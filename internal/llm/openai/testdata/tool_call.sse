@@ -1,0 +1,18 @@
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1699999999,"model":"gpt-5.4","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1699999999,"model":"gpt-5.4","choices":[{"index":0,"delta":{"content":"Let me check the weather."},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1699999999,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1699999999,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"location\":"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1699999999,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":" \"San Francisco"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1699999999,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":", CA\"}"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1699999999,"model":"gpt-5.4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1699999999,"model":"gpt-5.4","choices":[],"usage":{"prompt_tokens":50,"completion_tokens":20,"total_tokens":70,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}}
+
+data: [DONE]
+

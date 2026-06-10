@@ -1,0 +1,8 @@
+{
+  "provider_configs": [
+    "providers.json"
+  ],
+  "default_context_window": 256000,
+  "log_level": "info",
+  "log_format": "json"
+}

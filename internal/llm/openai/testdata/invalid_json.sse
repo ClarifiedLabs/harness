@@ -1,0 +1,10 @@
+data: {"id":"chatcmpl-8","object":"chat.completion.chunk","created":1699999999,"model":"gpt-5.4","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-8","object":"chat.completion.chunk","created":1699999999,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_bad","type":"function","function":{"name":"get_weather","arguments":"{\"location\":"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-8","object":"chat.completion.chunk","created":1699999999,"model":"gpt-5.4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":null}
+
+data: {"id":"chatcmpl-8","object":"chat.completion.chunk","created":1699999999,"model":"gpt-5.4","choices":[],"usage":{"prompt_tokens":50,"completion_tokens":5,"total_tokens":55,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}}
+
+data: [DONE]
+

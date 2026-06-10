@@ -1,0 +1,72 @@
+{
+  "provider": "",
+  "model": "",
+  "model_proxy_url": "http://127.0.0.1:8765",
+  "system_prompt": "@../../prompts/system.txt",
+  "no_env": false,
+  "histfile": "",
+  "histfilesize": 1000,
+  "histsize": 1000,
+  "max_turns": 250,
+  "default_context_window": 256000,
+  "context_window": 0,
+  "reasoning_effort": "",
+  "reasoning_enabled": null,
+  "reasoning_budget_tokens": null,
+  "reasoning_summary": "",
+  "responses_stateful": true,
+  "search_tools": "auto",
+  "image_detail": "auto",
+  "agents_md_warn_bytes": 8192,
+  "tool_result_max_bytes": 65536,
+  "tool_result_max_lines": 1000,
+  "read_file_default_limit": 1000,
+  "compact_keep_turns": 4,
+  "compact_summary_max_tokens": 2048,
+  "compact_tool_result_max_bytes": 4096,
+  "delegate_max_turns": 20,
+  "verbose": false,
+  "tool_stream": true,
+  "show_diffs": false,
+  "log_level": "info",
+  "no_color": false,
+  "timestamps": "short",
+  "repl_prompt": "[{agent}] > ",
+  "agent": "auto",
+  "agents": {
+    "auto": {
+      "description": "Default agent; the model decides what to do.",
+      "mcp_tools": "all",
+      "prompt": "",
+      "provider": "",
+      "model": ""
+    },
+    "independent": {
+      "description": "Complete the task end to end without pausing for input.",
+      "mcp_tools": "all",
+      "prompt": "@../../prompts/agents/independent.txt",
+      "provider": "",
+      "model": ""
+    },
+    "plan": {
+      "description": "Collaborate on an implementation plan without modifying the project.",
+      "mcp_tools": "read_only",
+      "prompt": "@../../prompts/agents/plan.txt",
+      "provider": "",
+      "model": ""
+    }
+  },
+  "hooks": {},
+  "hook_configs": [],
+  "mcp": {
+    "enable": false,
+    "proxy": "http://127.0.0.1:8766",
+    "headers": {},
+    "local": {
+      "enable": null,
+      "command": "",
+      "args": [],
+      "env": {}
+    }
+  }
+}

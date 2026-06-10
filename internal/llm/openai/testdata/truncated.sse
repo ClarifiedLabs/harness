@@ -1,0 +1,4 @@
+data: {"id":"chatcmpl-6","object":"chat.completion.chunk","created":1694268190,"model":"gpt-5.4","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-6","object":"chat.completion.chunk","created":1694268190,"model":"gpt-5.4","choices":[{"index":0,"delta":{"content":"Thinking"},"finish_reason":null}],"usage":null}
+

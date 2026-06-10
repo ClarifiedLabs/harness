@@ -1,0 +1,301 @@
+package openai
+
+import (
+	"encoding/json"
+
+	"harness/internal/llm"
+)
+
+// errorResultPrefix marks a failed tool result. OpenAI tool messages have no
+// is_error field, so error results carry this prefix in the content string
+// (design §4).
+const errorResultPrefix = "ERROR: "
+
+// emptyArgs is the canonical serialization for a tool call with no arguments.
+// OpenAI requires function.arguments to be a JSON string, never "" (design §4).
+const emptyArgs = "{}"
+
+// wireRequest is the OpenAI Chat Completions request body. MaxTokens is a
+// pointer so it is omitted entirely when unset (compatible servers pick their
+// own defaults, design §5.4).
+type wireRequest struct {
+	Model           string         `json:"model"`
+	Messages        []wireMessage  `json:"messages"`
+	Tools           []wireTool     `json:"tools,omitempty"`
+	MaxTokens       *int           `json:"max_tokens,omitempty"`
+	Temperature     *float64       `json:"temperature,omitempty"`
+	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+	Reasoning       *wireReasoning `json:"reasoning,omitempty"`
+	Stop            []string       `json:"stop,omitempty"`
+	Stream          bool           `json:"stream"`
+	StreamOptions   *streamOptions `json:"stream_options"`
+}
+
+// streamOptions always sets include_usage so the trailing usage chunk is emitted
+// (design §5.4).
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
+type wireReasoning struct {
+	Effort    string `json:"effort,omitempty"`
+	Enabled   *bool  `json:"enabled,omitempty"`
+	MaxTokens *int   `json:"max_tokens,omitempty"`
+}
+
+// wireMessage is one request message. An assistant message with tool_calls but
+// no text omits content; a tool message carries tool_call_id. Content is either
+// a string or []wireContentPart, and nil means omitted.
+type wireMessage struct {
+	Role       string         `json:"role"`
+	Content    any            `json:"content,omitempty"`
+	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+type wireContentPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *wireImageURL `json:"image_url,omitempty"`
+}
+
+type wireImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// wireToolCall is an assistant tool invocation. function.arguments is a complete
+// JSON-encoded string (design §4).
+type wireToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function wireToolCallFunc `json:"function"`
+}
+
+type wireToolCallFunc struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// wireTool is a function tool declaration. The ToolSchema.Parameters bytes pass
+// through unchanged into parameters.
+type wireTool struct {
+	Type     string       `json:"type"`
+	Function wireToolDecl `json:"function"`
+}
+
+type wireToolDecl struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+// --- streaming chunk wire structs ---
+
+// wireChunk is one streamed chat.completion.chunk. choices is empty on the
+// trailing usage chunk; usage is null on every other chunk (design §5.2, §6).
+type wireChunk struct {
+	Choices []wireChoice `json:"choices"`
+	Usage   *wireUsage   `json:"usage"`
+	Error   *wireError   `json:"error"`
+}
+
+type wireError struct {
+	Type    string `json:"type"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Param   string `json:"param"`
+}
+
+// wireChoice is one streamed choice: an incremental delta plus an optional
+// finish_reason (null until the finishing chunk).
+type wireChoice struct {
+	Delta        wireDelta `json:"delta"`
+	FinishReason string    `json:"finish_reason"`
+}
+
+// wireDelta carries incremental content and/or tool-call fragments.
+type wireDelta struct {
+	Content   string              `json:"content"`
+	ToolCalls []wireToolCallDelta `json:"tool_calls"`
+}
+
+// wireToolCallDelta is one streamed tool_call fragment. The first fragment for
+// an index carries id + function.name; later fragments carry only index +
+// function.arguments fragments (design §5.3).
+type wireToolCallDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// wireUsage is the trailing usage chunk's accounting. prompt_tokens INCLUDES the
+// cached tokens reported in prompt_tokens_details.cached_tokens (design §6).
+type wireUsage struct {
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	PromptTokensDetails struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+	CompletionTokensDetails struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
+}
+
+// buildRequest maps a provider-neutral llm.Request onto the OpenAI Chat
+// Completions wire body. The system prompt becomes a leading system message;
+// tool results are hoisted into sibling role:"tool" messages placed immediately
+// after the issuing assistant message, in call order (design §4).
+func buildRequest(req llm.Request) wireRequest {
+	return buildRequestForMode(req, "openai")
+}
+
+func buildRequestForMode(req llm.Request, reasoningMode string) wireRequest {
+	w := wireRequest{
+		Model:         req.Model,
+		Stream:        true,
+		StreamOptions: &streamOptions{IncludeUsage: true},
+		Temperature:   req.Temperature,
+	}
+
+	if req.MaxTokens > 0 {
+		mt := req.MaxTokens
+		w.MaxTokens = &mt
+	}
+	if len(req.StopSeqs) > 0 {
+		w.Stop = req.StopSeqs
+	}
+	if reasoningMode == "openrouter" {
+		w.Reasoning = openRouterReasoning(req.Reasoning)
+	} else if req.Reasoning.Effort != "" {
+		w.ReasoningEffort = req.Reasoning.Effort
+	}
+
+	if req.System != "" {
+		w.Messages = append(w.Messages, wireMessage{Role: "system", Content: req.System})
+	}
+
+	for _, m := range req.Messages {
+		w.Messages = append(w.Messages, buildMessages(m)...)
+	}
+	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
+		w.Messages = append(w.Messages, wireMessage{Role: "user", Content: contextText})
+	}
+
+	for _, t := range req.Tools {
+		w.Tools = append(w.Tools, wireTool{
+			Type: "function",
+			Function: wireToolDecl{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  t.Parameters,
+			},
+		})
+	}
+
+	return w
+}
+
+func openRouterReasoning(reasoning llm.ReasoningConfig) *wireReasoning {
+	if reasoning.Empty() {
+		return nil
+	}
+	out := &wireReasoning{Effort: reasoning.Effort}
+	if reasoning.Enabled != nil && reasoning.Effort == "" && reasoning.BudgetTokens == nil {
+		v := *reasoning.Enabled
+		out.Enabled = &v
+	}
+	if reasoning.BudgetTokens != nil {
+		v := *reasoning.BudgetTokens
+		out.MaxTokens = &v
+	}
+	return out
+}
+
+// buildMessages maps one internal message onto its OpenAI wire messages. A
+// message mixing tool_result blocks with text/tool_use is impossible under the
+// transcript invariant, so a user message is either plain text or a batch of
+// tool results; each tool result becomes its own role:"tool" message.
+func buildMessages(m llm.Message) []wireMessage {
+	var text string
+	var hasText bool
+	var parts []wireContentPart
+	var calls []wireToolCall
+	var results []wireMessage
+
+	flushTextPart := func() {
+		if text == "" {
+			return
+		}
+		parts = append(parts, wireContentPart{Type: "text", Text: text})
+		text = ""
+	}
+
+	for _, b := range m.Content {
+		switch b.Kind {
+		case llm.BlockText:
+			if len(parts) > 0 {
+				parts = append(parts, wireContentPart{Type: "text", Text: b.Text})
+			} else {
+				text += b.Text
+			}
+			hasText = true
+		case llm.BlockImage:
+			flushTextPart()
+			parts = append(parts, wireContentPart{
+				Type: "image_url",
+				ImageURL: &wireImageURL{
+					URL:    imageDataURL(b),
+					Detail: b.ImageDetail,
+				},
+			})
+		case llm.BlockToolUse:
+			args := string(b.ToolInput)
+			if args == "" {
+				args = emptyArgs
+			}
+			calls = append(calls, wireToolCall{
+				ID:   b.ToolUseID,
+				Type: "function",
+				Function: wireToolCallFunc{
+					Name:      b.ToolName,
+					Arguments: args,
+				},
+			})
+		case llm.BlockToolResult:
+			content := b.ResultText
+			if b.ResultError {
+				content = errorResultPrefix + content
+			}
+			results = append(results, wireMessage{
+				Role:       "tool",
+				Content:    content,
+				ToolCallID: b.ResultForID,
+			})
+		}
+	}
+
+	// Tool results stand alone as sibling messages.
+	if len(results) > 0 {
+		return results
+	}
+
+	msg := wireMessage{Role: string(m.Role), ToolCalls: calls}
+	// An assistant message with tool calls but no text omits content; a normal
+	// text message (or empty assistant text) keeps content present.
+	if len(parts) > 0 {
+		flushTextPart()
+		msg.Content = parts
+	} else if hasText || len(calls) == 0 {
+		msg.Content = text
+	}
+	return []wireMessage{msg}
+}
+
+func imageDataURL(b llm.ContentBlock) string {
+	return "data:" + b.ImageMediaType + ";base64," + b.ImageData
+}

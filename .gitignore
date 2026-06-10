@@ -1,0 +1,5 @@
+/harness
+/harness-model-proxy
+/harness-mcp-proxy
+/harness-lsp
+*.test

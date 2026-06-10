@@ -1,0 +1,9 @@
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_bad","type":"function_call","call_id":"call_bad","name":"get_weather","arguments":"","status":"in_progress"},"sequence_number":1}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_bad","type":"function_call","call_id":"call_bad","name":"get_weather","arguments":"{\"location\":","status":"completed"},"sequence_number":2}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_bad","status":"completed","output":[{"id":"fc_bad","type":"function_call","call_id":"call_bad","name":"get_weather","arguments":"{\"location\":","status":"completed"}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":{"cached_tokens":0}}},"sequence_number":3}
+

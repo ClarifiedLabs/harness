@@ -1,0 +1,32 @@
+{
+  "//": "Compatibility config for `harness lsp serve -config <path>`. Normal harness config uses top-level lsp.servers inline.",
+  "//defaults": "These same servers are embedded in the binary, so this file is optional; use it to add languages or replace a default by name. Same-name entries replace the whole default server definition, so include languages, root_markers, and command. command[0] must be on PATH.",
+  "version": 1,
+  "servers": {
+    "gopls": {
+      "languages": ["go"],
+      "root_markers": ["go.work", "go.mod", ".git"],
+      "command": ["gopls"]
+    },
+    "rust-analyzer": {
+      "languages": ["rust"],
+      "root_markers": ["Cargo.toml", ".git"],
+      "command": ["rust-analyzer"]
+    },
+    "pyright": {
+      "languages": ["python"],
+      "root_markers": ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", ".git"],
+      "command": ["pyright-langserver", "--stdio"]
+    },
+    "typescript-language-server": {
+      "languages": ["typescript", "typescriptreact", "javascript", "javascriptreact"],
+      "root_markers": ["tsconfig.json", "jsconfig.json", "package.json", ".git"],
+      "command": ["typescript-language-server", "--stdio"]
+    },
+    "clangd": {
+      "languages": ["c", "cpp"],
+      "root_markers": ["compile_commands.json", ".clangd", ".git"],
+      "command": ["clangd"]
+    }
+  }
+}

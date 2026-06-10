@@ -1,0 +1,102 @@
+{
+  "model": "claude-opus-4-8",
+  "max_tokens": 8192,
+  "system": [
+    {
+      "type": "text",
+      "text": "You are a helpful coding assistant.",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What is the weather in SF and NYC?"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Let me check both cities."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01A",
+          "name": "get_weather",
+          "input": {
+            "location": "San Francisco, CA"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01B",
+          "name": "get_weather",
+          "input": {
+            "location": "New York, NY"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01A",
+          "content": "59F and foggy"
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01B",
+          "content": "could not reach weather service",
+          "is_error": true,
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get the current weather for a location.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string",
+            "description": "City and state, e.g. San Francisco, CA"
+          }
+        },
+        "required": [
+          "location"
+        ]
+      }
+    },
+    {
+      "name": "list_dir",
+      "description": "List directory entries.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        }
+      },
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    }
+  ],
+  "stream": true
+}

@@ -1,0 +1,10 @@
+{
+  "//": "ADVANCED: a local harness-mcp-proxy config that hosts the LSP shim, for aggregating it with other local MCP services. For simple LSP enablement, use top-level lsp.enable=true.",
+  "//wiring": "Point harness's mcp.local.command at `harness-mcp-proxy` with args [serve, -stdio, -config, <this file>]. The shim runs with -namespace \"\" (bare names) so the PROXY namespaces its tools to mcp__lsp__*. harness must be on PATH (or use an absolute command).",
+  "mcpServers": {
+    "lsp": {
+      "command": "harness",
+      "args": ["lsp", "serve", "-namespace", ""]
+    }
+  }
+}

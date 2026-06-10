@@ -1,0 +1,86 @@
+{
+  "model": "gpt-5.4",
+  "instructions": "You are a helpful coding assistant.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": "What is the weather in SF and NYC?"
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": "Let me check both cities."
+    },
+    {
+      "type": "function_call",
+      "call_id": "call_01A",
+      "name": "get_weather",
+      "arguments": "{\"location\": \"San Francisco, CA\"}"
+    },
+    {
+      "type": "function_call",
+      "call_id": "call_01B",
+      "name": "get_weather",
+      "arguments": "{\"location\": \"New York, NY\"}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_01A",
+      "output": "59F and foggy"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_01B",
+      "output": "ERROR: could not reach weather service"
+    },
+    {
+      "type": "function_call",
+      "call_id": "call_01C",
+      "name": "list_dir",
+      "arguments": "{}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_01C",
+      "output": "main.go"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "get_weather",
+      "description": "Get the current weather for a location.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string",
+            "description": "City and state, e.g. San Francisco, CA"
+          }
+        },
+        "required": [
+          "location"
+        ]
+      },
+      "strict": false
+    },
+    {
+      "type": "function",
+      "name": "list_dir",
+      "description": "List directory entries.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        }
+      },
+      "strict": false
+    }
+  ],
+  "stream": true,
+  "store": false,
+  "parallel_tool_calls": true
+}

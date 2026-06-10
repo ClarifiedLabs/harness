@@ -1,0 +1,140 @@
+{
+  "providers": [
+    {
+      "name": "example-openai-compatible",
+      "api_type": "openai",
+      "base_url": "https://llm-gateway.example.test/v1",
+      "api_key": "",
+      "api_key_env": ["EXAMPLE_OPENAI_COMPATIBLE_API_KEY"],
+      "models": [
+        {
+          "name": "example-fast",
+          "context_window": 128000,
+          "price": {
+            "input": 0.25,
+            "output": 1.25,
+            "cache_read": 0.05,
+            "cache_write": 0.30
+          },
+          "reasoning": false,
+          "reasoning_options": []
+        },
+        {
+          "name": "example-reasoning",
+          "context_window": 256000,
+          "price": {
+            "input": 1.00,
+            "output": 5.00,
+            "cache_read": 0.20,
+            "cache_write": 1.25
+          },
+          "reasoning": true,
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": ["low", "medium", "high"]
+            },
+            {
+              "type": "budget_tokens",
+              "min": 1024,
+              "max": 32768
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "example-responses-provider",
+      "api_type": "responses",
+      "base_url": "https://responses.example.test/v1",
+      "api_key": "example-inline-api-key",
+      "api_key_env": ["EXAMPLE_RESPONSES_API_KEY", "OPENAI_API_KEY"],
+      "models": [
+        {
+          "name": "example-responses-model",
+          "context_window": 512000,
+          "price": {
+            "input": 2.00,
+            "output": 8.00,
+            "cache_read": 0.40,
+            "cache_write": 0.00
+          },
+          "reasoning": true,
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": ["none", "low", "medium", "high"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "openai-codex",
+      "api_type": "responses",
+      "base_url": "https://chatgpt.com/backend-api/codex",
+      "auth": {
+        "type": "codex_oauth"
+      },
+      "models": [
+        {
+          "name": "replace-with-codex-model-from-setup",
+          "context_window": 256000,
+          "reasoning": true,
+          "reasoning_options": []
+        }
+      ]
+    },
+    {
+      "name": "example-anthropic-provider",
+      "api_type": "anthropic",
+      "base_url": "https://anthropic.example.test",
+      "api_key": "",
+      "api_key_env": ["EXAMPLE_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+      "models": [
+        {
+          "name": "example-anthropic-model",
+          "context_window": 200000,
+          "price": {
+            "input": 3.00,
+            "output": 15.00,
+            "cache_read": 0.30,
+            "cache_write": 3.75
+          },
+          "reasoning": true,
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": ["low", "medium", "high", "xhigh"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "example-oauth-provider",
+      "api_type": "openai",
+      "base_url": "https://oauth-llm.example.test/v1",
+      "auth": {
+        "type": "token_command",
+        "command": "example-cloud",
+        "args": ["auth", "print-access-token"],
+        "cache_ttl_seconds": 300
+      },
+      "models": [
+        {
+          "name": "example-oauth-model",
+          "context_window": 128000,
+          "price": {
+            "input": 0.50,
+            "output": 2.00,
+            "cache_read": 0.10,
+            "cache_write": 0.00
+          },
+          "reasoning": false,
+          "reasoning_options": []
+        }
+      ]
+    }
+  ]
+}

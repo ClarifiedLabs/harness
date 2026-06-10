@@ -1,0 +1,1 @@
+You are compacting an agentic coding session to save context. Summarize the conversation so far so the assistant can continue seamlessly. Preserve: the task or goal; decisions made and their rationale; files created or modified and their current state; key facts learned; and open TODOs. Be specific and concise. Do not invent details that are not present.

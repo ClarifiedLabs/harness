@@ -1,0 +1,46 @@
+{
+  "mcpServers": {
+    "example_fs": {
+      "type": "stdio",
+      "command": "example-mcp-filesystem-server",
+      "args": ["--root", "/srv/example-data", "--readonly"],
+      "env": {
+        "LOG_LEVEL": "info",
+        "EXAMPLE_FS_TOKEN": "${EXAMPLE_FS_TOKEN:-dev-token}"
+      }
+    },
+    "example_search": {
+      "type": "streamable-http",
+      "url": "https://mcp-search.example.test/mcp",
+      "headers": {
+        "X-Workspace": "example"
+      },
+      "auth": {
+        "type": "token_command",
+        "command": "example-cloud",
+        "args": ["mcp", "print-access-token"],
+        "cache_ttl_seconds": 300
+      }
+    },
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "X-MCP-Toolsets": "context,repos,issues,pull_requests,actions",
+        "X-MCP-Readonly": "true"
+      },
+      "auth": {
+        "type": "token_command",
+        "command": "gh",
+        "args": ["auth", "token"],
+        "cache_ttl_seconds": 300
+      }
+    }
+  },
+  "proxy": {
+    "listen": "127.0.0.1:8766",
+    "logFile": "",
+    "logLevel": "info",
+    "logFormat": "json"
+  }
+}

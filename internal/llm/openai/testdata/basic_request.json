@@ -1,0 +1,103 @@
+{
+  "model": "gpt-5.4",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful coding assistant."
+    },
+    {
+      "role": "user",
+      "content": "What is the weather in SF and NYC?"
+    },
+    {
+      "role": "assistant",
+      "content": "Let me check both cities.",
+      "tool_calls": [
+        {
+          "id": "call_01A",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"location\": \"San Francisco, CA\"}"
+          }
+        },
+        {
+          "id": "call_01B",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"location\": \"New York, NY\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_01A",
+      "content": "59F and foggy"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_01B",
+      "content": "ERROR: could not reach weather service"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "call_01C",
+          "type": "function",
+          "function": {
+            "name": "list_dir",
+            "arguments": "{}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_01C",
+      "content": "main.go"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a location.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string",
+              "description": "City and state, e.g. San Francisco, CA"
+            }
+          },
+          "required": [
+            "location"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_dir",
+        "description": "List directory entries.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  }
+}

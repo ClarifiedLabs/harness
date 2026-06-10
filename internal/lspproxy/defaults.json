@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "servers": {
+    "gopls": {
+      "languages": ["go"],
+      "root_markers": ["go.work", "go.mod", ".git"],
+      "command": ["gopls"]
+    },
+    "rust-analyzer": {
+      "languages": ["rust"],
+      "root_markers": ["Cargo.toml", ".git"],
+      "command": ["rust-analyzer"]
+    },
+    "pyright": {
+      "languages": ["python"],
+      "root_markers": ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", ".git"],
+      "command": ["pyright-langserver", "--stdio"]
+    },
+    "typescript-language-server": {
+      "languages": ["typescript", "typescriptreact", "javascript", "javascriptreact"],
+      "root_markers": ["tsconfig.json", "jsconfig.json", "package.json", ".git"],
+      "command": ["typescript-language-server", "--stdio"]
+    },
+    "clangd": {
+      "languages": ["c", "cpp"],
+      "root_markers": ["compile_commands.json", ".clangd", ".git"],
+      "command": ["clangd"]
+    }
+  }
+}

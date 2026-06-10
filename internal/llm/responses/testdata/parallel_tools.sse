@@ -1,0 +1,24 @@
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_A","type":"function_call","call_id":"call_A","name":"get_weather","arguments":"","status":"in_progress"},"sequence_number":1}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_B","type":"function_call","call_id":"call_B","name":"get_weather","arguments":"","status":"in_progress"},"sequence_number":2}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_B","output_index":1,"delta":"{\"location\": \"New","sequence_number":3}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_A","output_index":0,"delta":"{\"location\": \"San Francisco, CA\"}","sequence_number":4}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_B","output_index":1,"delta":" York, NY\"}","sequence_number":5}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_B","type":"function_call","call_id":"call_B","name":"get_weather","arguments":"{\"location\": \"New York, NY\"}","status":"completed"},"sequence_number":6}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_A","type":"function_call","call_id":"call_A","name":"get_weather","arguments":"{\"location\": \"San Francisco, CA\"}","status":"completed"},"sequence_number":7}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_parallel","status":"completed","output":[{"id":"fc_A","type":"function_call","call_id":"call_A","name":"get_weather","arguments":"{\"location\": \"San Francisco, CA\"}","status":"completed"},{"id":"fc_B","type":"function_call","call_id":"call_B","name":"get_weather","arguments":"{\"location\": \"New York, NY\"}","status":"completed"}],"usage":{"input_tokens":20,"output_tokens":10,"total_tokens":30,"input_tokens_details":{"cached_tokens":0}}},"sequence_number":8}
+
