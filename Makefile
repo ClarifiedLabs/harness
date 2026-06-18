@@ -28,8 +28,10 @@ endif
 refresh-modelsdev:
 	@set -e; \
 	tmp=$$(mktemp "$(MODELSDEV_FALLBACK_ABS).XXXXXX"); \
-	trap 'rm -f "$$tmp"' EXIT; \
-	curl -fsSL "$(MODELSDEV_API_URL)" -o "$$tmp"; \
+	raw="$$tmp.raw"; \
+	trap 'rm -f "$$tmp" "$$raw"' EXIT; \
+	curl -fsSL "$(MODELSDEV_API_URL)" -o "$$raw"; \
+	go run ./scripts/jsonfmt.go "$$raw" "$$tmp"; \
 	MODELSDEV_FALLBACK_CANDIDATE="$$tmp" go test ./internal/modelsdev -run TestFallbackCandidateDecodes -count=1; \
 	mv "$$tmp" "$(MODELSDEV_FALLBACK_ABS)"; \
 	printf 'Updated %s from %s\n' "$(MODELSDEV_FALLBACK)" "$(MODELSDEV_API_URL)"; \
