@@ -307,8 +307,9 @@ func Replay(dir string, w io.Writer, opts ReplayOptions) error {
 			assistant.Write(ev.Text)
 		case EventReasoningSummary:
 			assistant.Finish()
-			if display := ReasoningSummaryDisplay(ev.Text); display != "" {
-				fmt.Fprintln(w, display)
+			lines := ReasoningSummaryLines(ev.Text, ReasoningSummaryFormat{Width: opts.Width})
+			if len(lines) != 0 {
+				fmt.Fprintln(w, strings.Join(lines, "\n"))
 			}
 		case EventToolResult, EventToolDiff, EventNotice, EventModelTurnAbandoned, EventModelTurnUsage, EventTurnUsage:
 			assistant.Finish()
@@ -361,8 +362,9 @@ func LatestTurnOutput(dir string) (string, error) {
 			assistant.Write(ev.Text)
 		case EventReasoningSummary:
 			assistant.Finish()
-			if display := ReasoningSummaryDisplay(ev.Text); display != "" {
-				b.WriteString(display)
+			lines := ReasoningSummaryLines(ev.Text, ReasoningSummaryFormat{})
+			if len(lines) != 0 {
+				b.WriteString(strings.Join(lines, "\n"))
 				b.WriteByte('\n')
 			}
 		case EventToolResult, EventToolDiff, EventNotice, EventModelTurnAbandoned, EventModelTurnUsage, EventTurnUsage:

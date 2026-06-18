@@ -56,6 +56,15 @@ func TestRenderListsNormalizeMarkersAndWrapContinuations(t *testing.T) {
 	}
 }
 
+func TestRenderWrapsParagraphsWithPrefix(t *testing.T) {
+	input := "alpha beta gamma delta epsilon zeta eta theta"
+	got := Render(input, Options{Enabled: true, Width: 24, Prefix: "  "})
+	want := "  alpha beta gamma delta\n  epsilon zeta eta theta"
+	if got != want {
+		t.Fatalf("Render =\n%q\nwant\n%q", got, want)
+	}
+}
+
 func TestRenderFormatsTables(t *testing.T) {
 	input := "| Name | Count |\n| --- | ---: |\n| a | 2 |\n| long | 10 |\n"
 	got := Render(input, Options{Enabled: true})
@@ -63,6 +72,17 @@ func TestRenderFormatsTables(t *testing.T) {
 		"| ---- | ----: |\n" +
 		"| a    |     2 |\n" +
 		"| long |    10 |\n"
+	if got != want {
+		t.Fatalf("Render =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestRenderPrefixesTables(t *testing.T) {
+	input := "| Name | Count |\n| --- | ---: |\n| a | 2 |\n"
+	got := Render(input, Options{Enabled: true, Prefix: "  "})
+	want := "  | Name | Count |\n" +
+		"  | ---- | ----: |\n" +
+		"  | a    |     2 |\n"
 	if got != want {
 		t.Fatalf("Render =\n%q\nwant\n%q", got, want)
 	}

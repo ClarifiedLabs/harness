@@ -21,6 +21,10 @@ const (
 	codeFenceTilde = "~~~"
 )
 
+// DefaultWidth is the fallback terminal width used by callers that want wrapping
+// even when the terminal size cannot be determined.
+const DefaultWidth = 80
+
 // Options controls Markdown rendering.
 type Options struct {
 	// Enabled leaves text byte-for-byte unchanged when false.
@@ -28,7 +32,8 @@ type Options struct {
 	// ANSI applies terminal styling for emphasis and links. When false, supported
 	// Markdown markers are still normalized or stripped.
 	ANSI bool
-	// Width enables simple wrapping for list item bodies when positive.
+	// Width enables simple word wrapping for paragraphs and list item bodies when
+	// positive.
 	Width int
 	// Prefix is prepended to each non-empty rendered line.
 	Prefix string
@@ -150,12 +155,10 @@ func (s *Stream) renderNonTableLine(out *strings.Builder, line string, newline b
 		s.writeLine(out, rendered, newline)
 		return
 	}
-	if rendered, ok := s.renderListItem(line, newline); ok {
-		out.WriteString(rendered)
-		s.lineOpen = !strings.HasSuffix(rendered, "\n")
+	if s.renderListItem(out, line, newline) {
 		return
 	}
-	s.writeLine(out, s.opts.Prefix+s.renderInline(line), newline)
+	s.renderParagraph(out, line, newline)
 }
 
 func (s *Stream) renderHeading(line string) (string, bool) {
@@ -177,25 +180,24 @@ func (s *Stream) renderHeading(line string) (string, bool) {
 	return rendered, true
 }
 
-func (s *Stream) renderListItem(line string, newline bool) (string, bool) {
+func (s *Stream) renderListItem(out *strings.Builder, line string, newline bool) bool {
 	leading, rest := splitLeadingWhitespace(line)
 	marker, body, ok := listMarker(rest)
 	if !ok {
-		return "", false
+		return false
 	}
 	firstPrefix := s.opts.Prefix + leading + marker + " "
 	nextPrefix := s.opts.Prefix + leading + strings.Repeat(" ", len(marker)+1)
-	lines := wrapListBody(body, firstPrefix, nextPrefix, s.opts.Width, s.opts.ANSI)
-	var out strings.Builder
-	for i, rendered := range lines {
-		if i == len(lines)-1 && !newline {
-			out.WriteString(rendered)
-			continue
-		}
-		out.WriteString(rendered)
-		out.WriteByte('\n')
-	}
-	return out.String(), true
+	lines := wrapBody(body, firstPrefix, nextPrefix, s.opts.Width, s.opts.ANSI)
+	s.writeLines(out, lines, newline)
+	return true
+}
+
+func (s *Stream) renderParagraph(out *strings.Builder, line string, newline bool) {
+	leading, rest := splitLeadingWhitespace(line)
+	prefix := s.opts.Prefix + leading
+	lines := wrapBody(rest, prefix, prefix, s.opts.Width, s.opts.ANSI)
+	s.writeLines(out, lines, newline)
 }
 
 func (s *Stream) flushTable(out *strings.Builder) {
@@ -254,16 +256,22 @@ func (s *Stream) formatTable(lines []tableLine) []tableLine {
 	}
 
 	out := make([]tableLine, 0, len(lines))
-	out = append(out, tableLine{text: formatTableRow(rows[0], widths, aligns), newline: lines[0].newline})
-	out = append(out, tableLine{text: formatTableRule(widths, aligns), newline: lines[1].newline})
+	out = append(out, tableLine{text: s.opts.Prefix + formatTableRow(rows[0], widths, aligns), newline: lines[0].newline})
+	out = append(out, tableLine{text: s.opts.Prefix + formatTableRule(widths, aligns), newline: lines[1].newline})
 	for i := 1; i < len(rows); i++ {
 		newline := true
 		if i+1 < len(lines) {
 			newline = lines[i+1].newline
 		}
-		out = append(out, tableLine{text: formatTableRow(rows[i], widths, aligns), newline: newline})
+		out = append(out, tableLine{text: s.opts.Prefix + formatTableRow(rows[i], widths, aligns), newline: newline})
 	}
 	return out
+}
+
+func (s *Stream) writeLines(out *strings.Builder, lines []string, newline bool) {
+	for i, line := range lines {
+		s.writeLine(out, line, newline || i+1 < len(lines))
+	}
 }
 
 func (s *Stream) writeLine(out *strings.Builder, line string, newline bool) {
@@ -463,12 +471,13 @@ func listMarker(s string) (marker, body string, ok bool) {
 	return s[:i+1], strings.TrimLeft(s[i+2:], " \t"), true
 }
 
-func wrapListBody(body, firstPrefix, nextPrefix string, width int, ansi bool) []string {
+func wrapBody(body, firstPrefix, nextPrefix string, width int, ansi bool) []string {
 	if body == "" {
 		return []string{strings.TrimRight(firstPrefix, " ")}
 	}
-	if width <= len(firstPrefix)+8 {
-		return []string{firstPrefix + renderInline(body, ansi)}
+	rendered := renderInline(body, ansi)
+	if width <= visibleLen(firstPrefix)+8 || visibleLen(firstPrefix)+visibleLen(rendered) <= width {
+		return []string{firstPrefix + rendered}
 	}
 	words := strings.Fields(body)
 	if len(words) == 0 {

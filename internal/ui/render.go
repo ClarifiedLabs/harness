@@ -318,10 +318,12 @@ func (r *Renderer) reasoningSummaryBlock(text string) string {
 }
 
 func (r *Renderer) outputWidth() int {
-	if r.width == nil {
-		return 0
+	if r.width != nil {
+		if width := r.width(); width > 0 {
+			return width
+		}
 	}
-	return r.width()
+	return markdown.DefaultWidth
 }
 
 func (r *Renderer) finishAssistantLine() {

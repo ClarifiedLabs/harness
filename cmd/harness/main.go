@@ -28,6 +28,7 @@ import (
 	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/logging"
+	"harness/internal/markdown"
 	"harness/internal/mcptools"
 	modelclient "harness/internal/modelproxy/client"
 	"harness/internal/modelproxy/protocol"
@@ -1190,9 +1191,11 @@ func runSessionCommand(args []string, stdout, stderr io.Writer, replayOpts sessi
 }
 
 func sessionReplayOptions(env environment, quiet bool) session.ReplayOptions {
-	width := 0
+	width := markdown.DefaultWidth
 	if env.terminalCols != nil {
-		width = env.terminalCols()
+		if cols := env.terminalCols(); cols > 0 {
+			width = cols
+		}
 	}
 	return session.ReplayOptions{
 		Markdown: true,

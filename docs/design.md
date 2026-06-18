@@ -1250,8 +1250,10 @@ backoff allows.
 - Assistant text and reasoning summaries use a small stdlib-only Markdown
   renderer on terminal output: emphasis becomes ANSI bold/italic when color is
   enabled, headings keep their `#` markers and render bold, lists normalize and
-  indent continuations, tables are padded, and URLs render visibly with cyan
-  highlighting. Redirected one-shot stdout remains raw model text.
+  indent continuations, paragraphs and list bodies wrap to terminal width (80
+  columns when the width is unavailable), tables are padded, and URLs render
+  visibly with cyan highlighting. Redirected one-shot stdout remains raw model
+  text.
 - The built-in system prompt asks tool-using models for brief user-facing
   commentary before tool calls and at meaningful work milestones. These
   commentary messages are normal assistant text; Responses `phase` metadata is

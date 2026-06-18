@@ -453,6 +453,29 @@ func TestReplayPrintsUserFacingView(t *testing.T) {
 	}
 }
 
+func TestReplayWrapsReasoningSummaryWithWidth(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	if err := AppendEvent(dir, Event{
+		Type: EventReasoningSummary,
+		Turn: 1,
+		Text: "alpha beta gamma delta epsilon zeta eta theta",
+	}); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	var out strings.Builder
+	if err := Replay(dir, &out, ReplayOptions{Markdown: true, Width: 24}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	want := "[reasoning]\n" +
+		"  alpha beta gamma delta\n" +
+		"  epsilon zeta eta theta\n" +
+		"[end reasoning]\n"
+	if got := out.String(); got != want {
+		t.Fatalf("replay output mismatch:\nwant %q\n got %q", want, got)
+	}
+}
+
 func TestReplayFiltersAbandonedAttemptOutput(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	events := []Event{

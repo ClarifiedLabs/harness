@@ -510,6 +510,29 @@ func TestReasoningSummaryStatusRendersTimestampedToStderr(t *testing.T) {
 	}
 }
 
+func TestReasoningSummaryStatusWrapsPlainParagraph(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{
+		Now:             func() time.Time { return time.Date(2026, 6, 13, 16, 15, 34, 0, time.Local) },
+		TimestampLayout: TimestampShortLayout,
+		Width:           func() int { return 24 },
+	})
+
+	r.ReasoningSummaryStatus("alpha beta gamma delta epsilon zeta eta theta")
+
+	if out.Len() != 0 {
+		t.Fatalf("status reasoning summary should not write stdout, got %q", out.String())
+	}
+	got := errw.String()
+	want := "[16:15:34 reasoning]\n" +
+		"  alpha beta gamma delta\n" +
+		"  epsilon zeta eta theta\n" +
+		"[end reasoning]\n"
+	if got != want {
+		t.Fatalf("status reasoning summary output mismatch:\nwant %q\n got %q", want, got)
+	}
+}
+
 func TestToolUseStreamEnabledWritesProgressOnlyToStderr(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{ToolStream: true})
