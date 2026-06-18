@@ -580,7 +580,9 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   configured provider. It fetches models.dev provider metadata, falls back to a
   vendored models.dev snapshot when the live catalog is unreachable, lists
   harness-supported providers, marks existing providers with bold text and `*`,
-  prompts for the API key when the provider needs one, pages the selected provider's
+  derives missing first-party API URLs from exact `@ai-sdk/openai`,
+  `@ai-sdk/anthropic`, and plain `@ai-sdk/google` package metadata, prompts for
+  the API key when the provider needs one, pages the selected provider's
   models newest-first, and asks which models should be locally available. The
   synthetic `openai-codex` provider is listed when the catalog has OpenAI models;
   it writes the ChatGPT Codex backend URL and a `codex_oauth` auth block instead

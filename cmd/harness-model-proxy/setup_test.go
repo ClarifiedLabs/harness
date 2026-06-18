@@ -183,6 +183,56 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	}
 }
 
+func TestRunSetupWritesGoogleOpenAICompatibleProvider(t *testing.T) {
+	home := t.TempDir()
+	var out, errw bytes.Buffer
+	env := environment{
+		stdin:  strings.NewReader("1\n\n1\nsave\n"),
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(k string) string {
+			if k == "HOME" {
+				return home
+			}
+			return ""
+		},
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return testSetupCatalogWithGoogle(), nil
+		},
+		terminalRows: func() int { return 12 },
+	}
+
+	if err := runSetup(context.Background(), env, false); err != nil {
+		t.Fatalf("runSetup: %v; stderr=%q", err, errw.String())
+	}
+
+	dir := filepath.Join(home, ".config", "harness-model-proxy")
+	providerData, err := os.ReadFile(filepath.Join(dir, "google.json"))
+	if err != nil {
+		t.Fatalf("read provider config: %v", err)
+	}
+	var provider setupProviderConfig
+	if err := json.Unmarshal(providerData, &provider); err != nil {
+		t.Fatalf("decode provider config: %v", err)
+	}
+	if provider.Name != "google" ||
+		provider.APIType != "openai" ||
+		provider.BaseURL != "https://generativelanguage.googleapis.com/v1beta/openai" ||
+		provider.APIKey != "" ||
+		provider.Auth != nil {
+		t.Fatalf("provider config = %+v", provider)
+	}
+	if len(provider.APIKeyEnv) != 3 ||
+		provider.APIKeyEnv[0] != "GOOGLE_API_KEY" ||
+		provider.APIKeyEnv[1] != "GOOGLE_GENERATIVE_AI_API_KEY" ||
+		provider.APIKeyEnv[2] != "GEMINI_API_KEY" {
+		t.Fatalf("provider API key env = %+v", provider.APIKeyEnv)
+	}
+	if len(provider.Models) != 1 || provider.Models[0].Name != "gemini-test" || provider.Models[0].ContextWindow != 1000000 {
+		t.Fatalf("provider models = %+v, want gemini-test", provider.Models)
+	}
+}
+
 func TestRunAuthStatusForProvider(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, ".config", "harness-model-proxy")
@@ -503,4 +553,23 @@ func testSetupCatalogWithOpenAI() *modelsdev.Catalog {
 		},
 	}
 	return catalog
+}
+
+func testSetupCatalogWithGoogle() *modelsdev.Catalog {
+	return &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+		"google": {
+			ID:   "google",
+			Name: "Google",
+			NPM:  "@ai-sdk/google",
+			Env:  []string{"GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"},
+			Models: map[string]modelsdev.Model{
+				"gemini-test": {
+					ID:          "gemini-test",
+					Name:        "Gemini Test",
+					ReleaseDate: "2026-03-01",
+					Limit:       modelsdev.Limit{Context: 1000000},
+				},
+			},
+		},
+	}}
 }

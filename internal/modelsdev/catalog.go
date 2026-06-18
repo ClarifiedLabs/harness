@@ -171,17 +171,27 @@ func (c *Catalog) ProvidersList() []Provider {
 	return providers
 }
 
+const (
+	npmAnthropic = "@ai-sdk/anthropic"
+	npmGoogle    = "@ai-sdk/google"
+	npmOpenAI    = "@ai-sdk/openai"
+)
+
 // BaseURL returns the provider API base URL known to models.dev, falling back to
-// harness's built-in defaults for first-party providers.
+// harness's built-in defaults for first-party providers and exact SDK package
+// matches whose HTTP wire format is known.
 func (p Provider) BaseURL() string {
 	if p.API != "" {
 		return p.API
 	}
-	switch p.ID {
-	case "openai":
+	npm := strings.ToLower(strings.TrimSpace(p.NPM))
+	switch {
+	case p.ID == "openai" || npm == npmOpenAI:
 		return "https://api.openai.com/v1"
-	case "anthropic":
+	case p.ID == "anthropic" || npm == npmAnthropic:
 		return "https://api.anthropic.com"
+	case p.ID == "google" || npm == npmGoogle:
+		return "https://generativelanguage.googleapis.com/v1beta/openai"
 	default:
 		return ""
 	}
@@ -189,13 +199,17 @@ func (p Provider) BaseURL() string {
 
 // APIType returns the harness dialect to use for this provider when it is known.
 func (p Provider) APIType() string {
-	if p.ID == "anthropic" || strings.Contains(strings.ToLower(p.NPM), "anthropic") || slices.Contains(p.Env, "ANTHROPIC_API_KEY") {
+	npm := strings.ToLower(strings.TrimSpace(p.NPM))
+	if p.ID == "anthropic" || strings.Contains(npm, "anthropic") || slices.Contains(p.Env, "ANTHROPIC_API_KEY") {
 		return "anthropic"
 	}
 	if p.ID == "openai" {
 		return "responses"
 	}
-	if p.API != "" || strings.Contains(strings.ToLower(p.NPM), "openai") {
+	if p.ID == "google" || npm == npmGoogle {
+		return "openai"
+	}
+	if p.API != "" || strings.Contains(npm, "openai") {
 		return "openai"
 	}
 	return ""

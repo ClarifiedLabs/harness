@@ -111,6 +111,50 @@ func TestFirstPartyProviderFallbacks(t *testing.T) {
 	}
 }
 
+func TestProviderFallbacksFromNPM(t *testing.T) {
+	tests := []struct {
+		name        string
+		provider    Provider
+		wantBaseURL string
+		wantAPIType string
+	}{
+		{
+			name:        "openai sdk",
+			provider:    Provider{ID: "custom-openai", NPM: "@ai-sdk/openai"},
+			wantBaseURL: "https://api.openai.com/v1",
+			wantAPIType: "openai",
+		},
+		{
+			name:        "anthropic sdk",
+			provider:    Provider{ID: "custom-anthropic", NPM: "@ai-sdk/anthropic"},
+			wantBaseURL: "https://api.anthropic.com",
+			wantAPIType: "anthropic",
+		},
+		{
+			name:        "google sdk",
+			provider:    Provider{ID: "google", NPM: "@ai-sdk/google"},
+			wantBaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+			wantAPIType: "openai",
+		},
+		{
+			name:        "google vertex sdk unsupported",
+			provider:    Provider{ID: "google-vertex", NPM: "@ai-sdk/google-vertex"},
+			wantBaseURL: "",
+			wantAPIType: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.provider.BaseURL(); got != tt.wantBaseURL {
+				t.Fatalf("BaseURL = %q, want %q", got, tt.wantBaseURL)
+			}
+			if got := tt.provider.APIType(); got != tt.wantAPIType {
+				t.Fatalf("APIType = %q, want %q", got, tt.wantAPIType)
+			}
+		})
+	}
+}
+
 func TestDecodeCatalogWrapper(t *testing.T) {
 	c, err := Decode(strings.NewReader(`{"providers":` + testCatalog + `,"models":{}}`))
 	if err != nil {

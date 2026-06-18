@@ -174,7 +174,11 @@ from models.dev, append a new provider config to an existing proxy config, or
 update an existing configured provider without configuring a proxy default model.
 Setup lists harness-supported providers, prompts for the API key when the
 provider needs one, then lets you choose which provider models are available
-locally.
+locally. If models.dev omits a provider API URL, setup can still derive
+first-party OpenAI and Anthropic defaults from exact `@ai-sdk/openai` and
+`@ai-sdk/anthropic` package metadata, and maps plain `@ai-sdk/google` to
+Google's OpenAI-compatible Gemini endpoint. Vertex Google package variants are
+not auto-configured.
 
 The special `openai-codex` provider uses ChatGPT subscription auth instead of an
 API key. After setup, run:
