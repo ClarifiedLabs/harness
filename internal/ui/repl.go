@@ -2498,6 +2498,20 @@ func (s *accumulatingSink) TextDelta(text string) {
 	})
 }
 
+func (s *accumulatingSink) AssistantPhase(phase string) {
+	if !llm.ValidAssistantPhase(phase) || phase == "" {
+		return
+	}
+	s.r.AssistantPhase(phase)
+	s.app.recordEvent(session.Event{
+		Type:       session.EventAssistantPhase,
+		Turn:       s.turn,
+		Phase:      phase,
+		ModelTurns: s.modelTurn,
+		Attempt:    s.attempt,
+	})
+}
+
 func (s *accumulatingSink) ReasoningSummary(text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {

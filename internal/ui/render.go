@@ -30,6 +30,8 @@ const (
 // snippetLines caps the verbose result preview (design §10: "first ~5 lines").
 const snippetLines = 5
 
+const finalAnswerSeparator = "\n---\n\n"
+
 // RenderOptions configures a Renderer. Color is decided by the caller (TTY check
 // plus NO_COLOR / -no-color); Now is injected so the per-turn duration is
 // deterministic in tests (design §10, §13).
@@ -68,8 +70,14 @@ type Renderer struct {
 	turnStart         time.Time
 	assistantLineOpen bool
 	assistantMarkdown *markdown.Stream
-	pending           map[string]llm.ToolCall // tool_use id -> call, awaiting its result
-	pendingToolUses   []string
+	assistantPhase    string
+
+	visiblePreFinalOutput bool
+	visibleFinalOutput    bool
+	finalSeparatorPrinted bool
+
+	pending         map[string]llm.ToolCall // tool_use id -> call, awaiting its result
+	pendingToolUses []string
 
 	cumInput  int
 	cumOutput int
@@ -110,6 +118,10 @@ func (r *Renderer) StartTurn() {
 	r.activeModelCost = 0
 	r.largeRequestWarned = false
 	r.assistantMarkdown = nil
+	r.assistantPhase = ""
+	r.visiblePreFinalOutput = false
+	r.visibleFinalOutput = false
+	r.finalSeparatorPrinted = false
 }
 
 // SetModel updates the model used for subsequent usage/cost summaries.
@@ -126,14 +138,24 @@ func (r *Renderer) TextDelta(text string) {
 	if text == "" {
 		return
 	}
+	r.writeFinalSeparatorIfNeeded()
 	if r.markdown {
 		r.ensureAssistantMarkdown()
 		io.WriteString(r.out, r.assistantMarkdown.Write(text))
 		r.assistantLineOpen = r.assistantMarkdown.LineOpen()
+		r.markAssistantTextVisible()
 		return
 	}
 	io.WriteString(r.out, text)
 	r.assistantLineOpen = !strings.HasSuffix(text, "\n")
+	r.markAssistantTextVisible()
+}
+
+func (r *Renderer) AssistantPhase(phase string) {
+	if !llm.ValidAssistantPhase(phase) || phase == "" {
+		return
+	}
+	r.assistantPhase = phase
 }
 
 func (r *Renderer) ReasoningSummary(text string) {
@@ -142,7 +164,12 @@ func (r *Renderer) ReasoningSummary(text string) {
 	}
 	r.flushToolUseStarts()
 	r.finishAssistantLine()
-	io.WriteString(r.out, r.reasoningSummaryBlock(text))
+	block := r.reasoningSummaryBlock(text)
+	if block == "" {
+		return
+	}
+	io.WriteString(r.out, block)
+	r.visiblePreFinalOutput = true
 }
 
 func (r *Renderer) ReasoningSummaryStatus(text string) {
@@ -355,6 +382,27 @@ func (r *Renderer) ensureAssistantMarkdown() {
 		ANSI:    r.color,
 		Width:   r.outputWidth(),
 	})
+}
+
+func (r *Renderer) writeFinalSeparatorIfNeeded() {
+	if r.assistantPhase != llm.AssistantPhaseFinal ||
+		!r.visiblePreFinalOutput ||
+		r.visibleFinalOutput ||
+		r.finalSeparatorPrinted {
+		return
+	}
+	r.finishAssistantLine()
+	io.WriteString(r.out, finalAnswerSeparator)
+	r.finalSeparatorPrinted = true
+}
+
+func (r *Renderer) markAssistantTextVisible() {
+	switch r.assistantPhase {
+	case llm.AssistantPhaseFinal:
+		r.visibleFinalOutput = true
+	case llm.AssistantPhaseCommentary:
+		r.visiblePreFinalOutput = true
+	}
 }
 
 // formatArgs renders a tool call's input object as space-prefixed key=value

@@ -159,6 +159,7 @@ type Event struct {
 	Turn       int              `json:"turn,omitempty"`
 	Attempt    int              `json:"attempt,omitempty"`
 	Text       string           `json:"text,omitempty"`
+	Phase      string           `json:"phase,omitempty"`
 	Display    string           `json:"display,omitempty"`
 	ToolID     string           `json:"tool_id,omitempty"`
 	Tool       string           `json:"tool,omitempty"`
@@ -199,6 +200,7 @@ type ImageInfo struct {
 const (
 	EventUser               = "user"
 	EventAssistantDelta     = "assistant_delta"
+	EventAssistantPhase     = "assistant_phase"
 	EventReasoningSummary   = "reasoning_summary"
 	EventToolStart          = "tool_start"
 	EventToolResult         = "tool_result"
@@ -242,10 +244,17 @@ type ReplayOptions struct {
 	Quiet             bool // suppress bracketed status lines; assistant text and user prompts are unaffected
 }
 
+const finalAnswerSeparator = "\n---\n\n"
+
 type assistantDisplay struct {
 	w        io.Writer
 	markdown *markdown.Stream
 	lineOpen bool
+
+	phase                 string
+	visiblePreFinalOutput bool
+	visibleFinalOutput    bool
+	finalSeparatorPrinted bool
 }
 
 func newAssistantDisplay(w io.Writer, opts ReplayOptions) *assistantDisplay {
@@ -261,13 +270,26 @@ func newAssistantDisplay(w io.Writer, opts ReplayOptions) *assistantDisplay {
 }
 
 func (d *assistantDisplay) Write(text string) {
+	if text == "" {
+		return
+	}
+	d.writeFinalSeparatorIfNeeded()
 	if d.markdown != nil {
 		io.WriteString(d.w, d.markdown.Write(text))
 		d.lineOpen = d.markdown.LineOpen()
+		d.markAssistantTextVisible()
 		return
 	}
 	io.WriteString(d.w, text)
 	d.lineOpen = !strings.HasSuffix(text, "\n")
+	d.markAssistantTextVisible()
+}
+
+func (d *assistantDisplay) Phase(phase string) {
+	if !llm.ValidAssistantPhase(phase) || phase == "" {
+		return
+	}
+	d.phase = phase
 }
 
 func (d *assistantDisplay) Finish() {
@@ -285,6 +307,31 @@ func (d *assistantDisplay) Finish() {
 	}
 }
 
+func (d *assistantDisplay) MarkPreFinalOutput() {
+	d.visiblePreFinalOutput = true
+}
+
+func (d *assistantDisplay) writeFinalSeparatorIfNeeded() {
+	if d.phase != llm.AssistantPhaseFinal ||
+		!d.visiblePreFinalOutput ||
+		d.visibleFinalOutput ||
+		d.finalSeparatorPrinted {
+		return
+	}
+	d.Finish()
+	io.WriteString(d.w, finalAnswerSeparator)
+	d.finalSeparatorPrinted = true
+}
+
+func (d *assistantDisplay) markAssistantTextVisible() {
+	switch d.phase {
+	case llm.AssistantPhaseFinal:
+		d.visibleFinalOutput = true
+	case llm.AssistantPhaseCommentary:
+		d.visiblePreFinalOutput = true
+	}
+}
+
 // Replay prints a user-facing reconstruction of raw.ndjson.
 func Replay(dir string, w io.Writer, opts ReplayOptions) error {
 	events, err := readEvents(dir)
@@ -299,17 +346,21 @@ func Replay(dir string, w io.Writer, opts ReplayOptions) error {
 		switch ev.Type {
 		case EventUser:
 			assistant.Finish()
+			assistant = newAssistantDisplay(w, opts)
 			fmt.Fprintf(w, "> %s\n", ev.Text)
 			for _, img := range ev.Images {
 				fmt.Fprintf(w, "[image: %s %s %d bytes detail=%s]\n", img.Name, img.MediaType, img.Bytes, img.Detail)
 			}
 		case EventAssistantDelta:
 			assistant.Write(ev.Text)
+		case EventAssistantPhase:
+			assistant.Phase(ev.Phase)
 		case EventReasoningSummary:
 			assistant.Finish()
 			lines := ReasoningSummaryLines(ev.Text, ReasoningSummaryFormat{Width: opts.Width})
 			if len(lines) != 0 {
 				fmt.Fprintln(w, strings.Join(lines, "\n"))
+				assistant.MarkPreFinalOutput()
 			}
 		case EventToolResult, EventToolDiff, EventNotice, EventModelTurnAbandoned, EventModelTurnUsage, EventTurnUsage:
 			assistant.Finish()
@@ -360,12 +411,15 @@ func LatestTurnOutput(dir string) (string, error) {
 		switch ev.Type {
 		case EventAssistantDelta:
 			assistant.Write(ev.Text)
+		case EventAssistantPhase:
+			assistant.Phase(ev.Phase)
 		case EventReasoningSummary:
 			assistant.Finish()
 			lines := ReasoningSummaryLines(ev.Text, ReasoningSummaryFormat{})
 			if len(lines) != 0 {
 				b.WriteString(strings.Join(lines, "\n"))
 				b.WriteByte('\n')
+				assistant.MarkPreFinalOutput()
 			}
 		case EventToolResult, EventToolDiff, EventNotice, EventModelTurnAbandoned, EventModelTurnUsage, EventTurnUsage:
 			assistant.Finish()
@@ -401,7 +455,7 @@ func filterAbandonedAttemptOutput(events []Event) []Event {
 
 func attemptOutputDiscarded(ev Event, abandoned map[[3]int]bool) bool {
 	switch ev.Type {
-	case EventAssistantDelta, EventReasoningSummary:
+	case EventAssistantDelta, EventAssistantPhase, EventReasoningSummary:
 	default:
 		return false
 	}

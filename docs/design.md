@@ -1258,6 +1258,10 @@ backoff allows.
   commentary before tool calls and at meaningful work milestones. These
   commentary messages are normal assistant text; Responses `phase` metadata is
   preserved in transcript history when the provider supplies it.
+- When Responses phase metadata marks visible commentary or reasoning output
+  before `final_answer` text, live rendering and session replay insert a
+  Markdown `---` delimiter with blank lines around it before the final answer.
+  Providers without phase metadata keep their assistant text stream unchanged.
 - Responses API reasoning summaries are semantic model-to-user output events,
   not notices and not transcript messages. Interactive runs render them to
   stdout as a compact two-space indented block headed by a timestamp line such

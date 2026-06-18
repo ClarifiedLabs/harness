@@ -233,6 +233,42 @@ func TestStreamAssistantPhase(t *testing.T) {
 	}
 }
 
+func TestStreamCompletedFallbackEmitsPhaseBeforeText(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"I have enough to answer."}]},{"id":"msg_2","type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Yes, with limits."}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}},"sequence_number":1}`+"\n\n"))
+	}))
+	t.Cleanup(srv.Close)
+	p := testProvider(t, srv, nil)
+
+	events, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.5")))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	var got []string
+	for _, event := range events {
+		switch event.Kind {
+		case llm.EventAssistantPhase:
+			got = append(got, "phase:"+event.Phase)
+		case llm.EventTextDelta:
+			got = append(got, "text:"+event.Text)
+		case llm.EventDone:
+			got = append(got, "done:"+string(event.StopReason))
+		}
+	}
+	want := []string{
+		"phase:commentary",
+		"text:I have enough to answer.",
+		"phase:final_answer",
+		"text:Yes, with limits.",
+		"done:end_turn",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("events = %#v, want %#v", got, want)
+	}
+}
+
 func TestStreamToolCall(t *testing.T) {
 	srv := llmtest.ServeSSEFixture(t, "tool_call.sse")
 	p := testProvider(t, srv, nil)

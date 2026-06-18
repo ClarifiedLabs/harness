@@ -45,6 +45,12 @@ type EventSink interface {
 	TurnComplete(usage TurnUsage)     // end of the turn
 }
 
+// AssistantPhaseSink is implemented by sinks that want provider phase metadata
+// before the corresponding assistant text is rendered.
+type AssistantPhaseSink interface {
+	AssistantPhase(phase string)
+}
+
 // ToolResultArchive is an optional sink-provided reference to the full raw tool
 // output behind a truncated result.
 type ToolResultArchive struct {
@@ -1044,6 +1050,9 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (mo
 		case llm.EventAssistantPhase:
 			if llm.ValidAssistantPhase(ev.Phase) && ev.Phase != "" {
 				res.phase = ev.Phase
+				if phaseSink, ok := sink.(AssistantPhaseSink); ok {
+					phaseSink.AssistantPhase(ev.Phase)
+				}
 			}
 		case llm.EventToolCallStart:
 			sink.ToolUseStart(llm.ToolCall{

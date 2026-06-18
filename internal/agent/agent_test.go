@@ -27,6 +27,7 @@ type recordSink struct {
 	models          []modelTurnEvent
 	modelUsage      []ModelTurnUsage
 	reasoning       []string
+	phases          []string
 	toolUses        []llm.ToolCall
 	argDeltas       []string
 	starts          []llm.ToolCall
@@ -45,6 +46,9 @@ type modelTurnEvent struct {
 func (s *recordSink) TextDelta(t string) { s.text.WriteString(t) }
 func (s *recordSink) ReasoningSummary(t string) {
 	s.reasoning = append(s.reasoning, t)
+}
+func (s *recordSink) AssistantPhase(phase string) {
+	s.phases = append(s.phases, phase)
 }
 func (s *recordSink) ModelTurnStart(modelTurn, attempt int, _ ContextEstimate) {
 	s.models = append(s.models, modelTurnEvent{modelTurn: modelTurn, attempt: attempt})
@@ -241,6 +245,36 @@ func TestReasoningSummaryUsesDedicatedSinkOnly(t *testing.T) {
 	asst := msgs[len(msgs)-1]
 	if len(asst.Content) != 1 || asst.Content[0].Kind != llm.BlockText || asst.Content[0].Text != "done" {
 		t.Fatalf("assistant transcript should contain only answer text, got:\n%s", dump([]llm.Message{asst}))
+	}
+}
+
+func TestAssistantPhaseForwardedToSink(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{
+			assistantPhaseEvent(llm.AssistantPhaseCommentary),
+			textDelta("I have enough to answer."),
+			assistantPhaseEvent(llm.AssistantPhaseFinal),
+			textDelta("Yes, with limits."),
+		},
+		Stop: llm.StopEndTurn,
+	})
+	a := newAgent(fp, tools.Default(), Options{})
+	sink := &recordSink{}
+
+	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+
+	want := []string{llm.AssistantPhaseCommentary, llm.AssistantPhaseFinal}
+	if !slices.Equal(sink.phases, want) {
+		t.Fatalf("phases = %#v, want %#v", sink.phases, want)
+	}
+	msgs := a.Transcript()
+	if got := msgs[len(msgs)-1].Phase; got != llm.AssistantPhaseFinal {
+		t.Fatalf("assistant phase = %q, want final_answer", got)
+	}
+	if got := sink.text.String(); got != "I have enough to answer.Yes, with limits." {
+		t.Fatalf("text = %q", got)
 	}
 }
 

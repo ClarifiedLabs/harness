@@ -208,10 +208,10 @@ func emitResponseOutputWithPhase(output []wireOutputItem, text *textAssembler, r
 		item := &output[i]
 		switch item.Type {
 		case "message":
-			if !text.outputItem(i, item, yield) {
+			if phase != nil && !phase.outputItem(i, item, yield) {
 				return false
 			}
-			if phase != nil && !phase.outputItem(i, item, yield) {
+			if !text.outputItem(i, item, yield) {
 				return false
 			}
 		case "reasoning":

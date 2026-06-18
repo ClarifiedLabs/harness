@@ -167,10 +167,10 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 			asm.argumentsDone(event.OutputIndex, event.ItemID, event.Name, event.Arguments)
 
 		case "response.output_item.done":
-			if !text.outputItem(event.OutputIndex, event.Item, yield) {
+			if !phase.outputItem(event.OutputIndex, event.Item, yield) {
 				return
 			}
-			if !phase.outputItem(event.OutputIndex, event.Item, yield) {
+			if !text.outputItem(event.OutputIndex, event.Item, yield) {
 				return
 			}
 			if !reasoning.outputItem(event.OutputIndex, event.Item, yield) {

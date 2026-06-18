@@ -476,6 +476,69 @@ func TestReplayWrapsReasoningSummaryWithWidth(t *testing.T) {
 	}
 }
 
+func TestReplaySeparatesCommentaryAndFinalAnswer(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	events := []Event{
+		{Type: EventUser, Turn: 1, Text: "answer this"},
+		{Type: EventAssistantPhase, Turn: 1, Phase: llm.AssistantPhaseCommentary},
+		{Type: EventAssistantDelta, Turn: 1, Text: "I have enough to answer."},
+		{Type: EventAssistantPhase, Turn: 1, Phase: llm.AssistantPhaseFinal},
+		{Type: EventAssistantDelta, Turn: 1, Text: "Yes, with limits."},
+	}
+	for _, ev := range events {
+		if err := AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	var replay strings.Builder
+	if err := Replay(dir, &replay, ReplayOptions{}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	wantReplay := "> answer this\nI have enough to answer.\n\n---\n\nYes, with limits.\n"
+	if replay.String() != wantReplay {
+		t.Fatalf("replay mismatch:\nwant %q\n got %q", wantReplay, replay.String())
+	}
+
+	latest, err := LatestTurnOutput(dir)
+	if err != nil {
+		t.Fatalf("LatestTurnOutput: %v", err)
+	}
+	wantLatest := "I have enough to answer.\n\n---\n\nYes, with limits."
+	if latest != wantLatest {
+		t.Fatalf("latest output mismatch:\nwant %q\n got %q", wantLatest, latest)
+	}
+}
+
+func TestReplayResetsPhaseStateBetweenTurns(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	events := []Event{
+		{Type: EventUser, Turn: 1, Text: "first"},
+		{Type: EventAssistantPhase, Turn: 1, Phase: llm.AssistantPhaseCommentary},
+		{Type: EventAssistantDelta, Turn: 1, Text: "Working."},
+		{Type: EventUser, Turn: 2, Text: "second"},
+		{Type: EventAssistantPhase, Turn: 2, Phase: llm.AssistantPhaseFinal},
+		{Type: EventAssistantDelta, Turn: 2, Text: "Done."},
+	}
+	for _, ev := range events {
+		if err := AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	var replay strings.Builder
+	if err := Replay(dir, &replay, ReplayOptions{}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	got := replay.String()
+	if strings.Contains(got, "\n---\n") {
+		t.Fatalf("replay carried phase state between turns:\n%s", got)
+	}
+	if !strings.Contains(got, "> second\nDone.\n") {
+		t.Fatalf("second turn final answer missing:\n%s", got)
+	}
+}
+
 func TestReplayFiltersAbandonedAttemptOutput(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	events := []Event{

@@ -281,6 +281,60 @@ func TestTextDeltaGoesToStdout(t *testing.T) {
 	}
 }
 
+func TestFinalAnswerSeparatorBetweenCommentaryAndFinal(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{})
+
+	r.AssistantPhase(llm.AssistantPhaseCommentary)
+	r.TextDelta("I have enough to answer.")
+	r.AssistantPhase(llm.AssistantPhaseFinal)
+	r.TextDelta("Yes, with limits.")
+
+	want := "I have enough to answer.\n\n---\n\nYes, with limits."
+	if out.String() != want {
+		t.Fatalf("assistant text = %q, want %q", out.String(), want)
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("phase separator should not touch stderr, got %q", errw.String())
+	}
+}
+
+func TestFinalAnswerSeparatorNotInsertedForFinalOnly(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{})
+
+	r.AssistantPhase(llm.AssistantPhaseFinal)
+	r.TextDelta("Yes, with limits.")
+
+	if out.String() != "Yes, with limits." {
+		t.Fatalf("assistant text = %q", out.String())
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("final-only text should not touch stderr, got %q", errw.String())
+	}
+}
+
+func TestFinalAnswerSeparatorOnlyOnce(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{})
+
+	r.AssistantPhase(llm.AssistantPhaseCommentary)
+	r.TextDelta("I have enough to answer.")
+	r.AssistantPhase(llm.AssistantPhaseFinal)
+	r.TextDelta("Yes")
+	r.TextDelta(", with limits.")
+
+	if got := strings.Count(out.String(), "\n---\n"); got != 1 {
+		t.Fatalf("separator count = %d, output = %q", got, out.String())
+	}
+	if !strings.HasSuffix(out.String(), "Yes, with limits.") {
+		t.Fatalf("final text was not preserved, got %q", out.String())
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("phase separator should not touch stderr, got %q", errw.String())
+	}
+}
+
 func TestTextDeltaRendersMarkdownWhenEnabled(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{Markdown: true})
