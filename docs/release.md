@@ -91,7 +91,7 @@ creates an annotated `vX.Y.Z` tag. `AUTOPUSH=1` pushes the tag to `origin`.
   exact certificate common names if automatic identity discovery is ambiguous.
 - `HOMEBREW_TAP_APP_PRIVATE_KEY`: private key for the GitHub App installed on
   `ClarifiedLabs/homebrew-tap`.
-- `HOMEBREW_TAP_APP_CLIENT_ID` (repository variable): the GitHub App Client ID.
+- `HOMEBREW_TAP_APP_CLIENT_ID`: the GitHub App Client ID.
 
 The GitHub App only needs to be installed on `ClarifiedLabs/homebrew-tap` with
 repository Contents read/write permission. No Apple provisioning profile is used
