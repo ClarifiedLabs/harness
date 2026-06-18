@@ -431,13 +431,24 @@ The same model-facing `ToolSchema.Parameters` bytes go into `parameters` vs
 `input_schema`. Harness strips nested JSON Schema `description` fields before
 advertising tools; each tool's top-level description remains the explanatory text.
 
-**Anthropic prompt caching (v1):** `cache_control: {"type":"ephemeral"}` breakpoints on
-**three** of the four allowed positions, refreshed every call: the last entry of the
-tool-schema array (the static prefix, so it survives a system-prompt/agent switch), the
-system block, and the last content block of the final message. The fourth allowed
-breakpoint is left unused (§16). An agentic loop re-sends a growing prefix every step;
-caching makes that prefix ~10× cheaper. OpenAI caches automatically; no opt-in exists or
-is needed.
+**Anthropic prompt caching (v2):** `cache_control: {"type":"ephemeral"}` breakpoints on
+all **four** allowed positions, refreshed every call: the last entry of the tool-schema
+array (the static prefix, so it survives a system-prompt/agent switch), the system block,
+and the last two content blocks of the persisted transcript — the last real message (the
+rolling write point read back next turn) and the previous real message (a stable anchor
+that lags a turn, keeping reads within the 20-block lookback on long tool-heavy steps).
+The two stable anchors (system + last tool) use a 1-hour TTL — written ~once and read
+every turn, so the long TTL survives multi-minute pauses for a one-time doubled write —
+while the rolling message anchors keep the 5-minute default. An interactive (TTY) session
+also fires a background `max_tokens:1` warm-up at startup so the first real request reads
+a warm prefix instead of paying the cold write.
+Crucially, the message breakpoints land on the persisted transcript, **not** on the
+volatile request-only context (todo/hook reminders) appended after it: pinning the
+breakpoint to per-turn content — as v1 did — meant the message prefix never matched across
+turns, so only the system and tool anchors ever cache-read while the whole transcript was
+re-billed at full rate. An agentic loop re-sends a growing prefix every step; caching makes
+that prefix ~10× cheaper. OpenAI caches automatically (longest stable prefix), so its
+trailing volatile context is harmless and no opt-in exists or is needed.
 
 ### 5.5 Errors and retries (`internal/retry`)
 
@@ -1895,5 +1906,8 @@ to external MCP connections.
   2024 GET-stream MCP transport — distinct from the already-implemented streamable-HTTP
   transport in `internal/mcp`), and OAuth discovery/dynamic client registration for
   remote servers.
-- Smarter prompt-cache breakpoint placement (the fourth allowed breakpoint is still
-  unused; dynamic placement could help compaction-heavy sessions).
+- Smarter prompt-cache breakpoint placement: all four breakpoints are now used (§5.4 v2),
+  but placement is still static. Splitting the volatile env block (date/git) out of the
+  cached system prefix would improve cross-session/agent-switch reuse (within a session the
+  system prompt is frozen per process, so it already cache-reads); content-aware anchoring
+  could further help compaction-heavy sessions.

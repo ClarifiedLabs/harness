@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"strings"
 
 	"harness/internal/llm"
 )
@@ -9,13 +10,25 @@ import (
 // defaultMaxTokens caps the unset-MaxTokens policy: min(8192, contextWindow/4).
 const defaultMaxTokensCap = 8192
 
-// cacheControl is the ephemeral prompt-cache breakpoint marker. Only the
-// "ephemeral" type is supported; the default TTL (5m) is used, so ttl is omitted.
+// cacheControl is the ephemeral prompt-cache breakpoint marker. TTL is omitted
+// for the default 5-minute window and set to "1h" on the stable anchors.
 type cacheControl struct {
 	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
 }
 
-var ephemeral = &cacheControl{Type: "ephemeral"}
+var (
+	// ephemeral is the default 5-minute breakpoint, used on the rolling message
+	// anchors that are rewritten every turn (a longer TTL there would just double
+	// the write cost of content the next turn supersedes).
+	ephemeral = &cacheControl{Type: "ephemeral"}
+	// ephemeral1h is the 1-hour breakpoint for the stable prefix (system + tool
+	// schemas). That prefix is written ~once per session and read on every turn,
+	// so the doubled write cost is paid once and amortized — and the long TTL
+	// keeps it warm across the multi-minute pauses common in interactive use,
+	// avoiding a cold re-write when the default 5-minute window would have lapsed.
+	ephemeral1h = &cacheControl{Type: "ephemeral", TTL: "1h"}
+)
 
 // wireRequest is the Anthropic Messages request body.
 type wireRequest struct {
@@ -38,6 +51,10 @@ type outputConfig struct {
 type thinkingConfig struct {
 	Type         string `json:"type"`
 	BudgetTokens *int   `json:"budget_tokens,omitempty"`
+	// Display is sent on adaptive thinking: "summarized" returns a readable
+	// reasoning summary, "omitted" streams empty thinking blocks. The API
+	// defaults to "omitted", so it must be set explicitly to surface reasoning.
+	Display string `json:"display,omitempty"`
 }
 
 // wireTextBlock is a system/text block; it carries optional cache_control.
@@ -73,6 +90,11 @@ type wireContent struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
+
+	// thinking (Thinking+Signature) / redacted_thinking (Data), replayed verbatim
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	Data      string `json:"data,omitempty"`
 
 	CacheControl *cacheControl `json:"cache_control,omitempty"`
 }
@@ -121,11 +143,16 @@ type wireEvent struct {
 		Type string `json:"type"`
 		ID   string `json:"id"`
 		Name string `json:"name"`
+		// thinking / redacted_thinking start payloads
+		Thinking  string `json:"thinking"`
+		Signature string `json:"signature"`
+		Data      string `json:"data"`
 	} `json:"content_block"`
 	Delta *struct {
 		Type         string `json:"type"`
 		Text         string `json:"text"`
 		Thinking     string `json:"thinking"`
+		Signature    string `json:"signature"`
 		PartialJSON  string `json:"partial_json"`
 		StopReason   string `json:"stop_reason"`
 		StopSequence string `json:"stop_sequence"`
@@ -158,7 +185,7 @@ func buildRequest(req llm.Request, contextWindow int) wireRequest {
 		w.System = []wireTextBlock{{
 			Type:         "text",
 			Text:         req.System,
-			CacheControl: ephemeral,
+			CacheControl: ephemeral1h,
 		}}
 	}
 
@@ -168,12 +195,7 @@ func buildRequest(req llm.Request, contextWindow int) wireRequest {
 	if req.Reasoning.Effort != "" {
 		w.OutputConfig = &outputConfig{Effort: req.Reasoning.Effort}
 	}
-	if req.Reasoning.BudgetTokens != nil {
-		budget := *req.Reasoning.BudgetTokens
-		w.Thinking = &thinkingConfig{Type: "enabled", BudgetTokens: &budget}
-	} else if req.Reasoning.Enabled != nil && !*req.Reasoning.Enabled {
-		w.Thinking = &thinkingConfig{Type: "disabled"}
-	}
+	w.Thinking = buildThinking(req.Reasoning)
 
 	for _, t := range req.Tools {
 		w.Tools = append(w.Tools, wireTool{
@@ -187,15 +209,24 @@ func buildRequest(req llm.Request, contextWindow int) wireRequest {
 	// prefix; caching it separately survives system-prompt changes such as a
 	// agent switch (spec §7).
 	if n := len(w.Tools); n > 0 {
-		w.Tools[n-1].CacheControl = ephemeral
+		w.Tools[n-1].CacheControl = ephemeral1h
 	}
 
+	// Replay prior thinking blocks only when thinking is enabled for this
+	// request. Anthropic requires the signed thinking that preceded a tool_use to
+	// be echoed back while thinking is on; when thinking is off it must be omitted.
+	// (Across a model switch the old signatures belong to a different model; the
+	// current API drops such blocks rather than echoing them.)
+	includeThinking := w.Thinking != nil && w.Thinking.Type != "disabled"
 	for _, m := range req.Messages {
 		w.Messages = append(w.Messages, wireMessage{
 			Role:    string(m.Role),
-			Content: buildContent(m.Content),
+			Content: buildContent(m.Content, includeThinking),
 		})
 	}
+	// realMessages excludes the request-only context appended below; the cache
+	// breakpoints must land on the persisted transcript, not the volatile tail.
+	realMessages := len(w.Messages)
 	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
 		w.Messages = append(w.Messages, wireMessage{
 			Role:    "user",
@@ -203,17 +234,27 @@ func buildRequest(req llm.Request, contextWindow int) wireRequest {
 		})
 	}
 
-	placeCacheBreakpoint(w.Messages)
+	placeCacheBreakpoints(w.Messages, realMessages)
 
 	return w
 }
 
 // buildContent maps internal content blocks onto request-side wire blocks. An
 // assistant message with tool_use but no text simply yields no text block.
-func buildContent(blocks []llm.ContentBlock) []wireContent {
+// includeThinking controls whether persisted thinking/redacted_thinking blocks
+// are replayed (only when thinking is enabled for the request).
+func buildContent(blocks []llm.ContentBlock, includeThinking bool) []wireContent {
 	out := make([]wireContent, 0, len(blocks))
 	for _, b := range blocks {
 		switch b.Kind {
+		case llm.BlockThinking:
+			if includeThinking {
+				out = append(out, wireContent{Type: "thinking", Thinking: b.Thinking, Signature: b.ThinkingSignature})
+			}
+		case llm.BlockRedactedThinking:
+			if includeThinking {
+				out = append(out, wireContent{Type: "redacted_thinking", Data: b.RedactedData})
+			}
 		case llm.BlockText:
 			out = append(out, wireContent{Type: "text", Text: b.Text})
 		case llm.BlockImage:
@@ -244,17 +285,79 @@ func buildContent(blocks []llm.ContentBlock) []wireContent {
 	return out
 }
 
-// placeCacheBreakpoint marks the last content block of the final message with
-// an ephemeral cache_control breakpoint.
-func placeCacheBreakpoint(msgs []wireMessage) {
-	if len(msgs) == 0 {
+// placeCacheBreakpoints marks the cacheable tail of the transcript. realCount is
+// the number of leading messages that belong to the persisted transcript;
+// trailing request-only context (todo/hook reminders, appended after realCount)
+// is excluded so the breakpoint lands on content that recurs byte-for-byte next
+// turn. Putting the breakpoint on the volatile context tail — as the prior
+// implementation did — meant the message prefix never matched across turns, so
+// only the system and tool anchors ever cache-read.
+//
+// Two ephemeral breakpoints are placed, within the 4-breakpoint budget alongside
+// the system and last-tool anchors: one on the last real message (the rolling
+// write point read back next turn) and one on the previous real message (a stable
+// anchor that lags a turn, so a long tool-heavy step still cache-reads within the
+// 20-block lookback window). This also uses the fourth breakpoint that was
+// previously left unused (design §7, §16).
+func placeCacheBreakpoints(msgs []wireMessage, realCount int) {
+	if realCount > len(msgs) {
+		realCount = len(msgs)
+	}
+	markLastBlock(msgs, realCount-1)
+	markLastBlock(msgs, realCount-2)
+}
+
+// markLastBlock sets an ephemeral breakpoint on the last content block of
+// msgs[i] when i is in range and the message has content.
+func markLastBlock(msgs []wireMessage, i int) {
+	if i < 0 || i >= len(msgs) {
 		return
 	}
-	last := &msgs[len(msgs)-1]
-	if len(last.Content) == 0 {
+	content := msgs[i].Content
+	if len(content) == 0 {
 		return
 	}
-	last.Content[len(last.Content)-1].CacheControl = ephemeral
+	content[len(content)-1].CacheControl = ephemeral
+}
+
+// buildThinking maps the provider-neutral reasoning controls onto the Anthropic
+// thinking config, mirroring the gate the OpenAI/Responses dialects use:
+// reasoning is "on" when effort, summary, or the explicit toggle asks for it.
+//
+//   - explicit off              -> {type:"disabled"}
+//   - explicit budget_tokens    -> {type:"enabled", budget_tokens}  (older models)
+//   - effort/summary/toggle-on  -> {type:"adaptive", display}        (modern Claude)
+//   - otherwise                 -> nil (provider default; no thinking)
+//
+// budget_tokens is rejected by Opus 4.7+/Fable 5, so it is used only when the
+// caller explicitly requests a budget. The modern path is adaptive thinking with
+// a "summarized" display, so reasoning is actually surfaced rather than streamed
+// as empty blocks (the API defaults display to "omitted").
+func buildThinking(r llm.ReasoningConfig) *thinkingConfig {
+	switch {
+	case r.Enabled != nil && !*r.Enabled:
+		return &thinkingConfig{Type: "disabled"}
+	case r.BudgetTokens != nil:
+		budget := *r.BudgetTokens
+		return &thinkingConfig{Type: "enabled", BudgetTokens: &budget}
+	case r.Effort != "" || r.Summary != "" || (r.Enabled != nil && *r.Enabled):
+		return &thinkingConfig{Type: "adaptive", Display: summaryToDisplay(r.Summary)}
+	default:
+		return nil
+	}
+}
+
+// summaryToDisplay maps the neutral reasoning-summary control onto Anthropic's
+// thinking.display values. Anthropic only distinguishes "summarized" (a readable
+// summary) from "omitted" (no text); the default is "summarized" so reasoning is
+// visible, and an explicit none/off request maps to "omitted".
+func summaryToDisplay(summary string) string {
+	switch strings.ToLower(strings.TrimSpace(summary)) {
+	case "none", "off", "omitted", "omit", "false", "disabled":
+		return "omitted"
+	default:
+		return "summarized"
+	}
 }
 
 // maxTokens applies the design §5.4 policy: the user value when set, else

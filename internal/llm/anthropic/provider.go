@@ -109,7 +109,7 @@ func (p *Provider) connect(ctx context.Context, body []byte, yield func(llm.Stre
 // sse.ErrTruncatedStream).
 func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.StreamEvent, error) bool) {
 	asm := newToolAssembler()
-	thinking := map[int]*strings.Builder{} // index → accumulated thinking text
+	thinking := map[int]*thinkingBlock{} // content-block index → accumulating thinking
 	var usage llm.Usage
 	var stop llm.StopReason = llm.StopEndTurn
 	completed := false
@@ -150,7 +150,11 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 						return
 					}
 				case "thinking":
-					thinking[data.Index] = &strings.Builder{}
+					tb := &thinkingBlock{signature: data.ContentBlock.Signature}
+					tb.text.WriteString(data.ContentBlock.Thinking)
+					thinking[data.Index] = tb
+				case "redacted_thinking":
+					thinking[data.Index] = &thinkingBlock{redacted: data.ContentBlock.Data, isRedacted: true}
 				}
 			}
 
@@ -164,8 +168,14 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 					return
 				}
 			case "thinking_delta":
-				if buf, ok := thinking[data.Index]; ok && data.Delta.Thinking != "" {
-					buf.WriteString(data.Delta.Thinking)
+				if tb, ok := thinking[data.Index]; ok {
+					tb.text.WriteString(data.Delta.Thinking)
+				}
+			case "signature_delta":
+				// The signature must be echoed back verbatim with the thinking
+				// block on the next turn, or Anthropic rejects the replayed turn.
+				if tb, ok := thinking[data.Index]; ok {
+					tb.signature += data.Delta.Signature
 				}
 			case "input_json_delta":
 				if dev, ok := asm.delta(data.Index, data.Delta.PartialJSON); ok {
@@ -173,14 +183,13 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 						return
 					}
 				}
-			// signature_delta: ignored (integrity verification only, not for display)
 			}
 
 		case "content_block_stop":
-			if buf, ok := thinking[data.Index]; ok {
+			if tb, ok := thinking[data.Index]; ok {
 				delete(thinking, data.Index)
-				if text := strings.TrimSpace(buf.String()); text != "" {
-					if !yield(llm.StreamEvent{Kind: llm.EventReasoningSummary, Text: text}, nil) {
+				if ev, ok := tb.event(); ok {
+					if !yield(ev, nil) {
 						return
 					}
 				}
@@ -244,6 +253,34 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 	if !completed {
 		yield(llm.StreamEvent{}, fmt.Errorf("anthropic: stream ended before message_stop: %w", sse.ErrTruncatedStream))
 	}
+}
+
+// thinkingBlock accumulates one streamed thinking (or redacted_thinking) block.
+// Text and signature are kept verbatim so the block can be replayed to the model
+// on the next turn — the signature is validated against the exact thinking text,
+// so trimming or otherwise altering it would invalidate the replayed block.
+type thinkingBlock struct {
+	text       strings.Builder
+	signature  string
+	redacted   string
+	isRedacted bool
+}
+
+// event renders the accumulated block as an EventReasoningSummary. ok is false
+// when the block carried nothing worth surfacing or persisting. Text is verbatim
+// (the display layer trims it); the TrimSpace check only gates emission.
+func (t *thinkingBlock) event() (llm.StreamEvent, bool) {
+	if t.isRedacted {
+		if t.redacted == "" {
+			return llm.StreamEvent{}, false
+		}
+		return llm.StreamEvent{Kind: llm.EventReasoningSummary, RedactedData: t.redacted}, true
+	}
+	text := t.text.String()
+	if strings.TrimSpace(text) == "" && t.signature == "" {
+		return llm.StreamEvent{}, false
+	}
+	return llm.StreamEvent{Kind: llm.EventReasoningSummary, Text: text, Signature: t.signature}, true
 }
 
 // parseErrorResponse maps a non-2xx HTTP response onto an *llm.APIError via the

@@ -244,6 +244,86 @@ func TestReasoningSummaryUsesDedicatedSinkOnly(t *testing.T) {
 	}
 }
 
+func TestSignedReasoningPersistedAndReplayed(t *testing.T) {
+	// A signed thinking block (Anthropic) must be persisted into the transcript
+	// so it can be replayed verbatim on the next turn; the display summary still
+	// goes to the dedicated sink only.
+	signed := llm.StreamEvent{Kind: llm.EventReasoningSummary, Text: "weighing options", Signature: "sig-abc"}
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{signed, textDelta("done")},
+		Stop:   llm.StopEndTurn,
+	})
+	a := newAgent(fp, tools.Default(), Options{})
+	sink := &recordSink{}
+
+	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if len(sink.reasoning) != 1 || sink.reasoning[0] != "weighing options" {
+		t.Fatalf("reasoning summaries = %v", sink.reasoning)
+	}
+
+	msgs := a.Transcript()
+	asst := msgs[len(msgs)-1]
+	if len(asst.Content) != 2 {
+		t.Fatalf("assistant content = %d blocks, want thinking+text:\n%s", len(asst.Content), dump([]llm.Message{asst}))
+	}
+	think := asst.Content[0]
+	if think.Kind != llm.BlockThinking || think.Thinking != "weighing options" || think.ThinkingSignature != "sig-abc" {
+		t.Fatalf("first block = %+v, want signed thinking persisted verbatim", think)
+	}
+	if asst.Content[1].Kind != llm.BlockText || asst.Content[1].Text != "done" {
+		t.Fatalf("second block = %+v, want text answer", asst.Content[1])
+	}
+}
+
+func TestPrewarmRequestShape(t *testing.T) {
+	fp := llmtest.New("fake")
+	a := newAgent(fp, tools.Default(), Options{})
+
+	req, ok := a.PrewarmRequest()
+	if !ok {
+		t.Fatal("PrewarmRequest ok=false, want a warm request (agent advertises tools)")
+	}
+	if req.MaxTokens != 1 {
+		t.Errorf("MaxTokens = %d, want 1 (prefill only)", req.MaxTokens)
+	}
+	if !req.Reasoning.Empty() {
+		t.Errorf("Reasoning = %+v, want empty (pure prefix write)", req.Reasoning)
+	}
+	if len(req.Messages) == 0 {
+		t.Fatal("want at least a placeholder message (Messages API requires one)")
+	}
+	if len(req.RequestContext) != 0 {
+		t.Errorf("RequestContext = %v, want nil", req.RequestContext)
+	}
+}
+
+func TestPrewarmFuncStreamsAndDiscards(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("x")},
+		Stop:   llm.StopMaxTokens,
+	})
+	a := newAgent(fp, tools.Default(), Options{})
+
+	warm, ok := a.PrewarmFunc()
+	if !ok {
+		t.Fatal("PrewarmFunc ok=false")
+	}
+	warm(context.Background())
+
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider received %d requests, want 1", len(fp.Requests))
+	}
+	if fp.Requests[0].MaxTokens != 1 {
+		t.Errorf("warm request MaxTokens = %d, want 1", fp.Requests[0].MaxTokens)
+	}
+	// Pre-warming must not mutate the transcript.
+	if n := len(a.Transcript()); n != 0 {
+		t.Errorf("transcript mutated by prewarm: %d messages", n)
+	}
+}
+
 func TestMaxTokensStopEmitsNotice(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("partial final")},

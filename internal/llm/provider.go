@@ -73,6 +73,14 @@ type StreamEvent struct {
 	Text  string `json:"text,omitempty"` // EventTextDelta / EventReasoningSummary
 	Phase string `json:"phase,omitempty"`
 
+	// Signature carries an EventReasoningSummary's thinking-block signature, used
+	// to persist and replay signed reasoning verbatim on the next turn. Empty for
+	// providers/models that don't return a signature. For an EventReasoningSummary,
+	// Text is the verbatim thinking text (the display layer trims it); RedactedData
+	// carries an opaque redacted-thinking payload instead of Text.
+	Signature    string `json:"signature,omitempty"`
+	RedactedData string `json:"redacted_data,omitempty"`
+
 	// EventToolCall*; Index disambiguates parallel calls within one turn.
 	Index     int             `json:"index,omitempty"`
 	ToolID    string          `json:"tool_id,omitempty"`    // Start/Done

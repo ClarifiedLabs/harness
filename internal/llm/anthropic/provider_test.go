@@ -498,12 +498,14 @@ func TestStreamThinking(t *testing.T) {
 	}
 
 	var reasoning []string
+	var signatures []string
 	var text strings.Builder
 	var done *llm.StreamEvent
 	for i := range events {
 		switch events[i].Kind {
 		case llm.EventReasoningSummary:
 			reasoning = append(reasoning, events[i].Text)
+			signatures = append(signatures, events[i].Signature)
 		case llm.EventTextDelta:
 			text.WriteString(events[i].Text)
 		case llm.EventDone:
@@ -518,6 +520,12 @@ func TestStreamThinking(t *testing.T) {
 		"1071 = 2 × 462 + 147\n462 = 3 × 147 + 21\n147 = 7 × 21 + 0\nThe remainder is 0, so GCD(1071, 462) = 21."
 	if reasoning[0] != wantReasoning {
 		t.Errorf("reasoning text =\n%q\nwant\n%q", reasoning[0], wantReasoning)
+	}
+	// The signature must be captured verbatim so the thinking block can be
+	// replayed to the model on the next turn (an altered signature is rejected).
+	const wantSignature = "EqQBCgIYAhIM1gbcDa9GJwZA2b3hGgxBdjrkzLoky3dl1pkiMOYds"
+	if signatures[0] != wantSignature {
+		t.Errorf("reasoning signature = %q, want %q", signatures[0], wantSignature)
 	}
 	if text.String() != "The GCD is 21." {
 		t.Errorf("text = %q, want %q", text.String(), "The GCD is 21.")

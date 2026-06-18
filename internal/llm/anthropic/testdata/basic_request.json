@@ -6,7 +6,8 @@
       "type": "text",
       "text": "You are a helpful coding assistant.",
       "cache_control": {
-        "type": "ephemeral"
+        "type": "ephemeral",
+        "ttl": "1h"
       }
     }
   ],
@@ -41,6 +42,9 @@
           "name": "get_weather",
           "input": {
             "location": "New York, NY"
+          },
+          "cache_control": {
+            "type": "ephemeral"
           }
         }
       ]
@@ -94,7 +98,8 @@
         }
       },
       "cache_control": {
-        "type": "ephemeral"
+        "type": "ephemeral",
+        "ttl": "1h"
       }
     }
   ],

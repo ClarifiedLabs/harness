@@ -346,6 +346,49 @@ func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 	}
 }
 
+// PrewarmRequest builds a minimal request that writes the prompt cache — the
+// stable tools+system prefix plus any existing (e.g. resumed) transcript —
+// without producing a real turn, so the first real request reads a warm cache
+// instead of paying the cold cache-write latency. ok is false when there is
+// nothing cacheable yet. The returned request is a self-contained snapshot.
+func (a *Agent) PrewarmRequest() (llm.Request, bool) {
+	if a.system == "" && len(a.toolSpecs) == 0 {
+		return llm.Request{}, false
+	}
+	req := a.ContextRequest()
+	if len(req.Messages) == 0 {
+		// The Messages API requires at least one message; this placeholder rides
+		// after the cached prefix and is never persisted.
+		req.Messages = []llm.Message{a.userMessage("warm cache", nil)}
+	}
+	req.MaxTokens = 1                     // smallest legal cap: only the prefill matters
+	req.Reasoning = llm.ReasoningConfig{} // no thinking/effort — a pure prefix write
+	req.RequestContext = nil
+	return req, true
+}
+
+// PrewarmFunc captures the current provider and a PrewarmRequest snapshot and
+// returns a closure that streams the warm-up request and discards its output.
+// Call it on the goroutine that owns the agent (before the input loop); the
+// returned closure shares no mutable agent state, so it is safe to run in a
+// background goroutine. ok is false when there is nothing to warm.
+func (a *Agent) PrewarmFunc() (func(context.Context), bool) {
+	req, ok := a.PrewarmRequest()
+	if !ok {
+		return nil, false
+	}
+	provider := a.provider
+	return func(ctx context.Context) {
+		for _, err := range provider.Stream(ctx, req) {
+			if err != nil {
+				// Best-effort: a failed warm-up just means the first real request
+				// pays the cold-cache cost.
+				return
+			}
+		}
+	}, true
+}
+
 // EstimateContext estimates the next request footprint using the current
 // transcript, system prompt, and advertised tools.
 func (a *Agent) EstimateContext() ContextEstimate {
@@ -369,6 +412,7 @@ func (a *Agent) estimateContext(extraContext []string) ContextEstimate {
 // modelTurnResult holds what one model turn produced after assembly.
 type modelTurnResult struct {
 	text       string
+	reasoning  []llm.ContentBlock // thinking / redacted_thinking blocks, in arrival order
 	toolCalls  []llm.ToolCall
 	phase      string
 	usage      llm.Usage
@@ -994,6 +1038,9 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (mo
 			if summary := reasoningSummaryText(ev.Text); summary != "" {
 				sink.ReasoningSummary(summary)
 			}
+			if block, ok := reasoningBlock(ev); ok {
+				res.reasoning = append(res.reasoning, block)
+			}
 		case llm.EventAssistantPhase:
 			if llm.ValidAssistantPhase(ev.Phase) && ev.Phase != "" {
 				res.phase = ev.Phase
@@ -1033,6 +1080,23 @@ func reasoningSummaryText(text string) string {
 	return strings.TrimSpace(text)
 }
 
+// reasoningBlock converts an EventReasoningSummary into a persistable thinking
+// block. Only signed thinking (Anthropic) or a redacted payload is persisted:
+// those must be replayed verbatim on the next turn for the API to accept the
+// transcript. Unsigned summaries (OpenAI/Responses) are display-only — they go
+// to the dedicated sink but are not stored as replayable blocks. Text is kept
+// verbatim (not trimmed) so the block replays exactly and its signature stays
+// valid. ok is false when there is nothing to persist.
+func reasoningBlock(ev llm.StreamEvent) (llm.ContentBlock, bool) {
+	if ev.RedactedData != "" {
+		return llm.ContentBlock{Kind: llm.BlockRedactedThinking, RedactedData: ev.RedactedData}, true
+	}
+	if ev.Signature == "" {
+		return llm.ContentBlock{}, false
+	}
+	return llm.ContentBlock{Kind: llm.BlockThinking, Thinking: ev.Text, ThinkingSignature: ev.Signature}, true
+}
+
 // textMessage builds the single-text-block message shape shared by user prompts
 // and cancel repair.
 func (a *Agent) textMessage(role llm.Role, text string) llm.Message {
@@ -1065,10 +1129,13 @@ func textMessageAt(at time.Time, role llm.Role, text string) llm.Message {
 	return llm.Message{Role: role, Time: at, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: text}}}
 }
 
-// assistantMessage builds the assistant message for a completed model turn: the text
-// block (if any) first, then tool_use blocks in emission order (design §8.1).
+// assistantMessage builds the assistant message for a completed model turn:
+// thinking block(s) first (so signed reasoning is replayed before the tool_use
+// it justified), then the text block (if any), then tool_use blocks in emission
+// order (design §8.1).
 func (a *Agent) assistantMessage(res modelTurnResult) llm.Message {
-	content := make([]llm.ContentBlock, 0, 1+len(res.toolCalls))
+	content := make([]llm.ContentBlock, 0, len(res.reasoning)+1+len(res.toolCalls))
+	content = append(content, res.reasoning...)
 	if res.text != "" {
 		content = append(content, llm.ContentBlock{Kind: llm.BlockText, Text: res.text})
 	}

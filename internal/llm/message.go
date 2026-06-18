@@ -53,6 +53,14 @@ const (
 	BlockImage      BlockKind = "image"
 	BlockToolUse    BlockKind = "tool_use"
 	BlockToolResult BlockKind = "tool_result"
+	// BlockThinking carries an assistant extended-thinking block. It is replayed
+	// verbatim to the same model on subsequent turns so signed reasoning
+	// round-trips (Anthropic requires the signature to be echoed back unchanged).
+	// Providers that don't model thinking (OpenAI/Responses) skip these blocks.
+	BlockThinking BlockKind = "thinking"
+	// BlockRedactedThinking carries an opaque, model-internal thinking payload
+	// that must be echoed back verbatim but is never rendered.
+	BlockRedactedThinking BlockKind = "redacted_thinking"
 )
 
 // ContentBlock is a tagged union; exactly the fields for Kind are set.
@@ -79,6 +87,15 @@ type ContentBlock struct {
 	ResultForID string `json:"result_for_id,omitempty"` // matches a ToolUseID
 	ResultText  string `json:"result_text,omitempty"`
 	ResultError bool   `json:"result_error,omitempty"`
+
+	// BlockThinking (assistant extended-thinking; replayed verbatim on the same
+	// model). ThinkingSignature is the integrity signature the API requires to be
+	// echoed back unchanged.
+	Thinking          string `json:"thinking,omitempty"`
+	ThinkingSignature string `json:"thinking_signature,omitempty"`
+
+	// BlockRedactedThinking (opaque model-internal payload, echoed back verbatim).
+	RedactedData string `json:"redacted_data,omitempty"`
 }
 
 // ToolCall is a flat view of a BlockToolUse, carried from the agent loop into
