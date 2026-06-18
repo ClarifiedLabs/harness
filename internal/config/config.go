@@ -89,6 +89,7 @@ type Config struct {
 	TimestampMode string `json:"timestamps"`  // -timestamps: short, full, or none
 	ReplPrompt    string `json:"repl_prompt"` // -repl-prompt: REPL input prompt format
 	ReplEditMode  string `json:"repl_edit_mode"`
+	OutputFormat  string `json:"-"` // -format: display format for informational commands
 
 	// Meta.
 	ShowConfig      bool `json:"show_config"`       // --show-config: print this resolved config and exit
@@ -303,7 +304,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	fMaxTurns, fDefaultContextWindow, fContextWindow := f.maxTurns, f.defaultContextWindow, f.contextWindow
 	fReasoningEffort, fReasoningEnabled, fReasoningBudgetTokens, fReasoningSummary := f.reasoningEffort, f.reasoningEnabled, f.reasoningBudgetTokens, f.reasoningSummary
 	fImageDetail, fSearchTools := f.imageDetail, f.searchTools
-	fPrompt, fReplPrompt, fReplEditMode := f.prompt, f.replPrompt, f.replEditMode
+	fPrompt, fReplPrompt, fReplEditMode, fOutputFormat := f.prompt, f.replPrompt, f.replEditMode, f.outputFormat
 	fVerbose, fToolStream, fShowDiffs, fNoColor := f.verbose, f.toolStream, f.showDiffs, f.noColor
 	fTimestamps, fNoTimestamps := f.timestamps, f.noTimestamps
 
@@ -453,6 +454,14 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		getenv("HARNESS_REPL_EDIT_MODE"), fc.ReplEditMode, DefaultReplEditMode))
 	if err != nil {
 		return Config{}, err
+	}
+	c.OutputFormat = strings.ToLower(strings.TrimSpace(*fOutputFormat))
+	switch c.OutputFormat {
+	case "", "text":
+		c.OutputFormat = "text"
+	case "json":
+	default:
+		return Config{}, fmt.Errorf("-format must be text or json")
 	}
 
 	// MCP block (env > file > default; no flags). Proxy is left empty when
@@ -793,6 +802,7 @@ type flags struct {
 	noColor                        *bool
 	noTimestamps                   *bool
 	quietShort, quiet              *bool
+	outputFormat                   *string
 	config                         *string
 	hooks                          *string
 	showConfig, showAgents         *bool
@@ -841,6 +851,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.noTimestamps = fs.Bool("no-timestamps", false, "disable bracketed status timestamps")
 	f.replPrompt = fs.String("repl-prompt", replprompt.DefaultFormat, "REPL input prompt format")
 	f.replEditMode = fs.String("repl-edit-mode", DefaultReplEditMode, "REPL prompt edit mode: emacs or vi")
+	f.outputFormat = fs.String("format", "text", "output format for informational commands: text or json")
 	f.showConfig = fs.Bool("show-config", false, "dump resolved config including defaults and exit")
 	f.showAgents = fs.Bool("agents", false, "list configured agents and exit")
 	f.showModels = fs.Bool("models", false, "list configured providers and models and exit")

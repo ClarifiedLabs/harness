@@ -1447,6 +1447,7 @@ zero for Anthropic sessions.
 -no-timestamps      alias for -timestamps=none
 -repl-prompt <text>    REPL input prompt format
 -repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
+-format <text|json>  output format for informational commands (default text)
 -show-config     dump resolved config, including defaults, as JSON and exit
 -agents          list configured agents and exit
 -models          list configured providers and models and exit
@@ -1460,9 +1461,11 @@ zero for Anthropic sessions.
 prompt sections such as env context, user/project `AGENTS.md`, skills, and the
 active agent prompt are not included in the `system_prompt` field.
 
-`-agents` prints the resolved agent list without contacting the model proxy.
-`-models` reuses the bounded proxy catalog request and prints configured
-provider/model rows before session creation.
+`-agents` prints a readable resolved agent list without contacting the model
+proxy. `-models` reuses the bounded proxy catalog request and prints configured
+provider/model rows before session creation. `-format json` is supported by
+`-agents`, `-models`, and `-check-model-proxy`; JSON output is versioned with
+`"version": 1`.
 
 ### Hooks
 

@@ -697,7 +697,7 @@ func TestShowConfigFlagParsed(t *testing.T) {
 }
 
 func TestListFlagsParsed(t *testing.T) {
-	c, err := Load([]string{"--agents", "--models"}, noEnv, "")
+	c, err := Load([]string{"--agents", "--models", "--format", "json"}, noEnv, "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -706,6 +706,9 @@ func TestListFlagsParsed(t *testing.T) {
 	}
 	if !c.ShowModels {
 		t.Fatalf("ShowModels = false, want true")
+	}
+	if c.OutputFormat != "json" {
+		t.Fatalf("OutputFormat = %q, want json", c.OutputFormat)
 	}
 }
 
@@ -776,12 +779,19 @@ func TestBadMaxTurnsValueIsUsageError(t *testing.T) {
 	}
 }
 
+func TestBadFormatValueIsUsageError(t *testing.T) {
+	_, err := Load([]string{"--format", "yaml"}, noEnv, "")
+	if err == nil {
+		t.Fatalf("expected usage error for invalid -format")
+	}
+}
+
 // helpFlags are every flag the design §10 table lists. The -h usage screen must
 // name every one of them so the help is an accurate reference.
 var helpFlags = []string{
 	"-p", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 	"-no-env", "-resume", "-session", "-max-turns", "-default-context-window", "-context-window",
-	"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-responses-stateful", "-image-detail", "-image", "-agent", "-search-tools", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-show-config",
+	"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-responses-stateful", "-image-detail", "-image", "-agent", "-search-tools", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-format", "-show-config",
 	"-agents", "-models", "-check-model-proxy", "-repl-edit-mode", "-hooks",
 }
 

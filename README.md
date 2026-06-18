@@ -58,7 +58,8 @@ the model proxy listens on `127.0.0.1:8765`.
 
 Use `harness --models` to list the providers, models, and cataloged reasoning
 controls exposed by the configured proxy. Use `harness --agents` to list the
-configured agents.
+configured agents. Add `--format json` to `--models`, `--agents`, or
+`--check-model-proxy` when another program needs structured output.
 
 MCP is optional. After configuring downstream servers for `harness-mcp-proxy`,
 start it separately and enable MCP for `harness`:

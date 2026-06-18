@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -154,19 +155,6 @@ func run(env environment) int {
 		}
 		return ui.ExitOK
 	}
-	agentsOutput := ""
-	if cfg.ShowAgents {
-		var err error
-		agentsOutput, err = buildAgentsListOutput(cfg)
-		if err != nil {
-			fmt.Fprintf(stderr, "harness: agents: %v\n", err)
-			return ui.ExitUsage
-		}
-		if !cfg.ShowModels {
-			fmt.Fprint(stdout, agentsOutput)
-			return ui.ExitOK
-		}
-	}
 	proxyURL := cfg.ModelProxyURL
 	if proxyURL == "" {
 		proxyURL = protocol.DefaultURL
@@ -178,23 +166,58 @@ func run(env environment) int {
 	}
 	startupCtx, stopStartup, startupInterrupted := signalCancelContext(env.sigCh)
 	defer stopStartup()
-	if cfg.ShowModels {
-		catalog, err := checkModelProxy(startupCtx, proxyClient)
-		if err != nil {
-			if startupInterrupted() || errors.Is(err, context.Canceled) {
+	if cfg.ShowAgents || cfg.ShowModels {
+		var agents *agentsListOutput
+		if cfg.ShowAgents {
+			var err error
+			agents, err = buildAgentsListOutput(cfg)
+			if err != nil {
+				fmt.Fprintf(stderr, "harness: agents: %v\n", err)
+				return ui.ExitUsage
+			}
+		}
+		var models *modelsListOutput
+		if cfg.ShowModels {
+			catalog, err := checkModelProxy(startupCtx, proxyClient)
+			if err != nil {
+				if startupInterrupted() || errors.Is(err, context.Canceled) {
+					return ui.ExitInterrupt
+				}
+				fmt.Fprintf(stderr, "harness: model proxy: %v\n", err)
+				return ui.ExitRuntime
+			}
+			if startupInterrupted() {
 				return ui.ExitInterrupt
 			}
-			fmt.Fprintf(stderr, "harness: model proxy: %v\n", err)
-			return ui.ExitRuntime
+			models = buildModelsListOutput(catalog)
 		}
-		if startupInterrupted() {
-			return ui.ExitInterrupt
+		if cfg.OutputFormat == "json" {
+			out := infoOutput{Version: 1}
+			if agents != nil {
+				out.DefaultAgent = agents.DefaultAgent
+				out.SelectedAgent = agents.SelectedAgent
+				out.Agents = agents.Agents
+			}
+			if models != nil {
+				out.ProviderCount = models.ProviderCount
+				out.ModelCount = models.ModelCount
+				out.Models = sortedModelListEntries(models.Models)
+			}
+			if err := config.WriteResolved(stdout, out); err != nil {
+				fmt.Fprintf(stderr, "harness: info: %v\n", err)
+				return ui.ExitRuntime
+			}
+			return ui.ExitOK
 		}
-		if cfg.ShowAgents {
-			fmt.Fprint(stdout, agentsOutput)
-			fmt.Fprintln(stdout)
+		if agents != nil {
+			fmt.Fprint(stdout, formatAgentsListText(*agents))
+			if models != nil {
+				fmt.Fprintln(stdout)
+			}
 		}
-		fmt.Fprint(stdout, buildModelsListOutput(catalog))
+		if models != nil {
+			fmt.Fprint(stdout, formatModelsListText(*models))
+		}
 		return ui.ExitOK
 	}
 	if cfg.CheckModelProxy {
@@ -209,7 +232,20 @@ func run(env environment) int {
 		if startupInterrupted() {
 			return ui.ExitInterrupt
 		}
-		fmt.Fprintf(stdout, "model proxy ok: %s (%d providers, %d models)\n", proxyClient.URL(), len(catalog.Providers), catalogModelCount(catalog))
+		if cfg.OutputFormat == "json" {
+			out := infoOutput{
+				Version:       1,
+				ModelProxyURL: proxyClient.URL(),
+				ProviderCount: len(catalog.Providers),
+				ModelCount:    catalogModelCount(catalog),
+			}
+			if err := config.WriteResolved(stdout, out); err != nil {
+				fmt.Fprintf(stderr, "harness: model proxy: %v\n", err)
+				return ui.ExitRuntime
+			}
+		} else {
+			fmt.Fprintf(stdout, "model proxy ok: %s (%d providers, %d models)\n", proxyClient.URL(), len(catalog.Providers), catalogModelCount(catalog))
+		}
 		return ui.ExitOK
 	}
 	logger, err := logging.NewLogger(stderr, cfg.LogLevel)
@@ -974,17 +1010,61 @@ func resolvedConfigAgentName(cfg config.Config, agents map[string]agentdef.Defin
 	return agentName, nil
 }
 
-func buildAgentsListOutput(cfg config.Config) (string, error) {
+type infoOutput struct {
+	Version       int              `json:"version"`
+	DefaultAgent  string           `json:"default_agent,omitempty"`
+	SelectedAgent string           `json:"selected_agent,omitempty"`
+	Agents        []agentListEntry `json:"agents,omitempty"`
+	ProviderCount int              `json:"provider_count,omitempty"`
+	ModelCount    int              `json:"model_count,omitempty"`
+	Models        []modelListEntry `json:"models,omitempty"`
+	ModelProxyURL string           `json:"model_proxy_url,omitempty"`
+}
+
+type agentsListOutput struct {
+	DefaultAgent  string
+	SelectedAgent string
+	Agents        []agentListEntry
+}
+
+type agentListEntry struct {
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	AllowedTools []string `json:"allowed_tools"`
+	MCPTools     string   `json:"mcp_tools"`
+	HasPrompt    bool     `json:"has_prompt"`
+	Provider     string   `json:"provider,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	Selected     bool     `json:"selected"`
+}
+
+func buildAgentsListOutput(cfg config.Config) (*agentsListOutput, error) {
 	agents, err := resolveConfiguredAgents(cfg)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	var b strings.Builder
+	selected, err := resolvedConfigAgentName(cfg, agents)
+	if err != nil {
+		return nil, err
+	}
+	out := &agentsListOutput{
+		DefaultAgent:  agentdef.Default,
+		SelectedAgent: selected,
+	}
 	for _, name := range agentdef.Names(agents) {
-		b.WriteString(name)
-		b.WriteByte('\n')
+		agent := agents[name]
+		out.Agents = append(out.Agents, agentListEntry{
+			Name:         name,
+			Description:  agent.Description,
+			AllowedTools: append([]string(nil), agent.AllowedTools...),
+			MCPTools:     string(agent.MCPTools),
+			HasPrompt:    strings.TrimSpace(agent.Prompt) != "",
+			Provider:     agent.Provider,
+			Model:        agent.Model,
+			Selected:     name == selected,
+		})
 	}
-	return b.String(), nil
+	return out, nil
 }
 
 func checkModelProxy(ctx context.Context, proxyClient *modelclient.Client) (protocol.Catalog, error) {
@@ -1001,26 +1081,83 @@ func catalogModelCount(catalog protocol.Catalog) int {
 	return total
 }
 
-type modelListRow struct {
-	Provider  string
-	Model     string
-	Reasoning string
-	Context   string
-	Price     string
-	Name      string
+type modelsListOutput struct {
+	ProviderCount int
+	ModelCount    int
+	Models        []modelListEntry
 }
 
-func buildModelsListOutput(catalog protocol.Catalog) string {
-	rows := catalogModelListRows(catalog, modelclient.Registry(catalog))
+type modelListEntry struct {
+	ProviderID               string                `json:"provider_id"`
+	ProviderName             string                `json:"provider_name,omitempty"`
+	ModelID                  string                `json:"model_id"`
+	QualifiedID              string                `json:"qualified_id"`
+	ModelName                string                `json:"model_name,omitempty"`
+	ContextWindow            int                   `json:"context_window,omitempty"`
+	PricePerMillionTokensUSD *llm.Price            `json:"price_per_million_tokens_usd,omitempty"`
+	Reasoning                modelReasoningDetails `json:"reasoning"`
+}
+
+type modelReasoningDetails struct {
+	Supported bool                  `json:"supported"`
+	Options   []llm.ReasoningOption `json:"options,omitempty"`
+}
+
+func buildModelsListOutput(catalog protocol.Catalog) *modelsListOutput {
+	models := catalogModelListRows(catalog, modelclient.Registry(catalog))
+	return &modelsListOutput{
+		ProviderCount: len(catalog.Providers),
+		ModelCount:    len(models),
+		Models:        models,
+	}
+}
+
+func sortedModelListEntries(models []modelListEntry) []modelListEntry {
+	sorted := append([]modelListEntry(nil), models...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].ProviderID != sorted[j].ProviderID {
+			return sorted[i].ProviderID < sorted[j].ProviderID
+		}
+		return sorted[i].ModelID < sorted[j].ModelID
+	})
+	return sorted
+}
+
+func formatAgentsListText(out agentsListOutput) string {
 	var b strings.Builder
-	for _, row := range rows {
-		fmt.Fprintf(&b, "%s\t%s\t%s\n", row.Provider, row.Model, row.Reasoning)
+	b.WriteString("agents:\n")
+	rows := make([]ui.NameDescription, 0, len(out.Agents))
+	for _, agent := range out.Agents {
+		name := agent.Name
+		if agent.Selected {
+			name += " (selected)"
+		}
+		parts := []string{
+			"[" + agentListModelSummary(agent.Provider, agent.Model) + "]",
+			"[mcp: " + agent.MCPTools + "]",
+		}
+		if strings.TrimSpace(agent.Description) != "" {
+			parts = append(parts, agent.Description)
+		}
+		rows = append(rows, ui.NameDescription{
+			Name:        name,
+			Description: strings.Join(parts, " "),
+		})
+	}
+	ui.WriteNameDescriptionList(&b, rows, ui.NameDescriptionListOptions{Indent: "  "})
+	return b.String()
+}
+
+func formatModelsListText(out modelsListOutput) string {
+	var b strings.Builder
+	for _, row := range out.Models {
+		fmt.Fprintf(&b, "%s\t%s\t%s\n", row.ProviderID, row.ModelID, modelListReasoningText(row.Reasoning))
 	}
 	return b.String()
 }
 
-func catalogModelListRows(catalog protocol.Catalog, registry *llm.Registry) []modelListRow {
-	var rows []modelListRow
+func catalogModelListRows(catalog protocol.Catalog, registry *llm.Registry) []modelListEntry {
+	var rows []modelListEntry
 	for _, provider := range catalog.Providers {
 		if provider.ID == "" {
 			continue
@@ -1029,24 +1166,45 @@ func catalogModelListRows(catalog protocol.Catalog, registry *llm.Registry) []mo
 			if model.ID == "" {
 				continue
 			}
-			price := formatPickerPrice(model.Price)
-			if price == "" {
-				price = "-"
-			}
-			rows = append(rows, modelListRow{
-				Provider:  provider.ID,
-				Model:     model.ID,
-				Reasoning: modelListReasoning(registry, provider.ID, model),
-				Context:   formatModelContextWindow(model.ContextWindow),
-				Price:     price,
-				Name:      modelListDisplayName(model),
+			rows = append(rows, modelListEntry{
+				ProviderID:               provider.ID,
+				ProviderName:             strings.TrimSpace(provider.Name),
+				ModelID:                  model.ID,
+				QualifiedID:              provider.ID + ":" + model.ID,
+				ModelName:                strings.TrimSpace(model.Name),
+				ContextWindow:            model.ContextWindow,
+				PricePerMillionTokensUSD: modelListPrice(model.Price),
+				Reasoning:                modelListReasoning(registry, provider.ID, model),
 			})
 		}
 	}
 	return rows
 }
 
-func modelListReasoning(registry *llm.Registry, providerID string, model protocol.Model) string {
+func agentListModelSummary(provider, model string) string {
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	switch {
+	case provider == "" && model == "":
+		return "default model"
+	case provider == "":
+		return "default provider/" + model
+	case model == "":
+		return provider + "/default model"
+	default:
+		return provider + "/" + model
+	}
+}
+
+func modelListPrice(price llm.Price) *llm.Price {
+	if price.Input == 0 && price.Output == 0 && price.CacheRead == 0 && price.CacheWrite == 0 {
+		return nil
+	}
+	out := price
+	return &out
+}
+
+func modelListReasoning(registry *llm.Registry, providerID string, model protocol.Model) modelReasoningDetails {
 	reasoning := model.Reasoning
 	if registry != nil && providerID != "" {
 		if info, ok := registry.Lookup(providerID + ":" + model.ID); ok && info.Reasoning != nil {
@@ -1054,10 +1212,21 @@ func modelListReasoning(registry *llm.Registry, providerID string, model protoco
 		}
 	}
 	if reasoning == nil || !reasoning.Supported {
+		return modelReasoningDetails{}
+	}
+	out := modelReasoningDetails{Supported: true}
+	if len(reasoning.Options) > 0 {
+		out.Options = append([]llm.ReasoningOption(nil), reasoning.Options...)
+	}
+	return out
+}
+
+func modelListReasoningText(reasoning modelReasoningDetails) string {
+	if !reasoning.Supported {
 		return "-"
 	}
 	var parts []string
-	if values, ok := reasoning.EffortValues(); ok {
+	if values, ok := reasoningEffortValues(reasoning); ok {
 		choices := []string{"default"}
 		for _, value := range values {
 			value = strings.TrimSpace(value)
@@ -1071,10 +1240,10 @@ func modelListReasoning(registry *llm.Registry, providerID string, model protoco
 			parts = append(parts, "effort=provider-defined")
 		}
 	}
-	if min, max, ok := reasoning.BudgetTokenRange(); ok {
+	if min, max, ok := reasoningBudgetTokenRange(reasoning); ok {
 		parts = append(parts, "budget_tokens="+budgetRangeLabel(min, max))
 	}
-	if reasoning.SupportsToggle() {
+	if reasoningSupportsToggle(reasoning) {
 		parts = append(parts, "toggle")
 	}
 	if len(parts) == 0 && len(reasoning.Options) == 0 {
@@ -1086,19 +1255,34 @@ func modelListReasoning(registry *llm.Registry, providerID string, model protoco
 	return strings.Join(parts, ";")
 }
 
-func formatModelContextWindow(contextWindow int) string {
-	if contextWindow <= 0 {
-		return "-"
+func reasoningEffortValues(reasoning modelReasoningDetails) ([]string, bool) {
+	for _, opt := range reasoning.Options {
+		if opt.Type == "effort" {
+			return opt.Values, true
+		}
 	}
-	return fmt.Sprintf("%d", contextWindow)
+	return nil, false
 }
 
-func modelListDisplayName(model protocol.Model) string {
-	name := strings.TrimSpace(model.Name)
-	if name == "" {
-		return "-"
+func reasoningBudgetTokenRange(reasoning modelReasoningDetails) (min *int, max *int, ok bool) {
+	for _, opt := range reasoning.Options {
+		if opt.Type == "budget_tokens" {
+			return opt.Min, opt.Max, true
+		}
 	}
-	return name
+	return nil, nil, false
+}
+
+func reasoningSupportsToggle(reasoning modelReasoningDetails) bool {
+	if !reasoning.Supported {
+		return false
+	}
+	for _, opt := range reasoning.Options {
+		if opt.Type == "toggle" {
+			return true
+		}
+	}
+	return len(reasoning.Options) == 0
 }
 
 func buildShowConfigOutput(cfg config.Config) (showConfigOutput, error) {

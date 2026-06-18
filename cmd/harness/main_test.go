@@ -176,6 +176,62 @@ func (p *fakeModelProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type testInfoAgentJSON struct {
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	AllowedTools []string `json:"allowed_tools"`
+	MCPTools     string   `json:"mcp_tools"`
+	HasPrompt    bool     `json:"has_prompt"`
+	Provider     string   `json:"provider"`
+	Model        string   `json:"model"`
+	Selected     bool     `json:"selected"`
+}
+
+type testInfoModelJSON struct {
+	ProviderID               string     `json:"provider_id"`
+	ProviderName             string     `json:"provider_name"`
+	ModelID                  string     `json:"model_id"`
+	QualifiedID              string     `json:"qualified_id"`
+	ModelName                string     `json:"model_name"`
+	ContextWindow            int        `json:"context_window"`
+	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd"`
+	Reasoning                struct {
+		Supported bool                  `json:"supported"`
+		Options   []llm.ReasoningOption `json:"options"`
+	} `json:"reasoning"`
+}
+
+func findJSONAgent(t *testing.T, agents []testInfoAgentJSON, name string) testInfoAgentJSON {
+	t.Helper()
+	for _, agent := range agents {
+		if agent.Name == name {
+			return agent
+		}
+	}
+	t.Fatalf("agent %q not found in %+v", name, agents)
+	return testInfoAgentJSON{}
+}
+
+func findJSONModel(t *testing.T, models []testInfoModelJSON, provider, model string) testInfoModelJSON {
+	t.Helper()
+	for _, entry := range models {
+		if entry.ProviderID == provider && entry.ModelID == model {
+			return entry
+		}
+	}
+	t.Fatalf("model %q/%q not found in %+v", provider, model, models)
+	return testInfoModelJSON{}
+}
+
+func reasoningOptionPresent(options []llm.ReasoningOption, typ string) bool {
+	for _, option := range options {
+		if option.Type == typ {
+			return true
+		}
+	}
+	return false
+}
+
 // okStep is the canned single-step script most wiring tests use: one "ok"
 // text delta, then end_turn.
 func okStep() llmtest.Step {
@@ -820,10 +876,11 @@ func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"auto\n",
-		"independent\n",
-		"plan\n",
-		"security\n",
+		"agents:\n",
+		"auto                 [default model] [mcp: all] Default agent; the model decides what to do.",
+		"independent          [default model] [mcp: all] Complete the task end to end without pausing for input.",
+		"plan                 [default model] [mcp: read_only] Collaborate on an implementation plan without modifying the project.",
+		"security (selected)  [openai/gpt-5.5] [mcp: all] Security review",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("agents output missing %q:\n%s", want, got)
@@ -891,6 +948,48 @@ func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 	}
 }
 
+func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--models", "--format", "json"}, fp, "")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if proxy.catalogRequests != 1 {
+		t.Fatalf("catalog requests = %d, want 1", proxy.catalogRequests)
+	}
+	if len(proxy.requests) != 0 {
+		t.Fatalf("--models should not stream a model request, got %d", len(proxy.requests))
+	}
+	var got struct {
+		Version       int                 `json:"version"`
+		ProviderCount int                 `json:"provider_count"`
+		ModelCount    int                 `json:"model_count"`
+		Models        []testInfoModelJSON `json:"models"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal models json: %v\n%s", err, out.String())
+	}
+	if got.Version != 1 || got.ProviderCount != 3 || got.ModelCount != 3 {
+		t.Fatalf("metadata = version %d providers %d models %d\n%s", got.Version, got.ProviderCount, got.ModelCount, out.String())
+	}
+	openRouterModel := findJSONModel(t, got.Models, "openrouter", "openai/gpt-5.5")
+	if openRouterModel.QualifiedID != "openrouter:openai/gpt-5.5" || openRouterModel.ContextWindow != 1_050_000 {
+		t.Fatalf("openrouter model = %+v\n%s", openRouterModel, out.String())
+	}
+	if openRouterModel.PricePerMillionTokensUSD == nil || openRouterModel.PricePerMillionTokensUSD.Input != 5 || openRouterModel.PricePerMillionTokensUSD.Output != 30 {
+		t.Fatalf("openrouter price = %+v\n%s", openRouterModel.PricePerMillionTokensUSD, out.String())
+	}
+	if !openRouterModel.Reasoning.Supported || !reasoningOptionPresent(openRouterModel.Reasoning.Options, "budget_tokens") || !reasoningOptionPresent(openRouterModel.Reasoning.Options, "toggle") {
+		t.Fatalf("openrouter reasoning = %+v\n%s", openRouterModel.Reasoning, out.String())
+	}
+	anthropicModel := findJSONModel(t, got.Models, "anthropic", "claude-opus-4-8")
+	if anthropicModel.PricePerMillionTokensUSD != nil || anthropicModel.Reasoning.Supported {
+		t.Fatalf("anthropic model = %+v\n%s", anthropicModel, out.String())
+	}
+}
+
 func TestRunAgentsAndModelsFlagsPrintBothInOrder(t *testing.T) {
 	fp := llmtest.New("fake")
 	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--agents", "--models", "-agent", "plan"}, fp, "")
@@ -906,14 +1005,93 @@ func TestRunAgentsAndModelsFlagsPrintBothInOrder(t *testing.T) {
 		t.Fatalf("listing should not stream a model request, got %d", len(proxy.requests))
 	}
 	got := out.String()
-	agentsAt := strings.Index(got, "auto\n")
+	agentsAt := strings.Index(got, "agents:\n")
 	modelsAt := strings.Index(got, "anthropic\tclaude-opus-4-8\t-")
 	if agentsAt < 0 || modelsAt < 0 || agentsAt > modelsAt {
 		t.Fatalf("expected agents before models:\n%s", got)
 	}
-	if !strings.Contains(got, "plan\n") {
-		t.Fatalf("agents output should include plan:\n%s", got)
+	if !strings.Contains(got, "plan (selected)") {
+		t.Fatalf("agents output should mark selected plan:\n%s", got)
 	}
+}
+
+func TestRunAgentsFlagJSONListsResolvedAgentsWithoutProxy(t *testing.T) {
+	fp := llmtest.New("fake")
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := `{
+		"agent":"security",
+		"agents":{
+			"security":{
+				"description":"Security review",
+				"provider":"openai",
+				"model":"gpt-5.5"
+			}
+		}
+	}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--agents", "--format", "json", "-config", cfgPath}, fp, "")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if proxy.catalogRequests != 0 {
+		t.Fatalf("--agents should not fetch catalog, got %d requests", proxy.catalogRequests)
+	}
+	var got struct {
+		Version       int                 `json:"version"`
+		DefaultAgent  string              `json:"default_agent"`
+		SelectedAgent string              `json:"selected_agent"`
+		Agents        []testInfoAgentJSON `json:"agents"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal agents json: %v\n%s", err, out.String())
+	}
+	if got.Version != 1 || got.DefaultAgent != "auto" || got.SelectedAgent != "security" {
+		t.Fatalf("metadata = version %d default %q selected %q\n%s", got.Version, got.DefaultAgent, got.SelectedAgent, out.String())
+	}
+	security := findJSONAgent(t, got.Agents, "security")
+	if !security.Selected || security.Provider != "openai" || security.Model != "gpt-5.5" || security.Description != "Security review" {
+		t.Fatalf("security agent = %+v\n%s", security, out.String())
+	}
+	plan := findJSONAgent(t, got.Agents, "plan")
+	if !plan.HasPrompt || plan.MCPTools != "read_only" || len(plan.AllowedTools) == 0 {
+		t.Fatalf("plan agent = %+v\n%s", plan, out.String())
+	}
+}
+
+func TestRunAgentsAndModelsFlagsJSONPrintSingleObject(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--agents", "--models", "--format", "json", "-agent", "plan"}, fp, "")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if proxy.catalogRequests != 1 {
+		t.Fatalf("catalog requests = %d, want 1", proxy.catalogRequests)
+	}
+	var got struct {
+		Version       int                 `json:"version"`
+		DefaultAgent  string              `json:"default_agent"`
+		SelectedAgent string              `json:"selected_agent"`
+		Agents        []testInfoAgentJSON `json:"agents"`
+		ProviderCount int                 `json:"provider_count"`
+		ModelCount    int                 `json:"model_count"`
+		Models        []testInfoModelJSON `json:"models"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal combined json: %v\n%s", err, out.String())
+	}
+	if got.Version != 1 || got.SelectedAgent != "plan" || got.ProviderCount != 3 || got.ModelCount != 3 {
+		t.Fatalf("combined metadata = %+v\n%s", got, out.String())
+	}
+	if !findJSONAgent(t, got.Agents, "plan").Selected {
+		t.Fatalf("plan should be selected\n%s", out.String())
+	}
+	_ = findJSONModel(t, got.Models, "anthropic", "claude-opus-4-8")
 }
 
 func TestRunModelsFlagFailureExitsRuntime(t *testing.T) {
@@ -974,6 +1152,34 @@ func TestRunCheckModelProxyExitsAfterCatalogRequest(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, "model proxy ok:") || !strings.Contains(got, proxy.URL()) {
 		t.Fatalf("stdout = %q, want model proxy ok line with URL", got)
+	}
+}
+
+func TestRunCheckModelProxyJSONExitsAfterCatalogRequest(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--check-model-proxy", "--format", "json"}, fp, "")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if proxy.catalogRequests != 1 {
+		t.Fatalf("catalog requests = %d, want 1", proxy.catalogRequests)
+	}
+	if len(proxy.requests) != 0 {
+		t.Fatalf("check should not stream a model request, got %d", len(proxy.requests))
+	}
+	var got struct {
+		Version       int    `json:"version"`
+		ModelProxyURL string `json:"model_proxy_url"`
+		ProviderCount int    `json:"provider_count"`
+		ModelCount    int    `json:"model_count"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal check json: %v\n%s", err, out.String())
+	}
+	if got.Version != 1 || got.ModelProxyURL != proxy.URL() || got.ProviderCount != 3 || got.ModelCount != 3 {
+		t.Fatalf("check json = %+v\n%s", got, out.String())
 	}
 }
 

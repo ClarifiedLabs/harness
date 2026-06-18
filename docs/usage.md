@@ -91,6 +91,7 @@ interrupted.
 -no-timestamps   alias for -timestamps=none
 -repl-prompt <text>    REPL input prompt format (default "[{agent}] > ")
 -repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
+--format <text|json>  output format for informational commands (default text)
 --show-config    dump the resolved config, including defaults, as JSON and exit
 --agents         list configured agents and exit
 --models         list configured providers and models and exit
@@ -140,7 +141,8 @@ context-efficiency knobs are config-file-only.
 - `--show-config` prints the resolved config as JSON after applying file, env,
   flag, and built-in defaults. It exits without contacting the model proxy.
 - `--agents` prints the resolved agent list without contacting the model proxy.
-  `--models` prints the configured proxy model catalog.
+  `--models` prints the configured proxy model catalog. Use `--format json` with
+  `--agents`, `--models`, or `--check-model-proxy` for structured output.
 - Context-efficiency knobs are config-file-only except where noted:
   `agents_md_warn_bytes`, `read_file_default_limit`, `compact_keep_turns`,
   `compact_summary_max_tokens`, and `compact_tool_result_max_bytes`.
