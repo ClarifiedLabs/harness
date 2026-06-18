@@ -252,7 +252,7 @@ func TestSetupMCPRejectsNonHTTPProxyAndContinues(t *testing.T) {
 	before := len(catalog.Names())
 
 	var errw strings.Builder
-	logger, err := logging.NewLogger(&errw, logging.LevelInfo, false)
+	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +389,7 @@ func TestSetupMCPTrustsRemoteReadOnlyHint(t *testing.T) {
 
 	catalog := tools.Catalog()
 	var errw strings.Builder
-	logger, err := logging.NewLogger(&errw, logging.LevelInfo, false)
+	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +428,7 @@ func TestSetupMCPHTTPUnreachableWarnsAndContinues(t *testing.T) {
 	before := len(catalog.Names())
 
 	var errw strings.Builder
-	logger, err := logging.NewLogger(&errw, logging.LevelInfo, false)
+	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +516,7 @@ func TestMCPRefresherAppliesAsyncRegistration(t *testing.T) {
 	bases := mcpAgentBases{"auto": {Allowed: []string{"read_file"}, Mode: agentdef.MCPToolsAll}}
 
 	var errw strings.Builder
-	logger, err := logging.NewLogger(&errw, logging.LevelInfo, false)
+	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -652,7 +652,7 @@ func TestAsyncMCPRegistrationPrunesUnknownWhitelistTool(t *testing.T) {
 	}
 
 	var errw strings.Builder
-	logger, err := logging.NewLogger(&errw, logging.LevelInfo, false)
+	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -83,7 +83,7 @@ type Config struct {
 	Verbose       bool   `json:"verbose"`     // -v
 	ToolStream    bool   `json:"tool_stream"` // -tool-stream: show live tool-call progress
 	ShowDiffs     bool   `json:"show_diffs"`  // -show-diffs: show per-tool file diffs
-	Quiet         bool   `json:"quiet"`       // -q / --quiet: suppress slog-backed diagnostics
+	Quiet         bool   `json:"quiet"`       // -q / --quiet: suppress bracketed status messages
 	LogLevel      string `json:"log_level"`   // --log-level / LOG_LEVEL: debug, info, warn, error
 	NoColor       bool   `json:"no_color"`    // -no-color or NO_COLOR
 	TimestampMode string `json:"timestamps"`  // -timestamps: short, full, or none
@@ -833,8 +833,8 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.verbose = fs.Bool("v", false, "show tool result snippets")
 	f.toolStream = fs.Bool("tool-stream", true, "show live tool-call progress")
 	f.showDiffs = fs.Bool("show-diffs", false, "show per-tool-call file diffs for built-in file edits")
-	f.quietShort = fs.Bool("q", false, "suppress informational diagnostics")
-	f.quiet = fs.Bool("quiet", false, "suppress informational diagnostics")
+	f.quietShort = fs.Bool("q", false, "suppress bracketed status messages")
+	f.quiet = fs.Bool("quiet", false, "suppress bracketed status messages")
 	f.logLevel = fs.String("log-level", logging.LevelInfo, "diagnostic log level: debug, info, warn, error (also LOG_LEVEL)")
 	f.noColor = fs.Bool("no-color", false, "disable color output")
 	f.timestamps = fs.String("timestamps", TimestampShort, "bracketed status timestamps: short, full, long, or none")

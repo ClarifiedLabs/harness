@@ -118,7 +118,7 @@ func run(env environment) int {
 		return ui.ExitOK
 	}
 	if len(args) > 0 && args[0] == "session" {
-		return runSessionCommand(args[1:], stdout, stderr, sessionReplayOptions(env))
+		return runSessionCommand(args[1:], stdout, stderr, sessionReplayOptions(env, argsQuiet(args)))
 	}
 	if len(args) > 0 && args[0] == "lsp" {
 		return runLSPCommand(env, args[1:])
@@ -207,7 +207,7 @@ func run(env environment) int {
 		fmt.Fprintf(stdout, "model proxy ok: %s (%d providers, %d models)\n", proxyClient.URL(), len(catalog.Providers), catalogModelCount(catalog))
 		return ui.ExitOK
 	}
-	logger, err := logging.NewLogger(stderr, cfg.LogLevel, cfg.Quiet)
+	logger, err := logging.NewLogger(stderr, cfg.LogLevel)
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
@@ -757,6 +757,7 @@ func run(env environment) int {
 		Markdown:        env.colorTTY,
 		Verbose:         cfg.Verbose,
 		ToolStream:      cfg.ToolStream,
+		Quiet:           cfg.Quiet,
 		Model:           registryModel,
 		Registry:        modelRegistry,
 		Now:             now,
@@ -1137,7 +1138,7 @@ func runSessionCommand(args []string, stdout, stderr io.Writer, replayOpts sessi
 	}
 }
 
-func sessionReplayOptions(env environment) session.ReplayOptions {
+func sessionReplayOptions(env environment, quiet bool) session.ReplayOptions {
 	width := 0
 	if env.terminalCols != nil {
 		width = env.terminalCols()
@@ -1146,7 +1147,19 @@ func sessionReplayOptions(env environment) session.ReplayOptions {
 		Markdown: true,
 		ANSI:     env.colorTTY && !envColorDisabled(env.getenv),
 		Width:    width,
+		Quiet:    quiet,
 	}
+}
+
+// argsQuiet reports whether -q, --quiet, or -quiet appears anywhere in args.
+// It is used before config.Load for subcommands dispatched early (e.g. "session").
+func argsQuiet(args []string) bool {
+	for _, a := range args {
+		if a == "-q" || a == "--quiet" || a == "-quiet" {
+			return true
+		}
+	}
+	return false
 }
 
 func envColorDisabled(getenv func(string) string) bool {

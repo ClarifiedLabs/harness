@@ -14,6 +14,49 @@ import (
 	"harness/internal/todo"
 )
 
+func TestReplayQuietSuppressesStatusLines(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a minimal event log with a user prompt, an assistant delta, a tool
+	// result (has a Display line), and a turn-usage line (also has Display).
+	events := []Event{
+		{Type: EventUser, Turn: 1, Text: "hello"},
+		{Type: EventAssistantDelta, Turn: 1, Text: "world"},
+		{Type: EventToolResult, Turn: 1, Display: "[read_file] path=a.go → 3 lines"},
+		{Type: EventTurnUsage, Turn: 1, Display: "[turn: 1 model turns · 1.0k in / 0.1k out · 0.1s]"},
+	}
+	for _, ev := range events {
+		if err := AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	// Without quiet: all display lines appear.
+	var loud bytes.Buffer
+	if err := Replay(dir, &loud, ReplayOptions{}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if !strings.Contains(loud.String(), "[read_file]") {
+		t.Errorf("non-quiet replay should include status lines, got %q", loud.String())
+	}
+
+	// With quiet: status lines suppressed; prompt and assistant text preserved.
+	var quiet bytes.Buffer
+	if err := Replay(dir, &quiet, ReplayOptions{Quiet: true}); err != nil {
+		t.Fatalf("Replay quiet: %v", err)
+	}
+	got := quiet.String()
+	if strings.Contains(got, "[read_file]") || strings.Contains(got, "[turn:") {
+		t.Errorf("quiet replay should suppress status lines, got %q", got)
+	}
+	if !strings.Contains(got, "> hello") {
+		t.Errorf("quiet replay should still show user prompt, got %q", got)
+	}
+	if !strings.Contains(got, "world") {
+		t.Errorf("quiet replay should still show assistant text, got %q", got)
+	}
+}
+
 // sampleSession builds a valid session whose transcript contains a complete
 // tool_use/tool_result pair, so ValidateTranscript passes before any mutation.
 func sampleSession() Session {

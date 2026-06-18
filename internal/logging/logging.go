@@ -82,19 +82,16 @@ func ParseFormat(name string) (string, error) {
 // HandlerOptions configures PlainHandler.
 type HandlerOptions struct {
 	Level slog.Leveler
-	Quiet bool
 }
 
-// NewLogger returns a slog.Logger that writes plaintext records to w. Quiet
-// suppresses non-error records handled by this logger.
-func NewLogger(w io.Writer, levelName string, quiet bool) (*slog.Logger, error) {
+// NewLogger returns a slog.Logger that writes plaintext records to w.
+func NewLogger(w io.Writer, levelName string) (*slog.Logger, error) {
 	level, err := ParseLevel(levelName)
 	if err != nil {
 		return nil, err
 	}
 	return slog.New(NewPlainHandler(w, HandlerOptions{
 		Level: level,
-		Quiet: quiet,
 	})), nil
 }
 
@@ -131,7 +128,6 @@ func NewProxyLogger(w io.Writer, levelName, formatName string) (*slog.Logger, er
 type PlainHandler struct {
 	w      io.Writer
 	level  slog.Leveler
-	quiet  bool
 	mu     *sync.Mutex
 	attrs  []slog.Attr
 	groups []string
@@ -149,15 +145,11 @@ func NewPlainHandler(w io.Writer, opts HandlerOptions) *PlainHandler {
 	return &PlainHandler{
 		w:     w,
 		level: level,
-		quiet: opts.Quiet,
 		mu:    &sync.Mutex{},
 	}
 }
 
 func (h *PlainHandler) Enabled(_ context.Context, level slog.Level) bool {
-	if h.quiet && level < slog.LevelError {
-		return false
-	}
 	return level >= h.level.Level()
 }
 

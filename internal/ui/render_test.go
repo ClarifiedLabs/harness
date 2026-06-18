@@ -118,6 +118,31 @@ func TestVerboseAddsSnippet(t *testing.T) {
 	}
 }
 
+func TestQuietSuppressesStatus(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{Quiet: true, ToolStream: true})
+
+	// ModelTurnStart, ToolUseStart (streamed), ToolStart, ToolResult, Notice,
+	// and TurnComplete should all produce nothing on errw.
+	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	r.ToolUseStart(llm.ToolCall{ID: "c1", Name: "read_file"})
+	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)})
+	r.ToolResult(llm.ToolResult{ForID: "c1", Text: "package main\n"})
+	r.Notice("[something happened]")
+	r.StartTurn()
+	r.TurnComplete(agent.TurnUsage{})
+
+	if errw.Len() != 0 {
+		t.Errorf("quiet mode: errw should be empty, got %q", errw.String())
+	}
+
+	// Assistant text must still flow to out.
+	r.TextDelta("hello")
+	if out.String() != "hello" {
+		t.Errorf("quiet mode: assistant text = %q, want %q", out.String(), "hello")
+	}
+}
+
 func TestToolDiffWritesToErr(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{})

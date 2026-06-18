@@ -38,6 +38,7 @@ type RenderOptions struct {
 	Markdown        bool
 	Verbose         bool
 	ToolStream      bool
+	Quiet           bool
 	Model           string
 	Registry        *llm.Registry
 	Now             func() time.Time
@@ -55,6 +56,7 @@ type Renderer struct {
 	markdown        bool
 	verbose         bool
 	toolStream      bool
+	quiet           bool
 	model           string
 	registry        *llm.Registry
 	now             func() time.Time
@@ -88,6 +90,7 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 		markdown:        opts.Markdown,
 		verbose:         opts.Verbose,
 		toolStream:      opts.ToolStream,
+		quiet:           opts.Quiet,
 		model:           opts.Model,
 		registry:        opts.Registry,
 		now:             now,
@@ -177,7 +180,7 @@ func (r *Renderer) writeModelTurnComplete(usage agent.ModelTurnUsage) string {
 }
 
 func (r *Renderer) ToolUseStart(call llm.ToolCall) {
-	if !r.toolStream {
+	if !r.toolStream || r.quiet {
 		return
 	}
 	r.pendingToolUses = append(r.pendingToolUses, fmt.Sprintf("[tool-call: %s id=%s]", call.Name, call.ID))
@@ -256,8 +259,11 @@ func (r *Renderer) flushToolUseStarts() {
 }
 
 // dimLine writes one line to errw, wrapping it in dim ANSI codes when color is
-// enabled.
+// enabled. When quiet mode is on the line is silently dropped.
 func (r *Renderer) dimLine(s string) {
+	if r.quiet {
+		return
+	}
 	r.finishAssistantLine()
 	s = r.timestampStatusLine(s)
 	if r.color {

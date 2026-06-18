@@ -34,21 +34,6 @@ func TestPlainHandlerFiltersByLevel(t *testing.T) {
 	}
 }
 
-func TestPlainHandlerQuietSuppressesNonErrorRecords(t *testing.T) {
-	var b bytes.Buffer
-	logger := slog.New(NewPlainHandler(&b, HandlerOptions{
-		Level: slog.LevelDebug,
-		Quiet: true,
-	}))
-
-	logger.Warn("hidden")
-	logger.Error("shown")
-
-	if got := b.String(); got != "[error] shown\n" {
-		t.Fatalf("quiet log output = %q", got)
-	}
-}
-
 func TestPlainHandlerRendersExtraAttrsAsPlainText(t *testing.T) {
 	var b bytes.Buffer
 	logger := slog.New(NewPlainHandler(&b, HandlerOptions{Level: slog.LevelInfo})).

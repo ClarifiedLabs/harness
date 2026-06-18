@@ -820,17 +820,16 @@ func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"available agents:",
-		"security (current)",
-		"[openai/gpt-5.5] Security review",
-		"auto",
-		"[inherit current] Default agent",
+		"auto\n",
+		"independent\n",
+		"plan\n",
+		"security\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("agents output missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "available models:") {
+	if strings.Contains(got, "anthropic\t") {
 		t.Fatalf("--agents should not print models:\n%s", got)
 	}
 }
@@ -854,23 +853,16 @@ func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"available models: 3 providers, 3 models",
-		"provider",
-		"model",
-		"context",
-		"price/M",
-		"anthropic",
-		"claude-opus-4-8",
-		"1000000",
-		"openai",
-		"gpt-5.5",
-		"$5/$30",
-		"openrouter",
-		"openai/gpt-5.5",
+		"anthropic\tclaude-opus-4-8\n",
+		"openai\tgpt-5.5\n",
+		"openrouter\topenai/gpt-5.5\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("models output missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "available models:") || strings.Contains(got, "price/M") {
+		t.Fatalf("--models should print compact provider/model rows:\n%s", got)
 	}
 }
 
@@ -889,13 +881,13 @@ func TestRunAgentsAndModelsFlagsPrintBothInOrder(t *testing.T) {
 		t.Fatalf("listing should not stream a model request, got %d", len(proxy.requests))
 	}
 	got := out.String()
-	agentsAt := strings.Index(got, "available agents:")
-	modelsAt := strings.Index(got, "available models:")
+	agentsAt := strings.Index(got, "auto\n")
+	modelsAt := strings.Index(got, "anthropic\tclaude-opus-4-8")
 	if agentsAt < 0 || modelsAt < 0 || agentsAt > modelsAt {
 		t.Fatalf("expected agents before models:\n%s", got)
 	}
-	if !strings.Contains(got, "plan (current)") {
-		t.Fatalf("agents output should mark plan current:\n%s", got)
+	if !strings.Contains(got, "plan\n") {
+		t.Fatalf("agents output should include plan:\n%s", got)
 	}
 }
 
@@ -2238,7 +2230,7 @@ func TestRunLogsUnavailableToolsAtLaunch(t *testing.T) {
 	}
 }
 
-func TestRunQuietSuppressesUnavailableToolWarnings(t *testing.T) {
+func TestRunQuietSuppressesBracketedStatusButNotDiagnostics(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "--quiet", "-p", "hi"}, fp, "")
@@ -2246,8 +2238,14 @@ func TestRunQuietSuppressesUnavailableToolWarnings(t *testing.T) {
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if strings.Contains(errw.String(), "[cli_tools]") {
-		t.Fatalf("quiet should suppress disabled-tool warnings, stderr=%q", errw.String())
+	got := errw.String()
+	if !strings.Contains(got, "[cli_tools]") {
+		t.Fatalf("quiet should not suppress slog diagnostics; stderr=%q", got)
+	}
+	for _, notWant := range []string{"[model:", "[turn:", "[tool-call:", "[tool:"} {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("quiet should suppress bracketed status %q; stderr=%q", notWant, got)
+		}
 	}
 }
 

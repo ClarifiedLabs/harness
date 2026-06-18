@@ -239,6 +239,7 @@ type ReplayOptions struct {
 	Markdown          bool
 	ANSI              bool
 	Width             int
+	Quiet             bool // suppress bracketed status lines; assistant text and user prompts are unaffected
 }
 
 type assistantDisplay struct {
@@ -311,7 +312,7 @@ func Replay(dir string, w io.Writer, opts ReplayOptions) error {
 			}
 		case EventToolResult, EventToolDiff, EventNotice, EventModelTurnAbandoned, EventModelTurnUsage, EventTurnUsage:
 			assistant.Finish()
-			if ev.Display != "" {
+			if ev.Display != "" && !opts.Quiet {
 				fmt.Fprintln(w, ev.Display)
 			}
 		}

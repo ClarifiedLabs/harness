@@ -858,8 +858,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 - Missing explicitly requested optional CLI-backed tools are reported once at startup
   through the plaintext slog handler, e.g.
   `[warn] [cli_tools] Tool "rg" is disabled. Reason: "rg" binary not found.`
-  `-q`/`--quiet` suppresses these diagnostics, and `--log-level`/`LOG_LEVEL` filters
-  them by level.
+  `--log-level`/`LOG_LEVEL` filters these diagnostics by level.
 - The advertised shape is `{"args":[...]}`. `args` must be a JSON array of
   strings, not a string or JSON-encoded array. The decoder also accepts a bare
   string array because earlier wording told models to provide that shape.
@@ -1281,8 +1280,10 @@ backoff allows.
   remains legible without color.
 - Startup diagnostics use `log/slog` with a plaintext handler: `[level] [category]
   message`. Default level is `info`; `--log-level` or `LOG_LEVEL` accepts `debug`,
-  `info`, `warn`, or `error`; `-q`/`--quiet` suppresses non-error slog-backed
-  diagnostics.
+  `info`, `warn`, or `error`.
+- `-q`/`--quiet` suppresses bracketed status messages (tool calls, model turns,
+  notices, and usage lines), disables live tool-stream progress, and suppresses
+  status lines in `harness session replay`; it does not filter slog diagnostics.
 
 ### Terminal reset on REPL start
 
@@ -1417,7 +1418,7 @@ zero for Anthropic sessions.
 -v                show tool result snippets
 -tool-stream      show live tool-call progress (default true)
 -show-diffs       show per-tool-call file diffs for built-in file edits
--q, --quiet       suppress informational diagnostics
+-q, --quiet       suppress bracketed status messages
 --log-level <level>  diagnostic log level: debug, info, warn, error (also LOG_LEVEL)
 -no-color
 -timestamps <mode>  status timestamps: short (default), full/long, or none
