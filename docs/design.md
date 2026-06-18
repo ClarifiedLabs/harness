@@ -1425,6 +1425,8 @@ zero for Anthropic sessions.
 -repl-prompt <text>    REPL input prompt format
 -repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
 -show-config     dump resolved config, including defaults, as JSON and exit
+-agents          list configured agents and exit
+-models          list configured providers and models and exit
 -check-model-proxy  check harness-model-proxy reachability and exit
 -hooks <file>    replace configured hooks with this hook config file
 -config <file>    alternate config path
@@ -1434,6 +1436,10 @@ zero for Anthropic sessions.
 `system_prompt`; it exits before contacting the model proxy. Dynamic runtime
 prompt sections such as env context, user/project `AGENTS.md`, skills, and the
 active agent prompt are not included in the `system_prompt` field.
+
+`-agents` prints the resolved agent list without contacting the model proxy.
+`-models` reuses the bounded proxy catalog request and prints configured
+provider/model rows before session creation.
 
 ### Hooks
 
@@ -1652,7 +1658,8 @@ reviewer, or the wide-open default without separate binaries.
   `HARNESS_AGENT` > `agent` in the config file > the built-in default `auto`. An
   empty value means "unspecified", so a resumed session's saved agent (§11) can
   supply it before the `auto` fallback. `/agent <name>` switches at runtime;
-  `/agent` lists. `/mode` is a REPL alias only.
+  `/agent` lists inside the REPL; `harness --agents` lists from the CLI. `/mode`
+  is a REPL alias only.
 - **Built-ins:** `auto` (all available built-in tools plus discovered MCP tools,
   including `delegate` and background job tools; its `prompts/agents/auto.txt` is a
   one-byte file — a single newline — that trims to empty, so it contributes no prompt

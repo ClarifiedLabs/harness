@@ -696,6 +696,19 @@ func TestShowConfigFlagParsed(t *testing.T) {
 	}
 }
 
+func TestListFlagsParsed(t *testing.T) {
+	c, err := Load([]string{"--agents", "--models"}, noEnv, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.ShowAgents {
+		t.Fatalf("ShowAgents = false, want true")
+	}
+	if !c.ShowModels {
+		t.Fatalf("ShowModels = false, want true")
+	}
+}
+
 func TestCheckModelProxyFlagParsed(t *testing.T) {
 	c, err := Load([]string{"--check-model-proxy"}, noEnv, "")
 	if err != nil {
@@ -769,7 +782,7 @@ var helpFlags = []string{
 	"-p", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 	"-no-env", "-resume", "-session", "-max-turns", "-default-context-window", "-context-window",
 	"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-responses-stateful", "-image-detail", "-image", "-agent", "-search-tools", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-show-config",
-	"-check-model-proxy", "-repl-edit-mode", "-hooks",
+	"-agents", "-models", "-check-model-proxy", "-repl-edit-mode", "-hooks",
 }
 
 // -h and --help are help requests, not usage errors: Load reports ErrHelp so the

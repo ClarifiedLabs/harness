@@ -654,7 +654,7 @@ func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 	flags := []string{
 		"-p", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 		"-no-env", "-resume", "-session", "-max-turns", "-default-context-window", "-context-window",
-		"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-check-model-proxy", "-hooks",
+		"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-agents", "-models", "-check-model-proxy", "-hooks",
 	}
 	for _, arg := range []string{"-h", "--help"} {
 		fp := llmtest.New("fake")
@@ -784,6 +784,157 @@ func TestRunShowConfigIncludesRuntimeDefaults(t *testing.T) {
 		if _, ok := agents[name]; !ok {
 			t.Fatalf("agents missing built-in %q\n%s", name, out.String())
 		}
+	}
+}
+
+func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
+	fp := llmtest.New("fake")
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := `{
+		"agent":"security",
+		"agents":{
+			"security":{
+				"description":"Security review",
+				"provider":"openai",
+				"model":"gpt-5.5"
+			}
+		}
+	}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--agents", "-config", cfgPath}, fp, "")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", errw.String())
+	}
+	if proxy.catalogRequests != 0 {
+		t.Fatalf("--agents should not fetch catalog, got %d requests", proxy.catalogRequests)
+	}
+	if len(proxy.requests) != 0 {
+		t.Fatalf("--agents should not stream a model request, got %d", len(proxy.requests))
+	}
+	got := out.String()
+	for _, want := range []string{
+		"available agents:",
+		"security (current)",
+		"[openai/gpt-5.5] Security review",
+		"auto",
+		"[inherit current] Default agent",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("agents output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "available models:") {
+		t.Fatalf("--agents should not print models:\n%s", got)
+	}
+}
+
+func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--models"}, fp, "")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if proxy.catalogRequests != 1 {
+		t.Fatalf("catalog requests = %d, want 1", proxy.catalogRequests)
+	}
+	if len(proxy.requests) != 0 {
+		t.Fatalf("--models should not stream a model request, got %d", len(proxy.requests))
+	}
+	if strings.Contains(errw.String(), "session:") {
+		t.Fatalf("--models should exit before session startup, stderr=%q", errw.String())
+	}
+	got := out.String()
+	for _, want := range []string{
+		"available models: 3 providers, 3 models",
+		"provider",
+		"model",
+		"context",
+		"price/M",
+		"anthropic",
+		"claude-opus-4-8",
+		"1000000",
+		"openai",
+		"gpt-5.5",
+		"$5/$30",
+		"openrouter",
+		"openai/gpt-5.5",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("models output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunAgentsAndModelsFlagsPrintBothInOrder(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--agents", "--models", "-agent", "plan"}, fp, "")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if proxy.catalogRequests != 1 {
+		t.Fatalf("catalog requests = %d, want 1", proxy.catalogRequests)
+	}
+	if len(proxy.requests) != 0 {
+		t.Fatalf("listing should not stream a model request, got %d", len(proxy.requests))
+	}
+	got := out.String()
+	agentsAt := strings.Index(got, "available agents:")
+	modelsAt := strings.Index(got, "available models:")
+	if agentsAt < 0 || modelsAt < 0 || agentsAt > modelsAt {
+		t.Fatalf("expected agents before models:\n%s", got)
+	}
+	if !strings.Contains(got, "plan (current)") {
+		t.Fatalf("agents output should mark plan current:\n%s", got)
+	}
+}
+
+func TestRunModelsFlagFailureExitsRuntime(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+			http.Error(w, "proxy unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	var out, errw bytes.Buffer
+	env := environment{
+		args:   []string{"--models", "-model-proxy-url", srv.URL},
+		stdin:  strings.NewReader(""),
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(k string) string {
+			if k == "HOME" {
+				return dir
+			}
+			return ""
+		},
+		now:   func() time.Time { return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC) },
+		sigCh: nil,
+	}
+
+	code := run(env)
+	if code != ui.ExitRuntime {
+		t.Fatalf("exit code = %d, want runtime; errw=%q", code, errw.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", out.String())
+	}
+	if got := errw.String(); !strings.Contains(got, "harness: model proxy:") || !strings.Contains(got, "proxy unavailable") {
+		t.Fatalf("stderr = %q, want model proxy failure", got)
 	}
 }
 

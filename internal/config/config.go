@@ -92,6 +92,8 @@ type Config struct {
 
 	// Meta.
 	ShowConfig      bool `json:"show_config"`       // --show-config: print this resolved config and exit
+	ShowAgents      bool `json:"show_agents"`       // --agents: print resolved agents and exit
+	ShowModels      bool `json:"show_models"`       // --models: print configured proxy models and exit
 	CheckModelProxy bool `json:"check_model_proxy"` // --check-model-proxy: verify the proxy catalog endpoint and exit
 
 	// Hooks are command-only lifecycle handlers. Inline hooks and hook_configs
@@ -547,6 +549,8 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		c.PromptSet = true
 	}
 	c.ShowConfig = set["show-config"]
+	c.ShowAgents = set["agents"]
+	c.ShowModels = set["models"]
 	c.CheckModelProxy = set["check-model-proxy"]
 
 	return c, nil
@@ -791,7 +795,8 @@ type flags struct {
 	quietShort, quiet              *bool
 	config                         *string
 	hooks                          *string
-	showConfig                     *bool
+	showConfig, showAgents         *bool
+	showModels                     *bool
 	checkModelProxy                *bool
 }
 
@@ -837,6 +842,8 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.replPrompt = fs.String("repl-prompt", replprompt.DefaultFormat, "REPL input prompt format")
 	f.replEditMode = fs.String("repl-edit-mode", DefaultReplEditMode, "REPL prompt edit mode: emacs or vi")
 	f.showConfig = fs.Bool("show-config", false, "dump resolved config including defaults and exit")
+	f.showAgents = fs.Bool("agents", false, "list configured agents and exit")
+	f.showModels = fs.Bool("models", false, "list configured providers and models and exit")
 	f.checkModelProxy = fs.Bool("check-model-proxy", false, "check harness-model-proxy reachability and exit")
 	f.hooks = fs.String("hooks", "", "override hook config file for this run")
 	// -config is consumed by the caller before Load (it picks the file Load

@@ -149,6 +149,19 @@ func run(env environment) int {
 		}
 		return ui.ExitOK
 	}
+	agentsOutput := ""
+	if cfg.ShowAgents {
+		var err error
+		agentsOutput, err = buildAgentsListOutput(cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "harness: agents: %v\n", err)
+			return ui.ExitUsage
+		}
+		if !cfg.ShowModels {
+			fmt.Fprint(stdout, agentsOutput)
+			return ui.ExitOK
+		}
+	}
 	proxyURL := cfg.ModelProxyURL
 	if proxyURL == "" {
 		proxyURL = protocol.DefaultURL
@@ -160,6 +173,25 @@ func run(env environment) int {
 	}
 	startupCtx, stopStartup, startupInterrupted := signalCancelContext(env.sigCh)
 	defer stopStartup()
+	if cfg.ShowModels {
+		catalog, err := checkModelProxy(startupCtx, proxyClient)
+		if err != nil {
+			if startupInterrupted() || errors.Is(err, context.Canceled) {
+				return ui.ExitInterrupt
+			}
+			fmt.Fprintf(stderr, "harness: model proxy: %v\n", err)
+			return ui.ExitRuntime
+		}
+		if startupInterrupted() {
+			return ui.ExitInterrupt
+		}
+		if cfg.ShowAgents {
+			fmt.Fprint(stdout, agentsOutput)
+			fmt.Fprintln(stdout)
+		}
+		fmt.Fprint(stdout, buildModelsListOutput(catalog))
+		return ui.ExitOK
+	}
 	if cfg.CheckModelProxy {
 		catalog, err := checkModelProxy(startupCtx, proxyClient)
 		if err != nil {
@@ -197,20 +229,8 @@ func run(env environment) int {
 		return ui.ExitUsage
 	}
 
-	fileAgents := make(map[string]agentdef.FileDefinition, len(cfg.Agents))
-	for name, fa := range cfg.Agents {
-		fileAgents[name] = agentdef.FileDefinition{
-			Description:  fa.Description,
-			AllowedTools: fa.AllowedTools,
-			MCPTools:     fa.MCPTools,
-			Prompt:       fa.Prompt,
-			Provider:     fa.Provider,
-			Model:        fa.Model,
-		}
-	}
-	agentOptions := agentdef.Options{SearchTools: cfg.SearchTools}
-	agents := agentdef.ResolveWithOptions(fileAgents, agentOptions)
-	if err := agentdef.Validate(agents); err != nil {
+	agents, err := resolveConfiguredAgents(cfg)
+	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
 	}
@@ -911,6 +931,71 @@ func showConfigDefaults(cfg config.Config) config.Config {
 	return cfg
 }
 
+func resolveConfiguredAgents(cfg config.Config) (map[string]agentdef.Definition, error) {
+	agents := agentdef.ResolveWithOptions(fileAgentDefinitions(cfg.Agents), agentdef.Options{SearchTools: cfg.SearchTools})
+	if err := agentdef.Validate(agents); err != nil {
+		return nil, err
+	}
+	return agents, nil
+}
+
+func resolvedConfigAgentName(cfg config.Config, agents map[string]agentdef.Definition) (string, error) {
+	agentName := cfg.Agent
+	if agentName == "" {
+		agentName = agentdef.Default
+	}
+	if _, ok := agents[agentName]; !ok {
+		return "", fmt.Errorf("unknown agent %q (available: %s)", agentName, strings.Join(agentdef.Names(agents), ", "))
+	}
+	return agentName, nil
+}
+
+func buildAgentsListOutput(cfg config.Config) (string, error) {
+	agents, err := resolveConfiguredAgents(cfg)
+	if err != nil {
+		return "", err
+	}
+	agentName, err := resolvedConfigAgentName(cfg, agents)
+	if err != nil {
+		return "", err
+	}
+	rows := make([]ui.NameDescription, 0, len(agents))
+	for _, name := range agentdef.Names(agents) {
+		a := agents[name]
+		label := name
+		if name == agentName {
+			label += " (current)"
+		}
+		parts := []string{"[" + agentDefinitionModelSummary(a) + "]"}
+		if strings.TrimSpace(a.Description) != "" {
+			parts = append(parts, a.Description)
+		}
+		rows = append(rows, ui.NameDescription{
+			Name:        label,
+			Description: strings.Join(parts, " "),
+		})
+	}
+	var b strings.Builder
+	b.WriteString("available agents:\n")
+	ui.WriteNameDescriptionList(&b, rows, ui.NameDescriptionListOptions{Indent: "  "})
+	return b.String(), nil
+}
+
+func agentDefinitionModelSummary(a agentdef.Definition) string {
+	provider := strings.TrimSpace(a.Provider)
+	model := strings.TrimSpace(a.Model)
+	switch {
+	case provider == "" && model == "":
+		return "inherit current"
+	case provider == "":
+		return fmt.Sprintf("inherit provider/%s", model)
+	case model == "":
+		return fmt.Sprintf("%s/inherit current model", provider)
+	default:
+		return fmt.Sprintf("%s/%s", provider, model)
+	}
+}
+
 func checkModelProxy(ctx context.Context, proxyClient *modelclient.Client) (protocol.Catalog, error) {
 	ctx, cancel := context.WithTimeout(ctx, modelProxyCheckTimeout)
 	defer cancel()
@@ -925,19 +1010,105 @@ func catalogModelCount(catalog protocol.Catalog) int {
 	return total
 }
 
+type modelListRow struct {
+	Provider string
+	Model    string
+	Context  string
+	Price    string
+	Name     string
+}
+
+func buildModelsListOutput(catalog protocol.Catalog) string {
+	rows := catalogModelListRows(catalog)
+	if len(rows) == 0 {
+		return "available models: none\n"
+	}
+	providerWidth := len("provider")
+	modelWidth := len("model")
+	contextWidth := len("context")
+	priceWidth := len("price/M")
+	for _, row := range rows {
+		providerWidth = max(providerWidth, len(row.Provider))
+		modelWidth = max(modelWidth, len(row.Model))
+		contextWidth = max(contextWidth, len(row.Context))
+		priceWidth = max(priceWidth, len(row.Price))
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "available models: %d providers, %d models\n", catalogVisibleProviderCount(catalog), len(rows))
+	fmt.Fprintf(&b, "%-*s  %-*s  %*s  %-*s  %s\n", providerWidth, "provider", modelWidth, "model", contextWidth, "context", priceWidth, "price/M", "name")
+	for _, row := range rows {
+		fmt.Fprintf(&b, "%-*s  %-*s  %*s  %-*s  %s\n", providerWidth, row.Provider, modelWidth, row.Model, contextWidth, row.Context, priceWidth, row.Price, row.Name)
+	}
+	return b.String()
+}
+
+func catalogModelListRows(catalog protocol.Catalog) []modelListRow {
+	var rows []modelListRow
+	for _, provider := range catalog.Providers {
+		if provider.ID == "" {
+			continue
+		}
+		for _, model := range provider.Models {
+			if model.ID == "" {
+				continue
+			}
+			price := formatPickerPrice(model.Price)
+			if price == "" {
+				price = "-"
+			}
+			rows = append(rows, modelListRow{
+				Provider: provider.ID,
+				Model:    model.ID,
+				Context:  formatModelContextWindow(model.ContextWindow),
+				Price:    price,
+				Name:     modelListDisplayName(model),
+			})
+		}
+	}
+	return rows
+}
+
+func catalogVisibleProviderCount(catalog protocol.Catalog) int {
+	total := 0
+	for _, provider := range catalog.Providers {
+		if provider.ID == "" {
+			continue
+		}
+		for _, model := range provider.Models {
+			if model.ID != "" {
+				total++
+				break
+			}
+		}
+	}
+	return total
+}
+
+func formatModelContextWindow(contextWindow int) string {
+	if contextWindow <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d", contextWindow)
+}
+
+func modelListDisplayName(model protocol.Model) string {
+	name := strings.TrimSpace(model.Name)
+	if name == "" {
+		return "-"
+	}
+	return name
+}
+
 func buildShowConfigOutput(cfg config.Config) (showConfigOutput, error) {
 	cfg = showConfigDefaults(cfg)
 
-	agents := agentdef.ResolveWithOptions(fileAgentDefinitions(cfg.Agents), agentdef.Options{SearchTools: cfg.SearchTools})
-	if err := agentdef.Validate(agents); err != nil {
+	agents, err := resolveConfiguredAgents(cfg)
+	if err != nil {
 		return showConfigOutput{}, err
 	}
-	agentName := cfg.Agent
-	if agentName == "" {
-		agentName = agentdef.Default
-	}
-	if _, ok := agents[agentName]; !ok {
-		return showConfigOutput{}, fmt.Errorf("unknown agent %q (available: %s)", agentName, strings.Join(agentdef.Names(agents), ", "))
+	agentName, err := resolvedConfigAgentName(cfg, agents)
+	if err != nil {
+		return showConfigOutput{}, err
 	}
 	cfg.Agent = agentName
 

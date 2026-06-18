@@ -24,6 +24,10 @@ Use `harness --check-model-proxy` to verify that the configured proxy is
 reachable. It sends `GET /v1/models`, prints a short success line on stdout, and
 exits before creating a session or starting the REPL.
 
+Use `harness --models` to print the providers and models exposed by the
+configured proxy. Use `harness --agents` to print the resolved built-in and
+config-defined agents. Both commands exit before creating a session.
+
 ## One-Shot Mode
 
 In one-shot mode (`-p`) the assistant's text goes to stdout while model progress,
@@ -88,6 +92,8 @@ interrupted.
 -repl-prompt <text>    REPL input prompt format (default "[{agent}] > ")
 -repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
 --show-config    dump the resolved config, including defaults, as JSON and exit
+--agents         list configured agents and exit
+--models         list configured providers and models and exit
 --check-model-proxy    check harness-model-proxy reachability and exit
 -hooks <file>    replace configured hooks with this hook config file
 -config <file>    alternate config path
@@ -133,6 +139,8 @@ context-efficiency knobs are config-file-only.
   `examples/harness/config.json` for a representative schema.
 - `--show-config` prints the resolved config as JSON after applying file, env,
   flag, and built-in defaults. It exits without contacting the model proxy.
+- `--agents` prints the resolved agent list without contacting the model proxy.
+  `--models` prints the configured proxy model catalog.
 - Context-efficiency knobs are config-file-only except where noted:
   `agents_md_warn_bytes`, `read_file_default_limit`, `compact_keep_turns`,
   `compact_summary_max_tokens`, and `compact_tool_result_max_bytes`.
