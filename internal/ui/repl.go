@@ -2234,6 +2234,9 @@ func (app *App) printExitUsageSummary() {
 		fmt.Fprintf(app.Errw, " · $%.4f", app.usage.CostUSD)
 	}
 	fmt.Fprintln(app.Errw, "]")
+	if app.SessionPath != "" {
+		fmt.Fprintf(app.Errw, "resume with: harness -resume %s\n", app.SessionPath)
+	}
 }
 
 // skillsSummary renders the available skills for /skills (design §10), grouped

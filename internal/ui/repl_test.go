@@ -599,9 +599,9 @@ func TestREPLExitPrintsUsageSummary(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	got := errw.String()
-	want := "[session summary: 100 input / 30 cached input / 10 output / 4 reasoning / 20 cache write]"
+	want := "[session summary: 100 input / 30 cached input / 10 output / 4 reasoning / 20 cache write]\nresume with: harness -resume " + app.SessionPath
 	if !strings.Contains(got, want) {
-		t.Errorf("exit should print usage summary %q, errw=%q", want, got)
+		t.Errorf("exit should print usage summary and resume hint %q, errw=%q", want, got)
 	}
 }
 
