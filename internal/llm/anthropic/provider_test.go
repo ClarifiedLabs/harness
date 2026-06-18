@@ -218,6 +218,26 @@ func TestStreamInvalidToolJSON(t *testing.T) {
 	}
 }
 
+func TestToolAssemblerRejectsNonObjectToolInput(t *testing.T) {
+	a := newToolAssembler()
+	a.pending[0] = &pendingTool{id: "toolu_x", name: "echo", args: []byte(`[]`)}
+
+	event, err, ok := a.flush(0)
+	if !ok {
+		t.Fatal("flush skipped pending tool")
+	}
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error is not *llm.APIError: %T %v", err, err)
+	}
+	if !apiErr.Retryable || !strings.Contains(apiErr.Message, "JSON object") {
+		t.Fatalf("error = %+v, want retryable JSON object diagnostic", apiErr)
+	}
+	if event.Kind == llm.EventToolCallDone {
+		t.Fatalf("emitted ToolCallDone for non-object input: %s", event.ToolInput)
+	}
+}
+
 func TestStreamErrorFrame(t *testing.T) {
 	srv := llmtest.ServeSSEFixture(t, "error_frame.sse")
 	p := testProvider(t, srv, nil)

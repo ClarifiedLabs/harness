@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 
@@ -61,8 +60,8 @@ func (a *toolAssembler) observe(frag wireToolCallDelta, yield func(llm.StreamEve
 }
 
 // flush finalizes every buffered call in ascending index order, emitting one
-// Done per call. An empty buffer flushes as {}. Accumulated JSON that fails
-// json.Valid is a retryable stream error — never a garbage Done; flush returns
+// Done per call. An empty buffer flushes as {}. Accumulated input that is not a
+// JSON object is a retryable stream error — never a garbage Done; flush returns
 // the error and stops without emitting further events.
 func (a *toolAssembler) flush(yield func(llm.StreamEvent, error) bool) (ok bool, fatal error) {
 	indices := make([]int, 0, len(a.pending))
@@ -77,9 +76,10 @@ func (a *toolAssembler) flush(yield func(llm.StreamEvent, error) bool) (ok bool,
 		if len(args) == 0 {
 			args = []byte(emptyArgs)
 		}
-		if !json.Valid(args) {
+		input, err := llm.NormalizeToolInputObject(args)
+		if err != nil {
 			return false, &llm.APIError{
-				Message:   fmt.Sprintf("tool %q produced invalid JSON arguments", t.name),
+				Message:   fmt.Sprintf("tool %q produced invalid arguments: %v", t.name, err),
 				Retryable: true,
 			}
 		}
@@ -88,7 +88,7 @@ func (a *toolAssembler) flush(yield func(llm.StreamEvent, error) bool) (ok bool,
 			Index:     i,
 			ToolID:    t.id,
 			ToolName:  t.name,
-			ToolInput: json.RawMessage(args),
+			ToolInput: input,
 		}, nil) {
 			return false, nil
 		}

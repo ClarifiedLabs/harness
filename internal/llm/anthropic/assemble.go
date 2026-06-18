@@ -1,7 +1,6 @@
 package anthropic
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"harness/internal/llm"
@@ -51,7 +50,7 @@ func (a *toolAssembler) delta(index int, fragment string) (llm.StreamEvent, bool
 }
 
 // flush finalizes the tool at index. An empty buffer flushes as {}. Accumulated
-// JSON that fails json.Valid is a retryable stream error — never a garbage
+// input that is not a JSON object is a retryable stream error — never a garbage
 // Done. A non-tool index (text block) yields ok=false so the caller skips
 // emission.
 func (a *toolAssembler) flush(index int) (llm.StreamEvent, error, bool) {
@@ -65,9 +64,10 @@ func (a *toolAssembler) flush(index int) (llm.StreamEvent, error, bool) {
 	if len(args) == 0 {
 		args = []byte("{}")
 	}
-	if !json.Valid(args) {
+	input, err := llm.NormalizeToolInputObject(args)
+	if err != nil {
 		return llm.StreamEvent{}, &llm.APIError{
-			Message:   fmt.Sprintf("tool %q produced invalid JSON arguments", t.name),
+			Message:   fmt.Sprintf("tool %q produced invalid arguments: %v", t.name, err),
 			Retryable: true,
 		}, true
 	}
@@ -76,6 +76,6 @@ func (a *toolAssembler) flush(index int) (llm.StreamEvent, error, bool) {
 		Index:     index,
 		ToolID:    t.id,
 		ToolName:  t.name,
-		ToolInput: json.RawMessage(args),
+		ToolInput: input,
 	}, nil, true
 }

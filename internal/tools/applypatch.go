@@ -23,7 +23,7 @@ type applyPatch struct{}
 func (applyPatch) Name() string { return "apply_patch" }
 
 func (applyPatch) Description() string {
-	return "Apply a Codex-format patch. Supports add, delete, update, and move."
+	return "Apply a Codex-format patch. Provide a JSON object with patch as the raw patch text. Supports add, delete, update, and move."
 }
 
 func (applyPatch) Schema() json.RawMessage { return json.RawMessage(applyPatchSchema) }

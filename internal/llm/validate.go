@@ -36,6 +36,9 @@ func ValidateTranscript(msgs []Message) error {
 					if b.ToolUseID == "" {
 						return fmt.Errorf("message %d: tool_use block with empty id", i)
 					}
+					if err := ValidateToolInputObject(b.ToolInput); err != nil {
+						return fmt.Errorf("message %d: tool_use %q has invalid input: %w", i, b.ToolUseID, err)
+					}
 					if open[b.ToolUseID] {
 						return fmt.Errorf("message %d: duplicate tool_use id %q", i, b.ToolUseID)
 					}

@@ -61,7 +61,7 @@ func WeatherToolRequest(model, toolIDPrefix string, includeEmptyToolCall bool) l
 		messages = append(messages,
 			llm.Message{
 				Role:    llm.RoleAssistant,
-				Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: toolIDPrefix + "01C", ToolName: "list_dir"}},
+				Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: toolIDPrefix + "01C", ToolName: "list_dir", ToolInput: json.RawMessage(`{}`)}},
 			},
 			llm.Message{
 				Role:    llm.RoleUser,

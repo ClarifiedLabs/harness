@@ -86,6 +86,28 @@ func TestValidateTranscript(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "tool_use input must be object",
+			msgs: []Message{
+				userText("do it"),
+				{Role: RoleAssistant, Content: []ContentBlock{
+					{Kind: BlockToolUse, ToolUseID: "a", ToolName: "read_file", ToolInput: []byte(`[]`)},
+				}},
+				{Role: RoleUser, Content: []ContentBlock{toolResult("a", "result")}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "tool_use input must not be empty",
+			msgs: []Message{
+				userText("do it"),
+				{Role: RoleAssistant, Content: []ContentBlock{
+					{Kind: BlockToolUse, ToolUseID: "a", ToolName: "read_file"},
+				}},
+				{Role: RoleUser, Content: []ContentBlock{toolResult("a", "result")}},
+			},
+			wantErr: true,
+		},
+		{
 			name: "tool_use with nothing following",
 			msgs: []Message{
 				userText("do it"),

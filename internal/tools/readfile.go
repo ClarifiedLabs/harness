@@ -35,7 +35,7 @@ type readFile struct {
 func (readFile) Name() string { return "read_file" }
 
 func (readFile) Description() string {
-	return "Read a file from disk. Returns line-numbered content; supports offset/limit for large files."
+	return "Read a file from disk. Provide a JSON object with path and optional offset/limit. Returns line-numbered content."
 }
 
 func (readFile) Schema() json.RawMessage { return json.RawMessage(readFileSchema) }

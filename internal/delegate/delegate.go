@@ -179,7 +179,7 @@ func NewTool(runner *Runner, background ...tools.BackgroundJobStarter) *Tool {
 func (*Tool) Name() string { return "delegate" }
 
 func (*Tool) Description() string {
-	return "Run a configured delegate agent on a self-contained task and return its final report."
+	return "Run a configured delegate agent on a self-contained task and return its final report. Provide a JSON object matching the schema."
 }
 
 func (t *Tool) Schema() json.RawMessage {

@@ -214,6 +214,35 @@ func TestStreamInvalidToolJSON(t *testing.T) {
 	}
 }
 
+func TestToolAssemblerRejectsNonObjectToolInput(t *testing.T) {
+	a := newToolAssembler()
+	a.pending[0] = &pendingTool{id: "call_x", name: "echo", args: []byte(`[]`)}
+
+	var events []llm.StreamEvent
+	ok, err := a.flush(func(e llm.StreamEvent, err error) bool {
+		if err != nil {
+			t.Fatalf("unexpected yield error: %v", err)
+		}
+		events = append(events, e)
+		return true
+	})
+	if ok {
+		t.Fatal("flush succeeded for non-object tool input")
+	}
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error is not *llm.APIError: %T %v", err, err)
+	}
+	if !apiErr.Retryable || !strings.Contains(apiErr.Message, "JSON object") {
+		t.Fatalf("error = %+v, want retryable JSON object diagnostic", apiErr)
+	}
+	for _, e := range events {
+		if e.Kind == llm.EventToolCallDone {
+			t.Fatalf("emitted ToolCallDone for non-object input: %s", e.ToolInput)
+		}
+	}
+}
+
 func TestStreamErrorEventParsesRetryAfterHint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

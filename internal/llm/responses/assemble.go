@@ -1,7 +1,6 @@
 package responses
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 
@@ -101,9 +100,10 @@ func (a *toolAssembler) flush(yield func(llm.StreamEvent, error) bool) (ok bool,
 		if len(args) == 0 {
 			args = []byte(emptyArgs)
 		}
-		if !json.Valid(args) {
+		input, err := llm.NormalizeToolInputObject(args)
+		if err != nil {
 			return false, &llm.APIError{
-				Message:   fmt.Sprintf("tool %q produced invalid JSON arguments", t.name),
+				Message:   fmt.Sprintf("tool %q produced invalid arguments: %v", t.name, err),
 				Retryable: true,
 			}
 		}
@@ -112,7 +112,7 @@ func (a *toolAssembler) flush(yield func(llm.StreamEvent, error) bool) (ok bool,
 			Index:     i,
 			ToolID:    toolID(t),
 			ToolName:  t.name,
-			ToolInput: json.RawMessage(args),
+			ToolInput: input,
 		}, nil) {
 			return false, nil
 		}

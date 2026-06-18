@@ -86,7 +86,7 @@ type StreamEvent struct {
 	ToolID    string          `json:"tool_id,omitempty"`    // Start/Done
 	ToolName  string          `json:"tool_name,omitempty"`  // Start/Done
 	ArgsDelta string          `json:"args_delta,omitempty"` // Delta
-	ToolInput json.RawMessage `json:"tool_input,omitempty"` // Done only: complete, valid JSON
+	ToolInput json.RawMessage `json:"tool_input,omitempty"` // Done only: complete JSON object
 
 	Usage      *Usage     `json:"usage,omitempty"`       // EventUsage / EventDone
 	StopReason StopReason `json:"stop_reason,omitempty"` // EventDone

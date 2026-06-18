@@ -27,7 +27,7 @@ type listDir struct{}
 func (listDir) Name() string { return "list_dir" }
 
 func (listDir) Description() string {
-	return "List directory entries with type and size. Non-recursive; pass a glob to filter."
+	return "List directory entries with type and size. Provide a JSON object; pass path and optional glob. Non-recursive."
 }
 
 func (listDir) Schema() json.RawMessage { return json.RawMessage(listDirSchema) }

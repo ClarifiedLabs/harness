@@ -97,7 +97,7 @@ type matchedEdit struct {
 func (edit) Name() string { return "edit" }
 
 func (edit) Description() string {
-	return "Edit one or more files with exact-text replacements. Each file has edits[]; oldText must be unique and non-overlapping in the original file."
+	return "Edit one or more files with exact-text replacements. Provide a JSON object with files[]. Each oldText must be unique and non-overlapping in the original file."
 }
 
 func (edit) Schema() json.RawMessage { return json.RawMessage(editSchema) }

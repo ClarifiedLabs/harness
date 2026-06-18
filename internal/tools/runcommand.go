@@ -60,7 +60,7 @@ type runCommand struct {
 func (runCommand) Name() string { return "run_command" }
 
 func (runCommand) Description() string {
-	return "Run a shell command with command or a program directly with argv. Provide exactly one of command or argv. When using argv, pass it as an array of strings, not a shell string or JSON-encoded array. Returns combined stdout+stderr and exit code, or a background job id when background is true."
+	return "Run a shell command with command or a program directly with argv. Provide a JSON object with exactly one of command or argv. When using argv, pass it as an array of strings, not a shell string or JSON-encoded array. Returns combined stdout+stderr and exit code, or a background job id when background is true."
 }
 
 func (t runCommand) Schema() json.RawMessage {
