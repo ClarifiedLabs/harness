@@ -57,6 +57,7 @@ func main() {
 		now:          time.Now,
 		colorTTY:     isTTY(os.Stdout),
 		stdinPiped:   pipedStdin(os.Stdin),
+		prewarmCache: true,
 		sigCh:        sigCh,
 		terminalRows: defaultTerminalRows,
 		terminalCols: defaultTerminalCols,
@@ -68,15 +69,16 @@ func main() {
 // (design §13: no dependence on real time or terminals in tests). A nil sigCh
 // disables SIGINT handling (tests).
 type environment struct {
-	args       []string
-	stdin      io.Reader
-	stdout     io.Writer
-	stderr     io.Writer
-	getenv     func(string) string
-	now        func() time.Time
-	colorTTY   bool // stdout is a terminal (gates color)
-	stdinPiped bool // stdin is piped/redirected (gates one-shot stdin read)
-	sigCh      chan os.Signal
+	args         []string
+	stdin        io.Reader
+	stdout       io.Writer
+	stderr       io.Writer
+	getenv       func(string) string
+	now          func() time.Time
+	colorTTY     bool // stdout is a terminal (gates color)
+	stdinPiped   bool // stdin is piped/redirected (gates one-shot stdin read)
+	prewarmCache bool // issue a background prompt-cache warm-up at interactive startup
+	sigCh        chan os.Signal
 
 	terminalRows func() int
 	terminalCols func() int
@@ -908,6 +910,23 @@ func run(env environment) int {
 		default:
 		}
 		return code
+	}
+
+	// Pre-warm the prompt cache in the background so the first real request reads
+	// a warm tools+system prefix instead of paying the cold cache-write latency.
+	// Gated to an interactive terminal: with piped/scripted stdin (one-shot is
+	// already handled above, plus CI and tests) there is no human-perceived
+	// first-turn latency to hide, so the extra request would be pure waste. The
+	// snapshot is captured synchronously here; only the stream runs in the
+	// goroutine, so it never races the loop.
+	if env.prewarmCache && !env.stdinPiped {
+		if warm, ok := ag.PrewarmFunc(); ok {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				warm(ctx)
+			}()
+		}
 	}
 
 	// Interactive REPL. ui.Run owns the session save in every exit path,
