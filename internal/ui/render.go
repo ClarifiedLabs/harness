@@ -34,34 +34,36 @@ const snippetLines = 5
 // plus NO_COLOR / -no-color); Now is injected so the per-turn duration is
 // deterministic in tests (design §10, §13).
 type RenderOptions struct {
-	Color           bool
-	Markdown        bool
-	Verbose         bool
-	ToolStream      bool
-	Quiet           bool
-	Model           string
-	Registry        *llm.Registry
-	Now             func() time.Time
-	TimestampLayout string
-	Width           func() int
+	Color                   bool
+	Markdown                bool
+	Verbose                 bool
+	ToolStream              bool
+	Quiet                   bool
+	SuppressReasoningOutput bool
+	Model                   string
+	Registry                *llm.Registry
+	Now                     func() time.Time
+	TimestampLayout         string
+	Width                   func() int
 }
 
 // Renderer implements agent.EventSink: assistant text streams to out, while tool
 // one-liners, the usage line, and notices go to errw so one-shot stdout carries
 // only the model's answer (design §10).
 type Renderer struct {
-	out             io.Writer
-	errw            io.Writer
-	color           bool
-	markdown        bool
-	verbose         bool
-	toolStream      bool
-	quiet           bool
-	model           string
-	registry        *llm.Registry
-	now             func() time.Time
-	timestampLayout string
-	width           func() int
+	out                     io.Writer
+	errw                    io.Writer
+	color                   bool
+	markdown                bool
+	verbose                 bool
+	toolStream              bool
+	quiet                   bool
+	suppressReasoningOutput bool
+	model                   string
+	registry                *llm.Registry
+	now                     func() time.Time
+	timestampLayout         string
+	width                   func() int
 
 	turnStart         time.Time
 	assistantLineOpen bool
@@ -84,19 +86,20 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 		now = time.Now
 	}
 	return &Renderer{
-		out:             out,
-		errw:            errw,
-		color:           opts.Color,
-		markdown:        opts.Markdown,
-		verbose:         opts.Verbose,
-		toolStream:      opts.ToolStream,
-		quiet:           opts.Quiet,
-		model:           opts.Model,
-		registry:        opts.Registry,
-		now:             now,
-		timestampLayout: opts.TimestampLayout,
-		width:           opts.Width,
-		pending:         make(map[string]llm.ToolCall),
+		out:                     out,
+		errw:                    errw,
+		color:                   opts.Color,
+		markdown:                opts.Markdown,
+		verbose:                 opts.Verbose,
+		toolStream:              opts.ToolStream,
+		quiet:                   opts.Quiet,
+		suppressReasoningOutput: opts.SuppressReasoningOutput,
+		model:                   opts.Model,
+		registry:                opts.Registry,
+		now:                     now,
+		timestampLayout:         opts.TimestampLayout,
+		width:                   opts.Width,
+		pending:                 make(map[string]llm.ToolCall),
 	}
 }
 
@@ -134,12 +137,18 @@ func (r *Renderer) TextDelta(text string) {
 }
 
 func (r *Renderer) ReasoningSummary(text string) {
+	if r.suppressReasoningOutput {
+		return
+	}
 	r.flushToolUseStarts()
 	r.finishAssistantLine()
 	io.WriteString(r.out, r.reasoningSummaryBlock(text))
 }
 
 func (r *Renderer) ReasoningSummaryStatus(text string) {
+	if r.suppressReasoningOutput {
+		return
+	}
 	r.flushToolUseStarts()
 	r.finishAssistantLine()
 	io.WriteString(r.errw, r.reasoningSummaryBlock(text))

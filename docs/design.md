@@ -528,7 +528,8 @@ controls are set, that metadata is used to validate provider/model reasoning
 support, effort values, and budget ranges.
 Responses API reasoning summaries default to `auto` for interactive sessions, can be
 set to `auto`, `concise`, `detailed`, or `none`, and are omitted by default in
-one-shot mode.
+one-shot mode. Quiet mode (`-q`/`--quiet`) suppresses reasoning summary output
+unless `-reasoning-summary` is explicitly set on the CLI.
 
 ## 7. Configuration and provider selection
 
@@ -1282,8 +1283,10 @@ backoff allows.
   message`. Default level is `info`; `--log-level` or `LOG_LEVEL` accepts `debug`,
   `info`, `warn`, or `error`.
 - `-q`/`--quiet` suppresses bracketed status messages (tool calls, model turns,
-  notices, and usage lines), disables live tool-stream progress, and suppresses
-  status lines in `harness session replay`; it does not filter slog diagnostics.
+  notices, and usage lines), disables live tool-stream progress, suppresses
+  reasoning summary output unless `-reasoning-summary` is explicitly set on the
+  CLI, and suppresses status lines in `harness session replay`; it does not filter
+  slog diagnostics.
 
 ### Terminal reset on REPL start
 
@@ -1418,7 +1421,7 @@ zero for Anthropic sessions.
 -v                show tool result snippets
 -tool-stream      show live tool-call progress (default true)
 -show-diffs       show per-tool-call file diffs for built-in file edits
--q, --quiet       suppress bracketed status messages
+-q, --quiet       suppress status messages and reasoning output unless -reasoning-summary is set
 --log-level <level>  diagnostic log level: debug, info, warn, error (also LOG_LEVEL)
 -no-color
 -timestamps <mode>  status timestamps: short (default), full/long, or none

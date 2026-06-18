@@ -83,7 +83,7 @@ interrupted.
 -v                show tool result snippets (first ~5 lines, dimmed)
 -tool-stream      show live tool-call progress (default true; use -tool-stream=false to disable)
 -show-diffs       show per-tool-call file diffs for built-in file edits
--q, --quiet       suppress informational diagnostics
+-q, --quiet       suppress status diagnostics and reasoning output unless -reasoning-summary is set
 --version        print release version and exit 0
 --log-level <level>  diagnostic log level: debug, info, warn, error (also LOG_LEVEL)
 -no-color         disable ANSI color (also: NO_COLOR env var; color is TTY-only anyway)
@@ -159,7 +159,8 @@ Reasoning controls are opt-in: `reasoning_effort` /
 `reasoning_budget_tokens` / `HARNESS_REASONING_BUDGET_TOKENS` /
 `-reasoning-budget-tokens`. Responses API reasoning summaries are controlled by
 `reasoning_summary` / `HARNESS_REASONING_SUMMARY` / `-reasoning-summary`; they
-default to `auto` in interactive sessions and off in one-shot mode.
+default to `auto` in interactive sessions and off in one-shot mode. `-q` disables
+reasoning summary output unless `-reasoning-summary` is explicitly set on the CLI.
 
 Responses continuation is on by default for proxy providers that report both
 `api_type: "responses"` and `responses_stateful:true`. Disable it with

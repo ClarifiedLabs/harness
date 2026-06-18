@@ -1439,21 +1439,24 @@ func TestRunReasoningBudgetTokensRejectedForOpenAICompatibleProvider(t *testing.
 
 func TestEffectiveReasoningSummaryDefaultsToInteractiveResponsesOnly(t *testing.T) {
 	cases := []struct {
-		name        string
-		configured  string
-		mode        string
-		interactive bool
-		want        string
+		name           string
+		configured     string
+		mode           string
+		interactive    bool
+		suppressOutput bool
+		want           string
 	}{
 		{name: "interactive responses", mode: "responses", interactive: true, want: "auto"},
 		{name: "one shot responses", mode: "responses", interactive: false, want: ""},
 		{name: "interactive chat completions", mode: "openai", interactive: true, want: ""},
 		{name: "configured concise", configured: "concise", mode: "responses", interactive: false, want: "concise"},
 		{name: "configured none", configured: "none", mode: "responses", interactive: true, want: ""},
+		{name: "quiet suppresses interactive default", mode: "responses", interactive: true, suppressOutput: true, want: ""},
+		{name: "quiet suppresses configured summary", configured: "detailed", mode: "responses", interactive: true, suppressOutput: true, want: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := effectiveReasoningSummary(tc.configured, tc.mode, tc.interactive)
+			got := effectiveReasoningSummary(tc.configured, tc.mode, tc.interactive, tc.suppressOutput)
 			if got != tc.want {
 				t.Fatalf("effectiveReasoningSummary = %q, want %q", got, tc.want)
 			}
@@ -1465,6 +1468,25 @@ func TestValidateReasoningSummaryRejectedForNonResponsesProvider(t *testing.T) {
 	err := validateReasoningConfig(nil, "gpt-5.5", "openai", llm.ReasoningConfig{Summary: "auto"})
 	if err == nil || !strings.Contains(err.Error(), "does not support reasoning_summary") {
 		t.Fatalf("err = %v, want unsupported reasoning_summary", err)
+	}
+}
+
+func TestExplicitReasoningOutputFlag(t *testing.T) {
+	cases := []struct {
+		args []string
+		want bool
+	}{
+		{args: []string{"-q"}, want: false},
+		{args: []string{"-q", "-reasoning-summary", "auto"}, want: true},
+		{args: []string{"-q", "--reasoning-summary=concise"}, want: true},
+		{args: []string{"-q", "-reasoning-summary", "on"}, want: true},
+		{args: []string{"-q", "-reasoning-summary", "none"}, want: false},
+		{args: []string{"-q", "-reasoning-summary", "default"}, want: false},
+	}
+	for _, tc := range cases {
+		if got := explicitReasoningOutputFlag(tc.args); got != tc.want {
+			t.Fatalf("explicitReasoningOutputFlag(%v) = %t, want %t", tc.args, got, tc.want)
+		}
 	}
 }
 
@@ -2246,6 +2268,52 @@ func TestRunQuietSuppressesBracketedStatusButNotDiagnostics(t *testing.T) {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("quiet should suppress bracketed status %q; stderr=%q", notWant, got)
 		}
+	}
+}
+
+func TestRunQuietSuppressesReasoningOutputUnlessExplicitlyEnabled(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{
+			{Kind: llm.EventReasoningSummary, Text: "quiet hidden reasoning"},
+			{Kind: llm.EventTextDelta, Text: "ok"},
+		},
+		Stop: llm.StopEndTurn,
+	})
+	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-5.5", "-q"}, fp, "hi\n/exit\n")
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("quiet exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(proxy.requests) != 1 {
+		t.Fatalf("quiet proxy requests = %d, want 1", len(proxy.requests))
+	}
+	if got := proxy.requests[0].Request.Reasoning.Summary; got != "" {
+		t.Fatalf("quiet request reasoning summary = %q, want empty", got)
+	}
+	if strings.Contains(out.String(), "quiet hidden reasoning") || strings.Contains(errw.String(), "quiet hidden reasoning") {
+		t.Fatalf("quiet should suppress reasoning output; stdout=%q stderr=%q", out.String(), errw.String())
+	}
+
+	fp = llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{
+			{Kind: llm.EventReasoningSummary, Text: "explicit visible reasoning"},
+			{Kind: llm.EventTextDelta, Text: "ok"},
+		},
+		Stop: llm.StopEndTurn,
+	})
+	env, out, errw, _, proxy = fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-5.5", "-q", "-reasoning-summary=auto"}, fp, "hi\n/exit\n")
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("explicit exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(proxy.requests) != 1 {
+		t.Fatalf("explicit proxy requests = %d, want 1", len(proxy.requests))
+	}
+	if got := proxy.requests[0].Request.Reasoning.Summary; got != "auto" {
+		t.Fatalf("explicit request reasoning summary = %q, want auto", got)
+	}
+	if !strings.Contains(out.String(), "explicit visible reasoning") && !strings.Contains(errw.String(), "explicit visible reasoning") {
+		t.Fatalf("explicit -reasoning-summary should show reasoning output; stdout=%q stderr=%q", out.String(), errw.String())
 	}
 }
 

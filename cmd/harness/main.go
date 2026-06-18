@@ -137,6 +137,8 @@ func run(env environment) int {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
 	}
+	explicitReasoningOutput := explicitReasoningOutputFlag(args)
+	suppressReasoningOutput := cfg.Quiet && !explicitReasoningOutput
 	if cfg.ShowConfig {
 		out, err := buildShowConfigOutput(cfg)
 		if err != nil {
@@ -309,7 +311,7 @@ func run(env environment) int {
 		}
 		cfg.Provider = selection.Provider
 		cfg.Model = selection.Model
-		reasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, reasoningModeForProvider(catalog, selection.Provider), interactiveSession)
+		reasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, reasoningModeForProvider(catalog, selection.Provider), interactiveSession, suppressReasoningOutput)
 		reasoning, err = pickStartupReasoningEffort(readStartupLine, stderr, modelRegistry, selection.RegistryModel, reasoning)
 		if err != nil {
 			if errors.Is(err, ui.ErrPickerCancelled) {
@@ -347,7 +349,7 @@ func run(env environment) int {
 	cfg.Provider = selection.Provider
 	cfg.Model = selection.Model
 	registryModel := selection.RegistryModel
-	reasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, reasoningModeForProvider(catalog, selection.Provider), interactiveSession)
+	reasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, reasoningModeForProvider(catalog, selection.Provider), interactiveSession, suppressReasoningOutput)
 	if err := validateReasoningConfig(modelRegistry, registryModel, reasoningModeForProvider(catalog, selection.Provider), reasoning); err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
@@ -595,7 +597,7 @@ func run(env environment) int {
 		mode := reasoningModeForProvider(catalog, next.Provider)
 		nextReasoning := compatibleReasoningForModel(modelRegistry, next.RegistryModel, mode, reasoning)
 		if nextReasoning.Summary == "" && cfg.ReasoningSummary == "" {
-			nextReasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, mode, interactiveSession)
+			nextReasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, mode, interactiveSession, suppressReasoningOutput)
 		}
 		if err := validateReasoningConfig(modelRegistry, next.RegistryModel, mode, nextReasoning); err != nil {
 			return ui.AgentSelection{}, err
@@ -641,7 +643,7 @@ func run(env environment) int {
 		}
 		mode := reasoningModeForProvider(catalog, next.Provider)
 		if nextReasoning.Summary == "" && cfg.ReasoningSummary == "" {
-			nextReasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, mode, interactiveSession)
+			nextReasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, mode, interactiveSession, suppressReasoningOutput)
 		}
 		nextReasoning = compatibleReasoningForModel(modelRegistry, next.RegistryModel, mode, nextReasoning)
 		if err := validateReasoningConfig(modelRegistry, next.RegistryModel, mode, nextReasoning); err != nil {
@@ -753,16 +755,17 @@ func run(env environment) int {
 
 	color := !cfg.NoColor && env.colorTTY
 	renderer := ui.NewRenderer(stdout, stderr, ui.RenderOptions{
-		Color:           color,
-		Markdown:        env.colorTTY,
-		Verbose:         cfg.Verbose,
-		ToolStream:      cfg.ToolStream,
-		Quiet:           cfg.Quiet,
-		Model:           registryModel,
-		Registry:        modelRegistry,
-		Now:             now,
-		TimestampLayout: timestampLayout(cfg.TimestampMode),
-		Width:           env.terminalCols,
+		Color:                   color,
+		Markdown:                env.colorTTY,
+		Verbose:                 cfg.Verbose,
+		ToolStream:              cfg.ToolStream,
+		Quiet:                   cfg.Quiet,
+		SuppressReasoningOutput: suppressReasoningOutput,
+		Model:                   registryModel,
+		Registry:                modelRegistry,
+		Now:                     now,
+		TimestampLayout:         timestampLayout(cfg.TimestampMode),
+		Width:                   env.terminalCols,
 	})
 
 	app := &ui.App{
@@ -1468,7 +1471,10 @@ func sessionResponseStateCompatible(cfg config.Config, catalog protocol.Catalog,
 	return s.ResponseState.AnchorMessages <= len(s.Messages)
 }
 
-func effectiveReasoningSummary(configured, mode string, interactive bool) string {
+func effectiveReasoningSummary(configured, mode string, interactive, suppressOutput bool) string {
+	if suppressOutput {
+		return ""
+	}
 	configured = strings.ToLower(strings.TrimSpace(configured))
 	switch configured {
 	case "none":
@@ -1875,6 +1881,11 @@ func homeDir(getenv func(string) string) string {
 // flagValue extracts a string flag's value from raw args, supporting both
 // -flag=value and -flag value forms. It returns "" when absent.
 func flagValue(args []string, name string) string {
+	value, _ := flagValueOK(args, name)
+	return value
+}
+
+func flagValueOK(args []string, name string) (string, bool) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--" {
@@ -1883,16 +1894,29 @@ func flagValue(args []string, name string) string {
 		for _, prefix := range []string{"-" + name, "--" + name} {
 			if a == prefix {
 				if i+1 < len(args) {
-					return args[i+1]
+					return args[i+1], true
 				}
-				return ""
+				return "", true
 			}
 			if strings.HasPrefix(a, prefix+"=") {
-				return a[len(prefix)+1:]
+				return a[len(prefix)+1:], true
 			}
 		}
 	}
-	return ""
+	return "", false
+}
+
+func explicitReasoningOutputFlag(args []string) bool {
+	value, ok := flagValueOK(args, "reasoning-summary")
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "auto", "concise", "detailed", "on", "true", "enabled", "enable":
+		return true
+	default:
+		return false
+	}
 }
 
 // resolveAtFile expands a @file reference to the file's contents; a plain string
