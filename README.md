@@ -3,16 +3,41 @@
 A minimal agentic coding harness in Go: a plain-text, line-oriented CLI that
 supports basic tool use, delegate sub-agents, skills, and MCP.
 
-## What it is
+## Design Invariants
 
 - **Zero third-party Go dependencies.** Go standard library only.
-- **No sandbox, no permission prompts.** `harness` assumes it is launched in an
-  environment that is already sandboxed enough; tools run with the process's
-  privileges.
+- **No sandbox.** `harness` assumes it is launched in an environment that is
+  already sandboxed enough; tools run with the process's privileges.
 - **Isolated provider and MCP access.** `harness` uses separate services for
   model providers and MCP. Those services can run outside the agent's sandbox, so
   API keys, OAuth tokens, and MCP credentials do not need to be available to the
   agent process.
+
+**Important Note:** There are no built in protections in harness unlike other
+popular agentic coding tools. You are in full control.
+
+## Basic Architecture
+
+Harness uses an unrestricted agent CLI tool combined with separate service
+that enable access to AI models and MCP services. This architecture enables
+running the coding agent in a sandboxed environment that doesn't have access
+to any credentials.
+
+```text
+                               +-----------------------+
+                               | Env with Credentials  |
++----------------------+       |                       |
+| Sandboxed Workspace  |       |  +-------------+      |
+|                      |   +---+--> Model Proxy |      |
+|   +-------------+    |   |   |  +-------------+      |
+|   |             |    |   |   |  +-----------+        |
+|   | Harness CLI +----+---+---+--> MCP Proxy |        |
+|   |             |    |   |   |  +-----------+        |
+|   +-------------+    |   |   |  +------------------+ |
++----------------------+   +---+--> Local Git Remote | |
+                               |  +------------------+ |
+                               +-----------------------+
+```
 
 ## Quickstart
 
@@ -67,33 +92,6 @@ start it separately and enable MCP for `harness`:
 ```sh
 harness-mcp-proxy serve
 HARNESS_MCP_ENABLE=true harness -provider <provider> -model <model>
-```
-
-## Process model
-
-```text
-+----------------------- sandboxed project environment ------------------------+
-|                                                                              |
-|  harness CLI                                                                 |
-|  - reads and writes local files                                               |
-|  - runs shell, git, and tool commands with this process's privileges          |
-|                                                                              |
-+----------------------+-------------------------------+-----------------------+
-                       | Model Provider                | MCP (Optional)
-                       |                               |
-                       v                               v
-+---------------------- outside sandbox / host environment ---------------------+
-|                                                                              |
-|  +------------------------+        +------------------------+                 |
-|  | harness-model-proxy    |        | harness-mcp-proxy      |                 |
-|  | provider config/auth   |        | MCP server config/auth |                 |
-|  | model catalog/dialects |        | stdio/HTTP MCP clients |                 |
-|  +-----------+------------+        +-----------+------------+                 |
-|              |                                 |                              |
-|              v                                 v                              |
-|       model providers                   MCP servers/services                  |
-|                                                                              |
-+------------------------------------------------------------------------------+
 ```
 
 ## Basic usage
