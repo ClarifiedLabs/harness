@@ -955,45 +955,12 @@ func buildAgentsListOutput(cfg config.Config) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	agentName, err := resolvedConfigAgentName(cfg, agents)
-	if err != nil {
-		return "", err
-	}
-	rows := make([]ui.NameDescription, 0, len(agents))
-	for _, name := range agentdef.Names(agents) {
-		a := agents[name]
-		label := name
-		if name == agentName {
-			label += " (current)"
-		}
-		parts := []string{"[" + agentDefinitionModelSummary(a) + "]"}
-		if strings.TrimSpace(a.Description) != "" {
-			parts = append(parts, a.Description)
-		}
-		rows = append(rows, ui.NameDescription{
-			Name:        label,
-			Description: strings.Join(parts, " "),
-		})
-	}
 	var b strings.Builder
-	b.WriteString("available agents:\n")
-	ui.WriteNameDescriptionList(&b, rows, ui.NameDescriptionListOptions{Indent: "  "})
-	return b.String(), nil
-}
-
-func agentDefinitionModelSummary(a agentdef.Definition) string {
-	provider := strings.TrimSpace(a.Provider)
-	model := strings.TrimSpace(a.Model)
-	switch {
-	case provider == "" && model == "":
-		return "inherit current"
-	case provider == "":
-		return fmt.Sprintf("inherit provider/%s", model)
-	case model == "":
-		return fmt.Sprintf("%s/inherit current model", provider)
-	default:
-		return fmt.Sprintf("%s/%s", provider, model)
+	for _, name := range agentdef.Names(agents) {
+		b.WriteString(name)
+		b.WriteByte('\n')
 	}
+	return b.String(), nil
 }
 
 func checkModelProxy(ctx context.Context, proxyClient *modelclient.Client) (protocol.Catalog, error) {
@@ -1020,24 +987,9 @@ type modelListRow struct {
 
 func buildModelsListOutput(catalog protocol.Catalog) string {
 	rows := catalogModelListRows(catalog)
-	if len(rows) == 0 {
-		return "available models: none\n"
-	}
-	providerWidth := len("provider")
-	modelWidth := len("model")
-	contextWidth := len("context")
-	priceWidth := len("price/M")
-	for _, row := range rows {
-		providerWidth = max(providerWidth, len(row.Provider))
-		modelWidth = max(modelWidth, len(row.Model))
-		contextWidth = max(contextWidth, len(row.Context))
-		priceWidth = max(priceWidth, len(row.Price))
-	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "available models: %d providers, %d models\n", catalogVisibleProviderCount(catalog), len(rows))
-	fmt.Fprintf(&b, "%-*s  %-*s  %*s  %-*s  %s\n", providerWidth, "provider", modelWidth, "model", contextWidth, "context", priceWidth, "price/M", "name")
 	for _, row := range rows {
-		fmt.Fprintf(&b, "%-*s  %-*s  %*s  %-*s  %s\n", providerWidth, row.Provider, modelWidth, row.Model, contextWidth, row.Context, priceWidth, row.Price, row.Name)
+		fmt.Fprintf(&b, "%s\t%s\n", row.Provider, row.Model)
 	}
 	return b.String()
 }
@@ -1066,22 +1018,6 @@ func catalogModelListRows(catalog protocol.Catalog) []modelListRow {
 		}
 	}
 	return rows
-}
-
-func catalogVisibleProviderCount(catalog protocol.Catalog) int {
-	total := 0
-	for _, provider := range catalog.Providers {
-		if provider.ID == "" {
-			continue
-		}
-		for _, model := range provider.Models {
-			if model.ID != "" {
-				total++
-				break
-			}
-		}
-	}
-	return total
 }
 
 func formatModelContextWindow(contextWindow int) string {
