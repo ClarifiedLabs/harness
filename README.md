@@ -56,8 +56,9 @@ harness -provider <provider> -model <model> -p "summarize README.md"
 when needed, and lets you choose which models are available locally. By default
 the model proxy listens on `127.0.0.1:8765`.
 
-Use `harness --models` to list the providers and models exposed by the
-configured proxy. Use `harness --agents` to list the configured agents.
+Use `harness --models` to list the providers, models, and cataloged reasoning
+effort choices exposed by the configured proxy. Use `harness --agents` to list
+the configured agents.
 
 MCP is optional. After configuring downstream servers for `harness-mcp-proxy`,
 start it separately and enable MCP for `harness`:

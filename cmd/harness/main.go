@@ -1003,21 +1003,22 @@ func catalogModelCount(catalog protocol.Catalog) int {
 type modelListRow struct {
 	Provider string
 	Model    string
+	Efforts  string
 	Context  string
 	Price    string
 	Name     string
 }
 
 func buildModelsListOutput(catalog protocol.Catalog) string {
-	rows := catalogModelListRows(catalog)
+	rows := catalogModelListRows(catalog, modelclient.Registry(catalog))
 	var b strings.Builder
 	for _, row := range rows {
-		fmt.Fprintf(&b, "%s\t%s\n", row.Provider, row.Model)
+		fmt.Fprintf(&b, "%s\t%s\t%s\n", row.Provider, row.Model, row.Efforts)
 	}
 	return b.String()
 }
 
-func catalogModelListRows(catalog protocol.Catalog) []modelListRow {
+func catalogModelListRows(catalog protocol.Catalog, registry *llm.Registry) []modelListRow {
 	var rows []modelListRow
 	for _, provider := range catalog.Providers {
 		if provider.ID == "" {
@@ -1034,6 +1035,7 @@ func catalogModelListRows(catalog protocol.Catalog) []modelListRow {
 			rows = append(rows, modelListRow{
 				Provider: provider.ID,
 				Model:    model.ID,
+				Efforts:  modelListEfforts(registry, provider.ID, model),
 				Context:  formatModelContextWindow(model.ContextWindow),
 				Price:    price,
 				Name:     modelListDisplayName(model),
@@ -1041,6 +1043,33 @@ func catalogModelListRows(catalog protocol.Catalog) []modelListRow {
 		}
 	}
 	return rows
+}
+
+func modelListEfforts(registry *llm.Registry, providerID string, model protocol.Model) string {
+	reasoning := model.Reasoning
+	if registry != nil && providerID != "" {
+		if info, ok := registry.Lookup(providerID + ":" + model.ID); ok && info.Reasoning != nil {
+			reasoning = info.Reasoning
+		}
+	}
+	if reasoning == nil || !reasoning.Supported {
+		return "-"
+	}
+	values, ok := reasoning.EffortValues()
+	if !ok || len(values) == 0 {
+		return "-"
+	}
+	parts := []string{"default"}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			parts = append(parts, value)
+		}
+	}
+	if len(parts) == 1 {
+		return "-"
+	}
+	return strings.Join(parts, "/")
 }
 
 func formatModelContextWindow(contextWindow int) string {

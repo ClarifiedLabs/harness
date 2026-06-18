@@ -837,6 +837,16 @@ func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
 func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 	fp := llmtest.New("fake")
 	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--models"}, fp, "")
+	for i := range proxy.catalog.Providers {
+		if proxy.catalog.Providers[i].ID == "openrouter" {
+			proxy.catalog.Providers[i].Models = append(proxy.catalog.Providers[i].Models, protocol.Model{
+				ID: "z-ai/glm-5.1",
+				Reasoning: &llm.ReasoningInfo{
+					Supported: true,
+				},
+			})
+		}
+	}
 
 	code := run(env)
 	if code != ui.ExitOK {
@@ -853,9 +863,10 @@ func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"anthropic\tclaude-opus-4-8\n",
-		"openai\tgpt-5.5\n",
-		"openrouter\topenai/gpt-5.5\n",
+		"anthropic\tclaude-opus-4-8\t-\n",
+		"openai\tgpt-5.5\t-\n",
+		"openrouter\topenai/gpt-5.5\tdefault/low/medium/high\n",
+		"openrouter\tz-ai/glm-5.1\tdefault/none/minimal/low/medium/high/xhigh\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("models output missing %q:\n%s", want, got)
@@ -882,7 +893,7 @@ func TestRunAgentsAndModelsFlagsPrintBothInOrder(t *testing.T) {
 	}
 	got := out.String()
 	agentsAt := strings.Index(got, "auto\n")
-	modelsAt := strings.Index(got, "anthropic\tclaude-opus-4-8")
+	modelsAt := strings.Index(got, "anthropic\tclaude-opus-4-8\t-")
 	if agentsAt < 0 || modelsAt < 0 || agentsAt > modelsAt {
 		t.Fatalf("expected agents before models:\n%s", got)
 	}
