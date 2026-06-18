@@ -696,6 +696,16 @@ func TestShowConfigFlagParsed(t *testing.T) {
 	}
 }
 
+func TestCheckModelProxyFlagParsed(t *testing.T) {
+	c, err := Load([]string{"--check-model-proxy"}, noEnv, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.CheckModelProxy {
+		t.Fatalf("CheckModelProxy = false, want true")
+	}
+}
+
 func TestLogLevelPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
 	checkPrecedence(t, precedenceCase[string]{
 		file:     `{"log_level":"debug"}`,
@@ -759,7 +769,7 @@ var helpFlags = []string{
 	"-p", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 	"-no-env", "-resume", "-session", "-max-turns", "-default-context-window", "-context-window",
 	"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-responses-stateful", "-image-detail", "-image", "-agent", "-search-tools", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-show-config",
-	"-repl-edit-mode", "-hooks",
+	"-check-model-proxy", "-repl-edit-mode", "-hooks",
 }
 
 // -h and --help are help requests, not usage errors: Load reports ErrHelp so the
@@ -918,6 +928,9 @@ func TestWriteResolvedIncludesDefaults(t *testing.T) {
 	}
 	if got["show_config"] != true {
 		t.Fatalf("show_config = %v, want true\n%s", got["show_config"], b.String())
+	}
+	if got["check_model_proxy"] != false {
+		t.Fatalf("check_model_proxy = %v, want false\n%s", got["check_model_proxy"], b.String())
 	}
 }
 

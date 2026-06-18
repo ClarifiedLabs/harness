@@ -615,6 +615,9 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   sets the provider when one was not already chosen (an explicit `-provider` /
   `HARNESS_PROVIDER` wins). Otherwise an explicit `-provider` selects a proxy provider,
   and model selection must come from `harness` flags, environment, config, or `/model`.
+- `harness --check-model-proxy` reuses the catalog request as a bounded
+  reachability check and exits before session creation, tool setup, hooks, model
+  selection prompts, or `/v1/stream`.
 - `internal/config` resolves only user-facing settings. Provider connection settings
   are resolved by `harness-model-proxy` from its config and environment.
 - The optional config-file `mcp` and `lsp` blocks (proxy/local MCP and LSP servers)
@@ -1422,6 +1425,7 @@ zero for Anthropic sessions.
 -repl-prompt <text>    REPL input prompt format
 -repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
 -show-config     dump resolved config, including defaults, as JSON and exit
+-check-model-proxy  check harness-model-proxy reachability and exit
 -hooks <file>    replace configured hooks with this hook config file
 -config <file>    alternate config path
 ```

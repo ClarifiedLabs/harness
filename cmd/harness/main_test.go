@@ -82,11 +82,12 @@ func fakeProviderEnvWithProxy(t *testing.T, args []string, fp *llmtest.FakeProvi
 }
 
 type fakeModelProxy struct {
-	t        *testing.T
-	fp       *llmtest.FakeProvider
-	server   *httptest.Server
-	catalog  protocol.Catalog
-	requests []protocol.StreamRequest
+	t               *testing.T
+	fp              *llmtest.FakeProvider
+	server          *httptest.Server
+	catalog         protocol.Catalog
+	requests        []protocol.StreamRequest
+	catalogRequests int
 }
 
 func newFakeModelProxy(t *testing.T, fp *llmtest.FakeProvider) *fakeModelProxy {
@@ -143,6 +144,7 @@ func (p *fakeModelProxy) URL() string { return p.server.URL }
 func (p *fakeModelProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
+		p.catalogRequests++
 		w.Header().Set("content-type", "application/json")
 		_ = json.NewEncoder(w).Encode(p.catalog)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/stream":
@@ -652,7 +654,7 @@ func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 	flags := []string{
 		"-p", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 		"-no-env", "-resume", "-session", "-max-turns", "-default-context-window", "-context-window",
-		"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-hooks",
+		"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-check-model-proxy", "-hooks",
 	}
 	for _, arg := range []string{"-h", "--help"} {
 		fp := llmtest.New("fake")
@@ -782,6 +784,67 @@ func TestRunShowConfigIncludesRuntimeDefaults(t *testing.T) {
 		if _, ok := agents[name]; !ok {
 			t.Fatalf("agents missing built-in %q\n%s", name, out.String())
 		}
+	}
+}
+
+func TestRunCheckModelProxyExitsAfterCatalogRequest(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--check-model-proxy"}, fp, "")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if proxy.catalogRequests != 1 {
+		t.Fatalf("catalog requests = %d, want 1", proxy.catalogRequests)
+	}
+	if len(proxy.requests) != 0 {
+		t.Fatalf("check should not stream a model request, got %d", len(proxy.requests))
+	}
+	if strings.Contains(errw.String(), "session:") {
+		t.Fatalf("check should exit before session startup, stderr=%q", errw.String())
+	}
+	if got := out.String(); !strings.Contains(got, "model proxy ok:") || !strings.Contains(got, proxy.URL()) {
+		t.Fatalf("stdout = %q, want model proxy ok line with URL", got)
+	}
+}
+
+func TestRunCheckModelProxyFailureExitsRuntime(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+			http.Error(w, "proxy unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	var out, errw bytes.Buffer
+	env := environment{
+		args:   []string{"--check-model-proxy", "-model-proxy-url", srv.URL},
+		stdin:  strings.NewReader(""),
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(k string) string {
+			if k == "HOME" {
+				return dir
+			}
+			return ""
+		},
+		now:   func() time.Time { return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC) },
+		sigCh: nil,
+	}
+
+	code := run(env)
+	if code != ui.ExitRuntime {
+		t.Fatalf("exit code = %d, want runtime; errw=%q", code, errw.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", out.String())
+	}
+	if got := errw.String(); !strings.Contains(got, "harness: model proxy:") || !strings.Contains(got, "proxy unavailable") {
+		t.Fatalf("stderr = %q, want model proxy failure", got)
 	}
 }
 

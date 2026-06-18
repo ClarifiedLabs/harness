@@ -20,6 +20,10 @@ other than `127.0.0.1:8765`. When `-model-proxy-url` /
 `HARNESS_MODEL_PROXY_URL` is left unset, harness applies the effective default
 `http://127.0.0.1:8765`.
 
+Use `harness --check-model-proxy` to verify that the configured proxy is
+reachable. It sends `GET /v1/models`, prints a short success line on stdout, and
+exits before creating a session or starting the REPL.
+
 ## One-Shot Mode
 
 In one-shot mode (`-p`) the assistant's text goes to stdout while model progress,
@@ -84,6 +88,7 @@ interrupted.
 -repl-prompt <text>    REPL input prompt format (default "[{agent}] > ")
 -repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
 --show-config    dump the resolved config, including defaults, as JSON and exit
+--check-model-proxy    check harness-model-proxy reachability and exit
 -hooks <file>    replace configured hooks with this hook config file
 -config <file>    alternate config path
 -h, --help        print this usage screen and exit 0

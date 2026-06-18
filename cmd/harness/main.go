@@ -41,6 +41,8 @@ import (
 	"harness/prompts"
 )
 
+const modelProxyCheckTimeout = 2 * time.Second
+
 func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT)
@@ -147,6 +149,32 @@ func run(env environment) int {
 		}
 		return ui.ExitOK
 	}
+	proxyURL := cfg.ModelProxyURL
+	if proxyURL == "" {
+		proxyURL = protocol.DefaultURL
+	}
+	proxyClient, err := modelclient.New(proxyURL, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "harness: %v\n", err)
+		return ui.ExitUsage
+	}
+	startupCtx, stopStartup, startupInterrupted := signalCancelContext(env.sigCh)
+	defer stopStartup()
+	if cfg.CheckModelProxy {
+		catalog, err := checkModelProxy(startupCtx, proxyClient)
+		if err != nil {
+			if startupInterrupted() || errors.Is(err, context.Canceled) {
+				return ui.ExitInterrupt
+			}
+			fmt.Fprintf(stderr, "harness: model proxy: %v\n", err)
+			return ui.ExitRuntime
+		}
+		if startupInterrupted() {
+			return ui.ExitInterrupt
+		}
+		fmt.Fprintf(stdout, "model proxy ok: %s (%d providers, %d models)\n", proxyClient.URL(), len(catalog.Providers), catalogModelCount(catalog))
+		return ui.ExitOK
+	}
 	logger, err := logging.NewLogger(stderr, cfg.LogLevel, cfg.Quiet)
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
@@ -202,18 +230,6 @@ func run(env environment) int {
 		fmt.Fprintf(stderr, "harness: unknown agent %q (available: %s)\n", agentName, strings.Join(agentdef.Names(agents), ", "))
 		return ui.ExitUsage
 	}
-
-	proxyURL := cfg.ModelProxyURL
-	if proxyURL == "" {
-		proxyURL = protocol.DefaultURL
-	}
-	proxyClient, err := modelclient.New(proxyURL, nil)
-	if err != nil {
-		fmt.Fprintf(stderr, "harness: %v\n", err)
-		return ui.ExitUsage
-	}
-	startupCtx, stopStartup, startupInterrupted := signalCancelContext(env.sigCh)
-	defer stopStartup()
 
 	catalog, err := proxyClient.Catalog(startupCtx)
 	if err != nil {
@@ -893,6 +909,20 @@ func showConfigDefaults(cfg config.Config) config.Config {
 		cfg.MCP.Proxy = resolveMCPProxy("")
 	}
 	return cfg
+}
+
+func checkModelProxy(ctx context.Context, proxyClient *modelclient.Client) (protocol.Catalog, error) {
+	ctx, cancel := context.WithTimeout(ctx, modelProxyCheckTimeout)
+	defer cancel()
+	return proxyClient.Catalog(ctx)
+}
+
+func catalogModelCount(catalog protocol.Catalog) int {
+	total := 0
+	for _, provider := range catalog.Providers {
+		total += len(provider.Models)
+	}
+	return total
 }
 
 func buildShowConfigOutput(cfg config.Config) (showConfigOutput, error) {
