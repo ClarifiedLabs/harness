@@ -1331,6 +1331,20 @@ preserving embedded newlines and preventing pasted `/commands` from dispatching 
 meta-commands. For non-TTY input the REPL keeps the `bufio.Reader` line path, so long
 scripted prompt lines are not capped by Scanner's token limit.
 
+At an interactive TTY prompt only, a non-pasted line starting with `!` is a local
+shell escape. The command text after `!` runs via the user's shell (`$SHELL -lc`,
+falling back to `bash -lc` then `sh -c`), prints directly to the terminal, and
+returns to the prompt without a model request, prompt-submit hook, transcript
+message, or replay event. `!!` escapes a literal leading `!`; one-shot mode,
+non-TTY/scripted input, bracketed paste, and external-editor prompt content treat
+`!text` as ordinary prompt text.
+
+Tab completion is intentionally small and stdlib-only. It is active only in raw
+prompt-editor buffers that start with `!`: the first word completes executable names
+from `PATH` unless it starts with `/`, `~/`, `./`, `../`, or otherwise contains `/`;
+path words complete filesystem entries from cwd, absolute paths, or the current
+user's home directory while preserving the typed prefix.
+
 `repl_prompt` (also `-repl-prompt` / `HARNESS_REPL_PROMPT`) is a format string
 rendered at every idle prompt boundary, so dynamic values reflect runtime
 changes before each read. The default is `[{agent}] > `. Supported placeholders
@@ -1355,7 +1369,8 @@ configures Escape as the second canonical-mode line delimiter so Esc-Esc can can
 turn; typeahead lines are queued for the next prompt. Bracketed paste is disabled while
 Escape is armed, then restored when the prompt returns. Before launching the editor,
 harness restores the original termios and disables bracketed paste so the editor owns a
-normal TTY; after it exits, the REPL reapplies its prompt settings.
+normal TTY; after it exits, the REPL reapplies its prompt settings. `!command`
+shell escapes use the same terminal handoff.
 
 External editor prompt files use `$VISUAL`, then `$EDITOR`, then `vi`, attached to
 `/dev/tty`. The temp file contains the visible output from the latest recorded turn,
@@ -1366,10 +1381,12 @@ Empty edited content returns to the prompt without running a turn.
 
 ### Meta-commands
 
-Lines starting with `/` are commands; `//` escapes a literal slash. In a normal
-typed prompt, `$skillName` mentions an available skill anywhere in the text; the
-next model turn gets request-only context telling it to read that skill's
-`SKILL.md` before acting. `$$` escapes a literal `$`.
+Lines starting with `/` are commands; `//` escapes a literal slash. At an
+interactive TTY prompt, lines starting with `!` run a local shell command; `!!`
+escapes a literal bang. In a normal typed prompt, `$skillName` mentions an
+available skill anywhere in the text; the next model turn gets request-only
+context telling it to read that skill's `SKILL.md` before acting. `$$` escapes a
+literal `$`.
 
 | command | effect |
 |---|---|
@@ -1407,6 +1424,7 @@ next model turn gets request-only context telling it to read that skill's
 | `/background cancel <id>` | cancel a running background job |
 | `/skills` | list available skills |
 | `/vi on\|off` | enable or disable vi-style prompt editing |
+| `!command` | run a local shell command at an interactive TTY prompt |
 
 Anthropic usage does not currently expose a separate reasoning-token field;
 extended thinking is counted in output tokens, so the reasoning total remains

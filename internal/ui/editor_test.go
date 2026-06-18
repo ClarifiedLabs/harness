@@ -196,6 +196,38 @@ func TestREPLEditedSlashTextIsPromptNotCommand(t *testing.T) {
 	}
 }
 
+func TestREPLEditedBangTextIsPromptNotShellCommand(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("ok")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.RunShellCommand = func(command string) error {
+		t.Fatalf("edited bang text should not run shell command %q", command)
+		return nil
+	}
+	app.OpenEditor = func(path string) error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		delimiter := editorDelimiterFromContent(t, string(data))
+		return os.WriteFile(path, []byte(delimiter+"\n!echo foo\n"), 0o600)
+	}
+
+	in := strings.NewReader("/edit\n/exit\n")
+	if code := Run(in, app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("edited bang text should be sent as a prompt, got %d requests", len(fp.Requests))
+	}
+	if got := app.Agent.Transcript()[0].Content[0].Text; got != "!echo foo" {
+		t.Fatalf("edited bang prompt = %q", got)
+	}
+}
+
 func TestREPLEditedSkillMentionIsPromptNotMention(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{

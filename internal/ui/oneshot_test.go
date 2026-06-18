@@ -100,6 +100,29 @@ func TestOneShotSavesSessionAndRunsOneTurn(t *testing.T) {
 	}
 }
 
+func TestOneShotBangPromptIsLiteral(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("done")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.RunShellCommand = func(command string) error {
+		t.Fatalf("one-shot bang prompt should not run shell command %q", command)
+		return nil
+	}
+
+	if code := OneShot(app, "!echo foo"); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("one-shot should send one model request, got %d", len(fp.Requests))
+	}
+	if got := app.Agent.Transcript()[0].Content[0].Text; got != "!echo foo" {
+		t.Fatalf("prompt = %q, want literal bang prompt", got)
+	}
+}
+
 func TestOneShotSendsPendingImage(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})

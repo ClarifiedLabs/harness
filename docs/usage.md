@@ -206,10 +206,14 @@ inaccessible.
 
 ## REPL Commands
 
-Lines starting with `/` are commands; `//` sends a literal leading slash. In a
-normal typed prompt, `$name` mentions the named skill anywhere in the text; the
-model receives request-only context telling it to read that skill's `SKILL.md`
-before acting. `$$` escapes a literal `$`.
+Lines starting with `/` are commands; `//` sends a literal leading slash. At an
+interactive TTY prompt, lines starting with `!` run a local shell command and
+return to the prompt without contacting the model; `!!` sends a literal leading
+`!`. In one-shot mode, non-TTY/scripted input, pasted text, and edited prompts,
+`!text` is literal prompt text. In a normal typed prompt, `$name` mentions the
+named skill anywhere in the text; the model receives request-only context
+telling it to read that skill's `SKILL.md` before acting. `$$` escapes a
+literal `$`.
 
 In terminals that support bracketed paste, pasted text is submitted as one
 literal prompt, preserving embedded newlines. Pasted `/commands` are not
@@ -219,7 +223,9 @@ piped stdin.
 At an interactive terminal, the prompt supports basic line editing. Shift-Enter
 inserts a newline without submitting. Press Ctrl-G at the prompt, or run
 `/edit [draft]`, to open an external editor for a multi-line prompt. Harness
-uses `$VISUAL`, then `$EDITOR`, then `vi`.
+uses `$VISUAL`, then `$EDITOR`, then `vi`. On `!` command lines, Tab completes
+the first word from `PATH` and completes path words with `/`, `~/`, `./`, `../`,
+and nested relative path prefixes.
 
 | command | effect |
 |---|---|
@@ -257,6 +263,7 @@ uses `$VISUAL`, then `$EDITOR`, then `vi`.
 | `/background cancel <id>` | cancel a running background job |
 | `/skills` | list available skills |
 | `/vi on\|off` | enable or disable vi-style prompt editing |
+| `!command` | run a local shell command at an interactive TTY prompt |
 
 Anthropic usage does not currently expose a separate reasoning-token field;
 extended thinking is counted in output tokens, so the reasoning total remains

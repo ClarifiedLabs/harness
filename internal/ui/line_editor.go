@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -202,6 +204,18 @@ func (e *promptLineEditor) read(prompt string) (replInput, bool, error) {
 			if len(state.buf) == 0 {
 				return replInput{}, false, nil
 			}
+		case '\t':
+			e.clearShiftEnterPending()
+			handled, err := e.completeBangLine(&state)
+			if err != nil {
+				return replInput{}, false, err
+			}
+			if !handled {
+				state.insert('\t')
+			}
+			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
+				return replInput{}, false, err
+			}
 		case '\b', del:
 			e.clearShiftEnterPending()
 			e.tracef("raw backspace")
@@ -272,6 +286,15 @@ func (e *promptLineEditor) read(prompt string) (replInput, bool, error) {
 				state.insert('\n')
 				e.discardBufferedRawEnter()
 			case lineEditInsertText:
+				if text == "\t" {
+					handled, err := e.completeBangLine(&state)
+					if err != nil {
+						return replInput{}, false, err
+					}
+					if handled {
+						break
+					}
+				}
 				state.insertString(text)
 			case lineEditHistoryPrev:
 				history.prev(&state)
@@ -735,6 +758,195 @@ func (e *promptLineEditor) tracef(format string, args ...any) {
 	traceREPLInputf("ui: "+format, args...)
 }
 
+type bangCompletionCandidate struct {
+	value   string
+	display string
+	isDir   bool
+}
+
+func (e *promptLineEditor) completeBangLine(s *lineEditState) (bool, error) {
+	start, token, first, ok := bangCompletionContext(s.buf, s.cursor)
+	if !ok {
+		return false, nil
+	}
+	var candidates []bangCompletionCandidate
+	if first && !bangCompletionUsesPath(token) {
+		candidates = bangCommandCompletions(token)
+	} else {
+		candidates = bangPathCompletions(token)
+	}
+	if len(candidates) == 0 {
+		return true, nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].display < candidates[j].display
+	})
+	if len(candidates) == 1 {
+		value := candidates[0].value
+		if candidates[0].isDir {
+			if !strings.HasSuffix(value, "/") {
+				value += "/"
+			}
+		} else {
+			value += " "
+		}
+		s.replaceRange(start, s.cursor, value)
+		return true, nil
+	}
+	common := longestCommonCompletionPrefix(candidates)
+	if len([]rune(common)) > len([]rune(token)) {
+		s.replaceRange(start, s.cursor, common)
+		return true, nil
+	}
+	if err := s.finish(e.w); err != nil {
+		return true, err
+	}
+	for _, candidate := range candidates {
+		display := candidate.display
+		if candidate.isDir && !strings.HasSuffix(display, "/") {
+			display += "/"
+		}
+		if _, err := fmt.Fprintln(e.w, display); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
+}
+
+func bangCompletionContext(buf []rune, cursor int) (start int, token string, first bool, ok bool) {
+	if len(buf) == 0 || buf[0] != '!' {
+		return 0, "", false, false
+	}
+	if cursor < 1 {
+		return 0, "", false, false
+	}
+	if cursor > len(buf) {
+		cursor = len(buf)
+	}
+	start = 1
+	for i := cursor - 1; i >= 1; i-- {
+		if unicode.IsSpace(buf[i]) {
+			start = i + 1
+			break
+		}
+	}
+	first = true
+	for i := 1; i < start; i++ {
+		if !unicode.IsSpace(buf[i]) {
+			first = false
+			break
+		}
+	}
+	return start, string(buf[start:cursor]), first, true
+}
+
+func bangCompletionUsesPath(token string) bool {
+	return strings.HasPrefix(token, "/") ||
+		strings.HasPrefix(token, "~/") ||
+		strings.HasPrefix(token, "./") ||
+		strings.HasPrefix(token, "../") ||
+		strings.Contains(token, "/")
+}
+
+func bangCommandCompletions(prefix string) []bangCompletionCandidate {
+	pathEnv := os.Getenv("PATH")
+	if pathEnv == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []bangCompletionCandidate
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			dir = "."
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if seen[name] || !strings.HasPrefix(name, prefix) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+				continue
+			}
+			seen[name] = true
+			out = append(out, bangCompletionCandidate{value: name, display: name})
+		}
+	}
+	return out
+}
+
+func bangPathCompletions(token string) []bangCompletionCandidate {
+	dirPart, base := splitCompletionPath(token)
+	searchDir, ok := expandCompletionDir(dirPart)
+	if !ok {
+		return nil
+	}
+	entries, err := os.ReadDir(searchDir)
+	if err != nil {
+		return nil
+	}
+	var out []bangCompletionCandidate
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, base) {
+			continue
+		}
+		value := dirPart + name
+		display := value
+		out = append(out, bangCompletionCandidate{value: value, display: display, isDir: entry.IsDir()})
+	}
+	return out
+}
+
+func splitCompletionPath(token string) (dirPart, base string) {
+	idx := strings.LastIndex(token, "/")
+	if idx < 0 {
+		return "", token
+	}
+	return token[:idx+1], token[idx+1:]
+}
+
+func expandCompletionDir(dirPart string) (string, bool) {
+	if dirPart == "" {
+		return ".", true
+	}
+	if strings.HasPrefix(dirPart, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return "", false
+		}
+		rest := strings.TrimPrefix(dirPart, "~/")
+		if rest == "" {
+			return home, true
+		}
+		return filepath.Join(home, rest), true
+	}
+	return dirPart, true
+}
+
+func longestCommonCompletionPrefix(candidates []bangCompletionCandidate) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	common := []rune(candidates[0].value)
+	for _, candidate := range candidates[1:] {
+		next := []rune(candidate.value)
+		n := 0
+		for n < len(common) && n < len(next) && common[n] == next[n] {
+			n++
+		}
+		common = common[:n]
+		if len(common) == 0 {
+			return ""
+		}
+	}
+	return string(common)
+}
+
 func traceREPLInputf(format string, args ...any) {
 	path := os.Getenv(replInputTraceEnv)
 	if path == "" {
@@ -954,6 +1166,24 @@ func (s *lineEditState) insertString(text string) {
 	for _, r := range text {
 		s.insert(r)
 	}
+}
+
+func (s *lineEditState) replaceRange(start, end int, text string) {
+	if start < 0 {
+		start = 0
+	}
+	if end < start {
+		end = start
+	}
+	if end > len(s.buf) {
+		end = len(s.buf)
+	}
+	next := make([]rune, 0, len(s.buf)-(end-start)+len([]rune(text)))
+	next = append(next, s.buf[:start]...)
+	next = append(next, []rune(text)...)
+	next = append(next, s.buf[end:]...)
+	s.buf = next
+	s.cursor = start + len([]rune(text))
 }
 
 func (s *lineEditState) setText(text string) {

@@ -464,6 +464,187 @@ func TestPromptLineEditorCtrlGReturnsEditInputWithDraft(t *testing.T) {
 	}
 }
 
+func TestPromptLineEditorTabOutsideBangInsertsTab(t *testing.T) {
+	input, ok, err := readEditedInput(t, "a\tb\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "a\tb" {
+		t.Fatalf("input text = %q, want tab preserved", input.text)
+	}
+}
+
+func TestPromptLineEditorBangTabCompletesCommandFromPath(t *testing.T) {
+	dir := t.TempDir()
+	writeExecutableForCompletion(t, filepath.Join(dir, "harness-test-cmd"))
+	t.Setenv("PATH", dir)
+
+	input, ok, err := readEditedInput(t, "!harness-test-c\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "!harness-test-cmd " {
+		t.Fatalf("input text = %q, want completed command", input.text)
+	}
+}
+
+func TestPromptLineEditorBangTabCompletesAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alpha")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	input, ok, err := readEditedInput(t, "!cat "+filepath.Join(dir, "al")+"\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if want := "!cat " + path + " "; input.text != want {
+		t.Fatalf("input text = %q, want %q", input.text, want)
+	}
+}
+
+func TestPromptLineEditorBangTabCompletesHomePath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "alpha"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	input, ok, err := readEditedInput(t, "!cat ~/al\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "!cat ~/alpha " {
+		t.Fatalf("input text = %q, want home-prefixed completion", input.text)
+	}
+}
+
+func TestPromptLineEditorBangTabCompletesDotSlashPath(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "alpha"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	input, ok, err := readEditedInput(t, "!cat ./al\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "!cat ./alpha " {
+		t.Fatalf("input text = %q, want ./ completion", input.text)
+	}
+}
+
+func TestPromptLineEditorBangTabCompletesDotDotPath(t *testing.T) {
+	parent := t.TempDir()
+	child := filepath.Join(parent, "child")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatalf("mkdir child: %v", err)
+	}
+	withWorkingDir(t, child)
+	if err := os.WriteFile(filepath.Join(parent, "alpha"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	input, ok, err := readEditedInput(t, "!cat ../al\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "!cat ../alpha " {
+		t.Fatalf("input text = %q, want ../ completion", input.text)
+	}
+}
+
+func TestPromptLineEditorBangTabCompletesCommonPrefix(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	for _, name := range []string{"alpha", "alpine"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+
+	input, ok, err := readEditedInput(t, "!cat ./al\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "!cat ./alp" {
+		t.Fatalf("input text = %q, want common prefix", input.text)
+	}
+}
+
+func TestPromptLineEditorBangTabListsCandidatesWithoutProgress(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	for _, name := range []string{"alpha", "beta"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("!cat ./\t\r"), &out)
+
+	input, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "!cat ./" {
+		t.Fatalf("input text = %q, want unchanged token", input.text)
+	}
+	got := out.String()
+	if !strings.Contains(got, "./alpha\n") || !strings.Contains(got, "./beta\n") {
+		t.Fatalf("completion list missing candidates: %q", got)
+	}
+}
+
+func writeExecutableForCompletion(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+}
+
+func withWorkingDir(t *testing.T, dir string) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(old); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	})
+}
+
 func TestPromptLineEditorKittyCtrlGReturnsEditInputWithDraft(t *testing.T) {
 	input, ok, err := readEditedInput(t, "\x1b[100;;100u\x1b[114;;114u\x1b[97;;97u\x1b[102;;102u\x1b[116;;116u\x1b[103;5u")
 	if err != nil {

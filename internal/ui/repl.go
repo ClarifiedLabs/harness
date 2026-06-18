@@ -157,6 +157,10 @@ type App struct {
 	// OpenEditor launches an editor for a temp prompt file. nil uses
 	// $VISUAL, then $EDITOR, then vi. Tests inject this to edit deterministically.
 	OpenEditor func(path string) error
+	// RunShellCommand runs a TTY-only !command escape from the prompt. nil uses
+	// the user's shell. Run wraps it with the same terminal handoff hooks used by
+	// the external editor.
+	RunShellCommand func(command string) error
 	// BeforeEditor/AfterEditor temporarily hand the terminal back to the editor.
 	// Run installs these hooks; tests and non-REPL callers can leave them nil.
 	BeforeEditor func()
@@ -203,8 +207,9 @@ const helpText = `commands:
   /background [id] list background jobs, inspect one, or cancel with "cancel <id>"
   /skills          list available skills
   /vi on|off       enable or disable vi-style prompt editing
+  !command         run a local shell command at an interactive prompt
   $skillName       mention a skill to load via SKILL.md
-Ctrl-G opens the editor from the prompt; lines starting with / are commands; // sends a literal leading slash; $$ escapes a literal $`
+Ctrl-G opens the editor from the prompt; lines starting with / are commands; // sends a literal leading slash; !! escapes a literal !; $$ escapes a literal $`
 
 func (app *App) clock() func() time.Time {
 	if app.Now != nil {
@@ -452,6 +457,10 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 		if action.exit {
 			return true, ExitOK
 		}
+		if action.shell {
+			app.runShellEscape(action.shellCommand)
+			return false, ExitOK
+		}
 		if action.run {
 			if action.echoEditedPrompt {
 				app.echoEditedPrompt(prompt, action.prompt)
@@ -608,11 +617,12 @@ func promptLineEditorEnabled(in io.Reader, w io.Writer) bool {
 }
 
 type replInput struct {
-	text      string
-	pasted    bool
-	edit      bool
-	escape    bool
-	interrupt bool
+	text        string
+	pasted      bool
+	edit        bool
+	escape      bool
+	interrupt   bool
+	interactive bool
 }
 
 type replReadResult struct {
@@ -630,6 +640,8 @@ type replAction struct {
 	prompt               string
 	run                  bool
 	exit                 bool
+	shell                bool
+	shellCommand         string
 	echoEditedPrompt     bool
 	resolveSkillMentions bool
 }
@@ -670,6 +682,16 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 	}
 	if input.pasted {
 		return replAction{prompt: line, run: true}
+	}
+	if input.interactive && strings.HasPrefix(line, "!!") {
+		return replAction{prompt: line[1:], run: true, resolveSkillMentions: true} // !! escapes one literal leading !
+	}
+	if input.interactive && strings.HasPrefix(line, "!") {
+		command := strings.TrimSpace(line[1:])
+		if command == "" {
+			return replAction{}
+		}
+		return replAction{shell: true, shellCommand: command}
 	}
 	if strings.HasPrefix(line, "//") {
 		return replAction{prompt: line[1:], run: true, resolveSkillMentions: true} // // escapes one literal leading slash
@@ -752,7 +774,11 @@ func (rr *replReader) setEscapeLineEnd(enabled bool) {
 
 func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
 	if req.promptEditor && rr.editor != nil {
-		return rr.editor.read(req.prompt)
+		input, ok, err := rr.editor.read(req.prompt)
+		if ok {
+			input.interactive = true
+		}
+		return input, ok, err
 	}
 	for {
 		line, terminator, err := readTerminalLine(rr.r, rr.escapeLineEnd.Load())

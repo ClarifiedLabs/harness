@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -514,6 +515,76 @@ func TestREPLLiteralSlashEscape(t *testing.T) {
 	}
 }
 
+func TestREPLInteractiveBangRunsLocalShellOnly(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	var events []string
+	app.BeforeEditor = func() { events = append(events, "before") }
+	app.AfterEditor = func() { events = append(events, "after") }
+	app.RunShellCommand = func(command string) error {
+		events = append(events, "run:"+command)
+		fmt.Fprintln(app.Errw, "foo")
+		return nil
+	}
+
+	if code := run(strings.NewReader("!echo foo\r/exit\r"), app, nil, true); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("bang command should not invoke provider, got %d requests", len(fp.Requests))
+	}
+	if got := strings.Join(events, ","); got != "before,run:echo foo,after" {
+		t.Fatalf("shell handoff events = %q", got)
+	}
+	if !strings.Contains(errw.String(), "foo\n") {
+		t.Fatalf("shell output missing from REPL output: %q", errw.String())
+	}
+}
+
+func TestREPLBangIsLiteralWithoutInteractivePromptEditor(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("ok")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.RunShellCommand = func(command string) error {
+		t.Fatalf("non-interactive bang should not run shell command %q", command)
+		return nil
+	}
+
+	if code := Run(strings.NewReader("!echo foo\n/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	}
+	if got := app.Agent.Transcript()[0].Content[0].Text; got != "!echo foo" {
+		t.Fatalf("prompt = %q, want literal bang prompt", got)
+	}
+}
+
+func TestREPLInteractiveDoubleBangEscapesLiteralBang(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("ok")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.RunShellCommand = func(command string) error {
+		t.Fatalf("escaped bang should not run shell command %q", command)
+		return nil
+	}
+
+	if code := run(strings.NewReader("!!hello\r/exit\r"), app, nil, true); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if got := app.Agent.Transcript()[0].Content[0].Text; got != "!hello" {
+		t.Fatalf("prompt = %q, want !hello", got)
+	}
+}
+
 func TestREPLBracketedPasteSubmittedAsSingleLiteralPrompt(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{
@@ -533,6 +604,28 @@ func TestREPLBracketedPasteSubmittedAsSingleLiteralPrompt(t *testing.T) {
 	sent := app.Agent.Transcript()[0].Content[0].Text
 	if sent != pasted {
 		t.Errorf("pasted prompt = %q, want %q", sent, pasted)
+	}
+}
+
+func TestREPLPastedBangStaysLiteral(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("ok")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.RunShellCommand = func(command string) error {
+		t.Fatalf("pasted bang should not run shell command %q", command)
+		return nil
+	}
+
+	pasted := "!echo foo"
+	in := strings.NewReader(bracketedPasteStart + pasted + bracketedPasteEnd + "/exit\r")
+	if code := run(in, app, nil, true); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if got := app.Agent.Transcript()[0].Content[0].Text; got != pasted {
+		t.Fatalf("prompt = %q, want pasted literal bang prompt", got)
 	}
 }
 
