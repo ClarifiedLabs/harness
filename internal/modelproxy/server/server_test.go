@@ -498,6 +498,9 @@ func TestHandlerLogsStreamErrorDetails(t *testing.T) {
 	if env.Error == nil || env.Error.RetryAfterMS != 250 {
 		t.Fatalf("stream error = %+v, want retry_after_ms 250", env.Error)
 	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatalf("drain response body: %v", err)
+	}
 
 	var record map[string]any
 	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
