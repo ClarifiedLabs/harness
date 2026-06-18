@@ -1002,19 +1002,19 @@ func catalogModelCount(catalog protocol.Catalog) int {
 }
 
 type modelListRow struct {
-	Provider string
-	Model    string
-	Efforts  string
-	Context  string
-	Price    string
-	Name     string
+	Provider  string
+	Model     string
+	Reasoning string
+	Context   string
+	Price     string
+	Name      string
 }
 
 func buildModelsListOutput(catalog protocol.Catalog) string {
 	rows := catalogModelListRows(catalog, modelclient.Registry(catalog))
 	var b strings.Builder
 	for _, row := range rows {
-		fmt.Fprintf(&b, "%s\t%s\t%s\n", row.Provider, row.Model, row.Efforts)
+		fmt.Fprintf(&b, "%s\t%s\t%s\n", row.Provider, row.Model, row.Reasoning)
 	}
 	return b.String()
 }
@@ -1034,19 +1034,19 @@ func catalogModelListRows(catalog protocol.Catalog, registry *llm.Registry) []mo
 				price = "-"
 			}
 			rows = append(rows, modelListRow{
-				Provider: provider.ID,
-				Model:    model.ID,
-				Efforts:  modelListEfforts(registry, provider.ID, model),
-				Context:  formatModelContextWindow(model.ContextWindow),
-				Price:    price,
-				Name:     modelListDisplayName(model),
+				Provider:  provider.ID,
+				Model:     model.ID,
+				Reasoning: modelListReasoning(registry, provider.ID, model),
+				Context:   formatModelContextWindow(model.ContextWindow),
+				Price:     price,
+				Name:      modelListDisplayName(model),
 			})
 		}
 	}
 	return rows
 }
 
-func modelListEfforts(registry *llm.Registry, providerID string, model protocol.Model) string {
+func modelListReasoning(registry *llm.Registry, providerID string, model protocol.Model) string {
 	reasoning := model.Reasoning
 	if registry != nil && providerID != "" {
 		if info, ok := registry.Lookup(providerID + ":" + model.ID); ok && info.Reasoning != nil {
@@ -1056,21 +1056,34 @@ func modelListEfforts(registry *llm.Registry, providerID string, model protocol.
 	if reasoning == nil || !reasoning.Supported {
 		return "-"
 	}
-	values, ok := reasoning.EffortValues()
-	if !ok || len(values) == 0 {
-		return "-"
-	}
-	parts := []string{"default"}
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			parts = append(parts, value)
+	var parts []string
+	if values, ok := reasoning.EffortValues(); ok {
+		choices := []string{"default"}
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				choices = append(choices, value)
+			}
+		}
+		if len(choices) > 1 {
+			parts = append(parts, strings.Join(choices, "/"))
+		} else {
+			parts = append(parts, "effort=provider-defined")
 		}
 	}
-	if len(parts) == 1 {
+	if min, max, ok := reasoning.BudgetTokenRange(); ok {
+		parts = append(parts, "budget_tokens="+budgetRangeLabel(min, max))
+	}
+	if reasoning.SupportsToggle() {
+		parts = append(parts, "toggle")
+	}
+	if len(parts) == 0 && len(reasoning.Options) == 0 {
+		return "provider-defined"
+	}
+	if len(parts) == 0 {
 		return "-"
 	}
-	return strings.Join(parts, "/")
+	return strings.Join(parts, ";")
 }
 
 func formatModelContextWindow(contextWindow int) string {

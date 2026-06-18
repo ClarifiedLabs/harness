@@ -838,11 +838,24 @@ func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 	fp := llmtest.New("fake")
 	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--models"}, fp, "")
 	for i := range proxy.catalog.Providers {
-		if proxy.catalog.Providers[i].ID == "openrouter" {
+		switch proxy.catalog.Providers[i].ID {
+		case "openrouter":
 			proxy.catalog.Providers[i].Models = append(proxy.catalog.Providers[i].Models, protocol.Model{
 				ID: "z-ai/glm-5.1",
 				Reasoning: &llm.ReasoningInfo{
 					Supported: true,
+				},
+			})
+		case "openai":
+			minBudget, maxBudget := 0, 24576
+			proxy.catalog.Providers[i].Models = append(proxy.catalog.Providers[i].Models, protocol.Model{
+				ID: "gemini-2.5-flash",
+				Reasoning: &llm.ReasoningInfo{
+					Supported: true,
+					Options: []llm.ReasoningOption{
+						{Type: "toggle"},
+						{Type: "budget_tokens", Min: &minBudget, Max: &maxBudget},
+					},
 				},
 			})
 		}
@@ -865,8 +878,9 @@ func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 	for _, want := range []string{
 		"anthropic\tclaude-opus-4-8\t-\n",
 		"openai\tgpt-5.5\t-\n",
-		"openrouter\topenai/gpt-5.5\tdefault/low/medium/high\n",
-		"openrouter\tz-ai/glm-5.1\tdefault/none/minimal/low/medium/high/xhigh\n",
+		"openai\tgemini-2.5-flash\tbudget_tokens=0..24576;toggle\n",
+		"openrouter\topenai/gpt-5.5\tdefault/low/medium/high;budget_tokens=provider-defined range;toggle\n",
+		"openrouter\tz-ai/glm-5.1\tdefault/none/minimal/low/medium/high/xhigh;budget_tokens=provider-defined range;toggle\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("models output missing %q:\n%s", want, got)
