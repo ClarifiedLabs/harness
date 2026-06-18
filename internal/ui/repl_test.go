@@ -536,6 +536,108 @@ func TestREPLBracketedPasteSubmittedAsSingleLiteralPrompt(t *testing.T) {
 	}
 }
 
+func TestREPLTypedSkillMentionAddsRequestContext(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Skills = map[string]skills.Skill{
+		"commit": {
+			Name:        "commit",
+			Description: "Create a git commit",
+			Location:    "/skills/commit/SKILL.md",
+		},
+	}
+
+	if code := Run(strings.NewReader("please use $commit\n/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	}
+	req := fp.Requests[0]
+	if got := req.Messages[0].Content[0].Text; got != "please use $commit" {
+		t.Fatalf("user prompt should be preserved, got %q", got)
+	}
+	got := strings.Join(req.RequestContext, "\n\n")
+	if !strings.Contains(got, "[explicit skill mentions]") ||
+		!strings.Contains(got, "path: /skills/commit/SKILL.md") ||
+		!strings.Contains(got, "read the full SKILL.md") {
+		t.Fatalf("request context missing skill instructions:\n%s", got)
+	}
+}
+
+func TestREPLTypedEscapedSkillMentionStillScansLaterMentions(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Skills = map[string]skills.Skill{
+		"commit": {Name: "commit", Description: "Create a git commit", Location: "/skills/commit/SKILL.md"},
+		"review": {Name: "review", Description: "Review code", Location: "/skills/review/SKILL.md"},
+	}
+
+	if code := Run(strings.NewReader("$$commit and use $review\n/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	}
+	req := fp.Requests[0]
+	if got := req.Messages[0].Content[0].Text; got != "$commit and use $review" {
+		t.Fatalf("user prompt should unescape only the escaped dollar, got %q", got)
+	}
+	got := strings.Join(req.RequestContext, "\n\n")
+	if strings.Contains(got, "path: /skills/commit/SKILL.md") {
+		t.Fatalf("escaped skill mention should not add commit context:\n%s", got)
+	}
+	if !strings.Contains(got, "path: /skills/review/SKILL.md") {
+		t.Fatalf("later skill mention should add review context:\n%s", got)
+	}
+}
+
+func TestREPLPastedSkillMentionStaysLiteral(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Skills = map[string]skills.Skill{
+		"commit": {Name: "commit", Description: "Create a git commit", Location: "/skills/commit/SKILL.md"},
+	}
+
+	pasted := "please use $commit"
+	in := strings.NewReader(bracketedPasteStart + pasted + bracketedPasteEnd + "\n/exit\n")
+	if code := Run(in, app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	}
+	req := fp.Requests[0]
+	if got := req.Messages[0].Content[0].Text; got != pasted {
+		t.Fatalf("pasted prompt = %q, want %q", got, pasted)
+	}
+	if got := strings.Join(req.RequestContext, "\n\n"); strings.Contains(got, "[explicit skill mentions]") {
+		t.Fatalf("pasted prompt should not add skill context:\n%s", got)
+	}
+}
+
+func TestREPLStandaloneUnknownSkillSkipsProvider(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Skills = map[string]skills.Skill{
+		"commit": {Name: "commit", Description: "Create a git commit", Location: "/skills/commit/SKILL.md"},
+	}
+
+	if code := Run(strings.NewReader("$missing\n/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("provider requests = %d, want 0", len(fp.Requests))
+	}
+	if !strings.Contains(errw.String(), `unknown skill "missing"`) {
+		t.Fatalf("missing unknown skill notice, errw=%q", errw.String())
+	}
+}
+
 func TestREPLAcceptsPromptLongerThanScannerLimit(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{

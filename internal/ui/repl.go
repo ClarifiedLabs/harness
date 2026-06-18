@@ -203,8 +203,8 @@ const helpText = `commands:
   /background [id] list background jobs, inspect one, or cancel with "cancel <id>"
   /skills          list available skills
   /vi on|off       enable or disable vi-style prompt editing
-  $skillName       invoke a skill (reads SKILL.md and sends as prompt)
-Ctrl-G opens the editor from the prompt; lines starting with / are commands; // sends a literal leading slash`
+  $skillName       mention a skill to load via SKILL.md
+Ctrl-G opens the editor from the prompt; lines starting with / are commands; // sends a literal leading slash; $$ escapes a literal $`
 
 func (app *App) clock() func() time.Time {
 	if app.Now != nil {
@@ -384,8 +384,8 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 		}
 		_ = term.SetBracketedPaste(true)
 	}
-	startTurn := func(prompt string) {
-		run, ok := app.prepareTurn(prompt)
+	startTurn := func(prompt string, resolveSkillMentions bool) {
+		run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: resolveSkillMentions})
 		if !ok {
 			return
 		}
@@ -462,7 +462,7 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 			if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return true, ExitInterrupt
 			}
-			startTurn(action.prompt)
+			startTurn(action.prompt, action.resolveSkillMentions)
 		}
 		return false, ExitOK
 	}
@@ -627,10 +627,11 @@ type replReadRequest struct {
 }
 
 type replAction struct {
-	prompt           string
-	run              bool
-	exit             bool
-	echoEditedPrompt bool
+	prompt               string
+	run                  bool
+	exit                 bool
+	echoEditedPrompt     bool
+	resolveSkillMentions bool
 }
 
 type escapePresses struct {
@@ -671,7 +672,7 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 		return replAction{prompt: line, run: true}
 	}
 	if strings.HasPrefix(line, "//") {
-		return replAction{prompt: line[1:], run: true} // // escapes one literal leading slash
+		return replAction{prompt: line[1:], run: true, resolveSkillMentions: true} // // escapes one literal leading slash
 	}
 	if strings.HasPrefix(line, "/") {
 		cmd, arg := commandFields(line)
@@ -686,18 +687,7 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 		}
 		return replAction{}
 	}
-	if strings.HasPrefix(line, "$$") && app.Skills != nil {
-		return replAction{prompt: line[1:], run: true} // $$ escapes one literal leading $
-	}
-	if strings.HasPrefix(line, "$") && app.Skills != nil {
-		if prompt, handled, ok := app.skillPrompt(line); handled {
-			if ok {
-				return replAction{prompt: prompt, run: true}
-			}
-			return replAction{}
-		}
-	}
-	return replAction{prompt: line, run: true}
+	return replAction{prompt: line, run: true, resolveSkillMentions: true}
 }
 
 func (app *App) echoEditedPrompt(replPrompt, submitted string) {
@@ -870,7 +860,9 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		app.imageCommand(arg)
 	case "/edit":
 		if prompt, ok := app.editPrompt(arg); ok {
-			app.runTurn(prompt)
+			if run, ok := app.prepareTurn(prompt, turnOptions{}); ok {
+				run()
+			}
 		}
 	case "/save":
 		path := app.SessionPath
@@ -1847,42 +1839,27 @@ func (app *App) clear() {
 	fmt.Fprintf(app.Errw, "[cleared; new session %s]\n", app.SessionPath)
 }
 
-func (app *App) skillPrompt(line string) (prompt string, handled bool, ok bool) {
-	words := strings.Fields(line)
-	if len(words) == 0 {
-		return "", false, false
-	}
-	skillName := strings.TrimPrefix(words[0], "$")
-	skill, ok := app.Skills[skillName]
-	if !ok {
-		fmt.Fprintf(app.Errw, "unknown skill %q; type /skills\n", skillName)
-		return "", true, false
-	}
-	body, err := skill.Read()
-	if err != nil {
-		fmt.Fprintf(app.Errw, "[skill %q read failed: %v]\n", skillName, err)
-		return "", true, false
-	}
-	// Build the prompt: skill content + any additional text.
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\n", body)
-	if len(words) > 1 {
-		fmt.Fprintf(&b, "User: %s", strings.Join(words[1:], " "))
-	} else {
-		fmt.Fprintf(&b, "User: invoke skill %q", skillName)
-	}
-	return b.String(), true, true
-}
-
 // runTurn runs one user turn, accumulates usage, and saves the session. A turn
 // error is reported but does not end the REPL (the next prompt may recover).
+type turnOptions struct {
+	resolveSkillMentions bool
+}
+
 func (app *App) runTurn(prompt string) {
-	if run, ok := app.prepareTurn(prompt); ok {
+	if run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: true}); ok {
 		run()
 	}
 }
 
-func (app *App) prepareTurn(prompt string) (func(), bool) {
+func (app *App) prepareTurn(prompt string, opts turnOptions) (func(), bool) {
+	var skillContext []string
+	if opts.resolveSkillMentions {
+		var ok bool
+		prompt, skillContext, ok = app.resolveSkillMentionContext(prompt)
+		if !ok {
+			return nil, false
+		}
+	}
 	promptHook := app.runPromptSubmitHook(context.Background(), prompt, app.Turn+1)
 	if promptHook.Block {
 		reason := promptHook.Reason()
@@ -1915,7 +1892,9 @@ func (app *App) prepareTurn(prompt string) (func(), bool) {
 		}
 
 		sink := newREPLSink(app.Renderer, app, turn)
-		err := app.Agent.RunTurnContentWithContext(ctx, prompt, imageBlocks(images), app.turnHookContext(promptHook.AdditionalContext), turn, sink)
+		turnContext := append([]string(nil), promptHook.AdditionalContext...)
+		turnContext = append(turnContext, skillContext...)
+		err := app.Agent.RunTurnContentWithContext(ctx, prompt, imageBlocks(images), app.turnHookContext(turnContext), turn, sink)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 		}

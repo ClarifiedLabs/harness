@@ -9,6 +9,7 @@ import (
 
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
+	"harness/internal/skills"
 )
 
 func TestParseEditedPromptReturnsOnlyTextAfterDelimiter(t *testing.T) {
@@ -192,6 +193,41 @@ func TestREPLEditedSlashTextIsPromptNotCommand(t *testing.T) {
 	}
 	if got := app.Agent.Transcript()[0].Content[0].Text; got != "/help" {
 		t.Fatalf("edited slash prompt = %q", got)
+	}
+}
+
+func TestREPLEditedSkillMentionIsPromptNotMention(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("ok")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Skills = map[string]skills.Skill{
+		"commit": {Name: "commit", Description: "Create a git commit", Location: "/skills/commit/SKILL.md"},
+	}
+	app.OpenEditor = func(path string) error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		delimiter := editorDelimiterFromContent(t, string(data))
+		return os.WriteFile(path, []byte(delimiter+"\nplease use $commit\n"), 0o600)
+	}
+
+	in := strings.NewReader("/edit\n/exit\n")
+	if code := Run(in, app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("edited prompt should send one request, got %d", len(fp.Requests))
+	}
+	req := fp.Requests[0]
+	if got := req.Messages[0].Content[0].Text; got != "please use $commit" {
+		t.Fatalf("edited prompt = %q", got)
+	}
+	if got := strings.Join(req.RequestContext, "\n\n"); strings.Contains(got, "[explicit skill mentions]") {
+		t.Fatalf("edited prompt should not add skill context:\n%s", got)
 	}
 }
 

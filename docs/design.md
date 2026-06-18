@@ -1366,9 +1366,10 @@ Empty edited content returns to the prompt without running a turn.
 
 ### Meta-commands
 
-Lines starting with `/` are commands; `//` escapes a literal slash. A line starting with
-`$skillName` invokes a skill — it reads that skill's `SKILL.md` and sends the body as the
-prompt; `$$` escapes one literal leading `$`.
+Lines starting with `/` are commands; `//` escapes a literal slash. In a normal
+typed prompt, `$skillName` mentions an available skill anywhere in the text; the
+next model turn gets request-only context telling it to read that skill's
+`SKILL.md` before acting. `$$` escapes a literal `$`.
 
 | command | effect |
 |---|---|

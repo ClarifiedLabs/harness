@@ -26,6 +26,12 @@ func OneShot(app *App, prompt string) int {
 	if app.Created.IsZero() {
 		app.Created = app.clock()()
 	}
+	var skillContext []string
+	var ok bool
+	prompt, skillContext, ok = app.resolveSkillMentionContext(prompt)
+	if !ok {
+		return ExitUsage
+	}
 	promptHook := app.runPromptSubmitHook(context.Background(), prompt, app.Turn+1)
 	if promptHook.Block {
 		reason := promptHook.Reason()
@@ -56,7 +62,9 @@ func OneShot(app *App, prompt string) int {
 
 	app.Renderer.StartTurn()
 	sink := newAccumulatingSink(app.Renderer, app, turn)
-	err := app.Agent.RunTurnContentWithContext(ctx, prompt, imageBlocks(images), app.turnHookContext(promptHook.AdditionalContext), turn, sink)
+	turnContext := append([]string(nil), promptHook.AdditionalContext...)
+	turnContext = append(turnContext, skillContext...)
+	err := app.Agent.RunTurnContentWithContext(ctx, prompt, imageBlocks(images), app.turnHookContext(turnContext), turn, sink)
 	app.stopBackgroundJobs()
 
 	// Save before deciding the exit code so a session is never lost (design §11).

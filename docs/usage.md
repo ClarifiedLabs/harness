@@ -206,9 +206,10 @@ inaccessible.
 
 ## REPL Commands
 
-Lines starting with `/` are commands; `//` sends a literal leading slash. A line
-beginning with `$name` invokes the named skill. `$$` sends a literal leading
-`$`.
+Lines starting with `/` are commands; `//` sends a literal leading slash. In a
+normal typed prompt, `$name` mentions the named skill anywhere in the text; the
+model receives request-only context telling it to read that skill's `SKILL.md`
+before acting. `$$` escapes a literal `$`.
 
 In terminals that support bracketed paste, pasted text is submitted as one
 literal prompt, preserving embedded newlines. Pasted `/commands` are not

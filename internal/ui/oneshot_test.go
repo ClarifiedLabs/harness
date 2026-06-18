@@ -9,6 +9,7 @@ import (
 
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
+	"harness/internal/skills"
 	"harness/internal/todo"
 	"harness/internal/tools"
 )
@@ -118,6 +119,83 @@ func TestOneShotSendsPendingImage(t *testing.T) {
 	}
 	if content[1].Kind != llm.BlockText || content[1].Text != "describe it" {
 		t.Fatalf("second block = %+v", content[1])
+	}
+}
+
+func TestOneShotSkillMentionAddsRequestContext(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Skills = map[string]skills.Skill{
+		"commit": {
+			Name:        "commit",
+			Description: "Create a git commit",
+			Location:    "/skills/commit/SKILL.md",
+		},
+	}
+
+	if code := OneShot(app, "please use $commit"); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	}
+	req := fp.Requests[0]
+	if got := req.Messages[0].Content[0].Text; got != "please use $commit" {
+		t.Fatalf("user prompt should be preserved, got %q", got)
+	}
+	got := strings.Join(req.RequestContext, "\n\n")
+	for _, want := range []string{
+		"[explicit skill mentions]",
+		"- commit: Create a git commit",
+		"path: /skills/commit/SKILL.md",
+		"read the full SKILL.md",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("request context missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestOneShotStandaloneUnknownSkillSkipsProvider(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Skills = map[string]skills.Skill{
+		"commit": {Name: "commit", Description: "Create a git commit", Location: "/skills/commit/SKILL.md"},
+	}
+
+	if code := OneShot(app, "$missing"); code != ExitUsage {
+		t.Fatalf("exit code = %d, want %d", code, ExitUsage)
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("provider requests = %d, want 0", len(fp.Requests))
+	}
+	if !strings.Contains(errw.String(), `unknown skill "missing"`) {
+		t.Fatalf("missing unknown skill notice, errw=%q", errw.String())
+	}
+}
+
+func TestOneShotEscapedSkillMentionSendsLiteralDollar(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Skills = map[string]skills.Skill{
+		"commit": {Name: "commit", Description: "Create a git commit", Location: "/skills/commit/SKILL.md"},
+	}
+
+	if code := OneShot(app, "$$commit"); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	}
+	req := fp.Requests[0]
+	if got := req.Messages[0].Content[0].Text; got != "$commit" {
+		t.Fatalf("escaped prompt = %q, want %q", got, "$commit")
+	}
+	if got := strings.Join(req.RequestContext, "\n\n"); strings.Contains(got, "[explicit skill mentions]") {
+		t.Fatalf("escaped prompt should not add skill context:\n%s", got)
 	}
 }
 
