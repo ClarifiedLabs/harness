@@ -108,7 +108,7 @@ func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (ll
 	older := a.transcript[:boundary]
 	kept := a.transcript[boundary:]
 
-	summary, usage, err := a.summarize(ctx, older)
+	summary, usage, err := a.summarize(ctx, prompts.CompactionSummary(), older)
 	if err != nil {
 		sink.Notice(fmt.Sprintf("[compact failed: %v; keeping full transcript]", err))
 		return llm.Usage{}, err
@@ -165,36 +165,44 @@ func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (ll
 	return usage, nil
 }
 
-// summarize runs one tool-less model call over the older messages and returns
-// the summary text and the call's usage.
-func (a *Agent) summarize(ctx context.Context, older []llm.Message) (string, llm.Usage, error) {
+// GenerateSummary runs one tool-less summarization pass over the full current
+// transcript using the given system instruction, returning the summary text and
+// the call's usage. It backs the plan->implementation handoff (with the handoff
+// brief prompt) and is independent of the compaction trigger/keep-turn logic.
+func (a *Agent) GenerateSummary(ctx context.Context, system string) (string, llm.Usage, error) {
+	return a.summarize(ctx, system, a.transcript)
+}
+
+// summarize runs one tool-less model call over the older messages, with the
+// given system instruction, and returns the summary text and the call's usage.
+func (a *Agent) summarize(ctx context.Context, system string, older []llm.Message) (string, llm.Usage, error) {
 	prepared := prepareSummaryMessages(older, a.summaryToolResultMaxBytes())
 	chunks := splitSummaryChunks(prepared, a.summaryChunkBudget())
 	if len(chunks) <= 1 {
-		return a.summarizeOne(ctx, prepared)
+		return a.summarizeOne(ctx, system, prepared)
 	}
 
 	var total llm.Usage
 	summaries := make([]llm.Message, 0, len(chunks))
 	for i, chunk := range chunks {
-		summary, usage, err := a.summarizeOne(ctx, chunk)
+		summary, usage, err := a.summarizeOne(ctx, system, chunk)
 		if err != nil {
 			return "", llm.Usage{}, err
 		}
 		total = add(total, usage)
 		summaries = append(summaries, textMessageAt(a.now(), llm.RoleUser, fmt.Sprintf("Chunk %d summary:\n%s", i+1, summary)))
 	}
-	final, usage, err := a.summarizeOne(ctx, summaries)
+	final, usage, err := a.summarizeOne(ctx, system, summaries)
 	if err != nil {
 		return "", llm.Usage{}, err
 	}
 	return final, add(total, usage), nil
 }
 
-func (a *Agent) summarizeOne(ctx context.Context, older []llm.Message) (string, llm.Usage, error) {
+func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Message) (string, llm.Usage, error) {
 	req := llm.Request{
 		Model:     a.model,
-		System:    prompts.CompactionSummary(),
+		System:    system,
 		Messages:  older,
 		MaxTokens: a.summaryMaxTokens(),
 		Reasoning: a.reasoning,

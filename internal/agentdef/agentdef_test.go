@@ -206,6 +206,42 @@ func TestValidateReportsInvalidMCPTools(t *testing.T) {
 	}
 }
 
+func TestResolveReasoningOverride(t *testing.T) {
+	m := Resolve(map[string]FileDefinition{
+		"plan": {Reasoning: "high"},
+		"fast": {Model: "cheap", Reasoning: "low"},
+	})
+	if m["plan"].Reasoning != "high" {
+		t.Errorf("plan Reasoning = %q, want high", m["plan"].Reasoning)
+	}
+	if m["fast"].Reasoning != "low" || m["fast"].Model != "cheap" {
+		t.Errorf("fast = reasoning %q model %q", m["fast"].Reasoning, m["fast"].Model)
+	}
+	// An omitted reasoning field inherits (built-in plan has none by default).
+	if Builtins()["plan"].Reasoning != "" {
+		t.Errorf("built-in plan should have no pinned reasoning, got %q", Builtins()["plan"].Reasoning)
+	}
+}
+
+func TestDefaultToolsIncludeRecordPlanNotRequestImplementation(t *testing.T) {
+	def := defaultTools(Options{})
+	if !slices.Contains(def, "record_plan") {
+		t.Errorf("default tools missing record_plan: %v", def)
+	}
+	if slices.Contains(def, "request_implementation") {
+		t.Errorf("default tools should not include request_implementation: %v", def)
+	}
+}
+
+func TestPlanToolsIncludeRecordPlanAndRequestImplementation(t *testing.T) {
+	pt := planTools(Options{})
+	for _, name := range []string{"record_plan", "request_implementation"} {
+		if !slices.Contains(pt, name) {
+			t.Errorf("plan tools missing %q: %v", name, pt)
+		}
+	}
+}
+
 func TestNamesSorted(t *testing.T) {
 	m := Resolve(map[string]FileDefinition{"zz": {}, "aa": {}})
 	if got := Names(m); !slices.Equal(got, []string{"aa", "auto", "independent", "plan", "zz"}) {

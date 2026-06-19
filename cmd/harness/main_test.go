@@ -2920,9 +2920,12 @@ func expectedPlanToolNames() []string {
 	if tools.GitAvailable() {
 		names = append(names, "git_readonly")
 	}
-	return append(names, "write_tmp_file", "update_todos", "delegate", "background_jobs")
+	// The realized tool list follows catalog registration order, where the
+	// main-registered tools (update_todos, delegate, background_jobs, record_plan,
+	// request_implementation) come after the built-in catalog tools.
+	return append(names, "write_tmp_file", "update_todos", "delegate", "background_jobs", "record_plan", "request_implementation")
 }
 
 func expectedDefaultToolNames() []string {
-	return append(tools.DefaultNames(), "update_todos", "delegate", "background_jobs")
+	return append(tools.DefaultNames(), "update_todos", "delegate", "background_jobs", "record_plan")
 }

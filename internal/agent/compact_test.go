@@ -59,6 +59,34 @@ func turnLabel(i int) string {
 	return string(rune('A' + i))
 }
 
+func TestGenerateSummaryUsesGivenSystemPrompt(t *testing.T) {
+	fp := llmtest.New("fake", summaryStep("HANDOFF BRIEF", 100, 20))
+	a := newAgent(fp, tools.Default(), Options{Model: "claude-opus-4-8"})
+	a.SetSystem("plan agent system prompt")
+	a.SetTranscript(makeTurns(3))
+
+	const handoffPrompt = "WRITE A HANDOFF BRIEF FOR A FRESH AGENT"
+	summary, usage, err := a.GenerateSummary(context.Background(), handoffPrompt)
+	if err != nil {
+		t.Fatalf("GenerateSummary: %v", err)
+	}
+	if summary != "HANDOFF BRIEF" {
+		t.Errorf("summary = %q, want canned reply", summary)
+	}
+	if usage.InputTokens != 100 || usage.OutputTokens != 20 {
+		t.Errorf("usage = %+v, want 100/20", usage)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("want 1 model call, got %d", len(fp.Requests))
+	}
+	if fp.Requests[0].System != handoffPrompt {
+		t.Errorf("summary call System = %q, want the handoff prompt (not compaction)", fp.Requests[0].System)
+	}
+	if fp.Requests[0].System == prompts.CompactionSummary() {
+		t.Error("GenerateSummary must not reuse the compaction prompt")
+	}
+}
+
 func TestCompactKeepsLastFourTurns(t *testing.T) {
 	// Ten whole turns; compaction keeps the system prompt plus the last four
 	// verbatim and collapses the older six into one summary message.
@@ -541,7 +569,7 @@ func TestSummarizeUsageSurvivesZeroedDoneFrame(t *testing.T) {
 		Stop: llm.StopEndTurn,
 	})
 	a := newAgent(fp, tools.Default(), Options{})
-	_, usage, err := a.summarize(context.Background(), []llm.Message{
+	_, usage, err := a.summarize(context.Background(), prompts.CompactionSummary(), []llm.Message{
 		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "old"}}},
 	})
 	if err != nil {

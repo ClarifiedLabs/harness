@@ -22,6 +22,7 @@ import (
 	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
+	"harness/internal/plan"
 	"harness/internal/session"
 	"harness/internal/skills"
 	"harness/internal/todo"
@@ -2213,5 +2214,217 @@ func TestREPLRefreshMCPNoChangeKeepsTools(t *testing.T) {
 	}
 	if strings.Contains(errw.String(), "tool list updated") {
 		t.Errorf("no notice expected on no-change, got %q", errw.String())
+	}
+}
+
+func TestAddUsageBucketsPerModel(t *testing.T) {
+	app := &App{Provider: "anthropic", Model: "opus", RegistryModel: "opus"}
+	app.addUsage(agent.TurnUsage{Usage: llm.Usage{InputTokens: 100, OutputTokens: 10}})
+	app.Provider, app.Model, app.RegistryModel = "openai", "gpt", "gpt"
+	app.addUsage(agent.TurnUsage{Usage: llm.Usage{InputTokens: 30, OutputTokens: 5}})
+
+	if len(app.usageByModel) != 2 {
+		t.Fatalf("want 2 model buckets, got %d: %+v", len(app.usageByModel), app.usageByModel)
+	}
+	if app.usageByModel["anthropic/opus"].InputTokens != 100 {
+		t.Errorf("opus bucket = %+v", app.usageByModel["anthropic/opus"])
+	}
+	if app.usageByModel["openai/gpt"].OutputTokens != 5 {
+		t.Errorf("gpt bucket = %+v", app.usageByModel["openai/gpt"])
+	}
+	if app.usage.InputTokens != 130 || app.usage.OutputTokens != 15 {
+		t.Errorf("aggregate = %+v, want 130/15", app.usage)
+	}
+	report := app.usageReport("session")
+	for _, want := range []string{"anthropic/opus", "openai/gpt", "total"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("multi-model report missing %q: %s", want, report)
+		}
+	}
+}
+
+func TestUsageReportSingleModelMatchesLegacyFormat(t *testing.T) {
+	app := &App{Provider: "anthropic", Model: "opus", RegistryModel: "opus"}
+	app.addUsage(agent.TurnUsage{Usage: llm.Usage{InputTokens: 100, CacheReadTokens: 30, OutputTokens: 10, ReasoningTokens: 4, CacheWriteTokens: 20}})
+	got := app.usageReport("session summary")
+	want := "[session summary: 100 input / 30 cached input / 10 output / 4 reasoning / 20 cache write]"
+	if got != want {
+		t.Errorf("single-model report = %q, want %q", got, want)
+	}
+}
+
+func uiUserMsg(s string) llm.Message {
+	return llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: s}}}
+}
+
+func uiAsstMsg(s string) llm.Message {
+	return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: s}}}
+}
+
+func TestHandoffToImplementationReseedsContext(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.SessionPath = filepath.Join(t.TempDir(), "session")
+	app.Plans = plan.NewStore()
+	app.Todos = todo.NewStore()
+	app.Todos.Replace([]todo.Item{{Content: "planning step", Status: "in_progress"}})
+	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it"), uiAsstMsg("here is the design")})
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl system"}, nil
+	}
+
+	app.handoffToImplementation(plan.HandoffRequest{Agent: "auto", PlanPath: "/sess/plans/0001.plan.md", Brief: "tests run with go test"})
+
+	msgs := app.Agent.Transcript()
+	if len(msgs) != 1 {
+		t.Fatalf("want a single seeded message, got %d", len(msgs))
+	}
+	if err := llm.ValidateTranscript(msgs); err != nil {
+		t.Fatalf("seeded transcript invalid: %v", err)
+	}
+	seed := msgs[0].Content[0].Text
+	for _, want := range []string{"Implementation handoff", "/sess/plans/0001.plan.md", "tests run with go test"} {
+		if !strings.Contains(seed, want) {
+			t.Errorf("seed missing %q: %q", want, seed)
+		}
+	}
+	if app.AgentName != "auto" {
+		t.Errorf("agent not switched: %q", app.AgentName)
+	}
+	if len(app.Todos.Snapshot()) != 0 {
+		t.Error("planning todos should be cleared on handoff")
+	}
+	if entries, _ := os.ReadDir(filepath.Join(app.SessionPath, "compactions")); len(entries) == 0 {
+		t.Error("planning transcript not archived under compactions/")
+	}
+}
+
+func TestHandoffToImplementationAbortsWhenModelSwitchFails(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it"), uiAsstMsg("here is the design")})
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl system"}, nil
+	}
+	app.SwitchModel = func(model string, reasoning llm.ReasoningConfig) (ModelSelection, error) {
+		return ModelSelection{}, errors.New("bad model")
+	}
+
+	app.handoffToImplementation(plan.HandoffRequest{
+		Agent:    "auto",
+		Model:    "missing-model",
+		PlanPath: "/sess/plans/0001.plan.md",
+		Brief:    "tests run with go test",
+	})
+
+	msgs := app.Agent.Transcript()
+	if len(msgs) != 2 || msgs[0].Content[0].Text != "design it" || msgs[1].Content[0].Text != "here is the design" {
+		t.Fatalf("failed model switch should keep planning transcript, got %+v", msgs)
+	}
+	if !strings.Contains(errw.String(), "model switch failed") {
+		t.Fatalf("stderr missing model switch failure:\n%s", errw.String())
+	}
+	if _, err := os.Stat(filepath.Join(app.SessionPath, "compactions")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed model switch should not archive or reseed, stat err=%v", err)
+	}
+}
+
+func TestHandoffToImplementationAbortsWhenArchiveFails(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	if err := os.WriteFile(app.SessionPath, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("make bad session path: %v", err)
+	}
+	app.Todos = todo.NewStore()
+	app.Todos.Replace([]todo.Item{{Content: "planning step", Status: "in_progress"}})
+	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it"), uiAsstMsg("here is the design")})
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl system"}, nil
+	}
+
+	app.handoffToImplementation(plan.HandoffRequest{
+		Agent:    "auto",
+		PlanPath: "/sess/plans/0001.plan.md",
+		Brief:    "tests run with go test",
+	})
+
+	msgs := app.Agent.Transcript()
+	if len(msgs) != 2 || msgs[0].Content[0].Text != "design it" || msgs[1].Content[0].Text != "here is the design" {
+		t.Fatalf("archive failure should keep planning transcript, got %+v", msgs)
+	}
+	if len(app.Todos.Snapshot()) != 1 {
+		t.Fatal("archive failure should not clear planning todos")
+	}
+	if !strings.Contains(errw.String(), "archive failed") {
+		t.Fatalf("stderr missing archive failure:\n%s", errw.String())
+	}
+}
+
+func TestHandoffCommandRequiresRecordedPlan(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.Plans = plan.NewStore()
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default()}, nil
+	}
+	called := false
+	app.handoffCommand("", func(string) (string, error) { called = true; return "y", nil })
+	if called {
+		t.Error("should not prompt for approval without a recorded plan")
+	}
+	if !strings.Contains(errw.String(), "no recorded plan") {
+		t.Errorf("expected a no-plan message, got %q", errw.String())
+	}
+}
+
+func TestHandoffCommandCancelledOnNo(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.SessionPath = filepath.Join(t.TempDir(), "session")
+	app.Plans = plan.NewStore()
+	app.Handoff = plan.NewPending()
+	app.Handoff.Request(plan.HandoffRequest{Brief: "ctx", PlanPath: "/p/0001.plan.md"})
+	switched := false
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		switched = true
+		return AgentSelection{Name: name, Tools: tools.Default()}, nil
+	}
+	app.handoffCommand("", func(string) (string, error) { return "n", nil })
+	if switched {
+		t.Error("declining the prompt should not switch agents")
+	}
+	if !strings.Contains(errw.String(), "handoff cancelled") {
+		t.Errorf("expected cancellation message, got %q", errw.String())
+	}
+}
+
+func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.SessionPath = filepath.Join(t.TempDir(), "session")
+	app.HandoffAgent = "auto"
+	app.Plans = plan.NewStore()
+	app.Todos = todo.NewStore()
+	app.Agent.SetTranscript([]llm.Message{uiUserMsg("x")})
+	app.Handoff = plan.NewPending()
+	app.Handoff.Request(plan.HandoffRequest{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+	var target string
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		target = name
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
+	}
+	app.handoffCommand("", func(string) (string, error) { return "y", nil })
+	if target != "auto" {
+		t.Errorf("handoff target = %q, want auto (default)", target)
+	}
+	got := app.Agent.Transcript()
+	if len(got) != 1 || !strings.Contains(got[0].Content[0].Text, "/p/0001.plan.md") {
+		t.Errorf("transcript not reseeded with the plan pointer: %+v", got)
 	}
 }

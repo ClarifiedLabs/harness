@@ -75,6 +75,10 @@ type Config struct {
 	Agent  string                     `json:"agent"`
 	Agents map[string]FileAgentConfig `json:"agents"` // raw "agents" config entries; main converts to agentdef.FileDefinition
 
+	// HandoffAgent is the agent a plan->implementation handoff switches to when
+	// no agent is given on the request. Defaults to "auto".
+	HandoffAgent string `json:"handoff_agent"`
+
 	// One-shot mode (design §10).
 	Prompt    string `json:"one_shot_prompt"`     // -p value
 	PromptSet bool   `json:"one_shot_prompt_set"` // -p was supplied (distinguishes "" from absent)
@@ -195,6 +199,7 @@ type FileAgentConfig struct {
 	Prompt       string   `json:"prompt"`
 	Provider     string   `json:"provider"`
 	Model        string   `json:"model"`
+	Reasoning    string   `json:"reasoning"`
 }
 
 // ImageAttachment is one -image flag value after parsing and detail resolution.
@@ -241,6 +246,7 @@ type fileConfig struct {
 	ReplEditMode              string                     `json:"repl_edit_mode"`
 	Agent                     string                     `json:"agent"`
 	Agents                    map[string]FileAgentConfig `json:"agents"`
+	HandoffAgent              string                     `json:"handoff_agent"`
 	Hooks                     json.RawMessage            `json:"hooks"`
 	HookConfigs               []string                   `json:"hook_configs"`
 
@@ -408,6 +414,8 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		getenv("HARNESS_RESPONSES_STATEFUL"), fc.ResponsesStateful, true)
 	c.Agent = strings.ToLower(strings.TrimSpace(resolveString(set["agent"], *f.agent,
 		getenv("HARNESS_AGENT"), fc.Agent, "")))
+	c.HandoffAgent = strings.ToLower(strings.TrimSpace(resolveString(set["handoff-agent"], *f.handoffAgent,
+		getenv("HARNESS_HANDOFF_AGENT"), fc.HandoffAgent, "auto")))
 	c.Agents = fc.Agents
 
 	c.NoEnv = resolveBool(set["no-env"], *fNoEnv,
@@ -791,6 +799,7 @@ type flags struct {
 	searchTools                    *string
 	images                         *imageFlags
 	agent                          *string
+	handoffAgent                   *string
 	prompt                         *string
 	replPrompt                     *string
 	replEditMode                   *string
@@ -838,6 +847,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.images = &imageVals
 	fs.Var(&imageVals, "image", "attach an image in one-shot mode; repeatable; optionally detail:path")
 	f.agent = fs.String("agent", "", "agent: auto, plan, independent, or a config-defined agent (default auto)")
+	f.handoffAgent = fs.String("handoff-agent", "", "agent a plan->implementation handoff switches to by default (default auto)")
 	f.searchTools = fs.String("search-tools", "auto", "search tools to expose: auto, grep, rg, or both")
 	f.responsesStateful = fs.Bool("responses-stateful", true, "enable OpenAI Responses previous_response_id continuation when supported")
 	f.verbose = fs.Bool("v", false, "show tool result snippets")

@@ -486,6 +486,34 @@ func TestDefaultContextWindowPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
 	})
 }
 
+func TestHandoffAgentPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
+	checkPrecedence(t, precedenceCase[string]{
+		file:     `{"handoff_agent":"filey"}`,
+		env:      map[string]string{"HARNESS_HANDOFF_AGENT": "envy"},
+		baseArgs: []string{"-model", "gpt-5.5"},
+		flagArgs: []string{"-handoff-agent", "Flaggy"},
+		got:      func(c Config) string { return c.HandoffAgent },
+		wantFlag: "flaggy",
+		wantEnv:  "envy",
+		wantFile: "filey",
+	})
+}
+
+func TestHandoffAgentDefaultsToAuto(t *testing.T) {
+	c := loadOK(t, []string{"-model", "gpt-5.5"}, noEnv, "")
+	if c.HandoffAgent != "auto" {
+		t.Errorf("HandoffAgent = %q, want auto by default", c.HandoffAgent)
+	}
+}
+
+func TestAgentReasoningCarriedFromConfig(t *testing.T) {
+	cfg := writeConfig(t, `{"agents":{"fast":{"model":"cheap","reasoning":"low"}}}`)
+	c := loadOK(t, []string{"-model", "gpt-5.5"}, noEnv, cfg)
+	if c.Agents["fast"].Reasoning != "low" {
+		t.Errorf("agent reasoning = %q, want low", c.Agents["fast"].Reasoning)
+	}
+}
+
 func TestReasoningEffortPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
 	checkPrecedence(t, precedenceCase[string]{
 		file:     `{"reasoning_effort":"low"}`,

@@ -33,6 +33,7 @@ import (
 	"harness/internal/mcptools"
 	modelclient "harness/internal/modelproxy/client"
 	"harness/internal/modelproxy/protocol"
+	"harness/internal/plan"
 	"harness/internal/session"
 	"harness/internal/skills"
 	"harness/internal/sysprompt"
@@ -307,6 +308,11 @@ func run(env environment) int {
 		Enabled:      cfg.ReasoningEnabled,
 		BudgetTokens: cfg.ReasoningBudgetTokens,
 	}
+	// A startup agent with a pinned reasoning effort sets the session base effort
+	// (model compatibility is enforced by the validation below).
+	if startupAgent.Reasoning != "" {
+		reasoning.Effort = startupAgent.Reasoning
+	}
 	interactiveSession := !cfg.PromptSet && !env.stdinPiped
 	startProvider, startModel := agentModelInputs(startupAgent, cfg.Provider, cfg.Model)
 	selection, err := resolveCatalogSelection(catalog, startProvider, startModel, cfg.Provider)
@@ -519,6 +525,14 @@ func run(env environment) int {
 	toolCatalog.Register(todo.NewTool(todoStore))
 	toolCatalog.Register(delegate.NewTool(delegateRunner, backgroundManager))
 	toolCatalog.Register(background.NewJobsTool(backgroundManager))
+	// record_plan persists plans under the live session directory (delegateState
+	// tracks it across /clear); request_implementation records a handoff the REPL
+	// approves at the turn boundary. The App persists/reseeds the plan store like
+	// todos. Handoff is interactive-only.
+	planStore := plan.NewStore()
+	handoffPending := plan.NewPending()
+	toolCatalog.Register(plan.NewTool(planStore, func() string { return delegateState.Snapshot().SessionPath }))
+	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, planStore, interactiveSession))
 	// MCP (opt-in): one-shot runs synchronously so the single request can use MCP
 	// tools immediately. Interactive REPL starts remote HTTP discovery in the
 	// background and applies discovered tools at a prompt boundary, so an
@@ -634,7 +648,7 @@ func run(env environment) int {
 			return ui.AgentSelection{}, err
 		}
 		mode := reasoningModeForProvider(catalog, next.Provider)
-		nextReasoning := compatibleReasoningForModel(modelRegistry, next.RegistryModel, mode, reasoning)
+		nextReasoning := compatibleReasoningForModel(modelRegistry, next.RegistryModel, mode, agentBaseReasoning(a, reasoning))
 		if nextReasoning.Summary == "" && cfg.ReasoningSummary == "" {
 			nextReasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, mode, interactiveSession, suppressReasoningOutput)
 		}
@@ -731,6 +745,7 @@ func run(env environment) int {
 
 	created := now()
 	var totals session.UsageTotals
+	var resumedUsageByModel map[string]session.UsageTotals
 	var resumeResponseState *llm.ResponseState
 
 	// Resume restores a prior transcript; flags win over the file's
@@ -746,6 +761,8 @@ func run(env environment) int {
 		}
 		ag.SetTranscript(s.Messages)
 		todoStore.Replace(s.Todos)
+		planStore.Replace(s.Plans)
+		resumedUsageByModel = s.UsageByModel
 		if !s.Created.IsZero() {
 			created = s.Created
 		}
@@ -846,12 +863,15 @@ func run(env environment) int {
 		RefreshAgentSummaries: func() []ui.AgentSummary {
 			return agentSummaries(agents, delegateState.Snapshot().ToolNames)
 		},
-		SwitchAgent: switchAgent,
-		Todos:       todoStore,
-		SessionPath: sessionPath,
-		StateDir:    stateDir(getenv),
-		Created:     created,
-		Now:         now,
+		SwitchAgent:  switchAgent,
+		Todos:        todoStore,
+		Plans:        planStore,
+		Handoff:      handoffPending,
+		HandoffAgent: cfg.HandoffAgent,
+		SessionPath:  sessionPath,
+		StateDir:     stateDir(getenv),
+		Created:      created,
+		Now:          now,
 		OnSessionPathChanged: func(path string) {
 			snap := delegateState.Snapshot()
 			snap.SessionPath = path
@@ -898,6 +918,7 @@ func run(env environment) int {
 		})
 	})
 	app.SetUsage(totals)
+	app.SetUsageByModel(resumedUsageByModel)
 	if hookRunner != nil {
 		source := "startup"
 		if resumed != nil {
@@ -1334,6 +1355,7 @@ func fileAgentDefinitions(agents map[string]config.FileAgentConfig) map[string]a
 			Prompt:       fa.Prompt,
 			Provider:     fa.Provider,
 			Model:        fa.Model,
+			Reasoning:    fa.Reasoning,
 		}
 	}
 	return out
@@ -1349,6 +1371,7 @@ func configAgentsFromDefinitions(agents map[string]agentdef.Definition) map[stri
 			Prompt:       a.Prompt,
 			Provider:     a.Provider,
 			Model:        a.Model,
+			Reasoning:    a.Reasoning,
 		}
 	}
 	return out
@@ -1540,12 +1563,15 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 	providerName := runtime.ProviderName
 	model := runtime.Model
 	system := runtime.System
+	launchReasoning := runtime.Reasoning
 	if target != runtime.Agent {
 		next, err := resolveAgentCatalogSelection(modelCatalog, def, runtime.ProviderName, runtime.Model)
 		if err != nil {
 			return delegate.Launch{}, err
 		}
-		if err := validateReasoningConfig(runtime.Registry, next.RegistryModel, reasoningModeForProvider(modelCatalog, next.Provider), runtime.Reasoning); err != nil {
+		mode := reasoningModeForProvider(modelCatalog, next.Provider)
+		launchReasoning = compatibleReasoningForModel(runtime.Registry, next.RegistryModel, mode, agentBaseReasoning(def, runtime.Reasoning))
+		if err := validateReasoningConfig(runtime.Registry, next.RegistryModel, mode, launchReasoning); err != nil {
 			return delegate.Launch{}, err
 		}
 		providerName = next.Provider
@@ -1565,12 +1591,23 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 		Model:             model,
 		ContextWindow:     runtime.ContextWindow,
 		Registry:          runtime.Registry,
-		Reasoning:         runtime.Reasoning,
+		Reasoning:         launchReasoning,
 		ResponsesStateful: responsesStatefulForProvider(cfg, modelCatalog, providerName),
 		System:            system,
 		Agent:             target,
 		Tools:             reg,
 	}, nil
+}
+
+// agentBaseReasoning returns base with its effort overridden by the agent's
+// pinned reasoning effort when set, so a per-agent "reasoning" field controls
+// that agent's thinking effort. Model compatibility is enforced afterward by
+// compatibleReasoningForModel and validateReasoningConfig.
+func agentBaseReasoning(def agentdef.Definition, base llm.ReasoningConfig) llm.ReasoningConfig {
+	if def.Reasoning != "" {
+		base.Effort = def.Reasoning
+	}
+	return base
 }
 
 func delegateAgentCandidates(agents map[string]agentdef.Definition) []delegate.AgentCandidate {

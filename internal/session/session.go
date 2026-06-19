@@ -21,11 +21,12 @@ import (
 
 	"harness/internal/llm"
 	"harness/internal/markdown"
+	"harness/internal/plan"
 	"harness/internal/todo"
 )
 
-// Version is the on-disk schema version.
-const Version = 1
+// Version is the on-disk schema version. v2 adds plans and per-model usage.
+const Version = 2
 
 const (
 	stateFile = "state.json"
@@ -45,7 +46,12 @@ type Session struct {
 	Messages      []llm.Message      `json:"messages"`
 	ResponseState *llm.ResponseState `json:"response_state,omitempty"`
 	Todos         []todo.Item        `json:"todos,omitempty"`
+	Plans         []plan.Plan        `json:"plans,omitempty"`
 	Usage         UsageTotals        `json:"usage"`
+	// UsageByModel breaks usage and cost down per "provider/model" so a session
+	// that switches models still reports accurate per-model cost. Usage stays as
+	// the session aggregate for back-compat and resume seeding.
+	UsageByModel map[string]UsageTotals `json:"usage_by_model,omitempty"`
 }
 
 // UsageTotals is the cumulative token accounting plus dollar cost for a session.

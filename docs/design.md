@@ -85,6 +85,7 @@ internal/agentdef        agent definitions (allowed tools, MCP exposure, prompt/
 internal/hooks           command-only lifecycle hooks (SessionStart/UserPromptSubmit/Pre+PostToolUse/Pre+PostCompact/Stop)
 internal/skills          skill discovery + `$skillName` prompt expansion
 internal/todo            update_todos store + render (§9.13)
+internal/plan            record_plan store + handoff request holder (§9.17, §9.18, §14)
 internal/auth            provider auth sources (token_command, oauth2, codex_oauth) for the model proxy
 cmd/harness-mcp-proxy  optional MCP proxy daemon + debug client (serve / tools / auth / version)
 internal/mcp             tools-only MCP slice: schema, client, server, stdio + streamable-HTTP transports
@@ -1245,6 +1246,31 @@ fast-fails subsequent calls rather than storming reconnects. A proxy crash
 mid-session surfaces as error tool results; the next call reconnects when the
 backoff allows.
 
+### 9.17 `record_plan` (`internal/plan`)
+
+- Persists an implementation plan as markdown under the live session directory:
+  `<session>/plans/NNNN-<slug>.plan.md`, written temp-then-rename. Input is
+  `{title, plan, steps?, files?, verification?}`; `plan` is the free-form markdown
+  body. Returns the absolute path.
+- The store is one `*plan.Store` per process (like `update_todos`); the list is
+  saved in `state.json` (`Session.Plans`), reseeded on resume, and reset on
+  `/clear`. `internal/plan` is a leaf package so `internal/session` can persist the
+  `Plan` type without importing tools.
+- Available to every default agent (in `defaultTools`), so plans are a first-class
+  artifact even outside plan mode. The session directory is read at call time, so
+  it errors clearly when none exists (one-shot mode).
+
+### 9.18 `request_implementation` (`internal/plan` + `internal/tools`)
+
+- The plan agent's request to hand the recorded plan to an implementation agent.
+  Input is `{brief, agent?, plan_path?, model?}`. It requires a recorded plan
+  (defaults to the most recent); the implementation agent reads the plan as its
+  task spec rather than being handed only the brief.
+- Tools cannot prompt, so it only records a `plan.HandoffRequest` in a shared
+  `*plan.Pending` holder and returns. The REPL prints a one-time notice after the
+  turn and performs the approval + switch via `/handoff` (§10). It errors in
+  one-shot mode (no interactive approval).
+
 ## 10. CLI / REPL (`internal/ui`)
 
 ### Rendering
@@ -1396,7 +1422,7 @@ literal `$`.
 | `/compact` | force compaction now |
 | `/context` | dump the current provider-neutral model context as JSON |
 | `/context <file>` | save the current provider-neutral model context as JSON |
-| `/usage` | cumulative input, cached input, output, reasoning tokens, and cost (also cache-write tokens when present) |
+| `/usage` | cumulative input, cached input, output, reasoning tokens, and cost (also cache-write tokens when present). Usage is bucketed per `provider/model`: with one model it is a single line; after a model change it breaks down per model and always ends with the session-total cost. The live per-turn line shows the active model's cumulative tokens with the session-total cost; a model-changing `/agent`, `/model`, or handoff prints the breakdown before the active counters reset for the new model. |
 | `/tools` | list enabled built-in and MCP tools with descriptions, plus disabled optional tools |
 | `/image` | list images queued for the next prompt |
 | `/image <path>` | attach an image to the next prompt |
@@ -1419,6 +1445,7 @@ literal `$`.
 | `/mode`, `/mode <name>` | alias for `/agent` |
 | `/plan` | alias for `/agent plan` |
 | `/auto` | alias for `/agent auto` |
+| `/handoff [agent]` | hand the recorded plan to an implementation agent after y/N approval: archive the planning transcript, switch agent (and model when requested), and reseed a clean context with the plan pointer plus the brief (§14) |
 | `/background` | list background jobs |
 | `/background <id>` | show a background job's status, result, and transcript path |
 | `/background cancel <id>` | cancel a running background job |
@@ -1550,7 +1577,7 @@ output belongs in hook context.
 
 ```go
 type Session struct {
-    Version       int                `json:"version"` // 1
+    Version       int                `json:"version"` // 2 (adds plans + per-model usage)
     Provider      string             `json:"provider"`
     Model         string             `json:"model"`
     Created       time.Time          `json:"created"`
@@ -1561,7 +1588,9 @@ type Session struct {
     Messages      []llm.Message      `json:"messages"`
     ResponseState *llm.ResponseState `json:"response_state,omitempty"` // Responses stateful continuation anchor
     Todos         []todo.Item        `json:"todos,omitempty"`          // update_todos list, reseeded on resume
-    Usage         UsageTotals        `json:"usage"`
+    Plans         []plan.Plan        `json:"plans,omitempty"`          // record_plan list, reseeded on resume
+    Usage         UsageTotals        `json:"usage"`                    // session aggregate (back-compat + resume seed)
+    UsageByModel  map[string]UsageTotals `json:"usage_by_model,omitempty"` // per "provider/model" cost; resume seeds a single bucket from Usage when absent
 }
 
 type UsageTotals struct {
@@ -1706,21 +1735,23 @@ reviewer, or the wide-open default without separate binaries.
   `/agent` lists inside the REPL; `harness --agents` lists from the CLI. `/mode`
   is a REPL alias only.
 - **Built-ins:** `auto` (all available built-in tools plus discovered MCP tools,
-  including `delegate` and background job tools; its `prompts/agents/auto.txt` is a
-  one-byte file — a single newline — that trims to empty, so it contributes no prompt
-  body), `plan` (inspection tools including the configured
-  search tool(s), optional `git_readonly` when git is installed, read-only MCP
-  tools, `write_tmp_file`, `delegate`, and background job tools, plus a planning
-  prompt from `prompts/agents/plan.txt`), and `independent` (all available
-  built-in tools plus discovered MCP tools, including `delegate` and background
-  job tools, a complete-without-asking prompt from
-  `prompts/agents/independent.txt`).
+  including `record_plan`, `delegate` and background job tools; its
+  `prompts/agents/auto.txt` is a one-byte file — a single newline — that trims to
+  empty, so it contributes no prompt body), `plan` (inspection tools including the
+  configured search tool(s), optional `git_readonly` when git is installed,
+  read-only MCP tools, `write_tmp_file`, `record_plan`, `request_implementation`,
+  `delegate`, and background job tools, plus a planning prompt from
+  `prompts/agents/plan.txt`), and `independent` (all available built-in tools plus
+  discovered MCP tools, including `record_plan`, `delegate` and background job
+  tools, a complete-without-asking prompt from `prompts/agents/independent.txt`).
+  `record_plan` (§9.17) is in every default agent's set; `request_implementation`
+  (§9.18) is plan-only.
 - **Config `agents`** entries **field-level merge** onto a built-in of the same name:
   a non-empty `description`, `allowed_tools`, `mcp_tools`, `prompt`, `provider`,
-  or `model` replaces, and an omitted field inherits. A new name defines a new
-  agent (no `allowed_tools` ⇒ the full default set). Agent prompts accept `@file`
-  and are expanded once at startup (fail-fast); relative config-file references
-  resolve from the config file directory.
+  `model`, or `reasoning` replaces, and an omitted field inherits. A new name
+  defines a new agent (no `allowed_tools` ⇒ the full default set). Agent prompts
+  accept `@file` and are expanded once at startup (fail-fast); relative config-file
+  references resolve from the config file directory.
 - **MCP exposure:** `mcp_tools` is one of `disabled`, `read_only`, or `all` (with
   `read-only`/`readonly` accepted as aliases for `read_only`) and controls automatic
   exposure of discovered MCP tools. An invalid value is a fail-fast validation error
@@ -1735,6 +1766,21 @@ reviewer, or the wide-open default without separate binaries.
   `/agent <name>` prints the provider/model line and warns when the switch changes
   provider or model because prompt cache may start cold and increase token usage or
   cost.
+- **Per-agent reasoning:** an agent's optional `reasoning` field pins its thinking
+  effort. It overrides the session base effort whenever that agent is selected
+  (startup, `/agent`, delegate, or a handoff target) and is then made
+  model-compatible and validated like any effort. This lets a cheap implementation
+  agent pair a smaller `model` with a lower `reasoning`.
+- **Plan → implementation handoff:** the `plan` agent records plans with
+  `record_plan` (§9.17) and requests a handoff with `request_implementation` (§9.18).
+  On `/handoff` (§10) the REPL prompts for approval, archives the planning
+  transcript via `SaveCompaction`, switches to the target agent — default `auto`,
+  overridable by `--handoff-agent`/`HARNESS_HANDOFF_AGENT`/`handoff_agent` or the
+  `/handoff <agent>` argument — optionally swaps the model, then reseeds a clean
+  transcript with a pointer to the recorded plan plus the brief and clears the
+  planning todos. Reusing the same in-session switch (not `delegate`) avoids the
+  `delegate` subset gate, so a read-only `plan` agent can hand off to a
+  write-capable implementation agent. Interactive REPL only.
 - **Tool gating** is the harness's one departure from the no-sandbox stance (§2): the
   agent's tool set is realized by `tools.Registry.Subset`, building a registry that
   holds only the allowed tools. Because the agent advertises (`Specs`) and dispatches

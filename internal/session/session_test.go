@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"harness/internal/llm"
+	"harness/internal/plan"
 	"harness/internal/todo"
 )
 
@@ -88,6 +89,34 @@ func sampleSession() Session {
 			Usage:   llm.Usage{InputTokens: 1200, OutputTokens: 340, CacheReadTokens: 800, CacheWriteTokens: 0},
 			CostUSD: 0.0123,
 		},
+	}
+}
+
+func TestSessionRoundTripsPlansAndUsageByModel(t *testing.T) {
+	s := sampleSession()
+	s.Plans = []plan.Plan{
+		{Title: "First plan", Body: "do the thing", Path: "/sess/plans/0001-first-plan.plan.md"},
+	}
+	s.UsageByModel = map[string]UsageTotals{
+		"anthropic/claude-opus-4-8": {Usage: llm.Usage{InputTokens: 1200, OutputTokens: 340}, CostUSD: 0.0123},
+		"openai/gpt-5.5":            {Usage: llm.Usage{InputTokens: 30}, CostUSD: 0.0007},
+	}
+	dir := filepath.Join(t.TempDir(), "session")
+	if err := s.Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Plans) != 1 || got.Plans[0].Title != "First plan" || got.Plans[0].Path == "" {
+		t.Errorf("plans not round-tripped: %+v", got.Plans)
+	}
+	if len(got.UsageByModel) != 2 {
+		t.Fatalf("usage_by_model not round-tripped: %+v", got.UsageByModel)
+	}
+	if got.UsageByModel["openai/gpt-5.5"].CostUSD != 0.0007 {
+		t.Errorf("per-model cost lost: %+v", got.UsageByModel["openai/gpt-5.5"])
 	}
 }
 

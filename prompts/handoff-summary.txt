@@ -1,0 +1,6 @@
+You are writing a handoff brief for a different engineer who will implement a plan with NONE of this conversation's context. The task itself lives in the recorded plan file; the implementer will read it. Do NOT restate the plan. Write only what is not in the plan and what saves the implementer from re-deriving it, from their perspective ("what would I need to know picking this up cold?"):
+- How the plan was produced and the rationale behind key decisions, including alternatives that were considered and rejected and why.
+- Environment and setup facts that affect execution: the exact build, test, lint, and run commands; where relevant code lives; tooling versions or quirks; and any gotchas already discovered.
+- Constraints and a do-not list: conventions to follow, files or approaches to avoid.
+- Verification specifics: how to confirm the work is correct beyond what the plan states.
+State facts directly and concretely; do not say "as discussed above". Do not invent details that were not established. Be specific and concise.

@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,12 +22,14 @@ import (
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
+	"harness/internal/plan"
 	"harness/internal/replprompt"
 	"harness/internal/session"
 	"harness/internal/skills"
 	"harness/internal/term"
 	"harness/internal/todo"
 	"harness/internal/tools"
+	"harness/prompts"
 )
 
 const (
@@ -122,6 +126,16 @@ type App struct {
 	// persisted in state.json and reset on /clear. nil disables persistence.
 	Todos *todo.Store
 
+	// Plans holds the recorded plans (the record_plan tool's store), persisted
+	// in state.json and reset on /clear. nil disables persistence.
+	Plans *plan.Store
+	// Handoff carries a pending plan->implementation handoff requested by the
+	// request_implementation tool, consumed at the turn boundary. nil disables.
+	Handoff *plan.Pending
+	// HandoffAgent is the default agent a handoff switches to when the request
+	// names none. Empty falls back to the built-in default agent.
+	HandoffAgent string
+
 	SessionPath          string    // current save path; /clear rotates it
 	StateDir             string    // for rotating to a fresh auto-save path on /clear
 	Created              time.Time // session creation time (preserved across saves)
@@ -182,7 +196,8 @@ type App struct {
 	// non-positive value disables forced wrapping.
 	SummaryWidth func() int
 
-	usage session.UsageTotals // cumulative across the session
+	usage        session.UsageTotals            // cumulative aggregate across the session
+	usageByModel map[string]session.UsageTotals // per "provider/model" cumulative, for accurate per-model cost
 }
 
 // helpText lists the meta-commands (design §10).
@@ -204,6 +219,7 @@ const helpText = `commands:
   /mode [name]     alias for /agent
   /plan            alias for /agent plan
   /auto            alias for /agent auto
+  /handoff [agent] hand off the recorded plan to an implementation agent
   /background [id] list background jobs, inspect one, or cancel with "cancel <id>"
   /skills          list available skills
   /vi on|off       enable or disable vi-style prompt editing
@@ -346,6 +362,7 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 		turnDone        <-chan struct{}
 		restoreEsc      func() error
 		escPresses      escapePresses
+		handoffNoticed  bool
 	)
 
 	requestRead := func(req replReadRequest) {
@@ -492,6 +509,7 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 				activeReadPause = false
 				turnDone = nil
 				escPresses.reset()
+				handoffNoticed = app.noticeHandoffRequest(handoffNoticed)
 				if exitAfterTurn {
 					return finish(ExitInterrupt)
 				}
@@ -926,6 +944,8 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 			arg = "auto"
 		}
 		app.switchAgent(arg)
+	case "/handoff":
+		app.handoffCommand(arg, readCommandLine)
 	case "/background":
 		app.backgroundCommand(arg)
 	case "/skills":
@@ -1116,6 +1136,7 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 		fmt.Fprintln(app.Errw, "[model switch unavailable]")
 		return false
 	}
+	oldProvider, oldModel := app.Provider, app.Model
 	selection, err := app.SwitchModel(model, reasoning)
 	if err != nil {
 		fmt.Fprintf(app.Errw, "[model switch failed: %v]\n", err)
@@ -1151,6 +1172,9 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	app.BaseURL = selection.BaseURL
 	app.Reasoning = selection.Reasoning
 	fmt.Fprintf(app.Errw, "[model switched: provider=%s model=%s proxy-url=%s reasoning=%s]\n", app.Provider, app.Model, app.BaseURL, app.reasoningLabel())
+	if oldProvider != app.Provider || oldModel != app.Model {
+		app.onModelChanged()
+	}
 	return true
 }
 
@@ -1768,15 +1792,22 @@ func (app *App) agentModelSummary(a AgentSummary) string {
 }
 
 func (app *App) switchAgent(name string) {
+	if err := app.applyAgentSwitch(name); err != nil {
+		fmt.Fprintf(app.Errw, "[agent switch failed: %v]\n", err)
+	}
+}
+
+// applyAgentSwitch performs the agent switch and reports an error instead of
+// printing it, so callers that must abort on failure (the handoff) can. The
+// /agent command wraps it and prints failures.
+func (app *App) applyAgentSwitch(name string) error {
 	if app.SwitchAgent == nil {
-		fmt.Fprintln(app.Errw, "[agent switch unavailable]")
-		return
+		return fmt.Errorf("agent switch unavailable")
 	}
 	oldProvider, oldModel := app.Provider, app.Model
 	selection, err := app.SwitchAgent(name)
 	if err != nil {
-		fmt.Fprintf(app.Errw, "[agent switch failed: %v]\n", err)
-		return
+		return err
 	}
 	app.Agent.SetTools(selection.Tools)
 	app.Agent.SetSystem(selection.System)
@@ -1815,8 +1846,127 @@ func (app *App) switchAgent(name string) {
 	fmt.Fprintf(app.Errw, "[agent switched: %s]\n", selection.Name)
 	fmt.Fprintln(app.Errw, ProviderLine(app.Provider, app.Model, app.currentRegistryModel(), app.Reasoning, app.Registry))
 	if oldProvider != app.Provider || oldModel != app.Model {
+		app.onModelChanged()
 		fmt.Fprintln(app.Errw, "[warning: provider/model changed; the new model may start without prompt cache, increasing token usage or cost]")
 	}
+	return nil
+}
+
+// noticeHandoffRequest prints a one-time hint when the request_implementation
+// tool has recorded a pending handoff, so the user knows to run /handoff. It
+// returns the updated "already noticed" flag: true once announced, false when no
+// request is pending so a later request re-announces.
+func (app *App) noticeHandoffRequest(alreadyNoticed bool) bool {
+	if app.Handoff == nil {
+		return false
+	}
+	req, ok := app.Handoff.Peek()
+	if !ok {
+		return false
+	}
+	if !alreadyNoticed {
+		fmt.Fprintf(app.Errw, "[implementation handoff requested for %s — run /handoff to review and approve]\n", req.PlanPath)
+	}
+	return true
+}
+
+// handoffCommand handles /handoff [agent]: hand off to an implementation agent
+// to carry out the most recently recorded plan, after interactive approval. It
+// consumes any request the request_implementation tool recorded, fills in the
+// target and brief, and switches with a clean, plan-seeded context.
+func (app *App) handoffCommand(arg string, readLine func(string) (string, error)) {
+	if app.SwitchAgent == nil {
+		fmt.Fprintln(app.Errw, "[handoff unavailable]")
+		return
+	}
+	var req plan.HandoffRequest
+	if app.Handoff != nil {
+		if pending, ok := app.Handoff.Take(); ok {
+			req = pending
+		}
+	}
+	if arg = strings.TrimSpace(arg); arg != "" {
+		req.Agent = arg
+	}
+	if req.PlanPath == "" && app.Plans != nil {
+		if latest, ok := app.Plans.Latest(); ok {
+			req.PlanPath = latest.Path
+		}
+	}
+	if req.PlanPath == "" {
+		fmt.Fprintln(app.Errw, "[handoff: no recorded plan; record one with record_plan first]")
+		return
+	}
+	if strings.TrimSpace(req.Brief) == "" {
+		brief, usage, err := app.Agent.GenerateSummary(context.Background(), prompts.HandoffSummary())
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[handoff: could not generate brief: %v]\n", err)
+			return
+		}
+		app.addUsage(agent.TurnUsage{Usage: usage})
+		req.Brief = brief
+	}
+	target := req.Agent
+	if target == "" {
+		target = app.HandoffAgent
+	}
+	if target == "" {
+		target = "auto"
+	}
+	req.Agent = target
+
+	input, err := readLine(fmt.Sprintf("Hand off to %q to implement %s? (y/N): ", target, req.PlanPath))
+	if err != nil {
+		fmt.Fprintf(app.Errw, "[handoff cancelled: %v]\n", err)
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "y", "yes":
+		app.handoffToImplementation(req)
+	default:
+		fmt.Fprintln(app.Errw, "[handoff cancelled]")
+	}
+}
+
+// handoffToImplementation switches the session to the implementation agent with
+// a clean context: it switches agent (and model when requested), archives the
+// planning transcript (recoverable), then reseeds the transcript with a pointer
+// to the recorded plan plus the brief. The implementation agent reads the plan
+// as its task spec. The switch is attempted before any destructive step so a
+// failed switch leaves the session — and the recorded plan — untouched.
+func (app *App) handoffToImplementation(req plan.HandoffRequest) {
+	if err := app.applyAgentSwitch(req.Agent); err != nil {
+		fmt.Fprintf(app.Errw, "[handoff failed: %v]\n", err)
+		return
+	}
+	if req.Model != "" {
+		if !app.switchModel(req.Model, app.Reasoning) {
+			return
+		}
+	}
+	if app.SessionPath != "" {
+		if _, err := session.SaveCompaction(app.SessionPath, session.Compaction{
+			Time:     app.clock()(),
+			Summary:  req.Brief,
+			Messages: app.Agent.Transcript(),
+		}); err != nil {
+			fmt.Fprintf(app.Errw, "[handoff: archive failed: %v]\n", err)
+			return
+		}
+	}
+	seed := fmt.Sprintf("=== Implementation handoff ===\nYour task is specified in the recorded plan — read it now:\n%s\n\nContext from planning (how it was produced and this environment):\n%s",
+		req.PlanPath, req.Brief)
+	app.Agent.SetTranscript([]llm.Message{{
+		Role:    llm.RoleUser,
+		Time:    app.clock()(),
+		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: seed}},
+	}})
+	app.Agent.SetResponseState(nil)
+	if app.Todos != nil {
+		app.Todos.Replace(nil) // the implementation agent builds its own task list
+	}
+	app.saveOrWarn(app.SessionPath)
+	fmt.Fprintf(app.Errw, "[handed off to %s; implementing from a clean context seeded by %s]\n", req.Agent, req.PlanPath)
 }
 
 // refreshMCP applies any pending proxy tool-list change at the idle-prompt
@@ -1851,7 +2001,11 @@ func (app *App) clear() {
 	if app.Todos != nil {
 		app.Todos.Replace(nil)
 	}
+	if app.Plans != nil {
+		app.Plans.Replace(nil)
+	}
 	app.SetUsage(session.UsageTotals{})
+	app.usageByModel = nil
 	app.Created = app.clock()()
 	app.Turn = 0
 	app.SessionPath = session.DefaultPath(app.StateDir, app.Created)
@@ -1952,24 +2106,82 @@ func (app *App) SetUsage(u session.UsageTotals) {
 	}
 }
 
-// addUsage folds one turn's usage into the cumulative session totals.
+// SetUsageByModel seeds the per-model usage buckets on resume. When byModel is
+// empty but the aggregate is non-zero (an older session predating per-model
+// accounting), it seeds a single bucket under the current model so resume does
+// not silently drop prior cost.
+func (app *App) SetUsageByModel(byModel map[string]session.UsageTotals) {
+	if len(byModel) == 0 {
+		if app.usage.InputTokens != 0 || app.usage.OutputTokens != 0 || app.usage.CostUSD != 0 {
+			app.usageByModel = map[string]session.UsageTotals{app.usageKey(): app.usage}
+		}
+		return
+	}
+	app.usageByModel = make(map[string]session.UsageTotals, len(byModel))
+	maps.Copy(app.usageByModel, byModel)
+	if app.Renderer != nil {
+		b := app.usageByModel[app.usageKey()]
+		app.Renderer.SetCumulativeUsage(b.InputTokens, b.OutputTokens, app.usage.CostUSD)
+	}
+}
+
+// usageKey is the "provider/model" key for the active model's usage bucket.
+func (app *App) usageKey() string {
+	model := app.RegistryModel
+	if model == "" {
+		model = app.Model
+	}
+	return app.Provider + "/" + model
+}
+
+// addUsage folds one turn's usage into the session aggregate and the active
+// model's bucket, then refreshes the live cumulative readout to show the active
+// model's tokens with the session-total cost.
 func (app *App) addUsage(u agent.TurnUsage) {
-	app.usage.InputTokens += u.Usage.InputTokens
-	app.usage.OutputTokens += u.Usage.OutputTokens
-	app.usage.CacheReadTokens += u.Usage.CacheReadTokens
-	app.usage.CacheWriteTokens += u.Usage.CacheWriteTokens
-	app.usage.ReasoningTokens += u.Usage.ReasoningTokens
+	var cost float64
 	if app.Registry != nil {
 		model := app.RegistryModel
 		if model == "" {
 			model = app.Model
 		}
 		if usd, known := app.Registry.Cost(model, u.Usage); known {
-			app.usage.CostUSD += usd
+			cost = usd
 		}
 	}
+	addTotals(&app.usage, u.Usage, cost)
+	if app.usageByModel == nil {
+		app.usageByModel = map[string]session.UsageTotals{}
+	}
+	key := app.usageKey()
+	bucket := app.usageByModel[key]
+	addTotals(&bucket, u.Usage, cost)
+	app.usageByModel[key] = bucket
 	if app.Renderer != nil {
-		app.Renderer.SetCumulativeUsage(app.usage.InputTokens, app.usage.OutputTokens, app.usage.CostUSD)
+		app.Renderer.SetCumulativeUsage(bucket.InputTokens, bucket.OutputTokens, app.usage.CostUSD)
+	}
+}
+
+// addTotals accumulates one turn's tokens and cost into dst.
+func addTotals(dst *session.UsageTotals, u llm.Usage, cost float64) {
+	dst.InputTokens += u.InputTokens
+	dst.OutputTokens += u.OutputTokens
+	dst.CacheReadTokens += u.CacheReadTokens
+	dst.CacheWriteTokens += u.CacheWriteTokens
+	dst.ReasoningTokens += u.ReasoningTokens
+	dst.CostUSD += cost
+}
+
+// onModelChanged reports the per-model usage breakdown so the prior model's cost
+// is visible, then resets the live cumulative readout to the new model's bucket
+// while keeping the session-total cost. The caller has already updated
+// app.Provider/Model/RegistryModel to the new model.
+func (app *App) onModelChanged() {
+	if app.usage.InputTokens != 0 || app.usage.OutputTokens != 0 {
+		fmt.Fprintln(app.Errw, app.usageReport("session summary"))
+	}
+	if app.Renderer != nil {
+		b := app.usageByModel[app.usageKey()]
+		app.Renderer.SetCumulativeUsage(b.InputTokens, b.OutputTokens, app.usage.CostUSD)
 	}
 }
 
@@ -2002,9 +2214,20 @@ func (app *App) save(path string) error {
 		Messages:      app.Agent.Transcript(),
 		ResponseState: app.Agent.ResponseState(),
 		Todos:         app.todoSnapshot(),
+		Plans:         app.planSnapshot(),
 		Usage:         app.usage,
+		UsageByModel:  app.usageByModel,
 	}
 	return s.Save(path)
+}
+
+// planSnapshot returns the recorded plans for persistence, or nil when the plan
+// store is not wired (one-shot mode and tests leave it nil).
+func (app *App) planSnapshot() []plan.Plan {
+	if app.Plans == nil {
+		return nil
+	}
+	return app.Plans.Snapshot()
 }
 
 // todoSnapshot returns the current todo list for persistence, or nil when the
@@ -2215,30 +2438,42 @@ func (app *App) recordEvent(ev session.Event) {
 
 // usageSummary renders the cumulative session usage for /usage (design §10).
 func (app *App) usageSummary() string {
-	u := app.usage
+	return app.usageReport("session")
+}
+
+// usageReport renders cumulative session usage under the given label. With at
+// most one model it is the single-line legacy format; with several it breaks
+// down per "provider/model" and always ends with the session-total cost.
+func (app *App) usageReport(label string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "[session: %d input / %d cached input / %d output / %d reasoning",
-		u.InputTokens, u.CacheReadTokens, u.OutputTokens, u.ReasoningTokens)
-	if u.CacheWriteTokens > 0 {
-		fmt.Fprintf(&b, " / %d cache write", u.CacheWriteTokens)
+	if len(app.usageByModel) <= 1 {
+		writeUsageTotals(&b, "["+label+": ", app.usage, "]")
+		return b.String()
 	}
-	if u.CostUSD > 0 {
-		fmt.Fprintf(&b, " · $%.4f", u.CostUSD)
+	fmt.Fprintf(&b, "[%s by model:", label)
+	for _, key := range slices.Sorted(maps.Keys(app.usageByModel)) {
+		writeUsageTotals(&b, "\n  "+key+": ", app.usageByModel[key], "")
 	}
-	b.WriteString("]")
+	fmt.Fprintf(&b, "\n  total · $%.4f]", app.usage.CostUSD)
 	return b.String()
 }
 
+// writeUsageTotals writes one usage line: prefix, the token counts (cache write
+// and cost shown only when non-zero), then suffix.
+func writeUsageTotals(b *strings.Builder, prefix string, u session.UsageTotals, suffix string) {
+	fmt.Fprintf(b, "%s%d input / %d cached input / %d output / %d reasoning",
+		prefix, u.InputTokens, u.CacheReadTokens, u.OutputTokens, u.ReasoningTokens)
+	if u.CacheWriteTokens > 0 {
+		fmt.Fprintf(b, " / %d cache write", u.CacheWriteTokens)
+	}
+	if u.CostUSD > 0 {
+		fmt.Fprintf(b, " · $%.4f", u.CostUSD)
+	}
+	b.WriteString(suffix)
+}
+
 func (app *App) printExitUsageSummary() {
-	fmt.Fprintf(app.Errw, "[session summary: %d input / %d cached input / %d output / %d reasoning",
-		app.usage.InputTokens, app.usage.CacheReadTokens, app.usage.OutputTokens, app.usage.ReasoningTokens)
-	if app.usage.CacheWriteTokens > 0 {
-		fmt.Fprintf(app.Errw, " / %d cache write", app.usage.CacheWriteTokens)
-	}
-	if app.usage.CostUSD > 0 {
-		fmt.Fprintf(app.Errw, " · $%.4f", app.usage.CostUSD)
-	}
-	fmt.Fprintln(app.Errw, "]")
+	fmt.Fprintln(app.Errw, app.usageReport("session summary"))
 	if app.SessionPath != "" {
 		fmt.Fprintf(app.Errw, "resume with: harness -resume %s\n", app.SessionPath)
 	}

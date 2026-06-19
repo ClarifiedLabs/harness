@@ -32,6 +32,10 @@ type Definition struct {
 	Prompt       string
 	Provider     string
 	Model        string
+	// Reasoning pins this agent's thinking effort (provider/model dependent,
+	// e.g. low/medium/high). Empty inherits the session default. The value is
+	// validated against the live model at switch time, not here.
+	Reasoning string
 }
 
 // MCPToolsMode controls which discovered MCP tools are exposed to an agent.
@@ -55,6 +59,7 @@ type FileDefinition struct {
 	Prompt       string   `json:"prompt"`
 	Provider     string   `json:"provider"`
 	Model        string   `json:"model"`
+	Reasoning    string   `json:"reasoning"`
 }
 
 type Options struct {
@@ -100,7 +105,7 @@ func planTools(opts Options) []string {
 	if tools.GitAvailable() {
 		names = append(names, "git_readonly")
 	}
-	return append(names, "write_tmp_file", "update_todos", "delegate", "background_jobs")
+	return append(names, "write_tmp_file", "record_plan", "request_implementation", "update_todos", "delegate", "background_jobs")
 }
 
 func searchToolNames(mode string) []string {
@@ -115,7 +120,7 @@ func searchToolNames(mode string) []string {
 }
 
 func defaultTools(opts Options) []string {
-	return append(tools.DefaultNamesWithOptions(tools.Options{SearchTools: opts.SearchTools}), "update_todos", "delegate", "background_jobs")
+	return append(tools.DefaultNamesWithOptions(tools.Options{SearchTools: opts.SearchTools}), "record_plan", "update_todos", "delegate", "background_jobs")
 }
 
 // DefaultTools returns the default allowed-tool set (the built-in tool names
@@ -167,6 +172,9 @@ func ResolveWithOptions(file map[string]FileDefinition, opts Options) map[string
 		}
 		if fm.Model != "" {
 			a.Model = fm.Model
+		}
+		if fm.Reasoning != "" {
+			a.Reasoning = fm.Reasoning
 		}
 		agents[name] = a
 	}

@@ -119,6 +119,27 @@ harness session replay ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
 ```
 
+## Plan and implementation handoff
+
+The `plan` agent investigates and designs without modifying the project. It can
+`record_plan` to persist a plan as markdown under the session (a durable,
+human-diffable artifact), and `request_implementation` to ask to hand the plan
+off to an implementation agent. The handoff is interactive and user-approved:
+
+```text
+/handoff [agent]   review the recorded plan and, on approval, switch this session
+                   to an implementation agent with a clean context seeded by the
+                   plan plus a short handoff brief (provenance + environment facts)
+```
+
+`record_plan` is available to every default agent; the handoff is plan-only and
+unavailable in one-shot mode. The target defaults to `auto`; override it with
+`--handoff-agent <name>`, `HARNESS_HANDOFF_AGENT`, the `handoff_agent` config
+key, or the `/handoff <agent>` argument. Because the implementation starts from a
+clean context, the target may use a different, cheaper model. Any agent can pin
+its own thinking effort with a per-agent `reasoning` field in config, so a
+fast/cheap implementation agent can pair a smaller model with lower effort.
+
 ## Build from source
 
 ```sh

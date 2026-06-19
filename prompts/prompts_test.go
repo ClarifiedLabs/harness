@@ -15,6 +15,20 @@ func TestBuiltInPromptsLoad(t *testing.T) {
 	if SkillsInstructions() == "" {
 		t.Fatal("skills instructions prompt is empty")
 	}
+	if HandoffSummary() == "" {
+		t.Fatal("handoff summary prompt is empty")
+	}
+}
+
+func TestHandoffSummaryDistinctFromCompaction(t *testing.T) {
+	if HandoffSummary() == CompactionSummary() {
+		t.Fatal("handoff summary must be a distinct prompt from compaction")
+	}
+	// The handoff brief is written for a fresh agent that will read the plan;
+	// it must point at the recorded plan rather than restate it.
+	if !strings.Contains(strings.ToLower(HandoffSummary()), "plan") {
+		t.Fatal("handoff summary should reference the recorded plan")
+	}
 }
 
 func TestSystemPromptRequestsToolCommentary(t *testing.T) {
@@ -45,6 +59,7 @@ func TestPromptFilesDoNotExposeFinalNewline(t *testing.T) {
 	for name, text := range map[string]string{
 		"system":              System(),
 		"compaction-summary":  CompactionSummary(),
+		"handoff-summary":     HandoffSummary(),
 		"skills-instructions": SkillsInstructions(),
 		"independent":         mustAgentPrompt(t, "independent"),
 		"plan":                mustAgentPrompt(t, "plan"),
