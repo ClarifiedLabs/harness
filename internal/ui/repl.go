@@ -535,6 +535,10 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 					}
 					continue
 				}
+				if input.escapeTail {
+					escPresses.reset()
+					continue
+				}
 				if input.escape {
 					if input.text != "" {
 						queued = append(queued, replInput{text: input.text})
@@ -639,6 +643,7 @@ type replInput struct {
 	pasted      bool
 	edit        bool
 	escape      bool
+	escapeTail  bool
 	interrupt   bool
 	interactive bool
 }
@@ -823,10 +828,11 @@ func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
 type lineTerminator byte
 
 const (
-	lineTermNone    lineTerminator = 0
-	lineTermNewline lineTerminator = '\n'
-	lineTermEdit    lineTerminator = '\a'
-	lineTermEscape  lineTerminator = '\x1b'
+	lineTermNone       lineTerminator = 0
+	lineTermNewline    lineTerminator = '\n'
+	lineTermEdit       lineTerminator = '\a'
+	lineTermEscape     lineTerminator = '\x1b'
+	lineTermEscapeTail lineTerminator = 0x80
 )
 
 func readTerminalLine(r *bufio.Reader, escapeLineEnd bool) (line string, terminator lineTerminator, err error) {
@@ -845,6 +851,13 @@ func readTerminalLine(r *bufio.Reader, escapeLineEnd bool) (line string, termina
 			return b.String(), lineTermEdit, nil
 		default:
 			if escapeLineEnd && c == byte(lineTermEscape) {
+				consumed, err := consumeBufferedEscapeTail(r)
+				if err != nil {
+					return b.String(), lineTermNone, err
+				}
+				if consumed {
+					return b.String(), lineTermEscapeTail, nil
+				}
 				return b.String(), lineTermEscape, nil
 			}
 			b.WriteByte(c)
@@ -852,10 +865,50 @@ func readTerminalLine(r *bufio.Reader, escapeLineEnd bool) (line string, termina
 	}
 }
 
+func consumeBufferedEscapeTail(r *bufio.Reader) (bool, error) {
+	if r == nil || r.Buffered() == 0 {
+		return false, nil
+	}
+	next, err := r.Peek(1)
+	if err != nil {
+		return false, err
+	}
+	if len(next) == 0 || (next[0] != '[' && next[0] != 'O') {
+		return false, nil
+	}
+	introducer, err := r.ReadByte()
+	if err != nil {
+		return false, err
+	}
+	switch introducer {
+	case '[':
+		for {
+			c, err := r.ReadByte()
+			if err != nil {
+				return true, err
+			}
+			if c >= '@' && c <= '~' {
+				return true, nil
+			}
+		}
+	case 'O':
+		_, err := r.ReadByte()
+		return true, err
+	default:
+		return false, nil
+	}
+}
+
 func (rr *replReader) handleLine(line string, terminator lineTerminator) (replInput, bool) {
 	if !rr.inPaste {
 		start := strings.Index(line, bracketedPasteStart)
 		if start < 0 {
+			if terminator == lineTermEscapeTail || isSplitEscapeTail(line, terminator) {
+				if line == "" {
+					return replInput{}, false
+				}
+				return replInput{text: line, escapeTail: true}, true
+			}
 			return replInput{text: line, edit: terminator == lineTermEdit, escape: terminator == lineTermEscape}, true
 		}
 		rr.inPaste = true
@@ -880,6 +933,29 @@ func (rr *replReader) handleLine(line string, terminator lineTerminator) (replIn
 		rr.paste.WriteByte(byte(lineTermEdit))
 	}
 	return replInput{}, false
+}
+
+func isSplitEscapeTail(line string, terminator lineTerminator) bool {
+	if terminator != lineTermEscape || line == "" {
+		return false
+	}
+	switch line[0] {
+	case '[':
+		return hasTerminalFinalByte(line[1:])
+	case 'O':
+		return len(line) >= 2 && line[1] >= '@' && line[1] <= '~'
+	default:
+		return false
+	}
+}
+
+func hasTerminalFinalByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '@' && s[i] <= '~' {
+			return true
+		}
+	}
+	return false
 }
 
 // command dispatches a meta-command line. It returns true when the REPL should

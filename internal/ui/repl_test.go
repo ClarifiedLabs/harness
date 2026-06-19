@@ -1776,6 +1776,92 @@ func TestREPLEscapeEscapeCancelsActiveTurn(t *testing.T) {
 	}
 }
 
+func TestREPLReaderConsumesBufferedEscapeSequenceTail(t *testing.T) {
+	rr := newREPLReader(strings.NewReader("\x1b[Asecond\n"), io.Discard, false, "")
+	rr.setEscapeLineEnd(true)
+
+	input, ok, err := rr.read(replReadRequest{})
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok || input.text != "second" {
+		t.Fatalf("input = %+v ok=%v, want second prompt", input, ok)
+	}
+}
+
+func TestREPLReaderMarksSplitEscapeSequenceTail(t *testing.T) {
+	rr := newREPLReader(strings.NewReader("[A\x1b"), io.Discard, false, "")
+	rr.setEscapeLineEnd(true)
+
+	input, ok, err := rr.read(replReadRequest{})
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok || !input.escapeTail || input.text != "[A" {
+		t.Fatalf("input = %+v ok=%v, want split escape tail", input, ok)
+	}
+}
+
+func TestREPLScrollEscapeDuringActiveTurnDoesNotQueuePrompt(t *testing.T) {
+	var out, errw bytes.Buffer
+	inTurn := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("first answer")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 5, OutputTokens: 2},
+			Block: func(ctx context.Context) {
+				close(inTurn)
+				<-releaseTurn
+			},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("second answer")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 6, OutputTokens: 2},
+		},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- Run(pr, app, nil) }()
+
+	writePipe(t, pw, "first\n")
+	select {
+	case <-inTurn:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+	writePipe(t, pw, "\x1b[A")
+	close(releaseTurn)
+	waitFor(t, func() bool { return strings.Count(errw.String(), "> ") >= 2 }, "prompt after first turn")
+	if len(fp.Requests) != 1 {
+		t.Fatalf("scroll escape should not queue a prompt, got %d requests", len(fp.Requests))
+	}
+
+	writePipe(t, pw, "second\n/exit\n")
+	_ = pw.Close()
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	}
+	var prompts []string
+	for _, msg := range app.Agent.Transcript() {
+		if msg.Role == llm.RoleUser && len(msg.Content) == 1 && msg.Content[0].Kind == llm.BlockText {
+			prompts = append(prompts, msg.Content[0].Text)
+		}
+	}
+	if strings.Join(prompts, "|") != "first|second" {
+		t.Fatalf("user prompts = %q, want first|second", strings.Join(prompts, "|"))
+	}
+}
+
 func TestREPLTypeaheadDuringActiveTurnRunsAfterTurn(t *testing.T) {
 	var out, errw bytes.Buffer
 	inTurn := make(chan struct{})
