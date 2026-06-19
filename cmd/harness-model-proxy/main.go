@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -33,14 +34,16 @@ const (
 )
 
 type environment struct {
-	args             []string
-	stdin            io.Reader
-	stdout           io.Writer
-	stderr           io.Writer
-	getenv           func(string) string
-	sigCh            chan os.Signal
-	modelsDevCatalog func(context.Context) (*modelsdev.Catalog, error)
-	terminalRows     func() int
+	args              []string
+	stdin             io.Reader
+	stdout            io.Writer
+	stderr            io.Writer
+	getenv            func(string) string
+	sigCh             chan os.Signal
+	modelsDevCatalog  func(context.Context) (*modelsdev.Catalog, error)
+	terminalRows      func() int
+	modelsDevCacheTTL *time.Duration
+	now               func() time.Time
 }
 
 func signalCancelContext(sigCh <-chan os.Signal) (context.Context, context.CancelFunc, func() bool) {
@@ -94,6 +97,7 @@ func run(env environment) int {
 	setup := fs.Bool("setup", false, "create or update proxy config")
 	force := fs.Bool("force", false, "with --setup, overwrite existing provider files")
 	refreshModels := fs.Bool("refresh-models", false, "fetch models.dev and update configured provider model metadata")
+	modelsDevCacheTTL := fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
 	logLevel := fs.String("log-level", "", "log level: debug, info, warn, error")
 	logFormat := fs.String("log-format", "", "log format: json, text")
 	if err := fs.Parse(env.args); err != nil {
@@ -105,6 +109,12 @@ func run(env environment) int {
 		return exitUsage
 	}
 	if *setup {
+		ttl, err := setupModelsDevCacheTTL(env, *modelsDevCacheTTL, flagWasSet(fs, "models-dev-cache-ttl"))
+		if err != nil {
+			fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+			return exitUsage
+		}
+		env.modelsDevCacheTTL = &ttl
 		ctx, cancel, interrupted := signalCancelContext(env.sigCh)
 		defer cancel()
 		if err := runSetup(ctx, env, *force); err != nil {
@@ -119,6 +129,12 @@ func run(env environment) int {
 
 	path := server.ConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv)
 	if *refreshModels {
+		ttl, err := configuredModelsDevCacheTTL(path, env, *modelsDevCacheTTL, flagWasSet(fs, "models-dev-cache-ttl"))
+		if err != nil {
+			fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+			return exitUsage
+		}
+		env.modelsDevCacheTTL = &ttl
 		ctx, cancel, interrupted := signalCancelContext(env.sigCh)
 		defer cancel()
 		if err := runRefreshModels(ctx, env, path); err != nil {
@@ -139,6 +155,12 @@ func run(env environment) int {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime
 	}
+	modelsTTL, err := modelsDevCacheTTLFromConfig(cfg, *modelsDevCacheTTL, flagWasSet(fs, "models-dev-cache-ttl"))
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitUsage
+	}
+	env.modelsDevCacheTTL = &modelsTTL
 
 	level := cfg.LogLevel
 	if *logLevel != "" {
@@ -187,6 +209,7 @@ func run(env environment) int {
 			}
 		}()
 	}
+	startModelsDevCacheRefresh(ctx, env, filepath.Dir(path), modelsTTL, logger)
 	srv := httpserve.New(addr, handler)
 	logger.Info("model proxy listening", "addr", addr)
 	if err := httpserve.Run(ctx, srv); err != nil {
@@ -213,9 +236,61 @@ func usage(w io.Writer) {
 	fs.Bool("setup", false, "create or update proxy config")
 	fs.Bool("force", false, "with --setup, overwrite existing provider files")
 	fs.Bool("refresh-models", false, "fetch models.dev and update configured provider model metadata")
+	fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
 	fs.String("log-level", logging.LevelInfo, "log level: debug, info, warn, error")
 	fs.String("log-format", logging.FormatJSON, "log format: json, text")
 	fs.PrintDefaults()
+}
+
+func setupModelsDevCacheTTL(env environment, flagValue string, flagSet bool) (time.Duration, error) {
+	configPath := filepath.Join(defaultConfigDir(env.getenv), "config.json")
+	if _, err := os.Stat(configPath); err == nil {
+		return configuredModelsDevCacheTTL(configPath, env, flagValue, flagSet)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return 0, err
+	}
+	return modelsDevCacheTTLFromConfig(server.Config{}, flagValue, flagSet)
+}
+
+func configuredModelsDevCacheTTL(path string, env environment, flagValue string, flagSet bool) (time.Duration, error) {
+	if path == "" {
+		return modelsDevCacheTTLFromConfig(server.Config{}, flagValue, flagSet)
+	}
+	cfg, err := server.LoadConfig(path)
+	if err != nil {
+		return 0, err
+	}
+	return modelsDevCacheTTLFromConfig(cfg, flagValue, flagSet)
+}
+
+func modelsDevCacheTTLFromConfig(cfg server.Config, flagValue string, flagSet bool) (time.Duration, error) {
+	ttl := defaultModelsDevTTL
+	if cfg.ModelsDevCacheTTL.Set {
+		ttl = cfg.ModelsDevCacheTTL.Duration
+	}
+	if flagSet {
+		parsed, err := parseModelsDevCacheTTLFlag(flagValue)
+		if err != nil {
+			return 0, err
+		}
+		ttl = parsed
+	}
+	return ttl, nil
+}
+
+func parseModelsDevCacheTTLFlag(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "0" {
+		return 0, nil
+	}
+	ttl, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid -models-dev-cache-ttl %q: %w", value, err)
+	}
+	if ttl < 0 {
+		return 0, fmt.Errorf("invalid -models-dev-cache-ttl %q: duration must be non-negative", value)
+	}
+	return ttl, nil
 }
 
 func flagWasSet(fs *flag.FlagSet, name string) bool {

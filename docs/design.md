@@ -525,9 +525,20 @@ func (r *Registry) Models() []string               // sorted configured model id
 
 Model metadata originates from the public **models.dev** catalog
 (`internal/modelsdev`); `harness-model-proxy --setup` and `--refresh-models` reduce it
-to the provider/context/price/reasoning fields harness needs. `--setup` falls back to a
-vendored models.dev snapshot when the live catalog is unreachable; `--refresh-models`
-instead errors out rather than substituting the stale snapshot.
+to the provider/context/price/reasoning fields harness needs. The proxy caches the
+full catalog JSON as `models.dev.api.json` in the proxy config directory.
+`--setup` prefers that cache over the vendored snapshot, but fetches and writes it
+when it is missing or invalid. A running proxy refreshes the cache when it is older
+than `models_dev_cache_ttl` (`24h` by default; `0` disables periodic refresh), and
+`--refresh-models` fetches and caches the full catalog before rewriting configured
+provider allowlists. The vendored snapshot is used only when there is no parseable
+cache and a live fetch fails.
+Candidate cache updates must parse as models.dev JSON and contain at least one
+provider and model. When a previous cache is parseable, replacement is rejected
+if provider or model counts change by more than 4x and the absolute delta is
+large enough to rule out normal small-catalog churn; the old cache remains in
+place. Successful replacements first save the previous cache as
+`models.dev.api.json.bak`, overwriting that single backup on each update.
 
 Harness only uses models exposed by `harness-model-proxy`; arbitrary
 provider-local model names are rejected unless they are configured in the proxy
@@ -578,8 +589,9 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   replaces the configured hook set for one launch.
 - `harness-model-proxy --setup` creates a proxy config in the default proxy directory,
   appends a new provider config to an existing proxy config, or updates an existing
-  configured provider. It fetches models.dev provider metadata, falls back to a
-  vendored models.dev snapshot when the live catalog is unreachable, lists
+  configured provider. It reads cached models.dev provider metadata, fetching and
+  caching the full catalog when needed, falls back to a vendored models.dev
+  snapshot only when no parseable cache is available and live fetch fails, lists
   harness-supported providers, marks existing providers with bold text and `*`,
   derives missing first-party API URLs from exact `@ai-sdk/openai`,
   `@ai-sdk/anthropic`, and plain `@ai-sdk/google` package metadata, prompts for
@@ -597,10 +609,12 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   api_type (`responses`, `openai`, or `anthropic`), key env vars, context windows,
   pricing, and reasoning metadata. Without `--force`, setup refuses to overwrite
   provider files that are not already referenced by the proxy config.
-- `harness-model-proxy --refresh-models` fetches the latest live models.dev catalog
-  and refreshes each configured provider file's current model allowlist, preserving
-  stored API keys and `auth` blocks. It errors if models.dev is inaccessible or a
-  configured provider or model is missing/unsupported.
+- `harness-model-proxy --refresh-models` fetches and caches the latest live
+  models.dev catalog and refreshes each configured provider file's current model
+  allowlist, preserving stored API keys and `auth` blocks. If live fetch fails, it
+  uses a parseable local cache before using the vendored fallback snapshot. It
+  errors if a configured provider or model is missing/unsupported in the selected
+  catalog.
 - Provider config auth: `api_key` / `api_key_env` remain the default secret path.
   When a provider config supplies none of `api_key`/`api_key_env`/`auth`, the proxy
   falls back to a hardcoded env var keyed on the provider's `api_type`:
@@ -624,7 +638,9 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   requester, provider, model, request/response bytes, duration, token usage, stop
   reason, tool-call count, and `cost_usd` when provider config contains pricing.
   Proxy config accepts `log_level` (`debug|info|warn|error`) and `log_format`
-  (`json` default, or `text`), with serve flags overriding config.
+  (`json` default, or `text`), with serve flags overriding config. Proxy config
+  also accepts `models_dev_cache_ttl` as a duration string such as `"24h"` or
+  numeric `0`; the `-models-dev-cache-ttl` serve/setup/refresh flag overrides it.
 - **Selection rule:** `harness` fetches `GET /v1/models` from the proxy. A
   `provider:model` value always strips the `provider:` prefix from the model, but only
   sets the provider when one was not already chosen (an explicit `-provider` /

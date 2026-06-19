@@ -102,6 +102,38 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	}
 }
 
+func TestLoadConfigParsesModelsDevCacheTTL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "provider_configs": ["p.json"],
+  "models_dev_cache_ttl": "12h"
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig string ttl: %v", err)
+	}
+	if !cfg.ModelsDevCacheTTL.Set || cfg.ModelsDevCacheTTL.Duration != 12*time.Hour {
+		t.Fatalf("string ttl = %+v, want 12h set", cfg.ModelsDevCacheTTL)
+	}
+
+	if err := os.WriteFile(path, []byte(`{
+  "provider_configs": ["p.json"],
+  "models_dev_cache_ttl": 0
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig zero ttl: %v", err)
+	}
+	if !cfg.ModelsDevCacheTTL.Set || cfg.ModelsDevCacheTTL.Duration != 0 {
+		t.Fatalf("zero ttl = %+v, want 0 set", cfg.ModelsDevCacheTTL)
+	}
+}
+
 func TestHandlerStreamPassesResponseStateFields(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{

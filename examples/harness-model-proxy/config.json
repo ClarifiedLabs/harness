@@ -3,6 +3,7 @@
     "providers.json"
   ],
   "default_context_window": 256000,
+  "models_dev_cache_ttl": "24h",
   "log_level": "info",
   "log_format": "json"
 }

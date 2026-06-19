@@ -199,10 +199,24 @@ For hand-written model-proxy config shape references, see
 `examples/harness-model-proxy/providers.json`. Setup remains the recommended way
 to create real provider allowlists.
 
-Run `harness-model-proxy --refresh-models` to fetch the latest live `models.dev`
-catalog and refresh metadata for the currently configured model allowlists,
-preserving stored API keys. Unlike setup, refresh fails if models.dev is
-inaccessible.
+`harness-model-proxy` stores the full models.dev catalog at
+`~/.config/harness-model-proxy/models.dev.api.json`. `--setup` uses the cache
+when present; if there is no cache, or the cache cannot be parsed, it fetches and
+rewrites the cache before using the vendored fallback snapshot. While serving,
+the proxy refreshes this cache when it is older than `24h` by default. Set
+`models_dev_cache_ttl` in the proxy config, or pass
+`-models-dev-cache-ttl <duration>`, to override the interval; use `0` to disable
+periodic serving-time refreshes. Cache updates are parsed and sanity-checked
+before replacing the old file; a candidate catalog with no providers/models, or
+one whose provider/model counts swing by more than 4x with a meaningful absolute
+delta, is rejected and the old cache is preserved. Successful replacements first
+copy the previous cache to `models.dev.api.json.bak`, overwriting that one backup
+each time.
+
+Run `harness-model-proxy --refresh-models` to fetch and cache the latest live
+`models.dev` catalog, then refresh metadata for the currently configured model
+allowlists while preserving stored API keys. If live fetch fails, refresh uses a
+parseable local cache before falling back to the vendored snapshot.
 
 ## REPL Commands
 

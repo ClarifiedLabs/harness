@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,6 +75,17 @@ func TestRunSetupWritesOnlySelectedModelsAndNoProxyDefault(t *testing.T) {
 	}
 	if len(provider.Models) != 1 || provider.Models[0].Name != "alpha" {
 		t.Fatalf("provider models = %+v, want only alpha", provider.Models)
+	}
+	cacheData, err := os.ReadFile(modelsDevCachePath(dir))
+	if err != nil {
+		t.Fatalf("read models.dev cache: %v", err)
+	}
+	cache, err := modelsdev.Decode(bytes.NewReader(cacheData))
+	if err != nil {
+		t.Fatalf("decode models.dev cache: %v", err)
+	}
+	if _, ok := cache.Provider("testai"); !ok {
+		t.Fatalf("models.dev cache missing testai provider")
 	}
 }
 
@@ -377,6 +391,79 @@ func TestRunSetupUpdatesExistingProviderConfig(t *testing.T) {
 	}
 }
 
+func TestRunSetupUsesCachedCatalogWhenFetchFails(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".config", "harness-model-proxy")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestModelsDevCache(t, dir, testSetupCatalog())
+	fetches := 0
+	var out, errw bytes.Buffer
+	env := environment{
+		stdin:  strings.NewReader("1\n\n1\nsave\n"),
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(k string) string {
+			if k == "HOME" {
+				return home
+			}
+			return ""
+		},
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			fetches++
+			return nil, errors.New("network down")
+		},
+		terminalRows: func() int { return 12 },
+	}
+
+	if err := runSetup(context.Background(), env, false); err != nil {
+		t.Fatalf("runSetup: %v; stderr=%q", err, errw.String())
+	}
+	if fetches != 0 {
+		t.Fatalf("setup should use fresh cache without fetching, fetches=%d", fetches)
+	}
+	if strings.Contains(errw.String(), "vendored fallback") {
+		t.Fatalf("setup should not use vendored fallback when cache is valid, stderr=%q", errw.String())
+	}
+}
+
+func TestSetupCatalogUsesFallbackOnlyAfterBadCacheAndFetchFailure(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".config", "harness-model-proxy")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(modelsDevCachePath(dir), []byte(`{bad json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var errw bytes.Buffer
+	env := environment{
+		stderr: &errw,
+		getenv: func(k string) string {
+			if k == "HOME" {
+				return home
+			}
+			return ""
+		},
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return nil, errors.New("network down")
+		},
+	}
+
+	catalog, err := setupCatalog(context.Background(), env)
+	if err != nil {
+		t.Fatalf("setupCatalog: %v", err)
+	}
+	if len(catalog.Providers) == 0 {
+		t.Fatalf("fallback catalog has no providers")
+	}
+	if !strings.Contains(errw.String(), "cached models.dev catalog failed") ||
+		!strings.Contains(errw.String(), "using vendored fallback") {
+		t.Fatalf("stderr should explain bad cache/fallback, got %q", errw.String())
+	}
+}
+
 func TestRunRefreshModelsPreservesConfiguredModelAllowlist(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
@@ -414,6 +501,179 @@ func TestRunRefreshModelsPreservesConfiguredModelAllowlist(t *testing.T) {
 	}
 	if len(provider.Models) != 1 || provider.Models[0].Name != "alpha" || provider.Models[0].ContextWindow != 123000 {
 		t.Fatalf("provider models after refresh = %+v, want refreshed alpha only", provider.Models)
+	}
+	cacheData, err := os.ReadFile(modelsDevCachePath(dir))
+	if err != nil {
+		t.Fatalf("read models.dev cache: %v", err)
+	}
+	cache, err := modelsdev.Decode(bytes.NewReader(cacheData))
+	if err != nil {
+		t.Fatalf("decode models.dev cache: %v", err)
+	}
+	if _, ok := cache.Provider("testai"); !ok {
+		t.Fatalf("models.dev cache missing refreshed testai provider")
+	}
+}
+
+func TestRunRefreshModelsFallsBackToCachedCatalog(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["testai.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+  "name": "testai",
+  "api_type": "openai",
+  "base_url": "https://api.test/v1",
+  "api_key": "sk-test",
+  "models": [{"name":"alpha","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeTestModelsDevCache(t, dir, testSetupCatalog())
+	var out, errw bytes.Buffer
+	env := environment{
+		stdout: &out,
+		stderr: &errw,
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return nil, errors.New("network down")
+		},
+	}
+
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v; stderr=%q", err, errw.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "testai.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var provider setupProviderConfig
+	if err := json.Unmarshal(data, &provider); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.Models) != 1 || provider.Models[0].Name != "alpha" || provider.Models[0].ContextWindow != 123000 {
+		t.Fatalf("provider models after refresh = %+v, want cached alpha metadata", provider.Models)
+	}
+	if !strings.Contains(errw.String(), "using cached catalog") {
+		t.Fatalf("stderr should mention cached catalog, got %q", errw.String())
+	}
+}
+
+func TestRefreshModelsDevCacheIfStaleUpdatesOldCache(t *testing.T) {
+	dir := t.TempDir()
+	writeTestModelsDevCache(t, dir, &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+		"oldai": {
+			ID:   "oldai",
+			Name: "OldAI",
+			API:  "https://old.example/v1",
+			NPM:  "@ai-sdk/openai-compatible",
+			Models: map[string]modelsdev.Model{
+				"old": {ID: "old", Name: "Old", Limit: modelsdev.Limit{Context: 1}},
+			},
+		},
+	}})
+	base := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	old := base.Add(-2 * time.Hour)
+	if err := os.Chtimes(modelsDevCachePath(dir), old, old); err != nil {
+		t.Fatal(err)
+	}
+	fetches := 0
+	env := environment{
+		stderr: &bytes.Buffer{},
+		now:    func() time.Time { return base },
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			fetches++
+			return testSetupCatalog(), nil
+		},
+	}
+
+	refreshModelsDevCacheIfStale(context.Background(), env, dir, time.Hour, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	if fetches != 1 {
+		t.Fatalf("fetches = %d, want 1", fetches)
+	}
+	cacheData, err := os.ReadFile(modelsDevCachePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := modelsdev.Decode(bytes.NewReader(cacheData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cache.Provider("testai"); !ok {
+		t.Fatalf("cache was not refreshed with testai provider")
+	}
+}
+
+func TestWriteModelsDevCacheRejectsInvalidCandidate(t *testing.T) {
+	dir := t.TempDir()
+	writeTestModelsDevCache(t, dir, testSetupCatalog())
+
+	err := writeModelsDevCache(dir, []byte(`{bad json`))
+	if err == nil || !strings.Contains(err.Error(), "did not parse") {
+		t.Fatalf("writeModelsDevCache error = %v, want parse failure", err)
+	}
+	cache := readTestModelsDevCache(t, dir)
+	if stats := modelsDevCatalogStats(cache); stats.providers != 1 || stats.models != 2 {
+		t.Fatalf("cache stats after rejected write = %+v, want original 1 provider/2 models", stats)
+	}
+}
+
+func TestWriteModelsDevCacheRejectsHugeCountSwing(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		current   int
+		candidate int
+	}{
+		{name: "shrink", current: 200, candidate: 40},
+		{name: "growth", current: 40, candidate: 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTestModelsDevCache(t, dir, testSetupCatalogWithModelCount(tc.current))
+			data, err := modelsdev.Encode(testSetupCatalogWithModelCount(tc.candidate))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = writeModelsDevCache(dir, append(data, '\n'))
+			if err == nil || !strings.Contains(err.Error(), "count changed too much") {
+				t.Fatalf("writeModelsDevCache error = %v, want count swing failure", err)
+			}
+			cache := readTestModelsDevCache(t, dir)
+			if stats := modelsDevCatalogStats(cache); stats.providers != 1 || stats.models != tc.current {
+				t.Fatalf("cache stats after rejected write = %+v, want original 1 provider/%d models", stats, tc.current)
+			}
+		})
+	}
+}
+
+func TestWriteModelsDevCacheBacksUpPreviousCache(t *testing.T) {
+	dir := t.TempDir()
+	writeTestModelsDevCache(t, dir, testSetupCatalogWithModelCount(2))
+
+	data, err := modelsdev.Encode(testSetupCatalogWithModelCount(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeModelsDevCache(dir, append(data, '\n')); err != nil {
+		t.Fatalf("writeModelsDevCache first update: %v", err)
+	}
+	if stats := modelsDevCatalogStats(readTestModelsDevCachePath(t, modelsDevCacheBackupPath(dir))); stats.models != 2 {
+		t.Fatalf("backup stats after first update = %+v, want 2 models", stats)
+	}
+
+	data, err = modelsdev.Encode(testSetupCatalogWithModelCount(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeModelsDevCache(dir, append(data, '\n')); err != nil {
+		t.Fatalf("writeModelsDevCache second update: %v", err)
+	}
+	if stats := modelsDevCatalogStats(readTestModelsDevCache(t, dir)); stats.models != 4 {
+		t.Fatalf("live cache stats after second update = %+v, want 4 models", stats)
+	}
+	if stats := modelsDevCatalogStats(readTestModelsDevCachePath(t, modelsDevCacheBackupPath(dir))); stats.models != 3 {
+		t.Fatalf("backup stats after second update = %+v, want previous 3 models", stats)
 	}
 }
 
@@ -572,4 +832,54 @@ func testSetupCatalogWithGoogle() *modelsdev.Catalog {
 			},
 		},
 	}}
+}
+
+func testSetupCatalogWithModelCount(count int) *modelsdev.Catalog {
+	models := make(map[string]modelsdev.Model, count)
+	for i := range count {
+		id := fmt.Sprintf("model-%02d", i+1)
+		models[id] = modelsdev.Model{
+			ID:    id,
+			Name:  "Model " + id,
+			Limit: modelsdev.Limit{Context: 1000 + i},
+		}
+	}
+	return &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+		"testai": {
+			ID:     "testai",
+			Name:   "TestAI",
+			API:    "https://api.test/v1",
+			NPM:    "@ai-sdk/openai-compatible",
+			Models: models,
+		},
+	}}
+}
+
+func writeTestModelsDevCache(t *testing.T, dir string, catalog *modelsdev.Catalog) {
+	t.Helper()
+	data, err := modelsdev.Encode(catalog)
+	if err != nil {
+		t.Fatalf("encode models.dev cache: %v", err)
+	}
+	if err := writeModelsDevCache(dir, append(data, '\n')); err != nil {
+		t.Fatalf("write models.dev cache: %v", err)
+	}
+}
+
+func readTestModelsDevCache(t *testing.T, dir string) *modelsdev.Catalog {
+	t.Helper()
+	return readTestModelsDevCachePath(t, modelsDevCachePath(dir))
+}
+
+func readTestModelsDevCachePath(t *testing.T, path string) *modelsdev.Catalog {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read models.dev cache: %v", err)
+	}
+	catalog, err := modelsdev.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("decode models.dev cache: %v", err)
+	}
+	return catalog
 }

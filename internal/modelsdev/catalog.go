@@ -3,6 +3,7 @@
 package modelsdev
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -53,6 +54,16 @@ type Limit struct {
 // Fetch downloads and decodes a models.dev API catalog. A nil client uses the
 // default HTTP client.
 func Fetch(ctx context.Context, client *http.Client, url string) (*Catalog, error) {
+	data, err := FetchData(ctx, client, url)
+	if err != nil {
+		return nil, err
+	}
+	return Decode(bytes.NewReader(data))
+}
+
+// FetchData downloads a models.dev API catalog and returns the raw JSON body. A
+// nil client uses the default HTTP client.
+func FetchData(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	if url == "" {
 		url = DefaultURL
 	}
@@ -73,7 +84,7 @@ func Fetch(ctx context.Context, client *http.Client, url string) (*Catalog, erro
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("models.dev: GET %s: %s", url, resp.Status)
 	}
-	return Decode(resp.Body)
+	return io.ReadAll(resp.Body)
 }
 
 // Decode parses a models.dev API catalog.
@@ -95,6 +106,17 @@ func Decode(r io.Reader) (*Catalog, error) {
 		return nil, err
 	}
 	return normalizeProviders(providers), nil
+}
+
+// Encode renders a catalog in a cache-compatible JSON shape.
+func Encode(c *Catalog) ([]byte, error) {
+	providers := map[string]Provider{}
+	if c != nil && c.Providers != nil {
+		providers = c.Providers
+	}
+	return json.MarshalIndent(struct {
+		Providers map[string]Provider `json:"providers"`
+	}{Providers: providers}, "", "  ")
 }
 
 func normalizeProviders(providers map[string]Provider) *Catalog {

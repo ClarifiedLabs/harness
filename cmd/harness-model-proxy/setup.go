@@ -184,7 +184,7 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 	if len(files) == 0 {
 		return fmt.Errorf("%s has no provider_configs", cfgPath)
 	}
-	catalog, err := refreshCatalog(ctx, env)
+	catalog, err := refreshCatalog(ctx, env, filepath.Dir(cfgPath))
 	if err != nil {
 		return err
 	}
@@ -236,11 +236,8 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 	return nil
 }
 
-func refreshCatalog(ctx context.Context, env environment) (*modelsdev.Catalog, error) {
-	if env.modelsDevCatalog != nil {
-		return env.modelsDevCatalog(ctx)
-	}
-	return defaultModelsDevCatalog(ctx)
+func refreshCatalog(ctx context.Context, env environment, configDir string) (*modelsdev.Catalog, error) {
+	return refreshModelsDevCatalog(ctx, env, configDir, "refresh-models")
 }
 
 func updatedSetupConfig(path, providerFile string, force bool, allowExisting bool) (map[string]json.RawMessage, error) {
@@ -814,22 +811,11 @@ func writeJSONFileAtomic(path string, v any) error {
 }
 
 func setupCatalog(ctx context.Context, env environment) (*modelsdev.Catalog, error) {
-	if env.modelsDevCatalog != nil {
-		catalog, err := env.modelsDevCatalog(ctx)
-		if err == nil {
-			return catalog, nil
-		}
-		if errors.Is(err, context.Canceled) {
-			return nil, err
-		}
-		fallback, fallbackErr := modelsdev.Fallback()
-		if fallbackErr != nil {
-			return nil, fmt.Errorf("models.dev lookup failed: %v; vendored fallback failed: %w", err, fallbackErr)
-		}
-		fmt.Fprintf(env.stderr, "harness-model-proxy: setup: warning: models.dev lookup failed: %v; using vendored fallback\n", err)
-		return fallback, nil
+	ttl := defaultModelsDevTTL
+	if env.modelsDevCacheTTL != nil {
+		ttl = *env.modelsDevCacheTTL
 	}
-	return modelsdev.Fallback()
+	return cachedOrFetchedSetupCatalog(ctx, env, defaultConfigDir(env.getenv), ttl)
 }
 
 func setupModelFromModelsDev(model modelsdev.Model) setupModelConfig {

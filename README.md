@@ -79,7 +79,10 @@ harness -provider <provider> -model <model> -p "summarize README.md"
 
 `harness-model-proxy --setup` writes proxy/provider config, prompts for auth
 when needed, and lets you choose which models are available locally. By default
-the model proxy listens on `127.0.0.1:8765`.
+the model proxy listens on `127.0.0.1:8765`. It caches the full models.dev
+catalog locally and refreshes that cache every 24 hours while serving; configure
+`models_dev_cache_ttl` or pass `-models-dev-cache-ttl 0` to disable the periodic
+refresh.
 
 Use `harness --models` to list the providers, models, and cataloged reasoning
 controls exposed by the configured proxy. Use `harness --agents` to list the
