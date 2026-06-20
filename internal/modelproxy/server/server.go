@@ -11,8 +11,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/factory"
 	"harness/internal/modelproxy/protocol"
+	"harness/internal/modelsdev"
 )
 
 const maxStreamRequestBytes = 64 << 20
@@ -95,18 +98,53 @@ type Options struct {
 	Logger    *slog.Logger
 	New       func(factory.Options) (llm.Provider, error)
 	Warn      func(string)
+	// PricingMaxAge is the effective models.dev refresh interval used to stamp
+	// catalog pricing staleness. Zero falls back to Config.ModelsDevCacheTTL so
+	// a flag override (which Config does not carry) is still reflected.
+	PricingMaxAge time.Duration
+	// ModelsDevCatalog is the in-memory models.dev cache the proxy uses to
+	// resolve prices for managed providers. Nil leaves managed prices unresolved
+	// until UpdateModelsDevCatalog supplies one. The cache loader lives in the
+	// proxy command, so main passes the catalog in rather than the server
+	// reading it (keeping internal/llm free of an internal/modelsdev import).
+	ModelsDevCatalog *modelsdev.Catalog
+	// ModelsDevSourceDate dates ModelsDevCatalog (its cache file mtime). Used to
+	// stamp catalog pricing freshness when any provider is managed.
+	ModelsDevSourceDate time.Time
+}
+
+// usageKey identifies an aggregate usage bucket by provider and model.
+type usageKey struct {
+	provider string
+	model    string
+}
+
+// catalogSnapshot is the immutable served state: a registry used to price
+// requests and the catalog served at /v1/models. It is swapped atomically when
+// the models.dev cache refreshes so managed prices stay fresh without a
+// restart. Readers Load() it; the refresher Stores() a freshly built one.
+type catalogSnapshot struct {
+	registry *llm.Registry
+	catalog  protocol.Catalog
 }
 
 type Handler struct {
-	catalog              protocol.Catalog
-	registry             *llm.Registry
+	// snapshot holds the current registry+catalog. Built once in NewHandler and
+	// replaced wholesale by UpdateModelsDevCatalog; never mutated in place.
+	snapshot atomic.Pointer[catalogSnapshot]
+
 	providers            []llm.ProviderConfig
 	authSources          map[string]*auth.Source
 	defaultContextWindow int
+	configSourceDate     time.Time
+	pricingMaxAge        time.Duration
 	getenv               func(string) string
 	logger               *slog.Logger
 	newProvider          func(factory.Options) (llm.Provider, error)
 	nextRequestID        atomic.Uint64
+
+	usageMu sync.Mutex
+	usage   map[usageKey]*protocol.ModelUsage
 }
 
 func NewHandler(opts Options) (*Handler, error) {
@@ -123,7 +161,7 @@ func NewHandler(opts Options) (*Handler, error) {
 		newProvider = factory.New
 	}
 	warn := opts.Warn
-	registry, providers, err := llm.LoadProviderConfigs(opts.ConfigDir, opts.Config.ProviderConfigs, warn)
+	_, providers, err := llm.LoadProviderConfigs(opts.ConfigDir, opts.Config.ProviderConfigs, warn)
 	if err != nil {
 		return nil, err
 	}
@@ -135,30 +173,166 @@ func NewHandler(opts Options) (*Handler, error) {
 	if defaultWindow <= 0 {
 		defaultWindow = llm.DefaultContextWindow
 	}
-	registry.SetDefaultContextWindow(defaultWindow)
 	if len(providers) == 0 {
 		return nil, fmt.Errorf("model proxy: no provider configs are configured")
 	}
-	catalog, err := catalogFromProviderConfigs(providers)
-	if err != nil {
-		return nil, err
+	maxAge := opts.PricingMaxAge
+	if maxAge <= 0 {
+		maxAge = opts.Config.ModelsDevCacheTTL.Duration
 	}
-	return &Handler{
-		catalog:              catalog,
-		registry:             registry,
+	h := &Handler{
 		providers:            providers,
 		authSources:          authSources,
 		defaultContextWindow: defaultWindow,
+		configSourceDate:     providerConfigSourceDate(opts.ConfigDir, opts.Config.ProviderConfigs),
+		pricingMaxAge:        maxAge,
 		getenv:               getenv,
 		logger:               logger,
 		newProvider:          newProvider,
-	}, nil
+		usage:                map[usageKey]*protocol.ModelUsage{},
+	}
+	snapshot, err := h.buildSnapshot(opts.ModelsDevCatalog, opts.ModelsDevSourceDate)
+	if err != nil {
+		return nil, err
+	}
+	h.snapshot.Store(snapshot)
+	return h, nil
+}
+
+// buildSnapshot resolves managed-provider prices from md, then builds the
+// registry and served catalog from the price-filled providers. Manual providers
+// keep their own configured prices. The catalog's pricing stamp dates the
+// managed prices to the models.dev cache when any provider is managed, and to
+// the provider-config mtime otherwise.
+func (h *Handler) buildSnapshot(md *modelsdev.Catalog, mdSourceDate time.Time) (*catalogSnapshot, error) {
+	priced := pricedProviders(h.providers, md)
+	registry := llm.RegistryFromProviderConfigs(priced)
+	registry.SetDefaultContextWindow(h.defaultContextWindow)
+	catalog, err := catalogFromProviderConfigs(priced)
+	if err != nil {
+		return nil, err
+	}
+	catalog.Pricing = h.pricingInfo(md, mdSourceDate)
+	return &catalogSnapshot{registry: registry, catalog: catalog}, nil
+}
+
+// UpdateModelsDevCatalog rebuilds the served snapshot with prices resolved from
+// md (manual providers unchanged) and swaps it in atomically. The serving
+// refresher calls this after a successful models.dev cache refresh so live
+// prices reach in-flight cost accounting and /v1/models without a restart.
+func (h *Handler) UpdateModelsDevCatalog(md *modelsdev.Catalog, sourceDate time.Time) {
+	snapshot, err := h.buildSnapshot(md, sourceDate)
+	if err != nil {
+		h.logger.Warn("rebuild catalog snapshot failed", "err", err)
+		return
+	}
+	h.snapshot.Store(snapshot)
+}
+
+// pricingInfo dates the served catalog's prices. When any provider is managed
+// and a models.dev cache is available, the cache's source date (kept fresh by
+// the refresher) wins; otherwise the manual prices are only as fresh as the
+// newest provider-config file.
+func (h *Handler) pricingInfo(md *modelsdev.Catalog, mdSourceDate time.Time) *protocol.PricingInfo {
+	sourceDate := h.configSourceDate
+	if md != nil && !mdSourceDate.IsZero() && anyManagedProvider(h.providers) {
+		sourceDate = mdSourceDate
+	}
+	if sourceDate.IsZero() {
+		return nil
+	}
+	return &protocol.PricingInfo{
+		SourceDate:    sourceDate,
+		MaxAgeSeconds: int64(h.pricingMaxAge / time.Second),
+	}
+}
+
+// pricedProviders returns provider configs with prices ready for the registry
+// and catalog. Managed providers get a fresh copy whose model prices come from
+// the models.dev cache (left zero when the cache lacks the model); manual
+// providers are returned unchanged, keeping their own configured prices.
+func pricedProviders(providers []llm.ProviderConfig, md *modelsdev.Catalog) []llm.ProviderConfig {
+	out := make([]llm.ProviderConfig, len(providers))
+	for i, pc := range providers {
+		if !pc.Managed {
+			out[i] = pc
+			continue
+		}
+		cp := pc
+		// Managed prices resolve from PriceSource when set (e.g. openai-codex
+		// prices from "openai"), otherwise from the provider's own name.
+		priceProvider := pc.PriceSource
+		if priceProvider == "" {
+			priceProvider = pc.Name
+		}
+		cp.Models = make([]llm.ModelEntry, len(pc.Models))
+		for j, entry := range pc.Models {
+			if price, ok := modelsDevPrice(md, priceProvider, entry.Name); ok {
+				entry.Price = price
+			}
+			cp.Models[j] = entry
+		}
+		out[i] = cp
+	}
+	return out
+}
+
+// modelsDevPrice bridges a models.dev catalog price into an llm.Price for one
+// provider/model. This is the single point where the proxy crosses from
+// modelsdev to llm pricing, keeping internal/llm free of a modelsdev import.
+func modelsDevPrice(md *modelsdev.Catalog, providerID, modelID string) (llm.Price, bool) {
+	if md == nil {
+		return llm.Price{}, false
+	}
+	provider, ok := md.Provider(providerID)
+	if !ok {
+		return llm.Price{}, false
+	}
+	info, ok := provider.ModelInfo(modelID)
+	if !ok {
+		return llm.Price{}, false
+	}
+	return info.Price, true
+}
+
+func anyManagedProvider(providers []llm.ProviderConfig) bool {
+	for _, pc := range providers {
+		if pc.Managed {
+			return true
+		}
+	}
+	return false
+}
+
+// providerConfigSourceDate returns the newest modification time among the
+// configured provider files. It dates manual prices (which live in those files)
+// and returns the zero time when no file can be stat'd. Managed prices are dated
+// separately by the models.dev cache source date, which the refresher keeps
+// fresh; see pricingInfo.
+func providerConfigSourceDate(configDir string, files []string) time.Time {
+	var newest time.Time
+	for _, f := range files {
+		path := f
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(configDir, f)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if mt := info.ModTime(); mt.After(newest) {
+			newest = mt
+		}
+	}
+	return newest
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
 		h.handleModels(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/usage":
+		h.handleUsage(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/stream":
 		h.handleStream(w, r)
 	default:
@@ -167,14 +341,60 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Catalog() protocol.Catalog {
-	return h.catalog
+	return h.snapshot.Load().catalog
 }
 
 func (h *Handler) handleModels(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("content-type", "application/json")
-	if err := json.NewEncoder(w).Encode(h.catalog); err != nil {
+	if err := json.NewEncoder(w).Encode(h.snapshot.Load().catalog); err != nil {
 		h.logger.Warn("write model catalog failed", "err", err)
 	}
+}
+
+func (h *Handler) handleUsage(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("content-type", "application/json")
+	if err := json.NewEncoder(w).Encode(h.usageSnapshot()); err != nil {
+		h.logger.Warn("write usage report failed", "err", err)
+	}
+}
+
+// recordUsage accumulates one priced request into the per-model usage map. It is
+// called only for requests whose model has a known price, so every bucket has a
+// meaningful CostUSD.
+func (h *Handler) recordUsage(provider, model string, u llm.Usage, cost float64) {
+	key := usageKey{provider: provider, model: model}
+	h.usageMu.Lock()
+	defer h.usageMu.Unlock()
+	acc := h.usage[key]
+	if acc == nil {
+		acc = &protocol.ModelUsage{Provider: provider, Model: model}
+		h.usage[key] = acc
+	}
+	acc.Requests++
+	acc.InputTokens += int64(u.InputTokens)
+	acc.OutputTokens += int64(u.OutputTokens)
+	acc.CacheReadTokens += int64(u.CacheReadTokens)
+	acc.CacheWriteTokens += int64(u.CacheWriteTokens)
+	acc.ReasoningTokens += int64(u.ReasoningTokens)
+	acc.CostUSD += cost
+}
+
+// usageSnapshot returns a copy of the accumulated usage, sorted by
+// provider:model for deterministic output.
+func (h *Handler) usageSnapshot() protocol.UsageReport {
+	h.usageMu.Lock()
+	report := protocol.UsageReport{Models: make([]protocol.ModelUsage, 0, len(h.usage))}
+	for _, acc := range h.usage {
+		report.Models = append(report.Models, *acc)
+	}
+	h.usageMu.Unlock()
+	sort.Slice(report.Models, func(i, j int) bool {
+		if report.Models[i].Provider != report.Models[j].Provider {
+			return report.Models[i].Provider < report.Models[j].Provider
+		}
+		return report.Models[i].Model < report.Models[j].Model
+	})
+	return report
 }
 
 func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -214,9 +434,12 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			"cache_write_tokens", usage.CacheWriteTokens,
 			"reasoning_tokens", usage.ReasoningTokens,
 		}
-		if h.registry != nil && providerID != "" && model != "" {
-			if cost, ok := h.registry.Cost(providerID+":"+model, usage); ok {
-				attrs = append(attrs, "cost_usd", cost)
+		if providerID != "" && model != "" {
+			if snapshot := h.snapshot.Load(); snapshot != nil && snapshot.registry != nil {
+				if cost, ok := snapshot.registry.Cost(providerID+":"+model, usage); ok {
+					attrs = append(attrs, "cost_usd", cost)
+					h.recordUsage(providerID, model, usage, cost)
+				}
 			}
 		}
 		if streamErr != "" {
@@ -439,6 +662,7 @@ func (h *Handler) runtimeOptions(ctx context.Context, providerID, model string) 
 		APIKey:        apiKey,
 		AuthHeaders:   authHeaders,
 		ContextWindow: contextWindow,
+		OutputLimit:   entry.OutputLimit,
 	}, nil
 }
 

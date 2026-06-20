@@ -18,7 +18,7 @@ func TestBuildRequestGolden(t *testing.T) {
 		t.Fatalf("transcript invariant violated: %v", err)
 	}
 
-	got, err := json.Marshal(buildRequest(req))
+	got, err := json.Marshal(buildRequest(req, 0, 0))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestBuildRequestGolden(t *testing.T) {
 
 func TestBuildRequestMaxTokensOmittedWhenUnset(t *testing.T) {
 	req := basicRequest()
-	b, err := json.Marshal(buildRequest(req))
+	b, err := json.Marshal(buildRequest(req, 0, 0))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -47,15 +47,52 @@ func TestBuildRequestMaxTokensOmittedWhenUnset(t *testing.T) {
 func TestBuildRequestMaxTokensUserSet(t *testing.T) {
 	req := basicRequest()
 	req.MaxTokens = 333
-	w := buildRequest(req)
+	w := buildRequest(req, 1_000_000, 0)
 	if w.MaxTokens == nil || *w.MaxTokens != 333 {
 		t.Errorf("max_tokens = %v, want 333 (user-set)", w.MaxTokens)
 	}
 }
 
+func TestBuildRequestMaxTokensFloorLargeWindow(t *testing.T) {
+	// A large window makes the 32768 floor the binding default (window/4 > floor).
+	req := basicRequest()
+	w := buildRequest(req, 1_000_000, 0)
+	if w.MaxTokens == nil || *w.MaxTokens != 32768 {
+		t.Fatalf("max_tokens = %v, want 32768 floor", w.MaxTokens)
+	}
+}
+
+func TestBuildRequestMaxTokensFloorSmallWindow(t *testing.T) {
+	// A small window makes window/4 the binding default.
+	req := basicRequest()
+	w := buildRequest(req, 20_000, 0)
+	if w.MaxTokens == nil || *w.MaxTokens != 5_000 {
+		t.Fatalf("max_tokens = %v, want 5000 (window/4)", w.MaxTokens)
+	}
+}
+
+func TestBuildRequestMaxTokensCatalogOutputLimit(t *testing.T) {
+	// A known catalog output limit beats the fixed 32768 fallback even on a
+	// large window, so a 128k-output model is not truncated at 32768.
+	req := basicRequest()
+	w := buildRequest(req, 1_000_000, 128_000)
+	if w.MaxTokens == nil || *w.MaxTokens != 128_000 {
+		t.Fatalf("max_tokens = %v, want 128000 (catalog output limit)", w.MaxTokens)
+	}
+}
+
+func TestBuildRequestMaxTokensUserSetBeatsOutputLimit(t *testing.T) {
+	req := basicRequest()
+	req.MaxTokens = 333
+	w := buildRequest(req, 1_000_000, 128_000)
+	if w.MaxTokens == nil || *w.MaxTokens != 333 {
+		t.Fatalf("max_tokens = %v, want 333 (user-set beats catalog output limit)", w.MaxTokens)
+	}
+}
+
 func TestBuildRequestTemperatureOmittedWhenNil(t *testing.T) {
 	req := basicRequest()
-	b, err := json.Marshal(buildRequest(req))
+	b, err := json.Marshal(buildRequest(req, 0, 0))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -64,7 +101,7 @@ func TestBuildRequestTemperatureOmittedWhenNil(t *testing.T) {
 	}
 
 	req.Temperature = llmtest.FloatPtr(0)
-	b, err = json.Marshal(buildRequest(req))
+	b, err = json.Marshal(buildRequest(req, 0, 0))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -76,7 +113,7 @@ func TestBuildRequestTemperatureOmittedWhenNil(t *testing.T) {
 func TestBuildRequestReasoningEffortOpenAI(t *testing.T) {
 	req := basicRequest()
 	req.Reasoning = llm.ReasoningConfig{Effort: "high"}
-	w := buildRequest(req)
+	w := buildRequest(req, 0, 0)
 	if w.ReasoningEffort != "high" {
 		t.Fatalf("reasoning_effort = %q, want high", w.ReasoningEffort)
 	}
@@ -96,7 +133,7 @@ func TestBuildRequestReasoningEffortOpenAI(t *testing.T) {
 func TestBuildRequestReasoningEffortOpenRouter(t *testing.T) {
 	req := basicRequest()
 	req.Reasoning = llm.ReasoningConfig{Effort: "medium"}
-	w := buildRequestForMode(req, "openrouter")
+	w := buildRequestForMode(req, 0, 0, "openrouter")
 	if w.ReasoningEffort != "" {
 		t.Fatalf("reasoning_effort = %q, want omitted for OpenRouter", w.ReasoningEffort)
 	}
@@ -117,7 +154,7 @@ func TestBuildRequestReasoningBudgetOpenRouter(t *testing.T) {
 	req := basicRequest()
 	budget := 2048
 	req.Reasoning = llm.ReasoningConfig{BudgetTokens: &budget}
-	w := buildRequestForMode(req, "openrouter")
+	w := buildRequestForMode(req, 0, 0, "openrouter")
 	if w.ReasoningEffort != "" {
 		t.Fatalf("reasoning_effort = %q, want omitted for OpenRouter", w.ReasoningEffort)
 	}
@@ -138,7 +175,7 @@ func TestBuildRequestReasoningToggleOpenRouter(t *testing.T) {
 	req := basicRequest()
 	enabled := false
 	req.Reasoning = llm.ReasoningConfig{Enabled: &enabled}
-	w := buildRequestForMode(req, "openrouter")
+	w := buildRequestForMode(req, 0, 0, "openrouter")
 	if w.Reasoning == nil || w.Reasoning.Enabled == nil || *w.Reasoning.Enabled {
 		t.Fatalf("reasoning = %+v, want enabled false", w.Reasoning)
 	}
@@ -152,9 +189,65 @@ func TestBuildRequestReasoningToggleOpenRouter(t *testing.T) {
 	}
 }
 
+func TestBuildRequestParallelToolCallsWhenToolsPresent(t *testing.T) {
+	w := buildRequest(basicRequest(), 0, 0)
+	if w.ParallelTools == nil || !*w.ParallelTools {
+		t.Fatalf("parallel_tool_calls = %v, want true when tools are present", w.ParallelTools)
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"parallel_tool_calls":true`)) {
+		t.Fatalf("parallel_tool_calls missing from JSON: %s", b)
+	}
+}
+
+func TestBuildRequestParallelToolCallsOmittedWithoutTools(t *testing.T) {
+	req := basicRequest()
+	req.Tools = nil
+	w := buildRequest(req, 0, 0)
+	if w.ParallelTools != nil {
+		t.Fatalf("parallel_tool_calls = %v, want omitted without tools", w.ParallelTools)
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte("parallel_tool_calls")) {
+		t.Fatalf("parallel_tool_calls present though no tools: %s", b)
+	}
+}
+
+func TestBuildRequestPromptCacheKey(t *testing.T) {
+	req := basicRequest()
+	req.PromptCacheKey = "harness-abc"
+	w := buildRequest(req, 0, 0)
+	if w.PromptCacheKey != "harness-abc" {
+		t.Fatalf("prompt_cache_key = %q, want harness-abc", w.PromptCacheKey)
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"prompt_cache_key":"harness-abc"`)) {
+		t.Fatalf("prompt_cache_key missing from JSON: %s", b)
+	}
+}
+
+func TestBuildRequestPromptCacheKeyOmittedWhenEmpty(t *testing.T) {
+	b, err := json.Marshal(buildRequest(basicRequest(), 0, 0))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte("prompt_cache_key")) {
+		t.Fatalf("prompt_cache_key present though unset: %s", b)
+	}
+}
+
 func TestBuildRequestStreamOptionsAlwaysPresent(t *testing.T) {
 	req := basicRequest()
-	b, err := json.Marshal(buildRequest(req))
+	b, err := json.Marshal(buildRequest(req, 0, 0))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -166,7 +259,7 @@ func TestBuildRequestStreamOptionsAlwaysPresent(t *testing.T) {
 func TestBuildRequestNoSystemOmitsSystemMessage(t *testing.T) {
 	req := basicRequest()
 	req.System = ""
-	w := buildRequest(req)
+	w := buildRequest(req, 0, 0)
 	if len(w.Messages) == 0 || w.Messages[0].Role == "system" {
 		t.Errorf("leading system message present though System is empty: %+v", w.Messages[0])
 	}
@@ -175,13 +268,13 @@ func TestBuildRequestNoSystemOmitsSystemMessage(t *testing.T) {
 func TestBuildRequestStopSequences(t *testing.T) {
 	req := basicRequest()
 	req.StopSeqs = []string{"STOP", "END"}
-	w := buildRequest(req)
+	w := buildRequest(req, 0, 0)
 	if len(w.Stop) != 2 || w.Stop[0] != "STOP" || w.Stop[1] != "END" {
 		t.Errorf("stop = %v, want [STOP END]", w.Stop)
 	}
 
 	req.StopSeqs = nil
-	b, err := json.Marshal(buildRequest(req))
+	b, err := json.Marshal(buildRequest(req, 0, 0))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -201,7 +294,7 @@ func TestBuildRequestUserImage(t *testing.T) {
 			},
 		}},
 	}
-	w := buildRequest(req)
+	w := buildRequest(req, 0, 0)
 	parts, ok := w.Messages[0].Content.([]wireContentPart)
 	if !ok {
 		t.Fatalf("content = %T, want []wireContentPart", w.Messages[0].Content)

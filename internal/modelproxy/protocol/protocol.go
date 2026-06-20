@@ -17,6 +17,52 @@ const (
 
 type Catalog struct {
 	Providers []Provider `json:"providers"`
+	// Pricing dates the catalog's prices against the models.dev data that backed
+	// the most recent setup/refresh, so clients can warn when prices are older
+	// than the proxy's refresh interval. Nil when the proxy cannot date them.
+	Pricing *PricingInfo `json:"pricing,omitempty"`
+}
+
+// PricingInfo describes how fresh a catalog's prices are. The proxy derives its
+// catalog from provider config files at startup and never rebuilds it, so the
+// served prices are only as current as the last setup/refresh.
+type PricingInfo struct {
+	// SourceDate is when the price data behind the catalog was last written
+	// (the newest provider config modification time).
+	SourceDate time.Time `json:"source_date"`
+	// MaxAgeSeconds is the proxy's configured models.dev refresh interval in
+	// seconds. Prices older than this are stale. Zero when no TTL is configured.
+	MaxAgeSeconds int64 `json:"max_age_seconds,omitempty"`
+}
+
+// Stale reports whether the catalog's pricing is older than its refresh
+// interval as of now. It returns false when the source date or max age is
+// unknown, so callers never warn without a basis.
+func (p *PricingInfo) Stale(now time.Time) bool {
+	if p == nil || p.SourceDate.IsZero() || p.MaxAgeSeconds <= 0 {
+		return false
+	}
+	return now.Sub(p.SourceDate) > time.Duration(p.MaxAgeSeconds)*time.Second
+}
+
+// UsageReport is the aggregate token and cost usage served by GET /v1/usage. It
+// captures every priced request the proxy has handled this run, including
+// delegated child-agent spend that is otherwise invisible to a parent session.
+type UsageReport struct {
+	Models []ModelUsage `json:"models"`
+}
+
+// ModelUsage is the accumulated usage for a single provider:model pair.
+type ModelUsage struct {
+	Provider         string  `json:"provider"`
+	Model            string  `json:"model"`
+	Requests         int64   `json:"requests"`
+	InputTokens      int64   `json:"input_tokens"`
+	OutputTokens     int64   `json:"output_tokens"`
+	CacheReadTokens  int64   `json:"cache_read_tokens"`
+	CacheWriteTokens int64   `json:"cache_write_tokens"`
+	ReasoningTokens  int64   `json:"reasoning_tokens"`
+	CostUSD          float64 `json:"cost_usd"`
 }
 
 type Provider struct {

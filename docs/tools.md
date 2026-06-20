@@ -8,21 +8,36 @@ This page is the operational overview.
 
 | tool | purpose |
 |---|---|
-| `read_file` | read line-numbered file content; supports `offset` and `limit` |
+| `read_file` | read line-numbered file content; supports `offset`/`limit`, or `paths[]` for multi-file reads |
 | `list_dir` | list directory entries with type and size, non-recursive |
+| `glob` | recursively find files/dirs by glob, including `**` patterns; read-only |
 | `grep` | run host `grep` with argv-style args |
 | `rg` | run host ripgrep when available |
-| `edit` | edit existing files with exact-text replacements |
+| `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
 | `write_file` | create or overwrite a file, creating parent directories |
-| `apply_patch` | apply Codex-format add/delete/update/move patches |
 | `run_command` | run a shell command or direct argv program |
 | `git` | run host git with `--no-pager`, when git is installed |
 | `git_readonly` | restricted git subcommands for read-only agents |
-| `web_fetch` | fetch HTTP(S) content and reduce HTML to readable text |
+| `web_fetch` | fetch HTTP(S) content and reduce HTML to readable text, keeping block structure and rendering links as `text (url)` |
 | `write_tmp_file` | write scratch files under a private temp directory |
 | `update_todos` | replace the current todo list for multi-step work |
 | `delegate` | run a configured child agent and return its final report |
 | `background_jobs` | list, inspect, or cancel process-local background jobs |
+
+`apply_patch` (Codex-format add/delete/update/move patches) is no longer in the
+default tool set — `edit` and `write_file` subsume it. It still ships in the tool
+catalog, so an agent can opt back in by naming `apply_patch` in its
+`allowed_tools` whitelist.
+
+`read_file` reads one file via `path` (with `offset`/`limit`), or several at once
+via `paths[]` — each file is rendered under a `==> path <==` header with its own
+per-file line budget. When a single read is cut off at the line limit it ends with
+`[file truncated at line N; continue with offset=N+1]`. `glob` walks recursively
+from an optional `root`, where `**` matches across directory segments (and `*`/`?`/
+`[…]` match within one segment), returning matching paths with type and size sorted
+by path. `edit` takes an optional per-edit `replaceAll` flag that replaces every
+occurrence of `oldText` instead of requiring a unique match, reporting the
+replacement count.
 
 When [MCP](mcp.md) is enabled, downstream MCP tools also appear, namespaced as
 `mcp__<server>__<tool>`. When [LSP](lsp.md) is enabled, read-only `lsp_*` code
@@ -43,11 +58,22 @@ Normal `rg` searches add `--max-columns=1024 --max-columns-preview
 --max-filesize=10M` unless the caller's native `rg` args already set those
 limits.
 
+The host `grep` tool injects `-I` (skip binary files) unless the call already sets
+a binary policy (`-I`/`-a`/`--text`/`--binary-files`) or is a help/version
+invocation; `-I` is placed before any `--` operand separator. Matched lines longer
+than 1024 bytes are clamped in-process (host `grep` has no portable
+`--max-columns`), trailing them with `… [N chars clamped]`. Under `-search-tools
+both`, `grep` and `rg` are both registered and `grep`'s description steers the model
+to prefer `rg`.
+
 ## Command Execution
 
 `run_command` accepts exactly one of:
 
-- `command`: executed through `bash -lc` with `sh -c` fallback
+- `command`: executed through a non-login `bash -c` (with `sh -c` fallback). The
+  login PATH a login shell would have added is resolved once at startup and merged
+  into the command environment, so build/test toolchains are still found without
+  paying the login-profile cost on every call.
 - `argv`: direct program invocation with literal args and no shell
 
 Foreground calls capture combined stdout/stderr and append `[exit code: N]`.

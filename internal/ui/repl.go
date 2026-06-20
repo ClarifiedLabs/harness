@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"harness/internal/agent"
 	"harness/internal/background"
@@ -109,6 +110,12 @@ type App struct {
 	SetReasoning           func(model string, reasoning llm.ReasoningConfig) error
 	SaveDefaultModel       func(provider, model string, reasoning llm.ReasoningConfig) error
 	PromptDefaultModelSave bool
+
+	// Prewarm, when set, kicks off a background prompt-cache warm-up for the
+	// current agent/model/provider/system snapshot. The REPL calls it after a
+	// cache-invalidating event (agent/model switch, compaction) so the next real
+	// request reads a warm prefix (r43). nil disables it (piped/one-shot, tests).
+	Prewarm func()
 
 	AgentName             string         // current agent definition name
 	AvailableAgents       []AgentSummary // sorted agent names/descriptions for /agent listing
@@ -225,6 +232,7 @@ const helpText = `commands:
   /vi on|off       enable or disable vi-style prompt editing
   !command         run a local shell command at an interactive prompt
   $skillName       mention a skill to load via SKILL.md
+Interrupt a running turn with Ctrl-C or double-Esc; typing during a turn is kept and pre-filled into the next prompt (not auto-sent).
 Ctrl-G opens the editor from the prompt; lines starting with / are commands; // sends a literal leading slash; !! escapes a literal !; $$ escapes a literal $`
 
 func (app *App) clock() func() time.Time {
@@ -320,6 +328,12 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 			reader.editor.setEditMode(mode)
 		}
 	}
+	// Render the during-turn typed buffer live on the status line (during-turn
+	// input). The reader calls this from its read goroutine; SetInputLine is
+	// mutex-guarded so it never interleaves with the agent's renderer writes.
+	if usePromptEditor && app.Renderer != nil {
+		reader.onTurnInput = func(buf string, cursor int) { app.Renderer.SetInputLine(buf, cursor) }
+	}
 	// Load and configure REPL history persistence (bash-style HISTFILE/HISTFILESIZE/HISTSIZE).
 	// The in-memory editor receives a pre-loaded slice and a callback that appends each new
 	// entry to the on-disk history file. Errors are warned but never fatal.
@@ -358,6 +372,7 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 		exitAfterTurn   bool
 		plainPromptRead bool
 		prompt          string
+		pendingPrefill  string // during-turn buffer deposited into the next prompt
 		queued          []replInput
 		turnDone        <-chan struct{}
 		restoreEsc      func() error
@@ -384,6 +399,7 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 	}
 	finish := func(code int) int {
 		if app.Renderer != nil {
+			app.Renderer.StopProgress()
 			app.Renderer.finishAssistantLine()
 		}
 		app.stopBackgroundJobs()
@@ -413,13 +429,27 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 		}
 		done := make(chan struct{}, 1)
 		active = true
-		activeReadPause = queuedContainsEditor(queued)
 		exitAfterTurn = false
 		plainPromptRead = false
 		promptPrinted = false
 		escPresses.reset()
-		disablePromptTerm()
-		enableTurnTerm()
+		if usePromptEditor {
+			// Keep the terminal in raw/echo-off mode for the whole turn so typed
+			// keystrokes feed the live during-turn input line instead of garbling
+			// scrolling output. Bracketed paste is suppressed so a paste arrives
+			// as plain keystrokes the capture can accumulate (during-turn input).
+			_ = term.SetBracketedPaste(false)
+			reader.turnBuf = reader.turnBuf[:0]
+			reader.turnCursor = 0
+			if app.Renderer != nil {
+				app.Renderer.SetInputLine("", 0)
+			}
+			activeReadPause = false
+		} else {
+			activeReadPause = queuedContainsEditor(queued)
+			disablePromptTerm()
+			enableTurnTerm()
+		}
 		turnDone = done
 		go func() {
 			run()
@@ -496,7 +526,11 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 	for {
 		if active {
 			if !activeReadPause {
-				requestRead(replReadRequest{})
+				req := replReadRequest{}
+				if usePromptEditor {
+					req.turnEdit = true
+				}
+				requestRead(req)
 			}
 			select {
 			case <-exit:
@@ -504,7 +538,35 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 				// turn goroutine finishes its own save and usage update.
 				exitAfterTurn = true
 			case <-turnDone:
-				disableTurnTerm()
+				if app.Renderer != nil {
+					app.Renderer.StopProgress()
+				}
+				if usePromptEditor {
+					// Release the blocked during-turn keystroke read so it
+					// deposits its buffer as the next prompt's editable prefill;
+					// it is never auto-submitted (during-turn input rule 2). The
+					// terminal stays in raw mode for the line editor; only
+					// bracketed paste is restored.
+					if readPending {
+						reader.cancelTurnRead()
+						res := <-inputs
+						readPending = false
+						if res.ok && res.input.deposit {
+							pendingPrefill = res.input.text
+						} else {
+							// The read returned via a keystroke (interrupt/Esc)
+							// rather than the cancel; the typed buffer is intact.
+							pendingPrefill = reader.turnBuffer()
+						}
+						reader.drainTurnCancel()
+					}
+					// When no read is pending an EOF-driven deposit was already
+					// stashed in pendingPrefill via the active inputs case; leave
+					// it as-is.
+					_ = term.SetBracketedPaste(true)
+				} else {
+					disableTurnTerm()
+				}
 				active = false
 				activeReadPause = false
 				turnDone = nil
@@ -513,13 +575,13 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 				if exitAfterTurn {
 					return finish(ExitInterrupt)
 				}
-				if usePromptEditor && readPending {
+				if !usePromptEditor && readPending {
 					// A plain read started during the model turn is still
 					// blocked. Let it collect the next line in canonical mode;
 					// starting the raw prompt editor now would leave no prompt
 					// drawn and no terminal echo until that stale read finishes.
 					plainPromptRead = true
-				} else {
+				} else if !usePromptEditor {
 					enablePromptTerm()
 				}
 			case res := <-inputs:
@@ -533,6 +595,14 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 					if app.Interrupt != nil {
 						app.Interrupt.CancelTurn()
 					}
+					continue
+				}
+				if input.deposit {
+					// Reached only on EOF mid-turn (the cancel-driven deposit is
+					// drained in the turn-done handoff). Stash it and stop reading
+					// until the turn ends.
+					pendingPrefill = input.text
+					activeReadPause = true
 					continue
 				}
 				if input.escapeTail {
@@ -580,7 +650,8 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 			promptPrinted = true
 		}
 		if !plainPromptRead {
-			requestRead(replReadRequest{prompt: prompt, promptEditor: usePromptEditor})
+			requestRead(replReadRequest{prompt: prompt, promptEditor: usePromptEditor, prefill: pendingPrefill})
+			pendingPrefill = ""
 		}
 		select {
 		case <-exit:
@@ -646,6 +717,10 @@ type replInput struct {
 	escapeTail  bool
 	interrupt   bool
 	interactive bool
+	// deposit marks the accumulated during-turn buffer handed back when a turn
+	// ends, to be pre-filled (editable) into the next prompt rather than
+	// auto-submitted (during-turn input).
+	deposit bool
 }
 
 type replReadResult struct {
@@ -657,6 +732,14 @@ type replReadResult struct {
 type replReadRequest struct {
 	prompt       string
 	promptEditor bool
+	// turnEdit routes the read through the during-turn keystroke capture: echo
+	// stays off, keystrokes accumulate into a shared buffer rendered live on the
+	// status line, and the read returns only on Ctrl-C, Esc, or cancellation
+	// (during-turn input).
+	turnEdit bool
+	// prefill seeds the prompt editor with editable text, used to deposit the
+	// during-turn buffer into the next prompt.
+	prefill string
 }
 
 type replAction struct {
@@ -768,22 +851,159 @@ func queuedContainsEditor(inputs []replInput) bool {
 	return false
 }
 
+// cancelableReader wraps an io.Reader so a blocked read can be released without
+// losing buffered bytes. A pump goroutine copies the underlying stream into a
+// channel; Read serves from there and returns errReadCanceled when cancel()
+// fires, leaving any not-yet-delivered bytes queued for the next Read. This lets
+// the REPL hand the terminal from the during-turn keystroke capture back to the
+// full line editor at a turn boundary without dropping a keystroke
+// (during-turn input).
+type cancelableReader struct {
+	chunks   chan readChunk
+	leftover []byte
+	err      error         // sticky terminal error once the pump reports one
+	cancel   chan struct{} // buffered(1); a queued token cancels the next Read
+	// pending counts bytes the pump has read off the underlying fd but Read has
+	// not yet returned to the caller (queued chunk + leftover). It lets readiness
+	// probes see input the eager pump already drained off the fd, which
+	// WaitReadable on that fd can no longer report (during-turn escape decoding).
+	pending atomic.Int64
+}
+
+type readChunk struct {
+	data []byte
+	err  error
+}
+
+var errReadCanceled = errors.New("repl: read canceled")
+
+func newCancelableReader(in io.Reader) *cancelableReader {
+	cr := &cancelableReader{
+		chunks: make(chan readChunk, 1),
+		cancel: make(chan struct{}, 1),
+	}
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := in.Read(buf)
+			if n > 0 {
+				// Count the bytes as buffered Go-side before handing them off, so a
+				// concurrent buffered() probe never undercounts input the pump has
+				// already pulled off the fd.
+				cr.pending.Add(int64(n))
+				cr.chunks <- readChunk{data: append([]byte(nil), buf[:n]...)}
+			}
+			if err != nil {
+				cr.chunks <- readChunk{err: err}
+				return
+			}
+		}
+	}()
+	return cr
+}
+
+func (cr *cancelableReader) Read(p []byte) (int, error) {
+	if len(cr.leftover) > 0 {
+		n := copy(p, cr.leftover)
+		cr.leftover = cr.leftover[n:]
+		cr.pending.Add(int64(-n))
+		return n, nil
+	}
+	if cr.err != nil {
+		// The pump has stopped; report the terminal error persistently so a read
+		// after EOF returns EOF rather than blocking on a dead channel.
+		return 0, cr.err
+	}
+	select {
+	case <-cr.cancel:
+		return 0, errReadCanceled
+	case chunk := <-cr.chunks:
+		if chunk.err != nil {
+			cr.err = chunk.err
+			return 0, chunk.err
+		}
+		n := copy(p, chunk.data)
+		cr.leftover = chunk.data[n:]
+		cr.pending.Add(int64(-n))
+		return n, nil
+	}
+}
+
+// buffered reports how many bytes the pump has read off the underlying fd but
+// not yet returned through Read (the queued chunk plus any leftover). Readiness
+// probes OR this in so a split escape sequence whose tail the pump already
+// drained off the fd is still seen as available (during-turn escape decoding).
+func (cr *cancelableReader) buffered() int {
+	if n := cr.pending.Load(); n > 0 {
+		return int(n)
+	}
+	return 0
+}
+
+// cancel queues a cancel token so the next Read (whether already blocked or not
+// yet started) returns errReadCanceled exactly once; queuing the token rather
+// than closing a channel avoids losing a cancel that races read startup.
+func (cr *cancelableReader) cancelRead() {
+	select {
+	case cr.cancel <- struct{}{}:
+	default:
+	}
+}
+
+// drainCancel clears an unconsumed cancel token so a later read is not spuriously
+// canceled (e.g. when the canceled read happened to return via a keystroke).
+func (cr *cancelableReader) drainCancel() {
+	select {
+	case <-cr.cancel:
+	default:
+	}
+}
+
 type replReader struct {
 	r             *bufio.Reader
 	editor        *promptLineEditor
 	paste         strings.Builder
 	inPaste       bool
 	escapeLineEnd atomic.Bool
+
+	// During-turn keystroke capture (during-turn input). turnBuf accumulates
+	// printable runes and the newlines Enter inserts; it persists across the
+	// reader returning on Esc so a double-Esc does not lose typed text.
+	// turnCursor is the rune index in turnBuf where the next edit lands, kept in
+	// [0, len(turnBuf)]; inserts/deletes/motions act at this position so the
+	// during-turn line behaves like a single-line editor. onTurnInput renders the
+	// live buffer and cursor; cancelable releases a blocked turn read so the
+	// buffer can be deposited at the turn boundary.
+	turnBuf     []rune
+	turnCursor  int
+	onTurnInput func(string, int)
+	cancelable  *cancelableReader
 }
 
 func newREPLReader(in io.Reader, promptWriter io.Writer, promptEditor bool, editMode string) *replReader {
-	r := bufio.NewReader(in)
-	rr := &replReader{r: r}
+	rr := &replReader{}
+	source := in
+	if promptEditor {
+		// The interactive path needs cancelable reads so a during-turn keystroke
+		// capture can hand the terminal back to the line editor at turn end.
+		rr.cancelable = newCancelableReader(in)
+		source = rr.cancelable
+	}
+	r := bufio.NewReader(source)
+	rr.r = r
 	if promptEditor {
 		rr.editor = newPromptLineEditorWithReader(r, promptWriter)
 		rr.editor.setEditMode(editMode)
 		if f, ok := in.(*os.File); ok {
+			cancelable := rr.cancelable
 			rr.editor.escapeSequenceReady = func(timeout time.Duration) bool {
+				// The pump eagerly drains f, so a split escape sequence's tail may
+				// already sit in the cancelableReader's Go-side buffers where
+				// WaitReadable(f) can no longer see it. Consult those buffers first
+				// so arrow/Home/End keys are not mis-read as bare Esc + literals.
+				if cancelable != nil && cancelable.buffered() > 0 {
+					return true
+				}
 				return term.WaitReadable(f, timeout)
 			}
 		}
@@ -796,8 +1016,11 @@ func (rr *replReader) setEscapeLineEnd(enabled bool) {
 }
 
 func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
+	if req.turnEdit {
+		return rr.readTurn()
+	}
 	if req.promptEditor && rr.editor != nil {
-		input, ok, err := rr.editor.read(req.prompt)
+		input, ok, err := rr.editor.readPrefilled(req.prompt, req.prefill)
 		if ok {
 			input.interactive = true
 		}
@@ -823,6 +1046,214 @@ func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
 			return replInput{}, false, err
 		}
 	}
+}
+
+// readTurn captures keystrokes during an active turn with echo off. Printable
+// runes and the newlines that Enter inserts accumulate into rr.turnBuf, rendered
+// live via onTurnInput. It returns to the caller only on Ctrl-C (interrupt),
+// bare Esc (for double-Esc cancel), cancellation (depositing the buffer), or
+// EOF — never auto-submitting (during-turn input). Enter never submits; it
+// inserts a newline.
+func (rr *replReader) readTurn() (replInput, bool, error) {
+	for {
+		r, _, err := rr.r.ReadRune()
+		if err != nil {
+			if errors.Is(err, errReadCanceled) {
+				return rr.depositTurnBuffer(), true, nil
+			}
+			if errors.Is(err, io.EOF) {
+				if dep := rr.depositTurnBuffer(); dep.text != "" {
+					return dep, true, nil
+				}
+				return replInput{}, false, nil
+			}
+			return replInput{}, false, err
+		}
+		if r == '\x1b' && rr.editor != nil {
+			// Reuse the line editor's decoder so escape and kitty CSI-u key
+			// sequences (which carry even printable keys on capable terminals)
+			// are handled correctly.
+			action, text, err := rr.editor.readEscape()
+			if err != nil {
+				if errors.Is(err, errReadCanceled) {
+					return rr.depositTurnBuffer(), true, nil
+				}
+				return replInput{}, false, err
+			}
+			if input, done := rr.applyTurnAction(action, text); done {
+				return input, true, nil
+			}
+			continue
+		}
+		switch r {
+		case ctrlC:
+			return replInput{interrupt: true}, true, nil
+		case '\x1b':
+			return replInput{escape: true}, true, nil
+		case '\r', '\n':
+			rr.turnInsertNewline()
+		case '\b', del:
+			rr.turnBackspace()
+		default:
+			if r == utf8.RuneError || r < 0x20 {
+				continue // ignore other control characters
+			}
+			rr.turnInsertRunes([]rune{r})
+		}
+	}
+}
+
+// applyTurnAction maps a decoded line-editor key action onto the during-turn
+// buffer. It returns done=true (with the input to surface) only for the events
+// the run loop must act on: Ctrl-C, bare Esc, and EOF. Submit/newline insert a
+// newline rather than starting a turn (during-turn input rule 1); inserts and
+// deletes act at turnCursor and the cursor-motion keys move it. History
+// (lineEditHistoryPrev/Next) is intentionally ignored during a turn: the
+// deposited buffer is editable in the next prompt where the full editor — with
+// real history — takes over, so recalling history mid-turn would be surprising
+// and has nowhere to commit.
+func (rr *replReader) applyTurnAction(action lineEditAction, text string) (replInput, bool) {
+	switch action {
+	case lineEditInterrupt:
+		return replInput{interrupt: true}, true
+	case lineEditEscape:
+		return replInput{escape: true}, true
+	case lineEditEOF:
+		return rr.depositTurnBuffer(), true
+	case lineEditInsertText, lineEditPaste:
+		rr.turnInsertRunes([]rune(text))
+	case lineEditInsertNewline, lineEditSubmit:
+		rr.turnInsertNewline()
+	case lineEditBackspace:
+		rr.turnBackspace()
+	case lineEditDelete:
+		rr.turnDelete()
+	case lineEditLeft:
+		rr.turnMoveLeft()
+	case lineEditRight:
+		rr.turnMoveRight()
+	case lineEditHome:
+		rr.turnMoveHome()
+	case lineEditEnd:
+		rr.turnMoveEnd()
+	}
+	return replInput{}, false
+}
+
+// turnInsertRunes inserts runes at the cursor and advances it past them.
+func (rr *replReader) turnInsertRunes(rs []rune) {
+	if len(rs) == 0 {
+		return
+	}
+	rr.clampTurnCursor()
+	buf := make([]rune, 0, len(rr.turnBuf)+len(rs))
+	buf = append(buf, rr.turnBuf[:rr.turnCursor]...)
+	buf = append(buf, rs...)
+	buf = append(buf, rr.turnBuf[rr.turnCursor:]...)
+	rr.turnBuf = buf
+	rr.turnCursor += len(rs)
+	rr.emitTurnInput()
+}
+
+func (rr *replReader) turnInsertNewline() {
+	rr.turnInsertRunes([]rune{'\n'})
+}
+
+// turnBackspace deletes the rune before the cursor and moves the cursor left.
+func (rr *replReader) turnBackspace() {
+	rr.clampTurnCursor()
+	if rr.turnCursor == 0 {
+		rr.emitTurnInput()
+		return
+	}
+	rr.turnBuf = append(rr.turnBuf[:rr.turnCursor-1], rr.turnBuf[rr.turnCursor:]...)
+	rr.turnCursor--
+	rr.emitTurnInput()
+}
+
+// turnDelete deletes the rune at the cursor, leaving the cursor in place.
+func (rr *replReader) turnDelete() {
+	rr.clampTurnCursor()
+	if rr.turnCursor >= len(rr.turnBuf) {
+		rr.emitTurnInput()
+		return
+	}
+	rr.turnBuf = append(rr.turnBuf[:rr.turnCursor], rr.turnBuf[rr.turnCursor+1:]...)
+	rr.emitTurnInput()
+}
+
+func (rr *replReader) turnMoveLeft() {
+	rr.clampTurnCursor()
+	if rr.turnCursor > 0 {
+		rr.turnCursor--
+	}
+	rr.emitTurnInput()
+}
+
+func (rr *replReader) turnMoveRight() {
+	rr.clampTurnCursor()
+	if rr.turnCursor < len(rr.turnBuf) {
+		rr.turnCursor++
+	}
+	rr.emitTurnInput()
+}
+
+func (rr *replReader) turnMoveHome() {
+	rr.turnCursor = 0
+	rr.emitTurnInput()
+}
+
+func (rr *replReader) turnMoveEnd() {
+	rr.turnCursor = len(rr.turnBuf)
+	rr.emitTurnInput()
+}
+
+// clampTurnCursor keeps turnCursor within [0, len(turnBuf)] so a stale index
+// (e.g. after a deposit reset) never indexes out of range.
+func (rr *replReader) clampTurnCursor() {
+	if rr.turnCursor < 0 {
+		rr.turnCursor = 0
+	}
+	if rr.turnCursor > len(rr.turnBuf) {
+		rr.turnCursor = len(rr.turnBuf)
+	}
+}
+
+// depositTurnBuffer returns the accumulated buffer as an editable deposit and
+// resets it (and the cursor) for the next turn.
+func (rr *replReader) depositTurnBuffer() replInput {
+	text := string(rr.turnBuf)
+	rr.turnBuf = rr.turnBuf[:0]
+	rr.turnCursor = 0
+	return replInput{text: text, deposit: true}
+}
+
+func (rr *replReader) emitTurnInput() {
+	rr.clampTurnCursor()
+	if rr.onTurnInput != nil {
+		rr.onTurnInput(string(rr.turnBuf), rr.turnCursor)
+	}
+}
+
+// cancelTurnRead releases a blocked during-turn keystroke read so it deposits
+// its buffer; a no-op without a cancelable reader.
+func (rr *replReader) cancelTurnRead() {
+	if rr.cancelable != nil {
+		rr.cancelable.cancelRead()
+	}
+}
+
+// drainTurnCancel clears any unconsumed cancel token so a later prompt read is
+// not spuriously canceled.
+func (rr *replReader) drainTurnCancel() {
+	if rr.cancelable != nil {
+		rr.cancelable.drainCancel()
+	}
+}
+
+// turnBuffer returns the current during-turn buffer without consuming it.
+func (rr *replReader) turnBuffer() string {
+	return string(rr.turnBuf)
 }
 
 type lineTerminator byte
@@ -1031,9 +1462,67 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 	case "/vi":
 		app.viCommand(arg)
 	default:
-		fmt.Fprintf(app.Errw, "unknown command %q; type /help\n", cmd)
+		if suggestion := suggestCommand(cmd); suggestion != "" {
+			fmt.Fprintf(app.Errw, "unknown command %q; did you mean %s? (type /help)\n", cmd, suggestion)
+		} else {
+			fmt.Fprintf(app.Errw, "unknown command %q; type /help\n", cmd)
+		}
 	}
 	return false
+}
+
+// knownCommands is the meta-command vocabulary used for "did you mean …?"
+// suggestions on an unknown command (r59).
+var knownCommands = []string{
+	"/help", "/exit", "/quit", "/clear", "/compact", "/context", "/usage",
+	"/tools", "/image", "/edit", "/save", "/model", "/reasoning", "/effort",
+	"/agent", "/mode", "/plan", "/auto", "/handoff", "/background", "/skills", "/vi",
+}
+
+// suggestCommand returns the closest known command to cmd, or "" when nothing is
+// close enough. A shared prefix wins; otherwise the nearest by edit distance
+// within a small threshold scaled to the command length.
+func suggestCommand(cmd string) string {
+	cmd = strings.ToLower(strings.TrimSpace(cmd))
+	if len(cmd) < 2 {
+		return ""
+	}
+	best, bestDist := "", 1<<30
+	for _, known := range knownCommands {
+		if strings.HasPrefix(known, cmd) || strings.HasPrefix(cmd, known) {
+			return known
+		}
+		if d := levenshtein(cmd, known); d < bestDist {
+			best, bestDist = known, d
+		}
+	}
+	// Allow roughly one edit per three characters of the typed command.
+	if bestDist <= 1+len(cmd)/3 {
+		return best
+	}
+	return ""
+}
+
+// levenshtein is the standard edit distance between a and b (stdlib only).
+func levenshtein(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	curr := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		curr[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			curr[j] = min(prev[j]+1, curr[j-1]+1, prev[j-1]+cost)
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(rb)]
 }
 
 func (app *App) imageCommand(arg string) {
@@ -1251,7 +1740,16 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	if oldProvider != app.Provider || oldModel != app.Model {
 		app.onModelChanged()
 	}
+	app.prewarm() // the new model/provider invalidated the warm cache prefix (r43)
 	return true
+}
+
+// prewarm triggers a background prompt-cache warm-up after a cache-invalidating
+// event, when one is wired (r43).
+func (app *App) prewarm() {
+	if app.Prewarm != nil {
+		app.Prewarm()
+	}
 }
 
 func (app *App) switchModelAndPromptDefault(model string, reasoning llm.ReasoningConfig, readLine func(string) (string, error)) {
@@ -1474,18 +1972,39 @@ func (app *App) effortSummary() string {
 		fmt.Fprintf(&b, "available efforts for %s: none (model does not support reasoning)", model)
 		return b.String()
 	}
-	values, hasEffort := info.EffortValues()
-	if !hasEffort {
-		fmt.Fprintf(&b, "available efforts for %s: none (catalog lists no effort levels)", model)
-		return b.String()
-	}
+	values, catalogDefined := effortMenu(info)
 	if len(values) == 0 {
-		fmt.Fprintf(&b, "available efforts for %s: provider-defined (catalog lists no fixed levels)", model)
+		fmt.Fprintf(&b, "available efforts for %s: none (model takes other reasoning controls, not effort)", model)
 		return b.String()
 	}
 	fmt.Fprintf(&b, "available efforts for %s:", model)
 	app.writeEffortRows(&b, values)
+	if !catalogDefined {
+		b.WriteString("\n  (suggested defaults; this model also accepts a custom effort)")
+	}
 	return b.String()
+}
+
+// defaultEffortLevels is offered when a model supports reasoning but the catalog
+// enumerates no fixed effort values, so the user still gets a menu instead of a
+// dead end. Free-text effort remains accepted for such models (r61).
+var defaultEffortLevels = []string{"minimal", "low", "medium", "high"}
+
+// effortMenu returns the effort levels to present for a reasoning-capable model:
+// the catalog's values when it enumerates them, otherwise the suggested defaults
+// when the model accepts a free-text effort (provider-defined: supported with no
+// enumerated options). A model with other options but no effort option (e.g.
+// toggle-only) does not take effort, so an empty list is returned. The bool is
+// true only when the values are catalog-defined. Callers must gate on
+// info.Supported and handle an empty result.
+func effortMenu(info *llm.ReasoningInfo) (values []string, catalogDefined bool) {
+	if v, ok := info.EffortValues(); ok && len(v) > 0 {
+		return v, true
+	}
+	if len(info.Options) == 0 {
+		return defaultEffortLevels, false
+	}
+	return nil, false
 }
 
 func (app *App) reasoningSummary() string {
@@ -1502,12 +2021,12 @@ func (app *App) reasoningSummary() string {
 		return b.String()
 	}
 	fmt.Fprintf(&b, "available controls for %s:", model)
-	values, hasEffort := info.EffortValues()
+	values, catalogDefined := effortMenu(info)
 	switch {
-	case hasEffort && len(values) > 0:
+	case catalogDefined:
 		fmt.Fprintf(&b, "\n  effort: %s", strings.Join(values, ", "))
-	case hasEffort:
-		b.WriteString("\n  effort: provider-defined")
+	case len(values) > 0:
+		fmt.Fprintf(&b, "\n  effort: %s (suggested; custom allowed)", strings.Join(values, ", "))
 	default:
 		b.WriteString("\n  effort: unavailable")
 	}
@@ -1547,8 +2066,11 @@ func (app *App) promptReasoningEffort(model string, reasoning llm.ReasoningConfi
 	if !ok || !info.Supported {
 		return reasoning, nil
 	}
-	values, hasEffort := info.EffortValues()
-	if !hasEffort || len(values) == 0 {
+	// Offer the catalog's effort values, or a default menu when the catalog
+	// lists none for a provider-defined model (r61). A model that takes other
+	// controls but not effort yields no values: skip the prompt as before.
+	values, _ := effortMenu(info)
+	if len(values) == 0 {
 		return reasoning, nil
 	}
 	current := strings.TrimSpace(reasoning.Effort)
@@ -1925,6 +2447,9 @@ func (app *App) applyAgentSwitch(name string) error {
 		app.onModelChanged()
 		fmt.Fprintln(app.Errw, "[warning: provider/model changed; the new model may start without prompt cache, increasing token usage or cost]")
 	}
+	// The agent's tools/system (and possibly model/provider) changed, so re-warm
+	// the cache prefix in the background (r43).
+	app.prewarm()
 	return nil
 }
 
@@ -2073,6 +2598,11 @@ func (app *App) clear() {
 	if app.Background != nil {
 		app.Background.Clear()
 	}
+	// Echo the totals being discarded so a /clear never silently wipes the
+	// session's accumulated token/cost spend (r26).
+	if app.usage.InputTokens != 0 || app.usage.OutputTokens != 0 || app.usage.CostUSD != 0 {
+		fmt.Fprintln(app.Errw, app.usageReport("cleared session"))
+	}
 	app.Agent.SetTranscript(nil)
 	if app.Todos != nil {
 		app.Todos.Replace(nil)
@@ -2171,6 +2701,9 @@ func (app *App) compact() {
 	}
 	app.addUsage(agent.TurnUsage{Usage: u})
 	app.saveOrWarn(app.SessionPath)
+	// Compaction rewrote the transcript prefix, invalidating the warm cache;
+	// re-warm in the background (r43).
+	app.prewarm()
 }
 
 // SetUsage seeds the cumulative session totals, used when resuming a session so
@@ -2213,17 +2746,22 @@ func (app *App) usageKey() string {
 // addUsage folds one turn's usage into the session aggregate and the active
 // model's bucket, then refreshes the live cumulative readout to show the active
 // model's tokens with the session-total cost.
-func (app *App) addUsage(u agent.TurnUsage) {
-	var cost float64
-	if app.Registry != nil {
-		model := app.RegistryModel
-		if model == "" {
-			model = app.Model
-		}
-		if usd, known := app.Registry.Cost(model, u.Usage); known {
-			cost = usd
-		}
+// turnCost prices usage against the App's active model (the per-turn model),
+// used both for cumulative accounting and to feed the renderer's per-turn line
+// so a mid-turn model switch is not mispriced against a stale model (r63).
+func (app *App) turnCost(u llm.Usage) (float64, bool) {
+	if app.Registry == nil {
+		return 0, false
 	}
+	model := app.RegistryModel
+	if model == "" {
+		model = app.Model
+	}
+	return app.Registry.Cost(model, u)
+}
+
+func (app *App) addUsage(u agent.TurnUsage) {
+	cost, _ := app.turnCost(u.Usage)
 	addTotals(&app.usage, u.Usage, cost)
 	if app.usageByModel == nil {
 		app.usageByModel = map[string]session.UsageTotals{}
@@ -2952,11 +3490,15 @@ func (s *accumulatingSink) RequestContext() []string {
 }
 
 func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
+	// Price the turn against the App's own model (not the renderer's) so a
+	// mid-turn model switch is not mispriced, and hand it to the renderer (r63).
+	cost, costKnown := s.app.turnCost(u.Usage)
+	s.r.SetTurnCost(cost, costKnown)
 	s.r.TurnComplete(u)
 	s.app.addUsage(u)
 	// Regenerate the line for the session event record after cumulative totals
 	// have been updated by TurnComplete above.
-	line := usageLine(s.r.registry, s.r.model, u, s.r.now().Sub(s.r.turnStart),
+	line := usageLine(u, s.r.now().Sub(s.r.turnStart), cost, costKnown,
 		s.r.cumInput, s.r.cumOutput, s.r.cumCost)
 	usage := u.Usage
 	s.app.recordEvent(session.Event{

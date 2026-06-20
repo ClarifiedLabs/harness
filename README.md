@@ -84,6 +84,22 @@ catalog locally and refreshes that cache every 24 hours while serving; configure
 `models_dev_cache_ttl` or pass `-models-dev-cache-ttl 0` to disable the periodic
 refresh.
 
+Provider config files written by `--setup`/`--refresh-models` are **managed**
+(`"managed": true`) and store **no per-model prices**: the proxy resolves managed
+prices live from the models.dev cache, so the 24h refresh updates served prices
+without re-running `--setup` or restarting. A hand-written config without
+`"managed": true` is **manual** — the proxy never edits it and keeps its own
+`price` entries. A managed config may set `"price_source"` to resolve prices from
+a different models.dev provider id; `--setup` sets it to `openai` for
+`openai-codex` so codex models are priced at the normal OpenAI per-token rates.
+
+While serving, the proxy also answers a read-only `GET /v1/usage` that aggregates
+token and cost totals per provider/model (including delegate child-agent spend),
+and its `GET /v1/models` response carries a pricing `source_date` plus
+`max_age_seconds` so clients can detect stale catalog prices. For managed
+providers `source_date` tracks the models.dev cache (kept fresh by the
+refresher); for manual-only setups it is the provider config file's mtime.
+
 Use `harness --models` to list the providers, models, and cataloged reasoning
 controls exposed by the configured proxy. Use `harness --agents` to list the
 configured agents. Add `--format json` to `--models`, `--agents`, or
@@ -121,6 +137,27 @@ Saved sessions can be replayed or inspected:
 harness session replay ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
 ```
+
+## Runaway protection
+
+The agent loop has guardrails against runaway token burn, beyond the blunt
+`-max-turns` count (default 250):
+
+- `-max-turn-tokens <n>` stops a user turn once accumulated tokens (input +
+  cache + output + reasoning, across every model call in the turn) reach the
+  budget. `0`, the default, means unlimited.
+- `-max-prompt-cost <usd>` stops a user turn once its accumulated model cost (in
+  USD, using catalog pricing) reaches the budget. `0`, the default, means
+  unlimited. Only fires for models with catalog pricing — an uncatalogued model
+  has no known cost, so the budget cannot apply (you'll see the unknown-price
+  warning instead).
+- Tool calls that repeat with identical results are first steered, then hard
+  stopped; consecutive turns where every tool call fails are steered then broken.
+- `-tool-timeout <s>` (default 600) is a per-tool-call backstop so a hung tool
+  cannot stall a turn; `run_command`'s own `timeout_seconds` stays authoritative.
+
+When a turn hits its model-turn limit, harness issues one final tools-disabled
+request so the turn ends on an assistant summary rather than a dangling tool call.
 
 ## Plan and implementation handoff
 

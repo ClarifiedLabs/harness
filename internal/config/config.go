@@ -51,6 +51,9 @@ type Config struct {
 
 	// Loop / model limits.
 	MaxTurns                  int               `json:"max_turns"`              // -max-turns, default 250
+	MaxTurnTokens             int               `json:"max_turn_tokens"`        // -max-turn-tokens, accumulated-token ceiling per user turn; 0 = unlimited
+	MaxPromptCostUSD          float64           `json:"max_prompt_cost_usd"`    // -max-prompt-cost, accumulated USD ceiling per user turn; 0 = unlimited (needs catalog pricing)
+	ToolTimeoutSeconds        int               `json:"tool_timeout_seconds"`   // -tool-timeout, per-tool-call dispatch ceiling (s); default 600, <=0 disables
 	DefaultContextWindow      int               `json:"default_context_window"` // -default-context-window, fallback when metadata lacks a window
 	ContextWindow             int               `json:"context_window"`         // -context-window, 0 = registry/default
 	ReasoningEffort           string            `json:"reasoning_effort"`
@@ -132,6 +135,20 @@ type MCPConfig struct {
 	// it authenticates to.
 	Headers map[string]string `json:"headers"`
 
+	// MaxTools optionally caps how many discovered remote (HTTP-proxy) MCP tool
+	// names are auto-exposed to agents whose mcp_tools mode is read_only/all. 0
+	// means unlimited. A single chatty server can otherwise add thousands of
+	// schema tokens per turn. Local MCP and LSP tools are not counted. On overflow
+	// the surface is truncated in discovery order and a warning is logged; the
+	// catalog still holds every tool so an explicit allowed_tools whitelist can
+	// still name one the cap excludes. Config-file-only (structured scoping data,
+	// matching the Headers precedent).
+	MaxTools int `json:"max_tools"`
+
+	// DisabledServers lists remote MCP server labels (the segment between mcp__ and
+	// the next __) whose tools are dropped from auto-exposure. Config-file-only.
+	DisabledServers []string `json:"disabled_servers,omitempty"`
+
 	// Local configures an explicitly enabled local stdio MCP service that harness
 	// spawns (e.g. a local harness-mcp-proxy hosting local tools). It is
 	// independent of Enable: a user can run a local stdio MCP service with no
@@ -152,10 +169,18 @@ type LocalMCPConfig struct {
 }
 
 // LSPConfig is the resolved first-class LSP feature block. Enable follows
-// env > file > default, while Servers is config-file-only because it is
-// structured data.
+// env > file > default, while Servers and Tools are config-file-only because
+// they are structured data.
 type LSPConfig struct {
-	Enable  bool                       `json:"enable"`
+	Enable bool `json:"enable"`
+
+	// Tools is an optional allowlist of bare LSP tool names (e.g. "definition",
+	// "references", "diagnostics") to register. Empty/unset registers the full
+	// built-in set. It lets an operator expose a subset without an allowed_tools
+	// whitelist, which would also disable MCP auto-exposure. The "lsp_" prefix is
+	// optional in each entry.
+	Tools []string `json:"tools,omitempty"`
+
 	Servers map[string]LSPServerConfig `json:"servers,omitempty"`
 }
 
@@ -172,12 +197,13 @@ type LSPServerConfig struct {
 }
 
 const (
-	defaultMaxTurns         = 250
-	defaultContextWindow    = 256_000
-	defaultDelegateMaxTurns = 20
-	TimestampShort          = "short"
-	TimestampFull           = "full"
-	TimestampNone           = "none"
+	defaultMaxTurns           = 250
+	defaultContextWindow      = 256_000
+	defaultDelegateMaxTurns   = 20
+	defaultToolTimeoutSeconds = 600
+	TimestampShort            = "short"
+	TimestampFull             = "full"
+	TimestampNone             = "none"
 
 	// DefaultHistFile controls the default REPL history file location. The
 	// actual default is resolved by the caller (cmd/harness/main.go) against
@@ -218,6 +244,9 @@ type fileConfig struct {
 	SystemPrompt              string                     `json:"system_prompt"`
 	NoEnv                     *bool                      `json:"no_env"`
 	MaxTurns                  *int                       `json:"max_turns"`
+	MaxTurnTokens             *int                       `json:"max_turn_tokens"`
+	MaxPromptCostUSD          *float64                   `json:"max_prompt_cost_usd"`
+	ToolTimeoutSeconds        *int                       `json:"tool_timeout_seconds"`
 	DefaultContextWindow      *int                       `json:"default_context_window"`
 	ContextWindow             *int                       `json:"context_window"`
 	ReasoningEffort           string                     `json:"reasoning_effort"`
@@ -264,10 +293,12 @@ type fileConfig struct {
 // follow the existing unset-detection convention: a nil block means "no mcp
 // config", letting env and defaults supply every field.
 type fileMCPConfig struct {
-	Enable  *bool               `json:"enable"`
-	Proxy   string              `json:"proxy"`
-	Headers map[string]string   `json:"headers"`
-	Local   *fileLocalMCPConfig `json:"local"`
+	Enable          *bool               `json:"enable"`
+	Proxy           string              `json:"proxy"`
+	Headers         map[string]string   `json:"headers"`
+	MaxTools        *int                `json:"max_tools"`
+	DisabledServers []string            `json:"disabled_servers"`
+	Local           *fileLocalMCPConfig `json:"local"`
 }
 
 // fileLocalMCPConfig mirrors the config file's "mcp.local" object.
@@ -281,6 +312,7 @@ type fileLocalMCPConfig struct {
 // fileLSPConfig mirrors the config file's top-level "lsp" object.
 type fileLSPConfig struct {
 	Enable  *bool                      `json:"enable"`
+	Tools   []string                   `json:"tools"`
 	Servers map[string]LSPServerConfig `json:"servers"`
 }
 
@@ -363,6 +395,12 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 
 	c.MaxTurns = resolveInt(set["max-turns"], *fMaxTurns,
 		getenv("HARNESS_MAX_TURNS"), fc.MaxTurns, defaultMaxTurns)
+	c.MaxTurnTokens = resolveInt(set["max-turn-tokens"], *f.maxTurnTokens,
+		getenv("HARNESS_MAX_TURN_TOKENS"), fc.MaxTurnTokens, 0)
+	c.MaxPromptCostUSD = resolveFloat(set["max-prompt-cost"], *f.maxPromptCost,
+		getenv("HARNESS_MAX_PROMPT_COST"), fc.MaxPromptCostUSD, 0)
+	c.ToolTimeoutSeconds = resolveInt(set["tool-timeout"], *f.toolTimeout,
+		getenv("HARNESS_TOOL_TIMEOUT"), fc.ToolTimeoutSeconds, defaultToolTimeoutSeconds)
 	c.DefaultContextWindow = resolveInt(set["default-context-window"], *fDefaultContextWindow,
 		getenv("HARNESS_DEFAULT_CONTEXT_WINDOW"), fc.DefaultContextWindow, defaultContextWindow)
 	c.ContextWindow = resolveInt(set["context-window"], *fContextWindow,
@@ -490,6 +528,17 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 			}
 			c.MCP.Headers = headers
 		}
+		// MaxTools and DisabledServers are config-file-only structured scoping
+		// data (no env layer), matching the Headers precedent.
+		if fc.MCP.MaxTools != nil {
+			if *fc.MCP.MaxTools < 0 {
+				return Config{}, fmt.Errorf("mcp.max_tools must not be negative")
+			}
+			c.MCP.MaxTools = *fc.MCP.MaxTools
+		}
+		if len(fc.MCP.DisabledServers) > 0 {
+			c.MCP.DisabledServers = append([]string(nil), fc.MCP.DisabledServers...)
+		}
 		// Local block: Command/Args are config-file-only; Env supports ${VAR}
 		// interpolation (reusing the headers expander).
 		if fc.MCP.Local != nil {
@@ -518,6 +567,9 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	var lspEnableFile *bool
 	if fc.LSP != nil {
 		lspEnableFile = fc.LSP.Enable
+		if len(fc.LSP.Tools) > 0 {
+			c.LSP.Tools = append([]string(nil), fc.LSP.Tools...)
+		}
 		if len(fc.LSP.Servers) > 0 {
 			c.LSP.Servers = cloneLSPServers(fc.LSP.Servers)
 		}
@@ -789,6 +841,9 @@ type flags struct {
 	histFile                       *string
 	histFileSize, histSize         *int
 	maxTurns                       *int
+	maxTurnTokens                  *int
+	maxPromptCost                  *float64
+	toolTimeout                    *int
 	defaultContextWindow           *int
 	contextWindow                  *int
 	reasoningEffort                *string
@@ -837,6 +892,9 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.histFileSize = fs.Int("histfilesize", DefaultHistFileSize, "max REPL history entries stored on disk (0 disables)")
 	f.histSize = fs.Int("histsize", DefaultHistSize, "max REPL history entries loaded into memory (0 disables)")
 	f.maxTurns = fs.Int("max-turns", defaultMaxTurns, "model turns per user prompt; <=0 means unlimited")
+	f.maxTurnTokens = fs.Int("max-turn-tokens", 0, "stop a user turn after this many accumulated tokens; 0 means unlimited")
+	f.maxPromptCost = fs.Float64("max-prompt-cost", 0, "stop a user turn once its accumulated model cost reaches this many USD; 0 means unlimited (requires a model with catalog pricing)")
+	f.toolTimeout = fs.Int("tool-timeout", defaultToolTimeoutSeconds, "per-tool-call timeout backstop in seconds; <=0 disables (run_command's own timeout_seconds still applies)")
 	f.defaultContextWindow = fs.Int("default-context-window", defaultContextWindow, "default context window for configured models without context metadata (tokens)")
 	f.contextWindow = fs.Int("context-window", 0, "context window override (tokens)")
 	f.reasoningEffort = fs.String("reasoning-effort", "", "reasoning/thinking effort (provider/model dependent)")
@@ -1029,6 +1087,22 @@ func resolveInt(flagSet bool, flagVal int, envVal string, fileVal *int, def int)
 	}
 	if envVal != "" {
 		if n, err := strconv.Atoi(envVal); err == nil {
+			return n
+		}
+	}
+	if fileVal != nil {
+		return *fileVal
+	}
+	return def
+}
+
+// resolveFloat mirrors resolveInt for float64 values. fileVal of nil means unset.
+func resolveFloat(flagSet bool, flagVal float64, envVal string, fileVal *float64, def float64) float64 {
+	if flagSet {
+		return flagVal
+	}
+	if envVal != "" {
+		if n, err := strconv.ParseFloat(envVal, 64); err == nil {
 			return n
 		}
 	}

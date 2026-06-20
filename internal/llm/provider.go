@@ -34,6 +34,19 @@ type Request struct {
 	StoreResponse      bool     `json:"store_response,omitempty"`
 	PreviousResponseID string   `json:"previous_response_id,omitempty"`
 	RequestContext     []string `json:"request_context,omitempty"`
+
+	// PromptCacheKey is a stable per-session routing hint emitted as
+	// prompt_cache_key on OpenAI/Responses so a session's requests, which share a
+	// large system+tools prefix, keep landing on the same cache backend. Empty =
+	// omitted; ignored by providers that don't support it.
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
+
+	// LongCacheTTL requests the 1-hour Anthropic prompt-cache breakpoint on the
+	// stable system+tools anchors (worth its 2x write cost only across the
+	// multi-minute pauses of an interactive REPL). One-shot, delegate, and other
+	// non-interactive runs leave it false to take the cheaper 5-minute breakpoint.
+	// Ignored by non-Anthropic dialects.
+	LongCacheTTL bool `json:"long_cache_ttl,omitempty"`
 }
 
 // ResponseState is the resumable continuation state for Responses API
@@ -80,6 +93,13 @@ type StreamEvent struct {
 	// carries an opaque redacted-thinking payload instead of Text.
 	Signature    string `json:"signature,omitempty"`
 	RedactedData string `json:"redacted_data,omitempty"`
+
+	// ReasoningID / ReasoningEncrypted carry a Responses reasoning item's id and
+	// opaque encrypted_content on an EventReasoningSummary. They are set (with an
+	// empty Text, so nothing displays) when stateless reasoning replay is enabled,
+	// and persisted as a BlockReasoning to round-trip on the next turn.
+	ReasoningID        string `json:"reasoning_id,omitempty"`
+	ReasoningEncrypted string `json:"reasoning_encrypted,omitempty"`
 
 	// EventToolCall*; Index disambiguates parallel calls within one turn.
 	Index     int             `json:"index,omitempty"`

@@ -2929,3 +2929,32 @@ func expectedPlanToolNames() []string {
 func expectedDefaultToolNames() []string {
 	return append(tools.DefaultNames(), "update_todos", "delegate", "background_jobs", "record_plan")
 }
+
+func TestFuzzyMatchModel(t *testing.T) {
+	catalog := protocol.Catalog{Providers: []protocol.Provider{
+		{ID: "anthropic", Models: []protocol.Model{{ID: "claude-opus-4-8"}, {ID: "claude-sonnet-4-8"}}},
+		{ID: "openai", Models: []protocol.Model{{ID: "gpt-5.5"}}},
+	}}
+
+	// Exact match.
+	if m, _ := fuzzyMatchModel(catalog, "gpt-5.5"); m != "gpt-5.5" {
+		t.Errorf("exact: got %q", m)
+	}
+	// Unique substring -> match.
+	if m, _ := fuzzyMatchModel(catalog, "opus"); m != "claude-opus-4-8" {
+		t.Errorf("substring: got %q", m)
+	}
+	// Provider-qualified input strips the provider before matching.
+	if m, _ := fuzzyMatchModel(catalog, "anthropic:opus"); m != "claude-opus-4-8" {
+		t.Errorf("qualified: got %q", m)
+	}
+	// Ambiguous prefix -> candidates, no single match.
+	m, candidates := fuzzyMatchModel(catalog, "claude")
+	if m != "" || len(candidates) != 2 {
+		t.Errorf("ambiguous: match=%q candidates=%v, want 2 candidates", m, candidates)
+	}
+	// No match.
+	if m, c := fuzzyMatchModel(catalog, "llama"); m != "" || len(c) != 0 {
+		t.Errorf("no-match: match=%q candidates=%v", m, c)
+	}
+}

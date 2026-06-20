@@ -622,6 +622,94 @@ func TestImageDetailRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestToolTimeoutResolution(t *testing.T) {
+	c, err := Load([]string{"-model", "gpt-5.5"}, noEnv, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.ToolTimeoutSeconds != defaultToolTimeoutSeconds {
+		t.Fatalf("default tool-timeout %d, want %d", c.ToolTimeoutSeconds, defaultToolTimeoutSeconds)
+	}
+
+	cfgPath := writeConfig(t, `{"tool_timeout_seconds":900}`)
+	c, err = Load([]string{"-tool-timeout", "45"}, noEnv, cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.ToolTimeoutSeconds != 45 {
+		t.Fatalf("tool-timeout %d, want 45 (flag beats file)", c.ToolTimeoutSeconds)
+	}
+
+	c, err = Load(nil, noEnv, cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.ToolTimeoutSeconds != 900 {
+		t.Fatalf("tool-timeout %d, want 900 (file beats default)", c.ToolTimeoutSeconds)
+	}
+
+	c, err = Load(nil, envFrom(map[string]string{"HARNESS_TOOL_TIMEOUT": "120"}), "")
+	if err != nil {
+		t.Fatalf("Load env: %v", err)
+	}
+	if c.ToolTimeoutSeconds != 120 {
+		t.Fatalf("env tool-timeout %d, want 120", c.ToolTimeoutSeconds)
+	}
+}
+
+func TestMaxTurnTokensResolution(t *testing.T) {
+	c, err := Load([]string{"-model", "gpt-5.5"}, noEnv, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.MaxTurnTokens != 0 {
+		t.Fatalf("default max-turn-tokens %d, want 0 (unlimited)", c.MaxTurnTokens)
+	}
+
+	c, err = Load([]string{"-max-turn-tokens", "50000"}, noEnv, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.MaxTurnTokens != 50000 {
+		t.Fatalf("max-turn-tokens %d, want 50000", c.MaxTurnTokens)
+	}
+}
+
+func TestMaxPromptCostResolution(t *testing.T) {
+	c, err := Load([]string{"-model", "gpt-5.5"}, noEnv, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.MaxPromptCostUSD != 0 {
+		t.Fatalf("default max-prompt-cost %v, want 0 (unlimited)", c.MaxPromptCostUSD)
+	}
+
+	c, err = Load([]string{"-max-prompt-cost", "2.50"}, noEnv, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.MaxPromptCostUSD != 2.50 {
+		t.Fatalf("max-prompt-cost %v, want 2.50 (flag)", c.MaxPromptCostUSD)
+	}
+
+	cfgPath := writeConfig(t, `{"max_prompt_cost_usd":1.0}`)
+	c, err = Load(nil, noEnv, cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.MaxPromptCostUSD != 1.0 {
+		t.Fatalf("max-prompt-cost %v, want 1.0 (file)", c.MaxPromptCostUSD)
+	}
+
+	c, err = Load(nil, envFrom(map[string]string{"HARNESS_MAX_PROMPT_COST": "3.25"}), "")
+	if err != nil {
+		t.Fatalf("Load env: %v", err)
+	}
+	if c.MaxPromptCostUSD != 3.25 {
+		t.Fatalf("env max-prompt-cost %v, want 3.25", c.MaxPromptCostUSD)
+	}
+}
+
 func TestMaxTurnsFlagBeatsFile(t *testing.T) {
 	cfgPath := writeConfig(t, `{"max_turns":7}`)
 	c, err := Load([]string{"-max-turns", "9"}, noEnv, cfgPath)
@@ -1184,6 +1272,33 @@ func TestMCPDefaults(t *testing.T) {
 	if c.MCP.Proxy != "" {
 		t.Errorf("MCP.Proxy default = %q, want empty (resolved at use)", c.MCP.Proxy)
 	}
+	if c.MCP.MaxTools != 0 {
+		t.Errorf("MCP.MaxTools default = %d, want 0 (unlimited)", c.MCP.MaxTools)
+	}
+	if c.MCP.DisabledServers != nil {
+		t.Errorf("MCP.DisabledServers default = %v, want nil", c.MCP.DisabledServers)
+	}
+}
+
+func TestMCPToolLimitsFromFile(t *testing.T) {
+	cfgPath := writeConfig(t, `{"mcp":{"enable":true,"max_tools":12,"disabled_servers":["playwright","browser"]}}`)
+	c, err := Load([]string{"-model", "gpt-5.5"}, noEnv, cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.MCP.MaxTools != 12 {
+		t.Errorf("MCP.MaxTools = %d, want 12", c.MCP.MaxTools)
+	}
+	if len(c.MCP.DisabledServers) != 2 || c.MCP.DisabledServers[0] != "playwright" || c.MCP.DisabledServers[1] != "browser" {
+		t.Errorf("MCP.DisabledServers = %v, want [playwright browser]", c.MCP.DisabledServers)
+	}
+}
+
+func TestMCPNegativeMaxToolsErrors(t *testing.T) {
+	cfgPath := writeConfig(t, `{"mcp":{"max_tools":-1}}`)
+	if _, err := Load([]string{"-model", "gpt-5.5"}, noEnv, cfgPath); err == nil {
+		t.Fatal("negative mcp.max_tools should be a load error")
+	}
 }
 
 func TestMCPFromFile(t *testing.T) {
@@ -1266,6 +1381,20 @@ func TestLSPDefaults(t *testing.T) {
 	}
 	if c.LSP.Servers != nil {
 		t.Errorf("LSP.Servers default = %v, want nil", c.LSP.Servers)
+	}
+	if c.LSP.Tools != nil {
+		t.Errorf("LSP.Tools default = %v, want nil", c.LSP.Tools)
+	}
+}
+
+func TestLSPToolsAllowlistFromFile(t *testing.T) {
+	cfgPath := writeConfig(t, `{"lsp":{"enable":true,"tools":["definition","references"]}}`)
+	c, err := Load([]string{"-model", "gpt-5.5"}, noEnv, cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.LSP.Tools) != 2 || c.LSP.Tools[0] != "definition" || c.LSP.Tools[1] != "references" {
+		t.Fatalf("LSP.Tools = %v, want [definition references]", c.LSP.Tools)
 	}
 }
 

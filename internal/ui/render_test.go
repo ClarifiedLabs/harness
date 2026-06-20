@@ -118,12 +118,12 @@ func TestVerboseAddsSnippet(t *testing.T) {
 	}
 }
 
-func TestQuietSuppressesStatus(t *testing.T) {
+func TestQuietSuppressesStatusButKeepsUsage(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{Quiet: true, ToolStream: true})
 
-	// ModelTurnStart, ToolUseStart (streamed), ToolStart, ToolResult, Notice,
-	// and TurnComplete should all produce nothing on errw.
+	// Progress noise (ModelTurnStart, tool lines, notices) is suppressed, but
+	// -quiet alone still prints the single per-turn usage line (r25).
 	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
 	r.ToolUseStart(llm.ToolCall{ID: "c1", Name: "read_file"})
 	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)})
@@ -132,14 +132,32 @@ func TestQuietSuppressesStatus(t *testing.T) {
 	r.StartTurn()
 	r.TurnComplete(agent.TurnUsage{})
 
-	if errw.Len() != 0 {
-		t.Errorf("quiet mode: errw should be empty, got %q", errw.String())
+	got := errw.String()
+	if strings.Contains(got, "waiting") || strings.Contains(got, "read_file") || strings.Contains(got, "something happened") {
+		t.Errorf("quiet mode should suppress progress lines, got %q", got)
+	}
+	if !strings.Contains(got, "[turn:") {
+		t.Errorf("quiet mode should still print the per-turn usage line (r25), got %q", got)
 	}
 
 	// Assistant text must still flow to out.
 	r.TextDelta("hello")
 	if out.String() != "hello" {
 		t.Errorf("quiet mode: assistant text = %q, want %q", out.String(), "hello")
+	}
+}
+
+func TestSuppressUsageSilencesEverything(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{Quiet: true, SuppressUsage: true})
+
+	// A fully silent piped run: even the usage line is dropped (r25).
+	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	r.StartTurn()
+	r.TurnComplete(agent.TurnUsage{})
+
+	if errw.Len() != 0 {
+		t.Errorf("SuppressUsage should silence errw entirely, got %q", errw.String())
 	}
 }
 
@@ -462,7 +480,7 @@ func TestModelTurnCompletePrintsCostBeforeToolUseProgress(t *testing.T) {
 	}
 }
 
-func TestModelTurnCompleteUnknownModelOmitsCost(t *testing.T) {
+func TestModelTurnCompleteUnknownModelOmitsCostButWarnsOnce(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{
 		Model:    "unknown-model",
@@ -474,9 +492,23 @@ func TestModelTurnCompleteUnknownModelOmitsCost(t *testing.T) {
 		Attempt:   1,
 		Usage:     llm.Usage{InputTokens: 100, OutputTokens: 10},
 	})
+	r.ModelTurnComplete(agent.ModelTurnUsage{
+		ModelTurn: 2,
+		Attempt:   1,
+		Usage:     llm.Usage{InputTokens: 50, OutputTokens: 5},
+	})
 
-	if out.Len() != 0 || errw.Len() != 0 {
-		t.Errorf("unknown model cost should be silent, out=%q errw=%q", out.String(), errw.String())
+	if out.Len() != 0 {
+		t.Errorf("unknown model cost should not write to out, out=%q", out.String())
+	}
+	got := errw.String()
+	// No dollar figure is ever shown for an unpriced model...
+	if strings.Contains(got, "$") {
+		t.Errorf("unknown model must not print a cost, got %q", got)
+	}
+	// ...but the one-time no-price notice is emitted exactly once (r16).
+	if n := strings.Count(got, "no price configured"); n != 1 {
+		t.Errorf("no-price notice should appear exactly once, got %d in %q", n, got)
 	}
 }
 
@@ -704,5 +736,233 @@ func TestUsageLineCumulativeAcrossTurns(t *testing.T) {
 	}
 	if !strings.Contains(line2, "300 (500) out") {
 		t.Errorf("turn 2 should show 300 per-turn and 500 cumulative, got %q", line2)
+	}
+}
+
+// --- r12 live wait-time counter + during-turn input line ---
+
+func liveRenderer(out, errw *bytes.Buffer, now func() time.Time) *Renderer {
+	return NewRenderer(out, errw, RenderOptions{
+		LiveStatus: true,
+		Now:        now,
+		Width:      func() int { return 80 },
+	})
+}
+
+func TestLiveCounterPaintsInPlaceAndCarriesContextPercent(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
+	r := liveRenderer(&out, &errw, func() time.Time { return now })
+
+	r.StartTurn()
+	r.ModelTurnStart(1, 1, agent.ContextEstimate{Total: 30, Window: 100})
+	defer r.StopProgress()
+
+	got := errw.String()
+	if out.Len() != 0 {
+		t.Fatalf("counter must not touch stdout, got %q", out.String())
+	}
+	if !strings.Contains(got, "\r\x1b[2K") {
+		t.Fatalf("counter should repaint in place with \\r\\x1b[2K, got %q", got)
+	}
+	if !strings.Contains(got, "[model: turn 1 · 0s · ctx 30%]") {
+		t.Fatalf("counter should show elapsed + context %%, got %q", got)
+	}
+	if strings.Contains(got, "waiting") {
+		t.Fatalf("live mode should not print the static waiting line, got %q", got)
+	}
+}
+
+func TestLiveCounterTickAdvancesElapsed(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
+	r := liveRenderer(&out, &errw, func() time.Time { return now })
+
+	r.StartTurn()
+	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	now = now.Add(12 * time.Second)
+	r.tick() // simulate a ticker fire without waiting on the real timer
+	defer r.StopProgress()
+
+	if got := errw.String(); !strings.Contains(got, "[model: turn 1 · 12s]") {
+		t.Fatalf("tick should repaint with the elapsed seconds, got %q", got)
+	}
+}
+
+func TestLiveCounterErasedWhenOutputAppears(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
+	r := liveRenderer(&out, &errw, func() time.Time { return now })
+
+	r.StartTurn()
+	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	errw.Reset() // focus on what happens when streamed output arrives
+	r.TextDelta("hello")
+
+	if got := out.String(); got != "hello" {
+		t.Fatalf("assistant text should stream to stdout, got %q", got)
+	}
+	if got := errw.String(); got != "\r\x1b[2K" {
+		t.Fatalf("first output should erase the counter, got %q", got)
+	}
+}
+
+func TestLiveCounterTicksDuringToolGap(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
+	r := liveRenderer(&out, &errw, func() time.Time { return now })
+
+	r.StartTurn()
+	r.ToolStart(llm.ToolCall{ID: "c1", Name: "grep", Input: json.RawMessage(`{"args":["x"]}`)})
+	defer r.StopProgress()
+
+	got := errw.String()
+	if !strings.Contains(got, "[tool: grep started") {
+		t.Fatalf("tool start line should scroll, got %q", got)
+	}
+	if !strings.Contains(got, "[tool: grep · 0s]") {
+		t.Fatalf("a counter should tick during the tool gap, got %q", got)
+	}
+}
+
+func TestLiveInputLineRendersTypedBuffer(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
+	r := liveRenderer(&out, &errw, func() time.Time { return now })
+
+	r.StartTurn()
+	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	errw.Reset()
+	r.SetInputLine("fix the bug", len("fix the bug"))
+	defer r.StopProgress()
+
+	if got := errw.String(); !strings.Contains(got, "[model: turn 1 · 0s] > fix the bug") {
+		t.Fatalf("input line should render the typed buffer after the counter, got %q", got)
+	}
+}
+
+func TestLiveInputLineSanitizesNewlines(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
+	r := liveRenderer(&out, &errw, func() time.Time { return now })
+
+	r.StartTurn()
+	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	errw.Reset()
+	r.SetInputLine("line1\nline2", len("line1\nline2"))
+	defer r.StopProgress()
+
+	got := errw.String()
+	if strings.Contains(got, "\n") {
+		t.Fatalf("the typed buffer's newline must not break the single counter line, got %q", got)
+	}
+	if !strings.Contains(got, "line1 line2") {
+		t.Fatalf("embedded newline should render as a space, got %q", got)
+	}
+}
+
+func TestUsageLineShowsCacheAndReasoning(t *testing.T) {
+	line := usageLine(agent.TurnUsage{
+		ModelTurns: 1,
+		Usage:      llm.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 3000, ReasoningTokens: 450},
+	}, time.Second, 0, false, 1000, 200, 0)
+	if !strings.Contains(line, "cache 3.0k read") {
+		t.Errorf("usage line should report cache reads, got %q", line)
+	}
+	if !strings.Contains(line, "(75%)") {
+		t.Errorf("usage line should report the cache-hit ratio, got %q", line)
+	}
+	if !strings.Contains(line, "450 reasoning") {
+		t.Errorf("usage line should report reasoning tokens, got %q", line)
+	}
+}
+
+func TestClipDisplayTailKeepsTailWithinWidth(t *testing.T) {
+	out := clipDisplayTail("abcdefghij", 5)
+	if displayWidth(out) > 5 {
+		t.Fatalf("clip should fit within 5 cols, got %q (width %d)", out, displayWidth(out))
+	}
+	if !strings.HasPrefix(out, "…") || !strings.HasSuffix(out, "j") {
+		t.Fatalf("clip should keep the tail and mark truncation, got %q", out)
+	}
+}
+
+func TestClipDisplayTailCountsWideRunes(t *testing.T) {
+	// Five double-width runes = 10 cols; must clip to fit 6 cols without wrap.
+	out := clipDisplayTail("漢字漢字漢", 6)
+	if displayWidth(out) > 6 {
+		t.Fatalf("wide-char clip exceeded width: %q has width %d", out, displayWidth(out))
+	}
+}
+
+func TestClipStatusLineCursorColumn(t *testing.T) {
+	const prefix = "[model: turn 1 · 0s] > "
+	prefixW := displayWidth(prefix)
+
+	t.Run("fits shows whole line, cursor at true column", func(t *testing.T) {
+		text, col := clipStatusLine(prefix, "hello", 2, 80)
+		if text != prefix+"hello" {
+			t.Fatalf("text = %q, want %q", text, prefix+"hello")
+		}
+		if want := prefixW + displayWidth("he"); col != want {
+			t.Fatalf("cursorCol = %d, want %d", col, want)
+		}
+	})
+
+	t.Run("wide runes advance the cursor by display width", func(t *testing.T) {
+		// Cursor between the two double-width runes.
+		text, col := clipStatusLine("> ", "漢字", 1, 80)
+		if text != "> 漢字" {
+			t.Fatalf("text = %q, want %q", text, "> 漢字")
+		}
+		if want := displayWidth("> ") + displayWidth("漢"); col != want {
+			t.Fatalf("cursorCol = %d, want %d (must count the wide rune as 2 cols)", col, want)
+		}
+	})
+
+	t.Run("overflow tail-anchored keeps cursor at end visible", func(t *testing.T) {
+		input := strings.Repeat("a", 100)
+		maxW := 10
+		text, col := clipStatusLine("> ", input, len(input), maxW)
+		if displayWidth(text) > maxW {
+			t.Fatalf("clipped text %q width %d exceeds maxW %d", text, displayWidth(text), maxW)
+		}
+		if !strings.HasPrefix(text, "…") {
+			t.Fatalf("overflow should mark the hidden head with a leading …, got %q", text)
+		}
+		if col < 0 || col > maxW {
+			t.Fatalf("cursorCol = %d, must be within [0,%d] so it stays on the single row", col, maxW)
+		}
+		if col != displayWidth(text) {
+			t.Fatalf("cursor at end should sit just past the visible tail: col=%d, visible width=%d", col, displayWidth(text))
+		}
+	})
+
+	t.Run("overflow scrolls left to reveal the cursor", func(t *testing.T) {
+		input := strings.Repeat("a", 100)
+		maxW := 10
+		text, col := clipStatusLine("> ", input, 0, maxW)
+		if displayWidth(text) > maxW {
+			t.Fatalf("clipped text %q width %d exceeds maxW %d", text, displayWidth(text), maxW)
+		}
+		if !strings.HasPrefix(text, "…") || !strings.HasSuffix(text, "…") {
+			t.Fatalf("cursor at home in a long line should show both head and tail markers, got %q", text)
+		}
+		// Cursor sits just after the leading … (column 1), proving the window
+		// scrolled left to keep it visible instead of staying tail-anchored.
+		if col != 1 {
+			t.Fatalf("cursorCol = %d, want 1 (just after the leading …)", col)
+		}
+	})
+}
+
+func TestApproachingCompactionNoticeOnce(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{})
+	r.StartTurn()
+	r.ModelTurnStart(1, 1, agent.ContextEstimate{Total: 85, Window: 100})
+	r.ModelTurnStart(2, 1, agent.ContextEstimate{Total: 90, Window: 100})
+	if n := strings.Count(errw.String(), "approaching compaction"); n != 1 {
+		t.Fatalf("compaction notice should fire once, got %d in %q", n, errw.String())
 	}
 }

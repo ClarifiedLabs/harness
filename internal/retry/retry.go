@@ -17,6 +17,10 @@ import (
 const (
 	baseDelay = 500 * time.Millisecond
 	cap30s    = 30 * time.Second
+	// cap60s is the higher jitter ceiling for the rate-limit class (429/529),
+	// which recovers over minutes rather than the seconds typical of a transient
+	// 500/502/503, so a longer backoff between attempts wastes fewer requests.
+	cap60s = 60 * time.Second
 )
 
 var retryDelayHintRE = regexp.MustCompile(`(?i)\btry again in\s+([0-9]+(?:\.[0-9]+)?\s*(?:ms|s|m|h))\b`)
@@ -26,9 +30,20 @@ var retryDelayHintRE = regexp.MustCompile(`(?i)\btry again in\s+([0-9]+(?:\.[0-9
 // retryAfter as a floor, so the result is never below a server-supplied
 // Retry-After even when jitter would pick a smaller value.
 func Next(attempt int, retryAfter time.Duration) time.Duration {
-	ceiling := cap30s
+	return next(attempt, retryAfter, cap30s)
+}
+
+// NextRateLimited is Next with the higher cap60s ceiling for the rate-limit
+// class. Use it when backing off a 429/529 so attempts spread over a longer
+// window matching how rate limits recover.
+func NextRateLimited(attempt int, retryAfter time.Duration) time.Duration {
+	return next(attempt, retryAfter, cap60s)
+}
+
+func next(attempt int, retryAfter, maxCeiling time.Duration) time.Duration {
+	ceiling := maxCeiling
 	if attempt < 60 {
-		if scaled := baseDelay << uint(attempt); scaled > 0 && scaled < cap30s {
+		if scaled := baseDelay << uint(attempt); scaled > 0 && scaled < maxCeiling {
 			ceiling = scaled
 		}
 	}
@@ -53,6 +68,14 @@ func RetryableStatus(code int) bool {
 	default:
 		return false
 	}
+}
+
+// RateLimitedStatus reports whether an HTTP status code is in the rate-limit
+// class — 429 (too many requests) and 529 (overloaded) — which recovers over
+// minutes. These warrant the longer cap60s backoff and must not be re-multiplied
+// by an outer retry loop on top of the connect-level budget already spent.
+func RateLimitedStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code == 529
 }
 
 // ParseRetryAfter parses a Retry-After header value (delay-seconds or HTTP-date)

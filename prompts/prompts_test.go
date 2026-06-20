@@ -44,6 +44,28 @@ func TestSystemPromptRequestsToolCommentary(t *testing.T) {
 	}
 }
 
+func TestSystemPromptSteersAgainstLoops(t *testing.T) {
+	system := strings.ToLower(System())
+	for _, want := range []string{
+		"same result",  // anti-loop: stop repeating a failing/identical call
+		"re-read",      // don't re-read unchanged files
+		"already have", // don't re-run commands whose output you already have
+	} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("system prompt missing anti-loop guidance %q:\n%s", want, System())
+		}
+	}
+}
+
+func TestCompactionSummaryDemandsFileStateAndTodos(t *testing.T) {
+	summary := strings.ToLower(CompactionSummary())
+	for _, want := range []string{"files touched", "open todos"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("compaction summary missing %q:\n%s", want, CompactionSummary())
+		}
+	}
+}
+
 func TestBuiltinAgentPrompt(t *testing.T) {
 	for _, name := range []string{"auto", "independent", "plan"} {
 		if _, ok := BuiltinAgentPrompt(name); !ok {

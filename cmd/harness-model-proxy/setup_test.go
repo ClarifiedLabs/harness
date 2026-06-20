@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"harness/internal/auth"
+	"harness/internal/llm"
 	"harness/internal/modelsdev"
 )
 
@@ -86,6 +87,77 @@ func TestRunSetupWritesOnlySelectedModelsAndNoProxyDefault(t *testing.T) {
 	}
 	if _, ok := cache.Provider("testai"); !ok {
 		t.Fatalf("models.dev cache missing testai provider")
+	}
+}
+
+// TestRunSetupWritesManagedConfigWithoutPrices verifies that --setup marks the
+// written provider config managed and omits per-model prices, even when
+// models.dev has prices for the selected model. The proxy resolves those prices
+// live from the cache instead, so refreshes reach the server without a re-setup.
+func TestRunSetupWritesManagedConfigWithoutPrices(t *testing.T) {
+	home := t.TempDir()
+	var out, errw bytes.Buffer
+	priced := &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+		"testai": {
+			ID:   "testai",
+			Name: "TestAI",
+			API:  "https://api.test/v1",
+			NPM:  "@ai-sdk/openai-compatible",
+			Env:  []string{"TESTAI_API_KEY"},
+			Models: map[string]modelsdev.Model{
+				"alpha": {
+					ID:          "alpha",
+					Name:        "Alpha",
+					ReleaseDate: "2025-01-01",
+					Limit:       modelsdev.Limit{Context: 123000},
+					Cost:        llm.Price{Input: 2, Output: 4, CacheRead: 0.5, CacheWrite: 1},
+				},
+			},
+		},
+	}}
+	env := environment{
+		stdin:  strings.NewReader("1\n\nall\nsave\n"),
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(k string) string {
+			if k == "HOME" {
+				return home
+			}
+			return ""
+		},
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return priced, nil
+		},
+		terminalRows: func() int { return 12 },
+	}
+
+	if err := runSetup(context.Background(), env, false); err != nil {
+		t.Fatalf("runSetup: %v; stderr=%q", err, errw.String())
+	}
+
+	dir := filepath.Join(home, ".config", "harness-model-proxy")
+	providerData, err := os.ReadFile(filepath.Join(dir, "testai.json"))
+	if err != nil {
+		t.Fatalf("read provider config: %v", err)
+	}
+	if bytes.Contains(providerData, []byte("\"price\"")) {
+		t.Fatalf("managed provider config should omit per-model prices: %s", providerData)
+	}
+	var provider setupProviderConfig
+	if err := json.Unmarshal(providerData, &provider); err != nil {
+		t.Fatalf("decode provider config: %v", err)
+	}
+	if !provider.Managed {
+		t.Fatalf("provider config managed = false, want true: %s", providerData)
+	}
+	if len(provider.Models) != 1 || provider.Models[0].Name != "alpha" {
+		t.Fatalf("provider models = %+v, want only alpha", provider.Models)
+	}
+	if provider.Models[0].Price != nil {
+		t.Fatalf("managed model price = %+v, want nil (resolved from models.dev cache)", provider.Models[0].Price)
+	}
+	if provider.Models[0].ContextWindow != 123000 {
+		t.Fatalf("managed model context window = %d, want 123000", provider.Models[0].ContextWindow)
 	}
 }
 
@@ -194,6 +266,12 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	}
 	if len(provider.Models) != 1 || provider.Models[0].Name != "gpt-test" || provider.Models[0].ContextWindow != 999000 {
 		t.Fatalf("provider models = %+v, want gpt-test", provider.Models)
+	}
+	if !provider.Managed {
+		t.Fatalf("codex provider should be managed: %+v", provider)
+	}
+	if provider.PriceSource != openAIModelsDevProviderID {
+		t.Fatalf("codex price_source = %q, want %q (prices from OpenAI rates)", provider.PriceSource, openAIModelsDevProviderID)
 	}
 }
 
@@ -501,6 +579,12 @@ func TestRunRefreshModelsPreservesConfiguredModelAllowlist(t *testing.T) {
 	}
 	if len(provider.Models) != 1 || provider.Models[0].Name != "alpha" || provider.Models[0].ContextWindow != 123000 {
 		t.Fatalf("provider models after refresh = %+v, want refreshed alpha only", provider.Models)
+	}
+	if !provider.Managed {
+		t.Fatalf("refreshed provider config managed = false, want true: %s", data)
+	}
+	if provider.Models[0].Price != nil || bytes.Contains(data, []byte("\"price\"")) {
+		t.Fatalf("refreshed managed config should omit per-model prices: %s", data)
 	}
 	cacheData, err := os.ReadFile(modelsDevCachePath(dir))
 	if err != nil {

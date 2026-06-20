@@ -9,7 +9,9 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"harness/internal/agent"
 	"harness/internal/diff"
@@ -42,11 +44,19 @@ type RenderOptions struct {
 	ToolStream              bool
 	Quiet                   bool
 	SuppressReasoningOutput bool
-	Model                   string
-	Registry                *llm.Registry
-	Now                     func() time.Time
-	TimestampLayout         string
-	Width                   func() int
+	// SuppressUsage drops the per-turn usage/cost line. It defaults false so
+	// even -quiet runs still print the single cost line; set it for a fully
+	// silent piped run (r25).
+	SuppressUsage bool
+	// LiveStatus enables the in-place wait-time counter and the during-turn
+	// input line (r12 + during-turn input). Gated by the caller to an
+	// interactive, non-quiet TTY; tests set it explicitly.
+	LiveStatus      bool
+	Model           string
+	Registry        *llm.Registry
+	Now             func() time.Time
+	TimestampLayout string
+	Width           func() int
 }
 
 // Renderer implements agent.EventSink: assistant text streams to out, while tool
@@ -60,6 +70,7 @@ type Renderer struct {
 	verbose                 bool
 	toolStream              bool
 	quiet                   bool
+	suppressUsage           bool
 	suppressReasoningOutput bool
 	model                   string
 	registry                *llm.Registry
@@ -85,6 +96,36 @@ type Renderer struct {
 
 	activeModelCost    float64
 	largeRequestWarned bool
+
+	// turnCost carries the per-turn cost priced by the App against the
+	// turn's own model (r63). When turnCostSet is false TurnComplete falls
+	// back to pricing against r.model.
+	turnCost      float64
+	turnCostKnown bool
+	turnCostSet   bool
+
+	// warnedNoPrice tracks models for which the one-time "no price" notice has
+	// already been emitted (r16).
+	warnedNoPrice map[string]bool
+	// compactionWarned guards the one-time "approaching compaction" notice (r27).
+	compactionWarned bool
+
+	// Live wait-time counter + during-turn input line (r12 + during-turn
+	// input). statusMu guards every field below and serialises the ticker
+	// goroutine against the synchronous event-sink writes so the two never
+	// interleave terminal bytes.
+	liveStatus        bool
+	statusMu          sync.Mutex
+	statusActive      bool      // in a wait; the ticker should keep the line painted
+	statusDrawn       bool      // a status line is currently on the terminal
+	statusLabel       string    // e.g. "model: turn 3" or "tool: grep"
+	statusStart       time.Time // when the current wait began
+	statusCtxPct      int       // context percent to append, 0 omits (r27)
+	statusInput       string    // during-turn typed buffer shown after "> "
+	statusInputCursor int       // rune index of the edit cursor within statusInput
+	ticker            *time.Ticker
+	tickerStop        chan struct{}
+	tickerDone        chan struct{}
 }
 
 // NewRenderer builds a Renderer. A nil Now defaults to time.Now.
@@ -102,6 +143,8 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 		toolStream:              opts.ToolStream,
 		quiet:                   opts.Quiet,
 		suppressReasoningOutput: opts.SuppressReasoningOutput,
+		suppressUsage:           opts.SuppressUsage,
+		liveStatus:              opts.LiveStatus && !opts.Quiet,
 		model:                   opts.Model,
 		registry:                opts.Registry,
 		now:                     now,
@@ -117,6 +160,10 @@ func (r *Renderer) StartTurn() {
 	r.turnStart = r.now()
 	r.activeModelCost = 0
 	r.largeRequestWarned = false
+	r.compactionWarned = false
+	r.turnCost = 0
+	r.turnCostKnown = false
+	r.turnCostSet = false
 	r.assistantMarkdown = nil
 	r.assistantPhase = ""
 	r.visiblePreFinalOutput = false
@@ -138,6 +185,7 @@ func (r *Renderer) TextDelta(text string) {
 	if text == "" {
 		return
 	}
+	r.statusClear()
 	r.writeFinalSeparatorIfNeeded()
 	if r.markdown {
 		r.ensureAssistantMarkdown()
@@ -162,6 +210,7 @@ func (r *Renderer) ReasoningSummary(text string) {
 	if r.suppressReasoningOutput {
 		return
 	}
+	r.statusClear()
 	r.flushToolUseStarts()
 	r.finishAssistantLine()
 	block := r.reasoningSummaryBlock(text)
@@ -176,6 +225,7 @@ func (r *Renderer) ReasoningSummaryStatus(text string) {
 	if r.suppressReasoningOutput {
 		return
 	}
+	r.statusClear()
 	r.flushToolUseStarts()
 	r.finishAssistantLine()
 	io.WriteString(r.errw, r.reasoningSummaryBlock(text))
@@ -188,6 +238,16 @@ func (r *Renderer) ModelTurnStart(modelTurn, attempt int, ctx agent.ContextEstim
 			r.dimLine(line)
 			r.largeRequestWarned = true
 		}
+	}
+	pct := contextPercent(ctx)
+	r.maybeWarnCompaction(pct)
+	if r.liveStatus {
+		label := fmt.Sprintf("model: turn %d", modelTurn)
+		if attempt > 1 {
+			label = fmt.Sprintf("model: turn %d retry %d", modelTurn, attempt-1)
+		}
+		r.beginWait(label, pct)
+		return
 	}
 	if attempt <= 1 {
 		r.dimLine(fmt.Sprintf("[model: turn %d waiting]", modelTurn))
@@ -205,6 +265,7 @@ func (r *Renderer) writeModelTurnComplete(usage agent.ModelTurnUsage) string {
 	if r.registry == nil {
 		return ""
 	}
+	r.maybeWarnNoPrice()
 	cost, known := r.registry.Cost(r.model, usage.Usage)
 	if !known {
 		return ""
@@ -230,6 +291,11 @@ func (r *Renderer) ToolStart(call llm.ToolCall) {
 	r.flushToolUseStarts()
 	r.pending[call.ID] = call
 	r.dimLine(fmt.Sprintf("[tool: %s started%s]", call.Name, formatToolArgs(call.Name, call.Input)))
+	// Tick during the (possibly long) tool-execution gap, not just model
+	// waits (r12). The next output line erases this counter again.
+	if r.liveStatus {
+		r.beginWait(fmt.Sprintf("tool: %s", call.Name), 0)
+	}
 }
 
 func (r *Renderer) ToolResult(result llm.ToolResult) {
@@ -247,6 +313,7 @@ func (r *Renderer) ToolResult(result llm.ToolResult) {
 }
 
 func (r *Renderer) ToolDiff(_ llm.ToolCall, text string) {
+	r.statusClear()
 	r.flushToolUseStarts()
 	r.finishAssistantLine()
 	if text == "" {
@@ -267,20 +334,50 @@ func (r *Renderer) Notice(msg string) {
 }
 
 func (r *Renderer) TurnComplete(usage agent.TurnUsage) {
+	r.StopProgress()
 	r.flushToolUseStarts()
 	r.finishAssistantLine()
 	elapsed := r.now().Sub(r.turnStart)
 
-	// Accumulate session totals for the cumulative readout.
-	var cost float64
-	if r.registry != nil {
-		cost, _ = r.registry.Cost(r.model, usage.Usage)
+	// Accumulate session totals for the cumulative readout. The App prices the
+	// turn against its own model and forwards it via SetTurnCost so a mid-turn
+	// model switch is not mispriced against the renderer's model (r63).
+	cost, costKnown := r.turnCost, r.turnCostKnown
+	if !r.turnCostSet && r.registry != nil {
+		cost, costKnown = r.registry.Cost(r.model, usage.Usage)
 	}
 	r.cumInput += usage.Usage.InputTokens
 	r.cumOutput += usage.Usage.OutputTokens
-	r.cumCost += cost
+	if costKnown {
+		r.cumCost += cost
+	}
 
-	r.dimLine(usageLine(r.registry, r.model, usage, elapsed, r.cumInput, r.cumOutput, r.cumCost))
+	r.usageOutput(usageLine(usage, elapsed, cost, costKnown, r.cumInput, r.cumOutput, r.cumCost))
+}
+
+// SetTurnCost records the turn cost priced by the App against the turn's own
+// model, consumed by the next TurnComplete (r63).
+func (r *Renderer) SetTurnCost(cost float64, known bool) {
+	r.turnCost = cost
+	r.turnCostKnown = known
+	r.turnCostSet = true
+}
+
+// usageOutput writes the per-turn usage line. It honours -quiet only when
+// SuppressUsage is set, so a plain -quiet run still prints the single cost line
+// (r25). The status line is cleared first so the counter never lingers above it.
+func (r *Renderer) usageOutput(line string) {
+	if r.suppressUsage {
+		return
+	}
+	r.statusClear()
+	r.finishAssistantLine()
+	out := r.timestampStatusLine(line)
+	if r.color {
+		fmt.Fprintf(r.errw, "%s%s%s\n", ansiDim, out, ansiReset)
+		return
+	}
+	fmt.Fprintln(r.errw, out)
 }
 
 func (r *Renderer) flushToolUseStarts() {
@@ -300,6 +397,7 @@ func (r *Renderer) dimLine(s string) {
 	if r.quiet {
 		return
 	}
+	r.statusClear()
 	r.finishAssistantLine()
 	s = r.timestampStatusLine(s)
 	if r.color {
@@ -351,6 +449,396 @@ func (r *Renderer) outputWidth() int {
 		}
 	}
 	return markdown.DefaultWidth
+}
+
+// --- Live wait-time counter + during-turn input line (r12 + during-turn input) ---
+//
+// The counter is a single transient status line repainted in place with
+// \r\x1b[2K (no scroll region, no sticky bar). beginWait activates it; any
+// scrolling write erases it via statusClear, which the synchronous event-sink
+// methods call before touching out/errw. A time.Ticker repaints it ~1/sec while
+// a wait is in progress; the ticker and the foreground writers are serialised by
+// statusMu and a stop-and-drain handshake so their bytes never interleave.
+
+// beginWait activates (or refreshes) the transient counter for a model wait or a
+// tool-execution gap. It finishes any open assistant line first so the counter
+// sits on its own row and erasing it never clobbers streamed content.
+func (r *Renderer) beginWait(label string, ctxPct int) {
+	if !r.liveStatus {
+		return
+	}
+	r.finishAssistantLine()
+	r.statusMu.Lock()
+	r.statusLabel = label
+	r.statusStart = r.now()
+	r.statusCtxPct = ctxPct
+	r.statusActive = true
+	r.ensureTickerLocked()
+	r.paintLocked()
+	r.statusMu.Unlock()
+}
+
+// statusClear erases the on-screen counter and deactivates it. Every method that
+// writes scrolling output to out/errw calls this first; it is a no-op unless a
+// live counter is currently drawn.
+func (r *Renderer) statusClear() {
+	if !r.liveStatus {
+		return
+	}
+	r.statusMu.Lock()
+	r.eraseLocked()
+	r.statusActive = false
+	r.statusMu.Unlock()
+}
+
+// SetInputLine updates the during-turn typed buffer shown after "> " on the
+// counter line, along with the rune index of the edit cursor, and repaints if a
+// wait is active. Empty restores the bare counter. cursor is clamped into
+// [0, len(buf)] so a stale index never positions the terminal cursor off-row.
+func (r *Renderer) SetInputLine(buf string, cursor int) {
+	if !r.liveStatus {
+		return
+	}
+	r.statusMu.Lock()
+	r.statusInput = buf
+	r.statusInputCursor = cursor
+	if r.statusActive {
+		r.paintLocked()
+	}
+	r.statusMu.Unlock()
+}
+
+// StopProgress erases the counter, clears the typed buffer, and stops the ticker,
+// draining its goroutine so no stray repaint can follow. Idempotent; called at
+// every turn boundary (TurnComplete, the REPL turn-done handoff, and one-shot).
+func (r *Renderer) StopProgress() {
+	if !r.liveStatus {
+		return
+	}
+	r.statusMu.Lock()
+	r.eraseLocked()
+	r.statusActive = false
+	r.statusInput = ""
+	r.statusInputCursor = 0
+	t, stop, done := r.ticker, r.tickerStop, r.tickerDone
+	r.ticker, r.tickerStop, r.tickerDone = nil, nil, nil
+	r.statusMu.Unlock()
+	if t != nil {
+		t.Stop()
+		close(stop)
+		<-done
+	}
+}
+
+func (r *Renderer) ensureTickerLocked() {
+	if r.ticker != nil {
+		return
+	}
+	r.ticker = time.NewTicker(time.Second)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	r.tickerStop = stop
+	r.tickerDone = done
+	t := r.ticker
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				r.tick()
+			}
+		}
+	}()
+}
+
+// tick repaints the counter on a timer. It paints only while a wait is active,
+// so a tick that races StopProgress (which sets statusActive=false under the
+// same mutex) is a no-op.
+func (r *Renderer) tick() {
+	r.statusMu.Lock()
+	if r.statusActive {
+		r.paintLocked()
+	}
+	r.statusMu.Unlock()
+}
+
+// eraseLocked clears a drawn counter line. Caller holds statusMu.
+func (r *Renderer) eraseLocked() {
+	if !r.statusDrawn {
+		return
+	}
+	io.WriteString(r.errw, "\r\x1b[2K")
+	r.statusDrawn = false
+}
+
+// paintLocked redraws the counter in place. Caller holds statusMu. When a
+// during-turn buffer is present it parks the terminal cursor at the edit column
+// on the same single row, so cursor-motion keys (arrows/Home/End) land visibly.
+func (r *Renderer) paintLocked() {
+	text, cursorCol, hasInput := r.statusTextLocked()
+	var b strings.Builder
+	b.WriteString("\r\x1b[2K")
+	if r.color {
+		b.WriteString(ansiDim)
+		b.WriteString(text)
+		b.WriteString(ansiReset)
+	} else {
+		b.WriteString(text)
+	}
+	if hasInput {
+		// The line is clamped to a single row, so \r returns to its start; move
+		// right to the edit column. Coloring is irrelevant to cursor movement.
+		b.WriteString("\r")
+		if cursorCol > 0 {
+			fmt.Fprintf(&b, "\x1b[%dC", cursorCol)
+		}
+	}
+	io.WriteString(r.errw, b.String())
+	r.statusDrawn = true
+}
+
+// statusTextLocked renders the counter, clipped to the terminal width so it
+// never wraps (a wrapped line would defeat the single-line \r\x1b[2K erase). It
+// also reports the terminal column for the during-turn edit cursor and whether a
+// typed buffer is present. Caller holds statusMu.
+func (r *Renderer) statusTextLocked() (text string, cursorCol int, hasInput bool) {
+	elapsed := r.now().Sub(r.statusStart)
+	secs := int(elapsed.Seconds())
+	if secs < 0 {
+		secs = 0
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "[%s · %ds", r.statusLabel, secs)
+	if r.statusCtxPct > 0 {
+		fmt.Fprintf(&b, " · ctx %d%%", r.statusCtxPct)
+	}
+	b.WriteByte(']')
+	maxW := r.outputWidth() - 1
+	if r.statusInput == "" {
+		return clipDisplayTail(b.String(), maxW), 0, false
+	}
+	prefix := b.String() + " > "
+	text, cursorCol = clipStatusLine(prefix, sanitizeInputLine(r.statusInput), r.statusInputCursor, maxW)
+	return text, cursorCol, true
+}
+
+// clipStatusLine fits the during-turn status line into maxW display columns and
+// reports the 0-based terminal column for the edit cursor. prefix is the counter
+// bracket plus the " > " separator; input is the already-sanitized typed buffer
+// (newlines collapsed to spaces, so a rune index maps 1:1 to a display column);
+// cursor is a rune index into input in [0, len(input)].
+//
+// When the whole line fits, it is shown verbatim with the cursor at its true
+// column. When it overflows a horizontal window follows the cursor: tail-anchored
+// while typing (a leading "…" marks the hidden head), scrolling left so the
+// cursor stays visible (a trailing "…" marks the hidden tail) when the cursor
+// moves ahead of that window. The window is always clamped to a single row so the
+// \r\x1b[2K redraw and the cursor park stay correct.
+func clipStatusLine(prefix, input string, cursor int, maxW int) (text string, cursorCol int) {
+	if maxW <= 0 {
+		return "", 0
+	}
+	pre := []rune(prefix)
+	in := []rune(input)
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(in) {
+		cursor = len(in)
+	}
+	full := make([]rune, 0, len(pre)+len(in))
+	full = append(full, pre...)
+	full = append(full, in...)
+	cursorRune := len(pre) + cursor
+
+	if displayWidth(string(full)) <= maxW {
+		return string(full), displayWidth(string(full[:cursorRune]))
+	}
+
+	// Tail-anchored window: include as many trailing runes as fit, reserving one
+	// column for the leading "…".
+	lo := len(full)
+	width := 0
+	for lo > 0 {
+		w := runeWidth(full[lo-1])
+		if width+w > maxW-1 {
+			break
+		}
+		width += w
+		lo--
+	}
+	hi := len(full)
+
+	if cursorRune < lo {
+		// The cursor is left of the tail window; re-anchor it to the first visible
+		// rune and grow rightward to fill the budget, reserving a column for a
+		// trailing "…" while hidden tail remains.
+		lo = cursorRune
+		budget := maxW
+		if lo > 0 {
+			budget-- // leading "…"
+		}
+		hi = lo
+		width = 0
+		for hi < len(full) {
+			w := runeWidth(full[hi])
+			reserve := 0
+			if hi+1 < len(full) {
+				reserve = 1 // room for a trailing "…"
+			}
+			if width+w+reserve > budget {
+				break
+			}
+			width += w
+			hi++
+		}
+	}
+
+	var b strings.Builder
+	if lo > 0 {
+		b.WriteRune('…')
+	}
+	b.WriteString(string(full[lo:hi]))
+	if hi < len(full) {
+		b.WriteRune('…')
+	}
+	cursorCol = displayWidth(string(full[lo:cursorRune]))
+	if lo > 0 {
+		cursorCol++ // account for the leading "…"
+	}
+	return b.String(), cursorCol
+}
+
+// maybeWarnNoPrice emits a one-time-per-model notice when the active model has
+// no configured price, so a silent $0 is never mistaken for "free" (r16).
+func (r *Renderer) maybeWarnNoPrice() {
+	if r.registry == nil || r.registry.HasPrice(r.model) {
+		return
+	}
+	if r.warnedNoPrice[r.model] {
+		return
+	}
+	if r.warnedNoPrice == nil {
+		r.warnedNoPrice = map[string]bool{}
+	}
+	r.warnedNoPrice[r.model] = true
+	r.dimLine(fmt.Sprintf("[note: no price configured for %q; cost is not reported for this model]", r.model))
+}
+
+// maybeWarnCompaction emits a one-time notice as the context fills toward the
+// compaction threshold so a surprise compaction is foreshadowed (r27).
+func (r *Renderer) maybeWarnCompaction(pct int) {
+	if r.compactionWarned || pct < compactionWarnPercent {
+		return
+	}
+	r.compactionWarned = true
+	r.dimLine(fmt.Sprintf("[notice: context at %d%%; approaching compaction]", pct))
+}
+
+const compactionWarnPercent = 80
+
+// contextPercent is the share of the model's context window in use, for the
+// counter and the compaction notice (r27).
+func contextPercent(ctx agent.ContextEstimate) int {
+	if ctx.Window <= 0 {
+		return 0
+	}
+	used := ctx.Total
+	if ctx.PayloadTotal > used {
+		used = ctx.PayloadTotal
+	}
+	if used <= 0 {
+		return 0
+	}
+	pct := used * 100 / ctx.Window
+	if pct < 0 {
+		return 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
+}
+
+// cacheHitRatio is the percentage of input tokens served from cache (r15).
+func cacheHitRatio(u llm.Usage) int {
+	total := u.InputTokens + u.CacheReadTokens
+	if total <= 0 {
+		return 0
+	}
+	return u.CacheReadTokens * 100 / total
+}
+
+// sanitizeInputLine collapses control characters (notably the newlines that
+// Enter inserts during a turn) to spaces so the multi-line buffer renders on the
+// single counter row.
+func sanitizeInputLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || r < 0x20 {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// clipDisplayTail trims s to at most max display columns, dropping leading runes
+// (so the cursor end stays visible) and prefixing "…" when truncated. A
+// conservative wide-rune width keeps East-Asian text from wrapping.
+func clipDisplayTail(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if displayWidth(s) <= max {
+		return s
+	}
+	runes := []rune(s)
+	width := 0
+	i := len(runes)
+	for i > 0 {
+		w := runeWidth(runes[i-1])
+		if width+w > max-1 { // reserve one column for the leading marker
+			break
+		}
+		width += w
+		i--
+	}
+	return "…" + string(runes[i:])
+}
+
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		w += runeWidth(r)
+	}
+	return w
+}
+
+// runeWidth is a minimal display-cell width: 2 for the common East-Asian wide
+// and emoji ranges, 1 otherwise. It is stdlib-only and intentionally
+// approximate — enough to keep the counter from wrapping.
+func runeWidth(r rune) int {
+	if r == utf8.RuneError {
+		return 1
+	}
+	switch {
+	case r >= 0x1100 && r <= 0x115F, // Hangul Jamo
+		r >= 0x2E80 && r <= 0x303E,   // CJK radicals, Kangxi
+		r >= 0x3041 && r <= 0x33FF,   // Hiragana, Katakana, CJK symbols
+		r >= 0x3400 && r <= 0x4DBF,   // CJK Ext A
+		r >= 0x4E00 && r <= 0x9FFF,   // CJK Unified
+		r >= 0xA000 && r <= 0xA4CF,   // Yi
+		r >= 0xAC00 && r <= 0xD7A3,   // Hangul syllables
+		r >= 0xF900 && r <= 0xFAFF,   // CJK compat
+		r >= 0xFE30 && r <= 0xFE4F,   // CJK compat forms
+		r >= 0xFF00 && r <= 0xFF60,   // Fullwidth forms
+		r >= 0xFFE0 && r <= 0xFFE6,   // Fullwidth signs
+		r >= 0x1F300 && r <= 0x1FAFF, // emoji & pictographs
+		r >= 0x20000 && r <= 0x3FFFD: // CJK Ext B+
+		return 2
+	}
+	return 1
 }
 
 func (r *Renderer) finishAssistantLine() {
@@ -520,16 +1008,25 @@ func ToolResultLine(call llm.ToolCall, result llm.ToolResult) string {
 // Per-turn values are shown first; parenthesised values are cumulative across
 // the session. Cumulative cost is omitted for models with no price entry;
 // per-turn cost is also omitted when the model has no price entry.
-func usageLine(registry *llm.Registry, model string, u agent.TurnUsage, elapsed time.Duration, cumIn, cumOut int, cumCost float64) string {
+func usageLine(u agent.TurnUsage, elapsed time.Duration, cost float64, costKnown bool, cumIn, cumOut int, cumCost float64) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[turn: %s · %s (%s) in / %s (%s) out",
 		modelTurnPhrase(u.ModelTurns),
 		humanTokens(u.Usage.InputTokens), humanTokens(cumIn),
 		humanTokens(u.Usage.OutputTokens), humanTokens(cumOut))
-	if registry != nil {
-		if _, known := registry.Cost(model, u.Usage); known {
-			fmt.Fprintf(&b, " · $%.3f ($%.3f)", turnCost(registry, model, u.Usage), cumCost)
+	// Cache reads and reasoning tokens are billed and material to cost; surface
+	// them (with the cache-hit ratio) when non-zero (r15).
+	if u.Usage.CacheReadTokens > 0 {
+		fmt.Fprintf(&b, " · cache %s read", humanTokens(u.Usage.CacheReadTokens))
+		if ratio := cacheHitRatio(u.Usage); ratio > 0 {
+			fmt.Fprintf(&b, " (%d%%)", ratio)
 		}
+	}
+	if u.Usage.ReasoningTokens > 0 {
+		fmt.Fprintf(&b, " · %s reasoning", humanTokens(u.Usage.ReasoningTokens))
+	}
+	if costKnown {
+		fmt.Fprintf(&b, " · $%.3f ($%.3f)", cost, cumCost)
 	}
 	if u.Context.Total > 0 {
 		fmt.Fprintf(&b, " · ctx %s/%s", humanTokens(u.Context.Total), humanTokens(u.Context.Window))
@@ -576,13 +1073,6 @@ func modelTurnPhrase(n int) string {
 		return "1 model turn"
 	}
 	return fmt.Sprintf("%d model turns", n)
-}
-
-// turnCost returns the USD cost for a single turn's usage. It returns 0 when
-// the model is unknown.
-func turnCost(registry *llm.Registry, model string, u llm.Usage) float64 {
-	usd, _ := registry.Cost(model, u)
-	return usd
 }
 
 // snippet returns the first snippetLines lines of s for the verbose preview.

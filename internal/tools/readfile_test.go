@@ -24,8 +24,8 @@ func TestReadFileNumbering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// cat -n style: right-aligned number, tab, line.
-	want := "     1\talpha\n     2\tbeta\n     3\tgamma"
+	// Unpadded "<n>\t<line>" form (no fixed-width column).
+	want := "1\talpha\n2\tbeta\n3\tgamma"
 	if out != want {
 		t.Errorf("got:\n%q\nwant:\n%q", out, want)
 	}
@@ -45,8 +45,9 @@ func TestReadFileOffsetLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Line numbers reflect the true line position, not the window position.
-	want := "     3\tL3\n     4\tL4"
+	// Line numbers reflect the true line position, not the window position;
+	// lines 5-10 follow the window, so the read is truncated (r14).
+	want := "3\tL3\n4\tL4\n[file truncated at line 4; continue with offset=5]"
 	if out != want {
 		t.Errorf("got:\n%q\nwant:\n%q", out, want)
 	}
@@ -147,6 +148,88 @@ func TestReadFileMissingPathArg(t *testing.T) {
 	}
 }
 
+// r36: paths[] reads several files in one call, each under a "==> path <=="
+// header.
+func TestReadFileMultiplePaths(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.txt")
+	b := filepath.Join(dir, "b.txt")
+	mustWrite(t, a, "alpha\nbeta\n")
+	mustWrite(t, b, "one\n")
+
+	out, err := runReadFile(t, map[string]any{"paths": []string{a, b}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "==> " + a + " <==\n1\talpha\n2\tbeta\n\n==> " + b + " <==\n1\tone"
+	if out != want {
+		t.Errorf("got:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+// A per-file error must appear inline so one bad path does not abort the batch.
+func TestReadFileMultiplePathsInlineError(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.txt")
+	missing := filepath.Join(dir, "nope.txt")
+	mustWrite(t, a, "alpha\n")
+
+	out, err := runReadFile(t, map[string]any{"paths": []string{a, missing}})
+	if err != nil {
+		t.Fatalf("batch read should not fail on one missing file: %v", err)
+	}
+	if !strings.Contains(out, "==> "+a+" <==\n1\talpha") {
+		t.Errorf("first file missing from output: %q", out)
+	}
+	if !strings.Contains(out, "==> "+missing+" <==\nerror:") {
+		t.Errorf("missing file should report an inline error: %q", out)
+	}
+}
+
+// With paths and no explicit limit, each file gets a divided budget so later
+// files are not dropped by the dispatch cap; the truncation notice fires per file.
+func TestReadFileMultiplePathsPerFileBudget(t *testing.T) {
+	dir := t.TempDir()
+	var paths []string
+	for f := 0; f < 4; f++ {
+		p := filepath.Join(dir, fmt.Sprintf("f%d.txt", f))
+		var b strings.Builder
+		for i := 1; i <= 400; i++ {
+			fmt.Fprintf(&b, "L%d\n", i)
+		}
+		mustWrite(t, p, b.String())
+		paths = append(paths, p)
+	}
+	out, err := runReadFile(t, map[string]any{"paths": paths})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// 1000-line default / 4 files = 250 lines budget each; every file is present
+	// and individually truncated.
+	if got := strings.Count(out, "==> "); got != 4 {
+		t.Errorf("expected 4 file headers, got %d", got)
+	}
+	if got := strings.Count(out, "[file truncated at line 250;"); got != 4 {
+		t.Errorf("expected each file truncated at line 250, got %d notices:\n%s", got, out)
+	}
+}
+
+func TestPerPathLineBudget(t *testing.T) {
+	tests := []struct {
+		explicit, numPaths, def, want int
+	}{
+		{explicit: 0, numPaths: 1, def: 1000, want: 1000},
+		{explicit: 0, numPaths: 4, def: 1000, want: 250},
+		{explicit: 0, numPaths: 100, def: 1000, want: multiReadMinPerPathLimit}, // floor
+		{explicit: 30, numPaths: 5, def: 1000, want: 30},                        // explicit wins
+	}
+	for _, tt := range tests {
+		if got := perPathLineBudget(tt.explicit, tt.numPaths, tt.def); got != tt.want {
+			t.Errorf("perPathLineBudget(%d,%d,%d) = %d, want %d", tt.explicit, tt.numPaths, tt.def, got, tt.want)
+		}
+	}
+}
+
 func TestReadFileDefaultLineCap(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "big.txt")
@@ -162,11 +245,56 @@ func TestReadFileDefaultLineCap(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	lines := strings.Split(out, "\n")
-	if len(lines) != 1000 {
-		t.Errorf("default cap should yield 1000 lines, got %d", len(lines))
+	// 1000 numbered lines plus a trailing truncation notice (see r14).
+	if len(lines) != 1001 {
+		t.Errorf("default cap should yield 1000 lines + notice, got %d", len(lines))
 	}
-	if !strings.HasPrefix(lines[0], "     1\tline 1") {
+	if !strings.HasPrefix(lines[0], "1\tline 1") {
 		t.Errorf("first line wrong: %q", lines[0])
+	}
+	if want := "[file truncated at line 1000; continue with offset=1001]"; lines[len(lines)-1] != want {
+		t.Errorf("missing truncation notice; got last line %q", lines[len(lines)-1])
+	}
+}
+
+// r14: a windowed read that does not reach EOF must announce truncation so the
+// model does not treat the last returned line as end-of-file.
+func TestReadFileTruncationNotice(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	var b strings.Builder
+	for i := 1; i <= 10; i++ {
+		fmt.Fprintf(&b, "L%d\n", i)
+	}
+	if err := os.WriteFile(p, []byte(b.String()), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runReadFile(t, map[string]any{"path": p, "offset": 2, "limit": 3})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "[file truncated at line 4; continue with offset=5]"; !strings.HasSuffix(out, want) {
+		t.Errorf("expected truncation notice %q at end of:\n%q", want, out)
+	}
+}
+
+// A read that reaches EOF (window covers the rest of the file) must NOT emit a
+// truncation notice.
+func TestReadFileNoTruncationNoticeAtEOF(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(p, []byte("a\nb\nc\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Exact-fit window (3 of 3 lines) and over-large window both reach EOF.
+	for _, limit := range []int{3, 10} {
+		out, err := runReadFile(t, map[string]any{"path": p, "limit": limit})
+		if err != nil {
+			t.Fatalf("limit %d: unexpected error: %v", limit, err)
+		}
+		if strings.Contains(out, "file truncated") {
+			t.Errorf("limit %d: unexpected truncation notice: %q", limit, out)
+		}
 	}
 }
 
@@ -204,11 +332,15 @@ func TestReadFileWindowedLargeFile(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	got := strings.Split(out, "\n")
-	if len(got) != 2 {
-		t.Fatalf("want 2 lines, got %d: %q", len(got), out)
+	// 2 window lines plus the r14 truncation notice (the file continues far past).
+	if len(got) != 3 {
+		t.Fatalf("want 2 lines + notice, got %d: %q", len(got), out)
 	}
-	if !strings.HasPrefix(got[0], "     2\t") || !strings.HasPrefix(got[1], "     3\t") {
+	if !strings.HasPrefix(got[0], "2\t") || !strings.HasPrefix(got[1], "3\t") {
 		t.Errorf("wrong window lines: %q", out)
+	}
+	if !strings.HasPrefix(got[2], "[file truncated at line 3;") {
+		t.Errorf("missing truncation notice: %q", got[2])
 	}
 }
 
@@ -232,12 +364,15 @@ func TestReadWindowLinesStopsEarly(t *testing.T) {
 	}
 	defer f.Close()
 	cr := &countingReader{r: f}
-	lines, total, err := readWindowLines(cr, 1, 3)
+	lines, total, truncated, err := readWindowLines(cr, 1, 3)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if total < 3 {
 		t.Fatalf("expected at least 3 lines counted, got %d", total)
+	}
+	if !truncated {
+		t.Errorf("a 3-line window of a 1000-line file should report truncated=true")
 	}
 	if len(lines) != 3 || lines[0] != "L1" || lines[2] != "L3" {
 		t.Errorf("wrong window: %v", lines)
@@ -269,7 +404,7 @@ func TestReadFileUnknownArgsTolerated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unknown key should be tolerated: %v", err)
 	}
-	if out != "     1\tx" {
+	if out != "1\tx" {
 		t.Errorf("got %q", out)
 	}
 }

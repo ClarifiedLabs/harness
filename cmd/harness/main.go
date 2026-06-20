@@ -487,6 +487,7 @@ func run(env environment) int {
 		ReadFileDefaultLimit: cfg.ReadFileDefaultLimit,
 		Background:           backgroundManager,
 		SearchTools:          cfg.SearchTools,
+		DispatchTimeout:      time.Duration(cfg.ToolTimeoutSeconds) * time.Second,
 	})
 	for _, disabled := range disabledTools {
 		logger.Warn(disabled.Message(), logging.Category("cli_tools"))
@@ -591,12 +592,17 @@ func run(env environment) int {
 	// re-derive their allowed lists.
 	// The name lists are empty when MCP/LSP are disabled, making this a no-op.
 	mcpBases := mcpExposingAgentBases(agents)
-	mcpNames := make([]string, 0, len(mcpSummary.Names)+len(localSummary.Names)+len(lspSummary.Names))
-	mcpNames = append(mcpNames, mcpSummary.Names...)
+	// Cap the discovered remote MCP surface before combining with local MCP and
+	// LSP names (those have their own gating). The same limits feed the interactive
+	// refresh hook below so async-discovered tools are capped identically.
+	mcpLim := mcpLimitsFromConfig(cfg.MCP)
+	cappedMCPNames, cappedMCPReadOnly := capRemoteMCPNames(mcpSummary.Names, mcpSummary.ReadOnlyNames, mcpLim, logger)
+	mcpNames := make([]string, 0, len(cappedMCPNames)+len(localSummary.Names)+len(lspSummary.Names))
+	mcpNames = append(mcpNames, cappedMCPNames...)
 	mcpNames = append(mcpNames, localSummary.Names...)
 	mcpNames = append(mcpNames, lspSummary.Names...)
-	mcpReadOnlyNames := make([]string, 0, len(mcpSummary.ReadOnlyNames)+len(localSummary.ReadOnlyNames)+len(lspSummary.ReadOnlyNames))
-	mcpReadOnlyNames = append(mcpReadOnlyNames, mcpSummary.ReadOnlyNames...)
+	mcpReadOnlyNames := make([]string, 0, len(cappedMCPReadOnly)+len(localSummary.ReadOnlyNames)+len(lspSummary.ReadOnlyNames))
+	mcpReadOnlyNames = append(mcpReadOnlyNames, cappedMCPReadOnly...)
 	mcpReadOnlyNames = append(mcpReadOnlyNames, localSummary.ReadOnlyNames...)
 	mcpReadOnlyNames = append(mcpReadOnlyNames, lspSummary.ReadOnlyNames...)
 	augmentAgentsWithMCP(agents, mcpNames, mcpReadOnlyNames)
@@ -692,7 +698,20 @@ func run(env environment) int {
 		}
 		next, err := resolveCatalogSelection(catalog, "", input, cfg.Provider)
 		if err != nil {
-			return ui.ModelSelection{}, err
+			// Near miss: fall back to the picker's prefix/substring matcher over
+			// the catalog's model ids (r24). A unique match switches; several
+			// list the candidates; none keeps the original error.
+			match, candidates := fuzzyMatchModel(catalog, input)
+			if match == "" {
+				if len(candidates) > 1 {
+					return ui.ModelSelection{}, fmt.Errorf("%q matched no model exactly; did you mean: %s", input, strings.Join(candidates, ", "))
+				}
+				return ui.ModelSelection{}, err
+			}
+			next, err = resolveCatalogSelection(catalog, "", match, cfg.Provider)
+			if err != nil {
+				return ui.ModelSelection{}, err
+			}
 		}
 		mode := reasoningModeForProvider(catalog, next.Provider)
 		if nextReasoning.Summary == "" && cfg.ReasoningSummary == "" {
@@ -727,6 +746,8 @@ func run(env environment) int {
 
 	ag := agent.New(provider, toolRegistry, agent.Options{
 		MaxTurns:                  cfg.MaxTurns,
+		MaxTurnTokens:             cfg.MaxTurnTokens,
+		MaxPromptCostUSD:          cfg.MaxPromptCostUSD,
 		Model:                     cfg.Model,
 		ContextWindow:             cfg.ContextWindow,
 		Registry:                  modelRegistry,
@@ -738,6 +759,7 @@ func run(env environment) int {
 		Hooks:                     hookRunner,
 		ShowDiffs:                 cfg.ShowDiffs,
 		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
+		Interactive:               interactiveSession,
 	})
 	if env.agentSleep != nil {
 		ag.SetSleep(env.agentSleep)
@@ -811,17 +833,23 @@ func run(env environment) int {
 
 	color := !cfg.NoColor && env.colorTTY
 	renderer := ui.NewRenderer(stdout, stderr, ui.RenderOptions{
-		Color:                   color,
-		Markdown:                env.colorTTY,
-		Verbose:                 cfg.Verbose,
-		ToolStream:              cfg.ToolStream,
-		Quiet:                   cfg.Quiet,
+		Color:      color,
+		Markdown:   env.colorTTY,
+		Verbose:    cfg.Verbose,
+		ToolStream: cfg.ToolStream,
+		Quiet:      cfg.Quiet,
+		// -quiet still prints the single per-turn cost line on a TTY (r25);
+		// a piped -quiet run stays fully silent for scripting.
+		SuppressUsage:           cfg.Quiet && !env.colorTTY,
 		SuppressReasoningOutput: suppressReasoningOutput,
-		Model:                   registryModel,
-		Registry:                modelRegistry,
-		Now:                     now,
-		TimestampLayout:         timestampLayout(cfg.TimestampMode),
-		Width:                   env.terminalCols,
+		// The in-place wait counter and during-turn input line need a TTY; the
+		// renderer also gates them off under -quiet (r12 + during-turn input).
+		LiveStatus:      env.colorTTY,
+		Model:           registryModel,
+		Registry:        modelRegistry,
+		Now:             now,
+		TimestampLayout: timestampLayout(cfg.TimestampMode),
+		Width:           env.terminalCols,
 	})
 
 	app := &ui.App{
@@ -898,7 +926,7 @@ func run(env environment) int {
 	// runs a single turn with tools discovered before the request, so it needs no hook.
 	if mcpConn != nil && !cfg.PromptSet {
 		staticSummary := mergeMCPSummaries(localSummary, lspSummary)
-		refreshMCP := newMCPRefresher(mcpConn, toolCatalog, agents, mcpBases, mcpSummary, staticSummary, logger, pendingMCP)
+		refreshMCP := newMCPRefresher(mcpConn, toolCatalog, agents, mcpBases, mcpSummary, staticSummary, logger, pendingMCP, mcpLim)
 		app.RefreshMCP = func(ctx context.Context, agentName string) (*tools.Registry, string) {
 			reg, notice := refreshMCP(ctx, agentName)
 			if reg != nil {
@@ -977,7 +1005,7 @@ func run(env environment) int {
 	// first-turn latency to hide, so the extra request would be pure waste. The
 	// snapshot is captured synchronously here; only the stream runs in the
 	// goroutine, so it never races the loop.
-	if env.prewarmCache && !env.stdinPiped {
+	prewarm := func() {
 		if warm, ok := ag.PrewarmFunc(); ok {
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -986,12 +1014,21 @@ func run(env environment) int {
 			}()
 		}
 	}
+	if env.prewarmCache && !env.stdinPiped {
+		prewarm()
+		// Re-warm after cache-invalidating events (agent/model/provider switch,
+		// compaction); the REPL captures a fresh snapshot at call time (r43).
+		app.Prewarm = prewarm
+	}
 
 	// Interactive REPL. ui.Run owns the session save in every exit path,
 	// including SIGINT, so the exit-save never races an in-flight turn's own save
 	// or usage update (design §8.4); main only forwards the exit request.
 	fmt.Fprintf(stderr, "session: %s\n", sessionPath)
 	fmt.Fprintln(stderr, ui.ProviderLine(cfg.Provider, cfg.Model, registryModel, reasoning, modelRegistry))
+	// Surface the active agent and the discoverability cues that were otherwise
+	// invisible: /help for commands and how to interrupt a turn (r58, r23).
+	fmt.Fprintf(stderr, "agent: %s · type /help for commands · interrupt a turn with Ctrl-C or double-Esc\n", agentName)
 	return ui.Run(stdin, app, exitCh)
 }
 
@@ -1679,6 +1716,65 @@ func resolveCatalogSelection(catalog protocol.Catalog, provider, model, preferre
 		}
 	}
 	return catalogSelection{}, fmt.Errorf("a model is required (-model or harness config model)")
+}
+
+// fuzzyMatchModel resolves a near-miss model argument against the catalog's
+// model ids: exact match wins, then a unique prefix, then a unique substring
+// (case-insensitive). It returns the matched id, or the candidate list when the
+// match is ambiguous so the caller can surface "did you mean …?" (r24).
+func fuzzyMatchModel(catalog protocol.Catalog, input string) (match string, candidates []string) {
+	input = strings.ToLower(strings.TrimSpace(input))
+	if _, m, ok := config.SplitProviderModel(input); ok {
+		input = strings.ToLower(strings.TrimSpace(m))
+	}
+	if input == "" {
+		return "", nil
+	}
+	seen := map[string]bool{}
+	var ids []string
+	for _, p := range catalog.Providers {
+		for _, m := range p.Models {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				ids = append(ids, m.ID)
+			}
+		}
+	}
+	for _, id := range ids {
+		if strings.ToLower(id) == input {
+			return id, nil
+		}
+	}
+	pick := func(filter func(string) bool) []string {
+		var out []string
+		for _, id := range ids {
+			if filter(strings.ToLower(id)) {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	for _, stage := range []func(string) bool{
+		func(id string) bool { return strings.HasPrefix(id, input) },
+		func(id string) bool { return strings.Contains(id, input) },
+	} {
+		matches := pick(stage)
+		if len(matches) == 1 {
+			return matches[0], nil
+		}
+		if len(matches) > 1 {
+			return "", clampStrings(matches, 8)
+		}
+	}
+	return "", nil
+}
+
+// clampStrings caps a candidate list so a "did you mean" message stays short.
+func clampStrings(s []string, max int) []string {
+	if len(s) > max {
+		return s[:max]
+	}
+	return s
 }
 
 func catalogProvider(catalog protocol.Catalog, id string) (protocol.Provider, bool) {

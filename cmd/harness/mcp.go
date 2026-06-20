@@ -215,6 +215,79 @@ func appendMCPNames(base, extra []string) []string {
 	return out
 }
 
+// mcpLimits bounds the auto-exposed remote MCP tool surface. The zero value is
+// inactive (no cap, no disabled servers).
+type mcpLimits struct {
+	maxTools int
+	disabled map[string]bool
+}
+
+// mcpLimitsFromConfig derives the auto-exposure limits from the resolved MCP
+// config.
+func mcpLimitsFromConfig(cfg config.MCPConfig) mcpLimits {
+	var disabled map[string]bool
+	if len(cfg.DisabledServers) > 0 {
+		disabled = make(map[string]bool, len(cfg.DisabledServers))
+		for _, s := range cfg.DisabledServers {
+			if s = strings.TrimSpace(s); s != "" {
+				disabled[s] = true
+			}
+		}
+	}
+	return mcpLimits{maxTools: cfg.MaxTools, disabled: disabled}
+}
+
+func (l mcpLimits) active() bool { return l.maxTools > 0 || len(l.disabled) > 0 }
+
+// capRemoteMCPNames applies the configured per-server and max_tools restrictions
+// to the discovered remote MCP tool surface before it is auto-exposed to agents.
+// It returns the kept names (in discovery order) and the read-only subset
+// filtered to the kept set, logging one warning when it drops anything. It leaves
+// the inputs untouched (the catalog still holds every discovered tool, so an
+// explicit allowed_tools whitelist can still name a tool the cap excludes from
+// auto-exposure). Only the remote HTTP-proxy surface is capped; local MCP and LSP
+// tools pass through their own gating.
+func capRemoteMCPNames(names, readOnly []string, limits mcpLimits, logger *slog.Logger) ([]string, []string) {
+	if !limits.active() || len(names) == 0 {
+		return names, readOnly
+	}
+	kept := names
+	droppedServers := 0
+	if len(limits.disabled) > 0 {
+		kept = make([]string, 0, len(names))
+		for _, n := range names {
+			if limits.disabled[mcptools.ServerLabel(n)] {
+				droppedServers++
+				continue
+			}
+			kept = append(kept, n)
+		}
+	}
+	droppedCap := 0
+	if limits.maxTools > 0 && len(kept) > limits.maxTools {
+		droppedCap = len(kept) - limits.maxTools
+		kept = kept[:limits.maxTools]
+	}
+	if droppedServers == 0 && droppedCap == 0 {
+		return names, readOnly
+	}
+	keptSet := make(map[string]bool, len(kept))
+	for _, n := range kept {
+		keptSet[n] = true
+	}
+	ro := make([]string, 0, len(readOnly))
+	for _, n := range readOnly {
+		if keptSet[n] {
+			ro = append(ro, n)
+		}
+	}
+	if logger != nil {
+		logger.Warn(fmt.Sprintf("mcp: restricting tool surface: exposing %d of %d discovered tools (%d over max_tools, %d from disabled servers)",
+			len(kept), len(names), droppedCap, droppedServers), logging.Category("mcp"))
+	}
+	return kept, ro
+}
+
 func mcpNamesForMode(mode agentdef.MCPToolsMode, allNames, readOnlyNames []string) []string {
 	switch mode {
 	case agentdef.MCPToolsAll:
@@ -278,11 +351,15 @@ func mcpExposingAgentBases(agents map[string]agentdef.Definition) mcpAgentBases 
 // change") fast when nothing changed, and on a re-discovery error keeps the
 // current tools. Not safe for concurrent use: the REPL calls it only at the
 // idle prompt boundary, between turns.
-func newMCPRefresher(conn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, prev, static mcptools.Summary, logger *slog.Logger, pending *asyncMCPRegistration) func(context.Context, string) (*tools.Registry, string) {
+func newMCPRefresher(conn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, prev, static mcptools.Summary, logger *slog.Logger, pending *asyncMCPRegistration, limits ...mcpLimits) func(context.Context, string) (*tools.Registry, string) {
 	prevNames := prev.Names
+	var lim mcpLimits
+	if len(limits) > 0 {
+		lim = limits[0]
+	}
 	return func(parent context.Context, agentName string) (*tools.Registry, string) {
 		if res, ok := pending.take(); ok {
-			return applyMCPRegistration(catalog, res.registry, agents, bases, agentName, &prevNames, res.summary, static, logger)
+			return applyMCPRegistration(catalog, res.registry, agents, bases, agentName, &prevNames, res.summary, static, logger, lim)
 		}
 
 		if !conn.Dirty() {
@@ -310,11 +387,11 @@ func newMCPRefresher(conn *mcptools.Conn, catalog *tools.Registry, agents map[st
 			return nil, ""
 		}
 		conn.ClearDirty()
-		return applyMCPRegistration(catalog, nil, agents, bases, agentName, &prevNames, sum, static, logger)
+		return applyMCPRegistration(catalog, nil, agents, bases, agentName, &prevNames, sum, static, logger, lim)
 	}
 }
 
-func applyMCPRegistration(catalog *tools.Registry, discovered *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, agentName string, prevNames *[]string, sum, static mcptools.Summary, logger *slog.Logger) (*tools.Registry, string) {
+func applyMCPRegistration(catalog *tools.Registry, discovered *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, agentName string, prevNames *[]string, sum, static mcptools.Summary, logger *slog.Logger, limits mcpLimits) (*tools.Registry, string) {
 	// Async first-apply: copy the privately-discovered tools into the shared catalog,
 	// log the connection, warn on skipped names, and drop any explicit-whitelist
 	// mcp__ name the proxy never exposed. This runs BEFORE the current-agent handling
@@ -342,8 +419,12 @@ func applyMCPRegistration(catalog *tools.Registry, discovered *tools.Registry, a
 	}
 	*prevNames = slices.Clone(sum.Names)
 
-	allNames := append(slices.Clone(sum.Names), static.Names...)
-	readOnlyNames := append(slices.Clone(sum.ReadOnlyNames), static.ReadOnlyNames...)
+	// Cap only the auto-exposure name lists, not the catalog: the full discovered
+	// set above stays registered so explicit whitelists keep working, while agents
+	// in read_only/all mode see at most the configured remote surface.
+	cappedNames, cappedReadOnly := capRemoteMCPNames(sum.Names, sum.ReadOnlyNames, limits, logger)
+	allNames := append(slices.Clone(cappedNames), static.Names...)
+	readOnlyNames := append(slices.Clone(cappedReadOnly), static.ReadOnlyNames...)
 	// Capture the current agent's pre-refresh allowed list (before the bases loop may
 	// rewrite it) to detect whether the refresh changed its effective tools.
 	// agentKnown gates only the current-agent subset below; the catalog updates and

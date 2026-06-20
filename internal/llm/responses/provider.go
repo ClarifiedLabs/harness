@@ -27,28 +27,31 @@ type Config struct {
 	AuthHeaders   map[string]string
 	BaseURL       string
 	ContextWindow int
+	OutputLimit   int // model's real max-output-token limit; 0 = unknown
 	HTTPClient    *http.Client
 	Sleep         func(time.Duration)
 }
 
 type Provider struct {
-	apiKey      string
-	authHeaders map[string]string
-	baseURL     string
-	client      *http.Client
-	sleep       func(time.Duration)
+	apiKey        string
+	authHeaders   map[string]string
+	baseURL       string
+	contextWindow int
+	outputLimit   int
+	client        *http.Client
+	sleep         func(time.Duration)
 }
 
 func New(cfg Config) *Provider {
 	base, client, sleep := llm.HTTPDefaults(cfg.BaseURL, defaultBaseURL, cfg.HTTPClient, cfg.Sleep)
-	return &Provider{apiKey: cfg.APIKey, authHeaders: cfg.AuthHeaders, baseURL: base, client: client, sleep: sleep}
+	return &Provider{apiKey: cfg.APIKey, authHeaders: cfg.AuthHeaders, baseURL: base, contextWindow: cfg.ContextWindow, outputLimit: cfg.OutputLimit, client: client, sleep: sleep}
 }
 
 func (p *Provider) Name() string { return "responses" }
 
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
-		body, err := json.Marshal(buildRequest(req))
+		body, err := json.Marshal(buildRequest(req, p.contextWindow, p.outputLimit))
 		if err != nil {
 			yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
 			return

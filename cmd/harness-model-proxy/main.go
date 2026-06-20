@@ -181,11 +181,16 @@ func run(env environment) int {
 		return exitUsage
 	}
 
+	configDir := filepath.Dir(path)
+	initialCatalog, initialSourceDate := loadModelsDevCacheForServe(configDir)
 	handler, err := server.NewHandler(server.Options{
-		ConfigDir: filepath.Dir(path),
-		Config:    cfg,
-		Getenv:    env.getenv,
-		Logger:    logger,
+		ConfigDir:           configDir,
+		Config:              cfg,
+		Getenv:              env.getenv,
+		Logger:              logger,
+		PricingMaxAge:       modelsTTL,
+		ModelsDevCatalog:    initialCatalog,
+		ModelsDevSourceDate: initialSourceDate,
 		Warn: func(msg string) {
 			logger.Warn(msg)
 		},
@@ -209,7 +214,9 @@ func run(env environment) int {
 			}
 		}()
 	}
-	startModelsDevCacheRefresh(ctx, env, filepath.Dir(path), modelsTTL, logger)
+	startModelsDevCacheRefresh(ctx, env, configDir, modelsTTL, logger, func(catalog *modelsdev.Catalog, sourceDate time.Time) {
+		handler.UpdateModelsDevCatalog(catalog, sourceDate)
+	})
 	srv := httpserve.New(addr, handler)
 	logger.Info("model proxy listening", "addr", addr)
 	if err := httpserve.Run(ctx, srv); err != nil {

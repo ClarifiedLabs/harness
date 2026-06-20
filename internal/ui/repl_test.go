@@ -91,7 +91,40 @@ func reasoningSummary(s string) llm.StreamEvent {
 	return llm.StreamEvent{Kind: llm.EventReasoningSummary, Text: s}
 }
 
-func newTestApp(t *testing.T, out, errw *bytes.Buffer, fp *llmtest.FakeProvider) *App {
+// testWriter is the buffer contract newTestApp/liveTestApp need: an io.Writer
+// the renderer writes to, plus String() for assertions. Both *bytes.Buffer and
+// *lockedBuffer satisfy it, so race-sensitive tests can swap in the locked
+// variant without touching the helpers' other callers.
+type testWriter interface {
+	io.Writer
+	String() string
+}
+
+// lockedBuffer is a mutex-guarded bytes.Buffer. The during-turn-input tests poll
+// rendered output (via waitFor/String) from the test goroutine while turn
+// goroutines write the renderer's out/errw concurrently; a bare *bytes.Buffer
+// makes that an unsynchronized access that trips `go test -race`. Locking both
+// Write and String lets the race detector exercise the goroutine interleavings.
+// Production code guards its writers with its own mutex — this only closes the
+// test-harness validation gap.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func newTestApp(t *testing.T, out, errw testWriter, fp *llmtest.FakeProvider) *App {
 	t.Helper()
 	stateDir := t.TempDir()
 	a := agent.New(fp, tools.Default(), agent.Options{Model: "claude-opus-4-8"})
@@ -131,8 +164,8 @@ func TestOneShotPromptHookBlockSkipsTurn(t *testing.T) {
 	if app.Turn != 0 {
 		t.Fatalf("turn = %d, want 0", app.Turn)
 	}
-	if len(fp.Requests) != 0 {
-		t.Fatalf("provider was called despite prompt block: %d requests", len(fp.Requests))
+	if fp.RequestCount() != 0 {
+		t.Fatalf("provider was called despite prompt block: %d requests", fp.RequestCount())
 	}
 	if !strings.Contains(errw.String(), "[prompt blocked: secret]") {
 		t.Fatalf("stderr missing prompt block notice:\n%s", errw.String())
@@ -157,8 +190,8 @@ func TestREPLHelpPromptExit(t *testing.T) {
 	if !strings.Contains(errw.String(), "/help") || !strings.Contains(errw.String(), "/exit") {
 		t.Errorf("/help should list commands, errw=%q", errw.String())
 	}
-	if len(fp.Requests) != 1 {
-		t.Errorf("agent should be invoked once for the single prompt, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Errorf("agent should be invoked once for the single prompt, got %d requests", fp.RequestCount())
 	}
 	if !strings.Contains(out.String(), "the answer") {
 		t.Errorf("assistant text should reach stdout, out=%q", out.String())
@@ -343,8 +376,8 @@ func TestREPLImageCommandAttachesNextPrompt(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 
-	if len(fp.Requests) != 1 {
-		t.Fatalf("requests = %d, want 1", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("requests = %d, want 1", fp.RequestCount())
 	}
 	content := fp.Requests[0].Messages[0].Content
 	if len(content) != 2 {
@@ -408,8 +441,37 @@ func TestREPLUnknownCommand(t *testing.T) {
 	if !strings.Contains(errw.String(), "/bogus") || !strings.Contains(strings.ToLower(errw.String()), "unknown") {
 		t.Errorf("unknown command should be reported, errw=%q", errw.String())
 	}
-	if len(fp.Requests) != 0 {
-		t.Errorf("unknown command must not invoke the agent, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 0 {
+		t.Errorf("unknown command must not invoke the agent, got %d requests", fp.RequestCount())
+	}
+}
+
+func TestREPLUnknownCommandSuggestsClosest(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+
+	if code := Run(strings.NewReader("/modl\n/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(errw.String(), "did you mean /model?") {
+		t.Errorf("near-miss command should suggest /model, errw=%q", errw.String())
+	}
+}
+
+func TestSuggestCommand(t *testing.T) {
+	cases := map[string]string{
+		"/modl":     "/model",  // edit distance 1
+		"/usag":     "/usage",  // shared prefix
+		"/efort":    "/effort", // transposition/missing letter
+		"/compactt": "/compact",
+		"/xyzzy":    "", // too far from anything
+		"/":         "", // too short
+	}
+	for in, want := range cases {
+		if got := suggestCommand(in); got != want {
+			t.Errorf("suggestCommand(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -506,8 +568,8 @@ func TestREPLLiteralSlashEscape(t *testing.T) {
 	if code := Run(in, app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("// escape should send a prompt, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("// escape should send a prompt, got %d requests", fp.RequestCount())
 	}
 	// The leading slash is restored; the doubled slash is the escape.
 	sent := app.Agent.Transcript()[0].Content[0].Text
@@ -532,8 +594,8 @@ func TestREPLInteractiveBangRunsLocalShellOnly(t *testing.T) {
 	if code := run(strings.NewReader("!echo foo\r/exit\r"), app, nil, true); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 0 {
-		t.Fatalf("bang command should not invoke provider, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 0 {
+		t.Fatalf("bang command should not invoke provider, got %d requests", fp.RequestCount())
 	}
 	if got := strings.Join(events, ","); got != "before,run:echo foo,after" {
 		t.Fatalf("shell handoff events = %q", got)
@@ -558,8 +620,8 @@ func TestREPLBangIsLiteralWithoutInteractivePromptEditor(t *testing.T) {
 	if code := Run(strings.NewReader("!echo foo\n/exit\n"), app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
 	if got := app.Agent.Transcript()[0].Content[0].Text; got != "!echo foo" {
 		t.Fatalf("prompt = %q, want literal bang prompt", got)
@@ -599,8 +661,8 @@ func TestREPLBracketedPasteSubmittedAsSingleLiteralPrompt(t *testing.T) {
 	if code := Run(in, app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("bracketed paste should send one prompt, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("bracketed paste should send one prompt, got %d requests", fp.RequestCount())
 	}
 	sent := app.Agent.Transcript()[0].Content[0].Text
 	if sent != pasted {
@@ -645,8 +707,8 @@ func TestREPLTypedSkillMentionAddsRequestContext(t *testing.T) {
 	if code := Run(strings.NewReader("please use $commit\n/exit\n"), app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
 	req := fp.Requests[0]
 	if got := req.Messages[0].Content[0].Text; got != "please use $commit" {
@@ -672,8 +734,8 @@ func TestREPLTypedEscapedSkillMentionStillScansLaterMentions(t *testing.T) {
 	if code := Run(strings.NewReader("$$commit and use $review\n/exit\n"), app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
 	req := fp.Requests[0]
 	if got := req.Messages[0].Content[0].Text; got != "$commit and use $review" {
@@ -701,8 +763,8 @@ func TestREPLPastedSkillMentionStaysLiteral(t *testing.T) {
 	if code := Run(in, app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
 	req := fp.Requests[0]
 	if got := req.Messages[0].Content[0].Text; got != pasted {
@@ -724,8 +786,8 @@ func TestREPLStandaloneUnknownSkillSkipsProvider(t *testing.T) {
 	if code := Run(strings.NewReader("$missing\n/exit\n"), app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 0 {
-		t.Fatalf("provider requests = %d, want 0", len(fp.Requests))
+	if fp.RequestCount() != 0 {
+		t.Fatalf("provider requests = %d, want 0", fp.RequestCount())
 	}
 	if !strings.Contains(errw.String(), `unknown skill "missing"`) {
 		t.Fatalf("missing unknown skill notice, errw=%q", errw.String())
@@ -745,8 +807,8 @@ func TestREPLAcceptsPromptLongerThanScannerLimit(t *testing.T) {
 	if code := Run(in, app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("long prompt should send one request, got %d", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("long prompt should send one request, got %d", fp.RequestCount())
 	}
 	sent := app.Agent.Transcript()[0].Content[0].Text
 	if sent != prompt {
@@ -817,8 +879,8 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 	if code := Run(in, app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 0 {
-		t.Fatalf("/tools should not invoke the agent, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 0 {
+		t.Fatalf("/tools should not invoke the agent, got %d requests", fp.RequestCount())
 	}
 	got := errw.String()
 	for _, want := range []string{
@@ -934,6 +996,10 @@ func TestREPLClearResetsUsageLineCumulative(t *testing.T) {
 	if strings.Contains(got, "200 (300) in") {
 		t.Errorf("post-clear turn leaked pre-clear input total, errw=%q", got)
 	}
+	// /clear echoes the outgoing totals before zeroing them (r26).
+	if !strings.Contains(got, "cleared session") || !strings.Contains(got, "100 input") {
+		t.Errorf("/clear should echo the discarded session totals, errw=%q", got)
+	}
 }
 
 func TestREPLUsageLineIncludesCompactUsage(t *testing.T) {
@@ -1008,8 +1074,8 @@ func TestREPLCompactCommand(t *testing.T) {
 		t.Errorf("/usage should include the summary call usage after /compact, errw=%q", got)
 	}
 	// The summary call was actually issued (the only model call here).
-	if len(fp.Requests) != 1 {
-		t.Errorf("/compact should issue exactly the summary call, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Errorf("/compact should issue exactly the summary call, got %d requests", fp.RequestCount())
 	}
 }
 
@@ -1106,8 +1172,8 @@ func TestREPLEffortCommandListsAndSwitchesNextTurn(t *testing.T) {
 			t.Errorf("/effort output missing %q:\n%s", want, got)
 		}
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
 	if fp.Requests[0].Reasoning.Effort != "high" {
 		t.Fatalf("request effort = %q, want high", fp.Requests[0].Reasoning.Effort)
@@ -1135,8 +1201,8 @@ func TestREPLEffortCommandSendsExplicitNone(t *testing.T) {
 	if code := Run(in, app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
 	if fp.Requests[0].Reasoning.Effort != "none" {
 		t.Fatalf("request effort = %q, want none", fp.Requests[0].Reasoning.Effort)
@@ -1177,8 +1243,8 @@ func TestREPLReasoningCommandSetsBudgetTokens(t *testing.T) {
 			t.Errorf("/reasoning output missing %q:\n%s", want, got)
 		}
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
 	if fp.Requests[0].Reasoning.BudgetTokens == nil || *fp.Requests[0].Reasoning.BudgetTokens != 2048 {
 		t.Fatalf("request budget_tokens = %v, want 2048", fp.Requests[0].Reasoning.BudgetTokens)
@@ -1209,8 +1275,8 @@ func TestREPLReasoningCommandSetsToggle(t *testing.T) {
 	if !strings.Contains(errw.String(), "[reasoning: enabled=false]") {
 		t.Fatalf("toggle should be acknowledged, errw=%q", errw.String())
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
 	if fp.Requests[0].Reasoning.Enabled == nil || *fp.Requests[0].Reasoning.Enabled {
 		t.Fatalf("request enabled = %v, want false", fp.Requests[0].Reasoning.Enabled)
@@ -1243,8 +1309,8 @@ func TestREPLEffortCommandRejectsInvalidLevelForCurrentModel(t *testing.T) {
 	if !strings.Contains(errw.String(), `does not support reasoning effort "xhigh"`) {
 		t.Fatalf("invalid effort should be reported, errw=%q", errw.String())
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
 	if fp.Requests[0].Reasoning.Effort != "medium" {
 		t.Fatalf("request effort = %q, want unchanged medium", fp.Requests[0].Reasoning.Effort)
@@ -1376,8 +1442,8 @@ func TestREPLAgentCommandSwitchesNextTurn(t *testing.T) {
 		t.Errorf("switch should be acknowledged, errw=%q", errw.String())
 	}
 	// The post-switch turn must advertise only the plan tool set.
-	if len(fp.Requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
 	names := make([]string, len(fp.Requests[0].Tools))
 	for i, s := range fp.Requests[0].Tools {
@@ -1503,8 +1569,8 @@ func TestREPLContextDumpsCurrentRequest(t *testing.T) {
 	if code := Run(in, app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("/context should not invoke the model, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("/context should not invoke the model, got %d requests", fp.RequestCount())
 	}
 	got := errw.String()
 	for _, want := range []string{
@@ -1547,8 +1613,8 @@ func TestREPLContextSavesToFile(t *testing.T) {
 	if len(req.Messages) != 2 || req.Messages[0].Content[0].Text != "hello" {
 		t.Fatalf("context messages = %+v", req.Messages)
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("/context <file> should not invoke the model, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("/context <file> should not invoke the model, got %d requests", fp.RequestCount())
 	}
 	if !strings.Contains(errw.String(), "[context saved "+path+"]") {
 		t.Errorf("/context <file> should acknowledge save, errw=%q", errw.String())
@@ -1572,8 +1638,8 @@ func TestREPLContextIncludesTodoRequestContext(t *testing.T) {
 	if code := Run(strings.NewReader("/context\n/exit\n"), app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if len(fp.Requests) != 0 {
-		t.Fatalf("/context should not invoke the model, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 0 {
+		t.Fatalf("/context should not invoke the model, got %d requests", fp.RequestCount())
 	}
 	got := errw.String()
 	for _, want := range []string{
@@ -1685,8 +1751,8 @@ func TestREPLBackgroundCommandListsNoJobs(t *testing.T) {
 	if code := Run(strings.NewReader("/background\n/exit\n"), app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if len(fp.Requests) != 0 {
-		t.Fatalf("/background should not invoke the model, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 0 {
+		t.Fatalf("/background should not invoke the model, got %d requests", fp.RequestCount())
 	}
 	if !strings.Contains(errw.String(), "[background: no jobs]") {
 		t.Fatalf("/background output = %q", errw.String())
@@ -1803,7 +1869,7 @@ func TestREPLReaderMarksSplitEscapeSequenceTail(t *testing.T) {
 }
 
 func TestREPLScrollEscapeDuringActiveTurnDoesNotQueuePrompt(t *testing.T) {
-	var out, errw bytes.Buffer
+	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
 	inTurn := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
@@ -1839,8 +1905,8 @@ func TestREPLScrollEscapeDuringActiveTurnDoesNotQueuePrompt(t *testing.T) {
 	writePipe(t, pw, "\x1b[A")
 	close(releaseTurn)
 	waitFor(t, func() bool { return strings.Count(errw.String(), "> ") >= 2 }, "prompt after first turn")
-	if len(fp.Requests) != 1 {
-		t.Fatalf("scroll escape should not queue a prompt, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("scroll escape should not queue a prompt, got %d requests", fp.RequestCount())
 	}
 
 	writePipe(t, pw, "second\n/exit\n")
@@ -1848,8 +1914,8 @@ func TestREPLScrollEscapeDuringActiveTurnDoesNotQueuePrompt(t *testing.T) {
 	if code := waitRun(t, codeCh); code != ExitOK {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 2 {
-		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	if fp.RequestCount() != 2 {
+		t.Fatalf("provider requests = %d, want 2", fp.RequestCount())
 	}
 	var prompts []string
 	for _, msg := range app.Agent.Transcript() {
@@ -1862,6 +1928,11 @@ func TestREPLScrollEscapeDuringActiveTurnDoesNotQueuePrompt(t *testing.T) {
 	}
 }
 
+// Non-interactive (piped) input keeps the auto-submitting type-ahead drain: a
+// script that pipes several lines runs each as a turn. The during-turn-input
+// deposit behavior (never auto-submit, deposit as editable prefill) applies only
+// to the interactive prompt-editor path — see
+// TestREPLDuringTurnInputDepositedOnCompletionNotAutoSubmitted.
 func TestREPLTypeaheadDuringActiveTurnRunsAfterTurn(t *testing.T) {
 	var out, errw bytes.Buffer
 	inTurn := make(chan struct{})
@@ -1904,8 +1975,8 @@ func TestREPLTypeaheadDuringActiveTurnRunsAfterTurn(t *testing.T) {
 	if code != ExitOK {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 2 {
-		t.Fatalf("typeahead prompt should run after the blocked turn, got %d requests", len(fp.Requests))
+	if fp.RequestCount() != 2 {
+		t.Fatalf("typeahead prompt should run after the blocked turn, got %d requests", fp.RequestCount())
 	}
 	var prompts []string
 	for _, msg := range app.Agent.Transcript() {
@@ -1919,7 +1990,7 @@ func TestREPLTypeaheadDuringActiveTurnRunsAfterTurn(t *testing.T) {
 }
 
 func TestREPLPromptEditorPrintsPromptAfterTurnWithPendingActiveRead(t *testing.T) {
-	var out, errw bytes.Buffer
+	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
 	inTurn := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
@@ -1960,8 +2031,10 @@ func TestREPLPromptEditorPrintsPromptAfterTurnWithPendingActiveRead(t *testing.T
 		return strings.Contains(s, "[turn:") && strings.Count(s, "> ") >= 2
 	}, "prompt after first turn")
 
-	writePipe(t, pw, "second\n")
-	waitFor(t, func() bool { return len(fp.Requests) == 2 }, "second request")
+	// The post-turn prompt is the raw line editor, so Enter is \r (the canonical
+	// \n fallback is gone now that during-turn input is captured raw).
+	writePipe(t, pw, "second\r")
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request")
 	waitFor(t, func() bool { return strings.Count(errw.String(), "> ") >= 3 }, "prompt after second turn")
 	writePipe(t, pw, "/exit\r")
 	_ = pw.Close()
@@ -1969,8 +2042,8 @@ func TestREPLPromptEditorPrintsPromptAfterTurnWithPendingActiveRead(t *testing.T
 	if code := waitRun(t, codeCh); code != ExitOK {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 2 {
-		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	if fp.RequestCount() != 2 {
+		t.Fatalf("provider requests = %d, want 2", fp.RequestCount())
 	}
 }
 
@@ -2261,8 +2334,8 @@ func TestREPLRefreshMCPAppliedBeforeTurn(t *testing.T) {
 	if gotAgent != "auto" {
 		t.Errorf("RefreshMCP agent = %q, want auto", gotAgent)
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("want 1 request, got %d", len(fp.Requests))
+	if fp.RequestCount() != 1 {
+		t.Fatalf("want 1 request, got %d", fp.RequestCount())
 	}
 	var advertised bool
 	for _, ts := range fp.Requests[0].Tools {
@@ -2512,5 +2585,289 @@ func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
 	got := app.Agent.Transcript()
 	if len(got) != 1 || !strings.Contains(got[0].Content[0].Text, "/p/0001.plan.md") {
 		t.Errorf("transcript not reseeded with the plan pointer: %+v", got)
+	}
+}
+
+// liveTestApp is newTestApp with a renderer that enables the live wait counter
+// and during-turn input line, so the typed buffer renders to errw in tests.
+func liveTestApp(t *testing.T, out, errw testWriter, fp *llmtest.FakeProvider) *App {
+	t.Helper()
+	app := newTestApp(t, out, errw, fp)
+	app.Renderer = NewRenderer(out, errw, RenderOptions{Model: "claude-opus-4-8", ToolStream: true, LiveStatus: true})
+	return app
+}
+
+// The cancelableReader's pump eagerly drains the fd, so a split escape
+// sequence's tail can sit in its Go-side buffers where WaitReadable(fd) can no
+// longer see it. buffered() must report exactly those undelivered bytes so the
+// escape-readiness probe finds them.
+func TestCancelableReaderBufferedTracksPendingBytes(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	cr := newCancelableReader(pr)
+
+	if got := cr.buffered(); got != 0 {
+		t.Fatalf("buffered() = %d on a fresh reader, want 0", got)
+	}
+	writePipe(t, pw, "\x1b[A") // a 3-byte arrow-key escape sequence
+	waitFor(t, func() bool { return cr.buffered() == 3 }, "pump buffers the 3 escape bytes")
+
+	// Reading the ESC leaves the [A tail buffered — invisible to a drained fd.
+	one := make([]byte, 1)
+	if n, err := cr.Read(one); err != nil || n != 1 {
+		t.Fatalf("Read = %d, %v; want 1, nil", n, err)
+	}
+	if got := cr.buffered(); got != 2 {
+		t.Fatalf("buffered() = %d after reading 1 of 3, want 2", got)
+	}
+	rest := make([]byte, 8)
+	if n, err := cr.Read(rest); err != nil || n != 2 {
+		t.Fatalf("Read remainder = %d, %v; want 2, nil", n, err)
+	}
+	if got := cr.buffered(); got != 0 {
+		t.Fatalf("buffered() = %d after draining, want 0", got)
+	}
+}
+
+// Readiness must consult the cancelableReader's Go-side buffers, not only the
+// raw fd: when the pump has pre-drained an escape sequence's tail off the fd, a
+// WaitReadable probe reports not-readable, so escapeSequenceAvailable would
+// otherwise mis-read the sequence as a bare Esc.
+func TestEscapeSequenceAvailableConsultsCancelableBuffer(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	cr := newCancelableReader(pr)
+	e := newPromptLineEditor(cr, io.Discard)
+	// Mirror the production wiring: the fd probe is stubbed not-readable (the pump
+	// already drained the fd), so readiness must come from the Go-side buffer.
+	e.escapeSequenceReady = func(time.Duration) bool { return cr.buffered() > 0 }
+
+	if e.escapeSequenceAvailable() {
+		t.Fatal("no buffered bytes and fd not readable -> escape sequence must be unavailable")
+	}
+	writePipe(t, pw, "[A") // the tail the pump pre-drained off the fd
+	waitFor(t, func() bool { return cr.buffered() == 2 }, "pump buffers the escape tail")
+	if !e.escapeSequenceAvailable() {
+		t.Fatal("a buffered escape tail must make the sequence available despite a drained fd")
+	}
+}
+
+func transcriptPrompts(app *App) string {
+	var prompts []string
+	for _, msg := range app.Agent.Transcript() {
+		if msg.Role == llm.RoleUser && len(msg.Content) == 1 && msg.Content[0].Kind == llm.BlockText {
+			prompts = append(prompts, msg.Content[0].Text)
+		}
+	}
+	return strings.Join(prompts, "|")
+}
+
+// During-turn typed input is NEVER auto-submitted (rule 1): Enter inserts a
+// newline into the buffer, and on completion the buffer is deposited into the
+// next prompt as editable, pre-filled text submitted manually (rule 2).
+func TestREPLDuringTurnInputDepositedOnCompletionNotAutoSubmitted(t *testing.T) {
+	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
+	inTurn := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		// No events on the blocking step: the model is in its initial wait, so
+		// the live counter stays active and the typed buffer renders on it.
+		llmtest.Step{
+			Stop:  llm.StopEndTurn,
+			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
+			Block: func(ctx context.Context) { close(inTurn); <-releaseTurn },
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp)
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-inTurn:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+
+	// Type during the turn, with Enter mid-word: it must render live and the
+	// Enter must insert a newline, never start a turn.
+	writePipe(t, pw, "dr\raft")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> dr aft") }, "live input line with sanitized newline")
+	close(releaseTurn)
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "[turn:") }, "turn 1 usage line")
+
+	if fp.RequestCount() != 1 {
+		t.Fatalf("during-turn input must not auto-submit; got %d requests", fp.RequestCount())
+	}
+
+	// The deposited buffer is editable prefill; submitting it manually runs it,
+	// and it preserves the newline that Enter inserted.
+	writePipe(t, pw, "\r")
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from deposited prefill")
+	_ = pw.Close()
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	if got := transcriptPrompts(app); got != "first|dr\naft" {
+		t.Fatalf("prompts = %q, want %q (deposited text, newline preserved, submitted manually)", got, "first|dr\naft")
+	}
+}
+
+// On interrupt (double-Esc) the typed-so-far buffer is still deposited (rule 2),
+// and the turn is cancelled (Esc-Esc still interrupts).
+func TestREPLDuringTurnInputDepositedOnInterrupt(t *testing.T) {
+	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
+	inTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		// No events: the model is in its initial wait so the live input line is
+		// active when the user types and double-Esc cancels.
+		llmtest.Step{
+			Stop:  llm.StopEndTurn,
+			Usage: llm.Usage{InputTokens: 5, OutputTokens: 1},
+			Block: func(ctx context.Context) { close(inTurn); <-ctx.Done() },
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("resumed answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp)
+	app.Interrupt = agent.NewInterruptWatcher(make(chan os.Signal), app.clock(), func() {})
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-inTurn:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+
+	// Type, then double-Esc to interrupt. The typed text survives as a deposit.
+	writePipe(t, pw, "wip")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> wip") }, "live input line")
+	writePipe(t, pw, "\x1b\x1b")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "[cancelled]") }, "turn cancelled")
+
+	if fp.RequestCount() != 1 {
+		t.Fatalf("interrupt must not start a new turn; got %d requests", fp.RequestCount())
+	}
+
+	// The interrupted-turn buffer is deposited; submitting it runs it.
+	writePipe(t, pw, "\r")
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from deposited prefill after interrupt")
+	_ = pw.Close()
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	if got := transcriptPrompts(app); got != "first|wip" {
+		t.Fatalf("prompts = %q, want first|wip (typed text deposited on interrupt)", got)
+	}
+}
+
+// The during-turn capture is a single-line editor: printable runes, inserts,
+// and deletes act at turnCursor, and Left/Right/Home/End move it. This exercises
+// the full edit grammar and asserts both the buffer and the cursor (mirrored on
+// the live onTurnInput callback) after each operation.
+func TestREPLDuringTurnCursorEditing(t *testing.T) {
+	rr := &replReader{}
+	var emittedBuf string
+	var emittedCursor int
+	rr.onTurnInput = func(buf string, cursor int) { emittedBuf, emittedCursor = buf, cursor }
+
+	check := func(wantBuf string, wantCursor int) {
+		t.Helper()
+		if string(rr.turnBuf) != wantBuf || rr.turnCursor != wantCursor {
+			t.Fatalf("buf=%q cursor=%d, want buf=%q cursor=%d", string(rr.turnBuf), rr.turnCursor, wantBuf, wantCursor)
+		}
+		if emittedBuf != wantBuf || emittedCursor != wantCursor {
+			t.Fatalf("emitted buf=%q cursor=%d, want buf=%q cursor=%d", emittedBuf, emittedCursor, wantBuf, wantCursor)
+		}
+	}
+
+	rr.turnInsertRunes([]rune("abc")) // type "abc"
+	check("abc", 3)
+	rr.applyTurnAction(lineEditLeft, "") // -> between b and c
+	check("abc", 2)
+	rr.applyTurnAction(lineEditLeft, "") // -> between a and b
+	check("abc", 1)
+	rr.turnInsertRunes([]rune("X")) // insert mid-buffer
+	check("aXbc", 2)
+	rr.applyTurnAction(lineEditHome, "")
+	check("aXbc", 0)
+	rr.applyTurnAction(lineEditBackspace, "") // no-op at start
+	check("aXbc", 0)
+	rr.applyTurnAction(lineEditDelete, "") // delete rune AT cursor
+	check("Xbc", 0)
+	rr.applyTurnAction(lineEditEnd, "")
+	check("Xbc", 3)
+	rr.applyTurnAction(lineEditBackspace, "") // delete rune BEFORE cursor
+	check("Xb", 2)
+	rr.applyTurnAction(lineEditRight, "") // no-op at end
+	check("Xb", 2)
+	rr.applyTurnAction(lineEditInsertNewline, "") // Enter inserts a newline, never submits
+	check("Xb\n", 3)
+	rr.applyTurnAction(lineEditInsertText, "yz") // pasted/CSI-u text inserts at cursor
+	check("Xb\nyz", 5)
+	rr.applyTurnAction(lineEditHome, "")
+	check("Xb\nyz", 0)
+	rr.applyTurnAction(lineEditDelete, "")
+	check("b\nyz", 0)
+
+	// Deposit returns the full buffer (newline preserved) and resets buffer+cursor.
+	dep := rr.depositTurnBuffer()
+	if !dep.deposit || dep.text != "b\nyz" {
+		t.Fatalf("deposit = %+v, want text %q deposit=true", dep, "b\nyz")
+	}
+	if len(rr.turnBuf) != 0 || rr.turnCursor != 0 {
+		t.Fatalf("after deposit buf=%q cursor=%d, want empty buffer and cursor 0", string(rr.turnBuf), rr.turnCursor)
+	}
+}
+
+// Wide and multi-byte runes must move the cursor by whole runes, and a stale
+// cursor past the (now shorter) buffer is clamped rather than panicking.
+func TestREPLDuringTurnCursorWideRunesAndClamp(t *testing.T) {
+	rr := &replReader{}
+	rr.turnInsertRunes([]rune("aé漢")) // 1-byte, 2-byte, 3-byte runes
+	if string(rr.turnBuf) != "aé漢" || rr.turnCursor != 3 {
+		t.Fatalf("buf=%q cursor=%d, want aé漢 / 3", string(rr.turnBuf), rr.turnCursor)
+	}
+	rr.applyTurnAction(lineEditLeft, "") // between é and 漢
+	rr.applyTurnAction(lineEditBackspace, "")
+	if string(rr.turnBuf) != "a漢" || rr.turnCursor != 1 {
+		t.Fatalf("buf=%q cursor=%d, want a漢 / 1", string(rr.turnBuf), rr.turnCursor)
+	}
+	// A stale out-of-range cursor is clamped to the buffer end on the next edit.
+	rr.turnCursor = 99
+	rr.applyTurnAction(lineEditBackspace, "")
+	if string(rr.turnBuf) != "a" || rr.turnCursor != 1 {
+		t.Fatalf("buf=%q cursor=%d after clamped backspace, want a / 1", string(rr.turnBuf), rr.turnCursor)
+	}
+}
+
+func TestEffortMenuFallsBackToDefaults(t *testing.T) {
+	catalog := &llm.ReasoningInfo{Supported: true, Options: []llm.ReasoningOption{{Type: "effort", Values: []string{"low", "high"}}}}
+	if v, fromCatalog := effortMenu(catalog); !fromCatalog || strings.Join(v, ",") != "low,high" {
+		t.Errorf("catalog efforts = %v (catalog=%v), want low,high from catalog", v, fromCatalog)
+	}
+	// Provider-defined (supported, no enumerated options): offer the default
+	// menu (r61).
+	noLevels := &llm.ReasoningInfo{Supported: true}
+	if v, fromCatalog := effortMenu(noLevels); fromCatalog || strings.Join(v, ",") != "minimal,low,medium,high" {
+		t.Errorf("fallback efforts = %v (catalog=%v), want the default menu", v, fromCatalog)
+	}
+	// Supported via a non-effort control (toggle): effort is not accepted, so no
+	// menu is offered.
+	toggleOnly := &llm.ReasoningInfo{Supported: true, Options: []llm.ReasoningOption{{Type: "toggle"}}}
+	if v, _ := effortMenu(toggleOnly); len(v) != 0 {
+		t.Errorf("toggle-only efforts = %v, want none", v)
 	}
 }

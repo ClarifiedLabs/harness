@@ -311,6 +311,108 @@ func TestSignedReasoningPersistedAndReplayed(t *testing.T) {
 	}
 }
 
+func TestEncryptedReasoningPersistedAndReplayed(t *testing.T) {
+	// An OpenAI Responses encrypted reasoning item (stateless store=false mode)
+	// must be persisted as a BlockReasoning so it round-trips on the next turn,
+	// sparing the model from re-reasoning. The persist event carries no display
+	// text, so the dedicated reasoning sink stays empty.
+	encrypted := llm.StreamEvent{Kind: llm.EventReasoningSummary, ReasoningID: "rs_1", ReasoningEncrypted: "ENC-1"}
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{encrypted, textDelta("answer")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("again")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Default(), Options{})
+	sink := &recordSink{}
+
+	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if len(sink.reasoning) != 0 {
+		t.Fatalf("encrypted reasoning must not surface as a display summary, got %v", sink.reasoning)
+	}
+	msgs := a.Transcript()
+	mustValid(t, msgs)
+	asst := msgs[len(msgs)-1]
+	if len(asst.Content) != 2 {
+		t.Fatalf("assistant content = %d blocks, want reasoning+text:\n%s", len(asst.Content), dump([]llm.Message{asst}))
+	}
+	r := asst.Content[0]
+	if r.Kind != llm.BlockReasoning || r.ReasoningID != "rs_1" || r.ReasoningEncrypted != "ENC-1" {
+		t.Fatalf("first block = %+v, want encrypted reasoning persisted verbatim", r)
+	}
+	if asst.Content[1].Kind != llm.BlockText || asst.Content[1].Text != "answer" {
+		t.Fatalf("second block = %+v, want text answer", asst.Content[1])
+	}
+
+	if err := a.RunTurn(context.Background(), "more", sink); err != nil {
+		t.Fatalf("RunTurn 2: %v", err)
+	}
+	replayed := false
+	for _, m := range fp.Requests[1].Messages {
+		for _, b := range m.Content {
+			if b.Kind == llm.BlockReasoning && b.ReasoningEncrypted == "ENC-1" {
+				replayed = true
+			}
+		}
+	}
+	if !replayed {
+		t.Fatalf("encrypted reasoning block not replayed in the next request:\n%s", dump(fp.Requests[1].Messages))
+	}
+}
+
+func TestPromptCacheKeyStableAndPrefixSensitive(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn}, llmtest.Step{Stop: llm.StopEndTurn})
+	a := newAgent(fp, tools.Default(), Options{})
+
+	key := a.promptCacheKey()
+	if key == "" {
+		t.Fatal("prompt cache key is empty")
+	}
+
+	// Every turn in a session reuses the same key, so requests with the same
+	// large system+tools prefix keep landing on the same cache backend.
+	for _, prompt := range []string{"one", "two"} {
+		if err := a.RunTurn(context.Background(), prompt, &recordSink{}); err != nil {
+			t.Fatalf("RunTurn %q: %v", prompt, err)
+		}
+	}
+	if got := fp.Requests[0].PromptCacheKey; got == "" || got != key {
+		t.Fatalf("request[0] cache key = %q, want %q", got, key)
+	}
+	if fp.Requests[0].PromptCacheKey != fp.Requests[1].PromptCacheKey {
+		t.Fatalf("cache key changed across turns: %q vs %q", fp.Requests[0].PromptCacheKey, fp.Requests[1].PromptCacheKey)
+	}
+
+	// A different advertised tool set is a different prefix, so the key must change.
+	subset, err := tools.Default().Subset([]string{"read_file"})
+	if err != nil {
+		t.Fatalf("Subset: %v", err)
+	}
+	if other := newAgent(fp, subset, Options{}).promptCacheKey(); other == key {
+		t.Fatalf("cache key did not change for a different tool set: %q", other)
+	}
+}
+
+func TestLongCacheTTLReflectsInteractive(t *testing.T) {
+	interactive := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	a := newAgent(interactive, tools.Default(), Options{Interactive: true})
+	if err := a.RunTurn(context.Background(), "hi", &recordSink{}); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if !interactive.Requests[0].LongCacheTTL {
+		t.Fatal("interactive session must set LongCacheTTL on requests")
+	}
+
+	oneshot := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	b := newAgent(oneshot, tools.Default(), Options{Interactive: false})
+	if err := b.RunTurn(context.Background(), "hi", &recordSink{}); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if oneshot.Requests[0].LongCacheTTL {
+		t.Fatal("one-shot session must not set LongCacheTTL")
+	}
+}
+
 func TestPrewarmRequestShape(t *testing.T) {
 	fp := llmtest.New("fake")
 	a := newAgent(fp, tools.Default(), Options{})
@@ -644,7 +746,7 @@ func TestToolCallStreamEventsForwardedBeforeDone(t *testing.T) {
 }
 
 func TestModelTurnStartEmittedForRetries(t *testing.T) {
-	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 529, Message: "overloaded", Retryable: true}}
+	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
 	fp := llmtest.New("fake",
 		fail,
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn},
@@ -718,18 +820,27 @@ func TestFailingToolFedBackAsError(t *testing.T) {
 }
 
 func TestMaxTurnsStop(t *testing.T) {
+	// Vary the tool result each call so the maxTurns behavior is isolated from
+	// the repetition guard (which keys on identical results).
+	n := 0
 	tool := &recordTool{name: "loop", run: func(_ context.Context, _ json.RawMessage) (string, error) {
-		return "again", nil
+		n++
+		return fmt.Sprintf("again %d", n), nil
 	}}
 	reg := &tools.Registry{}
 	reg.Register(tool)
 
-	// Every model turn asks for a tool: the loop must stop at the limit.
+	// Every model turn asks for a tool: the loop must stop at the limit. After
+	// the cap, one tools-disabled summary request winds the turn down (r49).
 	always := llmtest.Step{
 		Events: []llm.StreamEvent{toolDone(0, "id", "loop", `{}`)},
 		Stop:   llm.StopToolUse,
 	}
-	fp := llmtest.New("fake", always, always, always)
+	summary := llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("wrapping up: ran loop, nothing left")},
+		Stop:   llm.StopEndTurn,
+	}
+	fp := llmtest.New("fake", always, always, always, summary)
 	a := newAgent(fp, reg, Options{MaxTurns: 3})
 	sink := &recordSink{}
 
@@ -738,8 +849,34 @@ func TestMaxTurnsStop(t *testing.T) {
 	}
 	mustValid(t, a.Transcript())
 
-	if len(fp.Requests) != 3 {
-		t.Errorf("provider called %d times, want 3 (the limit)", len(fp.Requests))
+	// 3 capped model turns + 1 tools-disabled wind-down request.
+	if len(fp.Requests) != 4 {
+		t.Errorf("provider called %d times, want 4 (3 turns + final summary)", len(fp.Requests))
+	}
+	// The final summary request must advertise no tools so the model cannot keep
+	// calling them.
+	if final := fp.Requests[3]; len(final.Tools) != 0 {
+		t.Errorf("final wind-down request advertised %d tools, want 0", len(final.Tools))
+	}
+	// The turn ends on an assistant summary, not a dangling tool_result.
+	last := a.Transcript()[len(a.Transcript())-1]
+	if last.Role != llm.RoleAssistant || last.Phase != llm.AssistantPhaseFinal {
+		t.Errorf("turn should end on a final assistant message, got role=%s phase=%s", last.Role, last.Phase)
+	}
+	if len(last.Content) == 0 || !strings.Contains(last.Content[0].Text, "wrapping up") {
+		t.Errorf("final assistant message = %+v, want the wind-down summary", last.Content)
+	}
+	// A one-shot wrap-up nudge was injected before the final allowed turn.
+	var sawWrapUp bool
+	for _, m := range a.Transcript() {
+		for _, b := range m.Content {
+			if m.Role == llm.RoleUser && strings.Contains(b.Text, "turn budget") {
+				sawWrapUp = true
+			}
+		}
+	}
+	if !sawWrapUp {
+		t.Errorf("expected a wrap-up steering message before the final turn:\n%s", dump(a.Transcript()))
 	}
 
 	var sawMaxTurns bool
@@ -762,8 +899,10 @@ func TestMaxTurnsStop(t *testing.T) {
 func TestNonPositiveMaxTurnsIsUnlimited(t *testing.T) {
 	const defaultConfigMaxTurns = 250
 
+	n := 0
 	tool := &recordTool{name: "loop", run: func(_ context.Context, _ json.RawMessage) (string, error) {
-		return "again", nil
+		n++
+		return fmt.Sprintf("again %d", n), nil // distinct output each call so the repeat guard never trips
 	}}
 	reg := &tools.Registry{}
 	reg.Register(tool)
@@ -1113,7 +1252,7 @@ func TestMidStreamRetrySucceedsOnSecondAttempt(t *testing.T) {
 				textDelta("partial "),
 				{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 40}},
 			},
-			Err: &llm.APIError{StatusCode: 529, Message: "overloaded", Retryable: true},
+			Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true},
 		},
 		llmtest.Step{
 			Events: []llm.StreamEvent{textDelta("hello")},
@@ -1139,14 +1278,20 @@ func TestMidStreamRetrySucceedsOnSecondAttempt(t *testing.T) {
 	if len(fp.Requests) != 2 {
 		t.Errorf("provider called %d times, want 2", len(fp.Requests))
 	}
-	var retried bool
+	var retried, surfacedWaste bool
 	for _, n := range sink.notices {
 		if strings.Contains(n, "retrying model turn") {
 			retried = true
+			if strings.Contains(n, "discarded ~40 tokens") {
+				surfacedWaste = true
+			}
 		}
 	}
 	if !retried {
 		t.Errorf("no retry notice, notices=%v", sink.notices)
+	}
+	if !surfacedWaste {
+		t.Errorf("retry notice should surface the discarded tokens, notices=%v", sink.notices)
 	}
 	if want := []modelTurnEvent{{modelTurn: 1, attempt: 1}}; !slices.Equal(sink.abandoned, want) {
 		t.Errorf("abandoned attempts = %+v, want %+v", sink.abandoned, want)
@@ -1154,6 +1299,10 @@ func TestMidStreamRetrySucceedsOnSecondAttempt(t *testing.T) {
 	// Wasted usage from the failed attempt is paid for and counted.
 	if got := sink.turnUsage[0].Usage.InputTokens; got != 50 {
 		t.Errorf("turn input tokens = %d, want 50 (40 wasted + 10)", got)
+	}
+	// And it is broken out so the UI can show the retry cost (r51+r52).
+	if got := sink.turnUsage[0].Wasted.InputTokens; got != 40 {
+		t.Errorf("wasted input tokens = %d, want 40", got)
 	}
 }
 
@@ -1229,7 +1378,7 @@ func TestInvalidToolArgumentStreamIsRetried(t *testing.T) {
 }
 
 func TestMidStreamRetryBudgetExhausted(t *testing.T) {
-	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 529, Message: "overloaded", Retryable: true}}
+	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
 	fp := llmtest.New("fake", fail, fail, fail)
 	a := newAgent(fp, tools.Default(), Options{})
 	a.SetSleep(func(time.Duration) {})
@@ -1244,6 +1393,28 @@ func TestMidStreamRetryBudgetExhausted(t *testing.T) {
 		t.Errorf("provider called %d times, want 3 (1 + 2 retries)", len(fp.Requests))
 	}
 	mustValid(t, a.Transcript())
+}
+
+func TestRateLimitedStreamNotRetried(t *testing.T) {
+	// A connect-exhausted rate-limit error (HTTP 429/529, status code set) must not
+	// be re-run by the agent: the provider's connect loop already spent its full
+	// attempt budget on it, so re-running would only multiply attempts (up to
+	// 3×5=15) and hammer a busy API (r46). Transient 500/502/503 still retry.
+	for _, code := range []int{429, 529} {
+		fail := llmtest.Step{Err: &llm.APIError{StatusCode: code, Message: "slow down", Retryable: true}}
+		fp := llmtest.New("fake", fail, fail, fail)
+		a := newAgent(fp, tools.Default(), Options{})
+		a.SetSleep(func(time.Duration) {})
+
+		err := a.RunTurn(context.Background(), "hi", &recordSink{})
+		var apiErr *llm.APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != code {
+			t.Fatalf("status %d: RunTurn err = %v, want the %d APIError", code, err, code)
+		}
+		if len(fp.Requests) != 1 {
+			t.Errorf("status %d: provider called %d times, want 1 (rate limit not re-multiplied)", code, len(fp.Requests))
+		}
+	}
 }
 
 func TestMidStreamNonRetryableNotRetried(t *testing.T) {
@@ -1282,7 +1453,7 @@ func TestCancellationDuringRetryBackoff(t *testing.T) {
 	// A retryable failure schedules a retry; cancellation arrives during the
 	// backoff sleep, before the next attempt. The loop must honor it: return
 	// context.Canceled, attempt no further request, and leave a valid transcript.
-	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 529, Message: "overloaded", Retryable: true}}
+	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
 	fp := llmtest.New("fake", fail, fail, fail)
 	a := newAgent(fp, tools.Default(), Options{})
 	ctx, cancel := context.WithCancel(context.Background())

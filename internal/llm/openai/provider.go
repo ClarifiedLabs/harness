@@ -32,7 +32,8 @@ type Config struct {
 	APIKey        string
 	AuthHeaders   map[string]string
 	BaseURL       string // default https://api.openai.com/v1
-	ContextWindow int    // unused by OpenAI request building; kept for factory symmetry
+	ContextWindow int    // drives the default max_tokens floor when MaxTokens is unset
+	OutputLimit   int    // model's real max-output-token limit; 0 = unknown
 	ReasoningMode string // "openai" or "openrouter"; empty defaults to "openai"
 	HTTPClient    *http.Client
 	Sleep         func(time.Duration) // nil = time.Sleep
@@ -43,6 +44,8 @@ type Provider struct {
 	apiKey        string
 	authHeaders   map[string]string
 	baseURL       string
+	contextWindow int
+	outputLimit   int
 	reasoningMode string
 	client        *http.Client
 	sleep         func(time.Duration)
@@ -55,6 +58,8 @@ func New(cfg Config) *Provider {
 		apiKey:        cfg.APIKey,
 		authHeaders:   cfg.AuthHeaders,
 		baseURL:       base,
+		contextWindow: cfg.ContextWindow,
+		outputLimit:   cfg.OutputLimit,
 		reasoningMode: cfg.ReasoningMode,
 		client:        client,
 		sleep:         sleep,
@@ -69,7 +74,7 @@ func (p *Provider) Name() string { return "openai" }
 // every attempt and sleep.
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
-		body, err := json.Marshal(buildRequestForMode(req, p.reasoningMode))
+		body, err := json.Marshal(buildRequestForMode(req, p.contextWindow, p.outputLimit, p.reasoningMode))
 		if err != nil {
 			yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
 			return

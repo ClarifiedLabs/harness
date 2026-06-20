@@ -206,6 +206,72 @@ func TestStreamReasoningSummaryBuffersTokenDeltas(t *testing.T) {
 	}
 }
 
+func TestStreamCapturesEncryptedReasoning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"rs_1","type":"reasoning","encrypted_content":"ENC123","summary":[{"type":"summary_text","text":"thought"}]},{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read_file","arguments":"{}","status":"completed"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}},"sequence_number":1}`+"\n\n"))
+	}))
+	t.Cleanup(srv.Close)
+	p := testProvider(t, srv, nil)
+
+	events, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.5")))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	var encrypted *llm.StreamEvent
+	var summaries []string
+	for i := range events {
+		if events[i].Kind != llm.EventReasoningSummary {
+			continue
+		}
+		if events[i].ReasoningEncrypted != "" {
+			encrypted = &events[i]
+		} else if events[i].Text != "" {
+			summaries = append(summaries, events[i].Text)
+		}
+	}
+	if encrypted == nil {
+		t.Fatal("no EventReasoningSummary carrying encrypted reasoning content")
+	}
+	if encrypted.ReasoningID != "rs_1" || encrypted.ReasoningEncrypted != "ENC123" {
+		t.Fatalf("encrypted reasoning event = %+v, want rs_1/ENC123", encrypted)
+	}
+	if encrypted.Text != "" {
+		t.Fatalf("encrypted reasoning event must carry no display text, got %q", encrypted.Text)
+	}
+	if len(summaries) != 1 || summaries[0] != "thought" {
+		t.Fatalf("display summaries = %v, want [thought]", summaries)
+	}
+}
+
+func TestStreamEncryptedReasoningDedupedAcrossEvents(t *testing.T) {
+	// The reasoning item arrives on both response.output_item.done and again on
+	// response.completed; the persist event must be emitted only once.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		llmtest.WriteBody(w, []byte("event: response.output_item.done\n"+`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","encrypted_content":"ENC","summary":[]},"sequence_number":1}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"rs_1","type":"reasoning","encrypted_content":"ENC","summary":[]},{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}},"sequence_number":2}`+"\n\n"))
+	}))
+	t.Cleanup(srv.Close)
+	p := testProvider(t, srv, nil)
+
+	events, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.5")))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	count := 0
+	for _, e := range events {
+		if e.Kind == llm.EventReasoningSummary && e.ReasoningEncrypted != "" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("encrypted reasoning emitted %d times, want exactly 1 (deduped)", count)
+	}
+}
+
 func TestStreamAssistantPhase(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

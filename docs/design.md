@@ -273,6 +273,8 @@ type Request struct {
     StoreResponse      bool
     PreviousResponseID string
     RequestContext     []string // request-only hook/todo/background context
+    PromptCacheKey     string   // stable per-agent cache key (OpenAI/Responses); see §5.4
+    LongCacheTTL       bool     // Anthropic 1h cache TTL; set only for interactive sessions
 }
 
 type ReasoningConfig struct {
@@ -419,10 +421,11 @@ Edge cases:
 | Endpoint default | `https://api.openai.com/v1/responses` | `https://api.openai.com/v1/chat/completions` | `https://api.anthropic.com/v1/messages` |
 | Auth | `Authorization: Bearer <key>` | same | `x-api-key: <key>` + `anthropic-version: 2023-06-01` |
 | Tool schemas | `tools[] = {type:"function", name, description, parameters, strict:false}` | `tools[].function = {name, description, parameters}` (`type:"function"`) | `tools[] = {name, description, input_schema}` |
-| Parallel tool hint | `parallel_tool_calls:true` when tools are present | not sent | not sent |
+| Parallel tool hint | `parallel_tool_calls:true` when tools are present | `parallel_tool_calls:true` when tools are present | not sent |
+| Prompt cache key | `prompt_cache_key` from `Request.PromptCacheKey` | `prompt_cache_key` from `Request.PromptCacheKey` | not sent (explicit `cache_control` breakpoints instead) |
 | Stateful continuation | `store` is always sent — `store:true` plus `previous_response_id` when proxy catalog reports `responses_stateful:true` (tools/system still sent each request), `store:false` for the stateless default | ignored | ignored |
 | Assistant phase | assistant `message` input items include stored `phase` (`commentary` or `final_answer`) when present | ignored | ignored |
-| Token cap | `max_output_tokens` sent only if user-set | `max_tokens` sent only if user-set (compatible servers pick their own defaults) | `max_tokens` is required; if unset, default `min(8192, contextWindow/4)` |
+| Token cap | `max_output_tokens = min(32768, contextWindow/4)` when unset (omitted if the window is unknown) | `max_tokens = min(32768, contextWindow/4)` when unset (omitted if the window is unknown) | `max_tokens` is required; if unset, `min(32768, contextWindow/4)` |
 | Streaming usage | final `response.usage` on terminal events | `"stream_options":{"include_usage":true}` (always set) | automatic: input tokens in `message_start`, output in `message_delta` |
 | Stop sequences | not sent | `stop` | `stop_sequences` |
 | Temperature | omitted when nil (never send a spurious 0) | same | same |
@@ -432,15 +435,46 @@ The same model-facing `ToolSchema.Parameters` bytes go into `parameters` vs
 `input_schema`. Harness strips nested JSON Schema `description` fields before
 advertising tools; each tool's top-level description remains the explanatory text.
 
+**Default `max_tokens` cap (`defaultMaxTokensCap = 32768`).** When the user does
+not set `MaxTokens`, all three dialects bound a single response at
+`min(32768, contextWindow/4)`. This is a client-side runaway brake — a hard cap on
+one turn's output, **not** the model's catalog output limit (which is not plumbed)
+and not a floor — so a looping reasoning model cannot emit to a 64k+ model limit in
+one turn. Anthropic always sends the computed value (`max_tokens` is required);
+OpenAI Chat Completions and Responses send `max_tokens` / `max_output_tokens` only
+when the context window is known, omitting it otherwise.
+
+**Prompt cache key (`prompt_cache_key`).** OpenAI Chat Completions and Responses
+emit `Request.PromptCacheKey`, a stable per-agent value: an FNV-64a hash of the
+system prompt plus the advertised tool names, rendered `harness-<hex>`. It is
+identical across a session's turns and its startup prewarm, and changes on an
+agent/model switch that alters the system prompt or tool set, so the provider's
+automatic prefix cache keys consistently. Anthropic does not use it (it pins
+explicit `cache_control` breakpoints).
+
+**Responses reasoning persistence.** In the default stateless (`store:false`) mode
+the provider would otherwise re-derive chain-of-thought on every tool turn. For a
+reasoning request harness sends `include: ["reasoning.encrypted_content"]`,
+captures each reasoning item's id and `encrypted_content`, and persists it on the
+transcript as a `BlockReasoning` content block (§4). On the next request
+`buildInput` re-emits that as a `reasoning` input item immediately before its
+`function_call`, so reasoning is replayed rather than recomputed. The replay is
+gated on the request itself being a reasoning request — a reasoning-off call
+(compaction summary, prewarm) drops the encrypted items, since a reasoning input
+item without the matching `include` is rejected.
+
 **Anthropic prompt caching (v2):** `cache_control: {"type":"ephemeral"}` breakpoints on
 all **four** allowed positions, refreshed every call: the last entry of the tool-schema
 array (the static prefix, so it survives a system-prompt/agent switch), the system block,
 and the last two content blocks of the persisted transcript — the last real message (the
 rolling write point read back next turn) and the previous real message (a stable anchor
 that lags a turn, keeping reads within the 20-block lookback on long tool-heavy steps).
-The two stable anchors (system + last tool) use a 1-hour TTL — written ~once and read
-every turn, so the long TTL survives multi-minute pauses for a one-time doubled write —
-while the rolling message anchors keep the 5-minute default. An interactive (TTY) session
+The two stable anchors (system + last tool) use a 1-hour TTL **only for interactive
+(TTY) sessions** (`Request.LongCacheTTL`, set from `Options.Interactive`) — written
+~once and read every turn, so the long TTL survives multi-minute pauses for a
+one-time doubled write — while one-shot and delegate runs keep the 5-minute default
+on all four breakpoints to avoid paying the 1h write premium on a short-lived
+session. The rolling message anchors always keep the 5-minute default. An interactive (TTY) session
 also fires a background `max_tokens:1` warm-up at startup so the first real request reads
 a warm prefix instead of paying the cold write.
 Crucially, the message breakpoints land on the persisted transcript, **not** on the
@@ -525,7 +559,7 @@ func (r *Registry) Models() []string               // sorted configured model id
 
 Model metadata originates from the public **models.dev** catalog
 (`internal/modelsdev`); `harness-model-proxy --setup` and `--refresh-models` reduce it
-to the provider/context/price/reasoning fields harness needs. The proxy caches the
+to the provider/context/reasoning fields harness needs. The proxy caches the
 full catalog JSON as `models.dev.api.json` in the proxy config directory.
 `--setup` prefers that cache over the vendored snapshot, but fetches and writes it
 when it is missing or invalid. A running proxy refreshes the cache when it is older
@@ -533,6 +567,41 @@ than `models_dev_cache_ttl` (`24h` by default; `0` disables periodic refresh), a
 `--refresh-models` fetches and caches the full catalog before rewriting configured
 provider allowlists. The vendored snapshot is used only when there is no parseable
 cache and a live fetch fails.
+
+### Managed vs manual provider configs
+
+Provider config files are either **managed** or **manual**:
+
+- **Managed** configs are written by `--setup`/`--refresh-models` and carry
+  `"managed": true`. They store **no per-model `price`**; instead the proxy
+  resolves each managed model's price from the in-memory models.dev cache at
+  request time. Because the background refresher (above) reloads that cache and
+  the serving handler swaps in the new prices live, refreshed prices reach the
+  running server **without** a `--setup` + restart. Re-running `--setup` never
+  clobbers hand-edited prices because managed configs hold none.
+- **Manual** configs are any provider file lacking `"managed": true` — typically
+  hand-written. The proxy never touches them and serves their own `price`
+  entries verbatim. A pre-existing price-bearing config without the flag is
+  treated as manual and keeps its prices (there is no migration). Running
+  `--refresh-models` against such a provider rewrites it as a managed,
+  price-less config.
+
+A managed config may also carry `"price_source"` — a models.dev provider id to
+resolve its prices from when that differs from the config's own `name`. This
+exists for `openai-codex`, whose models are OpenAI models re-exposed under the
+codex base URL and billed at OpenAI per-token rates: `--setup` writes
+`"price_source": "openai"` so codex prices track the OpenAI rates in the cache.
+The server stays provider-neutral — the codex→openai knowledge lives only in
+`--setup`; the server just honors whatever `price_source` a managed config names.
+
+The serving handler holds its registry + served catalog behind an atomic
+snapshot. The initial snapshot is built at startup from the loaded provider
+configs plus the cached models.dev catalog; after each successful cache refresh
+the refresher rebuilds the snapshot (managed prices from the new catalog, manual
+prices unchanged) and atomically swaps it in, so `/v1/models` responses and
+per-request `cost_usd` accounting always reflect the freshest managed prices.
+`internal/llm` stays free of any `internal/modelsdev` import — the server is the
+only layer that bridges models.dev prices into `llm.Price`.
 Candidate cache updates must parse as models.dev JSON and contain at least one
 provider and model. When a previous cache is parseable, replacement is rejected
 if provider or model counts change by more than 4x and the absolute delta is
@@ -607,11 +676,15 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   `/search`, `n`, `p`, and `cancel`. The provider config is
   generated from models.dev with only enabled models for that provider: base URL,
   api_type (`responses`, `openai`, or `anthropic`), key env vars, context windows,
-  pricing, and reasoning metadata. Without `--force`, setup refuses to overwrite
-  provider files that are not already referenced by the proxy config.
+  and reasoning metadata. It is written as a **managed** config (`"managed": true`)
+  with **no per-model prices** — the proxy resolves managed prices live from the
+  models.dev cache (see *Managed vs manual provider configs*). Without `--force`,
+  setup refuses to overwrite provider files that are not already referenced by the
+  proxy config.
 - `harness-model-proxy --refresh-models` fetches and caches the latest live
   models.dev catalog and refreshes each configured provider file's current model
-  allowlist, preserving stored API keys and `auth` blocks. If live fetch fails, it
+  allowlist, preserving stored API keys and `auth` blocks. Refreshed files are
+  rewritten as managed, price-less configs. If live fetch fails, it
   uses a parseable local cache before using the vendored fallback snapshot. It
   errors if a configured provider or model is missing/unsupported in the selected
   catalog.
@@ -636,11 +709,26 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   then rename.
 - The model proxy logs one structured record per `/v1/stream` request with
   requester, provider, model, request/response bytes, duration, token usage, stop
-  reason, tool-call count, and `cost_usd` when provider config contains pricing.
+  reason, tool-call count, and `cost_usd` when the model has a known price
+  (from the config for manual providers, or the models.dev cache for managed ones).
   Proxy config accepts `log_level` (`debug|info|warn|error`) and `log_format`
   (`json` default, or `text`), with serve flags overriding config. Proxy config
   also accepts `models_dev_cache_ttl` as a duration string such as `"24h"` or
   numeric `0`; the `-models-dev-cache-ttl` serve/setup/refresh flag overrides it.
+- **Usage aggregation.** The proxy keeps a mutex-guarded `{provider, model}` usage
+  map and serves it read-only at `GET /v1/usage` as `{"models": [ {provider, model,
+  requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+  reasoning_tokens, cost_usd}, … ]}`, sorted by `provider:model`. Because every priced
+  `/v1/stream` request is recorded, delegate child-agent spend that flows through the
+  proxy is included.
+- **Pricing staleness.** The `GET /v1/models` catalog response carries an optional
+  `pricing` object — `{source_date, max_age_seconds}` — and `max_age_seconds` is the
+  configured models.dev refresh interval. `source_date` dates the served prices:
+  when any provider is managed and a models.dev cache is loaded, it is the cache's
+  source date (the cache file's mtime, kept fresh by the background refresher);
+  for a manual-only catalog it is the newest modification time among the
+  configured provider config files (the date those prices were last written). A
+  client can compare them to detect stale prices.
 - **Selection rule:** `harness` fetches `GET /v1/models` from the proxy. A
   `provider:model` value always strips the `provider:` prefix from the model, but only
   sets the provider when one was not already chosen (an explicit `-provider` /
@@ -699,7 +787,32 @@ emit turn-usage event   // the REPL / one-shot caller prints it and saves the se
 - **Max-turns guard:** when `max_turns` is positive, on hit print
   `[stopped: reached max turns (250)]`, keep the transcript (it is valid — the
   last model turn's results are appended), and return to the prompt. A
-  non-positive `max_turns` disables this guard.
+  non-positive `max_turns` disables this guard. One model turn before the limit
+  (`modelTurns == maxTurns-1`) the loop injects a one-shot RoleUser wrap-up steer
+  ("stop calling tools now and reply with a final message").
+- **Runaway guards (`internal/agent/loopguard.go`).** A per-run `turnGuard` (loop
+  frame only, never on the shared registry) watches each tool turn:
+  - *Repeated identical calls.* Each turn's call-set is reduced to an
+    order-insensitive signature of `name + canonical(JSON input) + result`. After
+    3 identical signatures in a row it injects one RoleUser steering message; at 8
+    it hard-stops with `[stopped: N identical tool turns repeated with no change]`.
+  - *Error storm.* It counts consecutive turns in which **every** tool result is an
+    error. At 5 it steers ("re-read the latest error output and change your
+    approach"); at 10 it breaks with `[stopped: N consecutive tool turns all
+    failed]`. (Repetition and error-storm steers share one slot, so a turn is
+    nudged at most once.)
+  - *Turn-token budget.* When `-max-turn-tokens` is positive, before each next
+    (paid) model request it compares the turn's cumulative usage
+    (input + cache-read + cache-write + output + reasoning) against the budget and
+    breaks with `[stopped: turn token budget N exceeded]`. `0` is unlimited. This
+    path deliberately skips the final summary — the point is to stop spending.
+- **Graceful wrap-up on hard stop.** The error-storm, repeat-loop, and
+  max-turns-reached breaks (but not the token-budget break) end with one final
+  request that has `Tools` cleared, so the model produces a text-only wind-down
+  appended as an assistant `final_answer` message instead of leaving a dangling
+  `tool_result`. It is best-effort: a failed or empty summary leaves the
+  already-valid transcript untouched, and any tool calls the model emits there are
+  ignored.
 - **Non-normal model stops:** `max_tokens` and stop-sequence finishes end the turn
   but emit a visible notice, so a truncated or externally stopped assistant answer
   does not look like an ordinary completion.
@@ -725,6 +838,16 @@ string fed back to the model so it can self-correct:
 | invalid JSON args | `error: invalid arguments: <detail>` |
 | tool returned error | `error: <message>` |
 | tool panicked | `error: tool panicked: <recovered>` (also logged to stderr) |
+| tool exceeded the dispatch timeout | `error: tool timed out after <dur>` |
+
+**Per-tool dispatch timeout backstop (`-tool-timeout`, default 600s, `<=0`
+disables).** `Dispatch` runs each tool under a derived `context.WithTimeout` so a
+hung tool that ignores cancellation cannot stall a turn; on expiry it returns the
+`error: tool timed out after <dur>` result above. It applies to both the
+sequential path and the concurrent read-only batch. A tool that reports its own
+deadline via `SelfTimeouter` only **raises** the ceiling, never lowers it, so
+`run_command`'s `timeout_seconds` stays authoritative. An outer cancellation
+(`^C`) is reported as cancellation, not a dispatch timeout.
 
 ### 8.3 Output truncation
 
@@ -830,16 +953,24 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.1 `read_file`
 
-> Read a file from disk. Returns line-numbered content; supports offset/limit for large files.
+> Read a file from disk. Provide a JSON object with path (single file; supports offset/limit), or paths[] to read several files at once, each under a "==> path <==" header. Returns line-numbered content.
 
 | param | type | notes |
 |---|---|---|
-| `path` | string, required | file path |
-| `offset` | int | 1-based starting line |
+| `path` | string | single file; required unless `paths` is given |
+| `paths` | array of strings | multi-file mode; each file rendered under a `==> path <==` header with its own per-file line budget; `offset` is ignored |
+| `offset` | int | 1-based starting line (single-file mode only) |
 | `limit` | int | max lines, default 1000 or `read_file_default_limit` |
 
 - Output is line-numbered (`cat -n` style: right-aligned number, tab, line). Line
   numbers make `edit` targeting and grep cross-referencing far more reliable.
+- **Truncation notice:** when a single-file read is cut off at its line window the
+  result ends with `[file truncated at line N; continue with offset=N+1]`, so the
+  model knows to page rather than assuming it saw the whole file.
+- **Multi-file mode (`paths[]`):** each file is read from line 1 under its
+  `==> path <==` header. With no explicit `limit` the default window is split across
+  the files (`max(defaultLimit/len(paths), 50)` lines each); an explicit `limit`
+  applies per file. A per-file read error is reported inline and the batch continues.
 - Binary sniff: first 8 KB containing NUL → `error: <path> appears to be binary`.
 - Files are streamed line-by-line and stop after the requested/default line
   window, so memory is bounded by the window and longest line regardless of file
@@ -856,16 +987,38 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `path` | string | default `"."` |
 | `glob` | string | `path.Match` filter on base names |
 
-- Non-recursive by design — recursion belongs to `grep`/`rg`/host commands, and
-  `run_command` (`find`) is the escape hatch. No separate `find` tool: fewer tools
-  means better model reliability.
+- Non-recursive by design — recursion belongs to `glob` (§9.2a, by name) and
+  `grep`/`rg`/host commands (by content), with `run_command` (`find`) as the escape
+  hatch. No separate `find` tool: fewer tools means better model reliability.
 - One entry per line: type char, human-readable size, name (`/` suffix for dirs);
   dirs-first, then alphabetical. 1000-entry cap with truncation marker.
 - Unreadable entries shown with `?` size; listing continues.
 
+### 9.2a `glob`
+
+> Recursively find files and directories by glob. Provide a JSON object with pattern (e.g. {"pattern":"**/*config*.go"}) and optional root. Read-only; ** matches across directories. Returns matching paths with type and size, one per line, sorted by path.
+
+| param | type | notes |
+|---|---|---|
+| `pattern` | string, required | glob relative to `root` |
+| `root` | string | directory to search from, default `"."` |
+
+- Read-only recursive name search, complementing `list_dir` (one level) and
+  `grep`/`rg` (by content). `**` matches any number of path segments (including
+  zero); `*`/`?`/`[…]` match within a single segment via `filepath.Match`. Consecutive
+  `**` collapse, and a trailing `**` matches the remainder.
+- One entry per line — type char, human size, root-relative path (`/` suffix for
+  dirs) — sorted ascending by path. Empty result → `(no matches)`.
+- Two caps: the walk stops collecting after `globScanCap` (10000) matches, and the
+  sorted output is truncated to the first `listDirCap` (1000) with a
+  `[truncated: showing first 1000 of <N> matches; narrow the pattern or root]`
+  marker (the total gains a `+` when the scan cap was hit).
+- In the default tool set (auto/independent), not in the read-only `plan` agent's
+  explicit list.
+
 ### 9.3 `grep` and optional `rg`
 
-> `grep`: Run the host grep command directly. Provide a JSON object with args as an array of strings, e.g. {"args":["-R","-n","TODO","."]}; do not pass args as a string or JSON-encoded array. No shell; returns combined stdout+stderr and the exit code, or returns a background job id immediately when background is true.
+> `grep`: Run the host grep command directly. Provide a JSON object with args as an array of strings, e.g. {"args":["-R","-n","TODO","."]}; do not pass args as a string or JSON-encoded array. No shell; binary files are skipped (-I) unless you set a binary policy or pass --; overlong matched lines are clamped in output. Returns combined stdout+stderr and the exit code, or returns a background job id immediately when background is true. (Under `-search-tools both` grep's description gains a "prefer rg" steer.)
 
 > `rg`: Run the host rg (ripgrep) command directly. Provide a JSON object with args as an array of strings, e.g. {"args":["-n","TODO","."]}; do not pass args as a string or JSON-encoded array. No shell; normal searches default to --max-columns=1024 --max-columns-preview --max-filesize=10M unless args set those native rg options. Returns combined stdout+stderr and the exit code, or returns a background job id immediately when background is true.
 
@@ -905,6 +1058,15 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   `--max-columns`, or `--max-filesize` to override those defaults. Raw/introspection
   modes such as `--json`, `--files`, `--type-list`, `--help`, and `--version` are
   passed through unchanged.
+- Host `grep` has no portable `--max-columns`, so it is guarded in-process. `-I`
+  (skip binary files) is prepended before any `--` operand separator unless the call
+  already sets a binary policy (`-I`/`-a`/`--text`/`--binary-files`) or is a
+  help/version invocation. Matched output lines longer than `grepMaxLineLen` (1024
+  bytes) are cut on a rune boundary and suffixed with `… [N chars clamped]`; the
+  `[exit code: N]` trailer and short lines pass through unchanged.
+- Under `-search-tools both`, both `grep` and `rg` are registered and `grep`'s
+  `Description()` gains a suffix steering the model to prefer `rg` as the faster
+  default.
 - Same process conventions as `run_command` (§9.7): own process group, timeout or ^C
   kills the group, combined stdout+stderr, `[exit code: N]` trailer, and non-zero exit
   is NOT an error result. For search this matters because no matches is commonly exit
@@ -920,11 +1082,17 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `files` | array, required | one entry per file; each target file must already exist |
 | `files[].path` | string, required | must exist (use write_file to create) |
 | `files[].edits` | array, required | one or more replacements for that file |
-| `files[].edits[].oldText` | string, required | exact text to replace; must be unique in the original file |
+| `files[].edits[].oldText` | string, required | exact text to replace; must be unique in the original file unless `replaceAll` is set |
 | `files[].edits[].newText` | string, required | replacement text; empty string deletes oldText |
+| `files[].edits[].replaceAll` | bool | optional; replace every occurrence of `oldText` instead of requiring a unique match (default false) |
 
 - All edits for a file match against that file's original content, not against
   content after earlier edits in the same call.
+- With `replaceAll`, every non-overlapping occurrence of `oldText` is replaced and
+  each counts toward the reported replacement count; the uniqueness check is skipped
+  but zero matches is still a not-found error. The overlap guard is relaxed only
+  between spans of the **same** `replaceAll` block — a `replaceAll` span overlapping
+  a different edit still raises the overlap error.
 - Duplicate file entries are rejected; combine a file's replacements in one
   `files[]` entry.
 - 0 occurrences → error naming the missing `oldText`.
@@ -963,6 +1131,12 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `patchText` | string | compatibility alias for `patch` |
 | `patch_text` | string | compatibility alias for `patch` |
 
+- **Catalog-only, not in the default tool set.** `edit` and `write_file` subsume
+  `apply_patch`, so `registerFileTools` omits it; it is registered only by
+  `CatalogWithOptions`. It is therefore absent from the `auto`/`independent` default
+  lists (derived from `DefaultNamesWithOptions`) and an agent opts back in by naming
+  `apply_patch` in its `allowed_tools` whitelist, which resolves against the full
+  catalog.
 - Parser accepts Codex patch operations only: `*** Add File: <path>`,
   `*** Delete File: <path>`, `*** Update File: <path>`, and optional
   `*** Move to: <path>` immediately after an update header. Classic `---` / `+++`
@@ -997,8 +1171,12 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `background` | bool | when true, start as a process-local background job and return a job id immediately |
 
 - Exactly one of `command` or `argv` is required.
-- `command` is executed via `bash -lc` (fallback `sh -c` if bash is absent);
-  `-l` picks up the user's PATH/toolchain for build and test commands.
+- `command` is executed via a **non-login** `bash -c` (fallback `sh -c` if bash is
+  absent). Sourcing the full login-profile chain on every call added ~50-300ms
+  (nvm/rbenv/conda) and risked banner noise in results, so it was dropped. The PATH
+  enrichment a login shell would have added is recovered once per process: a single
+  `bash -lc` probe at first use resolves the login PATH, and those extra directories
+  are appended (current PATH keeps precedence) into the command environment.
 - When using `argv`, pass a JSON array of strings such as `["go","test","./..."]`,
   not a shell command string or JSON-encoded array.
 - `argv` is executed with `exec.Command(argv[0], argv[1:]...)`: no shell, glob
@@ -1089,9 +1267,12 @@ this subsection records the common runner those argv tools point at.
 
 - Default 30 s timeout, configurable without a maximum; up to 5 redirects, each
   hop re-validated as http/https.
-- `text/html` → hand-rolled reduction: drop `<script>`/`<style>` blocks, strip tags,
-  `html.UnescapeString` (stdlib), collapse whitespace. Explicitly "readable-ish text",
-  not a renderer — good enough for docs and articles. Other `text/*`,
+- `text/html` → hand-rolled reduction that preserves links and block structure:
+  drop `<script>`/`<style>` blocks; render `<a href>` as `text (url)`; emit a newline
+  at block boundaries (`<br>` and the closing tags of `p`/`div`/`li`/`tr`/`h1`–`h6`);
+  strip remaining tags; `html.UnescapeString` (stdlib); collapse whitespace per line
+  while keeping the inserted line breaks. Explicitly "readable-ish text", not a
+  renderer — good enough for docs and articles. Other `text/*`,
   `application/json`, `application/xml`, and any `+json`/`+xml` suffix type → raw; an
   absent `Content-Type` is treated as text. Binary content types → error.
 - Output prefixed `# <final-url> (<status>, <content-type>)`. Non-2xx responses return
@@ -1320,6 +1501,20 @@ backoff allows.
   diagnostics, even when pricing is unknown and no cost line is shown. Retried
   streamed attempts also record a discard marker so replay can omit the abandoned
   attempt's assistant/reasoning deltas while keeping the retry notice.
+- **Live wait counter (TTY, non-quiet).** While a model request or a tool call is
+  outstanding, the static waiting line is replaced by a single in-place line painted
+  with `\r\x1b[2K` and repainted ~once a second by a `time.Ticker` goroutine (with a
+  mutex + stop-and-drain handshake so it never interleaves with streamed bytes):
+  `[model: turn 1 · 12s]` (or `[tool: grep · 3s]`), with the running context-window
+  percentage appended for model waits (`· ctx 30%`). It is erased the instant real
+  output or a tool line scrolls in — not a sticky bar or scroll region.
+- **During-turn input line.** Keystrokes typed during a turn are read in raw,
+  echo-off mode and shown on that wait line after a `>` marker
+  (`[model: turn 1 · 12s] > draft`). During-turn input is never auto-submitted: Enter
+  inserts a newline into the buffer rather than starting a turn. On both normal turn
+  completion and interrupt (`^C`/Esc-Esc), the accumulated buffer is deposited into
+  the next REPL prompt as editable, pre-filled text (cursor at end) instead of being
+  drained straight to the model. `^C`/Esc-Esc still cancel the turn.
 - Live tool-call construction renders progress to stderr by default:
   `[tool-call: name id=...]`. Disable with `-tool-stream=false`,
   `HARNESS_TOOL_STREAM=false`, or `"tool_stream": false`. Partial argument deltas
@@ -1332,7 +1527,11 @@ backoff allows.
   turn because they can materially slow first response latency.
 - Per-turn usage line:
   `[turn: 3 model turns · 12.4k (18.0k) in / 1.8k (2.6k) out · $0.071 ($0.101) · 4.3s]`
-  (cost omitted for configured models without pricing metadata).
+  (cost omitted for configured models without pricing metadata). When non-zero it
+  also appends cache-read tokens with the cache-hit ratio (`· cache 3.0k read (75%)`)
+  and reasoning tokens (`· 450 reasoning`). A model with no configured price prints a
+  one-time-per-model `[note: no price configured for "<model>"; …]` notice instead of
+  silently dropping cost.
 - Bracketed status lines are prefixed inside the bracket with local time by
   default, for example `[16:15:34 tool-call: name id=...]`.
   `-timestamps=full` (or `long`) uses `yyyy-mm-dd hh:mm:ss`; `-timestamps=none`
@@ -1344,10 +1543,14 @@ backoff allows.
   message`. Default level is `info`; `--log-level` or `LOG_LEVEL` accepts `debug`,
   `info`, `warn`, or `error`.
 - `-q`/`--quiet` suppresses bracketed status messages (tool calls, model turns,
-  notices, and usage lines), disables live tool-stream progress, suppresses
+  notices), disables live tool-stream progress and the live wait counter, suppresses
   reasoning summary output unless `-reasoning-summary` is explicitly set on the
   CLI, and suppresses status lines in `harness session replay`; it does not filter
-  slog diagnostics.
+  slog diagnostics. The per-turn usage/cost line is governed by a separate
+  `RenderOptions.SuppressUsage` (default false; the wiring sets it only for
+  `-q` **and** non-TTY output), so a quiet interactive run still prints one cost line.
+  One-shot runs additionally print a final `[session summary: …]` cost line to stderr
+  that bypasses `-q` entirely.
 
 ### Terminal reset on REPL start
 
@@ -1434,7 +1637,7 @@ literal `$`.
 |---|---|
 | `/help` | list commands |
 | `/exit`, `/quit` | save, print a session token summary, and exit |
-| `/clear` | reset conversation; rotate to a fresh session file |
+| `/clear` | echo discarded session token/cost totals, then reset conversation and rotate to a fresh session file |
 | `/compact` | force compaction now |
 | `/context` | dump the current provider-neutral model context as JSON |
 | `/context <file>` | save the current provider-neutral model context as JSON |
@@ -1447,7 +1650,7 @@ literal `$`.
 | `/edit [draft]` | open an external editor for the next prompt |
 | `/save [file]` | force save (optionally elsewhere) |
 | `/model` | choose a configured provider/model; interactive runs can optionally save it as the default |
-| `/model <id>` | switch subsequent turns to model `<id>`; interactive runs can optionally save it as the default |
+| `/model <id>` | switch subsequent turns to model `<id>`; a near-miss falls back to a unique prefix/substring match before erroring; interactive runs can optionally save it as the default |
 | `/model <provider>:<id>` | switch to `<id>` on a specific configured provider; interactive runs can optionally save it as the default |
 | `/reasoning` | list reasoning controls for the current model |
 | `/reasoning on`, `/reasoning off`, `/reasoning default` | set explicit reasoning toggle or return to provider defaults |
@@ -1473,6 +1676,13 @@ Anthropic usage does not currently expose a separate reasoning-token field;
 extended thinking is counted in output tokens, so the reasoning total remains
 zero for Anthropic sessions.
 
+`/model <name>` resolves exactly first, then falls back to a case-insensitive
+unique prefix and then unique substring match over the catalog; an ambiguous match
+lists the candidates rather than switching. An unknown `/command` prints
+`unknown command "<cmd>"; did you mean <suggestion>? (type /help)`, where the
+suggestion is the nearest known command by a stdlib Levenshtein distance (shared
+prefix wins, threshold `1 + len(cmd)/3`).
+
 ### Flags
 
 ```
@@ -1485,6 +1695,8 @@ zero for Anthropic sessions.
 -resume <file>    load a session transcript and continue
 -session <file>   explicit session save path
 -max-turns <n>    model turns per user prompt; <=0 means unlimited (default 250)
+-max-turn-tokens <n>   stop a user turn after this many accumulated tokens; 0 = unlimited (default 0)
+-tool-timeout <s>      per-tool-call timeout backstop in seconds; <=0 disables (default 600)
 -histfile <path>      REPL history file path (default <stateDir>/harness/history)
 -histfilesize <n>     max REPL history entries stored on disk (default 1000, 0 disables)
 -histsize <n>         max REPL history entries loaded into memory (default 1000, 0 disables)
@@ -1674,7 +1886,20 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   cached context still occupies the window. This fires after a turn **and proactively
   mid-turn** — before the next model request within a turn, when tool results balloon the
   estimate — so a single turn's tool output cannot overflow the window before the next
-  request. Also manual `/compact`.
+  request. Also manual `/compact`. The estimate side is the last **measured** input
+  tokens (`lastInput`) plus a bytes/4 estimate of only the messages appended since
+  that measurement (the append boundary), so the trigger tracks real usage instead of
+  re-estimating the whole transcript; the raw bytes/4 estimate is reserved for the
+  degradation ladder.
+- **Live-transcript retention pass.** Before each model request the agent runs a
+  pure-local retention pass (no model round-trip) over aged history: read-only
+  tool-result blocks older than `compact_keep_turns` and larger than
+  `defaultSummaryToolResultSize` (4096 bytes) are trimmed to a head slice plus a hint
+  (`[older tool output trimmed …]`, or an archive pointer when the sink can archive
+  the full output), and `BlockImage` blocks two or more turns old are swapped for a
+  text placeholder. It only ever shortens text or turns an image into text, so the §4
+  transcript invariant still holds, and it is idempotent (already-trimmed/placeholder
+  blocks are skipped). This keeps the window smaller between full compactions.
 - **Mechanism:** keep the system prompt and the configured number of recent turns
   verbatim (`compact_keep_turns`, default 4; a turn = a user message through the
   following end-turn). Send everything older to the model with the summarization
@@ -1696,12 +1921,29 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   `trigger` field (`auto` or `manual`).
 - Before replacing active history, raw removed messages are archived under
   `compactions/`; the active summary includes the archive reference.
+- **Summary call hardening (`summarizeOne`).** The summarization request runs with
+  reasoning disabled (`Reasoning: llm.ReasoningConfig{}`) regardless of the session's
+  effort, so compaction never spends a thinking budget. It retries transient
+  mid-stream errors with the shared `retry.Next` backoff (up to `streamRetries`) so a
+  429 at 78% does not abort compaction. If the summary itself is truncated
+  (`StopMaxTokens`) it doubles the token budget and retries once, then accepts the
+  result.
+- **Image-aware estimation.** `estimateTokens`/`estimateRequest` weight each
+  `BlockImage` at a flat `imageTokenEstimate` (1600 tokens) rather than counting its
+  base64 bytes at bytes/4, which wildly overstated images. Correspondingly,
+  `truncateLargestBlock` ranks an image by that token weight, so a large text result
+  is truncated before an image.
 - The summary call's tokens and cost are added to session totals and reported:
   `[compacted: 38 messages → summary · 9.1k in / 0.4k out · $0.05]`. The `· $X.XX`
   cost segment is omitted for models with no price entry.
 - **Degradation:** if still over budget, keep only the last turn; if still over,
   hard-truncate the largest tool result/input/image blocks in place with markers.
-  Never wedge.
+  When there is nothing older than `compact_keep_turns` to summarize but the
+  transcript is still over budget, the same ladder degrades the **oversized single
+  turn** in place. Each degrade pass deep-copies before mutating (so a post-degrade
+  `ValidateTranscript` failure rolls back to the live transcript) and skips a rewrite
+  that would not actually shrink (`[compact: transcript over budget but nothing left
+  to shrink]`). Never wedge.
 - **Failure:** if the summary or archive step errors, abort compaction, warn, and keep
   the full transcript — the next call may fail visibly on context length, which beats
   silent data loss.
@@ -1895,6 +2137,15 @@ on the thin `internal/mcptools` adapter for tool dispatch (§9.16).
   The HTTP proxy transport itself has no server-push channel, and a downstream
   streamable-HTTP server behind the proxy likewise refreshes only on
   session-expiry reconnect.
+- **Harness-side exposure caps (restrict-only, config-file-only).** Where harness
+  assembles the auto-exposed remote MCP tool names (`cmd/harness/mcp.go`), two
+  optional `mcp` keys narrow the surface: `mcp.max_tools` caps how many discovered
+  remote tools are auto-exposed (`0` = unlimited; negative rejected; overflow is
+  truncated in discovery order with a warning), and `mcp.disabled_servers` drops
+  named servers (the segment between `mcp__` and the next `__`) from auto-exposure.
+  Neither counts local-MCP or LSP tools, and both affect **automatic** exposure only —
+  an explicit `mcp__…` entry in an agent's `allowed_tools` still resolves against the
+  full catalog.
 - **Shutdown.** SIGINT/SIGTERM cancel the daemon: HTTP sessions close with the
   server, and each stdio child is reaped gracefully (close stdin → SIGTERM → SIGKILL
   on the process group, bounded by per-stage timeouts).
@@ -1934,10 +2185,12 @@ filesystem/workspace access.
 
 **Chain.** `harness → internal LSP manager → N language servers (LSP over
 Content-Length stdio)`. LSP config is top-level `lsp` with `enable` plus inline
-`servers`; a same-name server entry replaces the entire embedded default entry,
-so overrides must include all required fields. The built-in path uses
-`lspproxy.NewManager(..., namespace="")` and adapts the manager's bare tools to
-short `lsp_*` names. These tools are trusted read-only and join the same
+`servers` and an optional `tools` allowlist; a same-name server entry replaces the
+entire embedded default entry, so overrides must include all required fields. The
+built-in path uses `lspproxy.NewManager(..., namespace="")` and adapts the manager's
+bare tools to short `lsp_*` names. `lsp.tools` (config-file-only, bare names with or
+without the `lsp_` prefix) registers only the listed subset of the seven tools; an
+empty or unset list registers all, and unknown entries warn and are ignored. These tools are trusted read-only and join the same
 automatic exposure gate as other read-only discovered tools. This is independent
 of both `mcp.enable` and `mcp.local`: a user can enable LSP and a separate local
 stdio MCP service at the same time.

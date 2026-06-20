@@ -30,6 +30,7 @@ type Config struct {
 	AuthHeaders   map[string]string
 	BaseURL       string // default https://api.anthropic.com
 	ContextWindow int    // resolved by main from provider config registry
+	OutputLimit   int    // model's real max-output-token limit; 0 = unknown
 	HTTPClient    *http.Client
 	Sleep         func(time.Duration) // nil = time.Sleep
 }
@@ -40,6 +41,7 @@ type Provider struct {
 	authHeaders   map[string]string
 	baseURL       string
 	contextWindow int
+	outputLimit   int
 	client        *http.Client
 	sleep         func(time.Duration)
 }
@@ -52,6 +54,7 @@ func New(cfg Config) *Provider {
 		authHeaders:   cfg.AuthHeaders,
 		baseURL:       base,
 		contextWindow: cfg.ContextWindow,
+		outputLimit:   cfg.OutputLimit,
 		client:        client,
 		sleep:         sleep,
 	}
@@ -66,7 +69,7 @@ func (p *Provider) Name() string { return "anthropic" }
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
 		window := p.contextWindow
-		body, err := json.Marshal(buildRequest(req, window))
+		body, err := json.Marshal(buildRequest(req, window, p.outputLimit))
 		if err != nil {
 			yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
 			return

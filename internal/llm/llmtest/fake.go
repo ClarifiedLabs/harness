@@ -47,6 +47,17 @@ func New(name string, steps ...Step) *FakeProvider {
 
 func (p *FakeProvider) Name() string { return p.name }
 
+// RequestCount returns how many Requests have been recorded so far, taking the
+// same lock Stream uses for the append. During-turn UI tests poll this from the
+// test goroutine while a turn goroutine is still calling Stream, so reading
+// len(p.Requests) directly would race; this accessor makes the read safe under
+// `go test -race`.
+func (p *FakeProvider) RequestCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.Requests)
+}
+
 // Stream records req and replays the next scripted step. A request beyond the
 // script yields an EventDone at end_turn with zero usage, so a loop that calls
 // more often than scripted terminates rather than panicking.

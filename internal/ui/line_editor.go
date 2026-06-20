@@ -92,7 +92,18 @@ func (e *promptLineEditor) setEditMode(mode string) {
 }
 
 func (e *promptLineEditor) read(prompt string) (replInput, bool, error) {
+	return e.readPrefilled(prompt, "")
+}
+
+// readPrefilled reads a line with the editor seeded with editable prefill text
+// (cursor at end). It backs both the bare prompt and the during-turn deposit,
+// where the text typed while the model ran is handed back for review/edit before
+// the user submits it manually (during-turn input).
+func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, bool, error) {
 	state := lineEditState{prompt: prompt}
+	if prefill != "" {
+		state.setText(prefill)
+	}
 	history := e.historyState()
 	vi := viLineState{mode: viModeInsert}
 	e.tracef("read start prompt=%q", prompt)

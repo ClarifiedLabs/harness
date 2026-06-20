@@ -394,6 +394,114 @@ printf '\n'
 	}
 }
 
+// r42: guardGrepArgs injects -I unless a binary policy or help/version is set.
+func TestGuardGrepArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"injects -I", []string{"-n", "TODO", "."}, []string{"-I", "-n", "TODO", "."}},
+		{"respects -a", []string{"-a", "-n", "x", "."}, []string{"-a", "-n", "x", "."}},
+		{"respects --text", []string{"--text", "x"}, []string{"--text", "x"}},
+		{"respects existing -I", []string{"-I", "x"}, []string{"-I", "x"}},
+		{"respects --binary-files=", []string{"--binary-files=text", "x"}, []string{"--binary-files=text", "x"}},
+		{"-I injected before --", []string{"--", "-pat"}, []string{"-I", "--", "-pat"}},
+		{"help bypass", []string{"--help"}, []string{"--help"}},
+		{"version bypass", []string{"-V"}, []string{"-V"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := guardGrepArgs(tt.in); !slices.Equal(got, tt.want) {
+				t.Errorf("guardGrepArgs(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClampLongGrepLines(t *testing.T) {
+	short := "a:1\nb:2\n[exit code: 0]"
+	if got := clampLongGrepLines(short); got != short {
+		t.Errorf("short lines should pass through unchanged: %q", got)
+	}
+
+	long := "match:" + strings.Repeat("x", grepMaxLineLen+500)
+	out := clampLongGrepLines(long + "\n[exit code: 0]")
+	lines := strings.Split(out, "\n")
+	if len(lines[0]) > grepMaxLineLen+40 {
+		t.Errorf("long line not clamped: %d bytes", len(lines[0]))
+	}
+	if !strings.Contains(lines[0], "chars clamped]") {
+		t.Errorf("clamp marker missing: %q", lines[0])
+	}
+	if lines[1] != "[exit code: 0]" {
+		t.Errorf("trailer should survive clamping: %q", lines[1])
+	}
+}
+
+// Integration: -I skips a binary file that contains the pattern.
+func TestGrepSkipsBinaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "t.txt"), "needle in text\n")
+	if err := os.WriteFile(filepath.Join(dir, "b.bin"), []byte("needle\x00binary\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runGrep(t, map[string]any{"args": []string{"-rn", "needle", dir}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "needle in text") {
+		t.Errorf("text match should be found: %q", out)
+	}
+	if strings.Contains(out, "Binary file") || strings.Contains(out, "b.bin") {
+		t.Errorf("binary file should be skipped by -I: %q", out)
+	}
+}
+
+// Integration: an overlong matched line is clamped in the host grep output.
+func TestGrepClampsLongMatchedLine(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "min.js")
+	mustWrite(t, p, "needle "+strings.Repeat("x", grepMaxLineLen+500)+"\n")
+	out, err := runGrep(t, map[string]any{"args": []string{"-n", "needle", p}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "chars clamped]") {
+		t.Errorf("overlong matched line was not clamped (out len %d)", len(out))
+	}
+}
+
+// r60: in search_tools=both mode grep advises preferring rg, so the model
+// converges on one tool when both ship with near-identical schemas.
+func TestGrepDescriptionPrefersRGInBothMode(t *testing.T) {
+	if !strings.Contains((grep{preferRG: true}).Description(), "Prefer rg") {
+		t.Error("both-mode grep should advise preferring rg")
+	}
+	if strings.Contains((grep{}).Description(), "Prefer rg") {
+		t.Error("default grep should not mention an rg preference")
+	}
+}
+
+func TestRegisterSearchToolsBothModeGrepPrefersRG(t *testing.T) {
+	dir := t.TempDir()
+	makeExecutable(t, filepath.Join(dir, "rg"), "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", dir)
+
+	r := &Registry{}
+	registerSearchTools(r, nil, Options{SearchTools: SearchToolsBoth})
+	if !slices.Contains(r.Names(), "rg") {
+		t.Fatalf("both mode should register rg alongside grep: %v", r.Names())
+	}
+	g, ok := r.Lookup("grep")
+	if !ok {
+		t.Fatalf("both mode should register grep: %v", r.Names())
+	}
+	if !strings.Contains(g.Description(), "Prefer rg") {
+		t.Errorf("both-mode grep description should prefer rg: %q", g.Description())
+	}
+}
+
 func makeExecutable(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {

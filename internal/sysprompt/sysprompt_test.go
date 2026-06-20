@@ -96,14 +96,34 @@ func TestEnvGitSummary(t *testing.T) {
 
 	env := EnvContext(EnvOptions{Dir: dir, Now: func() time.Time { return fixedDate }})
 
-	if !strings.Contains(env, "branch=main") {
+	// Only the stable branch name is emitted. The volatile modified/untracked
+	// counts are deliberately dropped: they would be baked into the cache-anchored
+	// prefix and go stale the moment the agent edits a file.
+	if !strings.Contains(env, "git: branch=main") {
 		t.Errorf("git line should name the branch:\n%s", env)
 	}
-	if !strings.Contains(env, "1 modified") {
-		t.Errorf("git line should count modified files:\n%s", env)
+	if strings.Contains(env, "modified") || strings.Contains(env, "untracked") {
+		t.Errorf("git line must not carry volatile modified/untracked counts:\n%s", env)
 	}
-	if !strings.Contains(env, "1 untracked") {
-		t.Errorf("git line should count untracked files:\n%s", env)
+}
+
+// TestEnvGitSummaryDetached confirms a detached HEAD renders branch=(detached)
+// rather than an empty branch value.
+func TestEnvGitSummaryDetached(t *testing.T) {
+	gitAvailable(t)
+	dir := scratchRepo(t)
+	write(t, dir+"/a.txt", "1\n")
+	git(t, dir, "add", "a.txt")
+	git(t, dir, "commit", "-q", "-m", "c1")
+	write(t, dir+"/a.txt", "2\n")
+	git(t, dir, "add", "a.txt")
+	git(t, dir, "commit", "-q", "-m", "c2")
+	// Detach HEAD onto the first commit.
+	git(t, dir, "checkout", "-q", "HEAD~1")
+
+	env := EnvContext(EnvOptions{Dir: dir, Now: func() time.Time { return fixedDate }})
+	if !strings.Contains(env, "git: branch=(detached)") {
+		t.Errorf("detached HEAD should render branch=(detached):\n%s", env)
 	}
 }
 

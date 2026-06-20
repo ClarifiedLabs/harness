@@ -93,19 +93,23 @@ func EnvContext(opts EnvOptions) string {
 	return b.String()
 }
 
-// gitSummary returns the branch and modified/untracked counts, or
+// gitSummary returns only the branch name (branch=<name>), or
 // "(not a git repository)" when dir is not in a work tree (design §8.5).
+//
+// It deliberately omits modified/untracked counts: those are baked once into the
+// cache-anchored system prefix and go stale the moment the agent edits a file,
+// misleading about repo cleanliness for the rest of the session. The model can
+// run git_readonly status on demand for a live count. Keeping only the stable
+// branch name preserves the prompt-cache anchor.
 func gitSummary(dir string) string {
 	branch, ok := gitBranch(dir)
 	if !ok {
 		return "(not a git repository)"
 	}
-
-	modified, untracked := gitStatusCounts(dir)
 	if branch == "" {
 		branch = "(detached)"
 	}
-	return fmt.Sprintf("branch=%s, %d modified, %d untracked", branch, modified, untracked)
+	return fmt.Sprintf("branch=%s", branch)
 }
 
 // gitBranch runs `git branch --show-current`; ok is false when the command
@@ -116,27 +120,6 @@ func gitBranch(dir string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(out), true
-}
-
-// gitStatusCounts parses `git status --porcelain`: untracked lines start with
-// "??"; everything else is a tracked file with staged and/or unstaged changes,
-// counted as modified.
-func gitStatusCounts(dir string) (modified, untracked int) {
-	out, err := runGit(dir, "status", "--porcelain")
-	if err != nil {
-		return 0, 0
-	}
-	for _, line := range strings.Split(out, "\n") {
-		if len(line) < 2 {
-			continue
-		}
-		if strings.HasPrefix(line, "??") {
-			untracked++
-		} else {
-			modified++
-		}
-	}
-	return modified, untracked
 }
 
 func runGit(dir string, args ...string) (string, error) {

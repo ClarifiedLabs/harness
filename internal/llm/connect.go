@@ -104,7 +104,7 @@ func connectBackoff(ctx context.Context, sleep func(time.Duration), attempt int,
 		yield(StreamEvent{}, err)
 		return false
 	}
-	if !sleepCtx(ctx, sleep, retry.Next(attempt, retryAfter)) {
+	if !sleepCtx(ctx, sleep, connectBackoffDelay(attempt, retryAfter, apiErr)) {
 		yield(StreamEvent{}, ctx.Err())
 		return false
 	}
@@ -113,6 +113,17 @@ func connectBackoff(ctx context.Context, sleep func(time.Duration), attempt int,
 		return false
 	}
 	return true
+}
+
+// connectBackoffDelay picks the backoff before the next connect attempt. The
+// rate-limit class (429/529) takes the higher cap60s ceiling because it recovers
+// over minutes; transport errors and transient 500/502/503 keep the cap30s
+// schedule. Retry-After remains a floor either way.
+func connectBackoffDelay(attempt int, retryAfter time.Duration, apiErr *APIError) time.Duration {
+	if apiErr != nil && retry.RateLimitedStatus(apiErr.StatusCode) {
+		return retry.NextRateLimited(attempt, retryAfter)
+	}
+	return retry.Next(attempt, retryAfter)
 }
 
 func sleepCtx(ctx context.Context, sleep func(time.Duration), d time.Duration) bool {

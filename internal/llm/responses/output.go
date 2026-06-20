@@ -116,14 +116,16 @@ func contentPartText(part wireContentPart) (string, bool) {
 }
 
 type reasoningAssembler struct {
-	buffers map[summaryKey]*strings.Builder
-	emitted map[summaryKey]string
+	buffers   map[summaryKey]*strings.Builder
+	emitted   map[summaryKey]string
+	encrypted map[string]bool // reasoning item id → already emitted a persist event
 }
 
 func newReasoningAssembler() *reasoningAssembler {
 	return &reasoningAssembler{
-		buffers: map[summaryKey]*strings.Builder{},
-		emitted: map[summaryKey]string{},
+		buffers:   map[summaryKey]*strings.Builder{},
+		emitted:   map[summaryKey]string{},
+		encrypted: map[string]bool{},
 	}
 }
 
@@ -164,7 +166,24 @@ func (a *reasoningAssembler) outputItem(index int, item *wireOutputItem, yield f
 			return false
 		}
 	}
-	return true
+	return a.encryptedItem(item, yield)
+}
+
+// encryptedItem emits a persist-only EventReasoningSummary (empty Text, so it
+// renders nothing) carrying the reasoning item's id and encrypted_content, once
+// per item. The agent persists it as a BlockReasoning and replays it on the next
+// turn. The same item arrives on both response.output_item.done and
+// response.completed, so dedupe by id.
+func (a *reasoningAssembler) encryptedItem(item *wireOutputItem, yield func(llm.StreamEvent, error) bool) bool {
+	if item.ID == "" || item.EncryptedContent == "" || a.encrypted[item.ID] {
+		return true
+	}
+	a.encrypted[item.ID] = true
+	return yield(llm.StreamEvent{
+		Kind:               llm.EventReasoningSummary,
+		ReasoningID:        item.ID,
+		ReasoningEncrypted: item.EncryptedContent,
+	}, nil)
 }
 
 func (a *reasoningAssembler) key(event wireEvent) summaryKey {

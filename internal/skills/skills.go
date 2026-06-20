@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"harness/prompts"
 )
@@ -247,9 +248,82 @@ func BuildCatalog(skills map[string]Skill) string {
 	b.WriteString("Available skills:")
 	for _, name := range sortedNames(skills) {
 		s := skills[name]
-		fmt.Fprintf(&b, "\n- %s: %s (read %s)", oneLine(s.Name), oneLine(s.Description), s.Location)
+		fmt.Fprintf(&b, "\n- %s: %s (read %s)", oneLine(s.Name), catalogDescription(s.Description), s.Location)
 	}
 	return b.String()
+}
+
+// catalogDescMaxChars caps the per-skill description rendered into the
+// always-resident catalog. The full frontmatter description stays in SKILL.md
+// for Tier-2 read_file, so this only bounds the always-paid prompt cost.
+const catalogDescMaxChars = 200
+
+// catalogDescription renders a skill description for the Tier-1 catalog: the
+// first sentence or ~200 chars, whichever is shorter, with an ellipsis when the
+// text was cut mid-sentence. Preferring the first sentence over a hard char cap
+// keeps the leading trigger keywords intact while dropping the long tail that
+// would otherwise sit in the cache-anchored system prompt for every session,
+// even ones that never touch a skill.
+func catalogDescription(desc string) string {
+	s := oneLine(desc)
+	cut := s
+	// Prefer the first sentence when it leaves text behind.
+	if end := firstSentenceEnd(s); end > 0 && end < len(s) {
+		cut = s[:end]
+	}
+	// Hard char cap as a backstop: a very long first sentence, or no sentence
+	// boundary at all. Count runes, not bytes, so a multibyte rune is never split.
+	if utf8.RuneCountInString(cut) > catalogDescMaxChars {
+		cut = truncateRunes(cut, catalogDescMaxChars)
+	}
+	if cut == s {
+		return s
+	}
+	cut = strings.TrimRight(cut, " \t")
+	if endsWithSentencePunct(cut) {
+		// A clean sentence boundary already signals a complete unit.
+		return cut
+	}
+	return cut + "…"
+}
+
+// firstSentenceEnd returns the byte index just past the first sentence-ending
+// punctuation (. ! ?) that is followed by a space or the end of the string, or
+// -1 when there is none. It is a heuristic, not a full sentence tokenizer.
+func firstSentenceEnd(s string) int {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '.', '!', '?':
+			if i+1 >= len(s) || s[i+1] == ' ' {
+				return i + 1
+			}
+		}
+	}
+	return -1
+}
+
+// endsWithSentencePunct reports whether s ends with . ! or ?.
+func endsWithSentencePunct(s string) bool {
+	if s == "" {
+		return false
+	}
+	switch s[len(s)-1] {
+	case '.', '!', '?':
+		return true
+	}
+	return false
+}
+
+// truncateRunes returns the first n runes of s, never splitting a multibyte rune.
+func truncateRunes(s string, n int) string {
+	count := 0
+	for i := range s {
+		if count == n {
+			return s[:i]
+		}
+		count++
+	}
+	return s
 }
 
 // Instructions returns the behavioral block that accompanies the catalog in

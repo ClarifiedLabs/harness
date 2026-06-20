@@ -20,10 +20,13 @@ func TestBuildRequestGolden(t *testing.T) {
 		t.Fatalf("transcript invariant violated: %v", err)
 	}
 
-	// claude-opus-4-8 window is 1,000,000; quarter (250,000) > 8192, so the
-	// default cap of 8192 applies.
+	// The golden documents an interactive request, whose stable anchors take the
+	// 1h breakpoint.
+	req.LongCacheTTL = true
+	// claude-opus-4-8 window is 1,000,000; quarter (250,000) > 32768, so the
+	// default cap of 32768 applies.
 	const contextWindow = 1_000_000
-	got, err := json.Marshal(buildRequest(req, contextWindow))
+	got, err := json.Marshal(buildRequest(req, contextWindow, 0))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -41,24 +44,53 @@ func TestBuildRequestGolden(t *testing.T) {
 func TestBuildRequestMaxTokensDefaultSmallWindow(t *testing.T) {
 	req := basicRequest()
 	// A small window makes contextWindow/4 the binding default.
-	w := buildRequest(req, 20_000)
+	w := buildRequest(req, 20_000, 0)
 	if w.MaxTokens != 5_000 {
 		t.Errorf("max_tokens = %d, want 5000 (window/4)", w.MaxTokens)
+	}
+}
+
+func TestBuildRequestMaxTokensDefaultLargeWindow(t *testing.T) {
+	req := basicRequest()
+	// A large window makes the 32768 floor the binding default (window/4 > floor):
+	// the prior 8192 cap silently truncated large diffs/rewrites.
+	w := buildRequest(req, 1_000_000, 0)
+	if w.MaxTokens != 32_768 {
+		t.Errorf("max_tokens = %d, want 32768 floor", w.MaxTokens)
 	}
 }
 
 func TestBuildRequestMaxTokensUserSet(t *testing.T) {
 	req := basicRequest()
 	req.MaxTokens = 333
-	w := buildRequest(req, 1_000_000)
+	w := buildRequest(req, 1_000_000, 0)
 	if w.MaxTokens != 333 {
 		t.Errorf("max_tokens = %d, want 333 (user-set)", w.MaxTokens)
 	}
 }
 
+func TestBuildRequestMaxTokensCatalogOutputLimit(t *testing.T) {
+	req := basicRequest()
+	// A known catalog output limit beats the fixed 32768 fallback, so a model
+	// supporting 64k output is no longer truncated at 32768.
+	w := buildRequest(req, 1_000_000, 64_000)
+	if w.MaxTokens != 64_000 {
+		t.Errorf("max_tokens = %d, want 64000 (catalog output limit)", w.MaxTokens)
+	}
+}
+
+func TestBuildRequestMaxTokensUserSetBeatsOutputLimit(t *testing.T) {
+	req := basicRequest()
+	req.MaxTokens = 333
+	w := buildRequest(req, 1_000_000, 64_000)
+	if w.MaxTokens != 333 {
+		t.Errorf("max_tokens = %d, want 333 (user-set beats catalog output limit)", w.MaxTokens)
+	}
+}
+
 func TestBuildRequestTemperatureOmittedWhenNil(t *testing.T) {
 	req := basicRequest()
-	b, err := json.Marshal(buildRequest(req, 1_000_000))
+	b, err := json.Marshal(buildRequest(req, 1_000_000, 0))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -67,7 +99,7 @@ func TestBuildRequestTemperatureOmittedWhenNil(t *testing.T) {
 	}
 
 	req.Temperature = llmtest.FloatPtr(0)
-	b, err = json.Marshal(buildRequest(req, 1_000_000))
+	b, err = json.Marshal(buildRequest(req, 1_000_000, 0))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -79,7 +111,7 @@ func TestBuildRequestTemperatureOmittedWhenNil(t *testing.T) {
 func TestBuildRequestReasoningEffort(t *testing.T) {
 	req := basicRequest()
 	req.Reasoning = llm.ReasoningConfig{Effort: "xhigh"}
-	w := buildRequest(req, 1_000_000)
+	w := buildRequest(req, 1_000_000, 0)
 	if w.OutputConfig == nil || w.OutputConfig.Effort != "xhigh" {
 		t.Fatalf("output_config = %+v, want effort xhigh", w.OutputConfig)
 	}
@@ -102,7 +134,7 @@ func TestBuildRequestReasoningBudgetTokens(t *testing.T) {
 	req := basicRequest()
 	budget := 4096
 	req.Reasoning = llm.ReasoningConfig{BudgetTokens: &budget}
-	w := buildRequest(req, 1_000_000)
+	w := buildRequest(req, 1_000_000, 0)
 	if w.Thinking == nil || w.Thinking.Type != "enabled" || w.Thinking.BudgetTokens == nil || *w.Thinking.BudgetTokens != 4096 {
 		t.Fatalf("thinking = %+v, want enabled budget_tokens 4096", w.Thinking)
 	}
@@ -120,7 +152,7 @@ func TestBuildRequestReasoningEnabledFalse(t *testing.T) {
 	req := basicRequest()
 	disabled := false
 	req.Reasoning = llm.ReasoningConfig{Enabled: &disabled}
-	w := buildRequest(req, 1_000_000)
+	w := buildRequest(req, 1_000_000, 0)
 	if w.Thinking == nil || w.Thinking.Type != "disabled" {
 		t.Fatalf("thinking = %+v, want type disabled", w.Thinking)
 	}
@@ -144,7 +176,7 @@ func TestBuildRequestReasoningEnabledTrueAdaptive(t *testing.T) {
 	req := basicRequest()
 	enabled := true
 	req.Reasoning = llm.ReasoningConfig{Enabled: &enabled}
-	w := buildRequest(req, 1_000_000)
+	w := buildRequest(req, 1_000_000, 0)
 	if w.Thinking == nil || w.Thinking.Type != "adaptive" || w.Thinking.Display != "summarized" {
 		t.Fatalf("thinking = %+v, want adaptive/summarized for Enabled=true", w.Thinking)
 	}
@@ -165,7 +197,7 @@ func TestBuildRequestReasoningSummaryAdaptive(t *testing.T) {
 	// A summary request (mirroring the Responses gate) enables adaptive thinking.
 	req := basicRequest()
 	req.Reasoning = llm.ReasoningConfig{Summary: "auto"}
-	w := buildRequest(req, 1_000_000)
+	w := buildRequest(req, 1_000_000, 0)
 	if w.Thinking == nil || w.Thinking.Type != "adaptive" || w.Thinking.Display != "summarized" {
 		t.Fatalf("thinking = %+v, want adaptive/summarized for summary", w.Thinking)
 	}
@@ -176,7 +208,7 @@ func TestBuildRequestReasoningDefaultOmitsThinking(t *testing.T) {
 	// OpenAI/Responses gate: no effort/summary/toggle => provider default).
 	req := basicRequest()
 	req.Reasoning = llm.ReasoningConfig{}
-	w := buildRequest(req, 1_000_000)
+	w := buildRequest(req, 1_000_000, 0)
 	if w.Thinking != nil {
 		t.Errorf("thinking = %+v, want nil for empty reasoning", w.Thinking)
 	}
@@ -196,7 +228,7 @@ func TestBuildRequestThinkingReplayedWhenOn(t *testing.T) {
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "more"}}},
 		},
 	}
-	w := buildRequest(req, 1_000_000)
+	w := buildRequest(req, 1_000_000, 0)
 	got := w.Messages[1].Content
 	if len(got) != 2 {
 		t.Fatalf("assistant content = %d blocks, want 2 (thinking+text): %+v", len(got), got)
@@ -223,7 +255,7 @@ func TestBuildRequestThinkingStrippedWhenOff(t *testing.T) {
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "more"}}},
 		},
 	}
-	w := buildRequest(req, 1_000_000)
+	w := buildRequest(req, 1_000_000, 0)
 	got := w.Messages[1].Content
 	if len(got) != 1 || got[0].Type != "text" {
 		t.Fatalf("thinking must be stripped when thinking is off, got %+v", got)
@@ -231,11 +263,12 @@ func TestBuildRequestThinkingStrippedWhenOff(t *testing.T) {
 }
 
 func TestBuildRequestStableAnchorsUse1hTTL(t *testing.T) {
-	// The stable prefix (system + last tool) is written ~once and read every
-	// turn, so it carries a 1h TTL; the rolling message breakpoint is rewritten
-	// each turn and keeps the default 5m window (no ttl field).
+	// For an interactive session the stable prefix (system + last tool) is written
+	// ~once and read every turn, so it carries a 1h TTL; the rolling message
+	// breakpoint is rewritten each turn and keeps the default 5m window (no ttl).
 	req := basicRequest()
-	w := buildRequest(req, 1_000_000)
+	req.LongCacheTTL = true
+	w := buildRequest(req, 1_000_000, 0)
 
 	if len(w.System) == 0 || w.System[0].CacheControl == nil || w.System[0].CacheControl.TTL != "1h" {
 		t.Errorf("system anchor must use 1h TTL, got %+v", w.System[0].CacheControl)
@@ -251,10 +284,27 @@ func TestBuildRequestStableAnchorsUse1hTTL(t *testing.T) {
 	}
 }
 
+func TestBuildRequestStableAnchorsUse5mTTLWhenNotInteractive(t *testing.T) {
+	// One-shot/delegate/non-interactive runs (LongCacheTTL false) finish inside the
+	// 5m window, so the stable anchors take the default 5m breakpoint (no ttl) —
+	// half the write price of the 1h breakpoint they would never use.
+	req := basicRequest()
+	req.LongCacheTTL = false
+	w := buildRequest(req, 1_000_000, 0)
+
+	if len(w.System) == 0 || w.System[0].CacheControl == nil || w.System[0].CacheControl.Type != "ephemeral" || w.System[0].CacheControl.TTL != "" {
+		t.Errorf("system anchor must use the default 5m breakpoint (no ttl), got %+v", w.System[0].CacheControl)
+	}
+	last := w.Tools[len(w.Tools)-1]
+	if last.CacheControl == nil || last.CacheControl.Type != "ephemeral" || last.CacheControl.TTL != "" {
+		t.Errorf("last-tool anchor must use the default 5m breakpoint (no ttl), got %+v", last.CacheControl)
+	}
+}
+
 func TestBuildRequestNoSystemOmitsSystem(t *testing.T) {
 	req := basicRequest()
 	req.System = ""
-	w := buildRequest(req, 1_000_000)
+	w := buildRequest(req, 1_000_000, 0)
 	if w.System != nil {
 		t.Errorf("system block list present though System is empty")
 	}
@@ -271,7 +321,7 @@ func TestBuildRequestToolsCacheBreakpoint(t *testing.T) {
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
 		},
 	}
-	w := buildRequest(req, 200_000)
+	w := buildRequest(req, 200_000, 0)
 
 	if w.Tools[0].CacheControl != nil {
 		t.Error("first tool must not carry cache_control")
@@ -296,7 +346,7 @@ func TestBuildRequestCacheBreakpointSkipsRequestContext(t *testing.T) {
 		},
 		RequestContext: []string{"todo: ship it"},
 	}
-	w := buildRequest(req, 1_000_000)
+	w := buildRequest(req, 1_000_000, 0)
 
 	if len(w.Messages) != 4 {
 		t.Fatalf("want 3 real + 1 context message, got %d", len(w.Messages))
@@ -320,7 +370,7 @@ func TestBuildRequestNoToolsNoBreakpointPanic(t *testing.T) {
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
 		},
 	}
-	w := buildRequest(req, 200_000)
+	w := buildRequest(req, 200_000, 0)
 	if len(w.Tools) != 0 {
 		t.Fatalf("unexpected tools: %+v", w.Tools)
 	}
@@ -337,7 +387,7 @@ func TestBuildRequestUserImage(t *testing.T) {
 			},
 		}},
 	}
-	w := buildRequest(req, 1_000_000)
+	w := buildRequest(req, 1_000_000, 0)
 	content := w.Messages[0].Content
 	if len(content) != 2 {
 		t.Fatalf("content = %d, want 2", len(content))

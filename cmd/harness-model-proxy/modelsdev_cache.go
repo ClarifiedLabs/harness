@@ -281,22 +281,31 @@ func refreshModelsDevCatalog(ctx context.Context, env environment, configDir str
 	return fallback, nil
 }
 
-func refreshModelsDevCacheIfStale(ctx context.Context, env environment, configDir string, ttl time.Duration, logger *slog.Logger) {
+// refreshModelsDevCacheIfStale refreshes the on-disk models.dev cache when it
+// is older than ttl. On a successful refresh it returns the new catalog and its
+// source date (the rewritten cache file's mtime) so the caller can push fresh
+// managed prices into the running server; the bool reports whether a refresh
+// happened.
+func refreshModelsDevCacheIfStale(ctx context.Context, env environment, configDir string, ttl time.Duration, logger *slog.Logger) (*modelsdev.Catalog, time.Time, bool) {
 	if ttl <= 0 {
-		return
+		return nil, time.Time{}, false
 	}
 	path := modelsDevCachePath(configDir)
 	cached, err := readModelsDevCache(path)
 	now := currentTime(env)
 	if err == nil && now.Sub(cached.modTime) <= ttl {
-		return
+		return nil, time.Time{}, false
 	}
 	catalog, fetchErr := fetchAndCacheModelsDev(ctx, env, configDir)
 	if fetchErr != nil {
 		if logger != nil {
 			logger.Warn("models.dev cache refresh failed", "err", fetchErr)
 		}
-		return
+		return nil, time.Time{}, false
+	}
+	sourceDate := now
+	if refreshed, err := readModelsDevCache(path); err == nil {
+		sourceDate = refreshed.modTime
 	}
 	if logger != nil {
 		count := 0
@@ -305,25 +314,48 @@ func refreshModelsDevCacheIfStale(ctx context.Context, env environment, configDi
 		}
 		logger.Info("models.dev cache refreshed", "providers", count, "path", path)
 	}
+	return catalog, sourceDate, true
 }
 
-func startModelsDevCacheRefresh(ctx context.Context, env environment, configDir string, ttl time.Duration, logger *slog.Logger) {
+// startModelsDevCacheRefresh runs the background models.dev cache refresher.
+// onRefresh, when non-nil, is invoked with the new catalog and its source date
+// after each successful refresh so the serving handler can swap in fresh managed
+// prices.
+func startModelsDevCacheRefresh(ctx context.Context, env environment, configDir string, ttl time.Duration, logger *slog.Logger, onRefresh func(*modelsdev.Catalog, time.Time)) {
 	if ttl <= 0 {
 		return
 	}
+	refresh := func() {
+		catalog, sourceDate, ok := refreshModelsDevCacheIfStale(ctx, env, configDir, ttl, logger)
+		if ok && onRefresh != nil {
+			onRefresh(catalog, sourceDate)
+		}
+	}
 	go func() {
-		refreshModelsDevCacheIfStale(ctx, env, configDir, ttl, logger)
+		refresh()
 		ticker := time.NewTicker(ttl)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				refreshModelsDevCacheIfStale(ctx, env, configDir, ttl, logger)
+				refresh()
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
+}
+
+// loadModelsDevCacheForServe reads the cached models.dev catalog for the serving
+// handler's initial managed-price snapshot. A missing or unreadable cache yields
+// a nil catalog: managed prices stay unresolved until the first refresh writes
+// the cache.
+func loadModelsDevCacheForServe(configDir string) (*modelsdev.Catalog, time.Time) {
+	cached, err := readModelsDevCache(modelsDevCachePath(configDir))
+	if err != nil {
+		return nil, time.Time{}
+	}
+	return cached.catalog, cached.modTime
 }
 
 func currentTime(env environment) time.Time {

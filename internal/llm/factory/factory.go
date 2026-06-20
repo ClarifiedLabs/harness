@@ -31,6 +31,7 @@ type Options struct {
 	MaxTokens     int
 	Temperature   *float64
 	ContextWindow int
+	OutputLimit   int    // model's real max-output-token limit; 0 = unknown
 	ReasoningMode string // "openai" | "openrouter" | "anthropic"; empty = infer
 }
 
@@ -59,6 +60,7 @@ func New(opts Options) (llm.Provider, error) {
 			AuthHeaders:   opts.AuthHeaders,
 			BaseURL:       opts.BaseURL,
 			ContextWindow: opts.ContextWindow,
+			OutputLimit:   opts.OutputLimit,
 		}), nil
 	case "openai":
 		if opts.APIKey == "" && opts.BaseURL == "" && len(opts.AuthHeaders) == 0 {
@@ -69,6 +71,7 @@ func New(opts Options) (llm.Provider, error) {
 			AuthHeaders:   opts.AuthHeaders,
 			BaseURL:       opts.BaseURL,
 			ContextWindow: opts.ContextWindow,
+			OutputLimit:   opts.OutputLimit,
 			ReasoningMode: reasoningMode(opts.ProviderName, provider, opts.BaseURL, opts.ReasoningMode),
 		}), nil
 	case "responses":
@@ -80,6 +83,7 @@ func New(opts Options) (llm.Provider, error) {
 			AuthHeaders:   opts.AuthHeaders,
 			BaseURL:       opts.BaseURL,
 			ContextWindow: opts.ContextWindow,
+			OutputLimit:   opts.OutputLimit,
 		}), nil
 	default:
 		return nil, fmt.Errorf("llm: unknown provider %q (want openai, responses, or anthropic)", provider)

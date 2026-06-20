@@ -29,7 +29,7 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
   "api_key": "sk-file",
   "api_key_env": ["OPENROUTER_API_KEY"],
   "models": [
-    {"name":"openai/gpt-5.5","context_window":1050000,"price":{"input":5,"output":30},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}]}
+    {"name":"openai/gpt-5.5","context_window":1050000,"output_limit":64000,"price":{"input":5,"output":30},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}]}
   ]
 }`), 0o600); err != nil {
 		t.Fatalf("write provider config: %v", err)
@@ -94,7 +94,7 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	}
 	if captured.Provider != "openai" || captured.ProviderName != "openrouter" ||
 		captured.BaseURL != "https://openrouter.ai/api/v1" || captured.APIKey != "sk-env" ||
-		captured.ContextWindow != 1_050_000 {
+		captured.ContextWindow != 1_050_000 || captured.OutputLimit != 64_000 {
 		t.Fatalf("captured options = %+v", captured)
 	}
 	if len(fp.Requests) != 1 || fp.Requests[0].Model != "openai/gpt-5.5" {
@@ -472,6 +472,218 @@ func TestHandlerLogsStreamStats(t *testing.T) {
 	}
 	if record["request_bytes"].(float64) <= 0 || record["response_bytes"].(float64) <= 0 {
 		t.Fatalf("log sizes not populated: %+v", record)
+	}
+}
+
+func TestHandlerUsageAggregatesKnownCostRequests(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [
+    {"name":"priced","context_window":128000,"price":{"input":2,"output":4,"cache_read":0.5,"cache_write":1}},
+    {"name":"free","context_window":128000}
+  ]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000, CacheReadTokens: 3000, CacheWriteTokens: 4000, ReasoningTokens: 500}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			return llmtest.New("fake", llmtest.Step{
+				Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
+				Stop:   llm.StopEndTurn,
+				Usage:  usage,
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	stream := func(model string) {
+		body, _ := json.Marshal(protocol.StreamRequest{
+			Provider: "openai",
+			Request:  llm.Request{Model: model},
+		})
+		resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("POST stream %s: %v", model, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("stream %s status = %d", model, resp.StatusCode)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+	}
+	stream("priced")
+	stream("priced")
+	stream("free") // unknown price: must not appear in the aggregate
+
+	resp, err := srv.Client().Get(srv.URL + "/v1/usage")
+	if err != nil {
+		t.Fatalf("GET usage: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("usage status = %d, want 200", resp.StatusCode)
+	}
+	var report protocol.UsageReport
+	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
+		t.Fatalf("decode usage report: %v", err)
+	}
+	if len(report.Models) != 1 {
+		t.Fatalf("usage models = %+v, want exactly the priced model", report.Models)
+	}
+	got := report.Models[0]
+	want := protocol.ModelUsage{
+		Provider:         "openai",
+		Model:            "priced",
+		Requests:         2,
+		InputTokens:      2000,
+		OutputTokens:     4000,
+		CacheReadTokens:  6000,
+		CacheWriteTokens: 8000,
+		ReasoningTokens:  1000,
+	}
+	if got.Provider != want.Provider || got.Model != want.Model || got.Requests != want.Requests ||
+		got.InputTokens != want.InputTokens || got.OutputTokens != want.OutputTokens ||
+		got.CacheReadTokens != want.CacheReadTokens || got.CacheWriteTokens != want.CacheWriteTokens ||
+		got.ReasoningTokens != want.ReasoningTokens {
+		t.Fatalf("usage entry = %+v, want %+v (cost aside)", got, want)
+	}
+	// Two priced requests at the configured prices.
+	perReq := 1000.0/1e6*2 + 2000.0/1e6*4 + 3000.0/1e6*0.5 + 4000.0/1e6*1
+	wantCost := 2 * perReq
+	if diff := got.CostUSD - wantCost; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("usage cost = %v, want %v", got.CostUSD, wantCost)
+	}
+}
+
+func TestHandlerUsageEmptyBeforeAnyRequest(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/v1/usage")
+	if err != nil {
+		t.Fatalf("GET usage: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("usage status = %d, want 200", resp.StatusCode)
+	}
+	var report protocol.UsageReport
+	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
+		t.Fatalf("decode usage report: %v", err)
+	}
+	if len(report.Models) != 0 {
+		t.Fatalf("usage models = %+v, want empty", report.Models)
+	}
+}
+
+func TestHandlerCatalogStampsPricingStaleness(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "openai.json")
+	if err := os.WriteFile(cfgPath, []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	info, err := os.Stat(cfgPath)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	wantModTime := info.ModTime()
+
+	handler, err := NewHandler(Options{
+		ConfigDir:     dir,
+		Config:        Config{ProviderConfigs: []string{"openai.json"}},
+		PricingMaxAge: 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	var catalog protocol.Catalog
+	if err := json.NewDecoder(resp.Body).Decode(&catalog); err != nil {
+		t.Fatalf("decode catalog: %v", err)
+	}
+	resp.Body.Close()
+
+	if catalog.Pricing == nil {
+		t.Fatalf("catalog.Pricing = nil, want a stamped source date")
+	}
+	if !catalog.Pricing.SourceDate.Equal(wantModTime) {
+		t.Fatalf("pricing source date = %v, want config mtime %v", catalog.Pricing.SourceDate, wantModTime)
+	}
+	if catalog.Pricing.MaxAgeSeconds != int64((24 * time.Hour).Seconds()) {
+		t.Fatalf("pricing max age = %d, want 86400", catalog.Pricing.MaxAgeSeconds)
+	}
+	if catalog.Pricing.Stale(wantModTime.Add(23 * time.Hour)) {
+		t.Fatalf("pricing reported stale within the TTL window")
+	}
+	if !catalog.Pricing.Stale(wantModTime.Add(25 * time.Hour)) {
+		t.Fatalf("pricing not reported stale past the TTL window")
+	}
+}
+
+func TestNewHandlerPricingMaxAgeFallsBackToConfigTTL(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config: Config{
+			ProviderConfigs:   []string{"openai.json"},
+			ModelsDevCacheTTL: Duration{Duration: 12 * time.Hour, Set: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	pricing := handler.Catalog().Pricing
+	if pricing == nil {
+		t.Fatalf("catalog.Pricing = nil, want config TTL fallback")
+	}
+	if pricing.MaxAgeSeconds != int64((12 * time.Hour).Seconds()) {
+		t.Fatalf("pricing max age = %d, want 43200 from config TTL", pricing.MaxAgeSeconds)
 	}
 }
 

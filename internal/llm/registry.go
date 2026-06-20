@@ -22,25 +22,39 @@ type Price struct {
 // ModelInfo is the registry entry for one model.
 type ModelInfo struct {
 	ContextWindow int            `json:"context_window"`
+	OutputLimit   int            `json:"output_limit,omitempty"`
 	Price         Price          `json:"price"`
 	Reasoning     *ReasoningInfo `json:"reasoning,omitempty"`
 }
 
 // ProviderConfig is the on-disk schema for a provider JSON file.
 type ProviderConfig struct {
-	Name      string       `json:"name"`
-	APIType   string       `json:"api_type"`
-	BaseURL   string       `json:"base_url"`
-	APIKey    string       `json:"api_key"`
-	APIKeyEnv []string     `json:"api_key_env"`
-	Auth      *auth.Config `json:"auth,omitempty"`
-	Models    []ModelEntry `json:"models"`
+	Name    string `json:"name"`
+	APIType string `json:"api_type"`
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+	// Managed marks a config written by `--setup`/`--refresh-models`. Managed
+	// configs omit per-model prices; the proxy resolves their prices live from
+	// the in-memory models.dev cache instead. A config lacking this flag (e.g. a
+	// hand-written one) is treated as manual and keeps its own configured prices.
+	Managed bool `json:"managed,omitempty"`
+	// PriceSource overrides which models.dev provider id a managed config's prices
+	// are resolved from. Empty means "this provider's own name". It exists so a
+	// provider whose models are billed at another provider's rates — e.g.
+	// openai-codex, whose models are OpenAI models billed at OpenAI per-token
+	// rates — can price from that provider ("openai") instead. Ignored for manual
+	// configs.
+	PriceSource string       `json:"price_source,omitempty"`
+	APIKeyEnv   []string     `json:"api_key_env"`
+	Auth        *auth.Config `json:"auth,omitempty"`
+	Models      []ModelEntry `json:"models"`
 }
 
 // ModelEntry is one model inside a ProviderConfig.
 type ModelEntry struct {
 	Name             string            `json:"name"`
 	ContextWindow    int               `json:"context_window"`
+	OutputLimit      int               `json:"output_limit,omitempty"`
 	Price            Price             `json:"price"`
 	Reasoning        *bool             `json:"reasoning,omitempty"`
 	ReasoningOptions []ReasoningOption `json:"reasoning_options,omitempty"`
@@ -109,22 +123,39 @@ func LoadProviderConfigs(configDir string, files []string, warn func(string)) (*
 		}
 		for _, pc := range pcs {
 			providers = append(providers, pc)
-			for _, m := range pc.Models {
-				info := ModelInfo{
-					ContextWindow: m.ContextWindow,
-					Price:         m.Price,
-					Reasoning:     modelEntryReasoning(m),
-				}
-				models[m.Name] = info
-				if pc.Name != "" {
-					qualified[pc.Name+":"+m.Name] = info
-				}
-			}
+			addProviderModels(models, qualified, pc)
 		}
 	}
 	registry := NewRegistry(models)
 	registry.qualified = qualified
 	return registry, providers, nil
+}
+
+// RegistryFromProviderConfigs builds a Registry from already-decoded provider
+// configs, without any file I/O. The proxy uses this to rebuild its registry
+// after resolving managed-provider prices from the live models.dev cache.
+func RegistryFromProviderConfigs(providers []ProviderConfig) *Registry {
+	models := map[string]ModelInfo{}
+	qualified := map[string]ModelInfo{}
+	for _, pc := range providers {
+		addProviderModels(models, qualified, pc)
+	}
+	return NewRegistryWithQualified(models, qualified)
+}
+
+func addProviderModels(models, qualified map[string]ModelInfo, pc ProviderConfig) {
+	for _, m := range pc.Models {
+		info := ModelInfo{
+			ContextWindow: m.ContextWindow,
+			OutputLimit:   m.OutputLimit,
+			Price:         m.Price,
+			Reasoning:     modelEntryReasoning(m),
+		}
+		models[m.Name] = info
+		if pc.Name != "" {
+			qualified[pc.Name+":"+m.Name] = info
+		}
+	}
 }
 
 // Lookup returns the configured info for model, if any. The returned bool only
@@ -174,6 +205,9 @@ func (r *Registry) MergeModel(model string, info ModelInfo) {
 	current := target[model]
 	if current.ContextWindow <= 0 && info.ContextWindow > 0 {
 		current.ContextWindow = info.ContextWindow
+	}
+	if current.OutputLimit <= 0 && info.OutputLimit > 0 {
+		current.OutputLimit = info.OutputLimit
 	}
 	if priceZero(current.Price) && !priceZero(info.Price) {
 		current.Price = info.Price
@@ -272,4 +306,18 @@ func (r *Registry) ContextWindow(model string) int {
 		return r.defaultContextWindow
 	}
 	return DefaultContextWindow
+}
+
+// OutputLimit returns the model's known max-output-token limit from the
+// registry, or 0 when unknown. Unlike ContextWindow there is no configured
+// default: an unknown output limit leaves the per-request max_tokens cap to the
+// dialect's fixed fallback (min(defaultMaxTokensCap, contextWindow/4)).
+func (r *Registry) OutputLimit(model string) int {
+	if r == nil {
+		return 0
+	}
+	if info, ok := r.Lookup(model); ok {
+		return info.OutputLimit
+	}
+	return 0
 }

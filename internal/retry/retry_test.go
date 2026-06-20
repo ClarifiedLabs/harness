@@ -22,6 +22,37 @@ func TestRetryableStatus(t *testing.T) {
 	}
 }
 
+func TestRateLimitedStatus(t *testing.T) {
+	for _, c := range []int{429, 529} {
+		if !RateLimitedStatus(c) {
+			t.Errorf("RateLimitedStatus(%d) = false, want true", c)
+		}
+	}
+	for _, c := range []int{200, 400, 500, 502, 503} {
+		if RateLimitedStatus(c) {
+			t.Errorf("RateLimitedStatus(%d) = true, want false", c)
+		}
+	}
+}
+
+func TestNextRateLimitedHigherCeiling(t *testing.T) {
+	// The rate-limit backoff is bounded by the 60s ceiling; the standard schedule
+	// stays bounded at 30s. The wider ceiling lets rate-limit attempts spread over
+	// the minutes such limits take to recover.
+	for attempt := 0; attempt < 12; attempt++ {
+		if d := NextRateLimited(attempt, 0); d > cap60s {
+			t.Fatalf("NextRateLimited(%d) = %v, want <= 60s", attempt, d)
+		}
+		if d := Next(attempt, 0); d > cap30s {
+			t.Fatalf("Next(%d) = %v, want <= 30s", attempt, d)
+		}
+	}
+	// Retry-After remains a floor for the rate-limit schedule.
+	if d := NextRateLimited(0, 45*time.Second); d < 45*time.Second {
+		t.Fatalf("NextRateLimited(0, 45s) = %v, want >= 45s (Retry-After floor)", d)
+	}
+}
+
 func TestParseRetryAfter(t *testing.T) {
 	if d := ParseRetryAfter("3"); d != 3*time.Second {
 		t.Errorf("seconds form = %v, want 3s", d)

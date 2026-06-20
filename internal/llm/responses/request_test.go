@@ -19,7 +19,7 @@ func TestBuildRequestGolden(t *testing.T) {
 		t.Fatalf("transcript invariant violated: %v", err)
 	}
 
-	got, err := json.Marshal(buildRequest(req))
+	got, err := json.Marshal(buildRequest(req, 0, 0))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -35,15 +35,56 @@ func TestBuildRequestGolden(t *testing.T) {
 func TestBuildRequestMaxTokensUsesMaxOutputTokens(t *testing.T) {
 	req := basicRequest()
 	req.MaxTokens = 333
-	w := buildRequest(req)
+	w := buildRequest(req, 0, 0)
 	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 333 {
 		t.Errorf("max_output_tokens = %v, want 333", w.MaxOutputTokens)
 	}
 }
 
+func TestBuildRequestMaxOutputTokensFloorLargeWindow(t *testing.T) {
+	// A large window makes the 32768 floor the binding default (window/4 > floor).
+	w := buildRequest(basicRequest(), 1_000_000, 0)
+	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 32768 {
+		t.Fatalf("max_output_tokens = %v, want 32768 floor", w.MaxOutputTokens)
+	}
+}
+
+func TestBuildRequestMaxOutputTokensFloorSmallWindow(t *testing.T) {
+	// A small window makes window/4 the binding default.
+	w := buildRequest(basicRequest(), 20_000, 0)
+	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 5_000 {
+		t.Fatalf("max_output_tokens = %v, want 5000 (window/4)", w.MaxOutputTokens)
+	}
+}
+
+func TestBuildRequestMaxOutputTokensOmittedWhenWindowUnknown(t *testing.T) {
+	w := buildRequest(basicRequest(), 0, 0)
+	if w.MaxOutputTokens != nil {
+		t.Fatalf("max_output_tokens = %v, want omitted when window unknown", w.MaxOutputTokens)
+	}
+}
+
+func TestBuildRequestMaxOutputTokensCatalogOutputLimit(t *testing.T) {
+	// A known catalog output limit beats the fixed 32768 fallback even on a large
+	// window, and applies even when the context window is unknown (0).
+	w := buildRequest(basicRequest(), 0, 100_000)
+	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 100_000 {
+		t.Fatalf("max_output_tokens = %v, want 100000 (catalog output limit)", w.MaxOutputTokens)
+	}
+}
+
+func TestBuildRequestMaxOutputTokensUserSetBeatsOutputLimit(t *testing.T) {
+	req := basicRequest()
+	req.MaxTokens = 333
+	w := buildRequest(req, 1_000_000, 100_000)
+	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 333 {
+		t.Fatalf("max_output_tokens = %v, want 333 (user-set beats catalog output limit)", w.MaxOutputTokens)
+	}
+}
+
 func TestBuildRequestTemperatureOmittedWhenNil(t *testing.T) {
 	req := basicRequest()
-	b, err := json.Marshal(buildRequest(req))
+	b, err := json.Marshal(buildRequest(req, 0, 0))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -52,7 +93,7 @@ func TestBuildRequestTemperatureOmittedWhenNil(t *testing.T) {
 	}
 
 	req.Temperature = llmtest.FloatPtr(0)
-	b, err = json.Marshal(buildRequest(req))
+	b, err = json.Marshal(buildRequest(req, 0, 0))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -64,7 +105,7 @@ func TestBuildRequestTemperatureOmittedWhenNil(t *testing.T) {
 func TestBuildRequestReasoningEffort(t *testing.T) {
 	req := basicRequest()
 	req.Reasoning = llm.ReasoningConfig{Effort: "high"}
-	w := buildRequest(req)
+	w := buildRequest(req, 0, 0)
 	if w.Reasoning == nil || w.Reasoning.Effort != "high" {
 		t.Fatalf("reasoning = %+v, want effort high", w.Reasoning)
 	}
@@ -73,7 +114,7 @@ func TestBuildRequestReasoningEffort(t *testing.T) {
 func TestBuildRequestReasoningSummary(t *testing.T) {
 	req := basicRequest()
 	req.Reasoning = llm.ReasoningConfig{Summary: "auto"}
-	w := buildRequest(req)
+	w := buildRequest(req, 0, 0)
 	if w.Reasoning == nil || w.Reasoning.Summary != "auto" {
 		t.Fatalf("reasoning = %+v, want summary auto", w.Reasoning)
 	}
@@ -88,7 +129,7 @@ func TestBuildRequestAssistantPhase(t *testing.T) {
 			{Role: llm.RoleAssistant, Phase: llm.AssistantPhaseFinal, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "done"}}},
 		},
 	}
-	w := buildRequest(req)
+	w := buildRequest(req, 0, 0)
 	if len(w.Input) != 3 {
 		t.Fatalf("input = %d, want 3", len(w.Input))
 	}
@@ -103,8 +144,34 @@ func TestBuildRequestAssistantPhase(t *testing.T) {
 	}
 }
 
+func TestBuildRequestPromptCacheKey(t *testing.T) {
+	req := basicRequest()
+	req.PromptCacheKey = "harness-abc"
+	w := buildRequest(req, 0, 0)
+	if w.PromptCacheKey != "harness-abc" {
+		t.Fatalf("prompt_cache_key = %q, want harness-abc", w.PromptCacheKey)
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"prompt_cache_key":"harness-abc"`)) {
+		t.Fatalf("prompt_cache_key missing from JSON: %s", b)
+	}
+}
+
+func TestBuildRequestPromptCacheKeyOmittedWhenEmpty(t *testing.T) {
+	b, err := json.Marshal(buildRequest(basicRequest(), 0, 0))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte("prompt_cache_key")) {
+		t.Fatalf("prompt_cache_key present though unset: %s", b)
+	}
+}
+
 func TestBuildRequestStreamAndStore(t *testing.T) {
-	w := buildRequest(basicRequest())
+	w := buildRequest(basicRequest(), 0, 0)
 	if !w.Stream {
 		t.Fatal("stream = false, want true")
 	}
@@ -117,7 +184,7 @@ func TestBuildRequestStoreAndPreviousResponseID(t *testing.T) {
 	req := basicRequest()
 	req.StoreResponse = true
 	req.PreviousResponseID = "resp_1"
-	w := buildRequest(req)
+	w := buildRequest(req, 0, 0)
 	if !w.Store {
 		t.Fatal("store = false, want true")
 	}
@@ -128,7 +195,7 @@ func TestBuildRequestStoreAndPreviousResponseID(t *testing.T) {
 
 func TestBuildRequestContextIsInputWhenStateless(t *testing.T) {
 	req := llm.Request{Model: "gpt-5.4", RequestContext: []string{"todo context"}}
-	w := buildRequest(req)
+	w := buildRequest(req, 0, 0)
 	if len(w.Input) != 1 {
 		t.Fatalf("input = %d, want 1 context message", len(w.Input))
 	}
@@ -139,7 +206,7 @@ func TestBuildRequestContextIsInputWhenStateless(t *testing.T) {
 
 func TestBuildRequestContextIsInstructionsWhenStored(t *testing.T) {
 	req := llm.Request{Model: "gpt-5.4", System: "system", StoreResponse: true, RequestContext: []string{"todo context"}}
-	w := buildRequest(req)
+	w := buildRequest(req, 0, 0)
 	if len(w.Input) != 0 {
 		t.Fatalf("input = %d, want no context input items", len(w.Input))
 	}
@@ -149,7 +216,7 @@ func TestBuildRequestContextIsInstructionsWhenStored(t *testing.T) {
 }
 
 func TestBuildRequestToolsAreNonStrict(t *testing.T) {
-	w := buildRequest(basicRequest())
+	w := buildRequest(basicRequest(), 0, 0)
 	if len(w.Tools) == 0 {
 		t.Fatal("no tools")
 	}
@@ -164,9 +231,115 @@ func TestBuildRequestToolsAreNonStrict(t *testing.T) {
 }
 
 func TestBuildRequestParallelToolsOmittedWithoutTools(t *testing.T) {
-	w := buildRequest(llm.Request{Model: "gpt-5.4"})
+	w := buildRequest(llm.Request{Model: "gpt-5.4"}, 0, 0)
 	if w.ParallelTools {
 		t.Fatal("parallel_tool_calls = true without tools")
+	}
+}
+
+func TestBuildRequestIncludesEncryptedReasoningWhenReasoning(t *testing.T) {
+	req := basicRequest()
+	req.Reasoning = llm.ReasoningConfig{Effort: "high"}
+	w := buildRequest(req, 0, 0)
+	if len(w.Include) != 1 || w.Include[0] != "reasoning.encrypted_content" {
+		t.Fatalf("include = %v, want [reasoning.encrypted_content]", w.Include)
+	}
+}
+
+func TestBuildRequestOmitsIncludeWithoutReasoning(t *testing.T) {
+	w := buildRequest(basicRequest(), 0, 0)
+	if len(w.Include) != 0 {
+		t.Fatalf("include = %v, want none when reasoning is off", w.Include)
+	}
+}
+
+func TestBuildInputReplaysReasoningBeforeToolCall(t *testing.T) {
+	req := llm.Request{
+		Model:     "gpt-5.5",
+		Reasoning: llm.ReasoningConfig{Effort: "medium"},
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+				{Kind: llm.BlockReasoning, ReasoningID: "rs_1", ReasoningEncrypted: "enc-abc"},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
+			}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}},
+		},
+	}
+	if err := llm.ValidateTranscript(req.Messages); err != nil {
+		t.Fatalf("transcript invariant violated: %v", err)
+	}
+	w := buildRequest(req, 0, 0)
+
+	reasoningIdx, callIdx := -1, -1
+	for i, item := range w.Input {
+		switch item.Type {
+		case "reasoning":
+			reasoningIdx = i
+			if item.ID != "rs_1" || item.EncryptedContent != "enc-abc" {
+				t.Fatalf("reasoning item = %+v, want id rs_1 / enc-abc", item)
+			}
+		case "function_call":
+			callIdx = i
+		}
+	}
+	if reasoningIdx < 0 || callIdx < 0 || reasoningIdx >= callIdx {
+		t.Fatalf("reasoning item (%d) must precede function_call (%d): %+v", reasoningIdx, callIdx, w.Input)
+	}
+	b, err := json.Marshal(w.Input[reasoningIdx])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"summary":[]`)) {
+		t.Fatalf("replayed reasoning item must carry summary []: %s", b)
+	}
+}
+
+func TestBuildInputDropsReasoningWithoutEncryptedContent(t *testing.T) {
+	req := llm.Request{
+		Model: "gpt-5.5",
+		Messages: []llm.Message{
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+				{Kind: llm.BlockReasoning, ReasoningID: "rs_1"},
+				{Kind: llm.BlockText, Text: "done"},
+			}},
+		},
+	}
+	w := buildRequest(req, 0, 0)
+	for _, item := range w.Input {
+		if item.Type == "reasoning" {
+			t.Fatalf("reasoning item emitted without encrypted_content: %+v", item)
+		}
+	}
+}
+
+// Compaction summary and prewarm send the full transcript with reasoning
+// disabled. A persisted encrypted reasoning block must NOT be replayed then:
+// buildRequest omits Reasoning/Include in that case, so a stray reasoning input
+// item would carry no matching encrypted_content include and the provider would
+// reject the asymmetry.
+func TestBuildInputSkipsReasoningWhenReasoningDisabled(t *testing.T) {
+	req := llm.Request{
+		Model: "gpt-5.5",
+		// Reasoning left empty (off), as compaction's streamSummary and
+		// PrewarmRequest set it.
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+				{Kind: llm.BlockReasoning, ReasoningID: "rs_1", ReasoningEncrypted: "enc-abc"},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
+			}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}},
+		},
+	}
+	w := buildRequest(req, 0, 0)
+	if len(w.Include) != 0 {
+		t.Fatalf("include = %v, want none when reasoning is off", w.Include)
+	}
+	for _, item := range w.Input {
+		if item.Type == "reasoning" {
+			t.Fatalf("reasoning item replayed on a reasoning-off request: %+v", item)
+		}
 	}
 }
 
@@ -181,7 +354,7 @@ func TestBuildRequestUserImage(t *testing.T) {
 			},
 		}},
 	}
-	w := buildRequest(req)
+	w := buildRequest(req, 0, 0)
 	parts, ok := w.Input[0].Content.([]wireContentPart)
 	if !ok {
 		t.Fatalf("content = %T, want []wireContentPart", w.Input[0].Content)

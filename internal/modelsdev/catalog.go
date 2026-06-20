@@ -49,6 +49,7 @@ type Model struct {
 // Limit carries token limits from models.dev.
 type Limit struct {
 	Context int `json:"context"`
+	Output  int `json:"output"`
 }
 
 // Fetch downloads and decodes a models.dev API catalog. A nil client uses the
@@ -289,6 +290,7 @@ func (p Provider) ProviderConfig(apiKey string) llm.ProviderConfig {
 		entry := llm.ModelEntry{
 			Name:             m.ID,
 			ContextWindow:    m.Limit.Context,
+			OutputLimit:      m.Limit.Output,
 			Price:            m.Cost,
 			ReasoningOptions: append([]llm.ReasoningOption(nil), m.ReasoningOptions...),
 		}
@@ -310,6 +312,7 @@ func (p Provider) ProviderConfig(apiKey string) llm.ProviderConfig {
 func (m Model) ModelInfo() llm.ModelInfo {
 	return llm.ModelInfo{
 		ContextWindow: m.Limit.Context,
+		OutputLimit:   m.Limit.Output,
 		Price:         m.Cost,
 		Reasoning: &llm.ReasoningInfo{
 			Supported: m.Reasoning,

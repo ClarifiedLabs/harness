@@ -61,6 +61,13 @@ const (
 	// BlockRedactedThinking carries an opaque, model-internal thinking payload
 	// that must be echoed back verbatim but is never rendered.
 	BlockRedactedThinking BlockKind = "redacted_thinking"
+	// BlockReasoning carries an OpenAI Responses reasoning item captured in the
+	// default stateless (store=false) mode via include=[reasoning.encrypted_content].
+	// Its opaque encrypted_content is replayed verbatim as a reasoning input item
+	// before the tool call it preceded, so a reasoning model does not re-reason
+	// from scratch on every tool turn. Providers that don't model Responses
+	// reasoning (Anthropic/OpenAI-chat) skip these blocks.
+	BlockReasoning BlockKind = "reasoning"
 )
 
 // ContentBlock is a tagged union; exactly the fields for Kind are set.
@@ -96,6 +103,13 @@ type ContentBlock struct {
 
 	// BlockRedactedThinking (opaque model-internal payload, echoed back verbatim).
 	RedactedData string `json:"redacted_data,omitempty"`
+
+	// BlockReasoning (Responses encrypted reasoning item, replayed verbatim in
+	// stateless mode). ReasoningEncrypted is the opaque encrypted_content the API
+	// returns only when store=false and include carries reasoning.encrypted_content;
+	// ReasoningID is the item id (rs_…) echoed back alongside it.
+	ReasoningID        string `json:"reasoning_id,omitempty"`
+	ReasoningEncrypted string `json:"reasoning_encrypted,omitempty"`
 }
 
 // ToolCall is a flat view of a BlockToolUse, carried from the agent loop into

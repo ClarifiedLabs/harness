@@ -995,6 +995,107 @@ func TestAugmentAgentsWithMCP(t *testing.T) {
 	}
 }
 
+func TestCapRemoteMCPNames(t *testing.T) {
+	names := []string{"mcp__a__one", "mcp__a__two", "mcp__b__three", "mcp__b__four"}
+	readOnly := []string{"mcp__a__one", "mcp__b__three"}
+
+	// Inactive limits pass through unchanged.
+	if gotN, gotRO := capRemoteMCPNames(names, readOnly, mcpLimits{}, nil); !slices.Equal(gotN, names) || !slices.Equal(gotRO, readOnly) {
+		t.Fatalf("inactive limits should pass through: %v / %v", gotN, gotRO)
+	}
+
+	// max_tools truncates in discovery order; read-only is filtered to the kept set.
+	gotN, gotRO := capRemoteMCPNames(names, readOnly, mcpLimits{maxTools: 2}, nil)
+	if !slices.Equal(gotN, []string{"mcp__a__one", "mcp__a__two"}) {
+		t.Fatalf("cap names = %v", gotN)
+	}
+	if !slices.Equal(gotRO, []string{"mcp__a__one"}) {
+		t.Fatalf("cap read-only = %v, want only kept", gotRO)
+	}
+
+	// A disabled server drops that server's tools.
+	gotN, gotRO = capRemoteMCPNames(names, readOnly, mcpLimits{disabled: map[string]bool{"a": true}}, nil)
+	if !slices.Equal(gotN, []string{"mcp__b__three", "mcp__b__four"}) {
+		t.Fatalf("disabled-server names = %v", gotN)
+	}
+	if !slices.Equal(gotRO, []string{"mcp__b__three"}) {
+		t.Fatalf("disabled-server read-only = %v", gotRO)
+	}
+
+	// Disabled and cap combine: drop server a, then cap the remainder to 1.
+	if gotN, _ := capRemoteMCPNames(names, readOnly, mcpLimits{maxTools: 1, disabled: map[string]bool{"a": true}}, nil); !slices.Equal(gotN, []string{"mcp__b__three"}) {
+		t.Fatalf("combined names = %v", gotN)
+	}
+}
+
+func TestCapRemoteMCPNamesWarnsOnTruncate(t *testing.T) {
+	var errw strings.Builder
+	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capRemoteMCPNames([]string{"mcp__a__one", "mcp__a__two", "mcp__a__three"}, nil, mcpLimits{maxTools: 1}, logger)
+	if !strings.Contains(errw.String(), "restricting tool surface") {
+		t.Fatalf("expected truncation warning, got %q", errw.String())
+	}
+}
+
+func TestMCPLimitsFromConfig(t *testing.T) {
+	lim := mcpLimitsFromConfig(config.MCPConfig{MaxTools: 3, DisabledServers: []string{"playwright", " ", "browser"}})
+	if lim.maxTools != 3 {
+		t.Fatalf("maxTools = %d, want 3", lim.maxTools)
+	}
+	if !lim.disabled["playwright"] || !lim.disabled["browser"] || len(lim.disabled) != 2 {
+		t.Fatalf("disabled = %v, want {playwright, browser}", lim.disabled)
+	}
+	if mcpLimitsFromConfig(config.MCPConfig{}).active() {
+		t.Fatal("empty config should yield inactive limits")
+	}
+}
+
+// TestMCPRefresherAppliesToolCap confirms the cap reaches the async/interactive
+// refresh path: every discovered tool lands in the catalog, but an mcp_tools=all
+// agent auto-exposes at most max_tools of them.
+func TestMCPRefresherAppliesToolCap(t *testing.T) {
+	catalog := tools.Catalog()
+	discovered := &tools.Registry{}
+	discovered.Register(asyncMCPTestTool{name: "mcp__test__one"})
+	discovered.Register(asyncMCPTestTool{name: "mcp__test__two"})
+	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
+	pending.results <- asyncMCPResult{
+		registry: discovered,
+		summary: mcptools.Summary{
+			Servers: map[string]int{"test": 2},
+			Names:   []string{"mcp__test__one", "mcp__test__two"},
+			Total:   2,
+		},
+	}
+
+	conn := mcptools.NewConn(mcptools.Options{Info: mcp.Implementation{Name: "harness", Version: "test"}})
+	agents := map[string]agentdef.Definition{
+		"auto": {Name: "auto", AllowedTools: []string{"read_file"}, MCPTools: agentdef.MCPToolsAll},
+	}
+	bases := mcpAgentBases{"auto": {Allowed: []string{"read_file"}, Mode: agentdef.MCPToolsAll}}
+	refresh := newMCPRefresher(conn, catalog, agents, bases, mcptools.Summary{}, mcptools.Summary{}, slog.New(slog.DiscardHandler), pending, mcpLimits{maxTools: 1})
+
+	sel, _ := refresh(context.Background(), "auto")
+	if sel == nil {
+		t.Fatal("refresh should swap tools")
+	}
+	if _, ok := catalog.Lookup("mcp__test__two"); !ok {
+		t.Fatal("every discovered tool should remain in the catalog regardless of the cap")
+	}
+	mcpCount := 0
+	for _, n := range agents["auto"].AllowedTools {
+		if strings.HasPrefix(n, "mcp__") {
+			mcpCount++
+		}
+	}
+	if mcpCount != 1 {
+		t.Fatalf("auto agent should auto-expose only 1 capped mcp tool, got %d: %v", mcpCount, agents["auto"].AllowedTools)
+	}
+}
+
 // --- helpers ---
 
 func withMCPEnv(base func(string) string, proxy string) func(string) string {

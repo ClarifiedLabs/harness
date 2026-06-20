@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
@@ -195,7 +196,7 @@ func TestCompactBelowThresholdUntouched(t *testing.T) {
 	below := window / 2 // well under 78%
 
 	sink := &recordSink{}
-	if _, err := a.MaybeCompact(context.Background(), below, sink); err != nil {
+	if _, _, err := a.MaybeCompact(context.Background(), below, sink); err != nil {
 		t.Fatalf("MaybeCompact: %v", err)
 	}
 	if len(a.Transcript()) != len(transcript) {
@@ -219,7 +220,7 @@ func TestMaybeCompactAboveThresholdCompacts(t *testing.T) {
 	window := a.window()
 	above := window * 80 / 100 // ≥ 78%
 
-	if _, err := a.MaybeCompact(context.Background(), above, &recordSink{}); err != nil {
+	if _, _, err := a.MaybeCompact(context.Background(), above, &recordSink{}); err != nil {
 		t.Fatalf("MaybeCompact: %v", err)
 	}
 	msgs := a.Transcript()
@@ -234,8 +235,15 @@ func TestMaybeCompactAboveThresholdCompacts(t *testing.T) {
 
 func TestCompactSummaryFailureKeepsTranscript(t *testing.T) {
 	transcript := makeTurns(10)
-	fp := llmtest.New("fake", llmtest.Step{Err: errors.New("api down")})
+	// A persistent failure: every retry attempt errors, so the summary call gives
+	// up and the transcript is kept intact (r32 retries 1 + streamRetries times).
+	errSteps := make([]llmtest.Step, streamRetries+1)
+	for i := range errSteps {
+		errSteps[i] = llmtest.Step{Err: errors.New("api down")}
+	}
+	fp := llmtest.New("fake", errSteps...)
 	a := newAgent(fp, tools.Default(), Options{Model: "claude-opus-4-8"})
+	a.SetSleep(func(time.Duration) {})
 	a.SetSystem("sys")
 	a.SetTranscript(transcript)
 
@@ -394,7 +402,7 @@ func TestMaybeCompactReturnsUsageForTotals(t *testing.T) {
 	window := a.window()
 	above := window * 80 / 100
 
-	u, err := a.MaybeCompact(context.Background(), above, &recordSink{})
+	u, _, err := a.MaybeCompact(context.Background(), above, &recordSink{})
 	if err != nil {
 		t.Fatalf("MaybeCompact: %v", err)
 	}
@@ -411,7 +419,7 @@ func TestMaybeCompactBelowThresholdReturnsZeroUsage(t *testing.T) {
 	a.SetTranscript(transcript)
 
 	below := a.window() / 2
-	u, err := a.MaybeCompact(context.Background(), below, &recordSink{})
+	u, _, err := a.MaybeCompact(context.Background(), below, &recordSink{})
 	if err != nil {
 		t.Fatalf("MaybeCompact: %v", err)
 	}
@@ -444,7 +452,7 @@ func TestContextWindowOverrideMovesTrigger(t *testing.T) {
 		t.Fatalf("test setup: %d should be below the default trigger", above)
 	}
 
-	if _, err := a.MaybeCompact(context.Background(), above, &recordSink{}); err != nil {
+	if _, _, err := a.MaybeCompact(context.Background(), above, &recordSink{}); err != nil {
 		t.Fatalf("MaybeCompact: %v", err)
 	}
 	if len(fp.Requests) != 1 {
@@ -512,6 +520,126 @@ func TestContextWindowOverrideMovesDegradeBudget(t *testing.T) {
 	}
 	if budget := overrideWindow * compactThresholdPct / 100; ovEst > budget+minTruncResult/bytesPerToken {
 		t.Fatalf("override degrade left estimate %d well above budget %d", ovEst, budget)
+	}
+}
+
+// A single in-progress turn whose read-only tool result has ballooned over
+// budget has nothing older than the kept turns to summarize, but it must still
+// be shrunk in place rather than wedged against the context window (never wedge).
+// No summary model call happens on this path.
+func TestCompactShrinksOversizedSingleTurnWithoutSummary(t *testing.T) {
+	const window = 10_000 // budget = 7800 tokens ≈ 31.2k bytes
+	huge := strings.Repeat("x", 200_000)
+	transcript := []llm.Message{
+		userText("inspect the file"),
+		asstToolUse("c1", "read_file", `{"path":"a.go"}`),
+		toolResult("c1", huge),
+		asstText("looked"),
+	}
+	fp := llmtest.New("fake") // no summary step: the degrade-only path must not call the model
+	a := newAgent(fp, tools.Default(), Options{Model: "local", ContextWindow: window})
+	a.SetSystem("sys")
+	a.SetTranscript(transcript)
+
+	if estimateTokens(a.Transcript()) <= a.compactBudget() {
+		t.Fatal("test setup: transcript should start over budget")
+	}
+	if len(turnStarts(a.Transcript())) > a.keepTurns() {
+		t.Fatal("test setup: transcript should have <= keepTurns turns")
+	}
+
+	above := window * 80 / 100
+	sink := &recordSink{}
+	usage, changed, err := a.MaybeCompact(context.Background(), above, sink)
+	if err != nil {
+		t.Fatalf("MaybeCompact: %v", err)
+	}
+	if !changed {
+		t.Fatal("an oversized single-turn transcript should be shrunk (changed=true), not a silent no-op")
+	}
+	if usage != (llm.Usage{}) {
+		t.Errorf("degrade-only path makes no summary call, usage = %+v, want zero", usage)
+	}
+	if len(fp.Requests) != 0 {
+		t.Errorf("degrade-only path must not call the model, got %d requests", len(fp.Requests))
+	}
+	if est := estimateTokens(a.Transcript()); est > a.compactBudget() {
+		t.Errorf("shrunk transcript still over budget: est %d > budget %d", est, a.compactBudget())
+	}
+	mustValid(t, a.Transcript())
+	var noticed bool
+	for _, n := range sink.notices {
+		if strings.Contains(n, "compacted") {
+			noticed = true
+		}
+	}
+	if !noticed {
+		t.Errorf("degrade-only compaction should emit a visible notice, got %v", sink.notices)
+	}
+}
+
+// A transcript with <= keepTurns turns that already fits the budget is a genuine
+// no-op: compact must report changed=false so the mid-loop caller does not churn
+// its trigger state (reset lastInput/appendBoundary and re-estimate the whole
+// transcript) every model turn.
+func TestCompactNoOpReportsUnchanged(t *testing.T) {
+	a := newAgent(llmtest.New("fake"), tools.Default(), Options{Model: "claude-opus-4-8"})
+	a.SetSystem("sys")
+	a.SetTranscript(makeTurns(2)) // 2 turns <= keepTurns(4), tiny, well under budget
+
+	before := len(a.Transcript())
+	sink := &recordSink{}
+	usage, changed, err := a.compact(context.Background(), sink, "auto")
+	if err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if changed {
+		t.Error("a no-op compaction must report changed=false")
+	}
+	if usage != (llm.Usage{}) {
+		t.Errorf("no-op compaction usage = %+v, want zero", usage)
+	}
+	if len(a.Transcript()) != before {
+		t.Errorf("no-op compaction must not rewrite the transcript: %d != %d", len(a.Transcript()), before)
+	}
+	if len(sink.notices) != 0 {
+		t.Errorf("no-op compaction should emit no notice, got %v", sink.notices)
+	}
+}
+
+// degrade/trim mutate on a deep copy, so when ValidateTranscript fails after the
+// shrink, the live transcript is left fully intact — the documented rollback
+// guarantee. The transcript is oversized but already INVALID (a trailing
+// assistant tool_use with no result); the post-shrink validation must fail and
+// the live transcript's huge tool input must be untouched.
+func TestCompactValidationFailureLeavesTranscriptIntact(t *testing.T) {
+	const window = 1000
+	hugeInput := `{"path":"` + strings.Repeat("x", 200_000) + `"}`
+	transcript := []llm.Message{
+		userText("go"),
+		asstToolUse("c1", "read_file", hugeInput), // no tool_result follows -> invalid
+	}
+	if err := llm.ValidateTranscript(transcript); err == nil {
+		t.Fatal("test setup: transcript should be invalid (dangling tool_use)")
+	}
+	a := newAgent(llmtest.New("fake"), tools.Default(), Options{Model: "local", ContextWindow: window})
+	a.SetSystem("sys")
+	a.SetTranscript(transcript)
+	if estimateTokens(a.Transcript()) <= a.compactBudget() {
+		t.Fatal("test setup: transcript should start over budget")
+	}
+
+	origInputLen := len(a.Transcript()[1].Content[0].ToolInput)
+	above := window * 80 / 100
+	_, changed, err := a.MaybeCompact(context.Background(), above, &recordSink{})
+	if err == nil {
+		t.Fatal("compact should surface the post-shrink validation failure")
+	}
+	if changed {
+		t.Error("a failed shrink must report changed=false")
+	}
+	if got := len(a.Transcript()[1].Content[0].ToolInput); got != origInputLen {
+		t.Errorf("live transcript tool input mutated despite validation failure: len %d, want %d", got, origInputLen)
 	}
 }
 

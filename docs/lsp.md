@@ -57,6 +57,16 @@ configured server, or whose server binary is not installed, returns a normal too
 error. Each tool's description advertises which configured languages are actually
 installed, probed via `PATH` at startup.
 
+To register only a subset of the seven tools, set the config-file-only `lsp.tools`
+allowlist (bare names, with or without the `lsp_` prefix):
+
+```json
+{ "lsp": { "enable": true, "tools": ["definition", "references", "diagnostics"] } }
+```
+
+An empty or unset `lsp.tools` registers the full set. Unknown entries are warned
+about and ignored.
+
 ## Hosting Behind A Proxy
 
 To aggregate the shim with other local MCP services, set `mcp.local.enable=true`

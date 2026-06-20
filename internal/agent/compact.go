@@ -8,6 +8,7 @@ import (
 
 	"harness/internal/hooks"
 	"harness/internal/llm"
+	"harness/internal/retry"
 	"harness/prompts"
 )
 
@@ -61,10 +62,12 @@ const summaryHeader = "=== Summary of earlier conversation ===\n"
 // the final step of the just-finished turn reported) is at least
 // compactThresholdPct of the model's context window; otherwise it is a no-op
 // (design §12, §8.1). It returns the summary call's usage (zero when no
-// compaction ran) so the caller can fold it into the session totals.
-func (a *Agent) MaybeCompact(ctx context.Context, lastInputTokens int, sink EventSink) (llm.Usage, error) {
+// compaction ran), a changed flag reporting whether the transcript was actually
+// rewritten, and any error. The caller folds the usage into session totals and
+// uses changed to decide whether to reset its trigger state (r-churn).
+func (a *Agent) MaybeCompact(ctx context.Context, lastInputTokens int, sink EventSink) (llm.Usage, bool, error) {
 	if !a.overThreshold(lastInputTokens) {
-		return llm.Usage{}, nil
+		return llm.Usage{}, false, nil
 	}
 	return a.compact(ctx, sink, "auto")
 }
@@ -78,10 +81,16 @@ func (a *Agent) MaybeCompact(ctx context.Context, lastInputTokens int, sink Even
 // loss. The result always satisfies the §4 invariant: kept turns are whole, so
 // no tool_use/tool_result pair is ever split.
 func (a *Agent) Compact(ctx context.Context, sink EventSink) (llm.Usage, error) {
-	return a.compact(ctx, sink, "manual")
+	u, _, err := a.compact(ctx, sink, "manual")
+	return u, err
 }
 
-func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (llm.Usage, error) {
+// compact returns the summary-call usage, a changed flag (true only when the
+// live transcript was actually rewritten), and any error. A no-op (nothing old
+// enough to summarize and the transcript already within budget, or a PreCompact
+// block) returns changed=false so the mid-loop caller does not churn its trigger
+// state every model turn.
+func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (llm.Usage, bool, error) {
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PreCompact) {
 		res := a.hooks.Run(ctx, hooks.PreCompact, trigger, hooks.Payload{"trigger": trigger})
 		for _, notice := range res.Notices {
@@ -93,15 +102,23 @@ func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (ll
 				reason = "blocked by PreCompact hook"
 			}
 			sink.Notice("[compact skipped: " + reason + "]")
-			return llm.Usage{}, nil
+			return llm.Usage{}, false, nil
 		}
 	}
 
 	starts := turnStarts(a.transcript)
 	keepTurns := a.keepTurns()
 	if len(starts) <= keepTurns {
-		// Nothing older than the kept turns to summarize.
-		return llm.Usage{}, nil
+		// Nothing older than the kept turns to summarize. If the transcript still
+		// fits, this is a genuine no-op. If a single ballooning turn has pushed it
+		// over budget, the summarize path can't help (there is nothing older to
+		// fold), so shrink the current transcript in place rather than ship an
+		// oversized request to the provider (never wedge, design §12).
+		if estimateTokens(a.transcript) <= a.compactBudget() {
+			return llm.Usage{}, false, nil
+		}
+		changed, err := a.degradeCurrent(sink)
+		return llm.Usage{}, changed, err
 	}
 
 	boundary := starts[len(starts)-keepTurns]
@@ -111,7 +128,7 @@ func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (ll
 	summary, usage, err := a.summarize(ctx, prompts.CompactionSummary(), older)
 	if err != nil {
 		sink.Notice(fmt.Sprintf("[compact failed: %v; keeping full transcript]", err))
-		return llm.Usage{}, err
+		return llm.Usage{}, false, err
 	}
 	if a.archiveCompaction != nil {
 		ref, err := a.archiveCompaction(ctx, CompactionArchive{
@@ -121,7 +138,7 @@ func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (ll
 		})
 		if err != nil {
 			sink.Notice(fmt.Sprintf("[compact archive failed: %v; keeping full transcript]", err))
-			return llm.Usage{}, err
+			return llm.Usage{}, false, err
 		}
 		if ref != "" {
 			summary += "\n\nRaw compacted transcript archive: " + ref
@@ -129,19 +146,30 @@ func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (ll
 	}
 
 	collapsed := len(older)
+	before := estimateTokens(a.transcript)
 	compacted := make([]llm.Message, 0, 1+len(kept))
 	compacted = append(compacted, a.summaryMessage(summary))
-	compacted = append(compacted, kept...)
+	// Deep-copy the kept turns before the in-place degrade/trim below: they alias
+	// the live transcript's Content, and a post-degrade ValidateTranscript failure
+	// must leave the live transcript fully intact (the rollback guarantee).
+	compacted = append(compacted, cloneMessages(kept)...)
 
 	// Degradation ladder: shrink further while the estimate still overflows
 	// (design §12). Never wedge.
 	compacted = a.degrade(compacted, starts)
+	// r54: when collapsing the older turns reclaimed little — the kept turns
+	// dominate — trim their large read-only tool results in place rather than pay
+	// for another summarization pass.
+	if reclaimedTooLittle(before, compacted) {
+		a.trimToolResults(compacted, sink)
+	}
 	if err := llm.ValidateTranscript(compacted); err != nil {
 		sink.Notice(fmt.Sprintf("[compact failed: compacted transcript invalid: %v; keeping full transcript]", err))
-		return llm.Usage{}, err
+		return llm.Usage{}, false, err
 	}
 
 	a.transcript = compacted
+	a.validatedPrefix = 0 // the transcript was rewritten; re-validate from scratch (r62)
 	a.resetResponseState()
 	sink.Notice(compactionReport(a.registry, a.model, collapsed, usage))
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PostCompact) {
@@ -162,7 +190,53 @@ func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (ll
 			sink.Notice("[post-compact hook blocked after compaction: " + reason + "]")
 		}
 	}
-	return usage, nil
+	return usage, true, nil
+}
+
+// degradeCurrent shrinks the live transcript in place when it is over budget but
+// has nothing older than the kept turns to summarize — a single ballooning turn.
+// It trims large read-only results, then hard-truncates the largest blocks until
+// the estimate fits, so an oversized request never reaches the provider (never
+// wedge, design §12). All mutation happens on a deep copy, so a post-shrink
+// ValidateTranscript failure leaves the live transcript fully intact (the
+// rollback guarantee). It returns whether the transcript was actually replaced.
+func (a *Agent) degradeCurrent(sink EventSink) (bool, error) {
+	before := estimateTokens(a.transcript)
+	budget := a.compactBudget()
+	compacted := cloneMessages(a.transcript)
+	a.trimToolResults(compacted, sink)
+	truncateUntilFits(compacted, budget)
+	after := estimateTokens(compacted)
+	if after >= before {
+		// Nothing left to shrink; ship the oversized request rather than churn an
+		// identical rewrite. Surface it so the wedge risk is visible, not silent.
+		sink.Notice("[compact: transcript over budget but nothing left to shrink]")
+		return false, nil
+	}
+	if err := llm.ValidateTranscript(compacted); err != nil {
+		sink.Notice(fmt.Sprintf("[compact failed: shrunk transcript invalid: %v; keeping full transcript]", err))
+		return false, err
+	}
+	a.transcript = compacted
+	a.validatedPrefix = 0 // the transcript was rewritten; re-validate from scratch (r62)
+	a.resetResponseState()
+	sink.Notice(fmt.Sprintf("[compacted: shrank oversized turn in place · ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
+	return true, nil
+}
+
+// cloneMessages returns a copy of msgs in which each message's Content slice is a
+// fresh, independent slice. The in-place degrade/trim helpers only ever replace
+// whole ContentBlock fields (never mutate a backing array), so a shallow copy of
+// each Content slice is enough to keep mutations off the live transcript — the
+// same approach prepareSummaryMessages uses for the summary input.
+func cloneMessages(msgs []llm.Message) []llm.Message {
+	out := make([]llm.Message, len(msgs))
+	for i, m := range msgs {
+		out[i] = m
+		out[i].Content = make([]llm.ContentBlock, len(m.Content))
+		copy(out[i].Content, m.Content)
+	}
+	return out
 }
 
 // GenerateSummary runs one tool-less summarization pass over the full current
@@ -200,18 +274,56 @@ func (a *Agent) summarize(ctx context.Context, system string, older []llm.Messag
 }
 
 func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Message) (string, llm.Usage, error) {
+	budget := a.summaryMaxTokens()
+	var total llm.Usage
+	for bumped := false; ; {
+		text, usage, stop, err := a.streamSummary(ctx, system, older, budget)
+		total = add(total, usage)
+		if err != nil {
+			return "", total, err
+		}
+		// r33: a max-tokens-truncated summary silently loses its tail; grant a
+		// larger budget and retry once before accepting the truncated result.
+		if stop == llm.StopMaxTokens && !bumped {
+			bumped = true
+			budget *= 2
+			continue
+		}
+		return text, total, nil
+	}
+}
+
+// streamSummary runs one tool-less summarization request, re-requesting from
+// scratch on a retryable mid-stream failure (r32) so a transient error does not
+// abort compaction near the threshold. Reasoning is disabled: a summary needs no
+// thinking budget (r13, mirrors PrewarmRequest). It returns the assembled text,
+// usage, and the stop reason.
+func (a *Agent) streamSummary(ctx context.Context, system string, older []llm.Message, maxTokens int) (string, llm.Usage, llm.StopReason, error) {
 	req := llm.Request{
 		Model:     a.model,
 		System:    system,
 		Messages:  older,
-		MaxTokens: a.summaryMaxTokens(),
-		Reasoning: a.reasoning,
+		MaxTokens: maxTokens,
+		Reasoning: llm.ReasoningConfig{},
 	}
+	for attempt := 0; ; attempt++ {
+		text, usage, stop, err := a.collectSummary(ctx, req)
+		if err == nil || attempt >= streamRetries || !retryableStreamError(err) {
+			return text, usage, stop, err
+		}
+		if serr := a.sleep(ctx, retry.Next(attempt, streamRetryAfter(err))); serr != nil {
+			return "", llm.Usage{}, stop, serr
+		}
+	}
+}
+
+func (a *Agent) collectSummary(ctx context.Context, req llm.Request) (string, llm.Usage, llm.StopReason, error) {
 	var text []byte
 	var usage llm.Usage
+	var stop llm.StopReason
 	for ev, err := range a.provider.Stream(ctx, req) {
 		if err != nil {
-			return "", llm.Usage{}, err
+			return "", llm.Usage{}, stop, err
 		}
 		switch ev.Kind {
 		case llm.EventTextDelta:
@@ -224,9 +336,10 @@ func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Mes
 			if ev.Usage != nil {
 				usage = mergeUsage(usage, *ev.Usage)
 			}
+			stop = ev.StopReason
 		}
 	}
-	return string(text), usage, nil
+	return string(text), usage, stop, nil
 }
 
 func (a *Agent) keepTurns() int {
@@ -362,24 +475,33 @@ func (a *Agent) degrade(compacted []llm.Message, starts []int) []llm.Message {
 		return compacted
 	}
 
-	// Rung 2: keep only the last turn.
+	// Rung 2: keep only the last turn. Deep-copy it: it aliases the live
+	// transcript and rung 3 truncates it in place, which must not corrupt the live
+	// transcript if validation later fails (the rollback guarantee).
 	lastStart := starts[len(starts)-1]
-	lastTurn := a.transcript[lastStart:]
+	lastTurn := cloneMessages(a.transcript[lastStart:])
 	compacted = append([]llm.Message{compacted[0]}, lastTurn...)
 	if estimateTokens(compacted) <= budget {
 		return compacted
 	}
 
 	// Rung 3: hard-truncate the largest tool results in place until it fits.
-	// Each pass removes the current overage from the single largest result; a
-	// pass that cannot shrink anything further stops the loop so we never wedge.
-	for estimateTokens(compacted) > budget {
-		excessBytes := (estimateTokens(compacted) - budget) * bytesPerToken
-		if !truncateLargestBlock(compacted, excessBytes) {
+	truncateUntilFits(compacted, budget)
+	return compacted
+}
+
+// truncateUntilFits hard-truncates the single largest shrinkable block in msgs
+// repeatedly until the estimate fits budget or nothing can shrink further. Each
+// pass removes the current overage from the largest block; a pass that cannot
+// shrink anything stops the loop so we never wedge (design §12). It mutates msgs
+// in place.
+func truncateUntilFits(msgs []llm.Message, budget int) {
+	for estimateTokens(msgs) > budget {
+		excessBytes := (estimateTokens(msgs) - budget) * bytesPerToken
+		if !truncateLargestBlock(msgs, excessBytes) {
 			break
 		}
 	}
-	return compacted
 }
 
 // turnStarts returns the indices in msgs where a turn begins: every user message
@@ -430,7 +552,9 @@ func truncateLargestBlock(msgs []llm.Message, dropBytes int) bool {
 			case llm.BlockToolUse:
 				size = len(b.ToolInput)
 			case llm.BlockImage:
-				size = len(b.ImageData)
+				// Rank images by their token weight, not base64 byte length, so a
+				// large text result is truncated before an image is dropped (r22).
+				size = imageTokenEstimate * bytesPerToken
 			}
 			if size > bestLen {
 				bi, bj, bestLen, kind = i, j, size, b.Kind
@@ -479,17 +603,30 @@ func truncateLargestBlock(msgs []llm.Message, dropBytes int) bool {
 	return true
 }
 
-// estimateTokens approximates the token footprint of a message list by its byte
-// size. Coarse by design: it only gates the degradation ladder (design §12).
+// imageTokenEstimate is the flat per-image token weight used by the context
+// estimate and the degradation ladder. A base64 image is hundreds of KB of data
+// yet costs the model a roughly fixed ~1.6k tokens, so counting its raw bytes at
+// bytesPerToken wildly overstates it and would make every transcript with one
+// image look near-overflow (design §12, r22).
+const imageTokenEstimate = 1600
+
+// estimateTokens approximates the token footprint of a message list. Text is
+// counted by byte size; images are counted at a flat per-image weight rather
+// than their base64 byte length. Coarse by design: it only gates the
+// degradation ladder and retention reclaim check (design §12).
 func estimateTokens(msgs []llm.Message) int {
-	bytes := 0
+	bytes, images := 0, 0
 	for _, m := range msgs {
 		for _, b := range m.Content {
+			if b.Kind == llm.BlockImage {
+				images++
+				bytes += len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName)
+				continue
+			}
 			bytes += len(b.Text) + len(b.ResultText) + len(b.ToolInput) + len(b.ToolName)
-			bytes += len(b.ImageData) + len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName)
 		}
 	}
-	return bytes / bytesPerToken
+	return bytes/bytesPerToken + images*imageTokenEstimate
 }
 
 func estimateRequest(req llm.Request, window int) ContextEstimate {
@@ -499,19 +636,24 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 		toolBytes += len(t.Name) + len(t.Description) + len(t.Parameters)
 	}
 	messageBytes := 0
+	images := 0
 	for _, m := range req.Messages {
 		messageBytes += len(m.Role)
 		for _, b := range m.Content {
+			if b.Kind == llm.BlockImage {
+				images++
+				messageBytes += len(b.Kind) + len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName)
+				continue
+			}
 			messageBytes += len(b.Kind) + len(b.Text) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolInput) +
-				len(b.ResultForID) + len(b.ResultText) + len(b.ImageMediaType) + len(b.ImageData) +
-				len(b.ImageDetail) + len(b.ImageName)
+				len(b.ResultForID) + len(b.ResultText)
 		}
 	}
 	messageBytes += len(llm.RequestContextText(req.RequestContext))
 	est := ContextEstimate{
 		System:   systemBytes / bytesPerToken,
 		Tools:    toolBytes / bytesPerToken,
-		Messages: messageBytes / bytesPerToken,
+		Messages: messageBytes/bytesPerToken + images*imageTokenEstimate,
 		Window:   window,
 	}
 	est.Total = est.System + est.Tools + est.Messages

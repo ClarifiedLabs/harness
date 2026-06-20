@@ -7,8 +7,13 @@ import (
 	"harness/internal/llm"
 )
 
-// defaultMaxTokens caps the unset-MaxTokens policy: min(8192, contextWindow/4).
-const defaultMaxTokensCap = 8192
+// defaultMaxTokensCap caps the unset-MaxTokens policy only for models whose real
+// output limit is unknown: min(32768, contextWindow/4). When the models.dev
+// catalog reports an output limit it is used verbatim instead (see maxTokens),
+// so a model supporting 64k+ output is no longer silently truncated. Runaway is
+// bounded at the turn level by -max-turn-tokens and -max-prompt-cost, so this
+// fixed cap is just the conservative fallback for catalog-unknown models.
+const defaultMaxTokensCap = 32768
 
 // cacheControl is the ephemeral prompt-cache breakpoint marker. TTL is omitted
 // for the default 5-minute window and set to "1h" on the stable anchors.
@@ -169,23 +174,33 @@ type wireEvent struct {
 }
 
 // buildRequest maps a provider-neutral llm.Request onto the Anthropic Messages
-// wire body. contextWindow drives the default max_tokens policy when MaxTokens
-// is unset. cache_control breakpoints are placed on the last tool-schema entry
-// (when tools are present), the system block, and the last content block of the
-// final message, refreshed every call (design §5.4, §7).
-func buildRequest(req llm.Request, contextWindow int) wireRequest {
+// wire body. contextWindow and outputLimit drive the default max_tokens policy
+// when MaxTokens is unset. cache_control breakpoints are placed on the last
+// tool-schema entry (when tools are present), the system block, and the last
+// content block of the final message, refreshed every call (design §5.4, §7).
+func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 	w := wireRequest{
 		Model:       req.Model,
-		MaxTokens:   maxTokens(req.MaxTokens, contextWindow),
+		MaxTokens:   maxTokens(req.MaxTokens, contextWindow, outputLimit),
 		Stream:      true,
 		Temperature: req.Temperature,
+	}
+
+	// The stable prefix (system + last tool schema) takes the 1h breakpoint only
+	// for interactive sessions, whose multi-minute pauses would otherwise lapse the
+	// default 5m window and force a cold re-write. One-shot/delegate/non-interactive
+	// runs finish well inside 5 minutes, so the longer retention is never used —
+	// taking it would just pay 2x the write price for nothing.
+	anchor := ephemeral
+	if req.LongCacheTTL {
+		anchor = ephemeral1h
 	}
 
 	if req.System != "" {
 		w.System = []wireTextBlock{{
 			Type:         "text",
 			Text:         req.System,
-			CacheControl: ephemeral1h,
+			CacheControl: anchor,
 		}}
 	}
 
@@ -209,7 +224,7 @@ func buildRequest(req llm.Request, contextWindow int) wireRequest {
 	// prefix; caching it separately survives system-prompt changes such as a
 	// agent switch (spec §7).
 	if n := len(w.Tools); n > 0 {
-		w.Tools[n-1].CacheControl = ephemeral1h
+		w.Tools[n-1].CacheControl = anchor
 	}
 
 	// Replay prior thinking blocks only when thinking is enabled for this
@@ -360,11 +375,15 @@ func summaryToDisplay(summary string) string {
 	}
 }
 
-// maxTokens applies the design §5.4 policy: the user value when set, else
-// min(8192, contextWindow/4).
-func maxTokens(userValue, contextWindow int) int {
+// maxTokens applies the design §5.4 policy. Precedence: an explicit user value
+// wins; else the model's real catalog output limit when known (outputLimit > 0);
+// else the fixed fallback min(32768, contextWindow/4) for catalog-unknown models.
+func maxTokens(userValue, contextWindow, outputLimit int) int {
 	if userValue > 0 {
 		return userValue
+	}
+	if outputLimit > 0 {
+		return outputLimit
 	}
 	quarter := contextWindow / 4
 	if quarter < defaultMaxTokensCap {

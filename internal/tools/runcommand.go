@@ -8,7 +8,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -129,6 +131,21 @@ func (t runCommand) Run(ctx context.Context, input json.RawMessage) (string, err
 	return runCommandArgsCommand(ctx, args)
 }
 
+// SelfTimeout reports run_command's own per-call deadline so its documented
+// "no maximum" timeout_seconds is honored even under a shorter dispatch ceiling.
+// Background jobs run outside Dispatch (it returns once the job is queued), so
+// they report no deadline. See tools.SelfTimeouter.
+func (runCommand) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
+	var args runCommandArgs
+	if err := json.Unmarshal(input, &args); err != nil {
+		return 0, false
+	}
+	if args.Background || args.TimeoutSeconds < 0 {
+		return 0, false
+	}
+	return time.Duration(resolveProcessTimeoutSeconds(args.TimeoutSeconds)) * processTimeoutUnit, true
+}
+
 func validateRunCommandArgs(args runCommandArgs) error {
 	hasCommand := strings.TrimSpace(args.Command) != ""
 	hasArgv := len(args.Argv) > 0
@@ -167,6 +184,7 @@ func runCommandArgsCommand(ctx context.Context, args runCommandArgs) (string, er
 func runShellCommand(ctx context.Context, args runCommandArgs) (string, error) {
 	cmd := shellCommand(args.Command)
 	cmd.Dir = args.Cwd
+	cmd.Env = shellEnv()
 	if args.Stdin != "" {
 		cmd.Stdin = strings.NewReader(args.Stdin)
 	}
@@ -358,12 +376,120 @@ func resolveProcessTimeoutSeconds(timeoutSeconds int) int {
 // The shell program name is a static literal in each branch; only the command
 // line itself is user-supplied, which is intrinsic to this tool — hence the
 // nosemgrep annotations.
+//
+// A non-login shell (-c, not -lc) is used: sourcing the full login-profile
+// chain on every call added ~50-300ms (nvm/rbenv/conda) and could emit banner
+// noise into the result. PATH enrichment that the login shell would have done is
+// recovered once via shellEnv (see loginShellPATH).
 func shellCommand(line string) *exec.Cmd {
 	if _, err := exec.LookPath("bash"); err == nil {
-		// -l makes the login shell pick up the user's PATH/toolchain.
-		return exec.Command("bash", "-lc", line) // nosemgrep: dangerous-exec-command
+		return exec.Command("bash", "-c", line) // nosemgrep: dangerous-exec-command
 	}
 	return exec.Command("sh", "-c", line) // nosemgrep: dangerous-exec-command
+}
+
+// shellEnv returns the process environment with PATH enriched by the
+// once-resolved login-shell PATH, so dropping -lc above does not lose toolchain
+// directories a login shell would have added (nvm/rbenv/etc.). The current PATH
+// keeps precedence; login-only directories are appended.
+func shellEnv() []string {
+	login := loginShellPATH()
+	env := os.Environ()
+	if login == "" {
+		return env
+	}
+	current := ""
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			current = v
+			break
+		}
+	}
+	return setEnvPATH(env, mergePATH(current, login))
+}
+
+// setEnvPATH returns env with its PATH entry replaced by path (appended if
+// absent), without mutating the input slice.
+func setEnvPATH(env []string, path string) []string {
+	out := make([]string, len(env))
+	copy(out, env)
+	for i, kv := range out {
+		if strings.HasPrefix(kv, "PATH=") {
+			out[i] = "PATH=" + path
+			return out
+		}
+	}
+	return append(out, "PATH="+path)
+}
+
+// mergePATH appends login PATH entries not already present in current,
+// preserving current's order and precedence.
+func mergePATH(current, login string) string {
+	switch {
+	case login == "":
+		return current
+	case current == "":
+		return login
+	}
+	seen := make(map[string]bool)
+	var parts []string
+	add := func(list string) {
+		for _, p := range filepath.SplitList(list) {
+			if p == "" || seen[p] {
+				continue
+			}
+			seen[p] = true
+			parts = append(parts, p)
+		}
+	}
+	add(current)
+	add(login)
+	return strings.Join(parts, string(filepath.ListSeparator))
+}
+
+// loginPATHSentinel brackets the printed PATH so login-profile stdout noise
+// before it is discarded when parsing.
+const loginPATHSentinel = "__harness_login_path__:"
+
+// loginPATHResolver is a package var so tests can substitute a deterministic
+// value instead of spawning a real login shell.
+var loginPATHResolver = resolveLoginShellPATH
+
+var (
+	loginPATHOnce   sync.Once
+	loginPATHCached string
+)
+
+// loginShellPATH returns the PATH a login shell exports, resolved at most once
+// per process. This recovers the toolchain PATH the dropped -lc would have set
+// without paying the login-shell cost on every run_command call.
+func loginShellPATH() string {
+	loginPATHOnce.Do(func() { loginPATHCached = loginPATHResolver() })
+	return loginPATHCached
+}
+
+// resolveLoginShellPATH spawns one login shell to print its PATH. On any error
+// it returns "" so shellEnv falls back to the inherited environment unchanged.
+func resolveLoginShellPATH() string {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		return ""
+	}
+	cmd := exec.Command(bash, "-lc", "printf '%s%s' '"+loginPATHSentinel+"' \"$PATH\"") // nosemgrep: dangerous-exec-command
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return parseLoginPATHOutput(string(out))
+}
+
+// parseLoginPATHOutput extracts the PATH that follows the sentinel, tolerating
+// any banner text a login profile printed before it.
+func parseLoginPATHOutput(out string) string {
+	if i := strings.LastIndex(out, loginPATHSentinel); i >= 0 {
+		return strings.TrimSpace(out[i+len(loginPATHSentinel):])
+	}
+	return ""
 }
 
 // killGroup sends SIGKILL to the entire process group led by pid. Setpgid made

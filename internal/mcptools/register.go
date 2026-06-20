@@ -105,3 +105,10 @@ func serverLabel(name string) string {
 	label, _, _ := strings.Cut(rest, "__")
 	return label
 }
+
+// ServerLabel is the exported form of serverLabel: it extracts the best-effort
+// display-only server label from a validated mcp__<server>__<tool> name. It is
+// used for display and for config-level per-server filtering, never for routing.
+func ServerLabel(name string) string {
+	return serverLabel(name)
+}

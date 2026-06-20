@@ -32,13 +32,21 @@ type setupMainConfig struct {
 }
 
 type setupProviderConfig struct {
-	Name      string             `json:"name"`
-	APIType   string             `json:"api_type"`
-	BaseURL   string             `json:"base_url"`
-	APIKey    string             `json:"api_key,omitempty"`
-	APIKeyEnv []string           `json:"api_key_env,omitempty"`
-	Auth      *auth.Config       `json:"auth,omitempty"`
-	Models    []setupModelConfig `json:"models"`
+	Name    string `json:"name"`
+	APIType string `json:"api_type"`
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key,omitempty"`
+	// Managed is always true for configs written by setup/refresh: their prices
+	// are resolved live from the models.dev cache, so the per-model entries below
+	// carry no price.
+	Managed bool `json:"managed,omitempty"`
+	// PriceSource names the models.dev provider id whose prices apply to this
+	// managed provider when it differs from Name (e.g. openai-codex prices from
+	// "openai"). Empty means price from Name.
+	PriceSource string             `json:"price_source,omitempty"`
+	APIKeyEnv   []string           `json:"api_key_env,omitempty"`
+	Auth        *auth.Config       `json:"auth,omitempty"`
+	Models      []setupModelConfig `json:"models"`
 }
 
 type setupModelConfig struct {
@@ -53,6 +61,9 @@ const (
 	openAICodexProviderID      = "openai-codex"
 	openAICodexProviderName    = "OpenAI Codex (ChatGPT subscription)"
 	openAICodexProviderBaseURL = "https://chatgpt.com/backend-api/codex"
+	// openAIModelsDevProviderID is the models.dev provider id whose prices apply
+	// to openai-codex (its models are OpenAI models; see openAICodexProvider).
+	openAIModelsDevProviderID = "openai"
 )
 
 func runSetup(ctx context.Context, env environment, force bool) error {
@@ -347,8 +358,12 @@ func setupProviderFromModelsDev(provider modelsdev.Provider, apiKey string, auth
 			Name:    openAICodexProviderID,
 			APIType: setupProviderAPIType(provider),
 			BaseURL: setupProviderBaseURL(provider),
-			Auth:    setupProviderAuth(provider, authCfg),
-			Models:  entries,
+			Managed: true,
+			// Codex re-exposes OpenAI models (see openAICodexProvider), billed at
+			// OpenAI per-token rates, so resolve managed prices from "openai".
+			PriceSource: openAIModelsDevProviderID,
+			Auth:        setupProviderAuth(provider, authCfg),
+			Models:      entries,
 		}
 	}
 	cfg := provider.ProviderConfig(apiKey)
@@ -357,6 +372,7 @@ func setupProviderFromModelsDev(provider modelsdev.Provider, apiKey string, auth
 		APIType:   cfg.APIType,
 		BaseURL:   cfg.BaseURL,
 		APIKey:    cfg.APIKey,
+		Managed:   true,
 		APIKeyEnv: cfg.APIKeyEnv,
 		Auth:      authCfg,
 		Models:    entries,
@@ -818,6 +834,11 @@ func setupCatalog(ctx context.Context, env environment) (*modelsdev.Catalog, err
 	return cachedOrFetchedSetupCatalog(ctx, env, defaultConfigDir(env.getenv), ttl)
 }
 
+// setupModelFromModelsDev builds the on-disk entry for one selected model.
+// Managed configs never store a price: the proxy resolves prices live from the
+// models.dev cache, so leaving Price nil here keeps refreshed prices reaching
+// the running server without another --setup. The price is still shown in the
+// interactive picker (formatPickerPrice), it just isn't persisted.
 func setupModelFromModelsDev(model modelsdev.Model) setupModelConfig {
 	cfg := setupModelConfig{
 		Name:             model.ID,
@@ -826,15 +847,7 @@ func setupModelFromModelsDev(model modelsdev.Model) setupModelConfig {
 	}
 	reasoning := model.Reasoning
 	cfg.Reasoning = &reasoning
-	if setupPriceKnown(model.Cost) {
-		price := model.Cost
-		cfg.Price = &price
-	}
 	return cfg
-}
-
-func setupPriceKnown(p llm.Price) bool {
-	return p.Input != 0 || p.Output != 0 || p.CacheRead != 0 || p.CacheWrite != 0
 }
 
 func formatPickerPrice(p llm.Price) string {

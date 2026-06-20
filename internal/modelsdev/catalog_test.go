@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"harness/internal/llm"
 )
 
 const testCatalog = `{
@@ -22,7 +24,7 @@ const testCatalog = `{
         "release_date": "2026-06-01",
         "reasoning": true,
         "reasoning_options": [{"type":"effort","values":["low","medium","high"]}],
-        "limit": {"context": 1050000},
+        "limit": {"context": 1050000, "output": 64000},
         "cost": {"input": 5, "output": 30, "cache_read": 0.5}
       }
     }
@@ -82,11 +84,24 @@ func TestDecodeProviderBaseURLAndModelPricing(t *testing.T) {
 	if !ok {
 		t.Fatal("model not found")
 	}
-	if info.ContextWindow != 1_050_000 || info.Price.Input != 5 || info.Price.Output != 30 || info.Price.CacheRead != 0.5 {
+	if info.ContextWindow != 1_050_000 || info.OutputLimit != 64_000 || info.Price.Input != 5 || info.Price.Output != 30 || info.Price.CacheRead != 0.5 {
 		t.Fatalf("model info = %+v", info)
 	}
 	if info.Reasoning == nil || !info.Reasoning.SupportsEffort("high") {
 		t.Fatalf("reasoning info = %+v, want high effort support", info.Reasoning)
+	}
+
+	// The output limit must also reach the synthesized provider config's ModelEntry,
+	// which is the field the proxy resolves at dispatch.
+	pc := p.ProviderConfig("sk-test")
+	var entry llm.ModelEntry
+	for _, e := range pc.Models {
+		if e.Name == "openai/gpt-5.5" {
+			entry = e
+		}
+	}
+	if entry.ContextWindow != 1_050_000 || entry.OutputLimit != 64_000 {
+		t.Fatalf("provider config entry = %+v, want context 1050000 / output 64000", entry)
 	}
 }
 

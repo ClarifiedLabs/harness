@@ -106,6 +106,12 @@ type RunRequest struct {
 	MaxTurns   *int
 	ChildID    string
 	Background bool
+
+	// Tools optionally scopes the child to a subset of the resolved agent's
+	// tools. Empty means the full set (back-compatible). Each name is validated
+	// against the resolved launch tools; an unknown name is a hard error so a
+	// typo fails fast rather than silently shrinking the child's surface.
+	Tools []string
 }
 
 // RunResult is the complete outcome of one child-agent run.
@@ -151,11 +157,15 @@ func (r *Runner) Rebind(snapshot func() Runtime) *Runner {
 
 func (r *Runner) Schema() json.RawMessage {
 	var agents []string
-	if r != nil && r.snapshot != nil && r.opts.AgentCandidates != nil {
+	var toolNames []string
+	if r != nil && r.snapshot != nil {
 		runtime := r.snapshot()
-		agents = DelegatableAgentNames(runtime.ToolNames, r.opts.AgentCandidates(runtime))
+		toolNames = runtime.ToolNames
+		if r.opts.AgentCandidates != nil {
+			agents = DelegatableAgentNames(runtime.ToolNames, r.opts.AgentCandidates(runtime))
+		}
 	}
-	return schema(agents)
+	return schema(agents, toolNames)
 }
 
 // Tool is a model-callable configured-agent launcher.
@@ -184,7 +194,7 @@ func (*Tool) Description() string {
 
 func (t *Tool) Schema() json.RawMessage {
 	if t == nil || t.runner == nil {
-		return schema(nil)
+		return schema(nil, nil)
 	}
 	return t.runner.Schema()
 }
@@ -245,10 +255,11 @@ func (t *Tool) RebindRuntime(snapshot func() Runtime) tools.Tool {
 
 func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 	var args struct {
-		Task       string `json:"task"`
-		Agent      string `json:"agent"`
-		MaxTurns   *int   `json:"max_turns"`
-		Background bool   `json:"background"`
+		Task       string   `json:"task"`
+		Agent      string   `json:"agent"`
+		MaxTurns   *int     `json:"max_turns"`
+		Background bool     `json:"background"`
+		Tools      []string `json:"tools"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return RunRequest{}, err
@@ -266,7 +277,31 @@ func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 		Agent:      strings.TrimSpace(args.Agent),
 		MaxTurns:   args.MaxTurns,
 		Background: args.Background,
+		Tools:      cleanToolNames(args.Tools),
 	}, nil
+}
+
+// cleanToolNames trims and drops blank entries, preserving order and dropping
+// duplicates. It returns nil when nothing remains so an empty/whitespace-only
+// list resolves to the full tool set.
+func cleanToolNames(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, name := range in {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -302,6 +337,18 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, fmt.Errorf("delegate tool registry is not initialized")
 	}
 
+	// Resolve the child's tool surface: the full set by default, or the validated
+	// requested subset. Validating before any session metadata is written fails a
+	// typo'd name fast without leaving a stranded "running" child record.
+	toolNames := launch.Tools.Names()
+	if len(req.Tools) > 0 {
+		if missing := MissingTools(req.Tools, toolNames); len(missing) > 0 {
+			return RunResult{}, fmt.Errorf("delegate: unknown tools requested: %s (available: %s)",
+				strings.Join(missing, ", "), strings.Join(toolNames, ", "))
+		}
+		toolNames = slices.Clone(req.Tools)
+	}
+
 	childID := strings.TrimSpace(req.ChildID)
 	if childID == "" {
 		childID = nextChildID(req.Kind)
@@ -310,8 +357,8 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	childDir, saveErr := r.saveChildMeta(runtime, launch, childID, req, "running", now, now, agent.TurnUsage{}, nil, 0)
 
 	childTodos := todo.NewStore()
-	hasTodoTool := slices.Contains(launch.Tools.Names(), updateTodosToolName)
-	childTools, err := r.childTools(runtime, launch, childID, childTodos)
+	hasTodoTool := slices.Contains(toolNames, updateTodosToolName)
+	childTools, err := r.childTools(runtime, launch, childID, childTodos, toolNames)
 	if err != nil {
 		return RunResult{ChildID: childID, TranscriptPath: childDir, SaveError: saveErr}, err
 	}
@@ -380,8 +427,10 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}, nil
 }
 
-func (r *Runner) childTools(parent Runtime, launch Launch, childID string, todos *todo.Store) (*tools.Registry, error) {
-	names := launch.Tools.Names()
+func (r *Runner) childTools(parent Runtime, launch Launch, childID string, todos *todo.Store, names []string) (*tools.Registry, error) {
+	if names == nil {
+		names = launch.Tools.Names()
+	}
 	childTools, err := launch.Tools.Subset(names)
 	if err != nil {
 		return nil, err
@@ -501,13 +550,17 @@ func DelegatableAgentNames(available []string, candidates []AgentCandidate) []st
 	return names
 }
 
-func schema(agents []string) json.RawMessage {
+func schema(agents, toolNames []string) json.RawMessage {
 	agent := map[string]any{
 		"type":        "string",
 		"description": "Optional configured agent name to run. When omitted, uses the current active agent.",
 	}
 	if len(agents) > 0 {
 		agent["enum"] = agents
+	}
+	items := map[string]any{"type": "string"}
+	if len(toolNames) > 0 {
+		items["enum"] = toolNames
 	}
 	body := map[string]any{
 		"type": "object",
@@ -525,6 +578,11 @@ func schema(agents []string) json.RawMessage {
 			"background": map[string]any{
 				"type":        "boolean",
 				"description": "When true, start the delegate as a process-local background job and return a job id immediately.",
+			},
+			"tools": map[string]any{
+				"type":        "array",
+				"items":       items,
+				"description": "Optional subset of the agent's tools to expose to the child, by exact name, to cut the child's per-turn schema overhead. When omitted, the child gets the agent's full tool set. Every name must be one of the agent's available tools.",
 			},
 		},
 		"required": []string{"task"},

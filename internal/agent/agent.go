@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"strconv"
 	"strings"
 	"sync"
@@ -86,7 +87,11 @@ type RequestContextProvider interface {
 type TurnUsage struct {
 	ModelTurns int
 	Usage      llm.Usage
-	Context    ContextEstimate
+	// Wasted is the subset of Usage spent on model-turn attempts that were
+	// discarded and re-requested after a mid-stream failure (r51+r52). It is
+	// already included in Usage; surfacing it lets the UI show the retry cost.
+	Wasted  llm.Usage
+	Context ContextEstimate
 }
 
 // ModelTurnUsage is the token accounting for one provider request attempt.
@@ -116,6 +121,13 @@ type ContextEstimate struct {
 // unlimited.
 type Options struct {
 	MaxTurns int
+	// MaxTurnTokens stops a user turn once accumulated tokens for the turn reach
+	// this ceiling; zero means unlimited. Enforcement lives in the turn loop.
+	MaxTurnTokens int
+	// MaxPromptCostUSD stops a user turn once its accumulated model cost (USD)
+	// reaches this ceiling; zero means unlimited. Enforced only for models with
+	// catalog pricing (otherwise cost is unknown and the budget cannot fire).
+	MaxPromptCostUSD float64
 	// Model is the resolved model id stamped onto every request. The agent loop
 	// owns Request.Model because the provider config carries no model (one
 	// provider can serve many models); main injects the resolved value here.
@@ -150,6 +162,11 @@ type Options struct {
 	// ResponsesStateful enables Responses API previous_response_id chaining.
 	// Main only sets it when the selected provider is Responses-capable.
 	ResponsesStateful bool
+	// Interactive marks a session whose multi-minute pauses justify the 1h
+	// Anthropic prompt-cache breakpoint on the stable prefix (set for the REPL).
+	// One-shot, delegate, and non-interactive runs leave it false to take the
+	// cheaper 5-minute breakpoint. Forwarded to llm.Request.LongCacheTTL.
+	Interactive bool
 }
 
 // Agent drives the turn loop against one provider and tool registry, owning the
@@ -160,10 +177,13 @@ type Agent struct {
 	toolSpecs                 []llm.ToolSchema
 	registry                  *llm.Registry
 	transcript                []llm.Message
+	validatedPrefix           int // count of leading transcript messages already known valid (r62)
 	system                    string
 	model                     string
 	maxTurns                  int
-	contextWindow             int // -context-window override; 0 = use the registry default
+	maxTurnTokens             int     // accumulated-token ceiling per user turn; 0 = unlimited
+	maxPromptCostUSD          float64 // accumulated USD ceiling per user turn; 0 = unlimited
+	contextWindow             int     // -context-window override; 0 = use the registry default
 	reasoning                 llm.ReasoningConfig
 	now                       func() time.Time
 	sleep                     func(context.Context, time.Duration) error // mid-stream retry backoff; nil-free, set in New
@@ -174,6 +194,7 @@ type Agent struct {
 	hooks                     *hooks.Runner
 	showDiffs                 bool
 	responsesStateful         bool
+	interactive               bool // 1h Anthropic cache breakpoint; see Options.Interactive
 	responseState             llm.ResponseState
 }
 
@@ -194,6 +215,8 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		registry:                  modelRegistry,
 		model:                     opts.Model,
 		maxTurns:                  opts.MaxTurns,
+		maxTurnTokens:             opts.MaxTurnTokens,
+		maxPromptCostUSD:          opts.MaxPromptCostUSD,
 		contextWindow:             opts.ContextWindow,
 		reasoning:                 opts.Reasoning,
 		now:                       now,
@@ -204,6 +227,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		hooks:                     opts.Hooks,
 		showDiffs:                 opts.ShowDiffs,
 		responsesStateful:         opts.ResponsesStateful,
+		interactive:               opts.Interactive,
 	}
 }
 
@@ -272,6 +296,7 @@ func (a *Agent) SetHooks(runner *hooks.Runner) { a.hooks = runner }
 // SetTranscript replaces the running transcript (used when resuming a session).
 func (a *Agent) SetTranscript(msgs []llm.Message) {
 	a.transcript = msgs
+	a.validatedPrefix = 0 // resumed/replaced content must be fully re-validated (r62)
 	a.resetResponseState()
 }
 
@@ -349,7 +374,25 @@ func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 		Tools:          cloneToolSpecs(a.toolSpecs),
 		Reasoning:      a.reasoning,
 		RequestContext: append([]string(nil), extraContext...),
+		PromptCacheKey: a.promptCacheKey(),
+		LongCacheTTL:   a.interactive,
 	}
+}
+
+// promptCacheKey is a stable per-agent prompt-cache routing hint derived from
+// the system prompt and advertised tool names. It is identical across a session's
+// turns (and its prewarm, which shares the same prefix) so OpenAI/Responses keep
+// landing on the same cache backend, and it changes when the prefix changes
+// (agent or model switch). Empty system + no tools yields a stable empty-prefix
+// key, which is harmless. Ignored by providers that don't support the field.
+func (a *Agent) promptCacheKey() string {
+	h := fnv.New64a()
+	h.Write([]byte(a.system))
+	for _, t := range a.toolSpecs {
+		h.Write([]byte{0})
+		h.Write([]byte(t.Name))
+	}
+	return "harness-" + strconv.FormatUint(h.Sum64(), 16)
 }
 
 // PrewarmRequest builds a minimal request that writes the prompt cache — the
@@ -401,6 +444,23 @@ func (a *Agent) EstimateContext() ContextEstimate {
 	return a.estimateContext(nil)
 }
 
+// triggerTokens estimates the next request's input footprint for the compaction
+// trigger: the real input-token count the last measured response reported plus a
+// byte estimate of only the messages appended since (boundary..end). Using the
+// real measurement for the bulk and estimating just the delta is far more
+// accurate than a whole-request byte/4 estimate, especially with images (r44).
+// With no prior measurement (boundary 0, lastInput 0) it degrades to a full
+// transcript estimate.
+func (a *Agent) triggerTokens(lastInput, boundary int) int {
+	if boundary < 0 {
+		boundary = 0
+	}
+	if boundary > len(a.transcript) {
+		boundary = len(a.transcript)
+	}
+	return lastInput + estimateTokens(a.transcript[boundary:])
+}
+
 func (a *Agent) estimateContext(extraContext []string) ContextEstimate {
 	est := estimateRequest(llm.Request{
 		System:         a.system,
@@ -418,7 +478,7 @@ func (a *Agent) estimateContext(extraContext []string) ContextEstimate {
 // modelTurnResult holds what one model turn produced after assembly.
 type modelTurnResult struct {
 	text       string
-	reasoning  []llm.ContentBlock // thinking / redacted_thinking blocks, in arrival order
+	reasoning  []llm.ContentBlock // thinking / redacted_thinking / reasoning blocks, in arrival order
 	toolCalls  []llm.ToolCall
 	phase      string
 	usage      llm.Usage
@@ -453,6 +513,8 @@ func (a *Agent) modelRequest(requestContext []string) modelRequest {
 		Reasoning:      a.reasoning,
 		StoreResponse:  a.responsesStateful,
 		RequestContext: append([]string(nil), requestContext...),
+		PromptCacheKey: a.promptCacheKey(),
+		LongCacheTTL:   a.interactive,
 	}
 	if usedPrevious {
 		req.PreviousResponseID = a.responseState.PreviousResponseID
@@ -507,11 +569,24 @@ func (a *Agent) updateResponseState(res modelTurnResult) {
 	}
 }
 
+// validateTranscript asserts the §4 invariant after a mutation. It validates
+// incrementally: the loop only ever appends whole turns that leave the message
+// list at a clean boundary (no open tool_use), so a prior successful validation
+// already proved everything up to validatedPrefix valid, and only the suffix
+// appended since needs re-walking (r62). A full walk runs only after the prefix
+// is reset — on SetTranscript/resume, after compaction replaces the transcript,
+// or after any failure. This turns the per-turn validation cost from O(n²) over
+// a long session into O(n).
 func (a *Agent) validateTranscript(phase string) error {
-	if err := llm.ValidateTranscript(a.transcript); err != nil {
+	if a.validatedPrefix < 0 || a.validatedPrefix > len(a.transcript) {
+		a.validatedPrefix = 0 // transcript was replaced/shrank out from under us
+	}
+	if err := llm.ValidateTranscript(a.transcript[a.validatedPrefix:]); err != nil {
 		a.resetResponseState()
+		a.validatedPrefix = 0 // force a full re-walk next time
 		return fmt.Errorf("agent transcript invalid %s: %w", phase, err)
 	}
+	a.validatedPrefix = len(a.transcript)
 	return nil
 }
 
@@ -541,30 +616,48 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 	modelTurns := 0
 	unlimited := a.maxTurns <= 0
 	stopHookActive := false
+	var guard turnGuard
+	var wastedTotal llm.Usage // tokens spent on retried-and-discarded model-turn attempts (r51+r52)
+	appendBoundary := 0       // transcript length measured by lastInput (drives the r44 trigger)
 
 	for unlimited || modelTurns < a.maxTurns {
+		// Live-transcript retention (design §12, r9+r20): shrink stale large
+		// tool outputs and aged images before building the request, so they are
+		// not re-sent verbatim every turn. Pure local edit, invariant-preserving.
+		a.applyRetention(sink)
 		requestContext := a.requestContext(extraContext, sink)
 		modelReq := a.modelRequest(requestContext)
 		lastContext = modelReq.estimate
 		// Proactive trigger (spec §4): a turn whose tool results balloon the
 		// context compacts before the next request, not after the turn. The
-		// estimate catches growth the last reported count knows nothing about.
-		if a.overThreshold(max(lastInput, lastContext.Total)) {
-			if compUsage, err := a.compact(ctx, sink, "auto"); err == nil {
+		// trigger leans on the last real input count plus an estimate of only the
+		// messages appended since it was measured (r44), not a whole-request byte
+		// estimate.
+		if a.overThreshold(a.triggerTokens(lastInput, appendBoundary)) {
+			// Only reset the trigger state when compaction actually rewrote the
+			// transcript. A no-op compaction that reset lastInput/appendBoundary
+			// would force a full-transcript re-estimate every model turn with zero
+			// progress (no-op churn).
+			if compUsage, changed, err := a.compact(ctx, sink, "auto"); err == nil && changed {
 				total = add(total, compUsage)
 				// The old reported count no longer describes the compacted
 				// transcript and would re-trigger every model turn.
 				lastInput = 0
+				appendBoundary = 0
 				requestContext = a.requestContext(extraContext, sink)
 				modelReq = a.modelRequest(requestContext)
 				lastContext = modelReq.estimate
 			}
 		}
 		if err := a.validateTranscript("before model request"); err != nil {
-			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Context: lastContext})
+			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
 
+		// The request we are about to send reflects the current transcript;
+		// remember its length so the next trigger only re-estimates what gets
+		// appended after the response we are about to measure.
+		appendBoundary = len(a.transcript)
 		res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
 			a.resetResponseState()
@@ -576,6 +669,7 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			wasted = add(wasted, retryWasted)
 		}
 		modelTurns++
+		wastedTotal = add(wastedTotal, wasted)
 		total = add(total, add(res.usage, wasted))
 		// Context-size signal, not billing: cached tokens occupy the window too.
 		lastInput = res.usage.InputTokens + res.usage.CacheReadTokens + res.usage.CacheWriteTokens
@@ -594,7 +688,7 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			if verr := a.validateTranscript("after failed model turn"); verr != nil {
 				err = errors.Join(err, verr)
 			}
-			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Context: lastContext})
+			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
 
@@ -625,14 +719,14 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 					a.transcript = append(a.transcript, a.textMessage(llm.RoleUser, "[hook Stop requested continuation]\n"+reason))
 					stopHookActive = true
 					if err := a.validateTranscript("after stop hook continuation"); err != nil {
-						sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Context: lastContext})
+						sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
 						return err
 					}
 					continue
 				}
 			}
 			if err := a.validateTranscript("after assistant turn"); err != nil {
-				sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Context: lastContext})
+				sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
 				return err
 			}
 			break
@@ -646,12 +740,78 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			Content: results,
 		})
 		if err := a.validateTranscript("after tool results"); err != nil {
-			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Context: lastContext})
+			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
 			return err
+		}
+
+		// Runaway guardrails (design §8.1). The transcript now ends on a closed
+		// tool_use/tool_result pair, so injecting a steering RoleUser message or
+		// breaking here keeps the §4 invariant intact.
+		guard.recordTools(res.toolCalls, results)
+
+		// Hard stop: an unrelenting error storm. Finalize with a tools-disabled
+		// summary so the turn ends on an assistant message, not a dangling result.
+		if guard.shouldBreakErrors() {
+			sink.Notice(errorStormNotice(guard.errorRuns))
+			fu, fctx := a.finalizeWithSummary(ctx, sink, requestContext, modelTurns+1)
+			total = add(total, fu)
+			lastContext = fctx
+			break
+		}
+
+		// Hard stop: a byte-identical successful repeat loop that ignored the one
+		// steering nudge. Finalize the same way so the turn ends on an assistant
+		// message (the success-loop analogue of the error-storm break).
+		if guard.shouldBreakRepeat() {
+			sink.Notice(repeatLoopNotice(guard.repeatRuns))
+			fu, fctx := a.finalizeWithSummary(ctx, sink, requestContext, modelTurns+1)
+			total = add(total, fu)
+			lastContext = fctx
+			break
+		}
+
+		// Token budget: stop before the next (paid) request. No final summary —
+		// the whole point is to stop spending.
+		if a.maxTurnTokens > 0 && totalTokens(total) >= a.maxTurnTokens {
+			sink.Notice(turnTokenBudgetNotice(a.maxTurnTokens))
+			break
+		}
+
+		// Cost budget: the dollar analogue of the token budget, same hard stop.
+		// Only fires for models with catalog pricing — Cost reports known=false
+		// otherwise, so an unpriced model silently has no cost ceiling.
+		if a.maxPromptCostUSD > 0 {
+			if cost, known := a.registry.Cost(a.model, total); known && cost >= a.maxPromptCostUSD {
+				sink.Notice(promptCostBudgetNotice(a.maxPromptCostUSD, cost))
+				break
+			}
+		}
+
+		// One steering nudge per condition (repetition / error storm share a slot).
+		if msg := guard.steerMessage(); msg != "" {
+			a.transcript = append(a.transcript, a.textMessage(llm.RoleUser, msg))
+			if err := a.validateTranscript("after loop-guard steer"); err != nil {
+				sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+				return err
+			}
+		}
+
+		// Wrap-up nudge once, before the final allowed model turn, so the model
+		// can stop calling tools and summarize within budget (r3).
+		if !unlimited && modelTurns == a.maxTurns-1 && !guard.wrapUpSteered {
+			guard.wrapUpSteered = true
+			a.transcript = append(a.transcript, a.textMessage(llm.RoleUser, wrapUpSteer))
+			if err := a.validateTranscript("after wrap-up steer"); err != nil {
+				sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+				return err
+			}
 		}
 
 		if !unlimited && modelTurns >= a.maxTurns {
 			sink.Notice(maxTurnsNotice(a.maxTurns))
+			fu, fctx := a.finalizeWithSummary(ctx, sink, requestContext, modelTurns+1)
+			total = add(total, fu)
+			lastContext = fctx
 			break
 		}
 	}
@@ -662,17 +822,43 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 	// compaction error never fails the turn — the warning was already reported and
 	// the transcript was kept intact.
 	lastContext = a.estimateContext(a.requestContext(extraContext, sink))
-	if compUsage, err := a.MaybeCompact(ctx, max(lastInput, lastContext.Total), sink); err == nil {
+	if compUsage, changed, err := a.MaybeCompact(ctx, a.triggerTokens(lastInput, appendBoundary), sink); err == nil && changed {
 		total = add(total, compUsage)
 		lastContext = a.estimateContext(a.requestContext(extraContext, sink))
 	}
 	if err := a.validateTranscript("after turn"); err != nil {
-		sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Context: lastContext})
+		sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
 		return err
 	}
 
-	sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Context: lastContext})
+	sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
 	return nil
+}
+
+// finalizeWithSummary issues one final model request with tools disabled so a
+// turn that hit a hard stop right after tool dispatch ends on an assistant
+// summary instead of a dangling tool_result (r3+r49). It is best-effort: a
+// failed or empty summary leaves the already-valid transcript untouched. Any
+// tool calls the model emits despite tools being disabled are ignored — only
+// the summary text is appended, so no unanswered tool_use can be created. It
+// returns the request's usage (counted toward the turn total) and estimate.
+func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, requestContext []string, modelTurn int) (llm.Usage, ContextEstimate) {
+	modelReq := a.modelRequest(requestContext)
+	modelReq.request.Tools = nil // no tools: force a text-only wind-down
+	res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, modelTurn, modelReq.estimate)
+	usage := add(res.usage, wasted)
+	if err != nil {
+		a.resetResponseState()
+		return usage, modelReq.estimate
+	}
+	if strings.TrimSpace(res.text) == "" {
+		return usage, modelReq.estimate
+	}
+	msg := a.textMessage(llm.RoleAssistant, res.text)
+	msg.Phase = llm.AssistantPhaseFinal
+	a.transcript = append(a.transcript, msg)
+	a.updateResponseState(res)
+	return usage, modelReq.estimate
 }
 
 // dispatchCalls runs one model turn's tool calls. Consecutive read-only calls
@@ -951,7 +1137,11 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 		if abandon, ok := sink.(ModelTurnAbandonSink); ok {
 			abandon.ModelTurnAbandoned(modelTurn, attempt+1)
 		}
-		sink.Notice(fmt.Sprintf("[stream interrupted: %v; retrying model turn in %s]", err, delay))
+		discarded := ""
+		if n := totalTokens(res.usage); n > 0 {
+			discarded = fmt.Sprintf("; discarded ~%d tokens", n)
+		}
+		sink.Notice(fmt.Sprintf("[stream interrupted: %v; retrying model turn in %s%s]", err, delay, discarded))
 		if serr := a.sleep(ctx, delay); serr != nil {
 			return modelTurnResult{}, wasted, serr
 		}
@@ -980,12 +1170,23 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 // non-retryable APIError (invalid_request, auth) will not get better by
 // asking again. Everything else — truncated streams, transport resets,
 // retryable API errors — is transient (spec §2).
+//
+// The rate-limit class (HTTP 429/529) is the exception: the provider's connect
+// loop already spent its full attempt budget backing off on it (a connect-origin
+// rate limit carries the status code), and these recover over minutes, so
+// re-running the whole turn would only multiply attempts (up to 3×5=15) and
+// hammer a busy API. Transient 500/502/503 keep retrying as before. A mid-stream
+// rate-limit frame (no status code) is not connect-exhausted, so it stays
+// retryable and still honors its Retry-After hint.
 func retryableStreamError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	var apiErr *llm.APIError
 	if errors.As(err, &apiErr) {
+		if retry.RateLimitedStatus(apiErr.StatusCode) {
+			return false
+		}
 		return apiErr.Retryable
 	}
 	return true
@@ -1089,14 +1290,17 @@ func reasoningSummaryText(text string) string {
 	return strings.TrimSpace(text)
 }
 
-// reasoningBlock converts an EventReasoningSummary into a persistable thinking
-// block. Only signed thinking (Anthropic) or a redacted payload is persisted:
-// those must be replayed verbatim on the next turn for the API to accept the
-// transcript. Unsigned summaries (OpenAI/Responses) are display-only — they go
-// to the dedicated sink but are not stored as replayable blocks. Text is kept
-// verbatim (not trimmed) so the block replays exactly and its signature stays
-// valid. ok is false when there is nothing to persist.
+// reasoningBlock converts an EventReasoningSummary into a persistable reasoning
+// block. Three payloads must be replayed verbatim on the next turn for the API
+// to accept the transcript: signed thinking and redacted thinking (Anthropic),
+// and encrypted Responses reasoning items (stateless store=false mode). A plain
+// unsigned summary (the display digest) carries none of these and is not stored
+// — it only goes to the dedicated sink. Text is kept verbatim (not trimmed) so a
+// signed block replays exactly. ok is false when there is nothing to persist.
 func reasoningBlock(ev llm.StreamEvent) (llm.ContentBlock, bool) {
+	if ev.ReasoningEncrypted != "" {
+		return llm.ContentBlock{Kind: llm.BlockReasoning, ReasoningID: ev.ReasoningID, ReasoningEncrypted: ev.ReasoningEncrypted}, true
+	}
 	if ev.RedactedData != "" {
 		return llm.ContentBlock{Kind: llm.BlockRedactedThinking, RedactedData: ev.RedactedData}, true
 	}

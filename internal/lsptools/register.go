@@ -28,13 +28,23 @@ var emptySchema = json.RawMessage(`{"type":"object"}`)
 
 // Register lists the LSP provider's bare tools and registers short lsp_* tools
 // backed by provider calls. All first-class LSP tools are trusted read-only.
-func Register(ctx context.Context, reg *tools.Registry, provider mcp.ToolProvider) (mcptools.Summary, error) {
+//
+// When allow is non-empty it is an allowlist of tool names to register; every
+// other discovered tool is skipped. Entries match against the bare provider name
+// (e.g. "definition") with an optional "lsp_" prefix, so an operator can expose a
+// subset without an allowed_tools whitelist (which would disable MCP exposure).
+// An empty or all-blank allow registers the full set.
+func Register(ctx context.Context, reg *tools.Registry, provider mcp.ToolProvider, allow ...string) (mcptools.Summary, error) {
 	list, err := provider.ListTools(ctx, "")
 	if err != nil {
 		return mcptools.Summary{}, err
 	}
+	allowSet := allowlistSet(allow)
 	sum := mcptools.Summary{Servers: map[string]int{"lsp": 0}}
 	for _, d := range list.Tools {
+		if allowSet != nil && !allowSet[d.Name] {
+			continue
+		}
 		name := namePrefix + d.Name
 		if !toolNameRe.MatchString(name) {
 			sum.Skipped = append(sum.Skipped, name)
@@ -53,6 +63,28 @@ func Register(ctx context.Context, reg *tools.Registry, provider mcp.ToolProvide
 		sum.Total++
 	}
 	return sum, nil
+}
+
+// allowlistSet builds the set of bare tool names to register from a configured
+// allowlist. Each entry is trimmed and may carry the "lsp_" prefix, which is
+// stripped so it matches the provider's bare name. It returns nil when allow is
+// empty or all entries are blank, signalling "register everything".
+func allowlistSet(allow []string) map[string]bool {
+	if len(allow) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(allow))
+	for _, a := range allow {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		set[strings.TrimPrefix(a, namePrefix)] = true
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
 }
 
 // Tool adapts one built-in LSP tool to tools.Tool.

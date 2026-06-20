@@ -51,6 +51,11 @@ and piped stdin they are concatenated, so this works:
 harness -p "summarize:" < notes.txt
 ```
 
+At the end of a one-shot run harness prints a `[session summary: …]` cost line to
+stderr (cumulative input/cached/output/reasoning tokens and total cost). This
+summary bypasses `-q`/`--quiet`, so a quiet one-shot run still reports what it
+spent.
+
 Exit codes: `0` completed, `1` runtime error, `2` usage error, `130`
 interrupted.
 
@@ -69,6 +74,18 @@ interrupted.
 -histfilesize <n>     max REPL history entries stored on disk (0 disables, default 1000)
 -histsize <n>         max REPL history entries loaded into memory (0 disables, default 1000)
 -max-turns <n>    model turns per user prompt; <=0 means unlimited (default 250)
+-tool-timeout <s>   per-tool-call timeout backstop in seconds; <=0 disables (default 600). A
+                    hung tool that ignores cancellation is force-failed after this many
+                    seconds so it cannot stall a turn; run_command's own timeout_seconds stays
+                    authoritative and is never cut below.
+-max-turn-tokens <n>   stop a user turn after this many accumulated tokens; 0 means unlimited
+                    (default 0). Counts input + cache-read + cache-write + output + reasoning
+                    tokens across every model call in the turn, and breaks before the next paid
+                    request with a `[stopped: turn token budget N exceeded]` notice.
+-max-prompt-cost <usd>   stop a user turn once its accumulated model cost reaches this many USD;
+                    0 means unlimited (default 0). Uses catalog pricing, so it applies only to
+                    models with a known price; breaks before the next paid request with a
+                    `[stopped: turn cost budget $X reached]` notice. Complements -max-turn-tokens.
 -default-context-window <n>   fallback window for configured models without context metadata (default 256000)
 -context-window <n>   override the model's context window (tokens)
 -reasoning-effort <level>   reasoning/thinking effort when supported
@@ -83,7 +100,9 @@ interrupted.
 -v                show tool result snippets (first ~5 lines, dimmed)
 -tool-stream      show live tool-call progress (default true; use -tool-stream=false to disable)
 -show-diffs       show per-tool-call file diffs for built-in file edits
--q, --quiet       suppress status diagnostics and reasoning output unless -reasoning-summary is set
+-q, --quiet       suppress status diagnostics and reasoning output unless -reasoning-summary is set;
+                  still prints one per-turn usage/cost line at an interactive terminal (suppressed only
+                  when output is also non-TTY/piped), and one-shot runs always print the session summary
 --version        print release version and exit 0
 --log-level <level>  diagnostic log level: debug, info, warn, error (also LOG_LEVEL)
 -no-color         disable ANSI color (also: NO_COLOR env var; color is TTY-only anyway)
@@ -121,7 +140,8 @@ caps (`HARNESS_TOOL_RESULT_MAX_BYTES` / `HARNESS_TOOL_RESULT_MAX_LINES`). A few
 context-efficiency knobs are config-file-only.
 
 - Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_PROVIDER`, `HARNESS_MODEL`,
-  `HARNESS_MAX_TURNS`, `HARNESS_DEFAULT_CONTEXT_WINDOW`, `HARNESS_TIMESTAMPS`,
+  `HARNESS_MAX_TURNS`, `HARNESS_MAX_TURN_TOKENS`, `HARNESS_TOOL_TIMEOUT`,
+  `HARNESS_DEFAULT_CONTEXT_WINDOW`, `HARNESS_TIMESTAMPS`,
   `HARNESS_IMAGE_DETAIL`, and most other `HARNESS_*` equivalents for
   user-facing flags. The convention is `HARNESS_` plus the flag name uppercased
   with dashes turned into underscores. For example, `-context-window`, `-no-env`,
@@ -150,6 +170,18 @@ context-efficiency knobs are config-file-only.
   `tool_result_max_lines` or env `HARNESS_TOOL_RESULT_MAX_BYTES` /
   `HARNESS_TOOL_RESULT_MAX_LINES`. The delegate tool also has
   `delegate_max_turns` as a config-file-only cap.
+- Tool-surface limits for MCP and LSP are config-file-only: `mcp.max_tools` caps
+  how many discovered remote MCP tools are auto-exposed (`0` = unlimited),
+  `mcp.disabled_servers` is a list of remote MCP server names dropped from
+  auto-exposure, and `lsp.tools` registers only the listed subset of LSP tools
+  (empty = all). See [mcp.md](mcp.md) and [lsp.md](lsp.md). An explicit
+  `allowed_tools` whitelist can still name a tool that auto-exposure excluded.
+- A single model turn's output is capped at `min(32768, context_window/4)` tokens
+  (a client-side runaway brake, not the model's catalog limit). Models that
+  support 64k+ output are therefore truncated at 32768 tokens per turn, surfaced
+  as a `[stopped: model reached max tokens]` notice. This is distinct from
+  `-max-turn-tokens`, which is the cumulative per-turn token *budget* across all
+  model calls, not the single-response output cap.
 
 Harness automatically adds static AGENTS instructions from
 `~/.agents/AGENTS.md`, then from `AGENTS.md` in the current working directory.
@@ -245,7 +277,7 @@ and nested relative path prefixes.
 |---|---|
 | `/help` | list commands |
 | `/exit`, `/quit` | save, print a session token summary, and exit |
-| `/clear` | reset the conversation; rotate to a fresh session directory |
+| `/clear` | echo the discarded session token/cost totals, then reset the conversation and rotate to a fresh session directory |
 | `/compact` | force compaction now |
 | `/context` | dump the current provider-neutral model context as JSON |
 | `/context <file>` | save the current provider-neutral model context as JSON |
@@ -258,7 +290,7 @@ and nested relative path prefixes.
 | `/edit [draft]` | open an external editor for the next prompt |
 | `/save [file]` | force save, optionally elsewhere |
 | `/model` | choose a configured provider/model; interactive runs can optionally save it as the default |
-| `/model <id>` | switch subsequent turns to model `<id>` |
+| `/model <id>` | switch subsequent turns to model `<id>`; a near-miss falls back to a unique prefix/substring match |
 | `/model <provider>:<id>` | switch to `<id>` on a specific configured provider |
 | `/reasoning` | list reasoning controls for the current model |
 | `/reasoning on`, `/reasoning off`, `/reasoning default` | set explicit reasoning toggle or return to provider defaults |
@@ -282,6 +314,28 @@ and nested relative path prefixes.
 Anthropic usage does not currently expose a separate reasoning-token field;
 extended thinking is counted in output tokens, so the reasoning total remains
 zero for Anthropic sessions.
+
+An unknown `/command` prints a `did you mean <command>?` suggestion (nearest known
+command by edit distance) instead of failing silently. The per-turn usage line
+appends cache-read and reasoning token counts (with the cache-hit ratio) when they
+are non-zero, and a model with no configured price prints a one-time
+`[note: no price configured …]` notice instead of silently dropping cost.
+
+### Waiting and typing during a turn
+
+At an interactive terminal harness shows a live wait indicator while a model
+request or a tool call is outstanding: a single in-place line such as
+`[model: turn 1 · 12s]` (or `[tool: grep · 3s]`), updated about once a second and
+appended with the running context-window percentage (`· ctx 30%`) for model waits.
+It is erased the instant real output or a tool line appears, and is shown only at a
+TTY when not quiet.
+
+Text typed while a turn is running is captured with echo off and shown on that wait
+line after a `>` marker. During-turn input is **never** auto-submitted: Enter inserts
+a newline into the buffer rather than starting a turn. When the turn finishes — on
+normal completion **or** on interrupt (Ctrl-C / double-Esc) — the accumulated text is
+deposited into the next prompt as editable, pre-filled text for you to review, edit,
+or submit manually. Ctrl-C and double-Esc still cancel the active turn.
 
 ## Agents
 
@@ -372,7 +426,8 @@ likely slow response startup, harness prints one warning per user turn to stderr
 - Ctrl-C during a turn, or Esc twice in short succession during a REPL turn,
   cancels the turn. It aborts the HTTP stream, kills any `run_command` process
   group, keeps streamed partial text, strips unexecuted tool calls, prints
-  `[cancelled]`, and returns to the prompt.
+  `[cancelled]`, and returns to the prompt. Any text typed during the turn is
+  preserved and deposited into the next prompt as editable pre-filled text.
 - A second Ctrl-C within about one second, or Ctrl-C at the idle prompt, saves,
   prints the session token summary, and exits 130.
 - Ctrl-D at the prompt saves, prints the summary, and exits 0.

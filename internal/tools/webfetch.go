@@ -224,15 +224,215 @@ func validateHTTPURL(raw string) error {
 }
 
 // reduceHTML turns an HTML document into readable-ish text (design §9.10): it
-// drops <script>/<style> element contents, strips all remaining tags,
-// unescapes HTML entities, and collapses runs of whitespace. It is a heuristic
-// reducer for docs and articles, not a renderer.
+// drops <script>/<style> element contents, renders <a> as "text (url)" so
+// citation links survive, inserts newlines at block boundaries so headings,
+// paragraphs, list items and table rows stay separated, strips all remaining
+// tags, unescapes HTML entities, and collapses whitespace per line. It is a
+// heuristic reducer for docs and articles, not a renderer; the preserved line
+// structure also lets the central line-cap truncate cleanly instead of chopping
+// one giant collapsed paragraph mid-word.
 func reduceHTML(s string) string {
 	s = stripElement(s, "script")
 	s = stripElement(s, "style")
-	s = stripTags(s)
+	s = renderAnchors(s)
+	s = stripTagsWithBreaks(s)
 	s = html.UnescapeString(s)
-	return collapseWhitespace(s)
+	return collapseLines(s)
+}
+
+// blockBreakCloseTags lists tags whose closing form marks a block/line boundary
+// at which reduceHTML inserts a newline (<br> is handled separately as a void
+// element).
+var blockBreakCloseTags = map[string]bool{
+	"p": true, "div": true, "li": true, "tr": true,
+	"h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
+}
+
+// renderAnchors rewrites each <a ...href="URL"...>text</a> as "text (URL)" so
+// the model keeps the links it needs to follow citations. The inner text has its
+// own tags stripped; entities are left for the final unescape pass. Anchors with
+// no href collapse to their text. It scans a single lowercased copy for tag
+// boundaries while emitting from the original (case-preserving) string.
+func renderAnchors(s string) string {
+	lower := strings.ToLower(s)
+	var b strings.Builder
+	pos := 0
+	for {
+		rel := indexAnchorOpen(lower[pos:])
+		if rel < 0 {
+			b.WriteString(s[pos:])
+			break
+		}
+		i := pos + rel
+		b.WriteString(s[pos:i])
+
+		gtRel := strings.IndexByte(s[i:], '>')
+		if gtRel < 0 {
+			b.WriteString(s[i:]) // malformed opening tag; leave for stripTags
+			break
+		}
+		openEnd := i + gtRel + 1
+		href := extractHref(s[i:openEnd])
+
+		var inner string
+		if closeRel := strings.Index(lower[openEnd:], "</a>"); closeRel < 0 {
+			inner = s[openEnd:]
+			pos = len(s)
+		} else {
+			inner = s[openEnd : openEnd+closeRel]
+			pos = openEnd + closeRel + len("</a>")
+		}
+		inner = strings.TrimSpace(stripTags(inner))
+
+		switch {
+		case href != "" && inner != "":
+			b.WriteString(inner)
+			b.WriteString(" (")
+			b.WriteString(href)
+			b.WriteByte(')')
+		case href != "":
+			b.WriteByte('(')
+			b.WriteString(href)
+			b.WriteByte(')')
+		default:
+			b.WriteString(inner)
+		}
+		if pos >= len(s) {
+			break
+		}
+	}
+	return b.String()
+}
+
+// indexAnchorOpen returns the index of the next anchor opening tag ("<a" with a
+// following delimiter), or -1. The delimiter check avoids matching <article>,
+// <aside>, and similar.
+func indexAnchorOpen(lower string) int {
+	from := 0
+	for {
+		i := strings.Index(lower[from:], "<a")
+		if i < 0 {
+			return -1
+		}
+		idx := from + i
+		next := idx + 2
+		if next < len(lower) {
+			switch lower[next] {
+			case ' ', '\t', '\n', '\r', '>', '/':
+				return idx
+			}
+		}
+		from = idx + 2
+	}
+}
+
+// extractHref pulls the href attribute value out of an anchor opening tag,
+// handling double-quoted, single-quoted, and unquoted forms.
+func extractHref(tag string) string {
+	lower := strings.ToLower(tag)
+	i := strings.Index(lower, "href")
+	if i < 0 {
+		return ""
+	}
+	j := i + len("href")
+	for j < len(tag) && (tag[j] == ' ' || tag[j] == '\t') {
+		j++
+	}
+	if j >= len(tag) || tag[j] != '=' {
+		return ""
+	}
+	j++
+	for j < len(tag) && (tag[j] == ' ' || tag[j] == '\t') {
+		j++
+	}
+	if j >= len(tag) {
+		return ""
+	}
+	if q := tag[j]; q == '"' || q == '\'' {
+		j++
+		if end := strings.IndexByte(tag[j:], q); end >= 0 {
+			return strings.TrimSpace(tag[j : j+end])
+		}
+		return strings.TrimSpace(tag[j:])
+	}
+	end := j
+	for end < len(tag) {
+		switch tag[end] {
+		case ' ', '\t', '\n', '\r', '>':
+			return strings.TrimSpace(tag[j:end])
+		}
+		end++
+	}
+	return strings.TrimSpace(tag[j:end])
+}
+
+// stripTagsWithBreaks removes every <...> tag like stripTags, but emits a
+// newline in place of a block-boundary tag so document structure survives.
+func stripTagsWithBreaks(s string) string {
+	var b strings.Builder
+	for {
+		lt := strings.IndexByte(s, '<')
+		if lt < 0 {
+			b.WriteString(s)
+			break
+		}
+		b.WriteString(s[:lt])
+		gt := strings.IndexByte(s[lt:], '>')
+		if gt < 0 {
+			break // unterminated '<': drop remainder, matching stripTags
+		}
+		if isBlockBreakTag(s[lt : lt+gt+1]) {
+			b.WriteByte('\n')
+		}
+		s = s[lt+gt+1:]
+	}
+	return b.String()
+}
+
+// isBlockBreakTag reports whether a "<...>" tag is a line/block boundary: any
+// <br> (void) or a closing tag for a block element in blockBreakCloseTags.
+func isBlockBreakTag(tag string) bool {
+	if len(tag) < 3 {
+		return false
+	}
+	name, closing := tagNameOf(tag[1 : len(tag)-1])
+	if name == "br" {
+		return true
+	}
+	return closing && blockBreakCloseTags[name]
+}
+
+// tagNameOf extracts the lowercased element name from a tag's interior (the text
+// between '<' and '>') and reports whether it is a closing tag.
+func tagNameOf(inner string) (name string, closing bool) {
+	inner = strings.TrimSpace(inner)
+	if strings.HasPrefix(inner, "/") {
+		closing = true
+		inner = strings.TrimSpace(inner[1:])
+	}
+	end := 0
+	for end < len(inner) {
+		switch inner[end] {
+		case ' ', '\t', '\n', '\r', '/':
+			return strings.ToLower(inner[:end]), closing
+		}
+		end++
+	}
+	return strings.ToLower(inner[:end]), closing
+}
+
+// collapseLines collapses whitespace within each line and drops lines that
+// become empty, preserving the newline structure reduceHTML inserted instead of
+// flattening the whole document to one line.
+func collapseLines(s string) string {
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		if collapsed := strings.Join(strings.Fields(ln), " "); collapsed != "" {
+			out = append(out, collapsed)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // stripElement removes every <name ...>...</name> block (contents included),
@@ -284,12 +484,6 @@ func stripTags(s string) string {
 		s = s[lt+gt+1:]
 	}
 	return b.String()
-}
-
-// collapseWhitespace replaces every run of whitespace with a single space and
-// trims the ends, so reduced HTML reads as flowing text.
-func collapseWhitespace(s string) string {
-	return strings.Join(strings.Fields(s), " ")
 }
 
 // isTextual reports whether a media type carries text the model can read:

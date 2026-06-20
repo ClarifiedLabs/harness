@@ -100,6 +100,21 @@ type Options struct {
 	ReadFileDefaultLimit int
 	Background           BackgroundJobStarter
 	SearchTools          string
+	// DispatchTimeout is the per-call ceiling applied by Dispatch (zero = none).
+	// It backstops tools that ignore ctx (e.g. a hung MCP/web_fetch/lsp call) so
+	// one stuck call cannot stall a turn forever. A tool that enforces its own
+	// longer deadline (see SelfTimeouter) is never cut below it.
+	DispatchTimeout time.Duration
+}
+
+// SelfTimeouter is an optional Tool extension. A tool that enforces its own
+// per-call deadline reports it here so the Dispatch-level ceiling only ever
+// RAISES to that deadline, never lowers it. This preserves run_command's
+// documented "no maximum" (its own timeout_seconds stays authoritative) while
+// the ceiling still bounds tools that ignore ctx (design §8.2). ok is false when
+// the tool has no input-specific deadline.
+type SelfTimeouter interface {
+	SelfTimeout(input json.RawMessage) (timeout time.Duration, ok bool)
 }
 
 // DisabledTool describes an optional built-in tool that was not registered.
@@ -128,8 +143,10 @@ func (r *Registry) SetResultLimits(maxBytes, maxLines int) {
 }
 
 // RegisterFileTools registers the built-in file tools (read_file, list_dir,
-// grep, optional rg, edit, write_file, apply_patch) on r, in that order. It is
-// the only exported path to these tools; their types are unexported by design.
+// glob, grep, optional rg, edit, write_file) on r, in that order. It is the only
+// exported path to these tools; their types are unexported by design. apply_patch
+// is intentionally not here — it ships only in the constructible Catalog (see
+// CatalogWithOptions) since edit+write_file subsume it.
 func RegisterFileTools(r *Registry) {
 	registerFileTools(r, nil, Options{})
 }
@@ -137,10 +154,10 @@ func RegisterFileTools(r *Registry) {
 func registerFileTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 	r.Register(readFile{defaultLimit: opts.ReadFileDefaultLimit})
 	r.Register(listDir{})
+	r.Register(glob{})
 	registerSearchTools(r, disabled, opts)
 	r.Register(edit{})
 	r.Register(writeFile{})
-	r.Register(applyPatch{})
 }
 
 const (
@@ -156,7 +173,9 @@ func registerSearchTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 	addGrep := mode == SearchToolsGrep || mode == SearchToolsBoth || (mode == SearchToolsAuto && !hasRG) || (mode == SearchToolsRG && !hasRG)
 	addRG := hasRG && (mode == SearchToolsRG || mode == SearchToolsBoth || mode == SearchToolsAuto)
 	if addGrep {
-		r.Register(grep{background: opts.Background})
+		// In "both" mode grep and rg ship side by side with near-identical schemas;
+		// steer the model to rg so it converges on one tool.
+		r.Register(grep{background: opts.Background, preferRG: mode == SearchToolsBoth && addRG})
 	}
 	if addRG {
 		r.Register(rg)
@@ -214,6 +233,7 @@ func DefaultWithDiagnostics() (*Registry, []DisabledTool) {
 func DefaultWithOptions(opts Options) (*Registry, []DisabledTool) {
 	r := &Registry{}
 	r.SetResultLimits(opts.MaxResultBytes, opts.MaxResultLines)
+	r.SetDispatchTimeout(opts.DispatchTimeout)
 	var disabled []DisabledTool
 	registerFileTools(r, &disabled, opts)
 	registerExecTools(r, &disabled, opts)
@@ -230,9 +250,9 @@ func DefaultNamesWithOptions(opts Options) []string {
 }
 
 // Catalog returns a Registry with every constructible tool: the Default set
-// plus the agent-oriented tools (git_readonly, write_tmp_file), which agent definitions
-// select from by name. Build it once per process — write_tmp_file holds the
-// per-run temp directory.
+// plus the agent-oriented tools (apply_patch, git_readonly, write_tmp_file), which
+// agent definitions select from by name. Build it once per process — write_tmp_file
+// holds the per-run temp directory.
 func Catalog() *Registry {
 	r, _ := CatalogWithDiagnostics()
 	return r
@@ -248,6 +268,11 @@ func CatalogWithDiagnostics() (*Registry, []DisabledTool) {
 // configurable limits.
 func CatalogWithOptions(opts Options) (*Registry, []DisabledTool) {
 	r, disabled := DefaultWithOptions(opts)
+	// apply_patch overlaps edit+write_file, so it is kept out of the default
+	// request and registered only here, where agents may still whitelist it by
+	// name. This auto-drops it from auto/independent allowed lists derived from
+	// DefaultNamesWithOptions, which is intended.
+	r.Register(applyPatch{})
 	if git, ok := newGitReadonly(); ok {
 		r.Register(git)
 	} else {
@@ -270,7 +295,7 @@ func (r *Registry) Subset(names []string) (*Registry, error) {
 	for _, name := range names {
 		want[name] = true
 	}
-	sub := &Registry{resultLimits: r.resultLimits}
+	sub := &Registry{resultLimits: r.resultLimits, dispatchTimeout: r.dispatchTimeout}
 	for _, name := range r.order {
 		if want[name] {
 			sub.Register(r.tools[name])
@@ -461,6 +486,15 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 	}
 
 	timeout := r.dispatchTimeout
+	if timeout > 0 {
+		// A tool with its own (possibly longer) deadline must not be cut below it;
+		// the ceiling only raises, never lowers.
+		if st, ok := t.(SelfTimeouter); ok {
+			if d, has := st.SelfTimeout(input); has && d > timeout {
+				timeout = d
+			}
+		}
+	}
 	var ctx context.Context
 	var cancel context.CancelFunc
 	if timeout > 0 {

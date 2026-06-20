@@ -11,6 +11,15 @@ import (
 // (design §4).
 const errorResultPrefix = "ERROR: "
 
+// defaultMaxTokensCap is the unset-MaxTokens client brake used only when the
+// model's real output limit is unknown: min(32768, contextWindow/4). When the
+// models.dev catalog reports an output limit it is used verbatim instead (see
+// maxTokens), so a model that supports 64k+ output is no longer capped at 32768.
+// This fixed fallback still stops a catalog-unknown looping reasoning model from
+// emitting to a server's no-ceiling default; turn-level runaway is separately
+// bounded by -max-turn-tokens and -max-prompt-cost.
+const defaultMaxTokensCap = 32768
+
 // emptyArgs is the canonical serialization for a tool call with no arguments.
 // OpenAI requires function.arguments to be a JSON string, never "" (design §4).
 const emptyArgs = "{}"
@@ -22,11 +31,13 @@ type wireRequest struct {
 	Model           string         `json:"model"`
 	Messages        []wireMessage  `json:"messages"`
 	Tools           []wireTool     `json:"tools,omitempty"`
+	ParallelTools   *bool          `json:"parallel_tool_calls,omitempty"`
 	MaxTokens       *int           `json:"max_tokens,omitempty"`
 	Temperature     *float64       `json:"temperature,omitempty"`
 	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
 	Reasoning       *wireReasoning `json:"reasoning,omitempty"`
 	Stop            []string       `json:"stop,omitempty"`
+	PromptCacheKey  string         `json:"prompt_cache_key,omitempty"`
 	Stream          bool           `json:"stream"`
 	StreamOptions   *streamOptions `json:"stream_options"`
 }
@@ -150,11 +161,11 @@ type wireUsage struct {
 // Completions wire body. The system prompt becomes a leading system message;
 // tool results are hoisted into sibling role:"tool" messages placed immediately
 // after the issuing assistant message, in call order (design §4).
-func buildRequest(req llm.Request) wireRequest {
-	return buildRequestForMode(req, "openai")
+func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
+	return buildRequestForMode(req, contextWindow, outputLimit, "openai")
 }
 
-func buildRequestForMode(req llm.Request, reasoningMode string) wireRequest {
+func buildRequestForMode(req llm.Request, contextWindow, outputLimit int, reasoningMode string) wireRequest {
 	w := wireRequest{
 		Model:         req.Model,
 		Stream:        true,
@@ -162,13 +173,13 @@ func buildRequestForMode(req llm.Request, reasoningMode string) wireRequest {
 		Temperature:   req.Temperature,
 	}
 
-	if req.MaxTokens > 0 {
-		mt := req.MaxTokens
+	if mt := maxTokens(req.MaxTokens, contextWindow, outputLimit); mt > 0 {
 		w.MaxTokens = &mt
 	}
 	if len(req.StopSeqs) > 0 {
 		w.Stop = req.StopSeqs
 	}
+	w.PromptCacheKey = req.PromptCacheKey
 	if reasoningMode == "openrouter" {
 		w.Reasoning = openRouterReasoning(req.Reasoning)
 	} else if req.Reasoning.Effort != "" {
@@ -195,6 +206,14 @@ func buildRequestForMode(req llm.Request, reasoningMode string) wireRequest {
 				Parameters:  t.Parameters,
 			},
 		})
+	}
+	// Opt into parallel tool calls when tools are present (Responses already does),
+	// so the model can batch independent reads in one turn instead of one-call-per-
+	// turn round-trips that re-send the cached prefix each time. A pointer keeps it
+	// omittable for OpenAI-compatible servers that reject the field.
+	if len(w.Tools) > 0 {
+		parallel := true
+		w.ParallelTools = &parallel
 	}
 
 	return w
@@ -298,4 +317,25 @@ func buildMessages(m llm.Message) []wireMessage {
 
 func imageDataURL(b llm.ContentBlock) string {
 	return "data:" + b.ImageMediaType + ";base64," + b.ImageData
+}
+
+// maxTokens resolves the max_tokens to send. Precedence: an explicit user value
+// wins; else the model's real catalog output limit when known (outputLimit > 0);
+// else min(defaultMaxTokensCap, contextWindow/4) as a client-side runaway brake
+// for catalog-unknown models. Zero (all unset/unknown) means "omit" so the
+// server keeps its own default — matching OpenAI-compatible servers.
+func maxTokens(userValue, contextWindow, outputLimit int) int {
+	if userValue > 0 {
+		return userValue
+	}
+	if outputLimit > 0 {
+		return outputLimit
+	}
+	if contextWindow <= 0 {
+		return 0
+	}
+	if quarter := contextWindow / 4; quarter < defaultMaxTokensCap {
+		return quarter
+	}
+	return defaultMaxTokensCap
 }

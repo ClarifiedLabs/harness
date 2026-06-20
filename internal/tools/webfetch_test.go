@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +137,60 @@ func TestWebFetchHTMLReduced(t *testing.T) {
 	}
 	if !strings.Contains(out, "Some text here.") {
 		t.Errorf("whitespace should be collapsed: %q", out)
+	}
+}
+
+// r39: reduceHTML preserves links and block structure.
+func TestReduceHTMLStructure(t *testing.T) {
+	in := `<h1>Title</h1><p>See <a href="https://example.com/docs">the docs</a> for more.</p><ul><li>one</li><li>two</li></ul>`
+	out := reduceHTML(in)
+	if !strings.Contains(out, "the docs (https://example.com/docs)") {
+		t.Errorf("anchor should render as text (url): %q", out)
+	}
+	lines := strings.Split(out, "\n")
+	want := []string{"Title", "See the docs (https://example.com/docs) for more.", "one", "two"}
+	if !slices.Equal(lines, want) {
+		t.Errorf("block structure not preserved:\n got %q\nwant %q", lines, want)
+	}
+}
+
+func TestReduceHTMLBrAndPerLineCollapse(t *testing.T) {
+	if got := reduceHTML("a  b<br>c   d"); got != "a b\nc d" {
+		t.Errorf("br + per-line collapse wrong: %q", got)
+	}
+	// </tr> is a block boundary too.
+	if got := reduceHTML("<table><tr><td>r1</td></tr><tr><td>r2</td></tr></table>"); got != "r1\nr2" {
+		t.Errorf("table rows not separated: %q", got)
+	}
+}
+
+func TestExtractHref(t *testing.T) {
+	cases := map[string]string{
+		`<a href="https://x.com">`: "https://x.com",
+		`<a href='https://y.com'>`: "https://y.com",
+		`<a href=https://z.com>`:   "https://z.com",
+		`<a class="c" href="u">`:   "u",
+		`<a name="anchor">`:        "",
+	}
+	for tag, want := range cases {
+		if got := extractHref(tag); got != want {
+			t.Errorf("extractHref(%q) = %q, want %q", tag, got, want)
+		}
+	}
+}
+
+func TestRenderAnchorsEdgeCases(t *testing.T) {
+	// An anchor without href collapses to its text; <article> must not be treated
+	// as an anchor; a missing close tag is tolerated.
+	out := reduceHTML(`<a>click</a> and <article>body</article> and <a href="u">x`)
+	if !strings.Contains(out, "click") {
+		t.Errorf("hrefless anchor text lost: %q", out)
+	}
+	if strings.Contains(out, "<article>") || strings.Contains(out, "<a") {
+		t.Errorf("tags should be stripped: %q", out)
+	}
+	if !strings.Contains(out, "x (u)") {
+		t.Errorf("unterminated anchor should still render text (url): %q", out)
 	}
 }
 

@@ -146,6 +146,12 @@ func TestDefaultRegistersFileTools(t *testing.T) {
 }
 
 func TestRegisterFileTools(t *testing.T) {
+	// Derive the file-tool count from a clean registration so this test stays
+	// robust as file tools are added or relocated.
+	base := &Registry{}
+	RegisterFileTools(base)
+	fileToolCount := len(base.Specs())
+
 	r := &Registry{}
 	r.Register(newOK("existing", "x"))
 	RegisterFileTools(r)
@@ -154,8 +160,7 @@ func TestRegisterFileTools(t *testing.T) {
 	if specs[0].Name != "existing" {
 		t.Errorf("registration order not preserved: %q", specs[0].Name)
 	}
-	want := 7
-	if len(specs) != want {
+	if want := fileToolCount + 1; len(specs) != want {
 		t.Errorf("want %d tools after registration, got %d", want, len(specs))
 	}
 }
@@ -377,7 +382,7 @@ func expectedDefaultNames() []string {
 }
 
 func expectedDefaultNamesForSearch(mode string) []string {
-	want := []string{"read_file", "list_dir"}
+	want := []string{"read_file", "list_dir", "glob"}
 	switch mode {
 	case SearchToolsBoth:
 		want = append(want, "grep")
@@ -399,7 +404,8 @@ func expectedDefaultNamesForSearch(mode string) []string {
 			want = append(want, "grep")
 		}
 	}
-	want = append(want, "edit", "write_file", "apply_patch", "run_command")
+	// apply_patch is not in the default set; it ships only in the Catalog (r56).
+	want = append(want, "edit", "write_file", "run_command")
 	if GitAvailable() {
 		want = append(want, "git")
 	}
@@ -429,6 +435,7 @@ func TestDefaultNamesWithSearchToolOptions(t *testing.T) {
 func TestCatalogRegistersDefaultPlusModeTools(t *testing.T) {
 	r := Catalog()
 	want := append([]string{}, DefaultNames()...)
+	want = append(want, "apply_patch") // relocated out of the default set (r56)
 	if GitAvailable() {
 		want = append(want, "git_readonly")
 	}
@@ -440,6 +447,24 @@ func TestCatalogRegistersDefaultPlusModeTools(t *testing.T) {
 		if len(s.Parameters) == 0 {
 			t.Errorf("tool %q has empty schema", s.Name)
 		}
+	}
+}
+
+// r56: apply_patch ships only in the Catalog, not the default request, but stays
+// whitelist-constructible via Subset.
+func TestApplyPatchRelocatedToCatalog(t *testing.T) {
+	if slices.Contains(DefaultNames(), "apply_patch") {
+		t.Errorf("apply_patch should not be in the default set: %v", DefaultNames())
+	}
+	if !slices.Contains(Catalog().Names(), "apply_patch") {
+		t.Errorf("apply_patch should be in the catalog: %v", Catalog().Names())
+	}
+	sub, err := Catalog().Subset([]string{"apply_patch"})
+	if err != nil {
+		t.Fatalf("Subset([apply_patch]): %v", err)
+	}
+	if !slices.Contains(sub.Names(), "apply_patch") {
+		t.Errorf("apply_patch should be selectable via Subset: %v", sub.Names())
 	}
 }
 

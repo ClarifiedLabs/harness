@@ -204,6 +204,29 @@ When MCP is enabled, harness trusts `readOnlyHint` annotations from the
 configured MCP server path, so tools advertised as read-only can be exposed to
 `read_only` agents and join read-only parallel dispatch.
 
+Two config-file-only keys (under the harness `mcp` block, no flag or env var)
+restrict the auto-exposed remote MCP surface:
+
+```json
+{
+  "mcp": {
+    "enable": true,
+    "max_tools": 64,
+    "disabled_servers": ["noisy-server"]
+  }
+}
+```
+
+- `mcp.max_tools` caps how many discovered remote MCP tools are auto-exposed to
+  `read_only`/`all` agents. `0` (the default) means unlimited; a negative value is
+  rejected. On overflow the surface is truncated in discovery order and a warning is
+  logged. Local (`mcp.local`) and LSP tools are not counted.
+- `mcp.disabled_servers` lists remote MCP server names (the segment between `mcp__`
+  and the next `__` in a tool name) whose tools are dropped from auto-exposure.
+
+Both limits affect only automatic exposure; an explicit `mcp__…` name in an agent's
+`allowed_tools` whitelist still resolves even if the cap or disable list excluded it.
+
 Leave MCP off, the default, for latency-sensitive one-shot invocations that do
 not need it.
 

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func writeFile(t *testing.T, path, content string) {
@@ -349,6 +350,65 @@ func TestBuildCatalogOneLinesDescriptions(t *testing.T) {
 	out := BuildCatalog(m)
 	if !strings.Contains(out, "- s: first line second line (read /p/q.r)") {
 		t.Errorf("description should be collapsed to one line: %q", out)
+	}
+}
+
+func TestBuildCatalogTruncatesToFirstSentence(t *testing.T) {
+	m := map[string]Skill{
+		"s": {Name: "s", Description: "Do the thing. Then a long tail of extra detail that should not ride in the always-resident prompt.", Location: "/p/q.r"},
+	}
+	out := BuildCatalog(m)
+	if !strings.Contains(out, "- s: Do the thing. (read /p/q.r)") {
+		t.Errorf("catalog should keep only the first sentence: %q", out)
+	}
+	if strings.Contains(out, "long tail") {
+		t.Errorf("catalog should drop text after the first sentence: %q", out)
+	}
+}
+
+func TestBuildCatalogHardCapAddsEllipsis(t *testing.T) {
+	long := strings.Repeat("x", 250) // no sentence boundary
+	m := map[string]Skill{
+		"s": {Name: "s", Description: long, Location: "/p/q.r"},
+	}
+	out := BuildCatalog(m)
+	if !strings.Contains(out, "…") {
+		t.Errorf("a hard-capped description should end with an ellipsis: %q", out)
+	}
+	// The rendered description must be capped near the limit, not the full 250.
+	if strings.Contains(out, strings.Repeat("x", catalogDescMaxChars+1)) {
+		t.Errorf("description should be truncated to the char cap: %q", out)
+	}
+}
+
+func TestCatalogDescription(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"short single sentence kept whole", "Does X.", "Does X."},
+		{"no punctuation short kept whole", "does x", "does x"},
+		{"whitespace collapsed", "first\nsecond   third", "first second third"},
+		{"first sentence with tail dropped", "Lead in. More here.", "Lead in."},
+		{"question boundary", "Use when? Yes really.", "Use when?"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := catalogDescription(tc.in); got != tc.want {
+				t.Errorf("catalogDescription(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+
+	// A 200+ char first sentence falls back to the rune cap plus ellipsis.
+	long := strings.Repeat("a", 205) + "."
+	got := catalogDescription(long)
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("over-long first sentence should be capped with ellipsis: %q", got)
+	}
+	if n := utf8.RuneCountInString(strings.TrimSuffix(got, "…")); n != catalogDescMaxChars {
+		t.Errorf("capped body = %d runes, want %d", n, catalogDescMaxChars)
 	}
 }
 

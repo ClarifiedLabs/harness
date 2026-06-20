@@ -6,8 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -27,6 +29,80 @@ func TestRunCommandEchoExitZero(t *testing.T) {
 	}
 	if !strings.Contains(out, "[exit code: 0]") {
 		t.Errorf("missing exit code marker: %q", out)
+	}
+}
+
+// r41: run_command uses a non-login shell (-c) instead of -lc, so the
+// login-profile chain is not sourced on every call.
+func TestShellCommandUsesNonLoginShell(t *testing.T) {
+	cmd := shellCommand("echo hi")
+	if len(cmd.Args) < 2 {
+		t.Fatalf("unexpected shell args: %v", cmd.Args)
+	}
+	if cmd.Args[1] != "-c" {
+		t.Errorf("shell flag = %q, want -c (non-login)", cmd.Args[1])
+	}
+}
+
+func TestParseLoginPATHOutput(t *testing.T) {
+	if got := parseLoginPATHOutput("profile banner\n" + loginPATHSentinel + "/usr/bin:/bin\n"); got != "/usr/bin:/bin" {
+		t.Errorf("parseLoginPATHOutput = %q, want /usr/bin:/bin", got)
+	}
+	if got := parseLoginPATHOutput("no sentinel present"); got != "" {
+		t.Errorf("missing sentinel should yield empty, got %q", got)
+	}
+}
+
+func TestMergePATH(t *testing.T) {
+	sep := string(filepath.ListSeparator)
+	if got := mergePATH("/a"+sep+"/b", "/b"+sep+"/c"); got != "/a"+sep+"/b"+sep+"/c" {
+		t.Errorf("mergePATH dedup/append = %q", got)
+	}
+	if got := mergePATH("", "/x"); got != "/x" {
+		t.Errorf("empty current: %q", got)
+	}
+	if got := mergePATH("/x", ""); got != "/x" {
+		t.Errorf("empty login: %q", got)
+	}
+}
+
+func TestSetEnvPATH(t *testing.T) {
+	env := []string{"A=1", "PATH=/old", "B=2"}
+	got := setEnvPATH(env, "/new")
+	if env[1] != "PATH=/old" {
+		t.Errorf("input slice was mutated: %v", env)
+	}
+	if !slices.Contains(got, "PATH=/new") {
+		t.Errorf("PATH not replaced: %v", got)
+	}
+	appended := setEnvPATH([]string{"A=1"}, "/p")
+	if appended[len(appended)-1] != "PATH=/p" {
+		t.Errorf("PATH not appended when absent: %v", appended)
+	}
+}
+
+// Integration: the once-resolved login PATH makes a tool reachable to a shell
+// command even though it is only on the login PATH.
+func TestRunCommandUsesResolvedLoginPATH(t *testing.T) {
+	dir := t.TempDir()
+	makeExecutable(t, filepath.Join(dir, "harnesstool42"), "#!/bin/sh\necho found-it\n")
+
+	orig := loginPATHResolver
+	loginPATHResolver = func() string { return dir }
+	loginPATHOnce = sync.Once{}
+	loginPATHCached = ""
+	t.Cleanup(func() {
+		loginPATHResolver = orig
+		loginPATHOnce = sync.Once{}
+		loginPATHCached = ""
+	})
+
+	out, err := runRunCommand(t, map[string]any{"command": "harnesstool42"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "found-it") {
+		t.Errorf("command on the resolved login PATH was not found: %q", out)
 	}
 }
 

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -250,6 +251,244 @@ func TestEditMutatedPaths(t *testing.T) {
 	if len(paths) != 2 || paths[0] != "a.txt" || paths[1] != "b.txt" {
 		t.Fatalf("MutatedPaths = %v, want [a.txt b.txt]", paths)
 	}
+}
+
+func TestEditReplaceAllReplacesEveryOccurrence(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.go")
+	mustWrite(t, p, "old old\nfoo := old\nreturn old\n")
+
+	out, err := runEdit(t, map[string]any{
+		"files": []any{
+			editFileArg(p, map[string]any{"oldText": "old", "newText": "new", "replaceAll": true}),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertFileContent(t, p, "new new\nfoo := new\nreturn new\n")
+	if !strings.Contains(out, "4 replacement(s)") {
+		t.Errorf("success message should report 4 replacements: %q", out)
+	}
+}
+
+func TestEditReplaceAllBypassesUniquenessError(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	mustWrite(t, p, "x x x\n")
+
+	// Without replaceAll this is a duplicate-occurrence error (see
+	// TestEditMultipleOccurrencesRejected); replaceAll must accept it.
+	if _, err := runEdit(t, map[string]any{
+		"files": []any{editFileArg(p, map[string]any{"oldText": "x", "newText": "y", "replaceAll": true})},
+	}); err != nil {
+		t.Fatalf("replaceAll should bypass the uniqueness error: %v", err)
+	}
+	assertFileContent(t, p, "y y y\n")
+}
+
+func TestEditReplaceAllNotFoundStillErrors(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	mustWrite(t, p, "alpha\n")
+
+	_, err := runEdit(t, map[string]any{
+		"files": []any{editFileArg(p, map[string]any{"oldText": "absent", "newText": "x", "replaceAll": true})},
+	})
+	if err == nil {
+		t.Fatal("expected not-found error even with replaceAll")
+	}
+	if !strings.Contains(err.Error(), "could not find oldText") {
+		t.Errorf("error text wrong: %v", err)
+	}
+}
+
+func TestEditReplaceAllCoexistsWithUniqueEdit(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	mustWrite(t, p, "old old\nUNIQUE\n")
+
+	_, err := runEdit(t, map[string]any{
+		"files": []any{
+			editFileArg(p,
+				map[string]any{"oldText": "old", "newText": "new", "replaceAll": true},
+				map[string]any{"oldText": "UNIQUE", "newText": "DONE"},
+			),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertFileContent(t, p, "new new\nDONE\n")
+}
+
+// A replaceAll span that overlaps a DIFFERENT edit must raise the overlap error
+// rather than silently corrupting the file. Regression for the guard that only
+// exempted spans from the same replaceAll block.
+func TestEditReplaceAllOverlappingDifferentEditRejected(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	mustWrite(t, p, "foobar foo\n")
+
+	_, err := runEdit(t, map[string]any{
+		"files": []any{
+			editFileArg(p,
+				map[string]any{"oldText": "foo", "newText": "X", "replaceAll": true},
+				map[string]any{"oldText": "foobar", "newText": "Y"},
+			),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected overlap error when a replaceAll span overlaps a different edit")
+	}
+	if !strings.Contains(err.Error(), "overlap") {
+		t.Errorf("error should mention overlap: %v", err)
+	}
+	// The file must be untouched, not silently corrupted to "X\n".
+	assertFileContent(t, p, "foobar foo\n")
+}
+
+func TestEditReplaceAllDefaultsOff(t *testing.T) {
+	// Omitting replaceAll keeps the strict uniqueness behavior.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	mustWrite(t, p, "x x\n")
+
+	_, err := runEdit(t, map[string]any{
+		"files": []any{editFileArg(p, map[string]any{"oldText": "x", "newText": "y"})},
+	})
+	if err == nil {
+		t.Fatal("expected duplicate error when replaceAll is omitted")
+	}
+}
+
+// r35: a near-miss oldText (not caught by fuzzy normalization) gets a
+// nearest-similar-line hint so the model can recover without a re-read.
+func TestEditNotFoundIncludesNearestLineHint(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.go")
+	mustWrite(t, p, "package main\n\nfunc calculateTotal(items []int) int {\n\treturn 0\n}\n")
+
+	_, err := runEdit(t, map[string]any{
+		"files": []any{editFileArg(p, map[string]any{
+			"oldText": "func calcTotal(items []int) int {",
+			"newText": "x",
+		})},
+	})
+	if err == nil {
+		t.Fatal("expected not-found error")
+	}
+	if !strings.Contains(err.Error(), "nearest similar line is L3:") {
+		t.Errorf("expected nearest-line hint pointing to L3: %v", err)
+	}
+	if !strings.Contains(err.Error(), "calculateTotal") {
+		t.Errorf("hint should echo the similar line: %v", err)
+	}
+}
+
+// A dissimilar oldText must not get a spurious hint.
+func TestEditNotFoundNoHintWhenDissimilar(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	mustWrite(t, p, "alpha\nbeta\ngamma\n")
+
+	_, err := runEdit(t, map[string]any{
+		"files": []any{editFileArg(p, map[string]any{"oldText": "zzzzz qqqqq", "newText": "x"})},
+	})
+	if err == nil {
+		t.Fatal("expected not-found error")
+	}
+	if strings.Contains(err.Error(), "nearest similar line") {
+		t.Errorf("dissimilar oldText should not produce a hint: %v", err)
+	}
+}
+
+func TestNearestSimilarLine(t *testing.T) {
+	content := "import os\nimport sys\n\ndef compute_average(values):\n    return sum(values) / len(values)\n"
+	n, text, ok := nearestSimilarLine(content, "def compute_avg(values):")
+	if !ok {
+		t.Fatal("expected a nearest line")
+	}
+	if n != 4 {
+		t.Errorf("nearest line number = %d, want 4", n)
+	}
+	if !strings.Contains(text, "compute_average") {
+		t.Errorf("nearest line text = %q", text)
+	}
+
+	if _, _, ok := nearestSimilarLine(content, "wholly unrelated xyzzy"); ok {
+		t.Error("unrelated needle should not match any line")
+	}
+}
+
+// r40: a successful edit returns a small numbered snippet of the changed region
+// so the model can confirm the change without a follow-up read_file.
+func TestEditSuccessIncludesVerificationSnippet(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.go")
+	mustWrite(t, p, "package main\n\nfunc calculateTotal() int {\n\treturn 0\n}\n")
+
+	out, err := runEdit(t, map[string]any{
+		"files": []any{editFileArg(p, map[string]any{"oldText": "return 0", "newText": "return 42"})},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Changed line is L4; the snippet shows it (numbered) plus one line of context.
+	if !strings.Contains(out, "4\t\treturn 42") {
+		t.Errorf("snippet should show changed line 4 with new text:\n%q", out)
+	}
+	if !strings.Contains(out, "3\tfunc calculateTotal() int {") {
+		t.Errorf("snippet should include a line of context above:\n%q", out)
+	}
+}
+
+func TestEditSnippet(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&b, "line%d\n", i)
+	}
+	body := b.String()
+
+	t.Run("two distant regions with context and ellipsis", func(t *testing.T) {
+		snip := editSnippet(body, []editRegion{{startLine: 3, endLine: 3}, {startLine: 15, endLine: 15}})
+		for _, want := range []string{"2\tline2", "3\tline3", "4\tline4", "14\tline14", "15\tline15", "16\tline16", "…"} {
+			if !strings.Contains(snip, want) {
+				t.Errorf("snippet missing %q:\n%s", want, snip)
+			}
+		}
+	})
+
+	t.Run("adjacent regions merge into one block", func(t *testing.T) {
+		snip := editSnippet(body, []editRegion{{startLine: 5, endLine: 5}, {startLine: 6, endLine: 6}})
+		if strings.Contains(snip, "…") {
+			t.Errorf("adjacent regions should merge without an ellipsis:\n%s", snip)
+		}
+	})
+
+	t.Run("region count is capped", func(t *testing.T) {
+		regions := []editRegion{
+			{1, 1}, {5, 5}, {9, 9}, {13, 13}, {17, 17},
+		}
+		snip := editSnippet(body, regions)
+		if got := strings.Count(snip, "…"); got > editSnippetMaxRegions-1 {
+			t.Errorf("expected at most %d separators, got %d:\n%s", editSnippetMaxRegions-1, got, snip)
+		}
+	})
+
+	t.Run("byte budget trims at a line boundary", func(t *testing.T) {
+		var wide strings.Builder
+		for i := 1; i <= 60; i++ {
+			fmt.Fprintf(&wide, "%s\n", strings.Repeat("x", 40))
+		}
+		snip := editSnippet(wide.String(), []editRegion{{startLine: 1, endLine: 50}})
+		if len(snip) > editSnippetMaxBytes+len("\n…") {
+			t.Errorf("snippet exceeded byte budget: %d bytes", len(snip))
+		}
+		if !strings.HasSuffix(snip, "…") {
+			t.Errorf("trimmed snippet should end with an ellipsis:\n%s", snip)
+		}
+	})
 }
 
 func assertFileContent(t *testing.T, path, want string) {

@@ -66,10 +66,20 @@ func OneShot(app *App, prompt string) int {
 	turnContext = append(turnContext, skillContext...)
 	err := app.Agent.RunTurnContentWithContext(ctx, prompt, imageBlocks(images), app.turnHookContext(turnContext), turn, sink)
 	app.stopBackgroundJobs()
+	if app.Renderer != nil {
+		app.Renderer.StopProgress()
+	}
 
 	// Save before deciding the exit code so a session is never lost (design §11).
 	// A failed save warns rather than vanishing silently.
 	app.saveOrWarn(app.SessionPath)
+
+	// A one-shot run otherwise leaves no cost trail; print the session totals to
+	// errw (bypassing -quiet, like the interactive exit summary) so a piped run
+	// still reports what it spent (r4).
+	if summary := app.usageReport("session summary"); summary != "" {
+		fmt.Fprintln(app.Errw, summary)
+	}
 
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
