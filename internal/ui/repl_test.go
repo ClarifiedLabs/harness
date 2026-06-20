@@ -132,13 +132,17 @@ func newTestApp(t *testing.T, out, errw testWriter, fp *llmtest.FakeProvider) *A
 	a.SetSleep(func(time.Duration) {}) // no real time in tests
 	r := NewRenderer(out, errw, RenderOptions{Model: "claude-opus-4-8", ToolStream: true})
 	return &App{
-		Agent:       a,
-		Renderer:    r,
-		Out:         out,
-		Errw:        errw,
-		Provider:    "anthropic",
-		Model:       "claude-opus-4-8",
-		BaseURL:     "https://api.anthropic.com/v1",
+		Agent:         a,
+		Renderer:      r,
+		Out:           out,
+		Errw:          errw,
+		Provider:      "anthropic",
+		Model:         "claude-opus-4-8",
+		RegistryModel: "anthropic:claude-opus-4-8",
+		BaseURL:       "https://api.anthropic.com/v1",
+		Registry: llm.NewRegistryWithQualified(nil, map[string]llm.ModelInfo{
+			"anthropic:claude-opus-4-8": {InputModalities: []string{"text", "image"}},
+		}),
 		System:      "you are a test",
 		ImageDetail: "auto",
 		AgentName:   "auto",
@@ -391,6 +395,38 @@ func TestREPLImageCommandAttachesNextPrompt(t *testing.T) {
 	}
 	if !strings.Contains(errw.String(), "[image attached: screen.png image/png") {
 		t.Fatalf("missing image attachment notice: %q", errw.String())
+	}
+}
+
+func TestREPLImageCommandSkipsTextOnlyModel(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Provider = "openai"
+	app.Model = "gpt-5.5"
+	app.RegistryModel = "openai:gpt-5.5"
+	app.Registry = llm.NewRegistryWithQualified(nil, map[string]llm.ModelInfo{
+		"openai:gpt-5.5": {InputModalities: []string{"text"}},
+	})
+	path := writeUIImage(t)
+
+	in := strings.NewReader("/image " + path + "\ndescribe it\n/exit\n")
+	if code := Run(in, app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	if fp.RequestCount() != 1 {
+		t.Fatalf("requests = %d, want 1", fp.RequestCount())
+	}
+	content := fp.Requests[0].Messages[0].Content
+	if len(content) != 1 || content[0].Kind != llm.BlockText || content[0].Text != "describe it" {
+		t.Fatalf("content = %+v, want only text", content)
+	}
+	if !strings.Contains(errw.String(), "[image skipped: model openai:gpt-5.5 does not support image input]") {
+		t.Fatalf("missing image skipped warning: %q", errw.String())
+	}
+	if strings.Contains(errw.String(), "[image attached:") {
+		t.Fatalf("image should not have been attached: %q", errw.String())
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"harness/internal/auth"
 )
@@ -21,10 +22,11 @@ type Price struct {
 
 // ModelInfo is the registry entry for one model.
 type ModelInfo struct {
-	ContextWindow int            `json:"context_window"`
-	OutputLimit   int            `json:"output_limit,omitempty"`
-	Price         Price          `json:"price"`
-	Reasoning     *ReasoningInfo `json:"reasoning,omitempty"`
+	ContextWindow   int            `json:"context_window"`
+	OutputLimit     int            `json:"output_limit,omitempty"`
+	InputModalities []string       `json:"input_modalities,omitempty"`
+	Price           Price          `json:"price"`
+	Reasoning       *ReasoningInfo `json:"reasoning,omitempty"`
 }
 
 // ProviderConfig is the on-disk schema for a provider JSON file.
@@ -58,6 +60,7 @@ type ModelEntry struct {
 	Name             string            `json:"name"`
 	ContextWindow    int               `json:"context_window"`
 	OutputLimit      int               `json:"output_limit,omitempty"`
+	InputModalities  []string          `json:"input_modalities,omitempty"`
 	Price            Price             `json:"price"`
 	Reasoning        *bool             `json:"reasoning,omitempty"`
 	ReasoningOptions []ReasoningOption `json:"reasoning_options,omitempty"`
@@ -149,10 +152,11 @@ func RegistryFromProviderConfigs(providers []ProviderConfig) *Registry {
 func addProviderModels(models, qualified map[string]ModelInfo, pc ProviderConfig) {
 	for _, m := range pc.Models {
 		info := ModelInfo{
-			ContextWindow: m.ContextWindow,
-			OutputLimit:   m.OutputLimit,
-			Price:         m.Price,
-			Reasoning:     modelEntryReasoning(m),
+			ContextWindow:   m.ContextWindow,
+			OutputLimit:     m.OutputLimit,
+			InputModalities: append([]string(nil), m.InputModalities...),
+			Price:           m.Price,
+			Reasoning:       modelEntryReasoning(m),
 		}
 		models[m.Name] = info
 		if pc.Name != "" {
@@ -194,6 +198,23 @@ func (r *Registry) HasPrice(model string) bool {
 	return ok && !priceZero(info.Price)
 }
 
+// SupportsInputModality reports whether model explicitly advertises an input
+// modality such as "image". Missing model metadata or missing modalities are
+// treated as unsupported.
+func (r *Registry) SupportsInputModality(model, modality string) bool {
+	info, ok := r.Lookup(model)
+	if !ok {
+		return false
+	}
+	modality = strings.ToLower(strings.TrimSpace(modality))
+	for _, m := range info.InputModalities {
+		if strings.ToLower(strings.TrimSpace(m)) == modality {
+			return true
+		}
+	}
+	return false
+}
+
 // MergeModel fills missing registry metadata for model. Explicit provider
 // config values win; discovered data is used only where the registry has no
 // context window or no price at all.
@@ -214,6 +235,9 @@ func (r *Registry) MergeModel(model string, info ModelInfo) {
 	}
 	if priceZero(current.Price) && !priceZero(info.Price) {
 		current.Price = info.Price
+	}
+	if len(current.InputModalities) == 0 && len(info.InputModalities) > 0 {
+		current.InputModalities = append([]string(nil), info.InputModalities...)
 	}
 	if current.Reasoning == nil && info.Reasoning != nil {
 		current.Reasoning = info.Reasoning.Clone()

@@ -22,10 +22,11 @@ func TestCatalogAndRegistry(t *testing.T) {
 			Providers: []protocol.Provider{{
 				ID: "openrouter",
 				Models: []protocol.Model{{
-					ID:            "openai/gpt-5.5",
-					ContextWindow: 1_050_000,
-					OutputLimit:   64_000,
-					Price:         llm.Price{Input: 5, Output: 30},
+					ID:              "openai/gpt-5.5",
+					ContextWindow:   1_050_000,
+					OutputLimit:     64_000,
+					InputModalities: []string{"text", "image"},
+					Price:           llm.Price{Input: 5, Output: 30},
 				}},
 			}},
 		})
@@ -49,6 +50,9 @@ func TestCatalogAndRegistry(t *testing.T) {
 	}
 	if got := registry.OutputLimit("openrouter:openai/gpt-5.5"); got != 64_000 {
 		t.Fatalf("qualified output limit = %d, want 64000", got)
+	}
+	if !registry.SupportsInputModality("openrouter:openai/gpt-5.5", "image") {
+		t.Fatalf("qualified model should support image input")
 	}
 }
 

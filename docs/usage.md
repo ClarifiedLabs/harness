@@ -129,7 +129,11 @@ still composed around it.
 
 Image attachments accept local PNG, JPEG, WebP, and non-animated GIF files.
 Images are embedded in the saved transcript as base64 so resumed sessions remain
-self-contained; replay logs show only image metadata.
+self-contained; replay logs show only image metadata. Harness only sends queued
+images when the current model explicitly advertises image input support. Manual
+provider configs should set `input_modalities`, for example
+`["text", "image"]`; models without `image` are treated as text-only and image
+attachments are skipped with a warning.
 
 ## Configuration And Environment
 
@@ -229,7 +233,9 @@ and `codex_oauth`.
 For hand-written model-proxy config shape references, see
 `examples/harness-model-proxy/config.json` and
 `examples/harness-model-proxy/providers.json`. Setup remains the recommended way
-to create real provider allowlists.
+to create real provider allowlists. Manual model entries must declare supported
+input modalities with `input_modalities`; use `["text"]` for text-only models
+and `["text", "image"]` for models that accept image attachments.
 
 `harness-model-proxy` stores the full models.dev catalog at
 `~/.config/harness-model-proxy/models.dev.api.json`. `--setup` uses the cache

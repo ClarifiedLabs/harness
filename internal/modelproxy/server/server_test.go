@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
   "api_key": "sk-file",
   "api_key_env": ["OPENROUTER_API_KEY"],
   "models": [
-    {"name":"openai/gpt-5.5","context_window":1050000,"output_limit":64000,"price":{"input":5,"output":30},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}]}
+    {"name":"openai/gpt-5.5","context_window":1050000,"output_limit":64000,"input_modalities":["text","image"],"price":{"input":5,"output":30},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}]}
   ]
 }`), 0o600); err != nil {
 		t.Fatalf("write provider config: %v", err)
@@ -75,7 +76,7 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	if len(catalog.Providers) != 1 || catalog.Providers[0].ID != "openrouter" {
 		t.Fatalf("catalog providers = %+v", catalog.Providers)
 	}
-	if len(catalog.Providers[0].Models) != 1 || catalog.Providers[0].Models[0].OutputLimit != 64_000 {
+	if len(catalog.Providers[0].Models) != 1 || catalog.Providers[0].Models[0].OutputLimit != 64_000 || !slices.Equal(catalog.Providers[0].Models[0].InputModalities, []string{"text", "image"}) {
 		t.Fatalf("catalog models = %+v, want output limit 64000", catalog.Providers[0].Models)
 	}
 

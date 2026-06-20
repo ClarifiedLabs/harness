@@ -981,10 +981,13 @@ func run(env environment) int {
 			fmt.Fprintf(stderr, "harness: read prompt: %v\n", err)
 			return ui.ExitRuntime
 		}
-		images, err := loadConfiguredImages(cfg.Images)
+		images, err := loadConfiguredImages(cfg.Images, modelRegistry.SupportsInputModality(registryModel, "image"))
 		if err != nil {
 			fmt.Fprintf(stderr, "harness: image: %v\n", err)
 			return ui.ExitRuntime
+		}
+		if len(cfg.Images) > 0 && len(images) == 0 {
+			fmt.Fprintf(stderr, "[image skipped: model %s does not support image input]\n", registryModel)
 		}
 		app.PendingImages = images
 		fmt.Fprintf(stderr, "session: %s\n", sessionPath)
@@ -1152,6 +1155,7 @@ type modelListEntry struct {
 	QualifiedID              string                `json:"qualified_id"`
 	ModelName                string                `json:"model_name,omitempty"`
 	ContextWindow            int                   `json:"context_window,omitempty"`
+	InputModalities          []string              `json:"input_modalities,omitempty"`
 	PricePerMillionTokensUSD *llm.Price            `json:"price_per_million_tokens_usd,omitempty"`
 	Reasoning                modelReasoningDetails `json:"reasoning"`
 }
@@ -1209,7 +1213,7 @@ func formatAgentsListText(out agentsListOutput) string {
 func formatModelsListText(out modelsListOutput) string {
 	var b strings.Builder
 	for _, row := range out.Models {
-		fmt.Fprintf(&b, "%s\t%s\t%s\n", row.ProviderID, row.ModelID, modelListReasoningText(row.Reasoning))
+		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", row.ProviderID, row.ModelID, modelListModalitiesText(row.InputModalities), modelListReasoningText(row.Reasoning))
 	}
 	return b.String()
 }
@@ -1231,12 +1235,30 @@ func catalogModelListRows(catalog protocol.Catalog, registry *llm.Registry) []mo
 				QualifiedID:              provider.ID + ":" + model.ID,
 				ModelName:                strings.TrimSpace(model.Name),
 				ContextWindow:            model.ContextWindow,
+				InputModalities:          append([]string(nil), model.InputModalities...),
 				PricePerMillionTokensUSD: modelListPrice(model.Price),
 				Reasoning:                modelListReasoning(registry, provider.ID, model),
 			})
 		}
 	}
 	return rows
+}
+
+func modelListModalitiesText(input []string) string {
+	if len(input) == 0 {
+		return "-"
+	}
+	cleaned := make([]string, 0, len(input))
+	for _, modality := range input {
+		modality = strings.TrimSpace(modality)
+		if modality != "" {
+			cleaned = append(cleaned, modality)
+		}
+	}
+	if len(cleaned) == 0 {
+		return "-"
+	}
+	return strings.Join(cleaned, ",")
 }
 
 func agentListModelSummary(provider, model string) string {
@@ -1488,8 +1510,11 @@ func envColorDisabled(getenv func(string) string) bool {
 	}
 }
 
-func loadConfiguredImages(images []config.ImageAttachment) ([]inputimage.Loaded, error) {
+func loadConfiguredImages(images []config.ImageAttachment, supportsImages bool) ([]inputimage.Loaded, error) {
 	if len(images) == 0 {
+		return nil, nil
+	}
+	if !supportsImages {
 		return nil, nil
 	}
 	loaded := make([]inputimage.Loaded, 0, len(images))

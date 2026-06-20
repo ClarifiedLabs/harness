@@ -1541,6 +1541,10 @@ func (app *App) imageCommand(arg string) {
 		fmt.Fprintf(app.Errw, "[image failed: %v]\n", err)
 		return
 	}
+	if !app.currentModelSupportsImages() {
+		fmt.Fprintln(app.Errw, app.imageUnsupportedNotice())
+		return
+	}
 	loaded, err := inputimage.Load(att)
 	if err != nil {
 		fmt.Fprintf(app.Errw, "[image failed: %v]\n", err)
@@ -2988,6 +2992,24 @@ func (app *App) agentHasTool(name string) bool {
 	return false
 }
 
+func (app *App) currentModelSupportsImages() bool {
+	if app.Registry == nil {
+		return false
+	}
+	return app.Registry.SupportsInputModality(app.currentRegistryModel(), "image")
+}
+
+func (app *App) imageUnsupportedNotice() string {
+	model := app.currentRegistryModel()
+	if model == "" {
+		model = app.Model
+	}
+	if model == "" {
+		return "[image skipped: current model does not support image input]"
+	}
+	return fmt.Sprintf("[image skipped: model %s does not support image input]", model)
+}
+
 // AddHookContext keeps hook-generated context available for later model turns
 // without writing it into the saved transcript.
 func (app *App) AddHookContext(ctx []string) {
@@ -3000,6 +3022,11 @@ func (app *App) AddHookContext(ctx []string) {
 
 func (app *App) takePendingImages() []inputimage.Loaded {
 	if len(app.PendingImages) == 0 {
+		return nil
+	}
+	if !app.currentModelSupportsImages() {
+		fmt.Fprintln(app.Errw, app.imageUnsupportedNotice())
+		app.PendingImages = nil
 		return nil
 	}
 	images := append([]inputimage.Loaded(nil), app.PendingImages...)

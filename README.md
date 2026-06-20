@@ -86,14 +86,16 @@ refresh.
 
 Provider config files written by `--setup`/`--refresh-models` are **managed**
 (`"managed": true`) and store **no per-model prices**: the proxy resolves managed
-prices live from the models.dev cache, so the 24h refresh updates served prices
-without re-running `--setup` or restarting. A hand-written config without
-`"managed": true` is **manual** — the proxy never edits it and keeps its own
-`price` entries. A managed config may set `"price_source"` to resolve prices from
-a different models.dev provider id; `--setup` sets it to `openai` for
-`openai-codex` so codex models are priced at the normal OpenAI per-token rates.
-Codex configs also set `"omit_max_output_tokens": true` because that backend
-rejects the standard Responses parameter.
+prices and input modalities live from the models.dev cache, so the 24h refresh
+updates served metadata without re-running `--setup` or restarting. A
+hand-written config without `"managed": true` is **manual** — the proxy never
+edits it and keeps its own `price` and `input_modalities` entries. Manual models
+must set `input_modalities` explicitly; use `["text", "image"]` for models that
+accept image attachments. A managed config may set `"price_source"` to resolve
+metadata from a different models.dev provider id; `--setup` sets it to `openai`
+for `openai-codex` so codex models are priced at the normal OpenAI per-token
+rates. Codex configs also set `"omit_max_output_tokens": true` because that
+backend rejects the standard Responses parameter.
 
 While serving, the proxy also answers a read-only `GET /v1/usage` that aggregates
 token and cost totals per provider/model (including delegate child-agent spend),

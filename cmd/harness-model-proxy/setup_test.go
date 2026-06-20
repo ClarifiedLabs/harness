@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +110,7 @@ func TestRunSetupWritesManagedConfigWithoutPrices(t *testing.T) {
 					ID:          "alpha",
 					Name:        "Alpha",
 					ReleaseDate: "2025-01-01",
+					Modalities:  modelsdev.Modalities{Input: []string{"text", "image"}},
 					Limit:       modelsdev.Limit{Context: 123000, Output: 12000},
 					Cost:        llm.Price{Input: 2, Output: 4, CacheRead: 0.5, CacheWrite: 1},
 				},
@@ -161,6 +163,9 @@ func TestRunSetupWritesManagedConfigWithoutPrices(t *testing.T) {
 	}
 	if provider.Models[0].OutputLimit != 12000 {
 		t.Fatalf("managed model output limit = %d, want 12000", provider.Models[0].OutputLimit)
+	}
+	if !slices.Equal(provider.Models[0].InputModalities, []string{"text", "image"}) {
+		t.Fatalf("managed model input modalities = %+v, want text,image", provider.Models[0].InputModalities)
 	}
 }
 
@@ -880,12 +885,14 @@ func testSetupCatalog() *modelsdev.Catalog {
 					ID:          "alpha",
 					Name:        "Alpha",
 					ReleaseDate: "2025-01-01",
+					Modalities:  modelsdev.Modalities{Input: []string{"text", "image"}},
 					Limit:       modelsdev.Limit{Context: 123000},
 				},
 				"beta": {
 					ID:          "beta",
 					Name:        "Beta",
 					ReleaseDate: "2026-01-01",
+					Modalities:  modelsdev.Modalities{Input: []string{"text"}},
 					Limit:       modelsdev.Limit{Context: 456000},
 				},
 			},
@@ -906,6 +913,7 @@ func testSetupCatalogWithOpenAI() *modelsdev.Catalog {
 				ID:          "gpt-test",
 				Name:        "GPT Test",
 				ReleaseDate: "2026-02-01",
+				Modalities:  modelsdev.Modalities{Input: []string{"text", "image"}},
 				Reasoning:   true,
 				Limit:       modelsdev.Limit{Context: 999000, Output: 64000},
 			},

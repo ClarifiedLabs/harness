@@ -40,10 +40,17 @@ type Model struct {
 	Name             string                `json:"name"`
 	ReleaseDate      string                `json:"release_date"`
 	LastUpdated      string                `json:"last_updated"`
+	Modalities       Modalities            `json:"modalities"`
 	Reasoning        bool                  `json:"reasoning"`
 	ReasoningOptions []llm.ReasoningOption `json:"reasoning_options"`
 	Limit            Limit                 `json:"limit"`
 	Cost             llm.Price             `json:"cost"`
+}
+
+// Modalities carries supported input and output modalities from models.dev.
+type Modalities struct {
+	Input  []string `json:"input"`
+	Output []string `json:"output"`
 }
 
 // Limit carries token limits from models.dev.
@@ -291,6 +298,7 @@ func (p Provider) ProviderConfig(apiKey string) llm.ProviderConfig {
 			Name:             m.ID,
 			ContextWindow:    m.Limit.Context,
 			OutputLimit:      m.Limit.Output,
+			InputModalities:  append([]string(nil), m.Modalities.Input...),
 			Price:            m.Cost,
 			ReasoningOptions: append([]llm.ReasoningOption(nil), m.ReasoningOptions...),
 		}
@@ -311,9 +319,10 @@ func (p Provider) ProviderConfig(apiKey string) llm.ProviderConfig {
 // ModelInfo converts one models.dev model into a harness registry entry.
 func (m Model) ModelInfo() llm.ModelInfo {
 	return llm.ModelInfo{
-		ContextWindow: m.Limit.Context,
-		OutputLimit:   m.Limit.Output,
-		Price:         m.Cost,
+		ContextWindow:   m.Limit.Context,
+		OutputLimit:     m.Limit.Output,
+		InputModalities: append([]string(nil), m.Modalities.Input...),
+		Price:           m.Cost,
 		Reasoning: &llm.ReasoningInfo{
 			Supported: m.Reasoning,
 			Options:   append([]llm.ReasoningOption(nil), m.ReasoningOptions...),

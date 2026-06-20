@@ -56,6 +56,7 @@ type setupModelConfig struct {
 	Name             string                `json:"name"`
 	ContextWindow    int                   `json:"context_window,omitempty"`
 	OutputLimit      int                   `json:"output_limit,omitempty"`
+	InputModalities  []string              `json:"input_modalities,omitempty"`
 	Price            *llm.Price            `json:"price,omitempty"`
 	Reasoning        *bool                 `json:"reasoning,omitempty"`
 	ReasoningOptions []llm.ReasoningOption `json:"reasoning_options,omitempty"`
@@ -856,6 +857,7 @@ func setupModelFromModelsDev(model modelsdev.Model) setupModelConfig {
 		Name:             model.ID,
 		ContextWindow:    model.Limit.Context,
 		OutputLimit:      model.Limit.Output,
+		InputModalities:  append([]string(nil), model.Modalities.Input...),
 		ReasoningOptions: append([]llm.ReasoningOption(nil), model.ReasoningOptions...),
 	}
 	reasoning := model.Reasoning

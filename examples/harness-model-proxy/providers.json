@@ -11,6 +11,7 @@
           "name": "example-fast",
           "context_window": 128000,
           "output_limit": 8192,
+          "input_modalities": ["text"],
           "price": {
             "input": 0.25,
             "output": 1.25,
@@ -23,6 +24,7 @@
         {
           "name": "example-reasoning",
           "context_window": 256000,
+          "input_modalities": ["text"],
           "price": {
             "input": 1.00,
             "output": 5.00,
@@ -55,6 +57,7 @@
           "name": "example-responses-model",
           "context_window": 512000,
           "output_limit": 32768,
+          "input_modalities": ["text", "image"],
           "price": {
             "input": 2.00,
             "output": 8.00,
@@ -84,6 +87,7 @@
           "name": "replace-with-codex-model-from-setup",
           "context_window": 256000,
           "output_limit": 32768,
+          "input_modalities": ["text"],
           "reasoning": true,
           "reasoning_options": []
         }
@@ -99,6 +103,7 @@
         {
           "name": "example-anthropic-model",
           "context_window": 200000,
+          "input_modalities": ["text", "image"],
           "price": {
             "input": 3.00,
             "output": 15.00,
@@ -129,6 +134,7 @@
         {
           "name": "example-oauth-model",
           "context_window": 128000,
+          "input_modalities": ["text"],
           "price": {
             "input": 0.50,
             "output": 2.00,

@@ -559,8 +559,8 @@ func (r *Registry) Models() []string               // sorted configured model id
 
 Model metadata originates from the public **models.dev** catalog
 (`internal/modelsdev`); `harness-model-proxy --setup` and `--refresh-models` reduce it
-to the provider/context/reasoning fields harness needs. The proxy caches the
-full catalog JSON as `models.dev.api.json` in the proxy config directory.
+to the provider/context/input-modality/reasoning fields harness needs. The proxy
+caches the full catalog JSON as `models.dev.api.json` in the proxy config directory.
 `--setup` prefers that cache over the vendored snapshot, but fetches and writes it
 when it is missing or invalid. A running proxy refreshes the cache when it is older
 than `models_dev_cache_ttl` (`24h` by default; `0` disables periodic refresh), and
@@ -574,17 +574,18 @@ Provider config files are either **managed** or **manual**:
 
 - **Managed** configs are written by `--setup`/`--refresh-models` and carry
   `"managed": true`. They store **no per-model `price`**; instead the proxy
-  resolves each managed model's price from the in-memory models.dev cache at
-  request time. Because the background refresher (above) reloads that cache and
-  the serving handler swaps in the new prices live, refreshed prices reach the
-  running server **without** a `--setup` + restart. Re-running `--setup` never
-  clobbers hand-edited prices because managed configs hold none.
+  resolves each managed model's price and input modalities from the in-memory
+  models.dev cache at request time. Because the background refresher (above)
+  reloads that cache and the serving handler swaps in the new metadata live,
+  refreshed prices and modality support reach the running server **without** a
+  `--setup` + restart. Re-running `--setup` never clobbers hand-edited prices
+  because managed configs hold none.
 - **Manual** configs are any provider file lacking `"managed": true` — typically
-  hand-written. The proxy never touches them and serves their own `price`
-  entries verbatim. A pre-existing price-bearing config without the flag is
-  treated as manual and keeps its prices (there is no migration). Running
-  `--refresh-models` against such a provider rewrites it as a managed,
-  price-less config.
+  hand-written. The proxy never touches them and serves their own `price` and
+  `input_modalities` entries verbatim. A pre-existing price-bearing config
+  without the flag is treated as manual and keeps its metadata (there is no
+  migration). Running `--refresh-models` against such a provider rewrites it as
+  a managed, price-less config.
 
 A managed config may also carry `"price_source"` — a models.dev provider id to
 resolve its prices from when that differs from the config's own `name`. This
@@ -600,11 +601,11 @@ whatever `price_source` a managed config names.
 The serving handler holds its registry + served catalog behind an atomic
 snapshot. The initial snapshot is built at startup from the loaded provider
 configs plus the cached models.dev catalog; after each successful cache refresh
-the refresher rebuilds the snapshot (managed prices from the new catalog, manual
-prices unchanged) and atomically swaps it in, so `/v1/models` responses and
-per-request `cost_usd` accounting always reflect the freshest managed prices.
-`internal/llm` stays free of any `internal/modelsdev` import — the server is the
-only layer that bridges models.dev prices into `llm.Price`.
+the refresher rebuilds the snapshot (managed prices/modalities from the new
+catalog, manual metadata unchanged) and atomically swaps it in, so `/v1/models`
+responses and per-request `cost_usd` accounting always reflect the freshest
+managed metadata. `internal/llm` stays free of any `internal/modelsdev` import —
+the server is the only layer that bridges models.dev metadata into `llm`.
 Candidate cache updates must parse as models.dev JSON and contain at least one
 provider and model. When a previous cache is parseable, replacement is rejected
 if provider or model counts change by more than 4x and the absolute delta is
@@ -680,7 +681,7 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   `/search`, `n`, `p`, and `cancel`. The provider config is
   generated from models.dev with only enabled models for that provider: base URL,
   api_type (`responses`, `openai`, or `anthropic`), key env vars, context windows,
-  output limits, and reasoning metadata. It is written as a **managed** config (`"managed": true`)
+  output limits, input modalities, and reasoning metadata. It is written as a **managed** config (`"managed": true`)
   with **no per-model prices** — the proxy resolves managed prices live from the
   models.dev cache (see *Managed vs manual provider configs*). Without `--force`,
   setup refuses to overwrite provider files that are not already referenced by the

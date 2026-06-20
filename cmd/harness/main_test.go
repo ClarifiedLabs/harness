@@ -102,8 +102,9 @@ func newFakeModelProxy(t *testing.T, fp *llmtest.FakeProvider) *fakeModelProxy {
 					Name:    "Anthropic",
 					APIType: "anthropic",
 					Models: []protocol.Model{{
-						ID:            "claude-opus-4-8",
-						ContextWindow: 1_000_000,
+						ID:              "claude-opus-4-8",
+						ContextWindow:   1_000_000,
+						InputModalities: []string{"text", "image"},
 					}},
 				},
 				{
@@ -194,6 +195,7 @@ type testInfoModelJSON struct {
 	QualifiedID              string     `json:"qualified_id"`
 	ModelName                string     `json:"model_name"`
 	ContextWindow            int        `json:"context_window"`
+	InputModalities          []string   `json:"input_modalities"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd"`
 	Reasoning                struct {
 		Supported bool                  `json:"supported"`
@@ -350,6 +352,24 @@ func TestRunOneShotImageFlagSendsImage(t *testing.T) {
 	}
 	if content[1].Text != "describe it" {
 		t.Fatalf("text block = %+v", content[1])
+	}
+}
+
+func TestRunOneShotImageFlagSkipsTextOnlyModel(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	path := writeMainPNG(t)
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-provider", "openai", "-model", "gpt-5.5", "-p", "describe it", "-image", path}, fp, "")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	content := fp.Requests[0].Messages[0].Content
+	if len(content) != 1 || content[0].Kind != llm.BlockText || content[0].Text != "describe it" {
+		t.Fatalf("content = %+v, want only text", content)
+	}
+	if !strings.Contains(errw.String(), "[image skipped: model openai:gpt-5.5 does not support image input]") {
+		t.Fatalf("missing image skipped warning: %q", errw.String())
 	}
 }
 
@@ -933,11 +953,11 @@ func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"anthropic\tclaude-opus-4-8\t-\n",
-		"openai\tgpt-5.5\t-\n",
-		"openai\tgemini-2.5-flash\tbudget_tokens=0..24576;toggle\n",
-		"openrouter\topenai/gpt-5.5\tdefault/low/medium/high;budget_tokens=provider-defined range;toggle\n",
-		"openrouter\tz-ai/glm-5.1\tdefault/none/minimal/low/medium/high/xhigh;budget_tokens=provider-defined range;toggle\n",
+		"anthropic\tclaude-opus-4-8\ttext,image\t-\n",
+		"openai\tgpt-5.5\t-\t-\n",
+		"openai\tgemini-2.5-flash\t-\tbudget_tokens=0..24576;toggle\n",
+		"openrouter\topenai/gpt-5.5\t-\tdefault/low/medium/high;budget_tokens=provider-defined range;toggle\n",
+		"openrouter\tz-ai/glm-5.1\t-\tdefault/none/minimal/low/medium/high/xhigh;budget_tokens=provider-defined range;toggle\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("models output missing %q:\n%s", want, got)
@@ -988,6 +1008,9 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 	if anthropicModel.PricePerMillionTokensUSD != nil || anthropicModel.Reasoning.Supported {
 		t.Fatalf("anthropic model = %+v\n%s", anthropicModel, out.String())
 	}
+	if !slices.Equal(anthropicModel.InputModalities, []string{"text", "image"}) {
+		t.Fatalf("anthropic input modalities = %+v\n%s", anthropicModel.InputModalities, out.String())
+	}
 }
 
 func TestRunAgentsAndModelsFlagsPrintBothInOrder(t *testing.T) {
@@ -1006,7 +1029,7 @@ func TestRunAgentsAndModelsFlagsPrintBothInOrder(t *testing.T) {
 	}
 	got := out.String()
 	agentsAt := strings.Index(got, "agents:\n")
-	modelsAt := strings.Index(got, "anthropic\tclaude-opus-4-8\t-")
+	modelsAt := strings.Index(got, "anthropic\tclaude-opus-4-8\ttext,image\t-")
 	if agentsAt < 0 || modelsAt < 0 || agentsAt > modelsAt {
 		t.Fatalf("expected agents before models:\n%s", got)
 	}

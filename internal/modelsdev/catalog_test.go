@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,6 +23,7 @@ const testCatalog = `{
         "id": "openai/gpt-5.5",
         "name": "GPT-5.5",
         "release_date": "2026-06-01",
+        "modalities": {"input": ["text", "image"], "output": ["text"]},
         "reasoning": true,
         "reasoning_options": [{"type":"effort","values":["low","medium","high"]}],
         "limit": {"context": 1050000, "output": 64000},
@@ -87,6 +89,9 @@ func TestDecodeProviderBaseURLAndModelPricing(t *testing.T) {
 	if info.ContextWindow != 1_050_000 || info.OutputLimit != 64_000 || info.Price.Input != 5 || info.Price.Output != 30 || info.Price.CacheRead != 0.5 {
 		t.Fatalf("model info = %+v", info)
 	}
+	if !slices.Equal(info.InputModalities, []string{"text", "image"}) {
+		t.Fatalf("input modalities = %+v, want text,image", info.InputModalities)
+	}
 	if info.Reasoning == nil || !info.Reasoning.SupportsEffort("high") {
 		t.Fatalf("reasoning info = %+v, want high effort support", info.Reasoning)
 	}
@@ -100,7 +105,7 @@ func TestDecodeProviderBaseURLAndModelPricing(t *testing.T) {
 			entry = e
 		}
 	}
-	if entry.ContextWindow != 1_050_000 || entry.OutputLimit != 64_000 {
+	if entry.ContextWindow != 1_050_000 || entry.OutputLimit != 64_000 || !slices.Equal(entry.InputModalities, []string{"text", "image"}) {
 		t.Fatalf("provider config entry = %+v, want context 1050000 / output 64000", entry)
 	}
 }

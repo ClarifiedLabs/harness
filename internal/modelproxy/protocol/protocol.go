@@ -74,12 +74,13 @@ type Provider struct {
 }
 
 type Model struct {
-	ID            string             `json:"id"`
-	Name          string             `json:"name,omitempty"`
-	ContextWindow int                `json:"context_window,omitempty"`
-	OutputLimit   int                `json:"output_limit,omitempty"`
-	Price         llm.Price          `json:"price,omitempty"`
-	Reasoning     *llm.ReasoningInfo `json:"reasoning,omitempty"`
+	ID              string             `json:"id"`
+	Name            string             `json:"name,omitempty"`
+	ContextWindow   int                `json:"context_window,omitempty"`
+	OutputLimit     int                `json:"output_limit,omitempty"`
+	InputModalities []string           `json:"input_modalities,omitempty"`
+	Price           llm.Price          `json:"price,omitempty"`
+	Reasoning       *llm.ReasoningInfo `json:"reasoning,omitempty"`
 }
 
 type StreamRequest struct {

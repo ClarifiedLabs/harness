@@ -267,8 +267,9 @@ func pricedProviders(providers []llm.ProviderConfig, md *modelsdev.Catalog) []ll
 		}
 		cp.Models = make([]llm.ModelEntry, len(pc.Models))
 		for j, entry := range pc.Models {
-			if price, ok := modelsDevPrice(md, priceProvider, entry.Name); ok {
-				entry.Price = price
+			if info, ok := modelsDevModelInfo(md, priceProvider, entry.Name); ok {
+				entry.Price = info.Price
+				entry.InputModalities = append([]string(nil), info.InputModalities...)
 			}
 			cp.Models[j] = entry
 		}
@@ -281,18 +282,23 @@ func pricedProviders(providers []llm.ProviderConfig, md *modelsdev.Catalog) []ll
 // provider/model. This is the single point where the proxy crosses from
 // modelsdev to llm pricing, keeping internal/llm free of a modelsdev import.
 func modelsDevPrice(md *modelsdev.Catalog, providerID, modelID string) (llm.Price, bool) {
+	info, ok := modelsDevModelInfo(md, providerID, modelID)
+	return info.Price, ok
+}
+
+func modelsDevModelInfo(md *modelsdev.Catalog, providerID, modelID string) (llm.ModelInfo, bool) {
 	if md == nil {
-		return llm.Price{}, false
+		return llm.ModelInfo{}, false
 	}
 	provider, ok := md.Provider(providerID)
 	if !ok {
-		return llm.Price{}, false
+		return llm.ModelInfo{}, false
 	}
 	info, ok := provider.ModelInfo(modelID)
 	if !ok {
-		return llm.Price{}, false
+		return llm.ModelInfo{}, false
 	}
-	return info.Price, true
+	return info, true
 }
 
 func anyManagedProvider(providers []llm.ProviderConfig) bool {
@@ -765,12 +771,13 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig) (protocol.Catalo
 				continue
 			}
 			p.Models = append(p.Models, protocol.Model{
-				ID:            entry.Name,
-				Name:          entry.Name,
-				ContextWindow: entry.ContextWindow,
-				OutputLimit:   entry.OutputLimit,
-				Price:         entry.Price,
-				Reasoning:     modelEntryReasoning(entry),
+				ID:              entry.Name,
+				Name:            entry.Name,
+				ContextWindow:   entry.ContextWindow,
+				OutputLimit:     entry.OutputLimit,
+				InputModalities: append([]string(nil), entry.InputModalities...),
+				Price:           entry.Price,
+				Reasoning:       modelEntryReasoning(entry),
 			})
 		}
 		if len(p.Models) > 0 {
