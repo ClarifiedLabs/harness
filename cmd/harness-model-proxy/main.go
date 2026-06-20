@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"harness/internal/apikey"
 	"harness/internal/buildinfo"
 	"harness/internal/httpserve"
 	"harness/internal/logging"
@@ -97,6 +99,7 @@ func run(env environment) int {
 	setup := fs.Bool("setup", false, "create or update proxy config")
 	force := fs.Bool("force", false, "with --setup, overwrite existing provider files")
 	refreshModels := fs.Bool("refresh-models", false, "fetch models.dev and update configured provider model metadata")
+	generateAPIKey := fs.String("generate-api-key", "", "generate a new API key with the given name and add it to the config")
 	modelsDevCacheTTL := fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
 	logLevel := fs.String("log-level", "", "log level: debug, info, warn, error")
 	logFormat := fs.String("log-format", "", "log format: json, text")
@@ -125,6 +128,9 @@ func run(env environment) int {
 			return exitUsage
 		}
 		return exitOK
+	}
+	if *generateAPIKey != "" {
+		return runGenerateAPIKey(env, *configPath, *generateAPIKey)
 	}
 
 	path := server.ConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv)
@@ -217,7 +223,7 @@ func run(env environment) int {
 	startModelsDevCacheRefresh(ctx, env, configDir, modelsTTL, logger, func(catalog *modelsdev.Catalog, sourceDate time.Time) {
 		handler.UpdateModelsDevCatalog(catalog, sourceDate)
 	})
-	srv := httpserve.New(addr, handler)
+	srv := httpserve.New(addr, cfg.APIKeyStore().Middleware(handler))
 	logger.Info("model proxy listening", "addr", addr)
 	if err := httpserve.Run(ctx, srv); err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
@@ -230,9 +236,10 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "harness-model-proxy — provider and model proxy for harness.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  harness-model-proxy [flags]           serve HTTP")
-	fmt.Fprintln(w, "  harness-model-proxy --version         print release version")
-	fmt.Fprintln(w, "  harness-model-proxy --setup [--force] configure providers")
+	fmt.Fprintln(w, "  harness-model-proxy [flags]                    serve HTTP")
+	fmt.Fprintln(w, "  harness-model-proxy --version                  print release version")
+	fmt.Fprintln(w, "  harness-model-proxy --setup [--force]          configure providers")
+	fmt.Fprintln(w, "  harness-model-proxy --generate-api-key <name>  generate and store a new API key")
 	fmt.Fprintln(w, "  harness-model-proxy auth <login|logout|status> [flags] <provider>")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
@@ -243,10 +250,93 @@ func usage(w io.Writer) {
 	fs.Bool("setup", false, "create or update proxy config")
 	fs.Bool("force", false, "with --setup, overwrite existing provider files")
 	fs.Bool("refresh-models", false, "fetch models.dev and update configured provider model metadata")
+	fs.String("generate-api-key", "", "generate a new API key with the given name and add it to the config")
 	fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
 	fs.String("log-level", logging.LevelInfo, "log level: debug, info, warn, error")
 	fs.String("log-format", logging.FormatJSON, "log format: json, text")
 	fs.PrintDefaults()
+}
+
+func runGenerateAPIKey(env environment, argsConfigPath, name string) int {
+	path := server.ConfigPath(argsConfigPath, argsConfigPath != "", env.getenv)
+	if path == "" {
+		fmt.Fprintln(env.stderr, "harness-model-proxy: no config file found; run harness-model-proxy --setup")
+		return exitUsage
+	}
+	// Load existing api_keys via the typed config and add the new entry, then
+	// write back only the api_keys field in the raw JSON. This preserves all other
+	// config keys exactly and avoids round-tripping custom types such as Duration.
+	cfg, err := server.LoadConfig(path)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitRuntime
+	}
+	plaintext, err := apikey.Generate(name, apikey.ModelProxyPrefix)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitUsage
+	}
+	store := cfg.APIKeyStore()
+	store.Add(name, plaintext, env.now())
+	if err := updateConfigAPIKeys(path, store.Entries); err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitRuntime
+	}
+	fmt.Fprintln(env.stdout, plaintext)
+	return exitOK
+}
+
+// updateConfigAPIKeys writes entries into the api_keys field of the JSON file at
+// path, preserving every other top-level key exactly as it was written. It
+// creates parent directories as needed and writes atomically (temp file + rename).
+func updateConfigAPIKeys(path string, entries []apikey.Entry) error {
+	raw := map[string]json.RawMessage{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("read config: %w", err)
+		}
+	} else if len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("parse config: %w", err)
+		}
+	}
+	apiKeysJSON, err := json.Marshal(entries)
+	if err != nil {
+		return fmt.Errorf("marshal api_keys: %w", err)
+	}
+	raw["api_keys"] = apiKeysJSON
+	data, err = json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, "config.json.*")
+	if err != nil {
+		return fmt.Errorf("create temp config: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp config: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename temp config: %w", err)
+	}
+	cleanup = false
+	return nil
 }
 
 func setupModelsDevCacheTTL(env environment, flagValue string, flagSet bool) (time.Duration, error) {

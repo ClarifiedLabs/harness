@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"harness/internal/apikey"
 	"harness/internal/auth"
 	"harness/internal/llm"
 	"harness/internal/llm/factory"
@@ -28,11 +29,18 @@ import (
 const maxStreamRequestBytes = 64 << 20
 
 type Config struct {
-	ProviderConfigs      []string `json:"provider_configs"`
-	DefaultContextWindow int      `json:"default_context_window"`
-	LogLevel             string   `json:"log_level,omitempty"`
-	LogFormat            string   `json:"log_format,omitempty"`
-	ModelsDevCacheTTL    Duration `json:"models_dev_cache_ttl,omitempty"`
+	ProviderConfigs      []string       `json:"provider_configs"`
+	DefaultContextWindow int            `json:"default_context_window"`
+	LogLevel             string         `json:"log_level,omitempty"`
+	LogFormat            string         `json:"log_format,omitempty"`
+	ModelsDevCacheTTL    Duration       `json:"models_dev_cache_ttl,omitempty"`
+	APIKeys              []apikey.Entry `json:"api_keys,omitempty"`
+}
+
+// APIKeyStore returns the API-key store for this config. Auth is required as soon
+// as the first key is configured.
+func (c Config) APIKeyStore() apikey.Store {
+	return apikey.Store{Entries: append([]apikey.Entry(nil), c.APIKeys...)}
 }
 
 // Duration is a JSON duration setting. Strings use Go duration syntax such as

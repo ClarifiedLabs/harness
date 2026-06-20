@@ -64,7 +64,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		Provider: d.registry,
 		Logger:   d.logger,
 	})
-	srv := httpserve.New(d.cfg.Listen, handler)
+	srv := httpserve.New(d.cfg.Listen, d.cfg.APIKeyStore().Middleware(handler))
 	srv.IdleTimeout = 120 * time.Second
 	d.logger.Info("serving MCP over HTTP", logging.Category(categoryGate), "addr", d.cfg.Listen)
 	if err := httpserve.Run(ctx, srv); err != nil {

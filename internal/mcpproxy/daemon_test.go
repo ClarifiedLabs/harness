@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"harness/internal/apikey"
 	"harness/internal/mcp"
 )
 
@@ -110,6 +111,57 @@ func TestDaemonServesHTTP(t *testing.T) {
 	if conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond); err == nil {
 		conn.Close()
 		t.Fatalf("HTTP listener still accepting after shutdown")
+	}
+}
+
+func TestDaemonRequiresAPIKey(t *testing.T) {
+	addr := freePort(t)
+	cfg := Config{
+		Listen:  addr,
+		APIKeys: []apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmcpp_secret")}},
+		Servers: []ResolvedServer{{Name: "h", Transport: TransportStdio, Command: "helper"}},
+	}
+	spawn := helperSpawn(t, map[string]string{"HELPER_TOOLS": "echo"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := startDaemon(t, ctx, cfg, spawn)
+
+	endpoint := "http://" + addr
+	tr := mcp.NewHTTPTransport(mcp.HTTPOptions{Endpoint: endpoint})
+	client := mcp.NewClientTransport(tr, mcp.ClientOptions{Info: mcp.Implementation{Name: "test-http", Version: "1"}})
+
+	deadline := time.Now().Add(5 * time.Second)
+	var initErr error
+	for time.Now().Before(deadline) {
+		_, initErr = client.Initialize(context.Background())
+		if initErr == nil {
+			t.Fatal("expected initialize to fail without API key")
+		}
+		if strings.Contains(initErr.Error(), "401") {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if initErr == nil || !strings.Contains(initErr.Error(), "401") {
+		t.Fatalf("expected 401 without key, got %v", initErr)
+	}
+
+	client.Close()
+	tr2 := mcp.NewHTTPTransport(mcp.HTTPOptions{
+		Endpoint: endpoint,
+		Headers:  map[string]string{"Authorization": "Bearer hmcpp_secret"},
+	})
+	client2 := mcp.NewClientTransport(tr2, mcp.ClientOptions{Info: mcp.Implementation{Name: "test-http", Version: "1"}})
+	defer client2.Close()
+
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := client2.Initialize(context.Background())
+		return err == nil
+	})
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run returned error: %v", err)
 	}
 }
 

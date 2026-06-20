@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"harness/internal/apikey"
 	"harness/internal/auth"
 	"harness/internal/llm"
 	"harness/internal/llm/factory"
@@ -946,5 +947,91 @@ func TestHandlerLogsStreamErrorDetails(t *testing.T) {
 	}
 	if record["request_id"].(float64) <= 0 {
 		t.Fatalf("request_id not populated: %+v", record)
+	}
+}
+
+func TestHandlerAPIKeyAuthRejectsAndAccepts(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [{"name":"known","context_window":128000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	cfg := Config{
+		ProviderConfigs: []string{"openai.json"},
+		APIKeys: []apikey.Entry{
+			{Name: "laptop", Hash: apikey.Hash("hmp_secret")},
+		},
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    cfg,
+		New: func(factory.Options) (llm.Provider, error) {
+			return llmtest.New("fake"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(cfg.APIKeyStore().Middleware(handler))
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no key status = %d, want 401", resp.StatusCode)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer hmp_secret")
+	resp, err = srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET models with key: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("with key status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestHandlerNoAPIKeyAllowsWhenUnconfigured(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [{"name":"known","context_window":128000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			return llmtest.New("fake"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }

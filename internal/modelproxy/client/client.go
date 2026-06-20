@@ -27,9 +27,20 @@ var openRouterEffortValues = []string{"none", "minimal", "low", "medium", "high"
 type Client struct {
 	baseURL string
 	http    *http.Client
+	apiKey  string
 }
 
-func New(baseURL string, httpClient *http.Client) (*Client, error) {
+// Option configures a Client.
+type Option func(*Client)
+
+// WithAPIKey sets the API key sent on every request as Authorization: Bearer.
+func WithAPIKey(key string) Option {
+	return func(c *Client) {
+		c.apiKey = key
+	}
+}
+
+func New(baseURL string, httpClient *http.Client, opts ...Option) (*Client, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
 		baseURL = protocol.DefaultURL
@@ -44,7 +55,17 @@ func New(baseURL string, httpClient *http.Client) (*Client, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{baseURL: baseURL, http: httpClient}, nil
+	c := &Client{baseURL: baseURL, http: httpClient}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
+}
+
+func (c *Client) setAuth(req *http.Request) {
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 }
 
 func (c *Client) URL() string { return c.baseURL }
@@ -55,6 +76,7 @@ func (c *Client) Catalog(ctx context.Context) (protocol.Catalog, error) {
 		return protocol.Catalog{}, err
 	}
 	req.Header.Set(requesterHeader, "harness")
+	c.setAuth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return protocol.Catalog{}, err
@@ -161,6 +183,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 		httpReq.Header.Set("content-type", "application/json")
 		httpReq.Header.Set("accept", protocol.ContentTypeNDJSON)
 		httpReq.Header.Set(requesterHeader, "harness")
+		p.client.setAuth(httpReq)
 
 		resp, err := p.client.http.Do(httpReq)
 		if err != nil {
@@ -218,6 +241,7 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 	}
 	httpReq.Header.Set("content-type", "application/json")
 	httpReq.Header.Set(requesterHeader, "harness")
+	p.client.setAuth(httpReq)
 	resp, err := p.client.http.Do(httpReq)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

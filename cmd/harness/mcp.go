@@ -48,6 +48,7 @@ func dialMCPProxy(mcpCfg config.MCPConfig, logger *slog.Logger) (proxy string, c
 	}
 	conn = mcptools.NewConn(mcptools.Options{
 		Endpoint: proxy,
+		APIKey:   mcpCfg.APIKey,
 		Headers:  mcpCfg.Headers,
 		Info:     mcp.Implementation{Name: "harness", Version: buildinfo.Version},
 		Logger:   logger,

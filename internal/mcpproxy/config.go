@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 
+	"harness/internal/apikey"
 	"harness/internal/auth"
 )
 
@@ -48,10 +49,17 @@ type ServerConfig struct {
 // ProxySettings carries proxy-level overrides. Empty fields fall back to
 // defaults (listen → DefaultListen, logLevel → info, logFormat → json).
 type ProxySettings struct {
-	Listen    string `json:"listen"`
-	LogFile   string `json:"logFile"`
-	LogLevel  string `json:"logLevel"`
-	LogFormat string `json:"logFormat"`
+	Listen    string         `json:"listen"`
+	LogFile   string         `json:"logFile"`
+	LogLevel  string         `json:"logLevel"`
+	LogFormat string         `json:"logFormat"`
+	APIKeys   []apikey.Entry `json:"api_keys,omitempty"`
+}
+
+// APIKeyStore returns the proxy-level API-key store. Auth is required as soon as
+// the first key is configured.
+func (p ProxySettings) APIKeyStore() apikey.Store {
+	return apikey.Store{Entries: append([]apikey.Entry(nil), p.APIKeys...)}
 }
 
 // Transport selects a resolved server's downstream transport.
@@ -86,11 +94,18 @@ type ResolvedServer struct {
 // never prints.
 type Config struct {
 	Servers   []ResolvedServer
+	APIKeys   []apikey.Entry
 	Listen    string
 	LogFile   string
 	LogLevel  string
 	LogFormat string
 	Warnings  []string
+}
+
+// APIKeyStore returns the proxy-level API-key store. Auth is required as soon as
+// the first key is configured.
+func (c Config) APIKeyStore() apikey.Store {
+	return apikey.Store{Entries: append([]apikey.Entry(nil), c.APIKeys...)}
 }
 
 const (
@@ -138,6 +153,7 @@ func LoadConfig(path string) (Config, error) {
 // always the post-expansion value.
 func resolve(fc FileConfig, configDir string) Config {
 	cfg := Config{
+		APIKeys:   append([]apikey.Entry(nil), fc.Proxy.APIKeys...),
 		LogFile:   fc.Proxy.LogFile,
 		LogLevel:  fc.Proxy.LogLevel,
 		LogFormat: fc.Proxy.LogFormat,

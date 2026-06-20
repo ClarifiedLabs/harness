@@ -160,6 +160,30 @@ func TestModelProxyURLPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
 	})
 }
 
+func TestModelProxyAPIKeyPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
+	checkPrecedence(t, precedenceCase[string]{
+		file:     `{"model_proxy_api_key":"file-key"}`,
+		env:      map[string]string{"HARNESS_MODEL_PROXY_API_KEY": "env-key"},
+		flagArgs: []string{"-model-proxy-api-key", "flag-key"},
+		got:      func(c Config) string { return c.ModelProxyAPIKey },
+		wantFlag: "flag-key",
+		wantEnv:  "env-key",
+		wantFile: "file-key",
+	})
+}
+
+func TestMCPProxyAPIKeyPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
+	checkPrecedence(t, precedenceCase[string]{
+		file:     `{"mcp":{"api_key":"file-key"}}`,
+		env:      map[string]string{"HARNESS_MCP_PROXY_API_KEY": "env-key"},
+		flagArgs: []string{"-mcp-proxy-api-key", "flag-key"},
+		got:      func(c Config) string { return c.MCP.APIKey },
+		wantFlag: "flag-key",
+		wantEnv:  "env-key",
+		wantFile: "file-key",
+	})
+}
+
 func TestExplicitProviderIsPreserved(t *testing.T) {
 	c, err := Load([]string{"-model", "claude-opus-4-8", "-provider", "openai"}, noEnv, "")
 	if err != nil {

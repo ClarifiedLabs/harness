@@ -30,6 +30,9 @@ const initTimeout = 10 * time.Second
 type Options struct {
 	// Endpoint is the HTTP proxy URL.
 	Endpoint string
+	// APIKey is sent as Authorization: Bearer on every HTTP request when Endpoint
+	// is set.
+	APIKey string
 	// Headers are static request headers (e.g. Authorization) sent on every
 	// request to the proxy.
 	Headers map[string]string
@@ -106,6 +109,12 @@ func NewConn(opts Options) *Conn {
 	} else {
 		c.endpoint = opts.Endpoint
 		c.headers = opts.Headers
+		if opts.APIKey != "" {
+			if c.headers == nil {
+				c.headers = map[string]string{}
+			}
+			c.headers["Authorization"] = "Bearer " + opts.APIKey
+		}
 	}
 	return c
 }

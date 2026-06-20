@@ -708,6 +708,16 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   uses a parseable local cache before using the vendored fallback snapshot. It
   errors if a configured provider or model is missing/unsupported in the selected
   catalog.
+- **API-key authentication between harness and the model proxy** is optional and
+  disabled by default; it becomes required as soon as the first key is stored.
+  Keys are generated with `harness-model-proxy --generate-api-key <name>`, live in
+  the proxy config under `api_keys` as `{name, hash, added}` entries, and are
+  served by hashing the presented `Authorization: Bearer <key>` with SHA-256 and
+  comparing via `crypto/subtle.ConstantTimeCompare`. Key prefixes (`hmp_` for the
+  model proxy, `hmcpp_` for the MCP proxy) make them human-distinguishable. The
+  plaintext key is printed exactly once at generation and never stored or logged.
+  Harness supplies a key via `-model-proxy-api-key`, `HARNESS_MODEL_PROXY_API_KEY`,
+  or the config-file `model_proxy_api_key` field, with flag > env > file precedence.
 - Provider config auth: `api_key` / `api_key_env` remain the default secret path.
   When a provider config supplies none of `api_key`/`api_key_env`/`auth`, the proxy
   falls back to a hardcoded env var keyed on the provider's `api_type`:
@@ -2175,8 +2185,15 @@ on the thin `internal/mcptools` adapter for tool dispatch (§9.16).
 - **Shutdown.** SIGINT/SIGTERM cancel the daemon: HTTP sessions close with the
   server, and each stdio child is reaped gracefully (close stdin → SIGTERM → SIGKILL
   on the process group, bounded by per-stage timeouts).
-- **Auth and security.** HTTP downstream servers may set static `headers` and/or
-  `auth`. Static headers are applied first, dynamic auth headers next, then MCP
+- **Auth and security.** The proxy's HTTP listener supports optional API-key
+  auth: keys are generated with `harness-mcp-proxy generate-api-key <name>`, stored
+  under `proxy.api_keys` as `{name, hash, added}`, and required on every request
+  once any key exists. Clients send `Authorization: Bearer <key>`; the proxy
+  verifies it with SHA-256 and constant-time comparison. Harness supplies the key
+  via `-mcp-proxy-api-key`, `HARNESS_MCP_PROXY_API_KEY`, or the config-file
+  `mcp.api_key` field, with flag > env > file precedence. HTTP downstream servers
+  may also set static `headers` and/or `auth`. Static headers are applied first,
+  dynamic auth headers next, then MCP
   protocol headers override both. `token_command` delegates login/refresh to an
   external command and caches returned bearer tokens in memory. `oauth2` supports
   explicit `harness-mcp-proxy auth login|logout|status <server>` for browser PKCE

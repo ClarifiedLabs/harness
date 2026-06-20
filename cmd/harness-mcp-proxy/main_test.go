@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"harness/internal/apikey"
 	"harness/internal/mcp"
 	"harness/internal/mcpproxy"
 )
@@ -38,6 +40,7 @@ func testEnv(t *testing.T, args []string) (environment, *bytes.Buffer, *bytes.Bu
 		stderr: &errw,
 		getenv: getenv,
 		sigCh:  nil,
+		now:    time.Now,
 	}, &out, &errw
 }
 
@@ -101,6 +104,35 @@ func TestRunVersionExit0(t *testing.T) {
 		if errw.Len() != 0 {
 			t.Errorf("%s should not write stderr; stderr=%q", arg, errw.String())
 		}
+	}
+}
+
+func TestRunGenerateAPIKeyCreatesConfig(t *testing.T) {
+	env, out, errw := testEnv(t, []string{"generate-api-key", "laptop"})
+	if code := run(env); code != exitOK {
+		t.Fatalf("exit = %d, want %d; stderr=%q", code, exitOK, errw.String())
+	}
+	key := strings.TrimSpace(out.String())
+	if !strings.HasPrefix(key, apikey.MCPProxyPrefix) {
+		t.Fatalf("key missing prefix: %q", key)
+	}
+	cfgPath := mcpproxy.DefaultConfigPath(env.getenv)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg mcpproxy.FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	if len(cfg.Proxy.APIKeys) != 1 || cfg.Proxy.APIKeys[0].Name != "laptop" {
+		t.Fatalf("api_keys = %+v", cfg.Proxy.APIKeys)
+	}
+	store := cfg.Proxy.APIKeyStore()
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	if !store.Authorize(req) {
+		t.Fatal("generated key did not authorize")
 	}
 }
 

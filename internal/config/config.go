@@ -34,6 +34,11 @@ type Config struct {
 	Model         string `json:"model"`
 	ModelProxyURL string `json:"model_proxy_url"`
 
+	// Proxy API keys. These become Authorization: Bearer headers sent to the
+	// respective proxies. Empty means the proxy is contacted without auth.
+	ModelProxyAPIKey string `json:"model_proxy_api_key"`
+	MCPProxyAPIKey   string `json:"mcp_proxy_api_key"`
+
 	// System prompt composition (design §8.5).
 	SystemPrompt string `json:"system_prompt"` // -system-prompt: replace the static system prompt
 	NoEnv        bool   `json:"no_env"`        // -no-env: drop the env-context block
@@ -126,7 +131,8 @@ type Config struct {
 // MCP is enabled and which proxy to dial.
 type MCPConfig struct {
 	Enable bool   `json:"enable"`
-	Proxy  string `json:"proxy"` // http(s) proxy URL; "" means resolve the shared default at use
+	Proxy  string `json:"proxy"`  // http(s) proxy URL; "" means resolve the shared default at use
+	APIKey string `json:"api_key"` // API key for harness-mcp-proxy
 
 	// Headers are static request headers (e.g. Authorization) sent on every
 	// request to the proxy. It is config-file-only (file key "headers" under
@@ -242,6 +248,8 @@ type fileConfig struct {
 	Provider                  string                     `json:"provider"`
 	Model                     string                     `json:"model"`
 	ModelProxyURL             string                     `json:"model_proxy_url"`
+	ModelProxyAPIKey          string                     `json:"model_proxy_api_key"`
+	MCPProxyAPIKey            string                     `json:"mcp_proxy_api_key"`
 	SystemPrompt              string                     `json:"system_prompt"`
 	NoEnv                     *bool                      `json:"no_env"`
 	MaxTurns                  *int                       `json:"max_turns"`
@@ -297,6 +305,7 @@ type fileConfig struct {
 type fileMCPConfig struct {
 	Enable          *bool               `json:"enable"`
 	Proxy           string              `json:"proxy"`
+	APIKey          string              `json:"api_key"`
 	Headers         map[string]string   `json:"headers"`
 	MaxTools        *int                `json:"max_tools"`
 	DisabledServers []string            `json:"disabled_servers"`
@@ -339,6 +348,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	}
 
 	fProvider, fModel, fModelProxyURL := f.provider, f.model, f.modelProxyURL
+	fModelProxyAPIKey, fMCPProxyAPIKey := f.modelProxyAPIKey, f.mcpProxyAPIKey
 	fSystemPrompt, fNoEnv := f.systemPrompt, f.noEnv
 	fResume, fSession := f.resume, f.session
 	fMaxTurns, fDefaultContextWindow, fContextWindow := f.maxTurns, f.defaultContextWindow, f.contextWindow
@@ -368,6 +378,10 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	}
 	c.ModelProxyURL = resolveString(set["model-proxy-url"], *fModelProxyURL,
 		getenv("HARNESS_MODEL_PROXY_URL"), fc.ModelProxyURL, "")
+	c.ModelProxyAPIKey = resolveString(set["model-proxy-api-key"], *fModelProxyAPIKey,
+		getenv("HARNESS_MODEL_PROXY_API_KEY"), fc.ModelProxyAPIKey, "")
+	c.MCPProxyAPIKey = resolveString(set["mcp-proxy-api-key"], *fMCPProxyAPIKey,
+		getenv("HARNESS_MCP_PROXY_API_KEY"), fc.MCPProxyAPIKey, "")
 	c.SystemPrompt = resolveString(set["system-prompt"], *fSystemPrompt,
 		getenv("HARNESS_SYSTEM_PROMPT"), fc.SystemPrompt, "")
 	if set["resume"] {
@@ -518,10 +532,12 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	// unset so main can resolve the shared default HTTP URL at connect time.
 	var mcpEnableFile *bool
 	var mcpProxyFile string
+	var mcpAPIKeyFile string
 	var mcpLocalEnableFile *bool
 	if fc.MCP != nil {
 		mcpEnableFile = fc.MCP.Enable
 		mcpProxyFile = fc.MCP.Proxy
+		mcpAPIKeyFile = fc.MCP.APIKey
 		// Headers are config-file-only (no env layer); copy so a later mutation
 		// of fc cannot reach the resolved Config. Values support ${VAR} and
 		// ${VAR:-default} interpolation. Absent → nil.
@@ -562,6 +578,8 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		getenv("HARNESS_MCP_ENABLE"), mcpEnableFile, false)
 	c.MCP.Proxy = resolveString(false, "",
 		getenv("HARNESS_MCP_PROXY"), mcpProxyFile, "")
+	c.MCP.APIKey = resolveString(set["mcp-proxy-api-key"], *fMCPProxyAPIKey,
+		getenv("HARNESS_MCP_PROXY_API_KEY"), mcpAPIKeyFile, "")
 	localEnableEnv := getenv("HARNESS_MCP_LOCAL_ENABLE")
 	c.MCP.Local.EnableSet = localEnableEnv != "" || mcpLocalEnableFile != nil
 	c.MCP.Local.Enable = resolveBool(false, false,
@@ -839,7 +857,8 @@ func parseImageAttachment(spec, defaultDetail string) (ImageAttachment, error) {
 // the help can never drift from what is actually parsed (design §10).
 type flags struct {
 	provider, model, modelProxyURL *string
-	systemPrompt                   *string
+	modelProxyAPIKey, mcpProxyAPIKey *string
+	systemPrompt                    *string
 	noEnv                          *bool
 	resume, session                *string
 	histFile                       *string
@@ -889,6 +908,8 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.provider = fs.String("provider", "", "model proxy provider id")
 	f.model = fs.String("model", "", "model id")
 	f.modelProxyURL = fs.String("model-proxy-url", "", "harness-model-proxy URL")
+	f.modelProxyAPIKey = fs.String("model-proxy-api-key", "", "API key for harness-model-proxy (also HARNESS_MODEL_PROXY_API_KEY)")
+	f.mcpProxyAPIKey = fs.String("mcp-proxy-api-key", "", "API key for harness-mcp-proxy (also HARNESS_MCP_PROXY_API_KEY)")
 	f.systemPrompt = fs.String("system-prompt", "", "replace the static system prompt (text or @file)")
 	f.noEnv = fs.Bool("no-env", false, "omit the environment context block")
 	f.resume = fs.String("resume", "", "load a session transcript and continue")

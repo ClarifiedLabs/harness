@@ -160,7 +160,7 @@ func run(env environment) int {
 	if proxyURL == "" {
 		proxyURL = protocol.DefaultURL
 	}
-	proxyClient, err := modelclient.New(proxyURL, nil)
+	proxyClient, err := modelclient.New(proxyURL, nil, modelclient.WithAPIKey(cfg.ModelProxyAPIKey))
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage

@@ -13,14 +13,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync/atomic"
 	"syscall"
+	"time"
 
+	"harness/internal/apikey"
 	"harness/internal/buildinfo"
 	"harness/internal/mcp"
 	"harness/internal/mcpproxy"
@@ -55,6 +60,7 @@ func main() {
 		stderr: os.Stderr,
 		getenv: os.Getenv,
 		sigCh:  sigCh,
+		now:    time.Now,
 	}))
 }
 
@@ -69,6 +75,7 @@ type environment struct {
 	stderr io.Writer
 	getenv func(string) string
 	sigCh  chan os.Signal
+	now    func() time.Time
 }
 
 func signalCancelContext(sigCh <-chan os.Signal) (context.Context, context.CancelFunc, func() bool) {
@@ -113,6 +120,8 @@ func run(env environment) int {
 		return runTools(env, args[1:])
 	case "auth":
 		return runAuth(env, args[1:])
+	case "generate-api-key":
+		return runGenerateAPIKey(env, args[1:])
 	case "version":
 		fmt.Fprintf(env.stdout, "%s (MCP protocol %s)\n", buildinfo.Line("harness-mcp-proxy"), mcp.ProtocolVersion)
 		return exitOK
@@ -129,20 +138,22 @@ func usage(w io.Writer, getenv func(string) string) {
 	fmt.Fprint(w, `harness-mcp-proxy - MCP proxy daemon and debug client
 
 Usage:
-  harness-mcp-proxy serve   [-config path] [-listen addr] [-stdio] [-log path] [-log-level level] [-log-format format]
-  harness-mcp-proxy tools   [-config path] [-proxy url]
-  harness-mcp-proxy auth    <login|logout|status> [-config path] <server>
+  harness-mcp-proxy serve             [-config path] [-listen addr] [-stdio] [-log path] [-log-level level] [-log-format format]
+  harness-mcp-proxy tools             [-config path] [-proxy url]
+  harness-mcp-proxy auth              <login|logout|status> [-config path] <server>
+  harness-mcp-proxy generate-api-key  [-config path] <name>
   harness-mcp-proxy version
   harness-mcp-proxy --version
 
 Subcommands:
-  serve     Run the proxy daemon: load config, supervise downstream MCP
-            servers, and serve their merged tools over streamable HTTP.
-  tools     Connect to a running proxy and print the aggregated tool table,
-            over HTTP.
-  auth      Login, logout, or inspect OAuth credentials for a configured HTTP
-            downstream server.
-  version   Print the release version and MCP protocol revision.
+  serve             Run the proxy daemon: load config, supervise downstream MCP
+                     servers, and serve their merged tools over streamable HTTP.
+  tools             Connect to a running proxy and print the aggregated tool table,
+                     over HTTP.
+  auth              Login, logout, or inspect OAuth credentials for a configured HTTP
+                     downstream server.
+  generate-api-key  Generate a proxy-level API key and store its hash in config.
+  version           Print the release version and MCP protocol revision.
 
 serve flags:
   -config path      config file (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
@@ -152,9 +163,12 @@ serve flags:
   -log-level level  debug|info|warn|error (overrides config; default: info)
   -log-format fmt   json|text (overrides config; default: json)
 
+generate-api-key flags:
+  -config path      config file (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
+
 tools flags:
   -config path      config file (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
-  -proxy url      proxy URL (default: `+mcpproxy.DefaultURL()+`)
+  -proxy url        proxy URL (default: `+mcpproxy.DefaultURL()+`)
 `)
 }
 
@@ -173,6 +187,97 @@ func resolveConfigPath(flagValue string, explicit bool, getenv func(string) stri
 		return def
 	}
 	return ""
+}
+
+func runGenerateAPIKey(env environment, args []string) int {
+	fs := flag.NewFlagSet("generate-api-key", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	configPath := fs.String("config", "", "config file path")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
+		return exitUsage
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(env.stderr, "harness-mcp-proxy: generate-api-key requires exactly one name")
+		return exitUsage
+	}
+	name := fs.Arg(0)
+	path := resolveConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv)
+	if path == "" {
+		// No config file exists yet; create one at the default path so a key can
+		// be generated on a fresh install.
+		path = mcpproxy.DefaultConfigPath(env.getenv)
+	}
+
+	var fc mcpproxy.FileConfig
+	fc.MCPServers = map[string]mcpproxy.ServerConfig{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
+			return exitRuntime
+		}
+	} else {
+		if err := json.Unmarshal(data, &fc); err != nil {
+			fmt.Fprintf(env.stderr, "harness-mcp-proxy: parse config: %v\n", err)
+			return exitRuntime
+		}
+	}
+	if fc.MCPServers == nil {
+		fc.MCPServers = map[string]mcpproxy.ServerConfig{}
+	}
+
+	plaintext, err := apikey.Generate(name, apikey.MCPProxyPrefix)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
+		return exitUsage
+	}
+	store := fc.Proxy.APIKeyStore()
+	store.Add(name, plaintext, env.now())
+	fc.Proxy.APIKeys = store.Entries
+
+	if err := writeMCPConfigFile(path, fc); err != nil {
+		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
+		return exitRuntime
+	}
+	fmt.Fprintln(env.stdout, plaintext)
+	return exitOK
+}
+
+// writeMCPConfigFile writes v to path atomically (temp file + rename). It
+// creates parent directories as needed.
+func writeMCPConfigFile(path string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, "config.json.*")
+	if err != nil {
+		return fmt.Errorf("create temp config: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp config: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename temp config: %w", err)
+	}
+	cleanup = false
+	return nil
 }
 
 // flagWasSet reports whether the named flag was explicitly provided on the

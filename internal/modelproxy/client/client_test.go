@@ -13,6 +13,26 @@ import (
 	"harness/internal/modelproxy/protocol"
 )
 
+func TestCatalogSendsAuthorizationHeader(t *testing.T) {
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(protocol.Catalog{})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, srv.Client(), WithAPIKey("hmp_secret"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Catalog(context.Background()); err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	if auth != "Bearer hmp_secret" {
+		t.Fatalf("Authorization header = %q, want Bearer hmp_secret", auth)
+	}
+}
+
 func TestCatalogAndRegistry(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {

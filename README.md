@@ -117,6 +117,33 @@ harness-mcp-proxy serve
 HARNESS_MCP_ENABLE=true harness -provider <provider> -model <model>
 ```
 
+## Authenticating harness to its proxies
+
+Both proxies support optional API-key authentication. It is disabled by default
+and becomes required as soon as the first key is stored in the proxy's config.
+
+Generate and store a key for the model proxy (the full plaintext key is printed
+once):
+
+```sh
+harness-model-proxy --generate-api-key laptop
+harness --model-proxy-api-key <key> -provider <provider> -model <model>
+```
+
+Or use the `HARNESS_MODEL_PROXY_API_KEY` environment variable, or set
+`model_proxy_api_key` in `~/.config/harness/config.json`.
+
+For the MCP proxy:
+
+```sh
+harness-mcp-proxy generate-api-key laptop
+HARNESS_MCP_PROXY_API_KEY=<key> HARNESS_MCP_ENABLE=true harness -provider <provider> -model <model>
+```
+
+Or set `mcp.api_key` in `~/.config/harness/config.json`. The model proxy key has
+prefix `hmp_`; the MCP proxy key has prefix `hmcpp_`. Only SHA-256 hashes of
+keys are stored; the plaintext is shown exactly once at generation.
+
 ## Basic usage
 
 Interactive mode starts when no prompt is provided:

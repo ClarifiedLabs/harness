@@ -1,0 +1,121 @@
+package apikey
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestGenerateShapeAndPrefix(t *testing.T) {
+	key, err := Generate("laptop", ModelProxyPrefix)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if !strings.HasPrefix(key, ModelProxyPrefix) {
+		t.Fatalf("key %q missing prefix %q", key, ModelProxyPrefix)
+	}
+	wantLen := len(ModelProxyPrefix) + 43 // 32 bytes base64-raw-url = 43 chars
+	if len(key) != wantLen {
+		t.Fatalf("key length = %d, want %d", len(key), wantLen)
+	}
+}
+
+func TestGenerateUniqueness(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 100; i++ {
+		key, err := Generate(fmt.Sprintf("key-%d", i), MCPProxyPrefix)
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		if seen[key] {
+			t.Fatalf("duplicate key generated: %q", key)
+		}
+		seen[key] = true
+	}
+}
+
+func TestGenerateNameValidation(t *testing.T) {
+	_, err := Generate("bad name!", ModelProxyPrefix)
+	if err == nil {
+		t.Fatal("expected error for invalid name")
+	}
+}
+
+func TestHashDeterministic(t *testing.T) {
+	a := Hash("hmp_abc")
+	b := Hash("hmp_abc")
+	if len(a) != 32 || len(b) != 32 {
+		t.Fatalf("hash length wrong: %d/%d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatal("same key produced different hashes")
+		}
+	}
+}
+
+func TestStoreAuthorize(t *testing.T) {
+	var s Store
+	s.Add("laptop", "hmp_secret", time.Time{})
+
+	reqOK := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqOK.Header.Set("Authorization", "Bearer hmp_secret")
+	if !s.Authorize(reqOK) {
+		t.Fatal("expected valid key to authorize")
+	}
+
+	reqNoAuth := httptest.NewRequest(http.MethodGet, "/", nil)
+	if s.Authorize(reqNoAuth) {
+		t.Fatal("expected missing auth to be rejected")
+	}
+
+	reqBadScheme := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqBadScheme.Header.Set("Authorization", "Basic hmp_secret")
+	if s.Authorize(reqBadScheme) {
+		t.Fatal("expected non-Bearer scheme to be rejected")
+	}
+
+	reqWrong := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqWrong.Header.Set("Authorization", "Bearer hmp_wrong")
+	if s.Authorize(reqWrong) {
+		t.Fatal("expected wrong key to be rejected")
+	}
+}
+
+func TestStoreNotRequired(t *testing.T) {
+	var s Store
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	if !s.Authorize(req) {
+		t.Fatal("empty store should allow all requests")
+	}
+}
+
+func TestMiddlewareAllowsAndRejects(t *testing.T) {
+	var s Store
+	s.Add("laptop", "hmp_secret", time.Time{})
+
+	var reached bool
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true })
+	handler := s.Middleware(next)
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth code = %d, want 401", w.Code)
+	}
+
+	reached = false
+	w = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer hmp_secret")
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("auth code = %d, want 200", w.Code)
+	}
+	if !reached {
+		t.Fatal("auth request did not reach next handler")
+	}
+}
