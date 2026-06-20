@@ -50,6 +50,42 @@ func TestUnifiedMultipleHunks(t *testing.T) {
 	}
 }
 
+func TestUnifiedLargeFileSmallChanges(t *testing.T) {
+	var old, newer strings.Builder
+	for i := 1; i <= 2300; i++ {
+		oldLine := "same"
+		newLine := "same"
+		switch i {
+		case 780:
+			oldLine = "optional file diffs"
+			newLine = "file diffs"
+		case 1720:
+			oldLine = "show-diffs"
+			newLine = "show-diffs (default true)"
+		}
+		old.WriteString(oldLine)
+		old.WriteByte('\n')
+		newer.WriteString(newLine)
+		newer.WriteByte('\n')
+	}
+
+	got := Unified("large.md", true, []byte(old.String()), true, []byte(newer.String()), Options{})
+	if strings.Contains(got, "@@ -1,2300 +1,2300 @@") {
+		t.Fatalf("large small edit fell back to whole-file diff")
+	}
+	if count := strings.Count(got, "@@ "); count != 2 {
+		t.Fatalf("hunk count = %d, want 2:\n%s", count, got)
+	}
+	for _, want := range []string{
+		"-optional file diffs\n+file diffs\n",
+		"-show-diffs\n+show-diffs (default true)\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("diff missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestUnifiedMissingFinalNewline(t *testing.T) {
 	got := Unified("nonewline.txt", true, []byte("a"), true, []byte("a\n"), Options{})
 	if !strings.Contains(got, "\\ No newline at end of file\n") {

@@ -279,10 +279,62 @@ func diffLines(oldLines, newLines []line) []op {
 	if len(oldLines) == 0 && len(newLines) == 0 {
 		return nil
 	}
-	if len(oldLines) > 0 && len(newLines) > 4_000_000/len(oldLines) {
-		return wholeFileDiff(oldLines, newLines)
+	prefix := commonPrefix(oldLines, newLines)
+	oldEnd, newEnd := len(oldLines), len(newLines)
+	for oldEnd > prefix && newEnd > prefix && sameLine(oldLines[oldEnd-1], newLines[newEnd-1]) {
+		oldEnd--
+		newEnd--
 	}
-	return lcsDiff(oldLines, newLines)
+
+	ops := make([]op, 0, len(oldLines)+len(newLines))
+	for i := range prefix {
+		ops = append(ops, op{
+			kind:    opEqual,
+			oldLine: oldLines[i],
+			newLine: newLines[i],
+			oldNo:   i + 1,
+			newNo:   i + 1,
+		})
+	}
+
+	oldMiddle := oldLines[prefix:oldEnd]
+	newMiddle := newLines[prefix:newEnd]
+	var middle []op
+	if len(oldMiddle) > 0 && len(newMiddle) > 4_000_000/len(oldMiddle) {
+		middle = wholeFileDiff(oldMiddle, newMiddle)
+	} else {
+		middle = lcsDiff(oldMiddle, newMiddle)
+	}
+	ops = append(ops, shiftOps(middle, prefix, prefix)...)
+
+	for oldIdx, newIdx := oldEnd, newEnd; oldIdx < len(oldLines) && newIdx < len(newLines); oldIdx, newIdx = oldIdx+1, newIdx+1 {
+		ops = append(ops, op{
+			kind:    opEqual,
+			oldLine: oldLines[oldIdx],
+			newLine: newLines[newIdx],
+			oldNo:   oldIdx + 1,
+			newNo:   newIdx + 1,
+		})
+	}
+	return ops
+}
+
+func commonPrefix(oldLines, newLines []line) int {
+	n := min(len(oldLines), len(newLines))
+	for i := range n {
+		if !sameLine(oldLines[i], newLines[i]) {
+			return i
+		}
+	}
+	return n
+}
+
+func shiftOps(ops []op, oldOffset, newOffset int) []op {
+	for i := range ops {
+		ops[i].oldNo += oldOffset
+		ops[i].newNo += newOffset
+	}
+	return ops
 }
 
 func wholeFileDiff(oldLines, newLines []line) []op {
