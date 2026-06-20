@@ -622,10 +622,10 @@ overridable for a run with `-context-window`. Model prices, context windows,
 output limits, and reasoning metadata are loaded from the model proxy catalog. When reasoning
 controls are set, that metadata is used to validate provider/model reasoning
 support, effort values, and budget ranges.
-Responses API reasoning summaries default to `auto` for interactive sessions, can be
-set to `auto`, `concise`, `detailed`, or `none`, and are omitted by default in
-one-shot mode. Quiet mode (`-q`/`--quiet`) suppresses reasoning summary output
-unless `-reasoning-summary` is explicitly set on the CLI.
+Responses API reasoning summaries default off, can be set to `auto`, `concise`,
+`detailed`, or `none`, and are displayed only when explicitly enabled. Quiet mode
+(`-q`/`--quiet`) suppresses reasoning summary output unless `-reasoning-summary`
+is explicitly set on the CLI.
 
 ## 7. Configuration and provider selection
 
@@ -1493,12 +1493,12 @@ backoff allows.
   Markdown `---` delimiter with blank lines around it before the final answer.
   Providers without phase metadata keep their assistant text stream unchanged.
 - Responses API reasoning summaries are semantic model-to-user output events,
-  not notices and not transcript messages. Interactive runs render them to
-  stdout as a compact two-space indented block headed by a timestamp line such
-  as `[16:15:34 reasoning]` (the header drops the timestamp and reads `[reasoning]`
-  when status timestamps are disabled) and closed by an `[end reasoning]` footer.
-  Non-interactive runs default summaries off, and explicitly enabled summaries
-  render to stderr.
+  not notices and not transcript messages. They default off. When explicitly
+  enabled, interactive runs render them to stdout as a compact two-space indented
+  block headed by a timestamp line such as `[16:15:34 reasoning]` (the header
+  drops the timestamp and reads `[reasoning]` when status timestamps are
+  disabled) and closed by an `[end reasoning]` footer. Non-interactive runs render
+  explicitly enabled summaries to stderr.
 - Model progress renders as plain stderr lines, e.g. `[model: turn 1 waiting]`.
   When pricing is known, the returned provider request also emits a checkpoint:
   `[model: turn 1 cost: $0.0012 · totals: $0.0034 prompt · $0.0456 session]`.

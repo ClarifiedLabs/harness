@@ -1883,14 +1883,8 @@ func effectiveReasoningSummary(configured, mode string, interactive, suppressOut
 	}
 	configured = strings.ToLower(strings.TrimSpace(configured))
 	switch configured {
-	case "none":
-		return ""
 	case "auto", "concise", "detailed":
 		return configured
-	case "":
-		if interactive && strings.EqualFold(strings.TrimSpace(mode), "responses") {
-			return "auto"
-		}
 	}
 	return ""
 }

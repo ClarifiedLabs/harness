@@ -1691,7 +1691,7 @@ func TestRunReasoningBudgetTokensRejectedForOpenAICompatibleProvider(t *testing.
 	}
 }
 
-func TestEffectiveReasoningSummaryDefaultsToInteractiveResponsesOnly(t *testing.T) {
+func TestEffectiveReasoningSummaryRequiresExplicitSetting(t *testing.T) {
 	cases := []struct {
 		name           string
 		configured     string
@@ -1700,12 +1700,12 @@ func TestEffectiveReasoningSummaryDefaultsToInteractiveResponsesOnly(t *testing.
 		suppressOutput bool
 		want           string
 	}{
-		{name: "interactive responses", mode: "responses", interactive: true, want: "auto"},
-		{name: "one shot responses", mode: "responses", interactive: false, want: ""},
-		{name: "interactive chat completions", mode: "openai", interactive: true, want: ""},
+		{name: "interactive responses default off", mode: "responses", interactive: true, want: ""},
+		{name: "one shot responses default off", mode: "responses", interactive: false, want: ""},
+		{name: "interactive chat completions default off", mode: "openai", interactive: true, want: ""},
+		{name: "configured auto", configured: "auto", mode: "responses", interactive: true, want: "auto"},
 		{name: "configured concise", configured: "concise", mode: "responses", interactive: false, want: "concise"},
 		{name: "configured none", configured: "none", mode: "responses", interactive: true, want: ""},
-		{name: "quiet suppresses interactive default", mode: "responses", interactive: true, suppressOutput: true, want: ""},
 		{name: "quiet suppresses configured summary", configured: "detailed", mode: "responses", interactive: true, suppressOutput: true, want: ""},
 	}
 	for _, tc := range cases {

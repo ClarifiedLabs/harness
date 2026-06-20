@@ -49,7 +49,7 @@ func TestOneShotAssistantTextOnStdoutNoiseOnStderr(t *testing.T) {
 	}
 }
 
-func TestOneShotReasoningSummaryStaysOnStderr(t *testing.T) {
+func TestOneShotExplicitReasoningSummaryStaysOnStderr(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{
@@ -59,6 +59,8 @@ func TestOneShotReasoningSummaryStaysOnStderr(t *testing.T) {
 		Stop: llm.StopEndTurn,
 	})
 	app := newTestApp(t, &out, &errw, fp)
+	app.Reasoning = llm.ReasoningConfig{Summary: "auto"}
+	app.Agent.SetReasoning(app.Reasoning)
 	app.Renderer = NewRenderer(&out, &errw, RenderOptions{
 		Model:           "claude-opus-4-8",
 		ToolStream:      true,

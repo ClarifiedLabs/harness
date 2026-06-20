@@ -2166,6 +2166,15 @@ func normalizeReasoningSummaryInput(input string) (string, bool) {
 	}
 }
 
+func reasoningSummaryDisplayEnabled(summary string) bool {
+	switch strings.ToLower(strings.TrimSpace(summary)) {
+	case "auto", "concise", "detailed", "on", "true", "enabled", "enable":
+		return true
+	default:
+		return false
+	}
+}
+
 func (app *App) validateEffortForModel(model, effort string) error {
 	if effort == "" {
 		return nil
@@ -3398,7 +3407,7 @@ func (s *accumulatingSink) AssistantPhase(phase string) {
 
 func (s *accumulatingSink) ReasoningSummary(text string) {
 	text = strings.TrimSpace(text)
-	if text == "" {
+	if text == "" || !reasoningSummaryDisplayEnabled(s.app.Reasoning.Summary) {
 		return
 	}
 	if s.reasoningOutput {

@@ -228,7 +228,37 @@ func TestREPLRecordsModelTurnTimingEvents(t *testing.T) {
 	}
 }
 
-func TestREPLReasoningSummaryRendersAsFirstClassOutput(t *testing.T) {
+func TestREPLReasoningSummaryHiddenByDefault(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{
+			reasoningSummary("Hidden by default"),
+			textDelta("done"),
+		},
+		Stop: llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+
+	code := Run(strings.NewReader("hi\n/exit\n"), app, nil)
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if strings.Contains(out.String(), "Hidden by default") || strings.Contains(errw.String(), "Hidden by default") {
+		t.Fatalf("reasoning summary should be hidden by default; stdout=%q stderr=%q", out.String(), errw.String())
+	}
+	if !strings.Contains(out.String(), "done") {
+		t.Fatalf("assistant text missing from stdout:\n%s", out.String())
+	}
+	data, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read replay log: %v", err)
+	}
+	if strings.Contains(string(data), `"type":"reasoning_summary"`) {
+		t.Fatalf("hidden reasoning summary should not be recorded for replay:\n%s", data)
+	}
+}
+
+func TestREPLReasoningSummaryRendersAsFirstClassOutputWhenExplicit(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{
@@ -238,6 +268,8 @@ func TestREPLReasoningSummaryRendersAsFirstClassOutput(t *testing.T) {
 		Stop: llm.StopEndTurn,
 	})
 	app := newTestApp(t, &out, &errw, fp)
+	app.Reasoning = llm.ReasoningConfig{Summary: "auto"}
+	app.Agent.SetReasoning(app.Reasoning)
 	app.Renderer = NewRenderer(&out, &errw, RenderOptions{
 		Model:           "claude-opus-4-8",
 		ToolStream:      true,

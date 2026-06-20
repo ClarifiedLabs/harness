@@ -196,7 +196,7 @@ Reasoning controls are opt-in: `reasoning_effort` /
 `reasoning_budget_tokens` / `HARNESS_REASONING_BUDGET_TOKENS` /
 `-reasoning-budget-tokens`. Responses API reasoning summaries are controlled by
 `reasoning_summary` / `HARNESS_REASONING_SUMMARY` / `-reasoning-summary`; they
-default to `auto` in interactive sessions and off in one-shot mode. `-q` disables
+default off and are displayed only when explicitly enabled. `-q` disables
 reasoning summary output unless `-reasoning-summary` is explicitly set on the CLI.
 
 Responses continuation is on by default for proxy providers that report both
