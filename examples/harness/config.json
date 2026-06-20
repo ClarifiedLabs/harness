@@ -27,7 +27,7 @@
   "delegate_max_turns": 20,
   "verbose": false,
   "tool_stream": true,
-  "show_diffs": false,
+  "show_diffs": true,
   "log_level": "info",
   "no_color": false,
   "timestamps": "short",

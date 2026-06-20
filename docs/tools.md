@@ -89,10 +89,11 @@ when that process exits.
 ## File Mutation
 
 `edit`, `write_file`, and `apply_patch` are the built-in file mutation tools.
-When `show_diffs`, `HARNESS_SHOW_DIFFS`, or `-show-diffs` is enabled, harness
-prints a unified before/after diff for each built-in file mutation tool call.
-Diffs are generated from per-call file snapshots, so repeated edits to the same
-file show incremental changes rather than a repository-wide diff.
+By default, harness prints a unified before/after diff for each built-in file
+mutation tool call. Set `show_diffs`, `HARNESS_SHOW_DIFFS`, or `-show-diffs` to
+false to disable diff output. Diffs are generated from per-call file snapshots,
+so repeated edits to the same file show incremental changes rather than a
+repository-wide diff.
 
 ## Delegation
 

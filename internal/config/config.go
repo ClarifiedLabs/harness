@@ -463,7 +463,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	c.ToolStream = resolveBool(set["tool-stream"], *fToolStream,
 		getenv("HARNESS_TOOL_STREAM"), fc.ToolStream, true)
 	c.ShowDiffs = resolveBool(set["show-diffs"], *fShowDiffs,
-		getenv("HARNESS_SHOW_DIFFS"), fc.ShowDiffs, false)
+		getenv("HARNESS_SHOW_DIFFS"), fc.ShowDiffs, true)
 	c.Quiet = *f.quietShort || *f.quiet
 	logLevel := resolveString(set["log-level"], *f.logLevel,
 		getenv("LOG_LEVEL"), fc.LogLevel, logging.LevelInfo)
@@ -910,7 +910,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.responsesStateful = fs.Bool("responses-stateful", true, "enable OpenAI Responses previous_response_id continuation when supported")
 	f.verbose = fs.Bool("v", false, "show tool result snippets")
 	f.toolStream = fs.Bool("tool-stream", true, "show live tool-call progress")
-	f.showDiffs = fs.Bool("show-diffs", false, "show per-tool-call file diffs for built-in file edits")
+	f.showDiffs = fs.Bool("show-diffs", true, "show per-tool-call file diffs for built-in file edits")
 	f.quietShort = fs.Bool("q", false, "suppress status messages and reasoning output unless -reasoning-summary is set")
 	f.quiet = fs.Bool("quiet", false, "suppress status messages and reasoning output unless -reasoning-summary is set")
 	f.logLevel = fs.String("log-level", logging.LevelInfo, "diagnostic log level: debug, info, warn, error (also LOG_LEVEL)")

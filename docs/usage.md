@@ -99,7 +99,7 @@ interrupted.
 -search-tools <mode>   search tools to expose: auto, grep, rg, or both
 -v                show tool result snippets (first ~5 lines, dimmed)
 -tool-stream      show live tool-call progress (default true; use -tool-stream=false to disable)
--show-diffs       show per-tool-call file diffs for built-in file edits
+-show-diffs       show per-tool-call file diffs for built-in file edits (default true; use -show-diffs=false to disable)
 -q, --quiet       suppress status diagnostics and reasoning output unless -reasoning-summary is set;
                   still prints one per-turn usage/cost line at an interactive terminal (suppressed only
                   when output is also non-TTY/piped), and one-shot runs always print the session summary

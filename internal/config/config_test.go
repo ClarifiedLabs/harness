@@ -373,19 +373,19 @@ func TestToolStreamPrecedence(t *testing.T) {
 
 func TestShowDiffsPrecedence(t *testing.T) {
 	c := loadOK(t, []string{"-model", "gpt-5.5"}, noEnv, "")
-	if c.ShowDiffs {
-		t.Fatalf("default show-diffs true, want false")
+	if !c.ShowDiffs {
+		t.Fatalf("default show-diffs false, want true")
 	}
 
 	checkPrecedence(t, precedenceCase[bool]{
-		file:     `{"show_diffs":true}`,
-		env:      map[string]string{"HARNESS_SHOW_DIFFS": "false"},
+		file:     `{"show_diffs":false}`,
+		env:      map[string]string{"HARNESS_SHOW_DIFFS": "true"},
 		baseArgs: []string{"-model", "gpt-5.5"},
-		flagArgs: []string{"-show-diffs"},
+		flagArgs: []string{"-show-diffs=false"},
 		got:      func(c Config) bool { return c.ShowDiffs },
-		wantFlag: true,
-		wantEnv:  false,
-		wantFile: true,
+		wantFlag: false,
+		wantEnv:  true,
+		wantFile: false,
 	})
 }
 
