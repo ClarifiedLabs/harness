@@ -75,6 +75,9 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	if len(catalog.Providers) != 1 || catalog.Providers[0].ID != "openrouter" {
 		t.Fatalf("catalog providers = %+v", catalog.Providers)
 	}
+	if len(catalog.Providers[0].Models) != 1 || catalog.Providers[0].Models[0].OutputLimit != 64_000 {
+		t.Fatalf("catalog models = %+v, want output limit 64000", catalog.Providers[0].Models)
+	}
 
 	body, _ := json.Marshal(protocol.StreamRequest{
 		Provider: "openrouter",
@@ -246,6 +249,67 @@ func TestHandlerCatalogMarksResponsesStatefulCapability(t *testing.T) {
 	}
 	if providers["openrouter"].ResponsesStateful {
 		t.Fatalf("openrouter ResponsesStateful = true, want false")
+	}
+}
+
+func TestHandlerStreamOmitsMaxOutputTokensForCodexOAuth(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "tokens"), 0o700); err != nil {
+		t.Fatalf("mkdir tokens: %v", err)
+	}
+	token, err := json.Marshal(map[string]any{
+		"access_token": "access-token",
+		"account_id":   "account-123",
+		"expiry":       time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("marshal token: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tokens", "codex.json"), token, 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "openai-codex.json"), []byte(`{
+  "name": "openai-codex",
+  "api_type": "responses",
+  "base_url": "https://chatgpt.com/backend-api/codex",
+  "auth": {"type":"codex_oauth","token_file":"tokens/codex.json"},
+  "models": [{"name":"gpt-5.5","context_window":1050000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	var captured factory.Options
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai-codex.json"}},
+		New: func(opts factory.Options) (llm.Provider, error) {
+			captured = opts
+			return llmtest.New("fake", llmtest.Step{
+				Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
+				Stop:   llm.StopEndTurn,
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body, _ := json.Marshal(protocol.StreamRequest{
+		Provider: "openai-codex",
+		Request:  llm.Request{Model: "gpt-5.5"},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if captured.Provider != "responses" || !captured.OmitMaxOutputTokens {
+		t.Fatalf("captured options = %+v, want responses with OmitMaxOutputTokens", captured)
 	}
 }
 

@@ -31,8 +31,11 @@ type Options struct {
 	MaxTokens     int
 	Temperature   *float64
 	ContextWindow int
-	OutputLimit   int    // model's real max-output-token limit; 0 = unknown
-	ReasoningMode string // "openai" | "openrouter" | "anthropic"; empty = infer
+	OutputLimit   int // model's real max-output-token limit; 0 = unknown
+	// OmitMaxOutputTokens suppresses Responses max_output_tokens for providers
+	// that reject the standard parameter.
+	OmitMaxOutputTokens bool
+	ReasoningMode       string // "openai" | "openrouter" | "anthropic"; empty = infer
 }
 
 // New constructs the provider selected by opts. The provider is inferred from
@@ -79,11 +82,12 @@ func New(opts Options) (llm.Provider, error) {
 			return nil, fmt.Errorf("llm: OPENAI_API_KEY is required (or set a custom base URL for a local server)")
 		}
 		return responses.New(responses.Config{
-			APIKey:        opts.APIKey,
-			AuthHeaders:   opts.AuthHeaders,
-			BaseURL:       opts.BaseURL,
-			ContextWindow: opts.ContextWindow,
-			OutputLimit:   opts.OutputLimit,
+			APIKey:              opts.APIKey,
+			AuthHeaders:         opts.AuthHeaders,
+			BaseURL:             opts.BaseURL,
+			ContextWindow:       opts.ContextWindow,
+			OutputLimit:         opts.OutputLimit,
+			OmitMaxOutputTokens: opts.OmitMaxOutputTokens,
 		}), nil
 	default:
 		return nil, fmt.Errorf("llm: unknown provider %q (want openai, responses, or anthropic)", provider)

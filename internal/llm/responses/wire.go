@@ -177,6 +177,10 @@ type wireUsage struct {
 }
 
 func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
+	return buildRequestWithOptions(req, contextWindow, outputLimit, false)
+}
+
+func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, omitMaxOutputTokens bool) wireRequest {
 	instructions := req.System
 	// Replay persisted encrypted reasoning items only when reasoning is enabled
 	// for this request (mirrors the Anthropic dialect's includeThinking gate).
@@ -207,7 +211,7 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 		Temperature:        req.Temperature,
 	}
 
-	if mt := maxTokens(req.MaxTokens, contextWindow, outputLimit); mt > 0 {
+	if mt := maxTokens(req.MaxTokens, contextWindow, outputLimit, omitMaxOutputTokens); mt > 0 {
 		w.MaxOutputTokens = &mt
 	}
 	if req.Reasoning.Effort != "" || req.Reasoning.Summary != "" {
@@ -360,9 +364,13 @@ func imageDataURL(b llm.ContentBlock) string {
 // maxTokens resolves the max_output_tokens to send. Precedence: an explicit user
 // value wins; else the model's real catalog output limit when known
 // (outputLimit > 0); else min(defaultMaxTokensCap, contextWindow/4) as a
-// client-side runaway brake for catalog-unknown models. Zero (all unset/unknown)
-// means "omit" so the server keeps its default.
-func maxTokens(userValue, contextWindow, outputLimit int) int {
+// client-side runaway brake for catalog-unknown models. When omit is true, the
+// field is suppressed for compatible backends that reject it. Zero (all
+// unset/unknown) means "omit" so the server keeps its default.
+func maxTokens(userValue, contextWindow, outputLimit int, omit bool) int {
+	if omit {
+		return 0
+	}
 	if userValue > 0 {
 		return userValue
 	}

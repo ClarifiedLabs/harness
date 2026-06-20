@@ -655,15 +655,30 @@ func (h *Handler) runtimeOptions(ctx context.Context, providerID, model string) 
 		contextWindow = h.defaultContextWindow
 	}
 	return factory.Options{
-		Provider:      apiType,
-		ProviderName:  pc.Name,
-		Model:         model,
-		BaseURL:       pc.BaseURL,
-		APIKey:        apiKey,
-		AuthHeaders:   authHeaders,
-		ContextWindow: contextWindow,
-		OutputLimit:   entry.OutputLimit,
+		Provider:            apiType,
+		ProviderName:        pc.Name,
+		Model:               model,
+		BaseURL:             pc.BaseURL,
+		APIKey:              apiKey,
+		AuthHeaders:         authHeaders,
+		ContextWindow:       contextWindow,
+		OutputLimit:         entry.OutputLimit,
+		OmitMaxOutputTokens: providerOmitMaxOutputTokens(pc),
 	}, nil
+}
+
+func providerOmitMaxOutputTokens(pc llm.ProviderConfig) bool {
+	if pc.OmitMaxOutputTokens {
+		return true
+	}
+	if pc.Auth == nil || !strings.EqualFold(strings.TrimSpace(pc.Auth.Type), auth.TypeCodexOAuth) {
+		return false
+	}
+	apiType := pc.APIType
+	if apiType == "" {
+		apiType = pc.Name
+	}
+	return strings.EqualFold(strings.TrimSpace(apiType), "responses")
 }
 
 func buildAuthSources(providers []llm.ProviderConfig, configDir string, getenv func(string) string) (map[string]*auth.Source, error) {
@@ -753,6 +768,7 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig) (protocol.Catalo
 				ID:            entry.Name,
 				Name:          entry.Name,
 				ContextWindow: entry.ContextWindow,
+				OutputLimit:   entry.OutputLimit,
 				Price:         entry.Price,
 				Reasoning:     modelEntryReasoning(entry),
 			})

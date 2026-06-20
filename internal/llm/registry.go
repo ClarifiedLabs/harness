@@ -44,10 +44,13 @@ type ProviderConfig struct {
 	// openai-codex, whose models are OpenAI models billed at OpenAI per-token
 	// rates — can price from that provider ("openai") instead. Ignored for manual
 	// configs.
-	PriceSource string       `json:"price_source,omitempty"`
-	APIKeyEnv   []string     `json:"api_key_env"`
-	Auth        *auth.Config `json:"auth,omitempty"`
-	Models      []ModelEntry `json:"models"`
+	PriceSource string `json:"price_source,omitempty"`
+	// OmitMaxOutputTokens suppresses Responses max_output_tokens for compatible
+	// backends that reject the standard parameter, such as ChatGPT Codex.
+	OmitMaxOutputTokens bool         `json:"omit_max_output_tokens,omitempty"`
+	APIKeyEnv           []string     `json:"api_key_env"`
+	Auth                *auth.Config `json:"auth,omitempty"`
+	Models              []ModelEntry `json:"models"`
 }
 
 // ModelEntry is one model inside a ProviderConfig.

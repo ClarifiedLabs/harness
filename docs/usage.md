@@ -176,12 +176,11 @@ context-efficiency knobs are config-file-only.
   auto-exposure, and `lsp.tools` registers only the listed subset of LSP tools
   (empty = all). See [mcp.md](mcp.md) and [lsp.md](lsp.md). An explicit
   `allowed_tools` whitelist can still name a tool that auto-exposure excluded.
-- A single model turn's output is capped at `min(32768, context_window/4)` tokens
-  (a client-side runaway brake, not the model's catalog limit). Models that
-  support 64k+ output are therefore truncated at 32768 tokens per turn, surfaced
-  as a `[stopped: model reached max tokens]` notice. This is distinct from
-  `-max-turn-tokens`, which is the cumulative per-turn token *budget* across all
-  model calls, not the single-response output cap.
+- A single model turn's output is capped at the model's configured
+  `output_limit` when known, otherwise `min(32768, context_window/4)` tokens.
+  This client-side runaway brake is distinct from `-max-turn-tokens`, which is
+  the cumulative per-turn token *budget* across all model calls. When the cap is
+  reached, harness surfaces `[stopped: model reached max tokens]`.
 
 Harness automatically adds static AGENTS instructions from
 `~/.agents/AGENTS.md`, then from `AGENTS.md` in the current working directory.
@@ -215,7 +214,8 @@ Google's OpenAI-compatible Gemini endpoint. Vertex Google package variants are
 not auto-configured.
 
 The special `openai-codex` provider uses ChatGPT subscription auth instead of an
-API key. After setup, run:
+API key and omits Responses `max_output_tokens` because the Codex backend
+rejects that parameter. After setup, run:
 
 ```sh
 harness-model-proxy auth login openai-codex

@@ -10,6 +10,7 @@
         {
           "name": "example-fast",
           "context_window": 128000,
+          "output_limit": 8192,
           "price": {
             "input": 0.25,
             "output": 1.25,
@@ -53,6 +54,7 @@
         {
           "name": "example-responses-model",
           "context_window": 512000,
+          "output_limit": 32768,
           "price": {
             "input": 2.00,
             "output": 8.00,
@@ -73,6 +75,7 @@
       "name": "openai-codex",
       "api_type": "responses",
       "base_url": "https://chatgpt.com/backend-api/codex",
+      "omit_max_output_tokens": true,
       "auth": {
         "type": "codex_oauth"
       },
@@ -80,6 +83,7 @@
         {
           "name": "replace-with-codex-model-from-setup",
           "context_window": 256000,
+          "output_limit": 32768,
           "reasoning": true,
           "reasoning_options": []
         }

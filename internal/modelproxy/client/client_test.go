@@ -24,6 +24,7 @@ func TestCatalogAndRegistry(t *testing.T) {
 				Models: []protocol.Model{{
 					ID:            "openai/gpt-5.5",
 					ContextWindow: 1_050_000,
+					OutputLimit:   64_000,
 					Price:         llm.Price{Input: 5, Output: 30},
 				}},
 			}},
@@ -45,6 +46,9 @@ func TestCatalogAndRegistry(t *testing.T) {
 	registry := Registry(catalog)
 	if got := registry.ContextWindow("openrouter:openai/gpt-5.5"); got != 1_050_000 {
 		t.Fatalf("qualified context window = %d, want 1050000", got)
+	}
+	if got := registry.OutputLimit("openrouter:openai/gpt-5.5"); got != 64_000 {
+		t.Fatalf("qualified output limit = %d, want 64000", got)
 	}
 }
 

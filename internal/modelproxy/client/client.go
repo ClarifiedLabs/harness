@@ -84,6 +84,7 @@ func Registry(catalog protocol.Catalog) *llm.Registry {
 			}
 			info := llm.ModelInfo{
 				ContextWindow: model.ContextWindow,
+				OutputLimit:   model.OutputLimit,
 				Price:         model.Price,
 				Reasoning:     proxyModelReasoning(provider.ID, model),
 			}

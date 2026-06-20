@@ -92,6 +92,8 @@ without re-running `--setup` or restarting. A hand-written config without
 `price` entries. A managed config may set `"price_source"` to resolve prices from
 a different models.dev provider id; `--setup` sets it to `openai` for
 `openai-codex` so codex models are priced at the normal OpenAI per-token rates.
+Codex configs also set `"omit_max_output_tokens": true` because that backend
+rejects the standard Responses parameter.
 
 While serving, the proxy also answers a read-only `GET /v1/usage` that aggregates
 token and cost totals per provider/model (including delegate child-agent spend),

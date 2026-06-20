@@ -425,7 +425,7 @@ Edge cases:
 | Prompt cache key | `prompt_cache_key` from `Request.PromptCacheKey` | `prompt_cache_key` from `Request.PromptCacheKey` | not sent (explicit `cache_control` breakpoints instead) |
 | Stateful continuation | `store` is always sent — `store:true` plus `previous_response_id` when proxy catalog reports `responses_stateful:true` (tools/system still sent each request), `store:false` for the stateless default | ignored | ignored |
 | Assistant phase | assistant `message` input items include stored `phase` (`commentary` or `final_answer`) when present | ignored | ignored |
-| Token cap | `max_output_tokens = min(32768, contextWindow/4)` when unset (omitted if the window is unknown) | `max_tokens = min(32768, contextWindow/4)` when unset (omitted if the window is unknown) | `max_tokens` is required; if unset, `min(32768, contextWindow/4)` |
+| Token cap | `max_output_tokens = outputLimit when known, else min(32768, contextWindow/4)` when unset (omitted if disabled or window unknown) | `max_tokens = outputLimit when known, else min(32768, contextWindow/4)` when unset (omitted if the window is unknown) | `max_tokens` is required; if unset, `outputLimit when known, else min(32768, contextWindow/4)` |
 | Streaming usage | final `response.usage` on terminal events | `"stream_options":{"include_usage":true}` (always set) | automatic: input tokens in `message_start`, output in `message_delta` |
 | Stop sequences | not sent | `stop` | `stop_sequences` |
 | Temperature | omitted when nil (never send a spurious 0) | same | same |
@@ -436,13 +436,13 @@ The same model-facing `ToolSchema.Parameters` bytes go into `parameters` vs
 advertising tools; each tool's top-level description remains the explanatory text.
 
 **Default `max_tokens` cap (`defaultMaxTokensCap = 32768`).** When the user does
-not set `MaxTokens`, all three dialects bound a single response at
-`min(32768, contextWindow/4)`. This is a client-side runaway brake — a hard cap on
-one turn's output, **not** the model's catalog output limit (which is not plumbed)
-and not a floor — so a looping reasoning model cannot emit to a 64k+ model limit in
-one turn. Anthropic always sends the computed value (`max_tokens` is required);
-OpenAI Chat Completions and Responses send `max_tokens` / `max_output_tokens` only
-when the context window is known, omitting it otherwise.
+not set `MaxTokens`, all three dialects bound a single response at the model's
+catalog `output_limit` when known, otherwise at `min(32768, contextWindow/4)`.
+This is a client-side runaway brake, separate from the turn-level budgets.
+Anthropic always sends the computed value (`max_tokens` is required); OpenAI Chat
+Completions and Responses send `max_tokens` / `max_output_tokens` only when the
+value is known. Responses providers can set `omit_max_output_tokens` when a
+compatible backend rejects the standard parameter.
 
 **Prompt cache key (`prompt_cache_key`).** OpenAI Chat Completions and Responses
 emit `Request.PromptCacheKey`, a stable per-agent value: an FNV-64a hash of the
@@ -591,8 +591,11 @@ resolve its prices from when that differs from the config's own `name`. This
 exists for `openai-codex`, whose models are OpenAI models re-exposed under the
 codex base URL and billed at OpenAI per-token rates: `--setup` writes
 `"price_source": "openai"` so codex prices track the OpenAI rates in the cache.
-The server stays provider-neutral — the codex→openai knowledge lives only in
-`--setup`; the server just honors whatever `price_source` a managed config names.
+It also writes `"omit_max_output_tokens": true` because the ChatGPT Codex
+backend rejects the Responses `max_output_tokens` parameter; the proxy infers
+the same omit behavior for older `codex_oauth` Responses configs.
+The server otherwise stays provider-neutral for pricing — it just honors
+whatever `price_source` a managed config names.
 
 The serving handler holds its registry + served catalog behind an atomic
 snapshot. The initial snapshot is built at startup from the loaded provider
@@ -614,8 +617,8 @@ provider-local model names are rejected unless they are configured in the proxy
 catalog. Configured models without pricing metadata display token counts without
 a dollar figure. Configured models without context-window metadata use a
 conservative 256k default, configurable with `-default-context-window` and
-overridable for a run with `-context-window`. Model prices, context windows, and
-reasoning metadata are loaded from the model proxy catalog. When reasoning
+overridable for a run with `-context-window`. Model prices, context windows,
+output limits, and reasoning metadata are loaded from the model proxy catalog. When reasoning
 controls are set, that metadata is used to validate provider/model reasoning
 support, effort values, and budget ranges.
 Responses API reasoning summaries default to `auto` for interactive sessions, can be
@@ -668,15 +671,16 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   models newest-first, and asks which models should be locally available. The
   synthetic `openai-codex` provider is listed when the catalog has OpenAI models;
   it writes the ChatGPT Codex backend URL and a `codex_oauth` auth block instead
-  of API-key fields. The proxy exposes this provider as Responses-compatible but
-  not stateful because the Codex backend requires `store:false`. New providers
-  start with no models enabled; existing providers start with their configured
-  models enabled and all other catalog models disabled. Enabled rows are bold and marked with `*`; the
+  of API-key fields, plus `omit_max_output_tokens:true`. The proxy exposes this
+  provider as Responses-compatible but not stateful because the Codex backend
+  requires `store:false`. New providers start with no models enabled; existing
+  providers start with their configured models enabled and all other catalog
+  models disabled. Enabled rows are bold and marked with `*`; the
   selector accepts number/id toggles plus global `all`, global `none`, `save`,
   `/search`, `n`, `p`, and `cancel`. The provider config is
   generated from models.dev with only enabled models for that provider: base URL,
   api_type (`responses`, `openai`, or `anthropic`), key env vars, context windows,
-  and reasoning metadata. It is written as a **managed** config (`"managed": true`)
+  output limits, and reasoning metadata. It is written as a **managed** config (`"managed": true`)
   with **no per-model prices** — the proxy resolves managed prices live from the
   models.dev cache (see *Managed vs manual provider configs*). Without `--force`,
   setup refuses to overwrite provider files that are not already referenced by the

@@ -82,6 +82,29 @@ func TestBuildRequestMaxOutputTokensUserSetBeatsOutputLimit(t *testing.T) {
 	}
 }
 
+func TestBuildRequestOmitMaxOutputTokens(t *testing.T) {
+	tests := []struct {
+		name          string
+		userValue     int
+		contextWindow int
+		outputLimit   int
+	}{
+		{name: "context window default", contextWindow: 1_000_000},
+		{name: "catalog output limit", outputLimit: 100_000},
+		{name: "explicit request max", userValue: 333, contextWindow: 1_000_000, outputLimit: 100_000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := basicRequest()
+			req.MaxTokens = tc.userValue
+			w := buildRequestWithOptions(req, tc.contextWindow, tc.outputLimit, true)
+			if w.MaxOutputTokens != nil {
+				t.Fatalf("max_output_tokens = %v, want omitted", w.MaxOutputTokens)
+			}
+		})
+	}
+}
+
 func TestBuildRequestTemperatureOmittedWhenNil(t *testing.T) {
 	req := basicRequest()
 	b, err := json.Marshal(buildRequest(req, 0, 0))

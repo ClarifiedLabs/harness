@@ -109,7 +109,7 @@ func TestRunSetupWritesManagedConfigWithoutPrices(t *testing.T) {
 					ID:          "alpha",
 					Name:        "Alpha",
 					ReleaseDate: "2025-01-01",
-					Limit:       modelsdev.Limit{Context: 123000},
+					Limit:       modelsdev.Limit{Context: 123000, Output: 12000},
 					Cost:        llm.Price{Input: 2, Output: 4, CacheRead: 0.5, CacheWrite: 1},
 				},
 			},
@@ -158,6 +158,9 @@ func TestRunSetupWritesManagedConfigWithoutPrices(t *testing.T) {
 	}
 	if provider.Models[0].ContextWindow != 123000 {
 		t.Fatalf("managed model context window = %d, want 123000", provider.Models[0].ContextWindow)
+	}
+	if provider.Models[0].OutputLimit != 12000 {
+		t.Fatalf("managed model output limit = %d, want 12000", provider.Models[0].OutputLimit)
 	}
 }
 
@@ -267,11 +270,17 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	if len(provider.Models) != 1 || provider.Models[0].Name != "gpt-test" || provider.Models[0].ContextWindow != 999000 {
 		t.Fatalf("provider models = %+v, want gpt-test", provider.Models)
 	}
+	if provider.Models[0].OutputLimit != 64000 {
+		t.Fatalf("provider output limit = %d, want 64000", provider.Models[0].OutputLimit)
+	}
 	if !provider.Managed {
 		t.Fatalf("codex provider should be managed: %+v", provider)
 	}
 	if provider.PriceSource != openAIModelsDevProviderID {
 		t.Fatalf("codex price_source = %q, want %q (prices from OpenAI rates)", provider.PriceSource, openAIModelsDevProviderID)
+	}
+	if !provider.OmitMaxOutputTokens {
+		t.Fatalf("codex omit_max_output_tokens = false, want true")
 	}
 }
 
@@ -807,6 +816,12 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	if len(provider.Models) != 1 || provider.Models[0].Name != "gpt-test" || provider.Models[0].ContextWindow != 999000 {
 		t.Fatalf("provider models after refresh = %+v", provider.Models)
 	}
+	if provider.Models[0].OutputLimit != 64000 {
+		t.Fatalf("provider output limit after refresh = %d, want 64000", provider.Models[0].OutputLimit)
+	}
+	if !provider.OmitMaxOutputTokens {
+		t.Fatalf("codex omit_max_output_tokens after refresh = false, want true")
+	}
 }
 
 func TestRunRefreshModelsSIGINTCancelsCatalogFetch(t *testing.T) {
@@ -892,7 +907,7 @@ func testSetupCatalogWithOpenAI() *modelsdev.Catalog {
 				Name:        "GPT Test",
 				ReleaseDate: "2026-02-01",
 				Reasoning:   true,
-				Limit:       modelsdev.Limit{Context: 999000},
+				Limit:       modelsdev.Limit{Context: 999000, Output: 64000},
 			},
 		},
 	}

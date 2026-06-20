@@ -43,15 +43,19 @@ type setupProviderConfig struct {
 	// PriceSource names the models.dev provider id whose prices apply to this
 	// managed provider when it differs from Name (e.g. openai-codex prices from
 	// "openai"). Empty means price from Name.
-	PriceSource string             `json:"price_source,omitempty"`
-	APIKeyEnv   []string           `json:"api_key_env,omitempty"`
-	Auth        *auth.Config       `json:"auth,omitempty"`
-	Models      []setupModelConfig `json:"models"`
+	PriceSource string `json:"price_source,omitempty"`
+	// OmitMaxOutputTokens suppresses Responses max_output_tokens for compatible
+	// backends that reject the standard parameter, such as ChatGPT Codex.
+	OmitMaxOutputTokens bool               `json:"omit_max_output_tokens,omitempty"`
+	APIKeyEnv           []string           `json:"api_key_env,omitempty"`
+	Auth                *auth.Config       `json:"auth,omitempty"`
+	Models              []setupModelConfig `json:"models"`
 }
 
 type setupModelConfig struct {
 	Name             string                `json:"name"`
 	ContextWindow    int                   `json:"context_window,omitempty"`
+	OutputLimit      int                   `json:"output_limit,omitempty"`
 	Price            *llm.Price            `json:"price,omitempty"`
 	Reasoning        *bool                 `json:"reasoning,omitempty"`
 	ReasoningOptions []llm.ReasoningOption `json:"reasoning_options,omitempty"`
@@ -133,6 +137,9 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	}
 
 	provider := setupProviderFromModelsDev(providerMeta, apiKey, authCfg, models)
+	if existingProvider.Config.OmitMaxOutputTokens {
+		provider.OmitMaxOutputTokens = true
+	}
 
 	mainConfig := setupMainConfig{
 		ProviderConfigs:      []string{providerFile},
@@ -233,7 +240,11 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			if err != nil {
 				return fmt.Errorf("%s: provider %q: %w", path, current.Name, err)
 			}
-			updated = append(updated, setupProviderFromModelsDev(meta, current.APIKey, current.Auth, updatedModels))
+			next := setupProviderFromModelsDev(meta, current.APIKey, current.Auth, updatedModels)
+			if current.OmitMaxOutputTokens {
+				next.OmitMaxOutputTokens = true
+			}
+			updated = append(updated, next)
 		}
 		var body any = updated
 		if len(updated) == 1 {
@@ -361,9 +372,10 @@ func setupProviderFromModelsDev(provider modelsdev.Provider, apiKey string, auth
 			Managed: true,
 			// Codex re-exposes OpenAI models (see openAICodexProvider), billed at
 			// OpenAI per-token rates, so resolve managed prices from "openai".
-			PriceSource: openAIModelsDevProviderID,
-			Auth:        setupProviderAuth(provider, authCfg),
-			Models:      entries,
+			PriceSource:         openAIModelsDevProviderID,
+			OmitMaxOutputTokens: true,
+			Auth:                setupProviderAuth(provider, authCfg),
+			Models:              entries,
 		}
 	}
 	cfg := provider.ProviderConfig(apiKey)
@@ -843,6 +855,7 @@ func setupModelFromModelsDev(model modelsdev.Model) setupModelConfig {
 	cfg := setupModelConfig{
 		Name:             model.ID,
 		ContextWindow:    model.Limit.Context,
+		OutputLimit:      model.Limit.Output,
 		ReasoningOptions: append([]llm.ReasoningOption(nil), model.ReasoningOptions...),
 	}
 	reasoning := model.Reasoning
