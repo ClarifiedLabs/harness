@@ -11,15 +11,6 @@ import (
 // (design §4).
 const errorResultPrefix = "ERROR: "
 
-// defaultMaxTokensCap is the unset-MaxTokens client brake used only when the
-// model's real output limit is unknown: min(32768, contextWindow/4). When the
-// models.dev catalog reports an output limit it is used verbatim instead (see
-// maxTokens), so a model that supports 64k+ output is no longer capped at 32768.
-// This fixed fallback still stops a catalog-unknown looping reasoning model from
-// emitting to a server's no-ceiling default; turn-level runaway is separately
-// bounded by -max-turn-tokens and -max-prompt-cost.
-const defaultMaxTokensCap = 32768
-
 // emptyArgs is the canonical serialization for a tool call with no arguments.
 // OpenAI requires function.arguments to be a JSON string, never "" (design §4).
 const emptyArgs = "{}"
@@ -166,6 +157,7 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 }
 
 func buildRequestForMode(req llm.Request, contextWindow, outputLimit int, reasoningMode string) wireRequest {
+	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
 	w := wireRequest{
 		Model:         req.Model,
 		Stream:        true,
@@ -173,7 +165,7 @@ func buildRequestForMode(req llm.Request, contextWindow, outputLimit int, reason
 		Temperature:   req.Temperature,
 	}
 
-	if mt := maxTokens(req.MaxTokens, contextWindow, outputLimit); mt > 0 {
+	if mt := llm.ResolveMaxTokens(req, contextWindow, outputLimit); mt > 0 {
 		w.MaxTokens = &mt
 	}
 	if len(req.StopSeqs) > 0 {
@@ -317,25 +309,4 @@ func buildMessages(m llm.Message) []wireMessage {
 
 func imageDataURL(b llm.ContentBlock) string {
 	return "data:" + b.ImageMediaType + ";base64," + b.ImageData
-}
-
-// maxTokens resolves the max_tokens to send. Precedence: an explicit user value
-// wins; else the model's real catalog output limit when known (outputLimit > 0);
-// else min(defaultMaxTokensCap, contextWindow/4) as a client-side runaway brake
-// for catalog-unknown models. Zero (all unset/unknown) means "omit" so the
-// server keeps its own default — matching OpenAI-compatible servers.
-func maxTokens(userValue, contextWindow, outputLimit int) int {
-	if userValue > 0 {
-		return userValue
-	}
-	if outputLimit > 0 {
-		return outputLimit
-	}
-	if contextWindow <= 0 {
-		return 0
-	}
-	if quarter := contextWindow / 4; quarter < defaultMaxTokensCap {
-		return quarter
-	}
-	return defaultMaxTokensCap
 }

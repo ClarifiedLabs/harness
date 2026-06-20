@@ -31,6 +31,15 @@ type Request struct {
 	Reasoning   ReasoningConfig `json:"reasoning,omitempty"`
 	StopSeqs    []string        `json:"stop_seqs,omitempty"`
 
+	// EstimatedInputTokens is the caller's estimate of all model-visible input
+	// tokens for this request. Dialects use it to keep max output tokens within
+	// the context window. Zero means "estimate from the neutral request".
+	EstimatedInputTokens int `json:"estimated_input_tokens,omitempty"`
+	// ContextWindowHint is the caller's effective context window for this
+	// request, including overrides or provider errors learned at runtime. Zero
+	// means "use provider configuration".
+	ContextWindowHint int `json:"context_window_hint,omitempty"`
+
 	StoreResponse      bool     `json:"store_response,omitempty"`
 	PreviousResponseID string   `json:"previous_response_id,omitempty"`
 	RequestContext     []string `json:"request_context,omitempty"`

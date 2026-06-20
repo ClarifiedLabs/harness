@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -184,6 +185,7 @@ type Agent struct {
 	maxTurnTokens             int     // accumulated-token ceiling per user turn; 0 = unlimited
 	maxPromptCostUSD          float64 // accumulated USD ceiling per user turn; 0 = unlimited
 	contextWindow             int     // -context-window override; 0 = use the registry default
+	observedContextWindow     int     // smaller provider-reported limit learned from an overflow error
 	reasoning                 llm.ReasoningConfig
 	now                       func() time.Time
 	sleep                     func(context.Context, time.Duration) error // mid-stream retry backoff; nil-free, set in New
@@ -237,10 +239,17 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 // window). This is what honors the §6 "overridable with -context-window" promise
 // in the §12 trigger.
 func (a *Agent) window() int {
-	if a.contextWindow > 0 {
-		return a.contextWindow
+	configured := a.contextWindow
+	if configured <= 0 {
+		configured = a.registry.ContextWindow(a.model)
 	}
-	return a.registry.ContextWindow(a.model)
+	if a.contextWindow > 0 {
+		configured = a.contextWindow
+	}
+	if a.observedContextWindow > 0 && a.observedContextWindow < configured {
+		return a.observedContextWindow
+	}
+	return configured
 }
 
 // SetSystem sets the system prompt sent on every request.
@@ -272,6 +281,7 @@ func (a *Agent) SetTools(registry *tools.Registry) {
 func (a *Agent) SetProvider(provider llm.Provider) {
 	if provider != nil {
 		a.provider = provider
+		a.observedContextWindow = 0
 		a.resetResponseState()
 	}
 }
@@ -281,6 +291,7 @@ func (a *Agent) SetProvider(provider llm.Provider) {
 func (a *Agent) SetModel(model string, contextWindow int) {
 	a.model = model
 	a.contextWindow = contextWindow
+	a.observedContextWindow = 0
 	a.resetResponseState()
 }
 
@@ -505,23 +516,26 @@ type ModelTurnAbandonSink interface {
 
 func (a *Agent) modelRequest(requestContext []string) modelRequest {
 	payloadMessages, usedPrevious := a.payloadMessages()
+	estimate := a.estimatePayloadContext(requestContext, payloadMessages)
 	req := llm.Request{
-		Model:          a.model,
-		System:         a.system,
-		Messages:       payloadMessages,
-		Tools:          cloneToolSpecs(a.toolSpecs),
-		Reasoning:      a.reasoning,
-		StoreResponse:  a.responsesStateful,
-		RequestContext: append([]string(nil), requestContext...),
-		PromptCacheKey: a.promptCacheKey(),
-		LongCacheTTL:   a.interactive,
+		Model:                a.model,
+		System:               a.system,
+		Messages:             payloadMessages,
+		Tools:                cloneToolSpecs(a.toolSpecs),
+		Reasoning:            a.reasoning,
+		StoreResponse:        a.responsesStateful,
+		RequestContext:       append([]string(nil), requestContext...),
+		PromptCacheKey:       a.promptCacheKey(),
+		LongCacheTTL:         a.interactive,
+		EstimatedInputTokens: estimate.Total,
+		ContextWindowHint:    estimate.Window,
 	}
 	if usedPrevious {
 		req.PreviousResponseID = a.responseState.PreviousResponseID
 	}
 	return modelRequest{
 		request:      req,
-		estimate:     a.estimatePayloadContext(requestContext, payloadMessages),
+		estimate:     estimate,
 		usedPrevious: usedPrevious,
 	}
 }
@@ -659,6 +673,22 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		// appended after the response we are about to measure.
 		appendBoundary = len(a.transcript)
 		res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)
+		if err != nil && !res.hasPartialOutput() {
+			if learned, ok := contextOverflowWindow(err); ok && a.observeContextWindow(learned) {
+				sink.Notice(fmt.Sprintf("[context window adjusted: provider reported %d tokens; retrying request]", learned))
+				if a.overThreshold(modelReq.estimate.Total) {
+					if compUsage, changed, cerr := a.compact(ctx, sink, "context-overflow"); cerr == nil && changed {
+						total = add(total, compUsage)
+						lastInput = 0
+						appendBoundary = 0
+					}
+				}
+				requestContext = a.requestContext(extraContext, sink)
+				modelReq = a.modelRequest(requestContext)
+				lastContext = modelReq.estimate
+				res, wasted, err = a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)
+			}
+		}
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
 			a.resetResponseState()
 			sink.Notice("[responses state reset: previous response unavailable; retrying with full context]")
@@ -1198,6 +1228,49 @@ func streamRetryAfter(err error) time.Duration {
 		return apiErr.RetryAfter
 	}
 	return 0
+}
+
+var contextWindowPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)maximum context length is\s+([0-9][0-9,]*)`),
+	regexp.MustCompile(`(?i)context window(?: is| of)?\s+([0-9][0-9,]*)`),
+}
+
+func contextOverflowWindow(err error) (int, bool) {
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		return 0, false
+	}
+	msg := strings.ToLower(apiErr.Message)
+	if !strings.Contains(msg, "context") || !(strings.Contains(msg, "maximum") || strings.Contains(msg, "length") || strings.Contains(msg, "requested")) {
+		return 0, false
+	}
+	for _, re := range contextWindowPatterns {
+		m := re.FindStringSubmatch(apiErr.Message)
+		if len(m) != 2 {
+			continue
+		}
+		n, convErr := strconv.Atoi(strings.ReplaceAll(m[1], ",", ""))
+		if convErr == nil && n > 0 {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+func (a *Agent) observeContextWindow(window int) bool {
+	if window <= 0 {
+		return false
+	}
+	current := a.window()
+	if current > 0 && window >= current {
+		return false
+	}
+	if a.observedContextWindow > 0 && window >= a.observedContextWindow {
+		return false
+	}
+	a.observedContextWindow = window
+	a.resetResponseState()
+	return true
 }
 
 func previousResponseRejected(err error) bool {

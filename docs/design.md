@@ -425,7 +425,7 @@ Edge cases:
 | Prompt cache key | `prompt_cache_key` from `Request.PromptCacheKey` | `prompt_cache_key` from `Request.PromptCacheKey` | not sent (explicit `cache_control` breakpoints instead) |
 | Stateful continuation | `store` is always sent — `store:true` plus `previous_response_id` when proxy catalog reports `responses_stateful:true` (tools/system still sent each request), `store:false` for the stateless default | ignored | ignored |
 | Assistant phase | assistant `message` input items include stored `phase` (`commentary` or `final_answer`) when present | ignored | ignored |
-| Token cap | `max_output_tokens = outputLimit when known, else min(32768, contextWindow/4)` when unset (omitted if disabled or window unknown) | `max_tokens = outputLimit when known, else min(32768, contextWindow/4)` when unset (omitted if the window is unknown) | `max_tokens` is required; if unset, `outputLimit when known, else min(32768, contextWindow/4)` |
+| Token cap | `max_output_tokens` is capped by explicit `MaxTokens`, else `outputLimit`, else `min(32768, contextWindow/4)`, then clamped to remaining estimated context (omitted if disabled or unresolved) | `max_tokens` follows the same input-aware cap (omitted if unresolved) | `max_tokens` is required and follows the same input-aware cap |
 | Streaming usage | final `response.usage` on terminal events | `"stream_options":{"include_usage":true}` (always set) | automatic: input tokens in `message_start`, output in `message_delta` |
 | Stop sequences | not sent | `stop` | `stop_sequences` |
 | Temperature | omitted when nil (never send a spurious 0) | same | same |
@@ -436,13 +436,19 @@ The same model-facing `ToolSchema.Parameters` bytes go into `parameters` vs
 advertising tools; each tool's top-level description remains the explanatory text.
 
 **Default `max_tokens` cap (`defaultMaxTokensCap = 32768`).** When the user does
-not set `MaxTokens`, all three dialects bound a single response at the model's
-catalog `output_limit` when known, otherwise at `min(32768, contextWindow/4)`.
-This is a client-side runaway brake, separate from the turn-level budgets.
-Anthropic always sends the computed value (`max_tokens` is required); OpenAI Chat
-Completions and Responses send `max_tokens` / `max_output_tokens` only when the
-value is known. Responses providers can set `omit_max_output_tokens` when a
-compatible backend rejects the standard parameter.
+not set `MaxTokens`, all three dialects start from the model's catalog
+`output_limit` when known, otherwise `min(32768, contextWindow/4)`. Explicit
+`MaxTokens` is treated as an upper bound, not permission to exceed the window.
+The chosen cap is clamped to `contextWindow - estimatedInput - reserve`, where
+the reserve is `min(max(512, contextWindow/100), 8192, contextWindow/4)`.
+This keeps full-window catalog limits such as `output_limit == context_window`
+from producing invalid `input + output > context` requests. Anthropic always
+sends the computed value (`max_tokens` is required); OpenAI Chat Completions and
+Responses send `max_tokens` / `max_output_tokens` only when the value is known.
+Responses providers can set `omit_max_output_tokens` when a compatible backend
+rejects the standard parameter. If a provider rejects a request with a parseable
+context-overflow error, the agent records the smaller reported window for the
+session, rebuilds the request, and retries once before surfacing the error.
 
 **Prompt cache key (`prompt_cache_key`).** OpenAI Chat Completions and Responses
 emit `Request.PromptCacheKey`, a stable per-agent value: an FNV-64a hash of the

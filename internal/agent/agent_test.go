@@ -224,6 +224,53 @@ func TestTextOnlyTurn(t *testing.T) {
 	}
 }
 
+func TestModelRequestStampsContextBudgetHints(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn})
+	a := newAgent(fp, tools.Default(), Options{Model: "local", ContextWindow: 100_000})
+	a.SetSystem("system prompt")
+
+	if err := a.RunTurn(context.Background(), "hello", &recordSink{}); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(fp.Requests))
+	}
+	req := fp.Requests[0]
+	if req.ContextWindowHint != 100_000 {
+		t.Fatalf("ContextWindowHint = %d, want 100000", req.ContextWindowHint)
+	}
+	if req.EstimatedInputTokens <= 0 {
+		t.Fatalf("EstimatedInputTokens = %d, want positive", req.EstimatedInputTokens)
+	}
+}
+
+func TestContextOverflowLearnsWindowAndRetries(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{Err: &llm.APIError{
+			StatusCode: 400,
+			Message:    "This endpoint's maximum context length is 262144 tokens. However, you requested about 266580 tokens.",
+		}},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Default(), Options{
+		Model:         "local",
+		ContextWindow: 1_000_000,
+	})
+
+	if err := a.RunTurn(context.Background(), "hello", &recordSink{}); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(fp.Requests))
+	}
+	if fp.Requests[0].ContextWindowHint != 1_000_000 {
+		t.Fatalf("first ContextWindowHint = %d, want 1000000", fp.Requests[0].ContextWindowHint)
+	}
+	if fp.Requests[1].ContextWindowHint != 262_144 {
+		t.Fatalf("retry ContextWindowHint = %d, want 262144", fp.Requests[1].ContextWindowHint)
+	}
+}
+
 func TestReasoningSummaryUsesDedicatedSinkOnly(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{reasoningSummary("Checked the repo."), textDelta("done")},

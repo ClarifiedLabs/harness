@@ -7,14 +7,6 @@ import (
 	"harness/internal/llm"
 )
 
-// defaultMaxTokensCap caps the unset-MaxTokens policy only for models whose real
-// output limit is unknown: min(32768, contextWindow/4). When the models.dev
-// catalog reports an output limit it is used verbatim instead (see maxTokens),
-// so a model supporting 64k+ output is no longer silently truncated. Runaway is
-// bounded at the turn level by -max-turn-tokens and -max-prompt-cost, so this
-// fixed cap is just the conservative fallback for catalog-unknown models.
-const defaultMaxTokensCap = 32768
-
 // cacheControl is the ephemeral prompt-cache breakpoint marker. TTL is omitted
 // for the default 5-minute window and set to "1h" on the stable anchors.
 type cacheControl struct {
@@ -179,9 +171,10 @@ type wireEvent struct {
 // tool-schema entry (when tools are present), the system block, and the last
 // content block of the final message, refreshed every call (design §5.4, §7).
 func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
+	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
 	w := wireRequest{
 		Model:       req.Model,
-		MaxTokens:   maxTokens(req.MaxTokens, contextWindow, outputLimit),
+		MaxTokens:   maxTokens(req, contextWindow, outputLimit),
 		Stream:      true,
 		Temperature: req.Temperature,
 	}
@@ -375,19 +368,6 @@ func summaryToDisplay(summary string) string {
 	}
 }
 
-// maxTokens applies the design §5.4 policy. Precedence: an explicit user value
-// wins; else the model's real catalog output limit when known (outputLimit > 0);
-// else the fixed fallback min(32768, contextWindow/4) for catalog-unknown models.
-func maxTokens(userValue, contextWindow, outputLimit int) int {
-	if userValue > 0 {
-		return userValue
-	}
-	if outputLimit > 0 {
-		return outputLimit
-	}
-	quarter := contextWindow / 4
-	if quarter < defaultMaxTokensCap {
-		return quarter
-	}
-	return defaultMaxTokensCap
+func maxTokens(req llm.Request, contextWindow, outputLimit int) int {
+	return llm.ResolveMaxTokens(req, contextWindow, outputLimit)
 }

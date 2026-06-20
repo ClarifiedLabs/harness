@@ -13,15 +13,6 @@ const errorResultPrefix = "ERROR: "
 // emptyArgs is the canonical serialization for a tool call with no arguments.
 const emptyArgs = "{}"
 
-// defaultMaxTokensCap is the unset-MaxTokens client brake used only when the
-// model's real output limit is unknown: min(32768, contextWindow/4) as
-// max_output_tokens. When the models.dev catalog reports an output limit it is
-// used verbatim instead (see maxTokens), so a model that supports 64k+ output is
-// no longer capped at 32768. This fixed fallback still bounds catalog-unknown
-// models; turn-level runaway is separately bounded by -max-turn-tokens and
-// -max-prompt-cost.
-const defaultMaxTokensCap = 32768
-
 // wireRequest is the OpenAI Responses request body. Store is always sent false
 // so harness remains stateless and resends its own transcript every step.
 type wireRequest struct {
@@ -181,6 +172,7 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 }
 
 func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, omitMaxOutputTokens bool) wireRequest {
+	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
 	instructions := req.System
 	// Replay persisted encrypted reasoning items only when reasoning is enabled
 	// for this request (mirrors the Anthropic dialect's includeThinking gate).
@@ -211,7 +203,7 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, om
 		Temperature:        req.Temperature,
 	}
 
-	if mt := maxTokens(req.MaxTokens, contextWindow, outputLimit, omitMaxOutputTokens); mt > 0 {
+	if mt := maxTokens(req, contextWindow, outputLimit, omitMaxOutputTokens); mt > 0 {
 		w.MaxOutputTokens = &mt
 	}
 	if req.Reasoning.Effort != "" || req.Reasoning.Summary != "" {
@@ -361,29 +353,14 @@ func imageDataURL(b llm.ContentBlock) string {
 	return "data:" + b.ImageMediaType + ";base64," + b.ImageData
 }
 
-// maxTokens resolves the max_output_tokens to send. Precedence: an explicit user
-// value wins; else the model's real catalog output limit when known
-// (outputLimit > 0); else min(defaultMaxTokensCap, contextWindow/4) as a
-// client-side runaway brake for catalog-unknown models. When omit is true, the
-// field is suppressed for compatible backends that reject it. Zero (all
-// unset/unknown) means "omit" so the server keeps its default.
-func maxTokens(userValue, contextWindow, outputLimit int, omit bool) int {
+// maxTokens resolves the max_output_tokens to send. When omit is true, the
+// field is suppressed for compatible backends that reject it. Zero means "omit"
+// so the server keeps its default.
+func maxTokens(req llm.Request, contextWindow, outputLimit int, omit bool) int {
 	if omit {
 		return 0
 	}
-	if userValue > 0 {
-		return userValue
-	}
-	if outputLimit > 0 {
-		return outputLimit
-	}
-	if contextWindow <= 0 {
-		return 0
-	}
-	if quarter := contextWindow / 4; quarter < defaultMaxTokensCap {
-		return quarter
-	}
-	return defaultMaxTokensCap
+	return llm.ResolveMaxTokens(req, contextWindow, outputLimit)
 }
 
 func inputMessagePhase(m llm.Message) string {

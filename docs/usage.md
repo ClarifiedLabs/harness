@@ -181,10 +181,13 @@ context-efficiency knobs are config-file-only.
   (empty = all). See [mcp.md](mcp.md) and [lsp.md](lsp.md). An explicit
   `allowed_tools` whitelist can still name a tool that auto-exposure excluded.
 - A single model turn's output is capped at the model's configured
-  `output_limit` when known, otherwise `min(32768, context_window/4)` tokens.
-  This client-side runaway brake is distinct from `-max-turn-tokens`, which is
-  the cumulative per-turn token *budget* across all model calls. When the cap is
-  reached, harness surfaces `[stopped: model reached max tokens]`.
+  `output_limit` when known, otherwise `min(32768, context_window/4)` tokens,
+  then clamped to the estimated remaining context window. This client-side
+  runaway brake is distinct from `-max-turn-tokens`, which is the cumulative
+  per-turn token *budget* across all model calls. If a provider reports a smaller
+  real context window in an overflow error, harness learns that window for the
+  session and retries once. When the cap is reached, harness surfaces
+  `[stopped: model reached max tokens]`.
 
 Harness automatically adds static AGENTS instructions from
 `~/.agents/AGENTS.md`, then from `AGENTS.md` in the current working directory.
