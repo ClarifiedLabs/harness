@@ -83,8 +83,8 @@ func TestBuildRequestMaxTokensClampsFullWindowOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 4_436
 	w := buildRequest(req, 262_144, 262_144)
-	if w.MaxTokens != 255_087 {
-		t.Fatalf("max_tokens = %d, want 255087", w.MaxTokens)
+	if w.MaxTokens != 249_844 {
+		t.Fatalf("max_tokens = %d, want 249844", w.MaxTokens)
 	}
 }
 
@@ -93,8 +93,8 @@ func TestBuildRequestMaxTokensClampsExplicitValue(t *testing.T) {
 	req.MaxTokens = 100_000
 	req.EstimatedInputTokens = 90_000
 	w := buildRequest(req, 100_000, 0)
-	if w.MaxTokens != 9_000 {
-		t.Fatalf("max_tokens = %d, want 9000", w.MaxTokens)
+	if w.MaxTokens != 7_000 {
+		t.Fatalf("max_tokens = %d, want 7000", w.MaxTokens)
 	}
 }
 

@@ -77,7 +77,9 @@ func outputReserve(contextWindow int) int {
 	if contextWindow <= 0 {
 		return 0
 	}
-	reserve := max(512, contextWindow/100)
-	reserve = min(reserve, 8192)
+	// Leave room for tokenizer and provider-side accounting drift. The caller's
+	// input estimate is intentionally coarse, and providers may count tool schemas
+	// or hidden framing separately from prompt text.
+	reserve := max(512, contextWindow*3/100)
 	return min(reserve, contextWindow/4)
 }

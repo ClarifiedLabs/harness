@@ -85,8 +85,8 @@ func TestBuildRequestMaxTokensClampsFullWindowOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 4_436
 	w := buildRequestForMode(req, 262_144, 262_144, "openrouter")
-	if w.MaxTokens == nil || *w.MaxTokens != 255_087 {
-		t.Fatalf("max_tokens = %v, want 255087", w.MaxTokens)
+	if w.MaxTokens == nil || *w.MaxTokens != 249_844 {
+		t.Fatalf("max_tokens = %v, want 249844", w.MaxTokens)
 	}
 }
 
@@ -95,8 +95,8 @@ func TestBuildRequestMaxTokensClampsExplicitValue(t *testing.T) {
 	req.MaxTokens = 100_000
 	req.EstimatedInputTokens = 90_000
 	w := buildRequest(req, 100_000, 0)
-	if w.MaxTokens == nil || *w.MaxTokens != 9_000 {
-		t.Fatalf("max_tokens = %v, want 9000", w.MaxTokens)
+	if w.MaxTokens == nil || *w.MaxTokens != 7_000 {
+		t.Fatalf("max_tokens = %v, want 7000", w.MaxTokens)
 	}
 }
 
