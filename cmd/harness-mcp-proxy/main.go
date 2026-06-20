@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -169,6 +170,7 @@ generate-api-key flags:
 tools flags:
   -config path      config file (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
   -proxy url        proxy URL (default: `+mcpproxy.DefaultURL()+`)
+  -api-key key      proxy API key (also HARNESS_MCP_PROXY_API_KEY)
 `)
 }
 
@@ -209,22 +211,17 @@ func runGenerateAPIKey(env environment, args []string) int {
 		path = mcpproxy.DefaultConfigPath(env.getenv)
 	}
 
-	var fc mcpproxy.FileConfig
-	fc.MCPServers = map[string]mcpproxy.ServerConfig{}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
 			return exitRuntime
 		}
-	} else {
-		if err := json.Unmarshal(data, &fc); err != nil {
-			fmt.Fprintf(env.stderr, "harness-mcp-proxy: parse config: %v\n", err)
-			return exitRuntime
-		}
 	}
-	if fc.MCPServers == nil {
-		fc.MCPServers = map[string]mcpproxy.ServerConfig{}
+	entries, err := readMCPConfigAPIKeys(data)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-mcp-proxy: parse config: %v\n", err)
+		return exitRuntime
 	}
 
 	plaintext, err := apikey.Generate(name, apikey.MCPProxyPrefix)
@@ -232,11 +229,14 @@ func runGenerateAPIKey(env environment, args []string) int {
 		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
 		return exitUsage
 	}
-	store := fc.Proxy.APIKeyStore()
-	store.Add(name, plaintext, env.now())
-	fc.Proxy.APIKeys = store.Entries
+	store := apikey.Store{Entries: entries}
+	now := env.now
+	if now == nil {
+		now = time.Now
+	}
+	store.Add(name, plaintext, now())
 
-	if err := writeMCPConfigFile(path, fc); err != nil {
+	if err := writeMCPConfigAPIKeys(path, data, store.Entries); err != nil {
 		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
 		return exitRuntime
 	}
@@ -244,10 +244,50 @@ func runGenerateAPIKey(env environment, args []string) int {
 	return exitOK
 }
 
-// writeMCPConfigFile writes v to path atomically (temp file + rename). It
-// creates parent directories as needed.
-func writeMCPConfigFile(path string, v any) error {
-	data, err := json.MarshalIndent(v, "", "  ")
+func readMCPConfigAPIKeys(data []byte) ([]apikey.Entry, error) {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, nil
+	}
+	var raw struct {
+		Proxy struct {
+			APIKeys []apikey.Entry `json:"api_keys"`
+		} `json:"proxy"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	return append([]apikey.Entry(nil), raw.Proxy.APIKeys...), nil
+}
+
+// writeMCPConfigAPIKeys writes entries into proxy.api_keys while preserving
+// every other JSON field the MCP proxy config tolerates.
+func writeMCPConfigAPIKeys(path string, existing []byte, entries []apikey.Entry) error {
+	raw := map[string]json.RawMessage{}
+	if len(strings.TrimSpace(string(existing))) > 0 {
+		if err := json.Unmarshal(existing, &raw); err != nil {
+			return fmt.Errorf("parse config: %w", err)
+		}
+	}
+	proxy := map[string]json.RawMessage{}
+	if p, ok := raw["proxy"]; ok && len(strings.TrimSpace(string(p))) > 0 && strings.TrimSpace(string(p)) != "null" {
+		if err := json.Unmarshal(p, &proxy); err != nil {
+			return fmt.Errorf("parse proxy config: %w", err)
+		}
+	}
+	apiKeysJSON, err := json.Marshal(entries)
+	if err != nil {
+		return fmt.Errorf("marshal api_keys: %w", err)
+	}
+	proxy["api_keys"] = apiKeysJSON
+	proxyJSON, err := json.Marshal(proxy)
+	if err != nil {
+		return fmt.Errorf("marshal proxy config: %w", err)
+	}
+	raw["proxy"] = proxyJSON
+	if _, ok := raw["mcpServers"]; !ok {
+		raw["mcpServers"] = json.RawMessage(`{}`)
+	}
+	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}

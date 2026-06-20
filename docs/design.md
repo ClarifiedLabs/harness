@@ -2191,7 +2191,9 @@ on the thin `internal/mcptools` adapter for tool dispatch (§9.16).
   once any key exists. Clients send `Authorization: Bearer <key>`; the proxy
   verifies it with SHA-256 and constant-time comparison. Harness supplies the key
   via `-mcp-proxy-api-key`, `HARNESS_MCP_PROXY_API_KEY`, or the config-file
-  `mcp.api_key` field, with flag > env > file precedence. HTTP downstream servers
+  `mcp.api_key` field, with flag > env > file precedence. The
+  `harness-mcp-proxy tools` debug command supplies the key via `tools -api-key`
+  or `HARNESS_MCP_PROXY_API_KEY`. HTTP downstream servers
   may also set static `headers` and/or `auth`. Static headers are applied first,
   dynamic auth headers next, then MCP
   protocol headers override both. `token_command` delegates login/refresh to an

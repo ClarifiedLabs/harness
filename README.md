@@ -143,6 +143,8 @@ HARNESS_MCP_PROXY_API_KEY=<key> HARNESS_MCP_ENABLE=true harness -provider <provi
 Or set `mcp.api_key` in `~/.config/harness/config.json`. The model proxy key has
 prefix `hmp_`; the MCP proxy key has prefix `hmcpp_`. Only SHA-256 hashes of
 keys are stored; the plaintext is shown exactly once at generation.
+For an authenticated MCP proxy, the debug `harness-mcp-proxy tools` command uses
+`HARNESS_MCP_PROXY_API_KEY` or `tools -api-key <key>`.
 
 ## Basic usage
 

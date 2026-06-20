@@ -37,7 +37,6 @@ type Config struct {
 	// Proxy API keys. These become Authorization: Bearer headers sent to the
 	// respective proxies. Empty means the proxy is contacted without auth.
 	ModelProxyAPIKey string `json:"model_proxy_api_key"`
-	MCPProxyAPIKey   string `json:"mcp_proxy_api_key"`
 
 	// System prompt composition (design §8.5).
 	SystemPrompt string `json:"system_prompt"` // -system-prompt: replace the static system prompt
@@ -131,7 +130,7 @@ type Config struct {
 // MCP is enabled and which proxy to dial.
 type MCPConfig struct {
 	Enable bool   `json:"enable"`
-	Proxy  string `json:"proxy"`  // http(s) proxy URL; "" means resolve the shared default at use
+	Proxy  string `json:"proxy"`   // http(s) proxy URL; "" means resolve the shared default at use
 	APIKey string `json:"api_key"` // API key for harness-mcp-proxy
 
 	// Headers are static request headers (e.g. Authorization) sent on every
@@ -249,7 +248,6 @@ type fileConfig struct {
 	Model                     string                     `json:"model"`
 	ModelProxyURL             string                     `json:"model_proxy_url"`
 	ModelProxyAPIKey          string                     `json:"model_proxy_api_key"`
-	MCPProxyAPIKey            string                     `json:"mcp_proxy_api_key"`
 	SystemPrompt              string                     `json:"system_prompt"`
 	NoEnv                     *bool                      `json:"no_env"`
 	MaxTurns                  *int                       `json:"max_turns"`
@@ -380,8 +378,6 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		getenv("HARNESS_MODEL_PROXY_URL"), fc.ModelProxyURL, "")
 	c.ModelProxyAPIKey = resolveString(set["model-proxy-api-key"], *fModelProxyAPIKey,
 		getenv("HARNESS_MODEL_PROXY_API_KEY"), fc.ModelProxyAPIKey, "")
-	c.MCPProxyAPIKey = resolveString(set["mcp-proxy-api-key"], *fMCPProxyAPIKey,
-		getenv("HARNESS_MCP_PROXY_API_KEY"), fc.MCPProxyAPIKey, "")
 	c.SystemPrompt = resolveString(set["system-prompt"], *fSystemPrompt,
 		getenv("HARNESS_SYSTEM_PROMPT"), fc.SystemPrompt, "")
 	if set["resume"] {
@@ -856,46 +852,46 @@ func parseImageAttachment(spec, defaultDetail string) (ImageAttachment, error) {
 // back both Load (parsing) and Usage (the -h screen) — one source of truth, so
 // the help can never drift from what is actually parsed (design §10).
 type flags struct {
-	provider, model, modelProxyURL *string
+	provider, model, modelProxyURL   *string
 	modelProxyAPIKey, mcpProxyAPIKey *string
-	systemPrompt                    *string
-	noEnv                          *bool
-	resume, session                *string
-	histFile                       *string
-	histFileSize, histSize         *int
-	maxTurns                       *int
-	maxTurnTokens                  *int
-	maxOutputTokens                *int
-	maxPromptCost                  *float64
-	toolTimeout                    *int
-	defaultContextWindow           *int
-	contextWindow                  *int
-	reasoningEffort                *string
-	reasoningEnabled               *bool
-	reasoningBudgetTokens          *int
-	reasoningSummary               *string
-	imageDetail                    *string
-	searchTools                    *string
-	images                         *imageFlags
-	agent                          *string
-	handoffAgent                   *string
-	prompt                         *string
-	replPrompt                     *string
-	replEditMode                   *string
-	logLevel                       *string
-	timestamps                     *string
-	verbose, toolStream            *bool
-	showDiffs                      *bool
-	responsesStateful              *bool
-	noColor                        *bool
-	noTimestamps                   *bool
-	quietShort, quiet              *bool
-	outputFormat                   *string
-	config                         *string
-	hooks                          *string
-	showConfig, showAgents         *bool
-	showModels                     *bool
-	checkModelProxy                *bool
+	systemPrompt                     *string
+	noEnv                            *bool
+	resume, session                  *string
+	histFile                         *string
+	histFileSize, histSize           *int
+	maxTurns                         *int
+	maxTurnTokens                    *int
+	maxOutputTokens                  *int
+	maxPromptCost                    *float64
+	toolTimeout                      *int
+	defaultContextWindow             *int
+	contextWindow                    *int
+	reasoningEffort                  *string
+	reasoningEnabled                 *bool
+	reasoningBudgetTokens            *int
+	reasoningSummary                 *string
+	imageDetail                      *string
+	searchTools                      *string
+	images                           *imageFlags
+	agent                            *string
+	handoffAgent                     *string
+	prompt                           *string
+	replPrompt                       *string
+	replEditMode                     *string
+	logLevel                         *string
+	timestamps                       *string
+	verbose, toolStream              *bool
+	showDiffs                        *bool
+	responsesStateful                *bool
+	noColor                          *bool
+	noTimestamps                     *bool
+	quietShort, quiet                *bool
+	outputFormat                     *string
+	config                           *string
+	hooks                            *string
+	showConfig, showAgents           *bool
+	showModels                       *bool
+	checkModelProxy                  *bool
 }
 
 // newFlagSet defines every design §10 flag on a fresh FlagSet, used by both Load

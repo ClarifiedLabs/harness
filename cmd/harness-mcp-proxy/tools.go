@@ -27,6 +27,7 @@ func runTools(env environment, args []string) int {
 	// below); an explicit -config typo still surfaces as a load error.
 	configPath := fs.String("config", "", "config file path")
 	proxy := fs.String("proxy", "", "HTTP proxy URL")
+	apiKey := fs.String("api-key", "", "API key for the proxy (also HARNESS_MCP_PROXY_API_KEY)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			usage(env.stdout, env.getenv)
@@ -40,7 +41,11 @@ func runTools(env environment, args []string) int {
 	if code != exitOK {
 		return code
 	}
-	client := toolsClient(proxyURL)
+	key := *apiKey
+	if key == "" && env.getenv != nil {
+		key = env.getenv("HARNESS_MCP_PROXY_API_KEY")
+	}
+	client := toolsClient(proxyURL, key)
 	defer client.Close()
 
 	commandCtx, stop, interrupted := signalCancelContext(env.sigCh)
@@ -71,9 +76,13 @@ func runTools(env environment, args []string) int {
 }
 
 // toolsClient builds the HTTP MCP client for the tools command.
-func toolsClient(proxyURL string) *mcp.Client {
+func toolsClient(proxyURL, apiKey string) *mcp.Client {
 	info := mcp.Implementation{Name: "harness-mcp-proxy-tools", Version: "1"}
-	tr := mcp.NewHTTPTransport(mcp.HTTPOptions{Endpoint: proxyURL})
+	opts := mcp.HTTPOptions{Endpoint: proxyURL}
+	if apiKey != "" {
+		opts.Headers = map[string]string{"Authorization": "Bearer " + apiKey}
+	}
+	tr := mcp.NewHTTPTransport(opts)
 	return mcp.NewClientTransport(tr, mcp.ClientOptions{Info: info})
 }
 

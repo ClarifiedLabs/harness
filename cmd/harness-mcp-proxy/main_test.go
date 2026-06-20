@@ -44,6 +44,18 @@ func testEnv(t *testing.T, args []string) (environment, *bytes.Buffer, *bytes.Bu
 	}, &out, &errw
 }
 
+type staticToolsProvider struct {
+	tools []mcp.Tool
+}
+
+func (p staticToolsProvider) ListTools(context.Context, string) (mcp.ListToolsResult, error) {
+	return mcp.ListToolsResult{Tools: p.tools}, nil
+}
+
+func (p staticToolsProvider) CallTool(context.Context, string, json.RawMessage) (*mcp.CallToolResult, error) {
+	return &mcp.CallToolResult{}, nil
+}
+
 func TestRunNoArgsUsageExit2(t *testing.T) {
 	env, out, errw := testEnv(t, nil)
 	if code := run(env); code != exitUsage {
@@ -133,6 +145,70 @@ func TestRunGenerateAPIKeyCreatesConfig(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+key)
 	if !store.Authorize(req) {
 		t.Fatal("generated key did not authorize")
+	}
+}
+
+func TestRunGenerateAPIKeyPreservesUnknownConfigFields(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{
+  "mcpServers": {
+    "remote": {
+      "type": "http",
+      "url": "https://mcp.example/mcp",
+      "x-server-extension": {"keep": true}
+    }
+  },
+  "proxy": {
+    "listen": "127.0.0.1:8766",
+    "x-proxy-extension": "keep"
+  },
+  "x-top-extension": {"keep": true}
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env, out, errw := testEnv(t, []string{"generate-api-key", "-config", cfgPath, "laptop"})
+	if code := run(env); code != exitOK {
+		t.Fatalf("exit = %d, want %d; stderr=%q", code, exitOK, errw.String())
+	}
+	if !strings.HasPrefix(strings.TrimSpace(out.String()), apikey.MCPProxyPrefix) {
+		t.Fatalf("key missing prefix: %q", out.String())
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
+		t.Fatalf("parse config: %v\n%s", err, data)
+	}
+	if _, ok := top["x-top-extension"]; !ok {
+		t.Fatalf("top-level extension field was dropped:\n%s", data)
+	}
+	var proxy map[string]json.RawMessage
+	if err := json.Unmarshal(top["proxy"], &proxy); err != nil {
+		t.Fatalf("parse proxy: %v", err)
+	}
+	if _, ok := proxy["x-proxy-extension"]; !ok {
+		t.Fatalf("proxy extension field was dropped:\n%s", data)
+	}
+	var proxyKeys struct {
+		APIKeys []apikey.Entry `json:"api_keys"`
+	}
+	if err := json.Unmarshal(top["proxy"], &proxyKeys); err != nil {
+		t.Fatalf("parse proxy api keys: %v", err)
+	}
+	if len(proxyKeys.APIKeys) != 1 || proxyKeys.APIKeys[0].Name != "laptop" {
+		t.Fatalf("api_keys = %+v", proxyKeys.APIKeys)
+	}
+	var servers map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(top["mcpServers"], &servers); err != nil {
+		t.Fatalf("parse servers: %v", err)
+	}
+	if _, ok := servers["remote"]["x-server-extension"]; !ok {
+		t.Fatalf("server extension field was dropped:\n%s", data)
 	}
 }
 
@@ -382,6 +458,55 @@ func TestToolsListsAggregatedTools(t *testing.T) {
 
 	serveEnv.sigCh <- os.Interrupt
 	<-codeCh
+}
+
+func TestToolsUsesAPIKeyFromEnv(t *testing.T) {
+	handler := mcp.NewHTTPHandler(mcp.HTTPHandlerOptions{
+		Info: mcp.Implementation{Name: "test-mcp", Version: "1"},
+		Provider: staticToolsProvider{tools: []mcp.Tool{{
+			Name:        "mcp__fake__echo",
+			Description: "echo",
+		}}},
+	})
+	var store apikey.Store
+	store.Add("laptop", "hmcpp_secret", time.Time{})
+	srv := httptest.NewServer(store.Middleware(handler))
+	defer srv.Close()
+
+	var out, errw bytes.Buffer
+	env := environment{
+		args:   []string{"tools", "-proxy", srv.URL},
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(k string) string {
+			if k == "HARNESS_MCP_PROXY_API_KEY" {
+				return "hmcpp_secret"
+			}
+			return ""
+		},
+	}
+	if code := run(env); code != exitOK {
+		t.Fatalf("tools: exit = %d, want %d; stderr=%q", code, exitOK, errw.String())
+	}
+	if !strings.HasPrefix(out.String(), "1 tool\n") || !strings.Contains(out.String(), "mcp__fake__echo") {
+		t.Fatalf("tools output = %q, want authenticated tool list", out.String())
+	}
+
+	out.Reset()
+	errw.Reset()
+	env.args = []string{"tools", "-proxy", srv.URL, "-api-key", "hmcpp_secret"}
+	env.getenv = func(k string) string {
+		if k == "HARNESS_MCP_PROXY_API_KEY" {
+			return "hmcpp_wrong"
+		}
+		return ""
+	}
+	if code := run(env); code != exitOK {
+		t.Fatalf("tools with -api-key: exit = %d, want %d; stderr=%q", code, exitOK, errw.String())
+	}
+	if !strings.HasPrefix(out.String(), "1 tool\n") || !strings.Contains(out.String(), "mcp__fake__echo") {
+		t.Fatalf("tools with -api-key output = %q, want authenticated tool list", out.String())
+	}
 }
 
 // freeAddr binds an ephemeral TCP port, closes it, and returns the address so

@@ -1108,6 +1108,9 @@ func TestWriteResolvedIncludesDefaults(t *testing.T) {
 	if got["check_model_proxy"] != false {
 		t.Fatalf("check_model_proxy = %v, want false\n%s", got["check_model_proxy"], b.String())
 	}
+	if _, ok := got["mcp_proxy_api_key"]; ok {
+		t.Fatalf("resolved config should not expose unused top-level mcp_proxy_api_key:\n%s", b.String())
+	}
 }
 
 // A malformed config file is a usage/config error, not a silent ignore.
