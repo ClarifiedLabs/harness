@@ -12,7 +12,7 @@ func TestResolveMaxTokensUnknownOutputLimit(t *testing.T) {
 func TestResolveMaxTokensClampsFullWindowOutputLimit(t *testing.T) {
 	req := Request{EstimatedInputTokens: 4436}
 	got := ResolveMaxTokens(req, 262_144, 262_144)
-	want := 249_844 // 262144 - 4436 - 7864 reserve
+	want := 32_768
 	if got != want {
 		t.Fatalf("ResolveMaxTokens = %d, want %d", got, want)
 	}
@@ -24,6 +24,13 @@ func TestResolveMaxTokensLeavesProviderAccountingHeadroom(t *testing.T) {
 	const actualProviderInput = 52_762
 	if actualProviderInput+got > 262_144 {
 		t.Fatalf("ResolveMaxTokens = %d leaves actual request at %d, want <= 262144", got, actualProviderInput+got)
+	}
+}
+
+func TestResolveMaxTokensOutputLimitCapsDefault(t *testing.T) {
+	req := Request{EstimatedInputTokens: 1000}
+	if got := ResolveMaxTokens(req, 128_000, 8_000); got != 8_000 {
+		t.Fatalf("ResolveMaxTokens = %d, want 8000", got)
 	}
 }
 
@@ -45,8 +52,8 @@ func TestResolveMaxTokensTinyRemainingWindow(t *testing.T) {
 
 func TestResolveMaxTokensKnownOutputUnknownContext(t *testing.T) {
 	req := Request{EstimatedInputTokens: 1000}
-	if got := ResolveMaxTokens(req, 0, 64_000); got != 64_000 {
-		t.Fatalf("ResolveMaxTokens = %d, want 64000", got)
+	if got := ResolveMaxTokens(req, 0, 64_000); got != 0 {
+		t.Fatalf("ResolveMaxTokens = %d, want 0", got)
 	}
 }
 

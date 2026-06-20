@@ -71,11 +71,18 @@ func TestBuildRequestMaxTokensUserSet(t *testing.T) {
 
 func TestBuildRequestMaxTokensCatalogOutputLimit(t *testing.T) {
 	req := basicRequest()
-	// A known catalog output limit beats the fixed 32768 fallback, so a model
-	// supporting 64k output is no longer truncated at 32768.
+	// A known catalog output limit is a ceiling, not the automatic default.
 	w := buildRequest(req, 1_000_000, 64_000)
-	if w.MaxTokens != 64_000 {
-		t.Errorf("max_tokens = %d, want 64000 (catalog output limit)", w.MaxTokens)
+	if w.MaxTokens != 32_768 {
+		t.Errorf("max_tokens = %d, want 32768", w.MaxTokens)
+	}
+}
+
+func TestBuildRequestMaxTokensSmallCatalogOutputLimit(t *testing.T) {
+	req := basicRequest()
+	w := buildRequest(req, 1_000_000, 8_000)
+	if w.MaxTokens != 8_000 {
+		t.Errorf("max_tokens = %d, want 8000", w.MaxTokens)
 	}
 }
 
@@ -83,8 +90,8 @@ func TestBuildRequestMaxTokensClampsFullWindowOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 4_436
 	w := buildRequest(req, 262_144, 262_144)
-	if w.MaxTokens != 249_844 {
-		t.Fatalf("max_tokens = %d, want 249844", w.MaxTokens)
+	if w.MaxTokens != 32_768 {
+		t.Fatalf("max_tokens = %d, want 32768", w.MaxTokens)
 	}
 }
 

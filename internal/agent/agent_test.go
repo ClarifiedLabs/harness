@@ -25,6 +25,7 @@ import (
 type recordSink struct {
 	text            strings.Builder
 	models          []modelTurnEvent
+	contexts        []ContextEstimate
 	modelUsage      []ModelTurnUsage
 	reasoning       []string
 	phases          []string
@@ -50,8 +51,9 @@ func (s *recordSink) ReasoningSummary(t string) {
 func (s *recordSink) AssistantPhase(phase string) {
 	s.phases = append(s.phases, phase)
 }
-func (s *recordSink) ModelTurnStart(modelTurn, attempt int, _ ContextEstimate) {
+func (s *recordSink) ModelTurnStart(modelTurn, attempt int, ctx ContextEstimate) {
 	s.models = append(s.models, modelTurnEvent{modelTurn: modelTurn, attempt: attempt})
+	s.contexts = append(s.contexts, ctx)
 }
 func (s *recordSink) ModelTurnComplete(u ModelTurnUsage) {
 	s.modelUsage = append(s.modelUsage, u)
@@ -85,6 +87,19 @@ type archiveSink struct {
 	archive    ToolResultArchive
 	archiveErr error
 	archived   []llm.ToolResult
+}
+
+type countingProvider struct {
+	*llmtest.FakeProvider
+	count int
+	err   error
+}
+
+func (p *countingProvider) CountInputTokens(context.Context, llm.Request) (llm.InputTokenCount, error) {
+	if p.err != nil {
+		return llm.InputTokenCount{}, p.err
+	}
+	return llm.InputTokenCount{InputTokens: p.count, Source: "test"}, nil
 }
 
 func (s *archiveSink) ArchiveToolResult(r llm.ToolResult) (ToolResultArchive, error) {
@@ -241,6 +256,32 @@ func TestModelRequestStampsContextBudgetHints(t *testing.T) {
 	}
 	if req.EstimatedInputTokens <= 0 {
 		t.Fatalf("EstimatedInputTokens = %d, want positive", req.EstimatedInputTokens)
+	}
+}
+
+func TestRunTurnUsesProviderInputTokenCount(t *testing.T) {
+	fp := &countingProvider{
+		FakeProvider: llmtest.New("responses", llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("ok")},
+			Stop:   llm.StopEndTurn,
+		}),
+		count: 12_345,
+	}
+	a := newAgent(fp, tools.Default(), Options{Model: "local", ContextWindow: 100_000})
+	a.SetSystem("system prompt")
+	sink := &recordSink{}
+
+	if err := a.RunTurn(context.Background(), "hello", sink); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(fp.Requests))
+	}
+	if got := fp.Requests[0].EstimatedInputTokens; got != 12_345 {
+		t.Fatalf("EstimatedInputTokens = %d, want provider count 12345", got)
+	}
+	if len(sink.contexts) == 0 || sink.contexts[0].Total != 12_345 {
+		t.Fatalf("model start context = %+v, want total 12345", sink.contexts)
 	}
 }
 

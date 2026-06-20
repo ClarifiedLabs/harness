@@ -369,5 +369,11 @@ func summaryToDisplay(summary string) string {
 }
 
 func maxTokens(req llm.Request, contextWindow, outputLimit int) int {
-	return llm.ResolveMaxTokens(req, contextWindow, outputLimit)
+	if mt := llm.ResolveMaxTokens(req, contextWindow, outputLimit); mt > 0 {
+		return mt
+	}
+	if outputLimit > 0 && outputLimit < llm.DefaultMaxTokensCap {
+		return outputLimit
+	}
+	return llm.DefaultMaxTokensCap
 }

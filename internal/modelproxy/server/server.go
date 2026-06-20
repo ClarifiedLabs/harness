@@ -339,6 +339,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleModels(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/usage":
 		h.handleUsage(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/input_tokens":
+		h.handleInputTokens(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/stream":
 		h.handleStream(w, r)
 	default:
@@ -401,6 +403,66 @@ func (h *Handler) usageSnapshot() protocol.UsageReport {
 		return report.Models[i].Model < report.Models[j].Model
 	})
 	return report
+}
+
+func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
+	cw := &countingResponseWriter{ResponseWriter: w}
+	body, err := io.ReadAll(http.MaxBytesReader(cw, r.Body, maxStreamRequestBytes))
+	if err != nil {
+		writeError(cw, http.StatusRequestEntityTooLarge, &protocol.Error{StatusCode: http.StatusRequestEntityTooLarge, Message: "request body too large"})
+		return
+	}
+	var req protocol.TokenCountRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "malformed input token request"})
+		return
+	}
+	providerID := strings.TrimSpace(req.Provider)
+	if providerID == "" {
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "provider is required"})
+		return
+	}
+	if req.Request.Model == "" {
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "model is required"})
+		return
+	}
+	opts, err := h.runtimeOptions(r.Context(), providerID, req.Request.Model)
+	if err != nil {
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
+		return
+	}
+	provider, err := h.newProvider(opts)
+	if err != nil {
+		writeError(cw, http.StatusBadRequest, protocol.ErrorFrom(err))
+		return
+	}
+	counter, ok := provider.(llm.InputTokenCounter)
+	if !ok {
+		writeError(cw, http.StatusNotImplemented, &protocol.Error{
+			StatusCode: http.StatusNotImplemented,
+			Code:       "input_token_count_unsupported",
+			Message:    llm.ErrInputTokenCountUnsupported.Error(),
+		})
+		return
+	}
+	count, err := counter.CountInputTokens(r.Context(), req.Request)
+	if err != nil {
+		if errors.Is(err, llm.ErrInputTokenCountUnsupported) {
+			writeError(cw, http.StatusNotImplemented, &protocol.Error{
+				StatusCode: http.StatusNotImplemented,
+				Code:       "input_token_count_unsupported",
+				Message:    err.Error(),
+			})
+			return
+		}
+		writeError(cw, http.StatusBadRequest, protocol.ErrorFrom(err))
+		return
+	}
+	cw.Header().Set("content-type", "application/json")
+	_ = json.NewEncoder(cw).Encode(protocol.TokenCountResponse{
+		InputTokens: count.InputTokens,
+		Source:      count.Source,
+	})
 }
 
 func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {

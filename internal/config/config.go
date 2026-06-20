@@ -52,6 +52,7 @@ type Config struct {
 	// Loop / model limits.
 	MaxTurns                  int               `json:"max_turns"`              // -max-turns, default 250
 	MaxTurnTokens             int               `json:"max_turn_tokens"`        // -max-turn-tokens, accumulated-token ceiling per user turn; 0 = unlimited
+	MaxOutputTokens           int               `json:"max_output_tokens"`      // -max-output-tokens, per model turn output cap; 0 = automatic
 	MaxPromptCostUSD          float64           `json:"max_prompt_cost_usd"`    // -max-prompt-cost, accumulated USD ceiling per user turn; 0 = unlimited (needs catalog pricing)
 	ToolTimeoutSeconds        int               `json:"tool_timeout_seconds"`   // -tool-timeout, per-tool-call dispatch ceiling (s); default 600, <=0 disables
 	DefaultContextWindow      int               `json:"default_context_window"` // -default-context-window, fallback when metadata lacks a window
@@ -245,6 +246,7 @@ type fileConfig struct {
 	NoEnv                     *bool                      `json:"no_env"`
 	MaxTurns                  *int                       `json:"max_turns"`
 	MaxTurnTokens             *int                       `json:"max_turn_tokens"`
+	MaxOutputTokens           *int                       `json:"max_output_tokens"`
 	MaxPromptCostUSD          *float64                   `json:"max_prompt_cost_usd"`
 	ToolTimeoutSeconds        *int                       `json:"tool_timeout_seconds"`
 	DefaultContextWindow      *int                       `json:"default_context_window"`
@@ -397,6 +399,8 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		getenv("HARNESS_MAX_TURNS"), fc.MaxTurns, defaultMaxTurns)
 	c.MaxTurnTokens = resolveInt(set["max-turn-tokens"], *f.maxTurnTokens,
 		getenv("HARNESS_MAX_TURN_TOKENS"), fc.MaxTurnTokens, 0)
+	c.MaxOutputTokens = resolveInt(set["max-output-tokens"], *f.maxOutputTokens,
+		getenv("HARNESS_MAX_OUTPUT_TOKENS"), fc.MaxOutputTokens, 0)
 	c.MaxPromptCostUSD = resolveFloat(set["max-prompt-cost"], *f.maxPromptCost,
 		getenv("HARNESS_MAX_PROMPT_COST"), fc.MaxPromptCostUSD, 0)
 	c.ToolTimeoutSeconds = resolveInt(set["tool-timeout"], *f.toolTimeout,
@@ -842,6 +846,7 @@ type flags struct {
 	histFileSize, histSize         *int
 	maxTurns                       *int
 	maxTurnTokens                  *int
+	maxOutputTokens                *int
 	maxPromptCost                  *float64
 	toolTimeout                    *int
 	defaultContextWindow           *int
@@ -893,6 +898,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.histSize = fs.Int("histsize", DefaultHistSize, "max REPL history entries loaded into memory (0 disables)")
 	f.maxTurns = fs.Int("max-turns", defaultMaxTurns, "model turns per user prompt; <=0 means unlimited")
 	f.maxTurnTokens = fs.Int("max-turn-tokens", 0, "stop a user turn after this many accumulated tokens; 0 means unlimited")
+	f.maxOutputTokens = fs.Int("max-output-tokens", 0, "per-model-turn output token cap; 0 uses the automatic cap")
 	f.maxPromptCost = fs.Float64("max-prompt-cost", 0, "stop a user turn once its accumulated model cost reaches this many USD; 0 means unlimited (requires a model with catalog pricing)")
 	f.toolTimeout = fs.Int("tool-timeout", defaultToolTimeoutSeconds, "per-tool-call timeout backstop in seconds; <=0 disables (run_command's own timeout_seconds still applies)")
 	f.defaultContextWindow = fs.Int("default-context-window", defaultContextWindow, "default context window for configured models without context metadata (tokens)")

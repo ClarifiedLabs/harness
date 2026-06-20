@@ -72,12 +72,19 @@ func TestBuildRequestMaxTokensFloorSmallWindow(t *testing.T) {
 }
 
 func TestBuildRequestMaxTokensCatalogOutputLimit(t *testing.T) {
-	// A known catalog output limit beats the fixed 32768 fallback even on a
-	// large window, so a 128k-output model is not truncated at 32768.
+	// A known catalog output limit is a ceiling, not the automatic default.
 	req := basicRequest()
 	w := buildRequest(req, 1_000_000, 128_000)
-	if w.MaxTokens == nil || *w.MaxTokens != 128_000 {
-		t.Fatalf("max_tokens = %v, want 128000 (catalog output limit)", w.MaxTokens)
+	if w.MaxTokens == nil || *w.MaxTokens != 32_768 {
+		t.Fatalf("max_tokens = %v, want 32768", w.MaxTokens)
+	}
+}
+
+func TestBuildRequestMaxTokensSmallCatalogOutputLimit(t *testing.T) {
+	req := basicRequest()
+	w := buildRequest(req, 1_000_000, 8_000)
+	if w.MaxTokens == nil || *w.MaxTokens != 8_000 {
+		t.Fatalf("max_tokens = %v, want 8000", w.MaxTokens)
 	}
 }
 
@@ -85,8 +92,8 @@ func TestBuildRequestMaxTokensClampsFullWindowOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 4_436
 	w := buildRequestForMode(req, 262_144, 262_144, "openrouter")
-	if w.MaxTokens == nil || *w.MaxTokens != 249_844 {
-		t.Fatalf("max_tokens = %v, want 249844", w.MaxTokens)
+	if w.MaxTokens == nil || *w.MaxTokens != 32_768 {
+		t.Fatalf("max_tokens = %v, want 32768", w.MaxTokens)
 	}
 }
 

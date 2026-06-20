@@ -157,3 +157,52 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 		t.Fatalf("retry after = %v, want 250ms", apiErr.RetryAfter)
 	}
 }
+
+func TestProviderCountInputTokens(t *testing.T) {
+	var sawProvider string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/input_tokens" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var req protocol.TokenCountRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		sawProvider = req.Provider
+		_ = json.NewEncoder(w).Encode(protocol.TokenCountResponse{InputTokens: 3456, Source: "proxy"})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := c.Provider("openai").(llm.InputTokenCounter).CountInputTokens(context.Background(), llm.Request{Model: "gpt-5.5"})
+	if err != nil {
+		t.Fatalf("CountInputTokens: %v", err)
+	}
+	if sawProvider != "openai" || got.InputTokens != 3456 || got.Source != "proxy" {
+		t.Fatalf("provider/count = %q/%+v", sawProvider, got)
+	}
+}
+
+func TestProviderCountInputTokensUnsupported(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(protocol.Error{
+			StatusCode: http.StatusNotImplemented,
+			Code:       "input_token_count_unsupported",
+			Message:    llm.ErrInputTokenCountUnsupported.Error(),
+		})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = c.Provider("openai").(llm.InputTokenCounter).CountInputTokens(context.Background(), llm.Request{Model: "gpt-5.5"})
+	if !errors.Is(err, llm.ErrInputTokenCountUnsupported) {
+		t.Fatalf("err = %v, want ErrInputTokenCountUnsupported", err)
+	}
+}

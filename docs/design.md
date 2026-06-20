@@ -261,12 +261,16 @@ type Provider interface {
     Stream(ctx context.Context, req Request) iter.Seq2[StreamEvent, error]
 }
 
+type InputTokenCounter interface {
+    CountInputTokens(ctx context.Context, req Request) (InputTokenCount, error)
+}
+
 type Request struct {
     Model       string
     System      string
     Messages    []Message
     Tools       []ToolSchema
-    MaxTokens   int      // 0 = provider policy (see §5.4)
+    MaxTokens   int      // 0 = automatic policy (see §5.4)
     Temperature *float64 // nil = omit
     Reasoning   ReasoningConfig
     StopSeqs    []string
@@ -425,7 +429,8 @@ Edge cases:
 | Prompt cache key | `prompt_cache_key` from `Request.PromptCacheKey` | `prompt_cache_key` from `Request.PromptCacheKey` | not sent (explicit `cache_control` breakpoints instead) |
 | Stateful continuation | `store` is always sent — `store:true` plus `previous_response_id` when proxy catalog reports `responses_stateful:true` (tools/system still sent each request), `store:false` for the stateless default | ignored | ignored |
 | Assistant phase | assistant `message` input items include stored `phase` (`commentary` or `final_answer`) when present | ignored | ignored |
-| Token cap | `max_output_tokens` is capped by explicit `MaxTokens`, else `outputLimit`, else `min(32768, contextWindow/4)`, then clamped to remaining estimated context (omitted if disabled or unresolved) | `max_tokens` follows the same input-aware cap (omitted if unresolved) | `max_tokens` is required and follows the same input-aware cap |
+| Token cap | `max_output_tokens` is capped by explicit `MaxTokens`, else `min(32768, contextWindow/4)`, then by `outputLimit` and remaining counted/estimated context (omitted if disabled or unresolved) | `max_tokens` follows the same input-aware cap (omitted if unresolved) | `max_tokens` is required and follows the same input-aware cap, falling back to 32768 if unresolved |
+| Input token count | `POST /responses/input_tokens` via the optional `InputTokenCounter` | local `o200k_base` estimate for OpenAI/OpenRouter Chat Completions | `POST /v1/messages/count_tokens` via the optional `InputTokenCounter` |
 | Streaming usage | final `response.usage` on terminal events | `"stream_options":{"include_usage":true}` (always set) | automatic: input tokens in `message_start`, output in `message_delta` |
 | Stop sequences | not sent | `stop` | `stop_sequences` |
 | Temperature | omitted when nil (never send a spurious 0) | same | same |
@@ -436,15 +441,19 @@ The same model-facing `ToolSchema.Parameters` bytes go into `parameters` vs
 advertising tools; each tool's top-level description remains the explanatory text.
 
 **Default `max_tokens` cap (`defaultMaxTokensCap = 32768`).** When the user does
-not set `MaxTokens`, all three dialects start from the model's catalog
-`output_limit` when known, otherwise `min(32768, contextWindow/4)`. Explicit
-`MaxTokens` is treated as an upper bound, not permission to exceed the window.
-The chosen cap is clamped to `contextWindow - estimatedInput - reserve`, where
-the reserve is `min(max(512, contextWindow/100), 8192, contextWindow/4)`.
-This keeps full-window catalog limits such as `output_limit == context_window`
-from producing invalid `input + output > context` requests. Anthropic always
-sends the computed value (`max_tokens` is required); OpenAI Chat Completions and
-Responses send `max_tokens` / `max_output_tokens` only when the value is known.
+not set `MaxTokens`, all three dialects start from `min(32768,
+contextWindow/4)` when the context window is known. The model catalog's
+`output_limit` is a ceiling, not the default, so full-window limits such as
+`output_limit == context_window` do not reserve the whole remaining context.
+Explicit `MaxTokens` is treated as an upper bound, not permission to exceed the
+window. The chosen cap is clamped to `contextWindow - inputTokens - reserve`,
+where the reserve is `min(max(512, contextWindow*3/100), contextWindow/4)`.
+Before normal model requests, `inputTokens` comes from provider count APIs for
+OpenAI Responses and Anthropic when available through the proxy, then from a
+local `o200k_base` estimate for OpenAI/OpenRouter Chat Completions, then from
+the coarse request byte estimate. Anthropic always sends the computed value
+(`max_tokens` is required); OpenAI Chat Completions and Responses send
+`max_tokens` / `max_output_tokens` only when the value is known.
 Responses providers can set `omit_max_output_tokens` when a compatible backend
 rejects the standard parameter. If a provider rejects a request with a parseable
 context-overflow error, the agent records the smaller reported window for the
@@ -726,6 +735,11 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   (`json` default, or `text`), with serve flags overriding config. Proxy config
   also accepts `models_dev_cache_ttl` as a duration string such as `"24h"` or
   numeric `0`; the `-models-dev-cache-ttl` serve/setup/refresh flag overrides it.
+- `POST /v1/input_tokens` accepts `{provider, request}` and returns
+  `{input_tokens, source}` when the configured provider implements
+  `InputTokenCounter`; unsupported providers return `501` with
+  `code:"input_token_count_unsupported"`. Count requests are best-effort
+  preflight diagnostics and are not added to usage or cost aggregation.
 - **Usage aggregation.** The proxy keeps a mutex-guarded `{provider, model}` usage
   map and serves it read-only at `GET /v1/usage` as `{"models": [ {provider, model,
   requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
@@ -1707,6 +1721,7 @@ prefix wins, threshold `1 + len(cmd)/3`).
 -session <file>   explicit session save path
 -max-turns <n>    model turns per user prompt; <=0 means unlimited (default 250)
 -max-turn-tokens <n>   stop a user turn after this many accumulated tokens; 0 = unlimited (default 0)
+-max-output-tokens <n> per-model-turn output cap; 0 = automatic (default 0)
 -tool-timeout <s>      per-tool-call timeout backstop in seconds; <=0 disables (default 600)
 -histfile <path>      REPL history file path (default <stateDir>/harness/history)
 -histfilesize <n>     max REPL history entries stored on disk (default 1000, 0 disables)

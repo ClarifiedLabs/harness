@@ -496,6 +496,7 @@ func run(env environment) int {
 		ProviderName:      cfg.Provider,
 		Model:             cfg.Model,
 		ContextWindow:     cfg.ContextWindow,
+		MaxOutputTokens:   cfg.MaxOutputTokens,
 		Registry:          modelRegistry,
 		Reasoning:         reasoning,
 		ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider),
@@ -667,6 +668,7 @@ func run(env environment) int {
 		snap.ProviderName = next.Provider
 		snap.Model = next.Model
 		snap.ContextWindow = cfg.ContextWindow
+		snap.MaxOutputTokens = cfg.MaxOutputTokens
 		snap.System = system
 		snap.Reasoning = nextReasoning
 		snap.ResponsesStateful = responsesStatefulForProvider(cfg, catalog, next.Provider)
@@ -727,6 +729,7 @@ func run(env environment) int {
 		snap.ProviderName = next.Provider
 		snap.Model = next.Model
 		snap.ContextWindow = cfg.ContextWindow
+		snap.MaxOutputTokens = cfg.MaxOutputTokens
 		snap.Reasoning = nextReasoning
 		snap.ResponsesStateful = responsesStatefulForProvider(cfg, catalog, next.Provider)
 		delegateState.Set(snap)
@@ -747,6 +750,7 @@ func run(env environment) int {
 	ag := agent.New(provider, toolRegistry, agent.Options{
 		MaxTurns:                  cfg.MaxTurns,
 		MaxTurnTokens:             cfg.MaxTurnTokens,
+		MaxOutputTokens:           cfg.MaxOutputTokens,
 		MaxPromptCostUSD:          cfg.MaxPromptCostUSD,
 		Model:                     cfg.Model,
 		ContextWindow:             cfg.ContextWindow,
@@ -814,6 +818,7 @@ func run(env environment) int {
 		ProviderName:      cfg.Provider,
 		Model:             cfg.Model,
 		ContextWindow:     cfg.ContextWindow,
+		MaxOutputTokens:   cfg.MaxOutputTokens,
 		Registry:          modelRegistry,
 		Reasoning:         reasoning,
 		ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider),
@@ -1652,6 +1657,7 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 		ProviderName:      providerName,
 		Model:             model,
 		ContextWindow:     runtime.ContextWindow,
+		MaxOutputTokens:   runtime.MaxOutputTokens,
 		Registry:          runtime.Registry,
 		Reasoning:         launchReasoning,
 		ResponsesStateful: responsesStatefulForProvider(cfg, modelCatalog, providerName),

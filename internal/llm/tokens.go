@@ -51,13 +51,14 @@ func EffectiveContextWindow(configured, hint int) int {
 func ResolveMaxTokens(req Request, contextWindow, outputLimit int) int {
 	candidate := req.MaxTokens
 	if candidate <= 0 {
-		candidate = outputLimit
-	}
-	if candidate <= 0 {
 		if contextWindow <= 0 {
 			return 0
+		} else {
+			candidate = min(DefaultMaxTokensCap, contextWindow/4)
 		}
-		candidate = min(DefaultMaxTokensCap, contextWindow/4)
+	}
+	if outputLimit > 0 && candidate > outputLimit {
+		candidate = outputLimit
 	}
 	if contextWindow <= 0 {
 		return candidate

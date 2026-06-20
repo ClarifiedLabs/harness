@@ -82,6 +82,7 @@ interrupted.
                     (default 0). Counts input + cache-read + cache-write + output + reasoning
                     tokens across every model call in the turn, and breaks before the next paid
                     request with a `[stopped: turn token budget N exceeded]` notice.
+-max-output-tokens <n> per-model-turn output cap; 0 uses the automatic cap (default 0)
 -max-prompt-cost <usd>   stop a user turn once its accumulated model cost reaches this many USD;
                     0 means unlimited (default 0). Uses catalog pricing, so it applies only to
                     models with a known price; breaks before the next paid request with a
@@ -144,7 +145,8 @@ caps (`HARNESS_TOOL_RESULT_MAX_BYTES` / `HARNESS_TOOL_RESULT_MAX_LINES`). A few
 context-efficiency knobs are config-file-only.
 
 - Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_PROVIDER`, `HARNESS_MODEL`,
-  `HARNESS_MAX_TURNS`, `HARNESS_MAX_TURN_TOKENS`, `HARNESS_TOOL_TIMEOUT`,
+  `HARNESS_MAX_TURNS`, `HARNESS_MAX_TURN_TOKENS`,
+  `HARNESS_MAX_OUTPUT_TOKENS`, `HARNESS_TOOL_TIMEOUT`,
   `HARNESS_DEFAULT_CONTEXT_WINDOW`, `HARNESS_TIMESTAMPS`,
   `HARNESS_IMAGE_DETAIL`, and most other `HARNESS_*` equivalents for
   user-facing flags. The convention is `HARNESS_` plus the flag name uppercased
@@ -181,13 +183,19 @@ context-efficiency knobs are config-file-only.
   (empty = all). See [mcp.md](mcp.md) and [lsp.md](lsp.md). An explicit
   `allowed_tools` whitelist can still name a tool that auto-exposure excluded.
 - A single model turn's output is capped at the model's configured
-  `output_limit` when known, otherwise `min(32768, context_window/4)` tokens,
-  then clamped to the estimated remaining context window. This client-side
-  runaway brake is distinct from `-max-turn-tokens`, which is the cumulative
-  per-turn token *budget* across all model calls. If a provider reports a smaller
-  real context window in an overflow error, harness learns that window for the
-  session and retries once. When the cap is reached, harness surfaces
-  `[stopped: model reached max tokens]`.
+  `max_output_tokens` value when set, otherwise `min(32768,
+  context_window/4)` tokens. A model's configured `output_limit`, when known,
+  is a ceiling rather than the default. The chosen cap is then clamped to the
+  counted or estimated remaining context window. This client-side runaway brake
+  is distinct from `-max-turn-tokens`, which is the cumulative per-turn token
+  *budget* across all model calls. If a provider reports a smaller real context
+  window in an overflow error, harness learns that window for the session and
+  retries once. When the cap is reached, harness surfaces `[stopped: model
+  reached max tokens]`.
+- Before normal model requests, harness resolves input tokens in tiers:
+  provider-specific count APIs for OpenAI Responses and Anthropic Messages when
+  available through `harness-model-proxy`; a local `o200k_base` BPE estimate for
+  OpenAI/OpenRouter Chat Completions; then the coarse byte-based heuristic.
 
 Harness automatically adds static AGENTS instructions from
 `~/.agents/AGENTS.md`, then from `AGENTS.md` in the current working directory.

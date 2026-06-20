@@ -675,6 +675,19 @@ func TestMaxTurnTokensResolution(t *testing.T) {
 	}
 }
 
+func TestMaxOutputTokensPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
+	checkPrecedence(t, precedenceCase[int]{
+		file:     `{"max_output_tokens":12000}`,
+		env:      map[string]string{"HARNESS_MAX_OUTPUT_TOKENS": "16000"},
+		baseArgs: []string{"-model", "gpt-5.5"},
+		flagArgs: []string{"-max-output-tokens", "24000"},
+		got:      func(c Config) int { return c.MaxOutputTokens },
+		wantFlag: 24000,
+		wantEnv:  16000,
+		wantFile: 12000,
+	})
+}
+
 func TestMaxPromptCostResolution(t *testing.T) {
 	c, err := Load([]string{"-model", "gpt-5.5"}, noEnv, "")
 	if err != nil {

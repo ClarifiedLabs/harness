@@ -88,6 +88,16 @@ type StreamRequest struct {
 	Request  llm.Request `json:"request"`
 }
 
+type TokenCountRequest struct {
+	Provider string      `json:"provider"`
+	Request  llm.Request `json:"request"`
+}
+
+type TokenCountResponse struct {
+	InputTokens int    `json:"input_tokens"`
+	Source      string `json:"source,omitempty"`
+}
+
 type StreamEnvelope struct {
 	Event *llm.StreamEvent `json:"event,omitempty"`
 	Error *Error           `json:"error,omitempty"`

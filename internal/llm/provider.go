@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
 )
 
@@ -18,6 +19,21 @@ type Provider interface {
 	// Usage events carry cumulative snapshots of the whole call, never
 	// deltas; consumers may merge them with element-wise max.
 	Stream(ctx context.Context, req Request) iter.Seq2[StreamEvent, error]
+}
+
+// InputTokenCounter is an optional Provider side interface for exact or
+// provider-specific preflight input-token counts.
+type InputTokenCounter interface {
+	CountInputTokens(ctx context.Context, req Request) (InputTokenCount, error)
+}
+
+// ErrInputTokenCountUnsupported marks providers without preflight counting.
+var ErrInputTokenCountUnsupported = errors.New("input token count unsupported")
+
+// InputTokenCount is a provider-specific input-token count for one request.
+type InputTokenCount struct {
+	InputTokens int    `json:"input_tokens"`
+	Source      string `json:"source,omitempty"`
 }
 
 // Request is one model call's worth of input, provider-neutral.

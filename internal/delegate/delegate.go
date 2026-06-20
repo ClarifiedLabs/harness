@@ -34,6 +34,7 @@ type Runtime struct {
 	ProviderName      string
 	Model             string
 	ContextWindow     int
+	MaxOutputTokens   int
 	Registry          *llm.Registry
 	Reasoning         llm.ReasoningConfig
 	ResponsesStateful bool
@@ -50,6 +51,7 @@ type Launch struct {
 	ProviderName      string
 	Model             string
 	ContextWindow     int
+	MaxOutputTokens   int
 	Registry          *llm.Registry
 	Reasoning         llm.ReasoningConfig
 	ResponsesStateful bool
@@ -364,6 +366,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	child := agent.New(launch.Provider, childTools, agent.Options{
 		MaxTurns:                  maxTurns,
+		MaxOutputTokens:           launch.MaxOutputTokens,
 		Model:                     launch.Model,
 		ContextWindow:             launch.ContextWindow,
 		Registry:                  launch.Registry,
@@ -439,17 +442,18 @@ func (r *Runner) childTools(parent Runtime, launch Launch, childID string, todos
 		childTools.Register(todo.NewTool(todos))
 	}
 	childRuntime := Runtime{
-		Provider:      launch.Provider,
-		ProviderName:  launch.ProviderName,
-		Model:         launch.Model,
-		ContextWindow: launch.ContextWindow,
-		Registry:      launch.Registry,
-		Reasoning:     launch.Reasoning,
-		System:        launch.System,
-		Agent:         launch.Agent,
-		ToolNames:     names,
-		SessionPath:   parent.SessionPath,
-		ParentChildID: childID,
+		Provider:        launch.Provider,
+		ProviderName:    launch.ProviderName,
+		Model:           launch.Model,
+		ContextWindow:   launch.ContextWindow,
+		MaxOutputTokens: launch.MaxOutputTokens,
+		Registry:        launch.Registry,
+		Reasoning:       launch.Reasoning,
+		System:          launch.System,
+		Agent:           launch.Agent,
+		ToolNames:       names,
+		SessionPath:     parent.SessionPath,
+		ParentChildID:   childID,
 	}
 	childState := NewState(childRuntime)
 	for _, name := range childTools.Names() {

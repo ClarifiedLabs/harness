@@ -19,6 +19,7 @@ import (
 	"harness/internal/diff"
 	"harness/internal/hooks"
 	"harness/internal/llm"
+	"harness/internal/llm/tokencount"
 	"harness/internal/retry"
 	"harness/internal/tools"
 )
@@ -125,6 +126,10 @@ type Options struct {
 	// MaxTurnTokens stops a user turn once accumulated tokens for the turn reach
 	// this ceiling; zero means unlimited. Enforcement lives in the turn loop.
 	MaxTurnTokens int
+	// MaxOutputTokens caps one normal model turn's output; zero uses the shared
+	// automatic provider policy. Prewarm and compaction summaries set their own
+	// request caps and do not use this value.
+	MaxOutputTokens int
 	// MaxPromptCostUSD stops a user turn once its accumulated model cost (USD)
 	// reaches this ceiling; zero means unlimited. Enforced only for models with
 	// catalog pricing (otherwise cost is unknown and the budget cannot fire).
@@ -183,6 +188,7 @@ type Agent struct {
 	model                     string
 	maxTurns                  int
 	maxTurnTokens             int     // accumulated-token ceiling per user turn; 0 = unlimited
+	maxOutputTokens           int     // per-normal-model-turn output cap; 0 = automatic
 	maxPromptCostUSD          float64 // accumulated USD ceiling per user turn; 0 = unlimited
 	contextWindow             int     // -context-window override; 0 = use the registry default
 	observedContextWindow     int     // smaller provider-reported limit learned from an overflow error
@@ -218,6 +224,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		model:                     opts.Model,
 		maxTurns:                  opts.MaxTurns,
 		maxTurnTokens:             opts.MaxTurnTokens,
+		maxOutputTokens:           opts.MaxOutputTokens,
 		maxPromptCostUSD:          opts.MaxPromptCostUSD,
 		contextWindow:             opts.ContextWindow,
 		reasoning:                 opts.Reasoning,
@@ -523,6 +530,7 @@ func (a *Agent) modelRequest(requestContext []string) modelRequest {
 		Messages:             payloadMessages,
 		Tools:                cloneToolSpecs(a.toolSpecs),
 		Reasoning:            a.reasoning,
+		MaxTokens:            a.maxOutputTokens,
 		StoreResponse:        a.responsesStateful,
 		RequestContext:       append([]string(nil), requestContext...),
 		PromptCacheKey:       a.promptCacheKey(),
@@ -538,6 +546,42 @@ func (a *Agent) modelRequest(requestContext []string) modelRequest {
 		estimate:     estimate,
 		usedPrevious: usedPrevious,
 	}
+}
+
+func (a *Agent) countModelRequestInput(ctx context.Context, mr modelRequest) modelRequest {
+	count, ok := a.countInputTokens(ctx, mr.request)
+	if !ok || count <= 0 {
+		return mr
+	}
+	old := mr.request.EstimatedInputTokens
+	mr.request.EstimatedInputTokens = count
+	delta := count - old
+	mr.estimate.Total += delta
+	mr.estimate.PayloadTotal += delta
+	mr.estimate.Messages += delta
+	mr.estimate.PayloadMessages += delta
+	if mr.estimate.Messages < 0 {
+		mr.estimate.Messages = 0
+	}
+	if mr.estimate.PayloadMessages < 0 {
+		mr.estimate.PayloadMessages = 0
+	}
+	return mr
+}
+
+func (a *Agent) countInputTokens(ctx context.Context, req llm.Request) (int, bool) {
+	if counter, ok := a.provider.(llm.InputTokenCounter); ok {
+		count, err := counter.CountInputTokens(ctx, req)
+		if err == nil && count.InputTokens > 0 {
+			return count.InputTokens, true
+		}
+	}
+	if tokencount.ShouldEstimateOpenAIChat(a.provider.Name()) {
+		if count := tokencount.EstimateOpenAIChat(req); count > 0 {
+			return count, true
+		}
+	}
+	return 0, false
 }
 
 func (a *Agent) payloadMessages() ([]llm.Message, bool) {
@@ -667,6 +711,22 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
+		modelReq = a.countModelRequestInput(ctx, modelReq)
+		lastContext = modelReq.estimate
+		if a.overThreshold(modelReq.estimate.Total) {
+			if compUsage, changed, err := a.compact(ctx, sink, "input-count"); err == nil && changed {
+				total = add(total, compUsage)
+				lastInput = 0
+				appendBoundary = 0
+				requestContext = a.requestContext(extraContext, sink)
+				modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
+				lastContext = modelReq.estimate
+			}
+		}
+		if err := a.validateTranscript("before model request"); err != nil {
+			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+			return err
+		}
 
 		// The request we are about to send reflects the current transcript;
 		// remember its length so the next trigger only re-estimates what gets
@@ -684,7 +744,7 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 					}
 				}
 				requestContext = a.requestContext(extraContext, sink)
-				modelReq = a.modelRequest(requestContext)
+				modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 				lastContext = modelReq.estimate
 				res, wasted, err = a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)
 			}
@@ -692,7 +752,7 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
 			a.resetResponseState()
 			sink.Notice("[responses state reset: previous response unavailable; retrying with full context]")
-			modelReq = a.modelRequest(requestContext)
+			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = modelReq.estimate
 			var retryWasted llm.Usage
 			res, retryWasted, err = a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)

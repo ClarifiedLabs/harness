@@ -65,11 +65,17 @@ func TestBuildRequestMaxOutputTokensOmittedWhenWindowUnknown(t *testing.T) {
 }
 
 func TestBuildRequestMaxOutputTokensCatalogOutputLimit(t *testing.T) {
-	// A known catalog output limit beats the fixed 32768 fallback even on a large
-	// window, and applies even when the context window is unknown (0).
-	w := buildRequest(basicRequest(), 0, 100_000)
-	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 100_000 {
-		t.Fatalf("max_output_tokens = %v, want 100000 (catalog output limit)", w.MaxOutputTokens)
+	// A known catalog output limit is a ceiling, not the automatic default.
+	w := buildRequest(basicRequest(), 1_000_000, 100_000)
+	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 32_768 {
+		t.Fatalf("max_output_tokens = %v, want 32768", w.MaxOutputTokens)
+	}
+}
+
+func TestBuildRequestMaxOutputTokensSmallCatalogOutputLimit(t *testing.T) {
+	w := buildRequest(basicRequest(), 1_000_000, 8_000)
+	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 8_000 {
+		t.Fatalf("max_output_tokens = %v, want 8000", w.MaxOutputTokens)
 	}
 }
 
@@ -77,8 +83,8 @@ func TestBuildRequestMaxOutputTokensClampsFullWindowOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 4_436
 	w := buildRequest(req, 262_144, 262_144)
-	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 249_844 {
-		t.Fatalf("max_output_tokens = %v, want 249844", w.MaxOutputTokens)
+	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 32_768 {
+		t.Fatalf("max_output_tokens = %v, want 32768", w.MaxOutputTokens)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -201,6 +202,46 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			}
 		}
 	}
+}
+
+func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.InputTokenCount, error) {
+	body, err := json.Marshal(protocol.TokenCountRequest{
+		Provider: p.provider,
+		Request:  req,
+	})
+	if err != nil {
+		return llm.InputTokenCount{}, fmt.Errorf("marshal proxy input token request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.client.baseURL+"/v1/input_tokens", bytes.NewReader(body))
+	if err != nil {
+		return llm.InputTokenCount{}, err
+	}
+	httpReq.Header.Set("content-type", "application/json")
+	httpReq.Header.Set(requesterHeader, "harness")
+	resp, err := p.client.http.Do(httpReq)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return llm.InputTokenCount{}, ctxErr
+		}
+		return llm.InputTokenCount{}, &llm.APIError{Message: err.Error(), Retryable: true}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		err := readHTTPError(resp)
+		var apiErr *llm.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == "input_token_count_unsupported" {
+			return llm.InputTokenCount{}, llm.ErrInputTokenCountUnsupported
+		}
+		return llm.InputTokenCount{}, err
+	}
+	var out protocol.TokenCountResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return llm.InputTokenCount{}, fmt.Errorf("decode proxy input token response: %w", err)
+	}
+	if out.InputTokens <= 0 {
+		return llm.InputTokenCount{}, llm.ErrInputTokenCountUnsupported
+	}
+	return llm.InputTokenCount{InputTokens: out.InputTokens, Source: out.Source}, nil
 }
 
 func readHTTPError(resp *http.Response) error {

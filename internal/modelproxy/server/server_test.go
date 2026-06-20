@@ -21,6 +21,19 @@ import (
 	"harness/internal/modelproxy/protocol"
 )
 
+type countingFakeProvider struct {
+	*llmtest.FakeProvider
+	count int
+	err   error
+}
+
+func (p *countingFakeProvider) CountInputTokens(context.Context, llm.Request) (llm.InputTokenCount, error) {
+	if p.err != nil {
+		return llm.InputTokenCount{}, p.err
+	}
+	return llm.InputTokenCount{InputTokens: p.count, Source: "test"}, nil
+}
+
 func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "openrouter.json"), []byte(`{
@@ -103,6 +116,101 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	}
 	if len(fp.Requests) != 1 || fp.Requests[0].Model != "openai/gpt-5.5" {
 		t.Fatalf("fake provider requests = %+v", fp.Requests)
+	}
+}
+
+func TestHandlerInputTokens(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "responses",
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "sk-file",
+  "models": [{"name":"gpt-5.5","context_window":1000000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	var captured factory.Options
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		New: func(opts factory.Options) (llm.Provider, error) {
+			captured = opts
+			return &countingFakeProvider{FakeProvider: llmtest.New("responses"), count: 4321}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body, _ := json.Marshal(protocol.TokenCountRequest{
+		Provider: "openai",
+		Request:  llm.Request{Model: "gpt-5.5"},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/input_tokens", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST input_tokens: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var out protocol.TokenCountResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out.InputTokens != 4321 || out.Source != "test" {
+		t.Fatalf("token count = %+v, want 4321 test", out)
+	}
+	if captured.Provider != "responses" || captured.Model != "gpt-5.5" {
+		t.Fatalf("captured options = %+v", captured)
+	}
+}
+
+func TestHandlerInputTokensUnsupported(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "sk-file",
+  "models": [{"name":"gpt-5.5","context_window":1000000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			return llmtest.New("openai"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body, _ := json.Marshal(protocol.TokenCountRequest{
+		Provider: "openai",
+		Request:  llm.Request{Model: "gpt-5.5"},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/input_tokens", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST input_tokens: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", resp.StatusCode)
+	}
+	var out protocol.Error
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if out.Code != "input_token_count_unsupported" {
+		t.Fatalf("error = %+v, want unsupported", out)
 	}
 }
 
