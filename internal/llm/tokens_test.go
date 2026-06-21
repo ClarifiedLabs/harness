@@ -12,7 +12,7 @@ func TestResolveMaxTokensUnknownOutputLimit(t *testing.T) {
 func TestResolveMaxTokensClampsFullWindowOutputLimit(t *testing.T) {
 	req := Request{EstimatedInputTokens: 4436}
 	got := ResolveMaxTokens(req, 262_144, 262_144)
-	want := 32_768
+	want := 65_536
 	if got != want {
 		t.Fatalf("ResolveMaxTokens = %d, want %d", got, want)
 	}
@@ -29,8 +29,8 @@ func TestResolveMaxTokensLeavesProviderAccountingHeadroom(t *testing.T) {
 
 func TestResolveMaxTokensOutputLimitCapsDefault(t *testing.T) {
 	req := Request{EstimatedInputTokens: 1000}
-	if got := ResolveMaxTokens(req, 128_000, 8_000); got != 8_000 {
-		t.Fatalf("ResolveMaxTokens = %d, want 8000", got)
+	if got := ResolveMaxTokens(req, 1_000_000, 100_000); got != 100_000 {
+		t.Fatalf("ResolveMaxTokens = %d, want 100000", got)
 	}
 }
 

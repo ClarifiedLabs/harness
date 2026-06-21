@@ -1,7 +1,7 @@
 package llm
 
 const (
-	DefaultMaxTokensCap   = 32768
+	DefaultMaxTokensCap   = 1_000_000
 	estimateBytesPerToken = 4
 	estimateImageTokens   = 1600
 )

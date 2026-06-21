@@ -23,8 +23,8 @@ func TestBuildRequestGolden(t *testing.T) {
 	// The golden documents an interactive request, whose stable anchors take the
 	// 1h breakpoint.
 	req.LongCacheTTL = true
-	// claude-opus-4-8 window is 1,000,000; quarter (250,000) > 32768, so the
-	// default cap of 32768 applies.
+	// claude-opus-4-8 window is 1,000,000, so the default cap is a quarter
+	// of the context window.
 	const contextWindow = 1_000_000
 	got, err := json.Marshal(buildRequest(req, contextWindow, 0))
 	if err != nil {
@@ -52,11 +52,10 @@ func TestBuildRequestMaxTokensDefaultSmallWindow(t *testing.T) {
 
 func TestBuildRequestMaxTokensDefaultLargeWindow(t *testing.T) {
 	req := basicRequest()
-	// A large window makes the 32768 floor the binding default (window/4 > floor):
-	// the prior 8192 cap silently truncated large diffs/rewrites.
+	// A large window uses a quarter of the context window by default.
 	w := buildRequest(req, 1_000_000, 0)
-	if w.MaxTokens != 32_768 {
-		t.Errorf("max_tokens = %d, want 32768 floor", w.MaxTokens)
+	if w.MaxTokens != 250_000 {
+		t.Errorf("max_tokens = %d, want 250000", w.MaxTokens)
 	}
 }
 
@@ -73,8 +72,8 @@ func TestBuildRequestMaxTokensCatalogOutputLimit(t *testing.T) {
 	req := basicRequest()
 	// A known catalog output limit is a ceiling, not the automatic default.
 	w := buildRequest(req, 1_000_000, 64_000)
-	if w.MaxTokens != 32_768 {
-		t.Errorf("max_tokens = %d, want 32768", w.MaxTokens)
+	if w.MaxTokens != 64_000 {
+		t.Errorf("max_tokens = %d, want 64000", w.MaxTokens)
 	}
 }
 
@@ -90,8 +89,8 @@ func TestBuildRequestMaxTokensClampsFullWindowOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 4_436
 	w := buildRequest(req, 262_144, 262_144)
-	if w.MaxTokens != 32_768 {
-		t.Fatalf("max_tokens = %d, want 32768", w.MaxTokens)
+	if w.MaxTokens != 65_536 {
+		t.Fatalf("max_tokens = %d, want 65536", w.MaxTokens)
 	}
 }
 

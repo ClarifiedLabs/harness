@@ -338,7 +338,7 @@ func (r *Registry) ContextWindow(model string) int {
 // OutputLimit returns the model's known max-output-token limit from the
 // registry, or 0 when unknown. Unlike ContextWindow there is no configured
 // default: an unknown output limit leaves the per-request max_tokens cap to the
-// shared fixed fallback (min(DefaultMaxTokensCap, contextWindow/4)).
+// shared automatic policy.
 func (r *Registry) OutputLimit(model string) int {
 	if r == nil {
 		return 0

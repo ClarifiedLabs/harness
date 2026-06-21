@@ -429,7 +429,7 @@ Edge cases:
 | Prompt cache key | `prompt_cache_key` from `Request.PromptCacheKey` | `prompt_cache_key` from `Request.PromptCacheKey` | not sent (explicit `cache_control` breakpoints instead) |
 | Stateful continuation | `store` is always sent — `store:true` plus `previous_response_id` when proxy catalog reports `responses_stateful:true` (tools/system still sent each request), `store:false` for the stateless default | ignored | ignored |
 | Assistant phase | assistant `message` input items include stored `phase` (`commentary` or `final_answer`) when present | ignored | ignored |
-| Token cap | `max_output_tokens` is capped by explicit `MaxTokens`, else `min(32768, contextWindow/4)`, then by `outputLimit` and remaining counted/estimated context (omitted if disabled or unresolved) | `max_tokens` follows the same input-aware cap (omitted if unresolved) | `max_tokens` is required and follows the same input-aware cap, falling back to 32768 if unresolved |
+| Token cap | `max_output_tokens` is capped by explicit `MaxTokens`, else `min(1_000_000, contextWindow/4)`, then by `outputLimit` and remaining counted/estimated context (omitted if disabled or unresolved) | `max_tokens` follows the same input-aware cap (omitted if unresolved) | `max_tokens` is required and follows the same input-aware cap, falling back to 1,000,000 if unresolved |
 | Input token count | `POST /responses/input_tokens` via the optional `InputTokenCounter` | local `o200k_base` estimate for OpenAI/OpenRouter Chat Completions | `POST /v1/messages/count_tokens` via the optional `InputTokenCounter` |
 | Streaming usage | final `response.usage` on terminal events | `"stream_options":{"include_usage":true}` (always set) | automatic: input tokens in `message_start`, output in `message_delta` |
 | Stop sequences | not sent | `stop` | `stop_sequences` |
@@ -440,14 +440,15 @@ The same model-facing `ToolSchema.Parameters` bytes go into `parameters` vs
 `input_schema`. Harness strips nested JSON Schema `description` fields before
 advertising tools; each tool's top-level description remains the explanatory text.
 
-**Default `max_tokens` cap (`defaultMaxTokensCap = 32768`).** When the user does
-not set `MaxTokens`, all three dialects start from `min(32768,
-contextWindow/4)` when the context window is known. The model catalog's
-`output_limit` is a ceiling, not the default, so full-window limits such as
-`output_limit == context_window` do not reserve the whole remaining context.
-Explicit `MaxTokens` is treated as an upper bound, not permission to exceed the
-window. The chosen cap is clamped to `contextWindow - inputTokens - reserve`,
-where the reserve is `min(max(512, contextWindow*3/100), contextWindow/4)`.
+**Default `max_tokens` cap (`defaultMaxTokensCap = 1_000_000`).** When the user
+does not set `MaxTokens`, all three dialects start from
+`min(1_000_000, contextWindow/4)` when the context window is known. The model
+catalog's `output_limit` is a ceiling, not the default, so full-window limits
+such as `output_limit == context_window` do not reserve the whole remaining
+context. Explicit `MaxTokens` is treated as an upper bound, not permission to
+exceed the window. The chosen cap is clamped to
+`contextWindow - inputTokens - reserve`, where the reserve is
+`min(max(512, contextWindow*3/100), contextWindow/4)`.
 Before normal model requests, `inputTokens` comes from provider count APIs for
 OpenAI Responses and Anthropic when available through the proxy, then from a
 local `o200k_base` estimate for OpenAI/OpenRouter Chat Completions, then from

@@ -42,10 +42,10 @@ func TestBuildRequestMaxTokensUsesMaxOutputTokens(t *testing.T) {
 }
 
 func TestBuildRequestMaxOutputTokensFloorLargeWindow(t *testing.T) {
-	// A large window makes the 32768 floor the binding default (window/4 > floor).
+	// A large window uses a quarter of the context window by default.
 	w := buildRequest(basicRequest(), 1_000_000, 0)
-	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 32768 {
-		t.Fatalf("max_output_tokens = %v, want 32768 floor", w.MaxOutputTokens)
+	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 250_000 {
+		t.Fatalf("max_output_tokens = %v, want 250000", w.MaxOutputTokens)
 	}
 }
 
@@ -67,8 +67,8 @@ func TestBuildRequestMaxOutputTokensOmittedWhenWindowUnknown(t *testing.T) {
 func TestBuildRequestMaxOutputTokensCatalogOutputLimit(t *testing.T) {
 	// A known catalog output limit is a ceiling, not the automatic default.
 	w := buildRequest(basicRequest(), 1_000_000, 100_000)
-	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 32_768 {
-		t.Fatalf("max_output_tokens = %v, want 32768", w.MaxOutputTokens)
+	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 100_000 {
+		t.Fatalf("max_output_tokens = %v, want 100000", w.MaxOutputTokens)
 	}
 }
 
@@ -83,8 +83,8 @@ func TestBuildRequestMaxOutputTokensClampsFullWindowOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 4_436
 	w := buildRequest(req, 262_144, 262_144)
-	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 32_768 {
-		t.Fatalf("max_output_tokens = %v, want 32768", w.MaxOutputTokens)
+	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 65_536 {
+		t.Fatalf("max_output_tokens = %v, want 65536", w.MaxOutputTokens)
 	}
 }
 

@@ -182,16 +182,16 @@ context-efficiency knobs are config-file-only.
   auto-exposure, and `lsp.tools` registers only the listed subset of LSP tools
   (empty = all). See [mcp.md](mcp.md) and [lsp.md](lsp.md). An explicit
   `allowed_tools` whitelist can still name a tool that auto-exposure excluded.
-- A single model turn's output is capped at the model's configured
-  `max_output_tokens` value when set, otherwise `min(32768,
-  context_window/4)` tokens. A model's configured `output_limit`, when known,
-  is a ceiling rather than the default. The chosen cap is then clamped to the
-  counted or estimated remaining context window. This client-side runaway brake
-  is distinct from `-max-turn-tokens`, which is the cumulative per-turn token
-  *budget* across all model calls. If a provider reports a smaller real context
-  window in an overflow error, harness learns that window for the session and
-  retries once. When the cap is reached, harness surfaces `[stopped: model
-  reached max tokens]`.
+- A single model turn's output is capped at the configured
+  `max_output_tokens` value when set, otherwise at one quarter of the effective
+  `context_window` (with a very high 1,000,000-token runaway ceiling). A model's
+  configured `output_limit`, when known, is a ceiling rather than the default.
+  The chosen cap is then clamped to the counted or estimated remaining context
+  window. This client-side runaway brake is distinct from `-max-turn-tokens`,
+  which is the cumulative per-turn token *budget* across all model calls. If a
+  provider reports a smaller real context window in an overflow error, harness
+  learns that window for the session and retries once. When the cap is reached,
+  harness surfaces `[stopped: model reached max tokens]`.
 - Before normal model requests, harness resolves input tokens in tiers:
   provider-specific count APIs for OpenAI Responses and Anthropic Messages when
   available through `harness-model-proxy`; a local `o200k_base` BPE estimate for
