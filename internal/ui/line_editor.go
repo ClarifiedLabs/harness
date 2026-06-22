@@ -35,6 +35,26 @@ const (
 
 const bareEscapeSequenceTimeout = 50 * time.Millisecond
 
+// Paste-burst detection thresholds (non-bracketed paste fallback). A keystroke
+// arriving within pasteEnterGap of the previous one enters "paste mode"; paste
+// mode exits after a gap longer than pasteExitGap. Staying in paste mode too long
+// is the safe failure direction (an extra inserted newline, never a premature
+// submit). A paste filling an empty prompt that exceeds pasteSummaryBytes or has
+// at least pasteSummaryLines renders a one-line placeholder instead of the full
+// content inline (avoids scroll lag on large pastes).
+const (
+	pasteEnterGap           = 5 * time.Millisecond
+	pasteExitGap            = 150 * time.Millisecond
+	pasteSummaryBytes       = 1000
+	pasteSummaryLines       = 50
+	pasteSummaryPlaceholder = "[%d bytes of pasted content]"
+)
+
+// replPasteHeuristicEnv disables the non-bracketed paste-burst heuristic when
+// set to "off" (default on, interactive TTY only). It mirrors the
+// HARNESS_REPL_INPUT_TRACE pattern.
+const replPasteHeuristicEnv = "HARNESS_REPL_PASTE_HEURISTIC"
+
 const (
 	lineKeyDelete    = 3
 	lineKeyEscape    = 27
@@ -66,6 +86,20 @@ type promptLineEditor struct {
 	viYank              []rune
 	onNewHistory        func(string) // optional callback fired when a new entry is added
 	shiftEnterPending   bool
+
+	// Non-bracketed paste-burst heuristic (interactive TTY only). When now is
+	// non-nil and pasteHeuristic is true, updatePasteTiming tracks inter-keystroke
+	// gaps and enters pasteMode when bytes arrive faster than a human can type
+	// (<=pasteEnterGap), so newlines in a paste insert instead of submitting and
+	// the whole paste fills the buffer for review. Tests drive now with a fake
+	// clock; production wires time.Now on the TTY fd. pasteHeuristic defaults off
+	// (non-interactive readers and tests) and is switched on in newREPLReader.
+	now             func() time.Time
+	pasteHeuristic  bool
+	pasteMode       bool
+	lastKeyTime     time.Time
+	prevBufferEmpty bool // whether the buffer was empty before the current keystroke
+	purePaste       bool // an unedited paste fills the buffer; submitted literally
 }
 
 func newPromptLineEditor(in io.Reader, w io.Writer) *promptLineEditor {
@@ -79,6 +113,77 @@ func newPromptLineEditorWithReader(r *bufio.Reader, w io.Writer) *promptLineEdit
 		columns:            promptEditorColumns,
 		editMode:           promptEditModeEmacs,
 		escapeSequenceWait: bareEscapeSequenceTimeout,
+	}
+}
+
+// configurePasteHeuristic enables the non-bracketed paste-burst detection on
+// the interactive TTY path and supplies the clock (time.Now in production; a
+// fake clock in tests). It is a no-op when the heuristic is disabled.
+func (e *promptLineEditor) configurePasteHeuristic(enabled bool, now func() time.Time) {
+	e.pasteHeuristic = enabled && now != nil
+	e.now = now
+}
+
+// pasteHeuristicEnabled reports whether the non-bracketed paste-burst heuristic
+// is active. It defaults on and is disabled by HARNESS_REPL_PASTE_HEURISTIC=off.
+func pasteHeuristicEnabled() bool {
+	return !strings.EqualFold(os.Getenv(replPasteHeuristicEnv), "off")
+}
+
+// updatePasteTiming runs after each keystroke is read. It tracks inter-keystroke
+// gaps and enters paste mode when bytes arrive faster than a human can type
+// (<=pasteEnterGap), so newlines in a paste insert instead of submitting. Paste
+// mode exits after a gap longer than pasteExitGap. The heuristic is a fallback
+// for terminals that do not honor bracketed paste; it is a no-op unless
+// configurePasteHeuristic enabled it.
+//
+// purePaste is set when a burst is recognized that started from an empty buffer
+// (prevBufferEmpty recorded before the burst's first byte): such a paste fills
+// the prompt and is submitted literally. Staying in paste mode too long is the
+// safe failure direction (an extra inserted newline, never a premature submit).
+func (e *promptLineEditor) updatePasteTiming(s *lineEditState) {
+	if !e.pasteHeuristic || e.now == nil {
+		return
+	}
+	now := e.now()
+	emptyBefore := len(s.buf) == 0
+	if !e.lastKeyTime.IsZero() {
+		gap := now.Sub(e.lastKeyTime)
+		if gap <= pasteEnterGap {
+			if !e.pasteMode {
+				e.pasteMode = true
+				e.purePaste = e.prevBufferEmpty
+			}
+		} else if e.pasteMode && gap > pasteExitGap {
+			e.pasteMode = false
+		}
+	}
+	e.lastKeyTime = now
+	e.prevBufferEmpty = emptyBefore
+}
+
+// markManualEdit clears the pure-paste literal guarantee and any paste summary:
+// any manual keystroke (insert, delete, or cursor motion) after a paste makes
+// the whole submitted line typed (honoring !/command/$skill). It is a no-op
+// while a paste burst is in progress, so paste bytes never clear the flag.
+func (e *promptLineEditor) markManualEdit(s *lineEditState) {
+	if e.pasteMode {
+		return
+	}
+	e.purePaste = false
+	s.summary = ""
+}
+
+// refreshPasteSummary collapses the display to the one-line paste placeholder
+// once the accumulated buffer crosses the size/line threshold, so a large
+// non-bracketed paste stops rendering inline (avoiding scroll lag). Below the
+// threshold the real content renders inline. Called only while in paste mode.
+func (e *promptLineEditor) refreshPasteSummary(s *lineEditState) {
+	text := string(s.buf)
+	if len(text) > pasteSummaryBytes || strings.Count(text, "\n") >= pasteSummaryLines {
+		s.summary = fmt.Sprintf(pasteSummaryPlaceholder, len(text))
+	} else {
+		s.summary = ""
 	}
 }
 
@@ -104,6 +209,14 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 	if prefill != "" {
 		state.setText(prefill)
 	}
+	// Each prompt starts fresh: paste mode and the pure-paste literal flag must not
+	// carry over from a previous prompt (a typed prompt after a pasted one is
+	// authored, not literal). lastKeyTime is reset so the first keystroke of this
+	// prompt cannot be mistaken for a paste continuation.
+	e.pasteMode = false
+	e.purePaste = false
+	e.lastKeyTime = time.Time{}
+	e.prevBufferEmpty = len(state.buf) == 0
 	history := e.historyState()
 	vi := viLineState{mode: viModeInsert}
 	e.tracef("read start prompt=%q", prompt)
@@ -115,11 +228,11 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 		r, size, err := e.r.ReadRune()
 		if err != nil {
 			if errors.Is(err, io.EOF) && len(state.buf) > 0 {
-				e.tracef("read eof with buffered text len=%d", len(state.buf))
+				e.tracef("read eof with buffered text len=%d purePaste=%v", len(state.buf), e.purePaste)
 				if err := state.finish(e.w); err != nil {
 					return replInput{}, false, err
 				}
-				return replInput{text: string(state.buf)}, true, nil
+				return replInput{text: string(state.buf), pasted: e.purePaste}, true, nil
 			}
 			if errors.Is(err, io.EOF) {
 				e.tracef("read eof empty")
@@ -129,6 +242,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			return replInput{}, false, err
 		}
 		e.tracef("read rune=%s size=%d buffered=%d", traceRune(r), size, e.r.Buffered())
+		e.updatePasteTiming(&state)
 
 		if e.editMode == promptEditModeVi && vi.mode == viModeNormal {
 			result, err := e.handleViNormalInput(&vi, &state, &history, prompt, r)
@@ -150,27 +264,42 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 		case '\r':
 			if e.consumeShiftEnterPending() {
 				e.tracef("raw CR after shift modifier inserts newline")
+				e.markManualEdit(&state)
 				state.insert('\n')
 				if err := state.redraw(e.w, e.terminalColumns()); err != nil {
 					return replInput{}, false, err
 				}
 				continue
 			}
-			e.tracef("raw CR submits text len=%d", len(state.buf))
+			if e.pasteMode {
+				e.tracef("raw CR in paste inserts newline")
+				state.insert('\n')
+				e.refreshPasteSummary(&state)
+				if err := state.redraw(e.w, e.terminalColumns()); err != nil {
+					return replInput{}, false, err
+				}
+				continue
+			}
+			e.tracef("raw CR submits text len=%d purePaste=%v", len(state.buf), e.purePaste)
 			if err := state.finish(e.w); err != nil {
 				return replInput{}, false, err
 			}
 			e.addHistory(string(state.buf))
-			return replInput{text: string(state.buf)}, true, nil
+			return replInput{text: string(state.buf), pasted: e.purePaste}, true, nil
 		case '\n':
 			e.consumeShiftEnterPending()
+			e.markManualEdit(&state)
 			e.tracef("raw LF inserts newline")
 			state.insert('\n')
+			if e.pasteMode {
+				e.refreshPasteSummary(&state)
+			}
 			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
 				return replInput{}, false, err
 			}
 		case ctrlA:
 			e.clearShiftEnterPending()
+			e.markManualEdit(&state)
 			e.tracef("raw ctrl-a moves to start")
 			state.home()
 			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
@@ -178,6 +307,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			}
 		case ctrlB:
 			e.clearShiftEnterPending()
+			e.markManualEdit(&state)
 			e.tracef("raw ctrl-b moves left")
 			state.left()
 			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
@@ -193,6 +323,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			return replInput{text: string(state.buf), edit: true}, true, nil
 		case ctrlE:
 			e.clearShiftEnterPending()
+			e.markManualEdit(&state)
 			e.tracef("raw ctrl-e moves to end")
 			state.end()
 			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
@@ -200,6 +331,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			}
 		case ctrlF:
 			e.clearShiftEnterPending()
+			e.markManualEdit(&state)
 			e.tracef("raw ctrl-f moves right")
 			state.right()
 			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
@@ -217,6 +349,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			}
 		case '\t':
 			e.clearShiftEnterPending()
+			e.markManualEdit(&state)
 			handled, err := e.completeBangLine(&state)
 			if err != nil {
 				return replInput{}, false, err
@@ -229,6 +362,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			}
 		case '\b', del:
 			e.clearShiftEnterPending()
+			e.markManualEdit(&state)
 			e.tracef("raw backspace")
 			state.backspace()
 			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
@@ -262,24 +396,31 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			}
 			e.clearShiftEnterPending()
 			if action == lineEditSubmit {
+				e.tracef("escape submit text len=%d purePaste=%v", len(state.buf), e.purePaste)
 				if err := state.finish(e.w); err != nil {
 					return replInput{}, false, err
 				}
 				e.addHistory(string(state.buf))
-				return replInput{text: string(state.buf)}, true, nil
+				return replInput{text: string(state.buf), pasted: e.purePaste}, true, nil
 			}
 			switch action {
 			case lineEditHome:
+				e.markManualEdit(&state)
 				state.home()
 			case lineEditEnd:
+				e.markManualEdit(&state)
 				state.end()
 			case lineEditLeft:
+				e.markManualEdit(&state)
 				state.left()
 			case lineEditRight:
+				e.markManualEdit(&state)
 				state.right()
 			case lineEditBackspace:
+				e.markManualEdit(&state)
 				state.backspace()
 			case lineEditDelete:
+				e.markManualEdit(&state)
 				state.delete()
 			case lineEditEdit:
 				if err := state.finish(e.w); err != nil {
@@ -294,9 +435,14 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			case lineEditInterrupt:
 				return replInput{interrupt: true}, true, nil
 			case lineEditInsertNewline:
+				e.markManualEdit(&state)
 				state.insert('\n')
+				if e.pasteMode {
+					e.refreshPasteSummary(&state)
+				}
 				e.discardBufferedRawEnter()
 			case lineEditInsertText:
+				e.markManualEdit(&state)
 				if text == "\t" {
 					handled, err := e.completeBangLine(&state)
 					if err != nil {
@@ -307,21 +453,21 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 					}
 				}
 				state.insertString(text)
+				if e.pasteMode {
+					e.refreshPasteSummary(&state)
+				}
 			case lineEditHistoryPrev:
+				e.markManualEdit(&state)
 				history.prev(&state)
 			case lineEditHistoryNext:
+				e.markManualEdit(&state)
 				history.next(&state)
 			case lineEditPaste:
 				if len(state.buf) == 0 {
-					state.setText(text)
-					if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-						return replInput{}, false, err
-					}
-					if err := state.finish(e.w); err != nil {
-						return replInput{}, false, err
-					}
-					e.addHistory(text)
-					return replInput{text: text, pasted: true}, true, nil
+					state.setPasteSummary(text)
+					e.purePaste = true
+					e.tracef("bracketed paste fills empty prompt len=%d summary=%q", len(text), state.summary)
+					break
 				}
 				state.insertString(text)
 			}
@@ -330,8 +476,12 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			}
 		default:
 			e.clearShiftEnterPending()
+			e.markManualEdit(&state)
 			if r == '\t' || unicode.IsPrint(r) {
 				state.insert(r)
+				if e.pasteMode {
+					e.refreshPasteSummary(&state)
+				}
 				if err := state.redraw(e.w, e.terminalColumns()); err != nil {
 					return replInput{}, false, err
 				}
@@ -1157,6 +1307,12 @@ type lineEditState struct {
 	prompt string
 	buf    []rune
 	cursor int
+	// summary, when non-empty, is a one-line placeholder shown in place of buf
+	// (e.g. "[N bytes of pasted content]" for a large paste into an empty prompt).
+	// The real content stays in buf and is submitted on Enter; the placeholder
+	// avoids scroll lag from rendering a huge paste inline. The first manual
+	// keystroke clears it so typing reveals the full content.
+	summary string
 
 	drawn     bool
 	rows      int
@@ -1164,6 +1320,37 @@ type lineEditState struct {
 	cursorCol int
 	endRow    int
 	endCol    int
+}
+
+// displayRunes returns the runes the editor should render: the summary placeholder
+// when set, otherwise the real buffer. buf always holds the real content.
+func (s *lineEditState) displayRunes() []rune {
+	if s.summary != "" {
+		return []rune(s.summary)
+	}
+	return s.buf
+}
+
+// displayCursor returns the cursor position for rendering: at the end of the
+// summary placeholder when set, otherwise the real cursor.
+func (s *lineEditState) displayCursor() int {
+	if s.summary != "" {
+		return len([]rune(s.summary))
+	}
+	return s.cursor
+}
+
+// setPasteSummary replaces the buffer with a paste and, when the paste is large
+// or multi-line enough, records a one-line placeholder to render instead of the
+// full content. cursor lands at the end of the real content.
+func (s *lineEditState) setPasteSummary(text string) {
+	s.buf = []rune(text)
+	s.cursor = len(s.buf)
+	if len(text) > pasteSummaryBytes || strings.Count(text, "\n") >= pasteSummaryLines {
+		s.summary = fmt.Sprintf(pasteSummaryPlaceholder, len(text))
+	} else {
+		s.summary = ""
+	}
 }
 
 func (s *lineEditState) insert(r rune) {
@@ -1195,11 +1382,13 @@ func (s *lineEditState) replaceRange(start, end int, text string) {
 	next = append(next, s.buf[end:]...)
 	s.buf = next
 	s.cursor = start + len([]rune(text))
+	s.summary = "" // a content replacement reveals the real buffer
 }
 
 func (s *lineEditState) setText(text string) {
 	s.buf = []rune(text)
 	s.cursor = len(s.buf)
+	s.summary = "" // a content replacement reveals the real buffer
 }
 
 func (s *lineEditState) home() {
@@ -1243,7 +1432,7 @@ func (s *lineEditState) redraw(w io.Writer, cols int) error {
 	if err := s.moveToPromptStart(w); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "%s%s", s.prompt, string(s.buf)); err != nil {
+	if _, err := fmt.Fprintf(w, "%s%s", s.prompt, string(s.displayRunes())); err != nil {
 		return err
 	}
 
@@ -1308,15 +1497,17 @@ func (s *lineEditState) moveToPromptStart(w io.Writer) error {
 }
 
 func (s *lineEditState) metrics(cols int) (cursorRow, cursorCol, rows, endRow, endCol int) {
+	buf := s.displayRunes()
+	cursor := s.displayCursor()
 	if cols <= 0 {
 		cursorRow, cursorCol, rows = s.metricsNoWrap()
-		endRow, endCol = textPositionNoWrap(s.prompt + string(s.buf))
+		endRow, endCol = textPositionNoWrap(s.prompt + string(buf))
 		return cursorRow, cursorCol, rows, endRow, endCol
 	}
 	row, col := textPositionWrapped(s.prompt, cols)
 	cursorRow, cursorCol = row, col
-	seenCursor := s.cursor == 0
-	for i, r := range s.buf {
+	seenCursor := cursor == 0
+	for i, r := range buf {
 		if seenCursor {
 			rows = max(rows, row+occupiedRows(col+1, cols))
 		}
@@ -1331,7 +1522,7 @@ func (s *lineEditState) metrics(cols int) (cursorRow, cursorCol, rows, endRow, e
 				col %= cols
 			}
 		}
-		if i+1 == s.cursor {
+		if i+1 == cursor {
 			cursorRow, cursorCol = row, col
 			seenCursor = true
 		}
@@ -1341,17 +1532,19 @@ func (s *lineEditState) metrics(cols int) (cursorRow, cursorCol, rows, endRow, e
 }
 
 func (s *lineEditState) metricsNoWrap() (cursorRow, cursorCol, rows int) {
+	buf := s.displayRunes()
+	cursor := s.displayCursor()
 	row, col := textPositionNoWrap(s.prompt)
 	cursorRow, cursorCol = row, col
-	seenCursor := s.cursor == 0
-	for i, r := range s.buf {
+	seenCursor := cursor == 0
+	for i, r := range buf {
 		if r == '\n' {
 			row++
 			col = 0
 		} else {
 			col++
 		}
-		if i+1 == s.cursor {
+		if i+1 == cursor {
 			cursorRow, cursorCol = row, col
 			seenCursor = true
 		}

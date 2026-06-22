@@ -762,9 +762,12 @@ func TestPromptLineEditorBracketedPasteSubmitsEmptyPrompt(t *testing.T) {
 	}
 }
 
+// A bracketed paste into an empty prompt now fills the editable buffer for review
+// instead of auto-submitting, so a trailing Enter submits it. Multiline pastes are
+// still not added to history: recalling history at the next prompt yields nothing.
 func TestPromptLineEditorMultilinePasteIsNotAddedToHistory(t *testing.T) {
 	pasted := "first line\nsecond line"
-	inputs := readEditedInputs(t, bracketedPasteStart+pasted+bracketedPasteEnd+"\x1b[A\r", 2)
+	inputs := readEditedInputs(t, bracketedPasteStart+pasted+bracketedPasteEnd+"\r\x1b[A\r", 2)
 
 	if !inputs[0].pasted || inputs[0].text != pasted {
 		t.Fatalf("first input = %+v, want pasted %q", inputs[0], pasted)

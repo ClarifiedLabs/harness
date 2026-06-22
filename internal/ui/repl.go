@@ -996,6 +996,12 @@ func newREPLReader(in io.Reader, promptWriter io.Writer, promptEditor bool, edit
 		rr.editor.setEditMode(editMode)
 		if f, ok := in.(*os.File); ok {
 			cancelable := rr.cancelable
+			// The non-bracketed paste-burst heuristic is a fallback for terminals that
+			// do not honor bracketed paste: it detects a fast keystroke burst and
+			// treats newlines as inserts (filling the buffer for review) instead of
+			// submitting prematurely. It is interactive-only (a real fd) and on by
+			// default; HARNESS_REPL_PASTE_HEURISTIC=off disables it.
+			rr.editor.configurePasteHeuristic(pasteHeuristicEnabled(), time.Now)
 			rr.editor.escapeSequenceReady = func(timeout time.Duration) bool {
 				// The pump eagerly drains f, so a split escape sequence's tail may
 				// already sit in the cancelableReader's Go-side buffers where

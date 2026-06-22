@@ -278,10 +278,20 @@ named skill anywhere in the text; the model receives request-only context
 telling it to read that skill's `SKILL.md` before acting. `$$` escapes a
 literal `$`.
 
-In terminals that support bracketed paste, pasted text is submitted as one
-literal prompt, preserving embedded newlines. Pasted `/commands` are not
-executed as meta-commands. For non-interactive large input, prefer `-p -` or
-piped stdin.
+In terminals that support bracketed paste, pasted text fills the prompt for
+review and is submitted as one literal prompt when you press Enter, preserving
+embedded newlines. A large or multi-line paste shows a one-line
+`[N bytes of pasted content]` placeholder instead of the full content; press
+Ctrl-G / `/edit` to open the external editor with the full pasted content. A
+paste that fills an empty prompt is submitted literally — pasted `/commands`
+are not executed, `!command` is not a shell escape, and `$skill` is not
+resolved. This holds on the Enter path in every edit mode, including the vi
+normal-mode Enter after Esc. Typing anything after a paste (in emacs mode, or
+after entering vi normal mode with Esc) makes the whole line typed (so
+`!`/`/`/`$` apply). In terminals that do not support bracketed paste, harness
+falls back to detecting a fast paste burst so newlines in a paste do not submit
+prematurely; set `HARNESS_REPL_PASTE_HEURISTIC=off` to disable that. For
+non-interactive large input, prefer `-p -` or piped stdin.
 
 At an interactive terminal, the prompt supports basic line editing. Shift-Enter
 inserts a newline without submitting. Press Ctrl-G at the prompt, or run

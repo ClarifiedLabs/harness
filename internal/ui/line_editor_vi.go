@@ -62,6 +62,7 @@ func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState,
 	case rune(lineTermEdit):
 		return e.viEdit(s)
 	case '\b', del:
+		e.markManualEdit(s)
 		v.pending = viOpNone
 		s.viLeft()
 		return viEditResult{redraw: true}, nil
@@ -107,22 +108,26 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 	case lineEditRight:
 		return e.handleViNormalText(v, s, h, "l"), nil
 	case lineEditBackspace:
+		e.markManualEdit(s)
 		v.pending = viOpNone
 		s.viLeft()
 		return viEditResult{redraw: true}, nil
 	case lineEditDelete:
 		return e.handleViNormalText(v, s, h, "x"), nil
 	case lineEditHistoryPrev:
+		e.markManualEdit(s)
 		v.pending = viOpNone
 		h.prev(s)
 		s.viClampNormalCursor()
 		return viEditResult{redraw: true}, nil
 	case lineEditHistoryNext:
+		e.markManualEdit(s)
 		v.pending = viOpNone
 		h.next(s)
 		s.viClampNormalCursor()
 		return viEditResult{redraw: true}, nil
 	case lineEditInsertNewline:
+		e.markManualEdit(s)
 		v.enterInsert()
 		if len(s.buf) > 0 && s.cursor < len(s.buf) {
 			s.cursor++
@@ -133,15 +138,10 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 		return e.handleViNormalText(v, s, h, text), nil
 	case lineEditPaste:
 		if len(s.buf) == 0 {
-			s.setText(text)
-			if err := s.redraw(e.w, e.terminalColumns()); err != nil {
-				return viEditResult{}, err
-			}
-			if err := s.finish(e.w); err != nil {
-				return viEditResult{}, err
-			}
-			e.addHistory(text)
-			return viEditResult{input: replInput{text: text, pasted: true}, ok: true, done: true}, nil
+			s.setPasteSummary(text)
+			e.purePaste = true
+			v.enterInsert()
+			return viEditResult{redraw: true}, nil
 		}
 		e.viPasteText(s, []rune(text), false)
 		return viEditResult{redraw: true}, nil
@@ -152,6 +152,12 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 }
 
 func (e *promptLineEditor) handleViNormalText(v *viLineState, s *lineEditState, h *lineEditHistory, text string) viEditResult {
+	// A manual vi command (motion, delete, insert, paste-from-yank, or history
+	// recall) after a pure paste clears the literal flag, honoring the "any manual
+	// keystroke clears the mark" rule. Submit, edit, Esc, and the empty-buffer
+	// paste-fill branch in handleViNormalAction do not route here, so the pure-paste
+	// flag survives Esc into normal mode and is carried by viSubmit.
+	e.markManualEdit(s)
 	for _, r := range text {
 		if v.pending != viOpNone {
 			e.applyViOperator(v, s, r)
@@ -351,7 +357,13 @@ func (e *promptLineEditor) viSubmit(s *lineEditState) (viEditResult, error) {
 		return viEditResult{}, err
 	}
 	e.addHistory(string(s.buf))
-	return viEditResult{input: replInput{text: string(s.buf)}, ok: true, done: true}, nil
+	// A pure paste that filled the buffer submits literally even when entered
+	// from vi normal mode (Esc then Enter), matching every emacs-mode submit
+	// path (raw CR, escape-submit, EOF-with-buffer). The pure-paste flag survives
+	// Esc into normal mode; it is cleared only by a manual edit/motion keystroke
+	// (handleViNormalText/handleViNormalAction call markManualEdit), never by the
+	// mode switch itself. See the "any manual keystroke clears the mark" rule.
+	return viEditResult{input: replInput{text: string(s.buf), pasted: e.purePaste}, ok: true, done: true}, nil
 }
 
 func (e *promptLineEditor) viEdit(s *lineEditState) (viEditResult, error) {

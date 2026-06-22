@@ -1606,10 +1606,28 @@ cursor, Ctrl-A/Home and Ctrl-E/End movement, Ctrl-B/Ctrl-F left/right aliases,
 Ctrl-C to interrupt, and Ctrl-D on an empty prompt. Shift-Enter inserts a newline without submitting,
 so multi-line prompts can be typed directly in the REPL. The editor stores
 cursor positions as Go runes; exact grapheme
-cluster and emoji-width handling are out of scope. Bracketed paste markers are parsed so
-a multi-line paste into an empty prompt is submitted as one literal user prompt,
-preserving embedded newlines and preventing pasted `/commands` from dispatching as
-meta-commands. For non-TTY input the REPL keeps the `bufio.Reader` line path, so long
+cluster and emoji-width handling are out of scope. Paste into an empty prompt fills
+the editable buffer for review and does not auto-submit: Enter submits the buffered
+content, Ctrl-G / `/edit` opens the external editor with the full pasted content
+(submitted as edited/typed), and a large or multi-line paste renders a one-line
+`[N bytes of pasted content]` placeholder instead of the full content inline (the
+real content is retained in the buffer and submitted on Enter). A paste that fills
+an empty prompt is marked pure: submitted literally — no `!` shell escape, no
+`/command` dispatch, no `$skill` resolution. The literal flag is carried on
+the Enter path in every edit mode, including vi normal mode after Esc (so a
+paste then Esc then Enter submits literally); only a manual keystroke clears
+it. Any manual keystroke after the paste (insert, delete, or cursor motion,
+in emacs mode or after entering vi normal mode with Esc) clears that mark, so the whole submitted line is
+treated as typed (honoring `!`/`/`/`$`). Pasting into a non-empty prompt still
+inserts at the cursor. Bracketed paste markers (`\x1b[200~`..`\x1b[201~`) are the
+primary mechanism; when a terminal does not honor bracketed paste, a timing-based
+heuristic on the interactive TTY raw line editor detects a fast keystroke burst
+(bytes arriving within ~5ms of the previous one, below the ~10-15ms human
+key-repeat floor) and treats newlines in the burst as inserts instead of
+submitting, exiting after a ~150ms gap. Staying in paste mode too long is the safe
+failure direction (an extra inserted newline, never a premature submit). The
+heuristic is interactive-only and on by default; `HARNESS_REPL_PASTE_HEURISTIC=off`
+disables it. For non-TTY input the REPL keeps the `bufio.Reader` line path, so long
 scripted prompt lines are not capped by Scanner's token limit.
 
 At an interactive TTY prompt only, a non-pasted line starting with `!` is a local

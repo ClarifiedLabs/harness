@@ -751,7 +751,7 @@ func TestREPLPastedBangStaysLiteral(t *testing.T) {
 	}
 
 	pasted := "!echo foo"
-	in := strings.NewReader(bracketedPasteStart + pasted + bracketedPasteEnd + "/exit\r")
+	in := strings.NewReader(bracketedPasteStart + pasted + bracketedPasteEnd + "\r/exit\r")
 	if code := run(in, app, nil, true); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
