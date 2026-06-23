@@ -226,9 +226,17 @@ jobs:
           TAG: ${{ env.RELEASE_VERSION }}
         run: |
           cd "$TAP_DIR"
-          brew install --build-bottle clarifiedlabs/homebrew-tap/harness
-          brew test clarifiedlabs/homebrew-tap/harness
-          brew bottle --json --root-url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}" clarifiedlabs/homebrew-tap/harness
+          formulas=(
+            clarifiedlabs/homebrew-tap/harness
+            clarifiedlabs/homebrew-tap/harness-model-proxy
+            clarifiedlabs/homebrew-tap/harness-mcp-proxy
+            clarifiedlabs/homebrew-tap/harness-full
+          )
+          for formula in "${formulas[@]}"; do
+            brew install --build-bottle "$formula"
+            brew test "$formula"
+            brew bottle --json --root-url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}" "$formula"
+          done
           mkdir -p "${GITHUB_WORKSPACE}/dist"
           mv ./*.bottle.* "${GITHUB_WORKSPACE}/dist/"
 
@@ -386,7 +394,7 @@ jobs:
           for bottle_json in "${bottle_jsons[@]}"; do
             brew bottle --merge --write --no-commit "$bottle_json"
           done
-          git diff -- Formula/harness.rb
+          git diff -- Formula
           echo "Dry run only: would update ClarifiedLabs/homebrew-tap for ${TAG}"
 
   homebrew-publish:
@@ -471,7 +479,7 @@ jobs:
           cd homebrew-tap
           git config user.name "${{ steps.tap-token.outputs.app-slug }}[bot]"
           git config user.email "${{ steps.tap-token.outputs.app-slug }}[bot]@users.noreply.github.com"
-          git add Formula/harness.rb
+          git add Formula/harness.rb Formula/harness-model-proxy.rb Formula/harness-mcp-proxy.rb Formula/harness-full.rb
           if git diff --cached --quiet; then
             echo "No Homebrew formula changes"
           else

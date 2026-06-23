@@ -29,12 +29,14 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`. The workflow builds:
 
 It publishes tarballs, `.deb`, `.rpm`, a signed and notarized macOS `.pkg`,
 Homebrew bottles for macOS arm64, macOS Intel, Linux amd64, and Linux arm64,
-SHA-256 checksums, and GitHub artifact attestations. It then updates
+SHA-256 checksums, and GitHub artifact attestations. Homebrew formulae are split
+into `harness`, `harness-model-proxy`, `harness-mcp-proxy`, and the
+`harness-full` meta formula. The workflow then updates
 `ClarifiedLabs/homebrew-tap` through a GitHub App installation token.
 
 The tap repository must already exist with an initialized default branch. No
-formula file is required ahead of time; the release workflow writes
-`Formula/harness.rb` and merges the generated bottle metadata.
+formula file is required ahead of time; the release workflow writes the formula
+files and merges the generated bottle metadata.
 
 ## CI Dry Runs
 

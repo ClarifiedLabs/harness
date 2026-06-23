@@ -41,12 +41,14 @@ to any credentials.
 
 ## Quickstart
 
-Once the first release is published, install one of the release packages. They
-include `harness`, `harness-model-proxy`, and `harness-mcp-proxy`.
+Once the first release is published, install one of the release packages.
+Homebrew formulae are split by binary: `harness` installs only the CLI,
+`harness-model-proxy` installs the model proxy, `harness-mcp-proxy` installs
+the MCP proxy, and `harness-full` installs all three.
 
 ```sh
 brew tap ClarifiedLabs/tap
-brew install harness
+brew install harness-full
 ```
 
 Or download a package from
@@ -54,6 +56,8 @@ Or download a package from
 
 - macOS arm64: signed `.pkg` or `harness_<version>_darwin_arm64.tar.gz`
 - Linux amd64/arm64: `.deb`, `.rpm`, or `harness_<version>_linux_<arch>.tar.gz`
+
+Tarballs and OS packages include all three binaries.
 
 Until the first release exists, install from a checkout with Go 1.26:
 
