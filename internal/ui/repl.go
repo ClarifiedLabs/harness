@@ -256,10 +256,21 @@ func (app *App) clock() func() time.Time {
 // an active turn the same helper also preserves typeahead and observes Esc-Esc
 // without competing with an external editor launched from the idle prompt.
 func Run(in io.Reader, app *App, exit <-chan struct{}) int {
-	return run(in, app, exit, promptLineEditorEnabled(in, app.Errw))
+	return runWithInitialPrompt(in, app, exit, promptLineEditorEnabled(in, app.Errw), nil)
+}
+
+// RunWithInitialPrompt drives the interactive REPL after immediately starting
+// one model turn from initialPrompt. The initial prompt is always treated as
+// user text, never as a REPL command or shell escape.
+func RunWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, initialPrompt string) int {
+	return runWithInitialPrompt(in, app, exit, promptLineEditorEnabled(in, app.Errw), &initialPrompt)
 }
 
 func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int {
+	return runWithInitialPrompt(in, app, exit, usePromptEditor, nil)
+}
+
+func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool, initialPrompt *string) int {
 	if app.Created.IsZero() {
 		app.Created = app.clock()()
 	}
@@ -521,6 +532,16 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 			startTurn(action.prompt, action.resolveSkillMentions)
 		}
 		return false, ExitOK
+	}
+
+	if initialPrompt != nil {
+		ctx, cancel, interrupted := exitContext()
+		err := app.refreshMCP(ctx)
+		cancel()
+		if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return finish(ExitInterrupt)
+		}
+		startTurn(*initialPrompt, true)
 	}
 
 	for {

@@ -266,8 +266,8 @@ func run(env environment) int {
 		}
 		resumed = &s
 	}
-	if len(cfg.Images) > 0 && !cfg.PromptSet {
-		fmt.Fprintln(stderr, "harness: -image requires -p one-shot mode")
+	if len(cfg.Images) > 0 && !cfg.PromptSet && !cfg.InitialPromptSet {
+		fmt.Fprintln(stderr, "harness: -image requires -p one-shot mode or -i initial interactive prompt")
 		return ui.ExitUsage
 	}
 
@@ -1006,6 +1006,18 @@ func run(env environment) int {
 		return code
 	}
 
+	if cfg.InitialPromptSet {
+		images, err := loadConfiguredImages(cfg.Images, modelRegistry.SupportsInputModality(registryModel, "image"))
+		if err != nil {
+			fmt.Fprintf(stderr, "harness: image: %v\n", err)
+			return ui.ExitRuntime
+		}
+		if len(cfg.Images) > 0 && len(images) == 0 {
+			fmt.Fprintf(stderr, "[image skipped: model %s does not support image input]\n", registryModel)
+		}
+		app.PendingImages = images
+	}
+
 	// Pre-warm the prompt cache in the background so the first real request reads
 	// a warm tools+system prefix instead of paying the cold cache-write latency.
 	// Gated to an interactive terminal: with piped/scripted stdin (one-shot is
@@ -1023,7 +1035,9 @@ func run(env environment) int {
 		}
 	}
 	if env.prewarmCache && !env.stdinPiped {
-		prewarm()
+		if !cfg.InitialPromptSet {
+			prewarm()
+		}
 		// Re-warm after cache-invalidating events (agent/model/provider switch,
 		// compaction); the REPL captures a fresh snapshot at call time (r43).
 		app.Prewarm = prewarm
@@ -1037,6 +1051,9 @@ func run(env environment) int {
 	// Surface the active agent and the discoverability cues that were otherwise
 	// invisible: /help for commands and how to interrupt a turn (r58, r23).
 	fmt.Fprintf(stderr, "agent: %s · type /help for commands · interrupt a turn with Ctrl-C or double-Esc\n", agentName)
+	if cfg.InitialPromptSet {
+		return ui.RunWithInitialPrompt(stdin, app, exitCh, cfg.InitialPrompt)
+	}
 	return ui.Run(stdin, app, exitCh)
 }
 

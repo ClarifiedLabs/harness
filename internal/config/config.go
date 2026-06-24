@@ -91,6 +91,10 @@ type Config struct {
 	Prompt    string `json:"one_shot_prompt"`     // -p value
 	PromptSet bool   `json:"one_shot_prompt_set"` // -p was supplied (distinguishes "" from absent)
 
+	// Interactive initial prompt mode.
+	InitialPrompt    string `json:"initial_prompt"`     // -i/-initial-prompt value
+	InitialPromptSet bool   `json:"initial_prompt_set"` // initial prompt flag was supplied
+
 	// UI.
 	Verbose       bool   `json:"verbose"`     // -v
 	ToolStream    bool   `json:"tool_stream"` // -tool-stream: show live tool-call progress
@@ -352,7 +356,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	fMaxTurns, fDefaultContextWindow, fContextWindow := f.maxTurns, f.defaultContextWindow, f.contextWindow
 	fReasoningEffort, fReasoningEnabled, fReasoningBudgetTokens, fReasoningSummary := f.reasoningEffort, f.reasoningEnabled, f.reasoningBudgetTokens, f.reasoningSummary
 	fImageDetail, fSearchTools := f.imageDetail, f.searchTools
-	fPrompt, fReplPrompt, fReplEditMode, fOutputFormat := f.prompt, f.replPrompt, f.replEditMode, f.outputFormat
+	fPrompt, fInitialPrompt, fReplPrompt, fReplEditMode, fOutputFormat := f.prompt, f.initialPrompt, f.replPrompt, f.replEditMode, f.outputFormat
 	fVerbose, fToolStream, fShowDiffs, fNoColor := f.verbose, f.toolStream, f.showDiffs, f.noColor
 	fTimestamps, fNoTimestamps := f.timestamps, f.noTimestamps
 
@@ -635,6 +639,17 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		c.Prompt = *fPrompt
 		c.PromptSet = true
 	}
+	initialPromptSet := set["i"] || set["initial-prompt"]
+	if c.PromptSet && initialPromptSet {
+		return Config{}, fmt.Errorf("-p cannot be combined with -i or -initial-prompt")
+	}
+	if initialPromptSet {
+		if *fInitialPrompt == "-" {
+			return Config{}, fmt.Errorf("-i does not read from stdin; pass prompt text directly")
+		}
+		c.InitialPrompt = *fInitialPrompt
+		c.InitialPromptSet = true
+	}
 	c.ShowConfig = set["show-config"]
 	c.ShowAgents = set["agents"]
 	c.ShowModels = set["models"]
@@ -876,6 +891,7 @@ type flags struct {
 	agent                            *string
 	handoffAgent                     *string
 	prompt                           *string
+	initialPrompt                    *string
 	replPrompt                       *string
 	replEditMode                     *string
 	logLevel                         *string
@@ -900,7 +916,11 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	fs := flag.NewFlagSet("harness", flag.ContinueOnError)
 	var f flags
 	imageVals := imageFlags{}
+	initialPrompt := ""
 	f.prompt = fs.String("p", "", "one-shot prompt; \"-\" or piped stdin reads the prompt from stdin")
+	f.initialPrompt = &initialPrompt
+	fs.StringVar(f.initialPrompt, "i", "", "initial interactive prompt; run it first, then continue in the REPL")
+	fs.StringVar(f.initialPrompt, "initial-prompt", "", "initial interactive prompt; run it first, then continue in the REPL")
 	f.provider = fs.String("provider", "", "model proxy provider id")
 	f.model = fs.String("model", "", "model id")
 	f.modelProxyURL = fs.String("model-proxy-url", "", "harness-model-proxy URL")
@@ -962,6 +982,7 @@ func Usage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  harness [flags]            interactive REPL")
+	fmt.Fprintln(w, "  harness -i \"prompt\" [flags]  run a first prompt, then continue in the REPL")
 	fmt.Fprintln(w, "  harness -p \"prompt\" [flags]  one-shot: prints the assistant's answer to stdout")
 	fmt.Fprintln(w, "  harness session replay <session-dir>")
 	fmt.Fprintln(w)

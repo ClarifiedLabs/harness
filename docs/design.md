@@ -1635,8 +1635,8 @@ shell escape. The command text after `!` runs via the user's shell (`$SHELL -lc`
 falling back to `bash -lc` then `sh -c`), prints directly to the terminal, and
 returns to the prompt without a model request, prompt-submit hook, transcript
 message, or replay event. `!!` escapes a literal leading `!`; one-shot mode,
-non-TTY/scripted input, bracketed paste, and external-editor prompt content treat
-`!text` as ordinary prompt text.
+initial `-i` prompts, non-TTY/scripted input, bracketed paste, and external-editor
+prompt content treat `!text` as ordinary prompt text.
 
 Tab completion is intentionally small and stdlib-only. It is active only in raw
 prompt-editor buffers that start with `!`: the first word completes executable names
@@ -1741,6 +1741,7 @@ prefix wins, threshold `1 + len(cmd)/3`).
 
 ```
 -p <prompt|->     one-shot mode; "-" or piped stdin reads the prompt from stdin
+-i, -initial-prompt <prompt>   run an initial prompt, then continue in the REPL
 -provider <name>  model proxy provider id
 -model <id>
 -model-proxy-url <url>
@@ -1763,7 +1764,7 @@ prefix wins, threshold `1 + len(cmd)/3`).
 -reasoning-summary <auto|concise|detailed|none>
 -responses-stateful   Responses previous_response_id continuation (default true)
 -image-detail <level>   default image detail: auto, low, high, or original
--image <path|detail:path>   attach an image in one-shot mode; repeatable
+-image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
 -agent <name>
 -search-tools <auto|grep|rg|both>
 -v                show tool result snippets
@@ -1841,6 +1842,16 @@ exits warn and continue.
 detecting whether GNU sed is available as `gsed` or reporting the active bash
 version. Static personal preferences belong in `~/.agents/AGENTS.md`; command
 output belongs in hook context.
+
+### Interactive initial prompt (`-i`)
+
+- `-i` / `-initial-prompt` runs the provided prompt as the first REPL turn, then
+  continues normally at the prompt. The initial prompt is literal user text, so
+  leading `/` and `!` do not invoke REPL commands or shell escapes.
+- `-i` does not read from stdin or append piped stdin; stdin remains available for
+  scripted REPL input. `-i -` is a usage error.
+- `-image` attaches local image files to the initial `-i` turn only; later REPL
+  image attachments use `/image`.
 
 ### One-shot mode (`-p`)
 

@@ -295,6 +295,55 @@ func TestRunOneShotTTYRendersMarkdown(t *testing.T) {
 	}
 }
 
+func TestRunInitialPromptContinuesREPL(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "first reply"}}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "second reply"}}, Stop: llm.StopEndTurn},
+	)
+	env, out, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-i", "first prompt"}, fp, "second prompt\n/exit\n")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 2 {
+		t.Fatalf("request count = %d, want 2", fp.RequestCount())
+	}
+	first := fp.Requests[0].Messages[0].Content[0].Text
+	if first != "first prompt" {
+		t.Fatalf("first prompt = %q, want CLI initial prompt", first)
+	}
+	secondReq := fp.Requests[1]
+	last := secondReq.Messages[len(secondReq.Messages)-1].Content[0].Text
+	if last != "second prompt" {
+		t.Fatalf("second prompt = %q, want REPL stdin prompt", last)
+	}
+	if !strings.Contains(out.String(), "first reply") || !strings.Contains(out.String(), "second reply") {
+		t.Fatalf("stdout missing replies: %q", out.String())
+	}
+}
+
+func TestRunInitialPromptTreatsSlashAndBangLiterally(t *testing.T) {
+	for _, prompt := range []string{"/help", "!echo x"} {
+		t.Run(prompt, func(t *testing.T) {
+			fp := llmtest.New("fake", okStep())
+			env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-i", prompt}, fp, "/exit\n")
+
+			code := run(env)
+			if code != ui.ExitOK {
+				t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+			}
+			if fp.RequestCount() != 1 {
+				t.Fatalf("request count = %d, want initial prompt only", fp.RequestCount())
+			}
+			got := fp.Requests[0].Messages[0].Content[0].Text
+			if got != prompt {
+				t.Fatalf("initial prompt = %q, want literal %q", got, prompt)
+			}
+		})
+	}
+}
+
 func TestRunVersionFlag(t *testing.T) {
 	var out, errw bytes.Buffer
 	code := run(environment{
@@ -355,6 +404,35 @@ func TestRunOneShotImageFlagSendsImage(t *testing.T) {
 	}
 }
 
+func TestRunInitialPromptImageFlagSendsImageOnce(t *testing.T) {
+	fp := llmtest.New("fake", okStep(), okStep())
+	path := writeMainPNG(t)
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-i", "describe it", "-image", "high:" + path}, fp, "next prompt\n/exit\n")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 2 {
+		t.Fatalf("request count = %d, want 2", fp.RequestCount())
+	}
+	content := fp.Requests[0].Messages[0].Content
+	if len(content) != 2 {
+		t.Fatalf("initial content = %d, want image + text", len(content))
+	}
+	if content[0].Kind != llm.BlockImage || content[0].ImageDetail != "high" || content[0].ImageMediaType != "image/png" {
+		t.Fatalf("initial image block = %+v", content[0])
+	}
+	if content[1].Text != "describe it" {
+		t.Fatalf("initial text block = %+v", content[1])
+	}
+	secondReq := fp.Requests[1]
+	lastContent := secondReq.Messages[len(secondReq.Messages)-1].Content
+	if len(lastContent) != 1 || lastContent[0].Kind != llm.BlockText || lastContent[0].Text != "next prompt" {
+		t.Fatalf("next prompt content = %+v, want text only", lastContent)
+	}
+}
+
 func TestRunOneShotImageFlagSkipsTextOnlyModel(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	path := writeMainPNG(t)
@@ -373,7 +451,7 @@ func TestRunOneShotImageFlagSkipsTextOnlyModel(t *testing.T) {
 	}
 }
 
-func TestRunImageFlagRequiresOneShot(t *testing.T) {
+func TestRunImageFlagRequiresPromptMode(t *testing.T) {
 	fp := llmtest.New("fake")
 	path := writeMainPNG(t)
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-image", path}, fp, "/exit\n")
@@ -382,7 +460,7 @@ func TestRunImageFlagRequiresOneShot(t *testing.T) {
 	if code != ui.ExitUsage {
 		t.Fatalf("exit code = %d, want usage; errw=%q", code, errw.String())
 	}
-	if !strings.Contains(errw.String(), "-image requires -p") {
+	if !strings.Contains(errw.String(), "-image requires -p one-shot mode or -i initial interactive prompt") {
 		t.Fatalf("missing usage error: %q", errw.String())
 	}
 }
@@ -728,7 +806,7 @@ func TestRunEnvBlockReportsAbsoluteCwd(t *testing.T) {
 // and exits 0 (the prior defect exited 2 with a terse "flag: help requested").
 func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 	flags := []string{
-		"-p", "-provider", "-model", "-model-proxy-url", "-system-prompt",
+		"-p", "-i", "-initial-prompt", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 		"-no-env", "-resume", "-session", "-max-turns", "-max-output-tokens", "-default-context-window", "-context-window",
 		"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-agents", "-models", "-check-model-proxy", "-hooks",
 	}
@@ -1841,6 +1919,28 @@ func TestRunOneShotConcatenatesFlagAndStdin(t *testing.T) {
 	got := fp.Requests[0].Messages[0].Content[0].Text
 	if got != "summarize:\nthe notes" {
 		t.Errorf("flag and piped stdin should concatenate, got %q", got)
+	}
+}
+
+func TestRunInitialPromptDoesNotConcatenatePipedStdin(t *testing.T) {
+	fp := llmtest.New("fake", okStep(), okStep())
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "gpt-5.5", "-i", "first"}, fp, "second\n/exit\n")
+	env.stdinPiped = true
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit = %d; errw=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 2 {
+		t.Fatalf("request count = %d, want 2", fp.RequestCount())
+	}
+	first := fp.Requests[0].Messages[0].Content[0].Text
+	if first != "first" {
+		t.Fatalf("initial prompt = %q, want no stdin concatenation", first)
+	}
+	secondReq := fp.Requests[1]
+	second := secondReq.Messages[len(secondReq.Messages)-1].Content[0].Text
+	if second != "second" {
+		t.Fatalf("stdin REPL prompt = %q, want second", second)
 	}
 }
 

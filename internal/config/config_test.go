@@ -918,6 +918,39 @@ func TestOneShotAndSessionFlags(t *testing.T) {
 	}
 }
 
+func TestInitialPromptFlags(t *testing.T) {
+	c, err := Load([]string{"-model", "gpt-5.5", "-i", "start here"}, noEnv, "")
+	if err != nil {
+		t.Fatalf("Load -i: %v", err)
+	}
+	if c.InitialPrompt != "start here" || !c.InitialPromptSet {
+		t.Fatalf("initial prompt %q set=%v", c.InitialPrompt, c.InitialPromptSet)
+	}
+	if c.PromptSet {
+		t.Fatal("-i should not set one-shot prompt")
+	}
+
+	c, err = Load([]string{"-model", "gpt-5.5", "-initial-prompt", "start here"}, noEnv, "")
+	if err != nil {
+		t.Fatalf("Load -initial-prompt: %v", err)
+	}
+	if c.InitialPrompt != "start here" || !c.InitialPromptSet {
+		t.Fatalf("initial prompt alias %q set=%v", c.InitialPrompt, c.InitialPromptSet)
+	}
+}
+
+func TestInitialPromptRejectsConflictingModes(t *testing.T) {
+	if _, err := Load([]string{"-p", "one shot", "-i", "interactive"}, noEnv, ""); err == nil {
+		t.Fatal("expected -p with -i to fail")
+	}
+}
+
+func TestInitialPromptRejectsDashStdin(t *testing.T) {
+	if _, err := Load([]string{"-i", "-"}, noEnv, ""); err == nil {
+		t.Fatal("expected -i - to fail")
+	}
+}
+
 func TestBadFlagIsUsageError(t *testing.T) {
 	_, err := Load([]string{"-nonexistent-flag"}, noEnv, "")
 	if err == nil {
@@ -942,7 +975,7 @@ func TestBadFormatValueIsUsageError(t *testing.T) {
 // helpFlags are every flag the design §10 table lists. The -h usage screen must
 // name every one of them so the help is an accurate reference.
 var helpFlags = []string{
-	"-p", "-provider", "-model", "-model-proxy-url", "-system-prompt",
+	"-p", "-i", "-initial-prompt", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 	"-no-env", "-resume", "-session", "-max-turns", "-default-context-window", "-context-window",
 	"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-responses-stateful", "-image-detail", "-image", "-agent", "-search-tools", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-format", "-show-config",
 	"-agents", "-models", "-check-model-proxy", "-repl-edit-mode", "-hooks",

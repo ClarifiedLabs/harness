@@ -1,7 +1,7 @@
 # Usage Reference
 
 This page covers everyday behavior that is too detailed for the README:
-provider/model selection, one-shot mode, flags, configuration, REPL commands,
+provider/model selection, interactive initial prompts, one-shot mode, flags, configuration, REPL commands,
 agents, sessions, compaction, interrupts, and hooks.
 
 For tool behavior, see [tools.md](tools.md). For MCP and LSP, see
@@ -27,6 +27,21 @@ exits before creating a session or starting the REPL.
 Use `harness --models` to print the providers and models exposed by the
 configured proxy. Use `harness --agents` to print the resolved built-in and
 config-defined agents. Both commands exit before creating a session.
+
+## Interactive Initial Prompt
+
+Use `-i` or `-initial-prompt` to run one prompt immediately and then continue in
+the normal REPL:
+
+```sh
+harness -model gpt-5.5 -i "review the current git diff"
+```
+
+The initial prompt is literal text: leading `/` is not a REPL command and leading
+`!` is not a shell escape. Unlike `-p`, `-i` does not read from stdin or append
+piped stdin; any stdin lines remain available as scripted REPL input after the
+initial turn. `-image` attachments used with `-i` attach only to the initial
+prompt.
 
 ## One-Shot Mode
 
@@ -63,6 +78,7 @@ interrupted.
 
 ```text
 -p <prompt|->     one-shot mode; "-" or piped stdin reads the prompt from stdin
+-i, -initial-prompt <prompt>   run an initial prompt, then continue in the REPL
 -provider <name>  model proxy provider id
 -model <id>       model id
 -model-proxy-url <url>   harness-model-proxy URL (default http://127.0.0.1:8765)
@@ -95,7 +111,7 @@ interrupted.
 -reasoning-summary <mode> reasoning summary for Responses API: auto, concise, detailed, or none
 -responses-stateful   use Responses API previous_response_id continuation when supported (default true)
 -image-detail <level>   default image detail: auto, low, high, or original
--image <path|detail:path>   attach an image in one-shot mode; repeatable
+-image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
 -agent <name>     agent: auto (default), plan, independent, or a config-defined agent
 -search-tools <mode>   search tools to expose: auto, grep, rg, or both
 -v                show tool result snippets (first ~5 lines, dimmed)
@@ -272,7 +288,7 @@ parseable local cache before falling back to the vendored snapshot.
 Lines starting with `/` are commands; `//` sends a literal leading slash. At an
 interactive TTY prompt, lines starting with `!` run a local shell command and
 return to the prompt without contacting the model; `!!` sends a literal leading
-`!`. In one-shot mode, non-TTY/scripted input, pasted text, and edited prompts,
+`!`. In one-shot mode, initial `-i` prompts, non-TTY/scripted input, pasted text, and edited prompts,
 `!text` is literal prompt text. In a normal typed prompt, `$name` mentions the
 named skill anywhere in the text; the model receives request-only context
 telling it to read that skill's `SKILL.md` before acting. `$$` escapes a

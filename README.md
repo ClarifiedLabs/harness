@@ -158,6 +158,13 @@ Interactive mode starts when no prompt is provided:
 harness -provider anthropic -model claude-opus-4-8
 ```
 
+Use `-i` to send the first prompt from the command line and then continue in the
+interactive session:
+
+```sh
+harness -model openrouter:openai/gpt-5.5 -i "inspect the current diff"
+```
+
 One-shot mode sends a single prompt and exits:
 
 ```sh
