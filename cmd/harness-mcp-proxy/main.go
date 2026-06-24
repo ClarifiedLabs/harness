@@ -174,6 +174,22 @@ tools flags:
 `)
 }
 
+// usageGenerateAPIKey prints generate-api-key-specific help, mirroring the
+// model-proxy's usageGenerateAPIKey so both binaries treat -h/--help the same
+// (usage to stdout, exit 0) rather than as a flag parse error.
+func usageGenerateAPIKey(w io.Writer, getenv func(string) string) {
+	fmt.Fprint(w, `harness-mcp-proxy generate-api-key - generate and store a new proxy API key
+
+Usage:
+  harness-mcp-proxy generate-api-key [-config path] <name>
+
+Creates config at the default path if none exists yet.
+
+Flags:
+  -config path      config file path (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
+`)
+}
+
 // resolveConfigPath turns the parsed -config flag into the path passed to
 // mcpproxy.LoadConfig, mirroring cmd/harness's resolveConfigPath. An explicit
 // flag value is used verbatim (a typo surfaces as a "not found" error in Load).
@@ -196,6 +212,10 @@ func runGenerateAPIKey(env environment, args []string) int {
 	fs.SetOutput(io.Discard)
 	configPath := fs.String("config", "", "config file path")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usageGenerateAPIKey(env.stdout, env.getenv)
+			return exitOK
+		}
 		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
 		return exitUsage
 	}

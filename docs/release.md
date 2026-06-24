@@ -6,7 +6,7 @@ Release builds produce the three shipped binaries:
 - `harness-model-proxy`
 - `harness-mcp-proxy`
 
-The apps support `--version`:
+The apps support `--version` (the proxies also accept a `version` subcommand):
 
 ```sh
 harness --version

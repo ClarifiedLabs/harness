@@ -70,7 +70,7 @@ go install ./cmd/harness ./cmd/harness-model-proxy ./cmd/harness-mcp-proxy
 Configure provider access and start the model proxy:
 
 ```sh
-harness-model-proxy --setup
+harness-model-proxy setup
 harness-model-proxy
 ```
 
@@ -81,22 +81,22 @@ harness -provider <provider> -model <model>
 harness -provider <provider> -model <model> -p "summarize README.md"
 ```
 
-`harness-model-proxy --setup` writes proxy/provider config, prompts for auth
+`harness-model-proxy setup` writes proxy/provider config, prompts for auth
 when needed, and lets you choose which models are available locally. By default
 the model proxy listens on `127.0.0.1:8765`. It caches the full models.dev
 catalog locally and refreshes that cache every 24 hours while serving; configure
 `models_dev_cache_ttl` or pass `-models-dev-cache-ttl 0` to disable the periodic
 refresh.
 
-Provider config files written by `--setup`/`--refresh-models` are **managed**
+Provider config files written by `setup`/`refresh-models` are **managed**
 (`"managed": true`) and store **no per-model prices**: the proxy resolves managed
 prices and input modalities live from the models.dev cache, so the 24h refresh
-updates served metadata without re-running `--setup` or restarting. A
+updates served metadata without re-running `setup` or restarting. A
 hand-written config without `"managed": true` is **manual** — the proxy never
 edits it and keeps its own `price` and `input_modalities` entries. Manual models
 must set `input_modalities` explicitly; use `["text", "image"]` for models that
 accept image attachments. A managed config may set `"price_source"` to resolve
-metadata from a different models.dev provider id; `--setup` sets it to `openai`
+metadata from a different models.dev provider id; `setup` sets it to `openai`
 for `openai-codex` so codex models are priced at the normal OpenAI per-token
 rates. Codex configs also set `"omit_max_output_tokens": true` because that
 backend rejects the standard Responses parameter.
@@ -130,7 +130,7 @@ Generate and store a key for the model proxy (the full plaintext key is printed
 once):
 
 ```sh
-harness-model-proxy --generate-api-key laptop
+harness-model-proxy generate-api-key laptop
 harness --model-proxy-api-key <key> -provider <provider> -model <model>
 ```
 

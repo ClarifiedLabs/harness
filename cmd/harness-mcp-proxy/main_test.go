@@ -212,6 +212,70 @@ func TestRunGenerateAPIKeyPreservesUnknownConfigFields(t *testing.T) {
 	}
 }
 
+func TestRunAuthHelpExit0WithUsageOnStdout(t *testing.T) {
+	for _, args := range [][]string{
+		{"auth", "-h"},
+		{"auth", "--help"},
+		{"auth", "help"},
+	} {
+		env, out, errw := testEnv(t, args)
+		if code := run(env); code != exitOK {
+			t.Fatalf("run(%v) exit = %d, want %d; stderr=%q", args, code, exitOK, errw.String())
+		}
+		text := out.String()
+		for _, want := range []string{"Usage:", "auth <login|logout|status>", "oauth2", "codex_oauth", "auth login remote", "-config"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("run(%v) help missing %q; stdout=%q", args, want, text)
+			}
+		}
+		if errw.Len() != 0 {
+			t.Errorf("run(%v) should write help to stdout only; stderr=%q", args, errw.String())
+		}
+	}
+}
+
+func TestRunAuthLoginHelpExit0WithUsageOnStdout(t *testing.T) {
+	for _, args := range [][]string{
+		{"auth", "login", "-h"},
+		{"auth", "login", "--help"},
+	} {
+		env, out, errw := testEnv(t, args)
+		if code := run(env); code != exitOK {
+			t.Fatalf("run(%v) exit = %d, want %d; stderr=%q", args, code, exitOK, errw.String())
+		}
+		text := out.String()
+		for _, want := range []string{"Usage:", "auth login [-config path] <server>", "oauth2", "codex_oauth", "device-code", "auth login remote", "-config"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("run(%v) help missing %q; stdout=%q", args, want, text)
+			}
+		}
+		if errw.Len() != 0 {
+			t.Errorf("run(%v) should write help to stdout only; stderr=%q", args, errw.String())
+		}
+	}
+}
+
+func TestRunGenerateAPIKeyHelpExit0WithUsageOnStdout(t *testing.T) {
+	for _, args := range [][]string{
+		{"generate-api-key", "-h"},
+		{"generate-api-key", "--help"},
+	} {
+		env, out, errw := testEnv(t, args)
+		if code := run(env); code != exitOK {
+			t.Fatalf("run(%v) exit = %d, want %d; stderr=%q", args, code, exitOK, errw.String())
+		}
+		text := out.String()
+		for _, want := range []string{"Usage:", "generate-api-key [-config path] <name>", "Creates config at the default path", "-config"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("run(%v) help missing %q; stdout=%q", args, want, text)
+			}
+		}
+		if errw.Len() != 0 {
+			t.Errorf("run(%v) should write help to stdout only; stderr=%q", args, errw.String())
+		}
+	}
+}
+
 func TestRunAuthStatusForHTTPServer(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")

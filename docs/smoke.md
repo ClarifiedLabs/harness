@@ -155,7 +155,7 @@ should receive only the proxy URL, provider id, and model id.
 ```sh
 go build -o harness ./cmd/harness
 go build -o harness-model-proxy ./cmd/harness-model-proxy
-./harness-model-proxy --setup
+./harness-model-proxy setup
 ./harness-model-proxy
 ```
 

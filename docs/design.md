@@ -64,7 +64,7 @@ codebase works today and evolves as harness gains capabilities.
 
 ```
 cmd/harness/main.go      flags, config load, proxy catalog wiring, signal setup, REPL-vs-oneshot dispatch (also hosts `harness lsp serve`, `harness session replay|timings`)
-cmd/harness-model-proxy  provider setup/refresh and HTTP model proxy server; `auth` subcommand (login/logout/status)
+cmd/harness-model-proxy  provider setup/refresh and HTTP model proxy server; subcommands serve (default), setup, refresh-models, auth (login/logout/status), generate-api-key, version
 internal/modelproxy      proxy protocol, client Provider, server handler
 internal/llm             provider-agnostic types, Provider interface, model/price registry
 internal/llm/openai      Chat Completions dialect: wire structs, request builder, stream decode, tool-call assembly
@@ -574,13 +574,13 @@ func (r *Registry) Models() []string               // sorted configured model id
 ```
 
 Model metadata originates from the public **models.dev** catalog
-(`internal/modelsdev`); `harness-model-proxy --setup` and `--refresh-models` reduce it
+(`internal/modelsdev`); `harness-model-proxy setup` and `refresh-models` reduce it
 to the provider/context/input-modality/reasoning fields harness needs. The proxy
 caches the full catalog JSON as `models.dev.api.json` in the proxy config directory.
-`--setup` prefers that cache over the vendored snapshot, but fetches and writes it
+`setup` prefers that cache over the vendored snapshot, but fetches and writes it
 when it is missing or invalid. A running proxy refreshes the cache when it is older
 than `models_dev_cache_ttl` (`24h` by default; `0` disables periodic refresh), and
-`--refresh-models` fetches and caches the full catalog before rewriting configured
+`refresh-models` fetches and caches the full catalog before rewriting configured
 provider allowlists. The vendored snapshot is used only when there is no parseable
 cache and a live fetch fails.
 
@@ -588,25 +588,25 @@ cache and a live fetch fails.
 
 Provider config files are either **managed** or **manual**:
 
-- **Managed** configs are written by `--setup`/`--refresh-models` and carry
+- **Managed** configs are written by `setup`/`refresh-models` and carry
   `"managed": true`. They store **no per-model `price`**; instead the proxy
   resolves each managed model's price and input modalities from the in-memory
   models.dev cache at request time. Because the background refresher (above)
   reloads that cache and the serving handler swaps in the new metadata live,
   refreshed prices and modality support reach the running server **without** a
-  `--setup` + restart. Re-running `--setup` never clobbers hand-edited prices
+  `setup` + restart. Re-running `setup` never clobbers hand-edited prices
   because managed configs hold none.
 - **Manual** configs are any provider file lacking `"managed": true` — typically
   hand-written. The proxy never touches them and serves their own `price` and
   `input_modalities` entries verbatim. A pre-existing price-bearing config
   without the flag is treated as manual and keeps its metadata (there is no
-  migration). Running `--refresh-models` against such a provider rewrites it as
+  migration). Running `refresh-models` against such a provider rewrites it as
   a managed, price-less config.
 
 A managed config may also carry `"price_source"` — a models.dev provider id to
 resolve its prices from when that differs from the config's own `name`. This
 exists for `openai-codex`, whose models are OpenAI models re-exposed under the
-codex base URL and billed at OpenAI per-token rates: `--setup` writes
+codex base URL and billed at OpenAI per-token rates: `setup` writes
 `"price_source": "openai"` so codex prices track the OpenAI rates in the cache.
 It also writes `"omit_max_output_tokens": true` because the ChatGPT Codex
 backend rejects the Responses `max_output_tokens` parameter; the proxy infers
@@ -676,7 +676,7 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
 - Hooks use inline `hooks` plus config-relative `hook_configs` files. They are
   additive in order: inline first, then each listed file. `--hooks <file>`
   replaces the configured hook set for one launch.
-- `harness-model-proxy --setup` creates a proxy config in the default proxy directory,
+- `harness-model-proxy setup` creates a proxy config in the default proxy directory,
   appends a new provider config to an existing proxy config, or updates an existing
   configured provider. It reads cached models.dev provider metadata, fetching and
   caching the full catalog when needed, falls back to a vendored models.dev
@@ -699,10 +699,10 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   api_type (`responses`, `openai`, or `anthropic`), key env vars, context windows,
   output limits, input modalities, and reasoning metadata. It is written as a **managed** config (`"managed": true`)
   with **no per-model prices** — the proxy resolves managed prices live from the
-  models.dev cache (see *Managed vs manual provider configs*). Without `--force`,
+  models.dev cache (see *Managed vs manual provider configs*). Without `-force`,
   setup refuses to overwrite provider files that are not already referenced by the
   proxy config.
-- `harness-model-proxy --refresh-models` fetches and caches the latest live
+- `harness-model-proxy refresh-models` fetches and caches the latest live
   models.dev catalog and refreshes each configured provider file's current model
   allowlist, preserving stored API keys and `auth` blocks. Refreshed files are
   rewritten as managed, price-less configs. If live fetch fails, it
@@ -711,7 +711,7 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   catalog.
 - **API-key authentication between harness and the model proxy** is optional and
   disabled by default; it becomes required as soon as the first key is stored.
-  Keys are generated with `harness-model-proxy --generate-api-key <name>`, live in
+  Keys are generated with `harness-model-proxy generate-api-key <name>`, live in
   the proxy config under `api_keys` as `{name, hash, added}` entries, and are
   served by hashing the presented `Authorization: Bearer <key>` with SHA-256 and
   comparing via `crypto/subtle.ConstantTimeCompare`. Key prefixes (`hmp_` for the

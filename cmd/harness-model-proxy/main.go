@@ -83,77 +83,63 @@ func main() {
 	}))
 }
 
+// run dispatches on the first non-flag argument (the subcommand) and returns
+// the process exit code, mirroring cmd/harness-mcp-proxy's dispatch. With no
+// arguments it serves HTTP (the implicit default preserved from the previous
+// flag-based CLI). Unknown subcommands and -h/--help are handled here so every
+// path prints usage to the right stream with the right exit code.
 func run(env environment) int {
-	if len(env.args) > 0 && env.args[0] == "--version" {
+	args := env.args
+	if len(args) == 0 {
+		return runServe(env, nil)
+	}
+	switch args[0] {
+	case "-h", "--help", "help":
+		usage(env.stdout)
+		return exitOK
+	case "--version", "version":
 		fmt.Fprintln(env.stdout, buildinfo.Line("harness-model-proxy"))
 		return exitOK
+	case "serve":
+		return runServe(env, args[1:])
+	case "setup":
+		return runSetupCmd(env, args[1:])
+	case "refresh-models":
+		return runRefreshModelsCmd(env, args[1:])
+	case "auth":
+		return runAuth(env, args[1:])
+	case "generate-api-key":
+		return runGenerateAPIKeyCmd(env, args[1:])
+	default:
+		fmt.Fprintf(env.stderr, "harness-model-proxy: unknown subcommand %q\n", args[0])
+		usage(env.stderr)
+		return exitUsage
 	}
-	if len(env.args) > 0 && env.args[0] == "auth" {
-		return runAuth(env, env.args[1:])
-	}
+}
 
-	fs := flag.NewFlagSet("harness-model-proxy", flag.ContinueOnError)
+// runServe parses serve flags and serves HTTP. args may be nil, in which case it
+// serves with the resolved default config and listener (the implicit-default-serve
+// behavior: running `harness-model-proxy` with no arguments still serves).
+func runServe(env environment, args []string) int {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	configPath := fs.String("config", "", "config file path")
 	listen := fs.String("listen", "", "HTTP listen address")
-	setup := fs.Bool("setup", false, "create or update proxy config")
-	force := fs.Bool("force", false, "with --setup, overwrite existing provider files")
-	refreshModels := fs.Bool("refresh-models", false, "fetch models.dev and update configured provider model metadata")
-	generateAPIKey := fs.String("generate-api-key", "", "generate a new API key with the given name and add it to the config")
 	modelsDevCacheTTL := fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
 	logLevel := fs.String("log-level", "", "log level: debug, info, warn, error")
 	logFormat := fs.String("log-format", "", "log format: json, text")
-	if err := fs.Parse(env.args); err != nil {
+	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			usage(env.stdout)
+			usageServe(env.stdout)
 			return exitOK
 		}
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitUsage
 	}
-	if *setup {
-		ttl, err := setupModelsDevCacheTTL(env, *modelsDevCacheTTL, flagWasSet(fs, "models-dev-cache-ttl"))
-		if err != nil {
-			fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
-			return exitUsage
-		}
-		env.modelsDevCacheTTL = &ttl
-		ctx, cancel, interrupted := signalCancelContext(env.sigCh)
-		defer cancel()
-		if err := runSetup(ctx, env, *force); err != nil {
-			if interrupted() || errors.Is(err, context.Canceled) {
-				return exitInterrupt
-			}
-			fmt.Fprintf(env.stderr, "harness-model-proxy: setup: %v\n", err)
-			return exitUsage
-		}
-		return exitOK
-	}
-	if *generateAPIKey != "" {
-		return runGenerateAPIKey(env, *configPath, *generateAPIKey)
-	}
 
 	path := server.ConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv)
-	if *refreshModels {
-		ttl, err := configuredModelsDevCacheTTL(path, env, *modelsDevCacheTTL, flagWasSet(fs, "models-dev-cache-ttl"))
-		if err != nil {
-			fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
-			return exitUsage
-		}
-		env.modelsDevCacheTTL = &ttl
-		ctx, cancel, interrupted := signalCancelContext(env.sigCh)
-		defer cancel()
-		if err := runRefreshModels(ctx, env, path); err != nil {
-			if interrupted() || errors.Is(err, context.Canceled) {
-				return exitInterrupt
-			}
-			fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: %v\n", err)
-			return exitUsage
-		}
-		return exitOK
-	}
 	if path == "" {
-		fmt.Fprintln(env.stderr, "harness-model-proxy: no config file found; run harness-model-proxy --setup")
+		fmt.Fprintln(env.stderr, "harness-model-proxy: no config file found; run harness-model-proxy setup")
 		return exitUsage
 	}
 	cfg, err := server.LoadConfig(path)
@@ -232,42 +218,213 @@ func run(env environment) int {
 	return exitOK
 }
 
+// runSetupCmd parses setup flags and runs the interactive provider-config wizard.
+func runSetupCmd(env environment, args []string) int {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	force := fs.Bool("force", false, "overwrite existing provider files")
+	modelsDevCacheTTL := fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usageSetup(env.stdout)
+			return exitOK
+		}
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitUsage
+	}
+	ttl, err := setupModelsDevCacheTTL(env, *modelsDevCacheTTL, flagWasSet(fs, "models-dev-cache-ttl"))
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitUsage
+	}
+	env.modelsDevCacheTTL = &ttl
+	ctx, cancel, interrupted := signalCancelContext(env.sigCh)
+	defer cancel()
+	if err := runSetup(ctx, env, *force); err != nil {
+		if interrupted() || errors.Is(err, context.Canceled) {
+			return exitInterrupt
+		}
+		fmt.Fprintf(env.stderr, "harness-model-proxy: setup: %v\n", err)
+		return exitUsage
+	}
+	return exitOK
+}
+
+// runRefreshModelsCmd parses refresh-models flags and re-syncs configured
+// provider config files from the models.dev catalog.
+func runRefreshModelsCmd(env environment, args []string) int {
+	fs := flag.NewFlagSet("refresh-models", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	configPath := fs.String("config", "", "config file path")
+	modelsDevCacheTTL := fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usageRefreshModels(env.stdout)
+			return exitOK
+		}
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitUsage
+	}
+	path := server.ConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv)
+	if path == "" {
+		fmt.Fprintln(env.stderr, "harness-model-proxy: no config file found; run harness-model-proxy setup")
+		return exitUsage
+	}
+	ttl, err := configuredModelsDevCacheTTL(path, env, *modelsDevCacheTTL, flagWasSet(fs, "models-dev-cache-ttl"))
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitUsage
+	}
+	env.modelsDevCacheTTL = &ttl
+	ctx, cancel, interrupted := signalCancelContext(env.sigCh)
+	defer cancel()
+	if err := runRefreshModels(ctx, env, path); err != nil {
+		if interrupted() || errors.Is(err, context.Canceled) {
+			return exitInterrupt
+		}
+		fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: %v\n", err)
+		return exitUsage
+	}
+	return exitOK
+}
+
+// runGenerateAPIKeyCmd parses generate-api-key flags, generates a new API key,
+// and adds it to the config, creating the config at the default path if none
+// exists yet.
+func runGenerateAPIKeyCmd(env environment, args []string) int {
+	fs := flag.NewFlagSet("generate-api-key", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	configPath := fs.String("config", "", "config file path")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usageGenerateAPIKey(env.stdout)
+			return exitOK
+		}
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitUsage
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(env.stderr, "harness-model-proxy: generate-api-key requires exactly one name")
+		return exitUsage
+	}
+	return runGenerateAPIKey(env, *configPath, fs.Arg(0))
+}
+
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "harness-model-proxy — provider and model proxy for harness.")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  harness-model-proxy [flags]                    serve HTTP")
-	fmt.Fprintln(w, "  harness-model-proxy --version                  print release version")
-	fmt.Fprintln(w, "  harness-model-proxy --setup [--force]          configure providers")
-	fmt.Fprintln(w, "  harness-model-proxy --generate-api-key <name>  generate and store a new API key")
-	fmt.Fprintln(w, "  harness-model-proxy auth <login|logout|status> [flags] <provider>")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Flags:")
-	fs := flag.NewFlagSet("harness-model-proxy", flag.ContinueOnError)
-	fs.SetOutput(w)
-	fs.String("config", "", "config file path")
-	fs.String("listen", "", "HTTP listen address")
-	fs.Bool("setup", false, "create or update proxy config")
-	fs.Bool("force", false, "with --setup, overwrite existing provider files")
-	fs.Bool("refresh-models", false, "fetch models.dev and update configured provider model metadata")
-	fs.String("generate-api-key", "", "generate a new API key with the given name and add it to the config")
-	fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
-	fs.String("log-level", logging.LevelInfo, "log level: debug, info, warn, error")
-	fs.String("log-format", logging.FormatJSON, "log format: json, text")
-	fs.PrintDefaults()
+	fmt.Fprint(w, `harness-model-proxy - provider and model proxy for harness
+
+Usage:
+  harness-model-proxy serve             [-config path] [-listen addr] [-models-dev-cache-ttl d] [-log-level level] [-log-format format]
+  harness-model-proxy setup             [-force] [-models-dev-cache-ttl d]
+  harness-model-proxy refresh-models    [-config path] [-models-dev-cache-ttl d]
+  harness-model-proxy auth              <login|logout|status> [-config path] <provider>
+  harness-model-proxy generate-api-key  [-config path] <name>
+  harness-model-proxy version
+  harness-model-proxy --version
+
+With no arguments, harness-model-proxy serves HTTP (the default action).
+
+Subcommands:
+  serve             Load config and serve the HTTP model proxy (default).
+  setup             Create or update proxy and provider config interactively.
+  refresh-models    Fetch models.dev and update configured provider model metadata.
+  auth              Login, logout, or inspect OAuth tokens for a configured provider.
+  generate-api-key  Generate a new API key with the given name and add it to config.
+  version           Print the release version.
+
+serve flags:
+  -config path            config file path
+  -listen addr            HTTP listen address (default: `+defaultListen+`)
+  -models-dev-cache-ttl d models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh
+  -log-level level        debug|info|warn|error (overrides config)
+  -log-format format      json|text (overrides config)
+
+setup flags:
+  -force                  overwrite existing provider files
+  -models-dev-cache-ttl d models.dev cache refresh interval
+
+refresh-models flags:
+  -config path            config file path
+  -models-dev-cache-ttl d models.dev cache refresh interval
+
+generate-api-key flags:
+  -config path            config file path
+`)
+}
+
+// usageServe prints serve-specific help.
+func usageServe(w io.Writer) {
+	fmt.Fprint(w, `harness-model-proxy serve - load config and serve the HTTP model proxy
+
+Usage:
+  harness-model-proxy serve [-config path] [-listen addr] [-models-dev-cache-ttl d] [-log-level level] [-log-format format]
+
+With no arguments, harness-model-proxy serves HTTP (the default action).
+
+Flags:
+  -config path            config file path
+  -listen addr            HTTP listen address (default: `+defaultListen+`)
+  -models-dev-cache-ttl d models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh
+  -log-level level        debug|info|warn|error (overrides config)
+  -log-format format      json|text (overrides config)
+`)
+}
+
+// usageSetup prints setup-specific help.
+func usageSetup(w io.Writer) {
+	fmt.Fprint(w, `harness-model-proxy setup - create or update proxy and provider config interactively
+
+Usage:
+  harness-model-proxy setup [-force] [-models-dev-cache-ttl d]
+
+Runs the models.dev-backed provider/model picker and writes proxy and provider
+config files in the default config directory.
+
+Flags:
+  -force                  overwrite existing provider files
+  -models-dev-cache-ttl d models.dev cache refresh interval
+`)
+}
+
+// usageRefreshModels prints refresh-models-specific help.
+func usageRefreshModels(w io.Writer) {
+	fmt.Fprint(w, `harness-model-proxy refresh-models - fetch models.dev and update configured provider model metadata
+
+Usage:
+  harness-model-proxy refresh-models [-config path] [-models-dev-cache-ttl d]
+
+Flags:
+  -config path            config file path
+  -models-dev-cache-ttl d models.dev cache refresh interval
+`)
+}
+
+// usageGenerateAPIKey prints generate-api-key-specific help.
+func usageGenerateAPIKey(w io.Writer) {
+	fmt.Fprint(w, `harness-model-proxy generate-api-key - generate and store a new API key
+
+Usage:
+  harness-model-proxy generate-api-key [-config path] <name>
+
+Creates config at the default path if none exists yet.
+
+Flags:
+  -config path            config file path
+`)
 }
 
 func runGenerateAPIKey(env environment, argsConfigPath, name string) int {
 	path := server.ConfigPath(argsConfigPath, argsConfigPath != "", env.getenv)
 	if path == "" {
-		fmt.Fprintln(env.stderr, "harness-model-proxy: no config file found; run harness-model-proxy --setup")
-		return exitUsage
+		// No config file exists yet; create one at the default path so a key can
+		// be generated on a fresh install (mirrors harness-mcp-proxy).
+		path = filepath.Join(defaultConfigDir(env.getenv), "config.json")
 	}
 	// Load existing api_keys via the typed config and add the new entry, then
 	// write back only the api_keys field in the raw JSON. This preserves all other
 	// config keys exactly and avoids round-tripping custom types such as Duration.
 	cfg, err := server.LoadConfig(path)
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime
 	}
@@ -277,7 +434,11 @@ func runGenerateAPIKey(env environment, argsConfigPath, name string) int {
 		return exitUsage
 	}
 	store := cfg.APIKeyStore()
-	store.Add(name, plaintext, env.now())
+	now := env.now
+	if now == nil {
+		now = time.Now
+	}
+	store.Add(name, plaintext, now())
 	if err := updateConfigAPIKeys(path, store.Entries); err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime

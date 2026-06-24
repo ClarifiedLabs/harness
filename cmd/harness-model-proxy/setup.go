@@ -1,6 +1,6 @@
 // Setup wizard and provider-config refresh for harness-model-proxy: the
-// `harness-model-proxy --setup` interactive flow (models.dev-backed
-// provider/model pickers) and the `--refresh-models` re-sync of provider config
+// `harness-model-proxy setup` interactive flow (models.dev-backed
+// provider/model pickers) and the `refresh-models` re-sync of provider config
 // files. Split from main.go so the entrypoint stays focused on serving HTTP.
 package main
 
@@ -850,7 +850,7 @@ func setupCatalog(ctx context.Context, env environment) (*modelsdev.Catalog, err
 // setupModelFromModelsDev builds the on-disk entry for one selected model.
 // Managed configs never store a price: the proxy resolves prices live from the
 // models.dev cache, so leaving Price nil here keeps refreshed prices reaching
-// the running server without another --setup. The price is still shown in the
+// the running server without another setup. The price is still shown in the
 // interactive picker (formatPickerPrice), it just isn't persisted.
 func setupModelFromModelsDev(model modelsdev.Model) setupModelConfig {
 	cfg := setupModelConfig{

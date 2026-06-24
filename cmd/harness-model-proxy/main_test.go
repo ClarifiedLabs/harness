@@ -56,16 +56,82 @@ func TestRunAuthHelpExit0WithUsageOnStdout(t *testing.T) {
 	}
 }
 
+func TestRunHelpExit0WithUsageOnStdout(t *testing.T) {
+	for _, arg := range []string{"-h", "--help", "help"} {
+		env, out, errw := testEnv(t, []string{arg})
+		if code := run(env); code != exitOK {
+			t.Fatalf("%s: exit = %d, want %d; stderr=%q", arg, code, exitOK, errw.String())
+		}
+		text := out.String()
+		for _, want := range []string{"serve", "setup", "refresh-models", "auth", "generate-api-key", "version", "Usage:"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s usage missing %q; stdout=%q", arg, want, text)
+			}
+		}
+		if errw.Len() != 0 {
+			t.Errorf("%s should print to stdout only; stderr=%q", arg, errw.String())
+		}
+	}
+}
+
 func TestRunVersionExit0(t *testing.T) {
-	env, out, errw := testEnv(t, []string{"--version"})
-	if code := run(env); code != exitOK {
-		t.Fatalf("--version exit = %d, want %d; stderr=%q", code, exitOK, errw.String())
+	for _, arg := range []string{"--version", "version"} {
+		env, out, errw := testEnv(t, []string{arg})
+		if code := run(env); code != exitOK {
+			t.Fatalf("%s exit = %d, want %d; stderr=%q", arg, code, exitOK, errw.String())
+		}
+		if got := out.String(); !strings.HasPrefix(got, "harness-model-proxy ") {
+			t.Fatalf("%s output = %q, want app version line", arg, got)
+		}
+		if errw.Len() != 0 {
+			t.Fatalf("%s should not write stderr; stderr=%q", arg, errw.String())
+		}
 	}
-	if got := out.String(); !strings.HasPrefix(got, "harness-model-proxy ") {
-		t.Fatalf("--version output = %q, want app version line", got)
+}
+
+func TestRunNoArgsServesByDefault(t *testing.T) {
+	// With no config file, the implicit-default serve surfaces the same
+	// "no config file found" usage error as an explicit `serve`. Empty args
+	// must dispatch to serve, not print the top-level usage.
+	env, out, errw := testEnv(t, nil)
+	code := run(env)
+	if code != exitUsage {
+		t.Fatalf("no args: exit = %d, want %d; stderr=%q", code, exitUsage, errw.String())
 	}
-	if errw.Len() != 0 {
-		t.Fatalf("--version should not write stderr; stderr=%q", errw.String())
+	if out.Len() != 0 {
+		t.Errorf("no args should not print to stdout; stdout=%q", out.String())
+	}
+	if !strings.Contains(errw.String(), "no config file found; run harness-model-proxy setup") {
+		t.Errorf("no args should reach serve and report missing config; stderr=%q", errw.String())
+	}
+	if strings.Contains(errw.String(), "Usage:") {
+		t.Errorf("no args should not print top-level usage; stderr=%q", errw.String())
+	}
+
+	// An explicit `serve` with no config behaves identically to empty args.
+	serveEnv, serveOut, serveErrw := testEnv(t, []string{"serve"})
+	if got := run(serveEnv); got != code {
+		t.Fatalf("serve exit = %d, want %d (same as no args); stderr=%q", got, code, serveErrw.String())
+	}
+	if serveOut.String() != out.String() || serveErrw.String() != errw.String() {
+		t.Errorf("serve output differs from no args; serve out=%q err=%q noargs out=%q err=%q",
+			serveOut.String(), serveErrw.String(), out.String(), errw.String())
+	}
+}
+
+func TestRunUnknownSubcommandExit2(t *testing.T) {
+	env, out, errw := testEnv(t, []string{"bogus"})
+	if code := run(env); code != exitUsage {
+		t.Fatalf("unknown subcommand: exit = %d, want %d", code, exitUsage)
+	}
+	if out.Len() != 0 {
+		t.Errorf("unknown subcommand output should go to stderr; stdout=%q", out.String())
+	}
+	if !strings.Contains(errw.String(), `unknown subcommand "bogus"`) {
+		t.Errorf("stderr should name the bad subcommand; stderr=%q", errw.String())
+	}
+	if !strings.Contains(errw.String(), "Usage:") {
+		t.Errorf("unknown subcommand should also print usage; stderr=%q", errw.String())
 	}
 }
 
@@ -90,21 +156,39 @@ func TestRunAuthLoginHelpExit0WithUsageOnStdout(t *testing.T) {
 	}
 }
 
-func TestRunGenerateAPIKeyRequiresConfig(t *testing.T) {
-	env, out, errw := testEnv(t, []string{"--generate-api-key", "laptop"})
-	if code := run(env); code != exitUsage {
-		t.Fatalf("exit = %d, want %d; stderr=%q", code, exitUsage, errw.String())
+func TestRunGenerateAPIKeyCreatesConfigWhenNoneExists(t *testing.T) {
+	env, out, errw := testEnv(t, []string{"generate-api-key", "laptop"})
+	if code := run(env); code != exitOK {
+		t.Fatalf("exit = %d, want %d; stderr=%q", code, exitOK, errw.String())
 	}
-	if out.Len() != 0 {
-		t.Fatalf("expected no stdout; got %q", out.String())
+	key := strings.TrimSpace(out.String())
+	if !strings.HasPrefix(key, apikey.ModelProxyPrefix) {
+		t.Fatalf("key missing prefix: %q", key)
 	}
-	if !strings.Contains(errw.String(), "no config file found") {
-		t.Fatalf("stderr missing config message: %q", errw.String())
+	cfgPath := filepath.Join(server.DefaultConfigDir(env.getenv), "config.json")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var raw struct {
+		APIKeys []apikey.Entry `json:"api_keys"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	if len(raw.APIKeys) != 1 || raw.APIKeys[0].Name != "laptop" {
+		t.Fatalf("api_keys = %+v", raw.APIKeys)
+	}
+	store := apikey.Store{Entries: raw.APIKeys}
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	if !store.Authorize(req) {
+		t.Fatal("generated key did not authorize")
 	}
 }
 
 func TestRunGenerateAPIKeyWritesHashAndPrintsKey(t *testing.T) {
-	env, out, errw := testEnv(t, []string{"--generate-api-key", "laptop"})
+	env, out, errw := testEnv(t, []string{"generate-api-key", "laptop"})
 	configDir := server.DefaultConfigDir(env.getenv)
 	cfgPath := filepath.Join(configDir, "config.json")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {

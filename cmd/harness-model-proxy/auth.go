@@ -53,7 +53,7 @@ func runAuthAction(env environment, action string, args []string) int {
 	providerName := fs.Arg(0)
 	cfgPath := server.ConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv)
 	if cfgPath == "" {
-		fmt.Fprintln(env.stderr, "harness-model-proxy: no config file found; run harness-model-proxy --setup")
+		fmt.Fprintln(env.stderr, "harness-model-proxy: no config file found; run harness-model-proxy setup")
 		return exitUsage
 	}
 	pc, configDir, err := authProviderConfig(cfgPath, providerName)
@@ -113,7 +113,7 @@ func usageAuth(w io.Writer) {
 	fmt.Fprintln(w, "  codex_oauth  OpenAI Codex ChatGPT subscription device-code login.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Examples:")
-	fmt.Fprintln(w, "  harness-model-proxy --setup")
+	fmt.Fprintln(w, "  harness-model-proxy setup")
 	fmt.Fprintln(w, "  harness-model-proxy auth login openai-codex")
 	fmt.Fprintln(w, "  harness-model-proxy auth status openai-codex")
 	fmt.Fprintln(w)

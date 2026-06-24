@@ -233,7 +233,7 @@ Responses continuation is on by default for proxy providers that report both
 
 ## Model Proxy Setup
 
-Run `harness-model-proxy --setup` to create a proxy config and a provider config
+Run `harness-model-proxy setup` to create a proxy config and a provider config
 from models.dev, append a new provider config to an existing proxy config, or
 update an existing configured provider without configuring a proxy default model.
 Setup lists harness-supported providers, prompts for the API key when the
@@ -265,7 +265,7 @@ input modalities with `input_modalities`; use `["text"]` for text-only models
 and `["text", "image"]` for models that accept image attachments.
 
 `harness-model-proxy` stores the full models.dev catalog at
-`~/.config/harness-model-proxy/models.dev.api.json`. `--setup` uses the cache
+`~/.config/harness-model-proxy/models.dev.api.json`. `setup` uses the cache
 when present; if there is no cache, or the cache cannot be parsed, it fetches and
 rewrites the cache before using the vendored fallback snapshot. While serving,
 the proxy refreshes this cache when it is older than `24h` by default. Set
@@ -278,7 +278,7 @@ delta, is rejected and the old cache is preserved. Successful replacements first
 copy the previous cache to `models.dev.api.json.bak`, overwriting that one backup
 each time.
 
-Run `harness-model-proxy --refresh-models` to fetch and cache the latest live
+Run `harness-model-proxy refresh-models` to fetch and cache the latest live
 `models.dev` catalog, then refresh metadata for the currently configured model
 allowlists while preserving stored API keys. If live fetch fails, refresh uses a
 parseable local cache before falling back to the vendored snapshot.

@@ -91,7 +91,7 @@ func TestRunSetupWritesOnlySelectedModelsAndNoProxyDefault(t *testing.T) {
 	}
 }
 
-// TestRunSetupWritesManagedConfigWithoutPrices verifies that --setup marks the
+// TestRunSetupWritesManagedConfigWithoutPrices verifies that setup marks the
 // written provider config managed and omits per-model prices, even when
 // models.dev has prices for the selected model. The proxy resolves those prices
 // live from the cache instead, so refreshes reach the server without a re-setup.
@@ -174,7 +174,7 @@ func TestRunSetupSIGINTCancelsCatalogFetch(t *testing.T) {
 	catalogStarted := make(chan struct{})
 	var out, errw bytes.Buffer
 	env := environment{
-		args:   []string{"--setup"},
+		args:   []string{"setup"},
 		stdin:  strings.NewReader(""),
 		stdout: &out,
 		stderr: &errw,
@@ -838,7 +838,7 @@ func TestRunRefreshModelsSIGINTCancelsCatalogFetch(t *testing.T) {
 	catalogStarted := make(chan struct{})
 	var out, errw bytes.Buffer
 	env := environment{
-		args:   []string{"--refresh-models", "-config", cfgPath},
+		args:   []string{"refresh-models", "-config", cfgPath},
 		stdout: &out,
 		stderr: &errw,
 		sigCh:  make(chan os.Signal, 1),
