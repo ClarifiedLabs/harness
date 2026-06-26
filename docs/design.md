@@ -583,7 +583,7 @@ func (r *Registry) ContextWindow(model string) int // registry hit, else default
 func (r *Registry) Models() []string               // sorted configured model ids
 ```
 
-Model metadata originates from the public **models.dev** catalog
+Model metadata normally originates from the public **models.dev** catalog
 (`internal/modelsdev`); `harness-model-proxy setup` and `refresh-models` reduce it
 to the provider/context/input-modality/reasoning fields harness needs. The proxy
 caches the full catalog JSON as `models.dev.api.json` in the proxy config directory.
@@ -593,6 +593,12 @@ than `models_dev_cache_ttl` (`24h` by default; `0` disables periodic refresh), a
 `refresh-models` fetches and caches the full catalog before rewriting configured
 provider allowlists. The vendored snapshot is used only when there is no parseable
 cache and a live fetch fails.
+
+The synthetic `openai-codex` provider is the exception: its model list comes from
+the OpenAI Codex model catalog (`codex-rs/models-manager/models.json`). Setup uses
+a vendored copy or the last cached refresh; `refresh-models` fetches the latest
+catalog from `openai/codex` on GitHub and caches it as `openai-codex.models.json`.
+Only list-visible Codex models are exposed.
 
 ### Managed vs manual provider configs
 
@@ -614,17 +620,16 @@ Provider config files are either **managed** or **manual**:
   a managed, price-less config.
 
 A managed config may also carry `"price_source"` — a models.dev provider id to
-resolve its prices from when that differs from the config's own `name`. This
-exists for `openai-codex`, whose models are OpenAI models re-exposed under the
-codex base URL and billed at OpenAI per-token rates: `setup` writes
-`"price_source": "openai"` so codex prices track the OpenAI rates in the cache.
-It also writes `"omit_max_output_tokens": true` because the ChatGPT Codex
-backend rejects the Responses `max_output_tokens` parameter; the proxy infers
-the same omit behavior for older `codex_oauth` Responses configs. The proxy also
-defaults `responses_websocket` on for `codex_oauth` Responses configs so
-continuation can use the Codex-compatible WebSocket path without writing another
-managed config field.
-The server otherwise stays provider-neutral for pricing — it just honors
+resolve its prices from when that differs from the config's own `name`. The
+synthetic `openai-codex` provider does not use `price_source`: it is backed by a
+ChatGPT subscription, so the proxy serves token counts without dollar costs and
+ignores any stale Codex `price_source` left by older configs. It also writes
+`"omit_max_output_tokens": true` because the ChatGPT Codex backend rejects the
+Responses `max_output_tokens` parameter; the proxy infers the same omit behavior
+for older `codex_oauth` Responses configs. The proxy also defaults
+`responses_websocket` on for `codex_oauth` Responses configs so continuation can
+use the Codex-compatible WebSocket path without writing another managed config
+field. The server otherwise stays provider-neutral for pricing — it just honors
 whatever `price_source` a managed config names.
 
 The serving handler holds its registry + served catalog behind an atomic
@@ -707,9 +712,10 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   `@ai-sdk/anthropic`, and plain `@ai-sdk/google` package metadata, prompts for
   the API key when the provider needs one, pages the selected provider's
   models newest-first, and asks which models should be locally available. The
-  synthetic `openai-codex` provider is listed when the catalog has OpenAI models;
-  it writes the ChatGPT Codex backend URL and a `codex_oauth` auth block instead
-  of API-key fields, plus `omit_max_output_tokens:true`. The proxy defaults the
+  synthetic `openai-codex` provider is listed when OpenAI provider metadata is
+  available, with its models from the vendored or cached Codex model catalog; it
+  writes the ChatGPT Codex backend URL and a `codex_oauth` auth block instead of
+  API-key fields, plus `omit_max_output_tokens:true`. The proxy defaults the
   Responses WebSocket transport on for this `codex_oauth` provider at runtime,
   unless the config explicitly sets `responses_websocket:false`.
   New providers start with no models enabled; existing providers start with
@@ -717,8 +723,8 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   rows are bold and marked with `*`; the
   selector accepts number/id toggles plus global `all`, global `none`, `save`,
   `/search`, `n`, `p`, and `cancel`. The provider config is
-  generated from models.dev with only enabled models for that provider: base URL,
-  api_type (`responses`, `openai`, or `anthropic`), key env vars, context windows,
+  generated from the selected catalog with only enabled models for that provider:
+  base URL, api_type (`responses`, `openai`, or `anthropic`), key env vars, context windows,
   output limits, input modalities, and reasoning metadata. It is written as a **managed** config (`"managed": true`)
   with **no per-model prices** — the proxy resolves managed prices live from the
   models.dev cache (see *Managed vs manual provider configs*). Without `-force`,
@@ -726,7 +732,9 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   proxy config.
 - `harness-model-proxy refresh-models` fetches and caches the latest live
   models.dev catalog and refreshes each configured provider file's current model
-  allowlist, preserving stored API keys and `auth` blocks. Refreshed files are
+  allowlist, preserving stored API keys and `auth` blocks. When `openai-codex` is
+  configured, it also refreshes the cached OpenAI Codex catalog from GitHub and
+  rewrites Codex models from that source. Refreshed files are
   rewritten as managed, price-less configs. If live fetch fails, it
   uses a parseable local cache before using the vendored fallback snapshot. It
   errors if a configured provider or model is missing/unsupported in the selected

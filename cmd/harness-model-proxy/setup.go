@@ -36,13 +36,12 @@ type setupProviderConfig struct {
 	APIType string `json:"api_type"`
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key,omitempty"`
-	// Managed is always true for configs written by setup/refresh: their prices
-	// are resolved live from the models.dev cache, so the per-model entries below
-	// carry no price.
+	// Managed is always true for configs written by setup/refresh. For priced
+	// providers, prices are resolved live from the models.dev cache, so the
+	// per-model entries below carry no price.
 	Managed bool `json:"managed,omitempty"`
 	// PriceSource names the models.dev provider id whose prices apply to this
-	// managed provider when it differs from Name (e.g. openai-codex prices from
-	// "openai"). Empty means price from Name.
+	// managed provider when it differs from Name. Empty means price from Name.
 	PriceSource string `json:"price_source,omitempty"`
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for compatible
 	// backends that reject the standard parameter, such as ChatGPT Codex.
@@ -68,9 +67,6 @@ const (
 	openAICodexProviderID      = "openai-codex"
 	openAICodexProviderName    = "OpenAI Codex (ChatGPT subscription)"
 	openAICodexProviderBaseURL = "https://chatgpt.com/backend-api/codex"
-	// openAIModelsDevProviderID is the models.dev provider id whose prices apply
-	// to openai-codex (its models are OpenAI models; see openAICodexProvider).
-	openAIModelsDevProviderID = "openai"
 )
 
 func runSetup(ctx context.Context, env environment, force bool) error {
@@ -86,12 +82,16 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	if err != nil {
 		return err
 	}
+	codexCatalog, err := setupCodexModelsCatalog(env, dir)
+	if err != nil {
+		return err
+	}
 	existingProviders, err := loadSetupExistingProviders(configPath, configExists)
 	if err != nil {
 		return err
 	}
 
-	providerMeta, err := promptProviderSelection(reader, env.stdout, catalog, existingProviders, setupPageSize(env))
+	providerMeta, err := promptProviderSelection(reader, env.stdout, catalog, codexCatalog, existingProviders, setupPageSize(env))
 	if err != nil {
 		return err
 	}
@@ -217,6 +217,7 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 	}
 
 	dir := filepath.Dir(cfgPath)
+	var codexCatalog *codexModelsCatalog
 	for _, file := range files {
 		path := file
 		if !filepath.IsAbs(path) {
@@ -238,9 +239,15 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			if current.Name == "" {
 				return fmt.Errorf("%s has provider without name", path)
 			}
-			meta, ok := setupCatalogProvider(catalog, current.Name)
+			if current.Name == openAICodexProviderID && codexCatalog == nil {
+				codexCatalog, err = refreshCodexModelsCatalog(ctx, env, dir)
+				if err != nil {
+					return err
+				}
+			}
+			meta, ok := setupCatalogProvider(catalog, codexCatalog, current.Name)
 			if !ok {
-				return fmt.Errorf("provider %q from %s was not found in models.dev", current.Name, path)
+				return fmt.Errorf("provider %q from %s was not found in the model catalog", current.Name, path)
 			}
 			if setupProviderAPIType(meta) == "" || setupProviderBaseURL(meta) == "" {
 				return fmt.Errorf("provider %q from %s is not supported by harness", current.Name, path)
@@ -381,13 +388,10 @@ func setupProviderFromModelsDev(provider modelsdev.Provider, apiKey string, auth
 	}
 	if isOpenAICodexProvider(provider) {
 		return setupProviderConfig{
-			Name:    openAICodexProviderID,
-			APIType: setupProviderAPIType(provider),
-			BaseURL: setupProviderBaseURL(provider),
-			Managed: true,
-			// Codex re-exposes OpenAI models (see openAICodexProvider), billed at
-			// OpenAI per-token rates, so resolve managed prices from "openai".
-			PriceSource:         openAIModelsDevProviderID,
+			Name:                openAICodexProviderID,
+			APIType:             setupProviderAPIType(provider),
+			BaseURL:             setupProviderBaseURL(provider),
+			Managed:             true,
 			OmitMaxOutputTokens: true,
 			Auth:                setupProviderAuth(provider, authCfg),
 			Models:              entries,
@@ -421,8 +425,8 @@ func setupProviderAuth(provider modelsdev.Provider, existing *auth.Config) *auth
 	return &auth.Config{Type: auth.TypeCodexOAuth}
 }
 
-func promptProviderSelection(r *bufio.Reader, w io.Writer, catalog *modelsdev.Catalog, existing map[string]setupExistingProvider, pageSize int) (modelsdev.Provider, error) {
-	providers := supportedSetupProviders(catalog)
+func promptProviderSelection(r *bufio.Reader, w io.Writer, catalog *modelsdev.Catalog, codexCatalog *codexModelsCatalog, existing map[string]setupExistingProvider, pageSize int) (modelsdev.Provider, error) {
+	providers := supportedSetupProviders(catalog, codexCatalog)
 	if len(providers) == 0 {
 		return modelsdev.Provider{}, fmt.Errorf("models.dev catalog has no harness-supported providers")
 	}
@@ -683,7 +687,7 @@ func setupModelMatchSummary(items []setupModelPick, matches []int, limit int) st
 	return strings.Join(parts, ", ")
 }
 
-func supportedSetupProviders(catalog *modelsdev.Catalog) []modelsdev.Provider {
+func supportedSetupProviders(catalog *modelsdev.Catalog, codexCatalog *codexModelsCatalog) []modelsdev.Provider {
 	var providers []modelsdev.Provider
 	for _, provider := range catalog.ProvidersList() {
 		if setupProviderAPIType(provider) == "" || setupProviderBaseURL(provider) == "" || len(provider.Models) == 0 {
@@ -691,8 +695,11 @@ func supportedSetupProviders(catalog *modelsdev.Catalog) []modelsdev.Provider {
 		}
 		providers = append(providers, provider)
 	}
-	if codex, ok := openAICodexProvider(catalog); ok && !setupProviderListContains(providers, openAICodexProviderID) {
-		providers = append(providers, codex)
+	if _, hasOpenAI := catalog.Provider("openai"); hasOpenAI && !setupProviderListContains(providers, openAICodexProviderID) {
+		codex, ok := openAICodexProvider(codexCatalog)
+		if ok {
+			providers = append(providers, codex)
+		}
 	}
 	sort.Slice(providers, func(i, j int) bool {
 		if strings.EqualFold(providers[i].Name, providers[j].Name) {
@@ -712,28 +719,15 @@ func setupProviderListContains(providers []modelsdev.Provider, id string) bool {
 	return false
 }
 
-func setupCatalogProvider(catalog *modelsdev.Catalog, id string) (modelsdev.Provider, bool) {
+func setupCatalogProvider(catalog *modelsdev.Catalog, codexCatalog *codexModelsCatalog, id string) (modelsdev.Provider, bool) {
 	if id == openAICodexProviderID {
-		return openAICodexProvider(catalog)
+		return openAICodexProvider(codexCatalog)
 	}
 	return catalog.Provider(id)
 }
 
-func openAICodexProvider(catalog *modelsdev.Catalog) (modelsdev.Provider, bool) {
-	openai, ok := catalog.Provider("openai")
-	if !ok || len(openai.Models) == 0 {
-		return modelsdev.Provider{}, false
-	}
-	models := make(map[string]modelsdev.Model, len(openai.Models))
-	for id, model := range openai.Models {
-		models[id] = model
-	}
-	return modelsdev.Provider{
-		ID:     openAICodexProviderID,
-		Name:   openAICodexProviderName,
-		API:    openAICodexProviderBaseURL,
-		Models: models,
-	}, true
+func openAICodexProvider(catalog *codexModelsCatalog) (modelsdev.Provider, bool) {
+	return openAICodexProviderFromCatalog(catalog)
 }
 
 func setupProviderAPIType(provider modelsdev.Provider) string {
@@ -779,7 +773,7 @@ func refreshConfiguredModels(provider modelsdev.Provider, current []llm.ModelEnt
 		}
 		model, ok := setupProviderModel(provider, entry.Name)
 		if !ok {
-			return nil, fmt.Errorf("configured model %q was not found in models.dev", entry.Name)
+			return nil, fmt.Errorf("configured model %q was not found in the model catalog", entry.Name)
 		}
 		models = append(models, model)
 	}

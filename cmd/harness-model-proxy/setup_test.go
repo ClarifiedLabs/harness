@@ -220,7 +220,7 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	home := t.TempDir()
 	var out, errw bytes.Buffer
 	env := environment{
-		stdin:  strings.NewReader("openai-codex\n1\nsave\n"),
+		stdin:  strings.NewReader("openai-codex\ngpt-5.5\nsave\n"),
 		stdout: &out,
 		stderr: &errw,
 		getenv: func(k string) string {
@@ -272,17 +272,23 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 		provider.Auth.Type != auth.TypeCodexOAuth {
 		t.Fatalf("provider config = %+v", provider)
 	}
-	if len(provider.Models) != 1 || provider.Models[0].Name != "gpt-test" || provider.Models[0].ContextWindow != 999000 {
-		t.Fatalf("provider models = %+v, want gpt-test", provider.Models)
+	if len(provider.Models) != 1 || provider.Models[0].Name != "gpt-5.5" || provider.Models[0].ContextWindow != 272000 {
+		t.Fatalf("provider models = %+v, want Codex gpt-5.5 with 272000 context", provider.Models)
 	}
-	if provider.Models[0].OutputLimit != 64000 {
-		t.Fatalf("provider output limit = %d, want 64000", provider.Models[0].OutputLimit)
+	if provider.Models[0].OutputLimit != 0 {
+		t.Fatalf("provider output limit = %d, want omitted", provider.Models[0].OutputLimit)
+	}
+	if !slices.Contains(provider.Models[0].InputModalities, "image") {
+		t.Fatalf("provider input modalities = %+v, want image support", provider.Models[0].InputModalities)
+	}
+	if len(provider.Models[0].ReasoningOptions) != 1 || !slices.Contains(provider.Models[0].ReasoningOptions[0].Values, "xhigh") {
+		t.Fatalf("provider reasoning options = %+v, want Codex effort values", provider.Models[0].ReasoningOptions)
 	}
 	if !provider.Managed {
 		t.Fatalf("codex provider should be managed: %+v", provider)
 	}
-	if provider.PriceSource != openAIModelsDevProviderID {
-		t.Fatalf("codex price_source = %q, want %q (prices from OpenAI rates)", provider.PriceSource, openAIModelsDevProviderID)
+	if provider.PriceSource != "" {
+		t.Fatalf("codex price_source = %q, want omitted for subscription provider", provider.PriceSource)
 	}
 	if !provider.OmitMaxOutputTokens {
 		t.Fatalf("codex omit_max_output_tokens = false, want true")
@@ -791,9 +797,10 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
   "name": "openai-codex",
   "api_type": "responses",
   "base_url": "https://chatgpt.com/backend-api/codex",
-  "auth": {"type":"codex_oauth","token_file":"tokens/custom-codex.json"},
-  "models": [{"name":"gpt-test","context_window":1000}]
-}`), 0o600); err != nil {
+	  "auth": {"type":"codex_oauth","token_file":"tokens/custom-codex.json"},
+	  "price_source": "openai",
+	  "models": [{"name":"gpt-5.5","context_window":1000,"output_limit":64000}]
+	}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
@@ -802,6 +809,9 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 		stderr: &bytes.Buffer{},
 		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
 			return testSetupCatalogWithOpenAI(), nil
+		},
+		codexModelsData: func(context.Context) ([]byte, error) {
+			return []byte(testCodexModelsCatalogJSON()), nil
 		},
 	}
 
@@ -824,11 +834,14 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 		provider.Auth.TokenFile != "tokens/custom-codex.json" {
 		t.Fatalf("provider after refresh = %+v", provider)
 	}
-	if len(provider.Models) != 1 || provider.Models[0].Name != "gpt-test" || provider.Models[0].ContextWindow != 999000 {
+	if len(provider.Models) != 1 || provider.Models[0].Name != "gpt-5.5" || provider.Models[0].ContextWindow != 272000 {
 		t.Fatalf("provider models after refresh = %+v", provider.Models)
 	}
-	if provider.Models[0].OutputLimit != 64000 {
-		t.Fatalf("provider output limit after refresh = %d, want 64000", provider.Models[0].OutputLimit)
+	if provider.Models[0].OutputLimit != 0 {
+		t.Fatalf("provider output limit after refresh = %d, want omitted", provider.Models[0].OutputLimit)
+	}
+	if provider.PriceSource != "" {
+		t.Fatalf("codex price_source after refresh = %q, want omitted for subscription provider", provider.PriceSource)
 	}
 	if !provider.OmitMaxOutputTokens {
 		t.Fatalf("codex omit_max_output_tokens after refresh = false, want true")
@@ -838,6 +851,39 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	}
 	if provider.ResponsesWebSocket != nil {
 		t.Fatalf("codex responses_websocket after refresh = %v, want omitted runtime default", provider.ResponsesWebSocket)
+	}
+}
+
+func TestOpenAICodexProviderUsesListVisibleCodexModels(t *testing.T) {
+	catalog, err := decodeCodexModels([]byte(testCodexModelsCatalogJSON()))
+	if err != nil {
+		t.Fatalf("decodeCodexModels: %v", err)
+	}
+	provider, ok := openAICodexProvider(catalog)
+	if !ok {
+		t.Fatal("openAICodexProvider = false, want provider")
+	}
+	if len(provider.Models) != 1 {
+		t.Fatalf("provider models = %+v, want only one list-visible supported model", provider.Models)
+	}
+	model, ok := provider.Models["gpt-5.5"]
+	if !ok {
+		t.Fatalf("provider models = %+v, want gpt-5.5", provider.Models)
+	}
+	if model.Limit.Context != 272000 {
+		t.Fatalf("gpt-5.5 context = %d, want 272000", model.Limit.Context)
+	}
+	if model.Limit.Output != 0 {
+		t.Fatalf("gpt-5.5 output limit = %d, want omitted", model.Limit.Output)
+	}
+	if !model.Reasoning || len(model.ReasoningOptions) != 1 || !slices.Contains(model.ReasoningOptions[0].Values, "xhigh") {
+		t.Fatalf("gpt-5.5 reasoning = %v options=%+v, want Codex effort options", model.Reasoning, model.ReasoningOptions)
+	}
+	if _, ok := provider.Models["codex-auto-review"]; ok {
+		t.Fatalf("hidden codex-auto-review should not be exposed: %+v", provider.Models)
+	}
+	if _, ok := provider.Models["unsupported"]; ok {
+		t.Fatalf("unsupported model should not be exposed: %+v", provider.Models)
 	}
 }
 
@@ -932,6 +978,44 @@ func testSetupCatalogWithOpenAI() *modelsdev.Catalog {
 		},
 	}
 	return catalog
+}
+
+func testCodexModelsCatalogJSON() string {
+	return `{
+  "models": [
+    {
+      "slug": "gpt-5.5",
+      "display_name": "GPT-5.5",
+      "context_window": 272000,
+      "max_context_window": 272000,
+      "input_modalities": ["text", "image"],
+      "supported_reasoning_levels": [
+        {"effort": "low"},
+        {"effort": "medium"},
+        {"effort": "high"},
+        {"effort": "xhigh"}
+      ],
+      "visibility": "list",
+      "supported_in_api": true
+    },
+    {
+      "slug": "codex-auto-review",
+      "display_name": "Codex Auto Review",
+      "context_window": 272000,
+      "input_modalities": ["text", "image"],
+      "visibility": "hide",
+      "supported_in_api": true
+    },
+    {
+      "slug": "unsupported",
+      "display_name": "Unsupported",
+      "context_window": 128000,
+      "input_modalities": ["text"],
+      "visibility": "list",
+      "supported_in_api": false
+    }
+  ]
+}`
 }
 
 func testSetupCatalogWithGoogle() *modelsdev.Catalog {

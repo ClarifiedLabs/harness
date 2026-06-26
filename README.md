@@ -96,14 +96,15 @@ hand-written config without `"managed": true` is **manual** — the proxy never
 edits it and keeps its own `price` and `input_modalities` entries. Manual models
 must set `input_modalities` explicitly; use `["text", "image"]` for models that
 accept image attachments. A managed config may set `"price_source"` to resolve
-metadata from a different models.dev provider id; `setup` sets it to `openai`
-for `openai-codex` so codex models are priced at the normal OpenAI per-token
-rates. Codex configs also set `"omit_max_output_tokens": true` because that
-backend rejects the standard Responses parameter. The proxy uses the Responses
-WebSocket transport by default for `codex_oauth` Responses providers unless
-`responses_websocket:false` is set. Responses providers default to stateful
-continuation; if a backend rejects stored responses, harness disables stateful
-continuation for that agent and retries the request stateless.
+metadata from a different models.dev provider id. `openai-codex` is subscription
+backed, so setup writes no prices for it; its model list comes from the OpenAI
+Codex bundled catalog and `refresh-models` can update that catalog from
+`openai/codex`. Codex configs also set `"omit_max_output_tokens": true` because
+that backend rejects the standard Responses parameter. The proxy uses the
+Responses WebSocket transport by default for `codex_oauth` Responses providers
+unless `responses_websocket:false` is set. Responses providers default to
+stateful continuation; if a backend rejects stored responses, harness disables
+stateful continuation for that agent and retries the request stateless.
 
 While serving, the proxy also answers a read-only `GET /v1/usage` that aggregates
 token and cost totals per model target (including delegate child-agent spend),

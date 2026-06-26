@@ -143,15 +143,14 @@ func TestManagedProviderResolvesPriceFromModelsDevCatalog(t *testing.T) {
 }
 
 // TestManagedPriceSourceResolvesFromOtherProvider: a managed config whose
-// price_source names a different models.dev provider (the openai-codex case,
-// whose models are billed at OpenAI rates) resolves its prices from that
-// provider rather than its own name.
+// price_source names a different models.dev provider resolves its prices from
+// that provider rather than its own name.
 func TestManagedPriceSourceResolvesFromOtherProvider(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai-codex.json"), []byte(`{
-  "name": "openai-codex",
+	if err := os.WriteFile(filepath.Join(dir, "proxyai.json"), []byte(`{
+  "name": "proxyai",
   "api_type": "responses",
-  "base_url": "https://chatgpt.com/backend-api/codex",
+  "base_url": "https://api.proxy.test/v1",
   "managed": true,
   "price_source": "openai",
   "models": [{"name":"gpt-5-codex","context_window":400000}]
@@ -159,8 +158,37 @@ func TestManagedPriceSourceResolvesFromOtherProvider(t *testing.T) {
 		t.Fatalf("write provider config: %v", err)
 	}
 
-	// The price lives under the "openai" provider, not "openai-codex".
+	// The price lives under the "openai" provider, not "proxyai".
 	md := modelsDevCatalogWith("openai", "gpt-5-codex", llm.Price{Input: 1.25, Output: 10})
+	handler, err := NewHandler(Options{
+		ConfigDir:           dir,
+		Config:              Config{ProviderConfigs: []string{"proxyai.json"}},
+		ModelsDevCatalog:    md,
+		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
+		New:                 fixedUsageProvider(llm.Usage{InputTokens: 1000, OutputTokens: 2000}),
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	if got := catalogModelPrice(t, handler.Catalog(), "proxyai", "gpt-5-codex"); got != (llm.Price{Input: 1.25, Output: 10}) {
+		t.Fatalf("proxyai managed price = %+v, want {1.25,10} resolved from openai via price_source", got)
+	}
+}
+
+func TestOpenAICodexIgnoresPriceSource(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai-codex.json"), []byte(`{
+  "name": "openai-codex",
+  "api_type": "responses",
+  "base_url": "https://chatgpt.com/backend-api/codex",
+  "managed": true,
+  "price_source": "openai",
+  "models": [{"name":"gpt-5.5","context_window":272000,"price":{"input":99,"output":99}}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	md := modelsDevCatalogWith("openai", "gpt-5.5", llm.Price{Input: 5, Output: 30})
 	handler, err := NewHandler(Options{
 		ConfigDir:           dir,
 		Config:              Config{ProviderConfigs: []string{"openai-codex.json"}},
@@ -171,8 +199,13 @@ func TestManagedPriceSourceResolvesFromOtherProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	if got := catalogModelPrice(t, handler.Catalog(), "openai-codex", "gpt-5-codex"); got != (llm.Price{Input: 1.25, Output: 10}) {
-		t.Fatalf("codex managed price = %+v, want {1.25,10} resolved from openai via price_source", got)
+	if got := catalogModelPrice(t, handler.Catalog(), "openai-codex", "gpt-5.5"); got != (llm.Price{}) {
+		t.Fatalf("codex managed price = %+v, want zero subscription price", got)
+	}
+
+	usage := handler.priceUsage("openai-codex:gpt-5.5", llm.Usage{InputTokens: 1000, OutputTokens: 2000})
+	if usage.CostKnown {
+		t.Fatalf("codex usage cost known = true with cost %v, want unknown subscription price", usage.CostUSD)
 	}
 }
 

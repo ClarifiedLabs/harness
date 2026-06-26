@@ -262,10 +262,11 @@ Google's OpenAI-compatible Gemini endpoint. Vertex Google package variants are
 not auto-configured.
 
 The special `openai-codex` provider uses ChatGPT subscription auth instead of an
-API key and omits Responses `max_output_tokens` because the Codex backend
-rejects that parameter. The proxy also uses the Responses WebSocket transport by
-default for this provider, matching Codex's stateful continuation path while
-sending `store:false` to the ChatGPT backend. After setup, run:
+API key, exposes models from the OpenAI Codex catalog, and reports token usage
+without dollar pricing. It omits Responses `max_output_tokens` because the Codex
+backend rejects that parameter. The proxy also uses the Responses WebSocket
+transport by default for this provider, matching Codex's stateful continuation
+path while sending `store:false` to the ChatGPT backend. After setup, run:
 
 ```sh
 harness-model-proxy auth login openai-codex

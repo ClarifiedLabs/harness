@@ -42,10 +42,8 @@ type ProviderConfig struct {
 	Managed bool `json:"managed,omitempty"`
 	// PriceSource overrides which models.dev provider id a managed config's prices
 	// are resolved from. Empty means "this provider's own name". It exists so a
-	// provider whose models are billed at another provider's rates — e.g.
-	// openai-codex, whose models are OpenAI models billed at OpenAI per-token
-	// rates — can price from that provider ("openai") instead. Ignored for manual
-	// configs.
+	// provider whose models are billed at another provider's rates can price from
+	// that provider instead. Ignored for manual configs.
 	PriceSource string `json:"price_source,omitempty"`
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for compatible
 	// backends that reject the standard parameter, such as ChatGPT Codex.

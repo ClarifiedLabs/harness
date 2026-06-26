@@ -29,7 +29,10 @@ import (
 	"harness/internal/modelsdev"
 )
 
-const maxStreamRequestBytes = 64 << 20
+const (
+	maxStreamRequestBytes = 64 << 20
+	openAICodexProviderID = "openai-codex"
+)
 
 var universalReasoningProfiles = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
@@ -293,13 +296,23 @@ func (h *Handler) pricingInfo(md *modelsdev.Catalog, mdSourceDate time.Time) *pr
 func pricedProviders(providers []llm.ProviderConfig, md *modelsdev.Catalog) []llm.ProviderConfig {
 	out := make([]llm.ProviderConfig, len(providers))
 	for i, pc := range providers {
+		if pc.Name == openAICodexProviderID {
+			cp := pc
+			cp.Models = make([]llm.ModelEntry, len(pc.Models))
+			for j, entry := range pc.Models {
+				entry.Price = llm.Price{}
+				cp.Models[j] = entry
+			}
+			out[i] = cp
+			continue
+		}
 		if !pc.Managed {
 			out[i] = pc
 			continue
 		}
 		cp := pc
-		// Managed prices resolve from PriceSource when set (e.g. openai-codex
-		// prices from "openai"), otherwise from the provider's own name.
+		// Managed prices resolve from PriceSource when set, otherwise from the
+		// provider's own name.
 		priceProvider := pc.PriceSource
 		if priceProvider == "" {
 			priceProvider = pc.Name

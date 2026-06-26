@@ -43,6 +43,7 @@ type environment struct {
 	getenv            func(string) string
 	sigCh             chan os.Signal
 	modelsDevCatalog  func(context.Context) (*modelsdev.Catalog, error)
+	codexModelsData   func(context.Context) ([]byte, error)
 	terminalRows      func() int
 	modelsDevCacheTTL *time.Duration
 	now               func() time.Time
