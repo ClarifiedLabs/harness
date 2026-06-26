@@ -760,7 +760,7 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			// transcript. A no-op compaction that reset lastInput/appendBoundary
 			// would force a full-transcript re-estimate every model turn with zero
 			// progress (no-op churn).
-			if compUsage, changed, err := a.compact(ctx, sink, "auto"); err == nil && changed {
+			if compUsage, changed, err := a.compactTriggered(ctx, sink, "auto"); err == nil && changed {
 				total = add(total, compUsage)
 				// The old reported count no longer describes the compacted
 				// transcript and would re-trigger every model turn.
@@ -778,7 +778,7 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		modelReq = a.countModelRequestInput(ctx, modelReq)
 		lastContext = modelReq.estimate
 		if a.overThreshold(modelReq.estimate.Total) {
-			if compUsage, changed, err := a.compact(ctx, sink, "input-count"); err == nil && changed {
+			if compUsage, changed, err := a.compactTriggered(ctx, sink, "input-count"); err == nil && changed {
 				total = add(total, compUsage)
 				lastInput = 0
 				appendBoundary = 0
@@ -798,14 +798,16 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		appendBoundary = len(a.transcript)
 		res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)
 		if err != nil && !res.hasPartialOutput() {
-			if learned, ok := contextOverflowWindow(err); ok && a.observeContextWindow(learned) {
-				sink.Notice(fmt.Sprintf("[context window adjusted: provider reported %d tokens; retrying request]", learned))
-				if a.overThreshold(modelReq.estimate.Total) {
-					if compUsage, changed, cerr := a.compact(ctx, sink, "context-overflow"); cerr == nil && changed {
-						total = add(total, compUsage)
-						lastInput = 0
-						appendBoundary = 0
-					}
+			if learned, ok := contextOverflowWindow(err); ok {
+				if learned > 0 && a.observeContextWindow(learned) {
+					sink.Notice(fmt.Sprintf("[context window adjusted: provider reported %d tokens; retrying request]", learned))
+				} else {
+					sink.Notice("[context overflow: compacting and retrying request]")
+				}
+				if compUsage, changed, cerr := a.compactTriggered(ctx, sink, "context-overflow"); cerr == nil && changed {
+					total = add(total, compUsage)
+					lastInput = 0
+					appendBoundary = 0
 				}
 				requestContext = a.requestContext(extraContext, sink)
 				modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
@@ -1373,8 +1375,17 @@ func contextOverflowWindow(err error) (int, bool) {
 	if !errors.As(err, &apiErr) {
 		return 0, false
 	}
+	code := strings.ToLower(apiErr.Code)
 	msg := strings.ToLower(apiErr.Message)
-	if !strings.Contains(msg, "context") || !(strings.Contains(msg, "maximum") || strings.Contains(msg, "length") || strings.Contains(msg, "requested")) {
+	isOverflow := strings.Contains(code, "context_length") ||
+		strings.Contains(code, "context_window") ||
+		(strings.Contains(msg, "context") &&
+			(strings.Contains(msg, "exceed") ||
+				strings.Contains(msg, "maximum") ||
+				strings.Contains(msg, "length") ||
+				strings.Contains(msg, "requested") ||
+				strings.Contains(msg, "too long")))
+	if !isOverflow {
 		return 0, false
 	}
 	for _, re := range contextWindowPatterns {
@@ -1387,7 +1398,7 @@ func contextOverflowWindow(err error) (int, bool) {
 			return n, true
 		}
 	}
-	return 0, false
+	return 0, true
 }
 
 func (a *Agent) observeContextWindow(window int) bool {

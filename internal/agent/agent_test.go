@@ -312,6 +312,67 @@ func TestContextOverflowLearnsWindowAndRetries(t *testing.T) {
 	}
 }
 
+func TestContextOverflowWithoutWindowShrinksCurrentTurnAndRetries(t *testing.T) {
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{
+		name:     "big_read",
+		readOnly: true,
+		run: func(context.Context, json.RawMessage) (string, error) {
+			return strings.Repeat("x", 20_000), nil
+		},
+	})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "call_1", "big_read", `{}`)},
+			Stop:   llm.StopToolUse,
+			Usage:  llm.Usage{InputTokens: 100},
+		},
+		llmtest.Step{Err: &llm.APIError{
+			StatusCode: 400,
+			Code:       "context_length_exceeded",
+			Message:    "Your input exceeds the context window of this model. Please adjust your input and try again.",
+		}},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("recovered")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 100, OutputTokens: 5},
+		},
+	)
+	a := newAgent(fp, reg, Options{ContextWindow: 10_000})
+	sink := &recordSink{}
+
+	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if got := sink.text.String(); got != "recovered" {
+		t.Fatalf("text = %q, want recovered", got)
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("requests = %d, want 3", len(fp.Requests))
+	}
+	toolResultText := func(req llm.Request) string {
+		for _, m := range req.Messages {
+			for _, b := range m.Content {
+				if b.Kind == llm.BlockToolResult && b.ResultForID == "call_1" {
+					return b.ResultText
+				}
+			}
+		}
+		return ""
+	}
+	full := toolResultText(fp.Requests[1])
+	trimmed := toolResultText(fp.Requests[2])
+	if len(full) != 20_000 {
+		t.Fatalf("failed request tool result length = %d, want 20000", len(full))
+	}
+	if len(trimmed) >= len(full) || !strings.Contains(trimmed, retentionTrimMarker) {
+		t.Fatalf("retry tool result was not trimmed: len=%d text=%q", len(trimmed), trimmed)
+	}
+	if !slices.Contains(sink.notices, "[context overflow: compacting and retrying request]") {
+		t.Fatalf("notices = %+v, want context overflow retry notice", sink.notices)
+	}
+}
+
 func TestReasoningSummaryUsesDedicatedSinkOnly(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{reasoningSummary("Checked the repo."), textDelta("done")},

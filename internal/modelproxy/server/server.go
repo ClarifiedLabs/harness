@@ -631,7 +631,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	streamAttempt := func(request llm.Request) (bool, llm.ResponseState) {
+	streamAttempt := func(request llm.Request, anchorMessageCount int) (bool, llm.ResponseState) {
 		streamErr = ""
 		errAttrs = nil
 		sentEvents := false
@@ -671,11 +671,13 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				ev.Usage = &usage
 				if ev.ResponseID != "" && request.StoreResponse {
 					// The caller appends the assistant message from this response
-					// after the proxy sees the request, so the next delta starts
-					// after that future transcript item.
+					// after the proxy sees the full request, so the next delta
+					// starts after that future transcript item. request.Messages
+					// may be a trimmed continuation delta, so anchor against the
+					// caller's full message count instead.
 					finalState = llm.ResponseState{
 						PreviousResponseID: ev.ResponseID,
-						AnchorMessages:     len(request.Messages) + 1,
+						AnchorMessages:     anchorMessageCount + 1,
 					}
 				}
 			}
@@ -688,11 +690,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 		return false, finalState
 	}
-	retry, state := streamAttempt(req.Request)
+	retry, state := streamAttempt(req.Request, len(fullRequest.Messages))
 	if retry {
 		fullRequest.StoreResponse = false
 		fullRequest.PreviousResponseID = ""
-		retry, state = streamAttempt(fullRequest)
+		retry, state = streamAttempt(fullRequest, len(fullRequest.Messages))
 	}
 	if state.PreviousResponseID != "" {
 		h.saveContinuation(cacheKey, state)

@@ -69,7 +69,7 @@ func (a *Agent) MaybeCompact(ctx context.Context, lastInputTokens int, sink Even
 	if !a.overThreshold(lastInputTokens) {
 		return llm.Usage{}, false, nil
 	}
-	return a.compact(ctx, sink, "auto")
+	return a.compactTriggered(ctx, sink, "auto")
 }
 
 // Compact collapses every turn older than the last keepTurns into a single
@@ -91,6 +91,18 @@ func (a *Agent) Compact(ctx context.Context, sink EventSink) (llm.Usage, error) 
 // block) returns changed=false so the mid-loop caller does not churn its trigger
 // state every model turn.
 func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (llm.Usage, bool, error) {
+	return a.compactInternal(ctx, sink, trigger, false)
+}
+
+// compactTriggered is used when a measured request footprint or provider
+// overflow says the active context is too large. In a single long tool turn
+// there may be no older turn to summarize and the byte estimate can still be
+// optimistic, so force the current-turn shrink path instead of no-oping.
+func (a *Agent) compactTriggered(ctx context.Context, sink EventSink, trigger string) (llm.Usage, bool, error) {
+	return a.compactInternal(ctx, sink, trigger, true)
+}
+
+func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger string, forceCurrent bool) (llm.Usage, bool, error) {
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PreCompact) {
 		res := a.hooks.Run(ctx, hooks.PreCompact, trigger, hooks.Payload{"trigger": trigger})
 		for _, notice := range res.Notices {
@@ -114,7 +126,7 @@ func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (ll
 		// over budget, the summarize path can't help (there is nothing older to
 		// fold), so shrink the current transcript in place rather than ship an
 		// oversized request to the provider (never wedge, design §12).
-		if estimateTokens(a.transcript) <= a.compactBudget() {
+		if !forceCurrent && estimateTokens(a.transcript) <= a.compactBudget() {
 			return llm.Usage{}, false, nil
 		}
 		changed, err := a.degradeCurrent(sink)
@@ -624,6 +636,7 @@ func estimateTokens(msgs []llm.Message) int {
 				continue
 			}
 			bytes += len(b.Text) + len(b.ResultText) + len(b.ToolInput) + len(b.ToolName)
+			bytes += len(b.ReasoningID) + len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
 		}
 	}
 	return bytes/bytesPerToken + images*imageTokenEstimate
@@ -647,6 +660,7 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 			}
 			messageBytes += len(b.Kind) + len(b.Text) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolInput) +
 				len(b.ResultForID) + len(b.ResultText)
+			messageBytes += len(b.ReasoningID) + len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
 		}
 	}
 	messageBytes += len(llm.RequestContextText(req.RequestContext))

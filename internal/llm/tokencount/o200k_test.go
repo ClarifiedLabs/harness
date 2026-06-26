@@ -56,7 +56,7 @@ func TestEstimateOpenAIChatIncludesToolsAndContext(t *testing.T) {
 }
 
 func TestShouldEstimateOpenAIChat(t *testing.T) {
-	for _, name := range []string{"openai", "openrouter"} {
+	for _, name := range []string{"openai", "openrouter", "openai:gpt-5.5", "openrouter:openai/gpt-5.5", "openai-codex:gpt-5.5"} {
 		if !ShouldEstimateOpenAIChat(name) {
 			t.Fatalf("ShouldEstimateOpenAIChat(%q) = false, want true", name)
 		}

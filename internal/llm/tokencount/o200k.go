@@ -33,11 +33,14 @@ var o200k struct {
 // ShouldEstimateOpenAIChat reports whether the local OpenAI-compatible chat
 // estimator is a reasonable fallback for providerName.
 func ShouldEstimateOpenAIChat(providerName string) bool {
-	switch strings.ToLower(strings.TrimSpace(providerName)) {
+	name := strings.ToLower(strings.TrimSpace(providerName))
+	switch name {
 	case "openai", "openrouter":
 		return true
 	default:
-		return false
+		return strings.HasPrefix(name, "openai:") ||
+			strings.HasPrefix(name, "openrouter:") ||
+			strings.HasPrefix(name, "openai-codex:")
 	}
 }
 
@@ -75,6 +78,10 @@ func EstimateOpenAIChat(req llm.Request) int {
 				total += enc.CountText(string(b.ToolInput))
 				total += enc.CountText(b.ResultForID)
 				total += enc.CountText(b.ResultText)
+				total += enc.CountText(b.ReasoningID)
+				total += enc.CountText(b.ReasoningEncrypted)
+				total += enc.CountText(b.RedactedData)
+				total += enc.CountText(b.ThinkingSignature)
 			}
 		}
 	}

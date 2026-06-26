@@ -270,6 +270,11 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 			Stop:       llm.StopEndTurn,
 			ResponseID: "resp_2",
 		},
+		llmtest.Step{
+			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "third"}},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "resp_3",
+		},
 	)
 	handler, err := NewHandler(Options{
 		ConfigDir: dir,
@@ -344,6 +349,31 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	}
 	if got := fp.Requests[1].Messages[0].Content[0].Text; got != "again" {
 		t.Fatalf("second provider request message = %q, want again", got)
+	}
+
+	fullMessages = append(fullMessages,
+		llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "again answer"}}},
+		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "third"}}},
+	)
+	body, _ = json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:gpt-5.5",
+		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a", Messages: fullMessages},
+	})
+	resp, err = srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST third stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("third status = %d body=%s", resp.StatusCode, b)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	if len(fp.Requests) != 3 || fp.Requests[2].PreviousResponseID != "resp_2" || len(fp.Requests[2].Messages) != 1 {
+		t.Fatalf("third provider request = %+v", fp.Requests)
+	}
+	if got := fp.Requests[2].Messages[0].Content[0].Text; got != "third" {
+		t.Fatalf("third provider request message = %q, want third", got)
 	}
 }
 
