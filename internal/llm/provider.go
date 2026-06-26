@@ -62,7 +62,8 @@ type Request struct {
 
 	// PromptCacheKey is a stable per-session routing hint emitted as
 	// prompt_cache_key on OpenAI/Responses so a session's requests, which share a
-	// large system+tools prefix, keep landing on the same cache backend. Empty =
+	// large system+tools prefix, keep landing on the same cache backend without
+	// sharing provider-side continuation state with independent sessions. Empty =
 	// omitted; ignored by providers that don't support it.
 	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 
@@ -152,11 +153,11 @@ const (
 // normalization InputTokens means the same thing on both dialects: uncached
 // input billed at full rate (see design §6).
 type Usage struct {
-	InputTokens      int `json:"input_tokens"` // uncached input, billed at full rate
-	OutputTokens     int `json:"output_tokens"`
-	CacheReadTokens  int `json:"cache_read_tokens"`
-	CacheWriteTokens int `json:"cache_write_tokens"`
-	ReasoningTokens  int `json:"reasoning_tokens"`
+	InputTokens      int     `json:"input_tokens"` // uncached input, billed at full rate
+	OutputTokens     int     `json:"output_tokens"`
+	CacheReadTokens  int     `json:"cache_read_tokens"`
+	CacheWriteTokens int     `json:"cache_write_tokens"`
+	ReasoningTokens  int     `json:"reasoning_tokens"`
 	CostUSD          float64 `json:"cost_usd,omitempty"`
 	CostKnown        bool    `json:"cost_known,omitempty"`
 }

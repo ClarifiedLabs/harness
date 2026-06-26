@@ -448,7 +448,7 @@ func TestEncryptedReasoningPersistedAndReplayed(t *testing.T) {
 	}
 }
 
-func TestPromptCacheKeyStableAndPrefixSensitive(t *testing.T) {
+func TestPromptCacheKeyStablePerSessionAndPrefixSensitive(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn}, llmtest.Step{Stop: llm.StopEndTurn})
 	a := newAgent(fp, tools.Default(), Options{})
 
@@ -456,9 +456,14 @@ func TestPromptCacheKeyStableAndPrefixSensitive(t *testing.T) {
 	if key == "" {
 		t.Fatal("prompt cache key is empty")
 	}
+	prefix := a.promptCachePrefix()
+	if !strings.HasPrefix(key, prefix+"-") {
+		t.Fatalf("cache key = %q, want prefix %q plus session suffix", key, prefix)
+	}
 
 	// Every turn in a session reuses the same key, so requests with the same
-	// large system+tools prefix keep landing on the same cache backend.
+	// large system+tools prefix keep landing on the same cache backend without
+	// sharing proxy continuation state with other sessions.
 	for _, prompt := range []string{"one", "two"} {
 		if err := a.RunTurn(context.Background(), prompt, &recordSink{}); err != nil {
 			t.Fatalf("RunTurn %q: %v", prompt, err)
@@ -471,13 +476,17 @@ func TestPromptCacheKeyStableAndPrefixSensitive(t *testing.T) {
 		t.Fatalf("cache key changed across turns: %q vs %q", fp.Requests[0].PromptCacheKey, fp.Requests[1].PromptCacheKey)
 	}
 
+	if other := newAgent(fp, tools.Default(), Options{}).promptCacheKey(); other == key {
+		t.Fatalf("cache key reused across agent sessions: %q", key)
+	}
+
 	// A different advertised tool set is a different prefix, so the key must change.
 	subset, err := tools.Default().Subset([]string{"read_file"})
 	if err != nil {
 		t.Fatalf("Subset: %v", err)
 	}
-	if other := newAgent(fp, subset, Options{}).promptCacheKey(); other == key {
-		t.Fatalf("cache key did not change for a different tool set: %q", other)
+	if other := newAgent(fp, subset, Options{}).promptCachePrefix(); other == prefix {
+		t.Fatalf("cache prefix did not change for a different tool set: %q", other)
 	}
 }
 

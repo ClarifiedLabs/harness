@@ -284,9 +284,12 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
+	firstMessages := []llm.Message{
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}}},
+	}
 	body, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:gpt-5.5",
-		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a"},
+		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a", Messages: firstMessages},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 	if err != nil {
@@ -317,9 +320,14 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	if sawResponseID != "resp_1" {
 		t.Fatalf("response id = %q, want resp_1", sawResponseID)
 	}
+	fullMessages := append([]llm.Message(nil), firstMessages...)
+	fullMessages = append(fullMessages,
+		llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first answer"}}},
+		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "again"}}},
+	)
 	body, _ = json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:gpt-5.5",
-		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a"},
+		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a", Messages: fullMessages},
 	})
 	resp, err = srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 	if err != nil {
@@ -331,8 +339,85 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 		t.Fatalf("second status = %d body=%s", resp.StatusCode, b)
 	}
 	_, _ = io.ReadAll(resp.Body)
-	if len(fp.Requests) != 2 || fp.Requests[1].PreviousResponseID != "resp_1" {
+	if len(fp.Requests) != 2 || fp.Requests[1].PreviousResponseID != "resp_1" || len(fp.Requests[1].Messages) != 1 {
 		t.Fatalf("second provider request = %+v", fp.Requests)
+	}
+	if got := fp.Requests[1].Messages[0].Content[0].Text; got != "again" {
+		t.Fatalf("second provider request message = %q, want again", got)
+	}
+}
+
+func TestHandlerStreamDoesNotContinueShorterTranscriptWithSamePromptCacheKey(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "responses",
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "sk-test",
+  "models": [{"name":"gpt-5.5","context_window":128000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	fp := llmtest.New("responses",
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_1"},
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_2"},
+	)
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			return fp, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	firstMessages := []llm.Message{
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}}},
+	}
+	body, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:gpt-5.5",
+		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a", Messages: firstMessages},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST first stream: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first status = %d", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	freshMessages := []llm.Message{
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "fresh"}}},
+	}
+	body, _ = json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:gpt-5.5",
+		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a", Messages: freshMessages},
+	})
+	resp, err = srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST fresh stream: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fresh status = %d", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2: %+v", len(fp.Requests), fp.Requests)
+	}
+	if fp.Requests[1].PreviousResponseID != "" || len(fp.Requests[1].Messages) != 1 {
+		t.Fatalf("fresh provider request = prev %q messages %d, want no previous_response_id and one message", fp.Requests[1].PreviousResponseID, len(fp.Requests[1].Messages))
+	}
+	if got := fp.Requests[1].Messages[0].Content[0].Text; got != "fresh" {
+		t.Fatalf("fresh provider request message = %q, want fresh", got)
 	}
 }
 
@@ -374,7 +459,6 @@ func TestHandlerStreamRetriesPreviousResponseRejectionWithFullHistory(t *testing
 
 	firstMessages := []llm.Message{
 		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}}},
-		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first answer"}}},
 	}
 	body, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:gpt-5.5",
@@ -391,7 +475,10 @@ func TestHandlerStreamRetriesPreviousResponseRejectionWithFullHistory(t *testing
 	resp.Body.Close()
 
 	fullMessages := append([]llm.Message(nil), firstMessages...)
-	fullMessages = append(fullMessages, llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}})
+	fullMessages = append(fullMessages,
+		llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first answer"}}},
+		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}},
+	)
 	body, _ = json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:gpt-5.5",
 		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a", Messages: fullMessages},

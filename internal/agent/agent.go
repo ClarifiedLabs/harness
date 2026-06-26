@@ -6,6 +6,8 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -204,6 +206,7 @@ type Agent struct {
 	responsesStateful         bool
 	interactive               bool // 1h Anthropic cache breakpoint; see Options.Interactive
 	responseState             llm.ResponseState
+	promptCacheSessionID      string
 }
 
 // New constructs an Agent. A non-positive Options.MaxTurns means unlimited.
@@ -237,6 +240,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		showDiffs:                 opts.ShowDiffs,
 		responsesStateful:         opts.ResponsesStateful,
 		interactive:               opts.Interactive,
+		promptCacheSessionID:      newPromptCacheSessionID(),
 	}
 }
 
@@ -397,13 +401,19 @@ func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 	}
 }
 
-// promptCacheKey is a stable per-agent prompt-cache routing hint derived from
-// the system prompt and advertised tool names. It is identical across a session's
-// turns (and its prewarm, which shares the same prefix) so OpenAI/Responses keep
-// landing on the same cache backend, and it changes when the prefix changes
-// (agent or model switch). Empty system + no tools yields a stable empty-prefix
-// key, which is harmless. Ignored by providers that don't support the field.
+// promptCacheKey is a stable per-session prompt-cache routing hint. Its prefix
+// is derived from the system prompt and advertised tool names; the per-agent
+// suffix keeps proxy-managed Responses continuation state from leaking across
+// independent harness sessions that share the same prompt prefix.
 func (a *Agent) promptCacheKey() string {
+	prefix := a.promptCachePrefix()
+	if a.promptCacheSessionID == "" {
+		return prefix
+	}
+	return prefix + "-" + a.promptCacheSessionID
+}
+
+func (a *Agent) promptCachePrefix() string {
 	h := fnv.New64a()
 	h.Write([]byte(a.system))
 	for _, t := range a.toolSpecs {
@@ -411,6 +421,14 @@ func (a *Agent) promptCacheKey() string {
 		h.Write([]byte(t.Name))
 	}
 	return "harness-" + strconv.FormatUint(h.Sum64(), 16)
+}
+
+func newPromptCacheSessionID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return hex.EncodeToString(b[:])
+	}
+	return strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
 // PrewarmRequest builds a minimal request that writes the prompt cache — the

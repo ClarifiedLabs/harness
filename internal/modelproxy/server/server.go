@@ -670,9 +670,12 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				usage = h.priceUsage(targetID, usage)
 				ev.Usage = &usage
 				if ev.ResponseID != "" && request.StoreResponse {
+					// The caller appends the assistant message from this response
+					// after the proxy sees the request, so the next delta starts
+					// after that future transcript item.
 					finalState = llm.ResponseState{
 						PreviousResponseID: ev.ResponseID,
-						AnchorMessages:     len(request.Messages),
+						AnchorMessages:     len(request.Messages) + 1,
 					}
 				}
 			}
@@ -1133,7 +1136,7 @@ func (h *Handler) applyContinuation(key string, stateful bool, req llm.Request) 
 	}
 	req.StoreResponse = true
 	state := h.continuations[key]
-	if state.PreviousResponseID != "" && state.AnchorMessages >= 0 && state.AnchorMessages <= len(req.Messages) {
+	if state.PreviousResponseID != "" && state.AnchorMessages >= 0 && state.AnchorMessages < len(req.Messages) {
 		req.PreviousResponseID = state.PreviousResponseID
 		req.Messages = req.Messages[state.AnchorMessages:]
 	}

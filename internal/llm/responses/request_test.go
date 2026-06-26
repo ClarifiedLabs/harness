@@ -287,6 +287,28 @@ func TestBuildWebSocketRequestUsesResponseCreateEnvelope(t *testing.T) {
 	}
 }
 
+func TestBuildWebSocketRequestIDsDoNotDependOnPromptCacheKey(t *testing.T) {
+	p := New(Config{UseWebSocket: true})
+	first := basicRequest()
+	first.PromptCacheKey = "harness-first"
+	second := basicRequest()
+	second.PromptCacheKey = "harness-second"
+
+	w1 := p.buildWebSocketRequest(first)
+	w2 := p.buildWebSocketRequest(second)
+	for _, key := range []string{"session_id", "thread_id", "x-codex-installation-id", "x-codex-window-id"} {
+		if w1.ClientMetadata[key] == "" {
+			t.Fatalf("first client metadata missing %q: %+v", key, w1.ClientMetadata)
+		}
+		if w1.ClientMetadata[key] != w2.ClientMetadata[key] {
+			t.Fatalf("client metadata %q changed with prompt cache key: %q vs %q", key, w1.ClientMetadata[key], w2.ClientMetadata[key])
+		}
+	}
+	if w1.PromptCacheKey != "harness-first" || w2.PromptCacheKey != "harness-second" {
+		t.Fatalf("prompt cache keys not preserved in websocket bodies: %q %q", w1.PromptCacheKey, w2.PromptCacheKey)
+	}
+}
+
 func TestBuildRequestStreamAndStore(t *testing.T) {
 	w := buildRequest(basicRequest(), 0, 0)
 	if !w.Stream {

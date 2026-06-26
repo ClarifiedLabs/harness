@@ -2,8 +2,7 @@ package responses
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"harness/internal/llm"
@@ -153,7 +153,7 @@ func (p *Provider) buildWebSocketRequest(req llm.Request) wireWebSocketRequest {
 	// Codex's Responses WebSocket path carries continuation through
 	// previous_response_id, while the ChatGPT backend requires store:false.
 	w.Store = false
-	meta := webSocketClientMetadata(req)
+	meta := p.webSocketClientMetadata()
 	if p.wsTurnState != "" {
 		meta["x-codex-turn-state"] = p.wsTurnState
 	}
@@ -175,7 +175,7 @@ func (p *Provider) webSocketHeaders(req llm.Request) http.Header {
 	}
 	header.Set("OpenAI-Beta", responsesWebSocketBeta)
 	header.Set("User-Agent", "harness")
-	ids := webSocketIDs(req)
+	ids := p.wsIDs
 	header.Set("x-client-request-id", ids.threadID)
 	header.Set("session-id", ids.sessionID)
 	header.Set("thread-id", ids.threadID)
@@ -207,21 +207,17 @@ type wsIDs struct {
 	windowID       string
 }
 
-func webSocketIDs(req llm.Request) wsIDs {
-	seed := req.PromptCacheKey
-	if seed == "" {
-		seed = req.Model
-	}
+func randomWebSocketIDs() wsIDs {
 	return wsIDs{
-		installationID: uuidFromSeed("installation:" + seed),
-		sessionID:      uuidFromSeed("session:" + seed),
-		threadID:       uuidFromSeed("thread:" + seed),
-		windowID:       uuidFromSeed("window:" + seed),
+		installationID: randomUUID(),
+		sessionID:      randomUUID(),
+		threadID:       randomUUID(),
+		windowID:       randomUUID(),
 	}
 }
 
-func webSocketClientMetadata(req llm.Request) map[string]string {
-	ids := webSocketIDs(req)
+func (p *Provider) webSocketClientMetadata() map[string]string {
+	ids := p.wsIDs
 	meta := map[string]string{
 		"x-codex-installation-id":            ids.installationID,
 		"session_id":                         ids.sessionID,
@@ -275,10 +271,24 @@ func (p *Provider) captureWebSocketTurnState(data string) {
 	}
 }
 
-func uuidFromSeed(seed string) string {
-	sum := sha256.Sum256([]byte(seed))
-	hexed := hex.EncodeToString(sum[:16])
-	return hexed[0:8] + "-" + hexed[8:12] + "-" + hexed[12:16] + "-" + hexed[16:20] + "-" + hexed[20:32]
+var fallbackUUIDCounter atomic.Uint64
+
+func randomUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		now := uint64(time.Now().UnixNano())
+		n := fallbackUUIDCounter.Add(1)
+		return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+			uint32(now>>32),
+			uint16(now>>16),
+			uint16(now)&0x0fff|0x4000,
+			uint16(n)&0x3fff|0x8000,
+			n&0xffffffffffff,
+		)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func webSocketErrorEvent(data string) *llm.APIError {

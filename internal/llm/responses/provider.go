@@ -50,6 +50,7 @@ type Provider struct {
 	wsMu        sync.Mutex
 	wsConn      *ws.Conn
 	wsTurnState string
+	wsIDs       wsIDs
 }
 
 func New(cfg Config) *Provider {
@@ -64,6 +65,7 @@ func New(cfg Config) *Provider {
 		useWebSocket:        cfg.UseWebSocket,
 		client:              client,
 		sleep:               sleep,
+		wsIDs:               randomWebSocketIDs(),
 	}
 }
 
