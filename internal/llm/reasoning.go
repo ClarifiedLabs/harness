@@ -5,6 +5,10 @@ import "strings"
 // ReasoningConfig is the provider-neutral user request for model reasoning
 // controls. Empty fields mean the provider default is used.
 type ReasoningConfig struct {
+	// Profile is the portable harness -> model-proxy reasoning level. Empty and
+	// "default" mean provider default. Concrete providers should receive this
+	// only after the model proxy maps it to provider-specific controls.
+	Profile      string `json:"profile,omitempty"`
 	Effort       string `json:"effort,omitempty"`
 	Enabled      *bool  `json:"enabled,omitempty"`
 	BudgetTokens *int   `json:"budget_tokens,omitempty"`
@@ -13,7 +17,7 @@ type ReasoningConfig struct {
 
 // Empty reports whether no reasoning controls were requested.
 func (r ReasoningConfig) Empty() bool {
-	return strings.TrimSpace(r.Effort) == "" && r.Enabled == nil && r.BudgetTokens == nil && strings.TrimSpace(r.Summary) == ""
+	return strings.TrimSpace(r.Profile) == "" && strings.TrimSpace(r.Effort) == "" && r.Enabled == nil && r.BudgetTokens == nil && strings.TrimSpace(r.Summary) == ""
 }
 
 // ReasoningOption is one models.dev reasoning parameter supported by a model.

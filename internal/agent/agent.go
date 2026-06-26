@@ -926,8 +926,8 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		// Only fires for models with catalog pricing — Cost reports known=false
 		// otherwise, so an unpriced model silently has no cost ceiling.
 		if a.maxPromptCostUSD > 0 {
-			if cost, known := a.registry.Cost(a.model, total); known && cost >= a.maxPromptCostUSD {
-				sink.Notice(promptCostBudgetNotice(a.maxPromptCostUSD, cost))
+			if total.CostKnown && total.CostUSD >= a.maxPromptCostUSD {
+				sink.Notice(promptCostBudgetNotice(a.maxPromptCostUSD, total.CostUSD))
 				break
 			}
 		}
@@ -1588,6 +1588,8 @@ func add(a, b llm.Usage) llm.Usage {
 		CacheReadTokens:  a.CacheReadTokens + b.CacheReadTokens,
 		CacheWriteTokens: a.CacheWriteTokens + b.CacheWriteTokens,
 		ReasoningTokens:  a.ReasoningTokens + b.ReasoningTokens,
+		CostUSD:          a.CostUSD + b.CostUSD,
+		CostKnown:        a.CostKnown || b.CostKnown,
 	}
 }
 
@@ -1609,5 +1611,14 @@ func mergeUsage(acc, in llm.Usage) llm.Usage {
 		CacheReadTokens:  max(acc.CacheReadTokens, in.CacheReadTokens),
 		CacheWriteTokens: max(acc.CacheWriteTokens, in.CacheWriteTokens),
 		ReasoningTokens:  max(acc.ReasoningTokens, in.ReasoningTokens),
+		CostUSD:          mergeCost(acc, in),
+		CostKnown:        acc.CostKnown || in.CostKnown,
 	}
+}
+
+func mergeCost(acc, in llm.Usage) float64 {
+	if in.CostKnown {
+		return in.CostUSD
+	}
+	return acc.CostUSD
 }

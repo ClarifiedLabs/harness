@@ -634,10 +634,6 @@ func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string,
 	}
 	updated := r.now()
 	childDir := session.ChildSessionDir(parent.SessionPath, childID)
-	var cost float64
-	if launch.Registry != nil {
-		cost, _ = launch.Registry.Cost(launch.Model, usage.Usage)
-	}
 	if err := (session.Session{
 		Version:       session.Version,
 		Provider:      launch.ProviderName,
@@ -650,7 +646,7 @@ func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string,
 		Messages:      child.Transcript(),
 		ResponseState: child.ResponseState(),
 		Todos:         todos.Snapshot(),
-		Usage:         session.UsageTotals{Usage: usage.Usage, CostUSD: cost},
+		Usage:         session.UsageTotals{Usage: usage.Usage, CostUSD: usage.Usage.CostUSD},
 	}).Save(childDir); err != nil {
 		return err
 	}

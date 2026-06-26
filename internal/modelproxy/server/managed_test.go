@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,17 +34,13 @@ func modelsDevCatalogWith(providerID, modelID string, price llm.Price) *modelsde
 
 func catalogModelPrice(t *testing.T, c protocol.Catalog, providerID, modelID string) llm.Price {
 	t.Helper()
-	for _, p := range c.Providers {
-		if p.ID != providerID {
-			continue
-		}
-		for _, m := range p.Models {
-			if m.ID == modelID {
-				return m.Price
-			}
+	id := providerID + ":" + modelID
+	for _, target := range c.Targets {
+		if target.ID == id {
+			return target.Price
 		}
 	}
-	t.Fatalf("model %s/%s not found in catalog %+v", providerID, modelID, c.Providers)
+	t.Fatalf("target %s not found in catalog %+v", id, c.Targets)
 	return llm.Price{}
 }
 
@@ -51,9 +48,10 @@ func catalogModelPrice(t *testing.T, c protocol.Catalog, providerID, modelID str
 // the body, so the handler's deferred cost accounting runs.
 func streamOnce(t *testing.T, srv *httptest.Server, provider, model string) {
 	t.Helper()
+	targetID := provider + ":" + model
 	body, _ := json.Marshal(protocol.StreamRequest{
-		Provider: provider,
-		Request:  llm.Request{Model: model},
+		TargetID: targetID,
+		Request:  llm.Request{Model: targetID},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 	if err != nil {
@@ -78,7 +76,7 @@ func usageCost(t *testing.T, srv *httptest.Server, model string) (float64, bool)
 		t.Fatalf("decode usage: %v", err)
 	}
 	for _, m := range report.Models {
-		if m.Model == model {
+		if strings.HasSuffix(m.TargetID, ":"+model) {
 			return m.CostUSD, true
 		}
 	}

@@ -86,16 +86,16 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 		t.Fatalf("decode catalog: %v", err)
 	}
 	resp.Body.Close()
-	if len(catalog.Providers) != 1 || catalog.Providers[0].ID != "openrouter" {
-		t.Fatalf("catalog providers = %+v", catalog.Providers)
+	if len(catalog.Targets) != 1 || catalog.Targets[0].ID != "openrouter:openai/gpt-5.5" {
+		t.Fatalf("catalog targets = %+v", catalog.Targets)
 	}
-	if len(catalog.Providers[0].Models) != 1 || catalog.Providers[0].Models[0].OutputLimit != 64_000 || !slices.Equal(catalog.Providers[0].Models[0].InputModalities, []string{"text", "image"}) {
-		t.Fatalf("catalog models = %+v, want output limit 64000", catalog.Providers[0].Models)
+	if catalog.Targets[0].OutputLimit != 64_000 || !slices.Equal(catalog.Targets[0].InputModalities, []string{"text", "image"}) {
+		t.Fatalf("catalog target = %+v, want output limit 64000", catalog.Targets[0])
 	}
 
 	body, _ := json.Marshal(protocol.StreamRequest{
-		Provider: "openrouter",
-		Request:  llm.Request{Model: "openai/gpt-5.5"},
+		TargetID: "openrouter:openai/gpt-5.5",
+		Request:  llm.Request{Model: "openrouter:openai/gpt-5.5"},
 	})
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/v1/stream", bytes.NewReader(body))
 	if err != nil {
@@ -146,8 +146,8 @@ func TestHandlerInputTokens(t *testing.T) {
 	defer srv.Close()
 
 	body, _ := json.Marshal(protocol.TokenCountRequest{
-		Provider: "openai",
-		Request:  llm.Request{Model: "gpt-5.5"},
+		TargetID: "openai:gpt-5.5",
+		Request:  llm.Request{Model: "openai:gpt-5.5"},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/input_tokens", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -194,8 +194,8 @@ func TestHandlerInputTokensUnsupported(t *testing.T) {
 	defer srv.Close()
 
 	body, _ := json.Marshal(protocol.TokenCountRequest{
-		Provider: "openai",
-		Request:  llm.Request{Model: "gpt-5.5"},
+		TargetID: "openai:gpt-5.5",
+		Request:  llm.Request{Model: "openai:gpt-5.5"},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/input_tokens", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -246,7 +246,7 @@ func TestLoadConfigParsesModelsDevCacheTTL(t *testing.T) {
 	}
 }
 
-func TestHandlerStreamPassesResponseStateFields(t *testing.T) {
+func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
   "name": "openai",
@@ -258,11 +258,18 @@ func TestHandlerStreamPassesResponseStateFields(t *testing.T) {
 		t.Fatalf("write provider config: %v", err)
 	}
 
-	fp := llmtest.New("responses", llmtest.Step{
-		Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
-		Stop:       llm.StopEndTurn,
-		ResponseID: "resp_1",
-	})
+	fp := llmtest.New("responses",
+		llmtest.Step{
+			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "resp_1",
+		},
+		llmtest.Step{
+			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "again"}},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "resp_2",
+		},
+	)
 	handler, err := NewHandler(Options{
 		ConfigDir: dir,
 		Config:    Config{ProviderConfigs: []string{"openai.json"}},
@@ -277,8 +284,8 @@ func TestHandlerStreamPassesResponseStateFields(t *testing.T) {
 	defer srv.Close()
 
 	body, _ := json.Marshal(protocol.StreamRequest{
-		Provider: "openai",
-		Request:  llm.Request{Model: "gpt-5.5", StoreResponse: true, PreviousResponseID: "resp_0"},
+		TargetID: "openai:gpt-5.5",
+		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a"},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 	if err != nil {
@@ -289,7 +296,7 @@ func TestHandlerStreamPassesResponseStateFields(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status = %d body=%s", resp.StatusCode, b)
 	}
-	if len(fp.Requests) != 1 || !fp.Requests[0].StoreResponse || fp.Requests[0].PreviousResponseID != "resp_0" {
+	if len(fp.Requests) != 1 || !fp.Requests[0].StoreResponse || fp.Requests[0].PreviousResponseID != "" {
 		t.Fatalf("provider requests = %+v", fp.Requests)
 	}
 	var sawResponseID string
@@ -309,9 +316,26 @@ func TestHandlerStreamPassesResponseStateFields(t *testing.T) {
 	if sawResponseID != "resp_1" {
 		t.Fatalf("response id = %q, want resp_1", sawResponseID)
 	}
+	body, _ = json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:gpt-5.5",
+		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a"},
+	})
+	resp, err = srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST second stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("second status = %d body=%s", resp.StatusCode, b)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	if len(fp.Requests) != 2 || fp.Requests[1].PreviousResponseID != "resp_1" {
+		t.Fatalf("second provider request = %+v", fp.Requests)
+	}
 }
 
-func TestHandlerCatalogMarksResponsesStatefulCapability(t *testing.T) {
+func TestHandlerCatalogExposesTargetsOnly(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "providers.json"), []byte(`[
   {
@@ -361,24 +385,20 @@ func TestHandlerCatalogMarksResponsesStatefulCapability(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 
-	providers := map[string]protocol.Provider{}
-	for _, p := range handler.Catalog().Providers {
-		providers[p.ID] = p
+	targets := map[string]protocol.Target{}
+	for _, target := range handler.Catalog().Targets {
+		targets[target.ID] = target
 	}
-	if !providers["openai"].ResponsesStateful {
-		t.Fatalf("openai ResponsesStateful = false, want true")
-	}
-	if !providers["openai-codex"].ResponsesStateful {
-		t.Fatalf("openai-codex ResponsesStateful = false, want true")
-	}
-	if !providers["codex-compatible"].ResponsesStateful {
-		t.Fatalf("codex-compatible ResponsesStateful = false, want explicit true")
-	}
-	if providers["stateless-compatible"].ResponsesStateful {
-		t.Fatalf("stateless-compatible ResponsesStateful = true, want explicit false")
-	}
-	if providers["openrouter"].ResponsesStateful {
-		t.Fatalf("openrouter ResponsesStateful = true, want false")
+	for _, id := range []string{
+		"openai:gpt-5.5",
+		"openai-codex:gpt-5.5",
+		"codex-compatible:gpt-5.5",
+		"stateless-compatible:gpt-5.5",
+		"openrouter:openai/gpt-5.5",
+	} {
+		if _, ok := targets[id]; !ok {
+			t.Fatalf("target %q missing from catalog: %+v", id, handler.Catalog().Targets)
+		}
 	}
 }
 
@@ -430,8 +450,8 @@ func TestHandlerStreamOmitsMaxOutputTokensForCodexOAuth(t *testing.T) {
 	defer srv.Close()
 
 	body, _ := json.Marshal(protocol.StreamRequest{
-		Provider: "openai-codex",
-		Request:  llm.Request{Model: "gpt-5.5", PromptCacheKey: "session-a"},
+		TargetID: "openai-codex:gpt-5.5",
+		Request:  llm.Request{Model: "openai-codex:gpt-5.5", PromptCacheKey: "session-a"},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -502,8 +522,8 @@ func TestHandlerStreamResolvesProviderAuth(t *testing.T) {
 	defer srv.Close()
 
 	body, _ := json.Marshal(protocol.StreamRequest{
-		Provider: "oauth",
-		Request:  llm.Request{Model: "model"},
+		TargetID: "oauth:model",
+		Request:  llm.Request{Model: "oauth:model"},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -542,8 +562,8 @@ func TestHandlerRejectsUnknownModel(t *testing.T) {
 	defer srv.Close()
 
 	body, _ := json.Marshal(protocol.StreamRequest{
-		Provider: "openai",
-		Request:  llm.Request{Model: "missing"},
+		TargetID: "openai:missing",
+		Request:  llm.Request{Model: "openai:missing"},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -592,7 +612,7 @@ func TestHandlerRequiresExplicitProviderAndModel(t *testing.T) {
 		t.Fatalf("missing provider status = %d, want 400", resp.StatusCode)
 	}
 
-	body, _ = json.Marshal(protocol.StreamRequest{Provider: "openai"})
+	body, _ = json.Marshal(protocol.StreamRequest{TargetID: ""})
 	resp, err = srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST stream: %v", err)
@@ -641,8 +661,8 @@ func TestHandlerLogsStreamStats(t *testing.T) {
 	defer srv.Close()
 
 	body, _ := json.Marshal(protocol.StreamRequest{
-		Provider: "openai",
-		Request:  llm.Request{Model: "priced"},
+		TargetID: "openai:priced",
+		Request:  llm.Request{Model: "openai:priced"},
 	})
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/stream", bytes.NewReader(body))
 	if err != nil {
@@ -722,8 +742,8 @@ func TestHandlerUsageAggregatesKnownCostRequests(t *testing.T) {
 
 	stream := func(model string) {
 		body, _ := json.Marshal(protocol.StreamRequest{
-			Provider: "openai",
-			Request:  llm.Request{Model: model},
+			TargetID: "openai:" + model,
+			Request:  llm.Request{Model: "openai:" + model},
 		})
 		resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 		if err != nil {
@@ -756,8 +776,7 @@ func TestHandlerUsageAggregatesKnownCostRequests(t *testing.T) {
 	}
 	got := report.Models[0]
 	want := protocol.ModelUsage{
-		Provider:         "openai",
-		Model:            "priced",
+		TargetID:         "openai:priced",
 		Requests:         2,
 		InputTokens:      2000,
 		OutputTokens:     4000,
@@ -765,7 +784,7 @@ func TestHandlerUsageAggregatesKnownCostRequests(t *testing.T) {
 		CacheWriteTokens: 8000,
 		ReasoningTokens:  1000,
 	}
-	if got.Provider != want.Provider || got.Model != want.Model || got.Requests != want.Requests ||
+	if got.TargetID != want.TargetID || got.Requests != want.Requests ||
 		got.InputTokens != want.InputTokens || got.OutputTokens != want.OutputTokens ||
 		got.CacheReadTokens != want.CacheReadTokens || got.CacheWriteTokens != want.CacheWriteTokens ||
 		got.ReasoningTokens != want.ReasoningTokens {
@@ -937,8 +956,8 @@ func TestHandlerLogsStreamErrorDetails(t *testing.T) {
 	defer srv.Close()
 
 	body, _ := json.Marshal(protocol.StreamRequest{
-		Provider: "openai",
-		Request:  llm.Request{Model: "known"},
+		TargetID: "openai:known",
+		Request:  llm.Request{Model: "openai:known"},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 	if err != nil {

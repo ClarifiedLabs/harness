@@ -205,7 +205,7 @@ func TestUsageLineKnownModelShowsCost(t *testing.T) {
 	r.StartTurn()
 	r.TurnComplete(agent.TurnUsage{
 		ModelTurns: 3,
-		Usage:      llm.Usage{InputTokens: 12400, OutputTokens: 1800},
+		Usage:      llm.Usage{InputTokens: 12400, OutputTokens: 1800, CostUSD: 0.107, CostKnown: true},
 	})
 
 	got := errw.String()
@@ -419,12 +419,12 @@ func TestModelTurnCompleteShowsCostCheckpoints(t *testing.T) {
 	r.ModelTurnComplete(agent.ModelTurnUsage{
 		ModelTurn: 1,
 		Attempt:   1,
-		Usage:     llm.Usage{InputTokens: 100_000, OutputTokens: 50_000},
+		Usage:     llm.Usage{InputTokens: 100_000, OutputTokens: 50_000, CostUSD: 2, CostKnown: true},
 	})
 	r.ModelTurnComplete(agent.ModelTurnUsage{
 		ModelTurn: 2,
 		Attempt:   1,
-		Usage:     llm.Usage{InputTokens: 50_000},
+		Usage:     llm.Usage{InputTokens: 50_000, CostUSD: 0.5, CostKnown: true},
 	})
 
 	if out.Len() != 0 {
@@ -462,7 +462,7 @@ func TestModelTurnCompletePrintsCostBeforeToolUseProgress(t *testing.T) {
 	r.ModelTurnComplete(agent.ModelTurnUsage{
 		ModelTurn: 1,
 		Attempt:   1,
-		Usage:     llm.Usage{InputTokens: 100_000},
+		Usage:     llm.Usage{InputTokens: 100_000, CostUSD: 1, CostKnown: true},
 	})
 
 	if out.Len() != 0 {

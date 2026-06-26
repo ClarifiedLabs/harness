@@ -63,7 +63,7 @@ type AgentSummary struct {
 }
 
 // AgentSelection is the runtime agent bundle returned by App.SwitchAgent: the
-// new tool registry, fully reassembled system prompt, and provider/model runtime
+// new tool registry, fully reassembled system prompt, and model target runtime
 // for subsequent turns.
 type AgentSelection struct {
 	Name              string
@@ -204,7 +204,7 @@ type App struct {
 	SummaryWidth func() int
 
 	usage        session.UsageTotals            // cumulative aggregate across the session
-	usageByModel map[string]session.UsageTotals // per "provider/model" cumulative, for accurate per-model cost
+	usageByModel map[string]session.UsageTotals // per model target cumulative, for accurate per-model cost
 }
 
 // helpText lists the meta-commands (design §10).
@@ -219,7 +219,7 @@ const helpText = `commands:
   /image [opts]    attach an image to the next prompt, list, or clear
   /edit [draft]    open $VISUAL/$EDITOR (or vi) for a multi-line prompt
   /save [file]     force save (optionally elsewhere)
-  /model [model]   pick a configured provider/model, or switch directly
+  /model [target]  pick a configured model target, or switch directly
   /reasoning [cmd] list or set reasoning controls
   /effort [level]  list or set reasoning effort for the current model
   /agent [name]    list agents, or switch to agent
@@ -2073,7 +2073,7 @@ func (app *App) effortSummary() string {
 // defaultEffortLevels is offered when a model supports reasoning but the catalog
 // enumerates no fixed effort values, so the user still gets a menu instead of a
 // dead end. Free-text effort remains accepted for such models (r61).
-var defaultEffortLevels = []string{"minimal", "low", "medium", "high"}
+var defaultEffortLevels = []string{"none", "low", "medium", "high", "xhigh", "max"}
 
 // effortMenu returns the effort levels to present for a reasoning-capable model:
 // the catalog's values when it enumerates them, otherwise the suggested defaults
@@ -2195,7 +2195,7 @@ func (app *App) promptReasoningEffort(model string, reasoning llm.ReasoningConfi
 
 func PromptSaveDefaultModel(readLine func(string) (string, error), w io.Writer, provider, model string) (bool, error) {
 	for {
-		input, err := readLine(fmt.Sprintf("Save %s:%s as the default model? (y/N): ", provider, model))
+		input, err := readLine(fmt.Sprintf("Save %s as the default model? (y/N): ", modelDisplayName(provider, model)))
 		if err != nil {
 			return false, err
 		}
@@ -2210,6 +2210,13 @@ func PromptSaveDefaultModel(readLine func(string) (string, error), w io.Writer, 
 			fmt.Fprintln(w, `Please answer "yes" or "no".`)
 		}
 	}
+}
+
+func modelDisplayName(provider, model string) string {
+	if provider == "" || provider == model {
+		return model
+	}
+	return provider + ":" + model
 }
 
 func effortPromptCurrent(current string, valid bool) string {
@@ -2539,7 +2546,7 @@ func (app *App) applyAgentSwitch(name string) error {
 	fmt.Fprintln(app.Errw, ProviderLine(app.Provider, app.Model, app.currentRegistryModel(), app.Reasoning, app.Registry))
 	if oldProvider != app.Provider || oldModel != app.Model {
 		app.onModelChanged()
-		fmt.Fprintln(app.Errw, "[warning: provider/model changed; the new model may start without prompt cache, increasing token usage or cost]")
+		fmt.Fprintln(app.Errw, "[warning: model target changed; the new model may start without prompt cache, increasing token usage or cost]")
 	}
 	// The agent's tools/system (and possibly model/provider) changed, so re-warm
 	// the cache prefix in the background (r43).
@@ -2820,13 +2827,13 @@ func (app *App) SetUsageByModel(byModel map[string]session.UsageTotals) {
 	}
 }
 
-// usageKey is the "provider/model" key for the active model's usage bucket.
+// usageKey is the target key for the active model's usage bucket.
 func (app *App) usageKey() string {
 	model := app.RegistryModel
 	if model == "" {
 		model = app.Model
 	}
-	return app.Provider + "/" + model
+	return model
 }
 
 // addUsage folds one turn's usage into the session aggregate and the active
@@ -2836,14 +2843,7 @@ func (app *App) usageKey() string {
 // used both for cumulative accounting and to feed the renderer's per-turn line
 // so a mid-turn model switch is not mispriced against a stale model (r63).
 func (app *App) turnCost(u llm.Usage) (float64, bool) {
-	if app.Registry == nil {
-		return 0, false
-	}
-	model := app.RegistryModel
-	if model == "" {
-		model = app.Model
-	}
-	return app.Registry.Cost(model, u)
+	return u.CostUSD, u.CostKnown
 }
 
 func (app *App) addUsage(u agent.TurnUsage) {
@@ -3166,7 +3166,7 @@ func (app *App) usageSummary() string {
 
 // usageReport renders cumulative session usage under the given label. With at
 // most one model it is the single-line legacy format; with several it breaks
-// down per "provider/model" and always ends with the session-total cost.
+// down per model target and always ends with the session-total cost.
 func (app *App) usageReport(label string) string {
 	var b strings.Builder
 	if len(app.usageByModel) <= 1 {

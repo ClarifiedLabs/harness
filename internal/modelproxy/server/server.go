@@ -125,8 +125,7 @@ type Options struct {
 
 // usageKey identifies an aggregate usage bucket by provider and model.
 type usageKey struct {
-	provider string
-	model    string
+	targetID string
 }
 
 // catalogSnapshot is the immutable served state: a registry used to price
@@ -136,6 +135,13 @@ type usageKey struct {
 type catalogSnapshot struct {
 	registry *llm.Registry
 	catalog  protocol.Catalog
+	targets  map[string]resolvedTarget
+}
+
+type resolvedTarget struct {
+	targetID string
+	pc       llm.ProviderConfig
+	entry    llm.ModelEntry
 }
 
 type Handler struct {
@@ -158,6 +164,10 @@ type Handler struct {
 
 	providerMu    sync.Mutex
 	providerCache map[string]llm.Provider
+
+	continuationMu       sync.Mutex
+	continuations        map[string]llm.ResponseState
+	disabledContinuation map[string]bool
 }
 
 func NewHandler(opts Options) (*Handler, error) {
@@ -204,6 +214,8 @@ func NewHandler(opts Options) (*Handler, error) {
 		newProvider:          newProvider,
 		usage:                map[usageKey]*protocol.ModelUsage{},
 		providerCache:        map[string]llm.Provider{},
+		continuations:        map[string]llm.ResponseState{},
+		disabledContinuation: map[string]bool{},
 	}
 	snapshot, err := h.buildSnapshot(opts.ModelsDevCatalog, opts.ModelsDevSourceDate)
 	if err != nil {
@@ -222,12 +234,12 @@ func (h *Handler) buildSnapshot(md *modelsdev.Catalog, mdSourceDate time.Time) (
 	priced := pricedProviders(h.providers, md)
 	registry := llm.RegistryFromProviderConfigs(priced)
 	registry.SetDefaultContextWindow(h.defaultContextWindow)
-	catalog, err := catalogFromProviderConfigs(priced)
+	catalog, targets, err := catalogFromProviderConfigs(priced)
 	if err != nil {
 		return nil, err
 	}
 	catalog.Pricing = h.pricingInfo(md, mdSourceDate)
-	return &catalogSnapshot{registry: registry, catalog: catalog}, nil
+	return &catalogSnapshot{registry: registry, catalog: catalog, targets: targets}, nil
 }
 
 // UpdateModelsDevCatalog rebuilds the served snapshot with prices resolved from
@@ -383,13 +395,13 @@ func (h *Handler) handleUsage(w http.ResponseWriter, _ *http.Request) {
 // recordUsage accumulates one priced request into the per-model usage map. It is
 // called only for requests whose model has a known price, so every bucket has a
 // meaningful CostUSD.
-func (h *Handler) recordUsage(provider, model string, u llm.Usage, cost float64) {
-	key := usageKey{provider: provider, model: model}
+func (h *Handler) recordUsage(targetID string, u llm.Usage, cost float64) {
+	key := usageKey{targetID: targetID}
 	h.usageMu.Lock()
 	defer h.usageMu.Unlock()
 	acc := h.usage[key]
 	if acc == nil {
-		acc = &protocol.ModelUsage{Provider: provider, Model: model}
+		acc = &protocol.ModelUsage{TargetID: targetID}
 		h.usage[key] = acc
 	}
 	acc.Requests++
@@ -411,10 +423,7 @@ func (h *Handler) usageSnapshot() protocol.UsageReport {
 	}
 	h.usageMu.Unlock()
 	sort.Slice(report.Models, func(i, j int) bool {
-		if report.Models[i].Provider != report.Models[j].Provider {
-			return report.Models[i].Provider < report.Models[j].Provider
-		}
-		return report.Models[i].Model < report.Models[j].Model
+		return report.Models[i].TargetID < report.Models[j].TargetID
 	})
 	return report
 }
@@ -431,16 +440,18 @@ func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "malformed input token request"})
 		return
 	}
-	providerID := strings.TrimSpace(req.Provider)
-	if providerID == "" {
-		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "provider is required"})
+	targetID := strings.TrimSpace(req.TargetID)
+	if targetID == "" {
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "target_id is required"})
 		return
 	}
-	if req.Request.Model == "" {
-		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "model is required"})
+	target, err := h.resolveTarget(targetID)
+	if err != nil {
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
 		return
 	}
-	opts, err := h.runtimeOptions(r.Context(), providerID, req.Request.Model)
+	req.Request.Model = target.entry.Name
+	opts, err := h.runtimeOptionsForTarget(r.Context(), target)
 	if err != nil {
 		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
 		return
@@ -484,6 +495,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	requestID := h.nextRequestID.Add(1)
 	cw := &countingResponseWriter{ResponseWriter: w}
 	var (
+		targetID   string
 		providerID string
 		apiType    string
 		model      string
@@ -500,6 +512,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			"request_id", requestID,
 			"requester", requesterName(r),
 			"remote_addr", r.RemoteAddr,
+			"target_id", targetID,
 			"provider", providerID,
 			"api_type", apiType,
 			"model", model,
@@ -516,13 +529,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			"cache_write_tokens", usage.CacheWriteTokens,
 			"reasoning_tokens", usage.ReasoningTokens,
 		}
-		if providerID != "" && model != "" {
-			if snapshot := h.snapshot.Load(); snapshot != nil && snapshot.registry != nil {
-				if cost, ok := snapshot.registry.Cost(providerID+":"+model, usage); ok {
-					attrs = append(attrs, "cost_usd", cost)
-					h.recordUsage(providerID, model, usage, cost)
-				}
-			}
+		if targetID != "" && usage.CostKnown {
+			attrs = append(attrs, "cost_usd", usage.CostUSD)
+			h.recordUsage(targetID, usage, usage.CostUSD)
 		}
 		if streamErr != "" {
 			attrs = append(attrs, "err", streamErr)
@@ -550,27 +559,34 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "malformed stream request"})
 		return
 	}
-	providerID = strings.TrimSpace(req.Provider)
-	model = req.Request.Model
-	if providerID == "" {
-		streamErr = "provider is required"
-		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "provider is required"})
+	targetID = strings.TrimSpace(req.TargetID)
+	if targetID == "" {
+		streamErr = "target_id is required"
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "target_id is required"})
 		return
 	}
-	if model == "" {
-		streamErr = "model is required"
-		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "model is required"})
+	target, err := h.resolveTarget(targetID)
+	if err != nil {
+		streamErr = err.Error()
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
 		return
 	}
-
-	opts, err := h.runtimeOptions(r.Context(), providerID, req.Request.Model)
+	targetID = target.targetID
+	providerID = target.pc.Name
+	model = target.entry.Name
+	req.Request.Model = model
+	req.Request.Reasoning = h.reasoningForTarget(target, req.ReasoningProfile, req.Request.Reasoning)
+	opts, err := h.runtimeOptionsForTarget(r.Context(), target)
 	if err != nil {
 		streamErr = err.Error()
 		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
 		return
 	}
 	apiType = opts.Provider
-	provider, err := h.streamProvider(opts, providerID, req.Request.PromptCacheKey)
+	stateful := providerResponsesStateful(target.pc)
+	cacheKey := h.continuationKey(targetID, req.Request.PromptCacheKey)
+	req.Request = h.applyContinuation(cacheKey, stateful, req.Request)
+	provider, err := h.streamProvider(opts, targetID, req.Request.PromptCacheKey)
 	if err != nil {
 		streamErr = err.Error()
 		writeError(cw, http.StatusBadRequest, protocol.ErrorFrom(err))
@@ -587,30 +603,67 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	for ev, err := range provider.Stream(r.Context(), req.Request) {
-		if err != nil {
-			streamErr = err.Error()
-			errAttrs = streamErrorLogAttrs(err)
-			_ = enc.Encode(protocol.StreamEnvelope{Error: protocol.ErrorFrom(err)})
+	streamAttempt := func(request llm.Request) (bool, llm.ResponseState) {
+		sentEvents := false
+		var finalState llm.ResponseState
+		for ev, err := range provider.Stream(r.Context(), request) {
+			if err != nil {
+				streamErr = err.Error()
+				errAttrs = streamErrorLogAttrs(err)
+				if !sentEvents && request.PreviousResponseID != "" && previousResponseRejected(err) {
+					h.resetContinuation(cacheKey)
+					return true, llm.ResponseState{}
+				}
+				if !sentEvents && request.StoreResponse && storeResponseRejected(err) {
+					h.disableContinuation(cacheKey)
+					return true, llm.ResponseState{}
+				}
+				_ = enc.Encode(protocol.StreamEnvelope{Error: protocol.ErrorFrom(err)})
+				flush()
+				return false, llm.ResponseState{}
+			}
+			sentEvents = true
+			events++
+			if ev.Usage != nil {
+				usage = mergeUsage(usage, *ev.Usage)
+			}
+			if ev.Kind == llm.EventToolCallDone {
+				toolCalls++
+			}
+			if ev.Kind == llm.EventDone {
+				stop = ev.StopReason
+				if ev.Usage != nil {
+					usage = mergeUsage(usage, *ev.Usage)
+				}
+				usage = h.priceUsage(targetID, usage)
+				ev.Usage = &usage
+				if ev.ResponseID != "" && request.StoreResponse {
+					finalState = llm.ResponseState{
+						PreviousResponseID: ev.ResponseID,
+						AnchorMessages:     len(request.Messages),
+					}
+				}
+			}
+			event := ev
+			if err := enc.Encode(protocol.StreamEnvelope{Event: &event}); err != nil {
+				streamErr = err.Error()
+				return false, llm.ResponseState{}
+			}
 			flush()
-			return
 		}
-		events++
-		if ev.Usage != nil {
-			usage = mergeUsage(usage, *ev.Usage)
-		}
-		if ev.Kind == llm.EventToolCallDone {
-			toolCalls++
-		}
-		if ev.Kind == llm.EventDone {
-			stop = ev.StopReason
-		}
-		event := ev
-		if err := enc.Encode(protocol.StreamEnvelope{Event: &event}); err != nil {
-			streamErr = err.Error()
-			return
-		}
-		flush()
+		return false, finalState
+	}
+	retry, state := streamAttempt(req.Request)
+	if retry {
+		req.Request.StoreResponse = false
+		req.Request.PreviousResponseID = ""
+		retry, state = streamAttempt(req.Request)
+	}
+	if state.PreviousResponseID != "" {
+		h.saveContinuation(cacheKey, state)
+	}
+	if retry {
+		return
 	}
 }
 
@@ -740,18 +793,16 @@ func mergeUsage(acc, in llm.Usage) llm.Usage {
 	acc.CacheReadTokens = max(acc.CacheReadTokens, in.CacheReadTokens)
 	acc.CacheWriteTokens = max(acc.CacheWriteTokens, in.CacheWriteTokens)
 	acc.ReasoningTokens = max(acc.ReasoningTokens, in.ReasoningTokens)
+	if in.CostKnown {
+		acc.CostUSD = in.CostUSD
+		acc.CostKnown = true
+	}
 	return acc
 }
 
-func (h *Handler) runtimeOptions(ctx context.Context, providerID, model string) (factory.Options, error) {
-	pc, ok := providerConfigByName(h.providers, providerID)
-	if !ok {
-		return factory.Options{}, fmt.Errorf("provider %q is not configured", providerID)
-	}
-	entry, ok := providerConfigModel(pc, model)
-	if !ok {
-		return factory.Options{}, fmt.Errorf("provider %q has no configured model %q", providerID, model)
-	}
+func (h *Handler) runtimeOptionsForTarget(ctx context.Context, target resolvedTarget) (factory.Options, error) {
+	pc := target.pc
+	entry := target.entry
 	apiType := pc.APIType
 	if apiType == "" {
 		apiType = pc.Name
@@ -785,7 +836,7 @@ func (h *Handler) runtimeOptions(ctx context.Context, providerID, model string) 
 	return factory.Options{
 		Provider:            apiType,
 		ProviderName:        pc.Name,
-		Model:               model,
+		Model:               entry.Name,
 		BaseURL:             pc.BaseURL,
 		APIKey:              apiKey,
 		AuthHeaders:         authHeaders,
@@ -794,6 +845,216 @@ func (h *Handler) runtimeOptions(ctx context.Context, providerID, model string) 
 		OmitMaxOutputTokens: providerOmitMaxOutputTokens(pc),
 		ResponsesWebSocket:  providerResponsesWebSocket(pc),
 	}, nil
+}
+
+func (h *Handler) resolveTarget(id string) (resolvedTarget, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return resolvedTarget{}, fmt.Errorf("target_id is required")
+	}
+	snapshot := h.snapshot.Load()
+	if snapshot == nil {
+		return resolvedTarget{}, fmt.Errorf("model proxy catalog is unavailable")
+	}
+	if target, ok := snapshot.targets[id]; ok {
+		return target, nil
+	}
+	return resolvedTarget{}, fmt.Errorf("target %q is not available from the model proxy", id)
+}
+
+func (h *Handler) priceUsage(targetID string, usage llm.Usage) llm.Usage {
+	snapshot := h.snapshot.Load()
+	if snapshot == nil || snapshot.registry == nil {
+		return usage
+	}
+	cost, ok := snapshot.registry.Cost(targetID, usage)
+	if !ok {
+		return usage
+	}
+	usage.CostUSD = cost
+	usage.CostKnown = true
+	return usage
+}
+
+func (h *Handler) reasoningForTarget(target resolvedTarget, profile string, requested llm.ReasoningConfig) llm.ReasoningConfig {
+	if profile == "" {
+		profile = requested.Profile
+	}
+	profile = normalizeReasoningProfile(profile)
+	if profile == "" || profile == "default" {
+		return llm.ReasoningConfig{Summary: requested.Summary}
+	}
+	info := modelEntryReasoning(target.entry)
+	if info == nil || !info.Supported {
+		return llm.ReasoningConfig{Summary: requested.Summary}
+	}
+	mode := reasoningModeForProviderConfig(target.pc)
+	out := llm.ReasoningConfig{Profile: profile, Summary: requested.Summary}
+	switch profile {
+	case "none":
+		disabled := false
+		out.Enabled = &disabled
+	case "low", "medium", "high", "xhigh", "max":
+		out.Effort = mappedReasoningEffort(info, profile)
+		if out.Effort == "" && profile != "none" {
+			out.Effort = profile
+		}
+	}
+	if mode == "responses" {
+		out.Enabled = nil
+	}
+	if mode == "openai" && out.Enabled != nil {
+		out.Enabled = nil
+	}
+	if profile == "none" && out.Enabled == nil {
+		return llm.ReasoningConfig{}
+	}
+	return out
+}
+
+func normalizeReasoningProfile(profile string) string {
+	profile = strings.ToLower(strings.TrimSpace(profile))
+	switch profile {
+	case "", "default", "provider-default":
+		return "default"
+	case "off", "false", "disabled", "disable":
+		return "none"
+	default:
+		return profile
+	}
+}
+
+func mappedReasoningEffort(info *llm.ReasoningInfo, profile string) string {
+	values, ok := info.EffortValues()
+	if !ok || len(values) == 0 {
+		if profile == "max" {
+			return "high"
+		}
+		if profile == "xhigh" {
+			return "high"
+		}
+		return profile
+	}
+	has := func(v string) string {
+		for _, value := range values {
+			if strings.EqualFold(strings.TrimSpace(value), v) {
+				return strings.ToLower(strings.TrimSpace(value))
+			}
+		}
+		return ""
+	}
+	if got := has(profile); got != "" {
+		return got
+	}
+	switch profile {
+	case "xhigh":
+		return has("high")
+	case "max":
+		for i := len(values) - 1; i >= 0; i-- {
+			if v := strings.ToLower(strings.TrimSpace(values[i])); v != "" && v != "none" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+func reasoningModeForProviderConfig(pc llm.ProviderConfig) string {
+	apiType := strings.ToLower(strings.TrimSpace(pc.APIType))
+	if apiType == "" {
+		apiType = strings.ToLower(strings.TrimSpace(pc.Name))
+	}
+	if apiType == "anthropic" || apiType == "responses" {
+		return apiType
+	}
+	if strings.EqualFold(pc.Name, "openrouter") || strings.Contains(strings.ToLower(pc.BaseURL), "openrouter.ai") {
+		return "openrouter"
+	}
+	return "openai"
+}
+
+func (h *Handler) continuationKey(targetID, promptCacheKey string) string {
+	if strings.TrimSpace(promptCacheKey) == "" {
+		return ""
+	}
+	return targetID + "\x00" + promptCacheKey
+}
+
+func (h *Handler) applyContinuation(key string, stateful bool, req llm.Request) llm.Request {
+	if key == "" || !stateful {
+		req.StoreResponse = false
+		req.PreviousResponseID = ""
+		return req
+	}
+	h.continuationMu.Lock()
+	defer h.continuationMu.Unlock()
+	if h.disabledContinuation[key] {
+		req.StoreResponse = false
+		req.PreviousResponseID = ""
+		return req
+	}
+	req.StoreResponse = true
+	state := h.continuations[key]
+	if state.PreviousResponseID != "" && state.AnchorMessages >= 0 && state.AnchorMessages <= len(req.Messages) {
+		req.PreviousResponseID = state.PreviousResponseID
+		req.Messages = req.Messages[state.AnchorMessages:]
+	}
+	return req
+}
+
+func (h *Handler) saveContinuation(key string, state llm.ResponseState) {
+	if key == "" || state.PreviousResponseID == "" {
+		return
+	}
+	h.continuationMu.Lock()
+	h.continuations[key] = state
+	h.continuationMu.Unlock()
+}
+
+func (h *Handler) resetContinuation(key string) {
+	if key == "" {
+		return
+	}
+	h.continuationMu.Lock()
+	delete(h.continuations, key)
+	h.continuationMu.Unlock()
+}
+
+func (h *Handler) disableContinuation(key string) {
+	if key == "" {
+		return
+	}
+	h.continuationMu.Lock()
+	h.disabledContinuation[key] = true
+	delete(h.continuations, key)
+	h.continuationMu.Unlock()
+}
+
+func previousResponseRejected(err error) bool {
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	code := strings.ToLower(apiErr.Code)
+	if strings.Contains(code, "previous_response") {
+		return true
+	}
+	msg := strings.ToLower(apiErr.Message)
+	return strings.Contains(msg, "previous_response_id") || strings.Contains(msg, "previous response")
+}
+
+func storeResponseRejected(err error) bool {
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	code := strings.ToLower(apiErr.Code)
+	if strings.Contains(code, "store") {
+		return true
+	}
+	msg := strings.ToLower(apiErr.Message)
+	return strings.Contains(msg, "store") &&
+		(strings.Contains(msg, "false") || strings.Contains(msg, "unsupported") || strings.Contains(msg, "not supported"))
 }
 
 func providerOmitMaxOutputTokens(pc llm.ProviderConfig) bool {
@@ -874,43 +1135,54 @@ func DefaultConfigDir(getenv func(string) string) string {
 	return filepath.Join(os.TempDir(), "harness-model-proxy-config")
 }
 
-func catalogFromProviderConfigs(providers []llm.ProviderConfig) (protocol.Catalog, error) {
-	out := protocol.Catalog{
-		Providers: make([]protocol.Provider, 0, len(providers)),
+func catalogFromProviderConfigs(providers []llm.ProviderConfig) (protocol.Catalog, map[string]resolvedTarget, error) {
+	out := protocol.Catalog{}
+	modelCounts := map[string]int{}
+	for _, pc := range providers {
+		for _, entry := range pc.Models {
+			if entry.Name != "" {
+				modelCounts[entry.Name]++
+			}
+		}
 	}
+	targets := map[string]resolvedTarget{}
 	for _, pc := range providers {
 		if pc.Name == "" {
 			continue
-		}
-		p := protocol.Provider{
-			ID:                pc.Name,
-			Name:              pc.Name,
-			APIType:           pc.APIType,
-			ResponsesStateful: providerResponsesStateful(pc),
-			Models:            make([]protocol.Model, 0, len(pc.Models)),
 		}
 		for _, entry := range pc.Models {
 			if entry.Name == "" {
 				continue
 			}
-			p.Models = append(p.Models, protocol.Model{
-				ID:              entry.Name,
-				Name:            entry.Name,
+			id := pc.Name + ":" + entry.Name
+			aliases := []string{id}
+			if modelCounts[entry.Name] == 1 {
+				aliases = append(aliases, entry.Name)
+			}
+			target := protocol.Target{
+				ID:              id,
+				Aliases:         aliases,
+				DisplayName:     entry.Name,
+				ProviderLabel:   pc.Name,
+				ModelLabel:      entry.Name,
 				ContextWindow:   entry.ContextWindow,
 				OutputLimit:     entry.OutputLimit,
 				InputModalities: append([]string(nil), entry.InputModalities...),
 				Price:           entry.Price,
-				Reasoning:       modelEntryReasoning(entry),
-			})
-		}
-		if len(p.Models) > 0 {
-			out.Providers = append(out.Providers, p)
+				Reasoning:       targetReasoningProfiles(entry),
+			}
+			out.Targets = append(out.Targets, target)
+			rt := resolvedTarget{targetID: id, pc: pc, entry: entry}
+			targets[id] = rt
+			for _, alias := range aliases {
+				targets[alias] = rt
+			}
 		}
 	}
-	if len(out.Providers) == 0 {
-		return protocol.Catalog{}, fmt.Errorf("model proxy: no configured models")
+	if len(out.Targets) == 0 {
+		return protocol.Catalog{}, nil, fmt.Errorf("model proxy: no configured models")
 	}
-	return out, nil
+	return out, targets, nil
 }
 
 func providerResponsesStateful(pc llm.ProviderConfig) bool {
@@ -963,6 +1235,15 @@ func modelEntryReasoning(m llm.ModelEntry) *llm.ReasoningInfo {
 		Supported: supported,
 		Options:   append([]llm.ReasoningOption(nil), m.ReasoningOptions...),
 	}).Clone()
+}
+
+func targetReasoningProfiles(m llm.ModelEntry) *protocol.ReasoningProfiles {
+	info := modelEntryReasoning(m)
+	if info == nil || !info.Supported {
+		return nil
+	}
+	profiles := []string{"none", "low", "medium", "high", "xhigh", "max"}
+	return &protocol.ReasoningProfiles{Supported: true, Profiles: profiles}
 }
 
 func providerAPIKeyEnv(provider string, getenv func(string) string) string {

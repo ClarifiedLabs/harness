@@ -262,14 +262,11 @@ func (r *Renderer) ModelTurnComplete(usage agent.ModelTurnUsage) {
 
 func (r *Renderer) writeModelTurnComplete(usage agent.ModelTurnUsage) string {
 	defer r.flushToolUseStarts()
-	if r.registry == nil {
+	if !usage.Usage.CostKnown {
+		r.maybeWarnNoPrice()
 		return ""
 	}
-	r.maybeWarnNoPrice()
-	cost, known := r.registry.Cost(r.model, usage.Usage)
-	if !known {
-		return ""
-	}
+	cost := usage.Usage.CostUSD
 	r.activeModelCost += cost
 	line := modelTurnCostLine(usage, cost, r.activeModelCost, r.cumCost+r.activeModelCost)
 	r.dimLine(line)
@@ -342,9 +339,9 @@ func (r *Renderer) TurnComplete(usage agent.TurnUsage) {
 	// Accumulate session totals for the cumulative readout. The App prices the
 	// turn against its own model and forwards it via SetTurnCost so a mid-turn
 	// model switch is not mispriced against the renderer's model (r63).
-	cost, costKnown := r.turnCost, r.turnCostKnown
-	if !r.turnCostSet && r.registry != nil {
-		cost, costKnown = r.registry.Cost(r.model, usage.Usage)
+	cost, costKnown := usage.Usage.CostUSD, usage.Usage.CostKnown
+	if r.turnCostSet {
+		cost, costKnown = r.turnCost, r.turnCostKnown
 	}
 	r.cumInput += usage.Usage.InputTokens
 	r.cumOutput += usage.Usage.OutputTokens

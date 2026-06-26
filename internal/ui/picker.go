@@ -11,7 +11,7 @@ import (
 // ErrPickerCancelled is returned when an interactive picker receives q.
 var ErrPickerCancelled = errors.New("selection cancelled")
 
-// PickerEntry is the common shape for paged provider/model picker rows.
+// PickerEntry is the common shape for paged picker rows.
 type PickerEntry interface {
 	PickerID() string
 	PickerName() string
@@ -185,8 +185,8 @@ func PrintProviderPickerPage[T ProviderPickerEntry](w io.Writer, providers []T, 
 	}
 }
 
-// PrintModelPickerPage renders the model picker rows used by setup and the REPL
-// /model command. Each row shows number, model ID, input/output pricing, release
+// PrintModelPickerPage renders the model target picker rows used by setup and
+// the REPL /model command. Each row shows number, target ID, input/output pricing, release
 // date or last-updated date, and display name.
 func PrintModelPickerPage[T ModelPickerEntry](w io.Writer, providerID string, models []T, page, pageSize int, filter string) {
 	start, end := PickerPageBounds(page, pageSize, len(models))

@@ -16,7 +16,7 @@ const (
 )
 
 type Catalog struct {
-	Providers []Provider `json:"providers"`
+	Targets []Target `json:"targets"`
 	// Pricing dates the catalog's prices against the models.dev data that backed
 	// the most recent setup/refresh, so clients can warn when prices are older
 	// than the proxy's refresh interval. Nil when the proxy cannot date them.
@@ -54,8 +54,8 @@ type UsageReport struct {
 
 // ModelUsage is the accumulated usage for a single provider:model pair.
 type ModelUsage struct {
-	Provider         string  `json:"provider"`
-	Model            string  `json:"model"`
+	TargetID         string  `json:"target_id"`
+	TargetName       string  `json:"target_name,omitempty"`
 	Requests         int64   `json:"requests"`
 	InputTokens      int64   `json:"input_tokens"`
 	OutputTokens     int64   `json:"output_tokens"`
@@ -65,31 +65,32 @@ type ModelUsage struct {
 	CostUSD          float64 `json:"cost_usd"`
 }
 
-type Provider struct {
-	ID                string  `json:"id"`
-	Name              string  `json:"name,omitempty"`
-	APIType           string  `json:"api_type,omitempty"`
-	ResponsesStateful bool    `json:"responses_stateful,omitempty"`
-	Models            []Model `json:"models"`
-}
-
-type Model struct {
+type Target struct {
 	ID              string             `json:"id"`
-	Name            string             `json:"name,omitempty"`
+	Aliases         []string           `json:"aliases,omitempty"`
+	DisplayName     string             `json:"display_name,omitempty"`
+	ProviderLabel   string             `json:"provider_label,omitempty"`
+	ModelLabel      string             `json:"model_label,omitempty"`
 	ContextWindow   int                `json:"context_window,omitempty"`
 	OutputLimit     int                `json:"output_limit,omitempty"`
 	InputModalities []string           `json:"input_modalities,omitempty"`
 	Price           llm.Price          `json:"price,omitempty"`
-	Reasoning       *llm.ReasoningInfo `json:"reasoning,omitempty"`
+	Reasoning       *ReasoningProfiles `json:"reasoning,omitempty"`
+}
+
+type ReasoningProfiles struct {
+	Supported bool     `json:"supported"`
+	Profiles  []string `json:"profiles,omitempty"`
 }
 
 type StreamRequest struct {
-	Provider string      `json:"provider"`
-	Request  llm.Request `json:"request"`
+	TargetID         string      `json:"target_id"`
+	Request          llm.Request `json:"request"`
+	ReasoningProfile string      `json:"reasoning_profile,omitempty"`
 }
 
 type TokenCountRequest struct {
-	Provider string      `json:"provider"`
+	TargetID string      `json:"target_id"`
 	Request  llm.Request `json:"request"`
 }
 

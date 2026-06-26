@@ -237,7 +237,7 @@ func run(env environment) int {
 			out := infoOutput{
 				Version:       1,
 				ModelProxyURL: proxyClient.URL(),
-				ProviderCount: len(catalog.Providers),
+				ProviderCount: 0,
 				ModelCount:    catalogModelCount(catalog),
 			}
 			if err := config.WriteResolved(stdout, out); err != nil {
@@ -245,7 +245,7 @@ func run(env environment) int {
 				return ui.ExitRuntime
 			}
 		} else {
-			fmt.Fprintf(stdout, "model proxy ok: %s (%d providers, %d models)\n", proxyClient.URL(), len(catalog.Providers), catalogModelCount(catalog))
+			fmt.Fprintf(stdout, "model proxy ok: %s (%d targets)\n", proxyClient.URL(), catalogModelCount(catalog))
 		}
 		return ui.ExitOK
 	}
@@ -384,7 +384,7 @@ func run(env environment) int {
 		}
 		if saveDefault {
 			configPath := writableConfigPath(args, getenv)
-			if err := config.SaveSelectedModel(configPath, selection.Provider, selection.Model, reasoning.Effort, reasoning.Enabled, reasoning.BudgetTokens); err != nil {
+			if err := saveSelectedModel(configPath, selection.Provider, selection.Model, reasoning); err != nil {
 				fmt.Fprintf(stderr, "harness: save selected model: %v\n", err)
 				return ui.ExitRuntime
 			}
@@ -906,7 +906,7 @@ func run(env environment) int {
 			return nil
 		},
 		SaveDefaultModel: func(provider, model string, reasoning llm.ReasoningConfig) error {
-			return config.SaveSelectedModel(writableConfigPath(args, getenv), provider, model, reasoning.Effort, reasoning.Enabled, reasoning.BudgetTokens)
+			return saveSelectedModel(writableConfigPath(args, getenv), provider, model, reasoning)
 		},
 		AgentName:       agentName,
 		AvailableAgents: agentSummaries(agents, activeToolNames),
@@ -1279,11 +1279,7 @@ func checkModelProxy(ctx context.Context, proxyClient *modelclient.Client) (prot
 }
 
 func catalogModelCount(catalog protocol.Catalog) int {
-	total := 0
-	for _, provider := range catalog.Providers {
-		total += len(provider.Models)
-	}
-	return total
+	return len(catalog.Targets)
 }
 
 type modelsListOutput struct {
@@ -1293,11 +1289,10 @@ type modelsListOutput struct {
 }
 
 type modelListEntry struct {
-	ProviderID               string                `json:"provider_id"`
-	ProviderName             string                `json:"provider_name,omitempty"`
-	ModelID                  string                `json:"model_id"`
-	QualifiedID              string                `json:"qualified_id"`
-	ModelName                string                `json:"model_name,omitempty"`
+	TargetID                 string                `json:"target_id"`
+	DisplayName              string                `json:"display_name,omitempty"`
+	ProviderLabel            string                `json:"provider_label,omitempty"`
+	ModelLabel               string                `json:"model_label,omitempty"`
 	ContextWindow            int                   `json:"context_window,omitempty"`
 	InputModalities          []string              `json:"input_modalities,omitempty"`
 	PricePerMillionTokensUSD *llm.Price            `json:"price_per_million_tokens_usd,omitempty"`
@@ -1312,7 +1307,7 @@ type modelReasoningDetails struct {
 func buildModelsListOutput(catalog protocol.Catalog) *modelsListOutput {
 	models := catalogModelListRows(catalog, modelclient.Registry(catalog))
 	return &modelsListOutput{
-		ProviderCount: len(catalog.Providers),
+		ProviderCount: 0,
 		ModelCount:    len(models),
 		Models:        models,
 	}
@@ -1321,10 +1316,7 @@ func buildModelsListOutput(catalog protocol.Catalog) *modelsListOutput {
 func sortedModelListEntries(models []modelListEntry) []modelListEntry {
 	sorted := append([]modelListEntry(nil), models...)
 	sort.SliceStable(sorted, func(i, j int) bool {
-		if sorted[i].ProviderID != sorted[j].ProviderID {
-			return sorted[i].ProviderID < sorted[j].ProviderID
-		}
-		return sorted[i].ModelID < sorted[j].ModelID
+		return sorted[i].TargetID < sorted[j].TargetID
 	})
 	return sorted
 }
@@ -1357,33 +1349,27 @@ func formatAgentsListText(out agentsListOutput) string {
 func formatModelsListText(out modelsListOutput) string {
 	var b strings.Builder
 	for _, row := range out.Models {
-		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", row.ProviderID, row.ModelID, modelListModalitiesText(row.InputModalities), modelListReasoningText(row.Reasoning))
+		fmt.Fprintf(&b, "%s\t%s\t%s\n", row.TargetID, modelListModalitiesText(row.InputModalities), modelListReasoningText(row.Reasoning))
 	}
 	return b.String()
 }
 
 func catalogModelListRows(catalog protocol.Catalog, registry *llm.Registry) []modelListEntry {
 	var rows []modelListEntry
-	for _, provider := range catalog.Providers {
-		if provider.ID == "" {
+	for _, target := range catalog.Targets {
+		if target.ID == "" {
 			continue
 		}
-		for _, model := range provider.Models {
-			if model.ID == "" {
-				continue
-			}
-			rows = append(rows, modelListEntry{
-				ProviderID:               provider.ID,
-				ProviderName:             strings.TrimSpace(provider.Name),
-				ModelID:                  model.ID,
-				QualifiedID:              provider.ID + ":" + model.ID,
-				ModelName:                strings.TrimSpace(model.Name),
-				ContextWindow:            model.ContextWindow,
-				InputModalities:          append([]string(nil), model.InputModalities...),
-				PricePerMillionTokensUSD: modelListPrice(model.Price),
-				Reasoning:                modelListReasoning(registry, provider.ID, model),
-			})
-		}
+		rows = append(rows, modelListEntry{
+			TargetID:                 target.ID,
+			DisplayName:              strings.TrimSpace(target.DisplayName),
+			ProviderLabel:            strings.TrimSpace(target.ProviderLabel),
+			ModelLabel:               strings.TrimSpace(target.ModelLabel),
+			ContextWindow:            target.ContextWindow,
+			InputModalities:          append([]string(nil), target.InputModalities...),
+			PricePerMillionTokensUSD: modelListPrice(target.Price),
+			Reasoning:                modelListReasoning(registry, target),
+		})
 	}
 	return rows
 }
@@ -1428,10 +1414,10 @@ func modelListPrice(price llm.Price) *llm.Price {
 	return &out
 }
 
-func modelListReasoning(registry *llm.Registry, providerID string, model protocol.Model) modelReasoningDetails {
-	reasoning := model.Reasoning
-	if registry != nil && providerID != "" {
-		if info, ok := registry.Lookup(providerID + ":" + model.ID); ok && info.Reasoning != nil {
+func modelListReasoning(registry *llm.Registry, target protocol.Target) modelReasoningDetails {
+	var reasoning *llm.ReasoningInfo
+	if registry != nil {
+		if info, ok := registry.Lookup(target.ID); ok && info.Reasoning != nil {
 			reasoning = info.Reasoning
 		}
 	}
@@ -1850,40 +1836,20 @@ func agentSummaries(agents map[string]agentdef.Definition, parentTools []string)
 func resolveCatalogSelection(catalog protocol.Catalog, provider, model, preferredProvider string) (catalogSelection, error) {
 	provider = strings.TrimSpace(provider)
 	model = strings.TrimSpace(model)
-	if p, m, ok := config.SplitProviderModel(model); ok {
-		provider = p
-		model = m
-	}
-	if provider != "" && model == "" {
-		if p, ok := catalogProvider(catalog, provider); ok && len(p.Models) == 1 {
-			model = p.Models[0].ID
-		}
-	}
-	if provider != "" && model != "" {
-		p, ok := catalogProvider(catalog, provider)
-		if !ok {
-			return catalogSelection{}, fmt.Errorf("provider %q is not available from the model proxy", provider)
-		}
-		if !catalogProviderHasModel(p, model) {
-			return catalogSelection{}, fmt.Errorf("provider %q has no model %q", provider, model)
-		}
-		return catalogSelection{Provider: provider, Model: model, RegistryModel: providerModelKey(provider, model)}, nil
-	}
-	if provider == "" && model != "" {
-		if preferredProvider != "" {
-			if p, ok := catalogProvider(catalog, preferredProvider); ok && catalogProviderHasModel(p, model) {
-				return catalogSelection{Provider: preferredProvider, Model: model, RegistryModel: providerModelKey(preferredProvider, model)}, nil
+	if model == "" && provider != "" {
+		model = provider
+	} else if provider != "" && model != "" {
+		if provider != model {
+			if _, ok := catalogTarget(catalog, model); !ok {
+				model = provider + ":" + model
 			}
 		}
-		matches := catalogProvidersForModel(catalog, model)
-		switch len(matches) {
-		case 0:
-			return catalogSelection{}, fmt.Errorf("model %q is not available from the model proxy", model)
-		case 1:
-			return catalogSelection{Provider: matches[0], Model: model, RegistryModel: providerModelKey(matches[0], model)}, nil
-		default:
-			return catalogSelection{}, fmt.Errorf("model %q is available from multiple providers (%s); use provider:%s", model, strings.Join(matches, ", "), model)
+	}
+	if model != "" {
+		if target, ok := catalogTarget(catalog, model); ok {
+			return catalogSelection{Provider: target.ID, Model: target.ID, RegistryModel: target.ID}, nil
 		}
+		return catalogSelection{}, fmt.Errorf("target %q is not available from the model proxy", model)
 	}
 	return catalogSelection{}, fmt.Errorf("a model is required (-model or harness config model)")
 }
@@ -1894,32 +1860,24 @@ func resolveCatalogSelection(catalog protocol.Catalog, provider, model, preferre
 // match is ambiguous so the caller can surface "did you mean …?" (r24).
 func fuzzyMatchModel(catalog protocol.Catalog, input string) (match string, candidates []string) {
 	input = strings.ToLower(strings.TrimSpace(input))
-	if _, m, ok := config.SplitProviderModel(input); ok {
-		input = strings.ToLower(strings.TrimSpace(m))
-	}
 	if input == "" {
 		return "", nil
 	}
-	seen := map[string]bool{}
-	var ids []string
-	for _, p := range catalog.Providers {
-		for _, m := range p.Models {
-			if !seen[m.ID] {
-				seen[m.ID] = true
-				ids = append(ids, m.ID)
+	for _, target := range catalog.Targets {
+		for _, id := range append([]string{target.ID}, target.Aliases...) {
+			if strings.ToLower(strings.TrimSpace(id)) == input {
+				return target.ID, nil
 			}
-		}
-	}
-	for _, id := range ids {
-		if strings.ToLower(id) == input {
-			return id, nil
 		}
 	}
 	pick := func(filter func(string) bool) []string {
 		var out []string
-		for _, id := range ids {
-			if filter(strings.ToLower(id)) {
-				out = append(out, id)
+		for _, target := range catalog.Targets {
+			for _, id := range append([]string{target.ID}, target.Aliases...) {
+				if filter(strings.ToLower(strings.TrimSpace(id))) {
+					out = append(out, target.ID)
+					break
+				}
 			}
 		}
 		return out
@@ -1947,79 +1905,31 @@ func clampStrings(s []string, max int) []string {
 	return s
 }
 
-func catalogProvider(catalog protocol.Catalog, id string) (protocol.Provider, bool) {
-	for _, provider := range catalog.Providers {
-		if provider.ID == id {
-			return provider, true
+func catalogTarget(catalog protocol.Catalog, id string) (protocol.Target, bool) {
+	id = strings.TrimSpace(id)
+	for _, target := range catalog.Targets {
+		if target.ID == id {
+			return target, true
+		}
+		for _, alias := range target.Aliases {
+			if alias == id {
+				return target, true
+			}
 		}
 	}
-	return protocol.Provider{}, false
-}
-
-func catalogProviderHasModel(provider protocol.Provider, model string) bool {
-	for _, entry := range provider.Models {
-		if entry.ID == model {
-			return true
-		}
-	}
-	return false
-}
-
-func catalogProvidersForModel(catalog protocol.Catalog, model string) []string {
-	var providers []string
-	for _, provider := range catalog.Providers {
-		if catalogProviderHasModel(provider, model) {
-			providers = append(providers, provider.ID)
-		}
-	}
-	return providers
+	return protocol.Target{}, false
 }
 
 func reasoningModeForProvider(catalog protocol.Catalog, providerID string) string {
-	providerID = strings.TrimSpace(providerID)
-	if strings.EqualFold(providerID, "openrouter") {
-		return "openrouter"
-	}
-	p, ok := catalogProvider(catalog, providerID)
-	apiType := ""
-	if ok {
-		apiType = strings.ToLower(strings.TrimSpace(p.APIType))
-	}
-	if apiType == "" {
-		apiType = strings.ToLower(providerID)
-	}
-	switch apiType {
-	case "anthropic":
-		return "anthropic"
-	case "responses":
-		return "responses"
-	default:
-		return "openai"
-	}
+	return "model-proxy"
 }
 
 func responsesStatefulForProvider(cfg config.Config, catalog protocol.Catalog, providerID string) bool {
-	if !cfg.ResponsesStateful {
-		return false
-	}
-	p, ok := catalogProvider(catalog, providerID)
-	return ok && strings.EqualFold(strings.TrimSpace(p.APIType), "responses") && p.ResponsesStateful
+	return false
 }
 
 func sessionResponseStateCompatible(cfg config.Config, catalog protocol.Catalog, s session.Session, provider, model string) bool {
-	if s.ResponseState == nil || s.ResponseState.PreviousResponseID == "" {
-		return false
-	}
-	if !responsesStatefulForProvider(cfg, catalog, provider) {
-		return false
-	}
-	if s.Provider != "" && s.Provider != provider {
-		return false
-	}
-	if s.Model != "" && s.Model != model {
-		return false
-	}
-	return s.ResponseState.AnchorMessages <= len(s.Messages)
+	return false
 }
 
 func effectiveReasoningSummary(configured, mode string, interactive, suppressOutput bool) string {
@@ -2035,24 +1945,12 @@ func effectiveReasoningSummary(configured, mode string, interactive, suppressOut
 }
 
 func providerForReasoningModel(catalog protocol.Catalog, fallbackProvider, model string) string {
-	if provider, _, ok := config.SplitProviderModel(model); ok {
-		return provider
-	}
-	model = strings.TrimSpace(model)
-	fallbackProvider = strings.TrimSpace(fallbackProvider)
-	if fallbackProvider != "" {
-		return fallbackProvider
-	}
-	matches := catalogProvidersForModel(catalog, model)
-	if len(matches) == 1 {
-		return matches[0]
-	}
-	return ""
+	return strings.TrimSpace(model)
 }
 
 func catalogModelPicker(catalog protocol.Catalog) func(ui.PickerIO) (string, error) {
-	providerEntries := catalogProviderPickerEntries(catalog)
-	if len(providerEntries) == 0 {
+	targets := catalogTargetPickerEntries(catalog)
+	if len(targets) == 0 {
 		return nil
 	}
 	return func(pio ui.PickerIO) (string, error) {
@@ -2060,32 +1958,20 @@ func catalogModelPicker(catalog protocol.Catalog) func(ui.PickerIO) (string, err
 		if w == nil {
 			w = io.Discard
 		}
-		provider, err := ui.Pick(pio.ReadLine, w, ui.PickerOptions[catalogProviderPick]{
-			Items:       providerEntries,
+		target, err := ui.Pick(pio.ReadLine, w, ui.PickerOptions[catalogTargetPick]{
+			Items:       targets,
 			PageSize:    pio.PageSize,
-			Prompt:      "Provider (number/id, /search, n/p, q): ",
-			Kind:        "provider",
-			CancelError: ui.ErrPickerCancelled,
-			PrintPage:   ui.PrintProviderPickerPage[catalogProviderPick],
-		})
-		if err != nil {
-			return "", err
-		}
-		models := catalogModelPickerEntries(provider.provider.Models)
-		model, err := ui.Pick(pio.ReadLine, w, ui.PickerOptions[catalogModelPick]{
-			Items:       models,
-			PageSize:    pio.PageSize,
-			Prompt:      "Model (number/id, /search, n/p, q): ",
-			Kind:        "model",
+			Prompt:      "Model target (number/id, /search, n/p, q): ",
+			Kind:        "model target",
 			CancelError: ui.ErrPickerCancelled,
 			PrintPage: func(w io.Writer, models []catalogModelPick, page, pageSize int, filter string) {
-				ui.PrintModelPickerPage(w, provider.provider.ID, models, page, pageSize, filter)
+				ui.PrintModelPickerPage(w, "targets", models, page, pageSize, filter)
 			},
 		})
 		if err != nil {
 			return "", err
 		}
-		return provider.provider.ID + ":" + model.model.ID, nil
+		return target.target.ID, nil
 	}
 }
 
@@ -2094,7 +1980,7 @@ func pickStartupModel(readLine func(string) (string, error), w io.Writer, catalo
 	if picker == nil {
 		return catalogSelection{}, fmt.Errorf("model proxy catalog has no selectable models")
 	}
-	fmt.Fprintln(w, "Select a provider and model to use with harness.")
+	fmt.Fprintln(w, "Select a model target to use with harness.")
 	input, err := picker(ui.PickerIO{
 		ReadLine: readLine,
 		Writer:   w,
@@ -2181,6 +2067,13 @@ func normalizeEffortInput(input string) (string, bool) {
 	}
 }
 
+func saveSelectedModel(path, provider, model string, reasoning llm.ReasoningConfig) error {
+	if provider == model {
+		provider = ""
+	}
+	return config.SaveSelectedModel(path, provider, model, reasoning.Effort, reasoning.Enabled, reasoning.BudgetTokens)
+}
+
 func writableConfigPath(args []string, getenv func(string) string) string {
 	if p := flagValue(args, "config"); p != "" {
 		return p
@@ -2188,59 +2081,31 @@ func writableConfigPath(args []string, getenv func(string) string) string {
 	return filepath.Join(defaultConfigDir(getenv), "config.json")
 }
 
-type catalogProviderPick struct {
-	provider protocol.Provider
-}
-
-func catalogProviderPickerEntries(catalog protocol.Catalog) []catalogProviderPick {
-	seen := make(map[string]bool, len(catalog.Providers))
-	entries := make([]catalogProviderPick, 0, len(catalog.Providers))
-	for _, provider := range catalog.Providers {
-		if provider.ID == "" || len(provider.Models) == 0 || seen[provider.ID] {
-			continue
-		}
-		seen[provider.ID] = true
-		entries = append(entries, catalogProviderPick{provider: provider})
-	}
-	return entries
-}
-
-func (p catalogProviderPick) PickerID() string { return p.provider.ID }
-
-func (p catalogProviderPick) PickerName() string {
-	if p.provider.Name != "" {
-		return p.provider.Name
-	}
-	return p.provider.ID
-}
-
-func (p catalogProviderPick) PickerModelCount() int {
-	return len(p.provider.Models)
-}
-
 type catalogModelPick struct {
-	model protocol.Model
+	target protocol.Target
 }
 
-func catalogModelPickerEntries(models []protocol.Model) []catalogModelPick {
-	entries := make([]catalogModelPick, 0, len(models))
-	for _, model := range models {
-		if model.ID == "" {
+type catalogTargetPick = catalogModelPick
+
+func catalogTargetPickerEntries(catalog protocol.Catalog) []catalogModelPick {
+	entries := make([]catalogModelPick, 0, len(catalog.Targets))
+	for _, target := range catalog.Targets {
+		if target.ID == "" {
 			continue
 		}
-		entries = append(entries, catalogModelPick{model: model})
+		entries = append(entries, catalogModelPick{target: target})
 	}
 	return entries
 }
 
-func (m catalogModelPick) PickerID() string { return m.model.ID }
+func (m catalogModelPick) PickerID() string { return m.target.ID }
 func (m catalogModelPick) PickerName() string {
-	if m.model.Name != "" {
-		return m.model.Name
+	if m.target.DisplayName != "" {
+		return m.target.DisplayName
 	}
-	return m.model.ID
+	return m.target.ID
 }
-func (m catalogModelPick) PickerPrice() string   { return formatPickerPrice(m.model.Price) }
+func (m catalogModelPick) PickerPrice() string   { return formatPickerPrice(m.target.Price) }
 func (m catalogModelPick) PickerRelease() string { return "" }
 
 func validateReasoningConfig(registry *llm.Registry, model, mode string, reasoning llm.ReasoningConfig) error {

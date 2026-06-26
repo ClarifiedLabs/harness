@@ -39,15 +39,13 @@ func TestCatalogAndRegistry(t *testing.T) {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(protocol.Catalog{
-			Providers: []protocol.Provider{{
-				ID: "openrouter",
-				Models: []protocol.Model{{
-					ID:              "openai/gpt-5.5",
-					ContextWindow:   1_050_000,
-					OutputLimit:     64_000,
-					InputModalities: []string{"text", "image"},
-					Price:           llm.Price{Input: 5, Output: 30},
-				}},
+			Targets: []protocol.Target{{
+				ID:              "openrouter:openai/gpt-5.5",
+				Aliases:         []string{"openai/gpt-5.5"},
+				ContextWindow:   1_050_000,
+				OutputLimit:     64_000,
+				InputModalities: []string{"text", "image"},
+				Price:           llm.Price{Input: 5, Output: 30},
 			}},
 		})
 	}))
@@ -61,8 +59,8 @@ func TestCatalogAndRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Catalog: %v", err)
 	}
-	if len(catalog.Providers) != 1 || catalog.Providers[0].ID != "openrouter" {
-		t.Fatalf("catalog providers = %+v", catalog.Providers)
+	if len(catalog.Targets) != 1 || catalog.Targets[0].ID != "openrouter:openai/gpt-5.5" {
+		t.Fatalf("catalog targets = %+v", catalog.Targets)
 	}
 	registry := Registry(catalog)
 	if got := registry.ContextWindow("openrouter:openai/gpt-5.5"); got != 1_050_000 {
@@ -76,17 +74,14 @@ func TestCatalogAndRegistry(t *testing.T) {
 	}
 }
 
-func TestRegistryInfersOpenRouterReasoningControls(t *testing.T) {
+func TestRegistryUsesTargetReasoningProfiles(t *testing.T) {
 	registry := Registry(protocol.Catalog{
-		Providers: []protocol.Provider{{
-			ID: "openrouter",
-			Models: []protocol.Model{{
-				ID: "z-ai/glm-5.1",
-				Reasoning: &llm.ReasoningInfo{
-					Supported: true,
-					Options:   []llm.ReasoningOption{},
-				},
-			}},
+		Targets: []protocol.Target{{
+			ID: "openrouter:z-ai/glm-5.1",
+			Reasoning: &protocol.ReasoningProfiles{
+				Supported: true,
+				Profiles:  []string{"none", "low", "medium", "high", "xhigh", "max"},
+			},
 		}},
 	})
 
@@ -95,21 +90,13 @@ func TestRegistryInfersOpenRouterReasoningControls(t *testing.T) {
 		t.Fatalf("reasoning info = %+v, ok=%v", info.Reasoning, ok)
 	}
 	if !info.Reasoning.SupportsEffort("xhigh") || !info.Reasoning.SupportsEffort("none") {
-		t.Fatalf("openrouter inferred efforts = %+v, want xhigh and none", info.Reasoning)
-	}
-	if info.Reasoning.SupportsEffort("max") {
-		t.Fatalf("openrouter inferred efforts should not accept max: %+v", info.Reasoning)
-	}
-	if !info.Reasoning.SupportsToggle() {
-		t.Fatalf("openrouter inferred controls should include toggle: %+v", info.Reasoning)
-	}
-	if !info.Reasoning.SupportsBudgetTokens(2048) {
-		t.Fatalf("openrouter inferred controls should include budget_tokens: %+v", info.Reasoning)
+		t.Fatalf("target reasoning efforts = %+v, want xhigh and none", info.Reasoning)
 	}
 }
 
 func TestProviderStreamEventsAndErrors(t *testing.T) {
-	var sawProvider string
+	var sawTarget string
+	var sawProfile string
 	var sawRequest llm.Request
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/stream" {
@@ -119,7 +106,8 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		sawProvider = req.Provider
+		sawTarget = req.TargetID
+		sawProfile = req.ReasoningProfile
 		sawRequest = req.Request
 		w.Header().Set("content-type", protocol.ContentTypeNDJSON)
 		enc := json.NewEncoder(w)
@@ -144,8 +132,8 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 	var texts []string
 	var responseID string
 	var gotErr error
-	req := llm.Request{Model: "gpt-5.5", StoreResponse: true, PreviousResponseID: "resp_0"}
-	for ev, err := range c.Provider("openai").Stream(context.Background(), req) {
+	req := llm.Request{Model: "gpt-5.5", Reasoning: llm.ReasoningConfig{Effort: "xhigh"}, StoreResponse: true, PreviousResponseID: "resp_0"}
+	for ev, err := range c.Provider("openai:gpt-5.5").Stream(context.Background(), req) {
 		if err != nil {
 			gotErr = err
 			break
@@ -157,8 +145,8 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 			responseID = ev.ResponseID
 		}
 	}
-	if sawProvider != "openai" {
-		t.Fatalf("provider sent to proxy = %q", sawProvider)
+	if sawTarget != "openai:gpt-5.5" || sawProfile != "xhigh" {
+		t.Fatalf("target/profile sent to proxy = %q/%q", sawTarget, sawProfile)
 	}
 	if len(texts) != 1 || texts[0] != "hello" {
 		t.Fatalf("texts = %v", texts)
@@ -179,7 +167,7 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 }
 
 func TestProviderCountInputTokens(t *testing.T) {
-	var sawProvider string
+	var sawTarget string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/input_tokens" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -188,7 +176,7 @@ func TestProviderCountInputTokens(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		sawProvider = req.Provider
+		sawTarget = req.TargetID
 		_ = json.NewEncoder(w).Encode(protocol.TokenCountResponse{InputTokens: 3456, Source: "proxy"})
 	}))
 	defer srv.Close()
@@ -197,12 +185,12 @@ func TestProviderCountInputTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	got, err := c.Provider("openai").(llm.InputTokenCounter).CountInputTokens(context.Background(), llm.Request{Model: "gpt-5.5"})
+	got, err := c.Provider("openai:gpt-5.5").(llm.InputTokenCounter).CountInputTokens(context.Background(), llm.Request{Model: "gpt-5.5"})
 	if err != nil {
 		t.Fatalf("CountInputTokens: %v", err)
 	}
-	if sawProvider != "openai" || got.InputTokens != 3456 || got.Source != "proxy" {
-		t.Fatalf("provider/count = %q/%+v", sawProvider, got)
+	if sawTarget != "openai:gpt-5.5" || got.InputTokens != 3456 || got.Source != "proxy" {
+		t.Fatalf("target/count = %q/%+v", sawTarget, got)
 	}
 }
 

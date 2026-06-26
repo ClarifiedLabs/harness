@@ -1709,7 +1709,7 @@ literal `$`.
 | `/compact` | force compaction now |
 | `/context` | dump the current provider-neutral model context as JSON |
 | `/context <file>` | save the current provider-neutral model context as JSON |
-| `/usage` | cumulative input, cached input, output, reasoning tokens, and cost (also cache-write tokens when present). Usage is bucketed per `provider/model`: with one model it is a single line; after a model change it breaks down per model and always ends with the session-total cost. The live per-turn line shows the active model's cumulative tokens with the session-total cost; a model-changing `/agent`, `/model`, or handoff prints the breakdown before the active counters reset for the new model. |
+| `/usage` | cumulative input, cached input, output, reasoning tokens, and cost (also cache-write tokens when present). Usage is bucketed per model target: with one model it is a single line; after a model change it breaks down per model target and always ends with the session-total cost. The live per-turn line shows the active model's cumulative tokens with the session-total cost; a model-changing `/agent`, `/model`, or handoff prints the breakdown before the active counters reset for the new model. |
 | `/tools` | list enabled built-in and MCP tools with descriptions, plus disabled optional tools |
 | `/image` | list images queued for the next prompt |
 | `/image <path>` | attach an image to the next prompt |
@@ -1717,7 +1717,7 @@ literal `$`.
 | `/image --clear` | clear queued images |
 | `/edit [draft]` | open an external editor for the next prompt |
 | `/save [file]` | force save (optionally elsewhere) |
-| `/model` | choose a configured provider/model; interactive runs can optionally save it as the default |
+| `/model` | choose a configured model target; interactive runs can optionally save it as the default |
 | `/model <id>` | switch subsequent turns to model `<id>`; a near-miss falls back to a unique prefix/substring match before erroring; interactive runs can optionally save it as the default |
 | `/model <provider>:<id>` | switch to `<id>` on a specific configured provider; interactive runs can optionally save it as the default |
 | `/reasoning` | list reasoning controls for the current model |
@@ -1813,7 +1813,7 @@ reasoning settings, and request byte counts. It exits before prewarm,
 
 `-agents` prints a readable resolved agent list without contacting the model
 proxy. `-models` reuses the bounded proxy catalog request and prints configured
-provider/model rows before session creation. `-format json` is supported by
+model target rows before session creation. `-format json` is supported by
 `-agents`, `-models`, and `-check-model-proxy`; JSON output is versioned with
 `"version": 1`.
 
@@ -1904,7 +1904,7 @@ type Session struct {
     Todos         []todo.Item        `json:"todos,omitempty"`          // update_todos list, reseeded on resume
     Plans         []plan.Plan        `json:"plans,omitempty"`          // record_plan list, reseeded on resume
     Usage         UsageTotals        `json:"usage"`                    // session aggregate (back-compat + resume seed)
-    UsageByModel  map[string]UsageTotals `json:"usage_by_model,omitempty"` // per "provider/model" cost; resume seeds a single bucket from Usage when absent
+    UsageByModel  map[string]UsageTotals `json:"usage_by_model,omitempty"` // per model target cost; resume seeds a single bucket from Usage when absent
 }
 
 type UsageTotals struct {

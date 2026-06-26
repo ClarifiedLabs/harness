@@ -20,10 +20,6 @@ const maxErrorBodyBytes = 1 << 20
 
 const requesterHeader = "X-Harness-Requester"
 
-// OpenRouter normalizes reasoning controls for supported models.
-// https://openrouter.ai/docs/api/reference/parameters
-var openRouterEffortValues = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
-
 type Client struct {
 	baseURL string
 	http    *http.Client
@@ -92,84 +88,70 @@ func (c *Client) Catalog(ctx context.Context) (protocol.Catalog, error) {
 	return catalog, nil
 }
 
-func (c *Client) Provider(provider string) llm.Provider {
-	return &Provider{client: c, provider: provider}
+func (c *Client) Provider(targetID string) llm.Provider {
+	return &Provider{client: c, targetID: targetID}
 }
 
 // Registry builds a local model metadata registry from a proxy catalog.
 func Registry(catalog protocol.Catalog) *llm.Registry {
 	models := map[string]llm.ModelInfo{}
-	qualified := map[string]llm.ModelInfo{}
-	for _, provider := range catalog.Providers {
-		for _, model := range provider.Models {
-			if model.ID == "" {
-				continue
-			}
-			info := llm.ModelInfo{
-				ContextWindow:   model.ContextWindow,
-				OutputLimit:     model.OutputLimit,
-				InputModalities: append([]string(nil), model.InputModalities...),
-				Price:           model.Price,
-				Reasoning:       proxyModelReasoning(provider.ID, model),
-			}
-			if _, ok := models[model.ID]; !ok {
-				models[model.ID] = info
-			}
-			if provider.ID != "" {
-				qualified[provider.ID+":"+model.ID] = info
-			}
-		}
-	}
-	return llm.NewRegistryWithQualified(models, qualified)
-}
-
-func proxyModelReasoning(provider string, model protocol.Model) *llm.ReasoningInfo {
-	info := model.Reasoning.Clone()
-	if provider != "openrouter" || info == nil || !info.Supported {
-		return info
-	}
-	next := info.Clone()
-	if values, ok := next.EffortValues(); !ok || len(values) == 0 {
-		ensureReasoningOption(&next.Options, llm.ReasoningOption{
-			Type:   "effort",
-			Values: append([]string(nil), openRouterEffortValues...),
-		})
-	}
-	ensureReasoningOption(&next.Options, llm.ReasoningOption{Type: "toggle"})
-	ensureReasoningOption(&next.Options, llm.ReasoningOption{Type: "budget_tokens"})
-	return next
-}
-
-func ensureReasoningOption(options *[]llm.ReasoningOption, want llm.ReasoningOption) {
-	for i, opt := range *options {
-		if opt.Type != want.Type {
+	for _, target := range catalog.Targets {
+		if target.ID == "" {
 			continue
 		}
-		if want.Type == "effort" && len(opt.Values) == 0 {
-			(*options)[i].Values = append([]string(nil), want.Values...)
+		info := llm.ModelInfo{
+			ContextWindow:   target.ContextWindow,
+			OutputLimit:     target.OutputLimit,
+			InputModalities: append([]string(nil), target.InputModalities...),
+			Price:           target.Price,
+			Reasoning:       proxyTargetReasoning(target),
 		}
-		return
+		models[target.ID] = info
+		for _, alias := range target.Aliases {
+			if alias != "" {
+				models[alias] = info
+			}
+		}
 	}
-	*options = append(*options, want)
+	return llm.NewRegistry(models)
+}
+
+func proxyTargetReasoning(target protocol.Target) *llm.ReasoningInfo {
+	if target.Reasoning == nil || !target.Reasoning.Supported {
+		return &llm.ReasoningInfo{Supported: false}
+	}
+	values := append([]string(nil), target.Reasoning.Profiles...)
+	if len(values) == 0 {
+		values = []string{"none", "low", "medium", "high", "xhigh", "max"}
+	}
+	return &llm.ReasoningInfo{
+		Supported: true,
+		Options:   []llm.ReasoningOption{{Type: "effort", Values: values}},
+	}
 }
 
 type Provider struct {
 	client   *Client
-	provider string
+	targetID string
 }
 
 func (p *Provider) Name() string {
-	if p.provider != "" {
-		return p.provider
+	if p.targetID != "" {
+		return p.targetID
 	}
 	return "model-proxy"
 }
 
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
+		profile := req.Reasoning.Profile
+		if profile == "" {
+			profile = req.Reasoning.Effort
+		}
 		body, err := json.Marshal(protocol.StreamRequest{
-			Provider: p.provider,
-			Request:  req,
+			TargetID:         p.targetID,
+			Request:          req,
+			ReasoningProfile: profile,
 		})
 		if err != nil {
 			yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal proxy request: " + err.Error()})
@@ -229,7 +211,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 
 func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.InputTokenCount, error) {
 	body, err := json.Marshal(protocol.TokenCountRequest{
-		Provider: p.provider,
+		TargetID: p.targetID,
 		Request:  req,
 	})
 	if err != nil {

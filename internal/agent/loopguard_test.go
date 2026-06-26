@@ -250,7 +250,7 @@ func TestZeroTokenBudgetUnlimited(t *testing.T) {
 	toolStep := llmtest.Step{
 		Events: []llm.StreamEvent{toolDone(0, "id", "probe", `{}`)},
 		Stop:   llm.StopToolUse,
-		Usage:  llm.Usage{InputTokens: 1_000_000},
+		Usage:  llm.Usage{InputTokens: 1_000_000, CostUSD: 5, CostKnown: true},
 	}
 	done := llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn}
 	fp := llmtest.New("fake", toolStep, toolStep, done)
@@ -283,7 +283,7 @@ func TestPromptCostBudgetStops(t *testing.T) {
 	step := llmtest.Step{
 		Events: []llm.StreamEvent{toolDone(0, "id", "probe", `{}`)},
 		Stop:   llm.StopToolUse,
-		Usage:  llm.Usage{InputTokens: 1_000_000},
+		Usage:  llm.Usage{InputTokens: 1_000_000, CostUSD: 5, CostKnown: true},
 	}
 	fp := llmtest.New("fake", step, step, step, step)
 	a := newAgent(fp, reg, Options{MaxTurns: 0, Model: "claude-opus-4-8", MaxPromptCostUSD: 8.0})

@@ -157,4 +157,6 @@ type Usage struct {
 	CacheReadTokens  int `json:"cache_read_tokens"`
 	CacheWriteTokens int `json:"cache_write_tokens"`
 	ReasoningTokens  int `json:"reasoning_tokens"`
+	CostUSD          float64 `json:"cost_usd,omitempty"`
+	CostKnown        bool    `json:"cost_known,omitempty"`
 }

@@ -2453,17 +2453,17 @@ func TestAddUsageBucketsPerModel(t *testing.T) {
 	if len(app.usageByModel) != 2 {
 		t.Fatalf("want 2 model buckets, got %d: %+v", len(app.usageByModel), app.usageByModel)
 	}
-	if app.usageByModel["anthropic/opus"].InputTokens != 100 {
-		t.Errorf("opus bucket = %+v", app.usageByModel["anthropic/opus"])
+	if app.usageByModel["opus"].InputTokens != 100 {
+		t.Errorf("opus bucket = %+v", app.usageByModel["opus"])
 	}
-	if app.usageByModel["openai/gpt"].OutputTokens != 5 {
-		t.Errorf("gpt bucket = %+v", app.usageByModel["openai/gpt"])
+	if app.usageByModel["gpt"].OutputTokens != 5 {
+		t.Errorf("gpt bucket = %+v", app.usageByModel["gpt"])
 	}
 	if app.usage.InputTokens != 130 || app.usage.OutputTokens != 15 {
 		t.Errorf("aggregate = %+v, want 130/15", app.usage)
 	}
 	report := app.usageReport("session")
-	for _, want := range []string{"anthropic/opus", "openai/gpt", "total"} {
+	for _, want := range []string{"opus", "gpt", "total"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("multi-model report missing %q: %s", want, report)
 		}
@@ -3057,7 +3057,7 @@ func TestEffortMenuFallsBackToDefaults(t *testing.T) {
 	// Provider-defined (supported, no enumerated options): offer the default
 	// menu (r61).
 	noLevels := &llm.ReasoningInfo{Supported: true}
-	if v, fromCatalog := effortMenu(noLevels); fromCatalog || strings.Join(v, ",") != "minimal,low,medium,high" {
+	if v, fromCatalog := effortMenu(noLevels); fromCatalog || strings.Join(v, ",") != "none,low,medium,high,xhigh,max" {
 		t.Errorf("fallback efforts = %v (catalog=%v), want the default menu", v, fromCatalog)
 	}
 	// Supported via a non-effort control (toggle): effort is not accepted, so no
