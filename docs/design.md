@@ -424,6 +424,7 @@ Edge cases:
 |---|---|---|---|
 | Endpoint default | `https://api.openai.com/v1/responses` | `https://api.openai.com/v1/chat/completions` | `https://api.anthropic.com/v1/messages` |
 | Auth | `Authorization: Bearer <key>` | same | `x-api-key: <key>` + `anthropic-version: 2023-06-01` |
+| Transport | HTTP SSE by default; provider configs may set `responses_websocket:true`, and the proxy defaults it on for `codex_oauth` Responses providers | HTTP SSE | HTTP SSE |
 | Tool schemas | `tools[] = {type:"function", name, description, parameters, strict:false}` | `tools[].function = {name, description, parameters}` (`type:"function"`) | `tools[] = {name, description, input_schema}` |
 | Parallel tool hint | `parallel_tool_calls:true` when tools are present | `parallel_tool_calls:true` when tools are present | not sent |
 | Prompt cache key | `prompt_cache_key` from `Request.PromptCacheKey` | `prompt_cache_key` from `Request.PromptCacheKey` | not sent (explicit `cache_control` breakpoints instead) |
@@ -461,7 +462,10 @@ continuation; provider configs can set `responses_stateful:false` for compatible
 endpoints that require `store:false`, or `responses_stateful:true` to explicitly
 advertise support. If a provider rejects `store:true` before streaming output,
 the agent disables stateful continuation for that agent, rebuilds the request,
-and retries once stateless. If a provider rejects a request with a parseable
+and retries once stateless. Responses providers can set `responses_websocket:true`
+to use the Responses WebSocket transport; the proxy defaults that on for
+`codex_oauth` Responses configs and preserves explicit true/false overrides.
+If a provider rejects a request with a parseable
 context-overflow error, the agent records the smaller reported window for the
 session, rebuilds the request, and retries once before surfacing the error.
 
@@ -615,7 +619,10 @@ codex base URL and billed at OpenAI per-token rates: `setup` writes
 `"price_source": "openai"` so codex prices track the OpenAI rates in the cache.
 It also writes `"omit_max_output_tokens": true` because the ChatGPT Codex
 backend rejects the Responses `max_output_tokens` parameter; the proxy infers
-the same omit behavior for older `codex_oauth` Responses configs.
+the same omit behavior for older `codex_oauth` Responses configs. The proxy also
+defaults `responses_websocket` on for `codex_oauth` Responses configs so
+continuation can use the Codex-compatible WebSocket path without writing another
+managed config field.
 The server otherwise stays provider-neutral for pricing — it just honors
 whatever `price_source` a managed config names.
 
@@ -693,7 +700,9 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   models newest-first, and asks which models should be locally available. The
   synthetic `openai-codex` provider is listed when the catalog has OpenAI models;
   it writes the ChatGPT Codex backend URL and a `codex_oauth` auth block instead
-  of API-key fields, plus `omit_max_output_tokens:true`.
+  of API-key fields, plus `omit_max_output_tokens:true`. The proxy defaults the
+  Responses WebSocket transport on for this `codex_oauth` provider at runtime,
+  unless the config explicitly sets `responses_websocket:false`.
   New providers start with no models enabled; existing providers start with
   their configured models enabled and all other catalog models disabled. Enabled
   rows are bold and marked with `*`; the

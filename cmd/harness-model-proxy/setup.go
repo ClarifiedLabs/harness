@@ -48,6 +48,7 @@ type setupProviderConfig struct {
 	// backends that reject the standard parameter, such as ChatGPT Codex.
 	OmitMaxOutputTokens bool               `json:"omit_max_output_tokens,omitempty"`
 	ResponsesStateful   *bool              `json:"responses_stateful,omitempty"`
+	ResponsesWebSocket  *bool              `json:"responses_websocket,omitempty"`
 	APIKeyEnv           []string           `json:"api_key_env,omitempty"`
 	Auth                *auth.Config       `json:"auth,omitempty"`
 	Models              []setupModelConfig `json:"models"`
@@ -144,6 +145,9 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	}
 	if existingProvider.Config.ResponsesStateful != nil {
 		provider.ResponsesStateful = existingProvider.Config.ResponsesStateful
+	}
+	if existingProvider.Config.ResponsesWebSocket != nil {
+		provider.ResponsesWebSocket = existingProvider.Config.ResponsesWebSocket
 	}
 
 	mainConfig := setupMainConfig{
@@ -251,6 +255,9 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			}
 			if current.ResponsesStateful != nil {
 				next.ResponsesStateful = current.ResponsesStateful
+			}
+			if current.ResponsesWebSocket != nil {
+				next.ResponsesWebSocket = current.ResponsesWebSocket
 			}
 			updated = append(updated, next)
 		}

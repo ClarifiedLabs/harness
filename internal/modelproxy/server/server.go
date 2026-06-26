@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -153,6 +155,9 @@ type Handler struct {
 
 	usageMu sync.Mutex
 	usage   map[usageKey]*protocol.ModelUsage
+
+	providerMu    sync.Mutex
+	providerCache map[string]llm.Provider
 }
 
 func NewHandler(opts Options) (*Handler, error) {
@@ -198,6 +203,7 @@ func NewHandler(opts Options) (*Handler, error) {
 		logger:               logger,
 		newProvider:          newProvider,
 		usage:                map[usageKey]*protocol.ModelUsage{},
+		providerCache:        map[string]llm.Provider{},
 	}
 	snapshot, err := h.buildSnapshot(opts.ModelsDevCatalog, opts.ModelsDevSourceDate)
 	if err != nil {
@@ -564,7 +570,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiType = opts.Provider
-	provider, err := h.newProvider(opts)
+	provider, err := h.streamProvider(opts, providerID, req.Request.PromptCacheKey)
 	if err != nil {
 		streamErr = err.Error()
 		writeError(cw, http.StatusBadRequest, protocol.ErrorFrom(err))
@@ -606,6 +612,52 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 		flush()
 	}
+}
+
+func (h *Handler) streamProvider(opts factory.Options, providerID, promptCacheKey string) (llm.Provider, error) {
+	if !opts.ResponsesWebSocket {
+		return h.newProvider(opts)
+	}
+	key := streamProviderCacheKey(opts, providerID, promptCacheKey)
+	h.providerMu.Lock()
+	defer h.providerMu.Unlock()
+	if provider := h.providerCache[key]; provider != nil {
+		return provider, nil
+	}
+	provider, err := h.newProvider(opts)
+	if err != nil {
+		return nil, err
+	}
+	h.providerCache[key] = provider
+	return provider, nil
+}
+
+func streamProviderCacheKey(opts factory.Options, providerID, promptCacheKey string) string {
+	auth := sha256.New()
+	auth.Write([]byte(opts.APIKey))
+	keys := make([]string, 0, len(opts.AuthHeaders))
+	for key := range opts.AuthHeaders {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		auth.Write([]byte{0})
+		auth.Write([]byte(strings.ToLower(key)))
+		auth.Write([]byte{0})
+		auth.Write([]byte(opts.AuthHeaders[key]))
+	}
+	return strings.Join([]string{
+		providerID,
+		opts.Provider,
+		opts.ProviderName,
+		opts.Model,
+		opts.BaseURL,
+		strconv.Itoa(opts.ContextWindow),
+		strconv.Itoa(opts.OutputLimit),
+		strconv.FormatBool(opts.OmitMaxOutputTokens),
+		promptCacheKey,
+		hex.EncodeToString(auth.Sum(nil)),
+	}, "\x00")
 }
 
 type countingResponseWriter struct {
@@ -740,6 +792,7 @@ func (h *Handler) runtimeOptions(ctx context.Context, providerID, model string) 
 		ContextWindow:       contextWindow,
 		OutputLimit:         entry.OutputLimit,
 		OmitMaxOutputTokens: providerOmitMaxOutputTokens(pc),
+		ResponsesWebSocket:  providerResponsesWebSocket(pc),
 	}, nil
 }
 
@@ -868,6 +921,16 @@ func providerResponsesStateful(pc llm.ProviderConfig) bool {
 		return *pc.ResponsesStateful
 	}
 	return true
+}
+
+func providerResponsesWebSocket(pc llm.ProviderConfig) bool {
+	if !strings.EqualFold(strings.TrimSpace(pc.APIType), "responses") {
+		return false
+	}
+	if pc.ResponsesWebSocket != nil {
+		return *pc.ResponsesWebSocket
+	}
+	return pc.Auth != nil && strings.EqualFold(strings.TrimSpace(pc.Auth.Type), auth.TypeCodexOAuth)
 }
 
 func providerConfigByName(providers []llm.ProviderConfig, name string) (llm.ProviderConfig, bool) {

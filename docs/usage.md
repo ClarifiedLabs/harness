@@ -237,6 +237,10 @@ Responses continuation is on by default for proxy providers that report both
 `-responses-stateful=false`. If a provider rejects stored Responses requests,
 harness disables stateful continuation for that agent and retries the request
 stateless.
+Responses provider configs may also set `responses_websocket:true` to have the
+model proxy use the Responses WebSocket transport instead of HTTP SSE. The proxy
+defaults this on for `codex_oauth` Responses providers and preserves an explicit
+`responses_websocket:false` override.
 
 ## Model Proxy Setup
 
@@ -253,9 +257,9 @@ not auto-configured.
 
 The special `openai-codex` provider uses ChatGPT subscription auth instead of an
 API key and omits Responses `max_output_tokens` because the Codex backend
-rejects that parameter. It otherwise follows the same default stateful
-continuation path as other Responses providers; if the backend rejects
-`store:true`, harness falls back automatically. After setup, run:
+rejects that parameter. The proxy also uses the Responses WebSocket transport by
+default for this provider, matching Codex's stateful continuation path while
+sending `store:false` to the ChatGPT backend. After setup, run:
 
 ```sh
 harness-model-proxy auth login openai-codex

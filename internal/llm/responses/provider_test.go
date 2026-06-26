@@ -2,7 +2,10 @@ package responses
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +19,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/sse"
+	"harness/internal/ws"
 )
 
 func testProvider(t *testing.T, srv *httptest.Server, sleep func(time.Duration)) *Provider {
@@ -728,6 +732,153 @@ func TestStreamSendsHeaders(t *testing.T) {
 	if gotContentType != "application/json" {
 		t.Errorf("content-type = %q", gotContentType)
 	}
+}
+
+func TestStreamWebSocketResponseCreate(t *testing.T) {
+	var gotPath, gotBeta, gotAuth, gotRequest string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBeta = r.Header.Get("OpenAI-Beta")
+		gotAuth = r.Header.Get("Authorization")
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatalf("response writer is not a hijacker")
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		defer conn.Close()
+		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+		fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+		fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+		fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", testAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+		if err := rw.Flush(); err != nil {
+			t.Fatalf("flush handshake: %v", err)
+		}
+		gotRequest, err = ws.ReadClientText(rw.Reader)
+		if err != nil {
+			t.Fatalf("read websocket request: %v", err)
+		}
+		if err := ws.WriteServerText(conn, `{"type":"response.output_text.delta","delta":"Hello","output_index":0,"content_index":0}`); err != nil {
+			t.Fatalf("write delta: %v", err)
+		}
+		if err := ws.WriteServerText(conn, `{"type":"response.completed","response":{"id":"resp_ws","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}}`); err != nil {
+			t.Fatalf("write completed: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, Sleep: func(time.Duration) {}})
+	req := llmtest.SimpleRequest("gpt-5.4")
+	req.StoreResponse = true
+	req.PreviousResponseID = "resp_prev"
+	events, err := llmtest.Drain(p.Stream(context.Background(), req))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if gotPath != "/v1/responses" || gotBeta != responsesWebSocketBeta || gotAuth != "Bearer k" {
+		t.Fatalf("path/beta/auth = %q/%q/%q", gotPath, gotBeta, gotAuth)
+	}
+	for _, want := range []string{`"type":"response.create"`, `"previous_response_id":"resp_prev"`, `"store":false`, `"tool_choice":"auto"`} {
+		if !strings.Contains(gotRequest, want) {
+			t.Fatalf("websocket request missing %s: %s", want, gotRequest)
+		}
+	}
+	if got := textOf(events); got != "Hello" {
+		t.Fatalf("text = %q, want Hello", got)
+	}
+	var done *llm.StreamEvent
+	for i := range events {
+		if events[i].Kind == llm.EventDone {
+			done = &events[i]
+		}
+	}
+	if done == nil || done.ResponseID != "resp_ws" {
+		t.Fatalf("done = %+v, want response id resp_ws", done)
+	}
+}
+
+func TestStreamWebSocketReusesConnectionWithTurnState(t *testing.T) {
+	var handshakes int
+	gotFirst := make(chan string, 1)
+	gotSecond := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handshakes++
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatalf("response writer is not a hijacker")
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		defer conn.Close()
+		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+		fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+		fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+		fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", testAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+		if err := rw.Flush(); err != nil {
+			t.Fatalf("flush handshake: %v", err)
+		}
+		first, err := ws.ReadClientText(rw.Reader)
+		if err != nil {
+			t.Fatalf("read first websocket request: %v", err)
+		}
+		gotFirst <- first
+		if err := ws.WriteServerText(conn, `{"type":"response.metadata","headers":{"x-codex-turn-state":"turn-1"}}`); err != nil {
+			t.Fatalf("write metadata: %v", err)
+		}
+		if err := ws.WriteServerText(conn, `{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`); err != nil {
+			t.Fatalf("write first completed: %v", err)
+		}
+		second, err := ws.ReadClientText(rw.Reader)
+		if err != nil {
+			t.Fatalf("read second websocket request: %v", err)
+		}
+		gotSecond <- second
+		if err := ws.WriteServerText(conn, `{"type":"response.completed","response":{"id":"resp_2","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`); err != nil {
+			t.Fatalf("write second completed: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, Sleep: func(time.Duration) {}})
+	req := llmtest.SimpleRequest("gpt-5.4")
+	if _, err := llmtest.Drain(p.Stream(context.Background(), req)); err != nil {
+		t.Fatalf("first Stream: %v", err)
+	}
+	req.PreviousResponseID = "resp_1"
+	req.Messages = []llm.Message{{
+		Role: llm.RoleUser,
+		Content: []llm.ContentBlock{{
+			Kind:        llm.BlockToolResult,
+			ResultForID: "call_1",
+			ResultText:  "ok",
+		}},
+	}}
+	if _, err := llmtest.Drain(p.Stream(context.Background(), req)); err != nil {
+		t.Fatalf("second Stream: %v", err)
+	}
+
+	first := <-gotFirst
+	second := <-gotSecond
+	if handshakes != 1 {
+		t.Fatalf("handshakes = %d, want 1", handshakes)
+	}
+	if strings.Contains(first, "x-codex-turn-state") {
+		t.Fatalf("first websocket request unexpectedly included turn state: %s", first)
+	}
+	for _, want := range []string{`"previous_response_id":"resp_1"`, `"x-codex-turn-state":"turn-1"`} {
+		if !strings.Contains(second, want) {
+			t.Fatalf("second websocket request missing %s: %s", want, second)
+		}
+	}
+}
+
+func testAcceptKey(key string) string {
+	sum := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
 func TestStreamAppendsResponsesPath(t *testing.T) {

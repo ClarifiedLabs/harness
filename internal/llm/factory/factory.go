@@ -35,6 +35,7 @@ type Options struct {
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for providers
 	// that reject the standard parameter.
 	OmitMaxOutputTokens bool
+	ResponsesWebSocket  bool
 	ReasoningMode       string // "openai" | "openrouter" | "anthropic"; empty = infer
 }
 
@@ -88,6 +89,7 @@ func New(opts Options) (llm.Provider, error) {
 			ContextWindow:       opts.ContextWindow,
 			OutputLimit:         opts.OutputLimit,
 			OmitMaxOutputTokens: opts.OmitMaxOutputTokens,
+			UseWebSocket:        opts.ResponsesWebSocket,
 		}), nil
 	default:
 		return nil, fmt.Errorf("llm: unknown provider %q (want openai, responses, or anthropic)", provider)

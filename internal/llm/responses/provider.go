@@ -10,11 +10,13 @@ import (
 	"iter"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"harness/internal/llm"
 	"harness/internal/retry"
 	"harness/internal/sse"
+	"harness/internal/ws"
 )
 
 const (
@@ -29,6 +31,7 @@ type Config struct {
 	ContextWindow       int
 	OutputLimit         int // model's real max-output-token limit; 0 = unknown
 	OmitMaxOutputTokens bool
+	UseWebSocket        bool
 	HTTPClient          *http.Client
 	Sleep               func(time.Duration)
 }
@@ -40,8 +43,13 @@ type Provider struct {
 	contextWindow       int
 	outputLimit         int
 	omitMaxOutputTokens bool
+	useWebSocket        bool
 	client              *http.Client
 	sleep               func(time.Duration)
+
+	wsMu        sync.Mutex
+	wsConn      *ws.Conn
+	wsTurnState string
 }
 
 func New(cfg Config) *Provider {
@@ -53,6 +61,7 @@ func New(cfg Config) *Provider {
 		contextWindow:       cfg.ContextWindow,
 		outputLimit:         cfg.OutputLimit,
 		omitMaxOutputTokens: cfg.OmitMaxOutputTokens,
+		useWebSocket:        cfg.UseWebSocket,
 		client:              client,
 		sleep:               sleep,
 	}
@@ -62,20 +71,29 @@ func (p *Provider) Name() string { return "responses" }
 
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
-		body, err := json.Marshal(buildRequestWithOptions(req, p.contextWindow, p.outputLimit, p.omitMaxOutputTokens))
-		if err != nil {
-			yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
-			return
+		if p.useWebSocket {
+			if p.streamWebSocket(ctx, req, yield) {
+				return
+			}
 		}
-
-		resp, err := p.connect(ctx, body, yield)
-		if err != nil || resp == nil {
-			return
-		}
-		defer resp.Body.Close()
-
-		p.decode(ctx, resp.Body, yield)
+		p.streamHTTP(ctx, req, yield)
 	}
+}
+
+func (p *Provider) streamHTTP(ctx context.Context, req llm.Request, yield func(llm.StreamEvent, error) bool) {
+	body, err := json.Marshal(buildRequestWithOptions(req, p.contextWindow, p.outputLimit, p.omitMaxOutputTokens))
+	if err != nil {
+		yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
+		return
+	}
+
+	resp, err := p.connect(ctx, body, yield)
+	if err != nil || resp == nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	p.decode(ctx, resp.Body, yield)
 }
 
 // connect performs the request via the shared retry-before-first-byte loop
@@ -99,12 +117,7 @@ func (p *Provider) connect(ctx context.Context, body []byte, yield func(llm.Stre
 }
 
 func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.StreamEvent, error) bool) {
-	asm := newToolAssembler()
-	text := newTextAssembler()
-	reasoning := newReasoningAssembler()
-	phase := newPhaseAssembler()
-	var usage llm.Usage
-	completed := false
+	decoder := newStreamDecoder()
 
 	for ev, err := range sse.Read(ctx, r) {
 		if err != nil {
@@ -117,173 +130,180 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 			continue
 		}
 
-		var event wireEvent
-		if jsonErr := json.Unmarshal([]byte(data), &event); jsonErr != nil {
-			yield(llm.StreamEvent{}, &llm.APIError{Message: "decode stream event: " + jsonErr.Error()})
+		done, err := decoder.handle(data, yield)
+		if err != nil {
+			yield(llm.StreamEvent{}, err)
 			return
 		}
-
-		switch event.Type {
-		case "response.output_text.delta":
-			if !text.textDelta(event, yield) {
-				return
-			}
-
-		case "response.output_text.done":
-			if !text.textDone(event, yield) {
-				return
-			}
-
-		case "response.refusal.delta":
-			if !text.refusalDelta(event, yield) {
-				return
-			}
-
-		case "response.refusal.done":
-			if !text.refusalDone(event, yield) {
-				return
-			}
-
-		case "response.content_part.done":
-			if !text.contentPartDone(event, yield) {
-				return
-			}
-
-		case "response.output_item.added":
-			if !phase.outputItem(event.OutputIndex, event.Item, yield) {
-				return
-			}
-			if !asm.outputItemAdded(event.OutputIndex, event.Item, yield) {
-				return
-			}
-
-		case "response.reasoning_summary_text.delta":
-			if !reasoning.summaryDelta(event) {
-				return
-			}
-
-		case "response.reasoning_summary_text.done":
-			if !reasoning.summaryDone(event, yield) {
-				return
-			}
-
-		case "response.reasoning_summary_part.done":
-			if !reasoning.summaryPartDone(event, yield) {
-				return
-			}
-
-		case "response.function_call_arguments.delta":
-			if !asm.argumentsDelta(event.OutputIndex, event.Delta, yield) {
-				return
-			}
-
-		case "response.function_call_arguments.done":
-			asm.argumentsDone(event.OutputIndex, event.ItemID, event.Name, event.Arguments)
-
-		case "response.output_item.done":
-			if !phase.outputItem(event.OutputIndex, event.Item, yield) {
-				return
-			}
-			if !text.outputItem(event.OutputIndex, event.Item, yield) {
-				return
-			}
-			if !reasoning.outputItem(event.OutputIndex, event.Item, yield) {
-				return
-			}
-			asm.outputItemDone(event.OutputIndex, event.Item)
-
-		case "response.completed":
-			completed = true
-			if event.Response != nil {
-				if !emitResponseOutputWithPhase(event.Response.Output, text, reasoning, phase, yield) {
-					return
-				}
-				asm.responseOutput(event.Response.Output)
-				if event.Response.Usage != nil {
-					usage = normalizeUsage(event.Response.Usage)
-					u := usage
-					if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
-						return
-					}
-				}
-			}
-			stop := llm.StopEndTurn
-			if asm.has() {
-				stop = llm.StopToolUse
-				ok, fatal := asm.flush(yield)
-				if fatal != nil {
-					yield(llm.StreamEvent{}, fatal)
-					return
-				}
-				if !ok {
-					return
-				}
-			}
-			u := usage
-			responseID := ""
-			if event.Response != nil {
-				responseID = event.Response.ID
-			}
-			yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, StopReason: stop, ResponseID: responseID}, nil)
+		if done {
 			return
-
-		case "response.incomplete":
-			completed = true
-			stop := llm.StopEndTurn
-			if event.Response != nil {
-				if !emitResponseOutputWithPhase(event.Response.Output, text, reasoning, phase, yield) {
-					return
-				}
-				asm.responseOutput(event.Response.Output)
-				if event.Response.Usage != nil {
-					usage = normalizeUsage(event.Response.Usage)
-				}
-				if event.Response.IncompleteDetails != nil && event.Response.IncompleteDetails.Reason == "max_output_tokens" {
-					stop = llm.StopMaxTokens
-				}
-			}
-			if asm.has() {
-				ok, fatal := asm.flush(yield)
-				if fatal != nil {
-					yield(llm.StreamEvent{}, fatal)
-					return
-				}
-				if !ok {
-					return
-				}
-			}
-			u := usage
-			responseID := ""
-			if event.Response != nil {
-				responseID = event.Response.ID
-			}
-			yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, StopReason: stop, ResponseID: responseID}, nil)
-			return
-
-		case "response.failed":
-			completed = true
-			apiErr := &llm.APIError{Message: "response failed"}
-			if event.Response != nil && event.Response.Error != nil {
-				apiErr.Code = event.Response.Error.Code
-				apiErr.Message = event.Response.Error.Message
-				apiErr.Retryable = retryableErrorCode(apiErr.Code)
-			}
-			applyRetryAfterHint(apiErr)
-			yield(llm.StreamEvent{}, apiErr)
-			return
-
-		case "error":
-			completed = true
-			yield(llm.StreamEvent{}, streamError(event))
-			return
-
-		default:
-			// Lifecycle and unsupported tool events are ignored unless handled above.
 		}
 	}
 
-	if !completed {
+	if !decoder.completed {
 		yield(llm.StreamEvent{}, fmt.Errorf("responses: stream ended before terminal event: %w", sse.ErrTruncatedStream))
+	}
+}
+
+type streamDecoder struct {
+	asm       *toolAssembler
+	text      *textAssembler
+	reasoning *reasoningAssembler
+	phase     *phaseAssembler
+	usage     llm.Usage
+	completed bool
+}
+
+func newStreamDecoder() *streamDecoder {
+	return &streamDecoder{
+		asm:       newToolAssembler(),
+		text:      newTextAssembler(),
+		reasoning: newReasoningAssembler(),
+		phase:     newPhaseAssembler(),
+	}
+}
+
+func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) bool) (bool, error) {
+	var event wireEvent
+	if jsonErr := json.Unmarshal([]byte(data), &event); jsonErr != nil {
+		return false, &llm.APIError{Message: "decode stream event: " + jsonErr.Error()}
+	}
+
+	switch event.Type {
+	case "response.output_text.delta":
+		return !d.text.textDelta(event, yield), nil
+
+	case "response.output_text.done":
+		return !d.text.textDone(event, yield), nil
+
+	case "response.refusal.delta":
+		return !d.text.refusalDelta(event, yield), nil
+
+	case "response.refusal.done":
+		return !d.text.refusalDone(event, yield), nil
+
+	case "response.content_part.done":
+		return !d.text.contentPartDone(event, yield), nil
+
+	case "response.output_item.added":
+		if !d.phase.outputItem(event.OutputIndex, event.Item, yield) {
+			return true, nil
+		}
+		return !d.asm.outputItemAdded(event.OutputIndex, event.Item, yield), nil
+
+	case "response.reasoning_summary_text.delta":
+		return !d.reasoning.summaryDelta(event), nil
+
+	case "response.reasoning_summary_text.done":
+		return !d.reasoning.summaryDone(event, yield), nil
+
+	case "response.reasoning_summary_part.done":
+		return !d.reasoning.summaryPartDone(event, yield), nil
+
+	case "response.function_call_arguments.delta":
+		return !d.asm.argumentsDelta(event.OutputIndex, event.Delta, yield), nil
+
+	case "response.function_call_arguments.done":
+		d.asm.argumentsDone(event.OutputIndex, event.ItemID, event.Name, event.Arguments)
+		return false, nil
+
+	case "response.output_item.done":
+		if !d.phase.outputItem(event.OutputIndex, event.Item, yield) {
+			return true, nil
+		}
+		if !d.text.outputItem(event.OutputIndex, event.Item, yield) {
+			return true, nil
+		}
+		if !d.reasoning.outputItem(event.OutputIndex, event.Item, yield) {
+			return true, nil
+		}
+		d.asm.outputItemDone(event.OutputIndex, event.Item)
+		return false, nil
+
+	case "response.completed":
+		d.completed = true
+		if event.Response != nil {
+			if !emitResponseOutputWithPhase(event.Response.Output, d.text, d.reasoning, d.phase, yield) {
+				return true, nil
+			}
+			d.asm.responseOutput(event.Response.Output)
+			if event.Response.Usage != nil {
+				d.usage = normalizeUsage(event.Response.Usage)
+				u := d.usage
+				if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
+					return true, nil
+				}
+			}
+		}
+		stop := llm.StopEndTurn
+		if d.asm.has() {
+			stop = llm.StopToolUse
+			ok, fatal := d.asm.flush(yield)
+			if fatal != nil {
+				return false, fatal
+			}
+			if !ok {
+				return true, nil
+			}
+		}
+		u := d.usage
+		responseID := ""
+		if event.Response != nil {
+			responseID = event.Response.ID
+		}
+		yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, StopReason: stop, ResponseID: responseID}, nil)
+		return true, nil
+
+	case "response.incomplete":
+		d.completed = true
+		stop := llm.StopEndTurn
+		if event.Response != nil {
+			if !emitResponseOutputWithPhase(event.Response.Output, d.text, d.reasoning, d.phase, yield) {
+				return true, nil
+			}
+			d.asm.responseOutput(event.Response.Output)
+			if event.Response.Usage != nil {
+				d.usage = normalizeUsage(event.Response.Usage)
+			}
+			if event.Response.IncompleteDetails != nil && event.Response.IncompleteDetails.Reason == "max_output_tokens" {
+				stop = llm.StopMaxTokens
+			}
+		}
+		if d.asm.has() {
+			ok, fatal := d.asm.flush(yield)
+			if fatal != nil {
+				return false, fatal
+			}
+			if !ok {
+				return true, nil
+			}
+		}
+		u := d.usage
+		responseID := ""
+		if event.Response != nil {
+			responseID = event.Response.ID
+		}
+		yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, StopReason: stop, ResponseID: responseID}, nil)
+		return true, nil
+
+	case "response.failed":
+		d.completed = true
+		apiErr := &llm.APIError{Message: "response failed"}
+		if event.Response != nil && event.Response.Error != nil {
+			apiErr.Code = event.Response.Error.Code
+			apiErr.Message = event.Response.Error.Message
+			apiErr.Retryable = retryableErrorCode(apiErr.Code)
+		}
+		applyRetryAfterHint(apiErr)
+		return false, apiErr
+
+	case "error":
+		d.completed = true
+		return false, streamError(event)
+
+	default:
+		// Lifecycle and unsupported tool events are ignored unless handled above.
+		return false, nil
 	}
 }
 

@@ -218,6 +218,40 @@ func TestBuildRequestPromptCacheKeyOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestBuildWebSocketRequestUsesResponseCreateEnvelope(t *testing.T) {
+	req := basicRequest()
+	req.StoreResponse = true
+	req.PreviousResponseID = "resp_1"
+	req.PromptCacheKey = "harness-test"
+	p := New(Config{UseWebSocket: true})
+
+	w := p.buildWebSocketRequest(req)
+	if w.Type != "response.create" {
+		t.Fatalf("type = %q, want response.create", w.Type)
+	}
+	if w.Store {
+		t.Fatal("websocket store = true, want false")
+	}
+	if w.PreviousResponseID != "resp_1" {
+		t.Fatalf("previous_response_id = %q", w.PreviousResponseID)
+	}
+	if w.ToolChoice != "auto" {
+		t.Fatalf("tool_choice = %q, want auto", w.ToolChoice)
+	}
+	if w.ClientMetadata["session_id"] == "" || w.ClientMetadata["thread_id"] == "" || w.ClientMetadata["x-codex-installation-id"] == "" {
+		t.Fatalf("client metadata missing stable ids: %+v", w.ClientMetadata)
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"type":"response.create"`, `"tool_choice":"auto"`, `"previous_response_id":"resp_1"`, `"store":false`, `"client_metadata"`} {
+		if !bytes.Contains(b, []byte(want)) {
+			t.Fatalf("missing %s from websocket JSON: %s", want, b)
+		}
+	}
+}
+
 func TestBuildRequestStreamAndStore(t *testing.T) {
 	w := buildRequest(basicRequest(), 0, 0)
 	if !w.Stream {

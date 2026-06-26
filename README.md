@@ -99,9 +99,11 @@ accept image attachments. A managed config may set `"price_source"` to resolve
 metadata from a different models.dev provider id; `setup` sets it to `openai`
 for `openai-codex` so codex models are priced at the normal OpenAI per-token
 rates. Codex configs also set `"omit_max_output_tokens": true` because that
-backend rejects the standard Responses parameter. Responses providers default to
-stateful continuation; if a backend rejects stored responses, harness disables
-stateful continuation for that agent and retries the request stateless.
+backend rejects the standard Responses parameter. The proxy uses the Responses
+WebSocket transport by default for `codex_oauth` Responses providers unless
+`responses_websocket:false` is set. Responses providers default to stateful
+continuation; if a backend rejects stored responses, harness disables stateful
+continuation for that agent and retries the request stateless.
 
 While serving, the proxy also answers a read-only `GET /v1/usage` that aggregates
 token and cost totals per provider/model (including delegate child-agent spend),

@@ -290,6 +290,9 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	if provider.ResponsesStateful != nil {
 		t.Fatalf("codex responses_stateful = %v, want omitted default", provider.ResponsesStateful)
 	}
+	if provider.ResponsesWebSocket != nil {
+		t.Fatalf("codex responses_websocket = %v, want omitted runtime default", provider.ResponsesWebSocket)
+	}
 }
 
 func TestRunSetupWritesGoogleOpenAICompatibleProvider(t *testing.T) {
@@ -832,6 +835,9 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	}
 	if provider.ResponsesStateful != nil {
 		t.Fatalf("codex responses_stateful after refresh = %v, want omitted default", provider.ResponsesStateful)
+	}
+	if provider.ResponsesWebSocket != nil {
+		t.Fatalf("codex responses_websocket after refresh = %v, want omitted runtime default", provider.ResponsesWebSocket)
 	}
 }
 

@@ -409,15 +409,18 @@ func TestHandlerStreamOmitsMaxOutputTokensForCodexOAuth(t *testing.T) {
 	}
 
 	var captured factory.Options
+	constructions := 0
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "again"}}, Stop: llm.StopEndTurn},
+	)
 	handler, err := NewHandler(Options{
 		ConfigDir: dir,
 		Config:    Config{ProviderConfigs: []string{"openai-codex.json"}},
 		New: func(opts factory.Options) (llm.Provider, error) {
 			captured = opts
-			return llmtest.New("fake", llmtest.Step{
-				Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
-				Stop:   llm.StopEndTurn,
-			}), nil
+			constructions++
+			return fp, nil
 		},
 	})
 	if err != nil {
@@ -428,18 +431,34 @@ func TestHandlerStreamOmitsMaxOutputTokensForCodexOAuth(t *testing.T) {
 
 	body, _ := json.Marshal(protocol.StreamRequest{
 		Provider: "openai-codex",
-		Request:  llm.Request{Model: "gpt-5.5"},
+		Request:  llm.Request{Model: "gpt-5.5", PromptCacheKey: "session-a"},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST stream: %v", err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
-	if captured.Provider != "responses" || !captured.OmitMaxOutputTokens {
-		t.Fatalf("captured options = %+v, want responses with OmitMaxOutputTokens", captured)
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	resp, err = srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("second POST stream: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("second status = %d", resp.StatusCode)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if captured.Provider != "responses" || !captured.OmitMaxOutputTokens || !captured.ResponsesWebSocket {
+		t.Fatalf("captured options = %+v, want responses with OmitMaxOutputTokens and ResponsesWebSocket", captured)
+	}
+	if constructions != 1 {
+		t.Fatalf("provider constructions = %d, want 1 for cached websocket provider", constructions)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("fake provider requests = %d, want 2", len(fp.Requests))
 	}
 }
 
