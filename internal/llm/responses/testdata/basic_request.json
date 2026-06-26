@@ -5,12 +5,22 @@
     {
       "type": "message",
       "role": "user",
-      "content": "What is the weather in SF and NYC?"
+      "content": [
+        {
+          "type": "input_text",
+          "text": "What is the weather in SF and NYC?"
+        }
+      ]
     },
     {
       "type": "message",
       "role": "assistant",
-      "content": "Let me check both cities."
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Let me check both cities."
+        }
+      ]
     },
     {
       "type": "function_call",

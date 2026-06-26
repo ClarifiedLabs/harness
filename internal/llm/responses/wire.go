@@ -188,7 +188,7 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, om
 			input = append(input, wireInputItem{
 				Type:    "message",
 				Role:    "user",
-				Content: contextText,
+				Content: []wireContentPart{{Type: "input_text", Text: contextText}},
 			})
 		}
 	}
@@ -244,43 +244,25 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 	for _, m := range messages {
 		var text string
 		var parts []wireContentPart
-		structured := false
-		flushText := func() {
+		flushTextPart := func() {
 			if text == "" {
+				return
+			}
+			parts = append(parts, wireContentPart{Type: textPartType(m.Role), Text: text})
+			text = ""
+		}
+		flushMessage := func() {
+			flushTextPart()
+			if len(parts) == 0 {
 				return
 			}
 			out = append(out, wireInputItem{
 				Type:    "message",
 				Role:    string(m.Role),
 				Phase:   inputMessagePhase(m),
-				Content: text,
+				Content: parts,
 			})
-			text = ""
-		}
-		flushStructuredText := func() {
-			if text == "" {
-				return
-			}
-			parts = append(parts, wireContentPart{Type: "input_text", Text: text})
-			text = ""
-		}
-		flushMessage := func() {
-			if structured {
-				flushStructuredText()
-				if len(parts) == 0 {
-					return
-				}
-				out = append(out, wireInputItem{
-					Type:    "message",
-					Role:    string(m.Role),
-					Phase:   inputMessagePhase(m),
-					Content: parts,
-				})
-				parts = nil
-				structured = false
-				return
-			}
-			flushText()
+			parts = nil
 		}
 
 		for _, b := range m.Content {
@@ -304,16 +286,9 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 					Summary:          &[]wireContentPart{},
 				})
 			case llm.BlockText:
-				if structured {
-					parts = append(parts, wireContentPart{Type: "input_text", Text: b.Text})
-				} else {
-					text += b.Text
-				}
+				text += b.Text
 			case llm.BlockImage:
-				if !structured {
-					structured = true
-					flushStructuredText()
-				}
+				flushTextPart()
 				parts = append(parts, wireContentPart{
 					Type:     "input_image",
 					ImageURL: imageDataURL(b),
@@ -347,6 +322,13 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 		flushMessage()
 	}
 	return out
+}
+
+func textPartType(role llm.Role) string {
+	if role == llm.RoleAssistant {
+		return "output_text"
+	}
+	return "input_text"
 }
 
 func imageDataURL(b llm.ContentBlock) string {

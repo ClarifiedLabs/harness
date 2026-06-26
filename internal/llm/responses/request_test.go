@@ -13,6 +13,15 @@ import (
 
 func basicRequest() llm.Request { return llmtest.WeatherToolRequest("gpt-5.4", "call_", true) }
 
+func contentParts(t *testing.T, item wireInputItem) []wireContentPart {
+	t.Helper()
+	parts, ok := item.Content.([]wireContentPart)
+	if !ok {
+		t.Fatalf("content = %T, want []wireContentPart", item.Content)
+	}
+	return parts
+}
+
 func TestBuildRequestGolden(t *testing.T) {
 	req := basicRequest()
 	if err := llm.ValidateTranscript(req.Messages); err != nil {
@@ -192,6 +201,28 @@ func TestBuildRequestAssistantPhase(t *testing.T) {
 	}
 }
 
+func TestBuildRequestTextMessagesUseTypedContent(t *testing.T) {
+	req := llm.Request{
+		Model: "gpt-5.5",
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hello"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi there"}}},
+		},
+	}
+	w := buildRequest(req, 0, 0)
+	if len(w.Input) != 2 {
+		t.Fatalf("input = %d, want 2", len(w.Input))
+	}
+	userParts := contentParts(t, w.Input[0])
+	if len(userParts) != 1 || userParts[0].Type != "input_text" || userParts[0].Text != "hello" {
+		t.Fatalf("user content = %+v, want input_text hello", userParts)
+	}
+	assistantParts := contentParts(t, w.Input[1])
+	if len(assistantParts) != 1 || assistantParts[0].Type != "output_text" || assistantParts[0].Text != "hi there" {
+		t.Fatalf("assistant content = %+v, want output_text hi there", assistantParts)
+	}
+}
+
 func TestBuildRequestPromptCacheKey(t *testing.T) {
 	req := basicRequest()
 	req.PromptCacheKey = "harness-abc"
@@ -241,6 +272,10 @@ func TestBuildWebSocketRequestUsesResponseCreateEnvelope(t *testing.T) {
 	if w.ClientMetadata["session_id"] == "" || w.ClientMetadata["thread_id"] == "" || w.ClientMetadata["x-codex-installation-id"] == "" {
 		t.Fatalf("client metadata missing stable ids: %+v", w.ClientMetadata)
 	}
+	parts := contentParts(t, w.Input[0])
+	if len(parts) != 1 || parts[0].Type != "input_text" {
+		t.Fatalf("websocket first message content = %+v, want typed input_text", parts)
+	}
 	b, err := json.Marshal(w)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -281,7 +316,8 @@ func TestBuildRequestContextIsInputWhenStateless(t *testing.T) {
 	if len(w.Input) != 1 {
 		t.Fatalf("input = %d, want 1 context message", len(w.Input))
 	}
-	if w.Input[0].Role != "user" || !strings.Contains(w.Input[0].Content.(string), "todo context") {
+	parts := contentParts(t, w.Input[0])
+	if w.Input[0].Role != "user" || len(parts) != 1 || parts[0].Type != "input_text" || !strings.Contains(parts[0].Text, "todo context") {
 		t.Fatalf("context input = %+v", w.Input[0])
 	}
 }
@@ -437,10 +473,7 @@ func TestBuildRequestUserImage(t *testing.T) {
 		}},
 	}
 	w := buildRequest(req, 0, 0)
-	parts, ok := w.Input[0].Content.([]wireContentPart)
-	if !ok {
-		t.Fatalf("content = %T, want []wireContentPart", w.Input[0].Content)
-	}
+	parts := contentParts(t, w.Input[0])
 	if len(parts) != 2 {
 		t.Fatalf("parts = %d, want 2", len(parts))
 	}
