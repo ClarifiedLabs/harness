@@ -47,6 +47,7 @@ type setupProviderConfig struct {
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for compatible
 	// backends that reject the standard parameter, such as ChatGPT Codex.
 	OmitMaxOutputTokens bool               `json:"omit_max_output_tokens,omitempty"`
+	ResponsesStateful   *bool              `json:"responses_stateful,omitempty"`
 	APIKeyEnv           []string           `json:"api_key_env,omitempty"`
 	Auth                *auth.Config       `json:"auth,omitempty"`
 	Models              []setupModelConfig `json:"models"`
@@ -140,6 +141,9 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	provider := setupProviderFromModelsDev(providerMeta, apiKey, authCfg, models)
 	if existingProvider.Config.OmitMaxOutputTokens {
 		provider.OmitMaxOutputTokens = true
+	}
+	if existingProvider.Config.ResponsesStateful != nil {
+		provider.ResponsesStateful = existingProvider.Config.ResponsesStateful
 	}
 
 	mainConfig := setupMainConfig{
@@ -244,6 +248,9 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			next := setupProviderFromModelsDev(meta, current.APIKey, current.Auth, updatedModels)
 			if current.OmitMaxOutputTokens {
 				next.OmitMaxOutputTokens = true
+			}
+			if current.ResponsesStateful != nil {
+				next.ResponsesStateful = current.ResponsesStateful
 			}
 			updated = append(updated, next)
 		}

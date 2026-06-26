@@ -1333,6 +1333,40 @@ func TestResponsesStatefulRetriesFullContextWhenPreviousResponseRejected(t *test
 	}
 }
 
+func TestResponsesStatefulDisablesAndRetriesWhenStoreRejected(t *testing.T) {
+	fp := llmtest.New("responses",
+		llmtest.Step{Err: &llm.APIError{StatusCode: 400, Message: "Store must be set to false"}},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("recovered")},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	a := newAgent(fp, tools.Default(), Options{ResponsesStateful: true})
+	sink := &recordSink{}
+
+	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	}
+	if !fp.Requests[0].StoreResponse {
+		t.Fatalf("first request StoreResponse = false, want true")
+	}
+	if fp.Requests[1].StoreResponse || fp.Requests[1].PreviousResponseID != "" {
+		t.Fatalf("retry request state = store %v prev %q, want stateless", fp.Requests[1].StoreResponse, fp.Requests[1].PreviousResponseID)
+	}
+	if got := sink.text.String(); got != "recovered" {
+		t.Fatalf("text = %q, want recovered", got)
+	}
+	if state := a.ResponseState(); state != nil {
+		t.Fatalf("response state = %+v, want nil", state)
+	}
+	if !slices.Contains(sink.notices, "[responses state disabled: provider rejected stored responses; retrying stateless]") {
+		t.Fatalf("notices = %+v, want responses-state disabled notice", sink.notices)
+	}
+}
+
 func TestMidStreamRetrySucceedsOnSecondAttempt(t *testing.T) {
 	fp := llmtest.New("fake",
 		llmtest.Step{

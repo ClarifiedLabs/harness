@@ -427,7 +427,7 @@ Edge cases:
 | Tool schemas | `tools[] = {type:"function", name, description, parameters, strict:false}` | `tools[].function = {name, description, parameters}` (`type:"function"`) | `tools[] = {name, description, input_schema}` |
 | Parallel tool hint | `parallel_tool_calls:true` when tools are present | `parallel_tool_calls:true` when tools are present | not sent |
 | Prompt cache key | `prompt_cache_key` from `Request.PromptCacheKey` | `prompt_cache_key` from `Request.PromptCacheKey` | not sent (explicit `cache_control` breakpoints instead) |
-| Stateful continuation | `store` is always sent — `store:true` plus `previous_response_id` when proxy catalog reports `responses_stateful:true` (tools/system still sent each request), `store:false` for the stateless default | ignored | ignored |
+| Stateful continuation | `store` is always sent — `store:true` plus `previous_response_id` when proxy catalog reports `responses_stateful:true` (tools/system still sent each request), `store:false` for the stateless default. If the provider rejects stored responses before streaming output, the agent disables stateful continuation and retries stateless. | ignored | ignored |
 | Assistant phase | assistant `message` input items include stored `phase` (`commentary` or `final_answer`) when present | ignored | ignored |
 | Token cap | `max_output_tokens` is capped by explicit `MaxTokens`, else `min(1_000_000, contextWindow/4)`, then by `outputLimit` and remaining counted/estimated context (omitted if disabled or unresolved) | `max_tokens` follows the same input-aware cap (omitted if unresolved) | `max_tokens` is required and follows the same input-aware cap, falling back to 1,000,000 if unresolved |
 | Input token count | `POST /responses/input_tokens` via the optional `InputTokenCounter` | local `o200k_base` estimate for OpenAI/OpenRouter Chat Completions | `POST /v1/messages/count_tokens` via the optional `InputTokenCounter` |
@@ -456,7 +456,12 @@ the coarse request byte estimate. Anthropic always sends the computed value
 (`max_tokens` is required); OpenAI Chat Completions and Responses send
 `max_tokens` / `max_output_tokens` only when the value is known.
 Responses providers can set `omit_max_output_tokens` when a compatible backend
-rejects the standard parameter. If a provider rejects a request with a parseable
+rejects the standard parameter. Responses providers default to stateful
+continuation; provider configs can set `responses_stateful:false` for compatible
+endpoints that require `store:false`, or `responses_stateful:true` to explicitly
+advertise support. If a provider rejects `store:true` before streaming output,
+the agent disables stateful continuation for that agent, rebuilds the request,
+and retries once stateless. If a provider rejects a request with a parseable
 context-overflow error, the agent records the smaller reported window for the
 session, rebuilds the request, and retries once before surfacing the error.
 
@@ -688,11 +693,10 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   models newest-first, and asks which models should be locally available. The
   synthetic `openai-codex` provider is listed when the catalog has OpenAI models;
   it writes the ChatGPT Codex backend URL and a `codex_oauth` auth block instead
-  of API-key fields, plus `omit_max_output_tokens:true`. The proxy exposes this
-  provider as Responses-compatible but not stateful because the Codex backend
-  requires `store:false`. New providers start with no models enabled; existing
-  providers start with their configured models enabled and all other catalog
-  models disabled. Enabled rows are bold and marked with `*`; the
+  of API-key fields, plus `omit_max_output_tokens:true`.
+  New providers start with no models enabled; existing providers start with
+  their configured models enabled and all other catalog models disabled. Enabled
+  rows are bold and marked with `*`; the
   selector accepts number/id toggles plus global `all`, global `none`, `save`,
   `/search`, `n`, `p`, and `cancel`. The provider config is
   generated from models.dev with only enabled models for that provider: base URL,
@@ -1780,6 +1784,7 @@ prefix wins, threshold `1 + len(cmd)/3`).
 -repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
 -format <text|json>  output format for informational commands (default text)
 -show-config     dump resolved config, including defaults, as JSON and exit
+-debug-request   dump the first provider-neutral model request as JSON and exit without calling the model
 -agents          list configured agents and exit
 -models          list configured providers and models and exit
 -check-model-proxy  check harness-model-proxy reachability and exit
@@ -1791,6 +1796,11 @@ prefix wins, threshold `1 + len(cmd)/3`).
 `system_prompt`; it exits before contacting the model proxy. Dynamic runtime
 prompt sections such as env context, user/project `AGENTS.md`, skills, and the
 active agent prompt are not included in the `system_prompt` field.
+
+`-debug-request` resolves the same startup context as a real first turn, then
+prints the provider-neutral `llm.Request`, context estimate, active tools,
+reasoning settings, and request byte counts. It exits before prewarm,
+`SessionStart` hooks, session writes, or any model stream.
 
 `-agents` prints a readable resolved agent list without contacting the model
 proxy. `-models` reuses the bounded proxy catalog request and prints configured
@@ -1905,7 +1915,8 @@ type UsageTotals struct {
   Resume only restores this state when the active provider/model still match and
   the selected provider reports `api_type: "responses"` and
   `responses_stateful:true`; compaction, `/clear`, provider/model/tool/system
-  changes, and rejected prior response ids clear it.
+  changes, rejected prior response ids, and rejected stored-response requests
+  clear it.
 - Image bytes are embedded in `state.json` as provider-neutral base64 blocks so
   resume is self-contained; `raw.ndjson` records only image metadata for replay.
 - Auto-save to `~/.local/state/harness/sessions/<timestamp>`; the path is printed at

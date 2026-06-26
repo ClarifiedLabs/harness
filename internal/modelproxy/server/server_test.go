@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"harness/internal/apikey"
-	"harness/internal/auth"
 	"harness/internal/llm"
 	"harness/internal/llm/factory"
 	"harness/internal/llm/llmtest"
@@ -330,6 +329,21 @@ func TestHandlerCatalogMarksResponsesStatefulCapability(t *testing.T) {
     "models": [{"name":"gpt-5.5","context_window":128000}]
   },
   {
+    "name": "codex-compatible",
+    "api_type": "responses",
+    "base_url": "https://example.test/responses",
+    "auth": {"type":"codex_oauth"},
+    "responses_stateful": true,
+    "models": [{"name":"gpt-5.5","context_window":128000}]
+  },
+  {
+    "name": "stateless-compatible",
+    "api_type": "responses",
+    "base_url": "https://example.test/responses",
+    "responses_stateful": false,
+    "models": [{"name":"gpt-5.5","context_window":128000}]
+  },
+  {
     "name": "openrouter",
     "api_type": "openai",
     "base_url": "https://openrouter.ai/api/v1",
@@ -354,8 +368,14 @@ func TestHandlerCatalogMarksResponsesStatefulCapability(t *testing.T) {
 	if !providers["openai"].ResponsesStateful {
 		t.Fatalf("openai ResponsesStateful = false, want true")
 	}
-	if providers["openai-codex"].ResponsesStateful {
-		t.Fatalf("openai-codex ResponsesStateful = true, want false for %s", auth.TypeCodexOAuth)
+	if !providers["openai-codex"].ResponsesStateful {
+		t.Fatalf("openai-codex ResponsesStateful = false, want true")
+	}
+	if !providers["codex-compatible"].ResponsesStateful {
+		t.Fatalf("codex-compatible ResponsesStateful = false, want explicit true")
+	}
+	if providers["stateless-compatible"].ResponsesStateful {
+		t.Fatalf("stateless-compatible ResponsesStateful = true, want explicit false")
 	}
 	if providers["openrouter"].ResponsesStateful {
 		t.Fatalf("openrouter ResponsesStateful = true, want false")

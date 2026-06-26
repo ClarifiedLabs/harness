@@ -129,6 +129,7 @@ interrupted.
 -repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
 --format <text|json>  output format for informational commands (default text)
 --show-config    dump the resolved config, including defaults, as JSON and exit
+--debug-request  dump the first provider-neutral model request as JSON and exit without calling the model
 --agents         list configured agents and exit
 --models         list configured providers and models and exit
 --check-model-proxy    check harness-model-proxy reachability and exit
@@ -182,6 +183,10 @@ context-efficiency knobs are config-file-only.
   `examples/harness/config.json` for a representative schema.
 - `--show-config` prints the resolved config as JSON after applying file, env,
   flag, and built-in defaults. It exits without contacting the model proxy.
+- `--debug-request` prints the first provider-neutral `llm.Request`, context
+  estimate, active tools, reasoning settings, and request byte counts. It
+  resolves the model proxy catalog, then exits before prewarm, session hooks,
+  session writes, or any model stream.
 - `--agents` prints the resolved agent list without contacting the model proxy.
   `--models` prints the configured proxy model catalog. Use `--format json` with
   `--agents`, `--models`, or `--check-model-proxy` for structured output.
@@ -229,7 +234,9 @@ reasoning summary output unless `-reasoning-summary` is explicitly set on the CL
 Responses continuation is on by default for proxy providers that report both
 `api_type: "responses"` and `responses_stateful:true`. Disable it with
 `responses_stateful:false`, `HARNESS_RESPONSES_STATEFUL=false`, or
-`-responses-stateful=false`.
+`-responses-stateful=false`. If a provider rejects stored Responses requests,
+harness disables stateful continuation for that agent and retries the request
+stateless.
 
 ## Model Proxy Setup
 
@@ -246,7 +253,9 @@ not auto-configured.
 
 The special `openai-codex` provider uses ChatGPT subscription auth instead of an
 API key and omits Responses `max_output_tokens` because the Codex backend
-rejects that parameter. After setup, run:
+rejects that parameter. It otherwise follows the same default stateful
+continuation path as other Responses providers; if the backend rejects
+`store:true`, harness falls back automatically. After setup, run:
 
 ```sh
 harness-model-proxy auth login openai-codex

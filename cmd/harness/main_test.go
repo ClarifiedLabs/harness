@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -808,7 +809,7 @@ func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 	flags := []string{
 		"-p", "-i", "-initial-prompt", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 		"-no-env", "-resume", "-session", "-max-turns", "-max-output-tokens", "-default-context-window", "-context-window",
-		"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-agents", "-models", "-check-model-proxy", "-hooks",
+		"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks",
 	}
 	for _, arg := range []string{"-h", "--help"} {
 		fp := llmtest.New("fake")
@@ -827,6 +828,87 @@ func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 		if len(fp.Requests) != 0 {
 			t.Errorf("run(%q) should not call the provider, got %d requests", arg, len(fp.Requests))
 		}
+	}
+}
+
+func TestRunDebugRequestDumpsPromptAndSkipsModelStream(t *testing.T) {
+	fp := llmtest.New("fake", okStepWithUsage(1, 1))
+	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{
+		"--debug-request",
+		"-provider", "openai",
+		"-model", "gpt-5.5",
+		"-reasoning-effort", "high",
+		"-p", "inspect request",
+	}, fp, "")
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("debug request should not stream model calls, got %d", len(fp.Requests))
+	}
+	if len(proxy.requests) != 0 {
+		t.Fatalf("debug request should not hit proxy stream endpoint, got %d", len(proxy.requests))
+	}
+	var got debugRequestOutput
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("debug request JSON: %v\n%s", err, out.String())
+	}
+	if got.Provider != "openai" || got.Model != "gpt-5.5" || got.RegistryModel != "openai:gpt-5.5" {
+		t.Fatalf("provider/model = %q/%q registry=%q", got.Provider, got.Model, got.RegistryModel)
+	}
+	if got.Reasoning.Effort != "high" || got.Request.Reasoning.Effort != "high" {
+		t.Fatalf("reasoning effort not forwarded: output=%+v request=%+v", got.Reasoning, got.Request.Reasoning)
+	}
+	if !got.ResponsesStateful || !got.Request.StoreResponse {
+		t.Fatalf("responses stateful = output %v request %v, want true", got.ResponsesStateful, got.Request.StoreResponse)
+	}
+	if !got.PromptIncluded {
+		t.Fatal("prompt_included = false, want true")
+	}
+	if len(got.Request.Messages) != 1 {
+		t.Fatalf("request messages = %d, want 1", len(got.Request.Messages))
+	}
+	msg := got.Request.Messages[0]
+	if msg.Role != llm.RoleUser || len(msg.Content) != 1 || msg.Content[0].Text != "inspect request" {
+		t.Fatalf("debug prompt message = %+v", msg)
+	}
+	if got.MessageCount != len(got.Request.Messages) {
+		t.Fatalf("message_count = %d, request messages = %d", got.MessageCount, len(got.Request.Messages))
+	}
+	if !slices.Contains(got.ToolNames, "read_file") || got.ToolCount != len(got.ToolNames) || len(got.Request.Tools) != got.ToolCount {
+		t.Fatalf("tool accounting names=%v count=%d request=%d", got.ToolNames, got.ToolCount, len(got.Request.Tools))
+	}
+	if got.Context.Total <= 0 || got.Context.Tools <= 0 || got.RequestBytes.Total <= 0 {
+		t.Fatalf("missing context/request estimates: context=%+v bytes=%+v", got.Context, got.RequestBytes)
+	}
+}
+
+func TestRunDebugRequestInitialPromptDoesNotSaveSession(t *testing.T) {
+	fp := llmtest.New("fake", okStepWithUsage(1, 1))
+	sessionPath := filepath.Join(t.TempDir(), "session")
+	env, out, errw, _, _ := fakeProviderEnvWithProxy(t, []string{
+		"--debug-request",
+		"-model", "claude-opus-4-8",
+		"-session", sessionPath,
+		"-i", "initial prompt",
+	}, fp, "")
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("debug request should not stream model calls, got %d", len(fp.Requests))
+	}
+	if _, err := os.Stat(sessionPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("debug request should not create session path, stat err=%v", err)
+	}
+	var got debugRequestOutput
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("debug request JSON: %v\n%s", err, out.String())
+	}
+	if !got.PromptIncluded || len(got.Request.Messages) != 1 || got.Request.Messages[0].Content[0].Text != "initial prompt" {
+		t.Fatalf("initial prompt not represented once: included=%v messages=%+v", got.PromptIncluded, got.Request.Messages)
 	}
 }
 
@@ -2805,15 +2887,16 @@ func TestRunResponsesStatefulOnlyForResponsesProvider(t *testing.T) {
 	fp = llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _, proxy = fakeProviderEnvWithProxy(t, []string{"-provider", "openai-codex", "-model", "gpt-5.5", "-p", "hi"}, fp, "")
 	proxy.catalog.Providers = append(proxy.catalog.Providers, protocol.Provider{
-		ID:      "openai-codex",
-		Name:    "OpenAI Codex",
-		APIType: "responses",
-		Models:  []protocol.Model{{ID: "gpt-5.5", ContextWindow: 1_050_000}},
+		ID:                "openai-codex",
+		Name:              "OpenAI Codex",
+		APIType:           "responses",
+		ResponsesStateful: true,
+		Models:            []protocol.Model{{ID: "gpt-5.5", ContextWindow: 1_050_000}},
 	})
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("codex responses exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(proxy.requests) != 1 || proxy.requests[0].Request.StoreResponse {
+	if len(proxy.requests) != 1 || !proxy.requests[0].Request.StoreResponse {
 		t.Fatalf("codex responses request StoreResponse = %+v", proxy.requests)
 	}
 }

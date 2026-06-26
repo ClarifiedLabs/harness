@@ -480,9 +480,13 @@ func (a *Agent) triggerTokens(lastInput, boundary int) int {
 }
 
 func (a *Agent) estimateContext(extraContext []string) ContextEstimate {
+	return a.estimateContextForTranscript(extraContext, a.transcript)
+}
+
+func (a *Agent) estimateContextForTranscript(extraContext []string, transcript []llm.Message) ContextEstimate {
 	est := estimateRequest(llm.Request{
 		System:         a.system,
-		Messages:       a.transcript,
+		Messages:       transcript,
 		Tools:          a.toolSpecs,
 		RequestContext: extraContext,
 	}, a.window())
@@ -514,6 +518,15 @@ type modelRequest struct {
 	usedPrevious bool
 }
 
+// RequestSnapshot is a read-only view of the provider-neutral request the agent
+// would send for its current context. It is used by diagnostics that must not
+// call the model.
+type RequestSnapshot struct {
+	Request      llm.Request
+	Estimate     ContextEstimate
+	UsedPrevious bool
+}
+
 // ModelTurnAbandonSink is an optional event sink extension for renderers that
 // persist replay metadata. It marks a streamed attempt whose visible deltas were
 // discarded from the transcript because the model turn will be retried.
@@ -522,8 +535,12 @@ type ModelTurnAbandonSink interface {
 }
 
 func (a *Agent) modelRequest(requestContext []string) modelRequest {
-	payloadMessages, usedPrevious := a.payloadMessages()
-	estimate := a.estimatePayloadContext(requestContext, payloadMessages)
+	return a.modelRequestForTranscript(requestContext, a.transcript)
+}
+
+func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []llm.Message) modelRequest {
+	payloadMessages, usedPrevious := a.payloadMessagesIn(transcript)
+	estimate := a.estimatePayloadContextForTranscript(requestContext, transcript, payloadMessages)
 	req := llm.Request{
 		Model:                a.model,
 		System:               a.system,
@@ -545,6 +562,23 @@ func (a *Agent) modelRequest(requestContext []string) modelRequest {
 		request:      req,
 		estimate:     estimate,
 		usedPrevious: usedPrevious,
+	}
+}
+
+// DebugRequest snapshots the next provider-neutral model request without
+// appending to the live transcript or contacting the provider. When includeUser
+// is true, it includes the supplied user content as the pending first turn.
+func (a *Agent) DebugRequest(includeUser bool, userText string, images []llm.ContentBlock, extraContext []string) RequestSnapshot {
+	transcript := a.transcript
+	if includeUser {
+		transcript = cloneMessages(a.transcript)
+		transcript = append(transcript, a.userMessage(userText, images))
+	}
+	mr := a.modelRequestForTranscript(extraContext, transcript)
+	return RequestSnapshot{
+		Request:      mr.request,
+		Estimate:     mr.estimate,
+		UsedPrevious: mr.usedPrevious,
 	}
 }
 
@@ -585,21 +619,33 @@ func (a *Agent) countInputTokens(ctx context.Context, req llm.Request) (int, boo
 }
 
 func (a *Agent) payloadMessages() ([]llm.Message, bool) {
-	if !a.validResponseState() {
-		return a.transcript, false
+	return a.payloadMessagesIn(a.transcript)
+}
+
+func (a *Agent) payloadMessagesIn(transcript []llm.Message) ([]llm.Message, bool) {
+	if !a.validResponseStateFor(len(transcript)) {
+		return transcript, false
 	}
-	return a.transcript[a.responseState.AnchorMessages:], true
+	return transcript[a.responseState.AnchorMessages:], true
 }
 
 func (a *Agent) validResponseState() bool {
+	return a.validResponseStateFor(len(a.transcript))
+}
+
+func (a *Agent) validResponseStateFor(messageCount int) bool {
 	return a.responsesStateful &&
 		a.responseState.PreviousResponseID != "" &&
 		a.responseState.AnchorMessages >= 0 &&
-		a.responseState.AnchorMessages <= len(a.transcript)
+		a.responseState.AnchorMessages <= messageCount
 }
 
 func (a *Agent) estimatePayloadContext(requestContext []string, payloadMessages []llm.Message) ContextEstimate {
-	est := a.estimateContext(requestContext)
+	return a.estimatePayloadContextForTranscript(requestContext, a.transcript, payloadMessages)
+}
+
+func (a *Agent) estimatePayloadContextForTranscript(requestContext []string, transcript, payloadMessages []llm.Message) ContextEstimate {
+	est := a.estimateContextForTranscript(requestContext, transcript)
 	payload := estimateRequest(llm.Request{
 		System:         a.system,
 		Messages:       payloadMessages,
@@ -748,6 +794,15 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 				lastContext = modelReq.estimate
 				res, wasted, err = a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)
 			}
+		}
+		if err != nil && modelReq.request.StoreResponse && !res.hasPartialOutput() && storeResponseRejected(err) {
+			a.SetResponsesStateful(false)
+			sink.Notice("[responses state disabled: provider rejected stored responses; retrying stateless]")
+			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
+			lastContext = modelReq.estimate
+			var retryWasted llm.Usage
+			res, retryWasted, err = a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)
+			wasted = add(wasted, retryWasted)
 		}
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
 			a.resetResponseState()
@@ -1344,6 +1399,20 @@ func previousResponseRejected(err error) bool {
 	}
 	msg := strings.ToLower(apiErr.Message)
 	return strings.Contains(msg, "previous_response_id") || strings.Contains(msg, "previous response")
+}
+
+func storeResponseRejected(err error) bool {
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	code := strings.ToLower(apiErr.Code)
+	if strings.Contains(code, "store") {
+		return true
+	}
+	msg := strings.ToLower(apiErr.Message)
+	return strings.Contains(msg, "store") &&
+		(strings.Contains(msg, "false") || strings.Contains(msg, "unsupported") || strings.Contains(msg, "not supported"))
 }
 
 func stopReasonNotice(reason llm.StopReason) string {

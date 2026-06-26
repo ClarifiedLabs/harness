@@ -836,6 +836,23 @@ func run(env environment) int {
 	ag.SetTools(toolRegistry)
 	ag.SetResponseState(resumeResponseState)
 
+	if cfg.DebugRequest {
+		includePrompt, prompt, images, err := debugRequestPrompt(cfg, stdin, env.stdinPiped, modelRegistry.SupportsInputModality(registryModel, "image"))
+		if err != nil {
+			fmt.Fprintf(stderr, "harness: debug request: %v\n", err)
+			return ui.ExitRuntime
+		}
+		if len(cfg.Images) > 0 && len(images) == 0 {
+			fmt.Fprintf(stderr, "[image skipped: model %s does not support image input]\n", registryModel)
+		}
+		out := buildDebugRequestOutput(ag, cfg, registryModel, agentName, includePrompt, prompt, images)
+		if err := config.WriteResolved(stdout, out); err != nil {
+			fmt.Fprintf(stderr, "harness: debug request: %v\n", err)
+			return ui.ExitRuntime
+		}
+		return ui.ExitOK
+	}
+
 	color := !cfg.NoColor && env.colorTTY
 	renderer := ui.NewRenderer(stdout, stderr, ui.RenderOptions{
 		Color:      color,
@@ -1059,6 +1076,111 @@ func run(env environment) int {
 
 type showConfigOutput struct {
 	config.Config
+}
+
+type debugRequestOutput struct {
+	Version              int                    `json:"version"`
+	Provider             string                 `json:"provider"`
+	Model                string                 `json:"model"`
+	RegistryModel        string                 `json:"registry_model"`
+	Agent                string                 `json:"agent"`
+	Reasoning            llm.ReasoningConfig    `json:"reasoning"`
+	ResponsesStateful    bool                   `json:"responses_stateful"`
+	UsedPreviousResponse bool                   `json:"used_previous_response"`
+	PromptIncluded       bool                   `json:"prompt_included"`
+	ToolNames            []string               `json:"tool_names"`
+	ToolCount            int                    `json:"tool_count"`
+	MessageCount         int                    `json:"message_count"`
+	Request              llm.Request            `json:"request"`
+	Context              agent.ContextEstimate  `json:"context_estimate"`
+	RequestBytes         debugRequestByteCounts `json:"request_bytes"`
+}
+
+type debugRequestByteCounts struct {
+	System         int `json:"system"`
+	Tools          int `json:"tools"`
+	Messages       int `json:"messages"`
+	RequestContext int `json:"request_context"`
+	Total          int `json:"total"`
+}
+
+func debugRequestPrompt(cfg config.Config, stdin io.Reader, stdinPiped, supportsImages bool) (bool, string, []llm.ContentBlock, error) {
+	var prompt string
+	includePrompt := false
+	switch {
+	case cfg.PromptSet:
+		p, err := ui.BuildPrompt(cfg.Prompt, stdin, stdinPiped)
+		if err != nil {
+			return false, "", nil, fmt.Errorf("read prompt: %w", err)
+		}
+		prompt = p
+		includePrompt = true
+	case cfg.InitialPromptSet:
+		prompt = cfg.InitialPrompt
+		includePrompt = true
+	}
+	if !includePrompt {
+		return false, "", nil, nil
+	}
+	images, err := loadConfiguredImages(cfg.Images, supportsImages)
+	if err != nil {
+		return false, "", nil, fmt.Errorf("image: %w", err)
+	}
+	return true, prompt, loadedImageBlocks(images), nil
+}
+
+func loadedImageBlocks(images []inputimage.Loaded) []llm.ContentBlock {
+	if len(images) == 0 {
+		return nil
+	}
+	blocks := make([]llm.ContentBlock, 0, len(images))
+	for _, image := range images {
+		blocks = append(blocks, image.Block)
+	}
+	return blocks
+}
+
+func buildDebugRequestOutput(ag *agent.Agent, cfg config.Config, registryModel, agentName string, includePrompt bool, prompt string, images []llm.ContentBlock) debugRequestOutput {
+	snap := ag.DebugRequest(includePrompt, prompt, images, nil)
+	toolNames := ag.ToolNames()
+	return debugRequestOutput{
+		Version:              1,
+		Provider:             cfg.Provider,
+		Model:                cfg.Model,
+		RegistryModel:        registryModel,
+		Agent:                agentName,
+		Reasoning:            snap.Request.Reasoning,
+		ResponsesStateful:    snap.Request.StoreResponse,
+		UsedPreviousResponse: snap.UsedPrevious,
+		PromptIncluded:       includePrompt,
+		ToolNames:            toolNames,
+		ToolCount:            len(toolNames),
+		MessageCount:         len(snap.Request.Messages),
+		Request:              snap.Request,
+		Context:              snap.Estimate,
+		RequestBytes:         debugRequestBytes(snap.Request),
+	}
+}
+
+func debugRequestBytes(req llm.Request) debugRequestByteCounts {
+	out := debugRequestByteCounts{
+		System:         len(req.System),
+		RequestContext: len(llm.RequestContextText(req.RequestContext)),
+	}
+	for _, t := range req.Tools {
+		out.Tools += len(t.Name) + len(t.Description) + len(t.Parameters)
+	}
+	for _, m := range req.Messages {
+		out.Messages += len(m.Role) + len(m.Phase)
+		for _, b := range m.Content {
+			out.Messages += len(b.Kind) + len(b.Text) + len(b.ImageMediaType) + len(b.ImageData) +
+				len(b.ImageDetail) + len(b.ImageName) + len(b.ToolUseID) + len(b.ToolName) +
+				len(b.ToolInput) + len(b.ResultForID) + len(b.ResultText) + len(b.Thinking) +
+				len(b.ThinkingSignature) + len(b.RedactedData) + len(b.ReasoningID) + len(b.ReasoningEncrypted)
+		}
+	}
+	out.Total = out.System + out.Tools + out.Messages + out.RequestContext
+	return out
 }
 
 func showConfigDefaults(cfg config.Config) config.Config {

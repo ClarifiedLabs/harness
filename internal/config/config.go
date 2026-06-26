@@ -109,6 +109,7 @@ type Config struct {
 
 	// Meta.
 	ShowConfig      bool `json:"show_config"`       // --show-config: print this resolved config and exit
+	DebugRequest    bool `json:"debug_request"`     // --debug-request: print the first model request and exit
 	ShowAgents      bool `json:"show_agents"`       // --agents: print resolved agents and exit
 	ShowModels      bool `json:"show_models"`       // --models: print configured proxy models and exit
 	CheckModelProxy bool `json:"check_model_proxy"` // --check-model-proxy: verify the proxy catalog endpoint and exit
@@ -651,6 +652,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		c.InitialPromptSet = true
 	}
 	c.ShowConfig = set["show-config"]
+	c.DebugRequest = set["debug-request"]
 	c.ShowAgents = set["agents"]
 	c.ShowModels = set["models"]
 	c.CheckModelProxy = set["check-model-proxy"]
@@ -906,6 +908,7 @@ type flags struct {
 	config                           *string
 	hooks                            *string
 	showConfig, showAgents           *bool
+	debugRequest                     *bool
 	showModels                       *bool
 	checkModelProxy                  *bool
 }
@@ -964,6 +967,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.replEditMode = fs.String("repl-edit-mode", DefaultReplEditMode, "REPL prompt edit mode: emacs or vi")
 	f.outputFormat = fs.String("format", "text", "output format for informational commands: text or json")
 	f.showConfig = fs.Bool("show-config", false, "dump resolved config including defaults and exit")
+	f.debugRequest = fs.Bool("debug-request", false, "dump the first provider-neutral model request as JSON and exit without calling the model")
 	f.showAgents = fs.Bool("agents", false, "list configured agents and exit")
 	f.showModels = fs.Bool("models", false, "list configured providers and models and exit")
 	f.checkModelProxy = fs.Bool("check-model-proxy", false, "check harness-model-proxy reachability and exit")

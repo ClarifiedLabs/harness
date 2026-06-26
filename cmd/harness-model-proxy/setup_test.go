@@ -287,6 +287,9 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	if !provider.OmitMaxOutputTokens {
 		t.Fatalf("codex omit_max_output_tokens = false, want true")
 	}
+	if provider.ResponsesStateful != nil {
+		t.Fatalf("codex responses_stateful = %v, want omitted default", provider.ResponsesStateful)
+	}
 }
 
 func TestRunSetupWritesGoogleOpenAICompatibleProvider(t *testing.T) {
@@ -826,6 +829,9 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	}
 	if !provider.OmitMaxOutputTokens {
 		t.Fatalf("codex omit_max_output_tokens after refresh = false, want true")
+	}
+	if provider.ResponsesStateful != nil {
+		t.Fatalf("codex responses_stateful after refresh = %v, want omitted default", provider.ResponsesStateful)
 	}
 }
 

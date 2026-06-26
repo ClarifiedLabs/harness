@@ -864,7 +864,10 @@ func providerResponsesStateful(pc llm.ProviderConfig) bool {
 	if !strings.EqualFold(strings.TrimSpace(pc.APIType), "responses") {
 		return false
 	}
-	return pc.Auth == nil || !strings.EqualFold(strings.TrimSpace(pc.Auth.Type), auth.TypeCodexOAuth)
+	if pc.ResponsesStateful != nil {
+		return *pc.ResponsesStateful
+	}
+	return true
 }
 
 func providerConfigByName(providers []llm.ProviderConfig, name string) (llm.ProviderConfig, bool) {

@@ -99,7 +99,9 @@ accept image attachments. A managed config may set `"price_source"` to resolve
 metadata from a different models.dev provider id; `setup` sets it to `openai`
 for `openai-codex` so codex models are priced at the normal OpenAI per-token
 rates. Codex configs also set `"omit_max_output_tokens": true` because that
-backend rejects the standard Responses parameter.
+backend rejects the standard Responses parameter. Responses providers default to
+stateful continuation; if a backend rejects stored responses, harness disables
+stateful continuation for that agent and retries the request stateless.
 
 While serving, the proxy also answers a read-only `GET /v1/usage` that aggregates
 token and cost totals per provider/model (including delegate child-agent spend),
@@ -111,7 +113,9 @@ refresher); for manual-only setups it is the provider config file's mtime.
 Use `harness --models` to list the providers, models, and cataloged reasoning
 controls exposed by the configured proxy. Use `harness --agents` to list the
 configured agents. Add `--format json` to `--models`, `--agents`, or
-`--check-model-proxy` when another program needs structured output.
+`--check-model-proxy` when another program needs structured output. Use
+`harness --debug-request -p "..."` to dump the first provider-neutral model
+request, tool set, context estimate, and byte counts without calling the model.
 
 MCP is optional. After configuring downstream servers for `harness-mcp-proxy`,
 start it separately and enable MCP for `harness`:
