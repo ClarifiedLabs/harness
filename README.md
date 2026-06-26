@@ -112,8 +112,8 @@ and its `GET /v1/models` response carries a pricing `source_date` plus
 providers `source_date` tracks the models.dev cache (kept fresh by the
 refresher); for manual-only setups it is the provider config file's mtime.
 
-Use `harness --models` to list the providers, models, and cataloged reasoning
-controls exposed by the configured proxy. Use `harness --agents` to list the
+Use `harness --models` to list the model targets and portable reasoning
+profiles exposed by the configured proxy. Use `harness --agents` to list the
 configured agents. Add `--format json` to `--models`, `--agents`, or
 `--check-model-proxy` when another program needs structured output. Use
 `harness --debug-request -p "..."` to dump the first provider-neutral model
@@ -177,9 +177,11 @@ One-shot mode sends a single prompt and exits:
 harness -model openrouter:openai/gpt-5.5 -p "summarize README.md"
 ```
 
-`provider:model` is shorthand for selecting a proxy provider and sending the
-provider-local model id. You can also configure defaults in
-`~/.config/harness/config.json` or with `HARNESS_PROVIDER` and `HARNESS_MODEL`.
+`provider:model` selects a configured model-proxy target. If `-provider` is
+also set, harness resolves that provider's target first and reports an error
+when the model name only matches another provider. You can also configure
+defaults in `~/.config/harness/config.json` or with `HARNESS_PROVIDER` and
+`HARNESS_MODEL`.
 
 Saved sessions can be replayed or inspected:
 

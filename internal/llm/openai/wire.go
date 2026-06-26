@@ -27,6 +27,7 @@ type wireRequest struct {
 	Temperature     *float64       `json:"temperature,omitempty"`
 	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
 	Reasoning       *wireReasoning `json:"reasoning,omitempty"`
+	ExtraBody       *wireExtraBody `json:"extra_body,omitempty"`
 	Stop            []string       `json:"stop,omitempty"`
 	PromptCacheKey  string         `json:"prompt_cache_key,omitempty"`
 	Stream          bool           `json:"stream"`
@@ -43,6 +44,18 @@ type wireReasoning struct {
 	Effort    string `json:"effort,omitempty"`
 	Enabled   *bool  `json:"enabled,omitempty"`
 	MaxTokens *int   `json:"max_tokens,omitempty"`
+}
+
+type wireExtraBody struct {
+	Google *wireGoogleExtraBody `json:"google,omitempty"`
+}
+
+type wireGoogleExtraBody struct {
+	ThinkingConfig *wireGoogleThinkingConfig `json:"thinking_config,omitempty"`
+}
+
+type wireGoogleThinkingConfig struct {
+	ThinkingBudget *int `json:"thinking_budget,omitempty"`
 }
 
 // wireMessage is one request message. An assistant message with tool_calls but
@@ -172,10 +185,15 @@ func buildRequestForMode(req llm.Request, contextWindow, outputLimit int, reason
 		w.Stop = req.StopSeqs
 	}
 	w.PromptCacheKey = req.PromptCacheKey
-	if reasoningMode == "openrouter" {
+	switch reasoningMode {
+	case "openrouter":
 		w.Reasoning = openRouterReasoning(req.Reasoning)
-	} else if req.Reasoning.Effort != "" {
-		w.ReasoningEffort = req.Reasoning.Effort
+	case "google":
+		applyGoogleReasoning(&w, req.Reasoning)
+	default:
+		if req.Reasoning.Effort != "" {
+			w.ReasoningEffort = req.Reasoning.Effort
+		}
 	}
 
 	if req.System != "" {
@@ -225,6 +243,25 @@ func openRouterReasoning(reasoning llm.ReasoningConfig) *wireReasoning {
 		out.MaxTokens = &v
 	}
 	return out
+}
+
+func applyGoogleReasoning(w *wireRequest, reasoning llm.ReasoningConfig) {
+	switch {
+	case reasoning.BudgetTokens != nil:
+		w.googleThinkingBudget(*reasoning.BudgetTokens)
+	case reasoning.Enabled != nil && !*reasoning.Enabled:
+		w.googleThinkingBudget(0)
+	case reasoning.Effort != "":
+		w.ReasoningEffort = reasoning.Effort
+	}
+}
+
+func (w *wireRequest) googleThinkingBudget(budget int) {
+	w.ExtraBody = &wireExtraBody{
+		Google: &wireGoogleExtraBody{
+			ThinkingConfig: &wireGoogleThinkingConfig{ThinkingBudget: &budget},
+		},
+	}
 }
 
 // buildMessages maps one internal message onto its OpenAI wire messages. A

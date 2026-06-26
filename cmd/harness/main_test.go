@@ -108,7 +108,7 @@ func newFakeModelProxy(t *testing.T, fp *llmtest.FakeProvider) *fakeModelProxy {
 					InputModalities: []string{"text", "image"},
 					Reasoning: &protocol.ReasoningProfiles{
 						Supported: true,
-						Profiles:  []string{"low", "medium", "high", "xhigh", "max"},
+						Profiles:  []string{"minimal", "low", "medium", "high", "xhigh", "max"},
 					},
 				},
 				{
@@ -121,7 +121,7 @@ func newFakeModelProxy(t *testing.T, fp *llmtest.FakeProvider) *fakeModelProxy {
 					Price:         llm.Price{Input: 5, Output: 30, CacheRead: 0.5},
 					Reasoning: &protocol.ReasoningProfiles{
 						Supported: true,
-						Profiles:  []string{"low", "medium", "high", "xhigh", "max"},
+						Profiles:  []string{"minimal", "low", "medium", "high", "xhigh", "max"},
 					},
 				},
 				{
@@ -134,7 +134,7 @@ func newFakeModelProxy(t *testing.T, fp *llmtest.FakeProvider) *fakeModelProxy {
 					Price:         llm.Price{Input: 5, Output: 30, CacheRead: 0.5},
 					Reasoning: &protocol.ReasoningProfiles{
 						Supported: true,
-						Profiles:  []string{"low", "medium", "high", "xhigh", "max"},
+						Profiles:  []string{"minimal", "low", "medium", "high", "xhigh", "max"},
 					},
 				},
 			},
@@ -687,7 +687,7 @@ func TestRunREPLModelCommandPromptsReasoningEffort(t *testing.T) {
 	if got.Provider != "" || got.Model != "openrouter:openai/gpt-5.5" || got.ReasoningEffort != "high" {
 		t.Fatalf("saved config = %q/%q effort=%q, want openrouter:openai/gpt-5.5 effort=high\n%s", got.Provider, got.Model, got.ReasoningEffort, data)
 	}
-	if !strings.Contains(errw.String(), "Reasoning effort (default/low/medium/high/xhigh/max") {
+	if !strings.Contains(errw.String(), "Reasoning effort (default/minimal/low/medium/high/xhigh/max") {
 		t.Fatalf("stderr should show effort prompt, got %q", errw.String())
 	}
 }
@@ -1132,10 +1132,10 @@ func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"anthropic:claude-opus-4-8\ttext,image\tdefault/low/medium/high/xhigh/max\n",
-		"openai:gpt-5.5\t-\tdefault/low/medium/high/xhigh/max\n",
-		"openai:gemini-2.5-flash\t-\tdefault/none/low/medium/high/xhigh/max\n",
-		"openrouter:openai/gpt-5.5\t-\tdefault/low/medium/high/xhigh/max\n",
+		"anthropic:claude-opus-4-8\ttext,image\tdefault/minimal/low/medium/high/xhigh/max\n",
+		"openai:gpt-5.5\t-\tdefault/minimal/low/medium/high/xhigh/max\n",
+		"openai:gemini-2.5-flash\t-\tdefault/none/minimal/low/medium/high/xhigh/max\n",
+		"openrouter:openai/gpt-5.5\t-\tdefault/minimal/low/medium/high/xhigh/max\n",
 		"openrouter:z-ai/glm-5.1\t-\tdefault/none/minimal/low/medium/high/xhigh\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -1208,7 +1208,7 @@ func TestRunAgentsAndModelsFlagsPrintBothInOrder(t *testing.T) {
 	}
 	got := out.String()
 	agentsAt := strings.Index(got, "agents:\n")
-	modelsAt := strings.Index(got, "anthropic:claude-opus-4-8\ttext,image\tdefault/low/medium/high/xhigh/max")
+	modelsAt := strings.Index(got, "anthropic:claude-opus-4-8\ttext,image\tdefault/minimal/low/medium/high/xhigh/max")
 	if agentsAt < 0 || modelsAt < 0 || agentsAt > modelsAt {
 		t.Fatalf("expected agents before models:\n%s", got)
 	}
@@ -1684,7 +1684,7 @@ func TestRunStartupModelSelectionPromptsReasoningEffort(t *testing.T) {
 	if got.Provider != "" || got.Model != "openrouter:openai/gpt-5.5" || got.ReasoningEffort != "medium" {
 		t.Fatalf("saved config = %q/%q effort=%q, want openrouter:openai/gpt-5.5 effort=medium\n%s", got.Provider, got.Model, got.ReasoningEffort, data)
 	}
-	if !strings.Contains(errw.String(), "Reasoning effort (default/low/medium/high/xhigh/max") {
+	if !strings.Contains(errw.String(), "Reasoning effort (default/minimal/low/medium/high/xhigh/max") {
 		t.Fatalf("stderr should show effort prompt, got %q", errw.String())
 	}
 }
@@ -3135,6 +3135,41 @@ func expectedPlanToolNames() []string {
 
 func expectedDefaultToolNames() []string {
 	return append(tools.DefaultNames(), "update_todos", "delegate", "background_jobs", "record_plan")
+}
+
+func TestResolveCatalogSelectionHonorsExplicitProvider(t *testing.T) {
+	catalog := protocol.Catalog{Targets: []protocol.Target{
+		{ID: "openai:gpt-5.5", Aliases: []string{"gpt-5.5"}},
+		{ID: "openrouter:gpt-5.5", Aliases: []string{"gpt-5.5"}},
+		{ID: "openrouter:openai/gpt-5.5", Aliases: []string{"openai/gpt-5.5"}},
+	}}
+
+	got, err := resolveCatalogSelection(catalog, "openrouter", "gpt-5.5", "")
+	if err != nil {
+		t.Fatalf("resolve explicit provider: %v", err)
+	}
+	if got.Model != "openrouter:gpt-5.5" || got.Provider != "openrouter:gpt-5.5" {
+		t.Fatalf("selection = %+v, want openrouter:gpt-5.5", got)
+	}
+
+	got, err = resolveCatalogSelection(catalog, "openrouter", "openai/gpt-5.5", "")
+	if err != nil {
+		t.Fatalf("resolve provider with slash model: %v", err)
+	}
+	if got.Model != "openrouter:openai/gpt-5.5" {
+		t.Fatalf("selection = %+v, want openrouter:openai/gpt-5.5", got)
+	}
+}
+
+func TestResolveCatalogSelectionRejectsProviderAliasConflict(t *testing.T) {
+	catalog := protocol.Catalog{Targets: []protocol.Target{
+		{ID: "openai:gpt-5.5", Aliases: []string{"gpt-5.5"}},
+	}}
+
+	_, err := resolveCatalogSelection(catalog, "openrouter", "gpt-5.5", "")
+	if err == nil || !strings.Contains(err.Error(), `belongs to a different provider`) {
+		t.Fatalf("err = %v, want provider conflict", err)
+	}
 }
 
 func TestFuzzyMatchModel(t *testing.T) {

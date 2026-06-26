@@ -91,6 +91,8 @@ func TestReasoningModeInference(t *testing.T) {
 	}{
 		{"openrouter provider name", Options{ProviderName: "openrouter", Provider: "openai"}, "openrouter"},
 		{"openrouter base url", Options{Provider: "openai", BaseURL: "https://openrouter.ai/api/v1"}, "openrouter"},
+		{"google provider name", Options{ProviderName: "google", Provider: "openai"}, "google"},
+		{"google base url", Options{Provider: "openai", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai"}, "google"},
 		{"openai default", Options{Provider: "openai"}, "openai"},
 		{"anthropic", Options{Provider: "anthropic"}, "anthropic"},
 		{"explicit wins", Options{Provider: "openai", ProviderName: "openrouter", ReasoningMode: "openai"}, "openai"},

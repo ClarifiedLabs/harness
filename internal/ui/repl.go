@@ -2073,7 +2073,7 @@ func (app *App) effortSummary() string {
 // defaultEffortLevels is offered when a model supports reasoning but the catalog
 // enumerates no fixed effort values, so the user still gets a menu instead of a
 // dead end. Free-text effort remains accepted for such models (r61).
-var defaultEffortLevels = []string{"none", "low", "medium", "high", "xhigh", "max"}
+var defaultEffortLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 // effortMenu returns the effort levels to present for a reasoning-capable model:
 // the catalog's values when it enumerates them, otherwise the suggested defaults

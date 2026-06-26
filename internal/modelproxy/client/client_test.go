@@ -80,7 +80,7 @@ func TestRegistryUsesTargetReasoningProfiles(t *testing.T) {
 			ID: "openrouter:z-ai/glm-5.1",
 			Reasoning: &protocol.ReasoningProfiles{
 				Supported: true,
-				Profiles:  []string{"none", "low", "medium", "high", "xhigh", "max"},
+				Profiles:  []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"},
 			},
 		}},
 	})
@@ -89,8 +89,8 @@ func TestRegistryUsesTargetReasoningProfiles(t *testing.T) {
 	if !ok || info.Reasoning == nil {
 		t.Fatalf("reasoning info = %+v, ok=%v", info.Reasoning, ok)
 	}
-	if !info.Reasoning.SupportsEffort("xhigh") || !info.Reasoning.SupportsEffort("none") {
-		t.Fatalf("target reasoning efforts = %+v, want xhigh and none", info.Reasoning)
+	if !info.Reasoning.SupportsEffort("xhigh") || !info.Reasoning.SupportsEffort("none") || !info.Reasoning.SupportsEffort("minimal") {
+		t.Fatalf("target reasoning efforts = %+v, want xhigh, none, and minimal", info.Reasoning)
 	}
 }
 

@@ -197,6 +197,54 @@ func TestBuildRequestReasoningBudgetOpenRouter(t *testing.T) {
 	}
 }
 
+func TestBuildRequestReasoningBudgetGoogle(t *testing.T) {
+	req := basicRequest()
+	budget := 2048
+	req.Reasoning = llm.ReasoningConfig{BudgetTokens: &budget}
+	w := buildRequestForMode(req, 0, 0, "google")
+	if w.ReasoningEffort != "" {
+		t.Fatalf("reasoning_effort = %q, want omitted for Google budget", w.ReasoningEffort)
+	}
+	if w.Reasoning != nil {
+		t.Fatalf("reasoning object = %+v, want omitted for Google budget", w.Reasoning)
+	}
+	if w.ExtraBody == nil || w.ExtraBody.Google == nil || w.ExtraBody.Google.ThinkingConfig == nil ||
+		w.ExtraBody.Google.ThinkingConfig.ThinkingBudget == nil || *w.ExtraBody.Google.ThinkingConfig.ThinkingBudget != 2048 {
+		t.Fatalf("extra_body = %+v, want google thinking_budget 2048", w.ExtraBody)
+	}
+
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"extra_body":{"google":{"thinking_config":{"thinking_budget":2048}}}`)) {
+		t.Fatalf("google reasoning budget missing from JSON: %s", b)
+	}
+}
+
+func TestBuildRequestReasoningEffortGoogle(t *testing.T) {
+	req := basicRequest()
+	req.Reasoning = llm.ReasoningConfig{Effort: "medium"}
+	w := buildRequestForMode(req, 0, 0, "google")
+	if w.ReasoningEffort != "medium" {
+		t.Fatalf("reasoning_effort = %q, want medium", w.ReasoningEffort)
+	}
+	if w.ExtraBody != nil {
+		t.Fatalf("extra_body = %+v, want omitted for Google effort", w.ExtraBody)
+	}
+}
+
+func TestBuildRequestReasoningDisabledGoogle(t *testing.T) {
+	req := basicRequest()
+	enabled := false
+	req.Reasoning = llm.ReasoningConfig{Enabled: &enabled}
+	w := buildRequestForMode(req, 0, 0, "google")
+	if w.ExtraBody == nil || w.ExtraBody.Google == nil || w.ExtraBody.Google.ThinkingConfig == nil ||
+		w.ExtraBody.Google.ThinkingConfig.ThinkingBudget == nil || *w.ExtraBody.Google.ThinkingConfig.ThinkingBudget != 0 {
+		t.Fatalf("extra_body = %+v, want google thinking_budget 0", w.ExtraBody)
+	}
+}
+
 func TestBuildRequestReasoningToggleOpenRouter(t *testing.T) {
 	req := basicRequest()
 	enabled := false

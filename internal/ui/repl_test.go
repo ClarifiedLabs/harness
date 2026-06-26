@@ -3057,7 +3057,7 @@ func TestEffortMenuFallsBackToDefaults(t *testing.T) {
 	// Provider-defined (supported, no enumerated options): offer the default
 	// menu (r61).
 	noLevels := &llm.ReasoningInfo{Supported: true}
-	if v, fromCatalog := effortMenu(noLevels); fromCatalog || strings.Join(v, ",") != "none,low,medium,high,xhigh,max" {
+	if v, fromCatalog := effortMenu(noLevels); fromCatalog || strings.Join(v, ",") != "none,minimal,low,medium,high,xhigh,max" {
 		t.Errorf("fallback efforts = %v (catalog=%v), want the default menu", v, fromCatalog)
 	}
 	// Supported via a non-effort control (toggle): effort is not accepted, so no

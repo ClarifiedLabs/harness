@@ -36,7 +36,7 @@ type Options struct {
 	// that reject the standard parameter.
 	OmitMaxOutputTokens bool
 	ResponsesWebSocket  bool
-	ReasoningMode       string // "openai" | "openrouter" | "anthropic"; empty = infer
+	ReasoningMode       string // "openai" | "openrouter" | "google" | "anthropic"; empty = infer
 }
 
 // New constructs the provider selected by opts. The provider is inferred from
@@ -112,6 +112,9 @@ func reasoningMode(providerName, apiType, baseURL, explicit string) string {
 	}
 	if apiType == "anthropic" {
 		return "anthropic"
+	}
+	if strings.EqualFold(providerName, "google") || strings.Contains(strings.ToLower(baseURL), "generativelanguage.googleapis.com") {
+		return "google"
 	}
 	if strings.EqualFold(providerName, "openrouter") || strings.Contains(strings.ToLower(baseURL), "openrouter.ai") {
 		return "openrouter"

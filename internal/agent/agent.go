@@ -1589,7 +1589,7 @@ func add(a, b llm.Usage) llm.Usage {
 		CacheWriteTokens: a.CacheWriteTokens + b.CacheWriteTokens,
 		ReasoningTokens:  a.ReasoningTokens + b.ReasoningTokens,
 		CostUSD:          a.CostUSD + b.CostUSD,
-		CostKnown:        a.CostKnown || b.CostKnown,
+		CostKnown:        aggregateCostKnown(a, b),
 	}
 }
 
@@ -1612,7 +1612,7 @@ func mergeUsage(acc, in llm.Usage) llm.Usage {
 		CacheWriteTokens: max(acc.CacheWriteTokens, in.CacheWriteTokens),
 		ReasoningTokens:  max(acc.ReasoningTokens, in.ReasoningTokens),
 		CostUSD:          mergeCost(acc, in),
-		CostKnown:        acc.CostKnown || in.CostKnown,
+		CostKnown:        mergeCostKnown(acc, in),
 	}
 }
 
@@ -1621,4 +1621,35 @@ func mergeCost(acc, in llm.Usage) float64 {
 		return in.CostUSD
 	}
 	return acc.CostUSD
+}
+
+func mergeCostKnown(acc, in llm.Usage) bool {
+	if in.CostKnown {
+		return true
+	}
+	if usageHasTokens(in) {
+		return false
+	}
+	return acc.CostKnown
+}
+
+func aggregateCostKnown(a, b llm.Usage) bool {
+	aHasUsage := usageHasTokens(a)
+	bHasUsage := usageHasTokens(b)
+	switch {
+	case aHasUsage && !a.CostKnown:
+		return false
+	case bHasUsage && !b.CostKnown:
+		return false
+	default:
+		return a.CostKnown || b.CostKnown
+	}
+}
+
+func usageHasTokens(u llm.Usage) bool {
+	return u.InputTokens != 0 ||
+		u.OutputTokens != 0 ||
+		u.CacheReadTokens != 0 ||
+		u.CacheWriteTokens != 0 ||
+		u.ReasoningTokens != 0
 }

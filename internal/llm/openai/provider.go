@@ -1,8 +1,8 @@
 // Package openai implements the llm.Provider contract against the OpenAI Chat
 // Completions streaming API. The same code path serves OpenAI-compatible servers
-// (vLLM, Ollama, llama.cpp, OpenRouter) via a configurable base URL. It covers
-// tool-call assembly, usage normalization, and the retry-before-first-byte
-// policy (design §5.3–§5.5).
+// (vLLM, Ollama, llama.cpp, OpenRouter, Gemini OpenAI compatibility) via a
+// configurable base URL. It covers tool-call assembly, usage normalization, and
+// the retry-before-first-byte policy (design §5.3–§5.5).
 package openai
 
 import (
@@ -34,7 +34,7 @@ type Config struct {
 	BaseURL       string // default https://api.openai.com/v1
 	ContextWindow int    // drives the default max_tokens floor when MaxTokens is unset
 	OutputLimit   int    // model's real max-output-token limit; 0 = unknown
-	ReasoningMode string // "openai" or "openrouter"; empty defaults to "openai"
+	ReasoningMode string // "openai", "openrouter", or "google"; empty defaults to "openai"
 	HTTPClient    *http.Client
 	Sleep         func(time.Duration) // nil = time.Sleep
 }

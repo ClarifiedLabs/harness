@@ -9,11 +9,12 @@ For tool behavior, see [tools.md](tools.md). For MCP and LSP, see
 
 ## Provider Selection
 
-`harness` fetches providers and models from `harness-model-proxy`. A model value
-like `openrouter:openai/gpt-5.5` selects the proxy provider `openrouter` while
-sending `openai/gpt-5.5` as the provider-local model id. Model selection belongs
-to `harness`: use `-model`, `HARNESS_MODEL`, config `model`, or `/model` in the
-REPL.
+`harness` fetches configured model targets from `harness-model-proxy`. A model
+value like `openrouter:openai/gpt-5.5` selects that exact proxy target. If
+`-provider` is also set, harness resolves the provider-qualified target first
+and reports an error when the model name only matches another provider. Model
+selection belongs to `harness`: use `-model`, `HARNESS_MODEL`, config `model`,
+or `/model` in the REPL.
 
 Use `harness -model-proxy-url http://host:port` when the proxy runs somewhere
 other than `127.0.0.1:8765`. When `-model-proxy-url` /
@@ -24,9 +25,10 @@ Use `harness --check-model-proxy` to verify that the configured proxy is
 reachable. It sends `GET /v1/models`, prints a short success line on stdout, and
 exits before creating a session or starting the REPL.
 
-Use `harness --models` to print the providers and models exposed by the
-configured proxy. Use `harness --agents` to print the resolved built-in and
-config-defined agents. Both commands exit before creating a session.
+Use `harness --models` to print the targets and portable reasoning profiles
+exposed by the configured proxy. Use `harness --agents` to print the resolved
+built-in and config-defined agents. Both commands exit before creating a
+session.
 
 ## Interactive Initial Prompt
 
@@ -226,10 +228,14 @@ Reasoning controls are opt-in: `reasoning_effort` /
 `HARNESS_REASONING_EFFORT` / `-reasoning-effort`, `reasoning_enabled` /
 `HARNESS_REASONING_ENABLED` / `-reasoning-enabled`, and
 `reasoning_budget_tokens` / `HARNESS_REASONING_BUDGET_TOKENS` /
-`-reasoning-budget-tokens`. Responses API reasoning summaries are controlled by
-`reasoning_summary` / `HARNESS_REASONING_SUMMARY` / `-reasoning-summary`; they
-default off and are displayed only when explicitly enabled. `-q` disables
-reasoning summary output unless `-reasoning-summary` is explicitly set on the CLI.
+`-reasoning-budget-tokens`. The CLI treats effort values as portable profiles:
+`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The model proxy
+maps those profiles to the closest provider/model-specific effort value or, for
+budget-token models, to a percentage of the supported maximum budget. Responses
+API reasoning summaries are controlled by `reasoning_summary` /
+`HARNESS_REASONING_SUMMARY` / `-reasoning-summary`; they default off and are
+displayed only when explicitly enabled. `-q` disables reasoning summary output
+unless `-reasoning-summary` is explicitly set on the CLI.
 
 Responses continuation is on by default for proxy providers that report both
 `api_type: "responses"` and `responses_stateful:true`. Disable it with

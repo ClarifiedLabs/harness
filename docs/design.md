@@ -282,6 +282,7 @@ type Request struct {
 }
 
 type ReasoningConfig struct {
+    Profile      string // portable proxy profile; empty/default = provider default
     Effort       string // empty = provider default
     Enabled      *bool  // nil = provider default
     BudgetTokens *int   // nil = provider default
@@ -435,7 +436,7 @@ Edge cases:
 | Streaming usage | final `response.usage` on terminal events | `"stream_options":{"include_usage":true}` (always set) | automatic: input tokens in `message_start`, output in `message_delta` |
 | Stop sequences | not sent | `stop` | `stop_sequences` |
 | Temperature | omitted when nil (never send a spurious 0) | same | same |
-| Reasoning controls | effort: `reasoning.effort`; summary: `reasoning.summary`; budget/toggle not sent | OpenAI: `reasoning_effort`; OpenRouter: `reasoning.effort`, `reasoning.max_tokens`, `reasoning.enabled` | effort: `output_config.effort`; budget: `thinking={type:"enabled", budget_tokens}`; explicit reasoning-off sends `thinking={type:"disabled"}` |
+| Reasoning controls | effort: `reasoning.effort`; summary: `reasoning.summary`; budget/toggle not sent | OpenAI: `reasoning_effort`; OpenRouter: `reasoning.effort`, `reasoning.max_tokens`, `reasoning.enabled`; Google: `reasoning_effort` for effort and `extra_body.google.thinking_config.thinking_budget` for budget/off | effort: `output_config.effort`; budget: `thinking={type:"enabled", budget_tokens}`; explicit reasoning-off sends `thinking={type:"disabled"}` |
 
 The same model-facing `ToolSchema.Parameters` bytes go into `parameters` vs
 `input_schema`. Harness strips nested JSON Schema `description` fields before
@@ -647,8 +648,16 @@ catalog. Configured models without pricing metadata display token counts without
 a dollar figure. Configured models without context-window metadata use a
 conservative 256k default, configurable with `-default-context-window` and
 overridable for a run with `-context-window`. Model prices, context windows,
-output limits, and reasoning metadata are loaded from the model proxy catalog. When reasoning
-controls are set, that metadata is used to validate provider/model reasoning
+output limits, and reasoning metadata are loaded from the model proxy catalog.
+Harness presents reasoning as the portable profile list `none`, `minimal`,
+`low`, `medium`, `high`, `xhigh`, and `max`. The CLI sends the selected profile
+to the model proxy, and the proxy maps it to the closest supported
+provider/model control. For effort-based models, `minimal` is the lowest
+supported non-`none` value and `max` is the highest. For budget-token models,
+profiles map to percentages of the configured maximum budget: `minimal` 5%,
+`low` 25%, `medium` 50%, `high` 75%, `xhigh` 90%, and `max` 100%, clamped to
+the cataloged range. The proxy does not invent budget values when no maximum is
+known. Explicit concrete controls are still validated against provider/model
 support, effort values, and budget ranges.
 Responses API reasoning summaries default off, can be set to `auto`, `concise`,
 `detailed`, or `none`, and are displayed only when explicitly enabled. Quiet mode
@@ -768,8 +777,9 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   map and serves it read-only at `GET /v1/usage` as `{"models": [ {provider, model,
   requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
   reasoning_tokens, cost_usd}, … ]}`, sorted by `provider:model`. Because every priced
-  `/v1/stream` request is recorded, delegate child-agent spend that flows through the
-  proxy is included.
+  `/v1/stream` attempt with usage is recorded, delegate child-agent spend that flows
+  through the proxy is included, including failed attempts that streamed usage before
+  the error.
 - **Pricing staleness.** The `GET /v1/models` catalog response carries an optional
   `pricing` object — `{source_date, max_age_seconds}` — and `max_age_seconds` is the
   configured models.dev refresh interval. `source_date` dates the served prices:
@@ -778,11 +788,13 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   for a manual-only catalog it is the newest modification time among the
   configured provider config files (the date those prices were last written). A
   client can compare them to detect stale prices.
-- **Selection rule:** `harness` fetches `GET /v1/models` from the proxy. A
-  `provider:model` value always strips the `provider:` prefix from the model, but only
-  sets the provider when one was not already chosen (an explicit `-provider` /
-  `HARNESS_PROVIDER` wins). Otherwise an explicit `-provider` selects a proxy provider,
-  and model selection must come from `harness` flags, environment, config, or `/model`.
+- **Selection rule:** `harness` fetches `GET /v1/models` from the proxy. Model
+  selection resolves configured proxy targets, not arbitrary provider-local names.
+  With both provider and model set, harness tries `provider:model` first. If the bare
+  model name only resolves to another provider's target or alias, startup fails with a
+  provider-conflict error instead of silently switching providers. Otherwise an
+  explicit `-provider` selects a proxy provider, and model selection must come from
+  `harness` flags, environment, config, or `/model`.
 - `harness --check-model-proxy` reuses the catalog request as a bounded
   reachability check and exits before session creation, tool setup, hooks, model
   selection prompts, or `/v1/stream`.

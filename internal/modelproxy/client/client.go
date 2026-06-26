@@ -122,7 +122,7 @@ func proxyTargetReasoning(target protocol.Target) *llm.ReasoningInfo {
 	}
 	values := append([]string(nil), target.Reasoning.Profiles...)
 	if len(values) == 0 {
-		values = []string{"none", "low", "medium", "high", "xhigh", "max"}
+		values = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 	}
 	return &llm.ReasoningInfo{
 		Supported: true,

@@ -1840,9 +1840,20 @@ func resolveCatalogSelection(catalog protocol.Catalog, provider, model, preferre
 		model = provider
 	} else if provider != "" && model != "" {
 		if provider != model {
-			if _, ok := catalogTarget(catalog, model); !ok {
-				model = provider + ":" + model
+			qualified := provider + ":" + model
+			if strings.HasPrefix(model, provider+":") {
+				qualified = model
 			}
+			if target, ok := catalogTarget(catalog, qualified); ok {
+				return catalogSelection{Provider: target.ID, Model: target.ID, RegistryModel: target.ID}, nil
+			}
+			if target, ok := catalogTargetForProvider(catalog, provider, model); ok {
+				return catalogSelection{Provider: target.ID, Model: target.ID, RegistryModel: target.ID}, nil
+			}
+			if _, ok := catalogTarget(catalog, model); ok {
+				return catalogSelection{}, fmt.Errorf("target %q belongs to a different provider than %q", model, provider)
+			}
+			model = qualified
 		}
 	}
 	if model != "" {
@@ -1908,16 +1919,34 @@ func clampStrings(s []string, max int) []string {
 func catalogTarget(catalog protocol.Catalog, id string) (protocol.Target, bool) {
 	id = strings.TrimSpace(id)
 	for _, target := range catalog.Targets {
-		if target.ID == id {
+		if catalogTargetMatches(target, id) {
 			return target, true
-		}
-		for _, alias := range target.Aliases {
-			if alias == id {
-				return target, true
-			}
 		}
 	}
 	return protocol.Target{}, false
+}
+
+func catalogTargetForProvider(catalog protocol.Catalog, provider, id string) (protocol.Target, bool) {
+	id = strings.TrimSpace(id)
+	prefix := strings.TrimSpace(provider) + ":"
+	for _, target := range catalog.Targets {
+		if strings.HasPrefix(target.ID, prefix) && catalogTargetMatches(target, id) {
+			return target, true
+		}
+	}
+	return protocol.Target{}, false
+}
+
+func catalogTargetMatches(target protocol.Target, id string) bool {
+	if target.ID == id {
+		return true
+	}
+	for _, alias := range target.Aliases {
+		if alias == id {
+			return true
+		}
+	}
+	return false
 }
 
 func reasoningModeForProvider(catalog protocol.Catalog, providerID string) string {

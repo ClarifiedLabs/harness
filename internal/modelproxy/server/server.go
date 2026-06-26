@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -29,6 +30,18 @@ import (
 )
 
 const maxStreamRequestBytes = 64 << 20
+
+var universalReasoningProfiles = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+var reasoningProfileRank = map[string]int{
+	"none":    0,
+	"minimal": 1,
+	"low":     2,
+	"medium":  3,
+	"high":    4,
+	"xhigh":   5,
+	"max":     6,
+}
 
 type Config struct {
 	ProviderConfigs      []string       `json:"provider_configs"`
@@ -585,6 +598,8 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	apiType = opts.Provider
 	stateful := providerResponsesStateful(target.pc)
 	cacheKey := h.continuationKey(targetID, req.Request.PromptCacheKey)
+	fullRequest := req.Request
+	fullRequest.Messages = append([]llm.Message(nil), req.Request.Messages...)
 	req.Request = h.applyContinuation(cacheKey, stateful, req.Request)
 	provider, err := h.streamProvider(opts, targetID, req.Request.PromptCacheKey)
 	if err != nil {
@@ -604,6 +619,8 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	streamAttempt := func(request llm.Request) (bool, llm.ResponseState) {
+		streamErr = ""
+		errAttrs = nil
 		sentEvents := false
 		var finalState llm.ResponseState
 		for ev, err := range provider.Stream(r.Context(), request) {
@@ -626,6 +643,8 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			events++
 			if ev.Usage != nil {
 				usage = mergeUsage(usage, *ev.Usage)
+				usage = h.priceUsage(targetID, usage)
+				ev.Usage = &usage
 			}
 			if ev.Kind == llm.EventToolCallDone {
 				toolCalls++
@@ -655,9 +674,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	retry, state := streamAttempt(req.Request)
 	if retry {
-		req.Request.StoreResponse = false
-		req.Request.PreviousResponseID = ""
-		retry, state = streamAttempt(req.Request)
+		fullRequest.StoreResponse = false
+		fullRequest.PreviousResponseID = ""
+		retry, state = streamAttempt(fullRequest)
 	}
 	if state.PreviousResponseID != "" {
 		h.saveContinuation(cacheKey, state)
@@ -892,12 +911,15 @@ func (h *Handler) reasoningForTarget(target resolvedTarget, profile string, requ
 	out := llm.ReasoningConfig{Profile: profile, Summary: requested.Summary}
 	switch profile {
 	case "none":
-		disabled := false
-		out.Enabled = &disabled
-	case "low", "medium", "high", "xhigh", "max":
-		out.Effort = mappedReasoningEffort(info, profile)
-		if out.Effort == "" && profile != "none" {
-			out.Effort = profile
+		if info.SupportsToggle() {
+			disabled := false
+			out.Enabled = &disabled
+		}
+	case "minimal", "low", "medium", "high", "xhigh", "max":
+		if effort := mappedReasoningEffort(info, profile); effort != "" {
+			out.Effort = effort
+		} else if budget, ok := mappedReasoningBudget(info, profile); ok {
+			out.BudgetTokens = &budget
 		}
 	}
 	if mode == "responses" {
@@ -919,6 +941,8 @@ func normalizeReasoningProfile(profile string) string {
 		return "default"
 	case "off", "false", "disabled", "disable":
 		return "none"
+	case "minimum", "min":
+		return "minimal"
 	default:
 		return profile
 	}
@@ -926,7 +950,13 @@ func normalizeReasoningProfile(profile string) string {
 
 func mappedReasoningEffort(info *llm.ReasoningInfo, profile string) string {
 	values, ok := info.EffortValues()
-	if !ok || len(values) == 0 {
+	if !ok {
+		if len(info.Options) > 0 {
+			return ""
+		}
+		if profile == "minimal" {
+			return "low"
+		}
 		if profile == "max" {
 			return "high"
 		}
@@ -935,28 +965,120 @@ func mappedReasoningEffort(info *llm.ReasoningInfo, profile string) string {
 		}
 		return profile
 	}
-	has := func(v string) string {
-		for _, value := range values {
-			if strings.EqualFold(strings.TrimSpace(value), v) {
-				return strings.ToLower(strings.TrimSpace(value))
-			}
+	if len(values) == 0 {
+		if profile == "minimal" {
+			return "low"
 		}
+		if profile == "max" {
+			return "high"
+		}
+		if profile == "xhigh" {
+			return "high"
+		}
+		return profile
+	}
+	type candidate struct {
+		value string
+		rank  int
+	}
+	var candidates []candidate
+	seen := map[string]bool{}
+	for _, value := range values {
+		clean := strings.ToLower(strings.TrimSpace(value))
+		if clean == "" || clean == "none" || seen[clean] {
+			continue
+		}
+		rank, ok := reasoningProfileRank[clean]
+		if !ok {
+			continue
+		}
+		candidates = append(candidates, candidate{value: clean, rank: rank})
+		seen[clean] = true
+	}
+	if len(candidates) == 0 {
 		return ""
 	}
-	if got := has(profile); got != "" {
-		return got
-	}
 	switch profile {
-	case "xhigh":
-		return has("high")
-	case "max":
-		for i := len(values) - 1; i >= 0; i-- {
-			if v := strings.ToLower(strings.TrimSpace(values[i])); v != "" && v != "none" {
-				return v
+	case "minimal":
+		best := candidates[0]
+		for _, c := range candidates[1:] {
+			if c.rank < best.rank {
+				best = c
 			}
 		}
+		return best.value
+	case "max":
+		best := candidates[0]
+		for _, c := range candidates[1:] {
+			if c.rank > best.rank {
+				best = c
+			}
+		}
+		return best.value
 	}
-	return ""
+	targetRank, ok := reasoningProfileRank[profile]
+	if !ok {
+		return ""
+	}
+	best := candidates[0]
+	bestDistance := absInt(best.rank - targetRank)
+	for _, c := range candidates[1:] {
+		distance := absInt(c.rank - targetRank)
+		if distance < bestDistance || (distance == bestDistance && c.rank < best.rank) {
+			best = c
+			bestDistance = distance
+		}
+	}
+	return best.value
+}
+
+func mappedReasoningBudget(info *llm.ReasoningInfo, profile string) (int, bool) {
+	minPtr, maxPtr, ok := info.BudgetTokenRange()
+	if !ok || maxPtr == nil || *maxPtr <= 0 {
+		return 0, false
+	}
+	minBudget := 0
+	if minPtr != nil {
+		minBudget = *minPtr
+	}
+	maxBudget := *maxPtr
+	if minBudget > maxBudget {
+		minBudget = maxBudget
+	}
+	var budget int
+	switch profile {
+	case "minimal":
+		budget = int(math.Ceil(float64(maxBudget) * 0.05))
+		if budget < 1 {
+			budget = 1
+		}
+	case "low":
+		budget = int(math.Round(float64(maxBudget) * 0.25))
+	case "medium":
+		budget = int(math.Round(float64(maxBudget) * 0.50))
+	case "high":
+		budget = int(math.Round(float64(maxBudget) * 0.75))
+	case "xhigh":
+		budget = int(math.Round(float64(maxBudget) * 0.90))
+	case "max":
+		budget = maxBudget
+	default:
+		return 0, false
+	}
+	if budget < minBudget {
+		budget = minBudget
+	}
+	if budget > maxBudget {
+		budget = maxBudget
+	}
+	return budget, true
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 func reasoningModeForProviderConfig(pc llm.ProviderConfig) string {
@@ -966,6 +1088,9 @@ func reasoningModeForProviderConfig(pc llm.ProviderConfig) string {
 	}
 	if apiType == "anthropic" || apiType == "responses" {
 		return apiType
+	}
+	if strings.EqualFold(pc.Name, "google") || strings.Contains(strings.ToLower(pc.BaseURL), "generativelanguage.googleapis.com") {
+		return "google"
 	}
 	if strings.EqualFold(pc.Name, "openrouter") || strings.Contains(strings.ToLower(pc.BaseURL), "openrouter.ai") {
 		return "openrouter"
@@ -1242,8 +1367,7 @@ func targetReasoningProfiles(m llm.ModelEntry) *protocol.ReasoningProfiles {
 	if info == nil || !info.Supported {
 		return nil
 	}
-	profiles := []string{"none", "low", "medium", "high", "xhigh", "max"}
-	return &protocol.ReasoningProfiles{Supported: true, Profiles: profiles}
+	return &protocol.ReasoningProfiles{Supported: true, Profiles: append([]string(nil), universalReasoningProfiles...)}
 }
 
 func providerAPIKeyEnv(provider string, getenv func(string) string) string {

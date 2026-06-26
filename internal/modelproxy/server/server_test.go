@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -332,6 +333,157 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	_, _ = io.ReadAll(resp.Body)
 	if len(fp.Requests) != 2 || fp.Requests[1].PreviousResponseID != "resp_1" {
 		t.Fatalf("second provider request = %+v", fp.Requests)
+	}
+}
+
+func TestHandlerStreamRetriesPreviousResponseRejectionWithFullHistory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "responses",
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "sk-test",
+  "models": [{"name":"gpt-5.5","context_window":128000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	var logs bytes.Buffer
+	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
+	if err != nil {
+		t.Fatalf("NewProxyLogger: %v", err)
+	}
+	fp := llmtest.New("responses",
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_1"},
+		llmtest.Step{Err: &llm.APIError{Code: "previous_response_not_found", Message: "previous_response_id is invalid"}},
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_2"},
+	)
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		Logger:    logger,
+		New: func(factory.Options) (llm.Provider, error) {
+			return fp, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	firstMessages := []llm.Message{
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}}},
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first answer"}}},
+	}
+	body, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:gpt-5.5",
+		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a", Messages: firstMessages},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST first stream: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first status = %d", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	fullMessages := append([]llm.Message(nil), firstMessages...)
+	fullMessages = append(fullMessages, llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}})
+	body, _ = json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:gpt-5.5",
+		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a", Messages: fullMessages},
+	})
+	resp, err = srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST second stream: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("second status = %d", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want 3: %+v", len(fp.Requests), fp.Requests)
+	}
+	if fp.Requests[1].PreviousResponseID != "resp_1" || len(fp.Requests[1].Messages) != 1 {
+		t.Fatalf("continued request = prev %q messages %d, want resp_1 and trimmed tail", fp.Requests[1].PreviousResponseID, len(fp.Requests[1].Messages))
+	}
+	if fp.Requests[2].PreviousResponseID != "" || fp.Requests[2].StoreResponse || len(fp.Requests[2].Messages) != len(fullMessages) {
+		t.Fatalf("stateless retry = prev %q store=%v messages=%d, want full history without previous response", fp.Requests[2].PreviousResponseID, fp.Requests[2].StoreResponse, len(fp.Requests[2].Messages))
+	}
+
+	records := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(records) < 2 {
+		t.Fatalf("logs = %q, want at least two records", logs.String())
+	}
+	var last map[string]any
+	if err := json.Unmarshal([]byte(records[len(records)-1]), &last); err != nil {
+		t.Fatalf("decode last log %q: %v", records[len(records)-1], err)
+	}
+	if _, ok := last["err"]; ok {
+		t.Fatalf("successful retry should not log stale err: %+v", last)
+	}
+}
+
+func TestReasoningProfilesMapToEffortAndBudgetControls(t *testing.T) {
+	enabled := true
+	h := &Handler{}
+	effortOnly := resolvedTarget{pc: llm.ProviderConfig{Name: "openrouter", APIType: "openai"}, entry: llm.ModelEntry{
+		Name:      "effort",
+		Reasoning: &enabled,
+		ReasoningOptions: []llm.ReasoningOption{{
+			Type:   "effort",
+			Values: []string{"high"},
+		}},
+	}}
+	if got := h.reasoningForTarget(effortOnly, "low", llm.ReasoningConfig{}); got.Effort != "high" {
+		t.Fatalf("low mapped to effort %q, want high", got.Effort)
+	}
+
+	multiEffort := effortOnly
+	multiEffort.entry.ReasoningOptions = []llm.ReasoningOption{{
+		Type:   "effort",
+		Values: []string{"minimal", "low", "medium", "high", "xhigh"},
+	}}
+	if got := h.reasoningForTarget(multiEffort, "minimal", llm.ReasoningConfig{}); got.Effort != "minimal" {
+		t.Fatalf("minimal mapped to effort %q, want minimal", got.Effort)
+	}
+	if got := h.reasoningForTarget(multiEffort, "max", llm.ReasoningConfig{}); got.Effort != "xhigh" {
+		t.Fatalf("max mapped to effort %q, want xhigh", got.Effort)
+	}
+
+	minBudget, maxBudget := 128, 32768
+	budgetOnly := resolvedTarget{pc: llm.ProviderConfig{Name: "google", APIType: "openai"}, entry: llm.ModelEntry{
+		Name:      "budget",
+		Reasoning: &enabled,
+		ReasoningOptions: []llm.ReasoningOption{{
+			Type: "budget_tokens",
+			Min:  &minBudget,
+			Max:  &maxBudget,
+		}},
+	}}
+	if got := h.reasoningForTarget(budgetOnly, "medium", llm.ReasoningConfig{}); got.BudgetTokens == nil || *got.BudgetTokens != 16384 || got.Effort != "" {
+		t.Fatalf("medium budget mapping = %+v, want budget_tokens 16384 only", got)
+	}
+	if got := h.reasoningForTarget(budgetOnly, "minimal", llm.ReasoningConfig{}); got.BudgetTokens == nil || *got.BudgetTokens != 1639 {
+		t.Fatalf("minimal budget mapping = %+v, want budget_tokens 1639", got)
+	}
+	if got := h.reasoningForTarget(budgetOnly, "none", llm.ReasoningConfig{}); !got.Empty() {
+		t.Fatalf("none without toggle = %+v, want provider default/no controls", got)
+	}
+
+	minZero := 0
+	budgetToggle := budgetOnly
+	budgetToggle.entry.ReasoningOptions = []llm.ReasoningOption{
+		{Type: "toggle"},
+		{Type: "budget_tokens", Min: &minZero, Max: &maxBudget},
+	}
+	if got := h.reasoningForTarget(budgetToggle, "none", llm.ReasoningConfig{}); got.Enabled == nil || *got.Enabled {
+		t.Fatalf("none with toggle = %+v, want explicit disabled", got)
 	}
 }
 
@@ -795,6 +947,80 @@ func TestHandlerUsageAggregatesKnownCostRequests(t *testing.T) {
 	wantCost := 2 * perReq
 	if diff := got.CostUSD - wantCost; diff > 1e-9 || diff < -1e-9 {
 		t.Fatalf("usage cost = %v, want %v", got.CostUSD, wantCost)
+	}
+}
+
+func TestHandlerPricesUsageSnapshotsBeforeStreamError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			return llmtest.New("fake", llmtest.Step{
+				Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &usage}},
+				Err:    &llm.APIError{Code: "server_error", Message: "upstream failed", Retryable: true},
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:priced",
+		Request:  llm.Request{Model: "openai:priced"},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d, want 200", resp.StatusCode)
+	}
+	dec := json.NewDecoder(resp.Body)
+	var first protocol.StreamEnvelope
+	if err := dec.Decode(&first); err != nil {
+		t.Fatalf("decode first envelope: %v", err)
+	}
+	if first.Event == nil || first.Event.Usage == nil || !first.Event.Usage.CostKnown {
+		t.Fatalf("first usage event not priced: %+v", first.Event)
+	}
+	if diff := first.Event.Usage.CostUSD - 0.01; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("usage event cost = %v, want 0.01", first.Event.Usage.CostUSD)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	reportResp, err := srv.Client().Get(srv.URL + "/v1/usage")
+	if err != nil {
+		t.Fatalf("GET usage: %v", err)
+	}
+	defer reportResp.Body.Close()
+	var report protocol.UsageReport
+	if err := json.NewDecoder(reportResp.Body).Decode(&report); err != nil {
+		t.Fatalf("decode usage report: %v", err)
+	}
+	if len(report.Models) != 1 {
+		t.Fatalf("usage report = %+v, want one priced failed request", report.Models)
+	}
+	got := report.Models[0]
+	if got.TargetID != "openai:priced" || got.Requests != 1 || got.InputTokens != 1000 || got.OutputTokens != 2000 {
+		t.Fatalf("usage report entry = %+v, want priced failed request", got)
+	}
+	if diff := got.CostUSD - 0.01; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("usage report cost = %v, want 0.01", got.CostUSD)
 	}
 }
 
