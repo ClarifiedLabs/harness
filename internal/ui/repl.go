@@ -388,7 +388,6 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		turnDone        <-chan struct{}
 		restoreEsc      func() error
 		escPresses      escapePresses
-		handoffNoticed  bool
 	)
 
 	requestRead := func(req replReadRequest) {
@@ -509,6 +508,16 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		return ctx, cancel, interrupted.Load
 	}
+	startPromptTurn := func(prompt string, resolveSkillMentions bool) (exit bool, code int) {
+		ctx, cancel, interrupted := exitContext()
+		err := app.refreshMCP(ctx)
+		cancel()
+		if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return true, ExitInterrupt
+		}
+		startTurn(prompt, resolveSkillMentions)
+		return false, ExitOK
+	}
 	applyAction := func(input replInput) (exit bool, code int) {
 		action := app.handlePromptInput(input, readCommandLine)
 		promptPrinted = false
@@ -523,13 +532,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			if action.echoEditedPrompt {
 				app.echoEditedPrompt(prompt, action.prompt)
 			}
-			ctx, cancel, interrupted := exitContext()
-			err := app.refreshMCP(ctx)
-			cancel()
-			if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return true, ExitInterrupt
-			}
-			startTurn(action.prompt, action.resolveSkillMentions)
+			return startPromptTurn(action.prompt, action.resolveSkillMentions)
 		}
 		return false, ExitOK
 	}
@@ -592,9 +595,47 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				activeReadPause = false
 				turnDone = nil
 				escPresses.reset()
-				handoffNoticed = app.noticeHandoffRequest(handoffNoticed)
 				if exitAfterTurn {
 					return finish(ExitInterrupt)
+				}
+				if app.hasPendingHandoffRequest() {
+					approvalInterrupted := false
+					readHandoffLine := readCommandLine
+					if !usePromptEditor && readPending {
+						readHandoffLine = func(label string) (string, error) {
+							if _, err := fmt.Fprint(app.Errw, label); err != nil {
+								return "", err
+							}
+							select {
+							case <-exit:
+								approvalInterrupted = true
+								return "", context.Canceled
+							case res := <-inputs:
+								readPending = false
+								if !res.ok {
+									setInputEnded(res.err)
+									if res.err != nil {
+										return "", res.err
+									}
+									return "", io.EOF
+								}
+								if res.input.interrupt {
+									approvalInterrupted = true
+									return "", context.Canceled
+								}
+								return strings.TrimSpace(res.input.text), nil
+							}
+						}
+					}
+					if app.handoffCommand("", readHandoffLine) {
+						if exit, code := startPromptTurn(implementationStartPrompt, true); exit {
+							return finish(code)
+						}
+						continue
+					}
+					if approvalInterrupted {
+						return finish(ExitInterrupt)
+					}
 				}
 				if !usePromptEditor && readPending {
 					// A plain read started during the model turn is still
@@ -773,6 +814,14 @@ type replAction struct {
 	resolveSkillMentions bool
 }
 
+type replCommandResult struct {
+	exit                 bool
+	prompt               string
+	resolveSkillMentions bool
+}
+
+const implementationStartPrompt = "Begin implementing the recorded plan now."
+
 type escapePresses struct {
 	last time.Time
 	seen bool
@@ -831,8 +880,12 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 			}
 			return replAction{}
 		}
-		if app.command(line, readCommandLine) {
+		result := app.command(line, readCommandLine)
+		if result.exit {
 			return replAction{exit: true}
+		}
+		if result.prompt != "" {
+			return replAction{prompt: result.prompt, run: true, resolveSkillMentions: result.resolveSkillMentions}
 		}
 		return replAction{}
 	}
@@ -1416,16 +1469,15 @@ func hasTerminalFinalByte(s string) bool {
 	return false
 }
 
-// command dispatches a meta-command line. It returns true when the REPL should
-// exit (/exit, /quit).
-func (app *App) command(line string, readCommandLine func(string) (string, error)) (exit bool) {
+// command dispatches a meta-command line.
+func (app *App) command(line string, readCommandLine func(string) (string, error)) replCommandResult {
 	cmd, arg := commandFields(line)
 
 	switch cmd {
 	case "/help":
 		fmt.Fprintln(app.Errw, helpText)
 	case "/exit", "/quit":
-		return true
+		return replCommandResult{exit: true}
 	case "/clear":
 		app.clear()
 	case "/compact":
@@ -1479,7 +1531,9 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		}
 		app.switchAgent(arg)
 	case "/handoff":
-		app.handoffCommand(arg, readCommandLine)
+		if app.handoffCommand(arg, readCommandLine) {
+			return replCommandResult{prompt: implementationStartPrompt, resolveSkillMentions: true}
+		}
 	case "/background":
 		app.backgroundCommand(arg)
 	case "/skills":
@@ -1495,7 +1549,7 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 			fmt.Fprintf(app.Errw, "unknown command %q; type /help\n", cmd)
 		}
 	}
-	return false
+	return replCommandResult{}
 }
 
 // knownCommands is the meta-command vocabulary used for "did you mean …?"
@@ -2493,32 +2547,22 @@ func (app *App) applyAgentSwitch(name string) error {
 	return nil
 }
 
-// noticeHandoffRequest prints a one-time hint when the request_implementation
-// tool has recorded a pending handoff, so the user knows to run /handoff. It
-// returns the updated "already noticed" flag: true once announced, false when no
-// request is pending so a later request re-announces.
-func (app *App) noticeHandoffRequest(alreadyNoticed bool) bool {
+func (app *App) hasPendingHandoffRequest() bool {
 	if app.Handoff == nil {
 		return false
 	}
-	req, ok := app.Handoff.Peek()
-	if !ok {
-		return false
-	}
-	if !alreadyNoticed {
-		fmt.Fprintf(app.Errw, "[implementation handoff requested for %s — run /handoff to review and approve]\n", req.PlanPath)
-	}
-	return true
+	_, ok := app.Handoff.Peek()
+	return ok
 }
 
 // handoffCommand handles /handoff [agent]: hand off to an implementation agent
 // to carry out the most recently recorded plan, after interactive approval. It
 // consumes any request the request_implementation tool recorded, fills in the
 // target and brief, and switches with a clean, plan-seeded context.
-func (app *App) handoffCommand(arg string, readLine func(string) (string, error)) {
+func (app *App) handoffCommand(arg string, readLine func(string) (string, error)) bool {
 	if app.SwitchAgent == nil {
 		fmt.Fprintln(app.Errw, "[handoff unavailable]")
-		return
+		return false
 	}
 	var req plan.HandoffRequest
 	if app.Handoff != nil {
@@ -2536,13 +2580,13 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 	}
 	if req.PlanPath == "" {
 		fmt.Fprintln(app.Errw, "[handoff: no recorded plan; record one with record_plan first]")
-		return
+		return false
 	}
 	if strings.TrimSpace(req.Brief) == "" {
 		brief, usage, err := app.Agent.GenerateSummary(context.Background(), prompts.HandoffSummary())
 		if err != nil {
 			fmt.Fprintf(app.Errw, "[handoff: could not generate brief: %v]\n", err)
-			return
+			return false
 		}
 		app.addUsage(agent.TurnUsage{Usage: usage})
 		req.Brief = brief
@@ -2559,13 +2603,14 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 	input, err := readLine(fmt.Sprintf("Hand off to %q to implement %s? (y/N): ", target, req.PlanPath))
 	if err != nil {
 		fmt.Fprintf(app.Errw, "[handoff cancelled: %v]\n", err)
-		return
+		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(input)) {
 	case "y", "yes":
-		app.handoffToImplementation(req)
+		return app.handoffToImplementation(req)
 	default:
 		fmt.Fprintln(app.Errw, "[handoff cancelled]")
+		return false
 	}
 }
 
@@ -2575,14 +2620,14 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 // to the recorded plan plus the brief. The implementation agent reads the plan
 // as its task spec. The switch is attempted before any destructive step so a
 // failed switch leaves the session — and the recorded plan — untouched.
-func (app *App) handoffToImplementation(req plan.HandoffRequest) {
+func (app *App) handoffToImplementation(req plan.HandoffRequest) bool {
 	if err := app.applyAgentSwitch(req.Agent); err != nil {
 		fmt.Fprintf(app.Errw, "[handoff failed: %v]\n", err)
-		return
+		return false
 	}
 	if req.Model != "" {
 		if !app.switchModel(req.Model, app.Reasoning) {
-			return
+			return false
 		}
 	}
 	if app.SessionPath != "" {
@@ -2592,7 +2637,7 @@ func (app *App) handoffToImplementation(req plan.HandoffRequest) {
 			Messages: app.Agent.Transcript(),
 		}); err != nil {
 			fmt.Fprintf(app.Errw, "[handoff: archive failed: %v]\n", err)
-			return
+			return false
 		}
 	}
 	seed := fmt.Sprintf("=== Implementation handoff ===\nYour task is specified in the recorded plan — read it now:\n%s\n\nContext from planning (how it was produced and this environment):\n%s",
@@ -2608,6 +2653,7 @@ func (app *App) handoffToImplementation(req plan.HandoffRequest) {
 	}
 	app.saveOrWarn(app.SessionPath)
 	fmt.Fprintf(app.Errw, "[handed off to %s; implementing from a clean context seeded by %s]\n", req.Agent, req.PlanPath)
+	return true
 }
 
 // refreshMCP applies any pending proxy tool-list change at the idle-prompt

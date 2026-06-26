@@ -208,12 +208,14 @@ request so the turn ends on an assistant summary rather than a dangling tool cal
 The `plan` agent investigates and designs without modifying the project. It can
 `record_plan` to persist a plan as markdown under the session (a durable,
 human-diffable artifact), and `request_implementation` to ask to hand the plan
-off to an implementation agent. The handoff is interactive and user-approved:
+off to an implementation agent. The handoff is interactive and user-approved;
+when approved, harness switches agents and immediately starts implementation
+from the recorded plan:
 
 ```text
 /handoff [agent]   review the recorded plan and, on approval, switch this session
                    to an implementation agent with a clean context seeded by the
-                   plan plus a short handoff brief (provenance + environment facts)
+                   plan plus a short handoff brief, then start implementation
 ```
 
 `record_plan` is available to every default agent; the handoff is plan-only and

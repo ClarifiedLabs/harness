@@ -1500,9 +1500,10 @@ backoff allows.
   (defaults to the most recent); the implementation agent reads the plan as its
   task spec rather than being handed only the brief.
 - Tools cannot prompt, so it only records a `plan.HandoffRequest` in a shared
-  `*plan.Pending` holder and returns. The REPL prints a one-time notice after the
-  turn and performs the approval + switch via `/handoff` (§10). It errors in
-  one-shot mode (no interactive approval).
+  `*plan.Pending` holder and returns. At the turn boundary, the REPL asks for
+  approval, performs the switch, and immediately starts the implementation agent;
+  `/handoff` remains available as a manual fallback (§10). It errors in one-shot
+  mode (no interactive approval).
 
 ## 10. CLI / REPL (`internal/ui`)
 
@@ -1718,7 +1719,7 @@ literal `$`.
 | `/mode`, `/mode <name>` | alias for `/agent` |
 | `/plan` | alias for `/agent plan` |
 | `/auto` | alias for `/agent auto` |
-| `/handoff [agent]` | hand the recorded plan to an implementation agent after y/N approval: archive the planning transcript, switch agent (and model when requested), and reseed a clean context with the plan pointer plus the brief (§14) |
+| `/handoff [agent]` | hand the recorded plan to an implementation agent after y/N approval: archive the planning transcript, switch agent (and model when requested), reseed a clean context with the plan pointer plus the brief, and start implementation (§14) |
 | `/background` | list background jobs |
 | `/background <id>` | show a background job's status, result, and transcript path |
 | `/background cancel <id>` | cancel a running background job |
@@ -2097,13 +2098,15 @@ reviewer, or the wide-open default without separate binaries.
   agent pair a smaller `model` with a lower `reasoning`.
 - **Plan → implementation handoff:** the `plan` agent records plans with
   `record_plan` (§9.17) and requests a handoff with `request_implementation` (§9.18).
-  On `/handoff` (§10) the REPL prompts for approval, archives the planning
-  transcript via `SaveCompaction`, switches to the target agent — default `auto`,
-  overridable by `--handoff-agent`/`HARNESS_HANDOFF_AGENT`/`handoff_agent` or the
-  `/handoff <agent>` argument — optionally swaps the model, then reseeds a clean
-  transcript with a pointer to the recorded plan plus the brief and clears the
-  planning todos. Reusing the same in-session switch (not `delegate`) avoids the
-  `delegate` subset gate, so a read-only `plan` agent can hand off to a
+  At the next turn boundary, or on manual `/handoff` (§10), the REPL prompts for
+  approval, archives the planning transcript via `SaveCompaction`, switches to
+  the target agent — default `auto`, overridable by
+  `--handoff-agent`/`HARNESS_HANDOFF_AGENT`/`handoff_agent` or the `/handoff
+  <agent>` argument — optionally swaps the model, then reseeds a clean transcript
+  with a pointer to the recorded plan plus the brief, clears the planning todos,
+  and submits a fixed implementation-start prompt. Reusing the same in-session
+  switch (not `delegate`) avoids the `delegate` subset gate, so a read-only
+  `plan` agent can hand off to a
   write-capable implementation agent. Interactive REPL only.
 - **Tool gating** is the harness's one departure from the no-sandbox stance (§2): the
   agent's tool set is realized by `tools.Registry.Subset`, building a registry that

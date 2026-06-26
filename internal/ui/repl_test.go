@@ -2656,6 +2656,134 @@ func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
 	}
 }
 
+func TestREPLHandoffCommandApprovalStartsImplementationTurn(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("implemented")}, Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.SessionPath = filepath.Join(t.TempDir(), "session")
+	app.Handoff = plan.NewPending()
+	app.Handoff.Request(plan.HandoffRequest{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
+	}
+
+	if code := Run(strings.NewReader("/handoff\ny\n/exit\n"), app, nil); code != ExitOK {
+		t.Fatalf("exit code = %d, want %d; errw=%q", code, ExitOK, errw.String())
+	}
+	if fp.RequestCount() != 1 {
+		t.Fatalf("implementation turn requests = %d, want 1", fp.RequestCount())
+	}
+	if got := transcriptPrompts(app); !strings.Contains(got, implementationStartPrompt) {
+		t.Fatalf("implementation prompt missing from transcript prompts %q", got)
+	}
+	if !strings.Contains(out.String(), "implemented") {
+		t.Fatalf("implementation response missing from stdout: %q", out.String())
+	}
+}
+
+func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) {
+	var out, errw lockedBuffer
+	pending := plan.NewPending()
+	inTurn := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("plan ready")},
+			Stop:   llm.StopEndTurn,
+			Block: func(ctx context.Context) {
+				pending.Request(plan.HandoffRequest{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+				close(inTurn)
+				<-releaseTurn
+			},
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("implemented")}, Stop: llm.StopEndTurn},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+	app.SessionPath = filepath.Join(t.TempDir(), "session")
+	app.Handoff = pending
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
+	}
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, false) }()
+
+	writePipe(t, pw, "make a plan\n")
+	select {
+	case <-inTurn:
+	case <-time.After(time.Second):
+		t.Fatal("plan turn did not start")
+	}
+	close(releaseTurn)
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "Hand off to") }, "handoff approval prompt")
+	writePipe(t, pw, "y\n/exit\n")
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want %d; errw=%q", code, ExitOK, errw.String())
+	}
+	if fp.RequestCount() != 2 {
+		t.Fatalf("model requests = %d, want plan + implementation", fp.RequestCount())
+	}
+	if got := transcriptPrompts(app); !strings.Contains(got, implementationStartPrompt) {
+		t.Fatalf("implementation prompt missing from transcript prompts %q", got)
+	}
+}
+
+func TestREPLAutoHandoffDeclineDoesNotStartImplementation(t *testing.T) {
+	var out, errw bytes.Buffer
+	pending := plan.NewPending()
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("plan ready")},
+		Stop:   llm.StopEndTurn,
+		Block: func(ctx context.Context) {
+			pending.Request(plan.HandoffRequest{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+		},
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Handoff = pending
+	switched := false
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		switched = true
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
+	}
+
+	if code := Run(strings.NewReader("make a plan\nn\n/exit\n"), app, nil); code != ExitOK {
+		t.Fatalf("exit code = %d, want %d; errw=%q", code, ExitOK, errw.String())
+	}
+	if fp.RequestCount() != 1 {
+		t.Fatalf("model requests = %d, want only the plan turn", fp.RequestCount())
+	}
+	if switched {
+		t.Fatal("declined handoff should not switch agents")
+	}
+	if strings.Contains(transcriptPrompts(app), implementationStartPrompt) {
+		t.Fatalf("declined handoff should not submit implementation prompt: %q", transcriptPrompts(app))
+	}
+}
+
+func TestREPLHandoffFailureDoesNotStartImplementationTurn(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("should not run")}, Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Handoff = plan.NewPending()
+	app.Handoff.Request(plan.HandoffRequest{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{}, errors.New("no such agent")
+	}
+
+	if code := Run(strings.NewReader("/handoff\ny\n/exit\n"), app, nil); code != ExitOK {
+		t.Fatalf("exit code = %d, want %d; errw=%q", code, ExitOK, errw.String())
+	}
+	if fp.RequestCount() != 0 {
+		t.Fatalf("implementation turn should not start after handoff failure, got %d requests", fp.RequestCount())
+	}
+	if !strings.Contains(errw.String(), "handoff failed") {
+		t.Fatalf("stderr missing handoff failure: %q", errw.String())
+	}
+}
+
 // liveTestApp is newTestApp with a renderer that enables the live wait counter
 // and during-turn input line, so the typed buffer renders to errw in tests.
 func liveTestApp(t *testing.T, out, errw testWriter, fp *llmtest.FakeProvider) *App {
