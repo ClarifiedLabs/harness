@@ -1067,6 +1067,128 @@ func TestPromptLineEditorViDeleteAndChangeOperators(t *testing.T) {
 	}
 }
 
+func TestPromptLineEditorViDeleteToEndOperator(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		motion string
+	}{
+		{name: "literal dollar", motion: "$"},
+		{name: "shift modifier then dollar", motion: "\x1b[57441;2u$"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			input, ok, err := readViEditedInput(t, "one two three\x1b0wd"+tt.motion+"\r")
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok {
+				t.Fatal("read returned ok=false")
+			}
+			if input.text != "one " {
+				t.Fatalf("input text = %q, want one ", input.text)
+			}
+		})
+	}
+}
+
+func TestPromptLineEditorViCountedMotions(t *testing.T) {
+	input, ok, err := readViEditedInput(t, "abcdefghijk\x1b010liX\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "abcdefghijXk" {
+		t.Fatalf("input text = %q, want abcdefghijXk", input.text)
+	}
+
+	input, ok, err = readViEditedInput(t, "abcdefghijk\x1b010hix\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "xabcdefghijk" {
+		t.Fatalf("input text = %q, want xabcdefghijk", input.text)
+	}
+}
+
+func TestPromptLineEditorViCountedDeleteOperators(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "d count l", input: "abcdefghijk\x1b0d10l\r", want: "k"},
+		{name: "count d word", input: "one two three four\x1b03dw\r", want: "four"},
+		{name: "d count word", input: "one two three four\x1b0d3w\r", want: "four"},
+		{name: "combined counts", input: "one two three four five six seven\x1b02d3w\r", want: "seven"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, ok, err := readViEditedInput(t, tt.input)
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok {
+				t.Fatal("read returned ok=false")
+			}
+			if input.text != tt.want {
+				t.Fatalf("input text = %q, want %q", input.text, tt.want)
+			}
+		})
+	}
+}
+
+func TestPromptLineEditorViCountedChangeAndYankOperators(t *testing.T) {
+	input, ok, err := readViEditedInput(t, "one two three four\x1b0c3wX\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "Xfour" {
+		t.Fatalf("input text = %q, want Xfour", input.text)
+	}
+
+	input, ok, err = readViEditedInput(t, "one two three four\x1b0y3w$p\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "one two three fourone two three " {
+		t.Fatalf("input text = %q, want one two three fourone two three ", input.text)
+	}
+}
+
+func TestPromptLineEditorViCountedCharacterCommands(t *testing.T) {
+	input, ok, err := readViEditedInput(t, "abcdef\x1b03x\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "def" {
+		t.Fatalf("input text = %q, want def", input.text)
+	}
+
+	input, ok, err = readViEditedInput(t, "abcdef\x1b0lll2X\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "adef" {
+		t.Fatalf("input text = %q, want adef", input.text)
+	}
+}
+
 func TestPromptLineEditorViYankAndPasteOperator(t *testing.T) {
 	input, ok, err := readViEditedInput(t, "one two\x1b0yw$p\r")
 	if err != nil {

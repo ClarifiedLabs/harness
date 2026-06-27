@@ -22,8 +22,10 @@ const (
 )
 
 type viLineState struct {
-	mode    viMode
-	pending viOperator
+	mode          viMode
+	pending       viOperator
+	count         int
+	operatorCount int
 }
 
 type viEditResult struct {
@@ -33,9 +35,11 @@ type viEditResult struct {
 	redraw bool
 }
 
+const viMaxCount = 10000
+
 func (v *viLineState) enterNormal(s *lineEditState) {
 	v.mode = viModeNormal
-	v.pending = viOpNone
+	v.resetCommand()
 	if s.cursor > 0 {
 		s.cursor--
 	}
@@ -44,7 +48,60 @@ func (v *viLineState) enterNormal(s *lineEditState) {
 
 func (v *viLineState) enterInsert() {
 	v.mode = viModeInsert
+	v.resetCommand()
+}
+
+func (v *viLineState) resetCommand() {
 	v.pending = viOpNone
+	v.count = 0
+	v.operatorCount = 0
+}
+
+func (v *viLineState) appendCount(r rune) bool {
+	if r < '0' || r > '9' {
+		return false
+	}
+	if r == '0' && v.count == 0 {
+		return false
+	}
+	digit := int(r - '0')
+	if v.count > (viMaxCount-digit)/10 {
+		v.count = viMaxCount
+		return true
+	}
+	v.count = v.count*10 + digit
+	return true
+}
+
+func (v *viLineState) takeCount() int {
+	if v.count == 0 {
+		return 1
+	}
+	count := v.count
+	v.count = 0
+	return count
+}
+
+func (v *viLineState) startOperator(op viOperator, count int) {
+	if count <= 0 {
+		count = 1
+	}
+	v.pending = op
+	v.operatorCount = count
+	v.count = 0
+}
+
+func (v *viLineState) takeOperatorMotionCount() int {
+	motionCount := v.takeCount()
+	operatorCount := v.operatorCount
+	if operatorCount == 0 {
+		operatorCount = 1
+	}
+	v.operatorCount = 0
+	if motionCount > viMaxCount/operatorCount {
+		return viMaxCount
+	}
+	return motionCount * operatorCount
 }
 
 // refreshViPrompt re-renders the prompt for the current vi mode when a
@@ -89,7 +146,7 @@ func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState,
 		return e.viEdit(s)
 	case '\b', del:
 		e.markManualEdit(s)
-		v.pending = viOpNone
+		v.resetCommand()
 		s.viLeft()
 		return viEditResult{redraw: true}, nil
 	case rune(lineTermEscape):
@@ -111,8 +168,10 @@ func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState,
 
 func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, action lineEditAction, text string) (viEditResult, error) {
 	switch action {
-	case lineEditEscape, lineEditShiftModifier, lineEditIgnore:
-		v.pending = viOpNone
+	case lineEditEscape, lineEditIgnore:
+		v.resetCommand()
+		return viEditResult{redraw: true}, nil
+	case lineEditShiftModifier:
 		return viEditResult{redraw: true}, nil
 	case lineEditSubmit:
 		return e.viSubmit(s)
@@ -135,25 +194,32 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 		return e.handleViNormalText(v, s, h, "l"), nil
 	case lineEditBackspace:
 		e.markManualEdit(s)
-		v.pending = viOpNone
+		v.resetCommand()
 		s.viLeft()
 		return viEditResult{redraw: true}, nil
 	case lineEditDelete:
 		return e.handleViNormalText(v, s, h, "x"), nil
 	case lineEditHistoryPrev:
 		e.markManualEdit(s)
-		v.pending = viOpNone
-		h.prev(s)
+		count := v.takeCount()
+		v.resetCommand()
+		for range count {
+			h.prev(s)
+		}
 		s.viClampNormalCursor()
 		return viEditResult{redraw: true}, nil
 	case lineEditHistoryNext:
 		e.markManualEdit(s)
-		v.pending = viOpNone
-		h.next(s)
+		count := v.takeCount()
+		v.resetCommand()
+		for range count {
+			h.next(s)
+		}
 		s.viClampNormalCursor()
 		return viEditResult{redraw: true}, nil
 	case lineEditInsertNewline:
 		e.markManualEdit(s)
+		v.resetCommand()
 		e.viEnterInsert(v, s)
 		if len(s.buf) > 0 && s.cursor < len(s.buf) {
 			s.cursor++
@@ -163,6 +229,7 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 	case lineEditInsertText:
 		return e.handleViNormalText(v, s, h, text), nil
 	case lineEditPaste:
+		v.resetCommand()
 		if len(s.buf) == 0 {
 			s.setPasteSummary(text)
 			e.purePaste = true
@@ -172,7 +239,7 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 		e.viPasteText(s, []rune(text), false)
 		return viEditResult{redraw: true}, nil
 	default:
-		v.pending = viOpNone
+		v.resetCommand()
 		return viEditResult{redraw: true}, nil
 	}
 }
@@ -185,6 +252,9 @@ func (e *promptLineEditor) handleViNormalText(v *viLineState, s *lineEditState, 
 	// flag survives Esc into normal mode and is carried by viSubmit.
 	e.markManualEdit(s)
 	for _, r := range text {
+		if v.appendCount(r) {
+			continue
+		}
 		if v.pending != viOpNone {
 			e.applyViOperator(v, s, r)
 			continue
@@ -198,6 +268,7 @@ func (e *promptLineEditor) handleViNormalText(v *viLineState, s *lineEditState, 
 }
 
 func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *lineEditHistory, r rune) {
+	count := v.takeCount()
 	switch r {
 	case 'i':
 		e.viEnterInsert(v, s)
@@ -213,9 +284,13 @@ func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *l
 		s.cursor = len(s.buf)
 		e.viEnterInsert(v, s)
 	case 'h':
-		s.viLeft()
+		for range count {
+			s.viLeft()
+		}
 	case 'l', ' ':
-		s.viRight()
+		for range count {
+			s.viRight()
+		}
 	case '0':
 		s.cursor = 0
 	case '^':
@@ -223,33 +298,33 @@ func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *l
 	case '$':
 		s.viEnd()
 	case 'w':
-		s.cursor = viNextWordStart(s.buf, s.cursor, false)
+		s.cursor = viRepeatNextWordStart(s.buf, s.cursor, count, false)
 		s.viClampNormalCursor()
 	case 'W':
-		s.cursor = viNextWordStart(s.buf, s.cursor, true)
+		s.cursor = viRepeatNextWordStart(s.buf, s.cursor, count, true)
 		s.viClampNormalCursor()
 	case 'b':
-		s.cursor = viPrevWordStart(s.buf, s.cursor, false)
+		s.cursor = viRepeatPrevWordStart(s.buf, s.cursor, count, false)
 		s.viClampNormalCursor()
 	case 'B':
-		s.cursor = viPrevWordStart(s.buf, s.cursor, true)
+		s.cursor = viRepeatPrevWordStart(s.buf, s.cursor, count, true)
 		s.viClampNormalCursor()
 	case 'e':
-		s.cursor = viWordEnd(s.buf, s.cursor, false)
+		s.cursor = viRepeatWordEnd(s.buf, s.cursor, count, false)
 		s.viClampNormalCursor()
 	case 'E':
-		s.cursor = viWordEnd(s.buf, s.cursor, true)
+		s.cursor = viRepeatWordEnd(s.buf, s.cursor, count, true)
 		s.viClampNormalCursor()
 	case 'x':
-		e.viDeleteChar(s)
+		e.viDeleteChars(s, count)
 	case 'X':
-		e.viDeleteBefore(s)
+		e.viDeleteBeforeCount(s, count)
 	case 'd':
-		v.pending = viOpDelete
+		v.startOperator(viOpDelete, count)
 	case 'c':
-		v.pending = viOpChange
+		v.startOperator(viOpChange, count)
 	case 'y':
-		v.pending = viOpYank
+		v.startOperator(viOpYank, count)
 	case 'D':
 		e.viApplyRange(s, viOpDelete, s.cursor, len(s.buf))
 	case 'C':
@@ -258,30 +333,41 @@ func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *l
 	case 'Y':
 		e.viSetYank(s.buf)
 	case 's':
-		e.viDeleteChar(s)
+		e.viApplyRange(s, viOpChange, s.cursor, s.cursor+count)
 		e.viEnterInsert(v, s)
 	case 'S':
 		e.viApplyLine(s, viOpChange)
 		e.viEnterInsert(v, s)
 	case 'p':
-		e.viPasteText(s, e.viYank, false)
+		for range count {
+			e.viPasteText(s, e.viYank, false)
+		}
 	case 'P':
-		e.viPasteText(s, e.viYank, true)
+		for range count {
+			e.viPasteText(s, e.viYank, true)
+		}
 	case 'k':
-		h.prev(s)
+		for range count {
+			h.prev(s)
+		}
 		s.viClampNormalCursor()
 	case 'j':
-		h.next(s)
+		for range count {
+			h.next(s)
+		}
 		s.viClampNormalCursor()
 	default:
+		v.resetCommand()
 	}
 }
 
 func (e *promptLineEditor) applyViOperator(v *viLineState, s *lineEditState, motion rune) {
 	op := v.pending
+	count := v.takeOperatorMotionCount()
 	v.pending = viOpNone
 
 	if viOperatorRune(op) == motion {
+		v.resetCommand()
 		e.viApplyLine(s, op)
 		if op == viOpChange {
 			e.viEnterInsert(v, s)
@@ -289,8 +375,9 @@ func (e *promptLineEditor) applyViOperator(v *viLineState, s *lineEditState, mot
 		return
 	}
 
-	start, end, ok := viOperatorRange(s, motion, op)
+	start, end, ok := viOperatorRange(s, motion, op, count)
 	if !ok {
+		v.resetCommand()
 		return
 	}
 	e.viApplyRange(s, op, start, end)
@@ -338,19 +425,30 @@ func (e *promptLineEditor) viApplyRange(s *lineEditState, op viOperator, start, 
 }
 
 func (e *promptLineEditor) viDeleteChar(s *lineEditState) {
-	if len(s.buf) == 0 {
+	e.viDeleteChars(s, 1)
+}
+
+func (e *promptLineEditor) viDeleteChars(s *lineEditState, count int) {
+	if len(s.buf) == 0 || count <= 0 {
 		return
 	}
-	e.viSetYank(s.viDeleteRange(s.cursor, s.cursor+1))
-	s.viClampNormalCursor()
+	e.viApplyRange(s, viOpDelete, s.cursor, s.cursor+count)
 }
 
 func (e *promptLineEditor) viDeleteBefore(s *lineEditState) {
-	if len(s.buf) == 0 || s.cursor == 0 {
+	e.viDeleteBeforeCount(s, 1)
+}
+
+func (e *promptLineEditor) viDeleteBeforeCount(s *lineEditState, count int) {
+	if len(s.buf) == 0 || s.cursor == 0 || count <= 0 {
 		return
 	}
-	e.viSetYank(s.viDeleteRange(s.cursor-1, s.cursor))
-	s.cursor--
+	start := s.cursor - count
+	if start < 0 {
+		start = 0
+	}
+	e.viSetYank(s.viDeleteRange(start, s.cursor))
+	s.cursor = start
 	s.viClampNormalCursor()
 }
 
@@ -400,9 +498,12 @@ func (e *promptLineEditor) viEdit(s *lineEditState) (viEditResult, error) {
 	return viEditResult{input: replInput{text: string(s.buf), edit: true}, ok: true, done: true}, nil
 }
 
-func viOperatorRange(s *lineEditState, motion rune, op viOperator) (int, int, bool) {
+func viOperatorRange(s *lineEditState, motion rune, op viOperator, count int) (int, int, bool) {
 	if len(s.buf) == 0 {
 		return 0, 0, op == viOpChange
+	}
+	if count <= 0 {
+		count = 1
 	}
 	cursor := s.cursor
 	switch motion {
@@ -410,9 +511,9 @@ func viOperatorRange(s *lineEditState, motion rune, op viOperator) (int, int, bo
 		if cursor == 0 {
 			return 0, 0, false
 		}
-		return cursor - 1, cursor, true
+		return cursor - count, cursor, true
 	case 'l', ' ':
-		return cursor, cursor + 1, true
+		return cursor, cursor + count, true
 	case '0':
 		return 0, cursor, true
 	case '^':
@@ -420,31 +521,34 @@ func viOperatorRange(s *lineEditState, motion rune, op viOperator) (int, int, bo
 	case '$':
 		return cursor, len(s.buf), true
 	case 'b':
-		target := viPrevWordStart(s.buf, cursor, false)
+		target := viRepeatPrevWordStart(s.buf, cursor, count, false)
 		return target, cursor, true
 	case 'B':
-		target := viPrevWordStart(s.buf, cursor, true)
+		target := viRepeatPrevWordStart(s.buf, cursor, count, true)
 		return target, cursor, true
 	case 'e':
-		target := viWordEnd(s.buf, cursor, false)
+		target := viRepeatWordEnd(s.buf, cursor, count, false)
 		return cursor, target + 1, true
 	case 'E':
-		target := viWordEnd(s.buf, cursor, true)
+		target := viRepeatWordEnd(s.buf, cursor, count, true)
 		return cursor, target + 1, true
 	case 'w':
-		return cursor, viForwardOperatorEnd(s.buf, cursor, op, false), true
+		return cursor, viForwardOperatorEnd(s.buf, cursor, op, count, false), true
 	case 'W':
-		return cursor, viForwardOperatorEnd(s.buf, cursor, op, true), true
+		return cursor, viForwardOperatorEnd(s.buf, cursor, op, count, true), true
 	default:
 		return 0, 0, false
 	}
 }
 
-func viForwardOperatorEnd(buf []rune, cursor int, op viOperator, big bool) int {
-	if op == viOpChange && cursor < len(buf) && !unicode.IsSpace(buf[cursor]) {
+func viForwardOperatorEnd(buf []rune, cursor int, op viOperator, count int, big bool) int {
+	if count <= 0 {
+		count = 1
+	}
+	if op == viOpChange && count == 1 && cursor < len(buf) && !unicode.IsSpace(buf[cursor]) {
 		return viWordEnd(buf, cursor, big) + 1
 	}
-	return viNextWordStart(buf, cursor, big)
+	return viRepeatNextWordStart(buf, cursor, count, big)
 }
 
 func (s *lineEditState) viLeft() {
@@ -589,6 +693,20 @@ func viNextWordStart(buf []rune, pos int, big bool) int {
 	return i
 }
 
+func viRepeatNextWordStart(buf []rune, pos, count int, big bool) int {
+	if count <= 0 {
+		count = 1
+	}
+	for range count {
+		next := viNextWordStart(buf, pos, big)
+		if next == pos {
+			return next
+		}
+		pos = next
+	}
+	return pos
+}
+
 func viPrevWordStart(buf []rune, pos int, big bool) int {
 	if len(buf) == 0 || pos <= 0 {
 		return 0
@@ -615,6 +733,20 @@ func viPrevWordStart(buf []rune, pos int, big bool) int {
 		i--
 	}
 	return i
+}
+
+func viRepeatPrevWordStart(buf []rune, pos, count int, big bool) int {
+	if count <= 0 {
+		count = 1
+	}
+	for range count {
+		next := viPrevWordStart(buf, pos, big)
+		if next == pos {
+			return next
+		}
+		pos = next
+	}
+	return pos
 }
 
 func viWordEnd(buf []rune, pos int, big bool) int {
@@ -671,4 +803,18 @@ func viWordEnd(buf []rune, pos int, big bool) int {
 		i++
 	}
 	return i
+}
+
+func viRepeatWordEnd(buf []rune, pos, count int, big bool) int {
+	if count <= 0 {
+		count = 1
+	}
+	for range count {
+		next := viWordEnd(buf, pos, big)
+		if next == pos {
+			return next
+		}
+		pos = next
+	}
+	return pos
 }
