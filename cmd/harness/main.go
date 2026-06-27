@@ -2275,13 +2275,6 @@ func formatPriceComponent(v float64) string {
 	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", v), "0"), ".")
 }
 
-func providerModelKey(provider, model string) string {
-	if provider == "" || model == "" {
-		return model
-	}
-	return provider + ":" + model
-}
-
 func pickerPageSize(env environment) int {
 	rows := 0
 	if env.terminalRows != nil {
@@ -2406,13 +2399,6 @@ func projectAgentsMDPath(dir string) string {
 		return ""
 	}
 	return filepath.Join(dir, "AGENTS.md")
-}
-
-// loadAgentsMD reads AGENTS.md from dir when present. A missing file returns
-// an empty string with no error; other read failures (e.g. permissions) are
-// returned so the user isn't silently surprised.
-func loadAgentsMD(dir string) (string, error) {
-	return loadAgentsMDFile(projectAgentsMDPath(dir))
 }
 
 // loadAgentsMDFile reads path when present. A missing or empty path returns an

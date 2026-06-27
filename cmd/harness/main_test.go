@@ -2209,42 +2209,6 @@ type runtimeErr struct{ s string }
 
 func (e *runtimeErr) Error() string { return e.s }
 
-func TestLoadAgentsMD_Missing(t *testing.T) {
-	dir := t.TempDir()
-	content, err := loadAgentsMD(dir)
-	if err != nil {
-		t.Fatalf("loadAgentsMD should not error on missing file: %v", err)
-	}
-	if content != "" {
-		t.Errorf("loadAgentsMD should return empty string for missing file, got %q", content)
-	}
-}
-
-func TestLoadAgentsMD_Present(t *testing.T) {
-	dir := t.TempDir()
-	expected := "# Project Rules\n\nAlways write tests."
-	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(expected), 0o644); err != nil {
-		t.Fatalf("write AGENTS.md: %v", err)
-	}
-	content, err := loadAgentsMD(dir)
-	if err != nil {
-		t.Fatalf("loadAgentsMD should not error: %v", err)
-	}
-	if content != expected {
-		t.Errorf("loadAgentsMD returned %q, want %q", content, expected)
-	}
-}
-
-func TestLoadAgentsMD_EmptyDir(t *testing.T) {
-	content, err := loadAgentsMD("")
-	if err != nil {
-		t.Fatalf("loadAgentsMD should not error on empty dir: %v", err)
-	}
-	if content != "" {
-		t.Errorf("loadAgentsMD should return empty string for empty dir, got %q", content)
-	}
-}
-
 // runInDirSystemPrompt runs a one-shot turn from dir (the chdir is load-bearing:
 // project AGENTS.md auto-discovery reads the real working directory) and returns
 // the system prompt the fake provider received.
