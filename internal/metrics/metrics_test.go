@@ -72,20 +72,18 @@ func TestCounterIdenticalLabelsCoalesce(t *testing.T) {
 func TestCounterEmptyVsMissingLabel(t *testing.T) {
 	r := New()
 	c := r.Counter("c", "h")
-	c.Add(1, map[string]string{"a": ""})     // present, empty
-	c.Add(1, map[string]string{})            // missing label a
+	c.Add(1, map[string]string{"a": ""}) // present but empty
+	c.Add(1, map[string]string{})        // missing label a
 	var b strings.Builder
 	r.Render(&b)
 	out := b.String()
-	// Two distinct series: one with a="", one with no label.
-	if strings.Count(out, "c{") != 1 {
-		// only the labeled one renders with braces
+	// Prometheus treats an empty-valued label as identical to a missing label,
+	// so the two adds coalesce into a single bare series rendered without braces.
+	if strings.Contains(out, "c{") {
+		t.Errorf("empty label should render bare (no braces), got:\n%s", out)
 	}
-	if !strings.Contains(out, `c{a=""} 1`) {
-		t.Errorf("missing empty-value series:\n%s", out)
-	}
-	if !strings.Contains(out, "c 1\n") {
-		t.Errorf("missing no-label series:\n%s", out)
+	if !strings.Contains(out, "c 2\n") {
+		t.Errorf("empty and missing label should coalesce to `c 2`:\n%s", out)
 	}
 }
 

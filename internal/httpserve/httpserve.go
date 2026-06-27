@@ -31,11 +31,22 @@ func New(addr string, handler http.Handler) *http.Server {
 // Run starts srv and blocks until it exits or ctx is cancelled. A clean
 // http.Server shutdown returns nil; startup, bind, and serve errors are returned.
 func Run(ctx context.Context, srv *http.Server) error {
-	ln, err := net.Listen("tcp", srv.Addr)
+	ln, err := net.Listen("tcp", listenAddr(srv.Addr))
 	if err != nil {
 		return err
 	}
 	return Serve(ctx, srv, ln)
+}
+
+// listenAddr resolves the bind address, defaulting an empty value to ":http"
+// (port 80) to match http.Server.ListenAndServe. net.Listen, which Run uses so
+// it can detect bind failures immediately, would otherwise bind an OS-assigned
+// random port for an empty address.
+func listenAddr(addr string) string {
+	if addr == "" {
+		return ":http"
+	}
+	return addr
 }
 
 // Serve serves an already-bound listener and blocks until it exits or ctx is

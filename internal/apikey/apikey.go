@@ -156,16 +156,18 @@ func (s Store) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// AuthorizedName returns the matched API key's stored Name for r, if any. It
-// returns ("", false) when auth is disabled (no keys configured), the request
-// was not authenticated by Store.Middleware, or no key matched. Handlers use
-// the false case to bucket metrics under the sentinel "anonymous".
+// AuthorizedName returns the matched API key's stored Name for r, and whether
+// the request was authenticated by Store.Middleware. ok is true whenever a key
+// matched — even if that key's Name is empty — so an authenticated empty-name key
+// is not conflated with the unauthenticated case. It returns ("", false) when
+// auth is disabled (no keys configured), the request was not authenticated, or no
+// key matched; handlers use the false case to bucket metrics under "anonymous".
 func AuthorizedName(r *http.Request) (string, bool) {
 	if r == nil {
 		return "", false
 	}
 	v, ok := r.Context().Value(ctxKey{}).(string)
-	if !ok || v == "" {
+	if !ok {
 		return "", false
 	}
 	return v, true

@@ -303,3 +303,52 @@ func TestResolveMetricsEmptyFlagListenFallsBack(t *testing.T) {
 		t.Fatalf("empty flag listen = %q, want %q", listen, defaultMetricsListen)
 	}
 }
+
+func TestResolveMetricsEmptyFlagDoesNotClobberConfigListen(t *testing.T) {
+	// An explicitly-empty -metrics-listen= flag must not discard a configured
+	// listen address in favor of the default.
+	_, listen := resolveMetrics(server.Config{Metrics: server.MetricsConfig{Listen: "0.0.0.0:9100"}}, false, false, "", true)
+	if listen != "0.0.0.0:9100" {
+		t.Fatalf("empty flag with config listen = %q, want 0.0.0.0:9100", listen)
+	}
+}
+
+func TestNewMetricsRegistryDisabledIsNil(t *testing.T) {
+	// A nil registry is how collection is turned off at the handler level, so
+	// -no-metrics must not even build one.
+	if reg := newMetricsRegistry(false); reg != nil {
+		t.Fatal("disabled metrics should yield a nil registry")
+	}
+}
+
+func TestNewMetricsRegistryEnabledHasVersionOnlyBuildInfo(t *testing.T) {
+	reg := newMetricsRegistry(true)
+	if reg == nil {
+		t.Fatal("enabled metrics should yield a registry")
+	}
+	var b strings.Builder
+	reg.Render(&b)
+	out := b.String()
+	if !strings.Contains(out, "# TYPE model_proxy_build_info gauge") {
+		t.Errorf("missing build_info gauge:\n%s", out)
+	}
+	// build_info is labeled by version only (not provider/model/key).
+	if !strings.Contains(out, `model_proxy_build_info{version=`) {
+		t.Errorf("build_info should carry a version label:\n%s", out)
+	}
+	if strings.Contains(out, "provider=") || strings.Contains(out, "model=") {
+		t.Errorf("build_info should not carry provider/model labels:\n%s", out)
+	}
+}
+
+func TestMetricsListenExplicit(t *testing.T) {
+	if metricsListenExplicit(server.Config{}, false) {
+		t.Error("default listen (no flag, no config) should not be explicit")
+	}
+	if !metricsListenExplicit(server.Config{}, true) {
+		t.Error("-metrics-listen flag set should be explicit")
+	}
+	if !metricsListenExplicit(server.Config{Metrics: server.MetricsConfig{Listen: "0.0.0.0:9100"}}, false) {
+		t.Error("config listen set should be explicit")
+	}
+}

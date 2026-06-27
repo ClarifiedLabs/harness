@@ -810,15 +810,25 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   `model_proxy_input_tokens_total`, `model_proxy_output_tokens_total`,
   `model_proxy_cache_read_tokens_total`, `model_proxy_cache_write_tokens_total`,
   `model_proxy_reasoning_tokens_total`, `model_proxy_cost_usd_total`, and
-  `model_proxy_request_duration_seconds_total` — plus a `model_proxy_build_info`
-  gauge — are all labeled by `provider`, `model`, and `key`. The `key` label is the
+  `model_proxy_request_duration_seconds_total` — are labeled by `provider`,
+  `model`, and `key`, while the `model_proxy_build_info` gauge is labeled by
+  `version` only. The `key` label is the
   authorizing API key's stored `Name` (stashed in the request context by the auth
   middleware) or the sentinel `"anonymous"` when auth is disabled. Token counters
   are recorded for every `/v1/stream` that produced usage, priced or not — a
   deliberate superset of `/v1/usage`'s priced-only cost rollup — while
   `cost_usd_total` is recorded only when the model's price is known.
-  `-no-metrics` disables the endpoint and `-metrics-listen` moves it (both override
-  the config-file `metrics` object's `enabled`/`listen`; the default is enabled).
+  `requests_total`/`errors_total` cover every `/v1/stream` attempt, including ones
+  that fail before the target resolves (malformed/oversized/unknown `target_id`,
+  with `provider`/`model` omitted) and ones rejected by API-key auth (401); a
+  client disconnecting mid-stream is not counted as an error. An empty label value
+  is treated as absent (Prometheus semantics), so an omitted `provider`/`model`
+  collapses to a single aggregate series rather than `provider=""`.
+  `-no-metrics` disables the endpoint — and, via a nil registry, the per-request
+  recording itself — and `-metrics-listen` moves it (both override the config-file
+  `metrics` object's `enabled`/`listen`; the default is enabled). When the listen
+  address is set explicitly (flag or config) a bind failure is fatal rather than
+  silently disabling the endpoint.
   Histograms are out of scope; `requests_total` + `duration_seconds_total` give an
   average. The exposition is hand-rolled via the reusable stdlib-only
   `internal/metrics` package so the MCP proxy (or any future service) can adopt it.

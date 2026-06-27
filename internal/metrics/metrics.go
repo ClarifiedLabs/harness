@@ -104,22 +104,63 @@ func (m meta) name() string     { return m.metricName }
 func (m meta) help() string     { return m.metricHelp }
 func (m meta) kind() metricKind { return m.metricKind }
 
-// series is one observed label set and its accumulated value.
+// series is one observed label set and its accumulated value. The value is a
+// float64 because that is Prometheus's native counter/gauge type: integer token
+// counts are represented exactly below 2^53 (far beyond any realistic volume),
+// and accumulated cost carries only negligible floating-point rounding.
 type series struct {
 	labels map[string]string
 	value  float64
 }
 
-// labelSeriesKey returns a deterministic join of labels (sorted by name) used as
-// the dedup/accumulation key. A missing label is omitted from the key; an empty
-// value contributes `name=""`, which is a distinct key from a missing label.
-func labelSeriesKey(labels map[string]string) string {
-	if len(labels) == 0 {
-		return ""
+// seriesTable stores the observed series for one collector, indexed by
+// labelSeriesKey for O(1) upsert. It is not safe for concurrent use; the owning
+// collector serializes access with its mutex.
+type seriesTable struct {
+	serieses []series
+	index    map[string]int // labelSeriesKey -> position in serieses
+}
+
+// upsert adds value to (accumulate) or replaces (!accumulate) the series for the
+// given label set, creating it if absent. This is the single shared accumulation
+// path behind Counter.Add, Gauge.Set, and Gauge.Add.
+func (t *seriesTable) upsert(labels map[string]string, value float64, accumulate bool) {
+	key := labelSeriesKey(labels)
+	if i, ok := t.index[key]; ok {
+		if accumulate {
+			t.serieses[i].value += value
+		} else {
+			t.serieses[i].value = value
+		}
+		return
 	}
+	if t.index == nil {
+		t.index = make(map[string]int)
+	}
+	t.index[key] = len(t.serieses)
+	t.serieses = append(t.serieses, series{labels: copyLabels(labels), value: value})
+}
+
+// snapshot returns a copy of the stored series, safe to sort and render without
+// holding the collector lock.
+func (t *seriesTable) snapshot() []series {
+	return append([]series(nil), t.serieses...)
+}
+
+// labelSeriesKey returns a deterministic join of labels (sorted by name) used as
+// the dedup/accumulation key. Empty-valued labels are skipped: Prometheus treats
+// an empty-valued label as identical to a missing one, so `{a:"x",b:""}` and
+// `{a:"x"}` produce the same key and accumulate into one series.
+func labelSeriesKey(labels map[string]string) string {
 	names := make([]string, 0, len(labels))
-	for k := range labels {
+	for k, v := range labels {
+		if v == "" {
+			continue
+		}
 		names = append(names, k)
+	}
+	if len(names) == 0 {
+		return ""
 	}
 	sort.Strings(names)
 	var b strings.Builder
@@ -247,12 +288,25 @@ func escapeHelp(v string) string {
 	return b.String()
 }
 
+// writeCollector renders one collector's HELP/TYPE preamble followed by its
+// series, sorted by label value column-by-column so output is stable across
+// runs. snapshot must be a private copy the caller owns; it is sorted in place.
+func writeCollector(w io.Writer, m meta, snapshot []series) {
+	writeMeta(w, m)
+	names := observedLabelNames(snapshot)
+	sort.SliceStable(snapshot, func(i, j int) bool {
+		return seriesLess(names, snapshot[i], snapshot[j])
+	})
+	for _, s := range snapshot {
+		writeSeries(w, m.metricName, s)
+	}
+}
+
 // Counter is a monotonically increasing counter metric.
 type Counter struct {
 	meta
-	mu      sync.Mutex
-	serieses []series
-	order    []string // observed label names, in first-seen order
+	mu    sync.Mutex
+	table seriesTable
 }
 
 // Inc adds 1 for the given label set.
@@ -261,82 +315,45 @@ func (c *Counter) Inc(labels map[string]string) { c.Add(1, labels) }
 // Add adds value to the counter for the given label set. It is safe for
 // concurrent use.
 func (c *Counter) Add(value float64, labels map[string]string) {
-	key := labelSeriesKey(labels)
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	for i := range c.serieses {
-		if labelSeriesKey(c.serieses[i].labels) == key {
-			c.serieses[i].value += value
-			return
-		}
-	}
-	c.serieses = append(c.serieses, series{labels: copyLabels(labels), value: value})
+	c.table.upsert(labels, value, true)
+	c.mu.Unlock()
 }
 
 func (c *Counter) write(w io.Writer) {
 	c.mu.Lock()
-	serieses := append([]series(nil), c.serieses...)
+	snapshot := c.table.snapshot()
 	c.mu.Unlock()
-	writeMeta(w, c.meta)
-	names := observedLabelNames(serieses)
-	sorted := append([]series(nil), serieses...)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		return seriesLess(names, sorted[i], sorted[j])
-	})
-	for _, s := range sorted {
-		writeSeries(w, c.metricName, s)
-	}
+	writeCollector(w, c.meta, snapshot)
 }
 
 // Gauge is a metric that can go up and down.
 type Gauge struct {
 	meta
-	mu      sync.Mutex
-	serieses []series
+	mu    sync.Mutex
+	table seriesTable
 }
 
 // Set replaces the gauge value for the given label set.
 func (g *Gauge) Set(value float64, labels map[string]string) {
-	key := labelSeriesKey(labels)
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	for i := range g.serieses {
-		if labelSeriesKey(g.serieses[i].labels) == key {
-			g.serieses[i].value = value
-			return
-		}
-	}
-	g.serieses = append(g.serieses, series{labels: copyLabels(labels), value: value})
+	g.table.upsert(labels, value, false)
+	g.mu.Unlock()
 }
 
 // Add adjusts the gauge value for the given label set, creating it at zero if
 // absent.
 func (g *Gauge) Add(value float64, labels map[string]string) {
-	key := labelSeriesKey(labels)
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	for i := range g.serieses {
-		if labelSeriesKey(g.serieses[i].labels) == key {
-			g.serieses[i].value += value
-			return
-		}
-	}
-	g.serieses = append(g.serieses, series{labels: copyLabels(labels), value: value})
+	g.table.upsert(labels, value, true)
+	g.mu.Unlock()
 }
 
 func (g *Gauge) write(w io.Writer) {
 	g.mu.Lock()
-	serieses := append([]series(nil), g.serieses...)
+	snapshot := g.table.snapshot()
 	g.mu.Unlock()
-	writeMeta(w, g.meta)
-	names := observedLabelNames(serieses)
-	sorted := append([]series(nil), serieses...)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		return seriesLess(names, sorted[i], sorted[j])
-	})
-	for _, s := range sorted {
-		writeSeries(w, g.metricName, s)
-	}
+	writeCollector(w, g.meta, snapshot)
 }
 
 // seriesLess orders two series by label value, column by column, in the given
@@ -356,14 +373,19 @@ func seriesLess(names []string, a, b series) bool {
 }
 
 // copyLabels returns a defensive copy so later mutation of the caller's map does
-// not change a stored series.
+// not change a stored series. Empty-valued labels are dropped so a stored series
+// never carries one (an empty value is equivalent to a missing label), which
+// makes it render bare and coalesce with the missing-label series.
 func copyLabels(labels map[string]string) map[string]string {
-	if len(labels) == 0 {
-		return nil
-	}
 	out := make(map[string]string, len(labels))
 	for k, v := range labels {
+		if v == "" {
+			continue
+		}
 		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

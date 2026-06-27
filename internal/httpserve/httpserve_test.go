@@ -149,6 +149,18 @@ func TestServeClosedListenerReturnsError(t *testing.T) {
 	}
 }
 
+func TestListenAddrDefaultsToHTTPPort(t *testing.T) {
+	// Run binds via net.Listen, which (unlike http.Server.ListenAndServe) does
+	// not substitute ":http" for an empty address; listenAddr restores that
+	// default so an empty Addr does not bind a random ephemeral port.
+	if got := listenAddr(""); got != ":http" {
+		t.Fatalf("listenAddr(\"\") = %q, want \":http\"", got)
+	}
+	if got := listenAddr("127.0.0.1:9090"); got != "127.0.0.1:9090" {
+		t.Fatalf("listenAddr passthrough = %q, want unchanged", got)
+	}
+}
+
 func freeAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

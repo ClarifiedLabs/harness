@@ -180,15 +180,15 @@ type resolvedTarget struct {
 // per stream request. They are created once in NewHandler so HELP/TYPE always
 // appear in exposition even with zero traffic.
 type metricsCollectors struct {
-	requests  *metrics.Counter
-	errors    *metrics.Counter
-	input     *metrics.Counter
-	output    *metrics.Counter
-	cacheRead *metrics.Counter
+	requests   *metrics.Counter
+	errors     *metrics.Counter
+	input      *metrics.Counter
+	output     *metrics.Counter
+	cacheRead  *metrics.Counter
 	cacheWrite *metrics.Counter
-	reasoning *metrics.Counter
-	cost      *metrics.Counter
-	duration  *metrics.Counter
+	reasoning  *metrics.Counter
+	cost       *metrics.Counter
+	duration   *metrics.Counter
 }
 
 type Handler struct {
@@ -206,8 +206,8 @@ type Handler struct {
 	newProvider          func(factory.Options) (llm.Provider, error)
 	nextRequestID        atomic.Uint64
 
-	metrics     *metrics.Registry
-	metricFams  *metricsCollectors
+	metrics    *metrics.Registry
+	metricFams *metricsCollectors
 
 	usageMu sync.Mutex
 	usage   map[usageKey]*protocol.ModelUsage
@@ -296,14 +296,60 @@ func registerMetricFamilies(r *metrics.Registry) *metricsCollectors {
 	}
 }
 
-// recordMetrics stamps one stream request into the metrics registry. It is
-// called once per /v1/stream (including bounded retries) whenever targetID is
-// known, regardless of whether the model is priced, so free models still get
-// token counters. Cost is recorded only when usage.CostKnown. failed is true
-// when the stream errored or returned a 4xx/5xx status. The key label is the
-// authorizing API key's name ("anonymous" when auth is disabled or absent).
+// streamPath is the route the proxy streams model responses on.
+const streamPath = "/v1/stream"
+
+// ObserveAuth wraps the authenticated handler so stream requests rejected by
+// API-key auth (401) are still metered. It re-checks store.Authorize for the
+// stream route only and records a rejected request before delegating to next
+// (which writes the actual 401). When auth is not required store.Authorize is
+// always true, so nothing is counted. Counting here, rather than in the apikey
+// middleware, keeps that package free of a metrics dependency.
+func ObserveAuth(h *Handler, store apikey.Store, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == streamPath && !store.Authorize(r) {
+			h.RecordRejectedStream(r)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// RecordRejectedStream meters a stream request rejected before it reaches the
+// handler (a 401). provider/model are unknown and omitted; the key label is the
+// authorizing name or "anonymous".
+func (h *Handler) RecordRejectedStream(r *http.Request) {
+	if h.metrics == nil || h.metricFams == nil {
+		return
+	}
+	key := "anonymous"
+	if name, ok := apikey.AuthorizedName(r); ok {
+		key = name
+	}
+	labels := map[string]string{"key": key}
+	h.metricFams.requests.Inc(labels)
+	h.metricFams.errors.Inc(labels)
+}
+
+// streamFailed reports whether a completed stream should count as an error for
+// metrics. A client disconnecting mid-stream cancels the request context and
+// surfaces as a stream error, but that is not a server/provider failure, so it
+// is excluded; genuine errors and 4xx/5xx statuses still count.
+func streamFailed(ctx context.Context, streamErr string, status int) bool {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return false
+	}
+	return streamErr != "" || status >= http.StatusBadRequest
+}
+
+// recordMetrics stamps one stream request into the metrics registry. It is called
+// once per /v1/stream (including bounded retries), regardless of whether the
+// target resolved (empty provider/model labels are omitted) or the model is
+// priced, so free models and pre-resolution failures still get counters. Cost is
+// recorded only when usage.CostKnown. failed is true when the stream errored or
+// returned a 4xx/5xx status. The key label is the authorizing API key's name
+// ("anonymous" when auth is disabled or absent).
 func (h *Handler) recordMetrics(r *http.Request, providerID, model string, usage llm.Usage, duration time.Duration, failed bool) {
-	if h.metrics == nil || h.metricFams == nil || providerID == "" || model == "" {
+	if h.metrics == nil || h.metricFams == nil {
 		return
 	}
 	key := "anonymous"
@@ -488,7 +534,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleUsage(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/input_tokens":
 		h.handleInputTokens(w, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/v1/stream":
+	case r.Method == http.MethodPost && r.URL.Path == streamPath:
 		h.handleStream(w, r)
 	default:
 		http.NotFound(w, r)
@@ -654,9 +700,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			attrs = append(attrs, "cost_usd", usage.CostUSD)
 			h.recordUsage(targetID, usage, usage.CostUSD)
 		}
-		if targetID != "" {
-			h.recordMetrics(r, providerID, model, usage, time.Since(start), streamErr != "" || cw.statusCode() >= http.StatusBadRequest)
-		}
+		// Record every stream request, even one that failed before the target
+		// resolved (provider/model empty), so requests_total/errors_total reflect
+		// all client-facing failures, not just post-resolution ones.
+		h.recordMetrics(r, providerID, model, usage, time.Since(start), streamFailed(r.Context(), streamErr, cw.statusCode()))
 		if streamErr != "" {
 			attrs = append(attrs, "err", streamErr)
 			attrs = append(attrs, errAttrs...)
@@ -1352,6 +1399,14 @@ func LoadConfig(path string) (Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
+	}
+	// Reject keys with an empty/invalid name: such a key authenticates but its
+	// per-key metrics would be misattributed to the "anonymous" bucket. KeyNameRE
+	// is otherwise only enforced at key generation.
+	for i, e := range cfg.APIKeys {
+		if !apikey.KeyNameRE.MatchString(e.Name) {
+			return Config{}, fmt.Errorf("api_keys[%d]: name %q must match %s", i, e.Name, apikey.KeyNameRE.String())
+		}
 	}
 	return cfg, nil
 }

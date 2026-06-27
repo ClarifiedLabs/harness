@@ -151,6 +151,27 @@ func TestMiddlewareWrongKeyHasNoName(t *testing.T) {
 	}
 }
 
+func TestAuthorizedNameAuthenticatedEmptyNameReportsAuthenticated(t *testing.T) {
+	// A key with an empty Name still authenticates; AuthorizedName must report it
+	// as authenticated (ok=true) so it is not conflated with the unauthenticated
+	// "anonymous" case (ok=false) and its metrics misattributed.
+	var s Store
+	s.Add("", "hmp_secret", time.Time{}) // empty name, valid hash
+
+	var gotName string
+	var gotOK bool
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		gotName, gotOK = AuthorizedName(r)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer hmp_secret")
+	s.Middleware(next).ServeHTTP(httptest.NewRecorder(), req)
+
+	if !gotOK || gotName != "" {
+		t.Fatalf("AuthorizedName = (%q, %v), want (\"\", true)", gotName, gotOK)
+	}
+}
+
 func TestAuthorizedNameAuthDisabled(t *testing.T) {
 	var s Store // no keys -> auth not required
 	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {

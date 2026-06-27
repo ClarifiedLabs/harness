@@ -221,6 +221,33 @@ func TestHandlerInputTokensUnsupported(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsInvalidAPIKeyName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	// A valid hash but an empty name: such a key authenticates yet would have its
+	// metrics misattributed to "anonymous", so config load must reject it.
+	if err := os.WriteFile(path, []byte(`{
+  "provider_configs": ["p.json"],
+  "api_keys": [{"name": "", "hash": "AAAA"}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("LoadConfig accepted an api_keys entry with an empty name, want error")
+	}
+
+	// A well-formed name still loads.
+	if err := os.WriteFile(path, []byte(`{
+  "provider_configs": ["p.json"],
+  "api_keys": [{"name": "laptop", "hash": "AAAA"}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err != nil {
+		t.Fatalf("LoadConfig rejected a valid api_keys name: %v", err)
+	}
+}
+
 func TestLoadConfigParsesModelsDevCacheTTL(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -1641,6 +1668,140 @@ func TestHandlerMetricsRecordsErrors(t *testing.T) {
 	}
 	if !strings.Contains(out, seriesLine("model_proxy_requests_total", labels)+" 1") {
 		t.Errorf("missing requests series for failed request:\n%s", out)
+	}
+}
+
+func TestHandlerMetricsRecordsRejectedAuth(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	reg := metrics.New()
+	cfg := Config{
+		ProviderConfigs: []string{"openai.json"},
+		APIKeys:         []apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmp_secret")}},
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    cfg,
+		Metrics:   reg,
+		New: func(factory.Options) (llm.Provider, error) {
+			return llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	store := cfg.APIKeyStore()
+	srv := httptest.NewServer(ObserveAuth(handler, store, store.Middleware(handler)))
+	defer srv.Close()
+
+	// An unauthenticated stream request is rejected with 401 before the handler,
+	// but must still be metered so an auth-failure flood produces error signal.
+	body, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:priced",
+		Request:  llm.Request{Model: "openai:priced"},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST stream: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated stream status = %d, want 401", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	var b strings.Builder
+	reg.Render(&b)
+	out := b.String()
+	labels := map[string]string{"key": "anonymous"}
+	if !strings.Contains(out, seriesLine("model_proxy_requests_total", labels)+" 1") {
+		t.Errorf("rejected auth not counted in requests_total:\n%s", out)
+	}
+	if !strings.Contains(out, seriesLine("model_proxy_errors_total", labels)+" 1") {
+		t.Errorf("rejected auth not counted in errors_total:\n%s", out)
+	}
+}
+
+func TestStreamFailedExcludesClientCancel(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	// A client disconnect cancels the request context and surfaces as a stream
+	// error, but it is not a server/provider failure.
+	if streamFailed(canceled, "context canceled", http.StatusOK) {
+		t.Error("client-canceled stream should not be marked failed")
+	}
+	// A genuine provider error on a live context still counts.
+	if !streamFailed(context.Background(), "boom", http.StatusOK) {
+		t.Error("provider error should be marked failed")
+	}
+	// A 5xx on a live context counts.
+	if !streamFailed(context.Background(), "", http.StatusInternalServerError) {
+		t.Error("5xx should be marked failed")
+	}
+	// A clean success does not.
+	if streamFailed(context.Background(), "", http.StatusOK) {
+		t.Error("clean success should not be marked failed")
+	}
+}
+
+func TestHandlerMetricsRecordsUnresolvedRequest(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	reg := metrics.New()
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		Metrics:   reg,
+		New: func(factory.Options) (llm.Provider, error) {
+			return llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	// An unknown target_id fails before resolution: no provider/model, but the
+	// request and its error must still be metered.
+	body, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:nope",
+		Request:  llm.Request{Model: "openai:nope"},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST stream: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unresolved target status = %d, want 400", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	var b strings.Builder
+	reg.Render(&b)
+	out := b.String()
+	// provider/model are empty and so omitted; only the key label remains.
+	labels := map[string]string{"key": "anonymous"}
+	if !strings.Contains(out, seriesLine("model_proxy_requests_total", labels)+" 1") {
+		t.Errorf("unresolved request not counted in requests_total:\n%s", out)
+	}
+	if !strings.Contains(out, seriesLine("model_proxy_errors_total", labels)+" 1") {
+		t.Errorf("unresolved request not counted in errors_total:\n%s", out)
 	}
 }
 
