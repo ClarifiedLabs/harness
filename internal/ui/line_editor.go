@@ -101,11 +101,11 @@ type promptLineEditor struct {
 	prevBufferEmpty bool // whether the buffer was empty before the current keystroke
 	purePaste       bool // an unedited paste fills the buffer; submitted literally
 
-	// viPrompt, when non-nil, returns the fully rendered prompt for a given vi
-	// mode. It is invoked at the two mode-transition chokepoints (enterNormal /
-	// enterInsert) and once at read start so a {vimode} placeholder in the prompt
-	// flips live as the user switches mode. nil in emacs mode, templates without
-	// a vimode variant, and tests — behavior is then identical to today.
+	// viPrompt, when non-nil, returns the fully rendered main REPL prompt for a
+	// given vi mode. It is invoked at the two mode-transition chokepoints
+	// (enterNormal / enterInsert) and once at read start so a {vimode}
+	// placeholder flips live as the user switches mode. The REPL temporarily
+	// clears it for auxiliary prompts whose labels are context-specific.
 	viPrompt func(viMode) string
 }
 

@@ -727,7 +727,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			promptPrinted = true
 		}
 		if !plainPromptRead {
-			requestRead(replReadRequest{prompt: prompt, promptEditor: usePromptEditor, prefill: pendingPrefill})
+			requestRead(replReadRequest{prompt: prompt, promptEditor: usePromptEditor, replPrompt: true, prefill: pendingPrefill})
 			pendingPrefill = ""
 		}
 		select {
@@ -835,6 +835,10 @@ type replReadResult struct {
 type replReadRequest struct {
 	prompt       string
 	promptEditor bool
+	// replPrompt marks the main idle REPL prompt. Only that prompt may use the
+	// configured live vi-mode prompt renderer; auxiliary reads keep their own
+	// context-specific labels while still using the raw line editor.
+	replPrompt bool
 	// turnEdit routes the read through the during-turn keystroke capture: echo
 	// stays off, keystrokes accumulate into a shared buffer rendered live on the
 	// status line, and the read returns only on Ctrl-C, Esc, or cancellation
@@ -1141,6 +1145,13 @@ func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
 		return rr.readTurn()
 	}
 	if req.promptEditor && rr.editor != nil {
+		restoreViPrompt := rr.editor.viPrompt
+		if !req.replPrompt {
+			rr.editor.viPrompt = nil
+		}
+		defer func() {
+			rr.editor.viPrompt = restoreViPrompt
+		}()
 		input, ok, err := rr.editor.readPrefilled(req.prompt, req.prefill)
 		if ok {
 			input.interactive = true

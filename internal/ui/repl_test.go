@@ -1235,6 +1235,91 @@ func TestREPLModelCommand(t *testing.T) {
 	}
 }
 
+type replTestModelPick struct {
+	id   string
+	name string
+}
+
+func (m replTestModelPick) PickerID() string   { return m.id }
+func (m replTestModelPick) PickerName() string { return m.name }
+
+func TestREPLAuxiliaryPromptsKeepContextLabelsWithViModePrompt(t *testing.T) {
+	var out, errw bytes.Buffer
+	initial := llmtest.New("initial")
+	switched := llmtest.New("switched")
+	app := newTestApp(t, &out, &errw, initial)
+	app.Prompt = "MAIN {vimode:short}> "
+	app.PromptEditMode = "vi"
+	app.Registry = llm.NewRegistryWithQualified(nil, map[string]llm.ModelInfo{
+		"openai:gpt-5.5": {
+			Reasoning: &llm.ReasoningInfo{
+				Supported: true,
+				Options: []llm.ReasoningOption{{
+					Type:   "effort",
+					Values: []string{"minimal", "low", "medium", "high", "xhigh", "max"},
+				}},
+			},
+		},
+	})
+	app.PickModel = func(pio PickerIO) (string, error) {
+		model, err := Pick(pio.ReadLine, pio.Writer, PickerOptions[replTestModelPick]{
+			Items: []replTestModelPick{{
+				id:   "openai:gpt-5.5",
+				name: "gpt-5.5",
+			}},
+			PageSize: pio.PageSize,
+			Prompt:   "Model target (number/id, /search, n/p, q): ",
+			Kind:     "model target",
+		})
+		if err != nil {
+			return "", err
+		}
+		return model.id, nil
+	}
+	var switchedReasoning llm.ReasoningConfig
+	app.SwitchModel = func(model string, reasoning llm.ReasoningConfig) (ModelSelection, error) {
+		if model != "openai:gpt-5.5" {
+			t.Fatalf("switch model = %q, want openai:gpt-5.5", model)
+		}
+		switchedReasoning = reasoning
+		return ModelSelection{
+			Provider:      "openai",
+			Model:         "gpt-5.5",
+			RegistryModel: model,
+			BaseURL:       "https://api.openai.com/v1",
+			Runtime:       switched,
+			Reasoning:     reasoning,
+		}, nil
+	}
+	app.PromptDefaultModelSave = true
+	app.SaveDefaultModel = func(provider, model string, reasoning llm.ReasoningConfig) error {
+		t.Fatal("SaveDefaultModel should not be called after declining the prompt")
+		return nil
+	}
+
+	if code := run(strings.NewReader("/model\r1\rhigh\rn\r/exit\r"), app, nil, true); code != ExitOK {
+		t.Fatalf("exit code = %d, want %d; errw=%q", code, ExitOK, errw.String())
+	}
+	if switchedReasoning.Effort != "high" {
+		t.Fatalf("switch reasoning effort = %q, want high", switchedReasoning.Effort)
+	}
+	got := errw.String()
+	for _, want := range []string{
+		"MAIN I> ",
+		"Model target (number/id, /search, n/p, q): ",
+		"Reasoning effort (default/minimal/low/medium/high/xhigh/max",
+		"Save openai:gpt-5.5 as the default model? (y/N): ",
+		"model switched",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Invalid reasoning effort") {
+		t.Fatalf("auxiliary prompts consumed the scripted flow incorrectly:\n%s", got)
+	}
+}
+
 func TestREPLModelCommandSwitchesNextTurn(t *testing.T) {
 	var out, errw bytes.Buffer
 	initial := llmtest.New("initial")
