@@ -1080,6 +1080,105 @@ func TestPromptLineEditorViYankAndPasteOperator(t *testing.T) {
 	}
 }
 
+func TestPromptLineEditorViPromptFlipsInsertNormalOnEscAndBack(t *testing.T) {
+	var out bytes.Buffer
+	// Type abc, Esc into normal mode, 'h' move left, 'x' delete 'b', Enter submit.
+	editor := newPromptLineEditor(strings.NewReader("abc\x1bhx\r"), &out)
+	editor.setEditMode("vi")
+	editor.columns = func() int { return 40 }
+	editor.viPrompt = func(m viMode) string {
+		switch m {
+		case viModeInsert:
+			return "INSERT> "
+		case viModeNormal:
+			return "NORMAL> "
+		default:
+			return "> "
+		}
+	}
+
+	input, ok, err := editor.read("")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	// abc -> Esc/h moves cursor onto 'b' -> x deletes 'b' -> ac.
+	if input.text != "ac" {
+		t.Fatalf("input text = %q, want ac", input.text)
+	}
+	// The editor redraws after each keystroke, re-emitting the prompt. Each
+	// transition through the chokepoints refreshed s.prompt, so the cumulative
+	// output stream carries both labels.
+	if got := out.String(); !strings.Contains(got, "INSERT> ") || !strings.Contains(got, "NORMAL> ") {
+		t.Fatalf("output should contain both INSERT and NORMAL prompt labels:\n%q", got)
+	}
+}
+
+func TestPromptLineEditorViPromptFlipsInsertNormalOnI(t *testing.T) {
+	var out bytes.Buffer
+	// Type abc, Esc to normal, delete 'b' with 'x' (still normal), then 'i' back
+	// to insert, type 'X', submit.
+	editor := newPromptLineEditor(strings.NewReader("abc\x1bxiX\r"), &out)
+	editor.setEditMode("vi")
+	editor.columns = func() int { return 40 }
+	editor.viPrompt = func(m viMode) string {
+		if m == viModeInsert {
+			return "INSERT> "
+		}
+		return "NORMAL> "
+	}
+
+	input, ok, err := editor.read("")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	// abc -> Esc (cursor on 'c') -> x deletes 'c' -> ab (cursor on 'b')
+	// -> i inserts at 'b' -> X typed -> aXb
+	if input.text != "aXb" {
+		t.Fatalf("input text = %q, want aXb", input.text)
+	}
+	// The editor redraws after each keystroke, re-emitting the prompt. The 'i'
+	// transition back to insert mode refreshed s.prompt, so the cumulative
+	// output stream carries the NORMAL label (from Esc) followed by INSERT again.
+	if got := out.String(); !strings.Contains(got, "INSERT> ") || !strings.Contains(got, "NORMAL> ") {
+		t.Fatalf("output should contain both INSERT and NORMAL prompt labels:\n%q", got)
+	}
+}
+
+func TestPromptLineEditorViPromptNoCallbackUnchanged(t *testing.T) {
+	// When no viPrompt callback is wired (tests, emacs mode, templates without
+	// a vimode variant), the prompt must render exactly as passed.
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("abc\x1bhx\r"), &out)
+	editor.setEditMode("vi")
+	editor.columns = func() int { return 40 }
+
+	input, ok, err := editor.read("FIXED> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "ac" {
+		t.Fatalf("input text = %q, want ac", input.text)
+	}
+	screen := newPromptTestScreen(4, 40, 0)
+	screen.feed(out.String())
+	joined := strings.Join(screen.visibleLines(), "\n")
+	if !strings.Contains(joined, "FIXED> ") {
+		t.Fatalf("screen should show the fixed prompt unchanged:\n%s", joined)
+	}
+	if strings.Contains(joined, "INSERT") || strings.Contains(joined, "NORMAL") {
+		t.Fatalf("no vimode label should appear without a viPrompt callback:\n%s", joined)
+	}
+}
+
 type promptTestScreen struct {
 	rows, cols int
 	row, col   int

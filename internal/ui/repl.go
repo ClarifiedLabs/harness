@@ -286,7 +286,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		promptTemplate, _ = replprompt.Compile(replprompt.DefaultFormat)
 	}
 	renderPrompt := func() string {
-		return promptTemplate.Render(app.promptValues(promptTemplate))
+		return promptTemplate.Render(app.promptValues(promptTemplate, idleViMode(app.PromptEditMode)))
 	}
 
 	// Restore a usable terminal before the first prompt (termios sane plus an
@@ -338,6 +338,16 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	app.SetPromptEditMode = func(mode string) {
 		if reader.editor != nil {
 			reader.editor.setEditMode(mode)
+		}
+	}
+	// When the prompt template uses a {vimode} placeholder, re-render the prompt
+	// for the current vi mode at each mode transition (Esc/i/a/...) so the label
+	// flips live during a read. The closure mirrors renderPrompt but with the
+	// editor's current mode; it is nil in emacs mode and for templates without a
+	// vimode variant, so behavior is unchanged there and in tests.
+	if usePromptEditor && reader.editor != nil && promptTemplate.UsesViMode() {
+		reader.editor.viPrompt = func(m viMode) string {
+			return promptTemplate.Render(app.promptValues(promptTemplate, viModeName(m)))
 		}
 	}
 	// Render the during-turn typed buffer live on the status line (during-turn
@@ -740,7 +750,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}
 }
 
-func (app *App) promptValues(t *replprompt.Template) replprompt.Values {
+func (app *App) promptValues(t *replprompt.Template, viMode string) replprompt.Values {
 	var cwd string
 	if t.Uses("cwd") || t.Uses("git_branch") {
 		var err error
@@ -760,6 +770,32 @@ func (app *App) promptValues(t *replprompt.Template) replprompt.Values {
 		Provider:  app.Provider,
 		Model:     app.Model,
 		ModelInfo: replprompt.ModelInfo(app.Provider, app.Model),
+		ViMode:    viMode,
+	}
+}
+
+// idleViMode returns the raw-prompt vi mode name to render at idle boundaries
+// (before a read starts). The editor always begins a read in insert mode, so
+// vi mode renders "insert"; emacs mode (and any non-vi value) renders "" so a
+// {vimode} placeholder stays empty outside vi mode.
+func idleViMode(editMode string) string {
+	if promptEditMode(editMode) == promptEditModeVi {
+		return "insert"
+	}
+	return ""
+}
+
+// viModeName maps an editor viMode to the raw mode name carried by
+// replprompt.Values, so the viPrompt callback can re-render the prompt for the
+// current mode on each transition. Non-vi modes map to "" (empty label).
+func viModeName(m viMode) string {
+	switch m {
+	case viModeInsert:
+		return "insert"
+	case viModeNormal:
+		return "normal"
+	default:
+		return ""
 	}
 }
 

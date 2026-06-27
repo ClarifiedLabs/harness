@@ -353,6 +353,16 @@ func TestReplPromptValidation(t *testing.T) {
 	if _, err := Load([]string{"-repl-prompt", `line\n{agent}> `}, noEnv, ""); err != nil {
 		t.Fatalf("escaped newline prompt should load: %v", err)
 	}
+	// The vimode placeholder variants are valid config and should load.
+	for _, p := range []string{"{vimode}> ", "{vimode:long}> ", "{vimode:short}> "} {
+		if _, err := Load([]string{"-repl-prompt", p}, noEnv, ""); err != nil {
+			t.Fatalf("vimode prompt %q should load: %v", p, err)
+		}
+	}
+	// An unknown vimode style is still an unregistered field and must fail.
+	if _, err := Load([]string{"-repl-prompt", "{vimode:bogus}> "}, noEnv, ""); err == nil {
+		t.Fatalf("expected {vimode:bogus} repl_prompt placeholder to fail")
+	}
 }
 
 func TestReplEditModePrecedenceAndValidation(t *testing.T) {

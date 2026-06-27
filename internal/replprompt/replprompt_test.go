@@ -60,6 +60,8 @@ func TestCompileRejectsInvalidFormat(t *testing.T) {
 		"{}",
 		`bad\q`,
 		`bad\`,
+		"{vimode:bogus}",
+		"{agent:x}",
 	}
 
 	for _, format := range tests {
@@ -91,6 +93,104 @@ func TestUsesReportsReferencedPlaceholders(t *testing.T) {
 	}
 	if tmpl.Uses("git_branch") || tmpl.Uses("missing") {
 		t.Fatalf("Uses should ignore absent or invalid placeholders")
+	}
+}
+
+func TestViModeLabel(t *testing.T) {
+	cases := []struct {
+		mode  string
+		style string
+		want  string
+	}{
+		{"insert", "long", "INSERT"},
+		{"normal", "long", "NORMAL"},
+		{"", "long", ""},
+		{"insert", "short", "I"},
+		{"normal", "short", "N"},
+		{"", "short", ""},
+		// The default style (empty) behaves like long, used by bare {vimode}.
+		{"insert", "", "INSERT"},
+		{"normal", "", "NORMAL"},
+		{"", "", ""},
+		// Unknown style renders empty.
+		{"insert", "bogus", ""},
+	}
+	for _, tt := range cases {
+		t.Run(tt.mode+"/"+tt.style, func(t *testing.T) {
+			if got := ViModeLabel(tt.mode, tt.style); got != tt.want {
+				t.Fatalf("ViModeLabel(%q, %q) = %q, want %q", tt.mode, tt.style, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderViModePlaceholder(t *testing.T) {
+	cases := []struct {
+		name   string
+		format string
+		mode   string
+		want   string
+	}{
+		{"vimode insert", "{vimode}> ", "insert", "INSERT> "},
+		{"vimode normal", "{vimode}> ", "normal", "NORMAL> "},
+		{"vimode emacs empty", "{vimode}> ", "", "> "},
+		{"vimode:long insert", "{vimode:long}> ", "insert", "INSERT> "},
+		{"vimode:long normal", "{vimode:long}> ", "normal", "NORMAL> "},
+		{"vimode:short insert", "{vimode:short}> ", "insert", "I> "},
+		{"vimode:short normal", "{vimode:short}> ", "normal", "N> "},
+		{"vimode:short emacs empty", "{vimode:short}> ", "", "> "},
+		// Bare {vimode} behaves identically to {vimode:long}.
+		{"vimode bare equals long", "{vimode}={vimode:long}> ", "normal", "NORMAL=NORMAL> "},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpl, err := Compile(tt.format)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			got := tmpl.Render(Values{ViMode: tt.mode})
+			if got != tt.want {
+				t.Fatalf("render = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUsesViModeReportsAnyVariant(t *testing.T) {
+	for _, format := range []string{"{vimode}> ", "{vimode:long}> ", "{vimode:short}> "} {
+		tmpl, err := Compile(format)
+		if err != nil {
+			t.Fatalf("Compile(%q): %v", format, err)
+		}
+		if !tmpl.UsesViMode() {
+			t.Errorf("UsesViMode(%q) = false, want true", format)
+		}
+		// The specific variant should also be individually reported by Uses.
+		name := format[1:strings.IndexByte(format, '}')]
+		if !tmpl.Uses(name) {
+			t.Errorf("Uses(%q) = false, want true for %q", name, format)
+		}
+	}
+	tmpl, err := Compile("{agent}> ")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if tmpl.UsesViMode() {
+		t.Fatalf("UsesViMode should be false when no vimode variant is present")
+	}
+}
+
+func TestDefaultFormatUnchanged(t *testing.T) {
+	if DefaultFormat != "[{agent}] > " {
+		t.Fatalf("DefaultFormat = %q, want [{agent}] > ", DefaultFormat)
+	}
+	tmpl, err := Compile("")
+	if err != nil {
+		t.Fatalf("Compile(\"\"): %v", err)
+	}
+	got := tmpl.Render(Values{Agent: "auto", ViMode: "insert"})
+	if got != "[auto] > " {
+		t.Fatalf("default render = %q, want [auto] >  (ViMode must not leak in)", got)
 	}
 }
 

@@ -340,6 +340,48 @@ func TestREPLPromptUpdatesAfterAgentSwitch(t *testing.T) {
 	}
 }
 
+func TestREPLPromptRendersViModeLabel(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Prompt = "{vimode}> "
+	app.PromptEditMode = "vi"
+
+	// Drive the prompt editor in vi mode: type "hi", Esc into normal mode, 'i'
+	// back to insert, then Enter to submit. The {vimode} label should render
+	// INSERT at idle (the editor starts a read in insert mode), flip to NORMAL
+	// after Esc, and back to INSERT after 'i'.
+	if code := run(strings.NewReader("hi\x1bi\r/exit\n"), app, nil, true); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	got := errw.String()
+	if !strings.Contains(got, "INSERT> ") {
+		t.Fatalf("prompt should show INSERT label, got %q", got)
+	}
+	if !strings.Contains(got, "NORMAL> ") {
+		t.Fatalf("prompt should show NORMAL label after Esc, got %q", got)
+	}
+}
+
+func TestREPLPromptViModeEmptyInEmacsMode(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Prompt = "{vimode}> "
+	app.PromptEditMode = "emacs"
+
+	if code := run(strings.NewReader("hi\r/exit\n"), app, nil, true); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	got := errw.String()
+	if strings.Contains(got, "INSERT") || strings.Contains(got, "NORMAL") {
+		t.Fatalf("vimode label should be empty in emacs mode, got %q", got)
+	}
+	if !strings.Contains(got, "> ") {
+		t.Fatalf("prompt should still render the trailing > in emacs mode, got %q", got)
+	}
+}
+
 func TestREPLPromptRendersGitBranchEachPrompt(t *testing.T) {
 	gitAvailableForPromptTest(t)
 	dir := scratchPromptRepo(t)

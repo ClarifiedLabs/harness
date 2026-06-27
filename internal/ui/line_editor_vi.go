@@ -47,6 +47,32 @@ func (v *viLineState) enterInsert() {
 	v.pending = viOpNone
 }
 
+// refreshViPrompt re-renders the prompt for the current vi mode when a
+// viPrompt callback is wired (a {vimode} placeholder is in use) and the editor
+// is in vi mode, so the label flips live at the mode-transition chokepoints.
+// It is a no-op otherwise: the callback is nil in emacs mode / templates without
+// a vimode variant / tests, and emacs mode has no vi mode to reflect (the
+// prompt's empty {vimode} label is already rendered by renderPrompt at idle).
+func (e *promptLineEditor) refreshViPrompt(v *viLineState, s *lineEditState) {
+	if e.viPrompt == nil || e.editMode != promptEditModeVi {
+		return
+	}
+	s.prompt = e.viPrompt(v.mode)
+}
+
+// viEnterNormal / viEnterInsert are the routed mode transitions: they perform
+// the underlying state change then refresh the prompt, so every mode switch
+// funnels through refreshViPrompt regardless of which command triggered it.
+func (e *promptLineEditor) viEnterNormal(v *viLineState, s *lineEditState) {
+	v.enterNormal(s)
+	e.refreshViPrompt(v, s)
+}
+
+func (e *promptLineEditor) viEnterInsert(v *viLineState, s *lineEditState) {
+	v.enterInsert()
+	e.refreshViPrompt(v, s)
+}
+
 func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, r rune) (viEditResult, error) {
 	e.clearShiftEnterPending()
 	switch r {
@@ -128,7 +154,7 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 		return viEditResult{redraw: true}, nil
 	case lineEditInsertNewline:
 		e.markManualEdit(s)
-		v.enterInsert()
+		e.viEnterInsert(v, s)
 		if len(s.buf) > 0 && s.cursor < len(s.buf) {
 			s.cursor++
 		}
@@ -140,7 +166,7 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 		if len(s.buf) == 0 {
 			s.setPasteSummary(text)
 			e.purePaste = true
-			v.enterInsert()
+			e.viEnterInsert(v, s)
 			return viEditResult{redraw: true}, nil
 		}
 		e.viPasteText(s, []rune(text), false)
@@ -174,18 +200,18 @@ func (e *promptLineEditor) handleViNormalText(v *viLineState, s *lineEditState, 
 func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *lineEditHistory, r rune) {
 	switch r {
 	case 'i':
-		v.enterInsert()
+		e.viEnterInsert(v, s)
 	case 'a':
 		if len(s.buf) > 0 && s.cursor < len(s.buf) {
 			s.cursor++
 		}
-		v.enterInsert()
+		e.viEnterInsert(v, s)
 	case 'I':
 		s.cursor = 0
-		v.enterInsert()
+		e.viEnterInsert(v, s)
 	case 'A':
 		s.cursor = len(s.buf)
-		v.enterInsert()
+		e.viEnterInsert(v, s)
 	case 'h':
 		s.viLeft()
 	case 'l', ' ':
@@ -228,15 +254,15 @@ func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *l
 		e.viApplyRange(s, viOpDelete, s.cursor, len(s.buf))
 	case 'C':
 		e.viApplyRange(s, viOpChange, s.cursor, len(s.buf))
-		v.enterInsert()
+		e.viEnterInsert(v, s)
 	case 'Y':
 		e.viSetYank(s.buf)
 	case 's':
 		e.viDeleteChar(s)
-		v.enterInsert()
+		e.viEnterInsert(v, s)
 	case 'S':
 		e.viApplyLine(s, viOpChange)
-		v.enterInsert()
+		e.viEnterInsert(v, s)
 	case 'p':
 		e.viPasteText(s, e.viYank, false)
 	case 'P':
@@ -258,7 +284,7 @@ func (e *promptLineEditor) applyViOperator(v *viLineState, s *lineEditState, mot
 	if viOperatorRune(op) == motion {
 		e.viApplyLine(s, op)
 		if op == viOpChange {
-			v.enterInsert()
+			e.viEnterInsert(v, s)
 		}
 		return
 	}
@@ -269,7 +295,7 @@ func (e *promptLineEditor) applyViOperator(v *viLineState, s *lineEditState, mot
 	}
 	e.viApplyRange(s, op, start, end)
 	if op == viOpChange {
-		v.enterInsert()
+		e.viEnterInsert(v, s)
 	}
 }
 

@@ -19,12 +19,15 @@ const gitTimeout = 250 * time.Millisecond
 type field string
 
 const (
-	fieldAgent     field = "agent"
-	fieldCWD       field = "cwd"
-	fieldGitBranch field = "git_branch"
-	fieldProvider  field = "provider"
-	fieldModel     field = "model"
-	fieldModelInfo field = "model_info"
+	fieldAgent       field = "agent"
+	fieldCWD         field = "cwd"
+	fieldGitBranch   field = "git_branch"
+	fieldProvider    field = "provider"
+	fieldModel       field = "model"
+	fieldModelInfo   field = "model_info"
+	fieldViMode      field = "vimode"
+	fieldViModeLong  field = "vimode:long"
+	fieldViModeShort field = "vimode:short"
 )
 
 // Values carries the runtime values available to a REPL prompt template.
@@ -35,6 +38,9 @@ type Values struct {
 	Provider  string
 	Model     string
 	ModelInfo string
+	// ViMode is the current raw-prompt vi edit mode: "insert", "normal", or ""
+	// (empty outside vi mode, e.g. emacs mode). {vimode} renders a label for it.
+	ViMode string
 }
 
 // Template is a compiled REPL prompt format string.
@@ -131,6 +137,51 @@ func (t *Template) Render(values Values) string {
 	return b.String()
 }
 
+// ViModeLabel renders the prompt label for a vi edit mode. mode is the raw mode
+// name ("insert", "normal", or "" for non-vi/emacs). style is "long" (the
+// default for {vimode} and {vimode:long}) yielding INSERT/NORMAL, or "short"
+// (for {vimode:short}) yielding I/N. In any non-vi mode (mode == ""), or for an
+// unknown style, the label is empty so the placeholder renders nothing.
+func ViModeLabel(mode, style string) string {
+	switch style {
+	case "long", "":
+		switch mode {
+		case "insert":
+			return "INSERT"
+		case "normal":
+			return "NORMAL"
+		default:
+			return ""
+		}
+	case "short":
+		switch mode {
+		case "insert":
+			return "I"
+		case "normal":
+			return "N"
+		default:
+			return ""
+		}
+	default:
+		return ""
+	}
+}
+
+// UsesViMode reports whether the compiled template references any of the
+// {vimode} placeholder variants, so callers know to wire the live-update
+// callback that flips the label on mode transitions.
+func (t *Template) UsesViMode() bool {
+	if t == nil {
+		return false
+	}
+	for _, p := range t.parts {
+		if p.field == fieldViMode || p.field == fieldViModeLong || p.field == fieldViModeShort {
+			return true
+		}
+	}
+	return false
+}
+
 // Uses reports whether the compiled template contains the named placeholder.
 func (t *Template) Uses(name string) bool {
 	if t == nil {
@@ -151,6 +202,8 @@ func (t *Template) Uses(name string) bool {
 func parseField(name string) (field, bool) {
 	switch field(name) {
 	case fieldAgent, fieldCWD, fieldGitBranch, fieldProvider, fieldModel, fieldModelInfo:
+		return field(name), true
+	case fieldViMode, fieldViModeLong, fieldViModeShort:
 		return field(name), true
 	default:
 		return "", false
@@ -174,6 +227,10 @@ func valueForField(f field, values Values) string {
 			return values.ModelInfo
 		}
 		return ModelInfo(values.Provider, values.Model)
+	case fieldViMode, fieldViModeLong:
+		return ViModeLabel(values.ViMode, "long")
+	case fieldViModeShort:
+		return ViModeLabel(values.ViMode, "short")
 	default:
 		return ""
 	}

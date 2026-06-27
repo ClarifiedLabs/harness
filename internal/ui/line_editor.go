@@ -100,6 +100,13 @@ type promptLineEditor struct {
 	lastKeyTime     time.Time
 	prevBufferEmpty bool // whether the buffer was empty before the current keystroke
 	purePaste       bool // an unedited paste fills the buffer; submitted literally
+
+	// viPrompt, when non-nil, returns the fully rendered prompt for a given vi
+	// mode. It is invoked at the two mode-transition chokepoints (enterNormal /
+	// enterInsert) and once at read start so a {vimode} placeholder in the prompt
+	// flips live as the user switches mode. nil in emacs mode, templates without
+	// a vimode variant, and tests — behavior is then identical to today.
+	viPrompt func(viMode) string
 }
 
 func newPromptLineEditor(in io.Reader, w io.Writer) *promptLineEditor {
@@ -219,6 +226,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 	e.prevBufferEmpty = len(state.buf) == 0
 	history := e.historyState()
 	vi := viLineState{mode: viModeInsert}
+	e.refreshViPrompt(&vi, &state)
 	e.tracef("read start prompt=%q", prompt)
 	if err := state.redraw(e.w, e.terminalColumns()); err != nil {
 		return replInput{}, false, err
@@ -381,7 +389,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			e.tracef("escape action=%s text=%q", lineEditActionName(action), text)
 			if e.editMode == promptEditModeVi && action == lineEditEscape {
 				e.clearShiftEnterPending()
-				vi.enterNormal(&state)
+				e.viEnterNormal(&vi, &state)
 				if err := state.redraw(e.w, e.terminalColumns()); err != nil {
 					return replInput{}, false, err
 				}

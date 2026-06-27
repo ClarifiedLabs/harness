@@ -1683,12 +1683,21 @@ user's home directory while preserving the typed prefix.
 `repl_prompt` (also `-repl-prompt` / `HARNESS_REPL_PROMPT`) is a format string
 rendered at every idle prompt boundary, so dynamic values reflect runtime
 changes before each read. The default is `[{agent}] > `. Supported placeholders
-are `{agent}`, `{cwd}`, `{git_branch}`, `{provider}`, `{model}`, and
-`{model_info}`. `{cwd}` abbreviates the user's home directory prefix to `~`
+are `{agent}`, `{cwd}`, `{git_branch}`, `{provider}`, `{model}`, `{model_info}`,
+and `{vimode}`. `{cwd}` abbreviates the user's home directory prefix to `~`
 (for example `~/work`), so the rendered value may differ from the raw working
 directory. Literal escapes `\n`, `\t`, `\\`, `\{`, and `\}` are decoded
 for config, env, and flag values; unknown placeholders or invalid escapes are
 configuration errors.
+
+`{vimode}` reflects the current raw-prompt vi edit mode and renders `INSERT`
+(in insert mode) or `NORMAL` (in normal mode); `{vimode:long}` is the same,
+and `{vimode:short}` renders `I`/`N` instead. In emacs mode (or any non-vi
+edit mode) all variants render empty, so they are safe to leave in a shared
+prompt. The label updates live as the mode flips mid-edit (Esc enters normal
+mode; `i`/`a`/`A`/`I`/`c`/`s`/etc. return to insert mode), re-rendering the
+prompt at each transition. The label is plain visible text with no color,
+matching the other placeholders.
 
 `-repl-edit-mode=vi` (or `HARNESS_REPL_EDIT_MODE=vi` / config `repl_edit_mode`)
 switches the raw prompt editor to a small vi keymap. The prompt starts in insert
