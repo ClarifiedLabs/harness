@@ -47,12 +47,20 @@ type ProviderConfig struct {
 	PriceSource string `json:"price_source,omitempty"`
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for compatible
 	// backends that reject the standard parameter, such as ChatGPT Codex.
-	OmitMaxOutputTokens bool         `json:"omit_max_output_tokens,omitempty"`
-	ResponsesStateful   *bool        `json:"responses_stateful,omitempty"`
-	ResponsesWebSocket  *bool        `json:"responses_websocket,omitempty"`
-	APIKeyEnv           []string     `json:"api_key_env"`
-	Auth                *auth.Config `json:"auth,omitempty"`
-	Models              []ModelEntry `json:"models"`
+	OmitMaxOutputTokens bool              `json:"omit_max_output_tokens,omitempty"`
+	PromptCache         PromptCacheConfig `json:"prompt_cache,omitempty"`
+	ResponsesStateful   *bool             `json:"responses_stateful,omitempty"`
+	ResponsesWebSocket  *bool             `json:"responses_websocket,omitempty"`
+	APIKeyEnv           []string          `json:"api_key_env"`
+	Auth                *auth.Config      `json:"auth,omitempty"`
+	Models              []ModelEntry      `json:"models"`
+}
+
+// PromptCacheConfig controls how a provider receives the stable
+// Request.PromptCacheKey. Empty/auto keeps provider-specific defaults.
+type PromptCacheConfig struct {
+	KeyField        string   `json:"key_field,omitempty"`
+	AffinityHeaders []string `json:"affinity_headers,omitempty"`
 }
 
 // ModelEntry is one model inside a ProviderConfig.

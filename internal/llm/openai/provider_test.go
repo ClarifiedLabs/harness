@@ -517,6 +517,41 @@ func TestStreamSendsHeaders(t *testing.T) {
 	}
 }
 
+func TestStreamSendsPromptCacheAffinityHeaders(t *testing.T) {
+	body, _ := os.ReadFile("testdata/text_only.sse")
+	var gotAffinity, gotAuth, gotAPIKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAffinity = r.Header.Get("x-session-id")
+		gotAuth = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("x-api-key")
+		w.WriteHeader(http.StatusOK)
+		llmtest.WriteBody(w, body)
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{
+		APIKey:      "test-key",
+		BaseURL:     srv.URL,
+		PromptCache: llm.PromptCacheConfig{AffinityHeaders: []string{"x-session-id", "authorization", "x-api-key"}},
+		Sleep:       func(time.Duration) {},
+	})
+	req := llmtest.SimpleRequest("gpt-5.4")
+	req.PromptCacheKey = "harness-session"
+	_, err := llmtest.Drain(p.Stream(context.Background(), req))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotAffinity != "harness-session" {
+		t.Fatalf("x-session-id = %q, want harness-session", gotAffinity)
+	}
+	if gotAuth != "Bearer test-key" {
+		t.Fatalf("Authorization = %q, want Bearer test-key", gotAuth)
+	}
+	if gotAPIKey != "" {
+		t.Fatalf("x-api-key = %q, want omitted", gotAPIKey)
+	}
+}
+
 func TestStreamAppendsChatCompletionsPath(t *testing.T) {
 	body, _ := os.ReadFile("testdata/text_only.sse")
 	var gotPath string
@@ -536,6 +571,34 @@ func TestStreamAppendsChatCompletionsPath(t *testing.T) {
 	}
 	if gotPath != "/v1/chat/completions" {
 		t.Errorf("request path = %q, want /v1/chat/completions", gotPath)
+	}
+}
+
+func TestNormalizeUsageDeepSeekCacheHitMiss(t *testing.T) {
+	u := &wireUsage{
+		PromptTokens:          100,
+		CompletionTokens:      12,
+		PromptCacheHitTokens:  80,
+		PromptCacheMissTokens: 20,
+	}
+	got := normalizeUsage(u)
+	want := llm.Usage{InputTokens: 20, OutputTokens: 12, CacheReadTokens: 80}
+	if got != want {
+		t.Fatalf("usage = %+v, want %+v", got, want)
+	}
+}
+
+func TestNormalizeUsageOpenRouterCacheWriteTokens(t *testing.T) {
+	u := &wireUsage{
+		PromptTokens:     100,
+		CompletionTokens: 12,
+	}
+	u.PromptTokensDetails.CachedTokens = 50
+	u.PromptTokensDetails.CacheWriteTokens = 30
+	got := normalizeUsage(u)
+	want := llm.Usage{InputTokens: 20, OutputTokens: 12, CacheReadTokens: 50, CacheWriteTokens: 30}
+	if got != want {
+		t.Fatalf("usage = %+v, want %+v", got, want)
 	}
 }
 

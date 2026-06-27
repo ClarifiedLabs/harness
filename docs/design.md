@@ -433,7 +433,7 @@ Edge cases:
 | Transport | HTTP SSE by default; provider configs may set `responses_websocket:true`, and the proxy defaults it on for `codex_oauth` Responses providers | HTTP SSE | HTTP SSE |
 | Tool schemas | `tools[] = {type:"function", name, description, parameters, strict:false}` | `tools[].function = {name, description, parameters}` (`type:"function"`) | `tools[] = {name, description, input_schema}` |
 | Parallel tool hint | `parallel_tool_calls:true` when tools are present | `parallel_tool_calls:true` when tools are present | not sent |
-| Prompt cache key | `prompt_cache_key` from `Request.PromptCacheKey` | `prompt_cache_key` from `Request.PromptCacheKey` | not sent (explicit `cache_control` breakpoints instead) |
+| Prompt cache key | provider-configured; OpenAI auto emits `prompt_cache_key` | provider-configured; OpenAI auto emits `prompt_cache_key`, OpenRouter auto emits `session_id` | not sent (explicit `cache_control` breakpoints instead) |
 | Stateful continuation | `store` is always sent — `store:true` plus `previous_response_id` when proxy catalog reports `responses_stateful:true` (tools/system still sent each request), `store:false` for the stateless default. If the provider rejects stored responses before streaming output, the agent disables stateful continuation and retries stateless. | ignored | ignored |
 | Assistant phase | assistant `message` input items include stored `phase` (`commentary` or `final_answer`) when present | ignored | ignored |
 | Token cap | `max_output_tokens` is capped by explicit `MaxTokens`, else `min(1_000_000, contextWindow/4)`, then by `outputLimit` and remaining counted/estimated context (omitted if disabled or unresolved) | `max_tokens` follows the same input-aware cap (omitted if unresolved) | `max_tokens` is required and follows the same input-aware cap, falling back to 1,000,000 if unresolved |
@@ -475,13 +475,18 @@ If a provider rejects a request with a parseable
 context-overflow error, the agent records the smaller reported window for the
 session, rebuilds the request, and retries once before surfacing the error.
 
-**Prompt cache key (`prompt_cache_key`).** OpenAI Chat Completions and Responses
-emit `Request.PromptCacheKey`, a stable per-agent value: an FNV-64a hash of the
-system prompt plus the advertised tool names, rendered `harness-<hex>`. It is
-identical across a session's turns and its startup prewarm, and changes on an
-agent/model switch that alters the system prompt or tool set, so the provider's
-automatic prefix cache keys consistently. Anthropic does not use it (it pins
-explicit `cache_control` breakpoints).
+**Prompt cache mapping.** `Request.PromptCacheKey` is a stable per-agent value:
+an FNV-64a hash of the system prompt plus the advertised tool names, rendered
+`harness-<hex>`. It is identical across a session's turns and its startup
+prewarm, and changes on an agent/model switch that alters the system prompt or
+tool set. Provider configs can control where that key goes with
+`prompt_cache.key_field`: `auto` (default), `none`, `prompt_cache_key`, or
+`session_id`. `auto` sends `prompt_cache_key` to first-party OpenAI endpoints,
+`session_id` to OpenRouter Chat Completions, and no cache key field to other
+OpenAI-compatible custom base URLs. `prompt_cache.affinity_headers` can also
+copy the stable key into non-auth routing headers such as `x-session-id`.
+Anthropic does not use this key directly (it pins explicit `cache_control`
+breakpoints).
 
 **Responses reasoning persistence.** In the default stateless (`store:false`) mode
 the provider would otherwise re-derive chain-of-thought on every tool turn. For a
@@ -568,9 +573,14 @@ type Usage struct {
 }
 ```
 
-Normalization: OpenAI's `prompt_tokens` **includes** cached tokens
-(`prompt_tokens_details.cached_tokens` is subtracted); Anthropic's `input_tokens`
-already excludes them. After normalization `InputTokens` means the same thing on both.
+Normalization: OpenAI-compatible `prompt_tokens` **includes** cached tokens, so
+cache read/write fields (`prompt_tokens_details.cached_tokens`,
+`prompt_tokens_details.cache_write_tokens`, DeepSeek's
+`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`, and gateway
+`cache_read_input_tokens` / `cache_creation_input_tokens`) are normalized into
+`CacheReadTokens` / `CacheWriteTokens` and subtracted from `InputTokens`.
+Anthropic's `input_tokens` already excludes cached tokens. After normalization
+`InputTokens` means the same thing across dialects.
 
 `internal/llm/registry.go` holds a small registry. The structs carry JSON tags so they
 double as the proxy catalog's on-disk schema (`Price`, `ModelInfo`, `ProviderConfig`,

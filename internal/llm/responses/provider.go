@@ -32,6 +32,8 @@ type Config struct {
 	OutputLimit         int // model's real max-output-token limit; 0 = unknown
 	OmitMaxOutputTokens bool
 	UseWebSocket        bool
+	ProviderName        string
+	PromptCache         llm.PromptCacheConfig
 	HTTPClient          *http.Client
 	Sleep               func(time.Duration)
 }
@@ -44,6 +46,8 @@ type Provider struct {
 	outputLimit         int
 	omitMaxOutputTokens bool
 	useWebSocket        bool
+	providerName        string
+	promptCache         llm.PromptCacheConfig
 	client              *http.Client
 	sleep               func(time.Duration)
 
@@ -63,6 +67,8 @@ func New(cfg Config) *Provider {
 		outputLimit:         cfg.OutputLimit,
 		omitMaxOutputTokens: cfg.OmitMaxOutputTokens,
 		useWebSocket:        cfg.UseWebSocket,
+		providerName:        cfg.ProviderName,
+		promptCache:         cfg.PromptCache,
 		client:              client,
 		sleep:               sleep,
 		wsIDs:               randomWebSocketIDs(),
@@ -83,13 +89,18 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 }
 
 func (p *Provider) streamHTTP(ctx context.Context, req llm.Request, yield func(llm.StreamEvent, error) bool) {
-	body, err := json.Marshal(buildRequestWithOptions(req, p.contextWindow, p.outputLimit, p.omitMaxOutputTokens))
+	body, err := json.Marshal(buildRequestWithConfig(req, p.contextWindow, p.outputLimit, buildOptions{
+		omitMaxOutputTokens: p.omitMaxOutputTokens,
+		promptCache:         p.promptCache,
+		baseURL:             p.baseURL,
+		providerName:        p.providerName,
+	}))
 	if err != nil {
 		yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
 		return
 	}
 
-	resp, err := p.connect(ctx, body, yield)
+	resp, err := p.connect(ctx, body, req.PromptCacheKey, yield)
 	if err != nil || resp == nil {
 		return
 	}
@@ -101,7 +112,7 @@ func (p *Provider) streamHTTP(ctx context.Context, req llm.Request, yield func(l
 // connect performs the request via the shared retry-before-first-byte loop
 // (llm.Connect); the dialect supplies the Responses endpoint, bearer auth, and
 // its error-body parser.
-func (p *Provider) connect(ctx context.Context, body []byte, yield func(llm.StreamEvent, error) bool) (*http.Response, error) {
+func (p *Provider) connect(ctx context.Context, body []byte, promptCacheKey string, yield func(llm.StreamEvent, error) bool) (*http.Response, error) {
 	return llm.Connect(ctx, llm.ConnectOptions{
 		Client: p.client,
 		URL:    p.baseURL + responsesPath,
@@ -112,6 +123,7 @@ func (p *Provider) connect(ctx context.Context, body []byte, yield func(llm.Stre
 			if len(p.authHeaders) == 0 && p.apiKey != "" {
 				r.Header.Set("Authorization", "Bearer "+p.apiKey)
 			}
+			llm.ApplyPromptCacheAffinityHeaders(r.Header, p.promptCache.AffinityHeaders, promptCacheKey)
 		},
 		ParseError: parseErrorResponse,
 		Sleep:      p.sleep,
@@ -338,12 +350,23 @@ func applyRetryAfterHint(apiErr *llm.APIError) {
 }
 
 func normalizeUsage(u *wireUsage) llm.Usage {
-	cached := u.InputTokensDetails.CachedTokens
+	cacheRead := u.InputTokensDetails.CachedTokens
+	if cacheRead == 0 {
+		cacheRead = u.CacheReadInputTokens
+	}
+	cacheWrite := u.InputTokensDetails.CacheWriteTokens
+	if cacheWrite == 0 {
+		cacheWrite = u.CacheCreationInputTokens
+	}
+	input := u.InputTokens - cacheRead - cacheWrite
+	if input < 0 {
+		input = 0
+	}
 	return llm.Usage{
-		InputTokens:      u.InputTokens - cached,
+		InputTokens:      input,
 		OutputTokens:     u.OutputTokens,
-		CacheReadTokens:  cached,
-		CacheWriteTokens: 0,
+		CacheReadTokens:  cacheRead,
+		CacheWriteTokens: cacheWrite,
 		ReasoningTokens:  u.OutputTokensDetails.ReasoningTokens,
 	}
 }

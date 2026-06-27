@@ -43,6 +43,7 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
   "base_url": "https://openrouter.ai/api/v1",
   "api_key": "sk-file",
   "api_key_env": ["OPENROUTER_API_KEY"],
+  "prompt_cache": {"key_field":"session_id","affinity_headers":["x-session-id"]},
   "models": [
     {"name":"openai/gpt-5.5","context_window":1050000,"output_limit":64000,"input_modalities":["text","image"],"price":{"input":5,"output":30},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}]}
   ]
@@ -114,6 +115,9 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 		captured.BaseURL != "https://openrouter.ai/api/v1" || captured.APIKey != "sk-env" ||
 		captured.ContextWindow != 1_050_000 || captured.OutputLimit != 64_000 {
 		t.Fatalf("captured options = %+v", captured)
+	}
+	if captured.PromptCache.KeyField != "session_id" || len(captured.PromptCache.AffinityHeaders) != 1 || captured.PromptCache.AffinityHeaders[0] != "x-session-id" {
+		t.Fatalf("captured prompt cache = %+v, want session_id/x-session-id", captured.PromptCache)
 	}
 	if len(fp.Requests) != 1 || fp.Requests[0].Model != "openai/gpt-5.5" {
 		t.Fatalf("fake provider requests = %+v", fp.Requests)

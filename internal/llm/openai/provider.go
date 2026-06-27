@@ -35,6 +35,8 @@ type Config struct {
 	ContextWindow int    // drives the default max_tokens floor when MaxTokens is unset
 	OutputLimit   int    // model's real max-output-token limit; 0 = unknown
 	ReasoningMode string // "openai", "openrouter", or "google"; empty defaults to "openai"
+	ProviderName  string
+	PromptCache   llm.PromptCacheConfig
 	HTTPClient    *http.Client
 	Sleep         func(time.Duration) // nil = time.Sleep
 }
@@ -47,6 +49,8 @@ type Provider struct {
 	contextWindow int
 	outputLimit   int
 	reasoningMode string
+	providerName  string
+	promptCache   llm.PromptCacheConfig
 	client        *http.Client
 	sleep         func(time.Duration)
 }
@@ -61,6 +65,8 @@ func New(cfg Config) *Provider {
 		contextWindow: cfg.ContextWindow,
 		outputLimit:   cfg.OutputLimit,
 		reasoningMode: cfg.ReasoningMode,
+		providerName:  cfg.ProviderName,
+		promptCache:   cfg.PromptCache,
 		client:        client,
 		sleep:         sleep,
 	}
@@ -74,13 +80,13 @@ func (p *Provider) Name() string { return "openai" }
 // every attempt and sleep.
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
-		body, err := json.Marshal(buildRequestForMode(req, p.contextWindow, p.outputLimit, p.reasoningMode))
+		body, err := json.Marshal(buildRequestWithOptions(req, p.contextWindow, p.outputLimit, p.reasoningMode, p.promptCache, p.baseURL, p.providerName))
 		if err != nil {
 			yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
 			return
 		}
 
-		resp, err := p.connect(ctx, body, yield)
+		resp, err := p.connect(ctx, body, req.PromptCacheKey, yield)
 		if err != nil || resp == nil {
 			return
 		}
@@ -93,7 +99,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 // connect performs the request via the shared retry-before-first-byte loop
 // (llm.Connect); the dialect supplies the Chat Completions endpoint, bearer
 // auth, and its error-body parser.
-func (p *Provider) connect(ctx context.Context, body []byte, yield func(llm.StreamEvent, error) bool) (*http.Response, error) {
+func (p *Provider) connect(ctx context.Context, body []byte, promptCacheKey string, yield func(llm.StreamEvent, error) bool) (*http.Response, error) {
 	return llm.Connect(ctx, llm.ConnectOptions{
 		Client: p.client,
 		URL:    p.baseURL + chatCompletionsPath,
@@ -104,6 +110,7 @@ func (p *Provider) connect(ctx context.Context, body []byte, yield func(llm.Stre
 			if len(p.authHeaders) == 0 && p.apiKey != "" {
 				r.Header.Set("Authorization", "Bearer "+p.apiKey)
 			}
+			llm.ApplyPromptCacheAffinityHeaders(r.Header, p.promptCache.AffinityHeaders, promptCacheKey)
 		},
 		ParseError: parseErrorResponse,
 		Sleep:      p.sleep,
@@ -188,16 +195,39 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 	}
 }
 
-// normalizeUsage maps the OpenAI usage object onto llm.Usage. prompt_tokens
-// includes cached tokens, so cached_tokens is subtracted to recover the
-// full-rate InputTokens; OpenAI has no separate cache-write charge (design §6).
+// normalizeUsage maps OpenAI-compatible usage objects onto llm.Usage. Providers
+// disagree on cache field names, but prompt_tokens generally includes cached
+// tokens, so read/write tokens are subtracted to recover full-rate input.
 func normalizeUsage(u *wireUsage) llm.Usage {
-	cached := u.PromptTokensDetails.CachedTokens
+	cacheRead := u.PromptTokensDetails.CachedTokens
+	cacheWrite := u.PromptTokensDetails.CacheWriteTokens
+	input := u.PromptTokens - cacheRead - cacheWrite
+
+	if u.PromptCacheHitTokens != 0 || u.PromptCacheMissTokens != 0 {
+		cacheRead = u.PromptCacheHitTokens
+		cacheWrite = 0
+		if u.PromptCacheMissTokens != 0 {
+			input = u.PromptCacheMissTokens
+		} else {
+			input = u.PromptTokens - cacheRead
+		}
+	} else {
+		if cacheRead == 0 {
+			cacheRead = u.CacheReadInputTokens
+		}
+		if cacheWrite == 0 {
+			cacheWrite = u.CacheCreationInputTokens
+		}
+		input = u.PromptTokens - cacheRead - cacheWrite
+	}
+	if input < 0 {
+		input = 0
+	}
 	return llm.Usage{
-		InputTokens:      u.PromptTokens - cached,
+		InputTokens:      input,
 		OutputTokens:     u.CompletionTokens,
-		CacheReadTokens:  cached,
-		CacheWriteTokens: 0,
+		CacheReadTokens:  cacheRead,
+		CacheWriteTokens: cacheWrite,
 		ReasoningTokens:  u.CompletionTokensDetails.ReasoningTokens,
 	}
 }

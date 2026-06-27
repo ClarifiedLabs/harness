@@ -277,6 +277,13 @@ Provider configs accept an optional `auth` block in place of `api_key` /
 fallback if auth fails. Supported auth shapes include `token_command`, `oauth2`,
 and `codex_oauth`.
 
+Provider configs may also set `prompt_cache` to control how the stable harness
+session cache key is sent to OpenAI-compatible backends. `key_field` accepts
+`auto` (default), `none`, `prompt_cache_key`, or `session_id`; `auto` sends
+`prompt_cache_key` to first-party OpenAI endpoints, `session_id` to OpenRouter,
+and omits cache key fields for other custom base URLs. `affinity_headers` can
+copy the same key into non-auth routing headers such as `x-session-id`.
+
 For hand-written model-proxy config shape references, see
 `examples/harness-model-proxy/config.json` and
 `examples/harness-model-proxy/providers.json`. Setup remains the recommended way

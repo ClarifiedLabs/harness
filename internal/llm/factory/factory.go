@@ -32,6 +32,7 @@ type Options struct {
 	Temperature   *float64
 	ContextWindow int
 	OutputLimit   int // model's real max-output-token limit; 0 = unknown
+	PromptCache   llm.PromptCacheConfig
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for providers
 	// that reject the standard parameter.
 	OmitMaxOutputTokens bool
@@ -77,6 +78,8 @@ func New(opts Options) (llm.Provider, error) {
 			ContextWindow: opts.ContextWindow,
 			OutputLimit:   opts.OutputLimit,
 			ReasoningMode: reasoningMode(opts.ProviderName, provider, opts.BaseURL, opts.ReasoningMode),
+			ProviderName:  opts.ProviderName,
+			PromptCache:   opts.PromptCache,
 		}), nil
 	case "responses":
 		if opts.APIKey == "" && opts.BaseURL == "" && len(opts.AuthHeaders) == 0 {
@@ -90,6 +93,8 @@ func New(opts Options) (llm.Provider, error) {
 			OutputLimit:         opts.OutputLimit,
 			OmitMaxOutputTokens: opts.OmitMaxOutputTokens,
 			UseWebSocket:        opts.ResponsesWebSocket,
+			ProviderName:        opts.ProviderName,
+			PromptCache:         opts.PromptCache,
 		}), nil
 	default:
 		return nil, fmt.Errorf("llm: unknown provider %q (want openai, responses, or anthropic)", provider)

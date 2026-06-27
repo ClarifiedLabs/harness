@@ -67,6 +67,17 @@ func TestStreamTextOnly(t *testing.T) {
 	}
 }
 
+func TestNormalizeUsageCacheWriteTokens(t *testing.T) {
+	u := &wireUsage{InputTokens: 100, OutputTokens: 12}
+	u.InputTokensDetails.CachedTokens = 50
+	u.InputTokensDetails.CacheWriteTokens = 30
+	got := normalizeUsage(u)
+	want := llm.Usage{InputTokens: 20, OutputTokens: 12, CacheReadTokens: 50, CacheWriteTokens: 30}
+	if got != want {
+		t.Fatalf("usage = %+v, want %+v", got, want)
+	}
+}
+
 func TestStreamTextOnlyEventOrder(t *testing.T) {
 	srv := llmtest.ServeSSEFixture(t, "text_only.sse")
 	p := testProvider(t, srv, nil)

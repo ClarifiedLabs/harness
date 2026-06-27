@@ -879,6 +879,7 @@ func (h *Handler) runtimeOptionsForTarget(ctx context.Context, target resolvedTa
 		AuthHeaders:         authHeaders,
 		ContextWindow:       contextWindow,
 		OutputLimit:         entry.OutputLimit,
+		PromptCache:         pc.PromptCache,
 		OmitMaxOutputTokens: providerOmitMaxOutputTokens(pc),
 		ResponsesWebSocket:  providerResponsesWebSocket(pc),
 	}, nil

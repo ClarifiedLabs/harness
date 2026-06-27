@@ -309,6 +309,66 @@ func TestBuildRequestPromptCacheKey(t *testing.T) {
 	}
 }
 
+func TestBuildRequestPromptCacheAutoOpenRouterSessionID(t *testing.T) {
+	req := basicRequest()
+	req.PromptCacheKey = "harness-openrouter-session"
+	w := buildRequestWithOptions(req, 0, 0, "openrouter", llm.PromptCacheConfig{}, "https://openrouter.ai/api/v1", "openrouter")
+	if w.SessionID != "harness-openrouter-session" {
+		t.Fatalf("session_id = %q, want harness-openrouter-session", w.SessionID)
+	}
+	if w.PromptCacheKey != "" {
+		t.Fatalf("prompt_cache_key = %q, want omitted for OpenRouter auto", w.PromptCacheKey)
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"session_id":"harness-openrouter-session"`)) {
+		t.Fatalf("session_id missing from JSON: %s", b)
+	}
+	if bytes.Contains(b, []byte("prompt_cache_key")) {
+		t.Fatalf("prompt_cache_key present for OpenRouter auto: %s", b)
+	}
+}
+
+func TestBuildRequestPromptCacheAutoCustomBaseURLOmits(t *testing.T) {
+	req := basicRequest()
+	req.PromptCacheKey = "harness-custom"
+	w := buildRequestWithOptions(req, 0, 0, "openai", llm.PromptCacheConfig{}, "https://api.deepseek.com", "deepseek")
+	if w.PromptCacheKey != "" || w.SessionID != "" {
+		t.Fatalf("cache fields = prompt_cache_key %q session_id %q, want omitted", w.PromptCacheKey, w.SessionID)
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte("prompt_cache_key")) || bytes.Contains(b, []byte("session_id")) {
+		t.Fatalf("cache field present for custom auto: %s", b)
+	}
+}
+
+func TestBuildRequestPromptCacheExplicitFields(t *testing.T) {
+	req := basicRequest()
+	req.PromptCacheKey = "harness-explicit"
+	for _, tc := range []struct {
+		name        string
+		field       string
+		wantPrompt  string
+		wantSession string
+	}{
+		{name: "prompt cache key", field: llm.PromptCacheKeyFieldPromptCacheKey, wantPrompt: "harness-explicit"},
+		{name: "session id", field: llm.PromptCacheKeyFieldSessionID, wantSession: "harness-explicit"},
+		{name: "none", field: llm.PromptCacheKeyFieldNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := buildRequestWithOptions(req, 0, 0, "openai", llm.PromptCacheConfig{KeyField: tc.field}, "https://api.deepseek.com", "deepseek")
+			if w.PromptCacheKey != tc.wantPrompt || w.SessionID != tc.wantSession {
+				t.Fatalf("cache fields = prompt_cache_key %q session_id %q, want %q/%q", w.PromptCacheKey, w.SessionID, tc.wantPrompt, tc.wantSession)
+			}
+		})
+	}
+}
+
 func TestBuildRequestPromptCacheKeyOmittedWhenEmpty(t *testing.T) {
 	b, err := json.Marshal(buildRequest(basicRequest(), 0, 0))
 	if err != nil {

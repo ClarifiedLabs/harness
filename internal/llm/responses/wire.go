@@ -156,11 +156,14 @@ type wireResponseError struct {
 }
 
 type wireUsage struct {
-	InputTokens        int `json:"input_tokens"`
-	OutputTokens       int `json:"output_tokens"`
-	TotalTokens        int `json:"total_tokens"`
-	InputTokensDetails struct {
-		CachedTokens int `json:"cached_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	TotalTokens              int `json:"total_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	InputTokensDetails       struct {
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
 	OutputTokensDetails struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
@@ -172,6 +175,22 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 }
 
 func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, omitMaxOutputTokens bool) wireRequest {
+	return buildRequestWithConfig(req, contextWindow, outputLimit, buildOptions{
+		omitMaxOutputTokens: omitMaxOutputTokens,
+		promptCache:         llm.PromptCacheConfig{},
+		baseURL:             defaultBaseURL,
+		providerName:        "openai",
+	})
+}
+
+type buildOptions struct {
+	omitMaxOutputTokens bool
+	promptCache         llm.PromptCacheConfig
+	baseURL             string
+	providerName        string
+}
+
+func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opts buildOptions) wireRequest {
 	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
 	instructions := req.System
 	// Replay persisted encrypted reasoning items only when reasoning is enabled
@@ -199,11 +218,13 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, om
 		Stream:             true,
 		Store:              req.StoreResponse,
 		PreviousResponseID: req.PreviousResponseID,
-		PromptCacheKey:     req.PromptCacheKey,
 		Temperature:        req.Temperature,
 	}
+	if llm.ResolvePromptCacheKeyField(opts.providerName, "responses", opts.baseURL, opts.promptCache) == llm.PromptCacheKeyFieldPromptCacheKey {
+		w.PromptCacheKey = req.PromptCacheKey
+	}
 
-	if mt := maxTokens(req, contextWindow, outputLimit, omitMaxOutputTokens); mt > 0 {
+	if mt := maxTokens(req, contextWindow, outputLimit, opts.omitMaxOutputTokens); mt > 0 {
 		w.MaxOutputTokens = &mt
 	}
 	if req.Reasoning.Effort != "" || req.Reasoning.Summary != "" {

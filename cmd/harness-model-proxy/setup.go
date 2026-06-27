@@ -45,12 +45,13 @@ type setupProviderConfig struct {
 	PriceSource string `json:"price_source,omitempty"`
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for compatible
 	// backends that reject the standard parameter, such as ChatGPT Codex.
-	OmitMaxOutputTokens bool               `json:"omit_max_output_tokens,omitempty"`
-	ResponsesStateful   *bool              `json:"responses_stateful,omitempty"`
-	ResponsesWebSocket  *bool              `json:"responses_websocket,omitempty"`
-	APIKeyEnv           []string           `json:"api_key_env,omitempty"`
-	Auth                *auth.Config       `json:"auth,omitempty"`
-	Models              []setupModelConfig `json:"models"`
+	OmitMaxOutputTokens bool                  `json:"omit_max_output_tokens,omitempty"`
+	PromptCache         llm.PromptCacheConfig `json:"prompt_cache,omitempty"`
+	ResponsesStateful   *bool                 `json:"responses_stateful,omitempty"`
+	ResponsesWebSocket  *bool                 `json:"responses_websocket,omitempty"`
+	APIKeyEnv           []string              `json:"api_key_env,omitempty"`
+	Auth                *auth.Config          `json:"auth,omitempty"`
+	Models              []setupModelConfig    `json:"models"`
 }
 
 type setupModelConfig struct {
@@ -260,6 +261,7 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			if current.OmitMaxOutputTokens {
 				next.OmitMaxOutputTokens = true
 			}
+			next.PromptCache = current.PromptCache
 			if current.ResponsesStateful != nil {
 				next.ResponsesStateful = current.ResponsesStateful
 			}

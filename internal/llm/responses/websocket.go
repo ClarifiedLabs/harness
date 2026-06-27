@@ -149,7 +149,12 @@ func (p *Provider) closeWebSocketLocked() {
 }
 
 func (p *Provider) buildWebSocketRequest(req llm.Request) wireWebSocketRequest {
-	w := buildRequestWithOptions(req, p.contextWindow, p.outputLimit, p.omitMaxOutputTokens)
+	w := buildRequestWithConfig(req, p.contextWindow, p.outputLimit, buildOptions{
+		omitMaxOutputTokens: p.omitMaxOutputTokens,
+		promptCache:         p.promptCache,
+		baseURL:             p.baseURL,
+		providerName:        p.providerName,
+	})
 	// Codex's Responses WebSocket path carries continuation through
 	// previous_response_id, while the ChatGPT backend requires store:false.
 	w.Store = false
@@ -180,6 +185,7 @@ func (p *Provider) webSocketHeaders(req llm.Request) http.Header {
 	header.Set("session-id", ids.sessionID)
 	header.Set("thread-id", ids.threadID)
 	header.Set("x-codex-window-id", ids.windowID)
+	llm.ApplyPromptCacheAffinityHeaders(header, p.promptCache.AffinityHeaders, req.PromptCacheKey)
 	return header
 }
 

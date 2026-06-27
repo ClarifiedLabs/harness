@@ -35,6 +35,7 @@ func TestLoadProviderConfigsReadsProviderWrapper(t *testing.T) {
       "name": "openrouter",
       "api_type": "openai",
       "base_url": "https://openrouter.ai/api/v1",
+      "prompt_cache": {"key_field":"session_id","affinity_headers":["x-session-id"]},
       "models": [
         {"name":"openai/gpt-5.1","context_window":1000000,"output_limit":96000,"price":{"input":2,"output":8},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}]}
       ]
@@ -73,6 +74,9 @@ func TestLoadProviderConfigsReadsProviderWrapper(t *testing.T) {
 	// resolves it from there at dispatch.
 	if got := providers[0].Models[0].OutputLimit; got != 96_000 {
 		t.Fatalf("provider entry output limit = %d, want 96000", got)
+	}
+	if providers[0].PromptCache.KeyField != "session_id" || len(providers[0].PromptCache.AffinityHeaders) != 1 || providers[0].PromptCache.AffinityHeaders[0] != "x-session-id" {
+		t.Fatalf("provider prompt cache = %+v, want session_id/x-session-id", providers[0].PromptCache)
 	}
 	info, ok := r.Lookup("openai/gpt-5.1")
 	if !ok || info.Reasoning == nil || !info.Reasoning.SupportsEffort("medium") {

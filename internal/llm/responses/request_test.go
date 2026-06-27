@@ -239,6 +239,58 @@ func TestBuildRequestPromptCacheKey(t *testing.T) {
 	}
 }
 
+func TestBuildRequestPromptCacheAutoCustomBaseURLOmits(t *testing.T) {
+	req := basicRequest()
+	req.PromptCacheKey = "harness-custom"
+	w := buildRequestWithConfig(req, 0, 0, buildOptions{
+		baseURL:      "https://api.deepseek.com",
+		providerName: "deepseek",
+	})
+	if w.PromptCacheKey != "" {
+		t.Fatalf("prompt_cache_key = %q, want omitted", w.PromptCacheKey)
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte("prompt_cache_key")) {
+		t.Fatalf("prompt_cache_key present for custom auto: %s", b)
+	}
+}
+
+func TestBuildRequestPromptCacheExplicitPromptCacheKey(t *testing.T) {
+	req := basicRequest()
+	req.PromptCacheKey = "harness-explicit"
+	w := buildRequestWithConfig(req, 0, 0, buildOptions{
+		promptCache:  llm.PromptCacheConfig{KeyField: llm.PromptCacheKeyFieldPromptCacheKey},
+		baseURL:      "https://api.deepseek.com",
+		providerName: "deepseek",
+	})
+	if w.PromptCacheKey != "harness-explicit" {
+		t.Fatalf("prompt_cache_key = %q, want harness-explicit", w.PromptCacheKey)
+	}
+}
+
+func TestBuildRequestPromptCacheSessionIDOmittedForResponses(t *testing.T) {
+	req := basicRequest()
+	req.PromptCacheKey = "harness-session"
+	w := buildRequestWithConfig(req, 0, 0, buildOptions{
+		promptCache:  llm.PromptCacheConfig{KeyField: llm.PromptCacheKeyFieldSessionID},
+		baseURL:      "https://openrouter.ai/api/v1",
+		providerName: "openrouter",
+	})
+	if w.PromptCacheKey != "" {
+		t.Fatalf("prompt_cache_key = %q, want omitted for session_id in Responses", w.PromptCacheKey)
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte("session_id")) || bytes.Contains(b, []byte("prompt_cache_key")) {
+		t.Fatalf("cache field present for Responses session_id: %s", b)
+	}
+}
+
 func TestBuildRequestPromptCacheKeyOmittedWhenEmpty(t *testing.T) {
 	b, err := json.Marshal(buildRequest(basicRequest(), 0, 0))
 	if err != nil {

@@ -30,6 +30,7 @@ type wireRequest struct {
 	ExtraBody       *wireExtraBody `json:"extra_body,omitempty"`
 	Stop            []string       `json:"stop,omitempty"`
 	PromptCacheKey  string         `json:"prompt_cache_key,omitempty"`
+	SessionID       string         `json:"session_id,omitempty"`
 	Stream          bool           `json:"stream"`
 	StreamOptions   *streamOptions `json:"stream_options"`
 }
@@ -150,11 +151,16 @@ type wireToolCallDelta struct {
 // wireUsage is the trailing usage chunk's accounting. prompt_tokens INCLUDES the
 // cached tokens reported in prompt_tokens_details.cached_tokens (design §6).
 type wireUsage struct {
-	PromptTokens        int `json:"prompt_tokens"`
-	CompletionTokens    int `json:"completion_tokens"`
-	TotalTokens         int `json:"total_tokens"`
-	PromptTokensDetails struct {
-		CachedTokens int `json:"cached_tokens"`
+	PromptTokens             int `json:"prompt_tokens"`
+	CompletionTokens         int `json:"completion_tokens"`
+	TotalTokens              int `json:"total_tokens"`
+	PromptCacheHitTokens     int `json:"prompt_cache_hit_tokens"`
+	PromptCacheMissTokens    int `json:"prompt_cache_miss_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	PromptTokensDetails      struct {
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"prompt_tokens_details"`
 	CompletionTokensDetails struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
@@ -170,6 +176,10 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 }
 
 func buildRequestForMode(req llm.Request, contextWindow, outputLimit int, reasoningMode string) wireRequest {
+	return buildRequestWithOptions(req, contextWindow, outputLimit, reasoningMode, llm.PromptCacheConfig{}, defaultBaseURL, "openai")
+}
+
+func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, reasoningMode string, promptCache llm.PromptCacheConfig, baseURL, providerName string) wireRequest {
 	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
 	w := wireRequest{
 		Model:         req.Model,
@@ -184,7 +194,12 @@ func buildRequestForMode(req llm.Request, contextWindow, outputLimit int, reason
 	if len(req.StopSeqs) > 0 {
 		w.Stop = req.StopSeqs
 	}
-	w.PromptCacheKey = req.PromptCacheKey
+	switch llm.ResolvePromptCacheKeyField(providerName, "openai", baseURL, promptCache) {
+	case llm.PromptCacheKeyFieldPromptCacheKey:
+		w.PromptCacheKey = req.PromptCacheKey
+	case llm.PromptCacheKeyFieldSessionID:
+		w.SessionID = llm.PromptCacheSessionID(req.PromptCacheKey)
+	}
 	switch reasoningMode {
 	case "openrouter":
 		w.Reasoning = openRouterReasoning(req.Reasoning)
