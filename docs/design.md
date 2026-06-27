@@ -1196,9 +1196,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 | param | type | notes |
 |---|---|---|
-| `patch` | string | full `*** Begin Patch` / `*** End Patch` text; preferred field name |
-| `patchText` | string | compatibility alias for `patch` |
-| `patch_text` | string | compatibility alias for `patch` |
+| `patch` | string | full `*** Begin Patch` / `*** End Patch` text |
 
 - **Catalog-only, not in the default tool set.** `edit` and `write_file` subsume
   `apply_patch`, so `registerFileTools` omits it; it is registered only by
@@ -1210,10 +1208,9 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   `*** Delete File: <path>`, `*** Update File: <path>`, and optional
   `*** Move to: <path>` immediately after an update header. Classic `---` / `+++`
   unified diffs are not accepted by this tool.
-- Tool input also accepts a bare JSON string containing the patch text, for
+- Tool input also accepts a bare JSON string containing the patch text for
   compatibility with callers that model `apply_patch` as a freeform argument.
-  At least one non-empty patch value is required. If multiple non-empty patch
-  fields are provided, they must contain identical text.
+  At least one non-empty patch value is required.
 - Parse failures are reported as invalid arguments with a format hint: provide
   one raw patch envelope, avoid markdown fences, and prefix blank context lines
   in update hunks with a space.
@@ -1331,7 +1328,6 @@ this subsection records the common runner those argv tools point at.
 | `url` | string, required | http/https only |
 | `max_bytes` | int | default 1 MB, cap 5 MB |
 | `timeout_seconds` | int | default 30, no maximum |
-| `timeout` | int | alias for `timeout_seconds` |
 | `background` | bool | when true, start as a process-local background job and return a job id immediately |
 
 - Default 30 s timeout, configurable without a maximum; up to 5 redirects, each
@@ -2068,7 +2064,7 @@ injectable), the retry clock, and `ValidateTranscript`.
 | `internal/sse` | frame parsing tables; huge frames; truncated input |
 | providers | `httptest.Server` replaying `.sse` golden fixtures per dialect → assert ordered events; golden request-JSON tests (Responses input items, Chat role:tool hoisting, args-string vs object, system placement, `stream_options`, cache_control); tool-call reassembly tables (fragment splits, empty args → `{}`, interleaved parallel calls, invalid tail → retryable stream error); truncated stream; mid-stream cancellation; retry loop via injected sleeper (429-then-200, 400 immediate failure, budget exhaustion) |
 | `internal/retry` | `Next`: jitter bounds, 30s cap, Retry-After floor |
-| tools | table-driven against `t.TempDir()`; `grep` wrapper against the host CLI; optional `rg` registration with a fake executable on PATH; `git` against a scratch `git init` repo (skipped if git absent); `run_command` timeout via `sleep`; `apply_patch` at the tool level covers the Codex Add envelope, the `patch`/`patchText`/`patch_text`/bare-string input aliases, and conflicting-alias / parse-error format-hint paths, while `internal/tools/patch` covers parse + apply for create/update/delete/rename and first-rejection-leaves-file-untouched |
+| tools | table-driven against `t.TempDir()`; `grep` wrapper against the host CLI; optional `rg` registration with a fake executable on PATH; `git` against a scratch `git init` repo (skipped if git absent); `run_command` timeout via `sleep`; `apply_patch` at the tool level covers the Codex Add envelope, canonical `patch`, compatibility decoding paths, bare-string input, and conflicting-alias / parse-error format-hint paths, while `internal/tools/patch` covers parse + apply for create/update/delete/rename and first-rejection-leaves-file-untouched |
 | agent loop | `FakeProvider` scripts: multi-tool batches, error-result feedback (next request carries the error), max-turns stop, cancellation → transcript still re-sendable |
 | delegate | child-agent request shape, model-visible delegatable agent enum, parent-tool subset rejection, recursive delegate rebinding, private child todo stores, child transcript persistence, metered usage folded into parent turn totals |
 | background | job start/completion, one-shot context delivery, notices, cancellation/errors, child transcript path preservation |

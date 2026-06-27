@@ -57,6 +57,24 @@ func TestWebFetchBackgroundStartsJob(t *testing.T) {
 	}
 }
 
+func TestWebFetchSchemaAdvertisesTimeoutSecondsOnly(t *testing.T) {
+	cases := map[string]webFetch{
+		"foreground": {},
+		"background": {background: &fakeBackgroundStarter{}},
+	}
+	for name, tool := range cases {
+		t.Run(name, func(t *testing.T) {
+			schema := string(tool.Schema())
+			if !strings.Contains(schema, `"timeout_seconds"`) {
+				t.Fatalf("schema should advertise timeout_seconds: %s", schema)
+			}
+			if strings.Contains(schema, `"timeout":`) {
+				t.Fatalf("schema should not advertise legacy timeout alias: %s", schema)
+			}
+		})
+	}
+}
+
 func TestWebFetchBackgroundRequiresStarter(t *testing.T) {
 	_, err := runWebFetch(t, map[string]any{
 		"url":        "http://example.com",

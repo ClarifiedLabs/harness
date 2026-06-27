@@ -33,6 +33,18 @@ func codexAddPatch(path, content string) string {
 	return b.String()
 }
 
+func TestApplyPatchSchemaAdvertisesCanonicalPatchOnly(t *testing.T) {
+	schema := string((applyPatch{}).Schema())
+	if !strings.Contains(schema, `"patch"`) {
+		t.Fatalf("schema should advertise canonical patch field: %s", schema)
+	}
+	for _, legacy := range []string{`"patchText"`, `"patch_text"`} {
+		if strings.Contains(schema, legacy) {
+			t.Fatalf("schema should not advertise legacy alias %s: %s", legacy, schema)
+		}
+	}
+}
+
 func TestApplyPatchInputAliases(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -134,13 +146,13 @@ func TestApplyPatchParseErrorIncludesFormatHint(t *testing.T) {
 	}
 }
 
-func TestApplyPatchMissingPatchExplainsAliases(t *testing.T) {
+func TestApplyPatchMissingPatchNamesCanonicalField(t *testing.T) {
 	_, err := runApplyPatchRaw(t, map[string]any{})
 	if err == nil {
 		t.Fatal("expected missing patch error")
 	}
-	if !strings.Contains(err.Error(), "provide patch, patchText, or patch_text") {
-		t.Fatalf("error should name accepted fields: %v", err)
+	if err.Error() != "patch is required" {
+		t.Fatalf("error should name canonical field only: %v", err)
 	}
 }
 

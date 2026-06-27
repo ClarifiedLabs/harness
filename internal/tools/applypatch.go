@@ -12,9 +12,7 @@ import (
 const applyPatchSchema = `{
   "type": "object",
   "properties": {
-    "patch": {"type": "string", "description": "Codex apply_patch text beginning with *** Begin Patch and ending with *** End Patch. Supports *** Add File, *** Delete File, *** Update File, and *** Move to. Preferred field name."},
-    "patchText": {"type": "string", "description": "Alias for patch, accepted for compatibility."},
-    "patch_text": {"type": "string", "description": "Alias for patch, accepted for compatibility."}
+    "patch": {"type": "string", "description": "Codex apply_patch text beginning with *** Begin Patch and ending with *** End Patch. Supports *** Add File, *** Delete File, *** Update File, and *** Move to."}
   }
 }`
 
@@ -114,7 +112,7 @@ func decodeApplyPatchInput(input json.RawMessage) (string, error) {
 	if chosenValue != "" {
 		return chosenValue, nil
 	}
-	return "", badArgs("patch is required; provide patch, patchText, or patch_text")
+	return "", badArgs("patch is required")
 }
 
 func formatReport(files []patch.FilePatch, res patch.Result) string {
