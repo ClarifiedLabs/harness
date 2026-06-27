@@ -1080,6 +1080,60 @@ func TestSaveSelectedModelPreservesOtherConfigKeys(t *testing.T) {
 	}
 }
 
+func TestSaveReplEditModeCreatesConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "config.json")
+	if err := SaveReplEditMode(path, "vi"); err != nil {
+		t.Fatalf("SaveReplEditMode: %v", err)
+	}
+	c, err := Load(nil, noEnv, path)
+	if err != nil {
+		t.Fatalf("Load saved config: %v", err)
+	}
+	if c.ReplEditMode != "vi" {
+		t.Fatalf("repl_edit_mode = %q, want vi", c.ReplEditMode)
+	}
+}
+
+func TestSaveReplEditModeCanonicalizes(t *testing.T) {
+	for in, want := range map[string]string{"VIM": "vi", "emacs": "emacs", "": "emacs"} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := SaveReplEditMode(path, in); err != nil {
+			t.Fatalf("SaveReplEditMode(%q): %v", in, err)
+		}
+		c, err := Load(nil, noEnv, path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.ReplEditMode != want {
+			t.Fatalf("SaveReplEditMode(%q): repl_edit_mode = %q, want %q", in, c.ReplEditMode, want)
+		}
+	}
+}
+
+func TestSaveReplEditModeRejectsInvalid(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := SaveReplEditMode(path, "bogus"); err == nil {
+		t.Fatalf("SaveReplEditMode(%q): want error, got nil", "bogus")
+	}
+}
+
+func TestSaveReplEditModePreservesOtherConfigKeys(t *testing.T) {
+	path := writeConfig(t, `{"agent":"plan","provider":"openai","model":"gpt-5.5","repl_edit_mode":"emacs"}`)
+	if err := SaveReplEditMode(path, "vi"); err != nil {
+		t.Fatalf("SaveReplEditMode: %v", err)
+	}
+	c, err := Load(nil, noEnv, path)
+	if err != nil {
+		t.Fatalf("Load saved config: %v", err)
+	}
+	if c.ReplEditMode != "vi" {
+		t.Fatalf("repl_edit_mode = %q, want vi", c.ReplEditMode)
+	}
+	if c.Agent != "plan" || c.Provider != "openai" || c.Model != "gpt-5.5" {
+		t.Fatalf("preserved keys = agent=%q provider=%q model=%q, want plan/openai/gpt-5.5", c.Agent, c.Provider, c.Model)
+	}
+}
+
 // Usage writes a screen that names every design §10 flag with its default, so the
 // help output is a complete and accurate reference.
 func TestUsageListsEveryFlag(t *testing.T) {

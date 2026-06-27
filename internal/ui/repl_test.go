@@ -545,11 +545,13 @@ func TestSuggestCommand(t *testing.T) {
 
 func TestREPLViCommand(t *testing.T) {
 	var modeChange string
+	var savedModes []string
 	app := &App{
 		Errw:              new(bytes.Buffer),
 		Out:               new(bytes.Buffer),
 		PromptEditMode:    "emacs",
 		SetPromptEditMode: func(m string) { modeChange = m },
+		SaveReplEditMode:  func(m string) error { savedModes = append(savedModes, m); return nil },
 	}
 
 	// /vi on
@@ -560,6 +562,9 @@ func TestREPLViCommand(t *testing.T) {
 	if modeChange != "vi" {
 		t.Errorf("/vi on: SetPromptEditMode called with %q, want vi", modeChange)
 	}
+	if len(savedModes) != 1 || savedModes[0] != "vi" {
+		t.Errorf("/vi on: SaveReplEditMode called with %v, want [vi]", savedModes)
+	}
 
 	// /vi off
 	modeChange = ""
@@ -569,6 +574,9 @@ func TestREPLViCommand(t *testing.T) {
 	}
 	if modeChange != "emacs" {
 		t.Errorf("/vi off: SetPromptEditMode called with %q, want emacs", modeChange)
+	}
+	if len(savedModes) != 2 || savedModes[1] != "emacs" {
+		t.Errorf("/vi off: SaveReplEditMode called with %v, want appended emacs", savedModes)
 	}
 
 	// /vi vi (alias for on)

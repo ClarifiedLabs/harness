@@ -109,6 +109,7 @@ type App struct {
 	PickerPageSize         int
 	SetReasoning           func(model string, reasoning llm.ReasoningConfig) error
 	SaveDefaultModel       func(provider, model string, reasoning llm.ReasoningConfig) error
+	SaveReplEditMode       func(mode string) error
 	PromptDefaultModelSave bool
 
 	// Prewarm, when set, kicks off a background prompt-cache warm-up for the
@@ -1917,6 +1918,11 @@ func (app *App) setEditMode(mode string) {
 	app.PromptEditMode = mode
 	if app.SetPromptEditMode != nil {
 		app.SetPromptEditMode(mode)
+	}
+	if app.SaveReplEditMode != nil {
+		if err := app.SaveReplEditMode(mode); err != nil {
+			fmt.Fprintf(app.Errw, "[default edit mode save failed: %v]\n", err)
+		}
 	}
 	label := mode
 	if label == "" {

@@ -1054,31 +1054,58 @@ func SaveSelectedModel(path, provider, model, reasoningEffort string, reasoningE
 			return err
 		}
 	}
-	providerJSON, err := json.Marshal(provider)
+	raw["provider"], err = json.Marshal(provider)
 	if err != nil {
 		return err
 	}
-	modelJSON, err := json.Marshal(model)
+	raw["model"], err = json.Marshal(model)
 	if err != nil {
 		return err
 	}
-	reasoningEffortJSON, err := json.Marshal(strings.ToLower(strings.TrimSpace(reasoningEffort)))
+	raw["reasoning_effort"], err = json.Marshal(strings.ToLower(strings.TrimSpace(reasoningEffort)))
 	if err != nil {
 		return err
 	}
-	reasoningEnabledJSON, err := json.Marshal(reasoningEnabled)
+	raw["reasoning_enabled"], err = json.Marshal(reasoningEnabled)
 	if err != nil {
 		return err
 	}
-	reasoningBudgetTokensJSON, err := json.Marshal(reasoningBudgetTokens)
+	raw["reasoning_budget_tokens"], err = json.Marshal(reasoningBudgetTokens)
 	if err != nil {
 		return err
 	}
-	raw["provider"] = providerJSON
-	raw["model"] = modelJSON
-	raw["reasoning_effort"] = reasoningEffortJSON
-	raw["reasoning_enabled"] = reasoningEnabledJSON
-	raw["reasoning_budget_tokens"] = reasoningBudgetTokensJSON
+	return writeConfigFile(path, raw)
+}
+
+// SaveReplEditMode writes the repl_edit_mode setting into the harness config
+// file, preserving any existing top-level keys. Missing files are created
+// atomically. The mode is canonicalized to "emacs" or "vi".
+func SaveReplEditMode(path, mode string) error {
+	mode, err := canonicalReplEditMode(mode)
+	if err != nil {
+		return err
+	}
+	raw := map[string]json.RawMessage{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	} else if len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return err
+		}
+	}
+	modeJSON, err := json.Marshal(mode)
+	if err != nil {
+		return err
+	}
+	raw["repl_edit_mode"] = modeJSON
+	return writeConfigFile(path, raw)
+}
+
+// writeConfigFile marshals raw to indented JSON and atomically replaces path.
+func writeConfigFile(path string, raw map[string]json.RawMessage) error {
 	out, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return err

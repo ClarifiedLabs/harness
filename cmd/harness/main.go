@@ -908,6 +908,9 @@ func run(env environment) int {
 		SaveDefaultModel: func(provider, model string, reasoning llm.ReasoningConfig) error {
 			return saveSelectedModel(writableConfigPath(args, getenv), provider, model, reasoning)
 		},
+		SaveReplEditMode: func(mode string) error {
+			return config.SaveReplEditMode(writableConfigPath(args, getenv), mode)
+		},
 		AgentName:       agentName,
 		AvailableAgents: agentSummaries(agents, activeToolNames),
 		RefreshAgentSummaries: func() []ui.AgentSummary {

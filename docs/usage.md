@@ -371,7 +371,7 @@ and nested relative path prefixes.
 | `/background <id>` | show a background job's status, result, and transcript path |
 | `/background cancel <id>` | cancel a running background job |
 | `/skills` | list available skills |
-| `/vi on\|off` | enable or disable vi-style prompt editing |
+| `/vi on\|off` | enable or disable vi-style prompt editing (persisted as the default) |
 | `!command` | run a local shell command at an interactive TTY prompt |
 
 Anthropic usage does not currently expose a separate reasoning-token field;
