@@ -286,7 +286,11 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		promptTemplate, _ = replprompt.Compile(replprompt.DefaultFormat)
 	}
 	renderPrompt := func() string {
-		return promptTemplate.Render(app.promptValues(promptTemplate, idleViMode(app.PromptEditMode)))
+		viMode := ""
+		if usePromptEditor {
+			viMode = idleViMode(app.PromptEditMode)
+		}
+		return promptTemplate.Render(app.promptValues(promptTemplate, viMode))
 	}
 
 	// Restore a usable terminal before the first prompt (termios sane plus an

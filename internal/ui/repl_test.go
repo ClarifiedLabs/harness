@@ -382,6 +382,25 @@ func TestREPLPromptViModeEmptyInEmacsMode(t *testing.T) {
 	}
 }
 
+func TestREPLPromptViModeEmptyWithoutPromptEditor(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.Prompt = "{vimode}> "
+	app.PromptEditMode = "vi"
+
+	if code := Run(strings.NewReader("/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	got := errw.String()
+	if strings.Contains(got, "INSERT") || strings.Contains(got, "NORMAL") {
+		t.Fatalf("vimode label should be empty without the raw prompt editor, got %q", got)
+	}
+	if !strings.Contains(got, "> ") {
+		t.Fatalf("prompt should still render the trailing > without the raw prompt editor, got %q", got)
+	}
+}
+
 func TestREPLPromptRendersGitBranchEachPrompt(t *testing.T) {
 	gitAvailableForPromptTest(t)
 	dir := scratchPromptRepo(t)
