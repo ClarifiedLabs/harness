@@ -1678,7 +1678,9 @@ user's home directory while preserving the typed prefix.
 rendered at every idle prompt boundary, so dynamic values reflect runtime
 changes before each read. The default is `[{agent}] > `. Supported placeholders
 are `{agent}`, `{cwd}`, `{git_branch}`, `{provider}`, `{model}`, and
-`{model_info}`. Literal escapes `\n`, `\t`, `\\`, `\{`, and `\}` are decoded
+`{model_info}`. `{cwd}` abbreviates the user's home directory prefix to `~`
+(for example `~/work`), so the rendered value may differ from the raw working
+directory. Literal escapes `\n`, `\t`, `\\`, `\{`, and `\}` are decoded
 for config, env, and flag values; unknown placeholders or invalid escapes are
 configuration errors.
 

@@ -4,6 +4,7 @@ package replprompt
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -161,7 +162,7 @@ func valueForField(f field, values Values) string {
 	case fieldAgent:
 		return values.Agent
 	case fieldCWD:
-		return values.CWD
+		return abbreviateHome(values.CWD)
 	case fieldGitBranch:
 		return values.GitBranch
 	case fieldProvider:
@@ -188,6 +189,27 @@ func ModelInfo(provider, model string) string {
 	default:
 		return ""
 	}
+}
+
+// abbreviateHome rewrites the user's home directory prefix in path as "~",
+// shortening e.g. "/Users/alice/work" to "~/work". Paths outside the home
+// directory (including empty paths and the home directory itself when it is
+// the root prefix) are returned unchanged; the bare home directory becomes "~".
+func abbreviateHome(path string) string {
+	if path == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if path == home {
+		return "~"
+	}
+	if strings.HasPrefix(path, home+"/") {
+		return "~" + path[len(home):]
+	}
+	return path
 }
 
 // CurrentGitBranch returns the current git branch for dir. It returns "" when

@@ -94,6 +94,35 @@ func TestUsesReportsReferencedPlaceholders(t *testing.T) {
 	}
 }
 
+func TestAbbreviateHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skipf("home directory unavailable: %v", err)
+	}
+	for _, tt := range []struct {
+		name string
+		cwd  string
+		want string
+	}{
+		{name: "empty", cwd: "", want: ""},
+		{name: "exact home", cwd: home, want: "~"},
+		{name: "under home", cwd: filepath.Join(home, "work"), want: "~/work"},
+		{name: "nested under home", cwd: filepath.Join(home, "a", "b"), want: "~/a/b"},
+		{name: "outside home", cwd: "/repo", want: "/repo"},
+		{name: "home prefix only", cwd: home + "ish", want: home + "ish"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpl, err := Compile("{cwd}")
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			if got := tmpl.Render(Values{CWD: tt.cwd}); got != tt.want {
+				t.Fatalf("render = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCurrentGitBranch(t *testing.T) {
 	gitAvailable(t)
 	dir := scratchRepo(t)
