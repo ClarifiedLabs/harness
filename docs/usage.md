@@ -102,8 +102,8 @@ interrupted.
                     request with a `[stopped: turn token budget N exceeded]` notice.
 -max-output-tokens <n> per-model-turn output cap; 0 uses the automatic cap (default 0)
 -max-prompt-cost <usd>   stop a user turn once its accumulated model cost reaches this many USD;
-                    0 means unlimited (default 0). Uses catalog pricing, so it applies only to
-                    models with a known price; breaks before the next paid request with a
+                    0 means unlimited (default 0). Applies only when provider usage reports
+                    known cost; breaks before the next paid request with a
                     `[stopped: turn cost budget $X reached]` notice. Complements -max-turn-tokens.
 -default-context-window <n>   fallback window for configured models without context metadata (default 256000)
 -context-window <n>   override the model's context window (tokens)
@@ -271,6 +271,14 @@ path while sending `store:false` to the ChatGPT backend. After setup, run:
 ```sh
 harness-model-proxy auth login openai-codex
 ```
+
+The special `sakana` provider is bundled until models.dev lists Sakana AI
+directly. Setup writes a managed Responses config for
+`https://api.sakana.ai/v1`, uses `SAKANA_API_KEY`, exposes `fugu`,
+`fugu-ultra`, and `fugu-ultra-20260615`, and sets
+`responses_stateful:false` because Sakana requires the full conversation instead
+of `previous_response_id`. Fugu Ultra usage is costed with Sakana's context-tier
+pricing; the routed `fugu` model reports token usage without dollar costs.
 
 Provider configs accept an optional `auth` block in place of `api_key` /
 `api_key_env`; when `auth` is present, API-key fields are ignored and there is no

@@ -133,8 +133,8 @@ type Options struct {
 	// request caps and do not use this value.
 	MaxOutputTokens int
 	// MaxPromptCostUSD stops a user turn once its accumulated model cost (USD)
-	// reaches this ceiling; zero means unlimited. Enforced only for models with
-	// catalog pricing (otherwise cost is unknown and the budget cannot fire).
+	// reaches this ceiling; zero means unlimited. Enforced only when provider
+	// usage includes known cost, otherwise the budget cannot fire.
 	MaxPromptCostUSD float64
 	// Model is the resolved model id stamped onto every request. The agent loop
 	// owns Request.Model because the provider config carries no model (one
@@ -944,8 +944,8 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		}
 
 		// Cost budget: the dollar analogue of the token budget, same hard stop.
-		// Only fires for models with catalog pricing — Cost reports known=false
-		// otherwise, so an unpriced model silently has no cost ceiling.
+		// Only fires when provider usage includes known cost, so an unpriced model
+		// silently has no cost ceiling.
 		if a.maxPromptCostUSD > 0 {
 			if total.CostKnown && total.CostUSD >= a.maxPromptCostUSD {
 				sink.Notice(promptCostBudgetNotice(a.maxPromptCostUSD, total.CostUSD))

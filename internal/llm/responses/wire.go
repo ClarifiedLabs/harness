@@ -162,11 +162,14 @@ type wireUsage struct {
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	InputTokensDetails       struct {
-		CachedTokens     int `json:"cached_tokens"`
-		CacheWriteTokens int `json:"cache_write_tokens"`
+		CachedTokens                   int `json:"cached_tokens"`
+		CacheWriteTokens               int `json:"cache_write_tokens"`
+		OrchestrationInputTokens       int `json:"orchestration_input_tokens"`
+		OrchestrationInputCachedTokens int `json:"orchestration_input_cached_tokens"`
 	} `json:"input_tokens_details"`
 	OutputTokensDetails struct {
-		ReasoningTokens int `json:"reasoning_tokens"`
+		ReasoningTokens           int `json:"reasoning_tokens"`
+		OrchestrationOutputTokens int `json:"orchestration_output_tokens"`
 	} `json:"output_tokens_details"`
 }
 

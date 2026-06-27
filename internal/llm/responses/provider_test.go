@@ -78,6 +78,20 @@ func TestNormalizeUsageCacheWriteTokens(t *testing.T) {
 	}
 }
 
+func TestNormalizeUsageSakanaOrchestrationTokens(t *testing.T) {
+	u := &wireUsage{InputTokens: 120, OutputTokens: 80}
+	u.InputTokensDetails.CachedTokens = 20
+	u.InputTokensDetails.OrchestrationInputTokens = 30
+	u.InputTokensDetails.OrchestrationInputCachedTokens = 5
+	u.OutputTokensDetails.OrchestrationOutputTokens = 40
+
+	got := normalizeUsage(u)
+	want := llm.Usage{InputTokens: 125, OutputTokens: 120, CacheReadTokens: 25}
+	if got != want {
+		t.Fatalf("usage = %+v, want %+v", got, want)
+	}
+}
+
 func TestStreamTextOnlyEventOrder(t *testing.T) {
 	srv := llmtest.ServeSSEFixture(t, "text_only.sse")
 	p := testProvider(t, srv, nil)

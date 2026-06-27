@@ -203,9 +203,61 @@ func TestOpenAICodexIgnoresPriceSource(t *testing.T) {
 		t.Fatalf("codex managed price = %+v, want zero subscription price", got)
 	}
 
-	usage := handler.priceUsage("openai-codex:gpt-5.5", llm.Usage{InputTokens: 1000, OutputTokens: 2000})
+	usage := handler.priceUsage("openai-codex:gpt-5.5", llm.Request{}, llm.Usage{InputTokens: 1000, OutputTokens: 2000})
 	if usage.CostKnown {
 		t.Fatalf("codex usage cost known = true with cost %v, want unknown subscription price", usage.CostUSD)
+	}
+}
+
+func TestSakanaManagedProviderUsesDynamicPricing(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sakana.json"), []byte(`{
+  "name": "sakana",
+  "api_type": "responses",
+  "base_url": "https://api.sakana.ai/v1",
+  "managed": true,
+  "models": [
+    {"name":"fugu-ultra","context_window":1000000,"price":{"input":99,"output":99}},
+    {"name":"fugu","context_window":1000000,"price":{"input":99,"output":99}}
+  ]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	md := modelsDevCatalogWith("sakana", "fugu-ultra", llm.Price{Input: 99, Output: 99})
+	handler, err := NewHandler(Options{
+		ConfigDir:           dir,
+		Config:              Config{ProviderConfigs: []string{"sakana.json"}},
+		ModelsDevCatalog:    md,
+		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
+		New:                 fixedUsageProvider(llm.Usage{InputTokens: 1000, OutputTokens: 2000}),
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	if got := catalogModelPrice(t, handler.Catalog(), "sakana", "fugu-ultra"); got != (llm.Price{}) {
+		t.Fatalf("sakana fugu-ultra catalog price = %+v, want omitted dynamic price", got)
+	}
+	if got := catalogModelPrice(t, handler.Catalog(), "sakana", "fugu"); got != (llm.Price{}) {
+		t.Fatalf("sakana fugu catalog price = %+v, want omitted unknown router price", got)
+	}
+
+	usage := handler.priceUsage("sakana:fugu-ultra", llm.Request{EstimatedInputTokens: 1000}, llm.Usage{
+		InputTokens:     1000,
+		OutputTokens:    2000,
+		CacheReadTokens: 300,
+	})
+	if !usage.CostKnown {
+		t.Fatal("sakana fugu-ultra cost known = false, want true")
+	}
+	want := 1000.0/1e6*5 + 2000.0/1e6*30 + 300.0/1e6*0.5
+	if diff := usage.CostUSD - want; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("sakana fugu-ultra cost = %v, want %v", usage.CostUSD, want)
+	}
+
+	usage = handler.priceUsage("sakana:fugu", llm.Request{EstimatedInputTokens: 1000}, llm.Usage{InputTokens: 1000, OutputTokens: 2000})
+	if usage.CostKnown {
+		t.Fatalf("sakana fugu cost known = true with cost %v, want unknown route-dependent price", usage.CostUSD)
 	}
 }
 

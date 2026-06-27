@@ -37,8 +37,8 @@ type setupProviderConfig struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key,omitempty"`
 	// Managed is always true for configs written by setup/refresh. For priced
-	// providers, prices are resolved live from the models.dev cache, so the
-	// per-model entries below carry no price.
+	// providers, flat prices are resolved live from the models.dev cache or a
+	// provider-specific pricer, so the per-model entries below carry no price.
 	Managed bool `json:"managed,omitempty"`
 	// PriceSource names the models.dev provider id whose prices apply to this
 	// managed provider when it differs from Name. Empty means price from Name.
@@ -150,6 +150,7 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	if existingProvider.Config.ResponsesWebSocket != nil {
 		provider.ResponsesWebSocket = existingProvider.Config.ResponsesWebSocket
 	}
+	applySyntheticProviderDefaults(providerMeta, &provider)
 
 	mainConfig := setupMainConfig{
 		ProviderConfigs:      []string{providerFile},
@@ -268,6 +269,7 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			if current.ResponsesWebSocket != nil {
 				next.ResponsesWebSocket = current.ResponsesWebSocket
 			}
+			applySyntheticProviderDefaults(meta, &next)
 			updated = append(updated, next)
 		}
 		var body any = updated
@@ -397,6 +399,20 @@ func setupProviderFromModelsDev(provider modelsdev.Provider, apiKey string, auth
 			OmitMaxOutputTokens: true,
 			Auth:                setupProviderAuth(provider, authCfg),
 			Models:              entries,
+		}
+	}
+	if isSakanaProvider(provider) {
+		stateful := false
+		cfg := provider.ProviderConfig(apiKey)
+		return setupProviderConfig{
+			Name:              cfg.Name,
+			APIType:           setupProviderAPIType(provider),
+			BaseURL:           setupProviderBaseURL(provider),
+			APIKey:            cfg.APIKey,
+			Managed:           true,
+			ResponsesStateful: &stateful,
+			APIKeyEnv:         cfg.APIKeyEnv,
+			Models:            entries,
 		}
 	}
 	cfg := provider.ProviderConfig(apiKey)
@@ -703,6 +719,12 @@ func supportedSetupProviders(catalog *modelsdev.Catalog, codexCatalog *codexMode
 			providers = append(providers, codex)
 		}
 	}
+	if !setupProviderListContains(providers, sakanaProviderID) {
+		sakana, ok := sakanaProvider()
+		if ok {
+			providers = append(providers, sakana)
+		}
+	}
 	sort.Slice(providers, func(i, j int) bool {
 		if strings.EqualFold(providers[i].Name, providers[j].Name) {
 			return providers[i].ID < providers[j].ID
@@ -725,6 +747,9 @@ func setupCatalogProvider(catalog *modelsdev.Catalog, codexCatalog *codexModelsC
 	if id == openAICodexProviderID {
 		return openAICodexProvider(codexCatalog)
 	}
+	if id == sakanaProviderID {
+		return sakanaProvider()
+	}
 	return catalog.Provider(id)
 }
 
@@ -736,6 +761,9 @@ func setupProviderAPIType(provider modelsdev.Provider) string {
 	if isOpenAICodexProvider(provider) {
 		return "responses"
 	}
+	if isSakanaProvider(provider) {
+		return "responses"
+	}
 	return provider.APIType()
 }
 
@@ -743,11 +771,28 @@ func setupProviderBaseURL(provider modelsdev.Provider) string {
 	if isOpenAICodexProvider(provider) {
 		return openAICodexProviderBaseURL
 	}
+	if isSakanaProvider(provider) {
+		return sakanaProviderBaseURL
+	}
 	return provider.BaseURL()
 }
 
 func isOpenAICodexProvider(provider modelsdev.Provider) bool {
 	return provider.ID == openAICodexProviderID
+}
+
+func isSakanaProvider(provider modelsdev.Provider) bool {
+	return provider.ID == sakanaProviderID
+}
+
+func applySyntheticProviderDefaults(provider modelsdev.Provider, cfg *setupProviderConfig) {
+	if cfg == nil {
+		return
+	}
+	if isSakanaProvider(provider) {
+		stateful := false
+		cfg.ResponsesStateful = &stateful
+	}
 }
 
 func setupPageSize(env environment) int {
@@ -858,10 +903,11 @@ func setupCatalog(ctx context.Context, env environment) (*modelsdev.Catalog, err
 }
 
 // setupModelFromModelsDev builds the on-disk entry for one selected model.
-// Managed configs never store a price: the proxy resolves prices live from the
-// models.dev cache, so leaving Price nil here keeps refreshed prices reaching
-// the running server without another setup. The price is still shown in the
-// interactive picker (formatPickerPrice), it just isn't persisted.
+// Managed configs never store a flat price: the proxy resolves flat prices live
+// from the models.dev cache or provider-specific pricers, so leaving Price nil
+// keeps refreshed prices reaching the running server without another setup. The
+// models.dev price is still shown in the interactive picker (formatPickerPrice),
+// it just isn't persisted.
 func setupModelFromModelsDev(model modelsdev.Model) setupModelConfig {
 	cfg := setupModelConfig{
 		Name:             model.ID,

@@ -309,8 +309,8 @@ func TestPromptCostBudgetStops(t *testing.T) {
 }
 
 // TestPromptCostBudgetUnpricedModelNeverFires verifies the cost budget cannot
-// fire for a model without catalog pricing (Cost reports known=false): it
-// degrades to no ceiling rather than stopping arbitrarily.
+// fire when provider usage has no known cost: it degrades to no ceiling rather
+// than stopping arbitrarily.
 func TestPromptCostBudgetUnpricedModelNeverFires(t *testing.T) {
 	tool := &recordTool{name: "probe", readOnly: true, run: func(_ context.Context, _ json.RawMessage) (string, error) {
 		return "ok", nil

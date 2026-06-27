@@ -26,6 +26,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/factory"
 	"harness/internal/metrics"
+	"harness/internal/modelproxy/pricing"
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/modelsdev"
 )
@@ -160,14 +161,16 @@ type usageKey struct {
 	targetID string
 }
 
-// catalogSnapshot is the immutable served state: a registry used to price
-// requests and the catalog served at /v1/models. It is swapped atomically when
-// the models.dev cache refreshes so managed prices stay fresh without a
-// restart. Readers Load() it; the refresher Stores() a freshly built one.
+// catalogSnapshot is the immutable served state: a registry used for model
+// metadata, a pricer used for request costs, and the catalog served at
+// /v1/models. It is swapped atomically when the models.dev cache refreshes so
+// managed prices stay fresh without a restart. Readers Load() it; the refresher
+// Stores() a freshly built one.
 type catalogSnapshot struct {
 	registry *llm.Registry
 	catalog  protocol.Catalog
 	targets  map[string]resolvedTarget
+	pricer   pricing.Pricer
 }
 
 type resolvedTarget struct {
@@ -382,21 +385,22 @@ func (h *Handler) recordMetrics(r *http.Request, providerID, model string, usage
 	}
 }
 
-// buildSnapshot resolves managed-provider prices from md, then builds the
-// registry and served catalog from the price-filled providers. Manual providers
-// keep their own configured prices. The catalog's pricing stamp dates the
-// managed prices to the models.dev cache when any provider is managed, and to
-// the provider-config mtime otherwise.
+// buildSnapshot resolves managed-provider flat prices from md where applicable,
+// then builds the registry and served catalog from the provider configs. Manual
+// providers keep their own configured prices. The catalog's pricing stamp dates
+// the managed prices to the models.dev cache when any provider is managed, and
+// to the provider-config mtime otherwise.
 func (h *Handler) buildSnapshot(md *modelsdev.Catalog, mdSourceDate time.Time) (*catalogSnapshot, error) {
 	priced := pricedProviders(h.providers, md)
+	pricer := pricing.NewComposite()
 	registry := llm.RegistryFromProviderConfigs(priced)
 	registry.SetDefaultContextWindow(h.defaultContextWindow)
-	catalog, targets, err := catalogFromProviderConfigs(priced)
+	catalog, targets, err := catalogFromProviderConfigs(priced, pricer)
 	if err != nil {
 		return nil, err
 	}
 	catalog.Pricing = h.pricingInfo(md, mdSourceDate)
-	return &catalogSnapshot{registry: registry, catalog: catalog, targets: targets}, nil
+	return &catalogSnapshot{registry: registry, catalog: catalog, targets: targets, pricer: pricer}, nil
 }
 
 // UpdateModelsDevCatalog rebuilds the served snapshot with prices resolved from
@@ -430,14 +434,15 @@ func (h *Handler) pricingInfo(md *modelsdev.Catalog, mdSourceDate time.Time) *pr
 	}
 }
 
-// pricedProviders returns provider configs with prices ready for the registry
-// and catalog. Managed providers get a fresh copy whose model prices come from
-// the models.dev cache (left zero when the cache lacks the model); manual
+// pricedProviders returns provider configs with flat prices ready for the
+// registry and catalog. Managed providers get a fresh copy whose flat model
+// prices come from the models.dev cache when applicable (left zero when the
+// cache lacks the model or a provider-specific pricer owns the cost); manual
 // providers are returned unchanged, keeping their own configured prices.
 func pricedProviders(providers []llm.ProviderConfig, md *modelsdev.Catalog) []llm.ProviderConfig {
 	out := make([]llm.ProviderConfig, len(providers))
 	for i, pc := range providers {
-		if pc.Name == openAICodexProviderID {
+		if pc.Name == openAICodexProviderID || (pc.Managed && pc.Name == pricing.SakanaProviderID) {
 			cp := pc
 			cp.Models = make([]llm.ModelEntry, len(pc.Models))
 			for j, entry := range pc.Models {
@@ -560,8 +565,8 @@ func (h *Handler) handleUsage(w http.ResponseWriter, _ *http.Request) {
 }
 
 // recordUsage accumulates one priced request into the per-model usage map. It is
-// called only for requests whose model has a known price, so every bucket has a
-// meaningful CostUSD.
+// called only for requests with known cost, so every bucket has a meaningful
+// CostUSD.
 func (h *Handler) recordUsage(targetID string, u llm.Usage, cost float64) {
 	key := usageKey{targetID: targetID}
 	h.usageMu.Lock()
@@ -801,7 +806,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			events++
 			if ev.Usage != nil {
 				usage = mergeUsage(usage, *ev.Usage)
-				usage = h.priceUsage(targetID, usage)
+				usage = h.priceUsage(targetID, request, usage)
 				ev.Usage = &usage
 			}
 			if ev.Kind == llm.EventToolCallDone {
@@ -812,7 +817,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				if ev.Usage != nil {
 					usage = mergeUsage(usage, *ev.Usage)
 				}
-				usage = h.priceUsage(targetID, usage)
+				usage = h.priceUsage(targetID, request, usage)
 				ev.Usage = &usage
 				if ev.ResponseID != "" && request.StoreResponse {
 					// The caller appends the assistant message from this response
@@ -1045,16 +1050,26 @@ func (h *Handler) resolveTarget(id string) (resolvedTarget, error) {
 	return resolvedTarget{}, fmt.Errorf("target %q is not available from the model proxy", id)
 }
 
-func (h *Handler) priceUsage(targetID string, usage llm.Usage) llm.Usage {
+func (h *Handler) priceUsage(targetID string, request llm.Request, usage llm.Usage) llm.Usage {
 	snapshot := h.snapshot.Load()
-	if snapshot == nil || snapshot.registry == nil {
+	if snapshot == nil || snapshot.pricer == nil {
 		return usage
 	}
-	cost, ok := snapshot.registry.Cost(targetID, usage)
+	target, ok := snapshot.targets[targetID]
 	if !ok {
 		return usage
 	}
-	usage.CostUSD = cost
+	res := snapshot.pricer.PriceUsage(pricing.Input{
+		TargetID: targetID,
+		Provider: target.pc,
+		Model:    target.entry,
+		Request:  request,
+		Usage:    usage,
+	})
+	if !res.Known {
+		return usage
+	}
+	usage.CostUSD = res.CostUSD
 	usage.CostKnown = true
 	return usage
 }
@@ -1432,7 +1447,7 @@ func DefaultConfigDir(getenv func(string) string) string {
 	return filepath.Join(os.TempDir(), "harness-model-proxy-config")
 }
 
-func catalogFromProviderConfigs(providers []llm.ProviderConfig) (protocol.Catalog, map[string]resolvedTarget, error) {
+func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.Pricer) (protocol.Catalog, map[string]resolvedTarget, error) {
 	out := protocol.Catalog{}
 	modelCounts := map[string]int{}
 	for _, pc := range providers {
@@ -1456,6 +1471,14 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig) (protocol.Catalo
 			if modelCounts[entry.Name] == 1 {
 				aliases = append(aliases, entry.Name)
 			}
+			price := entry.Price
+			if pricer != nil {
+				if catalogPrice := pricer.CatalogPrice(pc, entry); catalogPrice.Known {
+					price = catalogPrice.Price
+				} else {
+					price = llm.Price{}
+				}
+			}
 			target := protocol.Target{
 				ID:              id,
 				Aliases:         aliases,
@@ -1465,7 +1488,7 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig) (protocol.Catalo
 				ContextWindow:   entry.ContextWindow,
 				OutputLimit:     entry.OutputLimit,
 				InputModalities: append([]string(nil), entry.InputModalities...),
-				Price:           entry.Price,
+				Price:           price,
 				Reasoning:       targetReasoningProfiles(entry),
 			}
 			out.Targets = append(out.Targets, target)

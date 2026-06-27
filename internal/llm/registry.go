@@ -36,9 +36,10 @@ type ProviderConfig struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key"`
 	// Managed marks a config written by `--setup`/`--refresh-models`. Managed
-	// configs omit per-model prices; the proxy resolves their prices live from
-	// the in-memory models.dev cache instead. A config lacking this flag (e.g. a
-	// hand-written one) is treated as manual and keeps its own configured prices.
+	// configs omit flat per-model prices; the proxy resolves flat prices live
+	// from the in-memory models.dev cache or provider-specific pricers. A config
+	// lacking this flag (e.g. a hand-written one) is treated as manual and keeps
+	// its own configured prices.
 	Managed bool `json:"managed,omitempty"`
 	// PriceSource overrides which models.dev provider id a managed config's prices
 	// are resolved from. Empty means "this provider's own name". It exists so a

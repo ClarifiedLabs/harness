@@ -23,7 +23,7 @@ func TestRunSetupWritesOnlySelectedModelsAndNoProxyDefault(t *testing.T) {
 	home := t.TempDir()
 	var out, errw bytes.Buffer
 	env := environment{
-		stdin:  strings.NewReader("1\n\nsave\n2\nsave\n"),
+		stdin:  strings.NewReader("testai\n\nsave\n2\nsave\n"),
 		stdout: &out,
 		stderr: &errw,
 		getenv: func(k string) string {
@@ -118,7 +118,7 @@ func TestRunSetupWritesManagedConfigWithoutPrices(t *testing.T) {
 		},
 	}}
 	env := environment{
-		stdin:  strings.NewReader("1\n\nall\nsave\n"),
+		stdin:  strings.NewReader("testai\n\nall\nsave\n"),
 		stdout: &out,
 		stderr: &errw,
 		getenv: func(k string) string {
@@ -301,11 +301,95 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	}
 }
 
+func TestRunSetupWritesSakanaProvider(t *testing.T) {
+	home := t.TempDir()
+	var out, errw bytes.Buffer
+	env := environment{
+		stdin:  strings.NewReader("sakana\n\nfugu-ultra\nsave\n"),
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(k string) string {
+			if k == "HOME" {
+				return home
+			}
+			return ""
+		},
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return testSetupCatalog(), nil
+		},
+		terminalRows: func() int { return 12 },
+	}
+
+	if err := runSetup(context.Background(), env, false); err != nil {
+		t.Fatalf("runSetup: %v; stderr=%q", err, errw.String())
+	}
+	if !strings.Contains(out.String(), "SAKANA_API_KEY") {
+		t.Fatalf("sakana setup should mention SAKANA_API_KEY, output=%q", out.String())
+	}
+
+	dir := filepath.Join(home, ".config", "harness-model-proxy")
+	configData, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("read proxy config: %v", err)
+	}
+	var mainConfig setupMainConfig
+	if err := json.Unmarshal(configData, &mainConfig); err != nil {
+		t.Fatalf("decode proxy config: %v", err)
+	}
+	if len(mainConfig.ProviderConfigs) != 1 || mainConfig.ProviderConfigs[0] != "sakana.json" {
+		t.Fatalf("provider configs = %+v, want sakana.json", mainConfig.ProviderConfigs)
+	}
+
+	providerData, err := os.ReadFile(filepath.Join(dir, "sakana.json"))
+	if err != nil {
+		t.Fatalf("read provider config: %v", err)
+	}
+	if bytes.Contains(providerData, []byte("\"price\"")) {
+		t.Fatalf("sakana managed config should omit flat per-model prices: %s", providerData)
+	}
+	var provider setupProviderConfig
+	if err := json.Unmarshal(providerData, &provider); err != nil {
+		t.Fatalf("decode provider config: %v", err)
+	}
+	if provider.Name != sakanaProviderID ||
+		provider.APIType != "responses" ||
+		provider.BaseURL != sakanaProviderBaseURL ||
+		provider.APIKey != "" ||
+		provider.Auth != nil {
+		t.Fatalf("provider config = %+v", provider)
+	}
+	if !provider.Managed {
+		t.Fatalf("sakana provider should be managed: %+v", provider)
+	}
+	if provider.ResponsesStateful == nil || *provider.ResponsesStateful {
+		t.Fatalf("sakana responses_stateful = %v, want false", provider.ResponsesStateful)
+	}
+	if !slices.Equal(provider.APIKeyEnv, []string{"SAKANA_API_KEY"}) {
+		t.Fatalf("sakana API key env = %+v, want SAKANA_API_KEY", provider.APIKeyEnv)
+	}
+	if len(provider.Models) != 1 || provider.Models[0].Name != "fugu-ultra" {
+		t.Fatalf("provider models = %+v, want fugu-ultra", provider.Models)
+	}
+	model := provider.Models[0]
+	if model.ContextWindow != 1_000_000 {
+		t.Fatalf("fugu-ultra context = %d, want 1000000", model.ContextWindow)
+	}
+	if !slices.Equal(model.InputModalities, []string{"text", "image"}) {
+		t.Fatalf("fugu-ultra input modalities = %+v, want text,image", model.InputModalities)
+	}
+	if model.Reasoning == nil || !*model.Reasoning {
+		t.Fatalf("fugu-ultra reasoning = %v, want true", model.Reasoning)
+	}
+	if len(model.ReasoningOptions) != 1 || !slices.Equal(model.ReasoningOptions[0].Values, []string{"high", "xhigh"}) {
+		t.Fatalf("fugu-ultra reasoning options = %+v, want high,xhigh", model.ReasoningOptions)
+	}
+}
+
 func TestRunSetupWritesGoogleOpenAICompatibleProvider(t *testing.T) {
 	home := t.TempDir()
 	var out, errw bytes.Buffer
 	env := environment{
-		stdin:  strings.NewReader("1\n\n1\nsave\n"),
+		stdin:  strings.NewReader("google\n\n1\nsave\n"),
 		stdout: &out,
 		stderr: &errw,
 		getenv: func(k string) string {
@@ -399,7 +483,7 @@ func TestRunSetupModelSelectorCancelDoesNotWriteConfig(t *testing.T) {
 	home := t.TempDir()
 	var out, errw bytes.Buffer
 	env := environment{
-		stdin:  strings.NewReader("1\n\ncancel\n"),
+		stdin:  strings.NewReader("testai\n\ncancel\n"),
 		stdout: &out,
 		stderr: &errw,
 		getenv: func(k string) string {
@@ -447,7 +531,7 @@ func TestRunSetupUpdatesExistingProviderConfig(t *testing.T) {
 
 	var out, errw bytes.Buffer
 	env := environment{
-		stdin:  strings.NewReader("1\n\n1\nsave\n"),
+		stdin:  strings.NewReader("testai\n\n1\nsave\n"),
 		stdout: &out,
 		stderr: &errw,
 		getenv: func(k string) string {
@@ -505,7 +589,7 @@ func TestRunSetupUsesCachedCatalogWhenFetchFails(t *testing.T) {
 	fetches := 0
 	var out, errw bytes.Buffer
 	env := environment{
-		stdin:  strings.NewReader("1\n\n1\nsave\n"),
+		stdin:  strings.NewReader("testai\n\n1\nsave\n"),
 		stdout: &out,
 		stderr: &errw,
 		getenv: func(k string) string {
@@ -851,6 +935,75 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	}
 	if provider.ResponsesWebSocket != nil {
 		t.Fatalf("codex responses_websocket after refresh = %v, want omitted runtime default", provider.ResponsesWebSocket)
+	}
+}
+
+func TestRunRefreshModelsHandlesSakanaProvider(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["sakana.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sakana.json"), []byte(`{
+  "name": "sakana",
+  "api_type": "responses",
+  "base_url": "https://api.sakana.ai/v1",
+  "api_key": "sk-existing",
+  "responses_stateful": true,
+  "models": [{"name":"fugu","context_window":1000,"price":{"input":99,"output":99}}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	env := environment{
+		stdout: &out,
+		stderr: &bytes.Buffer{},
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return testSetupCatalog(), nil
+		},
+	}
+
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "sakana.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("\"price\"")) {
+		t.Fatalf("sakana refreshed config should omit flat per-model prices: %s", data)
+	}
+	var provider setupProviderConfig
+	if err := json.Unmarshal(data, &provider); err != nil {
+		t.Fatal(err)
+	}
+	if provider.Name != sakanaProviderID ||
+		provider.APIType != "responses" ||
+		provider.BaseURL != sakanaProviderBaseURL ||
+		provider.APIKey != "sk-existing" {
+		t.Fatalf("provider after refresh = %+v", provider)
+	}
+	if !provider.Managed {
+		t.Fatalf("sakana provider should be managed after refresh: %+v", provider)
+	}
+	if provider.ResponsesStateful == nil || *provider.ResponsesStateful {
+		t.Fatalf("sakana responses_stateful after refresh = %v, want false", provider.ResponsesStateful)
+	}
+	if !slices.Equal(provider.APIKeyEnv, []string{"SAKANA_API_KEY"}) {
+		t.Fatalf("sakana API key env after refresh = %+v, want SAKANA_API_KEY", provider.APIKeyEnv)
+	}
+	if len(provider.Models) != 1 || provider.Models[0].Name != "fugu" {
+		t.Fatalf("provider models after refresh = %+v, want fugu", provider.Models)
+	}
+	model := provider.Models[0]
+	if model.ContextWindow != 1_000_000 {
+		t.Fatalf("fugu context after refresh = %d, want 1000000", model.ContextWindow)
+	}
+	if !slices.Equal(model.InputModalities, []string{"text", "image"}) {
+		t.Fatalf("fugu input modalities after refresh = %+v, want text,image", model.InputModalities)
+	}
+	if len(model.ReasoningOptions) != 1 || !slices.Equal(model.ReasoningOptions[0].Values, []string{"high", "xhigh"}) {
+		t.Fatalf("fugu reasoning options after refresh = %+v, want high,xhigh", model.ReasoningOptions)
 	}
 }
 

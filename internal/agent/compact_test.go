@@ -365,6 +365,18 @@ func TestCompactUsageReported(t *testing.T) {
 	}
 }
 
+func TestCompactionReportUsesKnownUsageCost(t *testing.T) {
+	report := compactionReport(nil, "sakana:fugu-ultra", 3, llm.Usage{
+		InputTokens:  9100,
+		OutputTokens: 400,
+		CostUSD:      0.061,
+		CostKnown:    true,
+	})
+	if !strings.Contains(report, "$0.06") {
+		t.Fatalf("compaction report = %q, want usage cost", report)
+	}
+}
+
 func TestCompactArchivesRemovedMessages(t *testing.T) {
 	transcript := makeTurns(10)
 	fp := llmtest.New("fake", summaryStep("S", 100, 10))

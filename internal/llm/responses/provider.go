@@ -354,6 +354,7 @@ func normalizeUsage(u *wireUsage) llm.Usage {
 	if cacheRead == 0 {
 		cacheRead = u.CacheReadInputTokens
 	}
+	orchestrationCacheRead := u.InputTokensDetails.OrchestrationInputCachedTokens
 	cacheWrite := u.InputTokensDetails.CacheWriteTokens
 	if cacheWrite == 0 {
 		cacheWrite = u.CacheCreationInputTokens
@@ -362,10 +363,14 @@ func normalizeUsage(u *wireUsage) llm.Usage {
 	if input < 0 {
 		input = 0
 	}
+	orchestrationInput := u.InputTokensDetails.OrchestrationInputTokens - u.InputTokensDetails.OrchestrationInputCachedTokens
+	if orchestrationInput < 0 {
+		orchestrationInput = 0
+	}
 	return llm.Usage{
-		InputTokens:      input,
-		OutputTokens:     u.OutputTokens,
-		CacheReadTokens:  cacheRead,
+		InputTokens:      input + orchestrationInput,
+		OutputTokens:     u.OutputTokens + u.OutputTokensDetails.OrchestrationOutputTokens,
+		CacheReadTokens:  cacheRead + orchestrationCacheRead,
 		CacheWriteTokens: cacheWrite,
 		ReasoningTokens:  u.OutputTokensDetails.ReasoningTokens,
 	}

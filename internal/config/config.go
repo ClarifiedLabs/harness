@@ -57,7 +57,7 @@ type Config struct {
 	MaxTurns                  int               `json:"max_turns"`              // -max-turns, default 250
 	MaxTurnTokens             int               `json:"max_turn_tokens"`        // -max-turn-tokens, accumulated-token ceiling per user turn; 0 = unlimited
 	MaxOutputTokens           int               `json:"max_output_tokens"`      // -max-output-tokens, per model turn output cap; 0 = automatic
-	MaxPromptCostUSD          float64           `json:"max_prompt_cost_usd"`    // -max-prompt-cost, accumulated USD ceiling per user turn; 0 = unlimited (needs catalog pricing)
+	MaxPromptCostUSD          float64           `json:"max_prompt_cost_usd"`    // -max-prompt-cost, accumulated USD ceiling per user turn; 0 = unlimited (needs known model cost)
 	ToolTimeoutSeconds        int               `json:"tool_timeout_seconds"`   // -tool-timeout, per-tool-call dispatch ceiling (s); default 600, <=0 disables
 	DefaultContextWindow      int               `json:"default_context_window"` // -default-context-window, fallback when metadata lacks a window
 	ContextWindow             int               `json:"context_window"`         // -context-window, 0 = registry/default
@@ -939,7 +939,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.maxTurns = fs.Int("max-turns", defaultMaxTurns, "model turns per user prompt; <=0 means unlimited")
 	f.maxTurnTokens = fs.Int("max-turn-tokens", 0, "stop a user turn after this many accumulated tokens; 0 means unlimited")
 	f.maxOutputTokens = fs.Int("max-output-tokens", 0, "per-model-turn output token cap; 0 uses the automatic cap")
-	f.maxPromptCost = fs.Float64("max-prompt-cost", 0, "stop a user turn once its accumulated model cost reaches this many USD; 0 means unlimited (requires a model with catalog pricing)")
+	f.maxPromptCost = fs.Float64("max-prompt-cost", 0, "stop a user turn once its accumulated model cost reaches this many USD; 0 means unlimited (requires known model cost)")
 	f.toolTimeout = fs.Int("tool-timeout", defaultToolTimeoutSeconds, "per-tool-call timeout backstop in seconds; <=0 disables (run_command's own timeout_seconds still applies)")
 	f.defaultContextWindow = fs.Int("default-context-window", defaultContextWindow, "default context window for configured models without context metadata (tokens)")
 	f.contextWindow = fs.Int("context-window", 0, "context window override (tokens)")

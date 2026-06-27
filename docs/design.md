@@ -66,6 +66,7 @@ codebase works today and evolves as harness gains capabilities.
 cmd/harness/main.go      flags, config load, proxy catalog wiring, signal setup, REPL-vs-oneshot dispatch (also hosts `harness lsp serve`, `harness session replay|timings`)
 cmd/harness-model-proxy  provider setup/refresh and HTTP model proxy server; subcommands serve (default), setup, refresh-models, auth (login/logout/status), generate-api-key, version
 internal/modelproxy      proxy protocol, client Provider, server handler
+internal/modelproxy/pricing generic request-cost pricers: flat llm.Price plus provider-specific dynamic models
 internal/llm             provider-agnostic types, Provider interface, model/price registry
 internal/llm/openai      Chat Completions dialect: wire structs, request builder, stream decode, tool-call assembly
 internal/llm/responses   OpenAI Responses dialect: same responsibilities
@@ -615,6 +616,11 @@ a vendored copy or the last cached refresh; `refresh-models` fetches the latest
 catalog from `openai/codex` on GitHub and caches it as `openai-codex.models.json`.
 Only list-visible Codex models are exposed.
 
+The synthetic `sakana` provider is bundled until models.dev lists Sakana AI
+directly. It exposes `fugu`, `fugu-ultra`, and `fugu-ultra-20260615`, uses the
+Responses API at `https://api.sakana.ai/v1`, and reads API keys from
+`SAKANA_API_KEY`.
+
 ### Managed vs manual provider configs
 
 Provider config files are either **managed** or **manual**:
@@ -644,17 +650,28 @@ Responses `max_output_tokens` parameter; the proxy infers the same omit behavior
 for older `codex_oauth` Responses configs. The proxy also defaults
 `responses_websocket` on for `codex_oauth` Responses configs so continuation can
 use the Codex-compatible WebSocket path without writing another managed config
-field. The server otherwise stays provider-neutral for pricing — it just honors
-whatever `price_source` a managed config names.
+field. The synthetic `sakana` provider always writes `responses_stateful:false`
+because Sakana does not accept `previous_response_id` and requires the full
+conversation history. It also bypasses models.dev flat prices: Fugu Ultra is
+priced by `internal/modelproxy/pricing` with Sakana's context-tier billing, while
+the routed `fugu` model has unknown dollar cost unless Sakana adds response
+billing metadata.
 
-The serving handler holds its registry + served catalog behind an atomic
-snapshot. The initial snapshot is built at startup from the loaded provider
-configs plus the cached models.dev catalog; after each successful cache refresh
-the refresher rebuilds the snapshot (managed prices/modalities from the new
-catalog, manual metadata unchanged) and atomically swaps it in, so `/v1/models`
-responses and per-request `cost_usd` accounting always reflect the freshest
-managed metadata. `internal/llm` stays free of any `internal/modelsdev` import —
-the server is the only layer that bridges models.dev metadata into `llm`.
+Flat catalog prices still use `price_source` for managed configs when the price
+is representable as `llm.Price`. Request costs flow through the pricing package's
+generic interface: provider-specific pricers can return handled-but-unknown for
+dynamic models, and the flat pricer handles the existing per-1M-token
+`llm.Price` shape for all other configured models.
+
+The serving handler holds its registry, pricer, and served catalog behind an
+atomic snapshot. The initial snapshot is built at startup from the loaded
+provider configs plus the cached models.dev catalog; after each successful cache
+refresh the refresher rebuilds the snapshot (managed flat prices/modalities from
+the new catalog, manual metadata unchanged) and atomically swaps it in, so
+`/v1/models` responses and per-request `cost_usd` accounting always reflect the
+freshest managed metadata. `internal/llm` stays free of any `internal/modelsdev`
+import — the server is the only layer that bridges models.dev metadata into
+`llm`.
 Candidate cache updates must parse as models.dev JSON and contain at least one
 provider and model. When a previous cache is parseable, replacement is rejected
 if provider or model counts change by more than 4x and the absolute delta is
@@ -664,8 +681,10 @@ place. Successful replacements first save the previous cache as
 
 Harness only uses models exposed by `harness-model-proxy`; arbitrary
 provider-local model names are rejected unless they are configured in the proxy
-catalog. Configured models without pricing metadata display token counts without
-a dollar figure. Configured models without context-window metadata use a
+catalog. Configured models whose request usage has no known cost display token
+counts without a dollar figure; dynamic pricers can still produce `cost_usd` for
+models that omit a flat catalog `Target.Price`. Configured models without
+context-window metadata use a
 conservative 256k default, configurable with `-default-context-window` and
 overridable for a run with `-context-window`. Model prices, context windows,
 output limits, and reasoning metadata are loaded from the model proxy catalog.
@@ -732,7 +751,10 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   writes the ChatGPT Codex backend URL and a `codex_oauth` auth block instead of
   API-key fields, plus `omit_max_output_tokens:true`. The proxy defaults the
   Responses WebSocket transport on for this `codex_oauth` provider at runtime,
-  unless the config explicitly sets `responses_websocket:false`.
+  unless the config explicitly sets `responses_websocket:false`. The synthetic
+  `sakana` provider is also listed even though models.dev does not include it
+  directly; it writes the Sakana Responses base URL, `SAKANA_API_KEY` env var,
+  and `responses_stateful:false`.
   New providers start with no models enabled; existing providers start with
   their configured models enabled and all other catalog models disabled. Enabled
   rows are bold and marked with `*`; the
@@ -749,8 +771,9 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   models.dev catalog and refreshes each configured provider file's current model
   allowlist, preserving stored API keys and `auth` blocks. When `openai-codex` is
   configured, it also refreshes the cached OpenAI Codex catalog from GitHub and
-  rewrites Codex models from that source. Refreshed files are
-  rewritten as managed, price-less configs. If live fetch fails, it
+  rewrites Codex models from that source. When `sakana` is configured, refresh
+  uses the bundled Sakana catalog and keeps `responses_stateful:false`.
+  Refreshed files are rewritten as managed, price-less configs. If live fetch fails, it
   uses a parseable local cache before using the vendored fallback snapshot. It
   errors if a configured provider or model is missing/unsupported in the selected
   catalog.
@@ -785,8 +808,10 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   then rename.
 - The model proxy logs one structured record per `/v1/stream` request with
   requester, provider, model, request/response bytes, duration, token usage, stop
-  reason, tool-call count, and `cost_usd` when the model has a known price
-  (from the config for manual providers, or the models.dev cache for managed ones).
+  reason, tool-call count, and `cost_usd` when the request has known cost
+  (from the config for manual flat-priced providers, the models.dev cache for
+  managed flat-priced providers, or a provider-specific dynamic pricer such as
+  Sakana Fugu Ultra).
   Proxy config accepts `log_level` (`debug|info|warn|error`) and `log_format`
   (`json` default, or `text`), with serve flags overriding config. Proxy config
   also accepts `models_dev_cache_ttl` as a duration string such as `"24h"` or
@@ -839,7 +864,9 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   source date (the cache file's mtime, kept fresh by the background refresher);
   for a manual-only catalog it is the newest modification time among the
   configured provider config files (the date those prices were last written). A
-  client can compare them to detect stale prices.
+  client can compare them to detect stale prices. Dynamic or route-dependent
+  models may omit `Target.Price` from this catalog even when request-time
+  `cost_usd` can be calculated by a provider-specific pricer.
 - **Selection rule:** `harness` fetches `GET /v1/models` from the proxy. Model
   selection resolves configured proxy targets, not arbitrary provider-local names.
   With both provider and model set, harness tries `provider:model` first. If the bare
@@ -1638,10 +1665,10 @@ backoff allows.
   turn because they can materially slow first response latency.
 - Per-turn usage line:
   `[turn: 3 model turns · 12.4k (18.0k) in / 1.8k (2.6k) out · $0.071 ($0.101) · 4.3s]`
-  (cost omitted for configured models without pricing metadata). When non-zero it
+  (cost omitted for usage without known cost). When non-zero it
   also appends cache-read tokens with the cache-hit ratio (`· cache 3.0k read (75%)`)
-  and reasoning tokens (`· 450 reasoning`). A model with no configured price prints a
-  one-time-per-model `[note: no price configured for "<model>"; …]` notice instead of
+  and reasoning tokens (`· 450 reasoning`). A model with no known cost prints a
+  one-time-per-model `[note: no price configured for "<model>"; ...]` notice instead of
   silently dropping cost.
 - Bracketed status lines are prefixed inside the bracket with local time by
   default, for example `[16:15:34 tool-call: name id=...]`.

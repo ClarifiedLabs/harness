@@ -105,6 +105,12 @@ Responses WebSocket transport by default for `codex_oauth` Responses providers
 unless `responses_websocket:false` is set. Responses providers default to
 stateful continuation; if a backend rejects stored responses, harness disables
 stateful continuation for that agent and retries the request stateless.
+
+`sakana` is also available from setup even before models.dev lists it directly:
+it writes a managed Responses config for `https://api.sakana.ai/v1`, uses
+`SAKANA_API_KEY`, and sets `"responses_stateful": false`. Sakana Fugu Ultra
+costs are priced by the proxy's Sakana-specific pricer; the routed `fugu` model
+reports token usage without dollar costs.
 Provider configs may set `prompt_cache.key_field` to `auto`, `none`,
 `prompt_cache_key`, or `session_id`; `auto` sends `prompt_cache_key` to
 first-party OpenAI endpoints, `session_id` to OpenRouter, and omits cache key
@@ -217,10 +223,8 @@ The agent loop has guardrails against runaway token burn, beyond the blunt
   cache + output + reasoning, across every model call in the turn) reach the
   budget. `0`, the default, means unlimited.
 - `-max-prompt-cost <usd>` stops a user turn once its accumulated model cost (in
-  USD, using catalog pricing) reaches the budget. `0`, the default, means
-  unlimited. Only fires for models with catalog pricing — an uncatalogued model
-  has no known cost, so the budget cannot apply (you'll see the unknown-price
-  warning instead).
+  USD, when provider usage reports known cost) reaches the budget. `0`, the
+  default, means unlimited. Models without known cost have no cost ceiling.
 - Tool calls that repeat with identical results are first steered, then hard
   stopped; consecutive turns where every tool call fails are steered then broken.
 - `-tool-timeout <s>` (default 600) is a per-tool-call backstop so a hung tool

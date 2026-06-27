@@ -682,15 +682,18 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 //
 //	[compacted: 38 messages → summary · 9.1k in / 0.4k out · $0.05]
 //
-// The cost segment is omitted for models with no price entry.
+// The cost segment is omitted when usage has no known cost and the registry
+// cannot calculate one from a flat price entry.
 func compactionReport(registry *llm.Registry, model string, collapsed int, u llm.Usage) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[compacted: %d messages → summary · %s in / %s out",
 		collapsed, kiloTokens(u.InputTokens), kiloTokens(u.OutputTokens))
-	if registry != nil {
-		if usd, known := registry.Cost(model, u); known {
-			fmt.Fprintf(&b, " · $%.2f", usd)
-		}
+	usd, known := u.CostUSD, u.CostKnown
+	if !known && registry != nil {
+		usd, known = registry.Cost(model, u)
+	}
+	if known {
+		fmt.Fprintf(&b, " · $%.2f", usd)
 	}
 	b.WriteString("]")
 	return b.String()
