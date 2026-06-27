@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"harness/internal/llm/factory"
 	"harness/internal/llm/llmtest"
 	"harness/internal/logging"
+	"harness/internal/metrics"
 	"harness/internal/modelproxy/protocol"
 )
 
@@ -1439,4 +1441,232 @@ func TestHandlerNoAPIKeyAllowsWhenUnconfigured(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
+}
+
+func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [
+    {"name":"priced","context_window":128000,"price":{"input":2,"output":4}},
+    {"name":"free","context_window":128000}
+  ]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	reg := metrics.New()
+	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000, CacheReadTokens: 3000, CacheWriteTokens: 4000, ReasoningTokens: 500}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		Metrics:   reg,
+		New: func(factory.Options) (llm.Provider, error) {
+			return llmtest.New("fake", llmtest.Step{
+				Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
+				Stop:   llm.StopEndTurn,
+				Usage:  usage,
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	stream := func(model string) {
+		body, _ := json.Marshal(protocol.StreamRequest{
+			TargetID: "openai:" + model,
+			Request:  llm.Request{Model: "openai:" + model},
+		})
+		resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("POST stream %s: %v", model, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("stream %s status = %d", model, resp.StatusCode)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+	}
+	stream("priced")
+	stream("free")
+
+	var b strings.Builder
+	reg.Render(&b)
+	out := b.String()
+
+	// Both models get token counters (free model is a deliberate superset of
+	// /v1/usage, which records cost only).
+	labels := map[string]string{"provider": "openai", "model": "priced", "key": "anonymous"}
+	pricedLine := seriesLine("model_proxy_input_tokens_total", labels)
+	if !strings.Contains(out, pricedLine+" 1000") {
+		t.Errorf("missing priced input tokens series:\n%s", out)
+	}
+	if !strings.Contains(out, seriesLine("model_proxy_requests_total", labels)+" 1") {
+		t.Errorf("missing priced requests series:\n%s", out)
+	}
+	// Cost only for the priced model.
+	if !strings.Contains(out, seriesLine("model_proxy_cost_usd_total", labels)+" ") {
+		t.Errorf("missing priced cost series:\n%s", out)
+	}
+	freeLabels := map[string]string{"provider": "openai", "model": "free", "key": "anonymous"}
+	if !strings.Contains(out, seriesLine("model_proxy_output_tokens_total", freeLabels)+" 2000") {
+		t.Errorf("missing free output tokens series:\n%s", out)
+	}
+	// No cost series for the free model.
+	if strings.Contains(out, seriesLine("model_proxy_cost_usd_total", freeLabels)) {
+		t.Errorf("free model should not have a cost series:\n%s", out)
+	}
+	// HELP/TYPE present even pre-traffic for all families.
+	for _, name := range []string{
+		"model_proxy_requests_total",
+		"model_proxy_errors_total",
+		"model_proxy_cost_usd_total",
+		"model_proxy_request_duration_seconds_total",
+	} {
+		if !strings.Contains(out, "# TYPE "+name+" counter") {
+			t.Errorf("missing TYPE for %s:\n%s", name, out)
+		}
+	}
+}
+
+func TestHandlerMetricsKeyLabelReflectsAuth(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	reg := metrics.New()
+	usage := llm.Usage{InputTokens: 100, OutputTokens: 50}
+	cfg := Config{
+		ProviderConfigs: []string{"openai.json"},
+		APIKeys: []apikey.Entry{
+			{Name: "laptop", Hash: apikey.Hash("hmp_secret")},
+		},
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    cfg,
+		Metrics:   reg,
+		New: func(factory.Options) (llm.Provider, error) {
+			return llmtest.New("fake", llmtest.Step{
+				Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
+				Stop:   llm.StopEndTurn,
+				Usage:  usage,
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(cfg.APIKeyStore().Middleware(handler))
+	defer srv.Close()
+
+	body, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:priced",
+		Request:  llm.Request{Model: "openai:priced"},
+	})
+	// Authenticated request: key label = configured name.
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/stream", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer hmp_secret")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST stream with key: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	var b strings.Builder
+	reg.Render(&b)
+	out := b.String()
+	namedLabels := map[string]string{"provider": "openai", "model": "priced", "key": "laptop"}
+	if !strings.Contains(out, seriesLine("model_proxy_requests_total", namedLabels)+" 1") {
+		t.Errorf("missing key=laptop series:\n%s", out)
+	}
+}
+
+func TestHandlerMetricsRecordsErrors(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [{"name":"known","context_window":128000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	reg := metrics.New()
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		Metrics:   reg,
+		New: func(factory.Options) (llm.Provider, error) {
+			return llmtest.New("fake", llmtest.Step{Err: &llm.APIError{Code: "server_error", Message: "boom"}}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:known",
+		Request:  llm.Request{Model: "openai:known"},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST stream: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	var b strings.Builder
+	reg.Render(&b)
+	out := b.String()
+	labels := map[string]string{"provider": "openai", "model": "known", "key": "anonymous"}
+	if !strings.Contains(out, seriesLine("model_proxy_errors_total", labels)+" 1") {
+		t.Errorf("missing errors series:\n%s", out)
+	}
+	if !strings.Contains(out, seriesLine("model_proxy_requests_total", labels)+" 1") {
+		t.Errorf("missing requests series for failed request:\n%s", out)
+	}
+}
+
+// seriesLine renders the metric name + sorted label set prefix that the
+// exposition writer emits, so tests can assert on the label order
+// deterministically.
+func seriesLine(name string, labels map[string]string) string {
+	names := make([]string, 0, len(labels))
+	for k := range labels {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString(name)
+	if len(names) > 0 {
+		b.WriteByte('{')
+		for i, k := range names {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(k)
+			b.WriteString(`="`)
+			b.WriteString(labels[k])
+			b.WriteByte('"')
+		}
+		b.WriteByte('}')
+	}
+	return b.String()
 }

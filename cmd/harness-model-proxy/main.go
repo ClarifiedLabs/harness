@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +23,7 @@ import (
 	"harness/internal/buildinfo"
 	"harness/internal/httpserve"
 	"harness/internal/logging"
+	"harness/internal/metrics"
 	"harness/internal/modelproxy/server"
 	"harness/internal/modelsdev"
 	"harness/internal/term"
@@ -33,6 +35,9 @@ const (
 	exitUsage     = 2
 	exitInterrupt = 130
 	defaultListen = "127.0.0.1:8765"
+	// defaultMetricsListen is the separate, unauthenticated port for the
+	// Prometheus /metrics endpoint. It stays off the harness CLI's API-key path.
+	defaultMetricsListen = "127.0.0.1:9090"
 )
 
 type environment struct {
@@ -129,6 +134,8 @@ func runServe(env environment, args []string) int {
 	modelsDevCacheTTL := fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
 	logLevel := fs.String("log-level", "", "log level: debug, info, warn, error")
 	logFormat := fs.String("log-format", "", "log format: json, text")
+	noMetrics := fs.Bool("no-metrics", false, "disable the Prometheus /metrics endpoint")
+	metricsListen := fs.String("metrics-listen", "", "Prometheus /metrics listen address (default: "+defaultMetricsListen+")")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			usageServe(env.stdout)
@@ -176,6 +183,8 @@ func runServe(env environment, args []string) int {
 
 	configDir := filepath.Dir(path)
 	initialCatalog, initialSourceDate := loadModelsDevCacheForServe(configDir)
+	reg := metrics.New()
+	reg.Gauge("model_proxy_build_info", "Model proxy build information.").Set(1, map[string]string{"version": buildinfo.Version})
 	handler, err := server.NewHandler(server.Options{
 		ConfigDir:           configDir,
 		Config:              cfg,
@@ -184,6 +193,7 @@ func runServe(env environment, args []string) int {
 		PricingMaxAge:       modelsTTL,
 		ModelsDevCatalog:    initialCatalog,
 		ModelsDevSourceDate: initialSourceDate,
+		Metrics:             reg,
 		Warn: func(msg string) {
 			logger.Warn(msg)
 		},
@@ -210,6 +220,22 @@ func runServe(env environment, args []string) int {
 	startModelsDevCacheRefresh(ctx, env, configDir, modelsTTL, logger, func(catalog *modelsdev.Catalog, sourceDate time.Time) {
 		handler.UpdateModelsDevCatalog(catalog, sourceDate)
 	})
+
+	metricsEnabled, metricsAddr := resolveMetrics(cfg, *noMetrics, flagWasSet(fs, "no-metrics"), *metricsListen, flagWasSet(fs, "metrics-listen"))
+	if metricsEnabled {
+		if ln, err := net.Listen("tcp", metricsAddr); err != nil {
+			logger.Warn("metrics endpoint disabled (listen failed)", "addr", metricsAddr, "err", err)
+		} else {
+			metricsSrv := httpserve.New("", reg.Handler())
+			logger.Info("metrics endpoint listening", "addr", metricsAddr)
+			go func() {
+				if err := httpserve.Serve(ctx, metricsSrv, ln); err != nil {
+					logger.Warn("metrics endpoint stopped", "err", err)
+				}
+			}()
+		}
+	}
+
 	srv := httpserve.New(addr, cfg.APIKeyStore().Middleware(handler))
 	logger.Info("model proxy listening", "addr", addr)
 	if err := httpserve.Run(ctx, srv); err != nil {
@@ -315,7 +341,7 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `harness-model-proxy - provider and model proxy for harness
 
 Usage:
-  harness-model-proxy serve             [-config path] [-listen addr] [-models-dev-cache-ttl d] [-log-level level] [-log-format format]
+  harness-model-proxy serve             [-config path] [-listen addr] [-models-dev-cache-ttl d] [-log-level level] [-log-format format] [-no-metrics] [-metrics-listen addr]
   harness-model-proxy setup             [-force] [-models-dev-cache-ttl d]
   harness-model-proxy refresh-models    [-config path] [-models-dev-cache-ttl d]
   harness-model-proxy auth              <login|logout|status> [-config path] <provider>
@@ -339,6 +365,8 @@ serve flags:
   -models-dev-cache-ttl d models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh
   -log-level level        debug|info|warn|error (overrides config)
   -log-format format      json|text (overrides config)
+  -no-metrics             disable the Prometheus /metrics endpoint
+  -metrics-listen addr    Prometheus /metrics listen address (default: `+defaultMetricsListen+`)
 
 setup flags:
   -force                  overwrite existing provider files
@@ -358,7 +386,7 @@ func usageServe(w io.Writer) {
 	fmt.Fprint(w, `harness-model-proxy serve - load config and serve the HTTP model proxy
 
 Usage:
-  harness-model-proxy serve [-config path] [-listen addr] [-models-dev-cache-ttl d] [-log-level level] [-log-format format]
+  harness-model-proxy serve [-config path] [-listen addr] [-models-dev-cache-ttl d] [-log-level level] [-log-format format] [-no-metrics] [-metrics-listen addr]
 
 With no arguments, harness-model-proxy serves HTTP (the default action).
 
@@ -368,6 +396,8 @@ Flags:
   -models-dev-cache-ttl d models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh
   -log-level level        debug|info|warn|error (overrides config)
   -log-format format      json|text (overrides config)
+  -no-metrics             disable the Prometheus /metrics endpoint
+  -metrics-listen addr    Prometheus /metrics listen address (default: `+defaultMetricsListen+`)
 `)
 }
 
@@ -560,6 +590,32 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 		}
 	})
 	return set
+}
+
+// resolveMetrics applies flags > config > default precedence for the Prometheus
+// /metrics endpoint. The endpoint is enabled by default; -no-metrics (or config
+// enabled=false) disables it. The listen address defaults to
+// defaultMetricsListen unless config or the -metrics-listen flag overrides it;
+// the flag wins over config.
+func resolveMetrics(cfg server.Config, noMetrics bool, noMetricsSet bool, metricsListen string, metricsListenSet bool) (bool, string) {
+	enabled := true
+	if cfg.Metrics.Enabled != nil {
+		enabled = *cfg.Metrics.Enabled
+	}
+	if noMetricsSet {
+		enabled = !noMetrics
+	}
+	listen := cfg.Metrics.Listen
+	if listen == "" {
+		listen = defaultMetricsListen
+	}
+	if metricsListenSet {
+		listen = metricsListen
+		if listen == "" {
+			listen = defaultMetricsListen
+		}
+	}
+	return enabled, listen
 }
 
 func defaultConfigDir(getenv func(string) string) string {

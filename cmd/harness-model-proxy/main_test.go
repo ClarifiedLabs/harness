@@ -237,3 +237,69 @@ func TestRunGenerateAPIKeyWritesHashAndPrintsKey(t *testing.T) {
 		t.Fatalf("provider_configs formatting not preserved:\n%s", string(data))
 	}
 }
+
+func boolPtr(b bool) *bool { return &b }
+
+func TestResolveMetricsDefaults(t *testing.T) {
+	enabled, listen := resolveMetrics(server.Config{}, false, false, "", false)
+	if !enabled {
+		t.Fatalf("default enabled = false, want true")
+	}
+	if listen != defaultMetricsListen {
+		t.Fatalf("default listen = %q, want %q", listen, defaultMetricsListen)
+	}
+}
+
+func TestResolveMetricsFlagDisables(t *testing.T) {
+	enabled, _ := resolveMetrics(server.Config{}, true, true, "", false)
+	if enabled {
+		t.Fatal("-no-metrics should disable")
+	}
+}
+
+func TestResolveMetricsFlagNoOpWhenUnset(t *testing.T) {
+	// -no-metrics=false but flag not set must not flip config-enabled=false.
+	enabled, _ := resolveMetrics(server.Config{Metrics: server.MetricsConfig{Enabled: boolPtr(false)}}, false, false, "", false)
+	if enabled {
+		t.Fatal("config enabled=false should hold when flag unset")
+	}
+}
+
+func TestResolveMetricsFlagBeatsConfig(t *testing.T) {
+	// Config disables, but -no-metrics not set with noMetrics=false means flag
+	// wins and re-enables.
+	enabled, _ := resolveMetrics(server.Config{Metrics: server.MetricsConfig{Enabled: boolPtr(false)}}, false, true, "", false)
+	if !enabled {
+		t.Fatal("flag (-no-metrics=false) should beat config enabled=false")
+	}
+}
+
+func TestResolveMetricsNoMetricsDisablesEvenWhenConfigEnables(t *testing.T) {
+	enabled, _ := resolveMetrics(server.Config{Metrics: server.MetricsConfig{Enabled: boolPtr(true)}}, true, true, "", false)
+	if enabled {
+		t.Fatal("-no-metrics should disable even when config enables")
+	}
+}
+
+func TestResolveMetricsConfigListen(t *testing.T) {
+	_, listen := resolveMetrics(server.Config{Metrics: server.MetricsConfig{Listen: "0.0.0.0:9100"}}, false, false, "", false)
+	if listen != "0.0.0.0:9100" {
+		t.Fatalf("config listen = %q, want 0.0.0.0:9100", listen)
+	}
+}
+
+func TestResolveMetricsFlagListenBeatsConfig(t *testing.T) {
+	_, listen := resolveMetrics(server.Config{Metrics: server.MetricsConfig{Listen: "0.0.0.0:9100"}}, false, false, "127.0.0.1:9200", true)
+	if listen != "127.0.0.1:9200" {
+		t.Fatalf("flag listen = %q, want 127.0.0.1:9200", listen)
+	}
+}
+
+func TestResolveMetricsEmptyFlagListenFallsBack(t *testing.T) {
+	// An empty -metrics-listen flag value should fall back to the default,
+	// not bind to "" (which would fail).
+	_, listen := resolveMetrics(server.Config{}, false, false, "", true)
+	if listen != defaultMetricsListen {
+		t.Fatalf("empty flag listen = %q, want %q", listen, defaultMetricsListen)
+	}
+}

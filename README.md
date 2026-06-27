@@ -118,6 +118,17 @@ and its `GET /v1/models` response carries a pricing `source_date` plus
 providers `source_date` tracks the models.dev cache (kept fresh by the
 refresher); for manual-only setups it is the provider config file's mtime.
 
+The proxy also exposes a Prometheus `/metrics` endpoint on a **separate port**
+(default `127.0.0.1:9090`), unauthenticated, so a scraper can reach it without
+the harness CLI's API-key path. Metrics break usage down by `provider`, `model`,
+and `key` (the authorizing API key's stored name, or `anonymous` when auth is
+disabled). Token counters (`model_proxy_*_tokens_total`) are recorded for every
+stream that produced usage — priced or not — while `model_proxy_cost_usd_total`
+is recorded only for priced models, a deliberate superset of `/v1/usage`'s
+priced-only cost rollup. Use `-no-metrics` to disable the endpoint and
+`-metrics-listen` to move it; both also have config-file counterparts under a
+`metrics` object (`enabled`, `listen`).
+
 Use `harness --models` to list the model targets and portable reasoning
 profiles exposed by the configured proxy. Use `harness --agents` to list the
 configured agents. Add `--format json` to `--models`, `--agents`, or

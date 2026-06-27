@@ -98,13 +98,21 @@ func TestMiddlewareAllowsAndRejects(t *testing.T) {
 	s.Add("laptop", "hmp_secret", time.Time{})
 
 	var reached bool
-	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true })
+	var gotName string
+	var gotOK bool
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		reached = true
+		gotName, gotOK = AuthorizedName(r)
+	})
 	handler := s.Middleware(next)
 
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unauth code = %d, want 401", w.Code)
+	}
+	if reached {
+		t.Fatal("unauth request should not reach next handler")
 	}
 
 	reached = false
@@ -117,5 +125,44 @@ func TestMiddlewareAllowsAndRejects(t *testing.T) {
 	}
 	if !reached {
 		t.Fatal("auth request did not reach next handler")
+	}
+	if !gotOK || gotName != "laptop" {
+		t.Fatalf("AuthorizedName = (%q, %v), want (\"laptop\", true)", gotName, gotOK)
+	}
+}
+
+func TestMiddlewareWrongKeyHasNoName(t *testing.T) {
+	var s Store
+	s.Add("laptop", "hmp_secret", time.Time{})
+
+	var reached bool
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true })
+	handler := s.Middleware(next)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer hmp_wrong")
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong key code = %d, want 401", w.Code)
+	}
+	if reached {
+		t.Fatal("wrong key should not reach next handler")
+	}
+}
+
+func TestAuthorizedNameAuthDisabled(t *testing.T) {
+	var s Store // no keys -> auth not required
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if name, ok := AuthorizedName(r); ok || name != "" {
+			t.Fatalf("AuthorizedName = (%q, %v), want false when auth disabled", name, ok)
+		}
+	})
+	s.Middleware(next).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+}
+
+func TestAuthorizedNameNilRequest(t *testing.T) {
+	if name, ok := AuthorizedName(nil); ok || name != "" {
+		t.Fatalf("AuthorizedName(nil) = (%q, %v), want false", name, ok)
 	}
 }

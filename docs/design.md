@@ -803,6 +803,25 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   `/v1/stream` attempt with usage is recorded, delegate child-agent spend that flows
   through the proxy is included, including failed attempts that streamed usage before
   the error.
+- **Prometheus metrics.** The proxy also exposes `/metrics` (Prometheus text
+  exposition 0.0.4) on a **separate port** (default `127.0.0.1:9090`) with **no
+  API-key auth**, so a scraper can reach it off the harness CLI path. Counter
+  families — `model_proxy_requests_total`, `model_proxy_errors_total`,
+  `model_proxy_input_tokens_total`, `model_proxy_output_tokens_total`,
+  `model_proxy_cache_read_tokens_total`, `model_proxy_cache_write_tokens_total`,
+  `model_proxy_reasoning_tokens_total`, `model_proxy_cost_usd_total`, and
+  `model_proxy_request_duration_seconds_total` — plus a `model_proxy_build_info`
+  gauge — are all labeled by `provider`, `model`, and `key`. The `key` label is the
+  authorizing API key's stored `Name` (stashed in the request context by the auth
+  middleware) or the sentinel `"anonymous"` when auth is disabled. Token counters
+  are recorded for every `/v1/stream` that produced usage, priced or not — a
+  deliberate superset of `/v1/usage`'s priced-only cost rollup — while
+  `cost_usd_total` is recorded only when the model's price is known.
+  `-no-metrics` disables the endpoint and `-metrics-listen` moves it (both override
+  the config-file `metrics` object's `enabled`/`listen`; the default is enabled).
+  Histograms are out of scope; `requests_total` + `duration_seconds_total` give an
+  average. The exposition is hand-rolled via the reusable stdlib-only
+  `internal/metrics` package so the MCP proxy (or any future service) can adopt it.
 - **Pricing staleness.** The `GET /v1/models` catalog response carries an optional
   `pricing` object — `{source_date, max_age_seconds}` — and `max_age_seconds` is the
   configured models.dev refresh interval. `source_date` dates the served prices:

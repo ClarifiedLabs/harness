@@ -31,12 +31,27 @@ func New(addr string, handler http.Handler) *http.Server {
 // Run starts srv and blocks until it exits or ctx is cancelled. A clean
 // http.Server shutdown returns nil; startup, bind, and serve errors are returned.
 func Run(ctx context.Context, srv *http.Server) error {
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return err
+	}
+	return Serve(ctx, srv, ln)
+}
+
+// Serve serves an already-bound listener and blocks until it exits or ctx is
+// cancelled. It binds srv.BaseContext to ctx (so handlers can observe
+// cancellation) and performs a graceful shutdown on ctx.Done. A clean
+// http.Server shutdown returns nil; serve errors are returned. This is the
+// entry point callers use when they need to detect bind failures immediately
+// (by calling net.Listen themselves) or to share one context across several
+// servers.
+func Serve(ctx context.Context, srv *http.Server, ln net.Listener) error {
 	if srv.BaseContext == nil {
 		srv.BaseContext = func(net.Listener) context.Context { return ctx }
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- srv.ListenAndServe()
+		errCh <- srv.Serve(ln)
 	}()
 
 	select {

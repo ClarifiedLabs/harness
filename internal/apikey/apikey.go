@@ -3,6 +3,7 @@
 package apikey
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -84,6 +85,26 @@ func (s Store) authorizedHash(digest []byte) bool {
 	return false
 }
 
+// authorizeName reports whether the request presents a valid API key and, when
+// it does, returns the matched key's stored Name. It mirrors Authorize but
+// reveals which key authorized the request so handlers can bucket metrics.
+func (s Store) authorizeName(r *http.Request) (string, bool) {
+	if !s.IsRequired() {
+		return "", false
+	}
+	key, ok := bearerKey(r)
+	if !ok || key == "" {
+		return "", false
+	}
+	digest := Hash(key)
+	for _, e := range s.Entries {
+		if subtle.ConstantTimeCompare(e.Hash, digest) == 1 {
+			return e.Name, true
+		}
+	}
+	return "", false
+}
+
 // bearerKey extracts the bearer token from r. It returns "", false when no
 // Authorization header is present or the scheme is not Bearer.
 func bearerKey(r *http.Request) (string, bool) {
@@ -113,16 +134,39 @@ func (s Store) Authorize(r *http.Request) bool {
 	return s.authorizedHash(Hash(key))
 }
 
+// ctxKey is the unexported context key holding the authorizing key's name.
+type ctxKey struct{}
+
 // Middleware wraps next with API-key authentication when keys are configured.
 // It returns 401 Unauthorized for requests lacking a valid key and passes
-// through otherwise.
+// through otherwise. On a successful match the matched key's stored Name is
+// stashed in the request context, retrievable via AuthorizedName.
 func (s Store) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.Authorize(r) {
+		if name, ok := s.authorizeName(r); ok {
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, name)))
+			return
+		}
+		if s.IsRequired() {
 			w.Header().Set("WWW-Authenticate", `Bearer`)
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// AuthorizedName returns the matched API key's stored Name for r, if any. It
+// returns ("", false) when auth is disabled (no keys configured), the request
+// was not authenticated by Store.Middleware, or no key matched. Handlers use
+// the false case to bucket metrics under the sentinel "anonymous".
+func AuthorizedName(r *http.Request) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	v, ok := r.Context().Value(ctxKey{}).(string)
+	if !ok || v == "" {
+		return "", false
+	}
+	return v, true
 }

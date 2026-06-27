@@ -25,6 +25,7 @@ import (
 	"harness/internal/auth"
 	"harness/internal/llm"
 	"harness/internal/llm/factory"
+	"harness/internal/metrics"
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/modelsdev"
 )
@@ -53,6 +54,15 @@ type Config struct {
 	LogFormat            string         `json:"log_format,omitempty"`
 	ModelsDevCacheTTL    Duration       `json:"models_dev_cache_ttl,omitempty"`
 	APIKeys              []apikey.Entry `json:"api_keys,omitempty"`
+	Metrics              MetricsConfig  `json:"metrics,omitempty"`
+}
+
+// MetricsConfig toggles the Prometheus /metrics endpoint on a separate port.
+// Enabled is a pointer so the JSON omitempty distinction between unset and
+// explicitly false survives; nil means the default (enabled) applies.
+type MetricsConfig struct {
+	Enabled *bool  `json:"enabled,omitempty"`
+	Listen  string `json:"listen,omitempty"`
 }
 
 // APIKeyStore returns the API-key store for this config. Auth is required as soon
@@ -137,6 +147,12 @@ type Options struct {
 	// ModelsDevSourceDate dates ModelsDevCatalog (its cache file mtime). Used to
 	// stamp catalog pricing freshness when any provider is managed.
 	ModelsDevSourceDate time.Time
+	// Metrics, when non-nil, receives Prometheus-style counters for every
+	// /v1/stream request (tokens, cost, requests, errors, duration), broken
+	// down by provider, model, and authorizing key. Nil disables metrics at
+	// the handler level; the command wires a registry in when the metrics
+	// endpoint is enabled.
+	Metrics *metrics.Registry
 }
 
 // usageKey identifies an aggregate usage bucket by provider and model.
@@ -160,6 +176,21 @@ type resolvedTarget struct {
 	entry    llm.ModelEntry
 }
 
+// metricsCollectors holds the pre-registered metric families the proxy stamps
+// per stream request. They are created once in NewHandler so HELP/TYPE always
+// appear in exposition even with zero traffic.
+type metricsCollectors struct {
+	requests  *metrics.Counter
+	errors    *metrics.Counter
+	input     *metrics.Counter
+	output    *metrics.Counter
+	cacheRead *metrics.Counter
+	cacheWrite *metrics.Counter
+	reasoning *metrics.Counter
+	cost      *metrics.Counter
+	duration  *metrics.Counter
+}
+
 type Handler struct {
 	// snapshot holds the current registry+catalog. Built once in NewHandler and
 	// replaced wholesale by UpdateModelsDevCatalog; never mutated in place.
@@ -174,6 +205,9 @@ type Handler struct {
 	logger               *slog.Logger
 	newProvider          func(factory.Options) (llm.Provider, error)
 	nextRequestID        atomic.Uint64
+
+	metrics     *metrics.Registry
+	metricFams  *metricsCollectors
 
 	usageMu sync.Mutex
 	usage   map[usageKey]*protocol.ModelUsage
@@ -233,12 +267,73 @@ func NewHandler(opts Options) (*Handler, error) {
 		continuations:        map[string]llm.ResponseState{},
 		disabledContinuation: map[string]bool{},
 	}
+	if opts.Metrics != nil {
+		h.metrics = opts.Metrics
+		h.metricFams = registerMetricFamilies(opts.Metrics)
+	}
 	snapshot, err := h.buildSnapshot(opts.ModelsDevCatalog, opts.ModelsDevSourceDate)
 	if err != nil {
 		return nil, err
 	}
 	h.snapshot.Store(snapshot)
 	return h, nil
+}
+
+// registerMetricFamilies pre-registers the proxy's Prometheus counter
+// families so HELP/TYPE are present even with zero traffic. Labels are
+// provider, model, and key (the authorizing key's name, or "anonymous").
+func registerMetricFamilies(r *metrics.Registry) *metricsCollectors {
+	return &metricsCollectors{
+		requests:   r.Counter("model_proxy_requests_total", "Number of proxied model requests."),
+		errors:     r.Counter("model_proxy_errors_total", "Number of proxied model requests that failed."),
+		input:      r.Counter("model_proxy_input_tokens_total", "Input tokens billed at full rate."),
+		output:     r.Counter("model_proxy_output_tokens_total", "Generated output tokens."),
+		cacheRead:  r.Counter("model_proxy_cache_read_tokens_total", "Prompt-cache read tokens."),
+		cacheWrite: r.Counter("model_proxy_cache_write_tokens_total", "Prompt-cache write tokens."),
+		reasoning:  r.Counter("model_proxy_reasoning_tokens_total", "Reasoning tokens."),
+		cost:       r.Counter("model_proxy_cost_usd_total", "Estimated cost in US dollars."),
+		duration:   r.Counter("model_proxy_request_duration_seconds_total", "Total request wall-clock duration in seconds."),
+	}
+}
+
+// recordMetrics stamps one stream request into the metrics registry. It is
+// called once per /v1/stream (including bounded retries) whenever targetID is
+// known, regardless of whether the model is priced, so free models still get
+// token counters. Cost is recorded only when usage.CostKnown. failed is true
+// when the stream errored or returned a 4xx/5xx status. The key label is the
+// authorizing API key's name ("anonymous" when auth is disabled or absent).
+func (h *Handler) recordMetrics(r *http.Request, providerID, model string, usage llm.Usage, duration time.Duration, failed bool) {
+	if h.metrics == nil || h.metricFams == nil || providerID == "" || model == "" {
+		return
+	}
+	key := "anonymous"
+	if name, ok := apikey.AuthorizedName(r); ok {
+		key = name
+	}
+	labels := map[string]string{"provider": providerID, "model": model, "key": key}
+	h.metricFams.requests.Inc(labels)
+	h.metricFams.duration.Add(duration.Seconds(), labels)
+	if failed {
+		h.metricFams.errors.Inc(labels)
+	}
+	if usage.InputTokens != 0 {
+		h.metricFams.input.Add(float64(usage.InputTokens), labels)
+	}
+	if usage.OutputTokens != 0 {
+		h.metricFams.output.Add(float64(usage.OutputTokens), labels)
+	}
+	if usage.CacheReadTokens != 0 {
+		h.metricFams.cacheRead.Add(float64(usage.CacheReadTokens), labels)
+	}
+	if usage.CacheWriteTokens != 0 {
+		h.metricFams.cacheWrite.Add(float64(usage.CacheWriteTokens), labels)
+	}
+	if usage.ReasoningTokens != 0 {
+		h.metricFams.reasoning.Add(float64(usage.ReasoningTokens), labels)
+	}
+	if usage.CostKnown {
+		h.metricFams.cost.Add(usage.CostUSD, labels)
+	}
 }
 
 // buildSnapshot resolves managed-provider prices from md, then builds the
@@ -558,6 +653,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		if targetID != "" && usage.CostKnown {
 			attrs = append(attrs, "cost_usd", usage.CostUSD)
 			h.recordUsage(targetID, usage, usage.CostUSD)
+		}
+		if targetID != "" {
+			h.recordMetrics(r, providerID, model, usage, time.Since(start), streamErr != "" || cw.statusCode() >= http.StatusBadRequest)
 		}
 		if streamErr != "" {
 			attrs = append(attrs, "err", streamErr)
