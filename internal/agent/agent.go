@@ -844,10 +844,11 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			// Cancellation repair: keep streamed partial text as a text-only
 			// assistant message; drop the message entirely if nothing streamed.
 			// Un-executed tool calls are never appended.
-			if res.text != "" {
+			cancelled := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+			if cancelled && res.text != "" {
 				a.transcript = append(a.transcript, a.partialAssistantMessage(res))
 			}
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if cancelled {
 				sink.Notice("[cancelled]")
 			}
 			if verr := a.validateTranscript("after failed model turn"); verr != nil {
@@ -1149,6 +1150,10 @@ func (a *Agent) emitToolDiff(call llm.ToolCall, state toolDiffState, sink EventS
 }
 
 func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, turnID int, sink EventSink) llm.ToolResult {
+	if call.InvalidInputError != "" {
+		return llm.ToolResult{ForID: call.ID, Text: invalidToolInputResult(call), IsError: true}
+	}
+
 	var preContext []string
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PreToolUse) {
 		res := a.hooks.Run(ctx, hooks.PreToolUse, call.Name, hooks.Payload{
@@ -1198,6 +1203,19 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, turnID int, 
 		}
 	}
 	return r
+}
+
+func invalidToolInputResult(call llm.ToolCall) string {
+	msg := "error: invalid tool call arguments"
+	if call.Name != "" {
+		msg += " for " + call.Name
+	}
+	msg += ": " + call.InvalidInputError + ". Provide arguments as a valid JSON object matching the tool schema."
+	switch call.Name {
+	case "rg", "grep":
+		msg += ` For rg/grep, use {"args":["-n","PATTERN","."]}; do not use shell syntax or bare tokens inside JSON.`
+	}
+	return msg
 }
 
 func (a *Agent) prepareToolResult(r llm.ToolResult, sink EventSink) (llm.ToolResult, string) {
@@ -1496,9 +1514,10 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (mo
 			sink.ToolUseDelta(ev.Index, ev.ArgsDelta)
 		case llm.EventToolCallDone:
 			res.toolCalls = append(res.toolCalls, llm.ToolCall{
-				ID:    ev.ToolID,
-				Name:  ev.ToolName,
-				Input: ev.ToolInput,
+				ID:                ev.ToolID,
+				Name:              ev.ToolName,
+				Input:             ev.ToolInput,
+				InvalidInputError: ev.InvalidInputError,
 			})
 		case llm.EventUsage:
 			if ev.Usage != nil {

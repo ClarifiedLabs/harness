@@ -133,6 +133,10 @@ type StreamEvent struct {
 	ToolName  string          `json:"tool_name,omitempty"`  // Start/Done
 	ArgsDelta string          `json:"args_delta,omitempty"` // Delta
 	ToolInput json.RawMessage `json:"tool_input,omitempty"` // Done only: complete JSON object
+	// InvalidInputError is set on EventToolCallDone when the provider streamed
+	// malformed tool-call JSON. ToolInput still contains a valid diagnostic
+	// object so the transcript can feed an error result back to the model.
+	InvalidInputError string `json:"invalid_input_error,omitempty"`
 
 	Usage      *Usage     `json:"usage,omitempty"`       // EventUsage / EventDone
 	StopReason StopReason `json:"stop_reason,omitempty"` // EventDone

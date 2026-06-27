@@ -153,6 +153,17 @@ func toolDone(index int, id, name, input string) llm.StreamEvent {
 	}
 }
 
+func invalidToolDone(index int, id, name, inputErr string) llm.StreamEvent {
+	return llm.StreamEvent{
+		Kind:              llm.EventToolCallDone,
+		Index:             index,
+		ToolID:            id,
+		ToolName:          name,
+		ToolInput:         llm.InvalidToolInputObject(errors.New(inputErr)),
+		InvalidInputError: inputErr,
+	}
+}
+
 func toolUseStart(index int, id, name string) llm.StreamEvent {
 	return llm.StreamEvent{
 		Kind:     llm.EventToolCallStart,
@@ -977,6 +988,82 @@ func TestFailingToolFedBackAsError(t *testing.T) {
 	}
 }
 
+func TestInvalidToolInputFedBackAsError(t *testing.T) {
+	var ran bool
+	tool := &recordTool{name: "rg", run: func(_ context.Context, _ json.RawMessage) (string, error) {
+		ran = true
+		return "should not run", nil
+	}}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+
+	invalid := `invalid JSON at byte offset 12: invalid character 'i' in numeric literal; input preview "{\"args\": [-i, vi, .]}"`
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{
+				toolUseStart(0, "call_bad", "rg"),
+				toolUseDelta(0, `{"args": [-i, vi, .]}`),
+				invalidToolDone(0, "call_bad", "rg", invalid),
+			},
+			Stop: llm.StopToolUse,
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("corrected")},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	a := newAgent(fp, reg, Options{})
+	sink := &recordSink{}
+
+	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if ran {
+		t.Fatal("invalid tool input should not dispatch the real tool")
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider called %d times, want 2", len(fp.Requests))
+	}
+	if len(sink.results) != 1 || !sink.results[0].IsError {
+		t.Fatalf("sink results = %+v, want one error result", sink.results)
+	}
+	for _, want := range []string{"invalid tool call arguments for rg", "valid JSON object", `{"args":["-n","PATTERN","."]}`} {
+		if !strings.Contains(sink.results[0].Text, want) {
+			t.Fatalf("error result %q missing %q", sink.results[0].Text, want)
+		}
+	}
+
+	msgs := a.Transcript()
+	mustValid(t, msgs)
+	if len(msgs) != 4 {
+		t.Fatalf("want user, invalid tool_use, error result, final assistant; got %d:\n%s", len(msgs), dump(msgs))
+	}
+	asst := msgs[1]
+	if len(asst.Content) != 1 || asst.Content[0].Kind != llm.BlockToolUse {
+		t.Fatalf("assistant tool_use missing:\n%s", dump([]llm.Message{asst}))
+	}
+	if !strings.Contains(string(asst.Content[0].ToolInput), "_harness_invalid_tool_input") {
+		t.Fatalf("invalid tool_use should carry diagnostic input, got %s", asst.Content[0].ToolInput)
+	}
+	resMsg := msgs[2]
+	if len(resMsg.Content) != 1 || !resMsg.Content[0].ResultError || !strings.Contains(resMsg.Content[0].ResultText, "invalid tool call arguments") {
+		t.Fatalf("error tool_result missing:\n%s", dump([]llm.Message{resMsg}))
+	}
+
+	second := fp.Requests[1]
+	var carried bool
+	for _, m := range second.Messages {
+		for _, b := range m.Content {
+			if b.Kind == llm.BlockToolResult && strings.Contains(b.ResultText, "invalid tool call arguments for rg") {
+				carried = true
+			}
+		}
+	}
+	if !carried {
+		t.Errorf("second request did not carry invalid-input error:\n%s", dump(second.Messages))
+	}
+}
+
 func TestMaxTurnsStop(t *testing.T) {
 	// Vary the tool result each call so the maxTurns behavior is isolated from
 	// the repetition guard (which keys on identical results).
@@ -1585,6 +1672,31 @@ func TestMidStreamRetryBudgetExhausted(t *testing.T) {
 		t.Errorf("provider called %d times, want 3 (1 + 2 retries)", len(fp.Requests))
 	}
 	mustValid(t, a.Transcript())
+}
+
+func TestMidStreamRetryBudgetExhaustedDropsPartialText(t *testing.T) {
+	fail := llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("I'll inspect the repo.")},
+		Err:    &llm.APIError{Message: `tool "rg" produced invalid arguments: invalid JSON`, Retryable: true},
+	}
+	fp := llmtest.New("fake", fail, fail, fail)
+	a := newAgent(fp, tools.Default(), Options{})
+	a.SetSleep(func(time.Duration) {})
+
+	err := a.RunTurn(context.Background(), "debug this", &recordSink{})
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("RunTurn err = %v, want the APIError after budget exhaustion", err)
+	}
+	if len(fp.Requests) != 3 {
+		t.Errorf("provider called %d times, want 3 (1 + 2 retries)", len(fp.Requests))
+	}
+
+	msgs := a.Transcript()
+	mustValid(t, msgs)
+	if len(msgs) != 1 || msgs[0].Role != llm.RoleUser {
+		t.Fatalf("failed stream should leave only the user message, got %d:\n%s", len(msgs), dump(msgs))
+	}
 }
 
 func TestRateLimitedStreamNotRetried(t *testing.T) {

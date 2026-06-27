@@ -115,9 +115,10 @@ type ContentBlock struct {
 // ToolCall is a flat view of a BlockToolUse, carried from the agent loop into
 // the tool layer.
 type ToolCall struct {
-	ID    string
-	Name  string
-	Input json.RawMessage
+	ID                string
+	Name              string
+	Input             json.RawMessage
+	InvalidInputError string
 }
 
 // ToolResult is a flat view that becomes a BlockToolResult, carried from the

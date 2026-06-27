@@ -334,6 +334,7 @@ type StreamEvent struct {
     ToolName  string          // Start/Done
     ArgsDelta string          // Delta
     ToolInput json.RawMessage // Done only: complete, valid JSON
+    InvalidInputError string  // Done only: malformed streamed args were replaced with a diagnostic object
 
     Usage      *Usage     // EventUsage / EventDone
     StopReason StopReason // EventDone
@@ -397,9 +398,12 @@ func Read(ctx context.Context, r io.Reader) iter.Seq2[Event, error]
 ### 5.3 Streaming tool-call assembly
 
 Providers emit granular `Start`/`Delta` events for live rendering **and** guarantee that
-`EventToolCallDone.ToolInput` is complete, valid JSON. The agent loop forwards
+`EventToolCallDone.ToolInput` is always complete, valid JSON. The agent loop forwards
 `Start`/`Delta` to the renderer, but only `Done` affects transcript mutation and tool
-dispatch. Assembly is per-turn state inside each provider's `Stream`:
+dispatch. When a provider streams malformed arguments, the assembler emits `Done` with
+`InvalidInputError` set and `ToolInput` replaced by a small diagnostic object; dispatch
+is short-circuited into an `is_error` tool result so the next model turn can correct
+it. Assembly is per-turn state inside each provider's `Stream`:
 
 - **OpenAI:** `choices[].delta.tool_calls[]` arrive with an `index`; the first delta for
   an index carries `id` + `function.name` (emit `Start`), subsequent deltas carry
@@ -412,8 +416,9 @@ dispatch. Assembly is per-turn state inside each provider's `Stream`:
 Edge cases:
 
 - **Empty arguments:** OpenAI may send zero fragments; an empty buffer flushes as `{}`.
-- **Validation on flush:** `json.Valid` is checked before emitting `Done`; invalid
-  accumulated JSON is a retryable terminal stream error, never a garbage `Done`.
+- **Validation on flush:** malformed or non-object accumulated JSON is never dispatched
+  to the real tool. The provider emits an invalid `Done` with a diagnostic JSON object,
+  and the agent returns an error tool result that includes the parse detail.
 - **Parallel calls:** both dialects interleave multiple calls; `Index` keeps them
   distinct and emission order is preserved into the transcript.
 - **Interleaved text and tool_use** (Anthropic): text blocks share the index space but
@@ -905,6 +910,7 @@ string fed back to the model so it can self-correct:
 |---|---|
 | unknown tool name | `error: unknown tool "<name>"` |
 | invalid JSON args | `error: invalid arguments: <detail>` |
+| malformed streamed tool-call args | `error: invalid tool call arguments for <name>: <detail>` |
 | tool returned error | `error: <message>` |
 | tool panicked | `error: tool panicked: <recovered>` (also logged to stderr) |
 | tool exceeded the dispatch timeout | `error: tool timed out after <dur>` |
@@ -2064,7 +2070,7 @@ injectable), the retry clock, and `ValidateTranscript`.
 | Layer | Tests |
 |---|---|
 | `internal/sse` | frame parsing tables; huge frames; truncated input |
-| providers | `httptest.Server` replaying `.sse` golden fixtures per dialect → assert ordered events; golden request-JSON tests (Responses input items, Chat role:tool hoisting, args-string vs object, system placement, `stream_options`, cache_control); tool-call reassembly tables (fragment splits, empty args → `{}`, interleaved parallel calls, invalid tail → retryable stream error); truncated stream; mid-stream cancellation; retry loop via injected sleeper (429-then-200, 400 immediate failure, budget exhaustion) |
+| providers | `httptest.Server` replaying `.sse` golden fixtures per dialect → assert ordered events; golden request-JSON tests (Responses input items, Chat role:tool hoisting, args-string vs object, system placement, `stream_options`, cache_control); tool-call reassembly tables (fragment splits, empty args → `{}`, interleaved parallel calls, invalid tail → invalid `Done` diagnostic); truncated stream; mid-stream cancellation; retry loop via injected sleeper (429-then-200, 400 immediate failure, budget exhaustion) |
 | `internal/retry` | `Next`: jitter bounds, 30s cap, Retry-After floor |
 | tools | table-driven against `t.TempDir()`; `grep` wrapper against the host CLI; optional `rg` registration with a fake executable on PATH; `git` against a scratch `git init` repo (skipped if git absent); `run_command` timeout via `sleep`; `apply_patch` at the tool level covers the Codex Add envelope, canonical `patch`, compatibility decoding paths, bare-string input, and conflicting-alias / parse-error format-hint paths, while `internal/tools/patch` covers parse + apply for create/update/delete/rename and first-rejection-leaves-file-untouched |
 | agent loop | `FakeProvider` scripts: multi-tool batches, error-result feedback (next request carries the error), max-turns stop, cancellation → transcript still re-sendable |

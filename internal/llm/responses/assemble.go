@@ -1,7 +1,6 @@
 package responses
 
 import (
-	"fmt"
 	"sort"
 
 	"harness/internal/llm"
@@ -101,18 +100,18 @@ func (a *toolAssembler) flush(yield func(llm.StreamEvent, error) bool) (ok bool,
 			args = []byte(emptyArgs)
 		}
 		input, err := llm.NormalizeToolInputObject(args)
+		invalidInputError := ""
 		if err != nil {
-			return false, &llm.APIError{
-				Message:   fmt.Sprintf("tool %q produced invalid arguments: %v", t.name, err),
-				Retryable: true,
-			}
+			invalidInputError = err.Error()
+			input = llm.InvalidToolInputObject(err)
 		}
 		if !yield(llm.StreamEvent{
-			Kind:      llm.EventToolCallDone,
-			Index:     i,
-			ToolID:    toolID(t),
-			ToolName:  t.name,
-			ToolInput: input,
+			Kind:              llm.EventToolCallDone,
+			Index:             i,
+			ToolID:            toolID(t),
+			ToolName:          t.name,
+			ToolInput:         input,
+			InvalidInputError: invalidInputError,
 		}, nil) {
 			return false, nil
 		}

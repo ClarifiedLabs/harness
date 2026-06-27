@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"fmt"
 	"sort"
 
 	"harness/internal/llm"
@@ -61,8 +60,9 @@ func (a *toolAssembler) observe(frag wireToolCallDelta, yield func(llm.StreamEve
 
 // flush finalizes every buffered call in ascending index order, emitting one
 // Done per call. An empty buffer flushes as {}. Accumulated input that is not a
-// JSON object is a retryable stream error — never a garbage Done; flush returns
-// the error and stops without emitting further events.
+// JSON object is emitted as an invalid Done with a diagnostic input object so
+// the agent can feed the parse error back to the model without corrupting the
+// transcript.
 func (a *toolAssembler) flush(yield func(llm.StreamEvent, error) bool) (ok bool, fatal error) {
 	indices := make([]int, 0, len(a.pending))
 	for i := range a.pending {
@@ -77,18 +77,18 @@ func (a *toolAssembler) flush(yield func(llm.StreamEvent, error) bool) (ok bool,
 			args = []byte(emptyArgs)
 		}
 		input, err := llm.NormalizeToolInputObject(args)
+		invalidInputError := ""
 		if err != nil {
-			return false, &llm.APIError{
-				Message:   fmt.Sprintf("tool %q produced invalid arguments: %v", t.name, err),
-				Retryable: true,
-			}
+			invalidInputError = err.Error()
+			input = llm.InvalidToolInputObject(err)
 		}
 		if !yield(llm.StreamEvent{
-			Kind:      llm.EventToolCallDone,
-			Index:     i,
-			ToolID:    t.id,
-			ToolName:  t.name,
-			ToolInput: input,
+			Kind:              llm.EventToolCallDone,
+			Index:             i,
+			ToolID:            t.id,
+			ToolName:          t.name,
+			ToolInput:         input,
+			InvalidInputError: invalidInputError,
 		}, nil) {
 			return false, nil
 		}

@@ -1,6 +1,9 @@
 package llm
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalizeToolInputObject(t *testing.T) {
 	tests := []struct {
@@ -41,5 +44,31 @@ func TestNormalizeToolInputObject(t *testing.T) {
 func TestValidateToolInputObjectRejectsEmpty(t *testing.T) {
 	if err := ValidateToolInputObject(nil); err == nil {
 		t.Fatal("ValidateToolInputObject(nil) = nil, want error")
+	}
+}
+
+func TestValidateToolInputObjectInvalidJSONDiagnostic(t *testing.T) {
+	err := ValidateToolInputObject([]byte(`{"path":`))
+	if err == nil {
+		t.Fatal("ValidateToolInputObject succeeded, want invalid JSON error")
+	}
+	got := err.Error()
+	for _, want := range []string{"invalid JSON", "byte offset", "input preview", "path"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error %q missing %q", got, want)
+		}
+	}
+}
+
+func TestValidateToolInputObjectTrailingDataDiagnostic(t *testing.T) {
+	err := ValidateToolInputObject([]byte(`{"path":"x"} extra`))
+	if err == nil {
+		t.Fatal("ValidateToolInputObject succeeded, want trailing data error")
+	}
+	got := err.Error()
+	for _, want := range []string{"trailing data", "byte offset", "input preview", "extra"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error %q missing %q", got, want)
+		}
 	}
 }

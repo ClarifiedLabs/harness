@@ -1,10 +1,6 @@
 package anthropic
 
-import (
-	"fmt"
-
-	"harness/internal/llm"
-)
+import "harness/internal/llm"
 
 // toolAssembler accumulates input_json_delta fragments for the tool_use blocks
 // of one streamed message, keyed by their content-block index. Text blocks share
@@ -50,8 +46,9 @@ func (a *toolAssembler) delta(index int, fragment string) (llm.StreamEvent, bool
 }
 
 // flush finalizes the tool at index. An empty buffer flushes as {}. Accumulated
-// input that is not a JSON object is a retryable stream error — never a garbage
-// Done. A non-tool index (text block) yields ok=false so the caller skips
+// input that is not a JSON object is emitted as an invalid Done with a
+// diagnostic input object so the agent can feed the parse error back to the
+// model. A non-tool index (text block) yields ok=false so the caller skips
 // emission.
 func (a *toolAssembler) flush(index int) (llm.StreamEvent, error, bool) {
 	t := a.pending[index]
@@ -65,17 +62,17 @@ func (a *toolAssembler) flush(index int) (llm.StreamEvent, error, bool) {
 		args = []byte("{}")
 	}
 	input, err := llm.NormalizeToolInputObject(args)
+	invalidInputError := ""
 	if err != nil {
-		return llm.StreamEvent{}, &llm.APIError{
-			Message:   fmt.Sprintf("tool %q produced invalid arguments: %v", t.name, err),
-			Retryable: true,
-		}, true
+		invalidInputError = err.Error()
+		input = llm.InvalidToolInputObject(err)
 	}
 	return llm.StreamEvent{
-		Kind:      llm.EventToolCallDone,
-		Index:     index,
-		ToolID:    t.id,
-		ToolName:  t.name,
-		ToolInput: input,
+		Kind:              llm.EventToolCallDone,
+		Index:             index,
+		ToolID:            t.id,
+		ToolName:          t.name,
+		ToolInput:         input,
+		InvalidInputError: invalidInputError,
 	}, nil, true
 }

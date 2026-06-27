@@ -194,31 +194,39 @@ func TestStreamInvalidToolJSON(t *testing.T) {
 	srv := llmtest.ServeSSEFixture(t, "invalid_json.sse")
 	p := testProvider(t, srv, nil)
 	events, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("claude-opus-4-8")))
-	if err == nil {
-		t.Fatal("expected stream error from invalid accumulated tool JSON")
+	if err != nil {
+		t.Fatalf("stream should complete with invalid tool-call feedback, got %v", err)
 	}
-	var apiErr *llm.APIError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("error is not *llm.APIError: %T %v", err, err)
-	}
-	if !strings.Contains(apiErr.Message, "get_weather") {
-		t.Errorf("error message %q does not name the offending tool", apiErr.Message)
-	}
-	if !apiErr.Retryable {
-		t.Errorf("invalid streamed tool JSON should be retryable, got %+v", apiErr)
-	}
-	// The invalid tail must never surface as a garbage Done, nor reach EventDone.
+	var done *llm.StreamEvent
+	var eventDone bool
 	for _, e := range events {
 		if e.Kind == llm.EventToolCallDone {
-			t.Errorf("emitted garbage ToolCallDone for invalid JSON: %s", e.ToolInput)
+			done = &e
 		}
 		if e.Kind == llm.EventDone {
-			t.Error("EventDone emitted despite invalid tool JSON")
+			eventDone = true
 		}
+	}
+	if done == nil {
+		t.Fatal("missing ToolCallDone for invalid JSON")
+	}
+	if done.ToolName != "get_weather" {
+		t.Fatalf("ToolName = %q, want get_weather", done.ToolName)
+	}
+	for _, want := range []string{"byte offset", "input preview", "location"} {
+		if !strings.Contains(done.InvalidInputError, want) {
+			t.Errorf("InvalidInputError %q missing %q", done.InvalidInputError, want)
+		}
+	}
+	if !strings.Contains(string(done.ToolInput), "_harness_invalid_tool_input") {
+		t.Fatalf("diagnostic ToolInput missing marker: %s", done.ToolInput)
+	}
+	if !eventDone {
+		t.Fatal("EventDone missing after invalid tool-call feedback")
 	}
 }
 
-func TestToolAssemblerRejectsNonObjectToolInput(t *testing.T) {
+func TestToolAssemblerEmitsInvalidNonObjectToolInput(t *testing.T) {
 	a := newToolAssembler()
 	a.pending[0] = &pendingTool{id: "toolu_x", name: "echo", args: []byte(`[]`)}
 
@@ -226,15 +234,17 @@ func TestToolAssemblerRejectsNonObjectToolInput(t *testing.T) {
 	if !ok {
 		t.Fatal("flush skipped pending tool")
 	}
-	var apiErr *llm.APIError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("error is not *llm.APIError: %T %v", err, err)
+	if err != nil {
+		t.Fatalf("flush returned error: %v", err)
 	}
-	if !apiErr.Retryable || !strings.Contains(apiErr.Message, "JSON object") {
-		t.Fatalf("error = %+v, want retryable JSON object diagnostic", apiErr)
+	if event.Kind != llm.EventToolCallDone {
+		t.Fatalf("event = %+v, want ToolCallDone", event)
 	}
-	if event.Kind == llm.EventToolCallDone {
-		t.Fatalf("emitted ToolCallDone for non-object input: %s", event.ToolInput)
+	if !strings.Contains(event.InvalidInputError, "JSON object") {
+		t.Fatalf("InvalidInputError = %q, want JSON object diagnostic", event.InvalidInputError)
+	}
+	if !strings.Contains(string(event.ToolInput), "_harness_invalid_tool_input") {
+		t.Fatalf("diagnostic ToolInput missing marker: %s", event.ToolInput)
 	}
 }
 
