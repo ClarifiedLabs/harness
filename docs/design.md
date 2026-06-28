@@ -298,9 +298,10 @@ type ToolSchema struct {
 ```
 
 `RequestContext` is rendered as a trailing synthetic user message for stateless
-Chat Completions, Anthropic, and Responses calls. For stored Responses calls it is
-merged into request instructions so fresh todo/background/hook context applies to
-the current request without becoming part of the OpenAI stored response chain.
+Chat Completions and Anthropic calls. Responses calls merge it into request
+instructions in both stored and stateless modes, so fresh todo/background/hook
+context applies to the current request without looking like the latest user
+prompt or becoming part of the OpenAI stored response chain.
 Responses streams surface `response.id` on terminal `EventDone.ResponseID`; the
 agent stores that with the local transcript anchor for optional
 `previous_response_id` continuation.
@@ -1476,13 +1477,15 @@ this subsection records the common runner those argv tools point at.
   returns a rendered checklist as the tool result: a `Todos (<done>/<total> done):`
   header followed by one `[x]`/`[~]`/`[ ]` line per item (an `in_progress` item shows
   its `active_form` label when set). An empty list renders `Todo list cleared.`
+  When all todos are completed, the tool result also includes a one-time
+  `All todos are complete.` cue.
 - Implemented in `internal/todo`, not `internal/tools`, so `internal/session` can persist
   `todo.Item` without importing the tools package. A single `todo.Store` is constructed
   per process (like `write_tmp_file`); the list is saved in `state.json` (`Session.Todos`),
   reseeded on resume, and cleared by `/clear`.
 - When `update_todos` is available, the REPL/one-shot drivers add a short request-only
-  reminder showing the current list (or noting that none exists). This context is not
-  saved into the transcript.
+  reminder showing the current open list. Completed lists are not added as request
+  context, and request context is not saved into the transcript.
 - In the interactive REPL, the visible session's non-empty todo list is also printed
   before the idle prompt when the current visible agent has `update_todos`, and
   the visible todo status is printed after each successful `update_todos` call.

@@ -384,15 +384,37 @@ func TestBuildRequestStoreAndPreviousResponseID(t *testing.T) {
 	}
 }
 
-func TestBuildRequestContextIsInputWhenStateless(t *testing.T) {
+func TestBuildRequestContextIsInstructionsWhenStateless(t *testing.T) {
 	req := llm.Request{Model: "gpt-5.4", RequestContext: []string{"todo context"}}
 	w := buildRequest(req, 0, 0)
-	if len(w.Input) != 1 {
-		t.Fatalf("input = %d, want 1 context message", len(w.Input))
+	if len(w.Input) != 0 {
+		t.Fatalf("input = %d, want no context input items", len(w.Input))
 	}
-	parts := contentParts(t, w.Input[0])
-	if w.Input[0].Role != "user" || len(parts) != 1 || parts[0].Type != "input_text" || !strings.Contains(parts[0].Text, "todo context") {
-		t.Fatalf("context input = %+v", w.Input[0])
+	if !strings.Contains(w.Instructions, "todo context") {
+		t.Fatalf("instructions = %q, want request context", w.Instructions)
+	}
+}
+
+func TestBuildRequestContextDoesNotFollowToolResultInput(t *testing.T) {
+	req := llm.Request{
+		Model:          "gpt-5.4",
+		RequestContext: []string{"todo context"},
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "inspect"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"a.go"}`)}}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}},
+		},
+	}
+	w := buildRequest(req, 0, 0)
+	if !strings.Contains(w.Instructions, "todo context") {
+		t.Fatalf("instructions = %q, want request context", w.Instructions)
+	}
+	if len(w.Input) == 0 {
+		t.Fatal("input is empty, want transcript input items")
+	}
+	last := w.Input[len(w.Input)-1]
+	if last.Type != "function_call_output" || last.CallID != "call_1" || last.Output != "ok" {
+		t.Fatalf("last input = %+v, want tool result output", last)
 	}
 }
 

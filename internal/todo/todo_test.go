@@ -37,6 +37,23 @@ func TestRunWritesAndRenders(t *testing.T) {
 	}
 }
 
+func TestRunCompletedListReportsCompletion(t *testing.T) {
+	store := NewStore()
+	tool := NewTool(store)
+	out, err := runTool(t, tool, map[string]any{"todos": []map[string]any{
+		{"content": "explore", "status": "completed"},
+		{"content": "summarize", "status": "completed"},
+	}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, want := range []string{"Todos (2/2 done):", "[x] explore", "[x] summarize", "All todos are complete."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n%s", want, out)
+		}
+	}
+}
+
 func TestRunReplacesPreviousList(t *testing.T) {
 	store := NewStore()
 	tool := NewTool(store)
@@ -99,10 +116,27 @@ func TestRenderEmpty(t *testing.T) {
 	}
 }
 
+func TestRenderCompletedListDoesNotReportCompletion(t *testing.T) {
+	got := Render([]Item{{Content: "explore", Status: StatusCompleted}})
+	if strings.Contains(got, "All todos are complete.") {
+		t.Fatalf("Render completed list included tool-only completion hint:\n%s", got)
+	}
+}
+
 func TestRequestContextEmpty(t *testing.T) {
 	got := RequestContext(nil)
 	if got != "" {
 		t.Fatalf("RequestContext(nil) = %q, want empty", got)
+	}
+}
+
+func TestRequestContextOmitsCompletedList(t *testing.T) {
+	got := RequestContext([]Item{
+		{Content: "explore", Status: StatusCompleted},
+		{Content: "summarize", Status: StatusCompleted},
+	})
+	if got != "" {
+		t.Fatalf("RequestContext(completed items) = %q, want empty", got)
 	}
 }
 

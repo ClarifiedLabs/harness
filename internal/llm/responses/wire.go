@@ -204,15 +204,7 @@ func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opt
 	replayReasoning := req.Reasoning.Effort != "" || req.Reasoning.Summary != ""
 	input := buildInput(req.Messages, replayReasoning)
 	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
-		if req.StoreResponse {
-			instructions = appendInstructionContext(instructions, contextText)
-		} else {
-			input = append(input, wireInputItem{
-				Type:    "message",
-				Role:    "user",
-				Content: []wireContentPart{{Type: "input_text", Text: contextText}},
-			})
-		}
+		instructions = appendInstructionContext(instructions, contextText)
 	}
 	w := wireRequest{
 		Model:              req.Model,

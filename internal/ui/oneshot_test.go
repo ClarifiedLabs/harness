@@ -337,6 +337,34 @@ func TestOneShotRefreshesTodoContextAfterUpdateTodos(t *testing.T) {
 	}
 }
 
+func TestOneShotOmitsTodoContextAfterCompletedUpdateTodos(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolStep("update_todos", `{"todos":[{"content":"explore","status":"completed"},{"content":"summarize","status":"completed"}]}`, "call_todo")},
+			Stop:   llm.StopToolUse,
+		},
+		llmtest.Step{Stop: llm.StopEndTurn},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+	store := todo.NewStore()
+	reg := tools.Default()
+	reg.Register(todo.NewTool(store))
+	app.Agent.SetTools(reg)
+	app.Todos = store
+
+	if code := OneShot(app, "work on it"); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	}
+	secondContext := strings.Join(fp.Requests[1].RequestContext, "\n\n")
+	if secondContext != "" {
+		t.Fatalf("completed todo list should not be request context:\n%s", secondContext)
+	}
+}
+
 func TestOneShotShowsToolCallProgressOnStderrOnly(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake",

@@ -130,7 +130,7 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (string, error) {
 		return "", fmt.Errorf("at most one todo may be in_progress (got %d)", inProgress)
 	}
 	t.store.Replace(args.Todos)
-	return Render(args.Todos), nil
+	return toolResult(args.Todos), nil
 }
 
 // Render formats items as the model-facing tool result and progress view.
@@ -163,11 +163,31 @@ func Render(items []Item) string {
 	return b.String()
 }
 
+func toolResult(items []Item) string {
+	out := Render(items)
+	if allCompleted(items) {
+		out += "\nAll todos are complete."
+	}
+	return out
+}
+
 // RequestContext renders a short, request-only reminder for the model. Callers
 // append it to ephemeral context, not the saved transcript.
 func RequestContext(items []Item) string {
-	if len(items) == 0 {
+	if len(items) == 0 || allCompleted(items) {
 		return ""
 	}
 	return "[todo]\n" + Render(items)
+}
+
+func allCompleted(items []Item) bool {
+	if len(items) == 0 {
+		return false
+	}
+	for _, item := range items {
+		if item.Status != StatusCompleted {
+			return false
+		}
+	}
+	return true
 }
