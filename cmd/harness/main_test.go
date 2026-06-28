@@ -230,6 +230,7 @@ type testInfoModelJSON struct {
 	ModelLabel               string     `json:"model_label"`
 	ContextWindow            int        `json:"context_window"`
 	InputModalities          []string   `json:"input_modalities"`
+	ServerTools              []string   `json:"server_tools"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd"`
 	Reasoning                struct {
 		Supported bool                  `json:"supported"`
@@ -308,6 +309,52 @@ func TestRunOneShotAssistantToStdout(t *testing.T) {
 	// Wiring gap #1: the resolved model must reach the provider request.
 	if fp.Requests[0].Model != "claude-opus-4-8" {
 		t.Errorf("request model = %q, want claude-opus-4-8", fp.Requests[0].Model)
+	}
+}
+
+func TestRunOneShotEnablesAdvertisedWebSearch(t *testing.T) {
+	fp := llmtest.New("fake", okStep())
+	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{
+		"-provider", "openrouter",
+		"-model", "openai/gpt-5.5",
+		"-web-search", "auto",
+		"-p", "hello",
+	}, fp, "")
+	for i := range proxy.catalog.Targets {
+		if proxy.catalog.Targets[i].ID == "openrouter:openai/gpt-5.5" {
+			proxy.catalog.Targets[i].ServerTools = []string{llm.ServerToolWebSearch}
+		}
+	}
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(proxy.requests) != 1 {
+		t.Fatalf("proxy requests = %d, want 1", len(proxy.requests))
+	}
+	req := proxy.requests[0].Request
+	if len(req.ServerTools) != 1 || req.ServerTools[0].Name != llm.ServerToolWebSearch || req.ServerTools[0].Kind != "" {
+		t.Fatalf("server tools = %+v, want neutral web_search request", req.ServerTools)
+	}
+}
+
+func TestRunOneShotDoesNotEnableUnadvertisedWebSearch(t *testing.T) {
+	fp := llmtest.New("fake", okStep())
+	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{
+		"-provider", "openrouter",
+		"-model", "openai/gpt-5.5",
+		"-web-search", "auto",
+		"-p", "hello",
+	}, fp, "")
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(proxy.requests) != 1 {
+		t.Fatalf("proxy requests = %d, want 1", len(proxy.requests))
+	}
+	if len(proxy.requests[0].Request.ServerTools) != 0 {
+		t.Fatalf("server tools = %+v, want none for unadvertised target", proxy.requests[0].Request.ServerTools)
 	}
 }
 
@@ -1132,11 +1179,11 @@ func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"anthropic:claude-opus-4-8\ttext,image\tdefault/minimal/low/medium/high/xhigh/max\n",
-		"openai:gpt-5.5\t-\tdefault/minimal/low/medium/high/xhigh/max\n",
-		"openai:gemini-2.5-flash\t-\tdefault/none/minimal/low/medium/high/xhigh/max\n",
-		"openrouter:openai/gpt-5.5\t-\tdefault/minimal/low/medium/high/xhigh/max\n",
-		"openrouter:z-ai/glm-5.1\t-\tdefault/none/minimal/low/medium/high/xhigh\n",
+		"anthropic:claude-opus-4-8\ttext,image\t-\tdefault/minimal/low/medium/high/xhigh/max\n",
+		"openai:gpt-5.5\t-\t-\tdefault/minimal/low/medium/high/xhigh/max\n",
+		"openai:gemini-2.5-flash\t-\t-\tdefault/none/minimal/low/medium/high/xhigh/max\n",
+		"openrouter:openai/gpt-5.5\t-\t-\tdefault/minimal/low/medium/high/xhigh/max\n",
+		"openrouter:z-ai/glm-5.1\t-\t-\tdefault/none/minimal/low/medium/high/xhigh\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("models output missing %q:\n%s", want, got)
@@ -1150,6 +1197,11 @@ func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 	fp := llmtest.New("fake")
 	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--models", "--format", "json"}, fp, "")
+	for i := range proxy.catalog.Targets {
+		if proxy.catalog.Targets[i].ID == "openrouter:openai/gpt-5.5" {
+			proxy.catalog.Targets[i].ServerTools = []string{llm.ServerToolWebSearch}
+		}
+	}
 
 	code := run(env)
 	if code != ui.ExitOK {
@@ -1183,6 +1235,9 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 	if !openRouterModel.Reasoning.Supported || !reasoningOptionPresent(openRouterModel.Reasoning.Options, "effort") {
 		t.Fatalf("openrouter reasoning = %+v\n%s", openRouterModel.Reasoning, out.String())
 	}
+	if !slices.Equal(openRouterModel.ServerTools, []string{llm.ServerToolWebSearch}) {
+		t.Fatalf("openrouter server tools = %+v\n%s", openRouterModel.ServerTools, out.String())
+	}
 	anthropicModel := findJSONModel(t, got.Models, "anthropic:claude-opus-4-8")
 	if anthropicModel.PricePerMillionTokensUSD != nil || !anthropicModel.Reasoning.Supported {
 		t.Fatalf("anthropic model = %+v\n%s", anthropicModel, out.String())
@@ -1208,7 +1263,7 @@ func TestRunAgentsAndModelsFlagsPrintBothInOrder(t *testing.T) {
 	}
 	got := out.String()
 	agentsAt := strings.Index(got, "agents:\n")
-	modelsAt := strings.Index(got, "anthropic:claude-opus-4-8\ttext,image\tdefault/minimal/low/medium/high/xhigh/max")
+	modelsAt := strings.Index(got, "anthropic:claude-opus-4-8\ttext,image\t-\tdefault/minimal/low/medium/high/xhigh/max")
 	if agentsAt < 0 || modelsAt < 0 || agentsAt > modelsAt {
 		t.Fatalf("expected agents before models:\n%s", got)
 	}

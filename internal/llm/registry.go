@@ -25,6 +25,7 @@ type ModelInfo struct {
 	ContextWindow   int            `json:"context_window"`
 	OutputLimit     int            `json:"output_limit,omitempty"`
 	InputModalities []string       `json:"input_modalities,omitempty"`
+	ServerTools     []string       `json:"server_tools,omitempty"`
 	Price           Price          `json:"price"`
 	Reasoning       *ReasoningInfo `json:"reasoning,omitempty"`
 }
@@ -52,6 +53,7 @@ type ProviderConfig struct {
 	PromptCache         PromptCacheConfig `json:"prompt_cache,omitempty"`
 	ResponsesStateful   *bool             `json:"responses_stateful,omitempty"`
 	ResponsesWebSocket  *bool             `json:"responses_websocket,omitempty"`
+	ServerTools         []string          `json:"server_tools,omitempty"`
 	APIKeyEnv           []string          `json:"api_key_env"`
 	Auth                *auth.Config      `json:"auth,omitempty"`
 	Models              []ModelEntry      `json:"models"`
@@ -70,6 +72,7 @@ type ModelEntry struct {
 	ContextWindow    int               `json:"context_window"`
 	OutputLimit      int               `json:"output_limit,omitempty"`
 	InputModalities  []string          `json:"input_modalities,omitempty"`
+	ServerTools      []string          `json:"server_tools,omitempty"`
 	Price            Price             `json:"price"`
 	Reasoning        *bool             `json:"reasoning,omitempty"`
 	ReasoningOptions []ReasoningOption `json:"reasoning_options,omitempty"`
@@ -164,6 +167,7 @@ func addProviderModels(models, qualified map[string]ModelInfo, pc ProviderConfig
 			ContextWindow:   m.ContextWindow,
 			OutputLimit:     m.OutputLimit,
 			InputModalities: append([]string(nil), m.InputModalities...),
+			ServerTools:     effectiveServerTools(pc, m),
 			Price:           m.Price,
 			Reasoning:       modelEntryReasoning(m),
 		}
@@ -248,12 +252,39 @@ func (r *Registry) MergeModel(model string, info ModelInfo) {
 	if len(current.InputModalities) == 0 && len(info.InputModalities) > 0 {
 		current.InputModalities = append([]string(nil), info.InputModalities...)
 	}
+	if len(current.ServerTools) == 0 && len(info.ServerTools) > 0 {
+		current.ServerTools = NormalizeServerTools(info.ServerTools)
+	}
 	if current.Reasoning == nil && info.Reasoning != nil {
 		current.Reasoning = info.Reasoning.Clone()
 	} else if current.Reasoning != nil && len(current.Reasoning.Options) == 0 && info.Reasoning != nil && len(info.Reasoning.Options) > 0 {
 		current.Reasoning.Options = info.Reasoning.Clone().Options
 	}
 	target[model] = current
+}
+
+func effectiveServerTools(pc ProviderConfig, entry ModelEntry) []string {
+	tools := make([]string, 0, len(pc.ServerTools)+len(entry.ServerTools))
+	tools = append(tools, pc.ServerTools...)
+	tools = append(tools, entry.ServerTools...)
+	return NormalizeServerTools(tools)
+}
+
+// NormalizeServerTools lowercases, trims, de-duplicates, and sorts server-tool
+// names so catalogs and request snapshots remain stable.
+func NormalizeServerTools(tools []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, tool := range tools {
+		tool = strings.ToLower(strings.TrimSpace(tool))
+		if tool == "" || seen[tool] {
+			continue
+		}
+		seen[tool] = true
+		out = append(out, tool)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // SetDefaultContextWindow sets the fallback window used when a model has no

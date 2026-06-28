@@ -648,6 +648,9 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 	for _, t := range req.Tools {
 		toolBytes += len(t.Name) + len(t.Description) + len(t.Parameters)
 	}
+	for _, t := range req.ServerTools {
+		toolBytes += len(t.Name) + len(t.Kind) + len(t.Parameters)
+	}
 	messageBytes := 0
 	images := 0
 	for _, m := range req.Messages {

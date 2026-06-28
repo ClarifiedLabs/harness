@@ -42,6 +42,7 @@ type Request struct {
 	System      string          `json:"system,omitempty"`
 	Messages    []Message       `json:"messages,omitempty"`
 	Tools       []ToolSchema    `json:"tools,omitempty"`
+	ServerTools []ServerTool    `json:"server_tools,omitempty"`
 	MaxTokens   int             `json:"max_tokens,omitempty"`  // 0 = provider policy (see design §5.4)
 	Temperature *float64        `json:"temperature,omitempty"` // nil = omit
 	Reasoning   ReasoningConfig `json:"reasoning,omitempty"`
@@ -88,6 +89,26 @@ type ToolSchema struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"` // JSON Schema object, owned by the tool layer
+}
+
+const (
+	ServerToolWebSearch = "web_search"
+
+	ServerToolKindOpenAIWebSearch     = "openai_web_search"
+	ServerToolKindAnthropicWebSearch  = "anthropic_web_search"
+	ServerToolKindOpenRouterWebSearch = "openrouter_web_search"
+	ServerToolKindMimoWebSearch       = "mimo_web_search"
+	ServerToolKindKimiWebSearch       = "kimi_web_search"
+	ServerToolKindZAIWebSearch        = "zai_web_search"
+)
+
+// ServerTool is a provider-hosted tool declaration. Name is the neutral feature
+// requested by harness, while Kind and Parameters are filled by the model proxy
+// after resolving the concrete target/provider wire format.
+type ServerTool struct {
+	Name       string          `json:"name"`
+	Kind       string          `json:"kind,omitempty"`
+	Parameters json.RawMessage `json:"parameters,omitempty"`
 }
 
 // EventKind discriminates the StreamEvent union.

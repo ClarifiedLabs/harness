@@ -357,6 +357,31 @@ func TestBuildRequestToolsCacheBreakpoint(t *testing.T) {
 	}
 }
 
+func TestBuildRequestServerTools(t *testing.T) {
+	req := llm.Request{
+		Model: "claude-opus-4-8",
+		Tools: []llm.ToolSchema{
+			{Name: "read_file", Parameters: json.RawMessage(`{}`)},
+		},
+		ServerTools: []llm.ServerTool{
+			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindAnthropicWebSearch},
+		},
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
+		},
+	}
+	w := buildRequest(req, 200_000, 0)
+	if len(w.Tools) != 2 {
+		t.Fatalf("tools = %+v, want function and server tool", w.Tools)
+	}
+	if w.Tools[1].Type != "web_search_20250305" || w.Tools[1].Name != "web_search" || w.Tools[1].MaxUses != 3 || len(w.Tools[1].InputSchema) != 0 {
+		t.Fatalf("web search tool = %+v", w.Tools[1])
+	}
+	if w.Tools[1].CacheControl == nil || w.Tools[1].CacheControl.Type != "ephemeral" {
+		t.Fatalf("server tool cache_control = %+v, want ephemeral", w.Tools[1].CacheControl)
+	}
+}
+
 func TestBuildRequestCacheBreakpointSkipsRequestContext(t *testing.T) {
 	// The volatile request-only context (e.g. a [todo] reminder) must not become
 	// the final user-like message or carry the cache breakpoint: pinning the

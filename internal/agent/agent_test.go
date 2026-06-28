@@ -1825,6 +1825,42 @@ func idsFromResults(results []llm.ToolResult) []string {
 	return ids
 }
 
+func TestKimiWebSearchToolCallPassesThroughArguments(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{
+				toolDone(0, "call_web", "$web_search", `{"query":"current docs"}`),
+			},
+			Stop: llm.StopToolUse,
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("done")},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	a := newAgent(fp, tools.Catalog(), Options{
+		ServerTools: []llm.ServerTool{{Name: llm.ServerToolWebSearch}},
+	})
+	sink := &recordSink{}
+
+	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if len(sink.results) != 1 {
+		t.Fatalf("tool results = %+v, want one", sink.results)
+	}
+	if sink.results[0].IsError || sink.results[0].Text != `{"query":"current docs"}` {
+		t.Fatalf("kimi web_search result = %+v, want passthrough arguments", sink.results[0])
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	}
+	msgs := fp.Requests[1].Messages
+	if len(msgs) == 0 || len(msgs[len(msgs)-1].Content) != 1 || msgs[len(msgs)-1].Content[0].ResultText != `{"query":"current docs"}` {
+		t.Fatalf("second request messages = %s", dump(msgs))
+	}
+}
+
 func TestRequestCarriesResolvedModel(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("hi")},

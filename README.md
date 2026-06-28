@@ -142,6 +142,8 @@ configured agents. Add `--format json` to `--models`, `--agents`, or
 `--check-model-proxy` when another program needs structured output. Use
 `harness --debug-request -p "..."` to dump the first provider-neutral model
 request, tool set, context estimate, and byte counts without calling the model.
+When a model target advertises `server_tools:["web_search"]`, opt in with
+`-web-search auto` to let the provider run its hosted web search tool.
 
 MCP is optional. After configuring downstream servers for `harness-mcp-proxy`,
 start it separately and enable MCP for `harness`:

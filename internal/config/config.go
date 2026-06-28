@@ -68,6 +68,7 @@ type Config struct {
 	ImageDetail               string            `json:"image_detail"`
 	Images                    []ImageAttachment `json:"images"`
 	SearchTools               string            `json:"search_tools"`
+	WebSearch                 string            `json:"web_search"`
 	AgentsMDWarnBytes         int               `json:"agents_md_warn_bytes"`          // config-only warning threshold in bytes; default 8192, explicit 0 disables
 	ToolResultMaxBytes        int               `json:"tool_result_max_bytes"`         // 0 = tool default
 	ToolResultMaxLines        int               `json:"tool_result_max_lines"`         // 0 = tool default
@@ -268,6 +269,7 @@ type fileConfig struct {
 	ReasoningSummary          string                     `json:"reasoning_summary"`
 	ImageDetail               string                     `json:"image_detail"`
 	SearchTools               string                     `json:"search_tools"`
+	WebSearch                 string                     `json:"web_search"`
 	AgentsMDWarnBytes         *int                       `json:"agents_md_warn_bytes"`
 	ToolResultMaxBytes        *int                       `json:"tool_result_max_bytes"`
 	ToolResultMaxLines        *int                       `json:"tool_result_max_lines"`
@@ -356,7 +358,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	fResume, fSession := f.resume, f.session
 	fMaxTurns, fDefaultContextWindow, fContextWindow := f.maxTurns, f.defaultContextWindow, f.contextWindow
 	fReasoningEffort, fReasoningEnabled, fReasoningBudgetTokens, fReasoningSummary := f.reasoningEffort, f.reasoningEnabled, f.reasoningBudgetTokens, f.reasoningSummary
-	fImageDetail, fSearchTools := f.imageDetail, f.searchTools
+	fImageDetail, fSearchTools, fWebSearch := f.imageDetail, f.searchTools, f.webSearch
 	fPrompt, fInitialPrompt, fReplPrompt, fReplEditMode, fOutputFormat := f.prompt, f.initialPrompt, f.replPrompt, f.replEditMode, f.outputFormat
 	fVerbose, fToolStream, fShowDiffs, fNoColor := f.verbose, f.toolStream, f.showDiffs, f.noColor
 	fTimestamps, fNoTimestamps := f.timestamps, f.noTimestamps
@@ -442,6 +444,11 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	}
 	c.SearchTools, err = canonicalSearchTools(resolveString(set["search-tools"], *fSearchTools,
 		getenv("HARNESS_SEARCH_TOOLS"), fc.SearchTools, "auto"))
+	if err != nil {
+		return Config{}, err
+	}
+	c.WebSearch, err = canonicalWebSearch(resolveString(set["web-search"], *fWebSearch,
+		getenv("HARNESS_WEB_SEARCH"), fc.WebSearch, "off"))
 	if err != nil {
 		return Config{}, err
 	}
@@ -835,6 +842,18 @@ func canonicalSearchTools(mode string) (string, error) {
 	}
 }
 
+func canonicalWebSearch(mode string) (string, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "", "off", "false", "no", "disabled", "disable":
+		return "off", nil
+	case "auto", "on", "true", "yes", "enabled", "enable":
+		return "auto", nil
+	default:
+		return "", fmt.Errorf("invalid web_search %q (want off or auto)", mode)
+	}
+}
+
 func canonicalReplEditMode(mode string) (string, error) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch mode {
@@ -889,6 +908,7 @@ type flags struct {
 	reasoningSummary                 *string
 	imageDetail                      *string
 	searchTools                      *string
+	webSearch                        *string
 	images                           *imageFlags
 	agent                            *string
 	handoffAgent                     *string
@@ -953,6 +973,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.agent = fs.String("agent", "", "agent: auto, plan, independent, or a config-defined agent (default auto)")
 	f.handoffAgent = fs.String("handoff-agent", "", "agent a plan->implementation handoff switches to by default (default auto)")
 	f.searchTools = fs.String("search-tools", "auto", "search tools to expose: auto, grep, rg, or both")
+	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")
 	f.responsesStateful = fs.Bool("responses-stateful", true, "enable OpenAI Responses previous_response_id continuation when supported")
 	f.verbose = fs.Bool("v", false, "show tool result snippets")
 	f.toolStream = fs.Bool("tool-stream", true, "show live tool-call progress")

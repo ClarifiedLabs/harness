@@ -458,6 +458,23 @@ func TestSearchToolsPrecedenceAndValidation(t *testing.T) {
 	}
 }
 
+func TestWebSearchPrecedenceAndValidation(t *testing.T) {
+	checkPrecedence(t, precedenceCase[string]{
+		file:     `{"web_search":"off"}`,
+		env:      map[string]string{"HARNESS_WEB_SEARCH": "true"},
+		baseArgs: []string{"-model", "gpt-5.5"},
+		flagArgs: []string{"-web-search", "off"},
+		got:      func(c Config) string { return c.WebSearch },
+		wantFlag: "off",
+		wantEnv:  "auto",
+		wantFile: "off",
+	})
+
+	if _, err := Load([]string{"-web-search", "always"}, noEnv, ""); err == nil {
+		t.Fatalf("expected invalid web_search to fail")
+	}
+}
+
 func TestToolResultLimitPrecedenceEnvBeatsFile(t *testing.T) {
 	cfgPath := writeConfig(t, `{"tool_result_max_bytes":111,"tool_result_max_lines":222}`)
 
@@ -987,7 +1004,7 @@ func TestBadFormatValueIsUsageError(t *testing.T) {
 var helpFlags = []string{
 	"-p", "-i", "-initial-prompt", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 	"-no-env", "-resume", "-session", "-max-turns", "-default-context-window", "-context-window",
-	"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-responses-stateful", "-image-detail", "-image", "-agent", "-search-tools", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-format", "-show-config",
+	"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-responses-stateful", "-image-detail", "-image", "-agent", "-search-tools", "-web-search", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-format", "-show-config",
 	"-agents", "-models", "-check-model-proxy", "-repl-edit-mode", "-hooks",
 }
 

@@ -105,9 +105,11 @@ type wireImageSource struct {
 // wireTool is a tool declaration: name, description, input_schema, optional
 // cache_control.
 type wireTool struct {
+	Type         string          `json:"type,omitempty"`
 	Name         string          `json:"name"`
 	Description  string          `json:"description,omitempty"`
-	InputSchema  json.RawMessage `json:"input_schema"`
+	InputSchema  json.RawMessage `json:"input_schema,omitempty"`
+	MaxUses      int             `json:"max_uses,omitempty"`
 	CacheControl *cacheControl   `json:"cache_control,omitempty"`
 }
 
@@ -218,6 +220,11 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 			InputSchema: t.Parameters,
 		})
 	}
+	for _, t := range req.ServerTools {
+		if tool, ok := buildServerTool(t); ok {
+			w.Tools = append(w.Tools, tool)
+		}
+	}
 
 	// Third breakpoint (of the 4 allowed): the tool-schema array is the static
 	// prefix; caching it separately survives system-prompt changes such as a
@@ -242,6 +249,17 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 	placeCacheBreakpoints(w.Messages, len(w.Messages))
 
 	return w
+}
+
+func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
+	if tool.Kind != llm.ServerToolKindAnthropicWebSearch && !(tool.Kind == "" && tool.Name == llm.ServerToolWebSearch) {
+		return wireTool{}, false
+	}
+	return wireTool{
+		Type:    "web_search_20250305",
+		Name:    "web_search",
+		MaxUses: 3,
+	}, true
 }
 
 // buildContent maps internal content blocks onto request-side wire blocks. An

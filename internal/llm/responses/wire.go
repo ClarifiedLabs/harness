@@ -76,10 +76,10 @@ type wireContentPart struct {
 
 type wireTool struct {
 	Type        string          `json:"type"`
-	Name        string          `json:"name"`
+	Name        string          `json:"name,omitempty"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
-	Strict      bool            `json:"strict"`
+	Strict      *bool           `json:"strict,omitempty"`
 }
 
 // --- streaming event wire structs ---
@@ -230,19 +230,44 @@ func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opt
 	}
 
 	for _, t := range req.Tools {
+		strict := false
 		w.Tools = append(w.Tools, wireTool{
 			Type:        "function",
 			Name:        t.Name,
 			Description: t.Description,
 			Parameters:  t.Parameters,
-			Strict:      false,
+			Strict:      &strict,
 		})
+	}
+	for _, t := range req.ServerTools {
+		if tool, ok := buildServerTool(t); ok {
+			w.Tools = append(w.Tools, tool)
+		}
 	}
 	if len(w.Tools) > 0 {
 		w.ParallelTools = true
 	}
 
 	return w
+}
+
+func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
+	switch tool.Kind {
+	case llm.ServerToolKindOpenRouterWebSearch:
+		return wireTool{Type: "openrouter:web_search", Parameters: rawObjectOrNil(tool.Parameters)}, true
+	case llm.ServerToolKindOpenAIWebSearch, "":
+		if tool.Name == llm.ServerToolWebSearch {
+			return wireTool{Type: "web_search", Parameters: rawObjectOrNil(tool.Parameters)}, true
+		}
+	}
+	return wireTool{}, false
+}
+
+func rawObjectOrNil(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	return raw
 }
 
 func appendInstructionContext(instructions, contextText string) string {

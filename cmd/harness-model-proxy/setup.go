@@ -49,6 +49,7 @@ type setupProviderConfig struct {
 	PromptCache         llm.PromptCacheConfig `json:"prompt_cache,omitempty"`
 	ResponsesStateful   *bool                 `json:"responses_stateful,omitempty"`
 	ResponsesWebSocket  *bool                 `json:"responses_websocket,omitempty"`
+	ServerTools         []string              `json:"server_tools,omitempty"`
 	APIKeyEnv           []string              `json:"api_key_env,omitempty"`
 	Auth                *auth.Config          `json:"auth,omitempty"`
 	Models              []setupModelConfig    `json:"models"`
@@ -59,6 +60,7 @@ type setupModelConfig struct {
 	ContextWindow    int                   `json:"context_window,omitempty"`
 	OutputLimit      int                   `json:"output_limit,omitempty"`
 	InputModalities  []string              `json:"input_modalities,omitempty"`
+	ServerTools      []string              `json:"server_tools,omitempty"`
 	Price            *llm.Price            `json:"price,omitempty"`
 	Reasoning        *bool                 `json:"reasoning,omitempty"`
 	ReasoningOptions []llm.ReasoningOption `json:"reasoning_options,omitempty"`
@@ -411,20 +413,47 @@ func setupProviderFromModelsDev(provider modelsdev.Provider, apiKey string, auth
 			APIKey:            cfg.APIKey,
 			Managed:           true,
 			ResponsesStateful: &stateful,
+			ServerTools:       setupProviderServerTools(provider),
 			APIKeyEnv:         cfg.APIKeyEnv,
 			Models:            entries,
 		}
 	}
 	cfg := provider.ProviderConfig(apiKey)
 	return setupProviderConfig{
-		Name:      cfg.Name,
-		APIType:   cfg.APIType,
-		BaseURL:   cfg.BaseURL,
-		APIKey:    cfg.APIKey,
-		Managed:   true,
-		APIKeyEnv: cfg.APIKeyEnv,
-		Auth:      authCfg,
-		Models:    entries,
+		Name:        cfg.Name,
+		APIType:     cfg.APIType,
+		BaseURL:     cfg.BaseURL,
+		APIKey:      cfg.APIKey,
+		Managed:     true,
+		ServerTools: setupProviderServerTools(provider),
+		APIKeyEnv:   cfg.APIKeyEnv,
+		Auth:        authCfg,
+		Models:      entries,
+	}
+}
+
+func setupProviderServerTools(provider modelsdev.Provider) []string {
+	id := strings.ToLower(strings.TrimSpace(provider.ID))
+	name := strings.ToLower(strings.TrimSpace(provider.Name))
+	apiType := strings.ToLower(strings.TrimSpace(provider.APIType()))
+	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL()))
+	switch {
+	case id == "openai":
+		return []string{llm.ServerToolWebSearch}
+	case id == "anthropic" || apiType == "anthropic":
+		return []string{llm.ServerToolWebSearch}
+	case id == sakanaProviderID || strings.Contains(baseURL, "api.sakana.ai"):
+		return []string{llm.ServerToolWebSearch}
+	case id == "openrouter" || strings.Contains(baseURL, "openrouter.ai"):
+		return []string{llm.ServerToolWebSearch}
+	case id == "mimo" || strings.Contains(id, "xiaomi") || strings.Contains(name, "mimo") || strings.Contains(name, "xiaomi") || strings.Contains(baseURL, "mimo.mi.com"):
+		return []string{llm.ServerToolWebSearch}
+	case id == "kimi" || id == "moonshot" || strings.Contains(id, "moonshot") || strings.Contains(name, "kimi") || strings.Contains(name, "moonshot") || strings.Contains(baseURL, "kimi"):
+		return []string{llm.ServerToolWebSearch}
+	case id == "zai" || id == "z-ai" || id == "z.ai" || strings.Contains(id, "zai") || strings.Contains(name, "z.ai") || strings.Contains(name, "zai") || strings.Contains(baseURL, "z.ai") || strings.Contains(baseURL, "bigmodel.cn"):
+		return []string{llm.ServerToolWebSearch}
+	default:
+		return nil
 	}
 }
 

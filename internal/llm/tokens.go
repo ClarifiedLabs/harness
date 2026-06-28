@@ -14,6 +14,9 @@ func EstimateInputTokens(req Request) int {
 	for _, t := range req.Tools {
 		bytes += len(t.Name) + len(t.Description) + len(t.Parameters)
 	}
+	for _, t := range req.ServerTools {
+		bytes += len(t.Name) + len(t.Kind) + len(t.Parameters)
+	}
 	for _, m := range req.Messages {
 		bytes += len(m.Role)
 		for _, b := range m.Content {

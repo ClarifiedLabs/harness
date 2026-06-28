@@ -96,10 +96,16 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	if catalog.Targets[0].OutputLimit != 64_000 || !slices.Equal(catalog.Targets[0].InputModalities, []string{"text", "image"}) {
 		t.Fatalf("catalog target = %+v, want output limit 64000", catalog.Targets[0])
 	}
+	if !slices.Equal(catalog.Targets[0].ServerTools, []string{llm.ServerToolWebSearch}) {
+		t.Fatalf("catalog server tools = %+v, want web_search", catalog.Targets[0].ServerTools)
+	}
 
 	body, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openrouter:openai/gpt-5.5",
-		Request:  llm.Request{Model: "openrouter:openai/gpt-5.5"},
+		Request: llm.Request{
+			Model:       "openrouter:openai/gpt-5.5",
+			ServerTools: []llm.ServerTool{{Name: llm.ServerToolWebSearch}},
+		},
 	})
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/v1/stream", bytes.NewReader(body))
 	if err != nil {
@@ -123,6 +129,9 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	}
 	if len(fp.Requests) != 1 || fp.Requests[0].Model != "openai/gpt-5.5" {
 		t.Fatalf("fake provider requests = %+v", fp.Requests)
+	}
+	if len(fp.Requests[0].ServerTools) != 1 || fp.Requests[0].ServerTools[0].Kind != llm.ServerToolKindOpenRouterWebSearch {
+		t.Fatalf("fake provider server tools = %+v", fp.Requests[0].ServerTools)
 	}
 }
 

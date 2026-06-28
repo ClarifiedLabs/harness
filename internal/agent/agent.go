@@ -153,6 +153,9 @@ type Options struct {
 	// Reasoning is forwarded to every model request. Empty means provider
 	// default.
 	Reasoning llm.ReasoningConfig
+	// ServerTools are provider-hosted tools such as web_search that are declared
+	// alongside local function tools but handled entirely by the provider.
+	ServerTools []llm.ServerTool
 	// Now stamps transcript messages. Nil defaults to time.Now.
 	Now func() time.Time
 	// CompactKeepTurns controls how many whole recent turns remain verbatim after
@@ -195,6 +198,7 @@ type Agent struct {
 	contextWindow             int     // -context-window override; 0 = use the registry default
 	observedContextWindow     int     // smaller provider-reported limit learned from an overflow error
 	reasoning                 llm.ReasoningConfig
+	serverTools               []llm.ServerTool
 	now                       func() time.Time
 	sleep                     func(context.Context, time.Duration) error // mid-stream retry backoff; nil-free, set in New
 	compactKeepTurns          int
@@ -231,6 +235,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		maxPromptCostUSD:          opts.MaxPromptCostUSD,
 		contextWindow:             opts.ContextWindow,
 		reasoning:                 opts.Reasoning,
+		serverTools:               cloneServerTools(opts.ServerTools),
 		now:                       now,
 		sleep:                     sleepContext,
 		compactKeepTurns:          opts.CompactKeepTurns,
@@ -309,6 +314,13 @@ func (a *Agent) SetModel(model string, contextWindow int) {
 // SetReasoning replaces the reasoning controls sent on subsequent requests.
 func (a *Agent) SetReasoning(reasoning llm.ReasoningConfig) {
 	a.reasoning = reasoning
+	a.resetResponseState()
+}
+
+// SetServerTools replaces provider-hosted tool declarations for subsequent
+// requests.
+func (a *Agent) SetServerTools(serverTools []llm.ServerTool) {
+	a.serverTools = cloneServerTools(serverTools)
 	a.resetResponseState()
 }
 
@@ -394,6 +406,7 @@ func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 		System:         a.system,
 		Messages:       append([]llm.Message(nil), a.transcript...),
 		Tools:          cloneToolSpecs(a.toolSpecs),
+		ServerTools:    cloneServerTools(a.serverTools),
 		Reasoning:      a.reasoning,
 		RequestContext: append([]string(nil), extraContext...),
 		PromptCacheKey: a.promptCacheKey(),
@@ -420,6 +433,16 @@ func (a *Agent) promptCachePrefix() string {
 		h.Write([]byte{0})
 		h.Write([]byte(t.Name))
 	}
+	for _, t := range a.serverTools {
+		h.Write([]byte{0})
+		h.Write([]byte(t.Name))
+		h.Write([]byte{0})
+		h.Write([]byte(t.Kind))
+		if len(t.Parameters) > 0 {
+			h.Write([]byte{0})
+			h.Write(t.Parameters)
+		}
+	}
 	return "harness-" + strconv.FormatUint(h.Sum64(), 16)
 }
 
@@ -437,7 +460,7 @@ func newPromptCacheSessionID() string {
 // instead of paying the cold cache-write latency. ok is false when there is
 // nothing cacheable yet. The returned request is a self-contained snapshot.
 func (a *Agent) PrewarmRequest() (llm.Request, bool) {
-	if a.system == "" && len(a.toolSpecs) == 0 {
+	if a.system == "" && len(a.toolSpecs) == 0 && len(a.serverTools) == 0 {
 		return llm.Request{}, false
 	}
 	req := a.ContextRequest()
@@ -506,6 +529,7 @@ func (a *Agent) estimateContextForTranscript(extraContext []string, transcript [
 		System:         a.system,
 		Messages:       transcript,
 		Tools:          a.toolSpecs,
+		ServerTools:    a.serverTools,
 		RequestContext: extraContext,
 	}, a.window())
 	est.PayloadSystem = est.System
@@ -564,6 +588,7 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 		System:               a.system,
 		Messages:             payloadMessages,
 		Tools:                cloneToolSpecs(a.toolSpecs),
+		ServerTools:          cloneServerTools(a.serverTools),
 		Reasoning:            a.reasoning,
 		MaxTokens:            a.maxOutputTokens,
 		StoreResponse:        a.responsesStateful,
@@ -668,6 +693,7 @@ func (a *Agent) estimatePayloadContextForTranscript(requestContext []string, tra
 		System:         a.system,
 		Messages:       payloadMessages,
 		Tools:          a.toolSpecs,
+		ServerTools:    a.serverTools,
 		RequestContext: requestContext,
 	}, a.window())
 	est.PayloadSystem = payload.System
@@ -1011,6 +1037,7 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, requestContext []string, modelTurn int) (llm.Usage, ContextEstimate) {
 	modelReq := a.modelRequest(requestContext)
 	modelReq.request.Tools = nil // no tools: force a text-only wind-down
+	modelReq.request.ServerTools = nil
 	res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, modelTurn, modelReq.estimate)
 	usage := add(res.usage, wasted)
 	if err != nil {
@@ -1153,6 +1180,13 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, turnID int, 
 	if call.InvalidInputError != "" {
 		return llm.ToolResult{ForID: call.ID, Text: invalidToolInputResult(call), IsError: true}
 	}
+	if a.isKimiWebSearchCall(call) {
+		text := strings.TrimSpace(string(call.Input))
+		if text == "" {
+			text = "{}"
+		}
+		return llm.ToolResult{ForID: call.ID, Text: text}
+	}
 
 	var preContext []string
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PreToolUse) {
@@ -1203,6 +1237,18 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, turnID int, 
 		}
 	}
 	return r
+}
+
+func (a *Agent) isKimiWebSearchCall(call llm.ToolCall) bool {
+	if call.Name != "$web_search" {
+		return false
+	}
+	for _, tool := range a.serverTools {
+		if tool.Name == llm.ServerToolWebSearch {
+			return true
+		}
+	}
+	return false
 }
 
 func invalidToolInputResult(call llm.ToolCall) string {
@@ -1643,6 +1689,14 @@ func add(a, b llm.Usage) llm.Usage {
 
 func cloneToolSpecs(specs []llm.ToolSchema) []llm.ToolSchema {
 	out := append([]llm.ToolSchema(nil), specs...)
+	for i := range out {
+		out[i].Parameters = append(json.RawMessage(nil), out[i].Parameters...)
+	}
+	return out
+}
+
+func cloneServerTools(serverTools []llm.ServerTool) []llm.ServerTool {
+	out := append([]llm.ServerTool(nil), serverTools...)
 	for i := range out {
 		out[i].Parameters = append(json.RawMessage(nil), out[i].Parameters...)
 	}

@@ -37,6 +37,7 @@ type Runtime struct {
 	MaxOutputTokens   int
 	Registry          *llm.Registry
 	Reasoning         llm.ReasoningConfig
+	ServerTools       []llm.ServerTool
 	ResponsesStateful bool
 	System            string
 	Agent             string
@@ -54,6 +55,7 @@ type Launch struct {
 	MaxOutputTokens   int
 	Registry          *llm.Registry
 	Reasoning         llm.ReasoningConfig
+	ServerTools       []llm.ServerTool
 	ResponsesStateful bool
 	System            string
 	Agent             string
@@ -371,6 +373,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		ContextWindow:             launch.ContextWindow,
 		Registry:                  launch.Registry,
 		Reasoning:                 launch.Reasoning,
+		ServerTools:               launch.ServerTools,
 		ResponsesStateful:         launch.ResponsesStateful,
 		CompactKeepTurns:          r.opts.CompactKeepTurns,
 		CompactSummaryMaxTokens:   r.opts.CompactSummaryMaxTokens,

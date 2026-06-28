@@ -623,6 +623,7 @@ func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Request.Model = target.entry.Name
+	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
 	opts, err := h.runtimeOptionsForTarget(r.Context(), target)
 	if err != nil {
 		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
@@ -751,6 +752,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	providerID = target.pc.Name
 	model = target.entry.Name
 	req.Request.Model = model
+	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
 	req.Request.Reasoning = h.reasoningForTarget(target, req.ReasoningProfile, req.Request.Reasoning)
 	opts, err := h.runtimeOptionsForTarget(r.Context(), target)
 	if err != nil {
@@ -781,7 +783,13 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	streamAttempt := func(request llm.Request, anchorMessageCount int) (bool, llm.ResponseState) {
+	type streamRetry int
+	const (
+		streamRetryNone streamRetry = iota
+		streamRetryContinuation
+		streamRetryServerTools
+	)
+	streamAttempt := func(request llm.Request, anchorMessageCount int) (streamRetry, llm.ResponseState) {
 		streamErr = ""
 		errAttrs = nil
 		sentEvents := false
@@ -792,15 +800,18 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				errAttrs = streamErrorLogAttrs(err)
 				if !sentEvents && request.PreviousResponseID != "" && previousResponseRejected(err) {
 					h.resetContinuation(cacheKey)
-					return true, llm.ResponseState{}
+					return streamRetryContinuation, llm.ResponseState{}
 				}
 				if !sentEvents && request.StoreResponse && storeResponseRejected(err) {
 					h.disableContinuation(cacheKey)
-					return true, llm.ResponseState{}
+					return streamRetryContinuation, llm.ResponseState{}
+				}
+				if !sentEvents && len(request.ServerTools) > 0 && serverToolRejected(err) {
+					return streamRetryServerTools, llm.ResponseState{}
 				}
 				_ = enc.Encode(protocol.StreamEnvelope{Error: protocol.ErrorFrom(err)})
 				flush()
-				return false, llm.ResponseState{}
+				return streamRetryNone, llm.ResponseState{}
 			}
 			sentEvents = true
 			events++
@@ -834,23 +845,31 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			event := ev
 			if err := enc.Encode(protocol.StreamEnvelope{Event: &event}); err != nil {
 				streamErr = err.Error()
-				return false, llm.ResponseState{}
+				return streamRetryNone, llm.ResponseState{}
 			}
 			flush()
 		}
-		return false, finalState
+		return streamRetryNone, finalState
 	}
-	retry, state := streamAttempt(req.Request, len(fullRequest.Messages))
-	if retry {
-		fullRequest.StoreResponse = false
-		fullRequest.PreviousResponseID = ""
-		retry, state = streamAttempt(fullRequest, len(fullRequest.Messages))
+	attemptRequest := req.Request
+	retry, state := streamAttempt(attemptRequest, len(fullRequest.Messages))
+	for retry != streamRetryNone {
+		switch retry {
+		case streamRetryContinuation:
+			fullRequest.StoreResponse = false
+			fullRequest.PreviousResponseID = ""
+			attemptRequest = fullRequest
+		case streamRetryServerTools:
+			attemptRequest.ServerTools = nil
+			fullRequest.ServerTools = nil
+		default:
+			retry = streamRetryNone
+			continue
+		}
+		retry, state = streamAttempt(attemptRequest, len(fullRequest.Messages))
 	}
 	if state.PreviousResponseID != "" {
 		h.saveContinuation(cacheKey, state)
-	}
-	if retry {
-		return
 	}
 }
 
@@ -1277,6 +1296,97 @@ func reasoningModeForProviderConfig(pc llm.ProviderConfig) string {
 	return "openai"
 }
 
+func resolveServerToolsForTarget(target resolvedTarget, requested []llm.ServerTool) []llm.ServerTool {
+	if len(requested) == 0 {
+		return nil
+	}
+	supported := targetServerTools(target.pc, target.entry)
+	if !stringSliceContains(supported, llm.ServerToolWebSearch) {
+		return nil
+	}
+	kind := serverToolKindForProviderConfig(target.pc)
+	if kind == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []llm.ServerTool
+	for _, tool := range requested {
+		name := strings.ToLower(strings.TrimSpace(tool.Name))
+		if name != llm.ServerToolWebSearch || seen[name] {
+			continue
+		}
+		seen[name] = true
+		tool.Name = name
+		tool.Kind = kind
+		out = append(out, tool)
+	}
+	return out
+}
+
+func targetServerTools(pc llm.ProviderConfig, entry llm.ModelEntry) []string {
+	tools := make([]string, 0, len(pc.ServerTools)+len(entry.ServerTools)+1)
+	tools = append(tools, pc.ServerTools...)
+	tools = append(tools, entry.ServerTools...)
+	if providerImplicitWebSearch(pc) {
+		tools = append(tools, llm.ServerToolWebSearch)
+	}
+	return llm.NormalizeServerTools(tools)
+}
+
+func providerImplicitWebSearch(pc llm.ProviderConfig) bool {
+	return serverToolKindForProviderConfig(pc) != ""
+}
+
+func serverToolKindForProviderConfig(pc llm.ProviderConfig) string {
+	name := strings.ToLower(strings.TrimSpace(pc.Name))
+	apiType := strings.ToLower(strings.TrimSpace(pc.APIType))
+	base := strings.ToLower(strings.TrimSpace(pc.BaseURL))
+	switch {
+	case name == "openrouter" || strings.Contains(base, "openrouter.ai"):
+		return llm.ServerToolKindOpenRouterWebSearch
+	case name == "anthropic" || apiType == "anthropic" || strings.Contains(base, "api.anthropic.com"):
+		return llm.ServerToolKindAnthropicWebSearch
+	case name == "sakana" || strings.Contains(base, "api.sakana.ai"):
+		return llm.ServerToolKindOpenAIWebSearch
+	case apiType == "responses" && (name == "openai" || strings.Contains(base, "api.openai.com")):
+		return llm.ServerToolKindOpenAIWebSearch
+	case name == "mimo" || strings.Contains(name, "xiaomi") || strings.Contains(base, "mimo.mi.com"):
+		return llm.ServerToolKindMimoWebSearch
+	case name == "kimi" || name == "moonshot" || strings.Contains(name, "moonshot") || strings.Contains(base, "kimi"):
+		return llm.ServerToolKindKimiWebSearch
+	case name == "zai" || name == "z-ai" || name == "z.ai" || strings.Contains(name, "zai") || strings.Contains(base, "z.ai") || strings.Contains(base, "bigmodel.cn"):
+		return llm.ServerToolKindZAIWebSearch
+	default:
+		return ""
+	}
+}
+
+func serverToolRejected(err error) bool {
+	var apiErr *llm.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode > 0 && apiErr.StatusCode != http.StatusBadRequest && apiErr.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	if !strings.Contains(text, "tool") && !strings.Contains(text, "web_search") && !strings.Contains(text, "web search") {
+		return false
+	}
+	for _, marker := range []string{"unsupported", "invalid", "unknown", "unrecognized", "not supported", "not available", "parameter", "schema"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) continuationKey(targetID, promptCacheKey string) string {
 	if strings.TrimSpace(promptCacheKey) == "" {
 		return ""
@@ -1488,6 +1598,7 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				ContextWindow:   entry.ContextWindow,
 				OutputLimit:     entry.OutputLimit,
 				InputModalities: append([]string(nil), entry.InputModalities...),
+				ServerTools:     targetServerTools(pc, entry),
 				Price:           price,
 				Reasoning:       targetReasoningProfiles(entry),
 			}

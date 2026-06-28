@@ -30,6 +30,10 @@ exposed by the configured proxy. Use `harness --agents` to print the resolved
 built-in and config-defined agents. Both commands exit before creating a
 session.
 
+`--models --format json` also shows each target's `server_tools` list. When a
+target advertises `web_search`, `-web-search auto` lets harness declare the
+provider-hosted web search tool for model calls. The default is `off`.
+
 ## Interactive Initial Prompt
 
 Use `-i` or `-initial-prompt` to run one prompt immediately and then continue in
@@ -116,6 +120,7 @@ interrupted.
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
 -agent <name>     agent: auto (default), plan, independent, or a config-defined agent
 -search-tools <mode>   search tools to expose: auto, grep, rg, or both
+-web-search <mode>     server-side web search: off or auto (default off)
 -v                show tool result snippets (first ~5 lines, dimmed)
 -tool-stream      show live tool-call progress (default true; use -tool-stream=false to disable)
 -show-diffs       show per-tool-call file diffs for built-in file edits (default true; use -show-diffs=false to disable)
@@ -155,6 +160,13 @@ provider configs should set `input_modalities`, for example
 `["text", "image"]`; models without `image` are treated as text-only and image
 attachments are skipped with a warning.
 
+Provider configs can advertise hosted model tools with `server_tools`.
+Currently `web_search` is recognized. It can be set at the provider level or on
+individual model entries; the proxy also infers it for known web-search-capable
+providers such as OpenAI Responses, Anthropic, Sakana, OpenRouter, MiMo, Kimi,
+and Z.AI. Harness only declares it when `-web-search auto` (or
+`web_search:"auto"`) is enabled and the selected target advertises support.
+
 ## Configuration And Environment
 
 Precedence is **flags > environment > config file > built-in defaults** for any
@@ -177,6 +189,9 @@ context-efficiency knobs are config-file-only.
   `HARNESS_NO_TIMESTAMPS` is an alias for `HARNESS_TIMESTAMPS=none`.
   `HARNESS_REPL_INPUT_TRACE` is a debug knob that appends timestamped
   terminal-input events to the given file path (`-` for stderr).
+- `HARNESS_WEB_SEARCH=auto` is equivalent to `-web-search auto`; `off` disables
+  it. `auto` only declares web search when the selected model-proxy target
+  advertises `server_tools:["web_search"]`.
 - Provider API-key environment variables are read only by
   `harness-model-proxy`.
 - The optional config file is `~/.config/harness/config.json`, overrideable with

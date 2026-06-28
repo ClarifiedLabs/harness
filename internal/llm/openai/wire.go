@@ -27,6 +27,7 @@ type wireRequest struct {
 	Temperature     *float64       `json:"temperature,omitempty"`
 	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
 	Reasoning       *wireReasoning `json:"reasoning,omitempty"`
+	Thinking        *wireThinking  `json:"thinking,omitempty"`
 	ExtraBody       *wireExtraBody `json:"extra_body,omitempty"`
 	Stop            []string       `json:"stop,omitempty"`
 	PromptCacheKey  string         `json:"prompt_cache_key,omitempty"`
@@ -45,6 +46,10 @@ type wireReasoning struct {
 	Effort    string `json:"effort,omitempty"`
 	Enabled   *bool  `json:"enabled,omitempty"`
 	MaxTokens *int   `json:"max_tokens,omitempty"`
+}
+
+type wireThinking struct {
+	Type string `json:"type"`
 }
 
 type wireExtraBody struct {
@@ -93,17 +98,29 @@ type wireToolCallFunc struct {
 	Arguments string `json:"arguments"`
 }
 
-// wireTool is a function tool declaration. The ToolSchema.Parameters bytes pass
-// through unchanged into parameters.
+// wireTool is a function or provider-hosted tool declaration. The
+// ToolSchema.Parameters bytes pass through unchanged into parameters.
 type wireTool struct {
-	Type     string       `json:"type"`
-	Function wireToolDecl `json:"function"`
+	Type        string            `json:"type"`
+	Function    *wireToolDecl     `json:"function,omitempty"`
+	Parameters  json.RawMessage   `json:"parameters,omitempty"`
+	MaxKeyword  *int              `json:"max_keyword,omitempty"`
+	ForceSearch *bool             `json:"force_search,omitempty"`
+	WebSearch   *wireZAIWebSearch `json:"web_search,omitempty"`
 }
 
 type wireToolDecl struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+type wireZAIWebSearch struct {
+	Enable       string `json:"enable"`
+	SearchEngine string `json:"search_engine,omitempty"`
+	SearchResult string `json:"search_result,omitempty"`
+	Count        string `json:"count,omitempty"`
+	ContentSize  string `json:"content_size,omitempty"`
 }
 
 // --- streaming chunk wire structs ---
@@ -226,12 +243,17 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, re
 	for _, t := range req.Tools {
 		w.Tools = append(w.Tools, wireTool{
 			Type: "function",
-			Function: wireToolDecl{
+			Function: &wireToolDecl{
 				Name:        t.Name,
 				Description: t.Description,
 				Parameters:  t.Parameters,
 			},
 		})
+	}
+	for _, t := range req.ServerTools {
+		if tool, ok := buildServerTool(t, &w); ok {
+			w.Tools = append(w.Tools, tool)
+		}
 	}
 	// Opt into parallel tool calls when tools are present (Responses already does),
 	// so the model can batch independent reads in one turn instead of one-call-per-
@@ -243,6 +265,41 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, re
 	}
 
 	return w
+}
+
+func buildServerTool(tool llm.ServerTool, req *wireRequest) (wireTool, bool) {
+	switch tool.Kind {
+	case llm.ServerToolKindOpenRouterWebSearch:
+		return wireTool{Type: "openrouter:web_search", Parameters: rawObjectOrNil(tool.Parameters)}, true
+	case llm.ServerToolKindMimoWebSearch:
+		maxKeyword := 3
+		forceSearch := false
+		req.Thinking = &wireThinking{Type: "disabled"}
+		return wireTool{Type: "web_search", MaxKeyword: &maxKeyword, ForceSearch: &forceSearch}, true
+	case llm.ServerToolKindKimiWebSearch:
+		req.Thinking = &wireThinking{Type: "disabled"}
+		return wireTool{Type: "builtin_function", Function: &wireToolDecl{Name: "$web_search"}}, true
+	case llm.ServerToolKindZAIWebSearch:
+		return wireTool{Type: "web_search", WebSearch: &wireZAIWebSearch{
+			Enable:       "True",
+			SearchEngine: "search-prime",
+			SearchResult: "True",
+			Count:        "5",
+			ContentSize:  "medium",
+		}}, true
+	case llm.ServerToolKindOpenAIWebSearch, "":
+		if tool.Name == llm.ServerToolWebSearch {
+			return wireTool{Type: "web_search", Parameters: rawObjectOrNil(tool.Parameters)}, true
+		}
+	}
+	return wireTool{}, false
+}
+
+func rawObjectOrNil(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	return raw
 }
 
 func appendSystemContext(system, contextText string) string {

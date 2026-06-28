@@ -103,6 +103,7 @@ func Registry(catalog protocol.Catalog) *llm.Registry {
 			ContextWindow:   target.ContextWindow,
 			OutputLimit:     target.OutputLimit,
 			InputModalities: append([]string(nil), target.InputModalities...),
+			ServerTools:     llm.NormalizeServerTools(target.ServerTools),
 			Price:           target.Price,
 			Reasoning:       proxyTargetReasoning(target),
 		}

@@ -74,6 +74,7 @@ type Target struct {
 	ContextWindow   int                `json:"context_window,omitempty"`
 	OutputLimit     int                `json:"output_limit,omitempty"`
 	InputModalities []string           `json:"input_modalities,omitempty"`
+	ServerTools     []string           `json:"server_tools,omitempty"`
 	Price           llm.Price          `json:"price,omitempty"`
 	Reasoning       *ReasoningProfiles `json:"reasoning,omitempty"`
 }

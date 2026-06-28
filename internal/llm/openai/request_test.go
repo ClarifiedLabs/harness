@@ -117,6 +117,40 @@ func TestBuildRequestMaxTokensUserSetBeatsOutputLimit(t *testing.T) {
 	}
 }
 
+func TestBuildRequestServerTools(t *testing.T) {
+	req := llm.Request{
+		Model: "gpt-5.5",
+		ServerTools: []llm.ServerTool{
+			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindOpenRouterWebSearch, Parameters: json.RawMessage(`{"max_results":3}`)},
+			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindMimoWebSearch},
+			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindKimiWebSearch},
+			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindZAIWebSearch},
+		},
+	}
+	w := buildRequest(req, 0, 0)
+	if len(w.Tools) != 4 {
+		t.Fatalf("tools = %+v, want four server tools", w.Tools)
+	}
+	if w.Tools[0].Type != "openrouter:web_search" || string(w.Tools[0].Parameters) != `{"max_results":3}` {
+		t.Fatalf("openrouter web search tool = %+v", w.Tools[0])
+	}
+	if w.Tools[1].Type != "web_search" || w.Tools[1].MaxKeyword == nil || *w.Tools[1].MaxKeyword != 3 || w.Tools[1].ForceSearch == nil || *w.Tools[1].ForceSearch {
+		t.Fatalf("mimo web search tool = %+v", w.Tools[1])
+	}
+	if w.Tools[2].Type != "builtin_function" || w.Tools[2].Function == nil || w.Tools[2].Function.Name != "$web_search" {
+		t.Fatalf("kimi web search tool = %+v", w.Tools[2])
+	}
+	if w.Tools[3].Type != "web_search" || w.Tools[3].WebSearch == nil || w.Tools[3].WebSearch.Enable != "True" || w.Tools[3].WebSearch.ContentSize != "medium" {
+		t.Fatalf("zai web search tool = %+v", w.Tools[3])
+	}
+	if w.Thinking == nil || w.Thinking.Type != "disabled" {
+		t.Fatalf("thinking = %+v, want disabled for compatible built-in web search", w.Thinking)
+	}
+	if w.ParallelTools == nil || !*w.ParallelTools {
+		t.Fatalf("parallel_tool_calls = %v, want true when server tools are present", w.ParallelTools)
+	}
+}
+
 func TestBuildRequestTemperatureOmittedWhenNil(t *testing.T) {
 	req := basicRequest()
 	b, err := json.Marshal(buildRequest(req, 0, 0))

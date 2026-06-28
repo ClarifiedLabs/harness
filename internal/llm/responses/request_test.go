@@ -438,9 +438,32 @@ func TestBuildRequestToolsAreNonStrict(t *testing.T) {
 		t.Fatal("parallel_tool_calls = false, want true when tools are present")
 	}
 	for _, tool := range w.Tools {
-		if tool.Strict {
-			t.Fatalf("tool %q strict = true, want false", tool.Name)
+		if tool.Strict == nil || *tool.Strict {
+			t.Fatalf("tool %q strict = %v, want false", tool.Name, tool.Strict)
 		}
+	}
+}
+
+func TestBuildRequestServerTools(t *testing.T) {
+	req := llm.Request{
+		Model: "gpt-5.5",
+		ServerTools: []llm.ServerTool{
+			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindOpenAIWebSearch},
+			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindOpenRouterWebSearch, Parameters: json.RawMessage(`{"max_results":3}`)},
+		},
+	}
+	w := buildRequest(req, 0, 0)
+	if len(w.Tools) != 2 {
+		t.Fatalf("tools = %+v, want two server tools", w.Tools)
+	}
+	if w.Tools[0].Type != "web_search" || w.Tools[0].Strict != nil || w.Tools[0].Name != "" {
+		t.Fatalf("openai web search tool = %+v", w.Tools[0])
+	}
+	if w.Tools[1].Type != "openrouter:web_search" || string(w.Tools[1].Parameters) != `{"max_results":3}` {
+		t.Fatalf("openrouter web search tool = %+v", w.Tools[1])
+	}
+	if !w.ParallelTools {
+		t.Fatal("parallel_tool_calls = false, want true when server tools are present")
 	}
 }
 

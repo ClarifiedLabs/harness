@@ -59,6 +59,12 @@ func EstimateOpenAIChat(req llm.Request) int {
 		total += enc.CountText(t.Description)
 		total += enc.CountText(string(t.Parameters))
 	}
+	for _, t := range req.ServerTools {
+		total += chatToolOverhead
+		total += enc.CountText(t.Name)
+		total += enc.CountText(t.Kind)
+		total += enc.CountText(string(t.Parameters))
+	}
 	for _, m := range req.Messages {
 		total += chatMessageOverhead
 		total += enc.CountText(string(m.Role))

@@ -47,6 +47,7 @@ type ModelSelection struct {
 	Runtime           llm.Provider
 	ContextWindow     int // agent override; 0 means use the registry
 	Reasoning         llm.ReasoningConfig
+	ServerTools       []llm.ServerTool
 	ResponsesStateful bool
 	// ReasoningSet says Reasoning intentionally replaces the requested config,
 	// including zero value for provider default.
@@ -76,6 +77,7 @@ type AgentSelection struct {
 	Runtime           llm.Provider
 	ContextWindow     int
 	Reasoning         llm.ReasoningConfig
+	ServerTools       []llm.ServerTool
 	ResponsesStateful bool
 	ReasoningSet      bool
 }
@@ -1860,6 +1862,7 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	app.Agent.SetProvider(selection.Runtime)
 	app.Agent.SetModel(selection.Model, selection.ContextWindow)
 	app.Agent.SetReasoning(selection.Reasoning)
+	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
 	if selection.RegistryModel == "" {
 		selection.RegistryModel = selection.Model
@@ -2577,6 +2580,7 @@ func (app *App) applyAgentSwitch(name string) error {
 		app.Reasoning = selection.Reasoning
 		app.Agent.SetReasoning(selection.Reasoning)
 	}
+	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
 	app.AgentName = selection.Name
 	app.System = selection.System // so saved sessions capture the agent's prompt

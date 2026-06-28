@@ -181,6 +181,10 @@ Design notes:
 - **JSON tags are provider-neutral** (`kind`, `tool_use_id`, …). Session files never
   contain raw provider wire JSON, so a session started against Anthropic resumes
   against an OpenAI-compatible server and vice versa.
+- **Provider-hosted tools are separate from local tools.** `Request.Tools` carries
+  function schemas backed by `internal/tools`; `Request.ServerTools` carries neutral
+  provider-hosted declarations such as `web_search`. The model proxy resolves those
+  neutral declarations into provider-specific wire shapes before calling a dialect.
 
 Two small seam types carry tool traffic between the agent loop and the tool layer;
 they are flat views of the corresponding content blocks:
@@ -435,6 +439,7 @@ Edge cases:
 | Auth | `Authorization: Bearer <key>` | same | `x-api-key: <key>` + `anthropic-version: 2023-06-01` |
 | Transport | HTTP SSE by default; provider configs may set `responses_websocket:true`, and the proxy defaults it on for `codex_oauth` Responses providers | HTTP SSE | HTTP SSE |
 | Tool schemas | `tools[] = {type:"function", name, description, parameters, strict:false}` | `tools[].function = {name, description, parameters}` (`type:"function"`) | `tools[] = {name, description, input_schema}` |
+| Server tools | `web_search`, or OpenRouter `openrouter:web_search` | OpenRouter `openrouter:web_search`; MiMo `web_search`; Kimi `builtin_function.$web_search`; Z.AI nested `web_search` options | `web_search_20250305` named `web_search` |
 | Parallel tool hint | `parallel_tool_calls:true` when tools are present | `parallel_tool_calls:true` when tools are present | not sent |
 | Prompt cache key | provider-configured; OpenAI auto emits `prompt_cache_key` | provider-configured; OpenAI auto emits `prompt_cache_key`, OpenRouter auto emits `session_id` | not sent (explicit `cache_control` breakpoints instead) |
 | Stateful continuation | `store` is always sent — `store:true` plus `previous_response_id` when proxy catalog reports `responses_stateful:true` (tools/system still sent each request), `store:false` for the stateless default. If the provider rejects stored responses before streaming output, the agent disables stateful continuation and retries stateless. | ignored | ignored |
@@ -659,6 +664,15 @@ conversation history. It also bypasses models.dev flat prices: Fugu Ultra is
 priced by `internal/modelproxy/pricing` with Sakana's context-tier billing, while
 the routed `fugu` model has unknown dollar cost unless Sakana adds response
 billing metadata.
+
+Provider and model entries may set `server_tools:["web_search"]`. The proxy
+serves the normalized list in `GET /v1/models`, and harness only declares hosted
+web search when the selected target advertises it and the harness config sets
+`web_search:"auto"` / `HARNESS_WEB_SEARCH=auto` / `-web-search auto`. The proxy
+also infers `web_search` for known endpoints: OpenAI Responses, Anthropic,
+Sakana, OpenRouter, MiMo, Kimi, and Z.AI. If a provider rejects a server-tool
+field before streaming any events, the proxy retries the request once without
+server tools so stale metadata does not fail the turn.
 
 Flat catalog prices still use `price_source` for managed configs when the price
 is representable as `llm.Price`. Request costs flow through the pricing package's
@@ -1176,6 +1190,9 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 - Search exposure is configurable with `search_tools` / `HARNESS_SEARCH_TOOLS` /
   `-search-tools`: `auto` (default), `grep`, `rg`, or `both`.
+- Provider-hosted web search is not a local tool in this registry. It is exposed
+  through `Request.ServerTools` when `web_search` is `auto` and the selected
+  model-proxy target advertises `server_tools:["web_search"]`.
 - In `auto`, harness registers `rg` when `exec.LookPath("rg")` succeeds and
   otherwise registers `grep`; it does not warn for the automatic fallback.
 - `grep` always invokes `grep` from the harness process PATH. Explicit `rg` or
@@ -1885,6 +1902,7 @@ prefix wins, threshold `1 + len(cmd)/3`).
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
 -agent <name>
 -search-tools <auto|grep|rg|both>
+-web-search <off|auto>
 -v                show tool result snippets
 -tool-stream      show live tool-call progress (default true)
 -show-diffs       show per-tool-call file diffs for built-in file edits (default true)

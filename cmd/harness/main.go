@@ -394,6 +394,7 @@ func run(env environment) int {
 	cfg.Provider = selection.Provider
 	cfg.Model = selection.Model
 	registryModel := selection.RegistryModel
+	serverTools := webSearchServerToolsForModel(modelRegistry, registryModel, cfg.WebSearch)
 	reasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, reasoningModeForProvider(catalog, selection.Provider), interactiveSession, suppressReasoningOutput)
 	if err := validateReasoningConfig(modelRegistry, registryModel, reasoningModeForProvider(catalog, selection.Provider), reasoning); err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
@@ -499,6 +500,7 @@ func run(env environment) int {
 		MaxOutputTokens:   cfg.MaxOutputTokens,
 		Registry:          modelRegistry,
 		Reasoning:         reasoning,
+		ServerTools:       serverTools,
 		ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		Agent:             agentName,
 	})
@@ -671,6 +673,7 @@ func run(env environment) int {
 		snap.MaxOutputTokens = cfg.MaxOutputTokens
 		snap.System = system
 		snap.Reasoning = nextReasoning
+		snap.ServerTools = webSearchServerToolsForModel(modelRegistry, next.RegistryModel, cfg.WebSearch)
 		snap.ResponsesStateful = responsesStatefulForProvider(cfg, catalog, next.Provider)
 		snap.Agent = a.Name
 		snap.ToolNames = reg.Names()
@@ -686,6 +689,7 @@ func run(env environment) int {
 			Runtime:           runtime,
 			ContextWindow:     cfg.ContextWindow,
 			Reasoning:         nextReasoning,
+			ServerTools:       snap.ServerTools,
 			ReasoningSet:      true,
 			ResponsesStateful: snap.ResponsesStateful,
 		}, nil
@@ -731,9 +735,11 @@ func run(env environment) int {
 		snap.ContextWindow = cfg.ContextWindow
 		snap.MaxOutputTokens = cfg.MaxOutputTokens
 		snap.Reasoning = nextReasoning
+		snap.ServerTools = webSearchServerToolsForModel(modelRegistry, next.RegistryModel, cfg.WebSearch)
 		snap.ResponsesStateful = responsesStatefulForProvider(cfg, catalog, next.Provider)
 		delegateState.Set(snap)
 		reasoning = nextReasoning
+		serverTools = snap.ServerTools
 		return ui.ModelSelection{
 			Provider:          next.Provider,
 			Model:             next.Model,
@@ -742,6 +748,7 @@ func run(env environment) int {
 			Runtime:           runtime,
 			ContextWindow:     cfg.ContextWindow,
 			Reasoning:         nextReasoning,
+			ServerTools:       snap.ServerTools,
 			ReasoningSet:      true,
 			ResponsesStateful: snap.ResponsesStateful,
 		}, nil
@@ -756,6 +763,7 @@ func run(env environment) int {
 		ContextWindow:             cfg.ContextWindow,
 		Registry:                  modelRegistry,
 		Reasoning:                 reasoning,
+		ServerTools:               serverTools,
 		Now:                       now,
 		CompactKeepTurns:          cfg.CompactKeepTurns,
 		CompactSummaryMaxTokens:   cfg.CompactSummaryMaxTokens,
@@ -821,6 +829,7 @@ func run(env environment) int {
 		MaxOutputTokens:   cfg.MaxOutputTokens,
 		Registry:          modelRegistry,
 		Reasoning:         reasoning,
+		ServerTools:       serverTools,
 		ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		System:            systemPrompt,
 		Agent:             agentName,
@@ -1173,6 +1182,9 @@ func debugRequestBytes(req llm.Request) debugRequestByteCounts {
 	for _, t := range req.Tools {
 		out.Tools += len(t.Name) + len(t.Description) + len(t.Parameters)
 	}
+	for _, t := range req.ServerTools {
+		out.Tools += len(t.Name) + len(t.Kind) + len(t.Parameters)
+	}
 	for _, m := range req.Messages {
 		out.Messages += len(m.Role) + len(m.Phase)
 		for _, b := range m.Content {
@@ -1298,6 +1310,7 @@ type modelListEntry struct {
 	ModelLabel               string                `json:"model_label,omitempty"`
 	ContextWindow            int                   `json:"context_window,omitempty"`
 	InputModalities          []string              `json:"input_modalities,omitempty"`
+	ServerTools              []string              `json:"server_tools,omitempty"`
 	PricePerMillionTokensUSD *llm.Price            `json:"price_per_million_tokens_usd,omitempty"`
 	Reasoning                modelReasoningDetails `json:"reasoning"`
 }
@@ -1352,7 +1365,7 @@ func formatAgentsListText(out agentsListOutput) string {
 func formatModelsListText(out modelsListOutput) string {
 	var b strings.Builder
 	for _, row := range out.Models {
-		fmt.Fprintf(&b, "%s\t%s\t%s\n", row.TargetID, modelListModalitiesText(row.InputModalities), modelListReasoningText(row.Reasoning))
+		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", row.TargetID, modelListModalitiesText(row.InputModalities), modelListServerToolsText(row.ServerTools), modelListReasoningText(row.Reasoning))
 	}
 	return b.String()
 }
@@ -1370,6 +1383,7 @@ func catalogModelListRows(catalog protocol.Catalog, registry *llm.Registry) []mo
 			ModelLabel:               strings.TrimSpace(target.ModelLabel),
 			ContextWindow:            target.ContextWindow,
 			InputModalities:          append([]string(nil), target.InputModalities...),
+			ServerTools:              append([]string(nil), target.ServerTools...),
 			PricePerMillionTokensUSD: modelListPrice(target.Price),
 			Reasoning:                modelListReasoning(registry, target),
 		})
@@ -1388,6 +1402,17 @@ func modelListModalitiesText(input []string) string {
 			cleaned = append(cleaned, modality)
 		}
 	}
+	if len(cleaned) == 0 {
+		return "-"
+	}
+	return strings.Join(cleaned, ",")
+}
+
+func modelListServerToolsText(tools []string) string {
+	if len(tools) == 0 {
+		return "-"
+	}
+	cleaned := llm.NormalizeServerTools(tools)
 	if len(cleaned) == 0 {
 		return "-"
 	}
@@ -1759,6 +1784,7 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 	model := runtime.Model
 	system := runtime.System
 	launchReasoning := runtime.Reasoning
+	serverTools := runtime.ServerTools
 	if target != runtime.Agent {
 		next, err := resolveAgentCatalogSelection(modelCatalog, def, runtime.ProviderName, runtime.Model)
 		if err != nil {
@@ -1771,6 +1797,7 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 		}
 		providerName = next.Provider
 		model = next.Model
+		serverTools = webSearchServerToolsForModel(runtime.Registry, next.RegistryModel, cfg.WebSearch)
 		provider = proxyClient.Provider(next.Provider)
 		system = buildSystem(def.Prompt)
 	}
@@ -1788,6 +1815,7 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 		MaxOutputTokens:   runtime.MaxOutputTokens,
 		Registry:          runtime.Registry,
 		Reasoning:         launchReasoning,
+		ServerTools:       serverTools,
 		ResponsesStateful: responsesStatefulForProvider(cfg, modelCatalog, providerName),
 		System:            system,
 		Agent:             target,
@@ -1958,6 +1986,22 @@ func reasoningModeForProvider(catalog protocol.Catalog, providerID string) strin
 
 func responsesStatefulForProvider(cfg config.Config, catalog protocol.Catalog, providerID string) bool {
 	return false
+}
+
+func webSearchServerToolsForModel(registry *llm.Registry, model, mode string) []llm.ServerTool {
+	if strings.ToLower(strings.TrimSpace(mode)) != "auto" || registry == nil {
+		return nil
+	}
+	info, ok := registry.Lookup(model)
+	if !ok {
+		return nil
+	}
+	for _, tool := range info.ServerTools {
+		if strings.EqualFold(strings.TrimSpace(tool), llm.ServerToolWebSearch) {
+			return []llm.ServerTool{{Name: llm.ServerToolWebSearch}}
+		}
+	}
+	return nil
 }
 
 func sessionResponseStateCompatible(cfg config.Config, catalog protocol.Catalog, s session.Session, provider, model string) bool {
