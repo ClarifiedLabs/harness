@@ -843,6 +843,39 @@ func TestLiveCounterTicksDuringToolGap(t *testing.T) {
 	}
 }
 
+func TestLiveCounterResumesForStreamedToolCallAfterAssistantText(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
+	r := liveRenderer(&out, &errw, func() time.Time { return now })
+
+	r.StartPrompt()
+	r.StartTurn()
+	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	errw.Reset()
+	r.TextDelta("I’ll inspect")
+	if got := errw.String(); got != "\r\x1b[2K" {
+		t.Fatalf("assistant text should erase the original counter, got %q", got)
+	}
+
+	errw.Reset()
+	now = now.Add(3 * time.Second)
+	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read_file"})
+	now = now.Add(2 * time.Second)
+	r.tick()
+	defer r.StopProgress()
+
+	if got := out.String(); got != "I’ll inspect\n" {
+		t.Fatalf("streamed tool-call status should move to its own row without changing text, got %q", got)
+	}
+	got := errw.String()
+	if strings.Contains(got, "[tool-call:") {
+		t.Fatalf("tool-call status should not force durable tool-stream output, got %q", got)
+	}
+	if !strings.Contains(got, "[model: tool call read_file · 2s · total 5s]") {
+		t.Fatalf("counter should resume while streamed tool arguments finish, got %q", got)
+	}
+}
+
 func TestLiveInputLineRendersTypedBuffer(t *testing.T) {
 	var out, errw bytes.Buffer
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)

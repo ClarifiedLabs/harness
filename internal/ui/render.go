@@ -292,6 +292,18 @@ func (r *Renderer) writeModelTurnComplete(usage agent.ModelTurnUsage) string {
 }
 
 func (r *Renderer) ToolUseStart(call llm.ToolCall) {
+	// A streamed tool call is still model work: after visible commentary the
+	// provider may spend seconds generating hidden function-call arguments and the
+	// final usage frame before local tool execution can begin. Resume the live
+	// counter for that gap so the CLI does not look idle between model output and
+	// tool-start lines.
+	if r.liveStatus {
+		label := "model: tool call"
+		if call.Name != "" {
+			label = "model: tool call " + call.Name
+		}
+		r.beginWait(label, 0)
+	}
 	if !r.toolStream || r.quiet {
 		return
 	}
