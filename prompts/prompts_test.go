@@ -57,6 +57,26 @@ func TestSystemPromptSteersAgainstLoops(t *testing.T) {
 	}
 }
 
+func TestSystemPromptIncludesSafetyVerificationAndFinalGuidance(t *testing.T) {
+	system := strings.ToLower(System())
+	for _, want := range []string{
+		"preserve user changes",
+		"never revert, overwrite, or discard changes",
+		"destructive git commands",
+		"verify appropriately",
+		"verification cannot be run",
+		"final responses",
+		"lead with the outcome",
+		"code reviews",
+		"findings first",
+		"residual risks",
+	} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("system prompt missing high-ROI guidance %q:\n%s", want, System())
+		}
+	}
+}
+
 func TestCompactionSummaryDemandsFileStateAndTodos(t *testing.T) {
 	summary := strings.ToLower(CompactionSummary())
 	for _, want := range []string{"files touched", "open todos"} {
