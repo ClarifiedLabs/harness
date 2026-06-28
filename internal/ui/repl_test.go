@@ -1894,10 +1894,10 @@ func TestREPLContextIncludesTodoRequestContext(t *testing.T) {
 	}
 }
 
-func TestREPLPrintsTodoStatusAfterUpdateTodosAndBeforePrompt(t *testing.T) {
+func TestREPLPrintsTodoStatusAfterUpdateTodosBeforeUsageAndPrompt(t *testing.T) {
 	var out, setupErrw bytes.Buffer
 	status := "Todos (1/2 done):\n  [x] explore\n  [~] Testing"
-	errw := newSignalBuffer(status + "\n[auto] > ")
+	errw := newSignalBuffer("\x00")
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Events: []llm.StreamEvent{toolStep("update_todos", `{"todos":[{"content":"explore","status":"completed"},{"content":"test","status":"in_progress","active_form":"Testing"}]}`, "call_todo")},
@@ -1924,11 +1924,10 @@ func TestREPLPrintsTodoStatusAfterUpdateTodosAndBeforePrompt(t *testing.T) {
 	go func() { codeCh <- Run(pr, app, nil) }()
 
 	writePipe(t, pw, "work\n")
-	select {
-	case <-errw.seen:
-	case <-time.After(time.Second):
-		t.Fatalf("timed out waiting for todo status before the prompt:\n%s", errw.String())
-	}
+	waitFor(t, func() bool {
+		got := errw.String()
+		return strings.Count(got, "[auto] > ") >= 2 && strings.Contains(got, "[turn:")
+	}, "post-turn usage line and prompt")
 	writePipe(t, pw, "/exit\n")
 	select {
 	case code := <-codeCh:
@@ -1960,8 +1959,20 @@ func TestREPLPrintsTodoStatusAfterUpdateTodosAndBeforePrompt(t *testing.T) {
 	if promptStatusIndex == statusIndex {
 		t.Fatalf("todo status should also be printed before the next prompt:\n%s", got)
 	}
-	if promptIndex := strings.Index(got[promptStatusIndex+len(status):], "> "); promptIndex < 0 {
-		t.Fatalf("todo status should be followed by the next REPL prompt:\n%s", got)
+	afterPromptStatus := got[promptStatusIndex+len(status):]
+	usageIndex := strings.Index(afterPromptStatus, "[turn:")
+	if usageIndex < 0 {
+		t.Fatalf("usage line should follow the prompt todo status:\n%s", got)
+	}
+	promptIndex := strings.Index(afterPromptStatus, "[auto] > ")
+	if promptIndex < 0 {
+		t.Fatalf("usage line should be followed by the next REPL prompt:\n%s", got)
+	}
+	if usageIndex > promptIndex {
+		t.Fatalf("usage line should be the last status line before the next REPL prompt:\n%s", got)
+	}
+	if strings.Contains(afterPromptStatus[usageIndex:promptIndex], "Todos (") {
+		t.Fatalf("todo status should not be printed between the usage line and next prompt:\n%s", got)
 	}
 }
 

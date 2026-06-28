@@ -136,6 +136,12 @@ type App struct {
 	// persisted in state.json and reset on /clear. nil disables persistence.
 	Todos *todo.Store
 
+	// The REPL sink can print the prompt todo status immediately before the
+	// per-turn usage line so usage is the last status line before the next prompt.
+	// These fields let the idle prompt avoid printing that same todo block again.
+	todoPromptStatusBeforeUsage     bool
+	todoPromptStatusBeforeUsageTurn int
+
 	// Plans holds the recorded plans (the record_plan tool's store), persisted
 	// in state.json and reset on /clear. nil disables persistence.
 	Plans *plan.Store
@@ -728,7 +734,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		if !promptPrinted {
 			prompt = renderPrompt()
 			app.pollBackgroundNotices()
-			app.printTodoPromptStatus()
+			if !app.todoPromptStatusPrintedBeforeUsageForTurn(app.Turn) {
+				app.printTodoPromptStatus()
+			}
 			if !usePromptEditor || plainPromptRead {
 				fmt.Fprint(app.Errw, prompt)
 			}
@@ -2783,6 +2791,8 @@ func (app *App) clear() {
 	app.usageByModel = nil
 	app.Created = app.clock()()
 	app.Turn = 0
+	app.todoPromptStatusBeforeUsage = false
+	app.todoPromptStatusBeforeUsageTurn = 0
 	app.SessionPath = session.DefaultPath(app.StateDir, app.Created)
 	if app.OnSessionPathChanged != nil {
 		app.OnSessionPathChanged(app.SessionPath)
@@ -3110,23 +3120,33 @@ func (app *App) pollBackgroundNotices() {
 	}
 }
 
-func (app *App) printTodoPromptStatus() {
-	app.printTodoStatus(false)
+func (app *App) printTodoPromptStatus() bool {
+	return app.printTodoStatus(false)
 }
 
-func (app *App) printTodoUpdateStatus() {
-	app.printTodoStatus(true)
+func (app *App) printTodoUpdateStatus() bool {
+	return app.printTodoStatus(true)
 }
 
-func (app *App) printTodoStatus(includeEmpty bool) {
+func (app *App) printTodoStatus(includeEmpty bool) bool {
 	if app.Todos == nil || !app.agentHasTool("update_todos") {
-		return
+		return false
 	}
 	items := app.Todos.Snapshot()
 	if len(items) == 0 && !includeEmpty {
-		return
+		return false
 	}
 	fmt.Fprintln(app.Errw, todo.Render(items))
+	return true
+}
+
+func (app *App) markTodoPromptStatusPrintedBeforeUsage(turn int) {
+	app.todoPromptStatusBeforeUsage = true
+	app.todoPromptStatusBeforeUsageTurn = turn
+}
+
+func (app *App) todoPromptStatusPrintedBeforeUsageForTurn(turn int) bool {
+	return app.todoPromptStatusBeforeUsage && app.todoPromptStatusBeforeUsageTurn == turn
 }
 
 func (app *App) stopBackgroundJobs() {
@@ -3512,14 +3532,15 @@ func (app *App) summaryWidth() int {
 // accumulatingSink forwards events to the renderer while accumulating cumulative
 // token totals and cost for the session (design §10 /usage, §11 saved totals).
 type accumulatingSink struct {
-	r               *Renderer
-	app             *App
-	turn            int
-	printTodoUpdate bool
-	reasoningOutput bool
-	pending         map[string]llm.ToolCall
-	modelTurn       int
-	attempt         int
+	r                          *Renderer
+	app                        *App
+	turn                       int
+	printTodoUpdate            bool
+	printTodoPromptBeforeUsage bool
+	reasoningOutput            bool
+	pending                    map[string]llm.ToolCall
+	modelTurn                  int
+	attempt                    int
 }
 
 func newAccumulatingSink(r *Renderer, app *App, turn int) *accumulatingSink {
@@ -3529,6 +3550,7 @@ func newAccumulatingSink(r *Renderer, app *App, turn int) *accumulatingSink {
 func newREPLSink(r *Renderer, app *App, turn int) *accumulatingSink {
 	s := newAccumulatingSink(r, app, turn)
 	s.printTodoUpdate = true
+	s.printTodoPromptBeforeUsage = true
 	s.reasoningOutput = true
 	return s
 }
@@ -3682,6 +3704,14 @@ func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
 	// Price the turn against the App's own model (not the renderer's) so a
 	// mid-turn model switch is not mispriced, and hand it to the renderer (r63).
 	cost, costKnown := s.app.turnCost(u.Usage)
+	if s.printTodoPromptBeforeUsage {
+		s.r.StopProgress()
+		s.r.flushToolUseStarts()
+		s.r.finishAssistantLine()
+		if s.app.printTodoPromptStatus() {
+			s.app.markTodoPromptStatusPrintedBeforeUsage(s.turn)
+		}
+	}
 	s.r.SetTurnCost(cost, costKnown)
 	s.r.TurnComplete(u)
 	s.app.addUsage(u)
