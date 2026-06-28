@@ -196,6 +196,12 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 			CacheControl: anchor,
 		}}
 	}
+	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
+		w.System = append(w.System, wireTextBlock{
+			Type: "text",
+			Text: contextText,
+		})
+	}
 
 	if len(req.StopSeqs) > 0 {
 		w.StopSequences = req.StopSeqs
@@ -232,17 +238,8 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 			Content: buildContent(m.Content, includeThinking),
 		})
 	}
-	// realMessages excludes the request-only context appended below; the cache
-	// breakpoints must land on the persisted transcript, not the volatile tail.
-	realMessages := len(w.Messages)
-	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
-		w.Messages = append(w.Messages, wireMessage{
-			Role:    "user",
-			Content: []wireContent{{Type: "text", Text: contextText}},
-		})
-	}
 
-	placeCacheBreakpoints(w.Messages, realMessages)
+	placeCacheBreakpoints(w.Messages, len(w.Messages))
 
 	return w
 }
@@ -294,12 +291,12 @@ func buildContent(blocks []llm.ContentBlock, includeThinking bool) []wireContent
 }
 
 // placeCacheBreakpoints marks the cacheable tail of the transcript. realCount is
-// the number of leading messages that belong to the persisted transcript;
-// trailing request-only context (todo/hook reminders, appended after realCount)
-// is excluded so the breakpoint lands on content that recurs byte-for-byte next
-// turn. Putting the breakpoint on the volatile context tail — as the prior
-// implementation did — meant the message prefix never matched across turns, so
-// only the system and tool anchors ever cache-read.
+// the number of leading messages that belong to the persisted transcript. Volatile
+// request-only context (todo/hook reminders) lives in an uncached system block, so
+// message breakpoints stay on content that recurs byte-for-byte next turn. Putting
+// the breakpoint on a volatile context tail — as the prior implementation did —
+// meant the message prefix never matched across turns, so only the system and tool
+// anchors ever cache-read.
 //
 // Two ephemeral breakpoints are placed, within the 4-breakpoint budget alongside
 // the system and last-tool anchors: one on the last real message (the rolling

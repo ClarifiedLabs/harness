@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"harness/internal/llm"
@@ -357,13 +358,13 @@ func TestBuildRequestToolsCacheBreakpoint(t *testing.T) {
 }
 
 func TestBuildRequestCacheBreakpointSkipsRequestContext(t *testing.T) {
-	// The volatile request-only context (e.g. a [todo] reminder) is appended as a
-	// trailing user message but must NOT carry the cache breakpoint: pinning the
-	// breakpoint to per-turn content defeats transcript caching (only system and
-	// tools would ever cache-read). The breakpoint must land on the last real
-	// transcript message instead.
+	// The volatile request-only context (e.g. a [todo] reminder) must not become
+	// the final user-like message or carry the cache breakpoint: pinning the
+	// breakpoint to per-turn content defeats transcript caching. The breakpoint
+	// must land on the last real transcript message instead.
 	req := llm.Request{
-		Model: "claude-opus-4-8",
+		Model:  "claude-opus-4-8",
+		System: "system prompt",
 		Messages: []llm.Message{
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}}},
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "reply"}}},
@@ -373,13 +374,20 @@ func TestBuildRequestCacheBreakpointSkipsRequestContext(t *testing.T) {
 	}
 	w := buildRequest(req, 1_000_000, 0)
 
-	if len(w.Messages) != 4 {
-		t.Fatalf("want 3 real + 1 context message, got %d", len(w.Messages))
+	if len(w.Messages) != 3 {
+		t.Fatalf("messages = %d, want only 3 real transcript messages", len(w.Messages))
 	}
-	// The appended request-context block (last message) must be unmarked.
-	ctxMsg := w.Messages[3]
-	if got := ctxMsg.Content[len(ctxMsg.Content)-1]; got.CacheControl != nil {
-		t.Errorf("request-context block must not carry cache_control, got %+v", got)
+	if len(w.System) != 2 {
+		t.Fatalf("system blocks = %d, want stable system + request context", len(w.System))
+	}
+	if w.System[0].Text != "system prompt" || w.System[0].CacheControl == nil {
+		t.Fatalf("stable system block = %+v, want cached system prompt", w.System[0])
+	}
+	if !strings.Contains(w.System[1].Text, "todo: ship it") {
+		t.Fatalf("request-context system block = %+v, want context text", w.System[1])
+	}
+	if w.System[1].CacheControl != nil {
+		t.Errorf("request-context system block must not carry cache_control, got %+v", w.System[1].CacheControl)
 	}
 	// The last real message must carry the ephemeral breakpoint.
 	lastReal := w.Messages[2]

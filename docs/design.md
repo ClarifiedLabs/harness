@@ -297,11 +297,12 @@ type ToolSchema struct {
 }
 ```
 
-`RequestContext` is rendered as a trailing synthetic user message for stateless
-Chat Completions and Anthropic calls. Responses calls merge it into request
-instructions in both stored and stateless modes, so fresh todo/background/hook
-context applies to the current request without looking like the latest user
-prompt or becoming part of the OpenAI stored response chain.
+`RequestContext` is request-only instruction context: Chat Completions merges it
+into the leading system message, Anthropic adds it as an uncached system text
+block, and Responses merges it into `instructions` in both stored and stateless
+modes. Fresh todo/background/hook context applies to the current request without
+looking like the latest user prompt or becoming part of the OpenAI stored
+response chain.
 Responses streams surface `response.id` on terminal `EventDone.ResponseID`; the
 agent stores that with the local transcript anchor for optional
 `previous_response_id` continuation.
@@ -515,13 +516,14 @@ on all four breakpoints to avoid paying the 1h write premium on a short-lived
 session. The rolling message anchors always keep the 5-minute default. An interactive (TTY) session
 also fires a background `max_tokens:1` warm-up at startup so the first real request reads
 a warm prefix instead of paying the cold write.
-Crucially, the message breakpoints land on the persisted transcript, **not** on the
-volatile request-only context (todo/hook reminders) appended after it: pinning the
-breakpoint to per-turn content — as v1 did — meant the message prefix never matched across
-turns, so only the system and tool anchors ever cache-read while the whole transcript was
-re-billed at full rate. An agentic loop re-sends a growing prefix every step; caching makes
-that prefix ~10× cheaper. OpenAI caches automatically (longest stable prefix), so its
-trailing volatile context is harmless and no opt-in exists or is needed.
+Crucially, the message breakpoints land on the persisted transcript, **not** on
+volatile request-only context (todo/hook reminders), which is carried in an
+uncached system block: pinning the breakpoint to per-turn content — as v1 did —
+meant the message prefix never matched across turns, so only the system and tool
+anchors ever cache-read while the whole transcript was re-billed at full rate.
+An agentic loop re-sends a growing prefix every step; caching makes
+that prefix ~10× cheaper. OpenAI caches automatically (longest stable prefix), so
+no explicit cache-control opt-in exists or is needed.
 
 ### 5.5 Errors and retries (`internal/retry`)
 

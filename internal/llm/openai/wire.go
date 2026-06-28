@@ -211,15 +211,16 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, re
 		}
 	}
 
-	if req.System != "" {
-		w.Messages = append(w.Messages, wireMessage{Role: "system", Content: req.System})
+	system := req.System
+	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
+		system = appendSystemContext(system, contextText)
+	}
+	if system != "" {
+		w.Messages = append(w.Messages, wireMessage{Role: "system", Content: system})
 	}
 
 	for _, m := range req.Messages {
 		w.Messages = append(w.Messages, buildMessages(m)...)
-	}
-	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
-		w.Messages = append(w.Messages, wireMessage{Role: "user", Content: contextText})
 	}
 
 	for _, t := range req.Tools {
@@ -242,6 +243,16 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, re
 	}
 
 	return w
+}
+
+func appendSystemContext(system, contextText string) string {
+	if contextText == "" {
+		return system
+	}
+	if system == "" {
+		return contextText
+	}
+	return system + "\n\n" + contextText
 }
 
 func openRouterReasoning(reasoning llm.ReasoningConfig) *wireReasoning {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"harness/internal/llm"
@@ -396,6 +397,55 @@ func TestBuildRequestNoSystemOmitsSystemMessage(t *testing.T) {
 	w := buildRequest(req, 0, 0)
 	if len(w.Messages) == 0 || w.Messages[0].Role == "system" {
 		t.Errorf("leading system message present though System is empty: %+v", w.Messages[0])
+	}
+}
+
+func TestBuildRequestContextIsSystemMessage(t *testing.T) {
+	req := llm.Request{
+		Model:          "gpt-5.4",
+		System:         "system prompt",
+		RequestContext: []string{"background complete"},
+		Messages: []llm.Message{{
+			Role:    llm.RoleUser,
+			Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "work on it"}},
+		}},
+	}
+	w := buildRequest(req, 0, 0)
+	if len(w.Messages) != 2 {
+		t.Fatalf("messages = %d, want system + user: %+v", len(w.Messages), w.Messages)
+	}
+	if w.Messages[0].Role != "system" {
+		t.Fatalf("first role = %q, want system", w.Messages[0].Role)
+	}
+	content, ok := w.Messages[0].Content.(string)
+	if !ok || !strings.Contains(content, "system prompt") || !strings.Contains(content, "background complete") {
+		t.Fatalf("system content = %#v, want system prompt and request context", w.Messages[0].Content)
+	}
+	if w.Messages[1].Role != "user" {
+		t.Fatalf("last role = %q, want original user prompt", w.Messages[1].Role)
+	}
+}
+
+func TestBuildRequestContextDoesNotFollowToolResult(t *testing.T) {
+	req := llm.Request{
+		Model:          "gpt-5.4",
+		RequestContext: []string{"todo context"},
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "inspect"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"a.go"}`)}}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}},
+		},
+	}
+	w := buildRequest(req, 0, 0)
+	if len(w.Messages) == 0 {
+		t.Fatal("messages is empty")
+	}
+	if w.Messages[0].Role != "system" {
+		t.Fatalf("first role = %q, want request context as system message", w.Messages[0].Role)
+	}
+	last := w.Messages[len(w.Messages)-1]
+	if last.Role != "tool" || last.ToolCallID != "call_1" || last.Content != "ok" {
+		t.Fatalf("last message = %+v, want tool result", last)
 	}
 }
 
