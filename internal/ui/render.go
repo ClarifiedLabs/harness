@@ -79,6 +79,7 @@ type Renderer struct {
 	width                   func() int
 
 	turnStart         time.Time
+	promptStart       time.Time
 	assistantLineOpen bool
 	assistantMarkdown *markdown.Stream
 	assistantPhase    string
@@ -154,10 +155,27 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 	}
 }
 
+// StartPrompt records when the last user prompt was submitted. The live status
+// line uses it for the total elapsed time across all model/tool waits in the
+// prompt turn.
+func (r *Renderer) StartPrompt() {
+	now := r.now()
+	r.statusMu.Lock()
+	r.promptStart = now
+	r.statusMu.Unlock()
+}
+
 // StartTurn records the turn's start instant for the duration in the usage line.
-// The driver calls it immediately before agent.RunTurn.
+// The driver calls it immediately before agent.RunTurn. If StartPrompt was not
+// called (older tests and direct callers), the prompt total starts here too.
 func (r *Renderer) StartTurn() {
-	r.turnStart = r.now()
+	now := r.now()
+	r.turnStart = now
+	r.statusMu.Lock()
+	if r.promptStart.IsZero() {
+		r.promptStart = now
+	}
+	r.statusMu.Unlock()
 	r.activeModelCost = 0
 	r.largeRequestWarned = false
 	r.compactionWarned = false
@@ -517,6 +535,7 @@ func (r *Renderer) StopProgress() {
 	r.statusActive = false
 	r.statusInput = ""
 	r.statusInputCursor = 0
+	r.promptStart = time.Time{}
 	t, stop, done := r.ticker, r.tickerStop, r.tickerDone
 	r.ticker, r.tickerStop, r.tickerDone = nil, nil, nil
 	r.statusMu.Unlock()
@@ -601,13 +620,13 @@ func (r *Renderer) paintLocked() {
 // also reports the terminal column for the during-turn edit cursor and whether a
 // typed buffer is present. Caller holds statusMu.
 func (r *Renderer) statusTextLocked() (text string, cursorCol int, hasInput bool) {
-	elapsed := r.now().Sub(r.statusStart)
-	secs := int(elapsed.Seconds())
-	if secs < 0 {
-		secs = 0
-	}
+	now := r.now()
+	elapsedSecs := nonNegativeSeconds(now.Sub(r.statusStart))
 	var b strings.Builder
-	fmt.Fprintf(&b, "[%s · %ds", r.statusLabel, secs)
+	fmt.Fprintf(&b, "[%s · %ds", r.statusLabel, elapsedSecs)
+	if !r.promptStart.IsZero() {
+		fmt.Fprintf(&b, " · total %ds", nonNegativeSeconds(now.Sub(r.promptStart)))
+	}
 	if r.statusCtxPct > 0 {
 		fmt.Fprintf(&b, " · ctx %d%%", r.statusCtxPct)
 	}
@@ -633,6 +652,14 @@ func (r *Renderer) statusTextLocked() (text string, cursorCol int, hasInput bool
 // cursor stays visible (a trailing "…" marks the hidden tail) when the cursor
 // moves ahead of that window. The window is always clamped to a single row so the
 // \r\x1b[2K redraw and the cursor park stay correct.
+func nonNegativeSeconds(d time.Duration) int {
+	secs := int(d.Seconds())
+	if secs < 0 {
+		return 0
+	}
+	return secs
+}
+
 func clipStatusLine(prefix, input string, cursor int, maxW int) (text string, cursorCol int) {
 	if maxW <= 0 {
 		return "", 0

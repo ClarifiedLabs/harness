@@ -26,10 +26,16 @@ func OneShot(app *App, prompt string) int {
 	if app.Created.IsZero() {
 		app.Created = app.clock()()
 	}
+	if app.Renderer != nil {
+		app.Renderer.StartPrompt()
+	}
 	var skillContext []string
 	var ok bool
 	prompt, skillContext, ok = app.resolveSkillMentionContext(prompt)
 	if !ok {
+		if app.Renderer != nil {
+			app.Renderer.StopProgress()
+		}
 		return ExitUsage
 	}
 	promptHook := app.runPromptSubmitHook(context.Background(), prompt, app.Turn+1)
@@ -40,6 +46,7 @@ func OneShot(app *App, prompt string) int {
 		}
 		if app.Renderer != nil {
 			app.Renderer.Notice("[prompt blocked: " + reason + "]")
+			app.Renderer.StopProgress()
 		} else {
 			fmt.Fprintf(app.Errw, "[prompt blocked: %s]\n", reason)
 		}

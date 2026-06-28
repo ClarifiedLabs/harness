@@ -526,6 +526,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		return ctx, cancel, interrupted.Load
 	}
 	startPromptTurn := func(prompt string, resolveSkillMentions bool) (exit bool, code int) {
+		if app.Renderer != nil {
+			app.Renderer.StartPrompt()
+		}
 		ctx, cancel, interrupted := exitContext()
 		err := app.refreshMCP(ctx)
 		cancel()
@@ -555,6 +558,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}
 
 	if initialPrompt != nil {
+		if app.Renderer != nil {
+			app.Renderer.StartPrompt()
+		}
 		ctx, cancel, interrupted := exitContext()
 		err := app.refreshMCP(ctx)
 		cancel()
@@ -2797,6 +2803,9 @@ func (app *App) prepareTurn(prompt string, opts turnOptions) (func(), bool) {
 		var ok bool
 		prompt, skillContext, ok = app.resolveSkillMentionContext(prompt)
 		if !ok {
+			if app.Renderer != nil {
+				app.Renderer.StopProgress()
+			}
 			return nil, false
 		}
 	}
@@ -2808,6 +2817,7 @@ func (app *App) prepareTurn(prompt string, opts turnOptions) (func(), bool) {
 		}
 		if app.Renderer != nil {
 			app.Renderer.Notice("[prompt blocked: " + reason + "]")
+			app.Renderer.StopProgress()
 		} else {
 			fmt.Fprintf(app.Errw, "[prompt blocked: %s]\n", reason)
 		}
