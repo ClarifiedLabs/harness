@@ -333,8 +333,10 @@ func TestRunOneShotEnablesAdvertisedWebSearch(t *testing.T) {
 		t.Fatalf("proxy requests = %d, want 1", len(proxy.requests))
 	}
 	req := proxy.requests[0].Request
-	if len(req.ServerTools) != 1 || req.ServerTools[0].Name != llm.ServerToolWebSearch || req.ServerTools[0].Kind != "" {
-		t.Fatalf("server tools = %+v, want neutral web_search request", req.ServerTools)
+	// Harness tags the provider-specific kind best-effort from the provider name;
+	// the proxy re-resolves it authoritatively before the wire call.
+	if len(req.ServerTools) != 1 || req.ServerTools[0].Name != llm.ServerToolWebSearch || req.ServerTools[0].Kind != llm.ServerToolKindOpenRouterWebSearch {
+		t.Fatalf("server tools = %+v, want web_search tagged openrouter", req.ServerTools)
 	}
 }
 

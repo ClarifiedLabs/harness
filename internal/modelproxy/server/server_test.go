@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -132,6 +133,130 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	}
 	if len(fp.Requests[0].ServerTools) != 1 || fp.Requests[0].ServerTools[0].Kind != llm.ServerToolKindOpenRouterWebSearch {
 		t.Fatalf("fake provider server tools = %+v", fp.Requests[0].ServerTools)
+	}
+}
+
+func TestHandlerStreamRetriesWithoutServerToolsOnRejection(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openrouter.json"), []byte(`{
+  "name": "openrouter",
+  "api_type": "openai",
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key": "sk-file",
+  "models": [{"name":"openai/gpt-5.5","context_window":1000000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	// First attempt fails with a provider error about the web_search tool; the
+	// proxy must retry once without server tools and stream the second attempt.
+	fp := llmtest.New("fake",
+		llmtest.Step{Err: &llm.APIError{StatusCode: http.StatusBadRequest, Message: "unsupported tool web_search"}},
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}}, Stop: llm.StopEndTurn},
+	)
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openrouter.json"}, DefaultContextWindow: 512000},
+		New:       func(opts factory.Options) (llm.Provider, error) { return fp, nil },
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "openrouter:openai/gpt-5.5",
+		Request: llm.Request{
+			Model:       "openrouter:openai/gpt-5.5",
+			ServerTools: []llm.ServerTool{{Name: llm.ServerToolWebSearch}},
+		},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	var sawText, sawError bool
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var env protocol.StreamEnvelope
+		if decErr := dec.Decode(&env); decErr != nil {
+			if decErr == io.EOF {
+				break
+			}
+			t.Fatalf("decode envelope: %v", decErr)
+		}
+		if env.Error != nil {
+			sawError = true
+		}
+		if env.Event != nil && env.Event.Kind == llm.EventTextDelta && env.Event.Text == "ok" {
+			sawText = true
+		}
+	}
+	if sawError {
+		t.Fatalf("stream surfaced an error envelope, want silent server-tool retry")
+	}
+	if !sawText {
+		t.Fatalf("stream missing post-retry text event")
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2 (initial + retry)", len(fp.Requests))
+	}
+	if len(fp.Requests[0].ServerTools) != 1 || fp.Requests[0].ServerTools[0].Kind != llm.ServerToolKindOpenRouterWebSearch {
+		t.Fatalf("first attempt server tools = %+v, want openrouter web_search", fp.Requests[0].ServerTools)
+	}
+	if len(fp.Requests[1].ServerTools) != 0 {
+		t.Fatalf("retry server tools = %+v, want none", fp.Requests[1].ServerTools)
+	}
+}
+
+func TestResolveServerToolsHonorsExplicitConfigOnUnknownProvider(t *testing.T) {
+	requested := []llm.ServerTool{{Name: llm.ServerToolWebSearch}}
+
+	// An unknown OpenAI-compatible endpoint that explicitly advertises web_search
+	// must still resolve to a wire shape (the OpenAI default) instead of being
+	// silently dropped.
+	explicit := resolvedTarget{
+		pc:    llm.ProviderConfig{Name: "acme", APIType: "openai", BaseURL: "https://api.acme.test/v1", ServerTools: []string{llm.ServerToolWebSearch}},
+		entry: llm.ModelEntry{Name: "m"},
+	}
+	if got := resolveServerToolsForTarget(explicit, requested); len(got) != 1 || got[0].Kind != llm.ServerToolKindOpenAIWebSearch {
+		t.Fatalf("explicit web_search on unknown provider = %+v, want openai fallback kind", got)
+	}
+
+	// The same provider without explicit config is not implicitly web-search-capable.
+	implicit := resolvedTarget{
+		pc:    llm.ProviderConfig{Name: "acme", APIType: "openai", BaseURL: "https://api.acme.test/v1"},
+		entry: llm.ModelEntry{Name: "m"},
+	}
+	if got := resolveServerToolsForTarget(implicit, requested); got != nil {
+		t.Fatalf("unknown provider without explicit config = %+v, want nil", got)
+	}
+}
+
+func TestServerToolRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "api 400 unsupported tool", err: &llm.APIError{StatusCode: 400, Message: "unsupported tool web_search"}, want: true},
+		{name: "api 422 invalid web_search", err: &llm.APIError{StatusCode: 422, Message: "invalid web_search parameter"}, want: true},
+		{name: "api 500 is not a rejection", err: &llm.APIError{StatusCode: 500, Message: "unsupported tool web_search"}, want: false},
+		{name: "api 400 unrelated", err: &llm.APIError{StatusCode: 400, Message: "context length exceeded"}, want: false},
+		{name: "non-api error never retries", err: errors.New("dial tcp: connection refused (tool invalid)"), want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := serverToolRejected(tc.err); got != tc.want {
+				t.Fatalf("serverToolRejected = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

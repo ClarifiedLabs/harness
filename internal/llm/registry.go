@@ -287,6 +287,35 @@ func NormalizeServerTools(tools []string) []string {
 	return out
 }
 
+// WebSearchServerToolKind reports the provider-specific server-tool kind to use
+// for hosted web search given a provider's name, API dialect, and base URL, or
+// "" when the provider is not known to offer hosted web search. It is the single
+// source of truth shared by the model proxy (catalog advertising and request-time
+// resolution) and harness-model-proxy setup so the two never drift.
+func WebSearchServerToolKind(name, apiType, baseURL string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	apiType = strings.ToLower(strings.TrimSpace(apiType))
+	base := strings.ToLower(strings.TrimSpace(baseURL))
+	switch {
+	case name == "openrouter" || strings.Contains(base, "openrouter.ai"):
+		return ServerToolKindOpenRouterWebSearch
+	case name == "anthropic" || apiType == "anthropic" || strings.Contains(base, "api.anthropic.com"):
+		return ServerToolKindAnthropicWebSearch
+	case name == "sakana" || strings.Contains(base, "api.sakana.ai"):
+		return ServerToolKindOpenAIWebSearch
+	case apiType == "responses" && (name == "openai" || strings.HasPrefix(name, "openai-") || strings.Contains(base, "api.openai.com") || strings.Contains(base, "chatgpt.com")):
+		return ServerToolKindOpenAIWebSearch
+	case name == "mimo" || strings.Contains(name, "xiaomi") || strings.Contains(base, "mimo.mi.com"):
+		return ServerToolKindMimoWebSearch
+	case name == "kimi" || name == "moonshot" || strings.Contains(name, "moonshot") || strings.Contains(base, "kimi"):
+		return ServerToolKindKimiWebSearch
+	case name == "zai" || name == "z-ai" || name == "z.ai" || strings.Contains(name, "zai") || strings.Contains(base, "z.ai") || strings.Contains(base, "bigmodel.cn"):
+		return ServerToolKindZAIWebSearch
+	default:
+		return ""
+	}
+}
+
 // SetDefaultContextWindow sets the fallback window used when a model has no
 // configured context window. Non-positive values reset to the built-in default.
 func (r *Registry) SetDefaultContextWindow(window int) {

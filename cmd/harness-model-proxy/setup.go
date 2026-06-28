@@ -399,6 +399,7 @@ func setupProviderFromModelsDev(provider modelsdev.Provider, apiKey string, auth
 			BaseURL:             setupProviderBaseURL(provider),
 			Managed:             true,
 			OmitMaxOutputTokens: true,
+			ServerTools:         setupProviderServerTools(openAICodexProviderID, setupProviderAPIType(provider), setupProviderBaseURL(provider)),
 			Auth:                setupProviderAuth(provider, authCfg),
 			Models:              entries,
 		}
@@ -413,7 +414,7 @@ func setupProviderFromModelsDev(provider modelsdev.Provider, apiKey string, auth
 			APIKey:            cfg.APIKey,
 			Managed:           true,
 			ResponsesStateful: &stateful,
-			ServerTools:       setupProviderServerTools(provider),
+			ServerTools:       setupProviderServerTools(cfg.Name, setupProviderAPIType(provider), setupProviderBaseURL(provider)),
 			APIKeyEnv:         cfg.APIKeyEnv,
 			Models:            entries,
 		}
@@ -425,36 +426,23 @@ func setupProviderFromModelsDev(provider modelsdev.Provider, apiKey string, auth
 		BaseURL:     cfg.BaseURL,
 		APIKey:      cfg.APIKey,
 		Managed:     true,
-		ServerTools: setupProviderServerTools(provider),
+		ServerTools: setupProviderServerTools(cfg.Name, cfg.APIType, cfg.BaseURL),
 		APIKeyEnv:   cfg.APIKeyEnv,
 		Auth:        authCfg,
 		Models:      entries,
 	}
 }
 
-func setupProviderServerTools(provider modelsdev.Provider) []string {
-	id := strings.ToLower(strings.TrimSpace(provider.ID))
-	name := strings.ToLower(strings.TrimSpace(provider.Name))
-	apiType := strings.ToLower(strings.TrimSpace(provider.APIType()))
-	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL()))
-	switch {
-	case id == "openai":
-		return []string{llm.ServerToolWebSearch}
-	case id == "anthropic" || apiType == "anthropic":
-		return []string{llm.ServerToolWebSearch}
-	case id == sakanaProviderID || strings.Contains(baseURL, "api.sakana.ai"):
-		return []string{llm.ServerToolWebSearch}
-	case id == "openrouter" || strings.Contains(baseURL, "openrouter.ai"):
-		return []string{llm.ServerToolWebSearch}
-	case id == "mimo" || strings.Contains(id, "xiaomi") || strings.Contains(name, "mimo") || strings.Contains(name, "xiaomi") || strings.Contains(baseURL, "mimo.mi.com"):
-		return []string{llm.ServerToolWebSearch}
-	case id == "kimi" || id == "moonshot" || strings.Contains(id, "moonshot") || strings.Contains(name, "kimi") || strings.Contains(name, "moonshot") || strings.Contains(baseURL, "kimi"):
-		return []string{llm.ServerToolWebSearch}
-	case id == "zai" || id == "z-ai" || id == "z.ai" || strings.Contains(id, "zai") || strings.Contains(name, "z.ai") || strings.Contains(name, "zai") || strings.Contains(baseURL, "z.ai") || strings.Contains(baseURL, "bigmodel.cn"):
-		return []string{llm.ServerToolWebSearch}
-	default:
+// setupProviderServerTools advertises hosted web search for the provider when
+// the persisted (name, apiType, baseURL) is one harness can resolve to a wire
+// shape. It delegates to llm.WebSearchServerToolKind — the same function the
+// model proxy uses at request time — so the catalog never advertises a tool the
+// proxy would later drop.
+func setupProviderServerTools(name, apiType, baseURL string) []string {
+	if llm.WebSearchServerToolKind(name, apiType, baseURL) == "" {
 		return nil
 	}
+	return []string{llm.ServerToolWebSearch}
 }
 
 func setupProviderAuth(provider modelsdev.Provider, existing *auth.Config) *auth.Config {

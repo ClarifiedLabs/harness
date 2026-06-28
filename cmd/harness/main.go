@@ -394,7 +394,7 @@ func run(env environment) int {
 	cfg.Provider = selection.Provider
 	cfg.Model = selection.Model
 	registryModel := selection.RegistryModel
-	serverTools := webSearchServerToolsForModel(modelRegistry, registryModel, cfg.WebSearch)
+	serverTools := webSearchServerToolsForModel(cfg.Provider, modelRegistry, registryModel, cfg.WebSearch)
 	reasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, reasoningModeForProvider(catalog, selection.Provider), interactiveSession, suppressReasoningOutput)
 	if err := validateReasoningConfig(modelRegistry, registryModel, reasoningModeForProvider(catalog, selection.Provider), reasoning); err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
@@ -673,7 +673,7 @@ func run(env environment) int {
 		snap.MaxOutputTokens = cfg.MaxOutputTokens
 		snap.System = system
 		snap.Reasoning = nextReasoning
-		snap.ServerTools = webSearchServerToolsForModel(modelRegistry, next.RegistryModel, cfg.WebSearch)
+		snap.ServerTools = webSearchServerToolsForModel(next.Provider, modelRegistry, next.RegistryModel, cfg.WebSearch)
 		snap.ResponsesStateful = responsesStatefulForProvider(cfg, catalog, next.Provider)
 		snap.Agent = a.Name
 		snap.ToolNames = reg.Names()
@@ -735,7 +735,7 @@ func run(env environment) int {
 		snap.ContextWindow = cfg.ContextWindow
 		snap.MaxOutputTokens = cfg.MaxOutputTokens
 		snap.Reasoning = nextReasoning
-		snap.ServerTools = webSearchServerToolsForModel(modelRegistry, next.RegistryModel, cfg.WebSearch)
+		snap.ServerTools = webSearchServerToolsForModel(next.Provider, modelRegistry, next.RegistryModel, cfg.WebSearch)
 		snap.ResponsesStateful = responsesStatefulForProvider(cfg, catalog, next.Provider)
 		delegateState.Set(snap)
 		reasoning = nextReasoning
@@ -1797,7 +1797,7 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 		}
 		providerName = next.Provider
 		model = next.Model
-		serverTools = webSearchServerToolsForModel(runtime.Registry, next.RegistryModel, cfg.WebSearch)
+		serverTools = webSearchServerToolsForModel(next.Provider, runtime.Registry, next.RegistryModel, cfg.WebSearch)
 		provider = proxyClient.Provider(next.Provider)
 		system = buildSystem(def.Prompt)
 	}
@@ -1988,7 +1988,7 @@ func responsesStatefulForProvider(cfg config.Config, catalog protocol.Catalog, p
 	return false
 }
 
-func webSearchServerToolsForModel(registry *llm.Registry, model, mode string) []llm.ServerTool {
+func webSearchServerToolsForModel(provider string, registry *llm.Registry, model, mode string) []llm.ServerTool {
 	if strings.ToLower(strings.TrimSpace(mode)) != "auto" || registry == nil {
 		return nil
 	}
@@ -1998,7 +1998,19 @@ func webSearchServerToolsForModel(registry *llm.Registry, model, mode string) []
 	}
 	for _, tool := range info.ServerTools {
 		if strings.EqualFold(strings.TrimSpace(tool), llm.ServerToolWebSearch) {
-			return []llm.ServerTool{{Name: llm.ServerToolWebSearch}}
+			// Best-effort tag of the provider-specific kind so the agent can tell a
+			// Kimi builtin web-search call (which the client must echo) from other
+			// providers' server-side search. provider is a "provider:model" target
+			// id, so resolve against its bare provider prefix. The model proxy
+			// re-resolves the kind authoritatively from the full provider config
+			// before the wire call, so a missing or imperfect tag here never affects
+			// the request.
+			name := provider
+			if before, _, ok := strings.Cut(provider, ":"); ok {
+				name = before
+			}
+			kind := llm.WebSearchServerToolKind(name, "", "")
+			return []llm.ServerTool{{Name: llm.ServerToolWebSearch, Kind: kind}}
 		}
 	}
 	return nil

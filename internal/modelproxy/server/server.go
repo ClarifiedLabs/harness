@@ -1306,6 +1306,13 @@ func resolveServerToolsForTarget(target resolvedTarget, requested []llm.ServerTo
 	}
 	kind := serverToolKindForProviderConfig(target.pc)
 	if kind == "" {
+		// The tool is supported (configured explicitly on the provider/model) but
+		// the endpoint isn't one harness recognizes by name. Fall back to a wire
+		// shape that matches the configured dialect so explicit config is honored
+		// instead of being silently dropped.
+		kind = defaultWebSearchKindForAPIType(target.pc.APIType)
+	}
+	if kind == "" {
 		return nil
 	}
 	seen := map[string]bool{}
@@ -1338,32 +1345,29 @@ func providerImplicitWebSearch(pc llm.ProviderConfig) bool {
 }
 
 func serverToolKindForProviderConfig(pc llm.ProviderConfig) string {
-	name := strings.ToLower(strings.TrimSpace(pc.Name))
-	apiType := strings.ToLower(strings.TrimSpace(pc.APIType))
-	base := strings.ToLower(strings.TrimSpace(pc.BaseURL))
-	switch {
-	case name == "openrouter" || strings.Contains(base, "openrouter.ai"):
-		return llm.ServerToolKindOpenRouterWebSearch
-	case name == "anthropic" || apiType == "anthropic" || strings.Contains(base, "api.anthropic.com"):
+	return llm.WebSearchServerToolKind(pc.Name, pc.APIType, pc.BaseURL)
+}
+
+// defaultWebSearchKindForAPIType picks a hosted web-search wire shape for a
+// provider harness doesn't recognize by name, based on its configured dialect.
+// Both the OpenAI Chat and Responses dialects emit the OpenAI `web_search` tool
+// for ServerToolKindOpenAIWebSearch, so it is the safe default for everything
+// except Anthropic.
+func defaultWebSearchKindForAPIType(apiType string) string {
+	if strings.EqualFold(strings.TrimSpace(apiType), "anthropic") {
 		return llm.ServerToolKindAnthropicWebSearch
-	case name == "sakana" || strings.Contains(base, "api.sakana.ai"):
-		return llm.ServerToolKindOpenAIWebSearch
-	case apiType == "responses" && (name == "openai" || strings.Contains(base, "api.openai.com")):
-		return llm.ServerToolKindOpenAIWebSearch
-	case name == "mimo" || strings.Contains(name, "xiaomi") || strings.Contains(base, "mimo.mi.com"):
-		return llm.ServerToolKindMimoWebSearch
-	case name == "kimi" || name == "moonshot" || strings.Contains(name, "moonshot") || strings.Contains(base, "kimi"):
-		return llm.ServerToolKindKimiWebSearch
-	case name == "zai" || name == "z-ai" || name == "z.ai" || strings.Contains(name, "zai") || strings.Contains(base, "z.ai") || strings.Contains(base, "bigmodel.cn"):
-		return llm.ServerToolKindZAIWebSearch
-	default:
-		return ""
 	}
+	return llm.ServerToolKindOpenAIWebSearch
 }
 
 func serverToolRejected(err error) bool {
+	// Only treat genuine provider API errors as server-tool rejections; a
+	// transport/network failure must surface, not silently retry without tools.
 	var apiErr *llm.APIError
-	if errors.As(err, &apiErr) && apiErr.StatusCode > 0 && apiErr.StatusCode != http.StatusBadRequest && apiErr.StatusCode != http.StatusUnprocessableEntity {
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode != 0 && apiErr.StatusCode != http.StatusBadRequest && apiErr.StatusCode != http.StatusUnprocessableEntity {
 		return false
 	}
 	text := strings.ToLower(err.Error())

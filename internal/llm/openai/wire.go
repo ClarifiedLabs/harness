@@ -27,7 +27,6 @@ type wireRequest struct {
 	Temperature     *float64       `json:"temperature,omitempty"`
 	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
 	Reasoning       *wireReasoning `json:"reasoning,omitempty"`
-	Thinking        *wireThinking  `json:"thinking,omitempty"`
 	ExtraBody       *wireExtraBody `json:"extra_body,omitempty"`
 	Stop            []string       `json:"stop,omitempty"`
 	PromptCacheKey  string         `json:"prompt_cache_key,omitempty"`
@@ -46,10 +45,6 @@ type wireReasoning struct {
 	Effort    string `json:"effort,omitempty"`
 	Enabled   *bool  `json:"enabled,omitempty"`
 	MaxTokens *int   `json:"max_tokens,omitempty"`
-}
-
-type wireThinking struct {
-	Type string `json:"type"`
 }
 
 type wireExtraBody struct {
@@ -251,7 +246,7 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, re
 		})
 	}
 	for _, t := range req.ServerTools {
-		if tool, ok := buildServerTool(t, &w); ok {
+		if tool, ok := buildServerTool(t); ok {
 			w.Tools = append(w.Tools, tool)
 		}
 	}
@@ -267,17 +262,15 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, re
 	return w
 }
 
-func buildServerTool(tool llm.ServerTool, req *wireRequest) (wireTool, bool) {
+func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
 	switch tool.Kind {
 	case llm.ServerToolKindOpenRouterWebSearch:
 		return wireTool{Type: "openrouter:web_search", Parameters: rawObjectOrNil(tool.Parameters)}, true
 	case llm.ServerToolKindMimoWebSearch:
 		maxKeyword := 3
 		forceSearch := false
-		req.Thinking = &wireThinking{Type: "disabled"}
 		return wireTool{Type: "web_search", MaxKeyword: &maxKeyword, ForceSearch: &forceSearch}, true
 	case llm.ServerToolKindKimiWebSearch:
-		req.Thinking = &wireThinking{Type: "disabled"}
 		return wireTool{Type: "builtin_function", Function: &wireToolDecl{Name: "$web_search"}}, true
 	case llm.ServerToolKindZAIWebSearch:
 		return wireTool{Type: "web_search", WebSearch: &wireZAIWebSearch{

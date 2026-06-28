@@ -1239,12 +1239,26 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, turnID int, 
 	return r
 }
 
+// kimiWebSearchToolName is Moonshot/Kimi's hosted builtin_function. Unlike other
+// providers' server-side web search, Kimi surfaces it as a tool call the client
+// must echo back to trigger the search, so the agent intercepts it (design §9).
+const kimiWebSearchToolName = "$web_search"
+
+// isKimiWebSearchCall reports whether call is the Kimi web-search builtin that
+// the client must echo. It requires the active web-search server tool to be the
+// Kimi kind so a stray $web_search call from another provider isn't echoed; when
+// the agent's neutral copy carries no resolved Kind (the model proxy fills it in
+// per provider and harness can't always tag it), it falls back to the web_search
+// feature name so Kimi targets still work.
 func (a *Agent) isKimiWebSearchCall(call llm.ToolCall) bool {
-	if call.Name != "$web_search" {
+	if call.Name != kimiWebSearchToolName {
 		return false
 	}
 	for _, tool := range a.serverTools {
-		if tool.Name == llm.ServerToolWebSearch {
+		if tool.Kind == llm.ServerToolKindKimiWebSearch {
+			return true
+		}
+		if tool.Kind == "" && tool.Name == llm.ServerToolWebSearch {
 			return true
 		}
 	}

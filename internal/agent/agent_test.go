@@ -1861,6 +1861,29 @@ func TestKimiWebSearchToolCallPassesThroughArguments(t *testing.T) {
 	}
 }
 
+func TestIsKimiWebSearchCall(t *testing.T) {
+	cases := []struct {
+		name        string
+		callName    string
+		serverTools []llm.ServerTool
+		want        bool
+	}{
+		{name: "kimi kind echoes", callName: "$web_search", serverTools: []llm.ServerTool{{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindKimiWebSearch}}, want: true},
+		{name: "untagged web_search falls back", callName: "$web_search", serverTools: []llm.ServerTool{{Name: llm.ServerToolWebSearch}}, want: true},
+		{name: "non-kimi kind is not echoed", callName: "$web_search", serverTools: []llm.ServerTool{{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindOpenAIWebSearch}}, want: false},
+		{name: "wrong call name", callName: "web_search", serverTools: []llm.ServerTool{{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindKimiWebSearch}}, want: false},
+		{name: "no server tools", callName: "$web_search", serverTools: nil, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAgent(llmtest.New("fake"), tools.Catalog(), Options{ServerTools: tc.serverTools})
+			if got := a.isKimiWebSearchCall(llm.ToolCall{ID: "c", Name: tc.callName}); got != tc.want {
+				t.Fatalf("isKimiWebSearchCall(%q) = %v, want %v", tc.callName, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRequestCarriesResolvedModel(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("hi")},

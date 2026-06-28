@@ -143,9 +143,6 @@ func TestBuildRequestServerTools(t *testing.T) {
 	if w.Tools[3].Type != "web_search" || w.Tools[3].WebSearch == nil || w.Tools[3].WebSearch.Enable != "True" || w.Tools[3].WebSearch.ContentSize != "medium" {
 		t.Fatalf("zai web search tool = %+v", w.Tools[3])
 	}
-	if w.Thinking == nil || w.Thinking.Type != "disabled" {
-		t.Fatalf("thinking = %+v, want disabled for compatible built-in web search", w.Thinking)
-	}
 	if w.ParallelTools == nil || !*w.ParallelTools {
 		t.Fatalf("parallel_tool_calls = %v, want true when server tools are present", w.ParallelTools)
 	}
