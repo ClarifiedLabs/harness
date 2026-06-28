@@ -449,7 +449,7 @@ Edge cases:
 | Streaming usage | final `response.usage` on terminal events | `"stream_options":{"include_usage":true}` (always set) | automatic: input tokens in `message_start`, output in `message_delta` |
 | Stop sequences | not sent | `stop` | `stop_sequences` |
 | Temperature | omitted when nil (never send a spurious 0) | same | same |
-| Reasoning controls | effort: `reasoning.effort`; summary: `reasoning.summary`; budget/toggle not sent | OpenAI: `reasoning_effort`; OpenRouter: `reasoning.effort`, `reasoning.max_tokens`, `reasoning.enabled`; Google: `reasoning_effort` for effort and `extra_body.google.thinking_config.thinking_budget` for budget/off | effort: `output_config.effort`; budget: `thinking={type:"enabled", budget_tokens}`; explicit reasoning-off sends `thinking={type:"disabled"}` |
+| Reasoning controls | harness sends `reasoning_profile` plus optional `reasoning.summary` to the model proxy; proxy maps profiles to provider controls | OpenAI: `reasoning_effort`; OpenRouter: `reasoning.effort`, `reasoning.max_tokens`, `reasoning.enabled`; Google: `reasoning_effort` for effort and `extra_body.google.thinking_config.thinking_budget` for budget/off | effort: `output_config.effort`; budget: `thinking={type:"enabled", budget_tokens}`; explicit reasoning-off sends `thinking={type:"disabled"}` |
 
 The same model-facing `ToolSchema.Parameters` bytes go into `parameters` vs
 `input_schema`. Harness strips nested JSON Schema `description` fields before
@@ -704,17 +704,17 @@ models that omit a flat catalog `Target.Price`. Configured models without
 context-window metadata use a
 conservative 256k default, configurable with `-default-context-window` and
 overridable for a run with `-context-window`. Model prices, context windows,
-output limits, and reasoning metadata are loaded from the model proxy catalog.
-Harness presents reasoning as the portable profile list `none`, `minimal`,
-`low`, `medium`, `high`, `xhigh`, and `max`. The CLI sends the selected profile
-to the model proxy, and the proxy maps it to the closest supported
+output limits, and reasoning support are loaded from the model proxy catalog.
+Harness presents reasoning as the portable profile list `default`, `none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The CLI sends the
+selected profile to the model proxy, and the proxy maps it to the closest supported
 provider/model control. For effort-based models, `minimal` is the lowest
 supported non-`none` value and `max` is the highest. For budget-token models,
 profiles map to percentages of the configured maximum budget: `minimal` 5%,
 `low` 25%, `medium` 50%, `high` 75%, `xhigh` 90%, and `max` 100%, clamped to
 the cataloged range. The proxy does not invent budget values when no maximum is
-known. Explicit concrete controls are still validated against provider/model
-support, effort values, and budget ranges.
+known. The public model catalog reports only whether reasoning profiles are
+supported; provider-specific options stay private to the proxy.
 Responses API reasoning summaries default off, can be set to `auto`, `concise`,
 `detailed`, or `none`, and are displayed only when explicitly enabled. Quiet mode
 (`-q`/`--quiet`) suppresses reasoning summary output unless `-reasoning-summary`
@@ -1843,12 +1843,9 @@ literal `$`.
 | `/model <id>` | switch subsequent turns to model `<id>`; a near-miss falls back to a unique prefix/substring match before erroring; interactive runs can optionally save it as the default |
 | `/model <provider>:<id>` | switch to `<id>` on a specific configured provider; interactive runs can optionally save it as the default |
 | `/reasoning` | list reasoning controls for the current model |
-| `/reasoning on`, `/reasoning off`, `/reasoning default` | set explicit reasoning toggle or return to provider defaults |
-| `/reasoning budget <n>` | set reasoning budget tokens for subsequent turns |
-| `/reasoning effort <level>` | switch reasoning effort for subsequent turns |
+| `/reasoning <profile>` | switch reasoning profile for subsequent turns |
 | `/reasoning summary <auto\|concise\|detailed\|none>` | switch Responses API reasoning summaries for subsequent turns |
-| `/effort` | list reasoning effort levels for the current model, marking the selected one |
-| `/effort <level>` | switch reasoning effort for subsequent turns |
+| `/effort [profile]` | alias for `/reasoning [profile]` |
 | `/agent` | list agents and descriptions, marking the current one and agents delegatable from it |
 | `/agent <name>` | switch the active agent |
 | `/mode`, `/mode <name>` | alias for `/agent` |
@@ -1894,9 +1891,7 @@ prefix wins, threshold `1 + len(cmd)/3`).
 -histsize <n>         max REPL history entries loaded into memory (default 1000, 0 disables)
 -default-context-window <n>
 -context-window <n>
--reasoning-effort <level>
--reasoning-enabled <bool>
--reasoning-budget-tokens <n>
+-reasoning <profile>
 -reasoning-summary <auto|concise|detailed|none>
 -responses-stateful   Responses previous_response_id continuation (default true)
 -image-detail <level>   default image detail: auto, low, high, or original

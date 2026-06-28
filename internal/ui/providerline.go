@@ -23,14 +23,8 @@ func providerLineReasoningLabel(reasoning llm.ReasoningConfig) string {
 		return "default"
 	}
 	var parts []string
-	if effort := strings.TrimSpace(reasoning.Effort); effort != "" {
-		parts = append(parts, "effort="+effort)
-	}
-	if reasoning.BudgetTokens != nil {
-		parts = append(parts, fmt.Sprintf("budget_tokens=%d", *reasoning.BudgetTokens))
-	}
-	if reasoning.Enabled != nil {
-		parts = append(parts, fmt.Sprintf("enabled=%t", *reasoning.Enabled))
+	if profile := strings.TrimSpace(reasoning.Profile); profile != "" {
+		parts = append(parts, "profile="+profile)
 	}
 	if summary := strings.TrimSpace(reasoning.Summary); summary != "" {
 		parts = append(parts, "summary="+summary)

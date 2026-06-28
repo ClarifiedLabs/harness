@@ -136,8 +136,8 @@ priced-only cost rollup. Use `-no-metrics` to disable the endpoint and
 `-metrics-listen` to move it; both also have config-file counterparts under a
 `metrics` object (`enabled`, `listen`).
 
-Use `harness --models` to list the model targets and portable reasoning
-profiles exposed by the configured proxy. Use `harness --agents` to list the
+Use `harness --models` to list the model targets and whether they support
+portable reasoning profiles. Use `harness --agents` to list the
 configured agents. Add `--format json` to `--models`, `--agents`, or
 `--check-model-proxy` when another program needs structured output. Use
 `harness --debug-request -p "..."` to dump the first provider-neutral model

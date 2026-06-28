@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -24,6 +23,7 @@ import (
 	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/plan"
+	"harness/internal/reasoningprofile"
 	"harness/internal/replprompt"
 	"harness/internal/session"
 	"harness/internal/skills"
@@ -229,8 +229,8 @@ const helpText = `commands:
   /edit [draft]    open $VISUAL/$EDITOR (or vi) for a multi-line prompt
   /save [file]     force save (optionally elsewhere)
   /model [target]  pick a configured model target, or switch directly
-  /reasoning [cmd] list or set reasoning controls
-  /effort [level]  list or set reasoning effort for the current model
+  /reasoning [profile] list or set the reasoning profile
+  /effort [profile]    alias for /reasoning
   /agent [name]    list agents, or switch to agent
   /mode [name]     alias for /agent
   /plan            alias for /agent plan
@@ -1803,7 +1803,7 @@ func (app *App) pickModel(readLine func(string) (string, error)) {
 		fmt.Fprintf(app.Errw, "[model selection failed: %v]\n", err)
 		return
 	}
-	reasoning, err := app.promptReasoningEffort(model, app.Reasoning, readLine)
+	reasoning, err := app.promptReasoningProfile(model, app.Reasoning, readLine)
 	if err != nil {
 		if errors.Is(err, ErrPickerCancelled) {
 			fmt.Fprintln(app.Errw, "[model selection cancelled]")
@@ -1946,32 +1946,7 @@ func (app *App) promptSaveDefaultModel(readLine func(string) (string, error)) {
 }
 
 func (app *App) effort(arg string) {
-	if arg == "" {
-		fmt.Fprintln(app.Errw, app.effortSummary())
-		return
-	}
-	reasoning := app.Reasoning
-	effort, ok := normalizeEffortInput(arg)
-	if !ok {
-		fmt.Fprintf(app.Errw, "[reasoning effort failed: invalid effort %q for model %q]\n", arg, app.currentRegistryModel())
-		return
-	}
-	reasoning.Effort = effort
-	if effort != "" {
-		reasoning.BudgetTokens = nil
-		if reasoning.Enabled != nil && !*reasoning.Enabled {
-			reasoning.Enabled = nil
-		}
-	}
-	if err := app.validateReasoningForModel(app.currentRegistryModel(), reasoning); err != nil {
-		fmt.Fprintf(app.Errw, "[reasoning effort failed: %v]\n", err)
-		return
-	}
-	if err := app.setReasoning(reasoning); err != nil {
-		fmt.Fprintf(app.Errw, "[reasoning effort failed: %v]\n", err)
-		return
-	}
-	fmt.Fprintf(app.Errw, "[reasoning effort: %s]\n", app.reasoningEffortLabel())
+	app.reasoningCommand(arg)
 }
 
 func (app *App) viCommand(arg string) {
@@ -2030,68 +2005,6 @@ func (app *App) reasoningCommand(arg string) {
 	}
 	cmd := strings.ToLower(fields[0])
 	switch cmd {
-	case "default", "provider-default":
-		if len(fields) != 1 {
-			fail("default takes no arguments")
-			return
-		}
-		set(llm.ReasoningConfig{})
-	case "on", "enable", "enabled":
-		if len(fields) != 1 {
-			fail("%s takes no arguments", fields[0])
-			return
-		}
-		enabled := true
-		set(llm.ReasoningConfig{Enabled: &enabled})
-	case "off", "disable", "disabled":
-		if len(fields) != 1 {
-			fail("%s takes no arguments", fields[0])
-			return
-		}
-		enabled := false
-		set(llm.ReasoningConfig{Enabled: &enabled})
-	case "budget", "budget_tokens":
-		if len(fields) != 2 {
-			fail("budget requires a token count or default")
-			return
-		}
-		reasoning := app.Reasoning
-		value := strings.ToLower(fields[1])
-		if value == "default" || value == "provider-default" {
-			reasoning.BudgetTokens = nil
-			set(reasoning)
-			return
-		}
-		n, err := strconv.Atoi(value)
-		if err != nil || n < 0 {
-			fail("budget requires a non-negative integer")
-			return
-		}
-		reasoning.Effort = ""
-		reasoning.BudgetTokens = &n
-		if reasoning.Enabled != nil && !*reasoning.Enabled {
-			reasoning.Enabled = nil
-		}
-		set(reasoning)
-	case "effort":
-		if len(fields) != 2 {
-			fail("effort requires a level or default")
-			return
-		}
-		reasoning := app.Reasoning
-		effort, ok := normalizeEffortInput(fields[1])
-		if !ok {
-			fail("invalid effort %q for model %q", fields[1], app.currentRegistryModel())
-			return
-		}
-		reasoning.Effort = effort
-		if effort != "" {
-			reasoning.BudgetTokens = nil
-			if reasoning.Enabled != nil && !*reasoning.Enabled {
-				reasoning.Enabled = nil
-			}
-		}
-		set(reasoning)
 	case "summary":
 		if len(fields) != 2 {
 			fail("summary requires auto, concise, detailed, or none")
@@ -2104,12 +2017,20 @@ func (app *App) reasoningCommand(arg string) {
 		}
 		reasoning := app.Reasoning
 		reasoning.Summary = summary
-		if summary != "" && reasoning.Enabled != nil && !*reasoning.Enabled {
-			reasoning.Enabled = nil
-		}
 		set(reasoning)
 	default:
-		fail("unknown subcommand %q", fields[0])
+		if len(fields) != 1 {
+			fail("reasoning profile takes one value")
+			return
+		}
+		profile, ok := reasoningprofile.Normalize(fields[0])
+		if !ok {
+			fail("invalid profile %q for model %q (supported: %s)", fields[0], app.currentRegistryModel(), reasoningprofile.ChoicesLabel())
+			return
+		}
+		reasoning := app.Reasoning
+		reasoning.Profile = profile
+		set(reasoning)
 	}
 }
 
@@ -2126,55 +2047,6 @@ func (app *App) setReasoning(reasoning llm.ReasoningConfig) error {
 	return nil
 }
 
-func (app *App) effortSummary() string {
-	model := app.currentRegistryModel()
-	var b strings.Builder
-	fmt.Fprintf(&b, "current reasoning: %s\n", app.reasoningLabel())
-	fmt.Fprintf(&b, "current reasoning effort: %s\n", app.reasoningEffortLabel())
-	info, ok := app.reasoningInfoForModel(model)
-	if !ok {
-		fmt.Fprintf(&b, "available efforts for %s: unknown", model)
-		return b.String()
-	}
-	if !info.Supported {
-		fmt.Fprintf(&b, "available efforts for %s: none (model does not support reasoning)", model)
-		return b.String()
-	}
-	values, catalogDefined := effortMenu(info)
-	if len(values) == 0 {
-		fmt.Fprintf(&b, "available efforts for %s: none (model takes other reasoning controls, not effort)", model)
-		return b.String()
-	}
-	fmt.Fprintf(&b, "available efforts for %s:", model)
-	app.writeEffortRows(&b, values)
-	if !catalogDefined {
-		b.WriteString("\n  (suggested defaults; this model also accepts a custom effort)")
-	}
-	return b.String()
-}
-
-// defaultEffortLevels is offered when a model supports reasoning but the catalog
-// enumerates no fixed effort values, so the user still gets a menu instead of a
-// dead end. Free-text effort remains accepted for such models (r61).
-var defaultEffortLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
-
-// effortMenu returns the effort levels to present for a reasoning-capable model:
-// the catalog's values when it enumerates them, otherwise the suggested defaults
-// when the model accepts a free-text effort (provider-defined: supported with no
-// enumerated options). A model with other options but no effort option (e.g.
-// toggle-only) does not take effort, so an empty list is returned. The bool is
-// true only when the values are catalog-defined. Callers must gate on
-// info.Supported and handle an empty result.
-func effortMenu(info *llm.ReasoningInfo) (values []string, catalogDefined bool) {
-	if v, ok := info.EffortValues(); ok && len(v) > 0 {
-		return v, true
-	}
-	if len(info.Options) == 0 {
-		return defaultEffortLevels, false
-	}
-	return nil, false
-}
-
 func (app *App) reasoningSummary() string {
 	model := app.currentRegistryModel()
 	var b strings.Builder
@@ -2189,62 +2061,23 @@ func (app *App) reasoningSummary() string {
 		return b.String()
 	}
 	fmt.Fprintf(&b, "available controls for %s:", model)
-	values, catalogDefined := effortMenu(info)
-	switch {
-	case catalogDefined:
-		fmt.Fprintf(&b, "\n  effort: %s", strings.Join(values, ", "))
-	case len(values) > 0:
-		fmt.Fprintf(&b, "\n  effort: %s (suggested; custom allowed)", strings.Join(values, ", "))
-	default:
-		b.WriteString("\n  effort: unavailable")
-	}
-	if min, max, ok := info.BudgetTokenRange(); ok {
-		fmt.Fprintf(&b, "\n  budget_tokens: %s", reasoningBudgetRangeLabel(min, max))
-	} else if len(info.Options) == 0 {
-		b.WriteString("\n  budget_tokens: provider-defined")
-	} else {
-		b.WriteString("\n  budget_tokens: unavailable")
-	}
-	if info.SupportsToggle() {
-		b.WriteString("\n  enabled: yes")
-	} else {
-		b.WriteString("\n  enabled: unavailable")
-	}
+	fmt.Fprintf(&b, "\n  profile: %s", strings.Join(reasoningprofile.Choices(), ", "))
 	b.WriteString("\n  summary: auto, concise, detailed, none")
 	return b.String()
 }
 
-func (app *App) writeEffortRows(b *strings.Builder, values []string) {
-	current := strings.ToLower(strings.TrimSpace(app.Reasoning.Effort))
-	if current == "" {
-		b.WriteString("\n  provider default (current)")
-	} else {
-		b.WriteString("\n  provider default")
-	}
-	for _, value := range values {
-		fmt.Fprintf(b, "\n  %s", value)
-		if strings.EqualFold(value, current) {
-			b.WriteString(" (current)")
-		}
-	}
-}
-
-func (app *App) promptReasoningEffort(model string, reasoning llm.ReasoningConfig, readLine func(string) (string, error)) (llm.ReasoningConfig, error) {
+func (app *App) promptReasoningProfile(model string, reasoning llm.ReasoningConfig, readLine func(string) (string, error)) (llm.ReasoningConfig, error) {
 	info, ok := app.reasoningInfoForModel(model)
 	if !ok || !info.Supported {
 		return reasoning, nil
 	}
-	// Offer the catalog's effort values, or a default menu when the catalog
-	// lists none for a provider-defined model (r61). A model that takes other
-	// controls but not effort yields no values: skip the prompt as before.
-	values, _ := effortMenu(info)
-	if len(values) == 0 {
-		return reasoning, nil
+	current := strings.TrimSpace(reasoning.Profile)
+	if normalized, ok := reasoningprofile.Normalize(current); ok {
+		current = normalized
 	}
-	current := strings.TrimSpace(reasoning.Effort)
-	currentValid := current == "" || info.SupportsEffort(current)
+	_, currentValid := reasoningprofile.Normalize(reasoning.Profile)
 	for {
-		prompt := fmt.Sprintf("Reasoning effort (default/%s; current: %s): ", strings.Join(values, "/"), effortPromptCurrent(current, currentValid))
+		prompt := fmt.Sprintf("Reasoning profile (%s; current: %s): ", reasoningprofile.ChoicesLabel(), reasoningProfilePromptCurrent(current, currentValid))
 		input, err := readLine(prompt)
 		if err != nil {
 			return reasoning, err
@@ -2254,26 +2087,30 @@ func (app *App) promptReasoningEffort(model string, reasoning llm.ReasoningConfi
 			if currentValid {
 				return reasoning, nil
 			}
-			reasoning.Effort = ""
+			reasoning.Profile = ""
 			return reasoning, nil
 		}
 		if strings.EqualFold(input, "q") {
 			return reasoning, ErrPickerCancelled
 		}
-		effort, ok := normalizeEffortInput(input)
-		if !ok || (effort != "" && !info.SupportsEffort(effort)) {
-			fmt.Fprintf(app.Errw, "Invalid reasoning effort %q (supported: default, %s)\n", input, strings.Join(values, ", "))
+		profile, ok := reasoningprofile.Normalize(input)
+		if !ok {
+			fmt.Fprintf(app.Errw, "Invalid reasoning profile %q (supported: %s)\n", input, reasoningprofile.ChoicesLabel())
 			continue
 		}
-		reasoning.Effort = effort
-		if effort != "" {
-			reasoning.BudgetTokens = nil
-			if reasoning.Enabled != nil && !*reasoning.Enabled {
-				reasoning.Enabled = nil
-			}
-		}
+		reasoning.Profile = profile
 		return reasoning, nil
 	}
+}
+
+func reasoningProfilePromptCurrent(current string, valid bool) string {
+	if current == "" {
+		return "provider default"
+	}
+	if valid {
+		return current
+	}
+	return current + " (not valid for this model; Enter uses provider default)"
 }
 
 func PromptSaveDefaultModel(readLine func(string) (string, error), w io.Writer, provider, model string) (bool, error) {
@@ -2302,28 +2139,6 @@ func modelDisplayName(provider, model string) string {
 	return provider + ":" + model
 }
 
-func effortPromptCurrent(current string, valid bool) string {
-	if strings.TrimSpace(current) == "" {
-		return "provider default"
-	}
-	if valid {
-		return current
-	}
-	return current + " (not valid for this model; Enter uses provider default)"
-}
-
-func normalizeEffortInput(input string) (string, bool) {
-	effort := strings.ToLower(strings.TrimSpace(input))
-	switch effort {
-	case "":
-		return "", false
-	case "default", "provider-default":
-		return "", true
-	default:
-		return effort, true
-	}
-}
-
 func normalizeReasoningSummaryInput(input string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(input)) {
 	case "", "default", "provider-default", "none", "off", "false", "disabled", "disable":
@@ -2346,73 +2161,23 @@ func reasoningSummaryDisplayEnabled(summary string) bool {
 	}
 }
 
-func (app *App) validateEffortForModel(model, effort string) error {
-	if effort == "" {
-		return nil
-	}
-	info, ok := app.reasoningInfoForModel(model)
-	if !ok {
-		return nil
-	}
-	if info.SupportsEffort(effort) {
-		return nil
-	}
-	if !info.Supported {
-		return fmt.Errorf("model %q does not support reasoning effort", model)
-	}
-	if values, ok := info.EffortValues(); ok && len(values) > 0 {
-		return fmt.Errorf("model %q does not support reasoning effort %q (supported: %s)", model, effort, strings.Join(values, ", "))
-	}
-	return fmt.Errorf("model %q does not support reasoning effort", model)
-}
-
 func (app *App) validateReasoningForModel(model string, reasoning llm.ReasoningConfig) error {
-	reasoning.Effort = strings.ToLower(strings.TrimSpace(reasoning.Effort))
+	reasoning.Profile = strings.ToLower(strings.TrimSpace(reasoning.Profile))
 	reasoning.Summary = strings.ToLower(strings.TrimSpace(reasoning.Summary))
 	if reasoning.Empty() {
 		return nil
 	}
-	if reasoning.Effort != "" && reasoning.BudgetTokens != nil {
-		return fmt.Errorf("reasoning effort and reasoning_budget_tokens cannot both be set")
-	}
-	if reasoning.Enabled != nil && !*reasoning.Enabled && (reasoning.Effort != "" || reasoning.BudgetTokens != nil || reasoning.Summary != "") {
-		return fmt.Errorf("reasoning_enabled=false cannot be combined with reasoning effort, reasoning_budget_tokens, or reasoning_summary")
-	}
-	if reasoning.BudgetTokens != nil && *reasoning.BudgetTokens < 0 {
-		return fmt.Errorf("reasoning_budget_tokens must be non-negative")
+	if profile, ok := reasoningprofile.Normalize(reasoning.Profile); ok {
+		reasoning.Profile = profile
+	} else {
+		return fmt.Errorf("invalid reasoning profile %q (want %s)", reasoning.Profile, reasoningprofile.ChoicesLabel())
 	}
 	info, ok := app.reasoningInfoForModel(model)
 	if !ok {
 		return nil
 	}
 	if !info.Supported {
-		if reasoning.Effort != "" {
-			return fmt.Errorf("model %q does not support reasoning effort", model)
-		}
-		if reasoning.BudgetTokens != nil {
-			return fmt.Errorf("model %q does not support reasoning_budget_tokens", model)
-		}
-		if reasoning.Summary != "" {
-			return fmt.Errorf("model %q does not support reasoning_summary", model)
-		}
-		toggleOnly := reasoning.Enabled != nil && reasoning.BudgetTokens == nil && reasoning.Summary == ""
-		if toggleOnly {
-			return fmt.Errorf("model %q does not support reasoning_enabled", model)
-		}
 		return fmt.Errorf("model %q does not support reasoning controls", model)
-	}
-	if reasoning.Effort != "" {
-		return app.validateEffortForModel(model, reasoning.Effort)
-	}
-	if reasoning.BudgetTokens != nil && !info.SupportsBudgetTokens(*reasoning.BudgetTokens) {
-		if min, max, ok := info.BudgetTokenRange(); ok {
-			return fmt.Errorf("model %q does not support reasoning_budget_tokens=%d (supported: %s)", model, *reasoning.BudgetTokens, reasoningBudgetRangeLabel(min, max))
-		}
-		return fmt.Errorf("model %q does not support reasoning_budget_tokens", model)
-	}
-	toggleOnly := reasoning.Enabled != nil && reasoning.BudgetTokens == nil && reasoning.Summary == ""
-	if toggleOnly && !info.SupportsToggle() {
-		return fmt.Errorf("model %q does not support reasoning_enabled", model)
 	}
 	return nil
 }
@@ -2470,44 +2235,18 @@ func (app *App) currentRegistryModel() string {
 	return "unknown"
 }
 
-func (app *App) reasoningEffortLabel() string {
-	if strings.TrimSpace(app.Reasoning.Effort) == "" {
-		return "provider default"
-	}
-	return app.Reasoning.Effort
-}
-
 func (app *App) reasoningLabel() string {
 	if app.Reasoning.Empty() {
 		return "provider default"
 	}
 	var parts []string
-	if effort := strings.TrimSpace(app.Reasoning.Effort); effort != "" {
-		parts = append(parts, "effort="+effort)
-	}
-	if app.Reasoning.BudgetTokens != nil {
-		parts = append(parts, fmt.Sprintf("budget_tokens=%d", *app.Reasoning.BudgetTokens))
-	}
-	if app.Reasoning.Enabled != nil {
-		parts = append(parts, fmt.Sprintf("enabled=%t", *app.Reasoning.Enabled))
+	if profile := strings.TrimSpace(app.Reasoning.Profile); profile != "" {
+		parts = append(parts, "profile="+profile)
 	}
 	if summary := strings.TrimSpace(app.Reasoning.Summary); summary != "" {
 		parts = append(parts, "summary="+summary)
 	}
 	return strings.Join(parts, ",")
-}
-
-func reasoningBudgetRangeLabel(min, max *int) string {
-	switch {
-	case min != nil && max != nil:
-		return fmt.Sprintf("%d..%d", *min, *max)
-	case min != nil:
-		return fmt.Sprintf(">=%d", *min)
-	case max != nil:
-		return fmt.Sprintf("<=%d", *max)
-	default:
-		return "provider-defined"
-	}
 }
 
 // agentSummary renders the current agent plus available agents and descriptions,

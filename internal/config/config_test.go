@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -21,23 +20,6 @@ func noEnv(string) string { return "" }
 // envFrom builds a getenv closure backed by a map.
 func envFrom(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
-}
-
-func boolPtrLabel(v *bool) string {
-	if v == nil {
-		return "nil"
-	}
-	if *v {
-		return "true"
-	}
-	return "false"
-}
-
-func intPtrLabel(v *int) string {
-	if v == nil {
-		return "nil"
-	}
-	return strconv.Itoa(*v)
 }
 
 // writeConfig writes a config file in a temp dir and returns its path.
@@ -197,29 +179,27 @@ func TestExplicitProviderIsPreserved(t *testing.T) {
 // HARNESS_* env mapping covers the user-facing flags.
 func TestHarnessEnvMapping(t *testing.T) {
 	env := envFrom(map[string]string{
-		"HARNESS_MODEL":                   "env-model",
-		"HARNESS_MODEL_PROXY_URL":         "http://proxy.example",
-		"HARNESS_MAX_TURNS":               "12",
-		"HARNESS_DEFAULT_CONTEXT_WINDOW":  "512000",
-		"HARNESS_CONTEXT_WINDOW":          "256000",
-		"HARNESS_REASONING_EFFORT":        "HIGH",
-		"HARNESS_REASONING_ENABLED":       "true",
-		"HARNESS_REASONING_BUDGET_TOKENS": "2048",
-		"HARNESS_REASONING_SUMMARY":       "AUTO",
-		"HARNESS_RESPONSES_STATEFUL":      "true",
-		"HARNESS_SEARCH_TOOLS":            "both",
-		"HARNESS_TOOL_RESULT_MAX_BYTES":   "32768",
-		"HARNESS_TOOL_RESULT_MAX_LINES":   "500",
-		"HARNESS_SYSTEM_PROMPT":           "env system prompt",
-		"HARNESS_NO_ENV":                  "true",
-		"HARNESS_NO_COLOR":                "true",
-		"HARNESS_TIMESTAMPS":              "full",
-		"HARNESS_VERBOSE":                 "true",
-		"HARNESS_TOOL_STREAM":             "false",
-		"HARNESS_SHOW_DIFFS":              "true",
-		"HARNESS_REPL_PROMPT":             "env> ",
-		"HARNESS_REPL_EDIT_MODE":          "vi",
-		"LOG_LEVEL":                       "WARN",
+		"HARNESS_MODEL":                  "env-model",
+		"HARNESS_MODEL_PROXY_URL":        "http://proxy.example",
+		"HARNESS_MAX_TURNS":              "12",
+		"HARNESS_DEFAULT_CONTEXT_WINDOW": "512000",
+		"HARNESS_CONTEXT_WINDOW":         "256000",
+		"HARNESS_REASONING":              "HIGH",
+		"HARNESS_REASONING_SUMMARY":      "AUTO",
+		"HARNESS_RESPONSES_STATEFUL":     "true",
+		"HARNESS_SEARCH_TOOLS":           "both",
+		"HARNESS_TOOL_RESULT_MAX_BYTES":  "32768",
+		"HARNESS_TOOL_RESULT_MAX_LINES":  "500",
+		"HARNESS_SYSTEM_PROMPT":          "env system prompt",
+		"HARNESS_NO_ENV":                 "true",
+		"HARNESS_NO_COLOR":               "true",
+		"HARNESS_TIMESTAMPS":             "full",
+		"HARNESS_VERBOSE":                "true",
+		"HARNESS_TOOL_STREAM":            "false",
+		"HARNESS_SHOW_DIFFS":             "true",
+		"HARNESS_REPL_PROMPT":            "env> ",
+		"HARNESS_REPL_EDIT_MODE":         "vi",
+		"LOG_LEVEL":                      "WARN",
 	})
 	c, err := Load(nil, env, "")
 	if err != nil {
@@ -240,14 +220,8 @@ func TestHarnessEnvMapping(t *testing.T) {
 	if c.ContextWindow != 256000 {
 		t.Fatalf("context-window %d, want 256000", c.ContextWindow)
 	}
-	if c.ReasoningEffort != "high" {
-		t.Fatalf("reasoning effort %q, want high", c.ReasoningEffort)
-	}
-	if c.ReasoningEnabled == nil || !*c.ReasoningEnabled {
-		t.Fatalf("reasoning enabled = %v, want true", c.ReasoningEnabled)
-	}
-	if c.ReasoningBudgetTokens == nil || *c.ReasoningBudgetTokens != 2048 {
-		t.Fatalf("reasoning budget tokens = %v, want 2048", c.ReasoningBudgetTokens)
+	if c.Reasoning != "high" {
+		t.Fatalf("reasoning %q, want high", c.Reasoning)
 	}
 	if c.ReasoningSummary != "auto" {
 		t.Fatalf("reasoning summary = %q, want auto", c.ReasoningSummary)
@@ -565,42 +539,16 @@ func TestAgentReasoningCarriedFromConfig(t *testing.T) {
 	}
 }
 
-func TestReasoningEffortPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
+func TestReasoningPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
 	checkPrecedence(t, precedenceCase[string]{
-		file:     `{"reasoning_effort":"low"}`,
-		env:      map[string]string{"HARNESS_REASONING_EFFORT": "medium"},
+		file:     `{"reasoning":"low"}`,
+		env:      map[string]string{"HARNESS_REASONING": "medium"},
 		baseArgs: []string{"-model", "gpt-5.5"},
-		flagArgs: []string{"-reasoning-effort", "HIGH"},
-		got:      func(c Config) string { return c.ReasoningEffort },
+		flagArgs: []string{"-reasoning", "HIGH"},
+		got:      func(c Config) string { return c.Reasoning },
 		wantFlag: "high",
 		wantEnv:  "medium",
 		wantFile: "low",
-	})
-}
-
-func TestReasoningEnabledPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
-	checkPrecedence(t, precedenceCase[string]{
-		file:     `{"reasoning_enabled":false}`,
-		env:      map[string]string{"HARNESS_REASONING_ENABLED": "true"},
-		baseArgs: []string{"-model", "gpt-5.5"},
-		flagArgs: []string{"-reasoning-enabled=false"},
-		got:      func(c Config) string { return boolPtrLabel(c.ReasoningEnabled) },
-		wantFlag: "false",
-		wantEnv:  "true",
-		wantFile: "false",
-	})
-}
-
-func TestReasoningBudgetTokensPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
-	checkPrecedence(t, precedenceCase[string]{
-		file:     `{"reasoning_budget_tokens":1024}`,
-		env:      map[string]string{"HARNESS_REASONING_BUDGET_TOKENS": "2048"},
-		baseArgs: []string{"-model", "gpt-5.5"},
-		flagArgs: []string{"-reasoning-budget-tokens", "4096"},
-		got:      func(c Config) string { return intPtrLabel(c.ReasoningBudgetTokens) },
-		wantFlag: "4096",
-		wantEnv:  "2048",
-		wantFile: "1024",
 	})
 }
 
@@ -638,6 +586,13 @@ func TestBadReasoningSummaryValueIsUsageError(t *testing.T) {
 	_, err := Load([]string{"-reasoning-summary", "verbose"}, noEnv, "")
 	if err == nil {
 		t.Fatalf("expected usage error for invalid -reasoning-summary")
+	}
+}
+
+func TestBadReasoningProfileValueIsUsageError(t *testing.T) {
+	_, err := Load([]string{"-reasoning", "ultra"}, noEnv, "")
+	if err == nil {
+		t.Fatalf("expected usage error for invalid -reasoning")
 	}
 }
 
@@ -1004,7 +959,7 @@ func TestBadFormatValueIsUsageError(t *testing.T) {
 var helpFlags = []string{
 	"-p", "-i", "-initial-prompt", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 	"-no-env", "-resume", "-session", "-max-turns", "-default-context-window", "-context-window",
-	"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-responses-stateful", "-image-detail", "-image", "-agent", "-search-tools", "-web-search", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-format", "-show-config",
+	"-reasoning", "-reasoning-summary", "-responses-stateful", "-image-detail", "-image", "-agent", "-search-tools", "-web-search", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-format", "-show-config",
 	"-agents", "-models", "-check-model-proxy", "-repl-edit-mode", "-hooks",
 }
 
@@ -1041,7 +996,7 @@ func TestModelColonWithoutProviderQualifierStaysModel(t *testing.T) {
 
 func TestSaveSelectedModelCreatesConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.json")
-	if err := SaveSelectedModel(path, "openai", "gpt-5.5", "HIGH", nil, nil); err != nil {
+	if err := SaveSelectedModel(path, "openai", "gpt-5.5", "HIGH"); err != nil {
 		t.Fatalf("SaveSelectedModel: %v", err)
 	}
 	c, err := Load(nil, noEnv, path)
@@ -1051,39 +1006,14 @@ func TestSaveSelectedModelCreatesConfig(t *testing.T) {
 	if c.Provider != "openai" || c.Model != "gpt-5.5" {
 		t.Fatalf("provider/model = %q/%q, want openai/gpt-5.5", c.Provider, c.Model)
 	}
-	if c.ReasoningEffort != "high" {
-		t.Fatalf("reasoning effort = %q, want high", c.ReasoningEffort)
-	}
-	if c.ReasoningEnabled != nil {
-		t.Fatalf("reasoning enabled = %v, want nil", c.ReasoningEnabled)
-	}
-	if c.ReasoningBudgetTokens != nil {
-		t.Fatalf("reasoning budget tokens = %v, want nil", c.ReasoningBudgetTokens)
-	}
-}
-
-func TestSaveSelectedModelWritesReasoningControls(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	enabled := true
-	budget := 2048
-	if err := SaveSelectedModel(path, "anthropic", "claude-opus-4-8", "", &enabled, &budget); err != nil {
-		t.Fatalf("SaveSelectedModel: %v", err)
-	}
-	c, err := Load(nil, noEnv, path)
-	if err != nil {
-		t.Fatalf("Load saved config: %v", err)
-	}
-	if c.ReasoningEnabled == nil || !*c.ReasoningEnabled {
-		t.Fatalf("reasoning enabled = %v, want true", c.ReasoningEnabled)
-	}
-	if c.ReasoningBudgetTokens == nil || *c.ReasoningBudgetTokens != 2048 {
-		t.Fatalf("reasoning budget tokens = %v, want 2048", c.ReasoningBudgetTokens)
+	if c.Reasoning != "high" {
+		t.Fatalf("reasoning = %q, want high", c.Reasoning)
 	}
 }
 
 func TestSaveSelectedModelPreservesOtherConfigKeys(t *testing.T) {
 	path := writeConfig(t, `{"agent":"plan","max_turns":7,"provider":"old","model":"old-model","reasoning_effort":"max","reasoning_enabled":true,"reasoning_budget_tokens":2048}`)
-	if err := SaveSelectedModel(path, "anthropic", "claude-opus-4-8", "", nil, nil); err != nil {
+	if err := SaveSelectedModel(path, "anthropic", "claude-opus-4-8", ""); err != nil {
 		t.Fatalf("SaveSelectedModel: %v", err)
 	}
 	c, err := Load(nil, noEnv, path)
@@ -1096,14 +1026,15 @@ func TestSaveSelectedModelPreservesOtherConfigKeys(t *testing.T) {
 	if c.Agent != "plan" || c.MaxTurns != 7 {
 		t.Fatalf("preserved agent/max_turns = %q/%d, want plan/7", c.Agent, c.MaxTurns)
 	}
-	if c.ReasoningEffort != "" {
-		t.Fatalf("reasoning effort = %q, want empty default", c.ReasoningEffort)
+	if c.Reasoning != "" {
+		t.Fatalf("reasoning = %q, want empty default", c.Reasoning)
 	}
-	if c.ReasoningEnabled != nil {
-		t.Fatalf("reasoning enabled = %v, want nil", c.ReasoningEnabled)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
 	}
-	if c.ReasoningBudgetTokens != nil {
-		t.Fatalf("reasoning budget tokens = %v, want nil", c.ReasoningBudgetTokens)
+	if strings.Contains(string(data), "reasoning_effort") || strings.Contains(string(data), "reasoning_enabled") || strings.Contains(string(data), "reasoning_budget_tokens") || strings.Contains(string(data), `"reasoning"`) {
+		t.Fatalf("saved config should remove reasoning keys:\n%s", data)
 	}
 }
 

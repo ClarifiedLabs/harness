@@ -25,10 +25,9 @@ Use `harness --check-model-proxy` to verify that the configured proxy is
 reachable. It sends `GET /v1/models`, prints a short success line on stdout, and
 exits before creating a session or starting the REPL.
 
-Use `harness --models` to print the targets and portable reasoning profiles
-exposed by the configured proxy. Use `harness --agents` to print the resolved
-built-in and config-defined agents. Both commands exit before creating a
-session.
+Use `harness --models` to print the targets and whether they support portable
+reasoning profiles. Use `harness --agents` to print the resolved built-in and
+config-defined agents. Both commands exit before creating a session.
 
 `--models --format json` also shows each target's `server_tools` list. When a
 target advertises `web_search`, `-web-search auto` lets harness declare the
@@ -111,9 +110,7 @@ interrupted.
                     `[stopped: turn cost budget $X reached]` notice. Complements -max-turn-tokens.
 -default-context-window <n>   fallback window for configured models without context metadata (default 256000)
 -context-window <n>   override the model's context window (tokens)
--reasoning-effort <level>   reasoning/thinking effort when supported
--reasoning-enabled <bool>    explicitly enable or disable reasoning when supported
--reasoning-budget-tokens <n> reasoning/thinking budget tokens when supported
+-reasoning <profile> reasoning profile: default, none, minimal, low, medium, high, xhigh, or max
 -reasoning-summary <mode> reasoning summary for Responses API: auto, concise, detailed, or none
 -responses-stateful   use Responses API previous_response_id continuation when supported (default true)
 -image-detail <level>   default image detail: auto, low, high, or original
@@ -239,15 +236,12 @@ Harness automatically adds static AGENTS instructions from
 `~/.agents/AGENTS.md`, then from `AGENTS.md` in the current working directory.
 Missing files are ignored; unreadable existing files fail startup.
 
-Reasoning controls are opt-in: `reasoning_effort` /
-`HARNESS_REASONING_EFFORT` / `-reasoning-effort`, `reasoning_enabled` /
-`HARNESS_REASONING_ENABLED` / `-reasoning-enabled`, and
-`reasoning_budget_tokens` / `HARNESS_REASONING_BUDGET_TOKENS` /
-`-reasoning-budget-tokens`. The CLI treats effort values as portable profiles:
-`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The model proxy
-maps those profiles to the closest provider/model-specific effort value or, for
-budget-token models, to a percentage of the supported maximum budget. Responses
-API reasoning summaries are controlled by `reasoning_summary` /
+Reasoning selection is opt-in via `reasoning` / `HARNESS_REASONING` /
+`-reasoning`. Accepted profiles are `default`, `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, and `max`. The model proxy maps those profiles to the
+closest provider/model-specific effort value or, for budget-token models, to a
+percentage of the supported maximum budget. Responses API reasoning summaries
+are controlled separately by `reasoning_summary` /
 `HARNESS_REASONING_SUMMARY` / `-reasoning-summary`; they default off and are
 displayed only when explicitly enabled. `-q` disables reasoning summary output
 unless `-reasoning-summary` is explicitly set on the CLI.
@@ -386,12 +380,9 @@ and nested relative path prefixes.
 | `/model <id>` | switch subsequent turns to model `<id>`; a near-miss falls back to a unique prefix/substring match |
 | `/model <provider>:<id>` | switch to `<id>` on a specific configured provider |
 | `/reasoning` | list reasoning controls for the current model |
-| `/reasoning on`, `/reasoning off`, `/reasoning default` | set explicit reasoning toggle or return to provider defaults |
-| `/reasoning budget <n>` | set reasoning budget tokens for subsequent turns |
-| `/reasoning effort <level>` | switch reasoning effort for subsequent turns |
+| `/reasoning <profile>` | switch reasoning profile for subsequent turns |
 | `/reasoning summary <auto\|concise\|detailed\|none>` | switch Responses API reasoning summaries for subsequent turns |
-| `/effort` | list reasoning effort levels for the current model, marking the selected one |
-| `/effort <level>` | switch reasoning effort for subsequent turns |
+| `/effort [profile]` | alias for `/reasoning [profile]` |
 | `/agent` | list agents and descriptions, marking the current one |
 | `/agent <name>` | switch the active agent |
 | `/mode`, `/mode <name>` | alias for `/agent` |

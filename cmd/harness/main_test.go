@@ -106,10 +106,7 @@ func newFakeModelProxy(t *testing.T, fp *llmtest.FakeProvider) *fakeModelProxy {
 					ModelLabel:      "claude-opus-4-8",
 					ContextWindow:   1_000_000,
 					InputModalities: []string{"text", "image"},
-					Reasoning: &protocol.ReasoningProfiles{
-						Supported: true,
-						Profiles:  []string{"minimal", "low", "medium", "high", "xhigh", "max"},
-					},
+					Reasoning:       true,
 				},
 				{
 					ID:            "openai:gpt-5.5",
@@ -119,10 +116,7 @@ func newFakeModelProxy(t *testing.T, fp *llmtest.FakeProvider) *fakeModelProxy {
 					ModelLabel:    "gpt-5.5",
 					ContextWindow: 1_050_000,
 					Price:         llm.Price{Input: 5, Output: 30, CacheRead: 0.5},
-					Reasoning: &protocol.ReasoningProfiles{
-						Supported: true,
-						Profiles:  []string{"minimal", "low", "medium", "high", "xhigh", "max"},
-					},
+					Reasoning:     true,
 				},
 				{
 					ID:            "openrouter:openai/gpt-5.5",
@@ -132,10 +126,7 @@ func newFakeModelProxy(t *testing.T, fp *llmtest.FakeProvider) *fakeModelProxy {
 					ModelLabel:    "openai/gpt-5.5",
 					ContextWindow: 1_050_000,
 					Price:         llm.Price{Input: 5, Output: 30, CacheRead: 0.5},
-					Reasoning: &protocol.ReasoningProfiles{
-						Supported: true,
-						Profiles:  []string{"minimal", "low", "medium", "high", "xhigh", "max"},
-					},
+					Reasoning:     true,
 				},
 			},
 		},
@@ -232,10 +223,7 @@ type testInfoModelJSON struct {
 	InputModalities          []string   `json:"input_modalities"`
 	ServerTools              []string   `json:"server_tools"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd"`
-	Reasoning                struct {
-		Supported bool                  `json:"supported"`
-		Options   []llm.ReasoningOption `json:"options"`
-	} `json:"reasoning"`
+	Reasoning                bool       `json:"reasoning"`
 }
 
 func findJSONAgent(t *testing.T, agents []testInfoAgentJSON, name string) testInfoAgentJSON {
@@ -258,15 +246,6 @@ func findJSONModel(t *testing.T, models []testInfoModelJSON, targetID string) te
 	}
 	t.Fatalf("model %q not found in %+v", targetID, models)
 	return testInfoModelJSON{}
-}
-
-func reasoningOptionPresent(options []llm.ReasoningOption, typ string) bool {
-	for _, option := range options {
-		if option.Type == typ {
-			return true
-		}
-	}
-	return false
 }
 
 // okStep is the canned single-step script most wiring tests use: one "ok"
@@ -699,7 +678,7 @@ func TestRunREPLModelCommandPromptsConfiguredProviderAndModel(t *testing.T) {
 	}
 }
 
-func TestRunREPLModelCommandPromptsReasoningEffort(t *testing.T) {
+func TestRunREPLModelCommandPromptsReasoningProfile(t *testing.T) {
 	fp := llmtest.New("fake", okStep())
 	env, _, errw, getenv, proxy := fakeProviderEnvWithProxy(t,
 		[]string{"-model", "claude-opus-4-8"},
@@ -717,8 +696,8 @@ func TestRunREPLModelCommandPromptsReasoningEffort(t *testing.T) {
 	if req.TargetID != "openrouter:openai/gpt-5.5" {
 		t.Fatalf("request target = %s, want openrouter/openai/gpt-5.5", req.TargetID)
 	}
-	if req.Request.Reasoning.Effort != "high" {
-		t.Fatalf("request reasoning effort = %q, want high", req.Request.Reasoning.Effort)
+	if req.ReasoningProfile != "high" || req.Request.Reasoning.Profile != "high" {
+		t.Fatalf("request reasoning profile = %q/%q, want high", req.ReasoningProfile, req.Request.Reasoning.Profile)
 	}
 	configPath := filepath.Join(getenv("HOME"), ".config", "harness", "config.json")
 	data, err := os.ReadFile(configPath)
@@ -726,25 +705,25 @@ func TestRunREPLModelCommandPromptsReasoningEffort(t *testing.T) {
 		t.Fatalf("read config: %v", err)
 	}
 	var got struct {
-		Provider        string `json:"provider"`
-		Model           string `json:"model"`
-		ReasoningEffort string `json:"reasoning_effort"`
+		Provider  string `json:"provider"`
+		Model     string `json:"model"`
+		Reasoning string `json:"reasoning"`
 	}
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("decode config: %v\n%s", err, data)
 	}
-	if got.Provider != "" || got.Model != "openrouter:openai/gpt-5.5" || got.ReasoningEffort != "high" {
-		t.Fatalf("saved config = %q/%q effort=%q, want openrouter:openai/gpt-5.5 effort=high\n%s", got.Provider, got.Model, got.ReasoningEffort, data)
+	if got.Provider != "" || got.Model != "openrouter:openai/gpt-5.5" || got.Reasoning != "high" {
+		t.Fatalf("saved config = %q/%q reasoning=%q, want openrouter:openai/gpt-5.5 reasoning=high\n%s", got.Provider, got.Model, got.Reasoning, data)
 	}
-	if !strings.Contains(errw.String(), "Reasoning effort (default/minimal/low/medium/high/xhigh/max") {
-		t.Fatalf("stderr should show effort prompt, got %q", errw.String())
+	if !strings.Contains(errw.String(), "Reasoning profile (default/none/minimal/low/medium/high/xhigh/max") {
+		t.Fatalf("stderr should show profile prompt, got %q", errw.String())
 	}
 }
 
-func TestRunREPLModelCommandDoesNotCarryMaxEffortToOpenRouter(t *testing.T) {
+func TestRunREPLModelCommandPromptsProfileAfterProfileFlag(t *testing.T) {
 	fp := llmtest.New("fake", okStep())
 	env, _, errw, getenv, proxy := fakeProviderEnvWithProxy(t,
-		[]string{"-model", "claude-opus-4-8", "-reasoning-effort", "max"},
+		[]string{"-model", "claude-opus-4-8", "-reasoning", "max"},
 		fp,
 		"/model\nopenrouter:z-ai/glm-5.1\nhigh\ny\nhello\n/exit\n",
 	)
@@ -755,10 +734,7 @@ func TestRunREPLModelCommandDoesNotCarryMaxEffortToOpenRouter(t *testing.T) {
 		ProviderLabel: "OpenRouter",
 		ModelLabel:    "z-ai/glm-5.1",
 		ContextWindow: 202752,
-		Reasoning: &protocol.ReasoningProfiles{
-			Supported: true,
-			Profiles:  []string{"none", "minimal", "low", "medium", "high", "xhigh"},
-		},
+		Reasoning:     true,
 	})
 
 	if code := run(env); code != ui.ExitOK {
@@ -771,8 +747,8 @@ func TestRunREPLModelCommandDoesNotCarryMaxEffortToOpenRouter(t *testing.T) {
 	if req.TargetID != "openrouter:z-ai/glm-5.1" {
 		t.Fatalf("request target = %s, want openrouter/z-ai/glm-5.1", req.TargetID)
 	}
-	if req.Request.Reasoning.Effort != "high" {
-		t.Fatalf("request reasoning effort = %q, want high", req.Request.Reasoning.Effort)
+	if req.ReasoningProfile != "high" || req.Request.Reasoning.Profile != "high" {
+		t.Fatalf("request reasoning profile = %q/%q, want high", req.ReasoningProfile, req.Request.Reasoning.Profile)
 	}
 	configPath := filepath.Join(getenv("HOME"), ".config", "harness", "config.json")
 	data, err := os.ReadFile(configPath)
@@ -780,27 +756,27 @@ func TestRunREPLModelCommandDoesNotCarryMaxEffortToOpenRouter(t *testing.T) {
 		t.Fatalf("read config: %v", err)
 	}
 	var got struct {
-		Provider        string `json:"provider"`
-		Model           string `json:"model"`
-		ReasoningEffort string `json:"reasoning_effort"`
+		Provider  string `json:"provider"`
+		Model     string `json:"model"`
+		Reasoning string `json:"reasoning"`
 	}
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("decode config: %v\n%s", err, data)
 	}
-	if got.Provider != "" || got.Model != "openrouter:z-ai/glm-5.1" || got.ReasoningEffort != "high" {
-		t.Fatalf("saved config = %q/%q effort=%q, want openrouter:z-ai/glm-5.1 effort=high\n%s", got.Provider, got.Model, got.ReasoningEffort, data)
+	if got.Provider != "" || got.Model != "openrouter:z-ai/glm-5.1" || got.Reasoning != "high" {
+		t.Fatalf("saved config = %q/%q reasoning=%q, want openrouter:z-ai/glm-5.1 reasoning=high\n%s", got.Provider, got.Model, got.Reasoning, data)
 	}
 	stderr := errw.String()
-	if !strings.Contains(stderr, "Reasoning effort (default/none/minimal/low/medium/high/xhigh") ||
-		!strings.Contains(stderr, "current: max (not valid for this model") {
-		t.Fatalf("stderr should show OpenRouter effort choices and mark max invalid, got %q", stderr)
+	if !strings.Contains(stderr, "Reasoning profile (default/none/minimal/low/medium/high/xhigh/max") ||
+		!strings.Contains(stderr, "current: max") {
+		t.Fatalf("stderr should show profile choices and current max, got %q", stderr)
 	}
 }
 
-func TestRunREPLModelCommandDropsUnsupportedReasoningEffort(t *testing.T) {
+func TestRunREPLModelCommandDropsUnsupportedReasoningProfile(t *testing.T) {
 	fp := llmtest.New("fake", okStep())
 	env, _, errw, getenv, proxy := fakeProviderEnvWithProxy(t,
-		[]string{"-model", "openrouter:openai/gpt-5.5", "-reasoning-effort", "high"},
+		[]string{"-model", "openrouter:openai/gpt-5.5", "-reasoning", "high"},
 		fp,
 		"/model\nxiaomi-token-plan-sgp:mimo-v2.5-pro\ny\nhello\n/exit\n",
 	)
@@ -832,15 +808,15 @@ func TestRunREPLModelCommandDropsUnsupportedReasoningEffort(t *testing.T) {
 		t.Fatalf("read config: %v", err)
 	}
 	var got struct {
-		Provider        string `json:"provider"`
-		Model           string `json:"model"`
-		ReasoningEffort string `json:"reasoning_effort"`
+		Provider  string `json:"provider"`
+		Model     string `json:"model"`
+		Reasoning string `json:"reasoning"`
 	}
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("decode config: %v\n%s", err, data)
 	}
-	if got.Provider != "" || got.Model != "xiaomi-token-plan-sgp:mimo-v2.5-pro" || got.ReasoningEffort != "" {
-		t.Fatalf("saved config = %q/%q effort=%q, want xiaomi-token-plan-sgp:mimo-v2.5-pro effort empty\n%s", got.Provider, got.Model, got.ReasoningEffort, data)
+	if got.Provider != "" || got.Model != "xiaomi-token-plan-sgp:mimo-v2.5-pro" || got.Reasoning != "" {
+		t.Fatalf("saved config = %q/%q reasoning=%q, want xiaomi-token-plan-sgp:mimo-v2.5-pro reasoning empty\n%s", got.Provider, got.Model, got.Reasoning, data)
 	}
 	stderr := errw.String()
 	if strings.Contains(stderr, "model switch failed") || !strings.Contains(stderr, "reasoning=provider default") {
@@ -886,7 +862,7 @@ func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 	flags := []string{
 		"-p", "-i", "-initial-prompt", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 		"-no-env", "-resume", "-session", "-max-turns", "-max-output-tokens", "-default-context-window", "-context-window",
-		"-reasoning-effort", "-reasoning-enabled", "-reasoning-budget-tokens", "-reasoning-summary", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks",
+		"-reasoning", "-reasoning-summary", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks",
 	}
 	for _, arg := range []string{"-h", "--help"} {
 		fp := llmtest.New("fake")
@@ -914,7 +890,7 @@ func TestRunDebugRequestDumpsPromptAndSkipsModelStream(t *testing.T) {
 		"--debug-request",
 		"-provider", "openai",
 		"-model", "gpt-5.5",
-		"-reasoning-effort", "high",
+		"-reasoning", "high",
 		"-p", "inspect request",
 	}, fp, "")
 
@@ -934,8 +910,8 @@ func TestRunDebugRequestDumpsPromptAndSkipsModelStream(t *testing.T) {
 	if got.Provider != "openai:gpt-5.5" || got.Model != "openai:gpt-5.5" || got.RegistryModel != "openai:gpt-5.5" {
 		t.Fatalf("provider/model = %q/%q registry=%q", got.Provider, got.Model, got.RegistryModel)
 	}
-	if got.Reasoning.Effort != "high" || got.Request.Reasoning.Effort != "high" {
-		t.Fatalf("reasoning effort not forwarded: output=%+v request=%+v", got.Reasoning, got.Request.Reasoning)
+	if got.Reasoning.Profile != "high" || got.Request.Reasoning.Profile != "high" {
+		t.Fatalf("reasoning profile not forwarded: output=%+v request=%+v", got.Reasoning, got.Request.Reasoning)
 	}
 	if got.ResponsesStateful || got.Request.StoreResponse {
 		t.Fatalf("responses stateful = output %v request %v, want proxy-managed state", got.ResponsesStateful, got.Request.StoreResponse)
@@ -1156,14 +1132,14 @@ func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 		DisplayName:   "z-ai/glm-5.1",
 		ProviderLabel: "OpenRouter",
 		ModelLabel:    "z-ai/glm-5.1",
-		Reasoning:     &protocol.ReasoningProfiles{Supported: true, Profiles: []string{"none", "minimal", "low", "medium", "high", "xhigh"}},
+		Reasoning:     true,
 	})
 	proxy.addTarget(protocol.Target{
 		ID:            "openai:gemini-2.5-flash",
 		DisplayName:   "gemini-2.5-flash",
 		ProviderLabel: "OpenAI",
 		ModelLabel:    "gemini-2.5-flash",
-		Reasoning:     &protocol.ReasoningProfiles{Supported: true},
+		Reasoning:     true,
 	})
 
 	code := run(env)
@@ -1181,11 +1157,11 @@ func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"anthropic:claude-opus-4-8\ttext,image\t-\tdefault/minimal/low/medium/high/xhigh/max\n",
-		"openai:gpt-5.5\t-\t-\tdefault/minimal/low/medium/high/xhigh/max\n",
-		"openai:gemini-2.5-flash\t-\t-\tdefault/none/minimal/low/medium/high/xhigh/max\n",
-		"openrouter:openai/gpt-5.5\t-\t-\tdefault/minimal/low/medium/high/xhigh/max\n",
-		"openrouter:z-ai/glm-5.1\t-\t-\tdefault/none/minimal/low/medium/high/xhigh\n",
+		"anthropic:claude-opus-4-8\ttext,image\t-\treasoning\n",
+		"openai:gpt-5.5\t-\t-\treasoning\n",
+		"openai:gemini-2.5-flash\t-\t-\treasoning\n",
+		"openrouter:openai/gpt-5.5\t-\t-\treasoning\n",
+		"openrouter:z-ai/glm-5.1\t-\t-\treasoning\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("models output missing %q:\n%s", want, got)
@@ -1234,14 +1210,14 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 	if openRouterModel.PricePerMillionTokensUSD == nil || openRouterModel.PricePerMillionTokensUSD.Input != 5 || openRouterModel.PricePerMillionTokensUSD.Output != 30 {
 		t.Fatalf("openrouter price = %+v\n%s", openRouterModel.PricePerMillionTokensUSD, out.String())
 	}
-	if !openRouterModel.Reasoning.Supported || !reasoningOptionPresent(openRouterModel.Reasoning.Options, "effort") {
+	if !openRouterModel.Reasoning {
 		t.Fatalf("openrouter reasoning = %+v\n%s", openRouterModel.Reasoning, out.String())
 	}
 	if !slices.Equal(openRouterModel.ServerTools, []string{llm.ServerToolWebSearch}) {
 		t.Fatalf("openrouter server tools = %+v\n%s", openRouterModel.ServerTools, out.String())
 	}
 	anthropicModel := findJSONModel(t, got.Models, "anthropic:claude-opus-4-8")
-	if anthropicModel.PricePerMillionTokensUSD != nil || !anthropicModel.Reasoning.Supported {
+	if anthropicModel.PricePerMillionTokensUSD != nil || !anthropicModel.Reasoning {
 		t.Fatalf("anthropic model = %+v\n%s", anthropicModel, out.String())
 	}
 	if !slices.Equal(anthropicModel.InputModalities, []string{"text", "image"}) {
@@ -1265,7 +1241,7 @@ func TestRunAgentsAndModelsFlagsPrintBothInOrder(t *testing.T) {
 	}
 	got := out.String()
 	agentsAt := strings.Index(got, "agents:\n")
-	modelsAt := strings.Index(got, "anthropic:claude-opus-4-8\ttext,image\t-\tdefault/minimal/low/medium/high/xhigh/max")
+	modelsAt := strings.Index(got, "anthropic:claude-opus-4-8\ttext,image\t-\treasoning")
 	if agentsAt < 0 || modelsAt < 0 || agentsAt > modelsAt {
 		t.Fatalf("expected agents before models:\n%s", got)
 	}
@@ -1708,7 +1684,7 @@ func TestRunPromptsForModelAndSkipsConfigSaveWhenDeclined(t *testing.T) {
 	}
 }
 
-func TestRunStartupModelSelectionPromptsReasoningEffort(t *testing.T) {
+func TestRunStartupModelSelectionPromptsReasoningProfile(t *testing.T) {
 	fp := llmtest.New("fake", okStep())
 	env, _, errw, getenv, proxy := fakeProviderEnvWithProxy(t, nil, fp, "3\nmedium\ny\nhello\n/exit\n")
 
@@ -1722,8 +1698,8 @@ func TestRunStartupModelSelectionPromptsReasoningEffort(t *testing.T) {
 	if req.TargetID != "openrouter:openai/gpt-5.5" {
 		t.Fatalf("request target = %s, want openrouter/openai/gpt-5.5", req.TargetID)
 	}
-	if req.Request.Reasoning.Effort != "medium" {
-		t.Fatalf("request reasoning effort = %q, want medium", req.Request.Reasoning.Effort)
+	if req.ReasoningProfile != "medium" || req.Request.Reasoning.Profile != "medium" {
+		t.Fatalf("request reasoning profile = %q/%q, want medium", req.ReasoningProfile, req.Request.Reasoning.Profile)
 	}
 	configPath := filepath.Join(getenv("HOME"), ".config", "harness", "config.json")
 	data, err := os.ReadFile(configPath)
@@ -1731,18 +1707,18 @@ func TestRunStartupModelSelectionPromptsReasoningEffort(t *testing.T) {
 		t.Fatalf("read config: %v", err)
 	}
 	var got struct {
-		Provider        string `json:"provider"`
-		Model           string `json:"model"`
-		ReasoningEffort string `json:"reasoning_effort"`
+		Provider  string `json:"provider"`
+		Model     string `json:"model"`
+		Reasoning string `json:"reasoning"`
 	}
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("decode config: %v\n%s", err, data)
 	}
-	if got.Provider != "" || got.Model != "openrouter:openai/gpt-5.5" || got.ReasoningEffort != "medium" {
-		t.Fatalf("saved config = %q/%q effort=%q, want openrouter:openai/gpt-5.5 effort=medium\n%s", got.Provider, got.Model, got.ReasoningEffort, data)
+	if got.Provider != "" || got.Model != "openrouter:openai/gpt-5.5" || got.Reasoning != "medium" {
+		t.Fatalf("saved config = %q/%q reasoning=%q, want openrouter:openai/gpt-5.5 reasoning=medium\n%s", got.Provider, got.Model, got.Reasoning, data)
 	}
-	if !strings.Contains(errw.String(), "Reasoning effort (default/minimal/low/medium/high/xhigh/max") {
-		t.Fatalf("stderr should show effort prompt, got %q", errw.String())
+	if !strings.Contains(errw.String(), "Reasoning profile (default/none/minimal/low/medium/high/xhigh/max") {
+		t.Fatalf("stderr should show profile prompt, got %q", errw.String())
 	}
 }
 
@@ -1818,9 +1794,9 @@ func TestRunOneShotUnavailableConfiguredSelectionDoesNotPrompt(t *testing.T) {
 	}
 }
 
-func TestRunReasoningEffortRejectedWhenProxyCatalogSaysUnsupported(t *testing.T) {
+func TestRunReasoningProfileRejectedWhenProxyCatalogSaysUnsupported(t *testing.T) {
 	fp := llmtest.New("fake")
-	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-4o", "-reasoning-effort", "high", "-p", "hi"}, fp, "")
+	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-4o", "-reasoning", "high", "-p", "hi"}, fp, "")
 	proxy.addTarget(protocol.Target{
 		ID:            "openai:gpt-4o",
 		DisplayName:   "gpt-4o",
@@ -1835,22 +1811,14 @@ func TestRunReasoningEffortRejectedWhenProxyCatalogSaysUnsupported(t *testing.T)
 	if len(fp.Requests) != 0 {
 		t.Fatalf("provider should not be called after validation failure, got %d requests", len(fp.Requests))
 	}
-	if !strings.Contains(errw.String(), "does not support reasoning effort") {
-		t.Fatalf("stderr should explain unsupported effort, got %q", errw.String())
+	if !strings.Contains(errw.String(), "does not support reasoning controls") {
+		t.Fatalf("stderr should explain unsupported reasoning, got %q", errw.String())
 	}
 }
 
-func TestRunReasoningEffortRejectedWhenProxyValueUnsupported(t *testing.T) {
+func TestRunInvalidReasoningProfileRejected(t *testing.T) {
 	fp := llmtest.New("fake")
-	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-5-pro", "-reasoning-effort", "xhigh", "-p", "hi"}, fp, "")
-	proxy.addTarget(protocol.Target{
-		ID:            "openai:gpt-5-pro",
-		DisplayName:   "gpt-5-pro",
-		ProviderLabel: "OpenAI",
-		ModelLabel:    "gpt-5-pro",
-		ContextWindow: 400000,
-		Reasoning:     &protocol.ReasoningProfiles{Supported: true, Profiles: []string{"high"}},
-	})
+	env, _, errw, _, _ := fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-5.5", "-reasoning", "ultra", "-p", "hi"}, fp, "")
 
 	if code := run(env); code != ui.ExitUsage {
 		t.Fatalf("exit = %d, want usage error; errw=%q", code, errw.String())
@@ -1858,54 +1826,23 @@ func TestRunReasoningEffortRejectedWhenProxyValueUnsupported(t *testing.T) {
 	if len(fp.Requests) != 0 {
 		t.Fatalf("provider should not be called after validation failure, got %d requests", len(fp.Requests))
 	}
-	if !strings.Contains(errw.String(), `supported: high`) {
-		t.Fatalf("stderr should list supported effort values, got %q", errw.String())
+	if !strings.Contains(errw.String(), `invalid reasoning profile "ultra"`) {
+		t.Fatalf("stderr should explain invalid profile, got %q", errw.String())
 	}
 }
 
-func TestRunReasoningBudgetTokensAnthropic(t *testing.T) {
+func TestRunReasoningProfileForwardedToProxy(t *testing.T) {
 	fp := llmtest.New("fake", okStep())
-	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-provider", "anthropic", "-model", "claude-opus-4-8", "-reasoning-budget-tokens", "4096", "-p", "hi"}, fp, "")
-	proxy.catalog.Targets[0].Reasoning = &protocol.ReasoningProfiles{Supported: true}
+	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-provider", "openrouter", "-model", "openai/gpt-5.5", "-reasoning", "none", "-p", "hi"}, fp, "")
 
-	if code := run(env); code != ui.ExitUsage {
-		t.Fatalf("exit = %d, want usage; errw=%q", code, errw.String())
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit = %d, want ok; errw=%q", code, errw.String())
 	}
-	if len(proxy.requests) != 0 {
-		t.Fatalf("proxy requests = %d, want 0", len(proxy.requests))
+	if len(proxy.requests) != 1 {
+		t.Fatalf("proxy requests = %d, want 1", len(proxy.requests))
 	}
-	if !strings.Contains(errw.String(), `provider mode "model-proxy" does not support reasoning_budget_tokens`) {
-		t.Fatalf("stderr should reject reasoning budget tokens, got %q", errw.String())
-	}
-}
-
-func TestRunReasoningToggleOpenRouter(t *testing.T) {
-	fp := llmtest.New("fake", okStep())
-	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-provider", "openrouter", "-model", "openai/gpt-5.5", "-reasoning-enabled=false", "-p", "hi"}, fp, "")
-
-	if code := run(env); code != ui.ExitUsage {
-		t.Fatalf("exit = %d, want usage; errw=%q", code, errw.String())
-	}
-	if len(proxy.requests) != 0 {
-		t.Fatalf("proxy requests = %d, want 0", len(proxy.requests))
-	}
-	if !strings.Contains(errw.String(), `provider mode "model-proxy" does not support reasoning_enabled`) {
-		t.Fatalf("stderr should reject reasoning toggle, got %q", errw.String())
-	}
-}
-
-func TestRunReasoningBudgetTokensRejectedForOpenAICompatibleProvider(t *testing.T) {
-	fp := llmtest.New("fake")
-	env, _, errw, _, _ := fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-5.5", "-reasoning-budget-tokens", "2048", "-p", "hi"}, fp, "")
-
-	if code := run(env); code != ui.ExitUsage {
-		t.Fatalf("exit = %d, want usage error; errw=%q", code, errw.String())
-	}
-	if len(fp.Requests) != 0 {
-		t.Fatalf("provider should not be called after validation failure, got %d requests", len(fp.Requests))
-	}
-	if !strings.Contains(errw.String(), `does not support reasoning_budget_tokens`) {
-		t.Fatalf("stderr should explain unsupported budget_tokens, got %q", errw.String())
+	if proxy.requests[0].ReasoningProfile != "none" || proxy.requests[0].Request.Reasoning.Profile != "none" {
+		t.Fatalf("reasoning profile = %q/%q, want none", proxy.requests[0].ReasoningProfile, proxy.requests[0].Request.Reasoning.Profile)
 	}
 }
 
@@ -1933,13 +1870,6 @@ func TestEffectiveReasoningSummaryRequiresExplicitSetting(t *testing.T) {
 				t.Fatalf("effectiveReasoningSummary = %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestValidateReasoningSummaryRejectedForNonResponsesProvider(t *testing.T) {
-	err := validateReasoningConfig(nil, "gpt-5.5", "openai", llm.ReasoningConfig{Summary: "auto"})
-	if err == nil || !strings.Contains(err.Error(), "does not support reasoning_summary") {
-		t.Fatalf("err = %v, want unsupported reasoning_summary", err)
 	}
 }
 
@@ -2761,17 +2691,17 @@ func TestRunQuietSuppressesReasoningOutputUnlessExplicitlyEnabled(t *testing.T) 
 	})
 	env, out, errw, _, proxy = fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-5.5", "-q", "-reasoning-summary=auto"}, fp, "hi\n/exit\n")
 
-	if code := run(env); code != ui.ExitUsage {
-		t.Fatalf("explicit exit code = %d, want usage; errw=%q", code, errw.String())
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("explicit exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(proxy.requests) != 0 {
-		t.Fatalf("explicit proxy requests = %d, want 0", len(proxy.requests))
+	if len(proxy.requests) != 1 {
+		t.Fatalf("explicit proxy requests = %d, want 1", len(proxy.requests))
 	}
-	if out.Len() != 0 {
-		t.Fatalf("explicit rejected request should not write stdout, got %q", out.String())
+	if got := proxy.requests[0].Request.Reasoning.Summary; got != "auto" {
+		t.Fatalf("explicit request reasoning summary = %q, want auto", got)
 	}
-	if !strings.Contains(errw.String(), `provider mode "model-proxy" does not support reasoning_summary`) {
-		t.Fatalf("explicit -reasoning-summary should be rejected; stderr=%q", errw.String())
+	if !strings.Contains(out.String(), "explicit visible reasoning") && !strings.Contains(errw.String(), "explicit visible reasoning") {
+		t.Fatalf("explicit -reasoning-summary should show reasoning output; stdout=%q stderr=%q", out.String(), errw.String())
 	}
 }
 

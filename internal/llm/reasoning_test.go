@@ -6,6 +6,9 @@ func TestReasoningConfigEmptyIncludesAllControls(t *testing.T) {
 	if !(ReasoningConfig{}).Empty() {
 		t.Fatal("zero reasoning config should be empty")
 	}
+	if (ReasoningConfig{Profile: "high"}).Empty() {
+		t.Fatal("profile control should make reasoning config non-empty")
+	}
 	enabled := false
 	if (ReasoningConfig{Enabled: &enabled}).Empty() {
 		t.Fatal("enabled control should make reasoning config non-empty")

@@ -118,16 +118,11 @@ func Registry(catalog protocol.Catalog) *llm.Registry {
 }
 
 func proxyTargetReasoning(target protocol.Target) *llm.ReasoningInfo {
-	if target.Reasoning == nil || !target.Reasoning.Supported {
+	if !target.Reasoning {
 		return &llm.ReasoningInfo{Supported: false}
-	}
-	values := append([]string(nil), target.Reasoning.Profiles...)
-	if len(values) == 0 {
-		values = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 	}
 	return &llm.ReasoningInfo{
 		Supported: true,
-		Options:   []llm.ReasoningOption{{Type: "effort", Values: values}},
 	}
 }
 
@@ -146,9 +141,6 @@ func (p *Provider) Name() string {
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
 		profile := req.Reasoning.Profile
-		if profile == "" {
-			profile = req.Reasoning.Effort
-		}
 		body, err := json.Marshal(protocol.StreamRequest{
 			TargetID:         p.targetID,
 			Request:          req,

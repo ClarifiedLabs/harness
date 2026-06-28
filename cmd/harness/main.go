@@ -34,6 +34,7 @@ import (
 	modelclient "harness/internal/modelproxy/client"
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/plan"
+	"harness/internal/reasoningprofile"
 	"harness/internal/session"
 	"harness/internal/skills"
 	"harness/internal/sysprompt"
@@ -304,14 +305,12 @@ func run(env environment) int {
 	modelRegistry := modelclient.Registry(catalog)
 	modelRegistry.SetDefaultContextWindow(cfg.DefaultContextWindow)
 	reasoning := llm.ReasoningConfig{
-		Effort:       cfg.ReasoningEffort,
-		Enabled:      cfg.ReasoningEnabled,
-		BudgetTokens: cfg.ReasoningBudgetTokens,
+		Profile: cfg.Reasoning,
 	}
-	// A startup agent with a pinned reasoning effort sets the session base effort
-	// (model compatibility is enforced by the validation below).
+	// A startup agent with a pinned reasoning profile sets the session base
+	// profile (model compatibility is enforced by the validation below).
 	if startupAgent.Reasoning != "" {
-		reasoning.Effort = startupAgent.Reasoning
+		reasoning.Profile = startupAgent.Reasoning
 	}
 	interactiveSession := !cfg.PromptSet && !env.stdinPiped
 	startProvider, startModel := agentModelInputs(startupAgent, cfg.Provider, cfg.Model)
@@ -357,7 +356,7 @@ func run(env environment) int {
 		cfg.Provider = selection.Provider
 		cfg.Model = selection.Model
 		reasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, reasoningModeForProvider(catalog, selection.Provider), interactiveSession, suppressReasoningOutput)
-		reasoning, err = pickStartupReasoningEffort(readStartupLine, stderr, modelRegistry, selection.RegistryModel, reasoning)
+		reasoning, err = pickStartupReasoningProfile(readStartupLine, stderr, modelRegistry, selection.RegistryModel, reasoning)
 		if err != nil {
 			if errors.Is(err, ui.ErrPickerCancelled) {
 				fmt.Fprintln(stderr, "harness: model selection cancelled")
@@ -1304,24 +1303,19 @@ type modelsListOutput struct {
 }
 
 type modelListEntry struct {
-	TargetID                 string                `json:"target_id"`
-	DisplayName              string                `json:"display_name,omitempty"`
-	ProviderLabel            string                `json:"provider_label,omitempty"`
-	ModelLabel               string                `json:"model_label,omitempty"`
-	ContextWindow            int                   `json:"context_window,omitempty"`
-	InputModalities          []string              `json:"input_modalities,omitempty"`
-	ServerTools              []string              `json:"server_tools,omitempty"`
-	PricePerMillionTokensUSD *llm.Price            `json:"price_per_million_tokens_usd,omitempty"`
-	Reasoning                modelReasoningDetails `json:"reasoning"`
-}
-
-type modelReasoningDetails struct {
-	Supported bool                  `json:"supported"`
-	Options   []llm.ReasoningOption `json:"options,omitempty"`
+	TargetID                 string     `json:"target_id"`
+	DisplayName              string     `json:"display_name,omitempty"`
+	ProviderLabel            string     `json:"provider_label,omitempty"`
+	ModelLabel               string     `json:"model_label,omitempty"`
+	ContextWindow            int        `json:"context_window,omitempty"`
+	InputModalities          []string   `json:"input_modalities,omitempty"`
+	ServerTools              []string   `json:"server_tools,omitempty"`
+	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd,omitempty"`
+	Reasoning                bool       `json:"reasoning"`
 }
 
 func buildModelsListOutput(catalog protocol.Catalog) *modelsListOutput {
-	models := catalogModelListRows(catalog, modelclient.Registry(catalog))
+	models := catalogModelListRows(catalog)
 	return &modelsListOutput{
 		ProviderCount: 0,
 		ModelCount:    len(models),
@@ -1370,7 +1364,7 @@ func formatModelsListText(out modelsListOutput) string {
 	return b.String()
 }
 
-func catalogModelListRows(catalog protocol.Catalog, registry *llm.Registry) []modelListEntry {
+func catalogModelListRows(catalog protocol.Catalog) []modelListEntry {
 	var rows []modelListEntry
 	for _, target := range catalog.Targets {
 		if target.ID == "" {
@@ -1385,7 +1379,7 @@ func catalogModelListRows(catalog protocol.Catalog, registry *llm.Registry) []mo
 			InputModalities:          append([]string(nil), target.InputModalities...),
 			ServerTools:              append([]string(nil), target.ServerTools...),
 			PricePerMillionTokensUSD: modelListPrice(target.Price),
-			Reasoning:                modelListReasoning(registry, target),
+			Reasoning:                target.Reasoning,
 		})
 	}
 	return rows
@@ -1442,85 +1436,11 @@ func modelListPrice(price llm.Price) *llm.Price {
 	return &out
 }
 
-func modelListReasoning(registry *llm.Registry, target protocol.Target) modelReasoningDetails {
-	var reasoning *llm.ReasoningInfo
-	if registry != nil {
-		if info, ok := registry.Lookup(target.ID); ok && info.Reasoning != nil {
-			reasoning = info.Reasoning
-		}
-	}
-	if reasoning == nil || !reasoning.Supported {
-		return modelReasoningDetails{}
-	}
-	out := modelReasoningDetails{Supported: true}
-	if len(reasoning.Options) > 0 {
-		out.Options = append([]llm.ReasoningOption(nil), reasoning.Options...)
-	}
-	return out
-}
-
-func modelListReasoningText(reasoning modelReasoningDetails) string {
-	if !reasoning.Supported {
+func modelListReasoningText(reasoning bool) string {
+	if !reasoning {
 		return "-"
 	}
-	var parts []string
-	if values, ok := reasoningEffortValues(reasoning); ok {
-		choices := []string{"default"}
-		for _, value := range values {
-			value = strings.TrimSpace(value)
-			if value != "" {
-				choices = append(choices, value)
-			}
-		}
-		if len(choices) > 1 {
-			parts = append(parts, strings.Join(choices, "/"))
-		} else {
-			parts = append(parts, "effort=provider-defined")
-		}
-	}
-	if min, max, ok := reasoningBudgetTokenRange(reasoning); ok {
-		parts = append(parts, "budget_tokens="+budgetRangeLabel(min, max))
-	}
-	if reasoningSupportsToggle(reasoning) {
-		parts = append(parts, "toggle")
-	}
-	if len(parts) == 0 && len(reasoning.Options) == 0 {
-		return "provider-defined"
-	}
-	if len(parts) == 0 {
-		return "-"
-	}
-	return strings.Join(parts, ";")
-}
-
-func reasoningEffortValues(reasoning modelReasoningDetails) ([]string, bool) {
-	for _, opt := range reasoning.Options {
-		if opt.Type == "effort" {
-			return opt.Values, true
-		}
-	}
-	return nil, false
-}
-
-func reasoningBudgetTokenRange(reasoning modelReasoningDetails) (min *int, max *int, ok bool) {
-	for _, opt := range reasoning.Options {
-		if opt.Type == "budget_tokens" {
-			return opt.Min, opt.Max, true
-		}
-	}
-	return nil, nil, false
-}
-
-func reasoningSupportsToggle(reasoning modelReasoningDetails) bool {
-	if !reasoning.Supported {
-		return false
-	}
-	for _, opt := range reasoning.Options {
-		if opt.Type == "toggle" {
-			return true
-		}
-	}
-	return len(reasoning.Options) == 0
+	return "reasoning"
 }
 
 func buildShowConfigOutput(cfg config.Config) (showConfigOutput, error) {
@@ -1823,13 +1743,13 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 	}, nil
 }
 
-// agentBaseReasoning returns base with its effort overridden by the agent's
-// pinned reasoning effort when set, so a per-agent "reasoning" field controls
-// that agent's thinking effort. Model compatibility is enforced afterward by
+// agentBaseReasoning returns base with its profile overridden by the agent's
+// pinned reasoning profile when set, so a per-agent "reasoning" field controls
+// that agent's thinking profile. Model compatibility is enforced afterward by
 // compatibleReasoningForModel and validateReasoningConfig.
 func agentBaseReasoning(def agentdef.Definition, base llm.ReasoningConfig) llm.ReasoningConfig {
 	if def.Reasoning != "" {
-		base.Effort = def.Reasoning
+		base.Profile = def.Reasoning
 	}
 	return base
 }
@@ -2080,19 +2000,18 @@ func pickStartupModel(readLine func(string) (string, error), w io.Writer, catalo
 	return resolveCatalogSelection(catalog, "", input, "")
 }
 
-func pickStartupReasoningEffort(readLine func(string) (string, error), w io.Writer, registry *llm.Registry, model string, reasoning llm.ReasoningConfig) (llm.ReasoningConfig, error) {
+func pickStartupReasoningProfile(readLine func(string) (string, error), w io.Writer, registry *llm.Registry, model string, reasoning llm.ReasoningConfig) (llm.ReasoningConfig, error) {
 	info, ok := reasoningInfoForModel(registry, model)
 	if !ok || !info.Supported {
 		return reasoning, nil
 	}
-	values, hasEffort := info.EffortValues()
-	if !hasEffort || len(values) == 0 {
-		return reasoning, nil
+	current := strings.TrimSpace(reasoning.Profile)
+	if normalized, ok := reasoningprofile.Normalize(current); ok {
+		current = normalized
 	}
-	current := strings.TrimSpace(reasoning.Effort)
-	currentValid := current == "" || info.SupportsEffort(current)
+	_, currentValid := reasoningprofile.Normalize(reasoning.Profile)
 	for {
-		line, err := readLine(fmt.Sprintf("Reasoning effort (default/%s; current: %s): ", strings.Join(values, "/"), effortPromptCurrent(current, currentValid)))
+		line, err := readLine(fmt.Sprintf("Reasoning profile (%s; current: %s): ", reasoningprofile.ChoicesLabel(), reasoningProfilePromptCurrent(current, currentValid)))
 		if err != nil {
 			return reasoning, err
 		}
@@ -2100,24 +2019,18 @@ func pickStartupReasoningEffort(readLine func(string) (string, error), w io.Writ
 			if currentValid {
 				return reasoning, nil
 			}
-			reasoning.Effort = ""
+			reasoning.Profile = ""
 			return reasoning, nil
 		}
 		if strings.EqualFold(line, "q") {
 			return reasoning, ui.ErrPickerCancelled
 		}
-		effort, ok := normalizeEffortInput(line)
-		if !ok || (effort != "" && !info.SupportsEffort(effort)) {
-			fmt.Fprintf(w, "Invalid reasoning effort %q (supported: default, %s)\n", line, strings.Join(values, ", "))
+		profile, ok := reasoningprofile.Normalize(line)
+		if !ok {
+			fmt.Fprintf(w, "Invalid reasoning profile %q (supported: %s)\n", line, reasoningprofile.ChoicesLabel())
 			continue
 		}
-		reasoning.Effort = effort
-		if effort != "" {
-			reasoning.BudgetTokens = nil
-			if reasoning.Enabled != nil && !*reasoning.Enabled {
-				reasoning.Enabled = nil
-			}
-		}
+		reasoning.Profile = profile
 		return reasoning, nil
 	}
 }
@@ -2133,7 +2046,7 @@ func reasoningInfoForModel(registry *llm.Registry, model string) (*llm.Reasoning
 	return info.Reasoning, true
 }
 
-func effortPromptCurrent(current string, valid bool) string {
+func reasoningProfilePromptCurrent(current string, valid bool) string {
 	if strings.TrimSpace(current) == "" {
 		return "provider default"
 	}
@@ -2143,23 +2056,11 @@ func effortPromptCurrent(current string, valid bool) string {
 	return current + " (not valid for this model; Enter uses provider default)"
 }
 
-func normalizeEffortInput(input string) (string, bool) {
-	effort := strings.ToLower(strings.TrimSpace(input))
-	switch effort {
-	case "":
-		return "", false
-	case "default", "provider-default":
-		return "", true
-	default:
-		return effort, true
-	}
-}
-
 func saveSelectedModel(path, provider, model string, reasoning llm.ReasoningConfig) error {
 	if provider == model {
 		provider = ""
 	}
-	return config.SaveSelectedModel(path, provider, model, reasoning.Effort, reasoning.Enabled, reasoning.BudgetTokens)
+	return config.SaveSelectedModel(path, provider, model, reasoning.Profile)
 }
 
 func writableConfigPath(args []string, getenv func(string) string) string {
@@ -2196,32 +2097,17 @@ func (m catalogModelPick) PickerName() string {
 func (m catalogModelPick) PickerPrice() string   { return formatPickerPrice(m.target.Price) }
 func (m catalogModelPick) PickerRelease() string { return "" }
 
-func validateReasoningConfig(registry *llm.Registry, model, mode string, reasoning llm.ReasoningConfig) error {
-	reasoning.Effort = strings.ToLower(strings.TrimSpace(reasoning.Effort))
+func validateReasoningConfig(registry *llm.Registry, model, _ string, reasoning llm.ReasoningConfig) error {
+	reasoning.Profile = strings.ToLower(strings.TrimSpace(reasoning.Profile))
 	reasoning.Summary = strings.ToLower(strings.TrimSpace(reasoning.Summary))
 	if reasoning.Empty() {
 		return nil
 	}
-	if reasoning.Effort != "" && reasoning.BudgetTokens != nil {
-		return fmt.Errorf("reasoning effort and reasoning_budget_tokens cannot both be set")
+	profile, ok := reasoningprofile.Normalize(reasoning.Profile)
+	if !ok {
+		return fmt.Errorf("invalid reasoning profile %q (want %s)", reasoning.Profile, reasoningprofile.ChoicesLabel())
 	}
-	if reasoning.Enabled != nil && !*reasoning.Enabled && (reasoning.Effort != "" || reasoning.BudgetTokens != nil || reasoning.Summary != "") {
-		return fmt.Errorf("reasoning_enabled=false cannot be combined with reasoning effort, reasoning_budget_tokens, or reasoning_summary")
-	}
-	if reasoning.BudgetTokens != nil && *reasoning.BudgetTokens < 0 {
-		return fmt.Errorf("reasoning_budget_tokens must be non-negative")
-	}
-	toggleOnly := reasoning.Enabled != nil && reasoning.Effort == "" && reasoning.BudgetTokens == nil && reasoning.Summary == ""
-	mode = strings.ToLower(strings.TrimSpace(mode))
-	if reasoning.BudgetTokens != nil && !reasoningModeSupportsBudgetTokens(mode) {
-		return fmt.Errorf("provider mode %q does not support reasoning_budget_tokens", reasoningModeLabel(mode))
-	}
-	if reasoning.Summary != "" && mode != "responses" {
-		return fmt.Errorf("provider mode %q does not support reasoning_summary", reasoningModeLabel(mode))
-	}
-	if toggleOnly && !reasoningModeSupportsToggle(mode) {
-		return fmt.Errorf("provider mode %q does not support reasoning_enabled", reasoningModeLabel(mode))
-	}
+	reasoning.Profile = profile
 	if registry == nil {
 		return nil
 	}
@@ -2230,92 +2116,27 @@ func validateReasoningConfig(registry *llm.Registry, model, mode string, reasoni
 		return nil
 	}
 	if !info.Reasoning.Supported {
-		if reasoning.Effort != "" {
-			return fmt.Errorf("model %q does not support reasoning effort", model)
-		}
-		if reasoning.BudgetTokens != nil {
-			return fmt.Errorf("model %q does not support reasoning_budget_tokens", model)
-		}
-		if reasoning.Summary != "" {
-			return fmt.Errorf("model %q does not support reasoning_summary", model)
-		}
-		if toggleOnly {
-			return fmt.Errorf("model %q does not support reasoning_enabled", model)
-		}
 		return fmt.Errorf("model %q does not support reasoning controls", model)
-	}
-	if reasoning.Effort != "" && !info.Reasoning.SupportsEffort(reasoning.Effort) {
-		if values, ok := info.Reasoning.EffortValues(); ok && len(values) > 0 {
-			return fmt.Errorf("model %q does not support reasoning effort %q (supported: %s)", model, reasoning.Effort, strings.Join(values, ", "))
-		}
-		return fmt.Errorf("model %q does not support reasoning effort", model)
-	}
-	if reasoning.BudgetTokens != nil && !info.Reasoning.SupportsBudgetTokens(*reasoning.BudgetTokens) {
-		if min, max, ok := info.Reasoning.BudgetTokenRange(); ok {
-			return fmt.Errorf("model %q does not support reasoning_budget_tokens=%d (supported: %s)", model, *reasoning.BudgetTokens, budgetRangeLabel(min, max))
-		}
-		return fmt.Errorf("model %q does not support reasoning_budget_tokens", model)
-	}
-	if toggleOnly && !info.Reasoning.SupportsToggle() {
-		return fmt.Errorf("model %q does not support reasoning_enabled", model)
 	}
 	return nil
 }
 
-func compatibleReasoningForModel(registry *llm.Registry, model, mode string, reasoning llm.ReasoningConfig) llm.ReasoningConfig {
-	reasoning.Effort = strings.ToLower(strings.TrimSpace(reasoning.Effort))
+func compatibleReasoningForModel(registry *llm.Registry, model, _ string, reasoning llm.ReasoningConfig) llm.ReasoningConfig {
+	reasoning.Profile = strings.ToLower(strings.TrimSpace(reasoning.Profile))
 	reasoning.Summary = strings.ToLower(strings.TrimSpace(reasoning.Summary))
+	if profile, ok := reasoningprofile.Normalize(reasoning.Profile); ok {
+		reasoning.Profile = profile
+	} else {
+		reasoning.Profile = ""
+	}
 	if reasoning.Empty() {
 		return reasoning
 	}
-	mode = strings.ToLower(strings.TrimSpace(mode))
 	info, ok := reasoningInfoForModel(registry, model)
 	if ok && !info.Supported {
 		return llm.ReasoningConfig{}
 	}
-	if reasoning.Effort != "" && ok && !info.SupportsEffort(reasoning.Effort) {
-		reasoning.Effort = ""
-	}
-	if reasoning.BudgetTokens != nil {
-		if !reasoningModeSupportsBudgetTokens(mode) || (ok && !info.SupportsBudgetTokens(*reasoning.BudgetTokens)) {
-			reasoning.BudgetTokens = nil
-		}
-	}
-	if reasoning.Enabled != nil && (!reasoningModeSupportsToggle(mode) || (ok && !info.SupportsToggle())) {
-		reasoning.Enabled = nil
-	}
-	if reasoning.Summary != "" && mode != "responses" {
-		reasoning.Summary = ""
-	}
 	return reasoning
-}
-
-func reasoningModeSupportsBudgetTokens(mode string) bool {
-	return mode == "openrouter" || mode == "anthropic"
-}
-
-func reasoningModeSupportsToggle(mode string) bool {
-	return mode == "openrouter"
-}
-
-func reasoningModeLabel(mode string) string {
-	if mode == "" {
-		return "openai"
-	}
-	return mode
-}
-
-func budgetRangeLabel(min, max *int) string {
-	switch {
-	case min != nil && max != nil:
-		return fmt.Sprintf("%d..%d", *min, *max)
-	case min != nil:
-		return fmt.Sprintf(">=%d", *min)
-	case max != nil:
-		return fmt.Sprintf("<=%d", *max)
-	default:
-		return "provider-defined range"
-	}
 }
 
 // formatPickerPrice formats an llm.Price as "$in/$out" per 1M tokens,

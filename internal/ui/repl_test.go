@@ -1319,14 +1319,14 @@ func TestREPLAuxiliaryPromptsKeepContextLabelsWithViModePrompt(t *testing.T) {
 	if code := run(strings.NewReader("/model\r1\rhigh\rn\r/exit\r"), app, nil, true); code != ExitOK {
 		t.Fatalf("exit code = %d, want %d; errw=%q", code, ExitOK, errw.String())
 	}
-	if switchedReasoning.Effort != "high" {
-		t.Fatalf("switch reasoning effort = %q, want high", switchedReasoning.Effort)
+	if switchedReasoning.Profile != "high" {
+		t.Fatalf("switch reasoning profile = %q, want high", switchedReasoning.Profile)
 	}
 	got := errw.String()
 	for _, want := range []string{
 		"MAIN I> ",
 		"Model target (number/id, /search, n/p, q): ",
-		"Reasoning effort (default/minimal/low/medium/high/xhigh/max",
+		"Reasoning profile (default/none/minimal/low/medium/high/xhigh/max",
 		"Save openai:gpt-5.5 as the default model? (y/N): ",
 		"model switched",
 	} {
@@ -1334,7 +1334,7 @@ func TestREPLAuxiliaryPromptsKeepContextLabelsWithViModePrompt(t *testing.T) {
 			t.Fatalf("stderr missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "Invalid reasoning effort") {
+	if strings.Contains(got, "Invalid reasoning profile") {
 		t.Fatalf("auxiliary prompts consumed the scripted flow incorrectly:\n%s", got)
 	}
 }
@@ -1381,7 +1381,7 @@ func TestREPLModelCommandSwitchesNextTurn(t *testing.T) {
 	}
 }
 
-func TestREPLEffortCommandListsAndSwitchesNextTurn(t *testing.T) {
+func TestREPLEffortCommandAliasesReasoningProfile(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("ok")},
@@ -1393,7 +1393,6 @@ func TestREPLEffortCommandListsAndSwitchesNextTurn(t *testing.T) {
 		"anthropic:claude-opus-4-8": {
 			Reasoning: &llm.ReasoningInfo{
 				Supported: true,
-				Options:   []llm.ReasoningOption{{Type: "effort", Values: []string{"low", "medium", "high"}}},
 			},
 		},
 	})
@@ -1404,10 +1403,9 @@ func TestREPLEffortCommandListsAndSwitchesNextTurn(t *testing.T) {
 	}
 	got := errw.String()
 	for _, want := range []string{
-		"available efforts for anthropic:claude-opus-4-8:",
-		"provider default (current)",
-		"high",
-		"[reasoning effort: high]",
+		"available controls for anthropic:claude-opus-4-8:",
+		"profile: default, none, minimal, low, medium, high, xhigh, max",
+		"[reasoning: profile=high]",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("/effort output missing %q:\n%s", want, got)
@@ -1416,12 +1414,12 @@ func TestREPLEffortCommandListsAndSwitchesNextTurn(t *testing.T) {
 	if fp.RequestCount() != 1 {
 		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
-	if fp.Requests[0].Reasoning.Effort != "high" {
-		t.Fatalf("request effort = %q, want high", fp.Requests[0].Reasoning.Effort)
+	if fp.Requests[0].Reasoning.Profile != "high" {
+		t.Fatalf("request profile = %q, want high", fp.Requests[0].Reasoning.Profile)
 	}
 }
 
-func TestREPLEffortCommandSendsExplicitNone(t *testing.T) {
+func TestREPLReasoningCommandSendsExplicitNone(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("ok")},
@@ -1433,24 +1431,26 @@ func TestREPLEffortCommandSendsExplicitNone(t *testing.T) {
 		"openrouter:z-ai/glm-5.1": {
 			Reasoning: &llm.ReasoningInfo{
 				Supported: true,
-				Options:   []llm.ReasoningOption{{Type: "effort", Values: []string{"none", "minimal", "low", "medium", "high", "xhigh"}}},
 			},
 		},
 	})
 
-	in := strings.NewReader("/effort none\nhello\n/exit\n")
+	in := strings.NewReader("/reasoning none\nhello\n/exit\n")
 	if code := Run(in, app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
 	if fp.RequestCount() != 1 {
 		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
-	if fp.Requests[0].Reasoning.Effort != "none" {
-		t.Fatalf("request effort = %q, want none", fp.Requests[0].Reasoning.Effort)
+	if !strings.Contains(errw.String(), "[reasoning: profile=none]") {
+		t.Fatalf("reasoning none should be acknowledged, errw=%q", errw.String())
+	}
+	if fp.Requests[0].Reasoning.Profile != "none" {
+		t.Fatalf("request profile = %q, want none", fp.Requests[0].Reasoning.Profile)
 	}
 }
 
-func TestREPLReasoningCommandSetsBudgetTokens(t *testing.T) {
+func TestREPLEffortCommandRejectsInvalidProfileForCurrentModel(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("ok")},
@@ -1458,103 +1458,28 @@ func TestREPLReasoningCommandSetsBudgetTokens(t *testing.T) {
 	})
 	app := newTestApp(t, &out, &errw, fp)
 	app.RegistryModel = "anthropic:claude-opus-4-8"
-	minBudget, maxBudget := 1024, 4096
-	app.Registry = llm.NewRegistryWithQualified(nil, map[string]llm.ModelInfo{
-		"anthropic:claude-opus-4-8": {
-			Reasoning: &llm.ReasoningInfo{
-				Supported: true,
-				Options: []llm.ReasoningOption{
-					{Type: "budget_tokens", Min: &minBudget, Max: &maxBudget},
-				},
-			},
-		},
-	})
-
-	in := strings.NewReader("/reasoning\n/reasoning budget 2048\nhello\n/exit\n")
-	if code := Run(in, app, nil); code != 0 {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-	}
-	got := errw.String()
-	for _, want := range []string{
-		"available controls for anthropic:claude-opus-4-8:",
-		"budget_tokens: 1024..4096",
-		"[reasoning: budget_tokens=2048]",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("/reasoning output missing %q:\n%s", want, got)
-		}
-	}
-	if fp.RequestCount() != 1 {
-		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
-	}
-	if fp.Requests[0].Reasoning.BudgetTokens == nil || *fp.Requests[0].Reasoning.BudgetTokens != 2048 {
-		t.Fatalf("request budget_tokens = %v, want 2048", fp.Requests[0].Reasoning.BudgetTokens)
-	}
-}
-
-func TestREPLReasoningCommandSetsToggle(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake", llmtest.Step{
-		Events: []llm.StreamEvent{textDelta("ok")},
-		Stop:   llm.StopEndTurn,
-	})
-	app := newTestApp(t, &out, &errw, fp)
-	app.RegistryModel = "openrouter:z-ai/glm-5.1"
-	app.Registry = llm.NewRegistryWithQualified(nil, map[string]llm.ModelInfo{
-		"openrouter:z-ai/glm-5.1": {
-			Reasoning: &llm.ReasoningInfo{
-				Supported: true,
-				Options:   []llm.ReasoningOption{{Type: "toggle"}},
-			},
-		},
-	})
-
-	in := strings.NewReader("/reasoning off\nhello\n/exit\n")
-	if code := Run(in, app, nil); code != 0 {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-	}
-	if !strings.Contains(errw.String(), "[reasoning: enabled=false]") {
-		t.Fatalf("toggle should be acknowledged, errw=%q", errw.String())
-	}
-	if fp.RequestCount() != 1 {
-		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
-	}
-	if fp.Requests[0].Reasoning.Enabled == nil || *fp.Requests[0].Reasoning.Enabled {
-		t.Fatalf("request enabled = %v, want false", fp.Requests[0].Reasoning.Enabled)
-	}
-}
-
-func TestREPLEffortCommandRejectsInvalidLevelForCurrentModel(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake", llmtest.Step{
-		Events: []llm.StreamEvent{textDelta("ok")},
-		Stop:   llm.StopEndTurn,
-	})
-	app := newTestApp(t, &out, &errw, fp)
-	app.RegistryModel = "anthropic:claude-opus-4-8"
-	app.Reasoning = llm.ReasoningConfig{Effort: "medium"}
+	app.Reasoning = llm.ReasoningConfig{Profile: "medium"}
 	app.Agent.SetReasoning(app.Reasoning)
 	app.Registry = llm.NewRegistryWithQualified(nil, map[string]llm.ModelInfo{
 		"anthropic:claude-opus-4-8": {
 			Reasoning: &llm.ReasoningInfo{
 				Supported: true,
-				Options:   []llm.ReasoningOption{{Type: "effort", Values: []string{"low", "medium", "high"}}},
 			},
 		},
 	})
 
-	in := strings.NewReader("/effort xhigh\nhello\n/exit\n")
+	in := strings.NewReader("/effort ultra\nhello\n/exit\n")
 	if code := Run(in, app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if !strings.Contains(errw.String(), `does not support reasoning effort "xhigh"`) {
-		t.Fatalf("invalid effort should be reported, errw=%q", errw.String())
+	if !strings.Contains(errw.String(), `invalid profile "ultra"`) {
+		t.Fatalf("invalid profile should be reported, errw=%q", errw.String())
 	}
 	if fp.RequestCount() != 1 {
 		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
-	if fp.Requests[0].Reasoning.Effort != "medium" {
-		t.Fatalf("request effort = %q, want unchanged medium", fp.Requests[0].Reasoning.Effort)
+	if fp.Requests[0].Reasoning.Profile != "medium" {
+		t.Fatalf("request profile = %q, want unchanged medium", fp.Requests[0].Reasoning.Profile)
 	}
 }
 
@@ -1645,7 +1570,7 @@ func TestREPLAgentCommandSwitchesNextTurn(t *testing.T) {
 			Price: llm.Price{Input: 0.43, Output: 0.87, CacheRead: 0.004},
 		},
 	})
-	app.Reasoning = llm.ReasoningConfig{Effort: "max"}
+	app.Reasoning = llm.ReasoningConfig{Profile: "max"}
 	app.Agent.SetReasoning(app.Reasoning)
 	catalog, _ := tools.CatalogWithOptions(tools.Options{SearchTools: tools.SearchToolsGrep})
 	planTools, err := catalog.Subset([]string{"read_file", "grep"})
@@ -1679,7 +1604,7 @@ func TestREPLAgentCommandSwitchesNextTurn(t *testing.T) {
 		t.Errorf("app.System should update so saves capture it, got %q", app.System)
 	}
 	if !strings.Contains(errw.String(), "agent switched: plan") ||
-		!strings.Contains(errw.String(), "provider: anthropic  model: claude-opus-4-8  reasoning: effort=max  pricing: in=$0.43/M out=$0.87/M cache-read=$0/M") {
+		!strings.Contains(errw.String(), "provider: anthropic  model: claude-opus-4-8  reasoning: profile=max  pricing: in=$0.43/M out=$0.87/M cache-read=$0/M") {
 		t.Errorf("switch should be acknowledged, errw=%q", errw.String())
 	}
 	// The post-switch turn must advertise only the plan tool set.
@@ -3230,24 +3155,5 @@ func TestREPLDuringTurnCursorWideRunesAndClamp(t *testing.T) {
 	rr.applyTurnAction(lineEditBackspace, "")
 	if string(rr.turnBuf) != "a" || rr.turnCursor != 1 {
 		t.Fatalf("buf=%q cursor=%d after clamped backspace, want a / 1", string(rr.turnBuf), rr.turnCursor)
-	}
-}
-
-func TestEffortMenuFallsBackToDefaults(t *testing.T) {
-	catalog := &llm.ReasoningInfo{Supported: true, Options: []llm.ReasoningOption{{Type: "effort", Values: []string{"low", "high"}}}}
-	if v, fromCatalog := effortMenu(catalog); !fromCatalog || strings.Join(v, ",") != "low,high" {
-		t.Errorf("catalog efforts = %v (catalog=%v), want low,high from catalog", v, fromCatalog)
-	}
-	// Provider-defined (supported, no enumerated options): offer the default
-	// menu (r61).
-	noLevels := &llm.ReasoningInfo{Supported: true}
-	if v, fromCatalog := effortMenu(noLevels); fromCatalog || strings.Join(v, ",") != "none,minimal,low,medium,high,xhigh,max" {
-		t.Errorf("fallback efforts = %v (catalog=%v), want the default menu", v, fromCatalog)
-	}
-	// Supported via a non-effort control (toggle): effort is not accepted, so no
-	// menu is offered.
-	toggleOnly := &llm.ReasoningInfo{Supported: true, Options: []llm.ReasoningOption{{Type: "toggle"}}}
-	if v, _ := effortMenu(toggleOnly); len(v) != 0 {
-		t.Errorf("toggle-only efforts = %v, want none", v)
 	}
 }

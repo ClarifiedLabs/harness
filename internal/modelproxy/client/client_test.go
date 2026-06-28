@@ -74,14 +74,11 @@ func TestCatalogAndRegistry(t *testing.T) {
 	}
 }
 
-func TestRegistryUsesTargetReasoningProfiles(t *testing.T) {
+func TestRegistryUsesTargetReasoningSupport(t *testing.T) {
 	registry := Registry(protocol.Catalog{
 		Targets: []protocol.Target{{
-			ID: "openrouter:z-ai/glm-5.1",
-			Reasoning: &protocol.ReasoningProfiles{
-				Supported: true,
-				Profiles:  []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"},
-			},
+			ID:        "openrouter:z-ai/glm-5.1",
+			Reasoning: true,
 		}},
 	})
 
@@ -89,8 +86,8 @@ func TestRegistryUsesTargetReasoningProfiles(t *testing.T) {
 	if !ok || info.Reasoning == nil {
 		t.Fatalf("reasoning info = %+v, ok=%v", info.Reasoning, ok)
 	}
-	if !info.Reasoning.SupportsEffort("xhigh") || !info.Reasoning.SupportsEffort("none") || !info.Reasoning.SupportsEffort("minimal") {
-		t.Fatalf("target reasoning efforts = %+v, want xhigh, none, and minimal", info.Reasoning)
+	if !info.Reasoning.Supported || len(info.Reasoning.Options) != 0 {
+		t.Fatalf("target reasoning = %+v, want supported without exposed options", info.Reasoning)
 	}
 }
 
@@ -132,7 +129,7 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 	var texts []string
 	var responseID string
 	var gotErr error
-	req := llm.Request{Model: "gpt-5.5", Reasoning: llm.ReasoningConfig{Effort: "xhigh"}, StoreResponse: true, PreviousResponseID: "resp_0"}
+	req := llm.Request{Model: "gpt-5.5", Reasoning: llm.ReasoningConfig{Profile: "xhigh"}, StoreResponse: true, PreviousResponseID: "resp_0"}
 	for ev, err := range c.Provider("openai:gpt-5.5").Stream(context.Background(), req) {
 		if err != nil {
 			gotErr = err

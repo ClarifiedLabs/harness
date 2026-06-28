@@ -29,14 +29,13 @@ import (
 	"harness/internal/modelproxy/pricing"
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/modelsdev"
+	"harness/internal/reasoningprofile"
 )
 
 const (
 	maxStreamRequestBytes = 64 << 20
 	openAICodexProviderID = "openai-codex"
 )
-
-var universalReasoningProfiles = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 var reasoningProfileRank = map[string]int{
 	"none":    0,
@@ -1098,7 +1097,7 @@ func (h *Handler) reasoningForTarget(target resolvedTarget, profile string, requ
 		profile = requested.Profile
 	}
 	profile = normalizeReasoningProfile(profile)
-	if profile == "" || profile == "default" {
+	if profile == "" {
 		return llm.ReasoningConfig{Summary: requested.Summary}
 	}
 	info := modelEntryReasoning(target.entry)
@@ -1133,17 +1132,10 @@ func (h *Handler) reasoningForTarget(target resolvedTarget, profile string, requ
 }
 
 func normalizeReasoningProfile(profile string) string {
-	profile = strings.ToLower(strings.TrimSpace(profile))
-	switch profile {
-	case "", "default", "provider-default":
-		return "default"
-	case "off", "false", "disabled", "disable":
-		return "none"
-	case "minimum", "min":
-		return "minimal"
-	default:
-		return profile
+	if normalized, ok := reasoningprofile.Normalize(profile); ok {
+		return normalized
 	}
+	return strings.ToLower(strings.TrimSpace(profile))
 }
 
 func mappedReasoningEffort(info *llm.ReasoningInfo, profile string) string {
@@ -1604,7 +1596,7 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				InputModalities: append([]string(nil), entry.InputModalities...),
 				ServerTools:     targetServerTools(pc, entry),
 				Price:           price,
-				Reasoning:       targetReasoningProfiles(entry),
+				Reasoning:       targetReasoningSupported(entry),
 			}
 			out.Targets = append(out.Targets, target)
 			rt := resolvedTarget{targetID: id, pc: pc, entry: entry}
@@ -1672,12 +1664,12 @@ func modelEntryReasoning(m llm.ModelEntry) *llm.ReasoningInfo {
 	}).Clone()
 }
 
-func targetReasoningProfiles(m llm.ModelEntry) *protocol.ReasoningProfiles {
+func targetReasoningSupported(m llm.ModelEntry) bool {
 	info := modelEntryReasoning(m)
 	if info == nil || !info.Supported {
-		return nil
+		return false
 	}
-	return &protocol.ReasoningProfiles{Supported: true, Profiles: append([]string(nil), universalReasoningProfiles...)}
+	return true
 }
 
 func providerAPIKeyEnv(provider string, getenv func(string) string) string {

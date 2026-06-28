@@ -19,6 +19,7 @@ import (
 
 	"harness/internal/hooks"
 	"harness/internal/logging"
+	"harness/internal/reasoningprofile"
 	"harness/internal/replprompt"
 )
 
@@ -61,9 +62,7 @@ type Config struct {
 	ToolTimeoutSeconds        int               `json:"tool_timeout_seconds"`   // -tool-timeout, per-tool-call dispatch ceiling (s); default 600, <=0 disables
 	DefaultContextWindow      int               `json:"default_context_window"` // -default-context-window, fallback when metadata lacks a window
 	ContextWindow             int               `json:"context_window"`         // -context-window, 0 = registry/default
-	ReasoningEffort           string            `json:"reasoning_effort"`
-	ReasoningEnabled          *bool             `json:"reasoning_enabled"`
-	ReasoningBudgetTokens     *int              `json:"reasoning_budget_tokens"`
+	Reasoning                 string            `json:"reasoning"`
 	ReasoningSummary          string            `json:"reasoning_summary"`
 	ImageDetail               string            `json:"image_detail"`
 	Images                    []ImageAttachment `json:"images"`
@@ -263,9 +262,7 @@ type fileConfig struct {
 	ToolTimeoutSeconds        *int                       `json:"tool_timeout_seconds"`
 	DefaultContextWindow      *int                       `json:"default_context_window"`
 	ContextWindow             *int                       `json:"context_window"`
-	ReasoningEffort           string                     `json:"reasoning_effort"`
-	ReasoningEnabled          *bool                      `json:"reasoning_enabled"`
-	ReasoningBudgetTokens     *int                       `json:"reasoning_budget_tokens"`
+	Reasoning                 string                     `json:"reasoning"`
 	ReasoningSummary          string                     `json:"reasoning_summary"`
 	ImageDetail               string                     `json:"image_detail"`
 	SearchTools               string                     `json:"search_tools"`
@@ -357,7 +354,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	fSystemPrompt, fNoEnv := f.systemPrompt, f.noEnv
 	fResume, fSession := f.resume, f.session
 	fMaxTurns, fDefaultContextWindow, fContextWindow := f.maxTurns, f.defaultContextWindow, f.contextWindow
-	fReasoningEffort, fReasoningEnabled, fReasoningBudgetTokens, fReasoningSummary := f.reasoningEffort, f.reasoningEnabled, f.reasoningBudgetTokens, f.reasoningSummary
+	fReasoning, fReasoningSummary := f.reasoning, f.reasoningSummary
 	fImageDetail, fSearchTools, fWebSearch := f.imageDetail, f.searchTools, f.webSearch
 	fPrompt, fInitialPrompt, fReplPrompt, fReplEditMode, fOutputFormat := f.prompt, f.initialPrompt, f.replPrompt, f.replEditMode, f.outputFormat
 	fVerbose, fToolStream, fShowDiffs, fNoColor := f.verbose, f.toolStream, f.showDiffs, f.noColor
@@ -426,12 +423,11 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		getenv("HARNESS_DEFAULT_CONTEXT_WINDOW"), fc.DefaultContextWindow, defaultContextWindow)
 	c.ContextWindow = resolveInt(set["context-window"], *fContextWindow,
 		getenv("HARNESS_CONTEXT_WINDOW"), fc.ContextWindow, 0)
-	c.ReasoningEffort = strings.ToLower(strings.TrimSpace(resolveString(set["reasoning-effort"], *fReasoningEffort,
-		getenv("HARNESS_REASONING_EFFORT"), fc.ReasoningEffort, "")))
-	c.ReasoningEnabled = resolveBoolPtr(set["reasoning-enabled"], *fReasoningEnabled,
-		getenv("HARNESS_REASONING_ENABLED"), fc.ReasoningEnabled)
-	c.ReasoningBudgetTokens = resolveIntPtr(set["reasoning-budget-tokens"], *fReasoningBudgetTokens,
-		getenv("HARNESS_REASONING_BUDGET_TOKENS"), fc.ReasoningBudgetTokens)
+	c.Reasoning, err = reasoningprofile.Canonicalize(resolveString(set["reasoning"], *fReasoning,
+		getenv("HARNESS_REASONING"), fc.Reasoning, ""))
+	if err != nil {
+		return Config{}, err
+	}
 	c.ReasoningSummary, err = canonicalReasoningSummary(resolveString(set["reasoning-summary"], *fReasoningSummary,
 		getenv("HARNESS_REASONING_SUMMARY"), fc.ReasoningSummary, ""))
 	if err != nil {
@@ -902,9 +898,7 @@ type flags struct {
 	toolTimeout                      *int
 	defaultContextWindow             *int
 	contextWindow                    *int
-	reasoningEffort                  *string
-	reasoningEnabled                 *bool
-	reasoningBudgetTokens            *int
+	reasoning                        *string
 	reasoningSummary                 *string
 	imageDetail                      *string
 	searchTools                      *string
@@ -963,9 +957,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.toolTimeout = fs.Int("tool-timeout", defaultToolTimeoutSeconds, "per-tool-call timeout backstop in seconds; <=0 disables (run_command's own timeout_seconds still applies)")
 	f.defaultContextWindow = fs.Int("default-context-window", defaultContextWindow, "default context window for configured models without context metadata (tokens)")
 	f.contextWindow = fs.Int("context-window", 0, "context window override (tokens)")
-	f.reasoningEffort = fs.String("reasoning-effort", "", "reasoning/thinking effort (provider/model dependent)")
-	f.reasoningEnabled = fs.Bool("reasoning-enabled", false, "explicitly enable or disable reasoning when supported")
-	f.reasoningBudgetTokens = fs.Int("reasoning-budget-tokens", 0, "reasoning/thinking budget tokens when supported")
+	f.reasoning = fs.String("reasoning", "", "reasoning profile: "+reasoningprofile.ChoicesLabel())
 	f.reasoningSummary = fs.String("reasoning-summary", "", "Responses API reasoning summary: auto, concise, detailed, or none")
 	f.imageDetail = fs.String("image-detail", "auto", "default image detail: auto, low, high, or original")
 	f.images = &imageVals
@@ -1060,9 +1052,13 @@ func normalizeConfigAtFileRef(v, baseDir string) string {
 // SaveSelectedModel writes provider/model/reasoning settings into the harness
 // config file, preserving any existing top-level keys. Missing files are
 // created atomically.
-func SaveSelectedModel(path, provider, model, reasoningEffort string, reasoningEnabled *bool, reasoningBudgetTokens *int) error {
+func SaveSelectedModel(path, provider, model, reasoning string) error {
 	if strings.TrimSpace(path) == "" {
 		return fmt.Errorf("config path is required")
+	}
+	reasoning, err := reasoningprofile.Canonicalize(reasoning)
+	if err != nil {
+		return err
 	}
 	raw := map[string]json.RawMessage{}
 	data, err := os.ReadFile(path)
@@ -1083,17 +1079,16 @@ func SaveSelectedModel(path, provider, model, reasoningEffort string, reasoningE
 	if err != nil {
 		return err
 	}
-	raw["reasoning_effort"], err = json.Marshal(strings.ToLower(strings.TrimSpace(reasoningEffort)))
-	if err != nil {
-		return err
-	}
-	raw["reasoning_enabled"], err = json.Marshal(reasoningEnabled)
-	if err != nil {
-		return err
-	}
-	raw["reasoning_budget_tokens"], err = json.Marshal(reasoningBudgetTokens)
-	if err != nil {
-		return err
+	delete(raw, "reasoning_effort")
+	delete(raw, "reasoning_enabled")
+	delete(raw, "reasoning_budget_tokens")
+	if reasoning == "" {
+		delete(raw, "reasoning")
+	} else {
+		raw["reasoning"], err = json.Marshal(reasoning)
+		if err != nil {
+			return err
+		}
 	}
 	return writeConfigFile(path, raw)
 }
