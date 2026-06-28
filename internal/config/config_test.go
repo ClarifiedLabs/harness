@@ -350,8 +350,8 @@ func TestReplPromptValidation(t *testing.T) {
 	if _, err := Load([]string{"-repl-prompt", "{missing}"}, noEnv, ""); err == nil {
 		t.Fatalf("expected unknown repl_prompt placeholder to fail")
 	}
-	if _, err := Load([]string{"-repl-prompt", `line\n{agent}> `}, noEnv, ""); err != nil {
-		t.Fatalf("escaped newline prompt should load: %v", err)
+	if _, err := Load([]string{"-repl-prompt", `line\n{agent}@{hostname}> `}, noEnv, ""); err != nil {
+		t.Fatalf("escaped newline and hostname prompt should load: %v", err)
 	}
 	// The vimode placeholder variants are valid config and should load.
 	for _, p := range []string{"{vimode}> ", "{vimode:long}> ", "{vimode:short}> "} {

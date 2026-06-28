@@ -771,6 +771,14 @@ func (app *App) promptValues(t *replprompt.Template, viMode string) replprompt.V
 			cwd = ""
 		}
 	}
+	var hostname string
+	if t.Uses("hostname") {
+		var err error
+		hostname, err = os.Hostname()
+		if err != nil {
+			hostname = ""
+		}
+	}
 	var gitBranch string
 	if t.Uses("git_branch") {
 		gitBranch = replprompt.CurrentGitBranch(cwd)
@@ -778,6 +786,7 @@ func (app *App) promptValues(t *replprompt.Template, viMode string) replprompt.V
 	return replprompt.Values{
 		Agent:     app.AgentName,
 		CWD:       cwd,
+		Hostname:  hostname,
 		GitBranch: gitBranch,
 		Provider:  app.Provider,
 		Model:     app.Model,

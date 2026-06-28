@@ -21,6 +21,7 @@ type field string
 const (
 	fieldAgent       field = "agent"
 	fieldCWD         field = "cwd"
+	fieldHostname    field = "hostname"
 	fieldGitBranch   field = "git_branch"
 	fieldProvider    field = "provider"
 	fieldModel       field = "model"
@@ -34,6 +35,7 @@ const (
 type Values struct {
 	Agent     string
 	CWD       string
+	Hostname  string
 	GitBranch string
 	Provider  string
 	Model     string
@@ -201,7 +203,7 @@ func (t *Template) Uses(name string) bool {
 
 func parseField(name string) (field, bool) {
 	switch field(name) {
-	case fieldAgent, fieldCWD, fieldGitBranch, fieldProvider, fieldModel, fieldModelInfo:
+	case fieldAgent, fieldCWD, fieldHostname, fieldGitBranch, fieldProvider, fieldModel, fieldModelInfo:
 		return field(name), true
 	case fieldViMode, fieldViModeLong, fieldViModeShort:
 		return field(name), true
@@ -216,6 +218,8 @@ func valueForField(f field, values Values) string {
 		return values.Agent
 	case fieldCWD:
 		return abbreviateHome(values.CWD)
+	case fieldHostname:
+		return values.Hostname
 	case fieldGitBranch:
 		return values.GitBranch
 	case fieldProvider:

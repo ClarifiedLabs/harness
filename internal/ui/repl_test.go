@@ -340,6 +340,25 @@ func TestREPLPromptUpdatesAfterAgentSwitch(t *testing.T) {
 	}
 }
 
+func TestREPLPromptRendersHostname(t *testing.T) {
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		t.Skipf("hostname unavailable: %v", err)
+	}
+
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.Prompt = "{hostname}> "
+
+	if code := Run(strings.NewReader("/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := errw.String(); !strings.Contains(got, hostname+"> ") {
+		t.Fatalf("prompt should show hostname %q, got %q", hostname, got)
+	}
+}
+
 func TestREPLPromptRendersViModeLabel(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
