@@ -53,7 +53,9 @@ func OneShot(app *App, prompt string) int {
 		app.saveOrWarn(app.SessionPath)
 		return ExitRuntime
 	}
+	pendingUnsupportedNotice := len(app.PendingImages) > 0 && !app.currentModelSupportsImages()
 	images := app.takePendingImages()
+	images = app.attachPromptImageReferences(prompt, images, pendingUnsupportedNotice)
 	turn := app.beginTurn(prompt, images)
 
 	ctx := context.Background()

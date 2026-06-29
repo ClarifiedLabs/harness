@@ -56,6 +56,19 @@ func TestValidateDetailRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestHasSupportedExtension(t *testing.T) {
+	for _, path := range []string{"screen.png", "photo.JPG", "scan.JPEG", "image.webp", "clip.GIF"} {
+		if !HasSupportedExtension(path) {
+			t.Fatalf("HasSupportedExtension(%q) = false, want true", path)
+		}
+	}
+	for _, path := range []string{"notes.txt", "archive.tar.gz", "README", ""} {
+		if HasSupportedExtension(path) {
+			t.Fatalf("HasSupportedExtension(%q) = true, want false", path)
+		}
+	}
+}
+
 func TestLoadRejectsUnsupportedType(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "notes.txt")
 	if err := os.WriteFile(path, []byte("not an image"), 0o644); err != nil {

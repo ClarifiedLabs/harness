@@ -358,7 +358,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 		case '\t':
 			e.clearShiftEnterPending()
 			e.markManualEdit(&state)
-			handled, err := e.completeBangLine(&state)
+			handled, err := e.completePromptTab(&state)
 			if err != nil {
 				return replInput{}, false, err
 			}
@@ -452,7 +452,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			case lineEditInsertText:
 				e.markManualEdit(&state)
 				if text == "\t" {
-					handled, err := e.completeBangLine(&state)
+					handled, err := e.completePromptTab(&state)
 					if err != nil {
 						return replInput{}, false, err
 					}
@@ -927,10 +927,144 @@ func (e *promptLineEditor) tracef(format string, args ...any) {
 	traceREPLInputf("ui: "+format, args...)
 }
 
+func (e *promptLineEditor) completePromptTab(s *lineEditState) (bool, error) {
+	if handled, err := e.completeAtFileReference(s); err != nil || handled {
+		return handled, err
+	}
+	return e.completeBangLine(s)
+}
+
 type bangCompletionCandidate struct {
 	value   string
 	display string
 	isDir   bool
+}
+
+func (e *promptLineEditor) completeAtFileReference(s *lineEditState) (bool, error) {
+	start, end, token, quoted, ok := atFileCompletionContext(s.buf, s.cursor)
+	if !ok {
+		return false, nil
+	}
+	candidates := bangPathCompletions(token)
+	if len(candidates) == 0 {
+		return true, nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].display < candidates[j].display
+	})
+	if len(candidates) == 1 {
+		text, cursor := formatPromptRefReplacement(candidates[0].value, candidates[0].isDir, true, quoted)
+		s.replaceRangeWithCursor(start, end, text, cursor)
+		return true, nil
+	}
+	common := longestCommonCompletionPrefix(candidates)
+	if len([]rune(common)) > len([]rune(token)) {
+		text, cursor := formatPromptRefReplacement(common, false, false, quoted)
+		s.replaceRangeWithCursor(start, end, text, cursor)
+		return true, nil
+	}
+	if err := s.finish(e.w); err != nil {
+		return true, err
+	}
+	for _, candidate := range candidates {
+		if _, err := fmt.Fprintln(e.w, formatPromptRefCandidate(candidate.value, candidate.isDir)); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
+}
+
+func atFileCompletionContext(buf []rune, cursor int) (start, end int, token string, quoted bool, ok bool) {
+	if !promptRefCompletionAllowed(buf) {
+		return 0, 0, "", false, false
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(buf) {
+		cursor = len(buf)
+	}
+	for i := cursor - 1; i >= 0; i-- {
+		if buf[i] != '@' || !isPromptRefBoundary(buf, i) || i+1 >= len(buf) || buf[i+1] != '"' || cursor < i+2 {
+			continue
+		}
+		raw := buf[i+2 : cursor]
+		if promptRefContainsUnescapedQuote(raw) {
+			continue
+		}
+		end = cursor
+		if cursor < len(buf) && buf[cursor] == '"' {
+			end = cursor + 1
+		}
+		return i, end, unescapePromptRefPath(string(raw)), true, true
+	}
+	start = cursor
+	for start > 0 && !unicode.IsSpace(buf[start-1]) {
+		start--
+	}
+	if start < len(buf) && buf[start] == '@' && isPromptRefBoundary(buf, start) {
+		if start+1 < len(buf) && buf[start+1] == '"' {
+			return 0, 0, "", false, false
+		}
+		return start, cursor, string(buf[start+1 : cursor]), false, true
+	}
+	return 0, 0, "", false, false
+}
+
+func promptRefCompletionAllowed(buf []rune) bool {
+	if len(buf) == 0 {
+		return true
+	}
+	if buf[0] == '!' && (len(buf) < 2 || buf[1] != '!') {
+		return false
+	}
+	if buf[0] == '/' && (len(buf) < 2 || buf[1] != '/') {
+		return false
+	}
+	return true
+}
+
+func promptRefContainsUnescapedQuote(runes []rune) bool {
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == '\\' && i+1 < len(runes) && (runes[i+1] == '"' || runes[i+1] == '\\') {
+			i++
+			continue
+		}
+		if runes[i] == '"' {
+			return true
+		}
+	}
+	return false
+}
+
+func formatPromptRefReplacement(path string, isDir, final, forceQuote bool) (string, int) {
+	if isDir && !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+	quote := forceQuote || needsPromptRefQuotes(path)
+	if quote {
+		text := "@\"" + escapePromptRefPath(path) + "\""
+		if final && !isDir {
+			text += " "
+			return text, len([]rune(text))
+		}
+		return text, len([]rune(text)) - 1
+	}
+	text := "@" + path
+	if final && !isDir {
+		text += " "
+	}
+	return text, len([]rune(text))
+}
+
+func formatPromptRefCandidate(path string, isDir bool) string {
+	if isDir && !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+	if needsPromptRefQuotes(path) {
+		return "@\"" + escapePromptRefPath(path) + "\""
+	}
+	return "@" + path
 }
 
 func (e *promptLineEditor) completeBangLine(s *lineEditState) (bool, error) {
@@ -1375,6 +1509,10 @@ func (s *lineEditState) insertString(text string) {
 }
 
 func (s *lineEditState) replaceRange(start, end int, text string) {
+	s.replaceRangeWithCursor(start, end, text, len([]rune(text)))
+}
+
+func (s *lineEditState) replaceRangeWithCursor(start, end int, text string, cursor int) {
 	if start < 0 {
 		start = 0
 	}
@@ -1384,12 +1522,19 @@ func (s *lineEditState) replaceRange(start, end int, text string) {
 	if end > len(s.buf) {
 		end = len(s.buf)
 	}
-	next := make([]rune, 0, len(s.buf)-(end-start)+len([]rune(text)))
+	inserted := []rune(text)
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(inserted) {
+		cursor = len(inserted)
+	}
+	next := make([]rune, 0, len(s.buf)-(end-start)+len(inserted))
 	next = append(next, s.buf[:start]...)
-	next = append(next, []rune(text)...)
+	next = append(next, inserted...)
 	next = append(next, s.buf[end:]...)
 	s.buf = next
-	s.cursor = start + len([]rune(text))
+	s.cursor = start + cursor
 	s.summary = "" // a content replacement reveals the real buffer
 }
 

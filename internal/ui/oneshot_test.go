@@ -147,6 +147,32 @@ func TestOneShotSendsPendingImage(t *testing.T) {
 	}
 }
 
+func TestOneShotAtImageReferenceAttachesImage(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	path := writeUIImageNamed(t, "screen shot.png")
+	prompt := `describe @"` + path + `"`
+
+	if code := OneShot(app, prompt); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+
+	content := fp.Requests[0].Messages[0].Content
+	if len(content) != 2 {
+		t.Fatalf("content = %d, want image + text", len(content))
+	}
+	if content[0].Kind != llm.BlockImage || content[0].ImageDetail != "auto" || content[0].ImageMediaType != "image/png" {
+		t.Fatalf("first block = %+v", content[0])
+	}
+	if content[1].Kind != llm.BlockText || content[1].Text != prompt {
+		t.Fatalf("second block = %+v, want preserved prompt %q", content[1], prompt)
+	}
+	if !strings.Contains(errw.String(), "[image attached: screen shot.png image/png") {
+		t.Fatalf("missing image attachment notice: %q", errw.String())
+	}
+}
+
 func TestOneShotSkillMentionAddsRequestContext(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})

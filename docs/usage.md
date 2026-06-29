@@ -157,6 +157,13 @@ provider configs should set `input_modalities`, for example
 `["text", "image"]`; models without `image` are treated as text-only and image
 attachments are skipped with a warning.
 
+Typed REPL prompts, initial `-i` prompts, and one-shot `-p` prompts also treat
+literal `@path` or `@"path with spaces"` references to supported image files as
+image attachments when the model supports images. The reference remains literal
+prompt text; harness does not expand file contents or strip the `@...` text.
+Pasted and externally edited REPL prompts stay fully literal and do not auto-attach
+images from `@` references.
+
 Provider configs can advertise hosted model tools with `server_tools`.
 Currently `web_search` is recognized. It can be set at the provider level or on
 individual model entries; the proxy also infers it for known web-search-capable
@@ -356,9 +363,13 @@ non-interactive large input, prefer `-p -` or piped stdin.
 At an interactive terminal, the prompt supports basic line editing. Shift-Enter
 inserts a newline without submitting. Press Ctrl-G at the prompt, or run
 `/edit [draft]`, to open an external editor for a multi-line prompt. Harness
-uses `$VISUAL`, then `$EDITOR`, then `vi`. On `!` command lines, Tab completes
-the first word from `PATH` and completes path words with `/`, `~/`, `./`, `../`,
-and nested relative path prefixes.
+uses `$VISUAL`, then `$EDITOR`, then `vi`. In normal prompt text, Tab completes
+literal `@path` file references; paths containing whitespace, quotes, or
+backslashes are inserted as `@"..."`. These references remain prompt text and do
+not expand file contents. Supported image references auto-attach as images using
+the default image detail when the model supports images. On `!` command lines,
+Tab completes the first word from `PATH` and completes path words with `/`, `~/`,
+`./`, `../`, and nested relative path prefixes.
 
 | command | effect |
 |---|---|

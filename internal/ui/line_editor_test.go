@@ -477,6 +477,164 @@ func TestPromptLineEditorTabOutsideBangInsertsTab(t *testing.T) {
 	}
 }
 
+func TestPromptLineEditorAtFileTabCompletesRelativeFile(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "alpha"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	input, ok, err := readEditedInput(t, "see @al\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "see @alpha " {
+		t.Fatalf("input text = %q, want completed @ reference", input.text)
+	}
+}
+
+func TestPromptLineEditorAtFileTabQuotesPathWithSpaces(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "screen shot.png"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	input, ok, err := readEditedInput(t, "see @screen\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != `see @"screen shot.png" ` {
+		t.Fatalf("input text = %q, want quoted @ reference", input.text)
+	}
+}
+
+func TestPromptLineEditorAtFileQuotedDirectoryCompletesFurther(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	child := filepath.Join(dir, "my dir")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatalf("mkdir fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(child, "screen shot.png"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	input, ok, err := readEditedInput(t, "see @my\tsc\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != `see @"my dir/screen shot.png" ` {
+		t.Fatalf("input text = %q, want nested quoted @ reference", input.text)
+	}
+}
+
+func TestPromptLineEditorAtFileTabCompletesCommonPrefix(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	for _, name := range []string{"alpha", "alpine"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+
+	input, ok, err := readEditedInput(t, "see @al\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "see @alp" {
+		t.Fatalf("input text = %q, want common @ prefix", input.text)
+	}
+}
+
+func TestPromptLineEditorAtFileTabListsCandidates(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	for _, name := range []string{"alpha", "beta"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("see @\t\r"), &out)
+
+	input, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "see @" {
+		t.Fatalf("input text = %q, want unchanged @ token", input.text)
+	}
+	got := out.String()
+	if !strings.Contains(got, "@alpha\n") || !strings.Contains(got, "@beta\n") {
+		t.Fatalf("completion list missing @ candidates: %q", got)
+	}
+}
+
+func TestPromptLineEditorAtFileTabCompletesEscapedBangPrompt(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "alpha"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	input, ok, err := readEditedInput(t, "!!see @al\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "!!see @alpha " {
+		t.Fatalf("input text = %q, want @ completion on escaped bang prompt", input.text)
+	}
+}
+
+func TestPromptLineEditorAtFileTabSkipsShellAndSlashLines(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "alpha"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	input, ok, err := readEditedInput(t, "!echo @al\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text == "!echo @alpha " {
+		t.Fatalf("single-bang shell line should not complete @ reference: %q", input.text)
+	}
+
+	input, ok, err = readEditedInput(t, "/cmd @al\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "/cmd @al\t" {
+		t.Fatalf("slash command line should insert a tab, got %q", input.text)
+	}
+}
+
 func TestPromptLineEditorBangTabCompletesCommandFromPath(t *testing.T) {
 	dir := t.TempDir()
 	writeExecutableForCompletion(t, filepath.Join(dir, "harness-test-cmd"))

@@ -1762,11 +1762,16 @@ message, or replay event. `!!` escapes a literal leading `!`; one-shot mode,
 initial `-i` prompts, non-TTY/scripted input, bracketed paste, and external-editor
 prompt content treat `!text` as ordinary prompt text.
 
-Tab completion is intentionally small and stdlib-only. It is active only in raw
-prompt-editor buffers that start with `!`: the first word completes executable names
-from `PATH` unless it starts with `/`, `~/`, `./`, `../`, or otherwise contains `/`;
-path words complete filesystem entries from cwd, absolute paths, or the current
-user's home directory while preserving the typed prefix.
+Tab completion is intentionally small and stdlib-only. In normal raw prompt-editor
+text, `@path` file references complete filesystem entries from cwd, absolute paths,
+or the current user's home directory while preserving the typed prefix; paths that
+need quoting are inserted as `@"..."`, and directories keep the cursor inside the
+closing quote so completion can continue. `@` completion is skipped for slash-command
+lines and single-bang shell escapes, but works on escaped prompt lines such as `//...`
+and `!!...`. In raw prompt-editor buffers that start with `!`, the first word still
+completes executable names from `PATH` unless it starts with `/`, `~/`, `./`, `../`,
+or otherwise contains `/`; path words complete filesystem entries with the same path
+prefix rules.
 
 `repl_prompt` (also `-repl-prompt` / `HARNESS_REPL_PROMPT`) is a format string
 rendered at every idle prompt boundary, so dynamic values reflect runtime
@@ -1821,7 +1826,11 @@ interactive TTY prompt, lines starting with `!` run a local shell command; `!!`
 escapes a literal bang. In a normal typed prompt, `$skillName` mentions an
 available skill anywhere in the text; the next model turn gets request-only
 context telling it to read that skill's `SKILL.md` before acting. `$$` escapes a
-literal `$`.
+literal `$`. Literal `@path` / `@"path with spaces"` references remain prompt text
+and never expand file contents; when they point at supported image extensions,
+typed REPL prompts, initial `-i` prompts, and one-shot prompts auto-attach the
+image if the model supports image input. Pasted and external-editor prompts keep
+literal-safety semantics and do not auto-attach from `@` references.
 
 | command | effect |
 |---|---|

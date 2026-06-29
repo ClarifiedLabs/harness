@@ -240,9 +240,10 @@ const helpText = `commands:
   /skills          list available skills
   /vi on|off       enable or disable vi-style prompt editing
   !command         run a local shell command at an interactive prompt
+  @path<Tab>       complete a literal file reference; image refs attach when supported
   $skillName       mention a skill to load via SKILL.md
 Interrupt a running turn with Ctrl-C or double-Esc; typing during a turn is kept and pre-filled into the next prompt (not auto-sent).
-Ctrl-G opens the editor from the prompt; lines starting with / are commands; // sends a literal leading slash; !! escapes a literal !; $$ escapes a literal $`
+Ctrl-G opens the editor from the prompt; paths with spaces complete as @"..."; lines starting with / are commands; // sends a literal leading slash; !! escapes a literal !; $$ escapes a literal $`
 
 func (app *App) clock() func() time.Time {
 	if app.Now != nil {
@@ -455,8 +456,8 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		_ = term.SetBracketedPaste(true)
 	}
-	startTurn := func(prompt string, resolveSkillMentions bool) {
-		run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: resolveSkillMentions})
+	startTurn := func(prompt string, resolveSkillMentions, attachPromptImages bool) {
+		run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: resolveSkillMentions, attachPromptImages: attachPromptImages})
 		if !ok {
 			return
 		}
@@ -531,7 +532,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		return ctx, cancel, interrupted.Load
 	}
-	startPromptTurn := func(prompt string, resolveSkillMentions bool) (exit bool, code int) {
+	startPromptTurn := func(prompt string, resolveSkillMentions, attachPromptImages bool) (exit bool, code int) {
 		if app.Renderer != nil {
 			app.Renderer.StartPrompt()
 		}
@@ -541,7 +542,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return true, ExitInterrupt
 		}
-		startTurn(prompt, resolveSkillMentions)
+		startTurn(prompt, resolveSkillMentions, attachPromptImages)
 		return false, ExitOK
 	}
 	applyAction := func(input replInput) (exit bool, code int) {
@@ -558,7 +559,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			if action.echoEditedPrompt {
 				app.echoEditedPrompt(prompt, action.prompt)
 			}
-			return startPromptTurn(action.prompt, action.resolveSkillMentions)
+			return startPromptTurn(action.prompt, action.resolveSkillMentions, action.attachPromptImages)
 		}
 		return false, ExitOK
 	}
@@ -573,7 +574,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return finish(ExitInterrupt)
 		}
-		startTurn(*initialPrompt, true)
+		startTurn(*initialPrompt, true, true)
 	}
 
 	for {
@@ -657,7 +658,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 						}
 					}
 					if app.handoffCommand("", readHandoffLine) {
-						if exit, code := startPromptTurn(implementationStartPrompt, true); exit {
+						if exit, code := startPromptTurn(implementationStartPrompt, true, false); exit {
 							return finish(code)
 						}
 						continue
@@ -882,12 +883,14 @@ type replAction struct {
 	shellCommand         string
 	echoEditedPrompt     bool
 	resolveSkillMentions bool
+	attachPromptImages   bool
 }
 
 type replCommandResult struct {
 	exit                 bool
 	prompt               string
 	resolveSkillMentions bool
+	attachPromptImages   bool
 }
 
 const implementationStartPrompt = "Begin implementing the recorded plan now."
@@ -930,7 +933,7 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 		return replAction{prompt: line, run: true}
 	}
 	if input.interactive && strings.HasPrefix(line, "!!") {
-		return replAction{prompt: line[1:], run: true, resolveSkillMentions: true} // !! escapes one literal leading !
+		return replAction{prompt: line[1:], run: true, resolveSkillMentions: true, attachPromptImages: true} // !! escapes one literal leading !
 	}
 	if input.interactive && strings.HasPrefix(line, "!") {
 		command := strings.TrimSpace(line[1:])
@@ -940,7 +943,7 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 		return replAction{shell: true, shellCommand: command}
 	}
 	if strings.HasPrefix(line, "//") {
-		return replAction{prompt: line[1:], run: true, resolveSkillMentions: true} // // escapes one literal leading slash
+		return replAction{prompt: line[1:], run: true, resolveSkillMentions: true, attachPromptImages: true} // // escapes one literal leading slash
 	}
 	if strings.HasPrefix(line, "/") {
 		cmd, arg := commandFields(line)
@@ -955,11 +958,11 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 			return replAction{exit: true}
 		}
 		if result.prompt != "" {
-			return replAction{prompt: result.prompt, run: true, resolveSkillMentions: result.resolveSkillMentions}
+			return replAction{prompt: result.prompt, run: true, resolveSkillMentions: result.resolveSkillMentions, attachPromptImages: result.attachPromptImages}
 		}
 		return replAction{}
 	}
-	return replAction{prompt: line, run: true, resolveSkillMentions: true}
+	return replAction{prompt: line, run: true, resolveSkillMentions: true, attachPromptImages: true}
 }
 
 func (app *App) echoEditedPrompt(replPrompt, submitted string) {
@@ -1746,6 +1749,75 @@ func (app *App) pendingImagesSummary() string {
 		fmt.Fprintf(&b, "\n  %d. %s %s %d bytes detail=%s", i+1, img.Info.Name, img.Info.MediaType, img.Info.Bytes, img.Info.Detail)
 	}
 	return b.String()
+}
+
+func (app *App) attachPromptImageReferences(prompt string, images []inputimage.Loaded, unsupportedNoticePrinted bool) []inputimage.Loaded {
+	refs := promptFileReferences(prompt)
+	if len(refs) == 0 {
+		return images
+	}
+	seen := map[string]bool{}
+	var candidates []struct {
+		ref  string
+		path string
+	}
+	for _, ref := range refs {
+		if !inputimage.HasSupportedExtension(ref) {
+			continue
+		}
+		path := resolvePromptRefLoadPath(ref)
+		key := promptRefLoadKey(path)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		candidates = append(candidates, struct {
+			ref  string
+			path string
+		}{ref: ref, path: path})
+	}
+	if len(candidates) == 0 {
+		return images
+	}
+	if !app.currentModelSupportsImages() {
+		if !unsupportedNoticePrinted {
+			fmt.Fprintln(app.Errw, app.imageUnsupportedNotice())
+		}
+		return images
+	}
+	for _, candidate := range candidates {
+		loaded, err := inputimage.Load(inputimage.Attachment{Path: candidate.path, Detail: app.ImageDetail})
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[image failed: %s: %v]\n", candidate.ref, err)
+			continue
+		}
+		next := append(append([]inputimage.Loaded(nil), images...), loaded)
+		if err := inputimage.ValidateTotal(next); err != nil {
+			fmt.Fprintf(app.Errw, "[image failed: %s: %v]\n", candidate.ref, err)
+			continue
+		}
+		images = next
+		fmt.Fprintf(app.Errw, "[image attached: %s %s %d bytes detail=%s]\n", loaded.Info.Name, loaded.Info.MediaType, loaded.Info.Bytes, loaded.Info.Detail)
+	}
+	return images
+}
+
+func resolvePromptRefLoadPath(ref string) string {
+	if strings.HasPrefix(ref, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil && home != "" {
+			return filepath.Join(home, strings.TrimPrefix(ref, "~/"))
+		}
+	}
+	return ref
+}
+
+func promptRefLoadKey(path string) string {
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		return abs
+	}
+	return filepath.Clean(path)
 }
 
 func (app *App) contextDump(path string) {
@@ -2547,10 +2619,11 @@ func (app *App) clear() {
 // error is reported but does not end the REPL (the next prompt may recover).
 type turnOptions struct {
 	resolveSkillMentions bool
+	attachPromptImages   bool
 }
 
 func (app *App) runTurn(prompt string) {
-	if run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: true}); ok {
+	if run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
 		run()
 	}
 }
@@ -2581,7 +2654,11 @@ func (app *App) prepareTurn(prompt string, opts turnOptions) (func(), bool) {
 		}
 		return nil, false
 	}
+	pendingUnsupportedNotice := len(app.PendingImages) > 0 && !app.currentModelSupportsImages()
 	images := app.takePendingImages()
+	if opts.attachPromptImages {
+		images = app.attachPromptImageReferences(prompt, images, pendingUnsupportedNotice)
+	}
 	turn := app.beginTurn(prompt, images)
 	ctx := context.Background()
 	var cancel context.CancelFunc

@@ -49,6 +49,18 @@ type Info struct {
 	Height       int    `json:"height,omitempty"`
 }
 
+// HasSupportedExtension reports whether path has an extension for an image type
+// that Load can validate. It is only a cheap candidate filter; Load remains the
+// authority on file content and size.
+func HasSupportedExtension(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png", ".jpg", ".jpeg", ".webp", ".gif":
+		return true
+	default:
+		return false
+	}
+}
+
 // ValidateDetail canonicalizes an OpenAI image detail value. Anthropic ignores
 // it, but keeping it provider-neutral lets sessions resume across providers.
 func ValidateDetail(detail string) (string, error) {
