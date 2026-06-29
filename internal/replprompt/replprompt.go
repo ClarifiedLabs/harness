@@ -23,9 +23,7 @@ const (
 	fieldCWD         field = "cwd"
 	fieldHostname    field = "hostname"
 	fieldGitBranch   field = "git_branch"
-	fieldProvider    field = "provider"
 	fieldModel       field = "model"
-	fieldModelInfo   field = "model_info"
 	fieldViMode      field = "vimode"
 	fieldViModeLong  field = "vimode:long"
 	fieldViModeShort field = "vimode:short"
@@ -37,9 +35,7 @@ type Values struct {
 	CWD       string
 	Hostname  string
 	GitBranch string
-	Provider  string
 	Model     string
-	ModelInfo string
 	// ViMode is the current raw-prompt vi edit mode: "insert", "normal", or ""
 	// (empty outside vi mode, e.g. emacs mode). {vimode} renders a label for it.
 	ViMode string
@@ -203,7 +199,7 @@ func (t *Template) Uses(name string) bool {
 
 func parseField(name string) (field, bool) {
 	switch field(name) {
-	case fieldAgent, fieldCWD, fieldHostname, fieldGitBranch, fieldProvider, fieldModel, fieldModelInfo:
+	case fieldAgent, fieldCWD, fieldHostname, fieldGitBranch, fieldModel:
 		return field(name), true
 	case fieldViMode, fieldViModeLong, fieldViModeShort:
 		return field(name), true
@@ -222,31 +218,12 @@ func valueForField(f field, values Values) string {
 		return values.Hostname
 	case fieldGitBranch:
 		return values.GitBranch
-	case fieldProvider:
-		return values.Provider
 	case fieldModel:
 		return values.Model
-	case fieldModelInfo:
-		if values.ModelInfo != "" {
-			return values.ModelInfo
-		}
-		return ModelInfo(values.Provider, values.Model)
 	case fieldViMode, fieldViModeLong:
 		return ViModeLabel(values.ViMode, "long")
 	case fieldViModeShort:
 		return ViModeLabel(values.ViMode, "short")
-	default:
-		return ""
-	}
-}
-
-// ModelInfo renders the compact provider/model prompt value.
-func ModelInfo(provider, model string) string {
-	switch {
-	case provider != "" && model != "":
-		return provider + ":" + model
-	case model != "":
-		return model
 	default:
 		return ""
 	}

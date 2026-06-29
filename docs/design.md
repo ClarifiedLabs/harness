@@ -1776,8 +1776,8 @@ prefix rules.
 `repl_prompt` (also `-repl-prompt` / `HARNESS_REPL_PROMPT`) is a format string
 rendered at every idle prompt boundary, so dynamic values reflect runtime
 changes before each read. The default is `[{agent}] > `. Supported placeholders
-are `{agent}`, `{cwd}`, `{hostname}`, `{git_branch}`, `{provider}`, `{model}`,
-`{model_info}`, and `{vimode}`. `{cwd}` abbreviates the user's home directory
+are `{agent}`, `{cwd}`, `{hostname}`, `{git_branch}`, `{model}`, and `{vimode}`.
+`{cwd}` abbreviates the user's home directory
 prefix to `~` (for example `~/work`), so the rendered value may differ from the
 raw working directory. `{hostname}` renders the OS hostname. Literal escapes `\n`,
 `\t`, `\\`, `\{`, and `\}` are decoded

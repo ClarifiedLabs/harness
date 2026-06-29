@@ -797,9 +797,7 @@ func (app *App) promptValues(t *replprompt.Template, viMode string) replprompt.V
 		CWD:       cwd,
 		Hostname:  hostname,
 		GitBranch: gitBranch,
-		Provider:  app.Provider,
 		Model:     app.Model,
-		ModelInfo: replprompt.ModelInfo(app.Provider, app.Model),
 		ViMode:    viMode,
 	}
 }
@@ -1861,7 +1859,7 @@ func (app *App) pickModel(readLine func(string) (string, error)) {
 		fmt.Fprintln(app.Errw, app.modelSummary())
 		return
 	}
-	fmt.Fprintf(app.Errw, "current: provider=%s model=%s\n", app.Provider, app.Model)
+	fmt.Fprintf(app.Errw, "current model: %s\n", modelDisplayName(app.Provider, app.Model))
 	model, err := app.PickModel(PickerIO{
 		ReadLine: readLine,
 		Writer:   app.Errw,
@@ -1897,7 +1895,7 @@ func (app *App) modelSummary() string {
 	models = uniqueModels(models, app.Model)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "current: provider=%s model=%s proxy-url=%s\n", app.Provider, app.Model, app.BaseURL)
+	fmt.Fprintf(&b, "current model: %s  proxy-url: %s\n", modelDisplayName(app.Provider, app.Model), app.BaseURL)
 	b.WriteString("available models:")
 	if len(models) == 0 {
 		b.WriteString(" none configured")
@@ -1971,7 +1969,7 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	}
 	app.BaseURL = selection.BaseURL
 	app.Reasoning = selection.Reasoning
-	fmt.Fprintf(app.Errw, "[model switched: provider=%s model=%s proxy-url=%s reasoning=%s]\n", app.Provider, app.Model, app.BaseURL, app.reasoningLabel())
+	fmt.Fprintf(app.Errw, "[model switched: model=%s proxy-url=%s reasoning=%s]\n", modelDisplayName(app.Provider, app.Model), app.BaseURL, app.reasoningLabel())
 	if oldProvider != app.Provider || oldModel != app.Model {
 		app.onModelChanged()
 	}
@@ -2364,7 +2362,7 @@ func (app *App) agentSummary() string {
 
 func (app *App) currentAgentModelSummary() string {
 	if app.Provider != "" || app.Model != "" {
-		return fmt.Sprintf("%s/%s", app.Provider, app.Model)
+		return modelDisplayName(app.Provider, app.Model)
 	}
 	return "unknown"
 }

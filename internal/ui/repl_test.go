@@ -1626,7 +1626,7 @@ func TestREPLAgentCommandLists(t *testing.T) {
 		t.Errorf("/agent should include descriptions, errw=%q", got)
 	}
 	for _, want := range []string{
-		"current agent: plan [anthropic/claude-opus-4-8]",
+		"current agent: plan [anthropic:claude-opus-4-8]",
 		"auto            [inherit current] Default agent",
 		"independent     [openai/inherit current model] Work independently",
 		"plan (current)  [anthropic/claude-opus-4-8] [delegatable] Plan changes",
@@ -1718,7 +1718,7 @@ func TestREPLAgentCommandSwitchesNextTurn(t *testing.T) {
 		t.Errorf("app.System should update so saves capture it, got %q", app.System)
 	}
 	if !strings.Contains(errw.String(), "agent switched: plan") ||
-		!strings.Contains(errw.String(), "provider: anthropic  model: claude-opus-4-8  reasoning: profile=max  pricing: in=$0.43/M out=$0.87/M cache-read=$0/M") {
+		!strings.Contains(errw.String(), "model: claude-opus-4-8  reasoning: profile=max  pricing: in=$0.43/M out=$0.87/M cache-read=$0/M") {
 		t.Errorf("switch should be acknowledged, errw=%q", errw.String())
 	}
 	// The post-switch turn must advertise only the plan tool set.

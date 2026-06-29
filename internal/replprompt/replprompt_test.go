@@ -9,7 +9,7 @@ import (
 )
 
 func TestRenderPlaceholdersAndEscapes(t *testing.T) {
-	tmpl, err := Compile(`{agent} {cwd} {hostname} {git_branch} {provider} {model} {model_info}\n\{\}\\\t`)
+	tmpl, err := Compile(`{agent} {cwd} {hostname} {git_branch} {model}\n\{\}\\\t`)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -18,38 +18,11 @@ func TestRenderPlaceholdersAndEscapes(t *testing.T) {
 		CWD:       "/repo",
 		Hostname:  "devbox",
 		GitBranch: "main",
-		Provider:  "openai",
-		Model:     "gpt-5.5",
+		Model:     "openai:gpt-5.5",
 	})
-	want := "plan /repo devbox main openai gpt-5.5 openai:gpt-5.5\n{}\\\t"
+	want := "plan /repo devbox main openai:gpt-5.5\n{}\\\t"
 	if got != want {
 		t.Fatalf("render = %q, want %q", got, want)
-	}
-}
-
-func TestRenderModelInfoFallbacks(t *testing.T) {
-	tests := []struct {
-		name     string
-		provider string
-		model    string
-		want     string
-	}{
-		{name: "provider and model", provider: "anthropic", model: "claude", want: "anthropic:claude"},
-		{name: "model only", model: "local", want: "local"},
-		{name: "empty", want: ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tmpl, err := Compile("{model_info}")
-			if err != nil {
-				t.Fatalf("Compile: %v", err)
-			}
-			got := tmpl.Render(Values{Provider: tt.provider, Model: tt.model})
-			if got != tt.want {
-				t.Fatalf("render = %q, want %q", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -63,6 +36,8 @@ func TestCompileRejectsInvalidFormat(t *testing.T) {
 		`bad\`,
 		"{vimode:bogus}",
 		"{agent:x}",
+		"{provider}",
+		"{model_info}",
 	}
 
 	for _, format := range tests {
@@ -85,14 +60,14 @@ func TestLiteralPromptStillWorks(t *testing.T) {
 }
 
 func TestUsesReportsReferencedPlaceholders(t *testing.T) {
-	tmpl, err := Compile("{agent} {hostname} {model_info}")
+	tmpl, err := Compile("{agent} {hostname} {model}")
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
-	if !tmpl.Uses("agent") || !tmpl.Uses("hostname") || !tmpl.Uses("model_info") {
+	if !tmpl.Uses("agent") || !tmpl.Uses("hostname") || !tmpl.Uses("model") {
 		t.Fatalf("Uses should report referenced placeholders")
 	}
-	if tmpl.Uses("git_branch") || tmpl.Uses("missing") {
+	if tmpl.Uses("git_branch") || tmpl.Uses("provider") || tmpl.Uses("model_info") || tmpl.Uses("missing") {
 		t.Fatalf("Uses should ignore absent or invalid placeholders")
 	}
 }

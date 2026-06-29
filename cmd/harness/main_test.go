@@ -554,7 +554,7 @@ func TestRunTimestampModes(t *testing.T) {
 			if out.String() != "42\n" {
 				t.Fatalf("stdout = %q, want raw assistant text", out.String())
 			}
-			if strings.Contains(errw.String(), "12:00:00 session:") || strings.Contains(errw.String(), "12:00:00 provider:") {
+			if strings.Contains(errw.String(), "12:00:00 session:") {
 				t.Fatalf("startup diagnostics should not be timestamped: %q", errw.String())
 			}
 			if !strings.Contains(errw.String(), tc.wantStatus) {
@@ -1735,14 +1735,14 @@ func TestRunPromptsForReplacementModelWhenConfiguredSelectionUnavailable(t *test
 			configJSON: `{"provider":"xiaomi","model":"mimo-v2.5-pro"}`,
 			stdin:      "\n2\n\nn\n/exit\n",
 			wantError:  `target "xiaomi:mimo-v2.5-pro" is not available from the model proxy`,
-			wantLine:   "provider: openai:gpt-5.5  model: openai:gpt-5.5",
+			wantLine:   "model: openai:gpt-5.5",
 		},
 		{
 			name:       "model unavailable",
 			configJSON: `{"model":"not-real"}`,
 			stdin:      "\n1\n\nn\n/exit\n",
 			wantError:  `target "not-real" is not available from the model proxy`,
-			wantLine:   "provider: anthropic:claude-opus-4-8  model: anthropic:claude-opus-4-8",
+			wantLine:   "model: anthropic:claude-opus-4-8",
 		},
 	}
 	for _, tc := range tests {
@@ -2879,7 +2879,7 @@ func TestRunREPLAgentListShowsProviderModelConfig(t *testing.T) {
 	if !strings.Contains(got, "security        [openai/gpt-5.5] [delegatable] Security review") {
 		t.Fatalf("/agent output missing configured provider/model, stderr=%q", got)
 	}
-	if !strings.Contains(got, "current agent: auto [anthropic:claude-opus-4-8/anthropic:claude-opus-4-8]") ||
+	if !strings.Contains(got, "current agent: auto [anthropic:claude-opus-4-8]") ||
 		!strings.Contains(got, "auto (current)  [inherit current]") {
 		t.Fatalf("/agent output missing inherited provider/model, stderr=%q", got)
 	}

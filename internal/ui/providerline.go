@@ -7,11 +7,12 @@ import (
 	"harness/internal/llm"
 )
 
-// ProviderLine formats the active provider/model summary shown at startup and
-// after runtime switches.
+// ProviderLine formats the active model summary shown at startup and after
+// runtime switches.
 func ProviderLine(provider, model, registryModel string, reasoning llm.ReasoningConfig, registry *llm.Registry) string {
+	_ = provider // Kept for call-site compatibility; model now carries the display target.
 	var b strings.Builder
-	fmt.Fprintf(&b, "provider: %s  model: %s  reasoning: %s", provider, model, providerLineReasoningLabel(reasoning))
+	fmt.Fprintf(&b, "model: %s  reasoning: %s", model, providerLineReasoningLabel(reasoning))
 	if price := providerLineModelPricing(registry, registryModel); price != "" {
 		fmt.Fprintf(&b, "  pricing: %s", price)
 	}
