@@ -23,26 +23,33 @@ case "$GOARCH" in
 	*) echo "unsupported GOARCH for rpm: ${GOARCH}" >&2; exit 2 ;;
 esac
 
-topdir="$(abs_path "${WORK_DIR:-dist/package-rpm}")/rpmbuild"
+work_dir="$(abs_path "${WORK_DIR:-dist/package-rpm}")"
 readme_path="$(abs_path README.md)"
 license_path="$(abs_path LICENSE)"
-rm -rf "$topdir"
-mkdir -p "${topdir}/BUILD" "${topdir}/BUILDROOT" "${topdir}/RPMS" "${topdir}/SOURCES" "${topdir}/SPECS" "$dist_dir"
+rm -rf "$work_dir"
+mkdir -p "$dist_dir"
 
-spec="${topdir}/SPECS/harness.spec"
-cat >"$spec" <<SPEC
-Name: harness
+package_one() {
+	local name="$1"
+	local binary="$2"
+	local summary="$3"
+	local description="$4"
+	local topdir="${work_dir}/${name}/rpmbuild"
+	local spec="${topdir}/SPECS/${name}.spec"
+
+	mkdir -p "${topdir}/BUILD" "${topdir}/BUILDROOT" "${topdir}/RPMS" "${topdir}/SOURCES" "${topdir}/SPECS"
+	cat >"$spec" <<SPEC
+Name: ${name}
 Version: ${version}
 Release: 1%{?dist}
-Summary: Tool-using LLM harness CLI
+Summary: ${summary}
 License: MIT
 URL: https://github.com/ClarifiedLabs/harness
 BuildArch: ${rpm_arch}
 AutoReqProv: no
 
 %description
-Harness is a small terminal-first CLI for running a provider-neutral,
-tool-using LLM loop over local files, shell commands, web fetches, and git.
+${description}
 
 %prep
 
@@ -50,26 +57,40 @@ tool-using LLM loop over local files, shell commands, web fetches, and git.
 
 %install
 mkdir -p %{buildroot}/usr/bin
-mkdir -p %{buildroot}/usr/share/doc/harness
-mkdir -p %{buildroot}/usr/share/licenses/harness
-install -m 0755 "${stage_dir}/harness" %{buildroot}/usr/bin/harness
-install -m 0755 "${stage_dir}/harness-model-proxy" %{buildroot}/usr/bin/harness-model-proxy
-install -m 0755 "${stage_dir}/harness-mcp-proxy" %{buildroot}/usr/bin/harness-mcp-proxy
-install -m 0644 "${readme_path}" %{buildroot}/usr/share/doc/harness/README.md
-install -m 0644 "${license_path}" %{buildroot}/usr/share/licenses/harness/LICENSE
+mkdir -p %{buildroot}/usr/share/doc/${name}
+mkdir -p %{buildroot}/usr/share/licenses/${name}
+install -m 0755 "${stage_dir}/${binary}" %{buildroot}/usr/bin/${binary}
+install -m 0644 "${readme_path}" %{buildroot}/usr/share/doc/${name}/README.md
+install -m 0644 "${license_path}" %{buildroot}/usr/share/licenses/${name}/LICENSE
 
 %files
-/usr/bin/harness
-/usr/bin/harness-model-proxy
-/usr/bin/harness-mcp-proxy
-%doc /usr/share/doc/harness/README.md
-%license /usr/share/licenses/harness/LICENSE
+/usr/bin/${binary}
+%doc /usr/share/doc/${name}/README.md
+%license /usr/share/licenses/${name}/LICENSE
 SPEC
 
-rpmbuild --define "_topdir ${topdir}" --target "${rpm_arch}" -bb "$spec"
-rpm_path="$(find "${topdir}/RPMS" -type f -name '*.rpm' -print | sort | awk 'END {print}')"
-if [[ -z "$rpm_path" ]]; then
-	echo "rpmbuild did not produce an rpm" >&2
-	exit 1
-fi
-cp "$rpm_path" "${dist_dir}/harness-${version}-1.${rpm_arch}.rpm"
+	rpmbuild --define "_topdir ${topdir}" --target "${rpm_arch}" -bb "$spec"
+	local rpm_path
+	rpm_path="$(find "${topdir}/RPMS" -type f -name '*.rpm' -print | sort | awk 'END {print}')"
+	if [[ -z "$rpm_path" ]]; then
+		echo "rpmbuild did not produce an rpm for ${name}" >&2
+		exit 1
+	fi
+	cp "$rpm_path" "${dist_dir}/${name}-${version}-1.${rpm_arch}.rpm"
+}
+
+package_one \
+	"harness" \
+	"harness" \
+	"Tool-using LLM harness CLI" \
+	"Harness is a terminal-first CLI for running a provider-neutral, tool-using LLM loop over local files, shell commands, web fetches, and git."
+package_one \
+	"harness-model-proxy" \
+	"harness-model-proxy" \
+	"Provider and model proxy for harness" \
+	"The harness model proxy owns provider configuration, API keys, model catalog metadata, and concrete provider calls."
+package_one \
+	"harness-mcp-proxy" \
+	"harness-mcp-proxy" \
+	"MCP proxy for harness" \
+	"The harness MCP proxy supervises configured MCP servers and exposes their merged tool surface over HTTP or stdio."

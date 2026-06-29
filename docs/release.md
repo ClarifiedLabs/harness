@@ -27,12 +27,35 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`. The workflow builds:
 - Linux amd64
 - Linux arm64
 
-It publishes tarballs, `.deb`, `.rpm`, a signed and notarized macOS `.pkg`,
-Homebrew bottles for macOS arm64, macOS Intel, Linux amd64, and Linux arm64,
-SHA-256 checksums, and GitHub artifact attestations. Homebrew formulae are split
-into `harness`, `harness-model-proxy`, `harness-mcp-proxy`, and the
-`harness-full` meta formula. The workflow then updates
-`ClarifiedLabs/homebrew-tap` through a GitHub App installation token.
+It publishes tarballs, per-binary `.deb` and `.rpm` packages, per-binary GHCR
+container images, a signed and notarized macOS `.pkg`, Homebrew bottles for
+macOS arm64, macOS Intel, Linux amd64, and Linux arm64, SHA-256 checksums, and
+GitHub artifact attestations. Homebrew formulae are split into `harness`,
+`harness-model-proxy`, `harness-mcp-proxy`, and the `harness-full` meta formula.
+The workflow then updates `ClarifiedLabs/homebrew-tap` through a GitHub App
+installation token.
+
+Tarballs and the macOS `.pkg` include all three binaries. Homebrew formulae,
+`.deb` packages, `.rpm` packages, and container images are split by binary:
+`harness`, `harness-model-proxy`, and `harness-mcp-proxy`.
+
+Container images are published to:
+
+- `ghcr.io/clarifiedlabs/harness`
+- `ghcr.io/clarifiedlabs/harness-model-proxy`
+- `ghcr.io/clarifiedlabs/harness-mcp-proxy`
+
+Image tags use the release version without the leading `v` plus `latest`, for
+example `1.2.3` and `latest`. The `harness` image includes `git`,
+`openssh-client`, and `ripgrep`; proxy images are minimal Debian Trixie images
+with `ca-certificates` and the selected binary.
+
+Proxy containers must bind wildcard addresses when exposing ports:
+
+```sh
+docker run --rm -p 8765:8765 ghcr.io/clarifiedlabs/harness-model-proxy:latest serve -listen 0.0.0.0:8765
+docker run --rm -p 8766:8766 ghcr.io/clarifiedlabs/harness-mcp-proxy:latest serve -listen 0.0.0.0:8766
+```
 
 The tap repository must already exist with an initialized default branch. No
 formula file is required ahead of time; the release workflow writes the formula
@@ -43,13 +66,14 @@ files and merges the generated bottle metadata.
 Push a branch named `release-ci` or under `release-ci/`, or run the `release`
 workflow manually, to exercise the release workflow without publishing. Dry-run
 builds use version `v0.0.0` and the pushed commit archive as the Homebrew source.
-They build and upload the normal workflow artifacts, generate checksums, build
-Homebrew bottles from a local tap, and dry-run the Homebrew formula merge.
+They build and upload the normal workflow artifacts, build container images
+without pushing them, generate checksums, build Homebrew bottles from a local
+tap, and dry-run the Homebrew formula merge.
 
-Dry runs do not publish a GitHub release, push to the Homebrew tap, or create
-artifact attestations. The macOS `.pkg` is built unsigned in dry runs so Apple
-Developer ID and notarization secrets are only required for real `v*` tag
-releases.
+Dry runs do not publish a GitHub release, push container images, push to the
+Homebrew tap, or create artifact attestations. The macOS `.pkg` is built
+unsigned in dry runs so Apple Developer ID and notarization secrets are only
+required for real `v*` tag releases.
 
 ## Tagging
 

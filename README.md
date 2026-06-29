@@ -55,9 +55,20 @@ Or download a package from
 [`github.com/ClarifiedLabs/harness/releases`](https://github.com/ClarifiedLabs/harness/releases):
 
 - macOS arm64: signed `.pkg` or `harness_<version>_darwin_arm64.tar.gz`
-- Linux amd64/arm64: `.deb`, `.rpm`, or `harness_<version>_linux_<arch>.tar.gz`
+- Linux amd64/arm64: per-binary `.deb`/`.rpm` packages or
+  `harness_<version>_linux_<arch>.tar.gz`
 
-Tarballs and OS packages include all three binaries.
+Tarballs include all three binaries. Homebrew, `.deb`, and `.rpm` packages are
+split by binary.
+
+Container images are published to GHCR with version tags like `1.2.3` and
+`latest`:
+
+```sh
+docker run --rm -it -v "$PWD:/workspace" -w /workspace ghcr.io/clarifiedlabs/harness:latest --version
+docker run --rm -p 8765:8765 ghcr.io/clarifiedlabs/harness-model-proxy:latest serve -listen 0.0.0.0:8765
+docker run --rm -p 8766:8766 ghcr.io/clarifiedlabs/harness-mcp-proxy:latest serve -listen 0.0.0.0:8766
+```
 
 Until the first release exists, install from a checkout with Go 1.26:
 

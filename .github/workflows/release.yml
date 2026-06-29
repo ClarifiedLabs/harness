@@ -253,6 +253,104 @@ jobs:
           path: dist/*.bottle.*
           if-no-files-found: error
 
+  container-images:
+    name: container image ${{ matrix.package }}
+    runs-on: ubuntu-24.04
+    needs: build-linux
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: harness
+            binary: harness
+            image: ghcr.io/clarifiedlabs/harness
+            title: harness
+            workbench: "true"
+          - package: harness-model-proxy
+            binary: harness-model-proxy
+            image: ghcr.io/clarifiedlabs/harness-model-proxy
+            title: harness-model-proxy
+            workbench: "false"
+          - package: harness-mcp-proxy
+            binary: harness-mcp-proxy
+            image: ghcr.io/clarifiedlabs/harness-mcp-proxy
+            title: harness-mcp-proxy
+            workbench: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Download Linux packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Prepare image metadata
+        id: image-meta
+        env:
+          IMAGE: ${{ matrix.image }}
+          VERSION: ${{ env.RELEASE_VERSION }}
+        run: |
+          version="${VERSION#v}"
+          created="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "version=${version}"
+            echo "created=${created}"
+            echo "tags<<TAGS"
+            echo "${IMAGE}:${version}"
+            if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+              echo "${IMAGE}:latest"
+            fi
+            echo "TAGS"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Login to GHCR
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: docker/binary.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.image-meta.outputs.tags }}
+          build-args: |
+            PACKAGE=${{ matrix.package }}
+            BINARY=${{ matrix.binary }}
+            VERSION=${{ steps.image-meta.outputs.version }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ steps.image-meta.outputs.created }}
+            IMAGE_TITLE=${{ matrix.title }}
+            INSTALL_WORKBENCH=${{ matrix.workbench }}
+
+      - name: Attest image
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-name: ${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
   publish:
     name: publish release
     runs-on: ubuntu-24.04
@@ -260,6 +358,7 @@ jobs:
     needs:
       - build-linux
       - build-macos
+      - container-images
       - homebrew-bottles
     permissions:
       contents: write
@@ -301,6 +400,7 @@ jobs:
     needs:
       - build-linux
       - build-macos
+      - container-images
       - homebrew-bottles
     permissions:
       contents: read
@@ -321,13 +421,24 @@ jobs:
         env:
           VERSION: ${{ env.RELEASE_VERSION }}
         run: |
+          pkg_version="${VERSION#v}"
           required_patterns=(
             "dist/harness_${VERSION}_linux_amd64.tar.gz"
             "dist/harness_${VERSION}_linux_arm64.tar.gz"
             "dist/harness_${VERSION}_darwin_arm64.tar.gz"
             "dist/harness_${VERSION}_darwin_arm64.pkg"
-            "dist/*.deb"
-            "dist/*.rpm"
+            "dist/harness_${pkg_version}_amd64.deb"
+            "dist/harness_${pkg_version}_arm64.deb"
+            "dist/harness-model-proxy_${pkg_version}_amd64.deb"
+            "dist/harness-model-proxy_${pkg_version}_arm64.deb"
+            "dist/harness-mcp-proxy_${pkg_version}_amd64.deb"
+            "dist/harness-mcp-proxy_${pkg_version}_arm64.deb"
+            "dist/harness-${pkg_version}-1.x86_64.rpm"
+            "dist/harness-${pkg_version}-1.aarch64.rpm"
+            "dist/harness-model-proxy-${pkg_version}-1.x86_64.rpm"
+            "dist/harness-model-proxy-${pkg_version}-1.aarch64.rpm"
+            "dist/harness-mcp-proxy-${pkg_version}-1.x86_64.rpm"
+            "dist/harness-mcp-proxy-${pkg_version}-1.aarch64.rpm"
             "dist/*.bottle.*"
             "dist/checksums.txt"
           )

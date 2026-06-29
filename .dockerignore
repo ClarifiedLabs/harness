@@ -1,0 +1,7 @@
+*
+!docker/
+!docker/binary.Dockerfile
+!dist/
+!dist/*.deb
+!README.md
+!LICENSE
