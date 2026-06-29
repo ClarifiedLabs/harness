@@ -351,16 +351,19 @@ func TestREPLPromptRendersHostname(t *testing.T) {
 		t.Skipf("hostname unavailable: %v", err)
 	}
 
+	shortHostname := strings.SplitN(hostname, ".", 2)[0]
+
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
-	app.Prompt = "{hostname}> "
+	app.Prompt = "{hostname} {hostname:long}> "
 
 	if code := Run(strings.NewReader("/exit\n"), app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if got := errw.String(); !strings.Contains(got, hostname+"> ") {
-		t.Fatalf("prompt should show hostname %q, got %q", hostname, got)
+	want := shortHostname + " " + hostname + "> "
+	if got := errw.String(); !strings.Contains(got, want) {
+		t.Fatalf("prompt should show short and long hostnames %q, got %q", want, got)
 	}
 }
 

@@ -19,20 +19,25 @@ const gitTimeout = 250 * time.Millisecond
 type field string
 
 const (
-	fieldAgent       field = "agent"
-	fieldCWD         field = "cwd"
-	fieldHostname    field = "hostname"
-	fieldGitBranch   field = "git_branch"
-	fieldModel       field = "model"
-	fieldViMode      field = "vimode"
-	fieldViModeLong  field = "vimode:long"
-	fieldViModeShort field = "vimode:short"
+	fieldAgent         field = "agent"
+	fieldCWD           field = "cwd"
+	fieldHostname      field = "hostname"
+	fieldHostnameLong  field = "hostname:long"
+	fieldHostnameShort field = "hostname:short"
+	fieldGitBranch     field = "git_branch"
+	fieldModel         field = "model"
+	fieldViMode        field = "vimode"
+	fieldViModeLong    field = "vimode:long"
+	fieldViModeShort   field = "vimode:short"
 )
 
 // Values carries the runtime values available to a REPL prompt template.
 type Values struct {
-	Agent     string
-	CWD       string
+	Agent string
+	CWD   string
+	// Hostname is the full host name (e.g. "host.example.com"). {hostname} and
+	// {hostname:short} render only the leading label ("host"); {hostname:long}
+	// renders the full value.
 	Hostname  string
 	GitBranch string
 	Model     string
@@ -165,6 +170,37 @@ func ViModeLabel(mode, style string) string {
 	}
 }
 
+// HostnameLabel renders the host name for a {hostname} placeholder. hostname is
+// the full host name. style is "short" (the default for {hostname} and
+// {hostname:short}) yielding only the leading label before the first dot, or
+// "long" (for {hostname:long}) yielding the full host name. An unknown style
+// renders the full host name.
+func HostnameLabel(hostname, style string) string {
+	switch style {
+	case "short", "":
+		if i := strings.IndexByte(hostname, '.'); i >= 0 {
+			return hostname[:i]
+		}
+		return hostname
+	default:
+		return hostname
+	}
+}
+
+// UsesHostname reports whether the compiled template references any of the
+// {hostname} placeholder variants, so callers know to resolve the host name.
+func (t *Template) UsesHostname() bool {
+	if t == nil {
+		return false
+	}
+	for _, p := range t.parts {
+		if p.field == fieldHostname || p.field == fieldHostnameLong || p.field == fieldHostnameShort {
+			return true
+		}
+	}
+	return false
+}
+
 // UsesViMode reports whether the compiled template references any of the
 // {vimode} placeholder variants, so callers know to wire the live-update
 // callback that flips the label on mode transitions.
@@ -199,7 +235,7 @@ func (t *Template) Uses(name string) bool {
 
 func parseField(name string) (field, bool) {
 	switch field(name) {
-	case fieldAgent, fieldCWD, fieldHostname, fieldGitBranch, fieldModel:
+	case fieldAgent, fieldCWD, fieldHostname, fieldHostnameLong, fieldHostnameShort, fieldGitBranch, fieldModel:
 		return field(name), true
 	case fieldViMode, fieldViModeLong, fieldViModeShort:
 		return field(name), true
@@ -214,8 +250,10 @@ func valueForField(f field, values Values) string {
 		return values.Agent
 	case fieldCWD:
 		return abbreviateHome(values.CWD)
-	case fieldHostname:
-		return values.Hostname
+	case fieldHostname, fieldHostnameShort:
+		return HostnameLabel(values.Hostname, "short")
+	case fieldHostnameLong:
+		return HostnameLabel(values.Hostname, "long")
 	case fieldGitBranch:
 		return values.GitBranch
 	case fieldModel:

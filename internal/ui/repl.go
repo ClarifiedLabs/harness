@@ -781,7 +781,7 @@ func (app *App) promptValues(t *replprompt.Template, viMode string) replprompt.V
 		}
 	}
 	var hostname string
-	if t.Uses("hostname") {
+	if t.UsesHostname() {
 		var err error
 		hostname, err = os.Hostname()
 		if err != nil {

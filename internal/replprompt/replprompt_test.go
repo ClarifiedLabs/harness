@@ -26,6 +26,83 @@ func TestRenderPlaceholdersAndEscapes(t *testing.T) {
 	}
 }
 
+func TestHostnameLabel(t *testing.T) {
+	cases := []struct {
+		hostname string
+		style    string
+		want     string
+	}{
+		{"host.example.com", "short", "host"},
+		{"host.example.com", "long", "host.example.com"},
+		{"host.example.com", "", "host"},
+		{"devbox", "short", "devbox"},
+		{"devbox", "long", "devbox"},
+		{"", "short", ""},
+		// Unknown style renders the full host name.
+		{"host.example.com", "bogus", "host.example.com"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.hostname+"/"+tt.style, func(t *testing.T) {
+			if got := HostnameLabel(tt.hostname, tt.style); got != tt.want {
+				t.Fatalf("HostnameLabel(%q, %q) = %q, want %q", tt.hostname, tt.style, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderHostnamePlaceholder(t *testing.T) {
+	cases := []struct {
+		name     string
+		format   string
+		hostname string
+		want     string
+	}{
+		// Bare {hostname} defaults to the short host name.
+		{"hostname bare fqdn", "{hostname}> ", "host.example.com", "host> "},
+		{"hostname bare short", "{hostname}> ", "devbox", "devbox> "},
+		{"hostname:short fqdn", "{hostname:short}> ", "host.example.com", "host> "},
+		{"hostname:long fqdn", "{hostname:long}> ", "host.example.com", "host.example.com> "},
+		{"hostname:long short", "{hostname:long}> ", "devbox", "devbox> "},
+		// Bare {hostname} behaves identically to {hostname:short}.
+		{"hostname bare equals short", "{hostname}={hostname:short}> ", "host.example.com", "host=host> "},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpl, err := Compile(tt.format)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			got := tmpl.Render(Values{Hostname: tt.hostname})
+			if got != tt.want {
+				t.Fatalf("render = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUsesHostnameReportsAnyVariant(t *testing.T) {
+	for _, format := range []string{"{hostname}> ", "{hostname:long}> ", "{hostname:short}> "} {
+		tmpl, err := Compile(format)
+		if err != nil {
+			t.Fatalf("Compile(%q): %v", format, err)
+		}
+		if !tmpl.UsesHostname() {
+			t.Errorf("UsesHostname(%q) = false, want true", format)
+		}
+		name := format[1:strings.IndexByte(format, '}')]
+		if !tmpl.Uses(name) {
+			t.Errorf("Uses(%q) = false, want true for %q", name, format)
+		}
+	}
+	tmpl, err := Compile("{agent}> ")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if tmpl.UsesHostname() {
+		t.Fatalf("UsesHostname should be false when no hostname variant is present")
+	}
+}
+
 func TestCompileRejectsInvalidFormat(t *testing.T) {
 	tests := []string{
 		"{unknown}",
@@ -35,6 +112,7 @@ func TestCompileRejectsInvalidFormat(t *testing.T) {
 		`bad\q`,
 		`bad\`,
 		"{vimode:bogus}",
+		"{hostname:bogus}",
 		"{agent:x}",
 		"{provider}",
 		"{model_info}",

@@ -333,6 +333,16 @@ func TestReplPromptValidation(t *testing.T) {
 			t.Fatalf("vimode prompt %q should load: %v", p, err)
 		}
 	}
+	// The hostname placeholder variants are valid config and should load.
+	for _, p := range []string{"{hostname}> ", "{hostname:long}> ", "{hostname:short}> "} {
+		if _, err := Load([]string{"-repl-prompt", p}, noEnv, ""); err != nil {
+			t.Fatalf("hostname prompt %q should load: %v", p, err)
+		}
+	}
+	// An unknown hostname style is still an unregistered field and must fail.
+	if _, err := Load([]string{"-repl-prompt", "{hostname:bogus}> "}, noEnv, ""); err == nil {
+		t.Fatalf("expected {hostname:bogus} repl_prompt placeholder to fail")
+	}
 	// An unknown vimode style is still an unregistered field and must fail.
 	if _, err := Load([]string{"-repl-prompt", "{vimode:bogus}> "}, noEnv, ""); err == nil {
 		t.Fatalf("expected {vimode:bogus} repl_prompt placeholder to fail")
