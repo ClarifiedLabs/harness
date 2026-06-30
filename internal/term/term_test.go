@@ -15,18 +15,19 @@ import (
 // clearing the screen or scrollback — that is the whole point of replacing RIS.
 func TestSoftResetDisablesLeftoverModes(t *testing.T) {
 	want := []string{
-		"\x1b[!p",     // DECSTR soft reset
-		"\x1b[?1000l", // mouse: normal tracking off
-		"\x1b[?1002l", // mouse: button-event tracking off
-		"\x1b[?1003l", // mouse: any-event tracking off
-		"\x1b[?1005l", // mouse: UTF-8 coords off
-		"\x1b[?1006l", // mouse: SGR coords off
-		"\x1b[?1015l", // mouse: urxvt coords off
-		"\x1b[?1004l", // focus in/out reporting off (ESC[I / ESC[O junk)
-		"\x1b[?2004l", // bracketed paste off
-		"\x1b[?25h",   // show cursor
-		"\x1b(B\x0f",  // G0 = ASCII, shift in (undo line-drawing charset)
-		"\x1b[0m",     // SGR reset
+		"\x1b[!p",                               // DECSTR soft reset
+		"\x1b[?1000l",                           // mouse: normal tracking off
+		"\x1b[?1002l",                           // mouse: button-event tracking off
+		"\x1b[?1003l",                           // mouse: any-event tracking off
+		"\x1b[?1005l",                           // mouse: UTF-8 coords off
+		"\x1b[?1006l",                           // mouse: SGR coords off
+		"\x1b[?1015l",                           // mouse: urxvt coords off
+		"\x1b[?1004l",                           // focus in/out reporting off (ESC[I / ESC[O junk)
+		"\x1b[?2004l",                           // bracketed paste off
+		"\x1b[?25h",                             // show cursor
+		"\x1b(B\x0f",                            // G0 = ASCII, shift in (undo line-drawing charset)
+		"\x1b[0m",                               // SGR reset
+		CursorShapeSequence(CursorShapeDefault), // cursor shape default
 	}
 	for _, seq := range want {
 		if !strings.Contains(softReset, seq) {
@@ -86,6 +87,16 @@ func TestLineEndHelpersNoTTY(t *testing.T) {
 		if err := cleanup(); err != nil {
 			t.Fatalf("%s cleanup without a controlling terminal = %v, want nil", name, err)
 		}
+	}
+}
+
+func TestSetCursorShapeNoTTY(t *testing.T) {
+	if f, err := os.OpenFile("/dev/tty", os.O_WRONLY|syscall.O_NOCTTY, 0); err == nil {
+		f.Close()
+		t.Skip("controlling terminal present; no-op path not reachable")
+	}
+	if err := SetCursorShape(CursorShapeDefault); err != nil {
+		t.Fatalf("SetCursorShape() without a controlling terminal = %v, want nil", err)
 	}
 }
 

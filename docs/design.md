@@ -1806,6 +1806,11 @@ doubled line operators (`dd`, `cc`, `yy`), and local `p`/`P` paste from the prom
 editor's yank buffer. Counts, registers, search, visual mode, macros, and full Vim text objects are
 out of scope.
 
+While a raw vi-mode idle prompt is active, harness also emits xterm DECSCUSR cursor-shape
+sequences: a steady bar in insert mode and a steady block in normal mode. The cursor
+shape is reset to the terminal default when leaving the prompt or REPL; terminals that
+do not support DECSCUSR should ignore the sequences.
+
 Ctrl-G opens the external prompt editor from the raw-mode prompt with the current draft.
 During an active REPL turn, harness restores the prompt terminal mode and temporarily
 configures Escape as the second canonical-mode line delimiter so Esc-Esc can cancel the

@@ -23,7 +23,7 @@ import (
 // the restore a no-op in the normal case, while after a crashed 1049h app the
 // normal screen's slot still holds the position saved on entry. The pair must
 // precede DECSTR, which resets the saved-cursor slot in some emulators.
-const softReset = "\x1b7\x1b[?1049l" + // leave alternate screen (DECSC-guarded, see above)
+var softReset = "\x1b7\x1b[?1049l" + // leave alternate screen (DECSC-guarded, see above)
 	"\x1b[!p" + // DECSTR: SGR, autowrap, origin/insert mode, cursor visible
 	"\x1b[?1003l\x1b[?1002l\x1b[?1000l" + // mouse tracking off (any-event, button-event, normal)
 	"\x1b[?1006l\x1b[?1005l\x1b[?1015l" + // mouse coordinate encodings off (SGR, UTF-8, urxvt)
@@ -31,7 +31,8 @@ const softReset = "\x1b7\x1b[?1049l" + // leave alternate screen (DECSC-guarded,
 	"\x1b[?2004l" + // bracketed paste off
 	"\x1b[?25h" + // show cursor (DECSTR covers it in xterm; explicit for partial emulators)
 	"\x1b(B\x0f" + // G0 = ASCII, shift in (undo line-drawing charset)
-	"\x1b[0m" // SGR reset (also in DECSTR; explicit for partial emulators)
+	"\x1b[0m" + // SGR reset (also in DECSTR; explicit for partial emulators)
+	CursorShapeSequence(CursorShapeDefault) // DECSCUSR: restore terminal cursor-shape default
 
 const (
 	bracketedPasteEnable  = "\x1b[?2004h"
@@ -92,6 +93,22 @@ func SetBracketedPaste(enabled bool) error {
 	}
 	if _, err := f.WriteString(seq); err != nil {
 		return fmt.Errorf("term: set bracketed paste: %w", err)
+	}
+	return nil
+}
+
+// SetCursorShape asks the controlling terminal to use shape. It targets
+// /dev/tty directly and silently no-ops without a controlling terminal so tests
+// and redirected runs do not receive escape sequences.
+func SetCursorShape(shape CursorShape) error {
+	f, err := os.OpenFile("/dev/tty", os.O_WRONLY|syscall.O_NOCTTY, 0)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(CursorShapeSequence(shape)); err != nil {
+		return fmt.Errorf("term: set cursor shape: %w", err)
 	}
 	return nil
 }

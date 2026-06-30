@@ -107,6 +107,11 @@ type promptLineEditor struct {
 	// placeholder flips live as the user switches mode. The REPL temporarily
 	// clears it for auxiliary prompts whose labels are context-specific.
 	viPrompt func(viMode) string
+
+	// cursorShapeSeq tracks the last DECSCUSR sequence this editor wrote while a
+	// vi-mode raw prompt is active, avoiding duplicate writes on redraws that keep
+	// the same vi mode.
+	cursorShapeSeq string
 }
 
 func newPromptLineEditor(in io.Reader, w io.Writer) *promptLineEditor {
@@ -207,6 +212,36 @@ func (e *promptLineEditor) read(prompt string) (replInput, bool, error) {
 	return e.readPrefilled(prompt, "")
 }
 
+func (e *promptLineEditor) applyPromptCursorShape(mode viMode) error {
+	if e.editMode != promptEditModeVi {
+		return nil
+	}
+	shape := term.CursorShapeSteadyBar
+	if mode == viModeNormal {
+		shape = term.CursorShapeSteadyBlock
+	}
+	seq := term.CursorShapeSequence(shape)
+	if seq == e.cursorShapeSeq {
+		return nil
+	}
+	if _, err := io.WriteString(e.w, seq); err != nil {
+		return err
+	}
+	e.cursorShapeSeq = seq
+	return nil
+}
+
+func (e *promptLineEditor) resetPromptCursorShape() error {
+	if e.cursorShapeSeq == "" {
+		return nil
+	}
+	if _, err := io.WriteString(e.w, term.CursorShapeSequence(term.CursorShapeDefault)); err != nil {
+		return err
+	}
+	e.cursorShapeSeq = ""
+	return nil
+}
+
 // readPrefilled reads a line with the editor seeded with editable prefill text
 // (cursor at end). It backs both the bare prompt and the during-turn deposit,
 // where the text typed while the model ran is handed back for review/edit before
@@ -227,7 +262,13 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 	history := e.historyState()
 	vi := viLineState{mode: viModeInsert}
 	e.refreshViPrompt(&vi, &state)
+	if e.editMode == promptEditModeVi {
+		defer func() { _ = e.resetPromptCursorShape() }()
+	}
 	e.tracef("read start prompt=%q", prompt)
+	if err := e.applyPromptCursorShape(vi.mode); err != nil {
+		return replInput{}, false, err
+	}
 	if err := state.redraw(e.w, e.terminalColumns()); err != nil {
 		return replInput{}, false, err
 	}
@@ -260,6 +301,9 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			return result.input, result.ok, nil
 		}
 		if result.redraw {
+			if err := e.applyPromptCursorShape(vi.mode); err != nil {
+				return replInput{}, false, err
+			}
 			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
 				return replInput{}, false, err
 			}

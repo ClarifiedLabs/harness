@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"harness/internal/term"
 )
 
 func readEditedInput(t *testing.T, input string) (replInput, bool, error) {
@@ -1357,6 +1359,73 @@ func TestPromptLineEditorViYankAndPasteOperator(t *testing.T) {
 	}
 	if input.text != "one twoone " {
 		t.Fatalf("input text = %q, want one twoone ", input.text)
+	}
+}
+
+func TestPromptLineEditorViCursorShapeFlipsAndResets(t *testing.T) {
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("abc\x1biX\r"), &out)
+	editor.setEditMode("vi")
+
+	input, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "abXc" {
+		t.Fatalf("input text = %q, want abXc", input.text)
+	}
+
+	bar := term.CursorShapeSequence(term.CursorShapeSteadyBar)
+	block := term.CursorShapeSequence(term.CursorShapeSteadyBlock)
+	def := term.CursorShapeSequence(term.CursorShapeDefault)
+	wantOrder := []string{bar, block, bar, def}
+	got := out.String()
+	pos := 0
+	for _, seq := range wantOrder {
+		idx := strings.Index(got[pos:], seq)
+		if idx < 0 {
+			t.Fatalf("output missing cursor sequence %q after byte %d:\n%q", seq, pos, got)
+		}
+		pos += idx + len(seq)
+	}
+	if count := strings.Count(got, bar); count != 2 {
+		t.Fatalf("bar cursor sequence count = %d, want 2; output=%q", count, got)
+	}
+	if count := strings.Count(got, block); count != 1 {
+		t.Fatalf("block cursor sequence count = %d, want 1; output=%q", count, got)
+	}
+	if count := strings.Count(got, def); count != 1 {
+		t.Fatalf("default cursor sequence count = %d, want 1; output=%q", count, got)
+	}
+}
+
+func TestPromptLineEditorEmacsDoesNotEmitCursorShape(t *testing.T) {
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("abc\r"), &out)
+
+	input, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "abc" {
+		t.Fatalf("input text = %q, want abc", input.text)
+	}
+
+	got := out.String()
+	for _, seq := range []string{
+		term.CursorShapeSequence(term.CursorShapeSteadyBar),
+		term.CursorShapeSequence(term.CursorShapeSteadyBlock),
+		term.CursorShapeSequence(term.CursorShapeDefault),
+	} {
+		if strings.Contains(got, seq) {
+			t.Fatalf("emacs prompt emitted cursor sequence %q in output %q", seq, got)
+		}
 	}
 }
 

@@ -311,6 +311,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			_ = restorePromptTerm()
 			restorePromptTerm = nil
 		}
+		if usePromptEditor && promptEditMode(app.PromptEditMode) == promptEditModeVi {
+			_ = term.SetCursorShape(term.CursorShapeDefault)
+		}
 	}
 	enablePromptTerm := func() {
 		if err := term.Reset(); err != nil {

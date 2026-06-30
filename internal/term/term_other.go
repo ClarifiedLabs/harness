@@ -16,6 +16,10 @@ func SetBracketedPaste(enabled bool) error {
 	return nil
 }
 
+func SetCursorShape(shape CursorShape) error {
+	return nil
+}
+
 func EnableCtrlGLineEnd() (func() error, error) {
 	return func() error { return nil }, nil
 }
