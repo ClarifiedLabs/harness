@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"harness/internal/agent"
 	"harness/internal/background"
@@ -473,8 +472,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			// scrolling output. Bracketed paste is suppressed so a paste arrives
 			// as plain keystrokes the capture can accumulate (during-turn input).
 			_ = term.SetBracketedPaste(false)
-			reader.turnBuf = reader.turnBuf[:0]
-			reader.turnCursor = 0
+			reader.beginTurnCapture()
 			if app.Renderer != nil {
 				app.Renderer.SetInputLine("", 0)
 			}
@@ -1111,16 +1109,19 @@ type replReader struct {
 	inPaste       bool
 	escapeLineEnd atomic.Bool
 
-	// During-turn keystroke capture (during-turn input). turnBuf accumulates
-	// printable runes and the newlines Enter inserts; it persists across the
-	// reader returning on Esc so a double-Esc does not lose typed text.
-	// turnCursor is the rune index in turnBuf where the next edit lands, kept in
-	// [0, len(turnBuf)]; inserts/deletes/motions act at this position so the
-	// during-turn line behaves like a single-line editor. onTurnInput renders the
-	// live buffer and cursor; cancelable releases a blocked turn read so the
-	// buffer can be deposited at the turn boundary.
-	turnBuf     []rune
-	turnCursor  int
+	// During-turn keystroke capture (during-turn input). The turn shares the
+	// promptLineEditor's lineEditState/viLineState/history so it gets the same
+	// editing grammar (Ctrl-A/E/B/F, arrows, word motions, kill commands, full vi
+	// mode, up/down history) as the idle prompt. The only difference is display:
+	// the idle prompt redraws the multi-row terminal region, while the turn mirrors
+	// buf/cursor onto the single status line via onTurnInput (it cannot use the
+	// multi-row redraw while output streams). turnState is created fresh at each
+	// turn start; onTurnInput renders the live buffer and cursor, and cancelable
+	// releases a blocked turn read so the buffer can be deposited at the turn
+	// boundary.
+	turnState   *lineEditState
+	turnVi      viLineState
+	turnHistory lineEditHistory
 	onTurnInput func(string, int)
 	cancelable  *cancelableReader
 }
@@ -1206,13 +1207,26 @@ func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
 	}
 }
 
-// readTurn captures keystrokes during an active turn with echo off. Printable
-// runes and the newlines that Enter inserts accumulate into rr.turnBuf, rendered
-// live via onTurnInput. It returns to the caller only on Ctrl-C (interrupt),
-// bare Esc (for double-Esc cancel), cancellation (depositing the buffer), or
-// EOF — never auto-submitting (during-turn input). Enter never submits; it
-// inserts a newline.
+// beginTurnCapture seeds a fresh during-turn editor state (empty buffer, insert
+// mode, history anchored at the end) for the upcoming readTurn. It is called at
+// turn start so the live status line begins empty.
+func (rr *replReader) beginTurnCapture() {
+	rr.turnState = &lineEditState{}
+	rr.turnVi = viLineState{mode: viModeInsert}
+	rr.turnHistory = rr.editor.historyState()
+}
+
+// readTurn captures keystrokes during an active turn with echo off, sharing the
+// promptLineEditor's full editing grammar via handleKey (duringTurn=true). The
+// buffer is mirrored live on the status line via onTurnInput. It returns to the
+// caller only on Ctrl-C (interrupt), bare Esc (for double-Esc cancel), Ctrl-G
+// (edit), cancellation (depositing the buffer), or EOF — never auto-submitting
+// (during-turn input). Enter never submits; it inserts a newline.
 func (rr *replReader) readTurn() (replInput, bool, error) {
+	if rr.turnState == nil {
+		rr.beginTurnCapture()
+	}
+	s := rr.turnState
 	for {
 		r, _, err := rr.r.ReadRune()
 		if err != nil {
@@ -1227,169 +1241,68 @@ func (rr *replReader) readTurn() (replInput, bool, error) {
 			}
 			return replInput{}, false, err
 		}
-		if r == '\x1b' && rr.editor != nil {
-			// Reuse the line editor's decoder so escape and kitty CSI-u key
-			// sequences (which carry even printable keys on capable terminals)
-			// are handled correctly.
-			action, text, err := rr.editor.readEscape()
-			if err != nil {
-				if errors.Is(err, errReadCanceled) {
-					return rr.depositTurnBuffer(), true, nil
-				}
-				return replInput{}, false, err
+		result, err := rr.editor.handleKey(&rr.turnVi, s, &rr.turnHistory, "", r, true)
+		if err != nil {
+			if errors.Is(err, errReadCanceled) {
+				return rr.depositTurnBuffer(), true, nil
 			}
-			if input, done := rr.applyTurnAction(action, text); done {
-				return input, true, nil
-			}
-			continue
+			return replInput{}, false, err
 		}
-		switch r {
-		case ctrlC:
-			return replInput{interrupt: true}, true, nil
-		case '\x1b':
-			return replInput{escape: true}, true, nil
-		case '\r', '\n':
-			rr.turnInsertNewline()
-		case '\b', del:
-			rr.turnBackspace()
-		default:
-			if r == utf8.RuneError || r < 0x20 {
-				continue // ignore other control characters
+		if result.done {
+			if result.input.interrupt {
+				return replInput{interrupt: true}, true, nil
 			}
-			rr.turnInsertRunes([]rune{r})
+			if result.input.edit {
+				// Ctrl-G during a turn: hand the buffer to the run loop as an edit
+				// request (queued, then $EDITOR opens on it after the turn ends).
+				text := string(s.buf)
+				rr.resetTurnBuffer()
+				return replInput{text: text, edit: true}, true, nil
+			}
+			if result.input.escape {
+				return replInput{escape: true}, true, nil
+			}
+			// EOF with no buffer (ok=false): end the read without a deposit.
+			if dep := rr.depositTurnBuffer(); dep.text != "" {
+				return dep, true, nil
+			}
+			return replInput{}, false, nil
 		}
-	}
-}
-
-// applyTurnAction maps a decoded line-editor key action onto the during-turn
-// buffer. It returns done=true (with the input to surface) only for the events
-// the run loop must act on: Ctrl-C, bare Esc, and EOF. Submit/newline insert a
-// newline rather than starting a turn (during-turn input rule 1); inserts and
-// deletes act at turnCursor and the cursor-motion keys move it. History
-// (lineEditHistoryPrev/Next) is intentionally ignored during a turn: the
-// deposited buffer is editable in the next prompt where the full editor — with
-// real history — takes over, so recalling history mid-turn would be surprising
-// and has nowhere to commit.
-func (rr *replReader) applyTurnAction(action lineEditAction, text string) (replInput, bool) {
-	switch action {
-	case lineEditInterrupt:
-		return replInput{interrupt: true}, true
-	case lineEditEscape:
-		return replInput{escape: true}, true
-	case lineEditEOF:
-		return rr.depositTurnBuffer(), true
-	case lineEditInsertText, lineEditPaste:
-		rr.turnInsertRunes([]rune(text))
-	case lineEditInsertNewline, lineEditSubmit:
-		rr.turnInsertNewline()
-	case lineEditBackspace:
-		rr.turnBackspace()
-	case lineEditDelete:
-		rr.turnDelete()
-	case lineEditLeft:
-		rr.turnMoveLeft()
-	case lineEditRight:
-		rr.turnMoveRight()
-	case lineEditHome:
-		rr.turnMoveHome()
-	case lineEditEnd:
-		rr.turnMoveEnd()
-	}
-	return replInput{}, false
-}
-
-// turnInsertRunes inserts runes at the cursor and advances it past them.
-func (rr *replReader) turnInsertRunes(rs []rune) {
-	if len(rs) == 0 {
-		return
-	}
-	rr.clampTurnCursor()
-	buf := make([]rune, 0, len(rr.turnBuf)+len(rs))
-	buf = append(buf, rr.turnBuf[:rr.turnCursor]...)
-	buf = append(buf, rs...)
-	buf = append(buf, rr.turnBuf[rr.turnCursor:]...)
-	rr.turnBuf = buf
-	rr.turnCursor += len(rs)
-	rr.emitTurnInput()
-}
-
-func (rr *replReader) turnInsertNewline() {
-	rr.turnInsertRunes([]rune{'\n'})
-}
-
-// turnBackspace deletes the rune before the cursor and moves the cursor left.
-func (rr *replReader) turnBackspace() {
-	rr.clampTurnCursor()
-	if rr.turnCursor == 0 {
-		rr.emitTurnInput()
-		return
-	}
-	rr.turnBuf = append(rr.turnBuf[:rr.turnCursor-1], rr.turnBuf[rr.turnCursor:]...)
-	rr.turnCursor--
-	rr.emitTurnInput()
-}
-
-// turnDelete deletes the rune at the cursor, leaving the cursor in place.
-func (rr *replReader) turnDelete() {
-	rr.clampTurnCursor()
-	if rr.turnCursor >= len(rr.turnBuf) {
-		rr.emitTurnInput()
-		return
-	}
-	rr.turnBuf = append(rr.turnBuf[:rr.turnCursor], rr.turnBuf[rr.turnCursor+1:]...)
-	rr.emitTurnInput()
-}
-
-func (rr *replReader) turnMoveLeft() {
-	rr.clampTurnCursor()
-	if rr.turnCursor > 0 {
-		rr.turnCursor--
-	}
-	rr.emitTurnInput()
-}
-
-func (rr *replReader) turnMoveRight() {
-	rr.clampTurnCursor()
-	if rr.turnCursor < len(rr.turnBuf) {
-		rr.turnCursor++
-	}
-	rr.emitTurnInput()
-}
-
-func (rr *replReader) turnMoveHome() {
-	rr.turnCursor = 0
-	rr.emitTurnInput()
-}
-
-func (rr *replReader) turnMoveEnd() {
-	rr.turnCursor = len(rr.turnBuf)
-	rr.emitTurnInput()
-}
-
-// clampTurnCursor keeps turnCursor within [0, len(turnBuf)] so a stale index
-// (e.g. after a deposit reset) never indexes out of range.
-func (rr *replReader) clampTurnCursor() {
-	if rr.turnCursor < 0 {
-		rr.turnCursor = 0
-	}
-	if rr.turnCursor > len(rr.turnBuf) {
-		rr.turnCursor = len(rr.turnBuf)
+		if result.redraw {
+			rr.emitTurnInput()
+		}
 	}
 }
 
 // depositTurnBuffer returns the accumulated buffer as an editable deposit and
-// resets it (and the cursor) for the next turn.
+// resets the turn state for the next turn.
 func (rr *replReader) depositTurnBuffer() replInput {
-	text := string(rr.turnBuf)
-	rr.turnBuf = rr.turnBuf[:0]
-	rr.turnCursor = 0
+	text := ""
+	if rr.turnState != nil {
+		text = string(rr.turnState.buf)
+	}
+	rr.resetTurnBuffer()
 	return replInput{text: text, deposit: true}
 }
 
+// resetTurnBuffer clears the during-turn buffer and cursor and emits an empty
+// status line so a closed-out read leaves no stale input painted.
+func (rr *replReader) resetTurnBuffer() {
+	if rr.turnState != nil {
+		rr.turnState.buf = nil
+		rr.turnState.cursor = 0
+		rr.turnState.summary = ""
+	}
+	rr.emitTurnInput()
+}
+
 func (rr *replReader) emitTurnInput() {
-	rr.clampTurnCursor()
 	if rr.onTurnInput != nil {
-		rr.onTurnInput(string(rr.turnBuf), rr.turnCursor)
+		if rr.turnState != nil {
+			rr.onTurnInput(string(rr.turnState.buf), rr.turnState.cursor)
+			return
+		}
+		rr.onTurnInput("", 0)
 	}
 }
 
@@ -1411,7 +1324,10 @@ func (rr *replReader) drainTurnCancel() {
 
 // turnBuffer returns the current during-turn buffer without consuming it.
 func (rr *replReader) turnBuffer() string {
-	return string(rr.turnBuf)
+	if rr.turnState == nil {
+		return ""
+	}
+	return string(rr.turnState.buf)
 }
 
 type lineTerminator byte

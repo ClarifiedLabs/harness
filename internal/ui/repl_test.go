@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -3195,82 +3196,239 @@ func TestREPLDuringTurnInputDepositedOnInterrupt(t *testing.T) {
 	}
 }
 
-// The during-turn capture is a single-line editor: printable runes, inserts,
-// and deletes act at turnCursor, and Left/Right/Home/End move it. This exercises
-// the full edit grammar and asserts both the buffer and the cursor (mirrored on
-// the live onTurnInput callback) after each operation.
+// The during-turn capture shares the promptLineEditor's editing grammar via
+// handleKey(duringTurn=true): printable runes, inserts, and deletes act at the
+// cursor, and Ctrl-A/E/B/F and the Delete escape sequence move it. Keystrokes
+// are fed through the editor's reader so multi-byte escape sequences decode
+// exactly as they do in the live REPL (one pump decodes a whole \x1b[3~). This
+// asserts both the buffer and the cursor (mirrored on the live onTurnInput
+// callback) after each keystroke.
 func TestREPLDuringTurnCursorEditing(t *testing.T) {
-	rr := &replReader{}
+	// Whole input is preloaded; each pump reads one rune (an escape sequence's
+	// tail is consumed by readEscape within the single pump that read the Esc).
+	const input = "abc\x02\x02X\x01\x7f\x1b[3~\x05\x7f\x06\ryz\x01\x1b[3~"
+	rr := newDuringTurnTestReader(input)
 	var emittedBuf string
 	var emittedCursor int
 	rr.onTurnInput = func(buf string, cursor int) { emittedBuf, emittedCursor = buf, cursor }
 
-	check := func(wantBuf string, wantCursor int) {
-		t.Helper()
-		if string(rr.turnBuf) != wantBuf || rr.turnCursor != wantCursor {
-			t.Fatalf("buf=%q cursor=%d, want buf=%q cursor=%d", string(rr.turnBuf), rr.turnCursor, wantBuf, wantCursor)
+	steps := []struct {
+		buf    string
+		cursor int
+	}{
+		{"a", 1},      // type a
+		{"ab", 2},     // type b
+		{"abc", 3},    // type c
+		{"abc", 2},    // Ctrl-B -> between b and c
+		{"abc", 1},    // Ctrl-B -> between a and b
+		{"aXbc", 2},   // insert X mid-buffer
+		{"aXbc", 0},   // Ctrl-A home
+		{"aXbc", 0},   // backspace no-op at start
+		{"Xbc", 0},    // Delete forward: rune AT cursor
+		{"Xbc", 3},    // Ctrl-E end
+		{"Xb", 2},     // backspace: rune BEFORE cursor
+		{"Xb", 2},     // Ctrl-F right no-op at end
+		{"Xb\n", 3},   // Enter inserts a newline, never submits
+		{"Xb\ny", 4},  // type y
+		{"Xb\nyz", 5}, // type z
+		{"Xb\nyz", 0}, // Ctrl-A home
+		{"b\nyz", 0},  // delete forward
+	}
+	for i, want := range steps {
+		in, done, err := pumpDuringTurnKey(rr)
+		if err != nil {
+			t.Fatalf("step %d: %v", i, err)
 		}
-		if emittedBuf != wantBuf || emittedCursor != wantCursor {
-			t.Fatalf("emitted buf=%q cursor=%d, want buf=%q cursor=%d", emittedBuf, emittedCursor, wantBuf, wantCursor)
+		if done {
+			t.Fatalf("step %d: handleKey returned done=%+v during a turn (Enter must insert, not submit)", i, in)
+		}
+		if string(rr.turnState.buf) != want.buf || rr.turnState.cursor != want.cursor {
+			t.Fatalf("step %d: buf=%q cursor=%d, want buf=%q cursor=%d", i, string(rr.turnState.buf), rr.turnState.cursor, want.buf, want.cursor)
+		}
+		if emittedBuf != want.buf || emittedCursor != want.cursor {
+			t.Fatalf("step %d: emitted buf=%q cursor=%d, want buf=%q cursor=%d", i, emittedBuf, emittedCursor, want.buf, want.cursor)
 		}
 	}
-
-	rr.turnInsertRunes([]rune("abc")) // type "abc"
-	check("abc", 3)
-	rr.applyTurnAction(lineEditLeft, "") // -> between b and c
-	check("abc", 2)
-	rr.applyTurnAction(lineEditLeft, "") // -> between a and b
-	check("abc", 1)
-	rr.turnInsertRunes([]rune("X")) // insert mid-buffer
-	check("aXbc", 2)
-	rr.applyTurnAction(lineEditHome, "")
-	check("aXbc", 0)
-	rr.applyTurnAction(lineEditBackspace, "") // no-op at start
-	check("aXbc", 0)
-	rr.applyTurnAction(lineEditDelete, "") // delete rune AT cursor
-	check("Xbc", 0)
-	rr.applyTurnAction(lineEditEnd, "")
-	check("Xbc", 3)
-	rr.applyTurnAction(lineEditBackspace, "") // delete rune BEFORE cursor
-	check("Xb", 2)
-	rr.applyTurnAction(lineEditRight, "") // no-op at end
-	check("Xb", 2)
-	rr.applyTurnAction(lineEditInsertNewline, "") // Enter inserts a newline, never submits
-	check("Xb\n", 3)
-	rr.applyTurnAction(lineEditInsertText, "yz") // pasted/CSI-u text inserts at cursor
-	check("Xb\nyz", 5)
-	rr.applyTurnAction(lineEditHome, "")
-	check("Xb\nyz", 0)
-	rr.applyTurnAction(lineEditDelete, "")
-	check("b\nyz", 0)
 
 	// Deposit returns the full buffer (newline preserved) and resets buffer+cursor.
 	dep := rr.depositTurnBuffer()
 	if !dep.deposit || dep.text != "b\nyz" {
 		t.Fatalf("deposit = %+v, want text %q deposit=true", dep, "b\nyz")
 	}
-	if len(rr.turnBuf) != 0 || rr.turnCursor != 0 {
-		t.Fatalf("after deposit buf=%q cursor=%d, want empty buffer and cursor 0", string(rr.turnBuf), rr.turnCursor)
+	if len(rr.turnState.buf) != 0 || rr.turnState.cursor != 0 {
+		t.Fatalf("after deposit buf=%q cursor=%d, want empty buffer and cursor 0", string(rr.turnState.buf), rr.turnState.cursor)
 	}
 }
 
 // Wide and multi-byte runes must move the cursor by whole runes, and a stale
 // cursor past the (now shorter) buffer is clamped rather than panicking.
 func TestREPLDuringTurnCursorWideRunesAndClamp(t *testing.T) {
-	rr := &replReader{}
-	rr.turnInsertRunes([]rune("aé漢")) // 1-byte, 2-byte, 3-byte runes
-	if string(rr.turnBuf) != "aé漢" || rr.turnCursor != 3 {
-		t.Fatalf("buf=%q cursor=%d, want aé漢 / 3", string(rr.turnBuf), rr.turnCursor)
+	rr := newDuringTurnTestReader("aé漢\x02\x7f\x7f")
+	// Type a, é, 漢 (3 pumps).
+	for i := 0; i < 3; i++ {
+		if _, _, err := pumpDuringTurnKey(rr); err != nil {
+			t.Fatalf("type %d: %v", i, err)
+		}
 	}
-	rr.applyTurnAction(lineEditLeft, "") // between é and 漢
-	rr.applyTurnAction(lineEditBackspace, "")
-	if string(rr.turnBuf) != "a漢" || rr.turnCursor != 1 {
-		t.Fatalf("buf=%q cursor=%d, want a漢 / 1", string(rr.turnBuf), rr.turnCursor)
+	if string(rr.turnState.buf) != "aé漢" || rr.turnState.cursor != 3 {
+		t.Fatalf("buf=%q cursor=%d, want aé漢 / 3", string(rr.turnState.buf), rr.turnState.cursor)
+	}
+	if _, _, err := pumpDuringTurnKey(rr); err != nil { // Ctrl-B -> between é and 漢
+		t.Fatalf("ctrl-b: %v", err)
+	}
+	if _, _, err := pumpDuringTurnKey(rr); err != nil { // backspace deletes é
+		t.Fatalf("backspace: %v", err)
+	}
+	if string(rr.turnState.buf) != "a漢" || rr.turnState.cursor != 1 {
+		t.Fatalf("buf=%q cursor=%d, want a漢 / 1", string(rr.turnState.buf), rr.turnState.cursor)
 	}
 	// A stale out-of-range cursor is clamped to the buffer end on the next edit.
-	rr.turnCursor = 99
-	rr.applyTurnAction(lineEditBackspace, "")
-	if string(rr.turnBuf) != "a" || rr.turnCursor != 1 {
-		t.Fatalf("buf=%q cursor=%d after clamped backspace, want a / 1", string(rr.turnBuf), rr.turnCursor)
+	rr.turnState.cursor = 99
+	if _, _, err := pumpDuringTurnKey(rr); err != nil { // clamped backspace deletes 漢
+		t.Fatalf("backspace: %v", err)
 	}
+	if string(rr.turnState.buf) != "a" || rr.turnState.cursor != 1 {
+		t.Fatalf("buf=%q cursor=%d after clamped backspace, want a / 1", string(rr.turnState.buf), rr.turnState.cursor)
+	}
+}
+
+// During a turn the shared editor runs in vi mode too: Esc enters normal mode,
+// motions (h/l) and x delete work, and Enter inserts a newline rather than
+// submitting (during-turn input rule). A second Esc is the cancel gesture.
+func TestREPLDuringTurnViMode(t *testing.T) {
+	// type "abc", Esc -> normal, h h (move left twice), x (delete at cursor),
+	// l (right), i (insert), type "Z".
+	rr := newDuringTurnTestReader("abc\x1bhhxliZ")
+	rr.editor.setEditMode(string(promptEditModeVi))
+	rr.beginTurnCapture() // re-seed vi state for the new edit mode
+
+	steps := []struct {
+		buf    string
+		cursor int
+	}{
+		{"a", 1},   // a
+		{"ab", 2},  // b
+		{"abc", 3}, // c (insert mode, cursor at end)
+		{"abc", 2}, // Esc -> normal (cursor backs to 2, on 'c')
+		{"abc", 1}, // h -> on 'b'
+		{"abc", 0}, // h -> on 'a'
+		{"bc", 0},  // x deletes 'a' (cursor stays 0, on 'b')
+		{"bc", 1},  // l -> on 'c'
+		{"bc", 1},  // i -> insert mode at cursor 1
+		{"bZc", 2}, // type Z
+	}
+	for i, want := range steps {
+		if _, _, err := pumpDuringTurnKey(rr); err != nil {
+			t.Fatalf("step %d: %v", i, err)
+		}
+		if string(rr.turnState.buf) != want.buf || rr.turnState.cursor != want.cursor {
+			t.Fatalf("step %d: buf=%q cursor=%d, want buf=%q cursor=%d", i, string(rr.turnState.buf), rr.turnState.cursor, want.buf, want.cursor)
+		}
+	}
+
+	// Enter during a turn inserts a newline (never submits), even in vi insert mode.
+	rr2 := newDuringTurnTestReader("ab\r")
+	rr2.editor.setEditMode(string(promptEditModeVi))
+	rr2.beginTurnCapture()
+	for i := 0; i < 2; i++ {
+		if _, _, err := pumpDuringTurnKey(rr2); err != nil {
+			t.Fatalf("type %d: %v", i, err)
+		}
+	}
+	in, done, err := pumpDuringTurnKey(rr2) // Enter
+	if err != nil {
+		t.Fatalf("enter: %v", err)
+	}
+	if done {
+		t.Fatalf("Enter during a turn must not submit; got done=%+v", in)
+	}
+	if string(rr2.turnState.buf) != "ab\n" {
+		t.Fatalf("buf=%q, want ab\n (Enter inserts newline)", string(rr2.turnState.buf))
+	}
+}
+
+// During a turn up/down arrows recall history just like the idle prompt: the
+// recalled line replaces the buffer (and is deposited as editable prefill, never
+// auto-submitted).
+func TestREPLDuringTurnHistoryRecall(t *testing.T) {
+	rr := newDuringTurnTestReader("\x1b[A\x1b[A\x1b[B")
+	rr.editor.SetInitialHistory([]string{"old1", "old2"})
+	rr.beginTurnCapture() // re-seed history anchor for the editor's history
+
+	// First pump: empty buffer (nothing typed yet) — up recalls the last entry.
+	if _, _, err := pumpDuringTurnKey(rr); err != nil {
+		t.Fatalf("up1: %v", err)
+	}
+	if string(rr.turnState.buf) != "old2" {
+		t.Fatalf("after first up buf=%q, want old2", string(rr.turnState.buf))
+	}
+	// Second up: previous entry.
+	if _, _, err := pumpDuringTurnKey(rr); err != nil {
+		t.Fatalf("up2: %v", err)
+	}
+	if string(rr.turnState.buf) != "old1" {
+		t.Fatalf("after second up buf=%q, want old1", string(rr.turnState.buf))
+	}
+	// Down: back to old2.
+	if _, _, err := pumpDuringTurnKey(rr); err != nil {
+		t.Fatalf("down: %v", err)
+	}
+	if string(rr.turnState.buf) != "old2" {
+		t.Fatalf("after down buf=%q, want old2", string(rr.turnState.buf))
+	}
+}
+
+// Ctrl-G during a turn returns an edit request (done) carrying the typed buffer
+// so the run loop can open $EDITOR on it; the during-turn state is cleared.
+func TestREPLDuringTurnCtrlGRequestsEdit(t *testing.T) {
+	rr := newDuringTurnTestReader("wip\x07")
+	for i := 0; i < 3; i++ {
+		if _, _, err := pumpDuringTurnKey(rr); err != nil {
+			t.Fatalf("type %d: %v", i, err)
+		}
+	}
+	in, done, err := pumpDuringTurnKey(rr) // Ctrl-G (\x07 = lineTermEdit)
+	if err != nil {
+		t.Fatalf("ctrl-g: %v", err)
+	}
+	if !done || !in.edit || in.text != "wip" {
+		t.Fatalf("ctrl-g = %+v done=%v, want edit request text %q", in, done, "wip")
+	}
+	// handleKey hands the buffer text to the run loop; the run loop (readTurn)
+	// clears the during-turn state. The buffer is intact here so the text is not
+	// lost before the editor opens on it.
+	if string(rr.turnState.buf) != "wip" {
+		t.Fatalf("after ctrl-g buf=%q, want wip (intact until the run loop clears)", string(rr.turnState.buf))
+	}
+}
+
+// newDuringTurnTestReader builds a replReader whose editor reads from a shared
+// bufio.Reader seeded with input, mirroring the live read loop where readTurn
+// reads a rune and hands it to handleKey (which reads escape-sequence tails from
+// the same reader).
+func newDuringTurnTestReader(input string) *replReader {
+	r := bufio.NewReader(strings.NewReader(input))
+	ed := newPromptLineEditorWithReader(r, io.Discard)
+	rr := &replReader{r: r, editor: ed}
+	rr.beginTurnCapture()
+	return rr
+}
+
+// pumpDuringTurnKey reads one rune from the shared reader and dispatches it
+// through the during-turn handleKey path, emitting the status-line update on
+// redraw. It returns the resulting input/done flag (done=false for ordinary
+// edits; done=true only for interrupt/escape/edit/EOF gestures).
+func pumpDuringTurnKey(rr *replReader) (replInput, bool, error) {
+	r, _, err := rr.r.ReadRune()
+	if err != nil {
+		return replInput{}, false, err
+	}
+	res, err := rr.editor.handleKey(&rr.turnVi, rr.turnState, &rr.turnHistory, "", r, true)
+	if err != nil {
+		return replInput{}, false, err
+	}
+	if res.redraw {
+		rr.emitTurnInput()
+	}
+	return res.input, res.done, nil
 }

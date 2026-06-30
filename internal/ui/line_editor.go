@@ -252,250 +252,288 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 		e.tracef("read rune=%s size=%d buffered=%d", traceRune(r), size, e.r.Buffered())
 		e.updatePasteTiming(&state)
 
-		if e.editMode == promptEditModeVi && vi.mode == viModeNormal {
-			result, err := e.handleViNormalInput(&vi, &state, &history, prompt, r)
-			if err != nil {
-				return replInput{}, false, err
-			}
-			if result.done {
-				return result.input, result.ok, nil
-			}
-			if result.redraw {
-				if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-					return replInput{}, false, err
-				}
-			}
-			continue
+		result, err := e.handleKey(&vi, &state, &history, prompt, r, false)
+		if err != nil {
+			return replInput{}, false, err
 		}
-
-		switch r {
-		case '\r':
-			if e.consumeShiftEnterPending() {
-				e.tracef("raw CR after shift modifier inserts newline")
-				e.markManualEdit(&state)
-				state.insert('\n')
-				if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-					return replInput{}, false, err
-				}
-				continue
-			}
-			if e.pasteMode {
-				e.tracef("raw CR in paste inserts newline")
-				state.insert('\n')
-				e.refreshPasteSummary(&state)
-				if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-					return replInput{}, false, err
-				}
-				continue
-			}
-			e.tracef("raw CR submits text len=%d purePaste=%v", len(state.buf), e.purePaste)
-			if err := state.finish(e.w); err != nil {
-				return replInput{}, false, err
-			}
-			e.addHistory(string(state.buf))
-			return replInput{text: string(state.buf), pasted: e.purePaste}, true, nil
-		case '\n':
-			e.consumeShiftEnterPending()
-			e.markManualEdit(&state)
-			e.tracef("raw LF inserts newline")
-			state.insert('\n')
-			if e.pasteMode {
-				e.refreshPasteSummary(&state)
-			}
+		if result.done {
+			return result.input, result.ok, nil
+		}
+		if result.redraw {
 			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
 				return replInput{}, false, err
-			}
-		case ctrlA:
-			e.clearShiftEnterPending()
-			e.markManualEdit(&state)
-			e.tracef("raw ctrl-a moves to start")
-			state.home()
-			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-				return replInput{}, false, err
-			}
-		case ctrlB:
-			e.clearShiftEnterPending()
-			e.markManualEdit(&state)
-			e.tracef("raw ctrl-b moves left")
-			state.left()
-			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-				return replInput{}, false, err
-			}
-		case rune(lineTermEdit):
-			e.clearShiftEnterPending()
-			e.tracef("raw ctrl-g opens editor text len=%d", len(state.buf))
-			if err := state.finish(e.w); err != nil {
-				return replInput{}, false, err
-			}
-			e.addHistory(string(state.buf))
-			return replInput{text: string(state.buf), edit: true}, true, nil
-		case ctrlE:
-			e.clearShiftEnterPending()
-			e.markManualEdit(&state)
-			e.tracef("raw ctrl-e moves to end")
-			state.end()
-			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-				return replInput{}, false, err
-			}
-		case ctrlF:
-			e.clearShiftEnterPending()
-			e.markManualEdit(&state)
-			e.tracef("raw ctrl-f moves right")
-			state.right()
-			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-				return replInput{}, false, err
-			}
-		case ctrlC:
-			e.clearShiftEnterPending()
-			e.tracef("raw ctrl-c interrupts")
-			return replInput{interrupt: true}, true, nil
-		case ctrlD:
-			e.clearShiftEnterPending()
-			e.tracef("raw ctrl-d text len=%d", len(state.buf))
-			if len(state.buf) == 0 {
-				return replInput{}, false, nil
-			}
-		case '\t':
-			e.clearShiftEnterPending()
-			e.markManualEdit(&state)
-			handled, err := e.completePromptTab(&state)
-			if err != nil {
-				return replInput{}, false, err
-			}
-			if !handled {
-				state.insert('\t')
-			}
-			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-				return replInput{}, false, err
-			}
-		case '\b', del:
-			e.clearShiftEnterPending()
-			e.markManualEdit(&state)
-			e.tracef("raw backspace")
-			state.backspace()
-			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-				return replInput{}, false, err
-			}
-		case rune(lineTermEscape):
-			action, text, err := e.readEscape()
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					e.tracef("escape read eof")
-					return replInput{}, false, nil
-				}
-				e.tracef("escape read error: %v", err)
-				return replInput{}, false, err
-			}
-			e.tracef("escape action=%s text=%q", lineEditActionName(action), text)
-			if e.editMode == promptEditModeVi && action == lineEditEscape {
-				e.clearShiftEnterPending()
-				e.viEnterNormal(&vi, &state)
-				if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-					return replInput{}, false, err
-				}
-				continue
-			}
-			if action == lineEditShiftModifier {
-				e.markShiftEnterPending()
-				if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-					return replInput{}, false, err
-				}
-				continue
-			}
-			e.clearShiftEnterPending()
-			if action == lineEditSubmit {
-				e.tracef("escape submit text len=%d purePaste=%v", len(state.buf), e.purePaste)
-				if err := state.finish(e.w); err != nil {
-					return replInput{}, false, err
-				}
-				e.addHistory(string(state.buf))
-				return replInput{text: string(state.buf), pasted: e.purePaste}, true, nil
-			}
-			switch action {
-			case lineEditHome:
-				e.markManualEdit(&state)
-				state.home()
-			case lineEditEnd:
-				e.markManualEdit(&state)
-				state.end()
-			case lineEditLeft:
-				e.markManualEdit(&state)
-				state.left()
-			case lineEditRight:
-				e.markManualEdit(&state)
-				state.right()
-			case lineEditBackspace:
-				e.markManualEdit(&state)
-				state.backspace()
-			case lineEditDelete:
-				e.markManualEdit(&state)
-				state.delete()
-			case lineEditEdit:
-				if err := state.finish(e.w); err != nil {
-					return replInput{}, false, err
-				}
-				e.addHistory(string(state.buf))
-				return replInput{text: string(state.buf), edit: true}, true, nil
-			case lineEditEOF:
-				if len(state.buf) == 0 {
-					return replInput{}, false, nil
-				}
-			case lineEditInterrupt:
-				return replInput{interrupt: true}, true, nil
-			case lineEditInsertNewline:
-				e.markManualEdit(&state)
-				state.insert('\n')
-				if e.pasteMode {
-					e.refreshPasteSummary(&state)
-				}
-				e.discardBufferedRawEnter()
-			case lineEditInsertText:
-				e.markManualEdit(&state)
-				if text == "\t" {
-					handled, err := e.completePromptTab(&state)
-					if err != nil {
-						return replInput{}, false, err
-					}
-					if handled {
-						break
-					}
-				}
-				state.insertString(text)
-				if e.pasteMode {
-					e.refreshPasteSummary(&state)
-				}
-			case lineEditHistoryPrev:
-				e.markManualEdit(&state)
-				history.prev(&state)
-			case lineEditHistoryNext:
-				e.markManualEdit(&state)
-				history.next(&state)
-			case lineEditPaste:
-				if len(state.buf) == 0 {
-					state.setPasteSummary(text)
-					e.purePaste = true
-					e.tracef("bracketed paste fills empty prompt len=%d summary=%q", len(text), state.summary)
-					break
-				}
-				state.insertString(text)
-			}
-			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-				return replInput{}, false, err
-			}
-		default:
-			e.clearShiftEnterPending()
-			e.markManualEdit(&state)
-			if r == '\t' || unicode.IsPrint(r) {
-				state.insert(r)
-				if e.pasteMode {
-					e.refreshPasteSummary(&state)
-				}
-				if err := state.redraw(e.w, e.terminalColumns()); err != nil {
-					return replInput{}, false, err
-				}
 			}
 		}
 	}
+}
+
+// handleKey dispatches one decoded keystroke against the shared editor state. It
+// backs both the idle prompt (readPrefilled, which redraws on result.redraw) and
+// the during-turn capture (readTurn, which mirrors buf/cursor on the status
+// line). Vi normal mode delegates to handleViNormalInput; emacs and vi insert
+// mode share the per-key switch below.
+//
+// duringTurn selects the during-turn capture semantics, which differ from the
+// idle prompt only in the terminal-finishing actions (the multi-row redraw cannot
+// run while output streams, so finish/history stay idle-only):
+//
+//   - Submit (raw CR / escape-submit / vi Enter) inserts a newline instead of
+//     committing — during-turn input never auto-submits (rule: Enter inserts).
+//   - Edit (Ctrl-G / escape-edit) returns done with an edit request but does not
+//     finish or commit history; the run loop opens $EDITOR on the buffer.
+//   - Bare Esc returns done as an escape gesture (for double-Esc cancel).
+//   - EOF/interrupt return done for the run loop to deposit/cancel.
+//
+// Every motion, insert, delete, history recall, and vi command is shared
+// verbatim with the idle prompt, so the during-turn buffer gets the same editing
+// grammar (Ctrl-A/E/B/F, arrows, word motions, kill commands, full vi mode,
+// up/down history) as the idle prompt.
+func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, r rune, duringTurn bool) (viEditResult, error) {
+	if duringTurn {
+		// The during-turn buffer can carry a stale cursor (e.g. after a history
+		// recall or an external reset); clamp it before any edit so insert/
+		// backspace never index out of range. The idle editor keeps the cursor in
+		// bounds via its own operations, so this is during-turn-only.
+		if s.cursor < 0 {
+			s.cursor = 0
+		}
+		if s.cursor > len(s.buf) {
+			s.cursor = len(s.buf)
+		}
+	}
+	if e.editMode == promptEditModeVi && v.mode == viModeNormal {
+		return e.handleViNormalInput(v, s, h, prompt, r, duringTurn)
+	}
+	switch r {
+	case '\r':
+		if e.consumeShiftEnterPending() {
+			e.tracef("raw CR after shift modifier inserts newline")
+			e.markManualEdit(s)
+			s.insert('\n')
+			return viEditResult{redraw: true}, nil
+		}
+		if e.pasteMode {
+			e.tracef("raw CR in paste inserts newline")
+			s.insert('\n')
+			e.refreshPasteSummary(s)
+			return viEditResult{redraw: true}, nil
+		}
+		if duringTurn {
+			e.tracef("raw CR during turn inserts newline")
+			e.markManualEdit(s)
+			s.insert('\n')
+			return viEditResult{redraw: true}, nil
+		}
+		e.tracef("raw CR submits text len=%d purePaste=%v", len(s.buf), e.purePaste)
+		return e.submit(s)
+	case '\n':
+		e.consumeShiftEnterPending()
+		e.markManualEdit(s)
+		e.tracef("raw LF inserts newline")
+		s.insert('\n')
+		if e.pasteMode {
+			e.refreshPasteSummary(s)
+		}
+		return viEditResult{redraw: true}, nil
+	case ctrlA:
+		e.clearShiftEnterPending()
+		e.markManualEdit(s)
+		e.tracef("raw ctrl-a moves to start")
+		s.home()
+		return viEditResult{redraw: true}, nil
+	case ctrlB:
+		e.clearShiftEnterPending()
+		e.markManualEdit(s)
+		e.tracef("raw ctrl-b moves left")
+		s.left()
+		return viEditResult{redraw: true}, nil
+	case rune(lineTermEdit):
+		e.clearShiftEnterPending()
+		e.tracef("raw ctrl-g opens editor text len=%d", len(s.buf))
+		return e.edit(s, duringTurn)
+	case ctrlE:
+		e.clearShiftEnterPending()
+		e.markManualEdit(s)
+		e.tracef("raw ctrl-e moves to end")
+		s.end()
+		return viEditResult{redraw: true}, nil
+	case ctrlF:
+		e.clearShiftEnterPending()
+		e.markManualEdit(s)
+		e.tracef("raw ctrl-f moves right")
+		s.right()
+		return viEditResult{redraw: true}, nil
+	case ctrlC:
+		e.clearShiftEnterPending()
+		e.tracef("raw ctrl-c interrupts")
+		return viEditResult{input: replInput{interrupt: true}, ok: true, done: true}, nil
+	case ctrlD:
+		e.clearShiftEnterPending()
+		e.tracef("raw ctrl-d text len=%d", len(s.buf))
+		if len(s.buf) == 0 {
+			return viEditResult{ok: false, done: true}, nil
+		}
+		return viEditResult{redraw: true}, nil
+	case '\t':
+		e.clearShiftEnterPending()
+		e.markManualEdit(s)
+		handled, err := e.completePromptTab(s)
+		if err != nil {
+			return viEditResult{}, err
+		}
+		if !handled {
+			s.insert('\t')
+		}
+		return viEditResult{redraw: true}, nil
+	case '\b', del:
+		e.clearShiftEnterPending()
+		e.markManualEdit(s)
+		e.tracef("raw backspace")
+		s.backspace()
+		return viEditResult{redraw: true}, nil
+	case rune(lineTermEscape):
+		action, text, err := e.readEscape()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				e.tracef("escape read eof")
+				return viEditResult{ok: false, done: true}, nil
+			}
+			e.tracef("escape read error: %v", err)
+			return viEditResult{}, err
+		}
+		e.tracef("escape action=%s text=%q", lineEditActionName(action), text)
+		if e.editMode == promptEditModeVi && action == lineEditEscape {
+			e.clearShiftEnterPending()
+			e.viEnterNormal(v, s)
+			return viEditResult{redraw: true}, nil
+		}
+		// During a turn a bare Esc is the double-Esc cancel gesture (the idle
+		// prompt treats bare Esc as a no-op in emacs mode and as enter-normal in vi
+		// mode). Surface it so the run loop can detect two within the window.
+		if duringTurn && action == lineEditEscape {
+			e.clearShiftEnterPending()
+			return viEditResult{input: replInput{escape: true}, ok: true, done: true}, nil
+		}
+		if action == lineEditShiftModifier {
+			e.markShiftEnterPending()
+			return viEditResult{redraw: true}, nil
+		}
+		e.clearShiftEnterPending()
+		if action == lineEditSubmit {
+			if duringTurn {
+				e.tracef("escape submit during turn inserts newline")
+				e.markManualEdit(s)
+				s.insert('\n')
+				return viEditResult{redraw: true}, nil
+			}
+			e.tracef("escape submit text len=%d purePaste=%v", len(s.buf), e.purePaste)
+			return e.submit(s)
+		}
+		switch action {
+		case lineEditHome:
+			e.markManualEdit(s)
+			s.home()
+		case lineEditEnd:
+			e.markManualEdit(s)
+			s.end()
+		case lineEditLeft:
+			e.markManualEdit(s)
+			s.left()
+		case lineEditRight:
+			e.markManualEdit(s)
+			s.right()
+		case lineEditBackspace:
+			e.markManualEdit(s)
+			s.backspace()
+		case lineEditDelete:
+			e.markManualEdit(s)
+			s.delete()
+		case lineEditEdit:
+			return e.edit(s, duringTurn)
+		case lineEditEOF:
+			if len(s.buf) == 0 {
+				return viEditResult{ok: false, done: true}, nil
+			}
+			return viEditResult{redraw: true}, nil
+		case lineEditInterrupt:
+			return viEditResult{input: replInput{interrupt: true}, ok: true, done: true}, nil
+		case lineEditInsertNewline:
+			e.markManualEdit(s)
+			s.insert('\n')
+			if e.pasteMode {
+				e.refreshPasteSummary(s)
+			}
+			e.discardBufferedRawEnter()
+		case lineEditInsertText:
+			e.markManualEdit(s)
+			if text == "\t" {
+				handled, err := e.completePromptTab(s)
+				if err != nil {
+					return viEditResult{}, err
+				}
+				if handled {
+					break
+				}
+			}
+			s.insertString(text)
+			if e.pasteMode {
+				e.refreshPasteSummary(s)
+			}
+		case lineEditHistoryPrev:
+			e.markManualEdit(s)
+			h.prev(s)
+		case lineEditHistoryNext:
+			e.markManualEdit(s)
+			h.next(s)
+		case lineEditPaste:
+			if len(s.buf) == 0 && !duringTurn {
+				s.setPasteSummary(text)
+				e.purePaste = true
+				e.tracef("bracketed paste fills empty prompt len=%d summary=%q", len(text), s.summary)
+				break
+			}
+			s.insertString(text)
+		}
+		return viEditResult{redraw: true}, nil
+	default:
+		e.clearShiftEnterPending()
+		e.markManualEdit(s)
+		if r == '\t' || unicode.IsPrint(r) {
+			s.insert(r)
+			if e.pasteMode {
+				e.refreshPasteSummary(s)
+			}
+			return viEditResult{redraw: true}, nil
+		}
+		return viEditResult{redraw: true}, nil
+	}
+}
+
+// submit finishes the line, commits it to history, and returns it as a submitted
+// input. Centralized so the idle prompt's several submit paths (raw CR, escape
+// submit, vi submit) share one history/finish sequence; the during-turn capture
+// does not call it (Enter inserts a newline there instead).
+func (e *promptLineEditor) submit(s *lineEditState) (viEditResult, error) {
+	if err := s.finish(e.w); err != nil {
+		return viEditResult{}, err
+	}
+	e.addHistory(string(s.buf))
+	return viEditResult{input: replInput{text: string(s.buf), pasted: e.purePaste}, ok: true, done: true}, nil
+}
+
+// edit returns an edit request so the caller opens $EDITOR on the text. At the
+// idle prompt it finishes the line and commits history first; during a turn it
+// leaves the buffer intact (no terminal finish, no history) and hands the text
+// to the run loop, which opens the editor against the deposited buffer.
+func (e *promptLineEditor) edit(s *lineEditState, duringTurn bool) (viEditResult, error) {
+	if duringTurn {
+		return viEditResult{input: replInput{text: string(s.buf), edit: true}, ok: true, done: true}, nil
+	}
+	if err := s.finish(e.w); err != nil {
+		return viEditResult{}, err
+	}
+	e.addHistory(string(s.buf))
+	return viEditResult{input: replInput{text: string(s.buf), edit: true}, ok: true, done: true}, nil
 }
 
 func (e *promptLineEditor) terminalColumns() int {

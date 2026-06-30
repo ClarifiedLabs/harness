@@ -130,11 +130,11 @@ func (e *promptLineEditor) viEnterInsert(v *viLineState, s *lineEditState) {
 	e.refreshViPrompt(v, s)
 }
 
-func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, r rune) (viEditResult, error) {
+func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, r rune, duringTurn bool) (viEditResult, error) {
 	e.clearShiftEnterPending()
 	switch r {
 	case '\r', '\n':
-		return e.viSubmit(s)
+		return e.viSubmit(s, v, duringTurn)
 	case ctrlC:
 		return viEditResult{input: replInput{interrupt: true}, ok: true, done: true}, nil
 	case ctrlD:
@@ -143,7 +143,7 @@ func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState,
 		}
 		return viEditResult{redraw: true}, nil
 	case rune(lineTermEdit):
-		return e.viEdit(s)
+		return e.viEdit(s, duringTurn)
 	case '\b', del:
 		e.markManualEdit(s)
 		v.resetCommand()
@@ -157,7 +157,7 @@ func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState,
 			}
 			return viEditResult{}, err
 		}
-		return e.handleViNormalAction(v, s, h, prompt, action, text)
+		return e.handleViNormalAction(v, s, h, prompt, action, text, duringTurn)
 	default:
 		if r == '\t' || unicode.IsPrint(r) {
 			return e.handleViNormalText(v, s, h, string(r)), nil
@@ -166,17 +166,27 @@ func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState,
 	}
 }
 
-func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, action lineEditAction, text string) (viEditResult, error) {
+func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, action lineEditAction, text string, duringTurn bool) (viEditResult, error) {
 	switch action {
-	case lineEditEscape, lineEditIgnore:
+	case lineEditEscape:
+		if duringTurn {
+			// In vi normal mode during a turn, a bare Esc is the second Esc of a
+			// double-Esc cancel (the first Esc entered normal mode). Surface it so
+			// the run loop can detect two within the window.
+			v.resetCommand()
+			return viEditResult{input: replInput{escape: true}, ok: true, done: true}, nil
+		}
+		v.resetCommand()
+		return viEditResult{redraw: true}, nil
+	case lineEditIgnore:
 		v.resetCommand()
 		return viEditResult{redraw: true}, nil
 	case lineEditShiftModifier:
 		return viEditResult{redraw: true}, nil
 	case lineEditSubmit:
-		return e.viSubmit(s)
+		return e.viSubmit(s, v, duringTurn)
 	case lineEditEdit:
-		return e.viEdit(s)
+		return e.viEdit(s, duringTurn)
 	case lineEditEOF:
 		if len(s.buf) == 0 {
 			return viEditResult{ok: false, done: true}, nil
@@ -230,7 +240,7 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 		return e.handleViNormalText(v, s, h, text), nil
 	case lineEditPaste:
 		v.resetCommand()
-		if len(s.buf) == 0 {
+		if len(s.buf) == 0 && !duringTurn {
 			s.setPasteSummary(text)
 			e.purePaste = true
 			e.viEnterInsert(v, s)
@@ -476,26 +486,33 @@ func (e *promptLineEditor) viPasteText(s *lineEditState, text []rune, before boo
 	s.viClampNormalCursor()
 }
 
-func (e *promptLineEditor) viSubmit(s *lineEditState) (viEditResult, error) {
-	if err := s.finish(e.w); err != nil {
-		return viEditResult{}, err
+// viSubmit finishes the line and returns it as a submitted input. A pure paste
+// that filled the buffer submits literally even when entered from vi normal mode
+// (Esc then Enter), matching every emacs-mode submit path (raw CR, escape-submit,
+// EOF-with-buffer). The pure-paste flag survives Esc into normal mode; it is
+// cleared only by a manual edit/motion keystroke (handleViNormalText/
+// handleViNormalAction call markManualEdit), never by the mode switch itself. See
+// the "any manual keystroke clears the mark" rule. The finish+history sequence
+// is shared with the emacs submit path via e.submit.
+//
+// During a turn Enter never submits (during-turn input rule: Enter inserts), so
+// vi-normal Enter inserts a newline, drops to insert mode, and keeps reading —
+// mirroring the emacs during-turn CR path.
+func (e *promptLineEditor) viSubmit(s *lineEditState, v *viLineState, duringTurn bool) (viEditResult, error) {
+	if duringTurn {
+		e.markManualEdit(s)
+		e.viEnterInsert(v, s)
+		if len(s.buf) > 0 && s.cursor < len(s.buf) {
+			s.cursor++
+		}
+		s.insert('\n')
+		return viEditResult{redraw: true}, nil
 	}
-	e.addHistory(string(s.buf))
-	// A pure paste that filled the buffer submits literally even when entered
-	// from vi normal mode (Esc then Enter), matching every emacs-mode submit
-	// path (raw CR, escape-submit, EOF-with-buffer). The pure-paste flag survives
-	// Esc into normal mode; it is cleared only by a manual edit/motion keystroke
-	// (handleViNormalText/handleViNormalAction call markManualEdit), never by the
-	// mode switch itself. See the "any manual keystroke clears the mark" rule.
-	return viEditResult{input: replInput{text: string(s.buf), pasted: e.purePaste}, ok: true, done: true}, nil
+	return e.submit(s)
 }
 
-func (e *promptLineEditor) viEdit(s *lineEditState) (viEditResult, error) {
-	if err := s.finish(e.w); err != nil {
-		return viEditResult{}, err
-	}
-	e.addHistory(string(s.buf))
-	return viEditResult{input: replInput{text: string(s.buf), edit: true}, ok: true, done: true}, nil
+func (e *promptLineEditor) viEdit(s *lineEditState, duringTurn bool) (viEditResult, error) {
+	return e.edit(s, duringTurn)
 }
 
 func viOperatorRange(s *lineEditState, motion rune, op viOperator, count int) (int, int, bool) {
