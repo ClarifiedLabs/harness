@@ -405,11 +405,17 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 		if e.editMode == promptEditModeVi && action == lineEditEscape {
 			e.clearShiftEnterPending()
 			e.viEnterNormal(v, s)
+			if duringTurn {
+				// During a turn, the first Esc in vi insert mode still enters normal
+				// mode, but it must also count as the first press of the double-Esc
+				// cancel gesture; otherwise vi mode requires three Esc presses.
+				return viEditResult{input: replInput{escape: true}, ok: true, done: true, redraw: true}, nil
+			}
 			return viEditResult{redraw: true}, nil
 		}
 		// During a turn a bare Esc is the double-Esc cancel gesture (the idle
-		// prompt treats bare Esc as a no-op in emacs mode and as enter-normal in vi
-		// mode). Surface it so the run loop can detect two within the window.
+		// prompt treats bare Esc as a no-op in emacs mode). Surface it so the run
+		// loop can detect two within the window.
 		if duringTurn && action == lineEditEscape {
 			e.clearShiftEnterPending()
 			return viEditResult{input: replInput{escape: true}, ok: true, done: true}, nil

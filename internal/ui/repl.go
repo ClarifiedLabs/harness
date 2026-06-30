@@ -1249,6 +1249,9 @@ func (rr *replReader) readTurn() (replInput, bool, error) {
 			return replInput{}, false, err
 		}
 		if result.done {
+			if result.redraw {
+				rr.emitTurnInput()
+			}
 			if result.input.interrupt {
 				return replInput{interrupt: true}, true, nil
 			}

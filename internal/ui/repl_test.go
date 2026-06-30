@@ -3347,6 +3347,42 @@ func TestREPLDuringTurnViMode(t *testing.T) {
 	}
 }
 
+// In vi mode during a turn, the first Esc both enters normal mode and surfaces
+// to the run loop, so the usual double-Esc cancel detector sees two presses (not
+// three).
+func TestREPLDuringTurnViDoubleEscapeSurfacesBothPresses(t *testing.T) {
+	rr := newDuringTurnTestReader("\x1b\x1b")
+	rr.editor.setEditMode(string(promptEditModeVi))
+	rr.beginTurnCapture()
+
+	first, done, err := pumpDuringTurnKey(rr)
+	if err != nil {
+		t.Fatalf("first Esc: %v", err)
+	}
+	if !done || !first.escape {
+		t.Fatalf("first Esc = %+v done=%v, want surfaced escape gesture", first, done)
+	}
+	if rr.turnVi.mode != viModeNormal {
+		t.Fatalf("first Esc should still enter vi normal mode, got mode=%v", rr.turnVi.mode)
+	}
+
+	var presses escapePresses
+	now := time.Unix(100, 0)
+	if presses.press(now) {
+		t.Fatal("first surfaced Esc should not cancel yet")
+	}
+	second, done, err := pumpDuringTurnKey(rr)
+	if err != nil {
+		t.Fatalf("second Esc: %v", err)
+	}
+	if !done || !second.escape {
+		t.Fatalf("second Esc = %+v done=%v, want surfaced escape gesture", second, done)
+	}
+	if !presses.press(now.Add(10 * time.Millisecond)) {
+		t.Fatal("two surfaced Esc gestures within the window should cancel")
+	}
+}
+
 // During a turn up/down arrows recall history just like the idle prompt: the
 // recalled line replaces the buffer (and is deposited as editable prefill, never
 // auto-submitted).
