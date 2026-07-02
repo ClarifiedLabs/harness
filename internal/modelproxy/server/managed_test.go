@@ -44,6 +44,16 @@ func catalogModelPrice(t *testing.T, c protocol.Catalog, providerID, modelID str
 	return llm.Price{}
 }
 
+func catalogHasTarget(c protocol.Catalog, providerID, modelID string) bool {
+	id := providerID + ":" + modelID
+	for _, target := range c.Targets {
+		if target.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // streamOnce drives one /v1/stream request returning fixed usage and discards
 // the body, so the handler's deferred cost accounting runs.
 func streamOnce(t *testing.T, srv *httptest.Server, provider, model string) {
@@ -172,6 +182,13 @@ func TestManagedPriceSourceResolvesFromOtherProvider(t *testing.T) {
 	}
 	if got := catalogModelPrice(t, handler.Catalog(), "proxyai", "gpt-5-codex"); got != (llm.Price{Input: 1.25, Output: 10}) {
 		t.Fatalf("proxyai managed price = %+v, want {1.25,10} resolved from openai via price_source", got)
+	}
+
+	// Live refresh still resolves through price_source, even though the provider's
+	// own name is not present in models.dev.
+	handler.UpdateModelsDevCatalog(modelsDevCatalogWith("openai", "gpt-5-codex", llm.Price{Input: 2, Output: 20}), time.Unix(1_700_086_400, 0))
+	if got := catalogModelPrice(t, handler.Catalog(), "proxyai", "gpt-5-codex"); got != (llm.Price{Input: 2, Output: 20}) {
+		t.Fatalf("proxyai refreshed price = %+v, want {2,20} resolved from openai via price_source", got)
 	}
 }
 
@@ -370,6 +387,119 @@ func TestUpdateModelsDevCatalogSwapsManagedPrices(t *testing.T) {
 	want := 1000.0/1e6*6 + 2000.0/1e6*8
 	if diff := cost - want; diff > 1e-9 || diff < -1e-9 {
 		t.Fatalf("refreshed cost = %v, want %v from new managed price", cost, want)
+	}
+}
+
+func TestUpdateModelsDevCatalogPrunesManagedModelsMissingFromRefresh(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+  "name": "testai",
+  "api_type": "openai",
+  "base_url": "https://api.test/v1",
+  "managed": true,
+  "models": [
+    {"name":"alpha","context_window":123000},
+    {"name":"retired","context_window":123000}
+  ]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	initial := &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+		"testai": {ID: "testai", Models: map[string]modelsdev.Model{
+			"alpha":   {ID: "alpha", Cost: llm.Price{Input: 2, Output: 4}},
+			"retired": {ID: "retired", Cost: llm.Price{Input: 9, Output: 9}},
+		}},
+	}}
+	handler, err := NewHandler(Options{
+		ConfigDir:           dir,
+		Config:              Config{ProviderConfigs: []string{"testai.json"}},
+		ModelsDevCatalog:    initial,
+		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
+		New:                 fixedUsageProvider(llm.Usage{}),
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	if !catalogHasTarget(handler.Catalog(), "testai", "retired") {
+		t.Fatalf("initial catalog missing retired target: %+v", handler.Catalog().Targets)
+	}
+
+	// Auto-refresh supplied a newer catalog where "retired" disappeared.
+	handler.UpdateModelsDevCatalog(modelsDevCatalogWith("testai", "alpha", llm.Price{Input: 6, Output: 8}), time.Unix(1_700_086_400, 0))
+
+	if !catalogHasTarget(handler.Catalog(), "testai", "alpha") {
+		t.Fatalf("refreshed catalog missing kept alpha target: %+v", handler.Catalog().Targets)
+	}
+	if catalogHasTarget(handler.Catalog(), "testai", "retired") {
+		t.Fatalf("refreshed catalog kept retired target: %+v", handler.Catalog().Targets)
+	}
+	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); got != (llm.Price{Input: 6, Output: 8}) {
+		t.Fatalf("alpha price after refresh = %+v, want {6,8}", got)
+	}
+}
+
+func TestUpdateModelsDevCatalogPrunesManagedProviderMissingFromRefresh(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "goneai.json"), []byte(`{
+  "name": "goneai",
+  "api_type": "openai",
+  "base_url": "https://api.gone.test/v1",
+  "managed": true,
+  "models": [{"name":"alpha","context_window":123000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir:           dir,
+		Config:              Config{ProviderConfigs: []string{"goneai.json"}},
+		ModelsDevCatalog:    modelsDevCatalogWith("goneai", "alpha", llm.Price{Input: 2, Output: 4}),
+		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
+		New:                 fixedUsageProvider(llm.Usage{}),
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	if !catalogHasTarget(handler.Catalog(), "goneai", "alpha") {
+		t.Fatalf("initial catalog missing goneai target: %+v", handler.Catalog().Targets)
+	}
+
+	// The refreshed catalog no longer contains the provider. This should not fail
+	// the snapshot rebuild; the live catalog just stops advertising the stale target.
+	handler.UpdateModelsDevCatalog(modelsDevCatalogWith("otherai", "beta", llm.Price{Input: 6, Output: 8}), time.Unix(1_700_086_400, 0))
+
+	if len(handler.Catalog().Targets) != 0 {
+		t.Fatalf("refreshed catalog targets = %+v, want stale provider pruned", handler.Catalog().Targets)
+	}
+	if handler.Catalog().Pricing == nil || !handler.Catalog().Pricing.SourceDate.Equal(time.Unix(1_700_086_400, 0)) {
+		t.Fatalf("refreshed empty catalog pricing = %+v, want new source date", handler.Catalog().Pricing)
+	}
+}
+
+func TestUpdateModelsDevCatalogKeepsManualProviderMissingFromRefresh(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "manual.json"), []byte(`{
+  "name": "manualai",
+  "api_type": "openai",
+  "base_url": "https://api.manual.test/v1",
+  "models": [{"name":"alpha","context_window":123000,"price":{"input":2,"output":4}}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir:           dir,
+		Config:              Config{ProviderConfigs: []string{"manual.json"}},
+		ModelsDevCatalog:    modelsDevCatalogWith("manualai", "alpha", llm.Price{Input: 99, Output: 99}),
+		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
+		New:                 fixedUsageProvider(llm.Usage{}),
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	handler.UpdateModelsDevCatalog(modelsDevCatalogWith("otherai", "beta", llm.Price{Input: 6, Output: 8}), time.Unix(1_700_086_400, 0))
+
+	if got := catalogModelPrice(t, handler.Catalog(), "manualai", "alpha"); got != (llm.Price{Input: 2, Output: 4}) {
+		t.Fatalf("manual provider price after refresh = %+v, want configured {2,4}", got)
 	}
 }
 

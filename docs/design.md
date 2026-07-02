@@ -639,8 +639,10 @@ Provider config files are either **managed** or **manual**:
   models.dev cache at request time. Because the background refresher (above)
   reloads that cache and the serving handler swaps in the new metadata live,
   refreshed prices and modality support reach the running server **without** a
-  `setup` + restart. Re-running `setup` never clobbers hand-edited prices
-  because managed configs hold none.
+  `setup` + restart. If a refreshed cache no longer lists a managed provider or
+  model, the handler warns and removes that stale target from the live catalog;
+  manual configs are not pruned by cache refreshes. Re-running `setup` never
+  clobbers hand-edited prices because managed configs hold none.
 - **Manual** configs are any provider file lacking `"managed": true` — typically
   hand-written. The proxy never touches them and serves their own `price` and
   `input_modalities` entries verbatim. A pre-existing price-bearing config
@@ -684,11 +686,11 @@ The serving handler holds its registry, pricer, and served catalog behind an
 atomic snapshot. The initial snapshot is built at startup from the loaded
 provider configs plus the cached models.dev catalog; after each successful cache
 refresh the refresher rebuilds the snapshot (managed flat prices/modalities from
-the new catalog, manual metadata unchanged) and atomically swaps it in, so
-`/v1/models` responses and per-request `cost_usd` accounting always reflect the
-freshest managed metadata. `internal/llm` stays free of any `internal/modelsdev`
-import — the server is the only layer that bridges models.dev metadata into
-`llm`.
+the new catalog with managed entries absent from that catalog pruned, manual
+metadata unchanged) and atomically swaps it in, so `/v1/models` responses and
+per-request `cost_usd` accounting always reflect the freshest managed metadata.
+`internal/llm` stays free of any `internal/modelsdev` import — the server is the
+only layer that bridges models.dev metadata into `llm`.
 Candidate cache updates must parse as models.dev JSON and contain at least one
 provider and model. When a previous cache is parseable, replacement is rejected
 if provider or model counts change by more than 4x and the absolute delta is
@@ -791,9 +793,15 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   rewrites Codex models from that source. When `sakana` is configured, refresh
   uses the bundled Sakana catalog and keeps `responses_stateful:false`.
   Refreshed files are rewritten as managed, price-less configs. If live fetch fails, it
-  uses a parseable local cache before using the vendored fallback snapshot. It
-  errors if a configured provider or model is missing/unsupported in the selected
-  catalog.
+  uses a parseable local cache before using the vendored fallback snapshot. When a
+  configured model is missing from the selected catalog it prints a warning and
+  drops that model; when a configured provider is missing, is no longer supported
+  by harness, or has no models left after refresh it prints a warning and removes
+  the provider (deleting its now-empty provider file and dropping the stale
+  `provider_configs` reference), so a provider that no longer exists never fails
+  the whole refresh. A referenced provider file that has gone missing is likewise
+  warned about and dropped from `provider_configs`. Unreadable or malformed files
+  still error.
 - **API-key authentication between harness and the model proxy** is optional and
   disabled by default; it becomes required as soon as the first key is stored.
   Keys are generated with `harness-model-proxy generate-api-key <name>`, live in

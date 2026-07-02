@@ -1007,6 +1007,338 @@ func TestRunRefreshModelsHandlesSakanaProvider(t *testing.T) {
 	}
 }
 
+func TestRunRefreshModelsRemovesProviderMissingFromCatalog(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["testai.json","goneai.json"],"default_context_window":222000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+  "name": "testai",
+  "api_type": "openai",
+  "base_url": "https://api.test/v1",
+  "api_key": "sk-test",
+  "models": [{"name":"alpha","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "goneai.json"), []byte(`{
+  "name": "goneai",
+  "api_type": "openai",
+  "base_url": "https://api.gone/v1",
+  "api_key": "sk-gone",
+  "models": [{"name":"gone-1","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errw bytes.Buffer
+	env := environment{
+		stdout: &out,
+		stderr: &errw,
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return testSetupCatalog(), nil
+		},
+	}
+
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v; stderr=%q", err, errw.String())
+	}
+	if !strings.Contains(errw.String(), "provider \"goneai\"") || !strings.Contains(errw.String(), "no longer in the model catalog") {
+		t.Fatalf("stderr should warn about the removed provider, got %q", errw.String())
+	}
+	// The surviving provider file is refreshed and kept.
+	if _, err := os.Stat(filepath.Join(dir, "testai.json")); err != nil {
+		t.Fatalf("testai.json should be kept: %v", err)
+	}
+	// The gone provider's file is deleted.
+	if _, err := os.Stat(filepath.Join(dir, "goneai.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("goneai.json should be removed, stat err = %v", err)
+	}
+	// The main config no longer references the removed provider file, and other
+	// keys are preserved.
+	cfgData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		ProviderConfigs      []string `json:"provider_configs"`
+		DefaultContextWindow int      `json:"default_context_window"`
+	}
+	if err := json.Unmarshal(cfgData, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.ProviderConfigs, []string{"testai.json"}) {
+		t.Fatalf("provider_configs after refresh = %+v, want [testai.json]", cfg.ProviderConfigs)
+	}
+	if cfg.DefaultContextWindow != 222000 {
+		t.Fatalf("default_context_window after refresh = %d, want 222000 preserved", cfg.DefaultContextWindow)
+	}
+}
+
+func TestRunRefreshModelsRemovesMissingProviderConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["testai.json","missing.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+  "name": "testai",
+  "api_type": "openai",
+  "base_url": "https://api.test/v1",
+  "api_key": "sk-test",
+  "models": [{"name":"alpha","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errw bytes.Buffer
+	env := environment{
+		stdout: &out,
+		stderr: &errw,
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return testSetupCatalog(), nil
+		},
+	}
+
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v; stderr=%q", err, errw.String())
+	}
+	if !strings.Contains(errw.String(), "missing.json") || !strings.Contains(errw.String(), "no longer exists") {
+		t.Fatalf("stderr should warn about the missing provider file, got %q", errw.String())
+	}
+	cfgData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		ProviderConfigs []string `json:"provider_configs"`
+	}
+	if err := json.Unmarshal(cfgData, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.ProviderConfigs, []string{"testai.json"}) {
+		t.Fatalf("provider_configs after refresh = %+v, want [testai.json]", cfg.ProviderConfigs)
+	}
+}
+
+func TestRunRefreshModelsDropsMissingModelKeepsOthers(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["testai.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+  "name": "testai",
+  "api_type": "openai",
+  "base_url": "https://api.test/v1",
+  "api_key": "sk-test",
+  "models": [{"name":"alpha","context_window":1000},{"name":"retired","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errw bytes.Buffer
+	env := environment{
+		stdout: &out,
+		stderr: &errw,
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return testSetupCatalog(), nil
+		},
+	}
+
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v; stderr=%q", err, errw.String())
+	}
+	if !strings.Contains(errw.String(), "model \"retired\"") || !strings.Contains(errw.String(), "no longer in the model catalog") {
+		t.Fatalf("stderr should warn about the removed model, got %q", errw.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "testai.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var provider setupProviderConfig
+	if err := json.Unmarshal(data, &provider); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.Models) != 1 || provider.Models[0].Name != "alpha" {
+		t.Fatalf("provider models after refresh = %+v, want alpha only", provider.Models)
+	}
+}
+
+func TestRunRefreshModelsRemovesProviderWithNoModelsRemaining(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["testai.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+  "name": "testai",
+  "api_type": "openai",
+  "base_url": "https://api.test/v1",
+  "api_key": "sk-test",
+  "models": [{"name":"retired","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errw bytes.Buffer
+	env := environment{
+		stdout: &out,
+		stderr: &errw,
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return testSetupCatalog(), nil
+		},
+	}
+
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v; stderr=%q", err, errw.String())
+	}
+	if !strings.Contains(errw.String(), "no models remaining") {
+		t.Fatalf("stderr should warn about the emptied provider, got %q", errw.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "testai.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("testai.json should be removed, stat err = %v", err)
+	}
+	cfgData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		ProviderConfigs []string `json:"provider_configs"`
+	}
+	if err := json.Unmarshal(cfgData, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.ProviderConfigs) != 0 {
+		t.Fatalf("provider_configs after refresh = %+v, want empty", cfg.ProviderConfigs)
+	}
+}
+
+func TestRunRefreshModelsDropsMissingProviderFromMultiProviderFile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["providers.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "providers.json"), []byte(`[
+  {
+    "name": "testai",
+    "api_type": "openai",
+    "base_url": "https://api.test/v1",
+    "api_key": "sk-test",
+    "models": [{"name":"alpha","context_window":1000}]
+  },
+  {
+    "name": "goneai",
+    "api_type": "openai",
+    "base_url": "https://api.gone/v1",
+    "api_key": "sk-gone",
+    "models": [{"name":"gone-1","context_window":1000}]
+  }
+]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errw bytes.Buffer
+	env := environment{
+		stdout: &out,
+		stderr: &errw,
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return testSetupCatalog(), nil
+		},
+	}
+
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v; stderr=%q", err, errw.String())
+	}
+	if !strings.Contains(errw.String(), "provider \"goneai\"") {
+		t.Fatalf("stderr should warn about the removed provider, got %q", errw.String())
+	}
+	// The file survives (testai still present) and now holds only the kept provider.
+	data, err := os.ReadFile(filepath.Join(dir, "providers.json"))
+	if err != nil {
+		t.Fatalf("providers.json should be kept: %v", err)
+	}
+	providers, err := llm.DecodeProviderConfigs(data)
+	if err != nil {
+		t.Fatalf("decode refreshed providers.json: %v", err)
+	}
+	if len(providers) != 1 || providers[0].Name != "testai" {
+		t.Fatalf("providers after refresh = %+v, want testai only", providers)
+	}
+	// The config file still references the surviving provider file.
+	cfgData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cfgData), "providers.json") {
+		t.Fatalf("config should still reference providers.json, got %q", cfgData)
+	}
+}
+
+func TestRunRefreshModelsRemovesUnsupportedProvider(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["testai.json","legacy.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+  "name": "testai",
+  "api_type": "openai",
+  "base_url": "https://api.test/v1",
+  "api_key": "sk-test",
+  "models": [{"name":"alpha","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "legacy.json"), []byte(`{
+  "name": "legacy",
+  "api_type": "openai",
+  "base_url": "https://api.legacy/v1",
+  "api_key": "sk-legacy",
+  "models": [{"name":"legacy-1","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Catalog lists "legacy" but with no api/npm, so harness can't resolve a wire
+	// shape for it: api_type and base_url both come back empty (unsupported).
+	catalog := testSetupCatalog()
+	catalog.Providers["legacy"] = modelsdev.Provider{
+		ID:   "legacy",
+		Name: "Legacy",
+		Models: map[string]modelsdev.Model{
+			"legacy-1": {ID: "legacy-1", Name: "Legacy 1", Limit: modelsdev.Limit{Context: 1000}},
+		},
+	}
+	var out, errw bytes.Buffer
+	env := environment{
+		stdout: &out,
+		stderr: &errw,
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return catalog, nil
+		},
+	}
+
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v; stderr=%q", err, errw.String())
+	}
+	if !strings.Contains(errw.String(), "provider \"legacy\"") || !strings.Contains(errw.String(), "no longer supported by harness") {
+		t.Fatalf("stderr should warn about the unsupported provider, got %q", errw.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "legacy.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy.json should be removed, stat err = %v", err)
+	}
+	cfgData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		ProviderConfigs []string `json:"provider_configs"`
+	}
+	if err := json.Unmarshal(cfgData, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.ProviderConfigs, []string{"testai.json"}) {
+		t.Fatalf("provider_configs after refresh = %+v, want [testai.json]", cfg.ProviderConfigs)
+	}
+}
+
 func TestOpenAICodexProviderUsesListVisibleCodexModels(t *testing.T) {
 	catalog, err := decodeCodexModels([]byte(testCodexModelsCatalogJSON()))
 	if err != nil {

@@ -332,7 +332,11 @@ each time.
 Run `harness-model-proxy refresh-models` to fetch and cache the latest live
 `models.dev` catalog, then refresh metadata for the currently configured model
 allowlists while preserving stored API keys. If live fetch fails, refresh uses a
-parseable local cache before falling back to the vendored snapshot.
+parseable local cache before falling back to the vendored snapshot. Configured
+providers or models that no longer exist in the catalog (or providers harness can
+no longer support) are reported with a warning and removed rather than failing the
+refresh: a missing model is dropped, and a provider that loses all its models is
+deleted along with its `provider_configs` reference.
 
 ## REPL Commands
 

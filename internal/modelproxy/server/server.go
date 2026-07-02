@@ -390,12 +390,16 @@ func (h *Handler) recordMetrics(r *http.Request, providerID, model string, usage
 // the managed prices to the models.dev cache when any provider is managed, and
 // to the provider-config mtime otherwise.
 func (h *Handler) buildSnapshot(md *modelsdev.Catalog, mdSourceDate time.Time) (*catalogSnapshot, error) {
-	priced := pricedProviders(h.providers, md)
+	priced, pruned := h.pricedProviders(md)
 	pricer := pricing.NewComposite()
 	registry := llm.RegistryFromProviderConfigs(priced)
 	registry.SetDefaultContextWindow(h.defaultContextWindow)
 	catalog, targets, err := catalogFromProviderConfigs(priced, pricer)
 	if err != nil {
+		if pruned && configuredTargetCount(priced) == 0 {
+			catalog := protocol.Catalog{Targets: []protocol.Target{}, Pricing: h.pricingInfo(md, mdSourceDate)}
+			return &catalogSnapshot{registry: registry, catalog: catalog, targets: map[string]resolvedTarget{}, pricer: pricer}, nil
+		}
 		return nil, err
 	}
 	catalog.Pricing = h.pricingInfo(md, mdSourceDate)
@@ -435,12 +439,14 @@ func (h *Handler) pricingInfo(md *modelsdev.Catalog, mdSourceDate time.Time) *pr
 
 // pricedProviders returns provider configs with flat prices ready for the
 // registry and catalog. Managed providers get a fresh copy whose flat model
-// prices come from the models.dev cache when applicable (left zero when the
-// cache lacks the model or a provider-specific pricer owns the cost); manual
-// providers are returned unchanged, keeping their own configured prices.
-func pricedProviders(providers []llm.ProviderConfig, md *modelsdev.Catalog) []llm.ProviderConfig {
-	out := make([]llm.ProviderConfig, len(providers))
-	for i, pc := range providers {
+// prices and input modalities come from the models.dev cache when applicable;
+// when a refreshed cache no longer contains a managed provider/model, the stale
+// entry is pruned from the live snapshot with a warning. Manual providers are
+// returned unchanged, keeping their own configured prices and metadata.
+func (h *Handler) pricedProviders(md *modelsdev.Catalog) ([]llm.ProviderConfig, bool) {
+	out := make([]llm.ProviderConfig, 0, len(h.providers))
+	pruned := false
+	for _, pc := range h.providers {
 		if pc.Name == openAICodexProviderID || (pc.Managed && pc.Name == pricing.SakanaProviderID) {
 			cp := pc
 			cp.Models = make([]llm.ModelEntry, len(pc.Models))
@@ -448,31 +454,61 @@ func pricedProviders(providers []llm.ProviderConfig, md *modelsdev.Catalog) []ll
 				entry.Price = llm.Price{}
 				cp.Models[j] = entry
 			}
-			out[i] = cp
+			out = append(out, cp)
 			continue
 		}
-		if !pc.Managed {
-			out[i] = pc
+		if !pc.Managed || md == nil {
+			out = append(out, pc)
 			continue
 		}
-		cp := pc
 		// Managed prices resolve from PriceSource when set, otherwise from the
 		// provider's own name.
 		priceProvider := pc.PriceSource
 		if priceProvider == "" {
 			priceProvider = pc.Name
 		}
-		cp.Models = make([]llm.ModelEntry, len(pc.Models))
-		for j, entry := range pc.Models {
-			if info, ok := modelsDevModelInfo(md, priceProvider, entry.Name); ok {
-				entry.Price = info.Price
-				entry.InputModalities = append([]string(nil), info.InputModalities...)
-			}
-			cp.Models[j] = entry
+		provider, ok := md.Provider(priceProvider)
+		if !ok {
+			pruned = true
+			h.logger.Warn("managed provider no longer exists in models.dev catalog; removing it from live catalog", "provider", pc.Name, "catalog_provider", priceProvider)
+			continue
 		}
-		out[i] = cp
+		cp := pc
+		cp.Models = make([]llm.ModelEntry, 0, len(pc.Models))
+		for _, entry := range pc.Models {
+			info, ok := provider.ModelInfo(entry.Name)
+			if !ok {
+				pruned = true
+				h.logger.Warn("managed model no longer exists in models.dev catalog; removing it from live catalog", "provider", pc.Name, "model", entry.Name, "catalog_provider", priceProvider)
+				continue
+			}
+			entry.Price = info.Price
+			entry.InputModalities = append([]string(nil), info.InputModalities...)
+			cp.Models = append(cp.Models, entry)
+		}
+		if len(cp.Models) == 0 {
+			pruned = true
+			h.logger.Warn("managed provider has no models remaining after models.dev refresh; removing it from live catalog", "provider", pc.Name, "catalog_provider", priceProvider)
+			continue
+		}
+		out = append(out, cp)
 	}
-	return out
+	return out, pruned
+}
+
+func configuredTargetCount(providers []llm.ProviderConfig) int {
+	count := 0
+	for _, pc := range providers {
+		if pc.Name == "" {
+			continue
+		}
+		for _, entry := range pc.Models {
+			if entry.Name != "" {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // modelsDevPrice bridges a models.dev catalog price into an llm.Price for one

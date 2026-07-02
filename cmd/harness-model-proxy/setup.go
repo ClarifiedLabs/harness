@@ -222,12 +222,23 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 
 	dir := filepath.Dir(cfgPath)
 	var codexCatalog *codexModelsCatalog
+	// Files kept after refresh, in original order. Provider files whose every
+	// provider disappeared from the catalog are deleted and dropped from this
+	// list so a stale reference does not fail the next refresh; when any file is
+	// dropped the main config's provider_configs is rewritten to match.
+	remainingFiles := make([]string, 0, len(files))
+	removedFiles := false
 	for _, file := range files {
 		path := file
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(dir, file)
 		}
 		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider config %s no longer exists; removing its reference\n", file)
+			removedFiles = true
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -251,14 +262,20 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			}
 			meta, ok := setupCatalogProvider(catalog, codexCatalog, current.Name)
 			if !ok {
-				return fmt.Errorf("provider %q from %s was not found in the model catalog", current.Name, path)
+				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider %q from %s is no longer in the model catalog; removing it\n", current.Name, path)
+				continue
 			}
 			if setupProviderAPIType(meta) == "" || setupProviderBaseURL(meta) == "" {
-				return fmt.Errorf("provider %q from %s is not supported by harness", current.Name, path)
+				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider %q from %s is no longer supported by harness; removing it\n", current.Name, path)
+				continue
 			}
-			updatedModels, err := refreshConfiguredModels(meta, current.Models)
-			if err != nil {
-				return fmt.Errorf("%s: provider %q: %w", path, current.Name, err)
+			updatedModels, missing := refreshConfiguredModels(meta, current.Models)
+			for _, name := range missing {
+				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: model %q of provider %q from %s is no longer in the model catalog; removing it\n", name, current.Name, path)
+			}
+			if len(updatedModels) == 0 {
+				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider %q from %s has no models remaining after refresh; removing it\n", current.Name, path)
+				continue
 			}
 			next := setupProviderFromModelsDev(meta, current.APIKey, current.Auth, updatedModels)
 			if current.OmitMaxOutputTokens {
@@ -274,6 +291,17 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			applySyntheticProviderDefaults(meta, &next)
 			updated = append(updated, next)
 		}
+		if len(updated) == 0 {
+			// Every provider in this file was removed: delete the now-empty file
+			// rather than write an unloadable config, and drop its reference below.
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			fmt.Fprintf(env.stdout, "Removed %s\n", path)
+			removedFiles = true
+			continue
+		}
+		remainingFiles = append(remainingFiles, file)
 		var body any = updated
 		if len(updated) == 1 {
 			body = updated[0]
@@ -282,6 +310,15 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			return err
 		}
 		fmt.Fprintf(env.stdout, "Updated %s\n", path)
+	}
+	if removedFiles {
+		if err := setJSONField(raw, "provider_configs", remainingFiles); err != nil {
+			return err
+		}
+		if err := writeJSONFileAtomic(cfgPath, raw); err != nil {
+			return err
+		}
+		fmt.Fprintf(env.stdout, "Updated %s\n", cfgPath)
 	}
 	return nil
 }
@@ -829,22 +866,26 @@ func setJSONField(cfg map[string]json.RawMessage, key string, value any) error {
 	return nil
 }
 
-func refreshConfiguredModels(provider modelsdev.Provider, current []llm.ModelEntry) ([]modelsdev.Model, error) {
-	models := make([]modelsdev.Model, 0, len(current))
+// refreshConfiguredModels re-resolves each configured model against the refreshed
+// catalog provider. Models that are no longer present in the catalog are dropped
+// and their names returned in missing so the caller can warn; the surviving
+// models are returned in their original order. It never errors on a missing or
+// empty result — the caller decides what to do with a provider left with no
+// models (warn and remove it).
+func refreshConfiguredModels(provider modelsdev.Provider, current []llm.ModelEntry) (models []modelsdev.Model, missing []string) {
+	models = make([]modelsdev.Model, 0, len(current))
 	for _, entry := range current {
 		if entry.Name == "" {
 			continue
 		}
 		model, ok := setupProviderModel(provider, entry.Name)
 		if !ok {
-			return nil, fmt.Errorf("configured model %q was not found in the model catalog", entry.Name)
+			missing = append(missing, entry.Name)
+			continue
 		}
 		models = append(models, model)
 	}
-	if len(models) == 0 {
-		return nil, fmt.Errorf("no configured models")
-	}
-	return models, nil
+	return models, missing
 }
 
 func setupProviderModel(provider modelsdev.Provider, id string) (modelsdev.Model, bool) {
