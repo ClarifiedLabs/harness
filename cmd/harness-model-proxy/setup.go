@@ -442,13 +442,15 @@ func setupProviderFromModelsDev(provider modelsdev.Provider, apiKey string, auth
 		}
 	}
 	cfg := provider.ProviderConfig(apiKey)
+	apiType := setupProviderAPIType(provider)
+	baseURL := setupProviderBaseURL(provider)
 	return setupProviderConfig{
 		Name:        cfg.Name,
-		APIType:     cfg.APIType,
-		BaseURL:     cfg.BaseURL,
+		APIType:     apiType,
+		BaseURL:     baseURL,
 		APIKey:      cfg.APIKey,
 		Managed:     true,
-		ServerTools: setupProviderServerTools(cfg.Name, cfg.APIType, cfg.BaseURL),
+		ServerTools: setupProviderServerTools(cfg.Name, apiType, baseURL),
 		APIKeyEnv:   cfg.APIKeyEnv,
 		Auth:        authCfg,
 		Models:      entries,
@@ -789,6 +791,9 @@ func openAICodexProvider(catalog *codexModelsCatalog) (modelsdev.Provider, bool)
 
 func setupProviderAPIType(provider modelsdev.Provider) string {
 	if isOpenAICodexProvider(provider) {
+		return "responses"
+	}
+	if isSakanaProvider(provider) {
 		return "responses"
 	}
 	return provider.APIType()

@@ -385,6 +385,42 @@ func TestRunSetupWritesSakanaProvider(t *testing.T) {
 	}
 }
 
+func TestRunSetupWritesSakanaProviderWithoutModelShape(t *testing.T) {
+	home := t.TempDir()
+	var out, errw bytes.Buffer
+	env := environment{
+		stdin:  strings.NewReader("sakana\n\nfugu-ultra\nsave\n"),
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(k string) string {
+			if k == "HOME" {
+				return home
+			}
+			return ""
+		},
+		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+			return testSetupCatalogWithSakanaNoShape(), nil
+		},
+		terminalRows: func() int { return 12 },
+	}
+
+	if err := runSetup(context.Background(), env, false); err != nil {
+		t.Fatalf("runSetup: %v; stderr=%q", err, errw.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, ".config", "harness-model-proxy", "sakana.json"))
+	if err != nil {
+		t.Fatalf("read provider config: %v", err)
+	}
+	var provider setupProviderConfig
+	if err := json.Unmarshal(data, &provider); err != nil {
+		t.Fatalf("decode provider config: %v", err)
+	}
+	if provider.APIType != "responses" {
+		t.Fatalf("sakana api_type = %q, want responses; config=%s", provider.APIType, data)
+	}
+}
+
 func TestRunSetupWritesGoogleOpenAICompatibleProvider(t *testing.T) {
 	home := t.TempDir()
 	var out, errw bytes.Buffer
@@ -946,7 +982,7 @@ func TestRunRefreshModelsHandlesSakanaProvider(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "sakana.json"), []byte(`{
   "name": "sakana",
-  "api_type": "responses",
+  "api_type": "openai",
   "base_url": "https://api.sakana.ai/v1",
   "api_key": "sk-existing",
   "responses_stateful": true,
@@ -959,7 +995,7 @@ func TestRunRefreshModelsHandlesSakanaProvider(t *testing.T) {
 		stdout: &out,
 		stderr: &bytes.Buffer{},
 		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
-			return testSetupCatalogWithSakana(), nil
+			return testSetupCatalogWithSakanaNoShape(), nil
 		},
 	}
 
@@ -1548,6 +1584,17 @@ func testSetupCatalogWithSakana() *modelsdev.Catalog {
 			},
 		},
 	}}
+}
+
+func testSetupCatalogWithSakanaNoShape() *modelsdev.Catalog {
+	catalog := testSetupCatalogWithSakana()
+	provider := catalog.Providers["sakana"]
+	for id, model := range provider.Models {
+		model.Provider.Shape = ""
+		provider.Models[id] = model
+	}
+	catalog.Providers["sakana"] = provider
+	return catalog
 }
 
 func testSetupCatalogWithGoogle() *modelsdev.Catalog {
