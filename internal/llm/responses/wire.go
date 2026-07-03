@@ -13,6 +13,12 @@ const errorResultPrefix = "ERROR: "
 // emptyArgs is the canonical serialization for a tool call with no arguments.
 const emptyArgs = "{}"
 
+// minMaxOutputTokens is the smallest max_output_tokens the OpenAI Responses API
+// accepts. Providers reject values below this with an invalid_request_error, so
+// a positive resolved cap that falls under the floor (e.g. a nearly-full context
+// window leaving little headroom) is raised to the minimum rather than sent as-is.
+const minMaxOutputTokens = 16
+
 // wireRequest is the OpenAI Responses request body. Store is always sent false
 // so harness remains stateless and resends its own transcript every step.
 type wireRequest struct {
@@ -378,12 +384,17 @@ func imageDataURL(b llm.ContentBlock) string {
 
 // maxTokens resolves the max_output_tokens to send. When omit is true, the
 // field is suppressed for compatible backends that reject it. Zero means "omit"
-// so the server keeps its default.
+// so the server keeps its default. A positive value below the API floor is
+// raised to minMaxOutputTokens so the request is not rejected.
 func maxTokens(req llm.Request, contextWindow, outputLimit int, omit bool) int {
 	if omit {
 		return 0
 	}
-	return llm.ResolveMaxTokens(req, contextWindow, outputLimit)
+	mt := llm.ResolveMaxTokens(req, contextWindow, outputLimit)
+	if mt > 0 && mt < minMaxOutputTokens {
+		return minMaxOutputTokens
+	}
+	return mt
 }
 
 func inputMessagePhase(m llm.Message) string {

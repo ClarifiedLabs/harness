@@ -107,6 +107,19 @@ func TestBuildRequestMaxOutputTokensClampsExplicitValue(t *testing.T) {
 	}
 }
 
+func TestBuildRequestMaxOutputTokensRaisedToAPIFloor(t *testing.T) {
+	// A nearly-full context window leaves little headroom, so ResolveMaxTokens
+	// returns a positive value below the Responses API minimum of 16. The wire
+	// value must be raised to the floor instead of sent as-is, which the API
+	// rejects with invalid_request_error ("must be greater than or equal to 16").
+	req := basicRequest()
+	req.EstimatedInputTokens = 999_999
+	w := buildRequest(req, 1_000_000, 0)
+	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 16 {
+		t.Fatalf("max_output_tokens = %v, want 16 (API floor)", w.MaxOutputTokens)
+	}
+}
+
 func TestBuildRequestMaxOutputTokensUserSetBeatsOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.MaxTokens = 333
