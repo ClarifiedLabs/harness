@@ -6,6 +6,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -668,6 +669,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 func WriteResolved(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
 	return enc.Encode(v)
 }
 
@@ -1122,11 +1124,14 @@ func SaveReplEditMode(path, mode string) error {
 
 // writeConfigFile marshals raw to indented JSON and atomically replaces path.
 func writeConfigFile(path string, raw map[string]json.RawMessage) error {
-	out, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(raw); err != nil {
 		return err
 	}
-	out = append(out, '\n')
+	out := b.Bytes()
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err

@@ -1048,6 +1048,45 @@ func TestSaveSelectedModelPreservesOtherConfigKeys(t *testing.T) {
 	}
 }
 
+func TestSaveSelectedModelDoesNotHTMLEscapeConfigStrings(t *testing.T) {
+	path := writeConfig(t, `{"repl_prompt":"({git_branch}) {cwd} [{model} | {agent}]> ","htmlish":"<&>"}`)
+	if err := SaveSelectedModel(path, "openai", "gpt-5.5", ""); err != nil {
+		t.Fatalf("SaveSelectedModel: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	out := string(data)
+	if strings.Contains(out, `\u003e`) || strings.Contains(out, `\u003c`) || strings.Contains(out, `\u0026`) {
+		t.Fatalf("saved config should not HTML-escape string values:\n%s", out)
+	}
+	if !strings.Contains(out, `"repl_prompt": "({git_branch}) {cwd} [{model} | {agent}]> "`) {
+		t.Fatalf("saved config should preserve literal repl_prompt >:\n%s", out)
+	}
+	if !strings.Contains(out, `"htmlish": "<&>"`) {
+		t.Fatalf("saved config should preserve literal <&>:\n%s", out)
+	}
+}
+
+func TestSaveSelectedModelStillEscapesRequiredJSONStringCharacters(t *testing.T) {
+	path := writeConfig(t, `{"custom":"quote \" backslash \\ newline\n"}`)
+	if err := SaveSelectedModel(path, "openai", "gpt-5.5", ""); err != nil {
+		t.Fatalf("SaveSelectedModel: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	out := string(data)
+	if !json.Valid(data) {
+		t.Fatalf("saved config is not valid JSON:\n%s", out)
+	}
+	if !strings.Contains(out, `"custom": "quote \" backslash \\ newline\n"`) {
+		t.Fatalf("saved config should still escape JSON-required string characters:\n%s", out)
+	}
+}
+
 func TestSaveReplEditModeCreatesConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.json")
 	if err := SaveReplEditMode(path, "vi"); err != nil {
