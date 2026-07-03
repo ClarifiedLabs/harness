@@ -2150,6 +2150,33 @@ func TestREPLReaderConsumesBufferedEscapeSequenceTail(t *testing.T) {
 	}
 }
 
+func TestREPLReaderAuxiliaryPromptSkipsHistory(t *testing.T) {
+	// The main idle prompt (replPrompt: true) records submitted lines to history,
+	// but auxiliary menu prompts (e.g. /model selections, save confirmations) must
+	// not, so transient answers like "44" or "y" never pollute up-arrow recall.
+	rr := newREPLReader(strings.NewReader("real-command\r44\ry\r"), io.Discard, true, "")
+	var recorded []string
+	rr.editor.onNewHistory = func(entry string) { recorded = append(recorded, entry) }
+
+	if _, ok, err := rr.read(replReadRequest{prompt: "> ", promptEditor: true, replPrompt: true}); err != nil || !ok {
+		t.Fatalf("idle read ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := rr.read(replReadRequest{prompt: "model? ", promptEditor: true}); err != nil || !ok {
+		t.Fatalf("menu read 1 ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := rr.read(replReadRequest{prompt: "save? ", promptEditor: true}); err != nil || !ok {
+		t.Fatalf("menu read 2 ok=%v err=%v", ok, err)
+	}
+
+	if len(recorded) != 1 || recorded[0] != "real-command" {
+		t.Fatalf("history recorded = %v, want only [real-command]", recorded)
+	}
+	// The editor's recallable history must also exclude the menu answers.
+	if got := rr.editor.history; len(got) != 1 || got[0] != "real-command" {
+		t.Fatalf("editor history = %v, want [real-command]", got)
+	}
+}
+
 func TestREPLReaderMarksSplitEscapeSequenceTail(t *testing.T) {
 	rr := newREPLReader(strings.NewReader("[A\x1b"), io.Discard, false, "")
 	rr.setEscapeLineEnd(true)

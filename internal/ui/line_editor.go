@@ -86,6 +86,11 @@ type promptLineEditor struct {
 	viYank              []rune
 	onNewHistory        func(string) // optional callback fired when a new entry is added
 	shiftEnterPending   bool
+	// noHistory suppresses committing submitted lines to history for the current
+	// read. It is set for auxiliary prompts (e.g. /model menu selections, save
+	// confirmations) so transient menu answers never pollute the recallable REPL
+	// history; the main idle prompt leaves it false.
+	noHistory bool
 
 	// Non-bracketed paste-burst heuristic (interactive TTY only). When now is
 	// non-nil and pasteHeuristic is true, updatePasteTiming tracks inter-keystroke
@@ -1471,6 +1476,9 @@ func (e *promptLineEditor) readBracketedPaste() (string, error) {
 }
 
 func (e *promptLineEditor) addHistory(text string) {
+	if e.noHistory {
+		return
+	}
 	if strings.TrimSpace(text) == "" {
 		return
 	}

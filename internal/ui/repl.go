@@ -1176,11 +1176,14 @@ func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
 	}
 	if req.promptEditor && rr.editor != nil {
 		restoreViPrompt := rr.editor.viPrompt
+		restoreNoHistory := rr.editor.noHistory
 		if !req.replPrompt {
 			rr.editor.viPrompt = nil
+			rr.editor.noHistory = true
 		}
 		defer func() {
 			rr.editor.viPrompt = restoreViPrompt
+			rr.editor.noHistory = restoreNoHistory
 		}()
 		input, ok, err := rr.editor.readPrefilled(req.prompt, req.prefill)
 		if ok {
