@@ -195,16 +195,33 @@ func TestBuildRequestReasoningEffortOpenRouter(t *testing.T) {
 	if w.ReasoningEffort != "" {
 		t.Fatalf("reasoning_effort = %q, want omitted for OpenRouter", w.ReasoningEffort)
 	}
-	if w.Reasoning == nil || w.Reasoning.Effort != "medium" {
-		t.Fatalf("reasoning = %+v, want effort medium", w.Reasoning)
+	if w.Reasoning == nil || w.Reasoning.Effort != "medium" || w.Reasoning.Exclude == nil || !*w.Reasoning.Exclude {
+		t.Fatalf("reasoning = %+v, want effort medium with exclude true", w.Reasoning)
 	}
 
 	b, err := json.Marshal(w)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if !bytes.Contains(b, []byte(`"reasoning":{"effort":"medium"}`)) {
+	if !bytes.Contains(b, []byte(`"reasoning":{"effort":"medium","exclude":true}`)) {
 		t.Fatalf("reasoning object missing from JSON: %s", b)
+	}
+}
+
+func TestBuildRequestReasoningOpenRouterExcludesByDefault(t *testing.T) {
+	req := basicRequest()
+	w := buildRequestForMode(req, 0, 0, "openrouter")
+	if w.Reasoning == nil || w.Reasoning.Exclude == nil || !*w.Reasoning.Exclude {
+		t.Fatalf("reasoning = %+v, want exclude true by default for OpenRouter", w.Reasoning)
+	}
+}
+
+func TestBuildRequestReasoningSummaryOpenRouterIncludesReasoning(t *testing.T) {
+	req := basicRequest()
+	req.Reasoning = llm.ReasoningConfig{Summary: "auto"}
+	w := buildRequestForMode(req, 0, 0, "openrouter")
+	if w.Reasoning == nil || w.Reasoning.Exclude == nil || *w.Reasoning.Exclude {
+		t.Fatalf("reasoning = %+v, want exclude false when reasoning summary is requested", w.Reasoning)
 	}
 }
 
@@ -216,15 +233,15 @@ func TestBuildRequestReasoningBudgetOpenRouter(t *testing.T) {
 	if w.ReasoningEffort != "" {
 		t.Fatalf("reasoning_effort = %q, want omitted for OpenRouter", w.ReasoningEffort)
 	}
-	if w.Reasoning == nil || w.Reasoning.MaxTokens == nil || *w.Reasoning.MaxTokens != 2048 {
-		t.Fatalf("reasoning = %+v, want max_tokens 2048", w.Reasoning)
+	if w.Reasoning == nil || w.Reasoning.MaxTokens == nil || *w.Reasoning.MaxTokens != 2048 || w.Reasoning.Exclude == nil || !*w.Reasoning.Exclude {
+		t.Fatalf("reasoning = %+v, want max_tokens 2048 with exclude true", w.Reasoning)
 	}
 
 	b, err := json.Marshal(w)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if !bytes.Contains(b, []byte(`"reasoning":{"max_tokens":2048}`)) {
+	if !bytes.Contains(b, []byte(`"reasoning":{"max_tokens":2048,"exclude":true}`)) {
 		t.Fatalf("reasoning budget missing from JSON: %s", b)
 	}
 }
@@ -282,15 +299,15 @@ func TestBuildRequestReasoningToggleOpenRouter(t *testing.T) {
 	enabled := false
 	req.Reasoning = llm.ReasoningConfig{Enabled: &enabled}
 	w := buildRequestForMode(req, 0, 0, "openrouter")
-	if w.Reasoning == nil || w.Reasoning.Enabled == nil || *w.Reasoning.Enabled {
-		t.Fatalf("reasoning = %+v, want enabled false", w.Reasoning)
+	if w.Reasoning == nil || w.Reasoning.Enabled == nil || *w.Reasoning.Enabled || w.Reasoning.Exclude == nil || !*w.Reasoning.Exclude {
+		t.Fatalf("reasoning = %+v, want enabled false with exclude true", w.Reasoning)
 	}
 
 	b, err := json.Marshal(w)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if !bytes.Contains(b, []byte(`"reasoning":{"enabled":false}`)) {
+	if !bytes.Contains(b, []byte(`"reasoning":{"enabled":false,"exclude":true}`)) {
 		t.Fatalf("reasoning toggle missing from JSON: %s", b)
 	}
 }

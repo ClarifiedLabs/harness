@@ -126,6 +126,16 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 	var usage llm.Usage
 	var stop llm.StopReason = llm.StopEndTurn
 	completed := false
+	var reasoning strings.Builder
+
+	flushReasoning := func() bool {
+		if reasoning.Len() == 0 {
+			return true
+		}
+		text := reasoning.String()
+		reasoning.Reset()
+		return yield(llm.StreamEvent{Kind: llm.EventReasoningSummary, Text: text}, nil)
+	}
 
 	for ev, err := range sse.Read(ctx, r) {
 		if err != nil {
@@ -163,12 +173,24 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 		}
 
 		for _, choice := range chunk.Choices {
+			if choice.Delta.Reasoning != "" {
+				reasoning.WriteString(choice.Delta.Reasoning)
+			}
+			if choice.Delta.ReasoningContent != "" {
+				reasoning.WriteString(choice.Delta.ReasoningContent)
+			}
 			if choice.Delta.Content != "" {
+				if !flushReasoning() {
+					return
+				}
 				if !yield(llm.StreamEvent{Kind: llm.EventTextDelta, Text: choice.Delta.Content}, nil) {
 					return
 				}
 			}
 			for _, frag := range choice.Delta.ToolCalls {
+				if !flushReasoning() {
+					return
+				}
 				if !asm.observe(frag, yield) {
 					return
 				}
@@ -177,6 +199,9 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 				continue
 			}
 			stop = normalizeStopReason(choice.FinishReason)
+			if !flushReasoning() {
+				return
+			}
 			if asm.has() {
 				ok, fatal := asm.flush(yield)
 				if fatal != nil {

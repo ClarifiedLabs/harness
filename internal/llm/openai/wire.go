@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"strings"
 
 	"harness/internal/llm"
 )
@@ -45,6 +46,7 @@ type wireReasoning struct {
 	Effort    string `json:"effort,omitempty"`
 	Enabled   *bool  `json:"enabled,omitempty"`
 	MaxTokens *int   `json:"max_tokens,omitempty"`
+	Exclude   *bool  `json:"exclude,omitempty"`
 }
 
 type wireExtraBody struct {
@@ -144,8 +146,10 @@ type wireChoice struct {
 
 // wireDelta carries incremental content and/or tool-call fragments.
 type wireDelta struct {
-	Content   string              `json:"content"`
-	ToolCalls []wireToolCallDelta `json:"tool_calls"`
+	Content          string              `json:"content"`
+	Reasoning        string              `json:"reasoning"`
+	ReasoningContent string              `json:"reasoning_content"`
+	ToolCalls        []wireToolCallDelta `json:"tool_calls"`
 }
 
 // wireToolCallDelta is one streamed tool_call fragment. The first fragment for
@@ -306,10 +310,9 @@ func appendSystemContext(system, contextText string) string {
 }
 
 func openRouterReasoning(reasoning llm.ReasoningConfig) *wireReasoning {
-	if reasoning.Empty() {
-		return nil
-	}
 	out := &wireReasoning{Effort: reasoning.Effort}
+	exclude := strings.TrimSpace(reasoning.Summary) == ""
+	out.Exclude = &exclude
 	if reasoning.Enabled != nil && reasoning.Effort == "" && reasoning.BudgetTokens == nil {
 		v := *reasoning.Enabled
 		out.Enabled = &v

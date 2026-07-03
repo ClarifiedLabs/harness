@@ -85,6 +85,35 @@ func TestStreamTextOnlyEventOrder(t *testing.T) {
 	}
 }
 
+func TestStreamOpenRouterReasoningDeltas(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		llmtest.WriteBody(w, []byte(`data: {"choices":[{"delta":{"reasoning":"checking","content":""},"finish_reason":null}]}`+"\n\n"))
+		llmtest.WriteBody(w, []byte(`data: {"choices":[{"delta":{"reasoning_content":" inputs","content":""},"finish_reason":null}]}`+"\n\n"))
+		llmtest.WriteBody(w, []byte(`data: {"choices":[{"delta":{"content":"Done."},"finish_reason":null}]}`+"\n\n"))
+		llmtest.WriteBody(w, []byte(`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+	p := testProvider(t, srv, nil)
+
+	events, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4")))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	if got := llmtest.KindsOf(events); !llmtest.EqualKinds(got, []llm.EventKind{llm.EventReasoningSummary, llm.EventTextDelta, llm.EventDone}) {
+		t.Fatalf("event kinds = %v, want reasoning, text, done", got)
+	}
+	if events[0].Text != "checking inputs" {
+		t.Fatalf("reasoning text = %q, want combined reasoning deltas", events[0].Text)
+	}
+	if events[1].Text != "Done." {
+		t.Fatalf("text delta = %q, want Done.", events[1].Text)
+	}
+}
+
 func TestStreamToolCall(t *testing.T) {
 	srv := llmtest.ServeSSEFixture(t, "tool_call.sse")
 	p := testProvider(t, srv, nil)
