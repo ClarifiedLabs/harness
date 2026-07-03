@@ -495,18 +495,11 @@ func (e *promptLineEditor) viPasteText(s *lineEditState, text []rune, before boo
 // the "any manual keystroke clears the mark" rule. The finish+history sequence
 // is shared with the emacs submit path via e.submit.
 //
-// During a turn Enter never submits (during-turn input rule: Enter inserts), so
-// vi-normal Enter inserts a newline, drops to insert mode, and keeps reading —
-// mirroring the emacs during-turn CR path.
+// During a turn Enter commits the current buffer as queued next-turn input via
+// submitDuringTurn (no terminal finish), matching the emacs during-turn CR path.
 func (e *promptLineEditor) viSubmit(s *lineEditState, v *viLineState, duringTurn bool) (viEditResult, error) {
 	if duringTurn {
-		e.markManualEdit(s)
-		e.viEnterInsert(v, s)
-		if len(s.buf) > 0 && s.cursor < len(s.buf) {
-			s.cursor++
-		}
-		s.insert('\n')
-		return viEditResult{redraw: true}, nil
+		return e.submitDuringTurn(s), nil
 	}
 	return e.submit(s)
 }

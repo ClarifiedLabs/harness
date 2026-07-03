@@ -323,11 +323,13 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 // mode share the per-key switch below.
 //
 // duringTurn selects the during-turn capture semantics, which differ from the
-// idle prompt only in the terminal-finishing actions (the multi-row redraw cannot
-// run while output streams, so finish/history stay idle-only):
+// idle prompt only in terminal-finishing behavior (the multi-row redraw cannot run
+// while output streams):
 //
-//   - Submit (raw CR / escape-submit / vi Enter) inserts a newline instead of
-//     committing — during-turn input never auto-submits (rule: Enter inserts).
+//   - Submit (raw CR / escape-submit / vi Enter) commits the current buffer via
+//     submitDuringTurn: it is returned as queued input the run loop runs as the
+//     next turn (no terminal finish). Shift-Enter/raw LF still inserts a newline
+//     for multiline prompts.
 //   - Edit (Ctrl-G / escape-edit) returns done with an edit request but does not
 //     finish or commit history; the run loop opens $EDITOR on the buffer.
 //   - Bare Esc returns done as an escape gesture (for double-Esc cancel).
@@ -368,10 +370,8 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 			return viEditResult{redraw: true}, nil
 		}
 		if duringTurn {
-			e.tracef("raw CR during turn inserts newline")
-			e.markManualEdit(s)
-			s.insert('\n')
-			return viEditResult{redraw: true}, nil
+			e.tracef("raw CR during turn submits text len=%d purePaste=%v", len(s.buf), e.purePaste)
+			return e.submitDuringTurn(s), nil
 		}
 		e.tracef("raw CR submits text len=%d purePaste=%v", len(s.buf), e.purePaste)
 		return e.submit(s)
@@ -476,10 +476,8 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 		e.clearShiftEnterPending()
 		if action == lineEditSubmit {
 			if duringTurn {
-				e.tracef("escape submit during turn inserts newline")
-				e.markManualEdit(s)
-				s.insert('\n')
-				return viEditResult{redraw: true}, nil
+				e.tracef("escape submit during turn submits text len=%d purePaste=%v", len(s.buf), e.purePaste)
+				return e.submitDuringTurn(s), nil
 			}
 			e.tracef("escape submit text len=%d purePaste=%v", len(s.buf), e.purePaste)
 			return e.submit(s)
@@ -566,14 +564,33 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 
 // submit finishes the line, commits it to history, and returns it as a submitted
 // input. Centralized so the idle prompt's several submit paths (raw CR, escape
-// submit, vi submit) share one history/finish sequence; the during-turn capture
-// does not call it (Enter inserts a newline there instead).
+// submit, vi submit) share one history/finish sequence.
 func (e *promptLineEditor) submit(s *lineEditState) (viEditResult, error) {
 	if err := s.finish(e.w); err != nil {
 		return viEditResult{}, err
 	}
 	e.addHistory(string(s.buf))
 	return viEditResult{input: replInput{text: string(s.buf), pasted: e.purePaste}, ok: true, done: true}, nil
+}
+
+// submitDuringTurn commits the current during-turn buffer as queued next-turn
+// input. Unlike submit it does not finish a terminal prompt (the multi-row redraw
+// cannot run while output streams); it clears the buffer so live capture can keep
+// reading more input while the turn runs. An empty Enter is a no-op so a stray
+// keypress does not stop capture. Submissions are marked interactive so they carry
+// the same !/command/$skill semantics as an idle-prompt line.
+func (e *promptLineEditor) submitDuringTurn(s *lineEditState) viEditResult {
+	text := string(s.buf)
+	if text == "" {
+		return viEditResult{redraw: true}
+	}
+	pasted := e.purePaste
+	e.addHistory(text)
+	s.buf = nil
+	s.cursor = 0
+	s.summary = ""
+	e.purePaste = false
+	return viEditResult{input: replInput{text: text, pasted: pasted, interactive: true}, ok: true, done: true, redraw: true}
 }
 
 // edit returns an edit request so the caller opens $EDITOR on the text. At the

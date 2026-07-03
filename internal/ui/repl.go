@@ -241,7 +241,7 @@ const helpText = `commands:
   !command         run a local shell command at an interactive prompt
   @path<Tab>       complete a literal file reference; image refs attach when supported
   $skillName       mention a skill to load via SKILL.md
-Interrupt a running turn with Ctrl-C or double-Esc; typing during a turn is kept and pre-filled into the next prompt (not auto-sent).
+Interrupt a running turn with Ctrl-C or double-Esc; typing during a turn is queued for the next turn when you press Enter.
 Ctrl-G opens the editor from the prompt; paths with spaces complete as @"..."; lines starting with / are commands; // sends a literal leading slash; !! escapes a literal !; $$ escapes a literal $`
 
 func (app *App) clock() func() time.Time {
@@ -409,7 +409,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		exitAfterTurn   bool
 		plainPromptRead bool
 		prompt          string
-		pendingPrefill  string // during-turn buffer deposited into the next prompt
+		pendingPrefill  string // partial during-turn buffer deposited into the next prompt
 		queued          []replInput
 		turnDone        <-chan struct{}
 		restoreEsc      func() error
@@ -597,10 +597,10 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					app.Renderer.StopProgress()
 				}
 				if usePromptEditor {
-					// Release the blocked during-turn keystroke read so it
-					// deposits its buffer as the next prompt's editable prefill;
-					// it is never auto-submitted (during-turn input rule 2). The
-					// terminal stays in raw mode for the line editor; only
+					// Release the blocked during-turn keystroke read so any
+					// unsubmitted partial buffer becomes the next prompt's editable
+					// prefill. A line already submitted with Enter is queued below.
+					// The terminal stays in raw mode for the line editor; only
 					// bracketed paste is restored.
 					if readPending {
 						reader.cancelTurnRead()
@@ -608,6 +608,8 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 						readPending = false
 						if res.ok && res.input.deposit {
 							pendingPrefill = res.input.text
+						} else if res.ok && !res.input.escape && !res.input.interrupt && (res.input.text != "" || res.input.edit) {
+							queued = append(queued, res.input)
 						} else {
 							// The read returned via a keystroke (interrupt/Esc)
 							// rather than the cancel; the typed buffer is intact.
@@ -845,9 +847,8 @@ type replInput struct {
 	escapeTail  bool
 	interrupt   bool
 	interactive bool
-	// deposit marks the accumulated during-turn buffer handed back when a turn
-	// ends, to be pre-filled (editable) into the next prompt rather than
-	// auto-submitted (during-turn input).
+	// deposit marks an accumulated during-turn buffer that did not end with Enter;
+	// it is handed back as editable prefill in the next prompt.
 	deposit bool
 }
 
@@ -869,7 +870,7 @@ type replReadRequest struct {
 	// status line, and the read returns only on Ctrl-C, Esc, or cancellation
 	// (during-turn input).
 	turnEdit bool
-	// prefill seeds the prompt editor with editable text, used to deposit the
+	// prefill seeds the prompt editor with editable text, used to deposit a partial
 	// during-turn buffer into the next prompt.
 	prefill string
 }
@@ -1120,7 +1121,7 @@ type replReader struct {
 	// buf/cursor onto the single status line via onTurnInput (it cannot use the
 	// multi-row redraw while output streams). turnState is created fresh at each
 	// turn start; onTurnInput renders the live buffer and cursor, and cancelable
-	// releases a blocked turn read so the buffer can be deposited at the turn
+	// releases a blocked turn read so a partial buffer can be deposited at the turn
 	// boundary.
 	turnState   *lineEditState
 	turnVi      viLineState
@@ -1225,9 +1226,9 @@ func (rr *replReader) beginTurnCapture() {
 // readTurn captures keystrokes during an active turn with echo off, sharing the
 // promptLineEditor's full editing grammar via handleKey (duringTurn=true). The
 // buffer is mirrored live on the status line via onTurnInput. It returns to the
-// caller only on Ctrl-C (interrupt), bare Esc (for double-Esc cancel), Ctrl-G
-// (edit), cancellation (depositing the buffer), or EOF — never auto-submitting
-// (during-turn input). Enter never submits; it inserts a newline.
+// caller on Enter (queued next-turn submission), Ctrl-C (interrupt), bare Esc (for
+// double-Esc cancel), Ctrl-G (edit), cancellation (depositing a partial buffer),
+// or EOF. Shift-Enter/raw LF inserts a newline.
 func (rr *replReader) readTurn() (replInput, bool, error) {
 	if rr.turnState == nil {
 		rr.beginTurnCapture()
@@ -1260,6 +1261,12 @@ func (rr *replReader) readTurn() (replInput, bool, error) {
 			}
 			if result.input.interrupt {
 				return replInput{interrupt: true}, true, nil
+			}
+			if result.input.text != "" || result.input.pasted || result.input.interactive {
+				// Enter during a turn: the editor committed the buffer as queued
+				// next-turn input. Hand it to the run loop, which queues it to run
+				// after the current turn; capture keeps reading further input.
+				return result.input, true, nil
 			}
 			if result.input.edit {
 				// Ctrl-G during a turn: hand the buffer to the run loop as an edit

@@ -1684,11 +1684,12 @@ backoff allows.
   output or a tool line scrolls in — not a sticky bar or scroll region.
 - **During-turn input line.** Keystrokes typed during a turn are read in raw,
   echo-off mode and shown on that wait line after a `>` marker
-  (`[model: turn 1 · 12s] > draft`). During-turn input is never auto-submitted: Enter
-  inserts a newline into the buffer rather than starting a turn. On both normal turn
-  completion and interrupt (`^C`/Esc-Esc), the accumulated buffer is deposited into
-  the next REPL prompt as editable, pre-filled text (cursor at end) instead of being
-  drained straight to the model. `^C`/Esc-Esc still cancel the turn.
+  (`[model: turn 1 · 12s] > draft`). Pressing Enter during a turn queues the
+  buffered input and runs it as the next model turn once the current turn finishes;
+  Shift-Enter/raw LF still inserts a newline for multi-line prompts. On normal turn
+  completion or interrupt (`^C`/Esc-Esc), any unsubmitted partial buffer is
+  deposited into the next REPL prompt as editable, pre-filled text (cursor at end).
+  `^C`/Esc-Esc still cancel the current turn.
 - Live tool-call construction renders progress to stderr by default:
   `[tool-call: name id=...]`. Disable with `-tool-stream=false`,
   `HARNESS_TOOL_STREAM=false`, or `"tool_stream": false`. Partial argument deltas

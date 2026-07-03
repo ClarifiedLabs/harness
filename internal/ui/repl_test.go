@@ -3112,10 +3112,9 @@ func transcriptPrompts(app *App) string {
 	return strings.Join(prompts, "|")
 }
 
-// During-turn typed input is NEVER auto-submitted (rule 1): Enter inserts a
-// newline into the buffer, and on completion the buffer is deposited into the
-// next prompt as editable, pre-filled text submitted manually (rule 2).
-func TestREPLDuringTurnInputDepositedOnCompletionNotAutoSubmitted(t *testing.T) {
+// During-turn typed input submitted with Enter is queued and automatically runs
+// as the next model turn after the current turn completes.
+func TestREPLDuringTurnInputQueuedOnEnter(t *testing.T) {
 	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
 	inTurn := make(chan struct{})
 	releaseTurn := make(chan struct{})
@@ -3144,19 +3143,63 @@ func TestREPLDuringTurnInputDepositedOnCompletionNotAutoSubmitted(t *testing.T) 
 		t.Fatal("turn did not start")
 	}
 
-	// Type during the turn, with Enter mid-word: it must render live and the
-	// Enter must insert a newline, never start a turn.
-	writePipe(t, pw, "dr\raft")
-	waitFor(t, func() bool { return strings.Contains(errw.String(), "> dr aft") }, "live input line with sanitized newline")
-	close(releaseTurn)
-	waitFor(t, func() bool { return strings.Contains(errw.String(), "[turn:") }, "turn 1 usage line")
-
+	// Type during the turn and press Enter. It renders live but the queued turn
+	// waits until the in-flight turn finishes.
+	writePipe(t, pw, "draft\r")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> draft") }, "live input line")
 	if fp.RequestCount() != 1 {
-		t.Fatalf("during-turn input must not auto-submit; got %d requests", fp.RequestCount())
+		t.Fatalf("queued during-turn input must wait for the active turn; got %d requests", fp.RequestCount())
+	}
+	close(releaseTurn)
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from queued during-turn input")
+	_ = pw.Close()
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	if got := transcriptPrompts(app); got != "first|draft" {
+		t.Fatalf("prompts = %q, want first|draft (during-turn Enter queues next prompt)", got)
+	}
+}
+
+// Partial during-turn input that is not submitted with Enter is still deposited
+// into the next prompt as editable prefill and requires a manual Enter.
+func TestREPLDuringTurnPartialInputDepositedOnCompletion(t *testing.T) {
+	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
+	inTurn := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Stop:  llm.StopEndTurn,
+			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
+			Block: func(ctx context.Context) { close(inTurn); <-releaseTurn },
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp)
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-inTurn:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
 	}
 
-	// The deposited buffer is editable prefill; submitting it manually runs it,
-	// and it preserves the newline that Enter inserted.
+	// Type without pressing Enter; the partial buffer is deposited as prefill.
+	writePipe(t, pw, "draft")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> draft") }, "live input line")
+	close(releaseTurn)
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "[turn:") }, "turn 1 usage line")
+	if fp.RequestCount() != 1 {
+		t.Fatalf("partial during-turn input must not auto-submit; got %d requests", fp.RequestCount())
+	}
+
 	writePipe(t, pw, "\r")
 	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from deposited prefill")
 	_ = pw.Close()
@@ -3164,13 +3207,13 @@ func TestREPLDuringTurnInputDepositedOnCompletionNotAutoSubmitted(t *testing.T) 
 	if code := waitRun(t, codeCh); code != ExitOK {
 		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
 	}
-	if got := transcriptPrompts(app); got != "first|dr\naft" {
-		t.Fatalf("prompts = %q, want %q (deposited text, newline preserved, submitted manually)", got, "first|dr\naft")
+	if got := transcriptPrompts(app); got != "first|draft" {
+		t.Fatalf("prompts = %q, want first|draft (partial text deposited then submitted manually)", got)
 	}
 }
 
-// On interrupt (double-Esc) the typed-so-far buffer is still deposited (rule 2),
-// and the turn is cancelled (Esc-Esc still interrupts).
+// On interrupt (double-Esc) the typed-so-far (unsubmitted) buffer is still
+// deposited, and the turn is cancelled (Esc-Esc still interrupts).
 func TestREPLDuringTurnInputDepositedOnInterrupt(t *testing.T) {
 	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
 	inTurn := make(chan struct{})
@@ -3200,7 +3243,7 @@ func TestREPLDuringTurnInputDepositedOnInterrupt(t *testing.T) {
 		t.Fatal("turn did not start")
 	}
 
-	// Type, then double-Esc to interrupt. The typed text survives as a deposit.
+	// Type without Enter, then double-Esc to interrupt. The typed text survives as a deposit.
 	writePipe(t, pw, "wip")
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> wip") }, "live input line")
 	writePipe(t, pw, "\x1b\x1b")
@@ -3233,7 +3276,7 @@ func TestREPLDuringTurnInputDepositedOnInterrupt(t *testing.T) {
 func TestREPLDuringTurnCursorEditing(t *testing.T) {
 	// Whole input is preloaded; each pump reads one rune (an escape sequence's
 	// tail is consumed by readEscape within the single pump that read the Esc).
-	const input = "abc\x02\x02X\x01\x7f\x1b[3~\x05\x7f\x06\ryz\x01\x1b[3~"
+	const input = "abc\x02\x02X\x01\x7f\x1b[3~\x05\x7f\x06\nyz\x01\x1b[3~"
 	rr := newDuringTurnTestReader(input)
 	var emittedBuf string
 	var emittedCursor int
@@ -3255,7 +3298,7 @@ func TestREPLDuringTurnCursorEditing(t *testing.T) {
 		{"Xbc", 3},    // Ctrl-E end
 		{"Xb", 2},     // backspace: rune BEFORE cursor
 		{"Xb", 2},     // Ctrl-F right no-op at end
-		{"Xb\n", 3},   // Enter inserts a newline, never submits
+		{"Xb\n", 3},   // raw LF inserts a newline (Shift-Enter path)
 		{"Xb\ny", 4},  // type y
 		{"Xb\nyz", 5}, // type z
 		{"Xb\nyz", 0}, // Ctrl-A home
@@ -3267,7 +3310,7 @@ func TestREPLDuringTurnCursorEditing(t *testing.T) {
 			t.Fatalf("step %d: %v", i, err)
 		}
 		if done {
-			t.Fatalf("step %d: handleKey returned done=%+v during a turn (Enter must insert, not submit)", i, in)
+			t.Fatalf("step %d: handleKey returned done=%+v during a turn", i, in)
 		}
 		if string(rr.turnState.buf) != want.buf || rr.turnState.cursor != want.cursor {
 			t.Fatalf("step %d: buf=%q cursor=%d, want buf=%q cursor=%d", i, string(rr.turnState.buf), rr.turnState.cursor, want.buf, want.cursor)
@@ -3320,8 +3363,8 @@ func TestREPLDuringTurnCursorWideRunesAndClamp(t *testing.T) {
 }
 
 // During a turn the shared editor runs in vi mode too: Esc enters normal mode,
-// motions (h/l) and x delete work, and Enter inserts a newline rather than
-// submitting (during-turn input rule). A second Esc is the cancel gesture.
+// motions (h/l) and x delete work, and Enter queues the buffer as the next turn.
+// A second Esc is the cancel gesture.
 func TestREPLDuringTurnViMode(t *testing.T) {
 	// type "abc", Esc -> normal, h h (move left twice), x (delete at cursor),
 	// l (right), i (insert), type "Z".
@@ -3353,7 +3396,8 @@ func TestREPLDuringTurnViMode(t *testing.T) {
 		}
 	}
 
-	// Enter during a turn inserts a newline (never submits), even in vi insert mode.
+	// Enter during a turn submits the current buffer as queued input, even in vi
+	// insert mode.
 	rr2 := newDuringTurnTestReader("ab\r")
 	rr2.editor.setEditMode(string(promptEditModeVi))
 	rr2.beginTurnCapture()
@@ -3366,11 +3410,31 @@ func TestREPLDuringTurnViMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enter: %v", err)
 	}
-	if done {
-		t.Fatalf("Enter during a turn must not submit; got done=%+v", in)
+	if !done || in.text != "ab" || !in.interactive {
+		t.Fatalf("Enter during a turn = %+v done=%v, want queued interactive input %q", in, done, "ab")
 	}
-	if string(rr2.turnState.buf) != "ab\n" {
-		t.Fatalf("buf=%q, want ab\n (Enter inserts newline)", string(rr2.turnState.buf))
+	if string(rr2.turnState.buf) != "" {
+		t.Fatalf("buf=%q, want empty after queued submit", string(rr2.turnState.buf))
+	}
+
+	// Shift-Enter/raw LF still inserts a newline for multiline during-turn prompts.
+	rr3 := newDuringTurnTestReader("ab\n")
+	rr3.editor.setEditMode(string(promptEditModeVi))
+	rr3.beginTurnCapture()
+	for i := 0; i < 2; i++ {
+		if _, _, err := pumpDuringTurnKey(rr3); err != nil {
+			t.Fatalf("type before LF %d: %v", i, err)
+		}
+	}
+	in, done, err = pumpDuringTurnKey(rr3) // LF
+	if err != nil {
+		t.Fatalf("lf: %v", err)
+	}
+	if done {
+		t.Fatalf("LF during a turn must insert, not submit; got done=%+v", in)
+	}
+	if string(rr3.turnState.buf) != "ab\n" {
+		t.Fatalf("buf=%q, want ab\\n (LF inserts newline)", string(rr3.turnState.buf))
 	}
 }
 
