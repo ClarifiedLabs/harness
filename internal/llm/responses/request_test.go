@@ -120,6 +120,19 @@ func TestBuildRequestMaxOutputTokensRaisedToAPIFloor(t *testing.T) {
 	}
 }
 
+func TestBuildRequestMaxOutputTokensRaisedToConfiguredFloor(t *testing.T) {
+	req := basicRequest()
+	req.EstimatedInputTokens = 999_999
+	w := buildRequestWithConfig(req, 1_000_000, 0, buildOptions{
+		minOutputTokens: 32,
+		baseURL:         defaultBaseURL,
+		providerName:    "testai",
+	})
+	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 32 {
+		t.Fatalf("max_output_tokens = %v, want 32 (configured floor)", w.MaxOutputTokens)
+	}
+}
+
 func TestBuildRequestMaxOutputTokensUserSetBeatsOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.MaxTokens = 333

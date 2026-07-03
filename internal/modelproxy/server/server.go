@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -823,7 +824,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		streamRetryNone streamRetry = iota
 		streamRetryContinuation
 		streamRetryServerTools
+		streamRetryMinOutputTokens
 	)
+	retryMinOutputTokens := 0
 	streamAttempt := func(request llm.Request, anchorMessageCount int) (streamRetry, llm.ResponseState) {
 		streamErr = ""
 		errAttrs = nil
@@ -843,6 +846,24 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				}
 				if !sentEvents && len(request.ServerTools) > 0 && serverToolRejected(err) {
 					return streamRetryServerTools, llm.ResponseState{}
+				}
+				if !sentEvents {
+					if floor, ok := outputTokenFloorRejected(err); ok && floor > request.MaxTokens {
+						retryMinOutputTokens = floor
+						h.logger.Warn("retrying model request with higher output token floor",
+							"request_id", requestID,
+							"target_id", targetID,
+							"provider", providerID,
+							"api_type", apiType,
+							"model", model,
+							"configured_min_output_tokens", target.pc.MinOutputTokens,
+							"inferred_min_output_tokens", floor,
+							"original_max_tokens", request.MaxTokens,
+							"retry_max_tokens", floor,
+							"err", err.Error(),
+						)
+						return streamRetryMinOutputTokens, llm.ResponseState{}
+					}
 				}
 				_ = enc.Encode(protocol.StreamEnvelope{Error: protocol.ErrorFrom(err)})
 				flush()
@@ -897,6 +918,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		case streamRetryServerTools:
 			attemptRequest.ServerTools = nil
 			fullRequest.ServerTools = nil
+		case streamRetryMinOutputTokens:
+			attemptRequest.MaxTokens = retryMinOutputTokens
+			fullRequest.MaxTokens = retryMinOutputTokens
 		default:
 			retry = streamRetryNone
 			continue
@@ -948,6 +972,7 @@ func streamProviderCacheKey(opts factory.Options, providerID, promptCacheKey str
 		opts.BaseURL,
 		strconv.Itoa(opts.ContextWindow),
 		strconv.Itoa(opts.OutputLimit),
+		strconv.Itoa(opts.MinOutputTokens),
 		strconv.FormatBool(opts.OmitMaxOutputTokens),
 		promptCacheKey,
 		hex.EncodeToString(auth.Sum(nil)),
@@ -1083,6 +1108,7 @@ func (h *Handler) runtimeOptionsForTarget(ctx context.Context, target resolvedTa
 		AuthHeaders:         authHeaders,
 		ContextWindow:       contextWindow,
 		OutputLimit:         entry.OutputLimit,
+		MinOutputTokens:     pc.MinOutputTokens,
 		PromptCache:         pc.PromptCache,
 		OmitMaxOutputTokens: providerOmitMaxOutputTokens(pc),
 		ResponsesWebSocket:  providerResponsesWebSocket(pc),
@@ -1408,6 +1434,36 @@ func serverToolRejected(err error) bool {
 		}
 	}
 	return false
+}
+
+var minTokenErrorRe = regexp.MustCompile(`(?i)(?:greater than or equal to|at least|minimum(?: value)?(?: is)?|must be >=)\s+(\d+)`)
+
+func outputTokenFloorRejected(err error) (int, bool) {
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		return 0, false
+	}
+	if apiErr.StatusCode != 0 && apiErr.StatusCode != http.StatusBadRequest && apiErr.StatusCode != http.StatusUnprocessableEntity {
+		return 0, false
+	}
+	text := strings.ToLower(apiErr.Code + " " + apiErr.Message)
+	if !strings.Contains(text, "max_tokens") &&
+		!strings.Contains(text, "max output") &&
+		!strings.Contains(text, "max_output_tokens") {
+		return 0, false
+	}
+	match := minTokenErrorRe.FindStringSubmatch(apiErr.Message)
+	if len(match) != 2 {
+		match = minTokenErrorRe.FindStringSubmatch(apiErr.Code)
+	}
+	if len(match) != 2 {
+		return 0, false
+	}
+	floor, err := strconv.Atoi(match[1])
+	if err != nil || floor <= 0 {
+		return 0, false
+	}
+	return floor, true
 }
 
 func stringSliceContains(values []string, want string) bool {

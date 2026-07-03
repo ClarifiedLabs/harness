@@ -46,6 +46,7 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
   "base_url": "https://openrouter.ai/api/v1",
   "api_key": "sk-file",
   "api_key_env": ["OPENROUTER_API_KEY"],
+  "min_output_tokens": 16,
   "prompt_cache": {"key_field":"session_id","affinity_headers":["x-session-id"]},
   "models": [
     {"name":"openai/gpt-5.5","context_window":1050000,"output_limit":64000,"input_modalities":["text","image"],"price":{"input":5,"output":30},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}]}
@@ -122,7 +123,8 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	}
 	if captured.Provider != "openai" || captured.ProviderName != "openrouter" ||
 		captured.BaseURL != "https://openrouter.ai/api/v1" || captured.APIKey != "sk-env" ||
-		captured.ContextWindow != 1_050_000 || captured.OutputLimit != 64_000 {
+		captured.ContextWindow != 1_050_000 || captured.OutputLimit != 64_000 ||
+		captured.MinOutputTokens != 16 {
 		t.Fatalf("captured options = %+v", captured)
 	}
 	if captured.PromptCache.KeyField != "session_id" || len(captured.PromptCache.AffinityHeaders) != 1 || captured.PromptCache.AffinityHeaders[0] != "x-session-id" {
@@ -1515,6 +1517,112 @@ func TestHandlerLogsStreamErrorDetails(t *testing.T) {
 	}
 	if record["request_id"].(float64) <= 0 {
 		t.Fatalf("request_id not populated: %+v", record)
+	}
+}
+
+func TestHandlerRetriesInferredOutputTokenFloor(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+  "name": "testai",
+  "api_type": "openai",
+  "base_url": "https://api.test/v1",
+  "models": [{"name":"model","context_window":1000000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	var logs bytes.Buffer
+	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
+	if err != nil {
+		t.Fatalf("NewProxyLogger: %v", err)
+	}
+	fp := llmtest.New("fake",
+		llmtest.Step{Err: &llm.APIError{
+			StatusCode: http.StatusBadRequest,
+			Code:       "invalid_request_error",
+			Message:    "Invalid 'max_tokens': must be greater than or equal to 16.",
+		}},
+		llmtest.Step{Stop: llm.StopEndTurn},
+	)
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"testai.json"}},
+		Logger:    logger,
+		New: func(factory.Options) (llm.Provider, error) {
+			return fp, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "testai:model",
+		Request:  llm.Request{Model: "testai:model", MaxTokens: 1},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var sawDone bool
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var env protocol.StreamEnvelope
+		if err := dec.Decode(&env); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatalf("decode stream envelope: %v", err)
+		}
+		if env.Error != nil {
+			t.Fatalf("unexpected stream error: %+v", env.Error)
+		}
+		if env.Event != nil && env.Event.Kind == llm.EventDone {
+			sawDone = true
+		}
+	}
+	if !sawDone {
+		t.Fatalf("stream did not complete after retry")
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	}
+	if fp.Requests[0].MaxTokens != 1 || fp.Requests[1].MaxTokens != 16 {
+		t.Fatalf("request max tokens = [%d, %d], want [1, 16]", fp.Requests[0].MaxTokens, fp.Requests[1].MaxTokens)
+	}
+
+	var retryLog map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode log %q: %v", line, err)
+		}
+		if record["msg"] == "retrying model request with higher output token floor" {
+			retryLog = record
+			break
+		}
+	}
+	if retryLog == nil {
+		t.Fatalf("retry log not found in %s", logs.String())
+	}
+	for k, want := range map[string]any{
+		"provider":                     "testai",
+		"api_type":                     "openai",
+		"model":                        "model",
+		"configured_min_output_tokens": float64(0),
+		"inferred_min_output_tokens":   float64(16),
+		"original_max_tokens":          float64(1),
+		"retry_max_tokens":             float64(16),
+	} {
+		if got := retryLog[k]; got != want {
+			t.Fatalf("retry log[%s] = %v (%T), want %v", k, got, got, want)
+		}
 	}
 }
 

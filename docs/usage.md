@@ -233,7 +233,11 @@ context-efficiency knobs are config-file-only.
   which is the cumulative per-turn token *budget* across all model calls. If a
   provider reports a smaller real context window in an overflow error, harness
   learns that window for the session and retries once. When the cap is reached,
-  harness surfaces `[stopped: model reached max tokens]`.
+  harness surfaces `[stopped: model reached max tokens]`. Provider configs may
+  set `min_output_tokens` for endpoints that reject very small output caps. If
+  an OpenAI-compatible endpoint rejects a request with a parseable minimum
+  `max_tokens` error, the model proxy retries once at the inferred floor and logs
+  the inferred/configured values.
 - Before normal model requests, harness resolves input tokens in tiers:
   provider-specific count APIs for OpenAI Responses and Anthropic Messages when
   available through `harness-model-proxy`; a local `o200k_base` BPE estimate for

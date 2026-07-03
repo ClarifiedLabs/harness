@@ -196,6 +196,10 @@ func buildRequestForMode(req llm.Request, contextWindow, outputLimit int, reason
 }
 
 func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, reasoningMode string, promptCache llm.PromptCacheConfig, baseURL, providerName string) wireRequest {
+	return buildRequestWithOptionsAndMin(req, contextWindow, outputLimit, reasoningMode, promptCache, baseURL, providerName, 0)
+}
+
+func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit int, reasoningMode string, promptCache llm.PromptCacheConfig, baseURL, providerName string, minOutputTokens int) wireRequest {
 	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
 	w := wireRequest{
 		Model:         req.Model,
@@ -204,7 +208,7 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, re
 		Temperature:   req.Temperature,
 	}
 
-	if mt := llm.ResolveMaxTokens(req, contextWindow, outputLimit); mt > 0 {
+	if mt := maxTokens(req, contextWindow, outputLimit, minOutputTokens); mt > 0 {
 		w.MaxTokens = &mt
 	}
 	if len(req.StopSeqs) > 0 {
@@ -264,6 +268,14 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, re
 	}
 
 	return w
+}
+
+func maxTokens(req llm.Request, contextWindow, outputLimit, minOutputTokens int) int {
+	mt := llm.ResolveMaxTokens(req, contextWindow, outputLimit)
+	if mt > 0 && minOutputTokens > 0 && mt < minOutputTokens {
+		return minOutputTokens
+	}
+	return mt
 }
 
 func buildServerTool(tool llm.ServerTool) (wireTool, bool) {

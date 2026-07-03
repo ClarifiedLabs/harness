@@ -151,6 +151,7 @@ func (p *Provider) closeWebSocketLocked() {
 func (p *Provider) buildWebSocketRequest(req llm.Request) wireWebSocketRequest {
 	w := buildRequestWithConfig(req, p.contextWindow, p.outputLimit, buildOptions{
 		omitMaxOutputTokens: p.omitMaxOutputTokens,
+		minOutputTokens:     p.minOutputTokens,
 		promptCache:         p.promptCache,
 		baseURL:             p.baseURL,
 		providerName:        p.providerName,

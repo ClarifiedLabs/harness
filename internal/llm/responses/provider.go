@@ -30,6 +30,7 @@ type Config struct {
 	BaseURL             string
 	ContextWindow       int
 	OutputLimit         int // model's real max-output-token limit; 0 = unknown
+	MinOutputTokens     int
 	OmitMaxOutputTokens bool
 	UseWebSocket        bool
 	ProviderName        string
@@ -44,6 +45,7 @@ type Provider struct {
 	baseURL             string
 	contextWindow       int
 	outputLimit         int
+	minOutputTokens     int
 	omitMaxOutputTokens bool
 	useWebSocket        bool
 	providerName        string
@@ -65,6 +67,7 @@ func New(cfg Config) *Provider {
 		baseURL:             base,
 		contextWindow:       cfg.ContextWindow,
 		outputLimit:         cfg.OutputLimit,
+		minOutputTokens:     cfg.MinOutputTokens,
 		omitMaxOutputTokens: cfg.OmitMaxOutputTokens,
 		useWebSocket:        cfg.UseWebSocket,
 		providerName:        cfg.ProviderName,
@@ -91,6 +94,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 func (p *Provider) streamHTTP(ctx context.Context, req llm.Request, yield func(llm.StreamEvent, error) bool) {
 	body, err := json.Marshal(buildRequestWithConfig(req, p.contextWindow, p.outputLimit, buildOptions{
 		omitMaxOutputTokens: p.omitMaxOutputTokens,
+		minOutputTokens:     p.minOutputTokens,
 		promptCache:         p.promptCache,
 		baseURL:             p.baseURL,
 		providerName:        p.providerName,

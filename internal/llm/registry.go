@@ -42,6 +42,7 @@ type ProviderConfig struct {
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for compatible
 	// backends that reject the standard parameter, such as ChatGPT Codex.
 	OmitMaxOutputTokens bool              `json:"omit_max_output_tokens,omitempty"`
+	MinOutputTokens     int               `json:"min_output_tokens,omitempty"`
 	PromptCache         PromptCacheConfig `json:"prompt_cache,omitempty"`
 	ResponsesStateful   *bool             `json:"responses_stateful,omitempty"`
 	ResponsesWebSocket  *bool             `json:"responses_websocket,omitempty"`

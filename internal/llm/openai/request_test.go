@@ -108,6 +108,15 @@ func TestBuildRequestMaxTokensClampsExplicitValue(t *testing.T) {
 	}
 }
 
+func TestBuildRequestMaxTokensRaisedToConfiguredFloor(t *testing.T) {
+	req := basicRequest()
+	req.EstimatedInputTokens = 999_999
+	w := buildRequestWithOptionsAndMin(req, 1_000_000, 0, "openai", llm.PromptCacheConfig{}, defaultBaseURL, "testai", 16)
+	if w.MaxTokens == nil || *w.MaxTokens != 16 {
+		t.Fatalf("max_tokens = %v, want 16 (configured floor)", w.MaxTokens)
+	}
+}
+
 func TestBuildRequestMaxTokensUserSetBeatsOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.MaxTokens = 333

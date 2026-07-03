@@ -186,6 +186,7 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, omitMaxOutputTokens bool) wireRequest {
 	return buildRequestWithConfig(req, contextWindow, outputLimit, buildOptions{
 		omitMaxOutputTokens: omitMaxOutputTokens,
+		minOutputTokens:     minMaxOutputTokens,
 		promptCache:         llm.PromptCacheConfig{},
 		baseURL:             defaultBaseURL,
 		providerName:        "openai",
@@ -194,6 +195,7 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, om
 
 type buildOptions struct {
 	omitMaxOutputTokens bool
+	minOutputTokens     int
 	promptCache         llm.PromptCacheConfig
 	baseURL             string
 	providerName        string
@@ -225,7 +227,7 @@ func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opt
 		w.PromptCacheKey = req.PromptCacheKey
 	}
 
-	if mt := maxTokens(req, contextWindow, outputLimit, opts.omitMaxOutputTokens); mt > 0 {
+	if mt := maxTokens(req, contextWindow, outputLimit, opts.omitMaxOutputTokens, opts.minOutputTokens); mt > 0 {
 		w.MaxOutputTokens = &mt
 	}
 	if req.Reasoning.Effort != "" || req.Reasoning.Summary != "" {
@@ -386,13 +388,16 @@ func imageDataURL(b llm.ContentBlock) string {
 // field is suppressed for compatible backends that reject it. Zero means "omit"
 // so the server keeps its default. A positive value below the API floor is
 // raised to minMaxOutputTokens so the request is not rejected.
-func maxTokens(req llm.Request, contextWindow, outputLimit int, omit bool) int {
+func maxTokens(req llm.Request, contextWindow, outputLimit int, omit bool, minOutputTokens int) int {
 	if omit {
 		return 0
 	}
+	if minOutputTokens <= 0 {
+		minOutputTokens = minMaxOutputTokens
+	}
 	mt := llm.ResolveMaxTokens(req, contextWindow, outputLimit)
-	if mt > 0 && mt < minMaxOutputTokens {
-		return minMaxOutputTokens
+	if mt > 0 && mt < minOutputTokens {
+		return minOutputTokens
 	}
 	return mt
 }

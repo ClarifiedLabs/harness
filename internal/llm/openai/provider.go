@@ -29,46 +29,49 @@ const (
 // only; the dialect appends its standard /chat/completions path, so
 // -base-url http://localhost:11434/v1 works for Ollama (design §7).
 type Config struct {
-	APIKey        string
-	AuthHeaders   map[string]string
-	BaseURL       string // default https://api.openai.com/v1
-	ContextWindow int    // drives the default max_tokens floor when MaxTokens is unset
-	OutputLimit   int    // model's real max-output-token limit; 0 = unknown
-	ReasoningMode string // "openai", "openrouter", or "google"; empty defaults to "openai"
-	ProviderName  string
-	PromptCache   llm.PromptCacheConfig
-	HTTPClient    *http.Client
-	Sleep         func(time.Duration) // nil = time.Sleep
+	APIKey          string
+	AuthHeaders     map[string]string
+	BaseURL         string // default https://api.openai.com/v1
+	ContextWindow   int    // drives the default max_tokens floor when MaxTokens is unset
+	OutputLimit     int    // model's real max-output-token limit; 0 = unknown
+	MinOutputTokens int
+	ReasoningMode   string // "openai", "openrouter", or "google"; empty defaults to "openai"
+	ProviderName    string
+	PromptCache     llm.PromptCacheConfig
+	HTTPClient      *http.Client
+	Sleep           func(time.Duration) // nil = time.Sleep
 }
 
 // Provider is the OpenAI Chat Completions dialect.
 type Provider struct {
-	apiKey        string
-	authHeaders   map[string]string
-	baseURL       string
-	contextWindow int
-	outputLimit   int
-	reasoningMode string
-	providerName  string
-	promptCache   llm.PromptCacheConfig
-	client        *http.Client
-	sleep         func(time.Duration)
+	apiKey          string
+	authHeaders     map[string]string
+	baseURL         string
+	contextWindow   int
+	outputLimit     int
+	minOutputTokens int
+	reasoningMode   string
+	providerName    string
+	promptCache     llm.PromptCacheConfig
+	client          *http.Client
+	sleep           func(time.Duration)
 }
 
 // New constructs a Provider from cfg, applying defaults.
 func New(cfg Config) *Provider {
 	base, client, sleep := llm.HTTPDefaults(cfg.BaseURL, defaultBaseURL, cfg.HTTPClient, cfg.Sleep)
 	return &Provider{
-		apiKey:        cfg.APIKey,
-		authHeaders:   cfg.AuthHeaders,
-		baseURL:       base,
-		contextWindow: cfg.ContextWindow,
-		outputLimit:   cfg.OutputLimit,
-		reasoningMode: cfg.ReasoningMode,
-		providerName:  cfg.ProviderName,
-		promptCache:   cfg.PromptCache,
-		client:        client,
-		sleep:         sleep,
+		apiKey:          cfg.APIKey,
+		authHeaders:     cfg.AuthHeaders,
+		baseURL:         base,
+		contextWindow:   cfg.ContextWindow,
+		outputLimit:     cfg.OutputLimit,
+		minOutputTokens: cfg.MinOutputTokens,
+		reasoningMode:   cfg.ReasoningMode,
+		providerName:    cfg.ProviderName,
+		promptCache:     cfg.PromptCache,
+		client:          client,
+		sleep:           sleep,
 	}
 }
 
@@ -80,7 +83,7 @@ func (p *Provider) Name() string { return "openai" }
 // every attempt and sleep.
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
-		body, err := json.Marshal(buildRequestWithOptions(req, p.contextWindow, p.outputLimit, p.reasoningMode, p.promptCache, p.baseURL, p.providerName))
+		body, err := json.Marshal(buildRequestWithOptionsAndMin(req, p.contextWindow, p.outputLimit, p.reasoningMode, p.promptCache, p.baseURL, p.providerName, p.minOutputTokens))
 		if err != nil {
 			yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
 			return

@@ -22,17 +22,18 @@ import (
 // (design §7). API keys are passed in (resolved from the environment by the
 // config layer), never read here.
 type Options struct {
-	Provider      string // api type: "openai" | "responses" | "anthropic"; empty = infer from Model
-	ProviderName  string // configured provider name, e.g. "openrouter"
-	Model         string
-	BaseURL       string
-	APIKey        string
-	AuthHeaders   map[string]string
-	MaxTokens     int
-	Temperature   *float64
-	ContextWindow int
-	OutputLimit   int // model's real max-output-token limit; 0 = unknown
-	PromptCache   llm.PromptCacheConfig
+	Provider        string // api type: "openai" | "responses" | "anthropic"; empty = infer from Model
+	ProviderName    string // configured provider name, e.g. "openrouter"
+	Model           string
+	BaseURL         string
+	APIKey          string
+	AuthHeaders     map[string]string
+	MaxTokens       int
+	Temperature     *float64
+	ContextWindow   int
+	OutputLimit     int // model's real max-output-token limit; 0 = unknown
+	MinOutputTokens int
+	PromptCache     llm.PromptCacheConfig
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for providers
 	// that reject the standard parameter.
 	OmitMaxOutputTokens bool
@@ -72,14 +73,15 @@ func New(opts Options) (llm.Provider, error) {
 			return nil, fmt.Errorf("llm: OPENAI_API_KEY is required (or set a custom base URL for a local server)")
 		}
 		return openai.New(openai.Config{
-			APIKey:        opts.APIKey,
-			AuthHeaders:   opts.AuthHeaders,
-			BaseURL:       opts.BaseURL,
-			ContextWindow: opts.ContextWindow,
-			OutputLimit:   opts.OutputLimit,
-			ReasoningMode: reasoningMode(opts.ProviderName, provider, opts.BaseURL, opts.ReasoningMode),
-			ProviderName:  opts.ProviderName,
-			PromptCache:   opts.PromptCache,
+			APIKey:          opts.APIKey,
+			AuthHeaders:     opts.AuthHeaders,
+			BaseURL:         opts.BaseURL,
+			ContextWindow:   opts.ContextWindow,
+			OutputLimit:     opts.OutputLimit,
+			MinOutputTokens: opts.MinOutputTokens,
+			ReasoningMode:   reasoningMode(opts.ProviderName, provider, opts.BaseURL, opts.ReasoningMode),
+			ProviderName:    opts.ProviderName,
+			PromptCache:     opts.PromptCache,
 		}), nil
 	case "responses":
 		if opts.APIKey == "" && opts.BaseURL == "" && len(opts.AuthHeaders) == 0 {
@@ -91,6 +93,7 @@ func New(opts Options) (llm.Provider, error) {
 			BaseURL:             opts.BaseURL,
 			ContextWindow:       opts.ContextWindow,
 			OutputLimit:         opts.OutputLimit,
+			MinOutputTokens:     opts.MinOutputTokens,
 			OmitMaxOutputTokens: opts.OmitMaxOutputTokens,
 			UseWebSocket:        opts.ResponsesWebSocket,
 			ProviderName:        opts.ProviderName,

@@ -657,6 +657,15 @@ for older `codex_oauth` Responses configs. The proxy also defaults
 use the Codex-compatible WebSocket path without writing another managed config
 field.
 
+Provider configs may set `"min_output_tokens"` when an endpoint rejects tiny
+output caps. Responses requests default this floor to 16 for
+`max_output_tokens`; Chat Completions requests keep tiny caps such as the
+`max_tokens:1` prewarm unless a provider config opts into a floor. If an
+OpenAI-compatible provider rejects a pre-stream request with a parseable
+minimum-token error, the proxy retries once at the inferred floor and logs a
+`retrying model request with higher output token floor` warning with the
+configured and inferred values so configs can be updated deliberately.
+
 Managed prices honor `model.cost.tiers` (`context` threshold plus higher-rate
 price) from the models.dev cache, so context-length price bands such as Sakana
 Fugu Ultra's 272k-token tier are applied automatically. Models with tiered pricing
