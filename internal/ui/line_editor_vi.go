@@ -26,6 +26,7 @@ type viLineState struct {
 	pending       viOperator
 	count         int
 	operatorCount int
+	replaceCount  int
 }
 
 type viEditResult struct {
@@ -55,6 +56,7 @@ func (v *viLineState) resetCommand() {
 	v.pending = viOpNone
 	v.count = 0
 	v.operatorCount = 0
+	v.replaceCount = 0
 }
 
 func (v *viLineState) appendCount(r rune) bool {
@@ -88,6 +90,14 @@ func (v *viLineState) startOperator(op viOperator, count int) {
 	}
 	v.pending = op
 	v.operatorCount = count
+	v.count = 0
+}
+
+func (v *viLineState) startReplace(count int) {
+	if count <= 0 {
+		count = 1
+	}
+	v.replaceCount = count
 	v.count = 0
 }
 
@@ -262,6 +272,10 @@ func (e *promptLineEditor) handleViNormalText(v *viLineState, s *lineEditState, 
 	// flag survives Esc into normal mode and is carried by viSubmit.
 	e.markManualEdit(s)
 	for _, r := range text {
+		if v.replaceCount > 0 {
+			e.applyViReplace(v, s, r)
+			continue
+		}
 		if v.appendCount(r) {
 			continue
 		}
@@ -329,6 +343,12 @@ func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *l
 		e.viDeleteChars(s, count)
 	case 'X':
 		e.viDeleteBeforeCount(s, count)
+	case 'r':
+		if len(s.buf) > 0 && s.cursor < len(s.buf) {
+			v.startReplace(count)
+		} else {
+			v.resetCommand()
+		}
 	case 'd':
 		v.startOperator(viOpDelete, count)
 	case 'c':
@@ -369,6 +389,12 @@ func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *l
 	default:
 		v.resetCommand()
 	}
+}
+
+func (e *promptLineEditor) applyViReplace(v *viLineState, s *lineEditState, r rune) {
+	count := v.replaceCount
+	v.resetCommand()
+	e.viReplaceChars(s, count, r)
 }
 
 func (e *promptLineEditor) applyViOperator(v *viLineState, s *lineEditState, motion rune) {
@@ -459,6 +485,21 @@ func (e *promptLineEditor) viDeleteBeforeCount(s *lineEditState, count int) {
 	}
 	e.viSetYank(s.viDeleteRange(start, s.cursor))
 	s.cursor = start
+	s.viClampNormalCursor()
+}
+
+func (e *promptLineEditor) viReplaceChars(s *lineEditState, count int, r rune) {
+	if len(s.buf) == 0 || count <= 0 || s.cursor >= len(s.buf) {
+		return
+	}
+	end := s.cursor + count
+	if end > len(s.buf) {
+		end = len(s.buf)
+	}
+	for i := s.cursor; i < end; i++ {
+		s.buf[i] = r
+	}
+	s.cursor = end - 1
 	s.viClampNormalCursor()
 }
 

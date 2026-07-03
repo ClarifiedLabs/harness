@@ -1349,6 +1349,32 @@ func TestPromptLineEditorViCountedCharacterCommands(t *testing.T) {
 	}
 }
 
+func TestPromptLineEditorViReplaceCharacter(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "single", input: "abc\x1b0lrX\r", want: "aXc"},
+		{name: "count", input: "abcdef\x1b03rX\r", want: "XXXdef"},
+		{name: "digit replacement", input: "abc\x1b0lr0\r", want: "a0c"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, ok, err := readViEditedInput(t, tt.input)
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok {
+				t.Fatal("read returned ok=false")
+			}
+			if input.text != tt.want {
+				t.Fatalf("input text = %q, want %q", input.text, tt.want)
+			}
+		})
+	}
+}
+
 func TestPromptLineEditorViYankAndPasteOperator(t *testing.T) {
 	input, ok, err := readViEditedInput(t, "one two\x1b0yw$p\r")
 	if err != nil {
