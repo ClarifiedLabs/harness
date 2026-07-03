@@ -535,7 +535,7 @@ func run(env environment) int {
 	planStore := plan.NewStore()
 	handoffPending := plan.NewPending()
 	toolCatalog.Register(plan.NewTool(planStore, func() string { return delegateState.Snapshot().SessionPath }))
-	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, planStore, interactiveSession))
+	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, planStore, interactiveSession, agentdef.Names(agents), cfg.HandoffAgent))
 	// MCP (opt-in): one-shot runs synchronously so the single request can use MCP
 	// tools immediately. Interactive REPL starts remote HTTP discovery in the
 	// background and applies discovered tools at a prompt boundary, so an

@@ -1630,6 +1630,12 @@ backoff allows.
   Input is `{brief, agent?, plan_path?, model?}`. It requires a recorded plan
   (defaults to the most recent); the implementation agent reads the plan as its
   task spec rather than being handed only the brief.
+- The `agent` field's schema is built from the configured agent names: its
+  description reads `Available agents: <default> (default), ...` and its `enum`
+  constrains the value to a real agent, so the model hands off to an existing
+  agent instead of inventing one (e.g. `implementation`). The tool also rejects
+  an explicit unknown `agent` before recording a pending handoff. The default is
+  the configured handoff agent (`auto` unless overridden).
 - Tools cannot prompt, so it only records a `plan.HandoffRequest` in a shared
   `*plan.Pending` holder and returns. At the turn boundary, the REPL asks for
   approval, performs the switch, and immediately starts the implementation agent;
