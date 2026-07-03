@@ -108,7 +108,7 @@ func TestRegistryFromProviderConfigsBuildsLookups(t *testing.T) {
 		if info.ContextWindow != 1_000_000 || info.OutputLimit != 64_000 {
 			t.Fatalf("Lookup(%q) = %+v, want window 1M / output 64k", name, info)
 		}
-		if info.Price != (Price{Input: 5, Output: 30}) {
+		if !info.Price.Equal(Price{Input: 5, Output: 30}) {
 			t.Fatalf("Lookup(%q) price = %+v, want {5,30}", name, info.Price)
 		}
 	}

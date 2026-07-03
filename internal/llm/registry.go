@@ -11,15 +11,6 @@ import (
 	"harness/internal/auth"
 )
 
-// Price is the per-1M-token price in USD for each token category. CacheRead and
-// CacheWrite are 0 when a provider has no separate cache pricing.
-type Price struct {
-	Input      float64 `json:"input"`
-	Output     float64 `json:"output"`
-	CacheRead  float64 `json:"cache_read"`
-	CacheWrite float64 `json:"cache_write"`
-}
-
 // ModelInfo is the registry entry for one model.
 type ModelInfo struct {
 	ContextWindow   int            `json:"context_window"`
@@ -27,6 +18,7 @@ type ModelInfo struct {
 	InputModalities []string       `json:"input_modalities,omitempty"`
 	ServerTools     []string       `json:"server_tools,omitempty"`
 	Price           Price          `json:"price"`
+	Shape           string         `json:"shape,omitempty"`
 	Reasoning       *ReasoningInfo `json:"reasoning,omitempty"`
 }
 
@@ -74,6 +66,7 @@ type ModelEntry struct {
 	InputModalities  []string          `json:"input_modalities,omitempty"`
 	ServerTools      []string          `json:"server_tools,omitempty"`
 	Price            Price             `json:"price"`
+	Shape            string            `json:"shape,omitempty"`
 	Reasoning        *bool             `json:"reasoning,omitempty"`
 	ReasoningOptions []ReasoningOption `json:"reasoning_options,omitempty"`
 }
@@ -169,6 +162,7 @@ func addProviderModels(models, qualified map[string]ModelInfo, pc ProviderConfig
 			InputModalities: append([]string(nil), m.InputModalities...),
 			ServerTools:     effectiveServerTools(pc, m),
 			Price:           m.Price,
+			Shape:           m.Shape,
 			Reasoning:       modelEntryReasoning(m),
 		}
 		models[m.Name] = info
@@ -208,7 +202,7 @@ func (r *Registry) Models() []string {
 // HasPrice reports whether model has any non-zero configured price component.
 func (r *Registry) HasPrice(model string) bool {
 	info, ok := r.Lookup(model)
-	return ok && !priceZero(info.Price)
+	return ok && !info.Price.IsZero()
 }
 
 // SupportsInputModality reports whether model explicitly advertises an input
@@ -246,7 +240,7 @@ func (r *Registry) MergeModel(model string, info ModelInfo) {
 	if current.OutputLimit <= 0 && info.OutputLimit > 0 {
 		current.OutputLimit = info.OutputLimit
 	}
-	if priceZero(current.Price) && !priceZero(info.Price) {
+	if current.Price.IsZero() && !info.Price.IsZero() {
 		current.Price = info.Price
 	}
 	if len(current.InputModalities) == 0 && len(info.InputModalities) > 0 {
@@ -359,20 +353,7 @@ func (r *Registry) Cost(model string, u Usage) (usd float64, known bool) {
 	if !ok {
 		return 0, false
 	}
-	const perMillion = 1_000_000.0
-	p := info.Price
-	if priceZero(p) {
-		return 0, false
-	}
-	usd = float64(u.InputTokens)/perMillion*p.Input +
-		float64(u.OutputTokens)/perMillion*p.Output +
-		float64(u.CacheReadTokens)/perMillion*p.CacheRead +
-		float64(u.CacheWriteTokens)/perMillion*p.CacheWrite
-	return usd, true
-}
-
-func priceZero(p Price) bool {
-	return p.Input == 0 && p.Output == 0 && p.CacheRead == 0 && p.CacheWrite == 0
+	return info.Price.Cost(u, 0)
 }
 
 func modelEntryReasoning(m ModelEntry) *ReasoningInfo {

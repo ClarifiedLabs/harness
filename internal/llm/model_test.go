@@ -130,3 +130,33 @@ func TestRegistryEntriesWellFormed(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistryCostAppliesPriceTiers(t *testing.T) {
+	r := NewRegistry(map[string]ModelInfo{
+		"gpt-5.5": {
+			ContextWindow: 1_000_000,
+			Price: Price{
+				Input: 5, Output: 30, CacheRead: 0.5,
+				Tiers: []PriceTier{{Threshold: 272_000, Input: 10, Output: 45, CacheRead: 1.0}},
+			},
+		},
+	})
+
+	below, known := r.Cost("gpt-5.5", Usage{InputTokens: 1000, OutputTokens: 2000, CacheReadTokens: 300})
+	if !known {
+		t.Fatal("below-threshold cost unknown")
+	}
+	wantBelow := 1000.0/1e6*5 + 2000.0/1e6*30 + 300.0/1e6*0.5
+	if below != wantBelow {
+		t.Fatalf("below-threshold cost = %v, want %v", below, wantBelow)
+	}
+
+	above, known := r.Cost("gpt-5.5", Usage{InputTokens: 300_000, OutputTokens: 2000, CacheReadTokens: 300})
+	if !known {
+		t.Fatal("above-threshold cost unknown")
+	}
+	wantAbove := 300_000.0/1e6*10 + 2000.0/1e6*45 + 300.0/1e6*1.0
+	if above != wantAbove {
+		t.Fatalf("above-threshold cost = %v, want %v", above, wantAbove)
+	}
+}

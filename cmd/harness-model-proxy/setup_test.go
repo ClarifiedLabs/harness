@@ -315,7 +315,7 @@ func TestRunSetupWritesSakanaProvider(t *testing.T) {
 			return ""
 		},
 		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
-			return testSetupCatalog(), nil
+			return testSetupCatalogWithSakana(), nil
 		},
 		terminalRows: func() int { return 12 },
 	}
@@ -351,9 +351,9 @@ func TestRunSetupWritesSakanaProvider(t *testing.T) {
 	if err := json.Unmarshal(providerData, &provider); err != nil {
 		t.Fatalf("decode provider config: %v", err)
 	}
-	if provider.Name != sakanaProviderID ||
+	if provider.Name != "sakana" ||
 		provider.APIType != "responses" ||
-		provider.BaseURL != sakanaProviderBaseURL ||
+		provider.BaseURL != "https://api.sakana.ai/v1" ||
 		provider.APIKey != "" ||
 		provider.Auth != nil {
 		t.Fatalf("provider config = %+v", provider)
@@ -959,7 +959,7 @@ func TestRunRefreshModelsHandlesSakanaProvider(t *testing.T) {
 		stdout: &out,
 		stderr: &bytes.Buffer{},
 		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
-			return testSetupCatalog(), nil
+			return testSetupCatalogWithSakana(), nil
 		},
 	}
 
@@ -977,9 +977,9 @@ func TestRunRefreshModelsHandlesSakanaProvider(t *testing.T) {
 	if err := json.Unmarshal(data, &provider); err != nil {
 		t.Fatal(err)
 	}
-	if provider.Name != sakanaProviderID ||
+	if provider.Name != "sakana" ||
 		provider.APIType != "responses" ||
-		provider.BaseURL != sakanaProviderBaseURL ||
+		provider.BaseURL != "https://api.sakana.ai/v1" ||
 		provider.APIKey != "sk-existing" {
 		t.Fatalf("provider after refresh = %+v", provider)
 	}
@@ -1501,6 +1501,53 @@ func testCodexModelsCatalogJSON() string {
     }
   ]
 }`
+}
+
+func testSetupCatalogWithSakana() *modelsdev.Catalog {
+	sakanaReasoning := []llm.ReasoningOption{{Type: "effort", Values: []string{"high", "xhigh"}}}
+	return &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+		"sakana": {
+			ID:   "sakana",
+			Name: "Sakana AI",
+			API:  "https://api.sakana.ai/v1",
+			Env:  []string{"SAKANA_API_KEY"},
+			NPM:  "@ai-sdk/openai-compatible",
+			Models: map[string]modelsdev.Model{
+				"fugu": {
+					ID:               "fugu",
+					Name:             "Fugu",
+					ReleaseDate:      "2026-06-15",
+					Modalities:       modelsdev.Modalities{Input: []string{"text", "image"}, Output: []string{"text"}},
+					Reasoning:        true,
+					ReasoningOptions: append([]llm.ReasoningOption(nil), sakanaReasoning...),
+					Limit:            modelsdev.Limit{Context: 1_000_000, Output: 1_000_000},
+					Provider:         modelsdev.ModelProvider{Shape: "responses"},
+				},
+				"fugu-ultra": {
+					ID:               "fugu-ultra",
+					Name:             "Fugu Ultra",
+					ReleaseDate:      "2026-06-15",
+					Modalities:       modelsdev.Modalities{Input: []string{"text", "image"}, Output: []string{"text"}},
+					Reasoning:        true,
+					ReasoningOptions: append([]llm.ReasoningOption(nil), sakanaReasoning...),
+					Limit:            modelsdev.Limit{Context: 1_000_000, Output: 1_000_000},
+					Provider:         modelsdev.ModelProvider{Shape: "responses"},
+					Cost:             llm.Price{Input: 5, Output: 30, CacheRead: 0.5, Tiers: []llm.PriceTier{{Threshold: 272_000, Input: 10, Output: 45, CacheRead: 1.0}}},
+				},
+				"fugu-ultra-20260615": {
+					ID:               "fugu-ultra-20260615",
+					Name:             "Fugu Ultra 20260615",
+					ReleaseDate:      "2026-06-15",
+					Modalities:       modelsdev.Modalities{Input: []string{"text", "image"}, Output: []string{"text"}},
+					Reasoning:        true,
+					ReasoningOptions: append([]llm.ReasoningOption(nil), sakanaReasoning...),
+					Limit:            modelsdev.Limit{Context: 1_000_000, Output: 1_000_000},
+					Provider:         modelsdev.ModelProvider{Shape: "responses"},
+					Cost:             llm.Price{Input: 5, Output: 30, CacheRead: 0.5, Tiers: []llm.PriceTier{{Threshold: 272_000, Input: 10, Output: 45, CacheRead: 1.0}}},
+				},
+			},
+		},
+	}}
 }
 
 func testSetupCatalogWithGoogle() *modelsdev.Catalog {

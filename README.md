@@ -119,11 +119,6 @@ unless `responses_websocket:false` is set. Responses providers default to
 stateful continuation; if a backend rejects stored responses, harness disables
 stateful continuation for that agent and retries the request stateless.
 
-`sakana` is also available from setup even before models.dev lists it directly:
-it writes a managed Responses config for `https://api.sakana.ai/v1`, uses
-`SAKANA_API_KEY`, and sets `"responses_stateful": false`. Sakana Fugu Ultra
-costs are priced by the proxy's Sakana-specific pricer; the routed `fugu` model
-reports token usage without dollar costs.
 Provider configs may set `prompt_cache.key_field` to `auto`, `none`,
 `prompt_cache_key`, or `session_id`; `auto` sends `prompt_cache_key` to
 first-party OpenAI endpoints, `session_id` to OpenRouter, and omits cache key

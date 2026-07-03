@@ -1,27 +1,10 @@
 // Package pricing calculates model-proxy request costs. Flat per-token pricing
-// remains the default, while provider-specific implementations can price models
-// whose billing cannot be represented by llm.Price alone.
+// remains the default, while tiered pricing (context-length price bands from
+// models.dev) is applied generically when present.
 package pricing
 
 import (
-	"strings"
-
 	"harness/internal/llm"
-)
-
-const (
-	perMillion = 1_000_000.0
-
-	SakanaProviderID = "sakana"
-
-	sakanaFuguUltraModelID      = "fugu-ultra"
-	sakanaFuguUltraDatedModelID = "fugu-ultra-20260615"
-	sakanaContextTierThreshold  = 272_000
-)
-
-var (
-	sakanaFuguUltraStandard = llm.Price{Input: 5, Output: 30, CacheRead: 0.50}
-	sakanaFuguUltraLong     = llm.Price{Input: 10, Output: 45, CacheRead: 1.00}
 )
 
 // Input describes one usage snapshot to price.
@@ -42,8 +25,8 @@ type Result struct {
 }
 
 // CatalogResult is a catalog-facing flat price. Handled=true with Known=false
-// means a provider-specific pricer owns the model, but cannot show a single
-// flat catalog price for it.
+// means the model has dynamic tiered pricing and cannot be represented by a
+// single flat catalog price.
 type CatalogResult struct {
 	Price   llm.Price
 	Known   bool
@@ -66,7 +49,7 @@ type Composite struct {
 
 // NewComposite returns the default pricing chain.
 func NewComposite() Composite {
-	return Composite{pricers: []Pricer{Sakana{}}, flat: Flat{}}
+	return Composite{flat: Flat{}}
 }
 
 // CatalogPrice returns a flat per-million-token catalog price when one can be
@@ -90,88 +73,33 @@ func (c Composite) PriceUsage(in Input) Result {
 	return c.flat.PriceUsage(in)
 }
 
-// Flat prices the existing llm.Price shape.
+// Flat prices the existing llm.Price shape, including tiered prices.
 type Flat struct{}
 
 func (Flat) CatalogPrice(_ llm.ProviderConfig, model llm.ModelEntry) CatalogResult {
-	if PriceZero(model.Price) {
+	if model.Price.IsZero() {
 		return CatalogResult{}
+	}
+	if model.Price.HasTiers() {
+		// Tiered models do not have a single accurate flat catalog price.
+		return CatalogResult{Handled: true}
 	}
 	return CatalogResult{Price: model.Price, Known: true, Handled: true}
 }
 
 func (Flat) PriceUsage(in Input) Result {
-	if PriceZero(in.Model.Price) {
+	if in.Model.Price.IsZero() {
 		return Result{}
 	}
-	return Result{CostUSD: cost(in.Model.Price, in.Usage), Known: true, Handled: true}
-}
-
-// Sakana prices Sakana-specific dynamic billing. The default fugu router cannot
-// be priced accurately without response billing metadata, so only Fugu Ultra is
-// priced here.
-type Sakana struct{}
-
-func (Sakana) CatalogPrice(provider llm.ProviderConfig, model llm.ModelEntry) CatalogResult {
-	if isSakanaRouted(provider, model) {
-		return CatalogResult{Handled: true}
-	}
-	if isSakanaFuguUltra(provider, model) {
-		return CatalogResult{Handled: true}
-	}
-	return CatalogResult{}
-}
-
-func (Sakana) PriceUsage(in Input) Result {
-	if isSakanaRouted(in.Provider, in.Model) {
-		return Result{Handled: true}
-	}
-	if !isSakanaFuguUltra(in.Provider, in.Model) {
+	usd, known := in.Model.Price.Cost(in.Usage, in.Request.EstimatedInputTokens)
+	if !known {
 		return Result{}
 	}
-	price := sakanaFuguUltraStandard
-	if sakanaContextTokens(in) > sakanaContextTierThreshold {
-		price = sakanaFuguUltraLong
-	}
-	return Result{CostUSD: cost(price, in.Usage), Known: true, Handled: true}
-}
-
-func isSakanaProvider(provider llm.ProviderConfig) bool {
-	return strings.EqualFold(strings.TrimSpace(provider.Name), SakanaProviderID)
-}
-
-func isSakanaRouted(provider llm.ProviderConfig, model llm.ModelEntry) bool {
-	return isSakanaProvider(provider) && strings.EqualFold(strings.TrimSpace(model.Name), "fugu")
-}
-
-func isSakanaFuguUltra(provider llm.ProviderConfig, model llm.ModelEntry) bool {
-	if !isSakanaProvider(provider) {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(model.Name)) {
-	case sakanaFuguUltraModelID, sakanaFuguUltraDatedModelID:
-		return true
-	default:
-		return false
-	}
-}
-
-func sakanaContextTokens(in Input) int {
-	fromUsage := in.Usage.InputTokens + in.Usage.CacheReadTokens + in.Usage.CacheWriteTokens
-	if in.Request.EstimatedInputTokens > fromUsage {
-		return in.Request.EstimatedInputTokens
-	}
-	return fromUsage
-}
-
-func cost(price llm.Price, usage llm.Usage) float64 {
-	return float64(usage.InputTokens)/perMillion*price.Input +
-		float64(usage.OutputTokens)/perMillion*price.Output +
-		float64(usage.CacheReadTokens)/perMillion*price.CacheRead +
-		float64(usage.CacheWriteTokens)/perMillion*price.CacheWrite
+	return Result{CostUSD: usd, Known: true, Handled: true}
 }
 
 // PriceZero reports whether a flat price has no configured components.
+// Deprecated: use llm.Price.IsZero.
 func PriceZero(p llm.Price) bool {
-	return p.Input == 0 && p.Output == 0 && p.CacheRead == 0 && p.CacheWrite == 0
+	return p.IsZero()
 }

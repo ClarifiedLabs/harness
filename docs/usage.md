@@ -288,14 +288,6 @@ path while sending `store:false` to the ChatGPT backend. After setup, run:
 harness-model-proxy auth login openai-codex
 ```
 
-The special `sakana` provider is bundled until models.dev lists Sakana AI
-directly. Setup writes a managed Responses config for
-`https://api.sakana.ai/v1`, uses `SAKANA_API_KEY`, exposes `fugu`,
-`fugu-ultra`, and `fugu-ultra-20260615`, and sets
-`responses_stateful:false` because Sakana requires the full conversation instead
-of `previous_response_id`. Fugu Ultra usage is costed with Sakana's context-tier
-pricing; the routed `fugu` model reports token usage without dollar costs.
-
 Provider configs accept an optional `auth` block in place of `api_key` /
 `api_key_env`; when `auth` is present, API-key fields are ignored and there is no
 fallback if auth fails. Supported auth shapes include `token_command`, `oauth2`,

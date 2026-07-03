@@ -223,6 +223,96 @@ func TestFallbackCandidateDecodes(t *testing.T) {
 	assertFallbackAPIJSON(t, data)
 }
 
+func TestAPITypeFromModelShape(t *testing.T) {
+	responses := Provider{
+		ID:   "sakana",
+		NPM:  "@ai-sdk/openai-compatible",
+		API:  "https://api.sakana.ai/v1",
+		Env:  []string{"SAKANA_API_KEY"},
+		Models: map[string]Model{
+			"fugu": {ID: "fugu", Provider: ModelProvider{Shape: "responses"}},
+		},
+	}
+	if got := responses.APIType(); got != "responses" {
+		t.Fatalf("shape-responses APIType = %q, want responses", got)
+	}
+
+	completions := Provider{
+		ID:   "azure",
+		NPM:  "@ai-sdk/azure",
+		Models: map[string]Model{
+			"kimi": {ID: "kimi", Provider: ModelProvider{Shape: "completions"}},
+		},
+	}
+	if got := completions.APIType(); got != "openai" {
+		t.Fatalf("shape-completions APIType = %q, want openai", got)
+	}
+}
+
+func TestDecodeTieredPrice(t *testing.T) {
+	catalog := `{
+  "testai": {
+    "id": "testai",
+    "name": "TestAI",
+    "env": ["TESTAI_API_KEY"],
+    "npm": "@ai-sdk/openai-compatible",
+    "api": "https://api.test/v1",
+    "models": {
+      "alpha": {
+        "id": "alpha",
+        "name": "Alpha",
+        "release_date": "2026-01-01",
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {"context": 1050000},
+        "provider": {"shape": "responses"},
+        "cost": {
+          "input": 5,
+          "output": 30,
+          "cache_read": 0.5,
+          "tiers": [
+            {"input": 10, "output": 45, "cache_read": 1.0, "tier": {"type": "context", "size": 272000}}
+          ]
+        }
+      }
+    }
+  }
+}`
+	c, err := Decode(strings.NewReader(catalog))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	p, ok := c.Provider("testai")
+	if !ok {
+		t.Fatal("testai provider not found")
+	}
+	if got := p.APIType(); got != "responses" {
+		t.Fatalf("APIType = %q, want responses", got)
+	}
+	m, ok := p.Models["alpha"]
+	if !ok {
+		t.Fatal("alpha model not found")
+	}
+	if m.Provider.Shape != "responses" {
+		t.Fatalf("model shape = %q, want responses", m.Provider.Shape)
+	}
+	if len(m.Cost.Tiers) != 1 {
+		t.Fatalf("tiers = %+v, want one tier", m.Cost.Tiers)
+	}
+	if m.Cost.Tiers[0].Threshold != 272_000 {
+		t.Fatalf("tier threshold = %d, want 272000", m.Cost.Tiers[0].Threshold)
+	}
+	if m.Cost.Tiers[0].Input != 10 || m.Cost.Tiers[0].Output != 45 {
+		t.Fatalf("tier price = %+v, want input=10 output=45", m.Cost.Tiers[0])
+	}
+	info, ok := p.ModelInfo("alpha")
+	if !ok {
+		t.Fatal("ModelInfo not found")
+	}
+	if info.Shape != "responses" {
+		t.Fatalf("ModelInfo.Shape = %q, want responses", info.Shape)
+	}
+}
+
 func assertFallbackAPIJSON(t *testing.T, data []byte) {
 	t.Helper()
 	c, err := Decode(bytes.NewReader(data))

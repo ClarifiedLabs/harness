@@ -44,7 +44,14 @@ type Model struct {
 	Reasoning        bool                  `json:"reasoning"`
 	ReasoningOptions []llm.ReasoningOption `json:"reasoning_options"`
 	Limit            Limit                 `json:"limit"`
+	Provider         ModelProvider         `json:"provider"`
 	Cost             llm.Price             `json:"cost"`
+}
+
+// ModelProvider captures provider-specific wire-shape hints attached to a model
+// in the models.dev catalog.
+type ModelProvider struct {
+	Shape string `json:"shape"`
 }
 
 // Modalities carries supported input and output modalities from models.dev.
@@ -228,6 +235,8 @@ func (p Provider) BaseURL() string {
 }
 
 // APIType returns the harness dialect to use for this provider when it is known.
+// It first honors well-known first-party providers, then the per-model
+// provider.shape field (responses/completions), then OpenAI-compatible heuristics.
 func (p Provider) APIType() string {
 	npm := strings.ToLower(strings.TrimSpace(p.NPM))
 	if p.ID == "anthropic" || strings.Contains(npm, "anthropic") || slices.Contains(p.Env, "ANTHROPIC_API_KEY") {
@@ -239,10 +248,36 @@ func (p Provider) APIType() string {
 	if p.ID == "google" || npm == npmGoogle {
 		return "openai"
 	}
+	switch p.dominantShape() {
+	case "responses":
+		return "responses"
+	case "completions":
+		return "openai"
+	}
 	if p.API != "" || strings.Contains(npm, "openai") {
 		return "openai"
 	}
 	return ""
+}
+
+// dominantShape returns the provider.shape value shared by every model that has
+// one, or "" when models disagree or none specify a shape.
+func (p Provider) dominantShape() string {
+	var shape string
+	for _, m := range p.Models {
+		s := strings.ToLower(strings.TrimSpace(m.Provider.Shape))
+		if s == "" {
+			continue
+		}
+		if shape == "" {
+			shape = s
+			continue
+		}
+		if shape != s {
+			return ""
+		}
+	}
+	return shape
 }
 
 // ModelsByID returns model entries sorted by provider-local model id.
@@ -300,6 +335,7 @@ func (p Provider) ProviderConfig(apiKey string) llm.ProviderConfig {
 			OutputLimit:      m.Limit.Output,
 			InputModalities:  append([]string(nil), m.Modalities.Input...),
 			Price:            m.Cost,
+			Shape:            m.Provider.Shape,
 			ReasoningOptions: append([]llm.ReasoningOption(nil), m.ReasoningOptions...),
 		}
 		reasoning := m.Reasoning
@@ -323,6 +359,7 @@ func (m Model) ModelInfo() llm.ModelInfo {
 		OutputLimit:     m.Limit.Output,
 		InputModalities: append([]string(nil), m.Modalities.Input...),
 		Price:           m.Cost,
+		Shape:           m.Provider.Shape,
 		Reasoning: &llm.ReasoningInfo{
 			Supported: m.Reasoning,
 			Options:   append([]llm.ReasoningOption(nil), m.ReasoningOptions...),

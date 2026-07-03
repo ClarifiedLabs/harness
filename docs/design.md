@@ -624,11 +624,6 @@ a vendored copy or the last cached refresh; `refresh-models` fetches the latest
 catalog from `openai/codex` on GitHub and caches it as `openai-codex.models.json`.
 Only list-visible Codex models are exposed.
 
-The synthetic `sakana` provider is bundled until models.dev lists Sakana AI
-directly. It exposes `fugu`, `fugu-ultra`, and `fugu-ultra-20260615`, uses the
-Responses API at `https://api.sakana.ai/v1`, and reads API keys from
-`SAKANA_API_KEY`.
-
 ### Managed vs manual provider configs
 
 Provider config files are either **managed** or **manual**:
@@ -660,12 +655,13 @@ Responses `max_output_tokens` parameter; the proxy infers the same omit behavior
 for older `codex_oauth` Responses configs. The proxy also defaults
 `responses_websocket` on for `codex_oauth` Responses configs so continuation can
 use the Codex-compatible WebSocket path without writing another managed config
-field. The synthetic `sakana` provider always writes `responses_stateful:false`
-because Sakana does not accept `previous_response_id` and requires the full
-conversation history. It also bypasses models.dev flat prices: Fugu Ultra is
-priced by `internal/modelproxy/pricing` with Sakana's context-tier billing, while
-the routed `fugu` model has unknown dollar cost unless Sakana adds response
-billing metadata.
+field.
+
+Managed prices honor `model.cost.tiers` (`context` threshold plus higher-rate
+price) from the models.dev cache, so context-length price bands such as Sakana
+Fugu Ultra's 272k-token tier are applied automatically. Models with tiered pricing
+do not expose a single flat catalog price because the rate depends on request
+context size.
 
 Provider and model entries may set `server_tools:["web_search"]`. The proxy
 serves the normalized list in `GET /v1/models`, and harness only declares hosted
@@ -770,10 +766,10 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   writes the ChatGPT Codex backend URL and a `codex_oauth` auth block instead of
   API-key fields, plus `omit_max_output_tokens:true`. The proxy defaults the
   Responses WebSocket transport on for this `codex_oauth` provider at runtime,
-  unless the config explicitly sets `responses_websocket:false`. The synthetic
-  `sakana` provider is also listed even though models.dev does not include it
-  directly; it writes the Sakana Responses base URL, `SAKANA_API_KEY` env var,
-  and `responses_stateful:false`.
+  unless the config explicitly sets `responses_websocket:false`. Providers
+  such as Sakana are listed when models.dev includes them; their
+  `provider.shape` drives `api_type` and any required `responses_stateful`
+  default is applied from provider-specific rules (e.g. Sakana is stateless).
   New providers start with no models enabled; existing providers start with
   their configured models enabled and all other catalog models disabled. Enabled
   rows are bold and marked with `*`; the
@@ -790,8 +786,8 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   models.dev catalog and refreshes each configured provider file's current model
   allowlist, preserving stored API keys and `auth` blocks. When `openai-codex` is
   configured, it also refreshes the cached OpenAI Codex catalog from GitHub and
-  rewrites Codex models from that source. When `sakana` is configured, refresh
-  uses the bundled Sakana catalog and keeps `responses_stateful:false`.
+  rewrites Codex models from that source. Sakana configs refresh from the
+  models.dev cache like any other managed provider.
   Refreshed files are rewritten as managed, price-less configs. If live fetch fails, it
   uses a parseable local cache before using the vendored fallback snapshot. When a
   configured model is missing from the selected catalog it prints a warning and
@@ -835,8 +831,7 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   requester, provider, model, request/response bytes, duration, token usage, stop
   reason, tool-call count, and `cost_usd` when the request has known cost
   (from the config for manual flat-priced providers, the models.dev cache for
-  managed flat-priced providers, or a provider-specific dynamic pricer such as
-  Sakana Fugu Ultra).
+  managed providers, or tiered prices derived from `model.cost.tiers`).
   Proxy config accepts `log_level` (`debug|info|warn|error`) and `log_format`
   (`json` default, or `text`), with serve flags overriding config. Proxy config
   also accepts `models_dev_cache_ttl` as a duration string such as `"24h"` or

@@ -14,7 +14,7 @@ func TestFlatPricer(t *testing.T) {
 		Price: llm.Price{Input: 2, Output: 4, CacheRead: 0.5, CacheWrite: 1},
 	}
 	price := Flat{}.CatalogPrice(provider, model)
-	if !price.Handled || !price.Known || price.Price != model.Price {
+	if !price.Handled || !price.Known || !price.Price.Equal(model.Price) {
 		t.Fatalf("CatalogPrice = %+v; want configured price", price)
 	}
 
@@ -39,12 +39,23 @@ func TestFlatPricer(t *testing.T) {
 	}
 }
 
-func TestCompositeSakanaFuguUltraPricingTiers(t *testing.T) {
+func TestFlatPricerTieredPricing(t *testing.T) {
 	pricer := NewComposite()
-	provider := llm.ProviderConfig{Name: SakanaProviderID}
-	model := llm.ModelEntry{Name: "fugu-ultra"}
+	provider := llm.ProviderConfig{Name: "sakana"}
+	model := llm.ModelEntry{
+		Name: "fugu-ultra",
+		Price: llm.Price{
+			Input:     5,
+			Output:    30,
+			CacheRead: 0.5,
+			Tiers: []llm.PriceTier{
+				{Threshold: 272_000, Input: 10, Output: 45, CacheRead: 1.0},
+			},
+		},
+	}
 	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000, CacheReadTokens: 300}
 
+	// Below the tier threshold uses base prices.
 	got := pricer.PriceUsage(Input{
 		Provider: provider,
 		Model:    model,
@@ -53,36 +64,49 @@ func TestCompositeSakanaFuguUltraPricingTiers(t *testing.T) {
 	})
 	assertKnownCost(t, got, 1000.0/1e6*5+2000.0/1e6*30+300.0/1e6*0.5)
 
+	// Estimated input above the threshold uses the upper tier.
 	got = pricer.PriceUsage(Input{
 		Provider: provider,
 		Model:    model,
-		Request:  llm.Request{EstimatedInputTokens: sakanaContextTierThreshold + 1},
+		Request:  llm.Request{EstimatedInputTokens: 272_001},
 		Usage:    usage,
 	})
-	assertKnownCost(t, got, 1000.0/1e6*10+2000.0/1e6*45+300.0/1e6*1)
+	assertKnownCost(t, got, 1000.0/1e6*10+2000.0/1e6*45+300.0/1e6*1.0)
 
+	// Dated model with the same tiered price.
+	model.Name = "fugu-ultra-20260615"
 	got = pricer.PriceUsage(Input{
 		Provider: provider,
-		Model:    llm.ModelEntry{Name: "fugu-ultra-20260615"},
+		Model:    model,
 		Request:  llm.Request{EstimatedInputTokens: 1000},
 		Usage:    usage,
 	})
 	assertKnownCost(t, got, 1000.0/1e6*5+2000.0/1e6*30+300.0/1e6*0.5)
 }
 
-func TestCompositeSakanaFuguRouterUnknown(t *testing.T) {
+func TestFlatPricerTieredCatalogPriceOmitted(t *testing.T) {
+	model := llm.ModelEntry{
+		Name: "tiered-model",
+		Price: llm.Price{
+			Input: 5,
+			Tiers: []llm.PriceTier{{Threshold: 100_000, Input: 10}},
+		},
+	}
+	price := NewComposite().CatalogPrice(llm.ProviderConfig{Name: "testai"}, model)
+	if !price.Handled || price.Known {
+		t.Fatalf("tiered catalog price = %+v, want handled but unknown", price)
+	}
+}
+
+func TestFlatPricerZeroPriceUnknown(t *testing.T) {
+	// A model with no configured price (e.g. Sakana's routed fugu) cannot be costed.
 	got := NewComposite().PriceUsage(Input{
-		Provider: llm.ProviderConfig{Name: SakanaProviderID},
-		Model:    llm.ModelEntry{Name: "fugu", Price: llm.Price{Input: 99, Output: 99}},
+		Provider: llm.ProviderConfig{Name: "sakana"},
+		Model:    llm.ModelEntry{Name: "fugu"},
 		Usage:    llm.Usage{InputTokens: 1000, OutputTokens: 2000},
 	})
-	if !got.Handled || got.Known {
-		t.Fatalf("fugu cost = %+v, want handled unknown route-dependent price", got)
-	}
-
-	price := NewComposite().CatalogPrice(llm.ProviderConfig{Name: SakanaProviderID}, llm.ModelEntry{Name: "fugu-ultra", Price: llm.Price{Input: 99}})
-	if !price.Handled || price.Known {
-		t.Fatalf("sakana dynamic catalog price = %+v, want handled unknown", price)
+	if got.Handled || got.Known {
+		t.Fatalf("zero price cost = %+v, want unknown", got)
 	}
 }
 

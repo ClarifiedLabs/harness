@@ -133,7 +133,7 @@ func TestManagedProviderResolvesPriceFromModelsDevCatalog(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); got != (llm.Price{Input: 2, Output: 4}) {
+	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4}) {
 		t.Fatalf("served managed price = %+v, want resolved {2,4} from models.dev", got)
 	}
 
@@ -180,14 +180,14 @@ func TestManagedPriceSourceResolvesFromOtherProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	if got := catalogModelPrice(t, handler.Catalog(), "proxyai", "gpt-5-codex"); got != (llm.Price{Input: 1.25, Output: 10}) {
+	if got := catalogModelPrice(t, handler.Catalog(), "proxyai", "gpt-5-codex"); !got.Equal(llm.Price{Input: 1.25, Output: 10}) {
 		t.Fatalf("proxyai managed price = %+v, want {1.25,10} resolved from openai via price_source", got)
 	}
 
 	// Live refresh still resolves through price_source, even though the provider's
 	// own name is not present in models.dev.
 	handler.UpdateModelsDevCatalog(modelsDevCatalogWith("openai", "gpt-5-codex", llm.Price{Input: 2, Output: 20}), time.Unix(1_700_086_400, 0))
-	if got := catalogModelPrice(t, handler.Catalog(), "proxyai", "gpt-5-codex"); got != (llm.Price{Input: 2, Output: 20}) {
+	if got := catalogModelPrice(t, handler.Catalog(), "proxyai", "gpt-5-codex"); !got.Equal(llm.Price{Input: 2, Output: 20}) {
 		t.Fatalf("proxyai refreshed price = %+v, want {2,20} resolved from openai via price_source", got)
 	}
 }
@@ -216,7 +216,7 @@ func TestOpenAICodexIgnoresPriceSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	if got := catalogModelPrice(t, handler.Catalog(), "openai-codex", "gpt-5.5"); got != (llm.Price{}) {
+	if got := catalogModelPrice(t, handler.Catalog(), "openai-codex", "gpt-5.5"); !got.IsZero() {
 		t.Fatalf("codex managed price = %+v, want zero subscription price", got)
 	}
 
@@ -226,22 +226,24 @@ func TestOpenAICodexIgnoresPriceSource(t *testing.T) {
 	}
 }
 
-func TestSakanaManagedProviderUsesDynamicPricing(t *testing.T) {
+func TestTieredManagedProviderUsesTieredPricing(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "sakana.json"), []byte(`{
   "name": "sakana",
   "api_type": "responses",
   "base_url": "https://api.sakana.ai/v1",
   "managed": true,
-  "models": [
-    {"name":"fugu-ultra","context_window":1000000,"price":{"input":99,"output":99}},
-    {"name":"fugu","context_window":1000000,"price":{"input":99,"output":99}}
-  ]
+  "models": [{"name":"fugu-ultra","context_window":1000000,"price":{"input":99,"output":99}}]
 }`), 0o600); err != nil {
 		t.Fatalf("write provider config: %v", err)
 	}
 
-	md := modelsDevCatalogWith("sakana", "fugu-ultra", llm.Price{Input: 99, Output: 99})
+	md := modelsDevCatalogWith("sakana", "fugu-ultra", llm.Price{
+		Input:     5,
+		Output:    30,
+		CacheRead: 0.5,
+		Tiers:     []llm.PriceTier{{Threshold: 272_000, Input: 10, Output: 45, CacheRead: 1.0}},
+	})
 	handler, err := NewHandler(Options{
 		ConfigDir:           dir,
 		Config:              Config{ProviderConfigs: []string{"sakana.json"}},
@@ -252,29 +254,36 @@ func TestSakanaManagedProviderUsesDynamicPricing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	if got := catalogModelPrice(t, handler.Catalog(), "sakana", "fugu-ultra"); got != (llm.Price{}) {
-		t.Fatalf("sakana fugu-ultra catalog price = %+v, want omitted dynamic price", got)
-	}
-	if got := catalogModelPrice(t, handler.Catalog(), "sakana", "fugu"); got != (llm.Price{}) {
-		t.Fatalf("sakana fugu catalog price = %+v, want omitted unknown router price", got)
+	if got := catalogModelPrice(t, handler.Catalog(), "sakana", "fugu-ultra"); !got.IsZero() {
+		t.Fatalf("tiered model catalog price = %+v, want omitted dynamic price", got)
 	}
 
+	// Below the tier threshold uses base rates.
 	usage := handler.priceUsage("sakana:fugu-ultra", llm.Request{EstimatedInputTokens: 1000}, llm.Usage{
 		InputTokens:     1000,
 		OutputTokens:    2000,
 		CacheReadTokens: 300,
 	})
 	if !usage.CostKnown {
-		t.Fatal("sakana fugu-ultra cost known = false, want true")
+		t.Fatal("tiered model below-threshold cost known = false, want true")
 	}
 	want := 1000.0/1e6*5 + 2000.0/1e6*30 + 300.0/1e6*0.5
 	if diff := usage.CostUSD - want; diff > 1e-9 || diff < -1e-9 {
-		t.Fatalf("sakana fugu-ultra cost = %v, want %v", usage.CostUSD, want)
+		t.Fatalf("tiered model below-threshold cost = %v, want %v", usage.CostUSD, want)
 	}
 
-	usage = handler.priceUsage("sakana:fugu", llm.Request{EstimatedInputTokens: 1000}, llm.Usage{InputTokens: 1000, OutputTokens: 2000})
-	if usage.CostKnown {
-		t.Fatalf("sakana fugu cost known = true with cost %v, want unknown route-dependent price", usage.CostUSD)
+	// Above the tier threshold uses upper rates.
+	usage = handler.priceUsage("sakana:fugu-ultra", llm.Request{EstimatedInputTokens: 272_001}, llm.Usage{
+		InputTokens:     1000,
+		OutputTokens:    2000,
+		CacheReadTokens: 300,
+	})
+	if !usage.CostKnown {
+		t.Fatal("tiered model above-threshold cost known = false, want true")
+	}
+	want = 1000.0/1e6*10 + 2000.0/1e6*45 + 300.0/1e6*1.0
+	if diff := usage.CostUSD - want; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("tiered model above-threshold cost = %v, want %v", usage.CostUSD, want)
 	}
 }
 
@@ -313,7 +322,7 @@ func TestManualProviderKeepsConfigPrice(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); got != (llm.Price{Input: 2, Output: 4}) {
+	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4}) {
 		t.Fatalf("served manual price = %+v, want config {2,4} (not models.dev {99,99})", got)
 	}
 
@@ -364,7 +373,7 @@ func TestUpdateModelsDevCatalogSwapsManagedPrices(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); got != (llm.Price{Input: 2, Output: 4}) {
+	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4}) {
 		t.Fatalf("initial managed price = %+v, want {2,4}", got)
 	}
 
@@ -372,7 +381,7 @@ func TestUpdateModelsDevCatalogSwapsManagedPrices(t *testing.T) {
 	secondDate := time.Unix(1_700_086_400, 0)
 	handler.UpdateModelsDevCatalog(modelsDevCatalogWith("testai", "alpha", llm.Price{Input: 6, Output: 8}), secondDate)
 
-	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); got != (llm.Price{Input: 6, Output: 8}) {
+	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 6, Output: 8}) {
 		t.Fatalf("post-refresh managed price = %+v, want {6,8}", got)
 	}
 	if handler.Catalog().Pricing == nil || !handler.Catalog().Pricing.SourceDate.Equal(secondDate) {
@@ -433,7 +442,7 @@ func TestUpdateModelsDevCatalogPrunesManagedModelsMissingFromRefresh(t *testing.
 	if catalogHasTarget(handler.Catalog(), "testai", "retired") {
 		t.Fatalf("refreshed catalog kept retired target: %+v", handler.Catalog().Targets)
 	}
-	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); got != (llm.Price{Input: 6, Output: 8}) {
+	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 6, Output: 8}) {
 		t.Fatalf("alpha price after refresh = %+v, want {6,8}", got)
 	}
 }
@@ -498,7 +507,7 @@ func TestUpdateModelsDevCatalogKeepsManualProviderMissingFromRefresh(t *testing.
 
 	handler.UpdateModelsDevCatalog(modelsDevCatalogWith("otherai", "beta", llm.Price{Input: 6, Output: 8}), time.Unix(1_700_086_400, 0))
 
-	if got := catalogModelPrice(t, handler.Catalog(), "manualai", "alpha"); got != (llm.Price{Input: 2, Output: 4}) {
+	if got := catalogModelPrice(t, handler.Catalog(), "manualai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4}) {
 		t.Fatalf("manual provider price after refresh = %+v, want configured {2,4}", got)
 	}
 }
@@ -559,7 +568,7 @@ func TestUpdateModelsDevCatalogConcurrentWithRequests(t *testing.T) {
 
 func TestModelsDevPriceLookup(t *testing.T) {
 	md := modelsDevCatalogWith("testai", "alpha", llm.Price{Input: 3, Output: 5})
-	if price, ok := modelsDevPrice(md, "testai", "alpha"); !ok || price != (llm.Price{Input: 3, Output: 5}) {
+	if price, ok := modelsDevPrice(md, "testai", "alpha"); !ok || !price.Equal(llm.Price{Input: 3, Output: 5}) {
 		t.Fatalf("modelsDevPrice(testai/alpha) = %+v, %v; want {3,5}, true", price, ok)
 	}
 	if _, ok := modelsDevPrice(md, "testai", "missing"); ok {

@@ -447,7 +447,7 @@ func (h *Handler) pricedProviders(md *modelsdev.Catalog) ([]llm.ProviderConfig, 
 	out := make([]llm.ProviderConfig, 0, len(h.providers))
 	pruned := false
 	for _, pc := range h.providers {
-		if pc.Name == openAICodexProviderID || (pc.Managed && pc.Name == pricing.SakanaProviderID) {
+		if pc.Name == openAICodexProviderID {
 			cp := pc
 			cp.Models = make([]llm.ModelEntry, len(pc.Models))
 			for j, entry := range pc.Models {

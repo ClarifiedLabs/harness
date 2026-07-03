@@ -441,21 +441,6 @@ func setupProviderFromModelsDev(provider modelsdev.Provider, apiKey string, auth
 			Models:              entries,
 		}
 	}
-	if isSakanaProvider(provider) {
-		stateful := false
-		cfg := provider.ProviderConfig(apiKey)
-		return setupProviderConfig{
-			Name:              cfg.Name,
-			APIType:           setupProviderAPIType(provider),
-			BaseURL:           setupProviderBaseURL(provider),
-			APIKey:            cfg.APIKey,
-			Managed:           true,
-			ResponsesStateful: &stateful,
-			ServerTools:       setupProviderServerTools(cfg.Name, setupProviderAPIType(provider), setupProviderBaseURL(provider)),
-			APIKeyEnv:         cfg.APIKeyEnv,
-			Models:            entries,
-		}
-	}
 	cfg := provider.ProviderConfig(apiKey)
 	return setupProviderConfig{
 		Name:        cfg.Name,
@@ -773,12 +758,6 @@ func supportedSetupProviders(catalog *modelsdev.Catalog, codexCatalog *codexMode
 			providers = append(providers, codex)
 		}
 	}
-	if !setupProviderListContains(providers, sakanaProviderID) {
-		sakana, ok := sakanaProvider()
-		if ok {
-			providers = append(providers, sakana)
-		}
-	}
 	sort.Slice(providers, func(i, j int) bool {
 		if strings.EqualFold(providers[i].Name, providers[j].Name) {
 			return providers[i].ID < providers[j].ID
@@ -801,9 +780,6 @@ func setupCatalogProvider(catalog *modelsdev.Catalog, codexCatalog *codexModelsC
 	if id == openAICodexProviderID {
 		return openAICodexProvider(codexCatalog)
 	}
-	if id == sakanaProviderID {
-		return sakanaProvider()
-	}
 	return catalog.Provider(id)
 }
 
@@ -815,18 +791,12 @@ func setupProviderAPIType(provider modelsdev.Provider) string {
 	if isOpenAICodexProvider(provider) {
 		return "responses"
 	}
-	if isSakanaProvider(provider) {
-		return "responses"
-	}
 	return provider.APIType()
 }
 
 func setupProviderBaseURL(provider modelsdev.Provider) string {
 	if isOpenAICodexProvider(provider) {
 		return openAICodexProviderBaseURL
-	}
-	if isSakanaProvider(provider) {
-		return sakanaProviderBaseURL
 	}
 	return provider.BaseURL()
 }
@@ -836,13 +806,17 @@ func isOpenAICodexProvider(provider modelsdev.Provider) bool {
 }
 
 func isSakanaProvider(provider modelsdev.Provider) bool {
-	return provider.ID == sakanaProviderID
+	return strings.EqualFold(strings.TrimSpace(provider.ID), "sakana") ||
+		strings.Contains(strings.ToLower(provider.BaseURL()), "api.sakana.ai")
 }
 
 func applySyntheticProviderDefaults(provider modelsdev.Provider, cfg *setupProviderConfig) {
 	if cfg == nil {
 		return
 	}
+	// Sakana's Responses implementation does not accept previous_response_id and
+	// requires the full conversation each request, so stateful continuation must
+	// stay off.
 	if isSakanaProvider(provider) {
 		stateful := false
 		cfg.ResponsesStateful = &stateful
