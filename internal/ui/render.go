@@ -636,11 +636,14 @@ func (r *Renderer) statusTextLocked() (text string, cursorCol int, hasInput bool
 	elapsedSecs := nonNegativeSeconds(now.Sub(r.statusStart))
 	var b strings.Builder
 	fmt.Fprintf(&b, "[%s · %ds", r.statusLabel, elapsedSecs)
-	if !r.promptStart.IsZero() {
-		fmt.Fprintf(&b, " · total %ds", nonNegativeSeconds(now.Sub(r.promptStart)))
-	}
 	if r.statusCtxPct > 0 {
 		fmt.Fprintf(&b, " · ctx %d%%", r.statusCtxPct)
+	}
+	// The session total is set off from the current-turn fields with a distinct
+	// "│" divider and placed last so the turn's own elapsed time and the running
+	// prompt total are easy to tell apart at a glance.
+	if !r.promptStart.IsZero() {
+		fmt.Fprintf(&b, " │ total %ds", nonNegativeSeconds(now.Sub(r.promptStart)))
 	}
 	b.WriteByte(']')
 	maxW := r.outputWidth() - 1

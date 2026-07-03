@@ -765,8 +765,8 @@ func TestLiveCounterPaintsInPlaceAndCarriesContextPercent(t *testing.T) {
 	if !strings.Contains(got, "\r\x1b[2K") {
 		t.Fatalf("counter should repaint in place with \\r\\x1b[2K, got %q", got)
 	}
-	if !strings.Contains(got, "[model: turn 1 · 0s · total 0s · ctx 30%]") {
-		t.Fatalf("counter should show elapsed + total + context %%, got %q", got)
+	if !strings.Contains(got, "[model: turn 1 · 0s · ctx 30% │ total 0s]") {
+		t.Fatalf("counter should show elapsed + context + visually separated total, got %q", got)
 	}
 	if strings.Contains(got, "waiting") {
 		t.Fatalf("live mode should not print the static waiting line, got %q", got)
@@ -784,7 +784,7 @@ func TestLiveCounterTickAdvancesElapsed(t *testing.T) {
 	r.tick() // simulate a ticker fire without waiting on the real timer
 	defer r.StopProgress()
 
-	if got := errw.String(); !strings.Contains(got, "[model: turn 1 · 12s · total 12s]") {
+	if got := errw.String(); !strings.Contains(got, "[model: turn 1 · 12s │ total 12s]") {
 		t.Fatalf("tick should repaint with the elapsed seconds, got %q", got)
 	}
 }
@@ -802,7 +802,7 @@ func TestLiveCounterShowsTotalElapsedSincePromptSubmission(t *testing.T) {
 	r.tick()
 	defer r.StopProgress()
 
-	if got := errw.String(); !strings.Contains(got, "[model: turn 1 · 2s · total 7s]") {
+	if got := errw.String(); !strings.Contains(got, "[model: turn 1 · 2s │ total 7s]") {
 		t.Fatalf("counter should include total elapsed since prompt submission, got %q", got)
 	}
 }
@@ -838,7 +838,7 @@ func TestLiveCounterTicksDuringToolGap(t *testing.T) {
 	if !strings.Contains(got, "[tool: grep started") {
 		t.Fatalf("tool start line should scroll, got %q", got)
 	}
-	if !strings.Contains(got, "[tool: grep · 0s · total 0s]") {
+	if !strings.Contains(got, "[tool: grep · 0s │ total 0s]") {
 		t.Fatalf("a counter should tick during the tool gap with total elapsed, got %q", got)
 	}
 }
@@ -871,7 +871,7 @@ func TestLiveCounterResumesForStreamedToolCallAfterAssistantText(t *testing.T) {
 	if strings.Contains(got, "[tool-call:") {
 		t.Fatalf("tool-call status should not force durable tool-stream output, got %q", got)
 	}
-	if !strings.Contains(got, "[model: tool call read_file · 2s · total 5s]") {
+	if !strings.Contains(got, "[model: tool call read_file · 2s │ total 5s]") {
 		t.Fatalf("counter should resume while streamed tool arguments finish, got %q", got)
 	}
 }
@@ -887,7 +887,7 @@ func TestLiveInputLineRendersTypedBuffer(t *testing.T) {
 	r.SetInputLine("fix the bug", len("fix the bug"))
 	defer r.StopProgress()
 
-	if got := errw.String(); !strings.Contains(got, "[model: turn 1 · 0s · total 0s] > fix the bug") {
+	if got := errw.String(); !strings.Contains(got, "[model: turn 1 · 0s │ total 0s] > fix the bug") {
 		t.Fatalf("input line should render the typed buffer after the counter, got %q", got)
 	}
 }
@@ -947,7 +947,7 @@ func TestClipDisplayTailCountsWideRunes(t *testing.T) {
 }
 
 func TestClipStatusLineCursorColumn(t *testing.T) {
-	const prefix = "[model: turn 1 · 0s · total 0s] > "
+	const prefix = "[model: turn 1 · 0s │ total 0s] > "
 	prefixW := displayWidth(prefix)
 
 	t.Run("fits shows whole line, cursor at true column", func(t *testing.T) {
