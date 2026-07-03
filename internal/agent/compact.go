@@ -541,7 +541,7 @@ func hasNonResult(m llm.Message) bool {
 }
 
 func (a *Agent) summaryMessage(summary string) llm.Message {
-	return a.textMessage(llm.RoleUser, summaryHeader+summary)
+	return a.textMessage(llm.RoleAssistant, summaryHeader+summary)
 }
 
 // minTruncResult is the smallest tool_result worth shrinking; below it the saving

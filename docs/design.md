@@ -2143,7 +2143,7 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   instruction in `prompts/compaction-summary.txt`: preserve the task/goal, decisions
   made, files created/modified and their current state, key facts learned, open TODOs;
   do not invent. Summary output is capped by `compact_summary_max_tokens` (default
-  2048). Replace the old messages with a single user message:
+  2048). Replace the old messages with a single assistant-authored summary message:
   `=== Summary of earlier conversation ===\n<summary>`.
 - Before summarization, large old tool results and tool inputs are reduced to
   previews (`compact_tool_result_max_bytes`, default 4096; a **negative** value disables

@@ -110,8 +110,8 @@ func TestCompactKeepsLastFourTurns(t *testing.T) {
 	if len(msgs) != 1+8 {
 		t.Fatalf("want 1 summary + 8 kept messages, got %d:\n%s", len(msgs), dump(msgs))
 	}
-	if msgs[0].Role != llm.RoleUser {
-		t.Errorf("summary should be a user message, got role %q", msgs[0].Role)
+	if msgs[0].Role != llm.RoleAssistant {
+		t.Errorf("summary should be an assistant message, got role %q", msgs[0].Role)
 	}
 	got := msgs[0].Content[0].Text
 	if !strings.HasPrefix(got, "=== Summary of earlier conversation ===\n") {
@@ -781,6 +781,9 @@ func TestProactiveCompactionMidTurn(t *testing.T) {
 	}
 	// The post-compaction request starts with the summary message.
 	first := fp.Requests[2].Messages[0]
+	if first.Role != llm.RoleAssistant {
+		t.Fatalf("post-compaction summary role = %q, want assistant", first.Role)
+	}
 	if !strings.HasPrefix(first.Content[0].Text, summaryHeader) {
 		t.Errorf("post-compaction request should start with the summary, got %q", first.Content[0].Text)
 	}
