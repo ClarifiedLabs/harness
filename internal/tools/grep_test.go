@@ -196,6 +196,9 @@ func TestSearchCommandDescriptionsSteerToObjectArgs(t *testing.T) {
 			t.Errorf("description still encourages bare array args: %q", desc)
 		}
 	}
+	if desc := (ripgrep{}).Description(); strings.Contains(desc, "grep-style -r") || strings.Contains(desc, "replace") {
+		t.Errorf("rg description should leave -r correction to runtime validation, got %q", desc)
+	}
 }
 
 func TestRipgrepNotRegisteredWhenMissing(t *testing.T) {
@@ -293,6 +296,55 @@ printf '\n'
 	want := "fake rg: <--max-columns=1024> <--max-columns-preview> <--max-filesize=10M> <-n> <needle> <.>"
 	if !strings.Contains(out, want) {
 		t.Errorf("rg guards not injected before search args:\n got %q\nwant %q", out, want)
+	}
+}
+
+func TestRipgrepRejectsShortReplaceFlags(t *testing.T) {
+	dir := t.TempDir()
+	makeExecutable(t, filepath.Join(dir, "rg"), "#!/bin/sh\nprintf 'should not run'\n")
+	t.Setenv("PATH", dir)
+
+	rg, ok := newRipgrep(nil)
+	if !ok {
+		t.Fatal("expected fake rg to be found on PATH")
+	}
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "bare short replace", args: []string{"-r", "needle", "."}},
+		{name: "combined grep style recursive flags", args: []string{"-rin", "needle", "."}},
+		{name: "combined replace with other flags", args: []string{"-ir", "needle", "."}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := runTool(t, rg, map[string]any{"args": tt.args})
+			if err == nil {
+				t.Fatal("expected rg -r validation error")
+			}
+			want := "rg does not use grep-style -r for recursion; rg recurses by default. For replacement output, use --replace explicitly."
+			if err.Error() != want {
+				t.Fatalf("error = %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}
+
+func TestRipgrepAllowsExplicitReplaceAndOperandDelimiter(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "long replace", args: []string{"--replace", "fish", "needle", "."}},
+		{name: "long replace equals", args: []string{"--replace=fish", "needle", "."}},
+		{name: "literal after delimiter", args: []string{"--", "-r", "."}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateRipgrepArgs(tt.args); err != nil {
+				t.Fatalf("validateRipgrepArgs(%v): %v", tt.args, err)
+			}
+		})
 	}
 }
 

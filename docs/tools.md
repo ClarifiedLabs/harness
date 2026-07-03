@@ -56,7 +56,8 @@ syntax, ignore behavior, output shape, and supported flags.
 
 Normal `rg` searches add `--max-columns=1024 --max-columns-preview
 --max-filesize=10M` unless the caller's native `rg` args already set those
-limits.
+limits. The wrapper rejects short `-r` forms because replacement output must use
+`--replace` explicitly.
 
 The host `grep` tool injects `-I` (skip binary files) unless the call already sets
 a binary policy (`-I`/`-a`/`--text`/`--binary-files`) or is a help/version

@@ -68,6 +68,9 @@ func (r ripgrep) Run(ctx context.Context, input json.RawMessage) (string, error)
 		if err != nil {
 			return "", err
 		}
+		if err := validateRipgrepArgs(args.Args); err != nil {
+			return "", err
+		}
 		desc := "rg"
 		if len(args.Args) > 0 {
 			desc = "rg " + strings.Join(args.Args, " ")
@@ -91,8 +94,33 @@ func (r ripgrep) Run(ctx context.Context, input json.RawMessage) (string, error)
 	if err != nil {
 		return "", err
 	}
+	if err := validateRipgrepArgs(args.Args); err != nil {
+		return "", err
+	}
 	args.Args = guardRipgrepArgs(args.Args)
 	return runProgram(ctx, r.program, args, "rg", true)
+}
+
+func validateRipgrepArgs(args []string) error {
+	for _, arg := range args {
+		if arg == "--" {
+			return nil
+		}
+		if arg == "--replace" || strings.HasPrefix(arg, "--replace=") {
+			continue
+		}
+		if arg == "-r" || isRipgrepShortReplaceArg(arg) {
+			return fmt.Errorf("rg does not use grep-style -r for recursion; rg recurses by default. For replacement output, use --replace explicitly.")
+		}
+	}
+	return nil
+}
+
+func isRipgrepShortReplaceArg(arg string) bool {
+	if len(arg) < 3 || !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
+		return false
+	}
+	return strings.Contains(arg[1:], "r")
 }
 
 func guardRipgrepArgs(args []string) []string {
