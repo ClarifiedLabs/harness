@@ -25,6 +25,7 @@ import (
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/session"
 	"harness/internal/tools"
+	"harness/internal/tracing"
 	"harness/internal/ui"
 	"harness/prompts"
 )
@@ -89,6 +90,8 @@ type fakeModelProxy struct {
 	catalog         protocol.Catalog
 	requests        []protocol.StreamRequest
 	catalogRequests int
+	catalogTraces   []string
+	streamTraces    []string
 }
 
 func newFakeModelProxy(t *testing.T, fp *llmtest.FakeProvider) *fakeModelProxy {
@@ -142,9 +145,11 @@ func (p *fakeModelProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
 		p.catalogRequests++
+		p.catalogTraces = append(p.catalogTraces, r.Header.Get(tracing.TraceparentHeader))
 		w.Header().Set("content-type", "application/json")
 		_ = json.NewEncoder(w).Encode(p.catalog)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/stream":
+		p.streamTraces = append(p.streamTraces, r.Header.Get(tracing.TraceparentHeader))
 		var req protocol.StreamRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -862,7 +867,7 @@ func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 	flags := []string{
 		"-p", "-i", "-initial-prompt", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 		"-no-env", "-resume", "-session", "-max-turns", "-max-output-tokens", "-default-context-window", "-context-window",
-		"-reasoning", "-reasoning-summary", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks",
+		"-reasoning", "-reasoning-summary", "-trace-proxy", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks",
 	}
 	for _, arg := range []string{"-h", "--help"} {
 		fp := llmtest.New("fake")
@@ -3150,5 +3155,24 @@ func TestFuzzyMatchModel(t *testing.T) {
 	// No match.
 	if m, c := fuzzyMatchModel(catalog, "llama"); m != "" || len(c) != 0 {
 		t.Errorf("no-match: match=%q candidates=%v", m, c)
+	}
+}
+
+func TestRunTraceProxySendsTraceparentToModelProxyCatalog(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--models", "-trace-proxy"}, fp, "")
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(proxy.catalogTraces) != 1 {
+		t.Fatalf("catalog trace count = %d, want 1", len(proxy.catalogTraces))
+	}
+	tc, ok := tracing.ParseTraceparent(proxy.catalogTraces[0])
+	if !ok {
+		t.Fatalf("traceparent = %q, want valid", proxy.catalogTraces[0])
+	}
+	if !tc.Sampled {
+		t.Fatalf("trace context = %+v, want sampled", tc)
 	}
 }

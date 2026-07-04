@@ -190,6 +190,17 @@ keys are stored; the plaintext is shown exactly once at generation.
 For an authenticated MCP proxy, the debug `harness-mcp-proxy tools` command uses
 `HARNESS_MCP_PROXY_API_KEY` or `tools -api-key <key>`.
 
+To correlate a harness run across proxy logs, enable opt-in proxy request tracing:
+
+```sh
+harness -trace-proxy -provider <provider> -model <model>
+```
+
+This sends standard W3C `traceparent` headers to `harness-model-proxy` and
+`harness-mcp-proxy`. Proxy logs that receive a valid trace include `trace_id`,
+`span_id`, `parent_span_id`, and `trace_sampled` fields; prompts, request bodies,
+API keys, and auth headers are not logged by tracing.
+
 ## Basic usage
 
 Interactive mode starts when no prompt is provided:

@@ -41,6 +41,7 @@ import (
 	"harness/internal/term"
 	"harness/internal/todo"
 	"harness/internal/tools"
+	"harness/internal/tracing"
 	"harness/internal/ui"
 	"harness/prompts"
 )
@@ -157,11 +158,20 @@ func run(env environment) int {
 		}
 		return ui.ExitOK
 	}
+	var proxyTracer *tracing.Tracer
+	if cfg.TraceProxy {
+		var err error
+		proxyTracer, err = tracing.NewTracer(true)
+		if err != nil {
+			fmt.Fprintf(stderr, "harness: trace proxy: %v\n", err)
+			return ui.ExitRuntime
+		}
+	}
 	proxyURL := cfg.ModelProxyURL
 	if proxyURL == "" {
 		proxyURL = protocol.DefaultURL
 	}
-	proxyClient, err := modelclient.New(proxyURL, nil, modelclient.WithAPIKey(cfg.ModelProxyAPIKey))
+	proxyClient, err := modelclient.New(proxyURL, nil, modelclient.WithAPIKey(cfg.ModelProxyAPIKey), modelclient.WithTracer(proxyTracer))
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
@@ -545,7 +555,7 @@ func run(env environment) int {
 	var mcpSummary mcptools.Summary
 	if cfg.MCP.Enable {
 		if cfg.PromptSet {
-			conn, summary, cleanup, ok := setupMCP(startupCtx, cfg.MCP, toolCatalog, logger)
+			conn, summary, cleanup, ok := setupMCP(startupCtx, cfg.MCP, toolCatalog, logger, proxyTracer)
 			defer cleanup()
 			if startupInterrupted() {
 				return ui.ExitInterrupt
@@ -554,7 +564,7 @@ func run(env environment) int {
 				mcpConn, mcpSummary = conn, summary
 			}
 		} else {
-			conn, pending, cleanup, ok := setupMCPAsync(cfg.MCP, logger)
+			conn, pending, cleanup, ok := setupMCPAsync(cfg.MCP, logger, proxyTracer)
 			defer cleanup()
 			if ok {
 				mcpConn, pendingMCP = conn, pending

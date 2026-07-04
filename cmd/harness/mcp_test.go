@@ -27,6 +27,7 @@ import (
 	"harness/internal/mcpproxy"
 	"harness/internal/mcptools"
 	"harness/internal/tools"
+	"harness/internal/tracing"
 	"harness/internal/ui"
 )
 
@@ -256,7 +257,7 @@ func TestSetupMCPRejectsNonHTTPProxyAndContinues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, _, cleanup, ok := setupMCP(context.Background(), config.MCPConfig{Enable: true, Proxy: "/no/such.sock"}, catalog, logger)
+	conn, _, cleanup, ok := setupMCP(context.Background(), config.MCPConfig{Enable: true, Proxy: "/no/such.sock"}, catalog, logger, nil)
 	defer cleanup()
 
 	if ok || conn != nil {
@@ -288,6 +289,7 @@ type httpAuthMiddleware struct {
 	next     http.Handler
 	mu       sync.Mutex
 	auths    []string
+	traces   []string
 	requests int
 }
 
@@ -295,6 +297,7 @@ func (m *httpAuthMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	m.requests++
 	m.auths = append(m.auths, r.Header.Get("Authorization"))
+	m.traces = append(m.traces, r.Header.Get(tracing.TraceparentHeader))
 	m.mu.Unlock()
 	m.next.ServeHTTP(w, r)
 }
@@ -311,6 +314,12 @@ func (m *httpAuthMiddleware) allHadAuth(want string) bool {
 		}
 	}
 	return true
+}
+
+func (m *httpAuthMiddleware) traceHeaders() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.traces...)
 }
 
 // startHTTPProxy starts an httptest server running a real mcp.NewHTTPHandler
@@ -393,7 +402,7 @@ func TestSetupMCPTrustsRemoteReadOnlyHint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, sum, cleanup, ok := setupMCP(context.Background(), config.MCPConfig{Enable: true, Proxy: url}, catalog, logger)
+	conn, sum, cleanup, ok := setupMCP(context.Background(), config.MCPConfig{Enable: true, Proxy: url}, catalog, logger, nil)
 	defer cleanup()
 
 	if !ok || conn == nil {
@@ -432,7 +441,7 @@ func TestSetupMCPHTTPUnreachableWarnsAndContinues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, _, cleanup, ok := setupMCP(context.Background(), config.MCPConfig{Enable: true, Proxy: deadURL}, catalog, logger)
+	conn, _, cleanup, ok := setupMCP(context.Background(), config.MCPConfig{Enable: true, Proxy: deadURL}, catalog, logger, nil)
 	defer cleanup()
 
 	if ok || conn != nil {
@@ -1122,4 +1131,42 @@ func transcriptHasToolResult(msgs []llm.Message, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestSetupMCPSendsTraceparentHeaders(t *testing.T) {
+	url, mw := startHTTPProxy(t, &echoProvider{tools: []mcp.Tool{echoTool()}})
+	catalog := &tools.Registry{}
+	var errw strings.Builder
+	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	tracer, err := tracing.NewTracer(true)
+	if err != nil {
+		t.Fatalf("NewTracer: %v", err)
+	}
+	conn, _, cleanup, ok := setupMCP(context.Background(), config.MCPConfig{Enable: true, Proxy: url}, catalog, logger, tracer)
+	defer cleanup()
+	if !ok || conn == nil {
+		t.Fatalf("setupMCP failed: ok=%v conn=%v stderr=%q", ok, conn != nil, errw.String())
+	}
+	var traceID string
+	traces := mw.traceHeaders()
+	if len(traces) == 0 {
+		t.Fatalf("no MCP HTTP requests captured")
+	}
+	for i, raw := range traces {
+		tc, ok := tracing.ParseTraceparent(raw)
+		if !ok {
+			t.Fatalf("trace[%d] = %q, want valid traceparent", i, raw)
+		}
+		if traceID == "" {
+			traceID = tc.TraceID
+		} else if tc.TraceID != traceID {
+			t.Fatalf("trace[%d] trace id = %q, want %q", i, tc.TraceID, traceID)
+		}
+	}
+	if traceID != tracer.TraceID() {
+		t.Fatalf("trace id = %q, want tracer root %q", traceID, tracer.TraceID())
+	}
 }

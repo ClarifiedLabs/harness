@@ -11,6 +11,7 @@ import (
 
 	"harness/internal/llm"
 	"harness/internal/modelproxy/protocol"
+	"harness/internal/tracing"
 )
 
 func TestCatalogSendsAuthorizationHeader(t *testing.T) {
@@ -209,5 +210,101 @@ func TestProviderCountInputTokensUnsupported(t *testing.T) {
 	_, err = c.Provider("openai").(llm.InputTokenCounter).CountInputTokens(context.Background(), llm.Request{Model: "gpt-5.5"})
 	if !errors.Is(err, llm.ErrInputTokenCountUnsupported) {
 		t.Fatalf("err = %v, want ErrInputTokenCountUnsupported", err)
+	}
+}
+
+func TestClientTraceHeaders(t *testing.T) {
+	tr, err := tracing.NewTracer(true)
+	if err != nil {
+		t.Fatalf("NewTracer: %v", err)
+	}
+	var catalogTrace string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		catalogTrace = r.Header.Get(tracing.TraceparentHeader)
+		_ = json.NewEncoder(w).Encode(protocol.Catalog{})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, srv.Client(), WithTracer(tr))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Catalog(context.Background()); err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	tc, ok := tracing.ParseTraceparent(catalogTrace)
+	if !ok {
+		t.Fatalf("traceparent = %q, want valid", catalogTrace)
+	}
+	if tc.TraceID != tr.TraceID() || !tc.Sampled {
+		t.Fatalf("trace context = %+v, tracer trace id %q", tc, tr.TraceID())
+	}
+}
+
+func TestClientTraceHeadersStreamAndInputTokensShareTraceDistinctSpans(t *testing.T) {
+	tr, err := tracing.NewTracer(true)
+	if err != nil {
+		t.Fatalf("NewTracer: %v", err)
+	}
+	traces := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		traces[r.URL.Path] = r.Header.Get(tracing.TraceparentHeader)
+		switch r.URL.Path {
+		case "/v1/stream":
+			w.Header().Set("content-type", protocol.ContentTypeNDJSON)
+			_ = json.NewEncoder(w).Encode(protocol.StreamEnvelope{Event: &llm.StreamEvent{Kind: llm.EventDone}})
+		case "/v1/input_tokens":
+			_ = json.NewEncoder(w).Encode(protocol.TokenCountResponse{InputTokens: 1, Source: "test"})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, srv.Client(), WithTracer(tr))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, evErr := range c.Provider("target").Stream(context.Background(), llm.Request{}) {
+		if evErr != nil {
+			t.Fatalf("Stream: %v", evErr)
+		}
+	}
+	if _, err := c.Provider("target").(llm.InputTokenCounter).CountInputTokens(context.Background(), llm.Request{}); err != nil {
+		t.Fatalf("CountInputTokens: %v", err)
+	}
+	streamTrace, ok := tracing.ParseTraceparent(traces["/v1/stream"])
+	if !ok {
+		t.Fatalf("stream traceparent = %q, want valid", traces["/v1/stream"])
+	}
+	tokenTrace, ok := tracing.ParseTraceparent(traces["/v1/input_tokens"])
+	if !ok {
+		t.Fatalf("token traceparent = %q, want valid", traces["/v1/input_tokens"])
+	}
+	if streamTrace.TraceID != tr.TraceID() || tokenTrace.TraceID != tr.TraceID() {
+		t.Fatalf("trace ids = %q/%q, want %q", streamTrace.TraceID, tokenTrace.TraceID, tr.TraceID())
+	}
+	if streamTrace.SpanID == tokenTrace.SpanID {
+		t.Fatalf("span ids should differ: %q", streamTrace.SpanID)
+	}
+}
+
+func TestClientNoTraceHeaderWhenTracerNil(t *testing.T) {
+	var trace string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		trace = r.Header.Get(tracing.TraceparentHeader)
+		_ = json.NewEncoder(w).Encode(protocol.Catalog{})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Catalog(context.Background()); err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	if trace != "" {
+		t.Fatalf("traceparent = %q, want empty", trace)
 	}
 }

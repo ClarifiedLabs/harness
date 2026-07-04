@@ -14,6 +14,7 @@ import (
 
 	"harness/internal/llm"
 	"harness/internal/modelproxy/protocol"
+	"harness/internal/tracing"
 )
 
 const maxErrorBodyBytes = 1 << 20
@@ -24,6 +25,7 @@ type Client struct {
 	baseURL string
 	http    *http.Client
 	apiKey  string
+	tracer  *tracing.Tracer
 }
 
 // Option configures a Client.
@@ -33,6 +35,13 @@ type Option func(*Client)
 func WithAPIKey(key string) Option {
 	return func(c *Client) {
 		c.apiKey = key
+	}
+}
+
+// WithTracer enables W3C Trace Context headers on outbound proxy requests.
+func WithTracer(t *tracing.Tracer) Option {
+	return func(c *Client) {
+		c.tracer = t
 	}
 }
 
@@ -64,6 +73,18 @@ func (c *Client) setAuth(req *http.Request) {
 	}
 }
 
+func (c *Client) setTrace(req *http.Request) {
+	if c.tracer == nil {
+		return
+	}
+	ctx, tc, err := c.tracer.Start(req.Context())
+	if err != nil {
+		return
+	}
+	tracing.Inject(req.Header, tc)
+	*req = *req.WithContext(ctx)
+}
+
 func (c *Client) URL() string { return c.baseURL }
 
 func (c *Client) Catalog(ctx context.Context) (protocol.Catalog, error) {
@@ -73,6 +94,7 @@ func (c *Client) Catalog(ctx context.Context) (protocol.Catalog, error) {
 	}
 	req.Header.Set(requesterHeader, "harness")
 	c.setAuth(req)
+	c.setTrace(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return protocol.Catalog{}, err
@@ -159,6 +181,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 		httpReq.Header.Set("accept", protocol.ContentTypeNDJSON)
 		httpReq.Header.Set(requesterHeader, "harness")
 		p.client.setAuth(httpReq)
+		p.client.setTrace(httpReq)
 
 		resp, err := p.client.http.Do(httpReq)
 		if err != nil {
@@ -217,6 +240,7 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 	httpReq.Header.Set("content-type", "application/json")
 	httpReq.Header.Set(requesterHeader, "harness")
 	p.client.setAuth(httpReq)
+	p.client.setTrace(httpReq)
 	resp, err := p.client.http.Do(httpReq)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

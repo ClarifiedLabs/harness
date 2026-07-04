@@ -21,6 +21,7 @@ import (
 	"harness/internal/mcp"
 	"harness/internal/mcp/jsonrpc"
 	"harness/internal/retry"
+	"harness/internal/tracing"
 )
 
 // initTimeout bounds the MCP initialize handshake on a fresh connection.
@@ -38,6 +39,7 @@ type Options struct {
 	Headers map[string]string
 	Info    mcp.Implementation // clientInfo (harness name/version)
 	Logger  *slog.Logger
+	Tracer  *tracing.Tracer
 
 	// Dial is an internal test seam for stream transports that can deliver
 	// tools/list_changed notifications. Production callers should leave it nil
@@ -66,6 +68,7 @@ type Conn struct {
 	dial     func(ctx context.Context) (io.ReadWriteCloser, error)
 	endpoint string
 	headers  map[string]string
+	tracer   *tracing.Tracer
 	now      func() time.Time
 
 	dirty atomic.Bool // set by OnToolsChanged, consumed at prompt boundaries
@@ -109,6 +112,7 @@ func NewConn(opts Options) *Conn {
 	} else {
 		c.endpoint = opts.Endpoint
 		c.headers = opts.Headers
+		c.tracer = opts.Tracer
 		if opts.APIKey != "" {
 			if c.headers == nil {
 				c.headers = map[string]string{}
@@ -216,6 +220,7 @@ func (c *Conn) connectHTTP(ctx context.Context) (*mcp.Client, error) {
 			Endpoint: c.endpoint,
 			Headers:  c.headers,
 			Logger:   c.logger,
+			Tracer:   c.tracer,
 		})
 	}
 	cl := mcp.NewClientTransport(c.http, mcp.ClientOptions{

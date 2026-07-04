@@ -18,6 +18,7 @@ import (
 	"harness/internal/auth"
 	"harness/internal/mcp"
 	"harness/internal/mcp/jsonrpc"
+	"harness/internal/tracing"
 )
 
 type supervisorHTTPProvider struct{}
@@ -435,5 +436,69 @@ func TestSupervisorHTTPVersionErrorTerminal(t *testing.T) {
 	fake.mu.Unlock()
 	if initsAfter != initsBefore {
 		t.Fatalf("terminal version error must not re-initialize: %d -> %d", initsBefore, initsAfter)
+	}
+}
+
+func TestSupervisorHTTPPropagatesTraceContextToDownstreamCall(t *testing.T) {
+	parent := tracing.Context{TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", SpanID: "00f067aa0ba902b7", Sampled: true}
+	gotTrace := make(chan tracing.Context, 1)
+	writeResult := func(w http.ResponseWriter, msg jsonrpc.Message, result json.RawMessage) {
+		w.Header().Set("Content-Type", "application/json")
+		id := jsonrpc.ID{}
+		if msg.ID != nil {
+			id = *msg.ID
+		}
+		_ = json.NewEncoder(w).Encode(jsonrpc.NewResponse(id, result))
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		var msg jsonrpc.Message
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch msg.Method {
+		case mcp.MethodInitialize:
+			w.Header().Set("Mcp-Session-Id", "session-1")
+			writeResult(w, msg, mustJSON(mcp.InitializeResult{
+				ProtocolVersion: mcp.ProtocolVersion,
+				Capabilities:    mcp.ServerCapabilities{Tools: &mcp.ToolsCapability{}},
+				ServerInfo:      mcp.Implementation{Name: "downstream", Version: "1"},
+			}))
+		case mcp.NotifInitialized:
+			w.WriteHeader(http.StatusAccepted)
+		case mcp.MethodListTools:
+			writeResult(w, msg, mustJSON(mcp.ListToolsResult{Tools: []mcp.Tool{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}}}))
+		case mcp.MethodCallTool:
+			tc, ok := tracing.TraceFromHeaders(r.Header)
+			if !ok {
+				t.Fatalf("downstream call missing valid traceparent %q", r.Header.Get(tracing.TraceparentHeader))
+			}
+			gotTrace <- tc
+			writeResult(w, msg, mustJSON(mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: "ok"}}}))
+		default:
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer srv.Close()
+
+	sup := newHTTPSupervisor(t, srv.URL)
+	sup.Start(t.Context())
+	defer sup.Shutdown(context.Background())
+	waitFor(t, 5*time.Second, func() bool { return sup.State() == StateReady })
+	ctx := tracing.ContextWithTrace(context.Background(), parent)
+	if _, err := sup.CallTool(ctx, "echo", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	select {
+	case got := <-gotTrace:
+		if got.TraceID != parent.TraceID || got.SpanID == parent.SpanID {
+			t.Fatalf("downstream trace = %+v, parent = %+v", got, parent)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for downstream call trace")
 	}
 }

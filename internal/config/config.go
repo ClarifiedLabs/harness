@@ -40,6 +40,9 @@ type Config struct {
 	// respective proxies. Empty means the proxy is contacted without auth.
 	ModelProxyAPIKey string `json:"model_proxy_api_key"`
 
+	// TraceProxy sends W3C Trace Context headers to harness-managed HTTP proxies.
+	TraceProxy bool `json:"trace_proxy"`
+
 	// System prompt composition (design §8.5).
 	SystemPrompt string `json:"system_prompt"` // -system-prompt: replace the static system prompt
 	NoEnv        bool   `json:"no_env"`        // -no-env: drop the env-context block
@@ -254,6 +257,7 @@ type fileConfig struct {
 	Model                     string                     `json:"model"`
 	ModelProxyURL             string                     `json:"model_proxy_url"`
 	ModelProxyAPIKey          string                     `json:"model_proxy_api_key"`
+	TraceProxy                *bool                      `json:"trace_proxy"`
 	SystemPrompt              string                     `json:"system_prompt"`
 	NoEnv                     *bool                      `json:"no_env"`
 	MaxTurns                  *int                       `json:"max_turns"`
@@ -383,6 +387,8 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		getenv("HARNESS_MODEL_PROXY_URL"), fc.ModelProxyURL, "")
 	c.ModelProxyAPIKey = resolveString(set["model-proxy-api-key"], *fModelProxyAPIKey,
 		getenv("HARNESS_MODEL_PROXY_API_KEY"), fc.ModelProxyAPIKey, "")
+	c.TraceProxy = resolveBool(set["trace-proxy"], *f.traceProxy,
+		getenv("HARNESS_TRACE_PROXY"), fc.TraceProxy, false)
 	c.SystemPrompt = resolveString(set["system-prompt"], *fSystemPrompt,
 		getenv("HARNESS_SYSTEM_PROMPT"), fc.SystemPrompt, "")
 	if set["resume"] {
@@ -917,6 +923,7 @@ type flags struct {
 	verbose, toolStream              *bool
 	showDiffs                        *bool
 	responsesStateful                *bool
+	traceProxy                       *bool
 	noColor                          *bool
 	noTimestamps                     *bool
 	quietShort, quiet                *bool
@@ -969,6 +976,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.searchTools = fs.String("search-tools", "auto", "search tools to expose: auto, grep, rg, or both")
 	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")
 	f.responsesStateful = fs.Bool("responses-stateful", true, "enable OpenAI Responses previous_response_id continuation when supported")
+	f.traceProxy = fs.Bool("trace-proxy", false, "send W3C trace headers to harness-model-proxy and harness-mcp-proxy")
 	f.verbose = fs.Bool("v", false, "show tool result snippets")
 	f.toolStream = fs.Bool("tool-stream", true, "show live tool-call progress")
 	f.showDiffs = fs.Bool("show-diffs", true, "show per-tool-call file diffs for built-in file edits")

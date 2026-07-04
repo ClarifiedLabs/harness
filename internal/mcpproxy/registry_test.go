@@ -17,6 +17,7 @@ import (
 	"harness/internal/logging"
 	"harness/internal/mcp"
 	"harness/internal/mcp/jsonrpc"
+	"harness/internal/tracing"
 )
 
 // newFixedSupervisor builds a Supervisor whose tools and call behavior are fixed
@@ -117,11 +118,12 @@ func TestRegistryLogsToolCallStats(t *testing.T) {
 	}
 	s := newFixedSupervisor("web", []mcp.Tool{tool("search")})
 	reg := NewRegistry([]*Supervisor{s}, logger)
-	ctx := mcp.ContextWithRequestInfo(context.Background(), mcp.RequestInfo{
+	tc := tracing.Context{TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", SpanID: "00f067aa0ba902b7", ParentSpanID: "1111111111111111", Sampled: true}
+	ctx := tracing.ContextWithTrace(mcp.ContextWithRequestInfo(context.Background(), mcp.RequestInfo{
 		Requester:        "harness",
 		RequesterVersion: "test",
 		RemoteAddr:       "127.0.0.1:1234",
-	})
+	}), tc)
 
 	res, err := reg.CallTool(ctx, "mcp__web__search", json.RawMessage(`{"q":"x"}`))
 	if err != nil {
@@ -145,6 +147,10 @@ func TestRegistryLogsToolCallStats(t *testing.T) {
 		"qualified_tool":    "mcp__web__search",
 		"request_bytes":     float64(len(`{"q":"x"}`)),
 		"is_error":          true,
+		"trace_id":          tc.TraceID,
+		"span_id":           tc.SpanID,
+		"parent_span_id":    tc.ParentSpanID,
+		"trace_sampled":     true,
 	} {
 		if got := record[k]; got != want {
 			t.Fatalf("log[%s] = %v (%T), want %v", k, got, got, want)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"harness/internal/mcp/jsonrpc"
+	"harness/internal/tracing"
 )
 
 // decodeReq reads a JSON-RPC request from an HTTP request body.
@@ -767,5 +768,94 @@ func TestHTTPCallJSONRPCErrorResult(t *testing.T) {
 	}
 	if je.Code != jsonrpc.CodeMethodNotFound {
 		t.Errorf("code = %d, want %d", je.Code, jsonrpc.CodeMethodNotFound)
+	}
+}
+
+func TestHTTPTransportTraceHeadersWithTracer(t *testing.T) {
+	tracer, err := tracing.NewTracer(true)
+	if err != nil {
+		t.Fatalf("NewTracer: %v", err)
+	}
+	var traces []tracing.Context
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tc, ok := tracing.TraceFromHeaders(r.Header)
+		if !ok {
+			t.Fatalf("missing valid traceparent: %q", r.Header.Get(tracing.TraceparentHeader))
+		}
+		traces = append(traces, tc)
+		m := decodeReq(t, r)
+		writeJSONResponse(w, m.ID, json.RawMessage(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	tr := NewHTTPTransport(HTTPOptions{Endpoint: srv.URL, Tracer: tracer})
+	defer tr.Close()
+	if _, err := tr.Call(context.Background(), "tools/list", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Call 1: %v", err)
+	}
+	if _, err := tr.Call(context.Background(), "tools/list", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Call 2: %v", err)
+	}
+	if len(traces) != 2 {
+		t.Fatalf("traces = %d, want 2", len(traces))
+	}
+	if traces[0].TraceID != tracer.TraceID() || traces[1].TraceID != tracer.TraceID() {
+		t.Fatalf("trace ids = %+v, want %q", traces, tracer.TraceID())
+	}
+	if traces[0].SpanID == traces[1].SpanID {
+		t.Fatalf("span ids should differ: %q", traces[0].SpanID)
+	}
+}
+
+func TestHTTPTransportPropagatesContextTraceWithoutTracer(t *testing.T) {
+	parent := tracing.Context{TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", SpanID: "00f067aa0ba902b7", TraceState: "a=b", Sampled: true}
+	var got tracing.Context
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ok bool
+		got, ok = tracing.TraceFromHeaders(r.Header)
+		if !ok {
+			t.Fatalf("missing valid traceparent")
+		}
+		m := decodeReq(t, r)
+		writeJSONResponse(w, m.ID, json.RawMessage(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	tr := NewHTTPTransport(HTTPOptions{Endpoint: srv.URL})
+	defer tr.Close()
+	ctx := tracing.ContextWithTrace(context.Background(), parent)
+	if _, err := tr.Call(ctx, "tools/list", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if got.TraceID != parent.TraceID || got.SpanID == parent.SpanID || got.TraceState != parent.TraceState {
+		t.Fatalf("propagated trace = %+v, parent = %+v", got, parent)
+	}
+}
+
+func TestHTTPTransportActiveTracingOverridesStaticTraceHeader(t *testing.T) {
+	tracer, err := tracing.NewTracer(true)
+	if err != nil {
+		t.Fatalf("NewTracer: %v", err)
+	}
+	stale := "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-00"
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get(tracing.TraceparentHeader)
+		m := decodeReq(t, r)
+		writeJSONResponse(w, m.ID, json.RawMessage(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	tr := NewHTTPTransport(HTTPOptions{Endpoint: srv.URL, Headers: map[string]string{tracing.TraceparentHeader: stale}, Tracer: tracer})
+	defer tr.Close()
+	if _, err := tr.Call(context.Background(), "tools/list", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	tc, ok := tracing.ParseTraceparent(got)
+	if !ok {
+		t.Fatalf("traceparent = %q, want valid", got)
+	}
+	if got == stale || tc.TraceID != tracer.TraceID() {
+		t.Fatalf("traceparent = %q, want tracer trace id %q and not stale", got, tracer.TraceID())
 	}
 }

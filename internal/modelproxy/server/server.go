@@ -31,6 +31,7 @@ import (
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/modelsdev"
 	"harness/internal/reasoningprofile"
+	"harness/internal/tracing"
 )
 
 const (
@@ -586,9 +587,36 @@ func (h *Handler) Catalog() protocol.Catalog {
 	return h.snapshot.Load().catalog
 }
 
-func (h *Handler) handleModels(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("content-type", "application/json")
-	if err := json.NewEncoder(w).Encode(h.snapshot.Load().catalog); err != nil {
+func (h *Handler) logTracedProxyRequest(r *http.Request, cw *countingResponseWriter, start time.Time, requestBytes int, tc tracing.Context) {
+	attrs := []any{
+		"requester", requesterName(r),
+		"remote_addr", r.RemoteAddr,
+		"method", r.Method,
+		"path", r.URL.Path,
+		"status", cw.statusCode(),
+		"request_bytes", requestBytes,
+		"response_bytes", cw.bytesWritten(),
+		"duration", time.Since(start),
+	}
+	attrs = append(attrs, tracing.LogAttrs(tc)...)
+	if cw.statusCode() >= http.StatusBadRequest {
+		h.logger.Warn("model proxy request completed", attrs...)
+		return
+	}
+	h.logger.Info("model proxy request completed", attrs...)
+}
+
+func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	tc, traceOK := tracing.TraceFromHeaders(r.Header)
+	cw := &countingResponseWriter{ResponseWriter: w}
+	defer func() {
+		if traceOK {
+			h.logTracedProxyRequest(r, cw, start, 0, tc)
+		}
+	}()
+	cw.Header().Set("content-type", "application/json")
+	if err := json.NewEncoder(cw).Encode(h.snapshot.Load().catalog); err != nil {
 		h.logger.Warn("write model catalog failed", "err", err)
 	}
 }
@@ -637,8 +665,17 @@ func (h *Handler) usageSnapshot() protocol.UsageReport {
 }
 
 func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	tc, traceOK := tracing.TraceFromHeaders(r.Header)
 	cw := &countingResponseWriter{ResponseWriter: w}
+	reqBytes := 0
+	defer func() {
+		if traceOK {
+			h.logTracedProxyRequest(r, cw, start, reqBytes, tc)
+		}
+	}()
 	body, err := io.ReadAll(http.MaxBytesReader(cw, r.Body, maxStreamRequestBytes))
+	reqBytes = len(body)
 	if err != nil {
 		writeError(cw, http.StatusRequestEntityTooLarge, &protocol.Error{StatusCode: http.StatusRequestEntityTooLarge, Message: "request body too large"})
 		return
@@ -701,6 +738,7 @@ func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	traceCtx, traceOK := tracing.TraceFromHeaders(r.Header)
 	requestID := h.nextRequestID.Add(1)
 	cw := &countingResponseWriter{ResponseWriter: w}
 	var (
@@ -741,6 +779,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		if targetID != "" && usage.CostKnown {
 			attrs = append(attrs, "cost_usd", usage.CostUSD)
 			h.recordUsage(targetID, usage, usage.CostUSD)
+		}
+		if traceOK {
+			attrs = append(attrs, tracing.LogAttrs(traceCtx)...)
 		}
 		// Record every stream request, even one that failed before the target
 		// resolved (provider/model empty), so requests_total/errors_total reflect

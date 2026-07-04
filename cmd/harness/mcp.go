@@ -20,6 +20,7 @@ import (
 	"harness/internal/mcptools"
 	"harness/internal/retry"
 	"harness/internal/tools"
+	"harness/internal/tracing"
 )
 
 // MCP startup timing budget.
@@ -40,7 +41,7 @@ var mcpRegisterTimeout = 5 * time.Second
 // not an http(s) URL it logs a single warning and returns ok=false with a nil conn,
 // preserving the "MCP never fails harness startup" contract for both the sync
 // (setupMCP) and async (setupMCPAsync) callers.
-func dialMCPProxy(mcpCfg config.MCPConfig, logger *slog.Logger) (proxy string, conn *mcptools.Conn, ok bool) {
+func dialMCPProxy(mcpCfg config.MCPConfig, logger *slog.Logger, tracer *tracing.Tracer) (proxy string, conn *mcptools.Conn, ok bool) {
 	proxy = resolveMCPProxy(mcpCfg.Proxy)
 	if !isHTTPProxy(proxy) {
 		logger.Warn(fmt.Sprintf("mcp: cannot connect to proxy at %s: proxy must be an http(s) URL; MCP tools unavailable", proxy), logging.Category("mcp"))
@@ -52,13 +53,14 @@ func dialMCPProxy(mcpCfg config.MCPConfig, logger *slog.Logger) (proxy string, c
 		Headers:  mcpCfg.Headers,
 		Info:     mcp.Implementation{Name: "harness", Version: buildinfo.Version},
 		Logger:   logger,
+		Tracer:   tracer,
 	})
 	return proxy, conn, true
 }
 
-func setupMCP(ctx context.Context, mcpCfg config.MCPConfig, catalog *tools.Registry, logger *slog.Logger) (conn *mcptools.Conn, summary mcptools.Summary, cleanup func(), ok bool) {
+func setupMCP(ctx context.Context, mcpCfg config.MCPConfig, catalog *tools.Registry, logger *slog.Logger, tracer *tracing.Tracer) (conn *mcptools.Conn, summary mcptools.Summary, cleanup func(), ok bool) {
 	noop := func() {}
-	proxy, c, ok := dialMCPProxy(mcpCfg, logger)
+	proxy, c, ok := dialMCPProxy(mcpCfg, logger, tracer)
 	if !ok {
 		return nil, mcptools.Summary{}, noop, false
 	}
@@ -100,9 +102,9 @@ type asyncMCPResult struct {
 // copies those tools into the real catalog on the main REPL goroutine. This keeps
 // startup and prompt reads from blocking on an unreachable proxy while preserving
 // the existing "MCP never fails harness startup" behavior.
-func setupMCPAsync(mcpCfg config.MCPConfig, logger *slog.Logger) (conn *mcptools.Conn, pending *asyncMCPRegistration, cleanup func(), ok bool) {
+func setupMCPAsync(mcpCfg config.MCPConfig, logger *slog.Logger, tracer *tracing.Tracer) (conn *mcptools.Conn, pending *asyncMCPRegistration, cleanup func(), ok bool) {
 	noop := func() {}
-	proxy, c, ok := dialMCPProxy(mcpCfg, logger)
+	proxy, c, ok := dialMCPProxy(mcpCfg, logger, tracer)
 	if !ok {
 		return nil, nil, noop, false
 	}

@@ -166,6 +166,18 @@ func TestMCPProxyAPIKeyPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
 	})
 }
 
+func TestTraceProxyPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
+	checkPrecedence(t, precedenceCase[bool]{
+		file:     `{"trace_proxy":true}`,
+		env:      map[string]string{"HARNESS_TRACE_PROXY": "false"},
+		flagArgs: []string{"-trace-proxy=true"},
+		got:      func(c Config) bool { return c.TraceProxy },
+		wantFlag: true,
+		wantEnv:  false,
+		wantFile: true,
+	})
+}
+
 func TestExplicitProviderIsPreserved(t *testing.T) {
 	c, err := Load([]string{"-model", "claude-opus-4-8", "-provider", "openai"}, noEnv, "")
 	if err != nil {
@@ -187,6 +199,7 @@ func TestHarnessEnvMapping(t *testing.T) {
 		"HARNESS_REASONING":              "HIGH",
 		"HARNESS_REASONING_SUMMARY":      "AUTO",
 		"HARNESS_RESPONSES_STATEFUL":     "true",
+		"HARNESS_TRACE_PROXY":            "true",
 		"HARNESS_SEARCH_TOOLS":           "both",
 		"HARNESS_TOOL_RESULT_MAX_BYTES":  "32768",
 		"HARNESS_TOOL_RESULT_MAX_LINES":  "500",
@@ -228,6 +241,9 @@ func TestHarnessEnvMapping(t *testing.T) {
 	}
 	if !c.ResponsesStateful {
 		t.Fatalf("responses_stateful false, want true")
+	}
+	if !c.TraceProxy {
+		t.Fatalf("trace_proxy false, want true")
 	}
 	if c.SearchTools != "both" {
 		t.Fatalf("search_tools = %q, want both", c.SearchTools)
@@ -969,7 +985,7 @@ func TestBadFormatValueIsUsageError(t *testing.T) {
 var helpFlags = []string{
 	"-p", "-i", "-initial-prompt", "-provider", "-model", "-model-proxy-url", "-system-prompt",
 	"-no-env", "-resume", "-session", "-max-turns", "-default-context-window", "-context-window",
-	"-reasoning", "-reasoning-summary", "-responses-stateful", "-image-detail", "-image", "-agent", "-search-tools", "-web-search", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-format", "-show-config",
+	"-reasoning", "-reasoning-summary", "-responses-stateful", "-trace-proxy", "-image-detail", "-image", "-agent", "-search-tools", "-web-search", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-format", "-show-config",
 	"-agents", "-models", "-check-model-proxy", "-repl-edit-mode", "-hooks",
 }
 

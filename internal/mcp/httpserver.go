@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"harness/internal/mcp/jsonrpc"
+	"harness/internal/tracing"
 )
 
 // httpServerMaxBodyBytes bounds a POST body. It matches the client's 4 MB cap
@@ -57,6 +58,7 @@ type RequestInfo struct {
 	Requester        string
 	RequesterVersion string
 	RemoteAddr       string
+	Trace            tracing.Context
 }
 
 type requestInfoKey struct{}
@@ -295,7 +297,12 @@ func (h *httpHandler) handleCallTool(w http.ResponseWriter, r *http.Request, ses
 		RequesterVersion: clientInfo.Version,
 		RemoteAddr:       r.RemoteAddr,
 	}
-	callCtx, cancel := context.WithCancel(ContextWithRequestInfo(r.Context(), requestInfo))
+	callBaseCtx := r.Context()
+	if tc, ok := tracing.TraceFromHeaders(r.Header); ok {
+		requestInfo.Trace = tc
+		callBaseCtx = tracing.ContextWithTrace(callBaseCtx, tc)
+	}
+	callCtx, cancel := context.WithCancel(ContextWithRequestInfo(callBaseCtx, requestInfo))
 	key := id
 	sess.mu.Lock()
 	sess.inflight[key] = cancel

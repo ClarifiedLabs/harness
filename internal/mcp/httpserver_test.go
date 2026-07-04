@@ -17,6 +17,7 @@ import (
 
 	"harness/internal/httpx"
 	"harness/internal/mcp/jsonrpc"
+	"harness/internal/tracing"
 )
 
 // postJSON sends body as a POST to srv with the given session/version headers
@@ -762,5 +763,50 @@ func TestParseErrorBodyValid(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(body), []byte(`"id":null`)) {
 		t.Fatalf("parse-error body must carry id:null")
+	}
+}
+
+func TestHTTPServerCallToolAttachesTraceContext(t *testing.T) {
+	inbound := tracing.Context{TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", SpanID: "00f067aa0ba902b7", TraceState: "a=b", Sampled: true}
+	var got tracing.Context
+	var gotInfo RequestInfo
+	p := &stubProvider{callFn: func(ctx context.Context, _ string, _ json.RawMessage) (*CallToolResult, error) {
+		var ok bool
+		got, ok = tracing.TraceFromContext(ctx)
+		if !ok {
+			t.Fatalf("TraceFromContext missing")
+		}
+		gotInfo, ok = RequestInfoFromContext(ctx)
+		if !ok {
+			t.Fatalf("RequestInfoFromContext missing")
+		}
+		return &CallToolResult{Content: []ContentBlock{{Type: "text", Text: "ok"}}}, nil
+	}}
+	srv := newTestHandler(t, p)
+	session, _ := initSession(t, srv)
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"foo"}}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set(mcpSessionHeader, session)
+	req.Header.Set(mcpProtocolHeader, ProtocolVersion)
+	tracing.Inject(req.Header, inbound)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	_ = decodeMessage(t, resp)
+	if got != inbound {
+		t.Fatalf("trace context = %+v, want %+v", got, inbound)
+	}
+	if gotInfo.Trace != inbound {
+		t.Fatalf("request info trace = %+v, want %+v", gotInfo.Trace, inbound)
 	}
 }

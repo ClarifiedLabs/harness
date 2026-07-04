@@ -18,6 +18,7 @@ import (
 	"harness/internal/mcp/jsonrpc"
 	"harness/internal/retry"
 	"harness/internal/sse"
+	"harness/internal/tracing"
 )
 
 // httpMaxAttempts caps the retry-before-first-byte loop, mirroring
@@ -63,6 +64,7 @@ type HTTPOptions struct {
 	HeaderSource func(context.Context) (map[string]string, error)
 	Client       *http.Client // nil → internal default (no whole-client timeout, redirect cap 5)
 	Logger       *slog.Logger
+	Tracer       *tracing.Tracer
 
 	// sleep is the injectable backoff sleeper (unexported; tests override it).
 	// nil → time.Sleep.
@@ -79,6 +81,7 @@ type HTTPTransport struct {
 	headerFn func(context.Context) (map[string]string, error)
 	client   *http.Client
 	logger   *slog.Logger
+	tracer   *tracing.Tracer
 	sleep    func(time.Duration)
 
 	nextID atomic.Int64
@@ -121,6 +124,7 @@ func NewHTTPTransport(opts HTTPOptions) *HTTPTransport {
 		headerFn: opts.HeaderSource,
 		client:   client,
 		logger:   logger,
+		tracer:   opts.Tracer,
 		sleep:    sleep,
 	}
 }
@@ -138,6 +142,7 @@ func (t *HTTPTransport) SetProtocolVersion(v string) {
 // is returned as a non-nil error wrapping *jsonrpc.Error. A terminated session
 // (HTTP 404) returns ErrSessionExpired.
 func (t *HTTPTransport) Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+	ctx = t.traceContext(ctx)
 	id := jsonrpc.IntID(t.nextID.Add(1))
 	msg := jsonrpc.NewRequest(id, method, params)
 	body, err := json.Marshal(msg)
@@ -166,6 +171,7 @@ func (t *HTTPTransport) Call(ctx context.Context, method string, params json.Raw
 // with no meaningful body. A terminated session (HTTP 404) returns
 // ErrSessionExpired.
 func (t *HTTPTransport) Notify(ctx context.Context, method string, params json.RawMessage) error {
+	ctx = t.traceContext(ctx)
 	msg := jsonrpc.NewNotification(method, params)
 	body, err := json.Marshal(msg)
 	if err != nil {
@@ -351,7 +357,29 @@ func (t *HTTPTransport) applyHeaders(ctx context.Context, req *http.Request, ses
 	if version != "" {
 		req.Header.Set("MCP-Protocol-Version", version)
 	}
+	if tc, ok := tracing.TraceFromContext(ctx); ok {
+		tracing.Inject(req.Header, tc)
+	}
 	return nil
+}
+
+func (t *HTTPTransport) traceContext(ctx context.Context) context.Context {
+	if t.tracer != nil {
+		ctx, _, err := t.tracer.Start(ctx)
+		if err == nil {
+			return ctx
+		}
+		return ctx
+	}
+	parent, ok := tracing.TraceFromContext(ctx)
+	if !ok {
+		return ctx
+	}
+	child, err := tracing.Child(parent)
+	if err != nil {
+		return ctx
+	}
+	return tracing.ContextWithTrace(ctx, child)
 }
 
 // captureSession stores the Mcp-Session-Id header when present (assigned on the

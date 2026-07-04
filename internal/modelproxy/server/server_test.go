@@ -23,6 +23,7 @@ import (
 	"harness/internal/logging"
 	"harness/internal/metrics"
 	"harness/internal/modelproxy/protocol"
+	"harness/internal/tracing"
 )
 
 type countingFakeProvider struct {
@@ -2072,4 +2073,75 @@ func seriesLine(name string, labels map[string]string) string {
 		b.WriteByte('}')
 	}
 	return b.String()
+}
+
+func TestHandlerCatalogLogsTraceAttrsOnlyForValidTraceparent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "provider.json"), []byte(`{
+  "name":"test",
+  "api_type":"openai",
+  "base_url":"https://example.invalid",
+  "api_key":"sk-test",
+  "models":[{"name":"model","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	var logs bytes.Buffer
+	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
+	if err != nil {
+		t.Fatalf("NewProxyLogger: %v", err)
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"provider.json"}},
+		Logger:    logger,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	badReq, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+	if err != nil {
+		t.Fatalf("bad request: %v", err)
+	}
+	badReq.Header.Set(tracing.TraceparentHeader, "not-valid")
+	badResp, err := srv.Client().Do(badReq)
+	if err != nil {
+		t.Fatalf("GET bad trace: %v", err)
+	}
+	badResp.Body.Close()
+	if strings.TrimSpace(logs.String()) != "" {
+		t.Fatalf("malformed traceparent produced log: %q", logs.String())
+	}
+
+	tc := tracing.Context{TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", SpanID: "00f067aa0ba902b7", ParentSpanID: "1111111111111111", Sampled: true}
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	tracing.Inject(req.Header, tc)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	resp.Body.Close()
+	var record map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("decode log %q: %v", logs.String(), err)
+	}
+	for k, want := range map[string]any{
+		"msg":           "model proxy request completed",
+		"method":        http.MethodGet,
+		"path":          "/v1/models",
+		"status":        float64(http.StatusOK),
+		"trace_id":      tc.TraceID,
+		"span_id":       tc.SpanID,
+		"trace_sampled": true,
+	} {
+		if got := record[k]; got != want {
+			t.Fatalf("log[%s] = %v (%T), want %v", k, got, got, want)
+		}
+	}
 }

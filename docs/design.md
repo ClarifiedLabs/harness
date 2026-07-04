@@ -736,7 +736,9 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
 `delegate_max_turns`) are config-file-only (listed below).
 
 - Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_PROVIDER`, `HARNESS_MODEL`, plus
-  most `HARNESS_*` equivalents for user-facing flags. `--log-level` uses
+  most `HARNESS_*` equivalents for user-facing flags. `trace_proxy` /
+  `HARNESS_TRACE_PROXY` / `-trace-proxy` opt in to W3C Trace Context headers for
+  harness-to-proxy HTTP requests. `--log-level` uses
   `LOG_LEVEL`. `HARNESS_TIMESTAMPS` accepts `short`, `full`/`long`, or `none` (with
   `off`/`false`/`disabled` as further aliases for `none`); `HARNESS_NO_TIMESTAMPS=true`
   is also an alias for `none`. Provider API keys and provider base URLs are resolved
@@ -841,7 +843,11 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   reason, tool-call count, and `cost_usd` when the request has known cost
   (from the config for manual flat-priced providers, the models.dev cache for
   managed providers, or tiered prices derived from `model.cost.tiers`).
-  Proxy config accepts `log_level` (`debug|info|warn|error`) and `log_format`
+  When a request carries a valid W3C `traceparent`, stream completion logs append
+  `trace_id`, `span_id`, `parent_span_id`, and `trace_sampled` (plus `tracestate`
+  when present). `/v1/models` and `/v1/input_tokens` emit lightweight completion
+  records only for traced requests, with the same trace fields. Invalid trace
+  headers are ignored and never fail the request. Proxy config accepts `log_level` (`debug|info|warn|error`) and `log_format`
   (`json` default, or `text`), with serve flags overriding config. Proxy config
   also accepts `models_dev_cache_ttl` as a duration string such as `"24h"` or
   numeric `0`; the `-models-dev-cache-ttl` serve/setup/refresh flag overrides it.
@@ -2371,7 +2377,12 @@ on the thin `internal/mcptools` adapter for tool dispatch (§9.16).
 - **Request logging.** The MCP proxy logs one structured record per routed
   `tools/call` with requester/clientInfo, downstream MCP server name, bare and
   qualified tool name, request/response bytes, duration, `is_error`, and any
-  protocol error. Unknown tools are warning records.
+  protocol error. Unknown tools are warning records. When a valid W3C
+  `traceparent` is present, the log appends `trace_id`, `span_id`,
+  `parent_span_id`, and `trace_sampled` (plus `tracestate` when present). The
+  proxy carries inbound trace metadata in `context.Context`; downstream HTTP MCP
+  servers receive a child `traceparent` with the same trace id, while stdio
+  downstream servers have no header channel and are correlated only by proxy logs.
 - **Refresh semantics.** One-shot runs use the tool list discovered before the
   model request. Interactive REPL runs may gain remote HTTP MCP tools after the
   background registration succeeds; the prompt-boundary refresh hook applies that

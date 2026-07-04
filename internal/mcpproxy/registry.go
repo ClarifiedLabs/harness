@@ -13,6 +13,7 @@ import (
 	"harness/internal/logging"
 	"harness/internal/mcp"
 	"harness/internal/mcp/jsonrpc"
+	"harness/internal/tracing"
 )
 
 // pageSize is the tools/list page size. Most setups fit one page; pagination is
@@ -182,6 +183,11 @@ func (r *Registry) logToolCall(ctx context.Context, qualified, server, tool stri
 		"response_bytes", responseBytes,
 		"duration", duration,
 		"is_error", isError,
+	}
+	if tc, ok := tracing.TraceFromContext(ctx); ok {
+		attrs = append(attrs, tracing.LogAttrs(tc)...)
+	} else if reqInfo.Trace.TraceID != "" {
+		attrs = append(attrs, tracing.LogAttrs(reqInfo.Trace)...)
 	}
 	if err != nil {
 		attrs = append(attrs, "err", err)
