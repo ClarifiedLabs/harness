@@ -590,6 +590,88 @@ func TestCompactShrinksOversizedSingleTurnWithoutSummary(t *testing.T) {
 	}
 }
 
+func TestCompactUnderKeepTurnsSummarizesOlderTurnsWhenOverBudget(t *testing.T) {
+	const window = 1000
+	currentResult := strings.Repeat("x", 8000)
+	transcript := []llm.Message{
+		userText("older question"),
+		asstText("older answer"),
+		userText("current question"),
+		asstToolUse("c1", "read_file", `{"path":"a.go"}`),
+		toolResult("c1", currentResult),
+	}
+	fp := llmtest.New("fake", summaryStep("OLDER SUMMARY", 40, 8))
+	a := newAgent(fp, tools.Default(), Options{Model: "local", ContextWindow: window})
+	a.SetTranscript(transcript)
+	if len(turnStarts(a.Transcript())) >= a.keepTurns() {
+		t.Fatal("test setup should have fewer turns than the normal keep window")
+	}
+
+	sink := &recordSink{}
+	usage, changed, err := a.MaybeCompact(context.Background(), window*80/100, sink)
+	if err != nil {
+		t.Fatalf("MaybeCompact: %v", err)
+	}
+	if !changed {
+		t.Fatal("over-budget transcript with an older turn should summarize it")
+	}
+	if usage.InputTokens != 40 || usage.OutputTokens != 8 {
+		t.Fatalf("summary usage = %+v, want 40 in / 8 out", usage)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("summary requests = %d, want 1", len(fp.Requests))
+	}
+	if len(fp.Requests[0].Messages) != 2 {
+		t.Fatalf("summary input messages = %d, want the older turn only", len(fp.Requests[0].Messages))
+	}
+	got := a.Transcript()
+	mustValid(t, got)
+	if len(got) != 4 {
+		t.Fatalf("compacted transcript len = %d, want summary + current turn", len(got))
+	}
+	if !strings.HasPrefix(got[0].Content[0].Text, summaryHeader) || !strings.Contains(got[0].Content[0].Text, "OLDER SUMMARY") {
+		t.Fatalf("first message is not the compaction summary: %#v", got[0].Content[0])
+	}
+	if got[1].Role != llm.RoleUser || got[1].Content[0].Text != "current question" {
+		t.Fatalf("latest turn was not kept verbatim after summary: %#v", got[1])
+	}
+}
+
+func TestCompactCurrentNoShrinkNoticeThrottled(t *testing.T) {
+	const window = 1000
+	a := newAgent(llmtest.New("fake"), tools.Default(), Options{Model: "local", ContextWindow: window})
+	a.SetTranscript([]llm.Message{
+		userText("single turn"),
+		asstText(strings.Repeat("x", 20_000)),
+	})
+	sink := &recordSink{}
+
+	for i := 0; i < 3; i++ {
+		_, changed, err := a.MaybeCompact(context.Background(), window*80/100, sink)
+		if err != nil {
+			t.Fatalf("MaybeCompact %d: %v", i, err)
+		}
+		if changed {
+			t.Fatalf("MaybeCompact %d changed an unshrinkable transcript", i)
+		}
+	}
+	if got := countNoticesContaining(sink.notices, "nothing left to shrink"); got != 1 {
+		t.Fatalf("no-shrink notices = %d, want 1; notices=%v", got, sink.notices)
+	}
+}
+
+func TestCompactCurrentTinyShrinkNoticeThrottled(t *testing.T) {
+	a := newAgent(llmtest.New("fake"), tools.Default(), Options{Model: "local"})
+	sink := &recordSink{}
+
+	a.noticeCurrentShrink(sink, "auto", 10_000, 9_500)
+	a.noticeCurrentShrink(sink, "auto", 11_000, 10_500)
+	a.noticeCurrentShrink(sink, "auto", 20_000, 18_000)
+	if got := countNoticesContaining(sink.notices, "shrank oversized turn"); got != 2 {
+		t.Fatalf("shrink notices = %d, want first tiny + material; notices=%v", got, sink.notices)
+	}
+}
+
 // A transcript with <= keepTurns turns that already fits the budget is a genuine
 // no-op: compact must report changed=false so the mid-loop caller does not churn
 // its trigger state (reset lastInput/appendBoundary and re-estimate the whole
@@ -617,6 +699,16 @@ func TestCompactNoOpReportsUnchanged(t *testing.T) {
 	if len(sink.notices) != 0 {
 		t.Errorf("no-op compaction should emit no notice, got %v", sink.notices)
 	}
+}
+
+func countNoticesContaining(notices []string, needle string) int {
+	var count int
+	for _, notice := range notices {
+		if strings.Contains(notice, needle) {
+			count++
+		}
+	}
+	return count
 }
 
 // degrade/trim mutate on a deep copy, so when ValidateTranscript fails after the

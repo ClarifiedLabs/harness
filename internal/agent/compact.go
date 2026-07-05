@@ -120,20 +120,24 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 
 	starts := turnStarts(a.transcript)
 	keepTurns := a.keepTurns()
+	boundary := 0
 	if len(starts) <= keepTurns {
-		// Nothing older than the kept turns to summarize. If the transcript still
-		// fits, this is a genuine no-op. If a single ballooning turn has pushed it
-		// over budget, the summarize path can't help (there is nothing older to
-		// fold), so shrink the current transcript in place rather than ship an
-		// oversized request to the provider (never wedge, design §12).
+		// Nothing older than the normal keep window exists. If the transcript
+		// still fits, this is a genuine no-op. Under pressure the keep window is
+		// soft: summarize every complete older turn and keep only the latest turn
+		// verbatim. If there is no older turn, fall back to local trimming.
 		if !forceCurrent && estimateTokens(a.transcript) <= a.compactBudget() {
 			return llm.Usage{}, false, nil
 		}
-		changed, err := a.degradeCurrent(sink)
-		return llm.Usage{}, changed, err
+		if len(starts) < 2 {
+			changed, err := a.degradeCurrent(sink, trigger)
+			return llm.Usage{}, changed, err
+		}
+		boundary = starts[len(starts)-1]
+	} else {
+		boundary = starts[len(starts)-keepTurns]
 	}
 
-	boundary := starts[len(starts)-keepTurns]
 	older := a.transcript[:boundary]
 	kept := a.transcript[boundary:]
 
@@ -183,6 +187,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	a.transcript = compacted
 	a.validatedPrefix = 0 // the transcript was rewritten; re-validate from scratch (r62)
 	a.resetResponseState()
+	a.compactFallbackNotice = compactFallbackNoticeState{}
 	sink.Notice(compactionReport(a.registry, a.model, collapsed, usage))
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PostCompact) {
 		res := a.hooks.Run(ctx, hooks.PostCompact, trigger, hooks.Payload{"trigger": trigger})
@@ -205,14 +210,14 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	return usage, true, nil
 }
 
-// degradeCurrent shrinks the live transcript in place when it is over budget but
-// has nothing older than the kept turns to summarize — a single ballooning turn.
+// degradeCurrent shrinks the live transcript in place when it is over budget and
+// there is no older turn to summarize — a single ballooning turn.
 // It trims large read-only results, then hard-truncates the largest blocks until
 // the estimate fits, so an oversized request never reaches the provider (never
 // wedge, design §12). All mutation happens on a deep copy, so a post-shrink
 // ValidateTranscript failure leaves the live transcript fully intact (the
 // rollback guarantee). It returns whether the transcript was actually replaced.
-func (a *Agent) degradeCurrent(sink EventSink) (bool, error) {
+func (a *Agent) degradeCurrent(sink EventSink, trigger string) (bool, error) {
 	before := estimateTokens(a.transcript)
 	budget := a.compactBudget()
 	compacted := cloneMessages(a.transcript)
@@ -222,7 +227,7 @@ func (a *Agent) degradeCurrent(sink EventSink) (bool, error) {
 	if after >= before {
 		// Nothing left to shrink; ship the oversized request rather than churn an
 		// identical rewrite. Surface it so the wedge risk is visible, not silent.
-		sink.Notice("[compact: transcript over budget but nothing left to shrink]")
+		a.noticeCurrentNoShrink(sink, trigger)
 		return false, nil
 	}
 	if err := llm.ValidateTranscript(compacted); err != nil {
@@ -232,8 +237,30 @@ func (a *Agent) degradeCurrent(sink EventSink) (bool, error) {
 	a.transcript = compacted
 	a.validatedPrefix = 0 // the transcript was rewritten; re-validate from scratch (r62)
 	a.resetResponseState()
-	sink.Notice(fmt.Sprintf("[compacted: shrank oversized turn in place · ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
+	a.noticeCurrentShrink(sink, trigger, before, after)
 	return true, nil
+}
+
+const smallCurrentShrinkNoticeTokens = 1000
+
+func (a *Agent) noticeCurrentNoShrink(sink EventSink, trigger string) {
+	if trigger != "manual" {
+		if a.compactFallbackNotice.noShrink {
+			return
+		}
+		a.compactFallbackNotice.noShrink = true
+	}
+	sink.Notice("[compact: transcript over budget but nothing left to shrink]")
+}
+
+func (a *Agent) noticeCurrentShrink(sink EventSink, trigger string, before, after int) {
+	if trigger != "manual" && before-after < smallCurrentShrinkNoticeTokens {
+		if a.compactFallbackNotice.smallShrink {
+			return
+		}
+		a.compactFallbackNotice.smallShrink = true
+	}
+	sink.Notice(fmt.Sprintf("[compacted: shrank oversized turn in place · ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
 }
 
 // cloneMessages returns a copy of msgs in which each message's Content slice is a

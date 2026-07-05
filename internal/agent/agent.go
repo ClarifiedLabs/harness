@@ -203,6 +203,7 @@ type Agent struct {
 	compactKeepTurns          int
 	compactSummaryMaxTokens   int
 	compactToolResultMaxBytes int
+	compactFallbackNotice     compactFallbackNoticeState
 	archiveCompaction         CompactionArchiver
 	hooks                     *hooks.Runner
 	showDiffs                 bool
@@ -210,6 +211,11 @@ type Agent struct {
 	interactive               bool // 1h Anthropic cache breakpoint; see Options.Interactive
 	responseState             llm.ResponseState
 	proxySessionID            string
+}
+
+type compactFallbackNoticeState struct {
+	noShrink    bool
+	smallShrink bool
 }
 
 // New constructs an Agent. A non-positive Options.MaxTurns means unlimited.
@@ -745,6 +751,7 @@ func (a *Agent) RunTurnContent(ctx context.Context, userText string, images []ll
 // extraContext is visible to model requests for this turn but is not persisted
 // into the transcript.
 func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, images []llm.ContentBlock, extraContext []string, turnID int, sink EventSink) error {
+	a.compactFallbackNotice = compactFallbackNoticeState{}
 	a.transcript = append(a.transcript, a.userMessage(userText, images))
 
 	var total llm.Usage

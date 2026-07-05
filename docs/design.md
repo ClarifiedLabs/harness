@@ -2162,11 +2162,14 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   blocks are skipped). This keeps the window smaller between full compactions.
 - **Mechanism:** keep the system prompt and the configured number of recent turns
   verbatim (`compact_keep_turns`, default 4; a turn = a user message through the
-  following end-turn). Send everything older to the model with the summarization
-  instruction in `prompts/compaction-summary.txt`: preserve the task/goal, decisions
-  made, files created/modified and their current state, key facts learned, open TODOs;
-  do not invent. Summary output is capped by `compact_summary_max_tokens` (default
-  2048). Replace the old messages with a single assistant-authored summary message:
+  following end-turn). Under pressure, when fewer than `compact_keep_turns` turns
+  exist but there is at least one older turn, the keep window is soft: summarize
+  everything before the latest turn and keep only that latest turn verbatim. Send
+  everything older to the model with the summarization instruction in
+  `prompts/compaction-summary.txt`: preserve the task/goal, decisions made, files
+  created/modified and their current state, key facts learned, open TODOs; do not
+  invent. Summary output is capped by `compact_summary_max_tokens` (default 2048).
+  Replace the old messages with a single assistant-authored summary message:
   `=== Summary of earlier conversation ===\n<summary>`.
 - Before summarization, large old tool results and tool inputs are reduced to
   previews (`compact_tool_result_max_bytes`, default 4096; a **negative** value disables
@@ -2198,12 +2201,13 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   cost segment is omitted for models with no price entry.
 - **Degradation:** if still over budget, keep only the last turn; if still over,
   hard-truncate the largest tool result/input/image blocks in place with markers.
-  When there is nothing older than `compact_keep_turns` to summarize but the
-  transcript is still over budget, the same ladder degrades the **oversized single
-  turn** in place. Each degrade pass deep-copies before mutating (so a post-degrade
-  `ValidateTranscript` failure rolls back to the live transcript) and skips a rewrite
-  that would not actually shrink (`[compact: transcript over budget but nothing left
-  to shrink]`). Never wedge.
+  When there is no older turn to summarize but the transcript is still over budget,
+  the same ladder degrades the **oversized single turn** in place. Each degrade pass
+  deep-copies before mutating (so a post-degrade `ValidateTranscript` failure rolls
+  back to the live transcript) and skips a rewrite that would not actually shrink
+  (`[compact: transcript over budget but nothing left to shrink]`). Automatic
+  current-turn fallback notices are throttled within a user turn so repeated no-op or
+  tiny-shrink attempts do not flood the UI. Never wedge.
 - **Failure:** if the summary or archive step errors, abort compaction, warn, and keep
   the full transcript — the next call may fail visibly on context length, which beats
   silent data loss.
