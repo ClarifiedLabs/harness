@@ -139,6 +139,23 @@ func TestCompactKeepsLastFourTurns(t *testing.T) {
 	}
 }
 
+func TestCompactRotatesProxySessionID(t *testing.T) {
+	fp := llmtest.New("fake", summaryStep("CANNED SUMMARY", 200, 40))
+	a := newAgent(fp, tools.Default(), Options{Model: "claude-opus-4-8"})
+	a.SetSystem("system prompt")
+	a.SetTranscript(makeTurns(10))
+	before := a.ProxySessionID()
+
+	if _, err := a.Compact(context.Background(), &recordSink{}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	after := a.ProxySessionID()
+	if before == "" || after == "" || before == after {
+		t.Fatalf("proxy session id = %q then %q, want rotation after transcript rewrite", before, after)
+	}
+}
+
 func TestCompactKeepsToolPairsWhole(t *testing.T) {
 	// A turn that spans a tool round-trip must be kept whole: no tool_use may be
 	// separated from its tool_result by the kept-turns boundary.

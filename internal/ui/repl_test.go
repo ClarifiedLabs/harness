@@ -1757,6 +1757,46 @@ func TestREPLAgentCommandSwitchesNextTurn(t *testing.T) {
 	}
 }
 
+func TestREPLAgentSwitchRotatesProxySessionID(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("first")}, Stop: llm.StopEndTurn, ResponseID: "resp_1"},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second")}, Stop: llm.StopEndTurn, ResponseID: "resp_2"},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+	app.Agent.SetResponsesStateful(true)
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		if name != "plan" {
+			t.Fatalf("switch agent = %q, want plan", name)
+		}
+		return AgentSelection{
+			Name:              "plan",
+			Tools:             tools.Default(),
+			System:            "PLAN AGENT PROMPT",
+			Provider:          app.Provider,
+			Model:             app.Model,
+			RegistryModel:     app.RegistryModel,
+			Runtime:           fp,
+			ResponsesStateful: true,
+		}, nil
+	}
+
+	if code := Run(strings.NewReader("first\n/agent plan\nsecond\n/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 2 {
+		t.Fatalf("provider requests = %d, want 2", fp.RequestCount())
+	}
+	firstSession := fp.Requests[0].ProxySessionID
+	secondSession := fp.Requests[1].ProxySessionID
+	if firstSession == "" || secondSession == "" || firstSession == secondSession {
+		t.Fatalf("proxy session ids = %q then %q, want rotation on agent switch", firstSession, secondSession)
+	}
+	if fp.Requests[1].PreviousResponseID != "" {
+		t.Fatalf("post-switch request previous_response_id = %q, want fresh context", fp.Requests[1].PreviousResponseID)
+	}
+}
+
 func TestREPLModeAliasSwitchesAgent(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")

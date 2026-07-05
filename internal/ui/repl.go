@@ -1890,6 +1890,7 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	app.Agent.SetReasoning(selection.Reasoning)
 	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
+	app.Agent.ResetProxySessionID()
 	if selection.RegistryModel == "" {
 		selection.RegistryModel = selection.Model
 	}
@@ -2046,6 +2047,7 @@ func (app *App) setReasoning(reasoning llm.ReasoningConfig) error {
 	app.Reasoning = reasoning
 	if app.Agent != nil {
 		app.Agent.SetReasoning(reasoning)
+		app.Agent.ResetProxySessionID()
 	}
 	return nil
 }
@@ -2351,6 +2353,7 @@ func (app *App) applyAgentSwitch(name string) error {
 	}
 	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
+	app.Agent.ResetProxySessionID()
 	app.AgentName = selection.Name
 	app.System = selection.System // so saved sessions capture the agent's prompt
 	if selection.Provider != "" {
@@ -2509,6 +2512,7 @@ func (app *App) refreshMCP(ctx context.Context) error {
 		return nil
 	}
 	app.Agent.SetTools(sel)
+	app.Agent.ResetProxySessionID()
 	if notice != "" {
 		fmt.Fprintln(app.Errw, notice)
 	}

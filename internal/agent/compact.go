@@ -186,7 +186,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 
 	a.transcript = compacted
 	a.validatedPrefix = 0 // the transcript was rewritten; re-validate from scratch (r62)
-	a.resetResponseState()
+	a.ResetProxySessionID()
 	a.compactFallbackNotice = compactFallbackNoticeState{}
 	sink.Notice(compactionReport(a.registry, a.model, collapsed, usage))
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PostCompact) {
@@ -236,7 +236,7 @@ func (a *Agent) degradeCurrent(sink EventSink, trigger string) (bool, error) {
 	}
 	a.transcript = compacted
 	a.validatedPrefix = 0 // the transcript was rewritten; re-validate from scratch (r62)
-	a.resetResponseState()
+	a.ResetProxySessionID()
 	a.noticeCurrentShrink(sink, trigger, before, after)
 	return true, nil
 }
