@@ -1707,14 +1707,16 @@ backoff allows.
   completion or interrupt (`^C`/Esc-Esc), any unsubmitted partial buffer is
   deposited into the next REPL prompt as editable, pre-filled text (cursor at end).
   `^C`/Esc-Esc still cancel the current turn.
-- Live tool-call construction renders progress to stderr by default:
-  `[tool-call: name id=...]`. Disable with `-tool-stream=false`,
-  `HARNESS_TOOL_STREAM=false`, or `"tool_stream": false`. Partial argument deltas
-  are not printed; session replay keeps completed tool calls and results.
-- Tool calls render as one-liners:
+- Tool-call progress details can render to stderr when explicitly enabled:
+  `[tool-call: name id=...]` as the model builds the call and
+  `[tool: name started ...]` when local execution starts. Enable with
+  `-tool-stream`, `HARNESS_TOOL_STREAM=true`, `"tool_stream": true`, or `-v`.
+  Partial argument deltas are not printed; session replay keeps completed tool
+  calls and results.
+- Tool results render as one-liners by default:
   `[grep] args=["-R","-n","func main","."] → 14 lines, 2.1KB`
   built from the tool name, key args, and a result summary. `-v` adds the first ~5 lines
-  of each result, dimmed.
+  of each result, dimmed, and also enables progress details.
 - Large estimated contexts, payloads, or tool schemas print one warning per user
   turn because they can materially slow first response latency.
 - Per-turn usage line:
@@ -1951,8 +1953,8 @@ prefix wins, threshold `1 + len(cmd)/3`).
 -agent <name>
 -search-tools <auto|grep|rg|both>
 -web-search <off|auto>
--v                show tool result snippets
--tool-stream      show live tool-call progress (default true)
+-v                show tool result snippets and tool-call progress details
+-tool-stream      show tool-call progress details
 -show-diffs       show per-tool-call file diffs for built-in file edits (default true)
 -q, --quiet       suppress status messages and reasoning output unless -reasoning-summary is set
 --log-level <level>  diagnostic log level: debug, info, warn, error (also LOG_LEVEL)

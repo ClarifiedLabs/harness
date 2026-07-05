@@ -101,7 +101,7 @@ type Config struct {
 
 	// UI.
 	Verbose       bool   `json:"verbose"`     // -v
-	ToolStream    bool   `json:"tool_stream"` // -tool-stream: show live tool-call progress
+	ToolStream    bool   `json:"tool_stream"` // -tool-stream: show tool-call progress details
 	ShowDiffs     bool   `json:"show_diffs"`  // -show-diffs: show per-tool file diffs
 	Quiet         bool   `json:"quiet"`       // -q / --quiet: suppress status messages and implicit reasoning output
 	LogLevel      string `json:"log_level"`   // --log-level / LOG_LEVEL: debug, info, warn, error
@@ -490,7 +490,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	c.Verbose = resolveBool(set["v"], *fVerbose,
 		getenv("HARNESS_VERBOSE"), fc.Verbose, false)
 	c.ToolStream = resolveBool(set["tool-stream"], *fToolStream,
-		getenv("HARNESS_TOOL_STREAM"), fc.ToolStream, true)
+		getenv("HARNESS_TOOL_STREAM"), fc.ToolStream, false)
 	c.ShowDiffs = resolveBool(set["show-diffs"], *fShowDiffs,
 		getenv("HARNESS_SHOW_DIFFS"), fc.ShowDiffs, true)
 	c.Quiet = *f.quietShort || *f.quiet
@@ -977,8 +977,8 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")
 	f.responsesStateful = fs.Bool("responses-stateful", true, "enable OpenAI Responses previous_response_id continuation when supported")
 	f.traceProxy = fs.Bool("trace-proxy", false, "send W3C trace headers to harness-model-proxy and harness-mcp-proxy")
-	f.verbose = fs.Bool("v", false, "show tool result snippets")
-	f.toolStream = fs.Bool("tool-stream", true, "show live tool-call progress")
+	f.verbose = fs.Bool("v", false, "show tool result snippets and tool-call progress details")
+	f.toolStream = fs.Bool("tool-stream", false, "show tool-call progress details")
 	f.showDiffs = fs.Bool("show-diffs", true, "show per-tool-call file diffs for built-in file edits")
 	f.quietShort = fs.Bool("q", false, "suppress status messages and reasoning output unless -reasoning-summary is set")
 	f.quiet = fs.Bool("quiet", false, "suppress status messages and reasoning output unless -reasoning-summary is set")

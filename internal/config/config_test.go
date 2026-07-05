@@ -392,19 +392,19 @@ func TestReplEditModePrecedenceAndValidation(t *testing.T) {
 
 func TestToolStreamPrecedence(t *testing.T) {
 	c := loadOK(t, []string{"-model", "gpt-5.5"}, noEnv, "")
-	if !c.ToolStream {
-		t.Fatalf("default tool-stream false, want true")
+	if c.ToolStream {
+		t.Fatalf("default tool-stream true, want false")
 	}
 
 	checkPrecedence(t, precedenceCase[bool]{
-		file:     `{"tool_stream":false}`,
-		env:      map[string]string{"HARNESS_TOOL_STREAM": "true"},
+		file:     `{"tool_stream":true}`,
+		env:      map[string]string{"HARNESS_TOOL_STREAM": "false"},
 		baseArgs: []string{"-model", "gpt-5.5"},
-		flagArgs: []string{"-tool-stream=false"},
+		flagArgs: []string{"-tool-stream"},
 		got:      func(c Config) bool { return c.ToolStream },
-		wantFlag: false,
-		wantEnv:  true,
-		wantFile: false,
+		wantFlag: true,
+		wantEnv:  false,
+		wantFile: true,
 	})
 }
 
@@ -1203,8 +1203,8 @@ func TestWriteResolvedIncludesDefaults(t *testing.T) {
 	if got["default_context_window"] != float64(256000) {
 		t.Fatalf("default_context_window = %v, want default 256000\n%s", got["default_context_window"], b.String())
 	}
-	if got["tool_stream"] != true {
-		t.Fatalf("tool_stream = %v, want default true\n%s", got["tool_stream"], b.String())
+	if got["tool_stream"] != false {
+		t.Fatalf("tool_stream = %v, want default false\n%s", got["tool_stream"], b.String())
 	}
 	if got["repl_prompt"] != replprompt.DefaultFormat {
 		t.Fatalf("repl_prompt = %v, want default REPL prompt\n%s", got["repl_prompt"], b.String())

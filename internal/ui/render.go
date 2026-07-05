@@ -304,7 +304,7 @@ func (r *Renderer) ToolUseStart(call llm.ToolCall) {
 		}
 		r.beginWait(label, 0)
 	}
-	if !r.toolStream || r.quiet {
+	if !r.toolProgress() || r.quiet {
 		return
 	}
 	r.pendingToolUses = append(r.pendingToolUses, fmt.Sprintf("[tool-call: %s id=%s]", call.Name, call.ID))
@@ -317,7 +317,9 @@ func (r *Renderer) ToolUseDelta(_ int, _ string) {}
 func (r *Renderer) ToolStart(call llm.ToolCall) {
 	r.flushToolUseStarts()
 	r.pending[call.ID] = call
-	r.dimLine(fmt.Sprintf("[tool: %s started%s]", call.Name, formatToolArgs(call.Name, call.Input)))
+	if r.toolProgress() {
+		r.dimLine(fmt.Sprintf("[tool: %s started%s]", call.Name, formatToolArgs(call.Name, call.Input)))
+	}
 	// Tick during the (possibly long) tool-execution gap, not just model
 	// waits (r12). The next output line erases this counter again.
 	if r.liveStatus {
@@ -353,6 +355,10 @@ func (r *Renderer) ToolDiff(_ llm.ToolCall, text string) {
 	if !strings.HasSuffix(text, "\n") {
 		fmt.Fprintln(r.errw)
 	}
+}
+
+func (r *Renderer) toolProgress() bool {
+	return r.toolStream || r.verbose
 }
 
 func (r *Renderer) Notice(msg string) {

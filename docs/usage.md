@@ -118,8 +118,8 @@ interrupted.
 -agent <name>     agent: auto (default), plan, independent, or a config-defined agent
 -search-tools <mode>   search tools to expose: auto, grep, rg, or both
 -web-search <mode>     server-side web search: off or auto (default off)
--v                show tool result snippets (first ~5 lines, dimmed)
--tool-stream      show live tool-call progress (default true; use -tool-stream=false to disable)
+-v                show tool result snippets (first ~5 lines, dimmed) and tool-call progress details
+-tool-stream      show tool-call progress details (default false)
 -show-diffs       show per-tool-call file diffs for built-in file edits (default true; use -show-diffs=false to disable)
 -q, --quiet       suppress status diagnostics and reasoning output unless -reasoning-summary is set;
                   still prints one per-turn usage/cost line at an interactive terminal (suppressed only

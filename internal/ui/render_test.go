@@ -44,8 +44,8 @@ func TestToolSummaryLine(t *testing.T) {
 	if out.Len() != 0 {
 		t.Errorf("tool lines must go to errw, not out; out=%q", out.String())
 	}
-	if !strings.Contains(got, "[tool: grep started") {
-		t.Errorf("tool start should be reported, got %q", got)
+	if strings.Contains(got, "[tool: grep started") {
+		t.Errorf("tool start should be hidden by default, got %q", got)
 	}
 	if !strings.Contains(got, "[grep]") {
 		t.Errorf("summary should include [grep], got %q", got)
@@ -105,6 +105,7 @@ func TestToolSummaryDoesNotDoubleSpaceAfterAssistantNewline(t *testing.T) {
 func TestVerboseAddsSnippet(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{Verbose: true})
+	r.ToolUseStart(llm.ToolCall{ID: "c1", Name: "read_file"})
 	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)})
 	body := "line1\nline2\nline3\nline4\nline5\nline6\nline7\n"
 	r.ToolResult(llm.ToolResult{ForID: "c1", Text: body})
@@ -112,6 +113,12 @@ func TestVerboseAddsSnippet(t *testing.T) {
 	got := errw.String()
 	if !strings.Contains(got, "line1") || !strings.Contains(got, "line5") {
 		t.Errorf("verbose should include the first ~5 lines, got %q", got)
+	}
+	if !strings.Contains(got, "[tool: read_file started path=a.go]") {
+		t.Errorf("verbose should include tool progress details, got %q", got)
+	}
+	if !strings.Contains(got, "[tool-call: read_file id=c1]") {
+		t.Errorf("verbose should include streamed tool-call progress, got %q", got)
 	}
 	if strings.Contains(got, "line6") {
 		t.Errorf("verbose should cap the snippet at ~5 lines, got %q", got)
@@ -371,7 +378,7 @@ func TestTextDeltaRendersMarkdownWhenEnabled(t *testing.T) {
 
 func TestMarkdownAssistantFlushesBeforeStatusLine(t *testing.T) {
 	var out, errw bytes.Buffer
-	r := NewRenderer(&out, &errw, RenderOptions{Markdown: true})
+	r := NewRenderer(&out, &errw, RenderOptions{Markdown: true, ToolStream: true})
 
 	r.TextDelta("calling **tool**")
 	r.ToolStart(llm.ToolCall{ID: "c1", Name: "list_dir", Input: json.RawMessage(`{"path":"."}`)})
@@ -835,8 +842,8 @@ func TestLiveCounterTicksDuringToolGap(t *testing.T) {
 	defer r.StopProgress()
 
 	got := errw.String()
-	if !strings.Contains(got, "[tool: grep started") {
-		t.Fatalf("tool start line should scroll, got %q", got)
+	if strings.Contains(got, "[tool: grep started") {
+		t.Fatalf("tool start line should not scroll by default, got %q", got)
 	}
 	if !strings.Contains(got, "[tool: grep · 0s │ total 0s]") {
 		t.Fatalf("a counter should tick during the tool gap with total elapsed, got %q", got)
