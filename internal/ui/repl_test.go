@@ -346,6 +346,25 @@ func TestREPLPromptUpdatesAfterAgentSwitch(t *testing.T) {
 	}
 }
 
+func TestREPLPromptRendersReasoning(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.Prompt = "{reasoning}> "
+	app.Reasoning = llm.ReasoningConfig{Profile: "high"}
+
+	if code := Run(strings.NewReader("/reasoning none\n/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	got := errw.String()
+	if !strings.Contains(got, "high> ") || !strings.Contains(got, "none> ") {
+		t.Fatalf("prompt should show current reasoning before and after changes, got %q", got)
+	}
+	if strings.Contains(got, "profile=high> ") || strings.Contains(got, "profile=none> ") {
+		t.Fatalf("prompt should show reasoning profile without profile= prefix, got %q", got)
+	}
+}
+
 func TestREPLPromptRendersHostname(t *testing.T) {
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {

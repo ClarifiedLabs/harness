@@ -1802,12 +1802,15 @@ prefix rules.
 rendered at every idle prompt boundary, so dynamic values reflect runtime
 changes before each read. The default is `[{agent}] > `. Supported placeholders
 are `{agent}`, `{cwd}`, `{hostname}`, `{hostname:short}`, `{hostname:long}`,
-`{git_branch}`, `{model}`, `{vimode}`, `{vimode:short}`, and `{vimode:long}`.
+`{git_branch}`, `{model}`, `{reasoning}`, `{vimode}`, `{vimode:short}`, and
+`{vimode:long}`.
 `{cwd}` abbreviates the user's home directory
 prefix to `~` (for example `~/work`), so the rendered value may differ from the
-raw working directory. `{hostname}` and `{hostname:short}` render the short OS
-hostname (the leading label before the first dot, equivalent to `hostname -s`),
-while `{hostname:long}` renders the full OS hostname. Literal escapes `\n`,
+raw working directory. `{reasoning}` renders the current reasoning profile, such
+as `provider default` or `high`, and updates after `/reasoning` changes.
+`{hostname}` and `{hostname:short}` render the short OS hostname (the leading
+label before the first dot, equivalent to `hostname -s`), while `{hostname:long}`
+renders the full OS hostname. Literal escapes `\n`,
 `\t`, `\\`, `\{`, and `\}` are decoded
 for config, env, and flag values; unknown placeholders or invalid escapes are
 configuration errors.

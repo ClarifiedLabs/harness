@@ -801,6 +801,7 @@ func (app *App) promptValues(t *replprompt.Template, viMode string) replprompt.V
 		Hostname:  hostname,
 		GitBranch: gitBranch,
 		Model:     app.Model,
+		Reasoning: app.promptReasoningLabel(),
 		ViMode:    viMode,
 	}
 }
@@ -2235,6 +2236,10 @@ func (app *App) currentRegistryModel() string {
 		return app.Model
 	}
 	return "unknown"
+}
+
+func (app *App) promptReasoningLabel() string {
+	return reasoningprofile.Label(app.Reasoning.Profile)
 }
 
 func (app *App) reasoningLabel() string {

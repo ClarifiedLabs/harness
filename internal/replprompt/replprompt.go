@@ -26,6 +26,7 @@ const (
 	fieldHostnameShort field = "hostname:short"
 	fieldGitBranch     field = "git_branch"
 	fieldModel         field = "model"
+	fieldReasoning     field = "reasoning"
 	fieldViMode        field = "vimode"
 	fieldViModeLong    field = "vimode:long"
 	fieldViModeShort   field = "vimode:short"
@@ -41,6 +42,9 @@ type Values struct {
 	Hostname  string
 	GitBranch string
 	Model     string
+	// Reasoning is the current model reasoning prompt label, e.g. "high" or
+	// "provider default".
+	Reasoning string
 	// ViMode is the current raw-prompt vi edit mode: "insert", "normal", or ""
 	// (empty outside vi mode, e.g. emacs mode). {vimode} renders a label for it.
 	ViMode string
@@ -235,7 +239,7 @@ func (t *Template) Uses(name string) bool {
 
 func parseField(name string) (field, bool) {
 	switch field(name) {
-	case fieldAgent, fieldCWD, fieldHostname, fieldHostnameLong, fieldHostnameShort, fieldGitBranch, fieldModel:
+	case fieldAgent, fieldCWD, fieldHostname, fieldHostnameLong, fieldHostnameShort, fieldGitBranch, fieldModel, fieldReasoning:
 		return field(name), true
 	case fieldViMode, fieldViModeLong, fieldViModeShort:
 		return field(name), true
@@ -258,6 +262,8 @@ func valueForField(f field, values Values) string {
 		return values.GitBranch
 	case fieldModel:
 		return values.Model
+	case fieldReasoning:
+		return values.Reasoning
 	case fieldViMode, fieldViModeLong:
 		return ViModeLabel(values.ViMode, "long")
 	case fieldViModeShort:

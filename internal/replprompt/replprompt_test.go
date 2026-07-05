@@ -9,7 +9,7 @@ import (
 )
 
 func TestRenderPlaceholdersAndEscapes(t *testing.T) {
-	tmpl, err := Compile(`{agent} {cwd} {hostname} {git_branch} {model}\n\{\}\\\t`)
+	tmpl, err := Compile(`{agent} {cwd} {hostname} {git_branch} {model} {reasoning}\n\{\}\\\t`)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -19,8 +19,9 @@ func TestRenderPlaceholdersAndEscapes(t *testing.T) {
 		Hostname:  "devbox",
 		GitBranch: "main",
 		Model:     "openai:gpt-5.5",
+		Reasoning: "high",
 	})
-	want := "plan /repo devbox main openai:gpt-5.5\n{}\\\t"
+	want := "plan /repo devbox main openai:gpt-5.5 high\n{}\\\t"
 	if got != want {
 		t.Fatalf("render = %q, want %q", got, want)
 	}
@@ -138,11 +139,11 @@ func TestLiteralPromptStillWorks(t *testing.T) {
 }
 
 func TestUsesReportsReferencedPlaceholders(t *testing.T) {
-	tmpl, err := Compile("{agent} {hostname} {model}")
+	tmpl, err := Compile("{agent} {hostname} {model} {reasoning}")
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
-	if !tmpl.Uses("agent") || !tmpl.Uses("hostname") || !tmpl.Uses("model") {
+	if !tmpl.Uses("agent") || !tmpl.Uses("hostname") || !tmpl.Uses("model") || !tmpl.Uses("reasoning") {
 		t.Fatalf("Uses should report referenced placeholders")
 	}
 	if tmpl.Uses("git_branch") || tmpl.Uses("provider") || tmpl.Uses("model_info") || tmpl.Uses("missing") {

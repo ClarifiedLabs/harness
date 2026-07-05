@@ -129,7 +129,7 @@ interrupted.
 -no-color         disable ANSI color (also: NO_COLOR env var; color is TTY-only anyway)
 -timestamps <mode>  bracketed status timestamps: short (default), full/long, or none
 -no-timestamps   alias for -timestamps=none
--repl-prompt <text>    REPL input prompt format (default "[{agent}] > ")
+-repl-prompt <text>    REPL input prompt format (default "[{agent}] > "; supports placeholders such as {agent}, {model}, and {reasoning})
 -repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
 --format <text|json>  output format for informational commands (default text)
 --show-config    dump the resolved config, including defaults, as JSON and exit

@@ -986,7 +986,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.noColor = fs.Bool("no-color", false, "disable color output")
 	f.timestamps = fs.String("timestamps", TimestampShort, "bracketed status timestamps: short, full, long, or none")
 	f.noTimestamps = fs.Bool("no-timestamps", false, "disable bracketed status timestamps")
-	f.replPrompt = fs.String("repl-prompt", replprompt.DefaultFormat, "REPL input prompt format")
+	f.replPrompt = fs.String("repl-prompt", replprompt.DefaultFormat, "REPL input prompt format (supports {agent}, {model}, {reasoning})")
 	f.replEditMode = fs.String("repl-edit-mode", DefaultReplEditMode, "REPL prompt edit mode: emacs or vi")
 	f.outputFormat = fs.String("format", "text", "output format for informational commands: text or json")
 	f.showConfig = fs.Bool("show-config", false, "dump resolved config including defaults and exit")
