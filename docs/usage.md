@@ -113,6 +113,7 @@ interrupted.
 -reasoning <profile> reasoning profile: default, none, minimal, low, medium, high, xhigh, or max
 -reasoning-summary <mode> reasoning summary for Responses API: auto, concise, detailed, or none
 -responses-stateful   use Responses API previous_response_id continuation when supported (default true)
+-no-steer         disable mid-turn steering: queue during-turn input for the next turn instead of injecting it into the running turn (default off; see "Mid-turn steering")
 -image-detail <level>   default image detail: auto, low, high, or original
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
 -agent <name>     agent: auto (default), plan, independent, or a config-defined agent

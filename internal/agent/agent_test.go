@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2246,5 +2247,306 @@ func TestMixedStepStaysSequential(t *testing.T) {
 	want := []string{"start:reader", "end:reader", "start:writer", "end:writer"}
 	if !slices.Equal(trace, want) {
 		t.Errorf("mixed step interleaving = %v, want strictly sequential %v", trace, want)
+	}
+}
+
+// TestSteerInjectsBeforeNextModelTurn drives a tool-calling turn where the tool
+// blocks until a steer is queued. The steered text must land as a RoleUser
+// message between the tool_result and the second assistant message, and the
+// second model request must have seen it (design §8.1).
+func TestSteerInjectsBeforeNextModelTurn(t *testing.T) {
+	toolRan := make(chan struct{})
+	releaseTool := make(chan struct{})
+	tool := &recordTool{name: "probe", run: func(_ context.Context, _ json.RawMessage) (string, error) {
+		close(toolRan)
+		<-releaseTool
+		return "probed", nil
+	}}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "call_1", "probe", `{}`)},
+			Stop:   llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, reg, Options{Steer: true})
+	sink := &recordSink{}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.RunTurn(context.Background(), "go", sink) }()
+
+	// Wait for the tool to run (so the loop is between tool dispatch and the
+	// next model request), then steer.
+	<-toolRan
+	a.Steer("now do Y instead")
+	close(releaseTool)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+
+	msgs := a.Transcript()
+	mustValid(t, msgs)
+	// user(prompt), assistant(tool_use), user(tool_result), user(steer text), assistant(final)
+	if len(msgs) != 5 {
+		t.Fatalf("want 5 messages, got %d:\n%s", len(msgs), dump(msgs))
+	}
+	if msgs[3].Role != llm.RoleUser || len(msgs[3].Content) != 1 || msgs[3].Content[0].Kind != llm.BlockText {
+		t.Fatalf("message 3 should be the steer text, got:\n%s", dump([]llm.Message{msgs[3]}))
+	}
+	if msgs[3].Content[0].Text != "now do Y instead" {
+		t.Errorf("steer text = %q, want %q", msgs[3].Content[0].Text, "now do Y instead")
+	}
+	if got := fp.RequestCount(); got != 2 {
+		t.Fatalf("request count = %d, want 2", got)
+	}
+	// The second request's messages must include the steered text so the model
+	// actually saw it on this round.
+	second := fp.Requests[1]
+	var sawSteer bool
+	for _, m := range second.Messages {
+		for _, b := range m.Content {
+			if b.Kind == llm.BlockText && b.Text == "now do Y instead" {
+				sawSteer = true
+			}
+		}
+	}
+	if !sawSteer {
+		t.Errorf("second model request did not include the steered text")
+	}
+}
+
+func TestSteerContentInjectsImagesAndRequestContext(t *testing.T) {
+	toolRan := make(chan struct{})
+	releaseTool := make(chan struct{})
+	tool := &recordTool{name: "probe", run: func(_ context.Context, _ json.RawMessage) (string, error) {
+		close(toolRan)
+		<-releaseTool
+		return "probed", nil
+	}}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "call_1", "probe", `{}`)},
+			Stop:   llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, reg, Options{Steer: true})
+	sink := &recordSink{}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.RunTurn(context.Background(), "go", sink) }()
+	<-toolRan
+	a.SteerContent(SteerInput{
+		Text: "inspect this",
+		Images: []llm.ContentBlock{{
+			Kind:           llm.BlockImage,
+			ImageMediaType: "image/png",
+			ImageData:      "abc123",
+			ImageDetail:    "high",
+			ImageName:      "screen.png",
+		}},
+		RequestContext: []string{"steer context"},
+	})
+	close(releaseTool)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	second := fp.Requests[1]
+	if len(second.RequestContext) != 1 || second.RequestContext[0] != "steer context" {
+		t.Fatalf("second request context = %v, want steer context", second.RequestContext)
+	}
+	var sawImage, sawText bool
+	for _, m := range second.Messages {
+		for _, b := range m.Content {
+			if b.Kind == llm.BlockImage && b.ImageName == "screen.png" && b.ImageData == "abc123" {
+				sawImage = true
+			}
+			if b.Kind == llm.BlockText && b.Text == "inspect this" {
+				sawText = true
+			}
+		}
+	}
+	if !sawImage || !sawText {
+		t.Fatalf("second request saw image=%v text=%v; messages:\n%s", sawImage, sawText, dump(second.Messages))
+	}
+}
+
+// TestSteerResetsLoopGuard queues a steer during a repeating-tool turn. The
+// steer must reset the repeat streak so the loop-guard nudge that would
+// otherwise fire at repeatSteerThreshold (3 identical rounds) does not.
+func TestSteerResetsLoopGuard(t *testing.T) {
+	// Gate the first tool round so the test can queue a steer before round 2.
+	firstDone := make(chan struct{})
+	releaseAll := make(chan struct{})
+	round := int32(0)
+	tool := &recordTool{name: "loop", run: func(_ context.Context, _ json.RawMessage) (string, error) {
+		if atomic.AddInt32(&round, 1) == 1 {
+			// Round 1: block until the test has steered, then release this and
+			// every later round together.
+			close(firstDone)
+			<-releaseAll
+		}
+		return "looped", nil
+	}}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+
+	always := llmtest.Step{
+		Events: []llm.StreamEvent{toolDone(0, "id", "loop", `{}`)},
+		Stop:   llm.StopToolUse,
+	}
+	// Three identical tool rounds would trip repeatSteerThreshold (3) at round
+	// 3 and inject a loop-guard nudge — unless the steer at round 1 resets the
+	// streak to leave only 2 identical rounds after it.
+	fp := llmtest.New("fake", always, always, always,
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn})
+	a := newAgent(fp, reg, Options{Steer: true})
+	sink := &recordSink{}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.RunTurn(context.Background(), "go", sink) }()
+	<-firstDone
+	a.Steer("change approach")
+	close(releaseAll)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	msgs := a.Transcript()
+	mustValid(t, msgs)
+
+	var injected []string
+	for _, m := range msgs {
+		if m.Role != llm.RoleUser {
+			continue
+		}
+		for _, b := range m.Content {
+			if b.Kind == llm.BlockText {
+				injected = append(injected, b.Text)
+			}
+		}
+	}
+	for _, txt := range injected {
+		if strings.Contains(txt, "[loop guard]") {
+			t.Errorf("loop-guard nudge fired despite steer:\n%s", txt)
+		}
+	}
+	var sawSteer bool
+	for _, txt := range injected {
+		if txt == "change approach" {
+			sawSteer = true
+		}
+	}
+	if !sawSteer {
+		t.Errorf("steer text not present in transcript; injected=%v", injected)
+	}
+}
+
+// TestSteerDisabledNoChannel confirms Steer() is a no-op when Options.Steer is
+// false: the channel is nil and the loop never drains.
+func TestSteerDisabledNoChannel(t *testing.T) {
+	a := newAgent(llmtest.New("fake"), tools.Catalog(), Options{})
+	a.Steer("ignored") // must not panic on a nil channel
+	if a.steer != nil {
+		t.Fatalf("steer channel should be nil when disabled, got %v", a.steer)
+	}
+	if got := a.DrainSteer(); got != "" {
+		t.Fatalf("DrainSteer on disabled agent = %q, want empty", got)
+	}
+}
+
+// TestDrainSteerJoinsMultiple confirms multiple queued steers are joined into one
+// RoleUser message on the next tool round.
+func TestDrainSteerJoinsMultiple(t *testing.T) {
+	toolRan := make(chan struct{})
+	release := make(chan struct{})
+	tool := &recordTool{name: "probe", run: func(_ context.Context, _ json.RawMessage) (string, error) {
+		close(toolRan)
+		<-release
+		return "probed", nil
+	}}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "call_1", "probe", `{}`)}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, reg, Options{Steer: true})
+	sink := &recordSink{}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.RunTurn(context.Background(), "go", sink) }()
+	<-toolRan
+	a.Steer("first")
+	a.Steer("second")
+	close(release)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	msgs := a.Transcript()
+	mustValid(t, msgs)
+	var steerText string
+	for _, m := range msgs {
+		if m.Role != llm.RoleUser {
+			continue
+		}
+		for _, b := range m.Content {
+			if b.Kind == llm.BlockText && (strings.Contains(b.Text, "first") || b.Text == "second") && b.Text != "probed" {
+				steerText = b.Text
+			}
+		}
+	}
+	if steerText != "first\n\nsecond" {
+		t.Errorf("joined steer text = %q, want %q", steerText, "first\n\nsecond")
+	}
+}
+
+// TestDrainSteerRecoversUnconsumed confirms a steer queued during a tool-less
+// (StopEndTurn) turn is never injected (no tool round) and remains recoverable
+// via DrainSteer after the turn ends, so the REPL can run it as the next turn.
+func TestDrainSteerRecoversUnconsumed(t *testing.T) {
+	steered := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("reply")},
+			Stop:   llm.StopEndTurn,
+			Block:  func(context.Context) { close(steered) },
+		},
+	)
+	a := newAgent(fp, tools.Catalog(), Options{Steer: true})
+	sink := &recordSink{}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.RunTurn(context.Background(), "go", sink) }()
+	<-steered
+	a.Steer("missed me")
+	if err := <-errCh; err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	// The turn ended on an assistant message with no tool round, so the steer was
+	// never appended to the transcript...
+	for _, m := range a.Transcript() {
+		for _, b := range m.Content {
+			if b.Kind == llm.BlockText && b.Text == "missed me" {
+				t.Fatalf("unconsumed steer should not be in transcript")
+			}
+		}
+	}
+	// …but it remains recoverable for the REPL to queue as the next turn.
+	if got := a.DrainSteer(); got != "missed me" {
+		t.Fatalf("DrainSteer = %q, want %q", got, "missed me")
+	}
+	if got := a.DrainSteer(); got != "" {
+		t.Fatalf("second DrainSteer = %q, want empty", got)
 	}
 }

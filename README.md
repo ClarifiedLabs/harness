@@ -257,6 +257,29 @@ The agent loop has guardrails against runaway token burn, beyond the blunt
 When a turn hits its model-turn limit, harness issues one final tools-disabled
 request so the turn ends on an assistant summary rather than a dangling tool call.
 
+## Mid-turn steering
+
+By default, a prompt you submit with Enter while a model turn is running is
+**steered**: it is injected as a user message before the *next* model request
+(that is, between tool rounds — the next time harness sends data back to the
+model) rather than waiting for the turn to end. This lets you redirect a
+running turn ("no, use the other file", "stop, you're overcomplicating it")
+without canceling and re-typing.
+
+- Only model-bound input is steered. `!shell`, `/commands`, and `/edit`
+  submitted during a turn keep the legacy behavior (queued, run at the idle
+  prompt after the turn).
+- A steer does not consume a `max-turns` slot and resets the loop-guard
+  streaks, so redirecting is never penalized.
+- If the turn ends without a tool round to inject into (a plain answer, or a
+  budget/cancel break), the steer is recovered and run as the next turn, so the
+  input is never lost.
+- `^C` / double-Esc still cancel the in-flight turn exactly as before.
+
+`--no-steer` (or `no_steer` / `HARNESS_NO_STEER`) restores the original
+behavior: during-turn input is queued and runs as the next turn after the
+current one completes. Steering is interactive-REPL only (not one-shot mode).
+
 ## Plan and implementation handoff
 
 The `plan` agent investigates and designs without modifying the project. It can

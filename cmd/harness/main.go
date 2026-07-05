@@ -781,6 +781,7 @@ func run(env environment) int {
 		ShowDiffs:                 cfg.ShowDiffs,
 		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		Interactive:               interactiveSession,
+		Steer:                     !cfg.NoSteer,
 	})
 	if env.agentSleep != nil {
 		ag.SetSleep(env.agentSleep)
@@ -1016,6 +1017,16 @@ func run(env environment) int {
 		stop := watcher.Start()
 		defer stop()
 		app.Interrupt = watcher
+	}
+
+	// Mid-turn steering: route a prompt submitted during a running turn into the
+	// agent as the next intermediate model round's input (design §8.1). Disabled
+	// by -no-steer, and only wired for the interactive REPL — one-shot mode has
+	// no during-turn input.
+	if !cfg.NoSteer && interactiveSession {
+		steerAgent := ag
+		app.Steer = func(input agent.SteerInput) { steerAgent.SteerContent(input) }
+		app.DrainSteer = func() agent.SteerInput { return steerAgent.DrainSteerContent() }
 	}
 
 	// One-shot mode: a single turn, then exit (design §10).

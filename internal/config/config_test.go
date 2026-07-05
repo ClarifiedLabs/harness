@@ -444,6 +444,25 @@ func TestResponsesStatefulDefaultAndPrecedence(t *testing.T) {
 	})
 }
 
+func TestNoSteerDefaultAndPrecedence(t *testing.T) {
+	// Default is false (steering on); -no-steer / HARNESS_NO_STEER / no_steer enable it.
+	c := loadOK(t, []string{"-model", "gpt-5.5"}, noEnv, "")
+	if c.NoSteer {
+		t.Fatalf("default no_steer true, want false (steering on)")
+	}
+
+	checkPrecedence(t, precedenceCase[bool]{
+		file:     `{"no_steer":true}`,
+		env:      map[string]string{"HARNESS_NO_STEER": "false"},
+		baseArgs: []string{"-model", "gpt-5.5"},
+		flagArgs: []string{"-no-steer"},
+		got:      func(c Config) bool { return c.NoSteer },
+		wantFlag: true,
+		wantEnv:  false,
+		wantFile: true,
+	})
+}
+
 func TestSearchToolsPrecedenceAndValidation(t *testing.T) {
 	checkPrecedence(t, precedenceCase[string]{
 		file:     `{"search_tools":"grep"}`,

@@ -171,6 +171,18 @@ type App struct {
 	// (design §8.4). Tests leave it nil.
 	Interrupt *agent.InterruptWatcher
 
+	// Steer, when set, routes a prepared model-bound prompt submitted during a
+	// running turn into the agent as a mid-turn steering message (injected before
+	// the next model request) instead of queuing it for the next turn. nil
+	// disables steering and keeps the legacy post-turn queue. Non-model-bound
+	// during-turn input (shell escapes, /commands, /edit) is never steered.
+	Steer func(agent.SteerInput)
+	// DrainSteer recovers prepared steer input the running turn never consumed
+	// (set alongside Steer). The REPL runs it as the next turn at turnDone so the
+	// input is not lost. Returns an empty input when nothing remains or steering
+	// is off.
+	DrainSteer func() agent.SteerInput
+
 	// Prompt is the REPL input prompt format.
 	Prompt string
 
@@ -241,7 +253,7 @@ const helpText = `commands:
   !command         run a local shell command at an interactive prompt
   @path<Tab>       complete a literal file reference; image refs attach when supported
   $skillName       mention a skill to load via SKILL.md
-Interrupt a running turn with Ctrl-C or double-Esc; typing during a turn is queued for the next turn when you press Enter.
+Interrupt a running turn with Ctrl-C or double-Esc; a prompt typed during a turn is steered into the running turn (injected before the next model request) when possible, otherwise queued for the next turn.
 Ctrl-G opens the editor from the prompt; paths with spaces complete as @"..."; lines starting with / are commands; // sends a literal leading slash; !! escapes a literal !; $$ escapes a literal $`
 
 func (app *App) clock() func() time.Time {
@@ -411,6 +423,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		prompt          string
 		pendingPrefill  string // partial during-turn buffer deposited into the next prompt
 		queued          []replInput
+		preparedQueued  []agent.SteerInput
 		turnDone        <-chan struct{}
 		restoreEsc      func() error
 		escPresses      escapePresses
@@ -458,11 +471,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		_ = term.SetBracketedPaste(true)
 	}
-	startTurn := func(prompt string, resolveSkillMentions, attachPromptImages bool) {
-		run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: resolveSkillMentions, attachPromptImages: attachPromptImages})
-		if !ok {
-			return
-		}
+	startRun := func(run func()) {
 		done := make(chan struct{}, 1)
 		active = true
 		exitAfterTurn = false
@@ -490,6 +499,20 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			run()
 			done <- struct{}{}
 		}()
+	}
+	startTurn := func(prompt string, resolveSkillMentions, attachPromptImages bool) {
+		run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: resolveSkillMentions, attachPromptImages: attachPromptImages})
+		if !ok {
+			return
+		}
+		startRun(run)
+	}
+	startPreparedTurn := func(input agent.SteerInput) {
+		run, ok := app.prepareSteeredTurn(input)
+		if !ok {
+			return
+		}
+		startRun(run)
 	}
 	readCommandLine := func(label string) (string, error) {
 		if len(queued) > 0 {
@@ -544,6 +567,19 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			return true, ExitInterrupt
 		}
 		startTurn(prompt, resolveSkillMentions, attachPromptImages)
+		return false, ExitOK
+	}
+	startPreparedPromptTurn := func(input agent.SteerInput) (exit bool, code int) {
+		if app.Renderer != nil {
+			app.Renderer.StartPrompt()
+		}
+		ctx, cancel, interrupted := exitContext()
+		err := app.refreshMCP(ctx)
+		cancel()
+		if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return true, ExitInterrupt
+		}
+		startPreparedTurn(input)
 		return false, ExitOK
 	}
 	applyAction := func(input replInput) (exit bool, code int) {
@@ -628,6 +664,13 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				activeReadPause = false
 				turnDone = nil
 				escPresses.reset()
+				// Recover any steer submitted during the turn that the loop never
+				// consumed (the turn ended without a tool round to inject into, or
+				// was broken by budget/cancel). Run it as the next turn so the
+				// input is not silently lost, ahead of any post-turn-queued input.
+				if leftover := app.drainLeftoverSteer(); !steerInputEmpty(leftover) {
+					preparedQueued = append([]agent.SteerInput{leftover}, preparedQueued...)
+				}
 				if exitAfterTurn {
 					return finish(ExitInterrupt)
 				}
@@ -714,8 +757,21 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					continue
 				}
 				escPresses.reset()
+				if app.steerDuringTurn(input) {
+					activeReadPause = true
+					continue
+				}
 				queued = append(queued, input)
 				activeReadPause = true
+			}
+			continue
+		}
+
+		if len(preparedQueued) > 0 {
+			input := preparedQueued[0]
+			preparedQueued = preparedQueued[1:]
+			if exit, code := startPreparedPromptTurn(input); exit {
+				return finish(code)
 			}
 			continue
 		}
@@ -914,6 +970,81 @@ func (p *escapePresses) press(now time.Time) bool {
 func (p *escapePresses) reset() {
 	p.last = time.Time{}
 	p.seen = false
+}
+
+// drainLeftoverSteer recovers any prepared steer input the just-finished turn
+// never injected, returning it so the run loop can queue it as the next turn. It
+// returns an empty input when steering is disabled.
+func (app *App) drainLeftoverSteer() agent.SteerInput {
+	if app.DrainSteer == nil {
+		return agent.SteerInput{}
+	}
+	return app.DrainSteer()
+}
+
+func steerInputEmpty(input agent.SteerInput) bool {
+	if strings.TrimSpace(input.Text) != "" {
+		return false
+	}
+	if len(input.Images) > 0 {
+		return false
+	}
+	for _, item := range input.RequestContext {
+		if strings.TrimSpace(item) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// steerDuringTurn routes a during-turn-submitted input into the agent as a
+// mid-turn steering message when steering is enabled and the input is
+// model-bound (would start a turn at the idle prompt). It returns true when it
+// consumed the input by steering. Non-model-bound input (shell escapes,
+// /commands, /edit requests) and any input when Steer is nil return false so the
+// caller queues them with the legacy post-turn behavior. The classification
+// mirrors handlePromptInput's prefix dispatch but performs no side effects,
+// since /commands and /edit must not run mid-turn.
+func (app *App) steerDuringTurn(input replInput) bool {
+	if app.Steer == nil {
+		return false
+	}
+	if input.escape || input.interrupt || input.deposit || input.edit {
+		return false
+	}
+	line := input.text
+	if line == "" {
+		return false
+	}
+	if !input.interactive && !input.pasted {
+		return false
+	}
+	if input.pasted {
+		if steered, ok := app.prepareSteerInput(line, turnOptions{}); ok {
+			app.Steer(steered)
+		}
+		return true
+	}
+	if input.interactive {
+		// Mirror handlePromptInput's escape-prefix stripping so a steered !!foo
+		// or //foo reaches the model as !foo / /foo, exactly as it would at the
+		// idle prompt.
+		if strings.HasPrefix(line, "!!") || strings.HasPrefix(line, "//") {
+			if steered, ok := app.prepareSteerInput(line[1:], turnOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
+				app.Steer(steered)
+			}
+			return true
+		}
+		// !shell escapes and /commands (including /edit) are not model input —
+		// leave them queued for the idle prompt.
+		if strings.HasPrefix(line, "!") || strings.HasPrefix(line, "/") {
+			return false
+		}
+	}
+	if steered, ok := app.prepareSteerInput(line, turnOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
+		app.Steer(steered)
+	}
+	return true
 }
 
 func (app *App) handlePromptInput(input replInput, readCommandLine func(string) (string, error)) replAction {
@@ -2562,6 +2693,12 @@ type turnOptions struct {
 	attachPromptImages   bool
 }
 
+type preparedPrompt struct {
+	prompt      string
+	images      []inputimage.Loaded
+	turnContext []string
+}
+
 func (app *App) runTurn(prompt string) {
 	if run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
 		run()
@@ -2569,37 +2706,11 @@ func (app *App) runTurn(prompt string) {
 }
 
 func (app *App) prepareTurn(prompt string, opts turnOptions) (func(), bool) {
-	var skillContext []string
-	if opts.resolveSkillMentions {
-		var ok bool
-		prompt, skillContext, ok = app.resolveSkillMentionContext(prompt)
-		if !ok {
-			if app.Renderer != nil {
-				app.Renderer.StopProgress()
-			}
-			return nil, false
-		}
-	}
-	promptHook := app.runPromptSubmitHook(context.Background(), prompt, app.Turn+1)
-	if promptHook.Block {
-		reason := promptHook.Reason()
-		if reason == "" {
-			reason = "blocked by UserPromptSubmit hook"
-		}
-		if app.Renderer != nil {
-			app.Renderer.Notice("[prompt blocked: " + reason + "]")
-			app.Renderer.StopProgress()
-		} else {
-			fmt.Fprintf(app.Errw, "[prompt blocked: %s]\n", reason)
-		}
+	prepared, ok := app.preparePrompt(prompt, opts, true)
+	if !ok {
 		return nil, false
 	}
-	pendingUnsupportedNotice := len(app.PendingImages) > 0 && !app.currentModelSupportsImages()
-	images := app.takePendingImages()
-	if opts.attachPromptImages {
-		images = app.attachPromptImageReferences(prompt, images, pendingUnsupportedNotice)
-	}
-	turn := app.beginTurn(prompt, images)
+	turn := app.beginTurn(prepared.prompt, prepared.images)
 	ctx := context.Background()
 	var cancel context.CancelFunc
 	if app.Interrupt != nil {
@@ -2617,9 +2728,89 @@ func (app *App) prepareTurn(prompt string, opts turnOptions) (func(), bool) {
 		}
 
 		sink := newREPLSink(app.Renderer, app, turn)
-		turnContext := append([]string(nil), promptHook.AdditionalContext...)
-		turnContext = append(turnContext, skillContext...)
-		err := app.Agent.RunTurnContentWithContext(ctx, prompt, imageBlocks(images), app.turnHookContext(turnContext), turn, sink)
+		err := app.Agent.RunTurnContentWithContext(ctx, prepared.prompt, imageBlocks(prepared.images), app.turnHookContext(prepared.turnContext), turn, sink)
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
+		}
+		app.saveOrWarn(app.SessionPath)
+	}, true
+}
+
+func (app *App) preparePrompt(prompt string, opts turnOptions, stopProgressOnBlock bool) (preparedPrompt, bool) {
+	var skillContext []string
+	if opts.resolveSkillMentions {
+		var ok bool
+		prompt, skillContext, ok = app.resolveSkillMentionContext(prompt)
+		if !ok {
+			if app.Renderer != nil {
+				if stopProgressOnBlock {
+					app.Renderer.StopProgress()
+				}
+			}
+			return preparedPrompt{}, false
+		}
+	}
+	promptHook := app.runPromptSubmitHook(context.Background(), prompt, app.Turn+1)
+	if promptHook.Block {
+		reason := promptHook.Reason()
+		if reason == "" {
+			reason = "blocked by UserPromptSubmit hook"
+		}
+		if app.Renderer != nil {
+			app.Renderer.Notice("[prompt blocked: " + reason + "]")
+			if stopProgressOnBlock {
+				app.Renderer.StopProgress()
+			}
+		} else {
+			fmt.Fprintf(app.Errw, "[prompt blocked: %s]\n", reason)
+		}
+		return preparedPrompt{}, false
+	}
+	pendingUnsupportedNotice := len(app.PendingImages) > 0 && !app.currentModelSupportsImages()
+	images := app.takePendingImages()
+	if opts.attachPromptImages {
+		images = app.attachPromptImageReferences(prompt, images, pendingUnsupportedNotice)
+	}
+	turnContext := append([]string(nil), promptHook.AdditionalContext...)
+	turnContext = append(turnContext, skillContext...)
+	return preparedPrompt{prompt: prompt, images: images, turnContext: turnContext}, true
+}
+
+func (app *App) prepareSteerInput(prompt string, opts turnOptions) (agent.SteerInput, bool) {
+	prepared, ok := app.preparePrompt(prompt, opts, false)
+	if !ok {
+		return agent.SteerInput{}, false
+	}
+	return agent.SteerInput{
+		Text:           prepared.prompt,
+		Images:         imageBlocks(prepared.images),
+		RequestContext: prepared.turnContext,
+	}, true
+}
+
+func (app *App) prepareSteeredTurn(input agent.SteerInput) (func(), bool) {
+	if steerInputEmpty(input) {
+		return nil, false
+	}
+	turn := app.beginTurn(input.Text, nil)
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if app.Interrupt != nil {
+		ctx, cancel = context.WithCancel(ctx)
+		app.Interrupt.BeginTurn(cancel)
+	}
+
+	app.Renderer.StartTurn()
+	return func() {
+		if app.Interrupt != nil {
+			defer func() {
+				app.Interrupt.EndTurn()
+				cancel()
+			}()
+		}
+
+		sink := newREPLSink(app.Renderer, app, turn)
+		err := app.Agent.RunTurnContentWithContext(ctx, input.Text, input.Images, app.turnHookContext(input.RequestContext), turn, sink)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 		}

@@ -2370,6 +2370,61 @@ func TestREPLTypeaheadDuringActiveTurnRunsAfterTurn(t *testing.T) {
 	}
 }
 
+func TestREPLTypeaheadDuringActiveTurnQueuesWhenSteerConfigured(t *testing.T) {
+	var out, errw bytes.Buffer
+	inTurn := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("first answer")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 5, OutputTokens: 2},
+			Block: func(ctx context.Context) {
+				close(inTurn)
+				<-releaseTurn
+			},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("second answer")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 6, OutputTokens: 2},
+		},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+	ag := agent.New(fp, tools.Default(), agent.Options{Model: "claude-opus-4-8", Steer: true})
+	ag.SetSystem("you are a test")
+	ag.SetSleep(func(time.Duration) {})
+	app.Agent = ag
+	app.Steer = func(input agent.SteerInput) { ag.SteerContent(input) }
+	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- Run(pr, app, nil) }()
+
+	writePipe(t, pw, "first\n")
+	select {
+	case <-inTurn:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+	writePipe(t, pw, "second\n/exit\n")
+	_ = pw.Close()
+	close(releaseTurn)
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 2 {
+		t.Fatalf("non-interactive typeahead should queue despite configured steering, got %d requests", fp.RequestCount())
+	}
+	if got := transcriptPrompts(app); got != "first|second" {
+		t.Fatalf("prompts = %q, want first|second", got)
+	}
+}
+
 func TestREPLPromptEditorPrintsPromptAfterTurnWithPendingActiveRead(t *testing.T) {
 	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
 	inTurn := make(chan struct{})
@@ -3171,6 +3226,12 @@ func transcriptPrompts(app *App) string {
 	return strings.Join(prompts, "|")
 }
 
+// dumpTranscript renders a transcript for test failure messages.
+func dumpTranscript(msgs []llm.Message) string {
+	b, _ := json.MarshalIndent(msgs, "", "  ")
+	return string(b)
+}
+
 // During-turn typed input submitted with Enter is queued and automatically runs
 // as the next model turn after the current turn completes.
 func TestREPLDuringTurnInputQueuedOnEnter(t *testing.T) {
@@ -3218,6 +3279,449 @@ func TestREPLDuringTurnInputQueuedOnEnter(t *testing.T) {
 	}
 	if got := transcriptPrompts(app); got != "first|draft" {
 		t.Fatalf("prompts = %q, want first|draft (during-turn Enter queues next prompt)", got)
+	}
+}
+
+// blockingTool is a fake tool whose Run blocks on release until the test signals
+// it, so a during-turn steer can be queued while the loop is between tool
+// dispatch and the next model request.
+type blockingTool struct {
+	name    string
+	ran     chan struct{}
+	release chan struct{}
+}
+
+func (t *blockingTool) Name() string                  { return t.name }
+func (t *blockingTool) Description() string           { return "blocks" }
+func (t *blockingTool) Schema() json.RawMessage       { return json.RawMessage(`{"type":"object"}`) }
+func (t *blockingTool) ReadOnly(json.RawMessage) bool { return false }
+func (t *blockingTool) Run(context.Context, json.RawMessage) (string, error) {
+	close(t.ran)
+	<-t.release
+	return "ok", nil
+}
+
+// With steering enabled, a prompt submitted during a tool-calling turn is
+// injected as the next intermediate model round's input (a RoleUser message the
+// second model request sees), rather than queued for the next turn.
+func TestREPLDuringTurnSteerInjectsBeforeNextModelRound(t *testing.T) {
+	var out, errw lockedBuffer
+	releaseTurn := make(chan struct{})
+	toolRan := make(chan struct{})
+	tool := &blockingTool{name: "probe", ran: toolRan, release: releaseTurn}
+	// Step 1: call the tool (StopToolUse). The tool's Run blocks on
+	// releaseTurn until the test steers, gating the loop between tool dispatch
+	// and the next model request.
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				Index:     0,
+				ToolID:    "call_1",
+				ToolName:  "probe",
+				ToolInput: json.RawMessage(`{}`),
+			}},
+			Stop:  llm.StopToolUse,
+			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp)
+	// Enable steering: rebuild the agent with Steer on and wire app.Steer.
+	reg := tools.Default()
+	reg.Register(tool)
+	ag := agent.New(fp, reg, agent.Options{Model: "claude-opus-4-8", Steer: true})
+	ag.SetSystem("you are a test")
+	ag.SetSleep(func(time.Duration) {})
+	app.Agent = ag
+	app.Steer = func(input agent.SteerInput) { ag.SteerContent(input) }
+	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+
+	// The model step streams the tool call, then the agent dispatches it. Wait
+	// for the tool to run (the loop is now between tool dispatch and the next
+	// model request), then type a steer and submit it with Enter.
+	select {
+	case <-toolRan:
+	case <-time.After(time.Second):
+		t.Fatal("tool did not run")
+	}
+	writePipe(t, pw, "redirect now\r")
+
+	// The steer must land before turnDone: the second model request fires while
+	// the turn is still active and carries the steered text.
+	close(releaseTurn)
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from steered input")
+	var sawSteer bool
+	for _, m := range fp.Requests[1].Messages {
+		for _, b := range m.Content {
+			if b.Kind == llm.BlockText && b.Text == "redirect now" {
+				sawSteer = true
+			}
+		}
+	}
+	if !sawSteer {
+		t.Errorf("second model request did not include the steered text")
+	}
+	_ = pw.Close()
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	// The steered text is a mid-turn RoleUser message, not a separate next-turn
+	// prompt: it sits between the tool_result and the final assistant message.
+	// (With steering off, "redirect now" would instead be the next turn's prompt,
+	// appearing after the final assistant message.)
+	msgs := app.Agent.Transcript()
+	var steerIdx, finalAsstIdx int = -1, -1
+	for i, m := range msgs {
+		if m.Role == llm.RoleUser && len(m.Content) == 1 && m.Content[0].Kind == llm.BlockText && m.Content[0].Text == "redirect now" {
+			steerIdx = i
+		}
+		if m.Role == llm.RoleAssistant && len(m.Content) == 1 && m.Content[0].Kind == llm.BlockText && strings.Contains(m.Content[0].Text, "second answer") {
+			finalAsstIdx = i
+		}
+	}
+	if steerIdx == -1 {
+		t.Fatalf("steer message not found in transcript:\n%s", dumpTranscript(msgs))
+	}
+	if finalAsstIdx == -1 {
+		t.Fatalf("final assistant message not found in transcript:\n%s", dumpTranscript(msgs))
+	}
+	if steerIdx > finalAsstIdx {
+		t.Fatalf("steer at index %d should precede final assistant at %d (mid-turn, not next turn):\n%s", steerIdx, finalAsstIdx, dumpTranscript(msgs))
+	}
+}
+
+func TestREPLDuringTurnSteerCarriesSkillContext(t *testing.T) {
+	var out, errw lockedBuffer
+	releaseTurn := make(chan struct{})
+	toolRan := make(chan struct{})
+	tool := &blockingTool{name: "probe", ran: toolRan, release: releaseTurn}
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				Index:     0,
+				ToolID:    "call_1",
+				ToolName:  "probe",
+				ToolInput: json.RawMessage(`{}`),
+			}},
+			Stop: llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp)
+	app.Skills = map[string]skills.Skill{
+		"steer": {Name: "steer", Description: "steer skill", Location: filepath.Join(t.TempDir(), "SKILL.md")},
+	}
+	reg := tools.Default()
+	reg.Register(tool)
+	ag := agent.New(fp, reg, agent.Options{Model: "claude-opus-4-8", Steer: true})
+	ag.SetSystem("you are a test")
+	ag.SetSleep(func(time.Duration) {})
+	app.Agent = ag
+	app.Steer = func(input agent.SteerInput) { ag.SteerContent(input) }
+	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-toolRan:
+	case <-time.After(time.Second):
+		t.Fatal("tool did not run")
+	}
+	writePipe(t, pw, "redirect with $steer\r")
+	close(releaseTurn)
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from steered input")
+	_ = pw.Close()
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+
+	var sawSkillContext bool
+	for _, item := range fp.Requests[1].RequestContext {
+		if strings.Contains(item, "steer skill") {
+			sawSkillContext = true
+		}
+	}
+	if !sawSkillContext {
+		t.Fatalf("second request context = %v, want steer skill context", fp.Requests[1].RequestContext)
+	}
+}
+
+func TestREPLDuringTurnSteerPromptHookBlockSkipsInjection(t *testing.T) {
+	var out, errw lockedBuffer
+	releaseTurn := make(chan struct{})
+	toolRan := make(chan struct{})
+	tool := &blockingTool{name: "probe", ran: toolRan, release: releaseTurn}
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				Index:     0,
+				ToolID:    "call_1",
+				ToolName:  "probe",
+				ToolInput: json.RawMessage(`{}`),
+			}},
+			Stop: llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp)
+	cfg, err := hooks.DecodeEventMap([]byte(`{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"if grep -q 'blocked steer'; then printf '{\"decision\":\"block\",\"reason\":\"blocked steer\"}'; else printf '{}'; fi"}]}]}`))
+	if err != nil {
+		t.Fatalf("DecodeEventMap: %v", err)
+	}
+	app.Hooks = &hooks.Runner{Config: cfg}
+	reg := tools.Default()
+	reg.Register(tool)
+	ag := agent.New(fp, reg, agent.Options{Model: "claude-opus-4-8", Steer: true})
+	ag.SetSystem("you are a test")
+	ag.SetSleep(func(time.Duration) {})
+	app.Agent = ag
+	app.Steer = func(input agent.SteerInput) { ag.SteerContent(input) }
+	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-toolRan:
+	case <-time.After(time.Second):
+		t.Fatal("tool did not run")
+	}
+	writePipe(t, pw, "blocked steer\r")
+	close(releaseTurn)
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request after blocked steer")
+	_ = pw.Close()
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	if !strings.Contains(errw.String(), "[prompt blocked: blocked steer]") {
+		t.Fatalf("stderr missing prompt block notice:\n%s", errw.String())
+	}
+	for _, req := range fp.Requests {
+		for _, m := range req.Messages {
+			for _, b := range m.Content {
+				if b.Kind == llm.BlockText && b.Text == "blocked steer" {
+					t.Fatalf("blocked steer was sent to provider in request: %+v", req)
+				}
+			}
+		}
+	}
+}
+
+// With steering disabled (app.Steer nil), during-turn Enter keeps the legacy
+// behavior: input is queued and runs as the next turn after the turn ends.
+func TestREPLDuringTurnNoSteerQueuesForNextTurn(t *testing.T) {
+	var out, errw lockedBuffer
+	inTurn := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Stop:  llm.StopEndTurn,
+			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
+			Block: func(context.Context) { close(inTurn); <-releaseTurn },
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp) // app.Steer left nil -> steering off
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-inTurn:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+
+	writePipe(t, pw, "draft\r")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> draft") }, "live input line")
+	if fp.RequestCount() != 1 {
+		t.Fatalf("queued during-turn input must wait for the active turn; got %d requests", fp.RequestCount())
+	}
+	close(releaseTurn)
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from queued during-turn input")
+	_ = pw.Close()
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	if got := transcriptPrompts(app); got != "first|draft" {
+		t.Fatalf("prompts = %q, want first|draft (no-steer queues next turn)", got)
+	}
+}
+
+// A steer submitted during a turn that ends without a tool round (StopEndTurn)
+// is never injected mid-turn; it must be recovered at turnDone and run as the
+// next turn so the input is not silently lost.
+func TestREPLDuringTurnSteerRecoveredWhenTurnEndsWithoutToolRound(t *testing.T) {
+	var out, errw lockedBuffer
+	inTurn := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Stop:  llm.StopEndTurn,
+			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
+			Block: func(context.Context) { close(inTurn); <-releaseTurn },
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp)
+	ag := agent.New(fp, tools.Default(), agent.Options{Model: "claude-opus-4-8", Steer: true})
+	ag.SetSystem("you are a test")
+	ag.SetSleep(func(time.Duration) {})
+	app.Agent = ag
+	app.Steer = func(input agent.SteerInput) { ag.SteerContent(input) }
+	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-inTurn:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+
+	// Submit a steer while the (tool-less) turn is still running. There is no
+	// tool round, so the loop cannot inject it; it must be recovered at turnDone.
+	writePipe(t, pw, "redirect\r")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> redirect") }, "live input line")
+	if fp.RequestCount() != 1 {
+		t.Fatalf("steer must not start a new request mid-turn; got %d requests", fp.RequestCount())
+	}
+	close(releaseTurn)
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from recovered steer")
+	_ = pw.Close()
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	// The recovered steer ran as the next turn's prompt (not lost).
+	if got := transcriptPrompts(app); got != "first|redirect" {
+		t.Fatalf("prompts = %q, want first|redirect (recovered steer ran as next turn)", got)
+	}
+}
+
+func TestREPLDuringTurnRecoveredLiteralSlashSteerDoesNotRunCommand(t *testing.T) {
+	var out, errw lockedBuffer
+	inTurn := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Stop:  llm.StopEndTurn,
+			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
+			Block: func(context.Context) { close(inTurn); <-releaseTurn },
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp)
+	ag := agent.New(fp, tools.Default(), agent.Options{Model: "claude-opus-4-8", Steer: true})
+	ag.SetSystem("you are a test")
+	ag.SetSleep(func(time.Duration) {})
+	app.Agent = ag
+	app.Steer = func(input agent.SteerInput) { ag.SteerContent(input) }
+	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-inTurn:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+
+	writePipe(t, pw, "//exit\r")
+	close(releaseTurn)
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from recovered literal slash steer")
+	_ = pw.Close()
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	if got := transcriptPrompts(app); got != "first|/exit" {
+		t.Fatalf("prompts = %q, want first|/exit (literal slash steer must not run /exit)", got)
+	}
+}
+
+// steerDuringTurn classifies a during-turn input as model-bound (steer it) or
+// not (queue it). This pins the prefix rules without driving a full REPL.
+func TestSteerDuringTurnClassification(t *testing.T) {
+	cases := []struct {
+		name      string
+		input     replInput
+		wantSteer bool
+		wantText  string // text that should reach Steer; ignored when !wantSteer
+	}{
+		{name: "plain", input: replInput{text: "hi", interactive: true}, wantSteer: true, wantText: "hi"},
+		{name: "empty", input: replInput{text: "", interactive: true}, wantSteer: false},
+		{name: "pasted", input: replInput{text: "blob", pasted: true}, wantSteer: true, wantText: "blob"},
+		{name: "bang-bang strips one", input: replInput{text: "!!cmd", interactive: true}, wantSteer: true, wantText: "!cmd"},
+		{name: "slash-slash strips one", input: replInput{text: "//path", interactive: true}, wantSteer: true, wantText: "/path"},
+		{name: "shell escape queued", input: replInput{text: "!ls", interactive: true}, wantSteer: false},
+		{name: "command queued", input: replInput{text: "/help", interactive: true}, wantSteer: false},
+		{name: "edit queued", input: replInput{text: "x", edit: true}, wantSteer: false},
+		{name: "interrupt queued", input: replInput{text: "", interrupt: true}, wantSteer: false},
+		{name: "escape queued", input: replInput{text: "", escape: true}, wantSteer: false},
+		{name: "deposit queued", input: replInput{text: "buf", deposit: true}, wantSteer: false},
+		{name: "non-interactive plain queued", input: replInput{text: "hi"}, wantSteer: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			var called bool
+			app := &App{Steer: func(input agent.SteerInput) { called = true; got = input.Text }}
+			steered := app.steerDuringTurn(tc.input)
+			if steered != tc.wantSteer {
+				t.Fatalf("steerDuringTurn = %v, want %v", steered, tc.wantSteer)
+			}
+			if tc.wantSteer {
+				if !called {
+					t.Fatalf("Steer not called for model-bound input")
+				}
+				if got != tc.wantText {
+					t.Errorf("steered text = %q, want %q", got, tc.wantText)
+				}
+			}
+		})
+	}
+
+	// nil Steer disables steering: everything is queued (returns false).
+	app := &App{}
+	if app.steerDuringTurn(replInput{text: "hi", interactive: true}) {
+		t.Fatalf("steerDuringTurn should be false when Steer is nil")
 	}
 }
 

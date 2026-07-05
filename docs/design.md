@@ -1008,6 +1008,19 @@ emit turn-usage event   // the REPL / one-shot caller prints it and saves the se
 - **Stop hook:** a configured `Stop` hook fires when the model would end the turn; it
   may block the break and force one more model turn. `stop_hook_active` guards it so it
   fires at most once per turn (`agent.go`).
+- **Mid-turn steering (default on; `-no-steer` off).** A prompt the user submits
+  with Enter while a model turn is running is injected as a `RoleUser` message
+  before the *next* model request (i.e. between tool rounds — the next time
+  harness sends data back to the model), rather than waiting for the turn to
+  end. Only model-bound input is steered; `!shell`, `/commands`, and `/edit`
+  submitted during a turn keep the legacy post-turn queue. A steer does not
+  consume a `max_turns` slot (it rides on the next request the loop was already
+  going to make) and resets the runaway-guard streaks, so a deliberate redirect
+  is not penalized for the repeat/error run that preceded it. If the turn ends
+  without a tool round to inject into (a `StopEndTurn` turn, or a budget/cancel
+  break), the unconsumed steer is recovered at `turnDone` and run as the next
+  turn, so the input is never lost. `^C`/Esc-Esc cancel the in-flight turn as
+  usual; steering changes nothing about interrupt handling (§8.4).
 
 ### 8.2 Tool failure handling
 
@@ -1948,6 +1961,7 @@ prefix wins, threshold `1 + len(cmd)/3`).
 -reasoning <profile>
 -reasoning-summary <auto|concise|detailed|none>
 -responses-stateful   Responses previous_response_id continuation (default true)
+-no-steer          disable mid-turn steering: queue during-turn input for the next turn instead of injecting it into the running turn (default off)
 -image-detail <level>   default image detail: auto, low, high, or original
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
 -agent <name>

@@ -80,7 +80,8 @@ type Config struct {
 	CompactSummaryMaxTokens   int               `json:"compact_summary_max_tokens"`    // config-only; 0 = agent default
 	CompactToolResultMaxBytes int               `json:"compact_tool_result_max_bytes"` // config-only; 0 = agent default, negative disables
 	DelegateMaxTurns          int               `json:"delegate_max_turns"`            // config-only; default 20, per delegate call cap
-	ResponsesStateful         bool              `json:"responses_stateful"`
+	ResponsesStateful         bool              `json:"responses_stateful"` // -responses-stateful
+	NoSteer                    bool              `json:"no_steer"`    // -no-steer: disable mid-turn steering (queue during-turn input for the next turn)
 
 	// Agent definition. Empty means "not specified" so main can let a resumed
 	// session supply the agent before falling back to the default.
@@ -281,6 +282,7 @@ type fileConfig struct {
 	CompactToolResultMaxBytes *int                       `json:"compact_tool_result_max_bytes"`
 	DelegateMaxTurns          *int                       `json:"delegate_max_turns"`
 	ResponsesStateful         *bool                      `json:"responses_stateful"`
+	NoSteer                    *bool                      `json:"no_steer"`
 	Verbose                   *bool                      `json:"verbose"`
 	ToolStream                *bool                      `json:"tool_stream"`
 	ShowDiffs                 *bool                      `json:"show_diffs"`
@@ -479,6 +481,8 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	}
 	c.ResponsesStateful = resolveBool(set["responses-stateful"], *f.responsesStateful,
 		getenv("HARNESS_RESPONSES_STATEFUL"), fc.ResponsesStateful, true)
+	c.NoSteer = resolveBool(set["no-steer"], *f.noSteer,
+		getenv("HARNESS_NO_STEER"), fc.NoSteer, false)
 	c.Agent = strings.ToLower(strings.TrimSpace(resolveString(set["agent"], *f.agent,
 		getenv("HARNESS_AGENT"), fc.Agent, "")))
 	c.HandoffAgent = strings.ToLower(strings.TrimSpace(resolveString(set["handoff-agent"], *f.handoffAgent,
@@ -923,6 +927,7 @@ type flags struct {
 	verbose, toolStream              *bool
 	showDiffs                        *bool
 	responsesStateful                *bool
+	noSteer                          *bool
 	traceProxy                       *bool
 	noColor                          *bool
 	noTimestamps                     *bool
@@ -976,6 +981,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.searchTools = fs.String("search-tools", "auto", "search tools to expose: auto, grep, rg, or both")
 	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")
 	f.responsesStateful = fs.Bool("responses-stateful", true, "enable OpenAI Responses previous_response_id continuation when supported")
+	f.noSteer = fs.Bool("no-steer", false, "disable mid-turn steering: queue during-turn input for the next turn instead of injecting it into the running turn")
 	f.traceProxy = fs.Bool("trace-proxy", false, "send W3C trace headers to harness-model-proxy and harness-mcp-proxy")
 	f.verbose = fs.Bool("v", false, "show tool result snippets and tool-call progress details")
 	f.toolStream = fs.Bool("tool-stream", false, "show tool-call progress details")

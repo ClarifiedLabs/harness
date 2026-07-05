@@ -86,6 +86,16 @@ type RequestContextProvider interface {
 	RequestContext() []string
 }
 
+// SteerInput is a prepared mid-turn steering message. Text and images are
+// appended as a RoleUser transcript message when a tool round gives the loop a
+// chance to inject it; RequestContext is visible to subsequent model requests in
+// the current turn without being persisted into the transcript.
+type SteerInput struct {
+	Text           string
+	Images         []llm.ContentBlock
+	RequestContext []string
+}
+
 // TurnUsage is the per-user-turn summary handed to the sink (design §10 usage line).
 type TurnUsage struct {
 	ModelTurns int
@@ -177,6 +187,12 @@ type Options struct {
 	// One-shot, delegate, and non-interactive runs leave it false to take the
 	// cheaper 5-minute breakpoint. Forwarded to llm.Request.LongCacheTTL.
 	Interactive bool
+	// Steer enables mid-turn steering: a prompt submitted by the user while a
+	// model turn is running is injected as a RoleUser message before the next
+	// model request (between tool rounds) rather than waiting for the turn to
+	// end. The REPL supplies text via Steer. Disabled (false) leaves the loop
+	// untouched — the caller never injects mid-turn.
+	Steer bool
 }
 
 // Agent drives the turn loop against one provider and tool registry, owning the
@@ -208,7 +224,8 @@ type Agent struct {
 	hooks                     *hooks.Runner
 	showDiffs                 bool
 	responsesStateful         bool
-	interactive               bool // 1h Anthropic cache breakpoint; see Options.Interactive
+	interactive               bool            // 1h Anthropic cache breakpoint; see Options.Interactive
+	steer                     chan SteerInput // buffered mid-turn steer input; nil when Options.Steer is false
 	responseState             llm.ResponseState
 	proxySessionID            string
 }
@@ -228,7 +245,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 	if now == nil {
 		now = time.Now
 	}
-	return &Agent{
+	a := &Agent{
 		provider:                  provider,
 		tools:                     registry,
 		toolSpecs:                 registry.Specs(),
@@ -252,6 +269,10 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		interactive:               opts.Interactive,
 		proxySessionID:            newProxySessionID(),
 	}
+	if opts.Steer {
+		a.steer = make(chan SteerInput, 16)
+	}
+	return a
 }
 
 // window returns the context window the compaction trigger and degradation
@@ -331,6 +352,50 @@ func (a *Agent) SetServerTools(serverTools []llm.ServerTool) {
 
 // SetHooks replaces the lifecycle hook runner used by subsequent turns.
 func (a *Agent) SetHooks(runner *hooks.Runner) { a.hooks = runner }
+
+// Steer injects text as a mid-turn steering message. It is the simple text-only
+// helper for callers that do not need images or request-only context.
+func (a *Agent) Steer(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	a.SteerContent(SteerInput{Text: text})
+}
+
+// SteerContent injects prepared content as a mid-turn steering message: the loop
+// drains it before the next model request (between tool rounds) and appends it as
+// a RoleUser message. It is a no-op when steering was not enabled
+// (Options.Steer false), the input is empty, or the steer buffer is full, so a
+// flooding caller cannot block the REPL. SteerContent is safe to call
+// concurrently with a running turn.
+func (a *Agent) SteerContent(input SteerInput) {
+	if a.steer == nil || steerInputEmpty(input) {
+		return
+	}
+	input.Images = cloneImageBlocks(input.Images)
+	input.RequestContext = cleanContext(input.RequestContext)
+	select {
+	case a.steer <- input:
+	default:
+	}
+}
+
+// DrainSteer pops all queued mid-turn steer text that the loop has not yet
+// consumed (e.g. a turn that ended with StopEndTurn and no tool round to inject
+// into, a budget/cancel break). The REPL calls this at turnDone to recover
+// undelivered steers and run them as the next turn, so a prompt submitted during
+// a turn is never silently lost. It returns "" when steering is disabled or
+// nothing is queued. Non-blocking.
+func (a *Agent) DrainSteer() string {
+	return a.DrainSteerContent().Text
+}
+
+// DrainSteerContent pops all queued prepared mid-turn steer input that the loop
+// has not yet consumed. Non-blocking.
+func (a *Agent) DrainSteerContent() SteerInput {
+	return a.drainSteer()
+}
 
 // SetTranscript replaces the running transcript (used when resuming a session).
 func (a *Agent) SetTranscript(msgs []llm.Message) {
@@ -763,13 +828,14 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 	var guard turnGuard
 	var wastedTotal llm.Usage // tokens spent on retried-and-discarded model-turn attempts (r51+r52)
 	appendBoundary := 0       // transcript length measured by lastInput (drives the r44 trigger)
+	var steerContext []string
 
 	for unlimited || modelTurns < a.maxTurns {
 		// Live-transcript retention (design §12, r9+r20): shrink stale large
 		// tool outputs and aged images before building the request, so they are
 		// not re-sent verbatim every turn. Pure local edit, invariant-preserving.
 		a.applyRetention(sink)
-		requestContext := a.requestContext(extraContext, sink)
+		requestContext := a.requestContext(appendTurnContext(extraContext, steerContext), sink)
 		modelReq := a.modelRequest(requestContext)
 		lastContext = modelReq.estimate
 		// Proactive trigger (spec §4): a turn whose tool results balloon the
@@ -937,6 +1003,29 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		// breaking here keeps the §4 invariant intact.
 		guard.recordTools(res.toolCalls, results)
 
+		// Mid-turn steering (design §8.1): drain prompts the user submitted while
+		// this turn was running and inject them as a single RoleUser message the
+		// next model request sees. A steer is a deliberate change of approach, so
+		// it resets the loop-guard streaks — the model is not penalized for the
+		// repeat/error run that preceded the redirect, and no redundant guard
+		// nudge fires immediately after. Steer does not consume a maxTurns slot:
+		// the message rides on the next model request the loop was already going
+		// to make. It falls through to the usual budget checks so a configured
+		// ceiling still bounds the turn.
+		if steered := a.drainSteer(); !steerInputEmpty(steered) {
+			a.transcript = append(a.transcript, a.userMessage(steered.Text, steered.Images))
+			steerContext = append(steerContext, steered.RequestContext...)
+			requestContext = a.requestContext(appendTurnContext(extraContext, steerContext), sink)
+			guard.repeatRuns = 0
+			guard.repeatSteered = false
+			guard.errorRuns = 0
+			guard.errorSteered = false
+			if err := a.validateTranscript("after mid-turn steer"); err != nil {
+				sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+				return err
+			}
+		}
+
 		// Hard stop: an unrelenting error storm. Finalize with a tools-disabled
 		// summary so the turn ends on an assistant message, not a dangling result.
 		if guard.shouldBreakErrors() {
@@ -1009,10 +1098,10 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 	// into the turn total so session totals (via the sink) include compaction. A
 	// compaction error never fails the turn — the warning was already reported and
 	// the transcript was kept intact.
-	lastContext = a.estimateContext(a.requestContext(extraContext, sink))
+	lastContext = a.estimateContext(a.requestContext(appendTurnContext(extraContext, steerContext), sink))
 	if compUsage, changed, err := a.MaybeCompact(ctx, a.triggerTokens(lastInput, appendBoundary), sink); err == nil && changed {
 		total = add(total, compUsage)
-		lastContext = a.estimateContext(a.requestContext(extraContext, sink))
+		lastContext = a.estimateContext(a.requestContext(appendTurnContext(extraContext, steerContext), sink))
 	}
 	if err := a.validateTranscript("after turn"); err != nil {
 		sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
@@ -1622,6 +1711,33 @@ func (a *Agent) textMessage(role llm.Role, text string) llm.Message {
 	return textMessageAt(a.now(), role, text)
 }
 
+// drainSteer pops all queued mid-turn steer inputs, joining their text with a
+// blank line and concatenating images/context into one steering message. It
+// returns an empty input when steering is disabled or nothing is queued. Draining
+// is non-blocking so a concurrent Steer caller can never stall the loop; inputs
+// queued after this drain are deferred to the next tool round.
+func (a *Agent) drainSteer() SteerInput {
+	if a.steer == nil {
+		return SteerInput{}
+	}
+	var out SteerInput
+	for {
+		select {
+		case input := <-a.steer:
+			if strings.TrimSpace(input.Text) != "" {
+				if out.Text != "" {
+					out.Text += "\n\n"
+				}
+				out.Text += input.Text
+			}
+			out.Images = append(out.Images, cloneImageBlocks(input.Images)...)
+			out.RequestContext = append(out.RequestContext, cleanContext(input.RequestContext)...)
+		default:
+			return out
+		}
+	}
+}
+
 func (a *Agent) partialAssistantMessage(res modelTurnResult) llm.Message {
 	msg := a.textMessage(llm.RoleAssistant, res.text)
 	msg.Phase = res.phase
@@ -1710,6 +1826,48 @@ func cloneServerTools(serverTools []llm.ServerTool) []llm.ServerTool {
 	for i := range out {
 		out[i].Parameters = append(json.RawMessage(nil), out[i].Parameters...)
 	}
+	return out
+}
+
+func steerInputEmpty(input SteerInput) bool {
+	if strings.TrimSpace(input.Text) != "" {
+		return false
+	}
+	if len(input.Images) > 0 {
+		return false
+	}
+	for _, item := range input.RequestContext {
+		if strings.TrimSpace(item) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneImageBlocks(blocks []llm.ContentBlock) []llm.ContentBlock {
+	out := make([]llm.ContentBlock, 0, len(blocks))
+	for _, block := range blocks {
+		if block.Kind != llm.BlockImage {
+			continue
+		}
+		out = append(out, block)
+	}
+	return out
+}
+
+func cleanContext(context []string) []string {
+	out := make([]string, 0, len(context))
+	for _, item := range context {
+		if strings.TrimSpace(item) != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func appendTurnContext(extraContext, steerContext []string) []string {
+	out := append([]string(nil), extraContext...)
+	out = append(out, steerContext...)
 	return out
 }
 
