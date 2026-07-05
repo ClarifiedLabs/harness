@@ -26,6 +26,7 @@ import (
 	"harness/internal/auth"
 	"harness/internal/llm"
 	"harness/internal/llm/factory"
+	"harness/internal/llm/tokencount"
 	"harness/internal/metrics"
 	"harness/internal/modelproxy/pricing"
 	"harness/internal/modelproxy/protocol"
@@ -697,6 +698,23 @@ func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Request.Model = target.entry.Name
 	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
+	if codexResponsesUsesLocalTokenCount(target.pc) {
+		count := tokencount.EstimateOpenAIChat(req.Request)
+		if count <= 0 {
+			writeError(cw, http.StatusNotImplemented, &protocol.Error{
+				StatusCode: http.StatusNotImplemented,
+				Code:       "input_token_count_unsupported",
+				Message:    llm.ErrInputTokenCountUnsupported.Error(),
+			})
+			return
+		}
+		cw.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(cw).Encode(protocol.TokenCountResponse{
+			InputTokens: count,
+			Source:      "o200k_base",
+		})
+		return
+	}
 	opts, err := h.runtimeOptionsForTarget(r.Context(), target)
 	if err != nil {
 		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
@@ -1389,6 +1407,23 @@ func reasoningModeForProviderConfig(pc llm.ProviderConfig) string {
 		return "openrouter"
 	}
 	return "openai"
+}
+
+func codexResponsesUsesLocalTokenCount(pc llm.ProviderConfig) bool {
+	apiType := strings.ToLower(strings.TrimSpace(pc.APIType))
+	if apiType == "" {
+		apiType = strings.ToLower(strings.TrimSpace(pc.Name))
+	}
+	if apiType != "responses" {
+		return false
+	}
+	if strings.EqualFold(pc.Name, openAICodexProviderID) {
+		return true
+	}
+	if pc.Auth != nil && strings.EqualFold(pc.Auth.Type, auth.TypeCodexOAuth) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(pc.BaseURL), "chatgpt.com/backend-api/codex")
 }
 
 func resolveServerToolsForTarget(target resolvedTarget, requested []llm.ServerTool) []llm.ServerTool {

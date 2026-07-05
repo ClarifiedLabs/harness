@@ -445,7 +445,7 @@ Edge cases:
 | Stateful continuation | `store` is always sent — `store:true` plus `previous_response_id` when proxy catalog reports `responses_stateful:true` (tools/system still sent each request), `store:false` for the stateless default. If the provider rejects stored responses before streaming output, the agent disables stateful continuation and retries stateless. | ignored | ignored |
 | Assistant phase | assistant `message` input items include stored `phase` (`commentary` or `final_answer`) when present | ignored | ignored |
 | Token cap | `max_output_tokens` is capped by explicit `MaxTokens`, else `min(1_000_000, contextWindow/4)`, then by `outputLimit` and remaining counted/estimated context (omitted if disabled or unresolved) | `max_tokens` follows the same input-aware cap (omitted if unresolved) | `max_tokens` is required and follows the same input-aware cap, falling back to 1,000,000 if unresolved |
-| Input token count | `POST /responses/input_tokens` via the optional `InputTokenCounter` | local `o200k_base` estimate for OpenAI/OpenRouter Chat Completions | `POST /v1/messages/count_tokens` via the optional `InputTokenCounter` |
+| Input token count | `POST /responses/input_tokens` via the optional `InputTokenCounter`; `codex_oauth`/ChatGPT Codex targets use a local `o200k_base` estimate because the Codex CLI protocol does not include a count-token endpoint | local `o200k_base` estimate for OpenAI/OpenRouter Chat Completions | `POST /v1/messages/count_tokens` via the optional `InputTokenCounter` |
 | Streaming usage | final `response.usage` on terminal events | `"stream_options":{"include_usage":true}` (always set) | automatic: input tokens in `message_start`, output in `message_delta` |
 | Stop sequences | not sent | `stop` | `stop_sequences` |
 | Temperature | omitted when nil (never send a spurious 0) | same | same |
@@ -853,7 +853,9 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   numeric `0`; the `-models-dev-cache-ttl` serve/setup/refresh flag overrides it.
 - `POST /v1/input_tokens` accepts `{provider, request}` and returns
   `{input_tokens, source}` when the configured provider implements
-  `InputTokenCounter`; unsupported providers return `501` with
+  `InputTokenCounter`. `codex_oauth` Responses targets return a local
+  `source:"o200k_base"` estimate instead of forwarding to a non-Codex
+  `/responses/input_tokens` endpoint. Unsupported providers return `501` with
   `code:"input_token_count_unsupported"`. Count requests are best-effort
   preflight diagnostics and are not added to usage or cost aggregation.
 - **Usage aggregation.** The proxy keeps a mutex-guarded `{provider, model}` usage

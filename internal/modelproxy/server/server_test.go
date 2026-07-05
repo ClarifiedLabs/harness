@@ -313,6 +313,66 @@ func TestHandlerInputTokens(t *testing.T) {
 	}
 }
 
+func TestHandlerInputTokensUsesLocalEstimateForCodexOAuth(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai-codex.json"), []byte(`{
+  "name": "openai-codex",
+  "api_type": "responses",
+  "base_url": "https://chatgpt.com/backend-api/codex",
+  "auth": {"type":"codex_oauth"},
+  "models": [{"name":"gpt-5.5","context_window":1000000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	constructions := 0
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai-codex.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			constructions++
+			return &countingFakeProvider{FakeProvider: llmtest.New("responses"), count: 4321}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body, _ := json.Marshal(protocol.TokenCountRequest{
+		TargetID: "openai-codex:gpt-5.5",
+		Request: llm.Request{
+			Model:  "openai-codex:gpt-5.5",
+			System: "system instructions",
+			Messages: []llm.Message{{
+				Role: llm.RoleUser,
+				Content: []llm.ContentBlock{{
+					Kind: llm.BlockText,
+					Text: "hello from a codex session",
+				}},
+			}},
+		},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/input_tokens", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST input_tokens: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var out protocol.TokenCountResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out.InputTokens <= 0 || out.Source != "o200k_base" {
+		t.Fatalf("token count = %+v, want positive o200k_base estimate", out)
+	}
+	if constructions != 0 {
+		t.Fatalf("provider constructions = %d, want 0 for local codex token estimate", constructions)
+	}
+}
+
 func TestHandlerInputTokensUnsupported(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
