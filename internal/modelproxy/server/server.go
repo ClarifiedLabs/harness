@@ -698,6 +698,7 @@ func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Request.Model = target.entry.Name
 	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
+	_, req.Request = prepareProviderRequest(req.Request)
 	if codexResponsesUsesLocalTokenCount(target.pc) {
 		count := tokencount.EstimateOpenAIChat(req.Request)
 		if count <= 0 {
@@ -849,6 +850,8 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	req.Request.Model = model
 	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
 	req.Request.Reasoning = h.reasoningForTarget(target, req.ReasoningProfile, req.Request.Reasoning)
+	sessionKey, providerRequest := prepareProviderRequest(req.Request)
+	req.Request = providerRequest
 	opts, err := h.runtimeOptionsForTarget(r.Context(), target)
 	if err != nil {
 		streamErr = err.Error()
@@ -857,11 +860,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	apiType = opts.Provider
 	stateful := providerResponsesStateful(target.pc)
-	cacheKey := h.continuationKey(targetID, req.Request.PromptCacheKey)
+	cacheKey := h.continuationKey(targetID, sessionKey)
 	fullRequest := req.Request
 	fullRequest.Messages = append([]llm.Message(nil), req.Request.Messages...)
 	req.Request = h.applyContinuation(cacheKey, stateful, req.Request)
-	provider, err := h.streamProvider(opts, targetID, req.Request.PromptCacheKey)
+	provider, err := h.streamProvider(opts, targetID, sessionKey)
 	if err != nil {
 		streamErr = err.Error()
 		writeError(cw, http.StatusBadRequest, protocol.ErrorFrom(err))
@@ -1556,6 +1559,22 @@ func (h *Handler) continuationKey(targetID, promptCacheKey string) string {
 		return ""
 	}
 	return targetID + "\x00" + promptCacheKey
+}
+
+func prepareProviderRequest(req llm.Request) (sessionKey string, providerReq llm.Request) {
+	providerReq = req
+	proxySessionID := strings.TrimSpace(req.ProxySessionID)
+	if proxySessionID == "" {
+		return strings.TrimSpace(req.PromptCacheKey), providerReq
+	}
+	providerReq.ProxySessionID = ""
+	providerReq.PromptCacheKey = providerPromptCacheKey(proxySessionID)
+	return proxySessionID, providerReq
+}
+
+func providerPromptCacheKey(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:])
 }
 
 func (h *Handler) applyContinuation(key string, stateful bool, req llm.Request) llm.Request {

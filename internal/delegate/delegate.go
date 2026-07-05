@@ -638,18 +638,19 @@ func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string,
 	updated := r.now()
 	childDir := session.ChildSessionDir(parent.SessionPath, childID)
 	if err := (session.Session{
-		Version:       session.Version,
-		Provider:      launch.ProviderName,
-		Model:         launch.Model,
-		Created:       created,
-		Updated:       updated,
-		System:        launch.System,
-		Agent:         launch.Agent,
-		Turn:          1,
-		Messages:      child.Transcript(),
-		ResponseState: child.ResponseState(),
-		Todos:         todos.Snapshot(),
-		Usage:         session.UsageTotals{Usage: usage.Usage, CostUSD: usage.Usage.CostUSD},
+		Version:        session.Version,
+		Provider:       launch.ProviderName,
+		Model:          launch.Model,
+		Created:        created,
+		Updated:        updated,
+		System:         launch.System,
+		Agent:          launch.Agent,
+		ProxySessionID: child.ProxySessionID(),
+		Turn:           1,
+		Messages:       child.Transcript(),
+		ResponseState:  child.ResponseState(),
+		Todos:          todos.Snapshot(),
+		Usage:          session.UsageTotals{Usage: usage.Usage, CostUSD: usage.Usage.CostUSD},
 	}).Save(childDir); err != nil {
 		return err
 	}

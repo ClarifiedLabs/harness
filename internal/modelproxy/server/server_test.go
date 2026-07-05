@@ -607,6 +607,98 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	}
 }
 
+func TestHandlerStreamUsesProxySessionIDForStateAndHashesProviderPromptCacheKey(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "responses",
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "sk-test",
+  "models": [{"name":"gpt-5.5","context_window":128000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	fp := llmtest.New("responses",
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_1"},
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_2"},
+	)
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			return fp, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	firstMessages := []llm.Message{
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}}},
+	}
+	body, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:gpt-5.5",
+		Request: llm.Request{
+			Model:          "openai:gpt-5.5",
+			ProxySessionID: "harness-session-one",
+			PromptCacheKey: "legacy-key",
+			Messages:       firstMessages,
+		},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST first stream: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first status = %d", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	secondMessages := append([]llm.Message(nil), firstMessages...)
+	secondMessages = append(secondMessages,
+		llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first answer"}}},
+		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}},
+	)
+	body, _ = json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:gpt-5.5",
+		Request: llm.Request{
+			Model:          "openai:gpt-5.5",
+			ProxySessionID: "harness-session-two",
+			PromptCacheKey: "legacy-key",
+			Messages:       secondMessages,
+		},
+	})
+	resp, err = srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST second stream: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("second status = %d", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2: %+v", len(fp.Requests), fp.Requests)
+	}
+	if fp.Requests[0].ProxySessionID != "" || fp.Requests[1].ProxySessionID != "" {
+		t.Fatalf("raw proxy session id reached provider: %+v", fp.Requests)
+	}
+	if got, want := fp.Requests[0].PromptCacheKey, providerPromptCacheKey("harness-session-one"); got != want {
+		t.Fatalf("first provider prompt cache key = %q, want %q", got, want)
+	}
+	if got, want := fp.Requests[1].PromptCacheKey, providerPromptCacheKey("harness-session-two"); got != want {
+		t.Fatalf("second provider prompt cache key = %q, want %q", got, want)
+	}
+	if fp.Requests[1].PreviousResponseID != "" {
+		t.Fatalf("second request continued across proxy sessions: prev=%q", fp.Requests[1].PreviousResponseID)
+	}
+}
+
 func TestHandlerStreamDoesNotContinueShorterTranscriptWithSamePromptCacheKey(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
@@ -950,7 +1042,7 @@ func TestHandlerStreamOmitsMaxOutputTokensForCodexOAuth(t *testing.T) {
 
 	body, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai-codex:gpt-5.5",
-		Request:  llm.Request{Model: "openai-codex:gpt-5.5", PromptCacheKey: "session-a"},
+		Request:  llm.Request{Model: "openai-codex:gpt-5.5", ProxySessionID: "harness-session-a"},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -970,14 +1062,35 @@ func TestHandlerStreamOmitsMaxOutputTokensForCodexOAuth(t *testing.T) {
 	}
 	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
+	bodyB, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "openai-codex:gpt-5.5",
+		Request:  llm.Request{Model: "openai-codex:gpt-5.5", ProxySessionID: "harness-session-b"},
+	})
+	resp, err = srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(bodyB))
+	if err != nil {
+		t.Fatalf("third POST stream: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("third status = %d", resp.StatusCode)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if captured.Provider != "responses" || !captured.OmitMaxOutputTokens || !captured.ResponsesWebSocket {
 		t.Fatalf("captured options = %+v, want responses with OmitMaxOutputTokens and ResponsesWebSocket", captured)
 	}
-	if constructions != 1 {
-		t.Fatalf("provider constructions = %d, want 1 for cached websocket provider", constructions)
+	if constructions != 2 {
+		t.Fatalf("provider constructions = %d, want 2 for two proxy sessions", constructions)
 	}
-	if len(fp.Requests) != 2 {
-		t.Fatalf("fake provider requests = %d, want 2", len(fp.Requests))
+	if len(fp.Requests) != 3 {
+		t.Fatalf("fake provider requests = %d, want 3", len(fp.Requests))
+	}
+	if fp.Requests[0].PromptCacheKey != providerPromptCacheKey("harness-session-a") ||
+		fp.Requests[1].PromptCacheKey != providerPromptCacheKey("harness-session-a") ||
+		fp.Requests[2].PromptCacheKey != providerPromptCacheKey("harness-session-b") {
+		t.Fatalf("provider prompt cache keys = %q, %q, %q", fp.Requests[0].PromptCacheKey, fp.Requests[1].PromptCacheKey, fp.Requests[2].PromptCacheKey)
+	}
+	if fp.Requests[0].ProxySessionID != "" || fp.Requests[1].ProxySessionID != "" || fp.Requests[2].ProxySessionID != "" {
+		t.Fatalf("raw proxy session id reached provider: %+v", fp.Requests)
 	}
 }
 

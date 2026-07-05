@@ -282,7 +282,8 @@ type Request struct {
     StoreResponse      bool
     PreviousResponseID string
     RequestContext     []string // request-only hook/todo/background context
-    PromptCacheKey     string   // stable per-agent cache key (OpenAI/Responses); see §5.4
+    ProxySessionID     string   // harness-local key for proxy continuation/websocket state
+    PromptCacheKey     string   // provider-facing cache-affinity key; proxy derives from ProxySessionID
     LongCacheTTL       bool     // Anthropic 1h cache TTL; set only for interactive sessions
 }
 
@@ -483,16 +484,20 @@ If a provider rejects a request with a parseable
 context-overflow error, the agent records the smaller reported window for the
 session, rebuilds the request, and retries once before surfacing the error.
 
-**Prompt cache mapping.** `Request.PromptCacheKey` is a stable per-agent value:
-an FNV-64a hash of the system prompt plus the advertised tool names, rendered
-`harness-<hex>`. It is identical across a session's turns and its startup
-prewarm, and changes on an agent/model switch that alters the system prompt or
-tool set. Provider configs can control where that key goes with
+**Prompt cache and proxy session mapping.** `Request.ProxySessionID` is a
+harness-local opaque session key. Harness persists it in `state.json`, reuses it
+on resume, and rotates it on `/clear`. The model proxy uses the raw key for
+Responses continuation state and cached Responses WebSocket providers. Before
+calling any concrete provider, the proxy strips the raw key and sets
+`Request.PromptCacheKey` to `hex(sha256(ProxySessionID))`, so API providers see a
+stable cache-affinity value without a harness-specific prefix. Provider configs
+can control where that provider-facing key goes with
 `prompt_cache.key_field`: `auto` (default), `none`, `prompt_cache_key`, or
 `session_id`. `auto` sends `prompt_cache_key` to first-party OpenAI endpoints,
 `session_id` to OpenRouter Chat Completions, and no cache key field to other
 OpenAI-compatible custom base URLs. `prompt_cache.affinity_headers` can also
-copy the stable key into non-auth routing headers such as `x-session-id`.
+copy the provider-facing stable key into non-auth routing headers such as
+`x-session-id`.
 Anthropic does not use this key directly (it pins explicit `cache_control`
 breakpoints).
 
@@ -2066,6 +2071,7 @@ type Session struct {
     Turn          int                `json:"turn,omitempty"`
     Messages      []llm.Message      `json:"messages"`
     ResponseState *llm.ResponseState `json:"response_state,omitempty"` // Responses stateful continuation anchor
+    ProxySessionID string `json:"proxy_session_id,omitempty"` // proxy continuation/cache isolation key
     Todos         []todo.Item        `json:"todos,omitempty"`          // update_todos list, reseeded on resume
     Plans         []plan.Plan        `json:"plans,omitempty"`          // record_plan list, reseeded on resume
     Usage         UsageTotals        `json:"usage"`                    // session aggregate (back-compat + resume seed)

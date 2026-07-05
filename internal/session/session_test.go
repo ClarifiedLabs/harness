@@ -64,12 +64,13 @@ func sampleSession() Session {
 	created := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
 	msgTime := created.Add(time.Minute)
 	return Session{
-		Version:  Version,
-		Provider: "anthropic",
-		Model:    "claude-opus-4-8",
-		Created:  created,
-		Updated:  created.Add(2 * time.Minute),
-		System:   "be terse",
+		Version:        Version,
+		Provider:       "anthropic",
+		Model:          "claude-opus-4-8",
+		Created:        created,
+		Updated:        created.Add(2 * time.Minute),
+		System:         "be terse",
+		ProxySessionID: "harness-session-test",
 		Messages: []llm.Message{
 			{Role: llm.RoleUser, Time: msgTime, Content: []llm.ContentBlock{
 				{Kind: llm.BlockText, Text: "list the dir"},
@@ -117,6 +118,9 @@ func TestSessionRoundTripsPlansAndUsageByModel(t *testing.T) {
 	}
 	if got.UsageByModel["openai/gpt-5.5"].CostUSD != 0.0007 {
 		t.Errorf("per-model cost lost: %+v", got.UsageByModel["openai/gpt-5.5"])
+	}
+	if got.ProxySessionID != "harness-session-test" {
+		t.Errorf("proxy_session_id = %q, want harness-session-test", got.ProxySessionID)
 	}
 }
 

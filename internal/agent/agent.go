@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"regexp"
 	"strconv"
 	"strings"
@@ -210,7 +209,7 @@ type Agent struct {
 	responsesStateful         bool
 	interactive               bool // 1h Anthropic cache breakpoint; see Options.Interactive
 	responseState             llm.ResponseState
-	promptCacheSessionID      string
+	proxySessionID            string
 }
 
 // New constructs an Agent. A non-positive Options.MaxTurns means unlimited.
@@ -245,7 +244,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		showDiffs:                 opts.ShowDiffs,
 		responsesStateful:         opts.ResponsesStateful,
 		interactive:               opts.Interactive,
-		promptCacheSessionID:      newPromptCacheSessionID(),
+		proxySessionID:            newProxySessionID(),
 	}
 }
 
@@ -409,49 +408,39 @@ func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 		ServerTools:    cloneServerTools(a.serverTools),
 		Reasoning:      a.reasoning,
 		RequestContext: append([]string(nil), extraContext...),
-		PromptCacheKey: a.promptCacheKey(),
+		ProxySessionID: a.proxySessionID,
 		LongCacheTTL:   a.interactive,
 	}
 }
 
-// promptCacheKey is a stable per-session prompt-cache routing hint. Its prefix
-// is derived from the system prompt and advertised tool names; the per-agent
-// suffix keeps proxy-managed Responses continuation state from leaking across
-// independent harness sessions that share the same prompt prefix.
-func (a *Agent) promptCacheKey() string {
-	prefix := a.promptCachePrefix()
-	if a.promptCacheSessionID == "" {
-		return prefix
-	}
-	return prefix + "-" + a.promptCacheSessionID
+// ProxySessionID returns the opaque local key used to isolate proxy-managed
+// model state for this agent session.
+func (a *Agent) ProxySessionID() string {
+	return a.proxySessionID
 }
 
-func (a *Agent) promptCachePrefix() string {
-	h := fnv.New64a()
-	h.Write([]byte(a.system))
-	for _, t := range a.toolSpecs {
-		h.Write([]byte{0})
-		h.Write([]byte(t.Name))
+// SetProxySessionID restores a persisted proxy session key on resume.
+func (a *Agent) SetProxySessionID(id string) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		a.proxySessionID = newProxySessionID()
+		return
 	}
-	for _, t := range a.serverTools {
-		h.Write([]byte{0})
-		h.Write([]byte(t.Name))
-		h.Write([]byte{0})
-		h.Write([]byte(t.Kind))
-		if len(t.Parameters) > 0 {
-			h.Write([]byte{0})
-			h.Write(t.Parameters)
-		}
-	}
-	return "harness-" + strconv.FormatUint(h.Sum64(), 16)
+	a.proxySessionID = id
 }
 
-func newPromptCacheSessionID() string {
+// ResetProxySessionID rotates proxy-managed model state for a fresh session.
+func (a *Agent) ResetProxySessionID() {
+	a.proxySessionID = newProxySessionID()
+	a.resetResponseState()
+}
+
+func newProxySessionID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err == nil {
-		return hex.EncodeToString(b[:])
+		return "harness-session-" + hex.EncodeToString(b[:])
 	}
-	return strconv.FormatInt(time.Now().UnixNano(), 36)
+	return "harness-session-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
 // PrewarmRequest builds a minimal request that writes the prompt cache — the
@@ -593,7 +582,7 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 		MaxTokens:            a.maxOutputTokens,
 		StoreResponse:        a.responsesStateful,
 		RequestContext:       append([]string(nil), requestContext...),
-		PromptCacheKey:       a.promptCacheKey(),
+		ProxySessionID:       a.proxySessionID,
 		LongCacheTTL:         a.interactive,
 		EstimatedInputTokens: estimate.Total,
 		ContextWindowHint:    estimate.Window,

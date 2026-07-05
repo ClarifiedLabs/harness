@@ -70,10 +70,24 @@ func (p *Provider) runWebSocketLocked(ctx context.Context, req llm.Request, yiel
 	if err != nil {
 		return &llm.APIError{Message: "marshal websocket request: " + err.Error()}
 	}
-	conn, err := p.webSocketConnLocked(ctx, req)
-	if err != nil {
+	for attempt := 0; ; attempt++ {
+		conn, reused, err := p.webSocketConnLocked(ctx, req)
+		if err != nil {
+			return err
+		}
+		emitted, retryFresh, err := p.runWebSocketOnConn(ctx, conn, string(body), yield)
+		if err == nil {
+			return nil
+		}
+		p.closeWebSocketLocked()
+		if reused && !emitted && retryFresh && attempt == 0 {
+			continue
+		}
 		return err
 	}
+}
+
+func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body string, yield func(llm.StreamEvent, error) bool) (emitted bool, retryFresh bool, err error) {
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -84,20 +98,31 @@ func (p *Provider) runWebSocketLocked(ctx context.Context, req llm.Request, yiel
 	}()
 	defer close(done)
 
-	if err := conn.SendText(string(body)); err != nil {
-		p.closeWebSocketLocked()
-		return &llm.APIError{Message: "websocket send: " + err.Error(), Retryable: true}
+	wrappedYield := func(ev llm.StreamEvent, err error) bool {
+		if err == nil {
+			emitted = true
+		}
+		return yield(ev, err)
+	}
+
+	if err := conn.SendText(body); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return emitted, false, ctxErr
+		}
+		return emitted, true, &llm.APIError{Message: "websocket send: " + err.Error(), Retryable: true}
 	}
 
 	decoder := newStreamDecoder()
 	for {
 		text, err := conn.ReadText(ctx)
 		if err != nil {
-			p.closeWebSocketLocked()
-			if errors.Is(err, io.EOF) {
-				return fmt.Errorf("responses websocket: stream ended before terminal event")
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return emitted, false, ctxErr
 			}
-			return err
+			if errors.Is(err, io.EOF) {
+				return emitted, true, fmt.Errorf("responses websocket: stream ended before terminal event")
+			}
+			return emitted, true, err
 		}
 		data := strings.TrimSpace(text)
 		if data == "" || data == "[DONE]" {
@@ -105,39 +130,37 @@ func (p *Provider) runWebSocketLocked(ctx context.Context, req llm.Request, yiel
 		}
 		p.captureWebSocketTurnState(data)
 		if apiErr := webSocketErrorEvent(data); apiErr != nil {
-			p.closeWebSocketLocked()
-			return apiErr
+			return emitted, false, apiErr
 		}
-		done, err := decoder.handle(data, yield)
-		if err != nil {
-			p.closeWebSocketLocked()
-			return err
+		streamDone, handleErr := decoder.handle(data, wrappedYield)
+		if handleErr != nil {
+			return emitted, false, handleErr
 		}
-		if done {
-			return nil
+		if streamDone {
+			return emitted, false, nil
 		}
 	}
 }
 
-func (p *Provider) webSocketConnLocked(ctx context.Context, req llm.Request) (*ws.Conn, error) {
+func (p *Provider) webSocketConnLocked(ctx context.Context, req llm.Request) (*ws.Conn, bool, error) {
 	if p.wsConn != nil {
-		return p.wsConn, nil
+		return p.wsConn, true, nil
 	}
 	u, err := p.webSocketURL()
 	if err != nil {
-		return nil, &llm.APIError{Message: "build websocket URL: " + err.Error()}
+		return nil, false, &llm.APIError{Message: "build websocket URL: " + err.Error()}
 	}
 	header := p.webSocketHeaders(req)
 	conn, resp, err := ws.Dial(ctx, u, header)
 	if err != nil {
 		if resp != nil && resp.StatusCode != http.StatusSwitchingProtocols {
 			defer resp.Body.Close()
-			return nil, parseErrorResponse(resp)
+			return nil, false, parseErrorResponse(resp)
 		}
-		return nil, &llm.APIError{Message: "websocket connect: " + err.Error(), Retryable: true}
+		return nil, false, &llm.APIError{Message: "websocket connect: " + err.Error(), Retryable: true}
 	}
 	p.wsConn = conn
-	return conn, nil
+	return conn, false, nil
 }
 
 func (p *Provider) closeWebSocketLocked() {

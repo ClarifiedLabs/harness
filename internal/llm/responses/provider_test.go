@@ -910,6 +910,68 @@ func TestStreamWebSocketReusesConnectionWithTurnState(t *testing.T) {
 	}
 }
 
+func TestStreamWebSocketReconnectsStaleReusedConnection(t *testing.T) {
+	var handshakes atomic.Int32
+	gotRequests := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := handshakes.Add(1)
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatalf("response writer is not a hijacker")
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		defer conn.Close()
+		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+		fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+		fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+		fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", testAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+		if err := rw.Flush(); err != nil {
+			t.Fatalf("flush handshake: %v", err)
+		}
+		reqText, err := ws.ReadClientText(rw.Reader)
+		if err != nil {
+			t.Fatalf("read websocket request %d: %v", n, err)
+		}
+		gotRequests <- reqText
+		if n == 1 {
+			if err := ws.WriteServerText(conn, `{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`); err != nil {
+				t.Fatalf("write first completed: %v", err)
+			}
+			return
+		}
+		if err := ws.WriteServerText(conn, `{"type":"response.output_text.delta","delta":"fresh","output_index":0,"content_index":0}`); err != nil {
+			t.Fatalf("write second delta: %v", err)
+		}
+		if err := ws.WriteServerText(conn, `{"type":"response.completed","response":{"id":"resp_2","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`); err != nil {
+			t.Fatalf("write second completed: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, Sleep: func(time.Duration) {}})
+	if _, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4"))); err != nil {
+		t.Fatalf("first Stream: %v", err)
+	}
+	events, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4")))
+	if err != nil {
+		t.Fatalf("second Stream: %v", err)
+	}
+	if got := textOf(events); got != "fresh" {
+		t.Fatalf("second text = %q, want fresh", got)
+	}
+	if got := handshakes.Load(); got != 2 {
+		t.Fatalf("websocket handshakes = %d, want reconnect with exactly 2", got)
+	}
+	first := <-gotRequests
+	second := <-gotRequests
+	if !strings.Contains(first, `"type":"response.create"`) || !strings.Contains(second, `"type":"response.create"`) {
+		t.Fatalf("unexpected websocket requests: first=%s second=%s", first, second)
+	}
+}
+
 func testAcceptKey(key string) string {
 	sum := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
 	return base64.StdEncoding.EncodeToString(sum[:])

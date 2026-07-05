@@ -122,8 +122,11 @@ stateful continuation for that agent and retries the request stateless.
 Provider configs may set `prompt_cache.key_field` to `auto`, `none`,
 `prompt_cache_key`, or `session_id`; `auto` sends `prompt_cache_key` to
 first-party OpenAI endpoints, `session_id` to OpenRouter, and omits cache key
-fields for other custom OpenAI-compatible base URLs. `prompt_cache.affinity_headers`
-can copy the same key into non-auth routing headers such as `x-session-id`.
+fields for other custom OpenAI-compatible base URLs. The model proxy derives the
+provider-facing cache key as `sha256` of harness's local session key, so providers
+do not receive the raw harness session identifier. `prompt_cache.affinity_headers`
+can copy the same provider-facing key into non-auth routing headers such as
+`x-session-id`.
 
 While serving, the proxy also answers a read-only `GET /v1/usage` that aggregates
 token and cost totals per model target (including delegate child-agent spend),

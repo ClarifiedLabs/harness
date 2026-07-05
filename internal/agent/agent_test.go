@@ -520,45 +520,43 @@ func TestEncryptedReasoningPersistedAndReplayed(t *testing.T) {
 	}
 }
 
-func TestPromptCacheKeyStablePerSessionAndPrefixSensitive(t *testing.T) {
+func TestProxySessionIDStablePerSessionAndRequestScoped(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn}, llmtest.Step{Stop: llm.StopEndTurn})
 	a := newAgent(fp, tools.Default(), Options{})
 
-	key := a.promptCacheKey()
-	if key == "" {
-		t.Fatal("prompt cache key is empty")
-	}
-	prefix := a.promptCachePrefix()
-	if !strings.HasPrefix(key, prefix+"-") {
-		t.Fatalf("cache key = %q, want prefix %q plus session suffix", key, prefix)
+	key := a.ProxySessionID()
+	if !strings.HasPrefix(key, "harness-session-") {
+		t.Fatalf("proxy session id = %q, want harness-session-*", key)
 	}
 
-	// Every turn in a session reuses the same key, so requests with the same
-	// large system+tools prefix keep landing on the same cache backend without
-	// sharing proxy continuation state with other sessions.
+	// Every turn in a session reuses the same local proxy key. The model proxy
+	// derives the provider-facing prompt cache key from it.
 	for _, prompt := range []string{"one", "two"} {
 		if err := a.RunTurn(context.Background(), prompt, &recordSink{}); err != nil {
 			t.Fatalf("RunTurn %q: %v", prompt, err)
 		}
 	}
-	if got := fp.Requests[0].PromptCacheKey; got == "" || got != key {
-		t.Fatalf("request[0] cache key = %q, want %q", got, key)
+	if got := fp.Requests[0].ProxySessionID; got != key {
+		t.Fatalf("request[0] proxy session id = %q, want %q", got, key)
 	}
-	if fp.Requests[0].PromptCacheKey != fp.Requests[1].PromptCacheKey {
-		t.Fatalf("cache key changed across turns: %q vs %q", fp.Requests[0].PromptCacheKey, fp.Requests[1].PromptCacheKey)
+	if fp.Requests[0].PromptCacheKey != "" {
+		t.Fatalf("agent request prompt cache key = %q, want proxy to derive it", fp.Requests[0].PromptCacheKey)
+	}
+	if fp.Requests[0].ProxySessionID != fp.Requests[1].ProxySessionID {
+		t.Fatalf("proxy session id changed across turns: %q vs %q", fp.Requests[0].ProxySessionID, fp.Requests[1].ProxySessionID)
 	}
 
-	if other := newAgent(fp, tools.Default(), Options{}).promptCacheKey(); other == key {
-		t.Fatalf("cache key reused across agent sessions: %q", key)
+	if other := newAgent(fp, tools.Default(), Options{}).ProxySessionID(); other == key {
+		t.Fatalf("proxy session id reused across agent sessions: %q", key)
 	}
 
-	// A different advertised tool set is a different prefix, so the key must change.
-	subset, err := tools.Default().Subset([]string{"read_file"})
-	if err != nil {
-		t.Fatalf("Subset: %v", err)
+	a.SetProxySessionID("restored-session")
+	if a.ProxySessionID() != "restored-session" {
+		t.Fatalf("restored proxy session id = %q", a.ProxySessionID())
 	}
-	if other := newAgent(fp, subset, Options{}).promptCachePrefix(); other == prefix {
-		t.Fatalf("cache prefix did not change for a different tool set: %q", other)
+	a.ResetProxySessionID()
+	if a.ProxySessionID() == "" || a.ProxySessionID() == "restored-session" {
+		t.Fatalf("reset proxy session id = %q", a.ProxySessionID())
 	}
 }
 

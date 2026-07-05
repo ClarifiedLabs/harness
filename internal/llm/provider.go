@@ -61,11 +61,15 @@ type Request struct {
 	PreviousResponseID string   `json:"previous_response_id,omitempty"`
 	RequestContext     []string `json:"request_context,omitempty"`
 
-	// PromptCacheKey is a stable per-session routing hint emitted as
-	// prompt_cache_key on OpenAI/Responses so a session's requests, which share a
-	// large system+tools prefix, keep landing on the same cache backend without
-	// sharing provider-side continuation state with independent sessions. Empty =
-	// omitted; ignored by providers that don't support it.
+	// ProxySessionID is a harness-local session key used by harness-model-proxy
+	// to isolate continuation and websocket state. Concrete provider dialects
+	// must not forward this value upstream.
+	ProxySessionID string `json:"proxy_session_id,omitempty"`
+
+	// PromptCacheKey is a provider-facing cache-affinity hint emitted as
+	// prompt_cache_key or session_id by providers that support it. When requests
+	// flow through harness-model-proxy, the proxy derives this from ProxySessionID
+	// instead of forwarding the local session id.
 	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 
 	// LongCacheTTL requests the 1-hour Anthropic prompt-cache breakpoint on the

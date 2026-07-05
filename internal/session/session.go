@@ -35,19 +35,20 @@ const (
 
 // Session is the compact, resumable conversation state.
 type Session struct {
-	Version       int                `json:"version"`
-	Provider      string             `json:"provider"`
-	Model         string             `json:"model"`
-	Created       time.Time          `json:"created"`
-	Updated       time.Time          `json:"updated"`
-	System        string             `json:"system"`
-	Agent         string             `json:"agent,omitempty"`
-	Turn          int                `json:"turn,omitempty"`
-	Messages      []llm.Message      `json:"messages"`
-	ResponseState *llm.ResponseState `json:"response_state,omitempty"`
-	Todos         []todo.Item        `json:"todos,omitempty"`
-	Plans         []plan.Plan        `json:"plans,omitempty"`
-	Usage         UsageTotals        `json:"usage"`
+	Version        int                `json:"version"`
+	Provider       string             `json:"provider"`
+	Model          string             `json:"model"`
+	Created        time.Time          `json:"created"`
+	Updated        time.Time          `json:"updated"`
+	System         string             `json:"system"`
+	Agent          string             `json:"agent,omitempty"`
+	ProxySessionID string             `json:"proxy_session_id,omitempty"`
+	Turn           int                `json:"turn,omitempty"`
+	Messages       []llm.Message      `json:"messages"`
+	ResponseState  *llm.ResponseState `json:"response_state,omitempty"`
+	Todos          []todo.Item        `json:"todos,omitempty"`
+	Plans          []plan.Plan        `json:"plans,omitempty"`
+	Usage          UsageTotals        `json:"usage"`
 	// UsageByModel breaks usage and cost down per "provider/model" so a session
 	// that switches models still reports accurate per-model cost. Usage stays as
 	// the session aggregate for back-compat and resume seeding.

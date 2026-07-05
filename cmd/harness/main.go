@@ -818,6 +818,7 @@ func run(env environment) int {
 		if sessionResponseStateCompatible(cfg, catalog, s, cfg.Provider, cfg.Model) {
 			resumeResponseState = s.ResponseState
 		}
+		ag.SetProxySessionID(s.ProxySessionID)
 	}
 	ag.SetSystem(systemPrompt)
 	activeToolNames := toolRegistry.Names()
