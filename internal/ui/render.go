@@ -1104,13 +1104,25 @@ func largeRequestWarning(ctx agent.ContextEstimate) string {
 	if payload == 0 {
 		payload = ctx.Total
 	}
-	largeWindow := ctx.Window > 0 && (ctx.Total*2 >= ctx.Window || payload*2 >= ctx.Window)
-	if !largeWindow && ctx.Tools < 10_000 {
+	largeContext := ctx.Window > 0 && ctx.Total*2 >= ctx.Window
+	largePayload := ctx.Window > 0 && payload*2 >= ctx.Window
+	largeTools := ctx.Tools >= 10_000
+	if !largeContext && !largePayload && !largeTools {
 		return ""
 	}
-	return fmt.Sprintf("[warning: large model request: ctx %s/%s payload %s (sys %s tools %s msgs %s); large prompts/tool schemas can slow response start]",
+
+	if largeTools && !largeContext && !largePayload {
+		return fmt.Sprintf("[warning: large tool schema payload: tools %s; large tool schemas can slow response start]",
+			humanTokens(ctx.Tools))
+	}
+
+	note := "large payloads can slow response start"
+	if ctx.Messages >= ctx.Tools && ctx.Messages >= ctx.System {
+		note = "message/tool-result history dominates; cached or continued tokens still count toward the context window"
+	}
+	return fmt.Sprintf("[warning: large model context: ctx %s/%s payload estimate %s (sys %s tools %s msgs %s); %s]",
 		humanTokens(ctx.Total), humanTokens(ctx.Window), humanTokens(payload),
-		humanTokens(ctx.System), humanTokens(ctx.Tools), humanTokens(ctx.Messages))
+		humanTokens(ctx.System), humanTokens(ctx.Tools), humanTokens(ctx.Messages), note)
 }
 
 func modelTurnPhrase(n int) string {

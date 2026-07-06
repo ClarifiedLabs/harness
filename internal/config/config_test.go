@@ -191,28 +191,35 @@ func TestExplicitProviderIsPreserved(t *testing.T) {
 // HARNESS_* env mapping covers the user-facing flags.
 func TestHarnessEnvMapping(t *testing.T) {
 	env := envFrom(map[string]string{
-		"HARNESS_MODEL":                  "env-model",
-		"HARNESS_MODEL_PROXY_URL":        "http://proxy.example",
-		"HARNESS_MAX_TURNS":              "12",
-		"HARNESS_DEFAULT_CONTEXT_WINDOW": "512000",
-		"HARNESS_CONTEXT_WINDOW":         "256000",
-		"HARNESS_REASONING":              "HIGH",
-		"HARNESS_REASONING_SUMMARY":      "AUTO",
-		"HARNESS_RESPONSES_STATEFUL":     "true",
-		"HARNESS_TRACE_PROXY":            "true",
-		"HARNESS_SEARCH_TOOLS":           "both",
-		"HARNESS_TOOL_RESULT_MAX_BYTES":  "32768",
-		"HARNESS_TOOL_RESULT_MAX_LINES":  "500",
-		"HARNESS_SYSTEM_PROMPT":          "env system prompt",
-		"HARNESS_NO_ENV":                 "true",
-		"HARNESS_NO_COLOR":               "true",
-		"HARNESS_TIMESTAMPS":             "full",
-		"HARNESS_VERBOSE":                "true",
-		"HARNESS_TOOL_STREAM":            "false",
-		"HARNESS_SHOW_DIFFS":             "true",
-		"HARNESS_REPL_PROMPT":            "env> ",
-		"HARNESS_REPL_EDIT_MODE":         "vi",
-		"LOG_LEVEL":                      "WARN",
+		"HARNESS_MODEL":                      "env-model",
+		"HARNESS_MODEL_PROXY_URL":            "http://proxy.example",
+		"HARNESS_MAX_TURNS":                  "12",
+		"HARNESS_DEFAULT_CONTEXT_WINDOW":     "512000",
+		"HARNESS_CONTEXT_WINDOW":             "256000",
+		"HARNESS_REASONING":                  "HIGH",
+		"HARNESS_REASONING_SUMMARY":          "AUTO",
+		"HARNESS_RESPONSES_STATEFUL":         "true",
+		"HARNESS_TRACE_PROXY":                "true",
+		"HARNESS_SEARCH_TOOLS":               "both",
+		"HARNESS_TOOL_RESULT_MAX_BYTES":      "32768",
+		"HARNESS_TOOL_RESULT_MAX_LINES":      "500",
+		"HARNESS_RG_RESULT_MAX_BYTES":        "24576",
+		"HARNESS_RG_RESULT_MAX_LINES":        "300",
+		"HARNESS_GREP_RESULT_MAX_BYTES":      "20480",
+		"HARNESS_GREP_RESULT_MAX_LINES":      "250",
+		"HARNESS_READ_FILE_DEFAULT_LIMIT":    "400",
+		"HARNESS_READ_FILE_RESULT_MAX_BYTES": "28672",
+		"HARNESS_READ_FILE_RESULT_MAX_LINES": "450",
+		"HARNESS_SYSTEM_PROMPT":              "env system prompt",
+		"HARNESS_NO_ENV":                     "true",
+		"HARNESS_NO_COLOR":                   "true",
+		"HARNESS_TIMESTAMPS":                 "full",
+		"HARNESS_VERBOSE":                    "true",
+		"HARNESS_TOOL_STREAM":                "false",
+		"HARNESS_SHOW_DIFFS":                 "true",
+		"HARNESS_REPL_PROMPT":                "env> ",
+		"HARNESS_REPL_EDIT_MODE":             "vi",
+		"LOG_LEVEL":                          "WARN",
 	})
 	c, err := Load(nil, env, "")
 	if err != nil {
@@ -253,6 +260,18 @@ func TestHarnessEnvMapping(t *testing.T) {
 	}
 	if c.ToolResultMaxLines != 500 {
 		t.Fatalf("tool result max lines = %d, want 500", c.ToolResultMaxLines)
+	}
+	if c.RGResultMaxBytes != 24576 || c.RGResultMaxLines != 300 {
+		t.Fatalf("rg result limits = %d/%d, want 24576/300", c.RGResultMaxBytes, c.RGResultMaxLines)
+	}
+	if c.GrepResultMaxBytes != 20480 || c.GrepResultMaxLines != 250 {
+		t.Fatalf("grep result limits = %d/%d, want 20480/250", c.GrepResultMaxBytes, c.GrepResultMaxLines)
+	}
+	if c.ReadFileDefaultLimit != 400 {
+		t.Fatalf("read file default limit = %d, want 400", c.ReadFileDefaultLimit)
+	}
+	if c.ReadFileResultMaxBytes != 28672 || c.ReadFileResultMaxLines != 450 {
+		t.Fatalf("read file result limits = %d/%d, want 28672/450", c.ReadFileResultMaxBytes, c.ReadFileResultMaxLines)
 	}
 	if c.SystemPrompt != "env system prompt" {
 		t.Fatalf("system prompt %q", c.SystemPrompt)
@@ -498,19 +517,56 @@ func TestWebSearchPrecedenceAndValidation(t *testing.T) {
 }
 
 func TestToolResultLimitPrecedenceEnvBeatsFile(t *testing.T) {
-	cfgPath := writeConfig(t, `{"tool_result_max_bytes":111,"tool_result_max_lines":222}`)
+	cfgPath := writeConfig(t, `{
+		"tool_result_max_bytes":111,
+		"tool_result_max_lines":222,
+		"rg_result_max_bytes":11,
+		"rg_result_max_lines":12,
+		"grep_result_max_bytes":21,
+		"grep_result_max_lines":22,
+		"read_file_default_limit":31,
+		"read_file_result_max_bytes":32,
+		"read_file_result_max_lines":33
+	}`)
 
 	fileCfg := loadOK(t, nil, noEnv, cfgPath)
 	if fileCfg.ToolResultMaxBytes != 111 || fileCfg.ToolResultMaxLines != 222 {
 		t.Fatalf("file tool result limits = %d/%d, want 111/222", fileCfg.ToolResultMaxBytes, fileCfg.ToolResultMaxLines)
 	}
+	if fileCfg.RGResultMaxBytes != 11 || fileCfg.RGResultMaxLines != 12 {
+		t.Fatalf("file rg limits = %d/%d, want 11/12", fileCfg.RGResultMaxBytes, fileCfg.RGResultMaxLines)
+	}
+	if fileCfg.GrepResultMaxBytes != 21 || fileCfg.GrepResultMaxLines != 22 {
+		t.Fatalf("file grep limits = %d/%d, want 21/22", fileCfg.GrepResultMaxBytes, fileCfg.GrepResultMaxLines)
+	}
+	if fileCfg.ReadFileDefaultLimit != 31 || fileCfg.ReadFileResultMaxBytes != 32 || fileCfg.ReadFileResultMaxLines != 33 {
+		t.Fatalf("file read_file limits = default %d result %d/%d, want 31 and 32/33",
+			fileCfg.ReadFileDefaultLimit, fileCfg.ReadFileResultMaxBytes, fileCfg.ReadFileResultMaxLines)
+	}
 
 	envCfg := loadOK(t, nil, envFrom(map[string]string{
-		"HARNESS_TOOL_RESULT_MAX_BYTES": "333",
-		"HARNESS_TOOL_RESULT_MAX_LINES": "444",
+		"HARNESS_TOOL_RESULT_MAX_BYTES":      "333",
+		"HARNESS_TOOL_RESULT_MAX_LINES":      "444",
+		"HARNESS_RG_RESULT_MAX_BYTES":        "55",
+		"HARNESS_RG_RESULT_MAX_LINES":        "56",
+		"HARNESS_GREP_RESULT_MAX_BYTES":      "65",
+		"HARNESS_GREP_RESULT_MAX_LINES":      "66",
+		"HARNESS_READ_FILE_DEFAULT_LIMIT":    "75",
+		"HARNESS_READ_FILE_RESULT_MAX_BYTES": "76",
+		"HARNESS_READ_FILE_RESULT_MAX_LINES": "77",
 	}), cfgPath)
 	if envCfg.ToolResultMaxBytes != 333 || envCfg.ToolResultMaxLines != 444 {
 		t.Fatalf("env tool result limits = %d/%d, want 333/444", envCfg.ToolResultMaxBytes, envCfg.ToolResultMaxLines)
+	}
+	if envCfg.RGResultMaxBytes != 55 || envCfg.RGResultMaxLines != 56 {
+		t.Fatalf("env rg limits = %d/%d, want 55/56", envCfg.RGResultMaxBytes, envCfg.RGResultMaxLines)
+	}
+	if envCfg.GrepResultMaxBytes != 65 || envCfg.GrepResultMaxLines != 66 {
+		t.Fatalf("env grep limits = %d/%d, want 65/66", envCfg.GrepResultMaxBytes, envCfg.GrepResultMaxLines)
+	}
+	if envCfg.ReadFileDefaultLimit != 75 || envCfg.ReadFileResultMaxBytes != 76 || envCfg.ReadFileResultMaxLines != 77 {
+		t.Fatalf("env read_file limits = default %d result %d/%d, want 75 and 76/77",
+			envCfg.ReadFileDefaultLimit, envCfg.ReadFileResultMaxBytes, envCfg.ReadFileResultMaxLines)
 	}
 }
 

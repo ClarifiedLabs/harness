@@ -736,8 +736,9 @@ is explicitly set on the CLI.
 
 Precedence: **flags > environment > config file > built-in defaults** — for settings
 that *have* a flag. A few knobs have no flag and resolve **env > config file > default**:
-MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Others
-(agent definitions, compaction knobs, `read_file_default_limit`, `agents_md_warn_bytes`,
+MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, the global tool-result caps, and
+the per-tool `rg`/`grep`/`read_file` caps. Others
+(agent definitions, compaction knobs, `agents_md_warn_bytes`,
 `delegate_max_turns`) are config-file-only (listed below).
 
 - Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_PROVIDER`, `HARNESS_MODEL`, plus
@@ -758,12 +759,16 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, and the tool-result caps. Other
   model_proxy_url, agent definitions, hooks, flag defaults, and
   context-efficiency knobs.
   `agents_md_warn_bytes` (applied to each AGENTS.md file independently),
-  `read_file_default_limit`, `compact_keep_turns`, `compact_summary_max_tokens`,
+  `compact_keep_turns`, `compact_summary_max_tokens`,
   and `compact_tool_result_max_bytes` are config-only.
   Tool-result truncation uses config `tool_result_max_bytes` /
   `tool_result_max_lines` or env `HARNESS_TOOL_RESULT_MAX_BYTES` /
-  `HARNESS_TOOL_RESULT_MAX_LINES`. `delegate_max_turns` (default `20`) is
-  config-only for the delegate tool.
+  `HARNESS_TOOL_RESULT_MAX_LINES`. `rg`/`grep` result caps use
+  `rg_result_max_bytes`, `rg_result_max_lines`, `grep_result_max_bytes`, and
+  `grep_result_max_lines`, or matching `HARNESS_*` env vars. `read_file` uses
+  `read_file_default_limit`, `read_file_result_max_bytes`, and
+  `read_file_result_max_lines`, or matching `HARNESS_*` env vars.
+  `delegate_max_turns` (default `20`) is config-only for the delegate tool.
 - Hooks use inline `hooks` plus config-relative `hook_configs` files. They are
   additive in order: inline first, then each listed file. `--hooks <file>`
   replaces the configured hook set for one launch.
@@ -1050,7 +1055,13 @@ deadline via `SelfTimeouter` only **raises** the ceiling, never lowers it, so
 A central cap in `Dispatch` (backstop for every tool): **64 KB or 1000 lines per
 result** by default, configurable with `tool_result_max_bytes` and
 `tool_result_max_lines`, or env `HARNESS_TOOL_RESULT_MAX_BYTES` and
-`HARNESS_TOOL_RESULT_MAX_LINES`. The first cap hit adds a teaching marker:
+`HARNESS_TOOL_RESULT_MAX_LINES`. Noisy file-inspection tools install smaller
+defaults when no global cap is configured: `rg`/`grep` use 32 KB or 500 lines,
+and `read_file` uses a 500-line default window plus a 32 KB result cap. Per-tool
+caps are configurable with `rg_result_max_bytes` / `rg_result_max_lines`,
+`grep_result_max_bytes` / `grep_result_max_lines`, and
+`read_file_result_max_bytes` / `read_file_result_max_lines`. The first cap hit
+adds a teaching marker:
 
 ```
 [truncated: showing first 1000 of 4213 lines; use read_file offset/limit or grep to narrow]
@@ -1156,7 +1167,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `path` | string | single file; required unless `paths` is given |
 | `paths` | array of strings | multi-file mode; each file rendered under a `==> path <==` header with its own per-file line budget; `offset` is ignored |
 | `offset` | int | 1-based starting line (single-file mode only) |
-| `limit` | int | max lines, default 1000 or `read_file_default_limit` |
+| `limit` | int | max lines, default 500 or `read_file_default_limit` |
 
 - Output is line-numbered (`cat -n` style: right-aligned number, tab, line). Line
   numbers make `edit` targeting and grep cross-referencing far more reliable.

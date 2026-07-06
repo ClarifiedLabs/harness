@@ -17,7 +17,7 @@ import (
 const binarySniffBytes = 8 * 1024
 
 // defaultReadFileLimit is the default number of lines returned (design §9.1).
-const defaultReadFileLimit = 1000
+const defaultReadFileLimit = 500
 
 // multiReadMinPerPathLimit floors the per-file budget in a multi-file read so
 // each file still shows a useful head even when many paths share the line cap.
@@ -34,7 +34,7 @@ const readFileSchema = `{
       "description": "Multiple files to read in one call, each under a \"==> path <==\" header with its own per-file line budget. Use instead of path to batch reads during orientation; offset is ignored in this mode."
     },
     "offset": {"type": "integer", "description": "1-based starting line (single-path reads only)."},
-    "limit": {"type": "integer", "description": "Maximum number of lines (default 1000); with paths it is the per-file budget."}
+    "limit": {"type": "integer", "description": "Maximum number of lines (default 500); with paths it is the per-file budget."}
   }
 }`
 
@@ -188,8 +188,8 @@ func readOneFile(path string, offset, limit int) (string, error) {
 
 // numberLines renders lines as "<n>\t<line>"; startLine is the 1-based number of
 // the first line. The number is emitted with no column padding: the model parses
-// the integer, not its alignment, and a fixed-width pad wastes ~3-5KB on a
-// default 1000-line read.
+// the integer, not its alignment, and a fixed-width pad wastes bytes on large
+// reads.
 func numberLines(lines []string, startLine int) string {
 	var b strings.Builder
 	for i, ln := range lines {

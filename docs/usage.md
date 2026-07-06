@@ -176,9 +176,10 @@ and Z.AI. Harness only declares it when `-web-search auto` (or
 
 Precedence is **flags > environment > config file > built-in defaults** for any
 setting that has a flag. Settings with no flag use **environment > config file >
-default**. This covers the MCP/LSP `enable` and `proxy` keys and the tool-result
-caps (`HARNESS_TOOL_RESULT_MAX_BYTES` / `HARNESS_TOOL_RESULT_MAX_LINES`). A few
-context-efficiency knobs are config-file-only.
+default**. This covers the MCP/LSP `enable` and `proxy` keys, global
+tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
+`HARNESS_TOOL_RESULT_MAX_LINES`), and the per-tool caps for `rg`, `grep`, and
+`read_file`. A few context-efficiency knobs are config-file-only.
 
 - Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_PROVIDER`, `HARNESS_MODEL`,
   `HARNESS_MAX_TURNS`, `HARNESS_MAX_TURN_TOKENS`,
@@ -213,12 +214,17 @@ context-efficiency knobs are config-file-only.
   `--models` prints the configured proxy model catalog. Use `--format json` with
   `--agents`, `--models`, or `--check-model-proxy` for structured output.
 - Context-efficiency knobs are config-file-only except where noted:
-  `agents_md_warn_bytes`, `read_file_default_limit`, `compact_keep_turns`,
-  `compact_summary_max_tokens`, and `compact_tool_result_max_bytes`.
+  `agents_md_warn_bytes`, `compact_keep_turns`, `compact_summary_max_tokens`,
+  and `compact_tool_result_max_bytes`.
   Tool-result truncation is controlled by config `tool_result_max_bytes` /
   `tool_result_max_lines` or env `HARNESS_TOOL_RESULT_MAX_BYTES` /
-  `HARNESS_TOOL_RESULT_MAX_LINES`. The delegate tool also has
-  `delegate_max_turns` as a config-file-only cap.
+  `HARNESS_TOOL_RESULT_MAX_LINES`. `rg` and `grep` default to 32 KB / 500 lines
+  and can be overridden with `rg_result_max_bytes`, `rg_result_max_lines`,
+  `grep_result_max_bytes`, and `grep_result_max_lines`, or the matching
+  `HARNESS_*` env vars. `read_file` defaults to 500 lines and a 32 KB result cap;
+  configure `read_file_default_limit`, `read_file_result_max_bytes`, and
+  `read_file_result_max_lines`, or matching `HARNESS_*` env vars. The delegate
+  tool also has `delegate_max_turns` as a config-file-only cap.
 - Tool-surface limits for MCP and LSP are config-file-only: `mcp.max_tools` caps
   how many discovered remote MCP tools are auto-exposed (`0` = unlimited),
   `mcp.disabled_servers` is a list of remote MCP server names dropped from

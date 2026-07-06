@@ -364,6 +364,67 @@ func TestDispatchTruncateLinesStillRespectsBytes(t *testing.T) {
 	}
 }
 
+func TestDefaultWithOptionsUsesNoisyToolResultDefaults(t *testing.T) {
+	r, _ := DefaultWithOptions(Options{SearchTools: SearchToolsGrep})
+
+	grepLimits := r.resultLimitsFor("grep")
+	if grepLimits.maxBytes != defaultSearchResultBytes || grepLimits.maxLines != defaultSearchResultLines {
+		t.Fatalf("grep limits = %d/%d, want %d/%d",
+			grepLimits.maxBytes, grepLimits.maxLines, defaultSearchResultBytes, defaultSearchResultLines)
+	}
+	readLimits := r.resultLimitsFor("read_file")
+	if readLimits.maxBytes != defaultReadFileResultBytes || readLimits.maxLines != defaultMaxResultLines {
+		t.Fatalf("read_file limits = %d/%d, want %d/%d",
+			readLimits.maxBytes, readLimits.maxLines, defaultReadFileResultBytes, defaultMaxResultLines)
+	}
+}
+
+func TestGlobalResultLimitsOverrideNoisyToolDefaults(t *testing.T) {
+	r, _ := DefaultWithOptions(Options{
+		MaxResultBytes: 1234,
+		MaxResultLines: 321,
+		SearchTools:    SearchToolsGrep,
+	})
+
+	for _, name := range []string{"grep", "read_file"} {
+		limits := r.resultLimitsFor(name)
+		if limits.maxBytes != 1234 || limits.maxLines != 321 {
+			t.Fatalf("%s limits = %d/%d, want global 1234/321", name, limits.maxBytes, limits.maxLines)
+		}
+	}
+}
+
+func TestPerToolResultLimitsOverrideGlobalByField(t *testing.T) {
+	r, _ := DefaultWithOptions(Options{
+		MaxResultBytes:      1000,
+		MaxResultLines:      200,
+		GrepResultBytes:     3000,
+		ReadFileResultLines: 40,
+		SearchTools:         SearchToolsGrep,
+	})
+
+	grepLimits := r.resultLimitsFor("grep")
+	if grepLimits.maxBytes != 3000 || grepLimits.maxLines != 200 {
+		t.Fatalf("grep limits = %d/%d, want 3000/200", grepLimits.maxBytes, grepLimits.maxLines)
+	}
+	readLimits := r.resultLimitsFor("read_file")
+	if readLimits.maxBytes != 1000 || readLimits.maxLines != 40 {
+		t.Fatalf("read_file limits = %d/%d, want 1000/40", readLimits.maxBytes, readLimits.maxLines)
+	}
+}
+
+func TestPerToolResultLimitSingleFieldInheritsGlobalDefault(t *testing.T) {
+	r, _ := DefaultWithOptions(Options{
+		GrepResultLines: 123,
+		SearchTools:     SearchToolsGrep,
+	})
+
+	grepLimits := r.resultLimitsFor("grep")
+	if grepLimits.maxBytes != defaultMaxResultBytes || grepLimits.maxLines != 123 {
+		t.Fatalf("grep limits = %d/%d, want %d/123", grepLimits.maxBytes, grepLimits.maxLines, defaultMaxResultBytes)
+	}
+}
+
 func TestDefaultNamesMatchDefaultRegistry(t *testing.T) {
 	want := expectedDefaultNames()
 	if got := DefaultNames(); !slices.Equal(got, want) {

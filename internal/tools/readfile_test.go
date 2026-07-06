@@ -204,13 +204,13 @@ func TestReadFileMultiplePathsPerFileBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// 1000-line default / 4 files = 250 lines budget each; every file is present
+	// 500-line default / 4 files = 125 lines budget each; every file is present
 	// and individually truncated.
 	if got := strings.Count(out, "==> "); got != 4 {
 		t.Errorf("expected 4 file headers, got %d", got)
 	}
-	if got := strings.Count(out, "[file truncated at line 250;"); got != 4 {
-		t.Errorf("expected each file truncated at line 250, got %d notices:\n%s", got, out)
+	if got := strings.Count(out, "[file truncated at line 125;"); got != 4 {
+		t.Errorf("expected each file truncated at line 125, got %d notices:\n%s", got, out)
 	}
 }
 
@@ -245,14 +245,14 @@ func TestReadFileDefaultLineCap(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	lines := strings.Split(out, "\n")
-	// 1000 numbered lines plus a trailing truncation notice (see r14).
-	if len(lines) != 1001 {
-		t.Errorf("default cap should yield 1000 lines + notice, got %d", len(lines))
+	// 500 numbered lines plus a trailing truncation notice (see r14).
+	if len(lines) != 501 {
+		t.Errorf("default cap should yield 500 lines + notice, got %d", len(lines))
 	}
 	if !strings.HasPrefix(lines[0], "1\tline 1") {
 		t.Errorf("first line wrong: %q", lines[0])
 	}
-	if want := "[file truncated at line 1000; continue with offset=1001]"; lines[len(lines)-1] != want {
+	if want := "[file truncated at line 500; continue with offset=501]"; lines[len(lines)-1] != want {
 		t.Errorf("missing truncation notice; got last line %q", lines[len(lines)-1])
 	}
 }

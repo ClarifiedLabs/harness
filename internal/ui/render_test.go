@@ -1024,3 +1024,29 @@ func TestApproachingCompactionNoticeOnce(t *testing.T) {
 		t.Fatalf("compaction notice should fire once, got %d in %q", n, errw.String())
 	}
 }
+
+func TestLargeContextWarningNamesPayloadEstimateAndHistory(t *testing.T) {
+	line := largeRequestWarning(agent.ContextEstimate{
+		Total:           136_000,
+		Window:          272_000,
+		System:          3_000,
+		Tools:           1_000,
+		Messages:        132_000,
+		PayloadTotal:    136_000,
+		PayloadSystem:   3_000,
+		PayloadTools:    1_000,
+		PayloadMessages: 132_000,
+	})
+	for _, want := range []string{"large model context", "payload estimate", "message/tool-result history dominates", "cached or continued tokens"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("warning %q missing %q", line, want)
+		}
+	}
+}
+
+func TestLargeToolSchemaWarning(t *testing.T) {
+	line := largeRequestWarning(agent.ContextEstimate{Total: 8_000, Window: 272_000, Tools: 12_000})
+	if !strings.Contains(line, "large tool schema payload") || strings.Contains(line, "large model context") {
+		t.Fatalf("tool schema warning = %q", line)
+	}
+}

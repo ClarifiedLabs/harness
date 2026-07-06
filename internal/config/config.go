@@ -75,13 +75,19 @@ type Config struct {
 	AgentsMDWarnBytes         int               `json:"agents_md_warn_bytes"`          // config-only warning threshold in bytes; default 8192, explicit 0 disables
 	ToolResultMaxBytes        int               `json:"tool_result_max_bytes"`         // 0 = tool default
 	ToolResultMaxLines        int               `json:"tool_result_max_lines"`         // 0 = tool default
-	ReadFileDefaultLimit      int               `json:"read_file_default_limit"`       // config-only; 0 = tool default
+	RGResultMaxBytes          int               `json:"rg_result_max_bytes"`           // 0 = tool/default global
+	RGResultMaxLines          int               `json:"rg_result_max_lines"`           // 0 = tool/default global
+	GrepResultMaxBytes        int               `json:"grep_result_max_bytes"`         // 0 = tool/default global
+	GrepResultMaxLines        int               `json:"grep_result_max_lines"`         // 0 = tool/default global
+	ReadFileDefaultLimit      int               `json:"read_file_default_limit"`       // 0 = tool default
+	ReadFileResultMaxBytes    int               `json:"read_file_result_max_bytes"`    // 0 = tool/default global
+	ReadFileResultMaxLines    int               `json:"read_file_result_max_lines"`    // 0 = tool/default global
 	CompactKeepTurns          int               `json:"compact_keep_turns"`            // config-only; 0 = agent default
 	CompactSummaryMaxTokens   int               `json:"compact_summary_max_tokens"`    // config-only; 0 = agent default
 	CompactToolResultMaxBytes int               `json:"compact_tool_result_max_bytes"` // config-only; 0 = agent default, negative disables
 	DelegateMaxTurns          int               `json:"delegate_max_turns"`            // config-only; default 20, per delegate call cap
-	ResponsesStateful         bool              `json:"responses_stateful"` // -responses-stateful
-	NoSteer                    bool              `json:"no_steer"`    // -no-steer: disable mid-turn steering (queue during-turn input for the next turn)
+	ResponsesStateful         bool              `json:"responses_stateful"`            // -responses-stateful
+	NoSteer                   bool              `json:"no_steer"`                      // -no-steer: disable mid-turn steering (queue during-turn input for the next turn)
 
 	// Agent definition. Empty means "not specified" so main can let a resumed
 	// session supply the agent before falling back to the default.
@@ -276,13 +282,19 @@ type fileConfig struct {
 	AgentsMDWarnBytes         *int                       `json:"agents_md_warn_bytes"`
 	ToolResultMaxBytes        *int                       `json:"tool_result_max_bytes"`
 	ToolResultMaxLines        *int                       `json:"tool_result_max_lines"`
+	RGResultMaxBytes          *int                       `json:"rg_result_max_bytes"`
+	RGResultMaxLines          *int                       `json:"rg_result_max_lines"`
+	GrepResultMaxBytes        *int                       `json:"grep_result_max_bytes"`
+	GrepResultMaxLines        *int                       `json:"grep_result_max_lines"`
 	ReadFileDefaultLimit      *int                       `json:"read_file_default_limit"`
+	ReadFileResultMaxBytes    *int                       `json:"read_file_result_max_bytes"`
+	ReadFileResultMaxLines    *int                       `json:"read_file_result_max_lines"`
 	CompactKeepTurns          *int                       `json:"compact_keep_turns"`
 	CompactSummaryMaxTokens   *int                       `json:"compact_summary_max_tokens"`
 	CompactToolResultMaxBytes *int                       `json:"compact_tool_result_max_bytes"`
 	DelegateMaxTurns          *int                       `json:"delegate_max_turns"`
 	ResponsesStateful         *bool                      `json:"responses_stateful"`
-	NoSteer                    *bool                      `json:"no_steer"`
+	NoSteer                   *bool                      `json:"no_steer"`
 	Verbose                   *bool                      `json:"verbose"`
 	ToolStream                *bool                      `json:"tool_stream"`
 	ShowDiffs                 *bool                      `json:"show_diffs"`
@@ -471,7 +483,20 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		getenv("HARNESS_TOOL_RESULT_MAX_BYTES"), fc.ToolResultMaxBytes, 0)
 	c.ToolResultMaxLines = resolveInt(false, 0,
 		getenv("HARNESS_TOOL_RESULT_MAX_LINES"), fc.ToolResultMaxLines, 0)
-	c.ReadFileDefaultLimit = intValue(fc.ReadFileDefaultLimit, 0)
+	c.RGResultMaxBytes = resolveInt(false, 0,
+		getenv("HARNESS_RG_RESULT_MAX_BYTES"), fc.RGResultMaxBytes, 0)
+	c.RGResultMaxLines = resolveInt(false, 0,
+		getenv("HARNESS_RG_RESULT_MAX_LINES"), fc.RGResultMaxLines, 0)
+	c.GrepResultMaxBytes = resolveInt(false, 0,
+		getenv("HARNESS_GREP_RESULT_MAX_BYTES"), fc.GrepResultMaxBytes, 0)
+	c.GrepResultMaxLines = resolveInt(false, 0,
+		getenv("HARNESS_GREP_RESULT_MAX_LINES"), fc.GrepResultMaxLines, 0)
+	c.ReadFileDefaultLimit = resolveInt(false, 0,
+		getenv("HARNESS_READ_FILE_DEFAULT_LIMIT"), fc.ReadFileDefaultLimit, 0)
+	c.ReadFileResultMaxBytes = resolveInt(false, 0,
+		getenv("HARNESS_READ_FILE_RESULT_MAX_BYTES"), fc.ReadFileResultMaxBytes, 0)
+	c.ReadFileResultMaxLines = resolveInt(false, 0,
+		getenv("HARNESS_READ_FILE_RESULT_MAX_LINES"), fc.ReadFileResultMaxLines, 0)
 	c.CompactKeepTurns = intValue(fc.CompactKeepTurns, 0)
 	c.CompactSummaryMaxTokens = intValue(fc.CompactSummaryMaxTokens, 0)
 	c.CompactToolResultMaxBytes = intValue(fc.CompactToolResultMaxBytes, 0)

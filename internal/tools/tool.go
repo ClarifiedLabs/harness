@@ -87,10 +87,11 @@ type BackgroundJobStarter interface {
 // Registry is an ordered set of tools. Order is preserved so Specs and the
 // model-facing tool list are stable across runs.
 type Registry struct {
-	order           []string
-	tools           map[string]Tool
-	dispatchTimeout time.Duration // zero = no dispatch-level timeout
-	resultLimits    resultLimits
+	order            []string
+	tools            map[string]Tool
+	dispatchTimeout  time.Duration // zero = no dispatch-level timeout
+	resultLimits     resultLimits
+	toolResultLimits map[string]resultLimits
 }
 
 // Options configures a tool registry. Zero values keep package defaults.
@@ -98,6 +99,12 @@ type Options struct {
 	MaxResultBytes       int
 	MaxResultLines       int
 	ReadFileDefaultLimit int
+	ReadFileResultBytes  int
+	ReadFileResultLines  int
+	RGResultBytes        int
+	RGResultLines        int
+	GrepResultBytes      int
+	GrepResultLines      int
 	Background           BackgroundJobStarter
 	SearchTools          string
 	// DispatchTimeout is the per-call ceiling applied by Dispatch (zero = none).
@@ -142,6 +149,37 @@ func (r *Registry) SetResultLimits(maxBytes, maxLines int) {
 	r.resultLimits = resultLimits{maxBytes: maxBytes, maxLines: maxLines}
 }
 
+// SetToolResultLimits overrides result truncation caps for one tool. Positive
+// fields override the corresponding global cap; non-positive fields inherit it.
+func (r *Registry) SetToolResultLimits(toolName string, maxBytes, maxLines int) {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		return
+	}
+	if r.toolResultLimits == nil {
+		r.toolResultLimits = map[string]resultLimits{}
+	}
+	r.toolResultLimits[toolName] = resultLimits{maxBytes: maxBytes, maxLines: maxLines}
+}
+
+func (r *Registry) resultLimitsFor(toolName string) resultLimits {
+	limits := r.resultLimits.withDefaults()
+	if r.toolResultLimits == nil {
+		return limits
+	}
+	override, ok := r.toolResultLimits[toolName]
+	if !ok {
+		return limits
+	}
+	if override.maxBytes > 0 {
+		limits.maxBytes = override.maxBytes
+	}
+	if override.maxLines > 0 {
+		limits.maxLines = override.maxLines
+	}
+	return limits
+}
+
 // RegisterFileTools registers the built-in file tools (read_file, list_dir,
 // glob, grep, optional rg, edit, write_file) on r, in that order. It is the only
 // exported path to these tools; their types are unexported by design. apply_patch
@@ -153,6 +191,9 @@ func RegisterFileTools(r *Registry) {
 
 func registerFileTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 	r.Register(readFile{defaultLimit: opts.ReadFileDefaultLimit})
+	r.SetToolResultLimits("read_file",
+		defaultToolResultBytes(opts.ReadFileResultBytes, opts.ReadFileResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultReadFileResultBytes),
+		defaultToolResultLines(opts.ReadFileResultBytes, opts.ReadFileResultLines, opts.MaxResultBytes, opts.MaxResultLines, 0))
 	r.Register(listDir{})
 	r.Register(glob{})
 	registerSearchTools(r, disabled, opts)
@@ -176,12 +217,44 @@ func registerSearchTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 		// In "both" mode grep and rg ship side by side with near-identical schemas;
 		// steer the model to rg so it converges on one tool.
 		r.Register(grep{background: opts.Background, preferRG: mode == SearchToolsBoth && addRG})
+		r.SetToolResultLimits("grep",
+			defaultToolResultBytes(opts.GrepResultBytes, opts.GrepResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
+			defaultToolResultLines(opts.GrepResultBytes, opts.GrepResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
 	}
 	if addRG {
 		r.Register(rg)
+		r.SetToolResultLimits("rg",
+			defaultToolResultBytes(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
+			defaultToolResultLines(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
 	} else if (mode == SearchToolsRG || mode == SearchToolsBoth) && !hasRG && disabled != nil {
 		*disabled = append(*disabled, missingBinaryTool("rg", "rg"))
 	}
+}
+
+func defaultToolResultBytes(configBytes, configLines, globalBytes, globalLines, defaultBytes int) int {
+	if configBytes > 0 {
+		return configBytes
+	}
+	if configLines > 0 {
+		return 0
+	}
+	if globalBytes > 0 || globalLines > 0 {
+		return 0
+	}
+	return defaultBytes
+}
+
+func defaultToolResultLines(configBytes, configLines, globalBytes, globalLines, defaultLines int) int {
+	if configLines > 0 {
+		return configLines
+	}
+	if configBytes > 0 {
+		return 0
+	}
+	if globalBytes > 0 || globalLines > 0 {
+		return 0
+	}
+	return defaultLines
 }
 
 func normalizeSearchTools(mode string) string {
@@ -569,7 +642,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 	}
 
 	var info truncationInfo
-	res.Text, info = truncate(out, r.resultLimits)
+	res.Text, info = truncate(out, r.resultLimitsFor(call.Name))
 	if info.truncated {
 		res.Truncated = true
 		res.OriginalText = out

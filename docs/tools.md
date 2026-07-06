@@ -117,7 +117,14 @@ recorded in the model's original call order.
 
 Tool results are centrally capped at 64 KB or 1000 lines by default. Configure
 this with `tool_result_max_bytes` / `tool_result_max_lines`, or
-`HARNESS_TOOL_RESULT_MAX_BYTES` / `HARNESS_TOOL_RESULT_MAX_LINES`.
+`HARNESS_TOOL_RESULT_MAX_BYTES` / `HARNESS_TOOL_RESULT_MAX_LINES`. Noisy file
+inspection tools have smaller defaults unless a global cap is configured:
+`rg`/`grep` use 32 KB or 500 lines, and `read_file` uses a 500-line default
+window plus a 32 KB result cap. Override them with `rg_result_max_bytes` /
+`rg_result_max_lines`, `grep_result_max_bytes` / `grep_result_max_lines`,
+`read_file_default_limit`, and `read_file_result_max_bytes` /
+`read_file_result_max_lines`; each has a matching `HARNESS_*` environment
+variable.
 
 Truncated results include a marker in the model-visible text, a warning in the
 UI, and the full output is archived under the session directory when available.

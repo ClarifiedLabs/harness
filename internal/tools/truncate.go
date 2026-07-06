@@ -8,8 +8,11 @@ import (
 // Central output caps, applied in Dispatch as a backstop for every tool by
 // default. A Registry can override these limits.
 const (
-	defaultMaxResultBytes = 64 * 1024
-	defaultMaxResultLines = 1000
+	defaultMaxResultBytes      = 64 * 1024
+	defaultMaxResultLines      = 1000
+	defaultSearchResultBytes   = 32 * 1024
+	defaultSearchResultLines   = 500
+	defaultReadFileResultBytes = 32 * 1024
 )
 
 type resultLimits struct {
