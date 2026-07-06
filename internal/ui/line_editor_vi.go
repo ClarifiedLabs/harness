@@ -362,7 +362,7 @@ func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *l
 		e.viApplyRange(s, viOpChange, s.cursor, s.cursor+count)
 		e.viEnterInsert(v, s)
 	case 'S':
-		e.viApplyLine(s, viOpChange)
+		e.viApplyLine(s, viOpChange, count)
 		e.viEnterInsert(v, s)
 	case 'p':
 		for range count {
@@ -434,7 +434,7 @@ func (e *promptLineEditor) applyViOperator(v *viLineState, s *lineEditState, mot
 
 	if viOperatorRune(op) == motion {
 		v.resetCommand()
-		e.viApplyLine(s, op)
+		e.viApplyLine(s, op, count)
 		if op == viOpChange {
 			e.viEnterInsert(v, s)
 		}
@@ -465,8 +465,36 @@ func viOperatorRune(op viOperator) rune {
 	}
 }
 
-func (e *promptLineEditor) viApplyLine(s *lineEditState, op viOperator) {
-	e.viApplyRange(s, op, 0, len(s.buf))
+func (e *promptLineEditor) viApplyLine(s *lineEditState, op viOperator, count int) {
+	start, end := viLineRange(s, count)
+	e.viApplyRange(s, op, start, end)
+}
+
+func viLineRange(s *lineEditState, count int) (start, end int) {
+	if s == nil || len(s.buf) == 0 {
+		return 0, 0
+	}
+	if count <= 0 {
+		count = 1
+	}
+	start, end, _ = s.cursorLogicalLine()
+	for i := 1; i < count && end < len(s.buf); i++ {
+		nextStart := end + 1
+		nextEnd := len(s.buf)
+		for j := nextStart; j < len(s.buf); j++ {
+			if s.buf[j] == '\n' {
+				nextEnd = j
+				break
+			}
+		}
+		end = nextEnd
+	}
+	if end < len(s.buf) && s.buf[end] == '\n' {
+		end++
+	} else if start > 0 && s.buf[start-1] == '\n' {
+		start--
+	}
+	return start, end
 }
 
 func (e *promptLineEditor) viApplyRange(s *lineEditState, op viOperator, start, end int) {

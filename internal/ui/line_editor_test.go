@@ -1236,6 +1236,33 @@ func TestPromptLineEditorViDeleteAndChangeOperators(t *testing.T) {
 	}
 }
 
+func TestPromptLineEditorViDeleteLineOperatorDeletesCurrentMultilineLine(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "first line", input: "aa\nbb\x1b0dd\r", want: "bb"},
+		{name: "middle line", input: "aa\nbb\ncc\x1bkdd\r", want: "aa\ncc"},
+		{name: "last line", input: "aa\nbb\ncc\x1bdd\r", want: "aa\nbb"},
+		{name: "counted lines", input: "aa\nbb\ncc\x1b02dd\r", want: "cc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, ok, err := readViEditedInput(t, tt.input)
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok {
+				t.Fatal("read returned ok=false")
+			}
+			if input.text != tt.want {
+				t.Fatalf("input text = %q, want %q", input.text, tt.want)
+			}
+		})
+	}
+}
+
 func TestPromptLineEditorViDeleteToEndOperator(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
