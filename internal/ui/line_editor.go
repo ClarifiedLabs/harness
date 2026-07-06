@@ -338,7 +338,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 // Every motion, insert, delete, history recall, and vi command is shared
 // verbatim with the idle prompt, so the during-turn buffer gets the same editing
 // grammar (Ctrl-A/E/B/F, arrows, word motions, kill commands, full vi mode,
-// up/down history) as the idle prompt.
+// vi-mode line-aware up/down history) as the idle prompt.
 func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, r rune, duringTurn bool) (viEditResult, error) {
 	if duringTurn {
 		// The during-turn buffer can carry a stale cursor (e.g. after a history
@@ -534,10 +534,18 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 			}
 		case lineEditHistoryPrev:
 			e.markManualEdit(s)
-			h.prev(s)
+			if e.editMode == promptEditModeVi {
+				e.viMoveLineUpOrHistory(s, h, 1)
+			} else {
+				h.prev(s)
+			}
 		case lineEditHistoryNext:
 			e.markManualEdit(s)
-			h.next(s)
+			if e.editMode == promptEditModeVi {
+				e.viMoveLineDownOrHistory(s, h, 1)
+			} else {
+				h.next(s)
+			}
 		case lineEditPaste:
 			if len(s.buf) == 0 && !duringTurn {
 				s.setPasteSummary(text)
@@ -1675,6 +1683,80 @@ func (s *lineEditState) right() {
 	if s.cursor < len(s.buf) {
 		s.cursor++
 	}
+}
+
+func (s *lineEditState) moveLogicalLineUp() bool {
+	start, _, col := s.cursorLogicalLine()
+	if start == 0 {
+		return false
+	}
+	prevEnd := start - 1
+	prevStart := 0
+	for i := prevEnd - 1; i >= 0; i-- {
+		if s.buf[i] == '\n' {
+			prevStart = i + 1
+			break
+		}
+	}
+	prevLen := prevEnd - prevStart
+	if col > prevLen {
+		col = prevLen
+	}
+	s.cursor = prevStart + col
+	return true
+}
+
+func (s *lineEditState) moveLogicalLineDown() bool {
+	_, end, col := s.cursorLogicalLine()
+	if end >= len(s.buf) {
+		return false
+	}
+	nextStart := end + 1
+	nextEnd := len(s.buf)
+	for i := nextStart; i < len(s.buf); i++ {
+		if s.buf[i] == '\n' {
+			nextEnd = i
+			break
+		}
+	}
+	nextLen := nextEnd - nextStart
+	if col > nextLen {
+		col = nextLen
+	}
+	s.cursor = nextStart + col
+	return true
+}
+
+func (s *lineEditState) cursorLogicalLine() (start, end, col int) {
+	cursor := s.cursor
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(s.buf) {
+		cursor = len(s.buf)
+	}
+	for i := cursor - 1; i >= 0; i-- {
+		if s.buf[i] == '\n' {
+			start = i + 1
+			break
+		}
+	}
+	end = len(s.buf)
+	for i := start; i < len(s.buf); i++ {
+		if s.buf[i] == '\n' {
+			end = i
+			break
+		}
+	}
+	col = cursor - start
+	lineLen := end - start
+	if col < 0 {
+		col = 0
+	}
+	if col > lineLen {
+		col = lineLen
+	}
+	return start, end, col
 }
 
 func (s *lineEditState) backspace() {

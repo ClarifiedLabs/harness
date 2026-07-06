@@ -223,18 +223,14 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 		e.markManualEdit(s)
 		count := v.takeCount()
 		v.resetCommand()
-		for range count {
-			h.prev(s)
-		}
+		e.viMoveLineUpOrHistory(s, h, count)
 		s.viClampNormalCursor()
 		return viEditResult{redraw: true}, nil
 	case lineEditHistoryNext:
 		e.markManualEdit(s)
 		count := v.takeCount()
 		v.resetCommand()
-		for range count {
-			h.next(s)
-		}
+		e.viMoveLineDownOrHistory(s, h, count)
 		s.viClampNormalCursor()
 		return viEditResult{redraw: true}, nil
 	case lineEditInsertNewline:
@@ -377,17 +373,51 @@ func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *l
 			e.viPasteText(s, e.viYank, true)
 		}
 	case 'k':
-		for range count {
-			h.prev(s)
-		}
+		e.viMoveLineUpOrHistory(s, h, count)
 		s.viClampNormalCursor()
 	case 'j':
-		for range count {
-			h.next(s)
-		}
+		e.viMoveLineDownOrHistory(s, h, count)
 		s.viClampNormalCursor()
 	default:
 		v.resetCommand()
+	}
+}
+
+func (e *promptLineEditor) viMoveLineUpOrHistory(s *lineEditState, h *lineEditHistory, count int) {
+	if count <= 0 {
+		count = 1
+	}
+	moved := false
+	for range count {
+		if !s.moveLogicalLineUp() {
+			break
+		}
+		moved = true
+	}
+	if moved {
+		return
+	}
+	for range count {
+		h.prev(s)
+	}
+}
+
+func (e *promptLineEditor) viMoveLineDownOrHistory(s *lineEditState, h *lineEditHistory, count int) {
+	if count <= 0 {
+		count = 1
+	}
+	moved := false
+	for range count {
+		if !s.moveLogicalLineDown() {
+			break
+		}
+		moved = true
+	}
+	if moved {
+		return
+	}
+	for range count {
+		h.next(s)
 	}
 }
 

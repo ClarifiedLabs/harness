@@ -44,6 +44,15 @@ func readViEditedInput(t *testing.T, input string) (replInput, bool, error) {
 	return editor.read("> ")
 }
 
+func readViEditedInputWithHistory(t *testing.T, input string, history []string) (replInput, bool, error) {
+	t.Helper()
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader(input), &out)
+	editor.setEditMode("vi")
+	editor.SetInitialHistory(history)
+	return editor.read("> ")
+}
+
 func TestPromptLineEditorInsertsAtCursor(t *testing.T) {
 	input, ok, err := readEditedInput(t, "abc\x1b[D\x1b[DX\r")
 	if err != nil {
@@ -1551,6 +1560,121 @@ func TestPromptLineEditorViPromptNoCallbackUnchanged(t *testing.T) {
 	}
 	if strings.Contains(joined, "INSERT") || strings.Contains(joined, "NORMAL") {
 		t.Fatalf("no vimode label should appear without a viPrompt callback:\n%s", joined)
+	}
+}
+
+func TestPromptLineEditorViJKMoveWithinMultilineInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "k moves line up", input: "ab\ncd\x1bkiX\r", want: "aXb\ncd"},
+		{name: "j moves line down", input: "ab\ncd\x1b0jiX\r", want: "ab\nXcd"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, ok, err := readViEditedInput(t, tt.input)
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok {
+				t.Fatal("read returned ok=false")
+			}
+			if input.text != tt.want {
+				t.Fatalf("input text = %q, want %q", input.text, tt.want)
+			}
+		})
+	}
+}
+
+func TestPromptLineEditorViCountedKDoesNotCrossIntoHistory(t *testing.T) {
+	input, ok, err := readViEditedInputWithHistory(t, "aa\nbb\ncc\x1b3kiX\r", []string{"old"})
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "aXa\nbb\ncc" {
+		t.Fatalf("input text = %q, want aXa\\nbb\\ncc", input.text)
+	}
+}
+
+func TestPromptLineEditorViJKHistoryAtMultilineBoundaries(t *testing.T) {
+	input, ok, err := readViEditedInputWithHistory(t, "aa\nbb\x1b0k\r", []string{"old"})
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "old" {
+		t.Fatalf("k on first line recalled %q, want old", input.text)
+	}
+
+	input, ok, err = readViEditedInputWithHistory(t, "aa\nbb\x1b0kj\r", []string{"old"})
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "aa\nbb" {
+		t.Fatalf("j after history recall restored %q, want aa\\nbb", input.text)
+	}
+}
+
+func TestPromptLineEditorViArrowsMoveWithinMultilineInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "insert up", input: "ab\ncd\x1b[AX\r", want: "abX\ncd"},
+		{name: "insert down", input: "ab\ncd\x01\x1b[BX\r", want: "ab\nXcd"},
+		{name: "normal up", input: "ab\ncd\x1b\x1b[AiX\r", want: "aXb\ncd"},
+		{name: "normal down", input: "ab\ncd\x1b0\x1b[BiX\r", want: "ab\nXcd"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, ok, err := readViEditedInput(t, tt.input)
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok {
+				t.Fatal("read returned ok=false")
+			}
+			if input.text != tt.want {
+				t.Fatalf("input text = %q, want %q", input.text, tt.want)
+			}
+		})
+	}
+}
+
+func TestPromptLineEditorViArrowsHistoryAtMultilineBoundaries(t *testing.T) {
+	input, ok, err := readViEditedInputWithHistory(t, "aa\nbb\x01\x1b[A\r", []string{"old"})
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "old" {
+		t.Fatalf("up arrow on first line recalled %q, want old", input.text)
+	}
+
+	input, ok, err = readViEditedInputWithHistory(t, "aa\nbb\x01\x1b[A\x1b[B\r", []string{"old"})
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "aa\nbb" {
+		t.Fatalf("down arrow after history recall restored %q, want aa\\nbb", input.text)
 	}
 }
 

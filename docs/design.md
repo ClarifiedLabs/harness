@@ -1851,10 +1851,11 @@ switches the raw prompt editor to a small vi keymap. The prompt starts in insert
 mode; bare Escape enters normal mode, while terminal escape sequences such as arrow
 keys, bracketed paste, and CSI-u key events remain parsed as terminal input. Normal
 mode supports `h/l`, `0/^/$`, `w/W/b/B/e/E`, `i/a/I/A`, `x/X`, `D/C/S`, `Y` (yank the
-whole line), `k/j` history navigation, `d`/`c`/`y` operators with those motions plus
-doubled line operators (`dd`, `cc`, `yy`), and local `p`/`P` paste from the prompt
-editor's yank buffer. Counts, registers, search, visual mode, macros, and full Vim text objects are
-out of scope.
+whole line), `k/j` and Up/Down line navigation with history fallback at input
+boundaries, `d`/`c`/`y` operators with those motions plus doubled line operators
+(`dd`, `cc`, `yy`), and local `p`/`P` paste from the prompt editor's yank buffer.
+Counts, registers, search, visual mode, macros, and full Vim text objects are out
+of scope.
 
 While a raw vi-mode idle prompt is active, harness also emits xterm DECSCUSR cursor-shape
 sequences: a steady bar in insert mode and a steady block in normal mode. The cursor

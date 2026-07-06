@@ -1248,7 +1248,8 @@ type replReader struct {
 	// During-turn keystroke capture (during-turn input). The turn shares the
 	// promptLineEditor's lineEditState/viLineState/history so it gets the same
 	// editing grammar (Ctrl-A/E/B/F, arrows, word motions, kill commands, full vi
-	// mode, up/down history) as the idle prompt. The only difference is display:
+	// mode, vi-mode line-aware up/down history) as the idle prompt. The only
+	// difference is display:
 	// the idle prompt redraws the multi-row terminal region, while the turn mirrors
 	// buf/cursor onto the single status line via onTurnInput (it cannot use the
 	// multi-row redraw while output streams). turnState is created fresh at each
