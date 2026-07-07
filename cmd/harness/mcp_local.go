@@ -46,7 +46,7 @@ func setupLocalMCP(ctx context.Context, localCfg config.LocalMCPConfig, explicit
 	var current *mcpchild.Child
 	dial := func(ctx context.Context) (io.ReadWriteCloser, error) {
 		child, err := mcpchild.Spawn(command, args, env, func(line string) {
-			logger.Info(line, logging.Category("mcp"), "stream", "local")
+			logger.Debug(line, logging.Category("mcp"), "stream", "local")
 		})
 		if err != nil {
 			return nil, err

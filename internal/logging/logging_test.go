@@ -50,6 +50,27 @@ func TestPlainHandlerRendersExtraAttrsAsPlainText(t *testing.T) {
 	}
 }
 
+func TestTeeHandlerCapturesHiddenDebugRecords(t *testing.T) {
+	var display, diagnostics bytes.Buffer
+	logger := slog.New(NewTeeHandler(
+		NewPlainHandler(&display, HandlerOptions{Level: slog.LevelInfo}),
+		slog.NewJSONHandler(&diagnostics, &slog.HandlerOptions{Level: slog.LevelDebug}),
+	))
+
+	logger.Debug("child noise", Category("lsp"), slog.String("stream", "serena"))
+
+	if display.Len() != 0 {
+		t.Fatalf("display log = %q, want hidden debug record", display.String())
+	}
+	var record map[string]any
+	if err := json.Unmarshal(diagnostics.Bytes(), &record); err != nil {
+		t.Fatalf("diagnostic log did not decode: %q: %v", diagnostics.String(), err)
+	}
+	if record["msg"] != "child noise" || record["level"] != "DEBUG" || record["category"] != "lsp" || record["stream"] != "serena" {
+		t.Fatalf("diagnostic record = %+v", record)
+	}
+}
+
 func TestParseLevel(t *testing.T) {
 	tests := map[string]slog.Level{
 		"":        slog.LevelInfo,

@@ -261,11 +261,6 @@ func run(env environment) int {
 		return ui.ExitOK
 	}
 	promptLogWriter := ui.NewPromptRedrawWriter(stderr)
-	logger, err := logging.NewLogger(promptLogWriter, cfg.LogLevel)
-	if err != nil {
-		fmt.Fprintf(stderr, "harness: %v\n", err)
-		return ui.ExitUsage
-	}
 
 	// Load a resumed session up front: its saved agent selects the tool set and
 	// any agent-specific provider/model when no -agent flag overrides it.
@@ -277,6 +272,23 @@ func run(env environment) int {
 			return ui.ExitRuntime
 		}
 		resumed = &s
+	}
+	created := now()
+	if resumed != nil && !resumed.Created.IsZero() {
+		created = resumed.Created
+	}
+	sessionPath := cfg.Session
+	if sessionPath == "" {
+		if cfg.Resume != "" {
+			sessionPath = cfg.Resume
+		} else {
+			sessionPath = session.DefaultPath(stateDir(getenv), created)
+		}
+	}
+	logger, diagnosticsSink, err := newHarnessLogger(promptLogWriter, cfg.LogLevel, sessionPath, !cfg.DebugRequest)
+	if err != nil {
+		fmt.Fprintf(stderr, "harness: %v\n", err)
+		return ui.ExitUsage
 	}
 	if len(cfg.Images) > 0 && !cfg.PromptSet && !cfg.InitialPromptSet {
 		fmt.Fprintln(stderr, "harness: -image requires -p one-shot mode or -i initial interactive prompt")
@@ -816,7 +828,6 @@ func run(env environment) int {
 		ag.SetSleep(env.agentSleep)
 	}
 
-	created := now()
 	var totals session.UsageTotals
 	var resumedUsageByModel map[string]session.UsageTotals
 	var resumeResponseState *llm.ResponseState
@@ -836,9 +847,6 @@ func run(env environment) int {
 		todoStore.Replace(s.Todos)
 		planStore.Replace(s.Plans)
 		resumedUsageByModel = s.UsageByModel
-		if !s.Created.IsZero() {
-			created = s.Created
-		}
 		totals = s.Usage
 		// A resumed session keeps its saved full system prompt unless a static
 		// system_prompt override is set.
@@ -853,14 +861,6 @@ func run(env environment) int {
 	ag.SetSystem(systemPrompt)
 	activeToolNames := toolRegistry.Names()
 
-	sessionPath := cfg.Session
-	if sessionPath == "" {
-		if cfg.Resume != "" {
-			sessionPath = cfg.Resume
-		} else {
-			sessionPath = session.DefaultPath(stateDir(getenv), created)
-		}
-	}
 	delegateState.Set(delegate.Runtime{
 		Provider:          provider,
 		ProviderName:      cfg.Provider,
@@ -978,6 +978,9 @@ func run(env environment) int {
 			snap := delegateState.Snapshot()
 			snap.SessionPath = path
 			delegateState.Set(snap)
+			if diagnosticsSink != nil {
+				diagnosticsSink.SetDir(path)
+			}
 		},
 		Prompt:          cfg.ReplPrompt,
 		PromptLogWriter: promptLogWriter,

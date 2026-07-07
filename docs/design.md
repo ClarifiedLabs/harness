@@ -1759,7 +1759,10 @@ backoff allows.
   remains legible without color.
 - Startup diagnostics use `log/slog` with a plaintext handler: `[level] [category]
   message`. Default level is `info`; `--log-level` or `LOG_LEVEL` accepts `debug`,
-  `info`, `warn`, or `error`.
+  `info`, `warn`, or `error`. Normal sessions also tee JSON diagnostics to
+  `diagnostics.ndjson` in the session directory; that sink accepts debug records so
+  child MCP/LSP stderr is preserved even though it is hidden from the terminal by
+  default and only shown with `--log-level debug`.
 - `-q`/`--quiet` suppresses bracketed status messages (tool calls, model turns,
   notices), disables live tool-stream progress and the live wait counter, suppresses
   reasoning summary output unless `-reasoning-summary` is explicitly set on the
@@ -2113,8 +2116,9 @@ type UsageTotals struct {
 ```
 
 - A session path is a directory. `state.json` is the compact resumable state,
-  `raw.ndjson` is append-only replay data, `compactions/` stores raw messages removed
-  from active context, and `artifacts/tool-results/` stores full truncated tool output.
+  `raw.ndjson` is append-only replay data, `diagnostics.ndjson` stores JSON slog
+  diagnostics for the run, `compactions/` stores raw messages removed from active
+  context, and `artifacts/tool-results/` stores full truncated tool output.
 - **Saved after every turn**, atomically (write `state.json.tmp`, `os.Rename`). Cheap
   relative to a model call; crash-safe for long sessions.
 - Every saved message and append-only replay event carries a timestamp.

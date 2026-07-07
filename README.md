@@ -238,6 +238,9 @@ harness session replay ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
 ```
 
+Diagnostic logs, including MCP/LSP child-process stderr that is hidden from the
+terminal by default, are kept as JSON lines in the session's `diagnostics.ndjson`.
+
 ## Runaway protection
 
 The agent loop has guardrails against runaway token burn, beyond the blunt

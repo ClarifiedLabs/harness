@@ -95,6 +95,63 @@ func NewLogger(w io.Writer, levelName string) (*slog.Logger, error) {
 	})), nil
 }
 
+// TeeHandler fans each record out to one or more child handlers. A record is
+// accepted when any child accepts its level, which lets a hidden debug diagnostic
+// still be captured by a secondary sink while the user-facing handler stays at
+// info or higher.
+type TeeHandler struct {
+	handlers []slog.Handler
+}
+
+// NewTeeHandler returns a slog handler that writes to all non-nil handlers.
+func NewTeeHandler(handlers ...slog.Handler) *TeeHandler {
+	out := make([]slog.Handler, 0, len(handlers))
+	for _, h := range handlers {
+		if h != nil {
+			out = append(out, h)
+		}
+	}
+	return &TeeHandler{handlers: out}
+}
+
+func (h *TeeHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	for _, child := range h.handlers {
+		if child.Enabled(ctx, level) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *TeeHandler) Handle(ctx context.Context, record slog.Record) error {
+	var firstErr error
+	for _, child := range h.handlers {
+		if !child.Enabled(ctx, record.Level) {
+			continue
+		}
+		if err := child.Handle(ctx, record.Clone()); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (h *TeeHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	next := make([]slog.Handler, 0, len(h.handlers))
+	for _, child := range h.handlers {
+		next = append(next, child.WithAttrs(attrs))
+	}
+	return &TeeHandler{handlers: next}
+}
+
+func (h *TeeHandler) WithGroup(name string) slog.Handler {
+	next := make([]slog.Handler, 0, len(h.handlers))
+	for _, child := range h.handlers {
+		next = append(next, child.WithGroup(name))
+	}
+	return &TeeHandler{handlers: next}
+}
+
 // NewProxyLogger returns a slog.Logger for long-running proxy daemons. It uses
 // the standard library's built-in JSON/Text handlers; unlike the interactive
 // CLI logger, proxy logs keep timestamps and structured attributes.

@@ -1,10 +1,13 @@
 package lspproxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -70,6 +73,20 @@ func helperSpawn(mode string, counter *int32) func() *exec.Cmd {
 
 		cmd.Env = append(os.Environ(), "LSP_HELPER_MODE="+mode)
 		return cmd
+	}
+}
+
+func TestDrainStderrLogsAtDebugLevel(t *testing.T) {
+	var info bytes.Buffer
+	drainStderr(strings.NewReader("lsp child noise\n"), slog.New(slog.NewTextHandler(&info, &slog.HandlerOptions{Level: slog.LevelInfo})), "fake")
+	if strings.Contains(info.String(), "lsp child noise") {
+		t.Fatalf("info logger should hide child stderr debug line: %q", info.String())
+	}
+
+	var debug bytes.Buffer
+	drainStderr(strings.NewReader("lsp child noise\n"), slog.New(slog.NewTextHandler(&debug, &slog.HandlerOptions{Level: slog.LevelDebug})), "fake")
+	if !strings.Contains(debug.String(), "lsp child noise") || !strings.Contains(debug.String(), "level=DEBUG") {
+		t.Fatalf("debug logger should show child stderr line: %q", debug.String())
 	}
 }
 

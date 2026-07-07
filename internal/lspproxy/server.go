@@ -271,7 +271,7 @@ func drainStderr(r io.Reader, logger *slog.Logger, name string) {
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
 		if line := sc.Text(); line != "" {
-			logger.Info(line, "server", name, "stream", "stderr")
+			logger.Debug(line, "server", name, "stream", "stderr")
 		}
 	}
 	if err := sc.Err(); err != nil {

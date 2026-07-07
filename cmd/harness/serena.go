@@ -33,7 +33,7 @@ func setupSerena(ctx context.Context, serenaCfg config.SerenaConfig, catalog *to
 	var current *mcpchild.Child
 	dial := func(ctx context.Context) (io.ReadWriteCloser, error) {
 		child, err := mcpchild.Spawn(serenaCfg.Command, serenaCfg.Args, env, func(line string) {
-			logger.Info(line, logging.Category("lsp"), "stream", serenaNamespace)
+			logger.Debug(line, logging.Category("lsp"), "stream", serenaNamespace)
 		})
 		if err != nil {
 			return nil, err
