@@ -40,8 +40,9 @@ occurrence of `oldText` instead of requiring a unique match, reporting the
 replacement count.
 
 When [MCP](mcp.md) is enabled, downstream MCP tools also appear, namespaced as
-`mcp__<server>__<tool>`. When [LSP](lsp.md) is enabled, read-only `lsp_*` code
-navigation tools are also registered.
+`mcp__<server>__<tool>`. When [LSP](lsp.md) is enabled, native `lsp_*` code
+intelligence tools are also registered; most are read-only, while `lsp_rename`
+applies language-server text edits.
 
 ## Search Tools
 

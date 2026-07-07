@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1613,6 +1614,15 @@ func TestLSPDefaults(t *testing.T) {
 	if c.LSP.Tools != nil {
 		t.Errorf("LSP.Tools default = %v, want nil", c.LSP.Tools)
 	}
+	if c.LSP.Serena.Enable || c.LSP.Serena.EnableSet {
+		t.Errorf("LSP.Serena default = {Enable:%v EnableSet:%v}, want both false", c.LSP.Serena.Enable, c.LSP.Serena.EnableSet)
+	}
+	if c.LSP.Serena.Command != DefaultSerenaCommand {
+		t.Errorf("LSP.Serena.Command = %q, want %q", c.LSP.Serena.Command, DefaultSerenaCommand)
+	}
+	if !slices.Equal(c.LSP.Serena.Args, DefaultSerenaArgs()) {
+		t.Errorf("LSP.Serena.Args = %v, want %v", c.LSP.Serena.Args, DefaultSerenaArgs())
+	}
 }
 
 func TestLSPToolsAllowlistFromFile(t *testing.T) {
@@ -1670,6 +1680,40 @@ func TestLSPFromFile(t *testing.T) {
 	}
 }
 
+func TestLSPSerenaFromFile(t *testing.T) {
+	cfgPath := writeConfig(t, `{
+		"lsp": {
+			"enable": false,
+			"serena": {
+				"enable": true,
+				"command": "uvx",
+				"args": ["--from", "git+https://example.invalid/serena", "serena", "start-mcp-server", "--context=ide", "--project-from-cwd"],
+				"env": {"SERENA_TOKEN": "${TOKEN}"}
+			}
+		}
+	}`)
+	c, err := Load([]string{"-model", "gpt-5.5"}, envFrom(map[string]string{"TOKEN": "secret"}), cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.LSP.Enable {
+		t.Errorf("LSP.Enable = true, want false")
+	}
+	if !c.LSP.Serena.Enable || !c.LSP.Serena.EnableSet {
+		t.Errorf("LSP.Serena = {Enable:%v EnableSet:%v}, want both true", c.LSP.Serena.Enable, c.LSP.Serena.EnableSet)
+	}
+	if c.LSP.Serena.Command != "uvx" {
+		t.Fatalf("Serena.Command = %q, want uvx", c.LSP.Serena.Command)
+	}
+	wantArgs := []string{"--from", "git+https://example.invalid/serena", "serena", "start-mcp-server", "--context=ide", "--project-from-cwd"}
+	if !slices.Equal(c.LSP.Serena.Args, wantArgs) {
+		t.Fatalf("Serena.Args = %v, want %v", c.LSP.Serena.Args, wantArgs)
+	}
+	if c.LSP.Serena.Env["SERENA_TOKEN"] != "secret" {
+		t.Fatalf("Serena.Env = %v", c.LSP.Serena.Env)
+	}
+}
+
 func TestLSPEnableEnvOverridesFile(t *testing.T) {
 	cfgPath := writeConfig(t, `{"lsp":{"enable":false}}`)
 	c, err := Load([]string{"-model", "gpt-5.5"}, envFrom(map[string]string{"HARNESS_LSP_ENABLE": "true"}), cfgPath)
@@ -1678,6 +1722,20 @@ func TestLSPEnableEnvOverridesFile(t *testing.T) {
 	}
 	if !c.LSP.Enable {
 		t.Errorf("LSP.Enable = false, want true (env overrides file)")
+	}
+}
+
+func TestLSPSerenaEnableEnvOverridesFile(t *testing.T) {
+	cfgPath := writeConfig(t, `{"lsp":{"serena":{"enable":false}}}`)
+	c, err := Load([]string{"-model", "gpt-5.5"}, envFrom(map[string]string{"HARNESS_LSP_SERENA_ENABLE": "true"}), cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.LSP.Serena.Enable || !c.LSP.Serena.EnableSet {
+		t.Errorf("LSP.Serena = {Enable:%v EnableSet:%v}, want {true true}", c.LSP.Serena.Enable, c.LSP.Serena.EnableSet)
+	}
+	if c.LSP.Enable {
+		t.Errorf("LSP.Enable = true, want false; Serena must not imply native LSP")
 	}
 }
 

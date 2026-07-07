@@ -2479,10 +2479,10 @@ aggregated table), `auth`, and `version` — with serve flags
 ## 15a. LSP code intelligence (optional)
 
 The **LSP manager** (`internal/lspproxy`) launches already-installed language
-servers on demand and exposes seven read-only navigation tools
+servers on demand and exposes native LSP tools
 (`lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_document_symbols`,
 `lsp_workspace_symbols`, `lsp_diagnostics`, and the read-only
-`lsp_rename_plan`). The normal path is first-class, not generic MCP:
+`lsp_rename_plan`, plus the mutating `lsp_rename`). The normal path is first-class, not generic MCP:
 `lsp.enable=true` registers short `lsp_*` tools directly through
 `internal/lsptools`, while `internal/lspproxy` still owns the language-server
 supervisors. This is distinct from the secrets-isolated remote
@@ -2495,11 +2495,19 @@ Content-Length stdio)`. LSP config is top-level `lsp` with `enable` plus inline
 entire embedded default entry, so overrides must include all required fields. The
 built-in path uses `lspproxy.NewManager(..., namespace="")` and adapts the manager's
 bare tools to short `lsp_*` names. `lsp.tools` (config-file-only, bare names with or
-without the `lsp_` prefix) registers only the listed subset of the seven tools; an
-empty or unset list registers all, and unknown entries warn and are ignored. These tools are trusted read-only and join the same
-automatic exposure gate as other read-only discovered tools. This is independent
-of both `mcp.enable` and `mcp.local`: a user can enable LSP and a separate local
-stdio MCP service at the same time.
+without the `lsp_` prefix) registers only the listed subset of native tools; an
+empty or unset list registers all, and unknown entries warn and are ignored. Tool
+annotations drive scheduling and agent exposure: read-only LSP tools join the
+read-only gate, while `lsp_rename` is mutating.
+
+Serena support is independent of native LSP. `lsp.serena.enable=true` starts a
+local stdio MCP child (default `serena start-mcp-server --context=ide
+--project-from-cwd --open-web-dashboard False`) and registers its bare downstream tools as
+`mcp__serena__<tool>` via `mcptools.RegisterWithOptions(..., Namespace:"serena")`.
+Harness trusts Serena `readOnlyHint` annotations; unannotated Serena tools are
+treated as mutating. Serena does not require `lsp.enable=true`, `mcp.enable`, or
+`mcp.local`, and successful registration adds only a short system-prompt hint,
+not Serena hooks.
 
 Harness still has a generic local-stdio-MCP capability (`mcp.local`,
 `internal/mcpchild` + `setupLocalMCP`): when explicitly enabled with
@@ -2535,7 +2543,10 @@ effectively always required unless the config narrows the set to one. Per-tool o
 params beyond the shared position shape: `lsp_diagnostics` takes `timeout_ms` (default
 3000); `lsp_references` takes `include_declaration` (default true) and `max_results`
 (default 100); `lsp_workspace_symbols` takes `max_results` (default 100); and
-`lsp_rename_plan` additionally **requires** `new_name`. Built-in config uses top-level
+`lsp_rename_plan`/`lsp_rename` additionally **require** `new_name`. `lsp_rename`
+applies text edits from `textDocument/rename` only after validating all files and
+ranges; unsupported WorkspaceEdit file operations are rejected before any write.
+Built-in config uses top-level
 `{"lsp":{"servers":{...}}}`; the compatibility `harness lsp serve -config` path
 still accepts the legacy `{"version":1,"servers":{...}}` file shape. Both paths
 replace embedded defaults (Go/Rust/Python/TS-JS/C-C++) by server name rather than
@@ -2543,8 +2554,8 @@ field-merging them; each tool description advertises the languages whose binary
 is on `PATH` via a suffix — ` Langs: <comma-separated list>.` when any are present,
 or ` No LSP servers on PATH.` when none are.
 
-**v1 non-goals:** read-only navigation only (no write/edit tools; rename is the
-read-only plan); full-text sync (no incremental); one root per language-server
+**v1 non-goals:** completion, formatting, code actions, and WorkspaceEdit file
+operations; full-text sync (no incremental); one root per language-server
 process, with separate processes for other roots; push diagnostics only; the
 built-in LSP tool surface is static, and the harness refresh hook is only wired
 to external MCP connections.

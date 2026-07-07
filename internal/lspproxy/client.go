@@ -274,15 +274,29 @@ func (c *lspClient) WorkspaceSymbols(ctx context.Context, query string) ([]Symbo
 // Rename resolves textDocument/rename and returns the resulting cross-file edits
 // (the shim never applies them; the caller renders a plan).
 func (c *lspClient) Rename(ctx context.Context, uri string, pos Position, newName string) ([]FileEdits, error) {
-	raw, err := jsonCall(ctx, c.peer, "textDocument/rename", RenameParams{
-		TextDocument: TextDocumentIdentifier{URI: uri},
-		Position:     pos,
-		NewName:      newName,
-	})
+	raw, err := c.renameRaw(ctx, uri, pos, newName)
 	if err != nil {
 		return nil, err
 	}
 	return parseWorkspaceEdit(raw)
+}
+
+// RenameTextEdits resolves textDocument/rename and rejects WorkspaceEdit file
+// operations. It is used by the mutating tool, which only applies text edits.
+func (c *lspClient) RenameTextEdits(ctx context.Context, uri string, pos Position, newName string) ([]FileEdits, error) {
+	raw, err := c.renameRaw(ctx, uri, pos, newName)
+	if err != nil {
+		return nil, err
+	}
+	return parseWorkspaceEditStrict(raw)
+}
+
+func (c *lspClient) renameRaw(ctx context.Context, uri string, pos Position, newName string) (json.RawMessage, error) {
+	return jsonCall(ctx, c.peer, "textDocument/rename", RenameParams{
+		TextDocument: TextDocumentIdentifier{URI: uri},
+		Position:     pos,
+		NewName:      newName,
+	})
 }
 
 // PositionEncoding returns the negotiated position encoding (utf-16 unless the

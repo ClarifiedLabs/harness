@@ -21,23 +21,29 @@ func goConfig() Config {
 	}}}
 }
 
-func TestManagerListToolsHasSevenReadOnly(t *testing.T) {
+func TestManagerListToolsHasExpectedAnnotations(t *testing.T) {
 	m := NewManager(goConfig(), "lsp", nil)
 	res, err := m.ListTools(context.Background(), "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(res.Tools) != 7 {
-		t.Fatalf("tool count = %d, want 7", len(res.Tools))
+	if len(res.Tools) != 8 {
+		t.Fatalf("tool count = %d, want 8", len(res.Tools))
 	}
 	names := map[string]bool{}
 	for _, tl := range res.Tools {
 		names[tl.Name] = true
-		if !strings.Contains(string(tl.Annotations), "readOnlyHint") {
-			t.Fatalf("tool %s missing readOnlyHint annotation", tl.Name)
+		if tl.Name == "mcp__lsp__rename" {
+			if !strings.Contains(string(tl.Annotations), `"readOnlyHint":false`) {
+				t.Fatalf("tool %s should be mutating, annotations=%s", tl.Name, tl.Annotations)
+			}
+			continue
+		}
+		if !strings.Contains(string(tl.Annotations), `"readOnlyHint":true`) {
+			t.Fatalf("tool %s missing readOnlyHint=true annotation: %s", tl.Name, tl.Annotations)
 		}
 	}
-	for _, want := range []string{"mcp__lsp__definition", "mcp__lsp__references", "mcp__lsp__hover", "mcp__lsp__document_symbols", "mcp__lsp__workspace_symbols", "mcp__lsp__diagnostics", "mcp__lsp__rename_plan"} {
+	for _, want := range []string{"mcp__lsp__definition", "mcp__lsp__references", "mcp__lsp__hover", "mcp__lsp__document_symbols", "mcp__lsp__workspace_symbols", "mcp__lsp__diagnostics", "mcp__lsp__rename_plan", "mcp__lsp__rename"} {
 		if !names[want] {
 			t.Fatalf("missing tool %s", want)
 		}
@@ -102,6 +108,54 @@ func TestManagerDefinition(t *testing.T) {
 	}
 }
 
+func TestManagerRenameAppliesEdits(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(src, []byte("package main\n\nfunc Foo() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(goConfig(), "lsp", nil)
+	m.acquireFn = func(ctx context.Context, s ResolvedServer, root string) (*lspClient, error) {
+		conn, _ := fakeLSP(t, func(server **jsonrpc.Peer) jsonrpc.PeerOptions {
+			return jsonrpc.PeerOptions{
+				Handlers: map[string]jsonrpc.Handler{
+					"initialize": initOK,
+					"textDocument/rename": func(ctx context.Context, p json.RawMessage) (json.RawMessage, *jsonrpc.Error) {
+						return json.RawMessage(`{"changes":{"` + uriForPath(src) + `":[{"range":{"start":{"line":2,"character":5},"end":{"line":2,"character":8}},"newText":"Bar"}]}}`), nil
+					},
+				},
+				Notifications: map[string]jsonrpc.NotificationHandler{
+					"initialized":          func(ctx context.Context, p json.RawMessage) {},
+					"textDocument/didOpen": func(ctx context.Context, p json.RawMessage) {},
+				},
+			}
+		})
+		cl := newClient(conn, root, nil)
+		if _, err := cl.Initialize(ctx, nil); err != nil {
+			return nil, err
+		}
+		return cl, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	args := json.RawMessage(`{"path":"` + src + `","line":3,"symbol":"Foo","new_name":"Bar"}`)
+	res, err := m.CallTool(ctx, "mcp__lsp__rename", args)
+	if err != nil {
+		t.Fatalf("callTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error result: %s", res.Content[0].Text)
+	}
+	if text := res.Content[0].Text; !strings.Contains(text, "applied 1 edit(s)") || !strings.Contains(text, src) {
+		t.Fatalf("rename result = %q", text)
+	}
+	if got := string(mustReadTestFile(t, src)); got != "package main\n\nfunc Bar() {}\n" {
+		t.Fatalf("file content = %q", got)
+	}
+}
+
 func TestManagerNoServerForExtension(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "a.unknownext")
@@ -116,6 +170,15 @@ func TestManagerNoServerForExtension(t *testing.T) {
 	if !res.IsError || !strings.Contains(res.Content[0].Text, "no language server") {
 		t.Fatalf("expected no-server error result, got %+v", res)
 	}
+}
+
+func mustReadTestFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestPrepareDocReopensAfterClientRestart(t *testing.T) {

@@ -168,6 +168,25 @@ func docSymbolsToSymbols(ds []DocumentSymbol) []Symbol {
 	return out
 }
 
+func parseWorkspaceEditStrict(raw json.RawMessage) ([]FileEdits, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var probe struct {
+		DocumentChanges []map[string]json.RawMessage `json:"documentChanges"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, fmt.Errorf("lspproxy: decode workspace edit: %w", err)
+	}
+	for _, change := range probe.DocumentChanges {
+		if _, ok := change["textDocument"]; !ok {
+			return nil, fmt.Errorf("workspace edit contains unsupported file operation")
+		}
+	}
+	return parseWorkspaceEdit(raw)
+}
+
 // parseWorkspaceEdit normalizes a rename's WorkspaceEdit into a per-file edit
 // list sorted by URI. It prefers documentChanges (the versioned form) and falls
 // back to changes; file-operation entries without text edits are skipped.

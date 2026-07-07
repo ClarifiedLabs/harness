@@ -2,16 +2,17 @@ package lspproxy
 
 // This file defines the static MCP tool surface. The set is fixed; the Manager
 // appends a dynamic "available languages" line to each description at runtime
-// (see ListTools). All tools are read-only.
+// (see ListTools).
 
-// toolAnnotations marks every tool read-only and closed-world.
-const toolAnnotations = `{"readOnlyHint":true,"openWorldHint":false}`
+const readOnlyToolAnnotations = `{"readOnlyHint":true,"openWorldHint":false}`
+const mutatingToolAnnotations = `{"readOnlyHint":false,"openWorldHint":false}`
 
 // toolSpec is the static definition of one exposed tool.
 type toolSpec struct {
 	name        string
 	description string
 	schema      string
+	readOnly    bool
 }
 
 // positionSchema is the shared input shape for position-bearing tools: a file
@@ -34,6 +35,7 @@ var toolSpecs = []toolSpec{
 		name:        "definition",
 		description: "Go to definition.",
 		schema:      positionSchema,
+		readOnly:    true,
 	},
 	{
 		name:        "references",
@@ -50,11 +52,13 @@ var toolSpecs = []toolSpec{
   },
   "required": ["path", "line"]
 }`,
+		readOnly: true,
 	},
 	{
 		name:        "hover",
 		description: "Show type/signature/docs.",
 		schema:      positionSchema,
+		readOnly:    true,
 	},
 	{
 		name:        "document_symbols",
@@ -66,6 +70,7 @@ var toolSpecs = []toolSpec{
   },
   "required": ["path"]
 }`,
+		readOnly: true,
 	},
 	{
 		name:        "workspace_symbols",
@@ -79,6 +84,7 @@ var toolSpecs = []toolSpec{
   },
   "required": ["query"]
 }`,
+		readOnly: true,
 	},
 	{
 		name:        "diagnostics",
@@ -91,10 +97,27 @@ var toolSpecs = []toolSpec{
   },
   "required": ["path"]
 }`,
+		readOnly: true,
 	},
 	{
 		name:        "rename_plan",
 		description: "Plan a safe cross-file rename; does not edit files.",
+		schema: `{
+  "type": "object",
+  "properties": {
+    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
+    "line": {"type": "integer", "description": "1-based line number the symbol is on."},
+    "symbol": {"type": "string", "description": "The identifier text on that line to rename."},
+    "column": {"type": "integer", "description": "Optional 1-based column override when symbol is absent or repeated."},
+    "new_name": {"type": "string", "description": "The new name for the symbol."}
+  },
+  "required": ["path", "line", "new_name"]
+}`,
+		readOnly: true,
+	},
+	{
+		name:        "rename",
+		description: "Apply a safe cross-file rename using language-server text edits.",
 		schema: `{
   "type": "object",
   "properties": {

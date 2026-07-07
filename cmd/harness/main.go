@@ -460,6 +460,7 @@ func run(env environment) int {
 	}
 	skillsCatalog := skills.BuildCatalog(discoveredSkills)
 	instructions := skills.Instructions(len(discoveredSkills))
+	systemAddendum := ""
 
 	// buildSystem assembles the full system prompt for a given agent prompt,
 	// reusing every other input. The configured system prompt replaces only the
@@ -477,7 +478,12 @@ func run(env environment) int {
 			Env:             sysprompt.EnvOptions{Dir: wd},
 		})
 		if instructions != "" {
+			if systemAddendum != "" {
+				s += "\n\n" + systemAddendum
+			}
 			s += "\n\n" + instructions
+		} else if systemAddendum != "" {
+			s += "\n\n" + systemAddendum
 		}
 		return s
 	}
@@ -603,6 +609,20 @@ func run(env environment) int {
 			lspSummary = summary
 		}
 	}
+	var serenaSummary mcptools.Summary
+	if cfg.LSP.Serena.Enable {
+		summary, cleanup, ok := setupSerena(startupCtx, cfg.LSP.Serena, toolCatalog, logger)
+		defer cleanup()
+		if startupInterrupted() {
+			return ui.ExitInterrupt
+		}
+		if ok {
+			serenaSummary = summary
+			if summary.Total > 0 {
+				systemAddendum = serenaSystemHint
+			}
+		}
+	}
 	// Agent mcp_tools policy controls automatic exposure for discovered external
 	// tools: disabled, read_only, or all. LSP tools are first-class but still use
 	// this read-only exposure gate so whitelist agents stay locked down. Capture
@@ -615,14 +635,16 @@ func run(env environment) int {
 	// refresh hook below so async-discovered tools are capped identically.
 	mcpLim := mcpLimitsFromConfig(cfg.MCP)
 	cappedMCPNames, cappedMCPReadOnly := capRemoteMCPNames(mcpSummary.Names, mcpSummary.ReadOnlyNames, mcpLim, logger)
-	mcpNames := make([]string, 0, len(cappedMCPNames)+len(localSummary.Names)+len(lspSummary.Names))
+	mcpNames := make([]string, 0, len(cappedMCPNames)+len(localSummary.Names)+len(lspSummary.Names)+len(serenaSummary.Names))
 	mcpNames = append(mcpNames, cappedMCPNames...)
 	mcpNames = append(mcpNames, localSummary.Names...)
 	mcpNames = append(mcpNames, lspSummary.Names...)
-	mcpReadOnlyNames := make([]string, 0, len(cappedMCPReadOnly)+len(localSummary.ReadOnlyNames)+len(lspSummary.ReadOnlyNames))
+	mcpNames = append(mcpNames, serenaSummary.Names...)
+	mcpReadOnlyNames := make([]string, 0, len(cappedMCPReadOnly)+len(localSummary.ReadOnlyNames)+len(lspSummary.ReadOnlyNames)+len(serenaSummary.ReadOnlyNames))
 	mcpReadOnlyNames = append(mcpReadOnlyNames, cappedMCPReadOnly...)
 	mcpReadOnlyNames = append(mcpReadOnlyNames, localSummary.ReadOnlyNames...)
 	mcpReadOnlyNames = append(mcpReadOnlyNames, lspSummary.ReadOnlyNames...)
+	mcpReadOnlyNames = append(mcpReadOnlyNames, serenaSummary.ReadOnlyNames...)
 	augmentAgentsWithMCP(agents, mcpNames, mcpReadOnlyNames)
 	// Expand @file references in agent prompts once at startup: a bad reference
 	// fails fast (rather than on a later /agent switch), and the cached text means
@@ -976,7 +998,7 @@ func run(env environment) int {
 	// Wire the MCP tool-list refresh hook for the interactive REPL only: one-shot
 	// runs a single turn with tools discovered before the request, so it needs no hook.
 	if mcpConn != nil && !cfg.PromptSet {
-		staticSummary := mergeMCPSummaries(localSummary, lspSummary)
+		staticSummary := mergeMCPSummaries(localSummary, lspSummary, serenaSummary)
 		refreshMCP := newMCPRefresher(mcpConn, toolCatalog, agents, mcpBases, mcpSummary, staticSummary, logger, pendingMCP, mcpLim)
 		app.RefreshMCP = func(ctx context.Context, agentName string) (*tools.Registry, string) {
 			reg, notice := refreshMCP(ctx, agentName)

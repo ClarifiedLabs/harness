@@ -297,6 +297,27 @@ func TestClientRename(t *testing.T) {
 	}
 }
 
+func TestClientRenameTextEditsRejectsFileOperations(t *testing.T) {
+	conn, _ := fakeLSP(t, func(server **jsonrpc.Peer) jsonrpc.PeerOptions {
+		return jsonrpc.PeerOptions{
+			Handlers: map[string]jsonrpc.Handler{
+				"initialize": initOK,
+				"textDocument/rename": func(ctx context.Context, p json.RawMessage) (json.RawMessage, *jsonrpc.Error) {
+					return json.RawMessage(`{"documentChanges":[{"kind":"rename","oldUri":"file:///tmp/a.go","newUri":"file:///tmp/b.go"}]}`), nil
+				},
+			},
+			Notifications: map[string]jsonrpc.NotificationHandler{"initialized": func(ctx context.Context, p json.RawMessage) {}},
+		}
+	})
+	cl := initClient(t, conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, err := cl.RenameTextEdits(ctx, "file:///tmp/proj/a.go", Position{Line: 1, Character: 5}, "Bar"); err == nil {
+		t.Fatal("RenameTextEdits should reject file operations")
+	}
+}
+
 func TestParseWorkspaceEditDocumentChanges(t *testing.T) {
 	raw := json.RawMessage(`{"documentChanges":[{"textDocument":{"uri":"file:///z","version":2},"edits":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"newText":"Q"}]}]}`)
 	edits, err := parseWorkspaceEdit(raw)

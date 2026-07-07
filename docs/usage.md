@@ -231,6 +231,8 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   auto-exposure, and `lsp.tools` registers only the listed subset of LSP tools
   (empty = all). See [mcp.md](mcp.md) and [lsp.md](lsp.md). An explicit
   `allowed_tools` whitelist can still name a tool that auto-exposure excluded.
+- Serena can be launched independently with `lsp.serena.enable=true` or
+  `HARNESS_LSP_SERENA_ENABLE=true`; this does not imply `lsp.enable=true`.
 - A single model turn's output is capped at the configured
   `max_output_tokens` value when set, otherwise at one quarter of the effective
   `context_window` (with a very high 1,000,000-token runaway ceiling). A model's

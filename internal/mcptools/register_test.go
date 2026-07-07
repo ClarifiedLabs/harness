@@ -151,6 +151,47 @@ func TestRegisterReadOnlyHintPolicy(t *testing.T) {
 	})
 }
 
+func TestRegisterWithNamespaceWrapsBareTools(t *testing.T) {
+	advertised := []mcp.Tool{
+		{
+			Name:        "find_symbol",
+			Description: "Find symbol.",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+			Annotations: json.RawMessage(`{"readOnlyHint":true}`),
+		},
+		{Name: "bad.name", Description: "illegal char skipped"},
+	}
+	provider := &scriptedProvider{result: &mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: "ok"}}}}
+	conn, cleanup := newScriptedConn(t, provider, advertised)
+	defer cleanup()
+
+	reg := &tools.Registry{}
+	sum, err := RegisterWithOptions(context.Background(), reg, conn, RegisterOptions{
+		TrustReadOnlyHint: true,
+		Namespace:         "serena",
+	})
+	if err != nil {
+		t.Fatalf("RegisterWithOptions: %v", err)
+	}
+	if !slices.Equal(sum.Names, []string{"mcp__serena__find_symbol"}) {
+		t.Fatalf("Names = %v, want namespaced Serena tool", sum.Names)
+	}
+	if !slices.Equal(sum.ReadOnlyNames, []string{"mcp__serena__find_symbol"}) {
+		t.Fatalf("ReadOnlyNames = %v, want read-only namespaced Serena tool", sum.ReadOnlyNames)
+	}
+	if !slices.Equal(sum.Skipped, []string{"bad.name"}) {
+		t.Fatalf("Skipped = %v, want bad.name", sum.Skipped)
+	}
+
+	res := reg.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "mcp__serena__find_symbol", Input: json.RawMessage(`{}`)})
+	if res.IsError || res.Text != "ok" {
+		t.Fatalf("dispatch = %+v, want ok", res)
+	}
+	if got := provider.callNames(); !slices.Equal(got, []string{"find_symbol"}) {
+		t.Fatalf("downstream call names = %v, want [find_symbol]", got)
+	}
+}
+
 func TestRegisterReplacesInPlace(t *testing.T) {
 	provider := &scriptedProvider{}
 	conn, cleanup := newScriptedConn(t, provider, []mcp.Tool{

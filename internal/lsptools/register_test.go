@@ -34,6 +34,7 @@ func TestRegisterUsesShortLSPNames(t *testing.T) {
 		Name:        "definition",
 		Description: "Go to definition.\nMore detail.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+		Annotations: json.RawMessage(`{"readOnlyHint":true}`),
 	}}}
 	reg := &tools.Registry{}
 
@@ -58,9 +59,9 @@ func TestRegisterUsesShortLSPNames(t *testing.T) {
 
 func threeToolProvider() *fakeProvider {
 	return &fakeProvider{tools: []mcp.Tool{
-		{Name: "definition", InputSchema: json.RawMessage(`{"type":"object"}`)},
-		{Name: "references", InputSchema: json.RawMessage(`{"type":"object"}`)},
-		{Name: "hover", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "definition", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
+		{Name: "references", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
+		{Name: "hover", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
 	}}
 }
 
@@ -118,6 +119,7 @@ func TestToolCallsBareProviderNameAndIsReadOnly(t *testing.T) {
 	provider := &fakeProvider{tools: []mcp.Tool{{
 		Name:        "hover",
 		InputSchema: json.RawMessage(`{"type":"object"}`),
+		Annotations: json.RawMessage(`{"readOnlyHint":true}`),
 	}}}
 	reg := &tools.Registry{}
 	if _, err := Register(context.Background(), reg, provider); err != nil {
@@ -134,5 +136,29 @@ func TestToolCallsBareProviderNameAndIsReadOnly(t *testing.T) {
 	}
 	if provider.calledName != "hover" {
 		t.Fatalf("provider called with %q, want bare name hover", provider.calledName)
+	}
+}
+
+func TestRegisterRespectsReadOnlyAnnotations(t *testing.T) {
+	provider := &fakeProvider{tools: []mcp.Tool{
+		{Name: "definition", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
+		{Name: "rename", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":false}`)},
+	}}
+	reg := &tools.Registry{}
+	sum, err := Register(context.Background(), reg, provider)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if !slices.Equal(sum.Names, []string{"lsp_definition", "lsp_rename"}) {
+		t.Fatalf("Names = %v, want definition and rename", sum.Names)
+	}
+	if !slices.Equal(sum.ReadOnlyNames, []string{"lsp_definition"}) {
+		t.Fatalf("ReadOnlyNames = %v, want only definition", sum.ReadOnlyNames)
+	}
+	if !reg.CallReadOnly(llm.ToolCall{ID: "1", Name: "lsp_definition", Input: json.RawMessage(`{}`)}) {
+		t.Fatal("definition should be read-only")
+	}
+	if reg.CallReadOnly(llm.ToolCall{ID: "2", Name: "lsp_rename", Input: json.RawMessage(`{}`)}) {
+		t.Fatal("rename should not be read-only")
 	}
 }

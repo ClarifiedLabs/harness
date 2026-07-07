@@ -328,7 +328,7 @@ go build ./... && go vet ./... && go test ./...
 - [Tools](docs/tools.md): built-in tools, delegation, background jobs,
   truncation, and tool artifacts.
 - [MCP](docs/mcp.md): configuring and running `harness-mcp-proxy`.
-- [LSP](docs/lsp.md): optional read-only code intelligence tools.
+- [LSP](docs/lsp.md): optional code intelligence tools, including independent Serena support.
 - [Release](docs/release.md): release artifacts, tagging, and required secrets.
 - [Design](docs/design.md): architecture and implementation details.
 - [Smoke tests](docs/smoke.md): end-to-end verification matrix.

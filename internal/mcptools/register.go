@@ -33,6 +33,10 @@ type Summary struct {
 // MCP annotations are treated as untrusted and do not affect scheduling.
 type RegisterOptions struct {
 	TrustReadOnlyHint bool
+	// Namespace adapts bare downstream tool names into mcp__<namespace>__<tool>
+	// names. Empty preserves the default proxy behavior, where the downstream
+	// must already advertise fully-qualified mcp__ names.
+	Namespace string
 }
 
 // Register lists the proxy's tools and registers each valid one on reg as an
@@ -53,23 +57,25 @@ func RegisterWithOptions(ctx context.Context, reg *tools.Registry, conn *Conn, o
 	}
 	sum := Summary{Servers: make(map[string]int)}
 	for _, d := range defs {
-		if !validName(d.Name) {
+		name, target, ok := registrationNames(d.Name, opts.Namespace)
+		if !ok {
 			sum.Skipped = append(sum.Skipped, d.Name)
 			continue
 		}
 		readOnly := opts.TrustReadOnlyHint && readOnlyHint(d)
 		reg.Register(&Tool{
-			name:     d.Name,
+			name:     name,
+			target:   target,
 			desc:     oneLineDesc(d.Description),
 			schema:   normalizeSchema(d.InputSchema),
 			readOnly: readOnly,
 			conn:     conn,
 		})
-		sum.Names = append(sum.Names, d.Name)
+		sum.Names = append(sum.Names, name)
 		if readOnly {
-			sum.ReadOnlyNames = append(sum.ReadOnlyNames, d.Name)
+			sum.ReadOnlyNames = append(sum.ReadOnlyNames, name)
 		}
-		sum.Servers[serverLabel(d.Name)]++
+		sum.Servers[serverLabel(name)]++
 		sum.Total++
 	}
 	return sum, nil
@@ -93,6 +99,21 @@ func readOnlyHint(d mcp.Tool) bool {
 // and match the provider charset/length bound.
 func validName(name string) bool {
 	return strings.HasPrefix(name, namePrefix) && toolNameRe.MatchString(name)
+}
+
+func registrationNames(advertised, namespace string) (name, target string, ok bool) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		if !validName(advertised) {
+			return "", "", false
+		}
+		return advertised, advertised, true
+	}
+	qualified := namePrefix + namespace + "__" + advertised
+	if !validName(qualified) {
+		return "", "", false
+	}
+	return qualified, advertised, true
 }
 
 // serverLabel extracts a display-only server label from a validated name. The

@@ -120,7 +120,7 @@ func (m *Manager) computeAvailable() {
 	m.available = langs
 }
 
-// ListTools returns the fixed 7-tool surface with descriptions augmented by the
+// ListTools returns the fixed tool surface with descriptions augmented by the
 // available-language list. The set fits one page; a non-empty cursor returns an
 // empty page.
 func (m *Manager) ListTools(ctx context.Context, cursor string) (mcp.ListToolsResult, error) {
@@ -133,11 +133,15 @@ func (m *Manager) ListTools(ctx context.Context, cursor string) (mcp.ListToolsRe
 	}
 	tools := make([]mcp.Tool, 0, len(toolSpecs))
 	for _, spec := range toolSpecs {
+		annotations := mutatingToolAnnotations
+		if spec.readOnly {
+			annotations = readOnlyToolAnnotations
+		}
 		tools = append(tools, mcp.Tool{
 			Name:        m.publicName(spec.name),
 			Description: spec.description + suffix,
 			InputSchema: json.RawMessage(spec.schema),
-			Annotations: json.RawMessage(toolAnnotations),
+			Annotations: json.RawMessage(annotations),
 		})
 	}
 	return mcp.ListToolsResult{Tools: tools}, nil
@@ -182,6 +186,8 @@ func (m *Manager) CallTool(ctx context.Context, name string, raw json.RawMessage
 		return m.handleDiagnostics(ctx, args)
 	case "rename_plan":
 		return m.handleRenamePlan(ctx, args)
+	case "rename":
+		return m.handleRename(ctx, args)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -391,6 +397,33 @@ func (m *Manager) handleRenamePlan(ctx context.Context, args toolArgs) (*mcp.Cal
 	lr := newLineReader()
 	lineFor := func(u string, line int) (string, bool) { return lr.line(uriToPath(u), line) }
 	return textResult(formatRenamePlan(edits, lineFor)), nil
+}
+
+func (m *Manager) handleRename(ctx context.Context, args toolArgs) (*mcp.CallToolResult, error) {
+	if args.NewName == "" {
+		return errorResult("new_name is required"), nil
+	}
+	ft, errRes := m.targetFor(ctx, args.Path)
+	if errRes != nil {
+		return errRes, nil
+	}
+	uri, lines, err := m.prepareDoc(ft, uriForPath(ft.abs))
+	if err != nil {
+		return errorResult("open %s: %v", ft.abs, err), nil
+	}
+	pos, err := positionFromArgs(lines, args)
+	if err != nil {
+		return errorResult("%v", err), nil
+	}
+	edits, err := ft.cl.RenameTextEdits(ctx, uri, pos, args.NewName)
+	if err != nil {
+		return errorResult("rename failed: %v", err), nil
+	}
+	result, err := applyWorkspaceTextEdits(edits)
+	if err != nil {
+		return errorResult("rename failed: %v", err), nil
+	}
+	return textResult(formatRenameApplied(result)), nil
 }
 
 // selectServer picks the configured server for a file: first one claiming the

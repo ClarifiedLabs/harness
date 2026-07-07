@@ -136,7 +136,7 @@ type Config struct {
 	MCP MCPConfig `json:"mcp"`
 
 	// LSP code intelligence (opt-in). When enabled, harness registers built-in
-	// read-only LSP tools directly with short lsp_* names. Server definitions are
+	// LSP tools directly with short lsp_* names. Server definitions are
 	// config-file-only and overlay the embedded defaults by server name.
 	LSP LSPConfig `json:"lsp"`
 }
@@ -204,6 +204,18 @@ type LSPConfig struct {
 	Tools []string `json:"tools,omitempty"`
 
 	Servers map[string]LSPServerConfig `json:"servers,omitempty"`
+	Serena  SerenaConfig               `json:"serena,omitempty"`
+}
+
+// SerenaConfig is the resolved first-class Serena MCP block. Serena is launched
+// independently of native LSP servers and exposes its MCP tools under the
+// mcp__serena__ namespace.
+type SerenaConfig struct {
+	Enable    bool              `json:"enable"`
+	EnableSet bool              `json:"enable_set"` // whether enable was explicitly set (env or file)
+	Command   string            `json:"command"`
+	Args      []string          `json:"args"`
+	Env       map[string]string `json:"env"`
 }
 
 // LSPServerConfig mirrors one inline "lsp.servers" entry. It intentionally
@@ -223,6 +235,7 @@ const (
 	defaultContextWindow      = 256_000
 	defaultDelegateMaxTurns   = 20
 	defaultToolTimeoutSeconds = 600
+	DefaultSerenaCommand      = "serena"
 	TimestampShort            = "short"
 	TimestampFull             = "full"
 	TimestampNone             = "none"
@@ -236,6 +249,10 @@ const (
 	DefaultHistSize     = 1000
 	DefaultReplEditMode = "emacs"
 )
+
+func DefaultSerenaArgs() []string {
+	return []string{"start-mcp-server", "--context=ide", "--project-from-cwd", "--open-web-dashboard", "False"}
+}
 
 // FileAgentConfig is one entry of the config file's "agents" object. It mirrors
 // agentdef.FileDefinition; config deliberately does not import internal/agentdef (which
@@ -346,6 +363,14 @@ type fileLSPConfig struct {
 	Enable  *bool                      `json:"enable"`
 	Tools   []string                   `json:"tools"`
 	Servers map[string]LSPServerConfig `json:"servers"`
+	Serena  *fileSerenaConfig          `json:"serena"`
+}
+
+type fileSerenaConfig struct {
+	Enable  *bool             `json:"enable"`
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env"`
 }
 
 // Load resolves a Config from the given args (argv after the program name), a
@@ -386,6 +411,8 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 
 	var c Config
 	// Each resolution goes default -> file -> env -> flag, last writer wins.
+	c.LSP.Serena.Command = DefaultSerenaCommand
+	c.LSP.Serena.Args = DefaultSerenaArgs()
 
 	c.Model = resolveString(set["model"], *fModel,
 		getenv("HARNESS_MODEL"), fc.Model, "")
@@ -627,6 +654,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 
 	// LSP block (env > file > default for enable; servers are config-file-only).
 	var lspEnableFile *bool
+	var serenaEnableFile *bool
 	if fc.LSP != nil {
 		lspEnableFile = fc.LSP.Enable
 		if len(fc.LSP.Tools) > 0 {
@@ -635,9 +663,29 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		if len(fc.LSP.Servers) > 0 {
 			c.LSP.Servers = cloneLSPServers(fc.LSP.Servers)
 		}
+		if fc.LSP.Serena != nil {
+			serenaEnableFile = fc.LSP.Serena.Enable
+			if fc.LSP.Serena.Command != "" {
+				c.LSP.Serena.Command = fc.LSP.Serena.Command
+			}
+			if fc.LSP.Serena.Args != nil {
+				c.LSP.Serena.Args = append([]string(nil), fc.LSP.Serena.Args...)
+			}
+			if len(fc.LSP.Serena.Env) > 0 {
+				env, err := expandMCPHeaders(fc.LSP.Serena.Env, getenv)
+				if err != nil {
+					return Config{}, err
+				}
+				c.LSP.Serena.Env = env
+			}
+		}
 	}
 	c.LSP.Enable = resolveBool(false, false,
 		getenv("HARNESS_LSP_ENABLE"), lspEnableFile, false)
+	serenaEnableEnv := getenv("HARNESS_LSP_SERENA_ENABLE")
+	c.LSP.Serena.EnableSet = serenaEnableEnv != "" || serenaEnableFile != nil
+	c.LSP.Serena.Enable = resolveBool(false, false,
+		serenaEnableEnv, serenaEnableFile, false)
 
 	if set["hooks"] {
 		if strings.TrimSpace(*f.hooks) == "" {

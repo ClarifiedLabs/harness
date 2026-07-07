@@ -68,5 +68,16 @@
       "args": [],
       "env": {}
     }
+  },
+  "lsp": {
+    "enable": false,
+    "tools": [],
+    "servers": {},
+    "serena": {
+      "enable": null,
+      "command": "serena",
+      "args": ["start-mcp-server", "--context=ide", "--project-from-cwd", "--open-web-dashboard", "False"],
+      "env": {}
+    }
   }
 }

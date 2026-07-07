@@ -50,15 +50,19 @@ func Register(ctx context.Context, reg *tools.Registry, provider mcp.ToolProvide
 			sum.Skipped = append(sum.Skipped, name)
 			continue
 		}
+		readOnly := readOnlyHint(d)
 		reg.Register(&Tool{
 			name:     name,
 			target:   d.Name,
 			desc:     oneLineDesc(d.Description),
 			schema:   normalizeSchema(d.InputSchema),
+			readOnly: readOnly,
 			provider: provider,
 		})
 		sum.Names = append(sum.Names, name)
-		sum.ReadOnlyNames = append(sum.ReadOnlyNames, name)
+		if readOnly {
+			sum.ReadOnlyNames = append(sum.ReadOnlyNames, name)
+		}
 		sum.Servers["lsp"]++
 		sum.Total++
 	}
@@ -87,12 +91,26 @@ func allowlistSet(allow []string) map[string]bool {
 	return set
 }
 
+func readOnlyHint(d mcp.Tool) bool {
+	if len(d.Annotations) == 0 {
+		return false
+	}
+	var annotations struct {
+		ReadOnlyHint bool `json:"readOnlyHint"`
+	}
+	if err := json.Unmarshal(d.Annotations, &annotations); err != nil {
+		return false
+	}
+	return annotations.ReadOnlyHint
+}
+
 // Tool adapts one built-in LSP tool to tools.Tool.
 type Tool struct {
 	name     string
 	target   string
 	desc     string
 	schema   json.RawMessage
+	readOnly bool
 	provider mcp.ToolProvider
 }
 
@@ -102,7 +120,7 @@ func (t *Tool) Description() string { return t.desc }
 
 func (t *Tool) Schema() json.RawMessage { return t.schema }
 
-func (t *Tool) ReadOnly(json.RawMessage) bool { return true }
+func (t *Tool) ReadOnly(json.RawMessage) bool { return t.readOnly }
 
 func (t *Tool) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	res, err := t.provider.CallTool(ctx, t.target, input)

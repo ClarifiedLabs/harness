@@ -32,6 +32,7 @@ const maxDescBytes = 1024
 // interface. It proxies tools/call over the shared Conn.
 type Tool struct {
 	name     string          // full mcp__<server>__<tool>, already prefixed+validated
+	target   string          // downstream tool name; usually name, bare when locally namespaced
 	desc     string          // one-line, truncated description
 	schema   json.RawMessage // inputSchema passthrough (or emptySchema)
 	readOnly bool
@@ -58,7 +59,11 @@ func (t *Tool) ReadOnly(json.RawMessage) bool { return t.readOnly }
 //     text through Dispatch's error path; empty text gets a stand-in.
 //   - success                   -> (rendered text, nil).
 func (t *Tool) Run(ctx context.Context, input json.RawMessage) (string, error) {
-	res, err := t.conn.CallTool(ctx, t.name, input)
+	target := t.target
+	if target == "" {
+		target = t.name
+	}
+	res, err := t.conn.CallTool(ctx, target, input)
 	if err != nil {
 		return "", err
 	}

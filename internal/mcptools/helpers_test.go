@@ -22,6 +22,7 @@ type scriptedProvider struct {
 
 	mu    sync.Mutex
 	calls int
+	names []string
 }
 
 func (p *scriptedProvider) ListTools(ctx context.Context, cursor string) (mcp.ListToolsResult, error) {
@@ -31,6 +32,7 @@ func (p *scriptedProvider) ListTools(ctx context.Context, cursor string) (mcp.Li
 func (p *scriptedProvider) CallTool(ctx context.Context, name string, args json.RawMessage) (*mcp.CallToolResult, error) {
 	p.mu.Lock()
 	p.calls++
+	p.names = append(p.names, name)
 	p.mu.Unlock()
 	if p.callErr != nil {
 		return nil, p.callErr
@@ -42,6 +44,12 @@ func (p *scriptedProvider) callCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.calls
+}
+
+func (p *scriptedProvider) callNames() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.names...)
 }
 
 // fakeProxy is a real mcp.Serve session running over the server end of a

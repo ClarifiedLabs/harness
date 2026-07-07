@@ -72,7 +72,7 @@ func TestLSPServeExposesToolsOverMCP(t *testing.T) {
 	for _, tl := range tools {
 		names[tl.Name] = true
 	}
-	for _, want := range []string{"mcp__lsp__definition", "mcp__lsp__references", "mcp__lsp__hover", "mcp__lsp__document_symbols", "mcp__lsp__workspace_symbols", "mcp__lsp__diagnostics", "mcp__lsp__rename_plan"} {
+	for _, want := range []string{"mcp__lsp__definition", "mcp__lsp__references", "mcp__lsp__hover", "mcp__lsp__document_symbols", "mcp__lsp__workspace_symbols", "mcp__lsp__diagnostics", "mcp__lsp__rename_plan", "mcp__lsp__rename"} {
 		if !names[want] {
 			t.Fatalf("missing tool %q; got %v", want, names)
 		}

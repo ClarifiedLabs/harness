@@ -83,7 +83,7 @@ func setupLocalMCP(ctx context.Context, localCfg config.LocalMCPConfig, explicit
 	// retry never double-registers. A connection error fails fast.
 	regCtx, cancel := context.WithTimeout(ctx, mcpRegisterTimeout)
 	defer cancel()
-	sum, err := registerLocalWhenReady(regCtx, catalog, c)
+	sum, err := registerLocalWhenReady(regCtx, catalog, c, mcptools.RegisterOptions{TrustReadOnlyHint: true})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			_ = c.Close()
@@ -122,10 +122,10 @@ var localReadyPoll = 200 * time.Millisecond
 // until tools appear or ctx is done. A connection/transport error returns
 // immediately. On timeout it returns the last (possibly empty) summary with no
 // error, so the caller can warn and continue.
-func registerLocalWhenReady(ctx context.Context, catalog *tools.Registry, c *mcptools.Conn) (mcptools.Summary, error) {
+func registerLocalWhenReady(ctx context.Context, catalog *tools.Registry, c *mcptools.Conn, opts mcptools.RegisterOptions) (mcptools.Summary, error) {
 	var last mcptools.Summary
 	for {
-		sum, err := mcptools.RegisterWithOptions(ctx, catalog, c, mcptools.RegisterOptions{TrustReadOnlyHint: true})
+		sum, err := mcptools.RegisterWithOptions(ctx, catalog, c, opts)
 		if err != nil {
 			return mcptools.Summary{}, err
 		}
