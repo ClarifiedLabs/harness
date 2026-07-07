@@ -260,7 +260,8 @@ func run(env environment) int {
 		}
 		return ui.ExitOK
 	}
-	logger, err := logging.NewLogger(stderr, cfg.LogLevel)
+	promptLogWriter := ui.NewPromptRedrawWriter(stderr)
+	logger, err := logging.NewLogger(promptLogWriter, cfg.LogLevel)
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
@@ -978,15 +979,16 @@ func run(env environment) int {
 			snap.SessionPath = path
 			delegateState.Set(snap)
 		},
-		Prompt:         cfg.ReplPrompt,
-		PromptEditMode: cfg.ReplEditMode,
-		HistFile:       cfg.HistFile,
-		HistFileSize:   cfg.HistFileSize,
-		HistSize:       cfg.HistSize,
-		Skills:         discoveredSkills,
-		SkillDirs:      skillDirs,
-		DisabledTools:  disabledTools,
-		SummaryWidth:   env.terminalCols,
+		Prompt:          cfg.ReplPrompt,
+		PromptLogWriter: promptLogWriter,
+		PromptEditMode:  cfg.ReplEditMode,
+		HistFile:        cfg.HistFile,
+		HistFileSize:    cfg.HistFileSize,
+		HistSize:        cfg.HistSize,
+		Skills:          discoveredSkills,
+		SkillDirs:       skillDirs,
+		DisabledTools:   disabledTools,
+		SummaryWidth:    env.terminalCols,
 	}
 	// If HistFile was not explicitly configured, derive it from StateDir.
 	if app.HistFile == "" {

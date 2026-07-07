@@ -44,6 +44,38 @@ func readViEditedInput(t *testing.T, input string) (replInput, bool, error) {
 	return editor.read("> ")
 }
 
+func TestPromptRedrawWriterMovesActivePromptBelowBackgroundLog(t *testing.T) {
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader(""), &out)
+	editor.columns = func() int { return 80 }
+	state := lineEditState{prompt: "> "}
+	state.setText("draft")
+	if err := editor.redrawPromptState(&state, viModeInsert); err != nil {
+		t.Fatalf("draw prompt: %v", err)
+	}
+	out.Reset()
+
+	w := NewPromptRedrawWriter(&out)
+	w.setPromptEditor(editor)
+	msg := []byte("[info] background refresh finished\n")
+	n, err := w.Write(msg)
+	if err != nil {
+		t.Fatalf("write background log: %v", err)
+	}
+	if n != len(msg) {
+		t.Fatalf("write count = %d, want %d", n, len(msg))
+	}
+
+	got := out.String()
+	want := "[info] background refresh finished\n\r\x1b[2K> draft"
+	if !strings.Contains(got, want) {
+		t.Fatalf("background log should be followed by a redrawn prompt\nwant substring %q\ngot %q", want, got)
+	}
+	if strings.Contains(got, "> draft[info]") {
+		t.Fatalf("log was appended after the prompt instead of moving above it: %q", got)
+	}
+}
+
 func readViEditedInputWithHistory(t *testing.T, input string, history []string) (replInput, bool, error) {
 	t.Helper()
 	var out bytes.Buffer

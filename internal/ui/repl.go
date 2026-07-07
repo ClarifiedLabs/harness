@@ -186,6 +186,11 @@ type App struct {
 	// Prompt is the REPL input prompt format.
 	Prompt string
 
+	// PromptLogWriter, when set, is attached to the raw prompt editor while the
+	// REPL is running so asynchronous slog output can clear/redraw the active
+	// prompt instead of printing after it on the same terminal row.
+	PromptLogWriter *PromptRedrawWriter
+
 	// PromptEditMode selects the raw prompt editor keymap: "emacs" (default)
 	// or "vi". It applies only to interactive TTY prompts.
 	PromptEditMode string
@@ -362,6 +367,10 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}()
 
 	reader := newREPLReader(in, app.Errw, usePromptEditor, app.PromptEditMode)
+	if app.PromptLogWriter != nil && reader.editor != nil {
+		app.PromptLogWriter.setPromptEditor(reader.editor)
+		defer app.PromptLogWriter.setPromptEditor(nil)
+	}
 	app.SetPromptEditMode = func(mode string) {
 		if reader.editor != nil {
 			reader.editor.setEditMode(mode)

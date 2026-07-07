@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -117,6 +118,14 @@ type promptLineEditor struct {
 	// vi-mode raw prompt is active, avoiding duplicate writes on redraws that keep
 	// the same vi mode.
 	cursorShapeSeq string
+
+	// terminalMu serializes prompt redraw/finish writes against asynchronous log
+	// writes that temporarily clear and repaint the active prompt. activePrompt is
+	// a display-only snapshot of the last drawn prompt state, protected by the same
+	// mutex so background logs can move the prompt below themselves without racing
+	// the input goroutine's terminal bytes.
+	terminalMu   sync.Mutex
+	activePrompt *lineEditState
 }
 
 func newPromptLineEditor(in io.Reader, w io.Writer) *promptLineEditor {
@@ -217,6 +226,65 @@ func (e *promptLineEditor) read(prompt string) (replInput, bool, error) {
 	return e.readPrefilled(prompt, "")
 }
 
+func (e *promptLineEditor) redrawPromptState(s *lineEditState, mode viMode) error {
+	e.terminalMu.Lock()
+	defer e.terminalMu.Unlock()
+	if err := e.applyPromptCursorShape(mode); err != nil {
+		return err
+	}
+	if err := s.redraw(e.w, e.terminalColumns()); err != nil {
+		return err
+	}
+	e.activePrompt = s.promptSnapshot()
+	return nil
+}
+
+func (e *promptLineEditor) finishPromptState(s *lineEditState) error {
+	e.terminalMu.Lock()
+	defer e.terminalMu.Unlock()
+	if err := s.finish(e.w); err != nil {
+		return err
+	}
+	e.activePrompt = nil
+	return nil
+}
+
+func (e *promptLineEditor) clearPromptSnapshot() {
+	e.terminalMu.Lock()
+	e.activePrompt = nil
+	e.terminalMu.Unlock()
+}
+
+func (e *promptLineEditor) resetPromptCursorShapeLocked() error {
+	e.terminalMu.Lock()
+	defer e.terminalMu.Unlock()
+	return e.resetPromptCursorShape()
+}
+
+func (e *promptLineEditor) writeBackground(p []byte) (int, error) {
+	e.terminalMu.Lock()
+	defer e.terminalMu.Unlock()
+	if e.activePrompt == nil || !e.activePrompt.drawn {
+		return e.w.Write(p)
+	}
+	prompt := e.activePrompt
+	if err := prompt.moveToPromptStart(e.w); err != nil {
+		return 0, err
+	}
+	// The prompt has been erased from the screen; redraw it from the current cursor
+	// position after the log line scrolls.
+	prompt.drawn = false
+	n, err := e.w.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if err := prompt.redraw(e.w, e.terminalColumns()); err != nil {
+		return n, err
+	}
+	e.activePrompt = prompt
+	return n, nil
+}
+
 func (e *promptLineEditor) applyPromptCursorShape(mode viMode) error {
 	if e.editMode != promptEditModeVi {
 		return nil
@@ -253,6 +321,7 @@ func (e *promptLineEditor) resetPromptCursorShape() error {
 // the user submits it manually (during-turn input).
 func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, bool, error) {
 	state := lineEditState{prompt: prompt}
+	defer e.clearPromptSnapshot()
 	if prefill != "" {
 		state.setText(prefill)
 	}
@@ -268,13 +337,10 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 	vi := viLineState{mode: viModeInsert}
 	e.refreshViPrompt(&vi, &state)
 	if e.editMode == promptEditModeVi {
-		defer func() { _ = e.resetPromptCursorShape() }()
+		defer func() { _ = e.resetPromptCursorShapeLocked() }()
 	}
 	e.tracef("read start prompt=%q", prompt)
-	if err := e.applyPromptCursorShape(vi.mode); err != nil {
-		return replInput{}, false, err
-	}
-	if err := state.redraw(e.w, e.terminalColumns()); err != nil {
+	if err := e.redrawPromptState(&state, vi.mode); err != nil {
 		return replInput{}, false, err
 	}
 
@@ -283,7 +349,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 		if err != nil {
 			if errors.Is(err, io.EOF) && len(state.buf) > 0 {
 				e.tracef("read eof with buffered text len=%d purePaste=%v", len(state.buf), e.purePaste)
-				if err := state.finish(e.w); err != nil {
+				if err := e.finishPromptState(&state); err != nil {
 					return replInput{}, false, err
 				}
 				return replInput{text: string(state.buf), pasted: e.purePaste}, true, nil
@@ -306,10 +372,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 			return result.input, result.ok, nil
 		}
 		if result.redraw {
-			if err := e.applyPromptCursorShape(vi.mode); err != nil {
-				return replInput{}, false, err
-			}
-			if err := state.redraw(e.w, e.terminalColumns()); err != nil {
+			if err := e.redrawPromptState(&state, vi.mode); err != nil {
 				return replInput{}, false, err
 			}
 		}
@@ -574,7 +637,7 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 // input. Centralized so the idle prompt's several submit paths (raw CR, escape
 // submit, vi submit) share one history/finish sequence.
 func (e *promptLineEditor) submit(s *lineEditState) (viEditResult, error) {
-	if err := s.finish(e.w); err != nil {
+	if err := e.finishPromptState(s); err != nil {
 		return viEditResult{}, err
 	}
 	e.addHistory(string(s.buf))
@@ -609,7 +672,7 @@ func (e *promptLineEditor) edit(s *lineEditState, duringTurn bool) (viEditResult
 	if duringTurn {
 		return viEditResult{input: replInput{text: string(s.buf), edit: true}, ok: true, done: true}, nil
 	}
-	if err := s.finish(e.w); err != nil {
+	if err := e.finishPromptState(s); err != nil {
 		return viEditResult{}, err
 	}
 	e.addHistory(string(s.buf))
@@ -1081,7 +1144,7 @@ func (e *promptLineEditor) completeAtFileReference(s *lineEditState) (bool, erro
 		s.replaceRangeWithCursor(start, end, text, cursor)
 		return true, nil
 	}
-	if err := s.finish(e.w); err != nil {
+	if err := e.finishPromptState(s); err != nil {
 		return true, err
 	}
 	for _, candidate := range candidates {
@@ -1219,7 +1282,7 @@ func (e *promptLineEditor) completeBangLine(s *lineEditState) (bool, error) {
 		s.replaceRange(start, s.cursor, common)
 		return true, nil
 	}
-	if err := s.finish(e.w); err != nil {
+	if err := e.finishPromptState(s); err != nil {
 		return true, err
 	}
 	for _, candidate := range candidates {
@@ -1601,6 +1664,23 @@ func (s *lineEditState) displayCursor() int {
 		return len([]rune(s.summary))
 	}
 	return s.cursor
+}
+
+func (s *lineEditState) promptSnapshot() *lineEditState {
+	if s == nil || !s.drawn {
+		return nil
+	}
+	return &lineEditState{
+		prompt:    s.prompt,
+		buf:       append([]rune(nil), s.displayRunes()...),
+		cursor:    s.displayCursor(),
+		drawn:     s.drawn,
+		rows:      s.rows,
+		cursorRow: s.cursorRow,
+		cursorCol: s.cursorCol,
+		endRow:    s.endRow,
+		endCol:    s.endCol,
+	}
 }
 
 // setPasteSummary replaces the buffer with a paste and, when the paste is large
