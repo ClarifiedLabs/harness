@@ -56,6 +56,11 @@ first, and provider-neutral.
 - Hand-write tool JSON schemas; decode inputs into typed private structs; tolerate unknown JSON keys.
 - Prefer argv-style tools (`exec`, `git`, `grep`, `rg`) when shell quoting is risky; use shell commands only for shell features.
 
+## Serena
+
+- Commit shared Serena project configuration (`.serena/project.yml` and `.serena/.gitignore`); do not commit `.serena/cache/` or `.serena/project.local.yml`.
+- Commit `.serena/memories/` entries only when they are deliberately curated, non-sensitive, and useful to future agents; keep them concise and update or remove stale memories.
+
 ## Tests
 
 - Unit tests live next to code; `//go:build integration` integration tests live in `cmd/harness/*_test.go` (run via `make test-integration`).
