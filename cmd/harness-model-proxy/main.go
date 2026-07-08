@@ -4,11 +4,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -132,6 +132,7 @@ func runServe(env environment, args []string) int {
 	configPath := fs.String("config", "", "config file path")
 	listen := fs.String("listen", "", "HTTP listen address")
 	modelsDevCacheTTL := fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
+	apiKeysFile := fs.String("api-keys-file", "", "accepted API keys file path")
 	logLevel := fs.String("log-level", "", "log level: debug, info, warn, error")
 	logFormat := fs.String("log-format", "", "log format: json, text")
 	noMetrics := fs.Bool("no-metrics", false, "disable the Prometheus /metrics endpoint")
@@ -155,6 +156,15 @@ func runServe(env environment, args []string) int {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime
 	}
+	keyFile := server.ResolveAPIKeysFile(path, cfg.APIKeysFile, *apiKeysFile)
+	keyFileExplicit := *apiKeysFile != "" || cfg.APIKeysFile != ""
+	initialKeys, keyFileState, err := apikey.LoadInitialFile(keyFile, keyFileExplicit)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: api keys file %s: %v\n", keyFile, err)
+		return exitRuntime
+	}
+	authStore := apikey.NewDynamicStore(initialKeys, nil)
+
 	modelsTTL, err := modelsDevCacheTTLFromConfig(cfg, *modelsDevCacheTTL, flagWasSet(fs, "models-dev-cache-ttl"))
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
@@ -196,6 +206,7 @@ func runServe(env environment, args []string) int {
 		PricingMaxAge:       modelsTTL,
 		ModelsDevCatalog:    initialCatalog,
 		ModelsDevSourceDate: initialSourceDate,
+		Now:                 env.now,
 		Metrics:             reg,
 		Warn: func(msg string) {
 			logger.Warn(msg)
@@ -223,6 +234,9 @@ func runServe(env environment, args []string) int {
 	startModelsDevCacheRefresh(ctx, env, configDir, modelsTTL, logger, func(catalog *modelsdev.Catalog, sourceDate time.Time) {
 		handler.UpdateModelsDevCatalog(catalog, sourceDate)
 	})
+	go apikey.WatchFile(ctx, keyFile, keyFileState, 2*time.Second, authStore, func(err error) {
+		logger.Warn("reload api keys failed", "path", keyFile, "err", err)
+	})
 
 	if reg != nil {
 		ln, err := net.Listen("tcp", metricsAddr)
@@ -245,8 +259,7 @@ func runServe(env environment, args []string) int {
 		}
 	}
 
-	store := cfg.APIKeyStore()
-	srv := httpserve.New(addr, server.ObserveAuth(handler, store, store.Middleware(handler)))
+	srv := httpserve.New(addr, server.ObserveAuth(handler, authStore, authStore.Middleware(handler)))
 	logger.Info("model proxy listening", "addr", addr)
 	if err := httpserve.Run(ctx, srv); err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
@@ -326,12 +339,16 @@ func runRefreshModelsCmd(env environment, args []string) int {
 }
 
 // runGenerateAPIKeyCmd parses generate-api-key flags, generates a new API key,
-// and adds it to the config, creating the config at the default path if none
-// exists yet.
+// and appends its hash to the dedicated key file.
 func runGenerateAPIKeyCmd(env environment, args []string) int {
 	fs := flag.NewFlagSet("generate-api-key", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	configPath := fs.String("config", "", "config file path")
+	apiKeysFile := fs.String("api-keys-file", "", "accepted API keys file path")
+	ttl := fs.String("ttl", "", "key TTL as a Go duration; empty or 0 means no expiry")
+	budgetUSD := fs.Float64("budget-usd", 0, "per-key cost budget in USD; 0 means no budget")
+	budgetPeriod := fs.String("budget-period", "", "per-key cost budget period as a Go duration; required when -budget-usd is set")
+	budgetRejectUnpriced := fs.Bool("budget-reject-unpriced", false, "reject unpriced targets while this key's budget is enabled")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			usageGenerateAPIKey(env.stdout)
@@ -344,18 +361,18 @@ func runGenerateAPIKeyCmd(env environment, args []string) int {
 		fmt.Fprintln(env.stderr, "harness-model-proxy: generate-api-key requires exactly one name")
 		return exitUsage
 	}
-	return runGenerateAPIKey(env, *configPath, fs.Arg(0))
+	return runGenerateAPIKey(env, *configPath, *apiKeysFile, *ttl, *budgetUSD, *budgetPeriod, *budgetRejectUnpriced, fs.Arg(0))
 }
 
 func usage(w io.Writer) {
 	fmt.Fprint(w, `harness-model-proxy - provider and model proxy for harness
 
 Usage:
-  harness-model-proxy serve             [-config path] [-listen addr] [-models-dev-cache-ttl d] [-log-level level] [-log-format format] [-no-metrics] [-metrics-listen addr]
+  harness-model-proxy serve             [-config path] [-api-keys-file path] [-listen addr] [-models-dev-cache-ttl d] [-log-level level] [-log-format format] [-no-metrics] [-metrics-listen addr]
   harness-model-proxy setup             [-force] [-models-dev-cache-ttl d]
   harness-model-proxy refresh-models    [-config path] [-models-dev-cache-ttl d]
   harness-model-proxy auth              <login|logout|status> [-config path] <provider>
-  harness-model-proxy generate-api-key  [-config path] <name>
+  harness-model-proxy generate-api-key  [-config path] [-api-keys-file path] [-ttl duration] [-budget-usd amount -budget-period duration] [-budget-reject-unpriced] <name>
   harness-model-proxy version
   harness-model-proxy --version
 
@@ -366,11 +383,12 @@ Subcommands:
   setup             Create or update proxy and provider config interactively.
   refresh-models    Fetch models.dev and update configured provider model metadata.
   auth              Login, logout, or inspect OAuth tokens for a configured provider.
-  generate-api-key  Generate a new API key with the given name and add it to config.
+  generate-api-key  Generate a new API key with the given name and add it to the key file.
   version           Print the release version.
 
 serve flags:
   -config path            config file path
+  -api-keys-file path     accepted API keys file path (default: api_keys.json next to config)
   -listen addr            HTTP listen address (default: `+defaultListen+`)
   -models-dev-cache-ttl d models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh
   -log-level level        debug|info|warn|error (overrides config)
@@ -388,6 +406,11 @@ refresh-models flags:
 
 generate-api-key flags:
   -config path            config file path
+  -api-keys-file path     accepted API keys file path (default: api_keys.json next to config)
+  -ttl duration           key TTL as a Go duration; empty or 0 means no expiry
+  -budget-usd amount      per-key cost budget in USD; 0 means no budget
+  -budget-period duration per-key cost budget period; required when -budget-usd is set
+  -budget-reject-unpriced reject unpriced targets while this key's budget is enabled
 `)
 }
 
@@ -396,12 +419,13 @@ func usageServe(w io.Writer) {
 	fmt.Fprint(w, `harness-model-proxy serve - load config and serve the HTTP model proxy
 
 Usage:
-  harness-model-proxy serve [-config path] [-listen addr] [-models-dev-cache-ttl d] [-log-level level] [-log-format format] [-no-metrics] [-metrics-listen addr]
+  harness-model-proxy serve [-config path] [-api-keys-file path] [-listen addr] [-models-dev-cache-ttl d] [-log-level level] [-log-format format] [-no-metrics] [-metrics-listen addr]
 
 With no arguments, harness-model-proxy serves HTTP (the default action).
 
 Flags:
   -config path            config file path
+  -api-keys-file path     accepted API keys file path (default: api_keys.json next to config)
   -listen addr            HTTP listen address (default: `+defaultListen+`)
   -models-dev-cache-ttl d models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh
   -log-level level        debug|info|warn|error (overrides config)
@@ -445,100 +469,130 @@ func usageGenerateAPIKey(w io.Writer) {
 	fmt.Fprint(w, `harness-model-proxy generate-api-key - generate and store a new API key
 
 Usage:
-  harness-model-proxy generate-api-key [-config path] <name>
+  harness-model-proxy generate-api-key [-config path] [-api-keys-file path] [-ttl duration] [-budget-usd amount -budget-period duration] [-budget-reject-unpriced] <name>
 
-Creates config at the default path if none exists yet.
+Writes the dedicated API-key file; it does not create or mutate the normal config.
 
 Flags:
   -config path            config file path
+  -api-keys-file path     accepted API keys file path (default: api_keys.json next to config)
+  -ttl duration           key TTL as a Go duration; empty or 0 means no expiry
+  -budget-usd amount      per-key cost budget in USD; 0 means no budget
+  -budget-period duration per-key cost budget period; required when -budget-usd is set
+  -budget-reject-unpriced reject unpriced targets while this key's budget is enabled
 `)
 }
 
-func runGenerateAPIKey(env environment, argsConfigPath, name string) int {
-	path := server.ConfigPath(argsConfigPath, argsConfigPath != "", env.getenv)
-	if path == "" {
-		// No config file exists yet; create one at the default path so a key can
-		// be generated on a fresh install (mirrors harness-mcp-proxy).
-		path = filepath.Join(defaultConfigDir(env.getenv), "config.json")
+func runGenerateAPIKey(env environment, argsConfigPath, argsAPIKeysFile, ttlValue string, budgetUSD float64, budgetPeriodValue string, budgetRejectUnpriced bool, name string) int {
+	configPath := server.ConfigPath(argsConfigPath, argsConfigPath != "", env.getenv)
+	if configPath == "" {
+		configPath = filepath.Join(defaultConfigDir(env.getenv), "config.json")
 	}
-	// Load existing api_keys via the typed config and add the new entry, then
-	// write back only the api_keys field in the raw JSON. This preserves all other
-	// config keys exactly and avoids round-tripping custom types such as Duration.
-	cfg, err := server.LoadConfig(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	var cfg server.Config
+	if _, err := os.Stat(configPath); err == nil {
+		var loadErr error
+		cfg, loadErr = server.LoadConfig(configPath)
+		if loadErr != nil {
+			fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", loadErr)
+			return exitRuntime
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime
+	}
+	keyFile := server.ResolveAPIKeysFile(configPath, cfg.APIKeysFile, argsAPIKeysFile)
+	ttl, err := parseAPIKeyTTL(ttlValue)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitUsage
+	}
+	budget, err := parseAPIKeyBudget(budgetUSD, budgetPeriodValue, budgetRejectUnpriced)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitUsage
 	}
 	plaintext, err := apikey.Generate(name, apikey.ModelProxyPrefix)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitUsage
 	}
-	store := cfg.APIKeyStore()
+	entries, err := apikey.LoadFile(keyFile)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(env.stderr, "harness-model-proxy: api keys file %s: %v\n", keyFile, err)
+			return exitRuntime
+		}
+	}
+	store := apikey.Store{Entries: entries}
 	now := env.now
 	if now == nil {
 		now = time.Now
 	}
-	store.Add(name, plaintext, now())
-	if err := updateConfigAPIKeys(path, store.Entries); err != nil {
-		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+	added := now()
+	expiresAt := time.Time{}
+	if ttl > 0 {
+		expiresAt = added.Add(ttl)
+	}
+	store.AddWithBudget(name, plaintext, added, expiresAt, budget)
+	if err := apikey.WriteFile(keyFile, store.Entries); err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: api keys file %s: %v\n", keyFile, err)
 		return exitRuntime
 	}
 	fmt.Fprintln(env.stdout, plaintext)
 	return exitOK
 }
 
-// updateConfigAPIKeys writes entries into the api_keys field of the JSON file at
-// path, preserving every other top-level key exactly as it was written. It
-// creates parent directories as needed and writes atomically (temp file + rename).
-func updateConfigAPIKeys(path string, entries []apikey.Entry) error {
-	raw := map[string]json.RawMessage{}
-	data, err := os.ReadFile(path)
+func parseAPIKeyTTL(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0" {
+		return 0, nil
+	}
+	ttl, err := time.ParseDuration(value)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("read config: %w", err)
+		return 0, fmt.Errorf("invalid -ttl %q: %w", value, err)
+	}
+	if ttl < 0 {
+		return 0, fmt.Errorf("invalid -ttl %q: duration must be non-negative", value)
+	}
+	return ttl, nil
+}
+
+func parseAPIKeyBudget(limitUSD float64, periodValue string, rejectUnpriced bool) (*apikey.CostBudget, error) {
+	periodValue = strings.TrimSpace(periodValue)
+	if limitUSD < 0 || math.IsNaN(limitUSD) || math.IsInf(limitUSD, 0) {
+		return nil, fmt.Errorf("invalid -budget-usd %v: must be finite and non-negative", limitUSD)
+	}
+	if limitUSD == 0 {
+		if periodValue != "" && periodValue != "0" {
+			return nil, fmt.Errorf("-budget-period requires -budget-usd")
 		}
-	} else if len(strings.TrimSpace(string(data))) > 0 {
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("parse config: %w", err)
+		if rejectUnpriced {
+			return nil, fmt.Errorf("-budget-reject-unpriced requires -budget-usd")
 		}
+		return nil, nil
 	}
-	apiKeysJSON, err := json.Marshal(entries)
+	if periodValue == "" || periodValue == "0" {
+		return nil, fmt.Errorf("-budget-period is required when -budget-usd is set")
+	}
+	period, err := time.ParseDuration(periodValue)
 	if err != nil {
-		return fmt.Errorf("marshal api_keys: %w", err)
+		return nil, fmt.Errorf("invalid -budget-period %q: %w", periodValue, err)
 	}
-	raw["api_keys"] = apiKeysJSON
-	data, err = json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+	if period <= 0 {
+		return nil, fmt.Errorf("invalid -budget-period %q: duration must be positive", periodValue)
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
+	budget := apikey.CostBudget{
+		LimitUSD:       limitUSD,
+		PeriodSeconds:  int64(period / time.Second),
+		RejectUnpriced: rejectUnpriced,
 	}
-	tmp, err := os.CreateTemp(dir, "config.json.*")
-	if err != nil {
-		return fmt.Errorf("create temp config: %w", err)
+	if time.Duration(budget.PeriodSeconds)*time.Second != period {
+		return nil, fmt.Errorf("invalid -budget-period %q: duration must be a whole number of seconds", periodValue)
 	}
-	tmpName := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp config: %w", err)
+	if err := apikey.ValidateCostBudget(budget); err != nil {
+		return nil, fmt.Errorf("invalid budget: %w", err)
 	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp config: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename temp config: %w", err)
-	}
-	cleanup = false
-	return nil
+	return &budget, nil
 }
 
 func setupModelsDevCacheTTL(env environment, flagValue string, flagSet bool) (time.Duration, error) {

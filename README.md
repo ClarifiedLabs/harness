@@ -134,6 +134,14 @@ and its `GET /v1/models` response carries a pricing `source_date` plus
 `max_age_seconds` so clients can detect stale catalog prices. For managed
 providers `source_date` tracks the models.dev cache (kept fresh by the
 refresher); for manual-only setups it is the provider config file's mtime.
+Cost budgets are per model-proxy API key. Generate a key with
+`-budget-usd 25 -budget-period 24h` to attach a fixed-window quota to that key:
+new authenticated `/v1/stream` requests are rejected with 429 once the key's
+recorded known-cost spend reaches the limit, and spend state persists under the
+model-proxy config directory across restarts. Unpriced targets are allowed by
+default and do not count toward the budget; add `-budget-reject-unpriced` to the
+key if those requests should be rejected instead. `/v1/usage` includes the
+current authenticated key's budget state when that key has a budget.
 
 The proxy also exposes a Prometheus `/metrics` endpoint on a **separate port**
 (default `127.0.0.1:9090`), unauthenticated, so a scraper can reach it without
@@ -167,13 +175,18 @@ HARNESS_MCP_ENABLE=true harness -provider <provider> -model <model>
 ## Authenticating harness to its proxies
 
 Both proxies support optional API-key authentication. It is disabled by default
-and becomes required as soon as the first key is stored in the proxy's config.
+and becomes required as soon as the first key is stored in the proxy's dedicated
+API-key file (`api_keys.json` next to the proxy config by default). Normal proxy
+configs may point elsewhere with `api_keys_file` (model proxy) or
+`proxy.api_keys_file` (MCP proxy), and `serve -api-keys-file path` overrides both.
+Inline `api_keys` / `proxy.api_keys` in normal configs are rejected with a
+migration error.
 
 Generate and store a key for the model proxy (the full plaintext key is printed
 once):
 
 ```sh
-harness-model-proxy generate-api-key laptop
+harness-model-proxy generate-api-key [-api-keys-file path] [-ttl 720h] [-budget-usd 25 -budget-period 24h] laptop
 harness --model-proxy-api-key <key> -provider <provider> -model <model>
 ```
 
@@ -183,15 +196,18 @@ Or use the `HARNESS_MODEL_PROXY_API_KEY` environment variable, or set
 For the MCP proxy:
 
 ```sh
-harness-mcp-proxy generate-api-key laptop
+harness-mcp-proxy generate-api-key [-api-keys-file path] [-ttl 720h] laptop
 HARNESS_MCP_PROXY_API_KEY=<key> HARNESS_MCP_ENABLE=true harness -provider <provider> -model <model>
 ```
 
 Or set `mcp.api_key` in `~/.config/harness/config.json`. The model proxy key has
 prefix `hmp_`; the MCP proxy key has prefix `hmcpp_`. Only SHA-256 hashes of
-keys are stored; the plaintext is shown exactly once at generation.
-For an authenticated MCP proxy, the debug `harness-mcp-proxy tools` command uses
-`HARNESS_MCP_PROXY_API_KEY` or `tools -api-key <key>`.
+keys are stored; the plaintext is shown exactly once at generation. Omit `-ttl`
+(or use `0`) for a non-expiring key; running HTTP proxies poll their key file and
+pick up valid additions/removals without restart. Existing `harness` clients load
+the outgoing key only at process start. For an authenticated MCP proxy, the debug
+`harness-mcp-proxy tools` command uses `HARNESS_MCP_PROXY_API_KEY` or
+`tools -api-key <key>`.
 
 To correlate a harness run across proxy logs, enable opt-in proxy request tracing:
 

@@ -106,6 +106,26 @@ func TestLoadConfigRejectsInvalidAuth(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsInlineAPIKeysAndResolvesKeyFilePath(t *testing.T) {
+	path := writeConfig(t, `{"proxy":{"api_keys":[{"name":"laptop","hash":"AAAA"}]}}`)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("LoadConfig accepted proxy.api_keys, want migration error")
+	}
+	if !strings.Contains(err.Error(), "proxy.api_keys is no longer supported") || !strings.Contains(err.Error(), filepath.Join(filepath.Dir(path), "api_keys.json")) {
+		t.Fatalf("migration error = %v", err)
+	}
+
+	path = writeConfig(t, `{"proxy":{"api_keys_file":"keys/api_keys.json"}}`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig api_keys_file: %v", err)
+	}
+	if got, want := cfg.APIKeysFile, filepath.Join(filepath.Dir(path), "keys", "api_keys.json"); got != want {
+		t.Fatalf("APIKeysFile = %q, want %q", got, want)
+	}
+}
+
 func TestLoadConfigListenField(t *testing.T) {
 	withListen := writeConfig(t, `{
 		"proxy": {"listen": "127.0.0.1:8089"}

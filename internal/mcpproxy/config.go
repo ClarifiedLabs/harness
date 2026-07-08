@@ -21,7 +21,6 @@ import (
 	"sort"
 	"strings"
 
-	"harness/internal/apikey"
 	"harness/internal/auth"
 )
 
@@ -49,17 +48,11 @@ type ServerConfig struct {
 // ProxySettings carries proxy-level overrides. Empty fields fall back to
 // defaults (listen → DefaultListen, logLevel → info, logFormat → json).
 type ProxySettings struct {
-	Listen    string         `json:"listen"`
-	LogFile   string         `json:"logFile"`
-	LogLevel  string         `json:"logLevel"`
-	LogFormat string         `json:"logFormat"`
-	APIKeys   []apikey.Entry `json:"api_keys,omitempty"`
-}
-
-// APIKeyStore returns the proxy-level API-key store. Auth is required as soon as
-// the first key is configured.
-func (p ProxySettings) APIKeyStore() apikey.Store {
-	return apikey.Store{Entries: append([]apikey.Entry(nil), p.APIKeys...)}
+	Listen      string `json:"listen"`
+	LogFile     string `json:"logFile"`
+	LogLevel    string `json:"logLevel"`
+	LogFormat   string `json:"logFormat"`
+	APIKeysFile string `json:"api_keys_file,omitempty"`
 }
 
 // Transport selects a resolved server's downstream transport.
@@ -93,19 +86,13 @@ type ResolvedServer struct {
 // expansion vars, skipped invalid servers); the caller logs them — library code
 // never prints.
 type Config struct {
-	Servers   []ResolvedServer
-	APIKeys   []apikey.Entry
-	Listen    string
-	LogFile   string
-	LogLevel  string
-	LogFormat string
-	Warnings  []string
-}
-
-// APIKeyStore returns the proxy-level API-key store. Auth is required as soon as
-// the first key is configured.
-func (c Config) APIKeyStore() apikey.Store {
-	return apikey.Store{Entries: append([]apikey.Entry(nil), c.APIKeys...)}
+	Servers     []ResolvedServer
+	APIKeysFile string
+	Listen      string
+	LogFile     string
+	LogLevel    string
+	LogFormat   string
+	Warnings    []string
 }
 
 const (
@@ -145,6 +132,20 @@ func LoadConfig(path string) (Config, error) {
 	if err := json.Unmarshal(data, &fc); err != nil {
 		return Config{}, fmt.Errorf("mcpproxy: parse config %s: %w", path, err)
 	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return Config{}, fmt.Errorf("mcpproxy: parse config %s: %w", path, err)
+	}
+	if proxyRaw, ok := raw["proxy"]; ok && len(strings.TrimSpace(string(proxyRaw))) > 0 && strings.TrimSpace(string(proxyRaw)) != "null" {
+		var proxy map[string]json.RawMessage
+		if err := json.Unmarshal(proxyRaw, &proxy); err != nil {
+			return Config{}, fmt.Errorf("mcpproxy: parse proxy config %s: %w", path, err)
+		}
+		if _, ok := proxy["api_keys"]; ok {
+			keyFile := ResolveAPIKeysFile(path, resolveConfiguredAPIKeysFile(filepath.Dir(path), fc.Proxy.APIKeysFile), "", nil)
+			return Config{}, fmt.Errorf("mcpproxy: proxy.api_keys is no longer supported in config; move entries to %s under {\"api_keys\": [...]} and remove proxy.api_keys from config", keyFile)
+		}
+	}
 	return resolve(fc, filepath.Dir(path)), nil
 }
 
@@ -153,10 +154,10 @@ func LoadConfig(path string) (Config, error) {
 // always the post-expansion value.
 func resolve(fc FileConfig, configDir string) Config {
 	cfg := Config{
-		APIKeys:   append([]apikey.Entry(nil), fc.Proxy.APIKeys...),
-		LogFile:   fc.Proxy.LogFile,
-		LogLevel:  fc.Proxy.LogLevel,
-		LogFormat: fc.Proxy.LogFormat,
+		APIKeysFile: resolveConfiguredAPIKeysFile(configDir, fc.Proxy.APIKeysFile),
+		LogFile:     fc.Proxy.LogFile,
+		LogLevel:    fc.Proxy.LogLevel,
+		LogFormat:   fc.Proxy.LogFormat,
 	}
 
 	// Expand variables across the whole config first, accumulating one warning
@@ -192,6 +193,34 @@ func resolve(fc FileConfig, configDir string) Config {
 		cfg.Listen = DefaultListen
 	}
 	return cfg
+}
+
+// ResolveAPIKeysFile applies flag > config > conventional-default precedence
+// for the MCP proxy's dedicated accepted-key file. configValue should be the
+// already-resolved Config.APIKeysFile returned by LoadConfig. When no config file
+// exists, the default is api_keys.json next to DefaultConfigPath(getenv).
+func ResolveAPIKeysFile(configPath, configValue, flagValue string, getenv func(string) string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if configValue != "" {
+		return configValue
+	}
+	configDir := filepath.Dir(configPath)
+	if configPath == "" {
+		configDir = filepath.Dir(DefaultConfigPath(getenv))
+	}
+	return filepath.Join(configDir, "api_keys.json")
+}
+
+func resolveConfiguredAPIKeysFile(configDir, value string) string {
+	if value == "" {
+		return ""
+	}
+	if filepath.IsAbs(value) || configDir == "" {
+		return value
+	}
+	return filepath.Join(configDir, value)
 }
 
 // DefaultURL is the harness-side URL for the default proxy listener.
@@ -437,6 +466,9 @@ func ChildEnv(extra map[string]string) []string {
 // ~/.config/harness-mcp-proxy/config.json. getenv injects the environment so
 // the resolution is testable.
 func DefaultConfigPath(getenv func(string) string) string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
 	if xdg := getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "harness-mcp-proxy", "config.json")
 	}

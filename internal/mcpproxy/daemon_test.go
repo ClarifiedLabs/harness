@@ -118,13 +118,17 @@ func TestDaemonRequiresAPIKey(t *testing.T) {
 	addr := freePort(t)
 	cfg := Config{
 		Listen:  addr,
-		APIKeys: []apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmcpp_secret")}},
 		Servers: []ResolvedServer{{Name: "h", Transport: TransportStdio, Command: "helper"}},
 	}
 	spawn := helperSpawn(t, map[string]string{"HELPER_TOOLS": "echo"})
+	store := apikey.NewDynamicStore([]apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmcpp_secret")}}, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	errCh := startDaemon(t, ctx, cfg, spawn)
+	d := NewDaemonWithAPIKeys(cfg, slog.New(slog.DiscardHandler), store)
+	d.spawn = spawn
+	d.sleep = func(context.Context, time.Duration) {}
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(ctx) }()
 
 	endpoint := "http://" + addr
 	tr := mcp.NewHTTPTransport(mcp.HTTPOptions{Endpoint: endpoint})

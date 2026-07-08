@@ -51,13 +51,23 @@ var reasoningProfileRank = map[string]int{
 }
 
 type Config struct {
-	ProviderConfigs      []string       `json:"provider_configs"`
-	DefaultContextWindow int            `json:"default_context_window"`
-	LogLevel             string         `json:"log_level,omitempty"`
-	LogFormat            string         `json:"log_format,omitempty"`
-	ModelsDevCacheTTL    Duration       `json:"models_dev_cache_ttl,omitempty"`
-	APIKeys              []apikey.Entry `json:"api_keys,omitempty"`
-	Metrics              MetricsConfig  `json:"metrics,omitempty"`
+	ProviderConfigs      []string      `json:"provider_configs"`
+	DefaultContextWindow int           `json:"default_context_window"`
+	LogLevel             string        `json:"log_level,omitempty"`
+	LogFormat            string        `json:"log_format,omitempty"`
+	ModelsDevCacheTTL    Duration      `json:"models_dev_cache_ttl,omitempty"`
+	APIKeysFile          string        `json:"api_keys_file,omitempty"`
+	Metrics              MetricsConfig `json:"metrics,omitempty"`
+}
+
+type CostBudgetConfig struct {
+	LimitUSD       float64  `json:"limit_usd,omitempty"`
+	Period         Duration `json:"period,omitempty"`
+	RejectUnpriced bool     `json:"reject_unpriced,omitempty"`
+}
+
+func (c CostBudgetConfig) Enabled() bool {
+	return budgetEnabled(c)
 }
 
 // MetricsConfig toggles the Prometheus /metrics endpoint on a separate port.
@@ -66,12 +76,6 @@ type Config struct {
 type MetricsConfig struct {
 	Enabled *bool  `json:"enabled,omitempty"`
 	Listen  string `json:"listen,omitempty"`
-}
-
-// APIKeyStore returns the API-key store for this config. Auth is required as soon
-// as the first key is configured.
-func (c Config) APIKeyStore() apikey.Store {
-	return apikey.Store{Entries: append([]apikey.Entry(nil), c.APIKeys...)}
 }
 
 // Duration is a JSON duration setting. Strings use Go duration syntax such as
@@ -150,6 +154,8 @@ type Options struct {
 	// ModelsDevSourceDate dates ModelsDevCatalog (its cache file mtime). Used to
 	// stamp catalog pricing freshness when any provider is managed.
 	ModelsDevSourceDate time.Time
+	// Now supplies the clock for budget windows. Nil uses time.Now.
+	Now func() time.Time
 	// Metrics, when non-nil, receives Prometheus-style counters for every
 	// /v1/stream request (tokens, cost, requests, errors, duration), broken
 	// down by provider, model, and authorizing key. Nil disables metrics at
@@ -204,15 +210,20 @@ type Handler struct {
 	providers            []llm.ProviderConfig
 	authSources          map[string]*auth.Source
 	defaultContextWindow int
+	configDir            string
 	configSourceDate     time.Time
 	pricingMaxAge        time.Duration
 	getenv               func(string) string
+	now                  func() time.Time
 	logger               *slog.Logger
 	newProvider          func(factory.Options) (llm.Provider, error)
 	nextRequestID        atomic.Uint64
 
 	metrics    *metrics.Registry
 	metricFams *metricsCollectors
+
+	keyBudgetMu sync.Mutex
+	keyBudgets  map[string]*costBudgetTracker
 
 	usageMu sync.Mutex
 	usage   map[usageKey]*protocol.ModelUsage
@@ -254,6 +265,10 @@ func NewHandler(opts Options) (*Handler, error) {
 	if len(providers) == 0 {
 		return nil, fmt.Errorf("model proxy: no provider configs are configured")
 	}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
 	maxAge := opts.PricingMaxAge
 	if maxAge <= 0 {
 		maxAge = opts.Config.ModelsDevCacheTTL.Duration
@@ -262,11 +277,14 @@ func NewHandler(opts Options) (*Handler, error) {
 		providers:            providers,
 		authSources:          authSources,
 		defaultContextWindow: defaultWindow,
+		configDir:            opts.ConfigDir,
 		configSourceDate:     providerConfigSourceDate(opts.ConfigDir, opts.Config.ProviderConfigs),
 		pricingMaxAge:        maxAge,
 		getenv:               getenv,
+		now:                  now,
 		logger:               logger,
 		newProvider:          newProvider,
+		keyBudgets:           map[string]*costBudgetTracker{},
 		usage:                map[usageKey]*protocol.ModelUsage{},
 		providerCache:        map[string]llm.Provider{},
 		continuations:        map[string]llm.ResponseState{},
@@ -304,15 +322,19 @@ func registerMetricFamilies(r *metrics.Registry) *metricsCollectors {
 // streamPath is the route the proxy streams model responses on.
 const streamPath = "/v1/stream"
 
+type authAuthorizer interface {
+	Authorize(*http.Request) bool
+}
+
 // ObserveAuth wraps the authenticated handler so stream requests rejected by
 // API-key auth (401) are still metered. It re-checks store.Authorize for the
 // stream route only and records a rejected request before delegating to next
 // (which writes the actual 401). When auth is not required store.Authorize is
 // always true, so nothing is counted. Counting here, rather than in the apikey
 // middleware, keeps that package free of a metrics dependency.
-func ObserveAuth(h *Handler, store apikey.Store, next http.Handler) http.Handler {
+func ObserveAuth(h *Handler, store authAuthorizer, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == streamPath && !store.Authorize(r) {
+		if store != nil && r.Method == http.MethodPost && r.URL.Path == streamPath && !store.Authorize(r) {
 			h.RecordRejectedStream(r)
 		}
 		next.ServeHTTP(w, r)
@@ -622,9 +644,9 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) handleUsage(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) handleUsage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("content-type", "application/json")
-	if err := json.NewEncoder(w).Encode(h.usageSnapshot()); err != nil {
+	if err := json.NewEncoder(w).Encode(h.usageSnapshotForRequest(r)); err != nil {
 		h.logger.Warn("write usage report failed", "err", err)
 	}
 }
@@ -651,8 +673,13 @@ func (h *Handler) recordUsage(targetID string, u llm.Usage, cost float64) {
 }
 
 // usageSnapshot returns a copy of the accumulated usage, sorted by
-// provider:model for deterministic output.
+// provider:model for deterministic output. It omits per-key budget state because
+// no authenticated request is available.
 func (h *Handler) usageSnapshot() protocol.UsageReport {
+	return h.usageSnapshotForRequest(nil)
+}
+
+func (h *Handler) usageSnapshotForRequest(r *http.Request) protocol.UsageReport {
 	h.usageMu.Lock()
 	report := protocol.UsageReport{Models: make([]protocol.ModelUsage, 0, len(h.usage))}
 	for _, acc := range h.usage {
@@ -662,6 +689,12 @@ func (h *Handler) usageSnapshot() protocol.UsageReport {
 	sort.Slice(report.Models, func(i, j int) bool {
 		return report.Models[i].TargetID < report.Models[j].TargetID
 	})
+	budget, err := h.requestCostBudget(r)
+	if err != nil {
+		h.logger.Warn("load api key cost budget failed", "err", err)
+	} else if budget != nil {
+		report.Budget = budget.Report()
+	}
 	return report
 }
 
@@ -772,6 +805,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		toolCalls  int
 		reqBytes   int
 		errAttrs   []any
+		budget     *costBudgetTracker
 	)
 	defer func() {
 		attrs := []any{
@@ -795,9 +829,17 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			"cache_write_tokens", usage.CacheWriteTokens,
 			"reasoning_tokens", usage.ReasoningTokens,
 		}
+		failed := streamFailed(r.Context(), streamErr, cw.statusCode())
 		if targetID != "" && usage.CostKnown {
 			attrs = append(attrs, "cost_usd", usage.CostUSD)
 			h.recordUsage(targetID, usage, usage.CostUSD)
+			if budget != nil && !failed {
+				if err := budget.Add(usage.CostUSD); err != nil {
+					h.logger.Warn("persist api key cost budget state failed", "err", err)
+				}
+			}
+		} else if budget != nil && targetID != "" && !failed {
+			h.logger.Warn("api key cost budget enabled but request cost was unknown", "target_id", targetID, "provider", providerID, "model", model)
 		}
 		if traceOK {
 			attrs = append(attrs, tracing.LogAttrs(traceCtx)...)
@@ -805,7 +847,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		// Record every stream request, even one that failed before the target
 		// resolved (provider/model empty), so requests_total/errors_total reflect
 		// all client-facing failures, not just post-resolution ones.
-		h.recordMetrics(r, providerID, model, usage, time.Since(start), streamFailed(r.Context(), streamErr, cw.statusCode()))
+		h.recordMetrics(r, providerID, model, usage, time.Since(start), failed)
 		if streamErr != "" {
 			attrs = append(attrs, "err", streamErr)
 			attrs = append(attrs, errAttrs...)
@@ -852,6 +894,12 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	req.Request.Reasoning = h.reasoningForTarget(target, req.ReasoningProfile, req.Request.Reasoning)
 	sessionKey, providerRequest := prepareProviderRequest(req.Request)
 	req.Request = providerRequest
+	if requestBudget, ok, message := h.checkCostBudget(cw, r, target, req.Request); !ok {
+		streamErr = message
+		return
+	} else {
+		budget = requestBudget
+	}
 	opts, err := h.runtimeOptionsForTarget(r.Context(), target)
 	if err != nil {
 		streamErr = err.Error()
@@ -1190,6 +1238,107 @@ func (h *Handler) resolveTarget(id string) (resolvedTarget, error) {
 		return target, nil
 	}
 	return resolvedTarget{}, fmt.Errorf("target %q is not available from the model proxy", id)
+}
+
+func (h *Handler) checkCostBudget(w http.ResponseWriter, r *http.Request, target resolvedTarget, request llm.Request) (*costBudgetTracker, bool, string) {
+	budget, err := h.requestCostBudget(r)
+	if err != nil {
+		msg := err.Error()
+		writeError(w, http.StatusInternalServerError, &protocol.Error{StatusCode: http.StatusInternalServerError, Code: "cost_budget_state_error", Message: msg})
+		return nil, false, msg
+	}
+	if budget == nil {
+		return nil, true, ""
+	}
+	snapshot := h.snapshot.Load()
+	if snapshot == nil || snapshot.pricer == nil {
+		msg := "api key cost budget is enabled but pricing is unavailable"
+		if budget.RejectUnpriced() {
+			writeError(w, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Code: "cost_budget_unpriced_target", Message: msg})
+			return budget, false, msg
+		}
+		return budget, true, ""
+	}
+	price := snapshot.pricer.PriceUsage(pricing.Input{
+		TargetID: target.targetID,
+		Provider: target.pc,
+		Model:    target.entry,
+		Request:  request,
+	})
+	if !price.Known {
+		msg := fmt.Sprintf("api key cost budget is enabled but target %q has no known price", target.targetID)
+		if budget.RejectUnpriced() {
+			writeError(w, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Code: "cost_budget_unpriced_target", Message: msg})
+			return budget, false, msg
+		}
+		return budget, true, ""
+	}
+	if ok, retryAfter := budget.Check(); !ok {
+		if retryAfter < 0 {
+			retryAfter = 0
+		}
+		retrySeconds := int(math.Ceil(retryAfter.Seconds()))
+		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+		msg := fmt.Sprintf("api key cost budget exhausted; retry after %s", retryAfter.Round(time.Second))
+		writeError(w, http.StatusTooManyRequests, &protocol.Error{
+			StatusCode:   http.StatusTooManyRequests,
+			Code:         "cost_budget_exceeded",
+			Message:      msg,
+			Retryable:    true,
+			RetryAfterMS: retryAfter.Milliseconds(),
+		})
+		return budget, false, msg
+	}
+	return budget, true, ""
+}
+
+func (h *Handler) requestCostBudget(r *http.Request) (*costBudgetTracker, error) {
+	entry, ok := apikey.AuthorizedEntry(r)
+	if !ok || entry.CostBudget == nil || !entry.CostBudget.Enabled() {
+		return nil, nil
+	}
+	cfg := CostBudgetConfig{
+		LimitUSD:       entry.CostBudget.LimitUSD,
+		Period:         Duration{Duration: time.Duration(entry.CostBudget.PeriodSeconds) * time.Second, Set: true},
+		RejectUnpriced: entry.CostBudget.RejectUnpriced,
+	}
+	statePath := h.keyBudgetStatePath(entry)
+	cacheKey := strings.Join([]string{
+		statePath,
+		strconv.FormatFloat(cfg.LimitUSD, 'g', -1, 64),
+		strconv.FormatInt(entry.CostBudget.PeriodSeconds, 10),
+		strconv.FormatBool(cfg.RejectUnpriced),
+	}, "|")
+	h.keyBudgetMu.Lock()
+	defer h.keyBudgetMu.Unlock()
+	if h.keyBudgets == nil {
+		h.keyBudgets = map[string]*costBudgetTracker{}
+	}
+	if budget := h.keyBudgets[cacheKey]; budget != nil {
+		return budget, nil
+	}
+	budget, err := newCostBudgetTrackerAtPath(cfg, statePath, h.now)
+	if err != nil {
+		return nil, err
+	}
+	h.keyBudgets[cacheKey] = budget
+	return budget, nil
+}
+
+func (h *Handler) keyBudgetStatePath(entry apikey.Entry) string {
+	hash := hex.EncodeToString(entry.Hash)
+	if len(hash) > 16 {
+		hash = hash[:16]
+	}
+	name := entry.Name
+	if name == "" {
+		name = "key"
+	}
+	filename := name
+	if hash != "" {
+		filename += "-" + hash
+	}
+	return filepath.Join(h.configDir, "state", "api_key_budgets", filename+".json")
 }
 
 func (h *Handler) priceUsage(targetID string, request llm.Request, usage llm.Usage) llm.Usage {
@@ -1708,15 +1857,35 @@ func LoadConfig(path string) (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
-	// Reject keys with an empty/invalid name: such a key authenticates but its
-	// per-key metrics would be misattributed to the "anonymous" bucket. KeyNameRE
-	// is otherwise only enforced at key generation.
-	for i, e := range cfg.APIKeys {
-		if !apikey.KeyNameRE.MatchString(e.Name) {
-			return Config{}, fmt.Errorf("api_keys[%d]: name %q must match %s", i, e.Name, apikey.KeyNameRE.String())
-		}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return Config{}, err
+	}
+	if _, ok := raw["api_keys"]; ok {
+		return Config{}, fmt.Errorf("api_keys is no longer supported in config; move entries to %s under {\"api_keys\": [...]} and remove api_keys from config", ResolveAPIKeysFile(path, cfg.APIKeysFile, ""))
+	}
+	if _, ok := raw["cost_budget"]; ok {
+		return Config{}, fmt.Errorf("cost_budget is no longer supported in model proxy config; generate model-proxy API keys with -budget-usd and -budget-period instead")
 	}
 	return cfg, nil
+}
+
+// ResolveAPIKeysFile applies flag > config > conventional-default precedence for
+// the model proxy's dedicated accepted-key file. Relative config values resolve
+// relative to the proxy config directory; a relative flag value is left relative
+// to the caller's working directory.
+func ResolveAPIKeysFile(configPath, configValue, flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	configDir := filepath.Dir(configPath)
+	if configValue != "" {
+		if filepath.IsAbs(configValue) {
+			return configValue
+		}
+		return filepath.Join(configDir, configValue)
+	}
+	return filepath.Join(configDir, "api_keys.json")
 }
 
 func ConfigPath(argsPath string, explicit bool, getenv func(string) string) string {

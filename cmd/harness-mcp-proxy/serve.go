@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
+	"harness/internal/apikey"
 	"harness/internal/logging"
 	"harness/internal/mcpproxy"
 )
@@ -26,6 +28,7 @@ func runServe(env environment, args []string) int {
 	// -config defaults to "" so we can distinguish "unset" (a missing default
 	// path is non-fatal) from an explicit value (a typo is a hard error).
 	configPath := fs.String("config", "", "config file path")
+	apiKeysFile := fs.String("api-keys-file", "", "accepted API keys file path")
 	listen := fs.String("listen", "", "HTTP listen address (overrides config and default)")
 	stdio := fs.Bool("stdio", false, "serve MCP over stdin/stdout instead of HTTP")
 	logPath := fs.String("log", "", "log file path (overrides config logFile)")
@@ -40,7 +43,8 @@ func runServe(env environment, args []string) int {
 		return exitUsage
 	}
 
-	cfg, err := mcpproxy.LoadConfig(resolveConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv))
+	resolvedConfigPath := resolveConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv)
+	cfg, err := mcpproxy.LoadConfig(resolvedConfigPath)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
 		return exitRuntime
@@ -94,6 +98,21 @@ func runServe(env environment, args []string) int {
 		logger.Warn(w, logging.Category(configCategory))
 	}
 
+	var authStore *apikey.DynamicStore
+	var keyFile string
+	var keyFileState apikey.FileState
+	if !*stdio {
+		keyFile = mcpproxy.ResolveAPIKeysFile(resolvedConfigPath, cfg.APIKeysFile, *apiKeysFile, env.getenv)
+		keyFileExplicit := *apiKeysFile != "" || cfg.APIKeysFile != ""
+		initialKeys, state, err := apikey.LoadInitialFile(keyFile, keyFileExplicit)
+		if err != nil {
+			fmt.Fprintf(env.stderr, "harness-mcp-proxy: api keys file %s: %v\n", keyFile, err)
+			return exitRuntime
+		}
+		authStore = apikey.NewDynamicStore(initialKeys, nil)
+		keyFileState = state
+	}
+
 	// Wire SIGINT/SIGTERM into ctx cancellation. The signal channel is injected
 	// so tests can drive a clean shutdown without sending real process signals.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -108,7 +127,13 @@ func runServe(env environment, args []string) int {
 		}()
 	}
 
-	d := mcpproxy.NewDaemon(cfg, logger)
+	if authStore != nil {
+		go apikey.WatchFile(ctx, keyFile, keyFileState, 2*time.Second, authStore, func(err error) {
+			logger.Warn("reload api keys failed", "path", keyFile, "err", err)
+		})
+	}
+
+	d := mcpproxy.NewDaemonWithAPIKeys(cfg, logger, authStore)
 	if *stdio {
 		// stdout is the MCP channel in stdio mode; logs already go to the sink
 		// (stderr or -log file), never stdout.

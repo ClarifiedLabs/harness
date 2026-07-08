@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -156,7 +156,7 @@ func TestRunAuthLoginHelpExit0WithUsageOnStdout(t *testing.T) {
 	}
 }
 
-func TestRunGenerateAPIKeyCreatesConfigWhenNoneExists(t *testing.T) {
+func TestRunGenerateAPIKeyCreatesDefaultKeyFileWhenNoConfigExists(t *testing.T) {
 	env, out, errw := testEnv(t, []string{"generate-api-key", "laptop"})
 	if code := run(env); code != exitOK {
 		t.Fatalf("exit = %d, want %d; stderr=%q", code, exitOK, errw.String())
@@ -166,20 +166,17 @@ func TestRunGenerateAPIKeyCreatesConfigWhenNoneExists(t *testing.T) {
 		t.Fatalf("key missing prefix: %q", key)
 	}
 	cfgPath := filepath.Join(server.DefaultConfigDir(env.getenv), "config.json")
-	data, err := os.ReadFile(cfgPath)
+	if _, err := os.Stat(cfgPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("config should not be created, stat err=%v", err)
+	}
+	entries, err := apikey.LoadFile(filepath.Join(filepath.Dir(cfgPath), "api_keys.json"))
 	if err != nil {
-		t.Fatalf("read config: %v", err)
+		t.Fatalf("load key file: %v", err)
 	}
-	var raw struct {
-		APIKeys []apikey.Entry `json:"api_keys"`
+	if len(entries) != 1 || entries[0].Name != "laptop" {
+		t.Fatalf("api_keys = %+v", entries)
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		t.Fatalf("parse config: %v", err)
-	}
-	if len(raw.APIKeys) != 1 || raw.APIKeys[0].Name != "laptop" {
-		t.Fatalf("api_keys = %+v", raw.APIKeys)
-	}
-	store := apikey.Store{Entries: raw.APIKeys}
+	store := apikey.Store{Entries: entries}
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	if !store.Authorize(req) {
@@ -194,7 +191,8 @@ func TestRunGenerateAPIKeyWritesHashAndPrintsKey(t *testing.T) {
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["p.json"]}`), 0o644); err != nil {
+	original := []byte(`{"provider_configs":["p.json"]}`)
+	if err := os.WriteFile(cfgPath, original, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -209,32 +207,69 @@ func TestRunGenerateAPIKeyWritesHashAndPrintsKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
-	var raw struct {
-		APIKeys         []apikey.Entry `json:"api_keys"`
-		ProviderConfigs []string       `json:"provider_configs"`
+	if string(data) != string(original) {
+		t.Fatalf("config mutated:\n%s", data)
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		t.Fatalf("parse config: %v", err)
+	entries, err := apikey.LoadFile(filepath.Join(configDir, "api_keys.json"))
+	if err != nil {
+		t.Fatalf("load key file: %v", err)
 	}
-	if len(raw.APIKeys) != 1 || raw.APIKeys[0].Name != "laptop" {
-		t.Fatalf("api_keys = %+v", raw.APIKeys)
+	if len(entries) != 1 || entries[0].Name != "laptop" {
+		t.Fatalf("api_keys = %+v", entries)
 	}
-	if len(raw.ProviderConfigs) != 1 || raw.ProviderConfigs[0] != "p.json" {
-		t.Fatalf("provider_configs not preserved: %+v", raw.ProviderConfigs)
-	}
-	store := apikey.Store{Entries: raw.APIKeys}
+	store := apikey.Store{Entries: entries}
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	if !store.Authorize(req) {
 		t.Fatal("generated key did not authorize")
 	}
+}
 
-	// Verify unrelated formatting is preserved (not round-tripped through typed
-	// config that could reformat or drop unknown fields).
-	if !strings.Contains(string(data), `"provider_configs": [
-    "p.json"
-  ]`) {
-		t.Fatalf("provider_configs formatting not preserved:\n%s", string(data))
+func TestRunGenerateAPIKeyWritesBudgetMetadata(t *testing.T) {
+	env, out, errw := testEnv(t, []string{"generate-api-key", "-budget-usd", "12.5", "-budget-period", "24h", "-budget-reject-unpriced", "laptop"})
+	if code := run(env); code != exitOK {
+		t.Fatalf("exit = %d, want %d; stderr=%q", code, exitOK, errw.String())
+	}
+	key := strings.TrimSpace(out.String())
+	entries, err := apikey.LoadFile(filepath.Join(server.DefaultConfigDir(env.getenv), "api_keys.json"))
+	if err != nil {
+		t.Fatalf("load key file: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "laptop" || entries[0].CostBudget == nil {
+		t.Fatalf("api_keys = %+v", entries)
+	}
+	budget := entries[0].CostBudget
+	if budget.LimitUSD != 12.5 || budget.PeriodSeconds != int64((24*time.Hour)/time.Second) || !budget.RejectUnpriced {
+		t.Fatalf("budget = %+v", budget)
+	}
+	store := apikey.Store{Entries: entries}
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	if !store.Authorize(req) {
+		t.Fatal("generated budgeted key did not authorize")
+	}
+}
+
+func TestRunGenerateAPIKeyRejectsInvalidBudgetFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing period", args: []string{"generate-api-key", "-budget-usd", "1", "laptop"}, want: "-budget-period is required"},
+		{name: "period without limit", args: []string{"generate-api-key", "-budget-period", "24h", "laptop"}, want: "-budget-period requires -budget-usd"},
+		{name: "reject without limit", args: []string{"generate-api-key", "-budget-reject-unpriced", "laptop"}, want: "-budget-reject-unpriced requires -budget-usd"},
+		{name: "subsecond period", args: []string{"generate-api-key", "-budget-usd", "1", "-budget-period", "500ms", "laptop"}, want: "whole number of seconds"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, _, errw := testEnv(t, tc.args)
+			if code := run(env); code != exitUsage {
+				t.Fatalf("exit = %d, want %d; stderr=%q", code, exitUsage, errw.String())
+			}
+			if !strings.Contains(errw.String(), tc.want) {
+				t.Fatalf("stderr=%q, want %q", errw.String(), tc.want)
+			}
+		})
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -119,7 +120,7 @@ func TestRunVersionExit0(t *testing.T) {
 	}
 }
 
-func TestRunGenerateAPIKeyCreatesConfig(t *testing.T) {
+func TestRunGenerateAPIKeyCreatesDefaultKeyFile(t *testing.T) {
 	env, out, errw := testEnv(t, []string{"generate-api-key", "laptop"})
 	if code := run(env); code != exitOK {
 		t.Fatalf("exit = %d, want %d; stderr=%q", code, exitOK, errw.String())
@@ -129,18 +130,18 @@ func TestRunGenerateAPIKeyCreatesConfig(t *testing.T) {
 		t.Fatalf("key missing prefix: %q", key)
 	}
 	cfgPath := mcpproxy.DefaultConfigPath(env.getenv)
-	data, err := os.ReadFile(cfgPath)
+	if _, err := os.Stat(cfgPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("config should not be created, stat err=%v", err)
+	}
+	keyFile := filepath.Join(filepath.Dir(cfgPath), "api_keys.json")
+	entries, err := apikey.LoadFile(keyFile)
 	if err != nil {
-		t.Fatalf("read config: %v", err)
+		t.Fatalf("load key file: %v", err)
 	}
-	var cfg mcpproxy.FileConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("parse config: %v", err)
+	if len(entries) != 1 || entries[0].Name != "laptop" {
+		t.Fatalf("api_keys = %+v", entries)
 	}
-	if len(cfg.Proxy.APIKeys) != 1 || cfg.Proxy.APIKeys[0].Name != "laptop" {
-		t.Fatalf("api_keys = %+v", cfg.Proxy.APIKeys)
-	}
-	store := cfg.Proxy.APIKeyStore()
+	store := apikey.Store{Entries: entries}
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	if !store.Authorize(req) {
@@ -148,10 +149,10 @@ func TestRunGenerateAPIKeyCreatesConfig(t *testing.T) {
 	}
 }
 
-func TestRunGenerateAPIKeyPreservesUnknownConfigFields(t *testing.T) {
+func TestRunGenerateAPIKeyDoesNotMutateConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(cfgPath, []byte(`{
+	original := []byte(`{
   "mcpServers": {
     "remote": {
       "type": "http",
@@ -164,7 +165,8 @@ func TestRunGenerateAPIKeyPreservesUnknownConfigFields(t *testing.T) {
     "x-proxy-extension": "keep"
   },
   "x-top-extension": {"keep": true}
-}`), 0o600); err != nil {
+}`)
+	if err := os.WriteFile(cfgPath, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,35 +182,15 @@ func TestRunGenerateAPIKeyPreservesUnknownConfigFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(data, &top); err != nil {
-		t.Fatalf("parse config: %v\n%s", err, data)
+	if string(data) != string(original) {
+		t.Fatalf("config mutated:\n%s", data)
 	}
-	if _, ok := top["x-top-extension"]; !ok {
-		t.Fatalf("top-level extension field was dropped:\n%s", data)
+	entries, err := apikey.LoadFile(filepath.Join(dir, "api_keys.json"))
+	if err != nil {
+		t.Fatalf("load key file: %v", err)
 	}
-	var proxy map[string]json.RawMessage
-	if err := json.Unmarshal(top["proxy"], &proxy); err != nil {
-		t.Fatalf("parse proxy: %v", err)
-	}
-	if _, ok := proxy["x-proxy-extension"]; !ok {
-		t.Fatalf("proxy extension field was dropped:\n%s", data)
-	}
-	var proxyKeys struct {
-		APIKeys []apikey.Entry `json:"api_keys"`
-	}
-	if err := json.Unmarshal(top["proxy"], &proxyKeys); err != nil {
-		t.Fatalf("parse proxy api keys: %v", err)
-	}
-	if len(proxyKeys.APIKeys) != 1 || proxyKeys.APIKeys[0].Name != "laptop" {
-		t.Fatalf("api_keys = %+v", proxyKeys.APIKeys)
-	}
-	var servers map[string]map[string]json.RawMessage
-	if err := json.Unmarshal(top["mcpServers"], &servers); err != nil {
-		t.Fatalf("parse servers: %v", err)
-	}
-	if _, ok := servers["remote"]["x-server-extension"]; !ok {
-		t.Fatalf("server extension field was dropped:\n%s", data)
+	if len(entries) != 1 || entries[0].Name != "laptop" {
+		t.Fatalf("api_keys = %+v", entries)
 	}
 }
 
@@ -265,7 +247,7 @@ func TestRunGenerateAPIKeyHelpExit0WithUsageOnStdout(t *testing.T) {
 			t.Fatalf("run(%v) exit = %d, want %d; stderr=%q", args, code, exitOK, errw.String())
 		}
 		text := out.String()
-		for _, want := range []string{"Usage:", "generate-api-key [-config path] <name>", "Creates config at the default path", "-config"} {
+		for _, want := range []string{"Usage:", "generate-api-key [-config path] [-api-keys-file path] [-ttl duration] <name>", "Writes the dedicated API-key file", "-api-keys-file", "-ttl"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("run(%v) help missing %q; stdout=%q", args, want, text)
 			}

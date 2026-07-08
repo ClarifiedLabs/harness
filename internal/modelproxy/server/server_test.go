@@ -418,30 +418,35 @@ func TestHandlerInputTokensUnsupported(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsInvalidAPIKeyName(t *testing.T) {
+func TestLoadConfigRejectsInlineAPIKeysAndLoadsKeyFilePath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	// A valid hash but an empty name: such a key authenticates yet would have its
-	// metrics misattributed to "anonymous", so config load must reject it.
-	if err := os.WriteFile(path, []byte(`{
-  "provider_configs": ["p.json"],
-  "api_keys": [{"name": "", "hash": "AAAA"}]
-}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadConfig(path); err == nil {
-		t.Fatal("LoadConfig accepted an api_keys entry with an empty name, want error")
-	}
-
-	// A well-formed name still loads.
 	if err := os.WriteFile(path, []byte(`{
   "provider_configs": ["p.json"],
   "api_keys": [{"name": "laptop", "hash": "AAAA"}]
 }`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadConfig(path); err != nil {
-		t.Fatalf("LoadConfig rejected a valid api_keys name: %v", err)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("LoadConfig accepted inline api_keys, want migration error")
+	}
+	if !strings.Contains(err.Error(), "api_keys is no longer supported") || !strings.Contains(err.Error(), filepath.Join(dir, "api_keys.json")) {
+		t.Fatalf("migration error = %v", err)
+	}
+
+	if err := os.WriteFile(path, []byte(`{
+  "provider_configs": ["p.json"],
+  "api_keys_file": "keys/api_keys.json"
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig api_keys_file: %v", err)
+	}
+	if got, want := ResolveAPIKeysFile(path, cfg.APIKeysFile, ""), filepath.Join(dir, "keys", "api_keys.json"); got != want {
+		t.Fatalf("resolved api_keys_file = %q, want %q", got, want)
 	}
 }
 
@@ -1810,12 +1815,8 @@ func TestHandlerAPIKeyAuthRejectsAndAccepts(t *testing.T) {
 }`), 0o600); err != nil {
 		t.Fatalf("write provider config: %v", err)
 	}
-	cfg := Config{
-		ProviderConfigs: []string{"openai.json"},
-		APIKeys: []apikey.Entry{
-			{Name: "laptop", Hash: apikey.Hash("hmp_secret")},
-		},
-	}
+	cfg := Config{ProviderConfigs: []string{"openai.json"}}
+	store := apikey.Store{Entries: []apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmp_secret")}}}
 	handler, err := NewHandler(Options{
 		ConfigDir: dir,
 		Config:    cfg,
@@ -1826,7 +1827,7 @@ func TestHandlerAPIKeyAuthRejectsAndAccepts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	srv := httptest.NewServer(cfg.APIKeyStore().Middleware(handler))
+	srv := httptest.NewServer(store.Middleware(handler))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/v1/models")
@@ -1989,12 +1990,8 @@ func TestHandlerMetricsKeyLabelReflectsAuth(t *testing.T) {
 	}
 	reg := metrics.New()
 	usage := llm.Usage{InputTokens: 100, OutputTokens: 50}
-	cfg := Config{
-		ProviderConfigs: []string{"openai.json"},
-		APIKeys: []apikey.Entry{
-			{Name: "laptop", Hash: apikey.Hash("hmp_secret")},
-		},
-	}
+	cfg := Config{ProviderConfigs: []string{"openai.json"}}
+	store := apikey.Store{Entries: []apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmp_secret")}}}
 	handler, err := NewHandler(Options{
 		ConfigDir: dir,
 		Config:    cfg,
@@ -2010,7 +2007,7 @@ func TestHandlerMetricsKeyLabelReflectsAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	srv := httptest.NewServer(cfg.APIKeyStore().Middleware(handler))
+	srv := httptest.NewServer(store.Middleware(handler))
 	defer srv.Close()
 
 	body, _ := json.Marshal(protocol.StreamRequest{
@@ -2098,10 +2095,8 @@ func TestHandlerMetricsRecordsRejectedAuth(t *testing.T) {
 		t.Fatalf("write provider config: %v", err)
 	}
 	reg := metrics.New()
-	cfg := Config{
-		ProviderConfigs: []string{"openai.json"},
-		APIKeys:         []apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmp_secret")}},
-	}
+	cfg := Config{ProviderConfigs: []string{"openai.json"}}
+	store := apikey.Store{Entries: []apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmp_secret")}}}
 	handler, err := NewHandler(Options{
 		ConfigDir: dir,
 		Config:    cfg,
@@ -2113,7 +2108,6 @@ func TestHandlerMetricsRecordsRejectedAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	store := cfg.APIKeyStore()
 	srv := httptest.NewServer(ObserveAuth(handler, store, store.Middleware(handler)))
 	defer srv.Close()
 
@@ -2316,5 +2310,273 @@ func TestHandlerCatalogLogsTraceAttrsOnlyForValidTraceparent(t *testing.T) {
 		if got := record[k]; got != want {
 			t.Fatalf("log[%s] = %v (%T), want %v", k, got, got, want)
 		}
+	}
+}
+
+func TestLoadConfigRejectsGlobalCostBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"provider_configs":["p.json"],"cost_budget":{"limit_usd":1.5,"period":"24h"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("LoadConfig accepted global cost_budget, want migration error")
+	}
+	if !strings.Contains(err.Error(), "cost_budget is no longer supported") || !strings.Contains(err.Error(), "-budget-usd") {
+		t.Fatalf("global budget error = %v", err)
+	}
+}
+
+func budgetedKeyEntry(name, plaintext string, limitUSD float64, period time.Duration, rejectUnpriced bool) apikey.Entry {
+	return apikey.Entry{
+		Name:  name,
+		Hash:  apikey.Hash(plaintext),
+		Added: time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC),
+		CostBudget: &apikey.CostBudget{
+			LimitUSD:       limitUSD,
+			PeriodSeconds:  int64(period / time.Second),
+			RejectUnpriced: rejectUnpriced,
+		},
+	}
+}
+
+func streamOnceWithKey(t *testing.T, srv *httptest.Server, provider, model, key string) {
+	t.Helper()
+	targetID := provider + ":" + model
+	body, _ := json.Marshal(protocol.StreamRequest{TargetID: targetID, Request: llm.Request{Model: targetID}})
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/stream", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new stream request: %v", err)
+	}
+	req.Header.Set("content-type", protocol.ContentTypeNDJSON)
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST stream %s/%s: %v", provider, model, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream %s/%s status = %d", provider, model, resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+}
+
+func usageReportWithKey(t *testing.T, srv *httptest.Server, key string) protocol.UsageReport {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/usage", nil)
+	if err != nil {
+		t.Fatalf("new usage request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET usage: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("usage status = %d, want 200", resp.StatusCode)
+	}
+	var report protocol.UsageReport
+	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
+		t.Fatalf("decode usage: %v", err)
+	}
+	return report
+}
+
+func TestAPIKeyCostBudgetRejectsAfterWindowSpendPersists(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name":"openai",
+  "api_type":"openai",
+  "base_url":"http://localhost:11434/v1",
+  "models":[{"name":"priced","context_window":128000,"price":{"input":10}}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	cfg := Config{ProviderConfigs: []string{"openai.json"}}
+	secret := "hmp_budgeted"
+	entry := budgetedKeyEntry("laptop", secret, 0.01, time.Hour, false)
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    cfg,
+		Now:       clock,
+		New: fixedUsageProvider(llm.Usage{
+			InputTokens: 1000, // $0.01 at $10 / 1M input tokens.
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(apikey.Store{Entries: []apikey.Entry{entry}}.Middleware(handler))
+	streamOnceWithKey(t, srv, "openai", "priced", secret)
+
+	report := usageReportWithKey(t, srv, secret)
+	if report.Budget == nil || report.Budget.SpentUSD != 0.01 || report.Budget.RemainingUSD != 0 {
+		t.Fatalf("budget report after first request = %+v", report.Budget)
+	}
+
+	body, _ := json.Marshal(protocol.StreamRequest{TargetID: "openai:priced", Request: llm.Request{Model: "openai:priced"}})
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/stream", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new over-budget request: %v", err)
+	}
+	req.Header.Set("content-type", protocol.ContentTypeNDJSON)
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST over budget: %v", err)
+	}
+	if resp.StatusCode != http.StatusTooManyRequests {
+		resp.Body.Close()
+		t.Fatalf("over-budget status = %d, want 429", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Retry-After"); got == "" {
+		resp.Body.Close()
+		t.Fatal("over-budget response missing Retry-After")
+	}
+	var apiErr protocol.Error
+	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
+		resp.Body.Close()
+		t.Fatalf("decode budget error: %v", err)
+	}
+	resp.Body.Close()
+	if apiErr.Code != "cost_budget_exceeded" || !apiErr.Retryable || apiErr.RetryAfterMS <= 0 {
+		t.Fatalf("budget error = %+v", apiErr)
+	}
+	srv.Close()
+
+	restarted, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    cfg,
+		Now:       clock,
+		New:       fixedUsageProvider(llm.Usage{InputTokens: 1000}),
+	})
+	if err != nil {
+		t.Fatalf("NewHandler restart: %v", err)
+	}
+	srv = httptest.NewServer(apikey.Store{Entries: []apikey.Entry{entry}}.Middleware(restarted))
+	defer srv.Close()
+	report = usageReportWithKey(t, srv, secret)
+	if report.Budget == nil || report.Budget.SpentUSD != 0.01 {
+		t.Fatalf("restarted budget report = %+v", report.Budget)
+	}
+}
+
+func TestAPIKeyCostBudgetAllowsUnpricedTargetByDefault(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name":"openai",
+  "api_type":"openai",
+  "base_url":"http://localhost:11434/v1",
+  "models":[{"name":"free","context_window":128000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	providerCalls := 0
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			providerCalls++
+			return llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}}, Stop: llm.StopEndTurn}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	secret := "hmp_budgeted"
+	entry := budgetedKeyEntry("laptop", secret, 1, time.Hour, false)
+	srv := httptest.NewServer(apikey.Store{Entries: []apikey.Entry{entry}}.Middleware(handler))
+	defer srv.Close()
+	streamOnceWithKey(t, srv, "openai", "free", secret)
+	if providerCalls != 1 {
+		t.Fatalf("provider calls = %d, want 1", providerCalls)
+	}
+	report := usageReportWithKey(t, srv, secret)
+	if report.Budget == nil || report.Budget.SpentUSD != 0 {
+		t.Fatalf("budget report for unpriced request = %+v", report.Budget)
+	}
+}
+
+func TestAPIKeyCostBudgetRejectsUnpricedTargetWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name":"openai",
+  "api_type":"openai",
+  "base_url":"http://localhost:11434/v1",
+  "models":[{"name":"free","context_window":128000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	providerCalls := 0
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			providerCalls++
+			return llmtest.New("fake"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	secret := "hmp_budgeted"
+	entry := budgetedKeyEntry("laptop", secret, 1, time.Hour, true)
+	srv := httptest.NewServer(apikey.Store{Entries: []apikey.Entry{entry}}.Middleware(handler))
+	defer srv.Close()
+	body, _ := json.Marshal(protocol.StreamRequest{TargetID: "openai:free", Request: llm.Request{Model: "openai:free"}})
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/stream", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new unpriced request: %v", err)
+	}
+	req.Header.Set("content-type", protocol.ContentTypeNDJSON)
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST unpriced: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unpriced status = %d, want 400", resp.StatusCode)
+	}
+	var apiErr protocol.Error
+	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
+		t.Fatalf("decode unpriced error: %v", err)
+	}
+	if apiErr.Code != "cost_budget_unpriced_target" {
+		t.Fatalf("unpriced error = %+v", apiErr)
+	}
+	if providerCalls != 0 {
+		t.Fatalf("provider calls = %d, want 0", providerCalls)
+	}
+}
+
+func TestCostBudgetWindowResetAndUsageOmitWhenDisabled(t *testing.T) {
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	cfg := CostBudgetConfig{LimitUSD: 1, Period: Duration{Duration: time.Hour, Set: true}}
+	tracker, err := newCostBudgetTrackerAtPath(cfg, filepath.Join(t.TempDir(), "budget.json"), clock)
+	if err != nil {
+		t.Fatalf("newCostBudgetTracker: %v", err)
+	}
+	if err := tracker.Add(0.75); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if report := tracker.Report(); report.SpentUSD != 0.75 || report.RemainingUSD != 0.25 {
+		t.Fatalf("report before reset = %+v", report)
+	}
+	now = now.Add(time.Hour)
+	if ok, retry := tracker.Check(); !ok || retry != 0 {
+		t.Fatalf("Check after reset = (%v,%v), want true,0", ok, retry)
+	}
+	if report := tracker.Report(); report.SpentUSD != 0 || !report.WindowStart.Equal(now) {
+		t.Fatalf("report after reset = %+v, now=%v", report, now)
+	}
+
+	h := &Handler{}
+	if report := h.usageSnapshot(); report.Budget != nil {
+		t.Fatalf("disabled budget report = %+v, want nil", report.Budget)
 	}
 }

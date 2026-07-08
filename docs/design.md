@@ -820,15 +820,27 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   warned about and dropped from `provider_configs`. Unreadable or malformed files
   still error.
 - **API-key authentication between harness and the model proxy** is optional and
-  disabled by default; it becomes required as soon as the first key is stored.
-  Keys are generated with `harness-model-proxy generate-api-key <name>`, live in
-  the proxy config under `api_keys` as `{name, hash, added}` entries, and are
-  served by hashing the presented `Authorization: Bearer <key>` with SHA-256 and
-  comparing via `crypto/subtle.ConstantTimeCompare`. Key prefixes (`hmp_` for the
+  disabled by default; it becomes required as soon as the first key is stored in
+  the dedicated accepted-key file. Keys are generated with
+  `harness-model-proxy generate-api-key [-api-keys-file path] [-ttl 720h]
+  [-budget-usd 25 -budget-period 24h] [-budget-reject-unpriced] <name>` and
+  stored as hashes under an `api_keys` array in that key file, not inline in the
+  normal proxy config. The config may set `api_keys_file` (relative paths are
+  resolved next to the config); otherwise the default is `api_keys.json` next to
+  the model-proxy config. `serve -api-keys-file` overrides both. Entries are
+  `{name, hash, added, expires_at?, cost_budget?}`; omitted/zero `expires_at`
+  never expires, and optional `cost_budget` entries store per-key
+  `{limit_usd, period_seconds, reject_unpriced?}` metadata.
+  Running HTTP proxies poll only this key file and atomically swap accepted-key
+  snapshots, preserving the previous good snapshot on reload errors. Inline
+  top-level `api_keys` in the normal config is rejected with a migration error.
+  Presented `Authorization: Bearer <key>` values are hashed with SHA-256 and
+  compared via `crypto/subtle.ConstantTimeCompare`. Key prefixes (`hmp_` for the
   model proxy, `hmcpp_` for the MCP proxy) make them human-distinguishable. The
   plaintext key is printed exactly once at generation and never stored or logged.
   Harness supplies a key via `-model-proxy-api-key`, `HARNESS_MODEL_PROXY_API_KEY`,
-  or the config-file `model_proxy_api_key` field, with flag > env > file precedence.
+  or the config-file `model_proxy_api_key` field, with flag > env > file precedence;
+  this outgoing client key is loaded at process start and is not hot-reloaded.
 - Provider config auth: `api_key` / `api_key_env` remain the default secret path.
   When a provider config supplies none of `api_key`/`api_key_env`/`auth`, the proxy
   falls back to a hardcoded env var keyed on the provider's `api_type`:
@@ -868,13 +880,28 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   `/responses/input_tokens` endpoint. Unsupported providers return `501` with
   `code:"input_token_count_unsupported"`. Count requests are best-effort
   preflight diagnostics and are not added to usage or cost aggregation.
-- **Usage aggregation.** The proxy keeps a mutex-guarded `{provider, model}` usage
-  map and serves it read-only at `GET /v1/usage` as `{"models": [ {provider, model,
-  requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-  reasoning_tokens, cost_usd}, … ]}`, sorted by `provider:model`. Because every priced
-  `/v1/stream` attempt with usage is recorded, delegate child-agent spend that flows
-  through the proxy is included, including failed attempts that streamed usage before
-  the error.
+- **Usage aggregation and model-proxy budgets.** The proxy keeps a mutex-guarded
+  `{provider, model}` usage map and serves it read-only at `GET /v1/usage` as
+  `{"models": [ {provider, model, requests, input_tokens, output_tokens,
+  cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd}, … ]}`, sorted
+  by `provider:model`. Because every priced `/v1/stream` attempt with usage is
+  recorded, delegate child-agent spend that flows through the proxy is included,
+  including failed attempts that streamed usage before the error. Cost budgets are
+  per API key: `harness-model-proxy generate-api-key -budget-usd 25 -budget-period
+  24h <name>` stores `cost_budget:{limit_usd, period_seconds}` on that key-file
+  entry, with optional `reject_unpriced:true` from `-budget-reject-unpriced`.
+  Budget state is persisted per key under the model-proxy config directory
+  (`state/api_key_budgets/<key>.json`) via temp-file + rename, so restarting does
+  not reset spend. Enforcement is quota-style: once the authenticated key's
+  current-window spend is at or above `limit_usd`, new priced streams are rejected
+  with `429 code:"cost_budget_exceeded"`, `Retry-After`, and `retry_after_ms`. The
+  request that pushes spend over the limit completes and is charged after
+  successful known-cost completion; failed or unpriced requests do not mutate
+  budget state. Unpriced targets are allowed by default and only rejected with
+  `400 code:"cost_budget_unpriced_target"` when that key sets `reject_unpriced`.
+  When the authenticated key has a budget, `/v1/usage` includes
+  `budget:{limit_usd, period_seconds, window_start, window_end, spent_usd,
+  remaining_usd}`. API-key files (including budget metadata) are hot-reloaded.
 - **Prometheus metrics.** The proxy also exposes `/metrics` (Prometheus text
   exposition 0.0.4) on a **separate port** (default `127.0.0.1:9090`) with **no
   API-key auth**, so a scraper can reach it off the harness CLI path. Counter
@@ -2451,14 +2478,22 @@ on the thin `internal/mcptools` adapter for tool dispatch (§9.16).
   server, and each stdio child is reaped gracefully (close stdin → SIGTERM → SIGKILL
   on the process group, bounded by per-stage timeouts).
 - **Auth and security.** The proxy's HTTP listener supports optional API-key
-  auth: keys are generated with `harness-mcp-proxy generate-api-key <name>`, stored
-  under `proxy.api_keys` as `{name, hash, added}`, and required on every request
-  once any key exists. Clients send `Authorization: Bearer <key>`; the proxy
-  verifies it with SHA-256 and constant-time comparison. Harness supplies the key
-  via `-mcp-proxy-api-key`, `HARNESS_MCP_PROXY_API_KEY`, or the config-file
-  `mcp.api_key` field, with flag > env > file precedence. The
-  `harness-mcp-proxy tools` debug command supplies the key via `tools -api-key`
-  or `HARNESS_MCP_PROXY_API_KEY`. HTTP downstream servers
+  auth: keys are generated with
+  `harness-mcp-proxy generate-api-key [-api-keys-file path] [-ttl 720h] <name>`,
+  stored in the dedicated accepted-key file as `{name, hash, added, expires_at?}`
+  entries under `api_keys`, and required on every request once any key exists.
+  The config may set `proxy.api_keys_file` (relative to the config dir); otherwise
+  HTTP mode defaults to `api_keys.json` next to the config/default config dir, and
+  `serve -api-keys-file` overrides both. Running HTTP proxies poll only this key
+  file and keep the previous good snapshot on reload errors. Inline
+  `proxy.api_keys` is rejected with a migration error. Stdio mode remains
+  unauthenticated and does not require/read accepted-key files. Clients send
+  `Authorization: Bearer <key>`; the proxy verifies it with SHA-256 and
+  constant-time comparison. Harness supplies the key via `-mcp-proxy-api-key`,
+  `HARNESS_MCP_PROXY_API_KEY`, or the config-file `mcp.api_key` field, with flag >
+  env > file precedence; this outgoing client key is loaded at process start and
+  is not hot-reloaded. The `harness-mcp-proxy tools` debug command supplies the
+  key via `tools -api-key` or `HARNESS_MCP_PROXY_API_KEY`. HTTP downstream servers
   may also set static `headers` and/or `auth`. Static headers are applied first,
   dynamic auth headers next, then MCP
   protocol headers override both. `token_command` delegates login/refresh to an

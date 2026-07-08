@@ -13,14 +13,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -139,10 +137,10 @@ func usage(w io.Writer, getenv func(string) string) {
 	fmt.Fprint(w, `harness-mcp-proxy - MCP proxy daemon and debug client
 
 Usage:
-  harness-mcp-proxy serve             [-config path] [-listen addr] [-stdio] [-log path] [-log-level level] [-log-format format]
+  harness-mcp-proxy serve             [-config path] [-api-keys-file path] [-listen addr] [-stdio] [-log path] [-log-level level] [-log-format format]
   harness-mcp-proxy tools             [-config path] [-proxy url]
   harness-mcp-proxy auth              <login|logout|status> [-config path] <server>
-  harness-mcp-proxy generate-api-key  [-config path] <name>
+  harness-mcp-proxy generate-api-key  [-config path] [-api-keys-file path] [-ttl duration] <name>
   harness-mcp-proxy version
   harness-mcp-proxy --version
 
@@ -153,11 +151,12 @@ Subcommands:
                      over HTTP.
   auth              Login, logout, or inspect OAuth credentials for a configured HTTP
                      downstream server.
-  generate-api-key  Generate a proxy-level API key and store its hash in config.
+  generate-api-key  Generate a proxy-level API key and store its hash in the key file.
   version           Print the release version and MCP protocol revision.
 
 serve flags:
   -config path      config file (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
+  -api-keys-file path accepted API keys file path (default: api_keys.json next to config/default config dir)
   -listen addr      HTTP listen address (overrides config; default: `+mcpproxy.DefaultListen+`)
   -stdio            serve MCP over stdin/stdout instead of HTTP
   -log path         log file (overrides config; default: stderr)
@@ -166,6 +165,8 @@ serve flags:
 
 generate-api-key flags:
   -config path      config file (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
+  -api-keys-file path accepted API keys file path (default: api_keys.json next to config/default config dir)
+  -ttl duration     key TTL as a Go duration; empty or 0 means no expiry
 
 tools flags:
   -config path      config file (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
@@ -181,12 +182,14 @@ func usageGenerateAPIKey(w io.Writer, getenv func(string) string) {
 	fmt.Fprint(w, `harness-mcp-proxy generate-api-key - generate and store a new proxy API key
 
 Usage:
-  harness-mcp-proxy generate-api-key [-config path] <name>
+  harness-mcp-proxy generate-api-key [-config path] [-api-keys-file path] [-ttl duration] <name>
 
-Creates config at the default path if none exists yet.
+Writes the dedicated API-key file; it does not create or mutate the normal config.
 
 Flags:
   -config path      config file path (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
+  -api-keys-file path accepted API keys file path (default: api_keys.json next to config/default config dir)
+  -ttl duration     key TTL as a Go duration; empty or 0 means no expiry
 `)
 }
 
@@ -211,6 +214,8 @@ func runGenerateAPIKey(env environment, args []string) int {
 	fs := flag.NewFlagSet("generate-api-key", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	configPath := fs.String("config", "", "config file path")
+	apiKeysFile := fs.String("api-keys-file", "", "accepted API keys file path")
+	ttlValue := fs.String("ttl", "", "key TTL as a Go duration; empty or 0 means no expiry")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			usageGenerateAPIKey(env.stdout, env.getenv)
@@ -226,118 +231,70 @@ func runGenerateAPIKey(env environment, args []string) int {
 	name := fs.Arg(0)
 	path := resolveConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv)
 	if path == "" {
-		// No config file exists yet; create one at the default path so a key can
-		// be generated on a fresh install.
 		path = mcpproxy.DefaultConfigPath(env.getenv)
 	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
+	var cfg mcpproxy.Config
+	if _, err := os.Stat(path); err == nil {
+		var loadErr error
+		cfg, loadErr = mcpproxy.LoadConfig(path)
+		if loadErr != nil {
+			fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", loadErr)
 			return exitRuntime
 		}
-	}
-	entries, err := readMCPConfigAPIKeys(data)
-	if err != nil {
-		fmt.Fprintf(env.stderr, "harness-mcp-proxy: parse config: %v\n", err)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
 		return exitRuntime
 	}
-
+	keyFile := mcpproxy.ResolveAPIKeysFile(path, cfg.APIKeysFile, *apiKeysFile, env.getenv)
+	ttl, err := parseAPIKeyTTL(*ttlValue)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
+		return exitUsage
+	}
 	plaintext, err := apikey.Generate(name, apikey.MCPProxyPrefix)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
 		return exitUsage
+	}
+	entries, err := apikey.LoadFile(keyFile)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(env.stderr, "harness-mcp-proxy: api keys file %s: %v\n", keyFile, err)
+			return exitRuntime
+		}
 	}
 	store := apikey.Store{Entries: entries}
 	now := env.now
 	if now == nil {
 		now = time.Now
 	}
-	store.Add(name, plaintext, now())
-
-	if err := writeMCPConfigAPIKeys(path, data, store.Entries); err != nil {
-		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
+	added := now()
+	expiresAt := time.Time{}
+	if ttl > 0 {
+		expiresAt = added.Add(ttl)
+	}
+	store.AddWithExpiry(name, plaintext, added, expiresAt)
+	if err := apikey.WriteFile(keyFile, store.Entries); err != nil {
+		fmt.Fprintf(env.stderr, "harness-mcp-proxy: api keys file %s: %v\n", keyFile, err)
 		return exitRuntime
 	}
 	fmt.Fprintln(env.stdout, plaintext)
 	return exitOK
 }
 
-func readMCPConfigAPIKeys(data []byte) ([]apikey.Entry, error) {
-	if len(strings.TrimSpace(string(data))) == 0 {
-		return nil, nil
+func parseAPIKeyTTL(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0" {
+		return 0, nil
 	}
-	var raw struct {
-		Proxy struct {
-			APIKeys []apikey.Entry `json:"api_keys"`
-		} `json:"proxy"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-	return append([]apikey.Entry(nil), raw.Proxy.APIKeys...), nil
-}
-
-// writeMCPConfigAPIKeys writes entries into proxy.api_keys while preserving
-// every other JSON field the MCP proxy config tolerates.
-func writeMCPConfigAPIKeys(path string, existing []byte, entries []apikey.Entry) error {
-	raw := map[string]json.RawMessage{}
-	if len(strings.TrimSpace(string(existing))) > 0 {
-		if err := json.Unmarshal(existing, &raw); err != nil {
-			return fmt.Errorf("parse config: %w", err)
-		}
-	}
-	proxy := map[string]json.RawMessage{}
-	if p, ok := raw["proxy"]; ok && len(strings.TrimSpace(string(p))) > 0 && strings.TrimSpace(string(p)) != "null" {
-		if err := json.Unmarshal(p, &proxy); err != nil {
-			return fmt.Errorf("parse proxy config: %w", err)
-		}
-	}
-	apiKeysJSON, err := json.Marshal(entries)
+	ttl, err := time.ParseDuration(value)
 	if err != nil {
-		return fmt.Errorf("marshal api_keys: %w", err)
+		return 0, fmt.Errorf("invalid -ttl %q: %w", value, err)
 	}
-	proxy["api_keys"] = apiKeysJSON
-	proxyJSON, err := json.Marshal(proxy)
-	if err != nil {
-		return fmt.Errorf("marshal proxy config: %w", err)
+	if ttl < 0 {
+		return 0, fmt.Errorf("invalid -ttl %q: duration must be non-negative", value)
 	}
-	raw["proxy"] = proxyJSON
-	if _, ok := raw["mcpServers"]; !ok {
-		raw["mcpServers"] = json.RawMessage(`{}`)
-	}
-	data, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
-	}
-	tmp, err := os.CreateTemp(dir, "config.json.*")
-	if err != nil {
-		return fmt.Errorf("create temp config: %w", err)
-	}
-	tmpName := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp config: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp config: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename temp config: %w", err)
-	}
-	cleanup = false
-	return nil
+	return ttl, nil
 }
 
 // flagWasSet reports whether the named flag was explicitly provided on the

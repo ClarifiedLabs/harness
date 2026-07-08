@@ -49,7 +49,18 @@ func (p *PricingInfo) Stale(now time.Time) bool {
 // captures every priced request the proxy has handled this run, including
 // delegated child-agent spend that is otherwise invisible to a parent session.
 type UsageReport struct {
-	Models []ModelUsage `json:"models"`
+	Models []ModelUsage  `json:"models"`
+	Budget *BudgetReport `json:"budget,omitempty"`
+}
+
+// BudgetReport describes the current authenticated API key's cost-budget window.
+type BudgetReport struct {
+	LimitUSD      float64   `json:"limit_usd"`
+	PeriodSeconds int64     `json:"period_seconds"`
+	WindowStart   time.Time `json:"window_start"`
+	WindowEnd     time.Time `json:"window_end"`
+	SpentUSD      float64   `json:"spent_usd"`
+	RemainingUSD  float64   `json:"remaining_usd"`
 }
 
 // ModelUsage is the accumulated usage for a single provider:model pair.

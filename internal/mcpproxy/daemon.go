@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"harness/internal/apikey"
 	"harness/internal/buildinfo"
 	"harness/internal/httpserve"
 	"harness/internal/logging"
@@ -24,8 +25,9 @@ const (
 // Run starts all supervisors eagerly, serves the aggregated tool surface over
 // streamable HTTP, and shuts down cleanly on ctx cancel.
 type Daemon struct {
-	cfg    Config
-	logger *slog.Logger
+	cfg     Config
+	logger  *slog.Logger
+	apiKeys *apikey.DynamicStore
 
 	// spawn/sleep are injected into every supervisor; nil → production defaults.
 	// Tests set them to avoid real subprocesses and backoff waits.
@@ -42,9 +44,20 @@ func NewDaemon(cfg Config, logger *slog.Logger) *Daemon {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &Daemon{
-		cfg:    cfg,
-		logger: logger,
+		cfg:     cfg,
+		logger:  logger,
+		apiKeys: apikey.NewDynamicStore(nil, nil),
 	}
+}
+
+// NewDaemonWithAPIKeys builds a daemon using the supplied dynamic API-key store
+// for HTTP authentication. A nil store disables auth until the caller updates it.
+func NewDaemonWithAPIKeys(cfg Config, logger *slog.Logger, apiKeys *apikey.DynamicStore) *Daemon {
+	d := NewDaemon(cfg, logger)
+	if apiKeys != nil {
+		d.apiKeys = apiKeys
+	}
+	return d
 }
 
 // Run serves HTTP until ctx is cancelled. It returns nil on a clean shutdown or
@@ -64,7 +77,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		Provider: d.registry,
 		Logger:   d.logger,
 	})
-	srv := httpserve.New(d.cfg.Listen, d.cfg.APIKeyStore().Middleware(handler))
+	apiKeys := d.apiKeys
+	if apiKeys == nil {
+		apiKeys = apikey.NewDynamicStore(nil, nil)
+	}
+	srv := httpserve.New(d.cfg.Listen, apiKeys.Middleware(handler))
 	srv.IdleTimeout = 120 * time.Second
 	d.logger.Info("serving MCP over HTTP", logging.Category(categoryGate), "addr", d.cfg.Listen)
 	if err := httpserve.Run(ctx, srv); err != nil {
