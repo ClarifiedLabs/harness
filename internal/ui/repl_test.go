@@ -208,6 +208,34 @@ func TestREPLHelpPromptExit(t *testing.T) {
 	}
 }
 
+func TestREPLSeparatesSubmittedPromptFromModelResponse(t *testing.T) {
+	tests := []struct {
+		name            string
+		input           string
+		usePromptEditor bool
+		want            string
+	}{
+		{name: "plain reader", input: "hi\n/exit\n", want: "[auto] > \nanswer"},
+		{name: "prompt editor", input: "hi\r/exit\r", usePromptEditor: true, want: "\n\nanswer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var term lockedBuffer
+			fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("answer")}, Stop: llm.StopEndTurn})
+			app := newTestApp(t, &term, &term, fp)
+			app.Renderer = NewRenderer(&term, &term, RenderOptions{Model: "claude-opus-4-8", Quiet: true, SuppressUsage: true})
+
+			code := run(strings.NewReader(tt.input), app, nil, tt.usePromptEditor)
+			if code != ExitOK {
+				t.Fatalf("exit code = %d, want 0; terminal=%q", code, term.String())
+			}
+			if got := term.String(); !strings.Contains(got, tt.want) {
+				t.Fatalf("terminal output should separate prompt from model response with %q; got %q", tt.want, got)
+			}
+		})
+	}
+}
+
 func TestREPLRecordsModelTurnTimingEvents(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn})

@@ -566,6 +566,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		return ctx, cancel, interrupted.Load
 	}
 	startPromptTurn := func(prompt string, resolveSkillMentions, attachPromptImages bool) (exit bool, code int) {
+		separateSubmittedPrompt(app.Errw)
 		if app.Renderer != nil {
 			app.Renderer.StartPrompt()
 		}
@@ -1112,6 +1113,12 @@ func (app *App) echoEditedPrompt(replPrompt, submitted string) {
 		return
 	}
 	fmt.Fprintln(app.Errw, submitted)
+}
+
+func separateSubmittedPrompt(w io.Writer) {
+	if w != nil {
+		fmt.Fprintln(w)
+	}
 }
 
 func commandFields(line string) (cmd, arg string) {
