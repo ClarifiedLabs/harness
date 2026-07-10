@@ -26,15 +26,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	var out bytes.Buffer
-	if err := json.Indent(&out, data, "", "  "); err != nil {
+	out, err := formatJSON(data)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "jsonfmt: format %s: %v\n", inPath, err)
 		os.Exit(1)
 	}
-	out.WriteByte('\n')
 
-	if err := os.WriteFile(outPath, out.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(outPath, out, 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "jsonfmt: write %s: %v\n", outPath, err)
 		os.Exit(1)
 	}
+}
+
+func formatJSON(data []byte) ([]byte, error) {
+	var out bytes.Buffer
+	if err := json.Indent(&out, bytes.TrimSpace(data), "", "  "); err != nil {
+		return nil, err
+	}
+	out.WriteByte('\n')
+	return out.Bytes(), nil
 }

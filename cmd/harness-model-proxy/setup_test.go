@@ -1408,6 +1408,20 @@ func TestOpenAICodexProviderUsesListVisibleCodexModels(t *testing.T) {
 	}
 }
 
+func TestCodexFallbackCandidateDecodes(t *testing.T) {
+	path := os.Getenv("CODEX_MODELS_FALLBACK_CANDIDATE")
+	if path == "" {
+		t.Skip("CODEX_MODELS_FALLBACK_CANDIDATE is not set")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeCodexModels(data); err != nil {
+		t.Fatalf("decode candidate Codex fallback: %v", err)
+	}
+}
+
 func TestRunRefreshModelsSIGINTCancelsCatalogFetch(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
