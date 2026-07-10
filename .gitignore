@@ -3,3 +3,4 @@
 /harness-mcp-proxy
 /harness-lsp
 *.test
+.DS_Store
