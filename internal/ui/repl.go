@@ -421,21 +421,22 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	defer close(readReq)
 
 	var (
-		promptPrinted   bool
-		readPending     bool
-		inputEnded      bool
-		inputErr        error
-		active          bool
-		activeReadPause bool
-		exitAfterTurn   bool
-		plainPromptRead bool
-		prompt          string
-		pendingPrefill  string // partial during-turn buffer deposited into the next prompt
-		queued          []replInput
-		preparedQueued  []agent.SteerInput
-		turnDone        <-chan struct{}
-		restoreEsc      func() error
-		escPresses      escapePresses
+		promptPrinted             bool
+		readPending               bool
+		inputEnded                bool
+		inputErr                  error
+		active                    bool
+		activeReadPause           bool
+		exitAfterTurn             bool
+		plainPromptRead           bool
+		prompt                    string
+		pendingPrefill            string // text deposited into the next prompt
+		pendingPrefillModelPrompt bool   // submitted prefill bypasses command/shell dispatch
+		queued                    []replInput
+		preparedQueued            []agent.SteerInput
+		turnDone                  <-chan struct{}
+		restoreEsc                func() error
+		escPresses                escapePresses
 	)
 
 	requestRead := func(req replReadRequest) {
@@ -602,6 +603,20 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			app.runShellEscape(action.shellCommand)
 			return false, ExitOK
 		}
+		if action.prefill != "" {
+			if usePromptEditor {
+				pendingPrefill = action.prefill
+				pendingPrefillModelPrompt = action.prefillModelPrompt
+			} else {
+				// Without the prompt editor there is no way to prefill for
+				// review; echo the loaded text and submit it directly,
+				// bypassing command and shell dispatch while preserving normal
+				// prompt enrichment for editor output.
+				app.echoEditedPrompt(prompt, action.prefill)
+				return startPromptTurn(action.prefill, true, true)
+			}
+			return false, ExitOK
+		}
 		if action.run {
 			if action.echoEditedPrompt {
 				app.echoEditedPrompt(prompt, action.prompt)
@@ -654,12 +669,14 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 						readPending = false
 						if res.ok && res.input.deposit {
 							pendingPrefill = res.input.text
+							pendingPrefillModelPrompt = false
 						} else if res.ok && !res.input.escape && !res.input.interrupt && (res.input.text != "" || res.input.edit) {
 							queued = append(queued, res.input)
 						} else {
 							// The read returned via a keystroke (interrupt/Esc)
 							// rather than the cancel; the typed buffer is intact.
 							pendingPrefill = reader.turnBuffer()
+							pendingPrefillModelPrompt = false
 						}
 						reader.drainTurnCancel()
 					}
@@ -750,6 +767,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					// drained in the turn-done handoff). Stash it and stop reading
 					// until the turn ends.
 					pendingPrefill = input.text
+					pendingPrefillModelPrompt = false
 					activeReadPause = true
 					continue
 				}
@@ -813,8 +831,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			promptPrinted = true
 		}
 		if !plainPromptRead {
-			requestRead(replReadRequest{prompt: prompt, promptEditor: usePromptEditor, replPrompt: true, prefill: pendingPrefill})
+			requestRead(replReadRequest{prompt: prompt, promptEditor: usePromptEditor, replPrompt: true, prefill: pendingPrefill, prefillModelPrompt: pendingPrefillModelPrompt})
 			pendingPrefill = ""
+			pendingPrefillModelPrompt = false
 		}
 		select {
 		case <-exit:
@@ -914,6 +933,10 @@ type replInput struct {
 	escapeTail  bool
 	interrupt   bool
 	interactive bool
+	// modelPrompt marks input already classified as model-bound prompt text. It
+	// bypasses prompt-level command and shell dispatch while preserving normal
+	// prompt enrichment.
+	modelPrompt bool
 	// deposit marks an accumulated during-turn buffer that did not end with Enter;
 	// it is handed back as editable prefill in the next prompt.
 	deposit bool
@@ -938,8 +961,11 @@ type replReadRequest struct {
 	// (during-turn input).
 	turnEdit bool
 	// prefill seeds the prompt editor with editable text, used to deposit a partial
-	// during-turn buffer into the next prompt.
+	// during-turn buffer or external editor output into the next prompt.
 	prefill string
+	// prefillModelPrompt marks the submitted prefill as model-bound prompt text;
+	// used for external editor output reviewed in the line editor.
+	prefillModelPrompt bool
 }
 
 type replAction struct {
@@ -951,6 +977,12 @@ type replAction struct {
 	echoEditedPrompt     bool
 	resolveSkillMentions bool
 	attachPromptImages   bool
+	// prefill deposits text into the next prompt as editable content instead
+	// of running a turn. Used when returning from an external editor so the
+	// user can review before submitting.
+	prefill string
+	// prefillModelPrompt marks the eventual submitted prefill as model-bound text.
+	prefillModelPrompt bool
 }
 
 type replCommandResult struct {
@@ -1067,9 +1099,12 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 	}
 	if input.edit {
 		if prompt, ok := app.editPrompt(line); ok {
-			return replAction{prompt: prompt, run: true, echoEditedPrompt: true}
+			return replAction{prefill: prompt, prefillModelPrompt: true}
 		}
 		return replAction{}
+	}
+	if input.modelPrompt {
+		return replAction{prompt: line, run: true, resolveSkillMentions: true, attachPromptImages: true}
 	}
 	if input.pasted {
 		return replAction{prompt: line, run: true}
@@ -1091,7 +1126,7 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 		cmd, arg := commandFields(line)
 		if cmd == "/edit" {
 			if prompt, ok := app.editPrompt(arg); ok {
-				return replAction{prompt: prompt, run: true}
+				return replAction{prefill: prompt, prefillModelPrompt: true}
 			}
 			return replAction{}
 		}
@@ -1338,6 +1373,9 @@ func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
 		input, ok, err := rr.editor.readPrefilled(req.prompt, req.prefill)
 		if ok {
 			input.interactive = true
+			if req.prefillModelPrompt {
+				input.modelPrompt = true
+			}
 		}
 		return input, ok, err
 	}
@@ -1649,7 +1687,7 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		app.imageCommand(arg)
 	case "/edit":
 		if prompt, ok := app.editPrompt(arg); ok {
-			if run, ok := app.prepareTurn(prompt, turnOptions{}); ok {
+			if run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
 				run()
 			}
 		}

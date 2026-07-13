@@ -228,7 +228,7 @@ func TestREPLEditedBangTextIsPromptNotShellCommand(t *testing.T) {
 	}
 }
 
-func TestREPLEditedSkillMentionIsPromptNotMention(t *testing.T) {
+func TestREPLEditedSkillMentionAddsRequestContext(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("ok")},
@@ -258,8 +258,120 @@ func TestREPLEditedSkillMentionIsPromptNotMention(t *testing.T) {
 	if got := req.Messages[0].Content[0].Text; got != "please use $commit" {
 		t.Fatalf("edited prompt = %q", got)
 	}
-	if got := strings.Join(req.RequestContext, "\n\n"); strings.Contains(got, "[explicit skill mentions]") {
-		t.Fatalf("edited prompt should not add skill context:\n%s", got)
+	got := strings.Join(req.RequestContext, "\n\n")
+	if !strings.Contains(got, "[explicit skill mentions]") || !strings.Contains(got, "path: /skills/commit/SKILL.md") {
+		t.Fatalf("edited prompt should add skill context:\n%s", got)
+	}
+}
+
+func TestREPLEditedImageReferenceAttachesPromptImage(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("ok")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	path := writeUIImage(t)
+	prompt := "describe @" + path
+	app.OpenEditor = func(path string) error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		delimiter := editorDelimiterFromContent(t, string(data))
+		return os.WriteFile(path, []byte(delimiter+"\n"+prompt+"\n"), 0o600)
+	}
+
+	in := strings.NewReader("/edit\n/exit\n")
+	if code := Run(in, app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("edited prompt should send one request, got %d", len(fp.Requests))
+	}
+	content := fp.Requests[0].Messages[0].Content
+	if len(content) != 2 {
+		t.Fatalf("content = %d, want image + text", len(content))
+	}
+	if content[0].Kind != llm.BlockImage || content[0].ImageMediaType != "image/png" {
+		t.Fatalf("first block = %+v", content[0])
+	}
+	if content[1].Kind != llm.BlockText || content[1].Text != prompt {
+		t.Fatalf("second block = %+v, want prompt %q", content[1], prompt)
+	}
+}
+
+func TestREPLEditorPrefillInteractiveSlashTextIsPromptWithEnrichment(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("ok")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Skills = map[string]skills.Skill{
+		"commit": {Name: "commit", Description: "Create a git commit", Location: "/skills/commit/SKILL.md"},
+	}
+	path := writeUIImage(t)
+	prompt := "/help please use $commit @" + path
+	app.OpenEditor = func(path string) error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		delimiter := editorDelimiterFromContent(t, string(data))
+		return os.WriteFile(path, []byte(delimiter+"\n"+prompt+"\n"), 0o600)
+	}
+
+	if code := run(strings.NewReader("/edit\r\r/exit\r"), app, nil, true); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("edited prompt should send one request, got %d; errw=%q", len(fp.Requests), errw.String())
+	}
+	content := fp.Requests[0].Messages[0].Content
+	if len(content) != 2 {
+		t.Fatalf("content = %d, want image + text", len(content))
+	}
+	if content[0].Kind != llm.BlockImage || content[0].ImageMediaType != "image/png" {
+		t.Fatalf("first block = %+v", content[0])
+	}
+	if content[1].Kind != llm.BlockText || content[1].Text != prompt {
+		t.Fatalf("second block = %+v, want prompt %q", content[1], prompt)
+	}
+	got := strings.Join(fp.Requests[0].RequestContext, "\n\n")
+	if !strings.Contains(got, "[explicit skill mentions]") || !strings.Contains(got, "path: /skills/commit/SKILL.md") {
+		t.Fatalf("edited prompt should add skill context:\n%s", got)
+	}
+}
+
+func TestREPLEditorPrefillInteractiveCtrlGBangTextIsPromptNotShellCommand(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("ok")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.RunShellCommand = func(command string) error {
+		t.Fatalf("edited bang text should not run shell command %q", command)
+		return nil
+	}
+	app.OpenEditor = func(path string) error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		delimiter := editorDelimiterFromContent(t, string(data))
+		return os.WriteFile(path, []byte(delimiter+"\n!echo foo\n"), 0o600)
+	}
+
+	if code := run(strings.NewReader("\a\r/exit\r"), app, nil, true); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("edited prompt should send one request, got %d", len(fp.Requests))
+	}
+	if got := fp.Requests[0].Messages[0].Content[0].Text; got != "!echo foo" {
+		t.Fatalf("edited prompt = %q", got)
 	}
 }
 
