@@ -29,7 +29,7 @@ type ProviderConfig struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key"`
 	// Managed marks a config written by `--setup`/`--refresh-models`. Managed
-	// configs omit flat per-model prices; the proxy resolves flat prices live
+	// configs omit per-model pricing schedules; the proxy resolves prices live
 	// from the in-memory models.dev cache or provider-specific pricers. A config
 	// lacking this flag (e.g. a hand-written one) is treated as manual and keeps
 	// its own configured prices.

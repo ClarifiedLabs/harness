@@ -409,10 +409,11 @@ func (h *Handler) recordMetrics(r *http.Request, providerID, model string, usage
 	}
 }
 
-// buildSnapshot resolves managed-provider flat prices from md where applicable,
-// then builds the registry and served catalog from the provider configs. Manual
-// providers keep their own configured prices. The catalog's pricing stamp dates
-// the managed prices to the models.dev cache when any provider is managed, and
+// buildSnapshot resolves managed-provider static pricing schedules from md where
+// applicable, then builds the registry and served catalog from the provider
+// configs. Manual providers keep their own configured prices. The catalog's
+// pricing stamp dates the managed prices to the models.dev cache when any
+// provider is managed, and
 // to the provider-config mtime otherwise.
 func (h *Handler) buildSnapshot(md *modelsdev.Catalog, mdSourceDate time.Time) (*catalogSnapshot, error) {
 	priced, pruned := h.pricedProviders(md)
@@ -462,8 +463,8 @@ func (h *Handler) pricingInfo(md *modelsdev.Catalog, mdSourceDate time.Time) *pr
 	}
 }
 
-// pricedProviders returns provider configs with flat prices ready for the
-// registry and catalog. Managed providers get a fresh copy whose flat model
+// pricedProviders returns provider configs with static pricing schedules ready
+// for the registry and catalog. Managed providers get a fresh copy whose model
 // prices and input modalities come from the models.dev cache when applicable;
 // when a refreshed cache no longer contains a managed provider/model, the stale
 // entry is pruned from the live snapshot with a warning. Manual providers are
@@ -1935,8 +1936,8 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 			}
 			price := entry.Price
 			if pricer != nil {
-				if catalogPrice := pricer.CatalogPrice(pc, entry); catalogPrice.Known {
-					price = catalogPrice.Price
+				if catalogPricing := pricer.CatalogPricing(pc, entry); catalogPricing.Known {
+					price = catalogPricing.Price
 				} else {
 					price = llm.Price{}
 				}

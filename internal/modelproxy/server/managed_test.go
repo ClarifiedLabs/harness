@@ -254,8 +254,14 @@ func TestTieredManagedProviderUsesTieredPricing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	if got := catalogModelPrice(t, handler.Catalog(), "sakana", "fugu-ultra"); !got.IsZero() {
-		t.Fatalf("tiered model catalog price = %+v, want omitted dynamic price", got)
+	wantPrice := llm.Price{
+		Input:     5,
+		Output:    30,
+		CacheRead: 0.5,
+		Tiers:     []llm.PriceTier{{Threshold: 272_000, Input: 10, Output: 45, CacheRead: 1.0}},
+	}
+	if got := catalogModelPrice(t, handler.Catalog(), "sakana", "fugu-ultra"); !got.Equal(wantPrice) {
+		t.Fatalf("tiered model catalog price = %+v, want complete schedule %+v", got, wantPrice)
 	}
 
 	// Below the tier threshold uses base rates.

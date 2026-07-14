@@ -13,9 +13,9 @@ func TestFlatPricer(t *testing.T) {
 		Name:  "alpha",
 		Price: llm.Price{Input: 2, Output: 4, CacheRead: 0.5, CacheWrite: 1},
 	}
-	price := Flat{}.CatalogPrice(provider, model)
+	price := Flat{}.CatalogPricing(provider, model)
 	if !price.Handled || !price.Known || !price.Price.Equal(model.Price) {
-		t.Fatalf("CatalogPrice = %+v; want configured price", price)
+		t.Fatalf("CatalogPricing = %+v; want configured price", price)
 	}
 
 	got := Flat{}.PriceUsage(Input{
@@ -84,7 +84,7 @@ func TestFlatPricerTieredPricing(t *testing.T) {
 	assertKnownCost(t, got, 1000.0/1e6*5+2000.0/1e6*30+300.0/1e6*0.5)
 }
 
-func TestFlatPricerTieredCatalogPriceOmitted(t *testing.T) {
+func TestFlatPricerExposesTieredCatalogPricing(t *testing.T) {
 	model := llm.ModelEntry{
 		Name: "tiered-model",
 		Price: llm.Price{
@@ -92,9 +92,9 @@ func TestFlatPricerTieredCatalogPriceOmitted(t *testing.T) {
 			Tiers: []llm.PriceTier{{Threshold: 100_000, Input: 10}},
 		},
 	}
-	price := NewComposite().CatalogPrice(llm.ProviderConfig{Name: "testai"}, model)
-	if !price.Handled || price.Known {
-		t.Fatalf("tiered catalog price = %+v, want handled but unknown", price)
+	price := NewComposite().CatalogPricing(llm.ProviderConfig{Name: "testai"}, model)
+	if !price.Handled || !price.Known || !price.Price.Equal(model.Price) {
+		t.Fatalf("tiered catalog pricing = %+v, want complete static schedule", price)
 	}
 }
 

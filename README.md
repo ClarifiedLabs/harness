@@ -130,8 +130,10 @@ can copy the same provider-facing key into non-auth routing headers such as
 
 While serving, the proxy also answers a read-only `GET /v1/usage` that aggregates
 token and cost totals per model target (including delegate child-agent spend),
-and its `GET /v1/models` response carries a pricing `source_date` plus
-`max_age_seconds` so clients can detect stale catalog prices. For managed
+and its `GET /v1/models` response carries complete static pricing schedules
+(including context-length tiers) plus a pricing `source_date` and
+`max_age_seconds` so clients can detect stale catalog prices. Setup and runtime
+model pickers show each band as input/output USD per 1M tokens. For managed
 providers `source_date` tracks the models.dev cache (kept fresh by the
 refresher); for manual-only setups it is the provider config file's mtime.
 Cost budgets are per model-proxy API key. Generate a key with

@@ -37,8 +37,9 @@ type setupProviderConfig struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key,omitempty"`
 	// Managed is always true for configs written by setup/refresh. For priced
-	// providers, flat prices are resolved live from the models.dev cache or a
-	// provider-specific pricer, so the per-model entries below carry no price.
+	// providers, static pricing schedules are resolved live from the models.dev
+	// cache or a provider-specific pricer, so the per-model entries below carry no
+	// price.
 	Managed bool `json:"managed,omitempty"`
 	// PriceSource names the models.dev provider id whose prices apply to this
 	// managed provider when it differs from Name. Empty means price from Name.
@@ -575,7 +576,7 @@ type setupModelPick struct {
 
 func (m setupModelPick) PickerID() string    { return m.ID }
 func (m setupModelPick) PickerName() string  { return m.Name }
-func (m setupModelPick) PickerPrice() string { return formatPickerPrice(m.Cost) }
+func (m setupModelPick) PickerPrice() string { return ui.FormatPickerPrice(m.Cost) }
 func (m setupModelPick) PickerRelease() string {
 	if m.ReleaseDate != "" {
 		return m.ReleaseDate
@@ -677,6 +678,7 @@ func printSetupModelSelectionPage(w io.Writer, providerID string, items []setupM
 		title += fmt.Sprintf(" matching %q", filter)
 	}
 	fmt.Fprintln(w, title)
+	fmt.Fprintln(w, ui.ModelPickerPriceLegend)
 	for pos := start; pos < end; pos++ {
 		item := items[indexes[pos]]
 		price := item.PickerPrice()
@@ -695,7 +697,7 @@ func printSetupModelSelectionPage(w io.Writer, providerID string, items []setupM
 			id = "\x1b[1m" + id + "\x1b[0m"
 			name = "\x1b[1m" + name + "\x1b[0m"
 		}
-		fmt.Fprintf(w, "%s%4d. %-43s %12s %10s  %s\n", marker, pos+1, id, price, release, name)
+		fmt.Fprintf(w, "%s%4d. %-43s %-12s %10s  %s\n", marker, pos+1, id, price, release, name)
 	}
 }
 
@@ -947,11 +949,11 @@ func setupCatalog(ctx context.Context, env environment) (*modelsdev.Catalog, err
 }
 
 // setupModelFromModelsDev builds the on-disk entry for one selected model.
-// Managed configs never store a flat price: the proxy resolves flat prices live
-// from the models.dev cache or provider-specific pricers, so leaving Price nil
-// keeps refreshed prices reaching the running server without another setup. The
-// models.dev price is still shown in the interactive picker (formatPickerPrice),
-// it just isn't persisted.
+// Managed configs never store a static pricing schedule: the proxy resolves
+// prices live from the models.dev cache or provider-specific pricers, so leaving
+// Price nil keeps refreshed prices reaching the running server without another
+// setup. The complete models.dev schedule is still shown in the interactive
+// picker; it just isn't persisted.
 func setupModelFromModelsDev(model modelsdev.Model) setupModelConfig {
 	cfg := setupModelConfig{
 		Name:             model.ID,
@@ -963,20 +965,6 @@ func setupModelFromModelsDev(model modelsdev.Model) setupModelConfig {
 	reasoning := model.Reasoning
 	cfg.Reasoning = &reasoning
 	return cfg
-}
-
-func formatPickerPrice(p llm.Price) string {
-	if p.Input == 0 && p.Output == 0 && p.CacheRead == 0 && p.CacheWrite == 0 {
-		return ""
-	}
-	return fmt.Sprintf("$%s/$%s", formatPriceComponent(p.Input), formatPriceComponent(p.Output))
-}
-
-func formatPriceComponent(v float64) string {
-	if v == float64(int64(v)) {
-		return fmt.Sprintf("%.0f", v)
-	}
-	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", v), "0"), ".")
 }
 
 func promptLine(r *bufio.Reader, w io.Writer, label string) (string, error) {

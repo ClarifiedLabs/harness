@@ -601,7 +601,14 @@ double as the proxy catalog's on-disk schema (`Price`, `ModelInfo`, `ProviderCon
 `ModelEntry`), and `Cost`/`ContextWindow`/`Models` are methods on `*Registry`:
 
 ```go
-type Price struct{ Input, Output, CacheRead, CacheWrite float64 } // USD per 1M tokens
+type Price struct {
+    Input, Output, CacheRead, CacheWrite float64 // USD per 1M tokens
+    Tiers []PriceTier                            // context-length rate steps
+}
+type PriceTier struct {
+    Threshold int
+    Input, Output, CacheRead, CacheWrite float64
+}
 type ModelInfo struct {
     ContextWindow int
     Price         Price
@@ -673,9 +680,10 @@ configured and inferred values so configs can be updated deliberately.
 
 Managed prices honor `model.cost.tiers` (`context` threshold plus higher-rate
 price) from the models.dev cache, so context-length price bands such as Sakana
-Fugu Ultra's 272k-token tier are applied automatically. Models with tiered pricing
-do not expose a single flat catalog price because the rate depends on request
-context size.
+Fugu Ultra's 272k-token tier are applied automatically. Static tier schedules are
+preserved in `GET /v1/models`; setup and runtime model pickers render every band
+as input/output USD per 1M tokens, for example
+`$5/$30 ≤272k · $10/$45 >272k`.
 
 Provider and model entries may set `server_tools:["web_search"]`. The proxy
 serves the normalized list in `GET /v1/models`, and harness only declares hosted
@@ -686,18 +694,19 @@ Sakana, OpenRouter, MiMo, Kimi, and Z.AI. If a provider rejects a server-tool
 field before streaming any events, the proxy retries the request once without
 server tools so stale metadata does not fail the turn.
 
-Flat catalog prices still use `price_source` for managed configs when the price
-is representable as `llm.Price`. Request costs flow through the pricing package's
-generic interface: provider-specific pricers can return handled-but-unknown for
-dynamic models, and the flat pricer handles the existing per-1M-token
-`llm.Price` shape for all other configured models.
+Static catalog pricing schedules use `price_source` for managed configs when the
+pricing is representable as `llm.Price`, including context tiers. Request costs
+flow through the pricing package's generic interface: provider-specific pricers
+can return handled-but-unknown for dynamic models, and the generic pricer handles
+the existing per-1M-token `llm.Price` shape for all other configured models.
 
 The serving handler holds its registry, pricer, and served catalog behind an
 atomic snapshot. The initial snapshot is built at startup from the loaded
 provider configs plus the cached models.dev catalog; after each successful cache
-refresh the refresher rebuilds the snapshot (managed flat prices/modalities from
-the new catalog with managed entries absent from that catalog pruned, manual
-metadata unchanged) and atomically swaps it in, so `/v1/models` responses and
+refresh the refresher rebuilds the snapshot (managed pricing schedules and
+modalities from the new catalog, with managed entries absent from that catalog
+pruned and manual metadata unchanged) and atomically swaps it in, so `/v1/models`
+responses and
 per-request `cost_usd` accounting always reflect the freshest managed metadata.
 `internal/llm` stays free of any `internal/modelsdev` import — the server is the
 only layer that bridges models.dev metadata into `llm`.
@@ -938,9 +947,10 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   source date (the cache file's mtime, kept fresh by the background refresher);
   for a manual-only catalog it is the newest modification time among the
   configured provider config files (the date those prices were last written). A
-  client can compare them to detect stale prices. Dynamic or route-dependent
-  models may omit `Target.Price` from this catalog even when request-time
-  `cost_usd` can be calculated by a provider-specific pricer.
+  client can compare them to detect stale prices. Static context-tier schedules
+  are included in `Target.Price`; only dynamic or route-dependent models may omit
+  it even when request-time `cost_usd` can be calculated by a provider-specific
+  pricer.
 - **Selection rule:** `harness` fetches `GET /v1/models` from the proxy. Model
   selection resolves configured proxy targets, not arbitrary provider-local names.
   With both provider and model set, harness tries `provider:model` first. If the bare

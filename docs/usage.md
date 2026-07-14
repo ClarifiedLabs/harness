@@ -398,7 +398,7 @@ Tab completes the first word from `PATH` and completes path words with `/`, `~/`
 | `/image --clear` | clear queued images |
 | `/edit [draft]` | open an external editor for the next prompt |
 | `/save [file]` | force save, optionally elsewhere |
-| `/model` | choose a configured provider/model; interactive runs can optionally save it as the default |
+| `/model` | choose a configured provider/model; the picker shows input/output USD per 1M tokens for every static context-price band; interactive runs can optionally save it as the default |
 | `/model <id>` | switch subsequent turns to model `<id>`; a near-miss falls back to a unique prefix/substring match |
 | `/model <provider>:<id>` | switch to `<id>` on a specific configured provider |
 | `/reasoning` | list reasoning controls for the current model |

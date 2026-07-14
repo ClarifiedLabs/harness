@@ -24,19 +24,19 @@ type Result struct {
 	Handled bool
 }
 
-// CatalogResult is a catalog-facing flat price. Handled=true with Known=false
-// means the model has dynamic tiered pricing and cannot be represented by a
-// single flat catalog price.
-type CatalogResult struct {
+// CatalogPricingResult is a catalog-facing static price schedule. Known=false
+// means no static schedule can represent the model's pricing, for example when
+// a provider chooses rates dynamically after routing the request.
+type CatalogPricingResult struct {
 	Price   llm.Price
 	Known   bool
 	Handled bool
 }
 
-// Pricer prices model-proxy usage and exposes flat catalog prices when a model
-// has one.
+// Pricer prices model-proxy usage and exposes static catalog pricing schedules
+// when a model has one.
 type Pricer interface {
-	CatalogPrice(provider llm.ProviderConfig, model llm.ModelEntry) CatalogResult
+	CatalogPricing(provider llm.ProviderConfig, model llm.ModelEntry) CatalogPricingResult
 	PriceUsage(Input) Result
 }
 
@@ -52,15 +52,15 @@ func NewComposite() Composite {
 	return Composite{flat: Flat{}}
 }
 
-// CatalogPrice returns a flat per-million-token catalog price when one can be
-// shown accurately.
-func (c Composite) CatalogPrice(provider llm.ProviderConfig, model llm.ModelEntry) CatalogResult {
+// CatalogPricing returns a static per-million-token pricing schedule when one
+// can be shown accurately, including context-length tiers.
+func (c Composite) CatalogPricing(provider llm.ProviderConfig, model llm.ModelEntry) CatalogPricingResult {
 	for _, p := range c.pricers {
-		if res := p.CatalogPrice(provider, model); res.Handled {
+		if res := p.CatalogPricing(provider, model); res.Handled {
 			return res
 		}
 	}
-	return c.flat.CatalogPrice(provider, model)
+	return c.flat.CatalogPricing(provider, model)
 }
 
 // PriceUsage returns a request cost when any pricer can calculate one.
@@ -76,15 +76,11 @@ func (c Composite) PriceUsage(in Input) Result {
 // Flat prices the existing llm.Price shape, including tiered prices.
 type Flat struct{}
 
-func (Flat) CatalogPrice(_ llm.ProviderConfig, model llm.ModelEntry) CatalogResult {
+func (Flat) CatalogPricing(_ llm.ProviderConfig, model llm.ModelEntry) CatalogPricingResult {
 	if model.Price.IsZero() {
-		return CatalogResult{}
+		return CatalogPricingResult{}
 	}
-	if model.Price.HasTiers() {
-		// Tiered models do not have a single accurate flat catalog price.
-		return CatalogResult{Handled: true}
-	}
-	return CatalogResult{Price: model.Price, Known: true, Handled: true}
+	return CatalogPricingResult{Price: model.Price, Known: true, Handled: true}
 }
 
 func (Flat) PriceUsage(in Input) Result {

@@ -118,8 +118,11 @@ func newFakeModelProxy(t *testing.T, fp *llmtest.FakeProvider) *fakeModelProxy {
 					ProviderLabel: "OpenAI",
 					ModelLabel:    "gpt-5.5",
 					ContextWindow: 1_050_000,
-					Price:         llm.Price{Input: 5, Output: 30, CacheRead: 0.5},
-					Reasoning:     true,
+					Price: llm.Price{
+						Input: 5, Output: 30, CacheRead: 0.5,
+						Tiers: []llm.PriceTier{{Threshold: 272_000, Input: 10, Output: 45, CacheRead: 1}},
+					},
+					Reasoning: true,
 				},
 				{
 					ID:            "openrouter:openai/gpt-5.5",
@@ -678,8 +681,10 @@ func TestRunREPLModelCommandPromptsConfiguredProviderAndModel(t *testing.T) {
 	}
 	stderr := errw.String()
 	if !strings.Contains(stderr, "Models for targets 1-3 of 3") ||
+		!strings.Contains(stderr, "Price: input/output USD per 1M tokens") ||
+		!strings.Contains(stderr, "$5/$30 ≤272k · $10/$45 >272k") ||
 		!strings.Contains(stderr, "model switched") {
-		t.Fatalf("/model should render target picker and acknowledge switch, stderr=%q", stderr)
+		t.Fatalf("/model should render tiered target pricing and acknowledge switch, stderr=%q", stderr)
 	}
 }
 
@@ -1214,6 +1219,11 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 	}
 	if openRouterModel.PricePerMillionTokensUSD == nil || openRouterModel.PricePerMillionTokensUSD.Input != 5 || openRouterModel.PricePerMillionTokensUSD.Output != 30 {
 		t.Fatalf("openrouter price = %+v\n%s", openRouterModel.PricePerMillionTokensUSD, out.String())
+	}
+	openAIModel := findJSONModel(t, got.Models, "openai:gpt-5.5")
+	if openAIModel.PricePerMillionTokensUSD == nil || len(openAIModel.PricePerMillionTokensUSD.Tiers) != 1 ||
+		openAIModel.PricePerMillionTokensUSD.Tiers[0].Threshold != 272_000 {
+		t.Fatalf("openai tiered price = %+v\n%s", openAIModel.PricePerMillionTokensUSD, out.String())
 	}
 	if !openRouterModel.Reasoning {
 		t.Fatalf("openrouter reasoning = %+v\n%s", openRouterModel.Reasoning, out.String())

@@ -1484,7 +1484,7 @@ func agentListModelSummary(provider, model string) string {
 }
 
 func modelListPrice(price llm.Price) *llm.Price {
-	if price.Input == 0 && price.Output == 0 && price.CacheRead == 0 && price.CacheWrite == 0 {
+	if price.IsZero() {
 		return nil
 	}
 	out := price
@@ -2149,7 +2149,7 @@ func (m catalogModelPick) PickerName() string {
 	}
 	return m.target.ID
 }
-func (m catalogModelPick) PickerPrice() string   { return formatPickerPrice(m.target.Price) }
+func (m catalogModelPick) PickerPrice() string   { return ui.FormatPickerPrice(m.target.Price) }
 func (m catalogModelPick) PickerRelease() string { return "" }
 
 func validateReasoningConfig(registry *llm.Registry, model, _ string, reasoning llm.ReasoningConfig) error {
@@ -2192,22 +2192,6 @@ func compatibleReasoningForModel(registry *llm.Registry, model, _ string, reason
 		return llm.ReasoningConfig{}
 	}
 	return reasoning
-}
-
-// formatPickerPrice formats an llm.Price as "$in/$out" per 1M tokens,
-// or "" when no price is configured.
-func formatPickerPrice(p llm.Price) string {
-	if p.Input == 0 && p.Output == 0 && p.CacheRead == 0 && p.CacheWrite == 0 {
-		return ""
-	}
-	return fmt.Sprintf("$%s/$%s", formatPriceComponent(p.Input), formatPriceComponent(p.Output))
-}
-
-func formatPriceComponent(v float64) string {
-	if v == float64(int64(v)) {
-		return fmt.Sprintf("%.0f", v)
-	}
-	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", v), "0"), ".")
 }
 
 func pickerPageSize(env environment) int {

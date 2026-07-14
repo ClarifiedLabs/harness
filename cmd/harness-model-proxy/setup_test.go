@@ -326,6 +326,9 @@ func TestRunSetupWritesSakanaProvider(t *testing.T) {
 	if !strings.Contains(out.String(), "SAKANA_API_KEY") {
 		t.Fatalf("sakana setup should mention SAKANA_API_KEY, output=%q", out.String())
 	}
+	if !strings.Contains(out.String(), "$5/$30 ≤272k · $10/$45 >272k") {
+		t.Fatalf("sakana setup should show every pricing tier, output=%q", out.String())
+	}
 
 	dir := filepath.Join(home, ".config", "harness-model-proxy")
 	configData, err := os.ReadFile(filepath.Join(dir, "config.json"))
