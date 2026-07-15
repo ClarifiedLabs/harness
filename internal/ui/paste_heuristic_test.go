@@ -182,6 +182,39 @@ func TestPromptLineEditorPurePasteSlashCommandIsLiteral(t *testing.T) {
 	}
 }
 
+// External-editor output is prefilled text, not a paste. Even if a rapid input
+// burst immediately follows the editor handoff, the fallback paste heuristic
+// must not collapse the existing text into a paste summary.
+func TestPromptLineEditorExternalEditorPrefillRendersNormally(t *testing.T) {
+	prefill := strings.Repeat("editor text ", pasteSummaryBytes/len("editor text ")+1)
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("xy\r"), &out)
+	base := time.Unix(1_000_000, 0)
+	clock := &scheduledClock{times: []time.Time{
+		base,
+		base.Add(time.Millisecond),
+		base.Add(time.Millisecond + pasteExitGap + time.Millisecond),
+	}}
+	editor.configurePasteHeuristic(true, clock.now)
+
+	input, ok, err := editor.readPrefilled("> ", prefill)
+	if err != nil {
+		t.Fatalf("readPrefilled = %v", err)
+	}
+	if !ok {
+		t.Fatal("readPrefilled returned ok=false")
+	}
+	if input.text != prefill+"xy" {
+		t.Fatalf("input text = %q, want editor prefill plus typed text", input.text)
+	}
+	if input.pasted {
+		t.Fatal("editor prefill followed by input burst was marked as a pure paste")
+	}
+	if strings.Contains(out.String(), "bytes of pasted content") {
+		t.Fatalf("editor prefill rendered as pasted content summary; got:\n%s", out.String())
+	}
+}
+
 // A large paste into an empty prompt renders a one-line placeholder instead of
 // the full content inline (avoiding scroll lag), while the real content is
 // retained in the buffer and submitted on Enter.

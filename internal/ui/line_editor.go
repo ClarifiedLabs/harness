@@ -200,11 +200,15 @@ func (e *promptLineEditor) markManualEdit(s *lineEditState) {
 	s.summary = ""
 }
 
-// refreshPasteSummary collapses the display to the one-line paste placeholder
-// once the accumulated buffer crosses the size/line threshold, so a large
-// non-bracketed paste stops rendering inline (avoiding scroll lag). Below the
-// threshold the real content renders inline. Called only while in paste mode.
+// refreshPasteSummary collapses a pure paste that filled an empty prompt to the
+// one-line placeholder once it crosses the size/line threshold. A burst added
+// to existing text (including external-editor prefill) renders normally.
+// Called only while in paste mode.
 func (e *promptLineEditor) refreshPasteSummary(s *lineEditState) {
+	if !e.purePaste {
+		s.summary = ""
+		return
+	}
 	text := string(s.buf)
 	if len(text) > pasteSummaryBytes || strings.Count(text, "\n") >= pasteSummaryLines {
 		s.summary = fmt.Sprintf(pasteSummaryPlaceholder, len(text))
