@@ -2149,8 +2149,7 @@ func (m catalogModelPick) PickerName() string {
 	}
 	return m.target.ID
 }
-func (m catalogModelPick) PickerPrice() string   { return ui.FormatPickerPrice(m.target.Price) }
-func (m catalogModelPick) PickerRelease() string { return "" }
+func (m catalogModelPick) PickerPrice() string { return ui.FormatPickerPrice(m.target.Price) }
 
 func validateReasoningConfig(registry *llm.Registry, model, _ string, reasoning llm.ReasoningConfig) error {
 	reasoning.Profile = strings.ToLower(strings.TrimSpace(reasoning.Profile))
