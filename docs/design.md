@@ -1844,9 +1844,9 @@ treated as typed (honoring `!`/`/`/`$`). Pasting into a non-empty prompt still
 inserts at the cursor. Bracketed paste markers (`\x1b[200~`..`\x1b[201~`) are the
 primary mechanism; when a terminal does not honor bracketed paste, a timing-based
 heuristic on the interactive TTY raw line editor detects a fast keystroke burst
-(bytes arriving within ~5ms of the previous one, below the ~10-15ms human
-key-repeat floor) and treats newlines in the burst as inserts instead of
-submitting, exiting after a ~150ms gap. Staying in paste mode too long is the safe
+(bytes arriving within ~10ms of the previous one, roughly 100 characters per
+second) and treats newlines in the burst as inserts instead of submitting,
+exiting after a ~150ms gap. Staying in paste mode too long is the safe
 failure direction (an extra inserted newline, never a premature submit). The
 heuristic is interactive-only and on by default; `HARNESS_REPL_PASTE_HEURISTIC=off`
 disables it. For non-TTY input the REPL keeps the `bufio.Reader` line path, so long

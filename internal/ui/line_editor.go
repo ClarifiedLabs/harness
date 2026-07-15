@@ -44,7 +44,7 @@ const bareEscapeSequenceTimeout = 50 * time.Millisecond
 // at least pasteSummaryLines renders a one-line placeholder instead of the full
 // content inline (avoids scroll lag on large pastes).
 const (
-	pasteEnterGap           = 5 * time.Millisecond
+	pasteEnterGap           = 10 * time.Millisecond
 	pasteExitGap            = 150 * time.Millisecond
 	pasteSummaryBytes       = 1000
 	pasteSummaryLines       = 50

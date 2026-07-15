@@ -71,7 +71,9 @@ func burstGaps(n int, gap time.Duration) []time.Duration {
 func TestPromptLineEditorNonBracketedPasteBurstSubmitsAsOnePrompt(t *testing.T) {
 	paste := "line1\nline2\nline3"
 	runes := []rune(paste + "\r")
-	gaps := burstGaps(len(runes), time.Millisecond)
+	// Simulate a paste paced by an SSH connection: slower than the old 5ms
+	// threshold, but still far faster than sustained human typing.
+	gaps := burstGaps(len(runes), 8*time.Millisecond)
 	gaps[len(gaps)-1] = 200 * time.Millisecond // Enter well after the burst exits paste mode
 
 	input, ok, err := readEditedInputTimed(t, runes, gaps)
@@ -94,7 +96,7 @@ func TestPromptLineEditorNonBracketedPasteBurstSubmitsAsOnePrompt(t *testing.T) 
 // normally and the line is treated as typed (not literal).
 func TestPromptLineEditorTypedSingleLineNotDetectedAsPaste(t *testing.T) {
 	runes := []rune("hello\r")
-	gaps := burstGaps(len(runes), 20*time.Millisecond) // 20ms > 5ms enter threshold
+	gaps := burstGaps(len(runes), 20*time.Millisecond) // 20ms > 10ms enter threshold
 
 	input, ok, err := readEditedInputTimed(t, runes, gaps)
 	if err != nil {
