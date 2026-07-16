@@ -64,6 +64,8 @@ type Config struct {
 	MaxOutputTokens           int               `json:"max_output_tokens"`      // -max-output-tokens, per model turn output cap; 0 = automatic
 	MaxPromptCostUSD          float64           `json:"max_prompt_cost_usd"`    // -max-prompt-cost, accumulated USD ceiling per user turn; 0 = unlimited (needs known model cost)
 	ToolTimeoutSeconds        int               `json:"tool_timeout_seconds"`   // -tool-timeout, per-tool-call dispatch ceiling (s); default 600, <=0 disables
+	RunCommandTimeoutSeconds          int               `json:"run_command_timeout_seconds"`          // 0 = tool default (120)
+	RunCommandBackgroundTimeoutSeconds int               `json:"run_command_background_timeout_seconds"` // 0 = tool default (1200)
 	DefaultContextWindow      int               `json:"default_context_window"` // -default-context-window, fallback when metadata lacks a window
 	ContextWindow             int               `json:"context_window"`         // -context-window, 0 = registry/default
 	Reasoning                 string            `json:"reasoning"`
@@ -289,6 +291,8 @@ type fileConfig struct {
 	MaxOutputTokens           *int                       `json:"max_output_tokens"`
 	MaxPromptCostUSD          *float64                   `json:"max_prompt_cost_usd"`
 	ToolTimeoutSeconds        *int                       `json:"tool_timeout_seconds"`
+	RunCommandTimeoutSeconds          *int                       `json:"run_command_timeout_seconds"`
+	RunCommandBackgroundTimeoutSeconds *int                       `json:"run_command_background_timeout_seconds"`
 	DefaultContextWindow      *int                       `json:"default_context_window"`
 	ContextWindow             *int                       `json:"context_window"`
 	Reasoning                 string                     `json:"reasoning"`
@@ -524,6 +528,10 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		getenv("HARNESS_READ_FILE_RESULT_MAX_BYTES"), fc.ReadFileResultMaxBytes, 0)
 	c.ReadFileResultMaxLines = resolveInt(false, 0,
 		getenv("HARNESS_READ_FILE_RESULT_MAX_LINES"), fc.ReadFileResultMaxLines, 0)
+	c.RunCommandTimeoutSeconds = resolveInt(false, 0,
+		getenv("HARNESS_RUN_COMMAND_TIMEOUT_SECONDS"), fc.RunCommandTimeoutSeconds, 0)
+	c.RunCommandBackgroundTimeoutSeconds = resolveInt(false, 0,
+		getenv("HARNESS_RUN_COMMAND_BACKGROUND_TIMEOUT_SECONDS"), fc.RunCommandBackgroundTimeoutSeconds, 0)
 	c.CompactKeepTurns = intValue(fc.CompactKeepTurns, 0)
 	c.CompactSummaryMaxTokens = intValue(fc.CompactSummaryMaxTokens, 0)
 	c.CompactToolResultMaxBytes = intValue(fc.CompactToolResultMaxBytes, 0)

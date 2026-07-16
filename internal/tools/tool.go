@@ -111,7 +111,9 @@ type Options struct {
 	// It backstops tools that ignore ctx (e.g. a hung MCP/web_fetch/lsp call) so
 	// one stuck call cannot stall a turn forever. A tool that enforces its own
 	// longer deadline (see SelfTimeouter) is never cut below it.
-	DispatchTimeout time.Duration
+	DispatchTimeout                  time.Duration
+	RunCommandTimeoutSeconds         int // 0 = tool default (120)
+	RunCommandBackgroundTimeoutSeconds int // 0 = tool default (1200)
 }
 
 // SelfTimeouter is an optional Tool extension. A tool that enforces its own
@@ -280,7 +282,11 @@ func RegisterExecTools(r *Registry) {
 }
 
 func registerExecTools(r *Registry, disabled *[]DisabledTool, opts Options) {
-	r.Register(runCommand{background: opts.Background})
+	r.Register(runCommand{
+		background:         opts.Background,
+		foregroundTimeout:  opts.RunCommandTimeoutSeconds,
+		backgroundTimeout:  opts.RunCommandBackgroundTimeoutSeconds,
+	})
 	if git, ok := newGitTool(); ok {
 		r.Register(git)
 	} else if disabled != nil {

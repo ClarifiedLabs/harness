@@ -777,6 +777,11 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   `grep_result_max_lines`, or matching `HARNESS_*` env vars. `read_file` uses
   `read_file_default_limit`, `read_file_result_max_bytes`, and
   `read_file_result_max_lines`, or matching `HARNESS_*` env vars.
+  `run_command_timeout_seconds` and `run_command_background_timeout_seconds`
+  (with `HARNESS_RUN_COMMAND_TIMEOUT_SECONDS` and
+  `HARNESS_RUN_COMMAND_BACKGROUND_TIMEOUT_SECONDS` env vars) override the
+  built-in defaults of 120 s and 1200 s respectively; set to 0 to use the
+  built-in values.
   `delegate_max_turns` (default `20`) is config-only for the delegate tool.
 - Hooks use inline `hooks` plus config-relative `hook_configs` files. They are
   additive in order: inline first, then each listed file. `--hooks <file>`
@@ -1411,7 +1416,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `argv` | array of strings | program + literal arguments; mutually exclusive with `command`; must not be a shell string or JSON-encoded array |
 | `stdin` | string | written to the command's standard input |
 | `cwd` | string | default process cwd |
-| `timeout_seconds` | int | default 120, no maximum |
+| `timeout_seconds` | int | foreground default 120, background default 1200, no maximum |
 | `background` | bool | when true, start as a process-local background job and return a job id immediately |
 
 - Exactly one of `command` or `argv` is required.
@@ -1440,10 +1445,12 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   descendant closes inherited stdout/stderr; any remaining same-group descendants
   are killed after that direct exit. Long-lived commands should use
   `background:true`.
-- With `background:true`, the command uses the same process-group, timeout, and
-  output formatting rules, but runs under the background job manager instead of
-  blocking the current tool call. Use `background_jobs` or `/background` to inspect
-  or cancel it; completed output is delivered once as request-only context.
+- With `background:true`, the command uses the same process-group and output
+  formatting rules, but runs under the background job manager instead of blocking
+  the current tool call. Background jobs default to a 1200-second timeout
+  (20 minutes) unless `timeout_seconds` is set explicitly. Use `background_jobs`
+  or `/background` to inspect or cancel it; completed output is delivered once as
+  request-only context.
 - Environment inherited unmodified.
 - `stdin`, when provided, is written verbatim to the command's standard input; absent
   means `/dev/null` (programs see immediate EOF, never hang on input). Prefer it over
@@ -1460,7 +1467,8 @@ this subsection records the common runner those argv tools point at.
 - **Own process group/session, no controlling TTY.** The child leads its own group, so
   a timeout or `^C` can signal the whole group (negative-pid `SIGKILL`) and reap
   descendants, not just the direct child.
-- **Timeout.** `timeout_seconds` defaults to **120** (`0` means the default; there is no
+- **Timeout.** `timeout_seconds` defaults to **120** for foreground calls and
+  **1200** (20 minutes) for background calls (`0` means the default; there is no
   maximum). A negative value is rejected as invalid arguments.
 - **Combined stdout+stderr** are captured (interleaved, to a temp file) and returned with
   a trailing `[exit code: N]` line. **Non-zero exit is not a tool error** — only a

@@ -15,14 +15,17 @@ import (
 	"time"
 )
 
-const runCommandDefaultTimeout = 120
+const (
+	runCommandDefaultTimeout           = 120
+	runCommandBackgroundDefaultTimeout = 1200
+)
 
 var (
 	processTimeoutUnit = time.Second
 	processReapGrace   = 500 * time.Millisecond
 )
 
-const runCommandSchema = `{
+const runCommandSchemaFmt = `{
   "type": "object",
   "properties": {
     "command": {"type": "string", "description": "Shell command line to execute."},
@@ -34,11 +37,11 @@ const runCommandSchema = `{
     },
     "stdin": {"type": "string", "description": "Written to the command's standard input. Omit for no stdin."},
     "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
-    "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default 120; no maximum)."}
+    "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default %d; no maximum)."}
   }
 }`
 
-const runCommandBackgroundSchema = `{
+const runCommandBackgroundSchemaFmt = `{
   "type": "object",
   "properties": {
     "command": {"type": "string", "description": "Shell command line to execute."},
@@ -50,13 +53,15 @@ const runCommandBackgroundSchema = `{
     },
     "stdin": {"type": "string", "description": "Written to the command's standard input. Omit for no stdin."},
     "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
-    "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default 120; no maximum)."},
+    "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default %d for background; no maximum)."},
     "background": {"type": "boolean", "description": "When true, start the command as a process-local background job and return a job id immediately. Use background_jobs to inspect or cancel it."}
   }
 }`
 
 type runCommand struct {
-	background BackgroundJobStarter
+	background         BackgroundJobStarter
+	foregroundTimeout  int // seconds; 0 means use constant default
+	backgroundTimeout  int // seconds; 0 means use constant default
 }
 
 func (runCommand) Name() string { return "run_command" }
@@ -66,10 +71,18 @@ func (runCommand) Description() string {
 }
 
 func (t runCommand) Schema() json.RawMessage {
-	if t.background != nil {
-		return json.RawMessage(runCommandBackgroundSchema)
+	fg := t.foregroundTimeout
+	if fg <= 0 {
+		fg = runCommandDefaultTimeout
 	}
-	return json.RawMessage(runCommandSchema)
+	bg := t.backgroundTimeout
+	if bg <= 0 {
+		bg = runCommandBackgroundDefaultTimeout
+	}
+	if t.background != nil {
+		return json.RawMessage(fmt.Sprintf(runCommandBackgroundSchemaFmt, bg))
+	}
+	return json.RawMessage(fmt.Sprintf(runCommandSchemaFmt, fg))
 }
 
 func (runCommand) ReadOnly(json.RawMessage) bool { return false }
@@ -107,12 +120,22 @@ func (t runCommand) Run(ctx context.Context, input json.RawMessage) (string, err
 	if err := validateCwd(args.Cwd); err != nil {
 		return "", err
 	}
+	if !args.Background && args.TimeoutSeconds == 0 && t.foregroundTimeout > 0 {
+		args.TimeoutSeconds = t.foregroundTimeout
+	}
 	if args.Background {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 		if t.background == nil {
 			return "", fmt.Errorf("background manager is not initialized")
+		}
+		if args.TimeoutSeconds == 0 {
+			if t.backgroundTimeout > 0 {
+				args.TimeoutSeconds = t.backgroundTimeout
+			} else {
+				args.TimeoutSeconds = runCommandBackgroundDefaultTimeout
+			}
 		}
 		info, err := t.background.StartBackgroundJob(BackgroundJobRequest{
 			Kind:        "run_command",
@@ -135,7 +158,7 @@ func (t runCommand) Run(ctx context.Context, input json.RawMessage) (string, err
 // "no maximum" timeout_seconds is honored even under a shorter dispatch ceiling.
 // Background jobs run outside Dispatch (it returns once the job is queued), so
 // they report no deadline. See tools.SelfTimeouter.
-func (runCommand) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
+func (t runCommand) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
 	var args runCommandArgs
 	if err := json.Unmarshal(input, &args); err != nil {
 		return 0, false
@@ -143,7 +166,11 @@ func (runCommand) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
 	if args.Background || args.TimeoutSeconds < 0 {
 		return 0, false
 	}
-	return time.Duration(resolveProcessTimeoutSeconds(args.TimeoutSeconds)) * processTimeoutUnit, true
+	timeout := resolveProcessTimeoutSeconds(args.TimeoutSeconds)
+	if timeout == runCommandDefaultTimeout && t.foregroundTimeout > 0 {
+		timeout = t.foregroundTimeout
+	}
+	return time.Duration(timeout) * processTimeoutUnit, true
 }
 
 func validateRunCommandArgs(args runCommandArgs) error {

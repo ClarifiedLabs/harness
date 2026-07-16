@@ -522,7 +522,9 @@ func run(env environment) int {
 		GrepResultLines:      cfg.GrepResultMaxLines,
 		Background:           backgroundManager,
 		SearchTools:          cfg.SearchTools,
-		DispatchTimeout:      time.Duration(cfg.ToolTimeoutSeconds) * time.Second,
+		DispatchTimeout:                  time.Duration(cfg.ToolTimeoutSeconds) * time.Second,
+		RunCommandTimeoutSeconds:         cfg.RunCommandTimeoutSeconds,
+		RunCommandBackgroundTimeoutSeconds: cfg.RunCommandBackgroundTimeoutSeconds,
 	})
 	for _, disabled := range disabledTools {
 		logger.Warn(disabled.Message(), logging.Category("cli_tools"))
