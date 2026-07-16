@@ -1393,7 +1393,7 @@ func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if rr.inPaste && rr.paste.Len() > 0 {
-					input := replInput{text: rr.paste.String(), pasted: true}
+					input := replInput{text: normalizePastedNewlines(rr.paste.String()), pasted: true}
 					rr.paste.Reset()
 					rr.inPaste = false
 					return input, true, nil
@@ -1631,7 +1631,9 @@ func (rr *replReader) handleLine(line string, terminator lineTerminator) (replIn
 	end := strings.Index(line, bracketedPasteEnd)
 	if end >= 0 {
 		rr.paste.WriteString(line[:end])
-		text := rr.paste.String() + line[end+len(bracketedPasteEnd):]
+		// Normalize only the pasted portion: a bare-CR- or CRLF-terminated paste
+		// otherwise leaks raw carriage returns into the submitted text.
+		text := normalizePastedNewlines(rr.paste.String()) + line[end+len(bracketedPasteEnd):]
 		rr.paste.Reset()
 		rr.inPaste = false
 		return replInput{text: text, pasted: true}, true

@@ -40,14 +40,13 @@ const bareEscapeSequenceTimeout = 50 * time.Millisecond
 // arriving within pasteEnterGap of the previous one enters "paste mode"; paste
 // mode exits after a gap longer than pasteExitGap. Staying in paste mode too long
 // is the safe failure direction (an extra inserted newline, never a premature
-// submit). A paste filling an empty prompt that exceeds pasteSummaryBytes or has
-// at least pasteSummaryLines renders a one-line placeholder instead of the full
-// content inline (avoids scroll lag on large pastes).
+// submit). A paste filling an empty prompt that exceeds pasteSummaryBytes or is
+// multi-line renders a one-line placeholder instead of the full content inline
+// (avoids scroll lag and prompt corruption on pastes with embedded newlines).
 const (
 	pasteEnterGap           = 10 * time.Millisecond
 	pasteExitGap            = 150 * time.Millisecond
 	pasteSummaryBytes       = 1000
-	pasteSummaryLines       = 50
 	pasteSummaryPlaceholder = "[%d bytes of pasted content]"
 )
 
@@ -105,6 +104,7 @@ type promptLineEditor struct {
 	pasteMode       bool
 	lastKeyTime     time.Time
 	prevBufferEmpty bool // whether the buffer was empty before the current keystroke
+	pasteCRPending  bool // paste-mode CR inserted LF; suppress a following LF in CRLF input
 	purePaste       bool // an unedited paste fills the buffer; submitted literally
 
 	// viPrompt, when non-nil, returns the fully rendered main REPL prompt for a
@@ -182,6 +182,7 @@ func (e *promptLineEditor) updatePasteTiming(s *lineEditState) {
 			}
 		} else if e.pasteMode && gap > pasteExitGap {
 			e.pasteMode = false
+			e.pasteCRPending = false
 		}
 	}
 	e.lastKeyTime = now
@@ -201,16 +202,16 @@ func (e *promptLineEditor) markManualEdit(s *lineEditState) {
 }
 
 // refreshPasteSummary collapses a pure paste that filled an empty prompt to the
-// one-line placeholder once it crosses the size/line threshold. A burst added
-// to existing text (including external-editor prefill) renders normally.
-// Called only while in paste mode.
+// one-line placeholder once it is large or multi-line. A burst added to existing
+// text (including external-editor prefill) renders normally. Called only while
+// in paste mode.
 func (e *promptLineEditor) refreshPasteSummary(s *lineEditState) {
 	if !e.purePaste {
 		s.summary = ""
 		return
 	}
 	text := string(s.buf)
-	if len(text) > pasteSummaryBytes || strings.Count(text, "\n") >= pasteSummaryLines {
+	if shouldSummarizePaste(text) {
 		s.summary = fmt.Sprintf(pasteSummaryPlaceholder, len(text))
 	} else {
 		s.summary = ""
@@ -334,6 +335,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 	// authored, not literal). lastKeyTime is reset so the first keystroke of this
 	// prompt cannot be mistaken for a paste continuation.
 	e.pasteMode = false
+	e.pasteCRPending = false
 	e.purePaste = false
 	e.lastKeyTime = time.Time{}
 	e.prevBufferEmpty = len(state.buf) == 0
@@ -422,6 +424,9 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 	if e.editMode == promptEditModeVi && v.mode == viModeNormal {
 		return e.handleViNormalInput(v, s, h, prompt, r, duringTurn)
 	}
+	if e.pasteCRPending && !(e.pasteMode && r == '\n') {
+		e.pasteCRPending = false
+	}
 	switch r {
 	case '\r':
 		if e.consumeShiftEnterPending() {
@@ -433,6 +438,7 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 		if e.pasteMode {
 			e.tracef("raw CR in paste inserts newline")
 			s.insert('\n')
+			e.pasteCRPending = true
 			e.refreshPasteSummary(s)
 			return viEditResult{redraw: true}, nil
 		}
@@ -443,6 +449,11 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 		e.tracef("raw CR submits text len=%d purePaste=%v", len(s.buf), e.purePaste)
 		return e.submit(s)
 	case '\n':
+		if e.pasteMode && e.pasteCRPending {
+			e.tracef("raw LF after paste CR ignored")
+			e.pasteCRPending = false
+			return viEditResult{}, nil
+		}
 		e.consumeShiftEnterPending()
 		e.markManualEdit(s)
 		e.tracef("raw LF inserts newline")
@@ -1557,14 +1568,38 @@ func (e *promptLineEditor) readBracketedPaste() (string, error) {
 	for {
 		c, err := e.r.ReadByte()
 		if err != nil {
-			return b.String(), err
+			return normalizePastedNewlines(b.String()), err
 		}
 		b.WriteByte(c)
 		text := b.String()
 		if strings.HasSuffix(text, bracketedPasteEnd) {
-			return strings.TrimSuffix(text, bracketedPasteEnd), nil
+			return normalizePastedNewlines(strings.TrimSuffix(text, bracketedPasteEnd)), nil
 		}
 	}
+}
+
+// normalizePastedNewlines rewrites a pasted block's line endings to '\n'.
+//
+// The prompt runs in raw mode with ICRNL cleared (see term.promptRawTermios),
+// so the kernel no longer translates carriage return to newline on input and a
+// terminal delivers a paste's line breaks as CR ("\r") or CRLF ("\r\n")
+// rather than LF. Left raw, those carriage returns corrupt the prompt (a bare
+// CR snaps the cursor back to column 0 and overwrites the prompt line), defeat
+// the newline-based paste line counting/summary, and leak "^M" into the
+// external editor. Collapsing CRLF before bare CR yields exactly one '\n' per
+// pasted line for every CR/CRLF/LF terminal convention (and mixtures of them),
+// and is a no-op for already-LF content. Scoped to pasted blocks only, so a
+// typed Enter (raw CR) is still handled as a submit elsewhere.
+func normalizePastedNewlines(text string) string {
+	if !strings.ContainsRune(text, '\r') {
+		return text
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	return strings.ReplaceAll(text, "\r", "\n")
+}
+
+func shouldSummarizePaste(text string) bool {
+	return len(text) > pasteSummaryBytes || strings.ContainsRune(text, '\n')
 }
 
 func (e *promptLineEditor) addHistory(text string) {
@@ -1688,12 +1723,12 @@ func (s *lineEditState) promptSnapshot() *lineEditState {
 }
 
 // setPasteSummary replaces the buffer with a paste and, when the paste is large
-// or multi-line enough, records a one-line placeholder to render instead of the
-// full content. cursor lands at the end of the real content.
+// or multi-line, records a one-line placeholder to render instead of the full
+// content. cursor lands at the end of the real content.
 func (s *lineEditState) setPasteSummary(text string) {
 	s.buf = []rune(text)
 	s.cursor = len(s.buf)
-	if len(text) > pasteSummaryBytes || strings.Count(text, "\n") >= pasteSummaryLines {
+	if shouldSummarizePaste(text) {
 		s.summary = fmt.Sprintf(pasteSummaryPlaceholder, len(text))
 	} else {
 		s.summary = ""
