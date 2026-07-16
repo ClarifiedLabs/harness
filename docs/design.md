@@ -1845,20 +1845,23 @@ cursor, Ctrl-A/Home and Ctrl-E/End movement, Ctrl-B/Ctrl-F left/right aliases,
 Ctrl-C to interrupt, and Ctrl-D on an empty prompt. Shift-Enter inserts a newline without submitting,
 so multi-line prompts can be typed directly in the REPL. The editor stores
 cursor positions as Go runes; exact grapheme
-cluster and emoji-width handling are out of scope. Paste into an empty prompt fills
-the editable buffer for review and does not auto-submit: Enter submits the buffered
-content, Ctrl-G / `/edit` opens the external editor with the full pasted content
-(submitted as edited/typed), and a large or multi-line paste renders a one-line
-`[N bytes of pasted content]` placeholder instead of the full content inline (the
-real content is retained in the buffer and submitted on Enter). A paste that fills
+cluster and emoji-width handling are out of scope. Paste fills the editable buffer
+for review and does not auto-submit: Enter submits the buffered content, while a
+large or multi-line pasted range renders as a one-line `[N bytes of pasted content]`
+placeholder wherever it occurs in the prompt. The real content remains in the
+buffer and is submitted on Enter. Collapsed ranges persist while surrounding text
+is edited and behave atomically for cursor movement, replacement, and deletion.
+Ctrl-G / `/edit` opens the external editor with the full expanded content
+(submitted as edited/typed); the returned prefill stays expanded because paste
+range identity is intentionally not tracked through the editor. A paste that fills
 an empty prompt is marked pure: submitted literally — no `!` shell escape, no
 `/command` dispatch, no `$skill` resolution. The literal flag is carried on
 the Enter path in every edit mode, including vi normal mode after Esc (so a
 paste then Esc then Enter submits literally); only a manual keystroke clears
 it. Any manual keystroke after the paste (insert, delete, or cursor motion,
 in emacs mode or after entering vi normal mode with Esc) clears that mark, so the whole submitted line is
-treated as typed (honoring `!`/`/`/`$`). Pasting into a non-empty prompt still
-inserts at the cursor. Bracketed paste markers (`\x1b[200~`..`\x1b[201~`) are the
+treated as typed (honoring `!`/`/`/`$`). Pasting into a non-empty prompt inserts a
+collapsed range at the cursor. Bracketed paste markers (`\x1b[200~`..`\x1b[201~`) are the
 primary mechanism; when a terminal does not honor bracketed paste, a timing-based
 heuristic on the interactive TTY raw line editor detects a fast keystroke burst
 (bytes arriving within ~10ms of the previous one, roughly 100 characters per

@@ -210,13 +210,13 @@ func (r *Renderer) TextDelta(text string) {
 		io.WriteString(r.out, r.assistantMarkdown.Write(text))
 		r.assistantLineOpen = r.assistantMarkdown.LineOpen()
 		r.markAssistantTextVisible()
-		r.resumeLiveModelWaitAfterAssistantText()
+		r.resumeLiveModelWaitAfterAssistantText(text)
 		return
 	}
 	io.WriteString(r.out, text)
 	r.assistantLineOpen = !strings.HasSuffix(text, "\n")
 	r.markAssistantTextVisible()
-	r.resumeLiveModelWaitAfterAssistantText()
+	r.resumeLiveModelWaitAfterAssistantText(text)
 }
 
 func (r *Renderer) AssistantPhase(phase string) {
@@ -314,8 +314,12 @@ func (r *Renderer) ToolUseStart(call llm.ToolCall) {
 
 func (r *Renderer) ToolUseDelta(_ int, _ string) {}
 
-func (r *Renderer) resumeLiveModelWaitAfterAssistantText() {
-	if !r.liveStatus || r.assistantLineOpen {
+func (r *Renderer) resumeLiveModelWaitAfterAssistantText(delta string) {
+	// Markdown buffers an incomplete source line, so LineOpen remains false while
+	// a token is merely pending. Restarting the status line then would flush that
+	// token and finish it with a newline. A newline-terminated delta guarantees
+	// there is no partial source line for beginWait to flush.
+	if !r.liveStatus || r.assistantLineOpen || !strings.HasSuffix(delta, "\n") {
 		return
 	}
 	r.statusMu.Lock()

@@ -270,6 +270,188 @@ func TestPromptLineEditorSmallPasteRendersInline(t *testing.T) {
 	}
 }
 
+func TestPromptLineEditorMultilinePasteWithinTypedTextStaysCollapsed(t *testing.T) {
+	prefix := "the daemon log says "
+	pasted := "```\nfirst failure\nsecond failure\n```"
+	suffix := " and the dashboard still says Starting"
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader(prefix+bracketedPasteStart+pasted+bracketedPasteEnd+suffix+"\x01X\r"), &out)
+
+	input, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if got, want := input.text, "X"+prefix+pasted+suffix; got != want {
+		t.Fatalf("input text = %q, want %q", got, want)
+	}
+	if input.pasted {
+		t.Fatal("prompt with authored surrounding text should not be marked as a pure paste")
+	}
+	placeholder := fmt.Sprintf(pasteSummaryPlaceholder, len(pasted))
+	finalDisplay := "X" + prefix + placeholder + suffix
+	if !strings.Contains(out.String(), finalDisplay) {
+		t.Fatalf("final prompt display missing persistent collapsed paste %q, got:\n%q", finalDisplay, out.String())
+	}
+	if strings.Contains(out.String(), pasted) {
+		t.Fatalf("pasted body should stay collapsed while surrounding text is edited, got:\n%q", out.String())
+	}
+}
+
+func TestPromptLineEditorFallbackPasteWithinTypedTextStaysCollapsed(t *testing.T) {
+	prefix := "prefix "
+	pasted := "first\nsecond"
+	suffix := " suffix"
+	runes := []rune(prefix + pasted + suffix + "\r")
+	gaps := burstGaps(len(runes), 20*time.Millisecond)
+	pasteStart := len([]rune(prefix))
+	pasteEnd := pasteStart + len([]rune(pasted))
+	gaps[pasteStart] = pasteExitGap + time.Millisecond
+	for i := pasteStart + 1; i < pasteEnd; i++ {
+		gaps[i] = time.Millisecond
+	}
+	gaps[pasteEnd] = pasteExitGap + time.Millisecond
+
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader(string(runes)), &out)
+	clock := &scheduledClock{}
+	when := time.Unix(1_000_000, 0)
+	for i := range runes {
+		if i > 0 {
+			when = when.Add(gaps[i])
+		}
+		clock.times = append(clock.times, when)
+	}
+	editor.configurePasteHeuristic(true, clock.now)
+
+	input, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if got, want := input.text, prefix+pasted+suffix; got != want {
+		t.Fatalf("input text = %q, want %q", got, want)
+	}
+	placeholder := fmt.Sprintf(pasteSummaryPlaceholder, len(pasted))
+	if !strings.Contains(out.String(), prefix+placeholder+suffix) {
+		t.Fatalf("fallback paste did not stay collapsed within typed text, got:\n%q", out.String())
+	}
+}
+
+func TestPromptLineEditorExternalEditorPrefillExpandsCollapsedPaste(t *testing.T) {
+	prefix := "before "
+	pasted := "one\ntwo"
+	suffix := " after"
+	full := prefix + pasted + suffix
+	var pastedOut bytes.Buffer
+	pastedEditor := newPromptLineEditor(strings.NewReader(prefix+bracketedPasteStart+pasted+bracketedPasteEnd+suffix+string(rune(lineTermEdit))), &pastedOut)
+
+	editInput, ok, err := pastedEditor.read("> ")
+	if err != nil {
+		t.Fatalf("read pasted prompt = %v", err)
+	}
+	if !ok || !editInput.edit || editInput.text != full {
+		t.Fatalf("edit input = %+v, ok=%v, want full expanded editor text %q", editInput, ok, full)
+	}
+	placeholder := fmt.Sprintf(pasteSummaryPlaceholder, len(pasted))
+	if !strings.Contains(pastedOut.String(), prefix+placeholder+suffix) {
+		t.Fatalf("paste should be collapsed before opening the editor, got:\n%q", pastedOut.String())
+	}
+
+	var prefillOut bytes.Buffer
+	prefillEditor := newPromptLineEditor(strings.NewReader("\r"), &prefillOut)
+	input, ok, err := prefillEditor.readPrefilled("> ", editInput.text)
+	if err != nil {
+		t.Fatalf("read editor prefill = %v", err)
+	}
+	if !ok || input.text != full {
+		t.Fatalf("prefill input = %+v, ok=%v, want %q", input, ok, full)
+	}
+	if strings.Contains(prefillOut.String(), placeholder) || !strings.Contains(prefillOut.String(), full) {
+		t.Fatalf("external-editor prefill should render expanded, got:\n%q", prefillOut.String())
+	}
+}
+
+func TestLineEditStateCollapsedPasteIsAtomic(t *testing.T) {
+	s := lineEditState{buf: []rune("before  after"), cursor: len([]rune("before "))}
+	pasted := "one\ntwo"
+	s.insertPastedText(pasted)
+	placeholder := fmt.Sprintf(pasteSummaryPlaceholder, len(pasted))
+	if got, want := string(s.displayRunes()), "before "+placeholder+" after"; got != want {
+		t.Fatalf("display = %q, want %q", got, want)
+	}
+
+	pasteEnd := s.cursor
+	s.left()
+	pasteStart := s.cursor
+	if pasteStart >= pasteEnd {
+		t.Fatalf("left did not jump over collapsed paste: start=%d end=%d", pasteStart, pasteEnd)
+	}
+	s.right()
+	if s.cursor != pasteEnd {
+		t.Fatalf("right cursor = %d, want paste end %d", s.cursor, pasteEnd)
+	}
+	s.backspace()
+	if got, want := string(s.buf), "before  after"; got != want {
+		t.Fatalf("backspace buffer = %q, want atomic paste deletion %q", got, want)
+	}
+	if len(s.pasteSummaries) != 0 {
+		t.Fatalf("paste summaries remain after atomic deletion: %+v", s.pasteSummaries)
+	}
+}
+
+func TestPromptLineEditorTracksMultipleCollapsedPastes(t *testing.T) {
+	first := "one\ntwo"
+	second := "three\nfour"
+	inputText := "a" + first + "b" + second + "c"
+	keys := "a" + bracketedPasteStart + first + bracketedPasteEnd + "b" + bracketedPasteStart + second + bracketedPasteEnd + "c\r"
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader(keys), &out)
+
+	input, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok || input.text != inputText {
+		t.Fatalf("input = %+v, ok=%v, want %q", input, ok, inputText)
+	}
+	display := "a" + fmt.Sprintf(pasteSummaryPlaceholder, len(first)) + "b" + fmt.Sprintf(pasteSummaryPlaceholder, len(second)) + "c"
+	if !strings.Contains(out.String(), display) {
+		t.Fatalf("final prompt display missing multiple collapsed pastes %q, got:\n%q", display, out.String())
+	}
+}
+
+func TestViCollapsedPasteMovementAndDeletionAreAtomic(t *testing.T) {
+	s := lineEditState{buf: []rune("ab"), cursor: 1}
+	pasted := "one\ntwo"
+	s.insertPastedText(pasted)
+	span := s.pasteSummaries[0]
+
+	v := viLineState{mode: viModeInsert}
+	v.enterNormal(&s)
+	if s.cursor != span.start {
+		t.Fatalf("normal-mode cursor = %d, want collapsed paste start %d", s.cursor, span.start)
+	}
+	s.viRight()
+	if s.cursor != span.end {
+		t.Fatalf("vi right cursor = %d, want suffix at paste end %d", s.cursor, span.end)
+	}
+	s.viLeft()
+	if s.cursor != span.start {
+		t.Fatalf("vi left cursor = %d, want collapsed paste start %d", s.cursor, span.start)
+	}
+
+	editor := newPromptLineEditor(strings.NewReader(""), &bytes.Buffer{})
+	editor.viDeleteChars(&s, 1)
+	if got, want := string(s.buf), "ab"; got != want {
+		t.Fatalf("vi delete buffer = %q, want atomic paste deletion %q", got, want)
+	}
+}
+
 // Ctrl-G on a pasted buffer opens the external editor with the FULL pasted
 // content; on submit from the editor it is treated as edited/typed.
 func TestPromptLineEditorCtrlGOnPastedBufferOpensEditorWithFullContent(t *testing.T) {

@@ -40,9 +40,9 @@ const bareEscapeSequenceTimeout = 50 * time.Millisecond
 // arriving within pasteEnterGap of the previous one enters "paste mode"; paste
 // mode exits after a gap longer than pasteExitGap. Staying in paste mode too long
 // is the safe failure direction (an extra inserted newline, never a premature
-// submit). A paste filling an empty prompt that exceeds pasteSummaryBytes or is
-// multi-line renders a one-line placeholder instead of the full content inline
-// (avoids scroll lag and prompt corruption on pastes with embedded newlines).
+// submit). A pasted range that exceeds pasteSummaryBytes or is multi-line
+// renders as a one-line placeholder wherever it appears in surrounding prompt
+// text (avoids scroll lag and prompt corruption on embedded newlines).
 const (
 	pasteEnterGap           = 10 * time.Millisecond
 	pasteExitGap            = 150 * time.Millisecond
@@ -104,6 +104,8 @@ type promptLineEditor struct {
 	pasteMode       bool
 	lastKeyTime     time.Time
 	prevBufferEmpty bool // whether the buffer was empty before the current keystroke
+	prevCursor      int  // cursor before the previous keystroke, used to locate a fallback paste
+	pasteStart      int  // buffer-rune offset where the active fallback paste began
 	pasteCRPending  bool // paste-mode CR inserted LF; suppress a following LF in CRLF input
 	purePaste       bool // an unedited paste fills the buffer; submitted literally
 
@@ -173,12 +175,14 @@ func (e *promptLineEditor) updatePasteTiming(s *lineEditState) {
 	}
 	now := e.now()
 	emptyBefore := len(s.buf) == 0
+	cursorBefore := s.cursor
 	if !e.lastKeyTime.IsZero() {
 		gap := now.Sub(e.lastKeyTime)
 		if gap <= pasteEnterGap {
 			if !e.pasteMode {
 				e.pasteMode = true
 				e.purePaste = e.prevBufferEmpty
+				e.pasteStart = e.prevCursor
 			}
 		} else if e.pasteMode && gap > pasteExitGap {
 			e.pasteMode = false
@@ -187,35 +191,28 @@ func (e *promptLineEditor) updatePasteTiming(s *lineEditState) {
 	}
 	e.lastKeyTime = now
 	e.prevBufferEmpty = emptyBefore
+	e.prevCursor = cursorBefore
 }
 
-// markManualEdit clears the pure-paste literal guarantee and any paste summary:
-// any manual keystroke (insert, delete, or cursor motion) after a paste makes
-// the whole submitted line typed (honoring !/command/$skill). It is a no-op
-// while a paste burst is in progress, so paste bytes never clear the flag.
+// markManualEdit clears only the pure-paste literal guarantee: collapsed paste
+// ranges remain atomic placeholders while surrounding text is edited. It is a
+// no-op while a paste burst is in progress, so paste bytes never clear the flag.
 func (e *promptLineEditor) markManualEdit(s *lineEditState) {
 	if e.pasteMode {
 		return
 	}
 	e.purePaste = false
-	s.summary = ""
 }
 
-// refreshPasteSummary collapses a pure paste that filled an empty prompt to the
-// one-line placeholder once it is large or multi-line. A burst added to existing
-// text (including external-editor prefill) renders normally. Called only while
-// in paste mode.
+// refreshPasteSummary collapses the active non-bracketed fallback paste once it
+// is large or multi-line. Only the detected burst is collapsed, preserving any
+// surrounding prompt or editor-prefill text. Called only while in paste mode.
 func (e *promptLineEditor) refreshPasteSummary(s *lineEditState) {
-	if !e.purePaste {
-		s.summary = ""
+	start, end := e.pasteStart, s.cursor
+	if start < 0 || end < start || end > len(s.buf) {
 		return
 	}
-	text := string(s.buf)
-	if shouldSummarizePaste(text) {
-		s.summary = fmt.Sprintf(pasteSummaryPlaceholder, len(text))
-	} else {
-		s.summary = ""
-	}
+	s.setPasteSummaryRange(start, end, string(s.buf[start:end]))
 }
 
 func (e *promptLineEditor) setEditMode(mode string) {
@@ -339,6 +336,8 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 	e.purePaste = false
 	e.lastKeyTime = time.Time{}
 	e.prevBufferEmpty = len(state.buf) == 0
+	e.prevCursor = state.cursor
+	e.pasteStart = state.cursor
 	history := e.historyState()
 	vi := viLineState{mode: viModeInsert}
 	e.refreshViPrompt(&vi, &state)
@@ -625,10 +624,13 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 				h.next(s)
 			}
 		case lineEditPaste:
-			if len(s.buf) == 0 && !duringTurn {
-				s.setPasteSummary(text)
-				e.purePaste = true
-				e.tracef("bracketed paste fills empty prompt len=%d summary=%q", len(text), s.summary)
+			if !duringTurn {
+				wasEmpty := len(s.buf) == 0
+				s.insertPastedText(text)
+				if wasEmpty {
+					e.purePaste = true
+				}
+				e.tracef("bracketed paste inserts len=%d summaries=%d", len(text), len(s.pasteSummaries))
 				break
 			}
 			s.insertString(text)
@@ -674,7 +676,7 @@ func (e *promptLineEditor) submitDuringTurn(s *lineEditState) viEditResult {
 	e.addHistory(text)
 	s.buf = nil
 	s.cursor = 0
-	s.summary = ""
+	s.clearPasteSummaries()
 	e.purePaste = false
 	return viEditResult{input: replInput{text: text, pasted: pasted, interactive: true}, ok: true, done: true, redraw: true}
 }
@@ -1672,12 +1674,10 @@ type lineEditState struct {
 	prompt string
 	buf    []rune
 	cursor int
-	// summary, when non-empty, is a one-line placeholder shown in place of buf
-	// (e.g. "[N bytes of pasted content]" for a large paste into an empty prompt).
-	// The real content stays in buf and is submitted on Enter; the placeholder
-	// avoids scroll lag from rendering a huge paste inline. The first manual
-	// keystroke clears it so typing reveals the full content.
-	summary string
+	// pasteSummaries replace pasted rune ranges for display while buf retains the
+	// full text submitted to the model or external editor. Ranges stay sorted and
+	// non-overlapping and behave as atomic placeholders in the inline editor.
+	pasteSummaries []pasteSummary
 
 	drawn     bool
 	rows      int
@@ -1687,22 +1687,41 @@ type lineEditState struct {
 	endCol    int
 }
 
-// displayRunes returns the runes the editor should render: the summary placeholder
-// when set, otherwise the real buffer. buf always holds the real content.
-func (s *lineEditState) displayRunes() []rune {
-	if s.summary != "" {
-		return []rune(s.summary)
-	}
-	return s.buf
+type pasteSummary struct {
+	start int
+	end   int
+	label []rune
 }
 
-// displayCursor returns the cursor position for rendering: at the end of the
-// summary placeholder when set, otherwise the real cursor.
-func (s *lineEditState) displayCursor() int {
-	if s.summary != "" {
-		return len([]rune(s.summary))
+// displayRunes returns the full prompt with summarized paste ranges replaced by
+// their placeholders. buf always holds the original pasted content.
+func (s *lineEditState) displayRunes() []rune {
+	if len(s.pasteSummaries) == 0 {
+		return s.buf
 	}
-	return s.cursor
+	display := make([]rune, 0, len(s.buf))
+	previous := 0
+	for _, summary := range s.pasteSummaries {
+		display = append(display, s.buf[previous:summary.start]...)
+		display = append(display, summary.label...)
+		previous = summary.end
+	}
+	return append(display, s.buf[previous:]...)
+}
+
+// displayCursor maps the full-buffer cursor into the collapsed display.
+func (s *lineEditState) displayCursor() int {
+	offset := 0
+	for _, summary := range s.pasteSummaries {
+		if s.cursor <= summary.start {
+			return s.cursor + offset
+		}
+		if s.cursor < summary.end {
+			return summary.start + offset + len(summary.label)
+		}
+		offset += len(summary.label) - (summary.end - summary.start)
+	}
+	return s.cursor + offset
 }
 
 func (s *lineEditState) promptSnapshot() *lineEditState {
@@ -1722,24 +1741,103 @@ func (s *lineEditState) promptSnapshot() *lineEditState {
 	}
 }
 
-// setPasteSummary replaces the buffer with a paste and, when the paste is large
-// or multi-line, records a one-line placeholder to render instead of the full
-// content. cursor lands at the end of the real content.
+// setPasteSummary replaces the buffer with a paste. It is retained for the
+// empty-prompt vi path; general bracketed pastes use insertPastedText.
 func (s *lineEditState) setPasteSummary(text string) {
 	s.buf = []rune(text)
 	s.cursor = len(s.buf)
-	if shouldSummarizePaste(text) {
-		s.summary = fmt.Sprintf(pasteSummaryPlaceholder, len(text))
-	} else {
-		s.summary = ""
+	s.clearPasteSummaries()
+	s.setPasteSummaryRange(0, len(s.buf), text)
+}
+
+func (s *lineEditState) insertPastedText(text string) {
+	start := s.normalizeInsertPosition(s.cursor)
+	s.cursor = start
+	s.replaceRangeWithCursor(start, start, text, len([]rune(text)))
+	s.setPasteSummaryRange(start, s.cursor, text)
+}
+
+func (s *lineEditState) setPasteSummaryRange(start, end int, text string) {
+	kept := s.pasteSummaries[:0]
+	for _, summary := range s.pasteSummaries {
+		if summary.end <= start || summary.start >= end {
+			kept = append(kept, summary)
+		}
+	}
+	s.pasteSummaries = kept
+	if !shouldSummarizePaste(text) || start == end {
+		return
+	}
+	s.pasteSummaries = append(s.pasteSummaries, pasteSummary{
+		start: start,
+		end:   end,
+		label: []rune(fmt.Sprintf(pasteSummaryPlaceholder, len(text))),
+	})
+	sort.Slice(s.pasteSummaries, func(i, j int) bool {
+		return s.pasteSummaries[i].start < s.pasteSummaries[j].start
+	})
+}
+
+func (s *lineEditState) clearPasteSummaries() {
+	s.pasteSummaries = nil
+}
+
+func (s *lineEditState) normalizeInsertPosition(cursor int) int {
+	for _, summary := range s.pasteSummaries {
+		if cursor > summary.start && cursor < summary.end {
+			return summary.end
+		}
+	}
+	return cursor
+}
+
+// expandReplaceRange makes summarized pastes atomic: a replacement that
+// touches any part of a collapsed paste consumes that whole pasted range.
+func (s *lineEditState) expandReplaceRange(start, end int) (int, int) {
+	if start == end {
+		position := s.normalizeInsertPosition(start)
+		return position, position
+	}
+	for {
+		changed := false
+		for _, summary := range s.pasteSummaries {
+			if start < summary.end && end > summary.start {
+				if summary.start < start {
+					start = summary.start
+					changed = true
+				}
+				if summary.end > end {
+					end = summary.end
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			return start, end
+		}
 	}
 }
 
+func (s *lineEditState) adjustPasteSummariesForReplace(start, end, inserted int) {
+	delta := inserted - (end - start)
+	kept := s.pasteSummaries[:0]
+	for _, summary := range s.pasteSummaries {
+		switch {
+		case summary.end <= start:
+			kept = append(kept, summary)
+		case summary.start >= end:
+			summary.start += delta
+			summary.end += delta
+			kept = append(kept, summary)
+			// Overlapping summaries are deliberately removed with their full
+			// underlying range by expandReplaceRange.
+		}
+	}
+	s.pasteSummaries = kept
+}
+
 func (s *lineEditState) insert(r rune) {
-	s.buf = append(s.buf, 0)
-	copy(s.buf[s.cursor+1:], s.buf[s.cursor:])
-	s.buf[s.cursor] = r
-	s.cursor++
+	s.replaceRangeWithCursor(s.cursor, s.cursor, string(r), 1)
 }
 
 func (s *lineEditState) insertString(text string) {
@@ -1762,7 +1860,9 @@ func (s *lineEditState) replaceRangeWithCursor(start, end int, text string, curs
 	if end > len(s.buf) {
 		end = len(s.buf)
 	}
+	start, end = s.expandReplaceRange(start, end)
 	inserted := []rune(text)
+	s.adjustPasteSummariesForReplace(start, end, len(inserted))
 	if cursor < 0 {
 		cursor = 0
 	}
@@ -1775,13 +1875,12 @@ func (s *lineEditState) replaceRangeWithCursor(start, end int, text string, curs
 	next = append(next, s.buf[end:]...)
 	s.buf = next
 	s.cursor = start + cursor
-	s.summary = "" // a content replacement reveals the real buffer
 }
 
 func (s *lineEditState) setText(text string) {
 	s.buf = []rune(text)
 	s.cursor = len(s.buf)
-	s.summary = "" // a content replacement reveals the real buffer
+	s.clearPasteSummaries()
 }
 
 func (s *lineEditState) home() {
@@ -1793,12 +1892,24 @@ func (s *lineEditState) end() {
 }
 
 func (s *lineEditState) left() {
+	for _, summary := range s.pasteSummaries {
+		if s.cursor > summary.start && s.cursor <= summary.end {
+			s.cursor = summary.start
+			return
+		}
+	}
 	if s.cursor > 0 {
 		s.cursor--
 	}
 }
 
 func (s *lineEditState) right() {
+	for _, summary := range s.pasteSummaries {
+		if s.cursor >= summary.start && s.cursor < summary.end {
+			s.cursor = summary.end
+			return
+		}
+	}
 	if s.cursor < len(s.buf) {
 		s.cursor++
 	}
@@ -1822,6 +1933,7 @@ func (s *lineEditState) moveLogicalLineUp() bool {
 		col = prevLen
 	}
 	s.cursor = prevStart + col
+	s.cursor = s.normalizeInsertPosition(s.cursor)
 	return true
 }
 
@@ -1843,6 +1955,7 @@ func (s *lineEditState) moveLogicalLineDown() bool {
 		col = nextLen
 	}
 	s.cursor = nextStart + col
+	s.cursor = s.normalizeInsertPosition(s.cursor)
 	return true
 }
 
@@ -1882,17 +1995,26 @@ func (s *lineEditState) backspace() {
 	if s.cursor == 0 {
 		return
 	}
-	copy(s.buf[s.cursor-1:], s.buf[s.cursor:])
-	s.buf = s.buf[:len(s.buf)-1]
-	s.cursor--
+	for _, summary := range s.pasteSummaries {
+		if s.cursor > summary.start && s.cursor <= summary.end {
+			s.replaceRangeWithCursor(summary.start, summary.end, "", 0)
+			return
+		}
+	}
+	s.replaceRangeWithCursor(s.cursor-1, s.cursor, "", 0)
 }
 
 func (s *lineEditState) delete() {
 	if s.cursor >= len(s.buf) {
 		return
 	}
-	copy(s.buf[s.cursor:], s.buf[s.cursor+1:])
-	s.buf = s.buf[:len(s.buf)-1]
+	for _, summary := range s.pasteSummaries {
+		if s.cursor >= summary.start && s.cursor < summary.end {
+			s.replaceRangeWithCursor(summary.start, summary.end, "", 0)
+			return
+		}
+	}
+	s.replaceRangeWithCursor(s.cursor, s.cursor+1, "", 0)
 }
 
 func (s *lineEditState) redraw(w io.Writer, cols int) error {

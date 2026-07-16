@@ -252,6 +252,22 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 			e.viEnterInsert(v, s)
 			return viEditResult{redraw: true}, nil
 		}
+		if !duringTurn {
+			idx := s.cursor
+			if len(s.buf) > 0 {
+				idx++
+			}
+			s.cursor = idx
+			s.insertPastedText(text)
+			for _, summary := range s.pasteSummaries {
+				if idx >= summary.start && idx < summary.end {
+					s.cursor = summary.start
+					break
+				}
+			}
+			s.viClampNormalCursor()
+			return viEditResult{redraw: true}, nil
+		}
 		e.viPasteText(s, []rune(text), false)
 		return viEditResult{redraw: true}, nil
 	default:
@@ -502,6 +518,7 @@ func (e *promptLineEditor) viApplyRange(s *lineEditState, op viOperator, start, 
 		start, end = end, start
 	}
 	start, end = viClampRange(start, end, len(s.buf))
+	start, end = s.expandReplaceRange(start, end)
 	if start == end && op != viOpChange {
 		return
 	}
@@ -554,10 +571,14 @@ func (e *promptLineEditor) viReplaceChars(s *lineEditState, count int, r rune) {
 	if end > len(s.buf) {
 		end = len(s.buf)
 	}
-	for i := s.cursor; i < end; i++ {
-		s.buf[i] = r
+	replacement := make([]rune, end-s.cursor)
+	for i := range replacement {
+		replacement[i] = r
 	}
-	s.cursor = end - 1
+	s.replaceRangeWithCursor(s.cursor, end, string(replacement), len(replacement))
+	if s.cursor > 0 {
+		s.cursor--
+	}
 	s.viClampNormalCursor()
 }
 
@@ -661,6 +682,18 @@ func viForwardOperatorEnd(buf []rune, cursor int, op viOperator, count int, big 
 }
 
 func (s *lineEditState) viLeft() {
+	for _, summary := range s.pasteSummaries {
+		if s.cursor > summary.start && s.cursor <= summary.end {
+			s.cursor = summary.start
+			return
+		}
+		if s.cursor == summary.start {
+			if s.cursor > 0 {
+				s.cursor--
+			}
+			return
+		}
+	}
 	if s.cursor > 0 {
 		s.cursor--
 	}
@@ -670,6 +703,16 @@ func (s *lineEditState) viRight() {
 	if len(s.buf) == 0 {
 		s.cursor = 0
 		return
+	}
+	for _, summary := range s.pasteSummaries {
+		if s.cursor >= summary.start && s.cursor < summary.end {
+			if summary.end < len(s.buf) {
+				s.cursor = summary.end
+			} else {
+				s.cursor = summary.start
+			}
+			return
+		}
 	}
 	if s.cursor < len(s.buf)-1 {
 		s.cursor++
@@ -682,6 +725,7 @@ func (s *lineEditState) viEnd() {
 		return
 	}
 	s.cursor = len(s.buf) - 1
+	s.viClampNormalCursor()
 }
 
 func (s *lineEditState) viClampNormalCursor() {
@@ -693,19 +737,22 @@ func (s *lineEditState) viClampNormalCursor() {
 	case s.cursor >= len(s.buf):
 		s.cursor = len(s.buf) - 1
 	}
+	for _, summary := range s.pasteSummaries {
+		if s.cursor >= summary.start && s.cursor < summary.end {
+			s.cursor = summary.start
+			return
+		}
+	}
 }
 
 func (s *lineEditState) viDeleteRange(start, end int) []rune {
 	start, end = viClampRange(start, end, len(s.buf))
+	start, end = s.expandReplaceRange(start, end)
 	if start >= end {
 		return nil
 	}
 	deleted := append([]rune(nil), s.buf[start:end]...)
-	copy(s.buf[start:], s.buf[end:])
-	s.buf = s.buf[:len(s.buf)-(end-start)]
-	if s.cursor > len(s.buf) {
-		s.cursor = len(s.buf)
-	}
+	s.replaceRangeWithCursor(start, end, "", 0)
 	return deleted
 }
 
@@ -719,9 +766,7 @@ func (s *lineEditState) viInsertRunesAt(index int, text []rune) {
 	if index > len(s.buf) {
 		index = len(s.buf)
 	}
-	s.buf = append(s.buf, make([]rune, len(text))...)
-	copy(s.buf[index+len(text):], s.buf[index:])
-	copy(s.buf[index:], text)
+	s.replaceRangeWithCursor(index, index, string(text), 0)
 }
 
 func viClampRange(start, end, length int) (int, int) {

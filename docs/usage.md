@@ -359,8 +359,11 @@ literal `$`.
 In terminals that support bracketed paste, pasted text fills the prompt for
 review and is submitted as one literal prompt when you press Enter, preserving
 embedded newlines. A large or multi-line paste shows a one-line
-`[N bytes of pasted content]` placeholder instead of the full content; press
-Ctrl-G / `/edit` to open the external editor with the full pasted content. A
+`[N bytes of pasted content]` placeholder instead of the full content wherever
+the paste occurs in the prompt. The placeholder remains collapsed while you edit
+surrounding text and acts as one unit for cursor movement and deletion. Press
+Ctrl-G / `/edit` to open the external editor with the full expanded content;
+text returned from the editor remains expanded in the prompt. A
 paste that fills an empty prompt is submitted literally — pasted `/commands`
 are not executed, `!command` is not a shell escape, and `$skill` is not
 resolved. This holds on the Enter path in every edit mode, including the vi

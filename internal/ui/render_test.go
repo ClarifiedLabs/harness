@@ -855,6 +855,28 @@ func TestLiveCounterResumesAfterCompleteAssistantLine(t *testing.T) {
 	}
 }
 
+func TestLiveCounterDoesNotFlushMarkdownTokenDeltasAsLines(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 7, 16, 14, 0, 0, 0, time.Local)
+	r := NewRenderer(&out, &errw, RenderOptions{
+		LiveStatus: true,
+		Markdown:   true,
+		Now:        func() time.Time { return now },
+	})
+
+	r.StartPrompt()
+	r.StartTurn()
+	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	for _, delta := range []string{"I", "’ll", " trace", " the", " error", ".\n"} {
+		r.TextDelta(delta)
+	}
+	defer r.StopProgress()
+
+	if got, want := out.String(), "I’ll trace the error.\n"; got != want {
+		t.Fatalf("streamed Markdown output = %q, want %q", got, want)
+	}
+}
+
 func TestLiveCounterTicksDuringToolGap(t *testing.T) {
 	var out, errw bytes.Buffer
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)

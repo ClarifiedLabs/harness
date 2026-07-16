@@ -1498,7 +1498,7 @@ func (rr *replReader) resetTurnBuffer() {
 	if rr.turnState != nil {
 		rr.turnState.buf = nil
 		rr.turnState.cursor = 0
-		rr.turnState.summary = ""
+		rr.turnState.clearPasteSummaries()
 	}
 	rr.emitTurnInput()
 }
