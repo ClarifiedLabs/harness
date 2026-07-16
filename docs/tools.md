@@ -31,7 +31,11 @@ catalog, so an agent can opt back in by naming `apply_patch` in its
 
 `read_file` reads one file via `path` (with `offset`/`limit`), or several at once
 via `paths[]` — each file is rendered under a `==> path <==` header with its own
-per-file line budget. When a single read is cut off at the line limit it ends with
+per-file line budget. For cross-harness compatibility `path` also silently accepts
+the aliases `file`, `file_path`, `filePath`, `filename`, `filepath`,
+`absolute_path`, and `target_file` (and `paths` accepts `files`); these are
+intentionally not listed in the tool schema, and the canonical name wins if both
+are supplied. When a single read is cut off at the line limit it ends with
 `[file truncated at line N; continue with offset=N+1]`. `glob` walks recursively
 from an optional `root`, where `**` matches across directory segments (and `*`/`?`/
 `[…]` match within one segment), returning matching paths with type and size sorted

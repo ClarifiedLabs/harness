@@ -58,9 +58,32 @@ func (r readFile) Run(ctx context.Context, input json.RawMessage) (string, error
 		Paths  []string `json:"paths"`
 		Offset int      `json:"offset"`
 		Limit  int      `json:"limit"`
+
+		// Accepted aliases for path/paths, resolved silently. Different harnesses
+		// name this parameter differently — Claude Code and Gemini CLI use
+		// file_path, opencode uses filePath, Cursor uses target_file, older Gemini
+		// used absolute_path — and models trained on them sometimes emit the other
+		// spelling here. Normalizing the common ones avoids a wasted "path is
+		// required" round trip. These are deliberately kept out of the JSON schema
+		// so the model-facing surface stays minimal; we just accept them if sent.
+		// The canonical path/paths win when both are set.
+		FilePath      string   `json:"file_path"`
+		FilePathCamel string   `json:"filePath"`
+		File          string   `json:"file"`
+		Filename      string   `json:"filename"`
+		FilepathAlt   string   `json:"filepath"`
+		AbsolutePath  string   `json:"absolute_path"`
+		TargetFile    string   `json:"target_file"`
+		Files         []string `json:"files"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", err
+	}
+	if args.Path == "" {
+		args.Path = firstNonEmpty(args.FilePath, args.FilePathCamel, args.File, args.Filename, args.FilepathAlt, args.AbsolutePath, args.TargetFile)
+	}
+	if len(args.Paths) == 0 {
+		args.Paths = args.Files
 	}
 	if args.Offset < 0 {
 		return "", badArgs("offset must be >= 1")
@@ -132,6 +155,18 @@ func perPathLineBudget(explicitLimit, numPaths, defaultLimit int) int {
 		return defaultLimit
 	}
 	return max(defaultLimit/numPaths, multiReadMinPerPathLimit)
+}
+
+// firstNonEmpty returns the first argument whose value is non-empty after
+// trimming surrounding whitespace, or "" if none qualify. It resolves
+// read_file's path aliases in a fixed precedence order.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // readOneFile reads the [offset, offset+limit) window of a single file and

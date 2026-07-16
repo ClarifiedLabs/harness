@@ -408,3 +408,95 @@ func TestReadFileUnknownArgsTolerated(t *testing.T) {
 		t.Errorf("got %q", out)
 	}
 }
+
+// Models trained on other harnesses sometimes name the path parameter
+// differently (Claude Code/Gemini file_path, opencode filePath, Cursor
+// target_file, etc.). Each accepted alias must resolve to a single-file read so
+// the call succeeds instead of erroring with "path or paths is required".
+func TestReadFilePathAliases(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(p, []byte("alpha\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	aliases := []string{"file", "file_path", "filePath", "filename", "filepath", "absolute_path", "target_file"}
+	for _, key := range aliases {
+		t.Run(key, func(t *testing.T) {
+			out, err := runReadFile(t, map[string]any{key: p})
+			if err != nil {
+				t.Fatalf("alias %q should read the file: %v", key, err)
+			}
+			if out != "1\talpha" {
+				t.Errorf("alias %q got %q", key, out)
+			}
+		})
+	}
+}
+
+// The canonical `path` must win when both it and an alias are supplied, so a
+// model that sends both does not read the wrong file.
+func TestReadFileCanonicalPathBeatsAlias(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.txt")
+	if err := os.WriteFile(real, []byte("real\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runReadFile(t, map[string]any{"path": real, "file": filepath.Join(dir, "nope.txt")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "1\treal" {
+		t.Errorf("path should win over alias, got %q", out)
+	}
+}
+
+// When only aliases are present they resolve in a fixed precedence order
+// (file_path before file), so a mix of names is deterministic.
+func TestReadFileAliasPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	want := filepath.Join(dir, "want.txt")
+	if err := os.WriteFile(want, []byte("want\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runReadFile(t, map[string]any{"file_path": want, "target_file": filepath.Join(dir, "nope.txt")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "1\twant" {
+		t.Errorf("file_path should win over target_file, got %q", out)
+	}
+}
+
+// `files` is accepted as an alias for the multi-file `paths` array.
+func TestReadFileFilesAliasForPaths(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.txt")
+	b := filepath.Join(dir, "b.txt")
+	if err := os.WriteFile(a, []byte("aaa\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b, []byte("bbb\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runReadFile(t, map[string]any{"files": []string{a, b}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "==> "+a+" <==") || !strings.Contains(out, "==> "+b+" <==") {
+		t.Errorf("files alias should render multi-file headers, got %q", out)
+	}
+	if !strings.Contains(out, "1\taaa") || !strings.Contains(out, "1\tbbb") {
+		t.Errorf("files alias should read both files, got %q", out)
+	}
+}
+
+// With neither path/paths nor any alias, the required-arg error still fires.
+func TestReadFileNoPathOrPathsError(t *testing.T) {
+	_, err := runReadFile(t, map[string]any{"limit": 10})
+	if err == nil {
+		t.Fatal("expected error when no path/paths/alias is given")
+	}
+	if !strings.Contains(err.Error(), "path or paths is required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}

@@ -1211,6 +1211,15 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `offset` | int | 1-based starting line (single-file mode only) |
 | `limit` | int | max lines, default 500 or `read_file_default_limit` |
 
+- **Parameter aliases (accepted silently; intentionally *not* in the schema):**
+  `path` also accepts `file`, `file_path`, `filePath`, `filename`, `filepath`,
+  `absolute_path`, and `target_file`; `paths` also accepts `files`. These match the
+  names other harnesses give the parameter (Claude Code and Gemini CLI use
+  `file_path`, opencode `filePath`, Cursor `target_file`), so a model that emits the
+  other spelling still succeeds on the first call instead of wasting a round trip.
+  They are left out of the advertised schema to keep the model-facing surface
+  minimal and avoid nudging models off `path`; the canonical `path`/`paths` win
+  when both a canonical name and an alias are set.
 - Output is line-numbered (`cat -n` style: right-aligned number, tab, line). Line
   numbers make `edit` targeting and grep cross-referencing far more reliable.
 - **Truncation notice:** when a single-file read is cut off at its line window the
