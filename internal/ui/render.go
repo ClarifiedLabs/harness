@@ -210,11 +210,13 @@ func (r *Renderer) TextDelta(text string) {
 		io.WriteString(r.out, r.assistantMarkdown.Write(text))
 		r.assistantLineOpen = r.assistantMarkdown.LineOpen()
 		r.markAssistantTextVisible()
+		r.resumeLiveModelWaitAfterAssistantText()
 		return
 	}
 	io.WriteString(r.out, text)
 	r.assistantLineOpen = !strings.HasSuffix(text, "\n")
 	r.markAssistantTextVisible()
+	r.resumeLiveModelWaitAfterAssistantText()
 }
 
 func (r *Renderer) AssistantPhase(phase string) {
@@ -311,6 +313,19 @@ func (r *Renderer) ToolUseStart(call llm.ToolCall) {
 }
 
 func (r *Renderer) ToolUseDelta(_ int, _ string) {}
+
+func (r *Renderer) resumeLiveModelWaitAfterAssistantText() {
+	if !r.liveStatus || r.assistantLineOpen {
+		return
+	}
+	r.statusMu.Lock()
+	label := r.statusLabel
+	ctxPct := r.statusCtxPct
+	r.statusMu.Unlock()
+	if label != "" {
+		r.beginWait(label, ctxPct)
+	}
+}
 
 // ToolStart stashes the call so ToolResult can render name+args+summary on one
 // line once the result is known.
@@ -553,6 +568,8 @@ func (r *Renderer) StopProgress() {
 	r.statusActive = false
 	r.statusInput = ""
 	r.statusInputCursor = 0
+	r.statusLabel = ""
+	r.statusCtxPct = 0
 	r.promptStart = time.Time{}
 	t, stop, done := r.ticker, r.tickerStop, r.tickerDone
 	r.ticker, r.tickerStop, r.tickerDone = nil, nil, nil

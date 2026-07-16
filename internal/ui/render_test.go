@@ -814,7 +814,7 @@ func TestLiveCounterShowsTotalElapsedSincePromptSubmission(t *testing.T) {
 	}
 }
 
-func TestLiveCounterErasedWhenOutputAppears(t *testing.T) {
+func TestLiveCounterErasedWhenPartialLineOutputAppears(t *testing.T) {
 	var out, errw bytes.Buffer
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
 	r := liveRenderer(&out, &errw, func() time.Time { return now })
@@ -828,7 +828,30 @@ func TestLiveCounterErasedWhenOutputAppears(t *testing.T) {
 		t.Fatalf("assistant text should stream to stdout, got %q", got)
 	}
 	if got := errw.String(); got != "\r\x1b[2K" {
-		t.Fatalf("first output should erase the counter, got %q", got)
+		t.Fatalf("partial-line output should erase the counter without restarting it, got %q", got)
+	}
+}
+
+func TestLiveCounterResumesAfterCompleteAssistantLine(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
+	r := liveRenderer(&out, &errw, func() time.Time { return now })
+
+	r.StartPrompt()
+	r.StartTurn()
+	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	errw.Reset()
+	r.TextDelta("Working.\n")
+	now = now.Add(4 * time.Second)
+	r.tick()
+	defer r.StopProgress()
+
+	if got := out.String(); got != "Working.\n" {
+		t.Fatalf("assistant text should stream unchanged, got %q", got)
+	}
+	got := errw.String()
+	if !strings.Contains(got, "[model: turn 1 · 4s │ total 4s]") {
+		t.Fatalf("counter should resume while the model continues after a full line, got %q", got)
 	}
 }
 
