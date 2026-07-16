@@ -215,8 +215,8 @@ func TestREPLSeparatesSubmittedPromptFromModelResponse(t *testing.T) {
 		usePromptEditor bool
 		want            string
 	}{
-		{name: "plain reader", input: "hi\n/exit\n", want: "[auto] > \nanswer"},
-		{name: "prompt editor", input: "hi\r/exit\r", usePromptEditor: true, want: "\n\nanswer"},
+		{name: "plain reader", input: "hi\n/exit\n", want: "[auto] > \n---\n\nanswer"},
+		{name: "prompt editor", input: "hi\r/exit\r", usePromptEditor: true, want: "\n---\n\nanswer"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

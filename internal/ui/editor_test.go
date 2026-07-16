@@ -162,7 +162,7 @@ func TestREPLCtrlGDisplaysEditedPromptBeforeModelStatus(t *testing.T) {
 	if strings.Contains(got, "\a") || strings.Contains(got, "^G") {
 		t.Fatalf("Ctrl-G should not be replayed to the REPL view, errw=%q", got)
 	}
-	want := "> from editor\nsecond line\n\n[model: turn 1 waiting]"
+	want := "> from editor\nsecond line\n\n---\n\n[model: turn 1 waiting]"
 	if !strings.Contains(got, want) {
 		t.Fatalf("edited prompt should be replayed before model status; missing %q in %q", want, got)
 	}
