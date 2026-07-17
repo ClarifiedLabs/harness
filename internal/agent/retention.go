@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"harness/internal/llm"
+	"harness/internal/toolresult"
 )
 
 // retentionImageKeepTurns is how many recent turns keep their images verbatim;
@@ -17,11 +18,6 @@ const retentionImageKeepTurns = 2
 // retentionTrimMarker is the idempotency sentinel left in a tool result the
 // retention pass has already shrunk, so repeated passes never re-trim it.
 const retentionTrimMarker = "[older tool output trimmed"
-
-// archivedHintMarker is the stable substring archivedToolResultHint embeds; a
-// result already carrying it (archived at source or by a prior pass) is left
-// alone.
-const archivedHintMarker = "full output archived at"
 
 // applyRetention shrinks the live transcript in place before a model request so
 // large stale tool outputs and aged images are not re-sent verbatim every turn
@@ -87,7 +83,7 @@ func (a *Agent) trimToolResultBlock(b *llm.ContentBlock, sink EventSink) bool {
 	hint := genericRetentionHint(len(head), len(full))
 	if archiver, ok := sink.(ToolResultArchiver); ok {
 		if archive, err := archiver.ArchiveToolResult(llm.ToolResult{ForID: b.ResultForID, Text: full}); err == nil && archive.ModelPath != "" {
-			hint = archivedToolResultHint(archive.ModelPath)
+			hint = toolresult.ArchivedHint(archive.ModelPath)
 		}
 	}
 	b.ResultText = head + "\n" + hint
@@ -98,7 +94,7 @@ func (a *Agent) trimToolResultBlock(b *llm.ContentBlock, sink EventSink) bool {
 // the retention pass or carries an archive reference, making it ineligible for
 // further trimming.
 func retentionTrimmed(text string) bool {
-	return strings.Contains(text, retentionTrimMarker) || strings.Contains(text, archivedHintMarker)
+	return strings.Contains(text, retentionTrimMarker) || strings.Contains(text, toolresult.ArchivedHintMarker)
 }
 
 func genericRetentionHint(shown, total int) string {

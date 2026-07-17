@@ -111,8 +111,8 @@ type Options struct {
 	// It backstops tools that ignore ctx (e.g. a hung MCP/web_fetch/lsp call) so
 	// one stuck call cannot stall a turn forever. A tool that enforces its own
 	// longer deadline (see SelfTimeouter) is never cut below it.
-	DispatchTimeout                  time.Duration
-	RunCommandTimeoutSeconds         int // 0 = tool default (120)
+	DispatchTimeout                    time.Duration
+	RunCommandTimeoutSeconds           int // 0 = tool default (120)
 	RunCommandBackgroundTimeoutSeconds int // 0 = tool default (1200)
 }
 
@@ -283,9 +283,9 @@ func RegisterExecTools(r *Registry) {
 
 func registerExecTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 	r.Register(runCommand{
-		background:         opts.Background,
-		foregroundTimeout:  opts.RunCommandTimeoutSeconds,
-		backgroundTimeout:  opts.RunCommandBackgroundTimeoutSeconds,
+		background:        opts.Background,
+		foregroundTimeout: opts.RunCommandTimeoutSeconds,
+		backgroundTimeout: opts.RunCommandBackgroundTimeoutSeconds,
 	})
 	if git, ok := newGitTool(); ok {
 		r.Register(git)
@@ -647,8 +647,18 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		return res
 	}
 
+	prepared := r.PrepareResult(call.Name, call.ID, out)
+	prepared.Usage = usage
+	return prepared
+}
+
+// PrepareResult applies the registry's configured limits and records the full
+// output metadata needed for archival. Background jobs use the same method so
+// their truncation behavior cannot drift from ordinary dispatched tools.
+func (r *Registry) PrepareResult(toolName, resultID, out string) llm.ToolResult {
+	res := llm.ToolResult{ForID: resultID}
 	var info truncationInfo
-	res.Text, info = truncate(out, r.resultLimitsFor(call.Name))
+	res.Text, info = truncate(out, r.resultLimitsFor(toolName))
 	if info.truncated {
 		res.Truncated = true
 		res.OriginalText = out

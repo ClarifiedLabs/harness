@@ -1115,8 +1115,11 @@ adds a teaching marker:
 Individual tools may also apply their own natural limits, but the central cap is the
 backstop for every result. Truncated results carry metadata so the UI can warn and write
 the full output to the session's `artifacts/tool-results/` directory. When an artifact
-is written, the model-visible tool result includes the absolute artifact path and
-advises using `read_file` with `offset`/`limit` or `rg` for targeted inspection.
+is written, the model-visible result includes the absolute artifact path and advises
+using `read_file` with `offset`/`limit` or `rg` for targeted inspection. Foreground tool
+results and completed background-job context share the registry's result preparation
+and the same archive-hint formatter, including per-tool limits, so this recovery
+behavior stays consistent between execution modes.
 
 ### 8.4 Interrupts
 
@@ -1665,7 +1668,10 @@ and token-accounting behavior as synchronous delegate.
   exit and cleared on `/clear`.
 - Completed job summaries are delivered once as request-only context to the parent
   agent, including the transcript path when one exists. They are not inserted into
-  the parent transcript.
+  the parent transcript. Output uses the same per-tool truncation limits as foreground
+  dispatch; when truncated, the full result is archived under
+  `artifacts/tool-results/` and the request context includes the same absolute path and
+  targeted `read_file`/`rg` guidance as a foreground result.
 - Background jobs run in the same cwd/tool policy as ordinary tools. Harness
   serializes session/job metadata, not concurrent filesystem edits.
 

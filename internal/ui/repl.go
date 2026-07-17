@@ -3105,15 +3105,15 @@ func (app *App) requestContext(turnContext []string) []string {
 	if ctx := app.todoRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
-	out = append(out, app.backgroundRequestContext()...)
+	out = append(out, app.backgroundRequestContext(nil)...)
 	return out
 }
 
-func (app *App) backgroundRequestContext() []string {
+func (app *App) backgroundRequestContext(archiver agent.ToolResultArchiver) []string {
 	if app.Background == nil {
 		return nil
 	}
-	return app.Background.DrainCompletedContext()
+	return app.Background.DrainCompletedContext(archiver)
 }
 
 func (app *App) pollBackgroundNotices() {
@@ -3705,7 +3705,7 @@ func (s *accumulatingSink) RequestContext() []string {
 	if ctx := s.app.todoRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
-	out = append(out, s.app.backgroundRequestContext()...)
+	out = append(out, s.app.backgroundRequestContext(s)...)
 	return out
 }
 

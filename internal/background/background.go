@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"harness/internal/llm"
+	"harness/internal/toolresult"
 	"harness/internal/tools"
 )
 
@@ -29,13 +31,17 @@ type Options struct {
 	Now             func() time.Time
 }
 
+// ResultPreparer applies the same tool-specific output limits used by ordinary
+// foreground dispatch.
+type ResultPreparer func(toolName, resultID, text string) llm.ToolResult
+
 // Manager owns the process-local background job table.
 type Manager struct {
-	mu              sync.Mutex
-	jobs            map[string]*Job
-	order           []string
-	maxContextBytes int
-	now             func() time.Time
+	mu            sync.Mutex
+	jobs          map[string]*Job
+	order         []string
+	prepareResult ResultPreparer
+	now           func() time.Time
 }
 
 // Job is one background run.
@@ -74,11 +80,27 @@ func NewManager(opts Options) *Manager {
 	if now == nil {
 		now = time.Now
 	}
-	max := opts.MaxContextBytes
-	if max <= 0 {
-		max = 64 * 1024
+	// Keep a standalone fallback for callers that do not wire a catalog. The main
+	// CLI replaces this with its live registry method so per-tool overrides (for
+	// example rg/grep) are shared too.
+	limits := &tools.Registry{}
+	limits.SetResultLimits(opts.MaxContextBytes, 0)
+	return &Manager{
+		jobs:          make(map[string]*Job),
+		prepareResult: limits.PrepareResult,
+		now:           now,
 	}
-	return &Manager{jobs: make(map[string]*Job), maxContextBytes: max, now: now}
+}
+
+// SetResultPreparer connects the manager to the live tool registry after that
+// registry has been constructed with this manager as its background starter.
+func (m *Manager) SetResultPreparer(prepare ResultPreparer) {
+	if m == nil || prepare == nil {
+		return
+	}
+	m.mu.Lock()
+	m.prepareResult = prepare
+	m.mu.Unlock()
 }
 
 func (m *Manager) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.BackgroundJobInfo, error) {
@@ -209,17 +231,23 @@ func (m *Manager) Clear() {
 	m.order = nil
 }
 
-func (m *Manager) DrainCompletedContext() []string {
+func (m *Manager) DrainCompletedContext(archiver toolresult.Archiver) []string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	var out []string
+	var completed []Job
 	for _, id := range m.order {
 		job := m.jobs[id]
 		if job == nil || job.contextDelivered || job.Status == StatusRunning {
 			continue
 		}
 		job.contextDelivered = true
-		out = append(out, m.contextFor(job))
+		completed = append(completed, *job)
+	}
+	prepare := m.prepareResult
+	m.mu.Unlock()
+
+	out := make([]string, 0, len(completed))
+	for i := range completed {
+		out = append(out, contextFor(&completed[i], prepare, archiver))
 	}
 	return out
 }
@@ -239,7 +267,7 @@ func (m *Manager) DrainNotices() []string {
 	return out
 }
 
-func (m *Manager) contextFor(job *Job) string {
+func contextFor(job *Job, prepare ResultPreparer, archiver toolresult.Archiver) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[background job %s %s]\n", job.ID, job.Status)
 	if job.Kind != "" {
@@ -255,9 +283,11 @@ func (m *Manager) contextFor(job *Job) string {
 		fmt.Fprintf(&b, "error: %s\n", job.Error)
 	}
 	if strings.TrimSpace(job.Result.Text) != "" {
-		fmt.Fprintf(&b, "result:\n%s", strings.TrimSpace(job.Result.Text))
+		result := prepare(job.Kind, job.ID, job.Result.Text)
+		result, _ = toolresult.PrepareTruncated(result, archiver)
+		fmt.Fprintf(&b, "result:\n%s", strings.TrimSpace(result.Text))
 	}
-	return clip(b.String(), m.maxContextBytes)
+	return b.String()
 }
 
 func noticeFor(job *Job) string {
@@ -292,13 +322,6 @@ func snapshotJob(job *Job) Snapshot {
 
 func backgroundID(t time.Time) string {
 	return fmt.Sprintf("bg_%s_%06d", t.UTC().Format("20060102T150405Z"), jobSeq.Add(1))
-}
-
-func clip(s string, max int) string {
-	if max <= 0 || len(s) <= max {
-		return s
-	}
-	return s[:max] + fmt.Sprintf("\n[background context truncated: showing first %s]", tools.HumanBytes(max))
 }
 
 // JobsTool lists, inspects, and cancels background jobs.

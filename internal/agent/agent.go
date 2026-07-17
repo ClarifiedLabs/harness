@@ -22,6 +22,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/tokencount"
 	"harness/internal/retry"
+	"harness/internal/toolresult"
 	"harness/internal/tools"
 )
 
@@ -55,18 +56,11 @@ type AssistantPhaseSink interface {
 	AssistantPhase(phase string)
 }
 
-// ToolResultArchive is an optional sink-provided reference to the full raw tool
-// output behind a truncated result.
-type ToolResultArchive struct {
-	DisplayPath string
-	ModelPath   string
-}
-
-// ToolResultArchiver is implemented by sinks that can persist full raw output
-// and return a path the next model turn can read or search.
-type ToolResultArchiver interface {
-	ArchiveToolResult(llm.ToolResult) (ToolResultArchive, error)
-}
+// ToolResultArchive and ToolResultArchiver remain agent-level aliases because
+// event sinks implement the archival boundary. Formatting and model guidance
+// live in toolresult so foreground and background results share them.
+type ToolResultArchive = toolresult.Archive
+type ToolResultArchiver = toolresult.Archiver
 
 // ToolDiffSink is implemented by renderers that want user-facing file diffs
 // after a mutating tool result. Diffs are not transcript/tool-result content.
@@ -1364,30 +1358,8 @@ func invalidToolInputResult(call llm.ToolCall) string {
 }
 
 func (a *Agent) prepareToolResult(r llm.ToolResult, sink EventSink) (llm.ToolResult, string) {
-	if !r.Truncated {
-		return r, ""
-	}
-	msg := fmt.Sprintf("[tool result truncated: showing %s of %s", tools.HumanBytes(r.ShownBytes), tools.HumanBytes(r.OriginalBytes))
-	archiver, ok := sink.(ToolResultArchiver)
-	if !ok {
-		return r, msg + "]"
-	}
-	archive, err := archiver.ArchiveToolResult(r)
-	if err != nil {
-		return r, fmt.Sprintf("[tool result truncated; full output archive failed: %v]", err)
-	}
-	if archive.DisplayPath != "" {
-		msg += "; full output: " + archive.DisplayPath
-	}
-	if archive.ModelPath != "" {
-		r.Text += "\n" + archivedToolResultHint(archive.ModelPath)
-	}
-	return r, msg + "]"
-}
-
-func archivedToolResultHint(path string) string {
-	quoted := strconv.Quote(path)
-	return fmt.Sprintf(`[full output archived at %s; use read_file {"path":%s,"offset":1,"limit":200} or rg {"args":["-n","<pattern>",%s]} to inspect it]`, quoted, quoted, quoted)
+	archiver, _ := sink.(ToolResultArchiver)
+	return toolresult.PrepareTruncated(r, archiver)
 }
 
 func resultBlock(r llm.ToolResult) llm.ContentBlock {

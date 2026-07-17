@@ -511,21 +511,22 @@ func run(env environment) int {
 	// runtime advertises and dispatches only that agent's tools. Built once and
 	// shared with /agent and the /mode alias (write_tmp_file holds a per-run temp dir).
 	toolCatalog, disabledTools := tools.CatalogWithOptions(tools.Options{
-		MaxResultBytes:       cfg.ToolResultMaxBytes,
-		MaxResultLines:       cfg.ToolResultMaxLines,
-		ReadFileDefaultLimit: cfg.ReadFileDefaultLimit,
-		ReadFileResultBytes:  cfg.ReadFileResultMaxBytes,
-		ReadFileResultLines:  cfg.ReadFileResultMaxLines,
-		RGResultBytes:        cfg.RGResultMaxBytes,
-		RGResultLines:        cfg.RGResultMaxLines,
-		GrepResultBytes:      cfg.GrepResultMaxBytes,
-		GrepResultLines:      cfg.GrepResultMaxLines,
-		Background:           backgroundManager,
-		SearchTools:          cfg.SearchTools,
-		DispatchTimeout:                  time.Duration(cfg.ToolTimeoutSeconds) * time.Second,
-		RunCommandTimeoutSeconds:         cfg.RunCommandTimeoutSeconds,
+		MaxResultBytes:                     cfg.ToolResultMaxBytes,
+		MaxResultLines:                     cfg.ToolResultMaxLines,
+		ReadFileDefaultLimit:               cfg.ReadFileDefaultLimit,
+		ReadFileResultBytes:                cfg.ReadFileResultMaxBytes,
+		ReadFileResultLines:                cfg.ReadFileResultMaxLines,
+		RGResultBytes:                      cfg.RGResultMaxBytes,
+		RGResultLines:                      cfg.RGResultMaxLines,
+		GrepResultBytes:                    cfg.GrepResultMaxBytes,
+		GrepResultLines:                    cfg.GrepResultMaxLines,
+		Background:                         backgroundManager,
+		SearchTools:                        cfg.SearchTools,
+		DispatchTimeout:                    time.Duration(cfg.ToolTimeoutSeconds) * time.Second,
+		RunCommandTimeoutSeconds:           cfg.RunCommandTimeoutSeconds,
 		RunCommandBackgroundTimeoutSeconds: cfg.RunCommandBackgroundTimeoutSeconds,
 	})
+	backgroundManager.SetResultPreparer(toolCatalog.PrepareResult)
 	for _, disabled := range disabledTools {
 		logger.Warn(disabled.Message(), logging.Category("cli_tools"))
 	}
