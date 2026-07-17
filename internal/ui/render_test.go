@@ -65,7 +65,7 @@ func TestToolSummaryErrorMarked(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{})
 	r.ToolStart(llm.ToolCall{ID: "e1", Name: "edit", Input: json.RawMessage(`{"path":"x"}`)})
-	r.ToolResult(llm.ToolResult{ForID: "e1", Text: "error: files is required", IsError: true})
+	r.ToolResult(llm.ToolResult{ForID: "e1", Text: "files is required", IsError: true})
 
 	got := errw.String()
 	if !strings.Contains(got, "error") {
@@ -661,7 +661,7 @@ func TestEditToolCallDoesNotDumpLargeJSONArgs(t *testing.T) {
 	r.ToolStart(llm.ToolCall{ID: "call_edit", Name: "edit", Input: input})
 	r.ToolResult(llm.ToolResult{
 		ForID:   "call_edit",
-		Text:    "error: could not find oldText in internal/ui/repl.go",
+		Text:    "could not find oldText in internal/ui/repl.go",
 		IsError: true,
 	})
 
@@ -679,7 +679,7 @@ func TestEditToolCallDoesNotDumpLargeJSONArgs(t *testing.T) {
 		"edits=1",
 		"internal/ui/repl.go",
 		"[edit]",
-		"error: error: could not find oldText in internal/ui/repl.go",
+		"error: could not find oldText in internal/ui/repl.go",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("stderr missing %q:\n%s", want, got)

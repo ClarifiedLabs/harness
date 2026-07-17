@@ -1284,7 +1284,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, turnID int, 
 			if reason == "" {
 				reason = "blocked by PreToolUse hook"
 			}
-			return llm.ToolResult{ForID: call.ID, Text: "error: " + reason, IsError: true}
+			return llm.ToolResult{ForID: call.ID, Text: reason, IsError: true}
 		}
 	}
 
@@ -1311,7 +1311,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, turnID int, 
 			if reason == "" {
 				reason = "blocked by PostToolUse hook"
 			}
-			r.Text = "error: " + reason
+			r.Text = reason
 			r.IsError = true
 		}
 	}
@@ -1345,7 +1345,7 @@ func (a *Agent) isKimiWebSearchCall(call llm.ToolCall) bool {
 }
 
 func invalidToolInputResult(call llm.ToolCall) string {
-	msg := "error: invalid tool call arguments"
+	msg := "invalid tool call arguments"
 	if call.Name != "" {
 		msg += " for " + call.Name
 	}

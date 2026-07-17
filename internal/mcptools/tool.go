@@ -54,7 +54,7 @@ func (t *Tool) ReadOnly(json.RawMessage) bool { return t.readOnly }
 
 // Run invokes the tool over the shared connection and maps the result to the
 // tools.Tool contract:
-//   - transport/protocol error -> ("", err): Dispatch renders "error: <err>".
+//   - transport/protocol error -> ("", err): Dispatch creates an error result.
 //   - success with IsError      -> ("", error(text)): preserves the MCP error
 //     text through Dispatch's error path; empty text gets a stand-in.
 //   - success                   -> (rendered text, nil).

@@ -243,8 +243,10 @@ Mapping subtleties that must be handled:
 - OpenAI tool results are **sibling messages, not blocks**: each `BlockToolResult` is
   hoisted into its own `role:"tool"` message, placed immediately after the assistant
   message that issued the calls, in call order.
-- OpenAI has no `is_error` field on tool messages; error results are prefixed
-  `ERROR: ` in the content string. Anthropic gets `is_error: true`.
+- Internal error-result text contains only the explanation; `ResultError` is the
+  canonical error signal. OpenAI has no `is_error` field on tool messages, so its
+  adapters prefix exactly one `ERROR: ` in the content string. Anthropic sends the
+  unprefixed explanation with `is_error: true`.
 - An assistant message with tool calls but no text serializes with `content` omitted
   (OpenAI) / no text block (Anthropic).
 - For Chat Completions, an assistant message that carries an image or multiple content
@@ -1075,21 +1077,31 @@ emit turn-usage event   // the REPL / one-shot caller prints it and saves the se
 ### 8.2 Tool failure handling
 
 `Dispatch` never lets the loop crash. Each failure mode becomes an `is_error` result
-string fed back to the model so it can self-correct:
+fed back to the model so it can self-correct. Internal result text deliberately
+omits an `error:` marker because the error bit already carries that information;
+the terminal renderer adds one lowercase `error: ` marker, while provider adapters
+apply their wire-specific representation (§4.1).
 
-| Failure | Result text |
+| Failure | Internal result text |
 |---|---|
-| unknown tool name | `error: unknown tool "<name>"` |
-| invalid JSON args | `error: invalid arguments: <detail>` |
-| malformed streamed tool-call args | `error: invalid tool call arguments for <name>: <detail>` |
-| tool returned error | `error: <message>` |
-| tool panicked | `error: tool panicked: <recovered>` (also logged to stderr) |
-| tool exceeded the dispatch timeout | `error: tool timed out after <dur>` |
+| unknown tool name | `unknown tool "<name>"` |
+| JSON type mismatch | `invalid arguments: invalid value for "<field>": expected <JSON type>; got <JSON type>` |
+| invalid JSON syntax | `invalid arguments: invalid JSON at byte <offset>: <detail>` |
+| malformed streamed tool-call args | `invalid tool call arguments for <name>: <detail>` |
+| tool returned error | `<message>` |
+| tool panicked | `tool panicked: <recovered>` (also logged to stderr) |
+| tool exceeded the dispatch timeout | `tool timed out after <dur>` |
+
+`json.UnmarshalTypeError` and `json.SyntaxError` are recognized centrally, including
+when wrapped. Type errors are translated into JSON terminology (for example,
+`"args"` expected an array of strings but got a string) rather than exposing Go
+struct/type details. Tool-specific semantic validation continues to use concise
+`badArgs` messages under the same `invalid arguments: ` prefix.
 
 **Per-tool dispatch timeout backstop (`-tool-timeout`, default 600s, `<=0`
 disables).** `Dispatch` runs each tool under a derived `context.WithTimeout` so a
 hung tool that ignores cancellation cannot stall a turn; on expiry it returns the
-`error: tool timed out after <dur>` result above. It applies to both the
+`tool timed out after <dur>` error result above. It applies to both the
 sequential path and the concurrent read-only batch. A tool that reports its own
 deadline via `SelfTimeouter` only **raises** the ceiling, never lowers it, so
 `run_command`'s `timeout_seconds` stays authoritative. An outer cancellation
@@ -1702,10 +1714,10 @@ contract maps the MCP tool shape onto the `Tool` interface:
   `[resource: <uri>]` (bare `[resource]` if no uri), `[unsupported content block: <type>]`.
   Blocks join with `\n` in order. If nothing renders but `structuredContent` is
   present, the raw structured JSON is the fallback.
-- **Errors:** a transport/protocol error returns `("", err)` so `Dispatch` renders
-  `error: <err>`. A successful result with `isError` true returns the rendered
-  text as an `error` (empty text gets a stand-in), so the failure flows through the
-  normal tool-error path.
+- **Errors:** a transport/protocol error returns `("", err)` so `Dispatch` creates
+  an error result containing `<err>`. A successful result with `isError` true
+  returns the rendered text as an `error` (empty text gets a stand-in), so the
+  failure flows through the normal tool-error path.
 
 The shared `*mcptools.Conn` is a lazily-reconnecting wrapper around one
 `mcp.Client` session to the proxy. It spawns no goroutines; reconnection is

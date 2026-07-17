@@ -219,28 +219,28 @@ func TestDispatch(t *testing.T) {
 		{
 			name:        "unknown tool",
 			call:        llm.ToolCall{ID: "2", Name: "nope", Input: json.RawMessage(`{}`)},
-			wantText:    `error: unknown tool "nope"`,
+			wantText:    `unknown tool "nope"`,
 			wantErr:     true,
 			wantContain: true,
 		},
 		{
 			name:        "invalid json args",
 			call:        llm.ToolCall{ID: "3", Name: "needsarg", Input: json.RawMessage(`{not json`)},
-			wantText:    "error: invalid arguments:",
+			wantText:    "invalid arguments: invalid JSON at byte",
 			wantErr:     true,
 			wantContain: true,
 		},
 		{
 			name:        "tool returns error",
 			call:        llm.ToolCall{ID: "4", Name: "err", Input: json.RawMessage(`{}`)},
-			wantText:    "error: something broke",
+			wantText:    "something broke",
 			wantErr:     true,
 			wantContain: true,
 		},
 		{
 			name:        "tool panics",
 			call:        llm.ToolCall{ID: "5", Name: "boom", Input: json.RawMessage(`{}`)},
-			wantText:    "error: tool panicked: kaboom",
+			wantText:    "tool panicked: kaboom",
 			wantErr:     true,
 			wantContain: true,
 		},
@@ -261,6 +261,68 @@ func TestDispatch(t *testing.T) {
 				}
 			} else if res.Text != tc.wantText {
 				t.Errorf("Text = %q, want %q", res.Text, tc.wantText)
+			}
+		})
+	}
+}
+
+func TestDispatchFormatsJSONUnmarshalTypeErrors(t *testing.T) {
+	r := &Registry{}
+	r.Register(fakeTool{
+		name:   "typed",
+		desc:   "typed input",
+		schema: `{"type":"object"}`,
+		run: func(_ context.Context, input json.RawMessage) (string, error) {
+			var args struct {
+				Args           []string        `json:"args"`
+				TimeoutSeconds int             `json:"timeout_seconds"`
+				Options        map[string]bool `json:"options"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				// Wrapping must not hide the generic JSON classification.
+				return "", fmt.Errorf("decode typed input: %w", err)
+			}
+			return "ok", nil
+		},
+	})
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "array field received string",
+			input: `{"args":"-n TODO ."}`,
+			want:  `invalid arguments: invalid value for "args": expected an array of strings; got string`,
+		},
+		{
+			name:  "integer field received string",
+			input: `{"timeout_seconds":"5"}`,
+			want:  `invalid arguments: invalid value for "timeout_seconds": expected an integer; got string`,
+		},
+		{
+			name:  "array element has wrong type",
+			input: `{"args":["-n",7]}`,
+			want:  `invalid arguments: invalid value for "args": expected a string; got number`,
+		},
+		{
+			name:  "object field received array",
+			input: `{"options":[]}`,
+			want:  `invalid arguments: invalid value for "options": expected an object; got array`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "typed", Input: json.RawMessage(tt.input)})
+			if !res.IsError {
+				t.Fatalf("Dispatch result = %+v, want error", res)
+			}
+			if res.Text != tt.want {
+				t.Fatalf("Text = %q, want %q", res.Text, tt.want)
+			}
+			if strings.Contains(res.Text, "Go struct field") || strings.Contains(res.Text, "[]string") {
+				t.Fatalf("Text exposes Go decoder details: %q", res.Text)
 			}
 		})
 	}

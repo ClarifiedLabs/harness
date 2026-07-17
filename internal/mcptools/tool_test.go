@@ -207,19 +207,19 @@ func TestRunMappingThroughDispatch(t *testing.T) {
 				IsError: true,
 				Content: []mcp.ContentBlock{{Type: "text", Text: "boom happened"}},
 			}},
-			wantText:    "error: boom happened",
+			wantText:    "boom happened",
 			wantIsError: true,
 		},
 		{
 			name:        "is_error empty content stand-in",
 			provider:    &scriptedProvider{result: &mcp.CallToolResult{IsError: true}},
-			wantText:    "error: tool reported an error with no content",
+			wantText:    "tool reported an error with no content",
 			wantIsError: true,
 		},
 		{
 			name:        "transport error",
 			provider:    &scriptedProvider{callErr: errors.New("downstream exploded")},
-			wantText:    "error: ",
+			wantText:    "jsonrpc error -32603: call tool: downstream exploded",
 			wantIsError: true,
 		},
 	}
@@ -240,12 +240,6 @@ func TestRunMappingThroughDispatch(t *testing.T) {
 			})
 			if res.IsError != tt.wantIsError {
 				t.Fatalf("IsError = %v, want %v (text=%q)", res.IsError, tt.wantIsError, res.Text)
-			}
-			if tt.name == "transport error" {
-				if !strings.HasPrefix(res.Text, "error: ") {
-					t.Fatalf("transport error text = %q, want prefix %q", res.Text, "error: ")
-				}
-				return
 			}
 			if res.Text != tt.wantText {
 				t.Fatalf("Text = %q, want %q", res.Text, tt.wantText)

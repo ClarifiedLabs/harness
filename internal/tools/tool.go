@@ -9,9 +9,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -554,7 +556,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 
 	t, ok := r.tools[call.Name]
 	if !ok {
-		res.Text = fmt.Sprintf("error: unknown tool %q", call.Name)
+		res.Text = fmt.Sprintf("unknown tool %q", call.Name)
 		res.IsError = true
 		return res
 	}
@@ -618,11 +620,11 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		// after we return, so built-in long-running tools are expected to honor
 		// ctx and apply their own user-configurable timeouts.
 		if parent.Err() != nil {
-			res.Text = "error: " + parent.Err().Error()
+			res.Text = parent.Err().Error()
 		} else if timeout > 0 {
-			res.Text = fmt.Sprintf("error: tool timed out after %s", timeout)
+			res.Text = fmt.Sprintf("tool timed out after %s", timeout)
 		} else {
-			res.Text = "error: " + ctx.Err().Error()
+			res.Text = ctx.Err().Error()
 		}
 		res.IsError = true
 		return res
@@ -637,11 +639,11 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		// through as a plain tool error — not be relabeled as a dispatch
 		// timeout with the wrong duration (spec §6).
 		if timeout > 0 && ctx.Err() == context.DeadlineExceeded && parent.Err() == nil {
-			res.Text = fmt.Sprintf("error: tool timed out after %s", timeout)
-		} else if _, bad := err.(*invalidArgsError); bad || isJSONError(err) {
-			res.Text = "error: invalid arguments: " + err.Error()
+			res.Text = fmt.Sprintf("tool timed out after %s", timeout)
+		} else if detail, invalid := invalidArgumentsDetail(err); invalid {
+			res.Text = "invalid arguments: " + detail
 		} else {
-			res.Text = "error: " + err.Error()
+			res.Text = err.Error()
 		}
 		res.IsError = true
 		return res
@@ -678,12 +680,83 @@ func badArgs(format string, a ...any) error {
 	return &invalidArgsError{msg: fmt.Sprintf(format, a...)}
 }
 
-// isJSONError reports whether err originates from encoding/json decoding, so a
-// tool's failed json.Unmarshal surfaces as an "invalid arguments" result.
-func isJSONError(err error) bool {
-	switch err.(type) {
-	case *json.SyntaxError, *json.UnmarshalTypeError:
-		return true
+// invalidArgumentsDetail classifies validation and encoding/json decode errors
+// from any tool. Unmarshal type errors are translated from Go implementation
+// terms into concise JSON terms so the model can repair the call directly.
+func invalidArgumentsDetail(err error) (string, bool) {
+	var bad *invalidArgsError
+	if errors.As(err, &bad) {
+		return bad.Error(), true
 	}
-	return false
+
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		expected := jsonTypeDescription(typeErr.Type)
+		received := typeErr.Value
+		if received == "" {
+			received = "an incompatible value"
+		}
+		if typeErr.Field == "" {
+			return fmt.Sprintf("invalid value: expected %s; got %s", expected, received), true
+		}
+		return fmt.Sprintf("invalid value for %q: expected %s; got %s", typeErr.Field, expected, received), true
+	}
+
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return fmt.Sprintf("invalid JSON at byte %d: %s", syntaxErr.Offset, syntaxErr.Error()), true
+	}
+	return "", false
+}
+
+func jsonTypeDescription(t reflect.Type) string {
+	if t == nil {
+		return "a compatible JSON value"
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Array, reflect.Slice:
+		return "an array of " + jsonTypePlural(t.Elem())
+	case reflect.Map, reflect.Struct:
+		return "an object"
+	case reflect.Bool:
+		return "a boolean"
+	case reflect.String:
+		return "a string"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return "an integer"
+	case reflect.Float32, reflect.Float64:
+		return "a number"
+	default:
+		return "a compatible JSON value"
+	}
+}
+
+func jsonTypePlural(t reflect.Type) string {
+	if t == nil {
+		return "JSON values"
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Array, reflect.Slice:
+		return "arrays of " + jsonTypePlural(t.Elem())
+	case reflect.Map, reflect.Struct:
+		return "objects"
+	case reflect.Bool:
+		return "booleans"
+	case reflect.String:
+		return "strings"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return "integers"
+	case reflect.Float32, reflect.Float64:
+		return "numbers"
+	default:
+		return "JSON values"
+	}
 }

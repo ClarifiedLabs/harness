@@ -122,7 +122,8 @@ type ToolCall struct {
 }
 
 // ToolResult is a flat view that becomes a BlockToolResult, carried from the
-// tool layer back into the agent loop.
+// tool layer back into the agent loop. When IsError is true, Text contains only
+// the explanation: UI and provider adapters add any required error marker.
 type ToolResult struct {
 	ForID         string
 	Text          string

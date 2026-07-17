@@ -962,8 +962,8 @@ func TestFailingToolFedBackAsError(t *testing.T) {
 	if len(resMsg.Content) != 1 || !resMsg.Content[0].ResultError {
 		t.Fatalf("expected an is_error result:\n%s", dump([]llm.Message{resMsg}))
 	}
-	if !strings.Contains(resMsg.Content[0].ResultText, "kaboom") {
-		t.Errorf("error text = %q, want it to mention kaboom", resMsg.Content[0].ResultText)
+	if resMsg.Content[0].ResultText != "kaboom" {
+		t.Errorf("error text = %q, want unprefixed %q", resMsg.Content[0].ResultText, "kaboom")
 	}
 
 	// The next request carries the error result so the model can self-correct.
@@ -1025,6 +1025,9 @@ func TestInvalidToolInputFedBackAsError(t *testing.T) {
 	}
 	if len(sink.results) != 1 || !sink.results[0].IsError {
 		t.Fatalf("sink results = %+v, want one error result", sink.results)
+	}
+	if strings.HasPrefix(sink.results[0].Text, "error: ") {
+		t.Fatalf("internal error text must be unprefixed: %q", sink.results[0].Text)
 	}
 	for _, want := range []string{"invalid tool call arguments for rg", "valid JSON object", `{"args":["-n","PATTERN","."]}`} {
 		if !strings.Contains(sink.results[0].Text, want) {
