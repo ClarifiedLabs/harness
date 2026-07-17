@@ -14,6 +14,7 @@ import (
 	"harness/internal/session"
 	"harness/internal/todo"
 	"harness/internal/tools"
+	"harness/prompts"
 )
 
 type fakeChildTool struct {
@@ -43,9 +44,9 @@ func TestDelegateSchemaListsOnlyDelegatableAgents(t *testing.T) {
 	tool := New(state.Snapshot, nil, Options{
 		AgentCandidates: func(Runtime) []AgentCandidate {
 			return []AgentCandidate{
-				{Name: "auto", ToolNames: []string{"read_file", "write_file", "delegate"}},
-				{Name: "plan", ToolNames: []string{"read_file", "grep", "delegate"}},
-				{Name: "style", ToolNames: []string{"read_file"}},
+				{Name: "auto", Description: "General work", ToolNames: []string{"read_file", "write_file", "delegate"}},
+				{Name: "plan", Description: "Plan broad changes", ToolNames: []string{"read_file", "grep", "delegate"}},
+				{Name: "style", Description: "Review style", ToolNames: []string{"read_file"}},
 			}
 		},
 	})
@@ -62,6 +63,82 @@ func TestDelegateSchemaListsOnlyDelegatableAgents(t *testing.T) {
 	want := []string{"plan", "style"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("agent enum = %v, want %v", got, want)
+	}
+}
+
+func TestDelegateSchemaCatalogIsDeterministicNormalizedAndCapped(t *testing.T) {
+	long := strings.Repeat("verbose description ", 30)
+	state := NewState(Runtime{ToolNames: []string{"read_file"}})
+	tool := New(state.Snapshot, nil, Options{
+		AgentCandidates: func(Runtime) []AgentCandidate {
+			return []AgentCandidate{
+				{Name: "zeta", Description: "  Search\n across\tmodules  ", ToolNames: []string{"read_file"}},
+				{Name: "incompatible", Description: "Must not leak", ToolNames: []string{"write_file"}},
+				{Name: "blank", Description: " \n ", ToolNames: []string{"read_file"}},
+				{Name: "alpha", Description: long, ToolNames: []string{"read_file"}},
+			}
+		},
+	})
+
+	var decoded struct {
+		Properties map[string]struct {
+			Description string   `json:"description"`
+			Enum        []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.Schema(), &decoded); err != nil {
+		t.Fatalf("schema JSON: %v", err)
+	}
+	agent := decoded.Properties["agent"]
+	if want := []string{"alpha", "zeta"}; !slices.Equal(agent.Enum, want) {
+		t.Fatalf("agent enum = %v, want %v", agent.Enum, want)
+	}
+	if strings.Contains(agent.Description, "incompatible") || strings.Contains(agent.Description, "Must not leak") || strings.Contains(agent.Description, "blank") {
+		t.Fatalf("catalog leaked unavailable or undescribed candidate: %q", agent.Description)
+	}
+	if !strings.Contains(agent.Description, "- zeta: Search across modules") {
+		t.Fatalf("catalog did not normalize description to one line: %q", agent.Description)
+	}
+	for _, name := range agent.Enum {
+		marker := "\n- " + name + ": "
+		at := strings.Index(agent.Description, marker)
+		if at < 0 {
+			t.Fatalf("enum agent %q has no catalog entry: %q", name, agent.Description)
+		}
+		entry := agent.Description[at+len(marker):]
+		if end := strings.IndexByte(entry, '\n'); end >= 0 {
+			entry = entry[:end]
+		}
+		if len(entry) > maxAgentDescriptionBytes {
+			t.Fatalf("catalog description for %q is %d bytes, want <= %d", name, len(entry), maxAgentDescriptionBytes)
+		}
+	}
+}
+
+func TestDelegateDescriptionAndSchemaExplainSteeringContract(t *testing.T) {
+	tool := New(nil, nil, Options{})
+	for _, want := range []string{"fresh context", "broad or noisy investigation", "known-file lookups", "tightly coupled blockers"} {
+		if !strings.Contains(tool.Description(), want) {
+			t.Fatalf("tool description missing %q: %s", want, tool.Description())
+		}
+	}
+	var decoded struct {
+		Properties map[string]struct {
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.Schema(), &decoded); err != nil {
+		t.Fatalf("schema JSON: %v", err)
+	}
+	for _, want := range []string{"objective", "scope", "constraints", "expected report", "verification"} {
+		if !strings.Contains(decoded.Properties["task"].Description, want) {
+			t.Fatalf("task description missing %q: %q", want, decoded.Properties["task"].Description)
+		}
+	}
+	for _, want := range []string{"independent", "non-overlapping", "automatically", "do not poll", "duplicate"} {
+		if !strings.Contains(decoded.Properties["background"].Description, want) {
+			t.Fatalf("background description missing %q: %q", want, decoded.Properties["background"].Description)
+		}
 	}
 }
 
@@ -104,8 +181,8 @@ func TestDelegateRebindsNestedDelegateSchemaToChildTools(t *testing.T) {
 	}, Options{
 		AgentCandidates: func(Runtime) []AgentCandidate {
 			return []AgentCandidate{
-				{Name: "auto", ToolNames: []string{"read_file", "write_file", "delegate"}},
-				{Name: "style", ToolNames: []string{"read_file", "delegate"}},
+				{Name: "auto", Description: "General work", ToolNames: []string{"read_file", "write_file", "delegate"}},
+				{Name: "style", Description: "Review style", ToolNames: []string{"read_file", "delegate"}},
 			}
 		},
 	})
@@ -184,8 +261,8 @@ func TestDelegateRunsChildAgentAndReturnsFinalReport(t *testing.T) {
 	if req.Model != "claude-opus-4-8" {
 		t.Fatalf("request model = %q", req.Model)
 	}
-	if req.System != "parent system" {
-		t.Fatalf("child system = %q, want exact parent system", req.System)
+	if req.System != "parent system\n\n"+prompts.DelegateChild() {
+		t.Fatalf("child system = %q, want parent system plus child suffix", req.System)
 	}
 	if len(req.Messages) != 1 || req.Messages[0].Content[0].Text != "inspect the repo" {
 		t.Fatalf("child transcript = %+v", req.Messages)
@@ -287,8 +364,35 @@ func TestDelegateSchemaListsToolNames(t *testing.T) {
 	}
 }
 
+func TestDelegateSchemaToolEnumIsValidForEveryAdvertisedAgent(t *testing.T) {
+	state := NewState(Runtime{ToolNames: []string{"read_file", "glob", "rg", "delegate"}})
+	tool := New(state.Snapshot, nil, Options{
+		AgentCandidates: func(Runtime) []AgentCandidate {
+			return []AgentCandidate{
+				{Name: "auto", Description: "General work", ToolNames: []string{"read_file", "glob", "rg", "delegate"}},
+				{Name: "explore", Description: "Read-only investigation", ToolNames: []string{"read_file", "rg"}},
+			}
+		},
+	})
+
+	var schema struct {
+		Properties map[string]struct {
+			Items struct {
+				Enum []string `json:"enum"`
+			} `json:"items"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.Schema(), &schema); err != nil {
+		t.Fatalf("schema JSON: %v", err)
+	}
+	got := schema.Properties["tools"].Items.Enum
+	if want := []string{"read_file", "rg"}; !slices.Equal(got, want) {
+		t.Fatalf("tools items enum = %v, want universally valid %v", got, want)
+	}
+}
+
 func TestDelegateBackgroundStartsJob(t *testing.T) {
-	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 11, OutputTokens: 5}})
 	state := NewState(Runtime{
 		Provider: fp,
 		Model:    "claude-opus-4-8",
@@ -305,18 +409,40 @@ func TestDelegateBackgroundStartsJob(t *testing.T) {
 	starter := &fakeBackgroundStarter{}
 	tool := NewTool(runner, starter)
 
-	result, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"inspect asynchronously","background":true}`))
+	result, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"inspect asynchronously","agent":"explore","background":true}`))
 	if err != nil {
 		t.Fatalf("RunMetered: %v", err)
 	}
 	if result.Text != "background job bg_delegate started" {
 		t.Fatalf("result = %q", result.Text)
 	}
-	if starter.req.Kind != "delegate" || starter.req.Description != "inspect asynchronously" {
+	if starter.req.Kind != "delegate" || starter.req.Description != "inspect asynchronously" || starter.req.Agent != "explore" || !starter.req.WaitForTurn {
 		t.Fatalf("background request = %+v", starter.req)
 	}
 	if len(fp.Requests) != 0 {
 		t.Fatalf("background start should not run child synchronously, got %d requests", len(fp.Requests))
+	}
+	completed, err := starter.req.Run(context.Background(), "bg_delegate")
+	if err != nil {
+		t.Fatalf("background delegate run: %v", err)
+	}
+	if completed.Text == "" || completed.Usage.InputTokens != 11 || completed.Usage.OutputTokens != 5 {
+		t.Fatalf("background result = %+v, want report and child usage 11/5", completed)
+	}
+}
+
+func TestDelegateBackgroundRejectsMaximumDepthBeforeStartingJob(t *testing.T) {
+	state := NewState(Runtime{Depth: 2})
+	runner := NewRunner(state.Snapshot, nil, Options{MaxDepth: 2})
+	starter := &fakeBackgroundStarter{}
+	tool := NewTool(runner, starter)
+
+	_, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"too deep","background":true}`))
+	if err == nil || !strings.Contains(err.Error(), "maximum depth 2 reached at depth 2") {
+		t.Fatalf("RunMetered error = %v", err)
+	}
+	if starter.req.Run != nil {
+		t.Fatal("over-depth background delegate should not start a job")
 	}
 }
 
@@ -472,6 +598,122 @@ func TestDelegateCapsMaxTurns(t *testing.T) {
 	}
 }
 
+func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T) {
+	originalState := NewState(Runtime{})
+	nested := New(originalState.Snapshot, nil, Options{MaxDepth: 3})
+	catalog := &tools.Registry{}
+	catalog.Register(fakeChildTool{name: "read_file", out: "ok"})
+	catalog.Register(nested)
+	runner := NewRunner(nil, nil, Options{MaxDepth: 3})
+	parent := Runtime{Depth: 0, MaxTurnTokens: 1234, MaxPromptCostUSD: 2.5, SessionPath: "session"}
+	launch := Launch{Tools: catalog, System: childSystemPrompt("root"), Agent: "explore"}
+
+	childTools, err := runner.childTools(parent, launch, "child-1", todo.NewStore(), []string{"read_file", "delegate"})
+	if err != nil {
+		t.Fatalf("childTools: %v", err)
+	}
+	tool, ok := childTools.Lookup("delegate")
+	if !ok {
+		t.Fatal("child delegate tool missing before deepest allowed level")
+	}
+	rebound, ok := tool.(*Tool)
+	if !ok || rebound.runner == nil {
+		t.Fatalf("rebound delegate = %T, want initialized *Tool", tool)
+	}
+	snapshot := rebound.runner.snapshot()
+	if snapshot.Depth != 1 || snapshot.MaxTurnTokens != 1234 || snapshot.MaxPromptCostUSD != 2.5 {
+		t.Fatalf("child runtime safety fields = depth %d tokens %d cost %v", snapshot.Depth, snapshot.MaxTurnTokens, snapshot.MaxPromptCostUSD)
+	}
+	if snapshot.ParentChildID != "child-1" || snapshot.SessionPath != "session" {
+		t.Fatalf("child runtime lineage = parent %q session %q", snapshot.ParentChildID, snapshot.SessionPath)
+	}
+}
+
+func TestDelegateDeepestChildDoesNotAdvertiseDelegate(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "done"}},
+		Stop:   llm.StopEndTurn,
+	})
+	state := NewState(Runtime{Provider: fp, Model: "m", Registry: llm.NewRegistry(nil), Depth: 1})
+	catalog := &tools.Registry{}
+	catalog.Register(fakeChildTool{name: "read_file", out: "ok"})
+	catalog.Register(New(state.Snapshot, nil, Options{MaxDepth: 2}))
+	tool := New(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
+		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: catalog}, nil
+	}, Options{MaxDepth: 2})
+
+	if _, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"inspect"}`)); err != nil {
+		t.Fatalf("RunMetered: %v", err)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("child requests = %d, want 1", len(fp.Requests))
+	}
+	got := make([]string, len(fp.Requests[0].Tools))
+	for i, spec := range fp.Requests[0].Tools {
+		got[i] = spec.Name
+	}
+	if !slices.Equal(got, []string{"read_file"}) {
+		t.Fatalf("deepest child tools = %v, want [read_file]", got)
+	}
+}
+
+func TestDelegateRejectsLaunchAtMaximumDepthBeforeRequest(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	resolved := false
+	tool := New(func() Runtime {
+		return Runtime{Provider: fp, Depth: 3}
+	}, func(runtime Runtime, name string) (Launch, error) {
+		resolved = true
+		return Launch{}, nil
+	}, Options{MaxDepth: 3})
+
+	_, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"too deep"}`))
+	if err == nil || !strings.Contains(err.Error(), "maximum depth 3 reached at depth 3") {
+		t.Fatalf("RunMetered error = %v", err)
+	}
+	if resolved || len(fp.Requests) != 0 {
+		t.Fatalf("over-depth launch resolved=%v requests=%d, want neither", resolved, len(fp.Requests))
+	}
+}
+
+func TestDelegatePropagatesRootTokenAndCostBudgets(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		runtime Runtime
+		usage   llm.Usage
+	}{
+		{name: "tokens", runtime: Runtime{MaxTurnTokens: 100}, usage: llm.Usage{InputTokens: 60}},
+		{name: "cost", runtime: Runtime{MaxPromptCostUSD: 8}, usage: llm.Usage{InputTokens: 1_000_000, CostUSD: 5, CostKnown: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step := func(id string) llmtest.Step {
+				return llmtest.Step{
+					Events: []llm.StreamEvent{{Kind: llm.EventToolCallDone, ToolID: id, ToolName: "read_file", ToolInput: json.RawMessage(`{}`)}},
+					Stop:   llm.StopToolUse,
+					Usage:  tc.usage,
+				}
+			}
+			fp := llmtest.New("fake", step("one"), step("two"), step("three"))
+			catalog := &tools.Registry{}
+			catalog.Register(fakeChildTool{name: "read_file", out: "ok"})
+			runtime := tc.runtime
+			runtime.Provider = fp
+			runtime.Model = "priced"
+			runtime.Registry = llm.NewRegistry(nil)
+			tool := New(func() Runtime { return runtime }, func(runtime Runtime, name string) (Launch, error) {
+				return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: catalog}, nil
+			}, Options{MaxTurns: 10, MaxDepth: 3})
+
+			if _, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"loop"}`)); err != nil {
+				t.Fatalf("RunMetered: %v", err)
+			}
+			if len(fp.Requests) != 2 {
+				t.Fatalf("child requests = %d, want 2 before inherited %s budget stops it", len(fp.Requests), tc.name)
+			}
+		})
+	}
+}
+
 func TestDelegatePassesRequestedAgentToResolver(t *testing.T) {
 	childTools := &tools.Registry{}
 	childTools.Register(fakeChildTool{name: "write_file", out: "ok"})
@@ -500,7 +742,7 @@ func TestDelegatePassesRequestedAgentToResolver(t *testing.T) {
 		t.Fatalf("resolver agent = %q, want style_review", gotName)
 	}
 	req := fp.Requests[0]
-	if req.Model != "style-model" || req.System != "style system" {
+	if req.Model != "style-model" || req.System != "style system\n\n"+prompts.DelegateChild() {
 		t.Fatalf("request model/system = %q/%q", req.Model, req.System)
 	}
 	if len(req.Tools) != 1 || req.Tools[0].Name != "write_file" {

@@ -36,10 +36,16 @@ func SkillsInstructions() string {
 	return mustText("skills-instructions.txt")
 }
 
+// DelegateChild returns the reporting and scope instructions appended only to
+// child-agent system prompts.
+func DelegateChild() string {
+	return mustText("delegate-child.txt")
+}
+
 // BuiltinAgentPrompt returns the prompt body for a built-in agent name.
 func BuiltinAgentPrompt(name string) (string, bool) {
 	switch name {
-	case "auto", "independent", "plan":
+	case "auto", "explore", "independent", "plan":
 	default:
 		return "", false
 	}

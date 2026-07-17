@@ -15,6 +15,9 @@ func TestBuiltInPromptsLoad(t *testing.T) {
 	if SkillsInstructions() == "" {
 		t.Fatal("skills instructions prompt is empty")
 	}
+	if DelegateChild() == "" {
+		t.Fatal("delegate child prompt is empty")
+	}
 	if HandoffSummary() == "" {
 		t.Fatal("handoff summary prompt is empty")
 	}
@@ -40,6 +43,30 @@ func TestSystemPromptRequestsToolCommentary(t *testing.T) {
 	} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("system prompt missing %q:\n%s", want, system)
+		}
+	}
+}
+
+func TestSystemPromptIncludesDelegationPolicy(t *testing.T) {
+	system := strings.ToLower(System())
+	for _, want := range []string{
+		"broad codebase exploration",
+		"known file or symbol",
+		"do not poll",
+		"complete prompt",
+		"do not delegate merely because",
+	} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("system prompt missing delegation guidance %q:\n%s", want, System())
+		}
+	}
+}
+
+func TestDelegateChildPromptDefinesScopeAndReport(t *testing.T) {
+	child := strings.ToLower(DelegateChild())
+	for _, want := range []string{"reporting to a parent", "do not ask the user", "evidence-backed", "verification", "unresolved risks", "do not recursively delegate"} {
+		if !strings.Contains(child, want) {
+			t.Fatalf("delegate child prompt missing %q:\n%s", want, DelegateChild())
 		}
 	}
 }
@@ -87,7 +114,7 @@ func TestCompactionSummaryDemandsFileStateAndTodos(t *testing.T) {
 }
 
 func TestBuiltinAgentPrompt(t *testing.T) {
-	for _, name := range []string{"auto", "independent", "plan"} {
+	for _, name := range []string{"auto", "explore", "independent", "plan"} {
 		if _, ok := BuiltinAgentPrompt(name); !ok {
 			t.Fatalf("BuiltinAgentPrompt(%q) not found", name)
 		}
@@ -103,6 +130,8 @@ func TestPromptFilesDoNotExposeFinalNewline(t *testing.T) {
 		"compaction-summary":  CompactionSummary(),
 		"handoff-summary":     HandoffSummary(),
 		"skills-instructions": SkillsInstructions(),
+		"delegate-child":      DelegateChild(),
+		"explore":             mustAgentPrompt(t, "explore"),
 		"independent":         mustAgentPrompt(t, "independent"),
 		"plan":                mustAgentPrompt(t, "plan"),
 	} {

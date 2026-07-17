@@ -25,6 +25,7 @@
   "compact_summary_max_tokens": 2048,
   "compact_tool_result_max_bytes": 4096,
   "delegate_max_turns": 20,
+  "delegate_max_depth": 3,
   "verbose": false,
   "tool_stream": true,
   "show_diffs": true,
@@ -38,6 +39,13 @@
       "description": "Default agent; the model decides what to do.",
       "mcp_tools": "all",
       "prompt": "",
+      "provider": "",
+      "model": ""
+    },
+    "explore": {
+      "description": "Use proactively for broad search, architecture or dependency tracing, root-cause investigation, and questions spanning many files; not for a single known-file lookup.",
+      "mcp_tools": "read_only",
+      "prompt": "@../../prompts/agents/explore.txt",
       "provider": "",
       "model": ""
     },

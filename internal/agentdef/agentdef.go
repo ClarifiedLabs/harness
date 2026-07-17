@@ -1,6 +1,6 @@
 // Package agentdef defines named agent definitions: bundles of an allowed-tool
 // set, optional provider/model overrides, and extra system-prompt instructions.
-// Three built-ins ship with the harness (auto, plan, independent); config-file
+// Four built-ins ship with the harness (auto, explore, plan, independent); config-file
 // entries field-level merge onto them (an omitted field keeps the built-in
 // value) or define new agents. The agent prompt is appended to the system prompt
 // as a final section; the tool list is realized by main via tools.Registry.Subset,
@@ -25,7 +25,9 @@ const Default = "auto"
 // struct is deliberately small; future per-agent knobs (e.g. max_turns) can be
 // added alongside without changing the merge contract.
 type Definition struct {
-	Name         string
+	Name string
+	// Description is required parent-facing selection metadata explaining when
+	// this agent should be used.
 	Description  string
 	AllowedTools []string
 	MCPTools     MCPToolsMode
@@ -51,7 +53,9 @@ const (
 
 // FileDefinition mirrors one entry of the config file's "agents" object. Empty fields
 // drive the field-level merge: they inherit from the same-named built-in, or
-// for new agents from the defaults (default tool set, no prompt).
+// for new agents from the defaults (default tool set, no prompt). Description
+// is required parent-facing "when to use" metadata for new agents; a built-in
+// override may omit it and inherit the built-in description.
 type FileDefinition struct {
 	Description  string   `json:"description"`
 	AllowedTools []string `json:"allowed_tools"`
@@ -66,12 +70,13 @@ type Options struct {
 	SearchTools string
 }
 
-// Builtins returns fresh copies of the three built-in agents keyed by name.
+// Builtins returns fresh copies of the four built-in agents keyed by name.
 func Builtins() map[string]Definition {
 	return BuiltinsWithOptions(Options{})
 }
 
 func BuiltinsWithOptions(opts Options) map[string]Definition {
+	explorePrompt, _ := prompts.BuiltinAgentPrompt("explore")
 	independentPrompt, _ := prompts.BuiltinAgentPrompt("independent")
 	planPrompt, _ := prompts.BuiltinAgentPrompt("plan")
 	return map[string]Definition{
@@ -80,6 +85,13 @@ func BuiltinsWithOptions(opts Options) map[string]Definition {
 			Description:  "Default agent; the model decides what to do.",
 			AllowedTools: defaultTools(opts),
 			MCPTools:     MCPToolsAll,
+		},
+		"explore": {
+			Name:         "explore",
+			Description:  "Use proactively for broad search, architecture or dependency tracing, root-cause investigation, and questions spanning many files; not for a single known-file lookup.",
+			AllowedTools: inspectionTools(opts),
+			MCPTools:     MCPToolsReadOnly,
+			Prompt:       explorePrompt,
 		},
 		"independent": {
 			Name:         "independent",
@@ -98,14 +110,18 @@ func BuiltinsWithOptions(opts Options) map[string]Definition {
 	}
 }
 
-func planTools(opts Options) []string {
+func inspectionTools(opts Options) []string {
 	names := []string{"read_file", "list_dir"}
 	names = append(names, searchToolNames(opts.SearchTools)...)
 	names = append(names, "web_fetch")
 	if tools.GitAvailable() {
 		names = append(names, "git_readonly")
 	}
-	return append(names, "write_tmp_file", "record_plan", "request_implementation", "update_todos", "delegate", "background_jobs")
+	return names
+}
+
+func planTools(opts Options) []string {
+	return append(inspectionTools(opts), "write_tmp_file", "record_plan", "request_implementation", "update_todos", "delegate", "background_jobs")
 }
 
 func searchToolNames(mode string) []string {
@@ -120,7 +136,11 @@ func searchToolNames(mode string) []string {
 }
 
 func defaultTools(opts Options) []string {
-	return append(tools.DefaultNamesWithOptions(tools.Options{SearchTools: opts.SearchTools}), "record_plan", "update_todos", "delegate", "background_jobs")
+	names := tools.DefaultNamesWithOptions(tools.Options{SearchTools: opts.SearchTools})
+	if tools.GitAvailable() && !slices.Contains(names, "git_readonly") {
+		names = append(names, "git_readonly")
+	}
+	return append(names, "record_plan", "update_todos", "delegate", "background_jobs")
 }
 
 // DefaultTools returns the default allowed-tool set (the built-in tool names
@@ -204,6 +224,9 @@ func ParseMCPToolsMode(s string) (MCPToolsMode, error) {
 // --show-config) can fail fast after all field-level merging is done.
 func Validate(agents map[string]Definition) error {
 	for _, name := range Names(agents) {
+		if strings.TrimSpace(agents[name].Description) == "" {
+			return fmt.Errorf("agent %q: description must state when the parent should use it", name)
+		}
 		if _, err := ParseMCPToolsMode(string(agents[name].MCPTools)); err != nil {
 			return fmt.Errorf("agent %q: %w", name, err)
 		}

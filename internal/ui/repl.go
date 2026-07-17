@@ -3709,6 +3709,24 @@ func (s *accumulatingSink) RequestContext() []string {
 	return out
 }
 
+func (s *accumulatingSink) PendingTurnWork() bool {
+	return s.app.Background != nil && s.app.Background.PendingTurnWork()
+}
+
+func (s *accumulatingSink) WaitForTurnWork(ctx context.Context) (llm.Usage, error) {
+	if s.app.Background == nil {
+		return llm.Usage{}, nil
+	}
+	return s.app.Background.WaitForTurnWork(ctx)
+}
+
+func (s *accumulatingSink) DrainTurnWorkUsage() llm.Usage {
+	if s.app.Background == nil {
+		return llm.Usage{}
+	}
+	return s.app.Background.DrainTurnWorkUsage()
+}
+
 func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
 	// Price the turn against the App's own model (not the renderer's) so a
 	// mid-turn model switch is not mispriced, and hand it to the renderer (r63).

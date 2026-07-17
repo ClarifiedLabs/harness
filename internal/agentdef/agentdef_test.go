@@ -2,6 +2,7 @@ package agentdef
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"harness/internal/tools"
@@ -15,8 +16,8 @@ func TestDefaultIsAuto(t *testing.T) {
 
 func TestBuiltins(t *testing.T) {
 	m := Builtins()
-	if len(m) != 3 {
-		t.Fatalf("want 3 builtin agents, got %d: %v", len(m), Names(m))
+	if len(m) != 4 {
+		t.Fatalf("want 4 builtin agents, got %d: %v", len(m), Names(m))
 	}
 	for name, a := range m {
 		if a.Name != name {
@@ -36,6 +37,22 @@ func TestBuiltins(t *testing.T) {
 	}
 	if auto.MCPTools != MCPToolsAll {
 		t.Errorf("auto MCPTools = %q, want %q", auto.MCPTools, MCPToolsAll)
+	}
+
+	explore := m["explore"]
+	if explore.Prompt == "" {
+		t.Error("explore must carry a prompt")
+	}
+	if !slices.Equal(explore.AllowedTools, inspectionTools(Options{})) {
+		t.Errorf("explore tools = %v, want inspection set", explore.AllowedTools)
+	}
+	if explore.MCPTools != MCPToolsReadOnly {
+		t.Errorf("explore MCPTools = %q, want %q", explore.MCPTools, MCPToolsReadOnly)
+	}
+	for _, forbidden := range []string{"write_file", "edit", "run_command", "record_plan", "request_implementation", "update_todos", "delegate", "background_jobs"} {
+		if slices.Contains(explore.AllowedTools, forbidden) {
+			t.Errorf("explore tools unexpectedly include %q: %v", forbidden, explore.AllowedTools)
+		}
 	}
 
 	ind := m["independent"]
@@ -64,17 +81,19 @@ func TestBuiltins(t *testing.T) {
 
 func TestResolveNilKeepsBuiltins(t *testing.T) {
 	m := Resolve(nil)
-	if !slices.Equal(Names(m), []string{"auto", "independent", "plan"}) {
+	if !slices.Equal(Names(m), []string{"auto", "explore", "independent", "plan"}) {
 		t.Errorf("Names = %v", Names(m))
 	}
 }
 
-func TestPlanAgentOmitsGitReadonlyWhenGitMissing(t *testing.T) {
+func TestInspectionAgentsOmitGitReadonlyWhenGitMissing(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
-	plan := Builtins()["plan"]
-	if slices.Contains(plan.AllowedTools, "git_readonly") {
-		t.Fatalf("plan agent includes unavailable git_readonly: %v", plan.AllowedTools)
+	for _, name := range []string{"explore", "plan"} {
+		agent := Builtins()[name]
+		if slices.Contains(agent.AllowedTools, "git_readonly") {
+			t.Fatalf("%s agent includes unavailable git_readonly: %v", name, agent.AllowedTools)
+		}
 	}
 }
 
@@ -164,8 +183,10 @@ func TestBuiltinsWithSearchToolsOption(t *testing.T) {
 			t.Fatalf("%s tools missing grep with search_tools=both: %v", name, m[name].AllowedTools)
 		}
 	}
-	if !slices.Contains(m["plan"].AllowedTools, "grep") {
-		t.Fatalf("plan tools missing grep with search_tools=both: %v", m["plan"].AllowedTools)
+	for _, name := range []string{"explore", "plan"} {
+		if !slices.Contains(m[name].AllowedTools, "grep") {
+			t.Fatalf("%s tools missing grep with search_tools=both: %v", name, m[name].AllowedTools)
+		}
 	}
 }
 
@@ -196,6 +217,29 @@ func TestParseMCPToolsMode(t *testing.T) {
 	}
 	if _, err := ParseMCPToolsMode("bogus"); err == nil {
 		t.Fatal("ParseMCPToolsMode(bogus) succeeded, want error")
+	}
+}
+
+func TestValidateRequiresParentFacingDescription(t *testing.T) {
+	for _, description := range []string{"", " \t\n "} {
+		m := Resolve(map[string]FileDefinition{"review": {Description: description}})
+		err := Validate(m)
+		if err == nil || !strings.Contains(err.Error(), `agent "review"`) || !strings.Contains(err.Error(), "description must state when the parent should use it") {
+			t.Fatalf("Validate description %q error = %v", description, err)
+		}
+	}
+
+	m := Resolve(map[string]FileDefinition{"review": {Description: "Use after implementation for an independent correctness review."}})
+	if err := Validate(m); err != nil {
+		t.Fatalf("Validate useful custom description: %v", err)
+	}
+
+	m = Resolve(map[string]FileDefinition{"explore": {Prompt: "custom exploration"}})
+	if err := Validate(m); err != nil {
+		t.Fatalf("built-in override should inherit description: %v", err)
+	}
+	if m["explore"].Description != Builtins()["explore"].Description {
+		t.Fatalf("explore description = %q, want inherited built-in description", m["explore"].Description)
 	}
 }
 
@@ -244,7 +288,7 @@ func TestPlanToolsIncludeRecordPlanAndRequestImplementation(t *testing.T) {
 
 func TestNamesSorted(t *testing.T) {
 	m := Resolve(map[string]FileDefinition{"zz": {}, "aa": {}})
-	if got := Names(m); !slices.Equal(got, []string{"aa", "auto", "independent", "plan", "zz"}) {
+	if got := Names(m); !slices.Equal(got, []string{"aa", "auto", "explore", "independent", "plan", "zz"}) {
 		t.Errorf("Names = %v", got)
 	}
 }

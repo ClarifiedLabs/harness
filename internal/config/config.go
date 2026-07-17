@@ -88,6 +88,7 @@ type Config struct {
 	CompactSummaryMaxTokens   int               `json:"compact_summary_max_tokens"`    // config-only; 0 = agent default
 	CompactToolResultMaxBytes int               `json:"compact_tool_result_max_bytes"` // config-only; 0 = agent default, negative disables
 	DelegateMaxTurns          int               `json:"delegate_max_turns"`            // config-only; default 20, per delegate call cap
+	DelegateMaxDepth          int               `json:"delegate_max_depth"`            // config-only; default 3, root depth is 0
 	ResponsesStateful         bool              `json:"responses_stateful"`            // -responses-stateful
 	NoSteer                   bool              `json:"no_steer"`                      // -no-steer: disable mid-turn steering (queue during-turn input for the next turn)
 
@@ -236,6 +237,7 @@ const (
 	defaultMaxTurns           = 250
 	defaultContextWindow      = 256_000
 	defaultDelegateMaxTurns   = 20
+	defaultDelegateMaxDepth   = 3
 	defaultToolTimeoutSeconds = 600
 	DefaultSerenaCommand      = "serena"
 	TimestampShort            = "short"
@@ -314,6 +316,7 @@ type fileConfig struct {
 	CompactSummaryMaxTokens   *int                       `json:"compact_summary_max_tokens"`
 	CompactToolResultMaxBytes *int                       `json:"compact_tool_result_max_bytes"`
 	DelegateMaxTurns          *int                       `json:"delegate_max_turns"`
+	DelegateMaxDepth          *int                       `json:"delegate_max_depth"`
 	ResponsesStateful         *bool                      `json:"responses_stateful"`
 	NoSteer                   *bool                      `json:"no_steer"`
 	Verbose                   *bool                      `json:"verbose"`
@@ -538,6 +541,10 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	c.DelegateMaxTurns = intValue(fc.DelegateMaxTurns, defaultDelegateMaxTurns)
 	if c.DelegateMaxTurns <= 0 {
 		return Config{}, fmt.Errorf("delegate_max_turns must be positive")
+	}
+	c.DelegateMaxDepth = intValue(fc.DelegateMaxDepth, defaultDelegateMaxDepth)
+	if c.DelegateMaxDepth <= 0 {
+		return Config{}, fmt.Errorf("delegate_max_depth must be positive")
 	}
 	c.ResponsesStateful = resolveBool(set["responses-stateful"], *f.responsesStateful,
 		getenv("HARNESS_RESPONSES_STATEFUL"), fc.ResponsesStateful, true)
@@ -1057,7 +1064,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.imageDetail = fs.String("image-detail", "auto", "default image detail: auto, low, high, or original")
 	f.images = &imageVals
 	fs.Var(&imageVals, "image", "attach an image in one-shot mode; repeatable; optionally detail:path")
-	f.agent = fs.String("agent", "", "agent: auto, plan, independent, or a config-defined agent (default auto)")
+	f.agent = fs.String("agent", "", "agent: auto, explore, plan, independent, or a config-defined agent (default auto)")
 	f.handoffAgent = fs.String("handoff-agent", "", "agent a plan->implementation handoff switches to by default (default auto)")
 	f.searchTools = fs.String("search-tools", "auto", "search tools to expose: auto, grep, rg, or both")
 	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")

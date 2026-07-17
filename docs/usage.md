@@ -116,7 +116,7 @@ interrupted.
 -no-steer         disable mid-turn steering: queue during-turn input for the next turn instead of injecting it into the running turn (default off; see "Mid-turn steering")
 -image-detail <level>   default image detail: auto, low, high, or original
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
--agent <name>     agent: auto (default), plan, independent, or a config-defined agent
+-agent <name>     agent: auto (default), explore, plan, independent, or a config-defined agent
 -search-tools <mode>   search tools to expose: auto, grep, rg, or both
 -web-search <mode>     server-side web search: off or auto (default off)
 -v                show tool result snippets (first ~5 lines, dimmed) and tool-call progress details
@@ -224,7 +224,8 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   `HARNESS_*` env vars. `read_file` defaults to 500 lines and a 32 KB result cap;
   configure `read_file_default_limit`, `read_file_result_max_bytes`, and
   `read_file_result_max_lines`, or matching `HARNESS_*` env vars. The delegate
-  tool also has `delegate_max_turns` as a config-file-only cap.
+  tool also has config-file-only `delegate_max_turns` (per-child model-turn cap)
+  and `delegate_max_depth` (recursive depth cap, root depth `0`).
 - Tool-surface limits for MCP and LSP are config-file-only: `mcp.max_tools` caps
   how many discovered remote MCP tools are auto-exposed (`0` = unlimited),
   `mcp.disabled_servers` is a list of remote MCP server names dropped from
@@ -453,16 +454,22 @@ instructions and optional provider/model overrides. Select one with
 `-agent <name>`, `HARNESS_AGENT`, or `agent` in the config file. Switch
 mid-session with `/agent <name>`.
 
-Three agents are built in:
+Four agents are built in:
 
 | agent | tools | behavior |
 |---|---|---|
 | `auto` | all available built-in tools plus discovered MCP tools, including `delegate` and background job tools | the default; the model decides what to do |
+| `explore` | read-only inspection/search tools, `web_fetch`, optional `git_readonly`, and read-only MCP tools; no mutation, todo, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
 | `plan` | inspection tools, read-only MCP tools, `write_tmp_file`, `update_todos`, `delegate`, and `background_jobs` | collaborate on a plan without modifying the project |
 | `independent` | all available built-in tools plus discovered MCP tools, including `delegate` and background job tools | complete the task end-to-end without pausing for input |
 
 Define new agents or override built-ins in the config file under `agents`.
-Entries field-level merge onto a built-in of the same name:
+**Breaking configuration rule:** every new custom agent must have a nonblank
+`description` that tells the parent *when to use it*. Startup, `--agents`, and
+`--show-config` fail when this selection metadata is missing or whitespace-only;
+there is no generated fallback. An override of `auto`, `explore`, `plan`, or
+`independent` may omit `description` and inherit the built-in value. Other fields
+continue to merge onto a built-in of the same name:
 
 ```json
 {
@@ -470,7 +477,7 @@ Entries field-level merge onto a built-in of the same name:
   "agents": {
     "plan": { "prompt": "@~/.config/harness/plan-prompt.md" },
     "security_review": {
-      "description": "Review for concrete security issues.",
+      "description": "Use after implementation for an independent review of concrete security issues.",
       "allowed_tools": ["read_file", "list_dir", "grep", "git_readonly"],
       "mcp_tools": "read_only",
       "provider": "anthropic",

@@ -80,6 +80,16 @@ type RequestContextProvider interface {
 	RequestContext() []string
 }
 
+// TurnWorkCoordinator is implemented by sinks that own background work whose
+// results must be incorporated before the current parent turn may finish.
+// Usage is drained exactly once into the parent turn; completion context is
+// delivered separately through RequestContextProvider.
+type TurnWorkCoordinator interface {
+	PendingTurnWork() bool
+	WaitForTurnWork(context.Context) (llm.Usage, error)
+	DrainTurnWorkUsage() llm.Usage
+}
+
 // SteerInput is a prepared mid-turn steering message. Text and images are
 // appended as a RoleUser transcript message when a tool round gives the loop a
 // chance to inject it; RequestContext is visible to subsequent model requests in
@@ -823,8 +833,9 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 	var wastedTotal llm.Usage // tokens spent on retried-and-discarded model-turn attempts (r51+r52)
 	appendBoundary := 0       // transcript length measured by lastInput (drives the r44 trigger)
 	var steerContext []string
+	forceTurnWorkSynthesis := false
 
-	for unlimited || modelTurns < a.maxTurns {
+	for unlimited || modelTurns < a.maxTurns || forceTurnWorkSynthesis {
 		// Live-transcript retention (design §12, r9+r20): shrink stale large
 		// tool outputs and aged images before building the request, so they are
 		// not re-sent verbatim every turn. Pure local edit, invariant-preserving.
@@ -878,6 +889,12 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		// remember its length so the next trigger only re-estimates what gets
 		// appended after the response we are about to measure.
 		appendBoundary = len(a.transcript)
+		// RequestContext above may have drained a just-completed delegate report.
+		// Fold its usage before the provider call and remember whether older
+		// join-required work is still running during this parent model round.
+		total = add(total, drainTurnWorkUsage(sink))
+		pendingBeforeRequest := pendingTurnWork(sink)
+		forceTurnWorkSynthesis = false
 		res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)
 		if err != nil && !res.hasPartialOutput() {
 			if learned, ok := contextOverflowWindow(err); ok {
@@ -944,6 +961,24 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		a.updateResponseState(res)
 
 		if res.stopReason != llm.StopToolUse {
+			// A model may try to finalize while background delegates are still
+			// running. Join them, then issue another model request with their reports
+			// injected as request context so the parent actually synthesizes them.
+			if pendingTurnWork(sink) {
+				usage, waitErr := waitForTurnWork(ctx, sink)
+				total = add(total, usage)
+				if waitErr != nil {
+					sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+					return waitErr
+				}
+				a.transcript = append(a.transcript, a.textMessage(llm.RoleUser, "[background delegates completed; synthesize their reports from request context before finishing]"))
+				if err := a.validateTranscript("after background delegate join"); err != nil {
+					sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+					return err
+				}
+				forceTurnWorkSynthesis = true
+				continue
+			}
 			if notice := stopReasonNotice(res.stopReason); notice != "" {
 				sink.Notice(notice)
 			}
@@ -990,6 +1025,20 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		if err := a.validateTranscript("after tool results"); err != nil {
 			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
 			return err
+		}
+
+		// Give a newly launched background delegate one subsequent parent model
+		// round for useful independent work. If work was already pending before
+		// this request, join it now and synthesize its injected report next.
+		if (pendingBeforeRequest || (!unlimited && modelTurns >= a.maxTurns)) && pendingTurnWork(sink) {
+			usage, waitErr := waitForTurnWork(ctx, sink)
+			total = add(total, usage)
+			if waitErr != nil {
+				sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+				return waitErr
+			}
+			forceTurnWorkSynthesis = true
+			continue
 		}
 
 		// Runaway guardrails (design §8.1). The transcript now ends on a closed
@@ -1086,6 +1135,18 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			break
 		}
 	}
+
+	// Budget/guard exits can bypass the normal synthesis continuation. They still
+	// must not abandon join-required delegates or lose their spend.
+	if pendingTurnWork(sink) {
+		usage, waitErr := waitForTurnWork(ctx, sink)
+		total = add(total, usage)
+		if waitErr != nil {
+			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+			return waitErr
+		}
+	}
+	total = add(total, drainTurnWorkUsage(sink))
 
 	// Post-turn compaction trigger (design §12, §8.1): fires after the turn
 	// completes, before returning to the prompt. The summary call's usage folds
@@ -1369,6 +1430,27 @@ func resultBlock(r llm.ToolResult) llm.ContentBlock {
 		ResultText:  r.Text,
 		ResultError: r.IsError,
 	}
+}
+
+func pendingTurnWork(sink EventSink) bool {
+	coordinator, ok := sink.(TurnWorkCoordinator)
+	return ok && coordinator.PendingTurnWork()
+}
+
+func waitForTurnWork(ctx context.Context, sink EventSink) (llm.Usage, error) {
+	coordinator, ok := sink.(TurnWorkCoordinator)
+	if !ok {
+		return llm.Usage{}, nil
+	}
+	return coordinator.WaitForTurnWork(ctx)
+}
+
+func drainTurnWorkUsage(sink EventSink) llm.Usage {
+	coordinator, ok := sink.(TurnWorkCoordinator)
+	if !ok {
+		return llm.Usage{}
+	}
+	return coordinator.DrainTurnWorkUsage()
 }
 
 func (a *Agent) requestContext(extraContext []string, sink EventSink) []string {

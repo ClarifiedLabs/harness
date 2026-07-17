@@ -39,6 +39,12 @@ func newOK(name, out string) fakeTool {
 	}
 }
 
+type preservingFakeTool struct {
+	fakeTool
+}
+
+func (preservingFakeTool) PreserveSchemaDescriptions() bool { return true }
+
 type meteredFakeTool struct {
 	fakeTool
 	result MeteredResult
@@ -100,6 +106,23 @@ func TestRegistrySpecsStripSchemaDescriptions(t *testing.T) {
 	want := `{"properties":{"name":{"type":"string"}},"type":"object"}`
 	if string(specs[0].Parameters) != want {
 		t.Fatalf("schema = %s, want %s", specs[0].Parameters, want)
+	}
+}
+
+func TestRegistrySpecsCanPreserveSchemaDescriptions(t *testing.T) {
+	r := &Registry{}
+	r.Register(preservingFakeTool{fakeTool: fakeTool{
+		name:   "dynamic_catalog",
+		desc:   "catalog tool",
+		schema: `{"type":"object","properties":{"agent":{"type":"string","description":"Available agents"}}}`,
+		run: func(context.Context, json.RawMessage) (string, error) {
+			return "ok", nil
+		},
+	}})
+
+	specs := r.Specs()
+	if !strings.Contains(string(specs[0].Parameters), `"description":"Available agents"`) {
+		t.Fatalf("schema description was stripped despite opt-in: %s", specs[0].Parameters)
 	}
 }
 

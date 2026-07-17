@@ -62,15 +62,21 @@ type FileMutationReporter interface {
 type BackgroundJobRequest struct {
 	Kind        string
 	Description string
+	Agent       string
+	// WaitForTurn marks work whose result must be incorporated before the parent
+	// agent may finish its current turn. Ordinary background commands leave this
+	// false; background delegates set it so the parent joins and synthesizes them.
+	WaitForTurn bool
 	Run         func(context.Context, string) (BackgroundJobResult, error)
 }
 
 // BackgroundJobResult is the model-facing outcome of a completed background
 // tool job. TranscriptPath is for jobs, such as delegate agents, that persist a
-// separate transcript.
+// separate transcript. Usage carries nested model spend back to the parent turn.
 type BackgroundJobResult struct {
 	Text           string
 	TranscriptPath string
+	Usage          llm.Usage
 }
 
 // BackgroundJobInfo is the minimal start acknowledgement a tool needs to return
@@ -84,6 +90,13 @@ type BackgroundJobInfo struct {
 // into tools that opt into background execution.
 type BackgroundJobStarter interface {
 	StartBackgroundJob(BackgroundJobRequest) (BackgroundJobInfo, error)
+}
+
+// SchemaDescriptionPreserver is an optional tool capability for the rare case
+// where JSON-schema field descriptions carry essential dynamic model-facing
+// metadata. Most tools omit it so Registry.Specs strips those descriptions.
+type SchemaDescriptionPreserver interface {
+	PreserveSchemaDescriptions() bool
 }
 
 // Registry is an ordered set of tools. Order is preserved so Specs and the
@@ -435,10 +448,14 @@ func (r *Registry) Specs() []llm.ToolSchema {
 	specs := make([]llm.ToolSchema, 0, len(r.order))
 	for _, name := range r.order {
 		t := r.tools[name]
+		parameters := modelSchema(t.Schema())
+		if preserver, ok := t.(SchemaDescriptionPreserver); ok && preserver.PreserveSchemaDescriptions() {
+			parameters = compactSchema(t.Schema())
+		}
 		specs = append(specs, llm.ToolSchema{
 			Name:        t.Name(),
 			Description: t.Description(),
-			Parameters:  modelSchema(t.Schema()),
+			Parameters:  parameters,
 		})
 	}
 	return specs

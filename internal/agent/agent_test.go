@@ -74,6 +74,40 @@ func (s *recordSink) TurnComplete(u TurnUsage) {
 	s.modelTurnCounts = append(s.modelTurnCounts, u.ModelTurns)
 }
 
+type turnWorkSink struct {
+	recordSink
+	pending        bool
+	contextPending bool
+	usage          llm.Usage
+	usageDelivered bool
+	waits          int
+}
+
+func (s *turnWorkSink) RequestContext() []string {
+	if !s.contextPending {
+		return nil
+	}
+	s.contextPending = false
+	return []string{"[background delegate completed]\nchild report"}
+}
+
+func (s *turnWorkSink) PendingTurnWork() bool {
+	return s.pending || s.contextPending
+}
+
+func (s *turnWorkSink) WaitForTurnWork(context.Context) (llm.Usage, error) {
+	s.waits++
+	s.pending = false
+	s.contextPending = true
+	if s.usageDelivered {
+		return llm.Usage{}, nil
+	}
+	s.usageDelivered = true
+	return s.usage, nil
+}
+
+func (s *turnWorkSink) DrainTurnWorkUsage() llm.Usage { return llm.Usage{} }
+
 type diffRecordSink struct {
 	recordSink
 	diffs []string
@@ -867,6 +901,43 @@ func TestToolUsageIncludedInTurnUsage(t *testing.T) {
 	got := sink.turnUsage[0].Usage
 	if got.InputTokens != 100 || got.OutputTokens != 36 {
 		t.Fatalf("turn usage = %+v, want provider 30/6 + delegate 70/30", got)
+	}
+}
+
+func TestPendingTurnWorkForcesSynthesisAndCountsUsage(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("premature final")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 10, OutputTokens: 2},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("synthesized child report")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 20, OutputTokens: 4},
+		},
+	)
+	a := newAgent(fp, &tools.Registry{}, Options{MaxTurns: 1})
+	sink := &turnWorkSink{
+		pending: true,
+		usage:   llm.Usage{InputTokens: 70, OutputTokens: 30},
+	}
+
+	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if sink.waits != 1 || len(fp.Requests) != 2 {
+		t.Fatalf("waits=%d requests=%d, want one join and synthesis request", sink.waits, len(fp.Requests))
+	}
+	if got := strings.Join(fp.Requests[1].RequestContext, "\n"); !strings.Contains(got, "child report") {
+		t.Fatalf("synthesis request context = %q, want child report", got)
+	}
+	if len(sink.turnUsage) != 1 {
+		t.Fatalf("turn usage events = %d, want 1", len(sink.turnUsage))
+	}
+	got := sink.turnUsage[0].Usage
+	if got.InputTokens != 100 || got.OutputTokens != 36 {
+		t.Fatalf("turn usage = %+v, want provider 30/6 + background child 70/30", got)
 	}
 }
 

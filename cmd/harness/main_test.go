@@ -1079,7 +1079,7 @@ func TestRunShowConfigIncludesRuntimeDefaults(t *testing.T) {
 	if !ok {
 		t.Fatalf("agents = %T, want object\n%s", got["agents"], out.String())
 	}
-	for _, name := range []string{"auto", "independent", "plan"} {
+	for _, name := range []string{"auto", "explore", "independent", "plan"} {
 		if _, ok := agents[name]; !ok {
 			t.Fatalf("agents missing built-in %q\n%s", name, out.String())
 		}
@@ -1121,6 +1121,7 @@ func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
 	for _, want := range []string{
 		"agents:\n",
 		"auto                 [default model] [mcp: all] Default agent; the model decides what to do.",
+		"explore              [default model] [mcp: read_only] Use proactively for broad search",
 		"independent          [default model] [mcp: all] Complete the task end to end without pausing for input.",
 		"plan                 [default model] [mcp: read_only] Collaborate on an implementation plan without modifying the project.",
 		"security (selected)  [openai/gpt-5.5] [mcp: all] Security review",
@@ -1472,6 +1473,43 @@ func TestRunCheckModelProxyFailureExitsRuntime(t *testing.T) {
 	}
 }
 
+func TestRunRejectsCustomAgentWithoutUsefulDescription(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		description string
+	}{
+		{name: "omitted"},
+		{name: "whitespace", description: `,"description":"  \t \n "`},
+	} {
+		for _, mode := range []string{"startup", "show-config"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				cfgPath := filepath.Join(t.TempDir(), "config.json")
+				body := `{"agents":{"review":{"allowed_tools":["read_file"]` + tc.description + `}}}`
+				if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+					t.Fatalf("write config: %v", err)
+				}
+				args := []string{"-config", cfgPath}
+				if mode == "startup" {
+					args = append(args, "-model", "claude-opus-4-8", "-p", "hi")
+				} else {
+					args = append(args, "--show-config")
+				}
+				fp := llmtest.New("fake")
+				env, _, errw, _ := fakeProviderEnv(t, args, fp, "")
+				if code := run(env); code != ui.ExitUsage {
+					t.Fatalf("exit code = %d, want usage; stderr=%q", code, errw.String())
+				}
+				if got := errw.String(); !strings.Contains(got, `agent "review"`) || !strings.Contains(got, "description must state when the parent should use it") {
+					t.Fatalf("stderr = %q, want required-description error", got)
+				}
+				if len(fp.Requests) != 0 {
+					t.Fatalf("invalid agent should fail before model request, got %d", len(fp.Requests))
+				}
+			})
+		}
+	}
+}
+
 func TestRunShowConfigIncludesEffectiveAgentsAndSystemPrompt(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -1533,7 +1571,7 @@ func TestRunShowConfigIncludesEffectiveAgentsAndSystemPrompt(t *testing.T) {
 	if !ok {
 		t.Fatalf("agents = %T, want object\n%s", got["agents"], out.String())
 	}
-	for _, name := range []string{"auto", "independent", "plan", "review"} {
+	for _, name := range []string{"auto", "explore", "independent", "plan", "review"} {
 		if _, ok := agents[name]; !ok {
 			t.Fatalf("agents missing %q\n%s", name, out.String())
 		}
@@ -2360,22 +2398,30 @@ func toolNames(req llm.Request) []string {
 
 func delegateAgentEnum(t *testing.T, req llm.Request) []string {
 	t.Helper()
+	enum, _ := delegateAgentProperty(t, req)
+	return enum
+}
+
+func delegateAgentProperty(t *testing.T, req llm.Request) ([]string, string) {
+	t.Helper()
 	for _, spec := range req.Tools {
 		if spec.Name != "delegate" {
 			continue
 		}
 		var schema struct {
 			Properties map[string]struct {
-				Enum []string `json:"enum"`
+				Enum        []string `json:"enum"`
+				Description string   `json:"description"`
 			} `json:"properties"`
 		}
 		if err := json.Unmarshal(spec.Parameters, &schema); err != nil {
 			t.Fatalf("delegate schema JSON: %v", err)
 		}
-		return schema.Properties["agent"].Enum
+		agent := schema.Properties["agent"]
+		return agent.Enum, agent.Description
 	}
 	t.Fatalf("request did not advertise delegate: %v", toolNames(req))
-	return nil
+	return nil, ""
 }
 
 // Default (auto) agent advertises the default tool set plus delegate and carries
@@ -2391,8 +2437,8 @@ func TestRunDefaultAgentTools(t *testing.T) {
 	if got := toolNames(fp.Requests[0]); !slices.Equal(got, want) {
 		t.Errorf("default agent tools = %v, want %v", got, want)
 	}
-	if strings.Contains(fp.Requests[0].System, "plan agent") || strings.Contains(fp.Requests[0].System, "independent agent") {
-		t.Errorf("default agent should carry no agent section; system=%q", fp.Requests[0].System)
+	if strings.Contains(fp.Requests[0].System, "plan agent") || strings.Contains(fp.Requests[0].System, "independent agent") || strings.Contains(fp.Requests[0].System, prompts.DelegateChild()) {
+		t.Errorf("default root agent should carry neither an agent section nor the child suffix; system=%q", fp.Requests[0].System)
 	}
 }
 
@@ -2419,7 +2465,7 @@ func TestRunDelegateToolUsesCurrentAgentTools(t *testing.T) {
 			Usage:  llm.Usage{InputTokens: 20, OutputTokens: 4},
 		},
 	)
-	env, out, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-p", "hi"}, fp, "")
+	env, out, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-system-prompt", "CUSTOM ROOT SYSTEM", "-p", "hi"}, fp, "")
 
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
@@ -2441,11 +2487,53 @@ func TestRunDelegateToolUsesCurrentAgentTools(t *testing.T) {
 	if got := fp.Requests[1].Messages[0].Content[0].Text; got != "inspect only" {
 		t.Fatalf("child task = %q", got)
 	}
+	if !strings.Contains(fp.Requests[0].System, "CUSTOM ROOT SYSTEM") {
+		t.Fatalf("root system missing configured custom prompt: %q", fp.Requests[0].System)
+	}
+	if !strings.HasSuffix(fp.Requests[1].System, prompts.DelegateChild()) || !strings.Contains(fp.Requests[1].System, "CUSTOM ROOT SYSTEM") {
+		t.Fatalf("child system should contain custom root prompt followed by delegate suffix: %q", fp.Requests[1].System)
+	}
+	if strings.Contains(fp.Requests[0].System, prompts.DelegateChild()) {
+		t.Fatalf("custom root system unexpectedly contains delegate child suffix: %q", fp.Requests[0].System)
+	}
 	if !strings.Contains(errw.String(), "delegate] task=\"inspect only\"") {
 		t.Fatalf("delegate tool result was not rendered: %q", errw.String())
 	}
 	if !strings.Contains(errw.String(), "60 (60) in / 13 (13) out") {
 		t.Fatalf("turn usage should include parent and child model calls, stderr=%q", errw.String())
+	}
+}
+
+func TestRunDelegateMaxDepthRemovesDelegateFromDeepestChild(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				ToolID:    "call_delegate",
+				ToolName:  "delegate",
+				ToolInput: json.RawMessage(`{"task":"inspect"}`),
+			}},
+			Stop: llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "child report"}}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "parent done"}}, Stop: llm.StopEndTurn},
+	)
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"delegate_max_depth":1}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-config", cfgPath, "-model", "claude-opus-4-8", "-p", "hi"}, fp, "")
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want parent, child, parent", len(fp.Requests))
+	}
+	if !slices.Contains(toolNames(fp.Requests[0]), "delegate") {
+		t.Fatalf("root should advertise delegate: %v", toolNames(fp.Requests[0]))
+	}
+	if slices.Contains(toolNames(fp.Requests[1]), "delegate") {
+		t.Fatalf("deepest child should not advertise delegate: %v", toolNames(fp.Requests[1]))
 	}
 }
 
@@ -2469,10 +2557,18 @@ func TestRunDelegateSchemaListsOnlyDelegatableAgents(t *testing.T) {
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	got := delegateAgentEnum(t, fp.Requests[0])
-	want := []string{"plan", "style"}
+	got, description := delegateAgentProperty(t, fp.Requests[0])
+	want := []string{"explore", "plan", "style"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("delegate agent enum = %v, want %v", got, want)
+	}
+	for _, name := range got {
+		if !strings.Contains(description, "\n- "+name+": ") {
+			t.Fatalf("delegate enum agent %q missing catalog entry: %q", name, description)
+		}
+	}
+	if strings.Contains(description, "independent:") {
+		t.Fatalf("delegate catalog leaked incompatible independent agent: %q", description)
 	}
 }
 
@@ -2497,7 +2593,7 @@ func TestRunDelegateSchemaAutoListsOnlyAutoSubsetAgents(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
 	got := delegateAgentEnum(t, fp.Requests[0])
-	want := []string{"auto", "independent", "style"}
+	want := []string{"auto", "explore", "independent", "style"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("delegate agent enum = %v, want %v", got, want)
 	}
@@ -2559,6 +2655,7 @@ func TestRunDelegateNamedSubsetAgentFromPlanUsesDefinition(t *testing.T) {
 	cfg := `{
 		"agents":{
 			"style":{
+				"description":"Review style after implementation",
 				"allowed_tools":["read_file"],
 				"prompt":"STYLE AGENT PROMPT"
 			}
@@ -2750,6 +2847,21 @@ func TestRunPlanAgentRestrictsToolsAndAddsPrompt(t *testing.T) {
 	}
 }
 
+func TestRunExploreAgentRestrictsToolsAndAddsPrompt(t *testing.T) {
+	fp := llmtest.New("fake", okStepWithUsage(1, 1))
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-agent", "explore", "-p", "hi"}, fp, "")
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if got, want := toolNames(fp.Requests[0]), expectedExploreToolNames(); !slices.Equal(got, want) {
+		t.Fatalf("explore agent tools = %v, want %v", got, want)
+	}
+	if !strings.Contains(fp.Requests[0].System, "explore agent") {
+		t.Fatalf("explore agent system prompt missing role guidance: %q", fp.Requests[0].System)
+	}
+}
+
 // An unknown agent is a startup usage error that lists the available agents.
 func TestRunUnknownAgentIsUsageError(t *testing.T) {
 	fp := llmtest.New("fake")
@@ -2927,6 +3039,7 @@ func TestRunDelegateNamedAgentUsesDefinition(t *testing.T) {
 	cfg := `{
 		"agents":{
 			"style":{
+				"description":"Review style after implementation",
 				"provider":"openai",
 				"model":"gpt-5.5",
 				"allowed_tools":["read_file"],
@@ -3082,7 +3195,7 @@ func toolsOutputHasDescribedTool(output, name string) bool {
 	return false
 }
 
-func expectedPlanToolNames() []string {
+func expectedExploreToolNames() []string {
 	names := []string{"read_file", "list_dir"}
 	if tools.RipgrepAvailable() {
 		names = append(names, "rg")
@@ -3093,6 +3206,11 @@ func expectedPlanToolNames() []string {
 	if tools.GitAvailable() {
 		names = append(names, "git_readonly")
 	}
+	return names
+}
+
+func expectedPlanToolNames() []string {
+	names := expectedExploreToolNames()
 	// The realized tool list follows catalog registration order, where the
 	// main-registered tools (update_todos, delegate, background_jobs, record_plan,
 	// request_implementation) come after the built-in catalog tools.
@@ -3100,7 +3218,11 @@ func expectedPlanToolNames() []string {
 }
 
 func expectedDefaultToolNames() []string {
-	return append(tools.DefaultNames(), "update_todos", "delegate", "background_jobs", "record_plan")
+	names := tools.DefaultNames()
+	if tools.GitAvailable() && !slices.Contains(names, "git_readonly") {
+		names = append(names, "git_readonly")
+	}
+	return append(names, "update_todos", "delegate", "background_jobs", "record_plan")
 }
 
 func TestResolveCatalogSelectionHonorsExplicitProvider(t *testing.T) {

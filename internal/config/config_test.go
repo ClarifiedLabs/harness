@@ -906,6 +906,34 @@ func TestDelegateMaxTurnsMustBePositive(t *testing.T) {
 	}
 }
 
+func TestDelegateMaxDepthConfigOnly(t *testing.T) {
+	c, err := Load(nil, noEnv, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.DelegateMaxDepth != 3 {
+		t.Fatalf("default delegate max depth = %d, want 3", c.DelegateMaxDepth)
+	}
+
+	cfgPath := writeConfig(t, `{"delegate_max_depth":5}`)
+	c, err = Load(nil, noEnv, cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.DelegateMaxDepth != 5 {
+		t.Fatalf("file delegate max depth = %d, want 5", c.DelegateMaxDepth)
+	}
+}
+
+func TestDelegateMaxDepthMustBePositive(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		cfgPath := writeConfig(t, `{"delegate_max_depth":`+value+`}`)
+		if _, err := Load(nil, noEnv, cfgPath); err == nil {
+			t.Fatalf("delegate_max_depth=%s should be invalid", value)
+		}
+	}
+}
+
 func TestBoolFlagsParsed(t *testing.T) {
 	c, err := Load([]string{"-model", "gpt-5.5", "-no-env", "-no-color", "-v", "-q"}, noEnv, "")
 	if err != nil {

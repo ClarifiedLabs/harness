@@ -751,7 +751,7 @@ that *have* a flag. A few knobs have no flag and resolve **env > config file > d
 MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, the global tool-result caps, and
 the per-tool `rg`/`grep`/`read_file` caps. Others
 (agent definitions, compaction knobs, `agents_md_warn_bytes`,
-`delegate_max_turns`) are config-file-only (listed below).
+`delegate_max_turns`, `delegate_max_depth`) are config-file-only (listed below).
 
 - Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_PROVIDER`, `HARNESS_MODEL`, plus
   most `HARNESS_*` equivalents for user-facing flags. `trace_proxy` /
@@ -785,7 +785,8 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   `HARNESS_RUN_COMMAND_BACKGROUND_TIMEOUT_SECONDS` env vars) override the
   built-in defaults of 120 s and 1200 s respectively; set to 0 to use the
   built-in values.
-  `delegate_max_turns` (default `20`) is config-only for the delegate tool.
+  `delegate_max_turns` (default `20`) and `delegate_max_depth` (default `3`,
+  root depth `0`) are config-only for the delegate tool. Both must be positive.
 - Hooks use inline `hooks` plus config-relative `hook_configs` files. They are
   additive in order: inline first, then each listed file. `--hooks <file>`
   replaces the configured hook set for one launch.
@@ -1633,28 +1634,53 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.14 `delegate`
 
-> Run a configured delegate agent on a self-contained task and return its final report.
+> Run a configured delegate agent with fresh context on a self-contained task and
+> return its final report. Use for broad/noisy investigation or bounded independent
+> review, not known-file lookups or tightly coupled blockers.
 
 | param | type | notes |
 |---|---|---|
-| `task` | string, required | complete task for the child agent |
-| `agent` | string | optional configured agent name; omitted uses the current active agent; schema enum contains only agents delegatable from the current parent tools |
+| `task` | string, required | complete child prompt: objective, scope, constraints, expected report, and verification |
+| `agent` | string | optional configured agent name; omitted uses the current active agent; remains a simple enum for provider compatibility |
 | `max_turns` | int | optional per-call model-turn cap; capped at `delegate_max_turns` |
+| `background` | bool | only for independent non-overlapping work; after one useful parent model round, harness joins outstanding delegates and requires synthesis; do not poll or duplicate |
+| `tools` | string[] | optional exact-name subset; the model-facing enum is the conservative intersection valid for every selectable agent, while omission gives the resolved child its full tool set; unknown names fail before launch |
 
 - Implemented in `internal/delegate`, not `internal/tools`, to avoid an import cycle:
   the delegate tool starts a child `agent.Agent`, while `internal/agent` already
   depends on `internal/tools` for dispatch.
+- The `agent` schema description appends a deterministic catalog with exact shape
+  `Available agents:\n- <name>: <one-line description>`. The enum and catalog
+  contain only candidates whose configured tools are a subset of the current
+  parent's live tools. Candidate descriptions are whitespace-normalized to one
+  line and individually capped at 240 bytes. Every enum value has one catalog
+  entry; incompatible names and descriptions are absent. `delegate` opts into
+  preserving schema descriptions in `tools.Registry.Specs`; other tools retain the
+  normal schema-description stripping behavior.
 - Child agents start with an empty transcript and use the requested agent
   definition's prompt, subset-validated tools, and optional provider/model. If no
   `agent` is provided, the child uses exactly the current parent agent's active
-  tools.
+  tools. `prompts/delegate-child.txt` is appended after that resolved system
+  prompt only in `Runner.Run`; root prompts, including a configured custom static
+  prompt, never receive it. The suffix says the child reports to the parent, owns
+  only its delegated scope, does not ask the user questions, returns an
+  evidence-backed report, and avoids recursive delegation by default.
 - A named child agent may only run when its configured tools are a subset of the
   current parent agent's active tools. Non-subset calls return a tool error before
-  any child model request is made.
-- If the child receives `delegate`, that delegate tool is rebound to the child's
-  runtime so recursive delegation is checked against the immediate parent's tools.
+  any child model request is made. This exact subset check remains the
+  capability-escalation guard.
+- Root depth is `0`. A launch is rejected before resolution/model I/O when the
+  current depth reaches `delegate_max_depth`; child runtimes increment depth, and
+  the deepest allowed child has `delegate` removed before its registry/specs are
+  built. If a child receives `delegate` at shallower depth, it is rebound to the
+  child's full runtime snapshot so recursive validation uses the immediate parent.
+- Root `max_turn_tokens` and `max_prompt_cost_usd` are copied into every child
+  `agent.Options`. They remain per-turn ceilings for each child, not a shared
+  hierarchy-wide budget. Provider/model output/context settings and recursive
+  runtime snapshots are preserved as before.
 - Child agents receive a private `update_todos` store when that tool is available;
-  child todo updates do not affect the parent session's todo list.
+  child todo updates do not affect the parent session's todo list. Foreground
+  delegates remain serialized because children share the checkout and may write.
 - The parent transcript records only the normal `delegate` tool call and compact result.
   Child transcripts are saved under `children/<child-id>/` in the parent session
   directory for forensics. Child token usage is reported through `MeteredTool` and
@@ -1680,10 +1706,17 @@ and token-accounting behavior as synchronous delegate.
   exit and cleared on `/clear`.
 - Completed job summaries are delivered once as request-only context to the parent
   agent, including the transcript path when one exists. They are not inserted into
-  the parent transcript. Output uses the same per-tool truncation limits as foreground
+  the parent transcript. Background delegates are marked join-required: the parent
+  may perform one subsequent useful model round, but cannot complete the turn until
+  all such delegates finish and a model request has received their reports for
+  synthesis. Ordinary background commands remain detached and may outlive the turn.
+  Output uses the same per-tool truncation limits as foreground
   dispatch; when truncated, the full result is archived under
   `artifacts/tool-results/` and the request context includes the same absolute path and
   targeted `read_file`/`rg` guidance as a foreground result.
+- Background delegate results carry child model usage through the manager exactly
+  once; the agent folds it into the parent turn and session totals before completion,
+  including failed child runs that returned partial usage.
 - Background jobs run in the same cwd/tool policy as ordinary tools. Harness
   serializes session/job metadata, not concurrent filesystem edits.
 
@@ -2335,7 +2368,7 @@ injectable), the retry clock, and `ValidateTranscript`.
 | `internal/retry` | `Next`: jitter bounds, 30s cap, Retry-After floor |
 | tools | table-driven against `t.TempDir()`; `grep` wrapper against the host CLI; optional `rg` registration with a fake executable on PATH; `git` against a scratch `git init` repo (skipped if git absent); `run_command` timeout via `sleep`; `apply_patch` at the tool level covers the Codex Add envelope, canonical `patch`, compatibility decoding paths, bare-string input, and conflicting-alias / parse-error format-hint paths, while `internal/tools/patch` covers parse + apply for create/update/delete/rename and first-rejection-leaves-file-untouched |
 | agent loop | `FakeProvider` scripts: multi-tool batches, error-result feedback (next request carries the error), max-turns stop, cancellation → transcript still re-sendable |
-| delegate | child-agent request shape, model-visible delegatable agent enum, parent-tool subset rejection, recursive delegate rebinding, private child todo stores, child transcript persistence, metered usage folded into parent turn totals |
+| delegate | child-agent request shape and child-only prompt suffix, model-visible compatible-agent enum/catalog (ordering, normalization, caps), parent-tool subset rejection, depth transitions/deepest-child removal, recursive runtime rebinding, inherited token/cost budgets, private child todo stores, child transcript persistence, metered usage folded into parent turn totals |
 | background | job start/completion, one-shot context delivery, notices, cancellation/errors, child transcript path preservation |
 | session | save→load→save round-trip; atomic rename leaves no `.tmp`; resume repair; cross-provider resume |
 | compaction | canned summary via FakeProvider; old messages collapse, last 4 turns kept; invariant holds |
@@ -2367,26 +2400,36 @@ reviewer, or the wide-open default without separate binaries.
 - **Built-ins:** `auto` (all available built-in tools plus discovered MCP tools,
   including `record_plan`, `delegate` and background job tools; its
   `prompts/agents/auto.txt` is a one-byte file — a single newline — that trims to
-  empty, so it contributes no prompt body), `plan` (inspection tools including the
-  configured search tool(s), optional `git_readonly` when git is installed,
-  read-only MCP tools, `write_tmp_file`, `record_plan`, `request_implementation`,
-  `delegate`, and background job tools, plus a planning prompt from
-  `prompts/agents/plan.txt`), and `independent` (all available built-in tools plus
-  discovered MCP tools, including `record_plan`, `delegate` and background job
-  tools, a complete-without-asking prompt from `prompts/agents/independent.txt`).
-  `record_plan` (§9.17) is in every default agent's set; `request_implementation`
-  (§9.18) is plan-only.
+  empty, so it contributes no prompt body), `explore` (read-only `read_file`,
+  `list_dir`, configured search tool(s), `web_fetch`, optional `git_readonly`, and
+  read-only MCP tools; no mutation, implementation handoff, todos, background jobs,
+  or delegation; prompt in `prompts/agents/explore.txt`), `plan` (the shared
+  inspection tools, read-only MCP tools, `write_tmp_file`, `record_plan`,
+  `request_implementation`, `update_todos`, `delegate`, and background job tools,
+  plus `prompts/agents/plan.txt`), and `independent` (all available built-in tools
+  plus discovered MCP tools, including `record_plan`, `delegate` and background
+  job tools, a complete-without-asking prompt from
+  `prompts/agents/independent.txt`). `auto`/`independent` also expose
+  `git_readonly` when available so the exact subset guard permits delegating to
+  `explore`. `record_plan` (§9.17) is in every default agent's set;
+  `request_implementation` (§9.18) is plan-only.
+- **Descriptions are required selection metadata:** after resolution, every agent
+  must have a nonblank trimmed `description` stating when a parent should use it.
+  A new custom name without one is a fail-fast startup/`--agents`/`--show-config`
+  error; there is no warning, generated fallback, or compatibility shim.
 - **Config `agents`** entries **field-level merge** onto a built-in of the same name:
   a non-empty `description`, `allowed_tools`, `mcp_tools`, `prompt`, `provider`,
-  `model`, or `reasoning` replaces, and an omitted field inherits. A new name
-  defines a new agent (no `allowed_tools` ⇒ the full default set). Agent prompts
+  `model`, or `reasoning` replaces, and an omitted field inherits. Thus an override
+  of `auto`, `explore`, `plan`, or `independent` may inherit its built-in
+  description. A new name defines a new agent (no `allowed_tools` ⇒ the full
+  default set). Agent prompts
   accept `@file` and are expanded once at startup (fail-fast); relative config-file
   references resolve from the config file directory.
 - **MCP exposure:** `mcp_tools` is one of `disabled`, `read_only`, or `all` (with
   `read-only`/`readonly` accepted as aliases for `read_only`) and controls automatic
   exposure of discovered MCP tools. An invalid value is a fail-fast validation error
   (surfaced by `main`/`--show-config` after field-level merging). Built-ins default to
-  `all` for `auto`/`independent` and `read_only` for `plan`; a new agent with no
+  `all` for `auto`/`independent` and `read_only` for `explore`/`plan`; a new agent with no
   explicit `allowed_tools` defaults to `all`, while an explicit `allowed_tools`
   whitelist defaults to `disabled` unless `mcp_tools` opts it back in. Explicit
   `mcp__...` names in `allowed_tools` remain strict whitelist entries.

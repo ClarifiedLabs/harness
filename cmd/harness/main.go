@@ -540,6 +540,9 @@ func run(env environment) int {
 		ServerTools:       serverTools,
 		ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		Agent:             agentName,
+		Depth:             0,
+		MaxTurnTokens:     cfg.MaxTurnTokens,
+		MaxPromptCostUSD:  cfg.MaxPromptCostUSD,
 	})
 	// pendingMCP is assigned below (interactive REPL only) before any turn can run,
 	// so this closure — invoked lazily at delegation time — captures the live value.
@@ -551,6 +554,7 @@ func run(env environment) int {
 	}
 	delegateOpts := delegate.Options{
 		MaxTurns:                  cfg.DelegateMaxTurns,
+		MaxDepth:                  cfg.DelegateMaxDepth,
 		CompactKeepTurns:          cfg.CompactKeepTurns,
 		CompactSummaryMaxTokens:   cfg.CompactSummaryMaxTokens,
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
@@ -878,6 +882,9 @@ func run(env environment) int {
 		Agent:             agentName,
 		ToolNames:         activeToolNames,
 		SessionPath:       sessionPath,
+		Depth:             0,
+		MaxTurnTokens:     cfg.MaxTurnTokens,
+		MaxPromptCostUSD:  cfg.MaxPromptCostUSD,
 	})
 	if hookRunner != nil {
 		hookRunner.SetSession(sessionPath)
@@ -1817,7 +1824,7 @@ func delegateAgentCandidates(agents map[string]agentdef.Definition) []delegate.A
 	out := make([]delegate.AgentCandidate, 0, len(names))
 	for _, name := range names {
 		a := agents[name]
-		out = append(out, delegate.AgentCandidate{Name: name, ToolNames: a.AllowedTools})
+		out = append(out, delegate.AgentCandidate{Name: name, Description: a.Description, ToolNames: a.AllowedTools})
 	}
 	return out
 }

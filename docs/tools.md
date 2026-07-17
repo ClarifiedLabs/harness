@@ -89,8 +89,11 @@ the model can react to failing builds, tests, and searches.
 `run_command`, `grep`, `rg`, and `web_fetch` can set `background:true` to return
 a job id immediately. `delegate` can also run as a background child agent.
 Completed background job summaries are delivered once as request-only context to
-the parent agent. Jobs live only in the current harness process and are abandoned
-when that process exits.
+the parent agent. Background delegates are join-required: after one useful parent
+model round, harness waits for them and makes the parent synthesize their reports
+before ending the turn. Their model usage is included exactly once in parent
+turn/session totals. Ordinary background commands remain detached. Jobs live only
+in the current harness process and are abandoned when that process exits.
 
 ## File Mutation
 
@@ -103,14 +106,52 @@ repository-wide diff.
 
 ## Delegation
 
-`delegate` starts a child agent using the requested agent definition, or the
-current agent when omitted. The model-facing `agent` choices are limited to
-agents whose tools are a subset of the current parent agent's tools. Each
-delegate call runs for at most `delegate_max_turns` model turns by default.
+`delegate` starts a fresh-context child agent using the requested agent
+definition, or the current agent when omitted. The model-facing `agent` enum and
+its deterministic `Available agents:` catalog include only agents whose tools
+are a subset of the current parent's live tools. Agent descriptions are selection
+policy, not cosmetic labels: every new custom agent must provide a nonblank
+`description` stating when the parent should use it. Same-named built-in
+overrides may inherit the built-in description.
+
+Built-in child roles are:
+
+| agent | when to use |
+|---|---|
+| `explore` | broad code search, architecture/dependency tracing, root-cause investigation, or questions spanning many files; read-only and not intended for a known-file lookup |
+| `independent` | bounded end-to-end work that can proceed without parent or user input |
+| `plan` | collaborative read-only planning; available only when its complete tool set is a subset of the parent |
+| `auto` | the current general-purpose behavior |
+
+A delegated task should include the objective, scope, constraints, expected
+report, and verification. Children receive a child-only prompt reminding them
+that they report to the parent, own only the delegated scope, should not ask the
+user questions, and must return a concise evidence-backed report. The parent
+should synthesize and verify that report. Prefer direct tools for known files or
+symbols, one- or two-step tasks, immediate blockers, and tightly coupled work.
+
+Foreground delegates run in the ordinary serialized tool loop because children
+share the checkout and may write. Use `background:true` only for independent
+read-only or disjoint work while useful parent work remains. Completion is delivered automatically as one-shot request context; do not poll or
+duplicate a background child's work. Harness permits one subsequent useful parent
+model round, then joins outstanding background delegates and continues the parent
+for synthesis before allowing the turn to end.
+
+Each call runs for at most `delegate_max_turns` model turns (default `20`).
+Recursion starts at root depth `0` and is limited by `delegate_max_depth`
+(default `3`); the deepest child does not receive `delegate`, and an over-depth
+launch fails before a model request. Children inherit the root
+`max_turn_tokens` and `max_prompt_cost_usd` per-turn safety ceilings. These are
+per-child ceilings, not a hierarchy-wide shared budget.
 
 Child agents get private todo stores. Their transcripts are saved under
-`children/<child-id>/` alongside the parent session, and child token usage is
-included in turn/session usage.
+`children/<child-id>/` alongside the parent session. Foreground and background
+child token/cost usage is included exactly once in parent turn/session usage.
+
+Because JSON-schema composition is rejected by some providers, `delegate.tools`
+advertises only the conservative intersection of tool names supported by every
+currently selectable agent. Omit `tools` to give the chosen child role its full
+configured surface; runtime validation still rejects any explicit unsupported name.
 
 ## Parallelism
 

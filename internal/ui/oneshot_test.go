@@ -2,17 +2,39 @@ package ui
 
 import (
 	"bytes"
+	"context"
+	"iter"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"harness/internal/background"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/skills"
 	"harness/internal/todo"
 	"harness/internal/tools"
 )
+
+type releaseAfterFirstProvider struct {
+	*llmtest.FakeProvider
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *releaseAfterFirstProvider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
+	seq := p.FakeProvider.Stream(ctx, req)
+	return func(yield func(llm.StreamEvent, error) bool) {
+		defer p.once.Do(func() { close(p.release) })
+		for event, err := range seq {
+			if !yield(event, err) {
+				return
+			}
+		}
+	}
+}
 
 func TestOneShotAssistantTextOnStdoutNoiseOnStderr(t *testing.T) {
 	var out, errw bytes.Buffer
@@ -302,6 +324,62 @@ func TestOneShotDoesNotPrintTodoPromptStatus(t *testing.T) {
 	}
 	if got := errw.String(); strings.Contains(got, "Todos (1/2 done):") || strings.Contains(got, "[~] Testing") {
 		t.Fatalf("one-shot mode should not print the interactive todo prompt status:\n%s", got)
+	}
+}
+
+func TestOneShotWaitsForBackgroundDelegateSynthesizesAndCountsUsage(t *testing.T) {
+	var out, errw bytes.Buffer
+	release := make(chan struct{})
+	manager := background.NewManager(background.Options{})
+	_, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind:        "delegate",
+		Description: "inspect",
+		Agent:       "explore",
+		WaitForTurn: true,
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			<-release
+			return tools.BackgroundJobResult{
+				Text:  "child found the accounting path",
+				Usage: llm.Usage{InputTokens: 70, OutputTokens: 30},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	fp := &releaseAfterFirstProvider{
+		FakeProvider: llmtest.New("fake",
+			llmtest.Step{
+				Events: []llm.StreamEvent{textDelta("premature parent answer")},
+				Stop:   llm.StopEndTurn,
+				Usage:  llm.Usage{InputTokens: 10, OutputTokens: 2},
+			},
+			llmtest.Step{
+				Events: []llm.StreamEvent{textDelta("synthesized child result")},
+				Stop:   llm.StopEndTurn,
+				Usage:  llm.Usage{InputTokens: 20, OutputTokens: 4},
+			},
+		),
+		release: release,
+	}
+	app := newTestApp(t, &out, &errw, fp.FakeProvider)
+	app.Agent.SetProvider(fp)
+	app.Background = manager
+
+	if code := OneShot(app, "finish the work"); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want synthesis request after join", len(fp.Requests))
+	}
+	if got := strings.Join(fp.Requests[1].RequestContext, "\n"); !strings.Contains(got, "child found the accounting path") {
+		t.Fatalf("synthesis request context = %q, want child result", got)
+	}
+	if !strings.Contains(out.String(), "synthesized child result") {
+		t.Fatalf("stdout = %q, want synthesized final response", out.String())
+	}
+	if app.usage.InputTokens != 100 || app.usage.OutputTokens != 36 {
+		t.Fatalf("session usage = %+v, want provider 30/6 + background delegate 70/30", app.usage)
 	}
 }
 

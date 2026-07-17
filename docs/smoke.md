@@ -160,6 +160,51 @@ go build -o harness-model-proxy ./cmd/harness-model-proxy
 ./harness-model-proxy
 ```
 
+### Live delegation steering matrix (repeat on Anthropic and OpenAI)
+
+Run this matrix in a clean disposable checkout after starting the model proxy.
+Use at least one Anthropic Messages model and one first-party OpenAI Responses
+model, and repeat every row at least three times per model; delegation propensity
+is probabilistic and a single successful run is not sufficient evidence.
+
+For each run, choose an explicit session directory and retain stderr:
+
+```sh
+MODEL=anthropic:claude-opus-4-8 # repeat with an OpenAI target such as openai:gpt-5.5
+CASE=architecture              # narrow | architecture | multi-angle | coupled
+SESSION=/tmp/harness-steering-${CASE}-$(date +%s)
+./harness -model "$MODEL" -session "$SESSION" 2>"$SESSION.stderr"
+```
+
+Submit one matrix prompt in the REPL, wait for all background completion notices
+and the final synthesis, then `/exit`:
+
+| Case | Prompt shape | Expected steering |
+|---|---|---|
+| Narrow known lookup | “In `internal/agentdef/agentdef.go`, find `Definition` and tell me what `Reasoning` means. Do not edit.” | Parent uses direct search/read tools; no `delegate` event and no child record. |
+| Broad architecture | “Trace delegation end to end from model-facing schema through child launch, recursive rebinding, persistence, and usage accounting. Cite paths/symbols; do not edit.” | Parent delegates to `explore`, then synthesizes and verifies its evidence. |
+| Independent multi-angle research | “Assess delegation from three independent angles: capability safety, context/cost behavior, and operator observability. Investigate in parallel where safe, then synthesize; do not edit.” | Multiple independent background children are reasonable; parent continues useful work, does not poll or duplicate them, and waits for automatic completion context before synthesis. |
+| Tightly coupled edit/test | “Make one small change to the delegate schema wording and update its focused test, then run that test.” | Parent owns the coupled edit/test loop rather than delegating it merely because `delegate` exists. Revert this smoke-only edit manually afterward. |
+
+For every repetition, inspect actual evidence rather than only the final prose:
+
+```sh
+rg -n 'delegate|background job' "$SESSION.stderr"
+find "$SESSION/children" -maxdepth 2 -type f -print 2>/dev/null
+for f in "$SESSION"/children/*/meta.json; do test -e "$f" && cat "$f"; done
+```
+
+Record the selected agent, foreground/background mode, child count, task prompt,
+report quality, whether the parent synthesized and independently verified the
+report, and whether the final parent usage/session summary includes child usage
+(the parent total must exceed the sum of parent-only model checkpoints by the child
+usage recorded in child metadata). For child runs, inspect
+`children/<id>/state.json` and `raw.ndjson` to
+confirm the fresh child transcript and tool events. The narrow and coupled rows
+must not be scored as failures merely for making zero child calls—that is their
+intended steering behavior. Compare repeated Anthropic and OpenAI results before
+changing heuristics.
+
 ### Anthropic Messages API
 
 ```sh

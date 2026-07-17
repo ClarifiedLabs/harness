@@ -56,8 +56,12 @@ type Job struct {
 	Result           tools.BackgroundJobResult
 	Error            string
 	cancel           context.CancelFunc
+	done             chan struct{}
+	finished         bool
+	waitForTurn      bool
 	contextDelivered bool
 	noticeDelivered  bool
+	usageDelivered   bool
 }
 
 // Snapshot is a copy of one job safe for callers to inspect.
@@ -104,14 +108,14 @@ func (m *Manager) SetResultPreparer(prepare ResultPreparer) {
 }
 
 func (m *Manager) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.BackgroundJobInfo, error) {
-	snap, err := m.start(req.Kind, req.Description, "", req.Run)
+	snap, err := m.start(req.Kind, req.Description, req.Agent, req.WaitForTurn, req.Run)
 	if err != nil {
 		return tools.BackgroundJobInfo{}, err
 	}
 	return tools.BackgroundJobInfo{ID: snap.ID, Status: snap.Status}, nil
 }
 
-func (m *Manager) start(kind, task, agent string, run func(context.Context, string) (tools.BackgroundJobResult, error)) (Snapshot, error) {
+func (m *Manager) start(kind, task, agent string, waitForTurn bool, run func(context.Context, string) (tools.BackgroundJobResult, error)) (Snapshot, error) {
 	if m == nil {
 		return Snapshot{}, fmt.Errorf("background manager is not initialized")
 	}
@@ -121,14 +125,16 @@ func (m *Manager) start(kind, task, agent string, run func(context.Context, stri
 	ctx, cancel := context.WithCancel(context.Background())
 	started := m.now()
 	job := &Job{
-		ID:      backgroundID(started),
-		Kind:    strings.TrimSpace(kind),
-		Task:    strings.TrimSpace(task),
-		Agent:   strings.TrimSpace(agent),
-		Status:  StatusRunning,
-		Created: started,
-		Updated: started,
-		cancel:  cancel,
+		ID:          backgroundID(started),
+		Kind:        strings.TrimSpace(kind),
+		Task:        strings.TrimSpace(task),
+		Agent:       strings.TrimSpace(agent),
+		Status:      StatusRunning,
+		Created:     started,
+		Updated:     started,
+		cancel:      cancel,
+		done:        make(chan struct{}),
+		waitForTurn: waitForTurn,
 	}
 	m.mu.Lock()
 	m.jobs[job.ID] = job
@@ -140,10 +146,10 @@ func (m *Manager) start(kind, task, agent string, run func(context.Context, stri
 		result, err := run(ctx, job.ID)
 		finished := m.now()
 		m.mu.Lock()
-		defer m.mu.Unlock()
 		job.Result = result
 		job.Updated = finished
 		job.cancel = nil
+		job.finished = true
 		switch {
 		case ctx.Err() != nil:
 			job.Status = StatusCanceled
@@ -154,6 +160,8 @@ func (m *Manager) start(kind, task, agent string, run func(context.Context, stri
 			job.Status = StatusFailed
 			job.Error = err.Error()
 		}
+		m.mu.Unlock()
+		close(job.done)
 	}()
 
 	return snap, nil
@@ -231,12 +239,79 @@ func (m *Manager) Clear() {
 	m.order = nil
 }
 
+// PendingTurnWork reports whether a join-required background job is still
+// running or has a completion result the parent has not yet received.
+func (m *Manager) PendingTurnWork() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range m.order {
+		job := m.jobs[id]
+		if job != nil && job.waitForTurn && (!job.finished || !job.contextDelivered) {
+			return true
+		}
+	}
+	return false
+}
+
+// WaitForTurnWork joins all background jobs marked as required for the current
+// parent turn and returns any nested model usage not already accounted there.
+// Completion context remains pending for RequestContext to inject on the next
+// model request.
+func (m *Manager) WaitForTurnWork(ctx context.Context) (llm.Usage, error) {
+	if m == nil {
+		return llm.Usage{}, nil
+	}
+	for {
+		m.mu.Lock()
+		var pending []<-chan struct{}
+		for _, id := range m.order {
+			job := m.jobs[id]
+			if job != nil && job.waitForTurn && !job.finished {
+				pending = append(pending, job.done)
+			}
+		}
+		m.mu.Unlock()
+		if len(pending) == 0 {
+			return m.DrainTurnWorkUsage(), nil
+		}
+		for _, done := range pending {
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return m.DrainTurnWorkUsage(), ctx.Err()
+			}
+		}
+	}
+}
+
+// DrainTurnWorkUsage returns completed join-required job usage exactly once.
+func (m *Manager) DrainTurnWorkUsage() llm.Usage {
+	if m == nil {
+		return llm.Usage{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var total llm.Usage
+	for _, id := range m.order {
+		job := m.jobs[id]
+		if job == nil || !job.waitForTurn || !job.finished || job.usageDelivered {
+			continue
+		}
+		job.usageDelivered = true
+		total = addUsage(total, job.Result.Usage)
+	}
+	return total
+}
+
 func (m *Manager) DrainCompletedContext(archiver toolresult.Archiver) []string {
 	m.mu.Lock()
 	var completed []Job
 	for _, id := range m.order {
 		job := m.jobs[id]
-		if job == nil || job.contextDelivered || job.Status == StatusRunning {
+		if job == nil || job.contextDelivered || !job.finished {
 			continue
 		}
 		job.contextDelivered = true
@@ -258,7 +333,7 @@ func (m *Manager) DrainNotices() []string {
 	var out []string
 	for _, id := range m.order {
 		job := m.jobs[id]
-		if job == nil || job.noticeDelivered || job.Status == StatusRunning {
+		if job == nil || job.noticeDelivered || !job.finished {
 			continue
 		}
 		job.noticeDelivered = true
@@ -315,8 +390,8 @@ func snapshotJob(job *Job) Snapshot {
 		Updated:        job.Updated,
 		Result:         job.Result,
 		Error:          job.Error,
-		ContextPending: !job.contextDelivered && job.Status != StatusRunning,
-		NoticePending:  !job.noticeDelivered && job.Status != StatusRunning,
+		ContextPending: !job.contextDelivered && job.finished,
+		NoticePending:  !job.noticeDelivered && job.finished,
 	}
 }
 
@@ -442,6 +517,32 @@ func formatGet(job Snapshot) string {
 		fmt.Fprintf(&b, "result:\n%s\n", strings.TrimSpace(job.Result.Text))
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func addUsage(a, b llm.Usage) llm.Usage {
+	return llm.Usage{
+		InputTokens:      a.InputTokens + b.InputTokens,
+		OutputTokens:     a.OutputTokens + b.OutputTokens,
+		CacheReadTokens:  a.CacheReadTokens + b.CacheReadTokens,
+		CacheWriteTokens: a.CacheWriteTokens + b.CacheWriteTokens,
+		ReasoningTokens:  a.ReasoningTokens + b.ReasoningTokens,
+		CostUSD:          a.CostUSD + b.CostUSD,
+		CostKnown:        aggregateCostKnown(a, b),
+	}
+}
+
+func aggregateCostKnown(a, b llm.Usage) bool {
+	aHasUsage := usageHasTokens(a)
+	bHasUsage := usageHasTokens(b)
+	if (aHasUsage && !a.CostKnown) || (bHasUsage && !b.CostKnown) {
+		return false
+	}
+	return a.CostKnown || b.CostKnown
+}
+
+func usageHasTokens(u llm.Usage) bool {
+	return u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadTokens != 0 ||
+		u.CacheWriteTokens != 0 || u.ReasoningTokens != 0
 }
 
 func preview(s string, max int) string {
