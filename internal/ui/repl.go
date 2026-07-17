@@ -1151,8 +1151,8 @@ func (app *App) echoEditedPrompt(replPrompt, submitted string) {
 }
 
 // submittedPromptSeparator visually separates a submitted REPL prompt from the
-// model output that follows: a blank line, a Markdown --- rule, and a blank line.
-const submittedPromptSeparator = "\n---\n\n"
+// model output that follows with a blank line.
+const submittedPromptSeparator = "\n\n"
 
 func separateSubmittedPrompt(w io.Writer) {
 	if w != nil {
