@@ -231,7 +231,18 @@ func AuthorizedName(r *http.Request) (string, bool) {
 	if r == nil {
 		return "", false
 	}
-	v, ok := r.Context().Value(ctxKey{}).(string)
+	return AuthorizedNameFromContext(r.Context())
+}
+
+// AuthorizedNameFromContext returns the matched API key's stored Name from ctx,
+// and whether authentication middleware matched a key. The boolean preserves the
+// distinction between an authenticated key with an empty stored name and an
+// unauthenticated context.
+func AuthorizedNameFromContext(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	v, ok := ctx.Value(ctxKey{}).(string)
 	if !ok {
 		return "", false
 	}

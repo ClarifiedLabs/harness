@@ -1,6 +1,7 @@
-// Package metrics is a tiny, dependency-free Prometheus registry and text
-// exposition (0.0.4) writer. It exists so harness auxiliary binaries can expose
-// /metrics without pulling in a third-party client library, per AGENTS.md.
+// Package metrics provides a tiny, dependency-free Prometheus registry, text
+// exposition (0.0.4) writer, and shared endpoint configuration and lifecycle.
+// It exists so harness auxiliary binaries can expose /metrics without pulling in
+// a third-party client library, per AGENTS.md.
 //
 // Only counters and gauges are supported; histogram buckets are out of scope.
 // Each collector derives its label-name set from the union of observed label

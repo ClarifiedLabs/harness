@@ -92,6 +92,7 @@ cmd/harness-mcp-proxy  optional MCP proxy daemon + debug client (serve / tools /
 internal/mcp             tools-only MCP slice: schema, client, server, stdio + streamable-HTTP transports
 internal/mcp/jsonrpc     JSON-RPC 2.0 framing and bidirectional request/response correlation
 internal/mcpproxy      proxy internals: config, supervisors, tool registry, daemon
+internal/metrics         shared Prometheus collectors/exposition plus endpoint config resolution and lifecycle
 internal/mcptools        harness-side adapter: tools.Tool over a reconnecting proxy Conn (§15)
 internal/lspproxy      LSP manager: language-server supervisors, Content-Length JSON-RPC, navigation tools (§15a)
 internal/lsptools        harness-side adapter exposing short `lsp_*` tools over the LSP manager (§15a)
@@ -944,7 +945,9 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   silently disabling the endpoint.
   Histograms are out of scope; `requests_total` + `duration_seconds_total` give an
   average. The exposition is hand-rolled via the reusable stdlib-only
-  `internal/metrics` package so the MCP proxy (or any future service) can adopt it.
+  `internal/metrics` package; config/flag resolution, build-info setup, separate
+  endpoint lifecycle, bind-failure policy, and context-driven shutdown are shared
+  by both proxy binaries, while metric-family registration remains service-specific.
 - **Pricing staleness.** The `GET /v1/models` catalog response carries an optional
   `pricing` object — `{source_date, max_age_seconds}` — and `max_age_seconds` is the
   configured models.dev refresh interval. `source_date` dates the served prices:
@@ -2423,7 +2426,8 @@ on the thin `internal/mcptools` adapter for tool dispatch (§9.16).
 
 - **Proxy config** (`internal/mcpproxy`) is Claude Code-compatible:
   `{"mcpServers": {name: {command,args,env} | {type:"http"|"streamable-http",url,headers,auth}}, "proxy":
-  {listen,logFile,logLevel,logFormat}}`, at `$XDG_CONFIG_HOME/harness-mcp-proxy/config.json`
+  {listen,logFile,logLevel,logFormat,metrics:{enabled,listen}}}`, at
+  `$XDG_CONFIG_HOME/harness-mcp-proxy/config.json`
   (else `~/.config/...`). `${NAME}` and `${NAME:-default}` references are expanded
   strictly (literal `$`, `$5`, `$$`, or unterminated `${` is preserved verbatim;
   an unset strict var warns and expands to empty). Invalid servers are skipped
@@ -2478,6 +2482,24 @@ on the thin `internal/mcptools` adapter for tool dispatch (§9.16).
   reverse proxy's auth). Header values expand `${NAME}` and `${NAME:-default}`;
   unset strict refs are config errors. The `tools` subcommand debugs one with
   `tools -proxy <url>` or the configured/default URL.
+- **Prometheus metrics.** HTTP mode enables a separate, unauthenticated
+  `GET /metrics` listener at `127.0.0.1:9091` by default. `proxy.metrics` stores
+  `enabled`/`listen`; `serve -no-metrics` and `serve -metrics-listen` override it.
+  Explicit config/flag addresses make bind failure fatal, while an implicit-default
+  collision warns and lets the MCP listener continue. `-no-metrics` passes a nil
+  registry into routing, disabling collection as well as exposition. The counters
+  `mcp_proxy_requests_total`, `mcp_proxy_errors_total`,
+  `mcp_proxy_request_bytes_total`, `mcp_proxy_response_bytes_total`, and
+  `mcp_proxy_request_duration_seconds_total` use only `mcp` (downstream server),
+  `tool` (bare name), and `key` (stored authorizing key name or `anonymous`).
+  Unknown qualified tools omit `mcp`/`tool` rather than parsing the name.
+  `mcp_proxy_build_info` is a gauge labeled only by `version`. Request bytes are
+  raw arguments and response bytes are marshaled `mcp.CallToolResult`; the outer
+  HTTP/JSON-RPC envelope is excluded. Unknown/downstream errors and `IsError`
+  results increment errors, except caller cancellation, which still contributes
+  requests/bytes/duration. Pre-routing malformed/session/method/auth failures are
+  not tool-call metrics. `serve -stdio` neither creates an endpoint nor collects,
+  even if metrics config or flags are present.
 - **Request logging.** The MCP proxy logs one structured record per routed
   `tools/call` with requester/clientInfo, downstream MCP server name, bare and
   qualified tool name, request/response bytes, duration, `is_error`, and any
@@ -2543,7 +2565,8 @@ The harness-side adapter contract (naming, description, schema, result and error
 mapping, the reconnecting `Conn`) is §9.16. The CLI wrapper has four subcommands —
 `serve` (the daemon), `tools` (connect to a running HTTP proxy and print the
 aggregated table), `auth`, and `version` — with serve flags
-`-config`/`-listen`/`-stdio`/`-log`/`-log-level`/`-log-format`.
+`-config`/`-listen`/`-stdio`/`-no-metrics`/`-metrics-listen`/`-log`/
+`-log-level`/`-log-format`.
 
 ## 15a. LSP code intelligence (optional)
 

@@ -137,7 +137,7 @@ func usage(w io.Writer, getenv func(string) string) {
 	fmt.Fprint(w, `harness-mcp-proxy - MCP proxy daemon and debug client
 
 Usage:
-  harness-mcp-proxy serve             [-config path] [-api-keys-file path] [-listen addr] [-stdio] [-log path] [-log-level level] [-log-format format]
+  harness-mcp-proxy serve             [-config path] [-api-keys-file path] [-listen addr] [-stdio] [-no-metrics] [-metrics-listen addr] [-log path] [-log-level level] [-log-format format]
   harness-mcp-proxy tools             [-config path] [-proxy url]
   harness-mcp-proxy auth              <login|logout|status> [-config path] <server>
   harness-mcp-proxy generate-api-key  [-config path] [-api-keys-file path] [-ttl duration] <name>
@@ -158,7 +158,9 @@ serve flags:
   -config path      config file (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
   -api-keys-file path accepted API keys file path (default: api_keys.json next to config/default config dir)
   -listen addr      HTTP listen address (overrides config; default: `+mcpproxy.DefaultListen+`)
-  -stdio            serve MCP over stdin/stdout instead of HTTP
+  -stdio            serve MCP over stdin/stdout instead of HTTP (metrics are disabled)
+  -no-metrics       disable the HTTP-mode Prometheus /metrics endpoint
+  -metrics-listen addr Prometheus /metrics listen address (default: `+defaultMetricsListen+`)
   -log path         log file (overrides config; default: stderr)
   -log-level level  debug|info|warn|error (overrides config; default: info)
   -log-format fmt   json|text (overrides config; default: json)

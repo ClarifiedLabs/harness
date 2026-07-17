@@ -58,6 +58,25 @@ func TestLoadConfigCamelCaseDecode(t *testing.T) {
 	}
 }
 
+func TestLoadConfigMetrics(t *testing.T) {
+	path := writeConfig(t, `{"proxy":{"metrics":{"enabled":false,"listen":"127.0.0.1:9191"}}}`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Metrics.Enabled == nil || *cfg.Metrics.Enabled || cfg.Metrics.Listen != "127.0.0.1:9191" {
+		t.Fatalf("Metrics = %+v, want explicit false and configured listen", cfg.Metrics)
+	}
+
+	cfg, err = LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig empty: %v", err)
+	}
+	if cfg.Metrics.Enabled != nil || cfg.Metrics.Listen != "" {
+		t.Fatalf("absent Metrics = %+v, want zero config", cfg.Metrics)
+	}
+}
+
 func TestLoadConfigHTTPAuthTokenCommand(t *testing.T) {
 	path := writeConfig(t, `{
 		"mcpServers": {

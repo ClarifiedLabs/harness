@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"harness/internal/auth"
+	"harness/internal/metrics"
 )
 
 // FileConfig is the on-disk config shape. It is Claude Code-compatible
@@ -48,12 +49,16 @@ type ServerConfig struct {
 // ProxySettings carries proxy-level overrides. Empty fields fall back to
 // defaults (listen → DefaultListen, logLevel → info, logFormat → json).
 type ProxySettings struct {
-	Listen      string `json:"listen"`
-	LogFile     string `json:"logFile"`
-	LogLevel    string `json:"logLevel"`
-	LogFormat   string `json:"logFormat"`
-	APIKeysFile string `json:"api_keys_file,omitempty"`
+	Listen      string        `json:"listen"`
+	LogFile     string        `json:"logFile"`
+	LogLevel    string        `json:"logLevel"`
+	LogFormat   string        `json:"logFormat"`
+	APIKeysFile string        `json:"api_keys_file,omitempty"`
+	Metrics     MetricsConfig `json:"metrics,omitempty"`
 }
+
+// MetricsConfig configures the HTTP proxy's separate Prometheus endpoint.
+type MetricsConfig = metrics.Config
 
 // Transport selects a resolved server's downstream transport.
 type Transport int
@@ -92,6 +97,7 @@ type Config struct {
 	LogFile     string
 	LogLevel    string
 	LogFormat   string
+	Metrics     MetricsConfig
 	Warnings    []string
 }
 
@@ -158,6 +164,7 @@ func resolve(fc FileConfig, configDir string) Config {
 		LogFile:     fc.Proxy.LogFile,
 		LogLevel:    fc.Proxy.LogLevel,
 		LogFormat:   fc.Proxy.LogFormat,
+		Metrics:     fc.Proxy.Metrics,
 	}
 
 	// Expand variables across the whole config first, accumulating one warning

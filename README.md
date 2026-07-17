@@ -174,6 +174,17 @@ harness-mcp-proxy serve
 HARNESS_MCP_ENABLE=true harness -provider <provider> -model <model>
 ```
 
+In HTTP mode, the MCP proxy also exposes an unauthenticated Prometheus endpoint
+on a separate listener, defaulting to `127.0.0.1:9091`. Configure it with
+`proxy.metrics.enabled` / `proxy.metrics.listen`, or override those settings with
+`serve -no-metrics` / `serve -metrics-listen`. The tool-call counter families are
+`mcp_proxy_requests_total`, `mcp_proxy_errors_total`,
+`mcp_proxy_request_bytes_total`, `mcp_proxy_response_bytes_total`, and
+`mcp_proxy_request_duration_seconds_total`; routed series use only `mcp`, `tool`,
+and `key` (the authorizing key's stored name, or `anonymous`). The
+`mcp_proxy_build_info` gauge uses only `version`. `serve -stdio` opens no metrics
+listener and performs no metrics collection, regardless of flags or config.
+
 ## Authenticating harness to its proxies
 
 Both proxies support optional API-key authentication. It is disabled by default

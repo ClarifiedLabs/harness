@@ -4,15 +4,18 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"slices"
 	"strconv"
 	"sync"
 	"time"
 
+	"harness/internal/apikey"
 	"harness/internal/logging"
 	"harness/internal/mcp"
 	"harness/internal/mcp/jsonrpc"
+	"harness/internal/metrics"
 	"harness/internal/tracing"
 )
 
@@ -30,6 +33,27 @@ type route struct {
 	bareName   string
 }
 
+type registryMetrics struct {
+	requests      *metrics.Counter
+	errors        *metrics.Counter
+	requestBytes  *metrics.Counter
+	responseBytes *metrics.Counter
+	duration      *metrics.Counter
+}
+
+func registerRegistryMetrics(reg *metrics.Registry) *registryMetrics {
+	if reg == nil {
+		return nil
+	}
+	return &registryMetrics{
+		requests:      reg.Counter("mcp_proxy_requests_total", "MCP proxy tool requests."),
+		errors:        reg.Counter("mcp_proxy_errors_total", "MCP proxy tool request errors."),
+		requestBytes:  reg.Counter("mcp_proxy_request_bytes_total", "MCP proxy tool argument bytes."),
+		responseBytes: reg.Counter("mcp_proxy_response_bytes_total", "MCP proxy tool result bytes."),
+		duration:      reg.Counter("mcp_proxy_request_duration_seconds_total", "MCP proxy tool request duration in seconds."),
+	}
+}
+
 // Registry aggregates the tools of every supervised server into one namespaced
 // surface and implements mcp.ToolProvider for the proxy's server sessions. It
 // maintains a merged sorted tool list (names rewritten to mcp__<server>__<tool>)
@@ -38,6 +62,7 @@ type route struct {
 type Registry struct {
 	supervisors []*Supervisor
 	logger      *slog.Logger
+	metrics     *registryMetrics
 
 	mu     sync.RWMutex
 	tools  []mcp.Tool       // merged, namespaced, sorted by name
@@ -50,12 +75,17 @@ type Registry struct {
 // callback into each so a supervisor's tool change rebuilds the table and
 // broadcasts list_changed. It builds the initial table immediately.
 func NewRegistry(servers []*Supervisor, logger *slog.Logger) *Registry {
+	return newRegistryWithMetrics(servers, logger, nil)
+}
+
+func newRegistryWithMetrics(servers []*Supervisor, logger *slog.Logger, collectors *registryMetrics) *Registry {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	r := &Registry{
 		supervisors: servers,
 		logger:      logger,
+		metrics:     collectors,
 		routes:      map[string]route{},
 		sessions:    map[*mcp.ServerSession]struct{}{},
 	}
@@ -154,7 +184,9 @@ func (r *Registry) CallTool(ctx context.Context, qualified string, args json.Raw
 	sup, bare, ok := r.route(qualified)
 	if !ok {
 		err := jsonrpc.Errorf(jsonrpc.CodeInvalidParams, "unknown tool: %s", qualified)
-		r.logToolCall(ctx, qualified, "", "", len(args), 0, time.Since(start), false, err)
+		duration := time.Since(start)
+		r.logToolCall(ctx, qualified, "", "", len(args), 0, duration, false, err)
+		r.recordToolCall(ctx, "", "", len(args), 0, duration, false, err)
 		return nil, err
 	}
 	result, err := sup.CallTool(ctx, bare, args)
@@ -166,8 +198,38 @@ func (r *Registry) CallTool(ctx context.Context, qualified string, args json.Raw
 			responseBytes = len(raw)
 		}
 	}
-	r.logToolCall(ctx, qualified, sup.Name(), bare, len(args), responseBytes, time.Since(start), isError, err)
+	duration := time.Since(start)
+	r.logToolCall(ctx, qualified, sup.Name(), bare, len(args), responseBytes, duration, isError, err)
+	r.recordToolCall(ctx, sup.Name(), bare, len(args), responseBytes, duration, isError, err)
 	return result, err
+}
+
+func (r *Registry) recordToolCall(ctx context.Context, server, tool string, requestBytes, responseBytes int, duration time.Duration, isError bool, err error) {
+	if r.metrics == nil {
+		return
+	}
+	key := "anonymous"
+	if name, ok := apikey.AuthorizedNameFromContext(ctx); ok {
+		key = name
+	}
+	labels := map[string]string{"key": key}
+	if server != "" {
+		labels["mcp"] = server
+	}
+	if tool != "" {
+		labels["tool"] = tool
+	}
+	r.metrics.requests.Inc(labels)
+	r.metrics.duration.Add(duration.Seconds(), labels)
+	if requestBytes != 0 {
+		r.metrics.requestBytes.Add(float64(requestBytes), labels)
+	}
+	if responseBytes != 0 {
+		r.metrics.responseBytes.Add(float64(responseBytes), labels)
+	}
+	if (err != nil || isError) && !errors.Is(ctx.Err(), context.Canceled) {
+		r.metrics.errors.Inc(labels)
+	}
 }
 
 func (r *Registry) logToolCall(ctx context.Context, qualified, server, tool string, requestBytes, responseBytes int, duration time.Duration, isError bool, err error) {

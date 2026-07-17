@@ -103,13 +103,18 @@ func mustBeFile(t *testing.T, sink any, wantPath string) {
 }
 
 func TestServeStdioServesOverPipe(t *testing.T) {
+	heldMetrics, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer heldMetrics.Close()
 	c1, c2 := net.Pipe()
 	go runServe(environment{
 		stdin:  c2,
 		stdout: c2,
 		stderr: io.Discard,
 		getenv: func(string) string { return "" },
-	}, []string{"-stdio"})
+	}, []string{"-stdio", "-metrics-listen", heldMetrics.Addr().String()})
 
 	client := mcp.NewClient(c1, mcp.ClientOptions{Info: mcp.Implementation{Name: "t", Version: "0"}})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

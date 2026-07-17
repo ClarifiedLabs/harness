@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -93,7 +94,7 @@ func TestRunHelpExit0WithUsageOnStdout(t *testing.T) {
 			t.Fatalf("%s: exit = %d, want %d; stderr=%q", arg, code, exitOK, errw.String())
 		}
 		text := out.String()
-		for _, want := range []string{"serve", "tools", "auth", "version", "Usage:"} {
+		for _, want := range []string{"serve", "tools", "auth", "version", "Usage:", "-no-metrics", "-metrics-listen", defaultMetricsListen} {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s usage missing %q; stdout=%q", arg, want, text)
 			}
@@ -101,6 +102,32 @@ func TestRunHelpExit0WithUsageOnStdout(t *testing.T) {
 		if errw.Len() != 0 {
 			t.Errorf("%s should print to stdout only; stderr=%q", arg, errw.String())
 		}
+	}
+}
+
+func TestServeMetricsFlagOverridesAndBuildInfo(t *testing.T) {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	noMetrics := fs.Bool("no-metrics", false, "")
+	listen := fs.String("metrics-listen", "", "")
+	if err := fs.Parse([]string{"-no-metrics=false", "-metrics-listen="}); err != nil {
+		t.Fatal(err)
+	}
+	overrides := serveMetricsOverrides(fs, *noMetrics, *listen)
+	if overrides.Disable || !overrides.DisableSet || overrides.Listen != "" || !overrides.ListenSet {
+		t.Fatalf("serveMetricsOverrides = %+v", overrides)
+	}
+	if reg := newMCPMetricsRegistry(false); reg != nil {
+		t.Fatal("disabled metrics should yield nil registry")
+	}
+	reg := newMCPMetricsRegistry(true)
+	var out strings.Builder
+	reg.Render(&out)
+	text := out.String()
+	if !strings.Contains(text, "# TYPE mcp_proxy_build_info gauge") || !strings.Contains(text, `mcp_proxy_build_info{version=`) {
+		t.Fatalf("MCP build info missing:\n%s", text)
+	}
+	if strings.Contains(text, "mcp=") || strings.Contains(text, "tool=") || strings.Contains(text, "key=") {
+		t.Fatalf("build info should be labeled only by version:\n%s", text)
 	}
 }
 
@@ -324,11 +351,12 @@ func writeConfigWithListen(t *testing.T, dir, logFile, tools, listen string) str
 func TestServeSigintCleanShutdown(t *testing.T) {
 	dir := t.TempDir()
 	addr := freeAddr(t)
+	metricsAddr := freeAddr(t)
 	logFile := filepath.Join(dir, "out.log")
 	cfgPath := writeConfig(t, t.TempDir(), logFile, "echo")
 
 	env := environment{
-		args:   []string{"-config", cfgPath, "-listen", addr},
+		args:   []string{"-config", cfgPath, "-listen", addr, "-metrics-listen", metricsAddr},
 		stdout: &bytes.Buffer{},
 		stderr: &bytes.Buffer{},
 		getenv: func(string) string { return "" },
@@ -338,6 +366,18 @@ func TestServeSigintCleanShutdown(t *testing.T) {
 	go func() { codeCh <- runServe(env, env.args) }()
 
 	waitForToolCount(t, "http://"+addr, 1, 5*time.Second)
+	resp, err := http.Get("http://" + metricsAddr + "/metrics")
+	if err != nil {
+		t.Fatalf("GET metrics: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "mcp_proxy_build_info") || !strings.Contains(string(body), "# TYPE mcp_proxy_requests_total counter") {
+		t.Fatalf("metrics status=%d body=%q", resp.StatusCode, body)
+	}
 
 	// Inject SIGINT; the daemon's ctx cancels and it shuts down cleanly.
 	env.sigCh <- os.Interrupt
@@ -351,9 +391,11 @@ func TestServeSigintCleanShutdown(t *testing.T) {
 		t.Fatal("serve did not shut down after SIGINT")
 	}
 
-	if conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond); err == nil {
-		conn.Close()
-		t.Errorf("listener still accepting after shutdown")
+	for _, closedAddr := range []string{addr, metricsAddr} {
+		if conn, err := net.DialTimeout("tcp", closedAddr, 250*time.Millisecond); err == nil {
+			conn.Close()
+			t.Errorf("listener %s still accepting after shutdown", closedAddr)
+		}
 	}
 }
 
@@ -392,6 +434,70 @@ func TestServeAddressInUseExit1(t *testing.T) {
 	// Shut down the first daemon.
 	env1.sigCh <- os.Interrupt
 	<-code1
+}
+
+func TestServeExplicitMetricsAddressInUseExit1(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	env, _, errw := testEnv(t, nil)
+	code := runServe(env, []string{"-listen", freeAddr(t), "-metrics-listen", held.Addr().String()})
+	if code != exitRuntime {
+		t.Fatalf("occupied metrics address exit = %d, want %d; stderr=%q", code, exitRuntime, errw.String())
+	}
+	if !strings.Contains(errw.String(), "metrics listen "+held.Addr().String()) {
+		t.Fatalf("stderr should name metrics address: %q", errw.String())
+	}
+}
+
+func TestServeConfigMetricsAddressInUseExit1(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	body := fmt.Sprintf(`{"proxy":{"metrics":{"listen":%q}}}`, held.Addr().String())
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, _, errw := testEnv(t, nil)
+	code := runServe(env, []string{"-config", configPath, "-listen", freeAddr(t)})
+	if code != exitRuntime {
+		t.Fatalf("config metrics address exit = %d, want %d; stderr=%q", code, exitRuntime, errw.String())
+	}
+	if !strings.Contains(errw.String(), "metrics listen "+held.Addr().String()) {
+		t.Fatalf("stderr should name configured metrics address: %q", errw.String())
+	}
+}
+
+func TestServeImplicitMetricsAddressInUseIsNonfatal(t *testing.T) {
+	held, err := net.Listen("tcp", defaultMetricsListen)
+	if err != nil {
+		t.Skipf("default metrics address unavailable before test: %v", err)
+	}
+	defer held.Close()
+	addr := freeAddr(t)
+	env, _, errw := testEnv(t, nil)
+	env.args = []string{"-listen", addr}
+	env.sigCh = make(chan os.Signal, 1)
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- runServe(env, env.args) }()
+	waitForToolCount(t, "http://"+addr, 0, 5*time.Second)
+	env.sigCh <- os.Interrupt
+	select {
+	case code := <-codeCh:
+		if code != exitOK {
+			t.Fatalf("implicit metrics collision exit = %d, want %d; stderr=%q", code, exitOK, errw.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not stop after implicit metrics collision")
+	}
+	if !strings.Contains(errw.String(), "metrics endpoint disabled (listen failed)") {
+		t.Fatalf("missing implicit metrics bind warning: %q", errw.String())
+	}
 }
 
 func TestServeConfigWarningsSurfaceInLog(t *testing.T) {

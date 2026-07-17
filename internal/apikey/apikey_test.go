@@ -1,6 +1,7 @@
 package apikey
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -208,6 +209,49 @@ func TestAuthorizedNameAuthDisabled(t *testing.T) {
 func TestAuthorizedNameNilRequest(t *testing.T) {
 	if name, ok := AuthorizedName(nil); ok || name != "" {
 		t.Fatalf("AuthorizedName(nil) = (%q, %v), want false", name, ok)
+	}
+}
+
+func TestAuthorizedNameFromContext(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dynamic bool
+		keyName string
+	}{
+		{name: "static", keyName: "laptop"},
+		{name: "dynamic", dynamic: true, keyName: "automation"},
+		{name: "authenticated empty name", keyName: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var store Store
+			store.Add(tc.keyName, "hmp_context_secret", time.Time{})
+			var handler http.Handler
+			var gotName string
+			var gotOK bool
+			next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				gotName, gotOK = AuthorizedNameFromContext(r.Context())
+			})
+			if tc.dynamic {
+				handler = NewDynamicStore(store.Entries, nil).Middleware(next)
+			} else {
+				handler = store.Middleware(next)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Authorization", "Bearer hmp_context_secret")
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+			if gotName != tc.keyName || !gotOK {
+				t.Fatalf("AuthorizedNameFromContext = (%q, %v), want (%q, true)", gotName, gotOK, tc.keyName)
+			}
+			if gotName == "hmp_context_secret" {
+				t.Fatal("AuthorizedNameFromContext exposed plaintext token")
+			}
+		})
+	}
+
+	for _, ctx := range []context.Context{nil, context.Background()} {
+		if name, ok := AuthorizedNameFromContext(ctx); name != "" || ok {
+			t.Fatalf("AuthorizedNameFromContext(%v) = (%q, %v), want (\"\", false)", ctx, name, ok)
+		}
 	}
 }
 

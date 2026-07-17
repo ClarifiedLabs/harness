@@ -9,14 +9,18 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"harness/internal/apikey"
 	"harness/internal/logging"
 	"harness/internal/mcp"
 	"harness/internal/mcp/jsonrpc"
+	"harness/internal/metrics"
 	"harness/internal/tracing"
 )
 
@@ -159,6 +163,146 @@ func TestRegistryLogsToolCallStats(t *testing.T) {
 	if record["response_bytes"].(float64) <= 0 {
 		t.Fatalf("log response_bytes not populated: %+v", record)
 	}
+}
+
+func TestRegistryMetricsPreRegistered(t *testing.T) {
+	prom := metrics.New()
+	registerRegistryMetrics(prom)
+	out := renderMetrics(prom)
+	for _, name := range []string{
+		"mcp_proxy_requests_total",
+		"mcp_proxy_errors_total",
+		"mcp_proxy_request_bytes_total",
+		"mcp_proxy_response_bytes_total",
+		"mcp_proxy_request_duration_seconds_total",
+	} {
+		if !strings.Contains(out, "# HELP "+name+" ") || !strings.Contains(out, "# TYPE "+name+" counter") {
+			t.Errorf("missing pre-registered metadata for %s:\n%s", name, out)
+		}
+	}
+}
+
+func TestRegistryMetricsSuccessfulAuthenticatedCall(t *testing.T) {
+	rs := ResolvedServer{Name: "h", Transport: TransportStdio, Command: "helper"}
+	sup := NewSupervisor(rs, slog.New(slog.DiscardHandler))
+	sup.spawn = helperSpawn(t, map[string]string{"HELPER_TOOLS": "echo"})
+	sup.sleep = func(context.Context, time.Duration) {}
+	prom := metrics.New()
+	reg := newRegistryWithMetrics([]*Supervisor{sup}, slog.New(slog.DiscardHandler), registerRegistryMetrics(prom))
+	ctx := t.Context()
+	sup.Start(ctx)
+	defer sup.Shutdown(context.Background())
+	waitFor(t, 5*time.Second, func() bool { return sup.State() == StateReady })
+
+	callCtx := authorizedCallContext(t, "automation", "hmcpp_secret")
+	args := json.RawMessage(`{"k":"v"}`)
+	res, err := reg.CallTool(callCtx, "mcp__h__echo", args)
+	if err != nil || res == nil || res.IsError {
+		t.Fatalf("CallTool() = (%+v, %v)", res, err)
+	}
+	response, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := `{key="automation",mcp="h",tool="echo"}`
+	out := renderMetrics(prom)
+	for _, want := range []string{
+		"mcp_proxy_requests_total" + labels + " 1",
+		fmt.Sprintf("mcp_proxy_request_bytes_total%s %d", labels, len(args)),
+		fmt.Sprintf("mcp_proxy_response_bytes_total%s %d", labels, len(response)),
+		"mcp_proxy_request_duration_seconds_total" + labels + " ",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("metrics missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "hmcpp_secret") {
+		t.Fatalf("metrics exposed plaintext token:\n%s", out)
+	}
+}
+
+func TestRegistryMetricsUnknownToolOmitsRouteLabels(t *testing.T) {
+	prom := metrics.New()
+	reg := newRegistryWithMetrics(nil, nil, registerRegistryMetrics(prom))
+	if _, err := reg.CallTool(context.Background(), "mcp__missing__tool", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("CallTool unknown tool returned nil error")
+	}
+	out := renderMetrics(prom)
+	for _, want := range []string{
+		`mcp_proxy_requests_total{key="anonymous"} 1`,
+		`mcp_proxy_errors_total{key="anonymous"} 1`,
+		`mcp_proxy_request_bytes_total{key="anonymous"} 2`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("metrics missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `mcp_proxy_requests_total{key="anonymous",mcp=`) || strings.Contains(out, `tool=`) {
+		t.Fatalf("unknown route should omit mcp/tool labels:\n%s", out)
+	}
+}
+
+func TestRegistryMetricsIsError(t *testing.T) {
+	sup := newFixedSupervisor("web", []mcp.Tool{tool("search")})
+	prom := metrics.New()
+	reg := newRegistryWithMetrics([]*Supervisor{sup}, nil, registerRegistryMetrics(prom))
+	res, err := reg.CallTool(context.Background(), "mcp__web__search", nil)
+	if err != nil || res == nil || !res.IsError {
+		t.Fatalf("CallTool() = (%+v, %v), want IsError result", res, err)
+	}
+	out := renderMetrics(prom)
+	if !strings.Contains(out, `mcp_proxy_errors_total{key="anonymous",mcp="web",tool="search"} 1`) {
+		t.Fatalf("IsError was not counted:\n%s", out)
+	}
+}
+
+func TestRegistryMetricsCallerCancellationDoesNotCountError(t *testing.T) {
+	sup := newFixedSupervisor("web", []mcp.Tool{tool("search")})
+	prom := metrics.New()
+	reg := newRegistryWithMetrics([]*Supervisor{sup}, nil, registerRegistryMetrics(prom))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := reg.CallTool(ctx, "mcp__web__search", json.RawMessage(`{}`))
+	if err != nil || res == nil || !res.IsError {
+		t.Fatalf("CallTool() = (%+v, %v), want routed IsError result", res, err)
+	}
+	out := renderMetrics(prom)
+	labels := `{key="anonymous",mcp="web",tool="search"}`
+	for _, want := range []string{
+		"mcp_proxy_requests_total" + labels + " 1",
+		"mcp_proxy_request_bytes_total" + labels + " 2",
+		"mcp_proxy_request_duration_seconds_total" + labels + " ",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("canceled request metrics missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\nmcp_proxy_errors_total{") || strings.Contains(out, "\nmcp_proxy_errors_total ") {
+		t.Fatalf("caller cancellation incremented errors:\n%s", out)
+	}
+}
+
+func renderMetrics(reg *metrics.Registry) string {
+	var out strings.Builder
+	reg.Render(&out)
+	return out.String()
+}
+
+func authorizedCallContext(t *testing.T, name, token string) context.Context {
+	t.Helper()
+	var store apikey.Store
+	store.Add(name, token, time.Time{})
+	var ctx context.Context
+	handler := store.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		ctx = r.Context()
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	if ctx == nil {
+		t.Fatal("authentication middleware did not reach handler")
+	}
+	return ctx
 }
 
 func TestRegistryPagination(t *testing.T) {

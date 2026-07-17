@@ -71,12 +71,8 @@ func (c CostBudgetConfig) Enabled() bool {
 }
 
 // MetricsConfig toggles the Prometheus /metrics endpoint on a separate port.
-// Enabled is a pointer so the JSON omitempty distinction between unset and
-// explicitly false survives; nil means the default (enabled) applies.
-type MetricsConfig struct {
-	Enabled *bool  `json:"enabled,omitempty"`
-	Listen  string `json:"listen,omitempty"`
-}
+// It remains an alias for source compatibility with existing callers.
+type MetricsConfig = metrics.Config
 
 // Duration is a JSON duration setting. Strings use Go duration syntax such as
 // "24h"; numeric values are seconds, so 0 disables the setting.

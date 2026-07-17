@@ -14,6 +14,7 @@ import (
 
 	"harness/internal/apikey"
 	"harness/internal/mcp"
+	"harness/internal/metrics"
 )
 
 // daemonConfig builds a Config wired to spawn the TestHelperProcess fake server,
@@ -166,6 +167,86 @@ func TestDaemonRequiresAPIKey(t *testing.T) {
 	cancel()
 	if err := <-errCh; err != nil {
 		t.Fatalf("Run returned error: %v", err)
+	}
+}
+
+func TestDaemonHTTPMetricsUseAuthenticatedKeyName(t *testing.T) {
+	addr := freePort(t)
+	cfg := Config{Listen: addr, Servers: []ResolvedServer{{Name: "h", Transport: TransportStdio, Command: "helper"}}}
+	spawn := helperSpawn(t, map[string]string{"HELPER_TOOLS": "echo"})
+	store := apikey.NewDynamicStore([]apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmcpp_secret")}}, nil)
+	prom := metrics.New()
+	d := NewDaemonWithOptions(cfg, slog.New(slog.DiscardHandler), DaemonOptions{APIKeys: store, Metrics: prom})
+	d.spawn = spawn
+	d.sleep = func(context.Context, time.Duration) {}
+	if out := renderMetrics(prom); !strings.Contains(out, "# TYPE mcp_proxy_requests_total counter") {
+		t.Fatalf("collector families were not pre-registered before Run:\n%s", out)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(ctx) }()
+	tr := mcp.NewHTTPTransport(mcp.HTTPOptions{
+		Endpoint: "http://" + addr,
+		Headers:  map[string]string{"Authorization": "Bearer hmcpp_secret"},
+	})
+	client := mcp.NewClientTransport(tr, mcp.ClientOptions{Info: mcp.Implementation{Name: "test-http", Version: "1"}})
+	defer client.Close()
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := client.Initialize(context.Background())
+		return err == nil
+	})
+	waitFor(t, 5*time.Second, func() bool {
+		tools, err := client.ListTools(context.Background())
+		return err == nil && len(tools) == 1
+	})
+	if _, err := client.CallTool(context.Background(), "mcp__h__echo", json.RawMessage(`{"hi":1}`)); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if out := renderMetrics(prom); !strings.Contains(out, `mcp_proxy_requests_total{key="laptop",mcp="h",tool="echo"} 1`) {
+		t.Fatalf("authenticated HTTP call metrics missing:\n%s", out)
+	}
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+}
+
+func TestDaemonStdioDoesNotCollectMetrics(t *testing.T) {
+	cfg := Config{Servers: []ResolvedServer{{Name: "h", Transport: TransportStdio, Command: "helper"}}}
+	prom := metrics.New()
+	d := NewDaemonWithOptions(cfg, slog.New(slog.DiscardHandler), DaemonOptions{Metrics: prom})
+	d.spawn = helperSpawn(t, map[string]string{"HELPER_TOOLS": "echo"})
+	d.sleep = func(context.Context, time.Duration) {}
+	clientConn, serverConn := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.RunStdio(ctx, serverConn) }()
+	client := mcp.NewClient(clientConn, mcp.ClientOptions{Info: mcp.Implementation{Name: "test-stdio", Version: "1"}})
+	if _, err := client.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		tools, err := client.ListTools(context.Background())
+		return err == nil && len(tools) == 1
+	})
+	if _, err := client.CallTool(context.Background(), "mcp__h__echo", json.RawMessage(`{"hi":1}`)); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if out := renderMetrics(prom); strings.Contains(out, "\nmcp_proxy_requests_total{") || strings.Contains(out, "\nmcp_proxy_requests_total ") {
+		t.Fatalf("stdio call unexpectedly collected metrics:\n%s", out)
+	}
+	_ = client.Close()
+	_ = clientConn.Close()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunStdio: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("RunStdio did not stop")
 	}
 }
 

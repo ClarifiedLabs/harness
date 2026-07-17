@@ -10,14 +10,17 @@ import (
 	"time"
 
 	"harness/internal/apikey"
+	"harness/internal/buildinfo"
 	"harness/internal/logging"
 	"harness/internal/mcpproxy"
+	"harness/internal/metrics"
 )
 
 // serveCategory labels serve-level log records (config warnings, lifecycle).
 const (
-	serveCategory  = "mcp_proxy"
-	configCategory = "mcp_config"
+	serveCategory        = "mcp_proxy"
+	configCategory       = "mcp_config"
+	defaultMetricsListen = "127.0.0.1:9091"
 )
 
 // runServe parses serve flags, loads config, resolves the log sink, wires
@@ -31,6 +34,8 @@ func runServe(env environment, args []string) int {
 	apiKeysFile := fs.String("api-keys-file", "", "accepted API keys file path")
 	listen := fs.String("listen", "", "HTTP listen address (overrides config and default)")
 	stdio := fs.Bool("stdio", false, "serve MCP over stdin/stdout instead of HTTP")
+	noMetrics := fs.Bool("no-metrics", false, "disable the Prometheus /metrics endpoint")
+	metricsListen := fs.String("metrics-listen", "", "Prometheus /metrics listen address (default: "+defaultMetricsListen+")")
 	logPath := fs.String("log", "", "log file path (overrides config logFile)")
 	logLevel := fs.String("log-level", "", "log level: debug|info|warn|error (overrides config)")
 	logFormat := fs.String("log-format", "", "log format: json|text (overrides config)")
@@ -133,12 +138,21 @@ func runServe(env environment, args []string) int {
 		})
 	}
 
-	d := mcpproxy.NewDaemonWithAPIKeys(cfg, logger, authStore)
 	if *stdio {
+		// Metrics configuration is intentionally inert in stdio mode: no registry is
+		// created or passed to the daemon, and no endpoint is started.
+		d := mcpproxy.NewDaemon(cfg, logger)
 		// stdout is the MCP channel in stdio mode; logs already go to the sink
 		// (stderr or -log file), never stdout.
 		err = d.RunStdio(ctx, stdioRWC{r: env.stdin, w: env.stdout})
 	} else {
+		metricsSettings := metrics.Resolve(cfg.Metrics, defaultMetricsListen, serveMetricsOverrides(fs, *noMetrics, *metricsListen))
+		reg := newMCPMetricsRegistry(metricsSettings.Enabled)
+		d := mcpproxy.NewDaemonWithOptions(cfg, logger, mcpproxy.DaemonOptions{APIKeys: authStore, Metrics: reg})
+		if err := metrics.StartEndpoint(ctx, logger.With(logging.Category(serveCategory)), reg, metricsSettings); err != nil {
+			fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
+			return exitRuntime
+		}
 		err = d.Run(ctx)
 	}
 	if err != nil {
@@ -159,6 +173,26 @@ type stdioRWC struct {
 func (c stdioRWC) Read(p []byte) (int, error)  { return c.r.Read(p) }
 func (c stdioRWC) Write(p []byte) (int, error) { return c.w.Write(p) }
 func (c stdioRWC) Close() error                { return nil }
+
+func serveMetricsOverrides(fs *flag.FlagSet, noMetrics bool, metricsListen string) metrics.Overrides {
+	return metrics.Overrides{
+		Disable:    noMetrics,
+		DisableSet: flagWasSet(fs, "no-metrics"),
+		Listen:     metricsListen,
+		ListenSet:  flagWasSet(fs, "metrics-listen"),
+	}
+}
+
+func newMCPMetricsRegistry(enabled bool) *metrics.Registry {
+	if !enabled {
+		return nil
+	}
+	return metrics.NewWithBuildInfo(metrics.BuildInfo{
+		Name:    "mcp_proxy_build_info",
+		Help:    "MCP proxy build information.",
+		Version: buildinfo.Version,
+	})
+}
 
 // logSinkParams carries the inputs to log-sink resolution so the precedence
 // rules are unit-testable without opening real files or process state.

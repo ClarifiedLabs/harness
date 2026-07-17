@@ -83,7 +83,11 @@ The shape is Claude Code-compatible:
     "listen": "127.0.0.1:8766",
     "logFile": "",
     "logLevel": "info",
-    "logFormat": "json"
+    "logFormat": "json",
+    "metrics": {
+      "enabled": true,
+      "listen": "127.0.0.1:9091"
+    }
   }
 }
 ```
@@ -141,6 +145,43 @@ Default paths:
 - Config: `$XDG_CONFIG_HOME/harness-mcp-proxy/config.json`, else
   `~/.config/harness-mcp-proxy/config.json`
 - Log: stderr unless `proxy.logFile` or `serve -log` is set
+- Prometheus metrics: `http://127.0.0.1:9091/metrics` in HTTP mode
+
+### Prometheus metrics
+
+HTTP mode enables a separate Prometheus text-exposition endpoint by default at
+`127.0.0.1:9091`. It serves only unauthenticated `GET /metrics`; it is not part of
+the MCP listener or its API-key middleware. Keep it on a trusted interface, or
+apply network-level controls around it. Configure the endpoint under
+`proxy.metrics` with `enabled` and `listen`, and override config with
+`serve -no-metrics[=true|false]` or `serve -metrics-listen addr`. Flags take
+precedence over config, then the defaults apply.
+
+The endpoint exports these tool-call counters:
+
+- `mcp_proxy_requests_total`
+- `mcp_proxy_errors_total`
+- `mcp_proxy_request_bytes_total`
+- `mcp_proxy_response_bytes_total`
+- `mcp_proxy_request_duration_seconds_total`
+
+Routed series are labeled only by `mcp` (downstream server), `tool` (bare tool
+name), and `key` (the authorizing API key's stored name, or `anonymous`). An
+unknown qualified tool is not parsed, so its series omits `mcp` and `tool`.
+`mcp_proxy_build_info{version="..."} 1` carries only the `version` label.
+Request bytes are the raw tool argument bytes; response bytes are the
+JSON-marshaled MCP `CallToolResult`, not the outer HTTP/JSON-RPC envelope.
+Errors include unknown/downstream failures and results with `isError: true`.
+Caller cancellation still records the request, bytes, and duration, but does not
+increment errors. Requests rejected before routing—such as malformed JSON-RPC,
+missing sessions, unsupported methods, or failed API-key auth—are outside these
+tool-call metrics.
+
+A bind failure for an address selected by config or flag is fatal. Failure to
+bind the implicit default logs a warning and leaves the primary MCP proxy
+running. `-no-metrics` disables both the endpoint and collection. In
+`serve -stdio` mode all metrics flags and config are inert: no listener opens,
+collector families are not registered, and tool calls are not recorded.
 
 Inspect the live surface without harness with:
 

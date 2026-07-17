@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -196,8 +195,13 @@ func runServe(env environment, args []string) int {
 	// Resolve metrics before building the handler: a nil registry disables
 	// collection at the handler level, so -no-metrics stops per-request recording
 	// rather than only the listener.
-	metricsEnabled, metricsAddr := resolveMetrics(cfg, *noMetrics, flagWasSet(fs, "no-metrics"), *metricsListen, flagWasSet(fs, "metrics-listen"))
-	reg := newMetricsRegistry(metricsEnabled)
+	metricsSettings := metrics.Resolve(cfg.Metrics, defaultMetricsListen, metrics.Overrides{
+		Disable:    *noMetrics,
+		DisableSet: flagWasSet(fs, "no-metrics"),
+		Listen:     *metricsListen,
+		ListenSet:  flagWasSet(fs, "metrics-listen"),
+	})
+	reg := newMetricsRegistry(metricsSettings.Enabled)
 	handler, err := server.NewHandler(server.Options{
 		ConfigDir:           configDir,
 		Config:              cfg,
@@ -238,25 +242,9 @@ func runServe(env environment, args []string) int {
 		logger.Warn("reload api keys failed", "path", keyFile, "err", err)
 	})
 
-	if reg != nil {
-		ln, err := net.Listen("tcp", metricsAddr)
-		switch {
-		case err == nil:
-			metricsSrv := httpserve.New("", reg.Handler())
-			logger.Info("metrics endpoint listening", "addr", metricsAddr)
-			go func() {
-				if err := httpserve.Serve(ctx, metricsSrv, ln); err != nil {
-					logger.Warn("metrics endpoint stopped", "err", err)
-				}
-			}()
-		case metricsListenExplicit(cfg, flagWasSet(fs, "metrics-listen")):
-			// The operator explicitly asked for this address; don't silently
-			// drop the endpoint they requested.
-			fmt.Fprintf(env.stderr, "harness-model-proxy: metrics listen %s: %v\n", metricsAddr, err)
-			return exitRuntime
-		default:
-			logger.Warn("metrics endpoint disabled (listen failed)", "addr", metricsAddr, "err", err)
-		}
+	if err := metrics.StartEndpoint(ctx, logger, reg, metricsSettings); err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitRuntime
 	}
 
 	srv := httpserve.New(addr, server.ObserveAuth(handler, authStore, authStore.Middleware(handler)))
@@ -656,31 +644,6 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 	return set
 }
 
-// resolveMetrics applies flags > config > default precedence for the Prometheus
-// /metrics endpoint. The endpoint is enabled by default; -no-metrics (or config
-// enabled=false) disables it. The listen address defaults to
-// defaultMetricsListen unless config or the -metrics-listen flag overrides it;
-// the flag wins over config.
-func resolveMetrics(cfg server.Config, noMetrics bool, noMetricsSet bool, metricsListen string, metricsListenSet bool) (bool, string) {
-	enabled := true
-	if cfg.Metrics.Enabled != nil {
-		enabled = *cfg.Metrics.Enabled
-	}
-	if noMetricsSet {
-		enabled = !noMetrics
-	}
-	listen := cfg.Metrics.Listen
-	if listen == "" {
-		listen = defaultMetricsListen
-	}
-	// Only a non-empty flag overrides; an explicit `-metrics-listen=` must not
-	// discard a configured listen address in favor of the default.
-	if metricsListenSet && metricsListen != "" {
-		listen = metricsListen
-	}
-	return enabled, listen
-}
-
 // newMetricsRegistry returns a registry seeded with the build-info gauge when
 // metrics are enabled, or nil when disabled. A nil registry disables collection
 // at the handler level (Options.Metrics), so -no-metrics stops the per-request
@@ -689,17 +652,11 @@ func newMetricsRegistry(enabled bool) *metrics.Registry {
 	if !enabled {
 		return nil
 	}
-	reg := metrics.New()
-	reg.Gauge("model_proxy_build_info", "Model proxy build information.").
-		Set(1, map[string]string{"version": buildinfo.Version})
-	return reg
-}
-
-// metricsListenExplicit reports whether the operator explicitly chose the metrics
-// listen address (via flag or config). When they did, a bind failure is fatal
-// rather than silently disabling the endpoint they asked for.
-func metricsListenExplicit(cfg server.Config, metricsListenSet bool) bool {
-	return metricsListenSet || cfg.Metrics.Listen != ""
+	return metrics.NewWithBuildInfo(metrics.BuildInfo{
+		Name:    "model_proxy_build_info",
+		Help:    "Model proxy build information.",
+		Version: buildinfo.Version,
+	})
 }
 
 func defaultConfigDir(getenv func(string) string) string {

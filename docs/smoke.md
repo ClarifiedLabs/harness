@@ -89,7 +89,7 @@ go test -tags=integration ./cmd/harness/ -run TestIntegration -v
 | Leg | Test | What it asserts |
 |---|---|---|
 | Real `gopls` over the shim | `TestIntegrationGopls` | Drives `harness lsp serve` against a real `gopls` over a tiny temp Go module — server selection, root detection, launch + handshake, `didOpen` — then a `mcp__lsp__definition` call (resolves `Foo` to `main.go:3`) and a `mcp__lsp__diagnostics` call (reports the `undefinedThing` error). **Skipped** when `gopls` is not on `PATH`. |
-| Production proxy chain | `TestIntegrationProxyChain` | Builds `harness` and `harness-mcp-proxy` and runs the real chain: a local `harness-mcp-proxy serve -stdio` hosts `harness lsp serve` as a downstream; the test confirms the shim's tools surface under the `mcp__lsp__` namespace (e.g. `mcp__lsp__definition`) — which is what lets harness register them. No language server is launched (`tools/list` is static). |
+| Production proxy chain | `TestIntegrationProxyChain` | Builds `harness` and `harness-mcp-proxy` and runs the real chain: a local `harness-mcp-proxy serve -stdio` hosts `harness lsp serve` as a downstream; the test confirms the shim's tools surface under the `mcp__lsp__` namespace (e.g. `mcp__lsp__definition`) — which is what lets harness register them. No language server is launched (`tools/list` is static), and this production stdio chain opens no metrics listener or collectors. |
 
 ### Real downstream MCP server (BLOCKED — run by hand)
 
@@ -103,6 +103,7 @@ go build ./cmd/...
 # Start the proxy yourself — harness never spawns it. Leave it running:
 ./harness-mcp-proxy serve &
 ./harness-mcp-proxy tools          # prints the mcp__<server>__<tool> table
+curl -fsS http://127.0.0.1:9091/metrics
 
 # Drive a model through an MCP tool:
 HARNESS_MCP_ENABLE=true ./harness -model claude-opus-4-8 \

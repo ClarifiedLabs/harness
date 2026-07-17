@@ -14,6 +14,7 @@ import (
 	"harness/internal/httpserve"
 	"harness/internal/logging"
 	"harness/internal/mcp"
+	"harness/internal/metrics"
 )
 
 const (
@@ -28,6 +29,7 @@ type Daemon struct {
 	cfg     Config
 	logger  *slog.Logger
 	apiKeys *apikey.DynamicStore
+	metrics *registryMetrics
 
 	// spawn/sleep are injected into every supervisor; nil → production defaults.
 	// Tests set them to avoid real subprocesses and backoff waits.
@@ -38,26 +40,40 @@ type Daemon struct {
 	registry    *Registry
 }
 
+// DaemonOptions supplies optional HTTP authentication and metrics dependencies.
+type DaemonOptions struct {
+	APIKeys *apikey.DynamicStore
+	Metrics *metrics.Registry
+}
+
 // NewDaemon builds a daemon for cfg. Run must be called to start it.
 func NewDaemon(cfg Config, logger *slog.Logger) *Daemon {
-	if logger == nil {
-		logger = slog.New(slog.DiscardHandler)
-	}
-	return &Daemon{
-		cfg:     cfg,
-		logger:  logger,
-		apiKeys: apikey.NewDynamicStore(nil, nil),
-	}
+	return NewDaemonWithOptions(cfg, logger, DaemonOptions{})
 }
 
 // NewDaemonWithAPIKeys builds a daemon using the supplied dynamic API-key store
 // for HTTP authentication. A nil store disables auth until the caller updates it.
 func NewDaemonWithAPIKeys(cfg Config, logger *slog.Logger, apiKeys *apikey.DynamicStore) *Daemon {
-	d := NewDaemon(cfg, logger)
-	if apiKeys != nil {
-		d.apiKeys = apiKeys
+	return NewDaemonWithOptions(cfg, logger, DaemonOptions{APIKeys: apiKeys})
+}
+
+// NewDaemonWithOptions builds a daemon and pre-registers the MCP tool-call metric
+// families when a metrics registry is supplied. RunStdio intentionally ignores
+// the collectors even when options include them.
+func NewDaemonWithOptions(cfg Config, logger *slog.Logger, options DaemonOptions) *Daemon {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
 	}
-	return d
+	apiKeys := options.APIKeys
+	if apiKeys == nil {
+		apiKeys = apikey.NewDynamicStore(nil, nil)
+	}
+	return &Daemon{
+		cfg:     cfg,
+		logger:  logger,
+		apiKeys: apiKeys,
+		metrics: registerRegistryMetrics(options.Metrics),
+	}
 }
 
 // Run serves HTTP until ctx is cancelled. It returns nil on a clean shutdown or
@@ -68,7 +84,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// the registry assigns the callback would race the run-loop goroutine's read
 	// of onToolsChanged against the registry's write.
 	d.buildSupervisors()
-	d.registry = NewRegistry(d.supervisors, d.logger)
+	d.registry = newRegistryWithMetrics(d.supervisors, d.logger, d.metrics)
 	d.startSupervisors(ctx)
 	defer d.shutdown()
 
