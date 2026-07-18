@@ -1634,9 +1634,9 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.14 `delegate`
 
-> Run a configured delegate agent with fresh context on a self-contained task and
-> return its final report. Use for broad/noisy investigation or bounded independent
-> review, not known-file lookups or tightly coupled blockers.
+> Use for broad exploration or independent workstreams; keep small known-file and tightly
+> coupled tasks in the parent. For separable work, call multiple delegates, then
+> synthesize reports without polling.
 
 | param | type | notes |
 |---|---|---|

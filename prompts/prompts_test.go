@@ -47,21 +47,6 @@ func TestSystemPromptRequestsToolCommentary(t *testing.T) {
 	}
 }
 
-func TestSystemPromptIncludesDelegationPolicy(t *testing.T) {
-	system := strings.ToLower(System())
-	for _, want := range []string{
-		"broad codebase exploration",
-		"known file or symbol",
-		"do not poll",
-		"complete prompt",
-		"do not delegate merely because",
-	} {
-		if !strings.Contains(system, want) {
-			t.Fatalf("system prompt missing delegation guidance %q:\n%s", want, System())
-		}
-	}
-}
-
 func TestDelegateChildPromptDefinesScopeAndReport(t *testing.T) {
 	child := strings.ToLower(DelegateChild())
 	for _, want := range []string{"reporting to a parent", "do not ask the user", "evidence-backed", "verification", "unresolved risks", "do not recursively delegate"} {

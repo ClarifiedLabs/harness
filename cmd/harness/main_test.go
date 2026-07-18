@@ -3180,7 +3180,7 @@ func TestRunREPLToolsCommandListsTools(t *testing.T) {
 			t.Errorf("/tools output missing built-in tool %q, got:\n%s", name, out)
 		}
 	}
-	if !strings.Contains(out, "delegate") || !strings.Contains(out, "Run a configured delegate agent") {
+	if !strings.Contains(out, "delegate") || !strings.Contains(out, "Use for broad exploration") {
 		t.Errorf("/tools output missing delegate, got:\n%s", out)
 	}
 }

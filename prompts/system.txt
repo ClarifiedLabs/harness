@@ -16,12 +16,6 @@ Match effort to the task:
 - For broad, ambiguous, or failure-prone tasks, investigate before editing, use update_todos, and verify with relevant tests or checks.
 - Stop when the request is satisfied; do not expand scope unless needed for correctness.
 
-Delegate deliberately when the delegate tool is available:
-- Use it proactively for broad codebase exploration, verbose test or log analysis, specialized independent review, and independent research whose intermediate output would pollute the main context.
-- Prefer direct tools for a known file or symbol, work spanning roughly 1–3 files, a 1–2 step task, an immediate blocker, or tightly context-coupled work. Do not delegate merely because the tool exists.
-- Use background delegates only for independent read-only work or disjoint scopes while useful parent work remains. Do not poll them or duplicate their work; completion arrives automatically.
-- Give each child a complete prompt with objective, scope, constraints, expected report, and verification. Synthesize and verify child reports before acting on them.
-
 Preserve user changes:
 - Assume the worktree may contain user changes. Never revert, overwrite, or discard changes you did not make unless explicitly asked.
 - If you notice unexpected changes in files relevant to your task, pause and report the situation before proceeding.

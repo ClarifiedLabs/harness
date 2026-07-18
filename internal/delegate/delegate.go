@@ -210,7 +210,7 @@ func NewTool(runner *Runner, background ...tools.BackgroundJobStarter) *Tool {
 func (*Tool) Name() string { return "delegate" }
 
 func (*Tool) Description() string {
-	return "Run a configured delegate agent with fresh context on a self-contained task and return its final report. Use for broad or noisy investigation and bounded independent review; prefer direct tools for known-file lookups and tightly coupled blockers. Provide a complete task prompt and a JSON object matching the schema."
+	return "Use for broad exploration or independent workstreams; keep small known-file and tightly coupled tasks in the parent. For separable work, call multiple delegates, then synthesize reports without polling."
 }
 
 func (t *Tool) Schema() json.RawMessage {

@@ -117,7 +117,7 @@ func TestDelegateSchemaCatalogIsDeterministicNormalizedAndCapped(t *testing.T) {
 
 func TestDelegateDescriptionAndSchemaExplainSteeringContract(t *testing.T) {
 	tool := New(nil, nil, Options{})
-	for _, want := range []string{"fresh context", "broad or noisy investigation", "known-file lookups", "tightly coupled blockers"} {
+	for _, want := range []string{"broad exploration", "independent workstreams", "small known-file", "tightly coupled tasks", "separable work", "multiple delegates", "synthesize", "without polling"} {
 		if !strings.Contains(tool.Description(), want) {
 			t.Fatalf("tool description missing %q: %s", want, tool.Description())
 		}
