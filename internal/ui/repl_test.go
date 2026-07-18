@@ -3509,7 +3509,11 @@ func TestREPLDuringTurnSteerCarriesSkillContext(t *testing.T) {
 	ag.SetSystem("you are a test")
 	ag.SetSleep(func(time.Duration) {})
 	app.Agent = ag
-	app.Steer = func(input agent.SteerInput) { ag.SteerContent(input) }
+	steerQueued := make(chan struct{})
+	app.Steer = func(input agent.SteerInput) {
+		ag.SteerContent(input)
+		close(steerQueued)
+	}
 	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
 
 	pr, pw := io.Pipe()
@@ -3525,6 +3529,13 @@ func TestREPLDuringTurnSteerCarriesSkillContext(t *testing.T) {
 		t.Fatal("tool did not run")
 	}
 	writePipe(t, pw, "redirect with $steer\r")
+	// A successful pipe write only means the reader consumed the bytes. Wait for
+	// the REPL loop to prepare and queue the steer before letting the tool return.
+	select {
+	case <-steerQueued:
+	case <-time.After(time.Second):
+		t.Fatal("steer was not queued")
+	}
 	close(releaseTurn)
 	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from steered input")
 	_ = pw.Close()
