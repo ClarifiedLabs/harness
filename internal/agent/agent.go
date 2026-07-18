@@ -56,6 +56,15 @@ type AssistantPhaseSink interface {
 	AssistantPhase(phase string)
 }
 
+// CompactionProgressSink is implemented by sinks that want transient progress
+// while compaction summarizes old context. The callbacks are balanced around
+// model-backed compaction only; local-only degradation and no-op compaction do
+// not emit them.
+type CompactionProgressSink interface {
+	CompactionStart()
+	CompactionComplete()
+}
+
 // ToolResultArchive and ToolResultArchiver remain agent-level aliases because
 // event sinks implement the archival boundary. Formatting and model guidance
 // live in toolresult so foreground and background results share them.

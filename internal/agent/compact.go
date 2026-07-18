@@ -141,6 +141,10 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	older := a.transcript[:boundary]
 	kept := a.transcript[boundary:]
 
+	if progress, ok := sink.(CompactionProgressSink); ok {
+		progress.CompactionStart()
+		defer progress.CompactionComplete()
+	}
 	summary, usage, err := a.summarize(ctx, prompts.CompactionSummary(), older)
 	if err != nil {
 		sink.Notice(fmt.Sprintf("[compact failed: %v; keeping full transcript]", err))

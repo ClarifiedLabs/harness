@@ -138,6 +138,8 @@ func readAll(r io.Reader) (string, error) {
 	return string(b), err
 }
 
-// ensure the accumulating sink stays an agent.EventSink (compile-time guard).
+// Ensure the accumulating sink stays compatible with the required and optional
+// agent event contracts it forwards.
 var _ agent.EventSink = (*accumulatingSink)(nil)
 var _ agent.AssistantPhaseSink = (*accumulatingSink)(nil)
+var _ agent.CompactionProgressSink = (*accumulatingSink)(nil)

@@ -529,8 +529,9 @@ Before summarization, large old tool results and large old tool inputs are
 reduced to previews (`compact_tool_result_max_bytes`, default `4096`), old images
 are replaced with placeholders, and the raw removed messages are archived under
 `compactions/`. If the old history is too large for one summary call, harness
-summarizes chunks and then summarizes the chunk summaries. If compaction fails,
-the full transcript is kept.
+summarizes chunks and then summarizes the chunk summaries. Non-quiet TTY runs
+show a transient elapsed-time indicator while this summary work is in progress.
+If compaction fails, the full transcript is kept.
 
 Turn summaries include approximate context footprint and, when stateful Responses
 sends a smaller request than the full active conversation, the payload estimate.

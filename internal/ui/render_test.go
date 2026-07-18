@@ -796,6 +796,49 @@ func TestLiveCounterTickAdvancesElapsed(t *testing.T) {
 	}
 }
 
+func TestLiveCounterTracksAndCompletesCompaction(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 7, 18, 2, 0, 0, 0, time.Local)
+	r := liveRenderer(&out, &errw, func() time.Time { return now })
+
+	r.CompactionStart()
+	now = now.Add(3 * time.Second)
+	r.tick()
+	defer r.StopProgress()
+
+	if out.Len() != 0 {
+		t.Fatalf("compaction progress must not touch stdout, got %q", out.String())
+	}
+	if got := errw.String(); !strings.Contains(got, "\r\x1b[2K[context: compacting · 3s]") {
+		t.Fatalf("compaction should repaint an elapsed counter in place, got %q", got)
+	}
+
+	errw.Reset()
+	r.CompactionComplete()
+	if got := errw.String(); got != "\r\x1b[2K" {
+		t.Fatalf("completing compaction should erase its transient row, got %q", got)
+	}
+	r.statusMu.Lock()
+	active, drawn := r.statusActive, r.statusDrawn
+	label, ctxPct := r.statusLabel, r.statusCtxPct
+	tickerRunning := r.ticker != nil
+	r.statusMu.Unlock()
+	if active || drawn || label != "" || ctxPct != 0 {
+		t.Fatalf("completed compaction left stale status state: active=%t drawn=%t label=%q ctx=%d",
+			active, drawn, label, ctxPct)
+	}
+	if !tickerRunning {
+		t.Fatal("compaction completion should preserve the turn-wide ticker")
+	}
+
+	errw.Reset()
+	r.tick()
+	r.TextDelta("done\n")
+	if got := errw.String(); got != "" {
+		t.Fatalf("a tick or complete assistant line must not revive completed compaction, got %q", got)
+	}
+}
+
 func TestLiveCounterShowsTotalElapsedSincePromptSubmission(t *testing.T) {
 	var out, errw bytes.Buffer
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)

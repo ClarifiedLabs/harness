@@ -280,6 +280,19 @@ func (r *Renderer) ModelTurnComplete(usage agent.ModelTurnUsage) {
 	r.writeModelTurnComplete(usage)
 }
 
+// CompactionStart begins a transient live wait while old context is summarized.
+// Non-live and quiet renderers intentionally produce no fallback line.
+func (r *Renderer) CompactionStart() {
+	r.beginWait("context: compacting", 0)
+}
+
+// CompactionComplete ends only the current wait phase. It leaves the turn-wide
+// ticker, prompt timer, and during-turn input intact so automatic compaction can
+// transition directly into the next model wait.
+func (r *Renderer) CompactionComplete() {
+	r.endWait()
+}
+
 func (r *Renderer) writeModelTurnComplete(usage agent.ModelTurnUsage) string {
 	defer r.flushToolUseStarts()
 	if !usage.Usage.CostKnown {
@@ -540,6 +553,21 @@ func (r *Renderer) statusClear() {
 	r.statusMu.Lock()
 	r.eraseLocked()
 	r.statusActive = false
+	r.statusMu.Unlock()
+}
+
+// endWait erases and deactivates a completed phase while preserving turn-wide
+// status state. Unlike statusClear, it clears the label so later assistant text
+// cannot resume a phase that has already completed.
+func (r *Renderer) endWait() {
+	if !r.liveStatus {
+		return
+	}
+	r.statusMu.Lock()
+	r.eraseLocked()
+	r.statusActive = false
+	r.statusLabel = ""
+	r.statusCtxPct = 0
 	r.statusMu.Unlock()
 }
 

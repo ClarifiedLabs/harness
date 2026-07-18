@@ -1824,13 +1824,14 @@ backoff allows.
   diagnostics, even when pricing is unknown and no cost line is shown. Retried
   streamed attempts also record a discard marker so replay can omit the abandoned
   attempt's assistant/reasoning deltas while keeping the retry notice.
-- **Live wait counter (TTY, non-quiet).** While a model request or a tool call is
-  outstanding, the static waiting line is replaced by a single in-place line painted
-  with `\r\x1b[2K` and repainted ~once a second by a `time.Ticker` goroutine (with a
-  mutex + stop-and-drain handshake so it never interleaves with streamed bytes):
-  `[model: turn 1 · 12s]` (or `[tool: grep · 3s]`), with the running context-window
-  percentage appended for model waits (`· ctx 30%`). It is erased the instant real
-  output or a tool line scrolls in — not a sticky bar or scroll region.
+- **Live wait counter (TTY, non-quiet).** While a model request, a tool call, or a
+  model-backed compaction summary is outstanding, the static waiting line is replaced
+  by a single in-place line painted with `\r\x1b[2K` and repainted ~once a second by a
+  `time.Ticker` goroutine (with a mutex + stop-and-drain handshake so it never
+  interleaves with streamed bytes): `[model: turn 1 · 12s]`, `[tool: grep · 3s]`, or
+  `[context: compacting · 3s]`, with the running context-window percentage appended
+  for model waits (`· ctx 30%`). It is erased the instant real output or a tool line
+  scrolls in — not a sticky bar or scroll region.
 - **During-turn input line.** Keystrokes typed during a turn are read in raw,
   echo-off mode and shown on that wait line after a `>` marker
   (`[model: turn 1 · 12s] > draft`). Pressing Enter during a turn queues the
@@ -2331,7 +2332,8 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   mid-stream errors with the shared `retry.Next` backoff (up to `streamRetries`) so a
   429 at 78% does not abort compaction. If the summary itself is truncated
   (`StopMaxTokens`) it doubles the token budget and retries once, then accepts the
-  result.
+  result. Chunking, retries, and archive writing remain covered by one transient
+  `context: compacting` progress phase.
 - **Image-aware estimation.** `estimateTokens`/`estimateRequest` weight each
   `BlockImage` at a flat `imageTokenEstimate` (1600 tokens) rather than counting its
   base64 bytes at bytes/4, which wildly overstated images. Correspondingly,

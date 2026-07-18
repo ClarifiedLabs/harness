@@ -1400,6 +1400,59 @@ func TestREPLCompactCommand(t *testing.T) {
 	}
 }
 
+func TestREPLCompactShowsLiveProgressWhileSummaryBlocked(t *testing.T) {
+	var out, errw lockedBuffer
+	inSummary := make(chan struct{})
+	releaseSummary := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseSummary) }) }
+	defer release()
+
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("CANNED SUMMARY")},
+		Stop:   llm.StopEndTurn,
+		Usage:  llm.Usage{InputTokens: 9100, OutputTokens: 400},
+		Block: func(context.Context) {
+			close(inSummary)
+			<-releaseSummary
+		},
+	})
+	app := liveTestApp(t, &out, &errw, fp)
+
+	var seed []llm.Message
+	for i := 0; i < 10; i++ {
+		label := string(rune('a' + i))
+		seed = append(seed,
+			llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: label + " q"}}},
+			llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: label + " a"}}},
+		)
+	}
+	app.Agent.SetTranscript(seed)
+
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- Run(strings.NewReader("/compact\n/exit\n"), app, nil) }()
+
+	select {
+	case <-inSummary:
+	case <-time.After(time.Second):
+		t.Fatal("compaction summary call did not start")
+	}
+	if got := errw.String(); !strings.Contains(got, "[context: compacting · 0s]") {
+		t.Fatalf("live compaction status was not visible while the summary call blocked: %q", got)
+	}
+	if got := out.String(); got != "" {
+		t.Fatalf("compaction progress must leave stdout untouched, got %q", got)
+	}
+
+	release()
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want %d; errw=%q", code, ExitOK, errw.String())
+	}
+	if got := errw.String(); !strings.Contains(got, "[compacted:") {
+		t.Fatalf("completed /compact should retain its durable report, errw=%q", got)
+	}
+}
+
 func TestREPLModelCommand(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")

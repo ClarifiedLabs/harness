@@ -3608,6 +3608,14 @@ func (s *accumulatingSink) ReasoningSummary(text string) {
 	})
 }
 
+func (s *accumulatingSink) CompactionStart() {
+	s.r.CompactionStart()
+}
+
+func (s *accumulatingSink) CompactionComplete() {
+	s.r.CompactionComplete()
+}
+
 func (s *accumulatingSink) ModelTurnStart(modelTurn, attempt int, ctx agent.ContextEstimate) {
 	s.modelTurn = modelTurn
 	s.attempt = attempt
