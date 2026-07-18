@@ -1581,7 +1581,7 @@ func configAgentsFromDefinitions(agents map[string]agentdef.Definition) map[stri
 
 func runSessionCommand(args []string, stdout, stderr io.Writer, replayOpts session.ReplayOptions) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "usage: harness session <replay|timings> <session-dir>")
+		fmt.Fprintln(stderr, "usage: harness session <replay|timings|stats> <session-dir>")
 		return ui.ExitUsage
 	}
 	switch args[0] {
@@ -1605,9 +1605,19 @@ func runSessionCommand(args []string, stdout, stderr io.Writer, replayOpts sessi
 			return ui.ExitRuntime
 		}
 		return ui.ExitOK
+	case "stats":
+		if len(args) != 2 {
+			fmt.Fprintln(stderr, "usage: harness session stats <session-dir>")
+			return ui.ExitUsage
+		}
+		if err := session.Stats(args[1], stdout); err != nil {
+			fmt.Fprintf(stderr, "harness: session stats: %v\n", err)
+			return ui.ExitRuntime
+		}
+		return ui.ExitOK
 	default:
 		fmt.Fprintf(stderr, "harness: unknown session command %q\n", args[0])
-		fmt.Fprintln(stderr, "usage: harness session <replay|timings> <session-dir>")
+		fmt.Fprintln(stderr, "usage: harness session <replay|timings|stats> <session-dir>")
 		return ui.ExitUsage
 	}
 }

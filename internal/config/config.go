@@ -1105,7 +1105,7 @@ func Usage(w io.Writer) {
 	fmt.Fprintln(w, "  harness [flags]            interactive REPL")
 	fmt.Fprintln(w, "  harness -i \"prompt\" [flags]  run a first prompt, then continue in the REPL")
 	fmt.Fprintln(w, "  harness -p \"prompt\" [flags]  one-shot: prints the assistant's answer to stdout")
-	fmt.Fprintln(w, "  harness session replay <session-dir>")
+	fmt.Fprintln(w, "  harness session <replay|timings|stats> <session-dir>")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Model provider access goes through harness-model-proxy.")
 	fmt.Fprintln(w)

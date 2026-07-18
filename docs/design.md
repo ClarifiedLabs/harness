@@ -63,7 +63,7 @@ codebase works today and evolves as harness gains capabilities.
 ### Package layout
 
 ```
-cmd/harness/main.go      flags, config load, proxy catalog wiring, signal setup, REPL-vs-oneshot dispatch (also hosts `harness lsp serve`, `harness session replay|timings`)
+cmd/harness/main.go      flags, config load, proxy catalog wiring, signal setup, REPL-vs-oneshot dispatch (also hosts `harness lsp serve`, `harness session replay|timings|stats`)
 cmd/harness-model-proxy  provider setup/refresh and HTTP model proxy server; subcommands serve (default), setup, refresh-models, auth (login/logout/status), generate-api-key, version
 internal/modelproxy      proxy protocol, client Provider, server handler
 internal/modelproxy/pricing generic request-cost pricers: flat llm.Price plus provider-specific dynamic models
@@ -2273,6 +2273,14 @@ type UsageTotals struct {
 - `harness session timings <session-dir>` reads `raw.ndjson` timestamps and
   prints turn totals, model attempt durations, tool durations, largest event gaps,
   and context/payload estimates.
+- `harness session stats <session-dir>` reads the existing root and child
+  `state.json` and `raw.ndjson` files, `compactions/*.meta.json` plus their input
+  transcripts, and `children/*/meta.json`. It reports turns, direct tool and
+  command activity, parallel batches, compactions, authoritative token/cost
+  totals, and a hierarchical delegate breakdown without changing the on-disk
+  schema. Root usage already includes delegate and compaction spend and is never
+  summed with child usage; each child usage total likewise includes its nested
+  delegates. Direct tool activity is instead summed once from every replay log.
 - Transcripts are provider-neutral; resuming under a different provider/model works.
   When flags disagree with the state, flags win with a warning. Tool-result messages
   may include local-only `parallel_tool_batches` metadata; provider adapters ignore it,

@@ -2105,6 +2105,84 @@ func TestRunSessionReplaySubcommand(t *testing.T) {
 	}
 }
 
+func TestRunSessionStatsSubcommand(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	created := time.Date(2026, 7, 18, 5, 0, 0, 0, time.UTC)
+	if err := (session.Session{
+		Provider: "openai",
+		Model:    "test-model",
+		Agent:    "code",
+		Created:  created,
+		Updated:  created.Add(time.Minute),
+		Usage: session.UsageTotals{
+			Usage:   llm.Usage{InputTokens: 10, OutputTokens: 5},
+			CostUSD: 0.002,
+		},
+	}).Save(dir); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+	if err := session.AppendEvent(dir, session.Event{Type: session.EventUser, Turn: 1, Text: "hello"}); err != nil {
+		t.Fatalf("append event: %v", err)
+	}
+
+	var out, errw bytes.Buffer
+	code := run(environment{
+		args:   []string{"session", "stats", dir},
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(string) string { return "" },
+		now:    time.Now,
+	})
+	if code != ui.ExitOK {
+		t.Fatalf("exit = %d; stderr=%q", code, errw.String())
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", errw.String())
+	}
+	for _, heading := range []string{"Session\n", "Conversation\n", "Tools\n", "Usage (includes delegates)\n", "Compactions\n", "Delegates (0)\n"} {
+		if !strings.Contains(out.String(), heading) {
+			t.Fatalf("stats output missing %q: %q", heading, out.String())
+		}
+	}
+}
+
+func TestRunSessionStatsErrors(t *testing.T) {
+	t.Run("arity", func(t *testing.T) {
+		var out, errw bytes.Buffer
+		code := run(environment{
+			args:   []string{"session", "stats"},
+			stdout: &out,
+			stderr: &errw,
+			getenv: func(string) string { return "" },
+			now:    time.Now,
+		})
+		if code != ui.ExitUsage {
+			t.Fatalf("exit = %d, want %d", code, ui.ExitUsage)
+		}
+		if got, want := errw.String(), "usage: harness session stats <session-dir>\n"; got != want {
+			t.Fatalf("stderr = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("missing session", func(t *testing.T) {
+		var out, errw bytes.Buffer
+		missing := filepath.Join(t.TempDir(), "missing")
+		code := run(environment{
+			args:   []string{"session", "stats", missing},
+			stdout: &out,
+			stderr: &errw,
+			getenv: func(string) string { return "" },
+			now:    time.Now,
+		})
+		if code != ui.ExitRuntime {
+			t.Fatalf("exit = %d, want %d", code, ui.ExitRuntime)
+		}
+		if !strings.HasPrefix(errw.String(), "harness: session stats: collect root session: ") {
+			t.Fatalf("stderr = %q", errw.String())
+		}
+	})
+}
+
 // TestRunSigintExitDuringTurnNoRace exercises the SIGINT-exit-while-a-turn-is-in-
 // flight path through run() with a non-nil injected signal channel. The first ^C
 // cancels the in-flight turn; a second ^C within the double-press window requests

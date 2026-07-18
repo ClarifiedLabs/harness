@@ -265,7 +265,12 @@ Saved sessions can be replayed or inspected:
 ```sh
 harness session replay ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
+harness session stats ~/.local/state/harness/sessions/20260611T123456Z
 ```
+
+The stats report covers turns, tools, commands, parallel batches, compactions,
+and per-delegate details; its session token and cost totals are authoritative
+and include delegate usage.
 
 Diagnostic logs, including MCP/LSP child-process stderr that is hidden from the
 terminal by default, are kept as JSON lines in the session's `diagnostics.ndjson`.

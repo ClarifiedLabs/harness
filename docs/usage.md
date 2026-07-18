@@ -515,7 +515,14 @@ Inspect saved sessions with:
 ```sh
 harness session replay ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
+harness session stats ~/.local/state/harness/sessions/20260611T123456Z
 ```
+
+`session stats` prints a deterministic, human-readable report for one session:
+root conversation turns, direct and delegate tool/command activity, parallel
+batches, compactions, and a hierarchical delegate breakdown. The root token and
+cost totals come from `state.json` and already include delegate and compaction
+usage; delegate totals similarly include any nested delegates.
 
 ## Compaction
 
