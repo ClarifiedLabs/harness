@@ -1024,12 +1024,13 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			break
 		}
 
-		results, toolUsage := a.dispatchCalls(ctx, res.toolCalls, turnID, sink)
+		results, parallelBatches, toolUsage := a.dispatchCalls(ctx, res.toolCalls, turnID, sink)
 		total = add(total, toolUsage)
 		a.transcript = append(a.transcript, llm.Message{
-			Role:    llm.RoleUser,
-			Time:    a.now(),
-			Content: results,
+			Role:                llm.RoleUser,
+			Time:                a.now(),
+			Content:             results,
+			ParallelToolBatches: parallelBatches,
 		})
 		if err := a.validateTranscript("after tool results"); err != nil {
 			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
@@ -1206,9 +1207,11 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, request
 // dispatchCalls runs one model turn's tool calls. Consecutive read-only calls
 // dispatch concurrently when tool hooks are inactive; mutating calls remain ordering
 // barriers. Sink events and the returned blocks are in emission order either way,
-// and the sink is only ever called from this goroutine (spec §8).
-func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, turnID int, sink EventSink) ([]llm.ContentBlock, llm.Usage) {
+// and the sink is only ever called from this goroutine (spec §8). The returned
+// parallel batches record the complete ordered membership of each concurrent island.
+func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, turnID int, sink EventSink) ([]llm.ContentBlock, []llm.ParallelToolBatch, llm.Usage) {
 	blocks := make([]llm.ContentBlock, len(calls))
+	var parallelBatches []llm.ParallelToolBatch
 	var total llm.Usage
 
 	toolHooksActive := a.hooks != nil && (a.hooks.HasEvent(hooks.PreToolUse) || a.hooks.HasEvent(hooks.PostToolUse))
@@ -1232,10 +1235,17 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, turnID 
 			continue
 		}
 
-		usage := a.dispatchReadOnlyBatch(ctx, calls[start:i], blocks[start:i], sink)
+		batchCalls := calls[start:i]
+		batch := llm.ParallelToolBatch{ToolUseIDs: make([]string, len(batchCalls))}
+		for j, call := range batchCalls {
+			batch.ToolUseIDs[j] = call.ID
+		}
+		parallelBatches = append(parallelBatches, batch)
+
+		usage := a.dispatchReadOnlyBatch(ctx, batchCalls, blocks[start:i], sink)
 		total = add(total, usage)
 	}
-	return blocks, total
+	return blocks, parallelBatches, total
 }
 
 func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, turnID int, sink EventSink) (llm.ContentBlock, llm.Usage) {

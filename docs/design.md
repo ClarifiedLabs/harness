@@ -128,11 +128,16 @@ const (
     // No system role: the system prompt is a Request field, not a message.
 )
 
+type ParallelToolBatch struct {
+    ToolUseIDs []string `json:"tool_use_ids"` // model emission order
+}
+
 type Message struct {
-    Role    Role           `json:"role"`
-    Time    time.Time      `json:"time,omitempty"`
-    Phase   string         `json:"phase,omitempty"` // assistant only: commentary | final_answer
-    Content []ContentBlock `json:"content"`
+    Role                Role                `json:"role"`
+    Time                time.Time           `json:"time,omitempty"`
+    Phase               string              `json:"phase,omitempty"` // assistant only: commentary | final_answer
+    Content             []ContentBlock      `json:"content"`
+    ParallelToolBatches []ParallelToolBatch `json:"parallel_tool_batches,omitempty"`
 }
 
 type BlockKind string
@@ -182,6 +187,11 @@ Design notes:
 - **JSON tags are provider-neutral** (`kind`, `tool_use_id`, …). Session files never
   contain raw provider wire JSON, so a session started against Anthropic resumes
   against an OpenAI-compatible server and vice versa.
+- **`ParallelToolBatches` is local execution metadata.** It appears on the user message
+  carrying tool results and is ignored by provider request builders. Each entry names,
+  in emission order, every tool-use ID in one group selected for concurrent dispatch.
+  Only groups of 2+ calls are recorded; no field means sequential execution or a
+  transcript written by an older harness version that did not record the distinction.
 - **Provider-hosted tools are separate from local tools.** `Request.Tools` carries
   function schemas backed by `internal/tools`; `Request.ServerTools` carries neutral
   provider-hosted declarations such as `web_search`. The model proxy resolves those
@@ -1003,7 +1013,10 @@ emit turn-usage event   // the REPL / one-shot caller prints it and saves the se
   ordering matching the model's emission order is worth far more than parallelism. Consecutive
   read-only islands with 2+ calls dispatch concurrently, bounded at 8, unless
   `PreToolUse` or `PostToolUse` hooks are configured; mutating calls remain ordering
-  barriers. Results, sink events, and transcript blocks stay in emission order.
+  barriers. Results, sink events, and transcript blocks stay in emission order. The
+  tool-result message records each actually selected concurrent island as one
+  `parallel_tool_batches` entry containing the complete ordered tool-use ID list; this
+  distinguishes separate islands in the same model-emitted call batch.
 - **One result per call, always.** Required by both APIs (§4 invariant). `Dispatch`
   produces a result even on panic.
 - **Metered tools:** tools may optionally report token usage (currently synchronous
@@ -2261,7 +2274,9 @@ type UsageTotals struct {
   prints turn totals, model attempt durations, tool durations, largest event gaps,
   and context/payload estimates.
 - Transcripts are provider-neutral; resuming under a different provider/model works.
-  When flags disagree with the state, flags win with a warning.
+  When flags disagree with the state, flags win with a warning. Tool-result messages
+  may include local-only `parallel_tool_batches` metadata; provider adapters ignore it,
+  and its omission in older sessions remains valid.
 
 ### REPL history
 

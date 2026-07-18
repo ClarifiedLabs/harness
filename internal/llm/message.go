@@ -26,13 +26,21 @@ const (
 	AssistantPhaseFinal      = "final_answer"
 )
 
+// ParallelToolBatch records one group of tool calls that the agent dispatched
+// concurrently. ToolUseIDs stay in the model's emission order.
+type ParallelToolBatch struct {
+	ToolUseIDs []string `json:"tool_use_ids"`
+}
+
 // Message is one turn-fragment in a transcript: a role plus an ordered list of
-// content blocks.
+// content blocks. ParallelToolBatches is execution metadata set only on the user
+// message carrying the corresponding tool results; provider adapters ignore it.
 type Message struct {
-	Role    Role           `json:"role"`
-	Time    time.Time      `json:"time,omitempty"`
-	Phase   string         `json:"phase,omitempty"`
-	Content []ContentBlock `json:"content"`
+	Role                Role                `json:"role"`
+	Time                time.Time           `json:"time,omitempty"`
+	Phase               string              `json:"phase,omitempty"`
+	Content             []ContentBlock      `json:"content"`
+	ParallelToolBatches []ParallelToolBatch `json:"parallel_tool_batches,omitempty"`
 }
 
 func ValidAssistantPhase(phase string) bool {

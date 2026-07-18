@@ -185,6 +185,40 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveLoadPreservesParallelToolBatches(t *testing.T) {
+	s := sampleSession()
+	s.Messages[1].Content = append(s.Messages[1].Content,
+		llm.ContentBlock{Kind: llm.BlockToolUse, ToolUseID: "call_2", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"README.md"}`)},
+	)
+	s.Messages[2].Content = append(s.Messages[2].Content,
+		llm.ContentBlock{Kind: llm.BlockToolResult, ResultForID: "call_2", ResultText: "readme"},
+	)
+	s.Messages[2].ParallelToolBatches = []llm.ParallelToolBatch{{ToolUseIDs: []string{"call_1", "call_2"}}}
+
+	path := filepath.Join(t.TempDir(), "session")
+	if err := s.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := llm.ValidateTranscript(got.Messages); err != nil {
+		t.Fatalf("loaded transcript invalid: %v", err)
+	}
+	batches := got.Messages[2].ParallelToolBatches
+	if len(batches) != 1 || !reflect.DeepEqual(batches[0].ToolUseIDs, []string{"call_1", "call_2"}) {
+		t.Fatalf("parallel tool batches = %+v, want [call_1 call_2]", batches)
+	}
+	data, err := os.ReadFile(filepath.Join(path, stateFile))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"parallel_tool_batches":[{"tool_use_ids":["call_1","call_2"]}]`)) {
+		t.Fatalf("saved session missing parallel batch metadata: %s", data)
+	}
+}
+
 func TestSaveLoadPreservesImageBlocks(t *testing.T) {
 	s := sampleSession()
 	s.Messages = []llm.Message{{

@@ -831,6 +831,9 @@ func TestParallelToolCallsSequentialInOrder(t *testing.T) {
 	if resMsg.Content[0].ResultForID != "call_a" || resMsg.Content[1].ResultForID != "call_b" {
 		t.Errorf("results out of order:\n%s", dump([]llm.Message{resMsg}))
 	}
+	if len(resMsg.ParallelToolBatches) != 0 {
+		t.Errorf("sequential calls recorded as parallel: %+v", resMsg.ParallelToolBatches)
+	}
 
 	// Tools executed sequentially in emission order.
 	if len(tool.inputs) != 2 || tool.inputs[0] != `{"n":1}` || tool.inputs[1] != `{"n":2}` {
@@ -2030,6 +2033,9 @@ func TestAllReadOnlyStepDispatchesConcurrently(t *testing.T) {
 			t.Errorf("read-only calls were not concurrent: %s", b.ResultText)
 		}
 	}
+	if len(resMsg.ParallelToolBatches) != 1 || !slices.Equal(resMsg.ParallelToolBatches[0].ToolUseIDs, []string{"a", "b"}) {
+		t.Fatalf("parallel batches = %+v, want one [a b] batch", resMsg.ParallelToolBatches)
+	}
 	// Sink saw both starts (emission order) before both results.
 	if len(sink.starts) != 2 || sink.starts[0].ID != "a" || sink.starts[1].ID != "b" {
 		t.Errorf("ToolStart order wrong: %+v", sink.starts)
@@ -2069,6 +2075,36 @@ func TestNonToolHooksDoNotDisableReadOnlyParallelDispatch(t *testing.T) {
 		if result.IsError {
 			t.Fatalf("read-only calls were serialized despite only non-tool hooks: %+v", sink.results)
 		}
+	}
+}
+
+func TestToolHooksOmitParallelBatchMetadata(t *testing.T) {
+	reg := &tools.Registry{}
+	for _, name := range []string{"r1", "r2"} {
+		reg.Register(&recordTool{name: name, readOnly: true, run: func(_ context.Context, _ json.RawMessage) (string, error) {
+			return "ok", nil
+		}})
+	}
+
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{
+				toolDone(0, "a", "r1", `{}`),
+				toolDone(1, "b", "r2", `{}`),
+			},
+			Stop: llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	runner := testHookRunner(t, `{"PreToolUse":[{"hooks":[{"type":"command","command":"printf '{}'"}]}]}`)
+	a := newAgent(fp, reg, Options{Hooks: runner})
+
+	if err := a.RunTurn(context.Background(), "go", &recordSink{}); err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	mustValid(t, a.Transcript())
+	if got := a.Transcript()[2].ParallelToolBatches; len(got) != 0 {
+		t.Fatalf("tool-hook-serialized calls recorded as parallel: %+v", got)
 	}
 }
 
@@ -2119,6 +2155,11 @@ func TestMixedStepDispatchesReadOnlyIslandsConcurrently(t *testing.T) {
 		if resMsg.Content[i].ResultError {
 			t.Fatalf("result %s errored; read-only islands were not concurrent: %s", wantID, resMsg.Content[i].ResultText)
 		}
+	}
+	if got := resMsg.ParallelToolBatches; len(got) != 2 ||
+		!slices.Equal(got[0].ToolUseIDs, []string{"a", "b"}) ||
+		!slices.Equal(got[1].ToolUseIDs, []string{"d", "e"}) {
+		t.Fatalf("parallel batches = %+v, want [a b] and [d e]", got)
 	}
 	if got := idsFromCalls(sink.starts); !slices.Equal(got, []string{"a", "b", "c", "d", "e"}) {
 		t.Fatalf("ToolStart order = %v, want [a b c d e]", got)
