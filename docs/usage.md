@@ -278,7 +278,9 @@ model proxy use the Responses WebSocket transport instead of HTTP SSE. The proxy
 defaults this on for `codex_oauth` Responses providers and preserves an explicit
 `responses_websocket:false` override.
 
-## Model Proxy Setup
+## Model Proxy
+
+### Setup
 
 Run `harness-model-proxy setup` to create a proxy config and a provider config
 from models.dev, append a new provider config to an existing proxy config, or
@@ -314,7 +316,9 @@ session cache key is sent to OpenAI-compatible backends. `key_field` accepts
 `auto` (default), `none`, `prompt_cache_key`, or `session_id`; `auto` sends
 `prompt_cache_key` to first-party OpenAI endpoints, `session_id` to OpenRouter,
 and omits cache key fields for other custom base URLs. `affinity_headers` can
-copy the same key into non-auth routing headers such as `x-session-id`.
+copy the same key into non-auth routing headers such as `x-session-id`. The
+proxy derives the provider-facing value as a SHA-256 hash of harness's local
+session key, so providers do not receive the raw session identifier.
 
 For hand-written model-proxy config shape references, see
 `examples/harness-model-proxy/config.json` and
@@ -322,6 +326,16 @@ For hand-written model-proxy config shape references, see
 to create real provider allowlists. Manual model entries must declare supported
 input modalities with `input_modalities`; use `["text"]` for text-only models
 and `["text", "image"]` for models that accept image attachments.
+
+Provider config files written by `setup` and `refresh-models` are managed
+(`"managed": true`) and store no per-model prices. The proxy resolves their
+prices and input modalities from the models.dev cache, so a cache refresh updates
+served metadata without re-running setup or restarting. Providers or models no
+longer present in that cache are warned about and removed from the live catalog.
+A hand-written config without `"managed": true` is manual: the proxy does not
+edit it and uses its own `price` and `input_modalities` entries. A managed config
+may set `price_source` to resolve metadata from a different models.dev provider
+ID.
 
 `harness-model-proxy` stores the full models.dev catalog at
 `~/.config/harness-model-proxy/models.dev.api.json`. `setup` uses the cache
@@ -345,6 +359,78 @@ providers or models that no longer exist in the catalog (or providers harness ca
 no longer support) are reported with a warning and removed rather than failing the
 refresh: a missing model is dropped, and a provider that loses all its models is
 deleted along with its `provider_configs` reference.
+
+### Harness-to-proxy authentication
+
+Model-proxy API-key authentication is disabled by default and becomes required
+as soon as the first key is stored in the proxy's dedicated API-key file. The
+default is `api_keys.json` next to the proxy config; `api_keys_file` selects
+another path and `serve -api-keys-file path` overrides it. Inline `api_keys` in
+the normal proxy config are rejected.
+
+Generate and store a key, then provide it to harness:
+
+```sh
+harness-model-proxy generate-api-key [-api-keys-file path] [-ttl 720h] [-budget-usd 25 -budget-period 24h] laptop
+harness --model-proxy-api-key <key> -provider <provider> -model <model>
+```
+
+Harness also reads `HARNESS_MODEL_PROXY_API_KEY` and the `model_proxy_api_key`
+field in `~/.config/harness/config.json`. Model-proxy keys have the `hmp_`
+prefix. Only SHA-256 hashes are stored, and the plaintext key is printed once.
+Omit `-ttl` (or use `0`) for a non-expiring key. A running proxy polls its key
+file for additions and removals; harness loads its outgoing key at process start.
+
+See [mcp.md](mcp.md#proxy-api-key-authentication) for the equivalent MCP proxy
+configuration.
+
+### Usage, pricing, and budgets
+
+The read-only `GET /v1/usage` endpoint aggregates token and cost totals per model
+target, including delegate child-agent spend. `GET /v1/models` includes complete
+static pricing schedules, including context-length tiers, plus `source_date` and
+`max_age_seconds` fields for detecting stale catalog prices. Managed-provider
+`source_date` values track the models.dev cache; manual-only setups use the
+provider config file modification time. Setup and runtime model pickers display
+each price band as input/output USD per million tokens.
+
+Cost budgets are attached to model-proxy API keys:
+
+```sh
+harness-model-proxy generate-api-key -budget-usd 25 -budget-period 24h laptop
+```
+
+New authenticated streams are rejected with HTTP 429 after the key's recorded
+known-cost spend reaches its fixed-window limit. Spend persists under the proxy
+config directory across restarts. Unpriced targets are allowed by default and do
+not count toward the budget; add `-budget-reject-unpriced` to reject them.
+`/v1/usage` includes the authenticated key's current budget state when it has a
+budget.
+
+### Prometheus metrics
+
+The proxy exposes unauthenticated Prometheus metrics on a separate listener,
+`127.0.0.1:9090` by default. Metrics break usage down by `provider`, `model`, and
+`key` (the API key's stored name, or `anonymous` when authentication is
+disabled). `model_proxy_build_info` carries the build version. Token counters are
+recorded for every stream that produced usage, priced or not, while
+`model_proxy_cost_usd_total` is recorded only when a price is known.
+
+Use `-no-metrics` to disable the endpoint or `-metrics-listen` to move it. The
+equivalent proxy-config `metrics` object accepts `enabled` and `listen`.
+
+### Proxy request tracing
+
+Enable opt-in tracing to correlate a harness run across model and MCP proxy logs:
+
+```sh
+harness -trace-proxy -provider <provider> -model <model>
+```
+
+Harness sends standard W3C `traceparent` headers. Proxy logs that receive a valid
+trace include `trace_id`, `span_id`, `parent_span_id`, and `trace_sampled` fields.
+Tracing does not log prompts, request bodies, API keys, or authentication
+headers.
 
 ## REPL Commands
 

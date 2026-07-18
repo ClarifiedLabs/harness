@@ -33,7 +33,10 @@ macOS arm64, macOS Intel, Linux amd64, and Linux arm64, SHA-256 checksums, and
 GitHub artifact attestations. Homebrew formulae are split into `harness`,
 `harness-model-proxy`, `harness-mcp-proxy`, and the `harness-full` meta formula.
 The workflow then updates `ClarifiedLabs/homebrew-tap` through a GitHub App
-installation token.
+installation token. After publishing the release assets and container images, it
+also updates the generated release-artifact block in `README.md` on the default
+branch and commits the versioned package links and container tags. Rerunning an
+older release does not replace links for a newer latest release.
 
 Tarballs and the macOS `.pkg` include all three binaries. Homebrew formulae,
 `.deb` packages, `.rpm` packages, and container images are split by binary:
@@ -73,7 +76,8 @@ tap, and dry-run the Homebrew formula merge.
 Dry runs do not publish a GitHub release, push container images, push to the
 Homebrew tap, or create artifact attestations. The macOS `.pkg` is built
 unsigned in dry runs so Apple Developer ID and notarization secrets are only
-required for real `v*` tag releases.
+required for real `v*` tag releases. They render the README release-artifact
+block with `v0.0.0` and show its diff without committing it.
 
 ## Tagging
 

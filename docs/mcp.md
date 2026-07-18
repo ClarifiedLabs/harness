@@ -193,6 +193,28 @@ harness-mcp-proxy tools -proxy http://127.0.0.1:8420
 `harness-mcp-proxy --version` prints the release version;
 `harness-mcp-proxy version` prints the release version plus MCP protocol version.
 
+## Proxy API-key authentication
+
+API-key authentication is disabled by default and becomes required as soon as
+the first key is stored in the proxy's dedicated API-key file. The default is
+`api_keys.json` next to the proxy config. Set `proxy.api_keys_file` to select
+another path or use `serve -api-keys-file path` to override it. Inline
+`proxy.api_keys` entries in the normal config are rejected.
+
+Generate and store a key, then provide it to harness:
+
+```sh
+harness-mcp-proxy generate-api-key [-api-keys-file path] [-ttl 720h] laptop
+HARNESS_MCP_PROXY_API_KEY=<key> HARNESS_MCP_ENABLE=true harness -provider <provider> -model <model>
+```
+
+Harness also reads `mcp.api_key` from `~/.config/harness/config.json`. MCP proxy
+keys have the `hmcpp_` prefix. Only SHA-256 hashes are stored, and the plaintext
+key is printed once. Omit `-ttl` (or use `0`) for a non-expiring key. A running
+HTTP proxy polls its key file for additions and removals; harness loads its
+outgoing key at process start. The `harness-mcp-proxy tools` diagnostic command
+uses `HARNESS_MCP_PROXY_API_KEY` or `tools -api-key <key>`.
+
 ## Proxy HTTP Details
 
 The proxy serves its merged MCP surface over streamable HTTP. Set `proxy.listen`
