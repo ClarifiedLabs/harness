@@ -272,33 +272,10 @@ func TestDelegateRunsChildAgentAndReturnsFinalReport(t *testing.T) {
 	}
 }
 
-func TestDecodeRunRequestParsesTools(t *testing.T) {
-	req, err := DecodeRunRequest(json.RawMessage(`{"task":"t","tools":[" read_file ","grep","read_file",""]}`), "delegate")
-	if err != nil {
-		t.Fatalf("DecodeRunRequest: %v", err)
-	}
-	// Trimmed, de-duplicated, order-preserving, blanks dropped.
-	if !slices.Equal(req.Tools, []string{"read_file", "grep"}) {
-		t.Fatalf("req.Tools = %v, want [read_file grep]", req.Tools)
-	}
-
-	// An omitted or all-blank tools list resolves to nil (full set).
-	for _, body := range []string{`{"task":"t"}`, `{"task":"t","tools":["  ",""]}`} {
-		req, err := DecodeRunRequest(json.RawMessage(body), "delegate")
-		if err != nil {
-			t.Fatalf("DecodeRunRequest(%s): %v", body, err)
-		}
-		if req.Tools != nil {
-			t.Fatalf("req.Tools = %v for %s, want nil", req.Tools, body)
-		}
-	}
-}
-
-func TestDelegateScopesChildToolSubset(t *testing.T) {
+func TestDelegateIgnoresLegacyToolsFieldAndUsesConfiguredTools(t *testing.T) {
 	childTools := &tools.Registry{}
 	childTools.Register(fakeChildTool{name: "read_file", out: "ok"})
-	childTools.Register(fakeChildTool{name: "grep", out: "ok"})
-	childTools.Register(fakeChildTool{name: "write_file", out: "ok"})
+	childTools.Register(fakeChildTool{name: "rg", out: "ok"})
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "done"}},
 		Stop:   llm.StopEndTurn,
@@ -308,8 +285,8 @@ func TestDelegateScopesChildToolSubset(t *testing.T) {
 		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools}, nil
 	}, Options{MaxTurns: 2})
 
-	if _, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"scoped","tools":["read_file"]}`)); err != nil {
-		t.Fatalf("RunMetered: %v", err)
+	if _, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"inspect","tools":["read_file"]}`)); err != nil {
+		t.Fatalf("RunMetered with legacy tools field: %v", err)
 	}
 	if len(fp.Requests) != 1 {
 		t.Fatalf("child requests = %d, want 1", len(fp.Requests))
@@ -318,76 +295,23 @@ func TestDelegateScopesChildToolSubset(t *testing.T) {
 	for i, tdef := range fp.Requests[0].Tools {
 		got[i] = tdef.Name
 	}
-	if !slices.Equal(got, []string{"read_file"}) {
-		t.Fatalf("child tool schemas = %v, want only [read_file]", got)
+	if want := []string{"read_file", "rg"}; !slices.Equal(got, want) {
+		t.Fatalf("child tool schemas = %v, want configured tools %v", got, want)
 	}
 }
 
-func TestDelegateUnknownScopedToolErrors(t *testing.T) {
-	childTools := &tools.Registry{}
-	childTools.Register(fakeChildTool{name: "read_file", out: "ok"})
-	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
-	state := NewState(Runtime{Provider: fp, Model: "claude-opus-4-8", Registry: llm.NewRegistry(nil)})
-	tool := New(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
-		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools}, nil
-	}, Options{MaxTurns: 2})
-
-	_, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"bad","tools":["read_file","nope"]}`))
-	if err == nil {
-		t.Fatal("expected error for unknown scoped tool")
-	}
-	if !strings.Contains(err.Error(), "nope") {
-		t.Fatalf("error = %v, want it to name the unknown tool", err)
-	}
-	if len(fp.Requests) != 0 {
-		t.Fatalf("invalid scoping should not launch the child, got %d requests", len(fp.Requests))
-	}
-}
-
-func TestDelegateSchemaListsToolNames(t *testing.T) {
-	state := NewState(Runtime{ToolNames: []string{"read_file", "grep", "delegate"}})
+func TestDelegateSchemaOmitsPerCallTools(t *testing.T) {
+	state := NewState(Runtime{ToolNames: []string{"read_file", "rg", "delegate"}})
 	tool := New(state.Snapshot, nil, Options{})
 
 	var schema struct {
-		Properties map[string]struct {
-			Items struct {
-				Enum []string `json:"enum"`
-			} `json:"items"`
-		} `json:"properties"`
+		Properties map[string]json.RawMessage `json:"properties"`
 	}
 	if err := json.Unmarshal(tool.Schema(), &schema); err != nil {
 		t.Fatalf("schema JSON: %v", err)
 	}
-	got := schema.Properties["tools"].Items.Enum
-	if !slices.Equal(got, []string{"read_file", "grep", "delegate"}) {
-		t.Fatalf("tools items enum = %v, want the runtime tool names", got)
-	}
-}
-
-func TestDelegateSchemaToolEnumIsValidForEveryAdvertisedAgent(t *testing.T) {
-	state := NewState(Runtime{ToolNames: []string{"read_file", "glob", "rg", "delegate"}})
-	tool := New(state.Snapshot, nil, Options{
-		AgentCandidates: func(Runtime) []AgentCandidate {
-			return []AgentCandidate{
-				{Name: "auto", Description: "General work", ToolNames: []string{"read_file", "glob", "rg", "delegate"}},
-				{Name: "explore", Description: "Read-only investigation", ToolNames: []string{"read_file", "rg"}},
-			}
-		},
-	})
-
-	var schema struct {
-		Properties map[string]struct {
-			Items struct {
-				Enum []string `json:"enum"`
-			} `json:"items"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(tool.Schema(), &schema); err != nil {
-		t.Fatalf("schema JSON: %v", err)
-	}
-	got := schema.Properties["tools"].Items.Enum
-	if want := []string{"read_file", "rg"}; !slices.Equal(got, want) {
-		t.Fatalf("tools items enum = %v, want universally valid %v", got, want)
+	if _, ok := schema.Properties["tools"]; ok {
+		t.Fatalf("delegate schema unexpectedly advertises per-call tools: %s", tool.Schema())
 	}
 }
 

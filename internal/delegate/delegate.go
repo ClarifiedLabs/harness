@@ -119,12 +119,6 @@ type RunRequest struct {
 	MaxTurns   *int
 	ChildID    string
 	Background bool
-
-	// Tools optionally scopes the child to a subset of the resolved agent's
-	// tools. Empty means the full set (back-compatible). Each name is validated
-	// against the resolved launch tools; an unknown name is a hard error so a
-	// typo fails fast rather than silently shrinking the child's surface.
-	Tools []string
 }
 
 // RunResult is the complete outcome of one child-agent run.
@@ -170,23 +164,11 @@ func (r *Runner) Rebind(snapshot func() Runtime) *Runner {
 
 func (r *Runner) Schema() json.RawMessage {
 	var agents []AgentCandidate
-	var toolNames []string
-	if r != nil && r.snapshot != nil {
+	if r != nil && r.snapshot != nil && r.opts.AgentCandidates != nil {
 		runtime := r.snapshot()
-		toolNames = runtime.ToolNames
-		if runtime.Depth+1 >= r.maxDepth() {
-			toolNames = withoutTool(toolNames, delegateToolName)
-		}
-		if r.opts.AgentCandidates != nil {
-			agents = DelegatableAgentCandidates(runtime.ToolNames, r.opts.AgentCandidates(runtime))
-			if runtime.Depth+1 >= r.maxDepth() {
-				for i := range agents {
-					agents[i].ToolNames = withoutTool(agents[i].ToolNames, delegateToolName)
-				}
-			}
-		}
+		agents = DelegatableAgentCandidates(runtime.ToolNames, r.opts.AgentCandidates(runtime))
 	}
-	return schema(agents, toolNames)
+	return schema(agents)
 }
 
 // Tool is a model-callable configured-agent launcher.
@@ -215,7 +197,7 @@ func (*Tool) Description() string {
 
 func (t *Tool) Schema() json.RawMessage {
 	if t == nil || t.runner == nil {
-		return schema(nil, nil)
+		return schema(nil)
 	}
 	return t.runner.Schema()
 }
@@ -286,11 +268,10 @@ func (t *Tool) RebindRuntime(snapshot func() Runtime) tools.Tool {
 
 func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 	var args struct {
-		Task       string   `json:"task"`
-		Agent      string   `json:"agent"`
-		MaxTurns   *int     `json:"max_turns"`
-		Background bool     `json:"background"`
-		Tools      []string `json:"tools"`
+		Task       string `json:"task"`
+		Agent      string `json:"agent"`
+		MaxTurns   *int   `json:"max_turns"`
+		Background bool   `json:"background"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return RunRequest{}, err
@@ -308,31 +289,7 @@ func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 		Agent:      strings.TrimSpace(args.Agent),
 		MaxTurns:   args.MaxTurns,
 		Background: args.Background,
-		Tools:      cleanToolNames(args.Tools),
 	}, nil
-}
-
-// cleanToolNames trims and drops blank entries, preserving order and dropping
-// duplicates. It returns nil when nothing remains so an empty/whitespace-only
-// list resolves to the full tool set.
-func cleanToolNames(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	seen := make(map[string]bool, len(in))
-	out := make([]string, 0, len(in))
-	for _, name := range in {
-		name = strings.TrimSpace(name)
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		out = append(out, name)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -373,19 +330,9 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	launch.System = childSystemPrompt(launch.System)
 
-	// Resolve the child's tool surface: the full set by default, or the validated
-	// requested subset. Validating before any session metadata is written fails a
-	// typo'd name fast without leaving a stranded "running" child record.
 	toolNames := launch.Tools.Names()
 	if runtime.Depth+1 >= maxDepth {
 		toolNames = withoutTool(toolNames, delegateToolName)
-	}
-	if len(req.Tools) > 0 {
-		if missing := MissingTools(req.Tools, toolNames); len(missing) > 0 {
-			return RunResult{}, fmt.Errorf("delegate: unknown tools requested: %s (available: %s)",
-				strings.Join(missing, ", "), strings.Join(toolNames, ", "))
-		}
-		toolNames = slices.Clone(req.Tools)
 	}
 
 	childID := strings.TrimSpace(req.ChildID)
@@ -673,7 +620,7 @@ func normalizeAgentDescription(description string) string {
 	return strings.TrimSpace(description[:keep]) + "..."
 }
 
-func schema(agents []AgentCandidate, toolNames []string) json.RawMessage {
+func schema(agents []AgentCandidate) json.RawMessage {
 	agentDescription := "Optional configured agent name to run. When omitted, uses the current active agent."
 	agentNames := make([]string, 0, len(agents))
 	if len(agents) > 0 {
@@ -695,15 +642,6 @@ func schema(agents []AgentCandidate, toolNames []string) json.RawMessage {
 	if len(agentNames) > 0 {
 		agent["enum"] = agentNames
 	}
-	// Agent-dependent tool enums require top-level schema composition, which
-	// Anthropic rejects for tool schemas. Advertise the conservative intersection
-	// instead: every listed name is valid for every selectable role. Omitting tools
-	// still gives the selected agent its full configured set.
-	toolNames = universallyAvailableTools(toolNames, agents)
-	items := map[string]any{"type": "string"}
-	if len(toolNames) > 0 {
-		items["enum"] = toolNames
-	}
 	properties := map[string]any{
 		"task": map[string]any{
 			"type":        "string",
@@ -720,13 +658,6 @@ func schema(agents []AgentCandidate, toolNames []string) json.RawMessage {
 			"description": "Use true only for independent, non-overlapping work while useful parent work remains. The parent may do one useful model round, then Harness automatically waits for these delegates, injects their results, and requires synthesis before the turn ends; do not poll for them or duplicate their work.",
 		},
 	}
-	if len(toolNames) > 0 {
-		properties["tools"] = map[string]any{
-			"type":        "array",
-			"items":       items,
-			"description": "Optional conservative subset of tools to expose to the child, by exact name, to cut per-turn schema overhead. Advertised names work with every selectable agent. Omit this field to give the selected agent its full configured tool set.",
-		}
-	}
 	body := map[string]any{
 		"type":       "object",
 		"properties": properties,
@@ -734,26 +665,6 @@ func schema(agents []AgentCandidate, toolNames []string) json.RawMessage {
 	}
 	b, _ := json.Marshal(body)
 	return b
-}
-
-func universallyAvailableTools(parent []string, agents []AgentCandidate) []string {
-	if len(agents) == 0 {
-		return slices.Clone(parent)
-	}
-	out := make([]string, 0, len(parent))
-	for _, name := range parent {
-		available := true
-		for _, candidate := range agents {
-			if !slices.Contains(candidate.ToolNames, name) {
-				available = false
-				break
-			}
-		}
-		if available {
-			out = append(out, name)
-		}
-	}
-	return out
 }
 
 func nextChildID(kind string) string {

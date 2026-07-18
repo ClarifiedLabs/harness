@@ -123,6 +123,10 @@ Built-in child roles are:
 | `plan` | collaborative read-only planning; available only when its complete tool set is a subset of the parent |
 | `auto` | the current general-purpose behavior |
 
+A child always receives the selected agent's configured tool set. Delegate calls
+cannot override or narrow it; select or define a different agent when a task needs
+a different capability bundle.
+
 A delegated task should include the objective, scope, constraints, expected
 report, and verification. Children receive a child-only prompt reminding them
 that they report to the parent, own only the delegated scope, should not ask the

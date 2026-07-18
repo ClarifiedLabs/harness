@@ -1657,7 +1657,6 @@ this subsection records the common runner those argv tools point at.
 | `agent` | string | optional configured agent name; omitted uses the current active agent; remains a simple enum for provider compatibility |
 | `max_turns` | int | optional per-call model-turn cap; capped at `delegate_max_turns` |
 | `background` | bool | only for independent non-overlapping work; after one useful parent model round, harness joins outstanding delegates and requires synthesis; do not poll or duplicate |
-| `tools` | string[] | optional exact-name subset; the model-facing enum is the conservative intersection valid for every selectable agent, while omission gives the resolved child its full tool set; unknown names fail before launch |
 
 - Implemented in `internal/delegate`, not `internal/tools`, to avoid an import cycle:
   the delegate tool starts a child `agent.Agent`, while `internal/agent` already
@@ -1671,9 +1670,11 @@ this subsection records the common runner those argv tools point at.
   preserving schema descriptions in `tools.Registry.Specs`; other tools retain the
   normal schema-description stripping behavior.
 - Child agents start with an empty transcript and use the requested agent
-  definition's prompt, subset-validated tools, and optional provider/model. If no
-  `agent` is provided, the child uses exactly the current parent agent's active
-  tools. `prompts/delegate-child.txt` is appended after that resolved system
+  definition's prompt, configured tools, and optional provider/model. Delegate
+  calls cannot narrow or expand that tool set; callers select or define a different
+  agent when they need a different capability bundle. If no `agent` is provided,
+  the child uses exactly the current parent agent's active tools.
+  `prompts/delegate-child.txt` is appended after that resolved system
   prompt only in `Runner.Run`; root prompts, including a configured custom static
   prompt, never receive it. The suffix says the child reports to the parent, owns
   only its delegated scope, does not ask the user questions, returns an
