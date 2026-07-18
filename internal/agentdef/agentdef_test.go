@@ -86,6 +86,15 @@ func TestResolveNilKeepsBuiltins(t *testing.T) {
 	}
 }
 
+func TestInspectionAgentsIncludeGlob(t *testing.T) {
+	for _, name := range []string{"explore", "plan"} {
+		agent := Builtins()[name]
+		if !slices.Contains(agent.AllowedTools, "glob") {
+			t.Fatalf("%s agent tools missing glob: %v", name, agent.AllowedTools)
+		}
+	}
+}
+
 func TestInspectionAgentsOmitGitReadonlyWhenGitMissing(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 

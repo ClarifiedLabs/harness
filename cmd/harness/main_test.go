@@ -3274,7 +3274,7 @@ func toolsOutputHasDescribedTool(output, name string) bool {
 }
 
 func expectedExploreToolNames() []string {
-	names := []string{"read_file", "list_dir"}
+	names := []string{"read_file", "list_dir", "glob"}
 	if tools.RipgrepAvailable() {
 		names = append(names, "rg")
 	} else {

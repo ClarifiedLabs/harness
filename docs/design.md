@@ -1303,8 +1303,8 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   sorted output is truncated to the first `listDirCap` (1000) with a
   `[truncated: showing first 1000 of <N> matches; narrow the pattern or root]`
   marker (the total gains a `+` when the scan cap was hit).
-- In the default tool set (auto/independent), not in the read-only `plan` agent's
-  explicit list.
+- Available to the default `auto`/`independent` agents and the shared read-only
+  inspection set used by `explore` and `plan`.
 
 ### 9.3 `grep` and optional `rg`
 
@@ -2427,7 +2427,7 @@ reviewer, or the wide-open default without separate binaries.
   including `record_plan`, `delegate` and background job tools; its
   `prompts/agents/auto.txt` is a one-byte file — a single newline — that trims to
   empty, so it contributes no prompt body), `explore` (read-only `read_file`,
-  `list_dir`, configured search tool(s), `web_fetch`, optional `git_readonly`, and
+  `list_dir`, `glob`, configured search tool(s), `web_fetch`, optional `git_readonly`, and
   read-only MCP tools; no mutation, implementation handoff, todos, background jobs,
   or delegation; prompt in `prompts/agents/explore.txt`), `plan` (the shared
   inspection tools, read-only MCP tools, `write_tmp_file`, `record_plan`,

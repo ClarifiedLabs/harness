@@ -111,7 +111,7 @@ func BuiltinsWithOptions(opts Options) map[string]Definition {
 }
 
 func inspectionTools(opts Options) []string {
-	names := []string{"read_file", "list_dir"}
+	names := []string{"read_file", "list_dir", "glob"}
 	names = append(names, searchToolNames(opts.SearchTools)...)
 	names = append(names, "web_fetch")
 	if tools.GitAvailable() {
