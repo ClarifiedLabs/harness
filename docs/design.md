@@ -1828,10 +1828,11 @@ backoff allows.
   model-backed compaction summary is outstanding, the static waiting line is replaced
   by a single in-place line painted with `\r\x1b[2K` and repainted ~once a second by a
   `time.Ticker` goroutine (with a mutex + stop-and-drain handshake so it never
-  interleaves with streamed bytes): `[model: turn 1 · 12s]`, `[tool: grep · 3s]`, or
-  `[context: compacting · 3s]`, with the running context-window percentage appended
-  for model waits (`· ctx 30%`). It is erased the instant real output or a tool line
-  scrolls in — not a sticky bar or scroll region.
+  interleaves with streamed bytes): `[model: turn 1 · 12s]`,
+  `[tool: grep args=["x"] · 3s]`, or `[context: compacting · 3s]`, with the same
+  compact key arguments as the completed tool summary and the running context-window
+  percentage appended for model waits (`· ctx 30%`). It is erased the instant real
+  output or a tool line scrolls in — not a sticky bar or scroll region.
 - **During-turn input line.** Keystrokes typed during a turn are read in raw,
   echo-off mode and shown on that wait line after a `>` marker
   (`[model: turn 1 · 12s] > draft`). Pressing Enter during a turn queues the

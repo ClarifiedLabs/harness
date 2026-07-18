@@ -119,7 +119,7 @@ type Renderer struct {
 	statusMu          sync.Mutex
 	statusActive      bool      // in a wait; the ticker should keep the line painted
 	statusDrawn       bool      // a status line is currently on the terminal
-	statusLabel       string    // e.g. "model: turn 3" or "tool: grep"
+	statusLabel       string    // e.g. "model: turn 3" or "tool: grep args=[\"x\"]"
 	statusStart       time.Time // when the current wait began
 	statusCtxPct      int       // context percent to append, 0 omits (r27)
 	statusInput       string    // during-turn typed buffer shown after "> "
@@ -355,7 +355,7 @@ func (r *Renderer) ToolStart(call llm.ToolCall) {
 	// Tick during the (possibly long) tool-execution gap, not just model
 	// waits (r12). The next output line erases this counter again.
 	if r.liveStatus {
-		r.beginWait(fmt.Sprintf("tool: %s", call.Name), 0)
+		r.beginWait(fmt.Sprintf("tool: %s%s", call.Name, formatToolArgs(call.Name, call.Input)), 0)
 	}
 }
 

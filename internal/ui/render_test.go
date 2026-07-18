@@ -933,8 +933,8 @@ func TestLiveCounterTicksDuringToolGap(t *testing.T) {
 	if strings.Contains(got, "[tool: grep started") {
 		t.Fatalf("tool start line should not scroll by default, got %q", got)
 	}
-	if !strings.Contains(got, "[tool: grep · 0s │ total 0s]") {
-		t.Fatalf("a counter should tick during the tool gap with total elapsed, got %q", got)
+	if !strings.Contains(got, `[tool: grep args=["x"] · 0s │ total 0s]`) {
+		t.Fatalf("a counter should show the tool arguments while ticking during the tool gap, got %q", got)
 	}
 }
 
