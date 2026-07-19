@@ -140,11 +140,11 @@ func (e *promptLineEditor) viEnterInsert(v *viLineState, s *lineEditState) {
 	e.refreshViPrompt(v, s)
 }
 
-func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, r rune, duringTurn bool) (viEditResult, error) {
+func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, r rune, duringPrompt bool) (viEditResult, error) {
 	e.clearShiftEnterPending()
 	switch r {
 	case '\r', '\n':
-		return e.viSubmit(s, v, duringTurn)
+		return e.viSubmit(s, v, duringPrompt)
 	case ctrlC:
 		return viEditResult{input: replInput{interrupt: true}, ok: true, done: true}, nil
 	case ctrlD:
@@ -153,7 +153,7 @@ func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState,
 		}
 		return viEditResult{redraw: true}, nil
 	case rune(lineTermEdit):
-		return e.viEdit(s, duringTurn)
+		return e.viEdit(s, duringPrompt)
 	case '\b', del:
 		e.markManualEdit(s)
 		v.resetCommand()
@@ -167,7 +167,7 @@ func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState,
 			}
 			return viEditResult{}, err
 		}
-		return e.handleViNormalAction(v, s, h, prompt, action, text, duringTurn)
+		return e.handleViNormalAction(v, s, h, prompt, action, text, duringPrompt)
 	default:
 		if r == '\t' || unicode.IsPrint(r) {
 			return e.handleViNormalText(v, s, h, string(r)), nil
@@ -176,11 +176,11 @@ func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState,
 	}
 }
 
-func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, action lineEditAction, text string, duringTurn bool) (viEditResult, error) {
+func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, action lineEditAction, text string, duringPrompt bool) (viEditResult, error) {
 	switch action {
 	case lineEditEscape:
-		if duringTurn {
-			// In vi normal mode during a turn, a bare Esc is the second Esc of a
+		if duringPrompt {
+			// In vi normal mode during a prompt, a bare Esc is the second Esc of a
 			// double-Esc cancel (the first Esc entered normal mode). Surface it so
 			// the run loop can detect two within the window.
 			v.resetCommand()
@@ -194,9 +194,9 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 	case lineEditShiftModifier:
 		return viEditResult{redraw: true}, nil
 	case lineEditSubmit:
-		return e.viSubmit(s, v, duringTurn)
+		return e.viSubmit(s, v, duringPrompt)
 	case lineEditEdit:
-		return e.viEdit(s, duringTurn)
+		return e.viEdit(s, duringPrompt)
 	case lineEditEOF:
 		if len(s.buf) == 0 {
 			return viEditResult{ok: false, done: true}, nil
@@ -246,13 +246,13 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 		return e.handleViNormalText(v, s, h, text), nil
 	case lineEditPaste:
 		v.resetCommand()
-		if len(s.buf) == 0 && !duringTurn {
+		if len(s.buf) == 0 && !duringPrompt {
 			s.setPasteSummary(text)
 			e.purePaste = true
 			e.viEnterInsert(v, s)
 			return viEditResult{redraw: true}, nil
 		}
-		if !duringTurn {
+		if !duringPrompt {
 			idx := s.cursor
 			if len(s.buf) > 0 {
 				idx++
@@ -615,17 +615,17 @@ func (e *promptLineEditor) viPasteText(s *lineEditState, text []rune, before boo
 // the "any manual keystroke clears the mark" rule. The finish+history sequence
 // is shared with the emacs submit path via e.submit.
 //
-// During a turn Enter commits the current buffer as queued next-turn input via
-// submitDuringTurn (no terminal finish), matching the emacs during-turn CR path.
-func (e *promptLineEditor) viSubmit(s *lineEditState, v *viLineState, duringTurn bool) (viEditResult, error) {
-	if duringTurn {
-		return e.submitDuringTurn(s), nil
+// During a prompt Enter commits the current buffer as queued next-prompt input via
+// submitDuringPrompt (no terminal finish), matching the emacs during-prompt CR path.
+func (e *promptLineEditor) viSubmit(s *lineEditState, v *viLineState, duringPrompt bool) (viEditResult, error) {
+	if duringPrompt {
+		return e.submitDuringPrompt(s), nil
 	}
 	return e.submit(s)
 }
 
-func (e *promptLineEditor) viEdit(s *lineEditState, duringTurn bool) (viEditResult, error) {
-	return e.edit(s, duringTurn)
+func (e *promptLineEditor) viEdit(s *lineEditState, duringPrompt bool) (viEditResult, error) {
+	return e.edit(s, duringPrompt)
 }
 
 func viOperatorRange(s *lineEditState, motion rune, op viOperator, count int) (int, int, bool) {

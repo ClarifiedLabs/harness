@@ -539,11 +539,11 @@ func TestRunTimestampModes(t *testing.T) {
 		wantStatus string
 		wantNot    string
 	}{
-		{name: "default short", args: nil, wantStatus: "[12:00:00 model:"},
-		{name: "full", args: []string{"-timestamps=full"}, wantStatus: "[2026-06-09 12:00:00 model:"},
-		{name: "long alias", args: []string{"-timestamps=long"}, wantStatus: "[2026-06-09 12:00:00 model:"},
-		{name: "none", args: []string{"-timestamps=none"}, wantStatus: "[model:", wantNot: "12:00:00"},
-		{name: "no timestamps alias", args: []string{"-no-timestamps"}, wantStatus: "[model:", wantNot: "12:00:00"},
+		{name: "default short", args: nil, wantStatus: "[12:00:00 turn:"},
+		{name: "full", args: []string{"-timestamps=full"}, wantStatus: "[2026-06-09 12:00:00 turn:"},
+		{name: "long alias", args: []string{"-timestamps=long"}, wantStatus: "[2026-06-09 12:00:00 turn:"},
+		{name: "none", args: []string{"-timestamps=none"}, wantStatus: "[turn:", wantNot: "12:00:00"},
+		{name: "no timestamps alias", args: []string{"-no-timestamps"}, wantStatus: "[turn:", wantNot: "12:00:00"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1964,7 +1964,7 @@ func TestRunBadFlagUsageError(t *testing.T) {
 
 func TestRunOneShotProviderErrorExit1(t *testing.T) {
 	// A plain (non-API, non-cancel) provider error is retryable, so it must
-	// recur through the whole per-model-turn budget (1 + 2 retries) to surface as the
+	// recur through the whole per-turn budget (1 + 2 retries) to surface as the
 	// turn-fatal exit-1 it models.
 	fail := llmtest.Step{Err: &runtimeErr{"upstream"}}
 	fp := llmtest.New("fake", fail, fail, fail)
@@ -2075,7 +2075,7 @@ func TestRunSavesSessionToDefaultPath(t *testing.T) {
 
 func TestRunSessionReplaySubcommand(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
-	if err := session.AppendEvent(dir, session.Event{Type: session.EventUser, Turn: 1, Text: "hello"}); err != nil {
+	if err := session.AppendEvent(dir, session.Event{Type: session.EventUser, Prompt: 1, Text: "hello"}); err != nil {
 		t.Fatalf("append event: %v", err)
 	}
 	if err := session.AppendEvent(dir, session.Event{Type: session.EventAssistantDelta, Turn: 1, Text: "world"}); err != nil {
@@ -2113,7 +2113,7 @@ func TestRunSessionStatsSubcommand(t *testing.T) {
 	}).Save(dir); err != nil {
 		t.Fatalf("save session: %v", err)
 	}
-	if err := session.AppendEvent(dir, session.Event{Type: session.EventUser, Turn: 1, Text: "hello"}); err != nil {
+	if err := session.AppendEvent(dir, session.Event{Type: session.EventUser, Prompt: 1, Text: "hello"}); err != nil {
 		t.Fatalf("append event: %v", err)
 	}
 
@@ -2175,16 +2175,16 @@ func TestRunSessionStatsErrors(t *testing.T) {
 	})
 }
 
-// TestRunSigintExitDuringTurnNoRace exercises the SIGINT-exit-while-a-turn-is-in-
+// TestRunSigintExitDuringPromptNoRace exercises the SIGINT-exit-while-a-turn-is-in-
 // flight path through run() with a non-nil injected signal channel. The first ^C
-// cancels the in-flight turn; a second ^C within the double-press window requests
-// exit. The REPL goroutine completes the cancelled turn (its per-turn save and
+// cancels the in-flight prompt; a second ^C within the double-press window requests
+// exit. The REPL goroutine completes the cancelled prompt (its per-prompt save and
 // usage update) and then performs the final exit save itself, with no concurrent
 // writer. Run under -race this is the regression guard for the data race that the
 // previous main-side concurrent exit save produced (design §8.4): the run() exit
 // wiring is exercised under the race detector, and the SIGINT exit code is 130.
-func TestRunSigintExitDuringTurnNoRace(t *testing.T) {
-	inTurn := make(chan struct{}) // closed when the turn's stream is in flight
+func TestRunSigintExitDuringPromptNoRace(t *testing.T) {
+	inPrompt := make(chan struct{}) // closed when the turn's stream is in flight
 	stdinBlock := make(chan struct{})
 	t.Cleanup(func() { close(stdinBlock) }) // unblock the leftover scanner read
 	fp := llmtest.New("fake", llmtest.Step{
@@ -2192,8 +2192,8 @@ func TestRunSigintExitDuringTurnNoRace(t *testing.T) {
 		Stop:   llm.StopEndTurn,
 		Usage:  llm.Usage{InputTokens: 7, OutputTokens: 2},
 		Block: func(ctx context.Context) {
-			close(inTurn)
-			<-ctx.Done() // released by the first ^C cancelling the turn
+			close(inPrompt)
+			<-ctx.Done() // released by the first ^C cancelling the prompt
 		},
 	})
 	proxy := newFakeModelProxy(t, fp)
@@ -2225,9 +2225,9 @@ func TestRunSigintExitDuringTurnNoRace(t *testing.T) {
 	codeCh := make(chan int, 1)
 	go func() { codeCh <- run(env) }()
 
-	<-inTurn
-	// First ^C cancels the in-flight turn; the second requests exit. The REPL
-	// goroutine finishes the cancelled turn (saving + accumulating usage) before
+	<-inPrompt
+	// First ^C cancels the in-flight prompt; the second requests exit. The REPL
+	// goroutine finishes the cancelled prompt (saving + accumulating usage) before
 	// acting on the exit request, so there is no concurrent save.
 	sigCh <- syscall.SIGINT
 	sigCh <- syscall.SIGINT
@@ -2570,7 +2570,7 @@ func TestRunDelegateToolUsesCurrentAgentTools(t *testing.T) {
 		t.Fatalf("delegate tool result was not rendered: %q", errw.String())
 	}
 	if !strings.Contains(errw.String(), "60 (60) in / 13 (13) out") {
-		t.Fatalf("turn usage should include parent and child model calls, stderr=%q", errw.String())
+		t.Fatalf("prompt usage should include parent and child model calls, stderr=%q", errw.String())
 	}
 }
 
@@ -2834,7 +2834,7 @@ func TestRunQuietSuppressesBracketedStatusButNotDiagnostics(t *testing.T) {
 	if !strings.Contains(got, "[cli_tools]") {
 		t.Fatalf("quiet should not suppress slog diagnostics; stderr=%q", got)
 	}
-	for _, notWant := range []string{"[model:", "[turn:", "[tool-call:", "[tool:"} {
+	for _, notWant := range []string{"[turn:", "[prompt:", "[tool-call:", "[tool:"} {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("quiet should suppress bracketed status %q; stderr=%q", notWant, got)
 		}

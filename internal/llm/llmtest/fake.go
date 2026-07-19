@@ -48,7 +48,7 @@ func New(name string, steps ...Step) *FakeProvider {
 func (p *FakeProvider) Name() string { return p.name }
 
 // RequestCount returns how many Requests have been recorded so far, taking the
-// same lock Stream uses for the append. During-turn UI tests poll this from the
+// same lock Stream uses for the append. During-prompt UI tests poll this from the
 // test goroutine while a turn goroutine is still calling Stream, so reading
 // len(p.Requests) directly would race; this accessor makes the read safe under
 // `go test -race`.

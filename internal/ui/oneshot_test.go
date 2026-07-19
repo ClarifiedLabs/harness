@@ -332,10 +332,10 @@ func TestOneShotWaitsForBackgroundDelegateSynthesizesAndCountsUsage(t *testing.T
 	release := make(chan struct{})
 	manager := background.NewManager(background.Options{})
 	_, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind:        "delegate",
-		Description: "inspect",
-		Agent:       "explore",
-		WaitForTurn: true,
+		Kind:          "delegate",
+		Description:   "inspect",
+		Agent:         "explore",
+		WaitForPrompt: true,
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			<-release
 			return tools.BackgroundJobResult{
@@ -496,7 +496,7 @@ func TestOneShotShowsToolCallProgressOnStderrOnly(t *testing.T) {
 	}
 	got := errw.String()
 	for _, want := range []string{
-		"[model: turn 1 waiting]",
+		"[turn: 1 waiting]",
 		"[tool-call: list_dir id=call_1]",
 		"[tool: list_dir started path=.]",
 		"[list_dir] path=.",
@@ -537,7 +537,7 @@ func TestOneShotSaveFailureWarned(t *testing.T) {
 func TestOneShotProviderErrorExit1(t *testing.T) {
 	var out, errw bytes.Buffer
 	// A plain (non-API, non-cancel) error is retryable, so it must persist
-	// across the whole per-model-turn budget (1 + 2 retries) to surface as exit 1.
+	// across the whole per-turn budget (1 + 2 retries) to surface as exit 1.
 	fail := llmtest.Step{Err: errContext("upstream 500")}
 	fp := llmtest.New("fake", fail, fail, fail)
 	app := newTestApp(t, &out, &errw, fp)

@@ -59,38 +59,38 @@ type Config struct {
 	HistSize     int    `json:"histsize"`
 
 	// Loop / model limits.
-	MaxTurns                  int               `json:"max_turns"`              // -max-turns, default 250
-	MaxTurnTokens             int               `json:"max_turn_tokens"`        // -max-turn-tokens, accumulated-token ceiling per user turn; 0 = unlimited
-	MaxOutputTokens           int               `json:"max_output_tokens"`      // -max-output-tokens, per model turn output cap; 0 = automatic
-	MaxPromptCostUSD          float64           `json:"max_prompt_cost_usd"`    // -max-prompt-cost, accumulated USD ceiling per user turn; 0 = unlimited (needs known model cost)
-	ToolTimeoutSeconds        int               `json:"tool_timeout_seconds"`   // -tool-timeout, per-tool-call dispatch ceiling (s); default 600, <=0 disables
-	RunCommandTimeoutSeconds          int               `json:"run_command_timeout_seconds"`          // 0 = tool default (120)
+	MaxTurns                           int               `json:"max_turns"`                              // -max-turns, default 250
+	MaxPromptTokens                    int               `json:"max_prompt_tokens"`                      // -max-prompt-tokens, accumulated-token ceiling per prompt; 0 = unlimited
+	MaxOutputTokens                    int               `json:"max_output_tokens"`                      // -max-output-tokens, per-turn output cap; 0 = automatic
+	MaxPromptCostUSD                   float64           `json:"max_prompt_cost_usd"`                    // -max-prompt-cost, accumulated USD ceiling per prompt; 0 = unlimited (needs known model cost)
+	ToolTimeoutSeconds                 int               `json:"tool_timeout_seconds"`                   // -tool-timeout, per-tool-call dispatch ceiling (s); default 600, <=0 disables
+	RunCommandTimeoutSeconds           int               `json:"run_command_timeout_seconds"`            // 0 = tool default (120)
 	RunCommandBackgroundTimeoutSeconds int               `json:"run_command_background_timeout_seconds"` // 0 = tool default (1200)
-	DefaultContextWindow      int               `json:"default_context_window"` // -default-context-window, fallback when metadata lacks a window
-	ContextWindow             int               `json:"context_window"`         // -context-window, 0 = registry/default
-	Reasoning                 string            `json:"reasoning"`
-	ReasoningSummary          string            `json:"reasoning_summary"`
-	ImageDetail               string            `json:"image_detail"`
-	Images                    []ImageAttachment `json:"images"`
-	SearchTools               string            `json:"search_tools"`
-	WebSearch                 string            `json:"web_search"`
-	AgentsMDWarnBytes         int               `json:"agents_md_warn_bytes"`          // config-only warning threshold in bytes; default 8192, explicit 0 disables
-	ToolResultMaxBytes        int               `json:"tool_result_max_bytes"`         // 0 = tool default
-	ToolResultMaxLines        int               `json:"tool_result_max_lines"`         // 0 = tool default
-	RGResultMaxBytes          int               `json:"rg_result_max_bytes"`           // 0 = tool/default global
-	RGResultMaxLines          int               `json:"rg_result_max_lines"`           // 0 = tool/default global
-	GrepResultMaxBytes        int               `json:"grep_result_max_bytes"`         // 0 = tool/default global
-	GrepResultMaxLines        int               `json:"grep_result_max_lines"`         // 0 = tool/default global
-	ReadFileDefaultLimit      int               `json:"read_file_default_limit"`       // 0 = tool default
-	ReadFileResultMaxBytes    int               `json:"read_file_result_max_bytes"`    // 0 = tool/default global
-	ReadFileResultMaxLines    int               `json:"read_file_result_max_lines"`    // 0 = tool/default global
-	CompactKeepTurns          int               `json:"compact_keep_turns"`            // config-only; 0 = agent default
-	CompactSummaryMaxTokens   int               `json:"compact_summary_max_tokens"`    // config-only; 0 = agent default
-	CompactToolResultMaxBytes int               `json:"compact_tool_result_max_bytes"` // config-only; 0 = agent default, negative disables
-	DelegateMaxTurns          int               `json:"delegate_max_turns"`            // config-only; default 20, per delegate call cap
-	DelegateMaxDepth          int               `json:"delegate_max_depth"`            // config-only; default 3, root depth is 0
-	ResponsesStateful         bool              `json:"responses_stateful"`            // -responses-stateful
-	NoSteer                   bool              `json:"no_steer"`                      // -no-steer: disable mid-turn steering (queue during-turn input for the next turn)
+	DefaultContextWindow               int               `json:"default_context_window"`                 // -default-context-window, fallback when metadata lacks a window
+	ContextWindow                      int               `json:"context_window"`                         // -context-window, 0 = registry/default
+	Reasoning                          string            `json:"reasoning"`
+	ReasoningSummary                   string            `json:"reasoning_summary"`
+	ImageDetail                        string            `json:"image_detail"`
+	Images                             []ImageAttachment `json:"images"`
+	SearchTools                        string            `json:"search_tools"`
+	WebSearch                          string            `json:"web_search"`
+	AgentsMDWarnBytes                  int               `json:"agents_md_warn_bytes"`          // config-only warning threshold in bytes; default 8192, explicit 0 disables
+	ToolResultMaxBytes                 int               `json:"tool_result_max_bytes"`         // 0 = tool default
+	ToolResultMaxLines                 int               `json:"tool_result_max_lines"`         // 0 = tool default
+	RGResultMaxBytes                   int               `json:"rg_result_max_bytes"`           // 0 = tool/default global
+	RGResultMaxLines                   int               `json:"rg_result_max_lines"`           // 0 = tool/default global
+	GrepResultMaxBytes                 int               `json:"grep_result_max_bytes"`         // 0 = tool/default global
+	GrepResultMaxLines                 int               `json:"grep_result_max_lines"`         // 0 = tool/default global
+	ReadFileDefaultLimit               int               `json:"read_file_default_limit"`       // 0 = tool default
+	ReadFileResultMaxBytes             int               `json:"read_file_result_max_bytes"`    // 0 = tool/default global
+	ReadFileResultMaxLines             int               `json:"read_file_result_max_lines"`    // 0 = tool/default global
+	CompactKeepTurns                   int               `json:"compact_keep_turns"`            // config-only; 0 = agent default
+	CompactSummaryMaxTokens            int               `json:"compact_summary_max_tokens"`    // config-only; 0 = agent default
+	CompactToolResultMaxBytes          int               `json:"compact_tool_result_max_bytes"` // config-only; 0 = agent default, negative disables
+	DelegateMaxTurns                   int               `json:"delegate_max_turns"`            // config-only; default 20, per delegate call cap
+	DelegateMaxDepth                   int               `json:"delegate_max_depth"`            // config-only; default 3, root depth is 0
+	ResponsesStateful                  bool              `json:"responses_stateful"`            // -responses-stateful
+	NoSteer                            bool              `json:"no_steer"`                      // -no-steer: disable in-prompt steering (queue input for the next prompt)
 
 	// Agent definition. Empty means "not specified" so main can let a resumed
 	// session supply the agent before falling back to the default.
@@ -280,57 +280,57 @@ type ImageAttachment struct {
 // Provider connection settings and secrets belong to harness-model-proxy, not
 // the harness process.
 type fileConfig struct {
-	Model                     string                     `json:"model"`
-	ModelProxyURL             string                     `json:"model_proxy_url"`
-	ModelProxyAPIKey          string                     `json:"model_proxy_api_key"`
-	TraceProxy                *bool                      `json:"trace_proxy"`
-	SystemPrompt              string                     `json:"system_prompt"`
-	NoEnv                     *bool                      `json:"no_env"`
-	MaxTurns                  *int                       `json:"max_turns"`
-	MaxTurnTokens             *int                       `json:"max_turn_tokens"`
-	MaxOutputTokens           *int                       `json:"max_output_tokens"`
-	MaxPromptCostUSD          *float64                   `json:"max_prompt_cost_usd"`
-	ToolTimeoutSeconds        *int                       `json:"tool_timeout_seconds"`
-	RunCommandTimeoutSeconds          *int                       `json:"run_command_timeout_seconds"`
+	Model                              string                     `json:"model"`
+	ModelProxyURL                      string                     `json:"model_proxy_url"`
+	ModelProxyAPIKey                   string                     `json:"model_proxy_api_key"`
+	TraceProxy                         *bool                      `json:"trace_proxy"`
+	SystemPrompt                       string                     `json:"system_prompt"`
+	NoEnv                              *bool                      `json:"no_env"`
+	MaxTurns                           *int                       `json:"max_turns"`
+	MaxPromptTokens                    *int                       `json:"max_prompt_tokens"`
+	MaxOutputTokens                    *int                       `json:"max_output_tokens"`
+	MaxPromptCostUSD                   *float64                   `json:"max_prompt_cost_usd"`
+	ToolTimeoutSeconds                 *int                       `json:"tool_timeout_seconds"`
+	RunCommandTimeoutSeconds           *int                       `json:"run_command_timeout_seconds"`
 	RunCommandBackgroundTimeoutSeconds *int                       `json:"run_command_background_timeout_seconds"`
-	DefaultContextWindow      *int                       `json:"default_context_window"`
-	ContextWindow             *int                       `json:"context_window"`
-	Reasoning                 string                     `json:"reasoning"`
-	ReasoningSummary          string                     `json:"reasoning_summary"`
-	ImageDetail               string                     `json:"image_detail"`
-	SearchTools               string                     `json:"search_tools"`
-	WebSearch                 string                     `json:"web_search"`
-	AgentsMDWarnBytes         *int                       `json:"agents_md_warn_bytes"`
-	ToolResultMaxBytes        *int                       `json:"tool_result_max_bytes"`
-	ToolResultMaxLines        *int                       `json:"tool_result_max_lines"`
-	RGResultMaxBytes          *int                       `json:"rg_result_max_bytes"`
-	RGResultMaxLines          *int                       `json:"rg_result_max_lines"`
-	GrepResultMaxBytes        *int                       `json:"grep_result_max_bytes"`
-	GrepResultMaxLines        *int                       `json:"grep_result_max_lines"`
-	ReadFileDefaultLimit      *int                       `json:"read_file_default_limit"`
-	ReadFileResultMaxBytes    *int                       `json:"read_file_result_max_bytes"`
-	ReadFileResultMaxLines    *int                       `json:"read_file_result_max_lines"`
-	CompactKeepTurns          *int                       `json:"compact_keep_turns"`
-	CompactSummaryMaxTokens   *int                       `json:"compact_summary_max_tokens"`
-	CompactToolResultMaxBytes *int                       `json:"compact_tool_result_max_bytes"`
-	DelegateMaxTurns          *int                       `json:"delegate_max_turns"`
-	DelegateMaxDepth          *int                       `json:"delegate_max_depth"`
-	ResponsesStateful         *bool                      `json:"responses_stateful"`
-	NoSteer                   *bool                      `json:"no_steer"`
-	Verbose                   *bool                      `json:"verbose"`
-	ToolStream                *bool                      `json:"tool_stream"`
-	ShowDiffs                 *bool                      `json:"show_diffs"`
-	LogLevel                  string                     `json:"log_level"`
-	NoColor                   *bool                      `json:"no_color"`
-	Timestamps                string                     `json:"timestamps"`
-	NoTimestamps              *bool                      `json:"no_timestamps"`
-	ReplPrompt                string                     `json:"repl_prompt"`
-	ReplEditMode              string                     `json:"repl_edit_mode"`
-	Agent                     string                     `json:"agent"`
-	Agents                    map[string]FileAgentConfig `json:"agents"`
-	HandoffAgent              string                     `json:"handoff_agent"`
-	Hooks                     json.RawMessage            `json:"hooks"`
-	HookConfigs               []string                   `json:"hook_configs"`
+	DefaultContextWindow               *int                       `json:"default_context_window"`
+	ContextWindow                      *int                       `json:"context_window"`
+	Reasoning                          string                     `json:"reasoning"`
+	ReasoningSummary                   string                     `json:"reasoning_summary"`
+	ImageDetail                        string                     `json:"image_detail"`
+	SearchTools                        string                     `json:"search_tools"`
+	WebSearch                          string                     `json:"web_search"`
+	AgentsMDWarnBytes                  *int                       `json:"agents_md_warn_bytes"`
+	ToolResultMaxBytes                 *int                       `json:"tool_result_max_bytes"`
+	ToolResultMaxLines                 *int                       `json:"tool_result_max_lines"`
+	RGResultMaxBytes                   *int                       `json:"rg_result_max_bytes"`
+	RGResultMaxLines                   *int                       `json:"rg_result_max_lines"`
+	GrepResultMaxBytes                 *int                       `json:"grep_result_max_bytes"`
+	GrepResultMaxLines                 *int                       `json:"grep_result_max_lines"`
+	ReadFileDefaultLimit               *int                       `json:"read_file_default_limit"`
+	ReadFileResultMaxBytes             *int                       `json:"read_file_result_max_bytes"`
+	ReadFileResultMaxLines             *int                       `json:"read_file_result_max_lines"`
+	CompactKeepTurns                   *int                       `json:"compact_keep_turns"`
+	CompactSummaryMaxTokens            *int                       `json:"compact_summary_max_tokens"`
+	CompactToolResultMaxBytes          *int                       `json:"compact_tool_result_max_bytes"`
+	DelegateMaxTurns                   *int                       `json:"delegate_max_turns"`
+	DelegateMaxDepth                   *int                       `json:"delegate_max_depth"`
+	ResponsesStateful                  *bool                      `json:"responses_stateful"`
+	NoSteer                            *bool                      `json:"no_steer"`
+	Verbose                            *bool                      `json:"verbose"`
+	ToolStream                         *bool                      `json:"tool_stream"`
+	ShowDiffs                          *bool                      `json:"show_diffs"`
+	LogLevel                           string                     `json:"log_level"`
+	NoColor                            *bool                      `json:"no_color"`
+	Timestamps                         string                     `json:"timestamps"`
+	NoTimestamps                       *bool                      `json:"no_timestamps"`
+	ReplPrompt                         string                     `json:"repl_prompt"`
+	ReplEditMode                       string                     `json:"repl_edit_mode"`
+	Agent                              string                     `json:"agent"`
+	Agents                             map[string]FileAgentConfig `json:"agents"`
+	HandoffAgent                       string                     `json:"handoff_agent"`
+	Hooks                              json.RawMessage            `json:"hooks"`
+	HookConfigs                        []string                   `json:"hook_configs"`
 
 	// REPL history (bash-style). HistFile is a string pointer so an empty
 	// config file does not override the default path derived in main.
@@ -460,8 +460,8 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 
 	c.MaxTurns = resolveInt(set["max-turns"], *fMaxTurns,
 		getenv("HARNESS_MAX_TURNS"), fc.MaxTurns, defaultMaxTurns)
-	c.MaxTurnTokens = resolveInt(set["max-turn-tokens"], *f.maxTurnTokens,
-		getenv("HARNESS_MAX_TURN_TOKENS"), fc.MaxTurnTokens, 0)
+	c.MaxPromptTokens = resolveInt(set["max-prompt-tokens"], *f.maxPromptTokens,
+		getenv("HARNESS_MAX_PROMPT_TOKENS"), fc.MaxPromptTokens, 0)
 	c.MaxOutputTokens = resolveInt(set["max-output-tokens"], *f.maxOutputTokens,
 		getenv("HARNESS_MAX_OUTPUT_TOKENS"), fc.MaxOutputTokens, 0)
 	c.MaxPromptCostUSD = resolveFloat(set["max-prompt-cost"], *f.maxPromptCost,
@@ -986,7 +986,7 @@ type flags struct {
 	histFile                         *string
 	histFileSize, histSize           *int
 	maxTurns                         *int
-	maxTurnTokens                    *int
+	maxPromptTokens                  *int
 	maxOutputTokens                  *int
 	maxPromptCost                    *float64
 	toolTimeout                      *int
@@ -1045,10 +1045,10 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.histFile = fs.String("histfile", "", "REPL history file path")
 	f.histFileSize = fs.Int("histfilesize", DefaultHistFileSize, "max REPL history entries stored on disk (0 disables)")
 	f.histSize = fs.Int("histsize", DefaultHistSize, "max REPL history entries loaded into memory (0 disables)")
-	f.maxTurns = fs.Int("max-turns", defaultMaxTurns, "model turns per user prompt; <=0 means unlimited")
-	f.maxTurnTokens = fs.Int("max-turn-tokens", 0, "stop a user turn after this many accumulated tokens; 0 means unlimited")
-	f.maxOutputTokens = fs.Int("max-output-tokens", 0, "per-model-turn output token cap; 0 uses the automatic cap")
-	f.maxPromptCost = fs.Float64("max-prompt-cost", 0, "stop a user turn once its accumulated model cost reaches this many USD; 0 means unlimited (requires known model cost)")
+	f.maxTurns = fs.Int("max-turns", defaultMaxTurns, "turns per prompt; <=0 means unlimited")
+	f.maxPromptTokens = fs.Int("max-prompt-tokens", 0, "stop a prompt after this many accumulated tokens; 0 means unlimited")
+	f.maxOutputTokens = fs.Int("max-output-tokens", 0, "per-turn output token cap; 0 uses the automatic cap")
+	f.maxPromptCost = fs.Float64("max-prompt-cost", 0, "stop a prompt once its accumulated model cost reaches this many USD; 0 means unlimited (requires known model cost)")
 	f.toolTimeout = fs.Int("tool-timeout", defaultToolTimeoutSeconds, "per-tool-call timeout backstop in seconds; <=0 disables (run_command's own timeout_seconds still applies)")
 	f.defaultContextWindow = fs.Int("default-context-window", defaultContextWindow, "default context window for configured models without context metadata (tokens)")
 	f.contextWindow = fs.Int("context-window", 0, "context window override (tokens)")
@@ -1062,7 +1062,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.searchTools = fs.String("search-tools", "auto", "search tools to expose: auto, grep, rg, or both")
 	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")
 	f.responsesStateful = fs.Bool("responses-stateful", true, "enable OpenAI Responses previous_response_id continuation when supported")
-	f.noSteer = fs.Bool("no-steer", false, "disable mid-turn steering: queue during-turn input for the next turn instead of injecting it into the running turn")
+	f.noSteer = fs.Bool("no-steer", false, "disable in-prompt steering: queue input for the next prompt instead of injecting it before the next turn")
 	f.traceProxy = fs.Bool("trace-proxy", false, "send W3C trace headers to harness-model-proxy and harness-mcp-proxy")
 	f.verbose = fs.Bool("v", false, "show tool result snippets and tool-call progress details")
 	f.toolStream = fs.Bool("tool-stream", false, "show tool-call progress details")

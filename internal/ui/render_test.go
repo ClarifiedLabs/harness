@@ -129,22 +129,22 @@ func TestQuietSuppressesStatusButKeepsUsage(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{Quiet: true, ToolStream: true})
 
-	// Progress noise (ModelTurnStart, tool lines, notices) is suppressed, but
-	// -quiet alone still prints the single per-turn usage line (r25).
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	// Progress noise (TurnAttemptStart, tool lines, notices) is suppressed, but
+	// -quiet alone still prints the single per-prompt usage line (r25).
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	r.ToolUseStart(llm.ToolCall{ID: "c1", Name: "read_file"})
 	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)})
 	r.ToolResult(llm.ToolResult{ForID: "c1", Text: "package main\n"})
 	r.Notice("[something happened]")
-	r.StartTurn()
-	r.TurnComplete(agent.TurnUsage{})
+	r.StartPromptRun()
+	r.PromptComplete(agent.PromptUsage{})
 
 	got := errw.String()
 	if strings.Contains(got, "waiting") || strings.Contains(got, "read_file") || strings.Contains(got, "something happened") {
 		t.Errorf("quiet mode should suppress progress lines, got %q", got)
 	}
-	if !strings.Contains(got, "[turn:") {
-		t.Errorf("quiet mode should still print the per-turn usage line (r25), got %q", got)
+	if !strings.Contains(got, "[prompt:") {
+		t.Errorf("quiet mode should still print the per-prompt usage line (r25), got %q", got)
 	}
 
 	// Assistant text must still flow to out.
@@ -159,9 +159,9 @@ func TestSuppressUsageSilencesEverything(t *testing.T) {
 	r := NewRenderer(&out, &errw, RenderOptions{Quiet: true, SuppressUsage: true})
 
 	// A fully silent piped run: even the usage line is dropped (r25).
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
-	r.StartTurn()
-	r.TurnComplete(agent.TurnUsage{})
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	r.StartPromptRun()
+	r.PromptComplete(agent.PromptUsage{})
 
 	if errw.Len() != 0 {
 		t.Errorf("SuppressUsage should silence errw entirely, got %q", errw.String())
@@ -209,29 +209,29 @@ func TestUsageLineKnownModelShowsCost(t *testing.T) {
 		}),
 		Now: fixedClock(start, 4300*time.Millisecond),
 	})
-	r.StartTurn()
-	r.TurnComplete(agent.TurnUsage{
-		ModelTurns: 3,
-		Usage:      llm.Usage{InputTokens: 12400, OutputTokens: 1800, CostUSD: 0.107, CostKnown: true},
+	r.StartPromptRun()
+	r.PromptComplete(agent.PromptUsage{
+		Turns: 3,
+		Usage: llm.Usage{InputTokens: 12400, OutputTokens: 1800, CostUSD: 0.107, CostKnown: true},
 	})
 
 	got := errw.String()
 	if out.Len() != 0 {
-		t.Errorf("TurnComplete should not write a newline before usage with no assistant text, got out=%q", out.String())
+		t.Errorf("PromptComplete should not write a newline before usage with no assistant text, got out=%q", out.String())
 	}
-	if !strings.Contains(got, "[turn:") {
+	if !strings.Contains(got, "[prompt:") {
 		t.Errorf("usage line should be bracketed, got %q", got)
 	}
-	if !strings.Contains(got, "3 model turns") {
-		t.Errorf("usage line should show model-turn count, got %q", got)
+	if !strings.Contains(got, "3 turns") {
+		t.Errorf("usage line should show turn count, got %q", got)
 	}
 	if !strings.Contains(got, "12.4k (12.4k) in") || !strings.Contains(got, "1.8k (1.8k) out") {
-		t.Errorf("usage line should show per-turn (cumulative) token counts, got %q", got)
+		t.Errorf("usage line should show per-prompt (cumulative) token counts, got %q", got)
 	}
 	if !strings.Contains(got, "$") {
 		t.Errorf("known model should show a cost, got %q", got)
 	}
-	// Both per-turn and cumulative cost should appear (parenthesised cumulative).
+	// Both per-prompt and cumulative cost should appear (parenthesised cumulative).
 	if !strings.Contains(got, "($") {
 		t.Errorf("usage line should show cumulative cost in parens, got %q", got)
 	}
@@ -247,8 +247,8 @@ func TestUsageLineUnknownModelOmitsCost(t *testing.T) {
 		Model: "some-local-llama",
 		Now:   fixedClock(start, time.Second),
 	})
-	r.StartTurn()
-	r.TurnComplete(agent.TurnUsage{ModelTurns: 1, Usage: llm.Usage{InputTokens: 100, OutputTokens: 10}})
+	r.StartPromptRun()
+	r.PromptComplete(agent.PromptUsage{Turns: 1, Usage: llm.Usage{InputTokens: 100, OutputTokens: 10}})
 
 	got := errw.String()
 	if strings.Contains(got, "$") {
@@ -279,13 +279,13 @@ func TestColorEmittedWhenEnabled(t *testing.T) {
 func TestTurnCompleteWritesTrailingNewline(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{})
-	r.StartTurn()
+	r.StartPromptRun()
 	r.TextDelta("hello world")
-	r.TurnComplete(agent.TurnUsage{ModelTurns: 1})
+	r.PromptComplete(agent.PromptUsage{Turns: 1})
 
 	got := out.String()
 	if !strings.HasSuffix(got, "\n") {
-		t.Errorf("TurnComplete should write a trailing newline to out, got %q", got)
+		t.Errorf("PromptComplete should write a trailing newline to out, got %q", got)
 	}
 	// The trailing newline should appear after the text.
 	if !strings.Contains(got, "hello world\n") {
@@ -391,26 +391,26 @@ func TestMarkdownAssistantFlushesBeforeStatusLine(t *testing.T) {
 	}
 }
 
-func TestModelTurnStartGoesToStderr(t *testing.T) {
+func TestTurnAttemptStartGoesToStderr(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{})
 
-	r.ModelTurnStart(2, 1, agent.ContextEstimate{})
-	r.ModelTurnStart(2, 3, agent.ContextEstimate{})
+	r.TurnAttemptStart(2, 1, agent.ContextEstimate{})
+	r.TurnAttemptStart(2, 3, agent.ContextEstimate{})
 
 	if out.Len() != 0 {
 		t.Errorf("model progress must not touch stdout, got %q", out.String())
 	}
 	got := errw.String()
-	if !strings.Contains(got, "[model: turn 2 waiting]") {
-		t.Errorf("missing model-turn wait line, got %q", got)
+	if !strings.Contains(got, "[turn: 2 waiting]") {
+		t.Errorf("missing turn wait line, got %q", got)
 	}
-	if !strings.Contains(got, "[model: turn 2 retry 2 waiting]") {
-		t.Errorf("missing retry wait line, got %q", got)
+	if !strings.Contains(got, "[turn: 2 attempt 3 waiting]") {
+		t.Errorf("missing attempt wait line, got %q", got)
 	}
 }
 
-func TestModelTurnCompleteShowsCostCheckpoints(t *testing.T) {
+func TestTurnAttemptCompleteDoesNotPrintCostCheckpoints(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{
 		Model: "priced-model",
@@ -421,34 +421,28 @@ func TestModelTurnCompleteShowsCostCheckpoints(t *testing.T) {
 		}),
 	})
 	r.SetCumulativeUsage(0, 0, 1.25)
-	r.StartTurn()
+	r.StartPromptRun()
 
-	r.ModelTurnComplete(agent.ModelTurnUsage{
-		ModelTurn: 1,
-		Attempt:   1,
-		Usage:     llm.Usage{InputTokens: 100_000, OutputTokens: 50_000, CostUSD: 2, CostKnown: true},
+	r.TurnAttemptComplete(agent.TurnAttemptUsage{
+		Turn:    1,
+		Attempt: 1,
+		Usage:   llm.Usage{InputTokens: 100_000, OutputTokens: 50_000, CostUSD: 2, CostKnown: true},
 	})
-	r.ModelTurnComplete(agent.ModelTurnUsage{
-		ModelTurn: 2,
-		Attempt:   1,
-		Usage:     llm.Usage{InputTokens: 50_000, CostUSD: 0.5, CostKnown: true},
+	r.TurnAttemptComplete(agent.TurnAttemptUsage{
+		Turn:    2,
+		Attempt: 1,
+		Usage:   llm.Usage{InputTokens: 50_000, CostUSD: 0.5, CostKnown: true},
 	})
 
 	if out.Len() != 0 {
 		t.Errorf("model cost progress must not touch stdout, got %q", out.String())
 	}
-	got := errw.String()
-	for _, want := range []string{
-		"[model: turn 1 cost: $2.0000 · totals: $2.0000 prompt · $3.2500 session]",
-		"[model: turn 2 cost: $0.5000 · totals: $2.5000 prompt · $3.7500 session]",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("missing cost checkpoint %q:\n%s", want, got)
-		}
+	if got := errw.String(); got != "" {
+		t.Errorf("attempt completion should be accounted without a durable status line, got %q", got)
 	}
 }
 
-func TestModelTurnCompletePrintsCostBeforeToolUseProgress(t *testing.T) {
+func TestTurnAttemptCompleteFlushesToolUseProgress(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{
 		Model:      "priced-model",
@@ -459,50 +453,49 @@ func TestModelTurnCompletePrintsCostBeforeToolUseProgress(t *testing.T) {
 			},
 		}),
 	})
-	r.StartTurn()
+	r.StartPromptRun()
 
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read_file"})
 	if strings.Contains(errw.String(), "[tool-call:") {
 		t.Fatalf("tool-call progress should wait for model cost, got:\n%s", errw.String())
 	}
-	r.ModelTurnComplete(agent.ModelTurnUsage{
-		ModelTurn: 1,
-		Attempt:   1,
-		Usage:     llm.Usage{InputTokens: 100_000, CostUSD: 1, CostKnown: true},
+	r.TurnAttemptComplete(agent.TurnAttemptUsage{
+		Turn:    1,
+		Attempt: 1,
+		Usage:   llm.Usage{InputTokens: 100_000, CostUSD: 1, CostKnown: true},
 	})
 
 	if out.Len() != 0 {
 		t.Errorf("model and tool-call progress must not touch stdout, got %q", out.String())
 	}
 	got := errw.String()
-	waiting := strings.Index(got, "[model: turn 1 waiting]")
-	cost := strings.Index(got, "[model: turn 1 cost: $1.0000")
+	waiting := strings.Index(got, "[turn: 1 waiting]")
 	toolCall := strings.Index(got, "[tool-call: read_file id=call_1]")
-	if waiting < 0 || cost < 0 || toolCall < 0 {
+	if waiting < 0 || toolCall < 0 {
 		t.Fatalf("missing expected progress lines:\n%s", got)
 	}
-	if !(waiting < cost && cost < toolCall) {
-		t.Fatalf("progress order =\n%s\nwant waiting, cost, then tool-call", got)
+	if waiting >= toolCall {
+		t.Fatalf("progress order =\n%s\nwant waiting, then tool-call", got)
 	}
 }
 
-func TestModelTurnCompleteUnknownModelOmitsCostButWarnsOnce(t *testing.T) {
+func TestTurnAttemptCompleteUnknownModelOmitsCostButWarnsOnce(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{
 		Model:    "unknown-model",
 		Registry: llm.NewRegistry(map[string]llm.ModelInfo{}),
 	})
-	r.StartTurn()
-	r.ModelTurnComplete(agent.ModelTurnUsage{
-		ModelTurn: 1,
-		Attempt:   1,
-		Usage:     llm.Usage{InputTokens: 100, OutputTokens: 10},
+	r.StartPromptRun()
+	r.TurnAttemptComplete(agent.TurnAttemptUsage{
+		Turn:    1,
+		Attempt: 1,
+		Usage:   llm.Usage{InputTokens: 100, OutputTokens: 10},
 	})
-	r.ModelTurnComplete(agent.ModelTurnUsage{
-		ModelTurn: 2,
-		Attempt:   1,
-		Usage:     llm.Usage{InputTokens: 50, OutputTokens: 5},
+	r.TurnAttemptComplete(agent.TurnAttemptUsage{
+		Turn:    2,
+		Attempt: 1,
+		Usage:   llm.Usage{InputTokens: 50, OutputTokens: 5},
 	})
 
 	if out.Len() != 0 {
@@ -528,7 +521,7 @@ func TestTimestampsOnlyBracketedStatusLines(t *testing.T) {
 	})
 
 	r.TextDelta("plain assistant text\n")
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read_file"})
 	r.Notice("unbracketed notice")
 	r.Notice("[bracketed notice]")
@@ -538,7 +531,7 @@ func TestTimestampsOnlyBracketedStatusLines(t *testing.T) {
 	}
 	got := errw.String()
 	for _, want := range []string{
-		"[16:15:34 model: turn 1 waiting]",
+		"[16:15:34 turn: 1 waiting]",
 		"[16:15:34 tool-call: read_file id=call_1]",
 		"unbracketed notice\n",
 		"[16:15:34 bracketed notice]",
@@ -716,37 +709,37 @@ func TestUsageLineCumulativeAcrossTurns(t *testing.T) {
 		Now: fixedClock(start, time.Second),
 	})
 
-	// Turn 1: 1000 in, 200 out.
-	r.StartTurn()
-	r.TurnComplete(agent.TurnUsage{
-		ModelTurns: 1,
-		Usage:      llm.Usage{InputTokens: 1000, OutputTokens: 200},
+	// Prompt 1: 1000 in, 200 out.
+	r.StartPromptRun()
+	r.PromptComplete(agent.PromptUsage{
+		Turns: 1,
+		Usage: llm.Usage{InputTokens: 1000, OutputTokens: 200},
 	})
 	line1 := errw.String()
 	errw.Reset()
 	if !strings.Contains(line1, "1.0k (1.0k) in") {
-		t.Errorf("turn 1 should show per-turn = cumulative, got %q", line1)
+		t.Errorf("prompt 1 should show per-prompt = cumulative, got %q", line1)
 	}
 	if !strings.Contains(line1, "200 (200) out") {
-		t.Errorf("turn 1 output should match cumulative, got %q", line1)
+		t.Errorf("prompt 1 output should match cumulative, got %q", line1)
 	}
 
-	// Turn 2: 500 in, 300 out. Cumulative: 1500 in, 500 out.
-	r.StartTurn()
-	r.TurnComplete(agent.TurnUsage{
-		ModelTurns: 2,
-		Usage:      llm.Usage{InputTokens: 500, OutputTokens: 300},
+	// Prompt 2: 500 in, 300 out. Cumulative: 1500 in, 500 out.
+	r.StartPromptRun()
+	r.PromptComplete(agent.PromptUsage{
+		Turns: 2,
+		Usage: llm.Usage{InputTokens: 500, OutputTokens: 300},
 	})
 	line2 := errw.String()
 	if !strings.Contains(line2, "500 (1.5k) in") {
-		t.Errorf("turn 2 should show 500 per-turn and 1.5k cumulative, got %q", line2)
+		t.Errorf("prompt 2 should show 500 per-prompt and 1.5k cumulative, got %q", line2)
 	}
 	if !strings.Contains(line2, "300 (500) out") {
-		t.Errorf("turn 2 should show 300 per-turn and 500 cumulative, got %q", line2)
+		t.Errorf("prompt 2 should show 300 per-prompt and 500 cumulative, got %q", line2)
 	}
 }
 
-// --- r12 live wait-time counter + during-turn input line ---
+// --- r12 live wait-time counter + during-prompt input line ---
 
 func liveRenderer(out, errw *bytes.Buffer, now func() time.Time) *Renderer {
 	return NewRenderer(out, errw, RenderOptions{
@@ -761,8 +754,8 @@ func TestLiveCounterPaintsInPlaceAndCarriesContextPercent(t *testing.T) {
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
 	r := liveRenderer(&out, &errw, func() time.Time { return now })
 
-	r.StartTurn()
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{Total: 30, Window: 100})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{Total: 30, Window: 100})
 	defer r.StopProgress()
 
 	got := errw.String()
@@ -772,7 +765,7 @@ func TestLiveCounterPaintsInPlaceAndCarriesContextPercent(t *testing.T) {
 	if !strings.Contains(got, "\r\x1b[2K") {
 		t.Fatalf("counter should repaint in place with \\r\\x1b[2K, got %q", got)
 	}
-	if !strings.Contains(got, "[model: turn 1 · 0s · ctx 30% │ total 0s]") {
+	if !strings.Contains(got, "[turn: 1 · 0s · ctx 30% │ prompt 0s]") {
 		t.Fatalf("counter should show elapsed + context + visually separated total, got %q", got)
 	}
 	if strings.Contains(got, "waiting") {
@@ -785,13 +778,13 @@ func TestLiveCounterTickAdvancesElapsed(t *testing.T) {
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
 	r := liveRenderer(&out, &errw, func() time.Time { return now })
 
-	r.StartTurn()
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	now = now.Add(12 * time.Second)
 	r.tick() // simulate a ticker fire without waiting on the real timer
 	defer r.StopProgress()
 
-	if got := errw.String(); !strings.Contains(got, "[model: turn 1 · 12s │ total 12s]") {
+	if got := errw.String(); !strings.Contains(got, "[turn: 1 · 12s │ prompt 12s]") {
 		t.Fatalf("tick should repaint with the elapsed seconds, got %q", got)
 	}
 }
@@ -846,13 +839,13 @@ func TestLiveCounterShowsTotalElapsedSincePromptSubmission(t *testing.T) {
 
 	r.StartPrompt()
 	now = now.Add(5 * time.Second)
-	r.StartTurn()
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	now = now.Add(2 * time.Second)
 	r.tick()
 	defer r.StopProgress()
 
-	if got := errw.String(); !strings.Contains(got, "[model: turn 1 · 2s │ total 7s]") {
+	if got := errw.String(); !strings.Contains(got, "[turn: 1 · 2s │ prompt 7s]") {
 		t.Fatalf("counter should include total elapsed since prompt submission, got %q", got)
 	}
 }
@@ -862,8 +855,8 @@ func TestLiveCounterErasedWhenPartialLineOutputAppears(t *testing.T) {
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
 	r := liveRenderer(&out, &errw, func() time.Time { return now })
 
-	r.StartTurn()
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	errw.Reset() // focus on what happens when streamed output arrives
 	r.TextDelta("hello")
 
@@ -881,8 +874,8 @@ func TestLiveCounterResumesAfterCompleteAssistantLine(t *testing.T) {
 	r := liveRenderer(&out, &errw, func() time.Time { return now })
 
 	r.StartPrompt()
-	r.StartTurn()
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	errw.Reset()
 	r.TextDelta("Working.\n")
 	now = now.Add(4 * time.Second)
@@ -893,7 +886,7 @@ func TestLiveCounterResumesAfterCompleteAssistantLine(t *testing.T) {
 		t.Fatalf("assistant text should stream unchanged, got %q", got)
 	}
 	got := errw.String()
-	if !strings.Contains(got, "[model: turn 1 · 4s │ total 4s]") {
+	if !strings.Contains(got, "[turn: 1 · 4s │ prompt 4s]") {
 		t.Fatalf("counter should resume while the model continues after a full line, got %q", got)
 	}
 }
@@ -908,8 +901,8 @@ func TestLiveCounterDoesNotFlushMarkdownTokenDeltasAsLines(t *testing.T) {
 	})
 
 	r.StartPrompt()
-	r.StartTurn()
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	for _, delta := range []string{"I", "’ll", " trace", " the", " error", ".\n"} {
 		r.TextDelta(delta)
 	}
@@ -925,7 +918,7 @@ func TestLiveCounterTicksDuringToolGap(t *testing.T) {
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
 	r := liveRenderer(&out, &errw, func() time.Time { return now })
 
-	r.StartTurn()
+	r.StartPromptRun()
 	r.ToolStart(llm.ToolCall{ID: "c1", Name: "grep", Input: json.RawMessage(`{"args":["x"]}`)})
 	defer r.StopProgress()
 
@@ -933,7 +926,7 @@ func TestLiveCounterTicksDuringToolGap(t *testing.T) {
 	if strings.Contains(got, "[tool: grep started") {
 		t.Fatalf("tool start line should not scroll by default, got %q", got)
 	}
-	if !strings.Contains(got, `[tool: grep args=["x"] · 0s │ total 0s]`) {
+	if !strings.Contains(got, `[tool: grep args=["x"] · 0s │ prompt 0s]`) {
 		t.Fatalf("a counter should show the tool arguments while ticking during the tool gap, got %q", got)
 	}
 }
@@ -944,8 +937,8 @@ func TestLiveCounterResumesForStreamedToolCallAfterAssistantText(t *testing.T) {
 	r := liveRenderer(&out, &errw, func() time.Time { return now })
 
 	r.StartPrompt()
-	r.StartTurn()
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	errw.Reset()
 	r.TextDelta("I’ll inspect")
 	if got := errw.String(); got != "\r\x1b[2K" {
@@ -966,7 +959,7 @@ func TestLiveCounterResumesForStreamedToolCallAfterAssistantText(t *testing.T) {
 	if strings.Contains(got, "[tool-call:") {
 		t.Fatalf("tool-call status should not force durable tool-stream output, got %q", got)
 	}
-	if !strings.Contains(got, "[model: tool call read_file · 2s │ total 5s]") {
+	if !strings.Contains(got, "[turn: tool call read_file · 2s │ prompt 5s]") {
 		t.Fatalf("counter should resume while streamed tool arguments finish, got %q", got)
 	}
 }
@@ -976,13 +969,13 @@ func TestLiveInputLineRendersTypedBuffer(t *testing.T) {
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
 	r := liveRenderer(&out, &errw, func() time.Time { return now })
 
-	r.StartTurn()
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	errw.Reset()
 	r.SetInputLine("fix the bug", len("fix the bug"))
 	defer r.StopProgress()
 
-	if got := errw.String(); !strings.Contains(got, "[model: turn 1 · 0s │ total 0s] > fix the bug") {
+	if got := errw.String(); !strings.Contains(got, "[turn: 1 · 0s │ prompt 0s] > fix the bug") {
 		t.Fatalf("input line should render the typed buffer after the counter, got %q", got)
 	}
 }
@@ -992,8 +985,8 @@ func TestLiveInputLineSanitizesNewlines(t *testing.T) {
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
 	r := liveRenderer(&out, &errw, func() time.Time { return now })
 
-	r.StartTurn()
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	errw.Reset()
 	r.SetInputLine("line1\nline2", len("line1\nline2"))
 	defer r.StopProgress()
@@ -1008,9 +1001,9 @@ func TestLiveInputLineSanitizesNewlines(t *testing.T) {
 }
 
 func TestUsageLineShowsCacheAndReasoning(t *testing.T) {
-	line := usageLine(agent.TurnUsage{
-		ModelTurns: 1,
-		Usage:      llm.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 3000, ReasoningTokens: 450},
+	line := usageLine(agent.PromptUsage{
+		Turns: 1,
+		Usage: llm.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 3000, ReasoningTokens: 450},
 	}, time.Second, 0, false, 1000, 200, 0)
 	if !strings.Contains(line, "cache 3.0k read") {
 		t.Errorf("usage line should report cache reads, got %q", line)
@@ -1042,7 +1035,7 @@ func TestClipDisplayTailCountsWideRunes(t *testing.T) {
 }
 
 func TestClipStatusLineCursorColumn(t *testing.T) {
-	const prefix = "[model: turn 1 · 0s │ total 0s] > "
+	const prefix = "[turn: 1 · 0s │ prompt 0s] > "
 	prefixW := displayWidth(prefix)
 
 	t.Run("fits shows whole line, cursor at true column", func(t *testing.T) {
@@ -1105,9 +1098,9 @@ func TestClipStatusLineCursorColumn(t *testing.T) {
 func TestApproachingCompactionNoticeOnce(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{})
-	r.StartTurn()
-	r.ModelTurnStart(1, 1, agent.ContextEstimate{Total: 85, Window: 100})
-	r.ModelTurnStart(2, 1, agent.ContextEstimate{Total: 90, Window: 100})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{Total: 85, Window: 100})
+	r.TurnAttemptStart(2, 1, agent.ContextEstimate{Total: 90, Window: 100})
 	if n := strings.Count(errw.String(), "approaching compaction"); n != 1 {
 		t.Fatalf("compaction notice should fire once, got %d in %q", n, errw.String())
 	}

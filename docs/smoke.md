@@ -219,8 +219,9 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ./harness -model anthropic:claude-opus-4-8
 ```
 
-Expect: model cost checkpoints and a per-turn usage line on stderr with dollar
-costs (from configured pricing or models.dev), tool one-liners on stderr, the
+Expect: `[turn: N … │ prompt …]` progress/completion lines and one aggregate
+`[prompt: N turns …]` usage line on stderr with dollar costs (from configured
+pricing or models.dev), tool one-liners on stderr, the
 final answer on stdout, and a session auto-saved under
 `~/.local/state/harness/sessions/`.
 

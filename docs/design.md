@@ -285,6 +285,7 @@ type InputTokenCounter interface {
 
 type Request struct {
     Model       string
+    Purpose     RequestPurpose // turn|compaction|prewarm|handoff_summary; proxy normalizes others to unknown
     System      string
     Messages    []Message
     Tools       []ToolSchema
@@ -423,7 +424,7 @@ Providers emit granular `Start`/`Delta` events for live rendering **and** guaran
 `Start`/`Delta` to the renderer, but only `Done` affects transcript mutation and tool
 dispatch. When a provider streams malformed arguments, the assembler emits `Done` with
 `InvalidInputError` set and `ToolInput` replaced by a small diagnostic object; dispatch
-is short-circuited into an `is_error` tool result so the next model turn can correct
+is short-circuited into an `is_error` tool result so the next turn can correct
 it. Assembly is per-turn state inside each provider's `Stream`:
 
 - **OpenAI:** `choices[].delta.tool_calls[]` arrive with an `index`; the first delta for
@@ -938,10 +939,13 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   `model_proxy_cache_read_tokens_total`, `model_proxy_cache_write_tokens_total`,
   `model_proxy_reasoning_tokens_total`, `model_proxy_cost_usd_total`, and
   `model_proxy_request_duration_seconds_total` — are labeled by `provider`,
-  `model`, and `key`, while the `model_proxy_build_info` gauge is labeled by
-  `version` only. The `key` label is the
-  authorizing API key's stored `Name` (stashed in the request context by the auth
-  middleware) or the sentinel `"anonymous"` when auth is disabled. Token counters
+  `model`, bounded request `purpose`, and `key`, while the
+  `model_proxy_build_info` gauge is labeled by `version` only.
+  `purpose` is `turn`, `compaction`, `prewarm`, `handoff_summary`, or `unknown`;
+  missing and unrecognized client values normalize to `unknown` to prevent label
+  cardinality growth. The `key` label is the authorizing API key's stored `Name`
+  (stashed in the request context by the auth middleware) or the sentinel
+  `"anonymous"` when auth is disabled. Token counters
   are recorded for every `/v1/stream` that produced usage, priced or not — a
   deliberate superset of `/v1/usage`'s priced-only cost rollup — while
   `cost_usd_total` is recorded only when the model's price is known.
@@ -986,24 +990,32 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
 
 ## 8. Agent loop (`internal/agent`)
 
-### 8.1 Turn loop
+### 8.1 Prompt and turn loop
 
-One user prompt runs model turns until the model stops asking for tools:
+A **prompt** is one top-level user interaction. Within it, a **turn** is one
+completed model response plus the complete tool-result batch requested by that
+response. An **attempt** is one provider request for a turn; retries do not create
+additional turns. Turn numbers restart at 1 for every prompt. Model-backed
+maintenance such as compaction and prewarming is neither a prompt nor a turn.
 
 ```
-append user message
-for modelTurn := 0; maxTurns <= 0 || modelTurn < maxTurns; modelTurn++ { // -max-turns, default 250; <=0 unlimited
-    stream := provider.Stream(ctx, request)
+append user prompt message (origin=prompt)
+for turn := 1; maxTurns <= 0 || turn <= maxTurns; turn++ { // default 250; <=0 unlimited
+    stream := provider.Stream(ctx, request) // attempt 1; retryable failures increment attempt
     accumulate: print text deltas live; collect assembled tool calls;
                 capture usage + stop reason
     append assistant message (text blocks + tool_use blocks, emission order)
+    if stopReason == tool_use {
+        for each tool call, in order:              // read-only islands may run concurrently
+            result := registry.Dispatch(ctx, call) // always returns a result
+            print one-line tool summary
+        append ONE user message carrying all tool_result blocks, in call order
+    }
+    emit turn_complete(prompt, turn)
     if stopReason != tool_use { break }
-    for each tool call, in order:                  // consecutive read-only islands may run concurrently
-        result := registry.Dispatch(ctx, call)     // always returns a result
-        print one-line tool summary
-    append ONE user message carrying all tool_result blocks, in call order
 }
-emit turn-usage event   // the REPL / one-shot caller prints it and saves the session (§11)
+run post-prompt maintenance if needed
+emit prompt_usage(prompt, completedTurns)
 ```
 
 - **Mostly-sequential tool execution.** Coding tools mutate a shared filesystem; deterministic
@@ -1017,7 +1029,7 @@ emit turn-usage event   // the REPL / one-shot caller prints it and saves the se
 - **One result per call, always.** Required by both APIs (§4 invariant). `Dispatch`
   produces a result even on panic.
 - **Metered tools:** tools may optionally report token usage (currently synchronous
-  `delegate`). The agent adds that usage to the turn/session total, while the normal
+  `delegate`). The agent adds that usage to the prompt/session total, while the normal
   tool result remains the only child output added to the parent transcript.
 - **File diffs:** unless `show_diffs` is disabled, the agent asks built-in file
   mutation tools for their affected paths, snapshots those files immediately
@@ -1031,9 +1043,9 @@ emit turn-usage event   // the REPL / one-shot caller prints it and saves the se
   later parent model request; they are not appended to the parent transcript.
 - **Max-turns guard:** when `max_turns` is positive, on hit print
   `[stopped: reached max turns (250)]`, keep the transcript (it is valid — the
-  last model turn's results are appended), and return to the prompt. A
-  non-positive `max_turns` disables this guard. One model turn before the limit
-  (`modelTurns == maxTurns-1`) the loop injects a one-shot RoleUser wrap-up steer
+  last turn's results are appended), and return to the prompt. A non-positive
+  `max_turns` disables this guard. One turn before the limit the loop injects a
+  one-shot RoleUser wrap-up steer
   ("stop calling tools now and reply with a final message").
 - **Runaway guards (`internal/agent/loopguard.go`).** A per-run `turnGuard` (loop
   frame only, never on the shared registry) watches each tool turn:
@@ -1046,10 +1058,10 @@ emit turn-usage event   // the REPL / one-shot caller prints it and saves the se
     approach"); at 10 it breaks with `[stopped: N consecutive tool turns all
     failed]`. (Repetition and error-storm steers share one slot, so a turn is
     nudged at most once.)
-  - *Turn-token budget.* When `-max-turn-tokens` is positive, before each next
-    (paid) model request it compares the turn's cumulative usage
+  - *Prompt-token budget.* When `-max-prompt-tokens` is positive, before each next
+    (paid) model request it compares the prompt's cumulative usage
     (input + cache-read + cache-write + output + reasoning) against the budget and
-    breaks with `[stopped: turn token budget N exceeded]`. `0` is unlimited. This
+    breaks with `[stopped: prompt token budget N exceeded]`. `0` is unlimited. This
     path deliberately skips the final summary — the point is to stop spending.
 - **Graceful wrap-up on hard stop.** The error-storm, repeat-loop, and
   max-turns-reached breaks (but not the token-budget break) end with one final
@@ -1058,31 +1070,31 @@ emit turn-usage event   // the REPL / one-shot caller prints it and saves the se
   `tool_result`. It is best-effort: a failed or empty summary leaves the
   already-valid transcript untouched, and any tool calls the model emits there are
   ignored.
-- **Non-normal model stops:** `max_tokens` and stop-sequence finishes end the turn
+- **Non-normal model stops:** `max_tokens` and stop-sequence finishes end the prompt
   but emit a visible notice, so a truncated or externally stopped assistant answer
   does not look like an ordinary completion.
-- **Mid-stream retries:** each model turn is wrapped in `streamWithRetry`, which
+- **Mid-stream retries:** each turn is wrapped in `streamWithRetry`, which
   re-requests the step from scratch on a retryable terminal stream error up to
   `streamRetries` (2) times. These attempts do **not** count against `max-turns`;
   failed-attempt usage is still billed and tracked (xref §5.5).
 - **Stateful-Responses fallback:** when a turn that reused a `previous_response_id`
   fails because that response is no longer available (and nothing streamed), the agent
   resets the stored Responses state, notes it, and retries once with the full context.
-- **Stop hook:** a configured `Stop` hook fires when the model would end the turn; it
-  may block the break and force one more model turn. `stop_hook_active` guards it so it
-  fires at most once per turn (`agent.go`).
-- **Mid-turn steering (default on; `-no-steer` off).** A prompt the user submits
-  with Enter while a model turn is running is injected as a `RoleUser` message
+- **Stop hook:** a configured `Stop` hook fires when the model would end the prompt;
+  it may block the break and force one more turn. `stop_hook_active` guards it so it
+  fires at most once per prompt (`agent.go`).
+- **In-prompt steering (default on; `-no-steer` off).** Input the user submits
+  with Enter while a prompt is running is injected as a `RoleUser` message
   before the *next* model request (i.e. between tool rounds — the next time
-  harness sends data back to the model), rather than waiting for the turn to
+  harness sends data back to the model), rather than waiting for the prompt to
   end. Only model-bound input is steered; `!shell`, `/commands`, and `/edit`
-  submitted during a turn keep the legacy post-turn queue. A steer does not
+  submitted during a prompt stay queued for the next prompt. A steer does not
   consume a `max_turns` slot (it rides on the next request the loop was already
   going to make) and resets the runaway-guard streaks, so a deliberate redirect
-  is not penalized for the repeat/error run that preceded it. If the turn ends
-  without a tool round to inject into (a `StopEndTurn` turn, or a budget/cancel
-  break), the unconsumed steer is recovered at `turnDone` and run as the next
-  turn, so the input is never lost. `^C`/Esc-Esc cancel the in-flight turn as
+  is not penalized for the repeat/error run that preceded it. If the prompt ends
+  without another turn to inject into (a final answer or budget/cancel break),
+  the unconsumed steer is recovered at prompt completion and run as the next
+  prompt, so the input is never lost. `^C`/Esc-Esc cancel the in-flight prompt as
   usual; steering changes nothing about interrupt handling (§8.4).
 
 ### 8.2 Tool failure handling
@@ -1146,12 +1158,12 @@ behavior stays consistent between execution modes.
 
 ### 8.4 Interrupts
 
-A single SIGINT handler plus a per-turn `context.CancelFunc`:
+A single SIGINT handler plus a per-prompt `context.CancelFunc`:
 
-- **^C during a turn** → cancel the turn context (aborts the HTTP stream; kills
+- **^C during a prompt** → cancel the prompt context (aborts the HTTP stream; kills
   `run_command` process groups). Apply the cancel repair rule (§4): keep streamed
   partial text, strip un-executed tool calls. Print `[cancelled]`, return to prompt.
-- **Esc-Esc during a REPL turn** → same turn cancellation as the first ^C, without
+- **Esc-Esc during a REPL prompt** → same prompt cancellation as the first ^C, without
   the second-^C exit behavior.
 - **Second ^C within ~1 s, or ^C at the idle prompt** → save session, print the
   session token summary, exit 130.
@@ -1652,7 +1664,7 @@ this subsection records the common runner those argv tools point at.
 |---|---|---|
 | `task` | string, required | complete child prompt: objective, scope, constraints, expected report, and verification |
 | `agent` | string | optional configured agent name; omitted uses the current active agent; remains a simple enum for provider compatibility |
-| `max_turns` | int | optional per-call model-turn cap; capped at `delegate_max_turns` |
+| `max_turns` | int | optional per-call turn cap; capped at `delegate_max_turns` |
 | `background` | bool | only for independent non-overlapping work; after one useful parent model round, harness joins outstanding delegates and requires synthesis; do not poll or duplicate |
 
 - Implemented in `internal/delegate`, not `internal/tools`, to avoid an import cycle:
@@ -1685,8 +1697,8 @@ this subsection records the common runner those argv tools point at.
   the deepest allowed child has `delegate` removed before its registry/specs are
   built. If a child receives `delegate` at shallower depth, it is rebound to the
   child's full runtime snapshot so recursive validation uses the immediate parent.
-- Root `max_turn_tokens` and `max_prompt_cost_usd` are copied into every child
-  `agent.Options`. They remain per-turn ceilings for each child, not a shared
+- Root `max_prompt_tokens` and `max_prompt_cost_usd` are copied into every child
+  `agent.Options`. They remain per-prompt ceilings for each child, not a shared
   hierarchy-wide budget. Provider/model output/context settings and recursive
   runtime snapshots are preserved as before.
 - Child agents receive a private `update_todos` store when that tool is available;
@@ -1695,7 +1707,7 @@ this subsection records the common runner those argv tools point at.
 - The parent transcript records only the normal `delegate` tool call and compact result.
   Child transcripts are saved under `children/<child-id>/` in the parent session
   directory for forensics. Child token usage is reported through `MeteredTool` and
-  folded into the parent turn/session usage totals.
+  folded into the parent prompt/session usage totals.
 
 ### 9.15 background jobs
 
@@ -1718,15 +1730,15 @@ and token-accounting behavior as synchronous delegate.
 - Completed job summaries are delivered once as request-only context to the parent
   agent, including the transcript path when one exists. They are not inserted into
   the parent transcript. Background delegates are marked join-required: the parent
-  may perform one subsequent useful model round, but cannot complete the turn until
+  may perform one subsequent useful turn, but cannot complete the prompt until
   all such delegates finish and a model request has received their reports for
-  synthesis. Ordinary background commands remain detached and may outlive the turn.
+  synthesis. Ordinary background commands remain detached and may outlive the prompt.
   Output uses the same per-tool truncation limits as foreground
   dispatch; when truncated, the full result is archived under
   `artifacts/tool-results/` and the request context includes the same absolute path and
   targeted `read_file`/`rg` guidance as a foreground result.
 - Background delegate results carry child model usage through the manager exactly
-  once; the agent folds it into the parent turn and session totals before completion,
+  once; the agent folds it into the parent prompt and session totals before completion,
   including failed child runs that returned partial usage.
 - Background jobs run in the same cwd/tool policy as ordinary tools. Harness
   serializes session/job metadata, not concurrent filesystem edits.
@@ -1797,7 +1809,7 @@ backoff allows.
   an explicit unknown `agent` before recording a pending handoff. The default is
   the configured handoff agent (`auto` unless overridden).
 - Tools cannot prompt, so it only records a `plan.HandoffRequest` in a shared
-  `*plan.Pending` holder and returns. At the turn boundary, the REPL asks for
+  `*plan.Pending` holder and returns. At the prompt boundary, the REPL asks for
   approval, performs the switch, and immediately starts the implementation agent;
   `/handoff` remains available as a manual fallback (§10). It errors in one-shot
   mode (no interactive approval).
@@ -1828,30 +1840,32 @@ backoff allows.
   drops the timestamp and reads `[reasoning]` when status timestamps are
   disabled) and closed by an `[end reasoning]` footer. Non-interactive runs render
   explicitly enabled summaries to stderr.
-- Model progress renders as plain stderr lines, e.g. `[model: turn 1 waiting]`.
-  When pricing is known, the returned provider request also emits a checkpoint:
-  `[model: turn 1 cost: $0.0012 · totals: $0.0034 prompt · $0.0456 session]`.
-  Model start/completion events are always recorded in `raw.ndjson` for timing
-  diagnostics, even when pricing is unknown and no cost line is shown. Retried
-  streamed attempts also record a discard marker so replay can omit the abandoned
-  attempt's assistant/reasoning deltas while keeping the retry notice.
+- Turn progress renders as plain stderr lines, e.g. `[turn: 1 waiting]`. A
+  completed conversational turn renders
+  `[turn: 1 · 6s · ctx 74% │ prompt 18s]`; the enclosing prompt emits one
+  aggregate `[prompt: 3 turns …]` usage/cost line. Attempt start/usage events are
+  always recorded in `raw.ndjson` for timing and accounting diagnostics but do
+  not produce separate visible cost checkpoints. Retried attempts record a
+  discard marker so replay can omit abandoned assistant/reasoning deltas while
+  keeping the retry notice.
 - **Live wait counter (TTY, non-quiet).** While a model request, a tool call, or a
   model-backed compaction summary is outstanding, the static waiting line is replaced
   by a single in-place line painted with `\r\x1b[2K` and repainted ~once a second by a
   `time.Ticker` goroutine (with a mutex + stop-and-drain handshake so it never
-  interleaves with streamed bytes): `[model: turn 1 · 12s]`,
+  interleaves with streamed bytes): `[turn: 1 · 12s · ctx 30% │ prompt 18s]`,
   `[tool: grep args=["x"] · 3s]`, or `[context: compacting · 3s]`, with the same
   compact key arguments as the completed tool summary and the running context-window
   percentage appended for model waits (`· ctx 30%`). It is erased the instant real
   output or a tool line scrolls in — not a sticky bar or scroll region.
-- **During-turn input line.** Keystrokes typed during a turn are read in raw,
+- **During-prompt input line.** Keystrokes typed during a prompt are read in raw,
   echo-off mode and shown on that wait line after a `>` marker
-  (`[model: turn 1 · 12s] > draft`). Pressing Enter during a turn queues the
-  buffered input and runs it as the next model turn once the current turn finishes;
-  Shift-Enter/raw LF still inserts a newline for multi-line prompts. On normal turn
-  completion or interrupt (`^C`/Esc-Esc), any unsubmitted partial buffer is
+  (`[turn: 1 · 12s │ prompt 18s] > draft`). Pressing Enter during a prompt
+  steers model-bound input before the next turn when possible; with steering
+  disabled, or for commands/editor/shell input, it queues the next prompt.
+  Shift-Enter/raw LF still inserts a newline for multi-line prompts. On normal
+  prompt completion or interrupt (`^C`/Esc-Esc), any unsubmitted partial buffer is
   deposited into the next REPL prompt as editable, pre-filled text (cursor at end).
-  `^C`/Esc-Esc still cancel the current turn.
+  `^C`/Esc-Esc cancel the current prompt.
 - Tool-call progress details can render to stderr when explicitly enabled:
   `[tool-call: name id=...]` as the model builds the call and
   `[tool: name started ...]` when local execution starts. Enable with
@@ -1862,10 +1876,10 @@ backoff allows.
   `[grep] args=["-R","-n","func main","."] → 14 lines, 2.1KB`
   built from the tool name, key args, and a result summary. `-v` adds the first ~5 lines
   of each result, dimmed, and also enables progress details.
-- Large estimated contexts, payloads, or tool schemas print one warning per user
-  turn because they can materially slow first response latency.
-- Per-turn usage line:
-  `[turn: 3 model turns · 12.4k (18.0k) in / 1.8k (2.6k) out · $0.071 ($0.101) · 4.3s]`
+- Large estimated contexts, payloads, or tool schemas print one warning per
+  prompt because they can materially slow first response latency.
+- Per-prompt usage line:
+  `[prompt: 3 turns · 12.4k (18.0k) in / 1.8k (2.6k) out · $0.071 ($0.101) · 4.3s]`
   (cost omitted for usage without known cost). When non-zero it
   also appends cache-read tokens with the cache-hit ratio (`· cache 3.0k read (75%)`)
   and reasoning tokens (`· 450 reasoning`). A model with no known cost prints a
@@ -1884,11 +1898,11 @@ backoff allows.
   `diagnostics.ndjson` in the session directory; that sink accepts debug records so
   child MCP/LSP stderr is preserved even though it is hidden from the terminal by
   default and only shown with `--log-level debug`.
-- `-q`/`--quiet` suppresses bracketed status messages (tool calls, model turns,
+- `-q`/`--quiet` suppresses bracketed status messages (tool calls, turns,
   notices), disables live tool-stream progress and the live wait counter, suppresses
   reasoning summary output unless `-reasoning-summary` is explicitly set on the
   CLI, and suppresses status lines in `harness session replay`; it does not filter
-  slog diagnostics. The per-turn usage/cost line is governed by a separate
+  slog diagnostics. The per-prompt usage/cost line is governed by a separate
   `RenderOptions.SuppressUsage` (default false; the wiring sets it only for
   `-q` **and** non-TTY output), so a quiet interactive run still prints one cost line.
   One-shot runs additionally print a final `[session summary: …]` cost line to stderr
@@ -2010,8 +2024,11 @@ normal TTY; after it exits, the REPL reapplies its prompt settings. `!command`
 shell escapes use the same terminal handoff.
 
 External editor prompt files use `$VISUAL`, then `$EDITOR`, then `vi`, attached to
-`/dev/tty`. The temp file contains the visible output from the latest recorded turn,
-then a delimiter line (`--- HARNESS EDIT ... ---`), then any draft text. Only content
+`/dev/tty`. The temp file contains visible output only from the latest completed
+`(prompt, turn)` pair: assistant/reasoning output, that turn's tool results/diffs and
+notices, and its `[turn: …]` completion line. It excludes the user prompt, prior turns,
+attempt/maintenance accounting, and the aggregate `[prompt: …]` line. A delimiter
+line (`--- HARNESS EDIT ... ---`) and any draft text follow. Only content
 after the exact delimiter is submitted as the next prompt; edits above the delimiter are
 context for the user only. Missing delimiters abort the edit and keep the temp file.
 Empty edited content returns to the prompt without running a turn.
@@ -2021,7 +2038,7 @@ Empty edited content returns to the prompt without running a turn.
 Lines starting with `/` are commands; `//` escapes a literal slash. At an
 interactive TTY prompt, lines starting with `!` run a local shell command; `!!`
 escapes a literal bang. In a normal typed prompt, `$skillName` mentions an
-available skill anywhere in the text; the next model turn gets request-only
+available skill anywhere in the text; the next turn gets request-only
 context telling it to read that skill's `SKILL.md` before acting. `$$` escapes a
 literal `$`. Literal `@path` / `@"path with spaces"` references remain prompt text
 and never expand file contents; when they point at supported image extensions,
@@ -2037,7 +2054,7 @@ literal-safety semantics and do not auto-attach from `@` references.
 | `/compact` | force compaction now |
 | `/context` | dump the current provider-neutral model context as JSON |
 | `/context <file>` | save the current provider-neutral model context as JSON |
-| `/usage` | cumulative input, cached input, output, reasoning tokens, and cost (also cache-write tokens when present). Usage is bucketed per model target: with one model it is a single line; after a model change it breaks down per model target and always ends with the session-total cost. The live per-turn line shows the active model's cumulative tokens with the session-total cost; a model-changing `/agent`, `/model`, or handoff prints the breakdown before the active counters reset for the new model. |
+| `/usage` | cumulative input, cached input, output, reasoning tokens, and cost (also cache-write tokens when present). Usage is bucketed per model target: with one model it is a single line; after a model change it breaks down per model target and always ends with the session-total cost. The live per-prompt line shows the active model's cumulative tokens with the session-total cost; a model-changing `/agent`, `/model`, or handoff prints the breakdown before the active counters reset for the new model. |
 | `/tools` | list enabled built-in and MCP tools with descriptions, plus disabled optional tools |
 | `/image` | list images queued for the next prompt |
 | `/image <path>` | attach an image to the next prompt |
@@ -2087,9 +2104,9 @@ prefix wins, threshold `1 + len(cmd)/3`).
 -no-env           omit environment context block
 -resume <file>    load a session transcript and continue
 -session <file>   explicit session save path
--max-turns <n>    model turns per user prompt; <=0 means unlimited (default 250)
--max-turn-tokens <n>   stop a user turn after this many accumulated tokens; 0 = unlimited (default 0)
--max-output-tokens <n> per-model-turn output cap; 0 = automatic (default 0)
+-max-turns <n>    turns per prompt; <=0 means unlimited (default 250)
+-max-prompt-tokens <n>   stop a prompt after this many accumulated tokens; 0 = unlimited (default 0)
+-max-output-tokens <n> per-turn output cap; 0 = automatic (default 0)
 -tool-timeout <s>      per-tool-call timeout backstop in seconds; <=0 disables (default 600)
 -histfile <path>      REPL history file path (default <stateDir>/harness/history)
 -histfilesize <n>     max REPL history entries stored on disk (default 1000, 0 disables)
@@ -2099,7 +2116,7 @@ prefix wins, threshold `1 + len(cmd)/3`).
 -reasoning <profile>
 -reasoning-summary <auto|concise|detailed|none>
 -responses-stateful   Responses previous_response_id continuation (default true)
--no-steer          disable mid-turn steering: queue during-turn input for the next turn instead of injecting it into the running turn (default off)
+-no-steer          disable in-prompt steering: queue input for the next prompt instead of injecting it before the next turn (default off)
 -image-detail <level>   default image detail: auto, low, high, or original
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
 -agent <name>
@@ -2209,27 +2226,27 @@ output belongs in hook context.
   stderr, not to assistant text. Terminal stdout renders basic Markdown;
   redirected stdout stays raw model text.
 - Exit codes: `0` completed, `1` runtime error, `2` usage error, `130` interrupted.
-- Runs exactly one user turn, saves the session, exits.
+- Runs exactly one prompt interaction, saves the session, exits.
 
 ## 11. Session persistence (`internal/session`)
 
 ```go
 type Session struct {
-    Version       int                `json:"version"` // 2 (adds plans + per-model usage)
+    Version       int                `json:"version"` // 3: prompt/turn/attempt/maintenance split
     Provider      string             `json:"provider"`
     Model         string             `json:"model"`
     Created       time.Time          `json:"created"`
     Updated       time.Time          `json:"updated"`
     System        string             `json:"system"`
     Agent         string             `json:"agent,omitempty"`
-    Turn          int                `json:"turn,omitempty"`
+    Prompt        int                `json:"prompt,omitempty"`
     Messages      []llm.Message      `json:"messages"`
     ResponseState *llm.ResponseState `json:"response_state,omitempty"` // Responses stateful continuation anchor
     ProxySessionID string `json:"proxy_session_id,omitempty"` // proxy continuation/cache isolation key
     Todos         []todo.Item        `json:"todos,omitempty"`          // update_todos list, reseeded on resume
     Plans         []plan.Plan        `json:"plans,omitempty"`          // record_plan list, reseeded on resume
-    Usage         UsageTotals        `json:"usage"`                    // session aggregate (back-compat + resume seed)
-    UsageByModel  map[string]UsageTotals `json:"usage_by_model,omitempty"` // per model target cost; resume seeds a single bucket from Usage when absent
+    Usage         UsageTotals        `json:"usage"`                    // session aggregate
+    UsageByModel  map[string]UsageTotals `json:"usage_by_model,omitempty"` // per model target cost
 }
 
 type UsageTotals struct {
@@ -2238,13 +2255,20 @@ type UsageTotals struct {
 }
 ```
 
+- Schema v3 is intentionally breaking: loading or replaying an older `state.json`
+  returns a clear unsupported-version error; there are no aliases or migrations.
 - A session path is a directory. `state.json` is the compact resumable state,
   `raw.ndjson` is append-only replay data, `diagnostics.ndjson` stores JSON slog
   diagnostics for the run, `compactions/` stores raw messages removed from active
   context, and `artifacts/tool-results/` stores full truncated tool output.
-- **Saved after every turn**, atomically (write `state.json.tmp`, `os.Rename`). Cheap
+- **Saved after every prompt**, atomically (write `state.json.tmp`, `os.Rename`). Cheap
   relative to a model call; crash-safe for long sessions.
-- Every saved message and append-only replay event carries a timestamp.
+- Every saved message and append-only replay event carries a timestamp. Replay
+  events identify `prompt`, `turn`, and (for provider requests) `attempt` separately.
+  `turn_attempt_start`, `turn_attempt_abandoned`, and `turn_attempt_usage` describe
+  provider calls; `turn_complete` closes a conversational turn; `prompt_usage`
+  closes the top-level prompt; `maintenance_usage` accounts for compaction,
+  prewarming, and handoff-summary calls without creating turns.
 - When Responses stateful continuation is active, `state.json` stores the last
   `previous_response_id` and the number of local messages represented by it.
   Resume only restores this state when the active provider/model still match and
@@ -2268,14 +2292,16 @@ type UsageTotals struct {
   Raw assistant deltas remain unchanged on disk; replay renders Markdown at
   display time.
 - `harness session timings <session-dir>` reads `raw.ndjson` timestamps and
-  prints turn totals, model attempt durations, tool durations, largest event gaps,
+  prints prompt totals, turn-attempt durations, tool durations, largest event gaps,
   and context/payload estimates.
 - `harness session stats <session-dir>` reads the existing root and child
   `state.json` and `raw.ndjson` files, `compactions/*.meta.json` plus their input
   transcripts, and `children/*/meta.json`. It reports turns, direct tool and
   command activity, parallel batches, compactions, authoritative token/cost
   totals, and a hierarchical delegate breakdown without changing the on-disk
-  schema. Root usage already includes delegate and compaction spend and is never
+  schema. Conversation statistics distinguish prompts, turns, model calls,
+  retries, and maintenance calls. Root usage already includes delegate and
+  maintenance spend and is never
   summed with child usage; each child usage total likewise includes its nested
   delegates. Direct tool activity is instead summed once from every replay log.
 - Transcripts are provider-neutral; resuming under a different provider/model works.
@@ -2305,35 +2331,42 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
 
 - **Trigger:** when `max(reported input tokens, estimated full-request footprint)`
   reaches **78%** of the model's context window (headroom for the summary call plus the
-  next turn). The reported-input figure counts cache-read/cache-write tokens too, since
-  cached context still occupies the window. This fires after a turn **and proactively
-  mid-turn** — before the next model request within a turn, when tool results balloon the
-  estimate — so a single turn's tool output cannot overflow the window before the next
-  request. Also manual `/compact`. The estimate side is the last **measured** input
+  next turn). Successful compaction targets a **65%** low-water mark after fixed
+  system/tool-schema overhead, providing hysteresis instead of re-compacting after each
+  small result. Reported input counts cache-read/cache-write tokens because cached context
+  still occupies the window. The trigger runs after a prompt and proactively between
+  turns, before the next request when tool results balloon the estimate. Also manual
+  `/compact`. The estimate side is the last **measured** input
   tokens (`lastInput`) plus a bytes/4 estimate of only the messages appended since
   that measurement (the append boundary), so the trigger tracks real usage instead of
   re-estimating the whole transcript; the raw bytes/4 estimate is reserved for the
   degradation ladder.
 - **Live-transcript retention pass.** Before each model request the agent runs a
   pure-local retention pass (no model round-trip) over aged history: read-only
-  tool-result blocks older than `compact_keep_turns` and larger than
+  tool-result blocks older than `compact_keep_turns` completed turns and larger than
   `defaultSummaryToolResultSize` (4096 bytes) are trimmed to a head slice plus a hint
   (`[older tool output trimmed …]`, or an archive pointer when the sink can archive
   the full output), and `BlockImage` blocks two or more turns old are swapped for a
   text placeholder. It only ever shortens text or turns an image into text, so the §4
   transcript invariant still holds, and it is idempotent (already-trimmed/placeholder
   blocks are skipped). This keeps the window smaller between full compactions.
-- **Mechanism:** keep the system prompt and the configured number of recent turns
-  verbatim (`compact_keep_turns`, default 4; a turn = a user message through the
-  following end-turn). Under pressure, when fewer than `compact_keep_turns` turns
-  exist but there is at least one older turn, the keep window is soft: summarize
+- **Turn boundary:** a completed turn begins at an assistant response and includes
+  its immediately following tool-result message when that response requested tools.
+  User prompts, steering messages, and synthetic context are inputs to a turn, not
+  boundaries that merge all round trips since one prompt.
+- **Mechanism:** keep the system prompt and the latest completed turns verbatim
+  (`compact_keep_turns`, default 8). Under pressure, when the normal keep window
+  cannot reach the 65% target but at least two completed turns exist, summarize
   everything before the latest turn and keep only that latest turn verbatim. Send
   everything older to the model with the summarization instruction in
   `prompts/compaction-summary.txt`: preserve the task/goal, decisions made, files
   created/modified and their current state, key facts learned, open TODOs; do not
   invent. Summary output is capped by `compact_summary_max_tokens` (default 2048).
-  Replace the old messages with a single assistant-authored summary message:
-  `=== Summary of earlier conversation ===\n<summary>`.
+  Replace the old messages with one synthetic **user** checkpoint headed
+  `=== Compaction checkpoint ===`. It carries the active prompt and any steering
+  instructions verbatim, then the progress summary and raw archive reference. This
+  preserves current instructions explicitly without pretending the summary was a
+  conversational assistant turn.
 - Before summarization, large old tool results and tool inputs are reduced to
   previews (`compact_tool_result_max_bytes`, default 4096; a **negative** value disables
   this reduction entirely), and old images are replaced with text placeholders. If older
@@ -2360,9 +2393,10 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   base64 bytes at bytes/4, which wildly overstated images. Correspondingly,
   `truncateLargestBlock` ranks an image by that token weight, so a large text result
   is truncated before an image.
-- The summary call's tokens and cost are added to session totals and reported:
-  `[compacted: 38 messages → summary · 9.1k in / 0.4k out · $0.05]`. The `· $X.XX`
-  cost segment is omitted for models with no price entry.
+- The summary call's tokens and cost are added to session totals as maintenance,
+  never as a turn. Replay records a `maintenance_usage` event. The visible notice
+  reports the full request estimate before and after:
+  `[compacted: 4 turns → checkpoint · ctx ~18.2k → ~12.7k]`.
 - **Degradation:** if still over budget, keep only the last turn; if still over,
   hard-truncate the largest tool result/input/image blocks in place with markers.
   When there is no older turn to summarize but the transcript is still over budget,
@@ -2370,7 +2404,7 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   deep-copies before mutating (so a post-degrade `ValidateTranscript` failure rolls
   back to the live transcript) and skips a rewrite that would not actually shrink
   (`[compact: transcript over budget but nothing left to shrink]`). Automatic
-  current-turn fallback notices are throttled within a user turn so repeated no-op or
+  current-turn fallback notices are throttled within a prompt so repeated no-op or
   tiny-shrink attempts do not flood the UI. Never wedge.
 - **Failure:** if the summary or archive step errors, abort compaction, warn, and keep
   the full transcript — the next call may fail visibly on context length, which beats
@@ -2391,7 +2425,7 @@ injectable), the retry clock, and `ValidateTranscript`.
 | `internal/retry` | `Next`: jitter bounds, 30s cap, Retry-After floor |
 | tools | table-driven against `t.TempDir()`; `grep` wrapper against the host CLI; optional `rg` registration with a fake executable on PATH; `git` against a scratch `git init` repo (skipped if git absent); `run_command` timeout via `sleep`; `apply_patch` at the tool level covers the Codex Add envelope, canonical `patch`, compatibility decoding paths, bare-string input, and conflicting-alias / parse-error format-hint paths, while `internal/tools/patch` covers parse + apply for create/update/delete/rename and first-rejection-leaves-file-untouched |
 | agent loop | `FakeProvider` scripts: multi-tool batches, error-result feedback (next request carries the error), max-turns stop, cancellation → transcript still re-sendable |
-| delegate | child-agent request shape and child-only prompt suffix, model-visible compatible-agent enum/catalog (ordering, normalization, caps), parent-tool subset rejection, depth transitions/deepest-child removal, recursive runtime rebinding, inherited token/cost budgets, private child todo stores, child transcript persistence, metered usage folded into parent turn totals |
+| delegate | child-agent request shape and child-only prompt suffix, model-visible compatible-agent enum/catalog (ordering, normalization, caps), parent-tool subset rejection, depth transitions/deepest-child removal, recursive runtime rebinding, inherited token/cost budgets, private child todo stores, child transcript persistence, metered usage folded into parent prompt totals |
 | background | job start/completion, one-shot context delivery, notices, cancellation/errors, child transcript path preservation |
 | session | save→load→save round-trip; atomic rename leaves no `.tmp`; resume repair; cross-provider resume |
 | compaction | canned summary via FakeProvider; old messages collapse, last 4 turns kept; invariant holds |
@@ -2467,7 +2501,7 @@ reviewer, or the wide-open default without separate binaries.
   agent pair a smaller `model` with a lower `reasoning`.
 - **Plan → implementation handoff:** the `plan` agent records plans with
   `record_plan` (§9.17) and requests a handoff with `request_implementation` (§9.18).
-  At the next turn boundary, or on manual `/handoff` (§10), the REPL prompts for
+  At the next prompt boundary, or on manual `/handoff` (§10), the REPL prompts for
   approval, archives the planning transcript via `SaveCompaction`, switches to
   the target agent — default `auto`, overridable by
   `--handoff-agent`/`HARNESS_HANDOFF_AGENT`/`handoff_agent` or the `/handoff

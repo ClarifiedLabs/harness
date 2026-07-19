@@ -52,8 +52,8 @@ func TestRepetitionGuardSteersOnce(t *testing.T) {
 	a := newAgent(fp, reg, Options{MaxTurns: 6})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
@@ -82,8 +82,8 @@ func TestRepetitionGuardIgnoresChangingResults(t *testing.T) {
 	a := newAgent(fp, reg, Options{MaxTurns: 5})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
@@ -117,8 +117,8 @@ func TestRepeatLoopHardStops(t *testing.T) {
 	a := newAgent(fp, reg, Options{MaxTurns: 0})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
@@ -172,8 +172,8 @@ func TestErrorStormSteersThenBreaks(t *testing.T) {
 	a := newAgent(fp, reg, Options{MaxTurns: 0})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
@@ -200,7 +200,7 @@ func TestErrorStormSteersThenBreaks(t *testing.T) {
 	}
 }
 
-// TestTurnTokenBudgetStops verifies the per-turn token budget halts a tool loop
+// TestTurnTokenBudgetStops verifies the per-prompt token budget halts a tool loop
 // with a notice once cumulative tokens cross the ceiling, without an extra
 // (paid) wind-down request.
 func TestTurnTokenBudgetStops(t *testing.T) {
@@ -210,18 +210,18 @@ func TestTurnTokenBudgetStops(t *testing.T) {
 	reg := &tools.Registry{}
 	reg.Register(tool)
 
-	// Each model turn reports 60 tokens; budget 100 -> stop after the 2nd turn.
+	// Each turn reports 60 tokens; budget 100 -> stop after the 2nd turn.
 	step := llmtest.Step{
 		Events: []llm.StreamEvent{toolDone(0, "id", "probe", `{}`)},
 		Stop:   llm.StopToolUse,
 		Usage:  llm.Usage{InputTokens: 60},
 	}
 	fp := llmtest.New("fake", step, step, step, step)
-	a := newAgent(fp, reg, Options{MaxTurns: 0, MaxTurnTokens: 100})
+	a := newAgent(fp, reg, Options{MaxTurns: 0, MaxPromptTokens: 100})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
@@ -230,16 +230,16 @@ func TestTurnTokenBudgetStops(t *testing.T) {
 	}
 	var sawBudget bool
 	for _, msg := range sink.notices {
-		if strings.Contains(msg, "turn token budget 100 exceeded") {
+		if strings.Contains(msg, "prompt token budget 100 exceeded") {
 			sawBudget = true
 		}
 	}
 	if !sawBudget {
-		t.Errorf("expected turn token budget notice, notices=%v", sink.notices)
+		t.Errorf("expected prompt token budget notice, notices=%v", sink.notices)
 	}
 }
 
-// TestZeroTokenBudgetUnlimited verifies MaxTurnTokens == 0 imposes no ceiling.
+// TestZeroTokenBudgetUnlimited verifies MaxPromptTokens == 0 imposes no ceiling.
 func TestZeroTokenBudgetUnlimited(t *testing.T) {
 	tool := &recordTool{name: "probe", readOnly: true, run: func(_ context.Context, _ json.RawMessage) (string, error) {
 		return "ok", nil
@@ -254,11 +254,11 @@ func TestZeroTokenBudgetUnlimited(t *testing.T) {
 	}
 	done := llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn}
 	fp := llmtest.New("fake", toolStep, toolStep, done)
-	a := newAgent(fp, reg, Options{MaxTurns: 0, MaxTurnTokens: 0})
+	a := newAgent(fp, reg, Options{MaxTurns: 0, MaxPromptTokens: 0})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
@@ -269,7 +269,7 @@ func TestZeroTokenBudgetUnlimited(t *testing.T) {
 	}
 }
 
-// TestPromptCostBudgetStops verifies the per-turn USD cost budget halts a tool
+// TestPromptCostBudgetStops verifies the per-prompt USD cost budget halts a tool
 // loop once cumulative model cost crosses the ceiling, like the token budget but
 // in dollars. The default test registry prices claude-opus-4-8 at $5/1M input,
 // so 1,000,000 input tokens => $5/turn; budget $8 stops after the 2nd turn.
@@ -289,22 +289,22 @@ func TestPromptCostBudgetStops(t *testing.T) {
 	a := newAgent(fp, reg, Options{MaxTurns: 0, Model: "claude-opus-4-8", MaxPromptCostUSD: 8.0})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
-	if len(fp.Requests) != 2 {
-		t.Errorf("provider called %d times, want 2 (cost budget stops the loop)", len(fp.Requests))
+	if len(sink.completedTurns) != 2 {
+		t.Errorf("completed turns = %d, want 2 (cost budget stops the loop); provider calls=%d include maintenance", len(sink.completedTurns), len(fp.Requests))
 	}
 	var sawBudget bool
 	for _, msg := range sink.notices {
-		if strings.Contains(msg, "turn cost budget") {
+		if strings.Contains(msg, "prompt cost budget") {
 			sawBudget = true
 		}
 	}
 	if !sawBudget {
-		t.Errorf("expected turn cost budget notice, notices=%v", sink.notices)
+		t.Errorf("expected prompt cost budget notice, notices=%v", sink.notices)
 	}
 }
 
@@ -331,8 +331,8 @@ func TestPromptCostBudgetUnpricedModelNeverFires(t *testing.T) {
 	a := newAgent(fp, reg, Options{MaxTurns: 0, Model: "local-model", Registry: unpriced, MaxPromptCostUSD: 0.01})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 

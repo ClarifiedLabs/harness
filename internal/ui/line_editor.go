@@ -318,9 +318,9 @@ func (e *promptLineEditor) resetPromptCursorShape() error {
 }
 
 // readPrefilled reads a line with the editor seeded with editable prefill text
-// (cursor at end). It backs both the bare prompt and the during-turn deposit,
+// (cursor at end). It backs both the bare prompt and the during-prompt deposit,
 // where the text typed while the model ran is handed back for review/edit before
-// the user submits it manually (during-turn input).
+// the user submits it manually (during-prompt input).
 func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, bool, error) {
 	state := lineEditState{prompt: prompt}
 	defer e.clearPromptSnapshot()
@@ -386,17 +386,17 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 
 // handleKey dispatches one decoded keystroke against the shared editor state. It
 // backs both the idle prompt (readPrefilled, which redraws on result.redraw) and
-// the during-turn capture (readTurn, which mirrors buf/cursor on the status
+// the during-prompt capture (readDuringPrompt, which mirrors buf/cursor on the status
 // line). Vi normal mode delegates to handleViNormalInput; emacs and vi insert
 // mode share the per-key switch below.
 //
-// duringTurn selects the during-turn capture semantics, which differ from the
+// duringPrompt selects the during-prompt capture semantics, which differ from the
 // idle prompt only in terminal-finishing behavior (the multi-row redraw cannot run
 // while output streams):
 //
 //   - Submit (raw CR / escape-submit / vi Enter) commits the current buffer via
-//     submitDuringTurn: it is returned as queued input the run loop runs as the
-//     next turn (no terminal finish). Shift-Enter/raw LF still inserts a newline
+//     submitDuringPrompt: it is returned as queued input the run loop runs as the
+//     next prompt (no terminal finish). Shift-Enter/raw LF still inserts a newline
 //     for multiline prompts.
 //   - Edit (Ctrl-G / escape-edit) returns done with an edit request but does not
 //     finish or commit history; the run loop opens $EDITOR on the buffer.
@@ -404,15 +404,15 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 //   - EOF/interrupt return done for the run loop to deposit/cancel.
 //
 // Every motion, insert, delete, history recall, and vi command is shared
-// verbatim with the idle prompt, so the during-turn buffer gets the same editing
+// verbatim with the idle prompt, so the during-prompt buffer gets the same editing
 // grammar (Ctrl-A/E/B/F, arrows, word motions, kill commands, full vi mode,
 // vi-mode line-aware up/down history) as the idle prompt.
-func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, r rune, duringTurn bool) (viEditResult, error) {
-	if duringTurn {
-		// The during-turn buffer can carry a stale cursor (e.g. after a history
+func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, r rune, duringPrompt bool) (viEditResult, error) {
+	if duringPrompt {
+		// The during-prompt buffer can carry a stale cursor (e.g. after a history
 		// recall or an external reset); clamp it before any edit so insert/
 		// backspace never index out of range. The idle editor keeps the cursor in
-		// bounds via its own operations, so this is during-turn-only.
+		// bounds via its own operations, so this is during-prompt-only.
 		if s.cursor < 0 {
 			s.cursor = 0
 		}
@@ -421,7 +421,7 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 		}
 	}
 	if e.editMode == promptEditModeVi && v.mode == viModeNormal {
-		return e.handleViNormalInput(v, s, h, prompt, r, duringTurn)
+		return e.handleViNormalInput(v, s, h, prompt, r, duringPrompt)
 	}
 	if e.pasteCRPending && !(e.pasteMode && r == '\n') {
 		e.pasteCRPending = false
@@ -441,9 +441,9 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 			e.refreshPasteSummary(s)
 			return viEditResult{redraw: true}, nil
 		}
-		if duringTurn {
-			e.tracef("raw CR during turn submits text len=%d purePaste=%v", len(s.buf), e.purePaste)
-			return e.submitDuringTurn(s), nil
+		if duringPrompt {
+			e.tracef("raw CR during prompt submits text len=%d purePaste=%v", len(s.buf), e.purePaste)
+			return e.submitDuringPrompt(s), nil
 		}
 		e.tracef("raw CR submits text len=%d purePaste=%v", len(s.buf), e.purePaste)
 		return e.submit(s)
@@ -476,7 +476,7 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 	case rune(lineTermEdit):
 		e.clearShiftEnterPending()
 		e.tracef("raw ctrl-g opens editor text len=%d", len(s.buf))
-		return e.edit(s, duringTurn)
+		return e.edit(s, duringPrompt)
 	case ctrlE:
 		e.clearShiftEnterPending()
 		e.markManualEdit(s)
@@ -531,18 +531,18 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 		if e.editMode == promptEditModeVi && action == lineEditEscape {
 			e.clearShiftEnterPending()
 			e.viEnterNormal(v, s)
-			if duringTurn {
-				// During a turn, the first Esc in vi insert mode still enters normal
+			if duringPrompt {
+				// During a prompt, the first Esc in vi insert mode still enters normal
 				// mode, but it must also count as the first press of the double-Esc
 				// cancel gesture; otherwise vi mode requires three Esc presses.
 				return viEditResult{input: replInput{escape: true}, ok: true, done: true, redraw: true}, nil
 			}
 			return viEditResult{redraw: true}, nil
 		}
-		// During a turn a bare Esc is the double-Esc cancel gesture (the idle
+		// During a prompt a bare Esc is the double-Esc cancel gesture (the idle
 		// prompt treats bare Esc as a no-op in emacs mode). Surface it so the run
 		// loop can detect two within the window.
-		if duringTurn && action == lineEditEscape {
+		if duringPrompt && action == lineEditEscape {
 			e.clearShiftEnterPending()
 			return viEditResult{input: replInput{escape: true}, ok: true, done: true}, nil
 		}
@@ -552,9 +552,9 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 		}
 		e.clearShiftEnterPending()
 		if action == lineEditSubmit {
-			if duringTurn {
-				e.tracef("escape submit during turn submits text len=%d purePaste=%v", len(s.buf), e.purePaste)
-				return e.submitDuringTurn(s), nil
+			if duringPrompt {
+				e.tracef("escape submit during prompt submits text len=%d purePaste=%v", len(s.buf), e.purePaste)
+				return e.submitDuringPrompt(s), nil
 			}
 			e.tracef("escape submit text len=%d purePaste=%v", len(s.buf), e.purePaste)
 			return e.submit(s)
@@ -579,7 +579,7 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 			e.markManualEdit(s)
 			s.delete()
 		case lineEditEdit:
-			return e.edit(s, duringTurn)
+			return e.edit(s, duringPrompt)
 		case lineEditEOF:
 			if len(s.buf) == 0 {
 				return viEditResult{ok: false, done: true}, nil
@@ -624,7 +624,7 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 				h.next(s)
 			}
 		case lineEditPaste:
-			if !duringTurn {
+			if !duringPrompt {
 				wasEmpty := len(s.buf) == 0
 				s.insertPastedText(text)
 				if wasEmpty {
@@ -661,13 +661,13 @@ func (e *promptLineEditor) submit(s *lineEditState) (viEditResult, error) {
 	return viEditResult{input: replInput{text: string(s.buf), pasted: e.purePaste}, ok: true, done: true}, nil
 }
 
-// submitDuringTurn commits the current during-turn buffer as queued next-turn
+// submitDuringPrompt commits the current during-prompt buffer as queued next-prompt
 // input. Unlike submit it does not finish a terminal prompt (the multi-row redraw
 // cannot run while output streams); it clears the buffer so live capture can keep
 // reading more input while the turn runs. An empty Enter is a no-op so a stray
 // keypress does not stop capture. Submissions are marked interactive so they carry
 // the same !/command/$skill semantics as an idle-prompt line.
-func (e *promptLineEditor) submitDuringTurn(s *lineEditState) viEditResult {
+func (e *promptLineEditor) submitDuringPrompt(s *lineEditState) viEditResult {
 	text := string(s.buf)
 	if text == "" {
 		return viEditResult{redraw: true}
@@ -682,11 +682,11 @@ func (e *promptLineEditor) submitDuringTurn(s *lineEditState) viEditResult {
 }
 
 // edit returns an edit request so the caller opens $EDITOR on the text. At the
-// idle prompt it finishes the line and commits history first; during a turn it
+// idle prompt it finishes the line and commits history first; during a prompt it
 // leaves the buffer intact (no terminal finish, no history) and hands the text
 // to the run loop, which opens the editor against the deposited buffer.
-func (e *promptLineEditor) edit(s *lineEditState, duringTurn bool) (viEditResult, error) {
-	if duringTurn {
+func (e *promptLineEditor) edit(s *lineEditState, duringPrompt bool) (viEditResult, error) {
+	if duringPrompt {
 		return viEditResult{input: replInput{text: string(s.buf), edit: true}, ok: true, done: true}, nil
 	}
 	if err := e.finishPromptState(s); err != nil {

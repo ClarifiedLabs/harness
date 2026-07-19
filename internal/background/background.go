@@ -58,7 +58,7 @@ type Job struct {
 	cancel           context.CancelFunc
 	done             chan struct{}
 	finished         bool
-	waitForTurn      bool
+	waitForPrompt    bool
 	contextDelivered bool
 	noticeDelivered  bool
 	usageDelivered   bool
@@ -108,14 +108,14 @@ func (m *Manager) SetResultPreparer(prepare ResultPreparer) {
 }
 
 func (m *Manager) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.BackgroundJobInfo, error) {
-	snap, err := m.start(req.Kind, req.Description, req.Agent, req.WaitForTurn, req.Run)
+	snap, err := m.start(req.Kind, req.Description, req.Agent, req.WaitForPrompt, req.Run)
 	if err != nil {
 		return tools.BackgroundJobInfo{}, err
 	}
 	return tools.BackgroundJobInfo{ID: snap.ID, Status: snap.Status}, nil
 }
 
-func (m *Manager) start(kind, task, agent string, waitForTurn bool, run func(context.Context, string) (tools.BackgroundJobResult, error)) (Snapshot, error) {
+func (m *Manager) start(kind, task, agent string, waitForPrompt bool, run func(context.Context, string) (tools.BackgroundJobResult, error)) (Snapshot, error) {
 	if m == nil {
 		return Snapshot{}, fmt.Errorf("background manager is not initialized")
 	}
@@ -125,16 +125,16 @@ func (m *Manager) start(kind, task, agent string, waitForTurn bool, run func(con
 	ctx, cancel := context.WithCancel(context.Background())
 	started := m.now()
 	job := &Job{
-		ID:          backgroundID(started),
-		Kind:        strings.TrimSpace(kind),
-		Task:        strings.TrimSpace(task),
-		Agent:       strings.TrimSpace(agent),
-		Status:      StatusRunning,
-		Created:     started,
-		Updated:     started,
-		cancel:      cancel,
-		done:        make(chan struct{}),
-		waitForTurn: waitForTurn,
+		ID:            backgroundID(started),
+		Kind:          strings.TrimSpace(kind),
+		Task:          strings.TrimSpace(task),
+		Agent:         strings.TrimSpace(agent),
+		Status:        StatusRunning,
+		Created:       started,
+		Updated:       started,
+		cancel:        cancel,
+		done:          make(chan struct{}),
+		waitForPrompt: waitForPrompt,
 	}
 	m.mu.Lock()
 	m.jobs[job.ID] = job
@@ -239,9 +239,9 @@ func (m *Manager) Clear() {
 	m.order = nil
 }
 
-// PendingTurnWork reports whether a join-required background job is still
+// PendingPromptWork reports whether a join-required background job is still
 // running or has a completion result the parent has not yet received.
-func (m *Manager) PendingTurnWork() bool {
+func (m *Manager) PendingPromptWork() bool {
 	if m == nil {
 		return false
 	}
@@ -249,18 +249,18 @@ func (m *Manager) PendingTurnWork() bool {
 	defer m.mu.Unlock()
 	for _, id := range m.order {
 		job := m.jobs[id]
-		if job != nil && job.waitForTurn && (!job.finished || !job.contextDelivered) {
+		if job != nil && job.waitForPrompt && (!job.finished || !job.contextDelivered) {
 			return true
 		}
 	}
 	return false
 }
 
-// WaitForTurnWork joins all background jobs marked as required for the current
-// parent turn and returns any nested model usage not already accounted there.
+// WaitForPromptWork joins all background jobs marked as required for the current
+// parent prompt and returns any nested model usage not already accounted there.
 // Completion context remains pending for RequestContext to inject on the next
 // model request.
-func (m *Manager) WaitForTurnWork(ctx context.Context) (llm.Usage, error) {
+func (m *Manager) WaitForPromptWork(ctx context.Context) (llm.Usage, error) {
 	if m == nil {
 		return llm.Usage{}, nil
 	}
@@ -269,26 +269,26 @@ func (m *Manager) WaitForTurnWork(ctx context.Context) (llm.Usage, error) {
 		var pending []<-chan struct{}
 		for _, id := range m.order {
 			job := m.jobs[id]
-			if job != nil && job.waitForTurn && !job.finished {
+			if job != nil && job.waitForPrompt && !job.finished {
 				pending = append(pending, job.done)
 			}
 		}
 		m.mu.Unlock()
 		if len(pending) == 0 {
-			return m.DrainTurnWorkUsage(), nil
+			return m.DrainPromptWorkUsage(), nil
 		}
 		for _, done := range pending {
 			select {
 			case <-done:
 			case <-ctx.Done():
-				return m.DrainTurnWorkUsage(), ctx.Err()
+				return m.DrainPromptWorkUsage(), ctx.Err()
 			}
 		}
 	}
 }
 
-// DrainTurnWorkUsage returns completed join-required job usage exactly once.
-func (m *Manager) DrainTurnWorkUsage() llm.Usage {
+// DrainPromptWorkUsage returns completed join-required job usage exactly once.
+func (m *Manager) DrainPromptWorkUsage() llm.Usage {
 	if m == nil {
 		return llm.Usage{}
 	}
@@ -297,7 +297,7 @@ func (m *Manager) DrainTurnWorkUsage() llm.Usage {
 	var total llm.Usage
 	for _, id := range m.order {
 		job := m.jobs[id]
-		if job == nil || !job.waitForTurn || !job.finished || job.usageDelivered {
+		if job == nil || !job.waitForPrompt || !job.finished || job.usageDelivered {
 			continue
 		}
 		job.usageDelivered = true

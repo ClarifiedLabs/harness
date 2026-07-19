@@ -44,7 +44,7 @@ harness -model openai:gpt-5.5 -i "review the current git diff"
 The initial prompt is literal text: leading `/` is not a REPL command and leading
 `!` is not a shell escape. Unlike `-p`, `-i` does not read from stdin or append
 piped stdin; any stdin lines remain available as scripted REPL input after the
-initial turn. `-image` attachments used with `-i` attach only to the initial
+initial prompt. `-image` attachments used with `-i` attach only to the initial
 prompt.
 
 ## One-Shot Mode
@@ -92,26 +92,26 @@ interrupted.
 -histfile <path>      REPL history file path
 -histfilesize <n>     max REPL history entries stored on disk (0 disables, default 1000)
 -histsize <n>         max REPL history entries loaded into memory (0 disables, default 1000)
--max-turns <n>    model turns per user prompt; <=0 means unlimited (default 250)
+-max-turns <n>    turns per prompt; <=0 means unlimited (default 250)
 -tool-timeout <s>   per-tool-call timeout backstop in seconds; <=0 disables (default 600). A
                     hung tool that ignores cancellation is force-failed after this many
                     seconds so it cannot stall a turn; run_command's own timeout_seconds stays
                     authoritative and is never cut below.
--max-turn-tokens <n>   stop a user turn after this many accumulated tokens; 0 means unlimited
+-max-prompt-tokens <n>   stop a prompt after this many accumulated tokens; 0 means unlimited
                     (default 0). Counts input + cache-read + cache-write + output + reasoning
-                    tokens across every model call in the turn, and breaks before the next paid
-                    request with a `[stopped: turn token budget N exceeded]` notice.
--max-output-tokens <n> per-model-turn output cap; 0 uses the automatic cap (default 0)
--max-prompt-cost <usd>   stop a user turn once its accumulated model cost reaches this many USD;
+                    tokens across every model call in the prompt, and breaks before the next paid
+                    request with a `[stopped: prompt token budget N exceeded]` notice.
+-max-output-tokens <n> per-turn output cap; 0 uses the automatic cap (default 0)
+-max-prompt-cost <usd>   stop a prompt once its accumulated model cost reaches this many USD;
                     0 means unlimited (default 0). Applies only when provider usage reports
                     known cost; breaks before the next paid request with a
-                    `[stopped: turn cost budget $X reached]` notice. Complements -max-turn-tokens.
+                    `[stopped: prompt cost budget $X reached]` notice. Complements -max-prompt-tokens.
 -default-context-window <n>   fallback window for configured models without context metadata (default 256000)
 -context-window <n>   override the model's context window (tokens)
 -reasoning <profile> reasoning profile: default, none, minimal, low, medium, high, xhigh, or max
 -reasoning-summary <mode> reasoning summary for Responses API: auto, concise, detailed, or none
 -responses-stateful   use Responses API previous_response_id continuation when supported (default true)
--no-steer         disable mid-turn steering: queue during-turn input for the next turn instead of injecting it into the running turn (default off; see "Mid-turn steering")
+-no-steer         disable in-prompt steering: queue input for the next prompt instead of injecting it before the next turn (default off; see "Steering")
 -image-detail <level>   default image detail: auto, low, high, or original
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
 -agent <name>     agent: auto (default), explore, plan, independent, or a config-defined agent
@@ -121,7 +121,7 @@ interrupted.
 -tool-stream      show tool-call progress details (default false)
 -show-diffs       show per-tool-call file diffs for built-in file edits (default true; use -show-diffs=false to disable)
 -q, --quiet       suppress status diagnostics and reasoning output unless -reasoning-summary is set;
-                  still prints one per-turn usage/cost line at an interactive terminal (suppressed only
+                  still prints one per-prompt usage/cost line at an interactive terminal (suppressed only
                   when output is also non-TTY/piped), and one-shot runs always print the session summary
 --version        print release version and exit 0
 --log-level <level>  diagnostic log level: debug, info, warn, error (also LOG_LEVEL)
@@ -180,7 +180,7 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
 `read_file`. A few context-efficiency knobs are config-file-only.
 
 - Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_MODEL`,
-  `HARNESS_MAX_TURNS`, `HARNESS_MAX_TURN_TOKENS`,
+  `HARNESS_MAX_TURNS`, `HARNESS_MAX_PROMPT_TOKENS`,
   `HARNESS_MAX_OUTPUT_TOKENS`, `HARNESS_TOOL_TIMEOUT`,
   `HARNESS_DEFAULT_CONTEXT_WINDOW`, `HARNESS_TIMESTAMPS`,
   `HARNESS_IMAGE_DETAIL`, and most other `HARNESS_*` equivalents for
@@ -222,7 +222,7 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   `HARNESS_*` env vars. `read_file` defaults to 500 lines and a 32 KB result cap;
   configure `read_file_default_limit`, `read_file_result_max_bytes`, and
   `read_file_result_max_lines`, or matching `HARNESS_*` env vars. The delegate
-  tool also has config-file-only `delegate_max_turns` (per-child model-turn cap)
+  tool also has config-file-only `delegate_max_turns` (per-child turn cap)
   and `delegate_max_depth` (recursive depth cap, root depth `0`).
 - Tool-surface limits for MCP and LSP are config-file-only: `mcp.max_tools` caps
   how many discovered remote MCP tools are auto-exposed (`0` = unlimited),
@@ -232,13 +232,13 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   `allowed_tools` whitelist can still name a tool that auto-exposure excluded.
 - Serena can be launched independently with `lsp.serena.enable=true` or
   `HARNESS_LSP_SERENA_ENABLE=true`; this does not imply `lsp.enable=true`.
-- A single model turn's output is capped at the configured
+- A single turn's output is capped at the configured
   `max_output_tokens` value when set, otherwise at one quarter of the effective
   `context_window` (with a very high 1,000,000-token runaway ceiling). A model's
   configured `output_limit`, when known, is a ceiling rather than the default.
   The chosen cap is then clamped to the counted or estimated remaining context
-  window. This client-side runaway brake is distinct from `-max-turn-tokens`,
-  which is the cumulative per-turn token *budget* across all model calls. If a
+  window. This client-side runaway brake is distinct from `-max-prompt-tokens`,
+  which is the cumulative per-prompt token *budget* across all model calls. If a
   provider reports a smaller real context window in an overflow error, harness
   learns that window for the session and retries once. When the cap is reached,
   harness surfaces `[stopped: model reached max tokens]`. Provider configs may
@@ -408,10 +408,11 @@ budget.
 ### Prometheus metrics
 
 The proxy exposes unauthenticated Prometheus metrics on a separate listener,
-`127.0.0.1:9090` by default. Metrics break usage down by `provider`, `model`, and
-`key` (the API key's stored name, or `anonymous` when authentication is
-disabled). `model_proxy_build_info` carries the build version. Token counters are
-recorded for every stream that produced usage, priced or not, while
+`127.0.0.1:9090` by default. Metrics break usage down by `provider`, `model`,
+bounded `purpose` (`turn`, `compaction`, `prewarm`, `handoff_summary`, or
+`unknown`), and `key` (the API key's stored name, or `anonymous` when
+authentication is disabled). `model_proxy_build_info` carries the build version.
+Token counters are recorded for every stream that produced usage, priced or not, while
 `model_proxy_cost_usd_total` is recorded only when a price is known.
 
 Use `-no-metrics` to disable the endpoint or `-metrics-listen` to move it. The
@@ -470,6 +471,11 @@ the default image detail when the model supports images. On `!` command lines,
 Tab completes the first word from `PATH` and completes path words with `/`, `~/`,
 `./`, `../`, and nested relative path prefixes.
 
+The editor preamble contains only the latest completed conversational turn from
+the replay log (assistant output, that turn's tool activity/notices, and its
+`[turn: …]` completion line). It excludes the user prompt, earlier turns, attempt
+accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
+
 | command | effect |
 |---|---|
 | `/help` | list commands |
@@ -510,26 +516,26 @@ extended thinking is counted in output tokens, so the reasoning total remains
 zero for Anthropic sessions.
 
 An unknown `/command` prints a `did you mean <command>?` suggestion (nearest known
-command by edit distance) instead of failing silently. The per-turn usage line
+command by edit distance) instead of failing silently. The per-prompt usage line
 appends cache-read and reasoning token counts (with the cache-hit ratio) when they
 are non-zero, and a model with no configured price prints a one-time
 `[note: no price configured …]` notice instead of silently dropping cost.
 
-### Waiting and typing during a turn
+### Waiting and typing during a prompt
 
 At an interactive terminal harness shows a live wait indicator while a model
 request or a tool call is outstanding: a single in-place line such as
-`[model: turn 1 · 12s]` (or `[tool: grep · 3s]`), updated about once a second and
-appended with the running context-window percentage (`· ctx 30%`) for model waits.
+`[turn: 1 · 12s · ctx 30% │ prompt 18s]` (or `[tool: grep · 3s]`), updated
+about once a second. Turn numbers restart at 1 for each prompt.
 It is erased the instant real output or a tool line appears, and is shown only at a
 TTY when not quiet.
 
-Text typed while a turn is running is captured with echo off and shown on that wait
-line after a `>` marker. During-turn input is **never** auto-submitted: Enter inserts
-a newline into the buffer rather than starting a turn. When the turn finishes — on
-normal completion **or** on interrupt (Ctrl-C / double-Esc) — the accumulated text is
-deposited into the next prompt as editable, pre-filled text for you to review, edit,
-or submit manually. Ctrl-C and double-Esc still cancel the active turn.
+Text typed while a prompt is running is captured with echo off and shown on that
+wait line after a `>` marker. Submitted model-bound input is steered before the
+next turn when possible; other input is queued for the next prompt. Unsubmitted
+text is deposited into the next prompt as editable, pre-filled text when the
+active prompt completes or is interrupted. Ctrl-C and double-Esc cancel the
+active prompt.
 
 ## Agents
 
@@ -587,7 +593,7 @@ sandbox for real isolation.
   removed from active context, `children/` stores child-agent transcripts and
   metadata, and `artifacts/tool-results/` stores full outputs omitted from model
   context.
-- The compact state is saved after every turn, atomically. Auto-save uses
+- The compact state is saved after every prompt, atomically. Auto-save uses
   `~/.local/state/harness/sessions/<timestamp>`, honoring `$XDG_STATE_HOME`.
 - `-session <dir>` chooses an explicit session directory. `-resume <dir>` loads
   its `state.json` and continues. `/clear` rotates to a fresh directory.
@@ -614,9 +620,10 @@ usage; delegate totals similarly include any nested delegates.
 
 Compaction fires when `max(reported input tokens, estimated full-request
 footprint)` reaches 78% of the model's context window, or on `/compact`.
-Harness summarizes old conversation history to free context while keeping the
-system prompt and the configured number of recent turns (`compact_keep_turns`,
-default `4`) verbatim.
+Harness compacts toward a 65% low-water mark, keeping the system prompt and the
+latest completed turns (`compact_keep_turns`, default `8`) verbatim. A turn is
+one assistant response plus its immediate tool-result batch, not all model calls
+made after one user prompt.
 
 Before summarization, large old tool results and large old tool inputs are
 reduced to previews (`compact_tool_result_max_bytes`, default `4096`), old images
@@ -624,19 +631,25 @@ are replaced with placeholders, and the raw removed messages are archived under
 `compactions/`. If the old history is too large for one summary call, harness
 summarizes chunks and then summarizes the chunk summaries. Non-quiet TTY runs
 show a transient elapsed-time indicator while this summary work is in progress.
-If compaction fails, the full transcript is kept.
+Older raw messages are archived before replacement. The active transcript gets
+a synthetic user checkpoint containing the active prompt and steering text
+verbatim, the progress summary, and the archive reference. If the normal keep
+window cannot reach the 65% target, harness keeps only the latest complete turn
+and truncates oversized tool payloads as a last resort without splitting a
+tool-use/result pair. If compaction fails validation or archive/summary writing,
+the full transcript is kept.
 
 Turn summaries include approximate context footprint and, when stateful Responses
 sends a smaller request than the full active conversation, the payload estimate.
 If the active context, request payload, or tool schemas are large enough to
-likely slow response startup, harness prints one warning per user turn to stderr.
+likely slow response startup, harness prints one warning per prompt to stderr.
 
 ## Interrupts
 
-- Ctrl-C during a turn, or Esc twice in short succession during a REPL turn,
-  cancels the turn. It aborts the HTTP stream, kills any `run_command` process
+- Ctrl-C during a prompt, or Esc twice in short succession during a REPL prompt,
+  cancels the prompt. It aborts the HTTP stream, kills any `run_command` process
   group, keeps streamed partial text, strips unexecuted tool calls, prints
-  `[cancelled]`, and returns to the prompt. Any text typed during the turn is
+  `[cancelled]`, and returns to the prompt. Any text typed during the prompt is
   preserved and deposited into the next prompt as editable pre-filled text.
 - A second Ctrl-C within about one second, or Ctrl-C at the idle prompt, saves,
   prints the session token summary, and exits 130.

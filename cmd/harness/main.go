@@ -541,7 +541,7 @@ func run(env environment) int {
 		ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		Agent:             agentName,
 		Depth:             0,
-		MaxTurnTokens:     cfg.MaxTurnTokens,
+		MaxPromptTokens:   cfg.MaxPromptTokens,
 		MaxPromptCostUSD:  cfg.MaxPromptCostUSD,
 	})
 	// pendingMCP is assigned below (interactive REPL only) before any turn can run,
@@ -572,7 +572,7 @@ func run(env environment) int {
 	toolCatalog.Register(background.NewJobsTool(backgroundManager))
 	// record_plan persists plans under the live session directory (delegateState
 	// tracks it across /clear); request_implementation records a handoff the REPL
-	// approves at the turn boundary. The App persists/reseeds the plan store like
+	// approves at the prompt boundary. The App persists/reseeds the plan store like
 	// todos. Handoff is interactive-only.
 	planStore := plan.NewStore()
 	handoffPending := plan.NewPending()
@@ -813,7 +813,7 @@ func run(env environment) int {
 
 	ag := agent.New(provider, toolRegistry, agent.Options{
 		MaxTurns:                  cfg.MaxTurns,
-		MaxTurnTokens:             cfg.MaxTurnTokens,
+		MaxPromptTokens:           cfg.MaxPromptTokens,
 		MaxOutputTokens:           cfg.MaxOutputTokens,
 		MaxPromptCostUSD:          cfg.MaxPromptCostUSD,
 		Model:                     cfg.Model,
@@ -883,7 +883,7 @@ func run(env environment) int {
 		ToolNames:         activeToolNames,
 		SessionPath:       sessionPath,
 		Depth:             0,
-		MaxTurnTokens:     cfg.MaxTurnTokens,
+		MaxPromptTokens:   cfg.MaxPromptTokens,
 		MaxPromptCostUSD:  cfg.MaxPromptCostUSD,
 	})
 	if hookRunner != nil {
@@ -919,12 +919,12 @@ func run(env environment) int {
 		Verbose:    cfg.Verbose,
 		ToolStream: cfg.ToolStream,
 		Quiet:      cfg.Quiet,
-		// -quiet still prints the single per-turn cost line on a TTY (r25);
+		// -quiet still prints the single per-prompt cost line on a TTY (r25);
 		// a piped -quiet run stays fully silent for scripting.
 		SuppressUsage:           cfg.Quiet && !env.colorTTY,
 		SuppressReasoningOutput: suppressReasoningOutput,
-		// The in-place wait counter and during-turn input line need a TTY; the
-		// renderer also gates them off under -quiet (r12 + during-turn input).
+		// The in-place wait counter and during-prompt input line need a TTY; the
+		// renderer also gates them off under -quiet (r12 + during-prompt input).
 		LiveStatus:      env.colorTTY,
 		Model:           registryModel,
 		Registry:        modelRegistry,
@@ -1008,10 +1008,10 @@ func run(env environment) int {
 		app.HistFile = session.HistoryPath(app.StateDir)
 	}
 	if resumed != nil {
-		app.Turn = resumed.Turn
+		app.PromptNumber = resumed.Prompt
 	}
 	// Wire the MCP tool-list refresh hook for the interactive REPL only: one-shot
-	// runs a single turn with tools discovered before the request, so it needs no hook.
+	// runs a single prompt with tools discovered before the request, so it needs no hook.
 	if mcpConn != nil && !cfg.PromptSet {
 		staticSummary := mergeMCPSummaries(localSummary, lspSummary, serenaSummary)
 		refreshMCP := newMCPRefresher(mcpConn, toolCatalog, agents, mcpBases, mcpSummary, staticSummary, logger, pendingMCP, mcpLim)
@@ -1047,7 +1047,7 @@ func run(env environment) int {
 	}
 	stopStartup()
 
-	// SIGINT wiring (design §8.4): a single handler cancels the active turn or,
+	// SIGINT wiring (design §8.4): a single handler cancels the active prompt or,
 	// on a second press / at the idle prompt, requests exit.
 	exitCh := make(chan struct{}, 1)
 	if env.sigCh != nil {
@@ -1062,17 +1062,17 @@ func run(env environment) int {
 		app.Interrupt = watcher
 	}
 
-	// Mid-turn steering: route a prompt submitted during a running turn into the
-	// agent as the next intermediate model round's input (design §8.1). Disabled
+	// Mid-prompt steering: route input submitted during a running prompt into the
+	// agent as the next turn's input (design §8.1). Disabled
 	// by -no-steer, and only wired for the interactive REPL — one-shot mode has
-	// no during-turn input.
+	// no during-prompt input.
 	if !cfg.NoSteer && interactiveSession {
 		steerAgent := ag
 		app.Steer = func(input agent.SteerInput) { steerAgent.SteerContent(input) }
 		app.DrainSteer = func() agent.SteerInput { return steerAgent.DrainSteerContent() }
 	}
 
-	// One-shot mode: a single turn, then exit (design §10).
+	// One-shot mode: a single prompt, then exit (design §10).
 	if cfg.PromptSet {
 		prompt, err := ui.BuildPrompt(cfg.Prompt, stdin, env.stdinPiped)
 		if err != nil {
@@ -1119,11 +1119,17 @@ func run(env environment) int {
 	// snapshot is captured synchronously here; only the stream runs in the
 	// goroutine, so it never races the loop.
 	prewarm := func() {
-		if warm, ok := ag.PrewarmFunc(); ok {
+		if warm, ok := app.Agent.PrewarmFunc(); ok {
+			modelKey := app.RegistryModel
+			if modelKey == "" {
+				modelKey = app.Model
+			}
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				warm(ctx)
+				if usage := warm(ctx); usage != (llm.Usage{}) {
+					app.QueueMaintenanceUsageForModel(modelKey, agent.MaintenanceUsage{Purpose: "prewarm", Usage: usage})
+				}
 			}()
 		}
 	}
@@ -1137,7 +1143,7 @@ func run(env environment) int {
 	}
 
 	// Interactive REPL. ui.Run owns the session save in every exit path,
-	// including SIGINT, so the exit-save never races an in-flight turn's own save
+	// including SIGINT, so the exit-save never races an in-flight prompt's own save
 	// or usage update (design §8.4); main only forwards the exit request.
 	fmt.Fprintf(stderr, "session: %s\n", sessionPath)
 	fmt.Fprintln(stderr, ui.ProviderLine(cfg.Provider, cfg.Model, registryModel, reasoning, modelRegistry))

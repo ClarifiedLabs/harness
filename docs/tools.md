@@ -90,9 +90,9 @@ the model can react to failing builds, tests, and searches.
 a job id immediately. `delegate` can also run as a background child agent.
 Completed background job summaries are delivered once as request-only context to
 the parent agent. Background delegates are join-required: after one useful parent
-model round, harness waits for them and makes the parent synthesize their reports
-before ending the turn. Their model usage is included exactly once in parent
-turn/session totals. Ordinary background commands remain detached. Jobs live only
+turn, harness waits for them and makes the parent synthesize their reports
+before ending the prompt. Their model usage is included exactly once in parent
+prompt/session totals. Ordinary background commands remain detached. Jobs live only
 in the current harness process and are abandoned when that process exits.
 
 ## File Mutation
@@ -141,16 +141,16 @@ duplicate a background child's work. Harness permits one subsequent useful paren
 model round, then joins outstanding background delegates and continues the parent
 for synthesis before allowing the turn to end.
 
-Each call runs for at most `delegate_max_turns` model turns (default `20`).
+Each call runs for at most `delegate_max_turns` turns (default `20`).
 Recursion starts at root depth `0` and is limited by `delegate_max_depth`
 (default `3`); the deepest child does not receive `delegate`, and an over-depth
 launch fails before a model request. Children inherit the root
-`max_turn_tokens` and `max_prompt_cost_usd` per-turn safety ceilings. These are
+`max_prompt_tokens` and `max_prompt_cost_usd` per-prompt safety ceilings. These are
 per-child ceilings, not a hierarchy-wide shared budget.
 
 Child agents get private todo stores. Their transcripts are saved under
 `children/<child-id>/` alongside the parent session. Foreground and background
-child token/cost usage is included exactly once in parent turn/session usage.
+child token/cost usage is included exactly once in parent prompt/session usage.
 
 Because JSON-schema composition is rejected by some providers, `delegate.tools`
 advertises only the conservative intersection of tool names supported by every

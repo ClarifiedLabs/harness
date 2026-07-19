@@ -1279,7 +1279,7 @@ func TestHandlerLogsStreamStats(t *testing.T) {
 
 	body, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:priced",
-		Request:  llm.Request{Model: "openai:priced"},
+		Request:  llm.Request{Model: "openai:priced", Purpose: llm.RequestPurposeTurn},
 	})
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/stream", bytes.NewReader(body))
 	if err != nil {
@@ -1306,6 +1306,7 @@ func TestHandlerLogsStreamStats(t *testing.T) {
 		"provider":         "openai",
 		"api_type":         "openai",
 		"model":            "priced",
+		"purpose":          string(llm.RequestPurposeTurn),
 		"status":           float64(http.StatusOK),
 		"input_tokens":     float64(1000),
 		"output_tokens":    float64(2000),
@@ -1924,7 +1925,7 @@ func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
 	stream := func(model string) {
 		body, _ := json.Marshal(protocol.StreamRequest{
 			TargetID: "openai:" + model,
-			Request:  llm.Request{Model: "openai:" + model},
+			Request:  llm.Request{Model: "openai:" + model, Purpose: llm.RequestPurposeTurn},
 		})
 		resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 		if err != nil {
@@ -1945,7 +1946,7 @@ func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
 
 	// Both models get token counters (free model is a deliberate superset of
 	// /v1/usage, which records cost only).
-	labels := map[string]string{"provider": "openai", "model": "priced", "key": "anonymous"}
+	labels := map[string]string{"provider": "openai", "model": "priced", "purpose": "turn", "key": "anonymous"}
 	pricedLine := seriesLine("model_proxy_input_tokens_total", labels)
 	if !strings.Contains(out, pricedLine+" 1000") {
 		t.Errorf("missing priced input tokens series:\n%s", out)
@@ -1957,7 +1958,7 @@ func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
 	if !strings.Contains(out, seriesLine("model_proxy_cost_usd_total", labels)+" ") {
 		t.Errorf("missing priced cost series:\n%s", out)
 	}
-	freeLabels := map[string]string{"provider": "openai", "model": "free", "key": "anonymous"}
+	freeLabels := map[string]string{"provider": "openai", "model": "free", "purpose": "turn", "key": "anonymous"}
 	if !strings.Contains(out, seriesLine("model_proxy_output_tokens_total", freeLabels)+" 2000") {
 		t.Errorf("missing free output tokens series:\n%s", out)
 	}
@@ -2012,7 +2013,7 @@ func TestHandlerMetricsKeyLabelReflectsAuth(t *testing.T) {
 
 	body, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:priced",
-		Request:  llm.Request{Model: "openai:priced"},
+		Request:  llm.Request{Model: "openai:priced", Purpose: llm.RequestPurposePrewarm},
 	})
 	// Authenticated request: key label = configured name.
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/stream", bytes.NewReader(body))
@@ -2030,7 +2031,7 @@ func TestHandlerMetricsKeyLabelReflectsAuth(t *testing.T) {
 	var b strings.Builder
 	reg.Render(&b)
 	out := b.String()
-	namedLabels := map[string]string{"provider": "openai", "model": "priced", "key": "laptop"}
+	namedLabels := map[string]string{"provider": "openai", "model": "priced", "purpose": "prewarm", "key": "laptop"}
 	if !strings.Contains(out, seriesLine("model_proxy_requests_total", namedLabels)+" 1") {
 		t.Errorf("missing key=laptop series:\n%s", out)
 	}
@@ -2063,7 +2064,7 @@ func TestHandlerMetricsRecordsErrors(t *testing.T) {
 
 	body, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:known",
-		Request:  llm.Request{Model: "openai:known"},
+		Request:  llm.Request{Model: "openai:known", Purpose: llm.RequestPurposeCompaction},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 	if err != nil {
@@ -2075,7 +2076,7 @@ func TestHandlerMetricsRecordsErrors(t *testing.T) {
 	var b strings.Builder
 	reg.Render(&b)
 	out := b.String()
-	labels := map[string]string{"provider": "openai", "model": "known", "key": "anonymous"}
+	labels := map[string]string{"provider": "openai", "model": "known", "purpose": "compaction", "key": "anonymous"}
 	if !strings.Contains(out, seriesLine("model_proxy_errors_total", labels)+" 1") {
 		t.Errorf("missing errors series:\n%s", out)
 	}
@@ -2130,7 +2131,7 @@ func TestHandlerMetricsRecordsRejectedAuth(t *testing.T) {
 	var b strings.Builder
 	reg.Render(&b)
 	out := b.String()
-	labels := map[string]string{"key": "anonymous"}
+	labels := map[string]string{"key": "anonymous", "purpose": "unknown"}
 	if !strings.Contains(out, seriesLine("model_proxy_requests_total", labels)+" 1") {
 		t.Errorf("rejected auth not counted in requests_total:\n%s", out)
 	}
@@ -2190,7 +2191,7 @@ func TestHandlerMetricsRecordsUnresolvedRequest(t *testing.T) {
 	// request and its error must still be metered.
 	body, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:nope",
-		Request:  llm.Request{Model: "openai:nope"},
+		Request:  llm.Request{Model: "openai:nope", Purpose: llm.RequestPurpose("unbounded-client-value")},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 	if err != nil {
@@ -2205,8 +2206,9 @@ func TestHandlerMetricsRecordsUnresolvedRequest(t *testing.T) {
 	var b strings.Builder
 	reg.Render(&b)
 	out := b.String()
-	// provider/model are empty and so omitted; only the key label remains.
-	labels := map[string]string{"key": "anonymous"}
+	// provider/model are empty and so omitted. The arbitrary client purpose is
+	// normalized to unknown so it cannot create an unbounded label value.
+	labels := map[string]string{"key": "anonymous", "purpose": "unknown"}
 	if !strings.Contains(out, seriesLine("model_proxy_requests_total", labels)+" 1") {
 		t.Errorf("unresolved request not counted in requests_total:\n%s", out)
 	}

@@ -32,6 +32,18 @@ type ParallelToolBatch struct {
 	ToolUseIDs []string `json:"tool_use_ids"`
 }
 
+// MessageOrigin records transcript-only provenance used to preserve prompt and
+// turn boundaries across compaction and resume. Provider adapters intentionally
+// ignore it.
+type MessageOrigin string
+
+const (
+	MessageOriginPrompt               MessageOrigin = "prompt"
+	MessageOriginSteer                MessageOrigin = "steer"
+	MessageOriginInternal             MessageOrigin = "internal"
+	MessageOriginCompactionCheckpoint MessageOrigin = "compaction_checkpoint"
+)
+
 // Message is one turn-fragment in a transcript: a role plus an ordered list of
 // content blocks. ParallelToolBatches is execution metadata set only on the user
 // message carrying the corresponding tool results; provider adapters ignore it.
@@ -39,6 +51,7 @@ type Message struct {
 	Role                Role                `json:"role"`
 	Time                time.Time           `json:"time,omitempty"`
 	Phase               string              `json:"phase,omitempty"`
+	Origin              MessageOrigin       `json:"origin,omitempty"`
 	Content             []ContentBlock      `json:"content"`
 	ParallelToolBatches []ParallelToolBatch `json:"parallel_tool_batches,omitempty"`
 }

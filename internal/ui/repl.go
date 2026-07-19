@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -124,7 +125,7 @@ type App struct {
 	SwitchAgent           func(name string) (AgentSelection, error)
 
 	// RefreshMCP, when set, is consulted at the idle-prompt boundary (just
-	// before a typed prompt starts a turn) to pick up proxy tool-list changes.
+	// before a typed prompt starts) to pick up proxy tool-list changes.
 	// It is called with the current agent name; a non-nil registry replaces the
 	// agent's tools and notice is rendered. A nil registry means "no change".
 	// nil disables the hook (one-shot mode and tests leave it nil).
@@ -135,16 +136,16 @@ type App struct {
 	Todos *todo.Store
 
 	// The REPL sink can print the prompt todo status immediately before the
-	// per-turn usage line so usage is the last status line before the next prompt.
+	// per-prompt usage line so usage is the last status line before the next prompt.
 	// These fields let the idle prompt avoid printing that same todo block again.
-	todoPromptStatusBeforeUsage     bool
-	todoPromptStatusBeforeUsageTurn int
+	todoPromptStatusBeforeUsage       bool
+	todoPromptStatusBeforeUsagePrompt int
 
 	// Plans holds the recorded plans (the record_plan tool's store), persisted
 	// in state.json and reset on /clear. nil disables persistence.
 	Plans *plan.Store
 	// Handoff carries a pending plan->implementation handoff requested by the
-	// request_implementation tool, consumed at the turn boundary. nil disables.
+	// request_implementation tool, consumed at the prompt boundary. nil disables.
 	Handoff *plan.Pending
 	// HandoffAgent is the default agent a handoff switches to when the request
 	// names none. Empty falls back to the built-in default agent.
@@ -153,7 +154,7 @@ type App struct {
 	SessionPath          string    // current save path; /clear rotates it
 	StateDir             string    // for rotating to a fresh auto-save path on /clear
 	Created              time.Time // session creation time (preserved across saves)
-	Turn                 int       // last started user turn, persisted for replay numbering
+	PromptNumber         int       // last started prompt, persisted for replay numbering
 	Now                  func() time.Time
 	OnSessionPathChanged func(string)
 
@@ -166,18 +167,18 @@ type App struct {
 	HistSize     int
 
 	// Interrupt is the optional SIGINT state machine. When set, the REPL marks
-	// turn boundaries so ^C cancels a turn rather than the whole process
+	// prompt boundaries so ^C cancels a prompt rather than the whole process
 	// (design §8.4). Tests leave it nil.
 	Interrupt *agent.InterruptWatcher
 
 	// Steer, when set, routes a prepared model-bound prompt submitted during a
-	// running turn into the agent as a mid-turn steering message (injected before
-	// the next model request) instead of queuing it for the next turn. nil
-	// disables steering and keeps the legacy post-turn queue. Non-model-bound
-	// during-turn input (shell escapes, /commands, /edit) is never steered.
+	// running prompt into the agent as an in-prompt steering message (injected before
+	// the next model request) instead of queuing it for the next prompt. nil
+	// disables steering and queues the input for the next prompt. Non-model-bound
+	// during-prompt input (shell escapes, /commands, /edit) is never steered.
 	Steer func(agent.SteerInput)
-	// DrainSteer recovers prepared steer input the running turn never consumed
-	// (set alongside Steer). The REPL runs it as the next turn at turnDone so the
+	// DrainSteer recovers prepared steer input the running prompt never consumed
+	// (set alongside Steer). The REPL runs it as the next prompt at prompt completion so the
 	// input is not lost. Returns an empty input when nothing remains or steering
 	// is off.
 	DrainSteer func() agent.SteerInput
@@ -229,6 +230,14 @@ type App struct {
 
 	usage        session.UsageTotals            // cumulative aggregate across the session
 	usageByModel map[string]session.UsageTotals // per model target cumulative, for accurate per-model cost
+
+	maintenanceMu      sync.Mutex
+	pendingMaintenance []queuedMaintenanceUsage
+}
+
+type queuedMaintenanceUsage struct {
+	agent.MaintenanceUsage
+	modelKey string
 }
 
 // helpText lists the meta-commands (design §10).
@@ -257,7 +266,7 @@ const helpText = `commands:
   !command         run a local shell command at an interactive prompt
   @path<Tab>       complete a literal file reference; image refs attach when supported
   $skillName       mention a skill to load via SKILL.md
-Interrupt a running turn with Ctrl-C or double-Esc; a prompt typed during a turn is steered into the running turn (injected before the next model request) when possible, otherwise queued for the next turn.
+Interrupt a running prompt with Ctrl-C or double-Esc; input submitted while it runs is injected before the next turn when possible, otherwise queued as the next prompt.
 Ctrl-G opens the editor from the prompt; paths with spaces complete as @"..."; lines starting with / are commands; // sends a literal leading slash; !! escapes a literal !; $$ escapes a literal $`
 
 func (app *App) clock() func() time.Time {
@@ -268,24 +277,24 @@ func (app *App) clock() func() time.Time {
 }
 
 // Run drives the interactive REPL: it reads lines from in, dispatches
-// meta-commands, and runs one agent turn per prompt, saving the session after
-// every turn (design §10, §11).
+// meta-commands, and runs one agent prompt interaction per submitted prompt,
+// saving the session after every prompt (design §10, §11).
 //
 // exit carries SIGINT exit requests (design §8.4); a nil channel disables them.
 // Run owns the final save in every exit path — /exit, EOF (^D), and SIGINT — so
 // no second goroutine ever touches the transcript or session file concurrently
-// with an in-flight turn. It returns 0 on /exit, /quit, or EOF, and
+// with an in-flight prompt. It returns 0 on /exit, /quit, or EOF, and
 // ExitInterrupt (130) on a SIGINT exit request. Input is scanned in an
 // on-demand helper goroutine so an exit request received while idle at the
 // prompt is acted on immediately rather than blocking on the next line. During
-// an active turn the same helper also preserves typeahead and observes Esc-Esc
+// an active prompt the same helper also preserves typeahead and observes Esc-Esc
 // without competing with an external editor launched from the idle prompt.
 func Run(in io.Reader, app *App, exit <-chan struct{}) int {
 	return runWithInitialPrompt(in, app, exit, promptLineEditorEnabled(in, app.Errw), nil)
 }
 
 // RunWithInitialPrompt drives the interactive REPL after immediately starting
-// one model turn from initialPrompt. The initial prompt is always treated as
+// one prompt interaction from initialPrompt. The initial prompt is always treated as
 // user text, never as a REPL command or shell escape.
 func RunWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, initialPrompt string) int {
 	return runWithInitialPrompt(in, app, exit, promptLineEditorEnabled(in, app.Errw), &initialPrompt)
@@ -321,7 +330,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	// emulator soft reset), in case a prior process left it in raw, no-echo,
 	// or mouse-reporting state. Targets /dev/tty directly; no-op without one.
 	var restorePromptTerm func() error
-	disablePromptTerm := func() {
+	disableIdlePromptTerm := func() {
 		_ = term.SetBracketedPaste(false)
 		if restorePromptTerm != nil {
 			_ = restorePromptTerm()
@@ -331,7 +340,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			_ = term.SetCursorShape(term.CursorShapeDefault)
 		}
 	}
-	enablePromptTerm := func() {
+	enableIdlePromptTerm := func() {
 		if err := term.Reset(); err != nil {
 			fmt.Fprintf(app.Errw, "[term reset: %v]\n", err)
 		}
@@ -344,12 +353,12 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		_ = term.SetBracketedPaste(true)
 	}
-	enablePromptTerm()
-	defer disablePromptTerm()
+	enableIdlePromptTerm()
+	defer disableIdlePromptTerm()
 
 	prevBeforeEditor, prevAfterEditor := app.BeforeEditor, app.AfterEditor
 	app.BeforeEditor = func() {
-		disablePromptTerm()
+		disableIdlePromptTerm()
 		if prevBeforeEditor != nil {
 			prevBeforeEditor()
 		}
@@ -358,7 +367,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		if prevAfterEditor != nil {
 			prevAfterEditor()
 		}
-		enablePromptTerm()
+		enableIdlePromptTerm()
 	}
 	defer func() {
 		app.BeforeEditor = prevBeforeEditor
@@ -385,11 +394,11 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			return promptTemplate.Render(app.promptValues(promptTemplate, viModeName(m)))
 		}
 	}
-	// Render the during-turn typed buffer live on the status line (during-turn
+	// Render the during-prompt typed buffer live on the status line (during-prompt
 	// input). The reader calls this from its read goroutine; SetInputLine is
 	// mutex-guarded so it never interleaves with the agent's renderer writes.
 	if usePromptEditor && app.Renderer != nil {
-		reader.onTurnInput = func(buf string, cursor int) { app.Renderer.SetInputLine(buf, cursor) }
+		reader.onPromptInput = func(buf string, cursor int) { app.Renderer.SetInputLine(buf, cursor) }
 	}
 	// Load and configure REPL history persistence (bash-style HISTFILE/HISTFILESIZE/HISTSIZE).
 	// The in-memory editor receives a pre-loaded slice and a callback that appends each new
@@ -426,14 +435,14 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		inputErr                  error
 		active                    bool
 		activeReadPause           bool
-		exitAfterTurn             bool
+		exitAfterPrompt           bool
 		plainPromptRead           bool
 		prompt                    string
 		pendingPrefill            string // text deposited into the next prompt
 		pendingPrefillModelPrompt bool   // submitted prefill bypasses command/shell dispatch
 		queued                    []replInput
 		preparedQueued            []agent.SteerInput
-		turnDone                  <-chan struct{}
+		promptDone                <-chan struct{}
 		restoreEsc                func() error
 		escPresses                escapePresses
 	)
@@ -465,14 +474,14 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		app.printExitUsageSummary()
 		return code
 	}
-	enableTurnTerm := func() {
+	enableActivePromptTerm := func() {
 		_ = term.SetBracketedPaste(false)
 		if cleanup, err := term.EnableEscLineEnd(); err == nil {
 			restoreEsc = cleanup
 		}
 		reader.setEscapeLineEnd(true)
 	}
-	disableTurnTerm := func() {
+	disableActivePromptTerm := func() {
 		reader.setEscapeLineEnd(false)
 		if restoreEsc != nil {
 			_ = restoreEsc()
@@ -483,41 +492,41 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	startRun := func(run func()) {
 		done := make(chan struct{}, 1)
 		active = true
-		exitAfterTurn = false
+		exitAfterPrompt = false
 		plainPromptRead = false
 		promptPrinted = false
 		escPresses.reset()
 		if usePromptEditor {
-			// Keep the terminal in raw/echo-off mode for the whole turn so typed
-			// keystrokes feed the live during-turn input line instead of garbling
+			// Keep the terminal in raw/echo-off mode for the whole prompt so typed
+			// keystrokes feed the live during-prompt input line instead of garbling
 			// scrolling output. Bracketed paste is suppressed so a paste arrives
-			// as plain keystrokes the capture can accumulate (during-turn input).
+			// as plain keystrokes the capture can accumulate (during-prompt input).
 			_ = term.SetBracketedPaste(false)
-			reader.beginTurnCapture()
+			reader.beginPromptCapture()
 			if app.Renderer != nil {
 				app.Renderer.SetInputLine("", 0)
 			}
 			activeReadPause = false
 		} else {
 			activeReadPause = queuedContainsEditor(queued)
-			disablePromptTerm()
-			enableTurnTerm()
+			disableIdlePromptTerm()
+			enableActivePromptTerm()
 		}
-		turnDone = done
+		promptDone = done
 		go func() {
 			run()
 			done <- struct{}{}
 		}()
 	}
-	startTurn := func(prompt string, resolveSkillMentions, attachPromptImages bool) {
-		run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: resolveSkillMentions, attachPromptImages: attachPromptImages})
+	startPromptRun := func(prompt string, resolveSkillMentions, attachPromptImages bool) {
+		run, ok := app.preparePromptRun(prompt, promptOptions{resolveSkillMentions: resolveSkillMentions, attachPromptImages: attachPromptImages})
 		if !ok {
 			return
 		}
 		startRun(run)
 	}
-	startPreparedTurn := func(input agent.SteerInput) {
-		run, ok := app.prepareSteeredTurn(input)
+	startPreparedPrompt := func(input agent.SteerInput) {
+		run, ok := app.prepareSteeredPrompt(input)
 		if !ok {
 			return
 		}
@@ -565,7 +574,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		return ctx, cancel, interrupted.Load
 	}
-	startPromptTurn := func(prompt string, resolveSkillMentions, attachPromptImages bool) (exit bool, code int) {
+	startPromptInteraction := func(prompt string, resolveSkillMentions, attachPromptImages bool) (exit bool, code int) {
 		separateSubmittedPrompt(app.Errw)
 		if app.Renderer != nil {
 			app.Renderer.StartPrompt()
@@ -576,10 +585,10 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return true, ExitInterrupt
 		}
-		startTurn(prompt, resolveSkillMentions, attachPromptImages)
+		startPromptRun(prompt, resolveSkillMentions, attachPromptImages)
 		return false, ExitOK
 	}
-	startPreparedPromptTurn := func(input agent.SteerInput) (exit bool, code int) {
+	startPreparedPromptInteraction := func(input agent.SteerInput) (exit bool, code int) {
 		if app.Renderer != nil {
 			app.Renderer.StartPrompt()
 		}
@@ -589,7 +598,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return true, ExitInterrupt
 		}
-		startPreparedTurn(input)
+		startPreparedPrompt(input)
 		return false, ExitOK
 	}
 	applyAction := func(input replInput) (exit bool, code int) {
@@ -612,7 +621,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				// bypassing command and shell dispatch while preserving normal
 				// prompt enrichment for editor output.
 				app.echoEditedPrompt(prompt, action.prefill)
-				return startPromptTurn(action.prefill, true, true)
+				return startPromptInteraction(action.prefill, true, true)
 			}
 			return false, ExitOK
 		}
@@ -620,7 +629,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			if action.echoEditedPrompt {
 				app.echoEditedPrompt(prompt, action.prompt)
 			}
-			return startPromptTurn(action.prompt, action.resolveSkillMentions, action.attachPromptImages)
+			return startPromptInteraction(action.prompt, action.resolveSkillMentions, action.attachPromptImages)
 		}
 		return false, ExitOK
 	}
@@ -635,7 +644,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return finish(ExitInterrupt)
 		}
-		startTurn(*initialPrompt, true, true)
+		startPromptRun(*initialPrompt, true, true)
 	}
 
 	for {
@@ -643,27 +652,27 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			if !activeReadPause {
 				req := replReadRequest{}
 				if usePromptEditor {
-					req.turnEdit = true
+					req.promptEdit = true
 				}
 				requestRead(req)
 			}
 			select {
 			case <-exit:
-				// SIGINT exit requests during a turn are honored only after the
-				// turn goroutine finishes its own save and usage update.
-				exitAfterTurn = true
-			case <-turnDone:
+				// SIGINT exit requests during a prompt are honored only after the
+				// prompt goroutine finishes its own save and usage update.
+				exitAfterPrompt = true
+			case <-promptDone:
 				if app.Renderer != nil {
 					app.Renderer.StopProgress()
 				}
 				if usePromptEditor {
-					// Release the blocked during-turn keystroke read so any
+					// Release the blocked during-prompt keystroke read so any
 					// unsubmitted partial buffer becomes the next prompt's editable
 					// prefill. A line already submitted with Enter is queued below.
 					// The terminal stays in raw mode for the line editor; only
 					// bracketed paste is restored.
 					if readPending {
-						reader.cancelTurnRead()
+						reader.cancelPromptRead()
 						res := <-inputs
 						readPending = false
 						if res.ok && res.input.deposit {
@@ -674,30 +683,30 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 						} else {
 							// The read returned via a keystroke (interrupt/Esc)
 							// rather than the cancel; the typed buffer is intact.
-							pendingPrefill = reader.turnBuffer()
+							pendingPrefill = reader.promptBuffer()
 							pendingPrefillModelPrompt = false
 						}
-						reader.drainTurnCancel()
+						reader.drainPromptCancel()
 					}
 					// When no read is pending an EOF-driven deposit was already
 					// stashed in pendingPrefill via the active inputs case; leave
 					// it as-is.
 					_ = term.SetBracketedPaste(true)
 				} else {
-					disableTurnTerm()
+					disableActivePromptTerm()
 				}
 				active = false
 				activeReadPause = false
-				turnDone = nil
+				promptDone = nil
 				escPresses.reset()
-				// Recover any steer submitted during the turn that the loop never
-				// consumed (the turn ended without a tool round to inject into, or
-				// was broken by budget/cancel). Run it as the next turn so the
-				// input is not silently lost, ahead of any post-turn-queued input.
+				// Recover any steer submitted during the prompt that the loop never
+				// consumed (the prompt ended without another turn to inject into, or
+				// was broken by budget/cancel). Run it as the next prompt so the
+				// input is not silently lost, ahead of other queued input.
 				if leftover := app.drainLeftoverSteer(); !steerInputEmpty(leftover) {
 					preparedQueued = append([]agent.SteerInput{leftover}, preparedQueued...)
 				}
-				if exitAfterTurn {
+				if exitAfterPrompt {
 					return finish(ExitInterrupt)
 				}
 				if app.hasPendingHandoffRequest() {
@@ -730,7 +739,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 						}
 					}
 					if app.handoffCommand("", readHandoffLine) {
-						if exit, code := startPromptTurn(implementationStartPrompt, true, false); exit {
+						if exit, code := startPromptInteraction(implementationStartPrompt, true, false); exit {
 							return finish(code)
 						}
 						continue
@@ -740,13 +749,13 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					}
 				}
 				if !usePromptEditor && readPending {
-					// A plain read started during the model turn is still
+					// A plain read started during the prompt is still
 					// blocked. Let it collect the next line in canonical mode;
 					// starting the raw prompt editor now would leave no prompt
 					// drawn and no terminal echo until that stale read finishes.
 					plainPromptRead = true
 				} else if !usePromptEditor {
-					enablePromptTerm()
+					enableIdlePromptTerm()
 				}
 			case res := <-inputs:
 				readPending = false
@@ -757,14 +766,14 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				input := res.input
 				if input.interrupt {
 					if app.Interrupt != nil {
-						app.Interrupt.CancelTurn()
+						app.Interrupt.CancelPrompt()
 					}
 					continue
 				}
 				if input.deposit {
-					// Reached only on EOF mid-turn (the cancel-driven deposit is
-					// drained in the turn-done handoff). Stash it and stop reading
-					// until the turn ends.
+					// Reached only on EOF during a prompt (the cancel-driven deposit is
+					// drained at prompt completion). Stash it and stop reading
+					// until the prompt ends.
 					pendingPrefill = input.text
 					pendingPrefillModelPrompt = false
 					activeReadPause = true
@@ -779,12 +788,12 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 						queued = append(queued, replInput{text: input.text})
 					}
 					if escPresses.press(app.clock()()) && app.Interrupt != nil {
-						app.Interrupt.CancelTurn()
+						app.Interrupt.CancelPrompt()
 					}
 					continue
 				}
 				escPresses.reset()
-				if app.steerDuringTurn(input) {
+				if app.steerDuringPrompt(input) {
 					activeReadPause = true
 					continue
 				}
@@ -797,7 +806,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		if len(preparedQueued) > 0 {
 			input := preparedQueued[0]
 			preparedQueued = preparedQueued[1:]
-			if exit, code := startPreparedPromptTurn(input); exit {
+			if exit, code := startPreparedPromptInteraction(input); exit {
 				return finish(code)
 			}
 			continue
@@ -821,7 +830,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		if !promptPrinted {
 			prompt = renderPrompt()
 			app.pollBackgroundNotices()
-			if !app.todoPromptStatusPrintedBeforeUsageForTurn(app.Turn) {
+			if !app.todoPromptStatusPrintedBeforeUsageForPrompt(app.PromptNumber) {
 				app.printTodoPromptStatus()
 			}
 			if !usePromptEditor || plainPromptRead {
@@ -842,7 +851,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			readPending = false
 			if plainPromptRead {
 				plainPromptRead = false
-				enablePromptTerm()
+				enableIdlePromptTerm()
 			}
 			if !res.ok {
 				setInputEnded(res.err)
@@ -936,7 +945,7 @@ type replInput struct {
 	// bypasses prompt-level command and shell dispatch while preserving normal
 	// prompt enrichment.
 	modelPrompt bool
-	// deposit marks an accumulated during-turn buffer that did not end with Enter;
+	// deposit marks an accumulated during-prompt buffer that did not end with Enter;
 	// it is handed back as editable prefill in the next prompt.
 	deposit bool
 }
@@ -954,13 +963,13 @@ type replReadRequest struct {
 	// configured live vi-mode prompt renderer; auxiliary reads keep their own
 	// context-specific labels while still using the raw line editor.
 	replPrompt bool
-	// turnEdit routes the read through the during-turn keystroke capture: echo
+	// promptEdit routes the read through the during-prompt keystroke capture: echo
 	// stays off, keystrokes accumulate into a shared buffer rendered live on the
 	// status line, and the read returns only on Ctrl-C, Esc, or cancellation
-	// (during-turn input).
-	turnEdit bool
+	// (during-prompt input).
+	promptEdit bool
 	// prefill seeds the prompt editor with editable text, used to deposit a partial
-	// during-turn buffer or external editor output into the next prompt.
+	// during-prompt buffer or external editor output into the next prompt.
 	prefill string
 	// prefillModelPrompt marks the submitted prefill as model-bound prompt text;
 	// used for external editor output reviewed in the line editor.
@@ -1013,8 +1022,8 @@ func (p *escapePresses) reset() {
 	p.seen = false
 }
 
-// drainLeftoverSteer recovers any prepared steer input the just-finished turn
-// never injected, returning it so the run loop can queue it as the next turn. It
+// drainLeftoverSteer recovers prepared steer input the just-finished prompt
+// never injected, returning it so the run loop can queue it as the next prompt. It
 // returns an empty input when steering is disabled.
 func (app *App) drainLeftoverSteer() agent.SteerInput {
 	if app.DrainSteer == nil {
@@ -1038,15 +1047,15 @@ func steerInputEmpty(input agent.SteerInput) bool {
 	return true
 }
 
-// steerDuringTurn routes a during-turn-submitted input into the agent as a
-// mid-turn steering message when steering is enabled and the input is
-// model-bound (would start a turn at the idle prompt). It returns true when it
+// steerDuringPrompt routes a during-prompt-submitted input into the agent as a
+// in-prompt steering message when steering is enabled and the input is
+// model-bound (would start a prompt at idle). It returns true when it
 // consumed the input by steering. Non-model-bound input (shell escapes,
 // /commands, /edit requests) and any input when Steer is nil return false so the
-// caller queues them with the legacy post-turn behavior. The classification
+// caller queues them for the next prompt. The classification
 // mirrors handlePromptInput's prefix dispatch but performs no side effects,
-// since /commands and /edit must not run mid-turn.
-func (app *App) steerDuringTurn(input replInput) bool {
+// since /commands and /edit must not run inside an active prompt.
+func (app *App) steerDuringPrompt(input replInput) bool {
 	if app.Steer == nil {
 		return false
 	}
@@ -1061,7 +1070,7 @@ func (app *App) steerDuringTurn(input replInput) bool {
 		return false
 	}
 	if input.pasted {
-		if steered, ok := app.prepareSteerInput(line, turnOptions{}); ok {
+		if steered, ok := app.prepareSteerInput(line, promptOptions{}); ok {
 			app.Steer(steered)
 		}
 		return true
@@ -1071,7 +1080,7 @@ func (app *App) steerDuringTurn(input replInput) bool {
 		// or //foo reaches the model as !foo / /foo, exactly as it would at the
 		// idle prompt.
 		if strings.HasPrefix(line, "!!") || strings.HasPrefix(line, "//") {
-			if steered, ok := app.prepareSteerInput(line[1:], turnOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
+			if steered, ok := app.prepareSteerInput(line[1:], promptOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
 				app.Steer(steered)
 			}
 			return true
@@ -1082,7 +1091,7 @@ func (app *App) steerDuringTurn(input replInput) bool {
 			return false
 		}
 	}
-	if steered, ok := app.prepareSteerInput(line, turnOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
+	if steered, ok := app.prepareSteerInput(line, promptOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
 		app.Steer(steered)
 	}
 	return true
@@ -1188,9 +1197,9 @@ func queuedContainsEditor(inputs []replInput) bool {
 // losing buffered bytes. A pump goroutine copies the underlying stream into a
 // channel; Read serves from there and returns errReadCanceled when cancel()
 // fires, leaving any not-yet-delivered bytes queued for the next Read. This lets
-// the REPL hand the terminal from the during-turn keystroke capture back to the
-// full line editor at a turn boundary without dropping a keystroke
-// (during-turn input).
+// the REPL hand the terminal from the during-prompt keystroke capture back to the
+// full line editor at a prompt boundary without dropping a keystroke
+// (during-prompt input).
 type cancelableReader struct {
 	chunks   chan readChunk
 	leftover []byte
@@ -1199,7 +1208,7 @@ type cancelableReader struct {
 	// pending counts bytes the pump has read off the underlying fd but Read has
 	// not yet returned to the caller (queued chunk + leftover). It lets readiness
 	// probes see input the eager pump already drained off the fd, which
-	// WaitReadable on that fd can no longer report (during-turn escape decoding).
+	// WaitReadable on that fd can no longer report (during-prompt escape decoding).
 	pending atomic.Int64
 }
 
@@ -1265,7 +1274,7 @@ func (cr *cancelableReader) Read(p []byte) (int, error) {
 // buffered reports how many bytes the pump has read off the underlying fd but
 // not yet returned through Read (the queued chunk plus any leftover). Readiness
 // probes OR this in so a split escape sequence whose tail the pump already
-// drained off the fd is still seen as available (during-turn escape decoding).
+// drained off the fd is still seen as available (during-prompt escape decoding).
 func (cr *cancelableReader) buffered() int {
 	if n := cr.pending.Load(); n > 0 {
 		return int(n)
@@ -1299,30 +1308,29 @@ type replReader struct {
 	inPaste       bool
 	escapeLineEnd atomic.Bool
 
-	// During-turn keystroke capture (during-turn input). The turn shares the
+	// During-prompt keystroke capture. The active prompt shares the
 	// promptLineEditor's lineEditState/viLineState/history so it gets the same
 	// editing grammar (Ctrl-A/E/B/F, arrows, word motions, kill commands, full vi
 	// mode, vi-mode line-aware up/down history) as the idle prompt. The only
 	// difference is display:
-	// the idle prompt redraws the multi-row terminal region, while the turn mirrors
-	// buf/cursor onto the single status line via onTurnInput (it cannot use the
-	// multi-row redraw while output streams). turnState is created fresh at each
-	// turn start; onTurnInput renders the live buffer and cursor, and cancelable
-	// releases a blocked turn read so a partial buffer can be deposited at the turn
-	// boundary.
-	turnState   *lineEditState
-	turnVi      viLineState
-	turnHistory lineEditHistory
-	onTurnInput func(string, int)
-	cancelable  *cancelableReader
+	// the idle prompt redraws the multi-row terminal region, while the active prompt mirrors
+	// buf/cursor onto the single status line via onPromptInput (it cannot use the
+	// multi-row redraw while output streams). promptState is created fresh at each
+	// prompt start; onPromptInput renders the live buffer and cursor, and cancelable
+	// releases a blocked read so a partial buffer can be deposited at the prompt boundary.
+	promptState   *lineEditState
+	promptVi      viLineState
+	promptHistory lineEditHistory
+	onPromptInput func(string, int)
+	cancelable    *cancelableReader
 }
 
 func newREPLReader(in io.Reader, promptWriter io.Writer, promptEditor bool, editMode string) *replReader {
 	rr := &replReader{}
 	source := in
 	if promptEditor {
-		// The interactive path needs cancelable reads so a during-turn keystroke
-		// capture can hand the terminal back to the line editor at turn end.
+		// The interactive path needs cancelable reads so a during-prompt keystroke
+		// capture can hand the terminal back to the line editor at prompt end.
 		rr.cancelable = newCancelableReader(in)
 		source = rr.cancelable
 	}
@@ -1359,8 +1367,8 @@ func (rr *replReader) setEscapeLineEnd(enabled bool) {
 }
 
 func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
-	if req.turnEdit {
-		return rr.readTurn()
+	if req.promptEdit {
+		return rr.readDuringPrompt()
 	}
 	if req.promptEditor && rr.editor != nil {
 		restoreViPrompt := rr.editor.viPrompt
@@ -1404,136 +1412,136 @@ func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
 	}
 }
 
-// beginTurnCapture seeds a fresh during-turn editor state (empty buffer, insert
-// mode, history anchored at the end) for the upcoming readTurn. It is called at
-// turn start so the live status line begins empty.
-func (rr *replReader) beginTurnCapture() {
-	rr.turnState = &lineEditState{}
-	rr.turnVi = viLineState{mode: viModeInsert}
-	rr.turnHistory = rr.editor.historyState()
+// beginPromptCapture seeds a fresh during-prompt editor state (empty buffer, insert
+// mode, history anchored at the end) for the upcoming readDuringPrompt. It is called at
+// prompt start so the live status line begins empty.
+func (rr *replReader) beginPromptCapture() {
+	rr.promptState = &lineEditState{}
+	rr.promptVi = viLineState{mode: viModeInsert}
+	rr.promptHistory = rr.editor.historyState()
 }
 
-// readTurn captures keystrokes during an active turn with echo off, sharing the
-// promptLineEditor's full editing grammar via handleKey (duringTurn=true). The
-// buffer is mirrored live on the status line via onTurnInput. It returns to the
-// caller on Enter (queued next-turn submission), Ctrl-C (interrupt), bare Esc (for
+// readDuringPrompt captures keystrokes during an active prompt with echo off, sharing the
+// promptLineEditor's full editing grammar via handleKey (duringPrompt=true). The
+// buffer is mirrored live on the status line via onPromptInput. It returns to the
+// caller on Enter (queued next-prompt submission), Ctrl-C (interrupt), bare Esc (for
 // double-Esc cancel), Ctrl-G (edit), cancellation (depositing a partial buffer),
 // or EOF. Shift-Enter/raw LF inserts a newline.
-func (rr *replReader) readTurn() (replInput, bool, error) {
-	if rr.turnState == nil {
-		rr.beginTurnCapture()
+func (rr *replReader) readDuringPrompt() (replInput, bool, error) {
+	if rr.promptState == nil {
+		rr.beginPromptCapture()
 	}
-	s := rr.turnState
+	s := rr.promptState
 	for {
 		r, _, err := rr.r.ReadRune()
 		if err != nil {
 			if errors.Is(err, errReadCanceled) {
-				return rr.depositTurnBuffer(), true, nil
+				return rr.depositPromptBuffer(), true, nil
 			}
 			if errors.Is(err, io.EOF) {
-				if dep := rr.depositTurnBuffer(); dep.text != "" {
+				if dep := rr.depositPromptBuffer(); dep.text != "" {
 					return dep, true, nil
 				}
 				return replInput{}, false, nil
 			}
 			return replInput{}, false, err
 		}
-		result, err := rr.editor.handleKey(&rr.turnVi, s, &rr.turnHistory, "", r, true)
+		result, err := rr.editor.handleKey(&rr.promptVi, s, &rr.promptHistory, "", r, true)
 		if err != nil {
 			if errors.Is(err, errReadCanceled) {
-				return rr.depositTurnBuffer(), true, nil
+				return rr.depositPromptBuffer(), true, nil
 			}
 			return replInput{}, false, err
 		}
 		if result.done {
 			if result.redraw {
-				rr.emitTurnInput()
+				rr.emitPromptInput()
 			}
 			if result.input.interrupt {
 				return replInput{interrupt: true}, true, nil
 			}
 			if result.input.text != "" || result.input.pasted || result.input.interactive {
-				// Enter during a turn: the editor committed the buffer as queued
-				// next-turn input. Hand it to the run loop, which queues it to run
-				// after the current turn; capture keeps reading further input.
+				// Enter during a prompt: the editor committed the buffer as queued
+				// next-prompt input. Hand it to the run loop, which queues it to run
+				// after the current prompt; capture keeps reading further input.
 				return result.input, true, nil
 			}
 			if result.input.edit {
-				// Ctrl-G during a turn: hand the buffer to the run loop as an edit
-				// request (queued, then $EDITOR opens on it after the turn ends).
+				// Ctrl-G during a prompt: hand the buffer to the run loop as an edit
+				// request (queued, then $EDITOR opens after the prompt ends).
 				text := string(s.buf)
-				rr.resetTurnBuffer()
+				rr.resetPromptBuffer()
 				return replInput{text: text, edit: true}, true, nil
 			}
 			if result.input.escape {
 				return replInput{escape: true}, true, nil
 			}
 			// EOF with no buffer (ok=false): end the read without a deposit.
-			if dep := rr.depositTurnBuffer(); dep.text != "" {
+			if dep := rr.depositPromptBuffer(); dep.text != "" {
 				return dep, true, nil
 			}
 			return replInput{}, false, nil
 		}
 		if result.redraw {
-			rr.emitTurnInput()
+			rr.emitPromptInput()
 		}
 	}
 }
 
-// depositTurnBuffer returns the accumulated buffer as an editable deposit and
-// resets the turn state for the next turn.
-func (rr *replReader) depositTurnBuffer() replInput {
+// depositPromptBuffer returns the accumulated buffer as an editable deposit and
+// resets the prompt-edit state for the next prompt.
+func (rr *replReader) depositPromptBuffer() replInput {
 	text := ""
-	if rr.turnState != nil {
-		text = string(rr.turnState.buf)
+	if rr.promptState != nil {
+		text = string(rr.promptState.buf)
 	}
-	rr.resetTurnBuffer()
+	rr.resetPromptBuffer()
 	return replInput{text: text, deposit: true}
 }
 
-// resetTurnBuffer clears the during-turn buffer and cursor and emits an empty
+// resetPromptBuffer clears the during-prompt buffer and cursor and emits an empty
 // status line so a closed-out read leaves no stale input painted.
-func (rr *replReader) resetTurnBuffer() {
-	if rr.turnState != nil {
-		rr.turnState.buf = nil
-		rr.turnState.cursor = 0
-		rr.turnState.clearPasteSummaries()
+func (rr *replReader) resetPromptBuffer() {
+	if rr.promptState != nil {
+		rr.promptState.buf = nil
+		rr.promptState.cursor = 0
+		rr.promptState.clearPasteSummaries()
 	}
-	rr.emitTurnInput()
+	rr.emitPromptInput()
 }
 
-func (rr *replReader) emitTurnInput() {
-	if rr.onTurnInput != nil {
-		if rr.turnState != nil {
-			rr.onTurnInput(string(rr.turnState.buf), rr.turnState.cursor)
+func (rr *replReader) emitPromptInput() {
+	if rr.onPromptInput != nil {
+		if rr.promptState != nil {
+			rr.onPromptInput(string(rr.promptState.buf), rr.promptState.cursor)
 			return
 		}
-		rr.onTurnInput("", 0)
+		rr.onPromptInput("", 0)
 	}
 }
 
-// cancelTurnRead releases a blocked during-turn keystroke read so it deposits
+// cancelPromptRead releases a blocked during-prompt keystroke read so it deposits
 // its buffer; a no-op without a cancelable reader.
-func (rr *replReader) cancelTurnRead() {
+func (rr *replReader) cancelPromptRead() {
 	if rr.cancelable != nil {
 		rr.cancelable.cancelRead()
 	}
 }
 
-// drainTurnCancel clears any unconsumed cancel token so a later prompt read is
+// drainPromptCancel clears any unconsumed cancel token so a later prompt read is
 // not spuriously canceled.
-func (rr *replReader) drainTurnCancel() {
+func (rr *replReader) drainPromptCancel() {
 	if rr.cancelable != nil {
 		rr.cancelable.drainCancel()
 	}
 }
 
-// turnBuffer returns the current during-turn buffer without consuming it.
-func (rr *replReader) turnBuffer() string {
-	if rr.turnState == nil {
+// promptBuffer returns the current during-prompt buffer without consuming it.
+func (rr *replReader) promptBuffer() string {
+	if rr.promptState == nil {
 		return ""
 	}
-	return string(rr.turnState.buf)
+	return string(rr.promptState.buf)
 }
 
 type lineTerminator byte
@@ -1692,7 +1700,7 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		app.imageCommand(arg)
 	case "/edit":
 		if prompt, ok := app.editPrompt(arg); ok {
-			if run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
+			if run, ok := app.preparePromptRun(prompt, promptOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
 				run()
 			}
 		}
@@ -1971,7 +1979,7 @@ func writeContextFile(path string, data []byte) error {
 }
 
 func (app *App) contextRequest() llm.Request {
-	out := app.turnHookContext(nil)
+	out := app.promptHookContext(nil)
 	if ctx := app.todoRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
@@ -2608,11 +2616,13 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 	}
 	if strings.TrimSpace(req.Brief) == "" {
 		brief, usage, err := app.Agent.GenerateSummary(context.Background(), prompts.HandoffSummary())
+		if usage != (llm.Usage{}) {
+			app.addMaintenanceUsage("handoff_summary", usage)
+		}
 		if err != nil {
 			fmt.Fprintf(app.Errw, "[handoff: could not generate brief: %v]\n", err)
 			return false
 		}
-		app.addUsage(agent.TurnUsage{Usage: usage})
 		req.Brief = brief
 	}
 	target := req.Agent
@@ -2725,9 +2735,9 @@ func (app *App) clear() {
 	app.SetUsage(session.UsageTotals{})
 	app.usageByModel = nil
 	app.Created = app.clock()()
-	app.Turn = 0
+	app.PromptNumber = 0
 	app.todoPromptStatusBeforeUsage = false
-	app.todoPromptStatusBeforeUsageTurn = 0
+	app.todoPromptStatusBeforeUsagePrompt = 0
 	app.SessionPath = session.DefaultPath(app.StateDir, app.Created)
 	if app.OnSessionPathChanged != nil {
 		app.OnSessionPathChanged(app.SessionPath)
@@ -2739,49 +2749,49 @@ func (app *App) clear() {
 	fmt.Fprintf(app.Errw, "[cleared; new session %s]\n", app.SessionPath)
 }
 
-// runTurn runs one user turn, accumulates usage, and saves the session. A turn
-// error is reported but does not end the REPL (the next prompt may recover).
-type turnOptions struct {
+// runPrompt runs one prompt interaction, accumulates usage, and saves the
+// session. An error does not end the REPL (the next prompt may recover).
+type promptOptions struct {
 	resolveSkillMentions bool
 	attachPromptImages   bool
 }
 
 type preparedPrompt struct {
-	prompt      string
-	images      []inputimage.Loaded
-	turnContext []string
+	prompt        string
+	images        []inputimage.Loaded
+	promptContext []string
 }
 
-func (app *App) runTurn(prompt string) {
-	if run, ok := app.prepareTurn(prompt, turnOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
+func (app *App) runPrompt(prompt string) {
+	if run, ok := app.preparePromptRun(prompt, promptOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
 		run()
 	}
 }
 
-func (app *App) prepareTurn(prompt string, opts turnOptions) (func(), bool) {
+func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), bool) {
 	prepared, ok := app.preparePrompt(prompt, opts, true)
 	if !ok {
 		return nil, false
 	}
-	turn := app.beginTurn(prepared.prompt, prepared.images)
+	promptID := app.beginPrompt(prepared.prompt, prepared.images)
 	ctx := context.Background()
 	var cancel context.CancelFunc
 	if app.Interrupt != nil {
 		ctx, cancel = context.WithCancel(ctx)
-		app.Interrupt.BeginTurn(cancel)
+		app.Interrupt.BeginPrompt(cancel)
 	}
 
-	app.Renderer.StartTurn()
+	app.Renderer.StartPromptRun()
 	return func() {
 		if app.Interrupt != nil {
 			defer func() {
-				app.Interrupt.EndTurn()
+				app.Interrupt.EndPrompt()
 				cancel()
 			}()
 		}
 
-		sink := newREPLSink(app.Renderer, app, turn)
-		err := app.Agent.RunTurnContentWithContext(ctx, prepared.prompt, imageBlocks(prepared.images), app.turnHookContext(prepared.turnContext), turn, sink)
+		sink := newREPLSink(app.Renderer, app, promptID)
+		err := app.Agent.RunPromptContentWithContext(ctx, prepared.prompt, imageBlocks(prepared.images), app.promptHookContext(prepared.promptContext), promptID, sink)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 		}
@@ -2789,7 +2799,7 @@ func (app *App) prepareTurn(prompt string, opts turnOptions) (func(), bool) {
 	}, true
 }
 
-func (app *App) preparePrompt(prompt string, opts turnOptions, stopProgressOnBlock bool) (preparedPrompt, bool) {
+func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnBlock bool) (preparedPrompt, bool) {
 	var skillContext []string
 	if opts.resolveSkillMentions {
 		var ok bool
@@ -2803,7 +2813,7 @@ func (app *App) preparePrompt(prompt string, opts turnOptions, stopProgressOnBlo
 			return preparedPrompt{}, false
 		}
 	}
-	promptHook := app.runPromptSubmitHook(context.Background(), prompt, app.Turn+1)
+	promptHook := app.runPromptSubmitHook(context.Background(), prompt, app.PromptNumber+1)
 	if promptHook.Block {
 		reason := promptHook.Reason()
 		if reason == "" {
@@ -2824,12 +2834,12 @@ func (app *App) preparePrompt(prompt string, opts turnOptions, stopProgressOnBlo
 	if opts.attachPromptImages {
 		images = app.attachPromptImageReferences(prompt, images, pendingUnsupportedNotice)
 	}
-	turnContext := append([]string(nil), promptHook.AdditionalContext...)
-	turnContext = append(turnContext, skillContext...)
-	return preparedPrompt{prompt: prompt, images: images, turnContext: turnContext}, true
+	promptContext := append([]string(nil), promptHook.AdditionalContext...)
+	promptContext = append(promptContext, skillContext...)
+	return preparedPrompt{prompt: prompt, images: images, promptContext: promptContext}, true
 }
 
-func (app *App) prepareSteerInput(prompt string, opts turnOptions) (agent.SteerInput, bool) {
+func (app *App) prepareSteerInput(prompt string, opts promptOptions) (agent.SteerInput, bool) {
 	prepared, ok := app.preparePrompt(prompt, opts, false)
 	if !ok {
 		return agent.SteerInput{}, false
@@ -2837,33 +2847,33 @@ func (app *App) prepareSteerInput(prompt string, opts turnOptions) (agent.SteerI
 	return agent.SteerInput{
 		Text:           prepared.prompt,
 		Images:         imageBlocks(prepared.images),
-		RequestContext: prepared.turnContext,
+		RequestContext: prepared.promptContext,
 	}, true
 }
 
-func (app *App) prepareSteeredTurn(input agent.SteerInput) (func(), bool) {
+func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 	if steerInputEmpty(input) {
 		return nil, false
 	}
-	turn := app.beginTurn(input.Text, nil)
+	promptID := app.beginPrompt(input.Text, nil)
 	ctx := context.Background()
 	var cancel context.CancelFunc
 	if app.Interrupt != nil {
 		ctx, cancel = context.WithCancel(ctx)
-		app.Interrupt.BeginTurn(cancel)
+		app.Interrupt.BeginPrompt(cancel)
 	}
 
-	app.Renderer.StartTurn()
+	app.Renderer.StartPromptRun()
 	return func() {
 		if app.Interrupt != nil {
 			defer func() {
-				app.Interrupt.EndTurn()
+				app.Interrupt.EndPrompt()
 				cancel()
 			}()
 		}
 
-		sink := newREPLSink(app.Renderer, app, turn)
-		err := app.Agent.RunTurnContentWithContext(ctx, input.Text, input.Images, app.turnHookContext(input.RequestContext), turn, sink)
+		sink := newREPLSink(app.Renderer, app, promptID)
+		err := app.Agent.RunPromptContentWithContext(ctx, input.Text, input.Images, app.promptHookContext(input.RequestContext), promptID, sink)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 		}
@@ -2877,12 +2887,14 @@ func (app *App) prepareSteeredTurn(input agent.SteerInput) (func(), bool) {
 // warned about via the sink by Compact; the transcript is left intact.
 func (app *App) compact() {
 	ctx := context.Background()
-	sink := newAccumulatingSink(app.Renderer, app, app.Turn)
+	sink := newAccumulatingSink(app.Renderer, app, app.PromptNumber)
 	u, err := app.Agent.Compact(ctx, sink)
+	if u != (llm.Usage{}) {
+		app.addMaintenanceUsage("compaction", u)
+	}
 	if err != nil {
 		return
 	}
-	app.addUsage(agent.TurnUsage{Usage: u})
 	app.saveOrWarn(app.SessionPath)
 	// Compaction rewrote the transcript prefix, invalidating the warm cache;
 	// re-warm in the background (r43).
@@ -2899,9 +2911,8 @@ func (app *App) SetUsage(u session.UsageTotals) {
 }
 
 // SetUsageByModel seeds the per-model usage buckets on resume. When byModel is
-// empty but the aggregate is non-zero (an older session predating per-model
-// accounting), it seeds a single bucket under the current model so resume does
-// not silently drop prior cost.
+// empty but the aggregate is non-zero, it seeds one bucket under the current
+// model so the aggregate remains visible after resume.
 func (app *App) SetUsageByModel(byModel map[string]session.UsageTotals) {
 	if len(byModel) == 0 {
 		if app.usage.InputTokens != 0 || app.usage.OutputTokens != 0 || app.usage.CostUSD != 0 {
@@ -2926,32 +2937,81 @@ func (app *App) usageKey() string {
 	return model
 }
 
-// addUsage folds one turn's usage into the session aggregate and the active
+// addUsage folds one prompt's usage into the session aggregate and the active
 // model's bucket, then refreshes the live cumulative readout to show the active
 // model's tokens with the session-total cost.
-// turnCost prices usage against the App's active model (the per-turn model),
-// used both for cumulative accounting and to feed the renderer's per-turn line
-// so a mid-turn model switch is not mispriced against a stale model (r63).
-func (app *App) turnCost(u llm.Usage) (float64, bool) {
+// promptCost prices usage against the App's active model, used both for
+// cumulative accounting and to feed the renderer's per-prompt line so a
+// mid-prompt model switch is not mispriced against a stale model (r63).
+func (app *App) promptCost(u llm.Usage) (float64, bool) {
 	return u.CostUSD, u.CostKnown
 }
 
-func (app *App) addUsage(u agent.TurnUsage) {
-	cost, _ := app.turnCost(u.Usage)
+func (app *App) addUsage(u agent.PromptUsage) {
+	app.addUsageForModel(u, app.usageKey())
+}
+
+func (app *App) addUsageForModel(u agent.PromptUsage, modelKey string) {
+	cost, _ := app.promptCost(u.Usage)
 	addTotals(&app.usage, u.Usage, cost)
 	if app.usageByModel == nil {
 		app.usageByModel = map[string]session.UsageTotals{}
 	}
-	key := app.usageKey()
-	bucket := app.usageByModel[key]
+	bucket := app.usageByModel[modelKey]
 	addTotals(&bucket, u.Usage, cost)
-	app.usageByModel[key] = bucket
+	app.usageByModel[modelKey] = bucket
 	if app.Renderer != nil {
-		app.Renderer.SetCumulativeUsage(bucket.InputTokens, bucket.OutputTokens, app.usage.CostUSD)
+		active := app.usageByModel[app.usageKey()]
+		app.Renderer.SetCumulativeUsage(active.InputTokens, active.OutputTokens, app.usage.CostUSD)
 	}
 }
 
-// addTotals accumulates one turn's tokens and cost into dst.
+// addMaintenanceUsage accounts for a model call that supports the session but
+// is not a conversational turn, and records it separately in replay metadata.
+func (app *App) addMaintenanceUsage(purpose string, usage llm.Usage) {
+	app.addMaintenanceUsageForModel(purpose, usage, app.usageKey())
+}
+
+func (app *App) addMaintenanceUsageForModel(purpose string, usage llm.Usage, modelKey string) {
+	app.addUsageForModel(agent.PromptUsage{Usage: usage, Maintenance: usage}, modelKey)
+	app.recordEvent(session.Event{
+		Type:    session.EventMaintenanceUsage,
+		Prompt:  app.PromptNumber,
+		Purpose: purpose,
+		Usage:   &usage,
+	})
+}
+
+// QueueMaintenanceUsage accepts accounting from background maintenance work.
+// The REPL drains the queue on its owning goroutine before prompts, usage
+// reports, and saves, so renderer and session state remain single-threaded.
+func (app *App) QueueMaintenanceUsage(usage agent.MaintenanceUsage) {
+	app.QueueMaintenanceUsageForModel(app.usageKey(), usage)
+}
+
+// QueueMaintenanceUsageForModel pins background accounting to the model
+// snapshot that started the work, even if the active model changes before the
+// REPL drains the queue.
+func (app *App) QueueMaintenanceUsageForModel(modelKey string, usage agent.MaintenanceUsage) {
+	app.maintenanceMu.Lock()
+	app.pendingMaintenance = append(app.pendingMaintenance, queuedMaintenanceUsage{
+		MaintenanceUsage: usage,
+		modelKey:         modelKey,
+	})
+	app.maintenanceMu.Unlock()
+}
+
+func (app *App) drainMaintenanceUsage() {
+	app.maintenanceMu.Lock()
+	pending := app.pendingMaintenance
+	app.pendingMaintenance = nil
+	app.maintenanceMu.Unlock()
+	for _, item := range pending {
+		app.addMaintenanceUsageForModel(item.Purpose, item.Usage, item.modelKey)
+	}
+}
+
+// addTotals accumulates one model call's tokens and cost into dst.
 func addTotals(dst *session.UsageTotals, u llm.Usage, cost float64) {
 	dst.InputTokens += u.InputTokens
 	dst.OutputTokens += u.OutputTokens
@@ -2976,7 +3036,7 @@ func (app *App) onModelChanged() {
 }
 
 // saveOrWarn is the automatic-save path used by every place that saves without a
-// user explicitly asking (after-turn auto-save, exit saves, /compact). A failed
+// user explicitly asking (after-prompt auto-save, exit saves, /compact). A failed
 // save must never be silent: a visible warning beats silent data loss (design
 // §11, §12), since a stale or missing on-disk transcript otherwise looks saved.
 // The explicit /save command surfaces its own richer success/failure message and
@@ -2992,6 +3052,7 @@ func (app *App) save(path string) error {
 	if path == "" {
 		return nil
 	}
+	app.drainMaintenanceUsage()
 	s := session.Session{
 		Version:        session.Version,
 		Provider:       app.Provider,
@@ -3001,7 +3062,7 @@ func (app *App) save(path string) error {
 		System:         app.System,
 		Agent:          app.AgentName,
 		ProxySessionID: app.Agent.ProxySessionID(),
-		Turn:           app.Turn,
+		Prompt:         app.PromptNumber,
 		Messages:       app.Agent.Transcript(),
 		ResponseState:  app.Agent.ResponseState(),
 		Todos:          app.todoSnapshot(),
@@ -3030,25 +3091,26 @@ func (app *App) todoSnapshot() []todo.Item {
 	return app.Todos.Snapshot()
 }
 
-func (app *App) beginTurn(prompt string, images []inputimage.Loaded) int {
-	app.Turn++
+func (app *App) beginPrompt(prompt string, images []inputimage.Loaded) int {
+	app.drainMaintenanceUsage()
+	app.PromptNumber++
 	app.recordEvent(session.Event{
 		Time:   app.clock()(),
 		Type:   session.EventUser,
-		Turn:   app.Turn,
+		Prompt: app.PromptNumber,
 		Text:   prompt,
 		Images: sessionImages(images),
 	})
-	return app.Turn
+	return app.PromptNumber
 }
 
-func (app *App) runPromptSubmitHook(ctx context.Context, prompt string, turn int) hooks.Result {
+func (app *App) runPromptSubmitHook(ctx context.Context, prompt string, promptID int) hooks.Result {
 	if app.Hooks == nil || !app.Hooks.HasEvent(hooks.UserPromptSubmit) {
 		return hooks.Result{}
 	}
 	res := app.Hooks.Run(ctx, hooks.UserPromptSubmit, "", hooks.Payload{
-		"turn_id": turn,
-		"prompt":  prompt,
+		"prompt_id": promptID,
+		"prompt":    prompt,
 	})
 	app.renderHookNotices(res.Notices)
 	return res
@@ -3085,15 +3147,15 @@ func (app *App) renderHookNotices(notices []string) {
 	}
 }
 
-func (app *App) turnHookContext(turnContext []string) []string {
-	out := make([]string, 0, len(app.HookContext)+len(turnContext))
+func (app *App) promptHookContext(promptContext []string) []string {
+	out := make([]string, 0, len(app.HookContext)+len(promptContext))
 	out = append(out, app.HookContext...)
-	out = append(out, turnContext...)
+	out = append(out, promptContext...)
 	return out
 }
 
-func (app *App) requestContext(turnContext []string) []string {
-	out := app.turnHookContext(turnContext)
+func (app *App) requestContext(promptContext []string) []string {
+	out := app.promptHookContext(promptContext)
 	if ctx := app.todoRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
@@ -3143,11 +3205,11 @@ func (app *App) printTodoStatus(includeEmpty bool) bool {
 
 func (app *App) markTodoPromptStatusPrintedBeforeUsage(turn int) {
 	app.todoPromptStatusBeforeUsage = true
-	app.todoPromptStatusBeforeUsageTurn = turn
+	app.todoPromptStatusBeforeUsagePrompt = turn
 }
 
-func (app *App) todoPromptStatusPrintedBeforeUsageForTurn(turn int) bool {
-	return app.todoPromptStatusBeforeUsage && app.todoPromptStatusBeforeUsageTurn == turn
+func (app *App) todoPromptStatusPrintedBeforeUsageForPrompt(turn int) bool {
+	return app.todoPromptStatusBeforeUsage && app.todoPromptStatusBeforeUsagePrompt == turn
 }
 
 func (app *App) stopBackgroundJobs() {
@@ -3193,7 +3255,7 @@ func (app *App) imageUnsupportedNotice() string {
 	return fmt.Sprintf("[image skipped: model %s does not support image input]", model)
 }
 
-// AddHookContext keeps hook-generated context available for later model turns
+// AddHookContext keeps hook-generated context available for later turns
 // without writing it into the saved transcript.
 func (app *App) AddHookContext(ctx []string) {
 	for _, item := range ctx {
@@ -3262,6 +3324,7 @@ func (app *App) recordEvent(ev session.Event) {
 
 // usageSummary renders the cumulative session usage for /usage (design §10).
 func (app *App) usageSummary() string {
+	app.drainMaintenanceUsage()
 	return app.usageReport("session")
 }
 
@@ -3535,21 +3598,22 @@ func (app *App) summaryWidth() int {
 type accumulatingSink struct {
 	r                          *Renderer
 	app                        *App
-	turn                       int
+	prompt                     int
 	printTodoUpdate            bool
 	printTodoPromptBeforeUsage bool
 	reasoningOutput            bool
 	pending                    map[string]llm.ToolCall
-	modelTurn                  int
+	turn                       int
 	attempt                    int
+	inMaintenance              bool
 }
 
-func newAccumulatingSink(r *Renderer, app *App, turn int) *accumulatingSink {
-	return &accumulatingSink{r: r, app: app, turn: turn, pending: make(map[string]llm.ToolCall)}
+func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
+	return &accumulatingSink{r: r, app: app, prompt: prompt, pending: make(map[string]llm.ToolCall)}
 }
 
-func newREPLSink(r *Renderer, app *App, turn int) *accumulatingSink {
-	s := newAccumulatingSink(r, app, turn)
+func newREPLSink(r *Renderer, app *App, prompt int) *accumulatingSink {
+	s := newAccumulatingSink(r, app, prompt)
 	s.printTodoUpdate = true
 	s.printTodoPromptBeforeUsage = true
 	s.reasoningOutput = true
@@ -3559,11 +3623,11 @@ func newREPLSink(r *Renderer, app *App, turn int) *accumulatingSink {
 func (s *accumulatingSink) TextDelta(text string) {
 	s.r.TextDelta(text)
 	s.app.recordEvent(session.Event{
-		Type:       session.EventAssistantDelta,
-		Turn:       s.turn,
-		Text:       text,
-		ModelTurns: s.modelTurn,
-		Attempt:    s.attempt,
+		Type:    session.EventAssistantDelta,
+		Prompt:  s.prompt,
+		Turn:    s.turn,
+		Text:    text,
+		Attempt: s.attempt,
 	})
 }
 
@@ -3573,11 +3637,11 @@ func (s *accumulatingSink) AssistantPhase(phase string) {
 	}
 	s.r.AssistantPhase(phase)
 	s.app.recordEvent(session.Event{
-		Type:       session.EventAssistantPhase,
-		Turn:       s.turn,
-		Phase:      phase,
-		ModelTurns: s.modelTurn,
-		Attempt:    s.attempt,
+		Type:    session.EventAssistantPhase,
+		Prompt:  s.prompt,
+		Turn:    s.turn,
+		Phase:   phase,
+		Attempt: s.attempt,
 	})
 }
 
@@ -3592,55 +3656,56 @@ func (s *accumulatingSink) ReasoningSummary(text string) {
 		s.r.ReasoningSummaryStatus(text)
 	}
 	s.app.recordEvent(session.Event{
-		Type:       session.EventReasoningSummary,
-		Turn:       s.turn,
-		Text:       text,
-		ModelTurns: s.modelTurn,
-		Attempt:    s.attempt,
+		Type:    session.EventReasoningSummary,
+		Prompt:  s.prompt,
+		Turn:    s.turn,
+		Text:    text,
+		Attempt: s.attempt,
 	})
 }
 
 func (s *accumulatingSink) CompactionStart() {
+	s.inMaintenance = true
 	s.r.CompactionStart()
 }
 
 func (s *accumulatingSink) CompactionComplete() {
 	s.r.CompactionComplete()
+	s.inMaintenance = false
 }
 
-func (s *accumulatingSink) ModelTurnStart(modelTurn, attempt int, ctx agent.ContextEstimate) {
-	s.modelTurn = modelTurn
+func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
+	s.turn = turn
 	s.attempt = attempt
-	s.r.ModelTurnStart(modelTurn, attempt, ctx)
+	s.r.TurnAttemptStart(turn, attempt, ctx)
 	s.app.recordEvent(session.Event{
-		Type:       session.EventModelTurnStart,
-		Turn:       s.turn,
-		ModelTurns: modelTurn,
-		Attempt:    attempt,
-		Context:    contextSnapshot(ctx),
+		Type:    session.EventTurnAttemptStart,
+		Prompt:  s.prompt,
+		Turn:    s.turn,
+		Attempt: attempt,
+		Context: contextSnapshot(ctx),
 	})
 }
 
-func (s *accumulatingSink) ModelTurnAbandoned(modelTurn, attempt int) {
+func (s *accumulatingSink) TurnAttemptAbandoned(turn, attempt int) {
 	s.app.recordEvent(session.Event{
-		Type:       session.EventModelTurnAbandoned,
-		Turn:       s.turn,
-		ModelTurns: modelTurn,
-		Attempt:    attempt,
-		Display:    fmt.Sprintf("[model: turn %d attempt %d discarded; retrying]", modelTurn, attempt),
+		Type:    session.EventTurnAttemptAbandoned,
+		Prompt:  s.prompt,
+		Turn:    turn,
+		Attempt: attempt,
+		Display: fmt.Sprintf("[turn: %d attempt %d discarded; retrying]", turn, attempt),
 	})
 }
 
-func (s *accumulatingSink) ModelTurnComplete(u agent.ModelTurnUsage) {
-	line := s.r.writeModelTurnComplete(u)
+func (s *accumulatingSink) TurnAttemptComplete(u agent.TurnAttemptUsage) {
+	s.r.TurnAttemptComplete(u)
 	usage := u.Usage
 	s.app.recordEvent(session.Event{
-		Type:       session.EventModelTurnUsage,
-		Turn:       s.turn,
-		Display:    line,
-		Usage:      &usage,
-		ModelTurns: u.ModelTurn,
-		Attempt:    u.Attempt,
+		Type:    session.EventTurnAttemptUsage,
+		Prompt:  s.prompt,
+		Turn:    u.Turn,
+		Usage:   &usage,
+		Attempt: u.Attempt,
 	})
 }
 
@@ -3655,7 +3720,7 @@ func (s *accumulatingSink) ToolUseDelta(index int, delta string) {
 func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 	s.pending[c.ID] = c
 	s.r.ToolStart(c)
-	s.app.recordEvent(session.Event{Type: session.EventToolStart, Turn: s.turn, ToolID: c.ID, Tool: c.Name, Input: c.Input})
+	s.app.recordEvent(session.Event{Type: session.EventToolStart, Prompt: s.prompt, Turn: s.turn, ToolID: c.ID, Tool: c.Name, Input: c.Input})
 }
 
 func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
@@ -3666,13 +3731,14 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	if s.printTodoUpdate && call.Name == "update_todos" && !res.IsError {
 		s.app.printTodoUpdateStatus()
 	}
-	s.app.recordEvent(session.Event{Type: session.EventToolResult, Turn: s.turn, ToolID: res.ForID, Tool: call.Name, Display: line})
+	s.app.recordEvent(session.Event{Type: session.EventToolResult, Prompt: s.prompt, Turn: s.turn, ToolID: res.ForID, Tool: call.Name, Display: line})
 }
 
 func (s *accumulatingSink) ToolDiff(call llm.ToolCall, text string) {
 	s.r.ToolDiff(call, text)
 	s.app.recordEvent(session.Event{
 		Type:    session.EventToolDiff,
+		Prompt:  s.prompt,
 		Turn:    s.turn,
 		ToolID:  call.ID,
 		Tool:    call.Name,
@@ -3681,7 +3747,7 @@ func (s *accumulatingSink) ToolDiff(call llm.ToolCall, text string) {
 }
 
 func (s *accumulatingSink) ArchiveToolResult(res llm.ToolResult) (agent.ToolResultArchive, error) {
-	ref, err := session.SaveToolResultArtifact(s.app.SessionPath, s.turn, res)
+	ref, err := session.SaveToolResultArtifact(s.app.SessionPath, s.prompt, s.turn, res)
 	if err != nil || ref == "" {
 		return agent.ToolResultArchive{}, err
 	}
@@ -3693,7 +3759,33 @@ func (s *accumulatingSink) ArchiveToolResult(res llm.ToolResult) (agent.ToolResu
 
 func (s *accumulatingSink) Notice(msg string) {
 	s.r.Notice(msg)
-	s.app.recordEvent(session.Event{Type: session.EventNotice, Turn: s.turn, Display: msg})
+	turn := s.turn
+	if s.inMaintenance {
+		turn = 0
+	}
+	s.app.recordEvent(session.Event{Type: session.EventNotice, Prompt: s.prompt, Turn: turn, Display: msg})
+}
+
+func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
+	line := s.r.TurnComplete(u)
+	usage := u.Usage
+	s.app.recordEvent(session.Event{
+		Type:    session.EventTurnComplete,
+		Prompt:  s.prompt,
+		Turn:    u.Turn,
+		Display: line,
+		Usage:   &usage,
+	})
+}
+
+func (s *accumulatingSink) MaintenanceComplete(u agent.MaintenanceUsage) {
+	usage := u.Usage
+	s.app.recordEvent(session.Event{
+		Type:    session.EventMaintenanceUsage,
+		Prompt:  s.prompt,
+		Purpose: u.Purpose,
+		Usage:   &usage,
+	})
 }
 
 func (s *accumulatingSink) AddHookContext(ctx []string) {
@@ -3709,50 +3801,49 @@ func (s *accumulatingSink) RequestContext() []string {
 	return out
 }
 
-func (s *accumulatingSink) PendingTurnWork() bool {
-	return s.app.Background != nil && s.app.Background.PendingTurnWork()
+func (s *accumulatingSink) PendingPromptWork() bool {
+	return s.app.Background != nil && s.app.Background.PendingPromptWork()
 }
 
-func (s *accumulatingSink) WaitForTurnWork(ctx context.Context) (llm.Usage, error) {
+func (s *accumulatingSink) WaitForPromptWork(ctx context.Context) (llm.Usage, error) {
 	if s.app.Background == nil {
 		return llm.Usage{}, nil
 	}
-	return s.app.Background.WaitForTurnWork(ctx)
+	return s.app.Background.WaitForPromptWork(ctx)
 }
 
-func (s *accumulatingSink) DrainTurnWorkUsage() llm.Usage {
+func (s *accumulatingSink) DrainPromptWorkUsage() llm.Usage {
 	if s.app.Background == nil {
 		return llm.Usage{}
 	}
-	return s.app.Background.DrainTurnWorkUsage()
+	return s.app.Background.DrainPromptWorkUsage()
 }
 
-func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
-	// Price the turn against the App's own model (not the renderer's) so a
-	// mid-turn model switch is not mispriced, and hand it to the renderer (r63).
-	cost, costKnown := s.app.turnCost(u.Usage)
+func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
+	// Price the prompt against the App's own model (not the renderer's) so an
+	// in-prompt model switch is not mispriced, and hand it to the renderer (r63).
+	cost, costKnown := s.app.promptCost(u.Usage)
 	if s.printTodoPromptBeforeUsage {
 		s.r.StopProgress()
 		s.r.flushToolUseStarts()
 		s.r.finishAssistantLine()
 		if s.app.printTodoPromptStatus() {
-			s.app.markTodoPromptStatusPrintedBeforeUsage(s.turn)
+			s.app.markTodoPromptStatusPrintedBeforeUsage(s.prompt)
 		}
 	}
-	s.r.SetTurnCost(cost, costKnown)
-	s.r.TurnComplete(u)
+	s.r.SetPromptCost(cost, costKnown)
+	s.r.PromptComplete(u)
 	s.app.addUsage(u)
 	// Regenerate the line for the session event record after cumulative totals
-	// have been updated by TurnComplete above.
-	line := usageLine(u, s.r.now().Sub(s.r.turnStart), cost, costKnown,
+	// have been updated by PromptComplete above.
+	line := usageLine(u, s.r.now().Sub(s.r.promptRunStart), cost, costKnown,
 		s.r.cumInput, s.r.cumOutput, s.r.cumCost)
 	usage := u.Usage
 	s.app.recordEvent(session.Event{
-		Type:       session.EventTurnUsage,
-		Turn:       s.turn,
-		Display:    line,
-		Usage:      &usage,
-		ModelTurns: u.ModelTurns,
+		Type:    session.EventPromptUsage,
+		Prompt:  s.prompt,
+		Display: line,
+		Usage:   &usage,
 	})
 }
 

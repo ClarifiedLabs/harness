@@ -141,10 +141,10 @@ terminal by default, are kept as JSON lines in the session's `diagnostics.ndjson
 The agent loop has guardrails against runaway token burn, beyond the blunt
 `-max-turns` count (default 250):
 
-- `-max-turn-tokens <n>` stops a user turn once accumulated tokens (input +
-  cache + output + reasoning, across every model call in the turn) reach the
+- `-max-prompt-tokens <n>` stops a prompt once accumulated tokens (input +
+  cache + output + reasoning, across every model call in the prompt) reach the
   budget. `0`, the default, means unlimited.
-- `-max-prompt-cost <usd>` stops a user turn once its accumulated model cost (in
+- `-max-prompt-cost <usd>` stops a prompt once its accumulated model cost (in
   USD, when provider usage reports known cost) reaches the budget. `0`, the
   default, means unlimited. Models without known cost have no cost ceiling.
 - Tool calls that repeat with identical results are first steered, then hard
@@ -152,31 +152,44 @@ The agent loop has guardrails against runaway token burn, beyond the blunt
 - `-tool-timeout <s>` (default 600) is a per-tool-call backstop so a hung tool
   cannot stall a turn; `run_command`'s own `timeout_seconds` stays authoritative.
 
-When a turn hits its model-turn limit, harness issues one final tools-disabled
-request so the turn ends on an assistant summary rather than a dangling tool call.
+When a prompt hits its turn limit, harness issues one final tools-disabled turn
+so the prompt ends on an assistant summary rather than a dangling tool call.
 
-## Mid-turn steering
+Harness uses these terms consistently:
 
-By default, a prompt you submit with Enter while a model turn is running is
+- A **prompt** is one top-level interaction started by user input.
+- A **turn** is one model response plus the complete tool-result batch it
+  requested. Turn numbers restart at 1 for each prompt.
+- An **attempt** is one provider request for a turn; stream retries increase the
+  attempt number without creating another turn.
+- **Maintenance** calls such as compaction, cache prewarming, and handoff-summary
+  generation are accounted separately and never increment the turn count.
+
+While a prompt runs, status uses `[turn: N … │ prompt …]`; completion uses
+`[prompt: N turns …]`.
+
+## Mid-prompt steering
+
+By default, input you submit with Enter while a prompt is running is
 **steered**: it is injected as a user message before the *next* model request
-(that is, between tool rounds — the next time harness sends data back to the
-model) rather than waiting for the turn to end. This lets you redirect a
-running turn ("no, use the other file", "stop, you're overcomplicating it")
+(that is, between turns — the next time harness sends data back to the model)
+rather than waiting for the prompt to end. This lets you redirect a
+running prompt ("no, use the other file", "stop, you're overcomplicating it")
 without canceling and re-typing.
 
 - Only model-bound input is steered. `!shell`, `/commands`, and `/edit`
-  submitted during a turn keep the legacy behavior (queued, run at the idle
-  prompt after the turn).
+  submitted during a prompt keep the queued behavior and run at the next idle
+  prompt.
 - A steer does not consume a `max-turns` slot and resets the loop-guard
   streaks, so redirecting is never penalized.
-- If the turn ends without a tool round to inject into (a plain answer, or a
-  budget/cancel break), the steer is recovered and run as the next turn, so the
+- If the prompt ends without another turn to inject into (a plain answer, or a
+  budget/cancel break), the steer is recovered and run as the next prompt, so the
   input is never lost.
-- `^C` / double-Esc still cancel the in-flight turn exactly as before.
+- `^C` / double-Esc cancel the in-flight prompt.
 
 `--no-steer` (or `no_steer` / `HARNESS_NO_STEER`) restores the original
-behavior: during-turn input is queued and runs as the next turn after the
-current one completes. Steering is interactive-REPL only (not one-shot mode).
+behavior: input submitted during a prompt is queued as the next prompt.
+Steering is interactive-REPL only (not one-shot mode).
 
 ## Plan and implementation handoff
 

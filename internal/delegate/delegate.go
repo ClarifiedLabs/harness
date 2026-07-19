@@ -49,7 +49,7 @@ type Runtime struct {
 	SessionPath       string
 	ParentChildID     string
 	Depth             int
-	MaxTurnTokens     int
+	MaxPromptTokens   int
 	MaxPromptCostUSD  float64
 }
 
@@ -125,7 +125,7 @@ type RunRequest struct {
 type RunResult struct {
 	Report         string
 	Usage          llm.Usage
-	ModelTurns     int
+	Turns          int
 	ChildID        string
 	TranscriptPath string
 	Agent          string
@@ -232,10 +232,10 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 			return tools.MeteredResult{}, fmt.Errorf("background manager is not initialized")
 		}
 		info, err := t.background.StartBackgroundJob(tools.BackgroundJobRequest{
-			Kind:        "delegate",
-			Description: req.Task,
-			Agent:       req.Agent,
-			WaitForTurn: true,
+			Kind:          "delegate",
+			Description:   req.Task,
+			Agent:         req.Agent,
+			WaitForPrompt: true,
 			Run: func(ctx context.Context, childID string) (tools.BackgroundJobResult, error) {
 				req.Background = false
 				req.ChildID = childID
@@ -340,7 +340,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		childID = nextChildID(req.Kind)
 	}
 	now := r.now()
-	childDir, saveErr := r.saveChildMeta(runtime, launch, childID, req, "running", now, now, agent.TurnUsage{}, nil, 0)
+	childDir, saveErr := r.saveChildMeta(runtime, launch, childID, req, "running", now, now, agent.PromptUsage{}, nil, 0)
 
 	childTodos := todo.NewStore()
 	hasTodoTool := slices.Contains(toolNames, updateTodosToolName)
@@ -350,7 +350,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	child := agent.New(launch.Provider, childTools, agent.Options{
 		MaxTurns:                  maxTurns,
-		MaxTurnTokens:             runtime.MaxTurnTokens,
+		MaxPromptTokens:           runtime.MaxPromptTokens,
 		MaxOutputTokens:           launch.MaxOutputTokens,
 		MaxPromptCostUSD:          runtime.MaxPromptCostUSD,
 		Model:                     launch.Model,
@@ -368,7 +368,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	sink := newChildSink(childDir, childTodos, hasTodoTool)
 	sink.User(req.Task)
-	runErr := child.RunTurn(ctx, req.Task, sink)
+	runErr := child.RunPrompt(ctx, req.Task, sink)
 	usage := sink.usage
 	status := "completed"
 	errText := ""
@@ -382,7 +382,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if runErr != nil {
 		return RunResult{
 			Usage:          usage.Usage,
-			ModelTurns:     usage.ModelTurns,
+			Turns:          usage.Turns,
 			ChildID:        childID,
 			TranscriptPath: childDir,
 			Agent:          launch.Agent,
@@ -396,7 +396,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		report = "(delegate completed without a final text response)"
 	}
 	report += fmt.Sprintf("\n\n[delegate: %s, %d input tokens, %d output tokens",
-		modelTurnPhrase(usage.ModelTurns), usage.Usage.InputTokens, usage.Usage.OutputTokens)
+		turnPhrase(usage.Turns), usage.Usage.InputTokens, usage.Usage.OutputTokens)
 	if childDir != "" {
 		report += fmt.Sprintf(", transcript %s", childDir)
 	}
@@ -407,7 +407,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	return RunResult{
 		Report:         report,
 		Usage:          usage.Usage,
-		ModelTurns:     usage.ModelTurns,
+		Turns:          usage.Turns,
 		ChildID:        childID,
 		TranscriptPath: childDir,
 		Agent:          launch.Agent,
@@ -444,7 +444,7 @@ func (r *Runner) childTools(parent Runtime, launch Launch, childID string, todos
 		SessionPath:       parent.SessionPath,
 		ParentChildID:     childID,
 		Depth:             parent.Depth + 1,
-		MaxTurnTokens:     parent.MaxTurnTokens,
+		MaxPromptTokens:   parent.MaxPromptTokens,
 		MaxPromptCostUSD:  parent.MaxPromptCostUSD,
 	}
 	childState := NewState(childRuntime)
@@ -509,11 +509,11 @@ func (r *Runner) now() time.Time {
 	return time.Now()
 }
 
-func modelTurnPhrase(n int) string {
+func turnPhrase(n int) string {
 	if n == 1 {
-		return "1 model turn"
+		return "1 turn"
 	}
-	return fmt.Sprintf("%d model turns", n)
+	return fmt.Sprintf("%d turns", n)
 }
 
 func lastAssistantText(msgs []llm.Message) string {
@@ -651,7 +651,7 @@ func schema(agents []AgentCandidate) json.RawMessage {
 		"max_turns": map[string]any{
 			"type":        "integer",
 			"minimum":     1,
-			"description": "Optional model-turn cap for this delegate call. Values above the configured cap are reduced to the cap.",
+			"description": "Optional turn cap for this delegate call. Values above the configured cap are reduced to the cap.",
 		},
 		"background": map[string]any{
 			"type":        "boolean",
@@ -676,7 +676,7 @@ func nextChildID(kind string) string {
 	return fmt.Sprintf("%s_%s_%06d", prefix, time.Now().UTC().Format("20060102T150405Z"), childSeq.Add(1))
 }
 
-func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, req RunRequest, status string, created, updated time.Time, usage agent.TurnUsage, runErr error, messageCount int) (string, error) {
+func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, req RunRequest, status string, created, updated time.Time, usage agent.PromptUsage, runErr error, messageCount int) (string, error) {
 	if parent.SessionPath == "" {
 		return "", nil
 	}
@@ -700,7 +700,7 @@ func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, re
 	return session.SaveChildMeta(parent.SessionPath, meta)
 }
 
-func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string, req RunRequest, child *agent.Agent, todos *todo.Store, usage agent.TurnUsage, status, errText string, created time.Time) error {
+func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string, req RunRequest, child *agent.Agent, todos *todo.Store, usage agent.PromptUsage, status, errText string, created time.Time) error {
 	if parent.SessionPath == "" {
 		return nil
 	}
@@ -715,7 +715,7 @@ func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string,
 		System:         launch.System,
 		Agent:          launch.Agent,
 		ProxySessionID: child.ProxySessionID(),
-		Turn:           1,
+		Prompt:         1,
 		Messages:       child.Transcript(),
 		ResponseState:  child.ResponseState(),
 		Todos:          todos.Snapshot(),
@@ -740,11 +740,13 @@ func preview(s string, limit int) string {
 }
 
 type childSink struct {
-	usage       agent.TurnUsage
+	usage       agent.PromptUsage
 	sessionDir  string
 	todos       *todo.Store
 	todoContext bool
 	pending     map[string]llm.ToolCall
+	turn        int
+	attempt     int
 }
 
 func newChildSink(sessionDir string, todos *todo.Store, todoContext bool) *childSink {
@@ -752,11 +754,11 @@ func newChildSink(sessionDir string, todos *todo.Store, todoContext bool) *child
 }
 
 func (s *childSink) User(text string) {
-	s.append(session.Event{Type: session.EventUser, Turn: 1, Text: text})
+	s.append(session.Event{Type: session.EventUser, Prompt: 1, Text: text})
 }
 
 func (s *childSink) TextDelta(text string) {
-	s.append(session.Event{Type: session.EventAssistantDelta, Turn: 1, Text: text})
+	s.append(session.Event{Type: session.EventAssistantDelta, Prompt: 1, Turn: s.turn, Attempt: s.attempt, Text: text})
 }
 
 func (s *childSink) ReasoningSummary(text string) {
@@ -764,14 +766,18 @@ func (s *childSink) ReasoningSummary(text string) {
 	if text == "" {
 		return
 	}
-	s.append(session.Event{Type: session.EventReasoningSummary, Turn: 1, Text: text})
+	s.append(session.Event{Type: session.EventReasoningSummary, Prompt: 1, Turn: s.turn, Attempt: s.attempt, Text: text})
 }
 
-func (*childSink) ModelTurnStart(int, int, agent.ContextEstimate) {}
+func (s *childSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
+	s.turn = turn
+	s.attempt = attempt
+	s.append(session.Event{Type: session.EventTurnAttemptStart, Prompt: 1, Turn: turn, Attempt: attempt})
+}
 
-func (s *childSink) ModelTurnComplete(u agent.ModelTurnUsage) {
+func (s *childSink) TurnAttemptComplete(u agent.TurnAttemptUsage) {
 	usage := u.Usage
-	s.append(session.Event{Type: session.EventModelTurnUsage, Turn: 1, Usage: &usage, ModelTurns: u.ModelTurn})
+	s.append(session.Event{Type: session.EventTurnAttemptUsage, Prompt: 1, Turn: u.Turn, Attempt: u.Attempt, Usage: &usage})
 }
 
 func (*childSink) ToolUseStart(llm.ToolCall) {}
@@ -780,7 +786,7 @@ func (*childSink) ToolUseDelta(int, string) {}
 
 func (s *childSink) ToolStart(call llm.ToolCall) {
 	s.pending[call.ID] = call
-	s.append(session.Event{Type: session.EventToolStart, Turn: 1, ToolID: call.ID, Tool: call.Name, Input: call.Input})
+	s.append(session.Event{Type: session.EventToolStart, Prompt: 1, Turn: s.turn, ToolID: call.ID, Tool: call.Name, Input: call.Input})
 }
 
 func (s *childSink) ToolResult(result llm.ToolResult) {
@@ -790,11 +796,11 @@ func (s *childSink) ToolResult(result llm.ToolResult) {
 	if result.IsError {
 		display = fmt.Sprintf("[tool: %s error: %s]", call.Name, preview(firstLine(result.Text), 120))
 	}
-	s.append(session.Event{Type: session.EventToolResult, Turn: 1, ToolID: result.ForID, Tool: call.Name, Display: display})
+	s.append(session.Event{Type: session.EventToolResult, Prompt: 1, Turn: s.turn, ToolID: result.ForID, Tool: call.Name, Display: display})
 }
 
 func (s *childSink) ArchiveToolResult(result llm.ToolResult) (agent.ToolResultArchive, error) {
-	ref, err := session.SaveToolResultArtifact(s.sessionDir, 1, result)
+	ref, err := session.SaveToolResultArtifact(s.sessionDir, 1, s.turn, result)
 	if err != nil || ref == "" {
 		return agent.ToolResultArchive{}, err
 	}
@@ -805,7 +811,17 @@ func (s *childSink) ArchiveToolResult(result llm.ToolResult) (agent.ToolResultAr
 }
 
 func (s *childSink) Notice(msg string) {
-	s.append(session.Event{Type: session.EventNotice, Turn: 1, Display: msg})
+	s.append(session.Event{Type: session.EventNotice, Prompt: 1, Turn: s.turn, Display: msg})
+}
+
+func (s *childSink) TurnComplete(usage agent.TurnUsage) {
+	u := usage.Usage
+	s.append(session.Event{Type: session.EventTurnComplete, Prompt: 1, Turn: usage.Turn, Usage: &u})
+}
+
+func (s *childSink) MaintenanceComplete(usage agent.MaintenanceUsage) {
+	u := usage.Usage
+	s.append(session.Event{Type: session.EventMaintenanceUsage, Prompt: 1, Purpose: usage.Purpose, Usage: &u})
 }
 
 func (s *childSink) RequestContext() []string {
@@ -815,10 +831,10 @@ func (s *childSink) RequestContext() []string {
 	return []string{todo.RequestContext(s.todos.Snapshot())}
 }
 
-func (s *childSink) TurnComplete(usage agent.TurnUsage) {
+func (s *childSink) PromptComplete(usage agent.PromptUsage) {
 	s.usage = usage
 	u := usage.Usage
-	s.append(session.Event{Type: session.EventTurnUsage, Turn: 1, Usage: &u, ModelTurns: usage.ModelTurns})
+	s.append(session.Event{Type: session.EventPromptUsage, Prompt: 1, Usage: &u})
 }
 
 func (s *childSink) append(ev session.Event) {

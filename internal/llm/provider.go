@@ -36,9 +36,33 @@ type InputTokenCount struct {
 	Source      string `json:"source,omitempty"`
 }
 
+// RequestPurpose classifies why a model request exists. Values are deliberately
+// bounded so they are safe to use as a Prometheus label.
+type RequestPurpose string
+
+const (
+	RequestPurposeUnknown        RequestPurpose = "unknown"
+	RequestPurposeTurn           RequestPurpose = "turn"
+	RequestPurposeCompaction     RequestPurpose = "compaction"
+	RequestPurposePrewarm        RequestPurpose = "prewarm"
+	RequestPurposeHandoffSummary RequestPurpose = "handoff_summary"
+)
+
+// NormalizeRequestPurpose maps missing or unrecognized values to unknown,
+// preventing external proxy clients from creating unbounded metric labels.
+func NormalizeRequestPurpose(purpose RequestPurpose) RequestPurpose {
+	switch purpose {
+	case RequestPurposeTurn, RequestPurposeCompaction, RequestPurposePrewarm, RequestPurposeHandoffSummary:
+		return purpose
+	default:
+		return RequestPurposeUnknown
+	}
+}
+
 // Request is one model call's worth of input, provider-neutral.
 type Request struct {
 	Model       string          `json:"model"`
+	Purpose     RequestPurpose  `json:"purpose,omitempty"` // harness/model-proxy metadata; never forwarded upstream
 	System      string          `json:"system,omitempty"`
 	Messages    []Message       `json:"messages,omitempty"`
 	Tools       []ToolSchema    `json:"tools,omitempty"`
@@ -168,7 +192,7 @@ type StreamEvent struct {
 	ResponseID string     `json:"response_id,omitempty"` // EventDone, Responses API
 }
 
-// StopReason is the normalized reason a model turn ended.
+// StopReason is the normalized reason a turn ended.
 type StopReason string
 
 const (

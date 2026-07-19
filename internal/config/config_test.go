@@ -746,21 +746,21 @@ func TestToolTimeoutResolution(t *testing.T) {
 	}
 }
 
-func TestMaxTurnTokensResolution(t *testing.T) {
+func TestMaxPromptTokensResolution(t *testing.T) {
 	c, err := Load([]string{"-model", "gpt-5.5"}, noEnv, "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.MaxTurnTokens != 0 {
-		t.Fatalf("default max-turn-tokens %d, want 0 (unlimited)", c.MaxTurnTokens)
+	if c.MaxPromptTokens != 0 {
+		t.Fatalf("default max-prompt-tokens %d, want 0 (unlimited)", c.MaxPromptTokens)
 	}
 
-	c, err = Load([]string{"-max-turn-tokens", "50000"}, noEnv, "")
+	c, err = Load([]string{"-max-prompt-tokens", "50000"}, noEnv, "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.MaxTurnTokens != 50000 {
-		t.Fatalf("max-turn-tokens %d, want 50000", c.MaxTurnTokens)
+	if c.MaxPromptTokens != 50000 {
+		t.Fatalf("max-prompt-tokens %d, want 50000", c.MaxPromptTokens)
 	}
 }
 

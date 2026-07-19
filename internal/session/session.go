@@ -25,8 +25,9 @@ import (
 	"harness/internal/todo"
 )
 
-// Version is the on-disk schema version. v2 adds plans and per-model usage.
-const Version = 2
+// Version is the on-disk schema version. v3 separates prompt, turn, attempt,
+// and maintenance events.
+const Version = 3
 
 const (
 	stateFile = "state.json"
@@ -43,15 +44,15 @@ type Session struct {
 	System         string             `json:"system"`
 	Agent          string             `json:"agent,omitempty"`
 	ProxySessionID string             `json:"proxy_session_id,omitempty"`
-	Turn           int                `json:"turn,omitempty"`
+	Prompt         int                `json:"prompt,omitempty"`
 	Messages       []llm.Message      `json:"messages"`
 	ResponseState  *llm.ResponseState `json:"response_state,omitempty"`
 	Todos          []todo.Item        `json:"todos,omitempty"`
 	Plans          []plan.Plan        `json:"plans,omitempty"`
 	Usage          UsageTotals        `json:"usage"`
 	// UsageByModel breaks usage and cost down per "provider/model" so a session
-	// that switches models still reports accurate per-model cost. Usage stays as
-	// the session aggregate for back-compat and resume seeding.
+	// that switches models still reports accurate per-model cost. Usage remains
+	// the authoritative session aggregate.
 	UsageByModel map[string]UsageTotals `json:"usage_by_model,omitempty"`
 }
 
@@ -154,6 +155,9 @@ func Load(dir string) (Session, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return Session{}, fmt.Errorf("session: decode %s: %w", filepath.Join(dir, stateFile), err)
 	}
+	if s.Version != Version {
+		return Session{}, fmt.Errorf("session: unsupported schema version %d (want %d)", s.Version, Version)
+	}
 	s.Messages = repair(s.Messages)
 	return s, nil
 }
@@ -161,20 +165,21 @@ func Load(dir string) (Session, error) {
 // Event is one append-only replay record. Display carries the exact user-facing
 // line for events that the renderer shows as dim one-liners.
 type Event struct {
-	Time       time.Time        `json:"time,omitempty"`
-	Type       string           `json:"type"`
-	Turn       int              `json:"turn,omitempty"`
-	Attempt    int              `json:"attempt,omitempty"`
-	Text       string           `json:"text,omitempty"`
-	Phase      string           `json:"phase,omitempty"`
-	Display    string           `json:"display,omitempty"`
-	ToolID     string           `json:"tool_id,omitempty"`
-	Tool       string           `json:"tool,omitempty"`
-	Input      json.RawMessage  `json:"input,omitempty"`
-	Images     []ImageInfo      `json:"images,omitempty"`
-	Usage      *llm.Usage       `json:"usage,omitempty"`
-	ModelTurns int              `json:"model_turns,omitempty"`
-	Context    *ContextSnapshot `json:"context,omitempty"`
+	Time    time.Time        `json:"time,omitempty"`
+	Type    string           `json:"type"`
+	Prompt  int              `json:"prompt,omitempty"`
+	Turn    int              `json:"turn,omitempty"`
+	Attempt int              `json:"attempt,omitempty"`
+	Text    string           `json:"text,omitempty"`
+	Phase   string           `json:"phase,omitempty"`
+	Display string           `json:"display,omitempty"`
+	ToolID  string           `json:"tool_id,omitempty"`
+	Tool    string           `json:"tool,omitempty"`
+	Input   json.RawMessage  `json:"input,omitempty"`
+	Images  []ImageInfo      `json:"images,omitempty"`
+	Usage   *llm.Usage       `json:"usage,omitempty"`
+	Purpose string           `json:"purpose,omitempty"`
+	Context *ContextSnapshot `json:"context,omitempty"`
 }
 
 // ContextSnapshot is the session-log copy of agent.ContextEstimate. It lives in
@@ -205,18 +210,20 @@ type ImageInfo struct {
 }
 
 const (
-	EventUser               = "user"
-	EventAssistantDelta     = "assistant_delta"
-	EventAssistantPhase     = "assistant_phase"
-	EventReasoningSummary   = "reasoning_summary"
-	EventToolStart          = "tool_start"
-	EventToolResult         = "tool_result"
-	EventToolDiff           = "tool_diff"
-	EventNotice             = "notice"
-	EventModelTurnStart     = "model_turn_start"
-	EventModelTurnAbandoned = "model_turn_abandoned"
-	EventModelTurnUsage     = "model_turn_usage"
-	EventTurnUsage          = "turn_usage"
+	EventUser                 = "user"
+	EventAssistantDelta       = "assistant_delta"
+	EventAssistantPhase       = "assistant_phase"
+	EventReasoningSummary     = "reasoning_summary"
+	EventToolStart            = "tool_start"
+	EventToolResult           = "tool_result"
+	EventToolDiff             = "tool_diff"
+	EventNotice               = "notice"
+	EventTurnAttemptStart     = "turn_attempt_start"
+	EventTurnAttemptAbandoned = "turn_attempt_abandoned"
+	EventTurnAttemptUsage     = "turn_attempt_usage"
+	EventTurnComplete         = "turn_complete"
+	EventPromptUsage          = "prompt_usage"
+	EventMaintenanceUsage     = "maintenance_usage"
 )
 
 // AppendEvent appends ev as one JSON line to raw.ndjson under dir.
@@ -369,7 +376,7 @@ func Replay(dir string, w io.Writer, opts ReplayOptions) error {
 				fmt.Fprintln(w, strings.Join(lines, "\n"))
 				assistant.MarkPreFinalOutput()
 			}
-		case EventToolResult, EventToolDiff, EventNotice, EventModelTurnAbandoned, EventModelTurnUsage, EventTurnUsage:
+		case EventToolResult, EventToolDiff, EventNotice, EventTurnAttemptAbandoned, EventTurnAttemptUsage, EventTurnComplete, EventPromptUsage:
 			assistant.Finish()
 			if ev.Display != "" && !opts.Quiet {
 				fmt.Fprintln(w, ev.Display)
@@ -396,23 +403,22 @@ func LatestTurnOutput(dir string) (string, error) {
 	}
 	events = filterAbandonedAttemptOutput(events)
 
-	latestTurn := 0
-	var b strings.Builder
-	assistant := newAssistantDisplay(&b, ReplayOptions{Markdown: true})
-	resetForTurn := func(turn int) {
-		latestTurn = turn
-		b.Reset()
-		assistant = newAssistantDisplay(&b, ReplayOptions{Markdown: true})
+	type turnKey struct{ prompt, turn int }
+	latest := turnKey{}
+	for _, ev := range events {
+		if ev.Type == EventTurnComplete && ev.Prompt > 0 && ev.Turn > 0 {
+			latest = turnKey{prompt: ev.Prompt, turn: ev.Turn}
+		}
+	}
+	if latest == (turnKey{}) {
+		return "", nil
 	}
 
+	var b strings.Builder
+	assistant := newAssistantDisplay(&b, ReplayOptions{Markdown: true})
+
 	for _, ev := range events {
-		if ev.Turn == 0 {
-			continue
-		}
-		if ev.Turn > latestTurn || ev.Type == EventUser && ev.Turn == latestTurn {
-			resetForTurn(ev.Turn)
-		}
-		if ev.Turn != latestTurn || ev.Type == EventUser {
+		if ev.Prompt != latest.prompt || ev.Turn != latest.turn {
 			continue
 		}
 		switch ev.Type {
@@ -428,7 +434,7 @@ func LatestTurnOutput(dir string) (string, error) {
 				b.WriteByte('\n')
 				assistant.MarkPreFinalOutput()
 			}
-		case EventToolResult, EventToolDiff, EventNotice, EventModelTurnAbandoned, EventModelTurnUsage, EventTurnUsage:
+		case EventToolResult, EventToolDiff, EventNotice, EventTurnComplete:
 			assistant.Finish()
 			if ev.Display != "" {
 				b.WriteString(ev.Display)
@@ -443,8 +449,8 @@ func LatestTurnOutput(dir string) (string, error) {
 func filterAbandonedAttemptOutput(events []Event) []Event {
 	abandoned := map[[3]int]bool{}
 	for _, ev := range events {
-		if ev.Type == EventModelTurnAbandoned && ev.Turn > 0 && ev.ModelTurns > 0 && ev.Attempt > 0 {
-			abandoned[[3]int{ev.Turn, ev.ModelTurns, ev.Attempt}] = true
+		if ev.Type == EventTurnAttemptAbandoned && ev.Prompt > 0 && ev.Turn > 0 && ev.Attempt > 0 {
+			abandoned[[3]int{ev.Prompt, ev.Turn, ev.Attempt}] = true
 		}
 	}
 	if len(abandoned) == 0 {
@@ -466,10 +472,10 @@ func attemptOutputDiscarded(ev Event, abandoned map[[3]int]bool) bool {
 	default:
 		return false
 	}
-	if ev.Turn == 0 || ev.ModelTurns == 0 || ev.Attempt == 0 {
+	if ev.Prompt == 0 || ev.Turn == 0 || ev.Attempt == 0 {
 		return false
 	}
-	return abandoned[[3]int{ev.Turn, ev.ModelTurns, ev.Attempt}]
+	return abandoned[[3]int{ev.Prompt, ev.Turn, ev.Attempt}]
 }
 
 // Timings prints a concise wall-clock report from raw.ndjson timestamps.
@@ -478,25 +484,28 @@ func Timings(dir string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	turns := map[int][]Event{}
+	prompts := map[int][]Event{}
 	var order []int
 	for _, ev := range events {
-		if ev.Turn == 0 {
+		if ev.Prompt == 0 {
 			continue
 		}
-		if _, ok := turns[ev.Turn]; !ok {
-			order = append(order, ev.Turn)
+		if _, ok := prompts[ev.Prompt]; !ok {
+			order = append(order, ev.Prompt)
 		}
-		turns[ev.Turn] = append(turns[ev.Turn], ev)
+		prompts[ev.Prompt] = append(prompts[ev.Prompt], ev)
 	}
 	sort.Ints(order)
-	for _, turn := range order {
-		writeTurnTimings(w, turn, turns[turn])
+	for _, prompt := range order {
+		writePromptTimings(w, prompt, prompts[prompt])
 	}
 	return nil
 }
 
 func readEvents(dir string) ([]Event, error) {
+	if err := validateReplaySchema(dir); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(filepath.Join(dir, eventLog))
 	if err != nil {
 		return nil, err
@@ -519,21 +528,41 @@ func readEvents(dir string) ([]Event, error) {
 	return events, nil
 }
 
-func writeTurnTimings(w io.Writer, turn int, events []Event) {
+func validateReplaySchema(dir string) error {
+	data, err := os.ReadFile(filepath.Join(dir, stateFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var header struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return fmt.Errorf("session: decode %s: %w", filepath.Join(dir, stateFile), err)
+	}
+	if header.Version != Version {
+		return fmt.Errorf("session: unsupported schema version %d (want %d)", header.Version, Version)
+	}
+	return nil
+}
+
+func writePromptTimings(w io.Writer, prompt int, events []Event) {
 	if len(events) == 0 {
 		return
 	}
 	user := firstEventTime(events, EventUser)
-	done := lastEventTime(events, EventTurnUsage)
+	done := lastEventTime(events, EventPromptUsage)
 	total := time.Duration(0)
 	if !user.IsZero() && !done.IsZero() && !done.Before(user) {
 		total = done.Sub(user)
 	}
 	firstVisible := firstVisibleDuration(events, user)
 	if firstVisible > 0 {
-		fmt.Fprintf(w, "turn %d: total %s, first visible %s\n", turn, formatDuration(total), formatDuration(firstVisible))
+		fmt.Fprintf(w, "prompt %d: total %s, first visible %s\n", prompt, formatDuration(total), formatDuration(firstVisible))
 	} else {
-		fmt.Fprintf(w, "turn %d: total %s\n", turn, formatDuration(total))
+		fmt.Fprintf(w, "prompt %d: total %s\n", prompt, formatDuration(total))
 	}
 	writeModelTimings(w, events)
 	writeToolTimings(w, events)
@@ -543,19 +572,19 @@ func writeTurnTimings(w io.Writer, turn int, events []Event) {
 func writeModelTimings(w io.Writer, events []Event) {
 	starts := map[[2]int]Event{}
 	for _, ev := range events {
-		if ev.Type == EventModelTurnStart {
-			starts[[2]int{ev.ModelTurns, ev.Attempt}] = ev
+		if ev.Type == EventTurnAttemptStart {
+			starts[[2]int{ev.Turn, ev.Attempt}] = ev
 			continue
 		}
-		if ev.Type != EventModelTurnUsage {
+		if ev.Type != EventTurnAttemptUsage {
 			continue
 		}
-		key := [2]int{ev.ModelTurns, ev.Attempt}
+		key := [2]int{ev.Turn, ev.Attempt}
 		start, ok := starts[key]
 		if !ok || start.Time.IsZero() || ev.Time.IsZero() || ev.Time.Before(start.Time) {
 			continue
 		}
-		fmt.Fprintf(w, "  model turn %d attempt %d: %s", ev.ModelTurns, ev.Attempt, formatDuration(ev.Time.Sub(start.Time)))
+		fmt.Fprintf(w, "  turn %d attempt %d: %s", ev.Turn, ev.Attempt, formatDuration(ev.Time.Sub(start.Time)))
 		if start.Context != nil {
 			fmt.Fprintf(w, " (%s)", formatContextSnapshot(*start.Context))
 		}
@@ -775,11 +804,11 @@ func SaveCompaction(dir string, c Compaction) (string, error) {
 }
 
 // SaveToolResultArtifact writes full output omitted from active context.
-func SaveToolResultArtifact(dir string, turn int, result llm.ToolResult) (string, error) {
+func SaveToolResultArtifact(dir string, prompt, turn int, result llm.ToolResult) (string, error) {
 	if dir == "" || !result.Truncated || result.OriginalText == "" {
 		return "", nil
 	}
-	rel := filepath.Join("artifacts", "tool-results", fmt.Sprintf("%04d-%s.txt", turn, safeName(result.ForID)))
+	rel := filepath.Join("artifacts", "tool-results", fmt.Sprintf("%04d-%04d-%s.txt", prompt, turn, safeName(result.ForID)))
 	path := filepath.Join(dir, rel)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", fmt.Errorf("session: create artifact dir: %w", err)

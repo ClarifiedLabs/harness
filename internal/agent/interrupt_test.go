@@ -14,7 +14,7 @@ func fakeClock(start time.Time) (now func() time.Time, advance func(time.Duratio
 	return now, advance
 }
 
-func TestInterruptFirstSignalCancelsTurn(t *testing.T) {
+func TestInterruptFirstSignalCancelsPrompt(t *testing.T) {
 	sig := make(chan os.Signal, 1)
 	now, _ := fakeClock(time.Unix(0, 0))
 	exited := make(chan struct{}, 1)
@@ -24,17 +24,17 @@ func TestInterruptFirstSignalCancelsTurn(t *testing.T) {
 	defer stop()
 
 	cancelled := make(chan struct{}, 1)
-	w.BeginTurn(func() { cancelled <- struct{}{} })
+	w.BeginPrompt(func() { cancelled <- struct{}{} })
 
 	sig <- os.Interrupt
 	select {
 	case <-cancelled:
 	case <-time.After(time.Second):
-		t.Fatal("first signal during a turn did not cancel the turn")
+		t.Fatal("first signal during a prompt did not cancel the prompt")
 	}
 	select {
 	case <-exited:
-		t.Fatal("first signal during a turn must not request exit")
+		t.Fatal("first signal during a prompt must not request exit")
 	case <-time.After(50 * time.Millisecond):
 	}
 }
@@ -49,7 +49,7 @@ func TestInterruptSecondSignalWithinWindowExits(t *testing.T) {
 	defer stop()
 
 	cancelled := make(chan struct{}, 2)
-	w.BeginTurn(func() { cancelled <- struct{}{} })
+	w.BeginPrompt(func() { cancelled <- struct{}{} })
 
 	sig <- os.Interrupt
 	<-cancelled // first cancels
@@ -73,7 +73,7 @@ func TestInterruptSecondSignalAfterWindowCancelsAgain(t *testing.T) {
 	defer stop()
 
 	cancelled := make(chan struct{}, 2)
-	w.BeginTurn(func() { cancelled <- struct{}{} })
+	w.BeginPrompt(func() { cancelled <- struct{}{} })
 
 	sig <- os.Interrupt
 	<-cancelled
@@ -83,7 +83,7 @@ func TestInterruptSecondSignalAfterWindowCancelsAgain(t *testing.T) {
 	select {
 	case <-cancelled:
 	case <-time.After(time.Second):
-		t.Fatal("signal after the window during a turn should cancel, not exit")
+		t.Fatal("signal after the window during a prompt should cancel, not exit")
 	}
 	select {
 	case <-exited:
@@ -101,7 +101,7 @@ func TestInterruptAtIdleExits(t *testing.T) {
 	stop := w.Start()
 	defer stop()
 
-	// No BeginTurn: the prompt is idle.
+	// No BeginPrompt: the prompt is idle.
 	sig <- os.Interrupt
 	select {
 	case <-exited:
@@ -120,19 +120,19 @@ func TestInterruptEndTurnReturnsToIdle(t *testing.T) {
 	defer stop()
 
 	cancelled := make(chan struct{}, 1)
-	w.BeginTurn(func() { cancelled <- struct{}{} })
-	w.EndTurn()
+	w.BeginPrompt(func() { cancelled <- struct{}{} })
+	w.EndPrompt()
 
-	// After EndTurn the prompt is idle again: a signal must request exit.
+	// After EndPrompt the prompt is idle again: a signal must request exit.
 	sig <- os.Interrupt
 	select {
 	case <-exited:
 	case <-time.After(time.Second):
-		t.Fatal("signal after EndTurn did not request exit at the idle prompt")
+		t.Fatal("signal after EndPrompt did not request exit at the idle prompt")
 	}
 }
 
-func TestInterruptCancelTurnCancelsWithoutExit(t *testing.T) {
+func TestInterruptCancelPromptCancelsWithoutExit(t *testing.T) {
 	sig := make(chan os.Signal, 1)
 	now, _ := fakeClock(time.Unix(0, 0))
 	exited := make(chan struct{}, 1)
@@ -140,17 +140,17 @@ func TestInterruptCancelTurnCancelsWithoutExit(t *testing.T) {
 	w := NewInterruptWatcher(sig, now, func() { exited <- struct{}{} })
 
 	cancelled := make(chan struct{}, 1)
-	w.BeginTurn(func() { cancelled <- struct{}{} })
-	w.CancelTurn()
+	w.BeginPrompt(func() { cancelled <- struct{}{} })
+	w.CancelPrompt()
 
 	select {
 	case <-cancelled:
 	case <-time.After(time.Second):
-		t.Fatal("CancelTurn did not cancel the active turn")
+		t.Fatal("CancelPrompt did not cancel the active prompt")
 	}
 	select {
 	case <-exited:
-		t.Fatal("CancelTurn must not request exit")
+		t.Fatal("CancelPrompt must not request exit")
 	case <-time.After(50 * time.Millisecond):
 	}
 }

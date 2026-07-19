@@ -35,7 +35,7 @@ const snippetLines = 5
 const finalAnswerSeparator = "\n---\n\n"
 
 // RenderOptions configures a Renderer. Color is decided by the caller (TTY check
-// plus NO_COLOR / -no-color); Now is injected so the per-turn duration is
+// plus NO_COLOR / -no-color); Now is injected so durations are
 // deterministic in tests (design §10, §13).
 type RenderOptions struct {
 	Color                   bool
@@ -44,12 +44,12 @@ type RenderOptions struct {
 	ToolStream              bool
 	Quiet                   bool
 	SuppressReasoningOutput bool
-	// SuppressUsage drops the per-turn usage/cost line. It defaults false so
+	// SuppressUsage drops the per-prompt usage/cost line. It defaults false so
 	// even -quiet runs still print the single cost line; set it for a fully
 	// silent piped run (r25).
 	SuppressUsage bool
-	// LiveStatus enables the in-place wait-time counter and the during-turn
-	// input line (r12 + during-turn input). Gated by the caller to an
+	// LiveStatus enables the in-place wait-time counter and the during-prompt
+	// input line (r12 + during-prompt input). Gated by the caller to an
 	// interactive, non-quiet TTY; tests set it explicitly.
 	LiveStatus      bool
 	Model           string
@@ -78,7 +78,8 @@ type Renderer struct {
 	timestampLayout         string
 	width                   func() int
 
-	turnStart         time.Time
+	promptRunStart    time.Time
+	currentTurnStart  time.Time
 	promptStart       time.Time
 	assistantLineOpen bool
 	assistantMarkdown *markdown.Stream
@@ -95,15 +96,14 @@ type Renderer struct {
 	cumOutput int
 	cumCost   float64
 
-	activeModelCost    float64
 	largeRequestWarned bool
 
-	// turnCost carries the per-turn cost priced by the App against the
-	// turn's own model (r63). When turnCostSet is false TurnComplete falls
+	// promptCost carries the per-prompt cost priced by the App against the
+	// prompt's model (r63). When promptCostSet is false PromptComplete falls
 	// back to pricing against r.model.
-	turnCost      float64
-	turnCostKnown bool
-	turnCostSet   bool
+	promptCost      float64
+	promptCostKnown bool
+	promptCostSet   bool
 
 	// warnedNoPrice tracks models for which the one-time "no price" notice has
 	// already been emitted (r16).
@@ -111,7 +111,7 @@ type Renderer struct {
 	// compactionWarned guards the one-time "approaching compaction" notice (r27).
 	compactionWarned bool
 
-	// Live wait-time counter + during-turn input line (r12 + during-turn
+	// Live wait-time counter + during-prompt input line (r12 + during-prompt
 	// input). statusMu guards every field below and serialises the ticker
 	// goroutine against the synchronous event-sink writes so the two never
 	// interleave terminal bytes.
@@ -119,10 +119,10 @@ type Renderer struct {
 	statusMu          sync.Mutex
 	statusActive      bool      // in a wait; the ticker should keep the line painted
 	statusDrawn       bool      // a status line is currently on the terminal
-	statusLabel       string    // e.g. "model: turn 3" or "tool: grep args=[\"x\"]"
+	statusLabel       string    // e.g. "turn: 3" or "tool: grep args=[\"x\"]"
 	statusStart       time.Time // when the current wait began
 	statusCtxPct      int       // context percent to append, 0 omits (r27)
-	statusInput       string    // during-turn typed buffer shown after "> "
+	statusInput       string    // during-prompt typed buffer shown after "> "
 	statusInputCursor int       // rune index of the edit cursor within statusInput
 	ticker            *time.Ticker
 	tickerStop        chan struct{}
@@ -157,7 +157,7 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 
 // StartPrompt records when the last user prompt was submitted. The live status
 // line uses it for the total elapsed time across all model/tool waits in the
-// prompt turn.
+// prompt.
 func (r *Renderer) StartPrompt() {
 	now := r.now()
 	r.statusMu.Lock()
@@ -165,23 +165,23 @@ func (r *Renderer) StartPrompt() {
 	r.statusMu.Unlock()
 }
 
-// StartTurn records the turn's start instant for the duration in the usage line.
-// The driver calls it immediately before agent.RunTurn. If StartPrompt was not
+// StartPromptRun records the prompt execution start for its usage line.
+// The driver calls it immediately before agent.RunPrompt. If StartPrompt was not
 // called (older tests and direct callers), the prompt total starts here too.
-func (r *Renderer) StartTurn() {
+func (r *Renderer) StartPromptRun() {
 	now := r.now()
-	r.turnStart = now
+	r.promptRunStart = now
+	r.currentTurnStart = time.Time{}
 	r.statusMu.Lock()
 	if r.promptStart.IsZero() {
 		r.promptStart = now
 	}
 	r.statusMu.Unlock()
-	r.activeModelCost = 0
 	r.largeRequestWarned = false
 	r.compactionWarned = false
-	r.turnCost = 0
-	r.turnCostKnown = false
-	r.turnCostSet = false
+	r.promptCost = 0
+	r.promptCostKnown = false
+	r.promptCostSet = false
 	r.assistantMarkdown = nil
 	r.assistantPhase = ""
 	r.visiblePreFinalOutput = false
@@ -192,7 +192,7 @@ func (r *Renderer) StartTurn() {
 // SetModel updates the model used for subsequent usage/cost summaries.
 func (r *Renderer) SetModel(model string) { r.model = model }
 
-// SetCumulativeUsage seeds the session totals used by per-turn usage lines.
+// SetCumulativeUsage seeds the session totals used by per-prompt usage lines.
 func (r *Renderer) SetCumulativeUsage(inputTokens, outputTokens int, costUSD float64) {
 	r.cumInput = inputTokens
 	r.cumOutput = outputTokens
@@ -251,8 +251,11 @@ func (r *Renderer) ReasoningSummaryStatus(text string) {
 	io.WriteString(r.errw, r.reasoningSummaryBlock(text))
 }
 
-func (r *Renderer) ModelTurnStart(modelTurn, attempt int, ctx agent.ContextEstimate) {
+func (r *Renderer) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
 	r.flushToolUseStarts()
+	if attempt <= 1 {
+		r.currentTurnStart = r.now()
+	}
 	if attempt <= 1 && !r.largeRequestWarned {
 		if line := largeRequestWarning(ctx); line != "" {
 			r.dimLine(line)
@@ -262,22 +265,22 @@ func (r *Renderer) ModelTurnStart(modelTurn, attempt int, ctx agent.ContextEstim
 	pct := contextPercent(ctx)
 	r.maybeWarnCompaction(pct)
 	if r.liveStatus {
-		label := fmt.Sprintf("model: turn %d", modelTurn)
+		label := fmt.Sprintf("turn: %d", turn)
 		if attempt > 1 {
-			label = fmt.Sprintf("model: turn %d retry %d", modelTurn, attempt-1)
+			label = fmt.Sprintf("turn: %d attempt %d", turn, attempt)
 		}
 		r.beginWait(label, pct)
 		return
 	}
 	if attempt <= 1 {
-		r.dimLine(fmt.Sprintf("[model: turn %d waiting]", modelTurn))
+		r.dimLine(fmt.Sprintf("[turn: %d waiting]", turn))
 		return
 	}
-	r.dimLine(fmt.Sprintf("[model: turn %d retry %d waiting]", modelTurn, attempt-1))
+	r.dimLine(fmt.Sprintf("[turn: %d attempt %d waiting]", turn, attempt))
 }
 
-func (r *Renderer) ModelTurnComplete(usage agent.ModelTurnUsage) {
-	r.writeModelTurnComplete(usage)
+func (r *Renderer) TurnAttemptComplete(usage agent.TurnAttemptUsage) {
+	r.finishTurnAttempt(usage)
 }
 
 // CompactionStart begins a transient live wait while old context is summarized.
@@ -287,21 +290,29 @@ func (r *Renderer) CompactionStart() {
 }
 
 // CompactionComplete ends only the current wait phase. It leaves the turn-wide
-// ticker, prompt timer, and during-turn input intact so automatic compaction can
+// ticker, prompt timer, and during-prompt input intact so automatic compaction can
 // transition directly into the next model wait.
 func (r *Renderer) CompactionComplete() {
 	r.endWait()
 }
 
-func (r *Renderer) writeModelTurnComplete(usage agent.ModelTurnUsage) string {
+func (r *Renderer) finishTurnAttempt(usage agent.TurnAttemptUsage) {
 	defer r.flushToolUseStarts()
 	if !usage.Usage.CostKnown {
 		r.maybeWarnNoPrice()
-		return ""
+		return
 	}
-	cost := usage.Usage.CostUSD
-	r.activeModelCost += cost
-	line := modelTurnCostLine(usage, cost, r.activeModelCost, r.cumCost+r.activeModelCost)
+	// Successful conversational attempts are summarized at the logical turn
+	// boundary. Retry costs remain available in the persisted attempt event.
+}
+
+// TurnComplete closes one conversational turn without ending the surrounding
+// prompt. It returns the persisted display line.
+func (r *Renderer) TurnComplete(usage agent.TurnUsage) string {
+	r.endWait()
+	r.flushToolUseStarts()
+	r.finishAssistantLine()
+	line := turnUsageLine(usage, r.now().Sub(r.currentTurnStart), r.now().Sub(r.promptStart))
 	r.dimLine(line)
 	return line
 }
@@ -313,9 +324,9 @@ func (r *Renderer) ToolUseStart(call llm.ToolCall) {
 	// counter for that gap so the CLI does not look idle between model output and
 	// tool-start lines.
 	if r.liveStatus {
-		label := "model: tool call"
+		label := "turn: tool call"
 		if call.Name != "" {
-			label = "model: tool call " + call.Name
+			label = "turn: tool call " + call.Name
 		}
 		r.beginWait(label, 0)
 	}
@@ -398,18 +409,18 @@ func (r *Renderer) Notice(msg string) {
 	r.dimLine(msg)
 }
 
-func (r *Renderer) TurnComplete(usage agent.TurnUsage) {
+func (r *Renderer) PromptComplete(usage agent.PromptUsage) {
 	r.StopProgress()
 	r.flushToolUseStarts()
 	r.finishAssistantLine()
-	elapsed := r.now().Sub(r.turnStart)
+	elapsed := r.now().Sub(r.promptRunStart)
 
 	// Accumulate session totals for the cumulative readout. The App prices the
-	// turn against its own model and forwards it via SetTurnCost so a mid-turn
+	// prompt against its own model and forwards it via SetPromptCost so a mid-prompt
 	// model switch is not mispriced against the renderer's model (r63).
 	cost, costKnown := usage.Usage.CostUSD, usage.Usage.CostKnown
-	if r.turnCostSet {
-		cost, costKnown = r.turnCost, r.turnCostKnown
+	if r.promptCostSet {
+		cost, costKnown = r.promptCost, r.promptCostKnown
 	}
 	r.cumInput += usage.Usage.InputTokens
 	r.cumOutput += usage.Usage.OutputTokens
@@ -420,15 +431,15 @@ func (r *Renderer) TurnComplete(usage agent.TurnUsage) {
 	r.usageOutput(usageLine(usage, elapsed, cost, costKnown, r.cumInput, r.cumOutput, r.cumCost))
 }
 
-// SetTurnCost records the turn cost priced by the App against the turn's own
-// model, consumed by the next TurnComplete (r63).
-func (r *Renderer) SetTurnCost(cost float64, known bool) {
-	r.turnCost = cost
-	r.turnCostKnown = known
-	r.turnCostSet = true
+// SetPromptCost records the prompt cost priced by the App against its own
+// model, consumed by the next PromptComplete (r63).
+func (r *Renderer) SetPromptCost(cost float64, known bool) {
+	r.promptCost = cost
+	r.promptCostKnown = known
+	r.promptCostSet = true
 }
 
-// usageOutput writes the per-turn usage line. It honours -quiet only when
+// usageOutput writes the per-prompt usage line. It honours -quiet only when
 // SuppressUsage is set, so a plain -quiet run still prints the single cost line
 // (r25). The status line is cleared first so the counter never lingers above it.
 func (r *Renderer) usageOutput(line string) {
@@ -516,7 +527,7 @@ func (r *Renderer) outputWidth() int {
 	return markdown.DefaultWidth
 }
 
-// --- Live wait-time counter + during-turn input line (r12 + during-turn input) ---
+// --- Live wait-time counter + during-prompt input line (r12 + during-prompt input) ---
 //
 // The counter is a single transient status line repainted in place with
 // \r\x1b[2K (no scroll region, no sticky bar). beginWait activates it; any
@@ -571,7 +582,7 @@ func (r *Renderer) endWait() {
 	r.statusMu.Unlock()
 }
 
-// SetInputLine updates the during-turn typed buffer shown after "> " on the
+// SetInputLine updates the during-prompt typed buffer shown after "> " on the
 // counter line, along with the rune index of the edit cursor, and repaints if a
 // wait is active. Empty restores the bare counter. cursor is clamped into
 // [0, len(buf)] so a stale index never positions the terminal cursor off-row.
@@ -590,7 +601,7 @@ func (r *Renderer) SetInputLine(buf string, cursor int) {
 
 // StopProgress erases the counter, clears the typed buffer, and stops the ticker,
 // draining its goroutine so no stray repaint can follow. Idempotent; called at
-// every turn boundary (TurnComplete, the REPL turn-done handoff, and one-shot).
+// every prompt boundary (PromptComplete, the REPL prompt-done handoff, and one-shot).
 func (r *Renderer) StopProgress() {
 	if !r.liveStatus {
 		return
@@ -657,7 +668,7 @@ func (r *Renderer) eraseLocked() {
 }
 
 // paintLocked redraws the counter in place. Caller holds statusMu. When a
-// during-turn buffer is present it parks the terminal cursor at the edit column
+// during-prompt buffer is present it parks the terminal cursor at the edit column
 // on the same single row, so cursor-motion keys (arrows/Home/End) land visibly.
 func (r *Renderer) paintLocked() {
 	text, cursorCol, hasInput := r.statusTextLocked()
@@ -684,7 +695,7 @@ func (r *Renderer) paintLocked() {
 
 // statusTextLocked renders the counter, clipped to the terminal width so it
 // never wraps (a wrapped line would defeat the single-line \r\x1b[2K erase). It
-// also reports the terminal column for the during-turn edit cursor and whether a
+// also reports the terminal column for the during-prompt edit cursor and whether a
 // typed buffer is present. Caller holds statusMu.
 func (r *Renderer) statusTextLocked() (text string, cursorCol int, hasInput bool) {
 	now := r.now()
@@ -698,7 +709,7 @@ func (r *Renderer) statusTextLocked() (text string, cursorCol int, hasInput bool
 	// "│" divider and placed last so the turn's own elapsed time and the running
 	// prompt total are easy to tell apart at a glance.
 	if !r.promptStart.IsZero() {
-		fmt.Fprintf(&b, " │ total %ds", nonNegativeSeconds(now.Sub(r.promptStart)))
+		fmt.Fprintf(&b, " │ prompt %ds", nonNegativeSeconds(now.Sub(r.promptStart)))
 	}
 	b.WriteByte(']')
 	maxW := r.outputWidth() - 1
@@ -710,7 +721,7 @@ func (r *Renderer) statusTextLocked() (text string, cursorCol int, hasInput bool
 	return text, cursorCol, true
 }
 
-// clipStatusLine fits the during-turn status line into maxW display columns and
+// clipStatusLine fits the during-prompt status line into maxW display columns and
 // reports the 0-based terminal column for the edit cursor. prefix is the counter
 // bracket plus the " > " separator; input is the already-sanitized typed buffer
 // (newlines collapsed to spaces, so a rune index maps 1:1 to a display column);
@@ -866,7 +877,7 @@ func cacheHitRatio(u llm.Usage) int {
 }
 
 // sanitizeInputLine collapses control characters (notably the newlines that
-// Enter inserts during a turn) to spaces so the multi-line buffer renders on the
+// Enter inserts during a prompt) to spaces so the multi-line buffer renders on the
 // single counter row.
 func sanitizeInputLine(s string) string {
 	return strings.Map(func(r rune) rune {
@@ -1095,17 +1106,17 @@ func ToolResultLine(call llm.ToolCall, result llm.ToolResult) string {
 	return fmt.Sprintf("[%s]%s → %s", call.Name, formatToolArgs(call.Name, call.Input), resultSummary(result))
 }
 
-// usageLine renders the per-turn summary with cumulative totals (design §10):
+// usageLine renders the per-prompt summary with cumulative totals (design §10):
 //
-//	[turn: 3 model turns · 12.4k (15.0k) in / 1.8k (2.0k) out · $0.071 ($0.102) · 4.3s]
+//	[prompt: 3 turns · 12.4k (15.0k) in / 1.8k (2.0k) out · $0.071 ($0.102) · 4.3s]
 //
-// Per-turn values are shown first; parenthesised values are cumulative across
+// Per-prompt values are shown first; parenthesised values are cumulative across
 // the session. Cumulative cost is omitted for models with no price entry;
-// per-turn cost is also omitted when the model has no price entry.
-func usageLine(u agent.TurnUsage, elapsed time.Duration, cost float64, costKnown bool, cumIn, cumOut int, cumCost float64) string {
+// per-prompt cost is also omitted when the model has no price entry.
+func usageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKnown bool, cumIn, cumOut int, cumCost float64) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "[turn: %s · %s (%s) in / %s (%s) out",
-		modelTurnPhrase(u.ModelTurns),
+	fmt.Fprintf(&b, "[prompt: %s · %s (%s) in / %s (%s) out",
+		turnPhrase(u.Turns),
 		humanTokens(u.Usage.InputTokens), humanTokens(cumIn),
 		humanTokens(u.Usage.OutputTokens), humanTokens(cumOut))
 	// Cache reads and reasoning tokens are billed and material to cost; surface
@@ -1136,13 +1147,17 @@ func usageLine(u agent.TurnUsage, elapsed time.Duration, cost float64, costKnown
 	return b.String()
 }
 
-func modelTurnCostLine(u agent.ModelTurnUsage, callCost, currentTurnCost, sessionCost float64) string {
-	label := fmt.Sprintf("turn %d", u.ModelTurn)
-	if u.Attempt > 1 {
-		label = fmt.Sprintf("turn %d retry %d", u.ModelTurn, u.Attempt-1)
+func turnUsageLine(u agent.TurnUsage, elapsed, promptElapsed time.Duration) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[turn: %d · %s", u.Turn, humanDuration(elapsed))
+	if u.Context.Window > 0 && u.Context.Total > 0 {
+		fmt.Fprintf(&b, " · ctx %d%%", contextPercent(u.Context))
 	}
-	return fmt.Sprintf("[model: %s cost: $%.4f · totals: $%.4f prompt · $%.4f session]",
-		label, callCost, currentTurnCost, sessionCost)
+	if promptElapsed >= 0 {
+		fmt.Fprintf(&b, " │ prompt %s", humanDuration(promptElapsed))
+	}
+	b.WriteByte(']')
+	return b.String()
 }
 
 func largeRequestWarning(ctx agent.ContextEstimate) string {
@@ -1174,11 +1189,11 @@ func largeRequestWarning(ctx agent.ContextEstimate) string {
 		humanTokens(ctx.System), humanTokens(ctx.Tools), humanTokens(ctx.Messages), note)
 }
 
-func modelTurnPhrase(n int) string {
+func turnPhrase(n int) string {
 	if n == 1 {
-		return "1 model turn"
+		return "1 turn"
 	}
-	return fmt.Sprintf("%d model turns", n)
+	return fmt.Sprintf("%d turns", n)
 }
 
 // snippet returns the first snippetLines lines of s for the verbose preview.

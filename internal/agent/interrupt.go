@@ -6,14 +6,14 @@ import (
 	"time"
 )
 
-// doublePressWindow is the interval within which a second ^C after a turn-cancel
+// doublePressWindow is the interval within which a second ^C after a prompt cancel
 // is treated as an exit request rather than another cancel (design §8.4).
 const doublePressWindow = time.Second
 
 // InterruptWatcher is the SIGINT state machine (design §8.4). A single handler
-// drives both behaviors via a per-turn cancel func:
+// drives both behaviors via a per-prompt cancel func:
 //
-//   - First ^C during a turn cancels the turn (aborting the stream and any
+//   - First ^C during a prompt cancels the prompt (aborting the stream and any
 //     run_command process group).
 //   - A second ^C within doublePressWindow, or any ^C at the idle prompt,
 //     requests exit.
@@ -27,10 +27,10 @@ type InterruptWatcher struct {
 	requestExit func()
 
 	mu         sync.Mutex
-	inTurn     bool
+	inPrompt   bool
 	cancel     func()
 	lastCancel time.Time
-	cancelled  bool // a cancel already fired for the current turn
+	cancelled  bool // a cancel already fired for the current prompt
 }
 
 // NewInterruptWatcher builds a watcher reading signals from sig, reading time
@@ -62,31 +62,31 @@ func (w *InterruptWatcher) Start() (stop func()) {
 	return func() { once.Do(func() { close(done) }) }
 }
 
-// BeginTurn marks a turn active and registers its cancel func. Called by the
-// turn loop before streaming.
-func (w *InterruptWatcher) BeginTurn(cancel func()) {
+// BeginPrompt marks a prompt active and registers its cancel func. Called by the
+// prompt loop before streaming.
+func (w *InterruptWatcher) BeginPrompt(cancel func()) {
 	w.mu.Lock()
-	w.inTurn = true
+	w.inPrompt = true
 	w.cancel = cancel
 	w.cancelled = false
 	w.mu.Unlock()
 }
 
-// EndTurn marks the prompt idle again. Called by the turn loop when the turn
+// EndPrompt marks the prompt idle again. Called by the prompt loop when the prompt
 // completes (normally or via cancel).
-func (w *InterruptWatcher) EndTurn() {
+func (w *InterruptWatcher) EndPrompt() {
 	w.mu.Lock()
-	w.inTurn = false
+	w.inPrompt = false
 	w.cancel = nil
 	w.mu.Unlock()
 }
 
-// CancelTurn cancels the active turn without requesting process exit. It is
+// CancelPrompt cancels the active prompt without requesting process exit. It is
 // used by non-signal interrupt gestures such as Esc-Esc, which should behave
-// like the first ^C during a turn but never like the second ^C exit shortcut.
-func (w *InterruptWatcher) CancelTurn() {
+// like the first ^C during a prompt but never like the second ^C exit shortcut.
+func (w *InterruptWatcher) CancelPrompt() {
 	w.mu.Lock()
-	if !w.inTurn {
+	if !w.inPrompt {
 		w.mu.Unlock()
 		return
 	}
@@ -104,7 +104,7 @@ func (w *InterruptWatcher) handle() {
 	w.mu.Lock()
 
 	// Idle prompt: any ^C requests exit.
-	if !w.inTurn {
+	if !w.inPrompt {
 		w.mu.Unlock()
 		w.requestExit()
 		return
@@ -117,7 +117,7 @@ func (w *InterruptWatcher) handle() {
 		return
 	}
 
-	// First ^C of this turn (or beyond the window): cancel the turn.
+	// First ^C of this prompt (or beyond the window): cancel the prompt.
 	cancel := w.cancel
 	w.cancelled = true
 	w.lastCancel = w.now()

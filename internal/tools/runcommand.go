@@ -59,9 +59,9 @@ const runCommandBackgroundSchemaFmt = `{
 }`
 
 type runCommand struct {
-	background         BackgroundJobStarter
-	foregroundTimeout  int // seconds; 0 means use constant default
-	backgroundTimeout  int // seconds; 0 means use constant default
+	background        BackgroundJobStarter
+	foregroundTimeout int // seconds; 0 means use constant default
+	backgroundTimeout int // seconds; 0 means use constant default
 }
 
 func (runCommand) Name() string { return "run_command" }

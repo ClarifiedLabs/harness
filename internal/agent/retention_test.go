@@ -36,7 +36,7 @@ func TestRetentionTrimsOldReadOnlyResults(t *testing.T) {
 	big := strings.Repeat("x", 9000)
 	var msgs []llm.Message
 	msgs = append(msgs, userText("q0"), asstToolUse("t0", "rd", `{}`), toolResult("t0", big), asstText("a0"))
-	for i := 1; i <= 4; i++ {
+	for i := 1; i <= 8; i++ {
 		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
 	}
 	msgs = append(msgs, userText("qR"), asstToolUse("tR", "rd", `{}`), toolResult("tR", big), asstText("aR"))
@@ -50,7 +50,7 @@ func TestRetentionTrimsOldReadOnlyResults(t *testing.T) {
 	if len(old) >= len(big) || !strings.Contains(old, retentionTrimMarker) {
 		t.Errorf("old read-only result not trimmed: len=%d marker=%v", len(old), strings.Contains(old, retentionTrimMarker))
 	}
-	recent := a.Transcript()[14].Content[0].ResultText
+	recent := a.Transcript()[22].Content[0].ResultText
 	if recent != big {
 		t.Errorf("recent result should be untouched, len=%d want %d", len(recent), len(big))
 	}
@@ -157,8 +157,8 @@ func TestCompactionRecoversTransientSummaryError(t *testing.T) {
 	if _, err := a.Compact(context.Background(), sink); err != nil {
 		t.Fatalf("Compact should recover from a transient error: %v", err)
 	}
-	if got := len(a.Transcript()); got != 1+8 {
-		t.Fatalf("compaction should have collapsed to summary + 8, got %d", got)
+	if got := len(a.Transcript()); got != 16 {
+		t.Fatalf("compaction should have collapsed to checkpoint + 8 turns, got %d", got)
 	}
 	if !strings.Contains(a.Transcript()[0].Content[0].Text, "recovered summary") {
 		t.Errorf("summary message = %q, want the recovered text", a.Transcript()[0].Content[0].Text)

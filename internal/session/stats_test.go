@@ -48,18 +48,23 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 			},
 		},
 	}
+	maintenance := llm.Usage{InputTokens: 9, OutputTokens: 3}
 	events := []Event{
-		{Type: EventUser, Turn: 1, Text: "first"},
-		{Type: EventUser, Turn: 1, Text: "replacement"},
-		{Type: EventUser, Turn: 2, Text: "second"},
-		{Type: EventModelTurnUsage, Turn: 1, ModelTurns: 1, Attempt: 1},
-		{Type: EventModelTurnUsage, Turn: 1, ModelTurns: 1, Attempt: 2},
-		{Type: EventModelTurnUsage, Turn: 1, ModelTurns: 2, Attempt: 1},
-		{Type: EventModelTurnUsage, Turn: 2, ModelTurns: 1, Attempt: 1},
-		{Type: EventToolStart, Turn: 1, ToolID: "z", Tool: "z_tool", Input: json.RawMessage(`{}`)},
-		{Type: EventToolStart, Turn: 1, ToolID: "shell", Tool: "run_command", Input: json.RawMessage(`{"command":"SECRET shell text"}`)},
-		{Type: EventToolStart, Turn: 1, ToolID: "a", Tool: "a_tool", Input: json.RawMessage(`{}`)},
-		{Type: EventToolStart, Turn: 2, ToolID: "argv", Tool: "run_command", Input: json.RawMessage(`{"argv":["SECRET-ARGV"],"background":true}`)},
+		{Type: EventUser, Prompt: 1, Text: "first"},
+		{Type: EventUser, Prompt: 1, Text: "replacement"},
+		{Type: EventUser, Prompt: 2, Text: "second"},
+		{Type: EventTurnAttemptUsage, Prompt: 1, Turn: 1, Attempt: 1},
+		{Type: EventTurnAttemptUsage, Prompt: 1, Turn: 1, Attempt: 2},
+		{Type: EventTurnAttemptUsage, Prompt: 1, Turn: 2, Attempt: 1},
+		{Type: EventTurnAttemptUsage, Prompt: 2, Turn: 1, Attempt: 1},
+		{Type: EventTurnComplete, Prompt: 1, Turn: 1},
+		{Type: EventTurnComplete, Prompt: 1, Turn: 2},
+		{Type: EventTurnComplete, Prompt: 2, Turn: 1},
+		{Type: EventMaintenanceUsage, Prompt: 2, Purpose: "compaction", Usage: &maintenance},
+		{Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "z", Tool: "z_tool", Input: json.RawMessage(`{}`)},
+		{Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "shell", Tool: "run_command", Input: json.RawMessage(`{"command":"SECRET shell text"}`)},
+		{Type: EventToolStart, Prompt: 1, Turn: 2, ToolID: "a", Tool: "a_tool", Input: json.RawMessage(`{}`)},
+		{Type: EventToolStart, Prompt: 2, Turn: 1, ToolID: "argv", Tool: "run_command", Input: json.RawMessage(`{"argv":["SECRET-ARGV"],"background":true}`)},
 	}
 	saveStatsFixture(t, dir, state, events)
 
@@ -88,8 +93,11 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("collectStats: %v", err)
 	}
-	if report.root.userTurns != 2 || report.root.modelTurns != 3 || report.root.modelCalls != 4 || report.root.retries != 1 {
-		t.Fatalf("conversation stats = users %d turns %d calls %d retries %d", report.root.userTurns, report.root.modelTurns, report.root.modelCalls, report.root.retries)
+	if report.root.prompts != 2 || report.root.turns != 3 || report.root.modelCalls != 4 || report.root.retries != 1 {
+		t.Fatalf("conversation stats = prompts %d turns %d calls %d retries %d", report.root.prompts, report.root.turns, report.root.modelCalls, report.root.retries)
+	}
+	if report.root.maintenanceCalls != 1 || report.root.maintenanceUsage.InputTokens != 9 || report.root.maintenanceUsage.OutputTokens != 3 {
+		t.Fatalf("maintenance stats = calls %d usage %+v", report.root.maintenanceCalls, report.root.maintenanceUsage)
 	}
 	if report.tools.calls != 4 || report.tools.commands != (commandStats{calls: 2, foreground: 1, background: 1, shell: 1, argv: 1}) {
 		t.Fatalf("tool stats = %+v", report.tools)
@@ -112,7 +120,7 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 		"  provider/model: anthropic/claude-test\n",
 		"  created: 2026-07-18T01:02:03Z\n",
 		"  duration: 2m0.3s\n",
-		"Conversation\n  user turns: 2\n  model turns: 3\n  model calls: 4\n  retries: 1\n  active messages: 1\n",
+		"Conversation\n  prompts: 2\n  turns: 3\n  model calls: 4\n  retries: 1\n  maintenance calls: 1\n  maintenance usage: 9 in / 3 out\n  active messages: 1\n",
 		"  tool calls: 4 total (4 root, 0 delegates)\n",
 		"  command calls: 2 total (2 root, 0 delegates)\n",
 		"    foreground: 1 total (1 root, 0 delegates)\n",
@@ -139,6 +147,24 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 	assertOrdered(t, got, "    a-provider/a-model:", "    z-provider/z-model:")
 	if strings.Contains(got, "SECRET") {
 		t.Fatalf("stats output leaked command input: %s", got)
+	}
+}
+
+func TestStatsDoesNotCountFailedFirstAttemptAsTurnOrRetry(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	saveStatsFixture(t, dir, Session{}, []Event{
+		{Type: EventUser, Prompt: 1, Text: "try once"},
+		{Type: EventTurnAttemptUsage, Prompt: 1, Turn: 1, Attempt: 1},
+		{Type: EventPromptUsage, Prompt: 1},
+	})
+
+	report, err := collectStats(dir)
+	if err != nil {
+		t.Fatalf("collectStats: %v", err)
+	}
+	if report.root.prompts != 1 || report.root.turns != 0 || report.root.modelCalls != 1 || report.root.retries != 0 {
+		t.Fatalf("conversation stats = prompts %d turns %d calls %d retries %d, want 1/0/1/0",
+			report.root.prompts, report.root.turns, report.root.modelCalls, report.root.retries)
 	}
 }
 
@@ -249,7 +275,7 @@ func TestStatsEmptyOptionalDirectories(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"Conversation\n  user turns: 0\n  model turns: 0\n  model calls: 0\n  retries: 0\n  active messages: 0\n",
+		"Conversation\n  prompts: 0\n  turns: 0\n  model calls: 0\n  retries: 0\n  maintenance calls: 0\n  active messages: 0\n",
 		"Tools\n  tool calls: 0 total (0 root, 0 delegates)\n  by tool: none\n",
 		"  command calls: 0 total (0 root, 0 delegates)\n",
 		"  parallel batches: 0 total (0 root, 0 delegates)\n",

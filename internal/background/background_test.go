@@ -60,15 +60,15 @@ func (a *recordingArchiver) ArchiveToolResult(result llm.ToolResult) (toolresult
 	}, nil
 }
 
-func TestManagerWaitsForTurnWorkAndDrainsUsageOnce(t *testing.T) {
+func TestManagerWaitsForPromptWorkAndDrainsUsageOnce(t *testing.T) {
 	m := NewManager(Options{})
 	startedRun := make(chan struct{})
 	release := make(chan struct{})
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind:        "delegate",
-		Description: "inspect",
-		Agent:       "explore",
-		WaitForTurn: true,
+		Kind:          "delegate",
+		Description:   "inspect",
+		Agent:         "explore",
+		WaitForPrompt: true,
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			close(startedRun)
 			<-release
@@ -82,32 +82,32 @@ func TestManagerWaitsForTurnWorkAndDrainsUsageOnce(t *testing.T) {
 		t.Fatalf("StartBackgroundJob: %v", err)
 	}
 	<-startedRun
-	if !m.PendingTurnWork() {
+	if !m.PendingPromptWork() {
 		t.Fatal("running required job should be pending turn work")
 	}
 	close(release)
-	usage, err := m.WaitForTurnWork(context.Background())
+	usage, err := m.WaitForPromptWork(context.Background())
 	if err != nil {
-		t.Fatalf("WaitForTurnWork: %v", err)
+		t.Fatalf("WaitForPromptWork: %v", err)
 	}
 	if usage.InputTokens != 70 || usage.OutputTokens != 30 || usage.CostUSD != 0.25 || !usage.CostKnown {
 		t.Fatalf("joined usage = %+v, want child usage", usage)
 	}
-	if got := m.DrainTurnWorkUsage(); got != (llm.Usage{}) {
+	if got := m.DrainPromptWorkUsage(); got != (llm.Usage{}) {
 		t.Fatalf("second usage drain = %+v, want zero", got)
 	}
 	snap, ok := m.Get(started.ID)
 	if !ok || snap.Agent != "explore" || snap.Status != StatusCompleted {
 		t.Fatalf("completed snapshot = %+v, ok=%v", snap, ok)
 	}
-	if !m.PendingTurnWork() {
+	if !m.PendingPromptWork() {
 		t.Fatal("completed result should remain pending until context delivery")
 	}
 	ctx := m.DrainCompletedContext(nil)
 	if len(ctx) != 1 || !strings.Contains(ctx[0], "child report") {
 		t.Fatalf("completed context = %v", ctx)
 	}
-	if m.PendingTurnWork() {
+	if m.PendingPromptWork() {
 		t.Fatal("delivered completed result should no longer be pending")
 	}
 }

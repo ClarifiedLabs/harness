@@ -17,7 +17,7 @@ harness-mcp-proxy --version
 Release builds inject the repository tag (`v*`) into those commands. The MCP
 protocol version is separate and is shown by `harness-mcp-proxy version` and
 `harness lsp version`. Persisted session `state.json` files use schema version
-`1`.
+`3`. Earlier schemas are rejected rather than migrated.
 
 ## Artifacts
 

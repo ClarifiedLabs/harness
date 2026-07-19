@@ -14,22 +14,32 @@ import (
 
 // defaultKeepTurns is how many whole turns compaction preserves verbatim; everything
 // older is summarized into one message (design §12).
-const defaultKeepTurns = 4
+const defaultKeepTurns = 8
 
 // compactThresholdPct is the fraction of the context window at which the
 // post-turn trigger fires: reported input tokens ≥ 78% leaves headroom for the
 // summary call plus the next turn (design §12).
 const compactThresholdPct = 78
 
+// compactTargetPct is the low-water mark reached by a triggered compaction.
+// Keeping it below the trigger prevents one small tool result from immediately
+// forcing another rewrite.
+const compactTargetPct = 65
+
 // overThreshold reports whether tokens crosses the compaction trigger for the
-// current window. compactBudget is the same fraction expressed as a token
-// budget; together they keep the threshold arithmetic in one place.
+// current window.
 func (a *Agent) overThreshold(tokens int) bool {
 	return tokens*100 >= a.window()*compactThresholdPct
 }
 
 func (a *Agent) compactBudget() int {
-	return a.window() * compactThresholdPct / 100
+	target := a.window() * compactTargetPct / 100
+	overhead := estimateRequest(llm.Request{
+		System:      a.system,
+		Tools:       a.toolSpecs,
+		ServerTools: a.serverTools,
+	}, a.window()).Total
+	return max(target-overhead, 1000)
 }
 
 // bytesPerToken is a coarse token estimate used only by the degradation ladder,
@@ -54,9 +64,11 @@ type CompactionArchive struct {
 // suitable for inclusion in the active summary.
 type CompactionArchiver func(context.Context, CompactionArchive) (string, error)
 
-// summaryHeader prefixes the replacement message so the model recognizes the
-// collapsed history (design §12).
-const summaryHeader = "=== Summary of earlier conversation ===\n"
+const (
+	checkpointHeader   = "=== Compaction checkpoint ===\n"
+	checkpointPreamble = "The following active instructions are preserved verbatim. Continue from the summarized progress without repeating completed work.\n"
+	checkpointProgress = "\nProgress summary:\n"
+)
 
 // MaybeCompact compacts the transcript when lastInputTokens (the input tokens
 // the final step of the just-finished turn reported) is at least
@@ -72,9 +84,10 @@ func (a *Agent) MaybeCompact(ctx context.Context, lastInputTokens int, sink Even
 	return a.compactTriggered(ctx, sink, "auto")
 }
 
-// Compact collapses every turn older than the last keepTurns into a single
-// model-written summary message, keeping the system prompt (it lives on
-// Request.System) and the recent turns verbatim (design §12). The summary call's
+// Compact collapses every turn older than the last keepTurns into a synthetic
+// user checkpoint containing a model-written progress summary, keeping the
+// system prompt (it lives on Request.System) and recent turns verbatim (design
+// §12). The summary call's
 // usage is returned for the session totals. On a summary-call error the
 // transcript is left fully intact and the error is returned, with a warning
 // reported via the sink — a visible context-length failure beats silent data
@@ -89,7 +102,7 @@ func (a *Agent) Compact(ctx context.Context, sink EventSink) (llm.Usage, error) 
 // live transcript was actually rewritten), and any error. A no-op (nothing old
 // enough to summarize and the transcript already within budget, or a PreCompact
 // block) returns changed=false so the mid-loop caller does not churn its trigger
-// state every model turn.
+// state every turn.
 func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (llm.Usage, bool, error) {
 	return a.compactInternal(ctx, sink, trigger, false)
 }
@@ -103,6 +116,10 @@ func (a *Agent) compactTriggered(ctx context.Context, sink EventSink, trigger st
 }
 
 func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger string, forceCurrent bool) (llm.Usage, bool, error) {
+	if progress, ok := sink.(CompactionProgressSink); ok {
+		progress.CompactionStart()
+		defer progress.CompactionComplete()
+	}
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PreCompact) {
 		res := a.hooks.Run(ctx, hooks.PreCompact, trigger, hooks.Payload{"trigger": trigger})
 		for _, notice := range res.Notices {
@@ -118,10 +135,10 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 		}
 	}
 
-	starts := turnStarts(a.transcript)
+	turns := completedTurnSpans(a.transcript)
 	keepTurns := a.keepTurns()
 	boundary := 0
-	if len(starts) <= keepTurns {
+	if len(turns) <= keepTurns {
 		// Nothing older than the normal keep window exists. If the transcript
 		// still fits, this is a genuine no-op. Under pressure the keep window is
 		// soft: summarize every complete older turn and keep only the latest turn
@@ -129,27 +146,24 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 		if !forceCurrent && estimateTokens(a.transcript) <= a.compactBudget() {
 			return llm.Usage{}, false, nil
 		}
-		if len(starts) < 2 {
+		if len(turns) < 2 {
 			changed, err := a.degradeCurrent(sink, trigger)
 			return llm.Usage{}, changed, err
 		}
-		boundary = starts[len(starts)-1]
+		boundary = turns[len(turns)-1].Start
 	} else {
-		boundary = starts[len(starts)-keepTurns]
+		boundary = turns[len(turns)-keepTurns].Start
 	}
 
 	older := a.transcript[:boundary]
 	kept := a.transcript[boundary:]
 
-	if progress, ok := sink.(CompactionProgressSink); ok {
-		progress.CompactionStart()
-		defer progress.CompactionComplete()
-	}
-	summary, usage, err := a.summarize(ctx, prompts.CompactionSummary(), older)
+	summary, usage, err := a.summarize(ctx, prompts.CompactionSummary(), older, llm.RequestPurposeCompaction)
 	if err != nil {
 		sink.Notice(fmt.Sprintf("[compact failed: %v; keeping full transcript]", err))
-		return llm.Usage{}, false, err
+		return usage, false, err
 	}
+	archiveRef := ""
 	if a.archiveCompaction != nil {
 		ref, err := a.archiveCompaction(ctx, CompactionArchive{
 			Messages: older,
@@ -158,17 +172,15 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 		})
 		if err != nil {
 			sink.Notice(fmt.Sprintf("[compact archive failed: %v; keeping full transcript]", err))
-			return llm.Usage{}, false, err
+			return usage, false, err
 		}
-		if ref != "" {
-			summary += "\n\nRaw compacted transcript archive: " + ref
-		}
+		archiveRef = ref
 	}
 
-	collapsed := len(older)
-	before := estimateTokens(a.transcript)
+	collapsed := countCompletedTurns(older)
+	before := a.estimateContext(nil).Total
 	compacted := make([]llm.Message, 0, 1+len(kept))
-	compacted = append(compacted, a.summaryMessage(summary))
+	compacted = append(compacted, a.checkpointMessage(summary, older, archiveRef))
 	// Deep-copy the kept turns before the in-place degrade/trim below: they alias
 	// the live transcript's Content, and a post-degrade ValidateTranscript failure
 	// must leave the live transcript fully intact (the rollback guarantee).
@@ -176,7 +188,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 
 	// Degradation ladder: shrink further while the estimate still overflows
 	// (design §12). Never wedge.
-	compacted = a.degrade(compacted, starts)
+	compacted = a.degrade(compacted, turns)
 	// r54: when collapsing the older turns reclaimed little — the kept turns
 	// dominate — trim their large read-only tool results in place rather than pay
 	// for another summarization pass.
@@ -185,14 +197,15 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	}
 	if err := llm.ValidateTranscript(compacted); err != nil {
 		sink.Notice(fmt.Sprintf("[compact failed: compacted transcript invalid: %v; keeping full transcript]", err))
-		return llm.Usage{}, false, err
+		return usage, false, err
 	}
 
 	a.transcript = compacted
 	a.validatedPrefix = 0 // the transcript was rewritten; re-validate from scratch (r62)
 	a.ResetProxySessionID()
 	a.compactFallbackNotice = compactFallbackNoticeState{}
-	sink.Notice(compactionReport(a.registry, a.model, collapsed, usage))
+	after := a.estimateContextForTranscript(nil, compacted).Total
+	sink.Notice(compactionReport(collapsed, before, after))
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PostCompact) {
 		res := a.hooks.Run(ctx, hooks.PostCompact, trigger, hooks.Payload{"trigger": trigger})
 		for _, notice := range res.Notices {
@@ -222,12 +235,12 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 // ValidateTranscript failure leaves the live transcript fully intact (the
 // rollback guarantee). It returns whether the transcript was actually replaced.
 func (a *Agent) degradeCurrent(sink EventSink, trigger string) (bool, error) {
-	before := estimateTokens(a.transcript)
+	before := a.estimateContext(nil).Total
 	budget := a.compactBudget()
 	compacted := cloneMessages(a.transcript)
 	a.trimToolResults(compacted, sink)
 	truncateUntilFits(compacted, budget)
-	after := estimateTokens(compacted)
+	after := a.estimateContextForTranscript(nil, compacted).Total
 	if after >= before {
 		// Nothing left to shrink; ship the oversized request rather than churn an
 		// identical rewrite. Surface it so the wedge risk is visible, not silent.
@@ -264,7 +277,7 @@ func (a *Agent) noticeCurrentShrink(sink EventSink, trigger string, before, afte
 		}
 		a.compactFallbackNotice.smallShrink = true
 	}
-	sink.Notice(fmt.Sprintf("[compacted: shrank oversized turn in place · ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
+	sink.Notice(fmt.Sprintf("[compacted: archived oversized turn payload · ctx ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
 }
 
 // cloneMessages returns a copy of msgs in which each message's Content slice is a
@@ -287,40 +300,41 @@ func cloneMessages(msgs []llm.Message) []llm.Message {
 // the call's usage. It backs the plan->implementation handoff (with the handoff
 // brief prompt) and is independent of the compaction trigger/keep-turn logic.
 func (a *Agent) GenerateSummary(ctx context.Context, system string) (string, llm.Usage, error) {
-	return a.summarize(ctx, system, a.transcript)
+	return a.summarize(ctx, system, a.transcript, llm.RequestPurposeHandoffSummary)
 }
 
 // summarize runs one tool-less model call over the older messages, with the
 // given system instruction, and returns the summary text and the call's usage.
-func (a *Agent) summarize(ctx context.Context, system string, older []llm.Message) (string, llm.Usage, error) {
+func (a *Agent) summarize(ctx context.Context, system string, older []llm.Message, purpose llm.RequestPurpose) (string, llm.Usage, error) {
 	prepared := prepareSummaryMessages(older, a.summaryToolResultMaxBytes())
 	chunks := splitSummaryChunks(prepared, a.summaryChunkBudget())
 	if len(chunks) <= 1 {
-		return a.summarizeOne(ctx, system, prepared)
+		return a.summarizeOne(ctx, system, prepared, purpose)
 	}
 
 	var total llm.Usage
 	summaries := make([]llm.Message, 0, len(chunks))
 	for i, chunk := range chunks {
-		summary, usage, err := a.summarizeOne(ctx, system, chunk)
-		if err != nil {
-			return "", llm.Usage{}, err
-		}
+		summary, usage, err := a.summarizeOne(ctx, system, chunk, purpose)
 		total = add(total, usage)
+		if err != nil {
+			return "", total, err
+		}
 		summaries = append(summaries, textMessageAt(a.now(), llm.RoleUser, fmt.Sprintf("Chunk %d summary:\n%s", i+1, summary)))
 	}
-	final, usage, err := a.summarizeOne(ctx, system, summaries)
+	final, usage, err := a.summarizeOne(ctx, system, summaries, purpose)
+	total = add(total, usage)
 	if err != nil {
-		return "", llm.Usage{}, err
+		return "", total, err
 	}
-	return final, add(total, usage), nil
+	return final, total, nil
 }
 
-func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Message) (string, llm.Usage, error) {
+func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Message, purpose llm.RequestPurpose) (string, llm.Usage, error) {
 	budget := a.summaryMaxTokens()
 	var total llm.Usage
 	for bumped := false; ; {
-		text, usage, stop, err := a.streamSummary(ctx, system, older, budget)
+		text, usage, stop, err := a.streamSummary(ctx, system, older, budget, purpose)
 		total = add(total, usage)
 		if err != nil {
 			return "", total, err
@@ -341,21 +355,24 @@ func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Mes
 // abort compaction near the threshold. Reasoning is disabled: a summary needs no
 // thinking budget (r13, mirrors PrewarmRequest). It returns the assembled text,
 // usage, and the stop reason.
-func (a *Agent) streamSummary(ctx context.Context, system string, older []llm.Message, maxTokens int) (string, llm.Usage, llm.StopReason, error) {
+func (a *Agent) streamSummary(ctx context.Context, system string, older []llm.Message, maxTokens int, purpose llm.RequestPurpose) (string, llm.Usage, llm.StopReason, error) {
 	req := llm.Request{
 		Model:     a.model,
+		Purpose:   purpose,
 		System:    system,
 		Messages:  older,
 		MaxTokens: maxTokens,
 		Reasoning: llm.ReasoningConfig{},
 	}
+	var total llm.Usage
 	for attempt := 0; ; attempt++ {
 		text, usage, stop, err := a.collectSummary(ctx, req)
+		total = add(total, usage)
 		if err == nil || attempt >= streamRetries || !retryableStreamError(err) {
-			return text, usage, stop, err
+			return text, total, stop, err
 		}
 		if serr := a.sleep(ctx, retry.Next(attempt, streamRetryAfter(err))); serr != nil {
-			return "", llm.Usage{}, stop, serr
+			return "", total, stop, serr
 		}
 	}
 }
@@ -366,7 +383,7 @@ func (a *Agent) collectSummary(ctx context.Context, req llm.Request) (string, ll
 	var stop llm.StopReason
 	for ev, err := range a.provider.Stream(ctx, req) {
 		if err != nil {
-			return "", llm.Usage{}, stop, err
+			return "", usage, stop, err
 		}
 		switch ev.Kind {
 		case llm.EventTextDelta:
@@ -483,23 +500,24 @@ func splitSummaryChunks(msgs []llm.Message, budget int) [][]llm.Message {
 	if len(msgs) == 0 || estimateTokens(msgs) <= budget {
 		return [][]llm.Message{msgs}
 	}
-	starts := turnStarts(msgs)
-	if len(starts) == 0 {
+	turns := completedTurnSpans(msgs)
+	if len(turns) == 0 {
 		return [][]llm.Message{msgs}
 	}
 	var chunks [][]llm.Message
 	var current []llm.Message
-	for i, start := range starts {
-		end := len(msgs)
-		if i+1 < len(starts) {
-			end = starts[i+1]
-		}
-		turn := msgs[start:end]
-		if len(current) > 0 && estimateTokens(append(append([]llm.Message(nil), current...), turn...)) > budget {
+	start := 0
+	for _, span := range turns {
+		unit := msgs[start:span.End]
+		if len(current) > 0 && estimateTokens(append(append([]llm.Message(nil), current...), unit...)) > budget {
 			chunks = append(chunks, current)
 			current = nil
 		}
-		current = append(current, turn...)
+		current = append(current, unit...)
+		start = span.End
+	}
+	if start < len(msgs) {
+		current = append(current, msgs[start:]...)
 	}
 	if len(current) > 0 {
 		chunks = append(chunks, current)
@@ -512,7 +530,7 @@ func splitSummaryChunks(msgs []llm.Message, budget int) [][]llm.Message {
 // hard-truncate the largest tool results in place (design §12). compacted is
 // [summary, ...keptTurns]; starts indexes the pre-compaction transcript so the
 // last turn's start can be located.
-func (a *Agent) degrade(compacted []llm.Message, starts []int) []llm.Message {
+func (a *Agent) degrade(compacted []llm.Message, turns []turnSpan) []llm.Message {
 	budget := a.compactBudget()
 	if estimateTokens(compacted) <= budget {
 		return compacted
@@ -521,7 +539,7 @@ func (a *Agent) degrade(compacted []llm.Message, starts []int) []llm.Message {
 	// Rung 2: keep only the last turn. Deep-copy it: it aliases the live
 	// transcript and rung 3 truncates it in place, which must not corrupt the live
 	// transcript if validation later fails (the rollback guarantee).
-	lastStart := starts[len(starts)-1]
+	lastStart := turns[len(turns)-1].Start
 	lastTurn := cloneMessages(a.transcript[lastStart:])
 	compacted = append([]llm.Message{compacted[0]}, lastTurn...)
 	if estimateTokens(compacted) <= budget {
@@ -547,19 +565,59 @@ func truncateUntilFits(msgs []llm.Message, budget int) {
 	}
 }
 
-// turnStarts returns the indices in msgs where a turn begins: every user message
-// that carries genuine user content (not solely tool_result blocks). A
-// tool_result-only user message continues the current turn — it answers the
-// preceding assistant's tool calls — so it never starts a new one. Keeping turns
-// whole this way guarantees the §4 invariant survives compaction.
-func turnStarts(msgs []llm.Message) []int {
-	var starts []int
-	for i, m := range msgs {
-		if m.Role == llm.RoleUser && hasNonResult(m) {
-			starts = append(starts, i)
+type turnSpan struct {
+	Start int
+	End   int
+}
+
+// completedTurnSpans returns canonical conversational turns. Each span begins
+// at an assistant response and includes its immediately following tool-result
+// message, if present. Prompt and steering messages are inputs to the next turn,
+// not boundaries that collapse all round trips into one oversized unit.
+func completedTurnSpans(msgs []llm.Message) []turnSpan {
+	var spans []turnSpan
+	for i, message := range msgs {
+		if message.Role != llm.RoleAssistant {
+			continue
 		}
+		end := i + 1
+		if hasToolUse(message) && end < len(msgs) && msgs[end].Role == llm.RoleUser && hasToolResult(msgs[end]) {
+			end++
+		}
+		spans = append(spans, turnSpan{Start: i, End: end})
+	}
+	return spans
+}
+
+func turnStarts(msgs []llm.Message) []int {
+	spans := completedTurnSpans(msgs)
+	starts := make([]int, len(spans))
+	for i, span := range spans {
+		starts[i] = span.Start
 	}
 	return starts
+}
+
+func countCompletedTurns(msgs []llm.Message) int {
+	return len(completedTurnSpans(msgs))
+}
+
+func hasToolUse(message llm.Message) bool {
+	for _, block := range message.Content {
+		if block.Kind == llm.BlockToolUse {
+			return true
+		}
+	}
+	return false
+}
+
+func hasToolResult(message llm.Message) bool {
+	for _, block := range message.Content {
+		if block.Kind == llm.BlockToolResult {
+			return true
+		}
+	}
+	return false
 }
 
 func hasNonResult(m llm.Message) bool {
@@ -571,8 +629,85 @@ func hasNonResult(m llm.Message) bool {
 	return len(m.Content) == 0
 }
 
-func (a *Agent) summaryMessage(summary string) llm.Message {
-	return a.textMessage(llm.RoleAssistant, summaryHeader+summary)
+func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRef string) llm.Message {
+	var b strings.Builder
+	b.WriteString(checkpointHeader)
+	b.WriteString(checkpointPreamble)
+	for _, message := range activeInstructionMessages(older) {
+		switch message.Origin {
+		case llm.MessageOriginSteer:
+			b.WriteString("\nSteering instruction (verbatim):\n")
+		case llm.MessageOriginCompactionCheckpoint:
+			b.WriteString("\nActive instructions from prior checkpoint (verbatim):\n")
+		default:
+			b.WriteString("\nPrompt (verbatim):\n")
+		}
+		text := messageTextForCheckpoint(message)
+		if message.Origin == llm.MessageOriginCompactionCheckpoint {
+			text = checkpointInstructionText(text)
+		}
+		b.WriteString(text)
+		b.WriteByte('\n')
+	}
+	b.WriteString(checkpointProgress)
+	b.WriteString(summary)
+	if archiveRef != "" {
+		b.WriteString("\n\nRaw compacted transcript archive: ")
+		b.WriteString(archiveRef)
+	}
+	message := a.textMessage(llm.RoleUser, b.String())
+	message.Origin = llm.MessageOriginCompactionCheckpoint
+	return message
+}
+
+func activeInstructionMessages(msgs []llm.Message) []llm.Message {
+	start := -1
+	for i := range msgs {
+		if msgs[i].Origin == llm.MessageOriginPrompt || msgs[i].Origin == llm.MessageOriginCompactionCheckpoint {
+			start = i
+		}
+	}
+	if start < 0 {
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].Role == llm.RoleUser && hasNonResult(msgs[i]) {
+				start = i
+				break
+			}
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	var out []llm.Message
+	for _, message := range msgs[start:] {
+		if message.Origin == llm.MessageOriginPrompt || message.Origin == llm.MessageOriginSteer || message.Origin == llm.MessageOriginCompactionCheckpoint || len(out) == 0 && message.Role == llm.RoleUser && hasNonResult(message) {
+			out = append(out, message)
+		}
+	}
+	return out
+}
+
+func checkpointInstructionText(text string) string {
+	prefix, _, found := strings.Cut(text, checkpointProgress)
+	if !found {
+		return text
+	}
+	prefix = strings.TrimPrefix(prefix, checkpointHeader)
+	prefix = strings.TrimPrefix(prefix, checkpointPreamble)
+	return strings.TrimSpace(prefix)
+}
+
+func messageTextForCheckpoint(message llm.Message) string {
+	var parts []string
+	for _, block := range message.Content {
+		switch block.Kind {
+		case llm.BlockText:
+			parts = append(parts, block.Text)
+		case llm.BlockImage:
+			parts = append(parts, imageSummaryPlaceholder(block))
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // minTruncResult is the smallest tool_result worth shrinking; below it the saving
@@ -712,25 +847,11 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 	return est
 }
 
-// compactionReport is the exact post-compaction notice (design §12):
-//
-//	[compacted: 38 messages → summary · 9.1k in / 0.4k out · $0.05]
-//
-// The cost segment is omitted when usage has no known cost and the registry
-// cannot calculate one from a flat price entry.
-func compactionReport(registry *llm.Registry, model string, collapsed int, u llm.Usage) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "[compacted: %d messages → summary · %s in / %s out",
-		collapsed, kiloTokens(u.InputTokens), kiloTokens(u.OutputTokens))
-	usd, known := u.CostUSD, u.CostKnown
-	if !known && registry != nil {
-		usd, known = registry.Cost(model, u)
-	}
-	if known {
-		fmt.Fprintf(&b, " · $%.2f", usd)
-	}
-	b.WriteString("]")
-	return b.String()
+// compactionReport describes semantic turn reclamation and the resulting full
+// request footprint.
+func compactionReport(collapsed, before, after int) string {
+	return fmt.Sprintf("[compacted: %d turns → checkpoint · ctx ~%s → ~%s]",
+		collapsed, kiloTokens(before), kiloTokens(after))
 }
 
 // kiloTokens renders a token count in thousands with one decimal, matching the

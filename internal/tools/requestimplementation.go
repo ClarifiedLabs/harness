@@ -13,7 +13,7 @@ import (
 // requestImplementation is the model-callable tool the plan agent uses to ask
 // for a handoff to an implementation agent. It cannot perform the switch itself
 // (tools cannot prompt the user), so it records the request in the shared Pending
-// holder; the REPL approves it and performs the switch at the turn boundary. It
+// holder; the REPL approves it and performs the switch at the prompt boundary. It
 // requires a recorded plan: the implementation agent reads the plan as its task
 // spec rather than being handed only the brief.
 type requestImplementation struct {

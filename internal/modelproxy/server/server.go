@@ -154,7 +154,7 @@ type Options struct {
 	Now func() time.Time
 	// Metrics, when non-nil, receives Prometheus-style counters for every
 	// /v1/stream request (tokens, cost, requests, errors, duration), broken
-	// down by provider, model, and authorizing key. Nil disables metrics at
+	// down by provider, model, request purpose, and authorizing key. Nil disables metrics at
 	// the handler level; the command wires a registry in when the metrics
 	// endpoint is enabled.
 	Metrics *metrics.Registry
@@ -300,7 +300,7 @@ func NewHandler(opts Options) (*Handler, error) {
 
 // registerMetricFamilies pre-registers the proxy's Prometheus counter
 // families so HELP/TYPE are present even with zero traffic. Labels are
-// provider, model, and key (the authorizing key's name, or "anonymous").
+// provider, model, purpose, and key (the authorizing key's name, or "anonymous").
 func registerMetricFamilies(r *metrics.Registry) *metricsCollectors {
 	return &metricsCollectors{
 		requests:   r.Counter("model_proxy_requests_total", "Number of proxied model requests."),
@@ -338,7 +338,8 @@ func ObserveAuth(h *Handler, store authAuthorizer, next http.Handler) http.Handl
 }
 
 // RecordRejectedStream meters a stream request rejected before it reaches the
-// handler (a 401). provider/model are unknown and omitted; the key label is the
+// handler (a 401). provider/model are unknown and omitted; purpose is unknown
+// because the authenticated handler never decoded the body, and key is the
 // authorizing name or "anonymous".
 func (h *Handler) RecordRejectedStream(r *http.Request) {
 	if h.metrics == nil || h.metricFams == nil {
@@ -348,7 +349,7 @@ func (h *Handler) RecordRejectedStream(r *http.Request) {
 	if name, ok := apikey.AuthorizedName(r); ok {
 		key = name
 	}
-	labels := map[string]string{"key": key}
+	labels := map[string]string{"key": key, "purpose": string(llm.RequestPurposeUnknown)}
 	h.metricFams.requests.Inc(labels)
 	h.metricFams.errors.Inc(labels)
 }
@@ -369,9 +370,10 @@ func streamFailed(ctx context.Context, streamErr string, status int) bool {
 // target resolved (empty provider/model labels are omitted) or the model is
 // priced, so free models and pre-resolution failures still get counters. Cost is
 // recorded only when usage.CostKnown. failed is true when the stream errored or
-// returned a 4xx/5xx status. The key label is the authorizing API key's name
-// ("anonymous" when auth is disabled or absent).
-func (h *Handler) recordMetrics(r *http.Request, providerID, model string, usage llm.Usage, duration time.Duration, failed bool) {
+// returned a 4xx/5xx status. Purpose is normalized to the bounded llm contract;
+// key is the authorizing API key's name ("anonymous" when auth is disabled or
+// absent).
+func (h *Handler) recordMetrics(r *http.Request, providerID, model string, purpose llm.RequestPurpose, usage llm.Usage, duration time.Duration, failed bool) {
 	if h.metrics == nil || h.metricFams == nil {
 		return
 	}
@@ -379,7 +381,12 @@ func (h *Handler) recordMetrics(r *http.Request, providerID, model string, usage
 	if name, ok := apikey.AuthorizedName(r); ok {
 		key = name
 	}
-	labels := map[string]string{"provider": providerID, "model": model, "key": key}
+	labels := map[string]string{
+		"provider": providerID,
+		"model":    model,
+		"purpose":  string(llm.NormalizeRequestPurpose(purpose)),
+		"key":      key,
+	}
 	h.metricFams.requests.Inc(labels)
 	h.metricFams.duration.Add(duration.Seconds(), labels)
 	if failed {
@@ -795,6 +802,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		providerID string
 		apiType    string
 		model      string
+		purpose    = llm.RequestPurposeUnknown
 		usage      llm.Usage
 		stop       llm.StopReason
 		streamErr  string
@@ -813,6 +821,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			"provider", providerID,
 			"api_type", apiType,
 			"model", model,
+			"purpose", purpose,
 			"status", cw.statusCode(),
 			"request_bytes", reqBytes,
 			"response_bytes", cw.bytesWritten(),
@@ -844,7 +853,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		// Record every stream request, even one that failed before the target
 		// resolved (provider/model empty), so requests_total/errors_total reflect
 		// all client-facing failures, not just post-resolution ones.
-		h.recordMetrics(r, providerID, model, usage, time.Since(start), failed)
+		h.recordMetrics(r, providerID, model, purpose, usage, time.Since(start), failed)
 		if streamErr != "" {
 			attrs = append(attrs, "err", streamErr)
 			attrs = append(attrs, errAttrs...)
@@ -871,6 +880,8 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "malformed stream request"})
 		return
 	}
+	purpose = llm.NormalizeRequestPurpose(req.Request.Purpose)
+	req.Request.Purpose = purpose
 	targetID = strings.TrimSpace(req.TargetID)
 	if targetID == "" {
 		streamErr = "target_id is required"

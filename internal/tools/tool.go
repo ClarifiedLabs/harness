@@ -34,7 +34,7 @@ type Tool interface {
 }
 
 // MeteredResult is returned by tools that consume model tokens internally.
-// Dispatch preserves Usage so the agent can include it in turn/session totals.
+// Dispatch preserves Usage so the agent can include it in prompt/session totals.
 type MeteredResult struct {
 	Text  string
 	Usage llm.Usage
@@ -63,16 +63,16 @@ type BackgroundJobRequest struct {
 	Kind        string
 	Description string
 	Agent       string
-	// WaitForTurn marks work whose result must be incorporated before the parent
-	// agent may finish its current turn. Ordinary background commands leave this
+	// WaitForPrompt marks work whose result must be incorporated before the parent
+	// agent may finish its current prompt. Ordinary background commands leave this
 	// false; background delegates set it so the parent joins and synthesizes them.
-	WaitForTurn bool
-	Run         func(context.Context, string) (BackgroundJobResult, error)
+	WaitForPrompt bool
+	Run           func(context.Context, string) (BackgroundJobResult, error)
 }
 
 // BackgroundJobResult is the model-facing outcome of a completed background
 // tool job. TranscriptPath is for jobs, such as delegate agents, that persist a
-// separate transcript. Usage carries nested model spend back to the parent turn.
+// separate transcript. Usage carries nested model spend back to the parent prompt.
 type BackgroundJobResult struct {
 	Text           string
 	TranscriptPath string

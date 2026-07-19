@@ -40,13 +40,15 @@ type statsReport struct {
 }
 
 type collectedSessionStats struct {
-	state       Session
-	userTurns   int
-	modelTurns  int
-	modelCalls  int
-	retries     int
-	tools       toolStats
-	compactions compactionStats
+	state            Session
+	prompts          int
+	turns            int
+	modelCalls       int
+	retries          int
+	maintenanceCalls int
+	maintenanceUsage llm.Usage
+	tools            toolStats
+	compactions      compactionStats
 }
 
 type delegateStats struct {
@@ -136,32 +138,48 @@ func collectSessionStats(dir string) (collectedSessionStats, error) {
 	}
 	tools.parallel = parallel
 
-	userTurns := make(map[int]struct{})
-	modelTurns := make(map[[2]int]struct{})
+	prompts := make(map[int]struct{})
+	turns := make(map[[2]int]struct{})
+	attemptedTurns := make(map[[2]int]struct{})
 	modelCalls := 0
+	maintenanceCalls := 0
+	var maintenanceUsage llm.Usage
 	for _, ev := range events {
 		switch ev.Type {
 		case EventUser:
-			if ev.Turn > 0 {
-				userTurns[ev.Turn] = struct{}{}
+			if ev.Prompt > 0 {
+				prompts[ev.Prompt] = struct{}{}
 			}
-		case EventModelTurnUsage:
+		case EventTurnAttemptUsage:
 			modelCalls++
-			modelTurns[[2]int{ev.Turn, ev.ModelTurns}] = struct{}{}
+			if ev.Prompt > 0 && ev.Turn > 0 {
+				attemptedTurns[[2]int{ev.Prompt, ev.Turn}] = struct{}{}
+			}
+		case EventTurnComplete:
+			if ev.Prompt > 0 && ev.Turn > 0 {
+				turns[[2]int{ev.Prompt, ev.Turn}] = struct{}{}
+			}
+		case EventMaintenanceUsage:
+			maintenanceCalls++
+			if ev.Usage != nil {
+				maintenanceUsage = addUsage(maintenanceUsage, *ev.Usage)
+			}
 		}
 	}
-	retries := modelCalls - len(modelTurns)
+	retries := modelCalls - len(attemptedTurns)
 	if retries < 0 {
 		retries = 0
 	}
 	return collectedSessionStats{
-		state:       state,
-		userTurns:   len(userTurns),
-		modelTurns:  len(modelTurns),
-		modelCalls:  modelCalls,
-		retries:     retries,
-		tools:       tools,
-		compactions: compactions,
+		state:            state,
+		prompts:          len(prompts),
+		turns:            len(turns),
+		modelCalls:       modelCalls,
+		retries:          retries,
+		maintenanceCalls: maintenanceCalls,
+		maintenanceUsage: maintenanceUsage,
+		tools:            tools,
+		compactions:      compactions,
 	}, nil
 }
 
@@ -401,10 +419,14 @@ func writeConversationStats(w io.Writer, stats collectedSessionStats) {
 }
 
 func writeConversationValues(w io.Writer, indent string, stats collectedSessionStats) {
-	fmt.Fprintf(w, "%suser turns: %d\n", indent, stats.userTurns)
-	fmt.Fprintf(w, "%smodel turns: %d\n", indent, stats.modelTurns)
+	fmt.Fprintf(w, "%sprompts: %d\n", indent, stats.prompts)
+	fmt.Fprintf(w, "%sturns: %d\n", indent, stats.turns)
 	fmt.Fprintf(w, "%smodel calls: %d\n", indent, stats.modelCalls)
 	fmt.Fprintf(w, "%sretries: %d\n", indent, stats.retries)
+	fmt.Fprintf(w, "%smaintenance calls: %d\n", indent, stats.maintenanceCalls)
+	if stats.maintenanceCalls > 0 {
+		fmt.Fprintf(w, "%smaintenance usage: %d in / %d out\n", indent, stats.maintenanceUsage.InputTokens, stats.maintenanceUsage.OutputTokens)
+	}
 	fmt.Fprintf(w, "%sactive messages: %d\n", indent, len(stats.state.Messages))
 }
 

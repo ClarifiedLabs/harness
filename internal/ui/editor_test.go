@@ -36,14 +36,19 @@ func TestREPLEditPreloadsLatestVisibleTurnAndSendsEditedPrompt(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake",
 		llmtest.Step{
-			Events: []llm.StreamEvent{textDelta("first answer")},
-			Stop:   llm.StopEndTurn,
+			Events: []llm.StreamEvent{textDelta("checking earlier context"), toolStep("list_dir", `{"path":"."}`, "call_1")},
+			Stop:   llm.StopToolUse,
 			Usage:  llm.Usage{InputTokens: 10, OutputTokens: 2},
 		},
 		llmtest.Step{
-			Events: []llm.StreamEvent{textDelta("second answer")},
+			Events: []llm.StreamEvent{textDelta("latest answer")},
 			Stop:   llm.StopEndTurn,
 			Usage:  llm.Usage{InputTokens: 20, OutputTokens: 4},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("edited prompt answer")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 30, OutputTokens: 5},
 		},
 	)
 	app := newTestApp(t, &out, &errw, fp)
@@ -65,22 +70,24 @@ func TestREPLEditPreloadsLatestVisibleTurnAndSendsEditedPrompt(t *testing.T) {
 	if code := Run(in, app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if !strings.Contains(editorInitial, "first answer") || !strings.Contains(editorInitial, "[turn:") {
-		t.Fatalf("editor preload should include visible last-turn output, got %q", editorInitial)
+	if !strings.Contains(editorInitial, "latest answer") || !strings.Contains(editorInitial, "[turn: 2") {
+		t.Fatalf("editor preload should include the latest completed turn, got %q", editorInitial)
 	}
-	if strings.Contains(editorInitial, "first prompt") {
-		t.Fatalf("editor preload should exclude the user prompt, got %q", editorInitial)
+	for _, excluded := range []string{"first prompt", "checking earlier context", "[list_dir", "[turn: 1", "[prompt:"} {
+		if strings.Contains(editorInitial, excluded) {
+			t.Fatalf("editor preload should exclude %q from earlier prompt/turn output, got %q", excluded, editorInitial)
+		}
 	}
-	if len(fp.Requests) != 2 {
-		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want 3", len(fp.Requests))
 	}
 	msgs := app.Agent.Transcript()
-	if got := msgs[2].Content[0].Text; got != "follow up\nsecond line" {
+	if got := msgs[4].Content[0].Text; got != "follow up\nsecond line" {
 		t.Fatalf("edited prompt = %q", got)
 	}
 }
 
-func TestREPLEditEmptyPromptDoesNotRunTurn(t *testing.T) {
+func TestREPLEditEmptyPromptDoesNotRunPrompt(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
@@ -162,7 +169,7 @@ func TestREPLCtrlGDisplaysEditedPromptBeforeModelStatus(t *testing.T) {
 	if strings.Contains(got, "\a") || strings.Contains(got, "^G") {
 		t.Fatalf("Ctrl-G should not be replayed to the REPL view, errw=%q", got)
 	}
-	want := "> from editor\nsecond line\n" + submittedPromptSeparator + "[model: turn 1 waiting]"
+	want := "> from editor\nsecond line\n" + submittedPromptSeparator + "[turn: 1 waiting]"
 	if !strings.Contains(got, want) {
 		t.Fatalf("edited prompt should be replayed before model status; missing %q in %q", want, got)
 	}

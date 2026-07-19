@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 	"harness/prompts"
 )
 
-// userText is a genuine user turn-start message (text, not tool results).
+// userText is a genuine user input message (text, not tool results).
 func userText(s string) llm.Message {
 	return llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: s}}}
 }
@@ -83,14 +84,17 @@ func TestGenerateSummaryUsesGivenSystemPrompt(t *testing.T) {
 	if fp.Requests[0].System != handoffPrompt {
 		t.Errorf("summary call System = %q, want the handoff prompt (not compaction)", fp.Requests[0].System)
 	}
+	if fp.Requests[0].Purpose != llm.RequestPurposeHandoffSummary {
+		t.Errorf("summary call purpose = %q, want %q", fp.Requests[0].Purpose, llm.RequestPurposeHandoffSummary)
+	}
 	if fp.Requests[0].System == prompts.CompactionSummary() {
 		t.Error("GenerateSummary must not reuse the compaction prompt")
 	}
 }
 
-func TestCompactKeepsLastFourTurns(t *testing.T) {
-	// Ten whole turns; compaction keeps the system prompt plus the last four
-	// verbatim and collapses the older six into one summary message.
+func TestCompactKeepsLastEightTurns(t *testing.T) {
+	// Ten whole turns; compaction keeps the latest eight assistant turns and
+	// checkpoints the earlier progress and active instructions.
 	transcript := makeTurns(10)
 
 	fp := llmtest.New("fake", summaryStep("CANNED SUMMARY", 200, 40))
@@ -106,27 +110,26 @@ func TestCompactKeepsLastFourTurns(t *testing.T) {
 	msgs := a.Transcript()
 	mustValid(t, msgs)
 
-	// One summary message + last four turns (8 messages).
-	if len(msgs) != 1+8 {
-		t.Fatalf("want 1 summary + 8 kept messages, got %d:\n%s", len(msgs), dump(msgs))
+	if len(msgs) != 16 {
+		t.Fatalf("want checkpoint + 8 kept turns, got %d messages:\n%s", len(msgs), dump(msgs))
 	}
-	if msgs[0].Role != llm.RoleAssistant {
-		t.Errorf("summary should be an assistant message, got role %q", msgs[0].Role)
+	if msgs[0].Role != llm.RoleUser || msgs[0].Origin != llm.MessageOriginCompactionCheckpoint {
+		t.Errorf("first message should be a user checkpoint, got role %q origin %q", msgs[0].Role, msgs[0].Origin)
 	}
 	got := msgs[0].Content[0].Text
-	if !strings.HasPrefix(got, "=== Summary of earlier conversation ===\n") {
-		t.Errorf("summary message missing header, got %q", got)
+	if !strings.HasPrefix(got, checkpointHeader) {
+		t.Errorf("checkpoint missing header, got %q", got)
 	}
 	if !strings.Contains(got, "CANNED SUMMARY") {
 		t.Errorf("summary message should carry the model's summary, got %q", got)
 	}
 
-	// The kept turns are the last four (G..J), verbatim and whole.
-	if msgs[1].Content[0].Text != "G question" {
-		t.Errorf("first kept turn = %q, want %q", msgs[1].Content[0].Text, "G question")
+	// The kept turns are C..J; C's input survives verbatim in the checkpoint.
+	if msgs[1].Content[0].Text != "C answer" || !strings.Contains(got, "C question") {
+		t.Errorf("first retained turn/checkpoint mismatch: %q / %q", msgs[1].Content[0].Text, got)
 	}
-	if msgs[8].Content[0].Text != "J answer" {
-		t.Errorf("last kept message = %q, want %q", msgs[8].Content[0].Text, "J answer")
+	if msgs[15].Content[0].Text != "J answer" {
+		t.Errorf("last kept message = %q, want %q", msgs[15].Content[0].Text, "J answer")
 	}
 
 	// The summary request received the older turns but never the system prompt
@@ -136,6 +139,9 @@ func TestCompactKeepsLastFourTurns(t *testing.T) {
 	}
 	if fp.Requests[0].System != prompts.CompactionSummary() {
 		t.Fatalf("summary call system prompt = %q, want embedded compaction prompt", fp.Requests[0].System)
+	}
+	if fp.Requests[0].Purpose != llm.RequestPurposeCompaction {
+		t.Fatalf("summary call purpose = %q, want %q", fp.Requests[0].Purpose, llm.RequestPurposeCompaction)
 	}
 }
 
@@ -242,11 +248,141 @@ func TestMaybeCompactAboveThresholdCompacts(t *testing.T) {
 	}
 	msgs := a.Transcript()
 	mustValid(t, msgs)
-	if len(msgs) != 1+8 {
-		t.Fatalf("above threshold should compact to summary + 8, got %d", len(msgs))
+	if len(msgs) != 16 {
+		t.Fatalf("above threshold should compact to checkpoint + 8 turns, got %d", len(msgs))
 	}
 	if len(fp.Requests) != 1 {
 		t.Errorf("summary call count = %d, want 1", len(fp.Requests))
+	}
+}
+
+// A single prompt can contain many conversational turns. Compaction must count
+// each assistant response (plus its tool-result batch) as a turn, preserve the
+// latest eight pairs intact, and leave enough headroom that the next small turn
+// does not immediately trigger another summary call.
+func TestMaybeCompactLongSinglePromptUsesTurnBoundariesAndLowWaterMark(t *testing.T) {
+	const window = 20_000
+	prompt := userText("implement the complete request exactly")
+	prompt.Origin = llm.MessageOriginPrompt
+	transcript := []llm.Message{prompt}
+	for i := 0; i < 12; i++ {
+		id := fmt.Sprintf("call_%02d", i)
+		transcript = append(transcript,
+			asstToolUse(id, "read_file", fmt.Sprintf(`{"path":"file_%02d.go"}`, i)),
+			toolResult(id, fmt.Sprintf("result-%02d-%s", i, strings.Repeat("x", 5_500))),
+		)
+		if i == 1 {
+			steer := userText("also preserve the public API names")
+			steer.Origin = llm.MessageOriginSteer
+			transcript = append(transcript, steer)
+		}
+	}
+
+	fp := llmtest.New("fake",
+		summaryStep("FOUR EARLY TURNS COMPLETE", 60, 12),
+		summaryStep("NEXT FOUR TURNS COMPLETE", 70, 14),
+	)
+	a := newAgent(fp, &tools.Registry{}, Options{Model: "local", ContextWindow: window, CompactKeepTurns: 8})
+	a.SetSystem("sys")
+	a.SetTranscript(transcript)
+	if got := len(completedTurnSpans(a.Transcript())); got != 12 {
+		t.Fatalf("completed turns = %d, want 12", got)
+	}
+	if before := a.estimateContext(nil).Total; before*100 < window*compactThresholdPct {
+		t.Fatalf("test setup context = %d, want at least %d%% of %d", before, compactThresholdPct, window)
+	}
+
+	var archived CompactionArchive
+	a.SetCompactionArchiver(func(_ context.Context, archive CompactionArchive) (string, error) {
+		archived = archive
+		return "compactions/0001.input.json", nil
+	})
+	sink := &recordSink{}
+	usage, changed, err := a.MaybeCompact(context.Background(), window*compactThresholdPct/100, sink)
+	if err != nil {
+		t.Fatalf("MaybeCompact: %v", err)
+	}
+	if !changed {
+		t.Fatal("long single-prompt transcript was not compacted")
+	}
+	if usage.InputTokens != 60 || usage.OutputTokens != 12 || len(fp.Requests) != 1 {
+		t.Fatalf("summary usage/requests = %+v / %d, want 60/12 and one request", usage, len(fp.Requests))
+	}
+	if got := countCompletedTurns(archived.Messages); got != 4 {
+		t.Fatalf("archived completed turns = %d, want 4", got)
+	}
+
+	got := a.Transcript()
+	mustValid(t, got)
+	if len(got) != 17 || got[0].Origin != llm.MessageOriginCompactionCheckpoint {
+		t.Fatalf("compacted transcript should be checkpoint + 8 tool turns, got %d messages:\n%s", len(got), dump(got))
+	}
+	checkpoint := got[0].Content[0].Text
+	for _, exact := range []string{"implement the complete request exactly", "also preserve the public API names", "FOUR EARLY TURNS COMPLETE", "compactions/0001.input.json"} {
+		if !strings.Contains(checkpoint, exact) {
+			t.Fatalf("checkpoint missing %q:\n%s", exact, checkpoint)
+		}
+	}
+	for i := 0; i < 8; i++ {
+		wantID := fmt.Sprintf("call_%02d", i+4)
+		assistant := got[1+i*2]
+		result := got[2+i*2]
+		if assistant.Content[0].ToolUseID != wantID || result.Content[0].ResultForID != wantID {
+			t.Fatalf("kept turn %d split or reordered: tool_use=%q tool_result=%q want %q", i+1, assistant.Content[0].ToolUseID, result.Content[0].ResultForID, wantID)
+		}
+	}
+	after := a.estimateContext(nil).Total
+	if after*100 > window*compactTargetPct {
+		t.Fatalf("post-compaction context = %d, want at most %d%% of %d", after, compactTargetPct, window)
+	}
+
+	// A small next turn remains below the 78%% trigger, proving the 65%% target
+	// provides hysteresis instead of causing per-turn compaction churn.
+	withNext := append(a.Transcript(),
+		asstToolUse("call_12", "read_file", `{"path":"small.go"}`),
+		toolResult("call_12", "small follow-up complete"),
+	)
+	a.SetTranscript(withNext)
+	nextSize := a.estimateContext(nil).Total
+	if nextSize*100 >= window*compactThresholdPct {
+		t.Fatalf("small next turn unexpectedly crossed trigger: %d", nextSize)
+	}
+	_, changed, err = a.MaybeCompact(context.Background(), nextSize, sink)
+	if err != nil || changed || len(fp.Requests) != 1 {
+		t.Fatalf("small next turn caused compaction churn: changed=%v err=%v requests=%d", changed, err, len(fp.Requests))
+	}
+
+	// Once enough new large turns accumulate, a second compaction carries the
+	// original prompt and steer forward without recursively nesting the prior
+	// checkpoint or treating it as a conversational turn.
+	withMore := a.Transcript()
+	for i := 13; i < 16; i++ {
+		id := fmt.Sprintf("call_%02d", i)
+		withMore = append(withMore,
+			asstToolUse(id, "read_file", fmt.Sprintf(`{"path":"file_%02d.go"}`, i)),
+			toolResult(id, fmt.Sprintf("result-%02d-%s", i, strings.Repeat("y", 6_000))),
+		)
+	}
+	a.SetTranscript(withMore)
+	secondSize := a.estimateContext(nil).Total
+	if secondSize*100 < window*compactThresholdPct {
+		t.Fatalf("second compaction setup remained below trigger: %d", secondSize)
+	}
+	_, changed, err = a.MaybeCompact(context.Background(), secondSize, sink)
+	if err != nil || !changed || len(fp.Requests) != 2 {
+		t.Fatalf("second compaction = changed=%v err=%v requests=%d", changed, err, len(fp.Requests))
+	}
+	secondCheckpoint := a.Transcript()[0].Content[0].Text
+	for _, exact := range []string{"implement the complete request exactly", "also preserve the public API names", "NEXT FOUR TURNS COMPLETE"} {
+		if !strings.Contains(secondCheckpoint, exact) {
+			t.Fatalf("second checkpoint lost %q:\n%s", exact, secondCheckpoint)
+		}
+	}
+	if strings.Count(secondCheckpoint, checkpointHeader) != 1 {
+		t.Fatalf("second checkpoint nested the prior checkpoint header:\n%s", secondCheckpoint)
+	}
+	if after := a.estimateContext(nil).Total; after*100 > window*compactTargetPct {
+		t.Fatalf("second post-compaction context = %d, want at most %d%% of %d", after, compactTargetPct, window)
 	}
 }
 
@@ -256,7 +392,10 @@ func TestCompactSummaryFailureKeepsTranscript(t *testing.T) {
 	// up and the transcript is kept intact (r32 retries 1 + streamRetries times).
 	errSteps := make([]llmtest.Step, streamRetries+1)
 	for i := range errSteps {
-		errSteps[i] = llmtest.Step{Err: errors.New("api down")}
+		errSteps[i] = llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 7, OutputTokens: 1}}},
+			Err:    errors.New("api down"),
+		}
 	}
 	fp := llmtest.New("fake", errSteps...)
 	a := newAgent(fp, tools.Default(), Options{Model: "claude-opus-4-8"})
@@ -265,9 +404,12 @@ func TestCompactSummaryFailureKeepsTranscript(t *testing.T) {
 	a.SetTranscript(transcript)
 
 	sink := &recordSink{}
-	_, err := a.Compact(context.Background(), sink)
+	usage, err := a.Compact(context.Background(), sink)
 	if err == nil {
 		t.Fatalf("Compact should return the summary-call error")
+	}
+	if usage.InputTokens != 7*(streamRetries+1) || usage.OutputTokens != streamRetries+1 {
+		t.Fatalf("failed summary usage = %+v, want every reported retry attempt", usage)
 	}
 	// Full transcript intact — a visible context-length failure beats data loss.
 	if len(a.Transcript()) != len(transcript) {
@@ -306,11 +448,11 @@ func TestCompactDegradesToLastTurnWhenOversized(t *testing.T) {
 	}
 	msgs := a.Transcript()
 	mustValid(t, msgs)
-	// summary + the single last turn (user + assistant) = 3 messages.
-	if len(msgs) != 1+2 {
-		t.Fatalf("oversized kept turns should drop to the last turn (summary + 2), got %d:\n%s", len(msgs), dumpShort(msgs))
+	// checkpoint + the single last assistant turn = 2 messages.
+	if len(msgs) != 2 {
+		t.Fatalf("oversized kept turns should drop to checkpoint + last turn, got %d:\n%s", len(msgs), dumpShort(msgs))
 	}
-	if msgs[2].Content[0].Text != big {
+	if msgs[1].Content[0].Text != big {
 		t.Errorf("the single kept turn should be the most recent one")
 	}
 }
@@ -339,16 +481,16 @@ func TestCompactHardTruncatesWhenSingleTurnOversized(t *testing.T) {
 	msgs := a.Transcript()
 	mustValid(t, msgs)
 
-	var truncated bool
+	var retainedHuge bool
 	for _, m := range msgs {
 		for _, b := range m.Content {
-			if b.Kind == llm.BlockToolResult && len(b.ResultText) < len(huge) && strings.Contains(b.ResultText, "truncated") {
-				truncated = true
+			if b.Kind == llm.BlockToolResult && len(b.ResultText) >= len(huge) {
+				retainedHuge = true
 			}
 		}
 	}
-	if !truncated {
-		t.Errorf("the largest tool result should be hard-truncated with a marker")
+	if retainedHuge {
+		t.Errorf("the oversized tool result should not remain in active context")
 	}
 }
 
@@ -364,7 +506,7 @@ func TestCompactUsageReported(t *testing.T) {
 		t.Fatalf("Compact: %v", err)
 	}
 
-	// The compaction report names the message collapse and the summary-call usage.
+	// The compaction report names semantic turns and the context reduction.
 	var report string
 	for _, n := range sink.notices {
 		if strings.Contains(n, "compacted") {
@@ -374,23 +516,15 @@ func TestCompactUsageReported(t *testing.T) {
 	if report == "" {
 		t.Fatalf("expected a [compacted: …] notice, got %v", sink.notices)
 	}
-	if !strings.Contains(report, "9.1k in") || !strings.Contains(report, "0.4k out") {
-		t.Errorf("compaction report should show summary-call usage, got %q", report)
-	}
-	if !strings.Contains(report, "summary") {
-		t.Errorf("compaction report should mention the summary, got %q", report)
+	if !strings.Contains(report, "turns → checkpoint") || !strings.Contains(report, "ctx ~") {
+		t.Errorf("compaction report should show semantic turns and context reduction, got %q", report)
 	}
 }
 
-func TestCompactionReportUsesKnownUsageCost(t *testing.T) {
-	report := compactionReport(nil, "sakana:fugu-ultra", 3, llm.Usage{
-		InputTokens:  9100,
-		OutputTokens: 400,
-		CostUSD:      0.061,
-		CostKnown:    true,
-	})
-	if !strings.Contains(report, "$0.06") {
-		t.Fatalf("compaction report = %q, want usage cost", report)
+func TestCompactionReportShowsTurnsAndContextReduction(t *testing.T) {
+	report := compactionReport(3, 9100, 400)
+	if report != "[compacted: 3 turns → checkpoint · ctx ~9.1k → ~0.4k]" {
+		t.Fatalf("compaction report = %q", report)
 	}
 }
 
@@ -408,8 +542,8 @@ func TestCompactArchivesRemovedMessages(t *testing.T) {
 	if _, err := a.Compact(context.Background(), &recordSink{}); err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
-	if len(archived.Messages) != 12 {
-		t.Fatalf("archived %d messages, want older six turns (12 messages)", len(archived.Messages))
+	if len(archived.Messages) != 5 {
+		t.Fatalf("archived %d messages, want two turns plus the next turn input", len(archived.Messages))
 	}
 	if archived.Summary != "S" {
 		t.Fatalf("archived summary %q, want S", archived.Summary)
@@ -487,8 +621,8 @@ func TestContextWindowOverrideMovesTrigger(t *testing.T) {
 	if len(fp.Requests) != 1 {
 		t.Fatalf("override window should have triggered compaction (1 summary call), got %d", len(fp.Requests))
 	}
-	if got := len(a.Transcript()); got != 1+8 {
-		t.Fatalf("override-triggered compaction should collapse to summary + 8, got %d", got)
+	if got := len(a.Transcript()); got != 16 {
+		t.Fatalf("override-triggered compaction should collapse to checkpoint + 8 turns, got %d", got)
 	}
 }
 
@@ -513,7 +647,7 @@ func TestContextWindowOverrideMovesDegradeBudget(t *testing.T) {
 		return transcript
 	}
 
-	// With the override the ladder must shrink past rung 1 (keep last 4 turns) all
+	// With the override the ladder must shrink past rung 1 (keep last 8 turns) all
 	// the way to a single truncated turn.
 	const overrideWindow = 4000
 	ov := newAgent(llmtest.New("fake", summaryStep("S", 50, 10)), tools.Default(), Options{
@@ -544,8 +678,8 @@ func TestContextWindowOverrideMovesDegradeBudget(t *testing.T) {
 	}
 	// Sanity: the override result must be near its own budget, the default must
 	// keep all four turns verbatim (no truncation under 256k).
-	if len(def.Transcript()) != 1+16 {
-		t.Fatalf("default budget should keep last 4 turns verbatim (summary + 16), got %d", len(def.Transcript()))
+	if len(def.Transcript()) != 16 {
+		t.Fatalf("default budget should keep the last 8 turns, got %d", len(def.Transcript()))
 	}
 	if budget := overrideWindow * compactThresholdPct / 100; ovEst > budget+minTruncResult/bytesPerToken {
 		t.Fatalf("override degrade left estimate %d well above budget %d", ovEst, budget)
@@ -554,9 +688,8 @@ func TestContextWindowOverrideMovesDegradeBudget(t *testing.T) {
 
 // A single in-progress turn whose read-only tool result has ballooned over
 // budget has nothing older than the kept turns to summarize, but it must still
-// be shrunk in place rather than wedged against the context window (never wedge).
-// No summary model call happens on this path.
-func TestCompactShrinksOversizedSingleTurnWithoutSummary(t *testing.T) {
+// be summarized and archived rather than wedged against the context window.
+func TestCompactSummarizesOversizedEarlierTurn(t *testing.T) {
 	const window = 10_000 // budget = 7800 tokens ≈ 31.2k bytes
 	huge := strings.Repeat("x", 200_000)
 	transcript := []llm.Message{
@@ -565,7 +698,7 @@ func TestCompactShrinksOversizedSingleTurnWithoutSummary(t *testing.T) {
 		toolResult("c1", huge),
 		asstText("looked"),
 	}
-	fp := llmtest.New("fake") // no summary step: the degrade-only path must not call the model
+	fp := llmtest.New("fake", summaryStep("LOOKED SUMMARY", 20, 4))
 	a := newAgent(fp, tools.Default(), Options{Model: "local", ContextWindow: window})
 	a.SetSystem("sys")
 	a.SetTranscript(transcript)
@@ -586,11 +719,11 @@ func TestCompactShrinksOversizedSingleTurnWithoutSummary(t *testing.T) {
 	if !changed {
 		t.Fatal("an oversized single-turn transcript should be shrunk (changed=true), not a silent no-op")
 	}
-	if usage != (llm.Usage{}) {
-		t.Errorf("degrade-only path makes no summary call, usage = %+v, want zero", usage)
+	if usage.InputTokens != 20 || usage.OutputTokens != 4 {
+		t.Errorf("summary usage = %+v", usage)
 	}
-	if len(fp.Requests) != 0 {
-		t.Errorf("degrade-only path must not call the model, got %d requests", len(fp.Requests))
+	if len(fp.Requests) != 1 {
+		t.Errorf("expected one summary call, got %d requests", len(fp.Requests))
 	}
 	if est := estimateTokens(a.Transcript()); est > a.compactBudget() {
 		t.Errorf("shrunk transcript still over budget: est %d > budget %d", est, a.compactBudget())
@@ -638,19 +771,19 @@ func TestCompactUnderKeepTurnsSummarizesOlderTurnsWhenOverBudget(t *testing.T) {
 	if len(fp.Requests) != 1 {
 		t.Fatalf("summary requests = %d, want 1", len(fp.Requests))
 	}
-	if len(fp.Requests[0].Messages) != 2 {
-		t.Fatalf("summary input messages = %d, want the older turn only", len(fp.Requests[0].Messages))
+	if len(fp.Requests[0].Messages) != 3 {
+		t.Fatalf("summary input messages = %d, want older turn plus current input", len(fp.Requests[0].Messages))
 	}
 	got := a.Transcript()
 	mustValid(t, got)
-	if len(got) != 4 {
-		t.Fatalf("compacted transcript len = %d, want summary + current turn", len(got))
+	if len(got) != 3 {
+		t.Fatalf("compacted transcript len = %d, want checkpoint + current tool turn", len(got))
 	}
-	if !strings.HasPrefix(got[0].Content[0].Text, summaryHeader) || !strings.Contains(got[0].Content[0].Text, "OLDER SUMMARY") {
-		t.Fatalf("first message is not the compaction summary: %#v", got[0].Content[0])
+	if !strings.HasPrefix(got[0].Content[0].Text, checkpointHeader) || !strings.Contains(got[0].Content[0].Text, "OLDER SUMMARY") {
+		t.Fatalf("first message is not the compaction checkpoint: %#v", got[0].Content[0])
 	}
-	if got[1].Role != llm.RoleUser || got[1].Content[0].Text != "current question" {
-		t.Fatalf("latest turn was not kept verbatim after summary: %#v", got[1])
+	if !strings.Contains(got[0].Content[0].Text, "current question") || got[1].Role != llm.RoleAssistant {
+		t.Fatalf("current input/turn was not preserved by checkpoint: %#v", got)
 	}
 }
 
@@ -684,7 +817,7 @@ func TestCompactCurrentTinyShrinkNoticeThrottled(t *testing.T) {
 	a.noticeCurrentShrink(sink, "auto", 10_000, 9_500)
 	a.noticeCurrentShrink(sink, "auto", 11_000, 10_500)
 	a.noticeCurrentShrink(sink, "auto", 20_000, 18_000)
-	if got := countNoticesContaining(sink.notices, "shrank oversized turn"); got != 2 {
+	if got := countNoticesContaining(sink.notices, "archived oversized turn payload"); got != 2 {
 		t.Fatalf("shrink notices = %d, want first tiny + material; notices=%v", got, sink.notices)
 	}
 }
@@ -692,11 +825,11 @@ func TestCompactCurrentTinyShrinkNoticeThrottled(t *testing.T) {
 // A transcript with <= keepTurns turns that already fits the budget is a genuine
 // no-op: compact must report changed=false so the mid-loop caller does not churn
 // its trigger state (reset lastInput/appendBoundary and re-estimate the whole
-// transcript) every model turn.
+// transcript) every turn.
 func TestCompactNoOpReportsUnchanged(t *testing.T) {
 	a := newAgent(llmtest.New("fake"), tools.Default(), Options{Model: "claude-opus-4-8"})
 	a.SetSystem("sys")
-	a.SetTranscript(makeTurns(2)) // 2 turns <= keepTurns(4), tiny, well under budget
+	a.SetTranscript(makeTurns(2)) // 2 turns <= keepTurns(8), tiny, well under budget
 
 	before := len(a.Transcript())
 	sink := &recordSink{}
@@ -820,7 +953,7 @@ func TestSummarizeUsageSurvivesZeroedDoneFrame(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	_, usage, err := a.summarize(context.Background(), prompts.CompactionSummary(), []llm.Message{
 		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "old"}}},
-	})
+	}, llm.RequestPurposeCompaction)
 	if err != nil {
 		t.Fatalf("summarize: %v", err)
 	}
@@ -865,7 +998,7 @@ func TestProactiveCompactionMidTurn(t *testing.T) {
 			Stop:   llm.StopToolUse,
 			Usage:  llm.Usage{InputTokens: 10, OutputTokens: 2},
 		},
-		llmtest.Step{ // the mid-turn summary call
+		llmtest.Step{ // the mid-prompt maintenance summary call
 			Events: []llm.StreamEvent{textDelta("the summary")},
 			Stop:   llm.StopEndTurn,
 			Usage:  llm.Usage{InputTokens: 50, OutputTokens: 5},
@@ -880,21 +1013,21 @@ func TestProactiveCompactionMidTurn(t *testing.T) {
 	a.SetTranscript(seedTurns(5))
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
 	if len(fp.Requests) != 3 {
 		t.Fatalf("provider called %d times, want 3 (step, summary, step)", len(fp.Requests))
 	}
-	// The post-compaction request starts with the summary message.
+	// The post-compaction request starts with the user checkpoint.
 	first := fp.Requests[2].Messages[0]
-	if first.Role != llm.RoleAssistant {
-		t.Fatalf("post-compaction summary role = %q, want assistant", first.Role)
+	if first.Role != llm.RoleUser {
+		t.Fatalf("post-compaction checkpoint role = %q, want user", first.Role)
 	}
-	if !strings.HasPrefix(first.Content[0].Text, summaryHeader) {
-		t.Errorf("post-compaction request should start with the summary, got %q", first.Content[0].Text)
+	if !strings.HasPrefix(first.Content[0].Text, checkpointHeader) {
+		t.Errorf("post-compaction request should start with the checkpoint, got %q", first.Content[0].Text)
 	}
 	var compacted bool
 	for _, n := range sink.notices {
@@ -905,9 +1038,9 @@ func TestProactiveCompactionMidTurn(t *testing.T) {
 	if !compacted {
 		t.Errorf("no compaction notice, notices=%v", sink.notices)
 	}
-	// Summary-call usage folds into the turn total (10+50+20 inputs).
-	if got := sink.turnUsage[0].Usage.InputTokens; got != 80 {
-		t.Errorf("turn input tokens = %d, want 80", got)
+	// Summary-call usage folds into the prompt total (10+50+20 inputs).
+	if got := sink.promptUsage[0].Usage.InputTokens; got != 80 {
+		t.Errorf("prompt input tokens = %d, want 80", got)
 	}
 }
 
@@ -929,8 +1062,8 @@ func TestNoMidTurnCompactionUnderThreshold(t *testing.T) {
 	a.SetTranscript(seedTurns(5))
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(fp.Requests) != 2 {
 		t.Errorf("provider called %d times, want 2 (no summary call)", len(fp.Requests))
@@ -945,7 +1078,7 @@ func TestNoMidTurnCompactionUnderThreshold(t *testing.T) {
 func TestPostTurnCompactionUsesFreshTranscriptEstimate(t *testing.T) {
 	// Window 1000 tokens -> trigger at 780 tokens. The final assistant message is
 	// large enough to cross the threshold even though the provider-reported input
-	// count for that model turn is tiny.
+	// count for that turn is tiny.
 	final := strings.Repeat("z", 8000)
 	fp := llmtest.New("fake",
 		llmtest.Step{
@@ -963,8 +1096,8 @@ func TestPostTurnCompactionUsesFreshTranscriptEstimate(t *testing.T) {
 	a.SetTranscript(seedTurns(5))
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 	if len(fp.Requests) != 2 {
@@ -979,7 +1112,7 @@ func TestPostTurnCompactionUsesFreshTranscriptEstimate(t *testing.T) {
 	if !compacted {
 		t.Fatalf("post-turn compaction did not run, notices=%v", sink.notices)
 	}
-	if got := sink.turnUsage[0].Usage.InputTokens; got != 60 {
-		t.Errorf("turn input tokens = %d, want 60 including summary call", got)
+	if got := sink.promptUsage[0].Usage.InputTokens; got != 60 {
+		t.Errorf("prompt input tokens = %d, want 60 including summary call", got)
 	}
 }

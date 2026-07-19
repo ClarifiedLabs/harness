@@ -171,7 +171,7 @@ func WaitReadable(f *os.File, timeout time.Duration) bool {
 }
 
 // EnableEscLineEnd makes Escape act as a canonical-mode line delimiter. The
-// REPL enables this only while a model turn is active so Esc-Esc can be observed
+// REPL enables this only while a prompt is active so Esc-Esc can be observed
 // immediately without switching the whole prompt to raw mode. The returned
 // cleanup restores the original termios; both setup and cleanup are silent
 // no-ops when no controlling terminal exists.

@@ -225,10 +225,10 @@ func TestFallbackCandidateDecodes(t *testing.T) {
 
 func TestAPITypeFromModelShape(t *testing.T) {
 	responses := Provider{
-		ID:   "sakana",
-		NPM:  "@ai-sdk/openai-compatible",
-		API:  "https://api.sakana.ai/v1",
-		Env:  []string{"SAKANA_API_KEY"},
+		ID:  "sakana",
+		NPM: "@ai-sdk/openai-compatible",
+		API: "https://api.sakana.ai/v1",
+		Env: []string{"SAKANA_API_KEY"},
 		Models: map[string]Model{
 			"fugu": {ID: "fugu", Provider: ModelProvider{Shape: "responses"}},
 		},
@@ -238,8 +238,8 @@ func TestAPITypeFromModelShape(t *testing.T) {
 	}
 
 	completions := Provider{
-		ID:   "azure",
-		NPM:  "@ai-sdk/azure",
+		ID:  "azure",
+		NPM: "@ai-sdk/azure",
 		Models: map[string]Model{
 			"kimi": {ID: "kimi", Provider: ModelProvider{Shape: "completions"}},
 		},

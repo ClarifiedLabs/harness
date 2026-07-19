@@ -1,5 +1,5 @@
-// Package agent runs one user turn as a loop of model turns until the model
-// stops asking for tools, executing each model turn's tool calls in emission order
+// Package agent runs one user prompt as a loop of turns until the model stops
+// asking for tools, executing each turn's tool calls in emission order
 // (concurrently when they are all read-only) and upholding the transcript
 // invariant after every mutation (design §8, §4).
 package agent
@@ -26,7 +26,7 @@ import (
 	"harness/internal/tools"
 )
 
-// streamRetries is the per-model-turn mid-stream retry budget: a model turn whose stream
+// streamRetries is the per-turn mid-stream retry budget: a turn whose stream
 // fails after the first byte may be re-requested this many times (spec §2).
 // Retries do not consume the maxTurns budget.
 const streamRetries = 2
@@ -34,20 +34,21 @@ const streamRetries = 2
 // maxParallelTools bounds concurrent read-only dispatch (spec §8).
 const maxParallelTools = 8
 
-// EventSink receives the turn's observable events for rendering. The agent loop
+// EventSink receives the prompt's observable events for rendering. The agent loop
 // owns the transcript and the control flow; the sink only reports. Phase 10's
 // renderer implements it (design §8.1, §10).
 type EventSink interface {
 	TextDelta(text string) // incremental assistant text
 	ReasoningSummary(text string)
-	ModelTurnStart(modelTurn, attempt int, ctx ContextEstimate)
-	ModelTurnComplete(usage ModelTurnUsage)
+	TurnAttemptStart(turn, attempt int, ctx ContextEstimate)
+	TurnAttemptComplete(usage TurnAttemptUsage)
 	ToolUseStart(call llm.ToolCall)
 	ToolUseDelta(index int, delta string)
 	ToolStart(call llm.ToolCall)      // a tool call is about to run
 	ToolResult(result llm.ToolResult) // a tool call finished
 	Notice(msg string)                // out-of-band notices (max-turns, cancelled)
-	TurnComplete(usage TurnUsage)     // end of the turn
+	TurnComplete(usage TurnUsage)     // end of one conversational turn
+	PromptComplete(usage PromptUsage) // end of the prompt
 }
 
 // AssistantPhaseSink is implemented by sinks that want provider phase metadata
@@ -57,9 +58,8 @@ type AssistantPhaseSink interface {
 }
 
 // CompactionProgressSink is implemented by sinks that want transient progress
-// while compaction summarizes old context. The callbacks are balanced around
-// model-backed compaction only; local-only degradation and no-op compaction do
-// not emit them.
+// while compaction inspects or summarizes old context. The callbacks are
+// balanced around every invoked compaction, including local degradation.
 type CompactionProgressSink interface {
 	CompactionStart()
 	CompactionComplete()
@@ -89,44 +89,71 @@ type RequestContextProvider interface {
 	RequestContext() []string
 }
 
-// TurnWorkCoordinator is implemented by sinks that own background work whose
-// results must be incorporated before the current parent turn may finish.
-// Usage is drained exactly once into the parent turn; completion context is
+// PromptWorkCoordinator is implemented by sinks that own background work whose
+// results must be incorporated before the current parent prompt may finish.
+// Usage is drained exactly once into the parent prompt; completion context is
 // delivered separately through RequestContextProvider.
-type TurnWorkCoordinator interface {
-	PendingTurnWork() bool
-	WaitForTurnWork(context.Context) (llm.Usage, error)
-	DrainTurnWorkUsage() llm.Usage
+type PromptWorkCoordinator interface {
+	PendingPromptWork() bool
+	WaitForPromptWork(context.Context) (llm.Usage, error)
+	DrainPromptWorkUsage() llm.Usage
 }
 
-// SteerInput is a prepared mid-turn steering message. Text and images are
+// SteerInput is a prepared in-prompt steering message. Text and images are
 // appended as a RoleUser transcript message when a tool round gives the loop a
 // chance to inject it; RequestContext is visible to subsequent model requests in
-// the current turn without being persisted into the transcript.
+// the current prompt without being persisted into the transcript.
 type SteerInput struct {
 	Text           string
 	Images         []llm.ContentBlock
 	RequestContext []string
 }
 
-// TurnUsage is the per-user-turn summary handed to the sink (design §10 usage line).
+// TurnUsage is the accounting for one conversational turn. A turn contains one
+// successful provider response (plus any retry attempts) and the complete tool
+// result batch requested by that response.
 type TurnUsage struct {
-	ModelTurns int
-	Usage      llm.Usage
-	// Wasted is the subset of Usage spent on model-turn attempts that were
+	Turn     int
+	Attempts int
+	Usage    llm.Usage
+	Wasted   llm.Usage
+	Context  ContextEstimate
+}
+
+// PromptUsage is the per-prompt summary handed to the sink (design §10 usage line).
+type PromptUsage struct {
+	Turns int
+	Usage llm.Usage
+	// Maintenance is the subset of Usage spent on model calls that are not
+	// conversational turns, such as automatic compaction.
+	Maintenance llm.Usage
+	// Wasted is the subset of Usage spent on turn attempts that were
 	// discarded and re-requested after a mid-stream failure (r51+r52). It is
 	// already included in Usage; surfacing it lets the UI show the retry cost.
 	Wasted  llm.Usage
 	Context ContextEstimate
 }
 
-// ModelTurnUsage is the token accounting for one provider request attempt.
-// ModelTurn is the logical model turn in the current user turn; Attempt is 1
+// TurnAttemptUsage is the token accounting for one provider request attempt.
+// Turn is the logical turn in the current prompt; Attempt is 1
 // for the first stream request and higher for retry attempts.
-type ModelTurnUsage struct {
-	ModelTurn int
-	Attempt   int
-	Usage     llm.Usage
+type TurnAttemptUsage struct {
+	Turn    int
+	Attempt int
+	Usage   llm.Usage
+}
+
+// MaintenanceUsage reports a model call that supports a prompt without
+// creating a conversational turn.
+type MaintenanceUsage struct {
+	Purpose string
+	Usage   llm.Usage
+}
+
+// MaintenanceSink is implemented by sinks that persist maintenance accounting
+// separately from conversational turns.
+type MaintenanceSink interface {
+	MaintenanceComplete(MaintenanceUsage)
 }
 
 // ContextEstimate is a coarse request-footprint estimate for UI diagnostics.
@@ -147,14 +174,14 @@ type ContextEstimate struct {
 // unlimited.
 type Options struct {
 	MaxTurns int
-	// MaxTurnTokens stops a user turn once accumulated tokens for the turn reach
+	// MaxPromptTokens stops a prompt once its accumulated tokens reach
 	// this ceiling; zero means unlimited. Enforcement lives in the turn loop.
-	MaxTurnTokens int
-	// MaxOutputTokens caps one normal model turn's output; zero uses the shared
+	MaxPromptTokens int
+	// MaxOutputTokens caps one normal turn's output; zero uses the shared
 	// automatic provider policy. Prewarm and compaction summaries set their own
 	// request caps and do not use this value.
 	MaxOutputTokens int
-	// MaxPromptCostUSD stops a user turn once its accumulated model cost (USD)
+	// MaxPromptCostUSD stops a prompt once its accumulated model cost (USD)
 	// reaches this ceiling; zero means unlimited. Enforced only when provider
 	// usage includes known cost, otherwise the budget cannot fire.
 	MaxPromptCostUSD float64
@@ -200,11 +227,10 @@ type Options struct {
 	// One-shot, delegate, and non-interactive runs leave it false to take the
 	// cheaper 5-minute breakpoint. Forwarded to llm.Request.LongCacheTTL.
 	Interactive bool
-	// Steer enables mid-turn steering: a prompt submitted by the user while a
-	// model turn is running is injected as a RoleUser message before the next
-	// model request (between tool rounds) rather than waiting for the turn to
-	// end. The REPL supplies text via Steer. Disabled (false) leaves the loop
-	// untouched — the caller never injects mid-turn.
+	// Steer enables in-prompt steering: input submitted while a prompt runs is
+	// injected as a RoleUser message before the next turn rather than waiting
+	// for the prompt to end. The REPL supplies text via Steer. Disabled (false)
+	// leaves the loop untouched.
 	Steer bool
 }
 
@@ -220,9 +246,9 @@ type Agent struct {
 	system                    string
 	model                     string
 	maxTurns                  int
-	maxTurnTokens             int     // accumulated-token ceiling per user turn; 0 = unlimited
-	maxOutputTokens           int     // per-normal-model-turn output cap; 0 = automatic
-	maxPromptCostUSD          float64 // accumulated USD ceiling per user turn; 0 = unlimited
+	maxPromptTokens           int     // accumulated-token ceiling per prompt; 0 = unlimited
+	maxOutputTokens           int     // per-turn output cap; 0 = automatic
+	maxPromptCostUSD          float64 // accumulated USD ceiling per prompt; 0 = unlimited
 	contextWindow             int     // -context-window override; 0 = use the registry default
 	observedContextWindow     int     // smaller provider-reported limit learned from an overflow error
 	reasoning                 llm.ReasoningConfig
@@ -238,7 +264,7 @@ type Agent struct {
 	showDiffs                 bool
 	responsesStateful         bool
 	interactive               bool            // 1h Anthropic cache breakpoint; see Options.Interactive
-	steer                     chan SteerInput // buffered mid-turn steer input; nil when Options.Steer is false
+	steer                     chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
 	responseState             llm.ResponseState
 	proxySessionID            string
 }
@@ -265,7 +291,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		registry:                  modelRegistry,
 		model:                     opts.Model,
 		maxTurns:                  opts.MaxTurns,
-		maxTurnTokens:             opts.MaxTurnTokens,
+		maxPromptTokens:           opts.MaxPromptTokens,
 		maxOutputTokens:           opts.MaxOutputTokens,
 		maxPromptCostUSD:          opts.MaxPromptCostUSD,
 		contextWindow:             opts.ContextWindow,
@@ -366,7 +392,7 @@ func (a *Agent) SetServerTools(serverTools []llm.ServerTool) {
 // SetHooks replaces the lifecycle hook runner used by subsequent turns.
 func (a *Agent) SetHooks(runner *hooks.Runner) { a.hooks = runner }
 
-// Steer injects text as a mid-turn steering message. It is the simple text-only
+// Steer injects text as an in-prompt steering message. It is the simple text-only
 // helper for callers that do not need images or request-only context.
 func (a *Agent) Steer(text string) {
 	text = strings.TrimSpace(text)
@@ -376,12 +402,12 @@ func (a *Agent) Steer(text string) {
 	a.SteerContent(SteerInput{Text: text})
 }
 
-// SteerContent injects prepared content as a mid-turn steering message: the loop
+// SteerContent injects prepared content as an in-prompt steering message: the loop
 // drains it before the next model request (between tool rounds) and appends it as
 // a RoleUser message. It is a no-op when steering was not enabled
 // (Options.Steer false), the input is empty, or the steer buffer is full, so a
 // flooding caller cannot block the REPL. SteerContent is safe to call
-// concurrently with a running turn.
+// concurrently with a running prompt.
 func (a *Agent) SteerContent(input SteerInput) {
 	if a.steer == nil || steerInputEmpty(input) {
 		return
@@ -394,17 +420,17 @@ func (a *Agent) SteerContent(input SteerInput) {
 	}
 }
 
-// DrainSteer pops all queued mid-turn steer text that the loop has not yet
+// DrainSteer pops all queued in-prompt steer text that the loop has not yet
 // consumed (e.g. a turn that ended with StopEndTurn and no tool round to inject
-// into, a budget/cancel break). The REPL calls this at turnDone to recover
-// undelivered steers and run them as the next turn, so a prompt submitted during
+// into, a budget/cancel break). The REPL calls this at prompt completion to recover
+// undelivered steers and run them as the next prompt, so input submitted during
 // a turn is never silently lost. It returns "" when steering is disabled or
 // nothing is queued. Non-blocking.
 func (a *Agent) DrainSteer() string {
 	return a.DrainSteerContent().Text
 }
 
-// DrainSteerContent pops all queued prepared mid-turn steer input that the loop
+// DrainSteerContent pops all queued prepared in-prompt steer input that the loop
 // has not yet consumed. Non-blocking.
 func (a *Agent) DrainSteerContent() SteerInput {
 	return a.drainSteer()
@@ -482,10 +508,11 @@ func (a *Agent) ContextRequest() llm.Request {
 }
 
 // ContextRequestWithContext is ContextRequest plus request-only context, matching
-// the message shape used by RunTurnContentWithContext.
+// the message shape used by RunPromptContentWithContext.
 func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 	return llm.Request{
 		Model:          a.model,
+		Purpose:        llm.RequestPurposeTurn,
 		System:         a.system,
 		Messages:       append([]llm.Message(nil), a.transcript...),
 		Tools:          cloneToolSpecs(a.toolSpecs),
@@ -542,31 +569,39 @@ func (a *Agent) PrewarmRequest() (llm.Request, bool) {
 		// after the cached prefix and is never persisted.
 		req.Messages = []llm.Message{a.userMessage("warm cache", nil)}
 	}
-	req.MaxTokens = 1                     // smallest legal cap: only the prefill matters
+	req.MaxTokens = 1 // smallest legal cap: only the prefill matters
+	req.Purpose = llm.RequestPurposePrewarm
 	req.Reasoning = llm.ReasoningConfig{} // no thinking/effort — a pure prefix write
 	req.RequestContext = nil
 	return req, true
 }
 
 // PrewarmFunc captures the current provider and a PrewarmRequest snapshot and
-// returns a closure that streams the warm-up request and discards its output.
+// returns a closure that streams the warm-up request, discards its output, and
+// returns any provider-reported usage for maintenance accounting.
 // Call it on the goroutine that owns the agent (before the input loop); the
 // returned closure shares no mutable agent state, so it is safe to run in a
 // background goroutine. ok is false when there is nothing to warm.
-func (a *Agent) PrewarmFunc() (func(context.Context), bool) {
+func (a *Agent) PrewarmFunc() (func(context.Context) llm.Usage, bool) {
 	req, ok := a.PrewarmRequest()
 	if !ok {
 		return nil, false
 	}
 	provider := a.provider
-	return func(ctx context.Context) {
-		for _, err := range provider.Stream(ctx, req) {
+	return func(ctx context.Context) llm.Usage {
+		var usage llm.Usage
+		for event, err := range provider.Stream(ctx, req) {
 			if err != nil {
 				// Best-effort: a failed warm-up just means the first real request
-				// pays the cold-cache cost.
-				return
+				// pays the cold-cache cost. Preserve usage already reported before
+				// the failure because those tokens may still be billed.
+				return usage
+			}
+			if (event.Kind == llm.EventUsage || event.Kind == llm.EventDone) && event.Usage != nil {
+				usage = mergeUsage(usage, *event.Usage)
 			}
 		}
+		return usage
 	}, true
 }
 
@@ -612,8 +647,8 @@ func (a *Agent) estimateContextForTranscript(extraContext []string, transcript [
 	return est
 }
 
-// modelTurnResult holds what one model turn produced after assembly.
-type modelTurnResult struct {
+// turnResult holds what one conversational turn produced after assembly.
+type turnResult struct {
 	text       string
 	reasoning  []llm.ContentBlock // thinking / redacted_thinking / reasoning blocks, in arrival order
 	toolCalls  []llm.ToolCall
@@ -621,9 +656,10 @@ type modelTurnResult struct {
 	usage      llm.Usage
 	stopReason llm.StopReason
 	responseID string
+	attempts   int
 }
 
-func (r modelTurnResult) hasPartialOutput() bool {
+func (r turnResult) hasPartialOutput() bool {
 	return r.text != "" || len(r.toolCalls) > 0
 }
 
@@ -642,11 +678,11 @@ type RequestSnapshot struct {
 	UsedPrevious bool
 }
 
-// ModelTurnAbandonSink is an optional event sink extension for renderers that
+// TurnAttemptAbandonSink is an optional event sink extension for renderers that
 // persist replay metadata. It marks a streamed attempt whose visible deltas were
-// discarded from the transcript because the model turn will be retried.
-type ModelTurnAbandonSink interface {
-	ModelTurnAbandoned(modelTurn, attempt int)
+// discarded from the transcript because the turn will be retried.
+type TurnAttemptAbandonSink interface {
+	TurnAttemptAbandoned(turn, attempt int)
 }
 
 func (a *Agent) modelRequest(requestContext []string) modelRequest {
@@ -658,6 +694,7 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 	estimate := a.estimatePayloadContextForTranscript(requestContext, transcript, payloadMessages)
 	req := llm.Request{
 		Model:                a.model,
+		Purpose:              llm.RequestPurposeTurn,
 		System:               a.system,
 		Messages:             payloadMessages,
 		Tools:                cloneToolSpecs(a.toolSpecs),
@@ -776,7 +813,7 @@ func (a *Agent) estimatePayloadContextForTranscript(requestContext []string, tra
 	return est
 }
 
-func (a *Agent) updateResponseState(res modelTurnResult) {
+func (a *Agent) updateResponseState(res turnResult) {
 	if !a.responsesStateful {
 		return
 	}
@@ -796,7 +833,7 @@ func (a *Agent) updateResponseState(res modelTurnResult) {
 // already proved everything up to validatedPrefix valid, and only the suffix
 // appended since needs re-walking (r62). A full walk runs only after the prefix
 // is reset — on SetTranscript/resume, after compaction replaces the transcript,
-// or after any failure. This turns the per-turn validation cost from O(n²) over
+// or after any failure. This turns the per-prompt validation cost from O(n²) over
 // a long session into O(n).
 func (a *Agent) validateTranscript(phase string) error {
 	if a.validatedPrefix < 0 || a.validatedPrefix > len(a.transcript) {
@@ -811,45 +848,48 @@ func (a *Agent) validateTranscript(phase string) error {
 	return nil
 }
 
-// RunTurn appends the user message, then loops model turns until the model
-// stops requesting tools or the model-turn budget is hit (design §8.1). Cancellation
+// RunPrompt appends the user message, then loops over turns until the model
+// stops requesting tools or the prompt's turn budget is hit (design §8.1). Cancellation
 // mid-stream applies the §4 cancel repair and returns ctx.Err(); the transcript
 // is left valid (re-sendable) in every exit path.
-func (a *Agent) RunTurn(ctx context.Context, userText string, sink EventSink) error {
-	return a.RunTurnContent(ctx, userText, nil, sink)
+func (a *Agent) RunPrompt(ctx context.Context, userText string, sink EventSink) error {
+	return a.RunPromptContent(ctx, userText, nil, sink)
 }
 
-// RunTurnContent is RunTurn with optional user-provided image blocks. Images
+// RunPromptContent is RunPrompt with optional user-provided image blocks. Images
 // are placed before text so vision providers see the visual context first.
-func (a *Agent) RunTurnContent(ctx context.Context, userText string, images []llm.ContentBlock, sink EventSink) error {
-	return a.RunTurnContentWithContext(ctx, userText, images, nil, 0, sink)
+func (a *Agent) RunPromptContent(ctx context.Context, userText string, images []llm.ContentBlock, sink EventSink) error {
+	return a.RunPromptContentWithContext(ctx, userText, images, nil, 0, sink)
 }
 
-// RunTurnContentWithContext is RunTurnContent plus request-only hook context.
-// extraContext is visible to model requests for this turn but is not persisted
+// RunPromptContentWithContext is RunPromptContent plus request-only hook context.
+// extraContext is visible to model requests for this prompt but is not persisted
 // into the transcript.
-func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, images []llm.ContentBlock, extraContext []string, turnID int, sink EventSink) error {
+func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string, images []llm.ContentBlock, extraContext []string, promptID int, sink EventSink) error {
 	a.compactFallbackNotice = compactFallbackNoticeState{}
-	a.transcript = append(a.transcript, a.userMessage(userText, images))
+	promptMessage := a.userMessage(userText, images)
+	promptMessage.Origin = llm.MessageOriginPrompt
+	a.transcript = append(a.transcript, promptMessage)
 
 	var total llm.Usage
-	var lastInput int // input tokens the final model turn reported (drives the trigger)
+	var maintenanceTotal llm.Usage
+	var lastInput int // input tokens the final turn reported (drives the trigger)
 	var lastContext ContextEstimate
-	modelTurns := 0
+	turns := 0
 	unlimited := a.maxTurns <= 0
 	stopHookActive := false
 	var guard turnGuard
-	var wastedTotal llm.Usage // tokens spent on retried-and-discarded model-turn attempts (r51+r52)
+	var wastedTotal llm.Usage // tokens spent on retried-and-discarded turn attempts (r51+r52)
 	appendBoundary := 0       // transcript length measured by lastInput (drives the r44 trigger)
 	var steerContext []string
-	forceTurnWorkSynthesis := false
+	forcePromptWorkSynthesis := false
 
-	for unlimited || modelTurns < a.maxTurns || forceTurnWorkSynthesis {
+	for unlimited || turns < a.maxTurns || forcePromptWorkSynthesis {
 		// Live-transcript retention (design §12, r9+r20): shrink stale large
 		// tool outputs and aged images before building the request, so they are
 		// not re-sent verbatim every turn. Pure local edit, invariant-preserving.
 		a.applyRetention(sink)
-		requestContext := a.requestContext(appendTurnContext(extraContext, steerContext), sink)
+		requestContext := a.requestContext(appendPromptContext(extraContext, steerContext), sink)
 		modelReq := a.modelRequest(requestContext)
 		lastContext = modelReq.estimate
 		// Proactive trigger (spec §4): a turn whose tool results balloon the
@@ -860,37 +900,47 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		if a.overThreshold(a.triggerTokens(lastInput, appendBoundary)) {
 			// Only reset the trigger state when compaction actually rewrote the
 			// transcript. A no-op compaction that reset lastInput/appendBoundary
-			// would force a full-transcript re-estimate every model turn with zero
+			// would force a full-transcript re-estimate every turn with zero
 			// progress (no-op churn).
-			if compUsage, changed, err := a.compactTriggered(ctx, sink, "auto"); err == nil && changed {
+			compUsage, changed, err := a.compactTriggered(ctx, sink, "auto")
+			if compUsage != (llm.Usage{}) {
 				total = add(total, compUsage)
+				maintenanceTotal = add(maintenanceTotal, compUsage)
+				reportMaintenance(sink, "compaction", compUsage)
+			}
+			if err == nil && changed {
 				// The old reported count no longer describes the compacted
-				// transcript and would re-trigger every model turn.
+				// transcript and would re-trigger every turn.
 				lastInput = 0
 				appendBoundary = 0
-				requestContext = a.requestContext(extraContext, sink)
+				requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
 				modelReq = a.modelRequest(requestContext)
 				lastContext = modelReq.estimate
 			}
 		}
 		if err := a.validateTranscript("before model request"); err != nil {
-			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
 		modelReq = a.countModelRequestInput(ctx, modelReq)
 		lastContext = modelReq.estimate
 		if a.overThreshold(modelReq.estimate.Total) {
-			if compUsage, changed, err := a.compactTriggered(ctx, sink, "input-count"); err == nil && changed {
+			compUsage, changed, err := a.compactTriggered(ctx, sink, "input-count")
+			if compUsage != (llm.Usage{}) {
 				total = add(total, compUsage)
+				maintenanceTotal = add(maintenanceTotal, compUsage)
+				reportMaintenance(sink, "compaction", compUsage)
+			}
+			if err == nil && changed {
 				lastInput = 0
 				appendBoundary = 0
-				requestContext = a.requestContext(extraContext, sink)
+				requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
 				modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 				lastContext = modelReq.estimate
 			}
 		}
 		if err := a.validateTranscript("before model request"); err != nil {
-			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
 
@@ -901,10 +951,10 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		// RequestContext above may have drained a just-completed delegate report.
 		// Fold its usage before the provider call and remember whether older
 		// join-required work is still running during this parent model round.
-		total = add(total, drainTurnWorkUsage(sink))
-		pendingBeforeRequest := pendingTurnWork(sink)
-		forceTurnWorkSynthesis = false
-		res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)
+		total = add(total, drainPromptWorkUsage(sink))
+		pendingBeforeRequest := pendingPromptWork(sink)
+		forcePromptWorkSynthesis = false
+		res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
 		if err != nil && !res.hasPartialOutput() {
 			if learned, ok := contextOverflowWindow(err); ok {
 				if learned > 0 && a.observeContextWindow(learned) {
@@ -912,15 +962,20 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 				} else {
 					sink.Notice("[context overflow: compacting and retrying request]")
 				}
-				if compUsage, changed, cerr := a.compactTriggered(ctx, sink, "context-overflow"); cerr == nil && changed {
+				compUsage, changed, cerr := a.compactTriggered(ctx, sink, "context-overflow")
+				if compUsage != (llm.Usage{}) {
 					total = add(total, compUsage)
+					maintenanceTotal = add(maintenanceTotal, compUsage)
+					reportMaintenance(sink, "compaction", compUsage)
+				}
+				if cerr == nil && changed {
 					lastInput = 0
 					appendBoundary = 0
 				}
-				requestContext = a.requestContext(extraContext, sink)
+				requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
 				modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 				lastContext = modelReq.estimate
-				res, wasted, err = a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)
+				res, wasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
 			}
 		}
 		if err != nil && modelReq.request.StoreResponse && !res.hasPartialOutput() && storeResponseRejected(err) {
@@ -929,7 +984,7 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = modelReq.estimate
 			var retryWasted llm.Usage
-			res, retryWasted, err = a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)
+			res, retryWasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
 			wasted = add(wasted, retryWasted)
 		}
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
@@ -938,10 +993,9 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = modelReq.estimate
 			var retryWasted llm.Usage
-			res, retryWasted, err = a.streamWithRetry(ctx, modelReq.request, sink, modelTurns+1, lastContext)
+			res, retryWasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
 			wasted = add(wasted, retryWasted)
 		}
-		modelTurns++
 		wastedTotal = add(wastedTotal, wasted)
 		total = add(total, add(res.usage, wasted))
 		// Context-size signal, not billing: cached tokens occupy the window too.
@@ -955,37 +1009,45 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			cancelled := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 			if cancelled && res.text != "" {
 				a.transcript = append(a.transcript, a.partialAssistantMessage(res))
+				turns++
 			}
 			if cancelled {
 				sink.Notice("[cancelled]")
 			}
-			if verr := a.validateTranscript("after failed model turn"); verr != nil {
+			if verr := a.validateTranscript("after failed turn"); verr != nil {
 				err = errors.Join(err, verr)
 			}
-			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+			if turns > 0 && cancelled && res.text != "" {
+				sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: add(res.usage, wasted), Wasted: wasted, Context: lastContext})
+			}
+			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
 
+		turns++
 		a.transcript = append(a.transcript, a.assistantMessage(res))
 		a.updateResponseState(res)
 
 		if res.stopReason != llm.StopToolUse {
+			sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: add(res.usage, wasted), Wasted: wasted, Context: lastContext})
 			// A model may try to finalize while background delegates are still
 			// running. Join them, then issue another model request with their reports
 			// injected as request context so the parent actually synthesizes them.
-			if pendingTurnWork(sink) {
-				usage, waitErr := waitForTurnWork(ctx, sink)
+			if pendingPromptWork(sink) {
+				usage, waitErr := waitForPromptWork(ctx, sink)
 				total = add(total, usage)
 				if waitErr != nil {
-					sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+					sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 					return waitErr
 				}
-				a.transcript = append(a.transcript, a.textMessage(llm.RoleUser, "[background delegates completed; synthesize their reports from request context before finishing]"))
+				message := a.textMessage(llm.RoleUser, "[background delegates completed; synthesize their reports from request context before finishing]")
+				message.Origin = llm.MessageOriginInternal
+				a.transcript = append(a.transcript, message)
 				if err := a.validateTranscript("after background delegate join"); err != nil {
-					sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+					sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 					return err
 				}
-				forceTurnWorkSynthesis = true
+				forcePromptWorkSynthesis = true
 				continue
 			}
 			if notice := stopReasonNotice(res.stopReason); notice != "" {
@@ -993,7 +1055,8 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			}
 			if a.hooks != nil && !stopHookActive && a.hooks.HasEvent(hooks.Stop) {
 				hookRes := a.hooks.Run(ctx, hooks.Stop, "", hooks.Payload{
-					"turn_id":                turnID,
+					"prompt_id":              promptID,
+					"turn_id":                turns,
 					"stop_hook_active":       stopHookActive,
 					"last_assistant_message": res.text,
 				})
@@ -1008,23 +1071,25 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 					if reason == "" {
 						reason = "Stop hook requested continuation"
 					}
-					a.transcript = append(a.transcript, a.textMessage(llm.RoleUser, "[hook Stop requested continuation]\n"+reason))
+					message := a.textMessage(llm.RoleUser, "[hook Stop requested continuation]\n"+reason)
+					message.Origin = llm.MessageOriginInternal
+					a.transcript = append(a.transcript, message)
 					stopHookActive = true
 					if err := a.validateTranscript("after stop hook continuation"); err != nil {
-						sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+						sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 						return err
 					}
 					continue
 				}
 			}
 			if err := a.validateTranscript("after assistant turn"); err != nil {
-				sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+				sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 				return err
 			}
 			break
 		}
 
-		results, parallelBatches, toolUsage := a.dispatchCalls(ctx, res.toolCalls, turnID, sink)
+		results, parallelBatches, toolUsage := a.dispatchCalls(ctx, res.toolCalls, promptID, turns, sink)
 		total = add(total, toolUsage)
 		a.transcript = append(a.transcript, llm.Message{
 			Role:                llm.RoleUser,
@@ -1033,21 +1098,22 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 			ParallelToolBatches: parallelBatches,
 		})
 		if err := a.validateTranscript("after tool results"); err != nil {
-			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
+		sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: add(add(res.usage, wasted), toolUsage), Wasted: wasted, Context: lastContext})
 
 		// Give a newly launched background delegate one subsequent parent model
 		// round for useful independent work. If work was already pending before
 		// this request, join it now and synthesize its injected report next.
-		if (pendingBeforeRequest || (!unlimited && modelTurns >= a.maxTurns)) && pendingTurnWork(sink) {
-			usage, waitErr := waitForTurnWork(ctx, sink)
+		if (pendingBeforeRequest || (!unlimited && turns >= a.maxTurns)) && pendingPromptWork(sink) {
+			usage, waitErr := waitForPromptWork(ctx, sink)
 			total = add(total, usage)
 			if waitErr != nil {
-				sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+				sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 				return waitErr
 			}
-			forceTurnWorkSynthesis = true
+			forcePromptWorkSynthesis = true
 			continue
 		}
 
@@ -1056,8 +1122,8 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		// breaking here keeps the §4 invariant intact.
 		guard.recordTools(res.toolCalls, results)
 
-		// Mid-turn steering (design §8.1): drain prompts the user submitted while
-		// this turn was running and inject them as a single RoleUser message the
+		// Mid-prompt steering (design §8.1): drain input the user submitted while
+		// this turn was running and inject it as a single RoleUser message the
 		// next model request sees. A steer is a deliberate change of approach, so
 		// it resets the loop-guard streaks — the model is not penalized for the
 		// repeat/error run that preceded the redirect, and no redundant guard
@@ -1066,15 +1132,17 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		// to make. It falls through to the usual budget checks so a configured
 		// ceiling still bounds the turn.
 		if steered := a.drainSteer(); !steerInputEmpty(steered) {
-			a.transcript = append(a.transcript, a.userMessage(steered.Text, steered.Images))
+			steerMessage := a.userMessage(steered.Text, steered.Images)
+			steerMessage.Origin = llm.MessageOriginSteer
+			a.transcript = append(a.transcript, steerMessage)
 			steerContext = append(steerContext, steered.RequestContext...)
-			requestContext = a.requestContext(appendTurnContext(extraContext, steerContext), sink)
+			requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
 			guard.repeatRuns = 0
 			guard.repeatSteered = false
 			guard.errorRuns = 0
 			guard.errorSteered = false
-			if err := a.validateTranscript("after mid-turn steer"); err != nil {
-				sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+			if err := a.validateTranscript("after in-prompt steer"); err != nil {
+				sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 				return err
 			}
 		}
@@ -1083,9 +1151,12 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		// summary so the turn ends on an assistant message, not a dangling result.
 		if guard.shouldBreakErrors() {
 			sink.Notice(errorStormNotice(guard.errorRuns))
-			fu, fctx := a.finalizeWithSummary(ctx, sink, requestContext, modelTurns+1)
+			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, requestContext, turns+1)
 			total = add(total, fu)
 			lastContext = fctx
+			if completed {
+				turns++
+			}
 			break
 		}
 
@@ -1094,16 +1165,19 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 		// message (the success-loop analogue of the error-storm break).
 		if guard.shouldBreakRepeat() {
 			sink.Notice(repeatLoopNotice(guard.repeatRuns))
-			fu, fctx := a.finalizeWithSummary(ctx, sink, requestContext, modelTurns+1)
+			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, requestContext, turns+1)
 			total = add(total, fu)
 			lastContext = fctx
+			if completed {
+				turns++
+			}
 			break
 		}
 
 		// Token budget: stop before the next (paid) request. No final summary —
 		// the whole point is to stop spending.
-		if a.maxTurnTokens > 0 && totalTokens(total) >= a.maxTurnTokens {
-			sink.Notice(turnTokenBudgetNotice(a.maxTurnTokens))
+		if a.maxPromptTokens > 0 && totalTokens(total) >= a.maxPromptTokens {
+			sink.Notice(promptTokenBudgetNotice(a.maxPromptTokens))
 			break
 		}
 
@@ -1119,62 +1193,87 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 
 		// One steering nudge per condition (repetition / error storm share a slot).
 		if msg := guard.steerMessage(); msg != "" {
-			a.transcript = append(a.transcript, a.textMessage(llm.RoleUser, msg))
+			message := a.textMessage(llm.RoleUser, msg)
+			message.Origin = llm.MessageOriginInternal
+			a.transcript = append(a.transcript, message)
 			if err := a.validateTranscript("after loop-guard steer"); err != nil {
-				sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+				sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 				return err
 			}
 		}
 
-		// Wrap-up nudge once, before the final allowed model turn, so the model
+		// Wrap-up nudge once, before the final allowed turn, so the model
 		// can stop calling tools and summarize within budget (r3).
-		if !unlimited && modelTurns == a.maxTurns-1 && !guard.wrapUpSteered {
+		if !unlimited && turns == a.maxTurns-1 && !guard.wrapUpSteered {
 			guard.wrapUpSteered = true
-			a.transcript = append(a.transcript, a.textMessage(llm.RoleUser, wrapUpSteer))
+			message := a.textMessage(llm.RoleUser, wrapUpSteer)
+			message.Origin = llm.MessageOriginInternal
+			a.transcript = append(a.transcript, message)
 			if err := a.validateTranscript("after wrap-up steer"); err != nil {
-				sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+				sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 				return err
 			}
 		}
 
-		if !unlimited && modelTurns >= a.maxTurns {
+		if !unlimited && turns >= a.maxTurns {
 			sink.Notice(maxTurnsNotice(a.maxTurns))
-			fu, fctx := a.finalizeWithSummary(ctx, sink, requestContext, modelTurns+1)
+			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, requestContext, turns+1)
 			total = add(total, fu)
 			lastContext = fctx
+			if completed {
+				turns++
+			}
 			break
 		}
 	}
 
 	// Budget/guard exits can bypass the normal synthesis continuation. They still
 	// must not abandon join-required delegates or lose their spend.
-	if pendingTurnWork(sink) {
-		usage, waitErr := waitForTurnWork(ctx, sink)
+	if pendingPromptWork(sink) {
+		usage, waitErr := waitForPromptWork(ctx, sink)
 		total = add(total, usage)
 		if waitErr != nil {
-			sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return waitErr
 		}
 	}
-	total = add(total, drainTurnWorkUsage(sink))
+	total = add(total, drainPromptWorkUsage(sink))
 
-	// Post-turn compaction trigger (design §12, §8.1): fires after the turn
-	// completes, before returning to the prompt. The summary call's usage folds
-	// into the turn total so session totals (via the sink) include compaction. A
-	// compaction error never fails the turn — the warning was already reported and
+	// Post-prompt compaction trigger (design §12, §8.1): fires after the final
+	// turn, before returning to the REPL. The summary call's usage folds into the
+	// prompt total and is also reported separately as maintenance. A compaction
+	// error never fails the prompt — the warning was already reported and
 	// the transcript was kept intact.
-	lastContext = a.estimateContext(a.requestContext(appendTurnContext(extraContext, steerContext), sink))
-	if compUsage, changed, err := a.MaybeCompact(ctx, a.triggerTokens(lastInput, appendBoundary), sink); err == nil && changed {
+	lastContext = a.estimateContext(a.requestContext(appendPromptContext(extraContext, steerContext), sink))
+	compUsage, changed, err := a.MaybeCompact(ctx, a.triggerTokens(lastInput, appendBoundary), sink)
+	if compUsage != (llm.Usage{}) {
 		total = add(total, compUsage)
-		lastContext = a.estimateContext(a.requestContext(appendTurnContext(extraContext, steerContext), sink))
+		maintenanceTotal = add(maintenanceTotal, compUsage)
+		reportMaintenance(sink, "compaction", compUsage)
 	}
-	if err := a.validateTranscript("after turn"); err != nil {
-		sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+	if err == nil && changed {
+		lastContext = a.estimateContext(a.requestContext(appendPromptContext(extraContext, steerContext), sink))
+	}
+	if err := a.validateTranscript("after prompt"); err != nil {
+		sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 		return err
 	}
 
-	sink.TurnComplete(TurnUsage{ModelTurns: modelTurns, Usage: total, Wasted: wastedTotal, Context: lastContext})
+	sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 	return nil
+}
+
+func reportMaintenance(sink EventSink, purpose string, usage llm.Usage) {
+	// A pressured transcript can be rewritten entirely through the local
+	// degradation path when there is no older completed turn to summarize.
+	// That is maintenance work, but it is not a model call and must not appear
+	// in model-call accounting.
+	if usage == (llm.Usage{}) {
+		return
+	}
+	if maintenance, ok := sink.(MaintenanceSink); ok {
+		maintenance.MaintenanceComplete(MaintenanceUsage{Purpose: purpose, Usage: usage})
+	}
 }
 
 // finalizeWithSummary issues one final model request with tools disabled so a
@@ -1184,32 +1283,32 @@ func (a *Agent) RunTurnContentWithContext(ctx context.Context, userText string, 
 // tool calls the model emits despite tools being disabled are ignored — only
 // the summary text is appended, so no unanswered tool_use can be created. It
 // returns the request's usage (counted toward the turn total) and estimate.
-func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, requestContext []string, modelTurn int) (llm.Usage, ContextEstimate) {
+func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, requestContext []string, turn int) (llm.Usage, ContextEstimate, bool) {
 	modelReq := a.modelRequest(requestContext)
 	modelReq.request.Tools = nil // no tools: force a text-only wind-down
 	modelReq.request.ServerTools = nil
-	res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, modelTurn, modelReq.estimate)
+	res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, turn, modelReq.estimate)
 	usage := add(res.usage, wasted)
 	if err != nil {
 		a.resetResponseState()
-		return usage, modelReq.estimate
+		return usage, modelReq.estimate, false
 	}
-	if strings.TrimSpace(res.text) == "" {
-		return usage, modelReq.estimate
+	if strings.TrimSpace(res.text) != "" {
+		msg := a.textMessage(llm.RoleAssistant, res.text)
+		msg.Phase = llm.AssistantPhaseFinal
+		a.transcript = append(a.transcript, msg)
+		a.updateResponseState(res)
 	}
-	msg := a.textMessage(llm.RoleAssistant, res.text)
-	msg.Phase = llm.AssistantPhaseFinal
-	a.transcript = append(a.transcript, msg)
-	a.updateResponseState(res)
-	return usage, modelReq.estimate
+	sink.TurnComplete(TurnUsage{Turn: turn, Attempts: res.attempts, Usage: usage, Wasted: wasted, Context: modelReq.estimate})
+	return usage, modelReq.estimate, true
 }
 
-// dispatchCalls runs one model turn's tool calls. Consecutive read-only calls
+// dispatchCalls runs one turn's tool calls. Consecutive read-only calls
 // dispatch concurrently when tool hooks are inactive; mutating calls remain ordering
 // barriers. Sink events and the returned blocks are in emission order either way,
 // and the sink is only ever called from this goroutine (spec §8). The returned
 // parallel batches record the complete ordered membership of each concurrent island.
-func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, turnID int, sink EventSink) ([]llm.ContentBlock, []llm.ParallelToolBatch, llm.Usage) {
+func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptID, turnID int, sink EventSink) ([]llm.ContentBlock, []llm.ParallelToolBatch, llm.Usage) {
 	blocks := make([]llm.ContentBlock, len(calls))
 	var parallelBatches []llm.ParallelToolBatch
 	var total llm.Usage
@@ -1217,7 +1316,7 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, turnID 
 	toolHooksActive := a.hooks != nil && (a.hooks.HasEvent(hooks.PreToolUse) || a.hooks.HasEvent(hooks.PostToolUse))
 	for i := 0; i < len(calls); {
 		if toolHooksActive || !a.tools.CallReadOnly(calls[i]) {
-			block, usage := a.dispatchSequentialCall(ctx, calls[i], turnID, sink)
+			block, usage := a.dispatchSequentialCall(ctx, calls[i], promptID, turnID, sink)
 			blocks[i] = block
 			total = add(total, usage)
 			i++
@@ -1229,7 +1328,7 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, turnID 
 			i++
 		}
 		if i-start == 1 {
-			block, usage := a.dispatchSequentialCall(ctx, calls[start], turnID, sink)
+			block, usage := a.dispatchSequentialCall(ctx, calls[start], promptID, turnID, sink)
 			blocks[start] = block
 			total = add(total, usage)
 			continue
@@ -1248,10 +1347,10 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, turnID 
 	return blocks, parallelBatches, total
 }
 
-func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, turnID int, sink EventSink) (llm.ContentBlock, llm.Usage) {
+func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink) (llm.ContentBlock, llm.Usage) {
 	sink.ToolStart(call)
 	diffState := a.snapshotToolDiff(call)
-	r := a.dispatchOne(ctx, call, turnID, sink)
+	r := a.dispatchOne(ctx, call, promptID, turnID, sink)
 	block, usage := a.finishToolResult(r, sink)
 	a.emitToolDiff(call, diffState, sink)
 	return block, usage
@@ -1335,7 +1434,7 @@ func (a *Agent) emitToolDiff(call llm.ToolCall, state toolDiffState, sink EventS
 	}
 }
 
-func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, turnID int, sink EventSink) llm.ToolResult {
+func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink) llm.ToolResult {
 	if call.InvalidInputError != "" {
 		return llm.ToolResult{ForID: call.ID, Text: invalidToolInputResult(call), IsError: true}
 	}
@@ -1350,6 +1449,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, turnID int, 
 	var preContext []string
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PreToolUse) {
 		res := a.hooks.Run(ctx, hooks.PreToolUse, call.Name, hooks.Payload{
+			"prompt_id":   promptID,
 			"turn_id":     turnID,
 			"tool_name":   call.Name,
 			"tool_use_id": call.ID,
@@ -1374,6 +1474,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, turnID int, 
 	}
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PostToolUse) {
 		res := a.hooks.Run(ctx, hooks.PostToolUse, call.Name, hooks.Payload{
+			"prompt_id":     promptID,
 			"turn_id":       turnID,
 			"tool_name":     call.Name,
 			"tool_use_id":   call.ID,
@@ -1451,25 +1552,25 @@ func resultBlock(r llm.ToolResult) llm.ContentBlock {
 	}
 }
 
-func pendingTurnWork(sink EventSink) bool {
-	coordinator, ok := sink.(TurnWorkCoordinator)
-	return ok && coordinator.PendingTurnWork()
+func pendingPromptWork(sink EventSink) bool {
+	coordinator, ok := sink.(PromptWorkCoordinator)
+	return ok && coordinator.PendingPromptWork()
 }
 
-func waitForTurnWork(ctx context.Context, sink EventSink) (llm.Usage, error) {
-	coordinator, ok := sink.(TurnWorkCoordinator)
+func waitForPromptWork(ctx context.Context, sink EventSink) (llm.Usage, error) {
+	coordinator, ok := sink.(PromptWorkCoordinator)
 	if !ok {
 		return llm.Usage{}, nil
 	}
-	return coordinator.WaitForTurnWork(ctx)
+	return coordinator.WaitForPromptWork(ctx)
 }
 
-func drainTurnWorkUsage(sink EventSink) llm.Usage {
-	coordinator, ok := sink.(TurnWorkCoordinator)
+func drainPromptWorkUsage(sink EventSink) llm.Usage {
+	coordinator, ok := sink.(PromptWorkCoordinator)
 	if !ok {
 		return llm.Usage{}
 	}
-	return coordinator.DrainTurnWorkUsage()
+	return coordinator.DrainPromptWorkUsage()
 }
 
 func (a *Agent) requestContext(extraContext []string, sink EventSink) []string {
@@ -1517,34 +1618,35 @@ func toolResponsePayload(r llm.ToolResult) map[string]any {
 	}
 }
 
-// streamWithRetry runs stream, re-requesting the model turn from scratch when it
+// streamWithRetry runs stream, re-requesting the turn from scratch when it
 // fails mid-flight with a retryable error. Partial output from a failed
 // attempt is never committed to the transcript; wasted carries the usage
 // failed attempts reported (paid for, so counted) — it never drives the
 // compaction trigger.
-func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink EventSink, modelTurn int, estimate ContextEstimate) (res modelTurnResult, wasted llm.Usage, err error) {
+func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink EventSink, turn int, estimate ContextEstimate) (res turnResult, wasted llm.Usage, err error) {
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return modelTurnResult{}, wasted, err
+			return turnResult{}, wasted, err
 		}
-		sink.ModelTurnStart(modelTurn, attempt+1, estimate)
+		sink.TurnAttemptStart(turn, attempt+1, estimate)
 		res, err = a.stream(ctx, req, sink)
-		sink.ModelTurnComplete(ModelTurnUsage{ModelTurn: modelTurn, Attempt: attempt + 1, Usage: res.usage})
+		res.attempts = attempt + 1
+		sink.TurnAttemptComplete(TurnAttemptUsage{Turn: turn, Attempt: attempt + 1, Usage: res.usage})
 		if err == nil || attempt >= streamRetries || !retryableStreamError(err) {
 			return res, wasted, err
 		}
 		wasted = add(wasted, res.usage)
 		delay := retry.Next(attempt, streamRetryAfter(err))
-		if abandon, ok := sink.(ModelTurnAbandonSink); ok {
-			abandon.ModelTurnAbandoned(modelTurn, attempt+1)
+		if abandon, ok := sink.(TurnAttemptAbandonSink); ok {
+			abandon.TurnAttemptAbandoned(turn, attempt+1)
 		}
 		discarded := ""
 		if n := totalTokens(res.usage); n > 0 {
 			discarded = fmt.Sprintf("; discarded ~%d tokens", n)
 		}
-		sink.Notice(fmt.Sprintf("[stream interrupted: %v; retrying model turn in %s%s]", err, delay, discarded))
+		sink.Notice(fmt.Sprintf("[stream interrupted: %v; retrying turn in %s%s]", err, delay, discarded))
 		if serr := a.sleep(ctx, delay); serr != nil {
-			return modelTurnResult{}, wasted, serr
+			return turnResult{}, wasted, serr
 		}
 	}
 }
@@ -1567,7 +1669,7 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 }
 
 // retryableStreamError reports whether a mid-stream failure may be retried by
-// re-requesting the model turn. Cancellation is the user's call to stop; a
+// re-requesting the turn. Cancellation is the user's call to stop; a
 // non-retryable APIError (invalid_request, auth) will not get better by
 // asking again. Everything else — truncated streams, transport resets,
 // retryable API errors — is transient (spec §2).
@@ -1695,8 +1797,8 @@ func stopReasonNotice(reason llm.StopReason) string {
 // assembles completed tool calls in emission order, and captures the final
 // usage and stop reason. A terminal stream error is returned with whatever
 // partial text streamed so far (for cancel repair).
-func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (modelTurnResult, error) {
-	var res modelTurnResult
+func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (turnResult, error) {
+	var res turnResult
 	var text []byte
 
 	for ev, err := range a.provider.Stream(ctx, req) {
@@ -1784,7 +1886,7 @@ func (a *Agent) textMessage(role llm.Role, text string) llm.Message {
 	return textMessageAt(a.now(), role, text)
 }
 
-// drainSteer pops all queued mid-turn steer inputs, joining their text with a
+// drainSteer pops all queued in-prompt steer inputs, joining their text with a
 // blank line and concatenating images/context into one steering message. It
 // returns an empty input when steering is disabled or nothing is queued. Draining
 // is non-blocking so a concurrent Steer caller can never stall the loop; inputs
@@ -1811,7 +1913,7 @@ func (a *Agent) drainSteer() SteerInput {
 	}
 }
 
-func (a *Agent) partialAssistantMessage(res modelTurnResult) llm.Message {
+func (a *Agent) partialAssistantMessage(res turnResult) llm.Message {
 	msg := a.textMessage(llm.RoleAssistant, res.text)
 	msg.Phase = res.phase
 	if msg.Phase == "" {
@@ -1837,11 +1939,11 @@ func textMessageAt(at time.Time, role llm.Role, text string) llm.Message {
 	return llm.Message{Role: role, Time: at, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: text}}}
 }
 
-// assistantMessage builds the assistant message for a completed model turn:
+// assistantMessage builds the assistant message for a completed turn:
 // thinking block(s) first (so signed reasoning is replayed before the tool_use
 // it justified), then the text block (if any), then tool_use blocks in emission
 // order (design §8.1).
-func (a *Agent) assistantMessage(res modelTurnResult) llm.Message {
+func (a *Agent) assistantMessage(res turnResult) llm.Message {
 	content := make([]llm.ContentBlock, 0, len(res.reasoning)+1+len(res.toolCalls))
 	content = append(content, res.reasoning...)
 	if res.text != "" {
@@ -1858,7 +1960,7 @@ func (a *Agent) assistantMessage(res modelTurnResult) llm.Message {
 	return llm.Message{Role: llm.RoleAssistant, Time: a.now(), Phase: assistantPhase(res), Content: content}
 }
 
-func assistantPhase(res modelTurnResult) string {
+func assistantPhase(res turnResult) string {
 	if res.phase != "" && llm.ValidAssistantPhase(res.phase) {
 		return res.phase
 	}
@@ -1868,7 +1970,7 @@ func assistantPhase(res modelTurnResult) string {
 	return llm.AssistantPhaseFinal
 }
 
-// maxTurnsNotice is the exact guard message printed when the model-turn budget is
+// maxTurnsNotice is the exact guard message printed when the turn budget is
 // exhausted (design §8.1).
 func maxTurnsNotice(maxTurns int) string {
 	return fmt.Sprintf("[stopped: reached max turns (%d)]", maxTurns)
@@ -1938,7 +2040,7 @@ func cleanContext(context []string) []string {
 	return out
 }
 
-func appendTurnContext(extraContext, steerContext []string) []string {
+func appendPromptContext(extraContext, steerContext []string) []string {
 	out := append([]string(nil), extraContext...)
 	out = append(out, steerContext...)
 	return out

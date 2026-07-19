@@ -106,7 +106,7 @@ type testWriter interface {
 	String() string
 }
 
-// lockedBuffer is a mutex-guarded bytes.Buffer. The during-turn-input tests poll
+// lockedBuffer is a mutex-guarded bytes.Buffer. The during-prompt-input tests poll
 // rendered output (via waitFor/String) from the test goroutine while turn
 // goroutines write the renderer's out/errw concurrently; a bare *bytes.Buffer
 // makes that an unsynchronized access that trips `go test -race`. Locking both
@@ -171,8 +171,8 @@ func TestOneShotPromptHookBlockSkipsTurn(t *testing.T) {
 	if code != ExitRuntime {
 		t.Fatalf("OneShot exit = %d, want %d", code, ExitRuntime)
 	}
-	if app.Turn != 0 {
-		t.Fatalf("turn = %d, want 0", app.Turn)
+	if app.PromptNumber != 0 {
+		t.Fatalf("prompt = %d, want 0", app.PromptNumber)
 	}
 	if fp.RequestCount() != 0 {
 		t.Fatalf("provider was called despite prompt block: %d requests", fp.RequestCount())
@@ -236,7 +236,7 @@ func TestREPLSeparatesSubmittedPromptFromModelResponse(t *testing.T) {
 	}
 }
 
-func TestREPLRecordsModelTurnTimingEvents(t *testing.T) {
+func TestREPLRecordsTurnTimingEvents(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn})
 	app := newTestApp(t, &out, &errw, fp)
@@ -251,11 +251,11 @@ func TestREPLRecordsModelTurnTimingEvents(t *testing.T) {
 		t.Fatalf("read replay log: %v", err)
 	}
 	got := string(data)
-	if !strings.Contains(got, `"type":"model_turn_start"`) {
-		t.Fatalf("missing model_turn_start event:\n%s", got)
+	if !strings.Contains(got, `"type":"turn_attempt_start"`) {
+		t.Fatalf("missing turn_attempt_start event:\n%s", got)
 	}
-	if !strings.Contains(got, `"type":"model_turn_usage"`) {
-		t.Fatalf("missing model_turn_usage event:\n%s", got)
+	if !strings.Contains(got, `"type":"turn_attempt_usage"`) || !strings.Contains(got, `"type":"turn_complete"`) {
+		t.Fatalf("missing turn attempt usage/completion events:\n%s", got)
 	}
 	if !strings.Contains(got, `"context"`) {
 		t.Fatalf("missing context snapshot:\n%s", got)
@@ -1362,7 +1362,7 @@ func TestREPLCompactCommand(t *testing.T) {
 	)
 	app := newTestApp(t, &out, &errw, fp)
 
-	// Seed enough whole turns that there is something older than the last four
+	// Seed enough whole turns that there is something older than the last eight
 	// to summarize.
 	var seed []llm.Message
 	for i := 0; i < 10; i++ {
@@ -1383,8 +1383,8 @@ func TestREPLCompactCommand(t *testing.T) {
 	if err := llm.ValidateTranscript(msgs); err != nil {
 		t.Fatalf("transcript invalid after /compact: %v", err)
 	}
-	if len(msgs) != 1+8 {
-		t.Fatalf("/compact should collapse to summary + last 4 turns (9 msgs), got %d", len(msgs))
+	if len(msgs) != 16 {
+		t.Fatalf("/compact should collapse to checkpoint + last 8 turns, got %d", len(msgs))
 	}
 	got := errw.String()
 	if !strings.Contains(got, "compacted") {
@@ -2110,7 +2110,7 @@ func TestREPLPrintsTodoStatusAfterUpdateTodosBeforeUsageAndPrompt(t *testing.T) 
 	waitFor(t, func() bool {
 		got := errw.String()
 		return strings.Count(got, "[auto] > ") >= 2 && strings.Contains(got, "[turn:")
-	}, "post-turn usage line and prompt")
+	}, "turn completion line and next prompt")
 	writePipe(t, pw, "/exit\n")
 	select {
 	case code := <-codeCh:
@@ -2130,12 +2130,12 @@ func TestREPLPrintsTodoStatusAfterUpdateTodosBeforeUsageAndPrompt(t *testing.T) 
 	if toolResultIndex < 0 {
 		t.Fatalf("update_todos tool result was not rendered:\n%s", got)
 	}
-	nextModelIndex := strings.Index(got, "[model: turn 2 waiting]")
+	nextModelIndex := strings.Index(got, "[turn: 2 waiting]")
 	if nextModelIndex < 0 {
-		t.Fatalf("second model turn was not rendered:\n%s", got)
+		t.Fatalf("second turn was not rendered:\n%s", got)
 	}
 	if !(toolResultIndex < statusIndex && statusIndex < nextModelIndex) {
-		t.Fatalf("todo status should print immediately after update_todos and before the next model turn:\n%s", got)
+		t.Fatalf("todo status should print immediately after update_todos and before the next turn:\n%s", got)
 	}
 
 	promptStatusIndex := strings.LastIndex(got, status)
@@ -2143,7 +2143,7 @@ func TestREPLPrintsTodoStatusAfterUpdateTodosBeforeUsageAndPrompt(t *testing.T) 
 		t.Fatalf("todo status should also be printed before the next prompt:\n%s", got)
 	}
 	afterPromptStatus := got[promptStatusIndex+len(status):]
-	usageIndex := strings.Index(afterPromptStatus, "[turn:")
+	usageIndex := strings.Index(afterPromptStatus, "[prompt:")
 	if usageIndex < 0 {
 		t.Fatalf("usage line should follow the prompt todo status:\n%s", got)
 	}
@@ -2215,7 +2215,7 @@ func TestREPLEOFSavesAndExitsZero(t *testing.T) {
 func TestREPLProviderErrorReported(t *testing.T) {
 	var out, errw bytes.Buffer
 	// A plain (non-API, non-cancel) error is retryable, so it must persist
-	// across the whole per-model-turn budget (1 + 2 retries) to surface to errw.
+	// across the whole per-turn budget (1 + 2 retries) to surface to errw.
 	fail := llmtest.Step{Err: errContext("boom")}
 	fp := llmtest.New("fake", fail, fail, fail)
 	app := newTestApp(t, &out, &errw, fp)
@@ -2230,15 +2230,15 @@ func TestREPLProviderErrorReported(t *testing.T) {
 	}
 }
 
-func TestREPLEscapeEscapeCancelsActiveTurn(t *testing.T) {
+func TestREPLEscapeEscapeCancelsActivePrompt(t *testing.T) {
 	var out, errw bytes.Buffer
-	inTurn := make(chan struct{})
+	inPrompt := make(chan struct{})
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("partial")},
 		Stop:   llm.StopEndTurn,
 		Usage:  llm.Usage{InputTokens: 5, OutputTokens: 1},
 		Block: func(ctx context.Context) {
-			close(inTurn)
+			close(inPrompt)
 			<-ctx.Done()
 		},
 	})
@@ -2256,7 +2256,7 @@ func TestREPLEscapeEscapeCancelsActiveTurn(t *testing.T) {
 
 	writePipe(t, pw, "first\n")
 	select {
-	case <-inTurn:
+	case <-inPrompt:
 	case <-time.After(time.Second):
 		t.Fatal("turn did not start")
 	}
@@ -2272,7 +2272,7 @@ func TestREPLEscapeEscapeCancelsActiveTurn(t *testing.T) {
 	}
 	select {
 	case <-exitRequested:
-		t.Fatal("Esc-Esc must cancel the turn without requesting process exit")
+		t.Fatal("Esc-Esc must cancel the prompt without requesting process exit")
 	default:
 	}
 }
@@ -2332,7 +2332,7 @@ func TestREPLReaderMarksSplitEscapeSequenceTail(t *testing.T) {
 
 func TestREPLScrollEscapeDuringActiveTurnDoesNotQueuePrompt(t *testing.T) {
 	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
-	inTurn := make(chan struct{})
+	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
 		llmtest.Step{
@@ -2340,7 +2340,7 @@ func TestREPLScrollEscapeDuringActiveTurnDoesNotQueuePrompt(t *testing.T) {
 			Stop:   llm.StopEndTurn,
 			Usage:  llm.Usage{InputTokens: 5, OutputTokens: 2},
 			Block: func(ctx context.Context) {
-				close(inTurn)
+				close(inPrompt)
 				<-releaseTurn
 			},
 		},
@@ -2360,7 +2360,7 @@ func TestREPLScrollEscapeDuringActiveTurnDoesNotQueuePrompt(t *testing.T) {
 
 	writePipe(t, pw, "first\n")
 	select {
-	case <-inTurn:
+	case <-inPrompt:
 	case <-time.After(time.Second):
 		t.Fatal("turn did not start")
 	}
@@ -2391,13 +2391,13 @@ func TestREPLScrollEscapeDuringActiveTurnDoesNotQueuePrompt(t *testing.T) {
 }
 
 // Non-interactive (piped) input keeps the auto-submitting type-ahead drain: a
-// script that pipes several lines runs each as a turn. The during-turn-input
+// script that pipes several lines runs each as a turn. The during-prompt-input
 // deposit behavior (never auto-submit, deposit as editable prefill) applies only
 // to the interactive prompt-editor path — see
-// TestREPLDuringTurnInputDepositedOnCompletionNotAutoSubmitted.
+// TestREPLDuringPromptInputDepositedOnCompletionNotAutoSubmitted.
 func TestREPLTypeaheadDuringActiveTurnRunsAfterTurn(t *testing.T) {
 	var out, errw bytes.Buffer
-	inTurn := make(chan struct{})
+	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
 		llmtest.Step{
@@ -2405,7 +2405,7 @@ func TestREPLTypeaheadDuringActiveTurnRunsAfterTurn(t *testing.T) {
 			Stop:   llm.StopEndTurn,
 			Usage:  llm.Usage{InputTokens: 5, OutputTokens: 2},
 			Block: func(ctx context.Context) {
-				close(inTurn)
+				close(inPrompt)
 				<-releaseTurn
 			},
 		},
@@ -2425,7 +2425,7 @@ func TestREPLTypeaheadDuringActiveTurnRunsAfterTurn(t *testing.T) {
 
 	writePipe(t, pw, "first\n")
 	select {
-	case <-inTurn:
+	case <-inPrompt:
 	case <-time.After(time.Second):
 		t.Fatal("turn did not start")
 	}
@@ -2453,7 +2453,7 @@ func TestREPLTypeaheadDuringActiveTurnRunsAfterTurn(t *testing.T) {
 
 func TestREPLTypeaheadDuringActiveTurnQueuesWhenSteerConfigured(t *testing.T) {
 	var out, errw bytes.Buffer
-	inTurn := make(chan struct{})
+	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
 		llmtest.Step{
@@ -2461,7 +2461,7 @@ func TestREPLTypeaheadDuringActiveTurnQueuesWhenSteerConfigured(t *testing.T) {
 			Stop:   llm.StopEndTurn,
 			Usage:  llm.Usage{InputTokens: 5, OutputTokens: 2},
 			Block: func(ctx context.Context) {
-				close(inTurn)
+				close(inPrompt)
 				<-releaseTurn
 			},
 		},
@@ -2487,7 +2487,7 @@ func TestREPLTypeaheadDuringActiveTurnQueuesWhenSteerConfigured(t *testing.T) {
 
 	writePipe(t, pw, "first\n")
 	select {
-	case <-inTurn:
+	case <-inPrompt:
 	case <-time.After(time.Second):
 		t.Fatal("turn did not start")
 	}
@@ -2508,7 +2508,7 @@ func TestREPLTypeaheadDuringActiveTurnQueuesWhenSteerConfigured(t *testing.T) {
 
 func TestREPLPromptEditorPrintsPromptAfterTurnWithPendingActiveRead(t *testing.T) {
 	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
-	inTurn := make(chan struct{})
+	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
 		llmtest.Step{
@@ -2516,7 +2516,7 @@ func TestREPLPromptEditorPrintsPromptAfterTurnWithPendingActiveRead(t *testing.T
 			Stop:   llm.StopEndTurn,
 			Usage:  llm.Usage{InputTokens: 5, OutputTokens: 2},
 			Block: func(ctx context.Context) {
-				close(inTurn)
+				close(inPrompt)
 				<-releaseTurn
 			},
 		},
@@ -2537,7 +2537,7 @@ func TestREPLPromptEditorPrintsPromptAfterTurnWithPendingActiveRead(t *testing.T
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
 	writePipe(t, pw, "first\r")
 	select {
-	case <-inTurn:
+	case <-inPrompt:
 	case <-time.After(time.Second):
 		t.Fatal("turn did not start")
 	}
@@ -2549,7 +2549,7 @@ func TestREPLPromptEditorPrintsPromptAfterTurnWithPendingActiveRead(t *testing.T
 	}, "prompt after first turn")
 
 	// The post-turn prompt is the raw line editor, so Enter is \r (the canonical
-	// \n fallback is gone now that during-turn input is captured raw).
+	// \n fallback is gone now that during-prompt input is captured raw).
 	writePipe(t, pw, "second\r")
 	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request")
 	waitFor(t, func() bool { return strings.Count(errw.String(), "> ") >= 3 }, "prompt after second turn")
@@ -2895,9 +2895,9 @@ func TestREPLRefreshMCPNoChangeKeepsTools(t *testing.T) {
 
 func TestAddUsageBucketsPerModel(t *testing.T) {
 	app := &App{Provider: "anthropic", Model: "opus", RegistryModel: "opus"}
-	app.addUsage(agent.TurnUsage{Usage: llm.Usage{InputTokens: 100, OutputTokens: 10}})
+	app.addUsage(agent.PromptUsage{Usage: llm.Usage{InputTokens: 100, OutputTokens: 10}})
 	app.Provider, app.Model, app.RegistryModel = "openai", "gpt", "gpt"
-	app.addUsage(agent.TurnUsage{Usage: llm.Usage{InputTokens: 30, OutputTokens: 5}})
+	app.addUsage(agent.PromptUsage{Usage: llm.Usage{InputTokens: 30, OutputTokens: 5}})
 
 	if len(app.usageByModel) != 2 {
 		t.Fatalf("want 2 model buckets, got %d: %+v", len(app.usageByModel), app.usageByModel)
@@ -2919,9 +2919,44 @@ func TestAddUsageBucketsPerModel(t *testing.T) {
 	}
 }
 
+func TestQueuedMaintenanceUsageIsAccountedWithoutCreatingTurn(t *testing.T) {
+	app := &App{
+		Provider:      "anthropic",
+		Model:         "opus",
+		RegistryModel: "opus",
+		SessionPath:   t.TempDir(),
+	}
+	app.QueueMaintenanceUsageForModel("opus", agent.MaintenanceUsage{
+		Purpose: "prewarm",
+		Usage:   llm.Usage{InputTokens: 12, OutputTokens: 1},
+	})
+	app.RegistryModel = "gpt"
+
+	if got := app.usageSummary(); !strings.Contains(got, "12 input") || !strings.Contains(got, "1 output") {
+		t.Fatalf("usage summary did not drain queued prewarm usage: %q", got)
+	}
+	data, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read event log: %v", err)
+	}
+	log := string(data)
+	if !strings.Contains(log, `"type":"maintenance_usage"`) || !strings.Contains(log, `"purpose":"prewarm"`) {
+		t.Fatalf("prewarm was not recorded as maintenance: %s", log)
+	}
+	if strings.Contains(log, `"type":"turn_complete"`) || strings.Contains(log, `"type":"turn_attempt_usage"`) {
+		t.Fatalf("prewarm must not create a conversational turn: %s", log)
+	}
+	if got := app.usageByModel["opus"]; got.InputTokens != 12 || got.OutputTokens != 1 {
+		t.Fatalf("prewarm usage moved off its initiating model: %+v", app.usageByModel)
+	}
+	if got := app.usageByModel["gpt"]; got != (session.UsageTotals{}) {
+		t.Fatalf("prewarm usage was charged to the later active model: %+v", app.usageByModel)
+	}
+}
+
 func TestUsageReportSingleModelMatchesLegacyFormat(t *testing.T) {
 	app := &App{Provider: "anthropic", Model: "opus", RegistryModel: "opus"}
-	app.addUsage(agent.TurnUsage{Usage: llm.Usage{InputTokens: 100, CacheReadTokens: 30, OutputTokens: 10, ReasoningTokens: 4, CacheWriteTokens: 20}})
+	app.addUsage(agent.PromptUsage{Usage: llm.Usage{InputTokens: 100, CacheReadTokens: 30, OutputTokens: 10, ReasoningTokens: 4, CacheWriteTokens: 20}})
 	got := app.usageReport("session summary")
 	want := "[session summary: 100 input / 30 cached input / 10 output / 4 reasoning / 20 cache write]"
 	if got != want {
@@ -3133,7 +3168,7 @@ func TestREPLHandoffCommandApprovalStartsImplementationTurn(t *testing.T) {
 func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) {
 	var out, errw lockedBuffer
 	pending := plan.NewPending()
-	inTurn := make(chan struct{})
+	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
 		llmtest.Step{
@@ -3141,7 +3176,7 @@ func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) 
 			Stop:   llm.StopEndTurn,
 			Block: func(ctx context.Context) {
 				pending.Request(plan.HandoffRequest{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
-				close(inTurn)
+				close(inPrompt)
 				<-releaseTurn
 			},
 		},
@@ -3161,7 +3196,7 @@ func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) 
 
 	writePipe(t, pw, "make a plan\n")
 	select {
-	case <-inTurn:
+	case <-inPrompt:
 	case <-time.After(time.Second):
 		t.Fatal("plan turn did not start")
 	}
@@ -3234,7 +3269,7 @@ func TestREPLHandoffFailureDoesNotStartImplementationTurn(t *testing.T) {
 }
 
 // liveTestApp is newTestApp with a renderer that enables the live wait counter
-// and during-turn input line, so the typed buffer renders to errw in tests.
+// and during-prompt input line, so the typed buffer renders to errw in tests.
 func liveTestApp(t *testing.T, out, errw testWriter, fp *llmtest.FakeProvider) *App {
 	t.Helper()
 	app := newTestApp(t, out, errw, fp)
@@ -3313,11 +3348,11 @@ func dumpTranscript(msgs []llm.Message) string {
 	return string(b)
 }
 
-// During-turn typed input submitted with Enter is queued and automatically runs
-// as the next model turn after the current turn completes.
-func TestREPLDuringTurnInputQueuedOnEnter(t *testing.T) {
+// During-prompt typed input submitted with Enter is queued and automatically runs
+// as the next prompt after the current prompt completes.
+func TestREPLDuringPromptInputQueuedOnEnter(t *testing.T) {
 	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
-	inTurn := make(chan struct{})
+	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
 		// No events on the blocking step: the model is in its initial wait, so
@@ -3325,7 +3360,7 @@ func TestREPLDuringTurnInputQueuedOnEnter(t *testing.T) {
 		llmtest.Step{
 			Stop:  llm.StopEndTurn,
 			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
-			Block: func(ctx context.Context) { close(inTurn); <-releaseTurn },
+			Block: func(ctx context.Context) { close(inPrompt); <-releaseTurn },
 		},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
 	)
@@ -3339,32 +3374,32 @@ func TestREPLDuringTurnInputQueuedOnEnter(t *testing.T) {
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
 	writePipe(t, pw, "first\r")
 	select {
-	case <-inTurn:
+	case <-inPrompt:
 	case <-time.After(time.Second):
 		t.Fatal("turn did not start")
 	}
 
-	// Type during the turn and press Enter. It renders live but the queued turn
-	// waits until the in-flight turn finishes.
+	// Type during the prompt and press Enter. It renders live but the queued prompt
+	// waits until the in-flight prompt finishes.
 	writePipe(t, pw, "draft\r")
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> draft") }, "live input line")
 	if fp.RequestCount() != 1 {
-		t.Fatalf("queued during-turn input must wait for the active turn; got %d requests", fp.RequestCount())
+		t.Fatalf("queued during-prompt input must wait for the active prompt; got %d requests", fp.RequestCount())
 	}
 	close(releaseTurn)
-	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from queued during-turn input")
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from queued during-prompt input")
 	_ = pw.Close()
 
 	if code := waitRun(t, codeCh); code != ExitOK {
 		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
 	}
 	if got := transcriptPrompts(app); got != "first|draft" {
-		t.Fatalf("prompts = %q, want first|draft (during-turn Enter queues next prompt)", got)
+		t.Fatalf("prompts = %q, want first|draft (during-prompt Enter queues next prompt)", got)
 	}
 }
 
 // blockingTool is a fake tool whose Run blocks on release until the test signals
-// it, so a during-turn steer can be queued while the loop is between tool
+// it, so a during-prompt steer can be queued while the loop is between tool
 // dispatch and the next model request.
 type blockingTool struct {
 	name    string
@@ -3384,8 +3419,8 @@ func (t *blockingTool) Run(context.Context, json.RawMessage) (string, error) {
 
 // With steering enabled, a prompt submitted during a tool-calling turn is
 // injected as the next intermediate model round's input (a RoleUser message the
-// second model request sees), rather than queued for the next turn.
-func TestREPLDuringTurnSteerInjectsBeforeNextModelRound(t *testing.T) {
+// second model request sees), rather than queued for the next prompt.
+func TestREPLDuringPromptSteerInjectsBeforeNextModelRound(t *testing.T) {
 	var out, errw lockedBuffer
 	releaseTurn := make(chan struct{})
 	toolRan := make(chan struct{})
@@ -3436,7 +3471,7 @@ func TestREPLDuringTurnSteerInjectsBeforeNextModelRound(t *testing.T) {
 	}
 	writePipe(t, pw, "redirect now\r")
 
-	// The steer must land before turnDone: the second model request fires while
+	// The steer must land before promptDone: the second model request fires while
 	// the turn is still active and carries the steered text.
 	close(releaseTurn)
 	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from steered input")
@@ -3456,9 +3491,9 @@ func TestREPLDuringTurnSteerInjectsBeforeNextModelRound(t *testing.T) {
 	if code := waitRun(t, codeCh); code != ExitOK {
 		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
 	}
-	// The steered text is a mid-turn RoleUser message, not a separate next-turn
+	// The steered text is a mid-prompt RoleUser message, not a separate next-prompt
 	// prompt: it sits between the tool_result and the final assistant message.
-	// (With steering off, "redirect now" would instead be the next turn's prompt,
+	// (With steering off, "redirect now" would instead be the next prompt,
 	// appearing after the final assistant message.)
 	msgs := app.Agent.Transcript()
 	var steerIdx, finalAsstIdx int = -1, -1
@@ -3477,11 +3512,11 @@ func TestREPLDuringTurnSteerInjectsBeforeNextModelRound(t *testing.T) {
 		t.Fatalf("final assistant message not found in transcript:\n%s", dumpTranscript(msgs))
 	}
 	if steerIdx > finalAsstIdx {
-		t.Fatalf("steer at index %d should precede final assistant at %d (mid-turn, not next turn):\n%s", steerIdx, finalAsstIdx, dumpTranscript(msgs))
+		t.Fatalf("steer at index %d should precede final assistant at %d (in-prompt, not next prompt):\n%s", steerIdx, finalAsstIdx, dumpTranscript(msgs))
 	}
 }
 
-func TestREPLDuringTurnSteerCarriesSkillContext(t *testing.T) {
+func TestREPLDuringPromptSteerCarriesSkillContext(t *testing.T) {
 	var out, errw lockedBuffer
 	releaseTurn := make(chan struct{})
 	toolRan := make(chan struct{})
@@ -3554,7 +3589,7 @@ func TestREPLDuringTurnSteerCarriesSkillContext(t *testing.T) {
 	}
 }
 
-func TestREPLDuringTurnSteerPromptHookBlockSkipsInjection(t *testing.T) {
+func TestREPLDuringPromptSteerPromptHookBlockSkipsInjection(t *testing.T) {
 	var out, errw lockedBuffer
 	releaseTurn := make(chan struct{})
 	toolRan := make(chan struct{})
@@ -3620,17 +3655,17 @@ func TestREPLDuringTurnSteerPromptHookBlockSkipsInjection(t *testing.T) {
 	}
 }
 
-// With steering disabled (app.Steer nil), during-turn Enter keeps the legacy
-// behavior: input is queued and runs as the next turn after the turn ends.
-func TestREPLDuringTurnNoSteerQueuesForNextTurn(t *testing.T) {
+// With steering disabled (app.Steer nil), during-prompt Enter keeps the legacy
+// behavior: input is queued and runs as the next prompt after the prompt ends.
+func TestREPLDuringPromptNoSteerQueuesForNextTurn(t *testing.T) {
 	var out, errw lockedBuffer
-	inTurn := make(chan struct{})
+	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Stop:  llm.StopEndTurn,
 			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
-			Block: func(context.Context) { close(inTurn); <-releaseTurn },
+			Block: func(context.Context) { close(inPrompt); <-releaseTurn },
 		},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
 	)
@@ -3644,7 +3679,7 @@ func TestREPLDuringTurnNoSteerQueuesForNextTurn(t *testing.T) {
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
 	writePipe(t, pw, "first\r")
 	select {
-	case <-inTurn:
+	case <-inPrompt:
 	case <-time.After(time.Second):
 		t.Fatal("turn did not start")
 	}
@@ -3652,32 +3687,32 @@ func TestREPLDuringTurnNoSteerQueuesForNextTurn(t *testing.T) {
 	writePipe(t, pw, "draft\r")
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> draft") }, "live input line")
 	if fp.RequestCount() != 1 {
-		t.Fatalf("queued during-turn input must wait for the active turn; got %d requests", fp.RequestCount())
+		t.Fatalf("queued during-prompt input must wait for the active prompt; got %d requests", fp.RequestCount())
 	}
 	close(releaseTurn)
-	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from queued during-turn input")
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from queued during-prompt input")
 	_ = pw.Close()
 
 	if code := waitRun(t, codeCh); code != ExitOK {
 		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
 	}
 	if got := transcriptPrompts(app); got != "first|draft" {
-		t.Fatalf("prompts = %q, want first|draft (no-steer queues next turn)", got)
+		t.Fatalf("prompts = %q, want first|draft (no-steer queues next prompt)", got)
 	}
 }
 
-// A steer submitted during a turn that ends without a tool round (StopEndTurn)
-// is never injected mid-turn; it must be recovered at turnDone and run as the
-// next turn so the input is not silently lost.
-func TestREPLDuringTurnSteerRecoveredWhenTurnEndsWithoutToolRound(t *testing.T) {
+// A steer submitted during a prompt whose final turn has no tool round (StopEndTurn)
+// is never injected after the final turn; it must be recovered at promptDone and run as the
+// next prompt so the input is not silently lost.
+func TestREPLDuringPromptSteerRecoveredWhenTurnEndsWithoutToolRound(t *testing.T) {
 	var out, errw lockedBuffer
-	inTurn := make(chan struct{})
+	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Stop:  llm.StopEndTurn,
 			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
-			Block: func(context.Context) { close(inTurn); <-releaseTurn },
+			Block: func(context.Context) { close(inPrompt); <-releaseTurn },
 		},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
 	)
@@ -3697,17 +3732,17 @@ func TestREPLDuringTurnSteerRecoveredWhenTurnEndsWithoutToolRound(t *testing.T) 
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
 	writePipe(t, pw, "first\r")
 	select {
-	case <-inTurn:
+	case <-inPrompt:
 	case <-time.After(time.Second):
 		t.Fatal("turn did not start")
 	}
 
 	// Submit a steer while the (tool-less) turn is still running. There is no
-	// tool round, so the loop cannot inject it; it must be recovered at turnDone.
+	// tool round, so the loop cannot inject it; it must be recovered at promptDone.
 	writePipe(t, pw, "redirect\r")
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> redirect") }, "live input line")
 	if fp.RequestCount() != 1 {
-		t.Fatalf("steer must not start a new request mid-turn; got %d requests", fp.RequestCount())
+		t.Fatalf("steer must not start a new request after the final turn; got %d requests", fp.RequestCount())
 	}
 	close(releaseTurn)
 	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from recovered steer")
@@ -3716,21 +3751,21 @@ func TestREPLDuringTurnSteerRecoveredWhenTurnEndsWithoutToolRound(t *testing.T) 
 	if code := waitRun(t, codeCh); code != ExitOK {
 		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
 	}
-	// The recovered steer ran as the next turn's prompt (not lost).
+	// The recovered steer ran as the next prompt (not lost).
 	if got := transcriptPrompts(app); got != "first|redirect" {
-		t.Fatalf("prompts = %q, want first|redirect (recovered steer ran as next turn)", got)
+		t.Fatalf("prompts = %q, want first|redirect (recovered steer ran as next prompt)", got)
 	}
 }
 
-func TestREPLDuringTurnRecoveredLiteralSlashSteerDoesNotRunCommand(t *testing.T) {
+func TestREPLDuringPromptRecoveredLiteralSlashSteerDoesNotRunCommand(t *testing.T) {
 	var out, errw lockedBuffer
-	inTurn := make(chan struct{})
+	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Stop:  llm.StopEndTurn,
 			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
-			Block: func(context.Context) { close(inTurn); <-releaseTurn },
+			Block: func(context.Context) { close(inPrompt); <-releaseTurn },
 		},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
 	)
@@ -3750,7 +3785,7 @@ func TestREPLDuringTurnRecoveredLiteralSlashSteerDoesNotRunCommand(t *testing.T)
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
 	writePipe(t, pw, "first\r")
 	select {
-	case <-inTurn:
+	case <-inPrompt:
 	case <-time.After(time.Second):
 		t.Fatal("turn did not start")
 	}
@@ -3768,9 +3803,9 @@ func TestREPLDuringTurnRecoveredLiteralSlashSteerDoesNotRunCommand(t *testing.T)
 	}
 }
 
-// steerDuringTurn classifies a during-turn input as model-bound (steer it) or
+// steerDuringPrompt classifies a during-prompt input as model-bound (steer it) or
 // not (queue it). This pins the prefix rules without driving a full REPL.
-func TestSteerDuringTurnClassification(t *testing.T) {
+func TestSteerDuringPromptClassification(t *testing.T) {
 	cases := []struct {
 		name      string
 		input     replInput
@@ -3795,9 +3830,9 @@ func TestSteerDuringTurnClassification(t *testing.T) {
 			var got string
 			var called bool
 			app := &App{Steer: func(input agent.SteerInput) { called = true; got = input.Text }}
-			steered := app.steerDuringTurn(tc.input)
+			steered := app.steerDuringPrompt(tc.input)
 			if steered != tc.wantSteer {
-				t.Fatalf("steerDuringTurn = %v, want %v", steered, tc.wantSteer)
+				t.Fatalf("steerDuringPrompt = %v, want %v", steered, tc.wantSteer)
 			}
 			if tc.wantSteer {
 				if !called {
@@ -3812,22 +3847,22 @@ func TestSteerDuringTurnClassification(t *testing.T) {
 
 	// nil Steer disables steering: everything is queued (returns false).
 	app := &App{}
-	if app.steerDuringTurn(replInput{text: "hi", interactive: true}) {
-		t.Fatalf("steerDuringTurn should be false when Steer is nil")
+	if app.steerDuringPrompt(replInput{text: "hi", interactive: true}) {
+		t.Fatalf("steerDuringPrompt should be false when Steer is nil")
 	}
 }
 
-// Partial during-turn input that is not submitted with Enter is still deposited
+// Partial during-prompt input that is not submitted with Enter is still deposited
 // into the next prompt as editable prefill and requires a manual Enter.
-func TestREPLDuringTurnPartialInputDepositedOnCompletion(t *testing.T) {
+func TestREPLDuringPromptPartialInputDepositedOnCompletion(t *testing.T) {
 	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
-	inTurn := make(chan struct{})
+	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Stop:  llm.StopEndTurn,
 			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
-			Block: func(ctx context.Context) { close(inTurn); <-releaseTurn },
+			Block: func(ctx context.Context) { close(inPrompt); <-releaseTurn },
 		},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
 	)
@@ -3841,7 +3876,7 @@ func TestREPLDuringTurnPartialInputDepositedOnCompletion(t *testing.T) {
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
 	writePipe(t, pw, "first\r")
 	select {
-	case <-inTurn:
+	case <-inPrompt:
 	case <-time.After(time.Second):
 		t.Fatal("turn did not start")
 	}
@@ -3852,7 +3887,7 @@ func TestREPLDuringTurnPartialInputDepositedOnCompletion(t *testing.T) {
 	close(releaseTurn)
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "[turn:") }, "turn 1 usage line")
 	if fp.RequestCount() != 1 {
-		t.Fatalf("partial during-turn input must not auto-submit; got %d requests", fp.RequestCount())
+		t.Fatalf("partial during-prompt input must not auto-submit; got %d requests", fp.RequestCount())
 	}
 
 	writePipe(t, pw, "\r")
@@ -3868,17 +3903,17 @@ func TestREPLDuringTurnPartialInputDepositedOnCompletion(t *testing.T) {
 }
 
 // On interrupt (double-Esc) the typed-so-far (unsubmitted) buffer is still
-// deposited, and the turn is cancelled (Esc-Esc still interrupts).
-func TestREPLDuringTurnInputDepositedOnInterrupt(t *testing.T) {
+// deposited, and the prompt is cancelled (Esc-Esc still interrupts).
+func TestREPLDuringPromptInputDepositedOnInterrupt(t *testing.T) {
 	var out, errw lockedBuffer // concurrent renderer writes vs waitFor reads
-	inTurn := make(chan struct{})
+	inPrompt := make(chan struct{})
 	fp := llmtest.New("fake",
 		// No events: the model is in its initial wait so the live input line is
 		// active when the user types and double-Esc cancels.
 		llmtest.Step{
 			Stop:  llm.StopEndTurn,
 			Usage: llm.Usage{InputTokens: 5, OutputTokens: 1},
-			Block: func(ctx context.Context) { close(inTurn); <-ctx.Done() },
+			Block: func(ctx context.Context) { close(inPrompt); <-ctx.Done() },
 		},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("resumed answer")}, Stop: llm.StopEndTurn},
 	)
@@ -3893,7 +3928,7 @@ func TestREPLDuringTurnInputDepositedOnInterrupt(t *testing.T) {
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
 	writePipe(t, pw, "first\r")
 	select {
-	case <-inTurn:
+	case <-inPrompt:
 	case <-time.After(time.Second):
 		t.Fatal("turn did not start")
 	}
@@ -3902,7 +3937,7 @@ func TestREPLDuringTurnInputDepositedOnInterrupt(t *testing.T) {
 	writePipe(t, pw, "wip")
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> wip") }, "live input line")
 	writePipe(t, pw, "\x1b\x1b")
-	waitFor(t, func() bool { return strings.Contains(errw.String(), "[cancelled]") }, "turn cancelled")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "[cancelled]") }, "prompt cancelled")
 
 	if fp.RequestCount() != 1 {
 		t.Fatalf("interrupt must not start a new turn; got %d requests", fp.RequestCount())
@@ -3921,21 +3956,21 @@ func TestREPLDuringTurnInputDepositedOnInterrupt(t *testing.T) {
 	}
 }
 
-// The during-turn capture shares the promptLineEditor's editing grammar via
-// handleKey(duringTurn=true): printable runes, inserts, and deletes act at the
+// The during-prompt capture shares the promptLineEditor's editing grammar via
+// handleKey(duringPrompt=true): printable runes, inserts, and deletes act at the
 // cursor, and Ctrl-A/E/B/F and the Delete escape sequence move it. Keystrokes
 // are fed through the editor's reader so multi-byte escape sequences decode
 // exactly as they do in the live REPL (one pump decodes a whole \x1b[3~). This
-// asserts both the buffer and the cursor (mirrored on the live onTurnInput
+// asserts both the buffer and the cursor (mirrored on the live onPromptInput
 // callback) after each keystroke.
-func TestREPLDuringTurnCursorEditing(t *testing.T) {
+func TestREPLDuringPromptCursorEditing(t *testing.T) {
 	// Whole input is preloaded; each pump reads one rune (an escape sequence's
 	// tail is consumed by readEscape within the single pump that read the Esc).
 	const input = "abc\x02\x02X\x01\x7f\x1b[3~\x05\x7f\x06\nyz\x01\x1b[3~"
-	rr := newDuringTurnTestReader(input)
+	rr := newDuringPromptTestReader(input)
 	var emittedBuf string
 	var emittedCursor int
-	rr.onTurnInput = func(buf string, cursor int) { emittedBuf, emittedCursor = buf, cursor }
+	rr.onPromptInput = func(buf string, cursor int) { emittedBuf, emittedCursor = buf, cursor }
 
 	steps := []struct {
 		buf    string
@@ -3960,15 +3995,15 @@ func TestREPLDuringTurnCursorEditing(t *testing.T) {
 		{"b\nyz", 0},  // delete forward
 	}
 	for i, want := range steps {
-		in, done, err := pumpDuringTurnKey(rr)
+		in, done, err := pumpDuringPromptKey(rr)
 		if err != nil {
 			t.Fatalf("step %d: %v", i, err)
 		}
 		if done {
-			t.Fatalf("step %d: handleKey returned done=%+v during a turn", i, in)
+			t.Fatalf("step %d: handleKey returned done=%+v during a prompt", i, in)
 		}
-		if string(rr.turnState.buf) != want.buf || rr.turnState.cursor != want.cursor {
-			t.Fatalf("step %d: buf=%q cursor=%d, want buf=%q cursor=%d", i, string(rr.turnState.buf), rr.turnState.cursor, want.buf, want.cursor)
+		if string(rr.promptState.buf) != want.buf || rr.promptState.cursor != want.cursor {
+			t.Fatalf("step %d: buf=%q cursor=%d, want buf=%q cursor=%d", i, string(rr.promptState.buf), rr.promptState.cursor, want.buf, want.cursor)
 		}
 		if emittedBuf != want.buf || emittedCursor != want.cursor {
 			t.Fatalf("step %d: emitted buf=%q cursor=%d, want buf=%q cursor=%d", i, emittedBuf, emittedCursor, want.buf, want.cursor)
@@ -3976,56 +4011,56 @@ func TestREPLDuringTurnCursorEditing(t *testing.T) {
 	}
 
 	// Deposit returns the full buffer (newline preserved) and resets buffer+cursor.
-	dep := rr.depositTurnBuffer()
+	dep := rr.depositPromptBuffer()
 	if !dep.deposit || dep.text != "b\nyz" {
 		t.Fatalf("deposit = %+v, want text %q deposit=true", dep, "b\nyz")
 	}
-	if len(rr.turnState.buf) != 0 || rr.turnState.cursor != 0 {
-		t.Fatalf("after deposit buf=%q cursor=%d, want empty buffer and cursor 0", string(rr.turnState.buf), rr.turnState.cursor)
+	if len(rr.promptState.buf) != 0 || rr.promptState.cursor != 0 {
+		t.Fatalf("after deposit buf=%q cursor=%d, want empty buffer and cursor 0", string(rr.promptState.buf), rr.promptState.cursor)
 	}
 }
 
 // Wide and multi-byte runes must move the cursor by whole runes, and a stale
 // cursor past the (now shorter) buffer is clamped rather than panicking.
-func TestREPLDuringTurnCursorWideRunesAndClamp(t *testing.T) {
-	rr := newDuringTurnTestReader("aé漢\x02\x7f\x7f")
+func TestREPLDuringPromptCursorWideRunesAndClamp(t *testing.T) {
+	rr := newDuringPromptTestReader("aé漢\x02\x7f\x7f")
 	// Type a, é, 漢 (3 pumps).
 	for i := 0; i < 3; i++ {
-		if _, _, err := pumpDuringTurnKey(rr); err != nil {
+		if _, _, err := pumpDuringPromptKey(rr); err != nil {
 			t.Fatalf("type %d: %v", i, err)
 		}
 	}
-	if string(rr.turnState.buf) != "aé漢" || rr.turnState.cursor != 3 {
-		t.Fatalf("buf=%q cursor=%d, want aé漢 / 3", string(rr.turnState.buf), rr.turnState.cursor)
+	if string(rr.promptState.buf) != "aé漢" || rr.promptState.cursor != 3 {
+		t.Fatalf("buf=%q cursor=%d, want aé漢 / 3", string(rr.promptState.buf), rr.promptState.cursor)
 	}
-	if _, _, err := pumpDuringTurnKey(rr); err != nil { // Ctrl-B -> between é and 漢
+	if _, _, err := pumpDuringPromptKey(rr); err != nil { // Ctrl-B -> between é and 漢
 		t.Fatalf("ctrl-b: %v", err)
 	}
-	if _, _, err := pumpDuringTurnKey(rr); err != nil { // backspace deletes é
+	if _, _, err := pumpDuringPromptKey(rr); err != nil { // backspace deletes é
 		t.Fatalf("backspace: %v", err)
 	}
-	if string(rr.turnState.buf) != "a漢" || rr.turnState.cursor != 1 {
-		t.Fatalf("buf=%q cursor=%d, want a漢 / 1", string(rr.turnState.buf), rr.turnState.cursor)
+	if string(rr.promptState.buf) != "a漢" || rr.promptState.cursor != 1 {
+		t.Fatalf("buf=%q cursor=%d, want a漢 / 1", string(rr.promptState.buf), rr.promptState.cursor)
 	}
 	// A stale out-of-range cursor is clamped to the buffer end on the next edit.
-	rr.turnState.cursor = 99
-	if _, _, err := pumpDuringTurnKey(rr); err != nil { // clamped backspace deletes 漢
+	rr.promptState.cursor = 99
+	if _, _, err := pumpDuringPromptKey(rr); err != nil { // clamped backspace deletes 漢
 		t.Fatalf("backspace: %v", err)
 	}
-	if string(rr.turnState.buf) != "a" || rr.turnState.cursor != 1 {
-		t.Fatalf("buf=%q cursor=%d after clamped backspace, want a / 1", string(rr.turnState.buf), rr.turnState.cursor)
+	if string(rr.promptState.buf) != "a" || rr.promptState.cursor != 1 {
+		t.Fatalf("buf=%q cursor=%d after clamped backspace, want a / 1", string(rr.promptState.buf), rr.promptState.cursor)
 	}
 }
 
-// During a turn the shared editor runs in vi mode too: Esc enters normal mode,
-// motions (h/l) and x delete work, and Enter queues the buffer as the next turn.
+// During a prompt the shared editor runs in vi mode too: Esc enters normal mode,
+// motions (h/l) and x delete work, and Enter queues the buffer as the next prompt.
 // A second Esc is the cancel gesture.
-func TestREPLDuringTurnViMode(t *testing.T) {
+func TestREPLDuringPromptViMode(t *testing.T) {
 	// type "abc", Esc -> normal, h h (move left twice), x (delete at cursor),
 	// l (right), i (insert), type "Z".
-	rr := newDuringTurnTestReader("abc\x1bhhxliZ")
+	rr := newDuringPromptTestReader("abc\x1bhhxliZ")
 	rr.editor.setEditMode(string(promptEditModeVi))
-	rr.beginTurnCapture() // re-seed vi state for the new edit mode
+	rr.beginPromptCapture() // re-seed vi state for the new edit mode
 
 	steps := []struct {
 		buf    string
@@ -4043,73 +4078,73 @@ func TestREPLDuringTurnViMode(t *testing.T) {
 		{"bZc", 2}, // type Z
 	}
 	for i, want := range steps {
-		if _, _, err := pumpDuringTurnKey(rr); err != nil {
+		if _, _, err := pumpDuringPromptKey(rr); err != nil {
 			t.Fatalf("step %d: %v", i, err)
 		}
-		if string(rr.turnState.buf) != want.buf || rr.turnState.cursor != want.cursor {
-			t.Fatalf("step %d: buf=%q cursor=%d, want buf=%q cursor=%d", i, string(rr.turnState.buf), rr.turnState.cursor, want.buf, want.cursor)
+		if string(rr.promptState.buf) != want.buf || rr.promptState.cursor != want.cursor {
+			t.Fatalf("step %d: buf=%q cursor=%d, want buf=%q cursor=%d", i, string(rr.promptState.buf), rr.promptState.cursor, want.buf, want.cursor)
 		}
 	}
 
-	// Enter during a turn submits the current buffer as queued input, even in vi
+	// Enter during a prompt submits the current buffer as queued input, even in vi
 	// insert mode.
-	rr2 := newDuringTurnTestReader("ab\r")
+	rr2 := newDuringPromptTestReader("ab\r")
 	rr2.editor.setEditMode(string(promptEditModeVi))
-	rr2.beginTurnCapture()
+	rr2.beginPromptCapture()
 	for i := 0; i < 2; i++ {
-		if _, _, err := pumpDuringTurnKey(rr2); err != nil {
+		if _, _, err := pumpDuringPromptKey(rr2); err != nil {
 			t.Fatalf("type %d: %v", i, err)
 		}
 	}
-	in, done, err := pumpDuringTurnKey(rr2) // Enter
+	in, done, err := pumpDuringPromptKey(rr2) // Enter
 	if err != nil {
 		t.Fatalf("enter: %v", err)
 	}
 	if !done || in.text != "ab" || !in.interactive {
-		t.Fatalf("Enter during a turn = %+v done=%v, want queued interactive input %q", in, done, "ab")
+		t.Fatalf("Enter during a prompt = %+v done=%v, want queued interactive input %q", in, done, "ab")
 	}
-	if string(rr2.turnState.buf) != "" {
-		t.Fatalf("buf=%q, want empty after queued submit", string(rr2.turnState.buf))
+	if string(rr2.promptState.buf) != "" {
+		t.Fatalf("buf=%q, want empty after queued submit", string(rr2.promptState.buf))
 	}
 
-	// Shift-Enter/raw LF still inserts a newline for multiline during-turn prompts.
-	rr3 := newDuringTurnTestReader("ab\n")
+	// Shift-Enter/raw LF still inserts a newline for multiline during-prompt prompts.
+	rr3 := newDuringPromptTestReader("ab\n")
 	rr3.editor.setEditMode(string(promptEditModeVi))
-	rr3.beginTurnCapture()
+	rr3.beginPromptCapture()
 	for i := 0; i < 2; i++ {
-		if _, _, err := pumpDuringTurnKey(rr3); err != nil {
+		if _, _, err := pumpDuringPromptKey(rr3); err != nil {
 			t.Fatalf("type before LF %d: %v", i, err)
 		}
 	}
-	in, done, err = pumpDuringTurnKey(rr3) // LF
+	in, done, err = pumpDuringPromptKey(rr3) // LF
 	if err != nil {
 		t.Fatalf("lf: %v", err)
 	}
 	if done {
-		t.Fatalf("LF during a turn must insert, not submit; got done=%+v", in)
+		t.Fatalf("LF during a prompt must insert, not submit; got done=%+v", in)
 	}
-	if string(rr3.turnState.buf) != "ab\n" {
-		t.Fatalf("buf=%q, want ab\\n (LF inserts newline)", string(rr3.turnState.buf))
+	if string(rr3.promptState.buf) != "ab\n" {
+		t.Fatalf("buf=%q, want ab\\n (LF inserts newline)", string(rr3.promptState.buf))
 	}
 }
 
-// In vi mode during a turn, the first Esc both enters normal mode and surfaces
+// In vi mode during a prompt, the first Esc both enters normal mode and surfaces
 // to the run loop, so the usual double-Esc cancel detector sees two presses (not
 // three).
-func TestREPLDuringTurnViDoubleEscapeSurfacesBothPresses(t *testing.T) {
-	rr := newDuringTurnTestReader("\x1b\x1b")
+func TestREPLDuringPromptViDoubleEscapeSurfacesBothPresses(t *testing.T) {
+	rr := newDuringPromptTestReader("\x1b\x1b")
 	rr.editor.setEditMode(string(promptEditModeVi))
-	rr.beginTurnCapture()
+	rr.beginPromptCapture()
 
-	first, done, err := pumpDuringTurnKey(rr)
+	first, done, err := pumpDuringPromptKey(rr)
 	if err != nil {
 		t.Fatalf("first Esc: %v", err)
 	}
 	if !done || !first.escape {
 		t.Fatalf("first Esc = %+v done=%v, want surfaced escape gesture", first, done)
 	}
-	if rr.turnVi.mode != viModeNormal {
-		t.Fatalf("first Esc should still enter vi normal mode, got mode=%v", rr.turnVi.mode)
+	if rr.promptVi.mode != viModeNormal {
+		t.Fatalf("first Esc should still enter vi normal mode, got mode=%v", rr.promptVi.mode)
 	}
 
 	var presses escapePresses
@@ -4117,7 +4152,7 @@ func TestREPLDuringTurnViDoubleEscapeSurfacesBothPresses(t *testing.T) {
 	if presses.press(now) {
 		t.Fatal("first surfaced Esc should not cancel yet")
 	}
-	second, done, err := pumpDuringTurnKey(rr)
+	second, done, err := pumpDuringPromptKey(rr)
 	if err != nil {
 		t.Fatalf("second Esc: %v", err)
 	}
@@ -4129,88 +4164,88 @@ func TestREPLDuringTurnViDoubleEscapeSurfacesBothPresses(t *testing.T) {
 	}
 }
 
-// During a turn up/down arrows recall history just like the idle prompt: the
+// During a prompt up/down arrows recall history just like the idle prompt: the
 // recalled line replaces the buffer (and is deposited as editable prefill, never
 // auto-submitted).
-func TestREPLDuringTurnHistoryRecall(t *testing.T) {
-	rr := newDuringTurnTestReader("\x1b[A\x1b[A\x1b[B")
+func TestREPLDuringPromptHistoryRecall(t *testing.T) {
+	rr := newDuringPromptTestReader("\x1b[A\x1b[A\x1b[B")
 	rr.editor.SetInitialHistory([]string{"old1", "old2"})
-	rr.beginTurnCapture() // re-seed history anchor for the editor's history
+	rr.beginPromptCapture() // re-seed history anchor for the editor's history
 
 	// First pump: empty buffer (nothing typed yet) — up recalls the last entry.
-	if _, _, err := pumpDuringTurnKey(rr); err != nil {
+	if _, _, err := pumpDuringPromptKey(rr); err != nil {
 		t.Fatalf("up1: %v", err)
 	}
-	if string(rr.turnState.buf) != "old2" {
-		t.Fatalf("after first up buf=%q, want old2", string(rr.turnState.buf))
+	if string(rr.promptState.buf) != "old2" {
+		t.Fatalf("after first up buf=%q, want old2", string(rr.promptState.buf))
 	}
 	// Second up: previous entry.
-	if _, _, err := pumpDuringTurnKey(rr); err != nil {
+	if _, _, err := pumpDuringPromptKey(rr); err != nil {
 		t.Fatalf("up2: %v", err)
 	}
-	if string(rr.turnState.buf) != "old1" {
-		t.Fatalf("after second up buf=%q, want old1", string(rr.turnState.buf))
+	if string(rr.promptState.buf) != "old1" {
+		t.Fatalf("after second up buf=%q, want old1", string(rr.promptState.buf))
 	}
 	// Down: back to old2.
-	if _, _, err := pumpDuringTurnKey(rr); err != nil {
+	if _, _, err := pumpDuringPromptKey(rr); err != nil {
 		t.Fatalf("down: %v", err)
 	}
-	if string(rr.turnState.buf) != "old2" {
-		t.Fatalf("after down buf=%q, want old2", string(rr.turnState.buf))
+	if string(rr.promptState.buf) != "old2" {
+		t.Fatalf("after down buf=%q, want old2", string(rr.promptState.buf))
 	}
 }
 
-// Ctrl-G during a turn returns an edit request (done) carrying the typed buffer
-// so the run loop can open $EDITOR on it; the during-turn state is cleared.
-func TestREPLDuringTurnCtrlGRequestsEdit(t *testing.T) {
-	rr := newDuringTurnTestReader("wip\x07")
+// Ctrl-G during a prompt returns an edit request (done) carrying the typed buffer
+// so the run loop can open $EDITOR on it; the during-prompt state is cleared.
+func TestREPLDuringPromptCtrlGRequestsEdit(t *testing.T) {
+	rr := newDuringPromptTestReader("wip\x07")
 	for i := 0; i < 3; i++ {
-		if _, _, err := pumpDuringTurnKey(rr); err != nil {
+		if _, _, err := pumpDuringPromptKey(rr); err != nil {
 			t.Fatalf("type %d: %v", i, err)
 		}
 	}
-	in, done, err := pumpDuringTurnKey(rr) // Ctrl-G (\x07 = lineTermEdit)
+	in, done, err := pumpDuringPromptKey(rr) // Ctrl-G (\x07 = lineTermEdit)
 	if err != nil {
 		t.Fatalf("ctrl-g: %v", err)
 	}
 	if !done || !in.edit || in.text != "wip" {
 		t.Fatalf("ctrl-g = %+v done=%v, want edit request text %q", in, done, "wip")
 	}
-	// handleKey hands the buffer text to the run loop; the run loop (readTurn)
-	// clears the during-turn state. The buffer is intact here so the text is not
+	// handleKey hands the buffer text to the run loop; the run loop (readDuringPrompt)
+	// clears the during-prompt state. The buffer is intact here so the text is not
 	// lost before the editor opens on it.
-	if string(rr.turnState.buf) != "wip" {
-		t.Fatalf("after ctrl-g buf=%q, want wip (intact until the run loop clears)", string(rr.turnState.buf))
+	if string(rr.promptState.buf) != "wip" {
+		t.Fatalf("after ctrl-g buf=%q, want wip (intact until the run loop clears)", string(rr.promptState.buf))
 	}
 }
 
-// newDuringTurnTestReader builds a replReader whose editor reads from a shared
-// bufio.Reader seeded with input, mirroring the live read loop where readTurn
+// newDuringPromptTestReader builds a replReader whose editor reads from a shared
+// bufio.Reader seeded with input, mirroring the live read loop where readDuringPrompt
 // reads a rune and hands it to handleKey (which reads escape-sequence tails from
 // the same reader).
-func newDuringTurnTestReader(input string) *replReader {
+func newDuringPromptTestReader(input string) *replReader {
 	r := bufio.NewReader(strings.NewReader(input))
 	ed := newPromptLineEditorWithReader(r, io.Discard)
 	rr := &replReader{r: r, editor: ed}
-	rr.beginTurnCapture()
+	rr.beginPromptCapture()
 	return rr
 }
 
-// pumpDuringTurnKey reads one rune from the shared reader and dispatches it
-// through the during-turn handleKey path, emitting the status-line update on
+// pumpDuringPromptKey reads one rune from the shared reader and dispatches it
+// through the during-prompt handleKey path, emitting the status-line update on
 // redraw. It returns the resulting input/done flag (done=false for ordinary
 // edits; done=true only for interrupt/escape/edit/EOF gestures).
-func pumpDuringTurnKey(rr *replReader) (replInput, bool, error) {
+func pumpDuringPromptKey(rr *replReader) (replInput, bool, error) {
 	r, _, err := rr.r.ReadRune()
 	if err != nil {
 		return replInput{}, false, err
 	}
-	res, err := rr.editor.handleKey(&rr.turnVi, rr.turnState, &rr.turnHistory, "", r, true)
+	res, err := rr.editor.handleKey(&rr.promptVi, rr.promptState, &rr.promptHistory, "", r, true)
 	if err != nil {
 		return replInput{}, false, err
 	}
 	if res.redraw {
-		rr.emitTurnInput()
+		rr.emitPromptInput()
 	}
 	return res.input, res.done, nil
 }

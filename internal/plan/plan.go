@@ -109,7 +109,7 @@ type HandoffRequest struct {
 
 // Pending carries a requested handoff from the model-callable
 // request_implementation tool to the REPL, which approves it and performs the
-// switch at the turn boundary. At most one request is held; Request overwrites.
+// switch at the prompt boundary. At most one request is held; Request overwrites.
 type Pending struct {
 	mu  sync.Mutex
 	req *HandoffRequest

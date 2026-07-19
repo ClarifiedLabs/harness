@@ -21,10 +21,10 @@ func TestReplayQuietSuppressesStatusLines(t *testing.T) {
 	// Write a minimal event log with a user prompt, an assistant delta, a tool
 	// result (has a Display line), and a turn-usage line (also has Display).
 	events := []Event{
-		{Type: EventUser, Turn: 1, Text: "hello"},
-		{Type: EventAssistantDelta, Turn: 1, Text: "world"},
-		{Type: EventToolResult, Turn: 1, Display: "[read_file] path=a.go → 3 lines"},
-		{Type: EventTurnUsage, Turn: 1, Display: "[turn: 1 model turns · 1.0k in / 0.1k out · 0.1s]"},
+		{Type: EventUser, Prompt: 1, Text: "hello"},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "world"},
+		{Type: EventToolResult, Prompt: 1, Turn: 1, Display: "[read_file] path=a.go → 3 lines"},
+		{Type: EventPromptUsage, Prompt: 1, Display: "[prompt: 1 turn · 1.0k in / 0.1k out · 0.1s]"},
 	}
 	for _, ev := range events {
 		if err := AppendEvent(dir, ev); err != nil {
@@ -93,6 +93,28 @@ func sampleSession() Session {
 	}
 }
 
+func TestLoadAndReplayRejectPreV3SessionSchema(t *testing.T) {
+	dir := t.TempDir()
+	data, err := json.Marshal(Session{Version: 2, Messages: []llm.Message{}})
+	if err != nil {
+		t.Fatalf("marshal v2 state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, stateFile), data, 0o644); err != nil {
+		t.Fatalf("write v2 state: %v", err)
+	}
+	if err := AppendEvent(dir, Event{Type: EventUser, Prompt: 1, Text: "old schema"}); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 3)") {
+		t.Fatalf("Load error = %v, want clear v2 rejection", err)
+	}
+	var replay strings.Builder
+	if err := Replay(dir, &replay, ReplayOptions{}); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 3)") {
+		t.Fatalf("Replay error = %v, want clear v2 rejection", err)
+	}
+}
+
 func TestSessionRoundTripsPlansAndUsageByModel(t *testing.T) {
 	s := sampleSession()
 	s.Plans = []plan.Plan{
@@ -145,7 +167,7 @@ func TestSaveBackfillsMissingMessageTimestamps(t *testing.T) {
 
 func TestAppendEventStampsMissingTime(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
-	if err := AppendEvent(dir, Event{Type: EventUser, Turn: 1, Text: "hello"}); err != nil {
+	if err := AppendEvent(dir, Event{Type: EventUser, Prompt: 1, Text: "hello"}); err != nil {
 		t.Fatalf("AppendEvent: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "raw.ndjson"))
@@ -494,14 +516,14 @@ func TestLoadMalformedFileIsError(t *testing.T) {
 func TestReplayPrintsUserFacingView(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	events := []Event{
-		{Type: EventUser, Turn: 1, Text: "fix it"},
-		{Type: EventAssistantDelta, Turn: 1, Text: "I'll check **now** and use [docs](https://docs.example.com).\n"},
-		{Type: EventReasoningSummary, Turn: 1, Text: "Checked **the repo**.\nNext [step](https://example.com)."},
-		{Type: EventModelTurnUsage, Turn: 1, Display: "[model: turn 1 cost: $0.0010 · totals: $0.0010 prompt · $0.0010 session]"},
-		{Type: EventToolResult, Turn: 1, Display: `[rg pattern="panic" .] → 2 lines, 80B`},
-		{Type: EventToolDiff, Turn: 1, Display: "--- a/f.txt\n+++ b/f.txt\n@@ -1,1 +1,1 @@\n-old\n+new"},
-		{Type: EventNotice, Turn: 1, Display: "[compacted: 6 messages → summary]"},
-		{Type: EventTurnUsage, Turn: 1, Display: "[turn: 2 model turns · 1.0k in / 100 out]"},
+		{Type: EventUser, Prompt: 1, Text: "fix it"},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "I'll check **now** and use [docs](https://docs.example.com).\n"},
+		{Type: EventReasoningSummary, Prompt: 1, Turn: 1, Text: "Checked **the repo**.\nNext [step](https://example.com)."},
+		{Type: EventTurnComplete, Prompt: 1, Turn: 1, Display: "[turn: 1 · 1.0s]"},
+		{Type: EventToolResult, Prompt: 1, Turn: 1, Display: `[rg pattern="panic" .] → 2 lines, 80B`},
+		{Type: EventToolDiff, Prompt: 1, Turn: 1, Display: "--- a/f.txt\n+++ b/f.txt\n@@ -1,1 +1,1 @@\n-old\n+new"},
+		{Type: EventNotice, Prompt: 1, Display: "[compacted: 6 messages → summary]"},
+		{Type: EventPromptUsage, Prompt: 1, Display: "[prompt: 2 turns · 1.0k in / 100 out]"},
 	}
 	for _, ev := range events {
 		if err := AppendEvent(dir, ev); err != nil {
@@ -513,7 +535,7 @@ func TestReplayPrintsUserFacingView(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"> fix it", "I'll check now and use docs <https://docs.example.com>.", "[reasoning]\n", "  Checked the repo.", "  Next step <https://example.com>.", "[model: turn 1 cost:", `[rg pattern="panic" .]`, "--- a/f.txt", "-old\n+new", "[compacted:", "[turn:"} {
+	for _, want := range []string{"> fix it", "I'll check now and use docs <https://docs.example.com>.", "[reasoning]\n", "  Checked the repo.", "  Next step <https://example.com>.", "[turn: 1", `[rg pattern="panic" .]`, "--- a/f.txt", "-old\n+new", "[compacted:", "[prompt:"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("replay missing %q:\n%s", want, got)
 		}
@@ -546,11 +568,12 @@ func TestReplayWrapsReasoningSummaryWithWidth(t *testing.T) {
 func TestReplaySeparatesCommentaryAndFinalAnswer(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	events := []Event{
-		{Type: EventUser, Turn: 1, Text: "answer this"},
-		{Type: EventAssistantPhase, Turn: 1, Phase: llm.AssistantPhaseCommentary},
-		{Type: EventAssistantDelta, Turn: 1, Text: "I have enough to answer."},
-		{Type: EventAssistantPhase, Turn: 1, Phase: llm.AssistantPhaseFinal},
-		{Type: EventAssistantDelta, Turn: 1, Text: "Yes, with limits."},
+		{Type: EventUser, Prompt: 1, Text: "answer this"},
+		{Type: EventAssistantPhase, Prompt: 1, Turn: 1, Phase: llm.AssistantPhaseCommentary},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "I have enough to answer."},
+		{Type: EventAssistantPhase, Prompt: 1, Turn: 1, Phase: llm.AssistantPhaseFinal},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "Yes, with limits."},
+		{Type: EventTurnComplete, Prompt: 1, Turn: 1},
 	}
 	for _, ev := range events {
 		if err := AppendEvent(dir, ev); err != nil {
@@ -580,12 +603,12 @@ func TestReplaySeparatesCommentaryAndFinalAnswer(t *testing.T) {
 func TestReplayResetsPhaseStateBetweenTurns(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	events := []Event{
-		{Type: EventUser, Turn: 1, Text: "first"},
-		{Type: EventAssistantPhase, Turn: 1, Phase: llm.AssistantPhaseCommentary},
-		{Type: EventAssistantDelta, Turn: 1, Text: "Working."},
-		{Type: EventUser, Turn: 2, Text: "second"},
-		{Type: EventAssistantPhase, Turn: 2, Phase: llm.AssistantPhaseFinal},
-		{Type: EventAssistantDelta, Turn: 2, Text: "Done."},
+		{Type: EventUser, Prompt: 1, Text: "first"},
+		{Type: EventAssistantPhase, Prompt: 1, Turn: 1, Phase: llm.AssistantPhaseCommentary},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "Working."},
+		{Type: EventUser, Prompt: 2, Text: "second"},
+		{Type: EventAssistantPhase, Prompt: 2, Turn: 1, Phase: llm.AssistantPhaseFinal},
+		{Type: EventAssistantDelta, Prompt: 2, Turn: 1, Text: "Done."},
 	}
 	for _, ev := range events {
 		if err := AppendEvent(dir, ev); err != nil {
@@ -609,14 +632,15 @@ func TestReplayResetsPhaseStateBetweenTurns(t *testing.T) {
 func TestReplayFiltersAbandonedAttemptOutput(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	events := []Event{
-		{Type: EventUser, Turn: 1, Text: "fix it"},
-		{Type: EventModelTurnStart, Turn: 1, ModelTurns: 1, Attempt: 1},
-		{Type: EventAssistantDelta, Turn: 1, ModelTurns: 1, Attempt: 1, Text: "discarded partial"},
-		{Type: EventReasoningSummary, Turn: 1, ModelTurns: 1, Attempt: 1, Text: "discarded reasoning"},
-		{Type: EventModelTurnAbandoned, Turn: 1, ModelTurns: 1, Attempt: 1, Display: "[model: turn 1 attempt 1 discarded; retrying]"},
-		{Type: EventNotice, Turn: 1, Display: "[stream interrupted: retrying]"},
-		{Type: EventModelTurnStart, Turn: 1, ModelTurns: 1, Attempt: 2},
-		{Type: EventAssistantDelta, Turn: 1, ModelTurns: 1, Attempt: 2, Text: "final answer"},
+		{Type: EventUser, Prompt: 1, Text: "fix it"},
+		{Type: EventTurnAttemptStart, Prompt: 1, Turn: 1, Attempt: 1},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 1, Text: "discarded partial"},
+		{Type: EventReasoningSummary, Prompt: 1, Turn: 1, Attempt: 1, Text: "discarded reasoning"},
+		{Type: EventTurnAttemptAbandoned, Prompt: 1, Turn: 1, Attempt: 1, Display: "[turn: 1 attempt 1 discarded; retrying]"},
+		{Type: EventNotice, Prompt: 1, Turn: 1, Display: "[stream interrupted: retrying]"},
+		{Type: EventTurnAttemptStart, Prompt: 1, Turn: 1, Attempt: 2},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 2, Text: "final answer"},
+		{Type: EventTurnComplete, Prompt: 1, Turn: 1},
 	}
 	for _, ev := range events {
 		if err := AppendEvent(dir, ev); err != nil {
@@ -634,7 +658,7 @@ func TestReplayFiltersAbandonedAttemptOutput(t *testing.T) {
 			t.Fatalf("replay included abandoned attempt output %q:\n%s", bad, gotReplay)
 		}
 	}
-	if !strings.Contains(gotReplay, "[model: turn 1 attempt 1 discarded; retrying]") || !strings.Contains(gotReplay, "final answer") {
+	if !strings.Contains(gotReplay, "[turn: 1 attempt 1 discarded; retrying]") || !strings.Contains(gotReplay, "final answer") {
 		t.Fatalf("replay missing abandoned marker or final answer:\n%s", gotReplay)
 	}
 
@@ -643,7 +667,7 @@ func TestReplayFiltersAbandonedAttemptOutput(t *testing.T) {
 		t.Fatalf("LatestTurnOutput: %v", err)
 	}
 	if strings.Contains(latest, "discarded partial") || strings.Contains(latest, "discarded reasoning") ||
-		latest != "[model: turn 1 attempt 1 discarded; retrying]\n[stream interrupted: retrying]\nfinal answer" {
+		latest != "[stream interrupted: retrying]\nfinal answer" {
 		t.Fatalf("latest output did not filter abandoned attempt correctly: %q", latest)
 	}
 }
@@ -652,12 +676,12 @@ func TestTimingsPrintsWallClockReport(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	base := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
 	events := []Event{
-		{Time: base, Type: EventUser, Turn: 1, Text: "fix it"},
-		{Time: base.Add(100 * time.Millisecond), Type: EventModelTurnStart, Turn: 1, ModelTurns: 1, Attempt: 1, Context: &ContextSnapshot{Total: 1000, Window: 4000, PayloadTotal: 400, Tools: 120}},
-		{Time: base.Add(1200 * time.Millisecond), Type: EventToolStart, Turn: 1, ToolID: "call_1", Tool: "read_file"},
-		{Time: base.Add(1500 * time.Millisecond), Type: EventToolResult, Turn: 1, ToolID: "call_1", Tool: "read_file"},
-		{Time: base.Add(1600 * time.Millisecond), Type: EventModelTurnUsage, Turn: 1, ModelTurns: 1, Attempt: 1},
-		{Time: base.Add(2 * time.Second), Type: EventTurnUsage, Turn: 1},
+		{Time: base, Type: EventUser, Prompt: 1, Text: "fix it"},
+		{Time: base.Add(100 * time.Millisecond), Type: EventTurnAttemptStart, Prompt: 1, Turn: 1, Attempt: 1, Context: &ContextSnapshot{Total: 1000, Window: 4000, PayloadTotal: 400, Tools: 120}},
+		{Time: base.Add(1200 * time.Millisecond), Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "call_1", Tool: "read_file"},
+		{Time: base.Add(1500 * time.Millisecond), Type: EventToolResult, Prompt: 1, Turn: 1, ToolID: "call_1", Tool: "read_file"},
+		{Time: base.Add(1600 * time.Millisecond), Type: EventTurnAttemptUsage, Prompt: 1, Turn: 1, Attempt: 1},
+		{Time: base.Add(2 * time.Second), Type: EventPromptUsage, Prompt: 1},
 	}
 	for _, ev := range events {
 		if err := AppendEvent(dir, ev); err != nil {
@@ -670,7 +694,7 @@ func TestTimingsPrintsWallClockReport(t *testing.T) {
 		t.Fatalf("Timings: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"turn 1: total 2s", "first visible 1.2s", "model turn 1 attempt 1: 1.5s", "payload 400", "tool read_file: 300ms", "gap 1.1s"} {
+	for _, want := range []string{"prompt 1: total 2s", "first visible 1.2s", "turn 1 attempt 1: 1.5s", "payload 400", "tool read_file: 300ms", "gap 1.1s"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("timings missing %q:\n%s", want, got)
 		}
@@ -681,9 +705,9 @@ func TestTimingsTreatsReasoningSummaryAsVisible(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	base := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
 	events := []Event{
-		{Time: base, Type: EventUser, Turn: 1, Text: "fix it"},
-		{Time: base.Add(400 * time.Millisecond), Type: EventReasoningSummary, Turn: 1, Text: "Checking."},
-		{Time: base.Add(2 * time.Second), Type: EventTurnUsage, Turn: 1},
+		{Time: base, Type: EventUser, Prompt: 1, Text: "fix it"},
+		{Time: base.Add(400 * time.Millisecond), Type: EventReasoningSummary, Prompt: 1, Turn: 1, Text: "Checking."},
+		{Time: base.Add(2 * time.Second), Type: EventPromptUsage, Prompt: 1},
 	}
 	for _, ev := range events {
 		if err := AppendEvent(dir, ev); err != nil {
@@ -703,16 +727,18 @@ func TestTimingsTreatsReasoningSummaryAsVisible(t *testing.T) {
 func TestLatestTurnOutputReturnsLatestVisibleOutputWithoutUserPrompt(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	events := []Event{
-		{Type: EventUser, Turn: 1, Text: "first prompt"},
-		{Type: EventAssistantDelta, Turn: 1, Text: "old answer\n"},
-		{Type: EventTurnUsage, Turn: 1, Display: "[turn: 1 model turn]"},
-		{Type: EventUser, Turn: 2, Text: "second prompt"},
-		{Type: EventAssistantDelta, Turn: 2, Text: "new **answer**"},
-		{Type: EventReasoningSummary, Turn: 2, Text: "Checked state."},
-		{Type: EventModelTurnUsage, Turn: 2, Display: "[model: turn 1 cost: $0.0010 · totals: $0.0010 prompt · $0.0010 session]"},
-		{Type: EventToolResult, Turn: 2, Display: `[read_file path="x"] → 12B`},
-		{Type: EventNotice, Turn: 2, Display: "[notice]"},
-		{Type: EventTurnUsage, Turn: 2, Display: "[turn: 2 model turns]"},
+		{Type: EventUser, Prompt: 1, Text: "one long prompt"},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "old answer\n"},
+		{Type: EventTurnComplete, Prompt: 1, Turn: 1, Display: "[turn: 1]"},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 2, Text: "new **answer**"},
+		{Type: EventReasoningSummary, Prompt: 1, Turn: 2, Text: "Checked state."},
+		{Type: EventTurnAttemptUsage, Prompt: 1, Turn: 2, Attempt: 1, Display: "[attempt usage is not editor output]"},
+		{Type: EventToolResult, Prompt: 1, Turn: 2, Display: `[read_file path="x"] → 12B`},
+		{Type: EventNotice, Prompt: 1, Turn: 2, Display: "[notice]"},
+		{Type: EventTurnComplete, Prompt: 1, Turn: 2, Display: "[turn: 2]"},
+		{Type: EventNotice, Prompt: 1, Display: "[compacted maintenance notice]"},
+		{Type: EventMaintenanceUsage, Prompt: 1, Purpose: "compaction", Display: "[maintenance usage]"},
+		{Type: EventPromptUsage, Prompt: 1, Display: "[prompt: 2 turns]"},
 	}
 	for _, ev := range events {
 		if err := AppendEvent(dir, ev); err != nil {
@@ -728,15 +754,40 @@ func TestLatestTurnOutputReturnsLatestVisibleOutputWithoutUserPrompt(t *testing.
 		"[reasoning]\n" +
 		"  Checked state.\n" +
 		"[end reasoning]\n" +
-		"[model: turn 1 cost: $0.0010 · totals: $0.0010 prompt · $0.0010 session]\n" +
 		`[read_file path="x"] → 12B` + "\n" +
 		"[notice]\n" +
-		"[turn: 2 model turns]"
+		"[turn: 2]"
 	if got != want {
 		t.Fatalf("latest output mismatch:\nwant %q\n got %q", want, got)
 	}
-	if strings.Contains(got, "second prompt") || strings.Contains(got, "old answer") {
+	if strings.Contains(got, "one long prompt") || strings.Contains(got, "old answer") || strings.Contains(got, "prompt: 2 turns") || strings.Contains(got, "maintenance") {
 		t.Fatalf("latest output included wrong turn/user text: %q", got)
+	}
+}
+
+func TestLatestTurnOutputUsesPromptAndTurnPairWhenTurnNumbersReset(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	events := []Event{
+		{Type: EventUser, Prompt: 1, Text: "first prompt"},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 2, Text: "prompt one turn two"},
+		{Type: EventTurnComplete, Prompt: 1, Turn: 2, Display: "[turn: 2]"},
+		{Type: EventUser, Prompt: 2, Text: "second prompt"},
+		{Type: EventAssistantDelta, Prompt: 2, Turn: 1, Text: "prompt two turn one"},
+		{Type: EventTurnComplete, Prompt: 2, Turn: 1, Display: "[turn: 1]"},
+		{Type: EventPromptUsage, Prompt: 2, Display: "[prompt: 1 turn]"},
+	}
+	for _, ev := range events {
+		if err := AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	got, err := LatestTurnOutput(dir)
+	if err != nil {
+		t.Fatalf("LatestTurnOutput: %v", err)
+	}
+	if got != "prompt two turn one\n[turn: 1]" {
+		t.Fatalf("latest output = %q, want the latest (prompt, turn) pair", got)
 	}
 }
 

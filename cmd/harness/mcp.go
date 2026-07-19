@@ -378,7 +378,7 @@ func newMCPRefresher(conn *mcptools.Conn, catalog *tools.Registry, agents map[st
 		// re-list runs synchronously at the prompt boundary. Accepted: it only
 		// happens on a misbehaving proxy after an explicit list_changed, the
 		// bound is finite, and the alternative (background re-list racing the
-		// turn's Specs()/Dispatch reads) is the unsafe mid-turn swap we avoid.
+		// prompt's Specs()/Dispatch reads) is the unsafe mid-prompt swap we avoid.
 		ctx, cancel := context.WithTimeout(parent, mcpRegisterTimeout)
 		defer cancel()
 		sum, err := mcptools.RegisterWithOptions(ctx, catalog, conn, mcptools.RegisterOptions{TrustReadOnlyHint: true})

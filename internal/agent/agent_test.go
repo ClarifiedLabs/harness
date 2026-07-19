@@ -24,25 +24,27 @@ import (
 // recordSink captures every sink callback so tests can assert what the UI would
 // have been told.
 type recordSink struct {
-	text            strings.Builder
-	models          []modelTurnEvent
-	contexts        []ContextEstimate
-	modelUsage      []ModelTurnUsage
-	reasoning       []string
-	phases          []string
-	toolUses        []llm.ToolCall
-	argDeltas       []string
-	starts          []llm.ToolCall
-	results         []llm.ToolResult
-	abandoned       []modelTurnEvent
-	notices         []string
-	turnUsage       []TurnUsage
-	modelTurnCounts []int
+	text           strings.Builder
+	attemptStarts  []turnAttemptEvent
+	contexts       []ContextEstimate
+	attemptUsage   []TurnAttemptUsage
+	reasoning      []string
+	phases         []string
+	toolUses       []llm.ToolCall
+	argDeltas      []string
+	starts         []llm.ToolCall
+	results        []llm.ToolResult
+	abandoned      []turnAttemptEvent
+	notices        []string
+	promptUsage    []PromptUsage
+	completedTurns []TurnUsage
+	turnCounts     []int
+	maintenance    []MaintenanceUsage
 }
 
-type modelTurnEvent struct {
-	modelTurn int
-	attempt   int
+type turnAttemptEvent struct {
+	turn    int
+	attempt int
 }
 
 func (s *recordSink) TextDelta(t string) { s.text.WriteString(t) }
@@ -52,15 +54,18 @@ func (s *recordSink) ReasoningSummary(t string) {
 func (s *recordSink) AssistantPhase(phase string) {
 	s.phases = append(s.phases, phase)
 }
-func (s *recordSink) ModelTurnStart(modelTurn, attempt int, ctx ContextEstimate) {
-	s.models = append(s.models, modelTurnEvent{modelTurn: modelTurn, attempt: attempt})
+func (s *recordSink) TurnAttemptStart(turn, attempt int, ctx ContextEstimate) {
+	s.attemptStarts = append(s.attemptStarts, turnAttemptEvent{turn: turn, attempt: attempt})
 	s.contexts = append(s.contexts, ctx)
 }
-func (s *recordSink) ModelTurnComplete(u ModelTurnUsage) {
-	s.modelUsage = append(s.modelUsage, u)
+func (s *recordSink) TurnAttemptComplete(u TurnAttemptUsage) {
+	s.attemptUsage = append(s.attemptUsage, u)
 }
-func (s *recordSink) ModelTurnAbandoned(modelTurn, attempt int) {
-	s.abandoned = append(s.abandoned, modelTurnEvent{modelTurn: modelTurn, attempt: attempt})
+func (s *recordSink) TurnAttemptAbandoned(turn, attempt int) {
+	s.abandoned = append(s.abandoned, turnAttemptEvent{turn: turn, attempt: attempt})
+}
+func (s *recordSink) TurnComplete(u TurnUsage) {
+	s.completedTurns = append(s.completedTurns, u)
 }
 func (s *recordSink) ToolUseStart(c llm.ToolCall) { s.toolUses = append(s.toolUses, c) }
 func (s *recordSink) ToolUseDelta(_ int, delta string) {
@@ -69,12 +74,28 @@ func (s *recordSink) ToolUseDelta(_ int, delta string) {
 func (s *recordSink) ToolStart(c llm.ToolCall)    { s.starts = append(s.starts, c) }
 func (s *recordSink) ToolResult(r llm.ToolResult) { s.results = append(s.results, r) }
 func (s *recordSink) Notice(msg string)           { s.notices = append(s.notices, msg) }
-func (s *recordSink) TurnComplete(u TurnUsage) {
-	s.turnUsage = append(s.turnUsage, u)
-	s.modelTurnCounts = append(s.modelTurnCounts, u.ModelTurns)
+func (s *recordSink) PromptComplete(u PromptUsage) {
+	s.promptUsage = append(s.promptUsage, u)
+	s.turnCounts = append(s.turnCounts, u.Turns)
+}
+func (s *recordSink) MaintenanceComplete(u MaintenanceUsage) {
+	s.maintenance = append(s.maintenance, u)
 }
 
-type turnWorkSink struct {
+func TestReportMaintenanceSkipsLocalZeroUsage(t *testing.T) {
+	sink := &recordSink{}
+	reportMaintenance(sink, "compaction", llm.Usage{})
+	if len(sink.maintenance) != 0 {
+		t.Fatalf("zero-usage local compaction recorded as a model call: %+v", sink.maintenance)
+	}
+
+	reportMaintenance(sink, "compaction", llm.Usage{InputTokens: 20, OutputTokens: 4})
+	if len(sink.maintenance) != 1 || sink.maintenance[0].Usage.InputTokens != 20 || sink.maintenance[0].Usage.OutputTokens != 4 {
+		t.Fatalf("model-backed compaction maintenance = %+v", sink.maintenance)
+	}
+}
+
+type promptWorkSink struct {
 	recordSink
 	pending        bool
 	contextPending bool
@@ -83,7 +104,7 @@ type turnWorkSink struct {
 	waits          int
 }
 
-func (s *turnWorkSink) RequestContext() []string {
+func (s *promptWorkSink) RequestContext() []string {
 	if !s.contextPending {
 		return nil
 	}
@@ -91,11 +112,11 @@ func (s *turnWorkSink) RequestContext() []string {
 	return []string{"[background delegate completed]\nchild report"}
 }
 
-func (s *turnWorkSink) PendingTurnWork() bool {
+func (s *promptWorkSink) PendingPromptWork() bool {
 	return s.pending || s.contextPending
 }
 
-func (s *turnWorkSink) WaitForTurnWork(context.Context) (llm.Usage, error) {
+func (s *promptWorkSink) WaitForPromptWork(context.Context) (llm.Usage, error) {
 	s.waits++
 	s.pending = false
 	s.contextPending = true
@@ -106,7 +127,7 @@ func (s *turnWorkSink) WaitForTurnWork(context.Context) (llm.Usage, error) {
 	return s.usage, nil
 }
 
-func (s *turnWorkSink) DrainTurnWorkUsage() llm.Usage { return llm.Usage{} }
+func (s *promptWorkSink) DrainPromptWorkUsage() llm.Usage { return llm.Usage{} }
 
 type diffRecordSink struct {
 	recordSink
@@ -143,7 +164,7 @@ func (s *archiveSink) ArchiveToolResult(r llm.ToolResult) (ToolResultArchive, er
 }
 
 // recordTool is a fake tool whose Run is scriptable; it records the inputs it
-// received in call order. The mutex guards inputs because read-only model turns now
+// received in call order. The mutex guards inputs because read-only turns now
 // dispatch Run concurrently.
 type recordTool struct {
 	name     string
@@ -262,8 +283,8 @@ func TestTextOnlyTurn(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 
 	msgs := a.Transcript()
@@ -282,6 +303,8 @@ func TestTextOnlyTurn(t *testing.T) {
 	}
 	if len(fp.Requests) != 1 {
 		t.Errorf("provider called %d times, want 1", len(fp.Requests))
+	} else if fp.Requests[0].Purpose != llm.RequestPurposeTurn {
+		t.Errorf("request purpose = %q, want %q", fp.Requests[0].Purpose, llm.RequestPurposeTurn)
 	}
 }
 
@@ -290,8 +313,8 @@ func TestModelRequestStampsContextBudgetHints(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{Model: "local", ContextWindow: 100_000})
 	a.SetSystem("system prompt")
 
-	if err := a.RunTurn(context.Background(), "hello", &recordSink{}); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hello", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(fp.Requests) != 1 {
 		t.Fatalf("requests = %d, want 1", len(fp.Requests))
@@ -305,7 +328,7 @@ func TestModelRequestStampsContextBudgetHints(t *testing.T) {
 	}
 }
 
-func TestRunTurnUsesProviderInputTokenCount(t *testing.T) {
+func TestRunPromptUsesProviderInputTokenCount(t *testing.T) {
 	fp := &countingProvider{
 		FakeProvider: llmtest.New("responses", llmtest.Step{
 			Events: []llm.StreamEvent{textDelta("ok")},
@@ -317,8 +340,8 @@ func TestRunTurnUsesProviderInputTokenCount(t *testing.T) {
 	a.SetSystem("system prompt")
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "hello", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hello", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(fp.Requests) != 1 {
 		t.Fatalf("requests = %d, want 1", len(fp.Requests))
@@ -344,8 +367,8 @@ func TestContextOverflowLearnsWindowAndRetries(t *testing.T) {
 		ContextWindow: 1_000_000,
 	})
 
-	if err := a.RunTurn(context.Background(), "hello", &recordSink{}); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hello", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(fp.Requests) != 2 {
 		t.Fatalf("requests = %d, want 2", len(fp.Requests))
@@ -387,8 +410,8 @@ func TestContextOverflowWithoutWindowShrinksCurrentTurnAndRetries(t *testing.T) 
 	a := newAgent(fp, reg, Options{ContextWindow: 10_000})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if got := sink.text.String(); got != "recovered" {
 		t.Fatalf("text = %q, want recovered", got)
@@ -427,8 +450,8 @@ func TestReasoningSummaryUsesDedicatedSinkOnly(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(sink.reasoning) != 1 || sink.reasoning[0] != "Checked the repo." {
 		t.Fatalf("reasoning summaries = %v", sink.reasoning)
@@ -456,8 +479,8 @@ func TestAssistantPhaseForwardedToSink(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 
 	want := []string{llm.AssistantPhaseCommentary, llm.AssistantPhaseFinal}
@@ -485,8 +508,8 @@ func TestSignedReasoningPersistedAndReplayed(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(sink.reasoning) != 1 || sink.reasoning[0] != "weighing options" {
 		t.Fatalf("reasoning summaries = %v", sink.reasoning)
@@ -519,8 +542,8 @@ func TestEncryptedReasoningPersistedAndReplayed(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(sink.reasoning) != 0 {
 		t.Fatalf("encrypted reasoning must not surface as a display summary, got %v", sink.reasoning)
@@ -539,8 +562,8 @@ func TestEncryptedReasoningPersistedAndReplayed(t *testing.T) {
 		t.Fatalf("second block = %+v, want text answer", asst.Content[1])
 	}
 
-	if err := a.RunTurn(context.Background(), "more", sink); err != nil {
-		t.Fatalf("RunTurn 2: %v", err)
+	if err := a.RunPrompt(context.Background(), "more", sink); err != nil {
+		t.Fatalf("RunPrompt 2: %v", err)
 	}
 	replayed := false
 	for _, m := range fp.Requests[1].Messages {
@@ -567,8 +590,8 @@ func TestProxySessionIDStablePerSessionAndRequestScoped(t *testing.T) {
 	// Every turn in a session reuses the same local proxy key. The model proxy
 	// derives the provider-facing prompt cache key from it.
 	for _, prompt := range []string{"one", "two"} {
-		if err := a.RunTurn(context.Background(), prompt, &recordSink{}); err != nil {
-			t.Fatalf("RunTurn %q: %v", prompt, err)
+		if err := a.RunPrompt(context.Background(), prompt, &recordSink{}); err != nil {
+			t.Fatalf("RunPrompt %q: %v", prompt, err)
 		}
 	}
 	if got := fp.Requests[0].ProxySessionID; got != key {
@@ -598,8 +621,8 @@ func TestProxySessionIDStablePerSessionAndRequestScoped(t *testing.T) {
 func TestLongCacheTTLReflectsInteractive(t *testing.T) {
 	interactive := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	a := newAgent(interactive, tools.Default(), Options{Interactive: true})
-	if err := a.RunTurn(context.Background(), "hi", &recordSink{}); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if !interactive.Requests[0].LongCacheTTL {
 		t.Fatal("interactive session must set LongCacheTTL on requests")
@@ -607,8 +630,8 @@ func TestLongCacheTTLReflectsInteractive(t *testing.T) {
 
 	oneshot := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	b := newAgent(oneshot, tools.Default(), Options{Interactive: false})
-	if err := b.RunTurn(context.Background(), "hi", &recordSink{}); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := b.RunPrompt(context.Background(), "hi", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if oneshot.Requests[0].LongCacheTTL {
 		t.Fatal("one-shot session must not set LongCacheTTL")
@@ -626,6 +649,9 @@ func TestPrewarmRequestShape(t *testing.T) {
 	if req.MaxTokens != 1 {
 		t.Errorf("MaxTokens = %d, want 1 (prefill only)", req.MaxTokens)
 	}
+	if req.Purpose != llm.RequestPurposePrewarm {
+		t.Errorf("Purpose = %q, want %q", req.Purpose, llm.RequestPurposePrewarm)
+	}
 	if !req.Reasoning.Empty() {
 		t.Errorf("Reasoning = %+v, want empty (pure prefix write)", req.Reasoning)
 	}
@@ -641,6 +667,7 @@ func TestPrewarmFuncStreamsAndDiscards(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("x")},
 		Stop:   llm.StopMaxTokens,
+		Usage:  llm.Usage{InputTokens: 12, OutputTokens: 1},
 	})
 	a := newAgent(fp, tools.Default(), Options{})
 
@@ -648,10 +675,13 @@ func TestPrewarmFuncStreamsAndDiscards(t *testing.T) {
 	if !ok {
 		t.Fatal("PrewarmFunc ok=false")
 	}
-	warm(context.Background())
+	usage := warm(context.Background())
 
 	if len(fp.Requests) != 1 {
 		t.Fatalf("provider received %d requests, want 1", len(fp.Requests))
+	}
+	if usage.InputTokens != 12 || usage.OutputTokens != 1 {
+		t.Errorf("prewarm usage = %+v, want 12 in / 1 out", usage)
 	}
 	if fp.Requests[0].MaxTokens != 1 {
 		t.Errorf("warm request MaxTokens = %d, want 1", fp.Requests[0].MaxTokens)
@@ -659,6 +689,23 @@ func TestPrewarmFuncStreamsAndDiscards(t *testing.T) {
 	// Pre-warming must not mutate the transcript.
 	if n := len(a.Transcript()); n != 0 {
 		t.Errorf("transcript mutated by prewarm: %d messages", n)
+	}
+}
+
+func TestPrewarmFuncPreservesUsageReportedBeforeFailure(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 9, OutputTokens: 1}}},
+		Err:    errors.New("stream failed after usage"),
+	})
+	a := newAgent(fp, tools.Default(), Options{})
+
+	warm, ok := a.PrewarmFunc()
+	if !ok {
+		t.Fatal("PrewarmFunc ok=false")
+	}
+	usage := warm(context.Background())
+	if usage.InputTokens != 9 || usage.OutputTokens != 1 {
+		t.Fatalf("prewarm failure usage = %+v, want reported 9 in / 1 out", usage)
 	}
 }
 
@@ -670,8 +717,8 @@ func TestMaxTokensStopEmitsNotice(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 	if !slices.Contains(sink.notices, "[stopped: model reached max tokens]") {
@@ -696,8 +743,8 @@ func TestPreToolUseHookBlocksToolAndPreservesTranscript(t *testing.T) {
 	a := newAgent(fp, reg, Options{Hooks: runner})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 	if len(tool.inputs) != 0 {
@@ -724,8 +771,8 @@ func TestPostToolUseHookReplacesToolResult(t *testing.T) {
 	a := newAgent(fp, reg, Options{Hooks: runner})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 	if len(sink.results) != 1 || !sink.results[0].IsError || !strings.Contains(sink.results[0].Text, "redacted") {
@@ -744,7 +791,7 @@ func TestPostToolUseHookReplacesToolResult(t *testing.T) {
 	}
 }
 
-func TestRunTurnContentAddsImagesBeforeText(t *testing.T) {
+func TestRunPromptContentAddsImagesBeforeText(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	a := newAgent(fp, tools.Default(), Options{})
 	sink := &recordSink{}
@@ -756,8 +803,8 @@ func TestRunTurnContentAddsImagesBeforeText(t *testing.T) {
 		ImageName:      "screen.png",
 	}
 
-	if err := a.RunTurnContent(context.Background(), "describe it", []llm.ContentBlock{image}, sink); err != nil {
-		t.Fatalf("RunTurnContent: %v", err)
+	if err := a.RunPromptContent(context.Background(), "describe it", []llm.ContentBlock{image}, sink); err != nil {
+		t.Fatalf("RunPromptContent: %v", err)
 	}
 
 	msgs := a.Transcript()
@@ -799,8 +846,8 @@ func TestParallelToolCallsSequentialInOrder(t *testing.T) {
 	a := newAgent(fp, reg, Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 
 	msgs := a.Transcript()
@@ -860,8 +907,8 @@ func TestAssistantMessagePreservesExplicitPhase(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	msgs := a.Transcript()
 	mustValid(t, msgs)
@@ -895,19 +942,19 @@ func TestToolUsageIncludedInTurnUsage(t *testing.T) {
 	a := newAgent(fp, reg, Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
-	if len(sink.turnUsage) != 1 {
-		t.Fatalf("turn usage events = %d, want 1", len(sink.turnUsage))
+	if len(sink.promptUsage) != 1 {
+		t.Fatalf("prompt usage events = %d, want 1", len(sink.promptUsage))
 	}
-	got := sink.turnUsage[0].Usage
+	got := sink.promptUsage[0].Usage
 	if got.InputTokens != 100 || got.OutputTokens != 36 {
-		t.Fatalf("turn usage = %+v, want provider 30/6 + delegate 70/30", got)
+		t.Fatalf("prompt usage = %+v, want provider 30/6 + delegate 70/30", got)
 	}
 }
 
-func TestPendingTurnWorkForcesSynthesisAndCountsUsage(t *testing.T) {
+func TestPendingPromptWorkForcesSynthesisAndCountsUsage(t *testing.T) {
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Events: []llm.StreamEvent{textDelta("premature final")},
@@ -921,13 +968,13 @@ func TestPendingTurnWorkForcesSynthesisAndCountsUsage(t *testing.T) {
 		},
 	)
 	a := newAgent(fp, &tools.Registry{}, Options{MaxTurns: 1})
-	sink := &turnWorkSink{
+	sink := &promptWorkSink{
 		pending: true,
 		usage:   llm.Usage{InputTokens: 70, OutputTokens: 30},
 	}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if sink.waits != 1 || len(fp.Requests) != 2 {
 		t.Fatalf("waits=%d requests=%d, want one join and synthesis request", sink.waits, len(fp.Requests))
@@ -935,12 +982,12 @@ func TestPendingTurnWorkForcesSynthesisAndCountsUsage(t *testing.T) {
 	if got := strings.Join(fp.Requests[1].RequestContext, "\n"); !strings.Contains(got, "child report") {
 		t.Fatalf("synthesis request context = %q, want child report", got)
 	}
-	if len(sink.turnUsage) != 1 {
-		t.Fatalf("turn usage events = %d, want 1", len(sink.turnUsage))
+	if len(sink.promptUsage) != 1 {
+		t.Fatalf("prompt usage events = %d, want 1", len(sink.promptUsage))
 	}
-	got := sink.turnUsage[0].Usage
+	got := sink.promptUsage[0].Usage
 	if got.InputTokens != 100 || got.OutputTokens != 36 {
-		t.Fatalf("turn usage = %+v, want provider 30/6 + background child 70/30", got)
+		t.Fatalf("prompt usage = %+v, want provider 30/6 + background child 70/30", got)
 	}
 }
 
@@ -966,8 +1013,8 @@ func TestToolCallStreamEventsForwardedBeforeDone(t *testing.T) {
 	a := newAgent(fp, reg, Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
@@ -987,7 +1034,7 @@ func TestToolCallStreamEventsForwardedBeforeDone(t *testing.T) {
 	}
 }
 
-func TestModelTurnStartEmittedForRetries(t *testing.T) {
+func TestTurnAttemptStartEmittedForRetries(t *testing.T) {
 	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
 	fp := llmtest.New("fake",
 		fail,
@@ -997,12 +1044,12 @@ func TestModelTurnStartEmittedForRetries(t *testing.T) {
 	a.SetSleep(func(time.Duration) {})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
-	want := []modelTurnEvent{{modelTurn: 1, attempt: 1}, {modelTurn: 1, attempt: 2}}
-	if !slices.Equal(sink.models, want) {
-		t.Errorf("model turn events = %+v, want %+v", sink.models, want)
+	want := []turnAttemptEvent{{turn: 1, attempt: 1}, {turn: 1, attempt: 2}}
+	if !slices.Equal(sink.attemptStarts, want) {
+		t.Errorf("turn attempt starts = %+v, want %+v", sink.attemptStarts, want)
 	}
 }
 
@@ -1026,8 +1073,8 @@ func TestFailingToolFedBackAsError(t *testing.T) {
 	a := newAgent(fp, reg, Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
@@ -1088,8 +1135,8 @@ func TestInvalidToolInputFedBackAsError(t *testing.T) {
 	a := newAgent(fp, reg, Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if ran {
 		t.Fatal("invalid tool input should not dispatch the real tool")
@@ -1151,7 +1198,7 @@ func TestMaxTurnsStop(t *testing.T) {
 	reg := &tools.Registry{}
 	reg.Register(tool)
 
-	// Every model turn asks for a tool: the loop must stop at the limit. After
+	// Every turn asks for a tool: the loop must stop at the limit. After
 	// the cap, one tools-disabled summary request winds the turn down (r49).
 	always := llmtest.Step{
 		Events: []llm.StreamEvent{toolDone(0, "id", "loop", `{}`)},
@@ -1165,12 +1212,12 @@ func TestMaxTurnsStop(t *testing.T) {
 	a := newAgent(fp, reg, Options{MaxTurns: 3})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
-	// 3 capped model turns + 1 tools-disabled wind-down request.
+	// 3 capped turns + 1 tools-disabled wind-down request.
 	if len(fp.Requests) != 4 {
 		t.Errorf("provider called %d times, want 4 (3 turns + final summary)", len(fp.Requests))
 	}
@@ -1232,25 +1279,25 @@ func TestNonPositiveMaxTurnsIsUnlimited(t *testing.T) {
 		Events: []llm.StreamEvent{toolDone(0, "id", "loop", `{}`)},
 		Stop:   llm.StopToolUse,
 	}
-	modelTurns := make([]llmtest.Step, defaultConfigMaxTurns+2)
+	turns := make([]llmtest.Step, defaultConfigMaxTurns+2)
 	for i := 0; i < defaultConfigMaxTurns+1; i++ {
-		modelTurns[i] = toolUse
+		turns[i] = toolUse
 	}
-	modelTurns[len(modelTurns)-1] = llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn}
-	fp := llmtest.New("fake", modelTurns...)
+	turns[len(turns)-1] = llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn}
+	fp := llmtest.New("fake", turns...)
 	a := newAgent(fp, reg, Options{MaxTurns: 0})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
 	if len(fp.Requests) != defaultConfigMaxTurns+2 {
 		t.Errorf("provider called %d times, want %d (past default cap)", len(fp.Requests), defaultConfigMaxTurns+2)
 	}
-	if sink.turnUsage[0].ModelTurns != defaultConfigMaxTurns+2 {
-		t.Errorf("TurnComplete model turns = %d, want %d", sink.turnUsage[0].ModelTurns, defaultConfigMaxTurns+2)
+	if sink.promptUsage[0].Turns != defaultConfigMaxTurns+2 {
+		t.Errorf("PromptComplete turns = %d, want %d", sink.promptUsage[0].Turns, defaultConfigMaxTurns+2)
 	}
 	for _, n := range sink.notices {
 		if strings.Contains(n, "max turns") {
@@ -1277,9 +1324,9 @@ func TestCancellationMidStreamKeepsPartialText(t *testing.T) {
 	a := newAgent(fp, reg, Options{})
 	sink := &recordSink{}
 
-	err := a.RunTurn(ctx, "go", sink)
+	err := a.RunPrompt(ctx, "go", sink)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("RunTurn err = %v, want context.Canceled", err)
+		t.Fatalf("RunPrompt err = %v, want context.Canceled", err)
 	}
 
 	msgs := a.Transcript()
@@ -1302,6 +1349,9 @@ func TestCancellationMidStreamKeepsPartialText(t *testing.T) {
 	if asst.Phase != llm.AssistantPhaseCommentary {
 		t.Errorf("partial assistant phase = %q, want commentary", asst.Phase)
 	}
+	if len(sink.completedTurns) != 1 || sink.promptUsage[0].Turns != 1 {
+		t.Fatalf("retained partial response should complete one turn: turns=%+v prompt=%+v", sink.completedTurns, sink.promptUsage)
+	}
 }
 
 func TestCancellationWithNoTextDropsMessage(t *testing.T) {
@@ -1313,10 +1363,11 @@ func TestCancellationWithNoTextDropsMessage(t *testing.T) {
 		Block:  func(_ context.Context) { cancel() },
 	})
 	a := newAgent(fp, reg, Options{})
+	sink := &recordSink{}
 
-	err := a.RunTurn(ctx, "go", &recordSink{})
+	err := a.RunPrompt(ctx, "go", sink)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("RunTurn err = %v, want context.Canceled", err)
+		t.Fatalf("RunPrompt err = %v, want context.Canceled", err)
 	}
 	msgs := a.Transcript()
 	mustValid(t, msgs)
@@ -1325,9 +1376,12 @@ func TestCancellationWithNoTextDropsMessage(t *testing.T) {
 	if len(msgs) != 1 || msgs[0].Role != llm.RoleUser {
 		t.Fatalf("want only the user message, got %d:\n%s", len(msgs), dump(msgs))
 	}
+	if len(sink.completedTurns) != 0 || sink.promptUsage[0].Turns != 0 {
+		t.Fatalf("uncommitted failed attempt counted as a turn: turns=%+v prompt=%+v", sink.completedTurns, sink.promptUsage)
+	}
 }
 
-func TestUsageAccumulatedAcrossModelTurns(t *testing.T) {
+func TestUsageAccumulatedAcrossTurns(t *testing.T) {
 	tool := &recordTool{name: "echo", run: func(_ context.Context, _ json.RawMessage) (string, error) {
 		return "x", nil
 	}}
@@ -1349,22 +1403,22 @@ func TestUsageAccumulatedAcrossModelTurns(t *testing.T) {
 	a := newAgent(fp, reg, Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
-	if len(sink.turnUsage) != 1 {
-		t.Fatalf("want one TurnComplete, got %d", len(sink.turnUsage))
+	if len(sink.promptUsage) != 1 {
+		t.Fatalf("want one PromptComplete, got %d", len(sink.promptUsage))
 	}
-	tu := sink.turnUsage[0]
-	if tu.Usage.InputTokens != 300 || tu.Usage.OutputTokens != 30 {
-		t.Errorf("turn usage = %+v, want 300 in / 30 out", tu.Usage)
+	pu := sink.promptUsage[0]
+	if pu.Usage.InputTokens != 300 || pu.Usage.OutputTokens != 30 {
+		t.Errorf("prompt usage = %+v, want 300 in / 30 out", pu.Usage)
 	}
-	if tu.ModelTurns != 2 {
-		t.Errorf("turn model turns = %d, want 2", tu.ModelTurns)
+	if pu.Turns != 2 {
+		t.Errorf("prompt turns = %d, want 2", pu.Turns)
 	}
 }
 
-func TestModelTurnUsageEmittedForEachProviderReturn(t *testing.T) {
+func TestTurnAttemptUsageEmittedForEachProviderReturn(t *testing.T) {
 	tool := &recordTool{name: "echo", run: func(_ context.Context, _ json.RawMessage) (string, error) {
 		return "x", nil
 	}}
@@ -1386,35 +1440,35 @@ func TestModelTurnUsageEmittedForEachProviderReturn(t *testing.T) {
 	a := newAgent(fp, reg, Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
-	if len(sink.modelUsage) != 2 {
-		t.Fatalf("model usage events = %d, want 2", len(sink.modelUsage))
+	if len(sink.attemptUsage) != 2 {
+		t.Fatalf("turn attempt usage events = %d, want 2", len(sink.attemptUsage))
 	}
-	if got := sink.modelUsage[0]; got.ModelTurn != 1 || got.Attempt != 1 || got.Usage.InputTokens != 100 || got.Usage.OutputTokens != 10 {
-		t.Errorf("model usage[0] = %+v, want turn 1 attempt 1 with 100/10", got)
+	if got := sink.attemptUsage[0]; got.Turn != 1 || got.Attempt != 1 || got.Usage.InputTokens != 100 || got.Usage.OutputTokens != 10 {
+		t.Errorf("turn attempt usage[0] = %+v, want turn 1 attempt 1 with 100/10", got)
 	}
-	if got := sink.modelUsage[1]; got.ModelTurn != 2 || got.Attempt != 1 || got.Usage.InputTokens != 200 || got.Usage.OutputTokens != 20 {
-		t.Errorf("model usage[1] = %+v, want turn 2 attempt 1 with 200/20", got)
+	if got := sink.attemptUsage[1]; got.Turn != 2 || got.Attempt != 1 || got.Usage.InputTokens != 200 || got.Usage.OutputTokens != 20 {
+		t.Errorf("turn attempt usage[1] = %+v, want turn 2 attempt 1 with 200/20", got)
 	}
 }
 
-func TestRunTurnRejectsInvalidStableTranscriptBeforeRequest(t *testing.T) {
+func TestRunPromptRejectsInvalidStableTranscriptBeforeRequest(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("should not run")}, Stop: llm.StopEndTurn})
 	a := newAgent(fp, tools.Default(), Options{})
 	a.SetTranscript([]llm.Message{asstToolUse("dangling", "read_file", `{}`)})
 	sink := &recordSink{}
 
-	err := a.RunTurn(context.Background(), "next", sink)
+	err := a.RunPrompt(context.Background(), "next", sink)
 	if err == nil || !strings.Contains(err.Error(), "agent transcript invalid before model request") {
-		t.Fatalf("RunTurn err = %v, want invalid transcript before request", err)
+		t.Fatalf("RunPrompt err = %v, want invalid transcript before request", err)
 	}
 	if len(fp.Requests) != 0 {
 		t.Fatalf("provider requests = %d, want 0", len(fp.Requests))
 	}
-	if len(sink.turnUsage) != 1 {
-		t.Fatalf("turn usage events = %d, want 1", len(sink.turnUsage))
+	if len(sink.promptUsage) != 1 {
+		t.Fatalf("prompt usage events = %d, want 1", len(sink.promptUsage))
 	}
 }
 
@@ -1438,12 +1492,12 @@ func TestSetToolsChangesAdvertisedAndDispatchableTools(t *testing.T) {
 	)
 	a := newAgent(fp, full, Options{})
 
-	if err := a.RunTurn(context.Background(), "one", &recordSink{}); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "one", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	a.SetTools(restricted)
-	if err := a.RunTurn(context.Background(), "two", &recordSink{}); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "two", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 
 	if names := specNames(fp.Requests[0].Tools); !slices.Contains(names, "grep") {
@@ -1511,8 +1565,8 @@ func TestResponsesStatefulSendsDeltaAfterResponseID(t *testing.T) {
 	)
 	a := newAgent(fp, reg, Options{ResponsesStateful: true})
 
-	if err := a.RunTurn(context.Background(), "go", &recordSink{}); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(fp.Requests) != 2 {
 		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
@@ -1552,8 +1606,8 @@ func TestResponsesStatefulRetriesFullContextWhenPreviousResponseRejected(t *test
 	})
 	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "missing", AnchorMessages: 2})
 
-	if err := a.RunTurn(context.Background(), "next", &recordSink{}); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "next", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(fp.Requests) != 2 {
 		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
@@ -1577,8 +1631,8 @@ func TestResponsesStatefulDisablesAndRetriesWhenStoreRejected(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{ResponsesStateful: true})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(fp.Requests) != 2 {
 		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
@@ -1619,8 +1673,8 @@ func TestMidStreamRetrySucceedsOnSecondAttempt(t *testing.T) {
 	a.SetSleep(func(time.Duration) {})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	msgs := a.Transcript()
 	mustValid(t, msgs)
@@ -1635,7 +1689,7 @@ func TestMidStreamRetrySucceedsOnSecondAttempt(t *testing.T) {
 	}
 	var retried, surfacedWaste bool
 	for _, n := range sink.notices {
-		if strings.Contains(n, "retrying model turn") {
+		if strings.Contains(n, "retrying turn") {
 			retried = true
 			if strings.Contains(n, "discarded ~40 tokens") {
 				surfacedWaste = true
@@ -1648,15 +1702,15 @@ func TestMidStreamRetrySucceedsOnSecondAttempt(t *testing.T) {
 	if !surfacedWaste {
 		t.Errorf("retry notice should surface the discarded tokens, notices=%v", sink.notices)
 	}
-	if want := []modelTurnEvent{{modelTurn: 1, attempt: 1}}; !slices.Equal(sink.abandoned, want) {
+	if want := []turnAttemptEvent{{turn: 1, attempt: 1}}; !slices.Equal(sink.abandoned, want) {
 		t.Errorf("abandoned attempts = %+v, want %+v", sink.abandoned, want)
 	}
 	// Wasted usage from the failed attempt is paid for and counted.
-	if got := sink.turnUsage[0].Usage.InputTokens; got != 50 {
-		t.Errorf("turn input tokens = %d, want 50 (40 wasted + 10)", got)
+	if got := sink.promptUsage[0].Usage.InputTokens; got != 50 {
+		t.Errorf("prompt input tokens = %d, want 50 (40 wasted + 10)", got)
 	}
 	// And it is broken out so the UI can show the retry cost (r51+r52).
-	if got := sink.turnUsage[0].Wasted.InputTokens; got != 40 {
+	if got := sink.promptUsage[0].Wasted.InputTokens; got != 40 {
 		t.Errorf("wasted input tokens = %d, want 40", got)
 	}
 }
@@ -1681,15 +1735,15 @@ func TestMidStreamRetryHonorsRetryAfter(t *testing.T) {
 	}
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(slept) != 1 || slept[0] != 2*time.Second {
 		t.Fatalf("slept = %v, want [2s]", slept)
 	}
 	var noticed bool
 	for _, n := range sink.notices {
-		if strings.Contains(n, "retrying model turn in 2s") {
+		if strings.Contains(n, "retrying turn in 2s") {
 			noticed = true
 		}
 	}
@@ -1716,8 +1770,8 @@ func TestInvalidToolArgumentStreamIsRetried(t *testing.T) {
 	a.SetSleep(func(time.Duration) {})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "commit", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "commit", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(fp.Requests) != 2 {
 		t.Fatalf("provider called %d times, want 2", len(fp.Requests))
@@ -1739,10 +1793,10 @@ func TestMidStreamRetryBudgetExhausted(t *testing.T) {
 	a.SetSleep(func(time.Duration) {})
 	sink := &recordSink{}
 
-	err := a.RunTurn(context.Background(), "hi", sink)
+	err := a.RunPrompt(context.Background(), "hi", sink)
 	var apiErr *llm.APIError
 	if !errors.As(err, &apiErr) {
-		t.Fatalf("RunTurn err = %v, want the APIError after budget exhaustion", err)
+		t.Fatalf("RunPrompt err = %v, want the APIError after budget exhaustion", err)
 	}
 	if len(fp.Requests) != 3 {
 		t.Errorf("provider called %d times, want 3 (1 + 2 retries)", len(fp.Requests))
@@ -1759,10 +1813,10 @@ func TestMidStreamRetryBudgetExhaustedDropsPartialText(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	a.SetSleep(func(time.Duration) {})
 
-	err := a.RunTurn(context.Background(), "debug this", &recordSink{})
+	err := a.RunPrompt(context.Background(), "debug this", &recordSink{})
 	var apiErr *llm.APIError
 	if !errors.As(err, &apiErr) {
-		t.Fatalf("RunTurn err = %v, want the APIError after budget exhaustion", err)
+		t.Fatalf("RunPrompt err = %v, want the APIError after budget exhaustion", err)
 	}
 	if len(fp.Requests) != 3 {
 		t.Errorf("provider called %d times, want 3 (1 + 2 retries)", len(fp.Requests))
@@ -1786,10 +1840,10 @@ func TestRateLimitedStreamNotRetried(t *testing.T) {
 		a := newAgent(fp, tools.Default(), Options{})
 		a.SetSleep(func(time.Duration) {})
 
-		err := a.RunTurn(context.Background(), "hi", &recordSink{})
+		err := a.RunPrompt(context.Background(), "hi", &recordSink{})
 		var apiErr *llm.APIError
 		if !errors.As(err, &apiErr) || apiErr.StatusCode != code {
-			t.Fatalf("status %d: RunTurn err = %v, want the %d APIError", code, err, code)
+			t.Fatalf("status %d: RunPrompt err = %v, want the %d APIError", code, err, code)
 		}
 		if len(fp.Requests) != 1 {
 			t.Errorf("status %d: provider called %d times, want 1 (rate limit not re-multiplied)", code, len(fp.Requests))
@@ -1804,9 +1858,9 @@ func TestMidStreamNonRetryableNotRetried(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	a.SetSleep(func(time.Duration) {})
 
-	err := a.RunTurn(context.Background(), "hi", &recordSink{})
+	err := a.RunPrompt(context.Background(), "hi", &recordSink{})
 	if err == nil {
-		t.Fatal("RunTurn should fail")
+		t.Fatal("RunPrompt should fail")
 	}
 	if len(fp.Requests) != 1 {
 		t.Errorf("provider called %d times, want 1 (no retry)", len(fp.Requests))
@@ -1821,8 +1875,8 @@ func TestTruncatedStreamRetried(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	a.SetSleep(func(time.Duration) {})
 
-	if err := a.RunTurn(context.Background(), "hi", &recordSink{}); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(fp.Requests) != 2 {
 		t.Errorf("provider called %d times, want 2", len(fp.Requests))
@@ -1843,9 +1897,9 @@ func TestCancellationDuringRetryBackoff(t *testing.T) {
 		return context.Canceled
 	}
 
-	err := a.RunTurn(ctx, "hi", &recordSink{})
+	err := a.RunPrompt(ctx, "hi", &recordSink{})
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("RunTurn err = %v, want context.Canceled", err)
+		t.Fatalf("RunPrompt err = %v, want context.Canceled", err)
 	}
 	// One real attempt, then cancellation during the backoff stops the loop before
 	// any retry re-requests the step.
@@ -1868,10 +1922,10 @@ func TestZeroedFinalUsageFrameDoesNotEraseEarlier(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
-	u := sink.turnUsage[0].Usage
+	u := sink.promptUsage[0].Usage
 	if u.InputTokens != 100 || u.OutputTokens != 10 || u.CacheReadTokens != 7 {
 		t.Errorf("usage = %+v, want the mid-stream snapshot preserved", u)
 	}
@@ -1919,8 +1973,8 @@ func TestKimiWebSearchToolCallPassesThroughArguments(t *testing.T) {
 	})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(sink.results) != 1 {
 		t.Fatalf("tool results = %+v, want one", sink.results)
@@ -1968,8 +2022,8 @@ func TestRequestCarriesResolvedModel(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{Model: "claude-opus-4-8"})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "hi", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 	if len(fp.Requests) != 1 {
@@ -2019,8 +2073,8 @@ func TestAllReadOnlyStepDispatchesConcurrently(t *testing.T) {
 	a := newAgent(fp, reg, Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
@@ -2067,8 +2121,8 @@ func TestNonToolHooksDoNotDisableReadOnlyParallelDispatch(t *testing.T) {
 	a := newAgent(fp, reg, Options{Hooks: runner})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 	for _, result := range sink.results {
@@ -2099,8 +2153,8 @@ func TestToolHooksOmitParallelBatchMetadata(t *testing.T) {
 	runner := testHookRunner(t, `{"PreToolUse":[{"hooks":[{"type":"command","command":"printf '{}'"}]}]}`)
 	a := newAgent(fp, reg, Options{Hooks: runner})
 
-	if err := a.RunTurn(context.Background(), "go", &recordSink{}); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 	if got := a.Transcript()[2].ParallelToolBatches; len(got) != 0 {
@@ -2139,8 +2193,8 @@ func TestMixedStepDispatchesReadOnlyIslandsConcurrently(t *testing.T) {
 	a := newAgent(fp, reg, Options{})
 	sink := &recordSink{}
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 
@@ -2187,8 +2241,8 @@ func TestShowDiffsEmitsPerToolDiffWithoutChangingToolResult(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{ShowDiffs: true})
 	sink := &diffRecordSink{}
 
-	if err := a.RunTurn(context.Background(), "edit", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "edit", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 	if len(sink.diffs) != 1 {
@@ -2221,8 +2275,8 @@ func TestShowDiffsDisabledEmitsNoDiff(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{})
 	sink := &diffRecordSink{}
 
-	if err := a.RunTurn(context.Background(), "edit", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "edit", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(sink.diffs) != 0 {
 		t.Fatalf("diff events = %d, want 0: %v", len(sink.diffs), sink.diffs)
@@ -2251,8 +2305,8 @@ func TestShowDiffsIncrementalSameFileToolCalls(t *testing.T) {
 	a := newAgent(fp, tools.Default(), Options{ShowDiffs: true})
 	sink := &diffRecordSink{}
 
-	if err := a.RunTurn(context.Background(), "edit", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "edit", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(sink.diffs) != 2 {
 		t.Fatalf("diff events = %d, want 2: %v", len(sink.diffs), sink.diffs)
@@ -2293,8 +2347,8 @@ func TestTruncatedToolResultIncludesArchivePathInNextRequest(t *testing.T) {
 	}
 	a := newAgent(fp, reg, Options{})
 
-	if err := a.RunTurn(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
 	if len(sink.archived) != 1 {
@@ -2356,8 +2410,8 @@ func TestMixedStepStaysSequential(t *testing.T) {
 	)
 	a := newAgent(fp, reg, Options{})
 
-	if err := a.RunTurn(context.Background(), "go", &recordSink{}); err != nil {
-		t.Fatalf("RunTurn: %v", err)
+	if err := a.RunPrompt(context.Background(), "go", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	want := []string{"start:reader", "end:reader", "start:writer", "end:writer"}
 	if !slices.Equal(trace, want) {
@@ -2365,11 +2419,11 @@ func TestMixedStepStaysSequential(t *testing.T) {
 	}
 }
 
-// TestSteerInjectsBeforeNextModelTurn drives a tool-calling turn where the tool
+// TestSteerInjectsBeforeNextTurn drives a tool-calling turn where the tool
 // blocks until a steer is queued. The steered text must land as a RoleUser
 // message between the tool_result and the second assistant message, and the
 // second model request must have seen it (design §8.1).
-func TestSteerInjectsBeforeNextModelTurn(t *testing.T) {
+func TestSteerInjectsBeforeNextTurn(t *testing.T) {
 	toolRan := make(chan struct{})
 	releaseTool := make(chan struct{})
 	tool := &recordTool{name: "probe", run: func(_ context.Context, _ json.RawMessage) (string, error) {
@@ -2391,7 +2445,7 @@ func TestSteerInjectsBeforeNextModelTurn(t *testing.T) {
 	sink := &recordSink{}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- a.RunTurn(context.Background(), "go", sink) }()
+	go func() { errCh <- a.RunPrompt(context.Background(), "go", sink) }()
 
 	// Wait for the tool to run (so the loop is between tool dispatch and the
 	// next model request), then steer.
@@ -2400,7 +2454,7 @@ func TestSteerInjectsBeforeNextModelTurn(t *testing.T) {
 	close(releaseTool)
 
 	if err := <-errCh; err != nil {
-		t.Fatalf("RunTurn: %v", err)
+		t.Fatalf("RunPrompt: %v", err)
 	}
 
 	msgs := a.Transcript()
@@ -2456,7 +2510,7 @@ func TestSteerContentInjectsImagesAndRequestContext(t *testing.T) {
 	sink := &recordSink{}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- a.RunTurn(context.Background(), "go", sink) }()
+	go func() { errCh <- a.RunPrompt(context.Background(), "go", sink) }()
 	<-toolRan
 	a.SteerContent(SteerInput{
 		Text: "inspect this",
@@ -2472,7 +2526,7 @@ func TestSteerContentInjectsImagesAndRequestContext(t *testing.T) {
 	close(releaseTool)
 
 	if err := <-errCh; err != nil {
-		t.Fatalf("RunTurn: %v", err)
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	second := fp.Requests[1]
 	if len(second.RequestContext) != 1 || second.RequestContext[0] != "steer context" {
@@ -2527,13 +2581,13 @@ func TestSteerResetsLoopGuard(t *testing.T) {
 	sink := &recordSink{}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- a.RunTurn(context.Background(), "go", sink) }()
+	go func() { errCh <- a.RunPrompt(context.Background(), "go", sink) }()
 	<-firstDone
 	a.Steer("change approach")
 	close(releaseAll)
 
 	if err := <-errCh; err != nil {
-		t.Fatalf("RunTurn: %v", err)
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	msgs := a.Transcript()
 	mustValid(t, msgs)
@@ -2599,14 +2653,14 @@ func TestDrainSteerJoinsMultiple(t *testing.T) {
 	sink := &recordSink{}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- a.RunTurn(context.Background(), "go", sink) }()
+	go func() { errCh <- a.RunPrompt(context.Background(), "go", sink) }()
 	<-toolRan
 	a.Steer("first")
 	a.Steer("second")
 	close(release)
 
 	if err := <-errCh; err != nil {
-		t.Fatalf("RunTurn: %v", err)
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	msgs := a.Transcript()
 	mustValid(t, msgs)
@@ -2642,11 +2696,11 @@ func TestDrainSteerRecoversUnconsumed(t *testing.T) {
 	sink := &recordSink{}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- a.RunTurn(context.Background(), "go", sink) }()
+	go func() { errCh <- a.RunPrompt(context.Background(), "go", sink) }()
 	<-steered
 	a.Steer("missed me")
 	if err := <-errCh; err != nil {
-		t.Fatalf("RunTurn: %v", err)
+		t.Fatalf("RunPrompt: %v", err)
 	}
 	// The turn ended on an assistant message with no tool round, so the steer was
 	// never appended to the transcript...

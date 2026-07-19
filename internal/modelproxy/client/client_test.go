@@ -130,7 +130,7 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 	var texts []string
 	var responseID string
 	var gotErr error
-	req := llm.Request{Model: "gpt-5.5", Reasoning: llm.ReasoningConfig{Profile: "xhigh"}, StoreResponse: true, PreviousResponseID: "resp_0"}
+	req := llm.Request{Model: "gpt-5.5", Purpose: llm.RequestPurposeCompaction, Reasoning: llm.ReasoningConfig{Profile: "xhigh"}, StoreResponse: true, PreviousResponseID: "resp_0"}
 	for ev, err := range c.Provider("openai:gpt-5.5").Stream(context.Background(), req) {
 		if err != nil {
 			gotErr = err
@@ -149,7 +149,7 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 	if len(texts) != 1 || texts[0] != "hello" {
 		t.Fatalf("texts = %v", texts)
 	}
-	if !sawRequest.StoreResponse || sawRequest.PreviousResponseID != "resp_0" {
+	if !sawRequest.StoreResponse || sawRequest.PreviousResponseID != "resp_0" || sawRequest.Purpose != llm.RequestPurposeCompaction {
 		t.Fatalf("request passthrough = %+v", sawRequest)
 	}
 	if responseID != "resp_1" {

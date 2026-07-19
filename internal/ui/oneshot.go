@@ -18,7 +18,7 @@ const (
 	ExitInterrupt = 130
 )
 
-// OneShot runs exactly one user turn, saves the session, and exits (design §10).
+// OneShot runs exactly one user prompt, saves the session, and exits (design §10).
 // Assistant text streams to app.Out; tool summaries, the usage line, notices,
 // and errors go to app.Errw. The return value is the process exit code:
 // 0 completed, 1 runtime error, 130 interrupted.
@@ -38,7 +38,7 @@ func OneShot(app *App, prompt string) int {
 		}
 		return ExitUsage
 	}
-	promptHook := app.runPromptSubmitHook(context.Background(), prompt, app.Turn+1)
+	promptHook := app.runPromptSubmitHook(context.Background(), prompt, app.PromptNumber+1)
 	if promptHook.Block {
 		reason := promptHook.Reason()
 		if reason == "" {
@@ -56,24 +56,24 @@ func OneShot(app *App, prompt string) int {
 	pendingUnsupportedNotice := len(app.PendingImages) > 0 && !app.currentModelSupportsImages()
 	images := app.takePendingImages()
 	images = app.attachPromptImageReferences(prompt, images, pendingUnsupportedNotice)
-	turn := app.beginTurn(prompt, images)
+	promptID := app.beginPrompt(prompt, images)
 
 	ctx := context.Background()
 	if app.Interrupt != nil {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
-		app.Interrupt.BeginTurn(cancel)
+		app.Interrupt.BeginPrompt(cancel)
 		defer func() {
-			app.Interrupt.EndTurn()
+			app.Interrupt.EndPrompt()
 			cancel()
 		}()
 	}
 
-	app.Renderer.StartTurn()
-	sink := newAccumulatingSink(app.Renderer, app, turn)
-	turnContext := append([]string(nil), promptHook.AdditionalContext...)
-	turnContext = append(turnContext, skillContext...)
-	err := app.Agent.RunTurnContentWithContext(ctx, prompt, imageBlocks(images), app.turnHookContext(turnContext), turn, sink)
+	app.Renderer.StartPromptRun()
+	sink := newAccumulatingSink(app.Renderer, app, promptID)
+	promptContext := append([]string(nil), promptHook.AdditionalContext...)
+	promptContext = append(promptContext, skillContext...)
+	err := app.Agent.RunPromptContentWithContext(ctx, prompt, imageBlocks(images), app.promptHookContext(promptContext), promptID, sink)
 	app.stopBackgroundJobs()
 	if app.Renderer != nil {
 		app.Renderer.StopProgress()

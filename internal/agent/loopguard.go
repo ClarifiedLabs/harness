@@ -14,7 +14,7 @@ import (
 // so it is race-free and a legitimate distant re-read in a later turn is never
 // penalized.
 const (
-	// repeatSteerThreshold is how many model turns in a row must produce an
+	// repeatSteerThreshold is how many turns in a row must produce an
 	// identical (tool calls + results) signature before one steering nudge is
 	// injected. Results are part of the signature so legitimate polling or test
 	// re-runs whose output changes never trip the guard.
@@ -25,7 +25,7 @@ const (
 	// is finalized rather than left to burn turns/tokens — the success-loop
 	// analogue of errorStormBreak.
 	repeatBreak = 8
-	// errorStormSteer / errorStormBreak count consecutive model turns whose tool
+	// errorStormSteer / errorStormBreak count consecutive turns whose tool
 	// results were all errors: steer once at the first, hard-stop at the second.
 	errorStormSteer = 5
 	errorStormBreak = 10
@@ -35,20 +35,20 @@ const repeatSteer = "[loop guard] The last several tool calls repeated with iden
 
 const errorStormSteerMsg = "[loop guard] Several consecutive tool calls have all failed. Re-read the latest error output and change your approach, or stop and report what is blocking you — do not keep retrying the same way."
 
-const wrapUpSteer = "[turn budget] You are about to reach this turn's model-turn limit. Stop calling tools now and reply with a final message: summarize what you completed, what remains, and any next steps."
+const wrapUpSteer = "[turn budget] You are about to reach this prompt's turn limit. Stop calling tools now and reply with a final message: summarize what you completed, what remains, and any next steps."
 
 // turnGuard is the per-run runaway-protection state. The zero value is ready to
-// use; one is created per RunTurn call and discarded when the turn ends.
+// use; one is created per RunPrompt call and discarded when the turn ends.
 type turnGuard struct {
-	lastCallSig   string // signature of the previous model turn's calls+results
-	repeatRuns    int    // consecutive model turns with that identical signature
+	lastCallSig   string // signature of the previous turn's calls+results
+	repeatRuns    int    // consecutive turns with that identical signature
 	repeatSteered bool   // steering already injected for the current repeat streak
-	errorRuns     int    // consecutive model turns whose tool results were all errors
+	errorRuns     int    // consecutive turns whose tool results were all errors
 	errorSteered  bool   // steering already injected for the current error streak
 	wrapUpSteered bool   // one-shot maxTurns wrap-up steering injected
 }
 
-// recordTools folds one model turn's tool calls and results into the guard's
+// recordTools folds one turn's tool calls and results into the guard's
 // sliding window. calls and results are positionally aligned (results[i] answers
 // calls[i]).
 func (g *turnGuard) recordTools(calls []llm.ToolCall, results []llm.ContentBlock) {
@@ -68,7 +68,7 @@ func (g *turnGuard) recordTools(calls []llm.ToolCall, results []llm.ContentBlock
 	}
 }
 
-// steerMessage returns the single steering nudge to inject this model turn, or
+// steerMessage returns the single steering nudge to inject this turn, or
 // "" when none is due. Repetition and the error storm share one slot so a turn
 // that is both repeating and erroring is nudged once, not twice.
 func (g *turnGuard) steerMessage() string {
@@ -92,7 +92,7 @@ func (g *turnGuard) shouldBreakErrors() bool { return g.errorRuns >= errorStormB
 // reach it; a call whose output changes resets the streak.
 func (g *turnGuard) shouldBreakRepeat() bool { return g.repeatRuns >= repeatBreak }
 
-// callSetSignature builds an order-insensitive signature of a model turn's tool
+// callSetSignature builds an order-insensitive signature of a turn's tool
 // calls and their results: per call, the tool name + canonicalized (sorted-key)
 // JSON of its input + the result's error flag and text. Including the result
 // keeps the guard conservative — identical calls that return different output
@@ -152,7 +152,7 @@ func allErrors(results []llm.ContentBlock) bool {
 }
 
 // totalTokens is the cumulative token throughput of a usage accumulator —
-// input (incl. cache) + output + reasoning — used to enforce the per-turn token
+// input (incl. cache) + output + reasoning — used to enforce the per-prompt token
 // budget (design §8.1, r7).
 func totalTokens(u llm.Usage) int {
 	return u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.OutputTokens + u.ReasoningTokens
@@ -170,14 +170,14 @@ func repeatLoopNotice(n int) string {
 	return fmt.Sprintf("[stopped: %d identical tool turns repeated with no change]", n)
 }
 
-// turnTokenBudgetNotice is the hard-stop notice when the per-turn token budget
+// promptTokenBudgetNotice is the hard-stop notice when the per-prompt token budget
 // is exhausted.
-func turnTokenBudgetNotice(budget int) string {
-	return fmt.Sprintf("[stopped: turn token budget %d exceeded]", budget)
+func promptTokenBudgetNotice(budget int) string {
+	return fmt.Sprintf("[stopped: prompt token budget %d exceeded]", budget)
 }
 
-// promptCostBudgetNotice is the hard-stop notice when the per-turn cost budget
-// (USD) is exhausted, mirroring turnTokenBudgetNotice.
+// promptCostBudgetNotice is the hard-stop notice when the per-prompt cost budget
+// (USD) is exhausted, mirroring promptTokenBudgetNotice.
 func promptCostBudgetNotice(budgetUSD, spentUSD float64) string {
-	return fmt.Sprintf("[stopped: turn cost budget $%.2f reached ($%.2f spent)]", budgetUSD, spentUSD)
+	return fmt.Sprintf("[stopped: prompt cost budget $%.2f reached ($%.2f spent)]", budgetUSD, spentUSD)
 }

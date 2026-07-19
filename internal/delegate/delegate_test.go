@@ -248,7 +248,7 @@ func TestDelegateRunsChildAgentAndReturnsFinalReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunMetered: %v", err)
 	}
-	if !strings.Contains(result.Text, "final report") || !strings.Contains(result.Text, "[delegate: 1 model turn") {
+	if !strings.Contains(result.Text, "final report") || !strings.Contains(result.Text, "[delegate: 1 turn") {
 		t.Fatalf("delegate output = %q", result.Text)
 	}
 	if result.Usage.InputTokens != 11 || result.Usage.OutputTokens != 5 {
@@ -340,7 +340,7 @@ func TestDelegateBackgroundStartsJob(t *testing.T) {
 	if result.Text != "background job bg_delegate started" {
 		t.Fatalf("result = %q", result.Text)
 	}
-	if starter.req.Kind != "delegate" || starter.req.Description != "inspect asynchronously" || starter.req.Agent != "explore" || !starter.req.WaitForTurn {
+	if starter.req.Kind != "delegate" || starter.req.Description != "inspect asynchronously" || starter.req.Agent != "explore" || !starter.req.WaitForPrompt {
 		t.Fatalf("background request = %+v", starter.req)
 	}
 	if len(fp.Requests) != 0 {
@@ -517,7 +517,7 @@ func TestDelegateCapsMaxTurns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunMetered with capped max_turns: %v", err)
 	}
-	if !strings.Contains(result.Text, "[delegate: 1 model turn") {
+	if !strings.Contains(result.Text, "[delegate: 1 turn") {
 		t.Fatalf("delegate output = %q", result.Text)
 	}
 }
@@ -529,7 +529,7 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 	catalog.Register(fakeChildTool{name: "read_file", out: "ok"})
 	catalog.Register(nested)
 	runner := NewRunner(nil, nil, Options{MaxDepth: 3})
-	parent := Runtime{Depth: 0, MaxTurnTokens: 1234, MaxPromptCostUSD: 2.5, SessionPath: "session"}
+	parent := Runtime{Depth: 0, MaxPromptTokens: 1234, MaxPromptCostUSD: 2.5, SessionPath: "session"}
 	launch := Launch{Tools: catalog, System: childSystemPrompt("root"), Agent: "explore"}
 
 	childTools, err := runner.childTools(parent, launch, "child-1", todo.NewStore(), []string{"read_file", "delegate"})
@@ -545,8 +545,8 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 		t.Fatalf("rebound delegate = %T, want initialized *Tool", tool)
 	}
 	snapshot := rebound.runner.snapshot()
-	if snapshot.Depth != 1 || snapshot.MaxTurnTokens != 1234 || snapshot.MaxPromptCostUSD != 2.5 {
-		t.Fatalf("child runtime safety fields = depth %d tokens %d cost %v", snapshot.Depth, snapshot.MaxTurnTokens, snapshot.MaxPromptCostUSD)
+	if snapshot.Depth != 1 || snapshot.MaxPromptTokens != 1234 || snapshot.MaxPromptCostUSD != 2.5 {
+		t.Fatalf("child runtime safety fields = depth %d tokens %d cost %v", snapshot.Depth, snapshot.MaxPromptTokens, snapshot.MaxPromptCostUSD)
 	}
 	if snapshot.ParentChildID != "child-1" || snapshot.SessionPath != "session" {
 		t.Fatalf("child runtime lineage = parent %q session %q", snapshot.ParentChildID, snapshot.SessionPath)
@@ -606,7 +606,7 @@ func TestDelegatePropagatesRootTokenAndCostBudgets(t *testing.T) {
 		runtime Runtime
 		usage   llm.Usage
 	}{
-		{name: "tokens", runtime: Runtime{MaxTurnTokens: 100}, usage: llm.Usage{InputTokens: 60}},
+		{name: "tokens", runtime: Runtime{MaxPromptTokens: 100}, usage: llm.Usage{InputTokens: 60}},
 		{name: "cost", runtime: Runtime{MaxPromptCostUSD: 8}, usage: llm.Usage{InputTokens: 1_000_000, CostUSD: 5, CostKnown: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -631,8 +631,14 @@ func TestDelegatePropagatesRootTokenAndCostBudgets(t *testing.T) {
 			if _, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"loop"}`)); err != nil {
 				t.Fatalf("RunMetered: %v", err)
 			}
-			if len(fp.Requests) != 2 {
-				t.Fatalf("child requests = %d, want 2 before inherited %s budget stops it", len(fp.Requests), tc.name)
+			var conversational int
+			for _, request := range fp.Requests {
+				if len(request.Tools) > 0 {
+					conversational++
+				}
+			}
+			if conversational != 2 {
+				t.Fatalf("conversational child requests = %d, want 2 before inherited %s budget stops it; total calls=%d", conversational, tc.name, len(fp.Requests))
 			}
 		})
 	}
