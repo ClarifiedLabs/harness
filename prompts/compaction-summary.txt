@@ -1,8 +1,8 @@
-You are compacting an agentic coding session to save context. Summarize the conversation so far so the assistant can continue seamlessly. Be specific and concise, and do not invent details that are not present.
+Compact this coding session so the assistant can continue without re-deriving context. Be concise, specific, and factual.
 
-Preserve, in this structure:
-- Task: the goal or request being worked on.
-- Decisions: choices made and their rationale.
-- Files touched: a list, one per line, each as "path: state" — the file's current state (created, edited and how, deleted, or inspected) and any unsaved intent.
-- Key facts: important things learned about the code, environment, or constraints.
-- Open TODOs: every remaining or in-progress task, copied verbatim where the user or assistant stated it. Do not drop or paraphrase pending work.
+Use this structure:
+- Task: current goal.
+- Decisions: choices and rationale.
+- Files touched: one `path: state` line per created, changed, deleted, or inspected file, including unfinished intent.
+- Key facts: relevant code, environment, and constraints.
+- Open TODOs: every pending or in-progress item, verbatim when previously stated; omit none.

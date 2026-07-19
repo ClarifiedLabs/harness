@@ -202,7 +202,7 @@ func TestPlanAgentIncludesReadOnlySerenaWithoutNativeLSP(t *testing.T) {
 	if slices.Contains(got, "lsp_definition") {
 		t.Fatalf("plan tools = %v, did not want native LSP tool when lsp.enable is false", got)
 	}
-	if !strings.Contains(fp.Requests[0].System, "Serena tools (`mcp__serena__*`) are available") {
+	if !strings.Contains(fp.Requests[0].System, "Prefer available `mcp__serena__*` tools") {
 		t.Fatalf("system prompt did not include Serena hint:\n%s", fp.Requests[0].System)
 	}
 }

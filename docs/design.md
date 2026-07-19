@@ -1173,7 +1173,7 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
 
 ### 8.5 System prompt (`internal/sysprompt`)
 
-`system = staticPrompt + "\n\n" + envContext + runtimeSections`
+`system = staticPrompt + envContext + AGENTS.md + skills + runtimeHints + agentPrompt`
 
 - **Builtin instructions** (`prompts/system.txt`): concise agentic-coding guidance — read before
   editing, prefer `edit` with unique context, use tools rather than guessing file
@@ -1186,17 +1186,21 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
   cwd: /Users/twt/project
   os: darwin/arm64
   date: 2026-06-09
-  git: branch=main, 2 modified, 1 untracked
+  git: branch=main
   ```
 
-  Git summary via `git branch --show-current` + parsed `git status --porcelain`;
-  `git: (not a git repository)` otherwise.
+  Git summary uses `git branch --show-current`; live dirty-state counts are
+  omitted because they become stale after the first edit. It renders
+  `git: (not a git repository)` outside a work tree.
 - Flag/config override: `-system-prompt <text|@file>`,
   `HARNESS_SYSTEM_PROMPT`, or config `system_prompt` replaces only the static
   built-in instructions. Runtime sections such as env context, user/project
   `AGENTS.md`, skills, and agent prompts are still composed around it.
   `~/.agents/AGENTS.md` is appended before the current working directory's
   `AGENTS.md`; missing files are ignored and other read failures fail startup.
+  The skills catalog includes its activation/read instruction once and caps each
+  description at 160 runes. Process-specific LSP/Serena hints follow it. The
+  active agent prompt is always the final section.
   `@~/path` expands through the current user's home directory; relative `@file`
   references in the config file resolve from that config file's directory.
   `-no-env` drops the env block.
@@ -1227,10 +1231,14 @@ func (r *Registry) Specs() []llm.ToolSchema
 func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResult
 ```
 
-- **Schemas are hand-written JSON Schema constants.** The raw schema is the
-  implementation contract, but model-facing specs strip schema `description` fields
-  to reduce repeated prompt text. Enums and required-ness still deserve hand tuning,
-  and reflection fights you on exactly those fields.
+- **Schemas are hand-written JSON Schema constants.** `Tool.Schema` remains the
+  full implementation contract. `Registry.Specs` removes annotation keywords
+  (`description`, `title`, `$comment`, `example`, `examples`) from actual schema
+  nodes before sending them to the model, while preserving validation keywords
+  and property names that happen to equal an annotation keyword. `delegate`
+  retains `description` because its dynamic compatible-agent catalog is essential.
+  Enums and required-ness still deserve hand tuning, and reflection fights you on
+  exactly those fields.
 - **Tools self-validate args** after `json.Unmarshal` into a private struct (no stdlib
   JSON Schema validator; unknown extra keys are tolerated — models hallucinate them).
 - **Metered tools** optionally implement `RunMetered`; `Dispatch` prefers it and
@@ -1243,7 +1251,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.1 `read_file`
 
-> Read a file from disk. Provide a JSON object with path (single file; supports offset/limit), or paths[] to read several files at once, each under a "==> path <==" header. Returns line-numbered content.
+> Read one file with optional offset/limit, or batch paths[]; returns line-numbered content.
 
 | param | type | notes |
 |---|---|---|
@@ -1279,7 +1287,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.2 `list_dir`
 
-> List directory entries with type and size. Non-recursive; pass a glob to filter.
+> List one directory with an optional base-name glob; non-recursive.
 
 | param | type | notes |
 |---|---|---|
@@ -1295,7 +1303,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.2a `glob`
 
-> Recursively find files and directories by glob. Provide a JSON object with pattern (e.g. {"pattern":"**/*config*.go"}) and optional root. Read-only; ** matches across directories. Returns matching paths with type and size, one per line, sorted by path.
+> Recursively list sorted files and directories matching pattern under optional root; ** crosses directories.
 
 | param | type | notes |
 |---|---|---|
@@ -1317,9 +1325,9 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.3 `grep` and optional `rg`
 
-> `grep`: Run the host grep command directly. Provide a JSON object with args as an array of strings, e.g. {"args":["-R","-n","TODO","."]}; do not pass args as a string or JSON-encoded array. No shell; binary files are skipped (-I) unless you set a binary policy or pass --; overlong matched lines are clamped in output. Returns combined stdout+stderr and the exit code, or returns a background job id immediately when background is true. (Under `-search-tools both` grep's description gains a "prefer rg" steer.)
+> `grep`: Run grep without a shell. Input is an object; args must be an array of strings, not a string. Skips binary files unless overridden; background returns a job id. (Under `-search-tools both`, the description also says to prefer `rg`.)
 
-> `rg`: Run the host rg (ripgrep) command directly. Provide a JSON object with args as an array of strings, e.g. {"args":["-n","TODO","."]}; do not pass args as a string or JSON-encoded array. No shell; normal searches default to --max-columns=1024 --max-columns-preview --max-filesize=10M unless args set those native rg options. Returns combined stdout+stderr and the exit code, or returns a background job id immediately when background is true.
+> `rg`: Run rg without a shell. Input is an object; args must be an array of strings, not a string. Adds safe line/file-size limits unless overridden; background returns a job id.
 
 | param | type | notes |
 |---|---|---|
@@ -1376,8 +1384,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.4 `edit`
 
-> Edit one or more files with exact-text replacements. Each file has edits[];
-> oldText must be unique and non-overlapping in the original file.
+> Atomically apply exact-text replacements across files[]; oldText must be unique unless replaceAll is true.
 
 | param | type | notes |
 |---|---|---|
@@ -1412,7 +1419,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.5 `write_file`
 
-> Create or overwrite a file with the given content. Creates parent directories.
+> Create or overwrite path with content, creating parent directories.
 
 | param | type | notes |
 |---|---|---|
@@ -1425,7 +1432,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.6 `apply_patch`
 
-> Apply a Codex-format patch. Supports add, delete, update, and move.
+> Apply a Codex-format add/delete/update/move patch; prefer edit or write_file for ordinary changes.
 
 | param | type | notes |
 |---|---|---|
@@ -1458,7 +1465,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.7 `run_command`
 
-> Run a shell command with `command` or a program directly with `argv`. Provide exactly one of command or argv. When using argv, pass it as an array of strings, not a shell string or JSON-encoded array. Returns combined stdout+stderr and exit code, or a background job id when background is true.
+> Run command through a shell or argv directly. Input is an object; set exactly one of command or argv, and make argv an array of strings, not a string. Returns combined output/exit code; background returns a job id.
 
 | param | type | notes |
 |---|---|---|
@@ -1532,7 +1539,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.9 `git`
 
-> Run a git command. Provide a JSON object with args as an array of strings, e.g. {"args":["status","--porcelain"]}; do not pass args as a string or JSON-encoded array. No shell; no pager.
+> Run git without a shell or pager. Input is an object; args must be an array of strings, not a string.
 
 | param | type | notes |
 |---|---|---|
@@ -1557,7 +1564,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.10 `web_fetch`
 
-> Fetch a URL (http/https) and return its text content. HTML is reduced to readable text. Returns a background job id immediately when background is true.
+> Fetch HTTP(S) text, reducing HTML to readable text; supports optional limits and background jobs.
 
 | param | type | notes |
 |---|---|---|
@@ -1581,7 +1588,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.11 `git_readonly`
 
-> Run a restricted git command: status, log, diff, show, grep, blame, or bisect (bisect checks out commits; run/view/visualize are rejected). Provide a JSON object with args as an array of strings starting with the subcommand, e.g. {"args":["log","--oneline"]}; do not pass args as a string or JSON-encoded array. No shell; no pager.
+> Run restricted git status/log/diff/show/grep/blame/bisect without shell or pager; bisect may check out commits. Input is an object; args must be an array of strings, not a string.
 
 | param | type | notes |
 |---|---|---|
@@ -1609,7 +1616,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.12 `write_tmp_file`
 
-> Write a scratch file under this run's private temp directory and return its absolute path. Files are kept after exit.
+> Write a retained scratch file in this run's private temp directory; returns its absolute path.
 
 | param | type | notes |
 |---|---|---|
@@ -1624,7 +1631,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.13 `update_todos`
 
-> Maintain the current plan for nontrivial work. Replace the full todo list; keep at most one item in_progress.
+> Replace the complete todo list for nontrivial work; allow at most one in_progress item.
 
 | param | type | notes |
 |---|---|---|
@@ -1656,9 +1663,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.14 `delegate`
 
-> Use for broad exploration or independent workstreams; keep small known-file and tightly
-> coupled tasks in the parent. For separable work, call multiple delegates, then
-> synthesize reports without polling.
+> Delegate broad exploration or separable work; keep small or tightly coupled tasks local. Launch independent calls together, then synthesize without polling.
 
 | param | type | notes |
 |---|---|---|
@@ -1671,10 +1676,10 @@ this subsection records the common runner those argv tools point at.
   the delegate tool starts a child `agent.Agent`, while `internal/agent` already
   depends on `internal/tools` for dispatch.
 - The `agent` schema description appends a deterministic catalog with exact shape
-  `Available agents:\n- <name>: <one-line description>`. The enum and catalog
+  `Available:\n- <name>: <one-line description>`. The enum and catalog
   contain only candidates whose configured tools are a subset of the current
   parent's live tools. Candidate descriptions are whitespace-normalized to one
-  line and individually capped at 240 bytes. Every enum value has one catalog
+  line and individually capped at 160 bytes. Every enum value has one catalog
   entry; incompatible names and descriptions are absent. `delegate` opts into
   preserving schema descriptions in `tools.Registry.Specs`; other tools retain the
   normal schema-description stripping behavior.
@@ -1756,10 +1761,10 @@ contract maps the MCP tool shape onto the `Tool` interface:
   required `mcp__` prefix; a name that fails is **skipped**, not rewritten (a
   truncated name could collide), and recorded in the registration summary.
 - **Description** is reduced to one line: trimmed, first line only, byte-capped at
-  1024 bytes on a UTF-8 rune boundary, with an ellipsis when truncated.
-- **Schema** is the MCP `inputSchema` passed through verbatim; an absent schema
-  (nil/empty/`null`) becomes `{"type":"object"}` so the model always sees a valid
-  object schema.
+  512 bytes on a UTF-8 rune boundary, with an ellipsis when truncated.
+- **Schema** keeps the MCP `inputSchema` on the adapter; an absent schema
+  (nil/empty/`null`) becomes `{"type":"object"}`. Model-facing registration then
+  applies the annotation stripping described at the start of §9.
 - **`ReadOnly(input)` is policy-controlled.** Harness trusts
   `annotations.readOnlyHint:true` for enabled MCP registrations, so advertised
   read-only tools can join read-only parallel islands (§8.1) and can be exposed
@@ -1786,8 +1791,8 @@ backoff allows.
 
 - Persists an implementation plan as markdown under the live session directory:
   `<session>/plans/NNNN-<slug>.plan.md`, written temp-then-rename. Input is
-  `{title, plan, steps?, files?, verification?}`; `plan` is the free-form markdown
-  body. Returns the absolute path.
+  `{title, plan}`; `plan` is the self-contained markdown body. Returns the
+  absolute path.
 - The store is one `*plan.Store` per process (like `update_todos`); the list is
   saved in `state.json` (`Session.Plans`), reseeded on resume, and reset on
   `/clear`. `internal/plan` is a leaf package so `internal/session` can persist the
@@ -1799,15 +1804,14 @@ backoff allows.
 ### 9.18 `request_implementation` (`internal/plan` + `internal/tools`)
 
 - The plan agent's request to hand the recorded plan to an implementation agent.
-  Input is `{brief, agent?, plan_path?, model?}`. It requires a recorded plan
-  (defaults to the most recent); the implementation agent reads the plan as its
+  Input is `{brief, agent?, model?}`. It requires and always selects the most
+  recently recorded plan; the implementation agent reads the plan as its
   task spec rather than being handed only the brief.
 - The `agent` field's schema is built from the configured agent names: its
-  description reads `Available agents: <default> (default), ...` and its `enum`
-  constrains the value to a real agent, so the model hands off to an existing
-  agent instead of inventing one (e.g. `implementation`). The tool also rejects
-  an explicit unknown `agent` before recording a pending handoff. The default is
-  the configured handoff agent (`auto` unless overridden).
+  `enum` constrains the value to a real agent, so the model cannot invent one.
+  The tool also rejects an explicit unknown `agent` before recording a pending
+  handoff. Omitting it leaves target selection to the REPL and configured handoff
+  default (`auto` unless overridden).
 - Tools cannot prompt, so it only records a `plan.HandoffRequest` in a shared
   `*plan.Pending` holder and returns. At the prompt boundary, the REPL asks for
   approval, performs the switch, and immediately starts the implementation agent;
@@ -2518,8 +2522,8 @@ reviewer, or the wide-open default without separate binaries.
   underlying tools still assume an external sandbox for real isolation; gating only
   shapes what each agent exposes. `Agent.SetTools` swaps the registry for `/agent`.
 - The agent prompt is appended to the composed system prompt as the final
-  section, so it layers on top of the static instructions, env block, and
-  user/project AGENTS.md sections. A configured `system_prompt` replaces the
+  section, so it layers on top of the static instructions, env block,
+  user/project AGENTS.md, skills catalog, and runtime capability hints. A configured `system_prompt` replaces the
   static instructions before the runtime sections are added. The active agent is
   saved with the session and restored on `-resume` (flags win).
 
@@ -2758,9 +2762,9 @@ Built-in config uses top-level
 `{"lsp":{"servers":{...}}}`; the compatibility `harness lsp serve -config` path
 still accepts the legacy `{"version":1,"servers":{...}}` file shape. Both paths
 replace embedded defaults (Go/Rust/Python/TS-JS/C-C++) by server name rather than
-field-merging them; each tool description advertises the languages whose binary
-is on `PATH` via a suffix — ` Langs: <comma-separated list>.` when any are present,
-or ` No LSP servers on PATH.` when none are.
+field-merging them. Per-tool descriptions stay capability-specific and are capped
+at 512 bytes; one system-prompt runtime hint lists languages whose configured
+server binary is on `PATH`, or reports that none are available.
 
 **v1 non-goals:** completion, formatting, code actions, and WorkspaceEdit file
 operations; full-text sync (no incremental); one root per language-server

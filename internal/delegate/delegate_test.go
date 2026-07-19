@@ -117,7 +117,7 @@ func TestDelegateSchemaCatalogIsDeterministicNormalizedAndCapped(t *testing.T) {
 
 func TestDelegateDescriptionAndSchemaExplainSteeringContract(t *testing.T) {
 	tool := New(nil, nil, Options{})
-	for _, want := range []string{"broad exploration", "independent workstreams", "small known-file", "tightly coupled tasks", "separable work", "multiple delegates", "synthesize", "without polling"} {
+	for _, want := range []string{"broad exploration", "separable work", "small", "tightly coupled", "independent calls", "synthesize", "without polling"} {
 		if !strings.Contains(tool.Description(), want) {
 			t.Fatalf("tool description missing %q: %s", want, tool.Description())
 		}
@@ -130,7 +130,7 @@ func TestDelegateDescriptionAndSchemaExplainSteeringContract(t *testing.T) {
 	if err := json.Unmarshal(tool.Schema(), &decoded); err != nil {
 		t.Fatalf("schema JSON: %v", err)
 	}
-	for _, want := range []string{"objective", "scope", "constraints", "expected report", "verification"} {
+	for _, want := range []string{"objective", "scope", "constraints", "report", "verification"} {
 		if !strings.Contains(decoded.Properties["task"].Description, want) {
 			t.Fatalf("task description missing %q: %q", want, decoded.Properties["task"].Description)
 		}

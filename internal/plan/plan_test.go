@@ -112,21 +112,6 @@ func TestStoreLatestReturnsMostRecent(t *testing.T) {
 	}
 }
 
-func TestStoreHasPathRequiresExactRecordedPath(t *testing.T) {
-	store := NewStore()
-	store.Add(Plan{Title: "first", Path: "/sess/plans/0001.plan.md"})
-
-	if !store.HasPath("/sess/plans/0001.plan.md") {
-		t.Fatal("HasPath should find an exact recorded path")
-	}
-	if store.HasPath("/sess/plans/../plans/0001.plan.md") {
-		t.Fatal("HasPath should not normalize alternate spellings")
-	}
-	if store.HasPath("/tmp/0001.plan.md") {
-		t.Fatal("HasPath should reject unrecorded paths")
-	}
-}
-
 func TestStoreSnapshotIsIndependentCopy(t *testing.T) {
 	store := NewStore()
 	store.Add(Plan{Title: "a"})

@@ -239,7 +239,7 @@ func TestRunCommandModelSchemaAvoidsTopLevelComposition(t *testing.T) {
 			if !strings.Contains(tc.tool.Description(), "exactly one of command or argv") {
 				t.Fatalf("description should carry command/argv exclusivity rule: %q", tc.tool.Description())
 			}
-			if !strings.Contains(tc.tool.Description(), "not a shell string or JSON-encoded array") {
+			if !strings.Contains(tc.tool.Description(), "array of strings, not a string") {
 				t.Fatalf("description should reject stringified argv arrays: %q", tc.tool.Description())
 			}
 		})

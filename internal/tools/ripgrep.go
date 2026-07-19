@@ -44,7 +44,7 @@ func RipgrepAvailable() bool {
 func (ripgrep) Name() string { return "rg" }
 
 func (ripgrep) Description() string {
-	return `Run the host rg (ripgrep) command directly. Provide a JSON object with args as an array of strings, e.g. {"args":["-n","TODO","."]}; do not pass args as a string or JSON-encoded array. No shell; normal searches default to --max-columns=1024 --max-columns-preview --max-filesize=10M unless args set those native rg options. Returns combined stdout+stderr and the exit code, or returns a background job id immediately when background is true.`
+	return "Run rg without a shell. Input is an object; args must be an array of strings, not a string. Adds safe line/file-size limits unless overridden; background returns a job id."
 }
 
 func (r ripgrep) Schema() json.RawMessage {

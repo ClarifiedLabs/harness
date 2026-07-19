@@ -19,7 +19,7 @@ import (
 
 const serenaNamespace = "serena"
 
-const serenaSystemHint = "Serena tools (`mcp__serena__*`) are available for symbol-aware code work. Prefer Serena for code navigation, references, implementations, and semantic refactors before repeated `read_file`, `rg`, or `glob`."
+const serenaSystemHint = "Prefer available `mcp__serena__*` tools for symbol navigation, references, and semantic refactors."
 
 func setupSerena(ctx context.Context, serenaCfg config.SerenaConfig, catalog *tools.Registry, logger *slog.Logger) (summary mcptools.Summary, cleanup func(), ok bool) {
 	noop := func() {}

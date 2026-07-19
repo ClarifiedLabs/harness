@@ -126,6 +126,89 @@ func TestRegistrySpecsCanPreserveSchemaDescriptions(t *testing.T) {
 	}
 }
 
+// A schema property may legitimately have the same name as an annotation
+// keyword. The sanitizer must remove annotations from schema nodes without
+// deleting those properties from the input contract.
+func TestRegistrySpecsPreserveAnnotationNamedProperties(t *testing.T) {
+	r := &Registry{}
+	r.Register(fakeTool{
+		name: "annotation_names",
+		desc: "annotation names",
+		schema: `{
+			"type":"object",
+			"title":"drop root title",
+			"examples":[{"description":"sample"}],
+			"properties":{
+				"description":{"type":"string","description":"drop field prose"},
+				"title":{"type":"string","default":"kept"},
+				"examples":{"type":"array","items":[{"type":"string","description":"drop tuple prose"}]}
+			}
+		}`,
+		run: func(context.Context, json.RawMessage) (string, error) { return "ok", nil },
+	})
+
+	var schema map[string]any
+	if err := json.Unmarshal(r.Specs()[0].Parameters, &schema); err != nil {
+		t.Fatalf("schema JSON: %v", err)
+	}
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties missing: %v", schema)
+	}
+	for _, name := range []string{"description", "title", "examples"} {
+		if _, ok := properties[name]; !ok {
+			t.Errorf("property %q was mistaken for an annotation: %s", name, r.Specs()[0].Parameters)
+		}
+	}
+	if _, ok := schema["title"]; ok {
+		t.Error("root title annotation was not stripped")
+	}
+	if _, ok := schema["examples"]; ok {
+		t.Error("root examples annotation was not stripped")
+	}
+	title := properties["title"].(map[string]any)
+	if title["default"] != "kept" {
+		t.Errorf("validation/default metadata changed: %v", title)
+	}
+	if strings.Contains(string(r.Specs()[0].Parameters), "drop tuple prose") {
+		t.Errorf("nested tuple annotation was not stripped: %s", r.Specs()[0].Parameters)
+	}
+}
+
+func TestRegistrySpecsPreserverStillDropsOtherAnnotations(t *testing.T) {
+	r := &Registry{}
+	r.Register(preservingFakeTool{fakeTool: fakeTool{
+		name:   "catalog",
+		desc:   "catalog",
+		schema: `{"type":"object","title":"drop","properties":{"agent":{"type":"string","description":"keep","examples":["drop"]}}}`,
+		run:    func(context.Context, json.RawMessage) (string, error) { return "ok", nil },
+	}})
+	parameters := string(r.Specs()[0].Parameters)
+	if !strings.Contains(parameters, `"description":"keep"`) {
+		t.Fatalf("preserved description missing: %s", parameters)
+	}
+	if strings.Contains(parameters, `"title"`) || strings.Contains(parameters, `"examples"`) {
+		t.Fatalf("non-description annotations were retained: %s", parameters)
+	}
+}
+
+func TestBuiltInToolDescriptionsStayConcise(t *testing.T) {
+	toolList := []Tool{
+		readFile{}, listDir{}, glob{}, grep{}, ripgrep{}, edit{}, writeFile{},
+		runCommand{}, gitTool{}, gitReadonly{}, webFetch{}, applyPatch{}, newWriteTmpFile(),
+		NewRequestImplementation(nil, nil, true, nil),
+	}
+	for _, tool := range toolList {
+		desc := tool.Description()
+		if len(desc) > 300 {
+			t.Errorf("%s description = %d bytes, budget 300", tool.Name(), len(desc))
+		}
+		if strings.Contains(desc, "\n") {
+			t.Errorf("%s description is not one line: %q", tool.Name(), desc)
+		}
+	}
+}
+
 func TestDispatchPreservesMeteredToolUsage(t *testing.T) {
 	r := &Registry{}
 	r.Register(meteredFakeTool{

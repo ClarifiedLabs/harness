@@ -19,7 +19,7 @@ import (
 
 const (
 	namePrefix   = "lsp_"
-	maxDescBytes = 1024
+	maxDescBytes = 512
 )
 
 var toolNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)

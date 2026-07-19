@@ -82,27 +82,27 @@ func BuiltinsWithOptions(opts Options) map[string]Definition {
 	return map[string]Definition{
 		"auto": {
 			Name:         "auto",
-			Description:  "Default agent; the model decides what to do.",
+			Description:  "General-purpose agent.",
 			AllowedTools: defaultTools(opts),
 			MCPTools:     MCPToolsAll,
 		},
 		"explore": {
 			Name:         "explore",
-			Description:  "Use proactively for broad search, architecture or dependency tracing, root-cause investigation, and questions spanning many files; not for a single known-file lookup.",
+			Description:  "Broad read-only search, tracing, and root-cause analysis; not known-file lookup.",
 			AllowedTools: inspectionTools(opts),
 			MCPTools:     MCPToolsReadOnly,
 			Prompt:       explorePrompt,
 		},
 		"independent": {
 			Name:         "independent",
-			Description:  "Complete the task end to end without pausing for input.",
+			Description:  "End-to-end work without user input.",
 			AllowedTools: defaultTools(opts),
 			MCPTools:     MCPToolsAll,
 			Prompt:       independentPrompt,
 		},
 		"plan": {
 			Name:         "plan",
-			Description:  "Collaborate on an implementation plan without modifying the project.",
+			Description:  "Collaborative read-only implementation planning.",
 			AllowedTools: planTools(opts),
 			MCPTools:     MCPToolsReadOnly,
 			Prompt:       planPrompt,

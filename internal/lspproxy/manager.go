@@ -60,7 +60,7 @@ type docState struct {
 }
 
 // NewManager builds a Manager over cfg and probes which configured servers are
-// installed (for the dynamic tool descriptions). namespace prefixes the exposed
+// installed (for a one-time runtime hint). namespace prefixes the exposed
 // tool names as mcp__<namespace>__<tool> (so harness can register them directly);
 // an empty namespace exposes bare names (for hosting behind a proxy that
 // namespaces them itself).
@@ -99,7 +99,7 @@ func (m *Manager) bareName(name string) string {
 }
 
 // computeAvailable records the sorted set of languages whose server binary is on
-// PATH, so ListTools can advertise what actually works here.
+// PATH for the one-time runtime hint.
 func (m *Manager) computeAvailable() {
 	present := map[string]bool{}
 	for _, s := range m.cfg.Servers {
@@ -120,16 +120,17 @@ func (m *Manager) computeAvailable() {
 	m.available = langs
 }
 
-// ListTools returns the fixed tool surface with descriptions augmented by the
-// available-language list. The set fits one page; a non-empty cursor returns an
-// empty page.
+// AvailableLanguages returns the sorted languages backed by a server binary
+// currently on PATH.
+func (m *Manager) AvailableLanguages() []string {
+	return slices.Clone(m.available)
+}
+
+// ListTools returns the fixed tool surface. The set fits one page; a non-empty
+// cursor returns an empty page.
 func (m *Manager) ListTools(ctx context.Context, cursor string) (mcp.ListToolsResult, error) {
 	if cursor != "" {
 		return mcp.ListToolsResult{}, nil
-	}
-	suffix := " No LSP servers on PATH."
-	if len(m.available) > 0 {
-		suffix = " Langs: " + strings.Join(m.available, ", ") + "."
 	}
 	tools := make([]mcp.Tool, 0, len(toolSpecs))
 	for _, spec := range toolSpecs {
@@ -139,7 +140,7 @@ func (m *Manager) ListTools(ctx context.Context, cursor string) (mcp.ListToolsRe
 		}
 		tools = append(tools, mcp.Tool{
 			Name:        m.publicName(spec.name),
-			Description: spec.description + suffix,
+			Description: spec.description,
 			InputSchema: json.RawMessage(spec.schema),
 			Annotations: json.RawMessage(annotations),
 		})

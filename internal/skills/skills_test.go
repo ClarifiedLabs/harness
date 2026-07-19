@@ -326,12 +326,12 @@ func TestBuildCatalogShape(t *testing.T) {
 		"a": {Name: "a", Description: "desc a", Location: "/path/a/SKILL.md"},
 	}
 	out := BuildCatalog(m)
-	if !strings.HasPrefix(out, "Available skills:\n") {
+	if !strings.HasPrefix(out, "Available skills (when a skill matches or is explicitly named") {
 		t.Errorf("missing header: %q", out)
 	}
 	// Sorted: a before b.
-	aIdx := strings.Index(out, "- a: desc a (read /path/a/SKILL.md)")
-	bIdx := strings.Index(out, "- b: desc b (read /path/b/SKILL.md)")
+	aIdx := strings.Index(out, "- a: desc a (/path/a/SKILL.md)")
+	bIdx := strings.Index(out, "- b: desc b (/path/b/SKILL.md)")
 	if aIdx < 0 || bIdx < 0 {
 		t.Fatalf("both skills missing: %q", out)
 	}
@@ -348,7 +348,7 @@ func TestBuildCatalogOneLinesDescriptions(t *testing.T) {
 		"s": {Name: "s", Description: "first line\nsecond   line", Location: "/p/q.r"},
 	}
 	out := BuildCatalog(m)
-	if !strings.Contains(out, "- s: first line second line (read /p/q.r)") {
+	if !strings.Contains(out, "- s: first line second line (/p/q.r)") {
 		t.Errorf("description should be collapsed to one line: %q", out)
 	}
 }
@@ -358,7 +358,7 @@ func TestBuildCatalogTruncatesToFirstSentence(t *testing.T) {
 		"s": {Name: "s", Description: "Do the thing. Then a long tail of extra detail that should not ride in the always-resident prompt.", Location: "/p/q.r"},
 	}
 	out := BuildCatalog(m)
-	if !strings.Contains(out, "- s: Do the thing. (read /p/q.r)") {
+	if !strings.Contains(out, "- s: Do the thing. (/p/q.r)") {
 		t.Errorf("catalog should keep only the first sentence: %q", out)
 	}
 	if strings.Contains(out, "long tail") {
@@ -401,7 +401,7 @@ func TestCatalogDescription(t *testing.T) {
 		})
 	}
 
-	// A 200+ char first sentence falls back to the rune cap plus ellipsis.
+	// An over-cap first sentence falls back to the rune cap plus ellipsis.
 	long := strings.Repeat("a", 205) + "."
 	got := catalogDescription(long)
 	if !strings.HasSuffix(got, "…") {
@@ -409,15 +409,6 @@ func TestCatalogDescription(t *testing.T) {
 	}
 	if n := utf8.RuneCountInString(strings.TrimSuffix(got, "…")); n != catalogDescMaxChars {
 		t.Errorf("capped body = %d runes, want %d", n, catalogDescMaxChars)
-	}
-}
-
-func TestInstructionsEmpty(t *testing.T) {
-	if out := Instructions(0); out != "" {
-		t.Errorf("expected empty instructions for 0 skills, got %q", out)
-	}
-	if out := Instructions(3); out == "" {
-		t.Errorf("expected instructions for 3 skills, got empty")
 	}
 }
 

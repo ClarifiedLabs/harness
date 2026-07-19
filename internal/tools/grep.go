@@ -23,9 +23,9 @@ type grep struct {
 func (grep) Name() string { return "grep" }
 
 func (t grep) Description() string {
-	desc := `Run the host grep command directly. Provide a JSON object with args as an array of strings, e.g. {"args":["-R","-n","TODO","."]}; do not pass args as a string or JSON-encoded array. No shell; binary files are skipped (-I) unless you set a binary policy or pass --; overlong matched lines are clamped in output. Returns combined stdout+stderr and the exit code, or returns a background job id immediately when background is true.`
+	desc := "Run grep without a shell. Input is an object; args must be an array of strings, not a string. Skips binary files unless overridden; background returns a job id."
 	if t.preferRG {
-		desc += " Prefer rg when available; it is registered alongside this tool and is the faster default."
+		desc += " Prefer rg when available."
 	}
 	return desc
 }

@@ -186,10 +186,10 @@ func TestDecodeSearchCommandArgsAcceptsObjectAndBareArray(t *testing.T) {
 
 func TestSearchCommandDescriptionsSteerToObjectArgs(t *testing.T) {
 	for _, desc := range []string{grep{}.Description(), ripgrep{}.Description()} {
-		if !strings.Contains(desc, "JSON object") || !strings.Contains(desc, `{"args":[`) {
+		if !strings.Contains(desc, "Input is an object") {
 			t.Errorf("description should show object-shaped args, got %q", desc)
 		}
-		if !strings.Contains(desc, "do not pass args as a string or JSON-encoded array") {
+		if !strings.Contains(desc, "array of strings, not a string") {
 			t.Errorf("description should reject stringified args arrays, got %q", desc)
 		}
 		if strings.Contains(desc, "Pass grep options") || strings.Contains(desc, "Pass ripgrep options") {

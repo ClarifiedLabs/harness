@@ -23,6 +23,8 @@ This page is the operational overview.
 | `update_todos` | replace the current todo list for multi-step work |
 | `delegate` | run a configured child agent and return its final report |
 | `background_jobs` | list, inspect, or cancel process-local background jobs |
+| `record_plan` | persist a self-contained markdown implementation plan in the session |
+| `request_implementation` | request an approved handoff of the latest recorded plan (plan agent only) |
 
 `apply_patch` (Codex-format add/delete/update/move patches) is no longer in the
 default tool set — `edit` and `write_file` subsume it. It still ships in the tool
@@ -108,7 +110,7 @@ repository-wide diff.
 
 `delegate` starts a fresh-context child agent using the requested agent
 definition, or the current agent when omitted. The model-facing `agent` enum and
-its deterministic `Available agents:` catalog include only agents whose tools
+its deterministic `Available:` catalog include only agents whose tools
 are a subset of the current parent's live tools. Agent descriptions are selection
 policy, not cosmetic labels: every new custom agent must provide a nonblank
 `description` stating when the parent should use it. Same-named built-in

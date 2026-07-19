@@ -184,10 +184,11 @@ func TestBuildEmptyAgentsMDOmitted(t *testing.T) {
 func TestBuildAgentPromptAppendedLast(t *testing.T) {
 	out := Build(Options{
 		ProjectAgentsMD: "agents rules",
+		RuntimeHints:    []string{"runtime one", "  ", "runtime two"},
 		AgentPrompt:     "agent section",
 		NoEnv:           true,
 	})
-	if !strings.HasSuffix(out, "agents rules\n\nagent section") {
+	if !strings.HasSuffix(out, "agents rules\n\nruntime one\n\nruntime two\n\nagent section") {
 		t.Errorf("agent prompt should be the final section:\n%s", out)
 	}
 	if !strings.Contains(out, prompts.System()) {

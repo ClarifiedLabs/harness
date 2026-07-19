@@ -425,8 +425,8 @@ func run(env environment) int {
 
 	// System prompt composition (design §8.5). -system-prompt may be an @file
 	// reference. When set, it replaces only the static prompt; runtime sections
-	// such as env, user/project AGENTS.md, skills, and agent prompts are still
-	// composed.
+	// such as env, user/project AGENTS.md, skills, capability hints, and agent
+	// prompts are still composed.
 	configuredSystemPrompt, err := resolveAtFile(cfg.SystemPrompt)
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: -system-prompt: %v\n", err)
@@ -472,33 +472,23 @@ func run(env environment) int {
 		fmt.Fprintf(stderr, "skills: %s\n", w)
 	}
 	skillsCatalog := skills.BuildCatalog(discoveredSkills)
-	instructions := skills.Instructions(len(discoveredSkills))
-	systemAddendum := ""
+	var runtimeHints []string
 
 	// buildSystem assembles the full system prompt for a given agent prompt,
 	// reusing every other input. The configured system prompt replaces only the
-	// static built-in instructions. The skills instructions block is appended
-	// last, exactly as at startup, so an /agent switch reproduces the same
-	// composition.
+	// static built-in instructions. Runtime hints precede the agent prompt so the
+	// selected agent's instructions remain the final layer.
 	buildSystem := func(agentPrompt string) string {
-		s := sysprompt.Build(sysprompt.Options{
+		return sysprompt.Build(sysprompt.Options{
 			StaticPrompt:    configuredSystemPrompt,
 			NoEnv:           cfg.NoEnv,
 			UserAgentsMD:    userAgentsMD,
 			ProjectAgentsMD: projectAgentsMD,
 			SkillsCatalog:   skillsCatalog,
+			RuntimeHints:    runtimeHints,
 			AgentPrompt:     agentPrompt,
 			Env:             sysprompt.EnvOptions{Dir: wd},
 		})
-		if instructions != "" {
-			if systemAddendum != "" {
-				s += "\n\n" + systemAddendum
-			}
-			s += "\n\n" + instructions
-		} else if systemAddendum != "" {
-			s += "\n\n" + systemAddendum
-		}
-		return s
 	}
 
 	backgroundManager := background.NewManager(background.Options{
@@ -577,7 +567,7 @@ func run(env environment) int {
 	planStore := plan.NewStore()
 	handoffPending := plan.NewPending()
 	toolCatalog.Register(plan.NewTool(planStore, func() string { return delegateState.Snapshot().SessionPath }))
-	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, planStore, interactiveSession, agentdef.Names(agents), cfg.HandoffAgent))
+	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, planStore, interactiveSession, agentdef.Names(agents)))
 	// MCP (opt-in): one-shot runs synchronously so the single request can use MCP
 	// tools immediately. Interactive REPL starts remote HTTP discovery in the
 	// background and applies discovered tools at a prompt boundary, so an
@@ -620,13 +610,14 @@ func run(env environment) int {
 	}
 	var lspSummary mcptools.Summary
 	if cfg.LSP.Enable {
-		summary, cleanup, ok := setupLSP(startupCtx, cfg.LSP, toolCatalog, logger)
+		summary, hint, cleanup, ok := setupLSP(startupCtx, cfg.LSP, toolCatalog, logger)
 		defer cleanup()
 		if startupInterrupted() {
 			return ui.ExitInterrupt
 		}
 		if ok {
 			lspSummary = summary
+			runtimeHints = append(runtimeHints, hint)
 		}
 	}
 	var serenaSummary mcptools.Summary
@@ -639,7 +630,7 @@ func run(env environment) int {
 		if ok {
 			serenaSummary = summary
 			if summary.Total > 0 {
-				systemAddendum = serenaSystemHint
+				runtimeHints = append(runtimeHints, serenaSystemHint)
 			}
 		}
 	}

@@ -23,7 +23,7 @@ func TestRequestImplementationRecordsPending(t *testing.T) {
 	pending := plan.NewPending()
 	store := plan.NewStore()
 	store.Add(plan.Plan{Title: "P", Path: "/sess/plans/0001.plan.md"})
-	tool := NewRequestImplementation(pending, store, true, nil, "")
+	tool := NewRequestImplementation(pending, store, true, nil)
 
 	out, err := runRequestImpl(t, tool, map[string]any{
 		"brief": "built the plan by reading X; tests run with go test",
@@ -47,48 +47,12 @@ func TestRequestImplementationRecordsPending(t *testing.T) {
 	}
 }
 
-func TestRequestImplementationUsesExplicitRecordedPlanPath(t *testing.T) {
-	pending := plan.NewPending()
-	store := plan.NewStore()
-	store.Add(plan.Plan{Title: "latest", Path: "/sess/plans/0002.plan.md"})
-	store.Add(plan.Plan{Title: "explicit", Path: "/sess/plans/0001-explicit.plan.md"})
-	tool := NewRequestImplementation(pending, store, true, nil, "")
-
-	if _, err := runRequestImpl(t, tool, map[string]any{
-		"brief":     "context",
-		"plan_path": "/sess/plans/0001-explicit.plan.md",
-	}); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	req, _ := pending.Take()
-	if req.PlanPath != "/sess/plans/0001-explicit.plan.md" {
-		t.Errorf("PlanPath = %q, want the explicit path", req.PlanPath)
-	}
-}
-
-func TestRequestImplementationRejectsExplicitUnrecordedPlanPath(t *testing.T) {
-	pending := plan.NewPending()
-	store := plan.NewStore()
-	store.Add(plan.Plan{Title: "recorded", Path: "/sess/plans/0001.plan.md"})
-	tool := NewRequestImplementation(pending, store, true, nil, "")
-
-	if out, err := runRequestImpl(t, tool, map[string]any{
-		"brief":     "context",
-		"plan_path": "/tmp/not-from-session.plan.md",
-	}); err == nil {
-		t.Fatalf("unrecorded plan_path should error, got %q", out)
-	}
-	if _, ok := pending.Take(); ok {
-		t.Fatal("unrecorded plan_path should not record a pending handoff")
-	}
-}
-
 func TestRequestImplementationDefaultsToLatestPlan(t *testing.T) {
 	pending := plan.NewPending()
 	store := plan.NewStore()
 	store.Add(plan.Plan{Title: "first", Path: "/p/0001.plan.md"})
 	store.Add(plan.Plan{Title: "second", Path: "/p/0002.plan.md"})
-	tool := NewRequestImplementation(pending, store, true, nil, "")
+	tool := NewRequestImplementation(pending, store, true, nil)
 
 	if _, err := runRequestImpl(t, tool, map[string]any{"brief": "ctx"}); err != nil {
 		t.Fatalf("run: %v", err)
@@ -103,7 +67,7 @@ func TestRequestImplementationRejectsUnknownAgentWhenKnown(t *testing.T) {
 	pending := plan.NewPending()
 	store := plan.NewStore()
 	store.Add(plan.Plan{Title: "P", Path: "/sess/plans/0001.plan.md"})
-	tool := NewRequestImplementation(pending, store, true, []string{"auto", "independent", "plan"}, "auto")
+	tool := NewRequestImplementation(pending, store, true, []string{"auto", "independent", "plan"})
 
 	out, err := runRequestImpl(t, tool, map[string]any{
 		"brief": "ctx",
@@ -123,14 +87,14 @@ func TestRequestImplementationRejectsUnknownAgentWhenKnown(t *testing.T) {
 func TestRequestImplementationRequiresBrief(t *testing.T) {
 	store := plan.NewStore()
 	store.Add(plan.Plan{Path: "/p/0001.plan.md"})
-	tool := NewRequestImplementation(plan.NewPending(), store, true, nil, "")
+	tool := NewRequestImplementation(plan.NewPending(), store, true, nil)
 	if out, err := runRequestImpl(t, tool, map[string]any{"brief": "  "}); err == nil {
 		t.Errorf("empty brief should error, got %q", out)
 	}
 }
 
 func TestRequestImplementationRequiresRecordedPlan(t *testing.T) {
-	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true, nil, "")
+	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true, nil)
 	if out, err := runRequestImpl(t, tool, map[string]any{"brief": "ctx"}); err == nil {
 		t.Errorf("missing plan should error, got %q", out)
 	}
@@ -139,7 +103,7 @@ func TestRequestImplementationRequiresRecordedPlan(t *testing.T) {
 func TestRequestImplementationOneShotErrors(t *testing.T) {
 	store := plan.NewStore()
 	store.Add(plan.Plan{Path: "/p/0001.plan.md"})
-	tool := NewRequestImplementation(plan.NewPending(), store, false, nil, "")
+	tool := NewRequestImplementation(plan.NewPending(), store, false, nil)
 	if out, err := runRequestImpl(t, tool, map[string]any{"brief": "ctx"}); err == nil {
 		t.Errorf("one-shot handoff should error, got %q", out)
 	}
@@ -165,16 +129,10 @@ func agentSchemaField(t *testing.T, tool *requestImplementation) map[string]any 
 	return field
 }
 
-func TestRequestImplementationSchemaListsAgentsWithDefault(t *testing.T) {
+func TestRequestImplementationSchemaListsAgents(t *testing.T) {
 	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true,
-		[]string{"auto", "independent", "plan"}, "auto")
+		[]string{"auto", "independent", "plan"})
 	field := agentSchemaField(t, tool)
-
-	desc, _ := field["description"].(string)
-	want := "Available agents: auto (default), independent, plan."
-	if !strings.Contains(desc, want) {
-		t.Errorf("description = %q, want it to contain %q", desc, want)
-	}
 
 	enumAny, ok := field["enum"].([]any)
 	if !ok {
@@ -184,48 +142,28 @@ func TestRequestImplementationSchemaListsAgentsWithDefault(t *testing.T) {
 	for i, v := range enumAny {
 		got[i], _ = v.(string)
 	}
-	// The enum holds the raw agent names (no "(default)" label) so the value stays
-	// selectable, constraining the model to a real target.
 	if !slices.Equal(got, []string{"auto", "independent", "plan"}) {
 		t.Errorf("enum = %v, want the raw agent names", got)
 	}
 }
 
-func TestRequestImplementationSchemaHonorsConfiguredDefault(t *testing.T) {
-	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true,
-		[]string{"auto", "fast", "plan"}, "fast")
-	desc, _ := agentSchemaField(t, tool)["description"].(string)
-	want := "Available agents: fast (default), auto, plan."
-	if !strings.Contains(desc, want) {
-		t.Errorf("description = %q, want it to contain %q (default moved first)", desc, want)
-	}
-}
-
-func TestRequestImplementationSchemaDefaultNotInListNotMarked(t *testing.T) {
-	// A default that is not among the names must not crash or be marked; the names
-	// list unadorned.
-	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true,
-		[]string{"auto", "plan"}, "missing")
-	desc, _ := agentSchemaField(t, tool)["description"].(string)
-	if strings.Contains(desc, "(default)") {
-		t.Errorf("description = %q, should not mark a default absent from the list", desc)
-	}
-	if !strings.Contains(desc, "Available agents: auto, plan.") {
-		t.Errorf("description = %q, want the plain agent list", desc)
-	}
-}
-
 func TestRequestImplementationSchemaFallsBackWithoutNames(t *testing.T) {
-	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true, nil, "")
+	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true, nil)
 	field := agentSchemaField(t, tool)
 	if _, ok := field["enum"]; ok {
 		t.Errorf("agent field should have no enum without known names: %v", field)
 	}
-	desc, _ := field["description"].(string)
-	if strings.Contains(desc, "Defaults to") {
-		t.Errorf("description = %q, should not use the old defaults wording", desc)
+}
+
+func TestRequestImplementationSchemaOmitsPlanPath(t *testing.T) {
+	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true, nil)
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
 	}
-	if !strings.Contains(desc, "Available agents: auto (default).") {
-		t.Errorf("description = %q, want the available-agents fallback wording", desc)
+	if err := json.Unmarshal(tool.Schema(), &schema); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+	if _, ok := schema.Properties["plan_path"]; ok {
+		t.Fatal("schema should always select the latest plan internally")
 	}
 }

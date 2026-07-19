@@ -20,16 +20,12 @@ import (
 	"sync"
 )
 
-// Plan is one recorded implementation plan. Body is the free-form markdown the
-// model wrote; the optional structured fields render into the saved file. Path
-// is the absolute path of the markdown file once written.
+// Plan is one recorded implementation plan. Body is the self-contained
+// markdown; Path is its absolute file path once written.
 type Plan struct {
-	Title        string   `json:"title"`
-	Body         string   `json:"body"`
-	Steps        []string `json:"steps,omitempty"`
-	Files        []string `json:"files,omitempty"`
-	Verification string   `json:"verification,omitempty"`
-	Path         string   `json:"path,omitempty"`
+	Title string `json:"title"`
+	Body  string `json:"body"`
+	Path  string `json:"path,omitempty"`
 }
 
 // Store holds the plans recorded this session, newest last. A single instance is
@@ -73,18 +69,6 @@ func (s *Store) Add(p Plan) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.items = append(s.items, p)
-}
-
-// HasPath reports whether path exactly matches a recorded plan artifact.
-func (s *Store) HasPath(path string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, p := range s.items {
-		if p.Path == path {
-			return true
-		}
-	}
-	return false
 }
 
 // Latest returns the most recently recorded plan, if any.
@@ -153,10 +137,7 @@ const schema = `{
   "type": "object",
   "properties": {
     "title": {"type": "string", "description": "Short title for the plan."},
-    "plan": {"type": "string", "description": "The full plan as markdown: context, the ordered steps, and how to verify."},
-    "steps": {"type": "array", "items": {"type": "string"}, "description": "Optional ordered step list rendered into the file."},
-    "files": {"type": "array", "items": {"type": "string"}, "description": "Optional list of files the plan touches."},
-    "verification": {"type": "string", "description": "Optional acceptance/verification criteria."}
+    "plan": {"type": "string", "description": "Self-contained implementation plan in markdown."}
   },
   "required": ["title", "plan"]
 }`
@@ -178,7 +159,7 @@ func NewTool(store *Store, sessionDir func() string) *Tool {
 func (*Tool) Name() string { return "record_plan" }
 
 func (*Tool) Description() string {
-	return "Record an implementation plan to a markdown file under the session for later reference and handoff. Provide a JSON object with title and plan (markdown); returns the file path."
+	return "Persist a self-contained markdown implementation plan; returns its session file path."
 }
 
 func (*Tool) Schema() json.RawMessage { return json.RawMessage(schema) }
@@ -187,11 +168,8 @@ func (*Tool) ReadOnly(json.RawMessage) bool { return false }
 
 func (t *Tool) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	var args struct {
-		Title        string   `json:"title"`
-		Plan         string   `json:"plan"`
-		Steps        []string `json:"steps"`
-		Files        []string `json:"files"`
-		Verification string   `json:"verification"`
+		Title string `json:"title"`
+		Plan  string `json:"plan"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", err
@@ -212,7 +190,7 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (string, error) {
 		return "", fmt.Errorf("record_plan requires a session directory, which is not available in this mode")
 	}
 
-	p := Plan{Title: title, Body: body, Steps: args.Steps, Files: args.Files, Verification: strings.TrimSpace(args.Verification)}
+	p := Plan{Title: title, Body: body}
 	path, err := writePlanFile(dir, p)
 	if err != nil {
 		return "", err
@@ -252,23 +230,6 @@ func Render(p Plan) string {
 	fmt.Fprintf(&b, "# %s\n\n", p.Title)
 	if p.Body != "" {
 		b.WriteString(p.Body)
-		b.WriteString("\n")
-	}
-	if len(p.Steps) > 0 {
-		b.WriteString("\n## Steps\n\n")
-		for i, s := range p.Steps {
-			fmt.Fprintf(&b, "%d. %s\n", i+1, s)
-		}
-	}
-	if len(p.Files) > 0 {
-		b.WriteString("\n## Files\n\n")
-		for _, f := range p.Files {
-			fmt.Fprintf(&b, "- %s\n", f)
-		}
-	}
-	if p.Verification != "" {
-		b.WriteString("\n## Verification\n\n")
-		b.WriteString(p.Verification)
 		b.WriteString("\n")
 	}
 	return b.String()

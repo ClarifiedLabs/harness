@@ -50,15 +50,18 @@ func TestManagerListToolsHasExpectedAnnotations(t *testing.T) {
 	}
 }
 
-func TestManagerListToolsAdvertisesAvailableLanguages(t *testing.T) {
+func TestManagerReportsAvailableLanguagesOnce(t *testing.T) {
 	m := NewManager(goConfig(), "lsp", nil)
 	// Pretend the gopls binary is present.
 	m.lookPath = func(string) (string, error) { return "/usr/bin/gopls", nil }
 	m.computeAvailable()
 
+	if got := m.AvailableLanguages(); len(got) != 1 || got[0] != "go" {
+		t.Fatalf("AvailableLanguages() = %v, want [go]", got)
+	}
 	res, _ := m.ListTools(context.Background(), "")
-	if !strings.Contains(res.Tools[0].Description, "go") {
-		t.Fatalf("description does not advertise available language: %q", res.Tools[0].Description)
+	if strings.Contains(res.Tools[0].Description, "Langs:") {
+		t.Fatalf("per-tool descriptions should not repeat languages: %q", res.Tools[0].Description)
 	}
 }
 

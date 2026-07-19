@@ -97,7 +97,7 @@ func NewTool(store *Store) *Tool { return &Tool{store: store} }
 func (*Tool) Name() string { return "update_todos" }
 
 func (*Tool) Description() string {
-	return "Maintain the current plan for nontrivial work. Replace the full todo list; keep at most one item in_progress."
+	return "Replace the complete todo list for nontrivial work; allow at most one in_progress item."
 }
 
 func (*Tool) Schema() json.RawMessage { return json.RawMessage(schema) }

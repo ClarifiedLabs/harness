@@ -411,7 +411,7 @@ func NewJobsTool(manager *Manager) *JobsTool {
 func (*JobsTool) Name() string { return "background_jobs" }
 
 func (*JobsTool) Description() string {
-	return "List, inspect, or cancel background jobs from this harness process."
+	return "List, inspect, or cancel this process's background jobs."
 }
 
 func (*JobsTool) Schema() json.RawMessage {

@@ -12,9 +12,6 @@ func TestBuiltInPromptsLoad(t *testing.T) {
 	if CompactionSummary() == "" {
 		t.Fatal("compaction summary prompt is empty")
 	}
-	if SkillsInstructions() == "" {
-		t.Fatal("skills instructions prompt is empty")
-	}
 	if DelegateChild() == "" {
 		t.Fatal("delegate child prompt is empty")
 	}
@@ -37,9 +34,9 @@ func TestHandoffSummaryDistinctFromCompaction(t *testing.T) {
 func TestSystemPromptRequestsToolCommentary(t *testing.T) {
 	system := System()
 	for _, want := range []string{
-		"user-facing commentary before tool calls",
-		"progress updates",
-		"final answer distinct",
+		"brief acknowledgement and plan",
+		"meaningful milestones",
+		"final answer separate",
 	} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("system prompt missing %q:\n%s", want, system)
@@ -49,7 +46,7 @@ func TestSystemPromptRequestsToolCommentary(t *testing.T) {
 
 func TestDelegateChildPromptDefinesScopeAndReport(t *testing.T) {
 	child := strings.ToLower(DelegateChild())
-	for _, want := range []string{"reporting to a parent", "do not ask the user", "evidence-backed", "verification", "unresolved risks", "do not recursively delegate"} {
+	for _, want := range []string{"reporting to a parent", "instead of asking the user", "evidence", "verification", "unresolved risks", "delegate again only"} {
 		if !strings.Contains(child, want) {
 			t.Fatalf("delegate child prompt missing %q:\n%s", want, DelegateChild())
 		}
@@ -72,15 +69,15 @@ func TestSystemPromptSteersAgainstLoops(t *testing.T) {
 func TestSystemPromptIncludesSafetyVerificationAndFinalGuidance(t *testing.T) {
 	system := strings.ToLower(System())
 	for _, want := range []string{
-		"preserve user changes",
+		"preserve user work",
 		"never revert, overwrite, or discard changes",
 		"destructive git commands",
-		"verify appropriately",
-		"verification cannot be run",
-		"final responses",
+		"targeted verification",
+		"verification cannot run",
+		"final response",
 		"lead with the outcome",
 		"code reviews",
-		"findings first",
+		"first by severity",
 		"residual risks",
 	} {
 		if !strings.Contains(system, want) {
@@ -111,18 +108,42 @@ func TestBuiltinAgentPrompt(t *testing.T) {
 
 func TestPromptFilesDoNotExposeFinalNewline(t *testing.T) {
 	for name, text := range map[string]string{
-		"system":              System(),
-		"compaction-summary":  CompactionSummary(),
-		"handoff-summary":     HandoffSummary(),
-		"skills-instructions": SkillsInstructions(),
-		"delegate-child":      DelegateChild(),
-		"explore":             mustAgentPrompt(t, "explore"),
-		"independent":         mustAgentPrompt(t, "independent"),
-		"plan":                mustAgentPrompt(t, "plan"),
+		"system":             System(),
+		"compaction-summary": CompactionSummary(),
+		"handoff-summary":    HandoffSummary(),
+		"delegate-child":     DelegateChild(),
+		"explore":            mustAgentPrompt(t, "explore"),
+		"independent":        mustAgentPrompt(t, "independent"),
+		"plan":               mustAgentPrompt(t, "plan"),
 	} {
 		if text[len(text)-1:] == "\n" || text[len(text)-1:] == "\r" {
 			t.Fatalf("%s prompt exposes final newline", name)
 		}
+	}
+}
+
+func TestPromptByteBudgets(t *testing.T) {
+	budgets := map[string]struct {
+		text string
+		max  int
+	}{
+		"system":             {System(), 2600},
+		"compaction-summary": {CompactionSummary(), 600},
+		"handoff-summary":    {HandoffSummary(), 700},
+		"delegate-child":     {DelegateChild(), 400},
+		"explore":            {mustAgentPrompt(t, "explore"), 300},
+		"independent":        {mustAgentPrompt(t, "independent"), 500},
+		"plan":               {mustAgentPrompt(t, "plan"), 800},
+	}
+	total := 0
+	for name, item := range budgets {
+		total += len(item.text)
+		if len(item.text) > item.max {
+			t.Errorf("%s prompt = %d bytes, budget %d", name, len(item.text), item.max)
+		}
+	}
+	if total > 6000 {
+		t.Errorf("shipped prompt total = %d bytes, budget 6000", total)
 	}
 }
 

@@ -19,12 +19,12 @@ import (
 // returns a cleanup func that stops any language servers launched during the
 // session. LSP is optional: on setup failure it logs one warning and leaves the
 // rest of harness usable.
-func setupLSP(ctx context.Context, lspCfg config.LSPConfig, catalog *tools.Registry, logger *slog.Logger) (summary mcptools.Summary, cleanup func(), ok bool) {
+func setupLSP(ctx context.Context, lspCfg config.LSPConfig, catalog *tools.Registry, logger *slog.Logger) (summary mcptools.Summary, hint string, cleanup func(), ok bool) {
 	noop := func() {}
 	cfg, err := lspproxy.LoadConfigWithServers(convertLSPServers(lspCfg.Servers))
 	if err != nil {
 		logger.Warn(fmt.Sprintf("lsp: cannot load configuration: %v; LSP tools unavailable", err), logging.Category("lsp"))
-		return mcptools.Summary{}, noop, false
+		return mcptools.Summary{}, "", noop, false
 	}
 	for _, w := range cfg.Warnings {
 		logger.Warn(w, logging.Category("lsp"))
@@ -35,11 +35,18 @@ func setupLSP(ctx context.Context, lspCfg config.LSPConfig, catalog *tools.Regis
 	if err != nil {
 		logger.Warn(fmt.Sprintf("lsp: cannot register tools: %v; LSP tools unavailable", err), logging.Category("lsp"))
 		mgr.Shutdown(context.Background())
-		return mcptools.Summary{}, noop, false
+		return mcptools.Summary{}, "", noop, false
 	}
 	warnUnknownLSPTools(lspCfg.Tools, sum.Names, logger)
 	logger.Info(fmt.Sprintf("lsp: registered %d tools", sum.Total), logging.Category("lsp"))
-	return sum, func() { mgr.Shutdown(context.Background()) }, true
+	return sum, lspSystemHint(mgr.AvailableLanguages()), func() { mgr.Shutdown(context.Background()) }, true
+}
+
+func lspSystemHint(languages []string) string {
+	if len(languages) == 0 {
+		return "LSP tools are registered, but no configured language-server binary is on PATH."
+	}
+	return "LSP tools are available for: " + strings.Join(languages, ", ") + "."
 }
 
 // warnUnknownLSPTools logs a warning for each configured lsp.tools entry that did

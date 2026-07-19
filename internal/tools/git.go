@@ -54,7 +54,7 @@ func GitAvailable() bool {
 func (gitTool) Name() string { return "git" }
 
 func (gitTool) Description() string {
-	return `Run a git command. Provide a JSON object with args as an array of strings, e.g. {"args":["status","--porcelain"]}; do not pass args as a string or JSON-encoded array. No shell; no pager.`
+	return "Run git without a shell or pager. Input is an object; args must be an array of strings, not a string."
 }
 
 func (gitTool) Schema() json.RawMessage { return json.RawMessage(gitSchema) }

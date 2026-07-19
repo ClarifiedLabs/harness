@@ -41,7 +41,7 @@ func newGitReadonly() (gitReadonly, bool) {
 func (gitReadonly) Name() string { return "git_readonly" }
 
 func (gitReadonly) Description() string {
-	return `Run a restricted git command: status, log, diff, show, grep, blame, or bisect (bisect checks out commits; run/view/visualize are rejected). Provide a JSON object with args as an array of strings starting with the subcommand, e.g. {"args":["log","--oneline"]}; do not pass args as a string or JSON-encoded array. No shell; no pager.`
+	return "Run restricted git status/log/diff/show/grep/blame/bisect without shell or pager; bisect may check out commits. Input is an object; args must be an array of strings, not a string."
 }
 
 func (gitReadonly) Schema() json.RawMessage { return json.RawMessage(gitReadonlySchema) }

@@ -1115,10 +1115,10 @@ func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"agents:\n",
-		"auto                 [default model] [mcp: all] Default agent; the model decides what to do.",
-		"explore              [default model] [mcp: read_only] Use proactively for broad search",
-		"independent          [default model] [mcp: all] Complete the task end to end without pausing for input.",
-		"plan                 [default model] [mcp: read_only] Collaborate on an implementation plan without modifying the project.",
+		"auto                 [default model] [mcp: all] General-purpose agent.",
+		"explore              [default model] [mcp: read_only] Broad read-only search",
+		"independent          [default model] [mcp: all] End-to-end work without user input.",
+		"plan                 [default model] [mcp: read_only] Collaborative read-only implementation planning.",
 		"security (selected)  [openai:gpt-5.5] [mcp: all] Security review",
 	} {
 		if !strings.Contains(got, want) {
@@ -3247,7 +3247,7 @@ func TestRunREPLToolsCommandListsTools(t *testing.T) {
 			t.Errorf("/tools output missing built-in tool %q, got:\n%s", name, out)
 		}
 	}
-	if !strings.Contains(out, "delegate") || !strings.Contains(out, "Use for broad exploration") {
+	if !strings.Contains(out, "delegate") || !strings.Contains(out, "Delegate broad exploration") {
 		t.Errorf("/tools output missing delegate, got:\n%s", out)
 	}
 }

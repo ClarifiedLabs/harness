@@ -45,7 +45,7 @@ type readFile struct {
 func (readFile) Name() string { return "read_file" }
 
 func (readFile) Description() string {
-	return "Read a file from disk. Provide a JSON object with path (single file; supports offset/limit), or paths[] to read several files at once, each under a \"==> path <==\" header. Returns line-numbered content."
+	return "Read one file with optional offset/limit, or batch paths[]; returns line-numbered content."
 }
 
 func (readFile) Schema() json.RawMessage { return json.RawMessage(readFileSchema) }

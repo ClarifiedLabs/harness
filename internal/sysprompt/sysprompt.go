@@ -21,23 +21,23 @@ import (
 // UserAgentsMD and ProjectAgentsMD carry AGENTS.md contents discovered from the
 // user's home and working directory; when non-empty they are appended after the
 // env block, giving the model user-level and project-specific instructions
-// automatically. SkillsCatalog is an optional section listing available agent
-// skills for progressive disclosure. AgentPrompt carries the active agent's
-// instructions and is appended as the final section, so an agent definition
-// layers on top of every other customization.
+// automatically. SkillsCatalog is an optional progressive-disclosure section.
+// RuntimeHints contains concise process-specific capability hints. AgentPrompt
+// is appended last so an agent definition layers on top of every customization.
 type Options struct {
-	StaticPrompt    string // override for the built-in static instructions (optional)
-	NoEnv           bool   // drop the env-context block
-	UserAgentsMD    string // contents of ~/.agents/AGENTS.md (optional)
-	ProjectAgentsMD string // contents of AGENTS.md from the working directory (optional)
-	SkillsCatalog   string // available skills catalog (optional, from skills discovery)
-	AgentPrompt     string // agent instructions, appended as the final section (optional)
+	StaticPrompt    string   // override for the built-in static instructions (optional)
+	NoEnv           bool     // drop the env-context block
+	UserAgentsMD    string   // contents of ~/.agents/AGENTS.md (optional)
+	ProjectAgentsMD string   // contents of AGENTS.md from the working directory (optional)
+	SkillsCatalog   string   // available skills catalog (optional, from skills discovery)
+	RuntimeHints    []string // process-specific capability hints (optional)
+	AgentPrompt     string   // agent instructions, appended as the final section (optional)
 	Env             EnvOptions
 }
 
 // Build composes the full system prompt per design §8.5: static instructions,
-// then a blank-line separator and the env block (unless NoEnv), then user,
-// project, skills, and agent sections when present.
+// env (unless disabled), user/project instructions, skills, runtime hints, then
+// the active agent prompt.
 func Build(opts Options) string {
 	instructions := prompts.System()
 	if opts.StaticPrompt != "" {
@@ -56,6 +56,11 @@ func Build(opts Options) string {
 	}
 	if opts.SkillsCatalog != "" {
 		parts = append(parts, opts.SkillsCatalog)
+	}
+	for _, hint := range opts.RuntimeHints {
+		if hint = strings.TrimSpace(hint); hint != "" {
+			parts = append(parts, hint)
+		}
 	}
 	// The agent section comes last so agent instructions layer on top of
 	// every other customization.

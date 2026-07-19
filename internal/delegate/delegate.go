@@ -25,7 +25,7 @@ import (
 
 const DefaultMaxTurns = 20
 const DefaultMaxDepth = 3
-const maxAgentDescriptionBytes = 240
+const maxAgentDescriptionBytes = 160
 
 const delegateToolName = "delegate"
 const updateTodosToolName = "update_todos"
@@ -192,7 +192,7 @@ func NewTool(runner *Runner, background ...tools.BackgroundJobStarter) *Tool {
 func (*Tool) Name() string { return "delegate" }
 
 func (*Tool) Description() string {
-	return "Use for broad exploration or independent workstreams; keep small known-file and tightly coupled tasks in the parent. For separable work, call multiple delegates, then synthesize reports without polling."
+	return "Delegate broad exploration or separable work; keep small or tightly coupled tasks local. Launch independent calls together, then synthesize without polling."
 }
 
 func (t *Tool) Schema() json.RawMessage {
@@ -621,11 +621,11 @@ func normalizeAgentDescription(description string) string {
 }
 
 func schema(agents []AgentCandidate) json.RawMessage {
-	agentDescription := "Optional configured agent name to run. When omitted, uses the current active agent."
+	agentDescription := "Agent; defaults to the current one."
 	agentNames := make([]string, 0, len(agents))
 	if len(agents) > 0 {
 		var catalog strings.Builder
-		catalog.WriteString(" Available agents:")
+		catalog.WriteString(" Available:")
 		for _, candidate := range agents {
 			agentNames = append(agentNames, candidate.Name)
 			catalog.WriteString("\n- ")
@@ -645,17 +645,17 @@ func schema(agents []AgentCandidate) json.RawMessage {
 	properties := map[string]any{
 		"task": map[string]any{
 			"type":        "string",
-			"description": "A complete self-contained prompt for the fresh-context child. Include the objective, scope, constraints, expected report, and required verification.",
+			"description": "Self-contained child prompt: objective, scope, constraints, report, and verification.",
 		},
 		"agent": agent,
 		"max_turns": map[string]any{
 			"type":        "integer",
 			"minimum":     1,
-			"description": "Optional turn cap for this delegate call. Values above the configured cap are reduced to the cap.",
+			"description": "Optional turn cap; clamped to the configured maximum.",
 		},
 		"background": map[string]any{
 			"type":        "boolean",
-			"description": "Use true only for independent, non-overlapping work while useful parent work remains. The parent may do one useful model round, then Harness automatically waits for these delegates, injects their results, and requires synthesis before the turn ends; do not poll for them or duplicate their work.",
+			"description": "Only independent, non-overlapping work while parent work remains; Harness joins automatically, so do not poll or duplicate.",
 		},
 	}
 	body := map[string]any{

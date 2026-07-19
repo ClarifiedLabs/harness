@@ -11,8 +11,6 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
-
-	"harness/prompts"
 )
 
 // skillFile is the canonical filename inside each skill subdirectory.
@@ -245,10 +243,10 @@ func BuildCatalog(skills map[string]Skill) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("Available skills:")
+	b.WriteString("Available skills (when a skill matches or is explicitly named, read its SKILL.md first; resolve relative paths from its directory):")
 	for _, name := range sortedNames(skills) {
 		s := skills[name]
-		fmt.Fprintf(&b, "\n- %s: %s (read %s)", oneLine(s.Name), catalogDescription(s.Description), s.Location)
+		fmt.Fprintf(&b, "\n- %s: %s (%s)", oneLine(s.Name), catalogDescription(s.Description), s.Location)
 	}
 	return b.String()
 }
@@ -256,10 +254,10 @@ func BuildCatalog(skills map[string]Skill) string {
 // catalogDescMaxChars caps the per-skill description rendered into the
 // always-resident catalog. The full frontmatter description stays in SKILL.md
 // for Tier-2 read_file, so this only bounds the always-paid prompt cost.
-const catalogDescMaxChars = 200
+const catalogDescMaxChars = 160
 
 // catalogDescription renders a skill description for the Tier-1 catalog: the
-// first sentence or ~200 chars, whichever is shorter, with an ellipsis when the
+// first sentence or 160 runes, whichever is shorter, with an ellipsis when the
 // text was cut mid-sentence. Preferring the first sentence over a hard char cap
 // keeps the leading trigger keywords intact while dropping the long tail that
 // would otherwise sit in the cache-anchored system prompt for every session,
@@ -324,16 +322,6 @@ func truncateRunes(s string, n int) string {
 		count++
 	}
 	return s
-}
-
-// Instructions returns the behavioral block that accompanies the catalog in
-// the system prompt, telling the model how to activate skills via its existing
-// file-read tool. Empty when no skills are supplied.
-func Instructions(count int) string {
-	if count == 0 {
-		return ""
-	}
-	return prompts.SkillsInstructions()
 }
 
 // parseFrontmatter extracts key/value pairs from the YAML frontmatter block

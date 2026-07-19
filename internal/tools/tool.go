@@ -448,10 +448,11 @@ func (r *Registry) Specs() []llm.ToolSchema {
 	specs := make([]llm.ToolSchema, 0, len(r.order))
 	for _, name := range r.order {
 		t := r.tools[name]
-		parameters := modelSchema(t.Schema())
-		if preserver, ok := t.(SchemaDescriptionPreserver); ok && preserver.PreserveSchemaDescriptions() {
-			parameters = compactSchema(t.Schema())
+		preserveDescriptions := false
+		if preserver, ok := t.(SchemaDescriptionPreserver); ok {
+			preserveDescriptions = preserver.PreserveSchemaDescriptions()
 		}
+		parameters := modelSchemaWithPolicy(t.Schema(), preserveDescriptions)
 		specs = append(specs, llm.ToolSchema{
 			Name:        t.Name(),
 			Description: t.Description(),
@@ -462,11 +463,15 @@ func (r *Registry) Specs() []llm.ToolSchema {
 }
 
 func modelSchema(raw json.RawMessage) json.RawMessage {
+	return modelSchemaWithPolicy(raw, false)
+}
+
+func modelSchemaWithPolicy(raw json.RawMessage, preserveDescriptions bool) json.RawMessage {
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return compactSchema(raw)
 	}
-	stripSchemaDescriptions(v)
+	stripSchemaAnnotations(v, preserveDescriptions)
 	b, err := json.Marshal(v)
 	if err != nil {
 		return compactSchema(raw)
@@ -482,17 +487,69 @@ func compactSchema(raw json.RawMessage) json.RawMessage {
 	return json.RawMessage(b.Bytes())
 }
 
-func stripSchemaDescriptions(v any) {
-	switch x := v.(type) {
-	case map[string]any:
-		delete(x, "description")
-		for _, child := range x {
-			stripSchemaDescriptions(child)
+var removableSchemaAnnotations = map[string]bool{
+	"$comment":    true,
+	"description": true,
+	"example":     true,
+	"examples":    true,
+	"title":       true,
+}
+
+// stripSchemaAnnotations removes model-facing prose and examples from actual
+// schema nodes without mistaking a property named "description" (or another
+// annotation keyword) for an annotation. Validation, defaults, formats, and
+// reference/dialect keywords remain intact.
+func stripSchemaAnnotations(v any, preserveDescriptions bool) {
+	schema, ok := v.(map[string]any)
+	if !ok {
+		return
+	}
+	for key := range removableSchemaAnnotations {
+		if key != "description" || !preserveDescriptions {
+			delete(schema, key)
 		}
-	case []any:
-		for _, child := range x {
-			stripSchemaDescriptions(child)
+	}
+
+	for keyword, child := range schema {
+		switch keyword {
+		case "$defs", "definitions", "dependentSchemas", "patternProperties", "properties":
+			stripNamedSchemas(child, preserveDescriptions)
+		case "allOf", "anyOf", "oneOf", "prefixItems":
+			stripSchemaList(child, preserveDescriptions)
+		case "additionalItems", "additionalProperties", "contains", "contentSchema", "else", "if", "items", "not", "propertyNames", "then", "unevaluatedItems", "unevaluatedProperties":
+			stripSchemaOrList(child, preserveDescriptions)
+		case "dependencies":
+			// Legacy dependencies values are either property-name arrays or schemas.
+			stripNamedSchemas(child, preserveDescriptions)
 		}
+	}
+}
+
+func stripSchemaOrList(v any, preserveDescriptions bool) {
+	if _, ok := v.(map[string]any); ok {
+		stripSchemaAnnotations(v, preserveDescriptions)
+		return
+	}
+	stripSchemaList(v, preserveDescriptions)
+}
+
+func stripSchemaList(v any, preserveDescriptions bool) {
+	schemas, ok := v.([]any)
+	if !ok {
+		return
+	}
+	for _, schema := range schemas {
+		stripSchemaAnnotations(schema, preserveDescriptions)
+	}
+}
+
+func stripNamedSchemas(v any, preserveDescriptions bool) {
+	named, ok := v.(map[string]any)
+	if !ok {
+		return
+	}
+	for _, schema := range named {
+		stripSchemaAnnotations(schema, preserveDescriptions)
 	}
 }
 

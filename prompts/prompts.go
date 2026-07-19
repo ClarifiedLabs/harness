@@ -30,12 +30,6 @@ func HandoffSummary() string {
 	return mustText("handoff-summary.txt")
 }
 
-// SkillsInstructions returns the behavioral instruction block appended when
-// skills are available.
-func SkillsInstructions() string {
-	return mustText("skills-instructions.txt")
-}
-
 // DelegateChild returns the reporting and scope instructions appended only to
 // child-agent system prompts.
 func DelegateChild() string {

@@ -31,7 +31,7 @@ type glob struct{}
 func (glob) Name() string { return "glob" }
 
 func (glob) Description() string {
-	return `Recursively find files and directories by glob. Provide a JSON object with pattern (e.g. {"pattern":"**/*config*.go"}) and optional root. Read-only; ** matches across directories. Returns matching paths with type and size, one per line, sorted by path.`
+	return "Recursively list sorted files and directories matching pattern under optional root; ** crosses directories."
 }
 
 func (glob) Schema() json.RawMessage { return json.RawMessage(globSchema) }
