@@ -832,6 +832,35 @@ func TestLiveCounterTracksAndCompletesCompaction(t *testing.T) {
 	}
 }
 
+func TestLiveCounterTracksAndCompletesPromptWorkWait(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 7, 19, 10, 47, 35, 0, time.Local)
+	r := liveRenderer(&out, &errw, func() time.Time { return now })
+
+	r.StartPrompt()
+	now = now.Add(5 * time.Second)
+	r.PromptWorkWaitStart()
+	now = now.Add(12 * time.Second)
+	r.tick()
+	defer r.StopProgress()
+
+	if got := errw.String(); !strings.Contains(got, "[background: waiting for delegates · 12s │ prompt 17s]") {
+		t.Fatalf("background wait should repaint elapsed and prompt totals, got %q", got)
+	}
+
+	errw.Reset()
+	r.PromptWorkWaitComplete()
+	if got := errw.String(); got != "\r\x1b[2K" {
+		t.Fatalf("completing background wait should erase its transient row, got %q", got)
+	}
+	r.statusMu.Lock()
+	active, drawn, label := r.statusActive, r.statusDrawn, r.statusLabel
+	r.statusMu.Unlock()
+	if active || drawn || label != "" {
+		t.Fatalf("completed background wait left stale status state: active=%t drawn=%t label=%q", active, drawn, label)
+	}
+}
+
 func TestLiveCounterShowsTotalElapsedSincePromptSubmission(t *testing.T) {
 	var out, errw bytes.Buffer
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)

@@ -99,6 +99,14 @@ type PromptWorkCoordinator interface {
 	DrainPromptWorkUsage() llm.Usage
 }
 
+// PromptWorkProgressSink is implemented by sinks that want transient progress
+// while the parent prompt waits for join-required background work. The callbacks
+// are balanced around every wait, including cancellation and errors.
+type PromptWorkProgressSink interface {
+	PromptWorkWaitStart()
+	PromptWorkWaitComplete()
+}
+
 // SteerInput is a prepared in-prompt steering message. Text and images are
 // appended as a RoleUser transcript message when a tool round gives the loop a
 // chance to inject it; RequestContext is visible to subsequent model requests in
@@ -1561,6 +1569,10 @@ func waitForPromptWork(ctx context.Context, sink EventSink) (llm.Usage, error) {
 	coordinator, ok := sink.(PromptWorkCoordinator)
 	if !ok {
 		return llm.Usage{}, nil
+	}
+	if progress, ok := sink.(PromptWorkProgressSink); ok {
+		progress.PromptWorkWaitStart()
+		defer progress.PromptWorkWaitComplete()
 	}
 	return coordinator.WaitForPromptWork(ctx)
 }

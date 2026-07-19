@@ -101,7 +101,9 @@ type promptWorkSink struct {
 	contextPending bool
 	usage          llm.Usage
 	usageDelivered bool
+	waitErr        error
 	waits          int
+	progress       []string
 }
 
 func (s *promptWorkSink) RequestContext() []string {
@@ -121,13 +123,21 @@ func (s *promptWorkSink) WaitForPromptWork(context.Context) (llm.Usage, error) {
 	s.pending = false
 	s.contextPending = true
 	if s.usageDelivered {
-		return llm.Usage{}, nil
+		return llm.Usage{}, s.waitErr
 	}
 	s.usageDelivered = true
-	return s.usage, nil
+	return s.usage, s.waitErr
 }
 
 func (s *promptWorkSink) DrainPromptWorkUsage() llm.Usage { return llm.Usage{} }
+
+func (s *promptWorkSink) PromptWorkWaitStart() {
+	s.progress = append(s.progress, "start")
+}
+
+func (s *promptWorkSink) PromptWorkWaitComplete() {
+	s.progress = append(s.progress, "complete")
+}
 
 type diffRecordSink struct {
 	recordSink
@@ -979,6 +989,9 @@ func TestPendingPromptWorkForcesSynthesisAndCountsUsage(t *testing.T) {
 	if sink.waits != 1 || len(fp.Requests) != 2 {
 		t.Fatalf("waits=%d requests=%d, want one join and synthesis request", sink.waits, len(fp.Requests))
 	}
+	if got := strings.Join(sink.progress, ","); got != "start,complete" {
+		t.Fatalf("prompt-work progress = %q, want balanced start,complete", got)
+	}
 	if got := strings.Join(fp.Requests[1].RequestContext, "\n"); !strings.Contains(got, "child report") {
 		t.Fatalf("synthesis request context = %q, want child report", got)
 	}
@@ -988,6 +1001,17 @@ func TestPendingPromptWorkForcesSynthesisAndCountsUsage(t *testing.T) {
 	got := sink.promptUsage[0].Usage
 	if got.InputTokens != 100 || got.OutputTokens != 36 {
 		t.Fatalf("prompt usage = %+v, want provider 30/6 + background child 70/30", got)
+	}
+}
+
+func TestPromptWorkProgressCompletesWhenWaitIsCancelled(t *testing.T) {
+	sink := &promptWorkSink{pending: true, waitErr: context.Canceled}
+
+	if _, err := waitForPromptWork(context.Background(), sink); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForPromptWork error = %v, want context canceled", err)
+	}
+	if got := strings.Join(sink.progress, ","); got != "start,complete" {
+		t.Fatalf("prompt-work progress = %q, want balanced start,complete", got)
 	}
 }
 

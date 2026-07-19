@@ -1852,15 +1852,17 @@ backoff allows.
   not produce separate visible cost checkpoints. Retried attempts record a
   discard marker so replay can omit abandoned assistant/reasoning deltas while
   keeping the retry notice.
-- **Live wait counter (TTY, non-quiet).** While a model request, a tool call, or a
-  model-backed compaction summary is outstanding, the static waiting line is replaced
-  by a single in-place line painted with `\r\x1b[2K` and repainted ~once a second by a
-  `time.Ticker` goroutine (with a mutex + stop-and-drain handshake so it never
-  interleaves with streamed bytes): `[turn: 1 · 12s · ctx 30% │ prompt 18s]`,
-  `[tool: grep args=["x"] · 3s]`, or `[context: compacting · 3s]`, with the same
-  compact key arguments as the completed tool summary and the running context-window
-  percentage appended for model waits (`· ctx 30%`). It is erased the instant real
-  output or a tool line scrolls in — not a sticky bar or scroll region.
+- **Live wait counter (TTY, non-quiet).** While a model request, a tool call, a
+  model-backed compaction summary, or a join-required background delegate is
+  outstanding, the static waiting line is replaced by a single in-place line painted
+  with `\r\x1b[2K` and repainted ~once a second by a `time.Ticker` goroutine (with a
+  mutex + stop-and-drain handshake so it never interleaves with streamed bytes):
+  `[turn: 1 · 12s · ctx 30% │ prompt 18s]`, `[tool: grep args=["x"] · 3s]`,
+  `[context: compacting · 3s]`, or
+  `[background: waiting for delegates · 12s │ prompt 30s]`, with the same compact key
+  arguments as the completed tool summary and the running context-window percentage
+  appended for model waits (`· ctx 30%`). It is erased the instant real output or a
+  tool line scrolls in — not a sticky bar or scroll region.
 - **During-prompt input line.** Keystrokes typed during a prompt are read in raw,
   echo-off mode and shown on that wait line after a `>` marker
   (`[turn: 1 · 12s │ prompt 18s] > draft`). Pressing Enter during a prompt

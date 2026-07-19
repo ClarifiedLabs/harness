@@ -3812,6 +3812,14 @@ func (s *accumulatingSink) WaitForPromptWork(ctx context.Context) (llm.Usage, er
 	return s.app.Background.WaitForPromptWork(ctx)
 }
 
+func (s *accumulatingSink) PromptWorkWaitStart() {
+	s.r.PromptWorkWaitStart()
+}
+
+func (s *accumulatingSink) PromptWorkWaitComplete() {
+	s.r.PromptWorkWaitComplete()
+}
+
 func (s *accumulatingSink) DrainPromptWorkUsage() llm.Usage {
 	if s.app.Background == nil {
 		return llm.Usage{}

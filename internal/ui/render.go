@@ -296,6 +296,18 @@ func (r *Renderer) CompactionComplete() {
 	r.endWait()
 }
 
+// PromptWorkWaitStart begins a transient live wait while join-required
+// background delegates finish.
+func (r *Renderer) PromptWorkWaitStart() {
+	r.beginWait("background: waiting for delegates", 0)
+}
+
+// PromptWorkWaitComplete clears the background-work wait before the parent
+// resumes model work or completes the prompt.
+func (r *Renderer) PromptWorkWaitComplete() {
+	r.endWait()
+}
+
 func (r *Renderer) finishTurnAttempt(usage agent.TurnAttemptUsage) {
 	defer r.flushToolUseStarts()
 	if !usage.Usage.CostKnown {
