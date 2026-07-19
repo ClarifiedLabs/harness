@@ -41,6 +41,19 @@ func TestBuildRequestGolden(t *testing.T) {
 	}
 }
 
+func TestBuildRequestOmitsCompactionMetadata(t *testing.T) {
+	req := basicRequest()
+	req.Messages[0].Origin = llm.MessageOriginCompactionCheckpoint
+	req.Messages[0].Compaction = &llm.CompactionMetadata{Summary: "SECRET_COMPACTION_METADATA", ReadFiles: []string{"secret.go"}}
+	b, err := json.Marshal(buildRequest(req, 0, 0))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte("SECRET_COMPACTION_METADATA")) || bytes.Contains(b, []byte("secret.go")) {
+		t.Fatalf("provider wire payload leaked compaction metadata: %s", b)
+	}
+}
+
 func TestBuildRequestMaxTokensUsesMaxOutputTokens(t *testing.T) {
 	req := basicRequest()
 	req.MaxTokens = 333

@@ -55,6 +55,13 @@ type FileMutationReporter interface {
 	MutatedPaths(input json.RawMessage) ([]string, error)
 }
 
+// FileReadReporter is implemented by tools that can identify file paths they
+// attempt to read from their JSON input. It reports call-level requested paths;
+// Dispatch and model-visible results do not depend on it.
+type FileReadReporter interface {
+	ReadPaths(input json.RawMessage) ([]string, error)
+}
+
 // BackgroundJobRequest is the reusable contract for tools that can hand work to
 // the process-local background job manager. The manager owns job ids, status,
 // cancellation, notices, and request-context delivery; the tool owns its input
@@ -595,6 +602,29 @@ func (r *Registry) MutatedPaths(call llm.ToolCall) (paths []string, ok bool) {
 		input = json.RawMessage("{}")
 	}
 	paths, err := reporter.MutatedPaths(input)
+	if err != nil || len(paths) == 0 {
+		return nil, false
+	}
+	return uniqueMutationPaths(paths), true
+}
+
+// ReadPaths reports the requested file paths for a call when its tool provides
+// that metadata. Unknown tools, non-reporting tools, and invalid inputs return
+// ok=false so optional observers can silently skip them.
+func (r *Registry) ReadPaths(call llm.ToolCall) (paths []string, ok bool) {
+	t, found := r.tools[call.Name]
+	if !found {
+		return nil, false
+	}
+	reporter, ok := t.(FileReadReporter)
+	if !ok {
+		return nil, false
+	}
+	input := call.Input
+	if len(input) == 0 {
+		input = json.RawMessage("{}")
+	}
+	paths, err := reporter.ReadPaths(input)
 	if err != nil || len(paths) == 0 {
 		return nil, false
 	}

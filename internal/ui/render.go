@@ -51,12 +51,14 @@ type RenderOptions struct {
 	// LiveStatus enables the in-place wait-time counter and the during-prompt
 	// input line (r12 + during-prompt input). Gated by the caller to an
 	// interactive, non-quiet TTY; tests set it explicitly.
-	LiveStatus      bool
-	Model           string
-	Registry        *llm.Registry
-	Now             func() time.Time
-	TimestampLayout string
-	Width           func() int
+	LiveStatus               bool
+	Model                    string
+	Registry                 *llm.Registry
+	CompactionTriggerPercent int
+	DisableAutoCompaction    bool
+	Now                      func() time.Time
+	TimestampLayout          string
+	Width                    func() int
 }
 
 // Renderer implements agent.EventSink: assistant text streams to out, while tool
@@ -74,6 +76,8 @@ type Renderer struct {
 	suppressReasoningOutput bool
 	model                   string
 	registry                *llm.Registry
+	compactionWarnPercent   int
+	disableAutoCompaction   bool
 	now                     func() time.Time
 	timestampLayout         string
 	width                   func() int
@@ -148,6 +152,8 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 		liveStatus:              opts.LiveStatus && !opts.Quiet,
 		model:                   opts.Model,
 		registry:                opts.Registry,
+		compactionWarnPercent:   resolvedCompactionWarnPercent(opts.CompactionTriggerPercent),
+		disableAutoCompaction:   opts.DisableAutoCompaction,
 		now:                     now,
 		timestampLayout:         opts.TimestampLayout,
 		width:                   opts.Width,
@@ -847,14 +853,21 @@ func (r *Renderer) maybeWarnNoPrice() {
 // maybeWarnCompaction emits a one-time notice as the context fills toward the
 // compaction threshold so a surprise compaction is foreshadowed (r27).
 func (r *Renderer) maybeWarnCompaction(pct int) {
-	if r.compactionWarned || pct < compactionWarnPercent {
+	if r.disableAutoCompaction || r.compactionWarned || pct < r.compactionWarnPercent {
 		return
 	}
 	r.compactionWarned = true
 	r.dimLine(fmt.Sprintf("[notice: context at %d%%; approaching compaction]", pct))
 }
 
-const compactionWarnPercent = 80
+func resolvedCompactionWarnPercent(trigger int) int {
+	if trigger <= 0 {
+		trigger = compactDefaultTriggerPercent
+	}
+	return max(trigger-5, 1)
+}
+
+const compactDefaultTriggerPercent = 78
 
 // contextPercent is the share of the model's context window in use, for the
 // counter and the compaction notice (r27).

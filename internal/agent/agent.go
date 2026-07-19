@@ -218,6 +218,18 @@ type Options struct {
 	// CompactKeepTurns controls how many whole recent turns remain verbatim after
 	// compaction. Zero uses the default.
 	CompactKeepTurns int
+	// CompactKeepTokens is the desired approximate size of the raw recent suffix.
+	// Whole rounds are retained until this target is reached, subject to
+	// CompactKeepTurns. Zero uses the default.
+	CompactKeepTokens int
+	// CompactTriggerPercent and CompactTargetPercent control automatic triggering
+	// and the post-compaction low-water mark. Zero uses the defaults.
+	CompactTriggerPercent int
+	CompactTargetPercent  int
+	// DisableAutoCompaction suppresses threshold-based compaction while preserving
+	// manual compaction and provider-overflow recovery. The inverted setting keeps
+	// the Options zero value enabled.
+	DisableAutoCompaction bool
 	// CompactSummaryMaxTokens caps summarization output. Zero uses the default.
 	CompactSummaryMaxTokens int
 	// CompactToolResultMaxBytes caps old tool-result bodies before they are sent
@@ -264,6 +276,10 @@ type Agent struct {
 	now                       func() time.Time
 	sleep                     func(context.Context, time.Duration) error // mid-stream retry backoff; nil-free, set in New
 	compactKeepTurns          int
+	compactKeepTokens         int
+	compactTriggerPercent     int
+	compactTargetPercent      int
+	disableAutoCompaction     bool
 	compactSummaryMaxTokens   int
 	compactToolResultMaxBytes int
 	compactFallbackNotice     compactFallbackNoticeState
@@ -308,6 +324,10 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		now:                       now,
 		sleep:                     sleepContext,
 		compactKeepTurns:          opts.CompactKeepTurns,
+		compactKeepTokens:         opts.CompactKeepTokens,
+		compactTriggerPercent:     opts.CompactTriggerPercent,
+		compactTargetPercent:      opts.CompactTargetPercent,
+		disableAutoCompaction:     opts.DisableAutoCompaction,
 		compactSummaryMaxTokens:   opts.CompactSummaryMaxTokens,
 		compactToolResultMaxBytes: opts.CompactToolResultMaxBytes,
 		hooks:                     opts.Hooks,
@@ -905,7 +925,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		// trigger leans on the last real input count plus an estimate of only the
 		// messages appended since it was measured (r44), not a whole-request byte
 		// estimate.
-		if a.overThreshold(a.triggerTokens(lastInput, appendBoundary)) {
+		if a.autoCompactionEnabled() && a.overThreshold(a.triggerTokens(lastInput, appendBoundary)) {
 			// Only reset the trigger state when compaction actually rewrote the
 			// transcript. A no-op compaction that reset lastInput/appendBoundary
 			// would force a full-transcript re-estimate every turn with zero
@@ -932,7 +952,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		}
 		modelReq = a.countModelRequestInput(ctx, modelReq)
 		lastContext = modelReq.estimate
-		if a.overThreshold(modelReq.estimate.Total) {
+		if a.autoCompactionEnabled() && a.overThreshold(modelReq.estimate.Total) {
 			compUsage, changed, err := a.compactTriggered(ctx, sink, "input-count")
 			if compUsage != (llm.Usage{}) {
 				total = add(total, compUsage)

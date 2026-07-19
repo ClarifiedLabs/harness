@@ -1465,6 +1465,30 @@ func TestREPLCompactCommand(t *testing.T) {
 	}
 }
 
+func TestREPLCompactCommandPassesOneShotFocus(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("CANNED SUMMARY")}, Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	var seed []llm.Message
+	for i := 0; i < 10; i++ {
+		seed = append(seed,
+			llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "q"}}},
+			llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "a"}}},
+		)
+	}
+	app.Agent.SetTranscript(seed)
+	if code := Run(strings.NewReader("/compact preserve API names\n/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if !strings.Contains(fp.Requests[0].System, "preserve API names") {
+		t.Fatalf("summary system missing focus: %q", fp.Requests[0].System)
+	}
+	meta := app.Agent.Transcript()[0].Compaction
+	if meta == nil || meta.Focus != "preserve API names" {
+		t.Fatalf("checkpoint focus = %+v", meta)
+	}
+}
+
 func TestREPLCompactShowsLiveProgressWhileSummaryBlocked(t *testing.T) {
 	var out, errw lockedBuffer
 	inSummary := make(chan struct{})

@@ -164,3 +164,16 @@ func TestValidateTranscript(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateTranscriptRestrictsCompactionMetadata(t *testing.T) {
+	meta := &CompactionMetadata{Summary: "summary"}
+	valid := Message{Role: RoleUser, Origin: MessageOriginCompactionCheckpoint, Content: []ContentBlock{{Kind: BlockText, Text: "checkpoint"}}, Compaction: meta}
+	if err := ValidateTranscript([]Message{valid}); err != nil {
+		t.Fatalf("valid checkpoint metadata: %v", err)
+	}
+	invalid := valid
+	invalid.Origin = MessageOriginPrompt
+	if err := ValidateTranscript([]Message{invalid}); err == nil {
+		t.Fatal("metadata on an ordinary prompt should fail validation")
+	}
+}

@@ -1,4 +1,4 @@
-Compact this coding session so the assistant can continue without re-deriving context. Be concise, specific, and factual.
+Compact this coding session so the assistant can continue without re-deriving context. Be concise, specific, and factual. A deterministic file-activity index may be attached as metadata; use it as a supplement, but preserve semantic file states in Files touched.
 
 Use this structure:
 - Task: current goal.

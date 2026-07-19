@@ -95,6 +95,40 @@ func TestModelPrecedenceFlagBeatsEnvBeatsFileBeatsDefault(t *testing.T) {
 	})
 }
 
+func TestCompactionConfigDefaultsAndFileOverrides(t *testing.T) {
+	defaults := loadOK(t, nil, noEnv, "")
+	if defaults.CompactKeepTokens != 20_000 || !defaults.CompactAutoEnabled || defaults.CompactTriggerPercent != 78 || defaults.CompactTargetPercent != 65 {
+		t.Fatalf("compaction defaults = tokens=%d auto=%t trigger=%d target=%d", defaults.CompactKeepTokens, defaults.CompactAutoEnabled, defaults.CompactTriggerPercent, defaults.CompactTargetPercent)
+	}
+
+	path := writeConfig(t, `{
+		"compact_keep_tokens": 12345,
+		"compact_auto_enabled": false,
+		"compact_trigger_percent": 90,
+		"compact_target_percent": 70
+	}`)
+	got := loadOK(t, nil, noEnv, path)
+	if got.CompactKeepTokens != 12_345 || got.CompactAutoEnabled || got.CompactTriggerPercent != 90 || got.CompactTargetPercent != 70 {
+		t.Fatalf("compaction overrides = tokens=%d auto=%t trigger=%d target=%d", got.CompactKeepTokens, got.CompactAutoEnabled, got.CompactTriggerPercent, got.CompactTargetPercent)
+	}
+}
+
+func TestCompactionConfigRejectsInvalidValues(t *testing.T) {
+	for _, body := range []string{
+		`{"compact_keep_tokens":0}`,
+		`{"compact_target_percent":0}`,
+		`{"compact_target_percent":78,"compact_trigger_percent":78}`,
+		`{"compact_target_percent":90,"compact_trigger_percent":80}`,
+		`{"compact_trigger_percent":100}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			if _, err := Load(nil, noEnv, writeConfig(t, body)); err == nil {
+				t.Fatal("expected invalid compaction config to fail")
+			}
+		})
+	}
+}
+
 // TestLoadSplitsProviderModel pins SplitProviderModel's contract at the Load
 // call site, including the whitespace trimming the consolidated helper adopted
 // from the REPL-side copy (regression: the two pre-merge copies had drifted).

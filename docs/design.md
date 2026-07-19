@@ -820,8 +820,10 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   model_proxy_url, agent definitions, hooks, flag defaults, and
   context-efficiency knobs.
   `agents_md_warn_bytes` (applied to each AGENTS.md file independently),
-  `compact_keep_turns`, `compact_summary_max_tokens`,
-  and `compact_tool_result_max_bytes` are config-only.
+  `compact_keep_turns`, `compact_keep_tokens`, `compact_auto_enabled`,
+  `compact_trigger_percent`, `compact_target_percent`,
+  `compact_summary_max_tokens`, and `compact_tool_result_max_bytes` are
+  config-only.
   Tool-result truncation uses config `tool_result_max_bytes` /
   `tool_result_max_lines` or env `HARNESS_TOOL_RESULT_MAX_BYTES` /
   `HARNESS_TOOL_RESULT_MAX_LINES`. `rg`/`grep` result caps use
@@ -2347,17 +2349,20 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
 ## 12. Compaction (`internal/agent/compact.go`)
 
 - **Trigger:** when `max(reported input tokens, estimated full-request footprint)`
-  reaches **78%** of the model's context window (headroom for the summary call plus the
-  next turn). Successful compaction targets a **65%** low-water mark after fixed
-  system/tool-schema overhead, providing hysteresis instead of re-compacting after each
-  small result. Reported input counts cache-read/cache-write tokens because cached context
+  reaches `compact_trigger_percent` (default **78%**) of the model's effective/learned
+  context window. Successful compaction targets `compact_target_percent` (default
+  **65%**) after fixed system/tool-schema overhead, providing hysteresis instead of
+  re-compacting after each small result. Reported input counts cache-read/cache-write tokens because cached context
   still occupies the window. The trigger runs after a prompt and proactively between
   turns, before the next request when tool results balloon the estimate. Also manual
   `/compact`. The estimate side is the last **measured** input
   tokens (`lastInput`) plus a bytes/4 estimate of only the messages appended since
   that measurement (the append boundary), so the trigger tracks real usage instead of
   re-estimating the whole transcript; the raw bytes/4 estimate is reserved for the
-  degradation ladder.
+  degradation ladder. `compact_auto_enabled: false` gates the proactive,
+  exact-count, and post-prompt checks only; explicit compaction and the single
+  provider-overflow recovery retry remain enabled. The terminal warning follows
+  the configured trigger and is suppressed with automatic compaction.
 - **Live-transcript retention pass.** Before each model request the agent runs a
   pure-local retention pass (no model round-trip) over aged history: read-only
   tool-result blocks older than `compact_keep_turns` completed turns and larger than
@@ -2371,19 +2376,35 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   its immediately following tool-result message when that response requested tools.
   User prompts, steering messages, and synthetic context are inputs to a turn, not
   boundaries that merge all round trips since one prompt.
-- **Mechanism:** keep the system prompt and the latest completed turns verbatim
-  (`compact_keep_turns`, default 8). Under pressure, when the normal keep window
-  cannot reach the 65% target but at least two completed turns exist, summarize
-  everything before the latest turn and keep only that latest turn verbatim. Send
+- **Mechanism:** keep the system prompt and select a raw whole-turn suffix newest
+  first until it reaches `compact_keep_tokens` (default 20,000) or the
+  `compact_keep_turns` cap (default 8). Always retain at least the newest completed
+  turn. Under low-water pressure, move the oldest retained round behind the boundary,
+  regenerate the summary over the enlarged removed set, and repeat until the target
+  is met or only the newest turn remains. Send
   everything older to the model with the summarization instruction in
   `prompts/compaction-summary.txt`: preserve the task/goal, decisions made, files
   created/modified and their current state, key facts learned, open TODOs; do not
   invent. Summary output is capped by `compact_summary_max_tokens` (default 2048).
-  Replace the old messages with one synthetic **user** checkpoint headed
+  A first compaction uses `prompts/compaction-summary.txt`. A repeated compaction
+  removes the structured prior checkpoint from ordinary summary history, passes its
+  exact generated summary once as data, and uses `prompts/compaction-update.txt` to
+  produce a complete replacement. Map/reduce phases summarize only newly aged chunks;
+  the prior summary appears only in the final update call. Replace the old messages
+  with one synthetic **user** checkpoint headed
   `=== Compaction checkpoint ===`. It carries the active prompt and any steering
   instructions verbatim, then the progress summary and raw archive reference. This
   preserves current instructions explicitly without pretending the summary was a
-  conversational assistant turn.
+  conversational assistant turn. `/compact [focus]` adds one-shot emphasis to all
+  summary phases and records that focus only on the resulting checkpoint/archive.
+- **Deterministic compacted-history files:** correlate each validated assistant
+  tool-use message with its immediate result message. Successful supported
+  `read_file`, `write_file`, `edit`, and `apply_patch` calls contribute normalized,
+  sorted cumulative read/modified paths; modified wins over read. Batched reads are
+  call-level and therefore retain every requested path even when one result is an
+  inline per-file error. Commands, Git, MCP, malformed inputs, failed calls, and
+  unsupported/custom tools are skipped. The JSON index supplements the semantic
+  model-authored `Files touched` section.
 - Before summarization, large old tool results and tool inputs are reduced to
   previews (`compact_tool_result_max_bytes`, default 4096; a **negative** value disables
   this reduction entirely), and old images are replaced with text placeholders. If older
@@ -2394,7 +2415,8 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   hook runs after the transcript is replaced; its `additionalContext` is added as
   request-only context for the next model request, and a block surfaces a
   `[post-compact hook blocked after compaction: <reason>]` notice. Both receive a
-  `trigger` field (`auto` or `manual`).
+  `trigger` field (`auto` or `manual`); a focused manual compaction also supplies
+  `focus` to both hooks.
 - Before replacing active history, raw removed messages are archived under
   `compactions/`; the active summary includes the archive reference.
 - **Summary call hardening (`summarizeOne`).** The summarization request runs with
@@ -2414,8 +2436,15 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   never as a turn. Replay records a `maintenance_usage` event. The visible notice
   reports the full request estimate before and after:
   `[compacted: 4 turns → checkpoint · ctx ~18.2k → ~12.7k]`.
-- **Degradation:** if still over budget, keep only the last turn; if still over,
-  hard-truncate the largest tool result/input/image blocks in place with markers.
+- **Tree/archive persistence:** archive the final enlarged removed set unchanged and
+  persist the exact summary, current focus, and cumulative file lists in additive
+  checkpoint/archive/tree metadata. `FirstKeptEntryID` remains an atomic original-tree
+  boundary. If degradation rewrites retained content, mark the compaction entry and
+  materialize the rewritten suffix as new atomic segment entries so save/resume cannot
+  resurrect the original payload. Old entries with omitted fields reconstruct metadata
+  from their canonical tree summary without a schema-version bump.
+- **Degradation:** once only the last turn remains, hard-truncate the largest tool
+  result/input/image blocks in place with markers.
   When there is no older turn to summarize but the transcript is still over budget,
   the same ladder degrades the **oversized single turn** in place. Each degrade pass
   deep-copies before mutating (so a post-degrade `ValidateTranscript` failure rolls

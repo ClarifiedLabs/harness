@@ -42,6 +42,23 @@ type readFile struct {
 	defaultLimit int
 }
 
+type readFileArgs struct {
+	Path   string   `json:"path"`
+	Paths  []string `json:"paths"`
+	Offset int      `json:"offset"`
+	Limit  int      `json:"limit"`
+
+	// Accepted aliases deliberately stay out of the model-facing schema.
+	FilePath      string   `json:"file_path"`
+	FilePathCamel string   `json:"filePath"`
+	File          string   `json:"file"`
+	Filename      string   `json:"filename"`
+	FilepathAlt   string   `json:"filepath"`
+	AbsolutePath  string   `json:"absolute_path"`
+	TargetFile    string   `json:"target_file"`
+	Files         []string `json:"files"`
+}
+
 func (readFile) Name() string { return "read_file" }
 
 func (readFile) Description() string {
@@ -52,32 +69,10 @@ func (readFile) Schema() json.RawMessage { return json.RawMessage(readFileSchema
 
 func (readFile) ReadOnly(json.RawMessage) bool { return true }
 
-func (r readFile) Run(ctx context.Context, input json.RawMessage) (string, error) {
-	var args struct {
-		Path   string   `json:"path"`
-		Paths  []string `json:"paths"`
-		Offset int      `json:"offset"`
-		Limit  int      `json:"limit"`
-
-		// Accepted aliases for path/paths, resolved silently. Different harnesses
-		// name this parameter differently — Claude Code and Gemini CLI use
-		// file_path, opencode uses filePath, Cursor uses target_file, older Gemini
-		// used absolute_path — and models trained on them sometimes emit the other
-		// spelling here. Normalizing the common ones avoids a wasted "path is
-		// required" round trip. These are deliberately kept out of the JSON schema
-		// so the model-facing surface stays minimal; we just accept them if sent.
-		// The canonical path/paths win when both are set.
-		FilePath      string   `json:"file_path"`
-		FilePathCamel string   `json:"filePath"`
-		File          string   `json:"file"`
-		Filename      string   `json:"filename"`
-		FilepathAlt   string   `json:"filepath"`
-		AbsolutePath  string   `json:"absolute_path"`
-		TargetFile    string   `json:"target_file"`
-		Files         []string `json:"files"`
-	}
+func decodeReadFileArgs(input json.RawMessage) (readFileArgs, error) {
+	var args readFileArgs
 	if err := json.Unmarshal(input, &args); err != nil {
-		return "", err
+		return readFileArgs{}, err
 	}
 	if args.Path == "" {
 		args.Path = firstNonEmpty(args.FilePath, args.FilePathCamel, args.File, args.Filename, args.FilepathAlt, args.AbsolutePath, args.TargetFile)
@@ -86,10 +81,38 @@ func (r readFile) Run(ctx context.Context, input json.RawMessage) (string, error
 		args.Paths = args.Files
 	}
 	if args.Offset < 0 {
-		return "", badArgs("offset must be >= 1")
+		return readFileArgs{}, badArgs("offset must be >= 1")
 	}
 	if args.Limit < 0 {
-		return "", badArgs("limit must be >= 0")
+		return readFileArgs{}, badArgs("limit must be >= 0")
+	}
+	if len(args.Paths) > 0 {
+		for i, path := range args.Paths {
+			if strings.TrimSpace(path) == "" {
+				return readFileArgs{}, badArgs("paths[%d] must not be empty", i)
+			}
+		}
+	} else if args.Path == "" {
+		return readFileArgs{}, badArgs("path or paths is required")
+	}
+	return args, nil
+}
+
+func (readFile) ReadPaths(input json.RawMessage) ([]string, error) {
+	args, err := decodeReadFileArgs(input)
+	if err != nil {
+		return nil, err
+	}
+	if len(args.Paths) > 0 {
+		return append([]string(nil), args.Paths...), nil
+	}
+	return []string{args.Path}, nil
+}
+
+func (r readFile) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	args, err := decodeReadFileArgs(input)
+	if err != nil {
+		return "", err
 	}
 
 	defaultLimit := r.defaultLimit
@@ -101,9 +124,6 @@ func (r readFile) Run(ctx context.Context, input json.RawMessage) (string, error
 		return readManyFiles(args.Paths, args.Limit, defaultLimit)
 	}
 
-	if args.Path == "" {
-		return "", badArgs("path or paths is required")
-	}
 	offset := args.Offset
 	if offset == 0 {
 		offset = 1

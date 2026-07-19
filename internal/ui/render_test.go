@@ -1135,6 +1135,27 @@ func TestApproachingCompactionNoticeOnce(t *testing.T) {
 	}
 }
 
+func TestApproachingCompactionNoticeUsesConfiguredTriggerAndDisable(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{CompactionTriggerPercent: 60})
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{Total: 54, Window: 100})
+	if strings.Contains(errw.String(), "approaching compaction") {
+		t.Fatalf("warning fired before configured lead point: %q", errw.String())
+	}
+	r.TurnAttemptStart(2, 1, agent.ContextEstimate{Total: 55, Window: 100})
+	if !strings.Contains(errw.String(), "approaching compaction") {
+		t.Fatalf("warning did not follow configured trigger: %q", errw.String())
+	}
+
+	out.Reset()
+	errw.Reset()
+	r = NewRenderer(&out, &errw, RenderOptions{CompactionTriggerPercent: 60, DisableAutoCompaction: true})
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{Total: 100, Window: 100})
+	if strings.Contains(errw.String(), "approaching compaction") {
+		t.Fatalf("disabled automatic compaction still warned: %q", errw.String())
+	}
+}
+
 func TestLargeContextWarningNamesPayloadEstimateAndHistory(t *testing.T) {
 	line := largeRequestWarning(agent.ContextEstimate{
 		Total:           136_000,

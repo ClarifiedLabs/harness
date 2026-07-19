@@ -44,6 +44,18 @@ const (
 	MessageOriginCompactionCheckpoint MessageOrigin = "compaction_checkpoint"
 )
 
+// CompactionMetadata is transcript-only state carried by a synthetic
+// compaction checkpoint. Provider adapters intentionally ignore it: it lets a
+// later compaction update the exact prior generated summary without parsing the
+// rendered checkpoint text, and preserves deterministic compacted-history file
+// activity alongside the model-authored prose.
+type CompactionMetadata struct {
+	Summary       string   `json:"summary"`
+	Focus         string   `json:"focus,omitempty"`
+	ReadFiles     []string `json:"read_files,omitempty"`
+	ModifiedFiles []string `json:"modified_files,omitempty"`
+}
+
 // Message is one turn-fragment in a transcript: a role plus an ordered list of
 // content blocks. ParallelToolBatches is execution metadata set only on the user
 // message carrying the corresponding tool results; provider adapters ignore it.
@@ -54,6 +66,7 @@ type Message struct {
 	Origin              MessageOrigin       `json:"origin,omitempty"`
 	Content             []ContentBlock      `json:"content"`
 	ParallelToolBatches []ParallelToolBatch `json:"parallel_tool_batches,omitempty"`
+	Compaction          *CompactionMetadata `json:"compaction,omitempty"`
 }
 
 func ValidAssistantPhase(phase string) bool {

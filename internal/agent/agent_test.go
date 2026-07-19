@@ -417,7 +417,7 @@ func TestContextOverflowWithoutWindowShrinksCurrentTurnAndRetries(t *testing.T) 
 			Usage:  llm.Usage{InputTokens: 100, OutputTokens: 5},
 		},
 	)
-	a := newAgent(fp, reg, Options{ContextWindow: 10_000})
+	a := newAgent(fp, reg, Options{ContextWindow: 10_000, DisableAutoCompaction: true})
 	sink := &recordSink{}
 
 	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {

@@ -22,6 +22,12 @@ func CompactionSummary() string {
 	return mustText("compaction-summary.txt")
 }
 
+// CompactionUpdate returns the system instruction used when updating an exact
+// prior compaction summary with newly aged history.
+func CompactionUpdate() string {
+	return mustText("compaction-update.txt")
+}
+
 // HandoffSummary returns the system instruction used to generate a
 // plan->implementation handoff brief. It is deliberately distinct from
 // CompactionSummary: compaction tells the same model to summarize so it can

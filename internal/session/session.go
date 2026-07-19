@@ -818,10 +818,13 @@ func formatDuration(d time.Duration) string {
 // Compaction stores the raw messages removed from active context and the summary
 // that replaced them.
 type Compaction struct {
-	Time     time.Time     `json:"time"`
-	Summary  string        `json:"summary"`
-	Usage    llm.Usage     `json:"usage"`
-	Messages []llm.Message `json:"messages"`
+	Time          time.Time     `json:"time"`
+	Summary       string        `json:"summary"`
+	Usage         llm.Usage     `json:"usage"`
+	Messages      []llm.Message `json:"messages"`
+	Focus         string        `json:"focus,omitempty"`
+	ReadFiles     []string      `json:"read_files,omitempty"`
+	ModifiedFiles []string      `json:"modified_files,omitempty"`
 }
 
 // SaveCompaction writes one numbered compaction archive and returns the relative
@@ -849,17 +852,23 @@ func SaveCompaction(dir string, c Compaction) (string, error) {
 		return "", fmt.Errorf("session: write compaction summary: %w", err)
 	}
 	meta := struct {
-		Time         time.Time `json:"time"`
-		Usage        llm.Usage `json:"usage"`
-		MessageCount int       `json:"message_count"`
-		Input        string    `json:"input"`
-		Summary      string    `json:"summary"`
+		Time          time.Time `json:"time"`
+		Usage         llm.Usage `json:"usage"`
+		MessageCount  int       `json:"message_count"`
+		Input         string    `json:"input"`
+		Summary       string    `json:"summary"`
+		Focus         string    `json:"focus,omitempty"`
+		ReadFiles     []string  `json:"read_files,omitempty"`
+		ModifiedFiles []string  `json:"modified_files,omitempty"`
 	}{
-		Time:         c.Time,
-		Usage:        c.Usage,
-		MessageCount: len(c.Messages),
-		Input:        inputRel,
-		Summary:      filepath.Join("compactions", prefix+".summary.md"),
+		Time:          c.Time,
+		Usage:         c.Usage,
+		MessageCount:  len(c.Messages),
+		Input:         inputRel,
+		Summary:       filepath.Join("compactions", prefix+".summary.md"),
+		Focus:         c.Focus,
+		ReadFiles:     append([]string(nil), c.ReadFiles...),
+		ModifiedFiles: append([]string(nil), c.ModifiedFiles...),
 	}
 	if err := writeJSONAtomic(filepath.Join(base, prefix+".meta.json"), meta); err != nil {
 		return "", err

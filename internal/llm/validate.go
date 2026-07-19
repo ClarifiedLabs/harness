@@ -18,6 +18,9 @@ func ValidateTranscript(msgs []Message) error {
 	open := map[string]bool{}
 
 	for i, m := range msgs {
+		if m.Compaction != nil && (m.Role != RoleUser || m.Origin != MessageOriginCompactionCheckpoint) {
+			return fmt.Errorf("message %d: compaction metadata requires a compaction-checkpoint user message", i)
+		}
 		switch m.Role {
 		case RoleAssistant:
 			if !ValidAssistantPhase(m.Phase) {

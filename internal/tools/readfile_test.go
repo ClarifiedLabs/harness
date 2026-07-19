@@ -6,9 +6,34 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestReadFileReportsCanonicalAndAliasPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{name: "single", input: `{"path":"a.txt"}`, want: []string{"a.txt"}},
+		{name: "batch", input: `{"paths":["b.txt","a.txt"]}`, want: []string{"b.txt", "a.txt"}},
+		{name: "single alias", input: `{"file_path":"alias.txt"}`, want: []string{"alias.txt"}},
+		{name: "batch alias", input: `{"files":["x.txt","y.txt"]}`, want: []string{"x.txt", "y.txt"}},
+		{name: "canonical wins", input: `{"path":"canonical.txt","file_path":"alias.txt"}`, want: []string{"canonical.txt"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := (readFile{}).ReadPaths([]byte(tc.input))
+			if err != nil {
+				t.Fatalf("ReadPaths: %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("ReadPaths = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
 
 func runReadFile(t *testing.T, args map[string]any) (string, error) {
 	return runTool(t, readFile{}, args)

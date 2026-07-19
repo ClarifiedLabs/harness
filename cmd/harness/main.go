@@ -583,6 +583,10 @@ func run(env environment) int {
 		MaxTurns:                  cfg.DelegateMaxTurns,
 		MaxDepth:                  cfg.DelegateMaxDepth,
 		CompactKeepTurns:          cfg.CompactKeepTurns,
+		CompactKeepTokens:         cfg.CompactKeepTokens,
+		CompactTriggerPercent:     cfg.CompactTriggerPercent,
+		CompactTargetPercent:      cfg.CompactTargetPercent,
+		DisableAutoCompaction:     !cfg.CompactAutoEnabled,
 		CompactSummaryMaxTokens:   cfg.CompactSummaryMaxTokens,
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
 		Now:                       now,
@@ -851,6 +855,10 @@ func run(env environment) int {
 		ServerTools:               serverTools,
 		Now:                       now,
 		CompactKeepTurns:          cfg.CompactKeepTurns,
+		CompactKeepTokens:         cfg.CompactKeepTokens,
+		CompactTriggerPercent:     cfg.CompactTriggerPercent,
+		CompactTargetPercent:      cfg.CompactTargetPercent,
+		DisableAutoCompaction:     !cfg.CompactAutoEnabled,
 		CompactSummaryMaxTokens:   cfg.CompactSummaryMaxTokens,
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
 		Hooks:                     hookRunner,
@@ -953,12 +961,14 @@ func run(env environment) int {
 		SuppressReasoningOutput: suppressReasoningOutput,
 		// The in-place wait counter and during-prompt input line need a TTY; the
 		// renderer also gates them off under -quiet (r12 + during-prompt input).
-		LiveStatus:      env.colorTTY,
-		Model:           registryModel,
-		Registry:        modelRegistry,
-		Now:             now,
-		TimestampLayout: timestampLayout(cfg.TimestampMode),
-		Width:           env.terminalCols,
+		LiveStatus:               env.colorTTY,
+		Model:                    registryModel,
+		Registry:                 modelRegistry,
+		CompactionTriggerPercent: cfg.CompactTriggerPercent,
+		DisableAutoCompaction:    !cfg.CompactAutoEnabled,
+		Now:                      now,
+		TimestampLayout:          timestampLayout(cfg.TimestampMode),
+		Width:                    env.terminalCols,
 	})
 
 	app := &ui.App{
@@ -1061,15 +1071,18 @@ func run(env environment) int {
 	}
 	ag.SetCompactionArchiver(func(ctx context.Context, archive agent.CompactionArchive) (string, error) {
 		ref, err := session.SaveCompaction(app.SessionPath, session.Compaction{
-			Time:     now(),
-			Summary:  archive.Summary,
-			Usage:    archive.Usage,
-			Messages: archive.Messages,
+			Time:          now(),
+			Summary:       archive.Summary,
+			Usage:         archive.Usage,
+			Messages:      archive.Messages,
+			Focus:         archive.Focus,
+			ReadFiles:     archive.ReadFiles,
+			ModifiedFiles: archive.ModifiedFiles,
 		})
 		if err != nil {
 			return "", err
 		}
-		if err := app.PrepareCompaction(ag.Transcript(), len(archive.Messages), archive.Summary, ref, archive.TokensBefore); err != nil {
+		if err := app.PrepareCompaction(ag.Transcript(), len(archive.Messages), archive.Summary, ref, archive.TokensBefore, archive.Focus, archive.ReadFiles, archive.ModifiedFiles); err != nil {
 			return "", err
 		}
 		return ref, nil

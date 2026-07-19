@@ -12,11 +12,26 @@ func TestBuiltInPromptsLoad(t *testing.T) {
 	if CompactionSummary() == "" {
 		t.Fatal("compaction summary prompt is empty")
 	}
+	if CompactionUpdate() == "" {
+		t.Fatal("compaction update prompt is empty")
+	}
 	if DelegateChild() == "" {
 		t.Fatal("delegate child prompt is empty")
 	}
 	if HandoffSummary() == "" {
 		t.Fatal("handoff summary prompt is empty")
+	}
+}
+
+func TestCompactionUpdatePreservesPriorState(t *testing.T) {
+	update := strings.ToLower(CompactionUpdate())
+	if update == strings.ToLower(CompactionSummary()) {
+		t.Fatal("compaction update must be distinct from the initial prompt")
+	}
+	for _, want := range []string{"prior progress summary", "preserve", "supersedes", "complete replacement", "files touched", "open todos"} {
+		if !strings.Contains(update, want) {
+			t.Fatalf("compaction update missing %q:\n%s", want, CompactionUpdate())
+		}
 	}
 }
 
@@ -110,6 +125,7 @@ func TestPromptFilesDoNotExposeFinalNewline(t *testing.T) {
 	for name, text := range map[string]string{
 		"system":             System(),
 		"compaction-summary": CompactionSummary(),
+		"compaction-update":  CompactionUpdate(),
 		"handoff-summary":    HandoffSummary(),
 		"delegate-child":     DelegateChild(),
 		"explore":            mustAgentPrompt(t, "explore"),
@@ -128,7 +144,8 @@ func TestPromptByteBudgets(t *testing.T) {
 		max  int
 	}{
 		"system":             {System(), 2600},
-		"compaction-summary": {CompactionSummary(), 600},
+		"compaction-summary": {CompactionSummary(), 700},
+		"compaction-update":  {CompactionUpdate(), 900},
 		"handoff-summary":    {HandoffSummary(), 700},
 		"delegate-child":     {DelegateChild(), 400},
 		"explore":            {mustAgentPrompt(t, "explore"), 300},
@@ -142,8 +159,8 @@ func TestPromptByteBudgets(t *testing.T) {
 			t.Errorf("%s prompt = %d bytes, budget %d", name, len(item.text), item.max)
 		}
 	}
-	if total > 6000 {
-		t.Errorf("shipped prompt total = %d bytes, budget 6000", total)
+	if total > 7000 {
+		t.Errorf("shipped prompt total = %d bytes, budget 7000", total)
 	}
 }
 

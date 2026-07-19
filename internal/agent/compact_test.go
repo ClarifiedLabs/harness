@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/tools"
@@ -142,6 +145,222 @@ func TestCompactKeepsLastEightTurns(t *testing.T) {
 	}
 	if fp.Requests[0].Purpose != llm.RequestPurposeCompaction {
 		t.Fatalf("summary call purpose = %q, want %q", fp.Requests[0].Purpose, llm.RequestPurposeCompaction)
+	}
+}
+
+func TestPreferredCompactionBoundaryUsesTokenFloorAndRoundCap(t *testing.T) {
+	large := make([]llm.Message, 0, 20)
+	for i := 0; i < 10; i++ {
+		large = append(large, userText("q"), asstText(strings.Repeat(string(rune('a'+i)), 4_000)))
+	}
+	a := newAgent(llmtest.New("fake"), tools.Default(), Options{CompactKeepTokens: 2_500, CompactKeepTurns: 8})
+	a.SetTranscript(large)
+	turns := completedTurnSpans(large)
+	boundary := a.preferredCompactionBoundary(turns)
+	if got := countCompletedTurns(large[boundary:]); got != 3 {
+		t.Fatalf("token-floor suffix kept %d rounds, want 3", got)
+	}
+
+	a.SetTranscript(makeTurns(10))
+	turns = completedTurnSpans(a.Transcript())
+	boundary = a.preferredCompactionBoundary(turns)
+	if got := countCompletedTurns(a.Transcript()[boundary:]); got != 8 {
+		t.Fatalf("small-round suffix kept %d rounds, want cap 8", got)
+	}
+}
+
+// Regression: low-water pressure used to drop retained rounds after the summary
+// and archive boundary had already been fixed. Every moved round must be included
+// in a regenerated summary and in the final raw archive.
+func TestLowWaterBoundaryMoveRegeneratesSummaryAndArchive(t *testing.T) {
+	transcript := make([]llm.Message, 0, 20)
+	for i := 0; i < 10; i++ {
+		transcript = append(transcript, userText(turnLabel(i)+" question"), asstText(turnLabel(i)+" "+strings.Repeat("x", 3_500)))
+	}
+	fp := llmtest.New("fake", summaryStep("first", 10, 1), summaryStep("second", 20, 2))
+	a := newAgent(fp, &tools.Registry{}, Options{Model: "local", ContextWindow: 10_000})
+	a.SetTranscript(transcript)
+	var archived CompactionArchive
+	a.SetCompactionArchiver(func(_ context.Context, archive CompactionArchive) (string, error) {
+		archived = archive
+		return "archive", nil
+	})
+	usage, err := a.Compact(context.Background(), &recordSink{})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if len(fp.Requests) != 2 || usage.InputTokens != 30 || usage.OutputTokens != 3 {
+		t.Fatalf("summary retries = %d usage=%+v, want 2 and cumulative usage", len(fp.Requests), usage)
+	}
+	if got := countCompletedTurns(archived.Messages); got != 3 {
+		t.Fatalf("archived rounds = %d, want final moved boundary with 3", got)
+	}
+	if !strings.Contains(dump(fp.Requests[1].Messages), "C ") {
+		t.Fatalf("regenerated summary input omitted moved round C: %s", dump(fp.Requests[1].Messages))
+	}
+}
+
+func TestAutomaticCompactionCanBeDisabledWithoutDisablingManual(t *testing.T) {
+	fp := llmtest.New("fake", summaryStep("manual summary", 10, 2))
+	a := newAgent(fp, tools.Default(), Options{DisableAutoCompaction: true})
+	a.SetTranscript(makeTurns(10))
+
+	if usage, changed, err := a.MaybeCompact(context.Background(), a.window(), &recordSink{}); err != nil || changed || usage != (llm.Usage{}) {
+		t.Fatalf("disabled automatic compaction = usage %+v changed=%t err=%v", usage, changed, err)
+	}
+	if _, err := a.Compact(context.Background(), &recordSink{}); err != nil {
+		t.Fatalf("manual compaction: %v", err)
+	}
+	if fp.RequestCount() != 1 || a.Transcript()[0].Origin != llm.MessageOriginCompactionCheckpoint {
+		t.Fatalf("manual compaction did not run with auto disabled: requests=%d", fp.RequestCount())
+	}
+}
+
+func TestNondefaultCompactionPercentagesMoveTriggerAndBudget(t *testing.T) {
+	a := newAgent(llmtest.New("fake"), &tools.Registry{}, Options{
+		Model:                 "local",
+		ContextWindow:         10_000,
+		CompactTriggerPercent: 90,
+		CompactTargetPercent:  50,
+	})
+	if a.overThreshold(8_999) || !a.overThreshold(9_000) {
+		t.Fatalf("90%% trigger did not move threshold")
+	}
+	if got := a.compactBudget(); got != 5_000 {
+		t.Fatalf("50%% target budget = %d, want 5000", got)
+	}
+}
+
+func TestCompactionFileActivityIsCumulativeAndModifiedWins(t *testing.T) {
+	reg := tools.Catalog()
+	a := newAgent(llmtest.New("fake"), reg, Options{})
+	failed := toolResult("r2", "missing")
+	failed.Content[0].ResultError = true
+	messages := []llm.Message{
+		asstToolUse("r1", "read_file", `{"paths":["z.go","./a.go"]}`), toolResult("r1", "ok with one possible inline failure"),
+		asstToolUse("r2", "read_file", `{"path":"failed.go"}`), failed,
+		asstToolUse("w1", "write_file", `{"path":"a.go","content":"x"}`), toolResult("w1", "ok"),
+		asstToolUse("e1", "edit", `{"files":[{"path":"edit.go","edits":[{"oldText":"a","newText":"b"}]}]}`), toolResult("e1", "ok"),
+		asstToolUse("p1", "apply_patch", `{"patch":"*** Begin Patch\n*** Add File: patch.go\n+x\n*** End Patch\n"}`), toolResult("p1", "ok"),
+		asstToolUse("u1", "run_command", `{"args":["touch","ignored.go"]}`), toolResult("u1", "ok"),
+	}
+	prior := &llm.CompactionMetadata{ReadFiles: []string{"prior.go"}, ModifiedFiles: []string{"already.go"}}
+	reads, modified := a.compactionFileActivity(messages, prior)
+	if got, want := strings.Join(reads, ","), "prior.go,z.go"; got != want {
+		t.Fatalf("read files = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(modified, ","), "a.go,already.go,edit.go,patch.go"; got != want {
+		t.Fatalf("modified files = %q, want %q", got, want)
+	}
+}
+
+func TestCompactWithFocusStoresOnlyCurrentFocus(t *testing.T) {
+	fp := llmtest.New("fake", summaryStep("focused summary", 10, 2), summaryStep("later summary", 11, 3))
+	a := newAgent(fp, tools.Default(), Options{})
+	a.SetTranscript(makeTurns(10))
+	var archives []CompactionArchive
+	a.SetCompactionArchiver(func(_ context.Context, archive CompactionArchive) (string, error) {
+		archives = append(archives, archive)
+		return "archive", nil
+	})
+	if _, err := a.CompactWithFocus(context.Background(), &recordSink{}, "  preserve API names  "); err != nil {
+		t.Fatalf("focused compact: %v", err)
+	}
+	if !strings.Contains(fp.Requests[0].System, "preserve API names") || a.Transcript()[0].Compaction.Focus != "preserve API names" || archives[0].Focus != "preserve API names" {
+		t.Fatalf("focus was not propagated: request=%q checkpoint=%+v archive=%+v", fp.Requests[0].System, a.Transcript()[0].Compaction, archives[0])
+	}
+
+	a.SetTranscript(append(a.Transcript(), makeTurns(9)...))
+	if _, _, err := a.compactTriggered(context.Background(), &recordSink{}, "auto"); err != nil {
+		t.Fatalf("later automatic compact: %v", err)
+	}
+	if fp.Requests[1].System != prompts.CompactionUpdate() {
+		t.Fatalf("repeated compaction system = %q, want update prompt", fp.Requests[1].System)
+	}
+	if a.Transcript()[0].Compaction.Focus != "" || archives[1].Focus != "" || strings.Contains(fp.Requests[1].System, "preserve API names") {
+		t.Fatalf("one-shot focus leaked into later compaction")
+	}
+	metadata := fp.Requests[1].Messages[0].Content[0].Text
+	if !strings.Contains(metadata, `"previous_summary":"focused summary"`) {
+		t.Fatalf("update metadata missing exact prior summary: %s", metadata)
+	}
+	for _, message := range fp.Requests[1].Messages[1:] {
+		if message.Origin == llm.MessageOriginCompactionCheckpoint || strings.Contains(messageTextForCheckpoint(message), checkpointHeader) {
+			t.Fatalf("prior checkpoint was sent as ordinary update history: %+v", message)
+		}
+	}
+}
+
+func TestRepeatedCompactionMapReduceUsesPriorSummaryOnlyInFinalUpdate(t *testing.T) {
+	fp := llmtest.New("fake",
+		summaryStep("chunk one", 10, 1),
+		summaryStep("chunk two", 11, 1),
+		summaryStep("chunk three", 12, 1),
+		summaryStep("updated", 13, 2),
+	)
+	a := newAgent(fp, tools.Default(), Options{Model: "local", ContextWindow: 4_000})
+	checkpoint := userText("rendered checkpoint")
+	checkpoint.Origin = llm.MessageOriginCompactionCheckpoint
+	checkpoint.Compaction = &llm.CompactionMetadata{Summary: "EXACT PRIOR SUMMARY"}
+	older := []llm.Message{checkpoint}
+	for i := 0; i < 3; i++ {
+		older = append(older, userText("q"), asstText(strings.Repeat(string(rune('a'+i)), 6_000)))
+	}
+	got, _, err := a.summarizeCompaction(context.Background(), older, checkpoint.Compaction, []string{"read.go"}, nil, "focus here")
+	if err != nil {
+		t.Fatalf("summarizeCompaction: %v", err)
+	}
+	if got != "updated" || len(fp.Requests) != 4 {
+		t.Fatalf("summary=%q requests=%d, want updated/4", got, len(fp.Requests))
+	}
+	for i, request := range fp.Requests[:3] {
+		if !strings.HasPrefix(request.System, prompts.CompactionSummary()) || !strings.Contains(request.System, "focus here") {
+			t.Fatalf("map request %d system = %q", i+1, request.System)
+		}
+		for _, message := range request.Messages {
+			if strings.Contains(messageTextForCheckpoint(message), "EXACT PRIOR SUMMARY") {
+				t.Fatalf("map request %d received prior summary", i+1)
+			}
+		}
+	}
+	final := fp.Requests[3]
+	if !strings.HasPrefix(final.System, prompts.CompactionUpdate()) || !strings.Contains(final.System, "focus here") {
+		t.Fatalf("final update system = %q", final.System)
+	}
+	if count := strings.Count(final.Messages[0].Content[0].Text, "EXACT PRIOR SUMMARY"); count != 1 {
+		t.Fatalf("prior summary count in final metadata = %d: %q", count, final.Messages[0].Content[0].Text)
+	}
+}
+
+func TestFocusedCompactionIncludesFocusInHooks(t *testing.T) {
+	dir := t.TempDir()
+	prePath := filepath.Join(dir, "pre.json")
+	postPath := filepath.Join(dir, "post.json")
+	configBody, err := json.Marshal(map[string]any{
+		"PreCompact":  []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "cat > " + prePath}}}},
+		"PostCompact": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "cat > " + postPath}}}},
+	})
+	if err != nil {
+		t.Fatalf("marshal hooks: %v", err)
+	}
+	cfg, err := hooks.DecodeEventMap(configBody)
+	if err != nil {
+		t.Fatalf("DecodeEventMap: %v", err)
+	}
+	fp := llmtest.New("fake", summaryStep("summary", 10, 2))
+	a := newAgent(fp, tools.Default(), Options{Hooks: &hooks.Runner{Config: cfg}})
+	a.SetTranscript(makeTurns(10))
+	if _, err := a.CompactWithFocus(context.Background(), &recordSink{}, "public API"); err != nil {
+		t.Fatalf("CompactWithFocus: %v", err)
+	}
+	for _, path := range []string{prePath, postPath} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read hook payload: %v", err)
+		}
+		if !strings.Contains(string(raw), `"trigger":"manual"`) || !strings.Contains(string(raw), `"focus":"public API"`) {
+			t.Fatalf("hook payload missing focus/trigger: %s", raw)
+		}
 	}
 }
 
@@ -771,8 +990,8 @@ func TestCompactUnderKeepTurnsSummarizesOlderTurnsWhenOverBudget(t *testing.T) {
 	if len(fp.Requests) != 1 {
 		t.Fatalf("summary requests = %d, want 1", len(fp.Requests))
 	}
-	if len(fp.Requests[0].Messages) != 3 {
-		t.Fatalf("summary input messages = %d, want older turn plus current input", len(fp.Requests[0].Messages))
+	if len(fp.Requests[0].Messages) != 4 {
+		t.Fatalf("summary input messages = %d, want metadata plus older turn and current input", len(fp.Requests[0].Messages))
 	}
 	got := a.Transcript()
 	mustValid(t, got)

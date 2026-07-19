@@ -216,8 +216,10 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   `--models` prints the configured proxy model catalog. Use `--format json` with
   `--agents`, `--models`, or `--check-model-proxy` for structured output.
 - Context-efficiency knobs are config-file-only except where noted:
-  `agents_md_warn_bytes`, `compact_keep_turns`, `compact_summary_max_tokens`,
-  and `compact_tool_result_max_bytes`.
+  `agents_md_warn_bytes`, `compact_keep_turns`, `compact_keep_tokens`,
+  `compact_auto_enabled`, `compact_trigger_percent`,
+  `compact_target_percent`, `compact_summary_max_tokens`, and
+  `compact_tool_result_max_bytes`.
   Tool-result truncation is controlled by config `tool_result_max_bytes` /
   `tool_result_max_lines` or env `HARNESS_TOOL_RESULT_MAX_BYTES` /
   `HARNESS_TOOL_RESULT_MAX_LINES`. `rg` and `grep` default to 32 KB / 500 lines
@@ -647,25 +649,44 @@ usage; delegate totals similarly include any nested delegates.
 ## Compaction
 
 Compaction fires when `max(reported input tokens, estimated full-request
-footprint)` reaches 78% of the model's context window, or on `/compact`.
-Harness compacts toward a 65% low-water mark, keeping the system prompt and the
-latest completed turns (`compact_keep_turns`, default `8`) verbatim. A turn is
-one assistant response plus its immediate tool-result batch, not all model calls
-made after one user prompt.
+footprint)` reaches `compact_trigger_percent` (default 78) of the effective
+model context window, or on `/compact`. `compact_auto_enabled: false` disables
+only threshold-based compaction; `/compact` and provider-overflow recovery still
+work. Harness compacts toward `compact_target_percent` (default 65) after fixed
+system/tool overhead.
+
+The recent raw suffix is selected in whole completed turns, newest first, until
+it first reaches `compact_keep_tokens` (default `20000`) or
+`compact_keep_turns` (default `8`) turns. At least the newest completed turn is
+kept. A turn is one assistant response plus its immediate tool-result batch, not
+all model calls made after one user prompt. Low-water pressure can retain fewer
+turns than the preferred suffix.
 
 Before summarization, large old tool results and large old tool inputs are
 reduced to previews (`compact_tool_result_max_bytes`, default `4096`), old images
 are replaced with placeholders, and the raw removed messages are archived under
 `compactions/`. If the old history is too large for one summary call, harness
-summarizes chunks and then summarizes the chunk summaries. Non-quiet TTY runs
-show a transient elapsed-time indicator while this summary work is in progress.
+summarizes chunks and then summarizes the chunk summaries. Later compactions
+explicitly update the exact prior generated summary with only newly aged
+history; they do not re-summarize the rendered checkpoint as conversation.
+Non-quiet TTY runs show a transient elapsed-time indicator while this summary
+work is in progress.
 Older raw messages are archived before replacement. The active transcript gets
 a synthetic user checkpoint containing the active prompt and steering text
-verbatim, the progress summary, and the archive reference. If the normal keep
-window cannot reach the 65% target, harness keeps only the latest complete turn
-and truncates oversized tool payloads as a last resort without splitting a
-tool-use/result pair. If compaction fails validation or archive/summary writing,
-the full transcript is kept.
+verbatim, the progress summary, the archive reference, and a deterministic
+cumulative index of successful supported `read_file`, `write_file`, `edit`, and
+`apply_patch` paths from compacted history. The index records requested paths at
+tool-call success granularity—so a successful batched read includes paths that
+reported inline per-file errors—and does not infer effects from commands, Git,
+MCP, or custom tools. The model-authored `Files touched` section remains the
+semantic source for file state and unsupported operations.
+
+Use `/compact optional focus text` to emphasize one manual summary. Focus is
+trimmed, recorded in hook/archive/tree metadata, and applies only to that
+successful compaction. If low-water pressure leaves only the newest complete
+turn, Harness truncates oversized tool payloads as a last resort without
+splitting a tool-use/result pair. If compaction fails validation or
+archive/summary writing, the full transcript is kept.
 
 Turn summaries include approximate context footprint and, when stateful Responses
 sends a smaller request than the full active conversation, the payload estimate.
@@ -689,6 +710,8 @@ likely slow response startup, harness prints one warning per prompt to stderr.
 
 Harness supports command hooks for `SessionStart`, `UserPromptSubmit`,
 `PreToolUse`, `PostToolUse`, `PreCompact`, `PostCompact`, and `Stop`.
+`PreCompact` and `PostCompact` receive `trigger`; focused manual compactions also
+receive the one-shot `focus` field.
 
 ```json
 {

@@ -85,6 +85,10 @@ type Config struct {
 	ReadFileResultMaxBytes             int               `json:"read_file_result_max_bytes"`    // 0 = tool/default global
 	ReadFileResultMaxLines             int               `json:"read_file_result_max_lines"`    // 0 = tool/default global
 	CompactKeepTurns                   int               `json:"compact_keep_turns"`            // config-only; 0 = agent default
+	CompactKeepTokens                  int               `json:"compact_keep_tokens"`           // config-only; desired raw recent suffix
+	CompactAutoEnabled                 bool              `json:"compact_auto_enabled"`          // config-only; threshold triggers only
+	CompactTriggerPercent              int               `json:"compact_trigger_percent"`       // config-only; automatic high-water mark
+	CompactTargetPercent               int               `json:"compact_target_percent"`        // config-only; post-compaction low-water mark
 	CompactSummaryMaxTokens            int               `json:"compact_summary_max_tokens"`    // config-only; 0 = agent default
 	CompactToolResultMaxBytes          int               `json:"compact_tool_result_max_bytes"` // config-only; 0 = agent default, negative disables
 	DelegateMaxTurns                   int               `json:"delegate_max_turns"`            // config-only; default 20, per delegate call cap
@@ -311,6 +315,10 @@ type fileConfig struct {
 	ReadFileResultMaxBytes             *int                       `json:"read_file_result_max_bytes"`
 	ReadFileResultMaxLines             *int                       `json:"read_file_result_max_lines"`
 	CompactKeepTurns                   *int                       `json:"compact_keep_turns"`
+	CompactKeepTokens                  *int                       `json:"compact_keep_tokens"`
+	CompactAutoEnabled                 *bool                      `json:"compact_auto_enabled"`
+	CompactTriggerPercent              *int                       `json:"compact_trigger_percent"`
+	CompactTargetPercent               *int                       `json:"compact_target_percent"`
 	CompactSummaryMaxTokens            *int                       `json:"compact_summary_max_tokens"`
 	CompactToolResultMaxBytes          *int                       `json:"compact_tool_result_max_bytes"`
 	DelegateMaxTurns                   *int                       `json:"delegate_max_turns"`
@@ -530,6 +538,16 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	c.RunCommandBackgroundTimeoutSeconds = resolveInt(false, 0,
 		getenv("HARNESS_RUN_COMMAND_BACKGROUND_TIMEOUT_SECONDS"), fc.RunCommandBackgroundTimeoutSeconds, 0)
 	c.CompactKeepTurns = intValue(fc.CompactKeepTurns, 0)
+	c.CompactKeepTokens = intValue(fc.CompactKeepTokens, 20_000)
+	if c.CompactKeepTokens <= 0 {
+		return Config{}, fmt.Errorf("compact_keep_tokens must be positive")
+	}
+	c.CompactAutoEnabled = boolValue(fc.CompactAutoEnabled, true)
+	c.CompactTriggerPercent = intValue(fc.CompactTriggerPercent, 78)
+	c.CompactTargetPercent = intValue(fc.CompactTargetPercent, 65)
+	if c.CompactTargetPercent < 1 || c.CompactTriggerPercent > 99 || c.CompactTargetPercent >= c.CompactTriggerPercent {
+		return Config{}, fmt.Errorf("compaction percentages must satisfy 1 <= compact_target_percent < compact_trigger_percent <= 99")
+	}
 	c.CompactSummaryMaxTokens = intValue(fc.CompactSummaryMaxTokens, 0)
 	c.CompactToolResultMaxBytes = intValue(fc.CompactToolResultMaxBytes, 0)
 	c.DelegateMaxTurns = intValue(fc.DelegateMaxTurns, defaultDelegateMaxTurns)
@@ -1318,6 +1336,13 @@ func resolveIntPtr(flagSet bool, flagVal int, envVal string, fileVal *int) *int 
 }
 
 func intValue(v *int, def int) int {
+	if v == nil {
+		return def
+	}
+	return *v
+}
+
+func boolValue(v *bool, def bool) bool {
 	if v == nil {
 		return def
 	}

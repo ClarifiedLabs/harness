@@ -105,6 +105,10 @@ type Options struct {
 	MaxTurns                  int
 	MaxDepth                  int
 	CompactKeepTurns          int
+	CompactKeepTokens         int
+	CompactTriggerPercent     int
+	CompactTargetPercent      int
+	DisableAutoCompaction     bool
 	CompactSummaryMaxTokens   int
 	CompactToolResultMaxBytes int
 	AgentCandidates           func(Runtime) []AgentCandidate
@@ -360,6 +364,10 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		ServerTools:               launch.ServerTools,
 		ResponsesStateful:         launch.ResponsesStateful,
 		CompactKeepTurns:          r.opts.CompactKeepTurns,
+		CompactKeepTokens:         r.opts.CompactKeepTokens,
+		CompactTriggerPercent:     r.opts.CompactTriggerPercent,
+		CompactTargetPercent:      r.opts.CompactTargetPercent,
+		DisableAutoCompaction:     r.opts.DisableAutoCompaction,
 		CompactSummaryMaxTokens:   r.opts.CompactSummaryMaxTokens,
 		CompactToolResultMaxBytes: r.opts.CompactToolResultMaxBytes,
 		Now:                       r.opts.Now,

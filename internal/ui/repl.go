@@ -246,7 +246,7 @@ const helpText = `commands:
   /help            list commands
   /exit, /quit     save and exit
   /clear           reset conversation; rotate to a fresh session directory
-  /compact         force compaction now
+  /compact [focus] force compaction now with optional one-shot summary focus
   /tree [entry]    browse the conversation tree and branch in this session
   /fork [entry]    branch before a prior prompt into a new session
   /clone           clone the current branch into a new session
@@ -1701,7 +1701,7 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 	case "/clear":
 		app.clear()
 	case "/compact":
-		app.compact()
+		app.compact(arg)
 	case "/tree":
 		prefill, set := app.treeCommand(arg, readCommandLine)
 		return replCommandResult{prefill: prefill, prefillSet: set}
@@ -2914,10 +2914,10 @@ func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 // is folded into the cumulative session totals so /usage stays accurate, and the
 // session is saved with the collapsed transcript. A summary-call error is already
 // warned about via the sink by Compact; the transcript is left intact.
-func (app *App) compact() {
+func (app *App) compact(focus string) {
 	ctx := context.Background()
 	sink := newAccumulatingSink(app.Renderer, app, app.PromptNumber)
-	u, err := app.Agent.Compact(ctx, sink)
+	u, err := app.Agent.CompactWithFocus(ctx, sink, focus)
 	if u != (llm.Usage{}) {
 		app.addMaintenanceUsage("compaction", u)
 	}
@@ -3121,11 +3121,11 @@ func (app *App) ensureSessionTree() error {
 
 // PrepareCompaction binds the agent archive callback to the immutable tree.
 // The next save observes the rewritten transcript and commits the checkpoint.
-func (app *App) PrepareCompaction(before []llm.Message, olderCount int, summary, archiveRef string, tokensBefore int) error {
+func (app *App) PrepareCompaction(before []llm.Message, olderCount int, summary, archiveRef string, tokensBefore int, focus string, readFiles, modifiedFiles []string) error {
 	if err := app.ensureSessionTree(); err != nil {
 		return err
 	}
-	return app.SessionTree.PrepareCompaction(before, olderCount, summary, archiveRef, tokensBefore)
+	return app.SessionTree.PrepareCompaction(before, olderCount, summary, archiveRef, tokensBefore, focus, readFiles, modifiedFiles)
 }
 
 // planSnapshot returns the recorded plans for persistence, or nil when the plan

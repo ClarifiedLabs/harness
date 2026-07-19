@@ -57,6 +57,9 @@ type Entry struct {
 	FirstKeptEntryID string       `json:"first_kept_entry_id,omitempty"`
 	ArchiveRef       string       `json:"archive_ref,omitempty"`
 	TokensBefore     int          `json:"tokens_before,omitempty"`
+	ReadFiles        []string     `json:"read_files,omitempty"`
+	ModifiedFiles    []string     `json:"modified_files,omitempty"`
+	MaterializedKept bool         `json:"materialized_kept,omitempty"`
 
 	FromLeafID         string `json:"from_leaf_id,omitempty"`
 	CommonAncestor     string `json:"common_ancestor_id,omitempty"`
@@ -79,10 +82,13 @@ type messageRef struct {
 }
 
 type pendingCompaction struct {
-	olderCount   int
-	summary      string
-	archiveRef   string
-	tokensBefore int
+	olderCount    int
+	summary       string
+	archiveRef    string
+	tokensBefore  int
+	focus         string
+	readFiles     []string
+	modifiedFiles []string
 }
 
 // Tree manages the canonical append-only conversation history in memory.
@@ -407,7 +413,7 @@ func hasToolUseMessage(m llm.Message) bool {
 
 // PrepareCompaction records the rewrite metadata supplied by the compaction
 // archiver. The next SyncTranscript commits the corresponding tree entry.
-func (t *Tree) PrepareCompaction(before []llm.Message, olderCount int, summary, archiveRef string, tokensBefore int) error {
+func (t *Tree) PrepareCompaction(before []llm.Message, olderCount int, summary, archiveRef string, tokensBefore int, focus string, readFiles, modifiedFiles []string) error {
 	if t.pending != nil {
 		if err := t.SyncTranscript(before); err != nil {
 			return err
@@ -419,7 +425,15 @@ func (t *Tree) PrepareCompaction(before []llm.Message, olderCount int, summary, 
 	if olderCount < 0 || olderCount >= len(before) || olderCount >= len(t.activeRefs) {
 		return fmt.Errorf("session: invalid compaction boundary %d for %d messages", olderCount, len(before))
 	}
-	t.pending = &pendingCompaction{olderCount: olderCount, summary: summary, archiveRef: archiveRef, tokensBefore: tokensBefore}
+	t.pending = &pendingCompaction{
+		olderCount:    olderCount,
+		summary:       summary,
+		archiveRef:    archiveRef,
+		tokensBefore:  tokensBefore,
+		focus:         strings.TrimSpace(focus),
+		readFiles:     append([]string(nil), readFiles...),
+		modifiedFiles: append([]string(nil), modifiedFiles...),
+	}
 	return nil
 }
 
@@ -439,7 +453,13 @@ func (t *Tree) commitCompaction(messages []llm.Message) error {
 	if ref.offset != 0 {
 		return errors.New("session: compaction boundary splits an atomic segment")
 	}
-	checkpoint := messages[0]
+	checkpoint := cloneMessagesForTree(messages[:1])[0]
+	keptCount := len(t.activeMsgs) - p.olderCount
+	baseLen := 1 + keptCount
+	if baseLen > len(messages) {
+		return fmt.Errorf("session: compacted transcript too short: got %d want at least %d", len(messages), baseLen)
+	}
+	materializedKept := !transcriptsEqual(messages[1:baseLen], t.activeMsgs[p.olderCount:])
 	entry := Entry{
 		Type:             EntryCompaction,
 		ParentID:         t.ActiveLeaf,
@@ -449,15 +469,23 @@ func (t *Tree) commitCompaction(messages []llm.Message) error {
 		ArchiveRef:       p.archiveRef,
 		Summary:          p.summary,
 		TokensBefore:     p.tokensBefore,
+		CustomFocus:      p.focus,
+		ReadFiles:        append([]string(nil), p.readFiles...),
+		ModifiedFiles:    append([]string(nil), p.modifiedFiles...),
+		MaterializedKept: materializedKept,
 	}
 	if err := t.appendEntry(entry); err != nil {
 		return err
 	}
 	compactionID := t.ActiveLeaf
-	keptCount := len(t.activeMsgs) - p.olderCount
-	baseLen := 1 + keptCount
-	if baseLen > len(messages) {
-		return fmt.Errorf("session: compacted transcript too short: got %d want at least %d", len(messages), baseLen)
+	if materializedKept {
+		t.activeRefs = []messageRef{{entryID: compactionID}}
+		t.activeMsgs = cloneMessagesForTree(messages[:1])
+		if err := t.appendMessages(messages[1:]); err != nil {
+			return err
+		}
+		t.activeMsgs = cloneMessagesForTree(messages)
+		return nil
 	}
 	refs := make([]messageRef, 0, len(messages))
 	refs = append(refs, messageRef{entryID: compactionID})
@@ -591,8 +619,19 @@ func (t *Tree) buildContext(leaf string) ([]llm.Message, []messageRef, error) {
 			if special.Checkpoint == nil {
 				return nil, nil, fmt.Errorf("session: compaction %q has no checkpoint", special.ID)
 			}
-			msgs = append(msgs, *special.Checkpoint)
+			checkpoint := cloneMessagesForTree([]llm.Message{*special.Checkpoint})[0]
+			checkpoint.Compaction = &llm.CompactionMetadata{
+				Summary:       special.Summary,
+				Focus:         special.CustomFocus,
+				ReadFiles:     append([]string(nil), special.ReadFiles...),
+				ModifiedFiles: append([]string(nil), special.ModifiedFiles...),
+			}
+			msgs = append(msgs, checkpoint)
 			refs = append(refs, messageRef{entryID: special.ID})
+			if special.MaterializedKept {
+				start = latestSpecial + 1
+				break
+			}
 			found := false
 			for i := 0; i < latestSpecial; i++ {
 				if path[i].ID == special.FirstKeptEntryID {
@@ -951,12 +990,23 @@ func cloneMessagesForTree(messages []llm.Message) []llm.Message {
 		out[i] = messages[i]
 		out[i].Content = append([]llm.ContentBlock(nil), messages[i].Content...)
 		out[i].ParallelToolBatches = append([]llm.ParallelToolBatch(nil), messages[i].ParallelToolBatches...)
+		for j := range out[i].ParallelToolBatches {
+			out[i].ParallelToolBatches[j].ToolUseIDs = append([]string(nil), messages[i].ParallelToolBatches[j].ToolUseIDs...)
+		}
+		if messages[i].Compaction != nil {
+			meta := *messages[i].Compaction
+			meta.ReadFiles = append([]string(nil), messages[i].Compaction.ReadFiles...)
+			meta.ModifiedFiles = append([]string(nil), messages[i].Compaction.ModifiedFiles...)
+			out[i].Compaction = &meta
+		}
 	}
 	return out
 }
 
 func cloneEntry(entry Entry) Entry {
 	entry.Messages = cloneMessagesForTree(entry.Messages)
+	entry.ReadFiles = append([]string(nil), entry.ReadFiles...)
+	entry.ModifiedFiles = append([]string(nil), entry.ModifiedFiles...)
 	if entry.Checkpoint != nil {
 		checkpoint := cloneMessagesForTree([]llm.Message{*entry.Checkpoint})[0]
 		entry.Checkpoint = &checkpoint

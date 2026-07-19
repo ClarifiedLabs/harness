@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -89,7 +90,7 @@ func TestTreeCompactionKeepsRawPathNavigable(t *testing.T) {
 			Text: "checkpoint summary",
 		}},
 	}
-	if err := tree.PrepareCompaction(before, 2, "summary", "compactions/0001.input.json", 1200); err != nil {
+	if err := tree.PrepareCompaction(before, 2, "summary", "compactions/0001.input.json", 1200, "", nil, nil); err != nil {
 		t.Fatalf("PrepareCompaction: %v", err)
 	}
 	after := append([]llm.Message{checkpoint}, before[2:]...)
@@ -244,7 +245,7 @@ func TestPreparedCompactionIsCancelledWhenAgentKeepsTranscript(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LinearTree: %v", err)
 	}
-	if err := tree.PrepareCompaction(messages, 2, "summary", "archive", 0); err != nil {
+	if err := tree.PrepareCompaction(messages, 2, "summary", "archive", 0, "", nil, nil); err != nil {
 		t.Fatalf("PrepareCompaction: %v", err)
 	}
 	if err := tree.SyncTranscript(messages); err != nil {
@@ -252,6 +253,62 @@ func TestPreparedCompactionIsCancelledWhenAgentKeepsTranscript(t *testing.T) {
 	}
 	if tree.pending != nil || len(tree.Entries) != 4 {
 		t.Fatalf("cancelled compaction left pending/entry: pending=%v entries=%d", tree.pending != nil, len(tree.Entries))
+	}
+}
+
+// Regression: compaction degradation can rewrite blocks in the retained suffix.
+// The tree must materialize those messages instead of linking back to the
+// original untrimmed entries and resurrecting them after resume.
+func TestCompactionMaterializesRewrittenKeptSuffix(t *testing.T) {
+	at := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	before := []llm.Message{
+		treePrompt(at, "old"), treeAssistant(at, "old answer"),
+		treePrompt(at.Add(time.Minute), "kept"), treeAssistant(at.Add(time.Minute), "large original payload"),
+	}
+	tree, err := LinearTree(at, "", before)
+	if err != nil {
+		t.Fatalf("LinearTree: %v", err)
+	}
+	checkpoint := llm.Message{Role: llm.RoleUser, Time: at.Add(2 * time.Minute), Origin: llm.MessageOriginCompactionCheckpoint, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "checkpoint"}}}
+	checkpoint.Compaction = &llm.CompactionMetadata{Summary: "summary"}
+	if err := tree.PrepareCompaction(before, 2, "summary", "archive", 100, "focus", []string{"read.go"}, []string{"changed.go"}); err != nil {
+		t.Fatalf("PrepareCompaction: %v", err)
+	}
+	after := append([]llm.Message{checkpoint}, cloneMessagesForTree(before[2:])...)
+	after[2].Content[0].Text = "[truncated payload]"
+	if err := tree.SyncTranscript(after); err != nil {
+		t.Fatalf("SyncTranscript: %v", err)
+	}
+
+	dir := t.TempDir()
+	if err := tree.Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := LoadTree(dir, tree.ActiveLeaf)
+	if err != nil {
+		t.Fatalf("LoadTree: %v", err)
+	}
+	got, err := loaded.BuildContext()
+	if err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+	if text := transcriptText(got); !strings.Contains(text, "[truncated payload]") || strings.Contains(text, "large original payload") {
+		t.Fatalf("rewritten kept suffix was not preserved: %q", text)
+	}
+	if got[0].Compaction == nil || got[0].Compaction.Focus != "focus" || !slices.Equal(got[0].Compaction.ReadFiles, []string{"read.go"}) {
+		t.Fatalf("checkpoint metadata was not reconstructed: %+v", got[0].Compaction)
+	}
+	var materialized bool
+	for _, entry := range loaded.Entries {
+		if entry.Type == EntryCompaction {
+			materialized = entry.MaterializedKept
+		}
+	}
+	if !materialized {
+		t.Fatal("rewritten suffix was not marked materialized")
+	}
+	if err := loaded.PrepareCompaction(got, 2, "again", "archive2", 50, "", nil, nil); err != nil {
+		t.Fatalf("materialized suffix lost atomic boundary: %v", err)
 	}
 }
 
