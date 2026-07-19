@@ -4,7 +4,7 @@ This document records the manual smoke matrix for `harness` (design §13) and ho
 to re-run each leg. It complements — it does not replace — the default unit and
 golden suites (`go test ./...`).
 
-The legs split in two groups:
+The legs split into automated and manual groups:
 
 - **Hermetic legs** drive the real, freshly-built `harness` binary as a
   subprocess through an in-process `harness-model-proxy` whose provider config
@@ -12,19 +12,19 @@ The legs split in two groups:
   network, no API keys). They are automated in `cmd/harness/integration_test.go`
   behind the `integration` build tag. The proxy and mock live only in `_test.go`,
   so they are never compiled into the shipped binaries.
-- **Real-API legs** require provider credentials and are **BLOCKED** in this
-  environment (no proxy-accessible `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, no
-  local Ollama). They are documented below with the exact commands to run them by
-  hand.
+- **Manual legs** cover a real downstream MCP server and live providers. They
+  require the corresponding local service or provider credentials and are not
+  part of the default test suite.
 
-## Environment at time of writing
+## Prerequisites
 
-- Go: `go1.26.4 darwin/arm64`
-- `ANTHROPIC_API_KEY`: not set
-- `OPENAI_API_KEY`: not set
-- Ollama: not installed / not running
+- Go 1.26 or newer, as declared by `go.mod`.
+- `gopls` on `PATH` to run the optional real-LSP integration leg; otherwise that
+  leg skips.
+- Provider credentials, Ollama, and a real downstream MCP server are needed only
+  for their respective manual legs.
 
-## Hermetic legs (automated, PASS)
+## Hermetic legs (automated)
 
 Run them all:
 
@@ -39,15 +39,13 @@ entire integration suite. The `-run TestSmoke` command above is a scoped subset
 that selects only the harness smoke legs in this table; the LSP legs below are
 part of the same `make test-integration` run.
 
-Last run: all three PASS, no data races.
-
 | Leg | Test | What it asserts |
 |---|---|---|
-| Local OpenAI-compatible server, tool round-trip | `TestSmokeToolRoundTrip` | The mock streams a `read_file` tool call, the harness executes it, and a **second** request to the mock carries the `role:"tool"` result with the file's content. The assistant's final text lands on **stdout**; a session file is written and passes `ValidateTranscript`. |
+| Local OpenAI-compatible server, tool round-trip | `TestSmokeToolRoundTrip` | The mock streams a `read_file` tool call, the harness executes it, and a **second** request to the mock carries the `role:"tool"` result with the file's content. The assistant's final text lands on **stdout**; the session directory's `state.json` is written and passes `ValidateTranscript`. |
 | `^C` during a stream | `TestSmokeInterruptMidStream` | The mock streams `partial answer` then stalls briefly. After the partial text reaches stdout, the test sends `SIGINT` to the subprocess. The process exits **130**; the saved session keeps the partial assistant text and passes `ValidateTranscript` (the §4 cancel-repair: keep streamed text, strip un-executed tool calls). |
 | Resume of an interrupted session | `TestSmokeResumeInterrupted` | A crafted session whose transcript ends in a **dangling `tool_use`** is resumed with `-resume`. `session.Load` repairs it with a synthesized `tool_result` (`is_error`, text `interrupted`). The mock's single request is verified to contain that `role:"tool"` / `tool_call_id` message, and the run completes against the mock's text turn. |
 
-### MCP proxy legs (automated, PASS)
+### MCP proxy legs (automated)
 
 These exercise the optional MCP proxy end to end without a network or any real
 downstream server: a fake in-process proxy (or the real `harness-mcp-proxy`
@@ -91,14 +89,14 @@ go test -tags=integration ./cmd/harness/ -run TestIntegration -v
 | Real `gopls` over the shim | `TestIntegrationGopls` | Drives `harness lsp serve` against a real `gopls` over a tiny temp Go module — server selection, root detection, launch + handshake, `didOpen` — then a `mcp__lsp__definition` call (resolves `Foo` to `main.go:3`) and a `mcp__lsp__diagnostics` call (reports the `undefinedThing` error). **Skipped** when `gopls` is not on `PATH`. |
 | Production proxy chain | `TestIntegrationProxyChain` | Builds `harness` and `harness-mcp-proxy` and runs the real chain: a local `harness-mcp-proxy serve -stdio` hosts `harness lsp serve` as a downstream; the test confirms the shim's tools surface under the `mcp__lsp__` namespace (e.g. `mcp__lsp__definition`) — which is what lets harness register them. No language server is launched (`tools/list` is static), and this production stdio chain opens no metrics listener or collectors. |
 
-### Real downstream MCP server (BLOCKED — run by hand)
+### Real downstream MCP server (manual)
 
 To smoke a real downstream MCP server, write a proxy config at
 `~/.config/harness-mcp-proxy/config.json` (one `mcpServers` entry, stdio or
 http; see the README), then:
 
 ```sh
-go build ./cmd/...
+make
 
 # Start the proxy yourself — harness never spawns it. Leave it running:
 ./harness-mcp-proxy serve &
@@ -147,7 +145,7 @@ records it, and replies with a scripted SSE stream (OpenAI chunk shape:
 `choices[].delta` for text, `choices[].delta.tool_calls[]` fragments for a tool
 call, `finish_reason`, a trailing usage chunk, then `data: [DONE]`).
 
-## Real-API legs (BLOCKED — run by hand once credentials exist)
+## Real-API legs (manual; requires credentials)
 
 These exercise the live provider dialects end to end through
 `harness-model-proxy`. Start the proxy in a separate shell first; `harness`
@@ -276,12 +274,12 @@ To reproduce the interrupt/resume legs against a live API rather than the mock:
 
 ```sh
 # Start a turn that will take a while, then press Ctrl-C once mid-stream:
-./harness -model anthropic:claude-opus-4-8 -session /tmp/s.json
+./harness -model anthropic:claude-opus-4-8 -session /tmp/harness-smoke-session
 > write a very long essay about distributed systems
 # ^C  -> [cancelled], partial text kept; ^C again (or at the idle prompt) -> exit 130
 
 # Resume the saved session and continue:
-./harness -model anthropic:claude-opus-4-8 -resume /tmp/s.json -p "continue"
+./harness -model anthropic:claude-opus-4-8 -resume /tmp/harness-smoke-session -p "continue"
 ```
 
 Expect: the resumed transcript is re-sent intact; if the prior run was saved

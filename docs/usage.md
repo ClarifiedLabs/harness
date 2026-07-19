@@ -85,10 +85,12 @@ interrupted.
 -i, -initial-prompt <prompt>   run an initial prompt, then continue in the REPL
 -model <provider>:<model>   model proxy target id
 -model-proxy-url <url>   harness-model-proxy URL (default http://127.0.0.1:8765)
+-model-proxy-api-key <key>   API key for harness-model-proxy (also HARNESS_MODEL_PROXY_API_KEY)
+-mcp-proxy-api-key <key>   API key for harness-mcp-proxy (also HARNESS_MCP_PROXY_API_KEY)
 -system-prompt <text|@file>    replace the static system prompt
 -no-env           omit the environment context block (cwd/os/date/git)
--resume <file>    load a session transcript and continue
--session <file>   explicit session save path
+-resume <session-dir>    load a saved session and continue
+-session <session-dir>   explicit session directory
 -histfile <path>      REPL history file path
 -histfilesize <n>     max REPL history entries stored on disk (0 disables, default 1000)
 -histsize <n>         max REPL history entries loaded into memory (0 disables, default 1000)
@@ -115,8 +117,10 @@ interrupted.
 -image-detail <level>   default image detail: auto, low, high, or original
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
 -agent <name>     agent: auto (default), explore, plan, independent, or a config-defined agent
+-handoff-agent <name>   default implementation agent for plan handoffs (default auto)
 -search-tools <mode>   search tools to expose: auto, grep, rg, or both
 -web-search <mode>     server-side web search: off or auto (default off)
+-trace-proxy      send W3C trace headers to the model and MCP proxies
 -v                show tool result snippets (first ~5 lines, dimmed) and tool-call progress details
 -tool-stream      show tool-call progress details (default false)
 -show-diffs       show per-tool-call file diffs for built-in file edits (default true; use -show-diffs=false to disable)
@@ -504,6 +508,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/mode`, `/mode <name>` | alias for `/agent` |
 | `/plan` | alias for `/agent plan` |
 | `/auto` | alias for `/agent auto` |
+| `/handoff [agent]` | review the recorded plan and, after approval, switch to an implementation agent and start the implementation turn |
 | `/background` | list background jobs |
 | `/background <id>` | show a background job's status, result, and transcript path |
 | `/background cancel <id>` | cancel a running background job |

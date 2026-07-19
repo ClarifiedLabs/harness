@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -1065,15 +1068,6 @@ func TestBadFormatValueIsUsageError(t *testing.T) {
 	}
 }
 
-// helpFlags are every flag the design §10 table lists. The -h usage screen must
-// name every one of them so the help is an accurate reference.
-var helpFlags = []string{
-	"-p", "-i", "-initial-prompt", "-model", "-model-proxy-url", "-system-prompt",
-	"-no-env", "-resume", "-session", "-max-turns", "-default-context-window", "-context-window",
-	"-reasoning", "-reasoning-summary", "-responses-stateful", "-trace-proxy", "-image-detail", "-image", "-agent", "-search-tools", "-web-search", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-format", "-show-config",
-	"-agents", "-models", "-check-model-proxy", "-repl-edit-mode", "-hooks",
-}
-
 // -h and --help are help requests, not usage errors: Load reports ErrHelp so the
 // caller can print a proper usage screen and exit 0 (design §10).
 func TestHelpFlagReturnsErrHelp(t *testing.T) {
@@ -1242,15 +1236,32 @@ func TestSaveReplEditModePreservesOtherConfigKeys(t *testing.T) {
 	}
 }
 
-// Usage writes a screen that names every design §10 flag with its default, so the
-// help output is a complete and accurate reference.
+// Usage writes a screen that names every registered flag with its default, so the
+// help output and canonical usage guide remain complete references.
 func TestUsageListsEveryFlag(t *testing.T) {
 	var b bytes.Buffer
 	Usage(&b)
 	out := b.String()
-	for _, f := range helpFlags {
-		if !strings.Contains(out, f) {
-			t.Errorf("usage text missing flag %q:\n%s", f, out)
+
+	usageDoc, err := os.ReadFile(filepath.Join("..", "..", "docs", "usage.md"))
+	if err != nil {
+		t.Fatalf("read usage documentation: %v", err)
+	}
+	flagSection := markdownSection(t, string(usageDoc), "## Flags", "## Configuration And Environment")
+
+	fs, _ := newFlagSet()
+	fs.VisitAll(func(f *flag.Flag) {
+		flagToken := "-" + f.Name
+		if !documentedFlag(out, f.Name) {
+			t.Errorf("usage text missing registered flag %q:\n%s", flagToken, out)
+		}
+		if !documentedFlag(flagSection, f.Name) {
+			t.Errorf("docs/usage.md flag section missing registered flag %q", flagToken)
+		}
+	})
+	for _, name := range []string{"h", "help", "version"} {
+		if !documentedFlag(flagSection, name) {
+			t.Errorf("docs/usage.md flag section missing manual flag alias %q", "-"+name)
 		}
 	}
 	// -max-turns default (250) must be visible so the reference is accurate.
@@ -1259,6 +1270,71 @@ func TestUsageListsEveryFlag(t *testing.T) {
 	}
 	if !strings.Contains(out, "256000") {
 		t.Errorf("usage text should show the -default-context-window default 256000:\n%s", out)
+	}
+}
+
+func TestExampleConfigUsesOnlySupportedKeys(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "examples", "harness", "config.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	checkJSONKeysMatchType(t, data, reflect.TypeOf(fileConfig{}), "config")
+}
+
+func markdownSection(t *testing.T, text, start, end string) string {
+	t.Helper()
+	startAt := strings.Index(text, start)
+	if startAt < 0 {
+		t.Fatalf("documentation missing section %q", start)
+	}
+	text = text[startAt+len(start):]
+	endAt := strings.Index(text, end)
+	if endAt < 0 {
+		t.Fatalf("documentation section %q missing end marker %q", start, end)
+	}
+	return text[:endAt]
+}
+
+func documentedFlag(section, name string) bool {
+	pattern := `(?m)(?:^|[\s,])--?` + regexp.QuoteMeta(name) + `(?:$|[\s,=<])`
+	return regexp.MustCompile(pattern).MatchString(section)
+}
+
+func checkJSONKeysMatchType(t *testing.T, raw []byte, typ reflect.Type, path string) {
+	t.Helper()
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	switch typ.Kind() {
+	case reflect.Struct:
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &object); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		fields := make(map[string]reflect.Type, typ.NumField())
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			name := strings.Split(field.Tag.Get("json"), ",")[0]
+			if name != "" && name != "-" {
+				fields[name] = field.Type
+			}
+		}
+		for name, value := range object {
+			fieldType, ok := fields[name]
+			if !ok {
+				t.Errorf("%s contains unsupported key %q", path, name)
+				continue
+			}
+			checkJSONKeysMatchType(t, value, fieldType, path+"."+name)
+		}
+	case reflect.Map:
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &object); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		for name, value := range object {
+			checkJSONKeysMatchType(t, value, typ.Elem(), path+"."+name)
+		}
 	}
 }
 

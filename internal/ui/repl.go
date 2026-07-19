@@ -244,7 +244,7 @@ type queuedMaintenanceUsage struct {
 const helpText = `commands:
   /help            list commands
   /exit, /quit     save and exit
-  /clear           reset conversation; rotate to a fresh session file
+  /clear           reset conversation; rotate to a fresh session directory
   /compact         force compaction now
   /context [file]  dump current model context, or save it as JSON
   /usage           cumulative session tokens and cost

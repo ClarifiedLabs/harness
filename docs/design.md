@@ -136,6 +136,7 @@ type Message struct {
     Role                Role                `json:"role"`
     Time                time.Time           `json:"time,omitempty"`
     Phase               string              `json:"phase,omitempty"` // assistant only: commentary | final_answer
+    Origin              MessageOrigin       `json:"origin,omitempty"` // prompt | steer | internal | compaction_checkpoint
     Content             []ContentBlock      `json:"content"`
     ParallelToolBatches []ParallelToolBatch `json:"parallel_tool_batches,omitempty"`
 }
@@ -147,6 +148,9 @@ const (
     BlockImage      BlockKind = "image"
     BlockToolUse    BlockKind = "tool_use"
     BlockToolResult BlockKind = "tool_result"
+    BlockThinking         BlockKind = "thinking"
+    BlockRedactedThinking BlockKind = "redacted_thinking"
+    BlockReasoning        BlockKind = "reasoning"
 )
 
 // ContentBlock is a tagged union; exactly the fields for Kind are set.
@@ -173,6 +177,15 @@ type ContentBlock struct {
     ResultForID string `json:"result_for_id,omitempty"` // matches a ToolUseID
     ResultText  string `json:"result_text,omitempty"`
     ResultError bool   `json:"result_error,omitempty"`
+
+    // Anthropic thinking and redacted-thinking replay
+    Thinking          string `json:"thinking,omitempty"`
+    ThinkingSignature string `json:"thinking_signature,omitempty"`
+    RedactedData      string `json:"redacted_data,omitempty"`
+
+    // Responses encrypted reasoning replay
+    ReasoningID        string `json:"reasoning_id,omitempty"`
+    ReasoningEncrypted string `json:"reasoning_encrypted,omitempty"`
 }
 ```
 
@@ -187,6 +200,11 @@ Design notes:
 - **JSON tags are provider-neutral** (`kind`, `tool_use_id`, …). Session files never
   contain raw provider wire JSON, so a session started against Anthropic resumes
   against an OpenAI-compatible server and vice versa.
+- **`Origin` is transcript-only provenance.** It preserves prompt, steering,
+  internal, and compaction-checkpoint boundaries; provider adapters ignore it.
+- **Reasoning blocks are opaque replay state.** Anthropic thinking/signatures and
+  Responses encrypted reasoning items are stored provider-neutrally, replayed only
+  to compatible requests, and never treated as ordinary user-visible text.
 - **`ParallelToolBatches` is local execution metadata.** It appears on the user message
   carrying tool results and is ignored by provider request builders. Each entry names,
   in emission order, every tool-use ID in one group selected for concurrent dispatch.
@@ -202,9 +220,10 @@ they are flat views of the corresponding content blocks:
 
 ```go
 type ToolCall struct { // from a BlockToolUse
-    ID    string
-    Name  string
-    Input json.RawMessage
+    ID                string
+    Name              string
+    Input             json.RawMessage
+    InvalidInputError string // malformed streamed args; Input contains a valid diagnostic object
 }
 
 type ToolResult struct { // becomes a BlockToolResult
@@ -237,28 +256,32 @@ any assistant `Phase` outside `""`, `AssistantPhaseCommentary` (`commentary`), o
 
 ### Wire mapping
 
-| Internal | OpenAI Chat Completions | Anthropic Messages |
-|---|---|---|
-| `Request.System` | leading `{"role":"system","content":…}` message | top-level `"system"` string |
-| user text | `{"role":"user","content":"…"}` | `{"role":"user","content":[{"type":"text",…}]}` |
-| user image | `{"type":"image_url","image_url":{"url":"data:<media>;base64,<data>","detail":…}}` inside structured user content | `{"type":"image","source":{"type":"base64","media_type":…,"data":…}}` |
-| assistant text + tool_use | `{"role":"assistant","content":"…","tool_calls":[{"id","type":"function","function":{"name","arguments":<JSON-string>}}]}` | `{"role":"assistant","content":[{"type":"text",…},{"type":"tool_use","id","name","input":<object>}]}` |
-| tool_result | separate `{"role":"tool","tool_call_id":…,"content":…}` message per result | `{"type":"tool_result","tool_use_id":…,"content":…,"is_error":…}` block inside a user message |
+| Internal | OpenAI Chat Completions | OpenAI Responses | Anthropic Messages |
+|---|---|---|---|
+| `Request.System` | leading `{"role":"system","content":…}` message | top-level `instructions` | top-level `system` blocks |
+| user text | `{"role":"user","content":"…"}` | `message` item with `input_text` content | user message with `text` content |
+| user image | structured `image_url` content with a data URL and detail | `input_image` content with a data URL and detail | `image` content with a base64 source |
+| assistant text | assistant message content | `message` item with `output_text` content and optional phase | assistant message with `text` content |
+| tool_use | assistant `tool_calls[].function` with JSON-string arguments | `function_call` item with string arguments | `tool_use` content with object input |
+| tool_result | sibling `role:"tool"` message | `function_call_output` item | `tool_result` content inside a user message |
+| opaque reasoning replay | ignored | `reasoning` item with encrypted content | signed `thinking` or opaque `redacted_thinking` content |
 
 Mapping subtleties that must be handled:
 
 - OpenAI `function.arguments` is a JSON **string** (`"{\"path\":\"x\"}"`); Anthropic
   `input` is a JSON **object**. A call with no arguments must serialize as `"{}"` for
   OpenAI, never `""`.
-- OpenAI tool results are **sibling messages, not blocks**: each `BlockToolResult` is
-  hoisted into its own `role:"tool"` message, placed immediately after the assistant
-  message that issued the calls, in call order.
+- OpenAI Chat Completions tool results are **sibling messages, not blocks**: each
+  `BlockToolResult` is hoisted into its own `role:"tool"` message, placed immediately
+  after the assistant message that issued the calls, in call order. OpenAI Responses
+  emits a `function_call_output` item instead.
 - Internal error-result text contains only the explanation; `ResultError` is the
-  canonical error signal. OpenAI has no `is_error` field on tool messages, so its
-  adapters prefix exactly one `ERROR: ` in the content string. Anthropic sends the
-  unprefixed explanation with `is_error: true`.
+  canonical error signal. Neither OpenAI wire format has an `is_error` field, so both
+  OpenAI adapters prefix exactly one `ERROR: ` in the result string. Anthropic sends
+  the unprefixed explanation with `is_error: true`.
 - An assistant message with tool calls but no text serializes with `content` omitted
-  (OpenAI) / no text block (Anthropic).
+  (OpenAI Chat Completions) or no text block (Anthropic). OpenAI Responses represents
+  the tool calls as standalone `function_call` items.
 - For Chat Completions, an assistant message that carries an image or multiple content
   blocks serializes `content` as a structured **parts array**; a plain text message keeps
   `content` as a bare string.
@@ -289,10 +312,13 @@ type Request struct {
     System      string
     Messages    []Message
     Tools       []ToolSchema
+    ServerTools []ServerTool
     MaxTokens   int      // 0 = automatic policy (see §5.4)
     Temperature *float64 // nil = omit
     Reasoning   ReasoningConfig
     StopSeqs    []string
+    EstimatedInputTokens int // caller estimate; 0 asks the dialect to estimate
+    ContextWindowHint    int // effective override or provider-learned window
     StoreResponse      bool
     PreviousResponseID string
     RequestContext     []string // request-only hook/todo/background context
@@ -349,6 +375,10 @@ type StreamEvent struct {
 
     Text  string // EventTextDelta / EventReasoningSummary
     Phase string // EventAssistantPhase
+    Signature    string // Anthropic signed-thinking replay
+    RedactedData string // Anthropic opaque redacted thinking
+    ReasoningID        string // Responses reasoning item id
+    ReasoningEncrypted string // Responses encrypted reasoning replay
 
     // EventToolCall*; Index disambiguates parallel calls within one turn.
     Index     int
@@ -598,6 +628,8 @@ type Usage struct {
     CacheReadTokens  int
     CacheWriteTokens int
     ReasoningTokens  int // Responses reasoning tokens; 0 for Anthropic (counted in output)
+    CostUSD          float64
+    CostKnown        bool
 }
 ```
 
@@ -617,16 +649,22 @@ double as the proxy catalog's on-disk schema (`Price`, `ModelInfo`, `ProviderCon
 ```go
 type Price struct {
     Input, Output, CacheRead, CacheWrite float64 // USD per 1M tokens
-    Tiers []PriceTier                            // context-length rate steps
+    Reasoning, InputAudio, OutputAudio   float64
+    Tiers []PriceTier // context-length rate steps with the same price dimensions
 }
 type PriceTier struct {
     Threshold int
     Input, Output, CacheRead, CacheWrite float64
+    Reasoning, InputAudio, OutputAudio   float64
 }
 type ModelInfo struct {
-    ContextWindow int
-    Price         Price
-    Reasoning     *ReasoningInfo
+    ContextWindow   int
+    OutputLimit     int
+    InputModalities []string
+    ServerTools     []string
+    Price           Price
+    Shape           string
+    Reasoning       *ReasoningInfo
 }
 func (r *Registry) Cost(model string, u Usage) (usd float64, known bool)
 func (r *Registry) ContextWindow(model string) int // registry hit, else default 256_000
@@ -2052,41 +2090,11 @@ typed REPL prompts, initial `-i` prompts, and one-shot prompts auto-attach the
 image if the model supports image input. Pasted and external-editor prompts keep
 literal-safety semantics and do not auto-attach from `@` references.
 
-| command | effect |
-|---|---|
-| `/help` | list commands |
-| `/exit`, `/quit` | save, print a session token summary, and exit |
-| `/clear` | echo discarded session token/cost totals, then reset conversation and rotate to a fresh session file |
-| `/compact` | force compaction now |
-| `/context` | dump the current provider-neutral model context as JSON |
-| `/context <file>` | save the current provider-neutral model context as JSON |
-| `/usage` | cumulative input, cached input, output, reasoning tokens, and cost (also cache-write tokens when present). Usage is bucketed per model target: with one model it is a single line; after a model change it breaks down per model target and always ends with the session-total cost. The live per-prompt line shows the active model's cumulative tokens with the session-total cost; a model-changing `/agent`, `/model`, or handoff prints the breakdown before the active counters reset for the new model. |
-| `/tools` | list enabled built-in and MCP tools with descriptions, plus disabled optional tools |
-| `/image` | list images queued for the next prompt |
-| `/image <path>` | attach an image to the next prompt |
-| `/image --detail <level> <path>` | attach an image with per-image detail |
-| `/image --clear` | clear queued images |
-| `/edit [draft]` | open an external editor for the next prompt |
-| `/save [file]` | force save (optionally elsewhere) |
-| `/model` | choose a configured model target; interactive runs can optionally save it as the default |
-| `/model <id>` | switch subsequent turns to model `<id>`; a near-miss falls back to a unique prefix/substring match before erroring; interactive runs can optionally save it as the default |
-| `/model <provider>:<id>` | switch to `<id>` on a specific configured provider; interactive runs can optionally save it as the default |
-| `/reasoning` | list reasoning controls for the current model |
-| `/reasoning <profile>` | switch reasoning profile for subsequent turns |
-| `/reasoning summary <auto\|concise\|detailed\|none>` | switch Responses API reasoning summaries for subsequent turns |
-| `/effort [profile]` | alias for `/reasoning [profile]` |
-| `/agent` | list agents and descriptions, marking the current one and agents delegatable from it |
-| `/agent <name>` | switch the active agent |
-| `/mode`, `/mode <name>` | alias for `/agent` |
-| `/plan` | alias for `/agent plan` |
-| `/auto` | alias for `/agent auto` |
-| `/handoff [agent]` | hand the recorded plan to an implementation agent after y/N approval: archive the planning transcript, switch agent (and model when requested), reseed a clean context with the plan pointer plus the brief, and start implementation (§14) |
-| `/background` | list background jobs |
-| `/background <id>` | show a background job's status, result, and transcript path |
-| `/background cancel <id>` | cancel a running background job |
-| `/skills` | list available skills |
-| `/vi on\|off` | enable or disable vi-style prompt editing (persisted as the default) |
-| `!command` | run a local shell command at an interactive TTY prompt |
+The canonical command inventory and operator-facing behavior live in the
+[usage reference](usage.md#repl-commands). `internal/ui.App.command` dispatches
+those commands; state-changing commands such as `/clear`, `/compact`, `/model`,
+`/agent`, and `/handoff` also invalidate or rotate the relevant session,
+continuation, prompt-cache, and prewarm state described in their owning sections.
 
 Anthropic usage does not currently expose a separate reasoning-token field;
 extended thinking is counted in output tokens, so the reasoning total remains
@@ -2101,52 +2109,11 @@ prefix wins, threshold `1 + len(cmd)/3`).
 
 ### Flags
 
-```
--p <prompt|->     one-shot mode; "-" or piped stdin reads the prompt from stdin
--i, -initial-prompt <prompt>   run an initial prompt, then continue in the REPL
--model <provider>:<model>   model proxy target id
--model-proxy-url <url>
--system-prompt <text|@file>    replace the static system prompt
--no-env           omit environment context block
--resume <file>    load a session transcript and continue
--session <file>   explicit session save path
--max-turns <n>    turns per prompt; <=0 means unlimited (default 250)
--max-prompt-tokens <n>   stop a prompt after this many accumulated tokens; 0 = unlimited (default 0)
--max-output-tokens <n> per-turn output cap; 0 = automatic (default 0)
--tool-timeout <s>      per-tool-call timeout backstop in seconds; <=0 disables (default 600)
--histfile <path>      REPL history file path (default <stateDir>/harness/history)
--histfilesize <n>     max REPL history entries stored on disk (default 1000, 0 disables)
--histsize <n>         max REPL history entries loaded into memory (default 1000, 0 disables)
--default-context-window <n>
--context-window <n>
--reasoning <profile>
--reasoning-summary <auto|concise|detailed|none>
--responses-stateful   Responses previous_response_id continuation (default true)
--no-steer          disable in-prompt steering: queue input for the next prompt instead of injecting it before the next turn (default off)
--image-detail <level>   default image detail: auto, low, high, or original
--image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
--agent <name>
--search-tools <auto|grep|rg|both>
--web-search <off|auto>
--v                show tool result snippets and tool-call progress details
--tool-stream      show tool-call progress details
--show-diffs       show per-tool-call file diffs for built-in file edits (default true)
--q, --quiet       suppress status messages and reasoning output unless -reasoning-summary is set
---log-level <level>  diagnostic log level: debug, info, warn, error (also LOG_LEVEL)
--no-color
--timestamps <mode>  status timestamps: short (default), full/long, or none
--no-timestamps      alias for -timestamps=none
--repl-prompt <text>    REPL input prompt format
--repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
--format <text|json>  output format for informational commands (default text)
--show-config     dump resolved config, including defaults, as JSON and exit
--debug-request   dump the first provider-neutral model request as JSON and exit without calling the model
--agents          list configured agents and exit
--models          list configured providers and models and exit
--check-model-proxy  check harness-model-proxy reachability and exit
--hooks <file>    replace configured hooks with this hook config file
--config <file>    alternate config path
-```
+The exhaustive flag inventory is maintained in the
+[usage reference](usage.md#flags). `internal/config.newFlagSet` is the parsing
+source of truth and also backs `config.Usage`, so runtime `-h` output cannot drift
+from accepted flags. Configuration resolution remains flags > environment > file
+> defaults, except for the documented config-only structured settings.
 
 `-show-config` includes the effective merged agent definitions and static
 `system_prompt`; it exits before contacting the model proxy. Dynamic runtime

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -206,6 +207,70 @@ func TestREPLHelpPromptExit(t *testing.T) {
 	if !strings.Contains(out.String(), "the answer") {
 		t.Errorf("assistant text should reach stdout, out=%q", out.String())
 	}
+}
+
+func TestREPLCommandDocumentationMatchesVocabulary(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "usage.md"))
+	if err != nil {
+		t.Fatalf("read usage documentation: %v", err)
+	}
+	section := string(data)
+	start := strings.Index(section, "## REPL Commands")
+	if start < 0 {
+		t.Fatal("docs/usage.md missing REPL Commands section")
+	}
+	section = section[start:]
+	tableStart := strings.Index(section, "| command | effect |")
+	if tableStart < 0 {
+		t.Fatal("docs/usage.md missing REPL command table")
+	}
+	section = section[tableStart:]
+	tableEnd := strings.Index(section, "\n\n")
+	if tableEnd < 0 {
+		t.Fatal("docs/usage.md REPL command table has no end")
+	}
+	documented := replCommandTableSet(section[:tableEnd])
+	help := replCommandSet(helpText)
+	known := make(map[string]bool, len(knownCommands))
+	for _, command := range knownCommands {
+		known[command] = true
+		if !help[command] {
+			t.Errorf("REPL help text missing known command %q", command)
+		}
+		if !documented[command] {
+			t.Errorf("docs/usage.md REPL command table missing known command %q", command)
+		}
+	}
+	for command := range help {
+		if !known[command] {
+			t.Errorf("REPL help text documents unknown command %q", command)
+		}
+	}
+	for command := range documented {
+		if !known[command] {
+			t.Errorf("docs/usage.md REPL command table documents unknown command %q", command)
+		}
+	}
+}
+
+func replCommandSet(text string) map[string]bool {
+	commands := map[string]bool{}
+	for _, command := range regexp.MustCompile(`/[a-z]+`).FindAllString(text, -1) {
+		commands[command] = true
+	}
+	return commands
+}
+
+func replCommandTableSet(table string) map[string]bool {
+	var commandCells strings.Builder
+	for _, row := range strings.Split(table, "\n") {
+		cells := strings.Split(row, "|")
+		if len(cells) >= 3 {
+			commandCells.WriteString(cells[1])
+			commandCells.WriteByte('\n')
+		}
+	}
+	return replCommandSet(commandCells.String())
 }
 
 func TestREPLSeparatesSubmittedPromptFromModelResponse(t *testing.T) {
