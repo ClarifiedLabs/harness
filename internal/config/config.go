@@ -266,8 +266,7 @@ type FileAgentConfig struct {
 	AllowedTools []string `json:"allowed_tools"`
 	MCPTools     string   `json:"mcp_tools"`
 	Prompt       string   `json:"prompt"`
-	Provider     string   `json:"provider"`
-	Model        string   `json:"model"`
+	Model        string   `json:"model"` // provider-qualified model-proxy target id
 	Reasoning    string   `json:"reasoning"`
 }
 
@@ -281,7 +280,6 @@ type ImageAttachment struct {
 // Provider connection settings and secrets belong to harness-model-proxy, not
 // the harness process.
 type fileConfig struct {
-	Provider                  string                     `json:"provider"`
 	Model                     string                     `json:"model"`
 	ModelProxyURL             string                     `json:"model_proxy_url"`
 	ModelProxyAPIKey          string                     `json:"model_proxy_api_key"`
@@ -400,7 +398,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		return Config{}, err
 	}
 
-	fProvider, fModel, fModelProxyURL := f.provider, f.model, f.modelProxyURL
+	fModel, fModelProxyURL := f.model, f.modelProxyURL
 	fModelProxyAPIKey, fMCPProxyAPIKey := f.modelProxyAPIKey, f.mcpProxyAPIKey
 	fSystemPrompt, fNoEnv := f.systemPrompt, f.noEnv
 	fResume, fSession := f.resume, f.session
@@ -423,12 +421,8 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 
 	c.Model = resolveString(set["model"], *fModel,
 		getenv("HARNESS_MODEL"), fc.Model, "")
-	c.Provider = resolveString(set["provider"], *fProvider,
-		getenv("HARNESS_PROVIDER"), fc.Provider, "")
 	if provider, model, ok := SplitProviderModel(c.Model); ok {
-		if c.Provider == "" {
-			c.Provider = provider
-		}
+		c.Provider = provider
 		c.Model = model
 	}
 	c.ModelProxyURL = resolveString(set["model-proxy-url"], *fModelProxyURL,
@@ -984,7 +978,7 @@ func parseImageAttachment(spec, defaultDetail string) (ImageAttachment, error) {
 // back both Load (parsing) and Usage (the -h screen) — one source of truth, so
 // the help can never drift from what is actually parsed (design §10).
 type flags struct {
-	provider, model, modelProxyURL   *string
+	model, modelProxyURL             *string
 	modelProxyAPIKey, mcpProxyAPIKey *string
 	systemPrompt                     *string
 	noEnv                            *bool
@@ -1040,8 +1034,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.initialPrompt = &initialPrompt
 	fs.StringVar(f.initialPrompt, "i", "", "initial interactive prompt; run it first, then continue in the REPL")
 	fs.StringVar(f.initialPrompt, "initial-prompt", "", "initial interactive prompt; run it first, then continue in the REPL")
-	f.provider = fs.String("provider", "", "model proxy provider id")
-	f.model = fs.String("model", "", "model id")
+	f.model = fs.String("model", "", "model proxy target id (<provider>:<model>)")
 	f.modelProxyURL = fs.String("model-proxy-url", "", "harness-model-proxy URL")
 	f.modelProxyAPIKey = fs.String("model-proxy-api-key", "", "API key for harness-model-proxy (also HARNESS_MODEL_PROXY_API_KEY)")
 	f.mcpProxyAPIKey = fs.String("mcp-proxy-api-key", "", "API key for harness-mcp-proxy (also HARNESS_MCP_PROXY_API_KEY)")
@@ -1153,10 +1146,10 @@ func normalizeConfigAtFileRef(v, baseDir string) string {
 	return "@" + filepath.Join(baseDir, path)
 }
 
-// SaveSelectedModel writes provider/model/reasoning settings into the harness
-// config file, preserving any existing top-level keys. Missing files are
-// created atomically.
-func SaveSelectedModel(path, provider, model, reasoning string) error {
+// SaveSelectedModel writes model/reasoning settings into the harness config
+// file, preserving any existing top-level keys. Model is a provider-qualified
+// model-proxy target id. Missing files are created atomically.
+func SaveSelectedModel(path, model, reasoning string) error {
 	if strings.TrimSpace(path) == "" {
 		return fmt.Errorf("config path is required")
 	}
@@ -1175,14 +1168,11 @@ func SaveSelectedModel(path, provider, model, reasoning string) error {
 			return err
 		}
 	}
-	raw["provider"], err = json.Marshal(provider)
-	if err != nil {
-		return err
-	}
 	raw["model"], err = json.Marshal(model)
 	if err != nil {
 		return err
 	}
+	delete(raw, "provider")
 	delete(raw, "reasoning_effort")
 	delete(raw, "reasoning_enabled")
 	delete(raw, "reasoning_budget_tokens")

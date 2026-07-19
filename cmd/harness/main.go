@@ -263,7 +263,7 @@ func run(env environment) int {
 	promptLogWriter := ui.NewPromptRedrawWriter(stderr)
 
 	// Load a resumed session up front: its saved agent selects the tool set and
-	// any agent-specific provider/model when no -agent flag overrides it.
+	// any agent-specific model target when no -agent flag overrides it.
 	var resumed *session.Session
 	if cfg.Resume != "" {
 		s, err := session.Load(cfg.Resume)
@@ -1317,7 +1317,6 @@ type agentListEntry struct {
 	AllowedTools []string `json:"allowed_tools"`
 	MCPTools     string   `json:"mcp_tools"`
 	HasPrompt    bool     `json:"has_prompt"`
-	Provider     string   `json:"provider,omitempty"`
 	Model        string   `json:"model,omitempty"`
 	Selected     bool     `json:"selected"`
 }
@@ -1343,7 +1342,6 @@ func buildAgentsListOutput(cfg config.Config) (*agentsListOutput, error) {
 			AllowedTools: append([]string(nil), agent.AllowedTools...),
 			MCPTools:     string(agent.MCPTools),
 			HasPrompt:    strings.TrimSpace(agent.Prompt) != "",
-			Provider:     agent.Provider,
 			Model:        agent.Model,
 			Selected:     name == selected,
 		})
@@ -1406,7 +1404,7 @@ func formatAgentsListText(out agentsListOutput) string {
 			name += " (selected)"
 		}
 		parts := []string{
-			"[" + agentListModelSummary(agent.Provider, agent.Model) + "]",
+			"[" + agentListModelSummary(agent.Model) + "]",
 			"[mcp: " + agent.MCPTools + "]",
 		}
 		if strings.TrimSpace(agent.Description) != "" {
@@ -1478,19 +1476,12 @@ func modelListServerToolsText(tools []string) string {
 	return strings.Join(cleaned, ",")
 }
 
-func agentListModelSummary(provider, model string) string {
-	provider = strings.TrimSpace(provider)
+func agentListModelSummary(model string) string {
 	model = strings.TrimSpace(model)
-	switch {
-	case provider == "" && model == "":
+	if model == "" {
 		return "default model"
-	case provider == "":
-		return "default provider/" + model
-	case model == "":
-		return provider + "/default model"
-	default:
-		return provider + "/" + model
 	}
+	return model
 }
 
 func modelListPrice(price llm.Price) *llm.Price {
@@ -1555,7 +1546,6 @@ func fileAgentDefinitions(agents map[string]config.FileAgentConfig) map[string]a
 			AllowedTools: fa.AllowedTools,
 			MCPTools:     fa.MCPTools,
 			Prompt:       fa.Prompt,
-			Provider:     fa.Provider,
 			Model:        fa.Model,
 			Reasoning:    fa.Reasoning,
 		}
@@ -1571,7 +1561,6 @@ func configAgentsFromDefinitions(agents map[string]agentdef.Definition) map[stri
 			AllowedTools: a.AllowedTools,
 			MCPTools:     string(a.MCPTools),
 			Prompt:       a.Prompt,
-			Provider:     a.Provider,
 			Model:        a.Model,
 			Reasoning:    a.Reasoning,
 		}
@@ -1718,11 +1707,8 @@ type catalogSelection struct {
 }
 
 func agentModelInputs(def agentdef.Definition, provider, model string) (string, string) {
-	if def.Provider != "" {
-		provider = def.Provider
-	}
 	if def.Model != "" {
-		model = def.Model
+		return "", def.Model
 	}
 	return provider, model
 }
@@ -1851,7 +1837,6 @@ func agentSummaries(agents map[string]agentdef.Definition, parentTools []string)
 		out = append(out, ui.AgentSummary{
 			Name:        name,
 			Description: a.Description,
-			Provider:    a.Provider,
 			Model:       a.Model,
 			Delegatable: delegatable[name],
 		})
@@ -2132,10 +2117,10 @@ func reasoningProfilePromptCurrent(current string, valid bool) string {
 }
 
 func saveSelectedModel(path, provider, model string, reasoning llm.ReasoningConfig) error {
-	if provider == model {
-		provider = ""
+	if provider != "" && !strings.Contains(model, ":") {
+		model = provider + ":" + model
 	}
-	return config.SaveSelectedModel(path, provider, model, reasoning.Profile)
+	return config.SaveSelectedModel(path, model, reasoning.Profile)
 }
 
 func writableConfigPath(args []string, getenv func(string) string) string {

@@ -1,5 +1,4 @@
 {
-  "provider": "",
   "model": "",
   "model_proxy_url": "http://127.0.0.1:8765",
   "system_prompt": "@../../prompts/system.txt",
@@ -39,28 +38,24 @@
       "description": "Default agent; the model decides what to do.",
       "mcp_tools": "all",
       "prompt": "",
-      "provider": "",
       "model": ""
     },
     "explore": {
       "description": "Use proactively for broad search, architecture or dependency tracing, root-cause investigation, and questions spanning many files; not for a single known-file lookup.",
       "mcp_tools": "read_only",
       "prompt": "@../../prompts/agents/explore.txt",
-      "provider": "",
       "model": ""
     },
     "independent": {
       "description": "Complete the task end to end without pausing for input.",
       "mcp_tools": "all",
       "prompt": "@../../prompts/agents/independent.txt",
-      "provider": "",
       "model": ""
     },
     "plan": {
       "description": "Collaborate on an implementation plan without modifying the project.",
       "mcp_tools": "read_only",
       "prompt": "@../../prompts/agents/plan.txt",
-      "provider": "",
       "model": ""
     }
   },

@@ -217,7 +217,6 @@ type testInfoAgentJSON struct {
 	AllowedTools []string `json:"allowed_tools"`
 	MCPTools     string   `json:"mcp_tools"`
 	HasPrompt    bool     `json:"has_prompt"`
-	Provider     string   `json:"provider"`
 	Model        string   `json:"model"`
 	Selected     bool     `json:"selected"`
 }
@@ -302,8 +301,7 @@ func TestRunOneShotAssistantToStdout(t *testing.T) {
 func TestRunOneShotEnablesAdvertisedWebSearch(t *testing.T) {
 	fp := llmtest.New("fake", okStep())
 	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{
-		"-provider", "openrouter",
-		"-model", "openai/gpt-5.5",
+		"-model", "openrouter:openai/gpt-5.5",
 		"-web-search", "auto",
 		"-p", "hello",
 	}, fp, "")
@@ -330,8 +328,7 @@ func TestRunOneShotEnablesAdvertisedWebSearch(t *testing.T) {
 func TestRunOneShotDoesNotEnableUnadvertisedWebSearch(t *testing.T) {
 	fp := llmtest.New("fake", okStep())
 	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{
-		"-provider", "openrouter",
-		"-model", "openai/gpt-5.5",
+		"-model", "openrouter:openai/gpt-5.5",
 		"-web-search", "auto",
 		"-p", "hello",
 	}, fp, "")
@@ -506,7 +503,7 @@ func TestRunInitialPromptImageFlagSendsImageOnce(t *testing.T) {
 func TestRunOneShotImageFlagSkipsTextOnlyModel(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	path := writeMainPNG(t)
-	env, _, errw, _ := fakeProviderEnv(t, []string{"-provider", "openai", "-model", "gpt-5.5", "-p", "describe it", "-image", path}, fp, "")
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "openai:gpt-5.5", "-p", "describe it", "-image", path}, fp, "")
 
 	code := run(env)
 	if code != ui.ExitOK {
@@ -870,7 +867,7 @@ func TestRunEnvBlockReportsAbsoluteCwd(t *testing.T) {
 // and exits 0 (the prior defect exited 2 with a terse "flag: help requested").
 func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 	flags := []string{
-		"-p", "-i", "-initial-prompt", "-provider", "-model", "-model-proxy-url", "-system-prompt",
+		"-p", "-i", "-initial-prompt", "-model", "-model-proxy-url", "-system-prompt",
 		"-no-env", "-resume", "-session", "-max-turns", "-max-output-tokens", "-default-context-window", "-context-window",
 		"-reasoning", "-reasoning-summary", "-trace-proxy", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks",
 	}
@@ -898,8 +895,7 @@ func TestRunDebugRequestDumpsPromptAndSkipsModelStream(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{
 		"--debug-request",
-		"-provider", "openai",
-		"-model", "gpt-5.5",
+		"-model", "openai:gpt-5.5",
 		"-reasoning", "high",
 		"-p", "inspect request",
 	}, fp, "")
@@ -1094,8 +1090,7 @@ func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
 		"agents":{
 			"security":{
 				"description":"Security review",
-				"provider":"openai",
-				"model":"gpt-5.5"
+				"model":"openai:gpt-5.5"
 			}
 		}
 	}`
@@ -1124,7 +1119,7 @@ func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
 		"explore              [default model] [mcp: read_only] Use proactively for broad search",
 		"independent          [default model] [mcp: all] Complete the task end to end without pausing for input.",
 		"plan                 [default model] [mcp: read_only] Collaborate on an implementation plan without modifying the project.",
-		"security (selected)  [openai/gpt-5.5] [mcp: all] Security review",
+		"security (selected)  [openai:gpt-5.5] [mcp: all] Security review",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("agents output missing %q:\n%s", want, got)
@@ -1274,8 +1269,7 @@ func TestRunAgentsFlagJSONListsResolvedAgentsWithoutProxy(t *testing.T) {
 		"agents":{
 			"security":{
 				"description":"Security review",
-				"provider":"openai",
-				"model":"gpt-5.5"
+				"model":"openai:gpt-5.5"
 			}
 		}
 	}`
@@ -1304,7 +1298,7 @@ func TestRunAgentsFlagJSONListsResolvedAgentsWithoutProxy(t *testing.T) {
 		t.Fatalf("metadata = version %d default %q selected %q\n%s", got.Version, got.DefaultAgent, got.SelectedAgent, out.String())
 	}
 	security := findJSONAgent(t, got.Agents, "security")
-	if !security.Selected || security.Provider != "openai" || security.Model != "gpt-5.5" || security.Description != "Security review" {
+	if !security.Selected || security.Model != "openai:gpt-5.5" || security.Description != "Security review" {
 		t.Fatalf("security agent = %+v\n%s", security, out.String())
 	}
 	plan := findJSONAgent(t, got.Agents, "plan")
@@ -1533,8 +1527,7 @@ func TestRunShowConfigIncludesEffectiveAgentsAndSystemPrompt(t *testing.T) {
 				"description":   "Review the current change.",
 				"allowed_tools": []string{"read_file"},
 				"prompt":        "@" + agentPath,
-				"provider":      "openai",
-				"model":         "gpt-5.5",
+				"model":         "openai:gpt-5.5",
 			},
 		},
 	})
@@ -1583,8 +1576,8 @@ func TestRunShowConfigIncludesEffectiveAgentsAndSystemPrompt(t *testing.T) {
 	if review["prompt"] != "review prompt expanded" {
 		t.Fatalf("review prompt = %v, want expanded prompt\n%s", review["prompt"], out.String())
 	}
-	if review["provider"] != "openai" || review["model"] != "gpt-5.5" {
-		t.Fatalf("review provider/model = %v/%v, want openai/gpt-5.5\n%s", review["provider"], review["model"], out.String())
+	if _, ok := review["provider"]; ok || review["model"] != "openai:gpt-5.5" {
+		t.Fatalf("review model config = %v, want only openai:gpt-5.5\n%s", review, out.String())
 	}
 	plan, ok := agents["plan"].(map[string]any)
 	if !ok || plan["prompt"] == "" {
@@ -1785,7 +1778,7 @@ func TestRunPromptsForReplacementModelWhenConfiguredSelectionUnavailable(t *test
 	}{
 		{
 			name:       "provider unavailable",
-			configJSON: `{"provider":"xiaomi","model":"mimo-v2.5-pro"}`,
+			configJSON: `{"model":"xiaomi:mimo-v2.5-pro"}`,
 			stdin:      "\n2\n\nn\n/exit\n",
 			wantError:  `target "xiaomi:mimo-v2.5-pro" is not available from the model proxy`,
 			wantLine:   "model: openai:gpt-5.5",
@@ -1830,7 +1823,7 @@ func TestRunPromptsForReplacementModelWhenConfiguredSelectionUnavailable(t *test
 
 func TestRunOneShotUnavailableConfiguredSelectionDoesNotPrompt(t *testing.T) {
 	fp := llmtest.New("fake")
-	env, _, errw, _ := fakeProviderEnv(t, []string{"-provider", "xiaomi", "-model", "mimo-v2.5-pro", "-p", "hi"}, fp, "")
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "xiaomi:mimo-v2.5-pro", "-p", "hi"}, fp, "")
 
 	if code := run(env); code != ui.ExitUsage {
 		t.Fatalf("exit = %d, want usage error; errw=%q", code, errw.String())
@@ -1849,7 +1842,7 @@ func TestRunOneShotUnavailableConfiguredSelectionDoesNotPrompt(t *testing.T) {
 
 func TestRunReasoningProfileRejectedWhenProxyCatalogSaysUnsupported(t *testing.T) {
 	fp := llmtest.New("fake")
-	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-4o", "-reasoning", "high", "-p", "hi"}, fp, "")
+	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-model", "openai:gpt-4o", "-reasoning", "high", "-p", "hi"}, fp, "")
 	proxy.addTarget(protocol.Target{
 		ID:            "openai:gpt-4o",
 		DisplayName:   "gpt-4o",
@@ -1871,7 +1864,7 @@ func TestRunReasoningProfileRejectedWhenProxyCatalogSaysUnsupported(t *testing.T
 
 func TestRunInvalidReasoningProfileRejected(t *testing.T) {
 	fp := llmtest.New("fake")
-	env, _, errw, _, _ := fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-5.5", "-reasoning", "ultra", "-p", "hi"}, fp, "")
+	env, _, errw, _, _ := fakeProviderEnvWithProxy(t, []string{"-model", "openai:gpt-5.5", "-reasoning", "ultra", "-p", "hi"}, fp, "")
 
 	if code := run(env); code != ui.ExitUsage {
 		t.Fatalf("exit = %d, want usage error; errw=%q", code, errw.String())
@@ -1886,7 +1879,7 @@ func TestRunInvalidReasoningProfileRejected(t *testing.T) {
 
 func TestRunReasoningProfileForwardedToProxy(t *testing.T) {
 	fp := llmtest.New("fake", okStep())
-	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-provider", "openrouter", "-model", "openai/gpt-5.5", "-reasoning", "none", "-p", "hi"}, fp, "")
+	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-model", "openrouter:openai/gpt-5.5", "-reasoning", "none", "-p", "hi"}, fp, "")
 
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("exit = %d, want ok; errw=%q", code, errw.String())
@@ -1948,8 +1941,7 @@ func TestExplicitReasoningOutputFlag(t *testing.T) {
 func TestRunContextWindowOverrideStillWins(t *testing.T) {
 	fp := llmtest.New("fake", okStep())
 	env, _, errw, _ := fakeProviderEnv(t, []string{
-		"-provider", "openrouter",
-		"-model", "openai/gpt-5.5",
+		"-model", "openrouter:openai/gpt-5.5",
 		"-context-window", "64000",
 		"-p", "hi",
 	}, fp, "")
@@ -2005,7 +1997,7 @@ func TestRunResumeFlagsWinWarning(t *testing.T) {
 
 	fp := llmtest.New("fake", okStep())
 	env, _, errw, _ := fakeProviderEnv(t,
-		[]string{"-model", "claude-opus-4-8", "-provider", "anthropic", "-resume", sessPath, "-p", "continue"},
+		[]string{"-model", "anthropic:claude-opus-4-8", "-resume", sessPath, "-p", "continue"},
 		fp, "")
 
 	if code := run(env); code != ui.ExitOK {
@@ -2857,7 +2849,7 @@ func TestRunQuietSuppressesReasoningOutputUnlessExplicitlyEnabled(t *testing.T) 
 		},
 		Stop: llm.StopEndTurn,
 	})
-	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-5.5", "-q"}, fp, "hi\n/exit\n")
+	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-model", "openai:gpt-5.5", "-q"}, fp, "hi\n/exit\n")
 
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("quiet exit code = %d, want 0; errw=%q", code, errw.String())
@@ -2879,7 +2871,7 @@ func TestRunQuietSuppressesReasoningOutputUnlessExplicitlyEnabled(t *testing.T) 
 		},
 		Stop: llm.StopEndTurn,
 	})
-	env, out, errw, _, proxy = fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-5.5", "-q", "-reasoning-summary=auto"}, fp, "hi\n/exit\n")
+	env, out, errw, _, proxy = fakeProviderEnvWithProxy(t, []string{"-model", "openai:gpt-5.5", "-q", "-reasoning-summary=auto"}, fp, "hi\n/exit\n")
 
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("explicit exit code = %d, want 0; errw=%q", code, errw.String())
@@ -2979,7 +2971,7 @@ func TestRunConfigAgentPromptOverrideKeepsTools(t *testing.T) {
 	}
 }
 
-func TestRunConfigAgentCanSetProviderAndModel(t *testing.T) {
+func TestRunConfigAgentCanSetQualifiedModel(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := `{
@@ -2987,8 +2979,7 @@ func TestRunConfigAgentCanSetProviderAndModel(t *testing.T) {
 		"agents":{
 			"style":{
 				"description":"Style review",
-				"provider":"openai",
-				"model":"gpt-5.5",
+				"model":"openai:gpt-5.5",
 				"allowed_tools":["read_file"],
 				"prompt":"STYLE REVIEW PROMPT"
 			}
@@ -3015,7 +3006,7 @@ func TestRunConfigAgentCanSetProviderAndModel(t *testing.T) {
 
 func TestRunDoesNotManageResponsesStateInHarness(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
-	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-5.5", "-p", "hi"}, fp, "")
+	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-model", "openai:gpt-5.5", "-p", "hi"}, fp, "")
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("responses exit code = %d, want 0; errw=%q", code, errw.String())
 	}
@@ -3024,7 +3015,7 @@ func TestRunDoesNotManageResponsesStateInHarness(t *testing.T) {
 	}
 
 	fp = llmtest.New("fake", okStepWithUsage(1, 1))
-	env, _, errw, _, proxy = fakeProviderEnvWithProxy(t, []string{"-provider", "openai", "-model", "gpt-5.5", "-responses-stateful=false", "-p", "hi"}, fp, "")
+	env, _, errw, _, proxy = fakeProviderEnvWithProxy(t, []string{"-model", "openai:gpt-5.5", "-responses-stateful=false", "-p", "hi"}, fp, "")
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("responses disabled exit code = %d, want 0; errw=%q", code, errw.String())
 	}
@@ -3033,7 +3024,7 @@ func TestRunDoesNotManageResponsesStateInHarness(t *testing.T) {
 	}
 
 	fp = llmtest.New("fake", okStepWithUsage(1, 1))
-	env, _, errw, _, proxy = fakeProviderEnvWithProxy(t, []string{"-provider", "anthropic", "-model", "claude-opus-4-8", "-p", "hi"}, fp, "")
+	env, _, errw, _, proxy = fakeProviderEnvWithProxy(t, []string{"-model", "anthropic:claude-opus-4-8", "-p", "hi"}, fp, "")
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("anthropic exit code = %d, want 0; errw=%q", code, errw.String())
 	}
@@ -3042,7 +3033,7 @@ func TestRunDoesNotManageResponsesStateInHarness(t *testing.T) {
 	}
 
 	fp = llmtest.New("fake", okStepWithUsage(1, 1))
-	env, _, errw, _, proxy = fakeProviderEnvWithProxy(t, []string{"-provider", "openai-codex", "-model", "gpt-5.5", "-p", "hi"}, fp, "")
+	env, _, errw, _, proxy = fakeProviderEnvWithProxy(t, []string{"-model", "openai-codex:gpt-5.5", "-p", "hi"}, fp, "")
 	proxy.addTarget(protocol.Target{
 		ID:            "openai-codex:gpt-5.5",
 		DisplayName:   "gpt-5.5",
@@ -3058,15 +3049,14 @@ func TestRunDoesNotManageResponsesStateInHarness(t *testing.T) {
 	}
 }
 
-func TestRunREPLAgentListShowsProviderModelConfig(t *testing.T) {
+func TestRunREPLAgentListShowsModelConfig(t *testing.T) {
 	fp := llmtest.New("fake")
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := `{
 		"agents":{
 			"security":{
 				"description":"Security review",
-				"provider":"openai",
-				"model":"gpt-5.5",
+				"model":"openai:gpt-5.5",
 				"allowed_tools":["read_file"],
 				"prompt":"SECURITY"
 			}
@@ -3081,8 +3071,8 @@ func TestRunREPLAgentListShowsProviderModelConfig(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
 	got := errw.String()
-	if !strings.Contains(got, "security        [openai/gpt-5.5] [delegatable] Security review") {
-		t.Fatalf("/agent output missing configured provider/model, stderr=%q", got)
+	if !strings.Contains(got, "security        [openai:gpt-5.5] [delegatable] Security review") {
+		t.Fatalf("/agent output missing configured model, stderr=%q", got)
 	}
 	if !strings.Contains(got, "current agent: auto [anthropic:claude-opus-4-8]") ||
 		!strings.Contains(got, "auto (current)  [inherit current]") {
@@ -3118,8 +3108,7 @@ func TestRunDelegateNamedAgentUsesDefinition(t *testing.T) {
 		"agents":{
 			"style":{
 				"description":"Review style after implementation",
-				"provider":"openai",
-				"model":"gpt-5.5",
+				"model":"openai:gpt-5.5",
 				"allowed_tools":["read_file"],
 				"prompt":"STYLE AGENT PROMPT"
 			}

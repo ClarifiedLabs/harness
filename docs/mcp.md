@@ -205,7 +205,7 @@ Generate and store a key, then provide it to harness:
 
 ```sh
 harness-mcp-proxy generate-api-key [-api-keys-file path] [-ttl 720h] laptop
-HARNESS_MCP_PROXY_API_KEY=<key> HARNESS_MCP_ENABLE=true harness -provider <provider> -model <model>
+HARNESS_MCP_PROXY_API_KEY=<key> HARNESS_MCP_ENABLE=true harness -model <provider>:<model>
 ```
 
 Harness also reads `mcp.api_key` from `~/.config/harness/config.json`. MCP proxy

@@ -119,18 +119,6 @@ func TestLoadSplitsProviderModel(t *testing.T) {
 	}
 }
 
-func TestProviderPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
-	checkPrecedence(t, precedenceCase[string]{
-		file:     `{"provider":"openai"}`,
-		env:      map[string]string{"HARNESS_PROVIDER": "anthropic"},
-		flagArgs: []string{"-provider", "openai"},
-		got:      func(c Config) string { return c.Provider },
-		wantFlag: "openai",
-		wantEnv:  "anthropic",
-		wantFile: "openai",
-	})
-}
-
 func TestModelProxyURLPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
 	checkPrecedence(t, precedenceCase[string]{
 		file:     `{"model_proxy_url":"http://file.example"}`,
@@ -177,16 +165,6 @@ func TestTraceProxyPrecedenceFlagBeatsEnvBeatsFile(t *testing.T) {
 		wantEnv:  false,
 		wantFile: true,
 	})
-}
-
-func TestExplicitProviderIsPreserved(t *testing.T) {
-	c, err := Load([]string{"-model", "claude-opus-4-8", "-provider", "openai"}, noEnv, "")
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if c.Provider != "openai" {
-		t.Fatalf("provider %q, want openai (explicit overrides inference)", c.Provider)
-	}
 }
 
 // HARNESS_* env mapping covers the user-facing flags.
@@ -1090,7 +1068,7 @@ func TestBadFormatValueIsUsageError(t *testing.T) {
 // helpFlags are every flag the design §10 table lists. The -h usage screen must
 // name every one of them so the help is an accurate reference.
 var helpFlags = []string{
-	"-p", "-i", "-initial-prompt", "-provider", "-model", "-model-proxy-url", "-system-prompt",
+	"-p", "-i", "-initial-prompt", "-model", "-model-proxy-url", "-system-prompt",
 	"-no-env", "-resume", "-session", "-max-turns", "-default-context-window", "-context-window",
 	"-reasoning", "-reasoning-summary", "-responses-stateful", "-trace-proxy", "-image-detail", "-image", "-agent", "-search-tools", "-web-search", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-format", "-show-config",
 	"-agents", "-models", "-check-model-proxy", "-repl-edit-mode", "-hooks",
@@ -1129,7 +1107,7 @@ func TestModelColonWithoutProviderQualifierStaysModel(t *testing.T) {
 
 func TestSaveSelectedModelCreatesConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.json")
-	if err := SaveSelectedModel(path, "openai", "gpt-5.5", "HIGH"); err != nil {
+	if err := SaveSelectedModel(path, "openai:gpt-5.5", "HIGH"); err != nil {
 		t.Fatalf("SaveSelectedModel: %v", err)
 	}
 	c, err := Load(nil, noEnv, path)
@@ -1146,7 +1124,7 @@ func TestSaveSelectedModelCreatesConfig(t *testing.T) {
 
 func TestSaveSelectedModelPreservesOtherConfigKeys(t *testing.T) {
 	path := writeConfig(t, `{"agent":"plan","max_turns":7,"provider":"old","model":"old-model","reasoning_effort":"max","reasoning_enabled":true,"reasoning_budget_tokens":2048}`)
-	if err := SaveSelectedModel(path, "anthropic", "claude-opus-4-8", ""); err != nil {
+	if err := SaveSelectedModel(path, "anthropic:claude-opus-4-8", ""); err != nil {
 		t.Fatalf("SaveSelectedModel: %v", err)
 	}
 	c, err := Load(nil, noEnv, path)
@@ -1166,14 +1144,14 @@ func TestSaveSelectedModelPreservesOtherConfigKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
-	if strings.Contains(string(data), "reasoning_effort") || strings.Contains(string(data), "reasoning_enabled") || strings.Contains(string(data), "reasoning_budget_tokens") || strings.Contains(string(data), `"reasoning"`) {
-		t.Fatalf("saved config should remove reasoning keys:\n%s", data)
+	if strings.Contains(string(data), `"provider"`) || strings.Contains(string(data), "reasoning_effort") || strings.Contains(string(data), "reasoning_enabled") || strings.Contains(string(data), "reasoning_budget_tokens") || strings.Contains(string(data), `"reasoning"`) {
+		t.Fatalf("saved config should remove standalone provider and reasoning keys:\n%s", data)
 	}
 }
 
 func TestSaveSelectedModelDoesNotHTMLEscapeConfigStrings(t *testing.T) {
 	path := writeConfig(t, `{"repl_prompt":"({git_branch}) {cwd} [{model} | {agent}]> ","htmlish":"<&>"}`)
-	if err := SaveSelectedModel(path, "openai", "gpt-5.5", ""); err != nil {
+	if err := SaveSelectedModel(path, "openai:gpt-5.5", ""); err != nil {
 		t.Fatalf("SaveSelectedModel: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -1194,7 +1172,7 @@ func TestSaveSelectedModelDoesNotHTMLEscapeConfigStrings(t *testing.T) {
 
 func TestSaveSelectedModelStillEscapesRequiredJSONStringCharacters(t *testing.T) {
 	path := writeConfig(t, `{"custom":"quote \" backslash \\ newline\n"}`)
-	if err := SaveSelectedModel(path, "openai", "gpt-5.5", ""); err != nil {
+	if err := SaveSelectedModel(path, "openai:gpt-5.5", ""); err != nil {
 		t.Fatalf("SaveSelectedModel: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -1248,7 +1226,7 @@ func TestSaveReplEditModeRejectsInvalid(t *testing.T) {
 }
 
 func TestSaveReplEditModePreservesOtherConfigKeys(t *testing.T) {
-	path := writeConfig(t, `{"agent":"plan","provider":"openai","model":"gpt-5.5","repl_edit_mode":"emacs"}`)
+	path := writeConfig(t, `{"agent":"plan","model":"openai:gpt-5.5","repl_edit_mode":"emacs"}`)
 	if err := SaveReplEditMode(path, "vi"); err != nil {
 		t.Fatalf("SaveReplEditMode: %v", err)
 	}
@@ -1418,7 +1396,7 @@ func TestAgentUnspecifiedIsEmpty(t *testing.T) {
 func TestAgentsObjectDecodes(t *testing.T) {
 	cfgPath := writeConfig(t, `{
 		"agents": {
-			"review": {"description":"Review changes", "allowed_tools": ["read_file", "grep"], "mcp_tools":"read_only", "prompt": "review the diff", "provider":"openai", "model":"gpt-5.5"},
+			"review": {"description":"Review changes", "allowed_tools": ["read_file", "grep"], "mcp_tools":"read_only", "prompt": "review the diff", "model":"openai:gpt-5.5"},
 			"plan": {"prompt": "custom plan prompt"}
 		}
 	}`)
@@ -1439,8 +1417,8 @@ func TestAgentsObjectDecodes(t *testing.T) {
 	if review.Prompt != "review the diff" {
 		t.Errorf("review.Prompt = %q", review.Prompt)
 	}
-	if review.Provider != "openai" || review.Model != "gpt-5.5" {
-		t.Errorf("review provider/model = %q/%q", review.Provider, review.Model)
+	if review.Model != "openai:gpt-5.5" {
+		t.Errorf("review model = %q", review.Model)
 	}
 	if review.MCPTools != "read_only" {
 		t.Errorf("review.MCPTools = %q", review.MCPTools)

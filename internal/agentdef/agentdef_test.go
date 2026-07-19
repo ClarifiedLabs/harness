@@ -152,12 +152,11 @@ func TestResolveMCPToolsOverride(t *testing.T) {
 func TestResolveMetadataOverrideKeepsOtherFields(t *testing.T) {
 	m := Resolve(map[string]FileDefinition{"plan": {
 		Description: "custom desc",
-		Provider:    "openai",
-		Model:       "gpt-5.5",
+		Model:       "openai:gpt-5.5",
 	}})
 	plan := m["plan"]
-	if plan.Description != "custom desc" || plan.Provider != "openai" || plan.Model != "gpt-5.5" {
-		t.Fatalf("metadata = description %q provider %q model %q", plan.Description, plan.Provider, plan.Model)
+	if plan.Description != "custom desc" || plan.Model != "openai:gpt-5.5" {
+		t.Fatalf("metadata = description %q model %q", plan.Description, plan.Model)
 	}
 	if plan.Prompt != Builtins()["plan"].Prompt {
 		t.Errorf("prompt not preserved: %q", plan.Prompt)

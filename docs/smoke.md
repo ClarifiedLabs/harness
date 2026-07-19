@@ -106,7 +106,7 @@ go build ./cmd/...
 curl -fsS http://127.0.0.1:9091/metrics
 
 # Drive a model through an MCP tool:
-HARNESS_MCP_ENABLE=true ./harness -model claude-opus-4-8 \
+HARNESS_MCP_ENABLE=true ./harness -model anthropic:claude-opus-4-8 \
   -p "use an MCP tool to <task>"
 ```
 
@@ -126,7 +126,7 @@ To smoke a non-default proxy address, add
 
 # Point harness at the URL (config mcp.proxy = "http://127.0.0.1:8420", or env):
 HARNESS_MCP_ENABLE=true HARNESS_MCP_PROXY=http://127.0.0.1:8420 \
-  ./harness -model claude-opus-4-8 -p "use an MCP tool to <task>"
+  ./harness -model anthropic:claude-opus-4-8 -p "use an MCP tool to <task>"
 ```
 
 Expect: the same `mcp: connected` line for the one-shot command; one-shot uses
@@ -212,11 +212,11 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # Start or restart harness-model-proxy in this environment after setup.
 
 # One-shot, assistant text captured to a file (tool summaries/usage go to stderr):
-./harness -provider anthropic -model claude-opus-4-8 \
+./harness -model anthropic:claude-opus-4-8 \
   -p "list the Go files in this directory using your tools" > answer.txt
 
 # Interactive REPL (try /help, a prompt that needs a tool, then /usage, /exit):
-./harness -provider anthropic -model claude-opus-4-8
+./harness -model anthropic:claude-opus-4-8
 ```
 
 Expect: model cost checkpoints and a per-turn usage line on stderr with dollar
@@ -230,9 +230,9 @@ final answer on stdout, and a session auto-saved under
 export OPENAI_API_KEY=sk-...
 # Start or restart harness-model-proxy in this environment after setup.
 
-./harness -provider openai -model gpt-5.5 \
+./harness -model openai:gpt-5.5 \
   -p "read README.md and summarize it in two sentences" > answer.txt
-./harness -provider openai -model gpt-5.5            # interactive
+./harness -model openai:gpt-5.5            # interactive
 ```
 
 Expect: same behavior as above. First-party OpenAI models use the Responses
@@ -262,7 +262,7 @@ cat > ~/.config/harness-model-proxy/ollama.json <<'JSON'
 JSON
 
 ./harness-model-proxy
-./harness -provider ollama -model llama3.2 -p "what files are in this directory?"
+./harness -model ollama:llama3.2 -p "what files are in this directory?"
 ```
 
 Expect: the proxy uses the OpenAI-compatible dialect with an empty API key,
@@ -275,12 +275,12 @@ To reproduce the interrupt/resume legs against a live API rather than the mock:
 
 ```sh
 # Start a turn that will take a while, then press Ctrl-C once mid-stream:
-./harness -provider anthropic -model claude-opus-4-8 -session /tmp/s.json
+./harness -model anthropic:claude-opus-4-8 -session /tmp/s.json
 > write a very long essay about distributed systems
 # ^C  -> [cancelled], partial text kept; ^C again (or at the idle prompt) -> exit 130
 
 # Resume the saved session and continue:
-./harness -provider anthropic -model claude-opus-4-8 -resume /tmp/s.json -p "continue"
+./harness -model anthropic:claude-opus-4-8 -resume /tmp/s.json -p "continue"
 ```
 
 Expect: the resumed transcript is re-sent intact; if the prior run was saved

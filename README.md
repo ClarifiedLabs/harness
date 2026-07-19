@@ -87,8 +87,8 @@ harness-model-proxy
 Then run the CLI in another shell:
 
 ```sh
-harness -provider <provider> -model <model>
-harness -provider <provider> -model <model> -p "summarize README.md"
+harness -model <provider>:<model>
+harness -model <provider>:<model> -p "summarize README.md"
 ```
 
 The proxy listens on `127.0.0.1:8765` by default. See the
@@ -101,7 +101,7 @@ optional; see [MCP servers](docs/mcp.md).
 Interactive mode starts when no prompt is provided:
 
 ```sh
-harness -provider anthropic -model claude-opus-4-8
+harness -model anthropic:claude-opus-4-8
 ```
 
 Use `-i` to send the first prompt from the command line and then continue in the
@@ -117,10 +117,8 @@ One-shot mode sends a single prompt and exits:
 harness -model openrouter:openai/gpt-5.5 -p "summarize README.md"
 ```
 
-`provider:model` selects a configured model-proxy target. If `-provider` is
-also set, harness resolves that provider's target first and reports an error
-when the model name only matches another provider. You can also configure
-defaults in `~/.config/harness/config.json` or with `HARNESS_PROVIDER` and
+`provider:model` selects a configured model-proxy target. You can also configure
+the default target as `model` in `~/.config/harness/config.json` or with
 `HARNESS_MODEL`.
 
 Saved sessions can be replayed or inspected:

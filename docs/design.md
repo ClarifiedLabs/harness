@@ -82,7 +82,7 @@ internal/config          flags > env > config-file resolution
 internal/modelsdev       optional models.dev catalog reduction for proxy setup/pricing metadata
 internal/ui              REPL, streaming renderer, tool summaries, usage line
 internal/sysprompt       embedded prompt files + environment context + AGENTS.md sections
-internal/agentdef        agent definitions (allowed tools, MCP exposure, prompt/provider/model) (§14)
+internal/agentdef        agent definitions (allowed tools, MCP exposure, prompt/model target) (§14)
 internal/hooks           command-only lifecycle hooks (SessionStart/UserPromptSubmit/Pre+PostToolUse/Pre+PostCompact/Stop)
 internal/skills          skill discovery + `$skillName` prompt expansion
 internal/todo            update_todos store + render (§9.13)
@@ -754,7 +754,7 @@ Responses API reasoning summaries default off, can be set to `auto`, `concise`,
 (`-q`/`--quiet`) suppresses reasoning summary output unless `-reasoning-summary`
 is explicitly set on the CLI.
 
-## 7. Configuration and provider selection
+## 7. Configuration and model selection
 
 Precedence: **flags > environment > config file > built-in defaults** — for settings
 that *have* a flag. A few knobs have no flag and resolve **env > config file > default**:
@@ -763,7 +763,7 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
 (agent definitions, compaction knobs, `agents_md_warn_bytes`,
 `delegate_max_turns`, `delegate_max_depth`) are config-file-only (listed below).
 
-- Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_PROVIDER`, `HARNESS_MODEL`, plus
+- Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_MODEL`, plus
   most `HARNESS_*` equivalents for user-facing flags. `trace_proxy` /
   `HARNESS_TRACE_PROXY` / `-trace-proxy` opt in to W3C Trace Context headers for
   harness-to-proxy HTTP requests. `--log-level` uses
@@ -777,7 +777,7 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   cap; default 1000, 0 disables recall). All three also have config-file keys
   (`histfile`, `histfilesize`, `histsize`) and flags (`-histfile`, `-histfilesize`,
   `-histsize`).
-- Config file (optional): `~/.config/harness/config.json` — provider, model,
+- Config file (optional): `~/.config/harness/config.json` — model,
   model_proxy_url, agent definitions, hooks, flag defaults, and
   context-efficiency knobs.
   `agents_md_warn_bytes` (applied to each AGENTS.md file independently),
@@ -973,12 +973,9 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   it even when request-time `cost_usd` can be calculated by a provider-specific
   pricer.
 - **Selection rule:** `harness` fetches `GET /v1/models` from the proxy. Model
-  selection resolves configured proxy targets, not arbitrary provider-local names.
-  With both provider and model set, harness tries `provider:model` first. If the bare
-  model name only resolves to another provider's target or alias, startup fails with a
-  provider-conflict error instead of silently switching providers. Otherwise an
-  explicit `-provider` selects a proxy provider, and model selection must come from
-  `harness` flags, environment, config, or `/model`.
+  selection resolves provider-qualified proxy target IDs, not arbitrary
+  provider-local names. The target comes from `-model`, `HARNESS_MODEL`, config
+  `model`, an agent override, or `/model`.
 - `harness --check-model-proxy` reuses the catalog request as a bounded
   reachability check and exits before session creation, tool setup, hooks, model
   selection prompts, or `/v1/stream`.
@@ -1670,7 +1667,7 @@ this subsection records the common runner those argv tools point at.
   preserving schema descriptions in `tools.Registry.Specs`; other tools retain the
   normal schema-description stripping behavior.
 - Child agents start with an empty transcript and use the requested agent
-  definition's prompt, configured tools, and optional provider/model. Delegate
+  definition's prompt, configured tools, and optional model target. Delegate
   calls cannot narrow or expand that tool set; callers select or define a different
   agent when they need a different capability bundle. If no `agent` is provided,
   the child uses exactly the current parent agent's active tools.
@@ -2084,8 +2081,7 @@ prefix wins, threshold `1 + len(cmd)/3`).
 ```
 -p <prompt|->     one-shot mode; "-" or piped stdin reads the prompt from stdin
 -i, -initial-prompt <prompt>   run an initial prompt, then continue in the REPL
--provider <name>  model proxy provider id
--model <id>
+-model <provider>:<model>   model proxy target id
 -model-proxy-url <url>
 -system-prompt <text|@file>    replace the static system prompt
 -no-env           omit environment context block
@@ -2414,7 +2410,7 @@ unit tests with `make test` (`go test ./...`) and the integration legs with
 ## 14. Agent definitions (`internal/agentdef`)
 
 An **agent definition** is a named bundle of an allowed-tool set, optional
-provider/model, description, and extra system-prompt instructions. It lets one
+model target, description, and extra system-prompt instructions. It lets one
 harness behave as a collaborative planner, autonomous worker, specialized
 reviewer, or the wide-open default without separate binaries.
 
@@ -2445,8 +2441,8 @@ reviewer, or the wide-open default without separate binaries.
   A new custom name without one is a fail-fast startup/`--agents`/`--show-config`
   error; there is no warning, generated fallback, or compatibility shim.
 - **Config `agents`** entries **field-level merge** onto a built-in of the same name:
-  a non-empty `description`, `allowed_tools`, `mcp_tools`, `prompt`, `provider`,
-  `model`, or `reasoning` replaces, and an omitted field inherits. Thus an override
+  a non-empty `description`, `allowed_tools`, `mcp_tools`, `prompt`, `model`, or
+  `reasoning` replaces, and an omitted field inherits. Thus an override
   of `auto`, `explore`, `plan`, or `independent` may inherit its built-in
   description. A new name defines a new agent (no `allowed_tools` ⇒ the full
   default set). Agent prompts
@@ -2460,12 +2456,10 @@ reviewer, or the wide-open default without separate binaries.
   explicit `allowed_tools` defaults to `all`, while an explicit `allowed_tools`
   whitelist defaults to `disabled` unless `mcp_tools` opts it back in. Explicit
   `mcp__...` names in `allowed_tools` remain strict whitelist entries.
-- **Provider/model:** an agent without provider/model uses the current session
-  provider/model. An agent with `model` only resolves using the current provider as
-  preference. An agent with `provider` and `model` requires that exact catalog pair.
-  `/agent <name>` prints the provider/model line and warns when the switch changes
-  provider or model because prompt cache may start cold and increase token usage or
-  cost.
+- **Model:** an agent without `model` uses the current session target. An agent
+  with `model` replaces it with that complete `<provider>:<model>` catalog target
+  ID. `/agent <name>` prints the model target and warns when a switch changes it
+  because prompt cache may start cold and increase token usage or cost.
 - **Per-agent reasoning:** an agent's optional `reasoning` field pins its thinking
   effort. It overrides the session base effort whenever that agent is selected
   (startup, `/agent`, delegate, or a handoff target) and is then made

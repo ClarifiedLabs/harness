@@ -1,5 +1,5 @@
 // Package agentdef defines named agent definitions: bundles of an allowed-tool
-// set, optional provider/model overrides, and extra system-prompt instructions.
+// set, an optional model target override, and extra system-prompt instructions.
 // Four built-ins ship with the harness (auto, explore, plan, independent); config-file
 // entries field-level merge onto them (an omitted field keeps the built-in
 // value) or define new agents. The agent prompt is appended to the system prompt
@@ -32,8 +32,9 @@ type Definition struct {
 	AllowedTools []string
 	MCPTools     MCPToolsMode
 	Prompt       string
-	Provider     string
-	Model        string
+	// Model is a complete provider-qualified model-proxy target id. Empty
+	// inherits the current session target.
+	Model string
 	// Reasoning pins this agent's thinking effort (provider/model dependent,
 	// e.g. low/medium/high). Empty inherits the session default. The value is
 	// validated against the live model at switch time, not here.
@@ -61,7 +62,6 @@ type FileDefinition struct {
 	AllowedTools []string `json:"allowed_tools"`
 	MCPTools     string   `json:"mcp_tools"`
 	Prompt       string   `json:"prompt"`
-	Provider     string   `json:"provider"`
 	Model        string   `json:"model"`
 	Reasoning    string   `json:"reasoning"`
 }
@@ -186,9 +186,6 @@ func ResolveWithOptions(file map[string]FileDefinition, opts Options) map[string
 		}
 		if fm.Prompt != "" {
 			a.Prompt = fm.Prompt
-		}
-		if fm.Provider != "" {
-			a.Provider = fm.Provider
 		}
 		if fm.Model != "" {
 			a.Model = fm.Model

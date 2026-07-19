@@ -1708,9 +1708,9 @@ func TestREPLAgentCommandLists(t *testing.T) {
 	app.AgentName = "plan"
 	app.AvailableAgents = []AgentSummary{
 		{Name: "auto", Description: "Default agent"},
-		{Name: "independent", Description: "Work independently", Provider: "openai"},
-		{Name: "plan", Description: "Plan changes", Provider: "anthropic", Model: "claude-opus-4-8", Delegatable: true},
-		{Name: "style", Description: "Style review", Model: "gpt-5.5", Delegatable: true},
+		{Name: "independent", Description: "Work independently"},
+		{Name: "plan", Description: "Plan changes", Model: "anthropic:claude-opus-4-8", Delegatable: true},
+		{Name: "style", Description: "Style review", Model: "openai:gpt-5.5", Delegatable: true},
 	}
 
 	in := strings.NewReader("/agent\n/exit\n")
@@ -1732,9 +1732,9 @@ func TestREPLAgentCommandLists(t *testing.T) {
 	for _, want := range []string{
 		"current agent: plan [anthropic:claude-opus-4-8]",
 		"auto            [inherit current] Default agent",
-		"independent     [openai/inherit current model] Work independently",
-		"plan (current)  [anthropic/claude-opus-4-8] [delegatable] Plan changes",
-		"style           [inherit provider/gpt-5.5] [delegatable] Style review",
+		"independent     [inherit current] Work independently",
+		"plan (current)  [anthropic:claude-opus-4-8] [delegatable] Plan changes",
+		"style           [openai:gpt-5.5] [delegatable] Style review",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("/agent output missing %q, errw=%q", want, got)
@@ -1742,7 +1742,7 @@ func TestREPLAgentCommandLists(t *testing.T) {
 	}
 	for _, notWant := range []string{
 		"auto            [inherit current] [delegatable]",
-		"independent     [openai/inherit current model] [delegatable]",
+		"independent     [inherit current] [delegatable]",
 	} {
 		if strings.Contains(got, notWant) {
 			t.Errorf("/agent output should not mark row delegatable with %q, errw=%q", notWant, got)
@@ -1758,7 +1758,7 @@ func TestREPLAgentCommandAlignsAndWrapsDescriptions(t *testing.T) {
 	app.SummaryWidth = func() int { return 54 }
 	app.AvailableAgents = []AgentSummary{
 		{Name: "auto", Description: "one two three four five six"},
-		{Name: "review", Description: "short", Provider: "openai", Model: "gpt-5.5"},
+		{Name: "review", Description: "short", Model: "openai:gpt-5.5"},
 	}
 
 	if code := Run(strings.NewReader("/agent\n/exit\n"), app, nil); code != 0 {
@@ -1768,7 +1768,7 @@ func TestREPLAgentCommandAlignsAndWrapsDescriptions(t *testing.T) {
 	for _, want := range []string{
 		"  auto (current)  [inherit current] one two three four",
 		"                  five six",
-		"  review          [openai/gpt-5.5] short",
+		"  review          [openai:gpt-5.5] short",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("/agent output missing %q:\n%s", want, got)

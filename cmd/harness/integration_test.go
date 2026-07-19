@@ -234,8 +234,7 @@ func startHarness(t *testing.T, bin, baseURL string, extraArgs ...string) (*exec
 	home := t.TempDir()
 	proxyURL := startModelProxy(t, baseURL)
 	args := append([]string{
-		"-model", "mock-model",
-		"-provider", "openai",
+		"-model", "openai:mock-model",
 		"-model-proxy-url", proxyURL,
 	}, extraArgs...)
 	// bin is the path of the harness binary this test just built with go build;

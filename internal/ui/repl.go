@@ -57,7 +57,6 @@ type ModelSelection struct {
 type AgentSummary struct {
 	Name        string
 	Description string
-	Provider    string
 	Model       string
 	Delegatable bool
 }
@@ -2499,18 +2498,11 @@ func (app *App) currentAgentModelSummary() string {
 }
 
 func (app *App) agentModelSummary(a AgentSummary) string {
-	provider := strings.TrimSpace(a.Provider)
 	model := strings.TrimSpace(a.Model)
-	switch {
-	case provider == "" && model == "":
+	if model == "" {
 		return "inherit current"
-	case provider == "":
-		return fmt.Sprintf("inherit provider/%s", model)
-	case model == "":
-		return fmt.Sprintf("%s/inherit current model", provider)
-	default:
-		return fmt.Sprintf("%s/%s", provider, model)
 	}
+	return model
 }
 
 func (app *App) switchAgent(name string) {

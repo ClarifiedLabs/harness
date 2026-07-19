@@ -7,14 +7,13 @@ agents, sessions, compaction, interrupts, and hooks.
 For tool behavior, see [tools.md](tools.md). For MCP and LSP, see
 [mcp.md](mcp.md) and [lsp.md](lsp.md).
 
-## Provider Selection
+## Model Selection
 
 `harness` fetches configured model targets from `harness-model-proxy`. A model
-value like `openrouter:openai/gpt-5.5` selects that exact proxy target. If
-`-provider` is also set, harness resolves the provider-qualified target first
-and reports an error when the model name only matches another provider. Model
+value like `openrouter:openai/gpt-5.5` selects that exact proxy target. Model
 selection belongs to `harness`: use `-model`, `HARNESS_MODEL`, config `model`,
-or `/model` in the REPL.
+or `/model` in the REPL. Model values use the proxy's `<provider>:<model>`
+target IDs.
 
 Use `harness -model-proxy-url http://host:port` when the proxy runs somewhere
 other than `127.0.0.1:8765`. When `-model-proxy-url` /
@@ -39,7 +38,7 @@ Use `-i` or `-initial-prompt` to run one prompt immediately and then continue in
 the normal REPL:
 
 ```sh
-harness -model gpt-5.5 -i "review the current git diff"
+harness -model openai:gpt-5.5 -i "review the current git diff"
 ```
 
 The initial prompt is literal text: leading `/` is not a REPL command and leading
@@ -61,7 +60,7 @@ or piped one-shot stdout stays raw model text. Bracketed status lines are
 timestamped by default; disable them when you want untimestamped diagnostics:
 
 ```sh
-harness -model gpt-5.5 -timestamps=none -p "explain this repo in one paragraph" > answer.txt
+harness -model openai:gpt-5.5 -timestamps=none -p "explain this repo in one paragraph" > answer.txt
 ```
 
 `-p -`, or piping into stdin, reads the prompt from stdin. With both a flag value
@@ -84,8 +83,7 @@ interrupted.
 ```text
 -p <prompt|->     one-shot mode; "-" or piped stdin reads the prompt from stdin
 -i, -initial-prompt <prompt>   run an initial prompt, then continue in the REPL
--provider <name>  model proxy provider id
--model <id>       model id
+-model <provider>:<model>   model proxy target id
 -model-proxy-url <url>   harness-model-proxy URL (default http://127.0.0.1:8765)
 -system-prompt <text|@file>    replace the static system prompt
 -no-env           omit the environment context block (cwd/os/date/git)
@@ -181,7 +179,7 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
 `HARNESS_TOOL_RESULT_MAX_LINES`), and the per-tool caps for `rg`, `grep`, and
 `read_file`. A few context-efficiency knobs are config-file-only.
 
-- Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_PROVIDER`, `HARNESS_MODEL`,
+- Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_MODEL`,
   `HARNESS_MAX_TURNS`, `HARNESS_MAX_TURN_TOKENS`,
   `HARNESS_MAX_OUTPUT_TOKENS`, `HARNESS_TOOL_TIMEOUT`,
   `HARNESS_DEFAULT_CONTEXT_WINDOW`, `HARNESS_TIMESTAMPS`,
@@ -201,7 +199,7 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
 - Provider API-key environment variables are read only by
   `harness-model-proxy`.
 - The optional config file is `~/.config/harness/config.json`, overrideable with
-  `-config`. It may set `model_proxy_url`, `provider`, `model`, `agent`,
+  `-config`. It may set `model_proxy_url`, `model`, `agent`,
   `agents`, `hooks`, `hook_configs`, and flag defaults. See
   `examples/harness/config.json` for a representative schema.
 - `--show-config` prints the resolved config as JSON after applying file, env,
@@ -372,7 +370,7 @@ Generate and store a key, then provide it to harness:
 
 ```sh
 harness-model-proxy generate-api-key [-api-keys-file path] [-ttl 720h] [-budget-usd 25 -budget-period 24h] laptop
-harness --model-proxy-api-key <key> -provider <provider> -model <model>
+harness --model-proxy-api-key <key> -model <provider>:<model>
 ```
 
 Harness also reads `HARNESS_MODEL_PROXY_API_KEY` and the `model_proxy_api_key`
@@ -424,7 +422,7 @@ equivalent proxy-config `metrics` object accepts `enabled` and `listen`.
 Enable opt-in tracing to correlate a harness run across model and MCP proxy logs:
 
 ```sh
-harness -trace-proxy -provider <provider> -model <model>
+harness -trace-proxy -model <provider>:<model>
 ```
 
 Harness sends standard W3C `traceparent` headers. Proxy logs that receive a valid
@@ -536,7 +534,7 @@ or submit manually. Ctrl-C and double-Esc still cancel the active turn.
 ## Agents
 
 An agent definition bundles a set of allowed tools with extra system-prompt
-instructions and optional provider/model overrides. Select one with
+instructions and an optional model target override. Select one with
 `-agent <name>`, `HARNESS_AGENT`, or `agent` in the config file. Switch
 mid-session with `/agent <name>`.
 
@@ -566,13 +564,15 @@ continue to merge onto a built-in of the same name:
       "description": "Use after implementation for an independent review of concrete security issues.",
       "allowed_tools": ["read_file", "list_dir", "grep", "git_readonly"],
       "mcp_tools": "read_only",
-      "provider": "anthropic",
-      "model": "claude-opus-4-8",
+      "model": "anthropic:claude-opus-4-8",
       "prompt": "Review the diff and surrounding code for security issues. Report only concrete findings."
     }
   }
 }
 ```
+
+An agent without `model` inherits the current session target. When set, `model`
+is a complete `<provider>:<model>` model-proxy target ID.
 
 Each agent can set `mcp_tools` to control automatic exposure of discovered MCP
 tools: `disabled`, `read_only`, or `all`. Explicit `mcp__...` names in
