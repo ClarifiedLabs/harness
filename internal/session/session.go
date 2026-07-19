@@ -1,7 +1,8 @@
-// Package session persists resumable state plus append-only replay/archive
+// Package session persists resumable state plus append-only tree/replay/archive
 // records. A session path is a directory:
 //
-//	state.json       compact state used for resume
+//	state.json       compact runtime state and active tree leaf
+//	tree.ndjson      canonical append-only conversation tree
 //	raw.ndjson       user-facing replay events
 //	compactions/     raw messages removed from active context
 //	artifacts/       full tool outputs omitted from active context
@@ -25,9 +26,9 @@ import (
 	"harness/internal/todo"
 )
 
-// Version is the on-disk schema version. v3 separates prompt, turn, attempt,
-// and maintenance events.
-const Version = 3
+// Version is the on-disk schema version. v4 moves the canonical conversation
+// from a linear state.json snapshot into tree.ndjson.
+const Version = 4
 
 const (
 	stateFile = "state.json"
@@ -36,20 +37,29 @@ const (
 
 // Session is the compact, resumable conversation state.
 type Session struct {
-	Version        int                `json:"version"`
-	Provider       string             `json:"provider"`
-	Model          string             `json:"model"`
-	Created        time.Time          `json:"created"`
-	Updated        time.Time          `json:"updated"`
-	System         string             `json:"system"`
-	Agent          string             `json:"agent,omitempty"`
-	ProxySessionID string             `json:"proxy_session_id,omitempty"`
-	Prompt         int                `json:"prompt,omitempty"`
-	Messages       []llm.Message      `json:"messages"`
-	ResponseState  *llm.ResponseState `json:"response_state,omitempty"`
-	Todos          []todo.Item        `json:"todos,omitempty"`
-	Plans          []plan.Plan        `json:"plans,omitempty"`
-	Usage          UsageTotals        `json:"usage"`
+	Version        int       `json:"version"`
+	ID             string    `json:"id"`
+	CWD            string    `json:"cwd,omitempty"`
+	ParentSession  string    `json:"parent_session,omitempty"`
+	ParentEntryID  string    `json:"parent_entry_id,omitempty"`
+	ActiveLeaf     string    `json:"active_leaf,omitempty"`
+	Provider       string    `json:"provider"`
+	Model          string    `json:"model"`
+	Created        time.Time `json:"created"`
+	Updated        time.Time `json:"updated"`
+	System         string    `json:"system"`
+	Agent          string    `json:"agent,omitempty"`
+	ProxySessionID string    `json:"proxy_session_id,omitempty"`
+	Prompt         int       `json:"prompt,omitempty"`
+	// Messages is materialized from Tree on load and is never written to
+	// state.json. It remains available to callers that need the active linear
+	// provider transcript.
+	Messages      []llm.Message      `json:"-"`
+	Tree          *Tree              `json:"-"`
+	ResponseState *llm.ResponseState `json:"response_state,omitempty"`
+	Todos         []todo.Item        `json:"todos,omitempty"`
+	Plans         []plan.Plan        `json:"plans,omitempty"`
+	Usage         UsageTotals        `json:"usage"`
 	// UsageByModel breaks usage and cost down per "provider/model" so a session
 	// that switches models still reports accurate per-model cost. Usage remains
 	// the authoritative session aggregate.
@@ -94,6 +104,36 @@ func (s Session) Save(dir string) error {
 	}
 	s.Version = Version
 	s.Messages = stampMissingMessageTimes(s.Messages, sessionTimestamp(s.Updated, s.Created))
+	// A save may happen after an interrupt while tool calls are still open. Store
+	// the same synthetic interrupted results Load historically supplied so every
+	// immutable tree segment is valid on disk.
+	s.Messages = repair(s.Messages)
+	if s.Tree == nil {
+		tree, err := LinearTree(s.Created, s.CWD, s.Messages)
+		if err != nil {
+			return fmt.Errorf("session: build tree: %w", err)
+		}
+		s.Tree = tree
+	} else if err := s.Tree.SyncTranscript(s.Messages); err != nil {
+		return err
+	}
+	if s.Tree.Header.CWD == "" {
+		s.Tree.Header.CWD = s.CWD
+	}
+	if s.Tree.Header.ParentSession == "" {
+		s.Tree.Header.ParentSession = s.ParentSession
+	}
+	if s.Tree.Header.ParentEntryID == "" {
+		s.Tree.Header.ParentEntryID = s.ParentEntryID
+	}
+	if err := s.Tree.Save(dir); err != nil {
+		return err
+	}
+	s.ID = s.Tree.Header.ID
+	s.CWD = s.Tree.Header.CWD
+	s.ParentSession = s.Tree.Header.ParentSession
+	s.ParentEntryID = s.Tree.Header.ParentEntryID
+	s.ActiveLeaf = s.Tree.ActiveLeaf
 
 	data, err := json.Marshal(s)
 	if err != nil {
@@ -144,8 +184,8 @@ func SaveChildMeta(parentDir string, meta ChildMeta) (string, error) {
 	return dir, nil
 }
 
-// Load reads dir/state.json and repairs a dangling trailing tool_use, yielding a
-// transcript that can be sent to either provider dialect.
+// Load reads state.json plus the active tree path, yielding a transcript that
+// can be sent to either provider dialect.
 func Load(dir string) (Session, error) {
 	data, err := os.ReadFile(filepath.Join(dir, stateFile))
 	if err != nil {
@@ -158,6 +198,26 @@ func Load(dir string) (Session, error) {
 	if s.Version != Version {
 		return Session{}, fmt.Errorf("session: unsupported schema version %d (want %d)", s.Version, Version)
 	}
+	if s.ID == "" {
+		return Session{}, errors.New("session: state is missing session id")
+	}
+	tree, err := LoadTree(dir, s.ActiveLeaf)
+	if err != nil {
+		return Session{}, fmt.Errorf("session: load tree: %w", err)
+	}
+	if s.ID != tree.Header.ID {
+		return Session{}, fmt.Errorf("session: state/tree id mismatch (%q != %q)", s.ID, tree.Header.ID)
+	}
+	s.ID = tree.Header.ID
+	s.CWD = tree.Header.CWD
+	s.ParentSession = tree.Header.ParentSession
+	s.ParentEntryID = tree.Header.ParentEntryID
+	s.ActiveLeaf = tree.ActiveLeaf
+	s.Tree = tree
+	s.Messages, err = tree.BuildContext()
+	if err != nil {
+		return Session{}, err
+	}
 	s.Messages = repair(s.Messages)
 	return s, nil
 }
@@ -165,21 +225,24 @@ func Load(dir string) (Session, error) {
 // Event is one append-only replay record. Display carries the exact user-facing
 // line for events that the renderer shows as dim one-liners.
 type Event struct {
-	Time    time.Time        `json:"time,omitempty"`
-	Type    string           `json:"type"`
-	Prompt  int              `json:"prompt,omitempty"`
-	Turn    int              `json:"turn,omitempty"`
-	Attempt int              `json:"attempt,omitempty"`
-	Text    string           `json:"text,omitempty"`
-	Phase   string           `json:"phase,omitempty"`
-	Display string           `json:"display,omitempty"`
-	ToolID  string           `json:"tool_id,omitempty"`
-	Tool    string           `json:"tool,omitempty"`
-	Input   json.RawMessage  `json:"input,omitempty"`
-	Images  []ImageInfo      `json:"images,omitempty"`
-	Usage   *llm.Usage       `json:"usage,omitempty"`
-	Purpose string           `json:"purpose,omitempty"`
-	Context *ContextSnapshot `json:"context,omitempty"`
+	Time        time.Time        `json:"time,omitempty"`
+	Type        string           `json:"type"`
+	Prompt      int              `json:"prompt,omitempty"`
+	Turn        int              `json:"turn,omitempty"`
+	Attempt     int              `json:"attempt,omitempty"`
+	Text        string           `json:"text,omitempty"`
+	Phase       string           `json:"phase,omitempty"`
+	Display     string           `json:"display,omitempty"`
+	ToolID      string           `json:"tool_id,omitempty"`
+	Tool        string           `json:"tool,omitempty"`
+	Input       json.RawMessage  `json:"input,omitempty"`
+	Images      []ImageInfo      `json:"images,omitempty"`
+	Usage       *llm.Usage       `json:"usage,omitempty"`
+	Purpose     string           `json:"purpose,omitempty"`
+	FromEntryID string           `json:"from_entry_id,omitempty"`
+	ToEntryID   string           `json:"to_entry_id,omitempty"`
+	Summary     string           `json:"summary,omitempty"`
+	Context     *ContextSnapshot `json:"context,omitempty"`
 }
 
 // ContextSnapshot is the session-log copy of agent.ContextEstimate. It lives in
@@ -224,6 +287,7 @@ const (
 	EventTurnComplete         = "turn_complete"
 	EventPromptUsage          = "prompt_usage"
 	EventMaintenanceUsage     = "maintenance_usage"
+	EventBranch               = "branch"
 )
 
 // AppendEvent appends ev as one JSON line to raw.ndjson under dir.
@@ -376,7 +440,7 @@ func Replay(dir string, w io.Writer, opts ReplayOptions) error {
 				fmt.Fprintln(w, strings.Join(lines, "\n"))
 				assistant.MarkPreFinalOutput()
 			}
-		case EventToolResult, EventToolDiff, EventNotice, EventTurnAttemptAbandoned, EventTurnAttemptUsage, EventTurnComplete, EventPromptUsage:
+		case EventToolResult, EventToolDiff, EventNotice, EventBranch, EventTurnAttemptAbandoned, EventTurnAttemptUsage, EventTurnComplete, EventPromptUsage:
 			assistant.Finish()
 			if ev.Display != "" && !opts.Quiet {
 				fmt.Fprintln(w, ev.Display)
@@ -925,5 +989,18 @@ func sessionTimestamp(updated, created time.Time) time.Time {
 // DefaultPath returns <stateDir>/harness/sessions/<timestamp>/.
 func DefaultPath(stateDir string, at time.Time) string {
 	name := at.UTC().Format("20060102T150405Z")
+	return filepath.Join(stateDir, "harness", "sessions", name)
+}
+
+// DefaultPathForID disambiguates a newly extracted session created in the same
+// second as its parent without relying on mutable collision checks.
+func DefaultPathForID(stateDir string, at time.Time, id string) string {
+	name := at.UTC().Format("20060102T150405Z")
+	if len(id) > 8 {
+		id = id[:8]
+	}
+	if id != "" {
+		name += "-" + id
+	}
 	return filepath.Join(stateDir, "harness", "sessions", name)
 }

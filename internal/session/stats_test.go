@@ -61,6 +61,7 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 		{Type: EventTurnComplete, Prompt: 1, Turn: 2},
 		{Type: EventTurnComplete, Prompt: 2, Turn: 1},
 		{Type: EventMaintenanceUsage, Prompt: 2, Purpose: "compaction", Usage: &maintenance},
+		{Type: EventBranch, Prompt: 2, FromEntryID: "old", ToEntryID: "new", Purpose: "tree"},
 		{Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "z", Tool: "z_tool", Input: json.RawMessage(`{}`)},
 		{Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "shell", Tool: "run_command", Input: json.RawMessage(`{"command":"SECRET shell text"}`)},
 		{Type: EventToolStart, Prompt: 1, Turn: 2, ToolID: "a", Tool: "a_tool", Input: json.RawMessage(`{}`)},
@@ -120,7 +121,8 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 		"  provider/model: anthropic/claude-test\n",
 		"  created: 2026-07-18T01:02:03Z\n",
 		"  duration: 2m0.3s\n",
-		"Conversation\n  prompts: 2\n  turns: 3\n  model calls: 4\n  retries: 1\n  maintenance calls: 1\n  maintenance usage: 9 in / 3 out\n  active messages: 1\n",
+		"Conversation\n  prompts: 2\n  turns: 3\n  model calls: 4\n  retries: 1\n  maintenance calls: 1\n  navigations: 1\n  maintenance usage: 9 in / 3 out\n  active messages: 1\n",
+		"Tree\n  entries:",
 		"  tool calls: 4 total (4 root, 0 delegates)\n",
 		"  command calls: 2 total (2 root, 0 delegates)\n",
 		"    foreground: 1 total (1 root, 0 delegates)\n",
@@ -275,7 +277,8 @@ func TestStatsEmptyOptionalDirectories(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"Conversation\n  prompts: 0\n  turns: 0\n  model calls: 0\n  retries: 0\n  maintenance calls: 0\n  active messages: 0\n",
+		"Conversation\n  prompts: 0\n  turns: 0\n  model calls: 0\n  retries: 0\n  maintenance calls: 0\n  navigations: 0\n  active messages: 0\n",
+		"Tree\n  entries: 0\n  branches: 0\n  leaves: 0\n",
 		"Tools\n  tool calls: 0 total (0 root, 0 delegates)\n  by tool: none\n",
 		"  command calls: 0 total (0 root, 0 delegates)\n",
 		"  parallel batches: 0 total (0 root, 0 delegates)\n",

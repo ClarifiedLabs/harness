@@ -2020,6 +2020,70 @@ func TestRunResumeFlagsWinWarning(t *testing.T) {
 	}
 }
 
+func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "source")
+	destinationPath := filepath.Join(dir, "destination")
+	prior := session.Session{
+		Provider: "anthropic",
+		Model:    "claude-opus-4-8",
+		Created:  time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC),
+		Updated:  time.Date(2026, 7, 19, 12, 1, 0, 0, time.UTC),
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "earlier"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "reply"}}},
+		},
+		Usage: session.UsageTotals{Usage: llm.Usage{InputTokens: 100}},
+	}
+	if err := prior.Save(sourcePath); err != nil {
+		t.Fatalf("save source: %v", err)
+	}
+	source, err := session.Load(sourcePath)
+	if err != nil {
+		t.Fatalf("load source: %v", err)
+	}
+
+	fp := llmtest.New("fake", okStepWithUsage(5, 1))
+	env, _, errw, _ := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-resume", sourcePath, "-session", destinationPath, "-p", "continue"},
+		fp, "")
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("clone run exit = %d; stderr=%q", code, errw.String())
+	}
+	child, err := session.Load(destinationPath)
+	if err != nil {
+		t.Fatalf("load clone: %v", err)
+	}
+	if child.ParentSession != source.ID || child.ParentEntryID != source.ActiveLeaf {
+		t.Fatalf("clone lineage = %q@%q, want %q@%q", child.ParentSession, child.ParentEntryID, source.ID, source.ActiveLeaf)
+	}
+	if child.Usage.InputTokens != 5 || child.Usage.OutputTokens != 1 {
+		t.Fatalf("clone usage = %+v, want only new turn usage", child.Usage)
+	}
+	if !strings.Contains(transcriptTextForMainTest(child.Messages), "working directory was not reverted") {
+		t.Fatalf("clone transcript missing workspace warning: %+v", child.Messages)
+	}
+	unchanged, err := session.Load(sourcePath)
+	if err != nil {
+		t.Fatalf("reload source: %v", err)
+	}
+	if unchanged.Usage.InputTokens != 100 {
+		t.Fatalf("source usage changed: %+v", unchanged.Usage)
+	}
+}
+
+func transcriptTextForMainTest(messages []llm.Message) string {
+	var parts []string
+	for _, message := range messages {
+		for _, block := range message.Content {
+			if block.Kind == llm.BlockText {
+				parts = append(parts, block.Text)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 func TestRunOneShotConcatenatesFlagAndStdin(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "done"}},

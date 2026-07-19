@@ -596,7 +596,7 @@ func TestREPLSavesSessionAfterTurn(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("session should be saved to %s: %v", path, err)
 	}
-	data, _ := os.ReadFile(filepath.Join(path, "state.json"))
+	data, _ := os.ReadFile(filepath.Join(path, "tree.ndjson"))
 	if !strings.Contains(string(data), "hello") {
 		t.Errorf("saved session should contain the user prompt, got %s", data)
 	}
@@ -3035,6 +3035,124 @@ func uiUserMsg(s string) llm.Message {
 
 func uiAsstMsg(s string) llm.Message {
 	return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: s}}}
+}
+
+func TestTreeCommandBranchesBeforeSelectedPromptAndPrefillsIt(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	at := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	seed := []llm.Message{
+		{Role: llm.RoleUser, Time: at, Origin: llm.MessageOriginPrompt, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}}},
+		{Role: llm.RoleAssistant, Time: at, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first answer"}}},
+		{Role: llm.RoleUser, Time: at.Add(time.Minute), Origin: llm.MessageOriginPrompt, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}},
+		{Role: llm.RoleAssistant, Time: at.Add(time.Minute), Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second answer"}}},
+	}
+	app.Agent.SetTranscript(seed)
+	if err := app.ensureSessionTree(); err != nil {
+		t.Fatalf("ensureSessionTree: %v", err)
+	}
+	selected := app.SessionTree.Entries[2]
+	read := func(string) (string, error) { return "n", nil }
+	result := app.command("/tree "+selected.ID, read)
+	if !result.prefillSet || result.prefill != "second" {
+		t.Fatalf("prefill = %q/%v, want second/true", result.prefill, result.prefillSet)
+	}
+	text := transcriptTextForUI(app.Agent.Transcript())
+	if strings.Contains(text, "second answer") || !strings.Contains(text, "working directory was not reverted") {
+		t.Fatalf("branched transcript = %q", text)
+	}
+	loaded, err := session.Load(app.SessionPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Tree.Entries) != 5 || loaded.ActiveLeaf != app.SessionTree.ActiveLeaf {
+		t.Fatalf("saved tree entries/leaf = %d/%s", len(loaded.Tree.Entries), loaded.ActiveLeaf)
+	}
+}
+
+func TestTreeCommandDefaultSummaryUsesBranchPurpose(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("left-branch summary")},
+		Stop:   llm.StopEndTurn,
+		Usage:  llm.Usage{InputTokens: 12, OutputTokens: 3},
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	at := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	seed := []llm.Message{
+		{Role: llm.RoleUser, Time: at, Origin: llm.MessageOriginPrompt, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}}},
+		{Role: llm.RoleAssistant, Time: at, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first answer"}}},
+		{Role: llm.RoleUser, Time: at.Add(time.Minute), Origin: llm.MessageOriginPrompt, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}},
+		{Role: llm.RoleAssistant, Time: at.Add(time.Minute), Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second answer"}}},
+	}
+	app.Agent.SetTranscript(seed)
+	if err := app.ensureSessionTree(); err != nil {
+		t.Fatalf("ensureSessionTree: %v", err)
+	}
+	selected := app.SessionTree.Entries[2]
+	app.command("/tree "+selected.ID, func(string) (string, error) { return "d", nil })
+	if fp.RequestCount() != 1 {
+		t.Fatalf("summary requests = %d, want 1", fp.RequestCount())
+	}
+	if fp.Requests[0].Purpose != llm.RequestPurposeBranchSummary {
+		t.Fatalf("summary purpose = %q", fp.Requests[0].Purpose)
+	}
+	if got := transcriptTextForUI(app.Agent.Transcript()); !strings.Contains(got, "left-branch summary") {
+		t.Fatalf("branch summary missing from context: %q", got)
+	}
+	if app.usage.InputTokens != 12 || app.usage.OutputTokens != 3 {
+		t.Fatalf("branch summary usage not accounted: %+v", app.usage)
+	}
+}
+
+func TestForkCommandCreatesChildSessionWithFreshUsage(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	at := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	app.Now = func() time.Time { return at.Add(2 * time.Minute) }
+	seed := []llm.Message{
+		{Role: llm.RoleUser, Time: at, Origin: llm.MessageOriginPrompt, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}}},
+		{Role: llm.RoleAssistant, Time: at, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first answer"}}},
+		{Role: llm.RoleUser, Time: at.Add(time.Minute), Origin: llm.MessageOriginPrompt, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}},
+		{Role: llm.RoleAssistant, Time: at.Add(time.Minute), Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second answer"}}},
+	}
+	app.Agent.SetTranscript(seed)
+	app.SetUsage(session.UsageTotals{Usage: llm.Usage{InputTokens: 100}})
+	if err := app.ensureSessionTree(); err != nil {
+		t.Fatalf("ensureSessionTree: %v", err)
+	}
+	parentID := app.SessionTree.Header.ID
+	originalPath := app.SessionPath
+	selected := app.SessionTree.Entries[2]
+	result := app.command("/fork "+selected.ID, func(string) (string, error) { return "n", nil })
+	if !result.prefillSet || result.prefill != "second" {
+		t.Fatalf("fork prefill = %q/%v", result.prefill, result.prefillSet)
+	}
+	if app.SessionPath == originalPath || app.usage.InputTokens != 0 {
+		t.Fatalf("fork path/usage = %q/%+v", app.SessionPath, app.usage)
+	}
+	loaded, err := session.Load(app.SessionPath)
+	if err != nil {
+		t.Fatalf("Load child: %v", err)
+	}
+	if loaded.ParentSession != parentID || loaded.Usage.InputTokens != 0 {
+		t.Fatalf("child lineage/usage = %q/%+v", loaded.ParentSession, loaded.Usage)
+	}
+	if got := transcriptTextForUI(loaded.Messages); strings.Contains(got, "second answer") || !strings.Contains(got, "first answer") {
+		t.Fatalf("forked context = %q", got)
+	}
+}
+
+func transcriptTextForUI(messages []llm.Message) string {
+	var parts []string
+	for _, message := range messages {
+		for _, block := range message.Content {
+			if block.Kind == llm.BlockText {
+				parts = append(parts, block.Text)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func TestHandoffToImplementationReseedsContext(t *testing.T) {

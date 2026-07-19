@@ -93,7 +93,7 @@ func sampleSession() Session {
 	}
 }
 
-func TestLoadAndReplayRejectPreV3SessionSchema(t *testing.T) {
+func TestLoadAndReplayRejectPreV4SessionSchema(t *testing.T) {
 	dir := t.TempDir()
 	data, err := json.Marshal(Session{Version: 2, Messages: []llm.Message{}})
 	if err != nil {
@@ -106,11 +106,11 @@ func TestLoadAndReplayRejectPreV3SessionSchema(t *testing.T) {
 		t.Fatalf("AppendEvent: %v", err)
 	}
 
-	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 3)") {
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 4)") {
 		t.Fatalf("Load error = %v, want clear v2 rejection", err)
 	}
 	var replay strings.Builder
-	if err := Replay(dir, &replay, ReplayOptions{}); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 3)") {
+	if err := Replay(dir, &replay, ReplayOptions{}); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 4)") {
 		t.Fatalf("Replay error = %v, want clear v2 rejection", err)
 	}
 }
@@ -202,6 +202,12 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if err := llm.ValidateTranscript(got.Messages); err != nil {
 		t.Fatalf("loaded transcript invalid: %v", err)
 	}
+	s.ID = got.ID
+	s.CWD = got.CWD
+	s.ParentSession = got.ParentSession
+	s.ParentEntryID = got.ParentEntryID
+	s.ActiveLeaf = got.ActiveLeaf
+	s.Tree = got.Tree
 	if !reflect.DeepEqual(s, got) {
 		t.Fatalf("round-trip mismatch:\n want %+v\n  got %+v", s, got)
 	}
@@ -232,7 +238,7 @@ func TestSaveLoadPreservesParallelToolBatches(t *testing.T) {
 	if len(batches) != 1 || !reflect.DeepEqual(batches[0].ToolUseIDs, []string{"call_1", "call_2"}) {
 		t.Fatalf("parallel tool batches = %+v, want [call_1 call_2]", batches)
 	}
-	data, err := os.ReadFile(filepath.Join(path, stateFile))
+	data, err := os.ReadFile(filepath.Join(path, treeFile))
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
@@ -351,8 +357,8 @@ func TestSaveLeavesNoTmpFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir session: %v", err)
 	}
-	if len(stateEntries) != 1 || stateEntries[0].Name() != stateFile {
-		t.Fatalf("expected only %s after save, got %v", stateFile, stateEntries)
+	if len(stateEntries) != 2 || stateEntries[0].Name() != stateFile || stateEntries[1].Name() != treeFile {
+		t.Fatalf("expected %s and %s after save, got %v", stateFile, treeFile, stateEntries)
 	}
 }
 
@@ -367,10 +373,9 @@ func TestSaveCreatesParentDirs(t *testing.T) {
 	}
 }
 
-// A transcript saved mid-turn ends with an assistant tool_use that has no
-// matching result. Loading must repair it by synthesizing an interrupted result,
-// yielding a transcript that passes ValidateTranscript.
-func TestLoadRepairsDanglingToolUse(t *testing.T) {
+// A save requested mid-turn may end with an assistant tool_use that has no
+// matching result. Save normalizes it before writing immutable tree data.
+func TestSaveRepairsDanglingToolUseBeforeTreeStorage(t *testing.T) {
 	dangling := Session{
 		Version:  Version,
 		Provider: "anthropic",
@@ -387,7 +392,7 @@ func TestLoadRepairsDanglingToolUse(t *testing.T) {
 			}},
 		},
 	}
-	// Validate the pre-repair transcript IS dangling (the bug we are fixing).
+	// Validate the pre-save transcript is dangling.
 	if err := llm.ValidateTranscript(dangling.Messages); err == nil {
 		t.Fatalf("expected dangling transcript to be invalid before repair")
 	}
@@ -453,7 +458,7 @@ func TestSavedFileIsProviderNeutral(t *testing.T) {
 	if err := sampleSession().Save(path); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	data, err := os.ReadFile(filepath.Join(path, stateFile))
+	data, err := os.ReadFile(filepath.Join(path, treeFile))
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
@@ -523,6 +528,7 @@ func TestReplayPrintsUserFacingView(t *testing.T) {
 		{Type: EventToolResult, Prompt: 1, Turn: 1, Display: `[rg pattern="panic" .] → 2 lines, 80B`},
 		{Type: EventToolDiff, Prompt: 1, Turn: 1, Display: "--- a/f.txt\n+++ b/f.txt\n@@ -1,1 +1,1 @@\n-old\n+new"},
 		{Type: EventNotice, Prompt: 1, Display: "[compacted: 6 messages → summary]"},
+		{Type: EventBranch, Prompt: 1, Display: "[tree: old → new; working directory unchanged]"},
 		{Type: EventPromptUsage, Prompt: 1, Display: "[prompt: 2 turns · 1.0k in / 100 out]"},
 	}
 	for _, ev := range events {
@@ -535,7 +541,7 @@ func TestReplayPrintsUserFacingView(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"> fix it", "I'll check now and use docs <https://docs.example.com>.", "[reasoning]\n", "  Checked the repo.", "  Next step <https://example.com>.", "[turn: 1", `[rg pattern="panic" .]`, "--- a/f.txt", "-old\n+new", "[compacted:", "[prompt:"} {
+	for _, want := range []string{"> fix it", "I'll check now and use docs <https://docs.example.com>.", "[reasoning]\n", "  Checked the repo.", "  Next step <https://example.com>.", "[turn: 1", `[rg pattern="panic" .]`, "--- a/f.txt", "-old\n+new", "[compacted:", "[tree: old", "[prompt:"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("replay missing %q:\n%s", want, got)
 		}

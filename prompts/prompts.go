@@ -30,6 +30,12 @@ func HandoffSummary() string {
 	return mustText("handoff-summary.txt")
 }
 
+// BranchSummary returns the system instruction used to summarize the portion
+// of a conversation being left behind during tree navigation.
+func BranchSummary() string {
+	return mustText("branch-summary.txt")
+}
+
 // DelegateChild returns the reporting and scope instructions appended only to
 // child-agent system prompts.
 func DelegateChild() string {

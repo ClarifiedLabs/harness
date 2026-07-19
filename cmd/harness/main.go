@@ -285,6 +285,43 @@ func run(env environment) int {
 			sessionPath = session.DefaultPath(stateDir(getenv), created)
 		}
 	}
+	resumeCloned := false
+	resumeCloneFrom := ""
+	resumeCloneTo := ""
+	if resumed != nil && cfg.Session != "" && filepath.Clean(cfg.Session) != filepath.Clean(cfg.Resume) {
+		cloneCreated := now()
+		resumeCloneFrom = resumed.Tree.ActiveLeaf
+		cloneCWD := resumed.CWD
+		if current, cwdErr := os.Getwd(); cwdErr == nil {
+			cloneCWD = current
+		}
+		cloneTree, err := resumed.Tree.Extract(resumeCloneFrom, cloneCreated, cloneCWD)
+		if err != nil {
+			fmt.Fprintf(stderr, "harness: clone resumed session: %v\n", err)
+			return ui.ExitRuntime
+		}
+		resumeCloneTo, err = cloneTree.AppendBranch(resumeCloneFrom, resumeCloneFrom, resumeCloneFrom, "", "")
+		if err != nil {
+			fmt.Fprintf(stderr, "harness: clone resumed session: %v\n", err)
+			return ui.ExitRuntime
+		}
+		cloneMessages, err := cloneTree.BuildContext()
+		if err != nil {
+			fmt.Fprintf(stderr, "harness: clone resumed session: %v\n", err)
+			return ui.ExitRuntime
+		}
+		resumed.Tree = cloneTree
+		resumed.Messages = cloneMessages
+		resumed.Created = cloneCreated
+		resumed.Updated = cloneCreated
+		resumed.Prompt = 0
+		resumed.ProxySessionID = ""
+		resumed.ResponseState = nil
+		resumed.Usage = session.UsageTotals{}
+		resumed.UsageByModel = nil
+		created = cloneCreated
+		resumeCloned = true
+	}
 	logger, diagnosticsSink, err := newHarnessLogger(promptLogWriter, cfg.LogLevel, sessionPath, !cfg.DebugRequest)
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
@@ -972,9 +1009,15 @@ func run(env environment) int {
 		Handoff:      handoffPending,
 		HandoffAgent: cfg.HandoffAgent,
 		SessionPath:  sessionPath,
-		StateDir:     stateDir(getenv),
-		Created:      created,
-		Now:          now,
+		SessionTree: func() *session.Tree {
+			if resumed != nil {
+				return resumed.Tree
+			}
+			return nil
+		}(),
+		StateDir: stateDir(getenv),
+		Created:  created,
+		Now:      now,
 		OnSessionPathChanged: func(path string) {
 			snap := delegateState.Snapshot()
 			snap.SessionPath = path
@@ -1017,18 +1060,39 @@ func run(env environment) int {
 		}
 	}
 	ag.SetCompactionArchiver(func(ctx context.Context, archive agent.CompactionArchive) (string, error) {
-		return session.SaveCompaction(app.SessionPath, session.Compaction{
+		ref, err := session.SaveCompaction(app.SessionPath, session.Compaction{
 			Time:     now(),
 			Summary:  archive.Summary,
 			Usage:    archive.Usage,
 			Messages: archive.Messages,
 		})
+		if err != nil {
+			return "", err
+		}
+		if err := app.PrepareCompaction(ag.Transcript(), len(archive.Messages), archive.Summary, ref, archive.TokensBefore); err != nil {
+			return "", err
+		}
+		return ref, nil
 	})
 	app.SetUsage(totals)
 	app.SetUsageByModel(resumedUsageByModel)
+	if resumeCloned {
+		if err := session.AppendEvent(app.SessionPath, session.Event{
+			Time:        now(),
+			Type:        session.EventBranch,
+			Display:     fmt.Sprintf("[clone: %s → %s; working directory unchanged]", resumeCloneFrom, resumeCloneTo),
+			FromEntryID: resumeCloneFrom,
+			ToEntryID:   resumeCloneTo,
+			Purpose:     "clone",
+		}); err != nil {
+			fmt.Fprintf(stderr, "[session event log failed: %v]\n", err)
+		}
+	}
 	if hookRunner != nil {
 		source := "startup"
-		if resumed != nil {
+		if resumeCloned {
+			source = "clone"
+		} else if resumed != nil {
 			source = "resume"
 		}
 		app.RunSessionStartHook(source)

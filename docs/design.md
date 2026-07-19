@@ -77,7 +77,7 @@ internal/agent           turn loop, interrupt state machine, compaction
 internal/tools           Tool interface, registry, dispatch (recover + central truncation), built-in tools; the same registry also hosts the delegate, background-job, MCP (§15), and LSP (§15a) tools
 internal/delegate        configured child-agent tool; starts child agents without an import cycle
 internal/background      process-local background job manager + tools
-internal/session         session state, replay log, compaction archives, tool artifacts
+internal/session         append-only conversation tree, mutable state, replay, archives, artifacts
 internal/config          flags > env > config-file resolution
 internal/modelsdev       optional models.dev catalog reduction for proxy setup/pricing metadata
 internal/ui              REPL, streaming renderer, tool summaries, usage line
@@ -308,7 +308,7 @@ type InputTokenCounter interface {
 
 type Request struct {
     Model       string
-    Purpose     RequestPurpose // turn|compaction|prewarm|handoff_summary; proxy normalizes others to unknown
+    Purpose     RequestPurpose // turn|compaction|prewarm|handoff_summary|branch_summary
     System      string
     Messages    []Message
     Tools       []ToolSchema
@@ -979,7 +979,8 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   `model_proxy_request_duration_seconds_total` — are labeled by `provider`,
   `model`, bounded request `purpose`, and `key`, while the
   `model_proxy_build_info` gauge is labeled by `version` only.
-  `purpose` is `turn`, `compaction`, `prewarm`, `handoff_summary`, or `unknown`;
+  `purpose` is `turn`, `compaction`, `prewarm`, `handoff_summary`,
+  `branch_summary`, or `unknown`;
   missing and unrecognized client values normalize to `unknown` to prevent label
   cardinality growth. The `key` label is the authorizing API key's stored `Name`
   (stashed in the request context by the auth middleware) or the sentinel
@@ -2205,7 +2206,12 @@ output belongs in hook context.
 
 ```go
 type Session struct {
-    Version       int                `json:"version"` // 3: prompt/turn/attempt/maintenance split
+    Version       int                `json:"version"` // 4: append-only conversation tree
+    ID            string             `json:"id"`
+    CWD           string             `json:"cwd,omitempty"`
+    ParentSession string             `json:"parent_session,omitempty"`
+    ParentEntryID string             `json:"parent_entry_id,omitempty"`
+    ActiveLeaf    string             `json:"active_leaf,omitempty"`
     Provider      string             `json:"provider"`
     Model         string             `json:"model"`
     Created       time.Time          `json:"created"`
@@ -2213,7 +2219,6 @@ type Session struct {
     System        string             `json:"system"`
     Agent         string             `json:"agent,omitempty"`
     Prompt        int                `json:"prompt,omitempty"`
-    Messages      []llm.Message      `json:"messages"`
     ResponseState *llm.ResponseState `json:"response_state,omitempty"` // Responses stateful continuation anchor
     ProxySessionID string `json:"proxy_session_id,omitempty"` // proxy continuation/cache isolation key
     Todos         []todo.Item        `json:"todos,omitempty"`          // update_todos list, reseeded on resume
@@ -2222,26 +2227,51 @@ type Session struct {
     UsageByModel  map[string]UsageTotals `json:"usage_by_model,omitempty"` // per model target cost
 }
 
+type Entry struct {
+    Type     EntryType // segment | compaction | branch | context_reset
+    ID       string
+    ParentID string
+    Time     time.Time
+    Messages []llm.Message // segment/context_reset
+    // Compaction checkpoint, kept-entry boundary, archive reference, and size.
+    // Branch source/common ancestor/optional summary and workspace warning.
+}
+
 type UsageTotals struct {
     llm.Usage         // cumulative token counts
     CostUSD   float64 `json:"cost_usd"` // 0 when the model has no price entry
 }
 ```
 
-- Schema v3 is intentionally breaking: loading or replaying an older `state.json`
-  returns a clear unsupported-version error; there are no aliases or migrations.
-- A session path is a directory. `state.json` is the compact resumable state,
-  `raw.ndjson` is append-only replay data, `diagnostics.ndjson` stores JSON slog
-  diagnostics for the run, `compactions/` stores raw messages removed from active
-  context, and `artifacts/tool-results/` stores full truncated tool output.
-- **Saved after every prompt**, atomically (write `state.json.tmp`, `os.Rename`). Cheap
-  relative to a model call; crash-safe for long sessions.
+- Schema v4 is intentionally breaking: loading or replaying an older
+  `state.json` returns a clear unsupported-version error; there are no aliases,
+  migrations, or legacy linear-session fallback.
+- A session path is a directory. `tree.ndjson` is canonical append-only
+  conversation data; its first record is a session header and later records are
+  immutable typed entries. `state.json` stores mutable runtime state and the
+  active leaf. `raw.ndjson` remains chronological replay data,
+  `diagnostics.ndjson` stores JSON slog diagnostics, `compactions/` stores raw
+  messages removed from active context, and `artifacts/tool-results/` stores full
+  truncated tool output.
+- Segment entries are safe navigation boundaries. An assistant tool-use message
+  and its immediately following tool-result message share one segment so a
+  branch cannot split the provider transcript invariant.
+- A save requested while tool calls are still open first appends synthetic
+  `interrupted` results, then records the resulting valid atomic segment.
+- Saves append and `fsync` new tree entries before atomically replacing
+  `state.json` via temp-file plus rename. A malformed final tree record is
+  treated as an interrupted append; malformed non-final records, missing
+  parents, duplicate IDs, and invalid segments are hard errors.
+- Active provider context is reconstructed by walking parents from
+  `ActiveLeaf`. The newest compaction or context-reset entry defines the active
+  prefix; later segment and branch entries are then applied in path order.
 - Every saved message and append-only replay event carries a timestamp. Replay
   events identify `prompt`, `turn`, and (for provider requests) `attempt` separately.
   `turn_attempt_start`, `turn_attempt_abandoned`, and `turn_attempt_usage` describe
   provider calls; `turn_complete` closes a conversational turn; `prompt_usage`
   closes the top-level prompt; `maintenance_usage` accounts for compaction,
-  prewarming, and handoff-summary calls without creating turns.
+  prewarming, handoff-summary, and branch-summary calls without creating turns.
+  `branch` records navigation source/target IDs in chronological replay.
 - When Responses stateful continuation is active, `state.json` stores the last
   `previous_response_id` and the number of local messages represented by it.
   Resume only restores this state when the active provider/model still match and
@@ -2249,11 +2279,26 @@ type UsageTotals struct {
   `responses_stateful:true`; compaction, `/clear`, provider/model/tool/system
   changes, rejected prior response ids, and rejected stored-response requests
   clear it.
-- Image bytes are embedded in `state.json` as provider-neutral base64 blocks so
+- Image bytes are embedded in `tree.ndjson` as provider-neutral base64 blocks so
   resume is self-contained; `raw.ndjson` records only image metadata for replay.
 - Auto-save to `~/.local/state/harness/sessions/<timestamp>`; the path is printed at
-  startup. `-session` chooses a directory; `-resume` loads `state.json` (applying the
-  dangling-tool-use repair, §4). `/clear` rotates to a fresh directory.
+  startup. `-session` chooses a directory; `-resume` loads `state.json` plus its
+  active tree path. Distinct `-resume <source>` and `-session <destination>` clone
+  the active path with parent lineage and fresh usage. `/clear` rotates to a
+  fresh directory.
+- `/tree` renders a harness-native searchable/paged line picker over tree nodes.
+  Selecting a human prompt targets its parent and returns its text/images as
+  editable prompt prefill. Other entries are selected directly. Before moving,
+  the user chooses no summary (default), a model-written summary, or a summary
+  with custom focus; summary failure leaves the active leaf untouched.
+- `/fork` extracts the selected pre-prompt path into a new session; `/clone`
+  extracts the current path. Extracted sessions receive a new session ID,
+  `ParentSession`/`ParentEntryID`, prompt number zero, fresh lifetime usage, and
+  cleared Responses/proxy continuation anchors. Model, provider, agent,
+  reasoning, todos, plans, hooks, and working directory stay global/current.
+- Conversation navigation does not alter filesystem or Git state. Every branch
+  adds a model-visible internal warning to inspect current files before assuming
+  their state. Optional branch summaries describe only the divergent old suffix.
 - Child-agent runs are stored below `children/<child-id>/` with their own
   `state.json`, `raw.ndjson`, `meta.json`, and artifacts. Parent resume ignores these
   child transcripts; they are forensic sidecars. `meta.json` is a `ChildMeta` index —
@@ -2270,17 +2315,16 @@ type UsageTotals struct {
 - `harness session stats <session-dir>` reads the existing root and child
   `state.json` and `raw.ndjson` files, `compactions/*.meta.json` plus their input
   transcripts, and `children/*/meta.json`. It reports turns, direct tool and
-  command activity, parallel batches, compactions, authoritative token/cost
-  totals, and a hierarchical delegate breakdown without changing the on-disk
-  schema. Conversation statistics distinguish prompts, turns, model calls,
-  retries, and maintenance calls. Root usage already includes delegate and
+  command activity, lifetime parallel batches, compactions, tree
+  entries/branches/leaves/depth, navigation events, authoritative token/cost
+  totals, and a hierarchical delegate breakdown. Conversation statistics
+  distinguish prompts, turns, model calls, retries, and maintenance calls. Root usage already includes delegate and
   maintenance spend and is never
   summed with child usage; each child usage total likewise includes its nested
   delegates. Direct tool activity is instead summed once from every replay log.
 - Transcripts are provider-neutral; resuming under a different provider/model works.
   When flags disagree with the state, flags win with a warning. Tool-result messages
-  may include local-only `parallel_tool_batches` metadata; provider adapters ignore it,
-  and its omission in older sessions remains valid.
+  may include local-only `parallel_tool_batches` metadata; provider adapters ignore it.
 
 ### REPL history
 

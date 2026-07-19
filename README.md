@@ -130,8 +130,15 @@ harness session stats ~/.local/state/harness/sessions/20260611T123456Z
 ```
 
 The stats report covers turns, tools, commands, parallel batches, compactions,
-and per-delegate details; its session token and cost totals are authoritative
-and include delegate usage.
+conversation-tree shape, and per-delegate details; its session token and cost
+totals are authoritative and include delegate usage.
+
+Interactive sessions keep an append-only conversation tree. `/tree` moves to an
+earlier safe point without changing files or Git state; selecting a prior user
+prompt removes that prompt from active context and places its text back in the
+editor. `/fork` does the same in a new session, while `/clone` copies the current
+branch. Forked and cloned sessions start fresh usage accounting and retain the
+current model, agent, reasoning controls, todos, plans, and working directory.
 
 Diagnostic logs, including MCP/LSP child-process stderr that is hidden from the
 terminal by default, are kept as JSON lines in the session's `diagnostics.ndjson`.
@@ -162,8 +169,9 @@ Harness uses these terms consistently:
   requested. Turn numbers restart at 1 for each prompt.
 - An **attempt** is one provider request for a turn; stream retries increase the
   attempt number without creating another turn.
-- **Maintenance** calls such as compaction, cache prewarming, and handoff-summary
-  generation are accounted separately and never increment the turn count.
+- **Maintenance** calls such as compaction, cache prewarming, handoff summaries,
+  and optional branch summaries are accounted separately and never increment
+  the turn count.
 
 While a prompt runs, status uses `[turn: N … │ prompt …]`; completion uses
 `[prompt: N turns …]`.

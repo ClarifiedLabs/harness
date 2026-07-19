@@ -47,8 +47,19 @@ type collectedSessionStats struct {
 	retries          int
 	maintenanceCalls int
 	maintenanceUsage llm.Usage
+	navigations      int
+	tree             treeStats
 	tools            toolStats
 	compactions      compactionStats
+}
+
+type treeStats struct {
+	entries       int
+	branches      int
+	leaves        int
+	maxDepth      int
+	activeDepth   int
+	contextResets int
 }
 
 type delegateStats struct {
@@ -132,7 +143,7 @@ func collectSessionStats(dir string) (collectedSessionStats, error) {
 	if err != nil {
 		return collectedSessionStats{}, fmt.Errorf("read tool activity in %s: %w", dir, err)
 	}
-	compactions, parallel, err := collectCompactionStats(dir, state.Messages)
+	compactions, parallel, err := collectCompactionStats(dir, state.Tree)
 	if err != nil {
 		return collectedSessionStats{}, err
 	}
@@ -143,6 +154,7 @@ func collectSessionStats(dir string) (collectedSessionStats, error) {
 	attemptedTurns := make(map[[2]int]struct{})
 	modelCalls := 0
 	maintenanceCalls := 0
+	navigations := 0
 	var maintenanceUsage llm.Usage
 	for _, ev := range events {
 		switch ev.Type {
@@ -164,6 +176,8 @@ func collectSessionStats(dir string) (collectedSessionStats, error) {
 			if ev.Usage != nil {
 				maintenanceUsage = addUsage(maintenanceUsage, *ev.Usage)
 			}
+		case EventBranch:
+			navigations++
 		}
 	}
 	retries := modelCalls - len(attemptedTurns)
@@ -178,6 +192,8 @@ func collectSessionStats(dir string) (collectedSessionStats, error) {
 		retries:          retries,
 		maintenanceCalls: maintenanceCalls,
 		maintenanceUsage: maintenanceUsage,
+		navigations:      navigations,
+		tree:             collectTreeStats(state.Tree),
 		tools:            tools,
 		compactions:      compactions,
 	}, nil
@@ -217,11 +233,22 @@ func collectToolStats(events []Event) (toolStats, error) {
 	return stats, nil
 }
 
-func collectCompactionStats(dir string, active []llm.Message) (compactionStats, parallelStats, error) {
+func collectCompactionStats(dir string, tree *Tree) (compactionStats, parallelStats, error) {
 	var compactions compactionStats
 	var parallel parallelStats
 	seenBatches := make(map[string]struct{})
-	collectParallelBatches(active, seenBatches, &parallel)
+	if tree != nil {
+		for _, entry := range tree.Entries {
+			switch entry.Type {
+			case EntrySegment, EntryContextReset:
+				collectParallelBatches(entry.Messages, seenBatches, &parallel)
+			case EntryCompaction:
+				if entry.Checkpoint != nil {
+					collectParallelBatches([]llm.Message{*entry.Checkpoint}, seenBatches, &parallel)
+				}
+			}
+		}
+	}
 
 	base := filepath.Join(dir, "compactions")
 	entries, err := os.ReadDir(base)
@@ -255,6 +282,38 @@ func collectCompactionStats(dir string, active []llm.Message) (compactionStats, 
 		collectParallelBatches(messages, seenBatches, &parallel)
 	}
 	return compactions, parallel, nil
+}
+
+func collectTreeStats(tree *Tree) treeStats {
+	if tree == nil {
+		return treeStats{}
+	}
+	stats := treeStats{entries: len(tree.Entries)}
+	parents := make(map[string]bool, len(tree.Entries))
+	for _, entry := range tree.Entries {
+		if entry.ParentID != "" {
+			parents[entry.ParentID] = true
+		}
+		switch entry.Type {
+		case EntryBranch:
+			stats.branches++
+		case EntryContextReset:
+			stats.contextResets++
+		}
+		path, err := tree.Path(entry.ID)
+		if err == nil {
+			stats.maxDepth = max(stats.maxDepth, len(path))
+		}
+	}
+	for _, entry := range tree.Entries {
+		if !parents[entry.ID] {
+			stats.leaves++
+		}
+	}
+	if path, err := tree.Path(tree.ActiveLeaf); err == nil {
+		stats.activeDepth = len(path)
+	}
+	return stats
 }
 
 func collectParallelBatches(messages []llm.Message, seen map[string]struct{}, stats *parallelStats) {
@@ -394,6 +453,7 @@ func writeStats(report statsReport, w io.Writer) error {
 	var b strings.Builder
 	writeSessionStats(&b, report)
 	writeConversationStats(&b, report.root)
+	writeTreeStats(&b, report.root.tree)
 	writeOverallToolStats(&b, report)
 	writeRootUsage(&b, report.root.state)
 	writeOverallCompactions(&b, report)
@@ -406,6 +466,13 @@ func writeSessionStats(w io.Writer, report statsReport) {
 	state := report.root.state
 	fmt.Fprintln(w, "Session")
 	fmt.Fprintf(w, "  path: %s\n", report.path)
+	fmt.Fprintf(w, "  id: %s\n", state.ID)
+	if state.ParentSession != "" {
+		fmt.Fprintf(w, "  parent: %s@%s\n", state.ParentSession, state.ParentEntryID)
+	}
+	if state.CWD != "" {
+		fmt.Fprintf(w, "  cwd: %s\n", state.CWD)
+	}
 	fmt.Fprintf(w, "  agent: %s\n", state.Agent)
 	fmt.Fprintf(w, "  provider/model: %s/%s\n", state.Provider, state.Model)
 	fmt.Fprintf(w, "  created: %s\n", state.Created.Format(time.RFC3339))
@@ -424,10 +491,21 @@ func writeConversationValues(w io.Writer, indent string, stats collectedSessionS
 	fmt.Fprintf(w, "%smodel calls: %d\n", indent, stats.modelCalls)
 	fmt.Fprintf(w, "%sretries: %d\n", indent, stats.retries)
 	fmt.Fprintf(w, "%smaintenance calls: %d\n", indent, stats.maintenanceCalls)
+	fmt.Fprintf(w, "%snavigations: %d\n", indent, stats.navigations)
 	if stats.maintenanceCalls > 0 {
 		fmt.Fprintf(w, "%smaintenance usage: %d in / %d out\n", indent, stats.maintenanceUsage.InputTokens, stats.maintenanceUsage.OutputTokens)
 	}
 	fmt.Fprintf(w, "%sactive messages: %d\n", indent, len(stats.state.Messages))
+}
+
+func writeTreeStats(w io.Writer, stats treeStats) {
+	fmt.Fprintln(w, "Tree")
+	fmt.Fprintf(w, "  entries: %d\n", stats.entries)
+	fmt.Fprintf(w, "  branches: %d\n", stats.branches)
+	fmt.Fprintf(w, "  leaves: %d\n", stats.leaves)
+	fmt.Fprintf(w, "  maximum depth: %d\n", stats.maxDepth)
+	fmt.Fprintf(w, "  active depth: %d\n", stats.activeDepth)
+	fmt.Fprintf(w, "  context resets: %d\n", stats.contextResets)
 }
 
 func writeOverallToolStats(w io.Writer, report statsReport) {

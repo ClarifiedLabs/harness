@@ -1,0 +1,3 @@
+Summarize the conversation fragment that the user is leaving behind when moving to another branch.
+
+Preserve decisions, discoveries, attempted approaches, unresolved problems, and any file or command state that may still matter. Distinguish completed work from proposals. Be concise, factual, and useful to the model continuing from the selected earlier point. Do not claim that the working directory was reverted: conversation branching does not change filesystem or Git state.

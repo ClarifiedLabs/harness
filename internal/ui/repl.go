@@ -151,7 +151,8 @@ type App struct {
 	// names none. Empty falls back to the built-in default agent.
 	HandoffAgent string
 
-	SessionPath          string    // current save path; /clear rotates it
+	SessionPath          string // current save path; /clear rotates it
+	SessionTree          *session.Tree
 	StateDir             string    // for rotating to a fresh auto-save path on /clear
 	Created              time.Time // session creation time (preserved across saves)
 	PromptNumber         int       // last started prompt, persisted for replay numbering
@@ -246,6 +247,9 @@ const helpText = `commands:
   /exit, /quit     save and exit
   /clear           reset conversation; rotate to a fresh session directory
   /compact         force compaction now
+  /tree [entry]    browse the conversation tree and branch in this session
+  /fork [entry]    branch before a prior prompt into a new session
+  /clone           clone the current branch into a new session
   /context [file]  dump current model context, or save it as JSON
   /usage           cumulative session tokens and cost
   /tools           list available tools (built-in, MCP, and disabled)
@@ -611,7 +615,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			app.runShellEscape(action.shellCommand)
 			return false, ExitOK
 		}
-		if action.prefill != "" {
+		if action.prefillSet || action.prefill != "" {
 			if usePromptEditor {
 				pendingPrefill = action.prefill
 				pendingPrefillModelPrompt = action.prefillModelPrompt
@@ -988,7 +992,8 @@ type replAction struct {
 	// prefill deposits text into the next prompt as editable content instead
 	// of running a turn. Used when returning from an external editor so the
 	// user can review before submitting.
-	prefill string
+	prefill    string
+	prefillSet bool
 	// prefillModelPrompt marks the eventual submitted prefill as model-bound text.
 	prefillModelPrompt bool
 }
@@ -996,6 +1001,8 @@ type replAction struct {
 type replCommandResult struct {
 	exit                 bool
 	prompt               string
+	prefill              string
+	prefillSet           bool
 	resolveSkillMentions bool
 	attachPromptImages   bool
 }
@@ -1107,7 +1114,7 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 	}
 	if input.edit {
 		if prompt, ok := app.editPrompt(line); ok {
-			return replAction{prefill: prompt, prefillModelPrompt: true}
+			return replAction{prefill: prompt, prefillSet: true, prefillModelPrompt: true}
 		}
 		return replAction{}
 	}
@@ -1134,13 +1141,16 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 		cmd, arg := commandFields(line)
 		if cmd == "/edit" {
 			if prompt, ok := app.editPrompt(arg); ok {
-				return replAction{prefill: prompt, prefillModelPrompt: true}
+				return replAction{prefill: prompt, prefillSet: true, prefillModelPrompt: true}
 			}
 			return replAction{}
 		}
 		result := app.command(line, readCommandLine)
 		if result.exit {
 			return replAction{exit: true}
+		}
+		if result.prefillSet {
+			return replAction{prefill: result.prefill, prefillSet: true, prefillModelPrompt: true}
 		}
 		if result.prompt != "" {
 			return replAction{prompt: result.prompt, run: true, resolveSkillMentions: result.resolveSkillMentions, attachPromptImages: result.attachPromptImages}
@@ -1692,6 +1702,14 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		app.clear()
 	case "/compact":
 		app.compact()
+	case "/tree":
+		prefill, set := app.treeCommand(arg, readCommandLine)
+		return replCommandResult{prefill: prefill, prefillSet: set}
+	case "/fork":
+		prefill, set := app.forkCommand(arg, readCommandLine)
+		return replCommandResult{prefill: prefill, prefillSet: set}
+	case "/clone":
+		app.cloneCommand()
 	case "/context":
 		app.contextDump(arg)
 	case "/usage":
@@ -1765,7 +1783,7 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 // knownCommands is the meta-command vocabulary used for "did you mean …?"
 // suggestions on an unknown command (r59).
 var knownCommands = []string{
-	"/help", "/exit", "/quit", "/clear", "/compact", "/context", "/usage",
+	"/help", "/exit", "/quit", "/clear", "/compact", "/tree", "/fork", "/clone", "/context", "/usage",
 	"/tools", "/image", "/edit", "/save", "/model", "/reasoning", "/effort",
 	"/agent", "/mode", "/plan", "/auto", "/handoff", "/background", "/skills", "/vi",
 }
@@ -2676,11 +2694,20 @@ func (app *App) handoffToImplementation(req plan.HandoffRequest) bool {
 	}
 	seed := fmt.Sprintf("=== Implementation handoff ===\nYour task is specified in the recorded plan — read it now:\n%s\n\nContext from planning (how it was produced and this environment):\n%s",
 		req.PlanPath, req.Brief)
-	app.Agent.SetTranscript([]llm.Message{{
+	seedMessages := []llm.Message{{
 		Role:    llm.RoleUser,
 		Time:    app.clock()(),
 		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: seed}},
-	}})
+	}}
+	if err := app.ensureSessionTree(); err != nil {
+		fmt.Fprintf(app.Errw, "[handoff: tree update failed: %v]\n", err)
+		return false
+	}
+	if err := app.SessionTree.AppendContextReset(seedMessages, "handoff"); err != nil {
+		fmt.Fprintf(app.Errw, "[handoff: tree update failed: %v]\n", err)
+		return false
+	}
+	app.Agent.SetTranscript(seedMessages)
 	app.Agent.SetResponseState(nil)
 	if app.Todos != nil {
 		app.Todos.Replace(nil) // the implementation agent builds its own task list
@@ -2735,6 +2762,8 @@ func (app *App) clear() {
 	app.SetUsage(session.UsageTotals{})
 	app.usageByModel = nil
 	app.Created = app.clock()()
+	cwd, _ := os.Getwd()
+	app.SessionTree = session.NewTree(app.Created, cwd, "", "")
 	app.PromptNumber = 0
 	app.todoPromptStatusBeforeUsage = false
 	app.todoPromptStatusBeforeUsagePrompt = 0
@@ -3053,6 +3082,9 @@ func (app *App) save(path string) error {
 		return nil
 	}
 	app.drainMaintenanceUsage()
+	if err := app.ensureSessionTree(); err != nil {
+		return err
+	}
 	s := session.Session{
 		Version:        session.Version,
 		Provider:       app.Provider,
@@ -3064,6 +3096,7 @@ func (app *App) save(path string) error {
 		ProxySessionID: app.Agent.ProxySessionID(),
 		Prompt:         app.PromptNumber,
 		Messages:       app.Agent.Transcript(),
+		Tree:           app.SessionTree,
 		ResponseState:  app.Agent.ResponseState(),
 		Todos:          app.todoSnapshot(),
 		Plans:          app.planSnapshot(),
@@ -3071,6 +3104,28 @@ func (app *App) save(path string) error {
 		UsageByModel:   app.usageByModel,
 	}
 	return s.Save(path)
+}
+
+func (app *App) ensureSessionTree() error {
+	if app.SessionTree != nil {
+		return nil
+	}
+	cwd, _ := os.Getwd()
+	tree, err := session.LinearTree(app.Created, cwd, app.Agent.Transcript())
+	if err != nil {
+		return fmt.Errorf("session tree: %w", err)
+	}
+	app.SessionTree = tree
+	return nil
+}
+
+// PrepareCompaction binds the agent archive callback to the immutable tree.
+// The next save observes the rewritten transcript and commits the checkpoint.
+func (app *App) PrepareCompaction(before []llm.Message, olderCount int, summary, archiveRef string, tokensBefore int) error {
+	if err := app.ensureSessionTree(); err != nil {
+		return err
+	}
+	return app.SessionTree.PrepareCompaction(before, olderCount, summary, archiveRef, tokensBefore)
 }
 
 // planSnapshot returns the recorded plans for persistence, or nil when the plan

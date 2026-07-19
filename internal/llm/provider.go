@@ -46,13 +46,14 @@ const (
 	RequestPurposeCompaction     RequestPurpose = "compaction"
 	RequestPurposePrewarm        RequestPurpose = "prewarm"
 	RequestPurposeHandoffSummary RequestPurpose = "handoff_summary"
+	RequestPurposeBranchSummary  RequestPurpose = "branch_summary"
 )
 
 // NormalizeRequestPurpose maps missing or unrecognized values to unknown,
 // preventing external proxy clients from creating unbounded metric labels.
 func NormalizeRequestPurpose(purpose RequestPurpose) RequestPurpose {
 	switch purpose {
-	case RequestPurposeTurn, RequestPurposeCompaction, RequestPurposePrewarm, RequestPurposeHandoffSummary:
+	case RequestPurposeTurn, RequestPurposeCompaction, RequestPurposePrewarm, RequestPurposeHandoffSummary, RequestPurposeBranchSummary:
 		return purpose
 	default:
 		return RequestPurposeUnknown

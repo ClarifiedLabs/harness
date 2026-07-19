@@ -55,9 +55,10 @@ const (
 // CompactionArchive is handed to the optional archive callback before old
 // messages are removed from the active transcript.
 type CompactionArchive struct {
-	Messages []llm.Message
-	Summary  string
-	Usage    llm.Usage
+	Messages     []llm.Message
+	Summary      string
+	Usage        llm.Usage
+	TokensBefore int
 }
 
 // CompactionArchiver preserves raw compacted messages and returns a reference
@@ -163,12 +164,14 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 		sink.Notice(fmt.Sprintf("[compact failed: %v; keeping full transcript]", err))
 		return usage, false, err
 	}
+	before := a.estimateContext(nil).Total
 	archiveRef := ""
 	if a.archiveCompaction != nil {
 		ref, err := a.archiveCompaction(ctx, CompactionArchive{
-			Messages: older,
-			Summary:  summary,
-			Usage:    usage,
+			Messages:     older,
+			Summary:      summary,
+			Usage:        usage,
+			TokensBefore: before,
 		})
 		if err != nil {
 			sink.Notice(fmt.Sprintf("[compact archive failed: %v; keeping full transcript]", err))
@@ -178,7 +181,6 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	}
 
 	collapsed := countCompletedTurns(older)
-	before := a.estimateContext(nil).Total
 	compacted := make([]llm.Message, 0, 1+len(kept))
 	compacted = append(compacted, a.checkpointMessage(summary, older, archiveRef))
 	// Deep-copy the kept turns before the in-place degrade/trim below: they alias
@@ -301,6 +303,17 @@ func cloneMessages(msgs []llm.Message) []llm.Message {
 // brief prompt) and is independent of the compaction trigger/keep-turn logic.
 func (a *Agent) GenerateSummary(ctx context.Context, system string) (string, llm.Usage, error) {
 	return a.summarize(ctx, system, a.transcript, llm.RequestPurposeHandoffSummary)
+}
+
+// GenerateBranchSummary summarizes only the conversation fragment that will
+// no longer be active after tree navigation. The current transcript is not
+// modified and tools/reasoning remain disabled for the maintenance call.
+func (a *Agent) GenerateBranchSummary(ctx context.Context, messages []llm.Message, focus string) (string, llm.Usage, error) {
+	system := prompts.BranchSummary()
+	if focus = strings.TrimSpace(focus); focus != "" {
+		system += "\n\nGive special attention to: " + focus
+	}
+	return a.summarize(ctx, system, messages, llm.RequestPurposeBranchSummary)
 }
 
 // summarize runs one tool-less model call over the older messages, with the

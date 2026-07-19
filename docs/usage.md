@@ -153,8 +153,8 @@ environment context, user/project `AGENTS.md`, skills, and agent prompts are
 still composed around it.
 
 Image attachments accept local PNG, JPEG, WebP, and non-animated GIF files.
-Images are embedded in the saved transcript as base64 so resumed sessions remain
-self-contained; replay logs show only image metadata. Harness only sends queued
+Images are embedded in `tree.ndjson` as provider-neutral base64 blocks so resumed
+sessions remain self-contained; replay logs show only image metadata. Harness only sends queued
 images when the current model explicitly advertises image input support. Manual
 provider configs should set `input_modalities`, for example
 `["text", "image"]`; models without `image` are treated as text-only and image
@@ -413,7 +413,8 @@ budget.
 
 The proxy exposes unauthenticated Prometheus metrics on a separate listener,
 `127.0.0.1:9090` by default. Metrics break usage down by `provider`, `model`,
-bounded `purpose` (`turn`, `compaction`, `prewarm`, `handoff_summary`, or
+bounded `purpose` (`turn`, `compaction`, `prewarm`, `handoff_summary`,
+`branch_summary`, or
 `unknown`), and `key` (the API key's stored name, or `anonymous` when
 authentication is disabled). `model_proxy_build_info` carries the build version.
 Token counters are recorded for every stream that produced usage, priced or not, while
@@ -486,6 +487,9 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/exit`, `/quit` | save, print a session token summary, and exit |
 | `/clear` | echo the discarded session token/cost totals, then reset the conversation and rotate to a fresh session directory |
 | `/compact` | force compaction now |
+| `/tree [entry]` | browse the conversation tree and branch in place; selecting a user prompt rewinds to its parent and pre-fills that prompt for editing |
+| `/fork [entry]` | select a prior user prompt and branch before it into a new session with fresh usage accounting |
+| `/clone` | copy the current branch into a new session with fresh usage accounting |
 | `/context` | dump the current provider-neutral model context as JSON |
 | `/context <file>` | save the current provider-neutral model context as JSON |
 | `/usage` | cumulative input, cached input, output, reasoning tokens, and cost |
@@ -593,19 +597,37 @@ sandbox for real isolation.
 
 ## Sessions
 
-- A session path is a directory. `state.json` is the compact resumable state,
-  `raw.ndjson` is an append-only replay log, `compactions/` stores raw messages
-  removed from active context, `children/` stores child-agent transcripts and
-  metadata, and `artifacts/tool-results/` stores full outputs omitted from model
-  context.
-- The compact state is saved after every prompt, atomically. Auto-save uses
+- A session path is a directory. `tree.ndjson` is the canonical append-only
+  conversation tree; `state.json` is compact mutable state containing the active
+  leaf and runtime settings; `raw.ndjson` is the chronological replay log.
+  `compactions/` stores raw messages removed from active context, `children/`
+  stores child-agent transcripts and metadata, and `artifacts/tool-results/`
+  stores full outputs omitted from model context.
+- New tree records are appended and synced before `state.json` atomically moves
+  its active-leaf pointer. An interrupted final tree record is ignored on load;
+  malformed earlier records are errors. Auto-save uses
   `~/.local/state/harness/sessions/<timestamp>`, honoring `$XDG_STATE_HOME`.
 - `-session <dir>` chooses an explicit session directory. `-resume <dir>` loads
-  its `state.json` and continues. `/clear` rotates to a fresh directory.
+  its active tree path and continues. Combining distinct `-resume <source>` and
+  `-session <destination>` clones the active branch into the destination with
+  fresh usage accounting. `/clear` rotates to a fresh directory.
+- `/tree` opens a searchable, paged line picker over safe tree nodes. Selecting
+  a human prompt branches from its parent and returns the prompt (including
+  images) to the editor; selecting another node makes that node the branch point.
+  Before moving, harness asks whether to attach no summary, a default summary,
+  or a summary with custom focus. A failed summary leaves the branch unchanged.
+- `/fork` selects a prior human prompt and performs the same move in a new
+  session. `/clone` copies the current branch into a new session. Both record
+  parent-session lineage, reset prompt/usage accounting and remote continuation
+  anchors, and preserve the current model, agent, reasoning settings, todos, and
+  plans.
+- Tree navigation changes only model-visible conversation context. It never
+  rewinds the working directory or Git; every new branch carries an internal
+  warning telling the model to inspect current files before assuming their state.
 - Transcripts are provider-neutral, so a session started against Anthropic can
   resume against an OpenAI-compatible server and vice versa.
-- A session saved mid-turn is repaired on load by synthesizing an `interrupted`
-  tool result, so the resumed transcript is valid for both APIs.
+- A save requested mid-turn synthesizes an `interrupted` tool result before the
+  transcript becomes immutable tree data, so resumed paths are valid for both APIs.
 
 Inspect saved sessions with:
 
@@ -616,8 +638,9 @@ harness session stats ~/.local/state/harness/sessions/20260611T123456Z
 ```
 
 `session stats` prints a deterministic, human-readable report for one session:
-root conversation turns, direct and delegate tool/command activity, parallel
-batches, compactions, and a hierarchical delegate breakdown. The root token and
+root conversation turns, navigation count, tree entries/branches/leaves/depth,
+direct and delegate tool/command activity, parallel batches, compactions, and a
+hierarchical delegate breakdown. The root token and
 cost totals come from `state.json` and already include delegate and compaction
 usage; delegate totals similarly include any nested delegates.
 
@@ -693,7 +716,7 @@ payload carries common fields such as `session_id`, `transcript_path`, `cwd`,
 `hook_event_name`, `model`, and `permission_mode`, plus per-event fields.
 
 `matcher` is a Go regexp over the tool name for tool hooks, `manual|auto` for
-compaction hooks, and `startup|resume|clear` for `SessionStart`. Omitted, empty,
+compaction hooks, and `startup|resume|clear|fork|clone` for `SessionStart`. Omitted, empty,
 or `*` matches all. Hook commands may block with exit code `2` or JSON stdout
 such as `{"decision":"block","reason":"..."}` / `{"continue":false}`. Plain
 stdout is added as hook context only when the command exits `0`.

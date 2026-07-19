@@ -432,15 +432,15 @@ func TestSmokeInterruptMidStream(t *testing.T) {
 }
 
 // TestSmokeResumeInterrupted is the resume-of-an-interrupted-session leg: a
-// session whose transcript ends in a dangling tool_use is resumed. session.Load
-// repairs it with a synthesized "interrupted" tool_result, which the harness must
-// send to the mock; the run then completes against the mock's text turn
+// session saved with a dangling tool_use is resumed. Session persistence repairs
+// it with a synthesized "interrupted" tool_result before immutable tree storage,
+// which the harness must send to the mock; the run then completes against the mock's text turn
 // (design §4, §11).
 func TestSmokeResumeInterrupted(t *testing.T) {
 	t.Parallel()
 	bin := buildBinary(t)
 
-	// Craft a session that stops right after an assistant tool_use (mid-turn save).
+	// Craft a session save requested right after an assistant tool_use.
 	dir := t.TempDir()
 	priorPath := filepath.Join(dir, "interrupted")
 	prior := session.Session{

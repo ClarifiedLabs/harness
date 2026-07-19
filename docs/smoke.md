@@ -41,9 +41,9 @@ part of the same `make test-integration` run.
 
 | Leg | Test | What it asserts |
 |---|---|---|
-| Local OpenAI-compatible server, tool round-trip | `TestSmokeToolRoundTrip` | The mock streams a `read_file` tool call, the harness executes it, and a **second** request to the mock carries the `role:"tool"` result with the file's content. The assistant's final text lands on **stdout**; the session directory's `state.json` is written and passes `ValidateTranscript`. |
+| Local OpenAI-compatible server, tool round-trip | `TestSmokeToolRoundTrip` | The mock streams a `read_file` tool call, the harness executes it, and a **second** request to the mock carries the `role:"tool"` result with the file's content. The assistant's final text lands on **stdout**; the session directory's `state.json` and `tree.ndjson` are written, and the loaded active path passes `ValidateTranscript`. |
 | `^C` during a stream | `TestSmokeInterruptMidStream` | The mock streams `partial answer` then stalls briefly. After the partial text reaches stdout, the test sends `SIGINT` to the subprocess. The process exits **130**; the saved session keeps the partial assistant text and passes `ValidateTranscript` (the §4 cancel-repair: keep streamed text, strip un-executed tool calls). |
-| Resume of an interrupted session | `TestSmokeResumeInterrupted` | A crafted session whose transcript ends in a **dangling `tool_use`** is resumed with `-resume`. `session.Load` repairs it with a synthesized `tool_result` (`is_error`, text `interrupted`). The mock's single request is verified to contain that `role:"tool"` / `tool_call_id` message, and the run completes against the mock's text turn. |
+| Resume of an interrupted session | `TestSmokeResumeInterrupted` | A crafted save requested with a **dangling `tool_use`** synthesizes a `tool_result` (`is_error`, text `interrupted`) before immutable tree storage, then resumes with `-resume`. The mock's single request is verified to contain that `role:"tool"` / `tool_call_id` message, and the run completes against the mock's text turn. |
 
 ### MCP proxy legs (automated)
 
