@@ -1,4 +1,4 @@
-package modelsdev
+package modelcatalog
 
 import (
 	"bytes"
@@ -68,7 +68,7 @@ const testCatalog = `{
 }`
 
 func TestDecodeProviderBaseURLAndModelPricing(t *testing.T) {
-	c, err := Decode(strings.NewReader(testCatalog))
+	c, err := DecodeModelsDev(strings.NewReader(testCatalog))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestDecodeProviderBaseURLAndModelPricing(t *testing.T) {
 }
 
 func TestFirstPartyProviderFallbacks(t *testing.T) {
-	c, err := Decode(strings.NewReader(testCatalog))
+	c, err := DecodeModelsDev(strings.NewReader(testCatalog))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestProviderFallbacksFromNPM(t *testing.T) {
 }
 
 func TestDecodeCatalogWrapper(t *testing.T) {
-	c, err := Decode(strings.NewReader(`{"providers":` + testCatalog + `,"models":{}}`))
+	c, err := DecodeModelsDev(strings.NewReader(`{"providers":` + testCatalog + `,"models":{}}`))
 	if err != nil {
 		t.Fatalf("Decode wrapper: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestDecodeCatalogWrapper(t *testing.T) {
 }
 
 func TestModelsByReleaseDateNewestFirst(t *testing.T) {
-	c, err := Decode(strings.NewReader(`{
+	c, err := DecodeModelsDev(strings.NewReader(`{
   "openai": {
     "id": "openai",
     "name": "OpenAI",
@@ -207,11 +207,11 @@ func TestModelsByReleaseDateNewestFirst(t *testing.T) {
 	}
 }
 
-func TestFallbackSnapshotDecodes(t *testing.T) {
-	assertFallbackAPIJSON(t, fallbackAPIJSON)
+func TestModelsDevFallbackSnapshotDecodes(t *testing.T) {
+	assertModelsDevFallbackJSON(t, modelsDevFallbackJSON)
 }
 
-func TestFallbackCandidateDecodes(t *testing.T) {
+func TestModelsDevFallbackCandidateDecodes(t *testing.T) {
 	path := os.Getenv("MODELSDEV_FALLBACK_CANDIDATE")
 	if path == "" {
 		t.Skip("MODELSDEV_FALLBACK_CANDIDATE is not set")
@@ -220,7 +220,7 @@ func TestFallbackCandidateDecodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read candidate: %v", err)
 	}
-	assertFallbackAPIJSON(t, data)
+	assertModelsDevFallbackJSON(t, data)
 }
 
 func TestAPITypeFromModelShape(t *testing.T) {
@@ -277,7 +277,7 @@ func TestDecodeTieredPrice(t *testing.T) {
     }
   }
 }`
-	c, err := Decode(strings.NewReader(catalog))
+	c, err := DecodeModelsDev(strings.NewReader(catalog))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -313,9 +313,9 @@ func TestDecodeTieredPrice(t *testing.T) {
 	}
 }
 
-func assertFallbackAPIJSON(t *testing.T, data []byte) {
+func assertModelsDevFallbackJSON(t *testing.T, data []byte) {
 	t.Helper()
-	c, err := Decode(bytes.NewReader(data))
+	c, err := DecodeModelsDev(bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}

@@ -1,10 +1,10 @@
-.PHONY: build test test-integration release refresh-modelsdev
+.PHONY: build test test-integration release refresh-model-catalogs
 
 MODELSDEV_API_URL ?= https://models.dev/api.json
-MODELSDEV_FALLBACK := internal/modelsdev/fallback_api.json
+MODELSDEV_FALLBACK := internal/modelcatalog/modelsdev_fallback.json
 MODELSDEV_FALLBACK_ABS := $(CURDIR)/$(MODELSDEV_FALLBACK)
 CODEX_MODELS_URL ?= https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json
-CODEX_MODELS_FALLBACK := cmd/harness-model-proxy/codex_models_fallback.json
+CODEX_MODELS_FALLBACK := internal/modelcatalog/codex_fallback.json
 CODEX_MODELS_FALLBACK_ABS := $(CURDIR)/$(CODEX_MODELS_FALLBACK)
 
 build:
@@ -28,7 +28,7 @@ endif
 	go test ./...
 	VERSION="$(VERSION)" AUTOPUSH="$(AUTOPUSH)" scripts/release/tag.sh
 
-refresh-modelsdev:
+refresh-model-catalogs:
 	@set -e; \
 	modelsdev_tmp=$$(mktemp "$(MODELSDEV_FALLBACK_ABS).XXXXXX"); \
 	modelsdev_raw="$$modelsdev_tmp.raw"; \
@@ -37,10 +37,10 @@ refresh-modelsdev:
 	trap 'rm -f "$$modelsdev_tmp" "$$modelsdev_raw" "$$codex_tmp" "$$codex_raw"' EXIT; \
 	curl -fsSL "$(MODELSDEV_API_URL)" -o "$$modelsdev_raw"; \
 	go run ./scripts/jsonfmt.go "$$modelsdev_raw" "$$modelsdev_tmp"; \
-	MODELSDEV_FALLBACK_CANDIDATE="$$modelsdev_tmp" go test ./internal/modelsdev -run TestFallbackCandidateDecodes -count=1; \
+	MODELSDEV_FALLBACK_CANDIDATE="$$modelsdev_tmp" go test ./internal/modelcatalog -run TestModelsDevFallbackCandidateDecodes -count=1; \
 	curl -fsSL "$(CODEX_MODELS_URL)" -o "$$codex_raw"; \
 	go run ./scripts/jsonfmt.go "$$codex_raw" "$$codex_tmp"; \
-	CODEX_MODELS_FALLBACK_CANDIDATE="$$codex_tmp" go test ./cmd/harness-model-proxy -run TestCodexFallbackCandidateDecodes -count=1; \
+	CODEX_MODELS_FALLBACK_CANDIDATE="$$codex_tmp" go test ./internal/modelcatalog -run TestCodexFallbackCandidateDecodes -count=1; \
 	mv "$$modelsdev_tmp" "$(MODELSDEV_FALLBACK_ABS)"; \
 	mv "$$codex_tmp" "$(CODEX_MODELS_FALLBACK_ABS)"; \
 	printf 'Updated %s from %s\n' "$(MODELSDEV_FALLBACK)" "$(MODELSDEV_API_URL)"; \

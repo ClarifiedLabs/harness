@@ -15,17 +15,17 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/factory"
 	"harness/internal/llm/llmtest"
+	"harness/internal/modelcatalog"
 	"harness/internal/modelproxy/protocol"
-	"harness/internal/modelsdev"
 )
 
 // modelsDevCatalogWith builds a single-provider models.dev catalog whose one
 // model carries the given price, for exercising managed-price resolution.
-func modelsDevCatalogWith(providerID, modelID string, price llm.Price) *modelsdev.Catalog {
-	return &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+func modelsDevCatalogWith(providerID, modelID string, price llm.Price) *modelcatalog.Catalog {
+	return &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
 		providerID: {
 			ID: providerID,
-			Models: map[string]modelsdev.Model{
+			Models: map[string]modelcatalog.Model{
 				modelID: {ID: modelID, Cost: price},
 			},
 		},
@@ -419,8 +419,8 @@ func TestUpdateModelsDevCatalogPrunesManagedModelsMissingFromRefresh(t *testing.
 }`), 0o600); err != nil {
 		t.Fatalf("write provider config: %v", err)
 	}
-	initial := &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
-		"testai": {ID: "testai", Models: map[string]modelsdev.Model{
+	initial := &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
+		"testai": {ID: "testai", Models: map[string]modelcatalog.Model{
 			"alpha":   {ID: "alpha", Cost: llm.Price{Input: 2, Output: 4}},
 			"retired": {ID: "retired", Cost: llm.Price{Input: 9, Output: 9}},
 		}},

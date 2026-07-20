@@ -16,7 +16,7 @@ import (
 
 	"harness/internal/auth"
 	"harness/internal/llm"
-	"harness/internal/modelsdev"
+	"harness/internal/modelcatalog"
 )
 
 func TestRunSetupWritesOnlySelectedModelsAndNoProxyDefault(t *testing.T) {
@@ -32,7 +32,7 @@ func TestRunSetupWritesOnlySelectedModelsAndNoProxyDefault(t *testing.T) {
 			}
 			return ""
 		},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalog(), nil
 		},
 		terminalRows: func() int { return 12 },
@@ -82,7 +82,7 @@ func TestRunSetupWritesOnlySelectedModelsAndNoProxyDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read models.dev cache: %v", err)
 	}
-	cache, err := modelsdev.Decode(bytes.NewReader(cacheData))
+	cache, err := modelcatalog.DecodeModelsDev(bytes.NewReader(cacheData))
 	if err != nil {
 		t.Fatalf("decode models.dev cache: %v", err)
 	}
@@ -98,20 +98,20 @@ func TestRunSetupWritesOnlySelectedModelsAndNoProxyDefault(t *testing.T) {
 func TestRunSetupWritesManagedConfigWithoutPrices(t *testing.T) {
 	home := t.TempDir()
 	var out, errw bytes.Buffer
-	priced := &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+	priced := &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
 		"testai": {
 			ID:   "testai",
 			Name: "TestAI",
 			API:  "https://api.test/v1",
 			NPM:  "@ai-sdk/openai-compatible",
 			Env:  []string{"TESTAI_API_KEY"},
-			Models: map[string]modelsdev.Model{
+			Models: map[string]modelcatalog.Model{
 				"alpha": {
 					ID:          "alpha",
 					Name:        "Alpha",
 					ReleaseDate: "2025-01-01",
-					Modalities:  modelsdev.Modalities{Input: []string{"text", "image"}},
-					Limit:       modelsdev.Limit{Context: 123000, Output: 12000},
+					Modalities:  modelcatalog.Modalities{Input: []string{"text", "image"}},
+					Limit:       modelcatalog.Limit{Context: 123000, Output: 12000},
 					Cost:        llm.Price{Input: 2, Output: 4, CacheRead: 0.5, CacheWrite: 1},
 				},
 			},
@@ -127,7 +127,7 @@ func TestRunSetupWritesManagedConfigWithoutPrices(t *testing.T) {
 			}
 			return ""
 		},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return priced, nil
 		},
 		terminalRows: func() int { return 12 },
@@ -185,7 +185,7 @@ func TestRunSetupSIGINTCancelsCatalogFetch(t *testing.T) {
 			return ""
 		},
 		sigCh: make(chan os.Signal, 1),
-		modelsDevCatalog: func(ctx context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(ctx context.Context) (*modelcatalog.Catalog, error) {
 			close(catalogStarted)
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -229,7 +229,7 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 			}
 			return ""
 		},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalogWithOpenAI(), nil
 		},
 		terminalRows: func() int { return 12 },
@@ -263,9 +263,9 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	if err := json.Unmarshal(providerData, &provider); err != nil {
 		t.Fatalf("decode provider config: %v", err)
 	}
-	if provider.Name != openAICodexProviderID ||
+	if provider.Name != modelcatalog.OpenAICodexProviderID ||
 		provider.APIType != "responses" ||
-		provider.BaseURL != openAICodexProviderBaseURL ||
+		provider.BaseURL != modelcatalog.OpenAICodexProviderBaseURL ||
 		provider.APIKey != "" ||
 		len(provider.APIKeyEnv) != 0 ||
 		provider.Auth == nil ||
@@ -317,7 +317,7 @@ func TestRunSetupWritesSakanaProvider(t *testing.T) {
 			}
 			return ""
 		},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalogWithSakana(), nil
 		},
 		terminalRows: func() int { return 12 },
@@ -404,7 +404,7 @@ func TestRunSetupWritesSakanaProviderWithoutModelShape(t *testing.T) {
 			}
 			return ""
 		},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalogWithSakanaNoShape(), nil
 		},
 		terminalRows: func() int { return 12 },
@@ -440,7 +440,7 @@ func TestRunSetupWritesGoogleOpenAICompatibleProvider(t *testing.T) {
 			}
 			return ""
 		},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalogWithGoogle(), nil
 		},
 		terminalRows: func() int { return 12 },
@@ -534,7 +534,7 @@ func TestRunSetupModelSelectorCancelDoesNotWriteConfig(t *testing.T) {
 			}
 			return ""
 		},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalog(), nil
 		},
 		terminalRows: func() int { return 12 },
@@ -582,7 +582,7 @@ func TestRunSetupUpdatesExistingProviderConfig(t *testing.T) {
 			}
 			return ""
 		},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalog(), nil
 		},
 		terminalRows: func() int { return 12 },
@@ -640,7 +640,7 @@ func TestRunSetupUsesCachedCatalogWhenFetchFails(t *testing.T) {
 			}
 			return ""
 		},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			fetches++
 			return nil, errors.New("network down")
 		},
@@ -676,7 +676,7 @@ func TestSetupCatalogUsesFallbackOnlyAfterBadCacheAndFetchFailure(t *testing.T) 
 			}
 			return ""
 		},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return nil, errors.New("network down")
 		},
 	}
@@ -713,7 +713,7 @@ func TestRunRefreshModelsPreservesConfiguredModelAllowlist(t *testing.T) {
 	env := environment{
 		stdout: &out,
 		stderr: &bytes.Buffer{},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalog(), nil
 		},
 	}
@@ -742,7 +742,7 @@ func TestRunRefreshModelsPreservesConfiguredModelAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read models.dev cache: %v", err)
 	}
-	cache, err := modelsdev.Decode(bytes.NewReader(cacheData))
+	cache, err := modelcatalog.DecodeModelsDev(bytes.NewReader(cacheData))
 	if err != nil {
 		t.Fatalf("decode models.dev cache: %v", err)
 	}
@@ -771,7 +771,7 @@ func TestRunRefreshModelsFallsBackToCachedCatalog(t *testing.T) {
 	env := environment{
 		stdout: &out,
 		stderr: &errw,
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return nil, errors.New("network down")
 		},
 	}
@@ -797,14 +797,14 @@ func TestRunRefreshModelsFallsBackToCachedCatalog(t *testing.T) {
 
 func TestRefreshModelsDevCacheIfStaleUpdatesOldCache(t *testing.T) {
 	dir := t.TempDir()
-	writeTestModelsDevCache(t, dir, &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+	writeTestModelsDevCache(t, dir, &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
 		"oldai": {
 			ID:   "oldai",
 			Name: "OldAI",
 			API:  "https://old.example/v1",
 			NPM:  "@ai-sdk/openai-compatible",
-			Models: map[string]modelsdev.Model{
-				"old": {ID: "old", Name: "Old", Limit: modelsdev.Limit{Context: 1}},
+			Models: map[string]modelcatalog.Model{
+				"old": {ID: "old", Name: "Old", Limit: modelcatalog.Limit{Context: 1}},
 			},
 		},
 	}})
@@ -817,7 +817,7 @@ func TestRefreshModelsDevCacheIfStaleUpdatesOldCache(t *testing.T) {
 	env := environment{
 		stderr: &bytes.Buffer{},
 		now:    func() time.Time { return base },
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			fetches++
 			return testSetupCatalog(), nil
 		},
@@ -831,7 +831,7 @@ func TestRefreshModelsDevCacheIfStaleUpdatesOldCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cache, err := modelsdev.Decode(bytes.NewReader(cacheData))
+	cache, err := modelcatalog.DecodeModelsDev(bytes.NewReader(cacheData))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -866,7 +866,7 @@ func TestWriteModelsDevCacheRejectsHugeCountSwing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeTestModelsDevCache(t, dir, testSetupCatalogWithModelCount(tc.current))
-			data, err := modelsdev.Encode(testSetupCatalogWithModelCount(tc.candidate))
+			data, err := modelcatalog.EncodeModelsDev(testSetupCatalogWithModelCount(tc.candidate))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -887,7 +887,7 @@ func TestWriteModelsDevCacheBacksUpPreviousCache(t *testing.T) {
 	dir := t.TempDir()
 	writeTestModelsDevCache(t, dir, testSetupCatalogWithModelCount(2))
 
-	data, err := modelsdev.Encode(testSetupCatalogWithModelCount(3))
+	data, err := modelcatalog.EncodeModelsDev(testSetupCatalogWithModelCount(3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -898,7 +898,7 @@ func TestWriteModelsDevCacheBacksUpPreviousCache(t *testing.T) {
 		t.Fatalf("backup stats after first update = %+v, want 2 models", stats)
 	}
 
-	data, err = modelsdev.Encode(testSetupCatalogWithModelCount(4))
+	data, err = modelcatalog.EncodeModelsDev(testSetupCatalogWithModelCount(4))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -933,7 +933,7 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	env := environment{
 		stdout: &out,
 		stderr: &bytes.Buffer{},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalogWithOpenAI(), nil
 		},
 		codexModelsData: func(context.Context) ([]byte, error) {
@@ -952,9 +952,9 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	if err := json.Unmarshal(data, &provider); err != nil {
 		t.Fatal(err)
 	}
-	if provider.Name != openAICodexProviderID ||
+	if provider.Name != modelcatalog.OpenAICodexProviderID ||
 		provider.APIType != "responses" ||
-		provider.BaseURL != openAICodexProviderBaseURL ||
+		provider.BaseURL != modelcatalog.OpenAICodexProviderBaseURL ||
 		provider.Auth == nil ||
 		provider.Auth.Type != auth.TypeCodexOAuth ||
 		provider.Auth.TokenFile != "tokens/custom-codex.json" {
@@ -1003,7 +1003,7 @@ func TestRunRefreshModelsHandlesSakanaProvider(t *testing.T) {
 	env := environment{
 		stdout: &out,
 		stderr: &bytes.Buffer{},
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalogWithSakanaNoShape(), nil
 		},
 	}
@@ -1080,7 +1080,7 @@ func TestRunRefreshModelsRemovesProviderMissingFromCatalog(t *testing.T) {
 	env := environment{
 		stdout: &out,
 		stderr: &errw,
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalog(), nil
 		},
 	}
@@ -1139,7 +1139,7 @@ func TestRunRefreshModelsRemovesMissingProviderConfigFile(t *testing.T) {
 	env := environment{
 		stdout: &out,
 		stderr: &errw,
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalog(), nil
 		},
 	}
@@ -1184,7 +1184,7 @@ func TestRunRefreshModelsDropsMissingModelKeepsOthers(t *testing.T) {
 	env := environment{
 		stdout: &out,
 		stderr: &errw,
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalog(), nil
 		},
 	}
@@ -1227,7 +1227,7 @@ func TestRunRefreshModelsRemovesProviderWithNoModelsRemaining(t *testing.T) {
 	env := environment{
 		stdout: &out,
 		stderr: &errw,
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalog(), nil
 		},
 	}
@@ -1284,7 +1284,7 @@ func TestRunRefreshModelsDropsMissingProviderFromMultiProviderFile(t *testing.T)
 	env := environment{
 		stdout: &out,
 		stderr: &errw,
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalog(), nil
 		},
 	}
@@ -1344,18 +1344,18 @@ func TestRunRefreshModelsRemovesUnsupportedProvider(t *testing.T) {
 	// Catalog lists "legacy" but with no api/npm, so harness can't resolve a wire
 	// shape for it: api_type and base_url both come back empty (unsupported).
 	catalog := testSetupCatalog()
-	catalog.Providers["legacy"] = modelsdev.Provider{
+	catalog.Providers["legacy"] = modelcatalog.Provider{
 		ID:   "legacy",
 		Name: "Legacy",
-		Models: map[string]modelsdev.Model{
-			"legacy-1": {ID: "legacy-1", Name: "Legacy 1", Limit: modelsdev.Limit{Context: 1000}},
+		Models: map[string]modelcatalog.Model{
+			"legacy-1": {ID: "legacy-1", Name: "Legacy 1", Limit: modelcatalog.Limit{Context: 1000}},
 		},
 	}
 	var out, errw bytes.Buffer
 	env := environment{
 		stdout: &out,
 		stderr: &errw,
-		modelsDevCatalog: func(context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return catalog, nil
 		},
 	}
@@ -1384,53 +1384,6 @@ func TestRunRefreshModelsRemovesUnsupportedProvider(t *testing.T) {
 	}
 }
 
-func TestOpenAICodexProviderUsesListVisibleCodexModels(t *testing.T) {
-	catalog, err := decodeCodexModels([]byte(testCodexModelsCatalogJSON()))
-	if err != nil {
-		t.Fatalf("decodeCodexModels: %v", err)
-	}
-	provider, ok := openAICodexProvider(catalog)
-	if !ok {
-		t.Fatal("openAICodexProvider = false, want provider")
-	}
-	if len(provider.Models) != 1 {
-		t.Fatalf("provider models = %+v, want only one list-visible supported model", provider.Models)
-	}
-	model, ok := provider.Models["gpt-5.5"]
-	if !ok {
-		t.Fatalf("provider models = %+v, want gpt-5.5", provider.Models)
-	}
-	if model.Limit.Context != 272000 {
-		t.Fatalf("gpt-5.5 context = %d, want 272000", model.Limit.Context)
-	}
-	if model.Limit.Output != 0 {
-		t.Fatalf("gpt-5.5 output limit = %d, want omitted", model.Limit.Output)
-	}
-	if !model.Reasoning || len(model.ReasoningOptions) != 1 || !slices.Contains(model.ReasoningOptions[0].Values, "xhigh") {
-		t.Fatalf("gpt-5.5 reasoning = %v options=%+v, want Codex effort options", model.Reasoning, model.ReasoningOptions)
-	}
-	if _, ok := provider.Models["codex-auto-review"]; ok {
-		t.Fatalf("hidden codex-auto-review should not be exposed: %+v", provider.Models)
-	}
-	if _, ok := provider.Models["unsupported"]; ok {
-		t.Fatalf("unsupported model should not be exposed: %+v", provider.Models)
-	}
-}
-
-func TestCodexFallbackCandidateDecodes(t *testing.T) {
-	path := os.Getenv("CODEX_MODELS_FALLBACK_CANDIDATE")
-	if path == "" {
-		t.Skip("CODEX_MODELS_FALLBACK_CANDIDATE is not set")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := decodeCodexModels(data); err != nil {
-		t.Fatalf("decode candidate Codex fallback: %v", err)
-	}
-}
-
 func TestRunRefreshModelsSIGINTCancelsCatalogFetch(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
@@ -1444,7 +1397,7 @@ func TestRunRefreshModelsSIGINTCancelsCatalogFetch(t *testing.T) {
 		stdout: &out,
 		stderr: &errw,
 		sigCh:  make(chan os.Signal, 1),
-		modelsDevCatalog: func(ctx context.Context) (*modelsdev.Catalog, error) {
+		modelsDevCatalog: func(ctx context.Context) (*modelcatalog.Catalog, error) {
 			close(catalogStarted)
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -1474,50 +1427,50 @@ func TestRunRefreshModelsSIGINTCancelsCatalogFetch(t *testing.T) {
 	}
 }
 
-func testSetupCatalog() *modelsdev.Catalog {
-	return &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+func testSetupCatalog() *modelcatalog.Catalog {
+	return &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
 		"testai": {
 			ID:   "testai",
 			Name: "TestAI",
 			API:  "https://api.test/v1",
 			NPM:  "@ai-sdk/openai-compatible",
 			Env:  []string{"TESTAI_API_KEY"},
-			Models: map[string]modelsdev.Model{
+			Models: map[string]modelcatalog.Model{
 				"alpha": {
 					ID:          "alpha",
 					Name:        "Alpha",
 					ReleaseDate: "2025-01-01",
-					Modalities:  modelsdev.Modalities{Input: []string{"text", "image"}},
-					Limit:       modelsdev.Limit{Context: 123000},
+					Modalities:  modelcatalog.Modalities{Input: []string{"text", "image"}},
+					Limit:       modelcatalog.Limit{Context: 123000},
 				},
 				"beta": {
 					ID:          "beta",
 					Name:        "Beta",
 					ReleaseDate: "2026-01-01",
-					Modalities:  modelsdev.Modalities{Input: []string{"text"}},
-					Limit:       modelsdev.Limit{Context: 456000},
+					Modalities:  modelcatalog.Modalities{Input: []string{"text"}},
+					Limit:       modelcatalog.Limit{Context: 456000},
 				},
 			},
 		},
 	}}
 }
 
-func testSetupCatalogWithOpenAI() *modelsdev.Catalog {
+func testSetupCatalogWithOpenAI() *modelcatalog.Catalog {
 	catalog := testSetupCatalog()
-	catalog.Providers["openai"] = modelsdev.Provider{
+	catalog.Providers["openai"] = modelcatalog.Provider{
 		ID:   "openai",
 		Name: "OpenAI",
 		API:  "https://api.openai.com/v1",
 		NPM:  "@ai-sdk/openai",
 		Env:  []string{"OPENAI_API_KEY"},
-		Models: map[string]modelsdev.Model{
+		Models: map[string]modelcatalog.Model{
 			"gpt-test": {
 				ID:          "gpt-test",
 				Name:        "GPT Test",
 				ReleaseDate: "2026-02-01",
-				Modalities:  modelsdev.Modalities{Input: []string{"text", "image"}},
+				Modalities:  modelcatalog.Modalities{Input: []string{"text", "image"}},
 				Reasoning:   true,
-				Limit:       modelsdev.Limit{Context: 999000, Output: 64000},
+				Limit:       modelcatalog.Limit{Context: 999000, Output: 64000},
 			},
 		},
 	}
@@ -1562,46 +1515,46 @@ func testCodexModelsCatalogJSON() string {
 }`
 }
 
-func testSetupCatalogWithSakana() *modelsdev.Catalog {
+func testSetupCatalogWithSakana() *modelcatalog.Catalog {
 	sakanaReasoning := []llm.ReasoningOption{{Type: "effort", Values: []string{"high", "xhigh"}}}
-	return &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+	return &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
 		"sakana": {
 			ID:   "sakana",
 			Name: "Sakana AI",
 			API:  "https://api.sakana.ai/v1",
 			Env:  []string{"SAKANA_API_KEY"},
 			NPM:  "@ai-sdk/openai-compatible",
-			Models: map[string]modelsdev.Model{
+			Models: map[string]modelcatalog.Model{
 				"fugu": {
 					ID:               "fugu",
 					Name:             "Fugu",
 					ReleaseDate:      "2026-06-15",
-					Modalities:       modelsdev.Modalities{Input: []string{"text", "image"}, Output: []string{"text"}},
+					Modalities:       modelcatalog.Modalities{Input: []string{"text", "image"}, Output: []string{"text"}},
 					Reasoning:        true,
 					ReasoningOptions: append([]llm.ReasoningOption(nil), sakanaReasoning...),
-					Limit:            modelsdev.Limit{Context: 1_000_000, Output: 1_000_000},
-					Provider:         modelsdev.ModelProvider{Shape: "responses"},
+					Limit:            modelcatalog.Limit{Context: 1_000_000, Output: 1_000_000},
+					Provider:         modelcatalog.ModelProvider{Shape: "responses"},
 				},
 				"fugu-ultra": {
 					ID:               "fugu-ultra",
 					Name:             "Fugu Ultra",
 					ReleaseDate:      "2026-06-15",
-					Modalities:       modelsdev.Modalities{Input: []string{"text", "image"}, Output: []string{"text"}},
+					Modalities:       modelcatalog.Modalities{Input: []string{"text", "image"}, Output: []string{"text"}},
 					Reasoning:        true,
 					ReasoningOptions: append([]llm.ReasoningOption(nil), sakanaReasoning...),
-					Limit:            modelsdev.Limit{Context: 1_000_000, Output: 1_000_000},
-					Provider:         modelsdev.ModelProvider{Shape: "responses"},
+					Limit:            modelcatalog.Limit{Context: 1_000_000, Output: 1_000_000},
+					Provider:         modelcatalog.ModelProvider{Shape: "responses"},
 					Cost:             llm.Price{Input: 5, Output: 30, CacheRead: 0.5, Tiers: []llm.PriceTier{{Threshold: 272_000, Input: 10, Output: 45, CacheRead: 1.0}}},
 				},
 				"fugu-ultra-20260615": {
 					ID:               "fugu-ultra-20260615",
 					Name:             "Fugu Ultra 20260615",
 					ReleaseDate:      "2026-06-15",
-					Modalities:       modelsdev.Modalities{Input: []string{"text", "image"}, Output: []string{"text"}},
+					Modalities:       modelcatalog.Modalities{Input: []string{"text", "image"}, Output: []string{"text"}},
 					Reasoning:        true,
 					ReasoningOptions: append([]llm.ReasoningOption(nil), sakanaReasoning...),
-					Limit:            modelsdev.Limit{Context: 1_000_000, Output: 1_000_000},
-					Provider:         modelsdev.ModelProvider{Shape: "responses"},
+					Limit:            modelcatalog.Limit{Context: 1_000_000, Output: 1_000_000},
+					Provider:         modelcatalog.ModelProvider{Shape: "responses"},
 					Cost:             llm.Price{Input: 5, Output: 30, CacheRead: 0.5, Tiers: []llm.PriceTier{{Threshold: 272_000, Input: 10, Output: 45, CacheRead: 1.0}}},
 				},
 			},
@@ -1609,7 +1562,7 @@ func testSetupCatalogWithSakana() *modelsdev.Catalog {
 	}}
 }
 
-func testSetupCatalogWithSakanaNoShape() *modelsdev.Catalog {
+func testSetupCatalogWithSakanaNoShape() *modelcatalog.Catalog {
 	catalog := testSetupCatalogWithSakana()
 	provider := catalog.Providers["sakana"]
 	for id, model := range provider.Models {
@@ -1620,36 +1573,36 @@ func testSetupCatalogWithSakanaNoShape() *modelsdev.Catalog {
 	return catalog
 }
 
-func testSetupCatalogWithGoogle() *modelsdev.Catalog {
-	return &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+func testSetupCatalogWithGoogle() *modelcatalog.Catalog {
+	return &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
 		"google": {
 			ID:   "google",
 			Name: "Google",
 			NPM:  "@ai-sdk/google",
 			Env:  []string{"GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"},
-			Models: map[string]modelsdev.Model{
+			Models: map[string]modelcatalog.Model{
 				"gemini-test": {
 					ID:          "gemini-test",
 					Name:        "Gemini Test",
 					ReleaseDate: "2026-03-01",
-					Limit:       modelsdev.Limit{Context: 1000000},
+					Limit:       modelcatalog.Limit{Context: 1000000},
 				},
 			},
 		},
 	}}
 }
 
-func testSetupCatalogWithModelCount(count int) *modelsdev.Catalog {
-	models := make(map[string]modelsdev.Model, count)
+func testSetupCatalogWithModelCount(count int) *modelcatalog.Catalog {
+	models := make(map[string]modelcatalog.Model, count)
 	for i := range count {
 		id := fmt.Sprintf("model-%02d", i+1)
-		models[id] = modelsdev.Model{
+		models[id] = modelcatalog.Model{
 			ID:    id,
 			Name:  "Model " + id,
-			Limit: modelsdev.Limit{Context: 1000 + i},
+			Limit: modelcatalog.Limit{Context: 1000 + i},
 		}
 	}
-	return &modelsdev.Catalog{Providers: map[string]modelsdev.Provider{
+	return &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
 		"testai": {
 			ID:     "testai",
 			Name:   "TestAI",
@@ -1660,9 +1613,9 @@ func testSetupCatalogWithModelCount(count int) *modelsdev.Catalog {
 	}}
 }
 
-func writeTestModelsDevCache(t *testing.T, dir string, catalog *modelsdev.Catalog) {
+func writeTestModelsDevCache(t *testing.T, dir string, catalog *modelcatalog.Catalog) {
 	t.Helper()
-	data, err := modelsdev.Encode(catalog)
+	data, err := modelcatalog.EncodeModelsDev(catalog)
 	if err != nil {
 		t.Fatalf("encode models.dev cache: %v", err)
 	}
@@ -1671,18 +1624,18 @@ func writeTestModelsDevCache(t *testing.T, dir string, catalog *modelsdev.Catalo
 	}
 }
 
-func readTestModelsDevCache(t *testing.T, dir string) *modelsdev.Catalog {
+func readTestModelsDevCache(t *testing.T, dir string) *modelcatalog.Catalog {
 	t.Helper()
 	return readTestModelsDevCachePath(t, modelsDevCachePath(dir))
 }
 
-func readTestModelsDevCachePath(t *testing.T, path string) *modelsdev.Catalog {
+func readTestModelsDevCachePath(t *testing.T, path string) *modelcatalog.Catalog {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read models.dev cache: %v", err)
 	}
-	catalog, err := modelsdev.Decode(bytes.NewReader(data))
+	catalog, err := modelcatalog.DecodeModelsDev(bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("decode models.dev cache: %v", err)
 	}

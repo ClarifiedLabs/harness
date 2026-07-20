@@ -23,8 +23,8 @@ import (
 	"harness/internal/httpserve"
 	"harness/internal/logging"
 	"harness/internal/metrics"
+	"harness/internal/modelcatalog"
 	"harness/internal/modelproxy/server"
-	"harness/internal/modelsdev"
 	"harness/internal/term"
 )
 
@@ -46,7 +46,7 @@ type environment struct {
 	stderr            io.Writer
 	getenv            func(string) string
 	sigCh             chan os.Signal
-	modelsDevCatalog  func(context.Context) (*modelsdev.Catalog, error)
+	modelsDevCatalog  func(context.Context) (*modelcatalog.Catalog, error)
 	codexModelsData   func(context.Context) ([]byte, error)
 	terminalRows      func() int
 	modelsDevCacheTTL *time.Duration
@@ -235,7 +235,7 @@ func runServe(env environment, args []string) int {
 			}
 		}()
 	}
-	startModelsDevCacheRefresh(ctx, env, configDir, modelsTTL, logger, func(catalog *modelsdev.Catalog, sourceDate time.Time) {
+	startModelsDevCacheRefresh(ctx, env, configDir, modelsTTL, logger, func(catalog *modelcatalog.Catalog, sourceDate time.Time) {
 		handler.UpdateModelsDevCatalog(catalog, sourceDate)
 	})
 	go apikey.WatchFile(ctx, keyFile, keyFileState, 2*time.Second, authStore, func(err error) {
@@ -663,10 +663,10 @@ func defaultConfigDir(getenv func(string) string) string {
 	return server.DefaultConfigDir(getenv)
 }
 
-func defaultModelsDevCatalog(ctx context.Context) (*modelsdev.Catalog, error) {
+func defaultModelsDevCatalog(ctx context.Context) (*modelcatalog.Catalog, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return modelsdev.Fetch(ctx, http.DefaultClient, modelsdev.DefaultURL)
+	return modelcatalog.FetchModelsDev(ctx, http.DefaultClient, modelcatalog.ModelsDevURL)
 }
 
 func defaultTerminalRows() int {

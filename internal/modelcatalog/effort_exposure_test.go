@@ -1,4 +1,4 @@
-package modelsdev
+package modelcatalog
 
 import (
 	"testing"
@@ -12,9 +12,9 @@ import (
 // the same path the UI uses) instead of being rejected as unsupported. It
 // regresses if the models.dev snapshot ever drops xhigh/max for these models.
 func TestAnthropicEffortTiersExposed(t *testing.T) {
-	cat, err := Fallback()
+	cat, err := ModelsDevFallback()
 	if err != nil {
-		t.Fatalf("Fallback: %v", err)
+		t.Fatalf("ModelsDevFallback: %v", err)
 	}
 	p, ok := cat.Provider("anthropic")
 	if !ok {

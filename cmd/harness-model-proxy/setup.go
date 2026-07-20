@@ -20,7 +20,7 @@ import (
 	"harness/internal/auth"
 	"harness/internal/llm"
 	"harness/internal/logging"
-	"harness/internal/modelsdev"
+	"harness/internal/modelcatalog"
 	"harness/internal/ui"
 )
 
@@ -68,12 +68,6 @@ type setupModelConfig struct {
 	ReasoningOptions []llm.ReasoningOption `json:"reasoning_options,omitempty"`
 }
 
-const (
-	openAICodexProviderID      = "openai-codex"
-	openAICodexProviderName    = "OpenAI Codex (ChatGPT subscription)"
-	openAICodexProviderBaseURL = "https://chatgpt.com/backend-api/codex"
-)
-
 func runSetup(ctx context.Context, env environment, force bool) error {
 	dir := defaultConfigDir(env.getenv)
 	configPath := filepath.Join(dir, "config.json")
@@ -87,7 +81,7 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	if err != nil {
 		return err
 	}
-	codexCatalog, err := setupCodexModelsCatalog(env, dir)
+	codexProvider, err := setupCodexProvider(env, dir)
 	if err != nil {
 		return err
 	}
@@ -96,7 +90,7 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 		return err
 	}
 
-	providerMeta, err := promptProviderSelection(reader, env.stdout, catalog, codexCatalog, existingProviders, setupPageSize(env))
+	providerMeta, err := promptProviderSelection(reader, env.stdout, catalog, &codexProvider, existingProviders, setupPageSize(env))
 	if err != nil {
 		return err
 	}
@@ -144,7 +138,7 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 		return err
 	}
 
-	provider := setupProviderFromModelsDev(providerMeta, apiKey, authCfg, models)
+	provider := setupProviderFromCatalog(providerMeta, apiKey, authCfg, models)
 	if existingProvider.Config.OmitMaxOutputTokens {
 		provider.OmitMaxOutputTokens = true
 	}
@@ -226,7 +220,7 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 	}
 
 	dir := filepath.Dir(cfgPath)
-	var codexCatalog *codexModelsCatalog
+	var codexProvider *modelcatalog.Provider
 	// Files kept after refresh, in original order. Provider files whose every
 	// provider disappeared from the catalog are deleted and dropped from this
 	// list so a stale reference does not fail the next refresh; when any file is
@@ -259,13 +253,14 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			if current.Name == "" {
 				return fmt.Errorf("%s has provider without name", path)
 			}
-			if current.Name == openAICodexProviderID && codexCatalog == nil {
-				codexCatalog, err = refreshCodexModelsCatalog(ctx, env, dir)
+			if current.Name == modelcatalog.OpenAICodexProviderID && codexProvider == nil {
+				refreshed, err := refreshCodexProvider(ctx, env, dir)
 				if err != nil {
 					return err
 				}
+				codexProvider = &refreshed
 			}
-			meta, ok := setupCatalogProvider(catalog, codexCatalog, current.Name)
+			meta, ok := setupCatalogProvider(catalog, codexProvider, current.Name)
 			if !ok {
 				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider %q from %s is no longer in the model catalog; removing it\n", current.Name, path)
 				continue
@@ -282,7 +277,7 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider %q from %s has no models remaining after refresh; removing it\n", current.Name, path)
 				continue
 			}
-			next := setupProviderFromModelsDev(meta, current.APIKey, current.Auth, updatedModels)
+			next := setupProviderFromCatalog(meta, current.APIKey, current.Auth, updatedModels)
 			if current.OmitMaxOutputTokens {
 				next.OmitMaxOutputTokens = true
 			}
@@ -331,7 +326,7 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 	return nil
 }
 
-func refreshCatalog(ctx context.Context, env environment, configDir string) (*modelsdev.Catalog, error) {
+func refreshCatalog(ctx context.Context, env environment, configDir string) (*modelcatalog.Catalog, error) {
 	return refreshModelsDevCatalog(ctx, env, configDir, "refresh-models")
 }
 
@@ -432,19 +427,19 @@ func setupProviderConfigs(raw json.RawMessage) ([]string, error) {
 	return configs, nil
 }
 
-func setupProviderFromModelsDev(provider modelsdev.Provider, apiKey string, authCfg *auth.Config, models []modelsdev.Model) setupProviderConfig {
+func setupProviderFromCatalog(provider modelcatalog.Provider, apiKey string, authCfg *auth.Config, models []modelcatalog.Model) setupProviderConfig {
 	entries := make([]setupModelConfig, 0, len(models))
 	for _, model := range models {
-		entries = append(entries, setupModelFromModelsDev(model))
+		entries = append(entries, setupModelFromCatalog(model))
 	}
 	if isOpenAICodexProvider(provider) {
 		return setupProviderConfig{
-			Name:                openAICodexProviderID,
+			Name:                modelcatalog.OpenAICodexProviderID,
 			APIType:             setupProviderAPIType(provider),
 			BaseURL:             setupProviderBaseURL(provider),
 			Managed:             true,
 			OmitMaxOutputTokens: true,
-			ServerTools:         setupProviderServerTools(openAICodexProviderID, setupProviderAPIType(provider), setupProviderBaseURL(provider)),
+			ServerTools:         setupProviderServerTools(modelcatalog.OpenAICodexProviderID, setupProviderAPIType(provider), setupProviderBaseURL(provider)),
 			Auth:                setupProviderAuth(provider, authCfg),
 			Models:              entries,
 		}
@@ -477,7 +472,7 @@ func setupProviderServerTools(name, apiType, baseURL string) []string {
 	return []string{llm.ServerToolWebSearch}
 }
 
-func setupProviderAuth(provider modelsdev.Provider, existing *auth.Config) *auth.Config {
+func setupProviderAuth(provider modelcatalog.Provider, existing *auth.Config) *auth.Config {
 	if !isOpenAICodexProvider(provider) {
 		return nil
 	}
@@ -492,10 +487,10 @@ func setupProviderAuth(provider modelsdev.Provider, existing *auth.Config) *auth
 	return &auth.Config{Type: auth.TypeCodexOAuth}
 }
 
-func promptProviderSelection(r *bufio.Reader, w io.Writer, catalog *modelsdev.Catalog, codexCatalog *codexModelsCatalog, existing map[string]setupExistingProvider, pageSize int) (modelsdev.Provider, error) {
-	providers := supportedSetupProviders(catalog, codexCatalog)
+func promptProviderSelection(r *bufio.Reader, w io.Writer, catalog *modelcatalog.Catalog, codexProvider *modelcatalog.Provider, existing map[string]setupExistingProvider, pageSize int) (modelcatalog.Provider, error) {
+	providers := supportedSetupProviders(catalog, codexProvider)
 	if len(providers) == 0 {
-		return modelsdev.Provider{}, fmt.Errorf("models.dev catalog has no harness-supported providers")
+		return modelcatalog.Provider{}, fmt.Errorf("models.dev catalog has no harness-supported providers")
 	}
 	entries := make([]setupProviderPick, 0, len(providers))
 	for _, provider := range providers {
@@ -513,12 +508,12 @@ func promptProviderSelection(r *bufio.Reader, w io.Writer, catalog *modelsdev.Ca
 		PrintPage:   printSetupProviderSelectionPage,
 	})
 	if err != nil {
-		return modelsdev.Provider{}, err
+		return modelcatalog.Provider{}, err
 	}
 	return selected.Provider, nil
 }
 
-func promptModelSelection(r *bufio.Reader, w io.Writer, provider modelsdev.Provider, enabled map[string]bool, pageSize int) ([]modelsdev.Model, error) {
+func promptModelSelection(r *bufio.Reader, w io.Writer, provider modelcatalog.Provider, enabled map[string]bool, pageSize int) ([]modelcatalog.Model, error) {
 	models := provider.ModelsByReleaseDate()
 	if len(models) == 0 {
 		return nil, fmt.Errorf("provider %q has no models", provider.ID)
@@ -533,14 +528,14 @@ func promptModelSelection(r *bufio.Reader, w io.Writer, provider modelsdev.Provi
 	if err != nil {
 		return nil, err
 	}
-	slices.SortFunc(selected, func(a, b modelsdev.Model) int {
+	slices.SortFunc(selected, func(a, b modelcatalog.Model) int {
 		return strings.Compare(a.ID, b.ID)
 	})
 	return selected, nil
 }
 
 type setupProviderPick struct {
-	modelsdev.Provider
+	modelcatalog.Provider
 	Configured bool
 }
 
@@ -570,7 +565,7 @@ func printSetupProviderSelectionPage(w io.Writer, providers []setupProviderPick,
 }
 
 type setupModelPick struct {
-	modelsdev.Model
+	modelcatalog.Model
 	Enabled bool
 }
 
@@ -584,7 +579,7 @@ func (m setupModelPick) PickerRelease() string {
 	return m.LastUpdated
 }
 
-func pickSetupModels(readLine func(string) (string, error), w io.Writer, providerID string, items []setupModelPick, pageSize int) ([]modelsdev.Model, error) {
+func pickSetupModels(readLine func(string) (string, error), w io.Writer, providerID string, items []setupModelPick, pageSize int) ([]modelcatalog.Model, error) {
 	if readLine == nil {
 		return nil, fmt.Errorf("picker has no input reader")
 	}
@@ -701,8 +696,8 @@ func printSetupModelSelectionPage(w io.Writer, providerID string, items []setupM
 	}
 }
 
-func selectedSetupModels(items []setupModelPick) []modelsdev.Model {
-	selected := make([]modelsdev.Model, 0, len(items))
+func selectedSetupModels(items []setupModelPick) []modelcatalog.Model {
+	selected := make([]modelcatalog.Model, 0, len(items))
 	for _, item := range items {
 		if item.Enabled {
 			selected = append(selected, item.Model)
@@ -755,19 +750,16 @@ func setupModelMatchSummary(items []setupModelPick, matches []int, limit int) st
 	return strings.Join(parts, ", ")
 }
 
-func supportedSetupProviders(catalog *modelsdev.Catalog, codexCatalog *codexModelsCatalog) []modelsdev.Provider {
-	var providers []modelsdev.Provider
+func supportedSetupProviders(catalog *modelcatalog.Catalog, codexProvider *modelcatalog.Provider) []modelcatalog.Provider {
+	var providers []modelcatalog.Provider
 	for _, provider := range catalog.ProvidersList() {
 		if setupProviderAPIType(provider) == "" || setupProviderBaseURL(provider) == "" || len(provider.Models) == 0 {
 			continue
 		}
 		providers = append(providers, provider)
 	}
-	if _, hasOpenAI := catalog.Provider("openai"); hasOpenAI && !setupProviderListContains(providers, openAICodexProviderID) {
-		codex, ok := openAICodexProvider(codexCatalog)
-		if ok {
-			providers = append(providers, codex)
-		}
+	if _, hasOpenAI := catalog.Provider("openai"); hasOpenAI && codexProvider != nil && len(codexProvider.Models) > 0 && !setupProviderListContains(providers, modelcatalog.OpenAICodexProviderID) {
+		providers = append(providers, *codexProvider)
 	}
 	sort.Slice(providers, func(i, j int) bool {
 		if strings.EqualFold(providers[i].Name, providers[j].Name) {
@@ -778,7 +770,7 @@ func supportedSetupProviders(catalog *modelsdev.Catalog, codexCatalog *codexMode
 	return providers
 }
 
-func setupProviderListContains(providers []modelsdev.Provider, id string) bool {
+func setupProviderListContains(providers []modelcatalog.Provider, id string) bool {
 	for _, provider := range providers {
 		if provider.ID == id {
 			return true
@@ -787,18 +779,17 @@ func setupProviderListContains(providers []modelsdev.Provider, id string) bool {
 	return false
 }
 
-func setupCatalogProvider(catalog *modelsdev.Catalog, codexCatalog *codexModelsCatalog, id string) (modelsdev.Provider, bool) {
-	if id == openAICodexProviderID {
-		return openAICodexProvider(codexCatalog)
+func setupCatalogProvider(catalog *modelcatalog.Catalog, codexProvider *modelcatalog.Provider, id string) (modelcatalog.Provider, bool) {
+	if id == modelcatalog.OpenAICodexProviderID {
+		if codexProvider == nil || len(codexProvider.Models) == 0 {
+			return modelcatalog.Provider{}, false
+		}
+		return *codexProvider, true
 	}
 	return catalog.Provider(id)
 }
 
-func openAICodexProvider(catalog *codexModelsCatalog) (modelsdev.Provider, bool) {
-	return openAICodexProviderFromCatalog(catalog)
-}
-
-func setupProviderAPIType(provider modelsdev.Provider) string {
+func setupProviderAPIType(provider modelcatalog.Provider) string {
 	if isOpenAICodexProvider(provider) {
 		return "responses"
 	}
@@ -808,23 +799,23 @@ func setupProviderAPIType(provider modelsdev.Provider) string {
 	return provider.APIType()
 }
 
-func setupProviderBaseURL(provider modelsdev.Provider) string {
+func setupProviderBaseURL(provider modelcatalog.Provider) string {
 	if isOpenAICodexProvider(provider) {
-		return openAICodexProviderBaseURL
+		return modelcatalog.OpenAICodexProviderBaseURL
 	}
 	return provider.BaseURL()
 }
 
-func isOpenAICodexProvider(provider modelsdev.Provider) bool {
-	return provider.ID == openAICodexProviderID
+func isOpenAICodexProvider(provider modelcatalog.Provider) bool {
+	return provider.ID == modelcatalog.OpenAICodexProviderID
 }
 
-func isSakanaProvider(provider modelsdev.Provider) bool {
+func isSakanaProvider(provider modelcatalog.Provider) bool {
 	return strings.EqualFold(strings.TrimSpace(provider.ID), "sakana") ||
 		strings.Contains(strings.ToLower(provider.BaseURL()), "api.sakana.ai")
 }
 
-func applySyntheticProviderDefaults(provider modelsdev.Provider, cfg *setupProviderConfig) {
+func applySyntheticProviderDefaults(provider modelcatalog.Provider, cfg *setupProviderConfig) {
 	if cfg == nil {
 		return
 	}
@@ -865,8 +856,8 @@ func setJSONField(cfg map[string]json.RawMessage, key string, value any) error {
 // models are returned in their original order. It never errors on a missing or
 // empty result — the caller decides what to do with a provider left with no
 // models (warn and remove it).
-func refreshConfiguredModels(provider modelsdev.Provider, current []llm.ModelEntry) (models []modelsdev.Model, missing []string) {
-	models = make([]modelsdev.Model, 0, len(current))
+func refreshConfiguredModels(provider modelcatalog.Provider, current []llm.ModelEntry) (models []modelcatalog.Model, missing []string) {
+	models = make([]modelcatalog.Model, 0, len(current))
 	for _, entry := range current {
 		if entry.Name == "" {
 			continue
@@ -881,9 +872,9 @@ func refreshConfiguredModels(provider modelsdev.Provider, current []llm.ModelEnt
 	return models, missing
 }
 
-func setupProviderModel(provider modelsdev.Provider, id string) (modelsdev.Model, bool) {
+func setupProviderModel(provider modelcatalog.Provider, id string) (modelcatalog.Model, bool) {
 	if provider.Models == nil {
-		return modelsdev.Model{}, false
+		return modelcatalog.Model{}, false
 	}
 	if model, ok := provider.Models[id]; ok {
 		return model, true
@@ -893,7 +884,7 @@ func setupProviderModel(provider modelsdev.Provider, id string) (modelsdev.Model
 			return model, true
 		}
 	}
-	return modelsdev.Model{}, false
+	return modelcatalog.Model{}, false
 }
 
 func writeSetupProviderConfig(path string, provider setupProviderConfig, force bool) error {
@@ -945,7 +936,7 @@ func writeJSONFileAtomic(path string, v any) error {
 	return nil
 }
 
-func setupCatalog(ctx context.Context, env environment) (*modelsdev.Catalog, error) {
+func setupCatalog(ctx context.Context, env environment) (*modelcatalog.Catalog, error) {
 	ttl := defaultModelsDevTTL
 	if env.modelsDevCacheTTL != nil {
 		ttl = *env.modelsDevCacheTTL
@@ -953,13 +944,13 @@ func setupCatalog(ctx context.Context, env environment) (*modelsdev.Catalog, err
 	return cachedOrFetchedSetupCatalog(ctx, env, defaultConfigDir(env.getenv), ttl)
 }
 
-// setupModelFromModelsDev builds the on-disk entry for one selected model.
+// setupModelFromCatalog builds the on-disk entry for one selected model.
 // Managed configs never store a static pricing schedule: the proxy resolves
 // prices live from the models.dev cache or provider-specific pricers, so leaving
 // Price nil keeps refreshed prices reaching the running server without another
 // setup. The complete models.dev schedule is still shown in the interactive
 // picker; it just isn't persisted.
-func setupModelFromModelsDev(model modelsdev.Model) setupModelConfig {
+func setupModelFromCatalog(model modelcatalog.Model) setupModelConfig {
 	cfg := setupModelConfig{
 		Name:             model.ID,
 		ContextWindow:    model.Limit.Context,

@@ -1,14 +1,8 @@
-// Package modelsdev reads the public models.dev catalog and reduces it to the
-// provider, endpoint, model context, and pricing fields harness needs.
-package modelsdev
+// Package modelcatalog defines the provider and model metadata harness uses and
+// adapts upstream model catalogs into that shared representation.
+package modelcatalog
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -16,14 +10,12 @@ import (
 	"harness/internal/llm"
 )
 
-const DefaultURL = "https://models.dev/api.json"
-
-// Catalog is the provider-keyed models.dev API response.
+// Catalog is a provider-keyed collection of model metadata.
 type Catalog struct {
 	Providers map[string]Provider
 }
 
-// Provider is one provider entry in the models.dev API response.
+// Provider describes one model provider and its available models.
 type Provider struct {
 	ID     string           `json:"id"`
 	Name   string           `json:"name"`
@@ -34,7 +26,7 @@ type Provider struct {
 	Models map[string]Model `json:"models"`
 }
 
-// Model is the subset of one models.dev model entry used by harness.
+// Model is the provider-local model metadata used by harness.
 type Model struct {
 	ID               string                `json:"id"`
 	Name             string                `json:"name"`
@@ -48,112 +40,21 @@ type Model struct {
 	Cost             llm.Price             `json:"cost"`
 }
 
-// ModelProvider captures provider-specific wire-shape hints attached to a model
-// in the models.dev catalog.
+// ModelProvider captures provider-specific wire-shape hints attached to a model.
 type ModelProvider struct {
 	Shape string `json:"shape"`
 }
 
-// Modalities carries supported input and output modalities from models.dev.
+// Modalities carries supported input and output modalities.
 type Modalities struct {
 	Input  []string `json:"input"`
 	Output []string `json:"output"`
 }
 
-// Limit carries token limits from models.dev.
+// Limit carries token limits.
 type Limit struct {
 	Context int `json:"context"`
 	Output  int `json:"output"`
-}
-
-// Fetch downloads and decodes a models.dev API catalog. A nil client uses the
-// default HTTP client.
-func Fetch(ctx context.Context, client *http.Client, url string) (*Catalog, error) {
-	data, err := FetchData(ctx, client, url)
-	if err != nil {
-		return nil, err
-	}
-	return Decode(bytes.NewReader(data))
-}
-
-// FetchData downloads a models.dev API catalog and returns the raw JSON body. A
-// nil client uses the default HTTP client.
-func FetchData(ctx context.Context, client *http.Client, url string) ([]byte, error) {
-	if url == "" {
-		url = DefaultURL
-	}
-	if client == nil {
-		client = http.DefaultClient
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("models.dev: GET %s: %s", url, resp.Status)
-	}
-	return io.ReadAll(resp.Body)
-}
-
-// Decode parses a models.dev API catalog.
-func Decode(r io.Reader) (*Catalog, error) {
-	var raw json.RawMessage
-	if err := json.NewDecoder(r).Decode(&raw); err != nil {
-		return nil, err
-	}
-
-	var wrapper struct {
-		Providers map[string]Provider `json:"providers"`
-	}
-	if err := json.Unmarshal(raw, &wrapper); err == nil && wrapper.Providers != nil {
-		return normalizeProviders(wrapper.Providers), nil
-	}
-
-	var providers map[string]Provider
-	if err := json.Unmarshal(raw, &providers); err != nil {
-		return nil, err
-	}
-	return normalizeProviders(providers), nil
-}
-
-// Encode renders a catalog in a cache-compatible JSON shape.
-func Encode(c *Catalog) ([]byte, error) {
-	providers := map[string]Provider{}
-	if c != nil && c.Providers != nil {
-		providers = c.Providers
-	}
-	return json.MarshalIndent(struct {
-		Providers map[string]Provider `json:"providers"`
-	}{Providers: providers}, "", "  ")
-}
-
-func normalizeProviders(providers map[string]Provider) *Catalog {
-	if providers == nil {
-		providers = map[string]Provider{}
-	}
-	for key, p := range providers {
-		if p.ID == "" {
-			p.ID = key
-		}
-		if p.Models == nil {
-			p.Models = map[string]Model{}
-		}
-		for modelKey, m := range p.Models {
-			if m.ID == "" {
-				m.ID = modelKey
-			}
-			p.Models[modelKey] = m
-		}
-		providers[key] = p
-	}
-	return &Catalog{Providers: providers}
 }
 
 // Provider returns the provider with id, matching case-insensitively against the
@@ -177,8 +78,8 @@ func (c *Catalog) Provider(id string) (Provider, bool) {
 	return Provider{}, false
 }
 
-// ProviderByAPI returns the provider whose models.dev api field matches baseURL
-// after trimming trailing slashes.
+// ProviderByAPI returns the provider whose API field matches baseURL after
+// trimming trailing slashes.
 func (c *Catalog) ProviderByAPI(baseURL string) (Provider, bool) {
 	if c == nil {
 		return Provider{}, false
@@ -321,10 +222,8 @@ func (p Provider) ModelInfo(modelID string) (llm.ModelInfo, bool) {
 	return llm.ModelInfo{}, false
 }
 
-// ProviderConfig converts this models.dev provider entry into a harness
-// provider config. The supplied apiKey is the only user-specific field; all
-// other connection and model metadata comes from models.dev plus harness's
-// first-party URL defaults.
+// ProviderConfig converts this catalog provider into a harness provider config.
+// The supplied apiKey is the only user-specific field.
 func (p Provider) ProviderConfig(apiKey string) llm.ProviderConfig {
 	models := p.ModelsByID()
 	entries := make([]llm.ModelEntry, 0, len(models))
@@ -352,7 +251,7 @@ func (p Provider) ProviderConfig(apiKey string) llm.ProviderConfig {
 	}
 }
 
-// ModelInfo converts one models.dev model into a harness registry entry.
+// ModelInfo converts one catalog model into a harness registry entry.
 func (m Model) ModelInfo() llm.ModelInfo {
 	return llm.ModelInfo{
 		ContextWindow:   m.Limit.Context,

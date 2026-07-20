@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"harness/internal/modelsdev"
+	"harness/internal/modelcatalog"
 )
 
 const (
@@ -32,7 +32,7 @@ func modelsDevCacheBackupPath(configDir string) string {
 }
 
 type cachedModelsDevCatalog struct {
-	catalog *modelsdev.Catalog
+	catalog *modelcatalog.Catalog
 	modTime time.Time
 }
 
@@ -41,7 +41,7 @@ func readModelsDevCache(path string) (cachedModelsDevCatalog, error) {
 	if err != nil {
 		return cachedModelsDevCatalog{}, err
 	}
-	catalog, err := modelsdev.Decode(bytes.NewReader(data))
+	catalog, err := modelcatalog.DecodeModelsDev(bytes.NewReader(data))
 	if err != nil {
 		return cachedModelsDevCatalog{}, err
 	}
@@ -52,7 +52,7 @@ func readModelsDevCache(path string) (cachedModelsDevCatalog, error) {
 	return cachedModelsDevCatalog{catalog: catalog, modTime: info.ModTime()}, nil
 }
 
-func fetchAndCacheModelsDev(ctx context.Context, env environment, configDir string) (*modelsdev.Catalog, error) {
+func fetchAndCacheModelsDev(ctx context.Context, env environment, configDir string) (*modelcatalog.Catalog, error) {
 	catalog, data, err := fetchModelsDevCatalogData(ctx, env)
 	if err != nil {
 		return nil, err
@@ -63,24 +63,24 @@ func fetchAndCacheModelsDev(ctx context.Context, env environment, configDir stri
 	return catalog, nil
 }
 
-func fetchModelsDevCatalogData(ctx context.Context, env environment) (*modelsdev.Catalog, []byte, error) {
+func fetchModelsDevCatalogData(ctx context.Context, env environment) (*modelcatalog.Catalog, []byte, error) {
 	if env.modelsDevCatalog != nil {
 		catalog, err := env.modelsDevCatalog(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
-		data, err := modelsdev.Encode(catalog)
+		data, err := modelcatalog.EncodeModelsDev(catalog)
 		if err != nil {
 			return nil, nil, err
 		}
 		data = append(data, '\n')
 		return catalog, data, nil
 	}
-	data, err := modelsdev.FetchData(ctx, http.DefaultClient, modelsdev.DefaultURL)
+	data, err := modelcatalog.FetchModelsDevData(ctx, http.DefaultClient, modelcatalog.ModelsDevURL)
 	if err != nil {
 		return nil, nil, err
 	}
-	catalog, err := modelsdev.Decode(bytes.NewReader(data))
+	catalog, err := modelcatalog.DecodeModelsDev(bytes.NewReader(data))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -88,7 +88,7 @@ func fetchModelsDevCatalogData(ctx context.Context, env environment) (*modelsdev
 }
 
 func writeModelsDevCache(configDir string, data []byte) error {
-	catalog, err := modelsdev.Decode(bytes.NewReader(data))
+	catalog, err := modelcatalog.DecodeModelsDev(bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("candidate models.dev cache did not parse: %w", err)
 	}
@@ -159,7 +159,7 @@ type modelsDevCacheStats struct {
 	models    int
 }
 
-func validateModelsDevCacheUpdate(path string, candidate *modelsdev.Catalog) error {
+func validateModelsDevCacheUpdate(path string, candidate *modelcatalog.Catalog) error {
 	next := modelsDevCatalogStats(candidate)
 	if next.providers == 0 || next.models == 0 {
 		return fmt.Errorf("candidate models.dev cache is empty: providers=%d models=%d", next.providers, next.models)
@@ -178,7 +178,7 @@ func validateModelsDevCacheUpdate(path string, candidate *modelsdev.Catalog) err
 	return nil
 }
 
-func modelsDevCatalogStats(catalog *modelsdev.Catalog) modelsDevCacheStats {
+func modelsDevCatalogStats(catalog *modelcatalog.Catalog) modelsDevCacheStats {
 	var stats modelsDevCacheStats
 	if catalog == nil {
 		return stats
@@ -213,7 +213,7 @@ func absInt(v int) int {
 	return v
 }
 
-func cachedOrFetchedSetupCatalog(ctx context.Context, env environment, configDir string, ttl time.Duration) (*modelsdev.Catalog, error) {
+func cachedOrFetchedSetupCatalog(ctx context.Context, env environment, configDir string, ttl time.Duration) (*modelcatalog.Catalog, error) {
 	path := modelsDevCachePath(configDir)
 	cached, cacheErr := readModelsDevCache(path)
 	now := currentTime(env)
@@ -237,7 +237,7 @@ func cachedOrFetchedSetupCatalog(ctx context.Context, env environment, configDir
 	if errors.Is(err, context.Canceled) {
 		return nil, err
 	}
-	fallback, fallbackErr := modelsdev.Fallback()
+	fallback, fallbackErr := modelcatalog.ModelsDevFallback()
 	if fallbackErr != nil {
 		if os.IsNotExist(cacheErr) {
 			return nil, fmt.Errorf("models.dev cache refresh failed: %v; vendored fallback failed: %w", err, fallbackErr)
@@ -252,7 +252,7 @@ func cachedOrFetchedSetupCatalog(ctx context.Context, env environment, configDir
 	return fallback, nil
 }
 
-func refreshModelsDevCatalog(ctx context.Context, env environment, configDir string, command string) (*modelsdev.Catalog, error) {
+func refreshModelsDevCatalog(ctx context.Context, env environment, configDir string, command string) (*modelcatalog.Catalog, error) {
 	catalog, err := fetchAndCacheModelsDev(ctx, env, configDir)
 	if err == nil {
 		return catalog, nil
@@ -266,7 +266,7 @@ func refreshModelsDevCatalog(ctx context.Context, env environment, configDir str
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %s: warning: models.dev cache refresh failed: %v; using cached catalog\n", command, err)
 		return cached.catalog, nil
 	}
-	fallback, fallbackErr := modelsdev.Fallback()
+	fallback, fallbackErr := modelcatalog.ModelsDevFallback()
 	if fallbackErr != nil {
 		if os.IsNotExist(cacheErr) {
 			return nil, fmt.Errorf("models.dev cache refresh failed: %v; vendored fallback failed: %w", err, fallbackErr)
@@ -286,7 +286,7 @@ func refreshModelsDevCatalog(ctx context.Context, env environment, configDir str
 // source date (the rewritten cache file's mtime) so the caller can push fresh
 // managed prices into the running server; the bool reports whether a refresh
 // happened.
-func refreshModelsDevCacheIfStale(ctx context.Context, env environment, configDir string, ttl time.Duration, logger *slog.Logger) (*modelsdev.Catalog, time.Time, bool) {
+func refreshModelsDevCacheIfStale(ctx context.Context, env environment, configDir string, ttl time.Duration, logger *slog.Logger) (*modelcatalog.Catalog, time.Time, bool) {
 	if ttl <= 0 {
 		return nil, time.Time{}, false
 	}
@@ -321,7 +321,7 @@ func refreshModelsDevCacheIfStale(ctx context.Context, env environment, configDi
 // onRefresh, when non-nil, is invoked with the new catalog and its source date
 // after each successful refresh so the serving handler can swap in fresh managed
 // prices.
-func startModelsDevCacheRefresh(ctx context.Context, env environment, configDir string, ttl time.Duration, logger *slog.Logger, onRefresh func(*modelsdev.Catalog, time.Time)) {
+func startModelsDevCacheRefresh(ctx context.Context, env environment, configDir string, ttl time.Duration, logger *slog.Logger, onRefresh func(*modelcatalog.Catalog, time.Time)) {
 	if ttl <= 0 {
 		return
 	}
@@ -350,7 +350,7 @@ func startModelsDevCacheRefresh(ctx context.Context, env environment, configDir 
 // handler's initial managed-price snapshot. A missing or unreadable cache yields
 // a nil catalog: managed prices stay unresolved until the first refresh writes
 // the cache.
-func loadModelsDevCacheForServe(configDir string) (*modelsdev.Catalog, time.Time) {
+func loadModelsDevCacheForServe(configDir string) (*modelcatalog.Catalog, time.Time) {
 	cached, err := readModelsDevCache(modelsDevCachePath(configDir))
 	if err != nil {
 		return nil, time.Time{}

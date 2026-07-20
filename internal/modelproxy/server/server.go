@@ -28,17 +28,14 @@ import (
 	"harness/internal/llm/factory"
 	"harness/internal/llm/tokencount"
 	"harness/internal/metrics"
+	"harness/internal/modelcatalog"
 	"harness/internal/modelproxy/pricing"
 	"harness/internal/modelproxy/protocol"
-	"harness/internal/modelsdev"
 	"harness/internal/reasoningprofile"
 	"harness/internal/tracing"
 )
 
-const (
-	maxStreamRequestBytes = 64 << 20
-	openAICodexProviderID = "openai-codex"
-)
+const maxStreamRequestBytes = 64 << 20
 
 var reasoningProfileRank = map[string]int{
 	"none":    0,
@@ -145,8 +142,8 @@ type Options struct {
 	// resolve prices for managed providers. Nil leaves managed prices unresolved
 	// until UpdateModelsDevCatalog supplies one. The cache loader lives in the
 	// proxy command, so main passes the catalog in rather than the server
-	// reading it (keeping internal/llm free of an internal/modelsdev import).
-	ModelsDevCatalog *modelsdev.Catalog
+	// reading it (keeping internal/llm free of an internal/modelcatalog import).
+	ModelsDevCatalog *modelcatalog.Catalog
 	// ModelsDevSourceDate dates ModelsDevCatalog (its cache file mtime). Used to
 	// stamp catalog pricing freshness when any provider is managed.
 	ModelsDevSourceDate time.Time
@@ -418,7 +415,7 @@ func (h *Handler) recordMetrics(r *http.Request, providerID, model string, purpo
 // pricing stamp dates the managed prices to the models.dev cache when any
 // provider is managed, and
 // to the provider-config mtime otherwise.
-func (h *Handler) buildSnapshot(md *modelsdev.Catalog, mdSourceDate time.Time) (*catalogSnapshot, error) {
+func (h *Handler) buildSnapshot(md *modelcatalog.Catalog, mdSourceDate time.Time) (*catalogSnapshot, error) {
 	priced, pruned := h.pricedProviders(md)
 	pricer := pricing.NewComposite()
 	registry := llm.RegistryFromProviderConfigs(priced)
@@ -439,7 +436,7 @@ func (h *Handler) buildSnapshot(md *modelsdev.Catalog, mdSourceDate time.Time) (
 // md (manual providers unchanged) and swaps it in atomically. The serving
 // refresher calls this after a successful models.dev cache refresh so live
 // prices reach in-flight cost accounting and /v1/models without a restart.
-func (h *Handler) UpdateModelsDevCatalog(md *modelsdev.Catalog, sourceDate time.Time) {
+func (h *Handler) UpdateModelsDevCatalog(md *modelcatalog.Catalog, sourceDate time.Time) {
 	snapshot, err := h.buildSnapshot(md, sourceDate)
 	if err != nil {
 		h.logger.Warn("rebuild catalog snapshot failed", "err", err)
@@ -452,7 +449,7 @@ func (h *Handler) UpdateModelsDevCatalog(md *modelsdev.Catalog, sourceDate time.
 // and a models.dev cache is available, the cache's source date (kept fresh by
 // the refresher) wins; otherwise the manual prices are only as fresh as the
 // newest provider-config file.
-func (h *Handler) pricingInfo(md *modelsdev.Catalog, mdSourceDate time.Time) *protocol.PricingInfo {
+func (h *Handler) pricingInfo(md *modelcatalog.Catalog, mdSourceDate time.Time) *protocol.PricingInfo {
 	sourceDate := h.configSourceDate
 	if md != nil && !mdSourceDate.IsZero() && anyManagedProvider(h.providers) {
 		sourceDate = mdSourceDate
@@ -472,11 +469,11 @@ func (h *Handler) pricingInfo(md *modelsdev.Catalog, mdSourceDate time.Time) *pr
 // when a refreshed cache no longer contains a managed provider/model, the stale
 // entry is pruned from the live snapshot with a warning. Manual providers are
 // returned unchanged, keeping their own configured prices and metadata.
-func (h *Handler) pricedProviders(md *modelsdev.Catalog) ([]llm.ProviderConfig, bool) {
+func (h *Handler) pricedProviders(md *modelcatalog.Catalog) ([]llm.ProviderConfig, bool) {
 	out := make([]llm.ProviderConfig, 0, len(h.providers))
 	pruned := false
 	for _, pc := range h.providers {
-		if pc.Name == openAICodexProviderID {
+		if pc.Name == modelcatalog.OpenAICodexProviderID {
 			cp := pc
 			cp.Models = make([]llm.ModelEntry, len(pc.Models))
 			for j, entry := range pc.Models {
@@ -543,12 +540,12 @@ func configuredTargetCount(providers []llm.ProviderConfig) int {
 // modelsDevPrice bridges a models.dev catalog price into an llm.Price for one
 // provider/model. This is the single point where the proxy crosses from
 // modelsdev to llm pricing, keeping internal/llm free of a modelsdev import.
-func modelsDevPrice(md *modelsdev.Catalog, providerID, modelID string) (llm.Price, bool) {
+func modelsDevPrice(md *modelcatalog.Catalog, providerID, modelID string) (llm.Price, bool) {
 	info, ok := modelsDevModelInfo(md, providerID, modelID)
 	return info.Price, ok
 }
 
-func modelsDevModelInfo(md *modelsdev.Catalog, providerID, modelID string) (llm.ModelInfo, bool) {
+func modelsDevModelInfo(md *modelcatalog.Catalog, providerID, modelID string) (llm.ModelInfo, bool) {
 	if md == nil {
 		return llm.ModelInfo{}, false
 	}
@@ -1584,7 +1581,7 @@ func codexResponsesUsesLocalTokenCount(pc llm.ProviderConfig) bool {
 	if apiType != "responses" {
 		return false
 	}
-	if strings.EqualFold(pc.Name, openAICodexProviderID) {
+	if strings.EqualFold(pc.Name, modelcatalog.OpenAICodexProviderID) {
 		return true
 	}
 	if pc.Auth != nil && strings.EqualFold(pc.Auth.Type, auth.TypeCodexOAuth) {

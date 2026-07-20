@@ -79,7 +79,7 @@ internal/delegate        configured child-agent tool; starts child agents withou
 internal/background      process-local background job manager + tools
 internal/session         append-only conversation tree, mutable state, replay, archives, artifacts
 internal/config          flags > env > config-file resolution
-internal/modelsdev       optional models.dev catalog reduction for proxy setup/pricing metadata
+internal/modelcatalog    normalized models.dev/OpenAI Codex catalogs for proxy setup/pricing metadata
 internal/ui              REPL, streaming renderer, tool summaries, usage line
 internal/sysprompt       embedded prompt files + environment context + AGENTS.md sections
 internal/agentdef        agent definitions (allowed tools, MCP exposure, prompt/model target) (§14)
@@ -686,10 +686,12 @@ func (r *Registry) ContextWindow(model string) int // registry hit, else default
 func (r *Registry) Models() []string               // sorted configured model ids
 ```
 
-Model metadata normally originates from the public **models.dev** catalog
-(`internal/modelsdev`); `harness-model-proxy setup` and `refresh-models` reduce it
-to the provider/context/input-modality/reasoning fields harness needs. The proxy
-caches the full catalog JSON as `models.dev.api.json` in the proxy config directory.
+Model metadata normally originates from the public **models.dev** catalog. The
+models.dev and OpenAI Codex adapters, normalized catalog types, and vendored
+fallback snapshots live in `internal/modelcatalog`; `harness-model-proxy setup`
+and `refresh-models` consume the normalized provider/context/input-modality/
+reasoning fields. The proxy caches the full catalog JSON as
+`models.dev.api.json` in the proxy config directory.
 `setup` prefers that cache over the vendored snapshot, but fetches and writes it
 when it is missing or invalid. A running proxy refreshes the cache when it is older
 than `models_dev_cache_ttl` (`24h` by default; `0` disables periodic refresh), and
@@ -776,8 +778,8 @@ modalities from the new catalog, with managed entries absent from that catalog
 pruned and manual metadata unchanged) and atomically swaps it in, so `/v1/models`
 responses and
 per-request `cost_usd` accounting always reflect the freshest managed metadata.
-`internal/llm` stays free of any `internal/modelsdev` import — the server is the
-only layer that bridges models.dev metadata into `llm`.
+`internal/llm` stays free of any `internal/modelcatalog` import — the server is
+the layer that bridges normalized catalog metadata into `llm`.
 Candidate cache updates must parse as models.dev JSON and contain at least one
 provider and model. When a previous cache is parseable, replacement is rejected
 if provider or model counts change by more than 4x and the absolute delta is
