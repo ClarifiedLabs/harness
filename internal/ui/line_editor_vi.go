@@ -314,10 +314,12 @@ func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *l
 		}
 		e.viEnterInsert(v, s)
 	case 'I':
-		s.cursor = 0
+		start, end, _ := s.cursorLogicalLine()
+		s.cursor = viFirstNonBlankLine(s.buf, start, end)
 		e.viEnterInsert(v, s)
 	case 'A':
-		s.cursor = len(s.buf)
+		_, end, _ := s.cursorLogicalLine()
+		s.cursor = end
 		e.viEnterInsert(v, s)
 	case 'h':
 		for range count {
@@ -328,11 +330,14 @@ func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *l
 			s.viRight()
 		}
 	case '0':
-		s.cursor = 0
+		start, _, _ := s.cursorLogicalLine()
+		s.cursor = start
 	case '^':
-		s.cursor = viFirstNonBlank(s.buf)
+		start, end, _ := s.cursorLogicalLine()
+		s.cursor = viFirstNonBlankLine(s.buf, start, end)
 	case '$':
-		s.viEnd()
+		_, end, _ := s.cursorLogicalLine()
+		s.cursor = end
 	case 'w':
 		s.cursor = viRepeatNextWordStart(s.buf, s.cursor, count, false)
 		s.viClampNormalCursor()
@@ -368,9 +373,17 @@ func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *l
 	case 'y':
 		v.startOperator(viOpYank, count)
 	case 'D':
-		e.viApplyRange(s, viOpDelete, s.cursor, len(s.buf))
+		_, end, _ := s.cursorLogicalLine()
+		if end < len(s.buf) && s.buf[end] == '\n' {
+			end++
+		}
+		e.viApplyRange(s, viOpDelete, s.cursor, end)
 	case 'C':
-		e.viApplyRange(s, viOpChange, s.cursor, len(s.buf))
+		_, end, _ := s.cursorLogicalLine()
+		if end < len(s.buf) && s.buf[end] == '\n' {
+			end++
+		}
+		e.viApplyRange(s, viOpChange, s.cursor, end)
 		e.viEnterInsert(v, s)
 	case 'Y':
 		e.viSetYank(s.buf)
@@ -645,11 +658,17 @@ func viOperatorRange(s *lineEditState, motion rune, op viOperator, count int) (i
 	case 'l', ' ':
 		return cursor, cursor + count, true
 	case '0':
-		return 0, cursor, true
+		start, _, _ := s.cursorLogicalLine()
+		return start, cursor, true
 	case '^':
-		return viFirstNonBlank(s.buf), cursor, true
+		start, _, _ := s.cursorLogicalLine()
+		return viFirstNonBlankLine(s.buf, start, cursor), cursor, true
 	case '$':
-		return cursor, len(s.buf), true
+		_, end, _ := s.cursorLogicalLine()
+		if end < len(s.buf) && s.buf[end] == '\n' {
+			end++
+		}
+		return cursor, end, true
 	case 'b':
 		target := viRepeatPrevWordStart(s.buf, cursor, count, false)
 		return target, cursor, true
@@ -719,15 +738,6 @@ func (s *lineEditState) viRight() {
 	}
 }
 
-func (s *lineEditState) viEnd() {
-	if len(s.buf) == 0 {
-		s.cursor = 0
-		return
-	}
-	s.cursor = len(s.buf) - 1
-	s.viClampNormalCursor()
-}
-
 func (s *lineEditState) viClampNormalCursor() {
 	switch {
 	case len(s.buf) == 0:
@@ -785,13 +795,17 @@ func viClampRange(start, end, length int) (int, int) {
 	return start, end
 }
 
-func viFirstNonBlank(buf []rune) int {
-	for i, r := range buf {
-		if !unicode.IsSpace(r) {
+// viFirstNonBlankLine returns the buffer index of the first non-space,
+// non-tab rune on the logical line spanning [start, end), or end when the
+// line is blank. It is the multi-line-aware counterpart used by the
+// line-scoped 0/^/$ motions and their operator ranges.
+func viFirstNonBlankLine(buf []rune, start, end int) int {
+	for i := start; i < end; i++ {
+		if buf[i] != ' ' && buf[i] != '\t' {
 			return i
 		}
 	}
-	return 0
+	return end
 }
 
 type viCharKind int

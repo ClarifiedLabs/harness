@@ -1274,10 +1274,94 @@ func TestPromptLineEditorViDeleteLineOperatorDeletesCurrentMultilineLine(t *test
 		input string
 		want  string
 	}{
-		{name: "first line", input: "aa\nbb\x1b0dd\r", want: "bb"},
+		{name: "first line", input: "aa\nbb\x1bkdd\r", want: "bb"},
 		{name: "middle line", input: "aa\nbb\ncc\x1bkdd\r", want: "aa\ncc"},
 		{name: "last line", input: "aa\nbb\ncc\x1bdd\r", want: "aa\nbb"},
-		{name: "counted lines", input: "aa\nbb\ncc\x1b02dd\r", want: "cc"},
+		{name: "counted lines", input: "aa\nbb\ncc\x1bkk2dd\r", want: "cc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, ok, err := readViEditedInput(t, tt.input)
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok {
+				t.Fatal("read returned ok=false")
+			}
+			if input.text != tt.want {
+				t.Fatalf("input text = %q, want %q", input.text, tt.want)
+			}
+		})
+	}
+}
+
+func TestPromptLineEditorViLineScopedMotions(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "0 to current line start", input: "aa\nbb\ncc\x1bk0iX\r", want: "aa\nXbb\ncc"},
+		{name: "$ to current line end", input: "aa\nbb\ncc\x1bk$iX\r", want: "aa\nbbX\ncc"},
+		{name: "^ to first non-blank of current line", input: "  aa\n  bb\x1b^iX\r", want: "  aa\n  Xbb"},
+		{name: "single-line 0 and $ unchanged", input: "one two\x1b$0iX\r", want: "Xone two"},
+		{name: "single-line $ unchanged", input: "one two\x1b0$iX\r", want: "one twoX"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, ok, err := readViEditedInput(t, tt.input)
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok {
+				t.Fatal("read returned ok=false")
+			}
+			if input.text != tt.want {
+				t.Fatalf("input text = %q, want %q", input.text, tt.want)
+			}
+		})
+	}
+}
+
+func TestPromptLineEditorViLineScopedOperators(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "d$ joins through newline", input: "aa\nbb\ncc\x1bk0d$\r", want: "aa\ncc"},
+		{name: "d$ on last line deletes to buffer end", input: "aa\nbb\ncc\x1b0d$\r", want: "aa\nbb\n"},
+		{name: "d0 deletes to current line start", input: "aa\nbb\ncc\x1bkd0\r", want: "aa\nb\ncc"},
+		{name: "D joins through newline", input: "aa\nbb\ncc\x1bkD\r", want: "aa\nbcc"},
+		{name: "C joins through newline", input: "aa\nbb\ncc\x1bkCX\r", want: "aa\nbXcc"},
+		{name: "single-line d$ unchanged", input: "one two three\x1b0wd$\r", want: "one "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, ok, err := readViEditedInput(t, tt.input)
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok {
+				t.Fatal("read returned ok=false")
+			}
+			if input.text != tt.want {
+				t.Fatalf("input text = %q, want %q", input.text, tt.want)
+			}
+		})
+	}
+}
+
+func TestPromptLineEditorViLineScopedInsertCommands(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "I at first non-blank of current line", input: "  aa\n  bb\x1bkIX\r", want: "  Xaa\n  bb"},
+		{name: "A at end of current line", input: "  aa\n  bb\x1bkAX\r", want: "  aaX\n  bb"},
+		{name: "single-line I unchanged", input: "one two\x1bIX\r", want: "Xone two"},
+		{name: "single-line A unchanged", input: "one two\x1bAX\r", want: "one twoX"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1629,7 +1713,7 @@ func TestPromptLineEditorViJKMoveWithinMultilineInput(t *testing.T) {
 		want  string
 	}{
 		{name: "k moves line up", input: "ab\ncd\x1bkiX\r", want: "aXb\ncd"},
-		{name: "j moves line down", input: "ab\ncd\x1b0jiX\r", want: "ab\nXcd"},
+		{name: "j moves line down", input: "ab\ncd\x1bk0jiX\r", want: "ab\nXcd"},
 	}
 
 	for _, tt := range tests {
@@ -1662,7 +1746,7 @@ func TestPromptLineEditorViCountedKDoesNotCrossIntoHistory(t *testing.T) {
 }
 
 func TestPromptLineEditorViJKHistoryAtMultilineBoundaries(t *testing.T) {
-	input, ok, err := readViEditedInputWithHistory(t, "aa\nbb\x1b0k\r", []string{"old"})
+	input, ok, err := readViEditedInputWithHistory(t, "aa\nbb\x1bkk\r", []string{"old"})
 	if err != nil {
 		t.Fatalf("read = %v", err)
 	}
@@ -1673,7 +1757,7 @@ func TestPromptLineEditorViJKHistoryAtMultilineBoundaries(t *testing.T) {
 		t.Fatalf("k on first line recalled %q, want old", input.text)
 	}
 
-	input, ok, err = readViEditedInputWithHistory(t, "aa\nbb\x1b0kj\r", []string{"old"})
+	input, ok, err = readViEditedInputWithHistory(t, "aa\nbb\x1bkkj\r", []string{"old"})
 	if err != nil {
 		t.Fatalf("read = %v", err)
 	}
@@ -1694,7 +1778,7 @@ func TestPromptLineEditorViArrowsMoveWithinMultilineInput(t *testing.T) {
 		{name: "insert up", input: "ab\ncd\x1b[AX\r", want: "abX\ncd"},
 		{name: "insert down", input: "ab\ncd\x01\x1b[BX\r", want: "ab\nXcd"},
 		{name: "normal up", input: "ab\ncd\x1b\x1b[AiX\r", want: "aXb\ncd"},
-		{name: "normal down", input: "ab\ncd\x1b0\x1b[BiX\r", want: "ab\nXcd"},
+		{name: "normal down", input: "ab\ncd\x1bk0\x1b[BiX\r", want: "ab\nXcd"},
 	}
 
 	for _, tt := range tests {

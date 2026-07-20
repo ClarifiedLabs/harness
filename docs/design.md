@@ -2073,8 +2073,10 @@ mode supports `h/l`, `0/^/$`, `w/W/b/B/e/E`, `i/a/I/A`, `x/X`, `D/C/S`, `Y` (yan
 whole line), `k/j` and Up/Down line navigation with history fallback at input
 boundaries, `d`/`c`/`y` operators with those motions plus doubled line operators
 (`dd`, `cc`, `yy`), and local `p`/`P` paste from the prompt editor's yank buffer.
-Counts, registers, search, visual mode, macros, and full Vim text objects are out
-of scope.
+The `0`/`^`/`$` motions and the `I`/`A`/`D`/`C` shortcuts operate on the current
+logical line rather than the whole multi-line buffer, so `d$`/`D`/`c$`/`C` join a
+line with the one below it. Counts, registers, search, visual mode, macros, and
+full Vim text objects are out of scope.
 
 While a raw vi-mode idle prompt is active, harness also emits xterm DECSCUSR cursor-shape
 sequences: a steady bar in insert mode and a steady block in normal mode. The cursor
