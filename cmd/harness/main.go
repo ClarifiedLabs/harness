@@ -316,6 +316,7 @@ func run(env environment) int {
 		resumed.Updated = cloneCreated
 		resumed.Prompt = 0
 		resumed.ProxySessionID = ""
+		resumed.CacheAffinityID = ""
 		resumed.ResponseState = nil
 		resumed.Usage = session.UsageTotals{}
 		resumed.UsageByModel = nil
@@ -900,6 +901,7 @@ func run(env environment) int {
 			resumeResponseState = s.ResponseState
 		}
 		ag.SetProxySessionID(s.ProxySessionID)
+		ag.SetCacheAffinityID(s.CacheAffinityID)
 	}
 	ag.SetSystem(systemPrompt)
 	activeToolNames := toolRegistry.Names()
@@ -918,6 +920,7 @@ func run(env environment) int {
 		Agent:             agentName,
 		ToolNames:         activeToolNames,
 		SessionPath:       sessionPath,
+		CacheAffinityID:   ag.CacheAffinityID(),
 		Depth:             0,
 		MaxPromptTokens:   cfg.MaxPromptTokens,
 		MaxPromptCostUSD:  cfg.MaxPromptCostUSD,
@@ -1031,6 +1034,7 @@ func run(env environment) int {
 		OnSessionPathChanged: func(path string) {
 			snap := delegateState.Snapshot()
 			snap.SessionPath = path
+			snap.CacheAffinityID = ag.CacheAffinityID()
 			delegateState.Set(snap)
 			if diagnosticsSink != nil {
 				diagnosticsSink.SetDir(path)

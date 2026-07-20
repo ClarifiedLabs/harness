@@ -224,10 +224,11 @@ func TestDelegateRunsChildAgentAndReturnsFinalReport(t *testing.T) {
 		Usage:  llm.Usage{InputTokens: 11, OutputTokens: 5},
 	})
 	state := NewState(Runtime{
-		Provider: fp,
-		Model:    "claude-opus-4-8",
-		Registry: llm.NewRegistry(nil),
-		System:   "parent system",
+		Provider:        fp,
+		Model:           "claude-opus-4-8",
+		Registry:        llm.NewRegistry(nil),
+		System:          "parent system",
+		CacheAffinityID: "parent-cache",
 	})
 	tool := New(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
 		if name != "" {
@@ -253,6 +254,12 @@ func TestDelegateRunsChildAgentAndReturnsFinalReport(t *testing.T) {
 	}
 	if result.Usage.InputTokens != 11 || result.Usage.OutputTokens != 5 {
 		t.Fatalf("usage = %+v, want 11/5", result.Usage)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("child requests = %d, want 1", len(fp.Requests))
+	}
+	if fp.Requests[0].CacheAffinityID != "parent-cache" {
+		t.Fatalf("child cache affinity = %q, want parent-cache", fp.Requests[0].CacheAffinityID)
 	}
 	if len(fp.Requests) != 1 {
 		t.Fatalf("child requests = %d, want 1", len(fp.Requests))
@@ -529,7 +536,7 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 	catalog.Register(fakeChildTool{name: "read_file", out: "ok"})
 	catalog.Register(nested)
 	runner := NewRunner(nil, nil, Options{MaxDepth: 3})
-	parent := Runtime{Depth: 0, MaxPromptTokens: 1234, MaxPromptCostUSD: 2.5, SessionPath: "session"}
+	parent := Runtime{Depth: 0, MaxPromptTokens: 1234, MaxPromptCostUSD: 2.5, SessionPath: "session", CacheAffinityID: "parent-cache"}
 	launch := Launch{Tools: catalog, System: childSystemPrompt("root"), Agent: "explore"}
 
 	childTools, err := runner.childTools(parent, launch, "child-1", todo.NewStore(), []string{"read_file", "delegate"})
@@ -550,6 +557,9 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 	}
 	if snapshot.ParentChildID != "child-1" || snapshot.SessionPath != "session" {
 		t.Fatalf("child runtime lineage = parent %q session %q", snapshot.ParentChildID, snapshot.SessionPath)
+	}
+	if snapshot.CacheAffinityID != "parent-cache" {
+		t.Fatalf("child runtime cache affinity = %q, want parent-cache", snapshot.CacheAffinityID)
 	}
 }
 

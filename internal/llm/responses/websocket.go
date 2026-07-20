@@ -182,6 +182,16 @@ func (p *Provider) buildWebSocketRequest(req llm.Request) wireWebSocketRequest {
 	// Codex's Responses WebSocket path carries continuation through
 	// previous_response_id, while the ChatGPT backend requires store:false.
 	w.Store = false
+	var generate *bool
+	if req.Purpose == llm.RequestPurposePrewarm {
+		// Codex can materialize the stable instructions/tools prefix without
+		// generating a disposable assistant turn. The returned response id then
+		// chains the first real user input onto that warmed prefix.
+		value := false
+		generate = &value
+		w.Input = []wireInputItem{}
+		w.MaxOutputTokens = nil
+	}
 	meta := p.webSocketClientMetadata()
 	if p.wsTurnState != "" {
 		meta["x-codex-turn-state"] = p.wsTurnState
@@ -190,6 +200,7 @@ func (p *Provider) buildWebSocketRequest(req llm.Request) wireWebSocketRequest {
 		Type:           "response.create",
 		wireRequest:    w,
 		ToolChoice:     "auto",
+		Generate:       generate,
 		ClientMetadata: meta,
 	}
 }

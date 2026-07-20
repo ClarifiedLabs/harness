@@ -2752,7 +2752,7 @@ func (app *App) clear() {
 		fmt.Fprintln(app.Errw, app.usageReport("cleared session"))
 	}
 	app.Agent.SetTranscript(nil)
-	app.Agent.ResetProxySessionID()
+	app.Agent.ResetSessionIDs()
 	if app.Todos != nil {
 		app.Todos.Replace(nil)
 	}
@@ -3086,22 +3086,23 @@ func (app *App) save(path string) error {
 		return err
 	}
 	s := session.Session{
-		Version:        session.Version,
-		Provider:       app.Provider,
-		Model:          app.Model,
-		Created:        app.Created,
-		Updated:        app.clock()(),
-		System:         app.System,
-		Agent:          app.AgentName,
-		ProxySessionID: app.Agent.ProxySessionID(),
-		Prompt:         app.PromptNumber,
-		Messages:       app.Agent.Transcript(),
-		Tree:           app.SessionTree,
-		ResponseState:  app.Agent.ResponseState(),
-		Todos:          app.todoSnapshot(),
-		Plans:          app.planSnapshot(),
-		Usage:          app.usage,
-		UsageByModel:   app.usageByModel,
+		Version:         session.Version,
+		Provider:        app.Provider,
+		Model:           app.Model,
+		Created:         app.Created,
+		Updated:         app.clock()(),
+		System:          app.System,
+		Agent:           app.AgentName,
+		ProxySessionID:  app.Agent.ProxySessionID(),
+		CacheAffinityID: app.Agent.CacheAffinityID(),
+		Prompt:          app.PromptNumber,
+		Messages:        app.Agent.Transcript(),
+		Tree:            app.SessionTree,
+		ResponseState:   app.Agent.ResponseState(),
+		Todos:           app.todoSnapshot(),
+		Plans:           app.planSnapshot(),
+		Usage:           app.usage,
+		UsageByModel:    app.usageByModel,
 	}
 	return s.Save(path)
 }

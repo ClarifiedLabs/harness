@@ -370,6 +370,7 @@ func TestCompactRotatesProxySessionID(t *testing.T) {
 	a.SetSystem("system prompt")
 	a.SetTranscript(makeTurns(10))
 	before := a.ProxySessionID()
+	cacheBefore := a.CacheAffinityID()
 
 	if _, err := a.Compact(context.Background(), &recordSink{}); err != nil {
 		t.Fatalf("Compact: %v", err)
@@ -378,6 +379,9 @@ func TestCompactRotatesProxySessionID(t *testing.T) {
 	after := a.ProxySessionID()
 	if before == "" || after == "" || before == after {
 		t.Fatalf("proxy session id = %q then %q, want rotation after transcript rewrite", before, after)
+	}
+	if cacheAfter := a.CacheAffinityID(); cacheAfter != cacheBefore {
+		t.Fatalf("cache affinity id = %q then %q, want it preserved across compaction", cacheBefore, cacheAfter)
 	}
 }
 

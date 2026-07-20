@@ -95,13 +95,14 @@ func sampleSession() Session {
 	created := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
 	msgTime := created.Add(time.Minute)
 	return Session{
-		Version:        Version,
-		Provider:       "anthropic",
-		Model:          "claude-opus-4-8",
-		Created:        created,
-		Updated:        created.Add(2 * time.Minute),
-		System:         "be terse",
-		ProxySessionID: "harness-session-test",
+		Version:         Version,
+		Provider:        "anthropic",
+		Model:           "claude-opus-4-8",
+		Created:         created,
+		Updated:         created.Add(2 * time.Minute),
+		System:          "be terse",
+		ProxySessionID:  "harness-session-test",
+		CacheAffinityID: "harness-cache-test",
 		Messages: []llm.Message{
 			{Role: llm.RoleUser, Time: msgTime, Content: []llm.ContentBlock{
 				{Kind: llm.BlockText, Text: "list the dir"},
@@ -174,6 +175,9 @@ func TestSessionRoundTripsPlansAndUsageByModel(t *testing.T) {
 	}
 	if got.ProxySessionID != "harness-session-test" {
 		t.Errorf("proxy_session_id = %q, want harness-session-test", got.ProxySessionID)
+	}
+	if got.CacheAffinityID != "harness-cache-test" {
+		t.Errorf("cache_affinity_id = %q, want harness-cache-test", got.CacheAffinityID)
 	}
 }
 

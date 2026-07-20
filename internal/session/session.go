@@ -37,20 +37,21 @@ const (
 
 // Session is the compact, resumable conversation state.
 type Session struct {
-	Version        int       `json:"version"`
-	ID             string    `json:"id"`
-	CWD            string    `json:"cwd,omitempty"`
-	ParentSession  string    `json:"parent_session,omitempty"`
-	ParentEntryID  string    `json:"parent_entry_id,omitempty"`
-	ActiveLeaf     string    `json:"active_leaf,omitempty"`
-	Provider       string    `json:"provider"`
-	Model          string    `json:"model"`
-	Created        time.Time `json:"created"`
-	Updated        time.Time `json:"updated"`
-	System         string    `json:"system"`
-	Agent          string    `json:"agent,omitempty"`
-	ProxySessionID string    `json:"proxy_session_id,omitempty"`
-	Prompt         int       `json:"prompt,omitempty"`
+	Version         int       `json:"version"`
+	ID              string    `json:"id"`
+	CWD             string    `json:"cwd,omitempty"`
+	ParentSession   string    `json:"parent_session,omitempty"`
+	ParentEntryID   string    `json:"parent_entry_id,omitempty"`
+	ActiveLeaf      string    `json:"active_leaf,omitempty"`
+	Provider        string    `json:"provider"`
+	Model           string    `json:"model"`
+	Created         time.Time `json:"created"`
+	Updated         time.Time `json:"updated"`
+	System          string    `json:"system"`
+	Agent           string    `json:"agent,omitempty"`
+	ProxySessionID  string    `json:"proxy_session_id,omitempty"`
+	CacheAffinityID string    `json:"cache_affinity_id,omitempty"`
+	Prompt          int       `json:"prompt,omitempty"`
 	// Messages is materialized from Tree on load and is never written to
 	// state.json. It remains available to callers that need the active linear
 	// provider transcript.

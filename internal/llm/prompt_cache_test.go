@@ -6,6 +6,20 @@ import (
 	"testing"
 )
 
+func TestResolvePromptCacheKeyFieldRecognizesOpenAICodex(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  string
+	}{
+		{name: "openai-codex", url: "https://custom.invalid/v1"},
+		{name: "renamed", url: "https://chatgpt.com/backend-api/codex"},
+	} {
+		if got := ResolvePromptCacheKeyField(tc.name, "responses", tc.url, PromptCacheConfig{}); got != PromptCacheKeyFieldPromptCacheKey {
+			t.Fatalf("ResolvePromptCacheKeyField(%q, %q) = %q, want prompt_cache_key", tc.name, tc.url, got)
+		}
+	}
+}
+
 func TestPromptCacheSessionIDHashesOverlongValues(t *testing.T) {
 	got := PromptCacheSessionID(strings.Repeat("x", 300))
 	if len(got) > 256 {

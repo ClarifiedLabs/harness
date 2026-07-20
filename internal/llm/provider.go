@@ -91,10 +91,17 @@ type Request struct {
 	// must not forward this value upstream.
 	ProxySessionID string `json:"proxy_session_id,omitempty"`
 
+	// CacheAffinityID is a stable harness-local conversation key used by
+	// harness-model-proxy to derive the provider-facing prompt cache key. Unlike
+	// ProxySessionID, it survives continuation resets such as compaction, model
+	// switches, and branch navigation. Concrete provider dialects must not
+	// forward this value upstream.
+	CacheAffinityID string `json:"cache_affinity_id,omitempty"`
+
 	// PromptCacheKey is a provider-facing cache-affinity hint emitted as
 	// prompt_cache_key or session_id by providers that support it. When requests
-	// flow through harness-model-proxy, the proxy derives this from ProxySessionID
-	// instead of forwarding the local session id.
+	// flow through harness-model-proxy, the proxy derives this from
+	// CacheAffinityID instead of forwarding the local conversation id.
 	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 
 	// LongCacheTTL requests the 1-hour Anthropic prompt-cache breakpoint on the

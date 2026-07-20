@@ -588,7 +588,7 @@ func TestEncryptedReasoningPersistedAndReplayed(t *testing.T) {
 	}
 }
 
-func TestProxySessionIDStablePerSessionAndRequestScoped(t *testing.T) {
+func TestSessionIDsHaveDistinctContinuationAndCacheLifetimes(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn}, llmtest.Step{Stop: llm.StopEndTurn})
 	a := newAgent(fp, tools.Default(), Options{})
 
@@ -596,9 +596,14 @@ func TestProxySessionIDStablePerSessionAndRequestScoped(t *testing.T) {
 	if !strings.HasPrefix(key, "harness-session-") {
 		t.Fatalf("proxy session id = %q, want harness-session-*", key)
 	}
+	cacheKey := a.CacheAffinityID()
+	if !strings.HasPrefix(cacheKey, "harness-cache-") {
+		t.Fatalf("cache affinity id = %q, want harness-cache-*", cacheKey)
+	}
 
-	// Every turn in a session reuses the same local proxy key. The model proxy
-	// derives the provider-facing prompt cache key from it.
+	// Every turn in a session reuses both local keys. The model proxy uses one
+	// for continuation and derives the provider-facing prompt cache key from the
+	// other.
 	for _, prompt := range []string{"one", "two"} {
 		if err := a.RunPrompt(context.Background(), prompt, &recordSink{}); err != nil {
 			t.Fatalf("RunPrompt %q: %v", prompt, err)
@@ -609,6 +614,9 @@ func TestProxySessionIDStablePerSessionAndRequestScoped(t *testing.T) {
 	}
 	if fp.Requests[0].PromptCacheKey != "" {
 		t.Fatalf("agent request prompt cache key = %q, want proxy to derive it", fp.Requests[0].PromptCacheKey)
+	}
+	if fp.Requests[0].CacheAffinityID != cacheKey || fp.Requests[1].CacheAffinityID != cacheKey {
+		t.Fatalf("cache affinity ids = %q then %q, want %q", fp.Requests[0].CacheAffinityID, fp.Requests[1].CacheAffinityID, cacheKey)
 	}
 	if fp.Requests[0].ProxySessionID != fp.Requests[1].ProxySessionID {
 		t.Fatalf("proxy session id changed across turns: %q vs %q", fp.Requests[0].ProxySessionID, fp.Requests[1].ProxySessionID)
@@ -625,6 +633,14 @@ func TestProxySessionIDStablePerSessionAndRequestScoped(t *testing.T) {
 	a.ResetProxySessionID()
 	if a.ProxySessionID() == "" || a.ProxySessionID() == "restored-session" {
 		t.Fatalf("reset proxy session id = %q", a.ProxySessionID())
+	}
+	if a.CacheAffinityID() != cacheKey {
+		t.Fatalf("cache affinity id changed on continuation reset: %q, want %q", a.CacheAffinityID(), cacheKey)
+	}
+	a.SetCacheAffinityID("restored-cache")
+	a.ResetSessionIDs()
+	if a.CacheAffinityID() == "" || a.CacheAffinityID() == "restored-cache" {
+		t.Fatalf("reset cache affinity id = %q", a.CacheAffinityID())
 	}
 }
 

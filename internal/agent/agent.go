@@ -291,6 +291,7 @@ type Agent struct {
 	steer                     chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
 	responseState             llm.ResponseState
 	proxySessionID            string
+	cacheAffinityID           string
 }
 
 type compactFallbackNoticeState struct {
@@ -335,6 +336,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		responsesStateful:         opts.ResponsesStateful,
 		interactive:               opts.Interactive,
 		proxySessionID:            newProxySessionID(),
+		cacheAffinityID:           newCacheAffinityID(),
 	}
 	if opts.Steer {
 		a.steer = make(chan SteerInput, 16)
@@ -539,16 +541,17 @@ func (a *Agent) ContextRequest() llm.Request {
 // the message shape used by RunPromptContentWithContext.
 func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 	return llm.Request{
-		Model:          a.model,
-		Purpose:        llm.RequestPurposeTurn,
-		System:         a.system,
-		Messages:       append([]llm.Message(nil), a.transcript...),
-		Tools:          cloneToolSpecs(a.toolSpecs),
-		ServerTools:    cloneServerTools(a.serverTools),
-		Reasoning:      a.reasoning,
-		RequestContext: append([]string(nil), extraContext...),
-		ProxySessionID: a.proxySessionID,
-		LongCacheTTL:   a.interactive,
+		Model:           a.model,
+		Purpose:         llm.RequestPurposeTurn,
+		System:          a.system,
+		Messages:        append([]llm.Message(nil), a.transcript...),
+		Tools:           cloneToolSpecs(a.toolSpecs),
+		ServerTools:     cloneServerTools(a.serverTools),
+		Reasoning:       a.reasoning,
+		RequestContext:  append([]string(nil), extraContext...),
+		ProxySessionID:  a.proxySessionID,
+		CacheAffinityID: a.cacheAffinityID,
+		LongCacheTTL:    a.interactive,
 	}
 }
 
@@ -568,18 +571,51 @@ func (a *Agent) SetProxySessionID(id string) {
 	a.proxySessionID = id
 }
 
-// ResetProxySessionID rotates proxy-managed model state for a fresh session.
+// ResetProxySessionID rotates proxy-managed continuation and WebSocket state
+// without changing prompt-cache affinity.
 func (a *Agent) ResetProxySessionID() {
 	a.proxySessionID = newProxySessionID()
 	a.resetResponseState()
 }
 
+// CacheAffinityID returns the stable local key used to route this conversation's
+// requests to the same provider prompt-cache shard.
+func (a *Agent) CacheAffinityID() string {
+	return a.cacheAffinityID
+}
+
+// SetCacheAffinityID restores a persisted prompt-cache affinity key on resume.
+func (a *Agent) SetCacheAffinityID(id string) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		a.cacheAffinityID = newCacheAffinityID()
+		return
+	}
+	a.cacheAffinityID = id
+}
+
+// ResetSessionIDs rotates both continuation state and prompt-cache affinity for
+// a genuinely new logical session.
+func (a *Agent) ResetSessionIDs() {
+	a.proxySessionID = newProxySessionID()
+	a.cacheAffinityID = newCacheAffinityID()
+	a.resetResponseState()
+}
+
 func newProxySessionID() string {
+	return newOpaqueID("harness-session-")
+}
+
+func newCacheAffinityID() string {
+	return newOpaqueID("harness-cache-")
+}
+
+func newOpaqueID(prefix string) string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err == nil {
-		return "harness-session-" + hex.EncodeToString(b[:])
+		return prefix + hex.EncodeToString(b[:])
 	}
-	return "harness-session-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	return prefix + strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
 // PrewarmRequest builds a minimal request that writes the prompt cache — the
@@ -732,6 +768,7 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 		StoreResponse:        a.responsesStateful,
 		RequestContext:       append([]string(nil), requestContext...),
 		ProxySessionID:       a.proxySessionID,
+		CacheAffinityID:      a.cacheAffinityID,
 		LongCacheTTL:         a.interactive,
 		EstimatedInputTokens: estimate.Total,
 		ContextWindowHint:    estimate.Window,

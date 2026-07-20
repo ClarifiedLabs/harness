@@ -780,6 +780,8 @@ func TestREPLClearResetsAndRotates(t *testing.T) {
 	)
 	app := newTestApp(t, &out, &errw, fp)
 	origPath := app.SessionPath
+	origProxySessionID := app.Agent.ProxySessionID()
+	origCacheAffinityID := app.Agent.CacheAffinityID()
 
 	in := strings.NewReader("first prompt\n/clear\nsecond prompt\n/exit\n")
 	if code := Run(in, app, nil); code != 0 {
@@ -801,6 +803,9 @@ func TestREPLClearResetsAndRotates(t *testing.T) {
 	// /clear rotates to a fresh session path.
 	if app.SessionPath == origPath {
 		t.Errorf("/clear should rotate to a fresh session file, still %s", origPath)
+	}
+	if app.Agent.ProxySessionID() == origProxySessionID || app.Agent.CacheAffinityID() == origCacheAffinityID {
+		t.Errorf("/clear should rotate continuation and cache ids, got proxy=%q cache=%q", app.Agent.ProxySessionID(), app.Agent.CacheAffinityID())
 	}
 	if !strings.Contains(errw.String(), "/clear") && !strings.Contains(errw.String(), "cleared") {
 		t.Errorf("/clear should acknowledge, errw=%q", errw.String())
@@ -1961,6 +1966,9 @@ func TestREPLAgentSwitchRotatesProxySessionID(t *testing.T) {
 	secondSession := fp.Requests[1].ProxySessionID
 	if firstSession == "" || secondSession == "" || firstSession == secondSession {
 		t.Fatalf("proxy session ids = %q then %q, want rotation on agent switch", firstSession, secondSession)
+	}
+	if firstCache, secondCache := fp.Requests[0].CacheAffinityID, fp.Requests[1].CacheAffinityID; firstCache == "" || firstCache != secondCache {
+		t.Fatalf("cache affinity ids = %q then %q, want preservation on agent switch", firstCache, secondCache)
 	}
 	if fp.Requests[1].PreviousResponseID != "" {
 		t.Fatalf("post-switch request previous_response_id = %q, want fresh context", fp.Requests[1].PreviousResponseID)

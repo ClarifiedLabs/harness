@@ -323,7 +323,8 @@ type Request struct {
     PreviousResponseID string
     RequestContext     []string // request-only hook/todo/background context
     ProxySessionID     string   // harness-local key for proxy continuation/websocket state
-    PromptCacheKey     string   // provider-facing cache-affinity key; proxy derives from ProxySessionID
+    CacheAffinityID    string   // harness-local conversation key for stable prompt-cache routing
+    PromptCacheKey     string   // provider-facing cache-affinity key; proxy derives from CacheAffinityID
     LongCacheTTL       bool     // Anthropic 1h cache TTL; set only for interactive sessions
 }
 
@@ -344,10 +345,11 @@ type ToolSchema struct {
 
 `RequestContext` is request-only instruction context: Chat Completions merges it
 into the leading system message, Anthropic adds it as an uncached system text
-block, and Responses merges it into `instructions` in both stored and stateless
-modes. Fresh todo/background/hook context applies to the current request without
-looking like the latest user prompt or becoming part of the OpenAI stored
-response chain.
+block, and Responses adds it as a late `role:"developer"` input item immediately
+before the current user message or trailing tool-call/output group. Responses
+therefore keeps top-level `instructions` stable for prefix caching. Fresh
+todo/background/hook context applies to the current request without looking like
+the latest user prompt or becoming part of the persisted transcript.
 Responses streams surface `response.id` on terminal `EventDone.ResponseID`; the
 agent stores that with the local transcript anchor for optional
 `previous_response_id` continuation.
@@ -486,7 +488,7 @@ Edge cases:
 | Tool schemas | `tools[] = {type:"function", name, description, parameters, strict:false}` | `tools[].function = {name, description, parameters}` (`type:"function"`) | `tools[] = {name, description, input_schema}` |
 | Server tools | `web_search`, or OpenRouter `openrouter:web_search` | OpenRouter `openrouter:web_search`; MiMo `web_search`; Kimi `builtin_function.$web_search`; Z.AI nested `web_search` options | `web_search_20250305` named `web_search` |
 | Parallel tool hint | `parallel_tool_calls:true` when tools are present | `parallel_tool_calls:true` when tools are present | not sent |
-| Prompt cache key | provider-configured; OpenAI auto emits `prompt_cache_key` | provider-configured; OpenAI auto emits `prompt_cache_key`, OpenRouter auto emits `session_id` | not sent (explicit `cache_control` breakpoints instead) |
+| Prompt cache key | provider-configured; OpenAI auto emits `prompt_cache_key`; managed `openai-codex` configs select it explicitly | provider-configured; OpenAI auto emits `prompt_cache_key`, OpenRouter auto emits `session_id` | not sent (explicit `cache_control` breakpoints instead) |
 | Stateful continuation | `store` is always sent — `store:true` plus `previous_response_id` when proxy catalog reports `responses_stateful:true` (tools/system still sent each request), `store:false` for the stateless default. If the provider rejects stored responses before streaming output, the agent disables stateful continuation and retries stateless. | ignored | ignored |
 | Assistant phase | assistant `message` input items include stored `phase` (`commentary` or `final_answer`) when present | ignored | ignored |
 | Token cap | `max_output_tokens` is capped by explicit `MaxTokens`, else `min(1_000_000, contextWindow/4)`, then by `outputLimit` and remaining counted/estimated context (omitted if disabled or unresolved) | `max_tokens` follows the same input-aware cap (omitted if unresolved) | `max_tokens` is required and follows the same input-aware cap, falling back to 1,000,000 if unresolved |
@@ -528,22 +530,35 @@ If a provider rejects a request with a parseable
 context-overflow error, the agent records the smaller reported window for the
 session, rebuilds the request, and retries once before surfacing the error.
 
-**Prompt cache and proxy session mapping.** `Request.ProxySessionID` is a
-harness-local opaque session key. Harness persists it in `state.json`, reuses it
-on resume, and rotates it on `/clear`. The model proxy uses the raw key for
-Responses continuation state and cached Responses WebSocket providers. Before
-calling any concrete provider, the proxy strips the raw key and sets
-`Request.PromptCacheKey` to `hex(sha256(ProxySessionID))`, so API providers see a
-stable cache-affinity value without a harness-specific prefix. Provider configs
-can control where that provider-facing key goes with
+**Prompt cache and proxy session mapping.** Harness deliberately uses two opaque
+local keys. `Request.ProxySessionID` isolates Responses continuation state and
+cached Responses WebSocket providers; transcript rewrites, branch navigation,
+and model/agent/tool changes rotate it. `Request.CacheAffinityID` is the longer
+lived cache-routing identity: it is persisted in `state.json`, restored on
+resume, preserved across those continuation resets, and inherited by delegate
+agents. A genuinely new logical session (`/clear`, clone/fork extraction, or a
+new process session) rotates both keys.
+
+Before calling any concrete provider, the proxy strips both raw keys and sets
+`Request.PromptCacheKey` to `hex(sha256(CacheAffinityID))`, so API providers see
+a stable cache-affinity value without a harness-specific prefix. Provider
+configs can control where that provider-facing key goes with
 `prompt_cache.key_field`: `auto` (default), `none`, `prompt_cache_key`, or
-`session_id`. `auto` sends `prompt_cache_key` to first-party OpenAI endpoints,
-`session_id` to OpenRouter Chat Completions, and no cache key field to other
-OpenAI-compatible custom base URLs. `prompt_cache.affinity_headers` can also
-copy the provider-facing stable key into non-auth routing headers such as
-`x-session-id`.
+`session_id`. `auto` sends `prompt_cache_key` to first-party OpenAI and ChatGPT
+Codex endpoints, `session_id` to OpenRouter Chat Completions, and no cache key
+field to other OpenAI-compatible custom base URLs. Managed `openai-codex`
+configs explicitly select `prompt_cache_key` so that behavior is self-describing.
+`prompt_cache.affinity_headers` can also copy the provider-facing
+stable key into non-auth routing headers such as `x-session-id`.
 Anthropic does not use this key directly (it pins explicit `cache_control`
 breakpoints).
+
+For ChatGPT Codex over Responses WebSocket, prewarm sends an empty
+`response.create` with `generate:false`. Its response id is saved at transcript
+anchor zero, allowing the first real user request to continue from the warmed
+system-and-tools prefix without generating or persisting a disposable assistant
+turn. Other transports retain the minimal one-token neutral warm-up request
+(subject to a provider's configured output-token floor).
 
 **Responses reasoning persistence.** In the default stateless (`store:false`) mode
 the provider would otherwise re-derive chain-of-thought on every tool turn. For a
@@ -719,7 +734,8 @@ Responses `max_output_tokens` parameter; the proxy infers the same omit behavior
 for older `codex_oauth` Responses configs. The proxy also defaults
 `responses_websocket` on for `codex_oauth` Responses configs so continuation can
 use the Codex-compatible WebSocket path without writing another managed config
-field.
+field. Managed config writes `prompt_cache.key_field:"prompt_cache_key"` so the
+proxy's stable, hashed cache-affinity key reaches the Codex backend.
 
 Provider configs may set `"min_output_tokens"` when an endpoint rejects tiny
 output caps. Responses requests default this floor to 16 for
@@ -2096,8 +2112,9 @@ literal-safety semantics and do not auto-attach from `@` references.
 The canonical command inventory and operator-facing behavior live in the
 [usage reference](usage.md#repl-commands). `internal/ui.App.command` dispatches
 those commands; state-changing commands such as `/clear`, `/compact`, `/model`,
-`/agent`, and `/handoff` also invalidate or rotate the relevant session,
-continuation, prompt-cache, and prewarm state described in their owning sections.
+`/agent`, and `/handoff` also invalidate or rotate the relevant continuation and
+prewarm state described in their owning sections. `/clear` starts a new cache
+affinity; context/model/tool changes preserve the current conversation affinity.
 
 Anthropic usage does not currently expose a separate reasoning-token field;
 extended thinking is counted in output tokens, so the reasoning total remains
@@ -2222,7 +2239,8 @@ type Session struct {
     Agent         string             `json:"agent,omitempty"`
     Prompt        int                `json:"prompt,omitempty"`
     ResponseState *llm.ResponseState `json:"response_state,omitempty"` // Responses stateful continuation anchor
-    ProxySessionID string `json:"proxy_session_id,omitempty"` // proxy continuation/cache isolation key
+    ProxySessionID string `json:"proxy_session_id,omitempty"` // proxy continuation/websocket isolation key
+    CacheAffinityID string `json:"cache_affinity_id,omitempty"` // stable prompt-cache routing identity
     Todos         []todo.Item        `json:"todos,omitempty"`          // update_todos list, reseeded on resume
     Plans         []plan.Plan        `json:"plans,omitempty"`          // record_plan list, reseeded on resume
     Usage         UsageTotals        `json:"usage"`                    // session aggregate

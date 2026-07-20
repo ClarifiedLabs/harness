@@ -612,7 +612,7 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	}
 }
 
-func TestHandlerStreamUsesProxySessionIDForStateAndHashesProviderPromptCacheKey(t *testing.T) {
+func TestHandlerStreamSeparatesProxySessionStateFromCacheAffinity(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
   "name": "openai",
@@ -647,10 +647,11 @@ func TestHandlerStreamUsesProxySessionIDForStateAndHashesProviderPromptCacheKey(
 	body, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:gpt-5.5",
 		Request: llm.Request{
-			Model:          "openai:gpt-5.5",
-			ProxySessionID: "harness-session-one",
-			PromptCacheKey: "legacy-key",
-			Messages:       firstMessages,
+			Model:           "openai:gpt-5.5",
+			ProxySessionID:  "harness-session-one",
+			CacheAffinityID: "harness-cache-shared",
+			PromptCacheKey:  "legacy-key",
+			Messages:        firstMessages,
 		},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
@@ -671,10 +672,11 @@ func TestHandlerStreamUsesProxySessionIDForStateAndHashesProviderPromptCacheKey(
 	body, _ = json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:gpt-5.5",
 		Request: llm.Request{
-			Model:          "openai:gpt-5.5",
-			ProxySessionID: "harness-session-two",
-			PromptCacheKey: "legacy-key",
-			Messages:       secondMessages,
+			Model:           "openai:gpt-5.5",
+			ProxySessionID:  "harness-session-two",
+			CacheAffinityID: "harness-cache-shared",
+			PromptCacheKey:  "legacy-key",
+			Messages:        secondMessages,
 		},
 	})
 	resp, err = srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
@@ -693,10 +695,13 @@ func TestHandlerStreamUsesProxySessionIDForStateAndHashesProviderPromptCacheKey(
 	if fp.Requests[0].ProxySessionID != "" || fp.Requests[1].ProxySessionID != "" {
 		t.Fatalf("raw proxy session id reached provider: %+v", fp.Requests)
 	}
-	if got, want := fp.Requests[0].PromptCacheKey, providerPromptCacheKey("harness-session-one"); got != want {
+	if fp.Requests[0].CacheAffinityID != "" || fp.Requests[1].CacheAffinityID != "" {
+		t.Fatalf("raw cache affinity id reached provider: %+v", fp.Requests)
+	}
+	if got, want := fp.Requests[0].PromptCacheKey, providerPromptCacheKey("harness-cache-shared"); got != want {
 		t.Fatalf("first provider prompt cache key = %q, want %q", got, want)
 	}
-	if got, want := fp.Requests[1].PromptCacheKey, providerPromptCacheKey("harness-session-two"); got != want {
+	if got, want := fp.Requests[1].PromptCacheKey, providerPromptCacheKey("harness-cache-shared"); got != want {
 		t.Fatalf("second provider prompt cache key = %q, want %q", got, want)
 	}
 	if fp.Requests[1].PreviousResponseID != "" {
@@ -1047,7 +1052,7 @@ func TestHandlerStreamOmitsMaxOutputTokensForCodexOAuth(t *testing.T) {
 
 	body, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai-codex:gpt-5.5",
-		Request:  llm.Request{Model: "openai-codex:gpt-5.5", ProxySessionID: "harness-session-a"},
+		Request:  llm.Request{Model: "openai-codex:gpt-5.5", ProxySessionID: "harness-session-a", CacheAffinityID: "harness-cache-a"},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -1069,7 +1074,7 @@ func TestHandlerStreamOmitsMaxOutputTokensForCodexOAuth(t *testing.T) {
 	resp.Body.Close()
 	bodyB, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai-codex:gpt-5.5",
-		Request:  llm.Request{Model: "openai-codex:gpt-5.5", ProxySessionID: "harness-session-b"},
+		Request:  llm.Request{Model: "openai-codex:gpt-5.5", ProxySessionID: "harness-session-b", CacheAffinityID: "harness-cache-a"},
 	})
 	resp, err = srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(bodyB))
 	if err != nil {
@@ -1089,9 +1094,9 @@ func TestHandlerStreamOmitsMaxOutputTokensForCodexOAuth(t *testing.T) {
 	if len(fp.Requests) != 3 {
 		t.Fatalf("fake provider requests = %d, want 3", len(fp.Requests))
 	}
-	if fp.Requests[0].PromptCacheKey != providerPromptCacheKey("harness-session-a") ||
-		fp.Requests[1].PromptCacheKey != providerPromptCacheKey("harness-session-a") ||
-		fp.Requests[2].PromptCacheKey != providerPromptCacheKey("harness-session-b") {
+	if fp.Requests[0].PromptCacheKey != providerPromptCacheKey("harness-cache-a") ||
+		fp.Requests[1].PromptCacheKey != providerPromptCacheKey("harness-cache-a") ||
+		fp.Requests[2].PromptCacheKey != providerPromptCacheKey("harness-cache-a") {
 		t.Fatalf("provider prompt cache keys = %q, %q, %q", fp.Requests[0].PromptCacheKey, fp.Requests[1].PromptCacheKey, fp.Requests[2].PromptCacheKey)
 	}
 	if fp.Requests[0].ProxySessionID != "" || fp.Requests[1].ProxySessionID != "" || fp.Requests[2].ProxySessionID != "" {

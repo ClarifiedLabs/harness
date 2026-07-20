@@ -278,6 +278,9 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	if provider.Models[0].OutputLimit != 0 {
 		t.Fatalf("provider output limit = %d, want omitted", provider.Models[0].OutputLimit)
 	}
+	if provider.PromptCache.KeyField != llm.PromptCacheKeyFieldPromptCacheKey {
+		t.Fatalf("provider prompt cache key field = %q, want prompt_cache_key", provider.PromptCache.KeyField)
+	}
 	if !slices.Contains(provider.Models[0].InputModalities, "image") {
 		t.Fatalf("provider input modalities = %+v, want image support", provider.Models[0].InputModalities)
 	}
@@ -962,6 +965,9 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	}
 	if provider.Models[0].OutputLimit != 0 {
 		t.Fatalf("provider output limit after refresh = %d, want omitted", provider.Models[0].OutputLimit)
+	}
+	if provider.PromptCache.KeyField != llm.PromptCacheKeyFieldPromptCacheKey {
+		t.Fatalf("provider prompt cache key field after refresh = %q, want prompt_cache_key", provider.PromptCache.KeyField)
 	}
 	if provider.PriceSource != "" {
 		t.Fatalf("codex price_source after refresh = %q, want omitted for subscription provider", provider.PriceSource)

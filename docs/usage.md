@@ -304,7 +304,10 @@ backend rejects that parameter. Input-token preflight counts use a local
 `o200k_base` estimate because the Codex CLI protocol does not expose a separate
 count-token endpoint. The proxy also uses the Responses WebSocket transport by
 default for this provider, matching Codex's stateful continuation path while
-sending `store:false` to the ChatGPT backend. After setup, run:
+sending `store:false` to the ChatGPT backend. Managed setup explicitly emits the
+hashed conversation cache key as `prompt_cache_key`. Its startup warm-up uses
+WebSocket `generate:false`, then reuses that response id for the first real
+request. After setup, run:
 
 ```sh
 harness-model-proxy auth login openai-codex
@@ -316,13 +319,17 @@ fallback if auth fails. Supported auth shapes include `token_command`, `oauth2`,
 and `codex_oauth`.
 
 Provider configs may also set `prompt_cache` to control how the stable harness
-session cache key is sent to OpenAI-compatible backends. `key_field` accepts
+conversation cache key is sent to OpenAI-compatible backends. This cache
+affinity survives continuation resets such as compaction and model/agent/tool
+changes, is shared with delegates, and rotates for a new logical session.
+`key_field` accepts
 `auto` (default), `none`, `prompt_cache_key`, or `session_id`; `auto` sends
-`prompt_cache_key` to first-party OpenAI endpoints, `session_id` to OpenRouter,
-and omits cache key fields for other custom base URLs. `affinity_headers` can
+`prompt_cache_key` to first-party OpenAI and ChatGPT Codex endpoints,
+`session_id` to OpenRouter, and omits cache key fields for other custom base
+URLs. `affinity_headers` can
 copy the same key into non-auth routing headers such as `x-session-id`. The
 proxy derives the provider-facing value as a SHA-256 hash of harness's local
-session key, so providers do not receive the raw session identifier.
+cache-affinity key, so providers do not receive the raw identifier.
 
 For hand-written model-proxy config shape references, see
 `examples/harness-model-proxy/config.json` and

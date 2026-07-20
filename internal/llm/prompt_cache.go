@@ -26,7 +26,10 @@ func ResolvePromptCacheKeyField(providerName, apiType, baseURL string, cfg Promp
 		if strings.EqualFold(providerName, "openrouter") || strings.Contains(base, "openrouter.ai") {
 			return PromptCacheKeyFieldSessionID
 		}
-		if strings.EqualFold(providerName, "openai") || strings.Contains(base, "api.openai.com") {
+		if strings.EqualFold(providerName, "openai") ||
+			strings.EqualFold(providerName, "openai-codex") ||
+			strings.Contains(base, "api.openai.com") ||
+			strings.Contains(base, "chatgpt.com/backend-api/codex") {
 			return PromptCacheKeyFieldPromptCacheKey
 		}
 		return PromptCacheKeyFieldNone

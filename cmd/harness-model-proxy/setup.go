@@ -828,6 +828,11 @@ func applySyntheticProviderDefaults(provider modelsdev.Provider, cfg *setupProvi
 	if cfg == nil {
 		return
 	}
+	// Keep the managed ChatGPT Codex config self-describing instead of relying on
+	// the generic auto resolver's provider-name/backend-URL recognition.
+	if isOpenAICodexProvider(provider) && strings.TrimSpace(cfg.PromptCache.KeyField) == "" {
+		cfg.PromptCache.KeyField = llm.PromptCacheKeyFieldPromptCacheKey
+	}
 	// Sakana's Responses implementation does not accept previous_response_id and
 	// requires the full conversation each request, so stateful continuation must
 	// stay off.

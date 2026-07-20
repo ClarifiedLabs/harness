@@ -162,7 +162,7 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 	app.SetUsage(session.UsageTotals{})
 	app.usageByModel = nil
 	app.Agent.SetTranscript(messages)
-	app.Agent.ResetProxySessionID()
+	app.Agent.ResetSessionIDs()
 	if app.OnSessionPathChanged != nil {
 		app.OnSessionPathChanged(app.SessionPath)
 	}

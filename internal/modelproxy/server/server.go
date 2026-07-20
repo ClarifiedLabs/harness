@@ -1010,9 +1010,16 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 					// starts after that future transcript item. request.Messages
 					// may be a trimmed continuation delta, so anchor against the
 					// caller's full message count instead.
+					anchorMessages := anchorMessageCount + 1
+					if request.Purpose == llm.RequestPurposePrewarm {
+						// A generate:false Responses WebSocket warm-up contributes no
+						// transcript messages. Its response id anchors the next request
+						// before the first real user message.
+						anchorMessages = 0
+					}
 					finalState = llm.ResponseState{
 						PreviousResponseID: ev.ResponseID,
-						AnchorMessages:     anchorMessageCount + 1,
+						AnchorMessages:     anchorMessages,
 					}
 				}
 			}
@@ -1721,11 +1728,15 @@ func (h *Handler) continuationKey(targetID, promptCacheKey string) string {
 func prepareProviderRequest(req llm.Request) (sessionKey string, providerReq llm.Request) {
 	providerReq = req
 	proxySessionID := strings.TrimSpace(req.ProxySessionID)
+	cacheAffinityID := strings.TrimSpace(req.CacheAffinityID)
+	providerReq.ProxySessionID = ""
+	providerReq.CacheAffinityID = ""
+	if cacheAffinityID != "" {
+		providerReq.PromptCacheKey = providerPromptCacheKey(cacheAffinityID)
+	}
 	if proxySessionID == "" {
 		return strings.TrimSpace(req.PromptCacheKey), providerReq
 	}
-	providerReq.ProxySessionID = ""
-	providerReq.PromptCacheKey = providerPromptCacheKey(proxySessionID)
 	return proxySessionID, providerReq
 }
 

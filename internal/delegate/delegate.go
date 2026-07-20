@@ -47,6 +47,7 @@ type Runtime struct {
 	Agent             string
 	ToolNames         []string
 	SessionPath       string
+	CacheAffinityID   string
 	ParentChildID     string
 	Depth             int
 	MaxPromptTokens   int
@@ -372,6 +373,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		CompactToolResultMaxBytes: r.opts.CompactToolResultMaxBytes,
 		Now:                       r.opts.Now,
 	})
+	child.SetCacheAffinityID(runtime.CacheAffinityID)
 	child.SetSystem(launch.System)
 
 	sink := newChildSink(childDir, childTodos, hasTodoTool)
@@ -450,6 +452,7 @@ func (r *Runner) childTools(parent Runtime, launch Launch, childID string, todos
 		Agent:             launch.Agent,
 		ToolNames:         names,
 		SessionPath:       parent.SessionPath,
+		CacheAffinityID:   parent.CacheAffinityID,
 		ParentChildID:     childID,
 		Depth:             parent.Depth + 1,
 		MaxPromptTokens:   parent.MaxPromptTokens,
@@ -715,19 +718,20 @@ func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string,
 	updated := r.now()
 	childDir := session.ChildSessionDir(parent.SessionPath, childID)
 	if err := (session.Session{
-		Version:        session.Version,
-		Provider:       launch.ProviderName,
-		Model:          launch.Model,
-		Created:        created,
-		Updated:        updated,
-		System:         launch.System,
-		Agent:          launch.Agent,
-		ProxySessionID: child.ProxySessionID(),
-		Prompt:         1,
-		Messages:       child.Transcript(),
-		ResponseState:  child.ResponseState(),
-		Todos:          todos.Snapshot(),
-		Usage:          session.UsageTotals{Usage: usage.Usage, CostUSD: usage.Usage.CostUSD},
+		Version:         session.Version,
+		Provider:        launch.ProviderName,
+		Model:           launch.Model,
+		Created:         created,
+		Updated:         updated,
+		System:          launch.System,
+		Agent:           launch.Agent,
+		ProxySessionID:  child.ProxySessionID(),
+		CacheAffinityID: child.CacheAffinityID(),
+		Prompt:          1,
+		Messages:        child.Transcript(),
+		ResponseState:   child.ResponseState(),
+		Todos:           todos.Snapshot(),
+		Usage:           session.UsageTotals{Usage: usage.Usage, CostUSD: usage.Usage.CostUSD},
 	}).Save(childDir); err != nil {
 		return err
 	}

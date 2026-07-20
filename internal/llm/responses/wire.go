@@ -203,7 +203,6 @@ type buildOptions struct {
 
 func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opts buildOptions) wireRequest {
 	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
-	instructions := req.System
 	// Replay persisted encrypted reasoning items only when reasoning is enabled
 	// for this request (mirrors the Anthropic dialect's includeThinking gate).
 	// buildRequest sets Reasoning/Include under the same condition below, so a
@@ -212,11 +211,11 @@ func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opt
 	replayReasoning := req.Reasoning.Effort != "" || req.Reasoning.Summary != ""
 	input := buildInput(req.Messages, replayReasoning)
 	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
-		instructions = appendInstructionContext(instructions, contextText)
+		input = insertRequestContext(input, contextText)
 	}
 	w := wireRequest{
 		Model:              req.Model,
-		Instructions:       instructions,
+		Instructions:       req.System,
 		Input:              input,
 		Stream:             true,
 		Store:              req.StoreResponse,
@@ -278,14 +277,43 @@ func rawObjectOrNil(raw json.RawMessage) json.RawMessage {
 	return raw
 }
 
-func appendInstructionContext(instructions, contextText string) string {
-	if contextText == "" {
-		return instructions
+func insertRequestContext(input []wireInputItem, contextText string) []wireInputItem {
+	contextItem := wireInputItem{
+		Type:    "message",
+		Role:    "developer",
+		Content: []wireContentPart{{Type: "input_text", Text: contextText}},
 	}
-	if instructions == "" {
-		return contextText
+	if len(input) == 0 {
+		return []wireInputItem{contextItem}
 	}
-	return instructions + "\n\n" + contextText
+
+	// Keep volatile request context as late as possible so the stable system,
+	// tools, and transcript prefix remains cacheable. Put it before the current
+	// user message. For a tool round, keep the assistant call/reasoning and its
+	// trailing outputs together and insert before that whole suffix.
+	insertAt := len(input)
+	last := input[len(input)-1]
+	if last.Type == "message" && last.Role == string(llm.RoleUser) {
+		insertAt--
+	} else if last.Type == "function_call" || last.Type == "function_call_output" {
+		for insertAt > 0 && input[insertAt-1].Type == "function_call_output" {
+			insertAt--
+		}
+		for insertAt > 0 && input[insertAt-1].Type == "function_call" {
+			insertAt--
+		}
+		for insertAt > 0 {
+			item := input[insertAt-1]
+			if item.Type != "reasoning" && !(item.Type == "message" && item.Role == string(llm.RoleAssistant)) {
+				break
+			}
+			insertAt--
+		}
+	}
+	input = append(input, wireInputItem{})
+	copy(input[insertAt+1:], input[insertAt:])
+	input[insertAt] = contextItem
+	return input
 }
 
 func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {

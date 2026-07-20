@@ -423,14 +423,14 @@ func TestBuildRequestStoreAndPreviousResponseID(t *testing.T) {
 	}
 }
 
-func TestBuildRequestContextIsInstructionsWhenStateless(t *testing.T) {
+func TestBuildRequestContextIsLateDeveloperInputWhenStateless(t *testing.T) {
 	req := llm.Request{Model: "gpt-5.4", RequestContext: []string{"todo context"}}
 	w := buildRequest(req, 0, 0)
-	if len(w.Input) != 0 {
-		t.Fatalf("input = %d, want no context input items", len(w.Input))
+	if w.Instructions != "" {
+		t.Fatalf("instructions = %q, want stable instructions", w.Instructions)
 	}
-	if !strings.Contains(w.Instructions, "todo context") {
-		t.Fatalf("instructions = %q, want request context", w.Instructions)
+	if len(w.Input) != 1 || w.Input[0].Role != "developer" || !strings.Contains(contentParts(t, w.Input[0])[0].Text, "todo context") {
+		t.Fatalf("input = %+v, want one developer context item", w.Input)
 	}
 }
 
@@ -445,11 +445,20 @@ func TestBuildRequestContextDoesNotFollowToolResultInput(t *testing.T) {
 		},
 	}
 	w := buildRequest(req, 0, 0)
-	if !strings.Contains(w.Instructions, "todo context") {
-		t.Fatalf("instructions = %q, want request context", w.Instructions)
-	}
 	if len(w.Input) == 0 {
 		t.Fatal("input is empty, want transcript input items")
+	}
+	contextIndex := -1
+	for i, item := range w.Input {
+		if item.Role == "developer" {
+			contextIndex = i
+		}
+	}
+	if contextIndex < 0 || !strings.Contains(contentParts(t, w.Input[contextIndex])[0].Text, "todo context") {
+		t.Fatalf("input = %+v, want developer context item", w.Input)
+	}
+	if contextIndex+2 >= len(w.Input) || w.Input[contextIndex+1].Type != "function_call" || w.Input[contextIndex+2].Type != "function_call_output" {
+		t.Fatalf("input = %+v, want context before trailing call/output pair", w.Input)
 	}
 	last := w.Input[len(w.Input)-1]
 	if last.Type != "function_call_output" || last.CallID != "call_1" || last.Output != "ok" {
@@ -457,14 +466,14 @@ func TestBuildRequestContextDoesNotFollowToolResultInput(t *testing.T) {
 	}
 }
 
-func TestBuildRequestContextIsInstructionsWhenStored(t *testing.T) {
+func TestBuildRequestContextLeavesStoredInstructionsStable(t *testing.T) {
 	req := llm.Request{Model: "gpt-5.4", System: "system", StoreResponse: true, RequestContext: []string{"todo context"}}
 	w := buildRequest(req, 0, 0)
-	if len(w.Input) != 0 {
-		t.Fatalf("input = %d, want no context input items", len(w.Input))
+	if w.Instructions != "system" {
+		t.Fatalf("instructions = %q, want stable system only", w.Instructions)
 	}
-	if !strings.Contains(w.Instructions, "system") || !strings.Contains(w.Instructions, "todo context") {
-		t.Fatalf("instructions = %q, want system and request context", w.Instructions)
+	if len(w.Input) != 1 || w.Input[0].Role != "developer" || !strings.Contains(contentParts(t, w.Input[0])[0].Text, "todo context") {
+		t.Fatalf("input = %+v, want one developer context item", w.Input)
 	}
 }
 
