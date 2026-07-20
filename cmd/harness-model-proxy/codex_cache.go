@@ -89,6 +89,10 @@ func fetchCodexModelsData(ctx context.Context, env environment) ([]byte, error) 
 }
 
 func writeCodexModelsCache(configDir string, data []byte) error {
+	data, err := modelcatalog.PruneCodexModelsData(data)
+	if err != nil {
+		return fmt.Errorf("candidate OpenAI Codex model catalog did not parse: %w", err)
+	}
 	if _, err := modelcatalog.DecodeCodexModels(data); err != nil {
 		return fmt.Errorf("candidate OpenAI Codex model catalog did not parse: %w", err)
 	}

@@ -88,6 +88,10 @@ func fetchModelsDevCatalogData(ctx context.Context, env environment) (*modelcata
 }
 
 func writeModelsDevCache(configDir string, data []byte) error {
+	data, err := modelcatalog.PruneModelsDevData(data)
+	if err != nil {
+		return fmt.Errorf("candidate models.dev cache did not parse: %w", err)
+	}
 	catalog, err := modelcatalog.DecodeModelsDev(bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("candidate models.dev cache did not parse: %w", err)

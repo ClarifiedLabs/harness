@@ -36,10 +36,10 @@ refresh-model-catalogs:
 	codex_raw="$$codex_tmp.raw"; \
 	trap 'rm -f "$$modelsdev_tmp" "$$modelsdev_raw" "$$codex_tmp" "$$codex_raw"' EXIT; \
 	curl -fsSL "$(MODELSDEV_API_URL)" -o "$$modelsdev_raw"; \
-	go run ./scripts/jsonfmt.go "$$modelsdev_raw" "$$modelsdev_tmp"; \
+	go run ./scripts/jsonfmt.go -catalog modelsdev "$$modelsdev_raw" "$$modelsdev_tmp"; \
 	MODELSDEV_FALLBACK_CANDIDATE="$$modelsdev_tmp" go test ./internal/modelcatalog -run TestModelsDevFallbackCandidateDecodes -count=1; \
 	curl -fsSL "$(CODEX_MODELS_URL)" -o "$$codex_raw"; \
-	go run ./scripts/jsonfmt.go "$$codex_raw" "$$codex_tmp"; \
+	go run ./scripts/jsonfmt.go -catalog codex "$$codex_raw" "$$codex_tmp"; \
 	CODEX_MODELS_FALLBACK_CANDIDATE="$$codex_tmp" go test ./internal/modelcatalog -run TestCodexFallbackCandidateDecodes -count=1; \
 	mv "$$modelsdev_tmp" "$(MODELSDEV_FALLBACK_ABS)"; \
 	mv "$$codex_tmp" "$(CODEX_MODELS_FALLBACK_ABS)"; \

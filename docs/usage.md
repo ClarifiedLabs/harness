@@ -348,7 +348,8 @@ edit it and uses its own `price` and `input_modalities` entries. A managed confi
 may set `price_source` to resolve metadata from a different models.dev provider
 ID.
 
-`harness-model-proxy` stores the full models.dev catalog at
+`harness-model-proxy` stores every models.dev provider and model, projected to
+the metadata harness consumes, at
 `~/.config/harness-model-proxy/models.dev.api.json`. `setup` uses the cache
 when present; if there is no cache, or the cache cannot be parsed, it fetches and
 rewrites the cache before using the vendored fallback snapshot. While serving,
@@ -358,9 +359,10 @@ the proxy refreshes this cache when it is older than `24h` by default. Set
 periodic serving-time refreshes. Cache updates are parsed and sanity-checked
 before replacing the old file; a candidate catalog with no providers/models, or
 one whose provider/model counts swing by more than 4x with a meaningful absolute
-delta, is rejected and the old cache is preserved. Successful replacements first
-copy the previous cache to `models.dev.api.json.bak`, overwriting that one backup
-each time.
+delta, is rejected and the old cache is preserved. Successful refreshes prune
+unused upstream fields before saving the previous cache to
+`models.dev.api.json.bak` and replacing the active cache; that single backup is
+overwritten each time.
 
 Run `harness-model-proxy refresh-models` to fetch and cache the latest live
 `models.dev` catalog, then refresh metadata for the currently configured model

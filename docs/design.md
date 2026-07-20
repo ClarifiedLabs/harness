@@ -690,20 +690,21 @@ Model metadata normally originates from the public **models.dev** catalog. The
 models.dev and OpenAI Codex adapters, normalized catalog types, and vendored
 fallback snapshots live in `internal/modelcatalog`; `harness-model-proxy setup`
 and `refresh-models` consume the normalized provider/context/input-modality/
-reasoning fields. The proxy caches the full catalog JSON as
-`models.dev.api.json` in the proxy config directory.
+reasoning fields. The proxy caches a projected catalog as `models.dev.api.json`
+in the proxy config directory, retaining every provider and model but only the
+metadata fields harness consumes.
 `setup` prefers that cache over the vendored snapshot, but fetches and writes it
 when it is missing or invalid. A running proxy refreshes the cache when it is older
 than `models_dev_cache_ttl` (`24h` by default; `0` disables periodic refresh), and
-`refresh-models` fetches and caches the full catalog before rewriting configured
-provider allowlists. The vendored snapshot is used only when there is no parseable
-cache and a live fetch fails.
+`refresh-models` fetches and caches that projected catalog before rewriting
+configured provider allowlists. The vendored snapshot is used only when there is
+no parseable cache and a live fetch fails.
 
 The synthetic `openai-codex` provider is the exception: its model list comes from
 the OpenAI Codex model catalog (`codex-rs/models-manager/models.json`). Setup uses
 a vendored copy or the last cached refresh; `refresh-models` fetches the latest
-catalog from `openai/codex` on GitHub and caches it as `openai-codex.models.json`.
-Only list-visible Codex models are exposed.
+catalog from `openai/codex` on GitHub and caches only the fields consumed by the
+adapter as `openai-codex.models.json`. Only list-visible Codex models are exposed.
 
 ### Managed vs manual provider configs
 
@@ -862,7 +863,8 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
 - `harness-model-proxy setup` creates a proxy config in the default proxy directory,
   appends a new provider config to an existing proxy config, or updates an existing
   configured provider. It reads cached models.dev provider metadata, fetching and
-  caching the full catalog when needed, falls back to a vendored models.dev
+  caching all providers and models with unused upstream fields pruned when needed,
+  falls back to a vendored models.dev
   snapshot only when no parseable cache is available and live fetch fails, lists
   harness-supported providers, marks existing providers with bold text and `*`,
   derives missing first-party API URLs from exact `@ai-sdk/openai`,

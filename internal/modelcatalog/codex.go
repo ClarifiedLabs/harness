@@ -32,17 +32,17 @@ type codexModelsCatalog struct {
 
 type codexModel struct {
 	Slug                     string                 `json:"slug"`
-	DisplayName              string                 `json:"display_name"`
-	ContextWindow            int                    `json:"context_window"`
-	MaxContextWindow         int                    `json:"max_context_window"`
-	InputModalities          []string               `json:"input_modalities"`
-	SupportedReasoningLevels []codexReasoningPreset `json:"supported_reasoning_levels"`
-	Visibility               string                 `json:"visibility"`
-	SupportedInAPI           *bool                  `json:"supported_in_api"`
+	DisplayName              string                 `json:"display_name,omitempty"`
+	ContextWindow            int                    `json:"context_window,omitempty"`
+	MaxContextWindow         int                    `json:"max_context_window,omitempty"`
+	InputModalities          []string               `json:"input_modalities,omitempty"`
+	SupportedReasoningLevels []codexReasoningPreset `json:"supported_reasoning_levels,omitempty"`
+	Visibility               string                 `json:"visibility,omitempty"`
+	SupportedInAPI           *bool                  `json:"supported_in_api,omitempty"`
 }
 
 type codexReasoningPreset struct {
-	Effort string `json:"effort"`
+	Effort string `json:"effort,omitempty"`
 }
 
 // FetchCodexModelsData downloads the OpenAI Codex model catalog and returns its
@@ -66,6 +66,16 @@ func DecodeCodexModels(data []byte) (Provider, error) {
 		return Provider{}, fmt.Errorf("OpenAI Codex model catalog has no list-visible models")
 	}
 	return provider, nil
+}
+
+// PruneCodexModelsData renders an OpenAI Codex model catalog with only the
+// fields consumed by DecodeCodexModels.
+func PruneCodexModelsData(data []byte) ([]byte, error) {
+	var catalog codexModelsCatalog
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&catalog); err != nil {
+		return nil, err
+	}
+	return json.MarshalIndent(catalog, "", "  ")
 }
 
 // CodexModelsFallback decodes the vendored OpenAI Codex model snapshot.

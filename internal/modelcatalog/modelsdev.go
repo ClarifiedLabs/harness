@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+
+	"harness/internal/llm"
 )
 
 // ModelsDevURL is the public models.dev catalog endpoint.
@@ -64,6 +66,69 @@ func EncodeModelsDev(c *Catalog) ([]byte, error) {
 	return json.MarshalIndent(struct {
 		Providers map[string]Provider `json:"providers"`
 	}{Providers: providers}, "", "  ")
+}
+
+// PruneModelsDevData renders a models.dev catalog with only the metadata used
+// by harness. The result keeps the upstream provider-map shape expected by the
+// vendored fallback snapshot.
+func PruneModelsDevData(data []byte) ([]byte, error) {
+	catalog, err := DecodeModelsDev(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	providers := make(map[string]modelsDevSnapshotProvider, len(catalog.Providers))
+	for key, provider := range catalog.Providers {
+		models := make(map[string]modelsDevSnapshotModel, len(provider.Models))
+		for modelKey, model := range provider.Models {
+			models[modelKey] = modelsDevSnapshotModel{
+				ID:               model.ID,
+				Name:             model.Name,
+				ReleaseDate:      model.ReleaseDate,
+				LastUpdated:      model.LastUpdated,
+				Modalities:       modelsDevSnapshotModalities{Input: model.Modalities.Input},
+				Reasoning:        model.Reasoning,
+				ReasoningOptions: model.ReasoningOptions,
+				Limit:            model.Limit,
+				Provider:         model.Provider,
+				Cost:             model.Cost,
+			}
+		}
+		providers[key] = modelsDevSnapshotProvider{
+			ID:     provider.ID,
+			Name:   provider.Name,
+			API:    provider.API,
+			NPM:    provider.NPM,
+			Env:    provider.Env,
+			Models: models,
+		}
+	}
+	return json.MarshalIndent(providers, "", "  ")
+}
+
+type modelsDevSnapshotProvider struct {
+	ID     string                            `json:"id"`
+	Name   string                            `json:"name,omitempty"`
+	API    string                            `json:"api,omitempty"`
+	NPM    string                            `json:"npm,omitempty"`
+	Env    []string                          `json:"env,omitempty"`
+	Models map[string]modelsDevSnapshotModel `json:"models"`
+}
+
+type modelsDevSnapshotModel struct {
+	ID               string                      `json:"id"`
+	Name             string                      `json:"name,omitempty"`
+	ReleaseDate      string                      `json:"release_date,omitempty"`
+	LastUpdated      string                      `json:"last_updated,omitempty"`
+	Modalities       modelsDevSnapshotModalities `json:"modalities,omitzero"`
+	Reasoning        bool                        `json:"reasoning,omitempty"`
+	ReasoningOptions []llm.ReasoningOption       `json:"reasoning_options,omitempty"`
+	Limit            Limit                       `json:"limit,omitzero"`
+	Provider         ModelProvider               `json:"provider,omitzero"`
+	Cost             llm.Price                   `json:"cost,omitzero"`
+}
+
+type modelsDevSnapshotModalities struct {
+	Input []string `json:"input,omitempty"`
 }
 
 // ModelsDevFallback decodes the vendored models.dev api.json snapshot.
