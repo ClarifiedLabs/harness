@@ -117,6 +117,21 @@ func TestInspectionAgentsOmitGitReadonlyWhenGitMissing(t *testing.T) {
 	}
 }
 
+// The default set (auto/independent) never advertises git_readonly: git already
+// covers every read-only operation, so listing both wastes context. Read-only
+// agents stay delegatable via the git->git_readonly subset rule in delegate.
+func TestDefaultToolsOmitGitReadonly(t *testing.T) {
+	for _, name := range []string{"auto", "independent"} {
+		agent := Builtins()[name]
+		if slices.Contains(agent.AllowedTools, "git_readonly") {
+			t.Fatalf("%s agent includes git_readonly: %v", name, agent.AllowedTools)
+		}
+	}
+	if slices.Contains(DefaultTools(), "git_readonly") {
+		t.Fatalf("DefaultTools includes git_readonly: %v", DefaultTools())
+	}
+}
+
 // Field-level merge: overriding only the prompt keeps the built-in tool list.
 func TestResolvePromptOnlyOverrideKeepsTools(t *testing.T) {
 	m := Resolve(map[string]FileDefinition{"plan": {Prompt: "custom plan prompt"}})

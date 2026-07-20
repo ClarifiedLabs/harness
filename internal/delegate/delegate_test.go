@@ -153,6 +153,19 @@ func TestMissingToolsPreservesRequiredOrder(t *testing.T) {
 	}
 }
 
+func TestMissingToolsGitSatisfiesGitReadonly(t *testing.T) {
+	// An available git tool satisfies a required git_readonly (git is a strict
+	// superset of the read-only subcommands), so a parent with git can delegate
+	// to a read-only agent that needs only git_readonly.
+	if got := MissingTools([]string{"git_readonly"}, []string{"git"}); len(got) != 0 {
+		t.Fatalf("git should satisfy git_readonly, missing = %v", got)
+	}
+	// The reverse does not hold: git_readonly does not satisfy a required git.
+	if got := MissingTools([]string{"git"}, []string{"git_readonly"}); !slices.Equal(got, []string{"git"}) {
+		t.Fatalf("git_readonly must not satisfy git, missing = %v", got)
+	}
+}
+
 func TestDelegateRebindsNestedDelegateSchemaToChildTools(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "final report"}},

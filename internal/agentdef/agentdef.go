@@ -143,10 +143,12 @@ func searchToolNames(mode string) []string {
 }
 
 func defaultTools(opts Options) []string {
+	// git already covers every git_readonly operation, so the default set omits
+	// git_readonly to avoid advertising duplicate functionality. Read-only
+	// agents (explore, plan) that require git_readonly remain delegatable from
+	// here because delegate.MissingTools treats an available git as satisfying a
+	// required git_readonly.
 	names := tools.DefaultNamesWithOptions(tools.Options{SearchTools: opts.SearchTools})
-	if tools.GitAvailable() && !slices.Contains(names, "git_readonly") {
-		names = append(names, "git_readonly")
-	}
 	return append(names, "record_plan", "update_todos", "delegate", "background_jobs")
 }
 

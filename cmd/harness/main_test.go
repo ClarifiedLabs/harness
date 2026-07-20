@@ -3352,10 +3352,9 @@ func expectedPlanToolNames() []string {
 }
 
 func expectedDefaultToolNames() []string {
+	// The default set omits git_readonly: git already covers it, and read-only
+	// agents remain delegatable via the git->git_readonly subset rule.
 	names := tools.DefaultNames()
-	if tools.GitAvailable() && !slices.Contains(names, "git_readonly") {
-		names = append(names, "git_readonly")
-	}
 	return append(names, "update_todos", "delegate", "background_jobs", "record_plan")
 }
 

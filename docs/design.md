@@ -2539,9 +2539,12 @@ reviewer, or the wide-open default without separate binaries.
   contract), and `independent` (all available built-in tools
   plus discovered MCP tools, including `record_plan`, `delegate` and background
   job tools, a complete-without-asking prompt from
-  `prompts/agents/independent.txt`). `auto`/`independent` also expose
-  `git_readonly` when available so the exact subset guard permits delegating to
-  `explore`. `record_plan` (§9.17) is in every default agent's set;
+  `prompts/agents/independent.txt`). `auto`/`independent` advertise `git` but not
+  `git_readonly` — `git` covers every read-only operation, so listing both would
+  duplicate functionality and waste context. The delegation subset guard treats an
+  available `git` as satisfying a required `git_readonly`, so these parents can
+  still delegate to `explore`/`plan`. `record_plan` (§9.17) is in every default
+  agent's set;
   `request_implementation` (§9.18) is plan-only.
 - **Descriptions are required selection metadata:** after resolution, every agent
   must have a nonblank trimmed `description` stating when a parent should use it.

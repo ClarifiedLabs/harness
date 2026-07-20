@@ -570,7 +570,11 @@ func withoutTool(names []string, excluded string) []string {
 }
 
 // MissingTools returns required tool names that are not available, preserving
-// the required order and de-duplicating repeated names.
+// the required order and de-duplicating repeated names. An available git tool
+// satisfies a required git_readonly: git is a strict superset of the read-only
+// subcommands, so a parent with git can delegate to a read-only agent that needs
+// only git_readonly. The reverse does not hold — git_readonly does not satisfy a
+// required git.
 func MissingTools(required, available []string) []string {
 	have := make(map[string]bool, len(available))
 	for _, name := range available {
@@ -580,6 +584,9 @@ func MissingTools(required, available []string) []string {
 	var missing []string
 	for _, name := range required {
 		if have[name] || seen[name] {
+			continue
+		}
+		if name == "git_readonly" && have["git"] {
 			continue
 		}
 		seen[name] = true
