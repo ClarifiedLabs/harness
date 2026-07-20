@@ -1118,7 +1118,7 @@ func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
 		"auto                 [default model] [mcp: all] General-purpose agent.",
 		"explore              [default model] [mcp: read_only] Broad read-only search",
 		"independent          [default model] [mcp: all] End-to-end work without user input.",
-		"plan                 [default model] [mcp: read_only] Collaborative read-only implementation planning.",
+		"plan                 [default model] [mcp: read_only] Collaborative implementation planning; explores freely (including running commands) but does not modify the project.",
 		"security (selected)  [openai:gpt-5.5] [mcp: all] Security review",
 	} {
 		if !strings.Contains(got, want) {
@@ -2964,7 +2964,8 @@ func TestRunLogLevelSuppressesUnavailableToolWarnings(t *testing.T) {
 	}
 }
 
-// Plan agent advertises only its read-only tool set and includes its prompt.
+// Plan agent advertises its exploration tool set (incl. run_command, no
+// file-mutation tools) and includes its prompt.
 func TestRunPlanAgentRestrictsToolsAndAddsPrompt(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-agent", "plan", "-p", "hi"}, fp, "")
@@ -3333,7 +3334,9 @@ func expectedExploreToolNames() []string {
 	} else {
 		names = append(names, "grep")
 	}
-	names = append(names, "web_fetch")
+	// explore (and plan) gain run_command for exploration; it lands right after
+	// the search tool in catalog registration order.
+	names = append(names, "run_command", "web_fetch")
 	if tools.GitAvailable() {
 		names = append(names, "git_readonly")
 	}
@@ -3342,9 +3345,9 @@ func expectedExploreToolNames() []string {
 
 func expectedPlanToolNames() []string {
 	names := expectedExploreToolNames()
-	// The realized tool list follows catalog registration order, where the
-	// main-registered tools (update_todos, delegate, background_jobs, record_plan,
-	// request_implementation) come after the built-in catalog tools.
+	// plan's realized tool list is the shared inspection set (which now includes
+	// run_command) followed by the main-registered tools (update_todos, delegate,
+	// background_jobs, record_plan, request_implementation) in catalog order.
 	return append(names, "write_tmp_file", "update_todos", "delegate", "background_jobs", "record_plan", "request_implementation")
 }
 

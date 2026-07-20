@@ -1381,7 +1381,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   sorted output is truncated to the first `listDirCap` (1000) with a
   `[truncated: showing first 1000 of <N> matches; narrow the pattern or root]`
   marker (the total gains a `+` when the scan cap was hit).
-- Available to the default `auto`/`independent` agents and the shared read-only
+- Available to the default `auto`/`independent` agents and the shared
   inspection set used by `explore` and `plan`.
 
 ### 9.3 `grep` and optional `rg`
@@ -2525,13 +2525,18 @@ reviewer, or the wide-open default without separate binaries.
 - **Built-ins:** `auto` (all available built-in tools plus discovered MCP tools,
   including `record_plan`, `delegate` and background job tools; its
   `prompts/agents/auto.txt` is a one-byte file — a single newline — that trims to
-  empty, so it contributes no prompt body), `explore` (read-only `read_file`,
-  `list_dir`, `glob`, configured search tool(s), `web_fetch`, optional `git_readonly`, and
-  read-only MCP tools; no mutation, implementation handoff, todos, background jobs,
-  or delegation; prompt in `prompts/agents/explore.txt`), `plan` (the shared
+  empty, so it contributes no prompt body), `explore` (the shared inspection
+  tools — `read_file`, `list_dir`, `glob`, configured search tool(s),
+  `run_command`, `web_fetch`, optional `git_readonly` — and read-only MCP tools;
+  no file mutation, implementation handoff, todos, background jobs, or
+  delegation; prompt in `prompts/agents/explore.txt`), `plan` (the shared
   inspection tools, read-only MCP tools, `write_tmp_file`, `record_plan`,
-  `request_implementation`, `update_todos`, `delegate`, and background job tools,
-  plus `prompts/agents/plan.txt`), and `independent` (all available built-in tools
+  `request_implementation`, `update_todos`, `delegate`, and background job
+  tools, plus `prompts/agents/plan.txt`; both `explore` and `plan` gain
+  `run_command` from the shared inspection set so they can explore via external
+  tools (`gh`, builds, screenshots, live apps) but have no first-class
+  file-mutation tools, keeping "don't modify the project" a prompt-level
+  contract), and `independent` (all available built-in tools
   plus discovered MCP tools, including `record_plan`, `delegate` and background
   job tools, a complete-without-asking prompt from
   `prompts/agents/independent.txt`). `auto`/`independent` also expose
@@ -2576,8 +2581,8 @@ reviewer, or the wide-open default without separate binaries.
   <agent>` argument — optionally swaps the model, then reseeds a clean transcript
   with a pointer to the recorded plan plus the brief, clears the planning todos,
   and submits a fixed implementation-start prompt. Reusing the same in-session
-  switch (not `delegate`) avoids the `delegate` subset gate, so a read-only
-  `plan` agent can hand off to a
+  switch (not `delegate`) avoids the `delegate` subset gate, so the
+  `plan` agent — which has no file-mutation tools — can hand off to a
   write-capable implementation agent. Interactive REPL only.
 - **Tool gating** is the harness's one departure from the no-sandbox stance (§2): the
   agent's tool set is realized by `tools.Registry.Subset`, building a registry that

@@ -49,7 +49,10 @@ func TestBuiltins(t *testing.T) {
 	if explore.MCPTools != MCPToolsReadOnly {
 		t.Errorf("explore MCPTools = %q, want %q", explore.MCPTools, MCPToolsReadOnly)
 	}
-	for _, forbidden := range []string{"write_file", "edit", "run_command", "record_plan", "request_implementation", "update_todos", "delegate", "background_jobs"} {
+	if !slices.Contains(explore.AllowedTools, "run_command") {
+		t.Errorf("explore tools missing run_command: %v", explore.AllowedTools)
+	}
+	for _, forbidden := range []string{"write_file", "edit", "apply_patch", "record_plan", "request_implementation", "update_todos", "delegate", "background_jobs"} {
 		if slices.Contains(explore.AllowedTools, forbidden) {
 			t.Errorf("explore tools unexpectedly include %q: %v", forbidden, explore.AllowedTools)
 		}
@@ -76,6 +79,14 @@ func TestBuiltins(t *testing.T) {
 	}
 	if plan.MCPTools != MCPToolsReadOnly {
 		t.Errorf("plan MCPTools = %q, want %q", plan.MCPTools, MCPToolsReadOnly)
+	}
+	if !slices.Contains(plan.AllowedTools, "run_command") {
+		t.Errorf("plan tools missing run_command: %v", plan.AllowedTools)
+	}
+	for _, forbidden := range []string{"edit", "write_file", "apply_patch"} {
+		if slices.Contains(plan.AllowedTools, forbidden) {
+			t.Errorf("plan tools unexpectedly include file-mutation tool %q: %v", forbidden, plan.AllowedTools)
+		}
 	}
 }
 
@@ -290,6 +301,22 @@ func TestPlanToolsIncludeRecordPlanAndRequestImplementation(t *testing.T) {
 	for _, name := range []string{"record_plan", "request_implementation"} {
 		if !slices.Contains(pt, name) {
 			t.Errorf("plan tools missing %q: %v", name, pt)
+		}
+	}
+}
+
+// plan (and explore) gain run_command via the shared inspection set so they can
+// explore via external tools (gh, builds, screenshots, live apps) but keep no
+// first-class file-mutation tools, so "don't modify the project" remains a
+// prompt-level contract.
+func TestPlanToolsAllowRunCommandButNotFileMutation(t *testing.T) {
+	pt := planTools(Options{})
+	if !slices.Contains(pt, "run_command") {
+		t.Errorf("plan tools missing run_command: %v", pt)
+	}
+	for _, forbidden := range []string{"edit", "write_file", "apply_patch"} {
+		if slices.Contains(pt, forbidden) {
+			t.Errorf("plan tools unexpectedly include %q: %v", forbidden, pt)
 		}
 	}
 }

@@ -102,7 +102,7 @@ func BuiltinsWithOptions(opts Options) map[string]Definition {
 		},
 		"plan": {
 			Name:         "plan",
-			Description:  "Collaborative read-only implementation planning.",
+			Description:  "Collaborative implementation planning; explores freely (including running commands) but does not modify the project.",
 			AllowedTools: planTools(opts),
 			MCPTools:     MCPToolsReadOnly,
 			Prompt:       planPrompt,
@@ -113,7 +113,11 @@ func BuiltinsWithOptions(opts Options) map[string]Definition {
 func inspectionTools(opts Options) []string {
 	names := []string{"read_file", "list_dir", "glob"}
 	names = append(names, searchToolNames(opts.SearchTools)...)
-	names = append(names, "web_fetch")
+	// run_command widens exploration (gh, builds, screenshots, live apps) for the
+	// read-only agents (explore, plan). Neither has first-class file-mutation
+	// tools (edit, write_file, apply_patch), so "don't modify the project" stays
+	// a prompt-level contract, not an enforced gate.
+	names = append(names, "run_command", "web_fetch")
 	if tools.GitAvailable() {
 		names = append(names, "git_readonly")
 	}
@@ -121,6 +125,9 @@ func inspectionTools(opts Options) []string {
 }
 
 func planTools(opts Options) []string {
+	// run_command comes from the shared inspection set; plan adds no first-class
+	// file-mutation tools (edit, write_file, apply_patch), so "don't modify the
+	// project" stays a prompt-level contract (prompts/agents/plan.txt).
 	return append(inspectionTools(opts), "write_tmp_file", "record_plan", "request_implementation", "update_todos", "delegate", "background_jobs")
 }
 
