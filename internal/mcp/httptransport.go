@@ -365,10 +365,7 @@ func (t *HTTPTransport) applyHeaders(ctx context.Context, req *http.Request, ses
 
 func (t *HTTPTransport) traceContext(ctx context.Context) context.Context {
 	if t.tracer != nil {
-		ctx, _, err := t.tracer.Start(ctx)
-		if err == nil {
-			return ctx
-		}
+		ctx, _, _ = t.tracer.Start(ctx)
 		return ctx
 	}
 	parent, ok := tracing.TraceFromContext(ctx)

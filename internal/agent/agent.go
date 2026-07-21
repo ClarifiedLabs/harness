@@ -354,9 +354,6 @@ func (a *Agent) window() int {
 	if configured <= 0 {
 		configured = a.registry.ContextWindow(a.model)
 	}
-	if a.contextWindow > 0 {
-		configured = a.contextWindow
-	}
 	if a.observedContextWindow > 0 && a.observedContextWindow < configured {
 		return a.observedContextWindow
 	}

@@ -624,7 +624,7 @@ func prepareSummaryMessages(msgs []llm.Message, maxToolResultBytes int) []llm.Me
 				out[i].Content[j].ResultText = b.ResultText[:maxToolResultBytes] +
 					fmt.Sprintf("\n[summary input truncated: showing first %d of %d bytes; raw content archived if compaction succeeds]", maxToolResultBytes, len(b.ResultText))
 			case b.Kind == llm.BlockToolUse && len(b.ToolInput) > maxToolResultBytes:
-				out[i].Content[j].ToolInput = summaryToolInput(b.ToolInput, maxToolResultBytes)
+				out[i].Content[j].ToolInput, _ = shortenedToolInput(b.ToolInput, maxToolResultBytes)
 			case b.Kind == llm.BlockImage && len(b.ImageData) > maxToolResultBytes:
 				out[i].Content[j] = llm.ContentBlock{
 					Kind: llm.BlockText,
@@ -633,11 +633,6 @@ func prepareSummaryMessages(msgs []llm.Message, maxToolResultBytes int) []llm.Me
 			}
 		}
 	}
-	return out
-}
-
-func summaryToolInput(raw json.RawMessage, maxBytes int) json.RawMessage {
-	out, _ := shortenedToolInput(raw, maxBytes)
 	return out
 }
 
