@@ -271,8 +271,11 @@ func TestDelegateRunsChildAgentAndReturnsFinalReport(t *testing.T) {
 	if len(fp.Requests) != 1 {
 		t.Fatalf("child requests = %d, want 1", len(fp.Requests))
 	}
-	if fp.Requests[0].CacheAffinityID != "parent-cache" {
-		t.Fatalf("child cache affinity = %q, want parent-cache", fp.Requests[0].CacheAffinityID)
+	// A delegate must route to its own cache shard, not its parent's: its
+	// system prompt and tool subset differ, so it never reads the parent's
+	// cached prefix, and sharing the key would only thrash the shared shard.
+	if got := fp.Requests[0].CacheAffinityID; got == "parent-cache" || got == "" || !strings.HasPrefix(got, "harness-cache-") {
+		t.Fatalf("child cache affinity = %q, want a distinct harness-cache-* key", got)
 	}
 	if len(fp.Requests) != 1 {
 		t.Fatalf("child requests = %d, want 1", len(fp.Requests))
@@ -571,8 +574,34 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 	if snapshot.ParentChildID != "child-1" || snapshot.SessionPath != "session" {
 		t.Fatalf("child runtime lineage = parent %q session %q", snapshot.ParentChildID, snapshot.SessionPath)
 	}
-	if snapshot.CacheAffinityID != "parent-cache" {
-		t.Fatalf("child runtime cache affinity = %q, want parent-cache", snapshot.CacheAffinityID)
+	if want := childCacheAffinityID("parent-cache", "child-1"); snapshot.CacheAffinityID != want {
+		t.Fatalf("child runtime cache affinity = %q, want %q", snapshot.CacheAffinityID, want)
+	}
+}
+
+func TestChildCacheAffinityID(t *testing.T) {
+	parent := "parent-cache"
+	a := childCacheAffinityID(parent, "delegate_1")
+	b := childCacheAffinityID(parent, "delegate_2")
+
+	if a == parent {
+		t.Errorf("child key %q must differ from the parent key", a)
+	}
+	if a == b {
+		t.Errorf("sibling delegates must get distinct keys, both %q", a)
+	}
+	if !strings.HasPrefix(a, "harness-cache-") {
+		t.Errorf("child key %q must keep the harness-cache- prefix", a)
+	}
+	// Deterministic: the same child keeps one key across its whole run.
+	if again := childCacheAffinityID(parent, "delegate_1"); again != a {
+		t.Errorf("child key not stable: %q then %q", a, again)
+	}
+	// An empty parent key still yields per-child-distinct values.
+	emptyA := childCacheAffinityID("", "delegate_1")
+	emptyB := childCacheAffinityID("", "delegate_2")
+	if emptyA == emptyB || emptyA == "" {
+		t.Errorf("empty-parent child keys must be distinct and non-empty: %q, %q", emptyA, emptyB)
 	}
 }
 

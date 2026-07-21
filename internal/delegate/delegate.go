@@ -5,6 +5,8 @@ package delegate
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -373,7 +375,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		CompactToolResultMaxBytes: r.opts.CompactToolResultMaxBytes,
 		Now:                       r.opts.Now,
 	})
-	child.SetCacheAffinityID(runtime.CacheAffinityID)
+	child.SetCacheAffinityID(childCacheAffinityID(runtime.CacheAffinityID, childID))
 	child.SetSystem(launch.System)
 
 	sink := newChildSink(childDir, childTodos, hasTodoTool)
@@ -452,7 +454,7 @@ func (r *Runner) childTools(parent Runtime, launch Launch, childID string, todos
 		Agent:             launch.Agent,
 		ToolNames:         names,
 		SessionPath:       parent.SessionPath,
-		CacheAffinityID:   parent.CacheAffinityID,
+		CacheAffinityID:   childCacheAffinityID(parent.CacheAffinityID, childID),
 		ParentChildID:     childID,
 		Depth:             parent.Depth + 1,
 		MaxPromptTokens:   parent.MaxPromptTokens,
@@ -683,6 +685,20 @@ func schema(agents []AgentCandidate) json.RawMessage {
 	}
 	b, _ := json.Marshal(body)
 	return b
+}
+
+// childCacheAffinityID derives a prompt-cache affinity key for a delegate child
+// that is distinct from its parent's and from sibling delegates, yet stable for
+// the child's whole multi-turn run. A child has a different system prompt and
+// tool subset than its parent, so it never reads the parent's cached prefix;
+// sharing the parent's routing key would only risk thrashing the same cache
+// shard when a parent and concurrent delegates interleave requests. Deriving
+// from the (fixed) childID keeps every turn of one child on the same key while
+// routing each child to its own shard. The empty parent key still yields a
+// per-child-distinct value.
+func childCacheAffinityID(parentID, childID string) string {
+	sum := sha256.Sum256([]byte(parentID + "\x00" + childID))
+	return "harness-cache-" + hex.EncodeToString(sum[:])
 }
 
 func nextChildID(kind string) string {

@@ -535,8 +535,13 @@ local keys. `Request.ProxySessionID` isolates Responses continuation state and
 cached Responses WebSocket providers; transcript rewrites, branch navigation,
 and model/agent/tool changes rotate it. `Request.CacheAffinityID` is the longer
 lived cache-routing identity: it is persisted in `state.json`, restored on
-resume, preserved across those continuation resets, and inherited by delegate
-agents. A genuinely new logical session (`/clear`, clone/fork extraction, or a
+resume, and preserved across those continuation resets. Delegate agents derive
+their own distinct affinity key from the parent's and their fixed child id
+(`harness-cache-` + `sha256(parentID + "\x00" + childID)`), so each child routes
+to its own cache shard — a child's system prompt and tool subset differ from the
+parent's, so it never reads the parent's cached prefix, and sharing the key would
+only thrash the shared shard under concurrency. A genuinely new logical session
+(`/clear`, clone/fork extraction, or a
 new process session) rotates both keys.
 
 Before calling any concrete provider, the proxy strips both raw keys and sets
