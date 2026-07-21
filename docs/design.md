@@ -1861,6 +1861,13 @@ backoff allows.
 - Available to every default agent (in `defaultTools`), so plans are a first-class
   artifact even outside plan mode. The session directory is read at call time, so
   it errors clearly when none exists (one-shot mode).
+- The REPL surfaces the latest recorded plan's path to the user, mirroring the
+  `update_todos` status (§9.13): the sink prints `plan.RenderLatest` to `Errw`
+  immediately after a successful `record_plan` result and again before the
+  per-prompt usage line (deduped so the idle prompt does not reprint it). It is
+  display-only — re-rendered from the shared store, never part of the model's tool
+  result or context — so the user always learns where the plan was written even if
+  the model does not mention it.
 
 ### 9.18 `request_implementation` (`internal/plan` + `internal/tools`)
 

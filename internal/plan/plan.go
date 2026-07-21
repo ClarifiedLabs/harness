@@ -235,6 +235,22 @@ func Render(p Plan) string {
 	return b.String()
 }
 
+// RenderLatest renders a short user-facing status line naming the most recently
+// recorded plan's file, or "" when no plan with a path has been recorded. The
+// REPL prints it after record_plan and at the prompt boundary (mirroring the
+// todo status, design §9.17); it is display-only and never part of the model's
+// tool result or context.
+func RenderLatest(items []Plan) string {
+	if len(items) == 0 {
+		return ""
+	}
+	p := items[len(items)-1]
+	if p.Path == "" {
+		return ""
+	}
+	return fmt.Sprintf("Plan recorded: %s", p.Path)
+}
+
 // nextIndex returns the next 1-based number for a *.plan.md file under base.
 func nextIndex(base string) (int, error) {
 	entries, err := os.ReadDir(base)

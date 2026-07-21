@@ -23,7 +23,7 @@ This page is the operational overview.
 | `update_todos` | replace the current todo list for multi-step work |
 | `delegate` | run a configured child agent and return its final report |
 | `background_jobs` | list, inspect, or cancel process-local background jobs |
-| `record_plan` | persist a self-contained markdown implementation plan in the session |
+| `record_plan` | persist a self-contained markdown implementation plan in the session; the user is shown the plan file path |
 | `request_implementation` | request an approved handoff of the latest recorded plan (plan agent only) |
 
 `apply_patch` (Codex-format add/delete/update/move patches) is no longer in the

@@ -55,6 +55,26 @@ func TestRecordPlanWritesMarkdownFile(t *testing.T) {
 	}
 }
 
+func TestRenderLatest(t *testing.T) {
+	if got := RenderLatest(nil); got != "" {
+		t.Fatalf("RenderLatest(nil) = %q, want empty", got)
+	}
+	if got := RenderLatest([]Plan{{Title: "no path"}}); got != "" {
+		t.Fatalf("RenderLatest with no recorded path = %q, want empty", got)
+	}
+	items := []Plan{
+		{Title: "first", Path: "/a/0001-first.plan.md"},
+		{Title: "second", Path: "/a/0002-second.plan.md"},
+	}
+	got := RenderLatest(items)
+	if !strings.Contains(got, "/a/0002-second.plan.md") {
+		t.Fatalf("RenderLatest = %q, want the latest plan path", got)
+	}
+	if strings.Contains(got, "0001-first") {
+		t.Fatalf("RenderLatest = %q, should name only the latest plan", got)
+	}
+}
+
 func TestRecordPlanRequiresTitleAndBody(t *testing.T) {
 	dir := t.TempDir()
 	tool := NewTool(NewStore(), func() string { return dir })

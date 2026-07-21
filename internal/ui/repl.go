@@ -144,6 +144,11 @@ type App struct {
 	// Plans holds the recorded plans (the record_plan tool's store), persisted
 	// in state.json and reset on /clear. nil disables persistence.
 	Plans *plan.Store
+	// The REPL prints the latest recorded plan's path after record_plan and again
+	// before the per-prompt usage line (mirroring the todo status). These fields
+	// let the idle prompt avoid printing that same plan line again.
+	planPromptStatusBeforeUsage       bool
+	planPromptStatusBeforeUsagePrompt int
 	// Handoff carries a pending plan->implementation handoff requested by the
 	// request_implementation tool, consumed at the prompt boundary. nil disables.
 	Handoff *plan.Pending
@@ -836,6 +841,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			app.pollBackgroundNotices()
 			if !app.todoPromptStatusPrintedBeforeUsageForPrompt(app.PromptNumber) {
 				app.printTodoPromptStatus()
+			}
+			if !app.planPromptStatusPrintedBeforeUsageForPrompt(app.PromptNumber) {
+				app.printPlanStatus()
 			}
 			if !usePromptEditor || plainPromptRead {
 				fmt.Fprint(app.Errw, prompt)
@@ -3268,6 +3276,32 @@ func (app *App) todoPromptStatusPrintedBeforeUsageForPrompt(turn int) bool {
 	return app.todoPromptStatusBeforeUsage && app.todoPromptStatusBeforeUsagePrompt == turn
 }
 
+// printPlanStatus prints a one-line pointer to the most recently recorded plan's
+// file (mirroring the todo status). It prints only when the visible agent has
+// record_plan and a plan with a path has been recorded, so the user always knows
+// where the plan was written without the model having to say so. It is
+// display-only and never part of the model's tool result or context.
+func (app *App) printPlanStatus() bool {
+	if app.Plans == nil || !app.agentHasTool("record_plan") {
+		return false
+	}
+	line := plan.RenderLatest(app.Plans.Snapshot())
+	if line == "" {
+		return false
+	}
+	fmt.Fprintln(app.Errw, line)
+	return true
+}
+
+func (app *App) markPlanPromptStatusPrintedBeforeUsage(turn int) {
+	app.planPromptStatusBeforeUsage = true
+	app.planPromptStatusBeforeUsagePrompt = turn
+}
+
+func (app *App) planPromptStatusPrintedBeforeUsageForPrompt(turn int) bool {
+	return app.planPromptStatusBeforeUsage && app.planPromptStatusBeforeUsagePrompt == turn
+}
+
 func (app *App) stopBackgroundJobs() {
 	if app.Background != nil {
 		app.Background.Shutdown()
@@ -3657,6 +3691,8 @@ type accumulatingSink struct {
 	prompt                     int
 	printTodoUpdate            bool
 	printTodoPromptBeforeUsage bool
+	printPlanUpdate            bool
+	printPlanPromptBeforeUsage bool
 	reasoningOutput            bool
 	pending                    map[string]llm.ToolCall
 	turn                       int
@@ -3672,6 +3708,8 @@ func newREPLSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 	s := newAccumulatingSink(r, app, prompt)
 	s.printTodoUpdate = true
 	s.printTodoPromptBeforeUsage = true
+	s.printPlanUpdate = true
+	s.printPlanPromptBeforeUsage = true
 	s.reasoningOutput = true
 	return s
 }
@@ -3787,6 +3825,9 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	if s.printTodoUpdate && call.Name == "update_todos" && !res.IsError {
 		s.app.printTodoUpdateStatus()
 	}
+	if s.printPlanUpdate && call.Name == "record_plan" && !res.IsError {
+		s.app.printPlanStatus()
+	}
 	s.app.recordEvent(session.Event{Type: session.EventToolResult, Prompt: s.prompt, Turn: s.turn, ToolID: res.ForID, Tool: call.Name, Display: line})
 }
 
@@ -3893,6 +3934,14 @@ func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
 		s.r.finishAssistantLine()
 		if s.app.printTodoPromptStatus() {
 			s.app.markTodoPromptStatusPrintedBeforeUsage(s.prompt)
+		}
+	}
+	if s.printPlanPromptBeforeUsage {
+		s.r.StopProgress()
+		s.r.flushToolUseStarts()
+		s.r.finishAssistantLine()
+		if s.app.printPlanStatus() {
+			s.app.markPlanPromptStatusPrintedBeforeUsage(s.prompt)
 		}
 	}
 	s.r.SetPromptCost(cost, costKnown)
