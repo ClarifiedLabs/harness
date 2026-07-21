@@ -470,7 +470,7 @@ func TestBuildRequestNoSystemOmitsSystemMessage(t *testing.T) {
 	}
 }
 
-func TestBuildRequestContextIsSystemMessage(t *testing.T) {
+func TestBuildRequestContextIsTrailingSystemMessage(t *testing.T) {
 	req := llm.Request{
 		Model:          "gpt-5.4",
 		System:         "system prompt",
@@ -481,18 +481,61 @@ func TestBuildRequestContextIsSystemMessage(t *testing.T) {
 		}},
 	}
 	w := buildRequest(req, 0, 0)
-	if len(w.Messages) != 2 {
-		t.Fatalf("messages = %d, want system + user: %+v", len(w.Messages), w.Messages)
+	if len(w.Messages) != 3 {
+		t.Fatalf("messages = %d, want system + user + trailing context: %+v", len(w.Messages), w.Messages)
 	}
+	// The leading system message must carry only the stable system prompt.
 	if w.Messages[0].Role != "system" {
 		t.Fatalf("first role = %q, want system", w.Messages[0].Role)
 	}
-	content, ok := w.Messages[0].Content.(string)
-	if !ok || !strings.Contains(content, "system prompt") || !strings.Contains(content, "background complete") {
-		t.Fatalf("system content = %#v, want system prompt and request context", w.Messages[0].Content)
+	if got, ok := w.Messages[0].Content.(string); !ok || got != "system prompt" {
+		t.Fatalf("system content = %#v, want exactly the stable system prompt", w.Messages[0].Content)
 	}
 	if w.Messages[1].Role != "user" {
-		t.Fatalf("last role = %q, want original user prompt", w.Messages[1].Role)
+		t.Fatalf("middle role = %q, want original user prompt", w.Messages[1].Role)
+	}
+	// Volatile context rides last so the prefix above it stays cacheable.
+	last := w.Messages[len(w.Messages)-1]
+	if last.Role != "system" {
+		t.Fatalf("last role = %q, want trailing system context", last.Role)
+	}
+	if got, ok := last.Content.(string); !ok || !strings.Contains(got, "background complete") {
+		t.Fatalf("last content = %#v, want the request context", last.Content)
+	}
+}
+
+func TestBuildRequestContextKeepsPrefixStable(t *testing.T) {
+	messages := []llm.Message{{
+		Role:    llm.RoleUser,
+		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "work on it"}},
+	}}
+	base := llm.Request{Model: "gpt-5.4", System: "system prompt", Messages: messages}
+
+	without := buildRequest(base, 0, 0)
+
+	withCtx := base
+	withCtx.RequestContext = []string{"todo: ship it"}
+	withContext := buildRequest(withCtx, 0, 0)
+
+	// The cache anchor (leading system message) must be byte-identical whether
+	// or not volatile request context is present. Compare the serialized wire
+	// form, since that is what the provider hashes for its prefix cache.
+	marshalMsg := func(m wireMessage) string {
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("marshal message: %v", err)
+		}
+		return string(b)
+	}
+	if got, want := marshalMsg(withContext.Messages[0]), marshalMsg(without.Messages[0]); got != want {
+		t.Fatalf("leading system message changed with request context:\n without: %s\n with:    %s", want, got)
+	}
+	// And the transcript prefix (system + user) must match too.
+	if len(without.Messages) != 2 || len(withContext.Messages) != 3 {
+		t.Fatalf("message counts = %d, %d; want 2 and 3", len(without.Messages), len(withContext.Messages))
+	}
+	if got, want := marshalMsg(withContext.Messages[1]), marshalMsg(without.Messages[1]); got != want {
+		t.Fatalf("transcript message changed with request context:\n without: %s\n with:    %s", want, got)
 	}
 }
 
@@ -510,12 +553,18 @@ func TestBuildRequestContextDoesNotFollowToolResult(t *testing.T) {
 	if len(w.Messages) == 0 {
 		t.Fatal("messages is empty")
 	}
-	if w.Messages[0].Role != "system" {
-		t.Fatalf("first role = %q, want request context as system message", w.Messages[0].Role)
-	}
+	// The request context is appended as a trailing system message after the
+	// tool result, never interleaved into the cached transcript prefix.
 	last := w.Messages[len(w.Messages)-1]
-	if last.Role != "tool" || last.ToolCallID != "call_1" || last.Content != "ok" {
-		t.Fatalf("last message = %+v, want tool result", last)
+	if last.Role != "system" {
+		t.Fatalf("last role = %q, want trailing system context", last.Role)
+	}
+	if got, ok := last.Content.(string); !ok || !strings.Contains(got, "todo context") {
+		t.Fatalf("last content = %#v, want the request context", last.Content)
+	}
+	prev := w.Messages[len(w.Messages)-2]
+	if prev.Role != "tool" || prev.ToolCallID != "call_1" || prev.Content != "ok" {
+		t.Fatalf("second-to-last message = %+v, want tool result", prev)
 	}
 }
 

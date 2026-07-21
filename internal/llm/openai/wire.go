@@ -222,16 +222,23 @@ func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit i
 		}
 	}
 
-	system := req.System
-	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
-		system = appendSystemContext(system, contextText)
-	}
-	if system != "" {
-		w.Messages = append(w.Messages, wireMessage{Role: "system", Content: system})
+	// The system message carries only the stable system prompt. Volatile
+	// per-request context is appended as a trailing system message after the
+	// transcript (below) so the leading system+tools+transcript prefix stays
+	// byte-stable and cacheable — Chat Completions caches the longest stable
+	// prefix from messages[0], so folding changing context into the system
+	// message would re-bill the whole conversation every turn (matches the
+	// Responses/Anthropic placement).
+	if req.System != "" {
+		w.Messages = append(w.Messages, wireMessage{Role: "system", Content: req.System})
 	}
 
 	for _, m := range req.Messages {
 		w.Messages = append(w.Messages, buildMessages(m)...)
+	}
+
+	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
+		w.Messages = append(w.Messages, wireMessage{Role: "system", Content: contextText})
 	}
 
 	for _, t := range req.Tools {
@@ -293,16 +300,6 @@ func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
 		}
 	}
 	return wireTool{}, false
-}
-
-func appendSystemContext(system, contextText string) string {
-	if contextText == "" {
-		return system
-	}
-	if system == "" {
-		return contextText
-	}
-	return system + "\n\n" + contextText
 }
 
 func openRouterReasoning(reasoning llm.ReasoningConfig) *wireReasoning {

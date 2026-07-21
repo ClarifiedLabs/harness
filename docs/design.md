@@ -343,13 +343,13 @@ type ToolSchema struct {
 }
 ```
 
-`RequestContext` is request-only instruction context: Chat Completions merges it
-into the leading system message, Anthropic adds it as an uncached system text
-block, and Responses adds it as a late `role:"developer"` input item immediately
-before the current user message or trailing tool-call/output group. Responses
-therefore keeps top-level `instructions` stable for prefix caching. Fresh
-todo/background/hook context applies to the current request without looking like
-the latest user prompt or becoming part of the persisted transcript.
+`RequestContext` is request-only instruction context: Chat Completions appends it
+as a trailing system message after the transcript, Anthropic adds it as an
+uncached system text block, and Responses adds it as a late `role:"developer"`
+input item immediately before the current user message or trailing tool-call/output
+group. All three keep the stable system+tools+transcript prefix intact for prefix
+caching. Fresh todo/background/hook context applies to the current request without
+looking like the latest user prompt or becoming part of the persisted transcript.
 Responses streams surface `response.id` on terminal `EventDone.ResponseID`; the
 agent stores that with the local transcript anchor for optional
 `previous_response_id` continuation.
