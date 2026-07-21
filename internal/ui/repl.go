@@ -431,8 +431,15 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			input, ok, err := reader.read(req)
 			inputs <- replReadResult{input: input, ok: ok, err: err}
 			if !ok {
-				return
+				break
 			}
+		}
+		// The reader has ended (EOF or a terminal read error). Keep draining
+		// readReq and replying with an inert ended result so a requestRead that
+		// races the end of input does not block forever on an orphaned channel.
+		// The main loop treats ended results as no-ops and exits via inputEnded.
+		for range readReq {
+			inputs <- replReadResult{input: replInput{ended: true}}
 		}
 	}()
 	defer close(readReq)
@@ -732,6 +739,10 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 								return "", context.Canceled
 							case res := <-inputs:
 								readPending = false
+								if res.input.ended {
+									inputEnded = true
+									return "", io.EOF
+								}
 								if !res.ok {
 									setInputEnded(res.err)
 									if res.err != nil {
@@ -768,6 +779,10 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				}
 			case res := <-inputs:
 				readPending = false
+				if res.input.ended {
+					inputEnded = true
+					continue
+				}
 				if !res.ok {
 					setInputEnded(res.err)
 					continue
@@ -861,6 +876,10 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			return finish(ExitInterrupt)
 		case res := <-inputs:
 			readPending = false
+			if res.input.ended {
+				inputEnded = true
+				continue
+			}
 			if plainPromptRead {
 				plainPromptRead = false
 				enableIdlePromptTerm()
@@ -960,6 +979,10 @@ type replInput struct {
 	// deposit marks an accumulated during-prompt buffer that did not end with Enter;
 	// it is handed back as editable prefill in the next prompt.
 	deposit bool
+	// ended marks an inert reply the read goroutine sends after the reader has
+	// ended (EOF or a terminal read error) so a racing requestRead does not block
+	// on an orphaned channel. The main loop ignores these and exits via inputEnded.
+	ended bool
 }
 
 type replReadResult struct {

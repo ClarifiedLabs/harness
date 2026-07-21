@@ -3973,6 +3973,9 @@ func TestREPLDuringPromptSteerPromptHookBlockSkipsInjection(t *testing.T) {
 
 // With steering disabled (app.Steer nil), during-prompt Enter keeps the legacy
 // behavior: input is queued and runs as the next prompt after the prompt ends.
+// This test also exercises the EOF handling: after the queued prompt runs, EOF
+// on the input pipe must cause a clean exit (not a deadlock on the orphaned
+// readReq channel).
 func TestREPLDuringPromptNoSteerQueuesForNextTurn(t *testing.T) {
 	var out, errw lockedBuffer
 	inPrompt := make(chan struct{})
