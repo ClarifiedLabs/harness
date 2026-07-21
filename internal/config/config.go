@@ -1318,23 +1318,6 @@ func resolveFloat(flagSet bool, flagVal float64, envVal string, fileVal *float64
 	return def
 }
 
-func resolveIntPtr(flagSet bool, flagVal int, envVal string, fileVal *int) *int {
-	if flagSet {
-		v := flagVal
-		return &v
-	}
-	if envVal != "" {
-		if n, err := strconv.Atoi(envVal); err == nil {
-			return &n
-		}
-	}
-	if fileVal != nil {
-		v := *fileVal
-		return &v
-	}
-	return nil
-}
-
 func intValue(v *int, def int) int {
 	if v == nil {
 		return def
@@ -1428,23 +1411,6 @@ func resolveBool(flagSet bool, flagVal bool, envVal string, fileVal *bool, def b
 		return *fileVal
 	}
 	return def
-}
-
-func resolveBoolPtr(flagSet bool, flagVal bool, envVal string, fileVal *bool) *bool {
-	if flagSet {
-		v := flagVal
-		return &v
-	}
-	if envVal != "" {
-		if b, err := strconv.ParseBool(envVal); err == nil {
-			return &b
-		}
-	}
-	if fileVal != nil {
-		v := *fileVal
-		return &v
-	}
-	return nil
 }
 
 // SplitProviderModel splits a "provider:model" string into its parts. The

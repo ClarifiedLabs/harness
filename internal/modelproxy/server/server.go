@@ -2004,24 +2004,6 @@ func providerResponsesWebSocket(pc llm.ProviderConfig) bool {
 	return pc.Auth != nil && strings.EqualFold(strings.TrimSpace(pc.Auth.Type), auth.TypeCodexOAuth)
 }
 
-func providerConfigByName(providers []llm.ProviderConfig, name string) (llm.ProviderConfig, bool) {
-	for _, pc := range providers {
-		if pc.Name == name {
-			return pc, true
-		}
-	}
-	return llm.ProviderConfig{}, false
-}
-
-func providerConfigModel(pc llm.ProviderConfig, model string) (llm.ModelEntry, bool) {
-	for _, entry := range pc.Models {
-		if entry.Name == model {
-			return entry, true
-		}
-	}
-	return llm.ModelEntry{}, false
-}
-
 func modelEntryReasoning(m llm.ModelEntry) *llm.ReasoningInfo {
 	if m.Reasoning == nil && len(m.ReasoningOptions) == 0 {
 		return nil

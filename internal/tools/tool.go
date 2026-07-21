@@ -296,13 +296,6 @@ func normalizeSearchTools(mode string) string {
 	}
 }
 
-// RegisterExecTools registers the process/network tools (run_command, git,
-// web_fetch) on r, in that order. It is the only exported path to these tools;
-// their types are unexported by design.
-func RegisterExecTools(r *Registry) {
-	registerExecTools(r, nil, Options{})
-}
-
 func registerExecTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 	r.Register(runCommand{
 		background:        opts.Background,
@@ -319,14 +312,8 @@ func registerExecTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 
 // Default returns a Registry preloaded with every built-in tool.
 func Default() *Registry {
-	r, _ := DefaultWithDiagnostics()
+	r, _ := DefaultWithOptions(Options{})
 	return r
-}
-
-// DefaultWithDiagnostics returns the default tool registry plus diagnostics for
-// optional tools that were not registered.
-func DefaultWithDiagnostics() (*Registry, []DisabledTool) {
-	return DefaultWithOptions(Options{})
 }
 
 // DefaultWithOptions returns the default tool registry with configurable result

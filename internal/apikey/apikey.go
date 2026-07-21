@@ -158,16 +158,6 @@ func authorizeNameAt(entries []Entry, r *http.Request, now time.Time) (string, b
 	return entry.Name, true
 }
 
-// authorizeName reports whether the request presents a valid API key and, when
-// it does, returns the matched key's stored Name. It mirrors Authorize but
-// reveals which key authorized the request so handlers can bucket metrics.
-func (s Store) authorizeName(r *http.Request) (string, bool) {
-	if !s.IsRequired() {
-		return "", false
-	}
-	return authorizeNameAt(s.Entries, r, time.Now())
-}
-
 // bearerKey extracts the bearer token from r. It returns "", false when no
 // Authorization header is present or the scheme is not Bearer.
 func bearerKey(r *http.Request) (string, bool) {

@@ -78,24 +78,6 @@ func (c *Catalog) Provider(id string) (Provider, bool) {
 	return Provider{}, false
 }
 
-// ProviderByAPI returns the provider whose API field matches baseURL after
-// trimming trailing slashes.
-func (c *Catalog) ProviderByAPI(baseURL string) (Provider, bool) {
-	if c == nil {
-		return Provider{}, false
-	}
-	baseURL = normalizeURL(baseURL)
-	if baseURL == "" {
-		return Provider{}, false
-	}
-	for _, p := range c.Providers {
-		if normalizeURL(p.API) == baseURL {
-			return p, true
-		}
-	}
-	return Provider{}, false
-}
-
 // ProvidersList returns provider entries sorted by id.
 func (c *Catalog) ProvidersList() []Provider {
 	if c == nil {

@@ -836,10 +836,6 @@ func (a *Agent) countInputTokens(ctx context.Context, req llm.Request) (int, boo
 	return 0, false
 }
 
-func (a *Agent) payloadMessages() ([]llm.Message, bool) {
-	return a.payloadMessagesIn(a.transcript)
-}
-
 func (a *Agent) payloadMessagesIn(transcript []llm.Message) ([]llm.Message, bool) {
 	if !a.validResponseStateFor(len(transcript)) {
 		return transcript, false
@@ -847,19 +843,11 @@ func (a *Agent) payloadMessagesIn(transcript []llm.Message) ([]llm.Message, bool
 	return transcript[a.responseState.AnchorMessages:], true
 }
 
-func (a *Agent) validResponseState() bool {
-	return a.validResponseStateFor(len(a.transcript))
-}
-
 func (a *Agent) validResponseStateFor(messageCount int) bool {
 	return a.responsesStateful &&
 		a.responseState.PreviousResponseID != "" &&
 		a.responseState.AnchorMessages >= 0 &&
 		a.responseState.AnchorMessages <= messageCount
-}
-
-func (a *Agent) estimatePayloadContext(requestContext []string, payloadMessages []llm.Message) ContextEstimate {
-	return a.estimatePayloadContextForTranscript(requestContext, a.transcript, payloadMessages)
 }
 
 func (a *Agent) estimatePayloadContextForTranscript(requestContext []string, transcript, payloadMessages []llm.Message) ContextEstimate {
