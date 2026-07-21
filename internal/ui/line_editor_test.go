@@ -1302,10 +1302,10 @@ func TestPromptLineEditorViLineScopedMotions(t *testing.T) {
 		want  string
 	}{
 		{name: "0 to current line start", input: "aa\nbb\ncc\x1bk0iX\r", want: "aa\nXbb\ncc"},
-		{name: "$ to current line end", input: "aa\nbb\ncc\x1bk$iX\r", want: "aa\nbbX\ncc"},
+		{name: "$ rests on the current line's last char", input: "aa\nbb\ncc\x1bk$iX\r", want: "aa\nbXb\ncc"},
 		{name: "^ to first non-blank of current line", input: "  aa\n  bb\x1b^iX\r", want: "  aa\n  Xbb"},
 		{name: "single-line 0 and $ unchanged", input: "one two\x1b$0iX\r", want: "Xone two"},
-		{name: "single-line $ unchanged", input: "one two\x1b0$iX\r", want: "one twoX"},
+		{name: "single-line $ rests on the last char", input: "one two\x1b0$iX\r", want: "one twXo"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1980,4 +1980,30 @@ func (s *promptTestScreen) visibleLines() []string {
 		lines = append(lines, strings.TrimRight(string(line), " "))
 	}
 	return lines
+}
+
+func TestPromptLineEditorViLineEndMotionsRestOnLastChar(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "$ then x deletes the last char", input: "one two\x1b0$x\r", want: "one tw"},
+		{name: "$ then x on a middle line deletes its last char", input: "aa\nbb\ncc\x1bk$x\r", want: "aa\nb\ncc"},
+		{name: "^ on a blank line rests on its last char", input: "aa\n   \ncc\x1bk^x\r", want: "aa\n  \ncc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, ok, err := readViEditedInput(t, tt.input)
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok {
+				t.Fatal("read returned ok=false")
+			}
+			if input.text != tt.want {
+				t.Fatalf("input text = %q, want %q", input.text, tt.want)
+			}
+		})
+	}
 }

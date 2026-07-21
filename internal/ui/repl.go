@@ -2029,7 +2029,11 @@ func writeContextFile(path string, data []byte) error {
 
 func (app *App) contextRequest() llm.Request {
 	out := app.promptHookContext(nil)
-	if ctx := app.todoRequestContext(); ctx != "" {
+	// Render the full todo list, not the changed-only reminder: /context answers
+	// "what context does the model have" for the user, and the unchanged list is
+	// still model context via the transcript's update_todos result. Going through
+	// todoRequestContext here would show nothing after the first real injection.
+	if ctx := app.todoContextDisplay(); ctx != "" {
 		out = append(out, ctx)
 	}
 	return app.Agent.ContextRequestWithContext(out)
@@ -3350,6 +3354,16 @@ func (app *App) todoRequestContext() string {
 	return app.Todos.ChangedRequestContext()
 }
 
+// todoContextDisplay renders the current list for display paths like /context,
+// regardless of injection marking. It must never consume the change signal
+// real requests rely on.
+func (app *App) todoContextDisplay() string {
+	if app.Todos == nil || !app.agentHasTool("update_todos") {
+		return ""
+	}
+	return todo.RequestContext(app.Todos.Snapshot())
+}
+
 func (app *App) agentHasTool(name string) bool {
 	if app.Agent == nil {
 		return false
@@ -3935,6 +3949,21 @@ func (s *accumulatingSink) RequestContext() []string {
 		}
 	}
 	out = append(out, s.app.backgroundRequestContext(s)...)
+	return out
+}
+
+// PeekRequestContext mirrors RequestContext without consuming anything: the
+// todo change marker stays unmarked and completed background context stays
+// queued, so post-prompt size estimates never eat context that still needs to
+// reach the model on a later real request.
+func (s *accumulatingSink) PeekRequestContext() []string {
+	var out []string
+	if ctx := s.app.todoRequestContext(); ctx != "" {
+		out = append(out, ctx)
+	}
+	if s.app.Background != nil {
+		out = append(out, s.app.Background.PeekCompletedContext()...)
+	}
 	return out
 }
 

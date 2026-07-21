@@ -4613,3 +4613,61 @@ func pumpDuringPromptKey(rr *replReader) (replInput, bool, error) {
 	}
 	return res.input, res.done, nil
 }
+
+func TestContextDumpShowsTodoReminderAfterInjection(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	store := todo.NewStore()
+	reg := tools.Default()
+	reg.Register(todo.NewTool(store))
+	app.Agent.SetTools(reg)
+	app.Todos = store
+	store.Replace([]todo.Item{{Content: "explore", Status: todo.StatusInProgress, ActiveForm: "Exploring"}})
+	store.MarkContextInjected() // a prior real request already carried the reminder
+
+	// /context answers "what context does the model have" for the user, so it
+	// renders the full list even though the next real request suppresses the
+	// unchanged reminder (the list already lives in the transcript).
+	req := app.contextRequest()
+	if got := strings.Join(req.RequestContext, "\n"); !strings.Contains(got, "[~] Exploring") {
+		t.Fatalf("/context request context = %q, want the full todo reminder", got)
+	}
+
+	// The display path must not consume the change signal real requests rely on.
+	store.Replace([]todo.Item{
+		{Content: "explore", Status: todo.StatusCompleted},
+		{Content: "test", Status: todo.StatusInProgress},
+	})
+	app.contextRequest()
+	if store.ChangedRequestContext() == "" {
+		t.Fatal("/context consumed the todo change signal; the next real request would drop the reminder")
+	}
+}
+
+func TestAccumulatingSinkPeekDoesNotMarkTodoInjected(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	store := todo.NewStore()
+	reg := tools.Default()
+	reg.Register(todo.NewTool(store))
+	app.Agent.SetTools(reg)
+	app.Todos = store
+	store.Replace([]todo.Item{{Content: "explore", Status: todo.StatusInProgress, ActiveForm: "Exploring"}})
+
+	sink := &accumulatingSink{r: app.Renderer, app: app}
+	for i := range 2 {
+		got := strings.Join(sink.PeekRequestContext(), "\n")
+		if !strings.Contains(got, "[~] Exploring") {
+			t.Fatalf("peek %d = %q, want the todo reminder (peeks must not consume it)", i+1, got)
+		}
+	}
+	// The real attach still marks: the next unchanged render goes quiet.
+	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[~] Exploring") {
+		t.Fatalf("RequestContext = %q, want the todo reminder", got)
+	}
+	if got := store.ChangedRequestContext(); got != "" {
+		t.Fatalf("after a real attach, ChangedRequestContext = %q, want empty", got)
+	}
+}

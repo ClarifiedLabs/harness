@@ -335,9 +335,17 @@ func (e *promptLineEditor) applyViCommand(v *viLineState, s *lineEditState, h *l
 	case '^':
 		start, end, _ := s.cursorLogicalLine()
 		s.cursor = viFirstNonBlankLine(s.buf, start, end)
+		if s.cursor == end && end > start {
+			s.cursor = end - 1 // all-blank line: rest on its last char, not the newline
+		}
+		s.viClampNormalCursor()
 	case '$':
-		_, end, _ := s.cursorLogicalLine()
+		start, end, _ := s.cursorLogicalLine()
 		s.cursor = end
+		if s.cursor > start {
+			s.cursor-- // normal mode rests on the last char, not past it
+		}
+		s.viClampNormalCursor()
 	case 'w':
 		s.cursor = viRepeatNextWordStart(s.buf, s.cursor, count, false)
 		s.viClampNormalCursor()

@@ -2759,3 +2759,44 @@ func TestDrainSteerRecoversUnconsumed(t *testing.T) {
 		t.Fatalf("second DrainSteer = %q, want empty", got)
 	}
 }
+
+// peekCountingSink counts consuming vs peek context gathering. Its
+// RequestContext models the REPL sink, whose call consumes one-shot signals
+// (todo change marking, completed background context draining).
+type peekCountingSink struct {
+	recordSink
+	requestCalls int
+	peekCalls    int
+}
+
+func (s *peekCountingSink) RequestContext() []string {
+	s.requestCalls++
+	return []string{"[one-shot context]"}
+}
+
+func (s *peekCountingSink) PeekRequestContext() []string {
+	s.peekCalls++
+	return []string{"[one-shot context]"}
+}
+
+func TestPostPromptEstimateDoesNotConsumeRequestContext(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn})
+	a := newAgent(fp, tools.Default(), Options{})
+	sink := &peekCountingSink{}
+
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	}
+	// RequestContext consumes one-shot signals, so it must run exactly once per
+	// request actually sent; the post-prompt sizing estimate has to use the
+	// non-consuming peek instead.
+	if sink.requestCalls != len(fp.Requests) {
+		t.Fatalf("RequestContext calls = %d, want %d (one per request sent)", sink.requestCalls, len(fp.Requests))
+	}
+	if sink.peekCalls == 0 {
+		t.Fatal("post-prompt estimate did not use PeekRequestContext")
+	}
+}

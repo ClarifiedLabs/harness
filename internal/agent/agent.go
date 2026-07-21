@@ -84,9 +84,19 @@ type HookContextReceiver interface {
 }
 
 // RequestContextProvider is implemented by sinks that can add fresh
-// request-only context before each model request.
+// request-only context before each model request. RequestContext may consume
+// one-shot signals as it attaches them (todo change marking, completed
+// background context draining), so it must only be called for a request that
+// is actually sent.
 type RequestContextProvider interface {
 	RequestContext() []string
+}
+
+// RequestContextPeeker is implemented by sinks whose RequestContext consumes
+// one-shot signals. PeekRequestContext returns what the next request would
+// carry without consuming anything, for local sizing estimates.
+type RequestContextPeeker interface {
+	PeekRequestContext() []string
 }
 
 // PromptWorkCoordinator is implemented by sinks that own background work whose
@@ -1294,7 +1304,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 	// prompt total and is also reported separately as maintenance. A compaction
 	// error never fails the prompt — the warning was already reported and
 	// the transcript was kept intact.
-	lastContext = a.estimateContext(a.requestContext(appendPromptContext(extraContext, steerContext), sink))
+	lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, steerContext), sink))
 	compUsage, changed, err := a.MaybeCompact(ctx, a.triggerTokens(lastInput, appendBoundary), sink)
 	if compUsage != (llm.Usage{}) {
 		total = add(total, compUsage)
@@ -1302,7 +1312,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		reportMaintenance(sink, "compaction", compUsage)
 	}
 	if err == nil && changed {
-		lastContext = a.estimateContext(a.requestContext(appendPromptContext(extraContext, steerContext), sink))
+		lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, steerContext), sink))
 	}
 	if err := a.validateTranscript("after prompt"); err != nil {
 		sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
@@ -1628,12 +1638,28 @@ func drainPromptWorkUsage(sink EventSink) llm.Usage {
 }
 
 func (a *Agent) requestContext(extraContext []string, sink EventSink) []string {
-	out := append([]string(nil), extraContext...)
 	provider, ok := sink.(RequestContextProvider)
 	if !ok {
-		return out
+		return append([]string(nil), extraContext...)
 	}
-	for _, item := range provider.RequestContext() {
+	return mergeRequestContext(extraContext, provider.RequestContext())
+}
+
+// estimateRequestContext gathers request context for local sizing only. No
+// request is sent, so prefer the sink's non-consuming peek: RequestContext's
+// attach semantics would eat one-shot signals that still need to reach the
+// model on a later real request.
+func (a *Agent) estimateRequestContext(extraContext []string, sink EventSink) []string {
+	peeker, ok := sink.(RequestContextPeeker)
+	if !ok {
+		return a.requestContext(extraContext, sink)
+	}
+	return mergeRequestContext(extraContext, peeker.PeekRequestContext())
+}
+
+func mergeRequestContext(extraContext, items []string) []string {
+	out := append([]string(nil), extraContext...)
+	for _, item := range items {
 		if strings.TrimSpace(item) != "" {
 			out = append(out, item)
 		}

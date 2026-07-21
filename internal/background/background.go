@@ -307,6 +307,17 @@ func (m *Manager) DrainPromptWorkUsage() llm.Usage {
 }
 
 func (m *Manager) DrainCompletedContext(archiver toolresult.Archiver) []string {
+	return m.completedContext(true, archiver)
+}
+
+// PeekCompletedContext returns what DrainCompletedContext would deliver
+// without marking it delivered or archiving oversized results, so a size
+// estimate can count pending context that still needs to reach the model.
+func (m *Manager) PeekCompletedContext() []string {
+	return m.completedContext(false, nil)
+}
+
+func (m *Manager) completedContext(deliver bool, archiver toolresult.Archiver) []string {
 	m.mu.Lock()
 	var completed []Job
 	for _, id := range m.order {
@@ -314,7 +325,9 @@ func (m *Manager) DrainCompletedContext(archiver toolresult.Archiver) []string {
 		if job == nil || job.contextDelivered || !job.finished {
 			continue
 		}
-		job.contextDelivered = true
+		if deliver {
+			job.contextDelivered = true
+		}
 		completed = append(completed, *job)
 	}
 	prepare := m.prepareResult
