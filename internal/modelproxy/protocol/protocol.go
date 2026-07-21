@@ -86,6 +86,8 @@ type Target struct {
 	OutputLimit     int       `json:"output_limit,omitempty"`
 	InputModalities []string  `json:"input_modalities,omitempty"`
 	ServerTools     []string  `json:"server_tools,omitempty"`
+	BaseTargetID    string    `json:"base_target_id,omitempty"`
+	Variant         string    `json:"variant,omitempty"`
 	Price           llm.Price `json:"price,omitempty"`
 	Reasoning       bool      `json:"reasoning,omitempty"`
 }

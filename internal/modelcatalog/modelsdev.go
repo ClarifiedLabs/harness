@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sort"
+	"strings"
 
 	"harness/internal/llm"
 )
@@ -91,6 +93,7 @@ func PruneModelsDevData(data []byte) ([]byte, error) {
 				Limit:            model.Limit,
 				Provider:         model.Provider,
 				Cost:             model.Cost,
+				ServiceTiers:     llm.NormalizeServiceTiers(model.ServiceTiers),
 			}
 		}
 		providers[key] = modelsDevSnapshotProvider{
@@ -125,6 +128,7 @@ type modelsDevSnapshotModel struct {
 	Limit            Limit                       `json:"limit,omitzero"`
 	Provider         ModelProvider               `json:"provider,omitzero"`
 	Cost             llm.Price                   `json:"cost,omitzero"`
+	ServiceTiers     []llm.ServiceTier           `json:"service_tiers,omitempty"`
 }
 
 type modelsDevSnapshotModalities struct {
@@ -151,9 +155,54 @@ func normalizeProviders(providers map[string]Provider) *Catalog {
 			if m.ID == "" {
 				m.ID = modelKey
 			}
+			m.ServiceTiers = modelsDevServiceTiers(m)
+			m.Experimental = modelExperimental{}
 			p.Models[modelKey] = m
 		}
 		providers[key] = p
 	}
 	return &Catalog{Providers: providers}
+}
+
+func modelsDevServiceTiers(model Model) []llm.ServiceTier {
+	tiers := append([]llm.ServiceTier(nil), model.ServiceTiers...)
+	modeIDs := make([]string, 0, len(model.Experimental.Modes))
+	for id := range model.Experimental.Modes {
+		modeIDs = append(modeIDs, id)
+	}
+	sort.Strings(modeIDs)
+	for _, modeID := range modeIDs {
+		mode := model.Experimental.Modes[modeID]
+		request := llm.ServiceTierRequest{
+			ServiceTier: mode.Provider.Body.ServiceTier,
+			Speed:       mode.Provider.Body.Speed,
+		}
+		if request.ServiceTier == "" && request.Speed == "" {
+			continue
+		}
+		if beta := mode.Provider.Headers["anthropic-beta"]; beta != "" {
+			request.Betas = splitCatalogBetas(beta)
+		}
+		tiers = append(tiers, llm.ServiceTier{
+			ID:      modeID,
+			Name:    catalogModeName(modeID),
+			Request: request,
+			Price:   mode.Cost,
+		})
+	}
+	return llm.NormalizeServiceTiers(tiers)
+}
+
+func catalogModeName(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	return strings.ToUpper(id[:1]) + id[1:]
+}
+
+func splitCatalogBetas(value string) []string {
+	return strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ' '
+	})
 }

@@ -317,6 +317,9 @@ type Request struct {
     Temperature *float64 // nil = omit
     Reasoning   ReasoningConfig
     StopSeqs    []string
+    ServiceTier string // model-advertised request tier; empty = provider default
+    Speed       string // resolved provider speed control (Anthropic fast mode)
+    Betas       []string // bounded provider beta identifiers resolved by the proxy
     EstimatedInputTokens int // caller estimate; 0 asks the dialect to estimate
     ContextWindowHint    int // effective override or provider-learned window
     StoreResponse      bool
@@ -650,6 +653,8 @@ type Usage struct {
     ReasoningTokens  int // Responses reasoning tokens; 0 for Anthropic (counted in output)
     CostUSD          float64
     CostKnown        bool
+    ServiceTier      string // actually served tier, when reported
+    Speed            string // actually served speed, when reported
 }
 ```
 
@@ -682,6 +687,7 @@ type ModelInfo struct {
     OutputLimit     int
     InputModalities []string
     ServerTools     []string
+    ServiceTiers   []ServiceTier
     Price           Price
     Shape           string
     Reasoning       *ReasoningInfo
@@ -695,7 +701,9 @@ Model metadata normally originates from the public **models.dev** catalog. The
 models.dev and OpenAI Codex adapters, normalized catalog types, and vendored
 fallback snapshots live in `internal/modelcatalog`; `harness-model-proxy setup`
 and `refresh-models` consume the normalized provider/context/input-modality/
-reasoning fields. The proxy caches a projected catalog as `models.dev.api.json`
+reasoning/service-tier fields. models.dev `experimental.modes` entries are
+projected into bounded service-tier request mappings and tier-specific prices.
+The proxy caches a projected catalog as `models.dev.api.json`
 in the proxy config directory, retaining every provider and model but only the
 metadata fields harness consumes.
 `setup` prefers that cache over the vendored snapshot, but fetches and writes it
@@ -769,6 +777,32 @@ also infers `web_search` for known endpoints: OpenAI Responses, Anthropic,
 Sakana, OpenRouter, MiMo, Kimi, and Z.AI. If a provider rejects a server-tool
 field before streaming any events, the proxy retries the request once without
 server tools so stale metadata does not fail the turn.
+
+Provider and model entries may also set typed `service_tiers` objects to
+advertise request-level scheduling modes. A model-level list overrides the
+provider list. Each `llm.ServiceTier` carries a target-suffix ID, display
+metadata, an optional `llm.Price`, and a bounded `ServiceTierRequest` containing
+only `service_tier`, `speed`, and Anthropic beta identifiers. This deliberately
+does not turn catalog data into arbitrary request bodies or headers.
+
+Managed models get their tier options from models.dev mode metadata. The Codex
+adapter consumes `service_tiers` and the deprecated `additional_speed_tiers`
+catalog fields, normalizing the user-facing `fast` suffix to the OpenAI wire
+value `priority`. No provider-wide tier inference is applied. For every
+non-default mode, the served catalog expands the base model into a separate
+target such as `provider:model:fast`, carrying `base_target_id`, `variant`, and
+its own price. Target resolution—not a caller-supplied request field—selects the
+bounded provider mapping. Anthropic encodes `speed` and merges required feature
+identifiers into `anthropic-beta`; OpenAI dialects encode `service_tier`.
+`/fast` switches between sibling targets while retaining the base model's proxy
+continuation/cache identity.
+
+The base `llm.Price` schedule represents standard processing; each service tier
+may carry its own schedule. Request pricing prefers provider-reported served
+`service_tier`/`speed` metadata, which accounts for graceful downgrades, then
+falls back to the requested mapping. A mode without an accurate price is
+handled-but-unknown, so usage tokens remain known while `CostKnown` stays false
+and reject-unpriced proxy budgets fail closed.
 
 Static catalog pricing schedules use `price_source` for managed configs when the
 pricing is representable as `llm.Price`, including context tiers. Request costs

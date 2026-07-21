@@ -28,9 +28,10 @@ Use `harness --models` to print the targets and whether they support portable
 reasoning profiles. Use `harness --agents` to print the resolved built-in and
 config-defined agents. Both commands exit before creating a session.
 
-`--models --format json` also shows each target's `server_tools` list. When a
-target advertises `web_search`, `-web-search auto` lets harness declare the
-provider-hosted web search tool for model calls. The default is `off`.
+`--models --format json` also shows each target's `server_tools`, price, and
+variant relationship (`base_target_id` / `variant`). When a target advertises
+`web_search`, `-web-search auto` lets harness declare the provider-hosted web
+search tool for model calls. The default is `off`.
 
 ## Interactive Initial Prompt
 
@@ -173,6 +174,30 @@ individual model entries; the proxy also infers it for known web-search-capable
 providers such as OpenAI Responses, Anthropic, Sakana, OpenRouter, MiMo, Kimi,
 and Z.AI. Harness only declares it when `-web-search auto` (or
 `web_search:"auto"`) is enabled and the selected target advertises support.
+
+Provider and model entries can advertise request-level scheduling tiers with
+typed `service_tiers` objects. Each object has a target-suffix `id`, optional
+`name` and `description`, a bounded `request` mapping, and an optional
+tier-specific `price`. For example, OpenAI fast mode is represented as
+`{"id":"fast","name":"Fast","request":{"service_tier":"priority"}}`.
+Anthropic fast mode instead maps to `request.speed:"fast"` plus its required
+`request.betas` feature identifier. A model-level list overrides a provider
+list.
+
+Managed models receive these options from models.dev mode metadata; Codex
+models receive them from the OpenAI Codex catalog. Harness does not infer tiers
+for every model on a provider. Manual compatible endpoints must declare their
+options explicitly. The proxy publishes each non-default mode as a separate
+model target: `provider:model:fast`, `provider:model:flex`, and so on. Select a
+mode with `-model`, `/model`, or an agent's `model` setting. `/fast
+[on|off|status]` is a shortcut that switches between the current base target
+and its `:fast` sibling; it reports unavailable when no such sibling exists.
+
+The proxy uses a mode-specific catalog price when present. Provider-reported
+served tier/speed metadata takes precedence, so a graceful downgrade is charged
+at the standard model rate. A selected mode with no accurate catalog price
+remains unpriced; token accounting continues normally and reject-unpriced
+dollar budgets fail closed.
 
 ## Configuration And Environment
 
@@ -518,6 +543,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/reasoning <profile>` | switch reasoning profile for subsequent turns |
 | `/reasoning summary <auto\|concise\|detailed\|none>` | switch Responses API reasoning summaries for subsequent turns |
 | `/effort [profile]` | alias for `/reasoning [profile]` |
+| `/fast [on\|off\|status]` | toggle or inspect the current model's `:fast` sibling; reports unavailable when the model has none |
 | `/agent` | list agents and descriptions, marking the current one |
 | `/agent <name>` | switch the active agent |
 | `/mode`, `/mode <name>` | alias for `/agent` |

@@ -21,6 +21,7 @@ type wireRequest struct {
 	Tools              []wireTool      `json:"tools,omitempty"`
 	MaxOutputTokens    *int            `json:"max_output_tokens,omitempty"`
 	Temperature        *float64        `json:"temperature,omitempty"`
+	ServiceTier        string          `json:"service_tier,omitempty"`
 	Reasoning          *wireReasoning  `json:"reasoning,omitempty"`
 	Stream             bool            `json:"stream"`
 	Store              bool            `json:"store"`
@@ -139,6 +140,7 @@ type wireOutputItem struct {
 type wireResponse struct {
 	ID                string             `json:"id"`
 	Status            string             `json:"status"`
+	ServiceTier       string             `json:"service_tier"`
 	Error             *wireResponseError `json:"error"`
 	IncompleteDetails *struct {
 		Reason string `json:"reason"`
@@ -214,6 +216,7 @@ func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opt
 		Store:              req.StoreResponse,
 		PreviousResponseID: req.PreviousResponseID,
 		Temperature:        req.Temperature,
+		ServiceTier:        req.ServiceTier,
 	}
 	if llm.ResolvePromptCacheKeyField(opts.providerName, "responses", opts.baseURL, opts.promptCache) == llm.PromptCacheKeyFieldPromptCacheKey {
 		w.PromptCacheKey = req.PromptCacheKey

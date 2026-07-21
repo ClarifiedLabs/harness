@@ -166,9 +166,14 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 			yield(llm.StreamEvent{}, streamError(chunk.Error))
 			return
 		}
+		if chunk.ServiceTier != "" {
+			usage.ServiceTier = chunk.ServiceTier
+		}
 
 		if chunk.Usage != nil {
+			servedTier := usage.ServiceTier
 			usage = normalizeUsage(chunk.Usage)
+			usage.ServiceTier = servedTier
 			u := usage
 			if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
 				return

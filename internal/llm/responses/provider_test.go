@@ -67,6 +67,22 @@ func TestStreamTextOnly(t *testing.T) {
 	}
 }
 
+func TestStreamReportsServedServiceTier(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"resp_fast","status":"completed","service_tier":"priority","output":[],"usage":{"input_tokens":1,"output_tokens":2}}}`+"\n\n"))
+	}))
+	defer srv.Close()
+	events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("gpt-5.5")))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	done := events[len(events)-1]
+	if done.Usage == nil || done.Usage.ServiceTier != "priority" {
+		t.Fatalf("done usage = %+v, want served priority tier", done.Usage)
+	}
+}
+
 func TestNormalizeUsageCacheWriteTokens(t *testing.T) {
 	u := &wireUsage{InputTokens: 100, OutputTokens: 12}
 	u.InputTokensDetails.CachedTokens = 50

@@ -4,6 +4,8 @@ import (
 	"os"
 	"slices"
 	"testing"
+
+	"harness/internal/llm"
 )
 
 func TestDecodeCodexModelsUsesListVisibleModels(t *testing.T) {
@@ -29,6 +31,10 @@ func TestDecodeCodexModelsUsesListVisibleModels(t *testing.T) {
 	}
 	if !model.Reasoning || len(model.ReasoningOptions) != 1 || !slices.Contains(model.ReasoningOptions[0].Values, "xhigh") {
 		t.Fatalf("gpt-5.5 reasoning = %v options=%+v, want Codex effort options", model.Reasoning, model.ReasoningOptions)
+	}
+	fast, ok := llm.ResolveServiceTier("fast", model.ServiceTiers)
+	if !ok || fast.ID != "fast" || fast.Request.ServiceTier != "priority" {
+		t.Fatalf("gpt-5.5 fast tier = %+v, %v", fast, ok)
 	}
 	if _, ok := provider.Models["codex-auto-review"]; ok {
 		t.Fatalf("hidden codex-auto-review should not be exposed: %+v", provider.Models)
@@ -74,7 +80,9 @@ func testCodexModelsCatalogJSON() string {
         {"effort": "xhigh"}
       ],
       "visibility": "list",
-      "supported_in_api": true
+      "supported_in_api": true,
+      "service_tiers": [{"id":"priority","name":"Fast","description":"Lower latency"}],
+      "default_service_tier": null
     },
     {
       "slug": "codex-auto-review",

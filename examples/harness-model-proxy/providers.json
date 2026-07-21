@@ -6,6 +6,16 @@
       "base_url": "https://llm-gateway.example.test/v1",
       "api_key": "",
       "api_key_env": ["EXAMPLE_OPENAI_COMPATIBLE_API_KEY"],
+      "service_tiers": [
+        {"id": "default"},
+        {"id": "flex"},
+        {
+          "id": "fast",
+          "name": "Fast",
+          "request": {"service_tier": "priority"},
+          "price": {"input": 0.50, "output": 2.50, "cache_read": 0.10, "cache_write": 0.60}
+        }
+      ],
       "models": [
         {
           "name": "example-fast",
@@ -110,6 +120,14 @@
             "cache_read": 0.30,
             "cache_write": 3.75
           },
+          "service_tiers": [
+            {
+              "id": "fast",
+              "name": "Fast",
+              "request": {"speed": "fast", "betas": ["fast-mode-2026-02-01"]},
+              "price": {"input": 18.00, "output": 90.00, "cache_read": 1.80, "cache_write": 22.50}
+            }
+          ],
           "reasoning": true,
           "reasoning_options": [
             {

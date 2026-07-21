@@ -75,7 +75,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			return
 		}
 
-		resp, err := p.connect(ctx, body, yield)
+		resp, err := p.connect(ctx, body, req.Betas, yield)
 		if err != nil || resp == nil {
 			return
 		}
@@ -88,7 +88,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 // connect performs the request via the shared retry-before-first-byte loop
 // (llm.Connect); the dialect supplies the Messages endpoint, the versioned
 // x-api-key auth headers, and its error-body parser.
-func (p *Provider) connect(ctx context.Context, body []byte, yield func(llm.StreamEvent, error) bool) (*http.Response, error) {
+func (p *Provider) connect(ctx context.Context, body []byte, betas []string, yield func(llm.StreamEvent, error) bool) (*http.Response, error) {
 	return llm.Connect(ctx, llm.ConnectOptions{
 		Client: p.client,
 		URL:    p.baseURL + messagesPath,
@@ -97,6 +97,9 @@ func (p *Provider) connect(ctx context.Context, body []byte, yield func(llm.Stre
 				r.Header.Set(k, v)
 			}
 			r.Header.Set("anthropic-version", apiVersion)
+			if value := mergeAnthropicBetas(r.Header.Get("anthropic-beta"), betas); value != "" {
+				r.Header.Set("anthropic-beta", value)
+			}
 			if len(p.authHeaders) == 0 && p.apiKey != "" {
 				r.Header.Set("x-api-key", p.apiKey)
 			}
@@ -139,6 +142,8 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 				usage.CacheWriteTokens = data.Message.Usage.CacheCreationInputTokens
 				usage.CacheReadTokens = data.Message.Usage.CacheReadInputTokens
 				usage.OutputTokens = data.Message.Usage.OutputTokens
+				usage.ServiceTier = data.Message.ServiceTier
+				usage.Speed = data.Message.Speed
 				u := usage
 				if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
 					return
@@ -224,6 +229,12 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 					usage.CacheReadTokens = data.Usage.CacheReadInputTokens
 				}
 			}
+			if data.ServiceTier != "" {
+				usage.ServiceTier = data.ServiceTier
+			}
+			if data.Speed != "" {
+				usage.Speed = data.Speed
+			}
 			u := usage
 			if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
 				return
@@ -256,6 +267,22 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 	if !completed {
 		yield(llm.StreamEvent{}, fmt.Errorf("anthropic: stream ended before message_stop: %w", sse.ErrTruncatedStream))
 	}
+}
+
+func mergeAnthropicBetas(existing string, betas []string) string {
+	values := strings.FieldsFunc(existing, func(r rune) bool { return r == ',' || r == ' ' })
+	values = append(values, betas...)
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return strings.Join(out, ",")
 }
 
 // thinkingBlock accumulates one streamed thinking (or redacted_thinking) block.

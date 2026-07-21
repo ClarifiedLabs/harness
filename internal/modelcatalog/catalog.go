@@ -38,6 +38,27 @@ type Model struct {
 	Limit            Limit                 `json:"limit"`
 	Provider         ModelProvider         `json:"provider"`
 	Cost             llm.Price             `json:"cost"`
+	ServiceTiers     []llm.ServiceTier     `json:"service_tiers,omitempty"`
+	Experimental     modelExperimental     `json:"experimental,omitzero"`
+}
+
+type modelExperimental struct {
+	Modes map[string]modelMode `json:"modes,omitempty"`
+}
+
+type modelMode struct {
+	Cost     llm.Price         `json:"cost,omitzero"`
+	Provider modelModeProvider `json:"provider,omitzero"`
+}
+
+type modelModeProvider struct {
+	Body    modelModeBody     `json:"body,omitzero"`
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+type modelModeBody struct {
+	ServiceTier string `json:"service_tier,omitempty"`
+	Speed       string `json:"speed,omitempty"`
 }
 
 // ModelProvider captures provider-specific wire-shape hints attached to a model.
@@ -218,6 +239,7 @@ func (p Provider) ProviderConfig(apiKey string) llm.ProviderConfig {
 			Price:            m.Cost,
 			Shape:            m.Provider.Shape,
 			ReasoningOptions: append([]llm.ReasoningOption(nil), m.ReasoningOptions...),
+			ServiceTiers:     llm.NormalizeServiceTiers(m.ServiceTiers),
 		}
 		reasoning := m.Reasoning
 		entry.Reasoning = &reasoning
@@ -239,6 +261,7 @@ func (m Model) ModelInfo() llm.ModelInfo {
 		ContextWindow:   m.Limit.Context,
 		OutputLimit:     m.Limit.Output,
 		InputModalities: append([]string(nil), m.Modalities.Input...),
+		ServiceTiers:    llm.NormalizeServiceTiers(m.ServiceTiers),
 		Price:           m.Cost,
 		Shape:           m.Provider.Shape,
 		Reasoning: &llm.ReasoningInfo{

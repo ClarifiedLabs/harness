@@ -37,6 +37,8 @@ type wireRequest struct {
 	StopSequences []string        `json:"stop_sequences,omitempty"`
 	Stream        bool            `json:"stream"`
 	Temperature   *float64        `json:"temperature,omitempty"`
+	ServiceTier   string          `json:"service_tier,omitempty"`
+	Speed         string          `json:"speed,omitempty"`
 	OutputConfig  *outputConfig   `json:"output_config,omitempty"`
 	Thinking      *thinkingConfig `json:"thinking,omitempty"`
 }
@@ -133,7 +135,9 @@ type wireEvent struct {
 
 	// message_start
 	Message *struct {
-		Usage wireUsage `json:"usage"`
+		Usage       wireUsage `json:"usage"`
+		ServiceTier string    `json:"service_tier"`
+		Speed       string    `json:"speed"`
 	} `json:"message"`
 
 	// content_block_start / content_block_delta / content_block_stop
@@ -159,6 +163,9 @@ type wireEvent struct {
 
 	// message_delta usage (cumulative output)
 	Usage *wireUsage `json:"usage"`
+	// Fast-mode responses may expose the served speed on a streamed frame.
+	ServiceTier string `json:"service_tier"`
+	Speed       string `json:"speed"`
 
 	// error
 	Error *struct {
@@ -179,6 +186,8 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 		MaxTokens:   maxTokens(req, contextWindow, outputLimit),
 		Stream:      true,
 		Temperature: req.Temperature,
+		ServiceTier: req.ServiceTier,
+		Speed:       req.Speed,
 	}
 
 	// The stable prefix (system + last tool schema) takes the 1h breakpoint only

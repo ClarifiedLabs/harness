@@ -68,6 +68,32 @@ func TestStreamTextOnly(t *testing.T) {
 	}
 }
 
+func TestStreamFastModeHeaderAndServedSpeed(t *testing.T) {
+	var beta string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		beta = r.Header.Get("anthropic-beta")
+		w.Header().Set("Content-Type", "text/event-stream")
+		llmtest.WriteBody(w, []byte("event: message_start\n"+`data: {"type":"message_start","message":{"speed":"fast","usage":{"input_tokens":1}}}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n"))
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, AuthHeaders: map[string]string{"anthropic-beta": "existing-beta"}})
+	req := llmtest.SimpleRequest("claude-opus-4-8")
+	req.Speed = "fast"
+	req.Betas = []string{"fast-mode-2026-02-01", "existing-beta"}
+	events, err := llmtest.Drain(p.Stream(context.Background(), req))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if beta != "existing-beta,fast-mode-2026-02-01" {
+		t.Fatalf("anthropic-beta = %q", beta)
+	}
+	done := events[len(events)-1]
+	if done.Usage == nil || done.Usage.Speed != "fast" {
+		t.Fatalf("done usage = %+v, want served fast speed", done.Usage)
+	}
+}
+
 func TestStreamTextOnlyEventOrder(t *testing.T) {
 	srv := llmtest.ServeSSEFixture(t, "text_only.sse")
 	p := testProvider(t, srv, nil)

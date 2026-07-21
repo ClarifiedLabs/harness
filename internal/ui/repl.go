@@ -47,6 +47,9 @@ type ModelSelection struct {
 	Runtime           llm.Provider
 	ContextWindow     int // agent override; 0 means use the registry
 	Reasoning         llm.ReasoningConfig
+	BaseTargetID      string
+	Variant           string
+	FastTargetID      string
 	ServerTools       []llm.ServerTool
 	ResponsesStateful bool
 	// ReasoningSet says Reasoning intentionally replaces the requested config,
@@ -76,6 +79,9 @@ type AgentSelection struct {
 	Runtime           llm.Provider
 	ContextWindow     int
 	Reasoning         llm.ReasoningConfig
+	BaseTargetID      string
+	Variant           string
+	FastTargetID      string
 	ServerTools       []llm.ServerTool
 	ResponsesStateful bool
 	ReasoningSet      bool
@@ -98,6 +104,9 @@ type App struct {
 	Registry      *llm.Registry
 	System        string
 	Reasoning     llm.ReasoningConfig
+	BaseTargetID  string
+	Variant       string
+	FastTargetID  string
 	ImageDetail   string
 	PendingImages []inputimage.Loaded
 	Hooks         *hooks.Runner
@@ -264,6 +273,7 @@ const helpText = `commands:
   /model [target]  pick a configured model target, or switch directly
   /reasoning [profile] list or set the reasoning profile
   /effort [profile]    alias for /reasoning
+  /fast [on|off|status] toggle the model's fast tier
   /agent [name]    list agents, or switch to agent
   /mode [name]     alias for /agent
   /plan            alias for /agent plan
@@ -1773,6 +1783,8 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		app.reasoningCommand(arg)
 	case "/effort":
 		app.effort(arg)
+	case "/fast":
+		app.fastCommand(arg)
 	case "/agent", "/mode":
 		if arg == "" {
 			fmt.Fprintln(app.Errw, app.agentSummary())
@@ -1815,7 +1827,7 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 // suggestions on an unknown command (r59).
 var knownCommands = []string{
 	"/help", "/exit", "/quit", "/clear", "/compact", "/tree", "/fork", "/clone", "/context", "/usage",
-	"/tools", "/image", "/edit", "/save", "/model", "/reasoning", "/effort",
+	"/tools", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
 	"/agent", "/mode", "/plan", "/auto", "/handoff", "/background", "/skills", "/vi",
 }
 
@@ -2118,7 +2130,7 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 		fmt.Fprintln(app.Errw, "[model switch unavailable]")
 		return false
 	}
-	oldProvider, oldModel := app.Provider, app.Model
+	oldProvider, oldModel, oldBaseTargetID := app.Provider, app.Model, app.BaseTargetID
 	selection, err := app.SwitchModel(model, reasoning)
 	if err != nil {
 		fmt.Fprintf(app.Errw, "[model switch failed: %v]\n", err)
@@ -2142,7 +2154,13 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	app.Agent.SetReasoning(selection.Reasoning)
 	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
-	app.Agent.ResetProxySessionID()
+	if selection.BaseTargetID == "" {
+		selection.BaseTargetID = selection.Model
+	}
+	baseChanged := oldBaseTargetID == "" || selection.BaseTargetID != oldBaseTargetID
+	if baseChanged {
+		app.Agent.ResetProxySessionID()
+	}
 	if selection.RegistryModel == "" {
 		selection.RegistryModel = selection.Model
 	}
@@ -2155,11 +2173,16 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	}
 	app.BaseURL = selection.BaseURL
 	app.Reasoning = selection.Reasoning
+	app.BaseTargetID = selection.BaseTargetID
+	app.Variant = selection.Variant
+	app.FastTargetID = selection.FastTargetID
 	fmt.Fprintf(app.Errw, "[model switched: model=%s proxy-url=%s reasoning=%s]\n", modelDisplayName(app.Provider, app.Model), app.BaseURL, app.reasoningLabel())
 	if oldProvider != app.Provider || oldModel != app.Model {
 		app.onModelChanged()
 	}
-	app.prewarm() // the new model/provider invalidated the warm cache prefix (r43)
+	if baseChanged {
+		app.prewarm() // the new underlying model/provider invalidated the warm cache prefix (r43)
+	}
 	return true
 }
 
@@ -2302,6 +2325,51 @@ func (app *App) setReasoning(reasoning llm.ReasoningConfig) error {
 		app.Agent.ResetProxySessionID()
 	}
 	return nil
+}
+
+func (app *App) fastCommand(arg string) {
+	action := strings.ToLower(strings.TrimSpace(arg))
+	if action == "" {
+		if strings.EqualFold(app.Variant, "fast") {
+			action = "off"
+		} else {
+			action = "on"
+		}
+	}
+	switch action {
+	case "status":
+		if app.FastTargetID == "" {
+			fmt.Fprintln(app.Errw, "[fast mode unavailable for current model]")
+			return
+		}
+		if strings.EqualFold(app.Variant, "fast") {
+			fmt.Fprintln(app.Errw, "[fast mode: on]")
+		} else {
+			fmt.Fprintln(app.Errw, "[fast mode: off]")
+		}
+	case "on":
+		if app.FastTargetID == "" {
+			fmt.Fprintln(app.Errw, "[fast mode unavailable for current model]")
+			return
+		}
+		if strings.EqualFold(app.Variant, "fast") {
+			fmt.Fprintln(app.Errw, "[fast mode: on]")
+			return
+		}
+		if app.switchModel(app.FastTargetID, app.Reasoning) {
+			fmt.Fprintln(app.Errw, "[fast mode: on]")
+		}
+	case "off":
+		if !strings.EqualFold(app.Variant, "fast") {
+			fmt.Fprintln(app.Errw, "[fast mode: off]")
+			return
+		}
+		if app.switchModel(app.BaseTargetID, app.Reasoning) {
+			fmt.Fprintln(app.Errw, "[fast mode: off]")
+		}
+	default:
+		fmt.Fprintln(app.Errw, "[fast mode failed: expected on, off, or status]")
+	}
 }
 
 func (app *App) reasoningSummary() string {
@@ -2596,6 +2664,12 @@ func (app *App) applyAgentSwitch(name string) error {
 		app.Reasoning = selection.Reasoning
 		app.Agent.SetReasoning(selection.Reasoning)
 	}
+	if selection.BaseTargetID == "" {
+		selection.BaseTargetID = selection.Model
+	}
+	app.BaseTargetID = selection.BaseTargetID
+	app.Variant = selection.Variant
+	app.FastTargetID = selection.FastTargetID
 	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
 	app.Agent.ResetProxySessionID()

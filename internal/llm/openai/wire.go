@@ -21,6 +21,7 @@ type wireRequest struct {
 	Reasoning       *wireReasoning `json:"reasoning,omitempty"`
 	ExtraBody       *wireExtraBody `json:"extra_body,omitempty"`
 	Stop            []string       `json:"stop,omitempty"`
+	ServiceTier     string         `json:"service_tier,omitempty"`
 	PromptCacheKey  string         `json:"prompt_cache_key,omitempty"`
 	SessionID       string         `json:"session_id,omitempty"`
 	Stream          bool           `json:"stream"`
@@ -116,9 +117,10 @@ type wireZAIWebSearch struct {
 // wireChunk is one streamed chat.completion.chunk. choices is empty on the
 // trailing usage chunk; usage is null on every other chunk (design §5.2, §6).
 type wireChunk struct {
-	Choices []wireChoice `json:"choices"`
-	Usage   *wireUsage   `json:"usage"`
-	Error   *wireError   `json:"error"`
+	Choices     []wireChoice `json:"choices"`
+	Usage       *wireUsage   `json:"usage"`
+	Error       *wireError   `json:"error"`
+	ServiceTier string       `json:"service_tier"`
 }
 
 type wireError struct {
@@ -197,6 +199,7 @@ func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit i
 		Stream:        true,
 		StreamOptions: &streamOptions{IncludeUsage: true},
 		Temperature:   req.Temperature,
+		ServiceTier:   req.ServiceTier,
 	}
 
 	if mt := maxTokens(req, contextWindow, outputLimit, minOutputTokens); mt > 0 {

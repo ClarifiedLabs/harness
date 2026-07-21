@@ -44,7 +44,11 @@ const testCatalog = `{
         "reasoning": true,
         "reasoning_options": [{"type":"effort","values":["none","low","medium","high","xhigh"]}],
         "limit": {"context": 1050000},
-        "cost": {"input": 5, "output": 30, "cache_read": 0.5}
+        "cost": {"input": 5, "output": 30, "cache_read": 0.5},
+        "experimental": {"modes": {"fast": {
+          "cost": {"input": 10, "output": 60, "cache_read": 1},
+          "provider": {"body": {"service_tier": "priority"}}
+        }}}
       }
     }
   },
@@ -61,7 +65,14 @@ const testCatalog = `{
         "reasoning": true,
         "reasoning_options": [{"type":"effort","values":["low","medium","high","xhigh","max"]}],
         "limit": {"context": 1000000},
-        "cost": {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25}
+        "cost": {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25},
+        "experimental": {"modes": {"fast": {
+          "cost": {"input": 30, "output": 150, "cache_read": 3, "cache_write": 37.5},
+          "provider": {
+            "body": {"speed": "fast"},
+            "headers": {"anthropic-beta": "fast-mode-2026-02-01"}
+          }
+        }}}
       }
     }
   }
@@ -128,6 +139,42 @@ func TestFirstPartyProviderFallbacks(t *testing.T) {
 	}
 	if got := anthropic.APIType(); got != "anthropic" {
 		t.Fatalf("anthropic APIType = %q", got)
+	}
+}
+
+func TestDecodeModelsDevServiceTierModes(t *testing.T) {
+	c, err := DecodeModelsDev(strings.NewReader(testCatalog))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	openai, _ := c.Provider("openai")
+	openaiInfo, _ := openai.ModelInfo("gpt-5.5")
+	fast, ok := llm.ResolveServiceTier("fast", openaiInfo.ServiceTiers)
+	if !ok || fast.ID != "fast" || fast.Request.ServiceTier != "priority" || fast.Price.Input != 10 || fast.Price.Output != 60 {
+		t.Fatalf("OpenAI fast tier = %+v, %v", fast, ok)
+	}
+	anthropic, _ := c.Provider("anthropic")
+	anthropicInfo, _ := anthropic.ModelInfo("claude-opus-4-8")
+	fast, ok = llm.ResolveServiceTier("fast", anthropicInfo.ServiceTiers)
+	if !ok || fast.ID != "fast" || fast.Request.Speed != "fast" || !slices.Equal(fast.Request.Betas, []string{"fast-mode-2026-02-01"}) || fast.Price.Input != 30 {
+		t.Fatalf("Anthropic fast tier = %+v, %v", fast, ok)
+	}
+}
+
+func TestPruneModelsDevDataPreservesNormalizedServiceTierModes(t *testing.T) {
+	data, err := PruneModelsDevData([]byte(testCatalog))
+	if err != nil {
+		t.Fatalf("PruneModelsDevData: %v", err)
+	}
+	c, err := DecodeModelsDev(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Decode pruned catalog: %v", err)
+	}
+	openai, _ := c.Provider("openai")
+	info, _ := openai.ModelInfo("gpt-5.5")
+	fast, ok := llm.ResolveServiceTier("fast", info.ServiceTiers)
+	if !ok || fast.Request.ServiceTier != "priority" || fast.Price.Output != 60 {
+		t.Fatalf("pruned OpenAI fast tier = %+v, %v", fast, ok)
 	}
 }
 

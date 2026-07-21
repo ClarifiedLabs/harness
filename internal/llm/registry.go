@@ -17,6 +17,7 @@ type ModelInfo struct {
 	OutputLimit     int            `json:"output_limit,omitempty"`
 	InputModalities []string       `json:"input_modalities,omitempty"`
 	ServerTools     []string       `json:"server_tools,omitempty"`
+	ServiceTiers    []ServiceTier  `json:"service_tiers,omitempty"`
 	Price           Price          `json:"price"`
 	Shape           string         `json:"shape,omitempty"`
 	Reasoning       *ReasoningInfo `json:"reasoning,omitempty"`
@@ -47,6 +48,7 @@ type ProviderConfig struct {
 	ResponsesStateful   *bool             `json:"responses_stateful,omitempty"`
 	ResponsesWebSocket  *bool             `json:"responses_websocket,omitempty"`
 	ServerTools         []string          `json:"server_tools,omitempty"`
+	ServiceTiers        []ServiceTier     `json:"service_tiers,omitempty"`
 	APIKeyEnv           []string          `json:"api_key_env"`
 	Auth                *auth.Config      `json:"auth,omitempty"`
 	Models              []ModelEntry      `json:"models"`
@@ -66,6 +68,7 @@ type ModelEntry struct {
 	OutputLimit      int               `json:"output_limit,omitempty"`
 	InputModalities  []string          `json:"input_modalities,omitempty"`
 	ServerTools      []string          `json:"server_tools,omitempty"`
+	ServiceTiers     []ServiceTier     `json:"service_tiers,omitempty"`
 	Price            Price             `json:"price"`
 	Shape            string            `json:"shape,omitempty"`
 	Reasoning        *bool             `json:"reasoning,omitempty"`
@@ -162,6 +165,7 @@ func addProviderModels(models, qualified map[string]ModelInfo, pc ProviderConfig
 			OutputLimit:     m.OutputLimit,
 			InputModalities: append([]string(nil), m.InputModalities...),
 			ServerTools:     effectiveServerTools(pc, m),
+			ServiceTiers:    ModelServiceTiers(pc, m),
 			Price:           m.Price,
 			Shape:           m.Shape,
 			Reasoning:       modelEntryReasoning(m),
@@ -249,6 +253,9 @@ func (r *Registry) MergeModel(model string, info ModelInfo) {
 	}
 	if len(current.ServerTools) == 0 && len(info.ServerTools) > 0 {
 		current.ServerTools = NormalizeServerTools(info.ServerTools)
+	}
+	if len(current.ServiceTiers) == 0 && len(info.ServiceTiers) > 0 {
+		current.ServiceTiers = NormalizeServiceTiers(info.ServiceTiers)
 	}
 	if current.Reasoning == nil && info.Reasoning != nil {
 		current.Reasoning = info.Reasoning.Clone()

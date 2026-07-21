@@ -58,6 +58,15 @@ func TestBuildRequestMaxTokensOmittedWhenUnset(t *testing.T) {
 	}
 }
 
+func TestBuildRequestServiceTier(t *testing.T) {
+	req := basicRequest()
+	req.ServiceTier = "priority"
+	w := buildRequest(req, 0, 0)
+	if w.ServiceTier != "priority" {
+		t.Fatalf("service_tier = %q, want priority", w.ServiceTier)
+	}
+}
+
 func TestBuildRequestMaxTokensUserSet(t *testing.T) {
 	req := basicRequest()
 	req.MaxTokens = 333

@@ -67,6 +67,23 @@ func TestStreamTextOnly(t *testing.T) {
 	}
 }
 
+func TestStreamReportsServedServiceTier(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		llmtest.WriteBody(w, []byte(`data: {"service_tier":"priority","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2}}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+	events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("gpt-5.5")))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	done := events[len(events)-1]
+	if done.Usage == nil || done.Usage.ServiceTier != "priority" {
+		t.Fatalf("done usage = %+v, want served priority tier", done.Usage)
+	}
+}
+
 func TestStreamTextOnlyEventOrder(t *testing.T) {
 	srv := llmtest.ServeSSEFixture(t, "text_only.sse")
 	p := testProvider(t, srv, nil)

@@ -125,6 +125,19 @@ func newFakeModelProxy(t *testing.T, fp *llmtest.FakeProvider) *fakeModelProxy {
 					Reasoning: true,
 				},
 				{
+					ID:              "openai:gpt-5.5:fast",
+					Aliases:         []string{"openai:gpt-5.5:fast", "gpt-5.5:fast"},
+					DisplayName:     "gpt-5.5 (Fast)",
+					ProviderLabel:   "OpenAI",
+					ModelLabel:      "gpt-5.5 (Fast)",
+					BaseTargetID:    "openai:gpt-5.5",
+					Variant:         "fast",
+					ContextWindow:   1_050_000,
+					InputModalities: []string{"text", "image"},
+					Price:           llm.Price{Input: 10, Output: 60, CacheRead: 1},
+					Reasoning:       true,
+				},
+				{
 					ID:            "openrouter:openai/gpt-5.5",
 					Aliases:       []string{"openrouter:openai/gpt-5.5", "openai/gpt-5.5"},
 					DisplayName:   "openai/gpt-5.5",
@@ -229,6 +242,8 @@ type testInfoModelJSON struct {
 	ContextWindow            int        `json:"context_window"`
 	InputModalities          []string   `json:"input_modalities"`
 	ServerTools              []string   `json:"server_tools"`
+	BaseTargetID             string     `json:"base_target_id"`
+	Variant                  string     `json:"variant"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd"`
 	Reasoning                bool       `json:"reasoning"`
 }
@@ -677,7 +692,7 @@ func TestRunREPLModelCommandPromptsConfiguredProviderAndModel(t *testing.T) {
 		t.Fatalf("proxy requests = %+v, want one openrouter-local request", proxy.requests)
 	}
 	stderr := errw.String()
-	if !strings.Contains(stderr, "Models for targets 1-3 of 3") ||
+	if !strings.Contains(stderr, "Models for targets 1-4 of 4") ||
 		!strings.Contains(stderr, "Price: input/output USD per 1M tokens") ||
 		!strings.Contains(stderr, "$5/$30 ≤272k · $10/$45 >272k") ||
 		!strings.Contains(stderr, "model switched") {
@@ -1206,7 +1221,7 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal models json: %v\n%s", err, out.String())
 	}
-	if got.Version != 1 || got.ProviderCount != 0 || got.ModelCount != 3 {
+	if got.Version != 1 || got.ProviderCount != 0 || got.ModelCount != 4 {
 		t.Fatalf("metadata = version %d providers %d models %d\n%s", got.Version, got.ProviderCount, got.ModelCount, out.String())
 	}
 	openRouterModel := findJSONModel(t, got.Models, "openrouter:openai/gpt-5.5")
@@ -1220,6 +1235,10 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 	if openAIModel.PricePerMillionTokensUSD == nil || len(openAIModel.PricePerMillionTokensUSD.Tiers) != 1 ||
 		openAIModel.PricePerMillionTokensUSD.Tiers[0].Threshold != 272_000 {
 		t.Fatalf("openai tiered price = %+v\n%s", openAIModel.PricePerMillionTokensUSD, out.String())
+	}
+	fastModel := findJSONModel(t, got.Models, "openai:gpt-5.5:fast")
+	if fastModel.BaseTargetID != "openai:gpt-5.5" || fastModel.Variant != "fast" || fastModel.PricePerMillionTokensUSD == nil || fastModel.PricePerMillionTokensUSD.Input != 10 {
+		t.Fatalf("openai fast model = %+v\n%s", fastModel, out.String())
 	}
 	if !openRouterModel.Reasoning {
 		t.Fatalf("openrouter reasoning = %+v\n%s", openRouterModel.Reasoning, out.String())
@@ -1330,7 +1349,7 @@ func TestRunAgentsAndModelsFlagsJSONPrintSingleObject(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal combined json: %v\n%s", err, out.String())
 	}
-	if got.Version != 1 || got.SelectedAgent != "plan" || got.ProviderCount != 0 || got.ModelCount != 3 {
+	if got.Version != 1 || got.SelectedAgent != "plan" || got.ProviderCount != 0 || got.ModelCount != 4 {
 		t.Fatalf("combined metadata = %+v\n%s", got, out.String())
 	}
 	if !findJSONAgent(t, got.Agents, "plan").Selected {
@@ -1423,7 +1442,7 @@ func TestRunCheckModelProxyJSONExitsAfterCatalogRequest(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal check json: %v\n%s", err, out.String())
 	}
-	if got.Version != 1 || got.ModelProxyURL != proxy.URL() || got.ProviderCount != 0 || got.ModelCount != 3 {
+	if got.Version != 1 || got.ModelProxyURL != proxy.URL() || got.ProviderCount != 0 || got.ModelCount != 4 {
 		t.Fatalf("check json = %+v\n%s", got, out.String())
 	}
 }
@@ -1732,7 +1751,7 @@ func TestRunPromptsForModelAndSkipsConfigSaveWhenDeclined(t *testing.T) {
 
 func TestRunStartupModelSelectionPromptsReasoningProfile(t *testing.T) {
 	fp := llmtest.New("fake", okStep())
-	env, _, errw, getenv, proxy := fakeProviderEnvWithProxy(t, nil, fp, "3\nmedium\ny\nhello\n/exit\n")
+	env, _, errw, getenv, proxy := fakeProviderEnvWithProxy(t, nil, fp, "4\nmedium\ny\nhello\n/exit\n")
 
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("exit = %d, want ok; errw=%q", code, errw.String())
@@ -1889,6 +1908,44 @@ func TestRunReasoningProfileForwardedToProxy(t *testing.T) {
 	}
 	if proxy.requests[0].ReasoningProfile != "none" || proxy.requests[0].Request.Reasoning.Profile != "none" {
 		t.Fatalf("reasoning profile = %q/%q, want none", proxy.requests[0].ReasoningProfile, proxy.requests[0].Request.Reasoning.Profile)
+	}
+}
+
+func TestRunFastModelVariantSelectedAtStartup(t *testing.T) {
+	fp := llmtest.New("fake", okStep())
+	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-model", "openai:gpt-5.5:fast", "-p", "hi"}, fp, "")
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit = %d, want ok; errw=%q", code, errw.String())
+	}
+	if len(proxy.requests) != 1 {
+		t.Fatalf("proxy requests = %d, want 1", len(proxy.requests))
+	}
+	if got := proxy.requests[0].TargetID; got != "openai:gpt-5.5:fast" {
+		t.Fatalf("target = %q, want fast variant", got)
+	}
+}
+
+func TestRunFastCommandTogglesCatalogSibling(t *testing.T) {
+	fp := llmtest.New("fake", okStep(), okStep())
+	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t,
+		[]string{"-model", "openai:gpt-5.5"},
+		fp,
+		"/fast\none\n/fast\ntwo\n/exit\n",
+	)
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit = %d, want ok; errw=%q", code, errw.String())
+	}
+	if len(proxy.requests) != 2 {
+		t.Fatalf("proxy requests = %d, want 2", len(proxy.requests))
+	}
+	if proxy.requests[0].TargetID != "openai:gpt-5.5:fast" || proxy.requests[1].TargetID != "openai:gpt-5.5" {
+		t.Fatalf("proxy targets = %q then %q, want fast then base", proxy.requests[0].TargetID, proxy.requests[1].TargetID)
+	}
+	firstSession := proxy.requests[0].Request.ProxySessionID
+	if firstSession == "" || proxy.requests[1].Request.ProxySessionID != firstSession {
+		t.Fatalf("proxy session IDs = %q then %q, want preserved", firstSession, proxy.requests[1].Request.ProxySessionID)
 	}
 }
 

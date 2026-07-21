@@ -2130,7 +2130,7 @@ func appendPromptContext(extraContext, steerContext []string) []string {
 // provider contract says snapshots are cumulative; max keeps a zeroed or
 // partial late frame from erasing earlier numbers (spec §3).
 func mergeUsage(acc, in llm.Usage) llm.Usage {
-	return llm.Usage{
+	out := llm.Usage{
 		InputTokens:      max(acc.InputTokens, in.InputTokens),
 		OutputTokens:     max(acc.OutputTokens, in.OutputTokens),
 		CacheReadTokens:  max(acc.CacheReadTokens, in.CacheReadTokens),
@@ -2139,6 +2139,17 @@ func mergeUsage(acc, in llm.Usage) llm.Usage {
 		CostUSD:          mergeCost(acc, in),
 		CostKnown:        mergeCostKnown(acc, in),
 	}
+	if in.ServiceTier != "" {
+		out.ServiceTier = in.ServiceTier
+	} else {
+		out.ServiceTier = acc.ServiceTier
+	}
+	if in.Speed != "" {
+		out.Speed = in.Speed
+	} else {
+		out.Speed = acc.Speed
+	}
+	return out
 }
 
 func mergeCost(acc, in llm.Usage) float64 {

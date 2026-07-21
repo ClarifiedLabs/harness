@@ -4,6 +4,8 @@
 package pricing
 
 import (
+	"strings"
+
 	"harness/internal/llm"
 )
 
@@ -84,14 +86,55 @@ func (Flat) CatalogPricing(_ llm.ProviderConfig, model llm.ModelEntry) CatalogPr
 }
 
 func (Flat) PriceUsage(in Input) Result {
-	if in.Model.Price.IsZero() {
+	basePrice := in.Model.Price
+	tiers := llm.ModelServiceTiers(in.Provider, in.Model)
+	servedTier := strings.ToLower(strings.TrimSpace(in.Usage.ServiceTier))
+	servedSpeed := strings.ToLower(strings.TrimSpace(in.Usage.Speed))
+	if servedTier != "" || servedSpeed != "" {
+		if standardServiceMode(servedTier) && standardServiceMode(servedSpeed) {
+			return priceWith(basePrice, in)
+		}
+		if tier, ok := llm.MatchServiceTierRequest(tiers, servedTier, servedSpeed); ok {
+			return priceModeWith(tier.Price, in)
+		}
+		return Result{Handled: true}
+	}
+	requestedTier := strings.ToLower(strings.TrimSpace(in.Request.ServiceTier))
+	requestedSpeed := strings.ToLower(strings.TrimSpace(in.Request.Speed))
+	if tier, ok := llm.MatchServiceTierRequest(tiers, requestedTier, requestedSpeed); ok {
+		return priceModeWith(tier.Price, in)
+	}
+	if !standardServiceMode(requestedTier) || !standardServiceMode(requestedSpeed) {
+		return Result{Handled: true}
+	}
+	return priceWith(basePrice, in)
+}
+
+func priceWith(price llm.Price, in Input) Result {
+	if price.IsZero() {
 		return Result{}
 	}
-	usd, known := in.Model.Price.Cost(in.Usage, in.Request.EstimatedInputTokens)
+	usd, known := price.Cost(in.Usage, in.Request.EstimatedInputTokens)
 	if !known {
-		return Result{}
+		return Result{Handled: true}
 	}
 	return Result{CostUSD: usd, Known: true, Handled: true}
+}
+
+func priceModeWith(price llm.Price, in Input) Result {
+	if price.IsZero() {
+		return Result{Handled: true}
+	}
+	return priceWith(price, in)
+}
+
+func standardServiceMode(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "default", "standard", "standard_only":
+		return true
+	default:
+		return false
+	}
 }
 
 // PriceZero reports whether a flat price has no configured components.

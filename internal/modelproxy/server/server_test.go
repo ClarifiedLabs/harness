@@ -47,6 +47,10 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
   "base_url": "https://openrouter.ai/api/v1",
   "api_key": "sk-file",
   "api_key_env": ["OPENROUTER_API_KEY"],
+  "service_tiers": [
+    {"id":"default"},
+    {"id":"fast","name":"Fast","request":{"service_tier":"priority"}}
+  ],
   "min_output_tokens": 16,
   "prompt_cache": {"key_field":"session_id","affinity_headers":["x-session-id"]},
   "models": [
@@ -93,7 +97,7 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 		t.Fatalf("decode catalog: %v", err)
 	}
 	resp.Body.Close()
-	if len(catalog.Targets) != 1 || catalog.Targets[0].ID != "openrouter:openai/gpt-5.5" {
+	if len(catalog.Targets) != 2 || catalog.Targets[0].ID != "openrouter:openai/gpt-5.5" {
 		t.Fatalf("catalog targets = %+v", catalog.Targets)
 	}
 	if catalog.Targets[0].OutputLimit != 64_000 || !slices.Equal(catalog.Targets[0].InputModalities, []string{"text", "image"}) {
@@ -102,11 +106,16 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	if !slices.Equal(catalog.Targets[0].ServerTools, []string{llm.ServerToolWebSearch}) {
 		t.Fatalf("catalog server tools = %+v, want web_search", catalog.Targets[0].ServerTools)
 	}
+	fastTarget := catalog.Targets[1]
+	if fastTarget.ID != "openrouter:openai/gpt-5.5:fast" || fastTarget.BaseTargetID != catalog.Targets[0].ID || fastTarget.Variant != "fast" {
+		t.Fatalf("fast catalog target = %+v", fastTarget)
+	}
 
 	body, _ := json.Marshal(protocol.StreamRequest{
-		TargetID: "openrouter:openai/gpt-5.5",
+		TargetID: fastTarget.ID,
 		Request: llm.Request{
-			Model:       "openrouter:openai/gpt-5.5",
+			Model:       fastTarget.ID,
+			ServiceTier: "caller-value-is-ignored",
 			ServerTools: []llm.ServerTool{{Name: llm.ServerToolWebSearch}},
 		},
 	})
@@ -136,6 +145,45 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	}
 	if len(fp.Requests[0].ServerTools) != 1 || fp.Requests[0].ServerTools[0].Kind != llm.ServerToolKindOpenRouterWebSearch {
 		t.Fatalf("fake provider server tools = %+v", fp.Requests[0].ServerTools)
+	}
+	if fp.Requests[0].ServiceTier != "priority" {
+		t.Fatalf("fake provider service tier = %q, want priority", fp.Requests[0].ServiceTier)
+	}
+}
+
+func TestApplyServiceTierForTargetUsesResolvedVariant(t *testing.T) {
+	base := resolvedTarget{targetID: "custom:model", baseTargetID: "custom:model", entry: llm.ModelEntry{Name: "model"}}
+	req := llm.Request{ServiceTier: "caller-value", Speed: "caller-speed", Betas: []string{"caller-beta"}}
+	if err := applyServiceTierForTarget(base, &req); err != nil {
+		t.Fatalf("apply base target: %v", err)
+	}
+	if req.ServiceTier != "" || req.Speed != "" || req.Betas != nil {
+		t.Fatalf("base request retained caller tier fields: %+v", req)
+	}
+
+	fast := base
+	fast.targetID += ":fast"
+	fast.variant = "fast"
+	fast.serviceTier = llm.ServiceTier{
+		ID:      "fast",
+		Request: llm.ServiceTierRequest{Speed: "fast", Betas: []string{"fast-mode-2026-02-01"}},
+	}
+	req = llm.Request{ServiceTier: "caller-value"}
+	if err := applyServiceTierForTarget(fast, &req); err != nil {
+		t.Fatalf("apply fast target: %v", err)
+	}
+	if req.ServiceTier != "" || req.Speed != "fast" || !slices.Equal(req.Betas, []string{"fast-mode-2026-02-01"}) {
+		t.Fatalf("fast request mapping = %+v", req)
+	}
+
+	priority := fast
+	priority.serviceTier.Request = llm.ServiceTierRequest{ServiceTier: "priority"}
+	req = llm.Request{Speed: "caller-speed"}
+	if err := applyServiceTierForTarget(priority, &req); err != nil {
+		t.Fatalf("apply priority target: %v", err)
+	}
+	if req.ServiceTier != "priority" || req.Speed != "" || req.Betas != nil {
+		t.Fatalf("priority request mapping = %+v", req)
 	}
 }
 
@@ -489,6 +537,7 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
   "api_type": "responses",
   "base_url": "https://api.openai.com/v1",
   "api_key": "sk-test",
+  "service_tiers": [{"id":"fast","name":"Fast","request":{"service_tier":"priority"}}],
   "models": [{"name":"gpt-5.5","context_window":128000}]
 }`), 0o600); err != nil {
 		t.Fatalf("write provider config: %v", err)
@@ -566,8 +615,8 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "again"}}},
 	)
 	body, _ = json.Marshal(protocol.StreamRequest{
-		TargetID: "openai:gpt-5.5",
-		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a", Messages: fullMessages},
+		TargetID: "openai:gpt-5.5:fast",
+		Request:  llm.Request{Model: "openai:gpt-5.5:fast", PromptCacheKey: "session-a", Messages: fullMessages},
 	})
 	resp, err = srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 	if err != nil {
@@ -579,7 +628,7 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 		t.Fatalf("second status = %d body=%s", resp.StatusCode, b)
 	}
 	_, _ = io.ReadAll(resp.Body)
-	if len(fp.Requests) != 2 || fp.Requests[1].PreviousResponseID != "resp_1" || len(fp.Requests[1].Messages) != 1 {
+	if len(fp.Requests) != 2 || fp.Requests[1].PreviousResponseID != "resp_1" || len(fp.Requests[1].Messages) != 1 || fp.Requests[1].ServiceTier != "priority" {
 		t.Fatalf("second provider request = %+v", fp.Requests)
 	}
 	if got := fp.Requests[1].Messages[0].Content[0].Text; got != "again" {
@@ -604,7 +653,7 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 		t.Fatalf("third status = %d body=%s", resp.StatusCode, b)
 	}
 	_, _ = io.ReadAll(resp.Body)
-	if len(fp.Requests) != 3 || fp.Requests[2].PreviousResponseID != "resp_2" || len(fp.Requests[2].Messages) != 1 {
+	if len(fp.Requests) != 3 || fp.Requests[2].PreviousResponseID != "resp_2" || len(fp.Requests[2].Messages) != 1 || fp.Requests[2].ServiceTier != "" {
 		t.Fatalf("third provider request = %+v", fp.Requests)
 	}
 	if got := fp.Requests[2].Messages[0].Content[0].Text; got != "third" {

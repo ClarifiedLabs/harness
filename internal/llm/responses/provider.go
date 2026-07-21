@@ -247,6 +247,7 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 			d.asm.responseOutput(event.Response.Output)
 			if event.Response.Usage != nil {
 				d.usage = normalizeUsage(event.Response.Usage)
+				d.usage.ServiceTier = event.Response.ServiceTier
 				u := d.usage
 				if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
 					return true, nil
@@ -283,6 +284,7 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 			if event.Response.Usage != nil {
 				d.usage = normalizeUsage(event.Response.Usage)
 			}
+			d.usage.ServiceTier = event.Response.ServiceTier
 			if event.Response.IncompleteDetails != nil && event.Response.IncompleteDetails.Reason == "max_output_tokens" {
 				stop = llm.StopMaxTokens
 			}

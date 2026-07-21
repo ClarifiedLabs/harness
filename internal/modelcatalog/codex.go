@@ -39,10 +39,19 @@ type codexModel struct {
 	SupportedReasoningLevels []codexReasoningPreset `json:"supported_reasoning_levels,omitempty"`
 	Visibility               string                 `json:"visibility,omitempty"`
 	SupportedInAPI           *bool                  `json:"supported_in_api,omitempty"`
+	ServiceTiers             []codexServiceTier     `json:"service_tiers,omitempty"`
+	DefaultServiceTier       *string                `json:"default_service_tier"`
+	AdditionalSpeedTiers     []string               `json:"additional_speed_tiers,omitempty"`
 }
 
 type codexReasoningPreset struct {
 	Effort string `json:"effort,omitempty"`
+}
+
+type codexServiceTier struct {
+	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // FetchCodexModelsData downloads the OpenAI Codex model catalog and returns its
@@ -124,16 +133,53 @@ func codexModelToCatalog(model codexModel) (Model, bool) {
 	}
 	reasoningValues := codexReasoningValues(model.SupportedReasoningLevels)
 	entry := Model{
-		ID:         id,
-		Name:       name,
-		Modalities: Modalities{Input: append([]string(nil), model.InputModalities...)},
-		Reasoning:  len(reasoningValues) > 0,
-		Limit:      Limit{Context: contextWindow},
+		ID:           id,
+		Name:         name,
+		Modalities:   Modalities{Input: append([]string(nil), model.InputModalities...)},
+		Reasoning:    len(reasoningValues) > 0,
+		Limit:        Limit{Context: contextWindow},
+		ServiceTiers: codexServiceTiers(model),
 	}
 	if len(reasoningValues) > 0 {
 		entry.ReasoningOptions = []llm.ReasoningOption{{Type: "effort", Values: reasoningValues}}
 	}
 	return entry, true
+}
+
+func codexServiceTiers(model codexModel) []llm.ServiceTier {
+	tiers := make([]llm.ServiceTier, 0, len(model.ServiceTiers)+len(model.AdditionalSpeedTiers))
+	for _, raw := range model.ServiceTiers {
+		id := raw.ID
+		if strings.EqualFold(strings.TrimSpace(raw.Name), "fast") {
+			id = "fast"
+		}
+		tier := llm.ServiceTier{
+			ID:          id,
+			Name:        raw.Name,
+			Description: raw.Description,
+			Request:     llm.ServiceTierRequest{ServiceTier: raw.ID},
+		}
+		tiers = append(tiers, tier)
+	}
+	for _, additional := range model.AdditionalSpeedTiers {
+		additional = strings.ToLower(strings.TrimSpace(additional))
+		if additional == "" {
+			continue
+		}
+		id := additional
+		requestValue := additional
+		name := catalogModeName(additional)
+		if additional == "fast" {
+			requestValue = "priority"
+			name = "Fast"
+		}
+		tiers = append(tiers, llm.ServiceTier{
+			ID:      id,
+			Name:    name,
+			Request: llm.ServiceTierRequest{ServiceTier: requestValue},
+		})
+	}
+	return llm.NormalizeServiceTiers(tiers)
 }
 
 func codexModelVisible(model codexModel) bool {

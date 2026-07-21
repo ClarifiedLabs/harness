@@ -52,6 +52,7 @@ type setupProviderConfig struct {
 	ResponsesStateful   *bool                 `json:"responses_stateful,omitempty"`
 	ResponsesWebSocket  *bool                 `json:"responses_websocket,omitempty"`
 	ServerTools         []string              `json:"server_tools,omitempty"`
+	ServiceTiers        []llm.ServiceTier     `json:"service_tiers,omitempty"`
 	APIKeyEnv           []string              `json:"api_key_env,omitempty"`
 	Auth                *auth.Config          `json:"auth,omitempty"`
 	Models              []setupModelConfig    `json:"models"`
@@ -63,6 +64,7 @@ type setupModelConfig struct {
 	OutputLimit      int                   `json:"output_limit,omitempty"`
 	InputModalities  []string              `json:"input_modalities,omitempty"`
 	ServerTools      []string              `json:"server_tools,omitempty"`
+	ServiceTiers     []llm.ServiceTier     `json:"service_tiers,omitempty"`
 	Price            *llm.Price            `json:"price,omitempty"`
 	Reasoning        *bool                 `json:"reasoning,omitempty"`
 	ReasoningOptions []llm.ReasoningOption `json:"reasoning_options,omitempty"`
@@ -150,6 +152,9 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	}
 	if existingProvider.Config.ResponsesWebSocket != nil {
 		provider.ResponsesWebSocket = existingProvider.Config.ResponsesWebSocket
+	}
+	if len(existingProvider.Config.ServiceTiers) > 0 {
+		provider.ServiceTiers = llm.NormalizeServiceTiers(existingProvider.Config.ServiceTiers)
 	}
 	applySyntheticProviderDefaults(providerMeta, &provider)
 
@@ -290,6 +295,9 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			}
 			if current.ResponsesWebSocket != nil {
 				next.ResponsesWebSocket = current.ResponsesWebSocket
+			}
+			if len(current.ServiceTiers) > 0 {
+				next.ServiceTiers = llm.NormalizeServiceTiers(current.ServiceTiers)
 			}
 			applySyntheticProviderDefaults(meta, &next)
 			updated = append(updated, next)
@@ -951,12 +959,17 @@ func setupCatalog(ctx context.Context, env environment) (*modelcatalog.Catalog, 
 // setup. The complete models.dev schedule is still shown in the interactive
 // picker; it just isn't persisted.
 func setupModelFromCatalog(model modelcatalog.Model) setupModelConfig {
+	serviceTiers := llm.NormalizeServiceTiers(model.ServiceTiers)
+	for i := range serviceTiers {
+		serviceTiers[i].Price = llm.Price{}
+	}
 	cfg := setupModelConfig{
 		Name:             model.ID,
 		ContextWindow:    model.Limit.Context,
 		OutputLimit:      model.Limit.Output,
 		InputModalities:  append([]string(nil), model.Modalities.Input...),
 		ReasoningOptions: append([]llm.ReasoningOption(nil), model.ReasoningOptions...),
+		ServiceTiers:     serviceTiers,
 	}
 	reasoning := model.Reasoning
 	cfg.Reasoning = &reasoning

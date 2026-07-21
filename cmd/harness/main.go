@@ -779,6 +779,9 @@ func run(env environment) int {
 			Runtime:           runtime,
 			ContextWindow:     cfg.ContextWindow,
 			Reasoning:         nextReasoning,
+			BaseTargetID:      next.BaseTargetID,
+			Variant:           next.Variant,
+			FastTargetID:      next.FastTargetID,
 			ServerTools:       snap.ServerTools,
 			ReasoningSet:      true,
 			ResponsesStateful: snap.ResponsesStateful,
@@ -838,6 +841,9 @@ func run(env environment) int {
 			Runtime:           runtime,
 			ContextWindow:     cfg.ContextWindow,
 			Reasoning:         nextReasoning,
+			BaseTargetID:      next.BaseTargetID,
+			Variant:           next.Variant,
+			FastTargetID:      next.FastTargetID,
 			ServerTools:       snap.ServerTools,
 			ReasoningSet:      true,
 			ResponsesStateful: snap.ResponsesStateful,
@@ -986,6 +992,9 @@ func run(env environment) int {
 		Registry:               modelRegistry,
 		System:                 systemPrompt,
 		Reasoning:              reasoning,
+		BaseTargetID:           selection.BaseTargetID,
+		Variant:                selection.Variant,
+		FastTargetID:           selection.FastTargetID,
 		ImageDetail:            cfg.ImageDetail,
 		Hooks:                  hookRunner,
 		Background:             backgroundManager,
@@ -1451,6 +1460,8 @@ type modelListEntry struct {
 	ContextWindow            int        `json:"context_window,omitempty"`
 	InputModalities          []string   `json:"input_modalities,omitempty"`
 	ServerTools              []string   `json:"server_tools,omitempty"`
+	BaseTargetID             string     `json:"base_target_id,omitempty"`
+	Variant                  string     `json:"variant,omitempty"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd,omitempty"`
 	Reasoning                bool       `json:"reasoning"`
 }
@@ -1519,6 +1530,8 @@ func catalogModelListRows(catalog protocol.Catalog) []modelListEntry {
 			ContextWindow:            target.ContextWindow,
 			InputModalities:          append([]string(nil), target.InputModalities...),
 			ServerTools:              append([]string(nil), target.ServerTools...),
+			BaseTargetID:             strings.TrimSpace(target.BaseTargetID),
+			Variant:                  strings.TrimSpace(target.Variant),
 			PricePerMillionTokensUSD: modelListPrice(target.Price),
 			Reasoning:                target.Reasoning,
 		})
@@ -1782,6 +1795,24 @@ type catalogSelection struct {
 	Provider      string
 	Model         string
 	RegistryModel string
+	BaseTargetID  string
+	Variant       string
+	FastTargetID  string
+}
+
+func catalogSelectionForTarget(catalog protocol.Catalog, target protocol.Target) catalogSelection {
+	baseTargetID := target.BaseTargetID
+	if baseTargetID == "" {
+		baseTargetID = target.ID
+	}
+	return catalogSelection{
+		Provider:      target.ID,
+		Model:         target.ID,
+		RegistryModel: target.ID,
+		BaseTargetID:  baseTargetID,
+		Variant:       target.Variant,
+		FastTargetID:  fastTargetID(catalog, baseTargetID),
+	}
 }
 
 func agentModelInputs(def agentdef.Definition, provider, model string) (string, string) {
@@ -1934,10 +1965,10 @@ func resolveCatalogSelection(catalog protocol.Catalog, provider, model, preferre
 				qualified = model
 			}
 			if target, ok := catalogTarget(catalog, qualified); ok {
-				return catalogSelection{Provider: target.ID, Model: target.ID, RegistryModel: target.ID}, nil
+				return catalogSelectionForTarget(catalog, target), nil
 			}
 			if target, ok := catalogTargetForProvider(catalog, provider, model); ok {
-				return catalogSelection{Provider: target.ID, Model: target.ID, RegistryModel: target.ID}, nil
+				return catalogSelectionForTarget(catalog, target), nil
 			}
 			if _, ok := catalogTarget(catalog, model); ok {
 				return catalogSelection{}, fmt.Errorf("target %q belongs to a different provider than %q", model, provider)
@@ -1947,7 +1978,7 @@ func resolveCatalogSelection(catalog protocol.Catalog, provider, model, preferre
 	}
 	if model != "" {
 		if target, ok := catalogTarget(catalog, model); ok {
-			return catalogSelection{Provider: target.ID, Model: target.ID, RegistryModel: target.ID}, nil
+			return catalogSelectionForTarget(catalog, target), nil
 		}
 		return catalogSelection{}, fmt.Errorf("target %q is not available from the model proxy", model)
 	}
@@ -2036,6 +2067,15 @@ func catalogTargetMatches(target protocol.Target, id string) bool {
 		}
 	}
 	return false
+}
+
+func fastTargetID(catalog protocol.Catalog, baseTargetID string) string {
+	for _, target := range catalog.Targets {
+		if target.BaseTargetID == baseTargetID && strings.EqualFold(target.Variant, "fast") {
+			return target.ID
+		}
+	}
+	return ""
 }
 
 func reasoningModeForProvider(catalog protocol.Catalog, providerID string) string {

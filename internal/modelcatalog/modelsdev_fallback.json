@@ -6180,7 +6180,21 @@
               "cache_read": 0.5
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 5,
+              "output": 30,
+              "cache_read": 0.5
+            }
+          }
+        ]
       },
       "gpt-5.4-mini": {
         "id": "gpt-5.4-mini",
@@ -6214,7 +6228,21 @@
           "input": 0.75,
           "output": 4.5,
           "cache_read": 0.075
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 1.5,
+              "output": 9,
+              "cache_read": 0.15
+            }
+          }
+        ]
       },
       "gpt-5.5": {
         "id": "gpt-5.5",
@@ -6257,7 +6285,21 @@
               "cache_read": 1
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 12.5,
+              "output": 75,
+              "cache_read": 1.25
+            }
+          }
+        ]
       },
       "gpt-5.6-luna": {
         "id": "gpt-5.6-luna",
@@ -15287,7 +15329,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "claude-opus-4-7": {
         "id": "claude-opus-4-7",
@@ -15323,7 +15383,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "claude-opus-4-8": {
         "id": "claude-opus-4-8",
@@ -15359,7 +15437,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 10,
+              "output": 50,
+              "cache_read": 1,
+              "cache_write": 12.5
+            }
+          }
+        ]
       },
       "claude-sonnet-4-5": {
         "id": "claude-sonnet-4-5",
@@ -15580,7 +15676,25 @@
         "limit": {
           "context": 1000000,
           "output": 128000
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "anthropic/claude-opus-4-7": {
         "id": "anthropic/claude-opus-4-7",
@@ -15611,7 +15725,25 @@
         "limit": {
           "context": 1000000,
           "output": 128000
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "anthropic/claude-sonnet-4-5": {
         "id": "anthropic/claude-sonnet-4-5",
@@ -16062,7 +16194,21 @@
         "limit": {
           "context": 1050000,
           "output": 128000
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 5,
+              "output": 30,
+              "cache_read": 0.5
+            }
+          }
+        ]
       },
       "openai/o3": {
         "id": "openai/o3",
@@ -16370,7 +16516,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "claude-sonnet-4-6": {
         "id": "claude-sonnet-4-6",
@@ -31011,7 +31175,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "databricks-claude-opus-4-7": {
         "id": "databricks-claude-opus-4-7",
@@ -31041,7 +31223,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "databricks-claude-sonnet-4": {
         "id": "databricks-claude-sonnet-4",
@@ -31533,7 +31733,21 @@
               "cache_read": 0.5
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 5,
+              "output": 30,
+              "cache_read": 0.5
+            }
+          }
+        ]
       },
       "databricks-gpt-5-4-mini": {
         "id": "databricks-gpt-5-4-mini",
@@ -31565,7 +31779,21 @@
           "input": 0.75,
           "output": 4.5,
           "cache_read": 0.075
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 1.5,
+              "output": 9,
+              "cache_read": 0.15
+            }
+          }
+        ]
       },
       "databricks-gpt-5-4-nano": {
         "id": "databricks-gpt-5-4-nano",
@@ -31638,7 +31866,21 @@
               "cache_read": 1
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 12.5,
+              "output": 75,
+              "cache_read": 1.25
+            }
+          }
+        ]
       },
       "databricks-gpt-5-6-luna": {
         "id": "databricks-gpt-5-6-luna",
@@ -40274,7 +40516,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "claude-opus-4.7": {
         "id": "claude-opus-4.7",
@@ -40310,7 +40570,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "claude-opus-4.8": {
         "id": "claude-opus-4.8",
@@ -40346,7 +40624,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 10,
+              "output": 50,
+              "cache_read": 1,
+              "cache_write": 12.5
+            }
+          }
+        ]
       },
       "claude-sonnet-4": {
         "id": "claude-sonnet-4",
@@ -42531,7 +42827,25 @@
           "input": 4.5,
           "output": 22.5,
           "cache_read": 0.45
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "anthropic/claude-opus-4.8": {
         "id": "anthropic/claude-opus-4.8",
@@ -61822,6 +62136,80 @@
           "cache_write": 0.08333
         }
       },
+      "gemini-3.5-flash-lite": {
+        "id": "gemini-3.5-flash-lite",
+        "name": "Gemini 3.5 Flash Lite",
+        "release_date": "2026-07-21",
+        "last_updated": "2026-07-21",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "cost": {
+          "input": 0.3,
+          "output": 2.5,
+          "cache_read": 0.03,
+          "cache_write": 0.08333
+        }
+      },
+      "gemini-3.6-flash": {
+        "id": "gemini-3.6-flash",
+        "name": "Gemini 3.6 Flash",
+        "release_date": "2026-07-21",
+        "last_updated": "2026-07-21",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "cost": {
+          "input": 1.5,
+          "output": 7.5,
+          "cache_read": 0.15,
+          "cache_write": 0.08333
+        }
+      },
       "gemini-pro-latest": {
         "id": "gemini-pro-latest",
         "name": "Gemini Pro Latest",
@@ -66451,7 +66839,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "anthropic/claude-opus-4-7": {
         "id": "anthropic/claude-opus-4-7",
@@ -66490,7 +66896,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "anthropic/claude-opus-4-8": {
         "id": "anthropic/claude-opus-4-8",
@@ -68298,7 +68722,21 @@
               "cache_read": 0.5
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 5,
+              "output": 30,
+              "cache_read": 0.5
+            }
+          }
+        ]
       },
       "openai/gpt-5.4-mini": {
         "id": "openai/gpt-5.4-mini",
@@ -68332,7 +68770,21 @@
           "input": 0.75,
           "output": 4.5,
           "cache_read": 0.075
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 1.5,
+              "output": 9,
+              "cache_read": 0.15
+            }
+          }
+        ]
       },
       "openai/gpt-5.4-nano": {
         "id": "openai/gpt-5.4-nano",
@@ -68409,7 +68861,21 @@
               "cache_read": 1
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 12.5,
+              "output": 75,
+              "cache_read": 1.25
+            }
+          }
+        ]
       },
       "openai/o1": {
         "id": "openai/o1",
@@ -94042,7 +94508,21 @@
               "cache_read": 0.5
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 5,
+              "output": 30,
+              "cache_read": 0.5
+            }
+          }
+        ]
       },
       "gpt-5.4-mini": {
         "id": "gpt-5.4-mini",
@@ -94076,7 +94556,21 @@
           "input": 0.75,
           "output": 4.5,
           "cache_read": 0.075
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 1.5,
+              "output": 9,
+              "cache_read": 0.15
+            }
+          }
+        ]
       },
       "gpt-5.4-nano": {
         "id": "gpt-5.4-nano",
@@ -94191,7 +94685,21 @@
               "cache_read": 1
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 12.5,
+              "output": 75,
+              "cache_read": 1.25
+            }
+          }
+        ]
       },
       "gpt-5.5-pro": {
         "id": "gpt-5.5-pro",
@@ -94276,7 +94784,22 @@
               "cache_write": 12.5
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 10,
+              "output": 60,
+              "cache_read": 1,
+              "cache_write": 12.5
+            }
+          }
+        ]
       },
       "gpt-5.6-luna": {
         "id": "gpt-5.6-luna",
@@ -94322,7 +94845,22 @@
               "cache_write": 2.5
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 2,
+              "output": 12,
+              "cache_read": 0.2,
+              "cache_write": 2.5
+            }
+          }
+        ]
       },
       "gpt-5.6-sol": {
         "id": "gpt-5.6-sol",
@@ -94368,7 +94906,22 @@
               "cache_write": 12.5
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 10,
+              "output": 60,
+              "cache_read": 1,
+              "cache_write": 12.5
+            }
+          }
+        ]
       },
       "gpt-5.6-terra": {
         "id": "gpt-5.6-terra",
@@ -94414,7 +94967,22 @@
               "cache_write": 6.25
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 5,
+              "output": 30,
+              "cache_read": 0.5,
+              "cache_write": 6.25
+            }
+          }
+        ]
       },
       "gpt-image-1": {
         "id": "gpt-image-1",
@@ -96737,6 +97305,32 @@
           "input": 0.95,
           "output": 4,
           "cache_read": 0.19
+        }
+      },
+      "laguna-s-2.1-free": {
+        "id": "laguna-s-2.1-free",
+        "name": "Laguna S 2.1 Free",
+        "release_date": "2026-07-21",
+        "last_updated": "2026-07-21",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 256000,
+          "output": 32000
         }
       },
       "ling-2.6-flash-free": {
@@ -106497,7 +107091,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "anthropic/claude-opus-4.7": {
         "id": "anthropic/claude-opus-4.7",
@@ -106531,7 +107143,25 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "anthropic/claude-sonnet-4": {
         "id": "anthropic/claude-sonnet-4",
@@ -107946,7 +108576,21 @@
               "cache_read": 0.5
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 5,
+              "output": 30,
+              "cache_read": 0.5
+            }
+          }
+        ]
       },
       "openai/gpt-5.4-mini": {
         "id": "openai/gpt-5.4-mini",
@@ -107968,7 +108612,21 @@
           "input": 0.75,
           "output": 4.5,
           "cache_read": 0.075
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 1.5,
+              "output": 9,
+              "cache_read": 0.15
+            }
+          }
+        ]
       },
       "openai/gpt-5.4-nano": {
         "id": "openai/gpt-5.4-nano",
@@ -108059,7 +108717,21 @@
               "cache_read": 1
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 12.5,
+              "output": 75,
+              "cache_read": 1.25
+            }
+          }
+        ]
       },
       "openai/gpt-5.5-pro": {
         "id": "openai/gpt-5.5-pro",
@@ -123271,7 +123943,25 @@
         "limit": {
           "context": 1000000,
           "output": 128000
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "speed": "fast",
+              "betas": [
+                "fast-mode-2026-02-01"
+              ]
+            },
+            "price": {
+              "input": 30,
+              "output": 150,
+              "cache_read": 3,
+              "cache_write": 37.5
+            }
+          }
+        ]
       },
       "claude-opus-4-8": {
         "id": "claude-opus-4-8",
@@ -123579,7 +124269,21 @@
         "limit": {
           "context": 1050000,
           "output": 128000
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 5,
+              "output": 30,
+              "cache_read": 0.5
+            }
+          }
+        ]
       },
       "openai-gpt-5.5": {
         "id": "openai-gpt-5.5",
@@ -128094,6 +128798,52 @@
           "output": 9.45,
           "cache_read": 0.155,
           "cache_write": 0.086
+        }
+      },
+      "gemini-3-5-flash-lite": {
+        "id": "gemini-3-5-flash-lite",
+        "name": "Gemini 3.5 Flash-Lite",
+        "release_date": "2026-07-09",
+        "last_updated": "2026-07-21",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio"
+          ]
+        },
+        "reasoning": true,
+        "limit": {
+          "context": 1000000,
+          "output": 65536
+        },
+        "cost": {
+          "input": 0.375,
+          "output": 3.125,
+          "cache_read": 0.0375
+        }
+      },
+      "gemini-3-6-flash": {
+        "id": "gemini-3-6-flash",
+        "name": "Gemini 3.6 Flash",
+        "release_date": "2026-07-09",
+        "last_updated": "2026-07-21",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio"
+          ]
+        },
+        "reasoning": true,
+        "limit": {
+          "context": 1000000,
+          "output": 65536
+        },
+        "cost": {
+          "input": 1.875,
+          "output": 9.375,
+          "cache_read": 0.1875
         }
       },
       "gemini-3-flash-preview": {
@@ -141948,7 +142698,21 @@
               "cache_read": 1
             }
           ]
-        }
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "priority"
+            },
+            "price": {
+              "input": 12.5,
+              "output": 75,
+              "cache_read": 1.25
+            }
+          }
+        ]
       },
       "openai/gpt-5.5-instant": {
         "id": "openai/gpt-5.5-instant",

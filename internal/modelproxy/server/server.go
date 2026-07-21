@@ -175,9 +175,12 @@ type catalogSnapshot struct {
 }
 
 type resolvedTarget struct {
-	targetID string
-	pc       llm.ProviderConfig
-	entry    llm.ModelEntry
+	targetID     string
+	baseTargetID string
+	variant      string
+	serviceTier  llm.ServiceTier
+	pc           llm.ProviderConfig
+	entry        llm.ModelEntry
 }
 
 // metricsCollectors holds the pre-registered metric families the proxy stamps
@@ -510,6 +513,7 @@ func (h *Handler) pricedProviders(md *modelcatalog.Catalog) ([]llm.ProviderConfi
 			}
 			entry.Price = info.Price
 			entry.InputModalities = append([]string(nil), info.InputModalities...)
+			entry.ServiceTiers = llm.NormalizeServiceTiers(info.ServiceTiers)
 			cp.Models = append(cp.Models, entry)
 		}
 		if len(cp.Models) == 0 {
@@ -730,6 +734,10 @@ func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
 		return
 	}
+	if err := applyServiceTierForTarget(target, &req.Request); err != nil {
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
+		return
+	}
 	req.Request.Model = target.entry.Name
 	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
 	_, req.Request = prepareProviderRequest(req.Request)
@@ -894,6 +902,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	targetID = target.targetID
 	providerID = target.pc.Name
 	model = target.entry.Name
+	if err := applyServiceTierForTarget(target, &req.Request); err != nil {
+		streamErr = err.Error()
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
+		return
+	}
 	req.Request.Model = model
 	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
 	req.Request.Reasoning = h.reasoningForTarget(target, req.ReasoningProfile, req.Request.Reasoning)
@@ -913,11 +926,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	apiType = opts.Provider
 	stateful := providerResponsesStateful(target.pc)
-	cacheKey := h.continuationKey(targetID, sessionKey)
+	cacheKey := h.continuationKey(target.baseTargetID, sessionKey)
 	fullRequest := req.Request
 	fullRequest.Messages = append([]llm.Message(nil), req.Request.Messages...)
 	req.Request = h.applyContinuation(cacheKey, stateful, req.Request)
-	provider, err := h.streamProvider(opts, targetID, sessionKey)
+	provider, err := h.streamProvider(opts, target.baseTargetID, sessionKey)
 	if err != nil {
 		streamErr = err.Error()
 		writeError(cw, http.StatusBadRequest, protocol.ErrorFrom(err))
@@ -1184,6 +1197,12 @@ func mergeUsage(acc, in llm.Usage) llm.Usage {
 	if in.CostKnown {
 		acc.CostUSD = in.CostUSD
 		acc.CostKnown = true
+	}
+	if in.ServiceTier != "" {
+		acc.ServiceTier = in.ServiceTier
+	}
+	if in.Speed != "" {
+		acc.Speed = in.Speed
 	}
 	return acc
 }
@@ -1624,6 +1643,23 @@ func resolveServerToolsForTarget(target resolvedTarget, requested []llm.ServerTo
 	return out
 }
 
+func applyServiceTierForTarget(target resolvedTarget, req *llm.Request) error {
+	if req == nil {
+		return nil
+	}
+	req.ServiceTier = ""
+	req.Speed = ""
+	req.Betas = nil
+	if target.variant == "" {
+		return nil
+	}
+	tier := target.serviceTier
+	req.ServiceTier = tier.Request.ServiceTier
+	req.Speed = tier.Request.Speed
+	req.Betas = append([]string(nil), tier.Request.Betas...)
+	return nil
+}
+
 func targetServerTools(pc llm.ProviderConfig, entry llm.ModelEntry) []string {
 	tools := make([]string, 0, len(pc.ServerTools)+len(entry.ServerTools)+1)
 	tools = append(tools, pc.ServerTools...)
@@ -1927,11 +1963,16 @@ func DefaultConfigDir(getenv func(string) string) string {
 
 func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.Pricer) (protocol.Catalog, map[string]resolvedTarget, error) {
 	out := protocol.Catalog{}
-	modelCounts := map[string]int{}
+	aliasCounts := map[string]int{}
 	for _, pc := range providers {
 		for _, entry := range pc.Models {
 			if entry.Name != "" {
-				modelCounts[entry.Name]++
+				aliasCounts[entry.Name]++
+				for _, tier := range llm.ModelServiceTiers(pc, entry) {
+					if !defaultServiceTier(tier) {
+						aliasCounts[entry.Name+":"+tier.ID]++
+					}
+				}
 			}
 		}
 	}
@@ -1945,8 +1986,11 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				continue
 			}
 			id := pc.Name + ":" + entry.Name
+			if _, exists := targets[id]; exists {
+				return protocol.Catalog{}, nil, fmt.Errorf("model proxy: target %q collides with another target or alias", id)
+			}
 			aliases := []string{id}
-			if modelCounts[entry.Name] == 1 {
+			if aliasCounts[entry.Name] == 1 {
 				aliases = append(aliases, entry.Name)
 			}
 			price := entry.Price
@@ -1971,10 +2015,45 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				Reasoning:       targetReasoningSupported(entry),
 			}
 			out.Targets = append(out.Targets, target)
-			rt := resolvedTarget{targetID: id, pc: pc, entry: entry}
-			targets[id] = rt
+			rt := resolvedTarget{targetID: id, baseTargetID: id, pc: pc, entry: entry}
 			for _, alias := range aliases {
+				if existing, exists := targets[alias]; exists && existing.targetID != rt.targetID {
+					return protocol.Catalog{}, nil, fmt.Errorf("model proxy: target alias %q collides with target %q", alias, existing.targetID)
+				}
 				targets[alias] = rt
+			}
+			for _, tier := range llm.ModelServiceTiers(pc, entry) {
+				if defaultServiceTier(tier) {
+					continue
+				}
+				variantID := id + ":" + tier.ID
+				if _, exists := targets[variantID]; exists {
+					return protocol.Catalog{}, nil, fmt.Errorf("model proxy: target variant %q collides with another target", variantID)
+				}
+				variantAliases := []string{variantID}
+				if aliasCounts[entry.Name+":"+tier.ID] == 1 {
+					variantAliases = append(variantAliases, entry.Name+":"+tier.ID)
+				}
+				label := tier.Name
+				if label == "" {
+					label = tier.ID
+				}
+				variantTarget := target
+				variantTarget.ID = variantID
+				variantTarget.Aliases = variantAliases
+				variantTarget.DisplayName = entry.Name + " (" + label + ")"
+				variantTarget.ModelLabel = variantTarget.DisplayName
+				variantTarget.BaseTargetID = id
+				variantTarget.Variant = tier.ID
+				variantTarget.Price = tier.Price
+				out.Targets = append(out.Targets, variantTarget)
+				variantRT := resolvedTarget{targetID: variantID, baseTargetID: id, variant: tier.ID, serviceTier: tier, pc: pc, entry: entry}
+				for _, alias := range variantAliases {
+					if existing, exists := targets[alias]; exists && existing.targetID != variantRT.targetID {
+						return protocol.Catalog{}, nil, fmt.Errorf("model proxy: target alias %q collides with target %q", alias, existing.targetID)
+					}
+					targets[alias] = variantRT
+				}
 			}
 		}
 	}
@@ -1982,6 +2061,18 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 		return protocol.Catalog{}, nil, fmt.Errorf("model proxy: no configured models")
 	}
 	return out, targets, nil
+}
+
+func defaultServiceTier(tier llm.ServiceTier) bool {
+	if tier.Request.Speed != "" || len(tier.Request.Betas) > 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(tier.Request.ServiceTier)) {
+	case "", "default", "standard", "standard_only":
+		return true
+	default:
+		return false
+	}
 }
 
 func providerResponsesStateful(pc llm.ProviderConfig) bool {

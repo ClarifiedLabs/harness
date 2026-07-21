@@ -64,6 +64,24 @@ func TestBuildRequestMaxTokensDefaultSmallWindow(t *testing.T) {
 	}
 }
 
+func TestBuildRequestServiceTier(t *testing.T) {
+	req := basicRequest()
+	req.ServiceTier = "standard_only"
+	w := buildRequest(req, 1_000_000, 0)
+	if w.ServiceTier != "standard_only" {
+		t.Fatalf("service_tier = %q, want standard_only", w.ServiceTier)
+	}
+}
+
+func TestBuildRequestSpeed(t *testing.T) {
+	req := basicRequest()
+	req.Speed = "fast"
+	w := buildRequest(req, 1_000_000, 0)
+	if w.Speed != "fast" {
+		t.Fatalf("speed = %q, want fast", w.Speed)
+	}
+}
+
 func TestBuildRequestMaxTokensDefaultLargeWindow(t *testing.T) {
 	req := basicRequest()
 	// A large window uses a quarter of the context window by default.

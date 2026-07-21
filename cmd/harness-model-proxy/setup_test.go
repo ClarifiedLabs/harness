@@ -113,6 +113,12 @@ func TestRunSetupWritesManagedConfigWithoutPrices(t *testing.T) {
 					Modalities:  modelcatalog.Modalities{Input: []string{"text", "image"}},
 					Limit:       modelcatalog.Limit{Context: 123000, Output: 12000},
 					Cost:        llm.Price{Input: 2, Output: 4, CacheRead: 0.5, CacheWrite: 1},
+					ServiceTiers: []llm.ServiceTier{{
+						ID:      "fast",
+						Name:    "Fast",
+						Request: llm.ServiceTierRequest{ServiceTier: "priority"},
+						Price:   llm.Price{Input: 4, Output: 8},
+					}},
 				},
 			},
 		},
@@ -166,6 +172,10 @@ func TestRunSetupWritesManagedConfigWithoutPrices(t *testing.T) {
 	}
 	if !slices.Equal(provider.Models[0].InputModalities, []string{"text", "image"}) {
 		t.Fatalf("managed model input modalities = %+v, want text,image", provider.Models[0].InputModalities)
+	}
+	fast, ok := llm.ResolveServiceTier("fast", provider.Models[0].ServiceTiers)
+	if !ok || fast.ID != "fast" || fast.Request.ServiceTier != "priority" || !fast.Price.IsZero() {
+		t.Fatalf("managed model fast tier = %+v, %v", fast, ok)
 	}
 }
 
@@ -286,6 +296,9 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	}
 	if len(provider.Models[0].ReasoningOptions) != 1 || !slices.Contains(provider.Models[0].ReasoningOptions[0].Values, "xhigh") {
 		t.Fatalf("provider reasoning options = %+v, want Codex effort values", provider.Models[0].ReasoningOptions)
+	}
+	if fast, ok := llm.ResolveServiceTier("fast", provider.Models[0].ServiceTiers); !ok || fast.ID != "fast" || fast.Request.ServiceTier != "priority" {
+		t.Fatalf("provider fast tier = %+v, %v", fast, ok)
 	}
 	if !provider.Managed {
 		t.Fatalf("codex provider should be managed: %+v", provider)
@@ -1493,7 +1506,10 @@ func testCodexModelsCatalogJSON() string {
         {"effort": "xhigh"}
       ],
       "visibility": "list",
-      "supported_in_api": true
+      "supported_in_api": true,
+      "service_tiers": [{"id":"priority","name":"Fast","description":"Lower latency"}],
+      "default_service_tier": null,
+      "additional_speed_tiers": ["fast"]
     },
     {
       "slug": "codex-auto-review",

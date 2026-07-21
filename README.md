@@ -25,6 +25,13 @@ to credentials that are usable outside of your local machine/network[^1].
 
 [^1]: The Model & MCP proxies both support optional API keys for Harness CLI -> Proxy access. These services are intended to be exposed only on localhost or within a trusted local network.
 
+For models that expose request-level service tiers, the model proxy publishes a
+separate target for each mode, such as `openai-codex:gpt-5.6-sol:fast`. Select it
+like any other model, with its own catalog price. `/fast` toggles between the
+current model's base and fast sibling when one is available. The proxy maps that
+target to provider-specific controls such as OpenAI/Codex `priority` or
+Anthropic `speed`.
+
 ```text
                                +-----------------------+
 +----------------------+       | Env with Credentials  |

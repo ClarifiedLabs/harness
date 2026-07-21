@@ -152,6 +152,55 @@ func TestManagedProviderResolvesPriceFromModelsDevCatalog(t *testing.T) {
 	}
 }
 
+func TestManagedProviderResolvesServiceTierAndModePriceFromModelsDevCatalog(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "responses",
+  "base_url": "https://api.openai.com/v1",
+  "managed": true,
+  "models": [{"name":"gpt-fast","context_window":123000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	md := modelsDevCatalogWith("openai", "gpt-fast", llm.Price{Input: 2, Output: 4})
+	model := md.Providers["openai"].Models["gpt-fast"]
+	model.ServiceTiers = []llm.ServiceTier{{
+		ID:      "fast",
+		Name:    "Fast",
+		Request: llm.ServiceTierRequest{ServiceTier: "priority"},
+		Price:   llm.Price{Input: 4, Output: 8},
+	}}
+	provider := md.Providers["openai"]
+	provider.Models["gpt-fast"] = model
+	md.Providers["openai"] = provider
+
+	handler, err := NewHandler(Options{
+		ConfigDir:        dir,
+		Config:           Config{ProviderConfigs: []string{"openai.json"}},
+		ModelsDevCatalog: md,
+		New:              fixedUsageProvider(llm.Usage{}),
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	targets := handler.Catalog().Targets
+	if len(targets) != 2 {
+		t.Fatalf("served targets = %+v, want base and fast", targets)
+	}
+	fast := targets[1]
+	if fast.ID != "openai:gpt-fast:fast" || fast.BaseTargetID != "openai:gpt-fast" || fast.Variant != "fast" || fast.Price.Output != 8 {
+		t.Fatalf("served fast target = %+v", fast)
+	}
+	usage := handler.priceUsage(fast.ID, llm.Request{ServiceTier: "priority"}, llm.Usage{
+		InputTokens:  1_000_000,
+		OutputTokens: 1_000_000,
+	})
+	if !usage.CostKnown || usage.CostUSD != 12 {
+		t.Fatalf("fast usage = %+v, want known $12", usage)
+	}
+}
+
 // TestManagedPriceSourceResolvesFromOtherProvider: a managed config whose
 // price_source names a different models.dev provider resolves its prices from
 // that provider rather than its own name.

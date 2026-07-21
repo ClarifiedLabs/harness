@@ -39,6 +39,69 @@ func TestFlatPricer(t *testing.T) {
 	}
 }
 
+func TestFlatPricerLeavesNonstandardServiceTiersUnpriced(t *testing.T) {
+	model := llm.ModelEntry{Name: "alpha", Price: llm.Price{Input: 2, Output: 4}}
+	for _, tier := range []string{"auto", "flex", "priority"} {
+		got := Flat{}.PriceUsage(Input{
+			Model:   model,
+			Request: llm.Request{ServiceTier: tier},
+			Usage:   llm.Usage{InputTokens: 1000, OutputTokens: 1000},
+		})
+		if !got.Handled || got.Known {
+			t.Fatalf("%s price = %+v, want handled but unknown", tier, got)
+		}
+	}
+	got := Flat{}.PriceUsage(Input{
+		Model:   model,
+		Request: llm.Request{ServiceTier: "default"},
+		Usage:   llm.Usage{InputTokens: 1000, OutputTokens: 1000},
+	})
+	if !got.Handled || !got.Known {
+		t.Fatalf("default price = %+v, want known", got)
+	}
+}
+
+func TestFlatPricerUsesCatalogModePrice(t *testing.T) {
+	model := llm.ModelEntry{
+		Name:  "alpha",
+		Price: llm.Price{Input: 2, Output: 4},
+		ServiceTiers: []llm.ServiceTier{{
+			ID:      "priority",
+			Aliases: []string{"fast"},
+			Request: llm.ServiceTierRequest{ServiceTier: "priority"},
+			Price:   llm.Price{Input: 4, Output: 8},
+		}},
+	}
+	in := Input{
+		Model:   model,
+		Request: llm.Request{ServiceTier: "priority"},
+		Usage:   llm.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000},
+	}
+	assertKnownCost(t, Flat{}.PriceUsage(in), 12)
+
+	// A provider can accept priority but gracefully serve standard. Response
+	// metadata wins over the requested mode so accounting uses the base rate.
+	in.Usage.ServiceTier = "default"
+	assertKnownCost(t, Flat{}.PriceUsage(in), 6)
+}
+
+func TestFlatPricerUsesCatalogSpeedPrice(t *testing.T) {
+	model := llm.ModelEntry{
+		Name:  "claude",
+		Price: llm.Price{Input: 5, Output: 25},
+		ServiceTiers: []llm.ServiceTier{{
+			ID:      "fast",
+			Request: llm.ServiceTierRequest{Speed: "fast"},
+			Price:   llm.Price{Input: 30, Output: 150},
+		}},
+	}
+	assertKnownCost(t, Flat{}.PriceUsage(Input{
+		Model:   model,
+		Request: llm.Request{Speed: "fast"},
+		Usage:   llm.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000, Speed: "fast"},
+	}), 180)
+}
+
 func TestFlatPricerTieredPricing(t *testing.T) {
 	pricer := NewComposite()
 	provider := llm.ProviderConfig{Name: "sakana"}

@@ -72,6 +72,16 @@ type Request struct {
 	Temperature *float64        `json:"temperature,omitempty"` // nil = omit
 	Reasoning   ReasoningConfig `json:"reasoning,omitempty"`
 	StopSeqs    []string        `json:"stop_seqs,omitempty"`
+	// ServiceTier selects a provider-advertised scheduling/cost tier such as
+	// priority or flex. Before provider dispatch the model proxy resolves the
+	// selected catalog target into this wire value and any Speed/Betas below.
+	ServiceTier string `json:"service_tier,omitempty"`
+	// Speed selects a provider's named inference speed when that provider does
+	// not use service_tier (for example Anthropic fast mode).
+	Speed string `json:"speed,omitempty"`
+	// Betas contains bounded provider beta feature identifiers required by the
+	// selected catalog tier. Dialects ignore identifiers they do not own.
+	Betas []string `json:"betas,omitempty"`
 
 	// EstimatedInputTokens is the caller's estimate of all model-visible input
 	// tokens for this request. Dialects use it to keep max output tokens within
@@ -221,4 +231,9 @@ type Usage struct {
 	ReasoningTokens  int     `json:"reasoning_tokens"`
 	CostUSD          float64 `json:"cost_usd,omitempty"`
 	CostKnown        bool    `json:"cost_known,omitempty"`
+	// ServiceTier and Speed report the tier actually served when the provider
+	// exposes it. They let the proxy choose standard versus mode-specific rates
+	// after graceful downgrades.
+	ServiceTier string `json:"service_tier,omitempty"`
+	Speed       string `json:"speed,omitempty"`
 }

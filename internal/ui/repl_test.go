@@ -1762,6 +1762,76 @@ func TestREPLReasoningCommandSendsExplicitNone(t *testing.T) {
 	}
 }
 
+func TestREPLFastCommandSwitchesSiblingTargetsWithoutRotatingSession(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("one")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("two")}, Stop: llm.StopEndTurn},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+	baseTarget := "anthropic:claude-opus-4-8"
+	fastTarget := baseTarget + ":fast"
+	app.Provider = baseTarget
+	app.Model = baseTarget
+	app.RegistryModel = baseTarget
+	app.BaseTargetID = baseTarget
+	app.FastTargetID = fastTarget
+	app.Agent.SetModel(baseTarget, 0)
+	app.SwitchModel = func(model string, reasoning llm.ReasoningConfig) (ModelSelection, error) {
+		selection := ModelSelection{
+			Provider:      model,
+			Model:         model,
+			RegistryModel: model,
+			BaseURL:       "proxy",
+			Runtime:       fp,
+			Reasoning:     reasoning,
+			BaseTargetID:  baseTarget,
+			FastTargetID:  fastTarget,
+			ReasoningSet:  true,
+		}
+		switch model {
+		case baseTarget:
+			return selection, nil
+		case fastTarget:
+			selection.Variant = "fast"
+			return selection, nil
+		default:
+			return ModelSelection{}, fmt.Errorf("unknown model %q", model)
+		}
+	}
+
+	input := strings.NewReader("/fast\none\n/fast status\n/fast\ntwo\n/exit\n")
+	if code := Run(input, app, nil); code != 0 {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 2 {
+		t.Fatalf("provider requests = %d, want 2", fp.RequestCount())
+	}
+	if fp.Requests[0].Model != fastTarget || fp.Requests[1].Model != baseTarget {
+		t.Fatalf("request models = %q then %q, want fast then base", fp.Requests[0].Model, fp.Requests[1].Model)
+	}
+	if fp.Requests[0].ProxySessionID == "" || fp.Requests[0].ProxySessionID != fp.Requests[1].ProxySessionID {
+		t.Fatalf("proxy session IDs = %q then %q, want preserved across sibling variants", fp.Requests[0].ProxySessionID, fp.Requests[1].ProxySessionID)
+	}
+	for _, want := range []string{"[fast mode: on]", "[fast mode: off]"} {
+		if !strings.Contains(errw.String(), want) {
+			t.Fatalf("output missing %q: %s", want, errw.String())
+		}
+	}
+}
+
+func TestREPLFastCommandReportsUnavailableForCurrentModel(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+
+	if code := Run(strings.NewReader("/fast\n/fast status\n/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := strings.Count(errw.String(), "[fast mode unavailable for current model]"); got != 2 {
+		t.Fatalf("unavailable notices = %d, want 2; output=%q", got, errw.String())
+	}
+}
+
 func TestREPLEffortCommandRejectsInvalidProfileForCurrentModel(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{

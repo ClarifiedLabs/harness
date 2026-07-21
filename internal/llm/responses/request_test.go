@@ -63,6 +63,15 @@ func TestBuildRequestMaxTokensUsesMaxOutputTokens(t *testing.T) {
 	}
 }
 
+func TestBuildRequestServiceTier(t *testing.T) {
+	req := basicRequest()
+	req.ServiceTier = "flex"
+	w := buildRequest(req, 0, 0)
+	if w.ServiceTier != "flex" {
+		t.Fatalf("service_tier = %q, want flex", w.ServiceTier)
+	}
+}
+
 func TestBuildRequestMaxOutputTokensFloorLargeWindow(t *testing.T) {
 	// A large window uses a quarter of the context window by default.
 	w := buildRequest(basicRequest(), 1_000_000, 0)
