@@ -3797,7 +3797,11 @@ func TestREPLDuringPromptSteerInjectsBeforeNextModelRound(t *testing.T) {
 	ag.SetSystem("you are a test")
 	ag.SetSleep(func(time.Duration) {})
 	app.Agent = ag
-	app.Steer = func(input agent.SteerInput) { ag.SteerContent(input) }
+	steerQueued := make(chan struct{})
+	app.Steer = func(input agent.SteerInput) {
+		ag.SteerContent(input)
+		close(steerQueued)
+	}
 	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
 
 	pr, pw := io.Pipe()
@@ -3817,6 +3821,16 @@ func TestREPLDuringPromptSteerInjectsBeforeNextModelRound(t *testing.T) {
 		t.Fatal("tool did not run")
 	}
 	writePipe(t, pw, "redirect now\r")
+
+	// A successful pipe write only means the reader consumed the bytes. Wait for
+	// the REPL loop to prepare and queue the steer before letting the tool return,
+	// so the loop's next drainSteer is guaranteed to see it (otherwise the steer
+	// races the drain and is recovered as a leftover next prompt instead).
+	select {
+	case <-steerQueued:
+	case <-time.After(time.Second):
+		t.Fatal("steer was not queued")
+	}
 
 	// The steer must land before promptDone: the second model request fires while
 	// the turn is still active and carries the steered text.
