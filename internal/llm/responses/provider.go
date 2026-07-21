@@ -310,7 +310,7 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 		if event.Response != nil && event.Response.Error != nil {
 			apiErr.Code = event.Response.Error.Code
 			apiErr.Message = event.Response.Error.Message
-			apiErr.Retryable = retryableErrorCode(apiErr.Code)
+			apiErr.Retryable = llm.RetryableErrorCode(apiErr.Code)
 		}
 		applyRetryAfterHint(apiErr)
 		return false, apiErr
@@ -338,7 +338,7 @@ func streamError(event wireEvent) *llm.APIError {
 			code = event.Error.Type
 		}
 	}
-	apiErr := &llm.APIError{Code: code, Message: message, Retryable: retryableErrorCode(code)}
+	apiErr := &llm.APIError{Code: code, Message: message, Retryable: llm.RetryableErrorCode(code)}
 	if apiErr.Message == "" {
 		apiErr.Message = "stream error"
 	}
@@ -390,12 +390,4 @@ func parseErrorResponse(resp *http.Response) *llm.APIError {
 		apiErr.Code = errCode
 	}
 	return apiErr
-}
-
-func retryableErrorCode(code string) bool {
-	switch code {
-	case "server_error", "rate_limit_exceeded", "rate_limit_error":
-		return true
-	}
-	return false
 }

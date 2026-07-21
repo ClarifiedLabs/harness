@@ -74,7 +74,7 @@ func (a *toolAssembler) flush(yield func(llm.StreamEvent, error) bool) (ok bool,
 		t := a.pending[i]
 		args := t.args
 		if len(args) == 0 {
-			args = []byte(emptyArgs)
+			args = []byte(llm.EmptyArgs)
 		}
 		input, err := llm.NormalizeToolInputObject(args)
 		invalidInputError := ""

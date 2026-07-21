@@ -115,7 +115,7 @@ func (p *Provider) connect(ctx context.Context, body []byte, promptCacheKey stri
 			}
 			llm.ApplyPromptCacheAffinityHeaders(r.Header, p.promptCache.AffinityHeaders, promptCacheKey)
 		},
-		ParseError: parseErrorResponse,
+		ParseError: llm.ParseErrorResponseByType,
 		Sleep:      p.sleep,
 	}, body, yield)
 }
@@ -260,15 +260,6 @@ func normalizeUsage(u *wireUsage) llm.Usage {
 	}
 }
 
-// parseErrorResponse maps a non-2xx HTTP response onto an *llm.APIError via the
-// shared envelope parser; Chat Completions' error code is the envelope's type
-// field.
-func parseErrorResponse(resp *http.Response) *llm.APIError {
-	apiErr, errType, _ := llm.ParseErrorResponse(resp)
-	apiErr.Code = errType
-	return apiErr
-}
-
 func streamError(err *wireError) *llm.APIError {
 	code := err.Type
 	if code == "" {
@@ -277,7 +268,7 @@ func streamError(err *wireError) *llm.APIError {
 	apiErr := &llm.APIError{
 		Code:      code,
 		Message:   err.Message,
-		Retryable: retryableStreamErrorCode(code),
+		Retryable: llm.RetryableErrorCode(code),
 	}
 	if apiErr.Message == "" {
 		apiErr.Message = "stream error"
@@ -286,15 +277,6 @@ func streamError(err *wireError) *llm.APIError {
 		apiErr.RetryAfter = retry.ParseRetryDelayHint(apiErr.Message)
 	}
 	return apiErr
-}
-
-func retryableStreamErrorCode(code string) bool {
-	switch code {
-	case "server_error", "rate_limit_exceeded", "rate_limit_error":
-		return true
-	default:
-		return false
-	}
 }
 
 // normalizeStopReason maps OpenAI finish_reason values onto the four normalized

@@ -59,7 +59,7 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return llm.InputTokenCount{}, parseErrorResponse(resp)
+		return llm.InputTokenCount{}, llm.ParseErrorResponseByType(resp)
 	}
 	var out countResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {

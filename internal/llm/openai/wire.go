@@ -7,15 +7,6 @@ import (
 	"harness/internal/llm"
 )
 
-// errorResultPrefix marks a failed tool result. OpenAI tool messages have no
-// is_error field, so error results carry this prefix in the content string
-// (design §4).
-const errorResultPrefix = "ERROR: "
-
-// emptyArgs is the canonical serialization for a tool call with no arguments.
-// OpenAI requires function.arguments to be a JSON string, never "" (design §4).
-const emptyArgs = "{}"
-
 // wireRequest is the OpenAI Chat Completions request body. MaxTokens is a
 // pointer so it is omitted entirely when unset (compatible servers pick their
 // own defaults, design §5.4).
@@ -281,7 +272,7 @@ func maxTokens(req llm.Request, contextWindow, outputLimit, minOutputTokens int)
 func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
 	switch tool.Kind {
 	case llm.ServerToolKindOpenRouterWebSearch:
-		return wireTool{Type: "openrouter:web_search", Parameters: rawObjectOrNil(tool.Parameters)}, true
+		return wireTool{Type: "openrouter:web_search", Parameters: llm.RawObjectOrNil(tool.Parameters)}, true
 	case llm.ServerToolKindMimoWebSearch:
 		maxKeyword := 3
 		forceSearch := false
@@ -298,17 +289,10 @@ func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
 		}}, true
 	case llm.ServerToolKindOpenAIWebSearch, "":
 		if tool.Name == llm.ServerToolWebSearch {
-			return wireTool{Type: "web_search", Parameters: rawObjectOrNil(tool.Parameters)}, true
+			return wireTool{Type: "web_search", Parameters: llm.RawObjectOrNil(tool.Parameters)}, true
 		}
 	}
 	return wireTool{}, false
-}
-
-func rawObjectOrNil(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil
-	}
-	return raw
 }
 
 func appendSystemContext(system, contextText string) string {
@@ -388,14 +372,14 @@ func buildMessages(m llm.Message) []wireMessage {
 			parts = append(parts, wireContentPart{
 				Type: "image_url",
 				ImageURL: &wireImageURL{
-					URL:    imageDataURL(b),
+					URL:    llm.ImageDataURL(b),
 					Detail: b.ImageDetail,
 				},
 			})
 		case llm.BlockToolUse:
 			args := string(b.ToolInput)
 			if args == "" {
-				args = emptyArgs
+				args = llm.EmptyArgs
 			}
 			calls = append(calls, wireToolCall{
 				ID:   b.ToolUseID,
@@ -408,7 +392,7 @@ func buildMessages(m llm.Message) []wireMessage {
 		case llm.BlockToolResult:
 			content := b.ResultText
 			if b.ResultError {
-				content = errorResultPrefix + content
+				content = llm.ErrorResultPrefix + content
 			}
 			results = append(results, wireMessage{
 				Role:       "tool",
@@ -433,8 +417,4 @@ func buildMessages(m llm.Message) []wireMessage {
 		msg.Content = text
 	}
 	return []wireMessage{msg}
-}
-
-func imageDataURL(b llm.ContentBlock) string {
-	return "data:" + b.ImageMediaType + ";base64," + b.ImageData
 }

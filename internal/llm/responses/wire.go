@@ -6,13 +6,6 @@ import (
 	"harness/internal/llm"
 )
 
-// errorResultPrefix marks a failed tool result. Responses function_call_output
-// items have no is_error field, so error results carry this prefix in output.
-const errorResultPrefix = "ERROR: "
-
-// emptyArgs is the canonical serialization for a tool call with no arguments.
-const emptyArgs = "{}"
-
 // minMaxOutputTokens is the smallest max_output_tokens the OpenAI Responses API
 // accepts. Providers reject values below this with an invalid_request_error, so
 // a positive resolved cap that falls under the floor (e.g. a nearly-full context
@@ -261,20 +254,13 @@ func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opt
 func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
 	switch tool.Kind {
 	case llm.ServerToolKindOpenRouterWebSearch:
-		return wireTool{Type: "openrouter:web_search", Parameters: rawObjectOrNil(tool.Parameters)}, true
+		return wireTool{Type: "openrouter:web_search", Parameters: llm.RawObjectOrNil(tool.Parameters)}, true
 	case llm.ServerToolKindOpenAIWebSearch, "":
 		if tool.Name == llm.ServerToolWebSearch {
-			return wireTool{Type: "web_search", Parameters: rawObjectOrNil(tool.Parameters)}, true
+			return wireTool{Type: "web_search", Parameters: llm.RawObjectOrNil(tool.Parameters)}, true
 		}
 	}
 	return wireTool{}, false
-}
-
-func rawObjectOrNil(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil
-	}
-	return raw
 }
 
 func insertRequestContext(input []wireInputItem, contextText string) []wireInputItem {
@@ -368,14 +354,14 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 				flushTextPart()
 				parts = append(parts, wireContentPart{
 					Type:     "input_image",
-					ImageURL: imageDataURL(b),
+					ImageURL: llm.ImageDataURL(b),
 					Detail:   b.ImageDetail,
 				})
 			case llm.BlockToolUse:
 				flushMessage()
 				args := string(b.ToolInput)
 				if args == "" {
-					args = emptyArgs
+					args = llm.EmptyArgs
 				}
 				out = append(out, wireInputItem{
 					Type:      "function_call",
@@ -387,7 +373,7 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 				flushMessage()
 				output := b.ResultText
 				if b.ResultError {
-					output = errorResultPrefix + output
+					output = llm.ErrorResultPrefix + output
 				}
 				out = append(out, wireInputItem{
 					Type:   "function_call_output",
@@ -406,10 +392,6 @@ func textPartType(role llm.Role) string {
 		return "output_text"
 	}
 	return "input_text"
-}
-
-func imageDataURL(b llm.ContentBlock) string {
-	return "data:" + b.ImageMediaType + ";base64," + b.ImageData
 }
 
 // maxTokens resolves the max_output_tokens to send. When omit is true, the

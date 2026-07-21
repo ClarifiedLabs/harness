@@ -101,7 +101,7 @@ func (p *Provider) connect(ctx context.Context, body []byte, yield func(llm.Stre
 				r.Header.Set("x-api-key", p.apiKey)
 			}
 		},
-		ParseError: parseErrorResponse,
+		ParseError: llm.ParseErrorResponseByType,
 		Sleep:      p.sleep,
 	}, body, yield)
 }
@@ -284,14 +284,6 @@ func (t *thinkingBlock) event() (llm.StreamEvent, bool) {
 		return llm.StreamEvent{}, false
 	}
 	return llm.StreamEvent{Kind: llm.EventReasoningSummary, Text: text, Signature: t.signature}, true
-}
-
-// parseErrorResponse maps a non-2xx HTTP response onto an *llm.APIError via the
-// shared envelope parser; Anthropic's error code is the envelope's type field.
-func parseErrorResponse(resp *http.Response) *llm.APIError {
-	apiErr, errType, _ := llm.ParseErrorResponse(resp)
-	apiErr.Code = errType
-	return apiErr
 }
 
 // retryableErrorType classifies mid-stream error-frame types: transient server

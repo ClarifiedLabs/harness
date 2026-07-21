@@ -362,6 +362,6 @@ func webSocketErrorEvent(data string) *llm.APIError {
 		StatusCode: status,
 		Code:       code,
 		Message:    message,
-		Retryable:  retry.RetryableStatus(status) || retryableErrorCode(code),
+		Retryable:  retry.RetryableStatus(status) || llm.RetryableErrorCode(code),
 	}
 }
