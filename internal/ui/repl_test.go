@@ -2174,6 +2174,37 @@ func TestREPLContextIncludesTodoRequestContext(t *testing.T) {
 	}
 }
 
+func TestREPLInjectsTodoContextOnlyWhenChanged(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake",
+		llmtest.Step{Stop: llm.StopEndTurn},
+		llmtest.Step{Stop: llm.StopEndTurn},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+	store := todo.NewStore()
+	store.Replace([]todo.Item{{Content: "explore", Status: todo.StatusInProgress, ActiveForm: "Exploring"}})
+	reg := tools.Default()
+	reg.Register(todo.NewTool(store))
+	app.Agent.SetTools(reg)
+	app.Todos = store
+
+	if code := Run(strings.NewReader("first\nsecond\n/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	}
+	// The first prompt injects the reminder (the list is new to this session).
+	if got := strings.Join(fp.Requests[0].RequestContext, "\n"); !strings.Contains(got, "[~] Exploring") {
+		t.Fatalf("first request context = %q, want the todo reminder", got)
+	}
+	// The list is unchanged for the second prompt, so the reminder is suppressed
+	// (it already lives in the transcript via the update_todos result).
+	if got := strings.Join(fp.Requests[1].RequestContext, "\n"); strings.Contains(got, "[todo]") {
+		t.Fatalf("second request context = %q, want the unchanged todo reminder suppressed", got)
+	}
+}
+
 func TestREPLPrintsTodoStatusAfterUpdateTodosBeforeUsageAndPrompt(t *testing.T) {
 	var out, setupErrw bytes.Buffer
 	status := "Todos (1/2 done):\n  [x] explore\n  [~] Testing"

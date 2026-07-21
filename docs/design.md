@@ -1720,8 +1720,14 @@ this subsection records the common runner those argv tools point at.
   per process (like `write_tmp_file`); the list is saved in `state.json` (`Session.Todos`),
   reseeded on resume, and cleared by `/clear`.
 - When `update_todos` is available, the REPL/one-shot drivers add a short request-only
-  reminder showing the current open list. Completed lists are not added as request
-  context, and request context is not saved into the transcript.
+  reminder showing the current open list. The reminder is re-injected only when the
+  list changes since it was last injected (`Store.ChangedRequestContext` /
+  `MarkContextInjected`): the list already lives in the transcript via the tool
+  result, so re-sending an unchanged reminder every turn is pure overhead. The
+  injected marker resets when the transcript is rewritten (compaction, branch,
+  fork/clone) and the raw `update_todos` result may be gone, so the model sees the
+  list again. Completed lists are not added as request context, and request context
+  is not saved into the transcript.
 - In the interactive REPL, the visible session's non-empty todo list is also printed
   before the idle prompt when the current visible agent has `update_todos`, and
   the visible todo status is printed after each successful `update_todos` call.

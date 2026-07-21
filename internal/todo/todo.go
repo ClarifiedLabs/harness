@@ -33,8 +33,9 @@ type Item struct {
 // so a single instance is constructed per process and shared (mirrors
 // delegate.State). Methods are safe for concurrent use.
 type Store struct {
-	mu    sync.Mutex
-	items []Item
+	mu           sync.Mutex
+	items        []Item
+	lastInjected []Item // list last rendered into request context; nil = never
 }
 
 // NewStore returns an empty Store.
@@ -64,6 +65,53 @@ func (s *Store) Replace(items []Item) {
 	next := make([]Item, len(items))
 	copy(next, items)
 	s.items = next
+}
+
+// ChangedRequestContext renders the todo reminder only when the list differs
+// from what was last injected into a request (see MarkContextInjected). The
+// list is already part of the transcript via the update_todos tool result, so
+// re-sending an unchanged reminder every turn is pure overhead: it spends a
+// per-turn trailing-context write and, on providers without prefix caching,
+// perturbs the request. Returning "" when nothing changed lets callers skip the
+// injection entirely. An empty or all-completed list always yields "".
+func (s *Store) ChangedRequestContext() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if itemsEqual(s.items, s.lastInjected) {
+		return ""
+	}
+	return RequestContext(s.items)
+}
+
+// MarkContextInjected records the current list as injected into a request, so a
+// subsequent ChangedRequestContext returns "" until the list changes again. Call
+// it after the rendered context has actually been attached to a request.
+func (s *Store) MarkContextInjected() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastInjected = append([]Item(nil), s.items...)
+}
+
+// ResetContextInjected forgets the last-injected list so the next
+// ChangedRequestContext re-renders the current list. Call it when the transcript
+// is rewritten (compaction, branch, fork/clone) and the raw update_todos result
+// may no longer be present, so the model sees the list again.
+func (s *Store) ResetContextInjected() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastInjected = nil
+}
+
+func itemsEqual(a, b []Item) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 const schema = `{

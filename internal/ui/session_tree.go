@@ -100,6 +100,11 @@ func (app *App) navigateTree(target string, readLine func(string) (string, error
 	}
 	app.Agent.SetTranscript(messages)
 	app.Agent.ResetProxySessionID()
+	if app.Todos != nil {
+		// Branching rewrites the transcript and may drop the raw update_todos
+		// result, so re-inject the todo reminder on the next request.
+		app.Todos.ResetContextInjected()
+	}
 	app.recordBranchEvent(from, leaf, summary, "tree")
 	app.saveOrWarn(app.SessionPath)
 	app.prewarm()
@@ -163,6 +168,11 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 	app.usageByModel = nil
 	app.Agent.SetTranscript(messages)
 	app.Agent.ResetSessionIDs()
+	if app.Todos != nil {
+		// Fork/clone rewrites the transcript and may drop the raw update_todos
+		// result, so re-inject the todo reminder on the next request.
+		app.Todos.ResetContextInjected()
+	}
 	if app.OnSessionPathChanged != nil {
 		app.OnSessionPathChanged(app.SessionPath)
 	}

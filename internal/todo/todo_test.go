@@ -158,3 +158,68 @@ func TestRequestContextIncludesExistingList(t *testing.T) {
 		}
 	}
 }
+
+func TestChangedRequestContextSuppressesUntilChange(t *testing.T) {
+	store := NewStore()
+	store.Replace([]Item{
+		{Content: "explore", Status: StatusInProgress, ActiveForm: "Exploring"},
+		{Content: "implement", Status: StatusPending},
+	})
+
+	// First render: the list has never been injected, so it is returned.
+	first := store.ChangedRequestContext()
+	if !strings.Contains(first, "[~] Exploring") {
+		t.Fatalf("first ChangedRequestContext = %q, want the rendered list", first)
+	}
+	store.MarkContextInjected()
+
+	// Unchanged list: suppressed on subsequent turns.
+	if got := store.ChangedRequestContext(); got != "" {
+		t.Fatalf("unchanged ChangedRequestContext = %q, want empty", got)
+	}
+
+	// A status flip re-renders.
+	store.Replace([]Item{
+		{Content: "explore", Status: StatusCompleted},
+		{Content: "implement", Status: StatusInProgress, ActiveForm: "Implementing"},
+	})
+	changed := store.ChangedRequestContext()
+	if !strings.Contains(changed, "[x] explore") || !strings.Contains(changed, "[~] Implementing") {
+		t.Fatalf("changed ChangedRequestContext = %q, want the updated list", changed)
+	}
+	store.MarkContextInjected()
+	if got := store.ChangedRequestContext(); got != "" {
+		t.Fatalf("re-suppressed ChangedRequestContext = %q, want empty", got)
+	}
+}
+
+func TestChangedRequestContextEmptyAndCompleted(t *testing.T) {
+	store := NewStore()
+	// Empty list never renders.
+	if got := store.ChangedRequestContext(); got != "" {
+		t.Fatalf("empty ChangedRequestContext = %q, want empty", got)
+	}
+	// An all-completed list renders "" even on first injection.
+	store.Replace([]Item{{Content: "done", Status: StatusCompleted}})
+	if got := store.ChangedRequestContext(); got != "" {
+		t.Fatalf("completed ChangedRequestContext = %q, want empty", got)
+	}
+}
+
+func TestResetContextInjectedForcesReinject(t *testing.T) {
+	store := NewStore()
+	store.Replace([]Item{{Content: "explore", Status: StatusInProgress, ActiveForm: "Exploring"}})
+	if got := store.ChangedRequestContext(); got == "" {
+		t.Fatal("first ChangedRequestContext should render")
+	}
+	store.MarkContextInjected()
+	if got := store.ChangedRequestContext(); got != "" {
+		t.Fatalf("suppressed ChangedRequestContext = %q, want empty", got)
+	}
+	// After a transcript rewrite the reminder must re-render even though the
+	// list is unchanged.
+	store.ResetContextInjected()
+	if got := store.ChangedRequestContext(); !strings.Contains(got, "[~] Exploring") {
+		t.Fatalf("post-reset ChangedRequestContext = %q, want the rendered list", got)
+	}
+}

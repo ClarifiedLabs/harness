@@ -3157,7 +3157,15 @@ func (app *App) PrepareCompaction(before []llm.Message, olderCount int, summary,
 	if err := app.ensureSessionTree(); err != nil {
 		return err
 	}
-	return app.SessionTree.PrepareCompaction(before, olderCount, summary, archiveRef, tokensBefore, focus, readFiles, modifiedFiles)
+	if err := app.SessionTree.PrepareCompaction(before, olderCount, summary, archiveRef, tokensBefore, focus, readFiles, modifiedFiles); err != nil {
+		return err
+	}
+	// Compaction rewrites the transcript and may drop the raw update_todos
+	// result, so re-inject the todo reminder on the next request.
+	if app.Todos != nil {
+		app.Todos.ResetContextInjected()
+	}
+	return nil
 }
 
 // planSnapshot returns the recorded plans for persistence, or nil when the plan
@@ -3335,7 +3343,11 @@ func (app *App) todoRequestContext() string {
 	if app.Todos == nil || !app.agentHasTool("update_todos") {
 		return ""
 	}
-	return todo.RequestContext(app.Todos.Snapshot())
+	// Only re-render the reminder when the list changed since it was last
+	// injected (see accumulatingSink.RequestContext, which marks the injection).
+	// The list already lives in the transcript via the update_todos result, so
+	// re-sending an unchanged reminder every turn is pure overhead.
+	return app.Todos.ChangedRequestContext()
 }
 
 func (app *App) agentHasTool(name string) bool {
@@ -3916,6 +3928,11 @@ func (s *accumulatingSink) RequestContext() []string {
 	var out []string
 	if ctx := s.app.todoRequestContext(); ctx != "" {
 		out = append(out, ctx)
+		// This sink supplies context to real model requests, so record the list as
+		// injected; todoRequestContext stays quiet until the list changes again.
+		if s.app.Todos != nil {
+			s.app.Todos.MarkContextInjected()
+		}
 	}
 	out = append(out, s.app.backgroundRequestContext(s)...)
 	return out
