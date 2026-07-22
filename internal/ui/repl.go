@@ -2936,7 +2936,11 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 		}
 		req.Brief = strings.TrimSpace(brief)
 	}
-	fmt.Fprintf(app.Errw, "Handoff brief:\n%s\n", req.Brief)
+	displayBrief := req.Brief
+	if app.Renderer != nil {
+		displayBrief = app.Renderer.FormatMarkdown(displayBrief)
+	}
+	fmt.Fprintf(app.Errw, "Handoff brief:\n%s\n", displayBrief)
 
 	target := req.Agent
 	if target == "" {

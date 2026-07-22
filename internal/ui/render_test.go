@@ -376,6 +376,25 @@ func TestTextDeltaRendersMarkdownWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestFormatMarkdownUsesRendererPolicy(t *testing.T) {
+	const input = "* first item has several words\n  + child item\n1. ordered item"
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{
+		Markdown: true,
+		Width:    func() int { return 24 },
+	})
+
+	want := "- first item has several\n  words\n  - child item\n1. ordered item"
+	if got := r.FormatMarkdown(input); got != want {
+		t.Fatalf("FormatMarkdown = %q, want %q", got, want)
+	}
+
+	r = NewRenderer(&out, &errw, RenderOptions{Width: func() int { return 1 }})
+	if got := r.FormatMarkdown(input); got != input {
+		t.Fatalf("FormatMarkdown disabled = %q, want raw %q", got, input)
+	}
+}
+
 func TestMarkdownAssistantFlushesBeforeStatusLine(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{Markdown: true, ToolStream: true})

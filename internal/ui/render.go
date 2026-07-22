@@ -205,6 +205,16 @@ func (r *Renderer) SetCumulativeUsage(inputTokens, outputTokens int, costUSD flo
 	r.cumCost = costUSD
 }
 
+// FormatMarkdown renders a complete Markdown block using the same enablement,
+// ANSI, and terminal-width policy as streamed assistant text.
+func (r *Renderer) FormatMarkdown(text string) string {
+	return markdown.Render(text, markdown.Options{
+		Enabled: r.markdown,
+		ANSI:    r.color,
+		Width:   r.outputWidth(),
+	})
+}
+
 func (r *Renderer) TextDelta(text string) {
 	if text == "" {
 		return

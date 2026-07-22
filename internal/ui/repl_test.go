@@ -3979,6 +3979,72 @@ func TestHandoffCommandAppliesOptionsAndSeedsUserMessage(t *testing.T) {
 	}
 }
 
+func TestHandoffCommandRendersMarkdownBriefWithoutChangingSource(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.Renderer = NewRenderer(&out, &errw, RenderOptions{
+		Markdown: true,
+		Width:    func() int { return 24 },
+	})
+	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
+	app.Handoff = plan.NewPending()
+	const brief = "**Verify behavior** with [docs](https://example.com/design).\n\n- alpha beta gamma delta epsilon zeta eta theta"
+	app.Handoff.Request(plan.HandoffRequest{Brief: brief, PlanPath: "/p/0001.plan.md"})
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
+	}
+
+	if !app.handoffCommand("", func(string) (string, error) { return "y", nil }) {
+		t.Fatal("handoffCommand should approve the handoff")
+	}
+
+	display := errw.String()
+	for _, want := range []string{
+		"Handoff brief:\nVerify behavior",
+		"docs <https://example.com/design>",
+		"- alpha beta gamma delta\n  epsilon zeta eta theta",
+	} {
+		if !strings.Contains(display, want) {
+			t.Errorf("rendered handoff brief missing %q:\n%s", want, display)
+		}
+	}
+	if strings.Contains(display, "**Verify behavior**") {
+		t.Errorf("display retained raw emphasis delimiters:\n%s", display)
+	}
+	if strings.Contains(out.String(), "Handoff brief:") {
+		t.Errorf("handoff brief should remain on stderr, stdout = %q", out.String())
+	}
+	if seed := transcriptTextForUI(app.Agent.Transcript()); !strings.Contains(seed, brief) {
+		t.Errorf("seed did not retain original Markdown source: %q", seed)
+	}
+	archived, err := os.ReadFile(filepath.Join(app.SessionPath, "compactions", "0001.summary.md"))
+	if err != nil {
+		t.Fatalf("read archived handoff brief: %v", err)
+	}
+	if got := string(archived); got != brief {
+		t.Errorf("archived handoff brief = %q, want original %q", got, brief)
+	}
+}
+
+func TestHandoffCommandDisplaysRawBriefWithoutRenderer(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.Renderer = nil
+	app.Handoff = plan.NewPending()
+	app.Handoff.Request(plan.HandoffRequest{Brief: "**raw brief**", PlanPath: "/p/0001.plan.md"})
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default()}, nil
+	}
+
+	app.handoffCommand("", func(string) (string, error) { return "n", nil })
+
+	if got := errw.String(); !strings.Contains(got, "Handoff brief:\n**raw brief**\n") {
+		t.Errorf("handoff brief should be displayed raw without a renderer:\n%s", got)
+	}
+}
+
 func TestHandoffCommandDisplaysGeneratedBrief(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{
