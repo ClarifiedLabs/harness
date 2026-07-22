@@ -1977,12 +1977,13 @@ backoff allows.
   discard marker so replay can omit abandoned assistant/reasoning deltas while
   keeping the retry notice.
 - **Live wait counter (TTY, non-quiet).** While a model request, a tool call, a
-  model-backed compaction summary, or a join-required background delegate is
-  outstanding, the static waiting line is replaced by a single in-place line painted
-  with `\r\x1b[2K` and repainted ~once a second by a `time.Ticker` goroutine (with a
-  mutex + stop-and-drain handshake so it never interleaves with streamed bytes):
-  `[turn: 1 · 12s · ctx 30% 60.0k/200.0k │ prompt 18s]`, `[tool: grep args=["x"] · 3s]`,
-  `[context: compacting · 3s]`, or
+  model-backed compaction or handoff summary, or a join-required background
+  delegate is outstanding, the static waiting line is replaced by a single in-place
+  line painted with `\r\x1b[2K` and repainted ~once a second by a `time.Ticker`
+  goroutine (with a mutex + stop-and-drain handshake so it never interleaves with
+  streamed bytes): `[turn: 1 · 12s · ctx 30% 60.0k/200.0k │ prompt 18s]`,
+  `[tool: grep args=["x"] · 3s]`, `[context: compacting · 3s]`,
+  `[handoff: generating brief · 3s]`, or
   `[background: waiting for delegates · 12s │ prompt 30s]`, with the same compact key
   arguments as the completed tool summary and the running context-window percentage
   and compact used/window token counts appended for model waits

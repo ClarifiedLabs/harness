@@ -2926,7 +2926,13 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 	}
 	req.Brief = strings.TrimSpace(req.Brief)
 	if req.Brief == "" {
+		if app.Renderer != nil {
+			app.Renderer.HandoffSummaryStart()
+		}
 		brief, usage, err := app.Agent.GenerateSummary(context.Background(), prompts.HandoffSummary())
+		if app.Renderer != nil {
+			app.Renderer.HandoffSummaryComplete()
+		}
 		if usage != (llm.Usage{}) {
 			app.addMaintenanceUsage("handoff_summary", usage)
 		}

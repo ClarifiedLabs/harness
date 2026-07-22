@@ -4066,6 +4066,39 @@ func TestHandoffCommandDisplaysGeneratedBrief(t *testing.T) {
 	}
 }
 
+func TestHandoffCommandShowsProgressWhileGeneratingBrief(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 7, 22, 11, 30, 0, 0, time.Local)
+	var app *App
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("generated planning brief")},
+		Stop:   llm.StopEndTurn,
+		Block: func(context.Context) {
+			now = now.Add(6 * time.Second)
+			app.Renderer.tick()
+		},
+	})
+	app = newTestApp(t, &out, &errw, fp)
+	app.Renderer = liveRenderer(&out, &errw, func() time.Time { return now })
+	defer app.Renderer.StopProgress()
+	app.Plans = plan.NewStore()
+	app.Plans.Add(plan.Plan{Path: "/p/0001.plan.md"})
+	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default()}, nil
+	}
+
+	app.handoffCommand("", func(string) (string, error) { return "n", nil })
+
+	got := errw.String()
+	if !strings.Contains(got, "[handoff: generating brief · 6s]") {
+		t.Errorf("generated handoff brief did not show elapsed progress:\n%s", got)
+	}
+	if !strings.Contains(got, "\r\x1b[2KHandoff brief:\ngenerated planning brief") {
+		t.Errorf("handoff progress was not erased before displaying the brief:\n%s", got)
+	}
+}
+
 func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
