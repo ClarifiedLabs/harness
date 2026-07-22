@@ -1981,6 +1981,13 @@ backoff allows.
   not produce separate visible cost checkpoints. Retried attempts record a
   discard marker so replay can omit abandoned assistant/reasoning deltas while
   keeping the retry notice.
+- **Submitted-prompt separator (interactive).** When a REPL prompt is submitted,
+  the entered line is left on screen (dimmed by the interactive line editor when
+  color is on) and a single dim rule line is drawn before the model output,
+  replacing the previous double blank line. Because the rule is a real scrolled
+  line rather than the transient wait counter, it survives the counter's in-place
+  erase and continues to separate the prompt from streamed output after the
+  counter is replaced.
 - **Live wait counter (TTY, non-quiet).** While a model request, a tool call, a
   model-backed compaction or handoff summary, or a join-required background
   delegate is outstanding, the static waiting line is replaced by a single in-place

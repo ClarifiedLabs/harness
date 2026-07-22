@@ -398,6 +398,11 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}()
 
 	reader := newREPLReader(in, app.Errw, usePromptEditor, app.PromptEditMode)
+	if reader.editor != nil && app.Renderer != nil {
+		// Dim the submitted prompt echo so the committed line reads as distinct
+		// from the model output that follows (matches the dim separator rule).
+		reader.editor.dimSubmittedPrompt = app.Renderer.color
+	}
 	if app.PromptLogWriter != nil && reader.editor != nil {
 		app.PromptLogWriter.setPromptEditor(reader.editor)
 		defer app.PromptLogWriter.setPromptEditor(nil)
@@ -633,8 +638,8 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}
 	startPromptInteraction := func(prompt string, resolveSkillMentions, attachPromptImages bool) (exit bool, code int) {
 		cancelShiftTabPrewarm()
-		separateSubmittedPrompt(app.Errw)
 		if app.Renderer != nil {
+			app.Renderer.SubmittedPromptSeparator()
 			app.Renderer.StartPrompt()
 		}
 		ctx, cancel, interrupted := exitContext()
@@ -1281,16 +1286,6 @@ func (app *App) echoEditedPrompt(replPrompt, submitted string) {
 		return
 	}
 	fmt.Fprintln(app.Errw, submitted)
-}
-
-// submittedPromptSeparator visually separates a submitted REPL prompt from the
-// model output that follows with a blank line.
-const submittedPromptSeparator = "\n\n"
-
-func separateSubmittedPrompt(w io.Writer) {
-	if w != nil {
-		io.WriteString(w, submittedPromptSeparator)
-	}
 }
 
 func commandFields(line string) (cmd, arg string) {

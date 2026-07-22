@@ -278,10 +278,9 @@ func TestREPLSeparatesSubmittedPromptFromModelResponse(t *testing.T) {
 		name            string
 		input           string
 		usePromptEditor bool
-		want            string
 	}{
-		{name: "plain reader", input: "hi\n/exit\n", want: "[auto] > \n\nanswer"},
-		{name: "prompt editor", input: "hi\r/exit\r", usePromptEditor: true, want: "\n\nanswer"},
+		{name: "plain reader", input: "hi\n/exit\n"},
+		{name: "prompt editor", input: "hi\r/exit\r", usePromptEditor: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -294,8 +293,14 @@ func TestREPLSeparatesSubmittedPromptFromModelResponse(t *testing.T) {
 			if code != ExitOK {
 				t.Fatalf("exit code = %d, want 0; terminal=%q", code, term.String())
 			}
-			if got := term.String(); !strings.Contains(got, tt.want) {
-				t.Fatalf("terminal output should separate prompt from model response with %q; got %q", tt.want, got)
+			got := term.String()
+			// The separator rule must appear between the prompt and the model answer,
+			// replacing the old double-blank-line separator.
+			if !strings.Contains(got, submittedPromptRule+"\nanswer") {
+				t.Fatalf("terminal output should separate prompt from model response with the rule line; got %q", got)
+			}
+			if strings.Contains(got, "\n\n") {
+				t.Fatalf("terminal output should not contain double blank lines; got %q", got)
 			}
 		})
 	}

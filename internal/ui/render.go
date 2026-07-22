@@ -34,6 +34,11 @@ const snippetLines = 5
 
 const finalAnswerSeparator = "\n---\n\n"
 
+// submittedPromptRule is the separator drawn between a submitted REPL prompt and
+// the model output that follows. It is a fixed, modest width rather than the
+// terminal width so a later resize narrower never leaves an ugly over-long rule.
+const submittedPromptRule = "────────────────────"
+
 // RenderOptions configures a Renderer. Color is decided by the caller (TTY check
 // plus NO_COLOR / -no-color); Now is injected so durations are
 // deterministic in tests (design §10, §13).
@@ -521,6 +526,23 @@ func (r *Renderer) dimLine(s string) {
 		return
 	}
 	fmt.Fprintln(r.errw, s)
+}
+
+// SubmittedPromptSeparator writes the separator between a submitted REPL prompt
+// and the model output that follows: a single dim rule (submittedPromptRule)
+// followed by a newline. Because it is a real scrolled line rather than the
+// transient wait counter, it survives the counter's in-place erase and so still
+// separates the prompt from streamed output after the counter is replaced. The
+// rule is dimmed only when color is on. Unlike status lines, this separator is
+// structural and is printed even in quiet mode.
+func (r *Renderer) SubmittedPromptSeparator() {
+	r.statusClear()
+	r.finishAssistantLine()
+	rule := submittedPromptRule
+	if r.color {
+		rule = ansiDim + rule + ansiReset
+	}
+	fmt.Fprintln(r.errw, rule)
 }
 
 func (r *Renderer) timestampStatusLine(s string) string {

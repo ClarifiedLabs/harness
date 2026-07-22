@@ -95,6 +95,12 @@ type promptLineEditor struct {
 	// reads and during-prompt capture leave it false so the key remains inert.
 	cycleAgent bool
 
+	// dimSubmittedPrompt redraws a submitted main-prompt line in dim style as it
+	// is finished, so the committed prompt reads as distinct from the model output
+	// that follows. Auxiliary prompts (noHistory) and during-prompt capture leave
+	// it inert. Set from the renderer's color decision.
+	dimSubmittedPrompt bool
+
 	// Non-bracketed paste-burst heuristic (interactive TTY only). When now is
 	// non-nil and pasteHeuristic is true, updatePasteTiming tracks inter-keystroke
 	// gaps and enters pasteMode when bytes arrive faster than a human can type
@@ -247,7 +253,11 @@ func (e *promptLineEditor) redrawPromptState(s *lineEditState, mode viMode) erro
 func (e *promptLineEditor) finishPromptState(s *lineEditState) error {
 	e.terminalMu.Lock()
 	defer e.terminalMu.Unlock()
-	if err := s.finish(e.w); err != nil {
+	if e.dimSubmittedPrompt && !e.noHistory {
+		if err := s.finishStyled(e.w, ansiDim, ansiReset); err != nil {
+			return err
+		}
+	} else if err := s.finish(e.w); err != nil {
 		return err
 	}
 	e.activePrompt = nil
@@ -2077,6 +2087,31 @@ func (s *lineEditState) finish(w io.Writer) error {
 		}
 	}
 	if _, err := fmt.Fprint(w, "\n"); err != nil {
+		return err
+	}
+	s.drawn = false
+	s.rows = 0
+	s.cursorRow = 0
+	s.cursorCol = 0
+	s.endRow = 0
+	s.endCol = 0
+	return nil
+}
+
+// finishStyled behaves like finish but, when the line is drawn, redraws the
+// committed line wrapped in the given ANSI prefix/suffix before the trailing
+// newline so it persists on screen in a distinct style (e.g. dim). The styling
+// wraps the whole rendered line and resets before the newline, so it never
+// affects the editor's cursor metrics (which use the unstyled prompt/buffer) or
+// any following output. When the line is not drawn it falls back to finish.
+func (s *lineEditState) finishStyled(w io.Writer, prefix, suffix string) error {
+	if !s.drawn {
+		return s.finish(w)
+	}
+	if err := moveDisplayCursor(w, s.cursorRow, s.cursorCol, s.endRow, s.endCol); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "\r\x1b[2K%s%s%s%s\n", prefix, s.prompt, string(s.displayRunes()), suffix); err != nil {
 		return err
 	}
 	s.drawn = false

@@ -168,6 +168,33 @@ func TestSuppressUsageSilencesEverything(t *testing.T) {
 	}
 }
 
+func TestSubmittedPromptSeparator(t *testing.T) {
+	t.Run("plain", func(t *testing.T) {
+		var out, errw bytes.Buffer
+		r := NewRenderer(&out, &errw, RenderOptions{})
+		r.SubmittedPromptSeparator()
+		if got, want := errw.String(), submittedPromptRule+"\n"; got != want {
+			t.Fatalf("plain separator = %q, want %q", got, want)
+		}
+	})
+	t.Run("color", func(t *testing.T) {
+		var out, errw bytes.Buffer
+		r := NewRenderer(&out, &errw, RenderOptions{Color: true})
+		r.SubmittedPromptSeparator()
+		if got, want := errw.String(), ansiDim+submittedPromptRule+ansiReset+"\n"; got != want {
+			t.Fatalf("color separator = %q, want %q", got, want)
+		}
+	})
+	t.Run("quiet still prints", func(t *testing.T) {
+		var out, errw bytes.Buffer
+		r := NewRenderer(&out, &errw, RenderOptions{Quiet: true})
+		r.SubmittedPromptSeparator()
+		if got, want := errw.String(), submittedPromptRule+"\n"; got != want {
+			t.Fatalf("quiet separator = %q, want %q (separator is structural, not a status line)", got, want)
+		}
+	})
+}
+
 func TestToolDiffWritesToErr(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{})
