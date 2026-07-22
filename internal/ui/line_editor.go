@@ -40,9 +40,9 @@ const bareEscapeSequenceTimeout = 50 * time.Millisecond
 // arriving within pasteEnterGap of the previous one enters "paste mode"; paste
 // mode exits after a gap longer than pasteExitGap. Staying in paste mode too long
 // is the safe failure direction (an extra inserted newline, never a premature
-// submit). A pasted range that exceeds pasteSummaryBytes or is multi-line
-// renders as a one-line placeholder wherever it appears in surrounding prompt
-// text (avoids scroll lag and prompt corruption on embedded newlines).
+// submit). A pasted range that exceeds pasteSummaryBytes renders as a one-line
+// placeholder wherever it appears in surrounding prompt text to avoid scroll
+// lag.
 const (
 	pasteEnterGap           = 10 * time.Millisecond
 	pasteExitGap            = 150 * time.Millisecond
@@ -208,8 +208,8 @@ func (e *promptLineEditor) markManualEdit(s *lineEditState) {
 }
 
 // refreshPasteSummary collapses the active non-bracketed fallback paste once it
-// is large or multi-line. Only the detected burst is collapsed, preserving any
-// surrounding prompt or editor-prefill text. Called only while in paste mode.
+// exceeds the byte threshold. Only the detected burst is collapsed, preserving
+// any surrounding prompt or editor-prefill text. Called only while in paste mode.
 func (e *promptLineEditor) refreshPasteSummary(s *lineEditState) {
 	start, end := e.pasteStart, s.cursor
 	if start < 0 || end < start || end > len(s.buf) {
@@ -1615,9 +1615,9 @@ func (e *promptLineEditor) readBracketedPaste() (string, error) {
 // so the kernel no longer translates carriage return to newline on input and a
 // terminal delivers a paste's line breaks as CR ("\r") or CRLF ("\r\n")
 // rather than LF. Left raw, those carriage returns corrupt the prompt (a bare
-// CR snaps the cursor back to column 0 and overwrites the prompt line), defeat
-// the newline-based paste line counting/summary, and leak "^M" into the
-// external editor. Collapsing CRLF before bare CR yields exactly one '\n' per
+// CR snaps the cursor back to column 0 and overwrites the prompt line), prevent
+// consistent normalized rendering, and leak "^M" into the external editor.
+// Collapsing CRLF before bare CR yields exactly one '\n' per
 // pasted line for every CR/CRLF/LF terminal convention (and mixtures of them),
 // and is a no-op for already-LF content. Scoped to pasted blocks only, so a
 // typed Enter (raw CR) is still handled as a submit elsewhere.
@@ -1630,7 +1630,7 @@ func normalizePastedNewlines(text string) string {
 }
 
 func shouldSummarizePaste(text string) bool {
-	return len(text) > pasteSummaryBytes || strings.ContainsRune(text, '\n')
+	return len(text) > pasteSummaryBytes
 }
 
 func (e *promptLineEditor) addHistory(text string) {
@@ -1770,7 +1770,8 @@ func (s *lineEditState) promptSnapshot() *lineEditState {
 	}
 }
 
-// setPasteSummary replaces the buffer with a paste. It is retained for the
+// setPasteSummary replaces the buffer with a paste and records a display
+// placeholder when it exceeds the byte threshold. It is retained for the
 // empty-prompt vi path; general bracketed pastes use insertPastedText.
 func (s *lineEditState) setPasteSummary(text string) {
 	s.buf = []rune(text)
@@ -1786,6 +1787,8 @@ func (s *lineEditState) insertPastedText(text string) {
 	s.setPasteSummaryRange(start, s.cursor, text)
 }
 
+// setPasteSummaryRange records a display-only placeholder when text exceeds the
+// byte threshold. The full pasted range remains in buf in either case.
 func (s *lineEditState) setPasteSummaryRange(start, end int, text string) {
 	kept := s.pasteSummaries[:0]
 	for _, summary := range s.pasteSummaries {

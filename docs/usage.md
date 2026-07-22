@@ -485,21 +485,25 @@ literal `$`.
 
 In terminals that support bracketed paste, pasted text fills the prompt for
 review and is submitted as one literal prompt when you press Enter, preserving
-embedded newlines. A large or multi-line paste shows a one-line
-`[N bytes of pasted content]` placeholder instead of the full content wherever
-the paste occurs in the prompt. The placeholder remains collapsed while you edit
-surrounding text and acts as one unit for cursor movement and deletion. Press
-Ctrl-G / `/edit` to open the external editor with the full expanded content;
-text returned from the editor remains expanded in the prompt. A
-paste that fills an empty prompt is submitted literally — pasted `/commands`
-are not executed, `!command` is not a shell escape, and `$skill` is not
-resolved. This holds on the Enter path in every edit mode, including the vi
-normal-mode Enter after Esc. Typing anything after a paste (in emacs mode, or
-after entering vi normal mode with Esc) makes the whole line typed (so
-`!`/`/`/`$` apply). In terminals that do not support bracketed paste, harness
-falls back to detecting a fast paste burst so newlines in a paste do not submit
-prematurely; set `HARNESS_REPL_PASTE_HEURISTIC=off` to disable that. For
-non-interactive large input, prefer `-p -` or piped stdin.
+embedded newlines. Each paste event is classified independently after newline
+normalization: a range of at most 1,000 normalized UTF-8 bytes renders inline,
+including multiline content, while a range over 1,000 bytes shows a one-line
+`[N bytes of pasted content]` placeholder wherever it occurs in the prompt. The
+full content is retained and submitted in either case. A collapsed placeholder
+persists while you edit surrounding text and acts as one unit for cursor movement
+and deletion. Press Ctrl-G / `/edit` to open the external editor with the full
+expanded content; text returned from the editor remains expanded in the prompt.
+A paste that fills an empty prompt is submitted literally — pasted `/commands`
+are not executed, `!command` is not a shell escape, and `$skill` is not resolved.
+This holds on the Enter path in every edit mode, including the vi normal-mode
+Enter after Esc. Typing anything after a paste (in emacs mode, or after entering
+vi normal mode with Esc) makes the whole line typed (so `!`/`/`/`$` apply).
+Bracketed paste is classified once its explicit end marker arrives. In terminals
+that do not support bracketed paste, harness falls back to detecting a fast paste
+burst so newlines in a paste do not submit prematurely; that incremental fallback
+may transition a range from inline to collapsed when it crosses 1,000 bytes. Set
+`HARNESS_REPL_PASTE_HEURISTIC=off` to disable the fallback. For non-interactive
+large input, prefer `-p -` or piped stdin.
 
 At an interactive terminal, the prompt supports basic line editing. Shift-Enter
 inserts a newline without submitting. Press Ctrl-G at the prompt, or run

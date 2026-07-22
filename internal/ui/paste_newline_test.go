@@ -2,7 +2,6 @@ package ui
 
 import (
 	"bytes"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -38,9 +37,9 @@ func TestNormalizePastedNewlines(t *testing.T) {
 }
 
 // The literal example from the bug report: a six-line paste whose lines are
-// separated by bare CR must render as a one-line paste placeholder while keeping
+// separated by bare CR must render inline with normalized newlines and keep that
 // newline-separated content in the real buffer.
-func TestPromptLineEditorReportCRPasteRendersSummaryAndSubmitsNewlines(t *testing.T) {
+func TestPromptLineEditorReportCRPasteRendersInlineAndSubmitsNewlines(t *testing.T) {
 	pastedCR := "pasted line 1\rpasted line 2\rpasted line 3\rpasted line 4\rpasted line 5\rpasted line 6"
 	want := "pasted line 1\npasted line 2\npasted line 3\npasted line 4\npasted line 5\npasted line 6"
 
@@ -62,9 +61,11 @@ func TestPromptLineEditorReportCRPasteRendersSummaryAndSubmitsNewlines(t *testin
 	if !input.pasted {
 		t.Fatalf("input.pasted = false, want true")
 	}
-	placeholder := fmt.Sprintf(pasteSummaryPlaceholder, len(want))
-	if !strings.Contains(out.String(), placeholder) {
-		t.Fatalf("output missing paste summary %q, got:\n%q", placeholder, out.String())
+	if strings.Contains(out.String(), "bytes of pasted content") {
+		t.Fatalf("short normalized multiline paste rendered as a summary:\n%q", out.String())
+	}
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("normalized multiline paste was not rendered inline:\n%q", out.String())
 	}
 	if strings.Contains(out.String(), pastedCR) || strings.Contains(out.String(), "pasted line 6\r") {
 		t.Fatalf("raw CR-separated paste body was rendered to the terminal:\n%q", out.String())

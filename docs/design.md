@@ -2058,11 +2058,14 @@ Ctrl-C to interrupt, and Ctrl-D on an empty prompt. Shift-Enter inserts a newlin
 so multi-line prompts can be typed directly in the REPL. The editor stores
 cursor positions as Go runes; exact grapheme
 cluster and emoji-width handling are out of scope. Paste fills the editable buffer
-for review and does not auto-submit: Enter submits the buffered content, while a
-large or multi-line pasted range renders as a one-line `[N bytes of pasted content]`
+for review and does not auto-submit: Enter submits the buffered content. Each
+paste event is classified independently after newline normalization. A range of
+at most 1,000 normalized UTF-8 bytes renders inline, including multiline content;
+a range over 1,000 bytes renders as a one-line `[N bytes of pasted content]`
 placeholder wherever it occurs in the prompt. The real content remains in the
-buffer and is submitted on Enter. Collapsed ranges persist while surrounding text
-is edited and behave atomically for cursor movement, replacement, and deletion.
+buffer and is submitted on Enter in either case. Collapsed ranges persist while
+surrounding text is edited and behave atomically for cursor movement, replacement,
+and deletion.
 Ctrl-G / `/edit` opens the external editor with the full expanded content
 (submitted as edited/typed); the returned prefill stays expanded because paste
 range identity is intentionally not tracked through the editor. A paste that fills
@@ -2072,17 +2075,20 @@ the Enter path in every edit mode, including vi normal mode after Esc (so a
 paste then Esc then Enter submits literally); only a manual keystroke clears
 it. Any manual keystroke after the paste (insert, delete, or cursor motion,
 in emacs mode or after entering vi normal mode with Esc) clears that mark, so the whole submitted line is
-treated as typed (honoring `!`/`/`/`$`). Pasting into a non-empty prompt inserts a
-collapsed range at the cursor. Bracketed paste markers (`\x1b[200~`..`\x1b[201~`) are the
-primary mechanism; when a terminal does not honor bracketed paste, a timing-based
-heuristic on the interactive TTY raw line editor detects a fast keystroke burst
-(bytes arriving within ~10ms of the previous one, roughly 100 characters per
-second) and treats newlines in the burst as inserts instead of submitting,
-exiting after a ~150ms gap. Staying in paste mode too long is the safe
-failure direction (an extra inserted newline, never a premature submit). The
-heuristic is interactive-only and on by default; `HARNESS_REPL_PASTE_HEURISTIC=off`
-disables it. For non-TTY input the REPL keeps the `bufio.Reader` line path, so long
-scripted prompt lines are not capped by Scanner's token limit.
+treated as typed (honoring `!`/`/`/`$`). Pasting into a non-empty prompt inserts
+the range at the cursor and collapses it only when it exceeds the byte threshold.
+Bracketed paste markers (`\x1b[200~`..`\x1b[201~`) are the primary mechanism; the
+complete range is classified once its explicit end marker arrives. When a terminal
+does not honor bracketed paste, a timing-based heuristic on the interactive TTY
+raw line editor detects a fast keystroke burst (bytes arriving within ~10ms of the
+previous one, roughly 100 characters per second) and treats newlines in the burst
+as inserts instead of submitting, exiting after a ~150ms gap. Because this
+fallback is incremental, an inline range may collapse when it crosses 1,000 bytes.
+Staying in paste mode too long is the safe failure direction (an extra inserted
+newline, never a premature submit). The heuristic is interactive-only and on by
+default; `HARNESS_REPL_PASTE_HEURISTIC=off` disables it. For non-TTY input the REPL
+keeps the `bufio.Reader` line path, so long scripted prompt lines are not capped by
+Scanner's token limit.
 
 At an interactive TTY prompt only, a non-pasted line starting with `!` is a local
 shell escape. The command text after `!` runs via the user's shell (`$SHELL -lc`,

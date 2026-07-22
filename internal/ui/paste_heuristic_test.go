@@ -34,6 +34,12 @@ func (c *scheduledClock) now() time.Time {
 // recognized as a paste and a slow one as human typing.
 func readEditedInputTimed(t *testing.T, runes []rune, gaps []time.Duration) (replInput, bool, error) {
 	t.Helper()
+	input, ok, _, err := readEditedInputTimedOutput(t, runes, gaps)
+	return input, ok, err
+}
+
+func readEditedInputTimedOutput(t *testing.T, runes []rune, gaps []time.Duration) (replInput, bool, string, error) {
+	t.Helper()
 	var out bytes.Buffer
 	editor := newPromptLineEditor(strings.NewReader(string(runes)), &out)
 	clock := &scheduledClock{}
@@ -47,7 +53,8 @@ func readEditedInputTimed(t *testing.T, runes []rune, gaps []time.Duration) (rep
 		clock.times = append(clock.times, acc)
 	}
 	editor.configurePasteHeuristic(true, clock.now)
-	return editor.read("> ")
+	input, ok, err := editor.read("> ")
+	return input, ok, out.String(), err
 }
 
 // burstGaps returns a gaps slice of length n where every entry is gap, suitable
@@ -76,7 +83,7 @@ func TestPromptLineEditorNonBracketedPasteBurstSubmitsAsOnePrompt(t *testing.T) 
 	gaps := burstGaps(len(runes), 8*time.Millisecond)
 	gaps[len(gaps)-1] = 200 * time.Millisecond // Enter well after the burst exits paste mode
 
-	input, ok, err := readEditedInputTimed(t, runes, gaps)
+	input, ok, output, err := readEditedInputTimedOutput(t, runes, gaps)
 	if err != nil {
 		t.Fatalf("read = %v", err)
 	}
@@ -88,6 +95,12 @@ func TestPromptLineEditorNonBracketedPasteBurstSubmitsAsOnePrompt(t *testing.T) 
 	}
 	if !input.pasted {
 		t.Fatalf("input.pasted = false, want true (pure paste submits literally)")
+	}
+	if strings.Contains(output, "bytes of pasted content") {
+		t.Fatalf("short multiline fallback paste should render inline, got:\n%q", output)
+	}
+	if !strings.Contains(output, paste) {
+		t.Fatalf("short multiline fallback paste missing from output, got:\n%q", output)
 	}
 }
 
@@ -217,62 +230,85 @@ func TestPromptLineEditorExternalEditorPrefillRendersNormally(t *testing.T) {
 	}
 }
 
-// A large paste into an empty prompt renders a one-line placeholder instead of
-// the full content inline (avoiding scroll lag), while the real content is
-// retained in the buffer and submitted on Enter.
-func TestPromptLineEditorLargePasteRendersSummary(t *testing.T) {
-	large := strings.Repeat("x", pasteSummaryBytes+1)
-	var out bytes.Buffer
-	editor := newPromptLineEditor(strings.NewReader(bracketedPasteStart+large+bracketedPasteEnd+"\r"), &out)
+func TestPromptLineEditorPasteRenderingThreshold(t *testing.T) {
+	tests := []struct {
+		name       string
+		pasted     string
+		summarized bool
+	}{
+		{name: "short single line", pasted: "hi"},
+		{name: "short multiline", pasted: "first line\nsecond line"},
+		{name: "exactly 1000 ASCII bytes", pasted: strings.Repeat("x", pasteSummaryBytes)},
+		{name: "1001 ASCII bytes", pasted: strings.Repeat("x", pasteSummaryBytes+1), summarized: true},
+		{name: "exactly 1000 multibyte UTF-8 bytes", pasted: strings.Repeat("é", pasteSummaryBytes/len("é"))},
+		{name: "1001 multibyte UTF-8 bytes", pasted: strings.Repeat("é", pasteSummaryBytes/len("é")) + "x", summarized: true},
+	}
 
-	input, ok, err := editor.read("> ")
-	if err != nil {
-		t.Fatalf("read = %v", err)
-	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != large {
-		t.Fatalf("input text length = %d, want %d (full content retained)", len(input.text), len(large))
-	}
-	placeholder := fmt.Sprintf(pasteSummaryPlaceholder, len(large))
-	if !strings.Contains(out.String(), placeholder) {
-		t.Fatalf("output missing large-paste summary %q, got:\n%s", placeholder, out.String())
-	}
-	// The placeholder replaces the inline content, so the huge body must not be
-	// rendered verbatim.
-	if strings.Contains(out.String(), large) {
-		t.Fatalf("large paste should render a summary, not the full %d-byte body inline", len(large))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			editor := newPromptLineEditor(strings.NewReader(bracketedPasteStart+tc.pasted+bracketedPasteEnd+"\r"), &out)
+
+			input, ok, err := editor.read("> ")
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok {
+				t.Fatal("read returned ok=false")
+			}
+			if input.text != tc.pasted {
+				t.Fatalf("input text length = %d, want %d (full content retained)", len(input.text), len(tc.pasted))
+			}
+			if !input.pasted {
+				t.Fatal("input.pasted = false, want true")
+			}
+
+			placeholder := fmt.Sprintf(pasteSummaryPlaceholder, len(tc.pasted))
+			if tc.summarized {
+				if !strings.Contains(out.String(), placeholder) {
+					t.Fatalf("output missing paste summary %q, got:\n%s", placeholder, out.String())
+				}
+				if strings.Contains(out.String(), tc.pasted) {
+					t.Fatalf("%d-byte paste should render a summary, not the full body inline", len(tc.pasted))
+				}
+				return
+			}
+			if strings.Contains(out.String(), "bytes of pasted content") {
+				t.Fatalf("%d-byte paste should render inline, not a summary; got:\n%s", len(tc.pasted), out.String())
+			}
+			if !strings.Contains(out.String(), tc.pasted) {
+				t.Fatalf("%d-byte paste should render inline; got:\n%s", len(tc.pasted), out.String())
+			}
+		})
 	}
 }
 
-// A small single-line paste renders inline (no summary placeholder).
-func TestPromptLineEditorSmallPasteRendersInline(t *testing.T) {
-	small := "hi"
+func TestPromptLineEditorSeparateShortPastesStayInlinePastAggregateThreshold(t *testing.T) {
+	first := strings.Repeat("a", 600)
+	second := strings.Repeat("b", 600)
+	want := "before " + first + " between " + second + " after"
+	keys := "before " + bracketedPasteStart + first + bracketedPasteEnd + " between " + bracketedPasteStart + second + bracketedPasteEnd + " after\r"
 	var out bytes.Buffer
-	editor := newPromptLineEditor(strings.NewReader(bracketedPasteStart+small+bracketedPasteEnd+"\r"), &out)
+	editor := newPromptLineEditor(strings.NewReader(keys), &out)
 
 	input, ok, err := editor.read("> ")
 	if err != nil {
 		t.Fatalf("read = %v", err)
 	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != small {
-		t.Fatalf("input text = %q, want %q", input.text, small)
+	if !ok || input.text != want {
+		t.Fatalf("input = %+v, ok=%v, want %q", input, ok, want)
 	}
 	if strings.Contains(out.String(), "bytes of pasted content") {
-		t.Fatalf("small paste should render inline, not a summary; got:\n%s", out.String())
+		t.Fatalf("separate sub-threshold pastes should stay inline, got:\n%q", out.String())
 	}
-	if !strings.Contains(out.String(), small) {
-		t.Fatalf("small paste should render inline; got:\n%s", out.String())
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("final prompt display missing inline pasted ranges, got:\n%q", out.String())
 	}
 }
 
-func TestPromptLineEditorMultilinePasteWithinTypedTextStaysCollapsed(t *testing.T) {
+func TestPromptLineEditorOverThresholdPasteWithinTypedTextStaysCollapsed(t *testing.T) {
 	prefix := "the daemon log says "
-	pasted := "```\nfirst failure\nsecond failure\n```"
+	pasted := "first failure\n" + strings.Repeat("x", pasteSummaryBytes)
 	suffix := " and the dashboard still says Starting"
 	var out bytes.Buffer
 	editor := newPromptLineEditor(strings.NewReader(prefix+bracketedPasteStart+pasted+bracketedPasteEnd+suffix+"\x01X\r"), &out)
@@ -300,9 +336,9 @@ func TestPromptLineEditorMultilinePasteWithinTypedTextStaysCollapsed(t *testing.
 	}
 }
 
-func TestPromptLineEditorFallbackPasteWithinTypedTextStaysCollapsed(t *testing.T) {
+func TestPromptLineEditorOverThresholdFallbackPasteWithinTypedTextStaysCollapsed(t *testing.T) {
 	prefix := "prefix "
-	pasted := "first\nsecond"
+	pasted := "first\n" + strings.Repeat("x", pasteSummaryBytes)
 	suffix := " suffix"
 	runes := []rune(prefix + pasted + suffix + "\r")
 	gaps := burstGaps(len(runes), 20*time.Millisecond)
@@ -344,7 +380,7 @@ func TestPromptLineEditorFallbackPasteWithinTypedTextStaysCollapsed(t *testing.T
 
 func TestPromptLineEditorExternalEditorPrefillExpandsCollapsedPaste(t *testing.T) {
 	prefix := "before "
-	pasted := "one\ntwo"
+	pasted := "one\n" + strings.Repeat("x", pasteSummaryBytes)
 	suffix := " after"
 	full := prefix + pasted + suffix
 	var pastedOut bytes.Buffer
@@ -376,9 +412,9 @@ func TestPromptLineEditorExternalEditorPrefillExpandsCollapsedPaste(t *testing.T
 	}
 }
 
-func TestLineEditStateCollapsedPasteIsAtomic(t *testing.T) {
+func TestLineEditStateOverThresholdCollapsedPasteIsAtomic(t *testing.T) {
 	s := lineEditState{buf: []rune("before  after"), cursor: len([]rune("before "))}
-	pasted := "one\ntwo"
+	pasted := "one\n" + strings.Repeat("x", pasteSummaryBytes)
 	s.insertPastedText(pasted)
 	placeholder := fmt.Sprintf(pasteSummaryPlaceholder, len(pasted))
 	if got, want := string(s.displayRunes()), "before "+placeholder+" after"; got != want {
@@ -404,9 +440,9 @@ func TestLineEditStateCollapsedPasteIsAtomic(t *testing.T) {
 	}
 }
 
-func TestPromptLineEditorTracksMultipleCollapsedPastes(t *testing.T) {
-	first := "one\ntwo"
-	second := "three\nfour"
+func TestPromptLineEditorTracksMultipleOverThresholdCollapsedPastes(t *testing.T) {
+	first := "one\n" + strings.Repeat("x", pasteSummaryBytes)
+	second := "two\n" + strings.Repeat("y", pasteSummaryBytes)
 	inputText := "a" + first + "b" + second + "c"
 	keys := "a" + bracketedPasteStart + first + bracketedPasteEnd + "b" + bracketedPasteStart + second + bracketedPasteEnd + "c\r"
 	var out bytes.Buffer
@@ -425,9 +461,9 @@ func TestPromptLineEditorTracksMultipleCollapsedPastes(t *testing.T) {
 	}
 }
 
-func TestViCollapsedPasteMovementAndDeletionAreAtomic(t *testing.T) {
+func TestViOverThresholdCollapsedPasteMovementAndDeletionAreAtomic(t *testing.T) {
 	s := lineEditState{buf: []rune("ab"), cursor: 1}
-	pasted := "one\ntwo"
+	pasted := "one\n" + strings.Repeat("x", pasteSummaryBytes)
 	s.insertPastedText(pasted)
 	span := s.pasteSummaries[0]
 
