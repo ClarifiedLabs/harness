@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -517,6 +518,63 @@ func TestPromptLineEditorTabOutsideBangInsertsTab(t *testing.T) {
 	}
 	if input.text != "a\tb" {
 		t.Fatalf("input text = %q, want tab preserved", input.text)
+	}
+}
+
+func TestPromptLineEditorShiftTabKeySequencesCycleAgent(t *testing.T) {
+	editor := newPromptLineEditor(strings.NewReader(""), io.Discard)
+	for _, seq := range []string{
+		"Z",       // legacy CSI Z
+		"9;2u",    // CSI-u Shift-Tab
+		"27;2;9~", // modifyOtherKeys Shift-Tab
+	} {
+		action, text := editor.actionForKeySequence(seq)
+		if action != lineEditCycleAgent || text != "" {
+			t.Errorf("sequence %q = (%s, %q), want cycle-agent", seq, lineEditActionName(action), text)
+		}
+	}
+
+	action, text := editor.actionForKeySequence("9;2:3u") // key release
+	if action != lineEditIgnore || text != "" {
+		t.Fatalf("Shift-Tab release = (%s, %q), want ignore", lineEditActionName(action), text)
+	}
+
+	action, text = actionForKeyEvent(lineKeyEvent{key: lineKeyTab, modifier: 1})
+	if action != lineEditInsertText || text != "\t" {
+		t.Fatalf("plain Tab = (%s, %q), want inserted tab", lineEditActionName(action), text)
+	}
+}
+
+func TestPromptLineEditorShiftTabReturnsDraftWithoutHistoryInEmacsAndVi(t *testing.T) {
+	tests := []struct {
+		name  string
+		mode  string
+		input string
+	}{
+		{name: "emacs", input: "draft\x1b[Z"},
+		{name: "vi insert", mode: "vi", input: "draft\x1b[9;2u"},
+		{name: "vi normal", mode: "vi", input: "draft\x1b\x1b[Z"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			editor := newPromptLineEditor(strings.NewReader(tt.input), &out)
+			editor.setEditMode(tt.mode)
+			editor.cycleAgent = true
+			var recorded []string
+			editor.onNewHistory = func(entry string) { recorded = append(recorded, entry) }
+
+			input, ok, err := editor.read("> ")
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok || !input.cycleAgent || input.text != "draft" {
+				t.Fatalf("input = %+v ok=%v, want cycle action with draft", input, ok)
+			}
+			if len(recorded) != 0 || len(editor.history) != 0 {
+				t.Fatalf("Shift-Tab committed history: callback=%v editor=%v", recorded, editor.history)
+			}
+		})
 	}
 }
 

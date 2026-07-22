@@ -191,6 +191,9 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 	case lineEditIgnore:
 		v.resetCommand()
 		return viEditResult{redraw: true}, nil
+	case lineEditCycleAgent:
+		v.resetCommand()
+		return e.cycleAgentInput(s, duringPrompt)
 	case lineEditShiftModifier:
 		return viEditResult{redraw: true}, nil
 	case lineEditSubmit:

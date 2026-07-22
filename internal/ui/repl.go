@@ -34,8 +34,9 @@ import (
 )
 
 const (
-	bracketedPasteStart = "\x1b[200~"
-	bracketedPasteEnd   = "\x1b[201~"
+	bracketedPasteStart     = "\x1b[200~"
+	bracketedPasteEnd       = "\x1b[201~"
+	shiftTabPrewarmDebounce = 500 * time.Millisecond
 )
 
 // ModelSelection is the runtime model/provider bundle returned by App.SwitchModel.
@@ -127,6 +128,8 @@ type App struct {
 	// cache-invalidating event (agent/model switch, compaction) so the next real
 	// request reads a warm prefix (r43). nil disables it (piped/one-shot, tests).
 	Prewarm func()
+	// shiftTabPrewarmAfter is test-injectable; production uses time.After.
+	shiftTabPrewarmAfter func(time.Duration) <-chan time.Time
 
 	AgentName             string         // current agent definition name
 	AvailableAgents       []AgentSummary // sorted agent names/descriptions for /agent listing
@@ -467,12 +470,38 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		prompt                    string
 		pendingPrefill            string // text deposited into the next prompt
 		pendingPrefillModelPrompt bool   // submitted prefill bypasses command/shell dispatch
+		pendingPrefillPasted      bool   // retained pure-paste classification across Shift-Tab
 		queued                    []replInput
 		preparedQueued            []agent.SteerInput
 		promptDone                <-chan struct{}
 		restoreEsc                func() error
 		escPresses                escapePresses
+		pendingShiftTabPrewarm    <-chan time.Time
 	)
+
+	prewarmAfter := app.shiftTabPrewarmAfter
+	if prewarmAfter == nil {
+		prewarmAfter = time.After
+	}
+	prewarm := app.Prewarm
+	cancelShiftTabPrewarm := func() {
+		pendingShiftTabPrewarm = nil
+	}
+	scheduleShiftTabPrewarm := func() {
+		if prewarm == nil {
+			return
+		}
+		pendingShiftTabPrewarm = prewarmAfter(shiftTabPrewarmDebounce)
+	}
+	// Existing immediate prewarm paths remain immediate and also invalidate any
+	// older Shift-Tab timer. Restore the caller's callback when the REPL exits.
+	if prewarm != nil {
+		app.Prewarm = func() {
+			cancelShiftTabPrewarm()
+			prewarm()
+		}
+		defer func() { app.Prewarm = prewarm }()
+	}
 
 	requestRead := func(req replReadRequest) {
 		if readPending || inputEnded {
@@ -492,6 +521,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 	}
 	finish := func(code int) int {
+		cancelShiftTabPrewarm()
 		if app.Renderer != nil {
 			app.Renderer.StopProgress()
 			app.Renderer.finishAssistantLine()
@@ -602,6 +632,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		return ctx, cancel, interrupted.Load
 	}
 	startPromptInteraction := func(prompt string, resolveSkillMentions, attachPromptImages bool) (exit bool, code int) {
+		cancelShiftTabPrewarm()
 		separateSubmittedPrompt(app.Errw)
 		if app.Renderer != nil {
 			app.Renderer.StartPrompt()
@@ -616,6 +647,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		return false, ExitOK
 	}
 	startPreparedPromptInteraction := func(input agent.SteerInput) (exit bool, code int) {
+		cancelShiftTabPrewarm()
 		if app.Renderer != nil {
 			app.Renderer.StartPrompt()
 		}
@@ -629,6 +661,16 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		return false, ExitOK
 	}
 	applyAction := func(input replInput) (exit bool, code int) {
+		if input.cycleAgent {
+			pendingPrefill = input.text
+			pendingPrefillModelPrompt = input.modelPrompt
+			pendingPrefillPasted = input.pasted
+			promptPrinted = false
+			if app.cycleAgent() {
+				scheduleShiftTabPrewarm()
+			}
+			return false, ExitOK
+		}
 		action := app.handlePromptInput(input, readCommandLine)
 		promptPrinted = false
 		if action.exit {
@@ -642,6 +684,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			if usePromptEditor {
 				pendingPrefill = action.prefill
 				pendingPrefillModelPrompt = action.prefillModelPrompt
+				pendingPrefillPasted = false
 			} else {
 				// Without the prompt editor there is no way to prefill for
 				// review; echo the loaded text and submit it directly,
@@ -659,6 +702,25 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			return startPromptInteraction(action.prompt, action.resolveSkillMentions, action.attachPromptImages)
 		}
 		return false, ExitOK
+	}
+	handleIdleReadResult := func(res replReadResult) (exit bool, code int) {
+		readPending = false
+		if res.input.ended {
+			inputEnded = true
+			return false, ExitOK
+		}
+		if plainPromptRead {
+			plainPromptRead = false
+			enableIdlePromptTerm()
+		}
+		if !res.ok {
+			setInputEnded(res.err)
+			return false, ExitOK
+		}
+		if res.input.interrupt {
+			return true, ExitInterrupt
+		}
+		return applyAction(res.input)
 	}
 
 	if initialPrompt != nil {
@@ -705,6 +767,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 						if res.ok && res.input.deposit {
 							pendingPrefill = res.input.text
 							pendingPrefillModelPrompt = false
+							pendingPrefillPasted = false
 						} else if res.ok && !res.input.escape && !res.input.interrupt && (res.input.text != "" || res.input.edit) {
 							queued = append(queued, res.input)
 						} else {
@@ -712,6 +775,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 							// rather than the cancel; the typed buffer is intact.
 							pendingPrefill = reader.promptBuffer()
 							pendingPrefillModelPrompt = false
+							pendingPrefillPasted = false
 						}
 						reader.drainPromptCancel()
 					}
@@ -811,6 +875,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					// until the prompt ends.
 					pendingPrefill = input.text
 					pendingPrefillModelPrompt = false
+					pendingPrefillPasted = false
 					activeReadPause = true
 					continue
 				}
@@ -877,32 +942,37 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			promptPrinted = true
 		}
 		if !plainPromptRead {
-			requestRead(replReadRequest{prompt: prompt, promptEditor: usePromptEditor, replPrompt: true, prefill: pendingPrefill, prefillModelPrompt: pendingPrefillModelPrompt})
+			requestRead(replReadRequest{prompt: prompt, promptEditor: usePromptEditor, replPrompt: true, prefill: pendingPrefill, prefillModelPrompt: pendingPrefillModelPrompt, prefillPasted: pendingPrefillPasted})
 			pendingPrefill = ""
 			pendingPrefillModelPrompt = false
+			pendingPrefillPasted = false
 		}
 		select {
 		case <-exit:
 			// SIGINT exit request at the idle prompt (design §8.4).
 			return finish(ExitInterrupt)
+		case <-pendingShiftTabPrewarm:
+			expired := pendingShiftTabPrewarm
+			// If a submitted line and the debounce become ready together, honor the
+			// input first so a real prompt can cancel the delayed warm-up. Non-model
+			// commands still allow the already-settled warm-up to run.
+			select {
+			case res := <-inputs:
+				if exit, code := handleIdleReadResult(res); exit {
+					return finish(code)
+				}
+				if inputEnded {
+					pendingShiftTabPrewarm = nil
+				} else if pendingShiftTabPrewarm == expired {
+					pendingShiftTabPrewarm = nil
+					prewarm()
+				}
+			default:
+				pendingShiftTabPrewarm = nil
+				prewarm()
+			}
 		case res := <-inputs:
-			readPending = false
-			if res.input.ended {
-				inputEnded = true
-				continue
-			}
-			if plainPromptRead {
-				plainPromptRead = false
-				enableIdlePromptTerm()
-			}
-			if !res.ok {
-				setInputEnded(res.err)
-				continue
-			}
-			if res.input.interrupt {
-				return finish(ExitInterrupt)
-			}
-			if exit, code := applyAction(res.input); exit {
+			if exit, code := handleIdleReadResult(res); exit {
 				return finish(code)
 			}
 		}
@@ -979,6 +1049,7 @@ type replInput struct {
 	text        string
 	pasted      bool
 	edit        bool
+	cycleAgent  bool
 	escape      bool
 	escapeTail  bool
 	interrupt   bool
@@ -1020,6 +1091,8 @@ type replReadRequest struct {
 	// prefillModelPrompt marks the submitted prefill as model-bound prompt text;
 	// used for external editor output reviewed in the line editor.
 	prefillModelPrompt bool
+	// prefillPasted retains pure-paste literal classification across Shift-Tab.
+	prefillPasted bool
 }
 
 type replAction struct {
@@ -1425,6 +1498,8 @@ func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
 	if req.promptEditor && rr.editor != nil {
 		restoreViPrompt := rr.editor.viPrompt
 		restoreNoHistory := rr.editor.noHistory
+		restoreCycleAgent := rr.editor.cycleAgent
+		rr.editor.cycleAgent = req.replPrompt
 		if !req.replPrompt {
 			rr.editor.viPrompt = nil
 			rr.editor.noHistory = true
@@ -1432,8 +1507,9 @@ func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
 		defer func() {
 			rr.editor.viPrompt = restoreViPrompt
 			rr.editor.noHistory = restoreNoHistory
+			rr.editor.cycleAgent = restoreCycleAgent
 		}()
-		input, ok, err := rr.editor.readPrefilled(req.prompt, req.prefill)
+		input, ok, err := rr.editor.readPrefilledClassified(req.prompt, req.prefill, req.prefillPasted)
 		if ok {
 			input.interactive = true
 			if req.prefillModelPrompt {
@@ -2641,10 +2717,51 @@ func (app *App) switchAgent(name string) {
 	}
 }
 
+// nextAgentName returns the configured agent after the current one, wrapping to
+// the first entry. AvailableAgents is already in canonical lexical order. If the
+// current name is absent, the first entry is the recovery target.
+func (app *App) nextAgentName() (string, bool) {
+	if len(app.AvailableAgents) == 0 || app.SwitchAgent == nil {
+		return "", false
+	}
+	next := 0
+	for i, summary := range app.AvailableAgents {
+		if summary.Name == app.AgentName {
+			next = (i + 1) % len(app.AvailableAgents)
+			break
+		}
+	}
+	name := app.AvailableAgents[next].Name
+	if name == app.AgentName {
+		return "", false
+	}
+	return name, true
+}
+
+// cycleAgent applies the next configured agent through the same full switch path
+// as /agent, but leaves prewarming to the idle-loop debounce.
+func (app *App) cycleAgent() bool {
+	name, ok := app.nextAgentName()
+	if !ok {
+		return false
+	}
+	if err := app.applyAgentSwitchWithPrewarm(name, false); err != nil {
+		fmt.Fprintf(app.Errw, "[agent switch failed: %v]\n", err)
+		return false
+	}
+	return true
+}
+
 // applyAgentSwitch performs the agent switch and reports an error instead of
 // printing it, so callers that must abort on failure (the handoff) can. The
-// /agent command wraps it and prints failures.
+// /agent command wraps it and prints failures. Existing callers prewarm
+// immediately; Shift-Tab uses applyAgentSwitchWithPrewarm to defer only that
+// warm-up to the idle loop.
 func (app *App) applyAgentSwitch(name string) error {
+	return app.applyAgentSwitchWithPrewarm(name, true)
+}
+
+func (app *App) applyAgentSwitchWithPrewarm(name string, prewarm bool) error {
 	if app.SwitchAgent == nil {
 		return fmt.Errorf("agent switch unavailable")
 	}
@@ -2702,8 +2819,11 @@ func (app *App) applyAgentSwitch(name string) error {
 		fmt.Fprintln(app.Errw, "[warning: model target changed; the new model may start without prompt cache, increasing token usage or cost]")
 	}
 	// The agent's tools/system (and possibly model/provider) changed, so re-warm
-	// the cache prefix in the background (r43).
-	app.prewarm()
+	// the cache prefix in the background (r43), unless the idle Shift-Tab path is
+	// deferring this switch's warm-up.
+	if prewarm {
+		app.prewarm()
+	}
 	return nil
 }
 

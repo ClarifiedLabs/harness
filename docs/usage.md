@@ -512,6 +512,11 @@ the default image detail when the model supports images. On `!` command lines,
 Tab completes the first word from `PATH` and completes path words with `/`, `~/`,
 `./`, `../`, and nested relative path prefixes.
 
+At the idle main interactive TTY prompt only, Shift-Tab cycles the configured
+agents by canonical sorted name, wrapping at the end, without changing the
+editable draft. It works in emacs mode and in both vi insert and normal modes;
+ordinary Tab keeps the completion behavior above.
+
 The editor preamble contains only the latest completed conversational turn from
 the replay log (assistant output, that turn's tool activity/notices, and its
 `[turn: …]` completion line). It excludes the user prompt, earlier turns, attempt
@@ -597,6 +602,14 @@ An agent definition bundles a set of allowed tools with extra system-prompt
 instructions and an optional model target override. Select one with
 `-agent <name>`, `HARNESS_AGENT`, or `agent` in the config file. Switch
 mid-session with `/agent <name>`.
+
+Shift-Tab switches use the same full agent runtime selection as `/agent` and emit
+the existing `[agent switched: <name>]` notice and provider/model line.
+Their prewarm uses a 500ms idle debounce, so rapid cycles warm only the final
+settled agent. It is not suppressed merely because the model ID is unchanged:
+system/tool prefixes and response continuation differ by agent. Startup, explicit
+`/agent`, handoff and model changes, and standalone `/compact` keep immediate
+prewarming; submitting a real prompt cancels any pending delayed warmup.
 
 Four agents are built in:
 

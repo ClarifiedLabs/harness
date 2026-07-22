@@ -91,6 +91,9 @@ type promptLineEditor struct {
 	// confirmations) so transient menu answers never pollute the recallable REPL
 	// history; the main idle prompt leaves it false.
 	noHistory bool
+	// cycleAgent enables Shift-Tab only for the main idle REPL prompt. Auxiliary
+	// reads and during-prompt capture leave it false so the key remains inert.
+	cycleAgent bool
 
 	// Non-bracketed paste-burst heuristic (interactive TTY only). When now is
 	// non-nil and pasteHeuristic is true, updatePasteTiming tracks inter-keystroke
@@ -322,6 +325,10 @@ func (e *promptLineEditor) resetPromptCursorShape() error {
 // where the text typed while the model ran is handed back for review/edit before
 // the user submits it manually (during-prompt input).
 func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, bool, error) {
+	return e.readPrefilledClassified(prompt, prefill, false)
+}
+
+func (e *promptLineEditor) readPrefilledClassified(prompt, prefill string, purePaste bool) (replInput, bool, error) {
 	state := lineEditState{prompt: prompt}
 	defer e.clearPromptSnapshot()
 	if prefill != "" {
@@ -333,7 +340,7 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 	// prompt cannot be mistaken for a paste continuation.
 	e.pasteMode = false
 	e.pasteCRPending = false
-	e.purePaste = false
+	e.purePaste = purePaste
 	e.lastKeyTime = time.Time{}
 	e.prevBufferEmpty = len(state.buf) == 0
 	e.prevCursor = state.cursor
@@ -587,6 +594,8 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 			return viEditResult{redraw: true}, nil
 		case lineEditInterrupt:
 			return viEditResult{input: replInput{interrupt: true}, ok: true, done: true}, nil
+		case lineEditCycleAgent:
+			return e.cycleAgentInput(s, duringPrompt)
 		case lineEditInsertNewline:
 			e.markManualEdit(s)
 			s.insert('\n')
@@ -696,6 +705,23 @@ func (e *promptLineEditor) edit(s *lineEditState, duringPrompt bool) (viEditResu
 	return viEditResult{input: replInput{text: string(s.buf), edit: true}, ok: true, done: true}, nil
 }
 
+// cycleAgentInput finishes only the main idle prompt and returns its draft for
+// the REPL to prefill again after switching agents. It intentionally does not
+// commit history or mark the draft as manually edited.
+func (e *promptLineEditor) cycleAgentInput(s *lineEditState, duringPrompt bool) (viEditResult, error) {
+	if duringPrompt || !e.cycleAgent {
+		return viEditResult{redraw: true}, nil
+	}
+	if err := e.finishPromptState(s); err != nil {
+		return viEditResult{}, err
+	}
+	return viEditResult{
+		input: replInput{text: string(s.buf), pasted: e.purePaste, cycleAgent: true},
+		ok:    true,
+		done:  true,
+	}, nil
+}
+
 func (e *promptLineEditor) terminalColumns() int {
 	if e.columns == nil {
 		return 0
@@ -732,6 +758,7 @@ const (
 	lineEditInterrupt
 	lineEditEscape
 	lineEditShiftModifier
+	lineEditCycleAgent
 )
 
 func (e *promptLineEditor) readEscape() (lineEditAction, string, error) {
@@ -887,7 +914,7 @@ func actionForKeyEvent(ev lineKeyEvent) (lineEditAction, string) {
 	case ev.key == lineKeyBackspace:
 		return lineEditDelete, ""
 	case ev.key == lineKeyTab && ev.modifier == lineModShift:
-		return lineEditIgnore, ""
+		return lineEditCycleAgent, ""
 	case ev.key == lineKeyTab:
 		return lineEditInsertText, "\t"
 	case (ev.key == lineKeyLeftShift || ev.key == lineKeyRightShift) && keyModifierHasShift(ev.modifier):
@@ -1560,6 +1587,8 @@ func lineEditActionName(action lineEditAction) string {
 		return "escape"
 	case lineEditShiftModifier:
 		return "shift-modifier"
+	case lineEditCycleAgent:
+		return "cycle-agent"
 	default:
 		return fmt.Sprintf("unknown(%d)", action)
 	}

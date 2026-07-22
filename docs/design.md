@@ -568,6 +568,14 @@ system-and-tools prefix without generating or persisting a disposable assistant
 turn. Other transports retain the minimal one-token neutral warm-up request
 (subject to a provider's configured output-token floor).
 
+Shift-Tab agent switches defer prewarm behind a 500ms idle debounce;
+each additional cycle replaces the pending target, so only the final settled
+agent warms. Equality of model IDs must not suppress that warmup because the
+agent's system/tool prefix and response continuation can differ. Startup,
+explicit `/agent`, handoff and model changes, and standalone `/compact` retain
+immediate prewarming. Submitting a real prompt cancels a pending delayed warmup
+before the turn starts.
+
 **Responses reasoning persistence.** In the default stateless (`store:false`) mode
 the provider would otherwise re-derive chain-of-thought on every tool turn. For a
 reasoning request harness sends `include: ["reasoning.encrypted_content"]`,
@@ -2093,6 +2101,13 @@ completes executable names from `PATH` unless it starts with `/`, `~/`, `./`, `.
 or otherwise contains `/`; path words complete filesystem entries with the same path
 prefix rules.
 
+The Shift-Tab binding is active only at the idle main interactive TTY
+prompt. In emacs mode and in both vi insert and normal modes, it selects the next
+configured agent in canonical name-sorted order with wraparound, preserves the
+editable draft, and emits the existing `[agent switched: <name>]` notice followed
+by the provider/model line. Ordinary Tab remains completion; Shift-Tab has no
+agent-switch meaning in other input contexts.
+
 `repl_prompt` (also `-repl-prompt` / `HARNESS_REPL_PROMPT`) is a format string
 rendered at every idle prompt boundary, so dynamic values reflect runtime
 changes before each read. The default is `[{agent}] > `. Supported placeholders
@@ -2578,7 +2593,9 @@ reviewer, or the wide-open default without separate binaries.
   empty value means "unspecified", so a resumed session's saved agent (§11) can
   supply it before the `auto` fallback. `/agent <name>` switches at runtime;
   `/agent` lists inside the REPL; `harness --agents` lists from the CLI. `/mode`
-  is a REPL alias only.
+  is a REPL alias only. Shift-Tab cycling invokes this same full runtime
+  selection path—not a display-name or model-only swap—so it recomposes the agent
+  prompt, tools, model/reasoning selection, and response continuation state.
 - **Built-ins:** `auto` (all available built-in tools plus discovered MCP tools,
   including `record_plan`, `delegate` and background job tools; its
   `prompts/agents/auto.txt` is a one-byte file — a single newline — that trims to

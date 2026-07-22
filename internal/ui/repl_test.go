@@ -2130,6 +2130,311 @@ func TestREPLAgentCommandUnknownReportsError(t *testing.T) {
 	}
 }
 
+type shiftTabDelayRequest struct {
+	delay time.Duration
+	fire  chan time.Time
+}
+
+func nextShiftTabDelay(t *testing.T, requests <-chan shiftTabDelayRequest) shiftTabDelayRequest {
+	t.Helper()
+	select {
+	case req := <-requests:
+		if req.delay != shiftTabPrewarmDebounce {
+			t.Fatalf("Shift-Tab delay = %v, want %v", req.delay, shiftTabPrewarmDebounce)
+		}
+		return req
+	case <-time.After(time.Second):
+		t.Fatal("Shift-Tab prewarm was not scheduled")
+	}
+	return shiftTabDelayRequest{}
+}
+
+func TestNextAgentNameCyclesWrapsAndRecovers(t *testing.T) {
+	app := &App{
+		AvailableAgents: []AgentSummary{{Name: "auto"}, {Name: "explore"}, {Name: "plan"}},
+		SwitchAgent:     func(string) (AgentSelection, error) { return AgentSelection{}, nil },
+	}
+	for _, tt := range []struct {
+		current string
+		want    string
+		ok      bool
+	}{
+		{current: "auto", want: "explore", ok: true},
+		{current: "explore", want: "plan", ok: true},
+		{current: "plan", want: "auto", ok: true},
+		{current: "missing", want: "auto", ok: true},
+	} {
+		app.AgentName = tt.current
+		got, ok := app.nextAgentName()
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("nextAgentName(%q) = %q, %v; want %q, %v", tt.current, got, ok, tt.want, tt.ok)
+		}
+	}
+
+	app.AvailableAgents = nil
+	if got, ok := app.nextAgentName(); ok || got != "" {
+		t.Fatalf("zero agents = %q, %v; want no-op", got, ok)
+	}
+	app.AvailableAgents = []AgentSummary{{Name: "auto"}}
+	app.AgentName = "auto"
+	if got, ok := app.nextAgentName(); ok || got != "" {
+		t.Fatalf("one current agent = %q, %v; want no-op", got, ok)
+	}
+	app.AgentName = "missing"
+	if got, ok := app.nextAgentName(); !ok || got != "auto" {
+		t.Fatalf("one recovery agent = %q, %v; want auto", got, ok)
+	}
+	app.SwitchAgent = nil
+	if got, ok := app.nextAgentName(); ok || got != "" {
+		t.Fatalf("missing switch callback = %q, %v; want no-op", got, ok)
+	}
+}
+
+func TestREPLShiftTabCyclesAgentsAndDebouncesFinalPrewarm(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.AvailableAgents = []AgentSummary{{Name: "auto"}, {Name: "explore"}, {Name: "plan"}}
+
+	catalog, _ := tools.CatalogWithOptions(tools.Options{SearchTools: tools.SearchToolsGrep})
+	toolSets := make(map[string]*tools.Registry)
+	for name, names := range map[string][]string{
+		"auto":    {"read_file"},
+		"explore": {"grep"},
+		"plan":    {"read_file", "grep"},
+	} {
+		registry, err := catalog.Subset(names)
+		if err != nil {
+			t.Fatalf("%s tool subset: %v", name, err)
+		}
+		toolSets[name] = registry
+	}
+	var switched []string
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		switched = append(switched, name)
+		return AgentSelection{
+			Name:          name,
+			Tools:         toolSets[name],
+			System:        strings.ToUpper(name) + " SYSTEM",
+			Provider:      "anthropic",
+			Model:         "claude-opus-4-8", // deliberately identical for every agent
+			RegistryModel: "anthropic:claude-opus-4-8",
+			BaseURL:       app.BaseURL,
+			Runtime:       fp,
+		}, nil
+	}
+
+	delayRequests := make(chan shiftTabDelayRequest, 4)
+	app.shiftTabPrewarmAfter = func(delay time.Duration) <-chan time.Time {
+		fire := make(chan time.Time, 1)
+		delayRequests <- shiftTabDelayRequest{delay: delay, fire: fire}
+		return fire
+	}
+	type warmSnapshot struct {
+		agent   string
+		request llm.Request
+	}
+	warmed := make(chan warmSnapshot, 4)
+	app.Prewarm = func() {
+		warmed <- warmSnapshot{agent: app.AgentName, request: app.Agent.ContextRequest()}
+	}
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	writePipe(t, pw, "draft\x1b[Z")
+	first := nextShiftTabDelay(t, delayRequests)
+	if app.AgentName != "explore" || app.System != "EXPLORE SYSTEM" {
+		t.Fatalf("first cycle selected agent=%q system=%q, want explore", app.AgentName, app.System)
+	}
+	if req := app.Agent.ContextRequest(); len(req.Tools) != 1 || req.Tools[0].Name != "grep" {
+		t.Fatalf("first cycle tools = %+v, want grep", req.Tools)
+	}
+
+	writePipe(t, pw, "\x1b[9;2u")
+	_ = nextShiftTabDelay(t, delayRequests)
+	if app.AgentName != "plan" {
+		t.Fatalf("second cycle selected %q, want plan", app.AgentName)
+	}
+	first.fire <- time.Now() // stale after the second schedule; must do nothing
+
+	writePipe(t, pw, "\x1b[Z")
+	latest := nextShiftTabDelay(t, delayRequests)
+	if app.AgentName != "auto" {
+		t.Fatalf("wrapped cycle selected %q, want auto", app.AgentName)
+	}
+	select {
+	case got := <-warmed:
+		t.Fatalf("rapid cycling prewarmed intermediate agent: %+v", got)
+	default:
+	}
+
+	latest.fire <- time.Now()
+	var got warmSnapshot
+	select {
+	case got = <-warmed:
+	case <-time.After(time.Second):
+		t.Fatal("latest Shift-Tab timer did not prewarm")
+	}
+	if got.agent != "auto" || got.request.Model != "claude-opus-4-8" || got.request.System != "AUTO SYSTEM" {
+		t.Fatalf("final prewarm snapshot = agent=%q model=%q system=%q", got.agent, got.request.Model, got.request.System)
+	}
+	if len(got.request.Tools) != 1 || got.request.Tools[0].Name != "read_file" {
+		t.Fatalf("final prewarm tools = %+v, want read_file", got.request.Tools)
+	}
+
+	writePipe(t, pw, "\x7f\x7f\x7f\x7f\x7f/exit\r")
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if strings.Join(switched, ",") != "explore,plan,auto" {
+		t.Fatalf("switch order = %v, want lexical cycle with wrap", switched)
+	}
+	for _, name := range switched {
+		if !strings.Contains(errw.String(), "[agent switched: "+name+"]") {
+			t.Errorf("missing switch notice for %s: %q", name, errw.String())
+		}
+		if !strings.Contains(errw.String(), "["+name+"] > draft") {
+			t.Errorf("next prompt did not retain draft for agent %s: %q", name, errw.String())
+		}
+	}
+	if got := strings.Count(errw.String(), "model: claude-opus-4-8"); got < 3 {
+		t.Fatalf("provider/model lines = %d, want one per switch: %q", got, errw.String())
+	}
+	select {
+	case extra := <-warmed:
+		t.Fatalf("more than one prewarm: %+v", extra)
+	default:
+	}
+}
+
+func TestREPLShiftTabFailedSwitchRetainsDraft(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.AvailableAgents = []AgentSummary{{Name: "auto"}, {Name: "plan"}}
+	app.SwitchAgent = func(string) (AgentSelection, error) { return AgentSelection{}, errors.New("switch broke") }
+	prewarms := 0
+	app.Prewarm = func() { prewarms++ }
+
+	if code := run(strings.NewReader("draft\x1b[Z\r"), app, nil, true); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if app.AgentName != "auto" || prewarms != 0 {
+		t.Fatalf("failed cycle left agent=%q prewarms=%d, want auto and zero", app.AgentName, prewarms)
+	}
+	if !strings.Contains(errw.String(), "[agent switch failed: switch broke]") {
+		t.Fatalf("missing switch failure notice: %q", errw.String())
+	}
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want retained draft submitted once", fp.RequestCount())
+	}
+	messages := fp.Requests[0].Messages
+	if len(messages) == 0 || len(messages[len(messages)-1].Content) == 0 || messages[len(messages)-1].Content[0].Text != "draft" {
+		t.Fatalf("submitted messages = %+v, want retained draft", messages)
+	}
+}
+
+func TestREPLShiftTabPendingPrewarmCancelledByExplicitAgentSwitch(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.AvailableAgents = []AgentSummary{{Name: "auto"}, {Name: "explore"}, {Name: "plan"}}
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default(), System: strings.ToUpper(name), Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel, Runtime: fp}, nil
+	}
+	delayRequests := make(chan shiftTabDelayRequest, 2)
+	app.shiftTabPrewarmAfter = func(delay time.Duration) <-chan time.Time {
+		fire := make(chan time.Time, 1)
+		delayRequests <- shiftTabDelayRequest{delay: delay, fire: fire}
+		return fire
+	}
+	warmed := make(chan string, 2)
+	app.Prewarm = func() { warmed <- app.AgentName }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	writePipe(t, pw, "\x1b[Z")
+	pending := nextShiftTabDelay(t, delayRequests)
+	writePipe(t, pw, "/agent plan\r")
+	select {
+	case name := <-warmed:
+		if name != "plan" {
+			t.Fatalf("explicit switch prewarmed %q, want plan", name)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("explicit /agent did not prewarm immediately")
+	}
+	pending.fire <- time.Now()
+	writePipe(t, pw, "/exit\r")
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	select {
+	case name := <-warmed:
+		t.Fatalf("stale Shift-Tab timer caused duplicate prewarm for %q", name)
+	default:
+	}
+}
+
+func TestREPLShiftTabPendingPrewarmCancelledByRealPrompt(t *testing.T) {
+	var out, errw lockedBuffer
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("ok")},
+		Stop:   llm.StopEndTurn,
+		Block: func(context.Context) {
+			close(started)
+			<-release
+		},
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.AvailableAgents = []AgentSummary{{Name: "auto"}, {Name: "plan"}}
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "PLAN", Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel, Runtime: fp}, nil
+	}
+	delayRequests := make(chan shiftTabDelayRequest, 1)
+	app.shiftTabPrewarmAfter = func(delay time.Duration) <-chan time.Time {
+		fire := make(chan time.Time, 1)
+		delayRequests <- shiftTabDelayRequest{delay: delay, fire: fire}
+		return fire
+	}
+	warmed := make(chan struct{}, 1)
+	app.Prewarm = func() { warmed <- struct{}{} }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+	writePipe(t, pw, "hello\x1b[Z")
+	pending := nextShiftTabDelay(t, delayRequests)
+	writePipe(t, pw, "\r")
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("real prompt did not start")
+	}
+	pending.fire <- time.Now()
+	close(release)
+	_ = pw.Close()
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	select {
+	case <-warmed:
+		t.Fatal("submitted real prompt did not cancel pending Shift-Tab prewarm")
+	default:
+	}
+}
+
 func TestREPLSaveToPath(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{
@@ -2586,6 +2891,67 @@ func TestREPLReaderConsumesBufferedEscapeSequenceTail(t *testing.T) {
 	}
 	if !ok || input.text != "second" {
 		t.Fatalf("input = %+v ok=%v, want second prompt", input, ok)
+	}
+}
+
+func TestREPLReaderShiftTabPreservesDraftClassificationWithoutHistory(t *testing.T) {
+	rr := newREPLReader(strings.NewReader("\x1b[Z\x1b[9;2u\r"), io.Discard, true, "")
+	req := replReadRequest{
+		prompt:             "> ",
+		promptEditor:       true,
+		replPrompt:         true,
+		prefill:            "/exit",
+		prefillModelPrompt: true,
+		prefillPasted:      true,
+	}
+
+	for i := 0; i < 2; i++ {
+		input, ok, err := rr.read(req)
+		if err != nil || !ok {
+			t.Fatalf("cycle read %d ok=%v err=%v", i, ok, err)
+		}
+		if !input.cycleAgent || input.text != "/exit" || !input.modelPrompt || !input.pasted {
+			t.Fatalf("cycle read %d = %+v, want classified /exit draft", i, input)
+		}
+		if len(rr.editor.history) != 0 {
+			t.Fatalf("cycle read %d committed history: %v", i, rr.editor.history)
+		}
+		req.prefill = input.text
+		req.prefillModelPrompt = input.modelPrompt
+		req.prefillPasted = input.pasted
+	}
+
+	input, ok, err := rr.read(req)
+	if err != nil || !ok {
+		t.Fatalf("submit read ok=%v err=%v", ok, err)
+	}
+	if input.cycleAgent || input.text != "/exit" || !input.modelPrompt || !input.pasted {
+		t.Fatalf("submitted input = %+v, want classified /exit prompt", input)
+	}
+}
+
+func TestREPLReaderShiftTabIsInertOutsideIdleMainPrompt(t *testing.T) {
+	rr := newREPLReader(strings.NewReader("draft\x1b[Z\r"), io.Discard, true, "")
+	input, ok, err := rr.read(replReadRequest{prompt: "choice: ", promptEditor: true})
+	if err != nil || !ok {
+		t.Fatalf("auxiliary read ok=%v err=%v", ok, err)
+	}
+	if input.cycleAgent || input.text != "draft" {
+		t.Fatalf("auxiliary Shift-Tab = %+v, want inert draft", input)
+	}
+
+	during := newDuringPromptTestReader("draft\x1b[Z")
+	for range len("draft") {
+		if _, _, err := pumpDuringPromptKey(during); err != nil {
+			t.Fatalf("type during prompt: %v", err)
+		}
+	}
+	input, done, err := pumpDuringPromptKey(during)
+	if err != nil {
+		t.Fatalf("during-prompt Shift-Tab: %v", err)
+	}
+	if done || input.cycleAgent || string(during.promptState.buf) != "draft" {
+		t.Fatalf("during-prompt Shift-Tab = %+v done=%v buf=%q, want inert draft", input, done, string(during.promptState.buf))
 	}
 }
 
