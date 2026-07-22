@@ -398,11 +398,6 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}()
 
 	reader := newREPLReader(in, app.Errw, usePromptEditor, app.PromptEditMode)
-	if reader.editor != nil && app.Renderer != nil {
-		// Dim the submitted prompt echo so the committed line reads as distinct
-		// from the model output that follows (matches the dim separator rule).
-		reader.editor.dimSubmittedPrompt = app.Renderer.color
-	}
 	if app.PromptLogWriter != nil && reader.editor != nil {
 		app.PromptLogWriter.setPromptEditor(reader.editor)
 		defer app.PromptLogWriter.setPromptEditor(nil)

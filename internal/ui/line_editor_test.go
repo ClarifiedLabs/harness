@@ -1181,53 +1181,6 @@ func TestPromptLineEditorFinishMovesFromMiddleToEnd(t *testing.T) {
 	}
 }
 
-func TestPromptLineEditorFinishStyledDimsSubmittedLine(t *testing.T) {
-	var out bytes.Buffer
-	screen := newPromptTestScreen(4, 6, 0)
-	state := lineEditState{prompt: "> "}
-	for _, r := range "abc" {
-		state.insert(r)
-	}
-	if err := state.redraw(&out, 6); err != nil {
-		t.Fatalf("redraw: %v", err)
-	}
-	screen.feed(out.String())
-
-	before := out.Len()
-	if err := state.finishStyled(&out, ansiDim, ansiReset); err != nil {
-		t.Fatalf("finishStyled: %v", err)
-	}
-	screen.feed(out.String()[before:])
-
-	// The committed line stays visible (now dim) with the cursor parked on the
-	// next row, just like a plain finish.
-	lines := screen.visibleLines()
-	if lines[0] != "> abc" || screen.row != 1 || screen.col != 0 {
-		t.Fatalf("screen after finishStyled = %#v cursor=(%d,%d), want dim line kept and newline", lines, screen.row, screen.col)
-	}
-	if want := ansiDim + "> abc" + ansiReset + "\n"; !strings.Contains(out.String()[before:], want) {
-		t.Fatalf("finishStyled output = %q, want it to contain %q", out.String()[before:], want)
-	}
-	if state.drawn {
-		t.Fatalf("finishStyled should clear drawn")
-	}
-}
-
-func TestPromptLineEditorFinishStyledFallsBackWhenNotDrawn(t *testing.T) {
-	var out bytes.Buffer
-	state := lineEditState{prompt: "> "}
-	for _, r := range "abc" {
-		state.insert(r)
-	}
-	// Never drawn: finishStyled must behave exactly like finish.
-	if err := state.finishStyled(&out, ansiDim, ansiReset); err != nil {
-		t.Fatalf("finishStyled: %v", err)
-	}
-	if got, want := out.String(), "\n"; got != want {
-		t.Fatalf("finishStyled (not drawn) = %q, want %q", got, want)
-	}
-}
-
 func TestPromptLineEditorPreloadedHistory(t *testing.T) {
 	// Simulate a fresh REPL with preloaded history from a previous session.
 	// Arrow-up should recall the most recent preloaded entry.
