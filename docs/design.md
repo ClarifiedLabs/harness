@@ -2516,10 +2516,11 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
 - **Tree/archive persistence:** archive the final enlarged removed set unchanged and
   persist the exact summary, current focus, and cumulative file lists in additive
   checkpoint/archive/tree metadata. `FirstKeptEntryID` remains an atomic original-tree
-  boundary. If degradation rewrites retained content, mark the compaction entry and
-  materialize the rewritten suffix as new atomic segment entries so save/resume cannot
-  resurrect the original payload. Old entries with omitted fields reconstruct metadata
-  from their canonical tree summary without a schema-version bump.
+  boundary when retained history can be linked directly. If degradation rewrites retained
+  content, or a valid boundary falls inside a wholesale context-reset entry, mark the
+  compaction entry and materialize the retained suffix as new atomic segment entries so
+  save/resume cannot resurrect or reject it. Old entries with omitted fields reconstruct
+  metadata from their canonical tree summary without a schema-version bump.
 - **Degradation:** once only the last turn remains, hard-truncate the largest tool
   result/input/image blocks in place with markers.
   When there is no older turn to summarize but the transcript is still over budget,

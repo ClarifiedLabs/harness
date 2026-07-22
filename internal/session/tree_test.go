@@ -118,6 +118,76 @@ func TestTreeCompactionKeepsRawPathNavigable(t *testing.T) {
 	}
 }
 
+// Regression: retention may rewrite an old tool result before compaction,
+// causing SyncTranscript to materialize the whole active transcript in one
+// context-reset entry. A later valid compaction boundary inside that entry must
+// materialize its kept suffix instead of treating the reset as indivisible.
+func TestTreeCompactionMaterializesBoundaryInsideContextReset(t *testing.T) {
+	at := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	before := []llm.Message{
+		treePrompt(at, "old"),
+		{Role: llm.RoleAssistant, Time: at, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "old-call", ToolName: "read_file", ToolInput: []byte(`{}`)}}},
+		{Role: llm.RoleUser, Time: at, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "old-call", ResultText: "original old result"}}},
+		{Role: llm.RoleAssistant, Time: at.Add(time.Minute), Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "kept-call", ToolName: "read_file", ToolInput: []byte(`{}`)}}},
+		{Role: llm.RoleUser, Time: at.Add(time.Minute), Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "kept-call", ResultText: "kept result"}}},
+	}
+	tree, err := LinearTree(at, "", before)
+	if err != nil {
+		t.Fatalf("LinearTree: %v", err)
+	}
+
+	rewritten := cloneMessagesForTree(before)
+	rewritten[2].Content[0].ResultText = "[older tool output trimmed]"
+	if err := tree.SyncTranscript(rewritten); err != nil {
+		t.Fatalf("SyncTranscript retention rewrite: %v", err)
+	}
+	resetID := tree.ActiveLeaf
+	if entry, ok := tree.Entry(resetID); !ok || entry.Type != EntryContextReset {
+		t.Fatalf("retention rewrite leaf = %+v, %v; want context reset", entry, ok)
+	}
+
+	checkpoint := llm.Message{
+		Role:       llm.RoleUser,
+		Time:       at.Add(2 * time.Minute),
+		Origin:     llm.MessageOriginCompactionCheckpoint,
+		Content:    []llm.ContentBlock{{Kind: llm.BlockText, Text: "checkpoint summary"}},
+		Compaction: &llm.CompactionMetadata{Summary: "summary"},
+	}
+	if err := tree.PrepareCompaction(rewritten, 3, "summary", "compactions/0001.input.json", 1200, "", nil, nil); err != nil {
+		t.Fatalf("PrepareCompaction: %v", err)
+	}
+	after := append([]llm.Message{checkpoint}, cloneMessagesForTree(rewritten[3:])...)
+	if err := tree.SyncTranscript(after); err != nil {
+		t.Fatalf("SyncTranscript compacted: %v", err)
+	}
+
+	var compaction Entry
+	for _, entry := range tree.Entries {
+		if entry.Type == EntryCompaction {
+			compaction = entry
+		}
+	}
+	if compaction.ID == "" || !compaction.MaterializedKept || compaction.FirstKeptEntryID != resetID {
+		t.Fatalf("compaction did not materialize reset suffix: %+v", compaction)
+	}
+
+	dir := t.TempDir()
+	if err := tree.Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := LoadTree(dir, tree.ActiveLeaf)
+	if err != nil {
+		t.Fatalf("LoadTree: %v", err)
+	}
+	active, err := loaded.BuildContext()
+	if err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+	if !transcriptsEqual(active, after) {
+		t.Fatalf("reloaded context = %+v, want %+v", active, after)
+	}
+}
+
 func TestTreeExtractRecordsParentAndGrowsIndependently(t *testing.T) {
 	at := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	tree, err := LinearTree(at, "/work", []llm.Message{treePrompt(at, "one"), treeAssistant(at, "answer")})

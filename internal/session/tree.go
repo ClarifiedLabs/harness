@@ -450,8 +450,19 @@ func (t *Tree) commitCompaction(messages []llm.Message) error {
 		return t.SyncTranscript(messages)
 	}
 	ref := t.activeRefs[p.olderCount]
+	materializeBoundary := false
 	if ref.offset != 0 {
-		return errors.New("session: compaction boundary splits an atomic segment")
+		idx, ok := t.byID[ref.entryID]
+		if !ok {
+			return fmt.Errorf("session: compaction boundary entry %q not found", ref.entryID)
+		}
+		if t.Entries[idx].Type != EntryContextReset {
+			return errors.New("session: compaction boundary splits an atomic segment")
+		}
+		// A context reset may contain a wholesale transcript rewrite. A valid
+		// turn boundary can therefore fall inside its entry, but there is no
+		// standalone original-tree node for the retained suffix to link to.
+		materializeBoundary = true
 	}
 	checkpoint := cloneMessagesForTree(messages[:1])[0]
 	keptCount := len(t.activeMsgs) - p.olderCount
@@ -459,7 +470,7 @@ func (t *Tree) commitCompaction(messages []llm.Message) error {
 	if baseLen > len(messages) {
 		return fmt.Errorf("session: compacted transcript too short: got %d want at least %d", len(messages), baseLen)
 	}
-	materializedKept := !transcriptsEqual(messages[1:baseLen], t.activeMsgs[p.olderCount:])
+	materializedKept := materializeBoundary || !transcriptsEqual(messages[1:baseLen], t.activeMsgs[p.olderCount:])
 	entry := Entry{
 		Type:             EntryCompaction,
 		ParentID:         t.ActiveLeaf,
