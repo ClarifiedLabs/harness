@@ -749,13 +749,13 @@ func liveRenderer(out, errw *bytes.Buffer, now func() time.Time) *Renderer {
 	})
 }
 
-func TestLiveCounterPaintsInPlaceAndCarriesContextPercent(t *testing.T) {
+func TestLiveCounterPaintsInPlaceAndCarriesContextUsage(t *testing.T) {
 	var out, errw bytes.Buffer
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
 	r := liveRenderer(&out, &errw, func() time.Time { return now })
 
 	r.StartPromptRun()
-	r.TurnAttemptStart(1, 1, agent.ContextEstimate{Total: 30, Window: 100})
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{Total: 30_000, Window: 100_000})
 	defer r.StopProgress()
 
 	got := errw.String()
@@ -765,11 +765,22 @@ func TestLiveCounterPaintsInPlaceAndCarriesContextPercent(t *testing.T) {
 	if !strings.Contains(got, "\r\x1b[2K") {
 		t.Fatalf("counter should repaint in place with \\r\\x1b[2K, got %q", got)
 	}
-	if !strings.Contains(got, "[turn: 1 · 0s · ctx 30% │ prompt 0s]") {
-		t.Fatalf("counter should show elapsed + context + visually separated total, got %q", got)
+	if !strings.Contains(got, "[turn: 1 · 0s · ctx 30% 30.0k/100.0k │ prompt 0s]") {
+		t.Fatalf("counter should show elapsed + context usage + visually separated total, got %q", got)
 	}
 	if strings.Contains(got, "waiting") {
 		t.Fatalf("live mode should not print the static waiting line, got %q", got)
+	}
+}
+
+func TestCompletedTurnCounterIncludesContextUsage(t *testing.T) {
+	got := turnUsageLine(agent.TurnUsage{
+		Turn:    19,
+		Context: agent.ContextEstimate{Total: 100_000, Window: 200_000},
+	}, 10_500*time.Millisecond, 224_100*time.Millisecond)
+	want := "[turn: 19 · 10.5s · ctx 50% 100.0k/200.0k │ prompt 224.1s]"
+	if got != want {
+		t.Fatalf("completed turn counter = %q, want %q", got, want)
 	}
 }
 
@@ -813,12 +824,12 @@ func TestLiveCounterTracksAndCompletesCompaction(t *testing.T) {
 	}
 	r.statusMu.Lock()
 	active, drawn := r.statusActive, r.statusDrawn
-	label, ctxPct := r.statusLabel, r.statusCtxPct
+	label, statusCtx := r.statusLabel, r.statusCtx
 	tickerRunning := r.ticker != nil
 	r.statusMu.Unlock()
-	if active || drawn || label != "" || ctxPct != 0 {
-		t.Fatalf("completed compaction left stale status state: active=%t drawn=%t label=%q ctx=%d",
-			active, drawn, label, ctxPct)
+	if active || drawn || label != "" || statusCtx != (agent.ContextEstimate{}) {
+		t.Fatalf("completed compaction left stale status state: active=%t drawn=%t label=%q ctx=%+v",
+			active, drawn, label, statusCtx)
 	}
 	if !tickerRunning {
 		t.Fatal("compaction completion should preserve the turn-wide ticker")

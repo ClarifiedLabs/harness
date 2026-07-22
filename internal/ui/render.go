@@ -121,13 +121,13 @@ type Renderer struct {
 	// interleave terminal bytes.
 	liveStatus        bool
 	statusMu          sync.Mutex
-	statusActive      bool      // in a wait; the ticker should keep the line painted
-	statusDrawn       bool      // a status line is currently on the terminal
-	statusLabel       string    // e.g. "turn: 3" or "tool: grep args=[\"x\"]"
-	statusStart       time.Time // when the current wait began
-	statusCtxPct      int       // context percent to append, 0 omits (r27)
-	statusInput       string    // during-prompt typed buffer shown after "> "
-	statusInputCursor int       // rune index of the edit cursor within statusInput
+	statusActive      bool                  // in a wait; the ticker should keep the line painted
+	statusDrawn       bool                  // a status line is currently on the terminal
+	statusLabel       string                // e.g. "turn: 3" or "tool: grep args=[\"x\"]"
+	statusStart       time.Time             // when the current wait began
+	statusCtx         agent.ContextEstimate // context usage to append for model waits (r27)
+	statusInput       string                // during-prompt typed buffer shown after "> "
+	statusInputCursor int                   // rune index of the edit cursor within statusInput
 	ticker            *time.Ticker
 	tickerStop        chan struct{}
 	tickerDone        chan struct{}
@@ -275,7 +275,7 @@ func (r *Renderer) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate
 		if attempt > 1 {
 			label = fmt.Sprintf("turn: %d attempt %d", turn, attempt)
 		}
-		r.beginWait(label, pct)
+		r.beginWait(label, ctx)
 		return
 	}
 	if attempt <= 1 {
@@ -292,7 +292,7 @@ func (r *Renderer) TurnAttemptComplete(usage agent.TurnAttemptUsage) {
 // CompactionStart begins a transient live wait while old context is summarized.
 // Non-live and quiet renderers intentionally produce no fallback line.
 func (r *Renderer) CompactionStart() {
-	r.beginWait("context: compacting", 0)
+	r.beginWait("context: compacting", agent.ContextEstimate{})
 }
 
 // CompactionComplete ends only the current wait phase. It leaves the turn-wide
@@ -305,7 +305,7 @@ func (r *Renderer) CompactionComplete() {
 // PromptWorkWaitStart begins a transient live wait while join-required
 // background delegates finish.
 func (r *Renderer) PromptWorkWaitStart() {
-	r.beginWait("background: waiting for delegates", 0)
+	r.beginWait("background: waiting for delegates", agent.ContextEstimate{})
 }
 
 // PromptWorkWaitComplete clears the background-work wait before the parent
@@ -346,7 +346,7 @@ func (r *Renderer) ToolUseStart(call llm.ToolCall) {
 		if call.Name != "" {
 			label = "turn: tool call " + call.Name
 		}
-		r.beginWait(label, 0)
+		r.beginWait(label, agent.ContextEstimate{})
 	}
 	if !r.toolProgress() || r.quiet {
 		return
@@ -366,10 +366,10 @@ func (r *Renderer) resumeLiveModelWaitAfterAssistantText(delta string) {
 	}
 	r.statusMu.Lock()
 	label := r.statusLabel
-	ctxPct := r.statusCtxPct
+	statusCtx := r.statusCtx
 	r.statusMu.Unlock()
 	if label != "" {
-		r.beginWait(label, ctxPct)
+		r.beginWait(label, statusCtx)
 	}
 }
 
@@ -384,7 +384,7 @@ func (r *Renderer) ToolStart(call llm.ToolCall) {
 	// Tick during the (possibly long) tool-execution gap, not just model
 	// waits (r12). The next output line erases this counter again.
 	if r.liveStatus {
-		r.beginWait(fmt.Sprintf("tool: %s%s", call.Name, formatToolArgs(call.Name, call.Input)), 0)
+		r.beginWait(fmt.Sprintf("tool: %s%s", call.Name, formatToolArgs(call.Name, call.Input)), agent.ContextEstimate{})
 	}
 }
 
@@ -557,7 +557,7 @@ func (r *Renderer) outputWidth() int {
 // beginWait activates (or refreshes) the transient counter for a model wait or a
 // tool-execution gap. It finishes any open assistant line first so the counter
 // sits on its own row and erasing it never clobbers streamed content.
-func (r *Renderer) beginWait(label string, ctxPct int) {
+func (r *Renderer) beginWait(label string, statusCtx agent.ContextEstimate) {
 	if !r.liveStatus {
 		return
 	}
@@ -565,7 +565,7 @@ func (r *Renderer) beginWait(label string, ctxPct int) {
 	r.statusMu.Lock()
 	r.statusLabel = label
 	r.statusStart = r.now()
-	r.statusCtxPct = ctxPct
+	r.statusCtx = statusCtx
 	r.statusActive = true
 	r.ensureTickerLocked()
 	r.paintLocked()
@@ -596,7 +596,7 @@ func (r *Renderer) endWait() {
 	r.eraseLocked()
 	r.statusActive = false
 	r.statusLabel = ""
-	r.statusCtxPct = 0
+	r.statusCtx = agent.ContextEstimate{}
 	r.statusMu.Unlock()
 }
 
@@ -630,7 +630,7 @@ func (r *Renderer) StopProgress() {
 	r.statusInput = ""
 	r.statusInputCursor = 0
 	r.statusLabel = ""
-	r.statusCtxPct = 0
+	r.statusCtx = agent.ContextEstimate{}
 	r.promptStart = time.Time{}
 	t, stop, done := r.ticker, r.tickerStop, r.tickerDone
 	r.ticker, r.tickerStop, r.tickerDone = nil, nil, nil
@@ -720,8 +720,8 @@ func (r *Renderer) statusTextLocked() (text string, cursorCol int, hasInput bool
 	elapsedSecs := nonNegativeSeconds(now.Sub(r.statusStart))
 	var b strings.Builder
 	fmt.Fprintf(&b, "[%s · %ds", r.statusLabel, elapsedSecs)
-	if r.statusCtxPct > 0 {
-		fmt.Fprintf(&b, " · ctx %d%%", r.statusCtxPct)
+	if used := contextUsed(r.statusCtx); r.statusCtx.Window > 0 && used > 0 {
+		fmt.Fprintf(&b, " · ctx %d%% %s/%s", contextPercent(r.statusCtx), humanTokens(used), humanTokens(r.statusCtx.Window))
 	}
 	// The session total is set off from the current-turn fields with a distinct
 	// "│" divider and placed last so the turn's own elapsed time and the running
@@ -875,10 +875,7 @@ func contextPercent(ctx agent.ContextEstimate) int {
 	if ctx.Window <= 0 {
 		return 0
 	}
-	used := ctx.Total
-	if ctx.PayloadTotal > used {
-		used = ctx.PayloadTotal
-	}
+	used := contextUsed(ctx)
 	if used <= 0 {
 		return 0
 	}
@@ -890,6 +887,10 @@ func contextPercent(ctx agent.ContextEstimate) int {
 		pct = 100
 	}
 	return pct
+}
+
+func contextUsed(ctx agent.ContextEstimate) int {
+	return max(ctx.Total, ctx.PayloadTotal)
 }
 
 // cacheHitRatio is the percentage of input tokens served from cache (r15).
@@ -1175,8 +1176,8 @@ func usageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKno
 func turnUsageLine(u agent.TurnUsage, elapsed, promptElapsed time.Duration) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[turn: %d · %s", u.Turn, humanDuration(elapsed))
-	if u.Context.Window > 0 && u.Context.Total > 0 {
-		fmt.Fprintf(&b, " · ctx %d%%", contextPercent(u.Context))
+	if used := contextUsed(u.Context); u.Context.Window > 0 && used > 0 {
+		fmt.Fprintf(&b, " · ctx %d%% %s/%s", contextPercent(u.Context), humanTokens(used), humanTokens(u.Context.Window))
 	}
 	if promptElapsed >= 0 {
 		fmt.Fprintf(&b, " │ prompt %s", humanDuration(promptElapsed))

@@ -1960,7 +1960,7 @@ backoff allows.
   explicitly enabled summaries to stderr.
 - Turn progress renders as plain stderr lines, e.g. `[turn: 1 waiting]`. A
   completed conversational turn renders
-  `[turn: 1 · 6s · ctx 74% │ prompt 18s]`; the enclosing prompt emits one
+  `[turn: 1 · 6s · ctx 74% 148.0k/200.0k │ prompt 18s]`; the enclosing prompt emits one
   aggregate `[prompt: 3 turns …]` usage/cost line. Attempt start/usage events are
   always recorded in `raw.ndjson` for timing and accounting diagnostics but do
   not produce separate visible cost checkpoints. Retried attempts record a
@@ -1971,11 +1971,12 @@ backoff allows.
   outstanding, the static waiting line is replaced by a single in-place line painted
   with `\r\x1b[2K` and repainted ~once a second by a `time.Ticker` goroutine (with a
   mutex + stop-and-drain handshake so it never interleaves with streamed bytes):
-  `[turn: 1 · 12s · ctx 30% │ prompt 18s]`, `[tool: grep args=["x"] · 3s]`,
+  `[turn: 1 · 12s · ctx 30% 60.0k/200.0k │ prompt 18s]`, `[tool: grep args=["x"] · 3s]`,
   `[context: compacting · 3s]`, or
   `[background: waiting for delegates · 12s │ prompt 30s]`, with the same compact key
   arguments as the completed tool summary and the running context-window percentage
-  appended for model waits (`· ctx 30%`). It is erased the instant real output or a
+  and compact used/window token counts appended for model waits
+  (`· ctx 30% 60.0k/200.0k`). It is erased the instant real output or a
   tool line scrolls in — not a sticky bar or scroll region.
 - **During-prompt input line.** Keystrokes typed during a prompt are read in raw,
   echo-off mode and shown on that wait line after a `>` marker
