@@ -216,18 +216,23 @@ when approved, harness switches agents and immediately starts implementation
 from the recorded plan:
 
 ```text
-/handoff [agent]   review the recorded plan and, on approval, switch this session
+/handoff [-a agent] [-m model] [message]
+                   review the recorded plan and, on approval, switch this session
                    to an implementation agent with a clean context seeded by the
-                   plan plus a short handoff brief, then start implementation
+                   plan, the displayed handoff brief, and optional user guidance
 ```
 
 `record_plan` is available to every default agent; the handoff is plan-only and
-unavailable in one-shot mode. The target defaults to `auto`; override it with
+unavailable in one-shot mode. `request_implementation` accepts a required brief
+and optional target agent; model selection comes from the target agent's
+configuration. The target defaults to `auto`; override it with
 `--handoff-agent <name>`, `HARNESS_HANDOFF_AGENT`, the `handoff_agent` config
-key, or the `/handoff <agent>` argument. Because the implementation starts from a
-clean context, the target may use a different, cheaper model. Any agent can pin
-its own thinking effort with a per-agent `reasoning` field in config, so a
-fast/cheap implementation agent can pair a smaller model with lower effort.
+key, or `/handoff -a <agent>`. A manual `/handoff -m <model>` applies a one-off
+model override, and trailing `message` text is added to the implementation
+context separately from the generated or tool-supplied brief. Harness displays
+the brief before asking for approval. Any agent can pin its own thinking effort
+with a per-agent `reasoning` field in config, so a fast/cheap implementation
+agent can pair a smaller model with lower effort.
 
 ## Documentation
 

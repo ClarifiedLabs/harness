@@ -55,7 +55,6 @@ func (t *requestImplementation) Run(ctx context.Context, input json.RawMessage) 
 	var args struct {
 		Brief string `json:"brief"`
 		Agent string `json:"agent"`
-		Model string `json:"model"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", err
@@ -79,7 +78,6 @@ func (t *requestImplementation) Run(ctx context.Context, input json.RawMessage) 
 		Brief:    brief,
 		Agent:    agent,
 		PlanPath: latest.Path,
-		Model:    strings.TrimSpace(args.Model),
 	})
 	return "handoff to implementation requested; awaiting your approval", nil
 }
@@ -97,7 +95,6 @@ func requestImplementationSchema(agentNames []string) json.RawMessage {
 		"properties": map[string]any{
 			"brief": map[string]any{"type": "string"},
 			"agent": agent,
-			"model": map[string]any{"type": "string"},
 		},
 		"required": []string{"brief"},
 	}

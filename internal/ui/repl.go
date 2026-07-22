@@ -278,7 +278,8 @@ const helpText = `commands:
   /mode [name]     alias for /agent
   /plan            alias for /agent plan
   /auto            alias for /agent auto
-  /handoff [agent] hand off the recorded plan to an implementation agent
+  /handoff [-a agent] [-m model] [message]
+                    hand off the recorded plan with optional implementation guidance
   /background [id] list background jobs, inspect one, or cancel with "cancel <id>"
   /skills          list available skills
   /vi on|off       enable or disable vi-style prompt editing
@@ -2714,13 +2715,69 @@ func (app *App) hasPendingHandoffRequest() bool {
 	return ok
 }
 
-// handoffCommand handles /handoff [agent]: hand off to an implementation agent
-// to carry out the most recently recorded plan, after interactive approval. It
-// consumes any request the request_implementation tool recorded, fills in the
-// target and brief, and switches with a clean, plan-seeded context.
+const handoffCommandUsage = "/handoff [-a agent] [-m model] [message]"
+
+type handoffCommandOptions struct {
+	Agent   string
+	Model   string
+	Message string
+}
+
+// parseHandoffCommandOptions parses leading -a/-m options and preserves the
+// remainder as one user message. Options intentionally stop at the first message
+// word; -- allows a message to start with a dash.
+func parseHandoffCommandOptions(arg string) (handoffCommandOptions, error) {
+	var opts handoffCommandOptions
+	rest := strings.TrimSpace(arg)
+	for rest != "" {
+		token, next := splitHandoffCommandToken(rest)
+		switch token {
+		case "--":
+			opts.Message = strings.TrimSpace(next)
+			return opts, nil
+		case "-a", "-m":
+			value, remaining := splitHandoffCommandToken(next)
+			if value == "" || strings.HasPrefix(value, "-") {
+				return handoffCommandOptions{}, fmt.Errorf("%s requires a value", token)
+			}
+			if token == "-a" {
+				opts.Agent = value
+			} else {
+				opts.Model = value
+			}
+			rest = remaining
+		default:
+			if strings.HasPrefix(token, "-") {
+				return handoffCommandOptions{}, fmt.Errorf("unknown option %q", token)
+			}
+			opts.Message = strings.TrimSpace(rest)
+			return opts, nil
+		}
+	}
+	return opts, nil
+}
+
+func splitHandoffCommandToken(s string) (token, rest string) {
+	s = strings.TrimLeft(s, " \t")
+	if i := strings.IndexAny(s, " \t"); i >= 0 {
+		return s[:i], strings.TrimLeft(s[i+1:], " \t")
+	}
+	return s, ""
+}
+
+// handoffCommand handles /handoff [-a agent] [-m model] [message]: hand off to
+// an implementation agent to carry out the most recently recorded plan, after
+// interactive approval. It consumes any request the request_implementation tool
+// recorded, applies manual overrides and guidance, fills in the brief, and
+// switches with a clean, plan-seeded context.
 func (app *App) handoffCommand(arg string, readLine func(string) (string, error)) bool {
 	if app.SwitchAgent == nil {
 		fmt.Fprintln(app.Errw, "[handoff unavailable]")
+		return false
+	}
+	opts, err := parseHandoffCommandOptions(arg)
+	if err != nil {
+		fmt.Fprintf(app.Errw, "[handoff: %v; usage: %s]\n", err, handoffCommandUsage)
 		return false
 	}
 	var req plan.HandoffRequest
@@ -2729,8 +2786,14 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 			req = pending
 		}
 	}
-	if arg = strings.TrimSpace(arg); arg != "" {
-		req.Agent = arg
+	if opts.Agent != "" {
+		req.Agent = opts.Agent
+	}
+	if opts.Model != "" {
+		req.Model = opts.Model
+	}
+	if opts.Message != "" {
+		req.Message = opts.Message
 	}
 	if req.PlanPath == "" && app.Plans != nil {
 		if latest, ok := app.Plans.Latest(); ok {
@@ -2741,7 +2804,8 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 		fmt.Fprintln(app.Errw, "[handoff: no recorded plan; record one with record_plan first]")
 		return false
 	}
-	if strings.TrimSpace(req.Brief) == "" {
+	req.Brief = strings.TrimSpace(req.Brief)
+	if req.Brief == "" {
 		brief, usage, err := app.Agent.GenerateSummary(context.Background(), prompts.HandoffSummary())
 		if usage != (llm.Usage{}) {
 			app.addMaintenanceUsage("handoff_summary", usage)
@@ -2750,8 +2814,10 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 			fmt.Fprintf(app.Errw, "[handoff: could not generate brief: %v]\n", err)
 			return false
 		}
-		req.Brief = brief
+		req.Brief = strings.TrimSpace(brief)
 	}
+	fmt.Fprintf(app.Errw, "Handoff brief:\n%s\n", req.Brief)
+
 	target := req.Agent
 	if target == "" {
 		target = app.HandoffAgent
@@ -2761,7 +2827,11 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 	}
 	req.Agent = target
 
-	input, err := readLine(fmt.Sprintf("Hand off to %q to implement %s? (y/N): ", target, req.PlanPath))
+	approval := fmt.Sprintf("Hand off to %q", target)
+	if req.Model != "" {
+		approval += fmt.Sprintf(" using model %q", req.Model)
+	}
+	input, err := readLine(fmt.Sprintf("%s to implement %s? (y/N): ", approval, req.PlanPath))
 	if err != nil {
 		fmt.Fprintf(app.Errw, "[handoff cancelled: %v]\n", err)
 		return false
@@ -2803,6 +2873,9 @@ func (app *App) handoffToImplementation(req plan.HandoffRequest) bool {
 	}
 	seed := fmt.Sprintf("=== Implementation handoff ===\nYour task is specified in the recorded plan — read it now:\n%s\n\nContext from planning (how it was produced and this environment):\n%s",
 		req.PlanPath, req.Brief)
+	if req.Message != "" {
+		seed += "\n\nAdditional input from the user:\n" + req.Message
+	}
 	seedMessages := []llm.Message{{
 		Role:    llm.RoleUser,
 		Time:    app.clock()(),

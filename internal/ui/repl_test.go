@@ -3402,7 +3402,12 @@ func TestHandoffToImplementationReseedsContext(t *testing.T) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl system"}, nil
 	}
 
-	app.handoffToImplementation(plan.HandoffRequest{Agent: "auto", PlanPath: "/sess/plans/0001.plan.md", Brief: "tests run with go test"})
+	app.handoffToImplementation(plan.HandoffRequest{
+		Agent:    "auto",
+		PlanPath: "/sess/plans/0001.plan.md",
+		Brief:    "tests run with go test",
+		Message:  "preserve the public API",
+	})
 
 	msgs := app.Agent.Transcript()
 	if len(msgs) != 1 {
@@ -3412,7 +3417,7 @@ func TestHandoffToImplementationReseedsContext(t *testing.T) {
 		t.Fatalf("seeded transcript invalid: %v", err)
 	}
 	seed := msgs[0].Content[0].Text
-	for _, want := range []string{"Implementation handoff", "/sess/plans/0001.plan.md", "tests run with go test"} {
+	for _, want := range []string{"Implementation handoff", "/sess/plans/0001.plan.md", "tests run with go test", "Additional input from the user", "preserve the public API"} {
 		if !strings.Contains(seed, want) {
 			t.Errorf("seed missing %q: %q", want, seed)
 		}
@@ -3491,6 +3496,42 @@ func TestHandoffToImplementationAbortsWhenArchiveFails(t *testing.T) {
 	}
 }
 
+func TestParseHandoffCommandOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    handoffCommandOptions
+		wantErr bool
+	}{
+		{name: "empty"},
+		{name: "message", input: "keep  the public API", want: handoffCommandOptions{Message: "keep  the public API"}},
+		{
+			name:  "all fields",
+			input: "-a independent -m openai:gpt-5.5 run the migration first",
+			want: handoffCommandOptions{
+				Agent:   "independent",
+				Model:   "openai:gpt-5.5",
+				Message: "run the migration first",
+			},
+		},
+		{name: "dash message", input: "-a auto -- - preserve this wording", want: handoffCommandOptions{Agent: "auto", Message: "- preserve this wording"}},
+		{name: "unknown option", input: "-x value", wantErr: true},
+		{name: "missing agent", input: "-a", wantErr: true},
+		{name: "missing model before option", input: "-m -a auto", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseHandoffCommandOptions(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseHandoffCommandOptions(%q) error = %v, wantErr %v", tc.input, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("parseHandoffCommandOptions(%q) = %+v, want %+v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHandoffCommandRequiresRecordedPlan(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
@@ -3528,6 +3569,68 @@ func TestHandoffCommandCancelledOnNo(t *testing.T) {
 	}
 	if !strings.Contains(errw.String(), "handoff cancelled") {
 		t.Errorf("expected cancellation message, got %q", errw.String())
+	}
+}
+
+func TestHandoffCommandAppliesOptionsAndSeedsUserMessage(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.SessionPath = filepath.Join(t.TempDir(), "session")
+	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
+	app.Handoff = plan.NewPending()
+	app.Handoff.Request(plan.HandoffRequest{Brief: "planning context", PlanPath: "/p/0001.plan.md"})
+	var agentTarget, modelTarget, approval string
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		agentTarget = name
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
+	}
+	app.SwitchModel = func(model string, reasoning llm.ReasoningConfig) (ModelSelection, error) {
+		modelTarget = model
+		return ModelSelection{Model: model, Runtime: fp}, nil
+	}
+
+	if !app.handoffCommand("-a independent -m cheap-model preserve the public API", func(prompt string) (string, error) {
+		approval = prompt
+		return "y", nil
+	}) {
+		t.Fatal("handoffCommand should approve the handoff")
+	}
+	if agentTarget != "independent" || modelTarget != "cheap-model" {
+		t.Errorf("targets = agent %q model %q, want independent/cheap-model", agentTarget, modelTarget)
+	}
+	if !strings.Contains(approval, `using model "cheap-model"`) {
+		t.Errorf("approval prompt should name the model override: %q", approval)
+	}
+	seed := transcriptTextForUI(app.Agent.Transcript())
+	for _, want := range []string{"planning context", "Additional input from the user", "preserve the public API"} {
+		if !strings.Contains(seed, want) {
+			t.Errorf("seed missing %q: %q", want, seed)
+		}
+	}
+	if got := errw.String(); !strings.Contains(got, "Handoff brief:\nplanning context") {
+		t.Errorf("handoff brief was not displayed:\n%s", got)
+	}
+}
+
+func TestHandoffCommandDisplaysGeneratedBrief(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("generated planning brief")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Plans = plan.NewStore()
+	app.Plans.Add(plan.Plan{Path: "/p/0001.plan.md"})
+	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default()}, nil
+	}
+
+	app.handoffCommand("manual implementation guidance", func(string) (string, error) { return "n", nil })
+
+	if got := errw.String(); !strings.Contains(got, "Handoff brief:\ngenerated planning brief") {
+		t.Errorf("generated handoff brief was not displayed:\n%s", got)
 	}
 }
 
@@ -3629,6 +3732,9 @@ func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) 
 	}
 	if got := transcriptPrompts(app); !strings.Contains(got, implementationStartPrompt) {
 		t.Fatalf("implementation prompt missing from transcript prompts %q", got)
+	}
+	if got := errw.String(); !strings.Contains(got, "Handoff brief:\nenv: go test") {
+		t.Fatalf("tool-requested handoff brief was not displayed: %q", got)
 	}
 }
 

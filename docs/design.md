@@ -1917,19 +1917,20 @@ backoff allows.
 ### 9.18 `request_implementation` (`internal/plan` + `internal/tools`)
 
 - The plan agent's request to hand the recorded plan to an implementation agent.
-  Input is `{brief, agent?, model?}`. It requires and always selects the most
-  recently recorded plan; the implementation agent reads the plan as its
-  task spec rather than being handed only the brief.
+  Input is `{brief, agent?}`. It requires and always selects the most recently
+  recorded plan; the implementation agent reads the plan as its task spec rather
+  than being handed only the brief. Model selection belongs to the target agent's
+  configuration rather than this model-callable tool.
 - The `agent` field's schema is built from the configured agent names: its
   `enum` constrains the value to a real agent, so the model cannot invent one.
   The tool also rejects an explicit unknown `agent` before recording a pending
   handoff. Omitting it leaves target selection to the REPL and configured handoff
   default (`auto` unless overridden).
 - Tools cannot prompt, so it only records a `plan.HandoffRequest` in a shared
-  `*plan.Pending` holder and returns. At the prompt boundary, the REPL asks for
-  approval, performs the switch, and immediately starts the implementation agent;
-  `/handoff` remains available as a manual fallback (§10). It errors in one-shot
-  mode (no interactive approval).
+  `*plan.Pending` holder and returns. At the prompt boundary, the REPL displays
+  the brief, asks for approval, performs the switch, and immediately starts the
+  implementation agent; `/handoff` remains available as a manual fallback (§10).
+  It errors in one-shot mode (no interactive approval).
 
 ## 10. CLI / REPL (`internal/ui`)
 
@@ -2634,10 +2635,12 @@ reviewer, or the wide-open default without separate binaries.
   At the next prompt boundary, or on manual `/handoff` (§10), the REPL prompts for
   approval, archives the planning transcript via `SaveCompaction`, switches to
   the target agent — default `auto`, overridable by
-  `--handoff-agent`/`HARNESS_HANDOFF_AGENT`/`handoff_agent` or the `/handoff
-  <agent>` argument — optionally swaps the model, then reseeds a clean transcript
-  with a pointer to the recorded plan plus the brief, clears the planning todos,
-  and submits a fixed implementation-start prompt. Reusing the same in-session
+  `--handoff-agent`/`HARNESS_HANDOFF_AGENT`/`handoff_agent` or `/handoff -a
+  <agent>` — optionally swaps the model for a manual `/handoff -m <model>`, then
+  reseeds a clean transcript with a pointer to the recorded plan, the displayed
+  brief, and any trailing `/handoff` user message as a separate section, clears
+  the planning todos, and submits a fixed implementation-start prompt. Reusing
+  the same in-session
   switch (not `delegate`) avoids the `delegate` subset gate, so the
   `plan` agent — which has no file-mutation tools — can hand off to a
   write-capable implementation agent. Interactive REPL only.

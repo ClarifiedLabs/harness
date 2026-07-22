@@ -549,7 +549,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/mode`, `/mode <name>` | alias for `/agent` |
 | `/plan` | alias for `/agent plan` |
 | `/auto` | alias for `/agent auto` |
-| `/handoff [agent]` | review the recorded plan and, after approval, switch to an implementation agent and start the implementation turn |
+| `/handoff [-a agent] [-m model] [message]` | review the recorded plan and displayed handoff brief, then after approval switch to an implementation agent, apply optional agent/model overrides and user guidance, and start the implementation turn |
 | `/background` | list background jobs |
 | `/background <id>` | show a background job's status, result, and transcript path |
 | `/background cancel <id>` | cancel a running background job |
@@ -560,6 +560,12 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 Anthropic usage does not currently expose a separate reasoning-token field;
 extended thinking is counted in output tokens, so the reasoning total remains
 zero for Anthropic sessions.
+
+For `/handoff`, `-a` overrides the configured target agent, `-m` applies a
+one-off model override, and the remaining text is passed to the implementation
+agent as additional user input alongside the generated or tool-supplied brief.
+Options must precede the message; use `--` when the message itself starts with a
+dash. Harness displays the brief before the approval prompt.
 
 An unknown `/command` prints a `did you mean <command>?` suggestion (nearest known
 command by edit distance) instead of failing silently. The per-prompt usage line

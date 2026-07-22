@@ -28,6 +28,7 @@ func TestRequestImplementationRecordsPending(t *testing.T) {
 	out, err := runRequestImpl(t, tool, map[string]any{
 		"brief": "built the plan by reading X; tests run with go test",
 		"agent": "auto",
+		"model": "ignored-model",
 	})
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -41,6 +42,9 @@ func TestRequestImplementationRecordsPending(t *testing.T) {
 	}
 	if req.Agent != "auto" || req.PlanPath != "/sess/plans/0001.plan.md" {
 		t.Errorf("request = %+v", req)
+	}
+	if req.Model != "" {
+		t.Errorf("request_implementation should ignore the removed model argument, got %q", req.Model)
 	}
 	if req.Brief == "" {
 		t.Error("brief not recorded")
@@ -155,13 +159,16 @@ func TestRequestImplementationSchemaFallsBackWithoutNames(t *testing.T) {
 	}
 }
 
-func TestRequestImplementationSchemaOmitsPlanPath(t *testing.T) {
+func TestRequestImplementationSchemaOmitsModelAndPlanPath(t *testing.T) {
 	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true, nil)
 	var schema struct {
 		Properties map[string]json.RawMessage `json:"properties"`
 	}
 	if err := json.Unmarshal(tool.Schema(), &schema); err != nil {
 		t.Fatalf("unmarshal schema: %v", err)
+	}
+	if _, ok := schema.Properties["model"]; ok {
+		t.Fatal("schema should leave model selection to the target agent")
 	}
 	if _, ok := schema.Properties["plan_path"]; ok {
 		t.Fatal("schema should always select the latest plan internally")

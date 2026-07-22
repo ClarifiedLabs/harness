@@ -83,12 +83,14 @@ func (s *Store) Latest() (Plan, bool) {
 
 // HandoffRequest is one requested plan->implementation handoff. PlanPath points
 // at the recorded plan the implementation agent will read; Brief is the
-// supplementary context (provenance + environment) authored for the receiver.
+// supplementary planning context authored for the receiver. Message is optional
+// user-authored implementation guidance supplied by the /handoff command.
 type HandoffRequest struct {
 	Brief    string
 	Agent    string
 	PlanPath string
 	Model    string
+	Message  string
 }
 
 // Pending carries a requested handoff from the model-callable
