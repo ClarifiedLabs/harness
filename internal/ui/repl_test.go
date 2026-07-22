@@ -158,6 +158,65 @@ func newTestApp(t *testing.T, out, errw testWriter, fp *llmtest.FakeProvider) *A
 	}
 }
 
+func TestTurnCompletePricesTurnAgainstRegistry(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.Registry = llm.NewRegistryWithQualified(nil, map[string]llm.ModelInfo{
+		"anthropic:claude-opus-4-8": {Price: llm.Price{Input: 10, Output: 20}},
+	})
+	sink := newREPLSink(app.Renderer, app, 1)
+
+	sink.TurnComplete(agent.TurnUsage{
+		Turn:  1,
+		Usage: llm.Usage{InputTokens: 100_000, OutputTokens: 10_000},
+	})
+
+	if got := errw.String(); !strings.Contains(got, "· $1.200") {
+		t.Fatalf("turn line should show the registry-priced cost, got %q", got)
+	}
+}
+
+func TestTurnCompleteKeepsProviderCost(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	// A registry price that disagrees with the proxy price must not override it.
+	app.Registry = llm.NewRegistryWithQualified(nil, map[string]llm.ModelInfo{
+		"anthropic:claude-opus-4-8": {Price: llm.Price{Input: 10, Output: 20}},
+	})
+	sink := newREPLSink(app.Renderer, app, 1)
+
+	sink.TurnComplete(agent.TurnUsage{
+		Turn:  1,
+		Usage: llm.Usage{InputTokens: 100_000, OutputTokens: 10_000, CostUSD: 0.5, CostKnown: true},
+	})
+
+	got := errw.String()
+	if !strings.Contains(got, "· $0.500") {
+		t.Fatalf("turn line should show the provider-priced cost, got %q", got)
+	}
+	if strings.Contains(got, "$1.200") {
+		t.Fatalf("registry price must not override the provider cost, got %q", got)
+	}
+}
+
+func TestTurnCompleteUnpricedModelOmitsCost(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp) // test registry has no price
+	sink := newREPLSink(app.Renderer, app, 1)
+
+	sink.TurnComplete(agent.TurnUsage{
+		Turn:  1,
+		Usage: llm.Usage{InputTokens: 100_000, OutputTokens: 10_000},
+	})
+
+	if got := errw.String(); strings.Contains(got, "$") {
+		t.Fatalf("unpriced model must not print a dollar figure, got %q", got)
+	}
+}
+
 func TestOneShotPromptHookBlockSkipsTurn(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("should not run")}, Stop: llm.StopEndTurn})

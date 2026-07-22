@@ -4204,6 +4204,13 @@ func (s *accumulatingSink) Notice(msg string) {
 }
 
 func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
+	// Price the turn when the provider did not supply a cost (proxy streams set
+	// CostKnown themselves), against the App's active model so a mid-prompt
+	// model switch is not mispriced (r63). Persist the priced usage so replay
+	// and session stats see the same cost as the display line.
+	if !u.Usage.CostKnown {
+		u.Usage.CostUSD, u.Usage.CostKnown = s.app.Registry.Cost(s.app.usageKey(), u.Usage)
+	}
 	line := s.r.TurnComplete(u)
 	usage := u.Usage
 	s.app.recordEvent(session.Event{

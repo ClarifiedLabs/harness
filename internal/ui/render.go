@@ -1220,6 +1220,13 @@ func usageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKno
 func turnUsageLine(u agent.TurnUsage, elapsed, promptElapsed time.Duration) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[turn: %d · %s", u.Turn, humanDuration(elapsed))
+	// Turn cost is known once the model stream closes: TurnComplete fires after
+	// the final usage frame, so Usage carries the turn's input/output/cache
+	// totals and either the proxy-priced cost or, for direct providers, a cost
+	// priced by the sink against the model registry.
+	if u.Usage.CostKnown {
+		fmt.Fprintf(&b, " · $%.3f", u.Usage.CostUSD)
+	}
 	if used := contextUsed(u.Context); u.Context.Window > 0 && used > 0 {
 		fmt.Fprintf(&b, " · ctx %d%% %s/%s", contextPercent(u.Context), humanTokens(used), humanTokens(u.Context.Window))
 	}

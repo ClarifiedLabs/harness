@@ -589,7 +589,10 @@ request or a tool call is outstanding: a single in-place line such as
 `[turn: 1 · 12s · ctx 30% 60.0k/200.0k │ prompt 18s]` (or
 `[tool: grep · 3s]`), updated about once a second. The context field includes
 both the percentage and compact used/window token counts. Turn numbers restart
-at 1 for each prompt.
+at 1 for each prompt. When a turn completes, its closing line adds the turn's
+dollar cost (e.g. `[turn: 1 · 12s · $0.032 · ctx 30% 60.0k/200.0k │ prompt 18s]`)
+once the model stream has closed and the final token totals are known; the
+cost is omitted for models with no configured price.
 It is erased the instant real output or a tool line appears, and is shown only at a
 TTY when not quiet.
 
