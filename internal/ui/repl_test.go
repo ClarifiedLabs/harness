@@ -2680,88 +2680,162 @@ func TestREPLSkipsTodoPromptStatusWhenToolUnavailable(t *testing.T) {
 	}
 }
 
-func TestREPLPrintsPlanStatusAfterRecordPlanBeforeUsageAndPrompt(t *testing.T) {
-	var out, setupErrw bytes.Buffer
-	errw := newSignalBuffer("\x00")
-	fp := llmtest.New("fake",
-		llmtest.Step{
-			Events: []llm.StreamEvent{toolStep("record_plan", `{"title":"Add widget","plan":"Step one."}`, "call_plan")},
-			Stop:   llm.StopToolUse,
+func TestREPLPrintsLifecycleAwarePlanStatusBeforeUsageAndPrompt(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		seed        *plan.Plan
+		record      bool
+		wantState   plan.DisplayState
+		wantLabel   string
+		wantUpdated bool
+	}{
+		{name: "newly recorded", record: true, wantState: plan.DisplayRecorded, wantLabel: "Plan recorded:"},
+		{
+			name:        "updated",
+			seed:        &plan.Plan{Title: "Existing", Path: "/tmp/0001-existing.plan.md"},
+			record:      true,
+			wantState:   plan.DisplayUpdated,
+			wantLabel:   "Plan updated:",
+			wantUpdated: true,
 		},
-		llmtest.Step{
-			Events: []llm.StreamEvent{textDelta("done")},
-			Stop:   llm.StopEndTurn,
+		{
+			name:      "unchanged current",
+			seed:      &plan.Plan{Title: "Resumed", Path: "/tmp/0001-resumed.plan.md"},
+			wantState: plan.DisplayCurrent,
+			wantLabel: "Plan:",
 		},
-	)
-	app := newTestApp(t, &out, &setupErrw, fp)
-	app.Errw = errw
-	app.Renderer = NewRenderer(&out, errw, RenderOptions{Model: "claude-opus-4-8", ToolStream: true})
-	store := plan.NewStore()
-	reg := tools.Default()
-	reg.Register(plan.NewTool(store, func() string { return app.SessionPath }))
-	app.Agent.SetTools(reg)
-	app.Plans = store
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, setupErrw bytes.Buffer
+			errw := newSignalBuffer("\x00")
+			var fp *llmtest.FakeProvider
+			if tt.record {
+				fp = llmtest.New("fake",
+					llmtest.Step{
+						Events: []llm.StreamEvent{toolStep("record_plan", `{"title":"Add widget","plan":"Step one."}`, "call_plan")},
+						Stop:   llm.StopToolUse,
+					},
+					llmtest.Step{
+						Events: []llm.StreamEvent{textDelta("done")},
+						Stop:   llm.StopEndTurn,
+					},
+				)
+			} else {
+				fp = llmtest.New("fake", llmtest.Step{
+					Events: []llm.StreamEvent{textDelta("done")},
+					Stop:   llm.StopEndTurn,
+				})
+			}
+			app := newTestApp(t, &out, &setupErrw, fp)
+			app.Errw = errw
+			app.Renderer = NewRenderer(&out, errw, RenderOptions{Model: "claude-opus-4-8", ToolStream: true})
+			store := plan.NewStore()
+			if tt.seed != nil {
+				store.Add(*tt.seed)
+			}
+			reg := tools.Default()
+			reg.Register(plan.NewTool(store, func() string { return app.SessionPath }))
+			app.Agent.SetTools(reg)
+			app.Plans = store
 
-	pr, pw := io.Pipe()
-	defer pr.Close()
-	defer pw.Close()
-	codeCh := make(chan int, 1)
-	go func() { codeCh <- Run(pr, app, nil) }()
+			pr, pw := io.Pipe()
+			defer pr.Close()
+			defer pw.Close()
+			codeCh := make(chan int, 1)
+			go func() { codeCh <- Run(pr, app, nil) }()
 
-	writePipe(t, pw, "work\n")
-	waitFor(t, func() bool {
-		got := errw.String()
-		return strings.Count(got, "[auto] > ") >= 2 && strings.Contains(got, "[turn:")
-	}, "turn completion line and next prompt")
-	writePipe(t, pw, "/exit\n")
-	select {
-	case code := <-codeCh:
-		if code != 0 {
-			t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-		}
-	case <-time.After(time.Second):
-		t.Fatal("REPL did not exit after /exit")
-	}
+			writePipe(t, pw, "work\n")
+			waitFor(t, func() bool {
+				got := errw.String()
+				return strings.Count(got, "[auto] > ") >= 2 && strings.Contains(got, "[turn:")
+			}, "turn completion line and next prompt")
+			writePipe(t, pw, "/exit\n")
+			select {
+			case code := <-codeCh:
+				if code != 0 {
+					t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+				}
+			case <-time.After(time.Second):
+				t.Fatal("REPL did not exit after /exit")
+			}
 
-	got := errw.String()
-	status := plan.RenderLatest(store.Snapshot())
-	if status == "" || !strings.Contains(status, "Plan recorded:") {
-		t.Fatalf("no plan was recorded; status = %q", status)
-	}
-	statusIndex := strings.Index(got, status)
-	if statusIndex < 0 {
-		t.Fatalf("plan status was not printed after record_plan:\n%s", got)
-	}
-	toolResultIndex := strings.Index(got, "[record_plan]")
-	if toolResultIndex < 0 {
-		t.Fatalf("record_plan tool result was not rendered:\n%s", got)
-	}
-	nextModelIndex := strings.Index(got, "[turn: 2 waiting]")
-	if nextModelIndex < 0 {
-		t.Fatalf("second turn was not rendered:\n%s", got)
-	}
-	if !(toolResultIndex < statusIndex && statusIndex < nextModelIndex) {
-		t.Fatalf("plan status should print immediately after record_plan and before the next turn:\n%s", got)
-	}
+			got := errw.String()
+			status := plan.RenderLatest(store.Snapshot(), tt.wantState)
+			if status == "" || !strings.HasPrefix(status, tt.wantLabel) {
+				t.Fatalf("plan status = %q, want label %q", status, tt.wantLabel)
+			}
+			if count := strings.Count(got, status); count != 2 {
+				t.Fatalf("plan status should print at exactly two display boundaries, got %d:\n%s", count, got)
+			}
+			statusIndex := strings.Index(got, status)
+			if statusIndex < 0 {
+				t.Fatalf("plan status was not printed:\n%s", got)
+			}
+			if tt.record {
+				toolResultIndex := strings.Index(got, "[record_plan]")
+				if toolResultIndex < 0 {
+					t.Fatalf("record_plan tool result was not rendered:\n%s", got)
+				}
+				nextModelIndex := strings.Index(got, "[turn: 2 waiting]")
+				if nextModelIndex < 0 {
+					t.Fatalf("second turn was not rendered:\n%s", got)
+				}
+				if !(toolResultIndex < statusIndex && statusIndex < nextModelIndex) {
+					t.Fatalf("plan status should print immediately after record_plan and before the next turn:\n%s", got)
+				}
+			}
+			if tt.wantUpdated && (tt.seed == nil || strings.Contains(status, tt.seed.Path)) {
+				t.Fatalf("updated status should name the newly appended plan, got %q", status)
+			}
 
-	promptStatusIndex := strings.LastIndex(got, status)
-	if promptStatusIndex == statusIndex {
-		t.Fatalf("plan status should also be printed before the next prompt:\n%s", got)
+			promptStatusIndex := strings.LastIndex(got, status)
+			if promptStatusIndex == statusIndex {
+				t.Fatalf("plan status should also be printed before the next prompt:\n%s", got)
+			}
+			afterPromptStatus := got[promptStatusIndex+len(status):]
+			usageIndex := strings.Index(afterPromptStatus, "[prompt:")
+			if usageIndex < 0 {
+				t.Fatalf("usage line should follow the prompt plan status:\n%s", got)
+			}
+			promptIndex := strings.Index(afterPromptStatus, "[auto] > ")
+			if promptIndex < 0 {
+				t.Fatalf("usage line should be followed by the next REPL prompt:\n%s", got)
+			}
+			if usageIndex > promptIndex {
+				t.Fatalf("usage line should be the last status line before the next REPL prompt:\n%s", got)
+			}
+			if strings.Contains(afterPromptStatus[usageIndex:promptIndex], status) {
+				t.Fatalf("plan status should not be printed between the usage line and next prompt:\n%s", got)
+			}
+		})
 	}
-	afterPromptStatus := got[promptStatusIndex+len(status):]
-	usageIndex := strings.Index(afterPromptStatus, "[prompt:")
-	if usageIndex < 0 {
-		t.Fatalf("usage line should follow the prompt plan status:\n%s", got)
-	}
-	promptIndex := strings.Index(afterPromptStatus, "[auto] > ")
-	if promptIndex < 0 {
-		t.Fatalf("usage line should be followed by the next REPL prompt:\n%s", got)
-	}
-	if usageIndex > promptIndex {
-		t.Fatalf("usage line should be the last status line before the next REPL prompt:\n%s", got)
-	}
-	if strings.Contains(afterPromptStatus[usageIndex:promptIndex], "Plan recorded:") {
-		t.Fatalf("plan status should not be printed between the usage line and next prompt:\n%s", got)
+}
+
+func TestREPLSinkPlanDisplayState(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		initial  int
+		appended int
+		want     plan.DisplayState
+	}{
+		{name: "unchanged existing plan", initial: 1, want: plan.DisplayCurrent},
+		{name: "first plan", appended: 1, want: plan.DisplayRecorded},
+		{name: "new version of existing plan", initial: 1, appended: 1, want: plan.DisplayUpdated},
+		{name: "multiple plans in one prompt", appended: 2, want: plan.DisplayUpdated},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := plan.NewStore()
+			for range tt.initial {
+				store.Add(plan.Plan{})
+			}
+			sink := newREPLSink(nil, &App{Plans: store}, 1)
+			for range tt.appended {
+				store.Add(plan.Plan{})
+			}
+			if got := sink.planDisplayState(); got != tt.want {
+				t.Fatalf("planDisplayState() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -2776,8 +2850,11 @@ func TestREPLSkipsPlanPromptStatusWhenToolUnavailable(t *testing.T) {
 	if code := Run(strings.NewReader("/exit\n"), app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if got := errw.String(); strings.Contains(got, "Plan recorded:") || strings.Contains(got, "hidden") {
-		t.Fatalf("plan status should not print when the visible agent lacks record_plan:\n%s", got)
+	got := errw.String()
+	for _, hidden := range []string{"Plan:", "Plan recorded:", "Plan updated:", "/tmp/hidden.plan.md"} {
+		if strings.Contains(got, hidden) {
+			t.Fatalf("plan status should not print when the visible agent lacks record_plan:\n%s", got)
+		}
 	}
 }
 

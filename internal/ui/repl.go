@@ -934,7 +934,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				app.printTodoPromptStatus()
 			}
 			if !app.planPromptStatusPrintedBeforeUsageForPrompt(app.PromptNumber) {
-				app.printPlanStatus()
+				app.printPlanStatus(plan.DisplayCurrent)
 			}
 			if !usePromptEditor || plainPromptRead {
 				fmt.Fprint(app.Errw, prompt)
@@ -3593,11 +3593,11 @@ func (app *App) todoPromptStatusPrintedBeforeUsageForPrompt(turn int) bool {
 // record_plan and a plan with a path has been recorded, so the user always knows
 // where the plan was written without the model having to say so. It is
 // display-only and never part of the model's tool result or context.
-func (app *App) printPlanStatus() bool {
+func (app *App) printPlanStatus(state plan.DisplayState) bool {
 	if app.Plans == nil || !app.agentHasTool("record_plan") {
 		return false
 	}
-	line := plan.RenderLatest(app.Plans.Snapshot())
+	line := plan.RenderLatest(app.Plans.Snapshot(), state)
 	if line == "" {
 		return false
 	}
@@ -4019,6 +4019,7 @@ type accumulatingSink struct {
 	printTodoPromptBeforeUsage bool
 	printPlanUpdate            bool
 	printPlanPromptBeforeUsage bool
+	planCountAtPromptStart     int
 	reasoningOutput            bool
 	pending                    map[string]llm.ToolCall
 	turn                       int
@@ -4036,8 +4037,26 @@ func newREPLSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 	s.printTodoPromptBeforeUsage = true
 	s.printPlanUpdate = true
 	s.printPlanPromptBeforeUsage = true
+	if app.Plans != nil {
+		s.planCountAtPromptStart = len(app.Plans.Snapshot())
+	}
 	s.reasoningOutput = true
 	return s
+}
+
+func (s *accumulatingSink) planDisplayState() plan.DisplayState {
+	current := 0
+	if s.app.Plans != nil {
+		current = len(s.app.Plans.Snapshot())
+	}
+	switch {
+	case current <= s.planCountAtPromptStart:
+		return plan.DisplayCurrent
+	case s.planCountAtPromptStart == 0 && current == 1:
+		return plan.DisplayRecorded
+	default:
+		return plan.DisplayUpdated
+	}
 }
 
 func (s *accumulatingSink) TextDelta(text string) {
@@ -4152,7 +4171,7 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 		s.app.printTodoUpdateStatus()
 	}
 	if s.printPlanUpdate && call.Name == "record_plan" && !res.IsError {
-		s.app.printPlanStatus()
+		s.app.printPlanStatus(s.planDisplayState())
 	}
 	s.app.recordEvent(session.Event{Type: session.EventToolResult, Prompt: s.prompt, Turn: s.turn, ToolID: res.ForID, Tool: call.Name, Display: line})
 }
@@ -4286,7 +4305,7 @@ func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
 		s.r.StopProgress()
 		s.r.flushToolUseStarts()
 		s.r.finishAssistantLine()
-		if s.app.printPlanStatus() {
+		if s.app.printPlanStatus(s.planDisplayState()) {
 			s.app.markPlanPromptStatusPrintedBeforeUsage(s.prompt)
 		}
 	}

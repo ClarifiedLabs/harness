@@ -237,12 +237,22 @@ func Render(p Plan) string {
 	return b.String()
 }
 
+// DisplayState describes how the latest plan relates to the current model
+// prompt. It is transient display metadata and is never persisted with a Plan.
+type DisplayState int
+
+const (
+	DisplayCurrent DisplayState = iota
+	DisplayRecorded
+	DisplayUpdated
+)
+
 // RenderLatest renders a short user-facing status line naming the most recently
 // recorded plan's file, or "" when no plan with a path has been recorded. The
-// REPL prints it after record_plan and at the prompt boundary (mirroring the
-// todo status, design §9.17); it is display-only and never part of the model's
-// tool result or context.
-func RenderLatest(items []Plan) string {
+// label reflects whether the current prompt left the plan unchanged, recorded
+// the first plan, or appended an updated plan. The status is display-only and
+// never part of the model's tool result or context.
+func RenderLatest(items []Plan, state DisplayState) string {
 	if len(items) == 0 {
 		return ""
 	}
@@ -250,7 +260,14 @@ func RenderLatest(items []Plan) string {
 	if p.Path == "" {
 		return ""
 	}
-	return fmt.Sprintf("Plan recorded: %s", p.Path)
+	label := "Plan"
+	switch state {
+	case DisplayRecorded:
+		label = "Plan recorded"
+	case DisplayUpdated:
+		label = "Plan updated"
+	}
+	return fmt.Sprintf("%s: %s", label, p.Path)
 }
 
 // nextIndex returns the next 1-based number for a *.plan.md file under base.

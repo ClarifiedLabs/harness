@@ -1915,12 +1915,17 @@ backoff allows.
   artifact even outside plan mode. The session directory is read at call time, so
   it errors clearly when none exists (one-shot mode).
 - The REPL surfaces the latest recorded plan's path to the user, mirroring the
-  `update_todos` status (§9.13): the sink prints `plan.RenderLatest` to `Errw`
-  immediately after a successful `record_plan` result and again before the
-  per-prompt usage line (deduped so the idle prompt does not reprint it). It is
-  display-only — re-rendered from the shared store, never part of the model's tool
-  result or context — so the user always learns where the plan was written even if
-  the model does not mention it.
+  `update_todos` status (§9.13). Display state is relative to the current model
+  prompt: the first plan added by that prompt is `Plan recorded: <path>`, a newer
+  artifact added when a plan already existed (or after multiple records in one
+  prompt) is `Plan updated: <path>`, and an unchanged current plan — including a
+  pre-existing plan when resuming — is `Plan: <path>`. The sink prints the line to
+  `Errw` immediately after each successful `record_plan` result and again before
+  the per-prompt usage line; the unchanged fallback is also shown at the idle
+  prompt, with the existing prompt-boundary marker deduplicating a line already
+  printed before usage. All variants are display-only — re-rendered from the
+  shared store, never part of the model's tool result or context — so the user
+  always learns where the plan was written even if the model does not mention it.
 
 ### 9.18 `request_implementation` (`internal/plan` + `internal/tools`)
 
