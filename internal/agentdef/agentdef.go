@@ -135,7 +135,7 @@ func searchToolNames(mode string) []string {
 	names := tools.DefaultNamesWithOptions(tools.Options{SearchTools: mode})
 	var out []string
 	for _, name := range names {
-		if name == "grep" || name == "rg" {
+		if name == "grep" || name == "rg" || name == "search_context" {
 			out = append(out, name)
 		}
 	}

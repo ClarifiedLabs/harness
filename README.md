@@ -245,3 +245,5 @@ agent can pair a smaller model with lower effort.
 - [Release](docs/release.md): release artifacts, tagging, and required secrets.
 - [Design](docs/design.md): architecture and implementation details.
 - [Smoke tests](docs/smoke.md): end-to-end verification matrix.
+- [Deterministic-flow benchmark](docs/flowbench.md): historic session patterns,
+  paired live-model protocol, results, and promotion decisions.

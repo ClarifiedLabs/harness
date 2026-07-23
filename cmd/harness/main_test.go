@@ -2933,7 +2933,7 @@ func TestRunLogsUnavailableToolsAtLaunch(t *testing.T) {
 			t.Fatalf("stderr missing %q:\n%s", want, got)
 		}
 	}
-	for _, name := range []string{"rg", "git", "git_readonly"} {
+	for _, name := range []string{"rg", "search_context", "git", "git_readonly"} {
 		if slices.Contains(toolNames(fp.Requests[0]), name) {
 			t.Fatalf("request advertised unavailable tool %q: %v", name, toolNames(fp.Requests[0]))
 		}
@@ -3387,7 +3387,7 @@ func toolsOutputHasDescribedTool(output, name string) bool {
 func expectedExploreToolNames() []string {
 	names := []string{"read_file", "list_dir", "glob"}
 	if tools.RipgrepAvailable() {
-		names = append(names, "rg")
+		names = append(names, "rg", "search_context")
 	} else {
 		names = append(names, "grep")
 	}

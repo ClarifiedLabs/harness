@@ -1340,8 +1340,8 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 	got := errw.String()
 	for _, want := range []string{
 		"built-in tools:",
-		"  read_file    Read one file with optional offset/limit, or batch paths[]; returns line-numbered content.",
-		"  list_dir     List one directory with an optional base-name glob; non-recursive.",
+		"  read_file       Read one file with optional offset/limit, or batch paths[]; returns line-numbered content.",
+		"  list_dir        List one directory with an optional base-name glob; non-recursive.",
 		"mcp tools:",
 		"  [files]",
 		"    mcp__files__read  refreshed tool",

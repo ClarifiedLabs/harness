@@ -1264,6 +1264,12 @@ results and completed background-job context share the registry's result prepara
 and the same archive-hint formatter, including per-tool limits, so this recovery
 behavior stays consistent between execution modes.
 
+A tool that implements `ResultTool` may supply separate concise `Text` and full
+`OriginalText`. `Dispatch` caps the concise text normally and marks the supplied
+original for this same artifact pipeline. This is used by `run_command.steps`:
+successful verification output remains recoverable without entering live model
+context.
+
 ### 8.4 Interrupts
 
 A single SIGINT handler plus a per-prompt `context.CancelFunc`:
@@ -1331,6 +1337,16 @@ type MeteredTool interface {
 type MeteredResult struct {
     Text  string
     Usage llm.Usage
+}
+
+type ResultTool interface {
+    RunResult(ctx context.Context, input json.RawMessage) (RunResult, error)
+}
+
+type RunResult struct {
+    Text         string
+    OriginalText string
+    Usage        llm.Usage
 }
 
 type Registry struct{ /* ordered map */ }
@@ -1431,11 +1447,13 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 - Available to the default `auto`/`independent` agents and the shared
   inspection set used by `explore` and `plan`.
 
-### 9.3 `grep` and optional `rg`
+### 9.3 `grep`, optional `rg`, and `search_context`
 
 > `grep`: Run grep without a shell. Input is an object; args must be an array of strings, not a string. Skips binary files unless overridden; background returns a job id. (Under `-search-tools both`, the description also says to prefer `rg`.)
 
-> `rg`: Run rg without a shell. Input is an object; args must be an array of strings, not a string. Adds safe line/file-size limits unless overridden; background returns a job id.
+> `rg`: Run raw `rg` for broad repository discovery, combined patterns, filenames, counts, native flags, or background searches. Once a target is known, use `search_context` for surrounding source.
+
+> `search_context`: Targeted code lookup after broad discovery: return bounded, merged line-numbered source around a known symbol, call site, or text match. Use this instead of `rg` followed by `read_file`; use one raw `rg` with a combined pattern for broad multi-concept orientation.
 
 | param | type | notes |
 |---|---|---|
@@ -1485,6 +1503,15 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 - Under `-search-tools both`, both `grep` and `rg` are registered and `grep`'s
   `Description()` gains a suffix steering the model to prefer `rg` as the faster
   default.
+- Whenever the selected mode exposes `rg`, it also exposes `search_context`.
+  The structured input requires `pattern`; `path` defaults to `.`, optional
+  `globs` and `fixed_strings` retain ripgrep matching semantics, and bounded
+  `context_lines` (default 20), `max_matches` (40), and `max_files` (8) control
+  collection. The tool streams `rg --json --sort=path`, groups matches by file,
+  merges touching source windows, and renders at most 400 numbered source lines.
+  No match is a successful `(no matches)` result; collection and output bounds
+  are called out explicitly. This is the deterministic search→read flow, while
+  raw `rg` remains available for native flags, lists, and counts.
 - Same process conventions as `run_command` (§9.7): own process group, timeout or ^C
   kills the group, combined stdout+stderr, `[exit code: N]` trailer, and non-zero exit
   is NOT an error result. For search this matters because no matches is commonly exit
@@ -1573,18 +1600,25 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.7 `run_command`
 
-> Run command through a shell or argv directly. Input is an object; set exactly one of command or argv, and make argv an array of strings, not a string. Returns combined output/exit code; background returns a job id.
+> Run one command or ordered steps. Each uses shell command or argv as an array of strings; steps stop on failure and return compact receipts while archiving verbose output. Background supports one command.
 
 | param | type | notes |
 |---|---|---|
 | `command` | string | shell command line; mutually exclusive with `argv` |
 | `argv` | array of strings | program + literal arguments; mutually exclusive with `command`; must not be a shell string or JSON-encoded array |
+| `steps` | array | 1–16 ordered entries, mutually exclusive with top-level `command`/`argv`/`stdin` |
+| `steps[].name` | string | receipt label; omitted means `step N` |
+| `steps[].command` / `steps[].argv` | string / array | exactly one per step |
+| `steps[].stdin` | string | step-specific stdin |
+| `steps[].cwd` | string | overrides the inherited top-level cwd |
+| `steps[].timeout_seconds` | int | overrides the inherited top-level timeout |
+| `stop_on_failure` | bool | default true |
 | `stdin` | string | written to the command's standard input |
 | `cwd` | string | default process cwd |
 | `timeout_seconds` | int | foreground default 120, background default 1200, no maximum |
 | `background` | bool | when true, start as a process-local background job and return a job id immediately |
 
-- Exactly one of `command` or `argv` is required.
+- Exactly one of top-level `command`, top-level `argv`, or `steps` is required.
 - `command` is executed via a **non-login** `bash -c` (fallback `sh -c` if bash is
   absent). Sourcing the full login-profile chain on every call added ~50-300ms
   (nvm/rbenv/conda) and risked banner noise in results, so it was dropped. The PATH
@@ -1613,14 +1647,28 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 - With `background:true`, the command uses the same process-group and output
   formatting rules, but runs under the background job manager instead of blocking
   the current tool call. Background jobs default to a 1200-second timeout
-  (20 minutes) unless `timeout_seconds` is set explicitly. Use `background_jobs`
-  or `/background` to inspect or cancel it; completed output is delivered once as
-  request-only context.
+  (20 minutes) unless `timeout_seconds` is set explicitly. When later work depends
+  on completion, use one `background_jobs` `wait` call rather than polling
+  `get`/`list`; otherwise completed output is delivered once as request-only
+  context. Use `/background` for interactive inspection or cancellation.
 - Environment inherited unmodified.
 - `stdin`, when provided, is written verbatim to the command's standard input; absent
   means `/dev/null` (programs see immediate EOF, never hang on input). Prefer it over
   `echo`/heredocs when feeding content to a command (`git commit -F -`, `python -`,
   `tee file`) — content travels with zero shell escaping.
+- `steps` runs related format/build/lint/test commands serially. Top-level `cwd`
+  and `timeout_seconds` are defaults; each step may override them. Background
+  mode and top-level stdin are rejected for steps. By default the first
+  non-zero, timed-out, cancelled, or unstartable step stops execution and reports
+  the remaining skip count; `stop_on_failure:false` continues.
+- Each successful step returns only `PASS <name> (<duration>)`. Failure receipts
+  include status and at most 4096 bytes of command output. Suppressed success
+  output and clipped failure output are combined under named command headers and
+  supplied as `ResultTool.OriginalText`, so the ordinary tool-result archiver
+  persists it and appends targeted recovery guidance.
+- A steps call reports the sum of its resolved per-step timeouts through
+  `SelfTimeouter`, preserving every step's no-maximum timeout contract under the
+  dispatch backstop.
 
 ### 9.8 Shared process execution (`runProcess`)
 
@@ -1647,11 +1695,12 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.9 `git`
 
-> Run git without a shell or pager. Input is an object; args must be an array of strings, not a string.
+> Run git without a shell or pager. Input is an object: use workflow workspace_summary for branch, status, diff sizes, and whitespace checks; otherwise args must be an array of strings, not a string.
 
 | param | type | notes |
 |---|---|---|
-| `args` | array of strings, required | argv after `git`; must not be a string or JSON-encoded array |
+| `args` | array of strings | argv after `git`; mutually exclusive with `workflow`; must not be a string or JSON-encoded array |
+| `workflow` | string | `workspace_summary`; mutually exclusive with `args` |
 | `cwd` | string | default process cwd |
 
 - `git` is registered only when `exec.LookPath("git")` succeeds at registry
@@ -1669,6 +1718,12 @@ this subsection records the common runner those argv tools point at.
 - Combined output + exit code, same conventions as `run_command`: no controlling
   TTY, group kill on timeout/^C, default 120 s timeout, and non-zero exit is not
   a tool error. Interactive flows (`rebase -i`) fail fast rather than hang.
+- `workspace_summary` is a read-only deterministic survey. It runs porcelain
+  branch/status, the latest oneline commit, staged and unstaged diff stats, and
+  staged and unstaged `diff --check`. The compact labeled result omits empty
+  diffstat/whitespace sections, reports `whitespace: clean` when applicable, and
+  handles an unborn repository explicitly. It does not include the full patch;
+  the model uses a subsequent raw `git diff` only when patch inspection is needed.
 
 ### 9.10 `web_fetch`
 
@@ -1831,8 +1886,9 @@ this subsection records the common runner those argv tools point at.
 ### 9.15 background jobs
 
 Tools that opt into the reusable background job contract hand the manager a job
-kind, description, and cancellable runner. The manager owns ids, status, list/get/cancel,
-one-shot notices, and request-only context delivery. `run_command`, `grep`, `rg`,
+kind, description, and cancellable runner. The manager owns ids, status,
+list/get/wait/cancel, one-shot notices, and request-only context delivery.
+`run_command`, `grep`, `rg`,
 `web_fetch`, and `delegate` support this path via `background:true`; background
 delegate jobs still use the same launch validation, child transcript, private todo,
 and token-accounting behavior as synchronous delegate.
@@ -1841,11 +1897,22 @@ and token-accounting behavior as synchronous delegate.
 
 | param | type | notes |
 |---|---|---|
-| `action` | string | `list`, `get`, or `cancel`; omitted means `list` |
-| `id` | string | required for `get` and `cancel` |
+| `action` | string | `list`, `get`, `wait`, or `cancel`; omitted means `list` |
+| `id` | string | required for `get` and `cancel`; optional for `wait` |
+| `timeout_seconds` | integer | `wait` timeout; omit for ordinary dependency waits (default 120 seconds), rather than using a short timeout as a status probe |
 
 - Jobs live only in the current harness process. Running jobs are abandoned on process
   exit and cleared on `/clear`.
+- `wait` is event-driven rather than polling. With an `id`, it waits for that job
+  to finish. Without an `id`, it snapshots the jobs currently running and returns
+  when the first finishes; if none are running, it returns the current list
+  immediately. A timeout is a normal result containing the latest status. Jobs
+  returned as completed are marked as delivered so the same result is not
+  automatically injected again. Completion notices and nested usage accounting
+  remain one-shot and independent.
+- The system prompt and background-capable tool schemas route a strict completion
+  dependency to one `wait` call. `get` and `list` are for nonblocking inspection,
+  not repeated status polling.
 - Completed job summaries are delivered once as request-only context to the parent
   agent, including the transcript path when one exists. They are not inserted into
   the parent transcript. Background delegates are marked join-required: the parent

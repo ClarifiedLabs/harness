@@ -47,6 +47,21 @@ type MeteredTool interface {
 	RunMetered(ctx context.Context, input json.RawMessage) (MeteredResult, error)
 }
 
+// RunResult separates concise model-visible text from a complete original that
+// should be archived for targeted recovery. Usage makes this a complete
+// alternative dispatch path rather than an ambiguous mix with MeteredTool.
+type RunResult struct {
+	Text         string
+	OriginalText string
+	Usage        llm.Usage
+}
+
+// ResultTool is an optional extension for tools that proactively summarize
+// successful output. Dispatch prefers it over MeteredTool and Tool.Run.
+type ResultTool interface {
+	RunResult(ctx context.Context, input json.RawMessage) (RunResult, error)
+}
+
 // FileMutationReporter is implemented by tools that can identify the file paths
 // they may mutate from their JSON input. The agent uses this for optional
 // user-facing before/after diff display; Dispatch and model-visible results do
@@ -248,6 +263,10 @@ func registerSearchTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 	if addRG {
 		r.Register(rg)
 		r.SetToolResultLimits("rg",
+			defaultToolResultBytes(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
+			defaultToolResultLines(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
+		r.Register(searchContext{program: rg.program})
+		r.SetToolResultLimits("search_context",
 			defaultToolResultBytes(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
 			defaultToolResultLines(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
 	} else if (mode == SearchToolsRG || mode == SearchToolsBoth) && !hasRG && disabled != nil {
@@ -677,9 +696,10 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 	defer cancel()
 
 	type outcome struct {
-		out   string
-		usage llm.Usage
-		err   error
+		out      string
+		original string
+		usage    llm.Usage
+		err      error
 	}
 	done := make(chan outcome, 1) // buffered: an abandoned Run can still send and exit
 	go func() {
@@ -689,6 +709,11 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 				done <- outcome{err: fmt.Errorf("tool panicked: %v", rec)}
 			}
 		}()
+		if rt, ok := t.(ResultTool); ok {
+			result, err := rt.RunResult(ctx, input)
+			done <- outcome{out: result.Text, original: result.OriginalText, usage: result.Usage, err: err}
+			return
+		}
 		if mt, ok := t.(MeteredTool); ok {
 			result, err := mt.RunMetered(ctx, input)
 			done <- outcome{out: result.Text, usage: result.Usage, err: err}
@@ -699,11 +724,12 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 	}()
 
 	var out string
+	var original string
 	var usage llm.Usage
 	var err error
 	select {
 	case o := <-done:
-		out, usage, err = o.out, o.usage, o.err
+		out, original, usage, err = o.out, o.original, o.usage, o.err
 	case <-ctx.Done():
 		// The Run goroutine is abandoned if it ignores ctx; its eventual send
 		// lands in the buffered channel and is dropped. The abandoned Run may
@@ -740,7 +766,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		return res
 	}
 
-	prepared := r.PrepareResult(call.Name, call.ID, out)
+	prepared := r.PrepareResultWithOriginal(call.Name, call.ID, out, original)
 	prepared.Usage = usage
 	return prepared
 }
@@ -757,6 +783,22 @@ func (r *Registry) PrepareResult(toolName, resultID, out string) llm.ToolResult 
 		res.OriginalText = out
 		res.OriginalBytes = info.originalBytes
 		res.ShownBytes = info.shownBytes
+	}
+	return res
+}
+
+// PrepareResultWithOriginal applies the model-facing cap to out while retaining
+// an explicitly supplied full result for the existing artifact pipeline.
+func (r *Registry) PrepareResultWithOriginal(toolName, resultID, out, original string) llm.ToolResult {
+	res := r.PrepareResult(toolName, resultID, out)
+	if original == "" || original == out {
+		return res
+	}
+	res.Truncated = true
+	res.OriginalText = original
+	res.OriginalBytes = len(original)
+	if res.ShownBytes == 0 {
+		res.ShownBytes = len(res.Text)
 	}
 	return res
 }

@@ -40,6 +40,7 @@ type Manager struct {
 	mu            sync.Mutex
 	jobs          map[string]*Job
 	order         []string
+	changed       chan struct{}
 	prepareResult ResultPreparer
 	now           func() time.Time
 }
@@ -79,6 +80,13 @@ type Snapshot struct {
 	NoticePending  bool
 }
 
+// WaitResult describes the state that satisfied a background job wait.
+type WaitResult struct {
+	Jobs      []Snapshot
+	TimedOut  bool
+	NoRunning bool
+}
+
 func NewManager(opts Options) *Manager {
 	now := opts.Now
 	if now == nil {
@@ -91,6 +99,7 @@ func NewManager(opts Options) *Manager {
 	limits.SetResultLimits(opts.MaxContextBytes, 0)
 	return &Manager{
 		jobs:          make(map[string]*Job),
+		changed:       make(chan struct{}),
 		prepareResult: limits.PrepareResult,
 		now:           now,
 	}
@@ -140,6 +149,7 @@ func (m *Manager) start(kind, task, agent string, waitForPrompt bool, run func(c
 	m.jobs[job.ID] = job
 	m.order = append(m.order, job.ID)
 	snap := snapshotJob(job)
+	m.signalLocked()
 	m.mu.Unlock()
 
 	go func() {
@@ -160,6 +170,7 @@ func (m *Manager) start(kind, task, agent string, waitForPrompt bool, run func(c
 			job.Status = StatusFailed
 			job.Error = err.Error()
 		}
+		m.signalLocked()
 		m.mu.Unlock()
 		close(job.done)
 	}()
@@ -170,13 +181,7 @@ func (m *Manager) start(kind, task, agent string, waitForPrompt bool, run func(c
 func (m *Manager) List() []Snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]Snapshot, 0, len(m.order))
-	for _, id := range m.order {
-		if job := m.jobs[id]; job != nil {
-			out = append(out, snapshotJob(job))
-		}
-	}
-	return out
+	return m.listLocked()
 }
 
 func (m *Manager) Get(id string) (Snapshot, bool) {
@@ -201,6 +206,7 @@ func (m *Manager) Cancel(id string) (Snapshot, bool) {
 		job.Status = StatusCanceled
 		job.Updated = m.now()
 		job.Error = "canceled"
+		m.signalLocked()
 	}
 	snap := snapshotJob(job)
 	m.mu.Unlock()
@@ -213,6 +219,7 @@ func (m *Manager) Cancel(id string) (Snapshot, bool) {
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	var cancels []context.CancelFunc
+	changed := false
 	for _, job := range m.jobs {
 		if job.Status != StatusRunning {
 			continue
@@ -224,6 +231,10 @@ func (m *Manager) Shutdown() {
 		job.Updated = m.now()
 		job.Error = "abandoned on harness exit"
 		job.cancel = nil
+		changed = true
+	}
+	if changed {
+		m.signalLocked()
 	}
 	m.mu.Unlock()
 	for _, cancel := range cancels {
@@ -237,6 +248,98 @@ func (m *Manager) Clear() {
 	defer m.mu.Unlock()
 	m.jobs = make(map[string]*Job)
 	m.order = nil
+	m.signalLocked()
+}
+
+// Wait blocks on manager state changes until a selected job finishes or the
+// timeout expires. With an empty id it snapshots the jobs running at call time
+// and returns when the first of those jobs finishes. Results returned from a
+// successful wait count as delivered completion context.
+func (m *Manager) Wait(ctx context.Context, id string, timeout time.Duration) (WaitResult, error) {
+	if m == nil {
+		return WaitResult{}, fmt.Errorf("background manager is not initialized")
+	}
+	if err := ctx.Err(); err != nil {
+		return WaitResult{}, err
+	}
+
+	m.mu.Lock()
+	targets := make(map[string]*Job)
+	if id != "" {
+		job, ok := m.jobs[id]
+		if !ok {
+			m.mu.Unlock()
+			return WaitResult{}, fmt.Errorf("unknown background job %q", id)
+		}
+		targets[id] = job
+	} else {
+		for _, jobID := range m.order {
+			job := m.jobs[jobID]
+			if job != nil && job.Status == StatusRunning && !job.finished {
+				targets[jobID] = job
+			}
+		}
+		if len(targets) == 0 {
+			jobs := m.listLocked()
+			m.mu.Unlock()
+			return WaitResult{Jobs: jobs, NoRunning: true}, nil
+		}
+	}
+	m.mu.Unlock()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		m.mu.Lock()
+		var completed []Snapshot
+		for _, jobID := range m.order {
+			job, selected := targets[jobID]
+			if !selected || !job.finished {
+				continue
+			}
+			job.contextDelivered = true
+			completed = append(completed, snapshotJob(job))
+		}
+		if len(completed) > 0 {
+			m.mu.Unlock()
+			return WaitResult{Jobs: completed}, nil
+		}
+		changed := m.changed
+		m.mu.Unlock()
+
+		select {
+		case <-changed:
+		case <-timer.C:
+			m.mu.Lock()
+			var jobs []Snapshot
+			if id != "" {
+				jobs = append(jobs, snapshotJob(targets[id]))
+			} else {
+				jobs = m.listLocked()
+			}
+			m.mu.Unlock()
+			return WaitResult{Jobs: jobs, TimedOut: true}, nil
+		case <-ctx.Done():
+			return WaitResult{}, ctx.Err()
+		}
+	}
+}
+
+func (m *Manager) listLocked() []Snapshot {
+	out := make([]Snapshot, 0, len(m.order))
+	for _, id := range m.order {
+		if job := m.jobs[id]; job != nil {
+			out = append(out, snapshotJob(job))
+		}
+	}
+	return out
+}
+
+func (m *Manager) signalLocked() {
+	if m.changed != nil {
+		close(m.changed)
+	}
+	m.changed = make(chan struct{})
 }
 
 // PendingPromptWork reports whether a join-required background job is still
@@ -412,7 +515,12 @@ func backgroundID(t time.Time) string {
 	return fmt.Sprintf("bg_%s_%06d", t.UTC().Format("20060102T150405Z"), jobSeq.Add(1))
 }
 
-// JobsTool lists, inspects, and cancels background jobs.
+const (
+	defaultWaitTimeout = 120 * time.Second
+	waitDispatchGrace  = 5 * time.Second
+)
+
+// JobsTool lists, inspects, waits for, and cancels background jobs.
 type JobsTool struct {
 	manager *Manager
 }
@@ -424,15 +532,16 @@ func NewJobsTool(manager *Manager) *JobsTool {
 func (*JobsTool) Name() string { return "background_jobs" }
 
 func (*JobsTool) Description() string {
-	return "List, inspect, or cancel this process's background jobs."
+	return "List, inspect, wait for, or cancel background jobs. If the next or final response depends on a running job, call action=wait once instead of polling get/list; completions otherwise arrive automatically."
 }
 
 func (*JobsTool) Schema() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
-    "action": {"type": "string", "enum": ["list", "get", "cancel"], "description": "Operation to perform. Defaults to list."},
-    "id": {"type": "string", "description": "Background job id for get or cancel."}
+    "action": {"type": "string", "enum": ["list", "get", "wait", "cancel"], "description": "Operation to perform. Use wait, not get/list polling, when later work depends on completion. Defaults to list."},
+    "id": {"type": "string", "description": "Background job id for get, cancel, or an optional targeted wait."},
+    "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Wait timeout. Omit for ordinary dependency waits (default 120 seconds); do not use a short timeout as a status probe. There is no configured maximum."}
   }
 }`)
 }
@@ -444,7 +553,7 @@ func (*JobsTool) ReadOnly(input json.RawMessage) bool {
 	if err := json.Unmarshal(input, &args); err != nil {
 		return false
 	}
-	return args.Action == "" || args.Action == "list" || args.Action == "get"
+	return args.Action == "" || args.Action == "list" || args.Action == "get" || args.Action == "wait"
 }
 
 func (t *JobsTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
@@ -452,8 +561,9 @@ func (t *JobsTool) Run(ctx context.Context, input json.RawMessage) (string, erro
 		return "", err
 	}
 	var args struct {
-		Action string `json:"action"`
-		ID     string `json:"id"`
+		Action         string `json:"action"`
+		ID             string `json:"id"`
+		TimeoutSeconds int    `json:"timeout_seconds"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", err
@@ -478,6 +588,16 @@ func (t *JobsTool) Run(ctx context.Context, input json.RawMessage) (string, erro
 			return "", fmt.Errorf("unknown background job %q", id)
 		}
 		return formatGet(snap), nil
+	case "wait":
+		timeout, err := backgroundWaitDuration(args.TimeoutSeconds)
+		if err != nil {
+			return "", err
+		}
+		result, err := t.manager.Wait(ctx, strings.TrimSpace(args.ID), timeout)
+		if err != nil {
+			return "", err
+		}
+		return formatWait(result, timeout), nil
 	case "cancel":
 		id := strings.TrimSpace(args.ID)
 		if id == "" {
@@ -491,6 +611,56 @@ func (t *JobsTool) Run(ctx context.Context, input json.RawMessage) (string, erro
 	default:
 		return "", fmt.Errorf("unknown action %q", action)
 	}
+}
+
+func (*JobsTool) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
+	var args struct {
+		Action         string `json:"action"`
+		TimeoutSeconds int    `json:"timeout_seconds"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil || strings.TrimSpace(args.Action) != "wait" {
+		return 0, false
+	}
+	timeout, err := backgroundWaitDuration(args.TimeoutSeconds)
+	if err != nil {
+		return 0, false
+	}
+	if timeout > time.Duration(1<<63-1)-waitDispatchGrace {
+		return time.Duration(1<<63 - 1), true
+	}
+	return timeout + waitDispatchGrace, true
+}
+
+func backgroundWaitDuration(seconds int) (time.Duration, error) {
+	if seconds < 0 {
+		return 0, fmt.Errorf("timeout_seconds must be positive")
+	}
+	if seconds == 0 {
+		return defaultWaitTimeout, nil
+	}
+	if int64(seconds) > int64((time.Duration(1<<63-1))/time.Second) {
+		return 0, fmt.Errorf("timeout_seconds is too large")
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
+func formatWait(result WaitResult, timeout time.Duration) string {
+	var b strings.Builder
+	if result.TimedOut {
+		fmt.Fprintf(&b, "wait timed out after %s", timeout)
+	} else if result.NoRunning {
+		if len(result.Jobs) == 0 {
+			return "No running background jobs."
+		}
+		return "No running background jobs.\n\n" + formatList(result.Jobs)
+	} else {
+		b.WriteString("background wait completed")
+	}
+	for _, job := range result.Jobs {
+		b.WriteString("\n\n")
+		b.WriteString(formatGet(job))
+	}
+	return b.String()
 }
 
 func formatList(jobs []Snapshot) string {
@@ -567,4 +737,5 @@ func preview(s string, max int) string {
 }
 
 var _ tools.Tool = (*JobsTool)(nil)
+var _ tools.SelfTimeouter = (*JobsTool)(nil)
 var _ tools.BackgroundJobStarter = (*Manager)(nil)

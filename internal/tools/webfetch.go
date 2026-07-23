@@ -29,7 +29,7 @@ const webFetchBackgroundSchema = `{
     "url": {"type": "string", "description": "Absolute http or https URL to fetch."},
     "max_bytes": {"type": "integer", "description": "Maximum response bytes to read (default 1MB, cap 5MB)."},
     "timeout_seconds": {"type": "integer", "description": "Maximum time to wait for the fetch, in seconds (default 30; no maximum)."},
-    "background": {"type": "boolean", "description": "When true, start the fetch as a process-local background job and return a job id immediately. Use background_jobs to inspect or cancel it."}
+    "background": {"type": "boolean", "description": "When true, start the fetch as a process-local background job and return a job id immediately. If later work depends on completion, call background_jobs action=wait once; do not poll get/list."}
   },
   "required": ["url"]
 }`

@@ -184,6 +184,15 @@ type recordTool struct {
 	inputs   []string
 }
 
+type resultRecordTool struct {
+	recordTool
+	result tools.RunResult
+}
+
+func (t *resultRecordTool) RunResult(context.Context, json.RawMessage) (tools.RunResult, error) {
+	return t.result, nil
+}
+
 func (t *recordTool) Name() string                  { return t.name }
 func (t *recordTool) Description() string           { return "fake tool" }
 func (t *recordTool) Schema() json.RawMessage       { return json.RawMessage(`{"type":"object"}`) }
@@ -2417,6 +2426,51 @@ func TestTruncatedToolResultIncludesArchivePathInNextRequest(t *testing.T) {
 	}
 	if len(sink.notices) == 0 || !strings.Contains(sink.notices[len(sink.notices)-1], "full output: artifacts/tool-results/0001-call_big.txt") {
 		t.Fatalf("truncation notice missing display path: %+v", sink.notices)
+	}
+}
+
+func TestResultToolOriginalUsesArchivePathInNextRequest(t *testing.T) {
+	reg := &tools.Registry{}
+	reg.Register(&resultRecordTool{
+		recordTool: recordTool{name: "receipts", readOnly: false},
+		result: tools.RunResult{
+			Text:         "PASS focused tests",
+			OriginalText: "verbose complete test transcript",
+		},
+	})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "call_receipts", "receipts", `{}`)},
+			Stop:   llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	sink := &archiveSink{
+		archive: ToolResultArchive{
+			DisplayPath: "artifacts/tool-results/0001-call_receipts.txt",
+			ModelPath:   "/tmp/harness-session/artifacts/tool-results/0001-call_receipts.txt",
+		},
+	}
+	a := newAgent(fp, reg, Options{})
+
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	mustValid(t, a.Transcript())
+	if len(sink.archived) != 1 || sink.archived[0].OriginalText != "verbose complete test transcript" {
+		t.Fatalf("archived results = %+v", sink.archived)
+	}
+	var resultText string
+	for _, msg := range fp.Requests[1].Messages {
+		for _, block := range msg.Content {
+			if block.Kind == llm.BlockToolResult && block.ResultForID == "call_receipts" {
+				resultText = block.ResultText
+			}
+		}
+	}
+	if !strings.Contains(resultText, "PASS focused tests") ||
+		!strings.Contains(resultText, "/tmp/harness-session/artifacts/tool-results/0001-call_receipts.txt") {
+		t.Fatalf("next request result = %q", resultText)
 	}
 }
 

@@ -44,7 +44,7 @@ func RipgrepAvailable() bool {
 func (ripgrep) Name() string { return "rg" }
 
 func (ripgrep) Description() string {
-	return "Run rg without a shell. Input is an object; args must be an array of strings, not a string. Adds safe line/file-size limits unless overridden; background returns a job id."
+	return "Run raw rg for broad repository discovery, combined patterns, filenames, counts, native flags, or background searches. Once a target is known and surrounding source is needed, use search_context instead of rg followed by read_file. Input is an object; args must be an array of strings, not a string."
 }
 
 func (r ripgrep) Schema() json.RawMessage {

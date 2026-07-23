@@ -13,16 +13,17 @@ This page is the operational overview.
 | `glob` | recursively find files/dirs by glob, including `**` patterns; read-only |
 | `grep` | run host `grep` with argv-style args |
 | `rg` | run host ripgrep when available |
+| `search_context` | search with ripgrep and return bounded surrounding source |
 | `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
 | `write_file` | create or overwrite a file, creating parent directories |
 | `run_command` | run a shell command or direct argv program |
-| `git` | run host git with `--no-pager`, when git is installed |
+| `git` | run host git with `--no-pager`, including a compact `workspace_summary` workflow |
 | `git_readonly` | restricted git subcommands for read-only agents |
 | `web_fetch` | fetch HTTP(S) content and reduce HTML to readable text, keeping block structure and rendering links as `text (url)` |
 | `write_tmp_file` | write scratch files under a private temp directory |
 | `update_todos` | replace the current todo list for multi-step work |
 | `delegate` | run a configured child agent and return its final report |
-| `background_jobs` | list, inspect, or cancel process-local background jobs |
+| `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
 | `record_plan` | persist a self-contained markdown implementation plan in the session; the user is shown the plan file path |
 | `request_implementation` | request an approved handoff of the latest recorded plan (plan agent only) |
 
@@ -52,9 +53,9 @@ applies language-server text edits.
 
 ## Search Tools
 
-Harness registers one search tool by default: `rg` when ripgrep is installed,
-otherwise `grep`. Configure this with `search_tools`, `HARNESS_SEARCH_TOOLS`, or
-`-search-tools`: `auto`, `grep`, `rg`, or `both`.
+Harness registers `rg` plus `search_context` when ripgrep is installed, otherwise
+it registers `grep`. Configure this with `search_tools`,
+`HARNESS_SEARCH_TOOLS`, or `-search-tools`: `auto`, `grep`, `rg`, or `both`.
 
 `grep`, `rg`, `git`, and direct-argv `run_command` calls expect JSON arrays of
 strings for argv-style fields, not shell strings and not JSON-encoded arrays. The
@@ -66,6 +67,17 @@ Normal `rg` searches add `--max-columns=1024 --max-columns-preview
 limits. The wrapper rejects short `-r` forms because replacement output must use
 `--replace` explicitly.
 
+`search_context` is the structured path for searches that would otherwise need
+an `rg` call followed by one or more `read_file` calls. It accepts `pattern`,
+optional `path`/`globs`/`fixed_strings`, and bounded `context_lines`,
+`max_matches`, and `max_files` values. It consumes `rg --json`, orders results
+by path and line, merges overlapping source windows, and returns at most 400
+line-numbered source lines with explicit match/file/output truncation markers.
+Use one raw `rg` with a combined pattern for broad repository orientation,
+filenames, counts, native flags, or background searches. Once a target symbol or
+call site is known, use `search_context` instead of an `rg`→`read_file` sequence.
+Preserve its returned paths and symbol names when citing evidence.
+
 The host `grep` tool injects `-I` (skip binary files) unless the call already sets
 a binary policy (`-I`/`-a`/`--text`/`--binary-files`) or is a help/version
 invocation; `-I` is placed before any `--` operand separator. Matched lines longer
@@ -76,17 +88,26 @@ to prefer `rg`.
 
 ## Command Execution
 
-`run_command` accepts exactly one of:
+`run_command` accepts either one command or an ordered `steps` array:
 
 - `command`: executed through a non-login `bash -c` (with `sh -c` fallback). The
   login PATH a login shell would have added is resolved once at startup and merged
   into the command environment, so build/test toolchains are still found without
   paying the login-profile cost on every call.
 - `argv`: direct program invocation with literal args and no shell
+- `steps`: up to 16 named `command`/`argv` entries, run serially. Top-level
+  `cwd` and `timeout_seconds` are inherited unless a step overrides them.
 
 Foreground calls capture combined stdout/stderr and append `[exit code: N]`.
 Non-zero exit is not a tool error; it is returned as ordinary command output so
 the model can react to failing builds, tests, and searches.
+
+Steps stop on the first failure by default (`stop_on_failure:false` continues).
+Successful output is replaced with one `PASS <name> (<duration>)` receipt per
+step. Failures include a bounded output excerpt and skip count. Any suppressed
+successful output or clipped failure output is archived through the normal
+session artifact path, so the model can inspect it without carrying it in every
+later request. `steps` is foreground-only.
 
 `run_command`, `grep`, `rg`, and `web_fetch` can set `background:true` to return
 a job id immediately. `delegate` can also run as a background child agent.
@@ -96,6 +117,17 @@ turn, harness waits for them and makes the parent synthesize their reports
 before ending the prompt. Their model usage is included exactly once in parent
 prompt/session totals. Ordinary background commands remain detached. Jobs live only
 in the current harness process and are abandoned when that process exits.
+Completion is normally delivered automatically. When later work has a strict
+dependency, `background_jobs {"action":"wait"}` waits on manager notifications
+instead of polling `get` or `list`; add `id` to target one job, or omit it to return when the
+first currently running job finishes. Its timeout defaults to 120 seconds and a
+timeout returns the latest status as a normal result. Omit `timeout_seconds` for
+ordinary dependency waits; do not use a short timeout as a status probe.
+
+For repository orientation, `git {"workflow":"workspace_summary"}` combines
+branch/porcelain status, HEAD, staged and unstaged diff stats, and both whitespace
+checks into one read-only result. Use ordinary `git {"args":[...]}` afterward
+when the actual patch or another native subcommand is needed.
 
 ## File Mutation
 

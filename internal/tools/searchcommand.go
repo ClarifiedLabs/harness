@@ -17,7 +17,7 @@ const searchCommandBackgroundSchema = `{
     "stdin": {"type": "string", "description": "Written to the program's standard input. Omit for no stdin."},
     "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
     "timeout_seconds": {"type": "integer", "description": "Kill the program after this many seconds (default 120; no maximum)."},
-    "background": {"type": "boolean", "description": "When true, start the command as a process-local background job and return a job id immediately. Use background_jobs to inspect or cancel it."}
+    "background": {"type": "boolean", "description": "When true, start the command as a process-local background job and return a job id immediately. If later work depends on completion, call background_jobs action=wait once; do not poll get/list."}
   },
   "required": ["args"]
 }`

@@ -101,6 +101,15 @@ func TestSystemPromptIncludesSafetyVerificationAndFinalGuidance(t *testing.T) {
 	}
 }
 
+func TestSystemPromptRequiresPreciseInvestigationCitations(t *testing.T) {
+	system := strings.ToLower(System())
+	for _, want := range []string{"investigation reports", "full repository-relative paths", "exact symbols"} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("system prompt missing investigation citation guidance %q:\n%s", want, System())
+		}
+	}
+}
+
 func TestCompactionSummaryDemandsFileStateAndTodos(t *testing.T) {
 	summary := strings.ToLower(CompactionSummary())
 	for _, want := range []string{"files touched", "open todos"} {

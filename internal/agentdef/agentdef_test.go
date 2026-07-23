@@ -216,10 +216,16 @@ func TestBuiltinsWithSearchToolsOption(t *testing.T) {
 		if !slices.Contains(m[name].AllowedTools, "grep") {
 			t.Fatalf("%s tools missing grep with search_tools=both: %v", name, m[name].AllowedTools)
 		}
+		if tools.RipgrepAvailable() && !slices.Contains(m[name].AllowedTools, "search_context") {
+			t.Fatalf("%s tools missing search_context with search_tools=both: %v", name, m[name].AllowedTools)
+		}
 	}
 	for _, name := range []string{"explore", "plan"} {
 		if !slices.Contains(m[name].AllowedTools, "grep") {
 			t.Fatalf("%s tools missing grep with search_tools=both: %v", name, m[name].AllowedTools)
+		}
+		if tools.RipgrepAvailable() && !slices.Contains(m[name].AllowedTools, "search_context") {
+			t.Fatalf("%s tools missing search_context with search_tools=both: %v", name, m[name].AllowedTools)
 		}
 	}
 }

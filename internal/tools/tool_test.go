@@ -55,6 +55,16 @@ func (m meteredFakeTool) RunMetered(context.Context, json.RawMessage) (MeteredRe
 	return m.result, m.err
 }
 
+type resultFakeTool struct {
+	fakeTool
+	result RunResult
+	err    error
+}
+
+func (f resultFakeTool) RunResult(context.Context, json.RawMessage) (RunResult, error) {
+	return f.result, f.err
+}
+
 func TestRegistrySpecsOrdered(t *testing.T) {
 	r := &Registry{}
 	r.Register(newOK("alpha", "a"))
@@ -222,6 +232,29 @@ func TestDispatchPreservesMeteredToolUsage(t *testing.T) {
 	}
 	if res.Usage.InputTokens != 7 || res.Usage.OutputTokens != 3 {
 		t.Fatalf("usage = %+v, want 7 input / 3 output", res.Usage)
+	}
+}
+
+func TestDispatchPreservesResultToolOriginal(t *testing.T) {
+	r := &Registry{}
+	r.Register(resultFakeTool{
+		fakeTool: newOK("result", "ordinary path should not run"),
+		result: RunResult{
+			Text:         "compact receipt",
+			OriginalText: "complete verbose transcript",
+			Usage:        llm.Usage{InputTokens: 2},
+		},
+	})
+
+	res := r.Dispatch(context.Background(), llm.ToolCall{ID: "r1", Name: "result", Input: json.RawMessage(`{}`)})
+	if res.Text != "compact receipt" || !res.Truncated || res.OriginalText != "complete verbose transcript" {
+		t.Fatalf("dispatch result = %+v", res)
+	}
+	if res.OriginalBytes != len(res.OriginalText) || res.ShownBytes != len(res.Text) {
+		t.Fatalf("result byte metadata = shown %d original %d", res.ShownBytes, res.OriginalBytes)
+	}
+	if res.Usage.InputTokens != 2 {
+		t.Fatalf("usage = %+v", res.Usage)
 	}
 }
 
@@ -616,11 +649,11 @@ func expectedDefaultNamesForSearch(mode string) []string {
 	case SearchToolsBoth:
 		want = append(want, "grep")
 		if RipgrepAvailable() {
-			want = append(want, "rg")
+			want = append(want, "rg", "search_context")
 		}
 	case SearchToolsRG:
 		if RipgrepAvailable() {
-			want = append(want, "rg")
+			want = append(want, "rg", "search_context")
 		} else {
 			want = append(want, "grep")
 		}
@@ -628,7 +661,7 @@ func expectedDefaultNamesForSearch(mode string) []string {
 		want = append(want, "grep")
 	default:
 		if RipgrepAvailable() {
-			want = append(want, "rg")
+			want = append(want, "rg", "search_context")
 		} else {
 			want = append(want, "grep")
 		}

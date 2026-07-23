@@ -2,7 +2,9 @@ package background
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -176,5 +178,325 @@ func TestJobsToolCancelUnknownJob(t *testing.T) {
 	tool := NewJobsTool(NewManager(Options{}))
 	if _, err := tool.Run(context.Background(), []byte(`{"action":"cancel","id":"missing"}`)); err == nil {
 		t.Fatalf("canceling an unknown job should return an error")
+	}
+}
+
+func TestManagerWaitAlreadyCompletedDeliversContextAndPreservesNoticeAndUsage(t *testing.T) {
+	m := NewManager(Options{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind:          "delegate",
+		Description:   "inspect",
+		WaitForPrompt: true,
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			return tools.BackgroundJobResult{
+				Text:  "finished report",
+				Usage: llm.Usage{InputTokens: 11, OutputTokens: 7, CostKnown: true},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	awaitJobDone(t, m, started.ID)
+
+	result, err := m.Wait(context.Background(), started.ID, time.Second)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if result.TimedOut || result.NoRunning || len(result.Jobs) != 1 {
+		t.Fatalf("wait result = %+v", result)
+	}
+	if result.Jobs[0].Status != StatusCompleted || result.Jobs[0].ContextPending {
+		t.Fatalf("completed snapshot = %+v", result.Jobs[0])
+	}
+	if got := m.DrainCompletedContext(nil); len(got) != 0 {
+		t.Fatalf("completion context delivered twice: %v", got)
+	}
+	if got := m.DrainNotices(); len(got) != 1 {
+		t.Fatalf("completion notices = %v, want one", got)
+	}
+	usage := m.DrainPromptWorkUsage()
+	if usage.InputTokens != 11 || usage.OutputTokens != 7 {
+		t.Fatalf("usage = %+v", usage)
+	}
+	if got := m.DrainPromptWorkUsage(); got != (llm.Usage{}) {
+		t.Fatalf("second usage drain = %+v, want zero", got)
+	}
+}
+
+func TestManagerWaitSpecificJobCompletesOnNotification(t *testing.T) {
+	m := NewManager(Options{})
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "run_command",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "done"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-startedRun
+
+	waited := make(chan WaitResult, 1)
+	waitErr := make(chan error, 1)
+	go func() {
+		result, waitError := m.Wait(context.Background(), started.ID, time.Second)
+		waited <- result
+		waitErr <- waitError
+	}()
+	select {
+	case result := <-waited:
+		t.Fatalf("wait returned before completion: %+v", result)
+	default:
+	}
+
+	close(release)
+	select {
+	case result := <-waited:
+		if err := <-waitErr; err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+		if len(result.Jobs) != 1 || result.Jobs[0].Status != StatusCompleted {
+			t.Fatalf("wait result = %+v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wait did not wake when the job completed")
+	}
+}
+
+func TestManagerWaitAnySnapshotsRunningJobsAndReturnsFirstCompletion(t *testing.T) {
+	m := NewManager(Options{})
+	firstRelease := make(chan struct{})
+	secondRelease := make(chan struct{})
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	first, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "first",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(firstStarted)
+			<-firstRelease
+			return tools.BackgroundJobResult{Text: "first"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start first: %v", err)
+	}
+	second, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "second",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(secondStarted)
+			<-secondRelease
+			return tools.BackgroundJobResult{Text: "second"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start second: %v", err)
+	}
+	<-firstStarted
+	<-secondStarted
+
+	waitEnteredSelect := make(chan struct{})
+	waited := make(chan WaitResult, 1)
+	waitErr := make(chan error, 1)
+	go func() {
+		waitCtx := &doneObservedContext{
+			Context:  context.Background(),
+			observed: waitEnteredSelect,
+		}
+		result, waitError := m.Wait(waitCtx, "", time.Second)
+		waited <- result
+		waitErr <- waitError
+	}()
+	<-waitEnteredSelect
+	close(secondRelease)
+	select {
+	case result := <-waited:
+		if err := <-waitErr; err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+		if len(result.Jobs) != 1 || result.Jobs[0].ID != second.ID {
+			t.Fatalf("wait result = %+v, want second job only", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wait did not return after a selected job completed")
+	}
+
+	close(firstRelease)
+	awaitJobDone(t, m, first.ID)
+}
+
+type doneObservedContext struct {
+	context.Context
+	once     sync.Once
+	observed chan struct{}
+}
+
+func (c *doneObservedContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.observed) })
+	return c.Context.Done()
+}
+
+func TestManagerWaitWithoutRunningJobsReturnsCurrentList(t *testing.T) {
+	m := NewManager(Options{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "completed",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			return tools.BackgroundJobResult{Text: "done"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	awaitJobDone(t, m, started.ID)
+
+	result, err := m.Wait(context.Background(), "", time.Second)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if !result.NoRunning || result.TimedOut || len(result.Jobs) != 1 {
+		t.Fatalf("wait result = %+v", result)
+	}
+	if !result.Jobs[0].ContextPending {
+		t.Fatal("an immediate list must not consume automatic completion context")
+	}
+}
+
+func TestManagerWaitTimeoutReturnsLatestState(t *testing.T) {
+	m := NewManager(Options{})
+	release := make(chan struct{})
+	startedRun := make(chan struct{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "blocked",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-startedRun
+
+	result, err := m.Wait(context.Background(), started.ID, time.Nanosecond)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if !result.TimedOut || len(result.Jobs) != 1 || result.Jobs[0].Status != StatusRunning {
+		t.Fatalf("timeout result = %+v", result)
+	}
+
+	close(release)
+	awaitJobDone(t, m, started.ID)
+}
+
+func TestManagerWaitHonorsContextCancellationAndUnknownID(t *testing.T) {
+	m := NewManager(Options{})
+	if _, err := m.Wait(context.Background(), "missing", time.Second); err == nil {
+		t.Fatal("waiting for an unknown job should fail")
+	}
+
+	release := make(chan struct{})
+	startedRun := make(chan struct{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "blocked",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-startedRun
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := m.Wait(ctx, started.ID, time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait error = %v, want context canceled", err)
+	}
+	close(release)
+	awaitJobDone(t, m, started.ID)
+}
+
+func TestManagerWaitWakesAfterCancelFinishes(t *testing.T) {
+	m := NewManager(Options{})
+	startedRun := make(chan struct{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "blocked",
+		Run: func(ctx context.Context, _ string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-ctx.Done()
+			return tools.BackgroundJobResult{}, ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-startedRun
+	waited := make(chan WaitResult, 1)
+	waitErr := make(chan error, 1)
+	go func() {
+		result, waitError := m.Wait(context.Background(), started.ID, time.Second)
+		waited <- result
+		waitErr <- waitError
+	}()
+	if _, ok := m.Cancel(started.ID); !ok {
+		t.Fatal("Cancel did not find job")
+	}
+	select {
+	case result := <-waited:
+		if err := <-waitErr; err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+		if len(result.Jobs) != 1 || result.Jobs[0].Status != StatusCanceled {
+			t.Fatalf("wait result = %+v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wait did not wake after canceled job finished")
+	}
+}
+
+func TestJobsToolWaitContract(t *testing.T) {
+	tool := NewJobsTool(NewManager(Options{}))
+	if !tool.ReadOnly([]byte(`{"action":"wait"}`)) {
+		t.Fatal("wait should be read-only")
+	}
+	if tool.ReadOnly([]byte(`{"action":"cancel","id":"bg"}`)) {
+		t.Fatal("cancel should not be read-only")
+	}
+	if got, err := tool.Run(context.Background(), []byte(`{"action":"wait"}`)); err != nil || got != "No running background jobs." {
+		t.Fatalf("empty wait = %q, %v", got, err)
+	}
+	if _, err := tool.Run(context.Background(), []byte(`{"action":"wait","timeout_seconds":-1}`)); err == nil {
+		t.Fatal("negative timeout should fail")
+	}
+	if timeout, ok := tool.SelfTimeout([]byte(`{"action":"wait"}`)); !ok || timeout != defaultWaitTimeout+waitDispatchGrace {
+		t.Fatalf("default SelfTimeout = %s, %v", timeout, ok)
+	}
+	if timeout, ok := tool.SelfTimeout([]byte(`{"action":"wait","timeout_seconds":900}`)); !ok || timeout != 900*time.Second+waitDispatchGrace {
+		t.Fatalf("explicit SelfTimeout = %s, %v", timeout, ok)
+	}
+	if _, ok := tool.SelfTimeout([]byte(`{"action":"list"}`)); ok {
+		t.Fatal("list should not advertise a self timeout")
+	}
+}
+
+func awaitJobDone(t *testing.T, m *Manager, id string) {
+	t.Helper()
+	m.mu.Lock()
+	job := m.jobs[id]
+	m.mu.Unlock()
+	if job == nil {
+		t.Fatalf("unknown job %s", id)
+	}
+	select {
+	case <-job.done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("job %s did not finish", id)
 	}
 }

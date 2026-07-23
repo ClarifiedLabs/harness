@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"harness/internal/llm"
 )
 
 func runRunCommand(t *testing.T, args map[string]any) (string, error) {
@@ -219,6 +221,9 @@ func TestRunCommandModelSchemaAvoidsTopLevelComposition(t *testing.T) {
 			if _, ok := props["argv"]; !ok {
 				t.Fatalf("schema missing argv property: %s", modelRaw)
 			}
+			if _, ok := props["steps"]; !ok {
+				t.Fatalf("schema missing steps property: %s", modelRaw)
+			}
 
 			var rawSchema map[string]any
 			if err := json.Unmarshal(tc.tool.Schema(), &rawSchema); err != nil {
@@ -236,13 +241,160 @@ func TestRunCommandModelSchemaAvoidsTopLevelComposition(t *testing.T) {
 			if !strings.Contains(argvDesc, "not a shell string or JSON-encoded array") {
 				t.Fatalf("argv description should reject stringified argv arrays: %q", argvDesc)
 			}
-			if !strings.Contains(tc.tool.Description(), "exactly one of command or argv") {
-				t.Fatalf("description should carry command/argv exclusivity rule: %q", tc.tool.Description())
+			if !strings.Contains(tc.tool.Description(), "ordered steps") {
+				t.Fatalf("description should advertise steps: %q", tc.tool.Description())
 			}
-			if !strings.Contains(tc.tool.Description(), "array of strings, not a string") {
-				t.Fatalf("description should reject stringified argv arrays: %q", tc.tool.Description())
+			if !strings.Contains(tc.tool.Description(), "argv as an array of strings") {
+				t.Fatalf("description should advertise argv shape: %q", tc.tool.Description())
 			}
 		})
+	}
+}
+
+func TestRunCommandStepsReturnCompactReceiptsAndOriginal(t *testing.T) {
+	tool := runCommand{}
+	input := json.RawMessage(`{
+		"steps": [
+			{"name":"first check","command":"printf 'verbose first output'"},
+			{"name":"second check","argv":["printf","verbose second output"]}
+		]
+	}`)
+	result, err := tool.RunResult(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"PASS first check", "PASS second check"} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("receipt missing %q:\n%s", want, result.Text)
+		}
+	}
+	if strings.Contains(result.Text, "verbose first output") || strings.Contains(result.Text, "verbose second output") {
+		t.Fatalf("successful output leaked into compact receipt:\n%s", result.Text)
+	}
+	for _, want := range []string{"verbose first output", "verbose second output", "[exit code: 0]"} {
+		if !strings.Contains(result.OriginalText, want) {
+			t.Errorf("full transcript missing %q:\n%s", want, result.OriginalText)
+		}
+	}
+}
+
+func TestRunCommandStepsStopOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "should-not-exist")
+	tool := runCommand{}
+	input, err := json.Marshal(map[string]any{
+		"steps": []map[string]any{
+			{"name": "fails", "command": "printf 'bad output'; exit 7"},
+			{"name": "skipped", "argv": []string{"touch", marker}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := tool.RunResult(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"FAIL fails", "exit 7", "bad output", "SKIP 1 remaining step"} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("receipt missing %q:\n%s", want, result.Text)
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("later step ran despite stop_on_failure: %v", err)
+	}
+}
+
+func TestRunCommandStepsCanContinueAfterFailure(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "continued")
+	tool := runCommand{}
+	input, err := json.Marshal(map[string]any{
+		"stop_on_failure": false,
+		"steps": []map[string]any{
+			{"name": "fails", "command": "exit 3"},
+			{"name": "continues", "argv": []string{"touch", marker}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := tool.RunResult(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Text, "FAIL fails") || !strings.Contains(result.Text, "PASS continues") {
+		t.Fatalf("continue receipt:\n%s", result.Text)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("later step did not run: %v", err)
+	}
+}
+
+func TestRunCommandStepsInheritCwdAndTimeout(t *testing.T) {
+	dir := t.TempDir()
+	tool := runCommand{}
+	input, err := json.Marshal(map[string]any{
+		"cwd":             dir,
+		"timeout_seconds": 7,
+		"steps": []map[string]any{
+			{"name": "cwd", "command": "pwd"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := tool.RunResult(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.OriginalText, dir) {
+		t.Fatalf("step did not inherit cwd:\n%s", result.OriginalText)
+	}
+	if d, ok := tool.SelfTimeout(input); !ok || d != 7*time.Second {
+		t.Fatalf("step SelfTimeout = %s, %t; want 7s", d, ok)
+	}
+}
+
+func TestRunCommandStepsValidation(t *testing.T) {
+	tests := []struct {
+		name  string
+		input map[string]any
+		want  string
+	}{
+		{"top level command", map[string]any{"command": "true", "steps": []map[string]any{{"command": "true"}}}, "steps or a top-level"},
+		{"top level stdin", map[string]any{"stdin": "x", "steps": []map[string]any{{"command": "true"}}}, "top-level stdin"},
+		{"background", map[string]any{"background": true, "steps": []map[string]any{{"command": "true"}}}, "background"},
+		{"missing step command", map[string]any{"steps": []map[string]any{{"name": "empty"}}}, "steps[0]"},
+		{"step command and argv", map[string]any{"steps": []map[string]any{{"command": "true", "argv": []string{"true"}}}}, "steps[0]"},
+		{"bad step timeout", map[string]any{"steps": []map[string]any{{"command": "true", "timeout_seconds": -1}}}, "timeout_seconds"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := runRunCommand(t, tc.input)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunCommandStepsDispatchArchivesSuppressedOutput(t *testing.T) {
+	r := &Registry{}
+	r.Register(runCommand{})
+	res := r.Dispatch(context.Background(), llm.ToolCall{
+		ID:    "steps",
+		Name:  "run_command",
+		Input: json.RawMessage(`{"steps":[{"name":"test","command":"printf verbose-success"}]}`),
+	})
+	if res.IsError || !res.Truncated {
+		t.Fatalf("dispatch result = %+v", res)
+	}
+	if strings.Contains(res.Text, "verbose-success") || !strings.Contains(res.Text, "PASS test") {
+		t.Fatalf("model receipt = %q", res.Text)
+	}
+	if !strings.Contains(res.OriginalText, "verbose-success") {
+		t.Fatalf("archival original = %q", res.OriginalText)
 	}
 }
 

@@ -30,6 +30,15 @@ func runGit(t *testing.T, dir string, args ...string) (string, error) {
 	return gitTool{}.Run(context.Background(), b)
 }
 
+func runGitWorkflow(t *testing.T, dir string) (string, error) {
+	t.Helper()
+	input, err := json.Marshal(map[string]any{"workflow": gitWorkflowWorkspaceSummary, "cwd": dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gitTool{}.Run(context.Background(), input)
+}
+
 // scratchRepo initializes a fresh git repo in a temp dir with identity set.
 func scratchRepo(t *testing.T) string {
 	t.Helper()
@@ -101,6 +110,98 @@ func TestGitMissingArgs(t *testing.T) {
 	}
 }
 
+func TestGitWorkspaceSummaryCleanRepository(t *testing.T) {
+	gitAvailable(t)
+	dir := scratchRepo(t)
+	mustWrite(t, dir+"/hello.txt", "hi\n")
+	if _, err := runGit(t, dir, "add", "hello.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(t, dir, "commit", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runGitWorkflow(t, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"branch/status:", "head:", "initial", "whitespace: clean"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "diffstat:") {
+		t.Fatalf("clean summary included empty diffstat:\n%s", out)
+	}
+}
+
+func TestGitWorkspaceSummarySeparatesStatesAndWhitespace(t *testing.T) {
+	gitAvailable(t)
+	dir := scratchRepo(t)
+	mustWrite(t, dir+"/staged.txt", "old\n")
+	mustWrite(t, dir+"/unstaged.txt", "old\n")
+	if _, err := runGit(t, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(t, dir, "commit", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, dir+"/staged.txt", "staged change\n")
+	if _, err := runGit(t, dir, "add", "staged.txt"); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, dir+"/unstaged.txt", "unstaged trailing  \n")
+	mustWrite(t, dir+"/untracked.txt", "new\n")
+
+	out, err := runGitWorkflow(t, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"M  staged.txt",
+		" M unstaged.txt",
+		"?? untracked.txt",
+		"staged diffstat:",
+		"unstaged diffstat:",
+		"unstaged whitespace errors:",
+		"trailing whitespace",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestGitWorkspaceSummaryHandlesUnbornRepository(t *testing.T) {
+	gitAvailable(t)
+	dir := scratchRepo(t)
+	mustWrite(t, dir+"/untracked.txt", "new\n")
+	out, err := runGitWorkflow(t, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "unborn; no commits yet") || !strings.Contains(out, "?? untracked.txt") {
+		t.Fatalf("unborn summary:\n%s", out)
+	}
+}
+
+func TestGitWorkspaceSummaryValidationAndReadOnly(t *testing.T) {
+	tool := gitTool{}
+	if !tool.ReadOnly(json.RawMessage(`{"workflow":"workspace_summary"}`)) {
+		t.Fatal("workspace_summary should be read-only")
+	}
+	for _, input := range []string{
+		`{"workflow":"workspace_summary","args":["status"]}`,
+		`{"workflow":"unknown"}`,
+	} {
+		if tool.ReadOnly(json.RawMessage(input)) {
+			t.Errorf("ReadOnly(%s) = true", input)
+		}
+		if _, err := tool.Run(context.Background(), json.RawMessage(input)); err == nil {
+			t.Errorf("Run(%s): expected error", input)
+		}
+	}
+}
+
 func TestGitEmptyArgs(t *testing.T) {
 	_, err := gitTool{}.Run(context.Background(), json.RawMessage(`{"args":[]}`))
 	if err == nil {
@@ -148,6 +249,8 @@ func TestGitReadOnlyClassificationUsesArgs(t *testing.T) {
 		{name: "grep pager", in: `{"args":["grep","-nO/tmp/pager","needle"]}`, want: false},
 		{name: "bad json", in: `{not json`, want: false},
 		{name: "empty args", in: `{"args":[]}`, want: false},
+		{name: "workspace summary", in: `{"workflow":"workspace_summary"}`, want: true},
+		{name: "workflow plus args", in: `{"workflow":"workspace_summary","args":["status"]}`, want: false},
 	}
 
 	for _, tt := range tests {

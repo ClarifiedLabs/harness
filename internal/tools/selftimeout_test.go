@@ -126,4 +126,13 @@ func TestRunCommandSelfTimeout(t *testing.T) {
 	if _, ok := rc.SelfTimeout(json.RawMessage(`{"command":"x","timeout_seconds":-1}`)); ok {
 		t.Error("negative timeout_seconds should report no SelfTimeout")
 	}
+	if d, ok := rc.SelfTimeout(json.RawMessage(`{
+		"timeout_seconds":10,
+		"steps":[
+			{"command":"one"},
+			{"command":"two","timeout_seconds":20}
+		]
+	}`)); !ok || d != 30*time.Second {
+		t.Errorf("steps SelfTimeout = (%s,%v), want (30s,true)", d, ok)
+	}
 }

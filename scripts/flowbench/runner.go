@@ -1,0 +1,581 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+var defaultModels = []string{
+	"deepseek:deepseek-v4-pro",
+	"alibaba-token-plan:qwen3.8-max-preview",
+	"openai-codex:gpt-5.6-terra",
+}
+
+type runConfig struct {
+	Repo         string
+	Results      string
+	Case         benchmarkCase
+	BaselineSHA  string
+	CandidateSHA string
+	Models       []string
+	Repetitions  int
+	DryRun       bool
+	Resume       bool
+	ImportRuns   string
+}
+
+type runRecord struct {
+	Version       int       `json:"version"`
+	Case          string    `json:"case"`
+	Model         string    `json:"model"`
+	Repetition    int       `json:"repetition"`
+	Variant       string    `json:"variant"`
+	Order         int       `json:"order"`
+	TargetSHA     string    `json:"target_sha"`
+	HarnessSHA    string    `json:"harness_sha"`
+	Started       time.Time `json:"started"`
+	Finished      time.Time `json:"finished"`
+	WallSeconds   float64   `json:"wall_seconds"`
+	ExitCode      int       `json:"exit_code"`
+	SessionDir    string    `json:"session_dir"`
+	StdoutPath    string    `json:"stdout_path"`
+	StderrPath    string    `json:"stderr_path"`
+	FixtureBefore string    `json:"fixture_before"`
+	FixtureAfter  string    `json:"fixture_after"`
+	Metrics       metrics   `json:"metrics"`
+	Score         score     `json:"score"`
+	Invalid       string    `json:"invalid,omitempty"`
+}
+
+func executeMatrix(ctx context.Context, cfg runConfig) ([]runRecord, error) {
+	if cfg.Repetitions <= 0 {
+		return nil, fmt.Errorf("repetitions must be positive")
+	}
+	if err := requireCleanRepo(cfg.Repo); err != nil {
+		return nil, err
+	}
+	if cfg.DryRun {
+		return dryRunRecords(cfg), nil
+	}
+	if err := os.MkdirAll(cfg.Results, 0o755); err != nil {
+		return nil, err
+	}
+	records, err := initialRecords(cfg)
+	if err != nil {
+		return nil, err
+	}
+	tempRoot, err := os.MkdirTemp("", "harness-flowbench-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tempRoot)
+
+	binaries := map[string]string{}
+	for variant, sha := range map[string]string{"baseline": cfg.BaselineSHA, "candidate": cfg.CandidateSHA} {
+		path := filepath.Join(tempRoot, "harness-"+variant)
+		if err := buildHarness(ctx, cfg.Repo, filepath.Join(tempRoot, "build-"+variant), sha, path); err != nil {
+			return nil, err
+		}
+		binaries[variant] = path
+	}
+	if err := preflightModels(ctx, binaries["candidate"], cfg.Models); err != nil {
+		return nil, err
+	}
+
+	worktree := filepath.Join(tempRoot, "target-worktree")
+	completed := make(map[string]bool, len(records))
+	for _, record := range records {
+		completed[recordKey(record.Model, record.Repetition, record.Variant)] = true
+	}
+	order := 0
+	for _, model := range cfg.Models {
+		for rep := 1; rep <= cfg.Repetitions; rep++ {
+			variants := []string{"baseline", "candidate"}
+			if rep%2 == 0 {
+				variants[0], variants[1] = variants[1], variants[0]
+			}
+			for _, variant := range variants {
+				order++
+				if completed[recordKey(model, rep, variant)] {
+					continue
+				}
+				record, err := executeOne(ctx, cfg, binaries[variant], variant, model, rep, order, worktree)
+				records = append(records, record)
+				if writeErr := writeRecords(cfg.Results, records); writeErr != nil {
+					return records, writeErr
+				}
+				if err != nil {
+					return records, err
+				}
+			}
+		}
+	}
+	if err := writeSummary(cfg.Results, cfg.Case, records); err != nil {
+		return records, err
+	}
+	return records, nil
+}
+
+func executeOne(ctx context.Context, cfg runConfig, binary, variant, model string, repetition, order int, worktree string) (runRecord, error) {
+	record := runRecord{
+		Version:    1,
+		Case:       cfg.Case.Name,
+		Model:      model,
+		Repetition: repetition,
+		Variant:    variant,
+		Order:      order,
+		TargetSHA:  targetSHA,
+		HarnessSHA: map[string]string{"baseline": cfg.BaselineSHA, "candidate": cfg.CandidateSHA}[variant],
+	}
+	if err := addWorktree(ctx, cfg.Repo, worktree, targetSHA); err != nil {
+		record.Invalid = err.Error()
+		return record, err
+	}
+	cleanup := func() {
+		_ = removeWorktree(context.Background(), cfg.Repo, worktree)
+	}
+	defer cleanup()
+
+	if err := cfg.Case.Setup(worktree); err != nil {
+		record.Invalid = err.Error()
+		return record, err
+	}
+	before, err := fixtureDigest(worktree)
+	if err != nil {
+		record.Invalid = err.Error()
+		return record, err
+	}
+	record.FixtureBefore = before
+
+	runDir := filepath.Join(cfg.Results, cfg.Case.Name, sanitize(model), fmt.Sprintf("%02d-%s", repetition, variant))
+	sessionDir := filepath.Join(runDir, "session")
+	goCache := filepath.Join(filepath.Dir(worktree), "go-cache")
+	if err := prepareRunDir(runDir, cfg.Resume); err != nil {
+		return record, err
+	}
+	record.SessionDir = sessionDir
+	record.StdoutPath = filepath.Join(runDir, "stdout.txt")
+	record.StderrPath = filepath.Join(runDir, "stderr.txt")
+
+	runCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+	defer cancel()
+	args := []string{
+		"-model", model,
+		"-reasoning", "medium",
+		"-agent", "independent",
+		"-search-tools", "rg",
+		"-web-search", "off",
+		"-no-env",
+		"-no-color",
+		"-timestamps", "none",
+		"-q",
+		"-max-prompt-tokens", "0",
+		"-max-turns", "200",
+		"-max-prompt-cost", "0",
+		"-session", sessionDir,
+		"-p", cfg.Case.Prompt,
+	}
+	cmd := exec.CommandContext(runCtx, binary, args...)
+	cmd.Dir = worktree
+	cmd.Env = benchmarkEnv(goCache)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	record.Started = time.Now().UTC()
+	runErr := cmd.Run()
+	record.Finished = time.Now().UTC()
+	record.WallSeconds = record.Finished.Sub(record.Started).Seconds()
+	record.ExitCode = exitStatus(runErr)
+	_ = os.WriteFile(record.StdoutPath, stdout.Bytes(), 0o644)
+	_ = os.WriteFile(record.StderrPath, stderr.Bytes(), 0o644)
+	if runCtx.Err() != nil {
+		record.Invalid = runCtx.Err().Error()
+		return record, fmt.Errorf("%s %s repetition %d: %w", cfg.Case.Name, model, repetition, runCtx.Err())
+	}
+	if runErr != nil {
+		record.Invalid = runErr.Error()
+		return record, fmt.Errorf("%s %s repetition %d %s: %w", cfg.Case.Name, model, repetition, variant, runErr)
+	}
+	m, err := collectMetrics(sessionDir)
+	if err != nil {
+		record.Invalid = err.Error()
+		return record, err
+	}
+	record.Metrics = m
+	if strings.TrimSpace(m.FinalText) == "" {
+		record.Invalid = "session ended without a final answer"
+		return record, fmt.Errorf("%s %s repetition %d %s: %s", cfg.Case.Name, model, repetition, variant, record.Invalid)
+	}
+	after, err := fixtureDigest(worktree)
+	if err != nil {
+		record.Invalid = err.Error()
+		return record, err
+	}
+	record.FixtureAfter = after
+	record.Score = cfg.Case.Score(scoreInput{
+		Stdout:        m.AssistantText,
+		Worktree:      worktree,
+		GoCache:       goCache,
+		FixtureBefore: before,
+		FixtureAfter:  after,
+		Metrics:       m,
+	})
+	return record, nil
+}
+
+func prepareRunDir(runDir string, resume bool) error {
+	if _, err := os.Stat(runDir); err == nil {
+		if !resume {
+			return fmt.Errorf("run directory already exists: %s", runDir)
+		}
+		interrupted := fmt.Sprintf("%s.interrupted-%d", runDir, time.Now().UTC().UnixNano())
+		if err := os.Rename(runDir, interrupted); err != nil {
+			return fmt.Errorf("preserve interrupted run directory: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.MkdirAll(runDir, 0o755)
+}
+
+func resumeRecords(cfg runConfig) ([]runRecord, error) {
+	if !cfg.Resume {
+		return nil, nil
+	}
+	path := filepath.Join(cfg.Results, cfg.Case.Name+"-runs.json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var records []runRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		return nil, fmt.Errorf("decode resume records: %w", err)
+	}
+	models := make(map[string]bool, len(cfg.Models))
+	for _, model := range cfg.Models {
+		models[model] = true
+	}
+	seen := make(map[string]bool, len(records))
+	for i := range records {
+		record := &records[i]
+		expectedSHA := map[string]string{"baseline": cfg.BaselineSHA, "candidate": cfg.CandidateSHA}[record.Variant]
+		key := recordKey(record.Model, record.Repetition, record.Variant)
+		switch {
+		case record.Case != cfg.Case.Name:
+			return nil, fmt.Errorf("resume record %d has case %q, want %q", i, record.Case, cfg.Case.Name)
+		case !models[record.Model]:
+			return nil, fmt.Errorf("resume record %d has unselected model %q", i, record.Model)
+		case record.Repetition < 1 || record.Repetition > cfg.Repetitions:
+			return nil, fmt.Errorf("resume record %d has repetition %d outside matrix", i, record.Repetition)
+		case expectedSHA == "":
+			return nil, fmt.Errorf("resume record %d has variant %q", i, record.Variant)
+		case record.HarnessSHA != expectedSHA:
+			return nil, fmt.Errorf("resume record %d harness SHA %q, want %q", i, record.HarnessSHA, expectedSHA)
+		case record.TargetSHA != targetSHA:
+			return nil, fmt.Errorf("resume record %d target SHA %q, want %q", i, record.TargetSHA, targetSHA)
+		case record.Invalid != "":
+			return nil, fmt.Errorf("resume record %d is invalid: %s", i, record.Invalid)
+		case seen[key]:
+			return nil, fmt.Errorf("duplicate resume record %q", key)
+		}
+		seen[key] = true
+		metrics, err := collectMetrics(record.SessionDir)
+		if err != nil {
+			return nil, fmt.Errorf("refresh resume record %d: %w", i, err)
+		}
+		if strings.TrimSpace(metrics.FinalText) == "" {
+			return nil, fmt.Errorf("resume record %d has no final answer", i)
+		}
+		record.Metrics = metrics
+		if cfg.Case.Name != "command_steps" {
+			record.Score = cfg.Case.Score(scoreInput{
+				Stdout:        metrics.AssistantText,
+				FixtureBefore: record.FixtureBefore,
+				FixtureAfter:  record.FixtureAfter,
+				Metrics:       metrics,
+			})
+		}
+	}
+	if err := writeRecords(cfg.Results, records); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func initialRecords(cfg runConfig) ([]runRecord, error) {
+	if cfg.Resume && strings.TrimSpace(cfg.ImportRuns) != "" {
+		return nil, fmt.Errorf("resume and import-baseline-runs are mutually exclusive")
+	}
+	if cfg.Resume {
+		return resumeRecords(cfg)
+	}
+	if strings.TrimSpace(cfg.ImportRuns) == "" {
+		return nil, nil
+	}
+	return importBaselineRecords(cfg, cfg.ImportRuns)
+}
+
+func importBaselineRecords(cfg runConfig, path string) ([]runRecord, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var source []runRecord
+	if err := json.Unmarshal(data, &source); err != nil {
+		return nil, fmt.Errorf("decode imported baseline records: %w", err)
+	}
+	modelIndex := make(map[string]int, len(cfg.Models))
+	for i, model := range cfg.Models {
+		modelIndex[model] = i
+	}
+	seen := make(map[string]bool)
+	var records []runRecord
+	for i := range source {
+		record := source[i]
+		if record.Variant != "baseline" {
+			continue
+		}
+		index, selected := modelIndex[record.Model]
+		key := recordKey(record.Model, record.Repetition, record.Variant)
+		switch {
+		case record.Case != cfg.Case.Name:
+			return nil, fmt.Errorf("imported baseline record %d has case %q, want %q", i, record.Case, cfg.Case.Name)
+		case !selected:
+			continue
+		case record.Repetition < 1 || record.Repetition > cfg.Repetitions:
+			continue
+		case record.HarnessSHA != cfg.BaselineSHA:
+			return nil, fmt.Errorf("imported baseline record %d harness SHA %q, want %q", i, record.HarnessSHA, cfg.BaselineSHA)
+		case record.TargetSHA != targetSHA:
+			return nil, fmt.Errorf("imported baseline record %d target SHA %q, want %q", i, record.TargetSHA, targetSHA)
+		case record.Invalid != "":
+			return nil, fmt.Errorf("imported baseline record %d is invalid: %s", i, record.Invalid)
+		case seen[key]:
+			return nil, fmt.Errorf("duplicate imported baseline record %q", key)
+		}
+		seen[key] = true
+		metrics, err := collectMetrics(record.SessionDir)
+		if err != nil {
+			return nil, fmt.Errorf("refresh imported baseline record %d: %w", i, err)
+		}
+		if strings.TrimSpace(metrics.FinalText) == "" {
+			return nil, fmt.Errorf("imported baseline record %d has no final answer", i)
+		}
+		record.Metrics = metrics
+		record.Score = cfg.Case.Score(scoreInput{
+			Stdout:        metrics.AssistantText,
+			FixtureBefore: record.FixtureBefore,
+			FixtureAfter:  record.FixtureAfter,
+			Metrics:       metrics,
+		})
+		record.Order = baselineOrder(index, cfg.Repetitions, record.Repetition)
+		records = append(records, record)
+	}
+	if len(records) == 0 {
+		return nil, fmt.Errorf("no matching baseline records found in %s", path)
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].Order < records[j].Order })
+	if err := writeRecords(cfg.Results, records); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func baselineOrder(modelIndex, repetitions, repetition int) int {
+	order := modelIndex*repetitions*2 + (repetition-1)*2 + 1
+	if repetition%2 == 0 {
+		order++
+	}
+	return order
+}
+
+func recordKey(model string, repetition int, variant string) string {
+	return fmt.Sprintf("%s\x00%d\x00%s", model, repetition, variant)
+}
+
+func buildHarness(ctx context.Context, repo, worktree, sha, out string) error {
+	if err := addWorktree(ctx, repo, worktree, sha); err != nil {
+		return err
+	}
+	defer removeWorktree(context.Background(), repo, worktree)
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", out, "./cmd/harness")
+	cmd.Dir = worktree
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("build harness at %s: %w\n%s", sha, err, output)
+	}
+	return nil
+}
+
+func addWorktree(ctx context.Context, repo, path, sha string) error {
+	cmd := exec.CommandContext(ctx, "git", "-C", repo, "worktree", "add", "--detach", path, sha)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("add worktree %s at %s: %w\n%s", path, sha, err, out)
+	}
+	return nil
+}
+
+func removeWorktree(ctx context.Context, repo, path string) error {
+	cmd := exec.CommandContext(ctx, "git", "-C", repo, "worktree", "remove", "--force", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("remove worktree %s: %w\n%s", path, err, out)
+	}
+	return nil
+}
+
+func requireCleanRepo(repo string) error {
+	status, err := gitOutput(repo, "status", "--porcelain=v1")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status) != "" {
+		return fmt.Errorf("repository must be clean before a scored matrix:\n%s", status)
+	}
+	return nil
+}
+
+func preflightModels(ctx context.Context, binary string, models []string) error {
+	cmd := exec.CommandContext(ctx, binary, "--models", "--format", "json")
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("model catalog preflight: %w", err)
+	}
+	var catalog struct {
+		Models []struct {
+			TargetID string `json:"target_id"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(out, &catalog); err != nil {
+		return fmt.Errorf("decode model catalog: %w", err)
+	}
+	available := map[string]bool{}
+	for _, model := range catalog.Models {
+		available[model.TargetID] = true
+	}
+	for _, model := range models {
+		if !available[model] {
+			return fmt.Errorf("model %q is not available from the configured proxy", model)
+		}
+	}
+	return nil
+}
+
+func benchmarkEnv(goCache string) []string {
+	env := os.Environ()
+	env = setEnv(env, "HARNESS_MCP_ENABLE", "false")
+	env = setEnv(env, "HARNESS_LSP_ENABLE", "false")
+	env = setEnv(env, "HARNESS_SERENA_ENABLE", "false")
+	env = setEnv(env, "NO_COLOR", "1")
+	if goCache != "" {
+		env = setEnv(env, "GOCACHE", goCache)
+	}
+	return env
+}
+
+func setEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			out = append(out, item)
+		}
+	}
+	return append(out, prefix+value)
+}
+
+func fixtureDigest(dir string) (string, error) {
+	var b strings.Builder
+	for _, args := range [][]string{
+		{"status", "--porcelain=v1", "--branch"},
+		{"diff", "--binary"},
+		{"diff", "--cached", "--binary"},
+	} {
+		out, err := gitOutput(dir, args...)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(strings.Join(args, " "))
+		b.WriteByte('\n')
+		b.WriteString(out)
+	}
+	untracked, err := gitOutput(dir, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return "", err
+	}
+	paths := strings.Split(strings.TrimSuffix(untracked, "\x00"), "\x00")
+	sort.Strings(paths)
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, path))
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "untracked %s\n", path)
+		b.Write(data)
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func exitStatus(err error) int {
+	if err == nil {
+		return 0
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+func sanitize(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+func dryRunRecords(cfg runConfig) []runRecord {
+	var records []runRecord
+	order := 0
+	for _, model := range cfg.Models {
+		for rep := 1; rep <= cfg.Repetitions; rep++ {
+			variants := []string{"baseline", "candidate"}
+			if rep%2 == 0 {
+				variants[0], variants[1] = variants[1], variants[0]
+			}
+			for _, variant := range variants {
+				order++
+				records = append(records, runRecord{
+					Version:    1,
+					Case:       cfg.Case.Name,
+					Model:      model,
+					Repetition: rep,
+					Variant:    variant,
+					Order:      order,
+					TargetSHA:  targetSHA,
+					HarnessSHA: map[string]string{"baseline": cfg.BaselineSHA, "candidate": cfg.CandidateSHA}[variant],
+				})
+			}
+		}
+	}
+	return records
+}

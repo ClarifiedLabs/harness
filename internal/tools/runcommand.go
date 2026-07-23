@@ -13,11 +13,14 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const (
 	runCommandDefaultTimeout           = 120
 	runCommandBackgroundDefaultTimeout = 1200
+	runCommandMaxSteps                 = 16
+	runCommandFailureOutputBytes       = 4096
 )
 
 var (
@@ -35,6 +38,24 @@ const runCommandSchemaFmt = `{
       "minItems": 1,
       "description": "Program and arguments to run directly without a shell. Must be a JSON array of strings, e.g. [\"go\",\"test\",\"./...\"], not a shell string or JSON-encoded array. argv[0] is resolved via PATH; remaining items are passed literally."
     },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "description": "Ordered commands to run serially. Use for related build, format, lint, and test verification. Mutually exclusive with top-level command/argv/stdin and unavailable in background mode.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string", "description": "Concise receipt label; defaults to step N."},
+          "command": {"type": "string", "description": "Shell command line to execute."},
+          "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and literal arguments to run directly."},
+          "stdin": {"type": "string", "description": "Written to this step's standard input."},
+          "cwd": {"type": "string", "description": "Working directory override for this step."},
+          "timeout_seconds": {"type": "integer", "description": "Timeout override for this step."}
+        }
+      }
+    },
+    "stop_on_failure": {"type": "boolean", "description": "Stop after the first non-zero, timed out, cancelled, or unstartable step (default true)."},
     "stdin": {"type": "string", "description": "Written to the command's standard input. Omit for no stdin."},
     "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
     "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default %d; no maximum)."}
@@ -51,10 +72,28 @@ const runCommandBackgroundSchemaFmt = `{
       "minItems": 1,
       "description": "Program and arguments to run directly without a shell. Must be a JSON array of strings, e.g. [\"go\",\"test\",\"./...\"], not a shell string or JSON-encoded array. argv[0] is resolved via PATH; remaining items are passed literally."
     },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "description": "Ordered foreground commands to run serially. Mutually exclusive with top-level command/argv/stdin and background:true.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string", "description": "Concise receipt label; defaults to step N."},
+          "command": {"type": "string", "description": "Shell command line to execute."},
+          "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and literal arguments to run directly."},
+          "stdin": {"type": "string", "description": "Written to this step's standard input."},
+          "cwd": {"type": "string", "description": "Working directory override for this step."},
+          "timeout_seconds": {"type": "integer", "description": "Timeout override for this step."}
+        }
+      }
+    },
+    "stop_on_failure": {"type": "boolean", "description": "Stop after the first non-zero, timed out, cancelled, or unstartable step (default true)."},
     "stdin": {"type": "string", "description": "Written to the command's standard input. Omit for no stdin."},
     "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
     "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default %d for background; no maximum)."},
-    "background": {"type": "boolean", "description": "When true, start the command as a process-local background job and return a job id immediately. Use background_jobs to inspect or cancel it."}
+    "background": {"type": "boolean", "description": "When true, start the command as a process-local background job and return a job id immediately. If later work depends on completion, call background_jobs action=wait once; do not poll get/list."}
   }
 }`
 
@@ -67,7 +106,7 @@ type runCommand struct {
 func (runCommand) Name() string { return "run_command" }
 
 func (runCommand) Description() string {
-	return "Run command through a shell or argv directly. Input is an object; set exactly one of command or argv, and make argv an array of strings, not a string. Returns combined output/exit code; background returns a job id."
+	return "Run one command or ordered steps. Each uses shell command or argv as an array of strings; steps stop on failure and return compact receipts while archiving verbose output. Background supports one command."
 }
 
 func (t runCommand) Schema() json.RawMessage {
@@ -98,37 +137,56 @@ func hasBackgroundFlag(input json.RawMessage) bool {
 }
 
 type runCommandArgs struct {
+	Command        string           `json:"command"`
+	Argv           []string         `json:"argv"`
+	Steps          []runCommandStep `json:"steps"`
+	StopOnFailure  *bool            `json:"stop_on_failure"`
+	Stdin          string           `json:"stdin"`
+	Cwd            string           `json:"cwd"`
+	TimeoutSeconds int              `json:"timeout_seconds"`
+	Background     bool             `json:"background"`
+}
+
+type runCommandStep struct {
+	Name           string   `json:"name"`
 	Command        string   `json:"command"`
 	Argv           []string `json:"argv"`
 	Stdin          string   `json:"stdin"`
 	Cwd            string   `json:"cwd"`
 	TimeoutSeconds int      `json:"timeout_seconds"`
-	Background     bool     `json:"background"`
 }
 
 func (t runCommand) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	result, err := t.RunResult(ctx, input)
+	return result.Text, err
+}
+
+func (t runCommand) RunResult(ctx context.Context, input json.RawMessage) (RunResult, error) {
 	var args runCommandArgs
 	if err := json.Unmarshal(input, &args); err != nil {
-		return "", err
+		return RunResult{}, err
 	}
 	if err := validateRunCommandArgs(args); err != nil {
-		return "", err
+		return RunResult{}, err
 	}
 	if args.TimeoutSeconds < 0 {
-		return "", badArgs("timeout_seconds must be >= 0")
+		return RunResult{}, badArgs("timeout_seconds must be >= 0")
 	}
 	if err := validateCwd(args.Cwd); err != nil {
-		return "", err
+		return RunResult{}, err
 	}
 	if !args.Background && args.TimeoutSeconds == 0 && t.foregroundTimeout > 0 {
 		args.TimeoutSeconds = t.foregroundTimeout
 	}
+	if len(args.Steps) > 0 {
+		return runCommandSteps(ctx, args)
+	}
 	if args.Background {
 		if err := ctx.Err(); err != nil {
-			return "", err
+			return RunResult{}, err
 		}
 		if t.background == nil {
-			return "", fmt.Errorf("background manager is not initialized")
+			return RunResult{}, fmt.Errorf("background manager is not initialized")
 		}
 		if args.TimeoutSeconds == 0 {
 			if t.backgroundTimeout > 0 {
@@ -146,12 +204,13 @@ func (t runCommand) Run(ctx context.Context, input json.RawMessage) (string, err
 			},
 		})
 		if err != nil {
-			return "", err
+			return RunResult{}, err
 		}
-		return fmt.Sprintf("background job %s started", info.ID), nil
+		return RunResult{Text: fmt.Sprintf("background job %s started", info.ID)}, nil
 	}
 
-	return runCommandArgsCommand(ctx, args)
+	out, err := runCommandArgsCommand(ctx, args)
+	return RunResult{Text: out}, err
 }
 
 // SelfTimeout reports run_command's own per-call deadline so its documented
@@ -166,6 +225,31 @@ func (t runCommand) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
 	if args.Background || args.TimeoutSeconds < 0 {
 		return 0, false
 	}
+	if len(args.Steps) > 0 {
+		defaultTimeout := args.TimeoutSeconds
+		if defaultTimeout == 0 {
+			defaultTimeout = runCommandDefaultTimeout
+			if t.foregroundTimeout > 0 {
+				defaultTimeout = t.foregroundTimeout
+			}
+		}
+		var total time.Duration
+		for _, step := range args.Steps {
+			if step.TimeoutSeconds < 0 {
+				return 0, false
+			}
+			seconds := step.TimeoutSeconds
+			if seconds == 0 {
+				seconds = defaultTimeout
+			}
+			duration := time.Duration(seconds) * processTimeoutUnit
+			if duration < 0 || total > time.Duration(1<<63-1)-duration {
+				return time.Duration(1<<63 - 1), true
+			}
+			total += duration
+		}
+		return total, len(args.Steps) > 0
+	}
 	timeout := resolveProcessTimeoutSeconds(args.TimeoutSeconds)
 	if timeout == runCommandDefaultTimeout && t.foregroundTimeout > 0 {
 		timeout = t.foregroundTimeout
@@ -176,16 +260,45 @@ func (t runCommand) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
 func validateRunCommandArgs(args runCommandArgs) error {
 	hasCommand := strings.TrimSpace(args.Command) != ""
 	hasArgv := len(args.Argv) > 0
+	hasSteps := len(args.Steps) > 0
 	switch {
+	case hasSteps && (hasCommand || hasArgv):
+		return badArgs("provide steps or a top-level command/argv, not both")
+	case hasSteps && args.Stdin != "":
+		return badArgs("top-level stdin is unavailable with steps; set stdin on a step")
+	case hasSteps && args.Background:
+		return badArgs("steps cannot run in the background")
+	case len(args.Steps) > runCommandMaxSteps:
+		return badArgs("steps must contain at most %d items", runCommandMaxSteps)
 	case hasCommand && hasArgv:
 		return badArgs("provide command or argv, not both")
-	case !hasCommand && !hasArgv:
-		return badArgs("command or argv is required")
+	case !hasCommand && !hasArgv && !hasSteps:
+		return badArgs("command, argv, or steps is required")
 	case hasArgv && strings.TrimSpace(args.Argv[0]) == "":
 		return badArgs("argv[0] is required")
-	default:
-		return nil
 	}
+	for i, step := range args.Steps {
+		stepArgs := runCommandArgs{
+			Command:        step.Command,
+			Argv:           step.Argv,
+			Stdin:          step.Stdin,
+			Cwd:            step.Cwd,
+			TimeoutSeconds: step.TimeoutSeconds,
+		}
+		if strings.TrimSpace(step.Name) == "" {
+			step.Name = fmt.Sprintf("step %d", i+1)
+		}
+		if err := validateRunCommandArgs(stepArgs); err != nil {
+			return badArgs("steps[%d]: %v", i, err)
+		}
+		if step.TimeoutSeconds < 0 {
+			return badArgs("steps[%d].timeout_seconds must be >= 0", i)
+		}
+		if err := validateCwd(step.Cwd); err != nil {
+			return badArgs("steps[%d].cwd: %v", i, err)
+		}
+	}
+	return nil
 }
 
 func runCommandDescription(args runCommandArgs) string {
@@ -196,31 +309,135 @@ func runCommandDescription(args runCommandArgs) string {
 }
 
 func runCommandArgsCommand(ctx context.Context, args runCommandArgs) (string, error) {
-	if len(args.Argv) == 0 {
-		return runShellCommand(ctx, args)
+	result, err := runCommandArgsProcess(ctx, args)
+	if err != nil {
+		return "", err
 	}
-	programArgs := programArgs{
-		Args:           append([]string(nil), args.Argv[1:]...),
-		Stdin:          args.Stdin,
-		Cwd:            args.Cwd,
-		TimeoutSeconds: args.TimeoutSeconds,
-	}
-	return runProgram(ctx, args.Argv[0], programArgs, args.Argv[0], false)
+	return formatProcessResult(result), nil
 }
 
-func runShellCommand(ctx context.Context, args runCommandArgs) (string, error) {
-	cmd := shellCommand(args.Command)
+func runCommandArgsProcess(ctx context.Context, args runCommandArgs) (processResult, error) {
+	if len(args.Argv) == 0 {
+		cmd := shellCommand(args.Command)
+		cmd.Dir = args.Cwd
+		cmd.Env = shellEnv()
+		if args.Stdin != "" {
+			cmd.Stdin = strings.NewReader(args.Stdin)
+		}
+		result, err := runProcessDetailed(ctx, cmd, args.TimeoutSeconds)
+		if err != nil {
+			return processResult{}, fmt.Errorf("failed to start shell: %w", err)
+		}
+		return result, nil
+	}
+	cmd := exec.Command(args.Argv[0], args.Argv[1:]...) // nosemgrep: dangerous-exec-command
 	cmd.Dir = args.Cwd
-	cmd.Env = shellEnv()
 	if args.Stdin != "" {
 		cmd.Stdin = strings.NewReader(args.Stdin)
 	}
-
-	out, err := runProcess(ctx, cmd, args.TimeoutSeconds)
+	result, err := runProcessDetailed(ctx, cmd, args.TimeoutSeconds)
 	if err != nil {
-		return "", fmt.Errorf("failed to start shell: %w", err)
+		return processResult{}, fmt.Errorf("%s: %w", args.Argv[0], err)
 	}
-	return out, nil
+	return result, nil
+}
+
+func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error) {
+	stopOnFailure := args.StopOnFailure == nil || *args.StopOnFailure
+	var receipt strings.Builder
+	var transcript strings.Builder
+	suppressed := false
+	for i, step := range args.Steps {
+		name := strings.TrimSpace(step.Name)
+		if name == "" {
+			name = fmt.Sprintf("step %d", i+1)
+		}
+		resolved := runCommandArgs{
+			Command:        step.Command,
+			Argv:           append([]string(nil), step.Argv...),
+			Stdin:          step.Stdin,
+			Cwd:            step.Cwd,
+			TimeoutSeconds: step.TimeoutSeconds,
+		}
+		if resolved.Cwd == "" {
+			resolved.Cwd = args.Cwd
+		}
+		if resolved.TimeoutSeconds == 0 {
+			resolved.TimeoutSeconds = args.TimeoutSeconds
+		}
+		started := time.Now()
+		result, err := runCommandArgsProcess(ctx, resolved)
+		elapsed := conciseDuration(time.Since(started))
+
+		if transcript.Len() > 0 {
+			transcript.WriteString("\n\n")
+		}
+		fmt.Fprintf(&transcript, "==> %s <==\n$ %s\n", name, runCommandDescription(resolved))
+		if err != nil {
+			fmt.Fprintf(&transcript, "failed to start: %v", err)
+			fmt.Fprintf(&receipt, "FAIL %s (%s; failed to start: %v)\n", name, elapsed, err)
+			if stopOnFailure {
+				writeSkippedReceipt(&receipt, len(args.Steps)-i-1)
+				break
+			}
+			continue
+		}
+		full := formatProcessResult(result)
+		transcript.WriteString(full)
+		if result.success() {
+			fmt.Fprintf(&receipt, "PASS %s (%s)\n", name, elapsed)
+			if strings.TrimSpace(result.Output) != "" {
+				suppressed = true
+			}
+			continue
+		}
+
+		fmt.Fprintf(&receipt, "FAIL %s (%s; %s)\n", name, elapsed, result.receiptStatus())
+		if strings.TrimSpace(result.Output) != "" {
+			excerpt, clipped := clipCommandOutput(result.Output, runCommandFailureOutputBytes)
+			receipt.WriteString("output:\n")
+			receipt.WriteString(strings.TrimRight(excerpt, "\n"))
+			receipt.WriteByte('\n')
+			if clipped {
+				receipt.WriteString("[failure output clipped; inspect the archived full transcript]\n")
+				suppressed = true
+			}
+		}
+		if stopOnFailure {
+			writeSkippedReceipt(&receipt, len(args.Steps)-i-1)
+			break
+		}
+	}
+	text := strings.TrimRight(receipt.String(), "\n")
+	original := ""
+	if suppressed {
+		original = strings.TrimRight(transcript.String(), "\n")
+	}
+	return RunResult{Text: text, OriginalText: original}, nil
+}
+
+func writeSkippedReceipt(b *strings.Builder, count int) {
+	if count > 0 {
+		fmt.Fprintf(b, "SKIP %d remaining step(s)\n", count)
+	}
+}
+
+func conciseDuration(d time.Duration) string {
+	if d < time.Millisecond {
+		return "0s"
+	}
+	return d.Round(time.Millisecond).String()
+}
+
+func clipCommandOutput(out string, limit int) (string, bool) {
+	if len(out) <= limit {
+		return out, false
+	}
+	clipped := out[:limit]
+	for !utf8.ValidString(clipped) {
+		clipped = clipped[:len(clipped)-1]
+	}
+	return clipped, true
 }
 
 type programArgs struct {
@@ -305,7 +522,46 @@ func validateCwd(cwd string) error {
 // the kill goroutine, and output formatting. A non-nil error means the process
 // failed to start or its output could not be captured; callers wrap it with
 // tool-specific context.
+type processStatus uint8
+
+const (
+	processExited processStatus = iota
+	processTimedOut
+	processCancelled
+)
+
+type processResult struct {
+	Output         string
+	ExitCode       int
+	Status         processStatus
+	TimeoutSeconds int
+	WaitComplete   bool
+}
+
+func (r processResult) success() bool {
+	return r.Status == processExited && r.ExitCode == 0
+}
+
+func (r processResult) receiptStatus() string {
+	switch r.Status {
+	case processTimedOut:
+		return fmt.Sprintf("timed out after %ds", r.TimeoutSeconds)
+	case processCancelled:
+		return "cancelled"
+	default:
+		return fmt.Sprintf("exit %d", r.ExitCode)
+	}
+}
+
 func runProcess(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int) (string, error) {
+	result, err := runProcessDetailed(ctx, cmd, timeoutSeconds)
+	if err != nil {
+		return "", err
+	}
+	return formatProcessResult(result), nil
+}
+
+func runProcessDetailed(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int) (processResult, error) {
 	timeout := resolveProcessTimeoutSeconds(timeoutSeconds)
 
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*processTimeoutUnit)
@@ -315,7 +571,7 @@ func runProcess(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int) (string,
 
 	outFile, err := os.CreateTemp("", "harness-tool-output-*")
 	if err != nil {
-		return "", err
+		return processResult{}, err
 	}
 	defer os.Remove(outFile.Name())
 	defer outFile.Close()
@@ -323,7 +579,7 @@ func runProcess(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int) (string,
 	cmd.Stderr = outFile
 
 	if err := cmd.Start(); err != nil {
-		return "", err
+		return processResult{}, err
 	}
 
 	waitDone := make(chan error, 1)
@@ -350,16 +606,27 @@ func runProcess(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int) (string,
 
 	out, err := readProcessOutput(outFile.Name())
 	if err != nil {
-		return "", err
+		return processResult{}, err
 	}
 
 	if errors.Is(ctxErr, context.DeadlineExceeded) {
-		return out + timeoutStatusLine("timed out", fmt.Sprintf("after %ds", timeout), waitComplete), nil
+		return processResult{Output: out, ExitCode: -1, Status: processTimedOut, TimeoutSeconds: timeout, WaitComplete: waitComplete}, nil
 	} else if errors.Is(ctxErr, context.Canceled) {
-		return out + timeoutStatusLine("cancelled", "", waitComplete), nil
+		return processResult{Output: out, ExitCode: -1, Status: processCancelled, TimeoutSeconds: timeout, WaitComplete: waitComplete}, nil
 	}
 
-	return out + fmt.Sprintf("[exit code: %d]", exitCode(waitErr)), nil
+	return processResult{Output: out, ExitCode: exitCode(waitErr), Status: processExited, TimeoutSeconds: timeout, WaitComplete: true}, nil
+}
+
+func formatProcessResult(result processResult) string {
+	switch result.Status {
+	case processTimedOut:
+		return result.Output + timeoutStatusLine("timed out", fmt.Sprintf("after %ds", result.TimeoutSeconds), result.WaitComplete)
+	case processCancelled:
+		return result.Output + timeoutStatusLine("cancelled", "", result.WaitComplete)
+	default:
+		return result.Output + fmt.Sprintf("[exit code: %d]", result.ExitCode)
+	}
 }
 
 func readProcessOutput(path string) (string, error) {
