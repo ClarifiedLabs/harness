@@ -114,11 +114,12 @@ type StreamEnvelope struct {
 }
 
 type Error struct {
-	StatusCode   int    `json:"status_code,omitempty"`
-	Code         string `json:"code,omitempty"`
-	Message      string `json:"message,omitempty"`
-	Retryable    bool   `json:"retryable,omitempty"`
-	RetryAfterMS int64  `json:"retry_after_ms,omitempty"`
+	StatusCode   int                     `json:"status_code,omitempty"`
+	Code         string                  `json:"code,omitempty"`
+	Message      string                  `json:"message,omitempty"`
+	Retryable    bool                    `json:"retryable,omitempty"`
+	RetryAfterMS int64                   `json:"retry_after_ms,omitempty"`
+	Diagnostic   *llm.APIErrorDiagnostic `json:"diagnostic,omitempty"`
 }
 
 func ErrorFrom(err error) *Error {
@@ -133,6 +134,7 @@ func ErrorFrom(err error) *Error {
 			Message:      apiErr.Message,
 			Retryable:    apiErr.Retryable,
 			RetryAfterMS: apiErr.RetryAfter.Milliseconds(),
+			Diagnostic:   apiErr.Diagnostic,
 		}
 	}
 	return &Error{Message: err.Error(), Retryable: true}
@@ -148,5 +150,6 @@ func (e *Error) APIError() *llm.APIError {
 		Message:    e.Message,
 		Retryable:  e.Retryable,
 		RetryAfter: time.Duration(e.RetryAfterMS) * time.Millisecond,
+		Diagnostic: e.Diagnostic,
 	}
 }

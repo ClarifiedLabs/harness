@@ -19,6 +19,7 @@ import (
 
 	"harness/internal/diff"
 	"harness/internal/hooks"
+	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/llm/tokencount"
 	"harness/internal/retry"
@@ -55,6 +56,27 @@ type EventSink interface {
 // before the corresponding assistant text is rendered.
 type AssistantPhaseSink interface {
 	AssistantPhase(phase string)
+}
+
+// ModelErrorDiagnostic is the safe structured record emitted for a final model
+// failure carrying a proxy compatibility classification. Message and Code have
+// already been sanitized by the proxy; Diagnostic contains only correlation and
+// bounded request-shape metadata.
+type ModelErrorDiagnostic struct {
+	Prompt     int
+	Turn       int
+	Attempt    int
+	StatusCode int
+	Code       string
+	Message    string
+	Diagnostic *llm.APIErrorDiagnostic
+}
+
+// ModelErrorDiagnosticSink is optionally implemented by event sinks that want a
+// durable structured record in addition to the ordinary user-facing notice. It
+// deliberately does not expand EventSink, so non-UI sinks remain compatible.
+type ModelErrorDiagnosticSink interface {
+	ModelErrorDiagnostic(ModelErrorDiagnostic)
 }
 
 // CompactionProgressSink is implemented by sinks that want transient progress
@@ -661,6 +683,9 @@ func (a *Agent) PrewarmFunc() (func(context.Context) llm.Usage, bool) {
 	provider := a.provider
 	return func(ctx context.Context) llm.Usage {
 		var usage llm.Usage
+		if err := validateRequestImageContent(req.Messages); err != nil {
+			return usage
+		}
 		for event, err := range provider.Stream(ctx, req) {
 			if err != nil {
 				// Best-effort: a failed warm-up just means the first real request
@@ -829,6 +854,9 @@ func (a *Agent) countModelRequestInput(ctx context.Context, mr modelRequest) mod
 }
 
 func (a *Agent) countInputTokens(ctx context.Context, req llm.Request) (int, bool) {
+	if err := validateRequestImageContent(req.Messages); err != nil {
+		return 0, false
+	}
 	if counter, ok := a.provider.(llm.InputTokenCounter); ok {
 		count, err := counter.CountInputTokens(ctx, req)
 		if err == nil && count.InputTokens > 0 {
@@ -908,6 +936,23 @@ func (a *Agent) validateTranscript(phase string) error {
 	return nil
 }
 
+func validateRequestImageContent(messages []llm.Message) error {
+	if _, err := inputimage.ValidateMessages(messages); err != nil {
+		return err
+	}
+	if err := llm.ValidateMessageContent(messages); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (a *Agent) validateRetainedTranscript(phase string) error {
+	if err := validateRequestImageContent(a.transcript); err != nil {
+		return fmt.Errorf("agent transcript invalid %s: %w", phase, err)
+	}
+	return a.validateTranscript(phase)
+}
+
 // RunPrompt appends the user message, then loops over turns until the model
 // stops requesting tools or the prompt's turn budget is hit (design §8.1). Cancellation
 // mid-stream applies the §4 cancel repair and returns ctx.Err(); the transcript
@@ -927,9 +972,11 @@ func (a *Agent) RunPromptContent(ctx context.Context, userText string, images []
 // into the transcript.
 func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string, images []llm.ContentBlock, extraContext []string, promptID int, sink EventSink) error {
 	a.compactFallbackNotice = compactFallbackNoticeState{}
+	promptIndex := len(a.transcript)
 	promptMessage := a.userMessage(userText, images)
 	promptMessage.Origin = llm.MessageOriginPrompt
 	a.transcript = append(a.transcript, promptMessage)
+	initialPromptPending := true
 
 	var total llm.Usage
 	var maintenanceTotal llm.Usage
@@ -948,7 +995,20 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		// Live-transcript retention (design §12, r9+r20): shrink stale large
 		// tool outputs and aged images before building the request, so they are
 		// not re-sent verbatim every turn. Pure local edit, invariant-preserving.
-		a.applyRetention(sink)
+		if a.applyRetention(sink) {
+			a.resetResponseState()
+		}
+		if err := a.validateRetainedTranscript("before model request"); err != nil {
+			if initialPromptPending && promptIndex < len(a.transcript) {
+				a.transcript = a.transcript[:promptIndex]
+				if a.validatedPrefix > len(a.transcript) {
+					a.validatedPrefix = len(a.transcript)
+				}
+			}
+			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
+			return err
+		}
+		initialPromptPending = false
 		requestContext := a.requestContext(appendPromptContext(extraContext, steerContext), sink)
 		modelReq := a.modelRequest(requestContext)
 		lastContext = modelReq.estimate
@@ -978,7 +1038,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 				lastContext = modelReq.estimate
 			}
 		}
-		if err := a.validateTranscript("before model request"); err != nil {
+		if err := a.validateRetainedTranscript("before model request"); err != nil {
 			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
@@ -995,11 +1055,15 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 				lastInput = 0
 				appendBoundary = 0
 				requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
+				if err := a.validateRetainedTranscript("after input-count compaction"); err != nil {
+					sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
+					return err
+				}
 				modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 				lastContext = modelReq.estimate
 			}
 		}
-		if err := a.validateTranscript("before model request"); err != nil {
+		if err := a.validateRetainedTranscript("before model request"); err != nil {
 			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
@@ -1028,14 +1092,22 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 					maintenanceTotal = add(maintenanceTotal, compUsage)
 					reportMaintenance(sink, "compaction", compUsage)
 				}
-				if cerr == nil && changed {
-					lastInput = 0
-					appendBoundary = 0
+				if cerr != nil {
+					err = cerr
+				} else {
+					if changed {
+						lastInput = 0
+						appendBoundary = 0
+					}
+					if verr := a.validateRetainedTranscript("after context-overflow compaction"); verr != nil {
+						err = verr
+					} else {
+						requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
+						modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
+						lastContext = modelReq.estimate
+						res, wasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
+					}
 				}
-				requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
-				modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
-				lastContext = modelReq.estimate
-				res, wasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
 			}
 		}
 		if err != nil && modelReq.request.StoreResponse && !res.hasPartialOutput() && storeResponseRejected(err) {
@@ -1062,6 +1134,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		lastInput = res.usage.InputTokens + res.usage.CacheReadTokens + res.usage.CacheWriteTokens
 
 		if err != nil {
+			emitModelErrorDiagnostic(sink, err, promptID, turns+1, res.attempts)
 			a.resetResponseState()
 			// Cancellation repair: keep streamed partial text as a text-only
 			// assistant message; drop the message entirely if nothing streamed.
@@ -1192,6 +1265,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		// to make. It falls through to the usual budget checks so a configured
 		// ceiling still bounds the turn.
 		if steered := a.drainSteer(); !steerInputEmpty(steered) {
+			steerIndex := len(a.transcript)
 			steerMessage := a.userMessage(steered.Text, steered.Images)
 			steerMessage.Origin = llm.MessageOriginSteer
 			a.transcript = append(a.transcript, steerMessage)
@@ -1201,7 +1275,11 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			guard.repeatSteered = false
 			guard.errorRuns = 0
 			guard.errorSteered = false
-			if err := a.validateTranscript("after in-prompt steer"); err != nil {
+			if err := a.validateRetainedTranscript("after in-prompt steer"); err != nil {
+				a.transcript = a.transcript[:steerIndex]
+				if a.validatedPrefix > len(a.transcript) {
+					a.validatedPrefix = len(a.transcript)
+				}
 				sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 				return err
 			}
@@ -1323,6 +1401,64 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 	return nil
 }
 
+func emitModelErrorDiagnostic(sink EventSink, err error, prompt, turn, attempt int) {
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) || apiErr.Diagnostic == nil || apiErr.Diagnostic.Compatibility == nil {
+		return
+	}
+	diagnostic := ModelErrorDiagnostic{
+		Prompt:     prompt,
+		Turn:       turn,
+		Attempt:    attempt,
+		StatusCode: apiErr.StatusCode,
+		Code:       apiErr.Code,
+		Message:    apiErr.Message,
+		Diagnostic: cloneAPIErrorDiagnostic(apiErr.Diagnostic),
+	}
+	sink.Notice(modelCompatibilityNotice(diagnostic.Diagnostic))
+	if diagnosticSink, ok := sink.(ModelErrorDiagnosticSink); ok {
+		diagnosticSink.ModelErrorDiagnostic(diagnostic)
+	}
+}
+
+func modelCompatibilityNotice(diagnostic *llm.APIErrorDiagnostic) string {
+	compatibility := diagnostic.Compatibility
+	target := strings.TrimSpace(diagnostic.TargetID)
+	if target == "" {
+		target = "selected target"
+	}
+	message := fmt.Sprintf("[model compatibility: target %s rejected %s", target, compatibility.Category)
+	if remediation := strings.TrimSpace(compatibility.Remediation); remediation != "" {
+		message += "; " + remediation
+	}
+	if diagnostic.ProxyRequestID != 0 {
+		message += fmt.Sprintf("; proxy request %d", diagnostic.ProxyRequestID)
+	}
+	if diagnostic.TraceID != "" {
+		message += "; trace " + diagnostic.TraceID
+	}
+	return message + "]"
+}
+
+func cloneAPIErrorDiagnostic(in *llm.APIErrorDiagnostic) *llm.APIErrorDiagnostic {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Compatibility != nil {
+		compatibility := *in.Compatibility
+		out.Compatibility = &compatibility
+	}
+	if in.MultimodalShape != nil {
+		shape := *in.MultimodalShape
+		shape.MIMETypes = append([]string(nil), shape.MIMETypes...)
+		shape.Details = append([]string(nil), shape.Details...)
+		shape.Dimensions = append([]llm.ImageDimension(nil), shape.Dimensions...)
+		out.MultimodalShape = &shape
+	}
+	return &out
+}
+
 func reportMaintenance(sink EventSink, purpose string, usage llm.Usage) {
 	// A pressured transcript can be rewritten entirely through the local
 	// degradation path when there is no older completed turn to summarize.
@@ -1371,12 +1507,18 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, request
 func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptID, turnID int, sink EventSink) ([]llm.ContentBlock, []llm.ParallelToolBatch, llm.Usage) {
 	blocks := make([]llm.ContentBlock, len(calls))
 	var parallelBatches []llm.ParallelToolBatch
+	richEncodedBytes, err := inputimage.ValidateMessages(a.transcript)
+	if err != nil {
+		// The full retained gate normally makes this unreachable. Treat an
+		// invalid baseline as exhausted so no additional rich content is accepted.
+		richEncodedBytes = inputimage.MaxTotalEncodedBytes
+	}
 	var total llm.Usage
 
 	toolHooksActive := a.hooks != nil && (a.hooks.HasEvent(hooks.PreToolUse) || a.hooks.HasEvent(hooks.PostToolUse))
 	for i := 0; i < len(calls); {
 		if toolHooksActive || !a.tools.CallReadOnly(calls[i]) {
-			block, usage := a.dispatchSequentialCall(ctx, calls[i], promptID, turnID, sink)
+			block, usage := a.dispatchSequentialCall(ctx, calls[i], promptID, turnID, sink, &richEncodedBytes)
 			blocks[i] = block
 			total = add(total, usage)
 			i++
@@ -1388,7 +1530,7 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 			i++
 		}
 		if i-start == 1 {
-			block, usage := a.dispatchSequentialCall(ctx, calls[start], promptID, turnID, sink)
+			block, usage := a.dispatchSequentialCall(ctx, calls[start], promptID, turnID, sink, &richEncodedBytes)
 			blocks[start] = block
 			total = add(total, usage)
 			continue
@@ -1401,22 +1543,23 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 		}
 		parallelBatches = append(parallelBatches, batch)
 
-		usage := a.dispatchReadOnlyBatch(ctx, batchCalls, blocks[start:i], sink)
+		usage := a.dispatchReadOnlyBatch(ctx, batchCalls, blocks[start:i], sink, &richEncodedBytes)
 		total = add(total, usage)
 	}
 	return blocks, parallelBatches, total
 }
 
-func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink) (llm.ContentBlock, llm.Usage) {
+func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink, richEncodedBytes *int) (llm.ContentBlock, llm.Usage) {
 	sink.ToolStart(call)
 	diffState := a.snapshotToolDiff(call)
 	r := a.dispatchOne(ctx, call, promptID, turnID, sink)
+	r = acceptRichResult(r, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
 	block, usage := a.finishToolResult(r, sink)
 	a.emitToolDiff(call, diffState, sink)
 	return block, usage
 }
 
-func (a *Agent) dispatchReadOnlyBatch(ctx context.Context, calls []llm.ToolCall, blocks []llm.ContentBlock, sink EventSink) llm.Usage {
+func (a *Agent) dispatchReadOnlyBatch(ctx context.Context, calls []llm.ToolCall, blocks []llm.ContentBlock, sink EventSink, richEncodedBytes *int) llm.Usage {
 	for _, call := range calls {
 		sink.ToolStart(call)
 	}
@@ -1430,13 +1573,14 @@ func (a *Agent) dispatchReadOnlyBatch(ctx context.Context, calls []llm.ToolCall,
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[i] = a.tools.Dispatch(ctx, call)
+			results[i] = a.dispatchTool(ctx, call)
 		}()
 	}
 	wg.Wait()
 
 	var total llm.Usage
 	for i, r := range results {
+		r = acceptRichResult(r, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
 		block, usage := a.finishToolResult(r, sink)
 		blocks[i] = block
 		total = add(total, usage)
@@ -1444,10 +1588,84 @@ func (a *Agent) dispatchReadOnlyBatch(ctx context.Context, calls []llm.ToolCall,
 	return total
 }
 
+func safeToolResultForSink(r llm.ToolResult) llm.ToolResult {
+	if len(r.Content) == 0 {
+		return r
+	}
+	r.Content = append([]llm.ContentBlock(nil), r.Content...)
+	for i := range r.Content {
+		if r.Content[i].ImageEncodedBytes == 0 {
+			r.Content[i].ImageEncodedBytes = len(r.Content[i].ImageData)
+		}
+		if r.Content[i].ImageBytes == 0 {
+			r.Content[i].ImageBytes = decodedImageSize(r.Content[i].ImageData)
+		}
+		r.Content[i].ImageData = ""
+	}
+	return r
+}
+
+func decodedImageSize(data string) int {
+	n := len(data) * 3 / 4
+	if strings.HasSuffix(data, "==") {
+		n -= 2
+	} else if strings.HasSuffix(data, "=") {
+		n--
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+func (a *Agent) dispatchTool(ctx context.Context, call llm.ToolCall) llm.ToolResult {
+	if modality, ok := a.tools.RequiredModality(call); ok && !a.registry.SupportsInputModality(a.model, modality) {
+		return llm.ToolResult{
+			ForID:   call.ID,
+			Text:    fmt.Sprintf("tool %q requires %s input, but the current model does not advertise %s support", call.Name, modality, modality),
+			IsError: true,
+		}
+	}
+	return a.tools.Dispatch(ctx, call)
+}
+
+func acceptRichResult(r llm.ToolResult, encodedTotal *int, imageSupported bool) llm.ToolResult {
+	if len(r.Content) == 0 {
+		return r
+	}
+	if r.IsError {
+		r.Content = nil
+		return r
+	}
+	if !imageSupported {
+		r.Text = "tool result includes images, but the current model does not advertise image support"
+		r.Content = nil
+		r.IsError = true
+		r.Truncated = false
+		r.OriginalText = ""
+		r.OriginalBytes = 0
+		r.ShownBytes = 0
+		return r
+	}
+	nextTotal, err := inputimage.ValidateBlocks(r.Content, *encodedTotal)
+	if err != nil {
+		r.Text = "tool result images rejected: " + err.Error()
+		r.Content = nil
+		r.IsError = true
+		r.Truncated = false
+		r.OriginalText = ""
+		r.OriginalBytes = 0
+		r.ShownBytes = 0
+		return r
+	}
+	*encodedTotal = nextTotal
+	return r
+}
+
 func (a *Agent) finishToolResult(r llm.ToolResult, sink EventSink) (llm.ContentBlock, llm.Usage) {
 	var notice string
 	r, notice = a.prepareToolResult(r, sink)
-	sink.ToolResult(r)
+	sink.ToolResult(safeToolResultForSink(r))
 	if notice != "" {
 		sink.Notice(notice)
 	}
@@ -1528,7 +1746,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 		}
 	}
 
-	r := a.tools.Dispatch(ctx, call)
+	r := a.dispatchTool(ctx, call)
 	if len(preContext) > 0 {
 		appendHookContext(&r, preContext)
 	}
@@ -1553,6 +1771,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 				reason = "blocked by PostToolUse hook"
 			}
 			r.Text = reason
+			r.Content = nil
 			r.IsError = true
 		}
 	}
@@ -1605,10 +1824,11 @@ func (a *Agent) prepareToolResult(r llm.ToolResult, sink EventSink) (llm.ToolRes
 
 func resultBlock(r llm.ToolResult) llm.ContentBlock {
 	return llm.ContentBlock{
-		Kind:        llm.BlockToolResult,
-		ResultForID: r.ForID,
-		ResultText:  r.Text,
-		ResultError: r.IsError,
+		Kind:          llm.BlockToolResult,
+		ResultForID:   r.ForID,
+		ResultText:    r.Text,
+		ResultError:   r.IsError,
+		ResultContent: append([]llm.ContentBlock(nil), r.Content...),
 	}
 }
 
@@ -1704,6 +1924,9 @@ func toolResponsePayload(r llm.ToolResult) map[string]any {
 // failed attempts reported (paid for, so counted) — it never drives the
 // compaction trigger.
 func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink EventSink, turn int, estimate ContextEstimate) (res turnResult, wasted llm.Usage, err error) {
+	if err := validateRequestImageContent(req.Messages); err != nil {
+		return turnResult{}, llm.Usage{}, fmt.Errorf("validate model request images: %w", err)
+	}
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return turnResult{}, wasted, err
@@ -1894,7 +2117,7 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 			if summary := reasoningSummaryText(ev.Text); summary != "" {
 				sink.ReasoningSummary(summary)
 			}
-			if block, ok := reasoningBlock(ev); ok {
+			if block, ok := llm.PersistedReasoningBlock(ev); ok {
 				res.reasoning = append(res.reasoning, block)
 			}
 		case llm.EventAssistantPhase:
@@ -1938,26 +2161,6 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 
 func reasoningSummaryText(text string) string {
 	return strings.TrimSpace(text)
-}
-
-// reasoningBlock converts an EventReasoningSummary into a persistable reasoning
-// block. Three payloads must be replayed verbatim on the next turn for the API
-// to accept the transcript: signed thinking and redacted thinking (Anthropic),
-// and encrypted Responses reasoning items (stateless store=false mode). A plain
-// unsigned summary (the display digest) carries none of these and is not stored
-// — it only goes to the dedicated sink. Text is kept verbatim (not trimmed) so a
-// signed block replays exactly. ok is false when there is nothing to persist.
-func reasoningBlock(ev llm.StreamEvent) (llm.ContentBlock, bool) {
-	if ev.ReasoningEncrypted != "" {
-		return llm.ContentBlock{Kind: llm.BlockReasoning, ReasoningID: ev.ReasoningID, ReasoningEncrypted: ev.ReasoningEncrypted}, true
-	}
-	if ev.RedactedData != "" {
-		return llm.ContentBlock{Kind: llm.BlockRedactedThinking, RedactedData: ev.RedactedData}, true
-	}
-	if ev.Signature == "" {
-		return llm.ContentBlock{}, false
-	}
-	return llm.ContentBlock{Kind: llm.BlockThinking, Thinking: ev.Text, ThinkingSignature: ev.Signature}, true
 }
 
 // textMessage builds the single-text-block message shape shared by user prompts
@@ -2024,30 +2227,9 @@ func textMessageAt(at time.Time, role llm.Role, text string) llm.Message {
 // it justified), then the text block (if any), then tool_use blocks in emission
 // order (design §8.1).
 func (a *Agent) assistantMessage(res turnResult) llm.Message {
-	content := make([]llm.ContentBlock, 0, len(res.reasoning)+1+len(res.toolCalls))
-	content = append(content, res.reasoning...)
-	if res.text != "" {
-		content = append(content, llm.ContentBlock{Kind: llm.BlockText, Text: res.text})
-	}
-	for _, call := range res.toolCalls {
-		content = append(content, llm.ContentBlock{
-			Kind:      llm.BlockToolUse,
-			ToolUseID: call.ID,
-			ToolName:  call.Name,
-			ToolInput: call.Input,
-		})
-	}
-	return llm.Message{Role: llm.RoleAssistant, Time: a.now(), Phase: assistantPhase(res), Content: content}
-}
-
-func assistantPhase(res turnResult) string {
-	if res.phase != "" && llm.ValidAssistantPhase(res.phase) {
-		return res.phase
-	}
-	if res.stopReason == llm.StopToolUse {
-		return llm.AssistantPhaseCommentary
-	}
-	return llm.AssistantPhaseFinal
+	message := llm.BuildAssistantMessage(res.reasoning, res.text, res.toolCalls, res.phase, res.stopReason)
+	message.Time = a.now()
+	return message
 }
 
 // maxTurnsNotice is the exact guard message printed when the turn budget is

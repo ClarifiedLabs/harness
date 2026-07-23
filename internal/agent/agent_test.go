@@ -15,11 +15,14 @@ import (
 	"time"
 
 	"harness/internal/hooks"
+	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/sse"
 	"harness/internal/tools"
 )
+
+const agentOnePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
 
 // recordSink captures every sink callback so tests can assert what the UI would
 // have been told.
@@ -45,6 +48,15 @@ type recordSink struct {
 type turnAttemptEvent struct {
 	turn    int
 	attempt int
+}
+
+type diagnosticRecordSink struct {
+	recordSink
+	diagnostics []ModelErrorDiagnostic
+}
+
+func (s *diagnosticRecordSink) ModelErrorDiagnostic(diagnostic ModelErrorDiagnostic) {
+	s.diagnostics = append(s.diagnostics, diagnostic)
 }
 
 func (s *recordSink) TextDelta(t string) { s.text.WriteString(t) }
@@ -209,6 +221,21 @@ type meteredRecordTool struct {
 	usage llm.Usage
 }
 
+type richRecordTool struct {
+	*recordTool
+	result   tools.RichResult
+	modality string
+}
+
+func (t *richRecordTool) RunRich(ctx context.Context, input json.RawMessage) (tools.RichResult, error) {
+	if _, err := t.recordTool.Run(ctx, input); err != nil {
+		return tools.RichResult{}, err
+	}
+	return t.result, nil
+}
+
+func (t *richRecordTool) RequiredInputModality() string { return t.modality }
+
 func (t *meteredRecordTool) RunMetered(ctx context.Context, input json.RawMessage) (tools.MeteredResult, error) {
 	out, err := t.recordTool.Run(ctx, input)
 	return tools.MeteredResult{Text: out, Usage: t.usage}, err
@@ -291,6 +318,152 @@ func testHookRunner(t *testing.T, body string) *hooks.Runner {
 		t.Fatalf("DecodeEventMap: %v", err)
 	}
 	return &hooks.Runner{Config: cfg}
+}
+
+func TestRichToolResultCapabilityGateAndDynamicModelSwitch(t *testing.T) {
+	tool := &richRecordTool{
+		recordTool: &recordTool{name: "image_tool", readOnly: true, run: func(context.Context, json.RawMessage) (string, error) { return "legacy", nil }},
+		modality:   "image",
+		result: tools.RichResult{
+			Text:    "image attached: screen.png (image/png, 3 bytes, 1x1, detail=high)",
+			Content: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: agentOnePixelPNG, ImageDetail: "high", ImageName: "screen.png", ImageWidth: 1, ImageHeight: 1}},
+		},
+	}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+	models := llm.NewRegistry(map[string]llm.ModelInfo{
+		"text-model":   {InputModalities: []string{"text"}},
+		"vision-model": {InputModalities: []string{"text", "image"}},
+	})
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "call_1", "image_tool", `{}`)}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("unsupported handled")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "call_2", "image_tool", `{}`)}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("image handled")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, reg, Options{Model: "text-model", Registry: models})
+	sink := &recordSink{}
+	if err := a.RunPrompt(context.Background(), "first", sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(tool.inputs) != 0 {
+		t.Fatalf("capability gate performed tool I/O: inputs = %v", tool.inputs)
+	}
+	if len(sink.results) != 1 || !sink.results[0].IsError || len(sink.results[0].Content) != 0 || !strings.Contains(sink.results[0].Text, "does not advertise image support") {
+		t.Fatalf("unsupported result = %+v", sink.results)
+	}
+
+	a.SetModel("vision-model", 0)
+	if err := a.RunPrompt(context.Background(), "second", sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(tool.inputs) != 1 {
+		t.Fatalf("tool executions after model switch = %d, want 1", len(tool.inputs))
+	}
+	if len(sink.results) != 2 || sink.results[1].IsError || len(sink.results[1].Content) != 1 {
+		t.Fatalf("supported result = %+v", sink.results)
+	}
+	if sink.results[1].Content[0].ImageData != "" || sink.results[1].Content[0].ImageBytes != 69 {
+		t.Fatalf("sink result was not safely redacted: %+v", sink.results[1])
+	}
+	if len(fp.Requests) != 4 {
+		t.Fatalf("provider requests = %d, want 4", len(fp.Requests))
+	}
+	var rich *llm.ContentBlock
+	for i := range fp.Requests[3].Messages {
+		for j := range fp.Requests[3].Messages[i].Content {
+			block := &fp.Requests[3].Messages[i].Content[j]
+			if block.Kind == llm.BlockToolResult && block.ResultForID == "call_2" {
+				rich = block
+			}
+		}
+	}
+	if rich == nil || len(rich.ResultContent) != 1 || rich.ResultContent[0].ImageData != agentOnePixelPNG {
+		t.Fatalf("next request missing rich result: %s", dump(fp.Requests[3].Messages))
+	}
+	mustValid(t, a.Transcript())
+}
+
+func TestAcceptRichResultRejectsDynamicImagesForTextModel(t *testing.T) {
+	accepted := 0
+	result := llm.ToolResult{ForID: "mcp", Text: "attached", Content: []llm.ContentBlock{{Kind: llm.BlockImage, ImageData: "YWJj"}}}
+	got := acceptRichResult(result, &accepted, false)
+	if !got.IsError || len(got.Content) != 0 || !strings.Contains(got.Text, "does not advertise image support") {
+		t.Fatalf("acceptRichResult = %+v", got)
+	}
+}
+
+func TestAcceptRichResultEnforcesAggregateEncodedLimit(t *testing.T) {
+	payload := strings.Repeat("A", 11*1024*1024)
+	accepted := 2 * len(payload)
+	result := llm.ToolResult{ForID: "third", Text: "attached", Content: []llm.ContentBlock{{Kind: llm.BlockImage, ImageData: payload}}}
+	got := acceptRichResult(result, &accepted, true)
+	if !got.IsError || len(got.Content) != 0 || !strings.Contains(got.Text, "encoded total") {
+		t.Fatalf("acceptRichResult = %+v", got)
+	}
+	if accepted != 2*len(payload) {
+		t.Fatalf("accepted total changed after rejection: %d", accepted)
+	}
+}
+
+func TestAcceptRichResultsAccountInEmissionOrder(t *testing.T) {
+	total := inputimage.MaxTotalEncodedBytes - 1
+	first := llm.ToolResult{ForID: "first", Content: []llm.ContentBlock{{Kind: llm.BlockImage, ImageData: "A"}}}
+	second := llm.ToolResult{ForID: "second", Content: []llm.ContentBlock{{Kind: llm.BlockImage, ImageData: "B"}}}
+	if got := acceptRichResult(first, &total, true); got.IsError || total != inputimage.MaxTotalEncodedBytes {
+		t.Fatalf("first result = %+v, total=%d", got, total)
+	}
+	if got := acceptRichResult(second, &total, true); !got.IsError || len(got.Content) != 0 || total != inputimage.MaxTotalEncodedBytes {
+		t.Fatalf("second result = %+v, total=%d", got, total)
+	}
+}
+
+func TestDispatchCallsIncludesRetainedTranscriptInRichBudget(t *testing.T) {
+	tool := &richRecordTool{
+		recordTool: &recordTool{name: "image_tool", readOnly: true, run: func(context.Context, json.RawMessage) (string, error) {
+			return "legacy", nil
+		}},
+		modality: "image",
+		result: tools.RichResult{
+			Text: "attached",
+			Content: []llm.ContentBlock{{
+				Kind:           llm.BlockImage,
+				ImageMediaType: "image/png",
+				ImageData:      agentOnePixelPNG,
+			}},
+		},
+	}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+	models := llm.NewRegistry(map[string]llm.ModelInfo{
+		"vision-model": {InputModalities: []string{"text", "image"}},
+	})
+	a := newAgent(llmtest.New("fake"), reg, Options{Model: "vision-model", Registry: models})
+
+	part := inputimage.MaxEncodedBytes - 1
+	remainder := inputimage.MaxTotalEncodedBytes - 2*part - 50
+	a.SetTranscript([]llm.Message{{
+		Role: llm.RoleUser,
+		Content: []llm.ContentBlock{
+			{Kind: llm.BlockImage, ImageData: strings.Repeat("A", part)},
+			{Kind: llm.BlockImage, ImageData: strings.Repeat("B", part)},
+			{Kind: llm.BlockImage, ImageData: strings.Repeat("C", remainder)},
+		},
+	}})
+	sink := &recordSink{}
+	blocks, _, _ := a.dispatchCalls(
+		context.Background(),
+		[]llm.ToolCall{{ID: "call", Name: "image_tool", Input: json.RawMessage(`{}`)}},
+		1,
+		1,
+		sink,
+	)
+	if len(blocks) != 1 || !blocks[0].ResultError || len(blocks[0].ResultContent) != 0 || !strings.Contains(blocks[0].ResultText, "encoded total") {
+		t.Fatalf("tool result block = %+v", blocks)
+	}
+	if len(sink.results) != 1 || !sink.results[0].IsError || len(sink.results[0].Content) != 0 {
+		t.Fatalf("sink results = %+v", sink.results)
+	}
 }
 
 func TestTextOnlyTurn(t *testing.T) {
@@ -744,6 +917,29 @@ func TestPrewarmFuncPreservesUsageReportedBeforeFailure(t *testing.T) {
 	}
 }
 
+func TestPrewarmFuncSkipsInvalidRichTranscript(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	a := newAgent(fp, tools.Default(), Options{})
+	a.SetTranscript([]llm.Message{{
+		Role: llm.RoleUser,
+		Content: []llm.ContentBlock{{
+			Kind:           llm.BlockImage,
+			ImageMediaType: "image/png",
+			ImageData:      "not-base64",
+		}},
+	}})
+	warm, ok := a.PrewarmFunc()
+	if !ok {
+		t.Fatal("PrewarmFunc ok=false")
+	}
+	if usage := warm(context.Background()); usage != (llm.Usage{}) {
+		t.Fatalf("prewarm usage = %+v, want zero", usage)
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("provider requests = %d, want 0", len(fp.Requests))
+	}
+}
+
 func TestMaxTokensStopEmitsNotice(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("partial final")},
@@ -833,7 +1029,7 @@ func TestRunPromptContentAddsImagesBeforeText(t *testing.T) {
 	image := llm.ContentBlock{
 		Kind:           llm.BlockImage,
 		ImageMediaType: "image/png",
-		ImageData:      "abc123",
+		ImageData:      agentOnePixelPNG,
 		ImageDetail:    "high",
 		ImageName:      "screen.png",
 	}
@@ -847,7 +1043,7 @@ func TestRunPromptContentAddsImagesBeforeText(t *testing.T) {
 	if len(msgs[0].Content) != 2 {
 		t.Fatalf("user content = %d, want image + text", len(msgs[0].Content))
 	}
-	if msgs[0].Content[0].Kind != llm.BlockImage || msgs[0].Content[0].ImageData != "abc123" {
+	if msgs[0].Content[0].Kind != llm.BlockImage || msgs[0].Content[0].ImageData != agentOnePixelPNG {
 		t.Fatalf("first block = %+v, want image", msgs[0].Content[0])
 	}
 	if msgs[0].Content[1].Kind != llm.BlockText || msgs[0].Content[1].Text != "describe it" {
@@ -1521,6 +1717,49 @@ func TestRunPromptRejectsInvalidStableTranscriptBeforeRequest(t *testing.T) {
 	}
 }
 
+func TestRunPromptRollsBackInvalidNewImage(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn})
+	a := newAgent(fp, tools.Default(), Options{})
+	invalid := llm.ContentBlock{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "not-base64"}
+
+	err := a.RunPromptContent(context.Background(), "invalid", []llm.ContentBlock{invalid}, &recordSink{})
+	if err == nil || !strings.Contains(err.Error(), "invalid image base64") {
+		t.Fatalf("invalid prompt error = %v", err)
+	}
+	if len(a.Transcript()) != 0 {
+		t.Fatalf("invalid prompt remained in transcript: %s", dump(a.Transcript()))
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("provider requests after invalid prompt = %d", len(fp.Requests))
+	}
+
+	if err := a.RunPrompt(context.Background(), "valid", &recordSink{}); err != nil {
+		t.Fatalf("valid prompt after rollback: %v", err)
+	}
+	if len(fp.Requests) != 1 || len(fp.Requests[0].Messages) != 1 || fp.Requests[0].Messages[0].Content[0].Text != "valid" {
+		t.Fatalf("provider requests = %+v", fp.Requests)
+	}
+}
+
+func TestStreamSummaryRejectsInvalidRichContentBeforeProvider(t *testing.T) {
+	fp := llmtest.New("fake", summaryStep("must not run", 1, 1))
+	a := newAgent(fp, tools.Default(), Options{})
+	messages := []llm.Message{{
+		Role: llm.RoleUser,
+		Content: []llm.ContentBlock{{
+			Kind:           llm.BlockImage,
+			ImageMediaType: "image/png",
+			ImageData:      "not-base64",
+		}},
+	}}
+	if _, _, _, err := a.streamSummary(context.Background(), "summary", messages, 100, llm.RequestPurposeCompaction); err == nil {
+		t.Fatal("streamSummary accepted invalid image")
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("provider requests = %d, want 0", len(fp.Requests))
+	}
+}
+
 // SetTools swaps the registry that backs both the advertised specs and
 // dispatch, so an agent switch immediately changes what the model sees and can
 // call.
@@ -1851,6 +2090,75 @@ func TestMidStreamRetryBudgetExhausted(t *testing.T) {
 		t.Errorf("provider called %d times, want 3 (1 + 2 retries)", len(fp.Requests))
 	}
 	mustValid(t, a.Transcript())
+}
+
+func TestCompatibilityDiagnosticEmittedOnceAfterRetryExhaustion(t *testing.T) {
+	diagnostic := &llm.APIErrorDiagnostic{
+		Stage:          llm.APIErrorStageUpstreamHTTP,
+		ProxyRequestID: 42,
+		TargetID:       "openai:vision",
+		TraceID:        "trace-123",
+		Compatibility: &llm.CompatibilityDiagnostic{
+			Category:    llm.CompatibilityCategoryMultimodalToolResultRejected,
+			Reason:      "image_unsupported",
+			Confidence:  llm.CompatibilityConfidenceLikely,
+			Remediation: "Use an image-capable target.",
+		},
+	}
+	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Code: "invalid_request", Message: "sanitized provider error", Retryable: true, Diagnostic: diagnostic}}
+	fp := llmtest.New("fake", fail, fail, fail)
+	a := newAgent(fp, tools.Default(), Options{})
+	a.SetSleep(func(time.Duration) {})
+	sink := &diagnosticRecordSink{}
+
+	err := a.RunPromptContentWithContext(context.Background(), "hi", nil, nil, 7, sink)
+	if err == nil {
+		t.Fatal("RunPrompt should fail")
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider called %d times, want 3", len(fp.Requests))
+	}
+	if len(sink.diagnostics) != 1 {
+		t.Fatalf("diagnostics = %+v, want exactly one", sink.diagnostics)
+	}
+	got := sink.diagnostics[0]
+	if got.Prompt != 7 || got.Turn != 1 || got.Attempt != 3 || got.StatusCode != 503 || got.Diagnostic.ProxyRequestID != 42 {
+		t.Fatalf("diagnostic = %+v", got)
+	}
+	compatibilityNotices := 0
+	for _, notice := range sink.notices {
+		if strings.Contains(notice, "model compatibility:") {
+			compatibilityNotices++
+			for _, want := range []string{"openai:vision", llm.CompatibilityCategoryMultimodalToolResultRejected, "Use an image-capable target.", "proxy request 42", "trace trace-123"} {
+				if !strings.Contains(notice, want) {
+					t.Fatalf("notice %q missing %q", notice, want)
+				}
+			}
+			if strings.Contains(notice, "sanitized provider error") {
+				t.Fatalf("notice repeated provider message: %q", notice)
+			}
+		}
+	}
+	if compatibilityNotices != 1 {
+		t.Fatalf("compatibility notices = %d in %v, want 1", compatibilityNotices, sink.notices)
+	}
+}
+
+func TestUnclassifiedAPIErrorDoesNotEmitCompatibilityDiagnostic(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Err: &llm.APIError{StatusCode: 400, Message: "old proxy error"}})
+	a := newAgent(fp, tools.Default(), Options{})
+	sink := &diagnosticRecordSink{}
+	if err := a.RunPrompt(context.Background(), "hi", sink); err == nil {
+		t.Fatal("RunPrompt should fail")
+	}
+	if len(sink.diagnostics) != 0 {
+		t.Fatalf("diagnostics = %+v, want none", sink.diagnostics)
+	}
+	for _, notice := range sink.notices {
+		if strings.Contains(notice, "model compatibility:") {
+			t.Fatalf("unexpected compatibility notice: %q", notice)
+		}
+	}
 }
 
 func TestMidStreamRetryBudgetExhaustedDropsPartialText(t *testing.T) {
@@ -2611,7 +2919,7 @@ func TestSteerContentInjectsImagesAndRequestContext(t *testing.T) {
 		Images: []llm.ContentBlock{{
 			Kind:           llm.BlockImage,
 			ImageMediaType: "image/png",
-			ImageData:      "abc123",
+			ImageData:      agentOnePixelPNG,
 			ImageDetail:    "high",
 			ImageName:      "screen.png",
 		}},
@@ -2629,7 +2937,7 @@ func TestSteerContentInjectsImagesAndRequestContext(t *testing.T) {
 	var sawImage, sawText bool
 	for _, m := range second.Messages {
 		for _, b := range m.Content {
-			if b.Kind == llm.BlockImage && b.ImageName == "screen.png" && b.ImageData == "abc123" {
+			if b.Kind == llm.BlockImage && b.ImageName == "screen.png" && b.ImageData == agentOnePixelPNG {
 				sawImage = true
 			}
 			if b.Kind == llm.BlockText && b.Text == "inspect this" {

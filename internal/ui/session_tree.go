@@ -322,7 +322,7 @@ func treeEntryPreview(entry session.Entry) string {
 				case llm.BlockToolUse:
 					parts = append(parts, "[tool "+block.ToolName+"]")
 				case llm.BlockToolResult:
-					parts = append(parts, "[tool result]")
+					parts = append(parts, richToolResultPreview(block))
 				case llm.BlockImage:
 					parts = append(parts, "[image "+block.ImageName+"]")
 				}
@@ -340,17 +340,49 @@ func treeEntryPreview(entry session.Entry) string {
 	}
 }
 
+func richToolResultPreview(block llm.ContentBlock) string {
+	if len(block.ResultContent) == 0 {
+		return "[tool result]"
+	}
+	mimes := make([]string, 0, len(block.ResultContent))
+	seen := make(map[string]struct{}, len(block.ResultContent))
+	for _, child := range block.ResultContent {
+		mime := child.ImageMediaType
+		if mime == "" {
+			mime = "unknown"
+		}
+		if _, ok := seen[mime]; ok {
+			continue
+		}
+		seen[mime] = struct{}{}
+		mimes = append(mimes, mime)
+	}
+	label := "images"
+	if len(block.ResultContent) == 1 {
+		label = "image"
+	}
+	return fmt.Sprintf("[tool result: %d %s %s]", len(block.ResultContent), label, strings.Join(mimes, ","))
+}
+
 func loadedTreeImages(blocks []llm.ContentBlock) []inputimage.Loaded {
 	images := make([]inputimage.Loaded, 0, len(blocks))
 	for _, block := range blocks {
+		encodedBytes := block.ImageEncodedBytes
+		if encodedBytes == 0 {
+			encodedBytes = len(block.ImageData)
+		}
+		decodedBytes := block.ImageBytes
+		if decodedBytes == 0 {
+			decodedBytes = len(block.ImageData) * 3 / 4
+		}
 		images = append(images, inputimage.Loaded{
 			Block: block,
 			Info: inputimage.Info{
 				Name:         block.ImageName,
 				MediaType:    block.ImageMediaType,
 				Detail:       block.ImageDetail,
-				EncodedBytes: len(block.ImageData),
-				Bytes:        len(block.ImageData) * 3 / 4,
+				EncodedBytes: encodedBytes,
+				Bytes:        decodedBytes,
 				Width:        block.ImageWidth,
 				Height:       block.ImageHeight,
 			},

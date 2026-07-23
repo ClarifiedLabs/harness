@@ -98,6 +98,13 @@ harness -model <provider>:<model>
 harness -model <provider>:<model> -p "summarize README.md"
 ```
 
+Image-capable models can call the read-only `view_image` tool to inspect a local
+PNG, JPEG, WebP, or non-animated GIF during a turn. Rich image tool results stay
+provider-neutral inside harness and are lowered to each provider's multimodal
+wire shape; text-only models are rejected before the file is read. Image paths
+must be regular files—directories, devices, and FIFOs are rejected—and image
+limits are enforced over the complete retained request before network activity.
+
 The proxy listens on `127.0.0.1:8765` by default. See the
 [model proxy documentation](docs/usage.md#model-proxy) for advanced provider,
 authentication, pricing, budget, metrics, and tracing configuration. MCP is
@@ -149,6 +156,13 @@ current model, agent, reasoning controls, todos, plans, and working directory.
 
 Diagnostic logs, including MCP/LSP child-process stderr that is hidden from the
 terminal by default, are kept as JSON lines in the session's `diagnostics.ndjson`.
+When a concrete endpoint rejects a valid image-bearing tool result, Harness emits
+one actionable compatibility notice and records safe request-shape and
+request/trace correlation metadata there. Prompts, tool arguments, local paths,
+result text, and image base64 are excluded. Use `-trace-proxy` to correlate the
+notice with model-proxy logs; Harness never retries by silently dropping the
+image. `--quiet` suppresses the terminal compatibility notice while retaining
+the single structured diagnostic record.
 
 ## Runaway protection
 
@@ -238,8 +252,8 @@ agent can pair a smaller model with lower effort.
 
 - [Usage reference](docs/usage.md): flags, config, provider selection, one-shot
   mode, REPL commands, agents, sessions, compaction, interrupts, and hooks.
-- [Tools](docs/tools.md): built-in tools, delegation, background jobs,
-  truncation, and tool artifacts.
+- [Tools](docs/tools.md): built-in tools, rich image results, delegation,
+  background jobs, truncation, and tool artifacts.
 - [MCP](docs/mcp.md): configuring and running `harness-mcp-proxy`.
 - [LSP](docs/lsp.md): optional code intelligence tools, including independent Serena support.
 - [Release](docs/release.md): release artifacts, tagging, and required secrets.

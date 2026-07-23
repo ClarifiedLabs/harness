@@ -257,6 +257,16 @@ Aggregated tools are named `mcp__<server>__<tool>`. Names must fit
 plain harness tools, so they flow through normal truncation, artifact, and
 session paths.
 
+A direct MCP image content item is preserved as an image-bearing rich tool
+result when it is valid PNG, JPEG, WebP, or non-animated GIF data. Harness calls
+the remote tool exactly once, validates its declared MIME type and data with the
+same 10 MiB per-image and 32 MiB aggregate encoded-request limits used for local
+images, and sends valid images through the provider-neutral tool-result path.
+Invalid image data, unsupported MCP content kinds, and over-limit batches become
+bounded textual placeholders instead of raw payloads; MCP error results remain
+text-only. Terminal summaries, hooks, artifacts, replay previews, and logs expose
+only text or safe image metadata, never image base64.
+
 Each agent's `mcp_tools` setting controls automatic exposure: `disabled`,
 `read_only`, or `all`. Explicit `mcp__` names in `allowed_tools` are still
 allowed as a strict whitelist. One-shot runs use the tool list discovered before

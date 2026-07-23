@@ -426,6 +426,9 @@ func (r *Renderer) ToolResult(result llm.ToolResult) {
 		for _, s := range snippet(result.Text) {
 			r.dimLine("  " + s)
 		}
+		for _, image := range result.Content {
+			r.dimLine("  " + richImageMetadata(image))
+		}
 	}
 }
 
@@ -1161,13 +1164,74 @@ func resultSummary(result llm.ToolResult) string {
 			prefix = "truncated, "
 		}
 	}
+	var textSummary string
 	if lines <= 1 {
 		if n == 0 {
-			return prefix + "(empty), " + size
+			textSummary = prefix + "(empty), " + size
+		} else {
+			textSummary = prefix + size
 		}
-		return prefix + size
+	} else {
+		textSummary = fmt.Sprintf("%s%d lines, %s", prefix, lines, size)
 	}
-	return fmt.Sprintf("%s%d lines, %s", prefix, lines, size)
+	if len(result.Content) == 0 {
+		return textSummary
+	}
+	return textSummary + " + " + richImagesSummary(result.Content)
+}
+
+func richImagesSummary(content []llm.ContentBlock) string {
+	mimeSet := make(map[string]struct{}, len(content))
+	decodedBytes := 0
+	for _, image := range content {
+		mime := image.ImageMediaType
+		if mime == "" {
+			mime = "unknown"
+		}
+		mimeSet[mime] = struct{}{}
+		decodedBytes += imageDisplayBytes(image)
+	}
+	mimes := make([]string, 0, len(mimeSet))
+	for mime := range mimeSet {
+		mimes = append(mimes, mime)
+	}
+	sort.Strings(mimes)
+	label := "images"
+	if len(content) == 1 {
+		label = "image"
+	}
+	return fmt.Sprintf("%d %s (%s, %s)", len(content), label, strings.Join(mimes, ", "), tools.HumanBytes(decodedBytes))
+}
+
+func richImageMetadata(image llm.ContentBlock) string {
+	parts := []string{"image", image.ImageMediaType, tools.HumanBytes(imageDisplayBytes(image))}
+	if image.ImageWidth > 0 && image.ImageHeight > 0 {
+		parts = append(parts, fmt.Sprintf("%dx%d", image.ImageWidth, image.ImageHeight))
+	}
+	if image.ImageDetail != "" {
+		parts = append(parts, "detail="+image.ImageDetail)
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func imageDisplayBytes(image llm.ContentBlock) int {
+	if image.ImageBytes > 0 {
+		return image.ImageBytes
+	}
+	return decodedBase64Size(image.ImageData)
+}
+
+func decodedBase64Size(data string) int {
+	n := len(data) * 3 / 4
+	if strings.HasSuffix(data, "==") {
+		n -= 2
+	} else if strings.HasSuffix(data, "=") {
+		n--
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 // ToolResultLine renders the one-line tool summary used by live output and

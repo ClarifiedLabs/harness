@@ -112,22 +112,26 @@ type ContentBlock struct {
 	Text string `json:"text,omitempty"`
 
 	// BlockImage (user-provided visual input)
-	ImageMediaType string `json:"image_media_type,omitempty"`
-	ImageData      string `json:"image_data,omitempty"` // base64, without data: prefix
-	ImageDetail    string `json:"image_detail,omitempty"`
-	ImageName      string `json:"image_name,omitempty"`
-	ImageWidth     int    `json:"image_width,omitempty"`
-	ImageHeight    int    `json:"image_height,omitempty"`
+	ImageMediaType    string `json:"image_media_type,omitempty"`
+	ImageData         string `json:"image_data,omitempty"` // base64, without data: prefix
+	ImageDetail       string `json:"image_detail,omitempty"`
+	ImageName         string `json:"image_name,omitempty"`
+	ImageWidth        int    `json:"image_width,omitempty"`
+	ImageHeight       int    `json:"image_height,omitempty"`
+	ImageBytes        int    `json:"image_bytes,omitempty"`
+	ImageEncodedBytes int    `json:"image_encoded_bytes,omitempty"`
 
 	// BlockToolUse (assistant calls a tool)
 	ToolUseID string          `json:"tool_use_id,omitempty"` // provider-issued call id
 	ToolName  string          `json:"tool_name,omitempty"`
 	ToolInput json.RawMessage `json:"tool_input,omitempty"` // complete JSON object
 
-	// BlockToolResult (we answer a tool call)
-	ResultForID string `json:"result_for_id,omitempty"` // matches a ToolUseID
-	ResultText  string `json:"result_text,omitempty"`
-	ResultError bool   `json:"result_error,omitempty"`
+	// BlockToolResult (we answer a tool call). ResultContent is shallow,
+	// supplementary model-visible content; it is currently restricted to images.
+	ResultForID   string         `json:"result_for_id,omitempty"` // matches a ToolUseID
+	ResultText    string         `json:"result_text,omitempty"`
+	ResultError   bool           `json:"result_error,omitempty"`
+	ResultContent []ContentBlock `json:"result_content,omitempty"`
 
 	// BlockThinking (assistant extended-thinking; replayed verbatim on the same
 	// model). ThinkingSignature is the integrity signature the API requires to be
@@ -161,6 +165,7 @@ type ToolCall struct {
 type ToolResult struct {
 	ForID         string
 	Text          string
+	Content       []ContentBlock
 	IsError       bool
 	Truncated     bool
 	OriginalText  string

@@ -611,7 +611,7 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	}
 	fullMessages := append([]llm.Message(nil), firstMessages...)
 	fullMessages = append(fullMessages,
-		llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first answer"}}},
+		llm.BuildAssistantMessage(nil, "ok", nil, "", llm.StopEndTurn),
 		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "again"}}},
 	)
 	body, _ = json.Marshal(protocol.StreamRequest{
@@ -636,7 +636,7 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	}
 
 	fullMessages = append(fullMessages,
-		llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "again answer"}}},
+		llm.BuildAssistantMessage(nil, "again", nil, "", llm.StopEndTurn),
 		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "third"}}},
 	)
 	body, _ = json.Marshal(protocol.StreamRequest{
@@ -715,7 +715,7 @@ func TestHandlerStreamSeparatesProxySessionStateFromCacheAffinity(t *testing.T) 
 
 	secondMessages := append([]llm.Message(nil), firstMessages...)
 	secondMessages = append(secondMessages,
-		llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first answer"}}},
+		llm.BuildAssistantMessage(nil, "", nil, "", llm.StopEndTurn),
 		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}},
 	)
 	body, _ = json.Marshal(protocol.StreamRequest{
@@ -887,7 +887,7 @@ func TestHandlerStreamRetriesPreviousResponseRejectionWithFullHistory(t *testing
 
 	fullMessages := append([]llm.Message(nil), firstMessages...)
 	fullMessages = append(fullMessages,
-		llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first answer"}}},
+		llm.BuildAssistantMessage(nil, "", nil, "", llm.StopEndTurn),
 		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}},
 	)
 	body, _ = json.Marshal(protocol.StreamRequest{
@@ -2634,5 +2634,214 @@ func TestCostBudgetWindowResetAndUsageOmitWhenDisabled(t *testing.T) {
 	h := &Handler{}
 	if report := h.usageSnapshot(); report.Budget != nil {
 		t.Fatalf("disabled budget report = %+v, want nil", report.Budget)
+	}
+}
+
+func TestHandlerRichImageRejectionReturnsSafeCorrelatedDiagnostic(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name":"openai",
+  "api_type":"openai",
+  "base_url":"https://api.test/v1",
+  "models":[{"name":"vision","context_window":128000,"input_modalities":["text","image"]}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	payload := serverOnePixelPNG
+	providerErr := &llm.APIError{
+		StatusCode: http.StatusBadRequest,
+		Code:       "invalid_image_" + payload,
+		Message:    "tool message image content is unsupported at /private/screen.png: private result text " + payload,
+		Diagnostic: &llm.APIErrorDiagnostic{UpstreamRequestID: "upstream-123"},
+	}
+	var logs bytes.Buffer
+	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
+	if err != nil {
+		t.Fatalf("NewProxyLogger: %v", err)
+	}
+	fp := llmtest.New("fake", llmtest.Step{Err: providerErr})
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		Logger:    logger,
+		New: func(factory.Options) (llm.Provider, error) {
+			return fp, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	request := richImageRequest(payload)
+	request.Model = "openai:vision"
+	body, err := json.Marshal(protocol.StreamRequest{TargetID: "openai:vision", Request: request})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/stream", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("content-type", protocol.ContentTypeNDJSON)
+	const traceID = "0123456789abcdef0123456789abcdef"
+	const spanID = "0123456789abcdef"
+	req.Header.Set(tracing.TraceparentHeader, "00-"+traceID+"-"+spanID+"-01")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var env protocol.StreamEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatalf("decode stream envelope: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatalf("drain response body: %v", err)
+	}
+	if env.Error == nil || env.Error.Diagnostic == nil {
+		t.Fatalf("stream error = %+v", env.Error)
+	}
+	diagnostic := env.Error.Diagnostic
+	if diagnostic.Stage != llm.APIErrorStageUpstreamHTTP || diagnostic.ProxyRequestID == 0 || diagnostic.UpstreamRequestID != "upstream-123" || diagnostic.TraceID != traceID || diagnostic.SpanID != spanID {
+		t.Fatalf("diagnostic correlation = %+v", diagnostic)
+	}
+	if diagnostic.TargetID != "openai:vision" || diagnostic.Provider != "openai" || diagnostic.APIType != "openai" || diagnostic.Model != "vision" {
+		t.Fatalf("diagnostic target = %+v", diagnostic)
+	}
+	if diagnostic.Compatibility == nil || diagnostic.Compatibility.Category != llm.CompatibilityCategoryMultimodalToolResultRejected {
+		t.Fatalf("compatibility = %+v", diagnostic.Compatibility)
+	}
+	shape := diagnostic.MultimodalShape
+	if shape == nil || shape.Strategy != llm.MultimodalStrategyOpenAIToolThenUserImage || shape.ImageCount != 1 || shape.ToolResultCount != 1 || shape.EncodedBytes != int64(len(payload)) {
+		t.Fatalf("shape = %+v", shape)
+	}
+	for _, text := range []string{env.Error.Message, env.Error.Code, logs.String()} {
+		for _, secret := range []string{payload, "/private/screen.png", "private result text", "private system prompt", "nested-secret"} {
+			if strings.Contains(text, secret) {
+				t.Fatalf("output contains %q: %s", secret, text)
+			}
+		}
+	}
+
+	var record map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("decode log %q: %v", logs.String(), err)
+	}
+	if record["error_stage"] != string(llm.APIErrorStageUpstreamHTTP) || record["category"] != llm.CompatibilityCategoryMultimodalToolResultRejected || record["trace_id"] != traceID {
+		t.Fatalf("completion log = %+v", record)
+	}
+	if got, ok := record["proxy_request_id"].(float64); !ok || uint64(got) != diagnostic.ProxyRequestID {
+		t.Fatalf("proxy request ids do not correlate: log=%v diagnostic=%d", record["proxy_request_id"], diagnostic.ProxyRequestID)
+	}
+}
+
+func TestHandlerSuccessfulRichImageLogsSafeShapeAndCorrelationOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name":"openai",
+  "api_type":"openai",
+  "base_url":"https://api.test/v1",
+  "models":[{"name":"vision","context_window":128000,"input_modalities":["text","image"]}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	payload := serverOnePixelPNG
+	var logs bytes.Buffer
+	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
+	if err != nil {
+		t.Fatalf("NewProxyLogger: %v", err)
+	}
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
+		Stop:   llm.StopEndTurn,
+	})
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		Logger:    logger,
+		New: func(factory.Options) (llm.Provider, error) {
+			return fp, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	request := richImageRequest(payload)
+	request.Model = "openai:vision"
+	body, err := json.Marshal(protocol.StreamRequest{TargetID: "openai:vision", Request: request})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/stream", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("content-type", protocol.ContentTypeNDJSON)
+	const traceID = "1123456789abcdef0123456789abcdef"
+	const spanID = "1123456789abcdef"
+	req.Header.Set(tracing.TraceparentHeader, "00-"+traceID+"-"+spanID+"-01")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatalf("drain response body: %v", err)
+	}
+
+	var record map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("decode log %q: %v", logs.String(), err)
+	}
+	if record["msg"] != "model request completed" || record["status"] != float64(http.StatusOK) || record["trace_id"] != traceID || record["span_id"] != spanID {
+		t.Fatalf("completion correlation = %+v", record)
+	}
+	if requestID, ok := record["request_id"].(float64); !ok || requestID <= 0 {
+		t.Fatalf("request_id = %v, want positive correlation id", record["request_id"])
+	}
+	shape, ok := record["multimodal_shape"].(map[string]any)
+	if !ok {
+		t.Fatalf("multimodal_shape = %v (%T), want object", record["multimodal_shape"], record["multimodal_shape"])
+	}
+	safeShapeKeys := map[string]bool{
+		"strategy": true, "tool_result_count": true, "image_count": true,
+		"mime_types": true, "details": true, "encoded_bytes": true,
+		"decoded_bytes": true, "dimensions": true, "result_ids_sha256": true,
+		"image_payloads_sha256": true,
+	}
+	for key := range shape {
+		if !safeShapeKeys[key] {
+			t.Fatalf("multimodal_shape contains unsafe field %q: %+v", key, shape)
+		}
+	}
+	if shape["strategy"] != llm.MultimodalStrategyOpenAIToolThenUserImage || shape["tool_result_count"] != float64(1) || shape["image_count"] != float64(1) || shape["encoded_bytes"] != float64(len(payload)) {
+		t.Fatalf("multimodal_shape = %+v", shape)
+	}
+	for _, secret := range []string{
+		"private system prompt",
+		"view_image",
+		"call-private",
+		"/private/screen.png",
+		"nested-secret",
+		"private result text",
+		"data:image/png;base64,",
+		payload,
+	} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("completion log contains sensitive request value %q: %s", secret, logs.String())
+		}
 	}
 }

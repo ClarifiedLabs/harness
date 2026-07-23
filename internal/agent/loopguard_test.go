@@ -357,6 +357,49 @@ func TestCanonicalJSONOrderInsensitive(t *testing.T) {
 	}
 }
 
+func TestCallSetSignatureIncludesRichResultImageMetadataAndDigest(t *testing.T) {
+	const imageData = "c2Vuc2l0aXZlLWJhc2U2NC1wYXlsb2Fk"
+	calls := []llm.ToolCall{{Name: "capture", Input: json.RawMessage(`{"target":"screen"}`)}}
+	baseResult := llm.ContentBlock{
+		Kind:        llm.BlockToolResult,
+		ResultForID: "call",
+		ResultText:  "attached",
+		ResultContent: []llm.ContentBlock{{
+			Kind:           llm.BlockImage,
+			ImageMediaType: "image/png",
+			ImageData:      imageData,
+			ImageDetail:    "high",
+			ImageWidth:     640,
+			ImageHeight:    480,
+		}},
+	}
+	base := callSetSignature(calls, []llm.ContentBlock{baseResult})
+	if strings.Contains(base, imageData) {
+		t.Fatalf("loop signature contains raw base64: %q", base)
+	}
+	if got := callSetSignature(calls, []llm.ContentBlock{baseResult}); got != base {
+		t.Fatalf("identical rich result signature changed:\n%s\n%s", base, got)
+	}
+
+	mutations := map[string]func(*llm.ContentBlock){
+		"media type": func(image *llm.ContentBlock) { image.ImageMediaType = "image/jpeg" },
+		"detail":     func(image *llm.ContentBlock) { image.ImageDetail = "low" },
+		"width":      func(image *llm.ContentBlock) { image.ImageWidth++ },
+		"height":     func(image *llm.ContentBlock) { image.ImageHeight++ },
+		"image data": func(image *llm.ContentBlock) { image.ImageData += "A" },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			changed := baseResult
+			changed.ResultContent = append([]llm.ContentBlock(nil), baseResult.ResultContent...)
+			mutate(&changed.ResultContent[0])
+			if got := callSetSignature(calls, []llm.ContentBlock{changed}); got == base {
+				t.Fatalf("%s did not change rich result signature", name)
+			}
+		})
+	}
+}
+
 // TestIncrementalValidationCatchesNewAppends verifies r62's incremental
 // validator still rejects a corruption introduced after an already-validated
 // prefix — only the suffix is re-walked, but new content is always checked.

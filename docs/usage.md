@@ -154,12 +154,20 @@ environment context, user/project `AGENTS.md`, skills, and agent prompts are
 still composed around it.
 
 Image attachments accept local PNG, JPEG, WebP, and non-animated GIF files.
+Paths must be regular files; directories, devices, and FIFOs are rejected.
 Images are embedded in `tree.ndjson` as provider-neutral base64 blocks so resumed
 sessions remain self-contained; replay logs show only image metadata. Harness only sends queued
 images when the current model explicitly advertises image input support. Manual
 provider configs should set `input_modalities`, for example
 `["text", "image"]`; models without `image` are treated as text-only and image
 attachments are skipped with a warning.
+
+Each image is limited to 10 MiB decoded and to the corresponding base64-encoded
+ceiling. A 32 MiB encoded aggregate applies to the complete retained request,
+including current and older user images plus images nested in tool results—not
+just one prompt or dispatch batch. Persisted and direct-proxy rich blocks are
+structurally validated, and malformed or over-budget requests are rejected
+before token counting, provider lowering, or network activity.
 
 Typed REPL prompts, initial `-i` prompts, and one-shot `-p` prompts also treat
 literal `@path` or `@"path with spaces"` references to supported image files as
@@ -302,6 +310,10 @@ Responses continuation is on by default for proxy providers that report both
 `-responses-stateful=false`. If a provider rejects stored Responses requests,
 harness disables stateful continuation for that agent and retries the request
 stateless.
+The model proxy also content-addresses the exact provider-neutral transcript
+prefix represented by each stored response. It reuses `previous_response_id`
+only when the incoming prefix matches; retention, compaction, branch changes,
+or any other prefix rewrite cause a full resend that establishes a fresh anchor.
 Responses provider configs may also set `responses_websocket:true` to have the
 model proxy use the Responses WebSocket transport instead of HTTP SSE. The proxy
 defaults this on for `codex_oauth` Responses providers and preserves an explicit
@@ -471,6 +483,45 @@ Harness sends standard W3C `traceparent` headers. Proxy logs that receive a vali
 trace include `trace_id`, `span_id`, `parent_span_id`, and `trace_sampled` fields.
 Tracing does not log prompts, request bodies, API keys, or authentication
 headers.
+
+### Multimodal tool-result compatibility diagnostics
+
+Image-bearing tool results have three separate compatibility layers:
+
+1. **Catalog modality:** the selected target must advertise `image` input.
+   Harness rejects a statically image-requiring tool before it reads the file
+   when this capability is absent.
+2. **Configured dialect:** the provider config's `api_type` selects the wire
+   lowering. Anthropic nests images in `tool_result.content`; OpenAI Chat emits
+   tool messages followed by one adjacent multimodal user message; Responses
+   emits function outputs followed by one adjacent user image item.
+3. **Concrete endpoint conformance:** an OpenAI-compatible endpoint can reject a
+   valid dialect shape despite catalog metadata. On the final non-retryable,
+   targeted rejection, after normal continuation/server-tool/output-floor
+   fallbacks, the proxy attaches the structured category
+   `multimodal_tool_result_rejected`.
+
+Harness shows one concise compatibility notice with the target, remediation,
+proxy request ID, and trace ID when available. It also writes a structured
+warning to the session's `diagnostics.ndjson` with prompt/turn/attempt,
+sanitized upstream status/code/message, correlation fields, lowering strategy,
+and bounded shape metadata. The ordinary error remains available. For streaming
+requests the proxy's outer HTTP response can be `200` while the diagnostic's
+`api_status_code` records the upstream provider failure.
+`--quiet` suppresses the compatibility notice (and no verbose duplicate is
+printed), while session diagnostics still receive exactly one structured
+record when enabled.
+
+Diagnostics include image counts, MIME types, dimensions, encoded/decoded byte
+totals, and deterministic SHA-256 fingerprints. They never include prompts,
+tool arguments, result text, local paths, data URLs, or image base64. The same
+concise notice is stored as a normal `raw.ndjson` replay event. Use
+`-trace-proxy` to correlate its `trace_id` with model-proxy logs.
+
+This classification is observational only: Harness does not silently drop the
+image, resend altered text-only content, switch serializers, mutate target
+metadata, or learn a persistent endpoint quirk. Select a conforming image target
+or inspect the image outside that model call.
 
 ## REPL Commands
 

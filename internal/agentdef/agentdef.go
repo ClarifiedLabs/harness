@@ -111,7 +111,7 @@ func BuiltinsWithOptions(opts Options) map[string]Definition {
 }
 
 func inspectionTools(opts Options) []string {
-	names := []string{"read_file", "list_dir", "glob"}
+	names := []string{"read_file", "view_image", "list_dir", "glob"}
 	names = append(names, searchToolNames(opts.SearchTools)...)
 	// run_command widens exploration (gh, builds, screenshots, live apps) for the
 	// read-only agents (explore, plan). Neither has first-class file-mutation

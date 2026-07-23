@@ -41,6 +41,41 @@ func TestBuildRequestGolden(t *testing.T) {
 	}
 }
 
+func TestBuildInputRichToolResultsFollowAllFunctionOutputs(t *testing.T) {
+	input := buildInput([]llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{
+		{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "PNG attached", ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "YWJj", ImageDetail: "high"}}},
+		{Kind: llm.BlockToolResult, ResultForID: "call_2", ResultText: "JPEG attached", ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/jpeg", ImageData: "ZGVm"}}},
+	}}}, false)
+	if len(input) != 3 || input[0].Type != "function_call_output" || input[0].CallID != "call_1" || input[1].CallID != "call_2" || input[2].Type != "message" || input[2].Role != "user" {
+		t.Fatalf("rich input order = %+v", input)
+	}
+	parts := contentParts(t, input[2])
+	if len(parts) != 2 || parts[0].ImageURL != "data:image/png;base64,YWJj" || parts[0].Detail != "high" || parts[1].ImageURL != "data:image/jpeg;base64,ZGVm" {
+		t.Fatalf("rich image order = %+v", parts)
+	}
+}
+
+func TestBuildInputRichToolResultKeepsEmptyFunctionOutput(t *testing.T) {
+	input := buildInput([]llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{
+		Kind: llm.BlockToolResult, ResultForID: "call_1",
+		ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "YWJj"}},
+	}}}}, false)
+	if len(input) != 2 || input[0].Type != "function_call_output" || input[0].CallID != "call_1" || input[0].Output != "" || !inputMessageContainsOnlyImages(input[1]) {
+		t.Fatalf("input = %+v, want empty function output followed by image user item", input)
+	}
+}
+
+func TestBuildRequestContextPrecedesCompleteRichToolSuffix(t *testing.T) {
+	req := llm.Request{Model: "gpt-5.4", RequestContext: []string{"todo context"}, Messages: []llm.Message{
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "view_image", ToolInput: json.RawMessage(`{"path":"x.png"}`)}}},
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "image attached", ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "YWJj"}}}}},
+	}}
+	input := buildRequest(req, 0, 0).Input
+	if len(input) != 4 || input[0].Role != "developer" || input[1].Type != "function_call" || input[2].Type != "function_call_output" || !inputMessageContainsOnlyImages(input[3]) {
+		t.Fatalf("request-context rich suffix order = %+v", input)
+	}
+}
+
 func TestBuildRequestOmitsCompactionMetadata(t *testing.T) {
 	req := basicRequest()
 	req.Messages[0].Origin = llm.MessageOriginCompactionCheckpoint

@@ -25,16 +25,17 @@ const retentionTrimMarker = "[older tool output trimmed"
 // ever shortens text or swaps an image for a text placeholder, so the §4
 // transcript invariant is preserved. The pass is idempotent: already-trimmed or
 // already-archived blocks are skipped.
-func (a *Agent) applyRetention(sink EventSink) {
+func (a *Agent) applyRetention(sink EventSink) bool {
 	if len(a.transcript) == 0 {
-		return
+		return false
 	}
 	starts := turnStarts(a.transcript)
 	resultBoundary := keepBoundary(starts, a.keepTurns())
 	imageBoundary := keepBoundary(starts, retentionImageKeepTurns)
 	if resultBoundary == 0 && imageBoundary == 0 {
-		return // nothing old enough to shrink
+		return false // nothing old enough to shrink
 	}
+	changed := false
 	readOnly := a.readOnlyResultIDsIn(a.transcript)
 	for i := range a.transcript {
 		for j := range a.transcript[i].Content {
@@ -44,15 +45,20 @@ func (a *Agent) applyRetention(sink EventSink) {
 				// Only read-only results are re-derivable on demand, so only they
 				// are safe to drop the body of.
 				if i < resultBoundary && readOnly[b.ResultForID] {
-					a.trimToolResultBlock(b, sink)
+					changed = a.trimToolResultBlock(b, sink) || changed
+				}
+				if i < imageBoundary {
+					changed = degradeToolResultImages(b, func(llm.ContentBlock) bool { return true }) || changed
 				}
 			case llm.BlockImage:
 				if i < imageBoundary {
 					*b = llm.ContentBlock{Kind: llm.BlockText, Text: imageSummaryPlaceholder(*b)}
+					changed = true
 				}
 			}
 		}
 	}
+	return changed
 }
 
 // trimToolResults shrinks every large read-only tool result in msgs in place.

@@ -282,9 +282,12 @@ func insertRequestContext(input []wireInputItem, contextText string) []wireInput
 	// trailing outputs together and insert before that whole suffix.
 	insertAt := len(input)
 	last := input[len(input)-1]
+	toolSuffix := last.Type == "function_call" || last.Type == "function_call_output"
 	if last.Type == "message" && last.Role == string(llm.RoleUser) {
 		insertAt--
-	} else if last.Type == "function_call" || last.Type == "function_call_output" {
+		toolSuffix = inputMessageContainsOnlyImages(last)
+	}
+	if toolSuffix {
 		for insertAt > 0 && input[insertAt-1].Type == "function_call_output" {
 			insertAt--
 		}
@@ -305,11 +308,25 @@ func insertRequestContext(input []wireInputItem, contextText string) []wireInput
 	return input
 }
 
+func inputMessageContainsOnlyImages(item wireInputItem) bool {
+	parts, ok := item.Content.([]wireContentPart)
+	if !ok || len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		if part.Type != "input_image" {
+			return false
+		}
+	}
+	return true
+}
+
 func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 	var out []wireInputItem
 	for _, m := range messages {
 		var text string
 		var parts []wireContentPart
+		var resultImages []wireContentPart
 		flushTextPart := func() {
 			if text == "" {
 				return
@@ -383,9 +400,23 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 					CallID: b.ResultForID,
 					Output: output,
 				})
+				for _, child := range b.ResultContent {
+					resultImages = append(resultImages, wireContentPart{
+						Type:     "input_image",
+						ImageURL: llm.ImageDataURL(child),
+						Detail:   child.ImageDetail,
+					})
+				}
 			}
 		}
 		flushMessage()
+		if len(resultImages) > 0 {
+			out = append(out, wireInputItem{
+				Type:    "message",
+				Role:    string(llm.RoleUser),
+				Content: resultImages,
+			})
+		}
 	}
 	return out
 }

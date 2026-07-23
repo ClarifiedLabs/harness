@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,7 +63,7 @@ func TestRetentionKeepsMutatingResults(t *testing.T) {
 	big := strings.Repeat("x", 9000)
 	var msgs []llm.Message
 	msgs = append(msgs, userText("q0"), asstToolUse("t0", "wr", `{}`), toolResult("t0", big), asstText("a0"))
-	for i := 1; i <= 5; i++ {
+	for i := 1; i <= 9; i++ {
 		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
 	}
 
@@ -78,7 +79,9 @@ func TestRetentionKeepsMutatingResults(t *testing.T) {
 // TestRetentionReplacesAgedImages verifies an image older than the image keep
 // window is swapped for a text placeholder while a recent image stays.
 func TestRetentionReplacesAgedImages(t *testing.T) {
-	data := strings.Repeat("x", 6000)
+	raw := make([]byte, 4500)
+	copy(raw, []byte("\x89PNG\r\n\x1a\n"))
+	data := base64.StdEncoding.EncodeToString(raw)
 	msgs := []llm.Message{
 		userImage("old.png", data, "q0"), asstText("a0"),
 		userText("q1"), asstText("a1"),
@@ -98,24 +101,102 @@ func TestRetentionReplacesAgedImages(t *testing.T) {
 	}
 }
 
+func TestRetentionReplacesAgedRichResultImages(t *testing.T) {
+	const imageData = agentOnePixelPNG
+	msgs := []llm.Message{
+		userText("q0"),
+		asstToolUse("old", "rd", `{}`),
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{
+			Kind:        llm.BlockToolResult,
+			ResultForID: "old",
+			ResultText:  "screenshot attached",
+			ResultContent: []llm.ContentBlock{{
+				Kind:           llm.BlockImage,
+				ImageName:      "old.png",
+				ImageMediaType: "image/png",
+				ImageData:      imageData,
+				ImageDetail:    "high",
+				ImageWidth:     640,
+				ImageHeight:    480,
+			}},
+		}}},
+		asstText("a0"),
+		userText("q1"), asstText("a1"),
+		userText("q2"), asstText("a2"),
+		userText("q3"), asstText("a3"),
+	}
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{})
+	a.SetTranscript(msgs)
+	a.applyRetention(&recordSink{})
+	got := a.Transcript()
+	mustValid(t, got)
+
+	result := got[2].Content[0]
+	if len(result.ResultContent) != 0 {
+		t.Fatalf("aged rich result still has image children: %+v", result.ResultContent)
+	}
+	for _, want := range []string{"image omitted", "old.png", "image/png", "detail high", "640x480"} {
+		if !strings.Contains(result.ResultText, want) {
+			t.Errorf("degraded result missing %q: %q", want, result.ResultText)
+		}
+	}
+	if strings.Contains(result.ResultText, imageData) {
+		t.Fatalf("degraded result leaked base64: %q", result.ResultText)
+	}
+}
+
 // TestRetentionIdempotent verifies a second pass does not re-trim an
 // already-trimmed result.
 func TestRetentionIdempotent(t *testing.T) {
 	big := strings.Repeat("x", 9000)
 	var msgs []llm.Message
 	msgs = append(msgs, userText("q0"), asstToolUse("t0", "rd", `{}`), toolResult("t0", big), asstText("a0"))
-	for i := 1; i <= 5; i++ {
+	for i := 1; i <= 9; i++ {
 		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
 	}
 	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{})
 	a.SetTranscript(msgs)
 
-	a.applyRetention(&recordSink{})
+	if changed := a.applyRetention(&recordSink{}); !changed {
+		t.Fatal("first retention pass reported unchanged")
+	}
 	first := a.Transcript()[2].Content[0].ResultText
-	a.applyRetention(&recordSink{})
+	if changed := a.applyRetention(&recordSink{}); changed {
+		t.Fatal("second retention pass reported a change")
+	}
 	second := a.Transcript()[2].Content[0].ResultText
 	if first != second {
 		t.Errorf("retention not idempotent:\nfirst=%q\nsecond=%q", first, second)
+	}
+}
+
+func TestRetentionRewriteClearsDirectResponseState(t *testing.T) {
+	msgs := []llm.Message{
+		userImage("old.png", agentOnePixelPNG, "q0"), asstText("a0"),
+		userText("q1"), asstText("a1"),
+		userText("q2"), asstText("a2"),
+		userText("q3"), asstText("a3"),
+	}
+	fp := llmtest.New("responses", llmtest.Step{
+		Events:     []llm.StreamEvent{textDelta("done")},
+		Stop:       llm.StopEndTurn,
+		ResponseID: "resp-new",
+	})
+	a := newAgent(fp, readOnlyRegistry(), Options{ResponsesStateful: true})
+	a.SetTranscript(msgs)
+	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "resp-old", AnchorMessages: len(msgs)})
+
+	if err := a.RunPrompt(context.Background(), "next", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	}
+	if fp.Requests[0].PreviousResponseID != "" || len(fp.Requests[0].Messages) != len(msgs)+1 {
+		t.Fatalf("request after retention = prev %q messages %d", fp.Requests[0].PreviousResponseID, len(fp.Requests[0].Messages))
+	}
+	if fp.Requests[0].Messages[0].Content[0].Kind != llm.BlockText {
+		t.Fatalf("old image was not replaced: %+v", fp.Requests[0].Messages[0].Content[0])
 	}
 }
 

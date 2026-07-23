@@ -24,6 +24,7 @@ import (
 
 	"harness/internal/apikey"
 	"harness/internal/auth"
+	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/llm/factory"
 	"harness/internal/llm/tokencount"
@@ -228,7 +229,7 @@ type Handler struct {
 	providerCache map[string]llm.Provider
 
 	continuationMu       sync.Mutex
-	continuations        map[string]llm.ResponseState
+	continuations        map[string]continuationEntry
 	disabledContinuation map[string]bool
 }
 
@@ -283,7 +284,7 @@ func NewHandler(opts Options) (*Handler, error) {
 		keyBudgets:           map[string]*costBudgetTracker{},
 		usage:                map[usageKey]*protocol.ModelUsage{},
 		providerCache:        map[string]llm.Provider{},
-		continuations:        map[string]llm.ResponseState{},
+		continuations:        map[string]continuationEntry{},
 		disabledContinuation: map[string]bool{},
 	}
 	if opts.Metrics != nil {
@@ -724,6 +725,14 @@ func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "malformed input token request"})
 		return
 	}
+	if err := validateProxyRequestMessages(req.Request.Messages); err != nil {
+		writeError(cw, http.StatusBadRequest, &protocol.Error{
+			StatusCode: http.StatusBadRequest,
+			Code:       "invalid_request",
+			Message:    "invalid model request content",
+		})
+		return
+	}
 	targetID := strings.TrimSpace(req.TargetID)
 	if targetID == "" {
 		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "target_id is required"})
@@ -803,20 +812,42 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	requestID := h.nextRequestID.Add(1)
 	cw := &countingResponseWriter{ResponseWriter: w}
 	var (
-		targetID   string
-		providerID string
-		apiType    string
-		model      string
-		purpose    = llm.RequestPurposeUnknown
-		usage      llm.Usage
-		stop       llm.StopReason
-		streamErr  string
-		events     int
-		toolCalls  int
-		reqBytes   int
-		errAttrs   []any
-		budget     *costBudgetTracker
+		targetID        string
+		providerID      string
+		apiType         string
+		model           string
+		purpose         = llm.RequestPurposeUnknown
+		usage           llm.Usage
+		stop            llm.StopReason
+		streamErr       string
+		events          int
+		toolCalls       int
+		reqBytes        int
+		errAttrs        []any
+		budget          *costBudgetTracker
+		requestShape    *llm.MultimodalRequestShape
+		finalDiagnostic *llm.APIErrorDiagnostic
 	)
+	diagnosticFor := func(stage llm.APIErrorStage) *llm.APIErrorDiagnostic {
+		diagnostic := &llm.APIErrorDiagnostic{
+			Stage:          stage,
+			ProxyRequestID: requestID,
+			TargetID:       targetID,
+			Provider:       providerID,
+			APIType:        apiType,
+			Model:          model,
+		}
+		if traceOK {
+			diagnostic.TraceID = traceCtx.TraceID
+			diagnostic.SpanID = traceCtx.SpanID
+		}
+		return diagnostic
+	}
+	writeFailure := func(status int, stage llm.APIErrorStage, proxyErr *protocol.Error) {
+		finalDiagnostic = diagnosticFor(stage)
+		proxyErr.Diagnostic = finalDiagnostic
+		writeError(cw, status, proxyErr)
+	}
 	defer func() {
 		attrs := []any{
 			"request_id", requestID,
@@ -855,6 +886,8 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		if traceOK {
 			attrs = append(attrs, tracing.LogAttrs(traceCtx)...)
 		}
+		attrs = append(attrs, shapeLogAttrs(requestShape)...)
+		attrs = append(attrs, diagnosticLogAttrs(finalDiagnostic)...)
 		// Record every stream request, even one that failed before the target
 		// resolved (provider/model empty), so requests_total/errors_total reflect
 		// all client-facing failures, not just post-resolution ones.
@@ -876,13 +909,22 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	reqBytes = len(body)
 	if err != nil {
 		streamErr = "request body too large"
-		writeError(cw, http.StatusRequestEntityTooLarge, &protocol.Error{StatusCode: http.StatusRequestEntityTooLarge, Message: "request body too large"})
+		writeFailure(http.StatusRequestEntityTooLarge, llm.APIErrorStageProxyDecode, &protocol.Error{StatusCode: http.StatusRequestEntityTooLarge, Message: "request body too large"})
 		return
 	}
 	var req protocol.StreamRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		streamErr = "malformed stream request"
-		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "malformed stream request"})
+		writeFailure(http.StatusBadRequest, llm.APIErrorStageProxyDecode, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "malformed stream request"})
+		return
+	}
+	if err := validateProxyRequestMessages(req.Request.Messages); err != nil {
+		streamErr = "invalid model request content"
+		writeFailure(http.StatusBadRequest, llm.APIErrorStageProxyDecode, &protocol.Error{
+			StatusCode: http.StatusBadRequest,
+			Code:       "invalid_request",
+			Message:    "invalid model request content",
+		})
 		return
 	}
 	purpose = llm.NormalizeRequestPurpose(req.Request.Purpose)
@@ -890,21 +932,22 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	targetID = strings.TrimSpace(req.TargetID)
 	if targetID == "" {
 		streamErr = "target_id is required"
-		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "target_id is required"})
+		writeFailure(http.StatusBadRequest, llm.APIErrorStageProxyResolve, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "target_id is required"})
 		return
 	}
 	target, err := h.resolveTarget(targetID)
 	if err != nil {
 		streamErr = err.Error()
-		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
+		writeFailure(http.StatusBadRequest, llm.APIErrorStageProxyResolve, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
 		return
 	}
 	targetID = target.targetID
 	providerID = target.pc.Name
+	apiType = target.pc.APIType
 	model = target.entry.Name
 	if err := applyServiceTierForTarget(target, &req.Request); err != nil {
 		streamErr = err.Error()
-		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
+		writeFailure(http.StatusBadRequest, llm.APIErrorStageProxyPrepare, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
 		return
 	}
 	req.Request.Model = model
@@ -912,8 +955,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	req.Request.Reasoning = h.reasoningForTarget(target, req.ReasoningProfile, req.Request.Reasoning)
 	sessionKey, providerRequest := prepareProviderRequest(req.Request)
 	req.Request = providerRequest
-	if requestBudget, ok, message := h.checkCostBudget(cw, r, target, req.Request); !ok {
+	if requestBudget, ok, message := h.checkCostBudget(cw, r, target, req.Request, diagnosticFor(llm.APIErrorStageProxyPrepare)); !ok {
 		streamErr = message
+		finalDiagnostic = diagnosticFor(llm.APIErrorStageProxyPrepare)
 		return
 	} else {
 		budget = requestBudget
@@ -921,7 +965,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	opts, err := h.runtimeOptionsForTarget(r.Context(), target)
 	if err != nil {
 		streamErr = err.Error()
-		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
+		writeFailure(http.StatusBadRequest, llm.APIErrorStageProviderRuntime, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
 		return
 	}
 	apiType = opts.Provider
@@ -933,7 +977,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	provider, err := h.streamProvider(opts, target.baseTargetID, sessionKey)
 	if err != nil {
 		streamErr = err.Error()
-		writeError(cw, http.StatusBadRequest, protocol.ErrorFrom(err))
+		writeFailure(http.StatusBadRequest, llm.APIErrorStageProviderRuntime, protocol.ErrorFrom(err))
 		return
 	}
 
@@ -955,25 +999,35 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		streamRetryMinOutputTokens
 	)
 	retryMinOutputTokens := 0
-	streamAttempt := func(request llm.Request, anchorMessageCount int) (streamRetry, llm.ResponseState) {
+	streamAttempt := func(request, semanticRequest llm.Request) (streamRetry, continuationEntry) {
+		semanticRequest.StoreResponse = request.StoreResponse
+		semanticRequest.PreviousResponseID = request.PreviousResponseID
+		semanticRequest.MaxTokens = request.MaxTokens
+		semanticRequest.ServerTools = request.ServerTools
 		streamErr = ""
 		errAttrs = nil
+		requestShape = richToolResultShape(semanticRequest, apiType)
+		finalDiagnostic = nil
 		sentEvents := false
-		var finalState llm.ResponseState
+		var finalState continuationEntry
+		var assistantText strings.Builder
+		var assistantReasoning []llm.ContentBlock
+		var assistantCalls []llm.ToolCall
+		var assistantPhase string
 		for ev, err := range provider.Stream(r.Context(), request) {
 			if err != nil {
 				streamErr = err.Error()
 				errAttrs = streamErrorLogAttrs(err)
 				if !sentEvents && request.PreviousResponseID != "" && previousResponseRejected(err) {
 					h.resetContinuation(cacheKey)
-					return streamRetryContinuation, llm.ResponseState{}
+					return streamRetryContinuation, continuationEntry{}
 				}
 				if !sentEvents && request.StoreResponse && storeResponseRejected(err) {
 					h.disableContinuation(cacheKey)
-					return streamRetryContinuation, llm.ResponseState{}
+					return streamRetryContinuation, continuationEntry{}
 				}
 				if !sentEvents && len(request.ServerTools) > 0 && serverToolRejected(err) {
-					return streamRetryServerTools, llm.ResponseState{}
+					return streamRetryServerTools, continuationEntry{}
 				}
 				if !sentEvents {
 					if floor, ok := outputTokenFloorRejected(err); ok && floor > request.MaxTokens {
@@ -988,14 +1042,23 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 							"inferred_min_output_tokens", floor,
 							"original_max_tokens", request.MaxTokens,
 							"retry_max_tokens", floor,
-							"err", err.Error(),
+							"err", redactImageBearingError(err, semanticRequest).Error(),
 						)
-						return streamRetryMinOutputTokens, llm.ResponseState{}
+						return streamRetryMinOutputTokens, continuationEntry{}
 					}
 				}
+				diagnostic := diagnosticFor(upstreamErrorStage(err))
+				diagnostic.UpstreamRequestID = upstreamRequestIDFromError(err)
+				diagnostic.MultimodalShape = requestShape
+				diagnostic.Compatibility = classifyMultimodalToolResultRejection(err, requestShape)
+				finalDiagnostic = diagnostic
+				err = redactImageBearingError(err, semanticRequest)
+				err = withAPIErrorDiagnostic(err, diagnostic)
+				streamErr = err.Error()
+				errAttrs = streamErrorLogAttrs(err)
 				_ = enc.Encode(protocol.StreamEnvelope{Error: protocol.ErrorFrom(err)})
 				flush()
-				return streamRetryNone, llm.ResponseState{}
+				return streamRetryNone, continuationEntry{}
 			}
 			sentEvents = true
 			events++
@@ -1004,10 +1067,26 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				usage = h.priceUsage(targetID, request, usage)
 				ev.Usage = &usage
 			}
-			if ev.Kind == llm.EventToolCallDone {
+			switch ev.Kind {
+			case llm.EventTextDelta:
+				assistantText.WriteString(ev.Text)
+			case llm.EventReasoningSummary:
+				if block, ok := llm.PersistedReasoningBlock(ev); ok {
+					assistantReasoning = append(assistantReasoning, block)
+				}
+			case llm.EventAssistantPhase:
+				if ev.Phase != "" && llm.ValidAssistantPhase(ev.Phase) {
+					assistantPhase = ev.Phase
+				}
+			case llm.EventToolCallDone:
 				toolCalls++
-			}
-			if ev.Kind == llm.EventDone {
+				assistantCalls = append(assistantCalls, llm.ToolCall{
+					ID:                ev.ToolID,
+					Name:              ev.ToolName,
+					Input:             ev.ToolInput,
+					InvalidInputError: ev.InvalidInputError,
+				})
+			case llm.EventDone:
 				stop = ev.StopReason
 				if ev.Usage != nil {
 					usage = mergeUsage(usage, *ev.Usage)
@@ -1015,35 +1094,43 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				usage = h.priceUsage(targetID, request, usage)
 				ev.Usage = &usage
 				if ev.ResponseID != "" && request.StoreResponse {
-					// The caller appends the assistant message from this response
-					// after the proxy sees the full request, so the next delta
-					// starts after that future transcript item. request.Messages
-					// may be a trimmed continuation delta, so anchor against the
-					// caller's full message count instead.
-					anchorMessages := anchorMessageCount + 1
 					if request.Purpose == llm.RequestPurposePrewarm {
-						// A generate:false Responses WebSocket warm-up contributes no
-						// transcript messages. Its response id anchors the next request
-						// before the first real user message.
-						anchorMessages = 0
-					}
-					finalState = llm.ResponseState{
-						PreviousResponseID: ev.ResponseID,
-						AnchorMessages:     anchorMessages,
+						if fingerprint, hashErr := fingerprintMessages(nil); hashErr == nil {
+							finalState = continuationEntry{
+								PreviousResponseID: ev.ResponseID,
+								AnchorMessages:     0,
+								Fingerprint:        fingerprint,
+							}
+						}
+					} else {
+						assistant := llm.BuildAssistantMessage(
+							assistantReasoning,
+							assistantText.String(),
+							assistantCalls,
+							assistantPhase,
+							ev.StopReason,
+						)
+						if fingerprint, hashErr := fingerprintMessagesWithAssistant(semanticRequest.Messages, assistant); hashErr == nil {
+							finalState = continuationEntry{
+								PreviousResponseID: ev.ResponseID,
+								AnchorMessages:     len(semanticRequest.Messages) + 1,
+								Fingerprint:        fingerprint,
+							}
+						}
 					}
 				}
 			}
 			event := ev
 			if err := enc.Encode(protocol.StreamEnvelope{Event: &event}); err != nil {
 				streamErr = err.Error()
-				return streamRetryNone, llm.ResponseState{}
+				return streamRetryNone, continuationEntry{}
 			}
 			flush()
 		}
 		return streamRetryNone, finalState
 	}
 	attemptRequest := req.Request
-	retry, state := streamAttempt(attemptRequest, len(fullRequest.Messages))
+	retry, state := streamAttempt(attemptRequest, fullRequest)
 	for retry != streamRetryNone {
 		switch retry {
 		case streamRetryContinuation:
@@ -1060,11 +1147,18 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			retry = streamRetryNone
 			continue
 		}
-		retry, state = streamAttempt(attemptRequest, len(fullRequest.Messages))
+		retry, state = streamAttempt(attemptRequest, fullRequest)
 	}
 	if state.PreviousResponseID != "" {
 		h.saveContinuation(cacheKey, state)
 	}
+}
+
+func validateProxyRequestMessages(messages []llm.Message) error {
+	if _, err := inputimage.ValidateMessages(messages); err != nil {
+		return err
+	}
+	return llm.ValidateTranscript(messages)
 }
 
 func (h *Handler) streamProvider(opts factory.Options, providerID, promptCacheKey string) (llm.Provider, error) {
@@ -1271,11 +1365,11 @@ func (h *Handler) resolveTarget(id string) (resolvedTarget, error) {
 	return resolvedTarget{}, fmt.Errorf("target %q is not available from the model proxy", id)
 }
 
-func (h *Handler) checkCostBudget(w http.ResponseWriter, r *http.Request, target resolvedTarget, request llm.Request) (*costBudgetTracker, bool, string) {
+func (h *Handler) checkCostBudget(w http.ResponseWriter, r *http.Request, target resolvedTarget, request llm.Request, diagnostic *llm.APIErrorDiagnostic) (*costBudgetTracker, bool, string) {
 	budget, err := h.requestCostBudget(r)
 	if err != nil {
 		msg := err.Error()
-		writeError(w, http.StatusInternalServerError, &protocol.Error{StatusCode: http.StatusInternalServerError, Code: "cost_budget_state_error", Message: msg})
+		writeError(w, http.StatusInternalServerError, &protocol.Error{StatusCode: http.StatusInternalServerError, Code: "cost_budget_state_error", Message: msg, Diagnostic: diagnostic})
 		return nil, false, msg
 	}
 	if budget == nil {
@@ -1285,7 +1379,7 @@ func (h *Handler) checkCostBudget(w http.ResponseWriter, r *http.Request, target
 	if snapshot == nil || snapshot.pricer == nil {
 		msg := "api key cost budget is enabled but pricing is unavailable"
 		if budget.RejectUnpriced() {
-			writeError(w, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Code: "cost_budget_unpriced_target", Message: msg})
+			writeError(w, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Code: "cost_budget_unpriced_target", Message: msg, Diagnostic: diagnostic})
 			return budget, false, msg
 		}
 		return budget, true, ""
@@ -1299,7 +1393,7 @@ func (h *Handler) checkCostBudget(w http.ResponseWriter, r *http.Request, target
 	if !price.Known {
 		msg := fmt.Sprintf("api key cost budget is enabled but target %q has no known price", target.targetID)
 		if budget.RejectUnpriced() {
-			writeError(w, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Code: "cost_budget_unpriced_target", Message: msg})
+			writeError(w, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Code: "cost_budget_unpriced_target", Message: msg, Diagnostic: diagnostic})
 			return budget, false, msg
 		}
 		return budget, true, ""
@@ -1317,6 +1411,7 @@ func (h *Handler) checkCostBudget(w http.ResponseWriter, r *http.Request, target
 			Message:      msg,
 			Retryable:    true,
 			RetryAfterMS: retryAfter.Milliseconds(),
+			Diagnostic:   diagnostic,
 		})
 		return budget, false, msg
 	}
@@ -1776,37 +1871,6 @@ func prepareProviderRequest(req llm.Request) (sessionKey string, providerReq llm
 func providerPromptCacheKey(sessionID string) string {
 	sum := sha256.Sum256([]byte(sessionID))
 	return hex.EncodeToString(sum[:])
-}
-
-func (h *Handler) applyContinuation(key string, stateful bool, req llm.Request) llm.Request {
-	if key == "" || !stateful {
-		req.StoreResponse = false
-		req.PreviousResponseID = ""
-		return req
-	}
-	h.continuationMu.Lock()
-	defer h.continuationMu.Unlock()
-	if h.disabledContinuation[key] {
-		req.StoreResponse = false
-		req.PreviousResponseID = ""
-		return req
-	}
-	req.StoreResponse = true
-	state := h.continuations[key]
-	if state.PreviousResponseID != "" && state.AnchorMessages >= 0 && state.AnchorMessages < len(req.Messages) {
-		req.PreviousResponseID = state.PreviousResponseID
-		req.Messages = req.Messages[state.AnchorMessages:]
-	}
-	return req
-}
-
-func (h *Handler) saveContinuation(key string, state llm.ResponseState) {
-	if key == "" || state.PreviousResponseID == "" {
-		return
-	}
-	h.continuationMu.Lock()
-	h.continuations[key] = state
-	h.continuationMu.Unlock()
 }
 
 func (h *Handler) resetContinuation(key string) {

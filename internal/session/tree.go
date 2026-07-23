@@ -1000,6 +1000,9 @@ func cloneMessagesForTree(messages []llm.Message) []llm.Message {
 	for i := range messages {
 		out[i] = messages[i]
 		out[i].Content = append([]llm.ContentBlock(nil), messages[i].Content...)
+		for j := range out[i].Content {
+			out[i].Content[j].ResultContent = append([]llm.ContentBlock(nil), messages[i].Content[j].ResultContent...)
+		}
 		out[i].ParallelToolBatches = append([]llm.ParallelToolBatch(nil), messages[i].ParallelToolBatches...)
 		for j := range out[i].ParallelToolBatches {
 			out[i].ParallelToolBatches[j].ToolUseIDs = append([]string(nil), messages[i].ParallelToolBatches[j].ToolUseIDs...)

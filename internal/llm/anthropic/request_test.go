@@ -42,6 +42,66 @@ func TestBuildRequestGolden(t *testing.T) {
 	}
 }
 
+func TestBuildContentRichToolResultNestsOrderedImages(t *testing.T) {
+	blocks := buildContent([]llm.ContentBlock{{
+		Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "two images attached",
+		ResultContent: []llm.ContentBlock{
+			{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "YWJj", ImageDetail: "high"},
+			{Kind: llm.BlockImage, ImageMediaType: "image/jpeg", ImageData: "ZGVm"},
+		},
+	}}, false)
+	if len(blocks) != 1 || blocks[0].Type != "tool_result" || blocks[0].ToolUseID != "call_1" {
+		t.Fatalf("tool result = %+v", blocks)
+	}
+	rich, ok := blocks[0].Content.([]wireContent)
+	if !ok || len(rich) != 3 {
+		t.Fatalf("rich content = %#v (%T)", blocks[0].Content, blocks[0].Content)
+	}
+	if rich[0].Type != "text" || rich[0].Text != "two images attached" || rich[1].Source.Data != "YWJj" || rich[2].Source.MediaType != "image/jpeg" {
+		t.Fatalf("rich content order = %+v", rich)
+	}
+}
+
+func TestBuildContentTextOnlyToolResultRemainsString(t *testing.T) {
+	blocks := buildContent([]llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}, false)
+	if got, ok := blocks[0].Content.(string); !ok || got != "ok" {
+		t.Fatalf("text-only content = %#v (%T)", blocks[0].Content, blocks[0].Content)
+	}
+}
+
+func TestBuildContentRichToolResultOmitsEmptyTextChild(t *testing.T) {
+	blocks := buildContent([]llm.ContentBlock{{
+		Kind: llm.BlockToolResult, ResultForID: "call_1",
+		ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "YWJj"}},
+	}}, false)
+	rich, ok := blocks[0].Content.([]wireContent)
+	if !ok || len(rich) != 1 || rich[0].Type != "image" {
+		t.Fatalf("rich content = %#v (%T), want one image and no empty text child", blocks[0].Content, blocks[0].Content)
+	}
+}
+
+func TestRichToolResultCacheBreakpointStaysOnParent(t *testing.T) {
+	messages := []wireMessage{{Role: "user", Content: buildContent([]llm.ContentBlock{{
+		Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "attached",
+		ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "YWJj"}},
+	}}, false)}}
+	placeCacheBreakpoints(messages, len(messages))
+
+	parent := messages[0].Content[0]
+	if parent.CacheControl != ephemeral {
+		t.Fatalf("parent cache_control = %+v, want ephemeral", parent.CacheControl)
+	}
+	rich, ok := parent.Content.([]wireContent)
+	if !ok {
+		t.Fatalf("parent content = %T, want []wireContent", parent.Content)
+	}
+	for i, child := range rich {
+		if child.CacheControl != nil {
+			t.Fatalf("rich child %d cache_control = %+v, want nil", i, child.CacheControl)
+		}
+	}
+}
+
 func TestBuildRequestOmitsCompactionMetadata(t *testing.T) {
 	req := basicRequest()
 	req.Messages[0].Origin = llm.MessageOriginCompactionCheckpoint

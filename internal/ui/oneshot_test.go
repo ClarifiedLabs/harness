@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"iter"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"harness/internal/background"
+	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/skills"
@@ -531,6 +534,124 @@ func TestOneShotSaveFailureWarned(t *testing.T) {
 	}
 	if !strings.Contains(errw.String(), "save failed") {
 		t.Errorf("failed one-shot save must warn to errw, got %q", errw.String())
+	}
+}
+
+func TestOneShotCompatibilityDiagnosticDisplayedLoggedAndRecordedSafely(t *testing.T) {
+	payload := uiOnePixelPNG
+	diagnostic := &llm.APIErrorDiagnostic{
+		Stage:          llm.APIErrorStageUpstreamHTTP,
+		ProxyRequestID: 77,
+		TargetID:       "openai:vision",
+		TraceID:        "trace-abc",
+		Compatibility: &llm.CompatibilityDiagnostic{
+			Category:    llm.CompatibilityCategoryMultimodalToolResultRejected,
+			Reason:      "image_unsupported",
+			Confidence:  llm.CompatibilityConfidenceLikely,
+			Remediation: "Use an image-capable target.",
+		},
+		MultimodalShape: &llm.MultimodalRequestShape{ImageCount: 1, ImagePayloadsSHA256: "safe-fingerprint"},
+	}
+	fp := llmtest.New("fake", llmtest.Step{Err: &llm.APIError{
+		StatusCode: 400,
+		Code:       "invalid_request",
+		Message:    "sanitized image rejection",
+		Diagnostic: diagnostic,
+	}})
+	var out, errw, diagnostics bytes.Buffer
+	app := newTestApp(t, &out, &errw, fp)
+	app.DiagnosticLogger = slog.New(slog.NewJSONHandler(&diagnostics, nil))
+	app.PendingImages = []inputimage.Loaded{{Block: llm.ContentBlock{
+		Kind:           llm.BlockImage,
+		ImageMediaType: "image/png",
+		ImageData:      payload,
+	}}}
+
+	if code := OneShot(app, "describe it"); code != ExitRuntime {
+		t.Fatalf("OneShot exit = %d, want %d", code, ExitRuntime)
+	}
+	if len(fp.Requests) != 1 || len(fp.Requests[0].Messages) == 0 || fp.Requests[0].Messages[0].Content[0].ImageData != payload {
+		t.Fatalf("provider did not receive expected image request: %+v", fp.Requests)
+	}
+	for _, want := range []string{"model compatibility:", "openai:vision", llm.CompatibilityCategoryMultimodalToolResultRejected, "Use an image-capable target.", "proxy request 77", "trace trace-abc"} {
+		if !strings.Contains(errw.String(), want) {
+			t.Fatalf("stderr %q missing %q", errw.String(), want)
+		}
+	}
+	if strings.Count(errw.String(), "model compatibility:") != 1 {
+		t.Fatalf("compatibility notice count in stderr = %d: %s", strings.Count(errw.String(), "model compatibility:"), errw.String())
+	}
+	logText := diagnostics.String()
+	for _, want := range []string{`"msg":"model compatibility diagnostic"`, `"prompt":1`, `"turn":1`, `"attempt":1`, `"proxy_request_id":77`, `"trace_id":"trace-abc"`, `"api_message":"sanitized image rejection"`} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("diagnostic log %q missing %q", logText, want)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw event log: %v", err)
+	}
+	if !strings.Contains(string(raw), `"type":"notice"`) || !strings.Contains(string(raw), "proxy request 77") {
+		t.Fatalf("raw events missing diagnostic notice: %s", raw)
+	}
+	for name, text := range map[string]string{"stdout": out.String(), "stderr": errw.String(), "diagnostics": logText, "raw events": string(raw)} {
+		if strings.Contains(text, payload) {
+			t.Fatalf("%s leaked image payload", name)
+		}
+	}
+}
+
+func TestREPLCompatibilityDiagnosticDisplayedOnce(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Err: &llm.APIError{
+		StatusCode: 400,
+		Message:    "sanitized rejection",
+		Diagnostic: &llm.APIErrorDiagnostic{
+			ProxyRequestID: 9,
+			TargetID:       "openai:vision",
+			Compatibility: &llm.CompatibilityDiagnostic{
+				Category:    llm.CompatibilityCategoryMultimodalToolResultRejected,
+				Remediation: "Choose another target.",
+			},
+		},
+	}})
+	var out, errw, diagnostics bytes.Buffer
+	app := newTestApp(t, &out, &errw, fp)
+	app.DiagnosticLogger = slog.New(slog.NewJSONHandler(&diagnostics, nil))
+	app.runPrompt("describe")
+	if strings.Count(errw.String(), "model compatibility:") != 1 || !strings.Contains(errw.String(), "proxy request 9") {
+		t.Fatalf("REPL stderr = %q", errw.String())
+	}
+	if strings.Count(diagnostics.String(), `"msg":"model compatibility diagnostic"`) != 1 {
+		t.Fatalf("REPL diagnostics = %q", diagnostics.String())
+	}
+}
+
+func TestOneShotQuietSuppressesCompatibilityNoticeButPersistsDiagnostic(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Err: &llm.APIError{
+		StatusCode: 400,
+		Message:    "sanitized rejection",
+		Diagnostic: &llm.APIErrorDiagnostic{
+			ProxyRequestID: 10,
+			TargetID:       "openai:vision",
+			Compatibility: &llm.CompatibilityDiagnostic{
+				Category:    llm.CompatibilityCategoryMultimodalToolResultRejected,
+				Remediation: "Choose another target.",
+			},
+		},
+	}})
+	var out, errw, diagnostics bytes.Buffer
+	app := newTestApp(t, &out, &errw, fp)
+	app.Renderer = NewRenderer(&out, &errw, RenderOptions{Model: app.Model, Quiet: true, SuppressUsage: true})
+	app.DiagnosticLogger = slog.New(slog.NewJSONHandler(&diagnostics, nil))
+
+	if code := OneShot(app, "describe"); code != ExitRuntime {
+		t.Fatalf("OneShot exit = %d, want %d", code, ExitRuntime)
+	}
+	if strings.Contains(errw.String(), "model compatibility:") || strings.Contains(errw.String(), "model compatibility diagnostic") {
+		t.Fatalf("quiet stderr contains compatibility output: %q", errw.String())
+	}
+	if strings.Count(diagnostics.String(), `"msg":"model compatibility diagnostic"`) != 1 {
+		t.Fatalf("quiet diagnostics = %q", diagnostics.String())
 	}
 }
 

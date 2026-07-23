@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -110,11 +111,43 @@ func callSetSignature(calls []llm.ToolCall, results []llm.ContentBlock) string {
 				flag = "err"
 			}
 			res = flag + "\x00" + results[i].ResultText
+			if len(results[i].ResultContent) > 0 {
+				res += "\x00" + resultContentSignature(results[i].ResultContent)
+			}
 		}
 		sigs[i] = c.Name + "\x00" + canonicalJSON(c.Input) + "\x00" + res
 	}
 	sort.Strings(sigs)
 	return strings.Join(sigs, "\x01")
+}
+
+// resultContentSignature captures every model-visible image attribute that can
+// make a rich tool result meaningfully different. The payload itself is
+// represented only by a SHA-256 digest, keeping signatures bounded and ensuring
+// base64 never appears in guard diagnostics or retained state.
+func resultContentSignature(content []llm.ContentBlock) string {
+	type imageSignature struct {
+		Kind      llm.BlockKind `json:"kind"`
+		MediaType string        `json:"media_type,omitempty"`
+		Detail    string        `json:"detail,omitempty"`
+		Width     int           `json:"width,omitempty"`
+		Height    int           `json:"height,omitempty"`
+		Digest    string        `json:"sha256"`
+	}
+	images := make([]imageSignature, 0, len(content))
+	for _, child := range content {
+		digest := sha256.Sum256([]byte(child.ImageData))
+		images = append(images, imageSignature{
+			Kind:      child.Kind,
+			MediaType: child.ImageMediaType,
+			Detail:    child.ImageDetail,
+			Width:     child.ImageWidth,
+			Height:    child.ImageHeight,
+			Digest:    fmt.Sprintf("%x", digest),
+		})
+	}
+	encoded, _ := json.Marshal(images)
+	return string(encoded)
 }
 
 // canonicalJSON renders raw with object keys sorted (json.Marshal sorts map

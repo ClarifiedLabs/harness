@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -97,6 +98,10 @@ type App struct {
 	Renderer *Renderer
 	Out      io.Writer
 	Errw     io.Writer
+	Logger   *slog.Logger
+	// DiagnosticLogger persists compatibility diagnostics without rendering
+	// them through the ordinary terminal log handler.
+	DiagnosticLogger *slog.Logger
 
 	Provider      string
 	Model         string
@@ -4196,6 +4201,37 @@ func (s *accumulatingSink) Notice(msg string) {
 		turn = 0
 	}
 	s.app.recordEvent(session.Event{Type: session.EventNotice, Prompt: s.prompt, Turn: turn, Display: msg})
+}
+
+func (s *accumulatingSink) ModelErrorDiagnostic(event agent.ModelErrorDiagnostic) {
+	if s.app.DiagnosticLogger == nil || event.Diagnostic == nil || event.Diagnostic.Compatibility == nil {
+		return
+	}
+	diagnostic := event.Diagnostic
+	compatibility := diagnostic.Compatibility
+	s.app.DiagnosticLogger.Warn("model compatibility diagnostic",
+		"prompt", event.Prompt,
+		"turn", event.Turn,
+		"attempt", event.Attempt,
+		"api_status_code", event.StatusCode,
+		"api_code", event.Code,
+		"api_message", event.Message,
+		"error_stage", string(diagnostic.Stage),
+		"proxy_request_id", diagnostic.ProxyRequestID,
+		"upstream_request_id", diagnostic.UpstreamRequestID,
+		"trace_id", diagnostic.TraceID,
+		"span_id", diagnostic.SpanID,
+		"target_id", diagnostic.TargetID,
+		"provider", diagnostic.Provider,
+		"api_type", diagnostic.APIType,
+		"model", diagnostic.Model,
+		"category", compatibility.Category,
+		"reason", compatibility.Reason,
+		"confidence", compatibility.Confidence,
+		"remediation", compatibility.Remediation,
+		"strategy", compatibility.Strategy,
+		"multimodal_shape", diagnostic.MultimodalShape,
+	)
 }
 
 func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {

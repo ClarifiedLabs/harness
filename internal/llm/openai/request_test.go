@@ -34,6 +34,33 @@ func TestBuildRequestGolden(t *testing.T) {
 	}
 }
 
+func TestBuildMessagesRichToolResultsFollowAllToolStrings(t *testing.T) {
+	messages := buildMessages(llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{
+		{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "PNG attached", ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "YWJj", ImageDetail: "high"}}},
+		{Kind: llm.BlockToolResult, ResultForID: "call_2", ResultText: "JPEG attached", ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/jpeg", ImageData: "ZGVm"}}},
+	}})
+	if len(messages) != 3 || messages[0].Role != "tool" || messages[0].ToolCallID != "call_1" || messages[1].ToolCallID != "call_2" || messages[2].Role != "user" {
+		t.Fatalf("rich message order = %+v", messages)
+	}
+	parts, ok := messages[2].Content.([]wireContentPart)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("rich image content = %#v (%T)", messages[2].Content, messages[2].Content)
+	}
+	if parts[0].ImageURL.URL != "data:image/png;base64,YWJj" || parts[0].ImageURL.Detail != "high" || parts[1].ImageURL.URL != "data:image/jpeg;base64,ZGVm" {
+		t.Fatalf("rich image order = %+v", parts)
+	}
+}
+
+func TestBuildMessagesRichToolResultKeepsEmptyToolString(t *testing.T) {
+	messages := buildMessages(llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{
+		Kind: llm.BlockToolResult, ResultForID: "call_1",
+		ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "YWJj"}},
+	}}})
+	if len(messages) != 2 || messages[0].Role != "tool" || messages[0].ToolCallID != "call_1" || messages[0].Content != "" || messages[1].Role != "user" {
+		t.Fatalf("messages = %+v, want empty tool string followed by image user message", messages)
+	}
+}
+
 func TestBuildRequestOmitsCompactionMetadata(t *testing.T) {
 	req := basicRequest()
 	req.Messages[0].Origin = llm.MessageOriginCompactionCheckpoint

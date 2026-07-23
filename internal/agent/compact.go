@@ -326,22 +326,30 @@ func (a *Agent) noticeCurrentShrink(sink EventSink, trigger string, before, afte
 	sink.Notice(fmt.Sprintf("[compacted: archived oversized turn payload · ctx ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
 }
 
-// cloneMessages returns a copy of msgs in which each message's Content slice is a
-// fresh, independent slice. The in-place degrade/trim helpers only ever replace
-// whole ContentBlock fields (never mutate a backing array), so a shallow copy of
-// each Content slice is enough to keep mutations off the live transcript — the
-// same approach prepareSummaryMessages uses for the summary input.
+// cloneMessages returns a deep-enough copy of msgs for transcript rewrites.
+// Content and nested rich tool-result content get independent backing slices, as
+// do the other message-owned slices that compaction may retain or mutate.
 func cloneMessages(msgs []llm.Message) []llm.Message {
 	out := make([]llm.Message, len(msgs))
 	for i, m := range msgs {
 		out[i] = m
-		out[i].Content = make([]llm.ContentBlock, len(m.Content))
-		copy(out[i].Content, m.Content)
+		out[i].Content = cloneContentBlocks(m.Content)
 		out[i].ParallelToolBatches = append([]llm.ParallelToolBatch(nil), m.ParallelToolBatches...)
 		for j := range out[i].ParallelToolBatches {
 			out[i].ParallelToolBatches[j].ToolUseIDs = append([]string(nil), m.ParallelToolBatches[j].ToolUseIDs...)
 		}
 		out[i].Compaction = cloneCompactionMetadata(m.Compaction)
+	}
+	return out
+}
+
+func cloneContentBlocks(blocks []llm.ContentBlock) []llm.ContentBlock {
+	if blocks == nil {
+		return nil
+	}
+	out := append([]llm.ContentBlock(nil), blocks...)
+	for i := range out {
+		out[i].ResultContent = cloneContentBlocks(blocks[i].ResultContent)
 	}
 	return out
 }
@@ -515,6 +523,9 @@ func (a *Agent) streamSummary(ctx context.Context, system string, older []llm.Me
 		MaxTokens: maxTokens,
 		Reasoning: llm.ReasoningConfig{},
 	}
+	if err := validateRequestImageContent(req.Messages); err != nil {
+		return "", llm.Usage{}, "", fmt.Errorf("validate compaction request images: %w", err)
+	}
 	var total llm.Usage
 	for attempt := 0; ; attempt++ {
 		text, usage, stop, err := a.collectSummary(ctx, req)
@@ -616,19 +627,28 @@ func prepareSummaryMessages(msgs []llm.Message, maxToolResultBytes int) []llm.Me
 	}
 	out := make([]llm.Message, len(msgs))
 	for i, m := range msgs {
-		out[i] = llm.Message{Role: m.Role, Time: m.Time, Phase: m.Phase, Content: make([]llm.ContentBlock, len(m.Content))}
-		copy(out[i].Content, m.Content)
-		for j, b := range out[i].Content {
-			switch {
-			case b.Kind == llm.BlockToolResult && len(b.ResultText) > maxToolResultBytes:
-				out[i].Content[j].ResultText = b.ResultText[:maxToolResultBytes] +
-					fmt.Sprintf("\n[summary input truncated: showing first %d of %d bytes; raw content archived if compaction succeeds]", maxToolResultBytes, len(b.ResultText))
-			case b.Kind == llm.BlockToolUse && len(b.ToolInput) > maxToolResultBytes:
-				out[i].Content[j].ToolInput, _ = shortenedToolInput(b.ToolInput, maxToolResultBytes)
-			case b.Kind == llm.BlockImage && len(b.ImageData) > maxToolResultBytes:
-				out[i].Content[j] = llm.ContentBlock{
-					Kind: llm.BlockText,
-					Text: imageSummaryPlaceholder(b),
+		out[i] = llm.Message{Role: m.Role, Time: m.Time, Phase: m.Phase, Content: cloneContentBlocks(m.Content)}
+		for j := range out[i].Content {
+			b := &out[i].Content[j]
+			switch b.Kind {
+			case llm.BlockToolResult:
+				if len(b.ResultText) > maxToolResultBytes {
+					b.ResultText = b.ResultText[:maxToolResultBytes] +
+						fmt.Sprintf("\n[summary input truncated: showing first %d of %d bytes; raw content archived if compaction succeeds]", maxToolResultBytes, len(b.ResultText))
+				}
+				degradeToolResultImages(b, func(child llm.ContentBlock) bool {
+					return len(child.ImageData) > maxToolResultBytes
+				})
+			case llm.BlockToolUse:
+				if len(b.ToolInput) > maxToolResultBytes {
+					b.ToolInput, _ = shortenedToolInput(b.ToolInput, maxToolResultBytes)
+				}
+			case llm.BlockImage:
+				if len(b.ImageData) > maxToolResultBytes {
+					*b = llm.ContentBlock{
+						Kind: llm.BlockText,
+						Text: imageSummaryPlaceholder(*b),
+					}
 				}
 			}
 		}
@@ -661,8 +681,65 @@ func imageSummaryPlaceholder(b llm.ContentBlock) string {
 	if b.ImageMediaType != "" {
 		parts = append(parts, "media "+b.ImageMediaType)
 	}
-	parts = append(parts, fmt.Sprintf("%d bytes", len(b.ImageData)))
+	if b.ImageDetail != "" {
+		parts = append(parts, "detail "+b.ImageDetail)
+	}
+	if b.ImageWidth > 0 || b.ImageHeight > 0 {
+		parts = append(parts, fmt.Sprintf("dimensions %dx%d", b.ImageWidth, b.ImageHeight))
+	}
+	parts = append(parts, fmt.Sprintf("%d encoded bytes", len(b.ImageData)))
 	return "[image omitted from compaction summary: " + strings.Join(parts, ", ") + "]"
+}
+
+// degradeToolResultImages removes matching supplementary images from a rich
+// tool result and appends model-visible descriptions to ResultText. Rich result
+// children are image-only, so putting the descriptions on the parent preserves
+// transcript validity while ensuring the discarded base64 is no longer hidden
+// in a nested slice.
+func degradeToolResultImages(b *llm.ContentBlock, shouldDegrade func(llm.ContentBlock) bool) bool {
+	if b.Kind != llm.BlockToolResult || len(b.ResultContent) == 0 {
+		return false
+	}
+	changed := false
+	kept := make([]llm.ContentBlock, 0, len(b.ResultContent))
+	for _, child := range b.ResultContent {
+		if child.Kind == llm.BlockImage && shouldDegrade(child) {
+			appendResultDescription(b, imageSummaryPlaceholder(child))
+			changed = true
+			continue
+		}
+		kept = append(kept, child)
+	}
+	if !changed {
+		return false
+	}
+	if len(kept) == 0 {
+		b.ResultContent = nil
+	} else {
+		b.ResultContent = kept
+	}
+	return true
+}
+
+func degradeToolResultImageAt(b *llm.ContentBlock, index int) bool {
+	if b.Kind != llm.BlockToolResult || index < 0 || index >= len(b.ResultContent) || b.ResultContent[index].Kind != llm.BlockImage {
+		return false
+	}
+	appendResultDescription(b, imageSummaryPlaceholder(b.ResultContent[index]))
+	copy(b.ResultContent[index:], b.ResultContent[index+1:])
+	b.ResultContent[len(b.ResultContent)-1] = llm.ContentBlock{}
+	b.ResultContent = b.ResultContent[:len(b.ResultContent)-1]
+	if len(b.ResultContent) == 0 {
+		b.ResultContent = nil
+	}
+	return true
+}
+
+func appendResultDescription(b *llm.ContentBlock, description string) {
+	if b.ResultText != "" && !strings.HasSuffix(b.ResultText, "\n") {
+		b.ResultText += "\n"
+	}
+	b.ResultText += description
 }
 
 func splitSummaryChunks(msgs []llm.Message, budget int) [][]llm.Message {
@@ -1016,23 +1093,29 @@ const minTruncResult = 256
 // when no block is large enough to shrink usefully, so the caller stops rather
 // than loops forever (never wedge, design §12).
 func truncateLargestBlock(msgs []llm.Message, dropBytes int) bool {
-	bi, bj, bestLen, kind := -1, -1, 0, llm.BlockText
+	bi, bj, childIndex, bestLen, kind := -1, -1, -1, 0, llm.BlockText
+	consider := func(i, j, child, size int, candidateKind llm.BlockKind) {
+		if size > bestLen {
+			bi, bj, childIndex, bestLen, kind = i, j, child, size, candidateKind
+		}
+	}
 	for i := range msgs {
 		for j := range msgs[i].Content {
 			b := msgs[i].Content[j]
-			var size int
 			switch b.Kind {
 			case llm.BlockToolResult:
-				size = len(b.ResultText)
+				consider(i, j, -1, len(b.ResultText), b.Kind)
+				for child, nested := range b.ResultContent {
+					if nested.Kind == llm.BlockImage {
+						// Rank nested and top-level images by model token weight, not
+						// base64 byte length, so larger text is truncated first (r22).
+						consider(i, j, child, imageTokenEstimate*bytesPerToken, llm.BlockImage)
+					}
+				}
 			case llm.BlockToolUse:
-				size = len(b.ToolInput)
+				consider(i, j, -1, len(b.ToolInput), b.Kind)
 			case llm.BlockImage:
-				// Rank images by their token weight, not base64 byte length, so a
-				// large text result is truncated before an image is dropped (r22).
-				size = imageTokenEstimate * bytesPerToken
-			}
-			if size > bestLen {
-				bi, bj, bestLen, kind = i, j, size, b.Kind
+				consider(i, j, -1, imageTokenEstimate*bytesPerToken, b.Kind)
 			}
 		}
 	}
@@ -1044,6 +1127,9 @@ func truncateLargestBlock(msgs []llm.Message, dropBytes int) bool {
 		orig = string(msgs[bi].Content[bj].ToolInput)
 	}
 	if kind == llm.BlockImage {
+		if childIndex >= 0 {
+			return degradeToolResultImageAt(&msgs[bi].Content[bj], childIndex)
+		}
 		msgs[bi].Content[bj] = llm.ContentBlock{
 			Kind: llm.BlockText,
 			Text: imageSummaryPlaceholder(msgs[bi].Content[bj]),
@@ -1093,16 +1179,26 @@ func estimateTokens(msgs []llm.Message) int {
 	bytes, images := 0, 0
 	for _, m := range msgs {
 		for _, b := range m.Content {
-			if b.Kind == llm.BlockImage {
-				images++
-				bytes += len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName)
-				continue
-			}
-			bytes += len(b.Text) + len(b.ResultText) + len(b.ToolInput) + len(b.ToolName)
-			bytes += len(b.ReasoningID) + len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
+			blockBytes, blockImages := estimateTranscriptContentBlock(b)
+			bytes += blockBytes
+			images += blockImages
 		}
 	}
 	return bytes/bytesPerToken + images*imageTokenEstimate
+}
+
+func estimateTranscriptContentBlock(b llm.ContentBlock) (bytes, images int) {
+	if b.Kind == llm.BlockImage {
+		return len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName), 1
+	}
+	bytes = len(b.Text) + len(b.ResultText) + len(b.ToolInput) + len(b.ToolName)
+	bytes += len(b.ReasoningID) + len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
+	for _, child := range b.ResultContent {
+		childBytes, childImages := estimateTranscriptContentBlock(child)
+		bytes += childBytes
+		images += childImages
+	}
+	return bytes, images
 }
 
 func estimateRequest(req llm.Request, window int) ContextEstimate {
@@ -1119,14 +1215,9 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 	for _, m := range req.Messages {
 		messageBytes += len(m.Role)
 		for _, b := range m.Content {
-			if b.Kind == llm.BlockImage {
-				images++
-				messageBytes += len(b.Kind) + len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName)
-				continue
-			}
-			messageBytes += len(b.Kind) + len(b.Text) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolInput) +
-				len(b.ResultForID) + len(b.ResultText)
-			messageBytes += len(b.ReasoningID) + len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
+			blockBytes, blockImages := estimateRequestContentBlock(b)
+			messageBytes += blockBytes
+			images += blockImages
 		}
 	}
 	messageBytes += len(llm.RequestContextText(req.RequestContext))
@@ -1142,6 +1233,21 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 	est.PayloadMessages = est.Messages
 	est.PayloadTotal = est.Total
 	return est
+}
+
+func estimateRequestContentBlock(b llm.ContentBlock) (bytes, images int) {
+	if b.Kind == llm.BlockImage {
+		return len(b.Kind) + len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName), 1
+	}
+	bytes = len(b.Kind) + len(b.Text) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolInput) +
+		len(b.ResultForID) + len(b.ResultText)
+	bytes += len(b.ReasoningID) + len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
+	for _, child := range b.ResultContent {
+		childBytes, childImages := estimateRequestContentBlock(child)
+		bytes += childBytes
+		images += childImages
+	}
+	return bytes, images
 }
 
 // compactionReport describes semantic turn reclamation and the resulting full

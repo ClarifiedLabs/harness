@@ -4,6 +4,7 @@ package inputimage
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"image"
@@ -12,7 +13,6 @@ import (
 	_ "image/png"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -21,7 +21,8 @@ import (
 
 const (
 	DefaultDetail        = "auto"
-	MaxEncodedBytes      = 10 * 1024 * 1024
+	MaxDecodedBytes      = 10 * 1024 * 1024
+	MaxEncodedBytes      = (MaxDecodedBytes + 2) / 3 * 4
 	MaxTotalEncodedBytes = 32 * 1024 * 1024
 )
 
@@ -96,25 +97,89 @@ func ParseSpec(spec, defaultDetail string) (Attachment, error) {
 	return Attachment{Path: spec, Detail: detail}, nil
 }
 
-// Load reads, validates, and base64-encodes a local image file.
+// Load reads and validates a local image file. It is the synchronous wrapper
+// used by CLI and REPL attachment paths.
 func Load(att Attachment) (Loaded, error) {
-	detail, err := ValidateDetail(att.Detail)
-	if err != nil {
+	return LoadContext(context.Background(), att)
+}
+
+// LoadContext reads and validates a local regular image file. The path is
+// retained only in safe local display metadata; it is never copied into the
+// model-facing block.
+func LoadContext(ctx context.Context, att Attachment) (Loaded, error) {
+	if err := ctx.Err(); err != nil {
 		return Loaded{}, err
 	}
 	path := strings.TrimSpace(att.Path)
 	if path == "" {
 		return Loaded{}, fmt.Errorf("image path is required")
 	}
+	f, err := openRegular(path)
+	if err != nil {
+		return Loaded{}, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return Loaded{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return Loaded{}, fmt.Errorf("image path is not a regular file")
+	}
+	if info.Size() < 0 {
+		return Loaded{}, fmt.Errorf("image has invalid size")
+	}
+	if info.Size() > MaxDecodedBytes {
+		return Loaded{}, fmt.Errorf("image is too large: decoded size %d bytes exceeds %d bytes", info.Size(), MaxDecodedBytes)
+	}
+	data, err := readBoundedContext(ctx, f, MaxDecodedBytes)
+	if err != nil {
+		return Loaded{}, err
+	}
+	loaded, err := LoadBytes(data, filepath.Base(path), att.Detail)
+	if err != nil {
+		return Loaded{}, err
+	}
+	loaded.Info.Path = path
+	return loaded, nil
+}
 
-	data, err := os.ReadFile(path)
+// LoadBytes validates raw image bytes and base64-encodes them exactly once.
+func LoadBytes(data []byte, name, detail string) (Loaded, error) {
+	if len(data) == 0 {
+		return Loaded{}, fmt.Errorf("image is empty")
+	}
+	if len(data) > MaxDecodedBytes {
+		return Loaded{}, fmt.Errorf("image is too large: decoded size %d bytes exceeds %d bytes", len(data), MaxDecodedBytes)
+	}
+	return loadData(data, base64.StdEncoding.EncodeToString(data), "", name, detail)
+}
+
+// LoadBase64 validates an already-encoded image without re-encoding it. The
+// declared media type, when present, must match the sniffed bytes.
+func LoadBase64(encoded, mediaType, name, detail string) (Loaded, error) {
+	if len(encoded) > MaxEncodedBytes {
+		return Loaded{}, fmt.Errorf("image is too large: encoded size %d bytes exceeds %d bytes", len(encoded), MaxEncodedBytes)
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return Loaded{}, fmt.Errorf("decode image data: %w", err)
+	}
+	return loadData(data, encoded, mediaType, name, detail)
+}
+
+func loadData(data []byte, encoded, declaredMediaType, name, detail string) (Loaded, error) {
+	detail, err := ValidateDetail(detail)
 	if err != nil {
 		return Loaded{}, err
 	}
 	if len(data) == 0 {
 		return Loaded{}, fmt.Errorf("image is empty")
 	}
-	encodedLen := base64.StdEncoding.EncodedLen(len(data))
+	if len(data) > MaxDecodedBytes {
+		return Loaded{}, fmt.Errorf("image is too large: decoded size %d bytes exceeds %d bytes", len(data), MaxDecodedBytes)
+	}
+	encodedLen := len(encoded)
 	if encodedLen > MaxEncodedBytes {
 		return Loaded{}, fmt.Errorf("image is too large: encoded size %d bytes exceeds %d bytes", encodedLen, MaxEncodedBytes)
 	}
@@ -123,24 +188,32 @@ func Load(att Attachment) (Loaded, error) {
 	if err != nil {
 		return Loaded{}, err
 	}
+	declaredMediaType = strings.TrimSpace(declaredMediaType)
+	if declaredMediaType != "" && declaredMediaType != mediaType {
+		return Loaded{}, fmt.Errorf("image media type %q does not match detected type %q", declaredMediaType, mediaType)
+	}
 	width, height, err := dimensions(data, mediaType)
 	if err != nil {
 		return Loaded{}, err
 	}
 
-	name := filepath.Base(path)
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "." {
+		name = ""
+	}
 	block := llm.ContentBlock{
-		Kind:           llm.BlockImage,
-		ImageMediaType: mediaType,
-		ImageData:      base64.StdEncoding.EncodeToString(data),
-		ImageDetail:    detail,
-		ImageName:      name,
-		ImageWidth:     width,
-		ImageHeight:    height,
+		Kind:              llm.BlockImage,
+		ImageMediaType:    mediaType,
+		ImageData:         encoded,
+		ImageDetail:       detail,
+		ImageName:         name,
+		ImageWidth:        width,
+		ImageHeight:       height,
+		ImageBytes:        len(data),
+		ImageEncodedBytes: encodedLen,
 	}
 	info := Info{
 		Name:         name,
-		Path:         path,
 		MediaType:    mediaType,
 		Detail:       detail,
 		Bytes:        len(data),
@@ -156,12 +229,127 @@ func Load(att Attachment) (Loaded, error) {
 func ValidateTotal(images []Loaded) error {
 	var total int
 	for _, image := range images {
+		if image.Info.EncodedBytes < 0 || image.Info.EncodedBytes > MaxTotalEncodedBytes-total {
+			return fmt.Errorf("images are too large: encoded total exceeds %d bytes", MaxTotalEncodedBytes)
+		}
 		total += image.Info.EncodedBytes
 	}
+	return validateEncodedTotal(total)
+}
+
+// ValidateBlocks validates image payload accounting and adds it to an existing
+// request-wide encoded total without decoding base64 again.
+func ValidateBlocks(images []llm.ContentBlock, initialTotal int) (int, error) {
+	if initialTotal < 0 || initialTotal > MaxTotalEncodedBytes {
+		return 0, fmt.Errorf("images are too large: encoded total exceeds %d bytes", MaxTotalEncodedBytes)
+	}
+	total := initialTotal
+	for _, image := range images {
+		if image.Kind != llm.BlockImage {
+			return 0, fmt.Errorf("image batch contains non-image block %q", image.Kind)
+		}
+		size := len(image.ImageData)
+		if size > MaxEncodedBytes {
+			return 0, fmt.Errorf("image is too large: encoded size %d bytes exceeds %d bytes", size, MaxEncodedBytes)
+		}
+		if image.ImageEncodedBytes != 0 && image.ImageEncodedBytes != size {
+			return 0, fmt.Errorf("image encoded size metadata does not match payload")
+		}
+		if size > MaxTotalEncodedBytes-total {
+			return 0, fmt.Errorf("images are too large: encoded total exceeds %d bytes", MaxTotalEncodedBytes)
+		}
+		total += size
+	}
+	return total, nil
+}
+
+// ValidateMessages enforces per-image and aggregate encoded limits over a
+// complete message set. It returns the validated total for incremental rich
+// tool-result accounting.
+func ValidateMessages(messages []llm.Message) (int, error) {
+	total := 0
+	for _, message := range messages {
+		for _, block := range message.Content {
+			var err error
+			switch block.Kind {
+			case llm.BlockImage:
+				total, err = ValidateBlocks([]llm.ContentBlock{block}, total)
+			case llm.BlockToolResult:
+				total, err = ValidateBlocks(block.ResultContent, total)
+			}
+			if err != nil {
+				return 0, err
+			}
+		}
+	}
+	return total, nil
+}
+
+func validateEncodedTotal(total int) error {
 	if total > MaxTotalEncodedBytes {
 		return fmt.Errorf("images are too large: encoded total %d bytes exceeds %d bytes", total, MaxTotalEncodedBytes)
 	}
 	return nil
+}
+
+func readBoundedContext(ctx context.Context, r io.Reader, limit int) ([]byte, error) {
+	if limit < 0 {
+		return nil, fmt.Errorf("invalid image read limit")
+	}
+	const chunkSize = 32 * 1024
+	initial := chunkSize
+	if limit+1 < initial {
+		initial = limit + 1
+	}
+	data := make([]byte, 0, initial)
+	buf := make([]byte, chunkSize)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		remaining := limit + 1 - len(data)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("image is too large: decoded size exceeds %d bytes", limit)
+		}
+		readBuf := buf
+		if len(readBuf) > remaining {
+			readBuf = readBuf[:remaining]
+		}
+		n, err := r.Read(readBuf)
+		if n < 0 || n > len(readBuf) {
+			return nil, fmt.Errorf("read image: invalid read count %d", n)
+		}
+		if n > 0 {
+			required := len(data) + n
+			if required > cap(data) {
+				nextCap := cap(data) * 2
+				if nextCap < required {
+					nextCap = required
+				}
+				if nextCap > limit+1 {
+					nextCap = limit + 1
+				}
+				grown := make([]byte, len(data), nextCap)
+				copy(grown, data)
+				data = grown
+			}
+			data = append(data, readBuf[:n]...)
+			if len(data) > limit {
+				return nil, fmt.Errorf("image is too large: decoded size exceeds %d bytes", limit)
+			}
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		switch {
+		case err == io.EOF:
+			return data, nil
+		case err != nil:
+			return nil, err
+		case n == 0:
+			return nil, io.ErrNoProgress
+		}
+	}
 }
 
 func detectMediaType(data []byte) (string, error) {

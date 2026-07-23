@@ -1,6 +1,9 @@
 package llm
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestResolveMaxTokensUnknownOutputLimit(t *testing.T) {
 	req := Request{EstimatedInputTokens: 1000}
@@ -54,6 +57,34 @@ func TestResolveMaxTokensKnownOutputUnknownContext(t *testing.T) {
 	req := Request{EstimatedInputTokens: 1000}
 	if got := ResolveMaxTokens(req, 0, 64_000); got != 0 {
 		t.Fatalf("ResolveMaxTokens = %d, want 0", got)
+	}
+}
+
+func TestEstimateInputTokensCountsToolResultImagesWithoutBase64Text(t *testing.T) {
+	image := ContentBlock{
+		Kind:           BlockImage,
+		ImageMediaType: "image/png",
+		ImageData:      "YWJj",
+		ImageDetail:    "high",
+		ImageName:      "screen.png",
+	}
+	base := Request{Messages: []Message{{Role: RoleUser, Content: []ContentBlock{{Kind: BlockToolResult, ResultForID: "call_1", ResultText: "attached"}}}}}
+	rich := base
+	rich.Messages = []Message{{Role: RoleUser, Content: []ContentBlock{{Kind: BlockToolResult, ResultForID: "call_1", ResultText: "attached", ResultContent: []ContentBlock{image}}}}}
+
+	baseTokens := EstimateInputTokens(base)
+	richTokens := EstimateInputTokens(rich)
+	metadataBytes := len(image.Kind) + len(image.ImageMediaType) + len(image.ImageDetail) + len(image.ImageName)
+	wantDelta := metadataBytes/estimateBytesPerToken + estimateImageTokens
+	// Integer division happens after all request bytes, so one token of rounding
+	// drift is possible relative to dividing the image metadata separately.
+	if delta := richTokens - baseTokens; delta < wantDelta-1 || delta > wantDelta+1 {
+		t.Fatalf("rich image token delta = %d, want about %d", delta, wantDelta)
+	}
+
+	rich.Messages[0].Content[0].ResultContent[0].ImageData = strings.Repeat("A", 1<<20)
+	if got := EstimateInputTokens(rich); got != richTokens {
+		t.Fatalf("base64 counted as text: got %d after data growth, want %d", got, richTokens)
 	}
 }
 

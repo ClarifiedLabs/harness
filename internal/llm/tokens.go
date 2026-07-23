@@ -20,17 +20,27 @@ func EstimateInputTokens(req Request) int {
 	for _, m := range req.Messages {
 		bytes += len(m.Role)
 		for _, b := range m.Content {
-			if b.Kind == BlockImage {
-				images++
-				bytes += len(b.Kind) + len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName)
-				continue
-			}
-			bytes += len(b.Kind) + len(b.Text) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolInput) +
-				len(b.ResultForID) + len(b.ResultText)
+			blockBytes, blockImages := estimateContentBlock(b)
+			bytes += blockBytes
+			images += blockImages
 		}
 	}
 	bytes += len(RequestContextText(req.RequestContext))
 	return bytes/estimateBytesPerToken + images*estimateImageTokens
+}
+
+func estimateContentBlock(b ContentBlock) (bytes, images int) {
+	if b.Kind == BlockImage {
+		return len(b.Kind) + len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName), 1
+	}
+	bytes = len(b.Kind) + len(b.Text) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolInput) +
+		len(b.ResultForID) + len(b.ResultText)
+	for _, child := range b.ResultContent {
+		childBytes, childImages := estimateContentBlock(child)
+		bytes += childBytes
+		images += childImages
+	}
+	return bytes, images
 }
 
 // EffectiveContextWindow combines provider config with a per-request hint. When

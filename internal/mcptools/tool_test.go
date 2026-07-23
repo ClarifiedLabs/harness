@@ -2,6 +2,7 @@ package mcptools
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -127,6 +128,156 @@ func TestRenderContent(t *testing.T) {
 				t.Fatalf("renderContent() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunRichPreservesDirectImageAndInvokesOnce(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+	provider := &scriptedProvider{result: &mcp.CallToolResult{Content: []mcp.ContentBlock{
+		{Type: "text", Text: "preview"},
+		{Type: "image", MimeType: "image/png", Data: png},
+		{Type: "audio", MimeType: "audio/wav"},
+	}}}
+	conn, cleanup := newScriptedConn(t, provider, []mcp.Tool{{Name: "mcp__test__image", InputSchema: json.RawMessage(`{"type":"object"}`)}})
+	defer cleanup()
+	reg := &tools.Registry{}
+	if _, err := Register(context.Background(), reg, conn); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	res := reg.Dispatch(context.Background(), llm.ToolCall{ID: "c1", Name: "mcp__test__image", Input: json.RawMessage(`{}`)})
+	if res.IsError || provider.callCount() != 1 {
+		t.Fatalf("result = %+v; calls = %d", res, provider.callCount())
+	}
+	if !strings.Contains(res.Text, "preview\n[image attached: image/png, 1x1, 69 bytes]\n[audio: audio/wav]") {
+		t.Fatalf("rich text = %q", res.Text)
+	}
+	if len(res.Content) != 1 || res.Content[0].ImageData != png || res.Content[0].ImageMediaType != "image/png" {
+		t.Fatalf("rich content = %+v", res.Content)
+	}
+}
+
+func TestRunRichInvalidImageBecomesTextPlaceholder(t *testing.T) {
+	provider := &scriptedProvider{result: &mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "image", MimeType: "image/png", Data: "not-base64"}}}}
+	conn, cleanup := newScriptedConn(t, provider, []mcp.Tool{{Name: "mcp__test__image", InputSchema: json.RawMessage(`{"type":"object"}`)}})
+	defer cleanup()
+	reg := &tools.Registry{}
+	if _, err := Register(context.Background(), reg, conn); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	res := reg.Dispatch(context.Background(), llm.ToolCall{ID: "c1", Name: "mcp__test__image", Input: json.RawMessage(`{}`)})
+	if res.IsError || len(res.Content) != 0 || !strings.Contains(res.Text, "[invalid image: image/png:") || strings.Contains(res.Text, "not-base64") {
+		t.Fatalf("invalid image result = %+v", res)
+	}
+	if provider.callCount() != 1 {
+		t.Fatalf("calls = %d, want 1", provider.callCount())
+	}
+}
+
+func TestRenderRichContentPreservesMultipleImages(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+	text, content, err := renderRichContent(&mcp.CallToolResult{Content: []mcp.ContentBlock{
+		{Type: "image", MimeType: "image/png", Data: png},
+		{Type: "text", Text: "between"},
+		{Type: "image", MimeType: "image/png", Data: png},
+	}})
+	if err != nil {
+		t.Fatalf("renderRichContent: %v", err)
+	}
+	if len(content) != 2 || content[0].ImageData != png || content[1].ImageData != png {
+		t.Fatalf("content = %+v, want two ordered images", content)
+	}
+	if strings.Count(text, "[image attached: image/png") != 2 || !strings.Contains(text, "\nbetween\n") {
+		t.Fatalf("text = %q, want ordered image placeholders around text", text)
+	}
+}
+
+func TestRenderRichContentInvalidFormatsUseBoundedPlaceholders(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+	longMIME := "image/" + strings.Repeat("private", 100)
+	tests := []struct {
+		name  string
+		block mcp.ContentBlock
+	}{
+		{name: "MIME mismatch", block: mcp.ContentBlock{Type: "image", MimeType: "image/jpeg", Data: png}},
+		{name: "unsupported format", block: mcp.ContentBlock{Type: "image", MimeType: "image/svg+xml", Data: base64.StdEncoding.EncodeToString([]byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`))}},
+		{name: "long private label", block: mcp.ContentBlock{Type: "image", MimeType: longMIME, Data: "not-base64"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			text, content, err := renderRichContent(&mcp.CallToolResult{Content: []mcp.ContentBlock{tt.block}})
+			if err != nil {
+				t.Fatalf("renderRichContent: %v", err)
+			}
+			if len(content) != 0 || !strings.HasPrefix(text, "[invalid image:") || len(text) > 400 {
+				t.Fatalf("result text = %q; content = %+v", text, content)
+			}
+			if strings.Contains(text, longMIME) || strings.Contains(text, tt.block.Data) {
+				t.Fatalf("placeholder leaked unbounded label or payload: %q", text)
+			}
+		})
+	}
+}
+
+func TestRenderRichContentBoundsNonTextPlaceholders(t *testing.T) {
+	long := strings.Repeat("private", 400)
+	resource, err := json.Marshal(map[string]string{"uri": long})
+	if err != nil {
+		t.Fatalf("marshal resource: %v", err)
+	}
+	text, content, err := renderRichContent(&mcp.CallToolResult{Content: []mcp.ContentBlock{
+		{Type: "audio", MimeType: long},
+		{Type: "resource_link", URI: long, Name: long},
+		{Type: "resource", Resource: resource},
+		{Type: long},
+	}})
+	if err != nil {
+		t.Fatalf("renderRichContent: %v", err)
+	}
+	if len(content) != 0 || len(text) > 1000 {
+		t.Fatalf("text length = %d; content = %+v, want bounded text-only placeholders", len(text), content)
+	}
+	if strings.Contains(text, long) {
+		t.Fatalf("placeholder leaked unbounded MCP value: %q", text)
+	}
+}
+
+func TestRenderRichContentRejectsAggregateImageOverflow(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+	raw, err := base64.StdEncoding.DecodeString(png)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	const paddedBytes = 9 * 1024 * 1024
+	raw = append(raw, make([]byte, paddedBytes-len(raw))...)
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	_, content, err := renderRichContent(&mcp.CallToolResult{Content: []mcp.ContentBlock{
+		{Type: "image", MimeType: "image/png", Data: encoded},
+		{Type: "image", MimeType: "image/png", Data: encoded},
+		{Type: "image", MimeType: "image/png", Data: encoded},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "encoded total") {
+		t.Fatalf("error = %v, want encoded total size error", err)
+	}
+	if content != nil {
+		t.Fatalf("content = %+v, want nil on aggregate overflow", content)
+	}
+}
+
+func TestRunRichMCPErrorRemainsTextOnly(t *testing.T) {
+	provider := &scriptedProvider{result: &mcp.CallToolResult{IsError: true, Content: []mcp.ContentBlock{{Type: "image", MimeType: "image/png", Data: "secret"}, {Type: "text", Text: "remote failed"}}}}
+	conn, cleanup := newScriptedConn(t, provider, []mcp.Tool{{Name: "mcp__test__image", InputSchema: json.RawMessage(`{"type":"object"}`)}})
+	defer cleanup()
+	reg := &tools.Registry{}
+	if _, err := Register(context.Background(), reg, conn); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	res := reg.Dispatch(context.Background(), llm.ToolCall{ID: "c1", Name: "mcp__test__image", Input: json.RawMessage(`{}`)})
+	if !res.IsError || len(res.Content) != 0 || strings.Contains(res.Text, "secret") || !strings.Contains(res.Text, "remote failed") {
+		t.Fatalf("error result = %+v", res)
+	}
+	if provider.callCount() != 1 {
+		t.Fatalf("calls = %d, want 1", provider.callCount())
 	}
 }
 

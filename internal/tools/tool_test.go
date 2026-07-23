@@ -11,6 +11,8 @@ import (
 	"harness/internal/llm"
 )
 
+const toolOnePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+
 // fakeTool is a configurable Tool for exercising Dispatch.
 type fakeTool struct {
 	name     string
@@ -64,6 +66,31 @@ type resultFakeTool struct {
 func (f resultFakeTool) RunResult(context.Context, json.RawMessage) (RunResult, error) {
 	return f.result, f.err
 }
+
+type richFakeTool struct {
+	fakeTool
+	result     RichResult
+	err        error
+	richRuns   *int
+	legacyRuns *int
+	modality   string
+}
+
+func (f richFakeTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	if f.legacyRuns != nil {
+		*f.legacyRuns++
+	}
+	return f.fakeTool.Run(ctx, input)
+}
+
+func (f richFakeTool) RunRich(context.Context, json.RawMessage) (RichResult, error) {
+	if f.richRuns != nil {
+		*f.richRuns++
+	}
+	return f.result, f.err
+}
+
+func (f richFakeTool) RequiredInputModality() string { return f.modality }
 
 func TestRegistrySpecsOrdered(t *testing.T) {
 	r := &Registry{}
@@ -232,6 +259,59 @@ func TestDispatchPreservesMeteredToolUsage(t *testing.T) {
 	}
 	if res.Usage.InputTokens != 7 || res.Usage.OutputTokens != 3 {
 		t.Fatalf("usage = %+v, want 7 input / 3 output", res.Usage)
+	}
+}
+
+func TestDispatchRichToolExactlyOnceAndTruncatesOnlyText(t *testing.T) {
+	richRuns, legacyRuns := 0, 0
+	image := llm.ContentBlock{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: toolOnePixelPNG, ImageDetail: "high"}
+	r := &Registry{}
+	r.SetResultLimits(4, 0)
+	r.Register(richFakeTool{
+		fakeTool:   newOK("rich", "legacy should not run"),
+		result:     RichResult{Text: "abcdefgh", Content: []llm.ContentBlock{image}, Usage: llm.Usage{InputTokens: 7}},
+		richRuns:   &richRuns,
+		legacyRuns: &legacyRuns,
+		modality:   "image",
+	})
+
+	call := llm.ToolCall{ID: "rich_1", Name: "rich", Input: json.RawMessage(`{}`)}
+	res := r.Dispatch(context.Background(), call)
+	if res.IsError || !res.Truncated || len(res.Content) != 1 || res.Content[0].ImageData != image.ImageData {
+		t.Fatalf("dispatch result = %+v", res)
+	}
+	if richRuns != 1 || legacyRuns != 0 {
+		t.Fatalf("execution counts rich=%d legacy=%d, want 1/0", richRuns, legacyRuns)
+	}
+	if res.Usage.InputTokens != 7 {
+		t.Fatalf("usage = %+v", res.Usage)
+	}
+	if modality, ok := r.RequiredModality(call); !ok || modality != "image" {
+		t.Fatalf("RequiredModality = %q, %v", modality, ok)
+	}
+}
+
+func TestDispatchRichToolRejectsInvalidOrErroredContent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content []llm.ContentBlock
+		err     error
+	}{
+		{name: "text child", content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "not allowed"}}},
+		{name: "nested result", content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "nested"}}},
+		{name: "execution error", content: []llm.ContentBlock{{Kind: llm.BlockImage, ImageData: "secret"}}, err: fmt.Errorf("failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Registry{}
+			r.Register(richFakeTool{fakeTool: newOK("rich", "legacy"), result: RichResult{Text: "text", Content: tc.content}, err: tc.err})
+			res := r.Dispatch(context.Background(), llm.ToolCall{ID: "r", Name: "rich", Input: json.RawMessage(`{}`)})
+			if !res.IsError || len(res.Content) != 0 {
+				t.Fatalf("dispatch result = %+v, want text-only error", res)
+			}
+			if strings.Contains(res.Text, "secret") {
+				t.Fatalf("image data leaked into error: %q", res.Text)
+			}
+		})
 	}
 }
 
@@ -644,7 +724,7 @@ func expectedDefaultNames() []string {
 }
 
 func expectedDefaultNamesForSearch(mode string) []string {
-	want := []string{"read_file", "list_dir", "glob"}
+	want := []string{"read_file", "view_image", "list_dir", "glob"}
 	switch mode {
 	case SearchToolsBoth:
 		want = append(want, "grep")

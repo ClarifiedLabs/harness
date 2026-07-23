@@ -119,6 +119,12 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 			Message:      "slow down",
 			Retryable:    true,
 			RetryAfterMS: 250,
+			Diagnostic: &llm.APIErrorDiagnostic{
+				Stage:             llm.APIErrorStageUpstreamStream,
+				ProxyRequestID:    123,
+				UpstreamRequestID: "upstream-456",
+				TraceID:           "trace-789",
+			},
 		}})
 	}))
 	defer srv.Close()
@@ -161,6 +167,9 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 	}
 	if apiErr.RetryAfter != 250*time.Millisecond {
 		t.Fatalf("retry after = %v, want 250ms", apiErr.RetryAfter)
+	}
+	if apiErr.Diagnostic == nil || apiErr.Diagnostic.ProxyRequestID != 123 || apiErr.Diagnostic.UpstreamRequestID != "upstream-456" || apiErr.Diagnostic.TraceID != "trace-789" {
+		t.Fatalf("diagnostic = %+v", apiErr.Diagnostic)
 	}
 }
 

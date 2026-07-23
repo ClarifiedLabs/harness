@@ -349,6 +349,7 @@ func buildMessages(m llm.Message) []wireMessage {
 	var parts []wireContentPart
 	var calls []wireToolCall
 	var results []wireMessage
+	var resultImages []wireContentPart
 
 	flushTextPart := func() {
 		if text == "" {
@@ -399,11 +400,24 @@ func buildMessages(m llm.Message) []wireMessage {
 				Content:    content,
 				ToolCallID: b.ResultForID,
 			})
+			for _, child := range b.ResultContent {
+				resultImages = append(resultImages, wireContentPart{
+					Type: "image_url",
+					ImageURL: &wireImageURL{
+						URL:    llm.ImageDataURL(child),
+						Detail: child.ImageDetail,
+					},
+				})
+			}
 		}
 	}
 
-	// Tool results stand alone as sibling messages.
+	// Tool strings stand alone as sibling messages. Rich images follow all tool
+	// strings in one neighboring user message, preserving result and child order.
 	if len(results) > 0 {
+		if len(resultImages) > 0 {
+			results = append(results, wireMessage{Role: string(llm.RoleUser), Content: resultImages})
+		}
 		return results
 	}
 

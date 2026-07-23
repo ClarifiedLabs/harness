@@ -61,6 +61,29 @@ func TestToolSummaryLine(t *testing.T) {
 	}
 }
 
+func TestToolSummaryRichImagesUsesSafeMetadata(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{Verbose: true})
+	payload := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+	r.ToolStart(llm.ToolCall{ID: "image_1", Name: "view_image", Input: json.RawMessage(`{"path":"/private/screen.png"}`)})
+	r.ToolResult(llm.ToolResult{
+		ForID: "image_1",
+		Text:  "image attached",
+		Content: []llm.ContentBlock{{
+			Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: payload,
+			ImageDetail: "high", ImageWidth: 1, ImageHeight: 1,
+		}},
+	})
+
+	got := errw.String()
+	if !strings.Contains(got, "1 image (image/png") || !strings.Contains(got, "1x1") || !strings.Contains(got, "detail=high") {
+		t.Fatalf("rich summary = %q", got)
+	}
+	if strings.Contains(got, payload) {
+		t.Fatalf("base64 leaked into rich summary: %q", got)
+	}
+}
+
 func TestToolSummaryErrorMarked(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{})

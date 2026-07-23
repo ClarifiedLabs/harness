@@ -70,17 +70,17 @@ func (s *sessionLogSink) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func newHarnessLogger(w io.Writer, levelName, sessionDir string, enableSessionDiagnostics bool) (*slog.Logger, *sessionLogSink, error) {
+func newHarnessLogger(w io.Writer, levelName, sessionDir string, enableSessionDiagnostics bool) (*slog.Logger, *slog.Logger, *sessionLogSink, error) {
 	level, err := logging.ParseLevel(levelName)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	display := logging.NewPlainHandler(w, logging.HandlerOptions{Level: level})
 	if !enableSessionDiagnostics {
-		return slog.New(display), nil, nil
+		return slog.New(display), nil, nil, nil
 	}
 
 	sink := newSessionLogSink(sessionDir)
 	diagnostics := slog.NewJSONHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug})
-	return slog.New(logging.NewTeeHandler(display, diagnostics)), sink, nil
+	return slog.New(logging.NewTeeHandler(display, diagnostics)), slog.New(diagnostics), sink, nil
 }

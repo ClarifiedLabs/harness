@@ -15,6 +15,8 @@ import (
 	"harness/internal/todo"
 )
 
+const sessionOnePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+
 func TestReplayQuietSuppressesStatusLines(t *testing.T) {
 	dir := t.TempDir()
 
@@ -287,7 +289,7 @@ func TestSaveLoadPreservesImageBlocks(t *testing.T) {
 	s.Messages = []llm.Message{{
 		Role: llm.RoleUser,
 		Content: []llm.ContentBlock{
-			{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "abc123", ImageDetail: "high", ImageName: "screen.png", ImageWidth: 1, ImageHeight: 1},
+			{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: sessionOnePixelPNG, ImageDetail: "high", ImageName: "screen.png", ImageWidth: 1, ImageHeight: 1},
 			{Kind: llm.BlockText, Text: "describe it"},
 		},
 	}}
@@ -303,8 +305,64 @@ func TestSaveLoadPreservesImageBlocks(t *testing.T) {
 	if len(content) != 2 || content[0].Kind != llm.BlockImage {
 		t.Fatalf("content = %+v, want image + text", content)
 	}
-	if content[0].ImageData != "abc123" || content[0].ImageDetail != "high" || content[0].ImageWidth != 1 {
+	if content[0].ImageData != sessionOnePixelPNG || content[0].ImageDetail != "high" || content[0].ImageWidth != 1 {
 		t.Fatalf("image block = %+v", content[0])
+	}
+}
+
+func TestSaveToolResultArtifactIgnoresRichImageContent(t *testing.T) {
+	dir := t.TempDir()
+	result := llm.ToolResult{
+		ForID:        "call_image",
+		Text:         "truncated summary",
+		Truncated:    true,
+		OriginalText: "full textual output",
+		Content: []llm.ContentBlock{{
+			Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "SECRET_BASE64_PAYLOAD", ImageName: "private/path.png",
+		}},
+	}
+	rel, err := SaveToolResultArtifact(dir, 1, 2, result)
+	if err != nil {
+		t.Fatalf("SaveToolResultArtifact: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, rel))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if got := string(data); got != result.OriginalText {
+		t.Fatalf("artifact = %q, want only original text %q", got, result.OriginalText)
+	}
+	if bytes.Contains(data, []byte("SECRET_BASE64_PAYLOAD")) || bytes.Contains(data, []byte("private/path.png")) {
+		t.Fatalf("artifact leaked rich image content: %q", data)
+	}
+}
+
+func TestSaveLoadPreservesRichToolResult(t *testing.T) {
+	s := sampleSession()
+	s.Messages = []llm.Message{
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "call_image", ToolName: "view_image", ToolInput: json.RawMessage(`{"path":"screen.png"}`)}}},
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{
+			Kind: llm.BlockToolResult, ResultForID: "call_image", ResultText: "screen.png attached",
+			ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: sessionOnePixelPNG, ImageDetail: "high", ImageWidth: 1, ImageHeight: 1, ImageBytes: 69, ImageEncodedBytes: len(sessionOnePixelPNG)}},
+		}}},
+	}
+	if err := llm.ValidateTranscript(s.Messages); err != nil {
+		t.Fatalf("ValidateTranscript before save: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "session")
+	if err := s.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := llm.ValidateTranscript(got.Messages); err != nil {
+		t.Fatalf("ValidateTranscript after load: %v", err)
+	}
+	child := got.Messages[1].Content[0].ResultContent[0]
+	if child.ImageData != sessionOnePixelPNG || child.ImageDetail != "high" || child.ImageBytes != 69 || child.ImageEncodedBytes != len(sessionOnePixelPNG) {
+		t.Fatalf("rich child = %+v", child)
 	}
 }
 

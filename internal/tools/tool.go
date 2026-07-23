@@ -62,6 +62,28 @@ type ResultTool interface {
 	RunResult(ctx context.Context, input json.RawMessage) (RunResult, error)
 }
 
+// RichResult carries a tool's ordinary text plus shallow supplementary image
+// content. Dispatch truncates only Text and preserves Usage.
+type RichResult struct {
+	Text    string
+	Content []llm.ContentBlock
+	Usage   llm.Usage
+}
+
+// RichTool is an optional extension for tools that can return supplementary
+// image content. Dispatch prefers it over every legacy execution path and calls
+// exactly one execution method.
+type RichTool interface {
+	RunRich(ctx context.Context, input json.RawMessage) (RichResult, error)
+}
+
+// RequiredInputModality is an optional proactive capability declaration. It is
+// intentionally separate from RichTool because dynamically rich tools such as
+// MCP may not know their result modality until after execution.
+type RequiredInputModality interface {
+	RequiredInputModality() string
+}
+
 // FileMutationReporter is implemented by tools that can identify the file paths
 // they may mutate from their JSON input. The agent uses this for optional
 // user-facing before/after diff display; Dispatch and model-visible results do
@@ -233,6 +255,7 @@ func registerFileTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 	r.SetToolResultLimits("read_file",
 		defaultToolResultBytes(opts.ReadFileResultBytes, opts.ReadFileResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultReadFileResultBytes),
 		defaultToolResultLines(opts.ReadFileResultBytes, opts.ReadFileResultLines, opts.MaxResultBytes, opts.MaxResultLines, 0))
+	r.Register(viewImage{})
 	r.Register(listDir{})
 	r.Register(glob{})
 	registerSearchTools(r, disabled, opts)
@@ -617,6 +640,21 @@ func (r *Registry) MutatedPaths(call llm.ToolCall) (paths []string, ok bool) {
 // ReadPaths reports the requested file paths for a call when its tool provides
 // that metadata. Unknown tools, non-reporting tools, and invalid inputs return
 // ok=false so optional observers can silently skip them.
+// RequiredModality reports a tool's proactive input-modality requirement.
+// Unknown tools and modality-neutral tools return ok=false.
+func (r *Registry) RequiredModality(call llm.ToolCall) (modality string, ok bool) {
+	t, found := r.tools[call.Name]
+	if !found {
+		return "", false
+	}
+	required, ok := t.(RequiredInputModality)
+	if !ok {
+		return "", false
+	}
+	modality = strings.TrimSpace(required.RequiredInputModality())
+	return modality, modality != ""
+}
+
 func (r *Registry) ReadPaths(call llm.ToolCall) (paths []string, ok bool) {
 	t, found := r.tools[call.Name]
 	if !found {
@@ -698,6 +736,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 	type outcome struct {
 		out      string
 		original string
+		content  []llm.ContentBlock
 		usage    llm.Usage
 		err      error
 	}
@@ -709,6 +748,11 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 				done <- outcome{err: fmt.Errorf("tool panicked: %v", rec)}
 			}
 		}()
+		if rich, ok := t.(RichTool); ok {
+			result, err := rich.RunRich(ctx, input)
+			done <- outcome{out: result.Text, content: result.Content, usage: result.Usage, err: err}
+			return
+		}
 		if rt, ok := t.(ResultTool); ok {
 			result, err := rt.RunResult(ctx, input)
 			done <- outcome{out: result.Text, original: result.OriginalText, usage: result.Usage, err: err}
@@ -725,11 +769,12 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 
 	var out string
 	var original string
+	var content []llm.ContentBlock
 	var usage llm.Usage
 	var err error
 	select {
 	case o := <-done:
-		out, original, usage, err = o.out, o.original, o.usage, o.err
+		out, original, content, usage, err = o.out, o.original, o.content, o.usage, o.err
 	case <-ctx.Done():
 		// The Run goroutine is abandoned if it ignores ctx; its eventual send
 		// lands in the buffered channel and is dropped. The abandoned Run may
@@ -766,7 +811,13 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		return res
 	}
 
+	if err := llm.ValidateToolResultContent(content, false); err != nil {
+		res.Text = "invalid rich tool result: " + err.Error()
+		res.IsError = true
+		return res
+	}
 	prepared := r.PrepareResultWithOriginal(call.Name, call.ID, out, original)
+	prepared.Content = append([]llm.ContentBlock(nil), content...)
 	prepared.Usage = usage
 	return prepared
 }

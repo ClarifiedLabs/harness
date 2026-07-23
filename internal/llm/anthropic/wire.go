@@ -85,9 +85,10 @@ type wireContent struct {
 	Name  string          `json:"name,omitempty"`
 	Input json.RawMessage `json:"input,omitempty"`
 
-	// tool_result
+	// tool_result. Content remains a string for text-only results and becomes a
+	// []wireContent for image-bearing rich results.
 	ToolUseID string `json:"tool_use_id,omitempty"`
-	Content   string `json:"content,omitempty"`
+	Content   any    `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
 
 	// thinking (Thinking+Signature) / redacted_thinking (Data), replayed verbatim
@@ -306,10 +307,28 @@ func buildContent(blocks []llm.ContentBlock, includeThinking bool) []wireContent
 				Input: b.ToolInput,
 			})
 		case llm.BlockToolResult:
+			var content any = b.ResultText
+			if len(b.ResultContent) > 0 {
+				rich := make([]wireContent, 0, len(b.ResultContent)+1)
+				if b.ResultText != "" {
+					rich = append(rich, wireContent{Type: "text", Text: b.ResultText})
+				}
+				for _, child := range b.ResultContent {
+					rich = append(rich, wireContent{
+						Type: "image",
+						Source: &wireImageSource{
+							Type:      "base64",
+							MediaType: child.ImageMediaType,
+							Data:      child.ImageData,
+						},
+					})
+				}
+				content = rich
+			}
 			out = append(out, wireContent{
 				Type:      "tool_result",
 				ToolUseID: b.ResultForID,
-				Content:   b.ResultText,
+				Content:   content,
 				IsError:   b.ResultError,
 			})
 		}

@@ -323,7 +323,7 @@ func run(env environment) int {
 		created = cloneCreated
 		resumeCloned = true
 	}
-	logger, diagnosticsSink, err := newHarnessLogger(promptLogWriter, cfg.LogLevel, sessionPath, !cfg.DebugRequest)
+	logger, diagnosticLogger, diagnosticsSink, err := newHarnessLogger(promptLogWriter, cfg.LogLevel, sessionPath, !cfg.DebugRequest)
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
@@ -985,6 +985,8 @@ func run(env environment) int {
 		Renderer:               renderer,
 		Out:                    stdout,
 		Errw:                   stderr,
+		Logger:                 logger,
+		DiagnosticLogger:       diagnosticLogger,
 		Provider:               cfg.Provider,
 		Model:                  cfg.Model,
 		RegistryModel:          registryModel,
@@ -1339,14 +1341,22 @@ func debugRequestBytes(req llm.Request) debugRequestByteCounts {
 	for _, m := range req.Messages {
 		out.Messages += len(m.Role) + len(m.Phase)
 		for _, b := range m.Content {
-			out.Messages += len(b.Kind) + len(b.Text) + len(b.ImageMediaType) + len(b.ImageData) +
-				len(b.ImageDetail) + len(b.ImageName) + len(b.ToolUseID) + len(b.ToolName) +
-				len(b.ToolInput) + len(b.ResultForID) + len(b.ResultText) + len(b.Thinking) +
-				len(b.ThinkingSignature) + len(b.RedactedData) + len(b.ReasoningID) + len(b.ReasoningEncrypted)
+			out.Messages += debugContentBlockBytes(b)
 		}
 	}
 	out.Total = out.System + out.Tools + out.Messages + out.RequestContext
 	return out
+}
+
+func debugContentBlockBytes(b llm.ContentBlock) int {
+	total := len(b.Kind) + len(b.Text) + len(b.ImageMediaType) + len(b.ImageData) +
+		len(b.ImageDetail) + len(b.ImageName) + len(b.ToolUseID) + len(b.ToolName) +
+		len(b.ToolInput) + len(b.ResultForID) + len(b.ResultText) + len(b.Thinking) +
+		len(b.ThinkingSignature) + len(b.RedactedData) + len(b.ReasoningID) + len(b.ReasoningEncrypted)
+	for _, child := range b.ResultContent {
+		total += debugContentBlockBytes(child)
+	}
+	return total
 }
 
 func showConfigDefaults(cfg config.Config) config.Config {

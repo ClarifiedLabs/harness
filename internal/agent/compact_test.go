@@ -1165,6 +1165,110 @@ func TestTruncateLargestBlockReplacesImage(t *testing.T) {
 	}
 }
 
+func TestPrepareSummaryMessagesDegradesRichResultImagesOnDeepCopy(t *testing.T) {
+	const imageData = "c2Vuc2l0aXZlLWltYWdlLWRhdGE="
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{
+		Kind:        llm.BlockToolResult,
+		ResultForID: "call",
+		ResultText:  "attached",
+		ResultContent: []llm.ContentBlock{{
+			Kind:           llm.BlockImage,
+			ImageName:      "capture.png",
+			ImageMediaType: "image/png",
+			ImageData:      imageData,
+			ImageDetail:    "high",
+			ImageWidth:     320,
+			ImageHeight:    200,
+		}},
+	}}}}
+
+	got := prepareSummaryMessages(msgs, 8)
+	result := got[0].Content[0]
+	if len(result.ResultContent) != 0 {
+		t.Fatalf("summary input retained nested image: %+v", result.ResultContent)
+	}
+	for _, want := range []string{"image omitted", "capture.png", "image/png", "detail high", "320x200"} {
+		if !strings.Contains(result.ResultText, want) {
+			t.Errorf("summary placeholder missing %q: %q", want, result.ResultText)
+		}
+	}
+	if strings.Contains(result.ResultText, imageData) {
+		t.Fatalf("summary placeholder leaked base64: %q", result.ResultText)
+	}
+	if len(msgs[0].Content[0].ResultContent) != 1 || msgs[0].Content[0].ResultContent[0].ImageData != imageData {
+		t.Fatalf("summary preparation mutated source: %+v", msgs[0].Content[0])
+	}
+}
+
+func TestTruncateLargestBlockReplacesRichResultImage(t *testing.T) {
+	const imageData = "c2Vuc2l0aXZlLWltYWdlLWRhdGE="
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{
+		Kind:        llm.BlockToolResult,
+		ResultForID: "call",
+		ResultText:  "attached",
+		ResultContent: []llm.ContentBlock{{
+			Kind:           llm.BlockImage,
+			ImageMediaType: "image/jpeg",
+			ImageData:      imageData,
+			ImageWidth:     800,
+			ImageHeight:    600,
+		}},
+	}}}}
+
+	if !truncateLargestBlock(msgs, 1000) {
+		t.Fatal("truncateLargestBlock returned false")
+	}
+	result := msgs[0].Content[0]
+	if len(result.ResultContent) != 0 || !strings.Contains(result.ResultText, "800x600") {
+		t.Fatalf("nested image was not replaced by a parent description: %+v", result)
+	}
+	if strings.Contains(result.ResultText, imageData) {
+		t.Fatalf("degraded result leaked base64: %q", result.ResultText)
+	}
+}
+
+func TestCloneMessagesDeepCopiesRichResultContent(t *testing.T) {
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{
+		Kind:          llm.BlockToolResult,
+		ResultForID:   "call",
+		ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageData: "original"}},
+	}}}}
+	cloned := cloneMessages(msgs)
+	cloned[0].Content[0].ResultContent[0].ImageData = "changed"
+	cloned[0].Content[0].ResultContent = append(cloned[0].Content[0].ResultContent, llm.ContentBlock{Kind: llm.BlockImage})
+
+	if got := msgs[0].Content[0].ResultContent; len(got) != 1 || got[0].ImageData != "original" {
+		t.Fatalf("clone shared nested result content with source: %+v", got)
+	}
+}
+
+func TestAgentEstimatesCountRichResultImagesAtFlatWeight(t *testing.T) {
+	plain := []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call", ResultText: "attached"}}}}
+	withImage := cloneMessages(plain)
+	withImage[0].Content[0].ResultContent = []llm.ContentBlock{{
+		Kind:           llm.BlockImage,
+		ImageMediaType: "image/png",
+		ImageDetail:    "high",
+		ImageName:      "capture.png",
+		ImageData:      "YWJj",
+	}}
+	withHugeImage := cloneMessages(withImage)
+	withHugeImage[0].Content[0].ResultContent[0].ImageData = strings.Repeat("A", 1<<20)
+
+	if delta := estimateTokens(withImage) - estimateTokens(plain); delta < imageTokenEstimate {
+		t.Fatalf("nested image token delta = %d, want at least flat weight %d", delta, imageTokenEstimate)
+	}
+	if small, huge := estimateTokens(withImage), estimateTokens(withHugeImage); small != huge {
+		t.Fatalf("base64 length changed flat image estimate: small=%d huge=%d", small, huge)
+	}
+	requestSmall := estimateRequest(llm.Request{Messages: withImage}, 10_000).Messages
+	requestHuge := estimateRequest(llm.Request{Messages: withHugeImage}, 10_000).Messages
+	requestPlain := estimateRequest(llm.Request{Messages: plain}, 10_000).Messages
+	if requestSmall-requestPlain < imageTokenEstimate || requestSmall != requestHuge {
+		t.Fatalf("request estimates plain=%d small=%d huge=%d", requestPlain, requestSmall, requestHuge)
+	}
+}
+
 func TestSummarizeUsageSurvivesZeroedDoneFrame(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{

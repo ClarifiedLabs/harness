@@ -164,9 +164,11 @@ type ContentBlock struct {
     ImageMediaType string `json:"image_media_type,omitempty"`
     ImageData      string `json:"image_data,omitempty"` // base64, without data: prefix
     ImageDetail    string `json:"image_detail,omitempty"`
-    ImageName      string `json:"image_name,omitempty"`
-    ImageWidth     int    `json:"image_width,omitempty"`
-    ImageHeight    int    `json:"image_height,omitempty"`
+    ImageName         string `json:"image_name,omitempty"`
+    ImageWidth        int    `json:"image_width,omitempty"`
+    ImageHeight       int    `json:"image_height,omitempty"`
+    ImageBytes        int    `json:"image_bytes,omitempty"`
+    ImageEncodedBytes int    `json:"image_encoded_bytes,omitempty"`
 
     // BlockToolUse (assistant calls a tool)
     ToolUseID string          `json:"tool_use_id,omitempty"` // provider-issued call id
@@ -175,8 +177,9 @@ type ContentBlock struct {
 
     // BlockToolResult (we answer a tool call)
     ResultForID string `json:"result_for_id,omitempty"` // matches a ToolUseID
-    ResultText  string `json:"result_text,omitempty"`
-    ResultError bool   `json:"result_error,omitempty"`
+    ResultText    string         `json:"result_text,omitempty"`
+    ResultError   bool           `json:"result_error,omitempty"`
+    ResultContent []ContentBlock `json:"result_content,omitempty"` // shallow image children only
 
     // Anthropic thinking and redacted-thinking replay
     Thinking          string `json:"thinking,omitempty"`
@@ -214,6 +217,18 @@ Design notes:
   function schemas backed by `internal/tools`; `Request.ServerTools` carries neutral
   provider-hosted declarations such as `web_search`. The model proxy resolves those
   neutral declarations into provider-specific wire shapes before calling a dialect.
+- **Rich tool results remain one logical result.** `ResultText` is always present for
+  ordinary summaries and compatibility. Optional `ResultContent` is shallow and may
+  contain only validated image blocks; error results are always text-only. The same
+  shape is exposed as `ToolResult.Content` at the dispatch seam. `omitempty` preserves
+  byte-for-byte text-only session JSON compatibility.
+- **Rich blocks are validated before provider work.** Top-level images are user-only;
+  top-level and nested images require supported MIME/detail values, valid base64 whose
+  magic matches the declared type, nonnegative metadata, and no foreign union fields.
+  Actual encoded lengths are authoritative. The agent gates the complete retained
+  transcript before counting, compaction, prewarm, and provider streams, and both
+  model-proxy request endpoints repeat the gate before resolving or constructing a
+  provider.
 
 Two small seam types carry tool traffic between the agent loop and the tool layer;
 they are flat views of the corresponding content blocks:
@@ -234,7 +249,8 @@ type ToolResult struct { // becomes a BlockToolResult
     OriginalText  string // full pre-truncation text, archived to artifacts/
     OriginalBytes int    // size before truncation
     ShownBytes    int    // size after truncation
-    Usage         Usage  // metered tools (e.g. delegate) report child token usage
+    Usage         Usage          // metered tools (e.g. delegate) report child token usage
+    Content       []ContentBlock // optional shallow image children
 }
 ```
 
@@ -263,7 +279,7 @@ any assistant `Phase` outside `""`, `AssistantPhaseCommentary` (`commentary`), o
 | user image | structured `image_url` content with a data URL and detail | `input_image` content with a data URL and detail | `image` content with a base64 source |
 | assistant text | assistant message content | `message` item with `output_text` content and optional phase | assistant message with `text` content |
 | tool_use | assistant `tool_calls[].function` with JSON-string arguments | `function_call` item with string arguments | `tool_use` content with object input |
-| tool_result | sibling `role:"tool"` message | `function_call_output` item | `tool_result` content inside a user message |
+| tool_result | sibling `role:"tool"` message; rich images follow in one neighboring user message | `function_call_output` item; rich images follow in one neighboring user message | `tool_result` content inside a user message, including nested image children |
 | opaque reasoning replay | ignored | `reasoning` item with encrypted content | signed `thinking` or opaque `redacted_thinking` content |
 
 Mapping subtleties that must be handled:
@@ -274,7 +290,10 @@ Mapping subtleties that must be handled:
 - OpenAI Chat Completions tool results are **sibling messages, not blocks**: each
   `BlockToolResult` is hoisted into its own `role:"tool"` message, placed immediately
   after the assistant message that issued the calls, in call order. OpenAI Responses
-  emits a `function_call_output` item instead.
+  emits a `function_call_output` item instead. For a batch with rich results, both
+  OpenAI adapters emit every string/function output first and then one neighboring
+  user message containing all images in original result/child order. Anthropic nests
+  rich image children directly in the matching `tool_result.content` array.
 - Internal error-result text contains only the explanation; `ResultError` is the
   canonical error signal. Neither OpenAI wire format has an `is_error` field, so both
   OpenAI adapters prefix exactly one `ERROR: ` in the result string. Anthropic sends
@@ -567,6 +586,15 @@ anchor zero, allowing the first real user request to continue from the warmed
 system-and-tools prefix without generating or persisting a disposable assistant
 turn. Other transports retain the minimal one-token neutral warm-up request
 (subject to a provider's configured output-token floor).
+
+The proxy stores each continuation as the previous response ID, anchor message
+count, and SHA-256 of the exact provider-neutral anchor prefix (with only message
+timestamps normalized). It reconstructs the returned assistant message from
+reasoning, text, tool calls, explicit assistant phase, and stop reason before
+hashing the new anchor. Continuation trimming is allowed only for an unchanged
+prefix with an appended suffix. Short or changed prefixes—including retention
+edits to image or tool-result content—delete the stale entry, send full context,
+and let the successful response establish a fresh anchor.
 
 Shift-Tab agent switches defer prewarm behind a 500ms idle debounce;
 each additional cycle replaces the pending target, so only the final settled
@@ -1330,6 +1358,20 @@ type Tool interface {
     Run(ctx context.Context, input json.RawMessage) (string, error)
 }
 
+type RichTool interface {
+    RunRich(ctx context.Context, input json.RawMessage) (RichResult, error)
+}
+
+type RichResult struct {
+    Text    string
+    Content []llm.ContentBlock
+    Usage   llm.Usage
+}
+
+type RequiredInputModality interface {
+    RequiredInputModality() string
+}
+
 type MeteredTool interface {
     RunMetered(ctx context.Context, input json.RawMessage) (MeteredResult, error)
 }
@@ -1365,8 +1407,11 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   exactly those fields.
 - **Tools self-validate args** after `json.Unmarshal` into a private struct (no stdlib
   JSON Schema validator; unknown extra keys are tolerated — models hallucinate them).
-- **Metered tools** optionally implement `RunMetered`; `Dispatch` prefers it and
-  preserves the reported `llm.Usage` on `ToolResult`.
+- **Optional execution seams have one strict preference order:** rich, result,
+  metered, then legacy `Run`. Dispatch invokes exactly one path. Rich children are
+  validated before they enter a transcript; errors and centrally rejected results
+  have content cleared. `RequiredInputModality` is a separate static capability signal,
+  so a tool can require image input regardless of whether all successful calls are rich.
 - **Read-only classification is per call.** Static read-only tools ignore the input;
   argv-style tools can parse their arguments and return true only for safe subcommands
   (for example `git status`, `git diff`, `git log`).
@@ -1408,6 +1453,28 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   size.
 - Directory → `error: <path> is a directory; use list_dir`. Offset past EOF → error
   stating the file's line count. Empty file → `(empty file)`.
+
+### 9.1a `view_image`
+
+> Attach a local image file to the next model request for visual inspection.
+
+| param | type | notes |
+|---|---|---|
+| `path` | string, required | local PNG, JPEG, WebP, or non-animated GIF |
+| `detail` | string | `auto`, `low`, `high` (default), or `original` |
+
+- Read-only. Unknown JSON keys are tolerated. The result contains a bounded,
+  basename-only text receipt plus exactly one rich image block; terminal summaries,
+  hooks, artifacts, and diagnostics never contain its base64 payload.
+- Shared `internal/inputimage` validation checks declared MIME and decoded format,
+  preserves already-validated base64, extracts dimensions, rejects animated GIFs,
+  and accepts only bounded regular files. Descriptor reads are cancellable, stop at
+  10 MiB plus one detection byte, and reject directories, devices, and FIFOs.
+  Each image also has a derived encoded ceiling; the 32 MiB encoded aggregate covers
+  the complete retained request, including user and nested tool-result images.
+- The tool declares the `image` input modality independently of rich-result support.
+  The agent checks the current model immediately before dispatch, so `/model` changes
+  take effect without rebuilding the registry and unsupported calls perform no file I/O.
 
 ### 9.2 `list_dir`
 
@@ -1950,12 +2017,13 @@ contract maps the MCP tool shape onto the `Tool` interface:
   `annotations.readOnlyHint:true` for enabled MCP registrations, so advertised
   read-only tools can join read-only parallel islands (§8.1) and can be exposed
   to agents whose `mcp_tools` mode is `read_only` (§14).
-- **Result mapping** flattens the MCP `CallToolResult` to one string for the model:
-  `text` blocks pass through; other blocks become bracketed placeholders —
-  `[image: <mime>]`, `[audio: <mime>]`, `[resource_link: <uri> (<name>)]`,
-  `[resource: <uri>]` (bare `[resource]` if no uri), `[unsupported content block: <type>]`.
+- **Result mapping** invokes the remote tool exactly once. Text blocks pass through;
+  valid direct image blocks become provider-neutral rich image children while their
+  text position is represented by `[image attached: <mime>]`. Audio, resource links,
+  embedded resources, and unknown blocks remain bracketed textual placeholders.
   Blocks join with `\n` in order. If nothing renders but `structuredContent` is
-  present, the raw structured JSON is the fallback.
+  present, the raw structured JSON is the fallback. Invalid images and all MCP error
+  results remain text-only.
 - **Errors:** a transport/protocol error returns `("", err)` so `Dispatch` creates
   an error result containing `<err>`. A successful result with `isError` true
   returns the rendered text as an `error` (empty text gets a stand-in), so the
@@ -2555,7 +2623,10 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   the full output), and `BlockImage` blocks two or more turns old are swapped for a
   text placeholder. It only ever shortens text or turns an image into text, so the §4
   transcript invariant still holds, and it is idempotent (already-trimmed/placeholder
-  blocks are skipped). This keeps the window smaller between full compactions.
+  blocks are skipped). Any such edit clears direct agent continuation state; the
+  model proxy independently verifies the full prefix fingerprint before reusing its
+  remote continuation. This keeps the window smaller between full compactions
+  without leaving removed content in provider-visible remote history.
 - **Turn boundary:** a completed turn begins at an assistant response and includes
   its immediately following tool-result message when that response requested tools.
   User prompts, steering messages, and synthetic context are inputs to a turn, not

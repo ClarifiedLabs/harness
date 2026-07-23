@@ -11,6 +11,18 @@ import (
 	"harness/internal/llm"
 )
 
+func TestCloneMessagesForTreeDeepCopiesRichResultContent(t *testing.T) {
+	original := []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{
+		Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "image attached",
+		ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "original"}},
+	}}}}
+	cloned := cloneMessagesForTree(original)
+	cloned[0].Content[0].ResultContent[0].ImageData = "changed"
+	if got := original[0].Content[0].ResultContent[0].ImageData; got != "original" {
+		t.Fatalf("nested result content aliased original: %q", got)
+	}
+}
+
 func TestTreeBranchesWithoutRewritingOldPath(t *testing.T) {
 	created := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	messages := []llm.Message{

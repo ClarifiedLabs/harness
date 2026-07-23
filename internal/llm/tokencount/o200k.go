@@ -69,29 +69,32 @@ func EstimateOpenAIChat(req llm.Request) int {
 		total += chatMessageOverhead
 		total += enc.CountText(string(m.Role))
 		for _, b := range m.Content {
-			total += chatBlockOverhead
-			switch b.Kind {
-			case llm.BlockImage:
-				total += imageTokenEstimate
-				total += enc.CountText(b.ImageMediaType)
-				total += enc.CountText(b.ImageDetail)
-				total += enc.CountText(b.ImageName)
-			default:
-				total += enc.CountText(string(b.Kind))
-				total += enc.CountText(b.Text)
-				total += enc.CountText(b.ToolUseID)
-				total += enc.CountText(b.ToolName)
-				total += enc.CountText(string(b.ToolInput))
-				total += enc.CountText(b.ResultForID)
-				total += enc.CountText(b.ResultText)
-				total += enc.CountText(b.ReasoningID)
-				total += enc.CountText(b.ReasoningEncrypted)
-				total += enc.CountText(b.RedactedData)
-				total += enc.CountText(b.ThinkingSignature)
-			}
+			total += countContentBlock(enc, b)
 		}
 	}
 	total += enc.CountText(llm.RequestContextText(req.RequestContext))
+	return total
+}
+
+func countContentBlock(enc *Encoding, b llm.ContentBlock) int {
+	total := chatBlockOverhead
+	if b.Kind == llm.BlockImage {
+		return total + imageTokenEstimate + enc.CountText(b.ImageMediaType) + enc.CountText(b.ImageDetail) + enc.CountText(b.ImageName)
+	}
+	total += enc.CountText(string(b.Kind))
+	total += enc.CountText(b.Text)
+	total += enc.CountText(b.ToolUseID)
+	total += enc.CountText(b.ToolName)
+	total += enc.CountText(string(b.ToolInput))
+	total += enc.CountText(b.ResultForID)
+	total += enc.CountText(b.ResultText)
+	total += enc.CountText(b.ReasoningID)
+	total += enc.CountText(b.ReasoningEncrypted)
+	total += enc.CountText(b.RedactedData)
+	total += enc.CountText(b.ThinkingSignature)
+	for _, child := range b.ResultContent {
+		total += countContentBlock(enc, child)
+	}
 	return total
 }
 
