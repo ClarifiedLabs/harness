@@ -740,16 +740,20 @@ sandbox for real isolation.
   its active tree path and continues. Combining distinct `-resume <source>` and
   `-session <destination>` clones the active branch into the destination with
   fresh usage accounting. `/clear` rotates to a fresh directory.
-- `/tree` opens a searchable, paged line picker over safe tree nodes. Selecting
-  a human prompt branches from its parent and returns the prompt (including
-  images) to the editor; selecting another node makes that node the branch point.
-  Before moving, harness asks whether to attach no summary, a default summary,
-  or a summary with custom focus. A failed summary leaves the branch unchanged.
-- `/fork` selects a prior human prompt and performs the same move in a new
-  session. `/clone` copies the current branch into a new session. Both record
-  parent-session lineage, reset prompt/usage accounting and remote continuation
-  anchors, and preserve the current model, agent, reasoning settings, todos, and
-  plans.
+- `/tree` opens a searchable, paged line picker over safe tree nodes. Its compact
+  graph stays flat along linear history and adds indentation only at real forks;
+  semantic row labels and condensed tool batches keep checkpoints readable
+  within the terminal width. Selecting a human prompt branches from its parent
+  and returns the prompt (including images) to the editor; selecting another
+  node makes that node the branch point. Before moving, harness asks whether to
+  attach no summary, a default summary, or a summary with custom focus. A failed
+  summary leaves the branch unchanged.
+- `/fork` presents the same compact fork graph filtered to prior human prompts,
+  then performs the selected move in a new session. Hidden tool and assistant
+  checkpoints do not add indentation. `/clone` copies the current branch into a
+  new session. Both record parent-session lineage, reset prompt/usage accounting
+  and remote continuation anchors, and preserve the current model, agent,
+  reasoning settings, todos, and plans.
 - Tree navigation changes only model-visible conversation context. It never
   rewinds the working directory or Git; every new branch carries an internal
   warning telling the model to inspect current files before assuming their state.

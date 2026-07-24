@@ -15,12 +15,35 @@ import (
 
 type treeChoice struct {
 	entry  session.Entry
-	depth  int
+	graph  string
 	active bool
 }
 
 func (c treeChoice) PickerID() string   { return c.entry.ID }
 func (c treeChoice) PickerName() string { return treeEntryPreview(c.entry) }
+
+type treePickerPresentation struct {
+	title      string
+	prompt     string
+	kind       string
+	showActive bool
+	showKind   bool
+}
+
+var (
+	treeCheckpointPresentation = treePickerPresentation{
+		title:      "Conversation tree",
+		prompt:     "Tree entry (number/id, /search, n/p, q): ",
+		kind:       "tree entry",
+		showActive: true,
+		showKind:   true,
+	}
+	treePromptPresentation = treePickerPresentation{
+		title:  "Conversation prompts",
+		prompt: "Prompt (number/id, /search, n/p, q): ",
+		kind:   "prompt",
+	}
+)
 
 func (app *App) treeCommand(arg string, readLine func(string) (string, error)) (string, bool) {
 	choice, ok := app.selectTreeEntry(arg, false, readLine)
@@ -245,6 +268,10 @@ func (app *App) selectTreeEntry(arg string, humanOnly bool, readLine func(string
 		fmt.Fprintf(app.Errw, "[tree failed: %v]\n", err)
 		return treeChoice{}, false
 	}
+	presentation := treeCheckpointPresentation
+	if humanOnly {
+		presentation = treePromptPresentation
+	}
 	items := flattenTreeChoices(app.SessionTree.Nodes(), app.SessionTree.ActiveLeaf, humanOnly)
 	if len(items) == 0 {
 		fmt.Fprintln(app.Errw, "[tree has no selectable prompts]")
@@ -260,10 +287,10 @@ func (app *App) selectTreeEntry(arg string, humanOnly bool, readLine func(string
 	selected, err := Pick(readLine, app.Errw, PickerOptions[treeChoice]{
 		Items:    items,
 		PageSize: app.PickerPageSize,
-		Prompt:   "Tree entry (number/id, /search, n/p, q): ",
-		Kind:     "tree entry",
+		Prompt:   presentation.prompt,
+		Kind:     presentation.kind,
 		PrintPage: func(w io.Writer, pageItems []treeChoice, page, pageSize int, filter string) {
-			printTreePage(w, pageItems, page, pageSize, filter)
+			printTreePage(w, pageItems, page, pageSize, filter, app.summaryWidth(), presentation)
 		},
 	})
 	if err != nil {
@@ -276,35 +303,175 @@ func (app *App) selectTreeEntry(arg string, humanOnly bool, readLine func(string
 }
 
 func flattenTreeChoices(nodes []*session.TreeNode, active string, humanOnly bool) []treeChoice {
-	var out []treeChoice
-	var walk func([]*session.TreeNode)
-	walk = func(items []*session.TreeNode) {
-		for _, node := range items {
+	type choiceNode struct {
+		choice   treeChoice
+		children []*choiceNode
+	}
+	var project func([]*session.TreeNode) []*choiceNode
+	project = func(nodes []*session.TreeNode) []*choiceNode {
+		var projected []*choiceNode
+		for _, node := range nodes {
+			children := project(node.Children)
 			_, _, human := session.HumanPromptText(node.Entry)
 			if !humanOnly || human {
-				out = append(out, treeChoice{entry: node.Entry, depth: node.Depth, active: node.Entry.ID == active})
+				projected = append(projected, &choiceNode{
+					choice:   treeChoice{entry: node.Entry, active: node.Entry.ID == active},
+					children: children,
+				})
+				continue
 			}
-			walk(node.Children)
+			projected = append(projected, children...)
+		}
+		return projected
+	}
+
+	var out []treeChoice
+	var walk func([]*choiceNode, []bool)
+	walk = func(items []*choiceNode, guides []bool) {
+		branched := len(items) > 1
+		for i, node := range items {
+			node.choice.graph = treeGraphPrefix(guides, branched, i == len(items)-1)
+			out = append(out, node.choice)
+			childGuides := guides
+			if branched {
+				childGuides = append(append([]bool(nil), guides...), i < len(items)-1)
+			}
+			walk(node.children, childGuides)
 		}
 	}
-	walk(nodes)
+	walk(project(nodes), nil)
 	return out
 }
 
-func printTreePage(w io.Writer, items []treeChoice, page, pageSize int, filter string) {
+func treeGraphPrefix(guides []bool, branched, last bool) string {
+	var b strings.Builder
+	for _, continues := range guides {
+		if continues {
+			b.WriteString("│ ")
+		} else {
+			b.WriteString("  ")
+		}
+	}
+	if branched {
+		if last {
+			b.WriteString("└─")
+		} else {
+			b.WriteString("├─")
+		}
+	}
+	b.WriteString("•")
+	return b.String()
+}
+
+func printTreePage(w io.Writer, items []treeChoice, page, pageSize int, filter string, width int, presentation treePickerPresentation) {
 	start, end := PickerPageBounds(page, pageSize, len(items))
-	title := fmt.Sprintf("Conversation tree %d-%d of %d", start+1, end, len(items))
+	title := fmt.Sprintf("%s %d-%d of %d", presentation.title, start+1, end, len(items))
 	if filter != "" {
 		title += fmt.Sprintf(" matching %q", filter)
+	}
+	if presentation.showActive {
+		title += "  (* active)"
+	}
+	if width > 0 {
+		title = clipTreeText(title, width-1)
 	}
 	fmt.Fprintln(w, title)
 	for i := start; i < end; i++ {
 		item := items[i]
-		active := " "
-		if item.active {
-			active = "*"
+		graph := clipDisplayTail(item.graph, 12)
+		var prefix string
+		if presentation.showActive {
+			active := " "
+			if item.active {
+				active = "*"
+			}
+			prefix = fmt.Sprintf("%4d. %s %s %s", i+1, active, graph, item.entry.ID)
+		} else {
+			prefix = fmt.Sprintf("%4d. %s %s", i+1, graph, item.entry.ID)
 		}
-		fmt.Fprintf(w, "%4d. %s %s%s  %s\n", i+1, active, strings.Repeat("  ", item.depth), item.entry.ID, ClipPickerText(item.PickerName(), 72))
+		if presentation.showKind {
+			prefix += fmt.Sprintf("  %-9s", treeEntryKind(item.entry))
+		}
+		fmt.Fprintln(w, treePickerRow(prefix, item.PickerName(), width))
+	}
+}
+
+func treePickerRow(prefix, preview string, width int) string {
+	prefix += "  "
+	if width <= 0 {
+		return prefix + clipTreeText(preview, 72)
+	}
+	maxWidth := width - 1
+	if maxWidth <= 0 {
+		return ""
+	}
+	prefixWidth := displayWidth(prefix)
+	if prefixWidth >= maxWidth {
+		return clipTreeText(prefix, maxWidth)
+	}
+	return prefix + clipTreeText(preview, maxWidth-prefixWidth)
+}
+
+func clipTreeText(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if displayWidth(s) <= max {
+		return s
+	}
+	if max == 1 {
+		return "…"
+	}
+	var b strings.Builder
+	width := 0
+	for _, r := range s {
+		rw := runeWidth(r)
+		if width+rw > max-1 {
+			break
+		}
+		b.WriteRune(r)
+		width += rw
+	}
+	b.WriteString("…")
+	return b.String()
+}
+
+func treeEntryKind(entry session.Entry) string {
+	switch entry.Type {
+	case session.EntryCompaction:
+		return "compact"
+	case session.EntryBranch:
+		return "branch"
+	case session.EntryContextReset:
+		return "reset"
+	case session.EntrySegment:
+		if _, _, human := session.HumanPromptText(entry); human {
+			return "you"
+		}
+		hasTool := false
+		hasAssistant := false
+		final := false
+		for _, message := range entry.Messages {
+			if message.Role == llm.RoleAssistant {
+				hasAssistant = true
+				final = final || message.Phase == llm.AssistantPhaseFinal
+			}
+			for _, block := range message.Content {
+				hasTool = hasTool || block.Kind == llm.BlockToolUse || block.Kind == llm.BlockToolResult
+			}
+		}
+		switch {
+		case hasTool:
+			return "tools"
+		case final:
+			return "answer"
+		case hasAssistant:
+			return "assistant"
+		default:
+			return "internal"
+		}
+	default:
+		return "internal"
 	}
 }
 
@@ -312,6 +479,13 @@ func treeEntryPreview(entry session.Entry) string {
 	switch entry.Type {
 	case session.EntrySegment:
 		var parts []string
+		var toolNames []string
+		toolCounts := make(map[string]int)
+		resultCount := 0
+		errorCount := 0
+		imageCount := 0
+		var imageMIMEs []string
+		seenMIMEs := make(map[string]struct{})
 		for _, message := range entry.Messages {
 			for _, block := range message.Content {
 				switch block.Kind {
@@ -320,15 +494,60 @@ func treeEntryPreview(entry session.Entry) string {
 						parts = append(parts, text)
 					}
 				case llm.BlockToolUse:
-					parts = append(parts, "[tool "+block.ToolName+"]")
+					if toolCounts[block.ToolName] == 0 {
+						toolNames = append(toolNames, block.ToolName)
+					}
+					toolCounts[block.ToolName]++
 				case llm.BlockToolResult:
-					parts = append(parts, richToolResultPreview(block))
+					resultCount++
+					if block.ResultError {
+						errorCount++
+					}
+					for _, child := range block.ResultContent {
+						imageCount++
+						mime := child.ImageMediaType
+						if mime == "" {
+							mime = "unknown"
+						}
+						if _, ok := seenMIMEs[mime]; !ok {
+							seenMIMEs[mime] = struct{}{}
+							imageMIMEs = append(imageMIMEs, mime)
+						}
+					}
 				case llm.BlockImage:
 					parts = append(parts, "[image "+block.ImageName+"]")
 				}
 			}
 		}
-		return strings.Join(parts, " ")
+		var tools []string
+		for _, name := range toolNames {
+			label := name
+			if count := toolCounts[name]; count > 1 {
+				label += fmt.Sprintf(" ×%d", count)
+			}
+			tools = append(tools, label)
+		}
+		if len(tools) > 0 {
+			parts = append(parts, strings.Join(tools, ", "))
+		} else if resultCount > 0 {
+			label := "tool result"
+			if resultCount > 1 {
+				label = fmt.Sprintf("%d tool results", resultCount)
+			}
+			parts = append(parts, label)
+		}
+		if errorCount > 0 {
+			label := fmt.Sprintf("%d failed", errorCount)
+			parts = append(parts, label)
+		}
+		if imageCount > 0 {
+			label := "image"
+			if imageCount > 1 {
+				label = "images"
+			}
+			parts = append(parts, fmt.Sprintf("%d %s (%s)", imageCount, label, strings.Join(imageMIMEs, ", ")))
+		}
+		return strings.Join(parts, " · ")
 	case session.EntryCompaction:
 		return "[compaction] " + strings.Join(strings.Fields(entry.Summary), " ")
 	case session.EntryBranch:
@@ -338,30 +557,6 @@ func treeEntryPreview(entry session.Entry) string {
 	default:
 		return string(entry.Type)
 	}
-}
-
-func richToolResultPreview(block llm.ContentBlock) string {
-	if len(block.ResultContent) == 0 {
-		return "[tool result]"
-	}
-	mimes := make([]string, 0, len(block.ResultContent))
-	seen := make(map[string]struct{}, len(block.ResultContent))
-	for _, child := range block.ResultContent {
-		mime := child.ImageMediaType
-		if mime == "" {
-			mime = "unknown"
-		}
-		if _, ok := seen[mime]; ok {
-			continue
-		}
-		seen[mime] = struct{}{}
-		mimes = append(mimes, mime)
-	}
-	label := "images"
-	if len(block.ResultContent) == 1 {
-		label = "image"
-	}
-	return fmt.Sprintf("[tool result: %d %s %s]", len(block.ResultContent), label, strings.Join(mimes, ","))
 }
 
 func loadedTreeImages(blocks []llm.ContentBlock) []inputimage.Loaded {

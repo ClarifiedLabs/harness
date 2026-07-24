@@ -2555,14 +2555,19 @@ type UsageTotals struct {
   the active path with parent lineage and fresh usage. `/clear` rotates to a
   fresh directory.
 - `/tree` renders a harness-native searchable/paged line picker over tree nodes.
-  Selecting a human prompt targets its parent and returns its text/images as
-  editable prompt prefill. Other entries are selected directly. Before moving,
-  the user chooses no summary (default), a model-written summary, or a summary
-  with custom focus; summary failure leaves the active leaf untouched.
-- `/fork` extracts the selected pre-prompt path into a new session; `/clone`
-  extracts the current path. Extracted sessions receive a new session ID,
-  `ParentSession`/`ParentEntryID`, prompt number zero, fresh lifetime usage, and
-  cleared Responses/proxy continuation anchors. Model, provider, agent,
+  The renderer keeps unary paths in one graph lane, adds lanes only for sibling
+  branches, labels checkpoint kinds, condenses repeated tools, and clips rows to
+  the live terminal width. Selecting a human prompt targets its parent and
+  returns its text/images as editable prompt prefill. Other entries are selected
+  directly. Before moving, the user chooses no summary (default), a model-written
+  summary, or a summary with custom focus; summary failure leaves the active leaf
+  untouched.
+- `/fork` uses the same compact graph projected onto human prompts, so hidden
+  assistant and tool entries do not affect indentation, then extracts the selected
+  pre-prompt path into a new session. `/clone` extracts the current path. Extracted
+  sessions receive a new session ID, `ParentSession`/`ParentEntryID`, prompt number
+  zero, fresh lifetime usage, and cleared Responses/proxy continuation anchors.
+  Model, provider, agent,
   reasoning, todos, plans, hooks, and working directory stay global/current.
 - Conversation navigation does not alter filesystem or Git state. Every branch
   adds a model-visible internal warning to inspect current files before assuming
