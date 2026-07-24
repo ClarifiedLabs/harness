@@ -350,6 +350,8 @@ func cloneContentBlocks(blocks []llm.ContentBlock) []llm.ContentBlock {
 	out := append([]llm.ContentBlock(nil), blocks...)
 	for i := range out {
 		out[i].ResultContent = cloneContentBlocks(blocks[i].ResultContent)
+		out[i].ToolInput = append(json.RawMessage(nil), blocks[i].ToolInput...)
+		out[i].InteractionStep = append(json.RawMessage(nil), blocks[i].InteractionStep...)
 	}
 	return out
 }
@@ -1193,6 +1195,7 @@ func estimateTranscriptContentBlock(b llm.ContentBlock) (bytes, images int) {
 	}
 	bytes = len(b.Text) + len(b.ResultText) + len(b.ToolInput) + len(b.ToolName)
 	bytes += len(b.ReasoningID) + len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
+	bytes += len(b.InteractionThoughtSummary) + len(b.InteractionThoughtSignature) + len(b.InteractionStep)
 	for _, child := range b.ResultContent {
 		childBytes, childImages := estimateTranscriptContentBlock(child)
 		bytes += childBytes
@@ -1242,6 +1245,7 @@ func estimateRequestContentBlock(b llm.ContentBlock) (bytes, images int) {
 	bytes = len(b.Kind) + len(b.Text) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolInput) +
 		len(b.ResultForID) + len(b.ResultText)
 	bytes += len(b.ReasoningID) + len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
+	bytes += len(b.InteractionThoughtSummary) + len(b.InteractionThoughtSignature) + len(b.InteractionStep)
 	for _, child := range b.ResultContent {
 		childBytes, childImages := estimateRequestContentBlock(child)
 		bytes += childBytes

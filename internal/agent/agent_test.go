@@ -1279,6 +1279,89 @@ func TestToolCallStreamEventsForwardedBeforeDone(t *testing.T) {
 	}
 }
 
+func TestToolCallOverridesContradictoryEndTurn(t *testing.T) {
+	tool := &recordTool{name: "echo", run: func(_ context.Context, in json.RawMessage) (string, error) {
+		return "ran " + string(in), nil
+	}}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "call_a", "echo", `{"n":1}`)},
+			Stop:   llm.StopEndTurn,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, reg, Options{})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(tool.inputs) != 1 || string(tool.inputs[0]) != `{"n":1}` {
+		t.Fatalf("tool inputs = %q, want contradictory stop normalized and dispatched", tool.inputs)
+	}
+	mustValid(t, a.Transcript())
+}
+
+func TestToolUseStopWithoutCallFailsBeforeAppendingAssistant(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopToolUse})
+	a := newAgent(fp, tools.Default(), Options{})
+
+	err := a.RunPrompt(context.Background(), "go", &recordSink{})
+	if err == nil || !strings.Contains(err.Error(), "emitted no usable tool call") {
+		t.Fatalf("RunPrompt error = %v", err)
+	}
+	msgs := a.Transcript()
+	if len(msgs) != 1 || msgs[0].Role != llm.RoleUser {
+		t.Fatalf("transcript should contain only the prompt: %s", dump(msgs))
+	}
+	mustValid(t, msgs)
+}
+
+func TestInteractionsStatePersistedAndReplayed(t *testing.T) {
+	thought := llm.StreamEvent{
+		Kind:            llm.EventReasoningSummary,
+		ReasoningFormat: llm.ReasoningFormatGeminiInteractions,
+		Text:            "search first",
+		Signature:       "thought-sig",
+	}
+	search := llm.StreamEvent{
+		Kind:            llm.EventInteractionStep,
+		InteractionStep: json.RawMessage(`{"type":"google_search_call","id":"search-1","signature":"search-sig"}`),
+	}
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{thought, search, textDelta("answer")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("again")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Default(), Options{})
+	sink := &recordSink{}
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatal(err)
+	}
+	msgs := a.Transcript()
+	asst := msgs[len(msgs)-1]
+	if len(asst.Content) != 3 ||
+		asst.Content[0].Kind != llm.BlockInteractionThought ||
+		asst.Content[0].InteractionThoughtSignature != "thought-sig" ||
+		asst.Content[1].Kind != llm.BlockInteractionStep {
+		t.Fatalf("assistant Interactions state = %s", dump([]llm.Message{asst}))
+	}
+	if err := a.RunPrompt(context.Background(), "more", sink); err != nil {
+		t.Fatal(err)
+	}
+	var replayedThought, replayedSearch bool
+	for _, message := range fp.Requests[1].Messages {
+		for _, block := range message.Content {
+			replayedThought = replayedThought || block.Kind == llm.BlockInteractionThought
+			replayedSearch = replayedSearch || block.Kind == llm.BlockInteractionStep
+		}
+	}
+	if !replayedThought || !replayedSearch {
+		t.Fatalf("Interactions state not replayed: %s", dump(fp.Requests[1].Messages))
+	}
+}
+
 func TestTurnAttemptStartEmittedForRetries(t *testing.T) {
 	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
 	fp := llmtest.New("fake",

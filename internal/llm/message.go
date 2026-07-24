@@ -102,6 +102,13 @@ const (
 	// from scratch on every tool turn. Providers that don't model Responses
 	// reasoning (Anthropic/OpenAI-chat) skip these blocks.
 	BlockReasoning BlockKind = "reasoning"
+	// BlockInteractionThought carries a Gemini Interactions thought summary and
+	// signature. It is deliberately distinct from Anthropic thinking so signed
+	// state cannot cross dialects.
+	BlockInteractionThought BlockKind = "interaction_thought"
+	// BlockInteractionStep carries a complete provider-managed Interactions
+	// step needed for stateless replay. It is never rendered or dispatched.
+	BlockInteractionStep BlockKind = "interaction_step"
 )
 
 // ContentBlock is a tagged union; exactly the fields for Kind are set.
@@ -148,6 +155,13 @@ type ContentBlock struct {
 	// ReasoningID is the item id (rs_…) echoed back alongside it.
 	ReasoningID        string `json:"reasoning_id,omitempty"`
 	ReasoningEncrypted string `json:"reasoning_encrypted,omitempty"`
+
+	// BlockInteractionThought
+	InteractionThoughtSummary   string `json:"interaction_thought_summary,omitempty"`
+	InteractionThoughtSignature string `json:"interaction_thought_signature,omitempty"`
+
+	// BlockInteractionStep
+	InteractionStep json.RawMessage `json:"interaction_step,omitempty"`
 }
 
 // ToolCall is a flat view of a BlockToolUse, carried from the agent loop into

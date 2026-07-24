@@ -304,13 +304,13 @@ func (t *thinkingBlock) event() (llm.StreamEvent, bool) {
 		if t.redacted == "" {
 			return llm.StreamEvent{}, false
 		}
-		return llm.StreamEvent{Kind: llm.EventReasoningSummary, RedactedData: t.redacted}, true
+		return llm.StreamEvent{Kind: llm.EventReasoningSummary, ReasoningFormat: llm.ReasoningFormatAnthropic, RedactedData: t.redacted}, true
 	}
 	text := t.text.String()
 	if strings.TrimSpace(text) == "" && t.signature == "" {
 		return llm.StreamEvent{}, false
 	}
-	return llm.StreamEvent{Kind: llm.EventReasoningSummary, Text: text, Signature: t.signature}, true
+	return llm.StreamEvent{Kind: llm.EventReasoningSummary, ReasoningFormat: llm.ReasoningFormatAnthropic, Text: text, Signature: t.signature}, true
 }
 
 // retryableErrorType classifies mid-stream error-frame types: transient server

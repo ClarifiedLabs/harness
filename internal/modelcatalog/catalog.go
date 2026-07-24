@@ -122,17 +122,20 @@ const (
 // harness's built-in defaults for first-party providers and exact SDK package
 // matches whose HTTP wire format is known.
 func (p Provider) BaseURL() string {
+	npm := strings.ToLower(strings.TrimSpace(p.NPM))
+	// Managed Google uses the native Interactions endpoint even if models.dev
+	// still publishes an SDK-oriented or OpenAI-compatibility API URL.
+	if p.ID == "google" || npm == npmGoogle {
+		return "https://generativelanguage.googleapis.com/v1beta"
+	}
 	if p.API != "" {
 		return p.API
 	}
-	npm := strings.ToLower(strings.TrimSpace(p.NPM))
 	switch {
 	case p.ID == "openai" || npm == npmOpenAI:
 		return "https://api.openai.com/v1"
 	case p.ID == "anthropic" || npm == npmAnthropic:
 		return "https://api.anthropic.com"
-	case p.ID == "google" || npm == npmGoogle:
-		return "https://generativelanguage.googleapis.com/v1beta/openai"
 	default:
 		return ""
 	}
@@ -150,7 +153,7 @@ func (p Provider) APIType() string {
 		return "responses"
 	}
 	if p.ID == "google" || npm == npmGoogle {
-		return "openai"
+		return "interactions"
 	}
 	switch p.dominantShape() {
 	case "responses":

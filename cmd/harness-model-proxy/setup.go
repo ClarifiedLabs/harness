@@ -46,16 +46,17 @@ type setupProviderConfig struct {
 	PriceSource string `json:"price_source,omitempty"`
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for compatible
 	// backends that reject the standard parameter, such as ChatGPT Codex.
-	OmitMaxOutputTokens bool                  `json:"omit_max_output_tokens,omitempty"`
-	MinOutputTokens     int                   `json:"min_output_tokens,omitempty"`
-	PromptCache         llm.PromptCacheConfig `json:"prompt_cache,omitempty"`
-	ResponsesStateful   *bool                 `json:"responses_stateful,omitempty"`
-	ResponsesWebSocket  *bool                 `json:"responses_websocket,omitempty"`
-	ServerTools         []string              `json:"server_tools,omitempty"`
-	ServiceTiers        []llm.ServiceTier     `json:"service_tiers,omitempty"`
-	APIKeyEnv           []string              `json:"api_key_env,omitempty"`
-	Auth                *auth.Config          `json:"auth,omitempty"`
-	Models              []setupModelConfig    `json:"models"`
+	OmitMaxOutputTokens  bool                  `json:"omit_max_output_tokens,omitempty"`
+	MinOutputTokens      int                   `json:"min_output_tokens,omitempty"`
+	PromptCache          llm.PromptCacheConfig `json:"prompt_cache,omitempty"`
+	ResponsesStateful    *bool                 `json:"responses_stateful,omitempty"`
+	ResponsesWebSocket   *bool                 `json:"responses_websocket,omitempty"`
+	InteractionsStateful *bool                 `json:"interactions_stateful,omitempty"`
+	ServerTools          []string              `json:"server_tools,omitempty"`
+	ServiceTiers         []llm.ServiceTier     `json:"service_tiers,omitempty"`
+	APIKeyEnv            []string              `json:"api_key_env,omitempty"`
+	Auth                 *auth.Config          `json:"auth,omitempty"`
+	Models               []setupModelConfig    `json:"models"`
 }
 
 type setupModelConfig struct {
@@ -152,6 +153,9 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	}
 	if existingProvider.Config.ResponsesWebSocket != nil {
 		provider.ResponsesWebSocket = existingProvider.Config.ResponsesWebSocket
+	}
+	if existingProvider.Config.InteractionsStateful != nil {
+		provider.InteractionsStateful = existingProvider.Config.InteractionsStateful
 	}
 	if len(existingProvider.Config.ServiceTiers) > 0 {
 		provider.ServiceTiers = llm.NormalizeServiceTiers(existingProvider.Config.ServiceTiers)
@@ -295,6 +299,9 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			}
 			if current.ResponsesWebSocket != nil {
 				next.ResponsesWebSocket = current.ResponsesWebSocket
+			}
+			if current.InteractionsStateful != nil {
+				next.InteractionsStateful = current.InteractionsStateful
 			}
 			if len(current.ServiceTiers) > 0 {
 				next.ServiceTiers = llm.NormalizeServiceTiers(current.ServiceTiers)
@@ -838,6 +845,10 @@ func applySyntheticProviderDefaults(provider modelcatalog.Provider, cfg *setupPr
 	if isSakanaProvider(provider) {
 		stateful := false
 		cfg.ResponsesStateful = &stateful
+	}
+	if strings.EqualFold(strings.TrimSpace(provider.ID), "google") && cfg.InteractionsStateful == nil {
+		stateful := true
+		cfg.InteractionsStateful = &stateful
 	}
 }
 

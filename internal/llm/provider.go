@@ -8,9 +8,9 @@ import (
 )
 
 // Provider runs one model call as a stream of events. Concrete implementations
-// live in internal/llm/anthropic and internal/llm/openai.
+// live in the provider dialect packages under internal/llm.
 type Provider interface {
-	Name() string // "openai" | "responses" | "anthropic"
+	Name() string // "openai" | "responses" | "anthropic" | "interactions"
 
 	// Stream runs one model call. The iterator yields events until a Done
 	// event or a terminal error (yielded at most once, last). Consumer break
@@ -122,8 +122,10 @@ type Request struct {
 	LongCacheTTL bool `json:"long_cache_ttl,omitempty"`
 }
 
-// ResponseState is the resumable continuation state for Responses API
-// previous_response_id chaining.
+// ResponseState is resumable provider continuation state. PreviousResponseID
+// carries either an OpenAI previous_response_id or a Gemini
+// previous_interaction_id; the neutral name keeps continuation bookkeeping out
+// of the agent's provider-specific code.
 type ResponseState struct {
 	PreviousResponseID string `json:"previous_response_id,omitempty"`
 	AnchorMessages     int    `json:"anchor_messages,omitempty"`
@@ -146,6 +148,7 @@ const (
 	ServerToolKindMimoWebSearch       = "mimo_web_search"
 	ServerToolKindKimiWebSearch       = "kimi_web_search"
 	ServerToolKindZAIWebSearch        = "zai_web_search"
+	ServerToolKindGoogleSearch        = "google_search"
 )
 
 // ServerTool is a provider-hosted tool declaration. Name is the neutral feature
@@ -169,6 +172,18 @@ const (
 	EventDone                              // turn end: StopReason + final Usage
 	EventReasoningSummary                  // display-ready provider-visible reasoning summary text
 	EventAssistantPhase                    // assistant message phase metadata
+	EventInteractionStep                   // hidden complete Gemini server-managed step for stateless replay
+)
+
+// ReasoningFormat identifies provider-owned reasoning state carried by a
+// summary event. It prevents one dialect's signed state from being replayed
+// into an incompatible provider after a model switch.
+type ReasoningFormat string
+
+const (
+	ReasoningFormatAnthropic          ReasoningFormat = "anthropic_thinking"
+	ReasoningFormatOpenAIResponses    ReasoningFormat = "openai_responses"
+	ReasoningFormatGeminiInteractions ReasoningFormat = "gemini_interactions"
 )
 
 // StreamEvent is one event in a provider stream. Which fields are populated
@@ -184,8 +199,9 @@ type StreamEvent struct {
 	// providers/models that don't return a signature. For an EventReasoningSummary,
 	// Text is the verbatim thinking text (the display layer trims it); RedactedData
 	// carries an opaque redacted-thinking payload instead of Text.
-	Signature    string `json:"signature,omitempty"`
-	RedactedData string `json:"redacted_data,omitempty"`
+	Signature       string          `json:"signature,omitempty"`
+	RedactedData    string          `json:"redacted_data,omitempty"`
+	ReasoningFormat ReasoningFormat `json:"reasoning_format,omitempty"`
 
 	// ReasoningID / ReasoningEncrypted carry a Responses reasoning item's id and
 	// opaque encrypted_content on an EventReasoningSummary. They are set (with an
@@ -193,6 +209,11 @@ type StreamEvent struct {
 	// and persisted as a BlockReasoning to round-trip on the next turn.
 	ReasoningID        string `json:"reasoning_id,omitempty"`
 	ReasoningEncrypted string `json:"reasoning_encrypted,omitempty"`
+
+	// InteractionStep carries a complete provider-managed Gemini Interactions
+	// step (currently Google Search call/result) for invisible persistence and
+	// exact stateless replay.
+	InteractionStep json.RawMessage `json:"interaction_step,omitempty"`
 
 	// EventToolCall*; Index disambiguates parallel calls within one turn.
 	Index     int             `json:"index,omitempty"`
@@ -207,7 +228,7 @@ type StreamEvent struct {
 
 	Usage      *Usage     `json:"usage,omitempty"`       // EventUsage / EventDone
 	StopReason StopReason `json:"stop_reason,omitempty"` // EventDone
-	ResponseID string     `json:"response_id,omitempty"` // EventDone, Responses API
+	ResponseID string     `json:"response_id,omitempty"` // EventDone, provider continuation id
 }
 
 // StopReason is the normalized reason a turn ended.

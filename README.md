@@ -98,6 +98,14 @@ harness -model <provider>:<model>
 harness -model <provider>:<model> -p "summarize README.md"
 ```
 
+Managed Google targets use the native Gemini Interactions API. The model proxy
+stores interactions by default for efficient `previous_interaction_id`
+continuation; set `interactions_stateful:false` in the Google provider config to
+send complete stateless history instead. Signed Gemini thought and Google Search
+steps are retained in sessions so a proxy restart can safely fall back to that
+stateless history. Enable provider-hosted Google Search with
+`-web-search auto`.
+
 Image-capable models can call the read-only `view_image` tool to inspect a local
 PNG, JPEG, WebP, or non-animated GIF during a turn. Rich image tool results stay
 provider-neutral inside harness and are lowered to each provider's multimodal

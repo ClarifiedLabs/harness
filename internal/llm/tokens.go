@@ -34,7 +34,8 @@ func estimateContentBlock(b ContentBlock) (bytes, images int) {
 		return len(b.Kind) + len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName), 1
 	}
 	bytes = len(b.Kind) + len(b.Text) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolInput) +
-		len(b.ResultForID) + len(b.ResultText)
+		len(b.ResultForID) + len(b.ResultText) + len(b.InteractionThoughtSummary) +
+		len(b.InteractionThoughtSignature) + len(b.InteractionStep)
 	for _, child := range b.ResultContent {
 		childBytes, childImages := estimateContentBlock(child)
 		bytes += childBytes

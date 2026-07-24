@@ -746,7 +746,7 @@ func (a *Agent) estimateContextForTranscript(extraContext []string, transcript [
 // turnResult holds what one conversational turn produced after assembly.
 type turnResult struct {
 	text       string
-	reasoning  []llm.ContentBlock // thinking / redacted_thinking / reasoning blocks, in arrival order
+	reasoning  []llm.ContentBlock // provider-owned replay state, in arrival order
 	toolCalls  []llm.ToolCall
 	phase      string
 	usage      llm.Usage
@@ -2067,8 +2067,14 @@ func previousResponseRejected(err error) bool {
 	if strings.Contains(code, "previous_response") {
 		return true
 	}
+	if strings.Contains(code, "previous_interaction") {
+		return true
+	}
 	msg := strings.ToLower(apiErr.Message)
-	return strings.Contains(msg, "previous_response_id") || strings.Contains(msg, "previous response")
+	return strings.Contains(msg, "previous_response_id") ||
+		strings.Contains(msg, "previous response") ||
+		strings.Contains(msg, "previous_interaction_id") ||
+		strings.Contains(msg, "previous interaction")
 }
 
 func storeResponseRejected(err error) bool {
@@ -2120,6 +2126,10 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 			if block, ok := llm.PersistedReasoningBlock(ev); ok {
 				res.reasoning = append(res.reasoning, block)
 			}
+		case llm.EventInteractionStep:
+			if block, ok := llm.PersistedInteractionStep(ev); ok {
+				res.reasoning = append(res.reasoning, block)
+			}
 		case llm.EventAssistantPhase:
 			if llm.ValidAssistantPhase(ev.Phase) && ev.Phase != "" {
 				res.phase = ev.Phase
@@ -2156,6 +2166,16 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 	}
 
 	res.text = string(text)
+	if len(res.toolCalls) > 0 {
+		// Tool calls are authoritative. Some compatible providers incorrectly
+		// report a normal stop after streaming complete calls.
+		res.stopReason = llm.StopToolUse
+	} else if res.stopReason == llm.StopToolUse {
+		return res, &llm.APIError{
+			Code:    "invalid_tool_use_stream",
+			Message: "provider ended with tool_use but emitted no usable tool call",
+		}
+	}
 	return res, nil
 }
 

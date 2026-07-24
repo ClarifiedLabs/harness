@@ -1,5 +1,7 @@
 package llm
 
+import "encoding/json"
+
 // PersistedReasoningBlock converts a reasoning stream event into the neutral
 // block that must be replayed on a subsequent request. Plain display-only
 // summaries are intentionally not persisted.
@@ -13,7 +15,26 @@ func PersistedReasoningBlock(ev StreamEvent) (ContentBlock, bool) {
 	if ev.Signature == "" {
 		return ContentBlock{}, false
 	}
+	if ev.ReasoningFormat == ReasoningFormatGeminiInteractions {
+		return ContentBlock{
+			Kind:                        BlockInteractionThought,
+			InteractionThoughtSummary:   ev.Text,
+			InteractionThoughtSignature: ev.Signature,
+		}, true
+	}
 	return ContentBlock{Kind: BlockThinking, Thinking: ev.Text, ThinkingSignature: ev.Signature}, true
+}
+
+// PersistedInteractionStep converts a hidden Interactions step event into the
+// neutral opaque block that sessions and stateless requests round-trip.
+func PersistedInteractionStep(ev StreamEvent) (ContentBlock, bool) {
+	if ev.Kind != EventInteractionStep || !validInteractionStep(ev.InteractionStep) {
+		return ContentBlock{}, false
+	}
+	return ContentBlock{
+		Kind:            BlockInteractionStep,
+		InteractionStep: append(json.RawMessage(nil), ev.InteractionStep...),
+	}, true
 }
 
 // ResolvedAssistantPhase applies an explicit valid streamed phase when present,

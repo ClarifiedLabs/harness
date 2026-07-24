@@ -1,11 +1,11 @@
 // Package factory selects and constructs a concrete llm.Provider from
 // user-facing options (design §7). It lives in its own package, importing both
 // dialects directly, rather than as internal/llm/factory.go: a file inside
-// internal/llm cannot import internal/llm/openai or internal/llm/anthropic
-// (those packages import internal/llm, which would be an import cycle). A
-// self-contained package avoids the alternative — init()-time registration that
-// only fires if some other package blank-imports the dialects — and keeps
-// internal/llm free of any dialect dependency.
+// internal/llm cannot import its concrete dialect packages (they import
+// internal/llm, which would be an import cycle). A self-contained package
+// avoids the alternative — init()-time registration that only fires if some
+// other package blank-imports the dialects — and keeps internal/llm free of any
+// dialect dependency.
 package factory
 
 import (
@@ -14,6 +14,7 @@ import (
 
 	"harness/internal/llm"
 	"harness/internal/llm/anthropic"
+	"harness/internal/llm/interactions"
 	"harness/internal/llm/openai"
 	"harness/internal/llm/responses"
 )
@@ -22,7 +23,7 @@ import (
 // (design §7). API keys are passed in (resolved from the environment by the
 // config layer), never read here.
 type Options struct {
-	Provider        string // api type: "openai" | "responses" | "anthropic"; empty = infer from Model
+	Provider        string // api type: "openai" | "responses" | "anthropic" | "interactions"; empty = infer from Model
 	ProviderName    string // configured provider name, e.g. "openrouter"
 	Model           string
 	BaseURL         string
@@ -99,8 +100,19 @@ func New(opts Options) (llm.Provider, error) {
 			ProviderName:        opts.ProviderName,
 			PromptCache:         opts.PromptCache,
 		}), nil
+	case "interactions":
+		if opts.APIKey == "" && opts.BaseURL == "" && len(opts.AuthHeaders) == 0 {
+			return nil, fmt.Errorf("llm: GEMINI_API_KEY is required (or set a custom base URL for a local server)")
+		}
+		return interactions.New(interactions.Config{
+			APIKey:        opts.APIKey,
+			AuthHeaders:   opts.AuthHeaders,
+			BaseURL:       opts.BaseURL,
+			ContextWindow: opts.ContextWindow,
+			OutputLimit:   opts.OutputLimit,
+		}), nil
 	default:
-		return nil, fmt.Errorf("llm: unknown provider %q (want openai, responses, or anthropic)", provider)
+		return nil, fmt.Errorf("llm: unknown provider %q (want openai, responses, anthropic, or interactions)", provider)
 	}
 }
 

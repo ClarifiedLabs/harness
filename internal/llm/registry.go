@@ -42,16 +42,17 @@ type ProviderConfig struct {
 	PriceSource string `json:"price_source,omitempty"`
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for compatible
 	// backends that reject the standard parameter, such as ChatGPT Codex.
-	OmitMaxOutputTokens bool              `json:"omit_max_output_tokens,omitempty"`
-	MinOutputTokens     int               `json:"min_output_tokens,omitempty"`
-	PromptCache         PromptCacheConfig `json:"prompt_cache,omitempty"`
-	ResponsesStateful   *bool             `json:"responses_stateful,omitempty"`
-	ResponsesWebSocket  *bool             `json:"responses_websocket,omitempty"`
-	ServerTools         []string          `json:"server_tools,omitempty"`
-	ServiceTiers        []ServiceTier     `json:"service_tiers,omitempty"`
-	APIKeyEnv           []string          `json:"api_key_env"`
-	Auth                *auth.Config      `json:"auth,omitempty"`
-	Models              []ModelEntry      `json:"models"`
+	OmitMaxOutputTokens  bool              `json:"omit_max_output_tokens,omitempty"`
+	MinOutputTokens      int               `json:"min_output_tokens,omitempty"`
+	PromptCache          PromptCacheConfig `json:"prompt_cache,omitempty"`
+	ResponsesStateful    *bool             `json:"responses_stateful,omitempty"`
+	ResponsesWebSocket   *bool             `json:"responses_websocket,omitempty"`
+	InteractionsStateful *bool             `json:"interactions_stateful,omitempty"`
+	ServerTools          []string          `json:"server_tools,omitempty"`
+	ServiceTiers         []ServiceTier     `json:"service_tiers,omitempty"`
+	APIKeyEnv            []string          `json:"api_key_env"`
+	Auth                 *auth.Config      `json:"auth,omitempty"`
+	Models               []ModelEntry      `json:"models"`
 }
 
 // PromptCacheConfig controls how a provider receives the stable
@@ -299,6 +300,8 @@ func WebSearchServerToolKind(name, apiType, baseURL string) string {
 	apiType = strings.ToLower(strings.TrimSpace(apiType))
 	base := strings.ToLower(strings.TrimSpace(baseURL))
 	switch {
+	case apiType == "interactions" && (name == "google" || strings.Contains(base, "generativelanguage.googleapis.com")):
+		return ServerToolKindGoogleSearch
 	case name == "openrouter" || strings.Contains(base, "openrouter.ai"):
 		return ServerToolKindOpenRouterWebSearch
 	case name == "anthropic" || apiType == "anthropic" || strings.Contains(base, "api.anthropic.com"):

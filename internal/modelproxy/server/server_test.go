@@ -290,6 +290,36 @@ func TestResolveServerToolsHonorsExplicitConfigOnUnknownProvider(t *testing.T) {
 	}
 }
 
+func TestGoogleInteractionsAdvertisesAndResolvesSearch(t *testing.T) {
+	target := resolvedTarget{
+		pc: llm.ProviderConfig{
+			Name:    "google",
+			APIType: "interactions",
+			BaseURL: "https://generativelanguage.googleapis.com/v1beta",
+		},
+		entry: llm.ModelEntry{Name: "gemini-3.6-flash"},
+	}
+	if got := targetServerTools(target.pc, target.entry); !slices.Equal(got, []string{llm.ServerToolWebSearch}) {
+		t.Fatalf("Google server tools = %v", got)
+	}
+	resolved := resolveServerToolsForTarget(target, []llm.ServerTool{{Name: llm.ServerToolWebSearch}})
+	if len(resolved) != 1 || resolved[0].Kind != llm.ServerToolKindGoogleSearch {
+		t.Fatalf("resolved Google Search = %+v", resolved)
+	}
+}
+
+func TestInteractionsStatefulDefaultAndOverride(t *testing.T) {
+	pc := llm.ProviderConfig{APIType: "interactions"}
+	if !providerContinuationStateful(pc) {
+		t.Fatal("Interactions should default to stateful")
+	}
+	disabled := false
+	pc.InteractionsStateful = &disabled
+	if providerContinuationStateful(pc) {
+		t.Fatal("interactions_stateful=false should disable continuation")
+	}
+}
+
 func TestServerToolRejected(t *testing.T) {
 	cases := []struct {
 		name string

@@ -200,8 +200,8 @@ func TestProviderFallbacksFromNPM(t *testing.T) {
 		{
 			name:        "google sdk",
 			provider:    Provider{ID: "google", NPM: "@ai-sdk/google"},
-			wantBaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
-			wantAPIType: "openai",
+			wantBaseURL: "https://generativelanguage.googleapis.com/v1beta",
+			wantAPIType: "interactions",
 		},
 		{
 			name:        "google vertex sdk unsupported",

@@ -181,6 +181,7 @@ func (a *reasoningAssembler) encryptedItem(item *wireOutputItem, yield func(llm.
 	a.encrypted[item.ID] = true
 	return yield(llm.StreamEvent{
 		Kind:               llm.EventReasoningSummary,
+		ReasoningFormat:    llm.ReasoningFormatOpenAIResponses,
 		ReasoningID:        item.ID,
 		ReasoningEncrypted: item.EncryptedContent,
 	}, nil)

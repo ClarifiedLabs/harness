@@ -969,7 +969,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiType = opts.Provider
-	stateful := providerResponsesStateful(target.pc)
+	stateful := providerContinuationStateful(target.pc)
 	cacheKey := h.continuationKey(target.baseTargetID, sessionKey)
 	fullRequest := req.Request
 	fullRequest.Messages = append([]llm.Message(nil), req.Request.Messages...)
@@ -1074,6 +1074,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				if block, ok := llm.PersistedReasoningBlock(ev); ok {
 					assistantReasoning = append(assistantReasoning, block)
 				}
+			case llm.EventInteractionStep:
+				if block, ok := llm.PersistedInteractionStep(ev); ok {
+					assistantReasoning = append(assistantReasoning, block)
+				}
 			case llm.EventAssistantPhase:
 				if ev.Phase != "" && llm.ValidAssistantPhase(ev.Phase) {
 					assistantPhase = ev.Phase
@@ -1087,6 +1091,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 					InvalidInputError: ev.InvalidInputError,
 				})
 			case llm.EventDone:
+				if len(assistantCalls) > 0 {
+					ev.StopReason = llm.StopToolUse
+				}
 				stop = ev.StopReason
 				if ev.Usage != nil {
 					usage = mergeUsage(usage, *ev.Usage)
@@ -1776,9 +1783,12 @@ func serverToolKindForProviderConfig(pc llm.ProviderConfig) string {
 // defaultWebSearchKindForAPIType picks a hosted web-search wire shape for a
 // provider harness doesn't recognize by name, based on its configured dialect.
 // Both the OpenAI Chat and Responses dialects emit the OpenAI `web_search` tool
-// for ServerToolKindOpenAIWebSearch, so it is the safe default for everything
-// except Anthropic.
+// for ServerToolKindOpenAIWebSearch; Anthropic and Gemini Interactions use
+// their native declarations.
 func defaultWebSearchKindForAPIType(apiType string) string {
+	if strings.EqualFold(strings.TrimSpace(apiType), "interactions") {
+		return llm.ServerToolKindGoogleSearch
+	}
 	if strings.EqualFold(strings.TrimSpace(apiType), "anthropic") {
 		return llm.ServerToolKindAnthropicWebSearch
 	}
@@ -1901,8 +1911,14 @@ func previousResponseRejected(err error) bool {
 	if strings.Contains(code, "previous_response") {
 		return true
 	}
+	if strings.Contains(code, "previous_interaction") {
+		return true
+	}
 	msg := strings.ToLower(apiErr.Message)
-	return strings.Contains(msg, "previous_response_id") || strings.Contains(msg, "previous response")
+	return strings.Contains(msg, "previous_response_id") ||
+		strings.Contains(msg, "previous response") ||
+		strings.Contains(msg, "previous_interaction_id") ||
+		strings.Contains(msg, "previous interaction")
 }
 
 func storeResponseRejected(err error) bool {
@@ -2149,6 +2165,21 @@ func providerResponsesStateful(pc llm.ProviderConfig) bool {
 	return true
 }
 
+func providerContinuationStateful(pc llm.ProviderConfig) bool {
+	apiType := strings.ToLower(strings.TrimSpace(pc.APIType))
+	switch apiType {
+	case "responses":
+		return providerResponsesStateful(pc)
+	case "interactions":
+		if pc.InteractionsStateful != nil {
+			return *pc.InteractionsStateful
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 func providerResponsesWebSocket(pc llm.ProviderConfig) bool {
 	if !strings.EqualFold(strings.TrimSpace(pc.APIType), "responses") {
 		return false
@@ -2185,6 +2216,8 @@ func providerAPIKeyEnv(provider string, getenv func(string) string) string {
 	switch provider {
 	case "anthropic":
 		return getenv("ANTHROPIC_API_KEY")
+	case "interactions":
+		return getenv("GEMINI_API_KEY")
 	case "responses":
 		if v := getenv("RESPONSES_API_KEY"); v != "" {
 			return v

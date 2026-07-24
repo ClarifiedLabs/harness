@@ -220,6 +220,75 @@ func TestValidateMessageContentAllowsContinuationToolResultDelta(t *testing.T) {
 	}
 }
 
+func TestValidateMessageContentInteractionState(t *testing.T) {
+	valid := []Message{{
+		Role: RoleAssistant,
+		Content: []ContentBlock{
+			{
+				Kind:                        BlockInteractionThought,
+				InteractionThoughtSummary:   "searched",
+				InteractionThoughtSignature: "thought-sig",
+			},
+			{
+				Kind:            BlockInteractionStep,
+				InteractionStep: json.RawMessage(`{"type":"google_search_result","call_id":"search-1"}`),
+			},
+		},
+	}}
+	if err := ValidateMessageContent(valid); err != nil {
+		t.Fatalf("valid interaction state: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		role  Role
+		block ContentBlock
+	}{
+		{
+			name: "thought in user message",
+			role: RoleUser,
+			block: ContentBlock{
+				Kind:                        BlockInteractionThought,
+				InteractionThoughtSignature: "thought-sig",
+			},
+		},
+		{
+			name:  "empty thought signature",
+			role:  RoleAssistant,
+			block: ContentBlock{Kind: BlockInteractionThought},
+		},
+		{
+			name: "step in user message",
+			role: RoleUser,
+			block: ContentBlock{
+				Kind:            BlockInteractionStep,
+				InteractionStep: json.RawMessage(`{"type":"google_search_call"}`),
+			},
+		},
+		{
+			name: "unknown step type",
+			role: RoleAssistant,
+			block: ContentBlock{
+				Kind:            BlockInteractionStep,
+				InteractionStep: json.RawMessage(`{"type":"code_execution_call"}`),
+			},
+		},
+		{
+			name: "malformed step",
+			role: RoleAssistant,
+			block: ContentBlock{
+				Kind:            BlockInteractionStep,
+				InteractionStep: json.RawMessage(`{`),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateMessageContent([]Message{{Role: tc.role, Content: []ContentBlock{tc.block}}}); err == nil {
+				t.Fatal("ValidateMessageContent = nil, want error")
+			}
+		})
+	}
+}
+
 func TestValidateMessageContentRejectsMalformedImages(t *testing.T) {
 	valid := ContentBlock{
 		Kind:           BlockImage,

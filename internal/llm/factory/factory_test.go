@@ -17,6 +17,7 @@ func TestInferProvider(t *testing.T) {
 		{"arbitrary local model infers openai", Options{Model: "llama-3.1-70b", APIKey: "k"}, "openai"},
 		{"explicit provider overrides claude inference", Options{Provider: "openai", Model: "claude-weird", APIKey: "k"}, "openai"},
 		{"explicit responses provider", Options{Provider: "responses", Model: "gpt-5.4", APIKey: "k"}, "responses"},
+		{"explicit interactions provider", Options{Provider: "interactions", Model: "gemini-3.6-flash", APIKey: "k"}, "interactions"},
 		{"explicit anthropic overrides non-claude model", Options{Provider: "anthropic", Model: "custom", APIKey: "k"}, "anthropic"},
 	}
 	for _, tc := range cases {
@@ -45,6 +46,9 @@ func TestMissingAPIKeyDefaultBaseURL(t *testing.T) {
 	if _, err := New(Options{Provider: "responses", Model: "gpt-5.4"}); err == nil {
 		t.Error("expected error for missing Responses API key with default base URL")
 	}
+	if _, err := New(Options{Provider: "interactions", Model: "gemini-3.6-flash"}); err == nil {
+		t.Error("expected error for missing Gemini API key with default base URL")
+	}
 }
 
 func TestEmptyKeyAllowedWithCustomBaseURL(t *testing.T) {
@@ -64,6 +68,9 @@ func TestEmptyKeyAllowedWithCustomBaseURL(t *testing.T) {
 
 	if _, err := New(Options{Provider: "responses", Model: "gpt-5.4", BaseURL: "http://localhost:8080/v1"}); err != nil {
 		t.Errorf("expected empty key allowed with custom responses base URL: %v", err)
+	}
+	if _, err := New(Options{Provider: "interactions", Model: "gemini", BaseURL: "http://localhost:8080/v1beta"}); err != nil {
+		t.Errorf("expected empty key allowed with custom Interactions base URL: %v", err)
 	}
 }
 

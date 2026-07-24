@@ -180,7 +180,8 @@ Provider configs can advertise hosted model tools with `server_tools`.
 Currently `web_search` is recognized. It can be set at the provider level or on
 individual model entries; the proxy also infers it for known web-search-capable
 providers such as OpenAI Responses, Anthropic, Sakana, OpenRouter, MiMo, Kimi,
-and Z.AI. Harness only declares it when `-web-search auto` (or
+Z.AI, and native Google Interactions. Harness only declares it when
+`-web-search auto` (or
 `web_search:"auto"`) is enabled and the selected target advertises support.
 
 Provider and model entries can advertise request-level scheduling tiers with
@@ -319,6 +320,16 @@ model proxy use the Responses WebSocket transport instead of HTTP SSE. The proxy
 defaults this on for `codex_oauth` Responses providers and preserves an explicit
 `responses_websocket:false` override.
 
+Gemini Interactions continuation is managed entirely by the model proxy and is
+on by default for `api_type:"interactions"`. It sends `store:true` and reuses
+`previous_interaction_id` only while the content-addressed transcript prefix
+matches. Set `interactions_stateful:false` in the provider config to send
+`store:false` with complete history. Missing/rejected stored state also retries
+with complete history; signed `thought`, Google Search call, and Google Search
+result steps are persisted invisibly so this fallback remains valid after proxy
+restart. Stored interactions are retained by Google under the account's
+applicable retention policy.
+
 ## Model Proxy
 
 ### Setup
@@ -331,8 +342,9 @@ provider needs one, then lets you choose which provider models are available
 locally. If models.dev omits a provider API URL, setup can still derive
 first-party OpenAI and Anthropic defaults from exact `@ai-sdk/openai` and
 `@ai-sdk/anthropic` package metadata, and maps plain `@ai-sdk/google` to
-Google's OpenAI-compatible Gemini endpoint. Vertex Google package variants are
-not auto-configured.
+the native Gemini Interactions endpoint. Managed Google configs use
+`api_type:"interactions"`, explicitly default `interactions_stateful:true`, and
+advertise `web_search`; Vertex Google package variants are not auto-configured.
 
 The special `openai-codex` provider uses ChatGPT subscription auth instead of an
 API key, exposes models from the OpenAI Codex catalog, and reports token usage
@@ -494,7 +506,8 @@ Image-bearing tool results have three separate compatibility layers:
 2. **Configured dialect:** the provider config's `api_type` selects the wire
    lowering. Anthropic nests images in `tool_result.content`; OpenAI Chat emits
    tool messages followed by one adjacent multimodal user message; Responses
-   emits function outputs followed by one adjacent user image item.
+   emits function outputs followed by one adjacent user image item; Gemini
+   Interactions emits `function_result.result` text/image content.
 3. **Concrete endpoint conformance:** an OpenAI-compatible endpoint can reject a
    valid dialect shape despite catalog metadata. On the final non-retryable,
    targeted rejection, after normal continuation/server-tool/output-floor

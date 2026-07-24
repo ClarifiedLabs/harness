@@ -142,6 +142,114 @@ func TestHandlerContinuationHonorsExplicitAssistantPhase(t *testing.T) {
 	}
 }
 
+func TestHandlerInteractionsContinuationIncludesSignedProviderState(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "google.json"), []byte(`{
+  "name": "google",
+  "api_type": "interactions",
+  "base_url": "https://generativelanguage.googleapis.com/v1beta",
+  "api_key": "gemini-key",
+  "models": [{"name":"gemini-3.6-flash","context_window":1000000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	thoughtEvent := llm.StreamEvent{
+		Kind:            llm.EventReasoningSummary,
+		ReasoningFormat: llm.ReasoningFormatGeminiInteractions,
+		Text:            "searching",
+		Signature:       "thought-sig",
+	}
+	searchEvent := llm.StreamEvent{
+		Kind:            llm.EventInteractionStep,
+		InteractionStep: json.RawMessage(`{"type":"google_search_call","id":"search-1","signature":"search-sig"}`),
+	}
+	fp := llmtest.New("interactions",
+		llmtest.Step{
+			Events:     []llm.StreamEvent{thoughtEvent, searchEvent, {Kind: llm.EventTextDelta, Text: "answer"}},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "interaction-1",
+		},
+		llmtest.Step{Err: &llm.APIError{Code: "previous_interaction_not_found", Message: "previous_interaction_id is invalid"}},
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "interaction-2"},
+	)
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"google.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			return fp, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	first := []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}}}}
+	postTargetContinuationStream(t, srv, "google:gemini-3.6-flash", first)
+	reasoning := []llm.ContentBlock{
+		{
+			Kind:                        llm.BlockInteractionThought,
+			InteractionThoughtSummary:   "searching",
+			InteractionThoughtSignature: "thought-sig",
+		},
+		{
+			Kind:            llm.BlockInteractionStep,
+			InteractionStep: json.RawMessage(`{"type":"google_search_call","id":"search-1","signature":"search-sig"}`),
+		},
+	}
+	second := append([]llm.Message(nil), first...)
+	second = append(second,
+		llm.BuildAssistantMessage(reasoning, "answer", nil, "", llm.StopEndTurn),
+		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "next"}}},
+	)
+	postTargetContinuationStream(t, srv, "google:gemini-3.6-flash", second)
+
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want 3", len(fp.Requests))
+	}
+	if !fp.Requests[0].StoreResponse {
+		t.Fatal("first Interactions request should store state")
+	}
+	if fp.Requests[1].PreviousResponseID != "interaction-1" || len(fp.Requests[1].Messages) != 1 {
+		t.Fatalf("continued request = prev %q messages %d", fp.Requests[1].PreviousResponseID, len(fp.Requests[1].Messages))
+	}
+	if fp.Requests[2].PreviousResponseID != "" || fp.Requests[2].StoreResponse || len(fp.Requests[2].Messages) != len(second) {
+		t.Fatalf("stateless retry = prev %q store=%v messages=%d, want full signed history",
+			fp.Requests[2].PreviousResponseID, fp.Requests[2].StoreResponse, len(fp.Requests[2].Messages))
+	}
+	if got := fp.Requests[2].Messages[1].Content; len(got) < 2 ||
+		got[0].Kind != llm.BlockInteractionThought ||
+		got[1].Kind != llm.BlockInteractionStep {
+		t.Fatalf("stateless retry interaction state = %+v", got)
+	}
+}
+
+func postTargetContinuationStream(t *testing.T, srv *httptest.Server, target string, messages []llm.Message) {
+	t.Helper()
+	body, err := json.Marshal(protocol.StreamRequest{
+		TargetID: target,
+		Request: llm.Request{
+			Model:          target,
+			ProxySessionID: "continuation-test",
+			Messages:       messages,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("stream status = %d body=%s", resp.StatusCode, data)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+}
+
 func TestHandlerContinuationMismatchResendsAndEstablishesFreshAnchor(t *testing.T) {
 	fp := llmtest.New("responses",
 		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp-original"},

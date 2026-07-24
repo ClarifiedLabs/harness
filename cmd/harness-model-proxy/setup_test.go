@@ -440,7 +440,7 @@ func TestRunSetupWritesSakanaProviderWithoutModelShape(t *testing.T) {
 	}
 }
 
-func TestRunSetupWritesGoogleOpenAICompatibleProvider(t *testing.T) {
+func TestRunSetupWritesGoogleInteractionsProvider(t *testing.T) {
 	home := t.TempDir()
 	var out, errw bytes.Buffer
 	env := environment{
@@ -473,11 +473,17 @@ func TestRunSetupWritesGoogleOpenAICompatibleProvider(t *testing.T) {
 		t.Fatalf("decode provider config: %v", err)
 	}
 	if provider.Name != "google" ||
-		provider.APIType != "openai" ||
-		provider.BaseURL != "https://generativelanguage.googleapis.com/v1beta/openai" ||
+		provider.APIType != "interactions" ||
+		provider.BaseURL != "https://generativelanguage.googleapis.com/v1beta" ||
 		provider.APIKey != "" ||
 		provider.Auth != nil {
 		t.Fatalf("provider config = %+v", provider)
+	}
+	if provider.InteractionsStateful == nil || !*provider.InteractionsStateful {
+		t.Fatalf("interactions_stateful = %v, want true", provider.InteractionsStateful)
+	}
+	if !slices.Equal(provider.ServerTools, []string{llm.ServerToolWebSearch}) {
+		t.Fatalf("Google server tools = %v, want web_search", provider.ServerTools)
 	}
 	if len(provider.APIKeyEnv) != 3 ||
 		provider.APIKeyEnv[0] != "GOOGLE_API_KEY" ||
@@ -487,6 +493,15 @@ func TestRunSetupWritesGoogleOpenAICompatibleProvider(t *testing.T) {
 	}
 	if len(provider.Models) != 1 || provider.Models[0].Name != "gemini-test" || provider.Models[0].ContextWindow != 1000000 {
 		t.Fatalf("provider models = %+v, want gemini-test", provider.Models)
+	}
+}
+
+func TestGoogleSetupPreservesExplicitStatelessOverride(t *testing.T) {
+	disabled := false
+	cfg := setupProviderConfig{InteractionsStateful: &disabled}
+	applySyntheticProviderDefaults(modelcatalog.Provider{ID: "google"}, &cfg)
+	if cfg.InteractionsStateful == nil || *cfg.InteractionsStateful {
+		t.Fatalf("interactions_stateful = %v, want preserved false", cfg.InteractionsStateful)
 	}
 }
 

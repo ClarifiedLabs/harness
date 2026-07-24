@@ -2,6 +2,7 @@ package llm
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -25,6 +26,20 @@ func ValidateMessageContent(msgs []Message) error {
 			case BlockToolResult:
 				if err := ValidateToolResultContent(block.ResultContent, block.ResultError); err != nil {
 					return fmt.Errorf("message %d block %d: %w", i, j, err)
+				}
+			case BlockInteractionThought:
+				if message.Role != RoleAssistant {
+					return fmt.Errorf("message %d block %d: interaction thought is only valid in an assistant message", i, j)
+				}
+				if block.InteractionThoughtSignature == "" {
+					return fmt.Errorf("message %d block %d: interaction thought signature is empty", i, j)
+				}
+			case BlockInteractionStep:
+				if message.Role != RoleAssistant {
+					return fmt.Errorf("message %d block %d: interaction step is only valid in an assistant message", i, j)
+				}
+				if !validInteractionStep(block.InteractionStep) {
+					return fmt.Errorf("message %d block %d: invalid interaction step", i, j)
 				}
 			}
 		}
@@ -109,7 +124,28 @@ func imageBlockHasForeignFields(block ContentBlock) bool {
 		block.ThinkingSignature != "" ||
 		block.RedactedData != "" ||
 		block.ReasoningID != "" ||
-		block.ReasoningEncrypted != ""
+		block.ReasoningEncrypted != "" ||
+		block.InteractionThoughtSummary != "" ||
+		block.InteractionThoughtSignature != "" ||
+		len(block.InteractionStep) > 0
+}
+
+func validInteractionStep(raw json.RawMessage) bool {
+	if len(raw) == 0 || !json.Valid(raw) {
+		return false
+	}
+	var header struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &header) != nil {
+		return false
+	}
+	switch header.Type {
+	case "google_search_call", "google_search_result":
+		return true
+	default:
+		return false
+	}
 }
 
 func imageMagicMatches(mediaType string, data []byte) bool {

@@ -200,14 +200,15 @@ Design notes:
 - **`ToolInput` is `json.RawMessage`,** not `map[string]any`: it arrives as a byte stream,
   the tool layer decodes it into its own typed struct anyway, and raw bytes round-trip
   through session files without re-encoding surprises.
-- **JSON tags are provider-neutral** (`kind`, `tool_use_id`, …). Session files never
-  contain raw provider wire JSON, so a session started against Anthropic resumes
-  against an OpenAI-compatible server and vice versa.
+- **JSON tags are provider-neutral** (`kind`, `tool_use_id`, …). The sole opaque
+  provider step is a hidden Gemini Interactions Google Search call/result needed
+  for stateless signature replay; incompatible dialects ignore it.
 - **`Origin` is transcript-only provenance.** It preserves prompt, steering,
   internal, and compaction-checkpoint boundaries; provider adapters ignore it.
-- **Reasoning blocks are opaque replay state.** Anthropic thinking/signatures and
-  Responses encrypted reasoning items are stored provider-neutrally, replayed only
-  to compatible requests, and never treated as ordinary user-visible text.
+- **Reasoning blocks are opaque replay state.** Anthropic thinking/signatures,
+  Responses encrypted reasoning items, and Gemini Interactions thought
+  summaries/signatures use distinct kinds, are replayed only to compatible
+  requests, and are never treated as ordinary user-visible text.
 - **`ParallelToolBatches` is local execution metadata.** It appears on the user message
   carrying tool results and is ignored by provider request builders. Each entry names,
   in emission order, every tool-use ID in one group selected for concurrent dispatch.
@@ -464,9 +465,13 @@ func Read(ctx context.Context, r io.Reader) iter.Seq2[Event, error]
   - **Anthropic:** typed frames — `message_start`, `content_block_start`,
     `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`,
     `ping` (ignored), `error` (terminal stream error; retryability follows type).
+  - **Gemini Interactions:** `interaction.created`, indexed `step.start` /
+    `step.delta` / `step.stop`, and terminal `interaction.completed`. Model text,
+    thought summaries/signatures, function arguments, and Google Search activity
+    arrive as typed step deltas.
 - **Truncated stream:** body EOF without the dialect terminator (`[DONE]`,
-  `response.completed` / `response.incomplete` / `response.failed`, or
-  `message_stop`) → `ErrTruncatedStream`. The agent may re-request the step from
+  `response.completed` / `response.incomplete` / `response.failed`,
+  `interaction.completed`, or `message_stop`) → `ErrTruncatedStream`. The agent may re-request the step from
   scratch when the terminal error is retryable; failed-attempt usage still counts.
 - Cancellation rides on the HTTP request context: cancelling unblocks the body read and
   the iterator yields `ctx.Err()` as its terminal error.
@@ -488,6 +493,9 @@ it. Assembly is per-turn state inside each provider's `Stream`:
 - **Anthropic:** `content_block_start` with `type:"tool_use"` gives `id` + `name` at a
   block index (`Start`); `content_block_delta` with `input_json_delta` carries
   `partial_json` fragments (`Delta`); `content_block_stop` flushes that call (`Done`).
+- **Gemini Interactions:** `step.start` with `type:"function_call"` gives `id` +
+  `name`; `step.delta` with `type:"arguments_delta"` carries JSON-string
+  fragments; `step.stop` flushes the call.
 
 Edge cases:
 
@@ -495,37 +503,38 @@ Edge cases:
 - **Validation on flush:** malformed or non-object accumulated JSON is never dispatched
   to the real tool. The provider emits an invalid `Done` with a diagnostic JSON object,
   and the agent returns an error tool result that includes the parse detail.
-- **Parallel calls:** both dialects interleave multiple calls; `Index` keeps them
+- **Parallel calls:** dialects may interleave multiple calls; `Index` keeps them
   distinct and emission order is preserved into the transcript.
 - **Interleaved text and tool_use** (Anthropic): text blocks share the index space but
   bypass the assembler.
 
 ### 5.4 Request building
 
-| Concern | OpenAI Responses | OpenAI Chat Completions | Anthropic Messages |
-|---|---|---|---|
-| Endpoint default | `https://api.openai.com/v1/responses` | `https://api.openai.com/v1/chat/completions` | `https://api.anthropic.com/v1/messages` |
-| Auth | `Authorization: Bearer <key>` | same | `x-api-key: <key>` + `anthropic-version: 2023-06-01` |
-| Transport | HTTP SSE by default; provider configs may set `responses_websocket:true`, and the proxy defaults it on for `codex_oauth` Responses providers | HTTP SSE | HTTP SSE |
-| Tool schemas | `tools[] = {type:"function", name, description, parameters, strict:false}` | `tools[].function = {name, description, parameters}` (`type:"function"`) | `tools[] = {name, description, input_schema}` |
-| Server tools | `web_search`, or OpenRouter `openrouter:web_search` | OpenRouter `openrouter:web_search`; MiMo `web_search`; Kimi `builtin_function.$web_search`; Z.AI nested `web_search` options | `web_search_20250305` named `web_search` |
-| Parallel tool hint | `parallel_tool_calls:true` when tools are present | `parallel_tool_calls:true` when tools are present | not sent |
-| Prompt cache key | provider-configured; OpenAI auto emits `prompt_cache_key`; managed `openai-codex` configs select it explicitly | provider-configured; OpenAI auto emits `prompt_cache_key`, OpenRouter auto emits `session_id` | not sent (explicit `cache_control` breakpoints instead) |
-| Stateful continuation | `store` is always sent — `store:true` plus `previous_response_id` when proxy catalog reports `responses_stateful:true` (tools/system still sent each request), `store:false` for the stateless default. If the provider rejects stored responses before streaming output, the agent disables stateful continuation and retries stateless. | ignored | ignored |
-| Assistant phase | assistant `message` input items include stored `phase` (`commentary` or `final_answer`) when present | ignored | ignored |
-| Token cap | `max_output_tokens` is capped by explicit `MaxTokens`, else `min(1_000_000, contextWindow/4)`, then by `outputLimit` and remaining counted/estimated context (omitted if disabled or unresolved) | `max_tokens` follows the same input-aware cap (omitted if unresolved) | `max_tokens` is required and follows the same input-aware cap, falling back to 1,000,000 if unresolved |
-| Input token count | `POST /responses/input_tokens` via the optional `InputTokenCounter`; `codex_oauth`/ChatGPT Codex targets use a local `o200k_base` estimate because the Codex CLI protocol does not include a count-token endpoint | local `o200k_base` estimate for OpenAI/OpenRouter Chat Completions | `POST /v1/messages/count_tokens` via the optional `InputTokenCounter` |
-| Streaming usage | final `response.usage` on terminal events | `"stream_options":{"include_usage":true}` (always set) | automatic: input tokens in `message_start`, output in `message_delta` |
-| Stop sequences | not sent | `stop` | `stop_sequences` |
-| Temperature | omitted when nil (never send a spurious 0) | same | same |
-| Reasoning controls | harness sends `reasoning_profile` plus optional `reasoning.summary` to the model proxy; proxy maps profiles to provider controls | OpenAI: `reasoning_effort`; OpenRouter: `reasoning.effort`, `reasoning.max_tokens`, `reasoning.enabled`; Google: `reasoning_effort` for effort and `extra_body.google.thinking_config.thinking_budget` for budget/off | effort: `output_config.effort`; budget: `thinking={type:"enabled", budget_tokens}`; explicit reasoning-off sends `thinking={type:"disabled"}` |
+| Concern | OpenAI Responses | OpenAI Chat Completions | Anthropic Messages | Gemini Interactions |
+|---|---|---|---|---|
+| Endpoint default | `https://api.openai.com/v1/responses` | `https://api.openai.com/v1/chat/completions` | `https://api.anthropic.com/v1/messages` | `https://generativelanguage.googleapis.com/v1beta/interactions` |
+| Auth | `Authorization: Bearer <key>` | same | `x-api-key: <key>` + `anthropic-version: 2023-06-01` | `x-goog-api-key: <key>` |
+| Transport | HTTP SSE by default; provider configs may set `responses_websocket:true`, and the proxy defaults it on for `codex_oauth` Responses providers | HTTP SSE | HTTP SSE | HTTP SSE |
+| Tool schemas | `tools[] = {type:"function", name, description, parameters, strict:false}` | `tools[].function = {name, description, parameters}` (`type:"function"`) | `tools[] = {name, description, input_schema}` | `tools[] = {type:"function", name, description, parameters}` |
+| Server tools | `web_search`, or OpenRouter `openrouter:web_search` | OpenRouter `openrouter:web_search`; MiMo `web_search`; Kimi `builtin_function.$web_search`; Z.AI nested `web_search` options | `web_search_20250305` named `web_search` | `google_search` |
+| Parallel tool hint | `parallel_tool_calls:true` when tools are present | `parallel_tool_calls:true` when tools are present | not sent | not sent |
+| Prompt cache key | provider-configured; OpenAI auto emits `prompt_cache_key`; managed `openai-codex` configs select it explicitly | provider-configured; OpenAI auto emits `prompt_cache_key`, OpenRouter auto emits `session_id` | not sent (explicit `cache_control` breakpoints instead) | not sent; stored continuation and Gemini implicit caching handle stable prefixes |
+| Stateful continuation | `store:true` plus `previous_response_id` by default, with content-addressed full-history fallback; `responses_stateful:false` sends `store:false` | ignored | ignored | `store:true` plus `previous_interaction_id` by default, with signed full-history fallback; `interactions_stateful:false` sends `store:false` |
+| Assistant phase | assistant input items include stored `phase` when present | ignored | ignored | ignored |
+| Response format | provider default unless explicitly requested by a caller | provider default | provider default | forced to plain text; generated media is rejected |
+| Token cap | input-aware `max_output_tokens` | input-aware `max_tokens` | required input-aware `max_tokens` | input-aware `generation_config.max_output_tokens` |
+| Input token count | `POST /responses/input_tokens`; `codex_oauth` uses a local `o200k_base` estimate | local `o200k_base` estimate | `POST /v1/messages/count_tokens` | provider-neutral local estimate |
+| Streaming usage | final `response.usage` | `stream_options.include_usage` | message start/delta | final interaction usage, including cached and thought tokens |
+| Stop sequences | not sent | `stop` | `stop_sequences` | `generation_config.stop_sequences` |
+| Temperature | omitted when nil | omitted when nil | omitted when nil | always omitted |
+| Reasoning controls | `reasoning.effort` / summary | provider-specific effort/budget | effort/budget/toggle | `thinking_level` and `thinking_summaries` |
 
 The same model-facing `ToolSchema.Parameters` bytes go into `parameters` vs
 `input_schema`. Harness strips nested JSON Schema `description` fields before
 advertising tools; each tool's top-level description remains the explanatory text.
 
 **Default `max_tokens` cap (`defaultMaxTokensCap = 1_000_000`).** When the user
-does not set `MaxTokens`, all three dialects start from
+does not set `MaxTokens`, all four dialects start from
 `min(1_000_000, contextWindow/4)` when the context window is known. The model
 catalog's `output_limit` is a ceiling, not the default, so full-window limits
 such as `output_limit == context_window` do not reserve the whole remaining
@@ -810,7 +819,7 @@ serves the normalized list in `GET /v1/models`, and harness only declares hosted
 web search when the selected target advertises it and the harness config sets
 `web_search:"auto"` / `HARNESS_WEB_SEARCH=auto` / `-web-search auto`. The proxy
 also infers `web_search` for known endpoints: OpenAI Responses, Anthropic,
-Sakana, OpenRouter, MiMo, Kimi, and Z.AI. If a provider rejects a server-tool
+Sakana, OpenRouter, MiMo, Kimi, Z.AI, and native Google Interactions. If a provider rejects a server-tool
 field before streaming any events, the proxy retries the request once without
 server tools so stale metadata does not fail the turn.
 
@@ -961,7 +970,7 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   selector accepts number/id toggles plus global `all`, global `none`, `save`,
   `/search`, `n`, `p`, and `cancel`. The provider config is
   generated from the selected catalog with only enabled models for that provider:
-  base URL, api_type (`responses`, `openai`, or `anthropic`), key env vars, context windows,
+  base URL, api_type (`responses`, `openai`, `anthropic`, or `interactions`), key env vars, context windows,
   output limits, input modalities, and reasoning metadata. It is written as a **managed** config (`"managed": true`)
   with **no per-model prices** — the proxy resolves managed prices live from the
   models.dev cache (see *Managed vs manual provider configs*). Without `-force`,
@@ -1009,7 +1018,7 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   When a provider config supplies none of `api_key`/`api_key_env`/`auth`, the proxy
   falls back to a hardcoded env var keyed on the provider's `api_type`:
   `ANTHROPIC_API_KEY` (anthropic), `RESPONSES_API_KEY` then `OPENAI_API_KEY`
-  (responses), and `OPENAI_API_KEY` (otherwise). An optional `auth` block takes
+  (responses), `GEMINI_API_KEY` (interactions), and `OPENAI_API_KEY` (otherwise). An optional `auth` block takes
   precedence and resolves dynamic request headers:
   `token_command` executes an argv command, parses plain-token or JSON
   `access_token` output, caches it in memory until expiry/TTL, and sends
@@ -2533,6 +2542,11 @@ type UsageTotals struct {
   `responses_stateful:true`; compaction, `/clear`, provider/model/tool/system
   changes, rejected prior response ids, and rejected stored-response requests
   clear it.
+- Gemini Interactions continuation is proxy-managed. The proxy defaults
+  `interactions_stateful` on, content-addresses each stored prefix, and falls
+  back to full history when state is absent or rejected. Sessions retain signed
+  Interactions thought and Google Search steps so a restarted proxy can replay
+  the conversation statelessly.
 - Image bytes are embedded in `tree.ndjson` as provider-neutral base64 blocks so
   resume is self-contained; `raw.ndjson` records only image metadata for replay.
 - Auto-save to `~/.local/state/harness/sessions/<timestamp>`; the path is printed at

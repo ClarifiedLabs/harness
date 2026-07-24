@@ -92,6 +92,9 @@ func countContentBlock(enc *Encoding, b llm.ContentBlock) int {
 	total += enc.CountText(b.ReasoningEncrypted)
 	total += enc.CountText(b.RedactedData)
 	total += enc.CountText(b.ThinkingSignature)
+	total += enc.CountText(b.InteractionThoughtSummary)
+	total += enc.CountText(b.InteractionThoughtSignature)
+	total += enc.CountText(string(b.InteractionStep))
 	for _, child := range b.ResultContent {
 		total += countContentBlock(enc, child)
 	}

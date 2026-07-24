@@ -243,6 +243,26 @@ dialect when models.dev identifies them. Cost appears when the model has
 configured pricing or pricing can be found through models.dev; unknown model
 names show token counts without a dollar figure.
 
+### Google Gemini Interactions
+
+```sh
+export GEMINI_API_KEY=...
+# Select Google and at least one Gemini model in setup, then restart the proxy.
+harness-model-proxy setup
+harness-model-proxy
+
+./harness -model google:gemini-3.6-flash \
+  -p "read README.md and summarize it in two sentences"
+./harness -model google:gemini-3.6-flash -web-search auto \
+  -p "What is the latest stable Go release? Verify it with Google Search."
+```
+
+Expect: Google uses `api_type:"interactions"`, function calls dispatch normally,
+and the second command uses server-side Google Search before returning model
+text. Repeat a tool-using prompt after restarting the model proxy to exercise
+signed full-history replay; it must not fail with a missing thought/search
+signature.
+
 ### Local Ollama (OpenAI-compatible, no key)
 
 ```sh
