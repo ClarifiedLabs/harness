@@ -512,13 +512,22 @@ func TestSaveRepairsDanglingToolUseBeforeTreeStorage(t *testing.T) {
 	if len(last.Content) != 2 {
 		t.Fatalf("repair carried %d results, want 2", len(last.Content))
 	}
-	for i, want := range []string{"call_x", "call_y"} {
+	for i, want := range []struct {
+		id   string
+		name string
+	}{
+		{id: "call_x", name: "edit"},
+		{id: "call_y", name: "edit"},
+	} {
 		b := last.Content[i]
 		if b.Kind != llm.BlockToolResult {
 			t.Fatalf("block %d kind %q, want tool_result", i, b.Kind)
 		}
-		if b.ResultForID != want {
-			t.Fatalf("block %d result_for_id %q, want %q", i, b.ResultForID, want)
+		if b.ResultForID != want.id {
+			t.Fatalf("block %d result_for_id %q, want %q", i, b.ResultForID, want.id)
+		}
+		if b.ToolName != want.name {
+			t.Fatalf("block %d tool_name %q, want %q", i, b.ToolName, want.name)
 		}
 		if !b.ResultError {
 			t.Fatalf("block %d result_error false, want true", i)

@@ -1597,7 +1597,7 @@ func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, p
 	diffState := a.snapshotToolDiff(call)
 	r := a.dispatchOne(ctx, call, promptID, turnID, sink)
 	r = acceptRichResult(r, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
-	block, usage := a.finishToolResult(r, sink)
+	block, usage := a.finishToolResult(r, call.Name, sink)
 	clearToolProgress(call, sink)
 	a.emitToolDiff(call, diffState, sink)
 	return block, usage
@@ -1626,7 +1626,7 @@ func (a *Agent) dispatchReadOnlyBatch(ctx context.Context, calls []llm.ToolCall,
 	var total llm.Usage
 	for i, r := range results {
 		r = acceptRichResult(r, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
-		block, usage := a.finishToolResult(r, sink)
+		block, usage := a.finishToolResult(r, calls[i].Name, sink)
 		blocks[i] = block
 		clearToolProgress(calls[i], sink)
 		total = add(total, usage)
@@ -1708,14 +1708,14 @@ func acceptRichResult(r llm.ToolResult, encodedTotal *int, imageSupported bool) 
 	return r
 }
 
-func (a *Agent) finishToolResult(r llm.ToolResult, sink EventSink) (llm.ContentBlock, llm.Usage) {
+func (a *Agent) finishToolResult(r llm.ToolResult, toolName string, sink EventSink) (llm.ContentBlock, llm.Usage) {
 	var notice string
 	r, notice = a.prepareToolResult(r, sink)
 	sink.ToolResult(safeToolResultForSink(r))
 	if notice != "" {
 		sink.Notice(notice)
 	}
-	return resultBlock(r), r.Usage
+	return resultBlock(r, toolName), r.Usage
 }
 
 // startToolProgress hands the renderer the tool's live-progress closure before
@@ -1892,9 +1892,10 @@ func (a *Agent) prepareToolResult(r llm.ToolResult, sink EventSink) (llm.ToolRes
 	return toolresult.PrepareTruncated(r, archiver)
 }
 
-func resultBlock(r llm.ToolResult) llm.ContentBlock {
+func resultBlock(r llm.ToolResult, toolName string) llm.ContentBlock {
 	return llm.ContentBlock{
 		Kind:          llm.BlockToolResult,
+		ToolName:      toolName,
 		ResultForID:   r.ForID,
 		ResultText:    r.Text,
 		ResultError:   r.IsError,

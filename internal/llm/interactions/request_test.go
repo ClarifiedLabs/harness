@@ -133,6 +133,7 @@ func TestBuildRequestStatefulTail(t *testing.T) {
 			Role: llm.RoleUser,
 			Content: []llm.ContentBlock{{
 				Kind:        llm.BlockToolResult,
+				ToolName:    "read_file",
 				ResultForID: "call-1",
 				ResultText:  "ok",
 			}},
@@ -147,6 +148,13 @@ func TestBuildRequestStatefulTail(t *testing.T) {
 	}
 	if len(got.Input) != 1 || !strings.Contains(string(got.Input[0]), `"type":"function_result"`) {
 		t.Fatalf("tail input = %s", got.Input)
+	}
+	var result wireStep
+	if err := json.Unmarshal(got.Input[0], &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Name != "read_file" {
+		t.Fatalf("function result name = %q, want read_file", result.Name)
 	}
 }
 

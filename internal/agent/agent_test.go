@@ -1170,6 +1170,9 @@ func TestParallelToolCallsSequentialInOrder(t *testing.T) {
 	if resMsg.Content[0].ResultForID != "call_a" || resMsg.Content[1].ResultForID != "call_b" {
 		t.Errorf("results out of order:\n%s", dump([]llm.Message{resMsg}))
 	}
+	if resMsg.Content[0].ToolName != "echo" || resMsg.Content[1].ToolName != "echo" {
+		t.Errorf("results missing tool names:\n%s", dump([]llm.Message{resMsg}))
+	}
 	if len(resMsg.ParallelToolBatches) != 0 {
 		t.Errorf("sequential calls recorded as parallel: %+v", resMsg.ParallelToolBatches)
 	}
@@ -2621,6 +2624,9 @@ func TestAllReadOnlyStepDispatchesConcurrently(t *testing.T) {
 	resMsg := a.Transcript()[2]
 	if len(resMsg.Content) != 2 || resMsg.Content[0].ResultForID != "a" || resMsg.Content[1].ResultForID != "b" {
 		t.Fatalf("results not in emission order:\n%s", dump([]llm.Message{resMsg}))
+	}
+	if resMsg.Content[0].ToolName != "r1" || resMsg.Content[1].ToolName != "r2" {
+		t.Fatalf("results missing tool names:\n%s", dump([]llm.Message{resMsg}))
 	}
 	for _, b := range resMsg.Content {
 		if b.ResultError {

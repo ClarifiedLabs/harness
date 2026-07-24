@@ -221,6 +221,7 @@ func buildInput(messages []llm.Message) ([]json.RawMessage, error) {
 				}
 				if err := appendStep(wireStep{
 					Type:    "function_result",
+					Name:    block.ToolName,
 					CallID:  block.ResultForID,
 					Result:  result,
 					IsError: block.ResultError,

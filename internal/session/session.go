@@ -1024,6 +1024,7 @@ func repair(msgs []llm.Message) []llm.Message {
 		if b.Kind == llm.BlockToolUse {
 			results = append(results, llm.ContentBlock{
 				Kind:        llm.BlockToolResult,
+				ToolName:    b.ToolName,
 				ResultForID: b.ToolUseID,
 				ResultText:  "interrupted",
 				ResultError: true,

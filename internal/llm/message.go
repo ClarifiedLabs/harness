@@ -128,7 +128,8 @@ type ContentBlock struct {
 	ImageBytes        int    `json:"image_bytes,omitempty"`
 	ImageEncodedBytes int    `json:"image_encoded_bytes,omitempty"`
 
-	// BlockToolUse (assistant calls a tool)
+	// BlockToolUse (assistant calls a tool). ToolName is also retained on the
+	// matching BlockToolResult for dialects that require it in the result.
 	ToolUseID string          `json:"tool_use_id,omitempty"` // provider-issued call id
 	ToolName  string          `json:"tool_name,omitempty"`
 	ToolInput json.RawMessage `json:"tool_input,omitempty"` // complete JSON object
