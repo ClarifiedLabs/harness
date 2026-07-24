@@ -43,20 +43,35 @@ Harness is a small, terminal-first Go CLI for a provider-neutral, tool-using LLM
 - Coordinate goroutines with channels or `sync.WaitGroup`, not sleeps.
 - Preserve `ValidateTranscript` invariants after transcript mutation. Behavioral tool changes need focused `internal/tools` tests.
 
-## Serena
+## Documentation
 
-- Commit `.serena/project.yml` and `.serena/.gitignore`, never `.serena/cache/` or `.serena/project.local.yml`.
-- Commit concise `.serena/memories/` entries only when curated, non-sensitive, and useful; remove stale entries.
-
-## Keep Docs In Sync
-
-- Public flags/usage: `README.md` and `cmd/harness/main.go` usage.
-- Tool behavior/schemas: `docs/design.md` section 9.
-- System prompts and compaction: `internal/sysprompt` tests/docs.
-- Agents: `README.md` and design section 14; MCP: README and design sections 9.15/15; smoke workflows: `docs/smoke.md`.
+- `README.md` is the onboarding and value-proposition surface: project summary,
+  design invariants, basic architecture, installation, first model-proxy setup,
+  first prompt, compact feature highlights, and links. Preserve the Design
+  Invariants and Basic Architecture sections as intentional README content.
+- Keep detailed flags, configuration, provider behavior, REPL commands, agents,
+  sessions, diagnostics, compaction, interrupts, and hooks in `docs/usage.md`.
+  Keep its flag and command references synchronized with
+  `cmd/harness/main.go`.
+- Keep operational tool behavior in `docs/tools.md`; keep model-facing schemas,
+  implementation contracts, architecture, system prompts, and compaction
+  internals in `docs/design.md` and the relevant tests.
+- Keep MCP, LSP, smoke, release, and benchmark details in their dedicated
+  documents under `docs/`.
+- Update the canonical document for every user-visible feature change. Change
+  the README only when the value proposition or new-user journey materially
+  changes; do not append changelog-style implementation details or duplicate
+  reference prose there.
+- Preserve the `release-artifacts` marker block in `README.md`; release
+  automation owns its versioned links.
 
 ## Adding Things
 
-- Tool: implement `Tool`, register, test, and document its model-facing contract.
-- Dialect: add `internal/llm/<dialect>`, implement `llm.Provider`, and register it in factory.
-- Config/flag: follow `flags > env > config > defaults`; update examples when useful.
+- Tool: implement `Tool`, register, test, document operational behavior in
+  `docs/tools.md`, and document its model-facing contract in design section 9.
+- Dialect: add `internal/llm/<dialect>`, implement `llm.Provider`, register it in
+  factory, and update the provider design and any user-facing setup in
+  `docs/usage.md`.
+- Config/flag: follow `flags > env > config > defaults`; update
+  `cmd/harness/main.go`, `docs/usage.md`, and examples when useful. Update the
+  README only when the quickstart changes.

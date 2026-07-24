@@ -208,6 +208,40 @@ at the standard model rate. A selected mode with no accurate catalog price
 remains unpriced; token accounting continues normally and reject-unpriced
 dollar budgets fail closed.
 
+## Prompt Limits And Lifecycle
+
+The agent loop has several controls against runaway work:
+
+- `-max-turns` limits model turns within one prompt.
+- `-max-prompt-tokens` stops before the next paid request once cumulative input,
+  cache, output, and reasoning tokens reach the configured budget.
+- `-max-prompt-cost` applies the equivalent cumulative USD ceiling when provider
+  usage reports a known cost. Unpriced models cannot enforce this limit.
+- `-tool-timeout` is a per-tool-call backstop; `run_command`'s own
+  `timeout_seconds` remains authoritative.
+- Repeated identical tool results and consecutive all-error tool turns are
+  steered first and eventually stopped if the model does not change course.
+
+Turn-limit and loop-guard stops make one best-effort tools-disabled request so
+the model can finish with a summary. Token and cost budgets stop without another
+paid request.
+
+Harness uses these terms consistently:
+
+- A **prompt** is one top-level interaction started by user input.
+- A **turn** is one model response plus the complete tool-result batch it
+  requested. Turn numbers restart at 1 for each prompt.
+- An **attempt** is one provider request for a turn; retries increase the
+  attempt number without creating another turn.
+- **Maintenance** calls such as compaction, cache prewarming, handoff summaries,
+  and optional branch summaries are accounted separately and never increment
+  the turn count.
+
+While a prompt runs, status uses `[turn: N … │ prompt …]`; completion uses
+`[prompt: N turns …]`. The [Flags](#flags) section lists defaults and config
+forms; [design section 8.1](design.md#81-prompt-and-turn-loop) records the exact
+loop mechanics.
+
 ## Configuration And Environment
 
 Precedence is **flags > environment > config file > built-in defaults** for any
@@ -483,6 +517,20 @@ Token counters are recorded for every stream that produced usage, priced or not,
 Use `-no-metrics` to disable the endpoint or `-metrics-listen` to move it. The
 equivalent proxy-config `metrics` object accepts `enabled` and `listen`.
 
+### Provider failures and retries
+
+Harness retries transient connection failures and retryable provider responses
+such as 429, 500, 502, 503, and 529. A `Retry-After` value or equivalent
+streaming error hint is honored when it is at most 60 seconds. Longer 429/529
+waits fail immediately with the original provider message so an interactive
+prompt is not silently parked for minutes or hours.
+
+Every unsuccessful upstream attempt is logged by the model proxy, including
+attempts followed by a successful retry. Session-side lifecycle records are
+described under [Session diagnostics](#session-diagnostics); the exact backoff,
+stream-retry, and cancellation rules are in
+[design section 5.5](design.md#55-errors-and-retries-internalretry).
+
 ### Proxy request tracing
 
 Enable opt-in tracing to correlate a harness run across model and MCP proxy logs:
@@ -634,12 +682,6 @@ Anthropic usage does not currently expose a separate reasoning-token field;
 extended thinking is counted in output tokens, so the reasoning total remains
 zero for Anthropic sessions.
 
-For `/handoff`, `-a` overrides the configured target agent, `-m` applies a
-one-off model override, and the remaining text is passed to the implementation
-agent as additional user input alongside the generated or tool-supplied brief.
-Options must precede the message; use `--` when the message itself starts with a
-dash. Harness displays the brief before the approval prompt.
-
 An unknown `/command` prints a `did you mean <command>?` suggestion (nearest known
 command by edit distance) instead of failing silently. The per-prompt usage line
 appends cache-read and reasoning token counts (with the cache-hit ratio) when they
@@ -661,11 +703,26 @@ It is erased the instant real output or a tool line appears, and is shown only a
 TTY when not quiet.
 
 Text typed while a prompt is running is captured with echo off and shown on that
-wait line after a `>` marker. Submitted model-bound input is steered before the
-next turn when possible; other input is queued for the next prompt. Unsubmitted
-text is deposited into the next prompt as editable, pre-filled text when the
-active prompt completes or is interrupted. Ctrl-C and double-Esc cancel the
-active prompt.
+wait line after a `>` marker. Unsubmitted text is deposited into the next prompt
+as editable, pre-filled text when the active prompt completes or is interrupted.
+Ctrl-C and double-Esc cancel the active prompt.
+
+### Steering while a prompt runs
+
+By default, model-bound input submitted with Enter while a prompt is running is
+injected as a user message before the next model request. This lets you redirect
+the current work without canceling and retyping the prompt.
+
+- `!shell`, `/commands`, and `/edit` retain their queued behavior and run at the
+  next idle prompt.
+- A steer does not consume a `max-turns` slot and resets the loop-guard streaks.
+- If the prompt finishes before another model request, the submitted steer is
+  recovered and run as the next prompt.
+- Ctrl-C or double-Esc still cancels the active prompt.
+
+`-no-steer`, `HARNESS_NO_STEER`, or config `no_steer` disables steering and
+queues submitted input as the next prompt. Steering is available only in the
+interactive REPL, not one-shot mode.
 
 ## Agents
 
@@ -724,6 +781,23 @@ tools: `disabled`, `read_only`, or `all`. Explicit `mcp__...` names in
 the harness restricts tools; the underlying tools still assume an external
 sandbox for real isolation.
 
+### Planning and implementation handoff
+
+The `plan` agent investigates and designs without modifying the project. It can
+use `record_plan` to persist a durable Markdown plan under the session, then
+`request_implementation` to propose handing the latest plan to an implementation
+agent. At the prompt boundary, Harness displays the handoff brief and asks for
+approval before switching agents and starting implementation with a clean
+context seeded by the plan.
+
+`/handoff [-a agent] [-m model] [message]` performs the same review manually.
+`-a` overrides the configured target agent, `-m` applies a one-off model
+override, and trailing text is added as separate user guidance. Options must
+precede the message; use `--` when the message itself begins with a dash. The
+target otherwise comes from `--handoff-agent`, `HARNESS_HANDOFF_AGENT`, config
+`handoff_agent`, or the `auto` default. Handoffs require an interactive session
+and are unavailable in one-shot mode.
+
 ## Sessions
 
 - A session path is a directory. `tree.ndjson` is the canonical append-only
@@ -776,6 +850,23 @@ direct and delegate tool/command activity, parallel batches, compactions, and a
 hierarchical delegate breakdown. The root token and
 cost totals come from `state.json` and already include delegate and compaction
 usage; delegate totals similarly include any nested delegates.
+
+### Session diagnostics
+
+`diagnostics.ndjson` contains JSON-line diagnostics, including MCP and LSP child
+process stderr that is hidden from the terminal by default. `raw.ndjson` is the
+chronological replay and analysis log. In addition to visible conversation
+events, it records model-request acceptance and completion, every failed
+upstream attempt, scheduled retries, terminal failures, and cancellation.
+
+Model-request lifecycle records carry parsed provider messages, timing, and
+request correlation used by `harness session timings`. They never become
+conversation-tree entries or model context. The model proxy logs the same
+failed upstream attempts individually. Multimodal endpoint rejections add the
+sanitized records described in
+[Multimodal tool-result compatibility diagnostics](#multimodal-tool-result-compatibility-diagnostics);
+prompts, tool arguments, local paths, result text, and image base64 remain
+excluded.
 
 ## Compaction
 

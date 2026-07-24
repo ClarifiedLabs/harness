@@ -15,10 +15,12 @@ codebase works today and evolves as harness gains capabilities.
 - **Unix philosophy for tools.** When the job is already owned by a mature host CLI
   (`grep`, `rg`, `git`, shell commands), expose a thin argv wrapper instead of
   reimplementing optimized search or command semantics in the harness.
-- **Provider access is isolated.** `harness` uses one provider-neutral
-  message/streaming model and talks to `harness-model-proxy` over HTTP. The proxy
-  owns API keys, provider configs, model metadata, and the Anthropic/OpenAI
-  dialects; the main CLI sees only a catalog and normalized stream events.
+- **Provider and MCP access are isolated.** `harness` uses one provider-neutral
+  message/streaming model and talks to `harness-model-proxy` over HTTP. The model
+  proxy owns API keys, provider configs, model metadata, and concrete provider
+  dialects. Optional remote MCP access similarly runs through
+  `harness-mcp-proxy`, keeping provider and MCP credentials outside the agent
+  process.
 - **No sandboxing or permission prompts.** The harness assumes it is launched inside an
   already-sandboxed environment. Tools run with the process's privileges, immediately.
 - **First-class git.** A dedicated `git` tool plus git context in the system prompt.
@@ -34,6 +36,31 @@ codebase works today and evolves as harness gains capabilities.
 | Secrets | API keys live in `harness-model-proxy`; the `harness` process talks to it over HTTP |
 
 ## 3. Architecture
+
+At the deployment level, the unrestricted agent CLI can run in an isolated
+workspace while separate model and MCP services retain credentials in a trusted
+environment:
+
+```text
+                               +-----------------------+
++----------------------+       | Env with Credentials  |
+| Sandboxed Workspace  |       |                       |
+|                      |       |    +-------------+    |
+|   +-------------+    |   +---+----> Model Proxy |    |
+|   |             |    |   |   |    +-------------+    |
+|   | Harness CLI + ---+---+   |                       |
+|   |             |    |   |   |     +-----------+     |
+|   +-------------+    |   +---+-----> MCP Proxy |     |
++----------------------+       |     +-----------+     |
+                               +-----------------------+
+```
+
+Both proxies support optional API keys for CLI-to-proxy access. They are
+intended to listen only on localhost or a trusted local network; proxy
+authentication does not make an otherwise untrusted deployment safe.
+
+Within the main CLI, prompts flow through the provider-neutral agent loop while
+tool calls dispatch against the local registry:
 
 ```
                  ┌────────────────────────────────────────────┐
