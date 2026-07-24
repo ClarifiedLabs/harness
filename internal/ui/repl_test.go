@@ -1340,8 +1340,6 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 	got := errw.String()
 	for _, want := range []string{
 		"built-in tools:",
-		"  read_file       Read one file with optional offset/limit, or batch paths[]; returns line-numbered content.",
-		"  list_dir        List one directory with an optional base-name glob; non-recursive.",
 		"mcp tools:",
 		"  [files]",
 		"    mcp__files__read  refreshed tool",
@@ -1354,7 +1352,9 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 			t.Errorf("/tools output missing %q:\n%s", want, got)
 		}
 	}
-	if col := toolSummarySeparatorColumn(t, got, "read_file"); col != toolSummarySeparatorColumn(t, got, "list_dir") {
+	readFileCol := toolSummaryDescriptionColumn(t, got, "read_file", "Read one file with optional offset/limit, or batch paths[]; returns line-numbered content.")
+	listDirCol := toolSummaryDescriptionColumn(t, got, "list_dir", "List one directory with an optional base-name glob; non-recursive.")
+	if readFileCol != listDirCol {
 		t.Errorf("built-in description separators not aligned:\n%s", got)
 	}
 }
@@ -1393,16 +1393,19 @@ func TestREPLSkillsCommandAlignsAndWrapsDescriptions(t *testing.T) {
 	}
 }
 
-func toolSummarySeparatorColumn(t *testing.T, summary, name string) int {
+func toolSummaryDescriptionColumn(t *testing.T, summary, name, wantDescription string) int {
 	t.Helper()
 	for _, line := range strings.Split(summary, "\n") {
-		if strings.Contains(line, name) {
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				t.Fatalf("summary line for %q has no description:\n%s", name, summary)
-			}
-			return strings.Index(line, fields[1])
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != name {
+			continue
 		}
+		trimmed := strings.TrimSpace(line)
+		gotDescription := strings.TrimSpace(strings.TrimPrefix(trimmed, name))
+		if gotDescription != wantDescription {
+			t.Fatalf("summary description for %q = %q, want %q:\n%s", name, gotDescription, wantDescription, summary)
+		}
+		return strings.Index(line, wantDescription)
 	}
 	t.Fatalf("summary missing tool %q:\n%s", name, summary)
 	return -1
