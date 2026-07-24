@@ -358,14 +358,17 @@ func TestTextDeltaGoesToStdout(t *testing.T) {
 
 func TestFinalAnswerSeparatorBetweenCommentaryAndFinal(t *testing.T) {
 	var out, errw bytes.Buffer
-	r := NewRenderer(&out, &errw, RenderOptions{})
+	r := NewRenderer(&out, &errw, RenderOptions{Color: true, Markdown: true})
 
 	r.AssistantPhase(llm.AssistantPhaseCommentary)
 	r.TextDelta("I have enough to answer.")
 	r.AssistantPhase(llm.AssistantPhaseFinal)
 	r.TextDelta("Yes, with limits.")
+	r.finishAssistantLine()
 
-	want := "I have enough to answer.\n\n---\n\nYes, with limits."
+	want := "I have enough to answer.\n" +
+		ansiDim + submittedPromptRule + ansiReset +
+		"\nYes, with limits.\n"
 	if out.String() != want {
 		t.Fatalf("assistant text = %q, want %q", out.String(), want)
 	}
@@ -399,7 +402,7 @@ func TestFinalAnswerSeparatorOnlyOnce(t *testing.T) {
 	r.TextDelta("Yes")
 	r.TextDelta(", with limits.")
 
-	if got := strings.Count(out.String(), "\n---\n"); got != 1 {
+	if got := strings.Count(out.String(), "\n"+submittedPromptRule+"\n"); got != 1 {
 		t.Fatalf("separator count = %d, output = %q", got, out.String())
 	}
 	if !strings.HasSuffix(out.String(), "Yes, with limits.") {

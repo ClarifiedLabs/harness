@@ -11,19 +11,23 @@ import (
 )
 
 const (
-	ansiBold       = "\x1b[1m"
-	ansiItalic     = "\x1b[3m"
-	ansiLink       = "\x1b[36;4m"
-	ansiCode       = "\x1b[33m"
-	ansiReset      = "\x1b[0m"
-	minTableRule   = 3
-	codeFenceTick  = "```"
-	codeFenceTilde = "~~~"
+	ansiBold          = "\x1b[1m"
+	ansiBoldUnderline = "\x1b[1;4m"
+	ansiItalic        = "\x1b[3m"
+	ansiLink          = "\x1b[36;4m"
+	ansiCode          = "\x1b[33m"
+	ansiReset         = "\x1b[0m"
+	minTableRule      = 3
+	codeFenceTick     = "```"
+	codeFenceTilde    = "~~~"
 )
 
 // DefaultWidth is the fallback terminal width used by callers that want wrapping
 // even when the terminal size cannot be determined.
 const DefaultWidth = 80
+
+// HorizontalRule is the fixed-width line used to render thematic breaks.
+const HorizontalRule = "────────────────────"
 
 // Options controls Markdown rendering.
 type Options struct {
@@ -151,6 +155,10 @@ func (s *Stream) renderNonTableLine(out *strings.Builder, line string, newline b
 		s.writeLine(out, "", newline)
 		return
 	}
+	if isHorizontalRule(line) {
+		s.writeLine(out, s.opts.Prefix+HorizontalRule, newline)
+		return
+	}
 	if rendered, ok := s.renderHeading(line); ok {
 		s.writeLine(out, rendered, newline)
 		return
@@ -175,7 +183,11 @@ func (s *Stream) renderHeading(line string) (string, bool) {
 	}
 	rendered := s.opts.Prefix + leading + s.renderInline(rest)
 	if s.opts.ANSI {
-		rendered = ansiBold + rendered + ansiReset
+		style := ansiBold
+		if n == 1 {
+			style = ansiBoldUnderline
+		}
+		rendered = style + rendered + ansiReset
 	}
 	return rendered, true
 }
@@ -455,6 +467,29 @@ func splitLeadingWhitespace(s string) (string, string) {
 		i++
 	}
 	return s[:i], s[i:]
+}
+
+func isHorizontalRule(line string) bool {
+	leading, rest := splitLeadingWhitespace(line)
+	if len(leading) > 3 {
+		return false
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" || rest[0] != '-' && rest[0] != '*' && rest[0] != '_' {
+		return false
+	}
+	marker := rest[0]
+	count := 0
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case marker:
+			count++
+		case ' ', '\t':
+		default:
+			return false
+		}
+	}
+	return count >= 3
 }
 
 func listMarker(s string) (marker, body string, ok bool) {

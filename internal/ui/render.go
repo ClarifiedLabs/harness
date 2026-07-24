@@ -32,12 +32,11 @@ const (
 // snippetLines caps the verbose result preview (design §10: "first ~5 lines").
 const snippetLines = 5
 
-const finalAnswerSeparator = "\n---\n\n"
-
 // submittedPromptRule is the separator drawn between a submitted REPL prompt and
-// the model output that follows. It is a fixed, modest width rather than the
-// terminal width so a later resize narrower never leaves an ugly over-long rule.
-const submittedPromptRule = "────────────────────"
+// the model output that follows and between commentary and a final answer. It is
+// a fixed, modest width rather than the terminal width so a later resize narrower
+// never leaves an ugly over-long rule.
+const submittedPromptRule = markdown.HorizontalRule
 
 // RenderOptions configures a Renderer. Color is decided by the caller (TTY check
 // plus NO_COLOR / -no-color); Now is injected so durations are
@@ -610,11 +609,14 @@ func (r *Renderer) dimLine(s string) {
 func (r *Renderer) SubmittedPromptSeparator() {
 	r.statusClear()
 	r.finishAssistantLine()
-	rule := submittedPromptRule
+	fmt.Fprintln(r.errw, r.separatorRule())
+}
+
+func (r *Renderer) separatorRule() string {
 	if r.color {
-		rule = ansiDim + rule + ansiReset
+		return ansiDim + submittedPromptRule + ansiReset
 	}
-	fmt.Fprintln(r.errw, rule)
+	return submittedPromptRule
 }
 
 func (r *Renderer) timestampStatusLine(s string) string {
@@ -1342,7 +1344,7 @@ func (r *Renderer) writeFinalSeparatorIfNeeded() {
 		return
 	}
 	r.finishAssistantLine()
-	io.WriteString(r.out, finalAnswerSeparator)
+	fmt.Fprintln(r.out, r.separatorRule())
 	r.finalSeparatorPrinted = true
 }
 

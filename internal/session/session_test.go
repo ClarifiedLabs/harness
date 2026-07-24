@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"harness/internal/llm"
+	"harness/internal/markdown"
 	"harness/internal/plan"
 	"harness/internal/todo"
 )
@@ -681,10 +682,12 @@ func TestReplaySeparatesCommentaryAndFinalAnswer(t *testing.T) {
 	}
 
 	var replay strings.Builder
-	if err := Replay(dir, &replay, ReplayOptions{}); err != nil {
+	if err := Replay(dir, &replay, ReplayOptions{Markdown: true, ANSI: true}); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	wantReplay := "> answer this\nI have enough to answer.\n\n---\n\nYes, with limits.\n"
+	wantReplay := "> answer this\nI have enough to answer.\n" +
+		ansiDim + markdown.HorizontalRule + ansiReset +
+		"\nYes, with limits.\n"
 	if replay.String() != wantReplay {
 		t.Fatalf("replay mismatch:\nwant %q\n got %q", wantReplay, replay.String())
 	}
@@ -693,7 +696,7 @@ func TestReplaySeparatesCommentaryAndFinalAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LatestTurnOutput: %v", err)
 	}
-	wantLatest := "I have enough to answer.\n\n---\n\nYes, with limits."
+	wantLatest := "I have enough to answer.\n" + markdown.HorizontalRule + "\nYes, with limits."
 	if latest != wantLatest {
 		t.Fatalf("latest output mismatch:\nwant %q\n got %q", wantLatest, latest)
 	}
@@ -720,7 +723,7 @@ func TestReplayResetsPhaseStateBetweenTurns(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 	got := replay.String()
-	if strings.Contains(got, "\n---\n") {
+	if strings.Contains(got, "\n"+markdown.HorizontalRule+"\n") {
 		t.Fatalf("replay carried phase state between turns:\n%s", got)
 	}
 	if !strings.Contains(got, "> second\nDone.\n") {

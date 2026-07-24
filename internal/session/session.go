@@ -325,12 +325,16 @@ type ReplayOptions struct {
 	Quiet             bool // suppress bracketed status lines; assistant text and user prompts are unaffected
 }
 
-const finalAnswerSeparator = "\n---\n\n"
+const (
+	ansiDim   = "\x1b[2m"
+	ansiReset = "\x1b[0m"
+)
 
 type assistantDisplay struct {
-	w        io.Writer
-	markdown *markdown.Stream
-	lineOpen bool
+	w                    io.Writer
+	markdown             *markdown.Stream
+	finalAnswerSeparator string
+	lineOpen             bool
 
 	phase                 string
 	visiblePreFinalOutput bool
@@ -339,7 +343,10 @@ type assistantDisplay struct {
 }
 
 func newAssistantDisplay(w io.Writer, opts ReplayOptions) *assistantDisplay {
-	d := &assistantDisplay{w: w}
+	d := &assistantDisplay{
+		w:                    w,
+		finalAnswerSeparator: renderFinalAnswerSeparator(opts.ANSI),
+	}
 	if opts.Markdown {
 		d.markdown = markdown.NewStream(markdown.Options{
 			Enabled: true,
@@ -348,6 +355,14 @@ func newAssistantDisplay(w io.Writer, opts ReplayOptions) *assistantDisplay {
 		})
 	}
 	return d
+}
+
+func renderFinalAnswerSeparator(ansi bool) string {
+	rule := markdown.HorizontalRule
+	if ansi {
+		rule = ansiDim + rule + ansiReset
+	}
+	return rule + "\n"
 }
 
 func (d *assistantDisplay) Write(text string) {
@@ -400,7 +415,7 @@ func (d *assistantDisplay) writeFinalSeparatorIfNeeded() {
 		return
 	}
 	d.Finish()
-	io.WriteString(d.w, finalAnswerSeparator)
+	io.WriteString(d.w, d.finalAnswerSeparator)
 	d.finalSeparatorPrinted = true
 }
 

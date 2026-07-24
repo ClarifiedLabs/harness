@@ -13,8 +13,8 @@ func TestRenderDisabledReturnsRawText(t *testing.T) {
 }
 
 func TestRenderStripsEmphasisWithoutANSI(t *testing.T) {
-	got := Render("Use **bold**, *italic*, and ***both***.", Options{Enabled: true})
-	want := "Use bold, italic, and both."
+	got := Render("Use **bold**, *italic*, and ***both***.\n---", Options{Enabled: true})
+	want := "Use bold, italic, and both.\n" + HorizontalRule
 	if got != want {
 		t.Fatalf("Render = %q, want %q", got, want)
 	}
@@ -23,7 +23,7 @@ func TestRenderStripsEmphasisWithoutANSI(t *testing.T) {
 func TestRenderAppliesANSIEmphasisAndHeadings(t *testing.T) {
 	got := Render("# Title\nUse **bold** and *italic*.", Options{Enabled: true, ANSI: true})
 	for _, want := range []string{
-		ansiBold + "# Title" + ansiReset,
+		ansiBoldUnderline + "# Title" + ansiReset,
 		ansiBold + "bold" + ansiReset,
 		ansiItalic + "italic" + ansiReset,
 	} {

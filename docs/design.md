@@ -2136,20 +2136,24 @@ backoff allows.
 - Assistant text, reasoning summaries, and handoff briefs displayed for approval
   use a small stdlib-only Markdown renderer on terminal output: emphasis becomes
   ANSI bold/italic when color is enabled, headings keep their `#` markers and
-  render bold, lists normalize and indent continuations, paragraphs and list
-  bodies wrap to terminal width (80 columns when the width is unavailable),
-  tables are padded, and URLs render visibly with cyan highlighting. Displayed
-  handoff briefs follow the same Markdown, color, and width policy, while their
-  archived and implementation-context copies retain the original Markdown
-  source. Redirected one-shot stdout remains raw model text.
+  render bold (with H1 headings also underlined), thematic breaks render as
+  `────────────────────`, lists normalize and indent continuations, paragraphs
+  and list bodies wrap to terminal width (80 columns when the width is
+  unavailable), tables are padded, and URLs render visibly with cyan
+  highlighting. Displayed handoff briefs follow the same Markdown, color, and
+  width policy, while their archived and implementation-context copies retain
+  the original Markdown source. Redirected one-shot stdout remains raw model
+  text.
 - The built-in system prompt asks tool-using models for brief user-facing
   commentary before tool calls and at meaningful work milestones. These
   commentary messages are normal assistant text; Responses `phase` metadata is
   preserved in transcript history when the provider supplies it.
 - When Responses phase metadata marks visible commentary or reasoning output
   before `final_answer` text, live rendering and session replay insert a
-  Markdown `---` delimiter with blank lines around it before the final answer.
-  Providers without phase metadata keep their assistant text stream unchanged.
+  standalone `────────────────────` rule before the final answer, with no extra
+  blank lines around it. The rule is dimmed when color is enabled, matching the
+  submitted-prompt separator. Providers without phase metadata keep their
+  assistant text stream unchanged.
 - Responses API reasoning summaries are semantic model-to-user output events,
   not notices and not transcript messages. They default off. When explicitly
   enabled, interactive runs render them to stdout as a compact two-space indented
