@@ -3025,6 +3025,84 @@ func TestREPLEscapeEscapeCancelsActivePrompt(t *testing.T) {
 	}
 }
 
+func TestREPLDoubleEscapeStillCancelsAfterSubmittedSteer(t *testing.T) {
+	var out, errw lockedBuffer
+	inPrompt := make(chan struct{})
+	fp := llmtest.New("fake", llmtest.Step{
+		Block: func(ctx context.Context) {
+			close(inPrompt)
+			<-ctx.Done()
+		},
+	})
+	app := liveTestApp(t, &out, &errw, fp)
+	app.Steer = func(agent.SteerInput) {}
+	app.Interrupt = agent.NewInterruptWatcher(make(chan os.Signal), app.clock(), func() {})
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-inPrompt:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+	writePipe(t, pw, "redirect\r")
+	writePipe(t, pw, "\x1b\x1b")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "[cancelled]") }, "prompt cancelled after steer")
+	_ = pw.Close()
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+}
+
+func TestREPLSecondControlCForceExitsProviderIgnoringCancellation(t *testing.T) {
+	var out, errw lockedBuffer
+	inPrompt := make(chan struct{})
+	releaseProvider := make(chan struct{})
+	fp := llmtest.New("fake", llmtest.Step{
+		Block: func(context.Context) {
+			close(inPrompt)
+			<-releaseProvider
+		},
+	})
+	app := liveTestApp(t, &out, &errw, fp)
+	sig := make(chan os.Signal, 2)
+	exit := make(chan struct{}, 1)
+	app.Interrupt = agent.NewInterruptWatcher(sig, app.clock(), func() { exit <- struct{}{} })
+	stop := app.Interrupt.Start()
+	defer stop()
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, exit, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-inPrompt:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+	sig <- os.Interrupt
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "cancelling") }, "graceful cancellation status")
+	sig <- os.Interrupt
+	if code := waitRun(t, codeCh); code != ExitInterrupt {
+		t.Fatalf("force exit code = %d, want %d", code, ExitInterrupt)
+	}
+
+	_ = pw.Close()
+	close(releaseProvider)
+	waitFor(t, func() bool {
+		_, err := os.Stat(filepath.Join(app.SessionPath, "state.json"))
+		return err == nil
+	}, "released prompt goroutine cleanup")
+}
+
 func TestREPLReaderConsumesBufferedEscapeSequenceTail(t *testing.T) {
 	rr := newREPLReader(strings.NewReader("\x1b[Asecond\n"), io.Discard, false, "")
 	rr.setEscapeLineEnd(true)

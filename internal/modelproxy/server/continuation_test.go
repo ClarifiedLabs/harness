@@ -382,10 +382,7 @@ func TestHandlerPlainImageStreamErrorRemainsRetryableOnWire(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 stream envelope", resp.StatusCode)
 	}
-	var envelope protocol.StreamEnvelope
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		t.Fatalf("decode stream envelope: %v", err)
-	}
+	envelope := decodeStreamError(t, resp.Body)
 	if envelope.Error == nil || !envelope.Error.Retryable {
 		t.Fatalf("stream error = %+v, want retryable", envelope.Error)
 	}

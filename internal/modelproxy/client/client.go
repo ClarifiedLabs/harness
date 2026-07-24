@@ -186,19 +186,25 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 		resp, err := p.client.http.Do(httpReq)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
+				yield(modelRequestEventFromClientError(ctxErr, llm.ModelRequestCancelled), nil)
 				yield(llm.StreamEvent{}, ctxErr)
 				return
 			}
-			yield(llm.StreamEvent{}, &llm.APIError{Message: err.Error(), Retryable: true})
+			apiErr := &llm.APIError{Message: err.Error(), Retryable: true}
+			yield(modelRequestEventFromClientError(apiErr, llm.ModelRequestFailed), nil)
+			yield(llm.StreamEvent{}, apiErr)
 			return
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			yield(llm.StreamEvent{}, readHTTPError(resp))
+			apiErr := readHTTPError(resp)
+			yield(modelRequestEventFromClientError(apiErr, llm.ModelRequestFailed), nil)
+			yield(llm.StreamEvent{}, apiErr)
 			return
 		}
 
 		dec := json.NewDecoder(resp.Body)
+		terminalEventSeen := false
 		for {
 			var env protocol.StreamEnvelope
 			if err := dec.Decode(&env); err != nil {
@@ -206,23 +212,78 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 					return
 				}
 				if ctxErr := ctx.Err(); ctxErr != nil {
+					if !terminalEventSeen {
+						yield(modelRequestEventFromClientError(ctxErr, llm.ModelRequestCancelled), nil)
+					}
 					yield(llm.StreamEvent{}, ctxErr)
 					return
 				}
-				yield(llm.StreamEvent{}, &llm.APIError{Message: "decode proxy stream: " + err.Error(), Retryable: true})
+				apiErr := &llm.APIError{Message: "decode proxy stream: " + err.Error(), Retryable: true}
+				if !terminalEventSeen {
+					yield(modelRequestEventFromClientError(apiErr, llm.ModelRequestFailed), nil)
+				}
+				yield(llm.StreamEvent{}, apiErr)
 				return
 			}
 			if env.Error != nil {
-				yield(llm.StreamEvent{}, env.Error.APIError())
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					if !terminalEventSeen {
+						yield(modelRequestEventFromClientError(ctxErr, llm.ModelRequestCancelled), nil)
+					}
+					yield(llm.StreamEvent{}, ctxErr)
+					return
+				}
+				apiErr := env.Error.APIError()
+				if !terminalEventSeen {
+					yield(modelRequestEventFromClientError(apiErr, llm.ModelRequestFailed), nil)
+				}
+				yield(llm.StreamEvent{}, apiErr)
 				return
 			}
 			if env.Event != nil {
+				if env.Event.Kind == llm.EventModelRequest && env.Event.ModelRequest != nil {
+					switch env.Event.ModelRequest.State {
+					case llm.ModelRequestFailed, llm.ModelRequestCancelled:
+						terminalEventSeen = true
+					case llm.ModelRequestUpstreamAttemptFailed:
+						terminalEventSeen = env.Event.ModelRequest.Outcome == llm.ModelRequestOutcomeTerminal
+					}
+				}
 				if !yield(*env.Event, nil) {
 					return
 				}
 			}
 		}
 	}
+}
+
+func modelRequestEventFromClientError(err error, state llm.ModelRequestState) llm.StreamEvent {
+	event := &llm.ModelRequestEvent{
+		State:   state,
+		Outcome: llm.ModelRequestOutcomeTerminal,
+	}
+	var apiErr *llm.APIError
+	if errors.As(err, &apiErr) {
+		event.StatusCode = apiErr.StatusCode
+		event.Code = apiErr.Code
+		event.Message = apiErr.Message
+		event.Retryable = apiErr.Retryable
+		event.RetryAfterMS = apiErr.RetryAfter.Milliseconds()
+		if apiErr.Diagnostic != nil {
+			event.Stage = apiErr.Diagnostic.Stage
+			event.ProxyRequestID = apiErr.Diagnostic.ProxyRequestID
+			event.UpstreamRequestID = apiErr.Diagnostic.UpstreamRequestID
+			event.TraceID = apiErr.Diagnostic.TraceID
+			event.SpanID = apiErr.Diagnostic.SpanID
+			event.TargetID = apiErr.Diagnostic.TargetID
+			event.Provider = apiErr.Diagnostic.Provider
+			event.APIType = apiErr.Diagnostic.APIType
+			event.Model = apiErr.Diagnostic.Model
+		}
+	} else if err != nil {
+		event.Message = err.Error()
+	}
+	return llm.StreamEvent{Kind: llm.EventModelRequest, ModelRequest: event}
 }
 
 func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.InputTokenCount, error) {

@@ -55,6 +55,15 @@ type diagnosticRecordSink struct {
 	diagnostics []ModelErrorDiagnostic
 }
 
+type modelRequestRecordSink struct {
+	recordSink
+	events []llm.ModelRequestEvent
+}
+
+func (s *modelRequestRecordSink) ModelRequestEvent(event llm.ModelRequestEvent) {
+	s.events = append(s.events, event)
+}
+
 func (s *diagnosticRecordSink) ModelErrorDiagnostic(diagnostic ModelErrorDiagnostic) {
 	s.diagnostics = append(s.diagnostics, diagnostic)
 }
@@ -105,6 +114,58 @@ func TestReportMaintenanceSkipsLocalZeroUsage(t *testing.T) {
 	if len(sink.maintenance) != 1 || sink.maintenance[0].Usage.InputTokens != 20 || sink.maintenance[0].Usage.OutputTokens != 4 {
 		t.Fatalf("model-backed compaction maintenance = %+v", sink.maintenance)
 	}
+}
+
+func TestModelRequestTelemetryNeverEntersTranscriptOrNextRequest(t *testing.T) {
+	const providerMessage = "private quota diagnostic"
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{
+				{Kind: llm.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{
+					State:          llm.ModelRequestUpstreamAttemptFailed,
+					Outcome:        llm.ModelRequestOutcomeRetrying,
+					ProxyRequestID: 77,
+					StatusCode:     429,
+					Message:        providerMessage,
+					RetryDelayMS:   100,
+				}},
+				textDelta("first"),
+				toolDone(0, "call_1", "probe", `{}`),
+			},
+			Stop: llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second")}, Stop: llm.StopEndTurn},
+	)
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{name: "probe", readOnly: true, run: func(context.Context, json.RawMessage) (string, error) {
+		return "ok", nil
+	}})
+	a := newAgent(fp, reg, Options{})
+	sink := &modelRequestRecordSink{}
+	if err := a.RunPrompt(context.Background(), "inspect", sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.events) != 1 || sink.events[0].ProxyRequestID != 77 {
+		t.Fatalf("request telemetry = %+v", sink.events)
+	}
+	transcript, err := json.Marshal(a.Transcript())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(transcript), providerMessage) {
+		t.Fatalf("telemetry leaked into transcript: %s", transcript)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want two turns", len(fp.Requests))
+	}
+	nextRequest, err := json.Marshal(fp.Requests[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(nextRequest), providerMessage) {
+		t.Fatalf("telemetry leaked into next provider request: %s", nextRequest)
+	}
+	mustValid(t, a.Transcript())
 }
 
 type promptWorkSink struct {
@@ -2104,7 +2165,7 @@ func TestMidStreamRetryHonorsRetryAfter(t *testing.T) {
 		slept = append(slept, d)
 		return ctx.Err()
 	}
-	sink := &recordSink{}
+	sink := &modelRequestRecordSink{}
 
 	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
 		t.Fatalf("RunPrompt: %v", err)
@@ -2120,6 +2181,45 @@ func TestMidStreamRetryHonorsRetryAfter(t *testing.T) {
 	}
 	if !noticed {
 		t.Fatalf("retry notice missing delay, notices=%v", sink.notices)
+	}
+	if len(sink.events) != 2 {
+		t.Fatalf("model request events = %+v, want failed then retry scheduled", sink.events)
+	}
+	retryEvent := sink.events[1]
+	if retryEvent.State != llm.ModelRequestRetryScheduled || retryEvent.Attempt != 2 || retryEvent.MaxAttempts != 3 || retryEvent.RetryDelayMS != 2000 {
+		t.Fatalf("retry event = %+v", retryEvent)
+	}
+}
+
+func TestMidStreamLongRetryAfterFailsWithoutSleeping(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Err: &llm.APIError{
+				Code:       "rate_limit_exceeded",
+				Message:    "quota exhausted; retry later",
+				Retryable:  true,
+				RetryAfter: 61 * time.Second,
+			},
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("unexpected")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Default(), Options{})
+	var slept []time.Duration
+	a.sleep = func(_ context.Context, d time.Duration) error {
+		slept = append(slept, d)
+		return nil
+	}
+
+	err := a.RunPrompt(context.Background(), "hi", &recordSink{})
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) || apiErr.RetryAfter != 61*time.Second {
+		t.Fatalf("RunPrompt error = %v, want long Retry-After API error", err)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	}
+	if len(slept) != 0 {
+		t.Fatalf("slept = %v, want no long provider-directed sleep", slept)
 	}
 }
 

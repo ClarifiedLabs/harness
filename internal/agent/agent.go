@@ -32,6 +32,12 @@ import (
 // Retries do not consume the maxTurns budget.
 const streamRetries = 2
 
+// maxStreamRetryAfter keeps a provider-supplied delay from parking an
+// interactive prompt for minutes or hours. This covers rate-limit errors
+// delivered inside an otherwise successful HTTP stream, which bypass the
+// connect-level Retry-After guard.
+const maxStreamRetryAfter = time.Minute
+
 // maxParallelTools bounds concurrent read-only dispatch (spec §8).
 const maxParallelTools = 8
 
@@ -56,6 +62,13 @@ type EventSink interface {
 // before the corresponding assistant text is rendered.
 type AssistantPhaseSink interface {
 	AssistantPhase(phase string)
+}
+
+// ModelRequestEventSink receives diagnostics-only model request lifecycle
+// telemetry. Implementations may render or persist it, but it must never be
+// added to the agent transcript or subsequent model requests.
+type ModelRequestEventSink interface {
+	ModelRequestEvent(llm.ModelRequestEvent)
 }
 
 // ModelErrorDiagnostic is the safe structured record emitted for a final model
@@ -112,7 +125,7 @@ type ToolDiffSink interface {
 type DelegateProgressSnapshot struct {
 	Turn     int
 	Attempt  int
-	Tools    int // count of ToolStart calls seen so far
+	Tools    int    // count of ToolStart calls seen so far
 	Agent    string // child agent name, for the background summary label
 	Context  ContextEstimate
 	Usage    llm.Usage // last TurnAttemptComplete usage
@@ -1995,8 +2008,18 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 		if err == nil || attempt >= streamRetries || !retryableStreamError(err) {
 			return res, wasted, err
 		}
+		retryAfter := streamRetryAfter(err)
+		if retryAfter > maxStreamRetryAfter {
+			return res, wasted, err
+		}
 		wasted = add(wasted, res.usage)
-		delay := retry.Next(attempt, streamRetryAfter(err))
+		delay := retry.Next(attempt, retryAfter)
+		retryEvent := modelRequestEventFromError(err, llm.ModelRequestRetryScheduled)
+		retryEvent.Outcome = ""
+		retryEvent.Attempt = attempt + 2
+		retryEvent.MaxAttempts = streamRetries + 1
+		retryEvent.RetryDelayMS = delay.Milliseconds()
+		emitModelRequestEvent(sink, retryEvent)
 		if abandon, ok := sink.(TurnAttemptAbandonSink); ok {
 			abandon.TurnAttemptAbandoned(turn, attempt+1)
 		}
@@ -2166,9 +2189,17 @@ func stopReasonNotice(reason llm.StopReason) string {
 func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (turnResult, error) {
 	var res turnResult
 	var text []byte
+	terminalModelEventSeen := false
 
 	for ev, err := range a.provider.Stream(ctx, req) {
 		if err != nil {
+			if !terminalModelEventSeen {
+				state := llm.ModelRequestFailed
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					state = llm.ModelRequestCancelled
+				}
+				emitModelRequestEvent(sink, modelRequestEventFromError(err, state))
+			}
 			res.text = string(text)
 			return res, err
 		}
@@ -2219,6 +2250,18 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 			}
 			res.stopReason = ev.StopReason
 			res.responseID = ev.ResponseID
+		case llm.EventModelRequest:
+			if ev.ModelRequest == nil {
+				continue
+			}
+			event := *ev.ModelRequest
+			switch event.State {
+			case llm.ModelRequestFailed, llm.ModelRequestCancelled:
+				terminalModelEventSeen = true
+			case llm.ModelRequestUpstreamAttemptFailed:
+				terminalModelEventSeen = event.Outcome == llm.ModelRequestOutcomeTerminal
+			}
+			emitModelRequestEvent(sink, event)
 		}
 	}
 
@@ -2234,6 +2277,43 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 		}
 	}
 	return res, nil
+}
+
+func emitModelRequestEvent(sink EventSink, event llm.ModelRequestEvent) {
+	if statusSink, ok := sink.(ModelRequestEventSink); ok {
+		statusSink.ModelRequestEvent(event)
+	}
+}
+
+func modelRequestEventFromError(err error, state llm.ModelRequestState) llm.ModelRequestEvent {
+	event := llm.ModelRequestEvent{
+		State:   state,
+		Outcome: llm.ModelRequestOutcomeTerminal,
+	}
+	var apiErr *llm.APIError
+	if errors.As(err, &apiErr) {
+		event.StatusCode = apiErr.StatusCode
+		event.Code = apiErr.Code
+		event.Message = apiErr.Message
+		event.Retryable = apiErr.Retryable
+		event.RetryAfterMS = apiErr.RetryAfter.Milliseconds()
+		if apiErr.Diagnostic != nil {
+			event.Stage = apiErr.Diagnostic.Stage
+			event.ProxyRequestID = apiErr.Diagnostic.ProxyRequestID
+			event.UpstreamRequestID = apiErr.Diagnostic.UpstreamRequestID
+			event.TraceID = apiErr.Diagnostic.TraceID
+			event.SpanID = apiErr.Diagnostic.SpanID
+			event.TargetID = apiErr.Diagnostic.TargetID
+			event.Provider = apiErr.Diagnostic.Provider
+			event.APIType = apiErr.Diagnostic.APIType
+			event.Model = apiErr.Diagnostic.Model
+		}
+		return event
+	}
+	if err != nil {
+		event.Message = err.Error()
+	}
+	return event
 }
 
 func reasoningSummaryText(text string) string {

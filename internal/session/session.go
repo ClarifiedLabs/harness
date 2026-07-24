@@ -226,24 +226,25 @@ func Load(dir string) (Session, error) {
 // Event is one append-only replay record. Display carries the exact user-facing
 // line for events that the renderer shows as dim one-liners.
 type Event struct {
-	Time        time.Time        `json:"time,omitempty"`
-	Type        string           `json:"type"`
-	Prompt      int              `json:"prompt,omitempty"`
-	Turn        int              `json:"turn,omitempty"`
-	Attempt     int              `json:"attempt,omitempty"`
-	Text        string           `json:"text,omitempty"`
-	Phase       string           `json:"phase,omitempty"`
-	Display     string           `json:"display,omitempty"`
-	ToolID      string           `json:"tool_id,omitempty"`
-	Tool        string           `json:"tool,omitempty"`
-	Input       json.RawMessage  `json:"input,omitempty"`
-	Images      []ImageInfo      `json:"images,omitempty"`
-	Usage       *llm.Usage       `json:"usage,omitempty"`
-	Purpose     string           `json:"purpose,omitempty"`
-	FromEntryID string           `json:"from_entry_id,omitempty"`
-	ToEntryID   string           `json:"to_entry_id,omitempty"`
-	Summary     string           `json:"summary,omitempty"`
-	Context     *ContextSnapshot `json:"context,omitempty"`
+	Time         time.Time              `json:"time,omitempty"`
+	Type         string                 `json:"type"`
+	Prompt       int                    `json:"prompt,omitempty"`
+	Turn         int                    `json:"turn,omitempty"`
+	Attempt      int                    `json:"attempt,omitempty"`
+	Text         string                 `json:"text,omitempty"`
+	Phase        string                 `json:"phase,omitempty"`
+	Display      string                 `json:"display,omitempty"`
+	ToolID       string                 `json:"tool_id,omitempty"`
+	Tool         string                 `json:"tool,omitempty"`
+	Input        json.RawMessage        `json:"input,omitempty"`
+	Images       []ImageInfo            `json:"images,omitempty"`
+	Usage        *llm.Usage             `json:"usage,omitempty"`
+	Purpose      string                 `json:"purpose,omitempty"`
+	FromEntryID  string                 `json:"from_entry_id,omitempty"`
+	ToEntryID    string                 `json:"to_entry_id,omitempty"`
+	Summary      string                 `json:"summary,omitempty"`
+	Context      *ContextSnapshot       `json:"context,omitempty"`
+	ModelRequest *llm.ModelRequestEvent `json:"model_request,omitempty"`
 }
 
 // ContextSnapshot is the session-log copy of agent.ContextEstimate. It lives in
@@ -289,6 +290,7 @@ const (
 	EventPromptUsage          = "prompt_usage"
 	EventMaintenanceUsage     = "maintenance_usage"
 	EventBranch               = "branch"
+	EventModelRequest         = "model_request"
 )
 
 // AppendEvent appends ev as one JSON line to raw.ndjson under dir.
@@ -441,7 +443,7 @@ func Replay(dir string, w io.Writer, opts ReplayOptions) error {
 				fmt.Fprintln(w, strings.Join(lines, "\n"))
 				assistant.MarkPreFinalOutput()
 			}
-		case EventToolResult, EventToolDiff, EventNotice, EventBranch, EventTurnAttemptAbandoned, EventTurnAttemptUsage, EventTurnComplete, EventPromptUsage:
+		case EventToolResult, EventToolDiff, EventNotice, EventBranch, EventTurnAttemptAbandoned, EventTurnAttemptUsage, EventTurnComplete, EventPromptUsage, EventModelRequest:
 			assistant.Finish()
 			if ev.Display != "" && !opts.Quiet {
 				fmt.Fprintln(w, ev.Display)
@@ -630,6 +632,7 @@ func writePromptTimings(w io.Writer, prompt int, events []Event) {
 		fmt.Fprintf(w, "prompt %d: total %s\n", prompt, formatDuration(total))
 	}
 	writeModelTimings(w, events)
+	writeModelAPIIssueTimings(w, events)
 	writeToolTimings(w, events)
 	writeLargestGaps(w, events)
 }
@@ -655,6 +658,49 @@ func writeModelTimings(w io.Writer, events []Event) {
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+func writeModelAPIIssueTimings(w io.Writer, events []Event) {
+	var failures int
+	var providerTime time.Duration
+	var scheduledWait time.Duration
+	statuses := map[int]int{}
+	for _, ev := range events {
+		if ev.Type != EventModelRequest || ev.ModelRequest == nil {
+			continue
+		}
+		request := ev.ModelRequest
+		if request.State == llm.ModelRequestRetryScheduled {
+			scheduledWait += time.Duration(request.RetryDelayMS) * time.Millisecond
+			continue
+		}
+		if request.State != llm.ModelRequestUpstreamAttemptFailed && request.State != llm.ModelRequestFailed {
+			continue
+		}
+		failures++
+		providerTime += time.Duration(request.AttemptDurationMS) * time.Millisecond
+		if request.StatusCode != 0 {
+			statuses[request.StatusCode]++
+		}
+	}
+	if failures == 0 {
+		return
+	}
+	var codes []int
+	for code := range statuses {
+		codes = append(codes, code)
+	}
+	sort.Ints(codes)
+	var statusParts []string
+	for _, code := range codes {
+		statusParts = append(statusParts, fmt.Sprintf("%d×%d", code, statuses[code]))
+	}
+	fmt.Fprintf(w, "  model API issues: %d failed attempts, %s provider time, %s scheduled retry wait",
+		failures, formatDuration(providerTime), formatDuration(scheduledWait))
+	if len(statusParts) > 0 {
+		fmt.Fprintf(w, " (%s)", strings.Join(statusParts, ", "))
+	}
+	fmt.Fprintln(w)
 }
 
 func writeToolTimings(w io.Writer, events []Event) {

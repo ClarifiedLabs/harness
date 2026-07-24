@@ -39,7 +39,7 @@ func TestInterruptFirstSignalCancelsPrompt(t *testing.T) {
 	}
 }
 
-func TestInterruptSecondSignalWithinWindowExits(t *testing.T) {
+func TestInterruptSecondSignalExits(t *testing.T) {
 	sig := make(chan os.Signal, 1)
 	now, advance := fakeClock(time.Unix(0, 0))
 	exited := make(chan struct{}, 1)
@@ -54,16 +54,16 @@ func TestInterruptSecondSignalWithinWindowExits(t *testing.T) {
 	sig <- os.Interrupt
 	<-cancelled // first cancels
 
-	advance(500 * time.Millisecond) // within the ~1s window
+	advance(500 * time.Millisecond)
 	sig <- os.Interrupt
 	select {
 	case <-exited:
 	case <-time.After(time.Second):
-		t.Fatal("second signal within the window did not request exit")
+		t.Fatal("second signal did not request exit")
 	}
 }
 
-func TestInterruptSecondSignalAfterWindowCancelsAgain(t *testing.T) {
+func TestInterruptSecondSignalAfterDelayStillExits(t *testing.T) {
 	sig := make(chan os.Signal, 1)
 	now, advance := fakeClock(time.Unix(0, 0))
 	exited := make(chan struct{}, 1)
@@ -72,23 +72,43 @@ func TestInterruptSecondSignalAfterWindowCancelsAgain(t *testing.T) {
 	stop := w.Start()
 	defer stop()
 
-	cancelled := make(chan struct{}, 2)
+	cancelled := make(chan struct{}, 1)
 	w.BeginPrompt(func() { cancelled <- struct{}{} })
 
 	sig <- os.Interrupt
 	<-cancelled
 
-	advance(2 * time.Second) // outside the window
+	advance(2 * time.Second)
 	sig <- os.Interrupt
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("delayed second signal did not request exit")
+	}
+	select {
+	case <-cancelled:
+		t.Fatal("delayed second signal cancelled the prompt twice")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestInterruptPromptUsesTwoStageBehavior(t *testing.T) {
+	exited := make(chan struct{}, 1)
+	w := NewInterruptWatcher(make(chan os.Signal), time.Now, func() { exited <- struct{}{} })
+	cancelled := make(chan struct{}, 1)
+	w.BeginPrompt(func() { cancelled <- struct{}{} })
+
+	w.InterruptPrompt()
 	select {
 	case <-cancelled:
 	case <-time.After(time.Second):
-		t.Fatal("signal after the window during a prompt should cancel, not exit")
+		t.Fatal("first decoded interrupt did not cancel")
 	}
+	w.InterruptPrompt()
 	select {
 	case <-exited:
-		t.Fatal("signal after the window must not request exit")
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(time.Second):
+		t.Fatal("second decoded interrupt did not request exit")
 	}
 }
 

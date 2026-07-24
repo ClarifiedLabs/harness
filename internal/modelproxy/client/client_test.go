@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -136,6 +137,7 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 	var texts []string
 	var responseID string
 	var gotErr error
+	var requestEvents []llm.ModelRequestEvent
 	req := llm.Request{Model: "gpt-5.5", Purpose: llm.RequestPurposeCompaction, Reasoning: llm.ReasoningConfig{Profile: "xhigh"}, StoreResponse: true, PreviousResponseID: "resp_0"}
 	for ev, err := range c.Provider("openai:gpt-5.5").Stream(context.Background(), req) {
 		if err != nil {
@@ -147,6 +149,9 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 		}
 		if ev.Kind == llm.EventDone {
 			responseID = ev.ResponseID
+		}
+		if ev.Kind == llm.EventModelRequest && ev.ModelRequest != nil {
+			requestEvents = append(requestEvents, *ev.ModelRequest)
 		}
 	}
 	if sawTarget != "openai:gpt-5.5" || sawProfile != "xhigh" {
@@ -170,6 +175,97 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 	}
 	if apiErr.Diagnostic == nil || apiErr.Diagnostic.ProxyRequestID != 123 || apiErr.Diagnostic.UpstreamRequestID != "upstream-456" || apiErr.Diagnostic.TraceID != "trace-789" {
 		t.Fatalf("diagnostic = %+v", apiErr.Diagnostic)
+	}
+	if len(requestEvents) != 1 || requestEvents[0].State != llm.ModelRequestFailed || requestEvents[0].ProxyRequestID != 123 || requestEvents[0].Message != "slow down" {
+		t.Fatalf("synthesized request events = %+v", requestEvents)
+	}
+}
+
+func TestProviderCancellationBeforeProxyResponseHeaders(t *testing.T) {
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(started)
+		select {
+		case <-r.Context().Done():
+			close(cancelled)
+		case <-release:
+		}
+	}))
+	defer close(release)
+	defer srv.Close()
+
+	c, err := New(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		var got error
+		for _, err := range c.Provider("openai:test").Stream(ctx, llm.Request{Model: "test"}) {
+			if err != nil {
+				got = err
+				break
+			}
+		}
+		done <- got
+	}()
+	<-started
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("stream error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy client did not unblock after cancellation before response headers")
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("proxy server did not observe the cancelled client request")
+	}
+}
+
+func TestProviderDoesNotDuplicateProxyTerminalLifecycleEvent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", protocol.ContentTypeNDJSON)
+		enc := json.NewEncoder(w)
+		status := llm.StreamEvent{Kind: llm.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{
+			State:          llm.ModelRequestUpstreamAttemptFailed,
+			Outcome:        llm.ModelRequestOutcomeTerminal,
+			ProxyRequestID: 99,
+			StatusCode:     http.StatusTooManyRequests,
+			Message:        "quota exhausted",
+		}}
+		_ = enc.Encode(protocol.StreamEnvelope{Event: &status})
+		_ = enc.Encode(protocol.StreamEnvelope{Error: &protocol.Error{
+			StatusCode: http.StatusTooManyRequests,
+			Message:    "quota exhausted",
+			Diagnostic: &llm.APIErrorDiagnostic{ProxyRequestID: 99},
+		}})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	var terminal []llm.ModelRequestEvent
+	for event, err := range c.Provider("openai:test").Stream(context.Background(), llm.Request{Model: "test"}) {
+		if err != nil {
+			break
+		}
+		if event.Kind == llm.EventModelRequest && event.ModelRequest != nil && event.ModelRequest.Outcome == llm.ModelRequestOutcomeTerminal {
+			terminal = append(terminal, *event.ModelRequest)
+		}
+	}
+	if len(terminal) != 1 || terminal[0].ProxyRequestID != 99 {
+		t.Fatalf("terminal events = %+v, want exactly one proxy event", terminal)
 	}
 }
 

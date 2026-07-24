@@ -664,10 +664,12 @@ type APIError struct {
 - **Fatal, no retry:** 400, 401, 403, 404, 422 — surfaced immediately with the
   provider's error message.
 - **Backoff:** full jitter — `sleep = rand(0, min(30s, 500ms·2^attempt))`, 5 attempts.
-  `Retry-After` (seconds or HTTP-date) is honored as a floor. The policy is a pure
-  function (`retry.Next(attempt, retryAfter) time.Duration`); the retry loop itself is
-  the shared `llm.Connect`, which every dialect calls with its endpoint, auth headers,
-  and error-body parser, and which takes an injected `sleep` so tests run instantly.
+  `Retry-After` (seconds or HTTP-date) is honored as a floor, except that an explicit
+  429/529 wait over 60 seconds is surfaced immediately rather than sleeping. The
+  policy is a pure function (`retry.Next(attempt, retryAfter) time.Duration`); the
+  retry loop itself is the shared `llm.Connect`, which every dialect calls with its
+  endpoint, auth headers, and error-body parser, and which takes an injected `sleep`
+  so tests run instantly.
   (The loop originally lived in each provider; the three copies were byte-identical
   apart from those inputs, so they were consolidated.)
 - **Provider retries apply only before the first response byte.** Once tokens have
@@ -679,10 +681,14 @@ type APIError struct {
   `APIError` with `RetryAfter`, the agent honors it as the retry floor; a retry-delay
   hint embedded in the error message (e.g. OpenAI streaming rate-limit text like "try
   again in 1.025s") is parsed into that field when no HTTP `Retry-After` header is
-  available. This hint parsing applies uniformly to terminal stream errors, including
-  Responses `response.failed` and bare `error` frames.
+  available. A parsed streaming delay over 60 seconds is likewise surfaced immediately
+  instead of parking the prompt. This hint parsing applies uniformly to terminal stream
+  errors, including Responses `response.failed` and bare `error` frames.
 - **Cancellation wins:** `ctx.Err()` is checked before every attempt and every backoff
   sleep, and is distinguished from `APIError` so the UI renders "cancelled" vs "failed".
+  The first Ctrl-C or double-Esc requests graceful cancellation. If the same prompt
+  remains active, any later Ctrl-C force-exits with status 130; it is not restricted
+  to a short double-press window.
   A failed attempt that will be retried is marked as discarded in `raw.ndjson`, so
   replay and editor resume helpers do not treat its streamed text as durable output.
 
@@ -1033,7 +1039,8 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   headers include `Authorization`, `ChatGPT-Account-ID`, and `X-OpenAI-Fedramp`
   when required. Token files are written under the proxy config dir via temp-file
   then rename.
-- The model proxy logs one structured record per `/v1/stream` request with
+- The model proxy logs a structured start and completion record per `/v1/stream`
+  request with
   requester, provider, model, request/response bytes, duration, token usage, stop
   reason, tool-call count, and `cost_usd` when the request has known cost
   (from the config for manual flat-priced providers, the models.dev cache for
@@ -1046,6 +1053,12 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   (`json` default, or `text`), with serve flags overriding config. Proxy config
   also accepts `models_dev_cache_ttl` as a duration string such as `"24h"` or
   numeric `0`; the `-models-dev-cache-ttl` serve/setup/refresh flag overrides it.
+  Every unsuccessful upstream attempt is additionally logged at WARN when it
+  occurs, even when a later retry succeeds. These records include the proxy and
+  upstream request ids, upstream attempt, status/code, parsed provider message,
+  retryability, retry-after/delay, attempt duration, and request elapsed time.
+  Retry scheduling is logged separately at INFO; cancellation is distinguished
+  from an upstream failure.
 - `POST /v1/input_tokens` accepts `{provider, request}` and returns
   `{input_tokens, source}` when the configured provider implements
   `InputTokenCounter`. `codex_oauth` Responses targets return a local
@@ -2534,7 +2547,10 @@ type UsageTotals struct {
   provider calls; `turn_complete` closes a conversational turn; `prompt_usage`
   closes the top-level prompt; `maintenance_usage` accounts for compaction,
   prewarming, handoff-summary, and branch-summary calls without creating turns.
-  `branch` records navigation source/target IDs in chronological replay.
+  `model_request` records proxy/request lifecycle and every API issue with timing,
+  parsed error, and correlation metadata; these events are replay/analysis data
+  only and never become conversation-tree entries or model context. `branch`
+  records navigation source/target IDs in chronological replay.
 - When Responses stateful continuation is active, `state.json` stores the last
   `previous_response_id` and the number of local messages represented by it.
   Resume only restores this state when the active provider/model still match and
@@ -2584,7 +2600,8 @@ type UsageTotals struct {
   display time.
 - `harness session timings <session-dir>` reads `raw.ndjson` timestamps and
   prints prompt totals, turn-attempt durations, tool durations, largest event gaps,
-  and context/payload estimates.
+  context/payload estimates, and model API issue counts/provider time/scheduled
+  retry wait.
 - `harness session stats <session-dir>` reads the existing root and child
   `state.json` and `raw.ndjson` files, `compactions/*.meta.json` plus their input
   transcripts, and `children/*/meta.json`. It reports turns, direct tool and

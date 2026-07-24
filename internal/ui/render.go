@@ -133,6 +133,7 @@ type Renderer struct {
 	statusCtx         agent.ContextEstimate // context usage to append for model waits (r27)
 	statusProgress    any                   // foreground delegate live-progress closure, or nil
 	statusBgProgress  []any                 // background delegate progress closures while joining
+	statusModel       string                // proxy correlation/retry/cancellation state
 	statusInput       string                // during-prompt typed buffer shown after "> "
 	statusInputCursor int                   // rune index of the edit cursor within statusInput
 	ticker            *time.Ticker
@@ -276,6 +277,9 @@ func (r *Renderer) ReasoningSummaryStatus(text string) {
 
 func (r *Renderer) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
 	r.flushToolUseStarts()
+	r.statusMu.Lock()
+	r.statusModel = ""
+	r.statusMu.Unlock()
 	if attempt <= 1 {
 		r.currentTurnStart = r.now()
 	}
@@ -304,6 +308,42 @@ func (r *Renderer) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate
 
 func (r *Renderer) TurnAttemptComplete(usage agent.TurnAttemptUsage) {
 	r.finishTurnAttempt(usage)
+}
+
+// ModelRequestEvent renders and tracks diagnostics-only provider lifecycle
+// state. It returns the durable display line, if any, for raw session replay.
+func (r *Renderer) ModelRequestEvent(event llm.ModelRequestEvent) string {
+	line := ""
+	switch event.State {
+	case llm.ModelRequestUpstreamAttemptFailed, llm.ModelRequestFailed:
+		line = modelRequestIssueLine(event)
+		if line != "" {
+			r.dimLine(line)
+		}
+	}
+
+	r.statusMu.Lock()
+	r.statusModel = modelRequestStatus(event)
+	if r.liveStatus && r.statusLabel != "" {
+		r.statusActive = true
+		r.ensureTickerLocked()
+		r.paintLocked()
+	}
+	r.statusMu.Unlock()
+	return line
+}
+
+// CancelRequested immediately makes a graceful cancellation visible while the
+// HTTP/provider stack unwinds.
+func (r *Renderer) CancelRequested() {
+	r.statusMu.Lock()
+	r.statusModel = "cancelling; Ctrl-C again to force exit"
+	if r.liveStatus && r.statusLabel != "" {
+		r.statusActive = true
+		r.ensureTickerLocked()
+		r.paintLocked()
+	}
+	r.statusMu.Unlock()
 }
 
 // CompactionStart begins a transient live wait while old context is summarized.
@@ -675,6 +715,7 @@ func (r *Renderer) endWait() {
 	r.statusCtx = agent.ContextEstimate{}
 	r.statusProgress = nil
 	r.statusBgProgress = nil
+	r.statusModel = ""
 	r.statusMu.Unlock()
 }
 
@@ -711,6 +752,7 @@ func (r *Renderer) StopProgress() {
 	r.statusCtx = agent.ContextEstimate{}
 	r.statusProgress = nil
 	r.statusBgProgress = nil
+	r.statusModel = ""
 	r.promptStart = time.Time{}
 	t, stop, done := r.ticker, r.tickerStop, r.tickerDone
 	r.ticker, r.tickerStop, r.tickerDone = nil, nil, nil
@@ -810,6 +852,9 @@ func (r *Renderer) statusTextLocked() (text string, cursorCol int, hasInput bool
 	} else if r.statusProgress != nil {
 		writeDelegateProgress(&b, r.statusProgress)
 	}
+	if r.statusModel != "" {
+		fmt.Fprintf(&b, " · %s", r.statusModel)
+	}
 	// The session total is set off from the current-turn fields with a distinct
 	// "│" divider and placed last so the turn's own elapsed time and the running
 	// prompt total are easy to tell apart at a glance.
@@ -824,6 +869,93 @@ func (r *Renderer) statusTextLocked() (text string, cursorCol int, hasInput bool
 	prefix := b.String() + " > "
 	text, cursorCol = clipStatusLine(prefix, sanitizeInputLine(r.statusInput), r.statusInputCursor, maxW)
 	return text, cursorCol, true
+}
+
+func modelRequestStatus(event llm.ModelRequestEvent) string {
+	request := ""
+	if event.ProxyRequestID != 0 {
+		request = fmt.Sprintf("proxy req %d", event.ProxyRequestID)
+	}
+	switch event.State {
+	case llm.ModelRequestAccepted, llm.ModelRequestCompleted:
+		return request
+	case llm.ModelRequestRetryScheduled:
+		return joinStatusParts(request, retryStatus(event))
+	case llm.ModelRequestUpstreamAttemptFailed:
+		if event.Outcome == llm.ModelRequestOutcomeRetrying {
+			return joinStatusParts(request, retryStatus(event))
+		}
+		return joinStatusParts(request, "failed")
+	case llm.ModelRequestFailed:
+		return joinStatusParts(request, "failed")
+	case llm.ModelRequestCancelled:
+		return joinStatusParts(request, "cancelled")
+	default:
+		return request
+	}
+}
+
+func retryStatus(event llm.ModelRequestEvent) string {
+	status := "retrying"
+	if event.StatusCode != 0 {
+		status += fmt.Sprintf(" %d", event.StatusCode)
+	}
+	if event.RetryDelayMS > 0 {
+		status += " in " + formatRetryDelay(event.RetryDelayMS)
+	}
+	return status
+}
+
+func modelRequestIssueLine(event llm.ModelRequestEvent) string {
+	var b strings.Builder
+	if event.Outcome == llm.ModelRequestOutcomeTerminal {
+		b.WriteString("[error: model API")
+	} else {
+		b.WriteString("[model API")
+	}
+	if event.StatusCode != 0 {
+		fmt.Fprintf(&b, " %d", event.StatusCode)
+	}
+	if event.Code != "" {
+		fmt.Fprintf(&b, " (%s)", event.Code)
+	}
+	if message := strings.Join(strings.Fields(event.Message), " "); message != "" {
+		b.WriteString(": ")
+		b.WriteString(message)
+	}
+	if event.Outcome == llm.ModelRequestOutcomeRetrying {
+		b.WriteString("; retrying")
+		if event.RetryDelayMS > 0 {
+			b.WriteString(" in ")
+			b.WriteString(formatRetryDelay(event.RetryDelayMS))
+		}
+	}
+	if event.ProxyRequestID != 0 {
+		fmt.Fprintf(&b, "; proxy request %d", event.ProxyRequestID)
+	}
+	if event.UpstreamRequestID != "" {
+		fmt.Fprintf(&b, "; upstream request %s", event.UpstreamRequestID)
+	}
+	if event.TraceID != "" {
+		fmt.Fprintf(&b, "; trace %s", event.TraceID)
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+func joinStatusParts(left, right string) string {
+	switch {
+	case left == "":
+		return right
+	case right == "":
+		return left
+	default:
+		return left + " · " + right
+	}
+}
+
+func formatRetryDelay(milliseconds int64) string {
+	return (time.Duration(milliseconds) * time.Millisecond).Round(time.Millisecond).String()
 }
 
 // clipStatusLine fits the during-prompt status line into maxW display columns and

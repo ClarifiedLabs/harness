@@ -6,40 +6,32 @@ import (
 	"time"
 )
 
-// doublePressWindow is the interval within which a second ^C after a prompt cancel
-// is treated as an exit request rather than another cancel (design §8.4).
-const doublePressWindow = time.Second
-
 // InterruptWatcher is the SIGINT state machine (design §8.4). A single handler
 // drives both behaviors via a per-prompt cancel func:
 //
 //   - First ^C during a prompt cancels the prompt (aborting the stream and any
 //     run_command process group).
-//   - A second ^C within doublePressWindow, or any ^C at the idle prompt,
-//     requests exit.
+//   - A second ^C while that prompt remains active, or any ^C at the idle
+//     prompt, requests exit.
 //
 // The signal channel and clock are injected so the state machine is unit-tested
 // without real signals or sleeps. Actual save+exit wiring lives in Phase 10's
 // main; this watcher only invokes the cancel func and the requestExit callback.
 type InterruptWatcher struct {
 	sig         <-chan os.Signal
-	now         func() time.Time
 	requestExit func()
 
-	mu         sync.Mutex
-	inPrompt   bool
-	cancel     func()
-	lastCancel time.Time
-	cancelled  bool // a cancel already fired for the current prompt
+	mu        sync.Mutex
+	inPrompt  bool
+	cancel    func()
+	cancelled bool // a cancel already fired for the current prompt
 }
 
-// NewInterruptWatcher builds a watcher reading signals from sig, reading time
-// from now, and calling requestExit when an exit is warranted.
-func NewInterruptWatcher(sig <-chan os.Signal, now func() time.Time, requestExit func()) *InterruptWatcher {
-	if now == nil {
-		now = time.Now
-	}
-	return &InterruptWatcher{sig: sig, now: now, requestExit: requestExit}
+// NewInterruptWatcher builds a watcher reading signals from sig and calling
+// requestExit when an exit is warranted. The clock argument remains injectable
+// for callers that share construction with other prompt timing code.
+func NewInterruptWatcher(sig <-chan os.Signal, _ func() time.Time, requestExit func()) *InterruptWatcher {
+	return &InterruptWatcher{sig: sig, requestExit: requestExit}
 }
 
 // Start launches the watcher goroutine and returns a stop function that ends it.
@@ -92,11 +84,16 @@ func (w *InterruptWatcher) CancelPrompt() {
 	}
 	cancel := w.cancel
 	w.cancelled = true
-	w.lastCancel = w.now()
 	w.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+}
+
+// InterruptPrompt applies the same two-stage behavior as a SIGINT to an
+// interrupt key decoded by the raw prompt editor.
+func (w *InterruptWatcher) InterruptPrompt() {
+	w.handle()
 }
 
 // handle applies one signal to the state machine.
@@ -110,17 +107,18 @@ func (w *InterruptWatcher) handle() {
 		return
 	}
 
-	// A second ^C within the window after a cancel requests exit.
-	if w.cancelled && w.now().Sub(w.lastCancel) <= doublePressWindow {
+	// Once cancellation has been requested, another ^C force-exits whenever the
+	// same prompt is still active. Providers that ignore context cancellation
+	// must not trap the user behind a timing window.
+	if w.cancelled {
 		w.mu.Unlock()
 		w.requestExit()
 		return
 	}
 
-	// First ^C of this prompt (or beyond the window): cancel the prompt.
+	// First ^C of this prompt: cancel the prompt.
 	cancel := w.cancel
 	w.cancelled = true
-	w.lastCancel = w.now()
 	w.mu.Unlock()
 	if cancel != nil {
 		cancel()

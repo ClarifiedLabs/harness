@@ -173,7 +173,59 @@ const (
 	EventReasoningSummary                  // display-ready provider-visible reasoning summary text
 	EventAssistantPhase                    // assistant message phase metadata
 	EventInteractionStep                   // hidden complete Gemini server-managed step for stateless replay
+	EventModelRequest                      // diagnostics-only request lifecycle metadata; never model content
 )
+
+// ModelRequestState identifies one out-of-band model request lifecycle event.
+// These events are for rendering, logging, and session analysis only. They must
+// never be converted into transcript messages or sent back to a model.
+type ModelRequestState string
+
+const (
+	ModelRequestAccepted              ModelRequestState = "accepted"
+	ModelRequestUpstreamAttemptFailed ModelRequestState = "upstream_attempt_failed"
+	ModelRequestRetryScheduled        ModelRequestState = "retry_scheduled"
+	ModelRequestCompleted             ModelRequestState = "completed"
+	ModelRequestFailed                ModelRequestState = "failed"
+	ModelRequestCancelled             ModelRequestState = "cancelled"
+)
+
+// ModelRequestOutcome describes what follows a failed upstream attempt.
+type ModelRequestOutcome string
+
+const (
+	ModelRequestOutcomeRetrying ModelRequestOutcome = "retrying"
+	ModelRequestOutcomeTerminal ModelRequestOutcome = "terminal"
+)
+
+// ModelRequestEvent is structured, provider-neutral telemetry for one model
+// request. Message is the already parsed/redacted API error message; no request
+// body, credentials, or model output belongs in this structure.
+type ModelRequestEvent struct {
+	State             ModelRequestState   `json:"state"`
+	Outcome           ModelRequestOutcome `json:"outcome,omitempty"`
+	Sequence          int                 `json:"sequence,omitempty"`
+	ProxyRequestID    uint64              `json:"proxy_request_id,omitempty"`
+	UpstreamRequestID string              `json:"upstream_request_id,omitempty"`
+	TraceID           string              `json:"trace_id,omitempty"`
+	SpanID            string              `json:"span_id,omitempty"`
+	TargetID          string              `json:"target_id,omitempty"`
+	Provider          string              `json:"provider,omitempty"`
+	APIType           string              `json:"api_type,omitempty"`
+	Model             string              `json:"model,omitempty"`
+	Purpose           RequestPurpose      `json:"purpose,omitempty"`
+	Stage             APIErrorStage       `json:"stage,omitempty"`
+	Attempt           int                 `json:"attempt,omitempty"`
+	MaxAttempts       int                 `json:"max_attempts,omitempty"`
+	StatusCode        int                 `json:"status_code,omitempty"`
+	Code              string              `json:"code,omitempty"`
+	Message           string              `json:"message,omitempty"`
+	Retryable         bool                `json:"retryable,omitempty"`
+	RetryAfterMS      int64               `json:"retry_after_ms,omitempty"`
+	RetryDelayMS      int64               `json:"retry_delay_ms,omitempty"`
+	AttemptDurationMS int64               `json:"attempt_duration_ms,omitempty"`
+	ElapsedMS         int64               `json:"elapsed_ms,omitempty"`
+}
 
 // ReasoningFormat identifies provider-owned reasoning state carried by a
 // summary event. It prevents one dialect's signed state from being replayed
@@ -229,6 +281,10 @@ type StreamEvent struct {
 	Usage      *Usage     `json:"usage,omitempty"`       // EventUsage / EventDone
 	StopReason StopReason `json:"stop_reason,omitempty"` // EventDone
 	ResponseID string     `json:"response_id,omitempty"` // EventDone, provider continuation id
+
+	// ModelRequest carries EventModelRequest telemetry. It is intentionally
+	// separate from every content-bearing field above.
+	ModelRequest *ModelRequestEvent `json:"model_request,omitempty"`
 }
 
 // StopReason is the normalized reason a turn ended.

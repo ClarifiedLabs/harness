@@ -88,6 +88,9 @@ type environment struct {
 	terminalRows func() int
 	terminalCols func() int
 	agentSleep   func(time.Duration)
+	// promptFinished is a test/embedding hook invoked after a prompt's final
+	// session save, including after run has returned for a forced exit.
+	promptFinished func()
 }
 
 func signalCancelContext(sigCh <-chan os.Signal) (context.Context, context.CancelFunc, func() bool) {
@@ -1051,16 +1054,17 @@ func run(env environment) int {
 				diagnosticsSink.SetDir(path)
 			}
 		},
-		Prompt:          cfg.ReplPrompt,
-		PromptLogWriter: promptLogWriter,
-		PromptEditMode:  cfg.ReplEditMode,
-		HistFile:        cfg.HistFile,
-		HistFileSize:    cfg.HistFileSize,
-		HistSize:        cfg.HistSize,
-		Skills:          discoveredSkills,
-		SkillDirs:       skillDirs,
-		DisabledTools:   disabledTools,
-		SummaryWidth:    env.terminalCols,
+		OnPromptFinished: env.promptFinished,
+		Prompt:           cfg.ReplPrompt,
+		PromptLogWriter:  promptLogWriter,
+		PromptEditMode:   cfg.ReplEditMode,
+		HistFile:         cfg.HistFile,
+		HistFileSize:     cfg.HistFileSize,
+		HistSize:         cfg.HistSize,
+		Skills:           discoveredSkills,
+		SkillDirs:        skillDirs,
+		DisabledTools:    disabledTools,
+		SummaryWidth:     env.terminalCols,
 	}
 	// If HistFile was not explicitly configured, derive it from StateDir.
 	if app.HistFile == "" {
@@ -1143,6 +1147,7 @@ func run(env environment) int {
 		stop := watcher.Start()
 		defer stop()
 		app.Interrupt = watcher
+		app.ForceExit = exitCh
 	}
 
 	// Mid-prompt steering: route input submitted during a running prompt into the

@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"iter"
 	"log/slog"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
+	"harness/internal/session"
 	"harness/internal/skills"
 	"harness/internal/todo"
 	"harness/internal/tools"
@@ -601,6 +603,70 @@ func TestOneShotCompatibilityDiagnosticDisplayedLoggedAndRecordedSafely(t *testi
 	}
 }
 
+func TestOneShotModelAPIIssuePersistsOutsideConversationState(t *testing.T) {
+	const providerMessage = "quota window temporarily exhausted"
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{
+			{Kind: llm.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{
+				State:          llm.ModelRequestAccepted,
+				ProxyRequestID: 301,
+				TargetID:       "alibaba-token-plan:glm-5.2",
+			}},
+			{Kind: llm.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{
+				State:          llm.ModelRequestUpstreamAttemptFailed,
+				Outcome:        llm.ModelRequestOutcomeRetrying,
+				ProxyRequestID: 301,
+				Attempt:        1,
+				MaxAttempts:    5,
+				StatusCode:     429,
+				Message:        providerMessage,
+				RetryAfterMS:   500,
+				RetryDelayMS:   500,
+			}},
+			{Kind: llm.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{
+				State:          llm.ModelRequestRetryScheduled,
+				ProxyRequestID: 301,
+				Attempt:        1,
+				StatusCode:     429,
+				RetryDelayMS:   500,
+			}},
+			textDelta("recovered"),
+		},
+		Stop: llm.StopEndTurn,
+	})
+	var out, errw, diagnostics bytes.Buffer
+	app := newTestApp(t, &out, &errw, fp)
+	app.DiagnosticLogger = slog.New(slog.NewJSONHandler(&diagnostics, nil))
+
+	if code := OneShot(app, "go"); code != ExitOK {
+		t.Fatalf("OneShot exit = %d, stderr=%q", code, errw.String())
+	}
+	if !strings.Contains(errw.String(), providerMessage) || !strings.Contains(errw.String(), "proxy request 301") {
+		t.Fatalf("stderr missing provider issue: %q", errw.String())
+	}
+	if !strings.Contains(diagnostics.String(), `"msg":"model API issue"`) || !strings.Contains(diagnostics.String(), `"api_message":"`+providerMessage+`"`) {
+		t.Fatalf("diagnostics missing structured provider issue: %s", diagnostics.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw event log: %v", err)
+	}
+	if strings.Count(string(raw), `"type":"model_request"`) != 3 || !strings.Contains(string(raw), providerMessage) || !strings.Contains(string(raw), `"proxy_request_id":301`) {
+		t.Fatalf("raw lifecycle events = %s", raw)
+	}
+	loaded, err := session.Load(app.SessionPath)
+	if err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+	state, err := json.Marshal(loaded.Messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(state), providerMessage) || strings.Contains(string(state), "model_request") {
+		t.Fatalf("model telemetry leaked into conversation state: %s", state)
+	}
+}
+
 func TestREPLCompatibilityDiagnosticDisplayedOnce(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Err: &llm.APIError{
 		StatusCode: 400,
@@ -670,6 +736,34 @@ func TestOneShotProviderErrorExit1(t *testing.T) {
 	if !strings.Contains(strings.ToLower(errw.String()), "error") {
 		t.Errorf("error should be reported to stderr, errw=%q", errw.String())
 	}
+}
+
+func TestOneShotForceExitDoesNotWaitForStuckProvider(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fp := llmtest.New("fake", llmtest.Step{Block: func(context.Context) {
+		close(started)
+		<-release
+	}})
+	var out, errw lockedBuffer
+	app := newTestApp(t, &out, &errw, fp)
+	force := make(chan struct{}, 1)
+	app.ForceExit = force
+
+	done := make(chan int, 1)
+	go func() { done <- OneShot(app, "go") }()
+	<-started
+	force <- struct{}{}
+	select {
+	case code := <-done:
+		if code != ExitInterrupt {
+			t.Fatalf("force exit = %d, want %d", code, ExitInterrupt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("one-shot force exit waited for stuck provider")
+	}
+	close(release)
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "[prompt:") }, "released one-shot prompt cleanup")
 }
 
 func TestBuildPromptDash(t *testing.T) {

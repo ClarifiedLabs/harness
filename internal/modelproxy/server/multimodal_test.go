@@ -134,6 +134,27 @@ func TestRedactImageBearingErrorRemovesRequestAndImageValues(t *testing.T) {
 	}
 }
 
+func TestRedactModelRequestEventRemovesImageRequestValues(t *testing.T) {
+	payload := strings.Repeat("QUJD", 30)
+	req := richImageRequest(payload)
+	event := llm.ModelRequestEvent{
+		State:      llm.ModelRequestUpstreamAttemptFailed,
+		StatusCode: 429,
+		Code:       "quota_" + payload,
+		Message:    "retry image data:image/png;base64," + payload + " from /private/screen.png",
+		Retryable:  true,
+	}
+	got := redactModelRequestEvent(event, req)
+	for _, secret := range []string{payload, "/private/screen.png"} {
+		if strings.Contains(got.Code+" "+got.Message, secret) {
+			t.Fatalf("redacted lifecycle event contains %q: %+v", secret, got)
+		}
+	}
+	if !strings.Contains(got.Message, "[REDACTED_") {
+		t.Fatalf("message = %q, want redaction marker", got.Message)
+	}
+}
+
 func TestWithAPIErrorDiagnosticPreservesRetryClassification(t *testing.T) {
 	diagnostic := &llm.APIErrorDiagnostic{Stage: llm.APIErrorStageUpstreamStream}
 	plain := withAPIErrorDiagnostic(errors.New("truncated stream"), diagnostic)

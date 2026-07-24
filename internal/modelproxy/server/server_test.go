@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"harness/internal/llm/llmtest"
 	"harness/internal/logging"
 	"harness/internal/metrics"
+	proxyclient "harness/internal/modelproxy/client"
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/tracing"
 )
@@ -30,6 +32,74 @@ type countingFakeProvider struct {
 	*llmtest.FakeProvider
 	count int
 	err   error
+}
+
+type lockedLogBuffer struct {
+	mu       sync.Mutex
+	b        bytes.Buffer
+	notify   string
+	notified chan struct{}
+	once     sync.Once
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n, err := b.b.Write(p)
+	if b.notified != nil && strings.Contains(string(p), b.notify) {
+		b.once.Do(func() { close(b.notified) })
+	}
+	return n, err
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+func decodeStreamEnvelope(t *testing.T, r io.Reader, match func(protocol.StreamEnvelope) bool) protocol.StreamEnvelope {
+	t.Helper()
+	dec := json.NewDecoder(r)
+	for {
+		var env protocol.StreamEnvelope
+		if err := dec.Decode(&env); err != nil {
+			t.Fatalf("decode matching stream envelope: %v", err)
+		}
+		if match(env) {
+			return env
+		}
+	}
+}
+
+func decodeStreamError(t *testing.T, r io.Reader) protocol.StreamEnvelope {
+	t.Helper()
+	return decodeStreamEnvelope(t, r, func(env protocol.StreamEnvelope) bool { return env.Error != nil })
+}
+
+func decodeStreamModelEvent(t *testing.T, r io.Reader, kind llm.EventKind) protocol.StreamEnvelope {
+	t.Helper()
+	return decodeStreamEnvelope(t, r, func(env protocol.StreamEnvelope) bool {
+		return env.Event != nil && env.Event.Kind == kind
+	})
+}
+
+func modelProxyLogRecord(t *testing.T, logs string, message string) map[string]any {
+	t.Helper()
+	var matched map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode log %q: %v", line, err)
+		}
+		if record["msg"] == message {
+			matched = record
+		}
+	}
+	if matched == nil {
+		t.Fatalf("log message %q not found in %s", message, logs)
+	}
+	return matched
 }
 
 func (p *countingFakeProvider) CountInputTokens(context.Context, llm.Request) (llm.InputTokenCount, error) {
@@ -619,9 +689,6 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status = %d body=%s", resp.StatusCode, b)
 	}
-	if len(fp.Requests) != 1 || !fp.Requests[0].StoreResponse || fp.Requests[0].PreviousResponseID != "" {
-		t.Fatalf("provider requests = %+v", fp.Requests)
-	}
 	var sawResponseID string
 	dec := json.NewDecoder(resp.Body)
 	for {
@@ -638,6 +705,9 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	}
 	if sawResponseID != "resp_1" {
 		t.Fatalf("response id = %q, want resp_1", sawResponseID)
+	}
+	if len(fp.Requests) != 1 || !fp.Requests[0].StoreResponse || fp.Requests[0].PreviousResponseID != "" {
+		t.Fatalf("provider requests = %+v", fp.Requests)
 	}
 	fullMessages := append([]llm.Message(nil), firstMessages...)
 	fullMessages = append(fullMessages,
@@ -1380,10 +1450,7 @@ func TestHandlerLogsStreamStats(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 
-	var record map[string]any
-	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
-		t.Fatalf("decode log %q: %v", logs.String(), err)
-	}
+	record := modelProxyLogRecord(t, logs.String(), "model request completed")
 	for k, want := range map[string]any{
 		"msg":              "model request completed",
 		"requester":        "test-client",
@@ -1407,6 +1474,185 @@ func TestHandlerLogsStreamStats(t *testing.T) {
 	}
 	if record["request_bytes"].(float64) <= 0 || record["response_bytes"].(float64) <= 0 {
 		t.Fatalf("log sizes not populated: %+v", record)
+	}
+}
+
+func TestHandlerLogsAndForwardsEveryRetriedUpstreamFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [{"name":"retrying","context_window":128000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	issue := func(attempt int, status int, message string) llm.StreamEvent {
+		return llm.StreamEvent{Kind: llm.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{
+			State:        llm.ModelRequestUpstreamAttemptFailed,
+			Outcome:      llm.ModelRequestOutcomeRetrying,
+			Attempt:      attempt,
+			MaxAttempts:  5,
+			StatusCode:   status,
+			Message:      message,
+			Retryable:    true,
+			RetryDelayMS: 1000,
+		}}
+	}
+	var logs bytes.Buffer
+	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
+	if err != nil {
+		t.Fatalf("NewProxyLogger: %v", err)
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		Logger:    logger,
+		New: func(factory.Options) (llm.Provider, error) {
+			return llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{
+				issue(1, http.StatusTooManyRequests, "quota window one"),
+				{Kind: llm.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{State: llm.ModelRequestRetryScheduled, Attempt: 1, StatusCode: http.StatusTooManyRequests, RetryDelayMS: 1000}},
+				issue(2, 529, "capacity window two"),
+				{Kind: llm.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{State: llm.ModelRequestRetryScheduled, Attempt: 2, StatusCode: 529, RetryDelayMS: 1000}},
+			}}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "openai:retrying",
+		Request:  llm.Request{Model: "openai:retrying", Purpose: llm.RequestPurposeTurn},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST stream: %v", err)
+	}
+	defer resp.Body.Close()
+	dec := json.NewDecoder(resp.Body)
+	var failures []llm.ModelRequestEvent
+	for {
+		var env protocol.StreamEnvelope
+		if err := dec.Decode(&env); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatalf("decode stream: %v", err)
+		}
+		if env.Event != nil && env.Event.Kind == llm.EventModelRequest && env.Event.ModelRequest != nil && env.Event.ModelRequest.State == llm.ModelRequestUpstreamAttemptFailed {
+			failures = append(failures, *env.Event.ModelRequest)
+		}
+	}
+	if len(failures) != 2 {
+		t.Fatalf("forwarded failures = %+v, want both upstream attempts", failures)
+	}
+	if failures[0].ProxyRequestID == 0 || failures[0].ProxyRequestID != failures[1].ProxyRequestID || failures[0].Message != "quota window one" || failures[1].Message != "capacity window two" {
+		t.Fatalf("forwarded failure correlation = %+v", failures)
+	}
+
+	var issueLogs []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode log: %v", err)
+		}
+		if record["msg"] == "model upstream attempt failed" {
+			issueLogs = append(issueLogs, record)
+		}
+	}
+	if len(issueLogs) != 2 || issueLogs[0]["api_message"] != "quota window one" || issueLogs[1]["api_message"] != "capacity window two" {
+		t.Fatalf("issue logs = %+v", issueLogs)
+	}
+	if completed := modelProxyLogRecord(t, logs.String(), "model request completed"); completed["level"] != "INFO" {
+		t.Fatalf("completion = %+v, want eventual success", completed)
+	}
+}
+
+func TestHandlerClientCancellationStaysCancellationEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "models": [{"name":"blocked","context_window":128000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	started := make(chan struct{})
+	logged := make(chan struct{})
+	logs := lockedLogBuffer{notify: `"msg":"model request completed"`, notified: logged}
+	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
+	if err != nil {
+		t.Fatalf("NewProxyLogger: %v", err)
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		Logger:    logger,
+		New: func(factory.Options) (llm.Provider, error) {
+			return llmtest.New("fake", llmtest.Step{Block: func(ctx context.Context) {
+				close(started)
+				<-ctx.Done()
+			}}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	client, err := proxyclient.New(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("new proxy client: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	type result struct {
+		events []llm.ModelRequestEvent
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var got result
+		for event, err := range client.Provider("openai:blocked").Stream(ctx, llm.Request{Model: "blocked", Purpose: llm.RequestPurposeTurn}) {
+			if err != nil {
+				got.err = err
+				break
+			}
+			if event.Kind == llm.EventModelRequest && event.ModelRequest != nil {
+				got.events = append(got.events, *event.ModelRequest)
+			}
+		}
+		done <- got
+	}()
+	<-started
+	cancel()
+	got := <-done
+	if !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("client error = %v, want context.Canceled", got.err)
+	}
+	var sawCancelled bool
+	for _, event := range got.events {
+		if event.State == llm.ModelRequestFailed || event.State == llm.ModelRequestUpstreamAttemptFailed {
+			t.Fatalf("cancellation surfaced as API failure: %+v", got.events)
+		}
+		sawCancelled = sawCancelled || event.State == llm.ModelRequestCancelled
+	}
+	if !sawCancelled {
+		t.Fatalf("request events = %+v, want cancellation", got.events)
+	}
+	select {
+	case <-logged:
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not log cancellation completion")
+	}
+	if strings.Contains(logs.String(), `"msg":"model upstream attempt failed"`) {
+		t.Fatalf("proxy logged client cancellation as upstream failure: %s", logs.String())
+	}
+	completed := modelProxyLogRecord(t, logs.String(), "model request completed")
+	if completed["level"] != "INFO" || completed["err_kind"] != "context_canceled" {
+		t.Fatalf("cancellation completion = %+v", completed)
 	}
 }
 
@@ -1540,11 +1786,7 @@ func TestHandlerPricesUsageSnapshotsBeforeStreamError(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("stream status = %d, want 200", resp.StatusCode)
 	}
-	dec := json.NewDecoder(resp.Body)
-	var first protocol.StreamEnvelope
-	if err := dec.Decode(&first); err != nil {
-		t.Fatalf("decode first envelope: %v", err)
-	}
+	first := decodeStreamModelEvent(t, resp.Body, llm.EventUsage)
 	if first.Event == nil || first.Event.Usage == nil || !first.Event.Usage.CostKnown {
 		t.Fatalf("first usage event not priced: %+v", first.Event)
 	}
@@ -1743,10 +1985,7 @@ func TestHandlerLogsStreamErrorDetails(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	var env protocol.StreamEnvelope
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		t.Fatalf("decode stream envelope: %v", err)
-	}
+	env := decodeStreamError(t, resp.Body)
 	if env.Error == nil || env.Error.RetryAfterMS != 250 {
 		t.Fatalf("stream error = %+v, want retry_after_ms 250", env.Error)
 	}
@@ -1754,10 +1993,7 @@ func TestHandlerLogsStreamErrorDetails(t *testing.T) {
 		t.Fatalf("drain response body: %v", err)
 	}
 
-	var record map[string]any
-	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
-		t.Fatalf("decode log %q: %v", logs.String(), err)
-	}
+	record := modelProxyLogRecord(t, logs.String(), "model request completed")
 	for k, want := range map[string]any{
 		"level":              "WARN",
 		"msg":                "model request completed",
@@ -2727,10 +2963,7 @@ func TestHandlerRichImageRejectionReturnsSafeCorrelatedDiagnostic(t *testing.T) 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	var env protocol.StreamEnvelope
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		t.Fatalf("decode stream envelope: %v", err)
-	}
+	env := decodeStreamError(t, resp.Body)
 	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 		t.Fatalf("drain response body: %v", err)
 	}
@@ -2759,10 +2992,7 @@ func TestHandlerRichImageRejectionReturnsSafeCorrelatedDiagnostic(t *testing.T) 
 		}
 	}
 
-	var record map[string]any
-	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
-		t.Fatalf("decode log %q: %v", logs.String(), err)
-	}
+	record := modelProxyLogRecord(t, logs.String(), "model request completed")
 	if record["error_stage"] != string(llm.APIErrorStageUpstreamHTTP) || record["category"] != llm.CompatibilityCategoryMultimodalToolResultRejected || record["trace_id"] != traceID {
 		t.Fatalf("completion log = %+v", record)
 	}
@@ -2832,10 +3062,7 @@ func TestHandlerSuccessfulRichImageLogsSafeShapeAndCorrelationOnly(t *testing.T)
 		t.Fatalf("drain response body: %v", err)
 	}
 
-	var record map[string]any
-	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
-		t.Fatalf("decode log %q: %v", logs.String(), err)
-	}
+	record := modelProxyLogRecord(t, logs.String(), "model request completed")
 	if record["msg"] != "model request completed" || record["status"] != float64(http.StatusOK) || record["trace_id"] != traceID || record["span_id"] != spanID {
 		t.Fatalf("completion correlation = %+v", record)
 	}

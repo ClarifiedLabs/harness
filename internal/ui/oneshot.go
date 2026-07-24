@@ -62,7 +62,12 @@ func OneShot(app *App, prompt string) int {
 	if app.Interrupt != nil {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
-		app.Interrupt.BeginPrompt(cancel)
+		app.Interrupt.BeginPrompt(func() {
+			if app.Renderer != nil {
+				app.Renderer.CancelRequested()
+			}
+			cancel()
+		})
 		defer func() {
 			app.Interrupt.EndPrompt()
 			cancel()
@@ -73,7 +78,22 @@ func OneShot(app *App, prompt string) int {
 	sink := newAccumulatingSink(app.Renderer, app, promptID)
 	promptContext := append([]string(nil), promptHook.AdditionalContext...)
 	promptContext = append(promptContext, skillContext...)
-	err := app.Agent.RunPromptContentWithContext(ctx, prompt, imageBlocks(images), app.promptHookContext(promptContext), promptID, sink)
+	done := make(chan error, 1)
+	go func() {
+		done <- app.Agent.RunPromptContentWithContext(ctx, prompt, imageBlocks(images), app.promptHookContext(promptContext), promptID, sink)
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-app.ForceExit:
+		if app.Renderer != nil {
+			app.Renderer.StopProgress()
+			app.Renderer.finishAssistantLine()
+		}
+		// The process exits immediately after OneShot returns. Avoid racing the
+		// stuck prompt goroutine through save/background state.
+		return ExitInterrupt
+	}
 	app.stopBackgroundJobs()
 	if app.Renderer != nil {
 		app.Renderer.StopProgress()
@@ -94,7 +114,9 @@ func OneShot(app *App, prompt string) int {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return ExitInterrupt
 		}
-		fmt.Fprintf(app.Errw, "[error: %v]\n", err)
+		if !sink.terminalModelErrorDisplayed {
+			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
+		}
 		return ExitRuntime
 	}
 	return ExitOK

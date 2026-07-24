@@ -180,6 +180,10 @@ type App struct {
 	PromptNumber         int       // last started prompt, persisted for replay numbering
 	Now                  func() time.Time
 	OnSessionPathChanged func(string)
+	// OnPromptFinished observes completion after the per-prompt session save.
+	// It is primarily useful to coordinate embedders and tests whose process
+	// remains alive after a forced REPL exit.
+	OnPromptFinished func()
 
 	// History configuration (bash-style REPL history persistence).
 	// HistFile is the path to the history file (empty disables persistence).
@@ -193,6 +197,9 @@ type App struct {
 	// prompt boundaries so ^C cancels a prompt rather than the whole process
 	// (design §8.4). Tests leave it nil.
 	Interrupt *agent.InterruptWatcher
+	// ForceExit receives the watcher's second-Ctrl-C exit request in one-shot
+	// mode, where no REPL select loop exists to observe it.
+	ForceExit <-chan struct{}
 
 	// Steer, when set, routes a prepared model-bound prompt submitted during a
 	// running prompt into the agent as an in-prompt steering message (injected before
@@ -294,7 +301,7 @@ const helpText = `commands:
   !command         run a local shell command at an interactive prompt
   @path<Tab>       complete a literal file reference; image refs attach when supported
   $skillName       mention a skill to load via SKILL.md
-Interrupt a running prompt with Ctrl-C or double-Esc; input submitted while it runs is injected before the next turn when possible, otherwise queued as the next prompt.
+Interrupt a running prompt with Ctrl-C or double-Esc; press Ctrl-C again to force exit if cancellation stalls. Input submitted while it runs is injected before the next turn when possible, otherwise queued as the next prompt.
 Ctrl-G opens the editor from the prompt; paths with spaces complete as @"..."; lines starting with / are commands; // sends a literal leading slash; !! escapes a literal !; $$ escapes a literal $`
 
 func (app *App) clock() func() time.Time {
@@ -470,7 +477,6 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		inputErr                  error
 		active                    bool
 		activeReadPause           bool
-		exitAfterPrompt           bool
 		plainPromptRead           bool
 		prompt                    string
 		pendingPrefill            string // text deposited into the next prompt
@@ -551,10 +557,21 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		_ = term.SetBracketedPaste(true)
 	}
+	forceFinish := func() int {
+		cancelShiftTabPrewarm()
+		disableActivePromptTerm()
+		if app.Renderer != nil {
+			app.Renderer.StopProgress()
+			app.Renderer.finishAssistantLine()
+		}
+		// The active prompt goroutine may be stuck in a provider that ignored
+		// cancellation. Do not race it through session/background mutation; the
+		// process exits immediately after Run returns.
+		return ExitInterrupt
+	}
 	startRun := func(run func()) {
 		done := make(chan struct{}, 1)
 		active = true
-		exitAfterPrompt = false
 		plainPromptRead = false
 		promptPrinted = false
 		escPresses.reset()
@@ -752,9 +769,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			}
 			select {
 			case <-exit:
-				// SIGINT exit requests during a prompt are honored only after the
-				// prompt goroutine finishes its own save and usage update.
-				exitAfterPrompt = true
+				return forceFinish()
 			case <-promptDone:
 				if app.Renderer != nil {
 					app.Renderer.StopProgress()
@@ -801,9 +816,6 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				// input is not silently lost, ahead of other queued input.
 				if leftover := app.drainLeftoverSteer(); !steerInputEmpty(leftover) {
 					preparedQueued = append([]agent.SteerInput{leftover}, preparedQueued...)
-				}
-				if exitAfterPrompt {
-					return finish(ExitInterrupt)
 				}
 				if app.hasPendingHandoffRequest() {
 					approvalInterrupted := false
@@ -870,7 +882,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				input := res.input
 				if input.interrupt {
 					if app.Interrupt != nil {
-						app.Interrupt.CancelPrompt()
+						app.Interrupt.InterruptPrompt()
 					}
 					continue
 				}
@@ -899,11 +911,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				}
 				escPresses.reset()
 				if app.steerDuringPrompt(input) {
-					activeReadPause = true
 					continue
 				}
 				queued = append(queued, input)
-				activeReadPause = true
 			}
 			continue
 		}
@@ -3114,11 +3124,19 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 	var cancel context.CancelFunc
 	if app.Interrupt != nil {
 		ctx, cancel = context.WithCancel(ctx)
-		app.Interrupt.BeginPrompt(cancel)
+		app.Interrupt.BeginPrompt(func() {
+			if app.Renderer != nil {
+				app.Renderer.CancelRequested()
+			}
+			cancel()
+		})
 	}
 
 	app.Renderer.StartPromptRun()
 	return func() {
+		if app.OnPromptFinished != nil {
+			defer app.OnPromptFinished()
+		}
 		if app.Interrupt != nil {
 			defer func() {
 				app.Interrupt.EndPrompt()
@@ -3128,7 +3146,7 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 
 		sink := newREPLSink(app.Renderer, app, promptID)
 		err := app.Agent.RunPromptContentWithContext(ctx, prepared.prompt, imageBlocks(prepared.images), app.promptHookContext(prepared.promptContext), promptID, sink)
-		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 		}
 		app.saveOrWarn(app.SessionPath)
@@ -3196,11 +3214,19 @@ func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 	var cancel context.CancelFunc
 	if app.Interrupt != nil {
 		ctx, cancel = context.WithCancel(ctx)
-		app.Interrupt.BeginPrompt(cancel)
+		app.Interrupt.BeginPrompt(func() {
+			if app.Renderer != nil {
+				app.Renderer.CancelRequested()
+			}
+			cancel()
+		})
 	}
 
 	app.Renderer.StartPromptRun()
 	return func() {
+		if app.OnPromptFinished != nil {
+			defer app.OnPromptFinished()
+		}
 		if app.Interrupt != nil {
 			defer func() {
 				app.Interrupt.EndPrompt()
@@ -3210,7 +3236,7 @@ func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 
 		sink := newREPLSink(app.Renderer, app, promptID)
 		err := app.Agent.RunPromptContentWithContext(ctx, input.Text, input.Images, app.promptHookContext(input.RequestContext), promptID, sink)
-		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 		}
 		app.saveOrWarn(app.SessionPath)
@@ -4007,19 +4033,20 @@ func (app *App) summaryWidth() int {
 // accumulatingSink forwards events to the renderer while accumulating cumulative
 // token totals and cost for the session (design §10 /usage, §11 saved totals).
 type accumulatingSink struct {
-	r                          *Renderer
-	app                        *App
-	prompt                     int
-	printTodoUpdate            bool
-	printTodoPromptBeforeUsage bool
-	printPlanUpdate            bool
-	printPlanPromptBeforeUsage bool
-	planCountAtPromptStart     int
-	reasoningOutput            bool
-	pending                    map[string]llm.ToolCall
-	turn                       int
-	attempt                    int
-	inMaintenance              bool
+	r                           *Renderer
+	app                         *App
+	prompt                      int
+	printTodoUpdate             bool
+	printTodoPromptBeforeUsage  bool
+	printPlanUpdate             bool
+	printPlanPromptBeforeUsage  bool
+	planCountAtPromptStart      int
+	reasoningOutput             bool
+	pending                     map[string]llm.ToolCall
+	turn                        int
+	attempt                     int
+	inMaintenance               bool
+	terminalModelErrorDisplayed bool
 }
 
 func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
@@ -4141,6 +4168,62 @@ func (s *accumulatingSink) TurnAttemptComplete(u agent.TurnAttemptUsage) {
 		Usage:   &usage,
 		Attempt: u.Attempt,
 	})
+}
+
+func (s *accumulatingSink) ModelRequestEvent(event llm.ModelRequestEvent) {
+	line := s.r.ModelRequestEvent(event)
+	if line != "" && event.Outcome == llm.ModelRequestOutcomeTerminal {
+		s.terminalModelErrorDisplayed = true
+	}
+	copyEvent := event
+	s.app.recordEvent(session.Event{
+		Type:         session.EventModelRequest,
+		Prompt:       s.prompt,
+		Turn:         s.turn,
+		Attempt:      s.attempt,
+		Display:      line,
+		ModelRequest: &copyEvent,
+	})
+	if s.app.DiagnosticLogger == nil {
+		return
+	}
+	switch event.State {
+	case llm.ModelRequestUpstreamAttemptFailed, llm.ModelRequestFailed:
+		s.app.DiagnosticLogger.Warn("model API issue", modelRequestLogAttrs(s.prompt, s.turn, s.attempt, event)...)
+	case llm.ModelRequestCancelled:
+		s.app.DiagnosticLogger.Info("model request cancelled", modelRequestLogAttrs(s.prompt, s.turn, s.attempt, event)...)
+	}
+}
+
+func modelRequestLogAttrs(prompt, turn, attempt int, event llm.ModelRequestEvent) []any {
+	return []any{
+		"prompt", prompt,
+		"turn", turn,
+		"attempt", attempt,
+		"sequence", event.Sequence,
+		"state", string(event.State),
+		"outcome", string(event.Outcome),
+		"proxy_request_id", event.ProxyRequestID,
+		"upstream_request_id", event.UpstreamRequestID,
+		"trace_id", event.TraceID,
+		"span_id", event.SpanID,
+		"target_id", event.TargetID,
+		"provider", event.Provider,
+		"api_type", event.APIType,
+		"model", event.Model,
+		"purpose", event.Purpose,
+		"upstream_attempt", event.Attempt,
+		"upstream_max_attempts", event.MaxAttempts,
+		"api_status_code", event.StatusCode,
+		"api_code", event.Code,
+		"api_message", event.Message,
+		"api_retryable", event.Retryable,
+		"api_retry_after_ms", event.RetryAfterMS,
+		"retry_delay_ms", event.RetryDelayMS,
+		"attempt_duration_ms", event.AttemptDurationMS,
+		"elapsed_ms", event.ElapsedMS,
+		"error_stage", string(event.Stage),
+	}
 }
 
 func (s *accumulatingSink) ToolUseStart(c llm.ToolCall) {

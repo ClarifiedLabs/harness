@@ -827,6 +827,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		budget          *costBudgetTracker
 		requestShape    *llm.MultimodalRequestShape
 		finalDiagnostic *llm.APIErrorDiagnostic
+		eventSequence   int
 	)
 	diagnosticFor := func(stage llm.APIErrorStage) *llm.APIErrorDiagnostic {
 		diagnostic := &llm.APIErrorDiagnostic{
@@ -846,6 +847,14 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	writeFailure := func(status int, stage llm.APIErrorStage, proxyErr *protocol.Error) {
 		finalDiagnostic = diagnosticFor(stage)
 		proxyErr.Diagnostic = finalDiagnostic
+		errAttrs = []any{
+			"err_kind", "api",
+			"api_status_code", proxyErr.StatusCode,
+			"api_code", proxyErr.Code,
+			"api_message", proxyErr.Message,
+			"api_retryable", proxyErr.Retryable,
+			"api_retry_after_ms", proxyErr.RetryAfterMS,
+		}
 		writeError(cw, status, proxyErr)
 	}
 	defer func() {
@@ -895,7 +904,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		if streamErr != "" {
 			attrs = append(attrs, "err", streamErr)
 			attrs = append(attrs, errAttrs...)
-			h.logger.Warn("model request completed", attrs...)
+			if !failed && errors.Is(r.Context().Err(), context.Canceled) {
+				h.logger.Info("model request completed", attrs...)
+			} else {
+				h.logger.Warn("model request completed", attrs...)
+			}
 			return
 		}
 		if cw.statusCode() >= http.StatusBadRequest {
@@ -958,6 +971,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	if requestBudget, ok, message := h.checkCostBudget(cw, r, target, req.Request, diagnosticFor(llm.APIErrorStageProxyPrepare)); !ok {
 		streamErr = message
 		finalDiagnostic = diagnosticFor(llm.APIErrorStageProxyPrepare)
+		errAttrs = []any{
+			"err_kind", "api",
+			"api_status_code", cw.statusCode(),
+			"api_message", message,
+		}
 		return
 	} else {
 		budget = requestBudget
@@ -990,6 +1008,61 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+	enrichModelRequestEvent := func(event llm.ModelRequestEvent) llm.ModelRequestEvent {
+		eventSequence++
+		event.Sequence = eventSequence
+		event.ProxyRequestID = requestID
+		event.TargetID = targetID
+		event.Provider = providerID
+		event.APIType = apiType
+		event.Model = model
+		event.Purpose = purpose
+		event.ElapsedMS = time.Since(start).Milliseconds()
+		if traceOK {
+			event.TraceID = traceCtx.TraceID
+			event.SpanID = traceCtx.SpanID
+		}
+		if event.UpstreamRequestID == "" && finalDiagnostic != nil {
+			event.UpstreamRequestID = finalDiagnostic.UpstreamRequestID
+		}
+		return event
+	}
+	writeModelRequestEvent := func(event llm.ModelRequestEvent) bool {
+		event = enrichModelRequestEvent(event)
+		switch event.State {
+		case llm.ModelRequestUpstreamAttemptFailed, llm.ModelRequestFailed:
+			h.logger.Warn("model upstream attempt failed", modelRequestEventLogAttrs(event)...)
+		case llm.ModelRequestRetryScheduled:
+			h.logger.Info("model upstream retry scheduled", modelRequestEventLogAttrs(event)...)
+		case llm.ModelRequestCancelled:
+			h.logger.Info("model request cancelled", modelRequestEventLogAttrs(event)...)
+		}
+		streamEvent := llm.StreamEvent{Kind: llm.EventModelRequest, ModelRequest: &event}
+		if err := enc.Encode(protocol.StreamEnvelope{Event: &streamEvent}); err != nil {
+			streamErr = err.Error()
+			return false
+		}
+		flush()
+		return true
+	}
+
+	accepted := enrichModelRequestEvent(llm.ModelRequestEvent{
+		State: llm.ModelRequestAccepted,
+	})
+	h.logger.Info("model request started", modelRequestEventLogAttrs(accepted)...)
+	acceptedEvent := llm.StreamEvent{Kind: llm.EventModelRequest, ModelRequest: &accepted}
+	if err := enc.Encode(protocol.StreamEnvelope{Event: &acceptedEvent}); err != nil {
+		streamErr = err.Error()
+		return
+	}
+	flush()
+	stopCancellationLog := context.AfterFunc(r.Context(), func() {
+		cancelled := accepted
+		cancelled.State = llm.ModelRequestCancelled
+		cancelled.ElapsedMS = time.Since(start).Milliseconds()
+		h.logger.Info("model request cancellation observed", modelRequestEventLogAttrs(cancelled)...)
+	})
+	defer stopCancellationLog()
 
 	type streamRetry int
 	const (
@@ -1000,6 +1073,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	)
 	retryMinOutputTokens := 0
 	streamAttempt := func(request, semanticRequest llm.Request) (streamRetry, continuationEntry) {
+		attemptStart := time.Now()
 		semanticRequest.StoreResponse = request.StoreResponse
 		semanticRequest.PreviousResponseID = request.PreviousResponseID
 		semanticRequest.MaxTokens = request.MaxTokens
@@ -1014,22 +1088,48 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		var assistantReasoning []llm.ContentBlock
 		var assistantCalls []llm.ToolCall
 		var assistantPhase string
+		var pendingTerminalEvent *llm.ModelRequestEvent
+		cancelEventSent := false
 		for ev, err := range provider.Stream(r.Context(), request) {
 			if err != nil {
+				rawErr := err
+				if errors.Is(rawErr, context.Canceled) || errors.Is(rawErr, context.DeadlineExceeded) {
+					streamErr = rawErr.Error()
+					errAttrs = streamErrorLogAttrs(rawErr)
+					if !cancelEventSent {
+						writeModelRequestEvent(llm.ModelRequestEvent{
+							State:   llm.ModelRequestCancelled,
+							Outcome: llm.ModelRequestOutcomeTerminal,
+							Message: rawErr.Error(),
+						})
+					}
+					_ = enc.Encode(protocol.StreamEnvelope{Error: protocol.ErrorFrom(rawErr)})
+					flush()
+					return streamRetryNone, continuationEntry{}
+				}
+				diagnostic := diagnosticFor(upstreamErrorStage(rawErr))
+				diagnostic.UpstreamRequestID = upstreamRequestIDFromError(rawErr)
+				diagnostic.MultimodalShape = requestShape
+				diagnostic.Compatibility = classifyMultimodalToolResultRejection(rawErr, requestShape)
+				finalDiagnostic = diagnostic
+				err = redactImageBearingError(rawErr, semanticRequest)
+				err = withAPIErrorDiagnostic(err, diagnostic)
 				streamErr = err.Error()
 				errAttrs = streamErrorLogAttrs(err)
+
+				retryKind := streamRetryNone
 				if !sentEvents && request.PreviousResponseID != "" && previousResponseRejected(err) {
 					h.resetContinuation(cacheKey)
-					return streamRetryContinuation, continuationEntry{}
+					retryKind = streamRetryContinuation
 				}
-				if !sentEvents && request.StoreResponse && storeResponseRejected(err) {
+				if retryKind == streamRetryNone && !sentEvents && request.StoreResponse && storeResponseRejected(err) {
 					h.disableContinuation(cacheKey)
-					return streamRetryContinuation, continuationEntry{}
+					retryKind = streamRetryContinuation
 				}
-				if !sentEvents && len(request.ServerTools) > 0 && serverToolRejected(err) {
-					return streamRetryServerTools, continuationEntry{}
+				if retryKind == streamRetryNone && !sentEvents && len(request.ServerTools) > 0 && serverToolRejected(err) {
+					retryKind = streamRetryServerTools
 				}
-				if !sentEvents {
+				if retryKind == streamRetryNone && !sentEvents {
 					if floor, ok := outputTokenFloorRejected(err); ok && floor > request.MaxTokens {
 						retryMinOutputTokens = floor
 						h.logger.Warn("retrying model request with higher output token floor",
@@ -1044,21 +1144,50 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 							"retry_max_tokens", floor,
 							"err", redactImageBearingError(err, semanticRequest).Error(),
 						)
-						return streamRetryMinOutputTokens, continuationEntry{}
+						retryKind = streamRetryMinOutputTokens
 					}
 				}
-				diagnostic := diagnosticFor(upstreamErrorStage(err))
-				diagnostic.UpstreamRequestID = upstreamRequestIDFromError(err)
-				diagnostic.MultimodalShape = requestShape
-				diagnostic.Compatibility = classifyMultimodalToolResultRejection(err, requestShape)
-				finalDiagnostic = diagnostic
-				err = redactImageBearingError(err, semanticRequest)
-				err = withAPIErrorDiagnostic(err, diagnostic)
-				streamErr = err.Error()
-				errAttrs = streamErrorLogAttrs(err)
+
+				issue := modelRequestEventFromError(err, llm.ModelRequestFailed, llm.ModelRequestOutcomeTerminal, time.Since(attemptStart))
+				if pendingTerminalEvent != nil {
+					issue = mergeModelRequestFailure(*pendingTerminalEvent, issue)
+				}
+				if retryKind != streamRetryNone {
+					issue.State = llm.ModelRequestUpstreamAttemptFailed
+					issue.Outcome = llm.ModelRequestOutcomeRetrying
+					if !writeModelRequestEvent(issue) {
+						return streamRetryNone, continuationEntry{}
+					}
+					retryEvent := issue
+					retryEvent.State = llm.ModelRequestRetryScheduled
+					retryEvent.Outcome = ""
+					retryEvent.Attempt++
+					retryEvent.AttemptDurationMS = 0
+					if !writeModelRequestEvent(retryEvent) {
+						return streamRetryNone, continuationEntry{}
+					}
+					return retryKind, continuationEntry{}
+				}
+				if !writeModelRequestEvent(issue) {
+					return streamRetryNone, continuationEntry{}
+				}
 				_ = enc.Encode(protocol.StreamEnvelope{Error: protocol.ErrorFrom(err)})
 				flush()
 				return streamRetryNone, continuationEntry{}
+			}
+			if ev.Kind == llm.EventModelRequest && ev.ModelRequest != nil {
+				status := redactModelRequestEvent(*ev.ModelRequest, semanticRequest)
+				if status.State == llm.ModelRequestCancelled {
+					cancelEventSent = true
+				}
+				if status.State == llm.ModelRequestUpstreamAttemptFailed && status.Outcome == llm.ModelRequestOutcomeTerminal {
+					pendingTerminalEvent = &status
+					continue
+				}
+				if !writeModelRequestEvent(status) {
+					return streamRetryNone, continuationEntry{}
+				}
+				continue
 			}
 			sentEvents = true
 			events++
@@ -1134,6 +1263,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			}
 			flush()
 		}
+		if pendingTerminalEvent != nil {
+			if !writeModelRequestEvent(*pendingTerminalEvent) {
+				return streamRetryNone, continuationEntry{}
+			}
+		}
 		return streamRetryNone, finalState
 	}
 	attemptRequest := req.Request
@@ -1158,6 +1292,12 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	if state.PreviousResponseID != "" {
 		h.saveContinuation(cacheKey, state)
+	}
+	if streamErr == "" {
+		writeModelRequestEvent(llm.ModelRequestEvent{
+			State:     llm.ModelRequestCompleted,
+			ElapsedMS: time.Since(start).Milliseconds(),
+		})
 	}
 }
 
@@ -1275,6 +1415,7 @@ func streamErrorLogAttrs(err error) []any {
 			"err_kind", "api",
 			"api_status_code", apiErr.StatusCode,
 			"api_code", apiErr.Code,
+			"api_message", apiErr.Message,
 			"api_retryable", apiErr.Retryable,
 			"api_retry_after_ms", apiErr.RetryAfter.Milliseconds(),
 		)
@@ -1286,6 +1427,93 @@ func streamErrorLogAttrs(err error) []any {
 		return append(attrs, "err_kind", "context_deadline")
 	default:
 		return append(attrs, "err_kind", "other")
+	}
+}
+
+func modelRequestEventFromError(err error, state llm.ModelRequestState, outcome llm.ModelRequestOutcome, duration time.Duration) llm.ModelRequestEvent {
+	event := llm.ModelRequestEvent{
+		State:             state,
+		Outcome:           outcome,
+		AttemptDurationMS: duration.Milliseconds(),
+		Stage:             upstreamErrorStage(err),
+	}
+	var apiErr *llm.APIError
+	if errors.As(err, &apiErr) {
+		event.StatusCode = apiErr.StatusCode
+		event.Code = apiErr.Code
+		event.Message = apiErr.Message
+		event.Retryable = apiErr.Retryable
+		event.RetryAfterMS = apiErr.RetryAfter.Milliseconds()
+		if apiErr.Diagnostic != nil {
+			event.UpstreamRequestID = apiErr.Diagnostic.UpstreamRequestID
+			if apiErr.Diagnostic.Stage != "" {
+				event.Stage = apiErr.Diagnostic.Stage
+			}
+		}
+		return event
+	}
+	event.Message = err.Error()
+	return event
+}
+
+func mergeModelRequestFailure(base, current llm.ModelRequestEvent) llm.ModelRequestEvent {
+	current.Attempt = base.Attempt
+	current.MaxAttempts = base.MaxAttempts
+	if base.AttemptDurationMS > 0 {
+		current.AttemptDurationMS = base.AttemptDurationMS
+	}
+	if base.UpstreamRequestID != "" {
+		current.UpstreamRequestID = base.UpstreamRequestID
+	}
+	return current
+}
+
+func redactModelRequestEvent(event llm.ModelRequestEvent, req llm.Request) llm.ModelRequestEvent {
+	if event.Message == "" && event.Code == "" {
+		return event
+	}
+	err := redactImageBearingError(&llm.APIError{
+		StatusCode: event.StatusCode,
+		Code:       event.Code,
+		Message:    event.Message,
+		Retryable:  event.Retryable,
+		RetryAfter: time.Duration(event.RetryAfterMS) * time.Millisecond,
+	}, req)
+	var apiErr *llm.APIError
+	if errors.As(err, &apiErr) {
+		event.Code = apiErr.Code
+		event.Message = apiErr.Message
+		return event
+	}
+	event.Message = err.Error()
+	return event
+}
+
+func modelRequestEventLogAttrs(event llm.ModelRequestEvent) []any {
+	return []any{
+		"request_id", event.ProxyRequestID,
+		"sequence", event.Sequence,
+		"state", string(event.State),
+		"outcome", string(event.Outcome),
+		"target_id", event.TargetID,
+		"provider", event.Provider,
+		"api_type", event.APIType,
+		"model", event.Model,
+		"purpose", event.Purpose,
+		"upstream_request_id", event.UpstreamRequestID,
+		"trace_id", event.TraceID,
+		"span_id", event.SpanID,
+		"upstream_attempt", event.Attempt,
+		"upstream_max_attempts", event.MaxAttempts,
+		"api_status_code", event.StatusCode,
+		"api_code", event.Code,
+		"api_message", event.Message,
+		"api_retryable", event.Retryable,
+		"api_retry_after_ms", event.RetryAfterMS,
+		"retry_delay_ms", event.RetryDelayMS,
+		"attempt_duration_ms", event.AttemptDurationMS,
+		"elapsed_ms", event.ElapsedMS,
+		"error_stage", string(event.Stage),
 	}
 }
 

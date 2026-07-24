@@ -157,6 +157,12 @@ current model, agent, reasoning controls, todos, plans, and working directory.
 
 Diagnostic logs, including MCP/LSP child-process stderr that is hidden from the
 terminal by default, are kept as JSON lines in the session's `diagnostics.ndjson`.
+Model requests also write diagnostics-only lifecycle records to `raw.ndjson`:
+proxy acceptance/completion, every failed upstream attempt (including 429/529
+responses later retried), retry scheduling, terminal failure, and cancellation.
+These records carry parsed provider messages, timing, and request correlation for
+`harness session timings`, but are never added to the conversation tree or model
+context. The proxy logs the same failed attempts individually.
 When a concrete endpoint rejects a valid image-bearing tool result, Harness emits
 one actionable compatibility notice and records safe request-shape and
 request/trace correlation metadata there. Prompts, tool arguments, local paths,
@@ -164,6 +170,10 @@ result text, and image base64 are excluded. Use `-trace-proxy` to correlate the
 notice with model-proxy logs; Harness never retries by silently dropping the
 image. `--quiet` suppresses the terminal compatibility notice while retaining
 the single structured diagnostic record.
+
+Rate limits with no `Retry-After`, or one of at most 60 seconds, use the bounded
+retry policy. Longer provider waits fail immediately with the original 429/529
+message so an interactive turn is not silently parked for hours.
 
 ## Runaway protection
 

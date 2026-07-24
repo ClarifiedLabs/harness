@@ -777,6 +777,9 @@ func TestTimingsPrintsWallClockReport(t *testing.T) {
 	events := []Event{
 		{Time: base, Type: EventUser, Prompt: 1, Text: "fix it"},
 		{Time: base.Add(100 * time.Millisecond), Type: EventTurnAttemptStart, Prompt: 1, Turn: 1, Attempt: 1, Context: &ContextSnapshot{Total: 1000, Window: 4000, PayloadTotal: 400, Tools: 120}},
+		{Time: base.Add(200 * time.Millisecond), Type: EventModelRequest, Prompt: 1, Turn: 1, Attempt: 1, ModelRequest: &llm.ModelRequestEvent{State: llm.ModelRequestUpstreamAttemptFailed, StatusCode: 429, AttemptDurationMS: 250}},
+		{Time: base.Add(200 * time.Millisecond), Type: EventModelRequest, Prompt: 1, Turn: 1, Attempt: 1, ModelRequest: &llm.ModelRequestEvent{State: llm.ModelRequestRetryScheduled, StatusCode: 429, RetryDelayMS: 500}},
+		{Time: base.Add(950 * time.Millisecond), Type: EventModelRequest, Prompt: 1, Turn: 1, Attempt: 1, ModelRequest: &llm.ModelRequestEvent{State: llm.ModelRequestFailed, StatusCode: 529, AttemptDurationMS: 125}},
 		{Time: base.Add(1200 * time.Millisecond), Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "call_1", Tool: "read_file"},
 		{Time: base.Add(1500 * time.Millisecond), Type: EventToolResult, Prompt: 1, Turn: 1, ToolID: "call_1", Tool: "read_file"},
 		{Time: base.Add(1600 * time.Millisecond), Type: EventTurnAttemptUsage, Prompt: 1, Turn: 1, Attempt: 1},
@@ -793,7 +796,7 @@ func TestTimingsPrintsWallClockReport(t *testing.T) {
 		t.Fatalf("Timings: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"prompt 1: total 2s", "first visible 1.2s", "turn 1 attempt 1: 1.5s", "payload 400", "tool read_file: 300ms", "gap 1.1s"} {
+	for _, want := range []string{"prompt 1: total 2s", "first visible 1.2s", "turn 1 attempt 1: 1.5s", "payload 400", "model API issues: 2 failed attempts, 375ms provider time, 500ms scheduled retry wait (429×1, 529×1)", "tool read_file: 300ms", "gap 750ms"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("timings missing %q:\n%s", want, got)
 		}

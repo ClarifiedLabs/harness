@@ -2298,14 +2298,13 @@ func TestRunSessionStatsErrors(t *testing.T) {
 
 // TestRunSigintExitDuringPromptNoRace exercises the SIGINT-exit-while-a-turn-is-in-
 // flight path through run() with a non-nil injected signal channel. The first ^C
-// cancels the in-flight prompt; a second ^C within the double-press window requests
-// exit. The REPL goroutine completes the cancelled prompt (its per-prompt save and
-// usage update) and then performs the final exit save itself, with no concurrent
-// writer. Run under -race this is the regression guard for the data race that the
-// previous main-side concurrent exit save produced (design §8.4): the run() exit
-// wiring is exercised under the race detector, and the SIGINT exit code is 130.
+// cancels the in-flight prompt and the second requests immediate process exit.
+// The test process remains alive, so it also waits for the cooperative fake prompt
+// to finish its per-prompt save before TempDir cleanup. Run under -race this is the
+// regression guard for both signal handling and background prompt cleanup.
 func TestRunSigintExitDuringPromptNoRace(t *testing.T) {
 	inPrompt := make(chan struct{}) // closed when the turn's stream is in flight
+	promptFinished := make(chan struct{}, 1)
 	stdinBlock := make(chan struct{})
 	t.Cleanup(func() { close(stdinBlock) }) // unblock the leftover scanner read
 	fp := llmtest.New("fake", llmtest.Step{
@@ -2341,15 +2340,20 @@ func TestRunSigintExitDuringPromptNoRace(t *testing.T) {
 		now:      func() time.Time { return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC) },
 		colorTTY: false,
 		sigCh:    sigCh,
+		promptFinished: func() {
+			select {
+			case promptFinished <- struct{}{}:
+			default:
+			}
+		},
 	}
 
 	codeCh := make(chan int, 1)
 	go func() { codeCh <- run(env) }()
 
 	<-inPrompt
-	// First ^C cancels the in-flight prompt; the second requests exit. The REPL
-	// goroutine finishes the cancelled prompt (saving + accumulating usage) before
-	// acting on the exit request, so there is no concurrent save.
+	// First ^C starts graceful cancellation; the second exits immediately even
+	// if cancellation has not yet reached the provider.
 	sigCh <- syscall.SIGINT
 	sigCh <- syscall.SIGINT
 
@@ -2357,6 +2361,7 @@ func TestRunSigintExitDuringPromptNoRace(t *testing.T) {
 	if code != ui.ExitInterrupt {
 		t.Fatalf("SIGINT exit should return 130, got %d; errw=%q", code, errw.String())
 	}
+	<-promptFinished
 }
 
 func TestRunSigintDuringModelCatalogFetch(t *testing.T) {
