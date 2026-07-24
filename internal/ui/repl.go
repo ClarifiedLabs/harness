@@ -4309,10 +4309,32 @@ func (s *accumulatingSink) WaitForPromptWork(ctx context.Context) (llm.Usage, er
 
 func (s *accumulatingSink) PromptWorkWaitStart() {
 	s.r.PromptWorkWaitStart()
+	// Surface the outstanding background delegate jobs' live progress so the
+	// wait ticker can summarize their activity while the parent joins them.
+	var progress []any
+	if s.app.Background != nil {
+		for _, snap := range s.app.Background.List() {
+			if snap.Status != background.StatusRunning {
+				continue
+			}
+			if snap.Progress != nil {
+				progress = append(progress, snap.Progress)
+			}
+		}
+	}
+	s.r.SetBackgroundProgress(progress)
 }
 
 func (s *accumulatingSink) PromptWorkWaitComplete() {
+	s.r.SetBackgroundProgress(nil)
 	s.r.PromptWorkWaitComplete()
+}
+
+// ToolProgress forwards a foreground tool call's live-progress closure to the
+// renderer's wait ticker so child-run activity is visible while the (blocking)
+// call runs. A nil progress clears it.
+func (s *accumulatingSink) ToolProgress(call llm.ToolCall, progress any) {
+	s.r.SetToolProgress(call.Name, progress)
 }
 
 func (s *accumulatingSink) DrainPromptWorkUsage() llm.Usage {

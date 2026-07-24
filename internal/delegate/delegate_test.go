@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"harness/internal/agent"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/session"
@@ -730,4 +731,209 @@ func TestDelegatePassesRequestedAgentToResolver(t *testing.T) {
 	if len(req.Tools) != 1 || req.Tools[0].Name != "write_file" {
 		t.Fatalf("child tools = %+v, want configured write_file", req.Tools)
 	}
+}
+
+// TestProgressSnapshotZeroAndFinished exercises the Progress type directly: a
+// fresh progress reads as a zero snapshot (no turn, not finished), and after
+// the child sink callbacks fire it carries the advanced turn/tool/finished
+// state through Snapshot under the RWMutex.
+func TestProgressSnapshotZeroAndFinished(t *testing.T) {
+	p := NewProgress()
+	if got := p.Snapshot(); got.Turn != 0 || got.Tools != 0 || got.Finished {
+		t.Fatalf("fresh progress = %+v, want zero and not finished", got)
+	}
+
+	s := newChildSink("", todo.NewStore(), false, p)
+	ctx := agent.ContextEstimate{Total: 1000, Window: 200000}
+	s.TurnAttemptStart(3, 1, ctx)
+	if got := p.Snapshot(); got.Turn != 3 || got.Attempt != 1 || got.Context.Total != 1000 || got.Context.Window != 200000 {
+		t.Fatalf("after TurnAttemptStart = %+v", got)
+	}
+
+	s.TurnAttemptComplete(agent.TurnAttemptUsage{Turn: 3, Attempt: 1, Usage: llm.Usage{InputTokens: 7, CostUSD: 0.01, CostKnown: true}})
+	if got := p.Snapshot(); got.Usage.InputTokens != 7 || !got.Usage.CostKnown {
+		t.Fatalf("after TurnAttemptComplete = %+v", got)
+	}
+
+	s.ToolStart(llm.ToolCall{ID: "t1", Name: "read_file"})
+	s.ToolStart(llm.ToolCall{ID: "t2", Name: "read_file"})
+	if got := p.Snapshot(); got.Tools != 2 {
+		t.Fatalf("after two ToolStart = %+v, want 2 tools", got)
+	}
+
+	s.TurnComplete(agent.TurnUsage{Turn: 3, Context: ctx})
+	if got := p.Snapshot(); got.Context.Total != 1000 {
+		t.Fatalf("after TurnComplete = %+v", got)
+	}
+
+	s.PromptComplete(agent.PromptUsage{Turns: 3})
+	if got := p.Snapshot(); !got.Finished || got.Turn != 3 {
+		t.Fatalf("after PromptComplete = %+v, want finished turn 3", got)
+	}
+}
+
+// TestProgressNilSafe ensures nil progress (failure-before-run paths) never
+// panics: every sink callback and Snapshot must be a no-op on a nil *Progress.
+func TestProgressNilSafe(t *testing.T) {
+	var p *Progress
+	if got := p.Snapshot(); got != (agent.DelegateProgressSnapshot{}) {
+		t.Fatalf("nil Snapshot = %+v, want zero", got)
+	}
+	p.markTurn(1, 1, agent.ContextEstimate{})
+	p.markUsage(llm.Usage{})
+	p.markContext(agent.ContextEstimate{})
+	p.markTool()
+	p.markFinished()
+	p.SetAgent("explore")
+	if got := p.Closure()(); got != (agent.DelegateProgressSnapshot{}) {
+		t.Fatalf("nil Closure = %+v, want zero", got)
+	}
+}
+
+// TestProgressClosureLiveDuringRun verifies the foreground delegate exposes a
+// live progress closure readable while the child run is still in progress. A
+// child tool that blocks until released lets the test assert the closure
+// already reflects the in-flight turn and the started tool, not only the final
+// snapshot.
+func TestProgressClosureLiveDuringRun(t *testing.T) {
+	childTools := &tools.Registry{}
+	toolStarted := make(chan struct{})
+	releaseTool := make(chan struct{})
+	childTools.Register(&blockingChildTool{name: "read_file", started: toolStarted, release: releaseTool})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventToolCallDone, ToolID: "r1", ToolName: "read_file", ToolInput: json.RawMessage(`{}`)}},
+			Stop:  llm.StopToolUse,
+		},
+		llmtest.Step{Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 11, OutputTokens: 5}},
+	)
+	state := NewState(Runtime{Provider: fp, Model: "m", Registry: llm.NewRegistry(nil)})
+	tool := New(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
+		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools, Agent: "explore"}, nil
+	}, Options{})
+
+	input := json.RawMessage(`{"task":"inspect"}`)
+	// StartProgress stashes the live progress keyed by input; the closure the
+	// renderer would read is available before the blocking run begins.
+	progress := tool.StartProgress(input)
+	if progress == nil {
+		t.Fatalf("StartProgress returned nil for a foreground delegate")
+	}
+	snapshot, ok := progress.(func() agent.DelegateProgressSnapshot)
+	if !ok {
+		t.Fatalf("StartProgress returned %T, want the progress closure", progress)
+	}
+	if got := snapshot(); got.Turn != 0 || got.Finished {
+		t.Fatalf("closure before run = %+v, want zero and not finished", got)
+	}
+
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := tool.RunMetered(context.Background(), input)
+		runDone <- err
+	}()
+
+	// Once the child tool has started, the live closure must already reflect
+	// turn 1 and one tool start; it must not yet be finished.
+	<-toolStarted
+	if got := snapshot(); got.Turn != 1 || got.Tools != 1 || got.Finished {
+		t.Fatalf("live closure mid-run = %+v, want turn 1, 1 tool, not finished", got)
+	}
+	if got := snapshot(); got.Agent != "explore" {
+		t.Fatalf("live closure agent = %q, want explore", got.Agent)
+	}
+
+	close(releaseTool) // let the child tool finish so the run completes
+	if err := <-runDone; err != nil {
+		t.Fatalf("RunMetered: %v", err)
+	}
+	// After the run returns the closure reports the final, finished snapshot.
+	if got := snapshot(); !got.Finished {
+		t.Fatalf("closure after run = %+v, want finished", got)
+	}
+}
+
+// blockingChildTool is a read-only child tool whose Run signals started and
+// then blocks until release is closed, so a test can observe live progress
+// while a child run is mid-flight.
+type blockingChildTool struct {
+	name    string
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (t *blockingChildTool) Name() string                  { return t.name }
+func (t *blockingChildTool) Description() string           { return "child test tool that blocks" }
+func (t *blockingChildTool) Schema() json.RawMessage       { return json.RawMessage(`{"type":"object"}`) }
+func (t *blockingChildTool) ReadOnly(json.RawMessage) bool { return true }
+func (t *blockingChildTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+	select {
+	case t.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-t.release:
+		return "ok", nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// TestProgressBackgroundExposedOnJob verifies a background delegate publishes a
+// live progress closure on its job snapshot immediately at start, before the
+// child run completes, so the parent wait ticker can read it mid-run.
+func TestProgressBackgroundExposedOnJob(t *testing.T) {
+	childTools := &tools.Registry{}
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 11}})
+	state := NewState(Runtime{Provider: fp, Model: "m", Registry: llm.NewRegistry(nil)})
+	runner := NewRunner(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
+		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools, Agent: "explore"}, nil
+	}, Options{})
+	started := make(chan tools.BackgroundJobRequest, 1)
+	starter := &capturingStarter{req: started}
+	tool := NewTool(runner, starter)
+
+	result, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"bg","background":true}`))
+	if err != nil {
+		t.Fatalf("RunMetered: %v", err)
+	}
+	if result.Progress == nil {
+		t.Fatalf("background RunMetered should return a live progress closure")
+	}
+	req := <-started
+	if req.Progress == nil {
+		t.Fatalf("background request should carry a progress closure")
+	}
+	snapshot, ok := req.Progress.(func() agent.DelegateProgressSnapshot)
+	if !ok {
+		t.Fatalf("background request progress = %T, want closure", req.Progress)
+	}
+	// Before the job runs, the closure reads zero.
+	if got := snapshot(); got.Turn != 0 || got.Finished {
+		t.Fatalf("closure before job run = %+v, want zero", got)
+	}
+	// Run the job to completion and confirm the closure reports finished.
+	completed, err := req.Run(context.Background(), "bg_x")
+	if err != nil {
+		t.Fatalf("background run: %v", err)
+	}
+	if completed.Progress == nil {
+		t.Fatalf("background result should carry progress closure")
+	}
+	final, ok := completed.Progress.(func() agent.DelegateProgressSnapshot)
+	if !ok || !final().Finished {
+		t.Fatalf("background result progress not finished: %T", completed.Progress)
+	}
+	if got := snapshot(); !got.Finished || got.Agent != "explore" {
+		t.Fatalf("closure after job run = %+v, want finished explore", got)
+	}
+}
+
+type capturingStarter struct {
+	req chan<- tools.BackgroundJobRequest
+}
+
+func (c *capturingStarter) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.BackgroundJobInfo, error) {
+	c.req <- req
+	return tools.BackgroundJobInfo{ID: "bg_delegate", Status: "running"}, nil
 }

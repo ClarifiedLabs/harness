@@ -99,6 +99,35 @@ type ToolDiffSink interface {
 	ToolDiff(call llm.ToolCall, text string)
 }
 
+// DelegateProgressSnapshot is a best-effort, lock-protected snapshot of one
+// delegate run's live activity, reported by the child sink to the parent
+// renderer's wait ticker. It is diagnostic only: never persisted and never fed
+// to the model. Zero values render as "no stats yet".
+//
+// The live object is a func() DelegateProgressSnapshot closure created in
+// internal/delegate (which imports this package) and carried as an opaque
+// `any` through internal/tools and internal/background so neither of those
+// packages needs to import agent. The renderer type-asserts the `any` back to
+// the concrete closure type to read the snapshot.
+type DelegateProgressSnapshot struct {
+	Turn     int
+	Attempt  int
+	Tools    int // count of ToolStart calls seen so far
+	Agent    string // child agent name, for the background summary label
+	Context  ContextEstimate
+	Usage    llm.Usage // last TurnAttemptComplete usage
+	Finished bool      // set once the run returns (success or failure)
+}
+
+// ToolProgressSink is optionally implemented by sinks that want live child-run
+// progress attached to an outstanding tool call's wait ticker. Set is called
+// with a progress closure (opaque `any`) before the call's ToolResult, and
+// cleared with nil after. Tools that do not support live progress are simply
+// skipped.
+type ToolProgressSink interface {
+	ToolProgress(call llm.ToolCall, progress any)
+}
+
 // HookContextReceiver is implemented by sinks that can keep hook-generated
 // context available for later turns without adding it to the saved transcript.
 type HookContextReceiver interface {
@@ -1550,17 +1579,20 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 }
 
 func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink, richEncodedBytes *int) (llm.ContentBlock, llm.Usage) {
+	startToolProgress(a.tools, call, sink)
 	sink.ToolStart(call)
 	diffState := a.snapshotToolDiff(call)
 	r := a.dispatchOne(ctx, call, promptID, turnID, sink)
 	r = acceptRichResult(r, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
 	block, usage := a.finishToolResult(r, sink)
+	clearToolProgress(call, sink)
 	a.emitToolDiff(call, diffState, sink)
 	return block, usage
 }
 
 func (a *Agent) dispatchReadOnlyBatch(ctx context.Context, calls []llm.ToolCall, blocks []llm.ContentBlock, sink EventSink, richEncodedBytes *int) llm.Usage {
 	for _, call := range calls {
+		startToolProgress(a.tools, call, sink)
 		sink.ToolStart(call)
 	}
 
@@ -1583,6 +1615,7 @@ func (a *Agent) dispatchReadOnlyBatch(ctx context.Context, calls []llm.ToolCall,
 		r = acceptRichResult(r, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
 		block, usage := a.finishToolResult(r, sink)
 		blocks[i] = block
+		clearToolProgress(calls[i], sink)
 		total = add(total, usage)
 	}
 	return total
@@ -1670,6 +1703,30 @@ func (a *Agent) finishToolResult(r llm.ToolResult, sink EventSink) (llm.ContentB
 		sink.Notice(notice)
 	}
 	return resultBlock(r), r.Usage
+}
+
+// startToolProgress hands the renderer the tool's live-progress closure before
+// the call begins, so the wait ticker can show child-run activity while the
+// (possibly long, blocking) tool runs. Sinks that do not implement
+// ToolProgressSink, or tools without ProgressStarter, are silently skipped.
+func startToolProgress(registry *tools.Registry, call llm.ToolCall, sink EventSink) {
+	ps, ok := sink.(ToolProgressSink)
+	if !ok || registry == nil {
+		return
+	}
+	progress, ok := registry.ProgressFor(call)
+	if !ok {
+		return
+	}
+	ps.ToolProgress(call, progress)
+}
+
+// clearToolProgress drops the tool's progress closure after the call returns so
+// a stale snapshot cannot leak into the next tool's wait ticker.
+func clearToolProgress(call llm.ToolCall, sink EventSink) {
+	if ps, ok := sink.(ToolProgressSink); ok {
+		ps.ToolProgress(call, nil)
+	}
 }
 
 type toolDiffState struct {

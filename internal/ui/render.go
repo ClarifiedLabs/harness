@@ -131,6 +131,8 @@ type Renderer struct {
 	statusLabel       string                // e.g. "turn: 3" or "tool: grep args=[\"x\"]"
 	statusStart       time.Time             // when the current wait began
 	statusCtx         agent.ContextEstimate // context usage to append for model waits (r27)
+	statusProgress    any                   // foreground delegate live-progress closure, or nil
+	statusBgProgress  []any                 // background delegate progress closures while joining
 	statusInput       string                // during-prompt typed buffer shown after "> "
 	statusInputCursor int                   // rune index of the edit cursor within statusInput
 	ticker            *time.Ticker
@@ -321,6 +323,33 @@ func (r *Renderer) CompactionComplete() {
 // background delegates finish.
 func (r *Renderer) PromptWorkWaitStart() {
 	r.beginWait("background: waiting for delegates", agent.ContextEstimate{})
+}
+
+// SetBackgroundProgress attaches the live-progress closures of the outstanding
+// background delegate jobs so the wait ticker can summarize their activity while
+// the parent is blocked joining them. A nil slice clears them. progress entries
+// are opaque func() agent.DelegateProgressSnapshot closures type-asserted at
+// render time; entries that are not the expected closure type are skipped.
+func (r *Renderer) SetBackgroundProgress(progress []any) {
+	if !r.liveStatus {
+		return
+	}
+	r.statusMu.Lock()
+	r.statusBgProgress = progress
+	r.statusMu.Unlock()
+}
+
+// SetToolProgress attaches (progress != nil) or clears (nil) the live-progress
+// closure for the currently running foreground tool call so its wait ticker can
+// show child-run activity. progress is an opaque func() agent.DelegateProgressSnapshot
+// closure type-asserted at render time.
+func (r *Renderer) SetToolProgress(name string, progress any) {
+	if !r.liveStatus {
+		return
+	}
+	r.statusMu.Lock()
+	r.statusProgress = progress
+	r.statusMu.Unlock()
 }
 
 // PromptWorkWaitComplete clears the background-work wait before the parent
@@ -644,6 +673,8 @@ func (r *Renderer) endWait() {
 	r.statusActive = false
 	r.statusLabel = ""
 	r.statusCtx = agent.ContextEstimate{}
+	r.statusProgress = nil
+	r.statusBgProgress = nil
 	r.statusMu.Unlock()
 }
 
@@ -678,6 +709,8 @@ func (r *Renderer) StopProgress() {
 	r.statusInputCursor = 0
 	r.statusLabel = ""
 	r.statusCtx = agent.ContextEstimate{}
+	r.statusProgress = nil
+	r.statusBgProgress = nil
 	r.promptStart = time.Time{}
 	t, stop, done := r.ticker, r.tickerStop, r.tickerDone
 	r.ticker, r.tickerStop, r.tickerDone = nil, nil, nil
@@ -769,6 +802,13 @@ func (r *Renderer) statusTextLocked() (text string, cursorCol int, hasInput bool
 	fmt.Fprintf(&b, "[%s · %ds", r.statusLabel, elapsedSecs)
 	if used := contextUsed(r.statusCtx); r.statusCtx.Window > 0 && used > 0 {
 		fmt.Fprintf(&b, " · ctx %d%% %s/%s", contextPercent(r.statusCtx), humanTokens(used), humanTokens(r.statusCtx.Window))
+	}
+	// Live delegate activity. A single foreground tool's child run is appended
+	// inline; the background join wait summarizes each outstanding job.
+	if len(r.statusBgProgress) > 0 {
+		writeBackgroundProgress(&b, r.statusBgProgress)
+	} else if r.statusProgress != nil {
+		writeDelegateProgress(&b, r.statusProgress)
 	}
 	// The session total is set off from the current-turn fields with a distinct
 	// "│" divider and placed last so the turn's own elapsed time and the running
@@ -947,6 +987,118 @@ func cacheHitRatio(u llm.Usage) int {
 		return 0
 	}
 	return u.CacheReadTokens * 100 / total
+}
+
+// delegateProgressSnapshot type-asserts an opaque `any` to the concrete
+// func() agent.DelegateProgressSnapshot closure carried through tools/background
+// (which cannot import agent) and invokes it. ok is false when the value is nil
+// or not the expected closure type, so non-delegate progress is silently skipped.
+func delegateProgressSnapshot(progress any) (agent.DelegateProgressSnapshot, bool) {
+	if progress == nil {
+		return agent.DelegateProgressSnapshot{}, false
+	}
+	fn, ok := progress.(func() agent.DelegateProgressSnapshot)
+	if !ok || fn == nil {
+		return agent.DelegateProgressSnapshot{}, false
+	}
+	return fn(), true
+}
+
+// writeDelegateProgress appends one foreground delegate child run's live activity
+// to the status line, e.g. "· turn 3 · 2 tools · 4.2k/200k ctx 2% · $0.04". A
+// finished run is shown once (its final snapshot) before the wait clears. Zero
+// state (no turn yet) renders nothing so a just-started run does not flicker.
+func writeDelegateProgress(b *strings.Builder, progress any) {
+	s, ok := delegateProgressSnapshot(progress)
+	if !ok {
+		return
+	}
+	if s.Turn == 0 && !s.Finished {
+		return
+	}
+	if s.Turn > 0 {
+		fmt.Fprintf(b, " · turn %d", s.Turn)
+		if s.Attempt > 1 {
+			fmt.Fprintf(b, " attempt %d", s.Attempt)
+		}
+	}
+	if s.Tools > 0 {
+		if s.Tools == 1 {
+			b.WriteString(" · 1 tool")
+		} else {
+			fmt.Fprintf(b, " · %d tools", s.Tools)
+		}
+	}
+	if used := contextUsed(s.Context); s.Context.Window > 0 && used > 0 {
+		fmt.Fprintf(b, " · ctx %d%% %s/%s", contextPercent(s.Context), humanTokens(used), humanTokens(s.Context.Window))
+	}
+	if s.Usage.CostKnown && s.Usage.CostUSD > 0 {
+		fmt.Fprintf(b, " · $%.3f", s.Usage.CostUSD)
+	}
+}
+
+// writeBackgroundProgress summarizes the outstanding join-required background
+// delegate jobs, e.g. "· 2 jobs: explore turn 5 · plan idle · $0.04". Idle jobs
+// (no turn yet) render "idle"; finished jobs render their final state once.
+// Jobs with no agent name fall back to the job kind.
+func writeBackgroundProgress(b *strings.Builder, progress []any) {
+	var segs []string
+	var totalCost float64
+	costKnown := true
+	for _, p := range progress {
+		s, ok := delegateProgressSnapshot(p)
+		if !ok {
+			continue
+		}
+		segs = append(segs, backgroundJobSegment(s))
+		if s.Usage.CostKnown {
+			totalCost += s.Usage.CostUSD
+		} else {
+			costKnown = false
+		}
+	}
+	if len(segs) == 0 {
+		return
+	}
+	if len(segs) == 1 {
+		fmt.Fprintf(b, " · 1 job: %s", segs[0])
+	} else {
+		fmt.Fprintf(b, " · %d jobs: %s", len(segs), strings.Join(segs, " · "))
+	}
+	if costKnown && totalCost > 0 {
+		fmt.Fprintf(b, " · $%.3f", totalCost)
+	}
+}
+
+// backgroundJobSegment renders one job's live state for the background
+// summary. A job with no activity yet is "idle". An agent name prefixes the
+// state when present so concurrent jobs are distinguishable at a glance.
+func backgroundJobSegment(s agent.DelegateProgressSnapshot) string {
+	var b strings.Builder
+	if s.Agent != "" {
+		b.WriteString(s.Agent)
+		b.WriteByte(' ')
+	}
+	if s.Turn == 0 && !s.Finished {
+		b.WriteString("idle")
+		return b.String()
+	}
+	if s.Turn > 0 {
+		fmt.Fprintf(&b, "turn %d", s.Turn)
+	}
+	if s.Tools > 0 {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "%d tools", s.Tools)
+	}
+	if s.Finished {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString("done")
+	}
+	return b.String()
 }
 
 // sanitizeInputLine collapses control characters (notably the newlines that

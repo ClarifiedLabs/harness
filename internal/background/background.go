@@ -56,6 +56,9 @@ type Job struct {
 	Updated          time.Time
 	Result           tools.BackgroundJobResult
 	Error            string
+	// progress is the opaque live-progress closure (func() agent.DelegateProgressSnapshot)
+	// set at job start so the parent wait ticker can read child activity mid-run.
+	progress         any
 	cancel           context.CancelFunc
 	done             chan struct{}
 	finished         bool
@@ -76,6 +79,9 @@ type Snapshot struct {
 	Updated        time.Time
 	Result         tools.BackgroundJobResult
 	Error          string
+	// Progress is the opaque live-progress closure (func() agent.DelegateProgressSnapshot)
+	// for the renderer to read mid-run; nil when the job did not supply one.
+	Progress       any
 	ContextPending bool
 	NoticePending  bool
 }
@@ -117,14 +123,14 @@ func (m *Manager) SetResultPreparer(prepare ResultPreparer) {
 }
 
 func (m *Manager) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.BackgroundJobInfo, error) {
-	snap, err := m.start(req.Kind, req.Description, req.Agent, req.WaitForPrompt, req.Run)
+	snap, err := m.start(req.Kind, req.Description, req.Agent, req.WaitForPrompt, req.Progress, req.Run)
 	if err != nil {
 		return tools.BackgroundJobInfo{}, err
 	}
 	return tools.BackgroundJobInfo{ID: snap.ID, Status: snap.Status}, nil
 }
 
-func (m *Manager) start(kind, task, agent string, waitForPrompt bool, run func(context.Context, string) (tools.BackgroundJobResult, error)) (Snapshot, error) {
+func (m *Manager) start(kind, task, agent string, waitForPrompt bool, progress any, run func(context.Context, string) (tools.BackgroundJobResult, error)) (Snapshot, error) {
 	if m == nil {
 		return Snapshot{}, fmt.Errorf("background manager is not initialized")
 	}
@@ -141,6 +147,7 @@ func (m *Manager) start(kind, task, agent string, waitForPrompt bool, run func(c
 		Status:        StatusRunning,
 		Created:       started,
 		Updated:       started,
+		progress:      progress,
 		cancel:        cancel,
 		done:          make(chan struct{}),
 		waitForPrompt: waitForPrompt,
@@ -157,6 +164,9 @@ func (m *Manager) start(kind, task, agent string, waitForPrompt bool, run func(c
 		finished := m.now()
 		m.mu.Lock()
 		job.Result = result
+		if result.Progress != nil {
+			job.progress = result.Progress
+		}
 		job.Updated = finished
 		job.cancel = nil
 		job.finished = true
@@ -506,6 +516,7 @@ func snapshotJob(job *Job) Snapshot {
 		Updated:        job.Updated,
 		Result:         job.Result,
 		Error:          job.Error,
+		Progress:       job.progress,
 		ContextPending: !job.contextDelivered && job.finished,
 		NoticePending:  !job.noticeDelivered && job.finished,
 	}

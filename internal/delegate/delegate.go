@@ -139,6 +139,10 @@ type RunResult struct {
 	ProviderName   string
 	Model          string
 	SaveError      error
+	// Progress carries the live-progress closure (func() agent.DelegateProgressSnapshot)
+	// for foreground delegates so the parent wait ticker can read child activity while
+	// the (synchronous) run is in progress. It is nil for failure-before-run paths.
+	Progress any
 }
 
 // RuntimeRebinder is implemented by tools whose behavior depends on the
@@ -182,6 +186,10 @@ func (r *Runner) Schema() json.RawMessage {
 type Tool struct {
 	runner     *Runner
 	background tools.BackgroundJobStarter
+	// progress stashes live Progress objects keyed by raw input between
+	// StartProgress and RunMetered so foreground runs reuse the exact object
+	// the renderer's closure reads. Lazily allocated; nil when unused.
+	progress *sync.Map
 }
 
 func New(snapshot func() Runtime, resolve func(Runtime, string) (Launch, error), opts Options) *Tool {
@@ -238,32 +246,78 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 		if t.background == nil {
 			return tools.MeteredResult{}, fmt.Errorf("background manager is not initialized")
 		}
+		// Create the progress here so its closure is available to the parent wait
+		// ticker immediately (the job runs in a goroutine that starts now); the
+		// same progress feeds the child sink inside the job's Run closure.
+		progress := NewProgress()
 		info, err := t.background.StartBackgroundJob(tools.BackgroundJobRequest{
 			Kind:          "delegate",
 			Description:   req.Task,
 			Agent:         req.Agent,
 			WaitForPrompt: true,
+			Progress:      progress.Closure(),
 			Run: func(ctx context.Context, childID string) (tools.BackgroundJobResult, error) {
 				req.Background = false
 				req.ChildID = childID
-				result, err := t.runner.Run(ctx, req)
+				result, err := t.runner.Run(ctx, req, progress)
 				return tools.BackgroundJobResult{
 					Text:           result.Report,
 					TranscriptPath: result.TranscriptPath,
 					Usage:          result.Usage,
+					Progress:       result.Progress,
 				}, err
 			},
 		})
 		if err != nil {
 			return tools.MeteredResult{}, err
 		}
-		return tools.MeteredResult{Text: fmt.Sprintf("background job %s started", info.ID)}, nil
+		return tools.MeteredResult{Text: fmt.Sprintf("background job %s started", info.ID), Progress: progress.Closure()}, nil
 	}
-	result, err := t.runner.Run(ctx, req)
+	// Foreground: the live progress was created by StartProgress (called by the
+	// agent just before dispatch) and stashed keyed by input so this Run reuses
+	// the very object the renderer's closure reads. Fall back to a fresh progress
+	// when no StartProgress ran (e.g. Run called directly outside dispatch).
+	progress := t.takeProgress(input)
+	result, err := t.runner.Run(ctx, req, progress)
 	if err != nil {
-		return tools.MeteredResult{Usage: result.Usage}, err
+		return tools.MeteredResult{Usage: result.Usage, Progress: result.Progress}, err
 	}
-	return tools.MeteredResult{Text: result.Report, Usage: result.Usage}, nil
+	return tools.MeteredResult{Text: result.Report, Usage: result.Usage, Progress: result.Progress}, nil
+}
+
+// StartProgress implements tools.ProgressStarter. It creates the live progress
+// object for an outstanding foreground delegate call and returns its closure so
+// the parent wait ticker can read child activity while the (synchronous) run
+// blocks. The progress is stashed keyed by the raw input so RunMetered,
+// invoked next with the same input, reuses this exact object (not a fresh one);
+// RunMetered removes it. Distinct parallel inputs thus never collide.
+func (t *Tool) StartProgress(input json.RawMessage) any {
+	if t == nil || t.runner == nil {
+		return nil
+	}
+	req, err := DecodeRunRequest(input, "delegate")
+	if err != nil || req.Background {
+		return nil // background progress is created inline in RunMetered
+	}
+	progress := NewProgress()
+	if t.progress == nil {
+		t.progress = &sync.Map{}
+	}
+	t.progress.Store(string(input), progress)
+	return progress.Closure()
+}
+
+// takeProgress removes and returns the progress stashed for input by
+// StartProgress, or nil when none was stashed (direct Run paths).
+func (t *Tool) takeProgress(input json.RawMessage) *Progress {
+	if t == nil || t.progress == nil {
+		return nil
+	}
+	v, ok := t.progress.LoadAndDelete(string(input))
+	if !ok {
+		return nil
+	}
+	return v.(*Progress)
 }
 
 func (t *Tool) RebindRuntime(snapshot func() Runtime) tools.Tool {
@@ -299,12 +353,19 @@ func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 	}, nil
 }
 
-func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+// Run executes one child-agent run. progress, when non-nil, is the live
+// progress object the child sink updates so a parent wait ticker can read child
+// activity while this (synchronous) call blocks; a fresh Progress is created
+// when nil for callers that do not surface live progress.
+func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (RunResult, error) {
 	if r == nil {
 		return RunResult{}, fmt.Errorf("delegate runner is not initialized")
 	}
 	if req.Kind == "" {
 		req.Kind = "delegate"
+	}
+	if progress == nil {
+		progress = NewProgress()
 	}
 	if r.snapshot == nil {
 		return RunResult{}, fmt.Errorf("delegate runtime is not initialized")
@@ -336,6 +397,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, fmt.Errorf("delegate tool registry is not initialized")
 	}
 	launch.System = childSystemPrompt(launch.System)
+	progress.SetAgent(launch.Agent)
 
 	toolNames := launch.Tools.Names()
 	if runtime.Depth+1 >= maxDepth {
@@ -378,8 +440,9 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	child.SetCacheAffinityID(childCacheAffinityID(runtime.CacheAffinityID, childID))
 	child.SetSystem(launch.System)
 
-	sink := newChildSink(childDir, childTodos, hasTodoTool)
+	sink := newChildSink(childDir, childTodos, hasTodoTool, progress)
 	sink.User(req.Task)
+	defer progress.markFinished()
 	runErr := child.RunPrompt(ctx, req.Task, sink)
 	usage := sink.usage
 	status := "completed"
@@ -401,6 +464,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			ProviderName:   launch.ProviderName,
 			Model:          launch.Model,
 			SaveError:      saveErr,
+			Progress:       progress.Closure(),
 		}, runErr
 	}
 	report := strings.TrimSpace(lastAssistantText(child.Transcript()))
@@ -426,6 +490,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		ProviderName:   launch.ProviderName,
 		Model:          launch.Model,
 		SaveError:      saveErr,
+		Progress:       progress.Closure(),
 	}, nil
 }
 
@@ -776,6 +841,7 @@ func preview(s string, limit int) string {
 
 type childSink struct {
 	usage       agent.PromptUsage
+	progress    *Progress // live activity reported to the parent wait ticker; may be nil
 	sessionDir  string
 	todos       *todo.Store
 	todoContext bool
@@ -784,8 +850,115 @@ type childSink struct {
 	attempt     int
 }
 
-func newChildSink(sessionDir string, todos *todo.Store, todoContext bool) *childSink {
-	return &childSink{sessionDir: sessionDir, todos: todos, todoContext: todoContext, pending: make(map[string]llm.ToolCall)}
+func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progress *Progress) *childSink {
+	return &childSink{sessionDir: sessionDir, todos: todos, todoContext: todoContext, progress: progress, pending: make(map[string]llm.ToolCall)}
+}
+
+// Progress is a lock-protected snapshot of one delegate run's live activity,
+// reported by the child sink to the parent renderer's wait ticker. It is
+// best-effort diagnostic state; it is never persisted and never fed to the
+// model. The ticker goroutine reads it from another goroutine while the child
+// agent writes it from the run goroutine, so every read/write is guarded by
+// the progress RWMutex. Snapshot returns a copy safe for the renderer to keep.
+type Progress struct {
+	mu       sync.RWMutex
+	turn     int
+	attempt  int
+	agent    string
+	ctx      agent.ContextEstimate
+	tools    int       // count of ToolStart calls seen so far
+	usage    llm.Usage // last TurnAttemptComplete usage
+	finished bool
+}
+
+func NewProgress() *Progress { return &Progress{} }
+
+// Snapshot returns a renderer-safe copy of the current live activity.
+func (p *Progress) Snapshot() agent.DelegateProgressSnapshot {
+	if p == nil {
+		return agent.DelegateProgressSnapshot{}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return agent.DelegateProgressSnapshot{
+		Turn:     p.turn,
+		Attempt:  p.attempt,
+		Tools:    p.tools,
+		Agent:    p.agent,
+		Context:  p.ctx,
+		Usage:    p.usage,
+		Finished: p.finished,
+	}
+}
+
+// SetAgent records the child agent name for the background summary label.
+func (p *Progress) SetAgent(name string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.agent = name
+}
+
+// markTurn records the current turn/attempt and context estimate.
+func (p *Progress) markTurn(turn, attempt int, ctx agent.ContextEstimate) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.turn = turn
+	p.attempt = attempt
+	p.ctx = ctx
+}
+
+// markUsage records the last per-attempt usage.
+func (p *Progress) markUsage(u llm.Usage) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.usage = u
+}
+
+// markContext refreshes the context estimate (e.g. from a completed turn).
+func (p *Progress) markContext(ctx agent.ContextEstimate) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ctx = ctx
+}
+
+// markTool increments the count of ToolStart calls seen.
+func (p *Progress) markTool() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.tools++
+}
+
+// markFinished signals the run has returned (success or failure) so the renderer
+// can render the final snapshot once before the wait clears.
+func (p *Progress) markFinished() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.finished = true
+}
+
+// Closure returns a func() agent.DelegateProgressSnapshot that reads this
+// progress. It is the opaque `any` carried through tools/background to the
+// renderer (which type-asserts it back). nil progress yields a zero snapshot.
+func (p *Progress) Closure() func() agent.DelegateProgressSnapshot {
+	return func() agent.DelegateProgressSnapshot { return p.Snapshot() }
 }
 
 func (s *childSink) User(text string) {
@@ -807,11 +980,13 @@ func (s *childSink) ReasoningSummary(text string) {
 func (s *childSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
 	s.turn = turn
 	s.attempt = attempt
+	s.progress.markTurn(turn, attempt, ctx)
 	s.append(session.Event{Type: session.EventTurnAttemptStart, Prompt: 1, Turn: turn, Attempt: attempt})
 }
 
 func (s *childSink) TurnAttemptComplete(u agent.TurnAttemptUsage) {
 	usage := u.Usage
+	s.progress.markUsage(usage)
 	s.append(session.Event{Type: session.EventTurnAttemptUsage, Prompt: 1, Turn: u.Turn, Attempt: u.Attempt, Usage: &usage})
 }
 
@@ -821,6 +996,7 @@ func (*childSink) ToolUseDelta(int, string) {}
 
 func (s *childSink) ToolStart(call llm.ToolCall) {
 	s.pending[call.ID] = call
+	s.progress.markTool()
 	s.append(session.Event{Type: session.EventToolStart, Prompt: 1, Turn: s.turn, ToolID: call.ID, Tool: call.Name, Input: call.Input})
 }
 
@@ -851,6 +1027,7 @@ func (s *childSink) Notice(msg string) {
 
 func (s *childSink) TurnComplete(usage agent.TurnUsage) {
 	u := usage.Usage
+	s.progress.markContext(usage.Context)
 	s.append(session.Event{Type: session.EventTurnComplete, Prompt: 1, Turn: usage.Turn, Usage: &u})
 }
 
@@ -868,6 +1045,7 @@ func (s *childSink) RequestContext() []string {
 
 func (s *childSink) PromptComplete(usage agent.PromptUsage) {
 	s.usage = usage
+	s.progress.markFinished()
 	u := usage.Usage
 	s.append(session.Event{Type: session.EventPromptUsage, Prompt: 1, Usage: &u})
 }

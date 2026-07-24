@@ -35,9 +35,14 @@ type Tool interface {
 
 // MeteredResult is returned by tools that consume model tokens internally.
 // Dispatch preserves Usage so the agent can include it in prompt/session totals.
+// Progress, when non-nil, is an opaque closure (func() agent.DelegateProgressSnapshot)
+// built by the tool that reports the run's live activity for the parent wait
+// ticker; it is consumed via type assertion by the renderer only. Keeping it
+// `any` avoids a tools -> agent import cycle.
 type MeteredResult struct {
-	Text  string
-	Usage llm.Usage
+	Text     string
+	Usage    llm.Usage
+	Progress any
 }
 
 // MeteredTool is an optional extension for tools whose Run implementation can
@@ -84,6 +89,18 @@ type RequiredInputModality interface {
 	RequiredInputModality() string
 }
 
+// ProgressStarter is an optional capability for tools whose Run may block for a
+// long time behind a child run (such as delegate) and want to surface live
+// activity to the parent wait ticker. StartProgress returns an opaque closure
+// (func() agent.DelegateProgressSnapshot) the renderer reads while the call is
+// outstanding; it is nil if the tool does not support live progress for this
+// input. The closure is created before the blocking Run, so it can report live
+// state rather than only a final snapshot. Returning `any` keeps this package
+// free of an agent import cycle.
+type ProgressStarter interface {
+	StartProgress(input json.RawMessage) any
+}
+
 // FileMutationReporter is implemented by tools that can identify the file paths
 // they may mutate from their JSON input. The agent uses this for optional
 // user-facing before/after diff display; Dispatch and model-visible results do
@@ -102,7 +119,10 @@ type FileReadReporter interface {
 // BackgroundJobRequest is the reusable contract for tools that can hand work to
 // the process-local background job manager. The manager owns job ids, status,
 // cancellation, notices, and request-context delivery; the tool owns its input
-// validation and execution semantics.
+// validation and execution semantics. Progress, when non-nil, is the opaque
+// live-progress closure (func() agent.DelegateProgressSnapshot) the job should
+// report while running; the manager stores it on the job so the parent wait
+// ticker can read it mid-run.
 type BackgroundJobRequest struct {
 	Kind        string
 	Description string
@@ -111,16 +131,21 @@ type BackgroundJobRequest struct {
 	// agent may finish its current prompt. Ordinary background commands leave this
 	// false; background delegates set it so the parent joins and synthesizes them.
 	WaitForPrompt bool
+	Progress       any
 	Run           func(context.Context, string) (BackgroundJobResult, error)
 }
 
 // BackgroundJobResult is the model-facing outcome of a completed background
 // tool job. TranscriptPath is for jobs, such as delegate agents, that persist a
 // separate transcript. Usage carries nested model spend back to the parent prompt.
+// Progress, when non-nil, is an opaque closure (func() agent.DelegateProgressSnapshot)
+// reporting the job's live activity while it runs; it is consumed via type
+// assertion by the renderer only. Keeping it `any` avoids a tools -> agent cycle.
 type BackgroundJobResult struct {
 	Text           string
 	TranscriptPath string
 	Usage          llm.Usage
+	Progress       any
 }
 
 // BackgroundJobInfo is the minimal start acknowledgement a tool needs to return
@@ -653,6 +678,27 @@ func (r *Registry) RequiredModality(call llm.ToolCall) (modality string, ok bool
 	}
 	modality = strings.TrimSpace(required.RequiredInputModality())
 	return modality, modality != ""
+}
+
+// ProgressFor reports a tool's live-progress closure when the tool implements
+// ProgressStarter. Unknown tools and non-progressing tools return ok=false so
+// optional observers can silently skip them. The returned `any` is an opaque
+// func() agent.DelegateProgressSnapshot closure for the renderer to read.
+func (r *Registry) ProgressFor(call llm.ToolCall) (progress any, ok bool) {
+	t, found := r.tools[call.Name]
+	if !found {
+		return nil, false
+	}
+	starter, ok := t.(ProgressStarter)
+	if !ok {
+		return nil, false
+	}
+	input := call.Input
+	if len(input) == 0 {
+		input = json.RawMessage("{}")
+	}
+	progress = starter.StartProgress(input)
+	return progress, progress != nil
 }
 
 func (r *Registry) ReadPaths(call llm.ToolCall) (paths []string, ok bool) {
