@@ -120,9 +120,6 @@ func interactionThinking(reasoning llm.ReasoningConfig) (level, summaries string
 		return "minimal", "none"
 	}
 	value := strings.ToLower(strings.TrimSpace(reasoning.Effort))
-	if value == "" {
-		value = strings.ToLower(strings.TrimSpace(reasoning.Profile))
-	}
 	switch value {
 	case "none":
 		level, summaries = "minimal", "none"

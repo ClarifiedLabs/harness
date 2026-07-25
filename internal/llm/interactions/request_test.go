@@ -58,6 +58,7 @@ func TestBuildRequestStatelessReplayAndGoogleSearch(t *testing.T) {
 		MaxTokens:   4096,
 		Reasoning: llm.ReasoningConfig{
 			Profile: "xhigh",
+			Effort:  "xhigh",
 			Summary: "detailed",
 		},
 		StopSeqs:       []string{"STOP"},
@@ -215,6 +216,13 @@ func TestInteractionThinkingDisabled(t *testing.T) {
 	level, summary := interactionThinking(llm.ReasoningConfig{Enabled: &disabled})
 	if level != "minimal" || summary != "none" {
 		t.Fatalf("disabled thinking = %q %q", level, summary)
+	}
+}
+
+func TestInteractionThinkingIgnoresUnresolvedProfile(t *testing.T) {
+	level, summary := interactionThinking(llm.ReasoningConfig{Profile: "high"})
+	if level != "" || summary != "" {
+		t.Fatalf("unresolved profile thinking = %q %q, want no wire controls", level, summary)
 	}
 }
 
