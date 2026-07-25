@@ -66,14 +66,14 @@ func (p *Provider) runWebSocketLocked(ctx context.Context, req llm.Request, yiel
 	if !webSocketContinuesToolTurn(req) {
 		p.wsTurnState = ""
 	}
-	body, err := json.Marshal(p.buildWebSocketRequest(req))
-	if err != nil {
-		return &llm.APIError{Message: "marshal websocket request: " + err.Error()}
-	}
 	for attempt := 0; ; attempt++ {
 		conn, reused, err := p.webSocketConnLocked(ctx, req)
 		if err != nil {
 			return err
+		}
+		body, err := json.Marshal(p.buildWebSocketRequest(req))
+		if err != nil {
+			return &llm.APIError{Message: "marshal websocket request: " + err.Error()}
 		}
 		emitted, retryFresh, err := p.runWebSocketOnConn(ctx, conn, string(body), yield)
 		if err == nil {
@@ -101,6 +101,9 @@ func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body s
 	wrappedYield := func(ev llm.StreamEvent, err error) bool {
 		if err == nil {
 			emitted = true
+			if ev.Kind == llm.EventDone {
+				p.wsResponseID = ev.ResponseID
+			}
 		}
 		return yield(ev, err)
 	}
@@ -144,7 +147,10 @@ func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body s
 
 func (p *Provider) webSocketConnLocked(ctx context.Context, req llm.Request) (*ws.Conn, bool, error) {
 	if p.wsConn != nil {
-		return p.wsConn, true, nil
+		if !p.wsConn.Closed() {
+			return p.wsConn, true, nil
+		}
+		p.closeWebSocketLocked()
 	}
 	u, err := p.webSocketURL()
 	if err != nil {
@@ -164,11 +170,12 @@ func (p *Provider) webSocketConnLocked(ctx context.Context, req llm.Request) (*w
 }
 
 func (p *Provider) closeWebSocketLocked() {
-	if p.wsConn == nil {
-		return
+	p.wsResponseID = ""
+	p.wsTurnState = ""
+	if p.wsConn != nil {
+		_ = p.wsConn.Close()
+		p.wsConn = nil
 	}
-	_ = p.wsConn.Close()
-	p.wsConn = nil
 }
 
 func (p *Provider) buildWebSocketRequest(req llm.Request) wireWebSocketRequest {

@@ -16,6 +16,10 @@ type continuationEntry struct {
 	Fingerprint        [sha256.Size]byte
 }
 
+type responseContinuationAvailability interface {
+	CanContinueResponse(responseID string) bool
+}
+
 func fingerprintMessages(messages []llm.Message) ([sha256.Size]byte, error) {
 	return fingerprintMessageSequence(messages, nil)
 }
@@ -53,7 +57,7 @@ func writeFingerprintMessage(dst hash.Hash, message llm.Message) error {
 	return json.NewEncoder(dst).Encode(message)
 }
 
-func (h *Handler) applyContinuation(key string, stateful bool, req llm.Request) llm.Request {
+func (h *Handler) applyContinuation(key string, stateful bool, provider llm.Provider, req llm.Request) llm.Request {
 	req.PreviousResponseID = ""
 	if key == "" || !stateful {
 		req.StoreResponse = false
@@ -79,6 +83,11 @@ func (h *Handler) applyContinuation(key string, stateful bool, req llm.Request) 
 	}
 	fingerprint, err := fingerprintMessages(req.Messages[:entry.AnchorMessages])
 	if err != nil || fingerprint != entry.Fingerprint {
+		h.deleteContinuationIfCurrent(key, entry)
+		return req
+	}
+	if availability, ok := provider.(responseContinuationAvailability); ok &&
+		!availability.CanContinueResponse(entry.PreviousResponseID) {
 		h.deleteContinuationIfCurrent(key, entry)
 		return req
 	}

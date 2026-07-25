@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"harness/internal/llm"
@@ -17,6 +18,24 @@ import (
 	"harness/internal/llm/llmtest"
 	"harness/internal/modelproxy/protocol"
 )
+
+type continuationAwareFakeProvider struct {
+	*llmtest.FakeProvider
+	mu                  sync.Mutex
+	availableResponseID string
+}
+
+func (p *continuationAwareFakeProvider) CanContinueResponse(responseID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return responseID != "" && responseID == p.availableResponseID
+}
+
+func (p *continuationAwareFakeProvider) setAvailableResponse(responseID string) {
+	p.mu.Lock()
+	p.availableResponseID = responseID
+	p.mu.Unlock()
+}
 
 func newContinuationTestServer(t *testing.T, provider llm.Provider) *httptest.Server {
 	t.Helper()
@@ -139,6 +158,66 @@ func TestHandlerContinuationHonorsExplicitAssistantPhase(t *testing.T) {
 	}
 	if fp.Requests[1].PreviousResponseID != "resp-phase" || len(fp.Requests[1].Messages) != 1 {
 		t.Fatalf("continued request = prev %q messages %d", fp.Requests[1].PreviousResponseID, len(fp.Requests[1].Messages))
+	}
+}
+
+func TestHandlerContinuationResendsFullHistoryWhenProviderConnectionClosed(t *testing.T) {
+	fp := &continuationAwareFakeProvider{FakeProvider: llmtest.New("responses",
+		llmtest.Step{
+			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "first answer"}},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "resp-closed",
+		},
+		llmtest.Step{
+			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "second answer"}},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "resp-live",
+		},
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp-third"},
+	)}
+	srv := newContinuationTestServer(t, fp)
+	defer srv.Close()
+
+	first := []llm.Message{{
+		Role:    llm.RoleUser,
+		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}},
+	}}
+	postContinuationStream(t, srv, first)
+
+	second := append([]llm.Message(nil), first...)
+	second = append(second,
+		llm.BuildAssistantMessage(nil, "first answer", nil, "", llm.StopEndTurn),
+		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}},
+	)
+	postContinuationStream(t, srv, second)
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	}
+	if fp.Requests[1].PreviousResponseID != "" || len(fp.Requests[1].Messages) != len(second) {
+		t.Fatalf(
+			"closed-connection request = prev %q messages %d, want full history with %d messages",
+			fp.Requests[1].PreviousResponseID,
+			len(fp.Requests[1].Messages),
+			len(second),
+		)
+	}
+
+	fp.setAvailableResponse("resp-live")
+	third := append([]llm.Message(nil), second...)
+	third = append(third,
+		llm.BuildAssistantMessage(nil, "second answer", nil, "", llm.StopEndTurn),
+		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "third"}}},
+	)
+	postContinuationStream(t, srv, third)
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want 3", len(fp.Requests))
+	}
+	if fp.Requests[2].PreviousResponseID != "resp-live" || len(fp.Requests[2].Messages) != 1 {
+		t.Fatalf(
+			"live-connection request = prev %q messages %d, want resp-live and one tail message",
+			fp.Requests[2].PreviousResponseID,
+			len(fp.Requests[2].Messages),
+		)
 	}
 }
 

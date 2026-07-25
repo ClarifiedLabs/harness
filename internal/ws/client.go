@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,8 +39,18 @@ const defaultHandshakeTimeout = 15 * time.Second
 
 // Conn is a client-side WebSocket connection.
 type Conn struct {
-	conn net.Conn
-	br   *bufio.Reader
+	conn        net.Conn
+	br          *bufio.Reader
+	writeMu     sync.Mutex
+	closeOnce   sync.Once
+	closedOnce  sync.Once
+	readResults chan readResult
+	closed      chan struct{}
+}
+
+type readResult struct {
+	text string
+	err  error
 }
 
 // Dial opens a client-side WebSocket connection.
@@ -128,16 +139,42 @@ func Dial(ctx context.Context, rawURL string, header http.Header) (*Conn, *http.
 	}
 	_ = conn.SetDeadline(time.Time{})
 	closed = false
-	return &Conn{conn: conn, br: br}, resp, nil
+	wsConn := &Conn{
+		conn:        conn,
+		br:          br,
+		readResults: make(chan readResult, 64),
+		closed:      make(chan struct{}),
+	}
+	go wsConn.readLoop()
+	return wsConn, resp, nil
 }
 
 // Close sends a close frame and closes the underlying network connection.
 func (c *Conn) Close() error {
-	if c == nil || c.conn == nil {
-		return nil
+	return c.close(true)
+}
+
+// Closed reports whether the websocket connection has closed.
+func (c *Conn) Closed() bool {
+	if c == nil || c.closed == nil {
+		return true
 	}
-	_ = c.writeFrame(opClose, nil, true)
-	return c.conn.Close()
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Done is closed when the websocket connection closes.
+func (c *Conn) Done() <-chan struct{} {
+	if c == nil || c.closed == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	return c.closed
 }
 
 // SendText sends one text message.
@@ -145,33 +182,95 @@ func (c *Conn) SendText(text string) error {
 	return c.writeFrame(opText, []byte(text), true)
 }
 
-// ReadText reads the next text message. Ping frames are answered automatically.
+// ReadText reads the next text message.
 func (c *Conn) ReadText(ctx context.Context) (string, error) {
-	for {
-		if deadline, ok := ctx.Deadline(); ok {
-			_ = c.conn.SetReadDeadline(deadline)
-		} else {
-			_ = c.conn.SetReadDeadline(time.Time{})
+	if c == nil || c.readResults == nil {
+		return "", errors.New("websocket connection is nil")
+	}
+
+	select {
+	case result, ok := <-c.readResults:
+		if !ok {
+			return "", io.EOF
 		}
+		return result.text, result.err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func (c *Conn) readLoop() {
+	var terminalErr error
+	defer func() {
+		_ = c.close(false)
+		if terminalErr != nil {
+			select {
+			case c.readResults <- readResult{err: terminalErr}:
+			default:
+			}
+		}
+		close(c.readResults)
+	}()
+
+	for {
 		op, payload, err := c.readMessage()
 		if err != nil {
-			return "", err
+			terminalErr = err
+			return
 		}
 		switch op {
 		case opText:
-			return string(payload), nil
+			if !c.deliver(readResult{text: string(payload)}) {
+				return
+			}
 		case opBinary:
-			return "", errors.New("unexpected binary websocket message")
+			terminalErr = errors.New("unexpected binary websocket message")
+			return
 		case opPing:
 			if err := c.writeFrame(opPong, payload, true); err != nil {
-				return "", err
+				terminalErr = err
+				return
 			}
 		case opPong:
 			continue
 		case opClose:
-			return "", io.EOF
+			terminalErr = io.EOF
+			return
 		}
 	}
+}
+
+func (c *Conn) deliver(result readResult) bool {
+	select {
+	case c.readResults <- result:
+		return true
+	case <-c.closed:
+		return false
+	}
+}
+
+func (c *Conn) close(sendClose bool) error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	var closeErr error
+	c.closeOnce.Do(func() {
+		c.markClosed()
+		if sendClose {
+			_ = c.writeFrame(opClose, nil, true)
+		}
+		closeErr = c.conn.Close()
+	})
+	return closeErr
+}
+
+func (c *Conn) markClosed() {
+	if c == nil || c.closed == nil {
+		return
+	}
+	c.closedOnce.Do(func() {
+		close(c.closed)
+	})
 }
 
 func (c *Conn) readMessage() (byte, []byte, error) {
@@ -241,6 +340,9 @@ func (c *Conn) readFrame() (bool, byte, []byte, error) {
 }
 
 func (c *Conn) writeFrame(op byte, payload []byte, masked bool) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
 	var frame []byte
 	frame = append(frame, 0x80|op)
 	n := len(payload)
@@ -305,6 +407,16 @@ func WriteServerText(w io.Writer, text string) error {
 	return writeServerFrame(w, opText, []byte(text))
 }
 
+// WriteServerPing writes an unmasked server ping frame.
+func WriteServerPing(w io.Writer, payload []byte) error {
+	return writeServerFrame(w, opPing, payload)
+}
+
+// WriteServerClose writes an unmasked server close frame.
+func WriteServerClose(w io.Writer) error {
+	return writeServerFrame(w, opClose, nil)
+}
+
 func writeServerFrame(w io.Writer, op byte, payload []byte) error {
 	var c Conn
 	c.conn = writeOnlyConn{w: w}
@@ -320,13 +432,27 @@ func (c writeOnlyConn) Write(p []byte) (int, error) { return c.w.Write(p) }
 
 // ReadClientText is used by tests and small local fixtures.
 func ReadClientText(r io.Reader) (string, error) {
+	payload, err := readClientFrame(r, opText)
+	return string(payload), err
+}
+
+// ReadClientPong reads and unmasks one client pong frame.
+func ReadClientPong(r io.Reader) ([]byte, error) {
+	return readClientFrame(r, opPong)
+}
+
+func readClientFrame(r io.Reader, wantOpcode byte) ([]byte, error) {
 	c := Conn{br: bufio.NewReader(r)}
 	_, op, payload, err := c.readFrame()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if op != opText {
-		return "", fmt.Errorf("opcode = %s, want text", strconv.Itoa(int(op)))
+	if op != wantOpcode {
+		return nil, fmt.Errorf(
+			"opcode = %s, want %s",
+			strconv.Itoa(int(op)),
+			strconv.Itoa(int(wantOpcode)),
+		)
 	}
-	return string(payload), nil
+	return payload, nil
 }

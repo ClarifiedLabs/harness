@@ -53,10 +53,11 @@ type Provider struct {
 	client              *http.Client
 	sleep               func(time.Duration)
 
-	wsMu        sync.Mutex
-	wsConn      *ws.Conn
-	wsTurnState string
-	wsIDs       wsIDs
+	wsMu         sync.Mutex
+	wsConn       *ws.Conn
+	wsTurnState  string
+	wsResponseID string
+	wsIDs        wsIDs
 }
 
 func New(cfg Config) *Provider {
@@ -79,6 +80,21 @@ func New(cfg Config) *Provider {
 }
 
 func (p *Provider) Name() string { return "responses" }
+
+// CanContinueResponse reports whether transport-local state permits responseID
+// to be resumed. Non-WebSocket Responses continuations have no connection
+// liveness constraint.
+func (p *Provider) CanContinueResponse(responseID string) bool {
+	p.wsMu.Lock()
+	defer p.wsMu.Unlock()
+	if !p.useWebSocket {
+		return true
+	}
+	return responseID != "" &&
+		responseID == p.wsResponseID &&
+		p.wsConn != nil &&
+		!p.wsConn.Closed()
+}
 
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {

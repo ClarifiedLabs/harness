@@ -998,13 +998,13 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	cacheKey := h.continuationKey(target.baseTargetID, sessionKey)
 	fullRequest := req.Request
 	fullRequest.Messages = append([]llm.Message(nil), req.Request.Messages...)
-	req.Request = h.applyContinuation(cacheKey, stateful, req.Request)
 	provider, err := h.streamProvider(opts, target.baseTargetID, sessionKey)
 	if err != nil {
 		streamErr = err.Error()
 		writeFailure(http.StatusBadRequest, llm.APIErrorStageProviderRuntime, protocol.ErrorFrom(err))
 		return
 	}
+	req.Request = h.applyContinuation(cacheKey, stateful, provider, req.Request)
 
 	cw.Header().Set("content-type", protocol.ContentTypeNDJSON)
 	cw.WriteHeader(http.StatusOK)

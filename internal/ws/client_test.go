@@ -2,8 +2,11 @@ package ws
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -69,6 +72,69 @@ func TestDialSendAndReadText(t *testing.T) {
 	}
 	if gotPath != "/responses" || gotToken != "abc" {
 		t.Fatalf("request path/token = %q/%q", gotPath, gotToken)
+	}
+}
+
+func TestDialReadPumpAnswersPingAndTracksCloseBetweenReads(t *testing.T) {
+	result := make(chan error, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			result <- fmt.Errorf("response writer is not a hijacker")
+			return
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			result <- fmt.Errorf("hijack: %w", err)
+			return
+		}
+		defer conn.Close()
+		key := r.Header.Get("Sec-WebSocket-Key")
+		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+		fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+		fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+		fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", acceptKey(key))
+		if err := rw.Flush(); err != nil {
+			result <- fmt.Errorf("flush handshake: %w", err)
+			return
+		}
+		ping := []byte("still-here")
+		if err := WriteServerPing(conn, ping); err != nil {
+			result <- fmt.Errorf("write ping: %w", err)
+			return
+		}
+		pong, err := ReadClientPong(rw.Reader)
+		if err != nil {
+			result <- fmt.Errorf("read pong: %w", err)
+			return
+		}
+		if !bytes.Equal(pong, ping) {
+			result <- fmt.Errorf("pong = %q, want %q", pong, ping)
+			return
+		}
+		if err := WriteServerClose(conn); err != nil {
+			result <- fmt.Errorf("write close: %w", err)
+			return
+		}
+		result <- nil
+	}))
+	defer srv.Close()
+
+	u := "ws" + srv.URL[len("http"):] + "/responses"
+	conn, _, err := Dial(context.Background(), u, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	<-conn.Done()
+	if !conn.Closed() {
+		t.Fatal("connection is not marked closed")
+	}
+	if _, err := conn.ReadText(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("ReadText error = %v, want EOF", err)
 	}
 }
 

@@ -920,6 +920,94 @@ func TestStreamWebSocketResponseCreate(t *testing.T) {
 	}
 }
 
+func TestWebSocketContinuationRequiresOriginatingLiveConnection(t *testing.T) {
+	sendPing := make(chan struct{})
+	pongReceived := make(chan struct{})
+	closeConnection := make(chan struct{})
+	serverResult := make(chan error, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			serverResult <- fmt.Errorf("response writer is not a hijacker")
+			return
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			serverResult <- fmt.Errorf("hijack: %w", err)
+			return
+		}
+		defer conn.Close()
+		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+		fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+		fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+		fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", testAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+		if err := rw.Flush(); err != nil {
+			serverResult <- fmt.Errorf("flush handshake: %w", err)
+			return
+		}
+		if _, err := ws.ReadClientText(rw.Reader); err != nil {
+			serverResult <- fmt.Errorf("read websocket request: %w", err)
+			return
+		}
+		if err := ws.WriteServerText(conn, `{"type":"response.completed","response":{"id":"resp_live","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`); err != nil {
+			serverResult <- fmt.Errorf("write completed: %w", err)
+			return
+		}
+		<-sendPing
+		ping := []byte("idle-heartbeat")
+		if err := ws.WriteServerPing(conn, ping); err != nil {
+			serverResult <- fmt.Errorf("write ping: %w", err)
+			return
+		}
+		pong, err := ws.ReadClientPong(rw.Reader)
+		if err != nil {
+			serverResult <- fmt.Errorf("read pong: %w", err)
+			return
+		}
+		if string(pong) != string(ping) {
+			serverResult <- fmt.Errorf("pong = %q, want %q", pong, ping)
+			return
+		}
+		close(pongReceived)
+		<-closeConnection
+		if err := ws.WriteServerClose(conn); err != nil {
+			serverResult <- fmt.Errorf("write close: %w", err)
+			return
+		}
+		serverResult <- nil
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, Sleep: func(time.Duration) {}})
+	if _, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4"))); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if !p.CanContinueResponse("resp_live") {
+		t.Fatal("completed response is not available on its live connection")
+	}
+	if p.CanContinueResponse("resp_other") {
+		t.Fatal("different response unexpectedly available for continuation")
+	}
+
+	close(sendPing)
+	<-pongReceived
+	if !p.CanContinueResponse("resp_live") {
+		t.Fatal("idle heartbeat invalidated live continuation")
+	}
+
+	p.wsMu.Lock()
+	done := p.wsConn.Done()
+	p.wsMu.Unlock()
+	close(closeConnection)
+	if err := <-serverResult; err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if p.CanContinueResponse("resp_live") {
+		t.Fatal("response remains available after its connection closed")
+	}
+}
+
 func TestStreamWebSocketReusesConnectionWithTurnState(t *testing.T) {
 	var handshakes int
 	gotFirst := make(chan string, 1)

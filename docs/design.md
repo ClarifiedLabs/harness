@@ -687,6 +687,9 @@ the agent disables stateful continuation for that agent, rebuilds the request,
 and retries once stateless. Responses providers can set `responses_websocket:true`
 to use the Responses WebSocket transport; the proxy defaults that on for
 `codex_oauth` Responses configs and preserves explicit true/false overrides.
+The Codex WebSocket request always carries `store:false`; its response IDs are
+continuation handles scoped to the originating live socket rather than durable
+stored Responses objects.
 If a provider rejects a request with a parseable
 context-overflow error, the agent records the smaller reported window for the
 session, rebuilds the request, and retries once before surfacing the error.
@@ -723,8 +726,11 @@ For ChatGPT Codex over Responses WebSocket, prewarm sends an empty
 `response.create` with `generate:false`. Its response id is saved at transcript
 anchor zero, allowing the first real user request to continue from the warmed
 system-and-tools prefix without generating or persisting a disposable assistant
-turn. Other transports retain the minimal one-token neutral warm-up request
-(subject to a provider's configured output-token floor).
+turn while that socket remains live. The WebSocket client continuously drains
+frames and answers ping heartbeats between model requests. A close frame or
+transport EOF marks the socket and its last response ID unavailable before the
+next request. Other transports retain the minimal one-token neutral warm-up
+request (subject to a provider's configured output-token floor).
 
 The proxy stores each continuation as the previous response ID, anchor message
 count, and SHA-256 of the exact provider-neutral anchor prefix (with only message
@@ -733,7 +739,12 @@ reasoning, text, tool calls, explicit assistant phase, and stop reason before
 hashing the new anchor. Continuation trimming is allowed only for an unchanged
 prefix with an appended suffix. Short or changed prefixes—including retention
 edits to image or tool-result content—delete the stale entry, send full context,
-and let the successful response establish a fresh anchor.
+and let the successful response establish a fresh anchor. Providers with
+connection-scoped continuation also get a liveness check before trimming; a
+known-closed connection deletes the stale entry and sends full history on a
+fresh connection. The existing pre-stream `previous_response_not_found`
+full-history retry remains as protection for closure races and genuine upstream
+misses.
 
 Shift-Tab agent switches defer prewarm behind a 500ms idle debounce;
 each additional cycle replaces the pending target, so only the final settled
