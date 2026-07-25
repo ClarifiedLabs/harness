@@ -3379,6 +3379,7 @@ func addTotals(dst *session.UsageTotals, u llm.Usage, cost float64) {
 	dst.OutputTokens += u.OutputTokens
 	dst.CacheReadTokens += u.CacheReadTokens
 	dst.CacheWriteTokens += u.CacheWriteTokens
+	dst.CacheWrite1hTokens += u.CacheWrite1hTokens
 	dst.ReasoningTokens += u.ReasoningTokens
 	dst.CostUSD += cost
 }
@@ -3789,6 +3790,9 @@ func writeUsageTotals(b *strings.Builder, prefix string, u session.UsageTotals, 
 		prefix, u.InputTokens, u.CacheReadTokens, u.OutputTokens, u.ReasoningTokens)
 	if u.CacheWriteTokens > 0 {
 		fmt.Fprintf(b, " / %d cache write", u.CacheWriteTokens)
+	}
+	if u.CacheWrite1hTokens > 0 {
+		fmt.Fprintf(b, " / %d cache write (1h)", u.CacheWrite1hTokens)
 	}
 	if u.CostUSD > 0 {
 		fmt.Fprintf(b, " · $%.4f", u.CostUSD)

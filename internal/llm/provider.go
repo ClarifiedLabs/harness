@@ -298,16 +298,23 @@ const (
 )
 
 // Usage is the normalized token accounting for a model call. After
-// normalization InputTokens means the same thing on both dialects: uncached
+// normalization InputTokens means the same thing across dialects: uncached
 // input billed at full rate (see design §6).
 type Usage struct {
-	InputTokens      int     `json:"input_tokens"` // uncached input, billed at full rate
-	OutputTokens     int     `json:"output_tokens"`
-	CacheReadTokens  int     `json:"cache_read_tokens"`
-	CacheWriteTokens int     `json:"cache_write_tokens"`
-	ReasoningTokens  int     `json:"reasoning_tokens"`
-	CostUSD          float64 `json:"cost_usd,omitempty"`
-	CostKnown        bool    `json:"cost_known,omitempty"`
+	InputTokens     int `json:"input_tokens"` // uncached input, billed at full rate
+	OutputTokens    int `json:"output_tokens"`
+	CacheReadTokens int `json:"cache_read_tokens"`
+	// CacheWriteTokens is the default-rate cache-write bucket. Anthropic's
+	// default is the 5-minute TTL; longer 1-hour writes are separate so they can
+	// be priced at their documented rate.
+	CacheWriteTokens   int `json:"cache_write_tokens"`
+	CacheWrite1hTokens int `json:"cache_write_1h_tokens"`
+	// CacheWriteTTLKnown is internal pricing metadata. It is intentionally not
+	// serialized across the harness/proxy protocol.
+	CacheWriteTTLKnown bool    `json:"-"`
+	ReasoningTokens    int     `json:"reasoning_tokens"`
+	CostUSD            float64 `json:"cost_usd,omitempty"`
+	CostKnown          bool    `json:"cost_known,omitempty"`
 	// ServiceTier and Speed report the tier actually served when the provider
 	// exposes it. They let the proxy choose standard versus mode-specific rates
 	// after graceful downgrades.

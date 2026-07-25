@@ -47,15 +47,15 @@ type Manager struct {
 
 // Job is one background run.
 type Job struct {
-	ID               string
-	Kind             string
-	Task             string
-	Agent            string
-	Status           string
-	Created          time.Time
-	Updated          time.Time
-	Result           tools.BackgroundJobResult
-	Error            string
+	ID      string
+	Kind    string
+	Task    string
+	Agent   string
+	Status  string
+	Created time.Time
+	Updated time.Time
+	Result  tools.BackgroundJobResult
+	Error   string
 	// progress is the opaque live-progress closure (func() agent.DelegateProgressSnapshot)
 	// set at job start so the parent wait ticker can read child activity mid-run.
 	progress         any
@@ -70,15 +70,15 @@ type Job struct {
 
 // Snapshot is a copy of one job safe for callers to inspect.
 type Snapshot struct {
-	ID             string
-	Kind           string
-	Task           string
-	Agent          string
-	Status         string
-	Created        time.Time
-	Updated        time.Time
-	Result         tools.BackgroundJobResult
-	Error          string
+	ID      string
+	Kind    string
+	Task    string
+	Agent   string
+	Status  string
+	Created time.Time
+	Updated time.Time
+	Result  tools.BackgroundJobResult
+	Error   string
 	// Progress is the opaque live-progress closure (func() agent.DelegateProgressSnapshot)
 	// for the renderer to read mid-run; nil when the job did not supply one.
 	Progress       any
@@ -715,13 +715,14 @@ func formatGet(job Snapshot) string {
 
 func addUsage(a, b llm.Usage) llm.Usage {
 	return llm.Usage{
-		InputTokens:      a.InputTokens + b.InputTokens,
-		OutputTokens:     a.OutputTokens + b.OutputTokens,
-		CacheReadTokens:  a.CacheReadTokens + b.CacheReadTokens,
-		CacheWriteTokens: a.CacheWriteTokens + b.CacheWriteTokens,
-		ReasoningTokens:  a.ReasoningTokens + b.ReasoningTokens,
-		CostUSD:          a.CostUSD + b.CostUSD,
-		CostKnown:        aggregateCostKnown(a, b),
+		InputTokens:        a.InputTokens + b.InputTokens,
+		OutputTokens:       a.OutputTokens + b.OutputTokens,
+		CacheReadTokens:    a.CacheReadTokens + b.CacheReadTokens,
+		CacheWriteTokens:   a.CacheWriteTokens + b.CacheWriteTokens,
+		CacheWrite1hTokens: a.CacheWrite1hTokens + b.CacheWrite1hTokens,
+		ReasoningTokens:    a.ReasoningTokens + b.ReasoningTokens,
+		CostUSD:            a.CostUSD + b.CostUSD,
+		CostKnown:          aggregateCostKnown(a, b),
 	}
 }
 
@@ -736,7 +737,7 @@ func aggregateCostKnown(a, b llm.Usage) bool {
 
 func usageHasTokens(u llm.Usage) bool {
 	return u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadTokens != 0 ||
-		u.CacheWriteTokens != 0 || u.ReasoningTokens != 0
+		u.CacheWriteTokens != 0 || u.CacheWrite1hTokens != 0 || u.ReasoningTokens != 0
 }
 
 func preview(s string, max int) string {

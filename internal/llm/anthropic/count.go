@@ -17,6 +17,7 @@ type countRequest struct {
 	System       []wireTextBlock `json:"system,omitempty"`
 	Messages     []wireMessage   `json:"messages"`
 	Tools        []wireTool      `json:"tools,omitempty"`
+	Speed        string          `json:"speed,omitempty"`
 	OutputConfig *outputConfig   `json:"output_config,omitempty"`
 	Thinking     *thinkingConfig `json:"thinking,omitempty"`
 }
@@ -32,6 +33,7 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 		System:       w.System,
 		Messages:     w.Messages,
 		Tools:        w.Tools,
+		Speed:        w.Speed,
 		OutputConfig: w.OutputConfig,
 		Thinking:     w.Thinking,
 	})
@@ -43,13 +45,7 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 		return llm.InputTokenCount{}, err
 	}
 	httpReq.Header.Set("content-type", "application/json")
-	for k, v := range p.authHeaders {
-		httpReq.Header.Set(k, v)
-	}
-	httpReq.Header.Set("anthropic-version", apiVersion)
-	if len(p.authHeaders) == 0 && p.apiKey != "" {
-		httpReq.Header.Set("x-api-key", p.apiKey)
-	}
+	p.applyHeaders(httpReq, req.Betas)
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

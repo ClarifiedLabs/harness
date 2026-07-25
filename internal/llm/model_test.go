@@ -42,7 +42,16 @@ func TestCostUnknownModel(t *testing.T) {
 func TestCostComponents(t *testing.T) {
 	r := testRegistry()
 	base := Usage{InputTokens: 1_000_000}
-	withCache := Usage{InputTokens: 1_000_000, CacheReadTokens: 1_000_000, CacheWriteTokens: 1_000_000}
+	r.models["claude-opus-4-8"] = ModelInfo{
+		ContextWindow: 1_000_000,
+		Price:         Price{Input: 5.0, Output: 25.0, CacheRead: 0.5, CacheWrite: 6.25, CacheWrite1h: 10},
+	}
+	withCache := Usage{
+		InputTokens:        1_000_000,
+		CacheReadTokens:    1_000_000,
+		CacheWriteTokens:   1_000_000,
+		CacheWrite1hTokens: 1_000_000,
+	}
 
 	baseCost, ok1 := r.Cost("claude-opus-4-8", base)
 	cacheCost, ok2 := r.Cost("claude-opus-4-8", withCache)
@@ -51,6 +60,9 @@ func TestCostComponents(t *testing.T) {
 	}
 	if cacheCost <= baseCost {
 		t.Fatalf("cache usage cost %v should exceed base cost %v", cacheCost, baseCost)
+	}
+	if want := 21.75; cacheCost != want {
+		t.Fatalf("cache usage cost = %v, want %v", cacheCost, want)
 	}
 }
 

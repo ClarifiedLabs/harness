@@ -69,6 +69,39 @@ func TestBuildContentTextOnlyToolResultRemainsString(t *testing.T) {
 	}
 }
 
+func TestBuildContentPreservesRequiredEmptyVariantFields(t *testing.T) {
+	blocks := buildContent([]llm.ContentBlock{
+		{Kind: llm.BlockText, Text: ""},
+		{Kind: llm.BlockToolUse, ToolUseID: "toolu_empty", ToolName: "empty"},
+	}, false)
+	data, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []map[string]json.RawMessage
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if text, ok := got[0]["text"]; !ok || string(text) != `""` {
+		t.Fatalf("empty text block omitted required text: %s", data)
+	}
+	if input, ok := got[1]["input"]; !ok || string(input) != `{}` {
+		t.Fatalf("empty tool_use omitted required input: %s", data)
+	}
+
+	toolData, err := json.Marshal(wireTool{Name: "empty"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tool map[string]json.RawMessage
+	if err := json.Unmarshal(toolData, &tool); err != nil {
+		t.Fatal(err)
+	}
+	if schema, ok := tool["input_schema"]; !ok || string(schema) != `{}` {
+		t.Fatalf("empty custom tool omitted required input_schema: %s", toolData)
+	}
+}
+
 func TestBuildContentRichToolResultOmitsEmptyTextChild(t *testing.T) {
 	blocks := buildContent([]llm.ContentBlock{{
 		Kind: llm.BlockToolResult, ResultForID: "call_1",
@@ -260,8 +293,18 @@ func TestBuildRequestReasoningBudgetTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if !bytes.Contains(b, []byte(`"thinking":{"type":"enabled","budget_tokens":4096}`)) {
+	if !bytes.Contains(b, []byte(`"thinking":{"type":"enabled","budget_tokens":4096,"display":"summarized"}`)) {
 		t.Fatalf("thinking budget missing from JSON: %s", b)
+	}
+}
+
+func TestBuildRequestReasoningBudgetHonorsOmittedSummary(t *testing.T) {
+	req := basicRequest()
+	budget := 4096
+	req.Reasoning = llm.ReasoningConfig{BudgetTokens: &budget, Summary: "none"}
+	w := buildRequest(req, 1_000_000, 0)
+	if w.Thinking == nil || w.Thinking.Display != "omitted" {
+		t.Fatalf("thinking = %+v, want enabled budget with omitted display", w.Thinking)
 	}
 }
 

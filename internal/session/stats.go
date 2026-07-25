@@ -435,18 +435,19 @@ func (stats *compactionStats) add(other compactionStats) {
 
 func addUsage(a, b llm.Usage) llm.Usage {
 	return llm.Usage{
-		InputTokens:      a.InputTokens + b.InputTokens,
-		OutputTokens:     a.OutputTokens + b.OutputTokens,
-		CacheReadTokens:  a.CacheReadTokens + b.CacheReadTokens,
-		CacheWriteTokens: a.CacheWriteTokens + b.CacheWriteTokens,
-		ReasoningTokens:  a.ReasoningTokens + b.ReasoningTokens,
-		CostUSD:          a.CostUSD + b.CostUSD,
-		CostKnown:        a.CostKnown || b.CostKnown,
+		InputTokens:        a.InputTokens + b.InputTokens,
+		OutputTokens:       a.OutputTokens + b.OutputTokens,
+		CacheReadTokens:    a.CacheReadTokens + b.CacheReadTokens,
+		CacheWriteTokens:   a.CacheWriteTokens + b.CacheWriteTokens,
+		CacheWrite1hTokens: a.CacheWrite1hTokens + b.CacheWrite1hTokens,
+		ReasoningTokens:    a.ReasoningTokens + b.ReasoningTokens,
+		CostUSD:            a.CostUSD + b.CostUSD,
+		CostKnown:          a.CostKnown || b.CostKnown,
 	}
 }
 
 func totalTokens(usage llm.Usage) int {
-	return usage.InputTokens + usage.CacheReadTokens + usage.CacheWriteTokens + usage.OutputTokens + usage.ReasoningTokens
+	return usage.InputTokens + usage.CacheReadTokens + usage.CacheWriteTokens + usage.CacheWrite1hTokens + usage.OutputTokens + usage.ReasoningTokens
 }
 
 func writeStats(report statsReport, w io.Writer) error {
@@ -554,6 +555,9 @@ func writeUsageValues(w io.Writer, indent string, usage llm.Usage, cost float64)
 	fmt.Fprintf(w, "%suncached input: %d\n", indent, usage.InputTokens)
 	fmt.Fprintf(w, "%scache read: %d\n", indent, usage.CacheReadTokens)
 	fmt.Fprintf(w, "%scache write: %d\n", indent, usage.CacheWriteTokens)
+	if usage.CacheWrite1hTokens > 0 {
+		fmt.Fprintf(w, "%scache write (1h): %d\n", indent, usage.CacheWrite1hTokens)
+	}
 	fmt.Fprintf(w, "%soutput: %d\n", indent, usage.OutputTokens)
 	fmt.Fprintf(w, "%sreasoning: %d\n", indent, usage.ReasoningTokens)
 	fmt.Fprintf(w, "%stotal tokens: %d\n", indent, totalTokens(usage))

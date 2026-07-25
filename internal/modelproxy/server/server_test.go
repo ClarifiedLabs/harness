@@ -24,6 +24,7 @@ import (
 	"harness/internal/logging"
 	"harness/internal/metrics"
 	proxyclient "harness/internal/modelproxy/client"
+	"harness/internal/modelproxy/pricing"
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/tracing"
 )
@@ -40,6 +41,37 @@ type lockedLogBuffer struct {
 	notify   string
 	notified chan struct{}
 	once     sync.Once
+}
+
+func TestCatalogPricesAnthropicSpeedVariantBuckets(t *testing.T) {
+	providers := []llm.ProviderConfig{{
+		Name:    "anthropic",
+		APIType: "anthropic",
+		Models: []llm.ModelEntry{{
+			Name:  "claude",
+			Price: llm.Price{Input: 5, Output: 25, CacheWrite: 6.25},
+			ServiceTiers: []llm.ServiceTier{{
+				ID:      "fast",
+				Request: llm.ServiceTierRequest{Speed: "fast"},
+				Price:   llm.Price{Input: 30, Output: 150, CacheWrite: 37.5},
+			}},
+		}},
+	}}
+	catalog, _, err := catalogFromProviderConfigs(providers, pricing.NewComposite())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Targets) != 2 {
+		t.Fatalf("targets = %+v", catalog.Targets)
+	}
+	base := catalog.Targets[0].Price
+	fast := catalog.Targets[1].Price
+	if base.Reasoning != 25 || base.CacheWrite1h != 10 {
+		t.Fatalf("base price = %+v", base)
+	}
+	if fast.Reasoning != 150 || fast.CacheWrite1h != 60 {
+		t.Fatalf("fast price = %+v", fast)
+	}
 }
 
 func (b *lockedLogBuffer) Write(p []byte) (int, error) {
@@ -1670,7 +1702,7 @@ func TestHandlerUsageAggregatesKnownCostRequests(t *testing.T) {
 		t.Fatalf("write provider config: %v", err)
 	}
 
-	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000, CacheReadTokens: 3000, CacheWriteTokens: 4000, ReasoningTokens: 500}
+	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000, CacheReadTokens: 3000, CacheWriteTokens: 4000, CacheWrite1hTokens: 6000, ReasoningTokens: 500}
 	handler, err := NewHandler(Options{
 		ConfigDir: dir,
 		Config:    Config{ProviderConfigs: []string{"openai.json"}},
@@ -1724,17 +1756,19 @@ func TestHandlerUsageAggregatesKnownCostRequests(t *testing.T) {
 	}
 	got := report.Models[0]
 	want := protocol.ModelUsage{
-		TargetID:         "openai:priced",
-		Requests:         2,
-		InputTokens:      2000,
-		OutputTokens:     4000,
-		CacheReadTokens:  6000,
-		CacheWriteTokens: 8000,
-		ReasoningTokens:  1000,
+		TargetID:           "openai:priced",
+		Requests:           2,
+		InputTokens:        2000,
+		OutputTokens:       4000,
+		CacheReadTokens:    6000,
+		CacheWriteTokens:   8000,
+		CacheWrite1hTokens: 12000,
+		ReasoningTokens:    1000,
 	}
 	if got.TargetID != want.TargetID || got.Requests != want.Requests ||
 		got.InputTokens != want.InputTokens || got.OutputTokens != want.OutputTokens ||
 		got.CacheReadTokens != want.CacheReadTokens || got.CacheWriteTokens != want.CacheWriteTokens ||
+		got.CacheWrite1hTokens != want.CacheWrite1hTokens ||
 		got.ReasoningTokens != want.ReasoningTokens {
 		t.Fatalf("usage entry = %+v, want %+v (cost aside)", got, want)
 	}
@@ -2223,7 +2257,7 @@ func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
 	}
 
 	reg := metrics.New()
-	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000, CacheReadTokens: 3000, CacheWriteTokens: 4000, ReasoningTokens: 500}
+	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000, CacheReadTokens: 3000, CacheWriteTokens: 4000, CacheWrite1hTokens: 6000, ReasoningTokens: 500}
 	handler, err := NewHandler(Options{
 		ConfigDir: dir,
 		Config:    Config{ProviderConfigs: []string{"openai.json"}},
@@ -2274,6 +2308,9 @@ func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
 	if !strings.Contains(out, seriesLine("model_proxy_requests_total", labels)+" 1") {
 		t.Errorf("missing priced requests series:\n%s", out)
 	}
+	if !strings.Contains(out, seriesLine("model_proxy_cache_write_1h_tokens_total", labels)+" 6000") {
+		t.Errorf("missing priced 1h cache-write series:\n%s", out)
+	}
 	// Cost only for the priced model.
 	if !strings.Contains(out, seriesLine("model_proxy_cost_usd_total", labels)+" ") {
 		t.Errorf("missing priced cost series:\n%s", out)
@@ -2291,6 +2328,7 @@ func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
 		"model_proxy_requests_total",
 		"model_proxy_errors_total",
 		"model_proxy_cost_usd_total",
+		"model_proxy_cache_write_1h_tokens_total",
 		"model_proxy_request_duration_seconds_total",
 	} {
 		if !strings.Contains(out, "# TYPE "+name+" counter") {

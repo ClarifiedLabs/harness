@@ -231,16 +231,106 @@ func TestReasoningRateFallbackIsScopedToSplitReasoningAPIs(t *testing.T) {
 	for _, provider := range []llm.ProviderConfig{
 		{Name: "google", APIType: "openai"},
 		{Name: "openai", APIType: "responses"},
+		{Name: "anthropic", APIType: "anthropic"},
 	} {
 		got := pricer.PriceUsage(Input{Provider: provider, Model: model, Usage: usage})
 		assertKnownCost(t, got, 9)
 	}
 	for _, provider := range []llm.ProviderConfig{
 		{Name: "compatible", APIType: "interactions"},
-		{Name: "anthropic", APIType: "anthropic"},
+		{Name: "compatible", APIType: "custom"},
 	} {
 		got := pricer.PriceUsage(Input{Provider: provider, Model: model, Usage: usage})
 		assertKnownCost(t, got, 5)
+	}
+}
+
+func TestAnthropicMessagesPricesReasoningAndCacheTTLs(t *testing.T) {
+	pricer := NewComposite()
+	provider := llm.ProviderConfig{
+		Name:    "anthropic",
+		APIType: "anthropic",
+		ServiceTiers: []llm.ServiceTier{{
+			ID:      "fast",
+			Request: llm.ServiceTierRequest{Speed: "fast"},
+			Price:   llm.Price{Input: 30, Output: 150, CacheWrite: 37.5},
+		}},
+	}
+	model := llm.ModelEntry{
+		Name: "claude",
+		Price: llm.Price{
+			Input:      5,
+			Output:     25,
+			CacheWrite: 6.25,
+			Tiers: []llm.PriceTier{{
+				Threshold:  3_500_000,
+				Input:      10,
+				Output:     45,
+				CacheWrite: 12.5,
+			}},
+		},
+	}
+	usage := llm.Usage{
+		InputTokens:        1_000_000,
+		OutputTokens:       1_000_000,
+		ReasoningTokens:    1_000_000,
+		CacheWriteTokens:   1_000_000,
+		CacheWrite1hTokens: 1_000_000,
+		CacheWriteTTLKnown: true,
+	}
+	assertKnownCost(t, pricer.PriceUsage(Input{Provider: provider, Model: model, Usage: usage}), 71.25)
+
+	tiered := pricer.PriceUsage(Input{
+		Provider: provider,
+		Model:    model,
+		Request:  llm.Request{EstimatedInputTokens: 3_500_001},
+		Usage:    usage,
+	})
+	assertKnownCost(t, tiered, 132.5)
+
+	fastUsage := usage
+	fastUsage.Speed = "fast"
+	assertKnownCost(t, pricer.PriceUsage(Input{
+		Provider: provider,
+		Model:    model,
+		Request:  llm.Request{Speed: "fast"},
+		Usage:    fastUsage,
+	}), 427.5)
+
+	catalog := pricer.CatalogPricing(provider, model)
+	if !catalog.Handled || !catalog.Known ||
+		catalog.Price.Reasoning != 25 || catalog.Price.CacheWrite1h != 10 ||
+		catalog.Price.Tiers[0].Reasoning != 45 || catalog.Price.Tiers[0].CacheWrite1h != 20 {
+		t.Fatalf("catalog pricing = %+v", catalog)
+	}
+}
+
+func TestAnthropicMessagesPreservesExplicitRates(t *testing.T) {
+	provider := llm.ProviderConfig{Name: "anthropic", APIType: "anthropic"}
+	model := llm.ModelEntry{
+		Name: "claude",
+		Price: llm.Price{
+			Input:        5,
+			Output:       25,
+			Reasoning:    20,
+			CacheWrite1h: 9,
+		},
+	}
+	catalog := NewComposite().CatalogPricing(provider, model)
+	if !catalog.Handled || !catalog.Known || catalog.Price.Reasoning != 20 || catalog.Price.CacheWrite1h != 9 {
+		t.Fatalf("catalog pricing = %+v", catalog)
+	}
+}
+
+func TestAnthropicMessagesLongTTLWithoutBreakdownIsUnknown(t *testing.T) {
+	got := NewComposite().PriceUsage(Input{
+		Provider: llm.ProviderConfig{Name: "anthropic", APIType: "anthropic"},
+		Model:    llm.ModelEntry{Name: "claude", Price: llm.Price{Input: 5, Output: 25, CacheWrite: 6.25}},
+		Request:  llm.Request{LongCacheTTL: true},
+		Usage:    llm.Usage{CacheWriteTokens: 1000},
+	})
+	if !got.Handled || got.Known {
+		t.Fatalf("price = %+v, want handled unknown", got)
 	}
 }
 

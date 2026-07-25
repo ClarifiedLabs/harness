@@ -188,7 +188,7 @@ func allErrors(results []llm.ContentBlock) bool {
 // input (incl. cache) + output + reasoning — used to enforce the per-prompt token
 // budget (design §8.1, r7).
 func totalTokens(u llm.Usage) int {
-	return u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.OutputTokens + u.ReasoningTokens
+	return u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.CacheWrite1hTokens + u.OutputTokens + u.ReasoningTokens
 }
 
 // errorStormNotice is the hard-stop notice for an unrelenting error storm,

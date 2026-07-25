@@ -18,6 +18,7 @@ type metrics struct {
 	InputTokens                 int            `json:"input_tokens"`
 	CacheReadTokens             int            `json:"cache_read_tokens"`
 	CacheWriteTokens            int            `json:"cache_write_tokens"`
+	CacheWrite1hTokens          int            `json:"cache_write_1h_tokens"`
 	OutputTokens                int            `json:"output_tokens"`
 	ReasoningTokens             int            `json:"reasoning_tokens"`
 	CostUSD                     float64        `json:"cost_usd"`
@@ -52,16 +53,17 @@ func collectMetrics(sessionDir string) (metrics, error) {
 	}
 	u := state.Usage.Usage
 	m := metrics{
-		InputTokens:      u.InputTokens,
-		CacheReadTokens:  u.CacheReadTokens,
-		CacheWriteTokens: u.CacheWriteTokens,
-		OutputTokens:     u.OutputTokens,
-		ReasoningTokens:  u.ReasoningTokens,
-		CostUSD:          state.Usage.CostUSD,
-		CostKnown:        u.CostKnown,
-		ToolCalls:        map[string]int{},
+		InputTokens:        u.InputTokens,
+		CacheReadTokens:    u.CacheReadTokens,
+		CacheWriteTokens:   u.CacheWriteTokens,
+		CacheWrite1hTokens: u.CacheWrite1hTokens,
+		OutputTokens:       u.OutputTokens,
+		ReasoningTokens:    u.ReasoningTokens,
+		CostUSD:            state.Usage.CostUSD,
+		CostKnown:          u.CostKnown,
+		ToolCalls:          map[string]int{},
 	}
-	m.TotalTokens = u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.OutputTokens + u.ReasoningTokens
+	m.TotalTokens = u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.CacheWrite1hTokens + u.OutputTokens + u.ReasoningTokens
 	m.FinalText = finalAssistantText(state.Messages)
 	m.AssistantText = assistantText(state.Messages)
 

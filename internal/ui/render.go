@@ -1550,6 +1550,9 @@ func usageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKno
 	if u.Usage.ReasoningTokens > 0 {
 		fmt.Fprintf(&b, " · %s reasoning", humanTokens(u.Usage.ReasoningTokens))
 	}
+	if u.Usage.CacheWrite1hTokens > 0 {
+		fmt.Fprintf(&b, " · %s cache write (1h)", humanTokens(u.Usage.CacheWrite1hTokens))
+	}
 	if costKnown {
 		fmt.Fprintf(&b, " · $%.3f ($%.3f)", cost, cumCost)
 	}

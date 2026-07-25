@@ -456,7 +456,8 @@ const (
 ```
 
 StopReason normalization: OpenAI `stop|length|tool_calls` and Anthropic
-`end_turn|max_tokens|tool_use|stop_sequence` map onto the four constants. Unknown or
+`end_turn|max_tokens|model_context_window_exceeded|tool_use|stop_sequence` map
+onto the four constants. Unknown or
 provider-specific reasons (e.g. `content_filter`) map to `end_turn` — the turn is over
 either way — and are noted on the rendered usage line.
 
@@ -496,7 +497,11 @@ func Read(ctx context.Context, r io.Reader) iter.Seq2[Event, error]
     future event envelope types are ignored.
   - **Anthropic:** typed frames — `message_start`, `content_block_start`,
     `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`,
-    `ping` (ignored), `error` (terminal stream error; retryability follows type).
+    `ping` (ignored), `error` (terminal stream error; retryability follows the
+    normalized type and embedded retry-delay hints). Indexed blocks and legal
+    delta types are validated; known unsupported output-bearing blocks fail
+    explicitly, while unknown future event envelopes remain ignorable under
+    Anthropic's additive versioning policy.
   - **Gemini Interactions:** `interaction.created`, indexed `step.start` /
     `step.delta` / `step.stop`, and terminal `interaction.completed`. Model text,
     thought summaries/signatures, function arguments, and Google Search activity
@@ -600,6 +605,34 @@ implementation and are not presented as first-party OpenAI fields.
 First-party endpoint selection is host-based: `api.openai.com` receives
 `max_completion_tokens`, while custom and compatibility endpoints continue to
 receive `max_tokens`; the two fields are never sent together.
+
+#### Anthropic Messages support boundary
+
+Harness implements the model-and-tools subset of Messages needed by the coding
+loop. A source-hashed snapshot of the official create, token-count, streaming,
+and versioning references lives in
+`internal/llm/anthropic/testdata/api_surface.json`; its contract test requires
+every captured request field, content/tool discriminator, event, delta, stop
+reason, and usage property to be classified.
+
+| Surface | Supported | Intentionally unsupported |
+|---|---|---|
+| Operations | streaming `POST /v1/messages`; `POST /v1/messages/count_tokens` | batches, files, model listing, and administrative APIs |
+| Request controls | model/messages/system, required output cap, temperature, stop sequences, service tier, beta speed, effort, adaptive/budget thinking, explicit block caching | containers, inference geography, metadata, tool choice, sampling controls, structured output, context-management betas |
+| Content/tools | text and base64 images; client function calls/results; signed and redacted thinking; `web_search_20250305` | documents/search-result input, container uploads, code/bash/text-editor execution, web fetch, memory, computer use, tool search, newer web-search variants |
+| Stream/usage | text/tool/thinking/citation deltas; hosted web-search call/results for continuation; disjoint input/cache/output/reasoning usage; served tier/speed | server-tool request counts and per-query fees, inference geography, stop details |
+
+Required union fields are emitted even when empty (`text`, `input`, and
+`input_schema`). Hosted web-search blocks remain provider-owned: they are
+recognized and retained for same-turn continuation but are not added to the
+provider-neutral transcript.
+
+Anthropic `pause_turn` is continued inside the dialect. The complete assistant
+content is replayed in original block-index order, rolling cache breakpoints are
+refreshed, and usage snapshots remain cumulative across the resulting HTTP
+requests. Five continuations are allowed; another pause returns the terminal
+`pause_turn_limit` error instead of looping indefinitely. A pause response that
+also requests a client tool is rejected as invalid.
 
 #### Gemini Interactions support boundary
 
@@ -796,9 +829,10 @@ type APIError struct {
 type Usage struct {
     InputTokens      int // uncached input, billed at full rate
     OutputTokens     int // generated output excluding separately reported reasoning
-    CacheReadTokens  int
-    CacheWriteTokens int
-    ReasoningTokens  int // separately reported reasoning; 0 when counted in output
+    CacheReadTokens    int
+    CacheWriteTokens   int // default-rate cache writes (Anthropic: 5m)
+    CacheWrite1hTokens int // Anthropic 1h cache writes
+    ReasoningTokens    int // separately reported reasoning
     CostUSD          float64
     CostKnown        bool
     ServiceTier      string // actually served tier, when reported
@@ -812,8 +846,13 @@ cache read/write fields (`prompt_tokens_details.cached_tokens`,
 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`, and gateway
 `cache_read_input_tokens` / `cache_creation_input_tokens`) are normalized into
 `CacheReadTokens` / `CacheWriteTokens` and subtracted from `InputTokens`.
-Anthropic's `input_tokens` already excludes cached tokens. After normalization
-`InputTokens` means the same thing across dialects.
+Anthropic's `input_tokens` already excludes cached tokens. Its cache-creation
+aggregate is split using `cache_creation.ephemeral_5m_input_tokens` and
+`ephemeral_1h_input_tokens`; malformed negative or inconsistent counts are
+clamped without double-counting. A long-TTL request whose response omits that
+breakdown retains its token usage but has unknown cost rather than being priced
+at the cheaper default rate. After normalization `InputTokens` means the same
+thing across dialects.
 
 Responses `output_tokens` and Chat Completions `completion_tokens` include the
 `reasoning_tokens` detail. Their normalizers clamp that detail to the aggregate
@@ -822,19 +861,26 @@ disjoint for UI totals, budgets, metrics, and pricing. Responses-compatible
 orchestration output tokens remain an additional output bucket because those
 extensions are reported outside the standard aggregate.
 
+Anthropic `output_tokens` likewise includes
+`output_tokens_details.thinking_tokens`. The Anthropic normalizer clamps and
+subtracts that detail, so output and reasoning are disjoint. Its pricing adapter
+uses the output rate for reasoning when no explicit reasoning price exists and
+derives the documented 1-hour cache-write rate as `2 × input`; explicit base,
+context-tier, service-tier, and speed-specific prices remain authoritative.
+
 `internal/llm/registry.go` holds a small registry. The structs carry JSON tags so they
 double as the proxy catalog's on-disk schema (`Price`, `ModelInfo`, `ProviderConfig`,
 `ModelEntry`), and `Cost`/`ContextWindow`/`Models` are methods on `*Registry`:
 
 ```go
 type Price struct {
-    Input, Output, CacheRead, CacheWrite float64 // USD per 1M tokens
+    Input, Output, CacheRead, CacheWrite, CacheWrite1h float64 // USD per 1M tokens
     Reasoning, InputAudio, OutputAudio   float64
     Tiers []PriceTier // context-length rate steps with the same price dimensions
 }
 type PriceTier struct {
     Threshold int
-    Input, Output, CacheRead, CacheWrite float64
+    Input, Output, CacheRead, CacheWrite, CacheWrite1h float64
     Reasoning, InputAudio, OutputAudio   float64
 }
 type ModelInfo struct {
@@ -968,19 +1014,22 @@ For Responses and Chat Completions API types, an API-specific pricer fills an
 unset reasoning rate from the output rate after normalization splits the API's
 aggregate output count into output and reasoning buckets. First-party Google
 Interactions uses the same schedule transformation because it reports thought
-tokens separately while Google bills them as output tokens. Explicit reasoning
-rates always win, and each fallback is applied to base, context-tier, and
-service-tier schedules. The rule is scoped to these wire contracts rather than
-being generic. The numeric schedules still come from models.dev (or a manual
-provider config); the filtered models.dev snapshot already preserves explicit
-`cost.reasoning` values when raw catalog entries provide them.
+tokens separately while Google bills them as output tokens. Anthropic Messages
+also receives the output-rate reasoning fallback plus a `2 × input` fallback
+for 1-hour cache writes. Explicit rates always win, and each fallback is applied
+to base, context-tier, service-tier, and speed schedules. The rule is scoped to
+these wire contracts rather than being generic. The numeric schedules still
+come from models.dev (or a manual provider config); the filtered models.dev
+snapshot already preserves explicit `cost.reasoning` values when raw catalog
+entries provide them.
 
 Google Search per-query charges are not part of `llm.Price` and are not added to
 `CostUSD`. Although the Interactions usage schema exposes
 `grounding_tool_count`, the public pricing source is a human-facing,
 model-dependent schedule rather than a stable model-ID keyed catalog. Harness
 therefore reports and budgets the token portion only instead of presenting a
-query fee as exact.
+query fee as exact. Anthropic hosted web search follows the same policy: its
+reported token usage is priced, but the per-search fee is excluded.
 
 The serving handler holds its registry, pricer, and served catalog behind an
 atomic snapshot. The initial snapshot is built at startup from the loaded
@@ -2497,9 +2546,8 @@ those commands; state-changing commands such as `/clear`, `/compact`, `/model`,
 prewarm state described in their owning sections. `/clear` starts a new cache
 affinity; context/model/tool changes preserve the current conversation affinity.
 
-Anthropic usage does not currently expose a separate reasoning-token field;
-extended thinking is counted in output tokens, so the reasoning total remains
-zero for Anthropic sessions.
+Anthropic extended thinking and 1-hour prompt-cache writes appear in the
+disjoint reasoning and cache-write buckets defined in §6.
 
 `/model <name>` resolves exactly first, then falls back to a case-insensitive
 unique prefix and then unique substring match over the catalog; an ambiguous match

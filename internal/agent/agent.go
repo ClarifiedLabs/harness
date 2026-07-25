@@ -1173,7 +1173,8 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		wastedTotal = add(wastedTotal, wasted)
 		total = add(total, add(res.usage, wasted))
 		// Context-size signal, not billing: cached tokens occupy the window too.
-		lastInput = res.usage.InputTokens + res.usage.CacheReadTokens + res.usage.CacheWriteTokens
+		lastInput = res.usage.InputTokens + res.usage.CacheReadTokens +
+			res.usage.CacheWriteTokens + res.usage.CacheWrite1hTokens
 
 		if err != nil {
 			emitModelErrorDiagnostic(sink, err, promptID, turns+1, res.attempts)
@@ -2398,13 +2399,14 @@ func maxTurnsNotice(maxTurns int) string {
 
 func add(a, b llm.Usage) llm.Usage {
 	return llm.Usage{
-		InputTokens:      a.InputTokens + b.InputTokens,
-		OutputTokens:     a.OutputTokens + b.OutputTokens,
-		CacheReadTokens:  a.CacheReadTokens + b.CacheReadTokens,
-		CacheWriteTokens: a.CacheWriteTokens + b.CacheWriteTokens,
-		ReasoningTokens:  a.ReasoningTokens + b.ReasoningTokens,
-		CostUSD:          a.CostUSD + b.CostUSD,
-		CostKnown:        aggregateCostKnown(a, b),
+		InputTokens:        a.InputTokens + b.InputTokens,
+		OutputTokens:       a.OutputTokens + b.OutputTokens,
+		CacheReadTokens:    a.CacheReadTokens + b.CacheReadTokens,
+		CacheWriteTokens:   a.CacheWriteTokens + b.CacheWriteTokens,
+		CacheWrite1hTokens: a.CacheWrite1hTokens + b.CacheWrite1hTokens,
+		ReasoningTokens:    a.ReasoningTokens + b.ReasoningTokens,
+		CostUSD:            a.CostUSD + b.CostUSD,
+		CostKnown:          aggregateCostKnown(a, b),
 	}
 }
 
@@ -2471,13 +2473,14 @@ func appendPromptContext(extraContext, steerContext []string) []string {
 // partial late frame from erasing earlier numbers (spec §3).
 func mergeUsage(acc, in llm.Usage) llm.Usage {
 	out := llm.Usage{
-		InputTokens:      max(acc.InputTokens, in.InputTokens),
-		OutputTokens:     max(acc.OutputTokens, in.OutputTokens),
-		CacheReadTokens:  max(acc.CacheReadTokens, in.CacheReadTokens),
-		CacheWriteTokens: max(acc.CacheWriteTokens, in.CacheWriteTokens),
-		ReasoningTokens:  max(acc.ReasoningTokens, in.ReasoningTokens),
-		CostUSD:          mergeCost(acc, in),
-		CostKnown:        mergeCostKnown(acc, in),
+		InputTokens:        max(acc.InputTokens, in.InputTokens),
+		OutputTokens:       max(acc.OutputTokens, in.OutputTokens),
+		CacheReadTokens:    max(acc.CacheReadTokens, in.CacheReadTokens),
+		CacheWriteTokens:   max(acc.CacheWriteTokens, in.CacheWriteTokens),
+		CacheWrite1hTokens: max(acc.CacheWrite1hTokens, in.CacheWrite1hTokens),
+		ReasoningTokens:    max(acc.ReasoningTokens, in.ReasoningTokens),
+		CostUSD:            mergeCost(acc, in),
+		CostKnown:          mergeCostKnown(acc, in),
 	}
 	if in.ServiceTier != "" {
 		out.ServiceTier = in.ServiceTier
@@ -2527,5 +2530,6 @@ func usageHasTokens(u llm.Usage) bool {
 		u.OutputTokens != 0 ||
 		u.CacheReadTokens != 0 ||
 		u.CacheWriteTokens != 0 ||
+		u.CacheWrite1hTokens != 0 ||
 		u.ReasoningTokens != 0
 }

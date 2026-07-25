@@ -188,15 +188,16 @@ type resolvedTarget struct {
 // per stream request. They are created once in NewHandler so HELP/TYPE always
 // appear in exposition even with zero traffic.
 type metricsCollectors struct {
-	requests   *metrics.Counter
-	errors     *metrics.Counter
-	input      *metrics.Counter
-	output     *metrics.Counter
-	cacheRead  *metrics.Counter
-	cacheWrite *metrics.Counter
-	reasoning  *metrics.Counter
-	cost       *metrics.Counter
-	duration   *metrics.Counter
+	requests     *metrics.Counter
+	errors       *metrics.Counter
+	input        *metrics.Counter
+	output       *metrics.Counter
+	cacheRead    *metrics.Counter
+	cacheWrite   *metrics.Counter
+	cacheWrite1h *metrics.Counter
+	reasoning    *metrics.Counter
+	cost         *metrics.Counter
+	duration     *metrics.Counter
 }
 
 type Handler struct {
@@ -304,15 +305,16 @@ func NewHandler(opts Options) (*Handler, error) {
 // provider, model, purpose, and key (the authorizing key's name, or "anonymous").
 func registerMetricFamilies(r *metrics.Registry) *metricsCollectors {
 	return &metricsCollectors{
-		requests:   r.Counter("model_proxy_requests_total", "Number of proxied model requests."),
-		errors:     r.Counter("model_proxy_errors_total", "Number of proxied model requests that failed."),
-		input:      r.Counter("model_proxy_input_tokens_total", "Input tokens billed at full rate."),
-		output:     r.Counter("model_proxy_output_tokens_total", "Generated output tokens."),
-		cacheRead:  r.Counter("model_proxy_cache_read_tokens_total", "Prompt-cache read tokens."),
-		cacheWrite: r.Counter("model_proxy_cache_write_tokens_total", "Prompt-cache write tokens."),
-		reasoning:  r.Counter("model_proxy_reasoning_tokens_total", "Reasoning tokens."),
-		cost:       r.Counter("model_proxy_cost_usd_total", "Estimated cost in US dollars."),
-		duration:   r.Counter("model_proxy_request_duration_seconds_total", "Total request wall-clock duration in seconds."),
+		requests:     r.Counter("model_proxy_requests_total", "Number of proxied model requests."),
+		errors:       r.Counter("model_proxy_errors_total", "Number of proxied model requests that failed."),
+		input:        r.Counter("model_proxy_input_tokens_total", "Input tokens billed at full rate."),
+		output:       r.Counter("model_proxy_output_tokens_total", "Generated output tokens."),
+		cacheRead:    r.Counter("model_proxy_cache_read_tokens_total", "Prompt-cache read tokens."),
+		cacheWrite:   r.Counter("model_proxy_cache_write_tokens_total", "Default-rate prompt-cache write tokens."),
+		cacheWrite1h: r.Counter("model_proxy_cache_write_1h_tokens_total", "One-hour prompt-cache write tokens."),
+		reasoning:    r.Counter("model_proxy_reasoning_tokens_total", "Reasoning tokens."),
+		cost:         r.Counter("model_proxy_cost_usd_total", "Estimated cost in US dollars."),
+		duration:     r.Counter("model_proxy_request_duration_seconds_total", "Total request wall-clock duration in seconds."),
 	}
 }
 
@@ -404,6 +406,9 @@ func (h *Handler) recordMetrics(r *http.Request, providerID, model string, purpo
 	}
 	if usage.CacheWriteTokens != 0 {
 		h.metricFams.cacheWrite.Add(float64(usage.CacheWriteTokens), labels)
+	}
+	if usage.CacheWrite1hTokens != 0 {
+		h.metricFams.cacheWrite1h.Add(float64(usage.CacheWrite1hTokens), labels)
 	}
 	if usage.ReasoningTokens != 0 {
 		h.metricFams.reasoning.Add(float64(usage.ReasoningTokens), labels)
@@ -674,6 +679,7 @@ func (h *Handler) recordUsage(targetID string, u llm.Usage, cost float64) {
 	acc.OutputTokens += int64(u.OutputTokens)
 	acc.CacheReadTokens += int64(u.CacheReadTokens)
 	acc.CacheWriteTokens += int64(u.CacheWriteTokens)
+	acc.CacheWrite1hTokens += int64(u.CacheWrite1hTokens)
 	acc.ReasoningTokens += int64(u.ReasoningTokens)
 	acc.CostUSD += cost
 }
@@ -878,6 +884,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			"output_tokens", usage.OutputTokens,
 			"cache_read_tokens", usage.CacheReadTokens,
 			"cache_write_tokens", usage.CacheWriteTokens,
+			"cache_write_1h_tokens", usage.CacheWrite1hTokens,
 			"reasoning_tokens", usage.ReasoningTokens,
 		}
 		failed := streamFailed(r.Context(), streamErr, cw.statusCode())
@@ -1522,6 +1529,8 @@ func mergeUsage(acc, in llm.Usage) llm.Usage {
 	acc.OutputTokens = max(acc.OutputTokens, in.OutputTokens)
 	acc.CacheReadTokens = max(acc.CacheReadTokens, in.CacheReadTokens)
 	acc.CacheWriteTokens = max(acc.CacheWriteTokens, in.CacheWriteTokens)
+	acc.CacheWrite1hTokens = max(acc.CacheWrite1hTokens, in.CacheWrite1hTokens)
+	acc.CacheWriteTTLKnown = acc.CacheWriteTTLKnown || in.CacheWriteTTLKnown
 	acc.ReasoningTokens = max(acc.ReasoningTokens, in.ReasoningTokens)
 	if in.CostKnown {
 		acc.CostUSD = in.CostUSD
@@ -2354,6 +2363,16 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				variantTarget.BaseTargetID = id
 				variantTarget.Variant = tier.ID
 				variantTarget.Price = tier.Price
+				if pricer != nil {
+					variantEntry := entry
+					variantEntry.Price = tier.Price
+					variantEntry.ServiceTiers = nil
+					if catalogPricing := pricer.CatalogPricing(pc, variantEntry); catalogPricing.Known {
+						variantTarget.Price = catalogPricing.Price
+					} else {
+						variantTarget.Price = llm.Price{}
+					}
+				}
 				out.Targets = append(out.Targets, variantTarget)
 				variantRT := resolvedTarget{targetID: variantID, baseTargetID: id, variant: tier.ID, serviceTier: tier, pc: pc, entry: entry}
 				for _, alias := range variantAliases {

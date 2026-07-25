@@ -517,6 +517,16 @@ count it. When a Responses or Chat catalog price omits a reasoning rate, harness
 uses that schedule's output rate; explicit base, context-tier, and service-tier
 reasoning rates remain authoritative.
 
+Anthropic Messages reports thinking tokens inside its aggregate output count.
+Harness similarly exposes a non-reasoning output remainder plus a disjoint
+reasoning bucket and prices reasoning at the output rate when the catalog has no
+explicit rate. Anthropic cache writes are split into default 5-minute and
+1-hour buckets; the latter uses the configured rate or the documented
+`2 × input` fallback. A long-TTL response without the required breakdown is
+reported as unpriced instead of using a cheaper estimate. Anthropic hosted
+web-search request fees are excluded from `cost_usd` and cost-budget spend; its
+token charges remain included.
+
 ### Prometheus metrics
 
 The proxy exposes unauthenticated Prometheus metrics on a separate listener,
@@ -527,6 +537,8 @@ bounded `purpose` (`turn`, `compaction`, `prewarm`, `handoff_summary`,
 authentication is disabled). `model_proxy_build_info` carries the build version.
 Token counters are recorded for every stream that produced usage, priced or not, while
 `model_proxy_cost_usd_total` is recorded only when a price is known.
+`model_proxy_cache_write_tokens_total` records default-rate writes and
+`model_proxy_cache_write_1h_tokens_total` records Anthropic's 1-hour writes.
 
 Use `-no-metrics` to disable the endpoint or `-metrics-listen` to move it. The
 equivalent proxy-config `metrics` object accepts `enabled` and `listen`.
@@ -692,9 +704,9 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/vi on\|off` | enable or disable vi-style prompt editing (persisted as the default) |
 | `!command` | run a local shell command at an interactive TTY prompt |
 
-Anthropic usage does not currently expose a separate reasoning-token field;
-extended thinking is counted in output tokens, so the reasoning total remains
-zero for Anthropic sessions.
+Anthropic extended thinking and 1-hour prompt-cache writes appear as separate
+reasoning and `cache write (1h)` usage buckets. They remain disjoint from output
+and default-rate cache writes in session totals and token budgets.
 
 An unknown `/command` prints a `did you mean <command>?` suggestion (nearest known
 command by edit distance) instead of failing silently. The per-prompt usage line

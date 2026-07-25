@@ -50,9 +50,9 @@ type outputConfig struct {
 type thinkingConfig struct {
 	Type         string `json:"type"`
 	BudgetTokens *int   `json:"budget_tokens,omitempty"`
-	// Display is sent on adaptive thinking: "summarized" returns a readable
-	// reasoning summary, "omitted" streams empty thinking blocks. The API
-	// defaults to "omitted", so it must be set explicitly to surface reasoning.
+	// Display is sent on adaptive and budget thinking: "summarized" returns a
+	// readable reasoning summary, while "omitted" streams empty thinking blocks.
+	// The API defaults to "omitted", so it must be explicit to surface reasoning.
 	Display string `json:"display,omitempty"`
 }
 
@@ -75,7 +75,8 @@ type wireContent struct {
 	Type string `json:"type"`
 
 	// text
-	Text string `json:"text,omitempty"`
+	Text      string            `json:"text,omitempty"`
+	Citations []json.RawMessage `json:"citations,omitempty"`
 
 	// image
 	Source *wireImageSource `json:"source,omitempty"`
@@ -97,6 +98,86 @@ type wireContent struct {
 	Data      string `json:"data,omitempty"`
 
 	CacheControl *cacheControl `json:"cache_control,omitempty"`
+
+	// Raw preserves provider-owned content blocks (currently hosted web-search
+	// results) for an exact pause_turn replay. It is never populated for ordinary
+	// request content.
+	Raw json.RawMessage `json:"-"`
+}
+
+// MarshalJSON emits only fields belonging to the selected content-block
+// variant. Several Anthropic union variants require fields even when their
+// values are empty, so omitempty on the shared representation is insufficient.
+func (c wireContent) MarshalJSON() ([]byte, error) {
+	if len(c.Raw) != 0 {
+		if c.CacheControl != nil {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(c.Raw, &fields); err != nil {
+				return nil, err
+			}
+			cache, err := json.Marshal(c.CacheControl)
+			if err != nil {
+				return nil, err
+			}
+			fields["cache_control"] = cache
+			return json.Marshal(fields)
+		}
+		return c.Raw, nil
+	}
+	switch c.Type {
+	case "text":
+		return json.Marshal(struct {
+			Type         string            `json:"type"`
+			Text         string            `json:"text"`
+			Citations    []json.RawMessage `json:"citations,omitempty"`
+			CacheControl *cacheControl     `json:"cache_control,omitempty"`
+		}{c.Type, c.Text, c.Citations, c.CacheControl})
+	case "image":
+		return json.Marshal(struct {
+			Type         string           `json:"type"`
+			Source       *wireImageSource `json:"source"`
+			CacheControl *cacheControl    `json:"cache_control,omitempty"`
+		}{c.Type, c.Source, c.CacheControl})
+	case "tool_use", "server_tool_use":
+		return json.Marshal(struct {
+			Type         string          `json:"type"`
+			ID           string          `json:"id"`
+			Name         string          `json:"name"`
+			Input        json.RawMessage `json:"input"`
+			CacheControl *cacheControl   `json:"cache_control,omitempty"`
+		}{c.Type, c.ID, c.Name, requiredJSONObject(c.Input), c.CacheControl})
+	case "tool_result":
+		return json.Marshal(struct {
+			Type         string        `json:"type"`
+			ToolUseID    string        `json:"tool_use_id"`
+			Content      any           `json:"content"`
+			IsError      bool          `json:"is_error,omitempty"`
+			CacheControl *cacheControl `json:"cache_control,omitempty"`
+		}{c.Type, c.ToolUseID, c.Content, c.IsError, c.CacheControl})
+	case "thinking":
+		return json.Marshal(struct {
+			Type         string        `json:"type"`
+			Thinking     string        `json:"thinking"`
+			Signature    string        `json:"signature"`
+			CacheControl *cacheControl `json:"cache_control,omitempty"`
+		}{c.Type, c.Thinking, c.Signature, c.CacheControl})
+	case "redacted_thinking":
+		return json.Marshal(struct {
+			Type         string        `json:"type"`
+			Data         string        `json:"data"`
+			CacheControl *cacheControl `json:"cache_control,omitempty"`
+		}{c.Type, c.Data, c.CacheControl})
+	default:
+		type alias wireContent
+		return json.Marshal(alias(c))
+	}
+}
+
+func requiredJSONObject(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return raw
 }
 
 type wireImageSource struct {
@@ -116,16 +197,48 @@ type wireTool struct {
 	CacheControl *cacheControl   `json:"cache_control,omitempty"`
 }
 
+// MarshalJSON keeps input_schema required for custom tools without leaking it
+// onto Anthropic's server-tool variants.
+func (t wireTool) MarshalJSON() ([]byte, error) {
+	if t.Type != "" {
+		return json.Marshal(struct {
+			Type         string        `json:"type"`
+			Name         string        `json:"name"`
+			MaxUses      int           `json:"max_uses,omitempty"`
+			CacheControl *cacheControl `json:"cache_control,omitempty"`
+		}{t.Type, t.Name, t.MaxUses, t.CacheControl})
+	}
+	return json.Marshal(struct {
+		Name         string          `json:"name"`
+		Description  string          `json:"description,omitempty"`
+		InputSchema  json.RawMessage `json:"input_schema"`
+		CacheControl *cacheControl   `json:"cache_control,omitempty"`
+	}{t.Name, t.Description, requiredJSONObject(t.InputSchema), t.CacheControl})
+}
+
 // --- streaming event wire structs ---
 
 // wireUsage is the usage object on message_start and message_delta. On
 // message_start it carries input_tokens (already excluding cached tokens) plus
 // the cache fields; on message_delta it carries the cumulative output_tokens.
 type wireUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	InputTokens              int                `json:"input_tokens"`
+	OutputTokens             int                `json:"output_tokens"`
+	CacheCreationInputTokens int                `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int                `json:"cache_read_input_tokens"`
+	CacheCreation            *wireCacheCreation `json:"cache_creation"`
+	OutputTokensDetails      wireOutputDetails  `json:"output_tokens_details"`
+	ServiceTier              string             `json:"service_tier"`
+	Speed                    string             `json:"speed"`
+}
+
+type wireCacheCreation struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+}
+
+type wireOutputDetails struct {
+	ThinkingTokens int `json:"thinking_tokens"`
 }
 
 // wireEvent is the union of every streamed frame's data payload. Unknown event
@@ -136,37 +249,25 @@ type wireEvent struct {
 
 	// message_start
 	Message *struct {
-		Usage       wireUsage `json:"usage"`
-		ServiceTier string    `json:"service_tier"`
-		Speed       string    `json:"speed"`
+		Usage wireUsage `json:"usage"`
 	} `json:"message"`
 
 	// content_block_start / content_block_delta / content_block_stop
-	Index        int `json:"index"`
-	ContentBlock *struct {
-		Type string `json:"type"`
-		ID   string `json:"id"`
-		Name string `json:"name"`
-		// thinking / redacted_thinking start payloads
-		Thinking  string `json:"thinking"`
-		Signature string `json:"signature"`
-		Data      string `json:"data"`
-	} `json:"content_block"`
-	Delta *struct {
-		Type         string `json:"type"`
-		Text         string `json:"text"`
-		Thinking     string `json:"thinking"`
-		Signature    string `json:"signature"`
-		PartialJSON  string `json:"partial_json"`
-		StopReason   string `json:"stop_reason"`
-		StopSequence string `json:"stop_sequence"`
+	Index        int             `json:"index"`
+	ContentBlock json.RawMessage `json:"content_block"`
+	Delta        *struct {
+		Type         string          `json:"type"`
+		Text         string          `json:"text"`
+		Thinking     string          `json:"thinking"`
+		Signature    string          `json:"signature"`
+		PartialJSON  string          `json:"partial_json"`
+		StopReason   string          `json:"stop_reason"`
+		StopSequence string          `json:"stop_sequence"`
+		Citation     json.RawMessage `json:"citation"`
 	} `json:"delta"`
 
 	// message_delta usage (cumulative output)
 	Usage *wireUsage `json:"usage"`
-	// Fast-mode responses may expose the served speed on a streamed frame.
-	ServiceTier string `json:"service_tier"`
-	Speed       string `json:"speed"`
 
 	// error
 	Error *struct {
@@ -390,7 +491,7 @@ func buildThinking(r llm.ReasoningConfig) *thinkingConfig {
 		return &thinkingConfig{Type: "disabled"}
 	case r.BudgetTokens != nil:
 		budget := *r.BudgetTokens
-		return &thinkingConfig{Type: "enabled", BudgetTokens: &budget}
+		return &thinkingConfig{Type: "enabled", BudgetTokens: &budget, Display: summaryToDisplay(r.Summary)}
 	case r.Effort != "" || r.Summary != "" || (r.Enabled != nil && *r.Enabled):
 		return &thinkingConfig{Type: "adaptive", Display: summaryToDisplay(r.Summary)}
 	default:

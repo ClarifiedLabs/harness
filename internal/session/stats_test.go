@@ -343,6 +343,21 @@ func TestStatsReturnsContextualErrors(t *testing.T) {
 	})
 }
 
+func TestWriteUsageValuesShowsOneHourCacheWrites(t *testing.T) {
+	var out bytes.Buffer
+	writeUsageValues(&out, "", llm.Usage{
+		InputTokens:        10,
+		CacheWriteTokens:   3,
+		CacheWrite1hTokens: 7,
+	}, 0)
+	got := out.String()
+	if !strings.Contains(got, "cache write: 3\n") ||
+		!strings.Contains(got, "cache write (1h): 7\n") ||
+		!strings.Contains(got, "total tokens: 20\n") {
+		t.Fatalf("usage values = %q", got)
+	}
+}
+
 func saveStatsFixture(t *testing.T, dir string, state Session, events []Event) {
 	t.Helper()
 	if err := state.Save(dir); err != nil {

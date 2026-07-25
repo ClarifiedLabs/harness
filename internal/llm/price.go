@@ -8,20 +8,20 @@ import (
 
 const perMillion = 1_000_000.0
 
-// Price is the per-1M-token price in USD for each token category. CacheRead and
-// CacheWrite are 0 when a provider has no separate cache pricing. Tiers carries
+// Price is the per-1M-token price in USD for each token category. Cache fields
+// are 0 when a provider has no separate cache pricing. Tiers carries
 // context-length price tiers (e.g. "over 272k tokens costs more"), sorted on
-// demand. Reasoning and audio prices are stored for completeness; the agent
-// currently prices reasoning tokens when a non-zero reasoning rate is supplied.
+// demand. Reasoning and audio prices are stored for completeness.
 type Price struct {
-	Input       float64     `json:"input"`
-	Output      float64     `json:"output"`
-	CacheRead   float64     `json:"cache_read,omitempty"`
-	CacheWrite  float64     `json:"cache_write,omitempty"`
-	Reasoning   float64     `json:"reasoning,omitempty"`
-	InputAudio  float64     `json:"input_audio,omitempty"`
-	OutputAudio float64     `json:"output_audio,omitempty"`
-	Tiers       []PriceTier `json:"tiers,omitempty"`
+	Input        float64     `json:"input"`
+	Output       float64     `json:"output"`
+	CacheRead    float64     `json:"cache_read,omitempty"`
+	CacheWrite   float64     `json:"cache_write,omitempty"`
+	CacheWrite1h float64     `json:"cache_write_1h,omitempty"`
+	Reasoning    float64     `json:"reasoning,omitempty"`
+	InputAudio   float64     `json:"input_audio,omitempty"`
+	OutputAudio  float64     `json:"output_audio,omitempty"`
+	Tiers        []PriceTier `json:"tiers,omitempty"`
 }
 
 // PriceTier is one context-length price step. The threshold is the maximum
@@ -29,20 +29,21 @@ type Price struct {
 // context is strictly greater than Threshold (matching models.dev's
 // "context_over_N" semantics).
 type PriceTier struct {
-	Threshold   int     `json:"threshold"`
-	Input       float64 `json:"input"`
-	Output      float64 `json:"output"`
-	CacheRead   float64 `json:"cache_read,omitempty"`
-	CacheWrite  float64 `json:"cache_write,omitempty"`
-	Reasoning   float64 `json:"reasoning,omitempty"`
-	InputAudio  float64 `json:"input_audio,omitempty"`
-	OutputAudio float64 `json:"output_audio,omitempty"`
+	Threshold    int     `json:"threshold"`
+	Input        float64 `json:"input"`
+	Output       float64 `json:"output"`
+	CacheRead    float64 `json:"cache_read,omitempty"`
+	CacheWrite   float64 `json:"cache_write,omitempty"`
+	CacheWrite1h float64 `json:"cache_write_1h,omitempty"`
+	Reasoning    float64 `json:"reasoning,omitempty"`
+	InputAudio   float64 `json:"input_audio,omitempty"`
+	OutputAudio  float64 `json:"output_audio,omitempty"`
 }
 
 // IsZero reports whether the price has no configured components, including no
 // tiers.
 func (p Price) IsZero() bool {
-	if p.Input != 0 || p.Output != 0 || p.CacheRead != 0 || p.CacheWrite != 0 ||
+	if p.Input != 0 || p.Output != 0 || p.CacheRead != 0 || p.CacheWrite != 0 || p.CacheWrite1h != 0 ||
 		p.Reasoning != 0 || p.InputAudio != 0 || p.OutputAudio != 0 {
 		return false
 	}
@@ -58,6 +59,7 @@ func (p Price) HasTiers() bool {
 func (p Price) Equal(other Price) bool {
 	if p.Input != other.Input || p.Output != other.Output ||
 		p.CacheRead != other.CacheRead || p.CacheWrite != other.CacheWrite ||
+		p.CacheWrite1h != other.CacheWrite1h ||
 		p.Reasoning != other.Reasoning || p.InputAudio != other.InputAudio || p.OutputAudio != other.OutputAudio {
 		return false
 	}
@@ -85,13 +87,14 @@ func (p Price) Effective(contextTokens int) Price {
 	sort.Slice(tiers, func(i, j int) bool { return tiers[i].Threshold < tiers[j].Threshold })
 
 	effective := Price{
-		Input:       p.Input,
-		Output:      p.Output,
-		CacheRead:   p.CacheRead,
-		CacheWrite:  p.CacheWrite,
-		Reasoning:   p.Reasoning,
-		InputAudio:  p.InputAudio,
-		OutputAudio: p.OutputAudio,
+		Input:        p.Input,
+		Output:       p.Output,
+		CacheRead:    p.CacheRead,
+		CacheWrite:   p.CacheWrite,
+		CacheWrite1h: p.CacheWrite1h,
+		Reasoning:    p.Reasoning,
+		InputAudio:   p.InputAudio,
+		OutputAudio:  p.OutputAudio,
 	}
 	for _, t := range tiers {
 		if contextTokens > t.Threshold {
@@ -99,6 +102,7 @@ func (p Price) Effective(contextTokens int) Price {
 			effective.Output = t.Output
 			effective.CacheRead = t.CacheRead
 			effective.CacheWrite = t.CacheWrite
+			effective.CacheWrite1h = t.CacheWrite1h
 			effective.Reasoning = t.Reasoning
 			effective.InputAudio = t.InputAudio
 			effective.OutputAudio = t.OutputAudio
@@ -116,7 +120,7 @@ func (p Price) Cost(u Usage, estimatedInputTokens int) (float64, bool) {
 	if p.IsZero() {
 		return 0, false
 	}
-	contextTokens := u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens
+	contextTokens := u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.CacheWrite1hTokens
 	if estimatedInputTokens > contextTokens {
 		contextTokens = estimatedInputTokens
 	}
@@ -125,6 +129,7 @@ func (p Price) Cost(u Usage, estimatedInputTokens int) (float64, bool) {
 		float64(u.OutputTokens)/perMillion*rate.Output +
 		float64(u.CacheReadTokens)/perMillion*rate.CacheRead +
 		float64(u.CacheWriteTokens)/perMillion*rate.CacheWrite +
+		float64(u.CacheWrite1hTokens)/perMillion*rate.CacheWrite1h +
 		float64(u.ReasoningTokens)/perMillion*rate.Reasoning
 	return usd, !math.IsNaN(usd) && !math.IsInf(usd, 0)
 }

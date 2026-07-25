@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -60,8 +61,8 @@ func TestStreamTextOnly(t *testing.T) {
 	if done.Usage == nil {
 		t.Fatal("EventDone carries no usage")
 	}
-	// Anthropic reports extended thinking usage as output tokens, not a separate
-	// reasoning-token usage field, so ReasoningTokens remains zero.
+	// This response has no output_tokens_details.thinking_tokens breakdown, so
+	// the aggregate remains ordinary output.
 	want := llm.Usage{InputTokens: 25, OutputTokens: 15, CacheWriteTokens: 10, CacheReadTokens: 7, ReasoningTokens: 0}
 	if *done.Usage != want {
 		t.Errorf("final usage = %+v, want %+v", *done.Usage, want)
@@ -73,7 +74,7 @@ func TestStreamFastModeHeaderAndServedSpeed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		beta = r.Header.Get("anthropic-beta")
 		w.Header().Set("Content-Type", "text/event-stream")
-		llmtest.WriteBody(w, []byte("event: message_start\n"+`data: {"type":"message_start","message":{"speed":"fast","usage":{"input_tokens":1}}}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("event: message_start\n"+`data: {"type":"message_start","message":{"usage":{"input_tokens":1,"speed":"fast"}}}`+"\n\n"))
 		llmtest.WriteBody(w, []byte("event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n"))
 	}))
 	defer srv.Close()
@@ -529,13 +530,14 @@ func TestName(t *testing.T) {
 
 func TestNormalizeStopReason(t *testing.T) {
 	cases := map[string]llm.StopReason{
-		"end_turn":      llm.StopEndTurn,
-		"tool_use":      llm.StopToolUse,
-		"max_tokens":    llm.StopMaxTokens,
-		"stop_sequence": llm.StopStop,
-		"pause_turn":    llm.StopEndTurn, // unknown/other -> end_turn
-		"refusal":       llm.StopEndTurn,
-		"":              llm.StopEndTurn,
+		"end_turn":                      llm.StopEndTurn,
+		"tool_use":                      llm.StopToolUse,
+		"max_tokens":                    llm.StopMaxTokens,
+		"model_context_window_exceeded": llm.StopMaxTokens,
+		"stop_sequence":                 llm.StopStop,
+		"pause_turn":                    llm.StopEndTurn, // handled before normalization
+		"refusal":                       llm.StopEndTurn,
+		"":                              llm.StopEndTurn,
 	}
 	for in, want := range cases {
 		if got := normalizeStopReason(in); got != want {
@@ -632,6 +634,7 @@ func TestMidStreamErrorFrameRetryability(t *testing.T) {
 		{"overloaded_error", true},
 		{"api_error", true},
 		{"rate_limit_error", true},
+		{" RATE_LIMIT_ERROR ", true},
 		{"invalid_request_error", false},
 	}
 	for _, tc := range cases {
@@ -661,5 +664,245 @@ func TestMidStreamErrorFrameRetryability(t *testing.T) {
 				t.Errorf("Retryable = %v, want %v", apiErr.Retryable, tc.retryable)
 			}
 		})
+	}
+}
+
+func TestStreamNormalizesThinkingAndCacheTTLUsage(t *testing.T) {
+	body := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":25,"cache_creation_input_tokens":12,"cache_read_input_tokens":7,"output_tokens":1,"cache_creation":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":9},"output_tokens_details":{"thinking_tokens":4},"service_tier":"standard","speed":"fast"}}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":15,"output_tokens_details":{"thinking_tokens":4}}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		llmtest.WriteBody(w, []byte(body))
+	}))
+	defer srv.Close()
+
+	events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("claude")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := events[len(events)-1]
+	want := llm.Usage{
+		InputTokens:        25,
+		OutputTokens:       11,
+		CacheReadTokens:    7,
+		CacheWriteTokens:   3,
+		CacheWrite1hTokens: 9,
+		ReasoningTokens:    4,
+		ServiceTier:        "standard",
+		Speed:              "fast",
+	}
+	if done.Usage == nil {
+		t.Fatal("missing final usage")
+	}
+	got := *done.Usage
+	got.CacheWriteTTLKnown = false
+	if got != want {
+		t.Fatalf("usage = %+v, want %+v", got, want)
+	}
+	if !done.Usage.CacheWriteTTLKnown {
+		t.Fatal("cache TTL breakdown should be marked known")
+	}
+}
+
+func TestNormalizeAnthropicUsageClampsMalformedDetails(t *testing.T) {
+	var usage wireUsage
+	usage.InputTokens = -1
+	usage.OutputTokens = 3
+	usage.CacheCreationInputTokens = 2
+	usage.OutputTokensDetails.ThinkingTokens = 9
+	usage.CacheCreation = &wireCacheCreation{Ephemeral5mInputTokens: -4, Ephemeral1hInputTokens: 5}
+	got := normalizeAnthropicUsage(usage)
+	if got.InputTokens != 0 || got.OutputTokens != 0 || got.ReasoningTokens != 3 ||
+		got.CacheWriteTokens != 0 || got.CacheWrite1hTokens != 5 {
+		t.Fatalf("normalized usage = %+v", got)
+	}
+}
+
+func TestMergeWireUsageKeepsOutputAndReasoningDisjoint(t *testing.T) {
+	start := wireUsage{OutputTokens: 1}
+	final := wireUsage{OutputTokens: 3, OutputTokensDetails: wireOutputDetails{ThinkingTokens: 3}}
+	got := normalizeAnthropicUsage(mergeWireUsage(start, final))
+	if got.OutputTokens != 0 || got.ReasoningTokens != 3 {
+		t.Fatalf("merged usage = %+v, want zero output and three reasoning", got)
+	}
+}
+
+func TestStreamRejectsUnsupportedOutputBlock(t *testing.T) {
+	body := "event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"code_execution_tool_result","content":[]}}` + "\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		llmtest.WriteBody(w, []byte(body))
+	}))
+	defer srv.Close()
+	_, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("claude")))
+	if err == nil || !strings.Contains(err.Error(), `unsupported content block type "code_execution_tool_result"`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestStreamErrorFrameParsesRetryDelayHint(t *testing.T) {
+	body := "event: error\n" +
+		`data: {"type":"error","error":{"type":" RATE_LIMIT_ERROR ","message":"Please try again in 250ms"}}` + "\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		llmtest.WriteBody(w, []byte(body))
+	}))
+	defer srv.Close()
+	_, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("claude")))
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v, want APIError", err)
+	}
+	if !apiErr.Retryable || apiErr.RetryAfter != 250*time.Millisecond {
+		t.Fatalf("APIError = %+v", apiErr)
+	}
+}
+
+func TestStreamContinuesPauseTurnWithCumulativeUsage(t *testing.T) {
+	first := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":10}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Searching. "}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{}}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"weather\"}"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":1}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":2,"content_block":{"type":"web_search_tool_result","tool_use_id":"srv_1","content":[{"type":"web_search_result","title":"Weather","url":"https://example.test"}]}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":2}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":4}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+	second := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":20}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Done."}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":6}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+
+	var calls int
+	var replay wireRequest
+	var betas []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		betas = append(betas, r.Header.Get("anthropic-beta"))
+		if calls == 2 {
+			if err := json.NewDecoder(r.Body).Decode(&replay); err != nil {
+				t.Fatalf("decode continuation: %v", err)
+			}
+		}
+		w.Header().Set("content-type", "text/event-stream")
+		if calls == 1 {
+			llmtest.WriteBody(w, []byte(first))
+		} else {
+			llmtest.WriteBody(w, []byte(second))
+		}
+	}))
+	defer srv.Close()
+
+	req := llmtest.SimpleRequest("claude")
+	req.Betas = []string{"web-search-beta"}
+	events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || len(betas) != 2 || betas[0] != "web-search-beta" || betas[1] != "web-search-beta" {
+		t.Fatalf("calls=%d betas=%v", calls, betas)
+	}
+	if len(replay.Messages) != len(req.Messages)+1 {
+		t.Fatalf("continuation messages = %d, want %d", len(replay.Messages), len(req.Messages)+1)
+	}
+	assistant := replay.Messages[len(replay.Messages)-1]
+	if assistant.Role != "assistant" || len(assistant.Content) != 3 ||
+		assistant.Content[0].Type != "text" ||
+		assistant.Content[1].Type != "server_tool_use" ||
+		assistant.Content[2].Type != "web_search_tool_result" {
+		t.Fatalf("replayed assistant = %+v", assistant)
+	}
+	if assistant.Content[2].CacheControl == nil {
+		t.Fatal("continuation did not refresh rolling cache breakpoint")
+	}
+	if string(assistant.Content[1].Input) != `{"query":"weather"}` || assistant.Content[2].Content == nil {
+		t.Fatalf("replayed hosted web search lost content: %+v", assistant.Content)
+	}
+	var text strings.Builder
+	var done *llm.StreamEvent
+	for i := range events {
+		if events[i].Kind == llm.EventTextDelta {
+			text.WriteString(events[i].Text)
+		}
+		if events[i].Kind == llm.EventDone {
+			done = &events[i]
+		}
+	}
+	if text.String() != "Searching. Done." {
+		t.Fatalf("text = %q", text.String())
+	}
+	if done == nil || done.Usage == nil || done.Usage.InputTokens != 30 || done.Usage.OutputTokens != 10 {
+		t.Fatalf("done = %+v", done)
+	}
+}
+
+func TestStreamRejectsPauseTurnWithClientTool(t *testing.T) {
+	body := "event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"local","input":{}}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":1}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		llmtest.WriteBody(w, []byte(body))
+	}))
+	defer srv.Close()
+	_, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("claude")))
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != "invalid_pause_turn" {
+		t.Fatalf("error = %v, want invalid_pause_turn", err)
+	}
+}
+
+func TestStreamPauseTurnLimit(t *testing.T) {
+	body := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":1}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("content-type", "text/event-stream")
+		llmtest.WriteBody(w, []byte(body))
+	}))
+	defer srv.Close()
+	_, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("claude")))
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != "pause_turn_limit" {
+		t.Fatalf("error = %v, want pause_turn_limit", err)
+	}
+	if calls != maxPauseContinuations+1 {
+		t.Fatalf("calls = %d, want %d", calls, maxPauseContinuations+1)
 	}
 }

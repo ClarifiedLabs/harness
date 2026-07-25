@@ -1171,7 +1171,7 @@ func TestLiveInputLineSanitizesNewlines(t *testing.T) {
 func TestUsageLineShowsCacheAndReasoning(t *testing.T) {
 	line := usageLine(agent.PromptUsage{
 		Turns: 1,
-		Usage: llm.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 3000, ReasoningTokens: 450},
+		Usage: llm.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 3000, CacheWrite1hTokens: 125, ReasoningTokens: 450},
 	}, time.Second, 0, false, 1000, 200, 0)
 	if !strings.Contains(line, "cache 3.0k read") {
 		t.Errorf("usage line should report cache reads, got %q", line)
@@ -1181,6 +1181,9 @@ func TestUsageLineShowsCacheAndReasoning(t *testing.T) {
 	}
 	if !strings.Contains(line, "450 reasoning") {
 		t.Errorf("usage line should report reasoning tokens, got %q", line)
+	}
+	if !strings.Contains(line, "125 cache write (1h)") {
+		t.Errorf("usage line should report 1h cache writes, got %q", line)
 	}
 }
 

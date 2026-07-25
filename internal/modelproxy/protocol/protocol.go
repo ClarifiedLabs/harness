@@ -65,15 +65,16 @@ type BudgetReport struct {
 
 // ModelUsage is the accumulated usage for a single provider:model pair.
 type ModelUsage struct {
-	TargetID         string  `json:"target_id"`
-	TargetName       string  `json:"target_name,omitempty"`
-	Requests         int64   `json:"requests"`
-	InputTokens      int64   `json:"input_tokens"`
-	OutputTokens     int64   `json:"output_tokens"`
-	CacheReadTokens  int64   `json:"cache_read_tokens"`
-	CacheWriteTokens int64   `json:"cache_write_tokens"`
-	ReasoningTokens  int64   `json:"reasoning_tokens"`
-	CostUSD          float64 `json:"cost_usd"`
+	TargetID           string  `json:"target_id"`
+	TargetName         string  `json:"target_name,omitempty"`
+	Requests           int64   `json:"requests"`
+	InputTokens        int64   `json:"input_tokens"`
+	OutputTokens       int64   `json:"output_tokens"`
+	CacheReadTokens    int64   `json:"cache_read_tokens"`
+	CacheWriteTokens   int64   `json:"cache_write_tokens"`
+	CacheWrite1hTokens int64   `json:"cache_write_1h_tokens"`
+	ReasoningTokens    int64   `json:"reasoning_tokens"`
+	CostUSD            float64 `json:"cost_usd"`
 }
 
 type Target struct {

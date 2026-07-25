@@ -10,10 +10,12 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"harness/internal/llm"
+	"harness/internal/retry"
 	"harness/internal/sse"
 )
 
@@ -21,6 +23,8 @@ const (
 	defaultBaseURL = "https://api.anthropic.com"
 	messagesPath   = "/v1/messages"
 	apiVersion     = "2023-06-01"
+
+	maxPauseContinuations = 5
 )
 
 // Config configures a Provider. A custom BaseURL supplies scheme/host/prefix
@@ -68,20 +72,57 @@ func (p *Provider) Name() string { return "anthropic" }
 // every attempt and sleep.
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
-		window := p.contextWindow
-		body, err := json.Marshal(buildRequest(req, window, p.outputLimit))
-		if err != nil {
-			yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
-			return
-		}
+		wireReq := buildRequest(req, p.contextWindow, p.outputLimit)
+		var aggregate llm.Usage
+		for continuations := 0; ; {
+			body, err := json.Marshal(wireReq)
+			if err != nil {
+				yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
+				return
+			}
+			resp, err := p.connect(ctx, body, req.Betas, yield)
+			if err != nil || resp == nil {
+				return
+			}
+			result, consumed, decodeErr := p.decode(ctx, resp.Body, aggregate, yield)
+			_ = resp.Body.Close()
+			if decodeErr != nil {
+				yield(llm.StreamEvent{}, decodeErr)
+				return
+			}
+			if !consumed {
+				return
+			}
+			total := addAnthropicUsage(aggregate, result.usage)
+			if result.stopReason != "pause_turn" {
+				yield(llm.StreamEvent{
+					Kind:       llm.EventDone,
+					Usage:      &total,
+					StopReason: normalizeStopReason(result.stopReason),
+				}, nil)
+				return
+			}
+			if result.sawClientTool {
+				yield(llm.StreamEvent{}, &llm.APIError{
+					Code:    "invalid_pause_turn",
+					Message: "anthropic: pause_turn response contained a client tool_use block",
+				})
+				return
+			}
+			if continuations >= maxPauseContinuations {
+				yield(llm.StreamEvent{}, &llm.APIError{
+					Code:    "pause_turn_limit",
+					Message: fmt.Sprintf("anthropic: pause_turn continuation limit exceeded (%d)", maxPauseContinuations),
+				})
+				return
+			}
 
-		resp, err := p.connect(ctx, body, req.Betas, yield)
-		if err != nil || resp == nil {
-			return
+			aggregate = total
+			wireReq.Messages = append(wireReq.Messages, result.assistant)
+			clearMessageCacheBreakpoints(wireReq.Messages)
+			placeCacheBreakpoints(wireReq.Messages, len(wireReq.Messages))
+			continuations++
 		}
-		defer resp.Body.Close()
-
-		p.decode(ctx, resp.Body, yield)
 	}
 }
 
@@ -93,37 +134,65 @@ func (p *Provider) connect(ctx context.Context, body []byte, betas []string, yie
 		Client: p.client,
 		URL:    p.baseURL + messagesPath,
 		Header: func(r *http.Request) {
-			for k, v := range p.authHeaders {
-				r.Header.Set(k, v)
-			}
-			r.Header.Set("anthropic-version", apiVersion)
-			if value := mergeAnthropicBetas(r.Header.Get("anthropic-beta"), betas); value != "" {
-				r.Header.Set("anthropic-beta", value)
-			}
-			if len(p.authHeaders) == 0 && p.apiKey != "" {
-				r.Header.Set("x-api-key", p.apiKey)
-			}
+			p.applyHeaders(r, betas)
 		},
 		ParseError: llm.ParseErrorResponseByType,
 		Sleep:      p.sleep,
 	}, body, yield)
 }
 
-// decode reads the SSE stream, emits events, and accumulates usage. A body EOF
-// before message_stop is a truncated stream; a mid-stream error frame is
-// terminal for this stream. Both are wrapped in *llm.APIError (truncation wraps
-// sse.ErrTruncatedStream).
-func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.StreamEvent, error) bool) {
+func (p *Provider) applyHeaders(r *http.Request, betas []string) {
+	for k, v := range p.authHeaders {
+		r.Header.Set(k, v)
+	}
+	r.Header.Set("anthropic-version", apiVersion)
+	if value := mergeAnthropicBetas(r.Header.Get("anthropic-beta"), betas); value != "" {
+		r.Header.Set("anthropic-beta", value)
+	}
+	if len(p.authHeaders) == 0 && p.apiKey != "" {
+		r.Header.Set("x-api-key", p.apiKey)
+	}
+}
+
+type streamDecodeResult struct {
+	usage         llm.Usage
+	stopReason    string
+	assistant     wireMessage
+	sawClientTool bool
+}
+
+type streamedBlock struct {
+	content wireContent
+	args    strings.Builder
+}
+
+type wireContentBlockStart struct {
+	Type      string            `json:"type"`
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	Text      string            `json:"text"`
+	Citations []json.RawMessage `json:"citations"`
+	Input     json.RawMessage   `json:"input"`
+	Thinking  string            `json:"thinking"`
+	Signature string            `json:"signature"`
+	Data      string            `json:"data"`
+}
+
+// decode reads one SSE response, validates its indexed content-block state,
+// emits provider-neutral content events, and returns the complete assistant
+// message for a possible pause_turn replay.
+func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yield func(llm.StreamEvent, error) bool) (streamDecodeResult, bool, error) {
 	asm := newToolAssembler()
-	thinking := map[int]*thinkingBlock{} // content-block index → accumulating thinking
+	active := make(map[int]*streamedBlock)
+	completedBlocks := make(map[int]wireContent)
+	var rawUsage wireUsage
 	var usage llm.Usage
-	var stop llm.StopReason = llm.StopEndTurn
-	completed := false
+	stopReason := "end_turn"
+	sawClientTool := false
 
 	for ev, err := range sse.Read(ctx, r) {
 		if err != nil {
-			yield(llm.StreamEvent{}, err)
-			return
+			return streamDecodeResult{}, true, err
 		}
 
 		var data wireEvent
@@ -131,120 +200,191 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 			continue
 		}
 		if jsonErr := json.Unmarshal([]byte(ev.Data), &data); jsonErr != nil {
-			yield(llm.StreamEvent{}, &llm.APIError{Message: "decode stream event: " + jsonErr.Error()})
-			return
+			return streamDecodeResult{}, true, &llm.APIError{Message: "decode stream event: " + jsonErr.Error()}
 		}
 
 		switch data.Type {
 		case "message_start":
 			if data.Message != nil {
-				usage.InputTokens = data.Message.Usage.InputTokens
-				usage.CacheWriteTokens = data.Message.Usage.CacheCreationInputTokens
-				usage.CacheReadTokens = data.Message.Usage.CacheReadInputTokens
-				usage.OutputTokens = data.Message.Usage.OutputTokens
-				usage.ServiceTier = data.Message.ServiceTier
-				usage.Speed = data.Message.Speed
-				u := usage
+				rawUsage = mergeWireUsage(rawUsage, data.Message.Usage)
+				usage = normalizeAnthropicUsage(rawUsage)
+				u := addAnthropicUsage(base, usage)
 				if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
-					return
+					return streamDecodeResult{}, false, nil
 				}
 			}
 
 		case "content_block_start":
-			if data.ContentBlock != nil {
-				switch data.ContentBlock.Type {
-				case "tool_use":
-					if !yield(asm.start(data.Index, data.ContentBlock.ID, data.ContentBlock.Name), nil) {
-						return
-					}
-				case "thinking":
-					tb := &thinkingBlock{signature: data.ContentBlock.Signature}
-					tb.text.WriteString(data.ContentBlock.Thinking)
-					thinking[data.Index] = tb
-				case "redacted_thinking":
-					thinking[data.Index] = &thinkingBlock{redacted: data.ContentBlock.Data, isRedacted: true}
-				}
+			if len(data.ContentBlock) == 0 {
+				return streamDecodeResult{}, true, fmt.Errorf("anthropic: content_block_start %d has no content block", data.Index)
 			}
+			if _, exists := active[data.Index]; exists {
+				return streamDecodeResult{}, true, fmt.Errorf("anthropic: duplicate content_block_start index %d", data.Index)
+			}
+			var start wireContentBlockStart
+			if err := json.Unmarshal(data.ContentBlock, &start); err != nil {
+				return streamDecodeResult{}, true, fmt.Errorf("anthropic: decode content block %d: %w", data.Index, err)
+			}
+			block := &streamedBlock{content: wireContent{
+				Type:      start.Type,
+				ID:        start.ID,
+				Name:      start.Name,
+				Text:      start.Text,
+				Citations: append([]json.RawMessage(nil), start.Citations...),
+				Input:     append(json.RawMessage(nil), start.Input...),
+				Thinking:  start.Thinking,
+				Signature: start.Signature,
+				Data:      start.Data,
+			}}
+			switch start.Type {
+			case "text", "thinking", "redacted_thinking":
+			case "tool_use":
+				sawClientTool = true
+				if !yield(asm.start(data.Index, start.ID, start.Name), nil) {
+					return streamDecodeResult{}, false, nil
+				}
+			case "server_tool_use":
+				if start.Name != "web_search" {
+					return streamDecodeResult{}, true, fmt.Errorf("anthropic: unsupported server tool %q", start.Name)
+				}
+			case "web_search_tool_result":
+				block.content.Raw = append(json.RawMessage(nil), data.ContentBlock...)
+			default:
+				return streamDecodeResult{}, true, fmt.Errorf("anthropic: unsupported content block type %q", start.Type)
+			}
+			active[data.Index] = block
 
 		case "content_block_delta":
 			if data.Delta == nil {
-				continue
+				return streamDecodeResult{}, true, fmt.Errorf("anthropic: content_block_delta %d has no delta", data.Index)
+			}
+			block := active[data.Index]
+			if block == nil {
+				return streamDecodeResult{}, true, fmt.Errorf("anthropic: content_block_delta for inactive index %d", data.Index)
 			}
 			switch data.Delta.Type {
 			case "text_delta":
+				if block.content.Type != "text" {
+					return streamDecodeResult{}, true, deltaTypeMismatch(data.Index, data.Delta.Type, block.content.Type)
+				}
+				block.content.Text += data.Delta.Text
 				if !yield(llm.StreamEvent{Kind: llm.EventTextDelta, Text: data.Delta.Text}, nil) {
-					return
+					return streamDecodeResult{}, false, nil
 				}
 			case "thinking_delta":
-				if tb, ok := thinking[data.Index]; ok {
-					tb.text.WriteString(data.Delta.Thinking)
+				if block.content.Type != "thinking" {
+					return streamDecodeResult{}, true, deltaTypeMismatch(data.Index, data.Delta.Type, block.content.Type)
 				}
+				block.content.Thinking += data.Delta.Thinking
 			case "signature_delta":
-				// The signature must be echoed back verbatim with the thinking
-				// block on the next turn, or Anthropic rejects the replayed turn.
-				if tb, ok := thinking[data.Index]; ok {
-					tb.signature += data.Delta.Signature
+				if block.content.Type != "thinking" {
+					return streamDecodeResult{}, true, deltaTypeMismatch(data.Index, data.Delta.Type, block.content.Type)
 				}
+				block.content.Signature += data.Delta.Signature
 			case "input_json_delta":
-				if dev, ok := asm.delta(data.Index, data.Delta.PartialJSON); ok {
+				if block.content.Type != "tool_use" && block.content.Type != "server_tool_use" {
+					return streamDecodeResult{}, true, deltaTypeMismatch(data.Index, data.Delta.Type, block.content.Type)
+				}
+				block.args.WriteString(data.Delta.PartialJSON)
+				if block.content.Type == "tool_use" {
+					dev, ok := asm.delta(data.Index, data.Delta.PartialJSON)
+					if !ok {
+						return streamDecodeResult{}, true, fmt.Errorf("anthropic: tool delta for inactive index %d", data.Index)
+					}
 					if !yield(dev, nil) {
-						return
+						return streamDecodeResult{}, false, nil
 					}
 				}
+			case "citations_delta":
+				if block.content.Type != "text" {
+					return streamDecodeResult{}, true, deltaTypeMismatch(data.Index, data.Delta.Type, block.content.Type)
+				}
+				if len(data.Delta.Citation) != 0 {
+					block.content.Citations = append(block.content.Citations, append(json.RawMessage(nil), data.Delta.Citation...))
+				}
+			default:
+				return streamDecodeResult{}, true, fmt.Errorf("anthropic: unsupported content block delta type %q", data.Delta.Type)
 			}
 
 		case "content_block_stop":
-			if tb, ok := thinking[data.Index]; ok {
-				delete(thinking, data.Index)
+			block := active[data.Index]
+			if block == nil {
+				return streamDecodeResult{}, true, fmt.Errorf("anthropic: content_block_stop for inactive index %d", data.Index)
+			}
+			delete(active, data.Index)
+			switch block.content.Type {
+			case "thinking":
+				tb := &thinkingBlock{signature: block.content.Signature}
+				tb.text.WriteString(block.content.Thinking)
 				if ev, ok := tb.event(); ok {
 					if !yield(ev, nil) {
-						return
+						return streamDecodeResult{}, false, nil
 					}
 				}
-			}
-			done, ferr, ok := asm.flush(data.Index)
-			if ferr != nil {
-				yield(llm.StreamEvent{}, ferr)
-				return
-			}
-			if ok {
-				if !yield(done, nil) {
-					return
+			case "redacted_thinking":
+				tb := &thinkingBlock{redacted: block.content.Data, isRedacted: true}
+				if ev, ok := tb.event(); ok {
+					if !yield(ev, nil) {
+						return streamDecodeResult{}, false, nil
+					}
 				}
+			case "tool_use":
+				done, ferr, ok := asm.flush(data.Index)
+				if ferr != nil {
+					return streamDecodeResult{}, true, ferr
+				}
+				if !ok {
+					return streamDecodeResult{}, true, fmt.Errorf("anthropic: tool stop for inactive index %d", data.Index)
+				}
+				block.content.Input = append(json.RawMessage(nil), done.ToolInput...)
+				if !yield(done, nil) {
+					return streamDecodeResult{}, false, nil
+				}
+			case "server_tool_use":
+				raw := json.RawMessage(block.args.String())
+				if len(raw) == 0 {
+					raw = block.content.Input
+				}
+				input, err := llm.NormalizeToolInputObject(raw)
+				if err != nil {
+					return streamDecodeResult{}, true, fmt.Errorf("anthropic: invalid server_tool_use input at index %d: %w", data.Index, err)
+				}
+				block.content.Input = input
 			}
+			completedBlocks[data.Index] = block.content
 
 		case "message_delta":
 			if data.Delta != nil && data.Delta.StopReason != "" {
-				stop = normalizeStopReason(data.Delta.StopReason)
+				stopReason = data.Delta.StopReason
 			}
 			if data.Usage != nil {
-				usage.OutputTokens = data.Usage.OutputTokens
-				if data.Usage.InputTokens > 0 {
-					usage.InputTokens = data.Usage.InputTokens
-				}
-				if data.Usage.CacheCreationInputTokens > 0 {
-					usage.CacheWriteTokens = data.Usage.CacheCreationInputTokens
-				}
-				if data.Usage.CacheReadInputTokens > 0 {
-					usage.CacheReadTokens = data.Usage.CacheReadInputTokens
-				}
+				rawUsage = mergeWireUsage(rawUsage, *data.Usage)
+				usage = normalizeAnthropicUsage(rawUsage)
 			}
-			if data.ServiceTier != "" {
-				usage.ServiceTier = data.ServiceTier
-			}
-			if data.Speed != "" {
-				usage.Speed = data.Speed
-			}
-			u := usage
+			u := addAnthropicUsage(base, usage)
 			if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
-				return
+				return streamDecodeResult{}, false, nil
 			}
 
 		case "message_stop":
-			completed = true
-			u := usage
-			yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, StopReason: stop}, nil)
-			return
+			if len(active) != 0 {
+				return streamDecodeResult{}, true, fmt.Errorf("anthropic: message_stop with %d unfinished content blocks", len(active))
+			}
+			indexes := make([]int, 0, len(completedBlocks))
+			for index := range completedBlocks {
+				indexes = append(indexes, index)
+			}
+			sort.Ints(indexes)
+			content := make([]wireContent, 0, len(indexes))
+			for _, index := range indexes {
+				content = append(content, completedBlocks[index])
+			}
+			return streamDecodeResult{
+				usage:         usage,
+				stopReason:    stopReason,
+				assistant:     wireMessage{Role: "assistant", Content: content},
+				sawClientTool: sawClientTool,
+			}, true, nil
 
 		case "error":
 			apiErr := &llm.APIError{Message: "stream error"}
@@ -252,9 +392,9 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 				apiErr.Code = data.Error.Type
 				apiErr.Message = data.Error.Message
 				apiErr.Retryable = retryableErrorType(data.Error.Type)
+				apiErr.RetryAfter = retry.ParseRetryDelayHint(data.Error.Message)
 			}
-			yield(llm.StreamEvent{}, apiErr)
-			return
+			return streamDecodeResult{}, true, apiErr
 
 		case "ping":
 			// ignored
@@ -264,9 +404,109 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 		}
 	}
 
-	if !completed {
-		yield(llm.StreamEvent{}, fmt.Errorf("anthropic: stream ended before message_stop: %w", sse.ErrTruncatedStream))
+	return streamDecodeResult{}, true, fmt.Errorf("anthropic: stream ended before message_stop: %w", sse.ErrTruncatedStream)
+}
+
+func deltaTypeMismatch(index int, deltaType, blockType string) error {
+	return fmt.Errorf("anthropic: delta type %q does not match content block %d type %q", deltaType, index, blockType)
+}
+
+func clearMessageCacheBreakpoints(messages []wireMessage) {
+	for i := range messages {
+		for j := range messages[i].Content {
+			messages[i].Content[j].CacheControl = nil
+		}
 	}
+}
+
+func normalizeAnthropicUsage(u wireUsage) llm.Usage {
+	input := max(u.InputTokens, 0)
+	outputTotal := max(u.OutputTokens, 0)
+	reasoning := min(max(u.OutputTokensDetails.ThinkingTokens, 0), outputTotal)
+	cacheRead := max(u.CacheReadInputTokens, 0)
+	cacheTotal := max(u.CacheCreationInputTokens, 0)
+	cache5m := 0
+	cache1h := 0
+	ttlKnown := false
+	if u.CacheCreation != nil {
+		cache5m = max(u.CacheCreation.Ephemeral5mInputTokens, 0)
+		cache1h = max(u.CacheCreation.Ephemeral1hInputTokens, 0)
+		cacheTotal = max(cacheTotal, cache5m+cache1h)
+		cache1h = min(cache1h, cacheTotal)
+		ttlKnown = cacheTotal > 0
+	}
+	return llm.Usage{
+		InputTokens:        input,
+		OutputTokens:       outputTotal - reasoning,
+		CacheReadTokens:    cacheRead,
+		CacheWriteTokens:   cacheTotal - cache1h,
+		CacheWrite1hTokens: cache1h,
+		CacheWriteTTLKnown: ttlKnown,
+		ReasoningTokens:    reasoning,
+		ServiceTier:        u.ServiceTier,
+		Speed:              u.Speed,
+	}
+}
+
+func mergeWireUsage(acc, in wireUsage) wireUsage {
+	out := wireUsage{
+		InputTokens:              max(acc.InputTokens, in.InputTokens),
+		OutputTokens:             max(acc.OutputTokens, in.OutputTokens),
+		CacheCreationInputTokens: max(acc.CacheCreationInputTokens, in.CacheCreationInputTokens),
+		CacheReadInputTokens:     max(acc.CacheReadInputTokens, in.CacheReadInputTokens),
+		OutputTokensDetails: wireOutputDetails{
+			ThinkingTokens: max(acc.OutputTokensDetails.ThinkingTokens, in.OutputTokensDetails.ThinkingTokens),
+		},
+		ServiceTier: acc.ServiceTier,
+		Speed:       acc.Speed,
+	}
+	switch {
+	case acc.CacheCreation != nil && in.CacheCreation != nil:
+		out.CacheCreation = &wireCacheCreation{
+			Ephemeral5mInputTokens: max(acc.CacheCreation.Ephemeral5mInputTokens, in.CacheCreation.Ephemeral5mInputTokens),
+			Ephemeral1hInputTokens: max(acc.CacheCreation.Ephemeral1hInputTokens, in.CacheCreation.Ephemeral1hInputTokens),
+		}
+	case acc.CacheCreation != nil:
+		copy := *acc.CacheCreation
+		out.CacheCreation = &copy
+	case in.CacheCreation != nil:
+		copy := *in.CacheCreation
+		out.CacheCreation = &copy
+	}
+	if in.ServiceTier != "" {
+		out.ServiceTier = in.ServiceTier
+	}
+	if in.Speed != "" {
+		out.Speed = in.Speed
+	}
+	return out
+}
+
+func addAnthropicUsage(a, b llm.Usage) llm.Usage {
+	out := llm.Usage{
+		InputTokens:        a.InputTokens + b.InputTokens,
+		OutputTokens:       a.OutputTokens + b.OutputTokens,
+		CacheReadTokens:    a.CacheReadTokens + b.CacheReadTokens,
+		CacheWriteTokens:   a.CacheWriteTokens + b.CacheWriteTokens,
+		CacheWrite1hTokens: a.CacheWrite1hTokens + b.CacheWrite1hTokens,
+		ReasoningTokens:    a.ReasoningTokens + b.ReasoningTokens,
+		ServiceTier:        a.ServiceTier,
+		Speed:              a.Speed,
+	}
+	if out.CacheWriteTokens+out.CacheWrite1hTokens > 0 {
+		out.CacheWriteTTLKnown = cacheWriteTTLKnown(a) && cacheWriteTTLKnown(b)
+	}
+	if b.ServiceTier != "" {
+		out.ServiceTier = b.ServiceTier
+	}
+	if b.Speed != "" {
+		out.Speed = b.Speed
+	}
+	return out
+}
+
+func cacheWriteTTLKnown(u llm.Usage) bool {
+	return u.CacheWriteTokens+u.CacheWrite1hTokens == 0 || u.CacheWriteTTLKnown
 }
 
 func mergeAnthropicBetas(existing string, betas []string) string {
@@ -317,7 +557,7 @@ func (t *thinkingBlock) event() (llm.StreamEvent, bool) {
 // conditions are retryable by re-requesting the step; everything else
 // (invalid_request_error, authentication_error, ...) is terminal.
 func retryableErrorType(t string) bool {
-	switch t {
+	switch strings.ToLower(strings.TrimSpace(t)) {
 	case "overloaded_error", "api_error", "rate_limit_error":
 		return true
 	}
@@ -332,7 +572,7 @@ func normalizeStopReason(reason string) llm.StopReason {
 		return llm.StopEndTurn
 	case "tool_use":
 		return llm.StopToolUse
-	case "max_tokens":
+	case "max_tokens", "model_context_window_exceeded":
 		return llm.StopMaxTokens
 	case "stop_sequence":
 		return llm.StopStop
