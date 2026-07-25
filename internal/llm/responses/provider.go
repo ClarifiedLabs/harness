@@ -201,9 +201,18 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 		return !d.text.refusalDone(event, yield), nil
 
 	case "response.content_part.done":
+		if err := validateOutputContentPart(event.Part); err != nil {
+			return false, err
+		}
 		return !d.text.contentPartDone(event, yield), nil
 
+	case "response.content_part.added":
+		return false, validateOutputContentPart(event.Part)
+
 	case "response.output_item.added":
+		if err := validateOutputItem(event.Item); err != nil {
+			return false, err
+		}
 		if !d.phase.outputItem(event.OutputIndex, event.Item, yield) {
 			return true, nil
 		}
@@ -226,6 +235,9 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 		return false, nil
 
 	case "response.output_item.done":
+		if err := validateOutputItem(event.Item); err != nil {
+			return false, err
+		}
 		if !d.phase.outputItem(event.OutputIndex, event.Item, yield) {
 			return true, nil
 		}
@@ -241,6 +253,9 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 	case "response.completed":
 		d.completed = true
 		if event.Response != nil {
+			if err := validateOutputItems(event.Response.Output); err != nil {
+				return false, err
+			}
 			if !emitResponseOutputWithPhase(event.Response.Output, d.text, d.reasoning, d.phase, yield) {
 				return true, nil
 			}
@@ -277,6 +292,9 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 		d.completed = true
 		stop := llm.StopEndTurn
 		if event.Response != nil {
+			if err := validateOutputItems(event.Response.Output); err != nil {
+				return false, err
+			}
 			if !emitResponseOutputWithPhase(event.Response.Output, d.text, d.reasoning, d.phase, yield) {
 				return true, nil
 			}
@@ -321,10 +339,112 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 		d.completed = true
 		return false, streamError(event)
 
+	case "response.created",
+		"response.in_progress",
+		"response.queued",
+		"response.output_text.annotation.added",
+		"response.output_text.annotation.delta",
+		"response.output_text.annotation.done",
+		"response.reasoning_summary_part.added",
+		"response.reasoning_text.delta",
+		"response.reasoning_text.done",
+		"response.web_search_call.in_progress",
+		"response.web_search_call.searching",
+		"response.web_search_call.completed":
+		return false, nil
+
+	case "response.audio.delta",
+		"response.audio.done",
+		"response.audio.transcript.delta",
+		"response.audio.transcript.done",
+		"response.code_interpreter_call.in_progress",
+		"response.code_interpreter_call.interpreting",
+		"response.code_interpreter_call.completed",
+		"response.code_interpreter_call_code.delta",
+		"response.code_interpreter_call_code.done",
+		"response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.done",
+		"response.file_search_call.in_progress",
+		"response.file_search_call.searching",
+		"response.file_search_call.completed",
+		"response.image_generation_call.in_progress",
+		"response.image_generation_call.generating",
+		"response.image_generation_call.partial_image",
+		"response.image_generation_call.completed",
+		"response.mcp_call.in_progress",
+		"response.mcp_call.completed",
+		"response.mcp_call.failed",
+		"response.mcp_call_arguments.delta",
+		"response.mcp_call_arguments.done",
+		"response.mcp_list_tools.in_progress",
+		"response.mcp_list_tools.completed",
+		"response.mcp_list_tools.failed":
+		return false, unsupportedResponseEvent(event.Type)
+
 	default:
-		// Lifecycle and unsupported tool events are ignored unless handled above.
+		// OpenAI may add new event envelope types without a version bump. Ignore
+		// unknown envelopes, but keep every currently documented type explicitly
+		// classified above so known output-bearing events cannot disappear.
 		return false, nil
 	}
+}
+
+func validateOutputItems(items []wireOutputItem) error {
+	for i := range items {
+		if err := validateOutputItem(&items[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateOutputItem(item *wireOutputItem) error {
+	if item == nil {
+		return nil
+	}
+	switch item.Type {
+	case "message":
+		for i := range item.Content {
+			if err := validateOutputContentPart(&item.Content[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "reasoning":
+		for i := range item.Summary {
+			if item.Summary[i].Type != "summary_text" {
+				return unsupportedResponseOutput("reasoning summary part", item.Summary[i].Type)
+			}
+		}
+		return nil
+	case "function_call", "web_search_call":
+		return nil
+	default:
+		return unsupportedResponseOutput("output item", item.Type)
+	}
+}
+
+func validateOutputContentPart(part *wireContentPart) error {
+	if part == nil {
+		return nil
+	}
+	switch part.Type {
+	case "output_text", "refusal":
+		return nil
+	default:
+		return unsupportedResponseOutput("content part", part.Type)
+	}
+}
+
+func unsupportedResponseEvent(eventType string) error {
+	return &llm.APIError{Message: "responses: stream event " + eventType + " is not supported"}
+}
+
+func unsupportedResponseOutput(kind, outputType string) error {
+	if outputType == "" {
+		outputType = "<empty>"
+	}
+	return &llm.APIError{Message: "responses: unsupported " + kind + " type " + outputType}
 }
 
 func streamError(event wireEvent) *llm.APIError {
@@ -355,6 +475,9 @@ func applyRetryAfterHint(apiErr *llm.APIError) {
 	apiErr.RetryAfter = retry.ParseRetryDelayHint(apiErr.Message)
 }
 
+// normalizeUsage maps the Responses aggregate counts into disjoint billing
+// buckets. output_tokens includes its reasoning_tokens detail; compatible
+// orchestration output is an additional count outside that standard aggregate.
 func normalizeUsage(u *wireUsage) llm.Usage {
 	cacheRead := u.InputTokensDetails.CachedTokens
 	if cacheRead == 0 {
@@ -373,12 +496,27 @@ func normalizeUsage(u *wireUsage) llm.Usage {
 	if orchestrationInput < 0 {
 		orchestrationInput = 0
 	}
+	outputTotal := u.OutputTokens
+	if outputTotal < 0 {
+		outputTotal = 0
+	}
+	orchestrationOutput := u.OutputTokensDetails.OrchestrationOutputTokens
+	if orchestrationOutput < 0 {
+		orchestrationOutput = 0
+	}
+	reasoning := u.OutputTokensDetails.ReasoningTokens
+	if reasoning < 0 {
+		reasoning = 0
+	}
+	if reasoning > outputTotal {
+		reasoning = outputTotal
+	}
 	return llm.Usage{
 		InputTokens:      input + orchestrationInput,
-		OutputTokens:     u.OutputTokens + u.OutputTokensDetails.OrchestrationOutputTokens,
+		OutputTokens:     outputTotal - reasoning + orchestrationOutput,
 		CacheReadTokens:  cacheRead + orchestrationCacheRead,
 		CacheWriteTokens: cacheWrite,
-		ReasoningTokens:  u.OutputTokensDetails.ReasoningTokens,
+		ReasoningTokens:  reasoning,
 	}
 }
 

@@ -1739,7 +1739,7 @@ func TestHandlerUsageAggregatesKnownCostRequests(t *testing.T) {
 		t.Fatalf("usage entry = %+v, want %+v (cost aside)", got, want)
 	}
 	// Two priced requests at the configured prices.
-	perReq := 1000.0/1e6*2 + 2000.0/1e6*4 + 3000.0/1e6*0.5 + 4000.0/1e6*1
+	perReq := 1000.0/1e6*2 + 2000.0/1e6*4 + 3000.0/1e6*0.5 + 4000.0/1e6*1 + 500.0/1e6*4
 	wantCost := 2 * perReq
 	if diff := got.CostUSD - wantCost; diff > 1e-9 || diff < -1e-9 {
 		t.Fatalf("usage cost = %v, want %v", got.CostUSD, wantCost)

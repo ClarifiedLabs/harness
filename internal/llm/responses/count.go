@@ -18,7 +18,6 @@ type countRequest struct {
 	Input              []wireInputItem `json:"input"`
 	Tools              []wireTool      `json:"tools,omitempty"`
 	Reasoning          *wireReasoning  `json:"reasoning,omitempty"`
-	Store              bool            `json:"store,omitempty"`
 	PreviousResponseID string          `json:"previous_response_id,omitempty"`
 }
 
@@ -34,7 +33,6 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 		Input:              w.Input,
 		Tools:              w.Tools,
 		Reasoning:          w.Reasoning,
-		Store:              w.Store,
 		PreviousResponseID: w.PreviousResponseID,
 	})
 	if err != nil {

@@ -52,7 +52,7 @@ type Composite struct {
 // NewComposite returns the default pricing chain.
 func NewComposite() Composite {
 	return Composite{
-		pricers: []Pricer{GoogleInteractions{}},
+		pricers: []Pricer{GoogleInteractions{}, OpenAIAPIs{}},
 		flat:    Flat{},
 	}
 }

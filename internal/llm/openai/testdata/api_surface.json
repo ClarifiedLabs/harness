@@ -1,0 +1,112 @@
+{
+  "source": {
+    "retrieved": "2026-07-24",
+    "create": {
+      "url": "https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create",
+      "sha256": "a43ae3c9826de0a274dfe8f3287a56f15c4ceb7b014f9f9a8171a5d75ea5d595"
+    },
+    "streaming": {
+      "url": "https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events",
+      "sha256": "dcbc1548433be9a99af2f7b01a673f132e323bf46bb6b2669bef323f91bf9823"
+    }
+  },
+  "request_properties": [
+    "audio",
+    "frequency_penalty",
+    "function_call",
+    "functions",
+    "logit_bias",
+    "logprobs",
+    "max_completion_tokens",
+    "max_tokens",
+    "messages",
+    "metadata",
+    "modalities",
+    "model",
+    "moderation",
+    "n",
+    "parallel_tool_calls",
+    "prediction",
+    "presence_penalty",
+    "prompt_cache_key",
+    "prompt_cache_options",
+    "prompt_cache_retention",
+    "reasoning_effort",
+    "response_format",
+    "safety_identifier",
+    "seed",
+    "service_tier",
+    "stop",
+    "store",
+    "stream",
+    "stream_options",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_logprobs",
+    "top_p",
+    "user",
+    "verbosity",
+    "web_search_options"
+  ],
+  "message_roles": [
+    "developer",
+    "system",
+    "user",
+    "assistant",
+    "tool",
+    "function"
+  ],
+  "input_content_types": [
+    "text",
+    "image_url",
+    "input_audio",
+    "file"
+  ],
+  "tool_types": [
+    "function",
+    "custom"
+  ],
+  "chunk_properties": [
+    "choices",
+    "created",
+    "id",
+    "model",
+    "object",
+    "service_tier",
+    "system_fingerprint",
+    "usage"
+  ],
+  "delta_properties": [
+    "audio",
+    "content",
+    "function_call",
+    "refusal",
+    "role",
+    "tool_calls"
+  ],
+  "finish_reasons": [
+    "stop",
+    "length",
+    "tool_calls",
+    "content_filter",
+    "function_call"
+  ],
+  "usage_properties": [
+    "completion_tokens",
+    "completion_tokens_details",
+    "prompt_tokens",
+    "prompt_tokens_details",
+    "total_tokens"
+  ],
+  "prompt_detail_properties": [
+    "audio_tokens",
+    "cached_tokens"
+  ],
+  "completion_detail_properties": [
+    "accepted_prediction_tokens",
+    "audio_tokens",
+    "reasoning_tokens",
+    "rejected_prediction_tokens"
+  ]
+}

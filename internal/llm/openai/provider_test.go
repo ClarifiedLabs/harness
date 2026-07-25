@@ -61,7 +61,7 @@ func TestStreamTextOnly(t *testing.T) {
 		t.Fatal("EventDone carries no usage")
 	}
 	// prompt_tokens 25 includes 7 cached: InputTokens = 25 - 7 = 18.
-	want := llm.Usage{InputTokens: 18, OutputTokens: 15, CacheReadTokens: 7, CacheWriteTokens: 0, ReasoningTokens: 4}
+	want := llm.Usage{InputTokens: 18, OutputTokens: 11, CacheReadTokens: 7, CacheWriteTokens: 0, ReasoningTokens: 4}
 	if *done.Usage != want {
 		t.Errorf("final usage = %+v, want %+v", *done.Usage, want)
 	}
@@ -128,6 +128,73 @@ func TestStreamOpenRouterReasoningDeltas(t *testing.T) {
 	}
 	if events[1].Text != "Done." {
 		t.Fatalf("text delta = %q, want Done.", events[1].Text)
+	}
+}
+
+func TestStreamRefusalDelta(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		llmtest.WriteBody(w, []byte(`data: {"choices":[{"delta":{"refusal":"I can’t help with that."},"finish_reason":null}]}`+"\n\n"))
+		llmtest.WriteBody(w, []byte(`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4")))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if len(events) != 2 || events[0].Kind != llm.EventTextDelta || events[0].Text != "I can’t help with that." || events[1].Kind != llm.EventDone {
+		t.Fatalf("events = %+v, want refusal text then done", events)
+	}
+}
+
+func TestStreamRejectsUnsupportedDeltaPayloads(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "audio", body: `{"audio":{"data":"AAAA"}}`, want: "audio output is not supported"},
+		{name: "legacy function call", body: `{"function_call":{"name":"old_tool","arguments":"{}"}}`, want: "legacy function_call output is not supported"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				llmtest.WriteBody(w, []byte(`data: {"choices":[{"delta":`+tt.body+`,"finish_reason":null}]}`+"\n\n"))
+			}))
+			defer srv.Close()
+
+			_, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4")))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestStreamRejectsLegacyFunctionCallFinishReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		llmtest.WriteBody(w, []byte(`data: {"choices":[{"delta":{},"finish_reason":"function_call"}]}`+"\n\n"))
+	}))
+	defer srv.Close()
+
+	_, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4")))
+	if err == nil || !strings.Contains(err.Error(), "legacy function_call output is not supported") {
+		t.Fatalf("error = %v, want legacy function_call rejection", err)
+	}
+}
+
+func TestNormalizeUsageClampsReasoningToCompletionTotal(t *testing.T) {
+	u := &wireUsage{CompletionTokens: 3}
+	u.CompletionTokensDetails.ReasoningTokens = 5
+
+	got := normalizeUsage(u)
+	want := llm.Usage{ReasoningTokens: 3}
+	if got != want {
+		t.Fatalf("usage = %+v, want %+v", got, want)
 	}
 }
 
@@ -660,8 +727,7 @@ func TestNormalizeStopReason(t *testing.T) {
 		"stop":           llm.StopEndTurn,
 		"length":         llm.StopMaxTokens,
 		"tool_calls":     llm.StopToolUse,
-		"content_filter": llm.StopEndTurn, // unknown/other -> end_turn
-		"function_call":  llm.StopEndTurn,
+		"content_filter": llm.StopEndTurn,
 		"abort":          llm.StopEndTurn,
 		"":               llm.StopEndTurn,
 	}

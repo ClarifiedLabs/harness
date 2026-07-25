@@ -61,7 +61,7 @@ func TestStreamTextOnly(t *testing.T) {
 	if done.ResponseID != "resp_1" {
 		t.Errorf("response id = %q, want resp_1", done.ResponseID)
 	}
-	want := llm.Usage{InputTokens: 18, OutputTokens: 15, CacheReadTokens: 7, ReasoningTokens: 4}
+	want := llm.Usage{InputTokens: 18, OutputTokens: 11, CacheReadTokens: 7, ReasoningTokens: 4}
 	if done.Usage == nil || *done.Usage != want {
 		t.Errorf("usage = %+v, want %+v", done.Usage, want)
 	}
@@ -103,6 +103,17 @@ func TestNormalizeUsageSakanaOrchestrationTokens(t *testing.T) {
 
 	got := normalizeUsage(u)
 	want := llm.Usage{InputTokens: 125, OutputTokens: 120, CacheReadTokens: 25}
+	if got != want {
+		t.Fatalf("usage = %+v, want %+v", got, want)
+	}
+}
+
+func TestNormalizeUsageClampsReasoningToOutputTotal(t *testing.T) {
+	u := &wireUsage{OutputTokens: 3}
+	u.OutputTokensDetails.ReasoningTokens = 5
+
+	got := normalizeUsage(u)
+	want := llm.Usage{ReasoningTokens: 3}
 	if got != want {
 		t.Fatalf("usage = %+v, want %+v", got, want)
 	}
@@ -628,6 +639,66 @@ func TestStreamIncompleteMaxOutputTokens(t *testing.T) {
 	}
 	if done == nil || done.StopReason != llm.StopMaxTokens {
 		t.Fatalf("done = %+v, want max_tokens", done)
+	}
+}
+
+func TestStreamIgnoresDocumentedLifecycleAndUnknownEvents(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		llmtest.WriteBody(w, []byte("event: response.created\n"+`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("event: response.web_search_call.searching\n"+`data: {"type":"response.web_search_call.searching","output_index":0,"item_id":"ws_1"}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("event: response.future_status\n"+`data: {"type":"response.future_status","value":"new"}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2}}}`+"\n\n"))
+	}))
+	defer srv.Close()
+
+	events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4")))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if len(events) != 2 || events[0].Kind != llm.EventUsage || events[1].Kind != llm.EventDone {
+		t.Fatalf("events = %+v, want usage and done only", events)
+	}
+}
+
+func TestStreamRejectsKnownUnsupportedResponsesOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "data event",
+			body: "event: response.image_generation_call.partial_image\n" +
+				`data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"AAAA"}` + "\n\n",
+			want: "response.image_generation_call.partial_image is not supported",
+		},
+		{
+			name: "terminal output item",
+			body: "event: response.completed\n" +
+				`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"ci_1","type":"code_interpreter_call","status":"completed"}]}}` + "\n\n",
+			want: "unsupported output item type code_interpreter_call",
+		},
+		{
+			name: "terminal content part",
+			body: "event: response.completed\n" +
+				`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_audio"}]}]}}` + "\n\n",
+			want: "unsupported content part type output_audio",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				llmtest.WriteBody(w, []byte(tt.body))
+			}))
+			defer srv.Close()
+
+			_, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4")))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 

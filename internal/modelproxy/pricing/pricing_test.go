@@ -220,7 +220,7 @@ func TestGoogleInteractionsPreservesExplicitReasoningRateAndPriceTiers(t *testin
 	}
 }
 
-func TestReasoningRateFallbackIsScopedToGoogleInteractions(t *testing.T) {
+func TestReasoningRateFallbackIsScopedToSplitReasoningAPIs(t *testing.T) {
 	pricer := NewComposite()
 	model := llm.ModelEntry{Name: "model", Price: llm.Price{Input: 1, Output: 4}}
 	usage := llm.Usage{
@@ -230,11 +230,61 @@ func TestReasoningRateFallbackIsScopedToGoogleInteractions(t *testing.T) {
 	}
 	for _, provider := range []llm.ProviderConfig{
 		{Name: "google", APIType: "openai"},
+		{Name: "openai", APIType: "responses"},
+	} {
+		got := pricer.PriceUsage(Input{Provider: provider, Model: model, Usage: usage})
+		assertKnownCost(t, got, 9)
+	}
+	for _, provider := range []llm.ProviderConfig{
 		{Name: "compatible", APIType: "interactions"},
+		{Name: "anthropic", APIType: "anthropic"},
 	} {
 		got := pricer.PriceUsage(Input{Provider: provider, Model: model, Usage: usage})
 		assertKnownCost(t, got, 5)
 	}
+}
+
+func TestOpenAIAPIsPreserveExplicitReasoningAndTierRates(t *testing.T) {
+	pricer := NewComposite()
+	provider := llm.ProviderConfig{
+		Name:    "compatible",
+		APIType: "openai",
+		ServiceTiers: []llm.ServiceTier{{
+			ID:      "priority",
+			Request: llm.ServiceTierRequest{ServiceTier: "priority"},
+			Price:   llm.Price{Input: 2, Output: 10},
+		}},
+	}
+	model := llm.ModelEntry{
+		Name: "reasoning-model",
+		Price: llm.Price{
+			Input:     1,
+			Output:    4,
+			Reasoning: 3,
+			Tiers: []llm.PriceTier{{
+				Threshold: 100_000,
+				Input:     2,
+				Output:    8,
+			}},
+		},
+	}
+
+	catalog := pricer.CatalogPricing(provider, model)
+	if !catalog.Handled || !catalog.Known || catalog.Price.Reasoning != 3 || catalog.Price.Tiers[0].Reasoning != 8 {
+		t.Fatalf("catalog pricing = %+v, want explicit base reasoning and output-rate tier reasoning", catalog)
+	}
+
+	got := pricer.PriceUsage(Input{
+		Provider: provider,
+		Model:    model,
+		Request:  llm.Request{ServiceTier: "priority"},
+		Usage: llm.Usage{
+			InputTokens:     1_000_000,
+			OutputTokens:    1_000_000,
+			ReasoningTokens: 1_000_000,
+		},
+	})
+	assertKnownCost(t, got, 22)
 }
 
 func TestGoogleInteractionsPricesServiceTierThoughtTokens(t *testing.T) {

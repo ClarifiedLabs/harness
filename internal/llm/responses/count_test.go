@@ -13,11 +13,19 @@ import (
 func TestCountInputTokens(t *testing.T) {
 	var gotPath, gotAuth string
 	var gotBody countRequest
+	var gotFields map[string]json.RawMessage
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&gotFields); err != nil {
 			t.Fatalf("decode request: %v", err)
+		}
+		body, err := json.Marshal(gotFields)
+		if err != nil {
+			t.Fatalf("remarshal request: %v", err)
+		}
+		if err := json.Unmarshal(body, &gotBody); err != nil {
+			t.Fatalf("decode typed request: %v", err)
 		}
 		_ = json.NewEncoder(w).Encode(countResponse{InputTokens: 1234})
 	}))
@@ -25,8 +33,9 @@ func TestCountInputTokens(t *testing.T) {
 
 	p := New(Config{APIKey: "sk-test", BaseURL: srv.URL})
 	got, err := p.CountInputTokens(context.Background(), llm.Request{
-		Model:  "gpt-5.5",
-		System: "system",
+		Model:         "gpt-5.5",
+		System:        "system",
+		StoreResponse: true,
 		Messages: []llm.Message{{
 			Role:    llm.RoleUser,
 			Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hello"}},
@@ -46,5 +55,8 @@ func TestCountInputTokens(t *testing.T) {
 	}
 	if gotBody.Model != "gpt-5.5" || gotBody.Instructions != "system" || len(gotBody.Input) != 1 {
 		t.Fatalf("count request body = %+v", gotBody)
+	}
+	if _, ok := gotFields["store"]; ok {
+		t.Fatalf("count request fields = %v, store is not part of the input-token count contract", gotFields)
 	}
 }

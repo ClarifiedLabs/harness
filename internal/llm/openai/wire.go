@@ -2,30 +2,32 @@ package openai
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 
 	"harness/internal/llm"
 )
 
-// wireRequest is the OpenAI Chat Completions request body. MaxTokens is a
-// pointer so it is omitted entirely when unset (compatible servers pick their
-// own defaults, design §5.4).
+// wireRequest is the OpenAI Chat Completions request body. The token-cap fields
+// are pointers so both are omitted when unset; first-party OpenAI receives
+// MaxCompletionTokens and compatible endpoints receive MaxTokens (design §5.4).
 type wireRequest struct {
-	Model           string         `json:"model"`
-	Messages        []wireMessage  `json:"messages"`
-	Tools           []wireTool     `json:"tools,omitempty"`
-	ParallelTools   *bool          `json:"parallel_tool_calls,omitempty"`
-	MaxTokens       *int           `json:"max_tokens,omitempty"`
-	Temperature     *float64       `json:"temperature,omitempty"`
-	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
-	Reasoning       *wireReasoning `json:"reasoning,omitempty"`
-	ExtraBody       *wireExtraBody `json:"extra_body,omitempty"`
-	Stop            []string       `json:"stop,omitempty"`
-	ServiceTier     string         `json:"service_tier,omitempty"`
-	PromptCacheKey  string         `json:"prompt_cache_key,omitempty"`
-	SessionID       string         `json:"session_id,omitempty"`
-	Stream          bool           `json:"stream"`
-	StreamOptions   *streamOptions `json:"stream_options"`
+	Model               string         `json:"model"`
+	Messages            []wireMessage  `json:"messages"`
+	Tools               []wireTool     `json:"tools,omitempty"`
+	ParallelTools       *bool          `json:"parallel_tool_calls,omitempty"`
+	MaxTokens           *int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int           `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64       `json:"temperature,omitempty"`
+	ReasoningEffort     string         `json:"reasoning_effort,omitempty"`
+	Reasoning           *wireReasoning `json:"reasoning,omitempty"`
+	ExtraBody           *wireExtraBody `json:"extra_body,omitempty"`
+	Stop                []string       `json:"stop,omitempty"`
+	ServiceTier         string         `json:"service_tier,omitempty"`
+	PromptCacheKey      string         `json:"prompt_cache_key,omitempty"`
+	SessionID           string         `json:"session_id,omitempty"`
+	Stream              bool           `json:"stream"`
+	StreamOptions       *streamOptions `json:"stream_options"`
 }
 
 // streamOptions always sets include_usage so the trailing usage chunk is emitted
@@ -139,10 +141,14 @@ type wireChoice struct {
 
 // wireDelta carries incremental content and/or tool-call fragments.
 type wireDelta struct {
+	Role             string              `json:"role"`
 	Content          string              `json:"content"`
+	Refusal          string              `json:"refusal"`
 	Reasoning        string              `json:"reasoning"`
 	ReasoningContent string              `json:"reasoning_content"`
 	ToolCalls        []wireToolCallDelta `json:"tool_calls"`
+	Audio            json.RawMessage     `json:"audio"`
+	FunctionCall     json.RawMessage     `json:"function_call"`
 }
 
 // wireToolCallDelta is one streamed tool_call fragment. The first fragment for
@@ -203,7 +209,11 @@ func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit i
 	}
 
 	if mt := maxTokens(req, contextWindow, outputLimit, minOutputTokens); mt > 0 {
-		w.MaxTokens = &mt
+		if isFirstPartyOpenAIChat(baseURL) {
+			w.MaxCompletionTokens = &mt
+		} else {
+			w.MaxTokens = &mt
+		}
 	}
 	if len(req.StopSeqs) > 0 {
 		w.Stop = req.StopSeqs
@@ -269,6 +279,11 @@ func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit i
 	}
 
 	return w
+}
+
+func isFirstPartyOpenAIChat(baseURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	return err == nil && strings.EqualFold(u.Hostname(), "api.openai.com")
 }
 
 func maxTokens(req llm.Request, contextWindow, outputLimit, minOutputTokens int) int {

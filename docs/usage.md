@@ -319,7 +319,9 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   set `min_output_tokens` for endpoints that reject very small output caps. If
   an OpenAI-compatible endpoint rejects a request with a parseable minimum
   `max_tokens` error, the model proxy retries once at the inferred floor and logs
-  the inferred/configured values.
+  the inferred/configured values. First-party Chat Completions requests to
+  `api.openai.com` encode the cap as `max_completion_tokens`; custom and
+  compatible endpoints continue to use `max_tokens`.
 - Before normal model requests, harness resolves input tokens in tiers:
   provider-specific count APIs for OpenAI Responses and Anthropic Messages when
   available through `harness-model-proxy`; a local `o200k_base` BPE estimate for
@@ -507,6 +509,13 @@ For first-party Google Interactions targets, thought tokens are billed at the
 model's output-token rate when the catalog does not provide a separate reasoning
 rate. Google Search per-query grounding fees are not included in `cost_usd` or
 cost-budget spend; those figures include the request's token charges only.
+
+Responses and Chat Completions report reasoning as a breakdown of their aggregate
+output/completion tokens. Harness reports the non-reasoning remainder as output
+and the breakdown as reasoning so displayed totals and budgets do not double
+count it. When a Responses or Chat catalog price omits a reasoning rate, harness
+uses that schedule's output rate; explicit base, context-tier, and service-tier
+reasoning rates remain authoritative.
 
 ### Prometheus metrics
 

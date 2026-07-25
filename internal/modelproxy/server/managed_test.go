@@ -133,8 +133,8 @@ func TestManagedProviderResolvesPriceFromModelsDevCatalog(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4}) {
-		t.Fatalf("served managed price = %+v, want resolved {2,4} from models.dev", got)
+	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4, Reasoning: 4}) {
+		t.Fatalf("served managed price = %+v, want resolved output/reasoning rate 4 from models.dev", got)
 	}
 
 	streamOnce(t, srv, "testai", "alpha")
@@ -229,15 +229,15 @@ func TestManagedPriceSourceResolvesFromOtherProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	if got := catalogModelPrice(t, handler.Catalog(), "proxyai", "gpt-5-codex"); !got.Equal(llm.Price{Input: 1.25, Output: 10}) {
-		t.Fatalf("proxyai managed price = %+v, want {1.25,10} resolved from openai via price_source", got)
+	if got := catalogModelPrice(t, handler.Catalog(), "proxyai", "gpt-5-codex"); !got.Equal(llm.Price{Input: 1.25, Output: 10, Reasoning: 10}) {
+		t.Fatalf("proxyai managed price = %+v, want {1.25,10,reasoning:10} resolved from openai via price_source", got)
 	}
 
 	// Live refresh still resolves through price_source, even though the provider's
 	// own name is not present in models.dev.
 	handler.UpdateModelsDevCatalog(modelsDevCatalogWith("openai", "gpt-5-codex", llm.Price{Input: 2, Output: 20}), time.Unix(1_700_086_400, 0))
-	if got := catalogModelPrice(t, handler.Catalog(), "proxyai", "gpt-5-codex"); !got.Equal(llm.Price{Input: 2, Output: 20}) {
-		t.Fatalf("proxyai refreshed price = %+v, want {2,20} resolved from openai via price_source", got)
+	if got := catalogModelPrice(t, handler.Catalog(), "proxyai", "gpt-5-codex"); !got.Equal(llm.Price{Input: 2, Output: 20, Reasoning: 20}) {
+		t.Fatalf("proxyai refreshed price = %+v, want {2,20,reasoning:20} resolved from openai via price_source", got)
 	}
 }
 
@@ -307,7 +307,8 @@ func TestTieredManagedProviderUsesTieredPricing(t *testing.T) {
 		Input:     5,
 		Output:    30,
 		CacheRead: 0.5,
-		Tiers:     []llm.PriceTier{{Threshold: 272_000, Input: 10, Output: 45, CacheRead: 1.0}},
+		Reasoning: 30,
+		Tiers:     []llm.PriceTier{{Threshold: 272_000, Input: 10, Output: 45, CacheRead: 1.0, Reasoning: 45}},
 	}
 	if got := catalogModelPrice(t, handler.Catalog(), "sakana", "fugu-ultra"); !got.Equal(wantPrice) {
 		t.Fatalf("tiered model catalog price = %+v, want complete schedule %+v", got, wantPrice)
@@ -377,8 +378,8 @@ func TestManualProviderKeepsConfigPrice(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4}) {
-		t.Fatalf("served manual price = %+v, want config {2,4} (not models.dev {99,99})", got)
+	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4, Reasoning: 4}) {
+		t.Fatalf("served manual price = %+v, want config {2,4,reasoning:4} (not models.dev {99,99})", got)
 	}
 
 	streamOnce(t, srv, "testai", "alpha")
@@ -428,16 +429,16 @@ func TestUpdateModelsDevCatalogSwapsManagedPrices(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4}) {
-		t.Fatalf("initial managed price = %+v, want {2,4}", got)
+	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4, Reasoning: 4}) {
+		t.Fatalf("initial managed price = %+v, want {2,4,reasoning:4}", got)
 	}
 
 	// Live refresh: new prices arrive without restarting the server.
 	secondDate := time.Unix(1_700_086_400, 0)
 	handler.UpdateModelsDevCatalog(modelsDevCatalogWith("testai", "alpha", llm.Price{Input: 6, Output: 8}), secondDate)
 
-	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 6, Output: 8}) {
-		t.Fatalf("post-refresh managed price = %+v, want {6,8}", got)
+	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 6, Output: 8, Reasoning: 8}) {
+		t.Fatalf("post-refresh managed price = %+v, want {6,8,reasoning:8}", got)
 	}
 	if handler.Catalog().Pricing == nil || !handler.Catalog().Pricing.SourceDate.Equal(secondDate) {
 		t.Fatalf("post-refresh source date = %+v, want %v", handler.Catalog().Pricing, secondDate)
@@ -497,8 +498,8 @@ func TestUpdateModelsDevCatalogPrunesManagedModelsMissingFromRefresh(t *testing.
 	if catalogHasTarget(handler.Catalog(), "testai", "retired") {
 		t.Fatalf("refreshed catalog kept retired target: %+v", handler.Catalog().Targets)
 	}
-	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 6, Output: 8}) {
-		t.Fatalf("alpha price after refresh = %+v, want {6,8}", got)
+	if got := catalogModelPrice(t, handler.Catalog(), "testai", "alpha"); !got.Equal(llm.Price{Input: 6, Output: 8, Reasoning: 8}) {
+		t.Fatalf("alpha price after refresh = %+v, want {6,8,reasoning:8}", got)
 	}
 }
 
@@ -562,8 +563,8 @@ func TestUpdateModelsDevCatalogKeepsManualProviderMissingFromRefresh(t *testing.
 
 	handler.UpdateModelsDevCatalog(modelsDevCatalogWith("otherai", "beta", llm.Price{Input: 6, Output: 8}), time.Unix(1_700_086_400, 0))
 
-	if got := catalogModelPrice(t, handler.Catalog(), "manualai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4}) {
-		t.Fatalf("manual provider price after refresh = %+v, want configured {2,4}", got)
+	if got := catalogModelPrice(t, handler.Catalog(), "manualai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4, Reasoning: 4}) {
+		t.Fatalf("manual provider price after refresh = %+v, want configured {2,4,reasoning:4}", got)
 	}
 }
 

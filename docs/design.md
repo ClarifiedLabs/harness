@@ -479,7 +479,9 @@ func Read(ctx context.Context, r io.Reader) iter.Seq2[Event, error]
   after the colon per the SSE spec; ignores comment (`:`) lines.
 - Dialect handling stays in the providers:
   - **OpenAI Chat Completions:** every frame is `data:` JSON; the literal
-    `data: [DONE]` terminates.
+    `data: [DONE]` terminates. Text, refusal text, modern `tool_calls`, usage,
+    and compatible reasoning fields are consumed. Audio and deprecated
+    `function_call` output fail explicitly.
   - **OpenAI Responses:** typed frames such as `response.output_text.delta`,
     `response.output_text.done`, `response.refusal.delta`, `response.refusal.done`,
     `response.content_part.done`, `response.output_item.added`,
@@ -488,7 +490,10 @@ func Read(ctx context.Context, r io.Reader) iter.Seq2[Event, error]
     `response.function_call_arguments.delta`, `response.function_call_arguments.done`,
     `response.completed`, `response.incomplete`, `response.failed`, and a bare
     terminal `error` frame. Assistant message `phase` metadata from output items is
-    preserved on transcript messages.
+    preserved on transcript messages. Lifecycle, annotation, hosted web-search
+    status, and raw-reasoning events are recognized without exposing an agent
+    event. Known unsupported output-bearing events fail explicitly; unknown
+    future event envelope types are ignored.
   - **Anthropic:** typed frames — `message_start`, `content_block_start`,
     `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`,
     `ping` (ignored), `error` (terminal stream error; retryability follows type).
@@ -549,12 +554,52 @@ Edge cases:
 | Stateful continuation | `store:true` plus `previous_response_id` by default, with content-addressed full-history fallback; `responses_stateful:false` sends `store:false` | ignored | ignored | `store:true` plus `previous_interaction_id` by default, with signed full-history fallback; `interactions_stateful:false` sends `store:false` |
 | Assistant phase | assistant input items include stored `phase` when present | ignored | ignored | ignored |
 | Response format | provider default unless explicitly requested by a caller | provider default | provider default | forced to plain text; generated media is rejected |
-| Token cap | input-aware `max_output_tokens` | input-aware `max_tokens` | required input-aware `max_tokens` | input-aware `generation_config.max_output_tokens` |
+| Token cap | input-aware `max_output_tokens` | input-aware `max_completion_tokens` for `api.openai.com`; `max_tokens` for compatible/custom endpoints | required input-aware `max_tokens` | input-aware `generation_config.max_output_tokens` |
 | Input token count | `POST /responses/input_tokens`; `codex_oauth` uses a local `o200k_base` estimate | local `o200k_base` estimate | `POST /v1/messages/count_tokens` | provider-neutral local estimate |
 | Streaming usage | final `response.usage` | `stream_options.include_usage` | message start/delta | final interaction usage, including cached and thought tokens |
 | Stop sequences | not sent | `stop` | `stop_sequences` | `generation_config.stop_sequences` |
 | Temperature | omitted when nil | omitted when nil | omitted when nil | always omitted |
 | Reasoning controls | `reasoning.effort` / summary | provider-specific effort/budget | effort/budget/toggle | `thinking_level` and `thinking_summaries` |
+
+#### OpenAI Responses support boundary
+
+Harness implements the model-and-tools subset of Responses needed by the coding
+loop. A scoped snapshot of the official create, input-token-count, and streaming
+references lives in `internal/llm/responses/testdata/api_surface.json`; its
+contract test requires every captured field, item/content discriminator, tool,
+event, and usage property to be classified as supported or intentionally
+unsupported.
+
+| Surface | Supported | Intentionally unsupported |
+|---|---|---|
+| Operations | streaming `POST /responses`; `POST /responses/input_tokens` | retrieve/delete/cancel/compact, conversations, background work |
+| Request controls | model/input/instructions, functions and hosted web search, output cap, temperature, reasoning summaries/encrypted replay, prompt cache key, service tier, stored continuation | arbitrary output formats, moderation, metadata, tool choice, sampling/logprob controls, safety/user identifiers |
+| Content/items | text and image input; message text/refusal, reasoning summary, function calls/results, hosted web-search status | file/audio input; generated media, computer/code/shell/patch/MCP/custom tools |
+| Stream/usage | text/refusal/reasoning-summary/function deltas, terminal/error events, cached input, non-reasoning output, and reasoning tokens | raw reasoning disclosure, annotations, and unused total-token fields |
+
+`function_call_output.output` is always present, including for an empty or
+image-only result. Status-only and lifecycle events are recognized and ignored;
+known unsupported content-bearing events and output item types fail instead of
+silently disappearing. Unknown future event envelope types remain ignorable
+because the OpenAI API treats new event types as additive.
+
+#### OpenAI Chat Completions support boundary
+
+The Chat dialect also serves OpenAI-compatible endpoints. Its scoped official
+surface snapshot lives in `internal/llm/openai/testdata/api_surface.json`;
+compatible request and usage extensions remain separately supported by the wire
+implementation and are not presented as first-party OpenAI fields.
+
+| Surface | Supported | Intentionally unsupported |
+|---|---|---|
+| Operation | streaming `POST /chat/completions` | stored completion CRUD and legacy `/v1/completions` |
+| Request controls | messages, modern function tools, parallel calls, output cap, temperature, stop sequences, reasoning effort, prompt cache key, service tier, usage streaming | audio/modalities, legacy functions, custom tools, arbitrary formats, prediction, moderation, sampling/logprob controls |
+| Content | system/user/assistant/tool text, user images, refusal text | developer/function roles, file/audio input, generated audio |
+| Stream/usage | text/refusal/tool-call deltas, compatible reasoning summaries, cached input, non-reasoning output, and reasoning tokens | legacy `function_call`, audio output, prediction/audio token details |
+
+First-party endpoint selection is host-based: `api.openai.com` receives
+`max_completion_tokens`, while custom and compatibility endpoints continue to
+receive `max_tokens`; the two fields are never sent together.
 
 #### Gemini Interactions support boundary
 
@@ -598,7 +643,8 @@ OpenAI Responses and Anthropic when available through the proxy, then from a
 local `o200k_base` estimate for OpenAI/OpenRouter Chat Completions, then from
 the coarse request byte estimate. Anthropic always sends the computed value
 (`max_tokens` is required); OpenAI Chat Completions and Responses send
-`max_tokens` / `max_output_tokens` only when the value is known.
+their endpoint-appropriate completion cap / `max_output_tokens` only when the
+value is known.
 Responses providers can set `omit_max_output_tokens` when a compatible backend
 rejects the standard parameter. Responses providers default to stateful
 continuation; provider configs can set `responses_stateful:false` for compatible
@@ -749,10 +795,10 @@ type APIError struct {
 // Usage lives in internal/llm/provider.go.
 type Usage struct {
     InputTokens      int // uncached input, billed at full rate
-    OutputTokens     int
+    OutputTokens     int // generated output excluding separately reported reasoning
     CacheReadTokens  int
     CacheWriteTokens int
-    ReasoningTokens  int // Responses reasoning tokens; 0 for Anthropic (counted in output)
+    ReasoningTokens  int // separately reported reasoning; 0 when counted in output
     CostUSD          float64
     CostKnown        bool
     ServiceTier      string // actually served tier, when reported
@@ -768,6 +814,13 @@ cache read/write fields (`prompt_tokens_details.cached_tokens`,
 `CacheReadTokens` / `CacheWriteTokens` and subtracted from `InputTokens`.
 Anthropic's `input_tokens` already excludes cached tokens. After normalization
 `InputTokens` means the same thing across dialects.
+
+Responses `output_tokens` and Chat Completions `completion_tokens` include the
+`reasoning_tokens` detail. Their normalizers clamp that detail to the aggregate
+and subtract it from `OutputTokens`, making the output and reasoning buckets
+disjoint for UI totals, budgets, metrics, and pricing. Responses-compatible
+orchestration output tokens remain an additional output bucket because those
+extensions are reported outside the standard aggregate.
 
 `internal/llm/registry.go` holds a small registry. The structs carry JSON tags so they
 double as the proxy catalog's on-disk schema (`Price`, `ModelInfo`, `ProviderConfig`,
@@ -911,15 +964,16 @@ pricing is representable as `llm.Price`, including context tiers. Request costs
 flow through the pricing package's generic interface: provider-specific pricers
 can return handled-but-unknown for dynamic models, and the generic pricer handles
 the existing per-1M-token `llm.Price` shape for all other configured models.
-For first-party Google Interactions targets, a provider-specific pricer fills an
-unset reasoning rate from the output rate because the API reports thought tokens
-separately while Google bills them as output tokens. An explicit reasoning rate
-still wins, and the fallback is applied to context and service-tier price
-schedules as well. This rule is deliberately not generic: other dialects may
-already include reasoning in their output count. The numeric input/output
-schedule still comes from models.dev (or a manual provider config); Google's
-official pricing page (`https://ai.google.dev/gemini-api/docs/pricing`) supplies
-the provider-specific billing semantics, not a model-ID keyed price feed.
+For Responses and Chat Completions API types, an API-specific pricer fills an
+unset reasoning rate from the output rate after normalization splits the API's
+aggregate output count into output and reasoning buckets. First-party Google
+Interactions uses the same schedule transformation because it reports thought
+tokens separately while Google bills them as output tokens. Explicit reasoning
+rates always win, and each fallback is applied to base, context-tier, and
+service-tier schedules. The rule is scoped to these wire contracts rather than
+being generic. The numeric schedules still come from models.dev (or a manual
+provider config); the filtered models.dev snapshot already preserves explicit
+`cost.reasoning` values when raw catalog entries provide them.
 
 Google Search per-query charges are not part of `llm.Price` and are not added to
 `CostUSD`. Although the Interactions usage schema exposes

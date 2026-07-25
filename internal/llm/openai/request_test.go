@@ -80,8 +80,8 @@ func TestBuildRequestMaxTokensOmittedWhenUnset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if bytes.Contains(b, []byte("max_tokens")) {
-		t.Errorf("max_tokens present though MaxTokens is unset: %s", b)
+	if bytes.Contains(b, []byte("max_tokens")) || bytes.Contains(b, []byte("max_completion_tokens")) {
+		t.Errorf("token cap present though MaxTokens is unset: %s", b)
 	}
 }
 
@@ -98,8 +98,8 @@ func TestBuildRequestMaxTokensUserSet(t *testing.T) {
 	req := basicRequest()
 	req.MaxTokens = 333
 	w := buildRequest(req, 1_000_000, 0)
-	if w.MaxTokens == nil || *w.MaxTokens != 333 {
-		t.Errorf("max_tokens = %v, want 333 (user-set)", w.MaxTokens)
+	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 333 || w.MaxTokens != nil {
+		t.Errorf("caps = max_completion_tokens:%v max_tokens:%v, want first-party 333 only", w.MaxCompletionTokens, w.MaxTokens)
 	}
 }
 
@@ -107,8 +107,8 @@ func TestBuildRequestMaxTokensFloorLargeWindow(t *testing.T) {
 	// A large window uses a quarter of the context window by default.
 	req := basicRequest()
 	w := buildRequest(req, 1_000_000, 0)
-	if w.MaxTokens == nil || *w.MaxTokens != 250_000 {
-		t.Fatalf("max_tokens = %v, want 250000", w.MaxTokens)
+	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 250_000 {
+		t.Fatalf("max_completion_tokens = %v, want 250000", w.MaxCompletionTokens)
 	}
 }
 
@@ -116,8 +116,8 @@ func TestBuildRequestMaxTokensFloorSmallWindow(t *testing.T) {
 	// A small window makes window/4 the binding default.
 	req := basicRequest()
 	w := buildRequest(req, 20_000, 0)
-	if w.MaxTokens == nil || *w.MaxTokens != 5_000 {
-		t.Fatalf("max_tokens = %v, want 5000 (window/4)", w.MaxTokens)
+	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 5_000 {
+		t.Fatalf("max_completion_tokens = %v, want 5000 (window/4)", w.MaxCompletionTokens)
 	}
 }
 
@@ -125,25 +125,28 @@ func TestBuildRequestMaxTokensCatalogOutputLimit(t *testing.T) {
 	// A known catalog output limit is a ceiling, not the automatic default.
 	req := basicRequest()
 	w := buildRequest(req, 1_000_000, 128_000)
-	if w.MaxTokens == nil || *w.MaxTokens != 128_000 {
-		t.Fatalf("max_tokens = %v, want 128000", w.MaxTokens)
+	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 128_000 {
+		t.Fatalf("max_completion_tokens = %v, want 128000", w.MaxCompletionTokens)
 	}
 }
 
 func TestBuildRequestMaxTokensSmallCatalogOutputLimit(t *testing.T) {
 	req := basicRequest()
 	w := buildRequest(req, 1_000_000, 8_000)
-	if w.MaxTokens == nil || *w.MaxTokens != 8_000 {
-		t.Fatalf("max_tokens = %v, want 8000", w.MaxTokens)
+	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 8_000 {
+		t.Fatalf("max_completion_tokens = %v, want 8000", w.MaxCompletionTokens)
 	}
 }
 
 func TestBuildRequestMaxTokensClampsFullWindowOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 4_436
-	w := buildRequestForMode(req, 262_144, 262_144, "openrouter")
+	w := buildRequestWithOptions(req, 262_144, 262_144, "openrouter", llm.PromptCacheConfig{}, "https://openrouter.ai/api/v1", "openrouter")
 	if w.MaxTokens == nil || *w.MaxTokens != 65_536 {
 		t.Fatalf("max_tokens = %v, want 65536", w.MaxTokens)
+	}
+	if w.MaxCompletionTokens != nil {
+		t.Fatalf("max_completion_tokens = %v, want omitted for compatible endpoint", w.MaxCompletionTokens)
 	}
 }
 
@@ -152,8 +155,8 @@ func TestBuildRequestMaxTokensClampsExplicitValue(t *testing.T) {
 	req.MaxTokens = 100_000
 	req.EstimatedInputTokens = 90_000
 	w := buildRequest(req, 100_000, 0)
-	if w.MaxTokens == nil || *w.MaxTokens != 7_000 {
-		t.Fatalf("max_tokens = %v, want 7000", w.MaxTokens)
+	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 7_000 {
+		t.Fatalf("max_completion_tokens = %v, want 7000", w.MaxCompletionTokens)
 	}
 }
 
@@ -161,8 +164,8 @@ func TestBuildRequestMaxTokensRaisedToConfiguredFloor(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 999_999
 	w := buildRequestWithOptionsAndMin(req, 1_000_000, 0, "openai", llm.PromptCacheConfig{}, defaultBaseURL, "testai", 16)
-	if w.MaxTokens == nil || *w.MaxTokens != 16 {
-		t.Fatalf("max_tokens = %v, want 16 (configured floor)", w.MaxTokens)
+	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 16 {
+		t.Fatalf("max_completion_tokens = %v, want 16 (configured floor)", w.MaxCompletionTokens)
 	}
 }
 
@@ -170,8 +173,17 @@ func TestBuildRequestMaxTokensUserSetBeatsOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.MaxTokens = 333
 	w := buildRequest(req, 1_000_000, 128_000)
-	if w.MaxTokens == nil || *w.MaxTokens != 333 {
-		t.Fatalf("max_tokens = %v, want 333 (user-set beats catalog output limit)", w.MaxTokens)
+	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 333 {
+		t.Fatalf("max_completion_tokens = %v, want 333 (user-set beats catalog output limit)", w.MaxCompletionTokens)
+	}
+}
+
+func TestBuildRequestUsesLegacyMaxTokensForCompatibleEndpoint(t *testing.T) {
+	req := basicRequest()
+	req.MaxTokens = 333
+	w := buildRequestWithOptions(req, 1_000_000, 0, "openai", llm.PromptCacheConfig{}, "https://api.compatible.test/v1", "openai")
+	if w.MaxTokens == nil || *w.MaxTokens != 333 || w.MaxCompletionTokens != nil {
+		t.Fatalf("caps = max_tokens:%v max_completion_tokens:%v, want compatible max_tokens only", w.MaxTokens, w.MaxCompletionTokens)
 	}
 }
 

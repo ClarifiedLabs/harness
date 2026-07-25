@@ -60,8 +60,15 @@ func TestBuildInputRichToolResultKeepsEmptyFunctionOutput(t *testing.T) {
 		Kind: llm.BlockToolResult, ResultForID: "call_1",
 		ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "YWJj"}},
 	}}}}, false)
-	if len(input) != 2 || input[0].Type != "function_call_output" || input[0].CallID != "call_1" || input[0].Output != "" || !inputMessageContainsOnlyImages(input[1]) {
+	if len(input) != 2 || input[0].Type != "function_call_output" || input[0].CallID != "call_1" || input[0].Output == nil || *input[0].Output != "" || !inputMessageContainsOnlyImages(input[1]) {
 		t.Fatalf("input = %+v, want empty function output followed by image user item", input)
+	}
+	got, err := json.Marshal(input[0])
+	if err != nil {
+		t.Fatalf("marshal function output: %v", err)
+	}
+	if !bytes.Contains(got, []byte(`"output":""`)) {
+		t.Fatalf("function output JSON = %s, want required empty output field", got)
 	}
 }
 
@@ -505,7 +512,7 @@ func TestBuildRequestContextDoesNotFollowToolResultInput(t *testing.T) {
 		t.Fatalf("input = %+v, want context before trailing call/output pair", w.Input)
 	}
 	last := w.Input[len(w.Input)-1]
-	if last.Type != "function_call_output" || last.CallID != "call_1" || last.Output != "ok" {
+	if last.Type != "function_call_output" || last.CallID != "call_1" || last.Output == nil || *last.Output != "ok" {
 		t.Fatalf("last input = %+v, want tool result output", last)
 	}
 }

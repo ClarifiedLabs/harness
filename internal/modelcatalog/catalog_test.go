@@ -178,6 +178,39 @@ func TestPruneModelsDevDataPreservesNormalizedServiceTierModes(t *testing.T) {
 	}
 }
 
+func TestPruneModelsDevDataPreservesReasoningPrices(t *testing.T) {
+	const data = `{
+	  "compatible": {
+	    "id": "compatible",
+	    "api": "https://compatible.test/v1",
+	    "models": {
+	      "reasoning-model": {
+	        "id": "reasoning-model",
+	        "cost": {"input": 1, "output": 4, "reasoning": 3},
+	        "experimental": {"modes": {"fast": {
+	          "cost": {"input": 2, "output": 8, "reasoning": 6},
+	          "provider": {"body": {"service_tier": "priority"}}
+	        }}}
+	      }
+	    }
+	  }
+	}`
+	pruned, err := PruneModelsDevData([]byte(data))
+	if err != nil {
+		t.Fatalf("PruneModelsDevData: %v", err)
+	}
+	catalog, err := DecodeModelsDev(bytes.NewReader(pruned))
+	if err != nil {
+		t.Fatalf("Decode pruned catalog: %v", err)
+	}
+	provider, _ := catalog.Provider("compatible")
+	info, _ := provider.ModelInfo("reasoning-model")
+	fast, ok := llm.ResolveServiceTier("fast", info.ServiceTiers)
+	if info.Price.Reasoning != 3 || !ok || fast.Price.Reasoning != 6 {
+		t.Fatalf("prices = base:%+v fast:%+v, want explicit reasoning rates 3 and 6", info.Price, fast.Price)
+	}
+}
+
 func TestProviderFallbacksFromNPM(t *testing.T) {
 	tests := []struct {
 		name        string

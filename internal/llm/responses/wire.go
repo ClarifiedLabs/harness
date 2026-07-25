@@ -53,10 +53,10 @@ type wireInputItem struct {
 	Content any    `json:"content,omitempty"`
 
 	// function_call / function_call_output
-	CallID    string `json:"call_id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
-	Output    string `json:"output,omitempty"`
+	CallID    string  `json:"call_id,omitempty"`
+	Name      string  `json:"name,omitempty"`
+	Arguments string  `json:"arguments,omitempty"`
+	Output    *string `json:"output,omitempty"`
 
 	// reasoning (stateless encrypted reasoning replay): the item id, its opaque
 	// encrypted_content, and an empty summary array (the documented minimal shape
@@ -398,7 +398,7 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 				out = append(out, wireInputItem{
 					Type:   "function_call_output",
 					CallID: b.ResultForID,
-					Output: output,
+					Output: &output,
 				})
 				for _, child := range b.ResultContent {
 					resultImages = append(resultImages, wireContentPart{

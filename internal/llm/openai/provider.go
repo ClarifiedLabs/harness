@@ -181,11 +181,27 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 		}
 
 		for _, choice := range chunk.Choices {
+			if rawJSONPresent(choice.Delta.Audio) {
+				yield(llm.StreamEvent{}, &llm.APIError{Message: "openai: streamed audio output is not supported"})
+				return
+			}
+			if rawJSONPresent(choice.Delta.FunctionCall) {
+				yield(llm.StreamEvent{}, &llm.APIError{Message: "openai: legacy function_call output is not supported; use tool_calls"})
+				return
+			}
 			if choice.Delta.Reasoning != "" {
 				reasoning.WriteString(choice.Delta.Reasoning)
 			}
 			if choice.Delta.ReasoningContent != "" {
 				reasoning.WriteString(choice.Delta.ReasoningContent)
+			}
+			if choice.Delta.Refusal != "" {
+				if !flushReasoning() {
+					return
+				}
+				if !yield(llm.StreamEvent{Kind: llm.EventTextDelta, Text: choice.Delta.Refusal}, nil) {
+					return
+				}
 			}
 			if choice.Delta.Content != "" {
 				if !flushReasoning() {
@@ -205,6 +221,10 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 			}
 			if choice.FinishReason == "" {
 				continue
+			}
+			if choice.FinishReason == "function_call" {
+				yield(llm.StreamEvent{}, &llm.APIError{Message: "openai: legacy function_call output is not supported; use tool_calls"})
+				return
 			}
 			stop = normalizeStopReason(choice.FinishReason)
 			if !flushReasoning() {
@@ -231,6 +251,8 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 // normalizeUsage maps OpenAI-compatible usage objects onto llm.Usage. Providers
 // disagree on cache field names, but prompt_tokens generally includes cached
 // tokens, so read/write tokens are subtracted to recover full-rate input.
+// completion_tokens includes its reasoning_tokens detail, so the latter is
+// subtracted to keep normalized output and reasoning buckets disjoint.
 func normalizeUsage(u *wireUsage) llm.Usage {
 	cacheRead := u.PromptTokensDetails.CachedTokens
 	cacheWrite := u.PromptTokensDetails.CacheWriteTokens
@@ -256,13 +278,29 @@ func normalizeUsage(u *wireUsage) llm.Usage {
 	if input < 0 {
 		input = 0
 	}
+	outputTotal := u.CompletionTokens
+	if outputTotal < 0 {
+		outputTotal = 0
+	}
+	reasoning := u.CompletionTokensDetails.ReasoningTokens
+	if reasoning < 0 {
+		reasoning = 0
+	}
+	if reasoning > outputTotal {
+		reasoning = outputTotal
+	}
 	return llm.Usage{
 		InputTokens:      input,
-		OutputTokens:     u.CompletionTokens,
+		OutputTokens:     outputTotal - reasoning,
 		CacheReadTokens:  cacheRead,
 		CacheWriteTokens: cacheWrite,
-		ReasoningTokens:  u.CompletionTokensDetails.ReasoningTokens,
+		ReasoningTokens:  reasoning,
 	}
+}
+
+func rawJSONPresent(raw json.RawMessage) bool {
+	value := strings.TrimSpace(string(raw))
+	return value != "" && value != "null"
 }
 
 func streamError(err *wireError) *llm.APIError {
@@ -284,10 +322,10 @@ func streamError(err *wireError) *llm.APIError {
 	return apiErr
 }
 
-// normalizeStopReason maps OpenAI finish_reason values onto the four normalized
-// constants. Unknown or provider-specific reasons (content_filter, function_call,
-// or compatible-server extensions) map to end_turn — the turn is over either way
-// (design §5.1).
+// normalizeStopReason maps supported OpenAI finish_reason values onto the four
+// normalized constants. Content filtering and compatible-server extensions map
+// to end_turn — the turn is over either way (design §5.1). The deprecated
+// function_call reason is rejected before this function.
 func normalizeStopReason(reason string) llm.StopReason {
 	switch reason {
 	case "stop":
