@@ -31,17 +31,19 @@ type codexModelsCatalog struct {
 }
 
 type codexModel struct {
-	Slug                     string                 `json:"slug"`
-	DisplayName              string                 `json:"display_name,omitempty"`
-	ContextWindow            int                    `json:"context_window,omitempty"`
-	MaxContextWindow         int                    `json:"max_context_window,omitempty"`
-	InputModalities          []string               `json:"input_modalities,omitempty"`
-	SupportedReasoningLevels []codexReasoningPreset `json:"supported_reasoning_levels,omitempty"`
-	Visibility               string                 `json:"visibility,omitempty"`
-	SupportedInAPI           *bool                  `json:"supported_in_api,omitempty"`
-	ServiceTiers             []codexServiceTier     `json:"service_tiers,omitempty"`
-	DefaultServiceTier       *string                `json:"default_service_tier"`
-	AdditionalSpeedTiers     []string               `json:"additional_speed_tiers,omitempty"`
+	Slug                              string                 `json:"slug"`
+	DisplayName                       string                 `json:"display_name,omitempty"`
+	ContextWindow                     int                    `json:"context_window,omitempty"`
+	MaxContextWindow                  int                    `json:"max_context_window,omitempty"`
+	InputModalities                   []string               `json:"input_modalities,omitempty"`
+	SupportedReasoningLevels          []codexReasoningPreset `json:"supported_reasoning_levels,omitempty"`
+	SupportsReasoningSummaryParameter *bool                  `json:"supports_reasoning_summary_parameter,omitempty"`
+	SupportsReasoningSummaries        *bool                  `json:"supports_reasoning_summaries,omitempty"`
+	Visibility                        string                 `json:"visibility,omitempty"`
+	SupportedInAPI                    *bool                  `json:"supported_in_api,omitempty"`
+	ServiceTiers                      []codexServiceTier     `json:"service_tiers,omitempty"`
+	DefaultServiceTier                *string                `json:"default_service_tier"`
+	AdditionalSpeedTiers              []string               `json:"additional_speed_tiers,omitempty"`
 }
 
 type codexReasoningPreset struct {
@@ -132,13 +134,20 @@ func codexModelToCatalog(model codexModel) (Model, bool) {
 		name = id
 	}
 	reasoningValues := codexReasoningValues(model.SupportedReasoningLevels)
+	summarySupported := true
+	if model.SupportsReasoningSummaryParameter != nil {
+		summarySupported = *model.SupportsReasoningSummaryParameter
+	} else if model.SupportsReasoningSummaries != nil {
+		summarySupported = *model.SupportsReasoningSummaries
+	}
 	entry := Model{
-		ID:           id,
-		Name:         name,
-		Modalities:   Modalities{Input: append([]string(nil), model.InputModalities...)},
-		Reasoning:    len(reasoningValues) > 0,
-		Limit:        Limit{Context: contextWindow},
-		ServiceTiers: codexServiceTiers(model),
+		ID:                        id,
+		Name:                      name,
+		Modalities:                Modalities{Input: append([]string(nil), model.InputModalities...)},
+		Reasoning:                 len(reasoningValues) > 0,
+		ReasoningSummarySupported: &summarySupported,
+		Limit:                     Limit{Context: contextWindow},
+		ServiceTiers:              codexServiceTiers(model),
 	}
 	if len(reasoningValues) > 0 {
 		entry.ReasoningOptions = []llm.ReasoningOption{{Type: "effort", Values: reasoningValues}}

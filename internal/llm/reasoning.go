@@ -33,8 +33,15 @@ type ReasoningOption struct {
 // ReasoningInfo describes whether a model supports reasoning controls and, when
 // available, which parameter shapes and effort values are accepted.
 type ReasoningInfo struct {
-	Supported bool              `json:"supported"`
-	Options   []ReasoningOption `json:"options,omitempty"`
+	Supported        bool              `json:"supported"`
+	SummarySupported *bool             `json:"summary_supported,omitempty"`
+	Options          []ReasoningOption `json:"options,omitempty"`
+}
+
+// SupportsSummaries reports whether the model accepts a reasoning-summary
+// request. Missing metadata preserves the provider-defined behavior.
+func (r *ReasoningInfo) SupportsSummaries() bool {
+	return r == nil || r.SummarySupported == nil || *r.SummarySupported
 }
 
 // EffortValues returns the configured effort values, if the catalog knows them.
@@ -136,6 +143,10 @@ func (r *ReasoningInfo) Clone() *ReasoningInfo {
 		return nil
 	}
 	out := &ReasoningInfo{Supported: r.Supported}
+	if r.SummarySupported != nil {
+		v := *r.SummarySupported
+		out.SummarySupported = &v
+	}
 	if len(r.Options) > 0 {
 		out.Options = append([]ReasoningOption(nil), r.Options...)
 		for i := range out.Options {

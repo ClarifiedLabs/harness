@@ -1740,15 +1740,19 @@ func (h *Handler) reasoningForTarget(target resolvedTarget, profile string, requ
 		profile = requested.Profile
 	}
 	profile = normalizeReasoningProfile(profile)
-	if profile == "" {
-		return llm.ReasoningConfig{Summary: requested.Summary}
-	}
 	info := modelEntryReasoning(target.entry)
+	summary := requested.Summary
+	if info != nil && !info.SupportsSummaries() {
+		summary = ""
+	}
+	if profile == "" {
+		return llm.ReasoningConfig{Summary: summary}
+	}
 	if info == nil || !info.Supported {
-		return llm.ReasoningConfig{Summary: requested.Summary}
+		return llm.ReasoningConfig{Summary: summary}
 	}
 	mode := reasoningModeForProviderConfig(target.pc)
-	out := llm.ReasoningConfig{Profile: profile, Summary: requested.Summary}
+	out := llm.ReasoningConfig{Profile: profile, Summary: summary}
 	switch profile {
 	case "none":
 		if info.SupportsToggle() {
@@ -1867,12 +1871,21 @@ func mappedReasoningEffort(info *llm.ReasoningInfo, profile string) string {
 
 func mappedReasoningBudget(info *llm.ReasoningInfo, profile string) (int, bool) {
 	minPtr, maxPtr, ok := info.BudgetTokenRange()
-	if !ok || maxPtr == nil || *maxPtr <= 0 {
+	if !ok {
 		return 0, false
 	}
 	minBudget := 0
 	if minPtr != nil {
 		minBudget = *minPtr
+	}
+	if maxPtr == nil {
+		if minBudget <= 0 {
+			return 0, false
+		}
+		return minBudget, true
+	}
+	if *maxPtr <= 0 {
+		return 0, false
 	}
 	maxBudget := *maxPtr
 	if minBudget > maxBudget {
@@ -2438,7 +2451,7 @@ func providerResponsesWebSocket(pc llm.ProviderConfig) bool {
 }
 
 func modelEntryReasoning(m llm.ModelEntry) *llm.ReasoningInfo {
-	if m.Reasoning == nil && len(m.ReasoningOptions) == 0 {
+	if m.Reasoning == nil && m.ReasoningSummarySupported == nil && len(m.ReasoningOptions) == 0 {
 		return nil
 	}
 	supported := false
@@ -2446,8 +2459,9 @@ func modelEntryReasoning(m llm.ModelEntry) *llm.ReasoningInfo {
 		supported = *m.Reasoning
 	}
 	return (&llm.ReasoningInfo{
-		Supported: supported,
-		Options:   append([]llm.ReasoningOption(nil), m.ReasoningOptions...),
+		Supported:        supported,
+		SummarySupported: m.ReasoningSummarySupported,
+		Options:          append([]llm.ReasoningOption(nil), m.ReasoningOptions...),
 	}).Clone()
 }
 

@@ -1102,6 +1102,22 @@ func TestReasoningProfilesMapToEffortAndBudgetControls(t *testing.T) {
 	if got := h.reasoningForTarget(budgetOnly, "minimal", llm.ReasoningConfig{}); got.BudgetTokens == nil || *got.BudgetTokens != 1639 {
 		t.Fatalf("minimal budget mapping = %+v, want budget_tokens 1639", got)
 	}
+	minOnlyBudget := 1024
+	minOnly := budgetOnly
+	minOnly.entry.ReasoningOptions = []llm.ReasoningOption{{
+		Type: "budget_tokens",
+		Min:  &minOnlyBudget,
+	}}
+	if got := h.reasoningForTarget(minOnly, "low", llm.ReasoningConfig{Summary: "concise"}); got.BudgetTokens == nil || *got.BudgetTokens != 1024 || got.Summary != "concise" {
+		t.Fatalf("min-only budget mapping = %+v, want budget_tokens 1024 with concise summary", got)
+	}
+
+	summaryUnsupported := effortOnly
+	summarySupported := false
+	summaryUnsupported.entry.ReasoningSummarySupported = &summarySupported
+	if got := h.reasoningForTarget(summaryUnsupported, "low", llm.ReasoningConfig{Summary: "concise"}); got.Summary != "" {
+		t.Fatalf("unsupported reasoning summary mapping = %+v, want summary omitted", got)
+	}
 	if got := h.reasoningForTarget(budgetOnly, "none", llm.ReasoningConfig{}); !got.Empty() {
 		t.Fatalf("none without toggle = %+v, want provider default/no controls", got)
 	}

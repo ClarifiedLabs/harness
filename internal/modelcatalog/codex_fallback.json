@@ -29,6 +29,7 @@
           "effort": "ultra"
         }
       ],
+      "supports_reasoning_summaries": true,
       "visibility": "list",
       "supported_in_api": true,
       "service_tiers": [
@@ -72,6 +73,7 @@
           "effort": "ultra"
         }
       ],
+      "supports_reasoning_summaries": true,
       "visibility": "list",
       "supported_in_api": true,
       "service_tiers": [
@@ -112,6 +114,7 @@
           "effort": "max"
         }
       ],
+      "supports_reasoning_summaries": true,
       "visibility": "list",
       "supported_in_api": true,
       "service_tiers": [
@@ -149,6 +152,7 @@
           "effort": "xhigh"
         }
       ],
+      "supports_reasoning_summaries": true,
       "visibility": "list",
       "supported_in_api": true,
       "service_tiers": [
@@ -186,6 +190,7 @@
           "effort": "xhigh"
         }
       ],
+      "supports_reasoning_summaries": true,
       "visibility": "hide",
       "supported_in_api": true,
       "service_tiers": [
@@ -223,6 +228,7 @@
           "effort": "xhigh"
         }
       ],
+      "supports_reasoning_summaries": true,
       "visibility": "hide",
       "supported_in_api": true,
       "default_service_tier": null
@@ -250,6 +256,7 @@
           "effort": "xhigh"
         }
       ],
+      "supports_reasoning_summaries": true,
       "visibility": "list",
       "supported_in_api": true,
       "default_service_tier": null
@@ -277,6 +284,7 @@
           "effort": "xhigh"
         }
       ],
+      "supports_reasoning_summaries": true,
       "visibility": "hide",
       "supported_in_api": true,
       "default_service_tier": null

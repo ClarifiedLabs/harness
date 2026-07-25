@@ -2951,6 +2951,9 @@ them as subprocesses against hermetic local mock servers (no API keys, no networ
 transcript), resume-of-interrupted-session, and the LSP shim end to end. Run the fast
 unit tests with `make test` (`go test ./...`) and the integration legs with
 `make test-integration` (`go test -tags=integration ./cmd/harness`).
+Opt-in upstream model checks, including separate ChatGPT-subscription and
+first-party OpenAI Responses legs, use the `livemodel` tag via
+`make test-live-models`; see `docs/smoke.md` for setup and expectations.
 
 ## 14. Agent definitions (`internal/agentdef`)
 

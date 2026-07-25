@@ -1,10 +1,10 @@
 # Smoke / verification matrix
 
-This document records the manual smoke matrix for `harness` (design §13) and how
-to re-run each leg. It complements — it does not replace — the default unit and
+This document records the smoke matrix for `harness` (design §13) and how to
+re-run each leg. It complements — it does not replace — the default unit and
 golden suites (`go test ./...`).
 
-The legs split into automated and manual groups:
+The legs split into three groups:
 
 - **Hermetic legs** drive the real, freshly-built `harness` binary as a
   subprocess through an in-process `harness-model-proxy` whose provider config
@@ -12,17 +12,23 @@ The legs split into automated and manual groups:
   network, no API keys). They are automated in `cmd/harness/integration_test.go`
   behind the `integration` build tag. The proxy and mock live only in `_test.go`,
   so they are never compiled into the shipped binaries.
-- **Manual legs** cover a real downstream MCP server and live providers. They
-  require the corresponding local service or provider credentials and are not
-  part of the default test suite.
+- **Opt-in automated live-model legs** drive a freshly-built `harness` binary
+  through a separately running `harness-model-proxy` and make real upstream
+  calls. They live behind the `livemodel` build tag and are not part of the
+  default test suite.
+- **Manual legs** cover a real downstream MCP server and broader live-provider
+  workflows. They require the corresponding local service or provider
+  credentials and are not part of the default test suite.
 
 ## Prerequisites
 
 - Go 1.26 or newer, as declared by `go.mod`.
 - `gopls` on `PATH` to run the optional real-LSP integration leg; otherwise that
   leg skips.
+- A separately running, configured `harness-model-proxy` is needed for the
+  opt-in live-model legs.
 - Provider credentials, Ollama, and a real downstream MCP server are needed only
-  for their respective manual legs.
+  for their respective live or manual legs.
 
 ## Hermetic legs (automated)
 
@@ -88,6 +94,41 @@ go test -tags=integration ./cmd/harness/ -run TestIntegration -v
 |---|---|---|
 | Real `gopls` over the shim | `TestIntegrationGopls` | Drives `harness lsp serve` against a real `gopls` over a tiny temp Go module — server selection, root detection, launch + handshake, `didOpen` — then a `mcp__lsp__definition` call (resolves `Foo` to `main.go:3`) and a `mcp__lsp__diagnostics` call (reports the `undefinedThing` error). **Skipped** when `gopls` is not on `PATH`. |
 | Production proxy chain | `TestIntegrationProxyChain` | Builds `harness` and `harness-mcp-proxy` and runs the real chain: a local `harness-mcp-proxy serve -stdio` hosts `harness lsp serve` as a downstream; the test confirms the shim's tools surface under the `mcp__lsp__` namespace (e.g. `mcp__lsp__definition`) — which is what lets harness register them. No language server is launched (`tools/list` is static), and this production stdio chain opens no metrics listener or collectors. |
+
+## Live-model legs (opt-in automated)
+
+The `livemodel` suite builds the real `harness` CLI once, checks a separately
+running model proxy, reads its catalog, and then exercises Gemini Interactions,
+OpenAI Chat Completions through OpenRouter, Alibaba Token Plan, DeepSeek, and
+Xiaomi, OpenAI Responses through Sakana, the ChatGPT subscription, and the
+first-party API route, and Anthropic Messages sequentially. It verifies clean
+text turns, dialect-specific reasoning usage and summaries, an Anthropic tool
+round-trip, rendered session summaries, and valid persisted transcripts.
+
+Set the proxy URL and run the suite:
+
+```sh
+export HARNESS_LIVE_PROXY_URL=http://localhost:8765
+make test-live-models
+```
+
+If the model proxy requires its own API key, supply it separately:
+
+```sh
+export HARNESS_LIVE_PROXY_API_KEY=...
+make test-live-models
+```
+
+An unset `HARNESS_LIVE_PROXY_URL` skips the top-level suite before another
+binary is built or any network connection is attempted. Once the URL is set,
+an unreachable proxy, malformed catalog, timeout, build error, or model-call
+error fails the suite. If the proxy catalog has no candidate for one dialect,
+only that dialect's subtest skips.
+
+The default `go test ./...` and `make test` commands never compile or run these
+tests. Live calls may incur provider charges; the candidate order favors free
+or subscription-backed targets and the tests run sequentially to limit cost
+and rate-limit pressure.
 
 ### Real downstream MCP server (manual)
 

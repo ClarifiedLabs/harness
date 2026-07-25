@@ -47,8 +47,10 @@ func TestReasoningInfoSupportsToggleAndBudgetTokens(t *testing.T) {
 
 func TestReasoningInfoCloneCopiesOptionPointers(t *testing.T) {
 	minBudget, maxBudget := 1024, 4096
+	summarySupported := true
 	info := &ReasoningInfo{
-		Supported: true,
+		Supported:        true,
+		SummarySupported: &summarySupported,
 		Options: []ReasoningOption{{
 			Type: "budget_tokens",
 			Min:  &minBudget,
@@ -64,5 +66,8 @@ func TestReasoningInfoCloneCopiesOptionPointers(t *testing.T) {
 	}
 	if *min != 1024 || *max != 4096 {
 		t.Fatalf("clone range = %d..%d, want 1024..4096", *min, *max)
+	}
+	if clone.SummarySupported == info.SummarySupported || clone.SummarySupported == nil || !*clone.SummarySupported {
+		t.Fatal("summary support pointer was not cloned")
 	}
 }

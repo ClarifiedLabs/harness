@@ -60,15 +60,16 @@ type setupProviderConfig struct {
 }
 
 type setupModelConfig struct {
-	Name             string                `json:"name"`
-	ContextWindow    int                   `json:"context_window,omitempty"`
-	OutputLimit      int                   `json:"output_limit,omitempty"`
-	InputModalities  []string              `json:"input_modalities,omitempty"`
-	ServerTools      []string              `json:"server_tools,omitempty"`
-	ServiceTiers     []llm.ServiceTier     `json:"service_tiers,omitempty"`
-	Price            *llm.Price            `json:"price,omitempty"`
-	Reasoning        *bool                 `json:"reasoning,omitempty"`
-	ReasoningOptions []llm.ReasoningOption `json:"reasoning_options,omitempty"`
+	Name                      string                `json:"name"`
+	ContextWindow             int                   `json:"context_window,omitempty"`
+	OutputLimit               int                   `json:"output_limit,omitempty"`
+	InputModalities           []string              `json:"input_modalities,omitempty"`
+	ServerTools               []string              `json:"server_tools,omitempty"`
+	ServiceTiers              []llm.ServiceTier     `json:"service_tiers,omitempty"`
+	Price                     *llm.Price            `json:"price,omitempty"`
+	Reasoning                 *bool                 `json:"reasoning,omitempty"`
+	ReasoningSummarySupported *bool                 `json:"reasoning_summary_supported,omitempty"`
+	ReasoningOptions          []llm.ReasoningOption `json:"reasoning_options,omitempty"`
 }
 
 func runSetup(ctx context.Context, env environment, force bool) error {
@@ -975,12 +976,13 @@ func setupModelFromCatalog(model modelcatalog.Model) setupModelConfig {
 		serviceTiers[i].Price = llm.Price{}
 	}
 	cfg := setupModelConfig{
-		Name:             model.ID,
-		ContextWindow:    model.Limit.Context,
-		OutputLimit:      model.Limit.Output,
-		InputModalities:  append([]string(nil), model.Modalities.Input...),
-		ReasoningOptions: append([]llm.ReasoningOption(nil), model.ReasoningOptions...),
-		ServiceTiers:     serviceTiers,
+		Name:                      model.ID,
+		ContextWindow:             model.Limit.Context,
+		OutputLimit:               model.Limit.Output,
+		InputModalities:           append([]string(nil), model.Modalities.Input...),
+		ReasoningSummarySupported: model.ReasoningSummarySupported,
+		ReasoningOptions:          append([]llm.ReasoningOption(nil), model.ReasoningOptions...),
+		ServiceTiers:              serviceTiers,
 	}
 	reasoning := model.Reasoning
 	cfg.Reasoning = &reasoning

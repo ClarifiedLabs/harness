@@ -64,16 +64,17 @@ type PromptCacheConfig struct {
 
 // ModelEntry is one model inside a ProviderConfig.
 type ModelEntry struct {
-	Name             string            `json:"name"`
-	ContextWindow    int               `json:"context_window"`
-	OutputLimit      int               `json:"output_limit,omitempty"`
-	InputModalities  []string          `json:"input_modalities,omitempty"`
-	ServerTools      []string          `json:"server_tools,omitempty"`
-	ServiceTiers     []ServiceTier     `json:"service_tiers,omitempty"`
-	Price            Price             `json:"price"`
-	Shape            string            `json:"shape,omitempty"`
-	Reasoning        *bool             `json:"reasoning,omitempty"`
-	ReasoningOptions []ReasoningOption `json:"reasoning_options,omitempty"`
+	Name                      string            `json:"name"`
+	ContextWindow             int               `json:"context_window"`
+	OutputLimit               int               `json:"output_limit,omitempty"`
+	InputModalities           []string          `json:"input_modalities,omitempty"`
+	ServerTools               []string          `json:"server_tools,omitempty"`
+	ServiceTiers              []ServiceTier     `json:"service_tiers,omitempty"`
+	Price                     Price             `json:"price"`
+	Shape                     string            `json:"shape,omitempty"`
+	Reasoning                 *bool             `json:"reasoning,omitempty"`
+	ReasoningSummarySupported *bool             `json:"reasoning_summary_supported,omitempty"`
+	ReasoningOptions          []ReasoningOption `json:"reasoning_options,omitempty"`
 }
 
 // DefaultContextWindow is used for any model not in the registry — arbitrary
@@ -368,7 +369,7 @@ func (r *Registry) Cost(model string, u Usage) (usd float64, known bool) {
 }
 
 func modelEntryReasoning(m ModelEntry) *ReasoningInfo {
-	if m.Reasoning == nil && len(m.ReasoningOptions) == 0 {
+	if m.Reasoning == nil && m.ReasoningSummarySupported == nil && len(m.ReasoningOptions) == 0 {
 		return nil
 	}
 	supported := false
@@ -376,8 +377,9 @@ func modelEntryReasoning(m ModelEntry) *ReasoningInfo {
 		supported = *m.Reasoning
 	}
 	return (&ReasoningInfo{
-		Supported: supported,
-		Options:   append([]ReasoningOption(nil), m.ReasoningOptions...),
+		Supported:        supported,
+		SummarySupported: m.ReasoningSummarySupported,
+		Options:          append([]ReasoningOption(nil), m.ReasoningOptions...),
 	}).Clone()
 }
 

@@ -317,7 +317,11 @@ func (r *Renderer) ModelRequestEvent(event llm.ModelRequestEvent) string {
 	case llm.ModelRequestUpstreamAttemptFailed, llm.ModelRequestFailed:
 		line = modelRequestIssueLine(event)
 		if line != "" {
-			r.dimLine(line)
+			if event.Outcome == llm.ModelRequestOutcomeTerminal {
+				r.writeDimLine(line)
+			} else {
+				r.dimLine(line)
+			}
 		}
 	}
 
@@ -589,6 +593,12 @@ func (r *Renderer) dimLine(s string) {
 	if r.quiet {
 		return
 	}
+	r.writeDimLine(s)
+}
+
+// writeDimLine writes a status-shaped line even in quiet mode. Terminal model
+// errors use it because quiet suppresses progress, not actionable failures.
+func (r *Renderer) writeDimLine(s string) {
 	r.statusClear()
 	r.finishAssistantLine()
 	s = r.timestampStatusLine(s)

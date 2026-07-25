@@ -716,6 +716,9 @@ func TestOneShotQuietSuppressesCompatibilityNoticeButPersistsDiagnostic(t *testi
 	if strings.Contains(errw.String(), "model compatibility:") || strings.Contains(errw.String(), "model compatibility diagnostic") {
 		t.Fatalf("quiet stderr contains compatibility output: %q", errw.String())
 	}
+	if !strings.Contains(errw.String(), "[error: model API 400: sanitized rejection") {
+		t.Fatalf("quiet stderr omitted terminal model error: %q", errw.String())
+	}
 	if strings.Count(diagnostics.String(), `"msg":"model compatibility diagnostic"`) != 1 {
 		t.Fatalf("quiet diagnostics = %q", diagnostics.String())
 	}

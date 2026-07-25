@@ -1,6 +1,7 @@
 package modelcatalog
 
 import (
+	"encoding/json"
 	"os"
 	"slices"
 	"testing"
@@ -32,6 +33,9 @@ func TestDecodeCodexModelsUsesListVisibleModels(t *testing.T) {
 	if !model.Reasoning || len(model.ReasoningOptions) != 1 || !slices.Contains(model.ReasoningOptions[0].Values, "xhigh") {
 		t.Fatalf("gpt-5.5 reasoning = %v options=%+v, want Codex effort options", model.Reasoning, model.ReasoningOptions)
 	}
+	if model.ReasoningSummarySupported == nil || !*model.ReasoningSummarySupported {
+		t.Fatalf("gpt-5.5 reasoning summary support = %v, want true", model.ReasoningSummarySupported)
+	}
 	fast, ok := llm.ResolveServiceTier("fast", model.ServiceTiers)
 	if !ok || fast.ID != "fast" || fast.Request.ServiceTier != "priority" {
 		t.Fatalf("gpt-5.5 fast tier = %+v, %v", fast, ok)
@@ -47,6 +51,40 @@ func TestDecodeCodexModelsUsesListVisibleModels(t *testing.T) {
 func TestCodexFallbackSnapshotDecodes(t *testing.T) {
 	if _, err := DecodeCodexModels(codexModelsFallbackJSON); err != nil {
 		t.Fatalf("DecodeCodexModels fallback: %v", err)
+	}
+}
+
+func TestPruneCodexModelsDataPreservesReasoningSummarySupport(t *testing.T) {
+	data, err := PruneCodexModelsData([]byte(testCodexModelsCatalogJSON()))
+	if err != nil {
+		t.Fatalf("PruneCodexModelsData: %v", err)
+	}
+	var catalog codexModelsCatalog
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		t.Fatalf("decode pruned catalog: %v", err)
+	}
+	if len(catalog.Models) == 0 ||
+		catalog.Models[0].SupportsReasoningSummaries == nil ||
+		!*catalog.Models[0].SupportsReasoningSummaries {
+		t.Fatalf("pruned reasoning summary support = %+v, want true", catalog.Models)
+	}
+}
+
+func TestCodexModelUsesRequestBuilderReasoningSummaryCapability(t *testing.T) {
+	supported, legacySupported := false, true
+	model, ok := codexModelToCatalog(codexModel{
+		Slug:                              "gpt-test",
+		ContextWindow:                     128_000,
+		SupportedReasoningLevels:          []codexReasoningPreset{{Effort: "medium"}},
+		SupportsReasoningSummaryParameter: &supported,
+		SupportsReasoningSummaries:        &legacySupported,
+		Visibility:                        "list",
+	})
+	if !ok {
+		t.Fatal("codexModelToCatalog rejected visible model")
+	}
+	if model.ReasoningSummarySupported == nil || *model.ReasoningSummarySupported {
+		t.Fatalf("reasoning summary support = %v, want false", model.ReasoningSummarySupported)
 	}
 }
 
@@ -79,6 +117,7 @@ func testCodexModelsCatalogJSON() string {
         {"effort": "high"},
         {"effort": "xhigh"}
       ],
+      "supports_reasoning_summaries": true,
       "visibility": "list",
       "supported_in_api": true,
       "service_tiers": [{"id":"priority","name":"Fast","description":"Lower latency"}],

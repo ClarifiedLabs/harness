@@ -1,4 +1,4 @@
-.PHONY: build test test-integration release refresh-model-catalogs
+.PHONY: build test test-integration test-live-models release refresh-model-catalogs
 
 MODELSDEV_API_URL ?= https://models.dev/api.json
 MODELSDEV_FALLBACK := internal/modelcatalog/modelsdev_fallback.json
@@ -17,6 +17,9 @@ test:
 
 test-integration:
 	go test -tags=integration ./cmd/harness
+
+test-live-models:
+	go test -tags=livemodel -count=1 -v ./cmd/harness
 
 release:
 ifndef VERSION
