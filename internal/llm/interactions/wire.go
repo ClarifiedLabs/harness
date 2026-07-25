@@ -54,11 +54,15 @@ type wireStep struct {
 }
 
 type wireContent struct {
-	Type       string `json:"type"`
-	Text       string `json:"text,omitempty"`
-	Data       string `json:"data,omitempty"`
-	MIMEType   string `json:"mime_type,omitempty"`
-	Resolution string `json:"resolution,omitempty"`
+	Type       string  `json:"type"`
+	Text       *string `json:"text,omitempty"`
+	Data       string  `json:"data,omitempty"`
+	MIMEType   string  `json:"mime_type,omitempty"`
+	Resolution string  `json:"resolution,omitempty"`
+}
+
+func interactionText(text string) wireContent {
+	return wireContent{Type: "text", Text: &text}
 }
 
 func buildRequest(req llm.Request, contextWindow, outputLimit int) (wireRequest, error) {
@@ -167,7 +171,7 @@ func buildInput(messages []llm.Message) ([]json.RawMessage, error) {
 		for _, block := range message.Content {
 			switch block.Kind {
 			case llm.BlockText:
-				contents = append(contents, wireContent{Type: "text", Text: block.Text})
+				contents = append(contents, interactionText(block.Text))
 			case llm.BlockImage:
 				contents = append(contents, interactionImage(block))
 			case llm.BlockInteractionThought:
@@ -176,7 +180,7 @@ func buildInput(messages []llm.Message) ([]json.RawMessage, error) {
 				}
 				summary := []wireContent(nil)
 				if block.InteractionThoughtSummary != "" {
-					summary = []wireContent{{Type: "text", Text: block.InteractionThoughtSummary}}
+					summary = []wireContent{interactionText(block.InteractionThoughtSummary)}
 				}
 				if err := appendStep(wireStep{
 					Type:      "thought",
@@ -213,11 +217,17 @@ func buildInput(messages []llm.Message) ([]json.RawMessage, error) {
 				if err := flushContent(); err != nil {
 					return nil, err
 				}
-				result := []wireContent{{Type: "text", Text: block.ResultText}}
+				result := make([]wireContent, 0, len(block.ResultContent)+1)
+				if block.ResultText != "" {
+					result = append(result, interactionText(block.ResultText))
+				}
 				for _, child := range block.ResultContent {
 					if child.Kind == llm.BlockImage {
 						result = append(result, interactionImage(child))
 					}
+				}
+				if len(result) == 0 {
+					result = append(result, interactionText(""))
 				}
 				if err := appendStep(wireStep{
 					Type:    "function_result",

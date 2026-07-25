@@ -112,7 +112,8 @@ func TestBuildRequestStatelessReplayAndGoogleSearch(t *testing.T) {
 	if err := json.Unmarshal(got.Input[len(got.Input)-1], &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.CallID != "call-1" || !result.IsError || len(result.Result) != 1 || result.Result[0].Text != "contents" {
+	if result.CallID != "call-1" || !result.IsError || len(result.Result) != 1 ||
+		result.Result[0].Text == nil || *result.Result[0].Text != "contents" {
 		t.Fatalf("function result = %+v", result)
 	}
 	body, err := json.Marshal(got)
@@ -155,6 +156,57 @@ func TestBuildRequestStatefulTail(t *testing.T) {
 	}
 	if result.Name != "read_file" {
 		t.Fatalf("function result name = %q, want read_file", result.Name)
+	}
+}
+
+func TestBuildRequestImageOnlyFunctionResultOmitsTextContent(t *testing.T) {
+	got, err := buildRequest(llm.Request{Messages: []llm.Message{{
+		Role: llm.RoleUser,
+		Content: []llm.ContentBlock{{
+			Kind:        llm.BlockToolResult,
+			ToolName:    "view_image",
+			ResultForID: "call-image",
+			ResultContent: []llm.ContentBlock{{
+				Kind:           llm.BlockImage,
+				ImageMediaType: "image/png",
+				ImageData:      "aGVsbG8=",
+			}},
+		}},
+	}}}, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Input) != 1 {
+		t.Fatalf("input count = %d, want 1", len(got.Input))
+	}
+	var result struct {
+		Result []map[string]json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(got.Input[0], &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Result) != 1 || string(result.Result[0]["type"]) != `"image"` {
+		t.Fatalf("function result = %s", got.Input[0])
+	}
+	if _, exists := result.Result[0]["text"]; exists {
+		t.Fatalf("image content unexpectedly contains text: %s", got.Input[0])
+	}
+}
+
+func TestBuildRequestEmptyFunctionResultIncludesRequiredText(t *testing.T) {
+	got, err := buildRequest(llm.Request{Messages: []llm.Message{{
+		Role: llm.RoleUser,
+		Content: []llm.ContentBlock{{
+			Kind:        llm.BlockToolResult,
+			ToolName:    "noop",
+			ResultForID: "call-empty",
+		}},
+	}}}, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Input) != 1 || !strings.Contains(string(got.Input[0]), `"result":[{"type":"text","text":""}]`) {
+		t.Fatalf("empty function result = %s", got.Input)
 	}
 }
 

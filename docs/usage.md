@@ -503,6 +503,11 @@ not count toward the budget; add `-budget-reject-unpriced` to reject them.
 `/v1/usage` includes the authenticated key's current budget state when it has a
 budget.
 
+For first-party Google Interactions targets, thought tokens are billed at the
+model's output-token rate when the catalog does not provide a separate reasoning
+rate. Google Search per-query grounding fees are not included in `cost_usd` or
+cost-budget spend; those figures include the request's token charges only.
+
 ### Prometheus metrics
 
 The proxy exposes unauthenticated Prometheus metrics on a separate listener,

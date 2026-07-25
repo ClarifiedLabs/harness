@@ -276,8 +276,8 @@ func (d *streamDecoder) start(index int, raw json.RawMessage, yield func(llm.Str
 		var base wireStep
 		if json.Unmarshal(raw, &base) == nil {
 			for _, content := range base.Content {
-				if content.Type == "text" && content.Text != "" {
-					if !yield(llm.StreamEvent{Kind: llm.EventTextDelta, Text: content.Text}, nil) {
+				if content.Type == "text" && content.Text != nil && *content.Text != "" {
+					if !yield(llm.StreamEvent{Kind: llm.EventTextDelta, Text: *content.Text}, nil) {
 						return false
 					}
 				}
@@ -287,8 +287,8 @@ func (d *streamDecoder) start(index int, raw json.RawMessage, yield func(llm.Str
 		var base wireStep
 		if json.Unmarshal(raw, &base) == nil {
 			for _, content := range base.Summary {
-				if content.Type == "text" {
-					step.summary.WriteString(content.Text)
+				if content.Type == "text" && content.Text != nil {
+					step.summary.WriteString(*content.Text)
 				}
 			}
 		}
@@ -336,8 +336,8 @@ func (d *streamDecoder) delta(index int, raw json.RawMessage, yield func(llm.Str
 		}
 	case "thought_summary":
 		var content wireContent
-		if json.Unmarshal(delta.Content, &content) == nil {
-			step.summary.WriteString(content.Text)
+		if json.Unmarshal(delta.Content, &content) == nil && content.Text != nil {
+			step.summary.WriteString(*content.Text)
 		}
 	case "thought_signature":
 		step.signature = delta.Signature
@@ -513,9 +513,19 @@ func interactionError(interaction *wireInteraction, streamErr *wireError, code, 
 	if message == "" {
 		message = "interaction failed"
 	}
-	apiErr := &llm.APIError{Code: code, Message: message, Retryable: llm.RetryableErrorCode(code)}
+	apiErr := &llm.APIError{Code: code, Message: message, Retryable: retryableInteractionErrorCode(code)}
 	if apiErr.Retryable {
 		apiErr.RetryAfter = retry.ParseRetryDelayHint(message)
 	}
 	return apiErr
+}
+
+func retryableInteractionErrorCode(code string) bool {
+	code = strings.ToLower(strings.TrimSpace(code))
+	switch code {
+	case "too_many_requests", "resource_exhausted", "unavailable", "internal", "internal_error", "api_error":
+		return true
+	default:
+		return llm.RetryableErrorCode(code)
+	}
 }

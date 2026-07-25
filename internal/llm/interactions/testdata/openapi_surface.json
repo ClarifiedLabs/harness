@@ -1,0 +1,117 @@
+{
+  "source": {
+    "url": "https://ai.google.dev/static/api/interactions.openapi.json",
+    "retrieved": "2026-07-24",
+    "sha256": "ca73485a826d758f1ac90ea34137dd3d59c44533d2ff9f4d901d02da7ad948e1",
+    "openapi": "3.0.3",
+    "version": "v1beta",
+    "revision": "0"
+  },
+  "request": {
+    "required": [
+      "input",
+      "model"
+    ],
+    "input_properties": [
+      "background",
+      "environment",
+      "generation_config",
+      "input",
+      "labels",
+      "model",
+      "previous_interaction_id",
+      "response_format",
+      "response_mime_type",
+      "response_modalities",
+      "safety_settings",
+      "service_tier",
+      "store",
+      "stream",
+      "system_instruction",
+      "tools",
+      "webhook_config"
+    ],
+    "generation_config_properties": [
+      "image_config",
+      "max_output_tokens",
+      "seed",
+      "speech_config",
+      "stop_sequences",
+      "thinking_level",
+      "thinking_summaries",
+      "tool_choice",
+      "transcription_config",
+      "video_config"
+    ]
+  },
+  "tools": [
+    "function",
+    "code_execution",
+    "url_context",
+    "computer_use",
+    "mcp_server",
+    "google_search",
+    "file_search",
+    "google_maps",
+    "retrieval"
+  ],
+  "steps": [
+    "user_input",
+    "model_output",
+    "thought",
+    "function_call",
+    "code_execution_call",
+    "url_context_call",
+    "mcp_server_tool_call",
+    "google_search_call",
+    "file_search_call",
+    "google_maps_call",
+    "function_result",
+    "code_execution_result",
+    "url_context_result",
+    "google_search_result",
+    "mcp_server_tool_result",
+    "file_search_result",
+    "google_maps_result"
+  ],
+  "content": [
+    "text",
+    "image",
+    "audio",
+    "document",
+    "video"
+  ],
+  "events": [
+    "interaction.created",
+    "interaction.completed",
+    "interaction.status_update",
+    "error",
+    "step.start",
+    "step.delta",
+    "step.stop"
+  ],
+  "usage_properties": [
+    "cached_tokens_by_modality",
+    "grounding_tool_count",
+    "input_tokens_by_modality",
+    "output_tokens_by_modality",
+    "tool_use_tokens_by_modality",
+    "total_cached_tokens",
+    "total_input_tokens",
+    "total_output_tokens",
+    "total_thought_tokens",
+    "total_tokens",
+    "total_tool_use_tokens"
+  ],
+  "required_fields": {
+    "FunctionResultStep": [
+      "call_id",
+      "result",
+      "type"
+    ],
+    "TextContent": [
+      "text",
+      "type"
+    ]
+  }
+}

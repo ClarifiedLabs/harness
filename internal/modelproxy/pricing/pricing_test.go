@@ -161,6 +161,106 @@ func TestFlatPricerExposesTieredCatalogPricing(t *testing.T) {
 	}
 }
 
+func TestGoogleInteractionsPricesThoughtTokensAtOutputRate(t *testing.T) {
+	pricer := NewComposite()
+	provider := llm.ProviderConfig{Name: "google", APIType: "interactions"}
+	model := llm.ModelEntry{
+		Name:  "gemini-3.6-flash",
+		Price: llm.Price{Input: 1.5, Output: 7.5, CacheRead: 0.15},
+	}
+	got := pricer.PriceUsage(Input{
+		Provider: provider,
+		Model:    model,
+		Usage: llm.Usage{
+			InputTokens:     1_000_000,
+			CacheReadTokens: 1_000_000,
+			OutputTokens:    1_000_000,
+			ReasoningTokens: 1_000_000,
+		},
+	})
+	assertKnownCost(t, got, 16.65)
+
+	catalog := pricer.CatalogPricing(provider, model)
+	if !catalog.Handled || !catalog.Known || catalog.Price.Reasoning != model.Price.Output {
+		t.Fatalf("catalog pricing = %+v, want reasoning rate %v", catalog, model.Price.Output)
+	}
+}
+
+func TestGoogleInteractionsPreservesExplicitReasoningRateAndPriceTiers(t *testing.T) {
+	pricer := NewComposite()
+	provider := llm.ProviderConfig{Name: "google", APIType: "interactions"}
+	model := llm.ModelEntry{
+		Name: "gemini-tiered",
+		Price: llm.Price{
+			Input:     1,
+			Output:    4,
+			Reasoning: 3,
+			Tiers: []llm.PriceTier{{
+				Threshold: 100_000,
+				Input:     2,
+				Output:    8,
+			}},
+		},
+	}
+	got := pricer.PriceUsage(Input{
+		Provider: provider,
+		Model:    model,
+		Request:  llm.Request{EstimatedInputTokens: 100_001},
+		Usage: llm.Usage{
+			InputTokens:     1_000_000,
+			OutputTokens:    1_000_000,
+			ReasoningTokens: 1_000_000,
+		},
+	})
+	assertKnownCost(t, got, 18)
+
+	catalog := pricer.CatalogPricing(provider, model)
+	if catalog.Price.Reasoning != 3 || len(catalog.Price.Tiers) != 1 || catalog.Price.Tiers[0].Reasoning != 8 {
+		t.Fatalf("catalog pricing = %+v, want explicit base reasoning and inherited tier reasoning", catalog.Price)
+	}
+}
+
+func TestReasoningRateFallbackIsScopedToGoogleInteractions(t *testing.T) {
+	pricer := NewComposite()
+	model := llm.ModelEntry{Name: "model", Price: llm.Price{Input: 1, Output: 4}}
+	usage := llm.Usage{
+		InputTokens:     1_000_000,
+		OutputTokens:    1_000_000,
+		ReasoningTokens: 1_000_000,
+	}
+	for _, provider := range []llm.ProviderConfig{
+		{Name: "google", APIType: "openai"},
+		{Name: "compatible", APIType: "interactions"},
+	} {
+		got := pricer.PriceUsage(Input{Provider: provider, Model: model, Usage: usage})
+		assertKnownCost(t, got, 5)
+	}
+}
+
+func TestGoogleInteractionsPricesServiceTierThoughtTokens(t *testing.T) {
+	pricer := NewComposite()
+	provider := llm.ProviderConfig{
+		Name:    "google",
+		APIType: "interactions",
+		ServiceTiers: []llm.ServiceTier{{
+			ID:      "priority",
+			Request: llm.ServiceTierRequest{ServiceTier: "priority"},
+			Price:   llm.Price{Input: 2, Output: 10},
+		}},
+	}
+	got := pricer.PriceUsage(Input{
+		Provider: provider,
+		Model:    llm.ModelEntry{Name: "gemini", Price: llm.Price{Input: 1, Output: 4}},
+		Request:  llm.Request{ServiceTier: "priority"},
+		Usage: llm.Usage{
+			InputTokens:     1_000_000,
+			OutputTokens:    1_000_000,
+			ReasoningTokens: 1_000_000,
+		},
+	})
+	assertKnownCost(t, got, 22)
+}
+
 func TestFlatPricerZeroPriceUnknown(t *testing.T) {
 	// A model with no configured price (e.g. Sakana's routed fugu) cannot be costed.
 	got := NewComposite().PriceUsage(Input{

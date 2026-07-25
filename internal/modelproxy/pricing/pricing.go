@@ -51,7 +51,10 @@ type Composite struct {
 
 // NewComposite returns the default pricing chain.
 func NewComposite() Composite {
-	return Composite{flat: Flat{}}
+	return Composite{
+		pricers: []Pricer{GoogleInteractions{}},
+		flat:    Flat{},
+	}
 }
 
 // CatalogPricing returns a static per-million-token pricing schedule when one

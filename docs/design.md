@@ -556,6 +556,30 @@ Edge cases:
 | Temperature | omitted when nil | omitted when nil | omitted when nil | always omitted |
 | Reasoning controls | `reasoning.effort` / summary | provider-specific effort/budget | effort/budget/toggle | `thinking_level` and `thinking_summaries` |
 
+#### Gemini Interactions support boundary
+
+Harness implements the model-and-tools subset needed by the coding loop, not
+the full Interactions product surface. The official OpenAPI document is
+`https://ai.google.dev/static/api/interactions.openapi.json`. A scoped snapshot
+of its request fields and union discriminators lives in
+`internal/llm/interactions/testdata/openapi_surface.json`; its contract test
+requires every captured field/type to remain explicitly classified as supported
+or intentionally unsupported when that snapshot is refreshed.
+
+| Surface | Supported | Intentionally unsupported |
+|---|---|---|
+| Operation | streaming `POST /v1beta/interactions` for a model | read/delete/cancel, background work, managed agents, environments, webhooks |
+| Request controls | model/input, system instruction, stored continuation, functions, Google Search, service tier, output cap, stop sequences, thinking level/summaries; response format is fixed to plain text | labels, safety settings, arbitrary response modalities/formats, deprecated MIME shortcut, seed, tool choice, media/transcription configuration |
+| Content | text and inline image input; text output | audio, video, and document input; generated media |
+| Steps/tools | user/model text, thought signatures/summaries, function call/result, Google Search call/result | code execution, URL context, computer use, MCP server, file search, Maps, and retrieval steps/tools |
+| Stream/usage | all documented SSE envelope events; total input, cached, output, and thought tokens | modality breakdowns, tool-use totals, grounding query counts |
+
+Some backend events observed in practice (`interaction.failed` and
+`interaction.cancelled`) are accepted as compatible terminal extensions.
+Unsupported generated media and step types fail explicitly rather than being
+silently discarded. Status-only events are recognized and ignored because the
+coding loop has no intermediate state to expose.
+
 The same model-facing `ToolSchema.Parameters` bytes go into `parameters` vs
 `input_schema`. Harness strips nested JSON Schema `description` fields before
 advertising tools; each tool's top-level description remains the explanatory text.
@@ -887,6 +911,22 @@ pricing is representable as `llm.Price`, including context tiers. Request costs
 flow through the pricing package's generic interface: provider-specific pricers
 can return handled-but-unknown for dynamic models, and the generic pricer handles
 the existing per-1M-token `llm.Price` shape for all other configured models.
+For first-party Google Interactions targets, a provider-specific pricer fills an
+unset reasoning rate from the output rate because the API reports thought tokens
+separately while Google bills them as output tokens. An explicit reasoning rate
+still wins, and the fallback is applied to context and service-tier price
+schedules as well. This rule is deliberately not generic: other dialects may
+already include reasoning in their output count. The numeric input/output
+schedule still comes from models.dev (or a manual provider config); Google's
+official pricing page (`https://ai.google.dev/gemini-api/docs/pricing`) supplies
+the provider-specific billing semantics, not a model-ID keyed price feed.
+
+Google Search per-query charges are not part of `llm.Price` and are not added to
+`CostUSD`. Although the Interactions usage schema exposes
+`grounding_tool_count`, the public pricing source is a human-facing,
+model-dependent schedule rather than a stable model-ID keyed catalog. Harness
+therefore reports and budgets the token portion only instead of presenting a
+query fee as exact.
 
 The serving handler holds its registry, pricer, and served catalog behind an
 atomic snapshot. The initial snapshot is built at startup from the loaded

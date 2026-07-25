@@ -7,64 +7,20 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"harness/internal/llm"
 	"harness/internal/sse"
 )
 
 func TestProviderStreamsThoughtSearchAndFunctionCall(t *testing.T) {
-	stream := strings.Join([]string{
-		`event: interaction.created`,
-		`data: {"event_type":"interaction.created","interaction":{"id":"interaction-1","status":"in_progress"}}`,
-		``,
-		`event: step.start`,
-		`data: {"event_type":"step.start","index":0,"step":{"type":"thought","summary":[{"type":"text","text":"Need "}]}}`,
-		``,
-		`event: step.delta`,
-		`data: {"event_type":"step.delta","index":0,"delta":{"type":"thought_summary","content":{"type":"text","text":"current data."}}}`,
-		``,
-		`event: step.delta`,
-		`data: {"event_type":"step.delta","index":0,"delta":{"type":"thought_signature","signature":"thought-sig"}}`,
-		``,
-		`event: step.stop`,
-		`data: {"event_type":"step.stop","index":0}`,
-		``,
-		`event: step.start`,
-		`data: {"event_type":"step.start","index":1,"step":{"type":"google_search_call","id":"search-1"}}`,
-		``,
-		`event: step.delta`,
-		`data: {"event_type":"step.delta","index":1,"delta":{"type":"google_search_call","arguments":{"queries":["latest result"]},"signature":"search-sig"}}`,
-		``,
-		`event: step.stop`,
-		`data: {"event_type":"step.stop","index":1}`,
-		``,
-		`event: step.start`,
-		`data: {"event_type":"step.start","index":2,"step":{"type":"google_search_result","call_id":"search-1"}}`,
-		``,
-		`event: step.delta`,
-		`data: {"event_type":"step.delta","index":2,"delta":{"type":"google_search_result","result":{"search_suggestions":"html"},"signature":"result-sig"}}`,
-		``,
-		`event: step.stop`,
-		`data: {"event_type":"step.stop","index":2}`,
-		``,
-		`event: step.start`,
-		`data: {"event_type":"step.start","index":3,"step":{"type":"function_call","id":"call-1","name":"read_file","arguments":{}}}`,
-		``,
-		`event: step.delta`,
-		`data: {"event_type":"step.delta","index":3,"delta":{"type":"arguments_delta","arguments":"{\"path\":\"README.md\"}"}}`,
-		``,
-		`event: step.stop`,
-		`data: {"event_type":"step.stop","index":3}`,
-		``,
-		`event: interaction.completed`,
-		`data: {"event_type":"interaction.completed","interaction":{"id":"interaction-1","status":"requires_action","service_tier":"standard","usage":{"total_input_tokens":100,"total_cached_tokens":20,"total_output_tokens":10,"total_thought_tokens":30,"total_tokens":140}}}`,
-		``,
-		`event: done`,
-		`data: [DONE]`,
-		``,
-	}, "\n")
+	stream, err := os.ReadFile("testdata/thought_search_function.sse")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var sawBody wireRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +34,7 @@ func TestProviderStreamsThoughtSearchAndFunctionCall(t *testing.T) {
 			t.Errorf("decode body: %v", err)
 		}
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = io.WriteString(w, stream)
+		_, _ = w.Write(stream)
 	}))
 	defer server.Close()
 
@@ -152,6 +108,40 @@ func TestProviderParsesNativeGeminiError(t *testing.T) {
 		apiErr.Code != "INVALID_ARGUMENT" ||
 		apiErr.Message != "bad previous_interaction_id" {
 		t.Fatalf("error = %#v", got)
+	}
+}
+
+func TestDecoderMarksNativeTransientErrorsRetryable(t *testing.T) {
+	for _, code := range []string{"too_many_requests", "RESOURCE_EXHAUSTED", "unavailable", "api_error"} {
+		t.Run(code, func(t *testing.T) {
+			stream := `data: {"event_type":"error","error":{"code":"` + code + `","message":"Please try again in 2s."}}` + "\n\n"
+			var got error
+			decode(context.Background(), strings.NewReader(stream), func(_ llm.StreamEvent, err error) bool {
+				if err != nil {
+					got = err
+				}
+				return true
+			})
+			var apiErr *llm.APIError
+			if !errors.As(got, &apiErr) || !apiErr.Retryable || apiErr.RetryAfter != 2*time.Second {
+				t.Fatalf("error = %#v, want retryable with a 2s delay", got)
+			}
+		})
+	}
+}
+
+func TestDecoderLeavesNativeInvalidRequestNonRetryable(t *testing.T) {
+	stream := "data: {\"event_type\":\"error\",\"error\":{\"code\":\"invalid_request\",\"message\":\"bad request\"}}\n\n"
+	var got error
+	decode(context.Background(), strings.NewReader(stream), func(_ llm.StreamEvent, err error) bool {
+		if err != nil {
+			got = err
+		}
+		return true
+	})
+	var apiErr *llm.APIError
+	if !errors.As(got, &apiErr) || apiErr.Retryable {
+		t.Fatalf("error = %#v, want non-retryable API error", got)
 	}
 }
 
