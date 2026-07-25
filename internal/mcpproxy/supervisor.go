@@ -34,6 +34,10 @@ const (
 	shutdownStdinWait = 5 * time.Second
 	// shutdownTermWait is how long Shutdown waits after SIGTERM before SIGKILL.
 	shutdownTermWait = 2 * time.Second
+	// childOutputDrainWait bounds how long a crashed stdio child may keep stdout
+	// open after its process exits. Normally EOF is immediate; the bound prevents
+	// an inherited descriptor in a stray grandchild from blocking restarts.
+	childOutputDrainWait = 5 * time.Second
 
 	categoryServer = "mcp_server"
 	categoryGate   = "mcp_proxy"
@@ -87,6 +91,9 @@ type Supervisor struct {
 	// sleep is the ctx-aware backoff sleeper; injectable for tests to skip real
 	// waits. nil → a real ctx-aware sleep.
 	sleep func(context.Context, time.Duration)
+	// wrapConn decorates a spawned child's stdio connection in tests. nil uses
+	// the raw stdio connection.
+	wrapConn func(io.ReadWriteCloser) io.ReadWriteCloser
 
 	mu     sync.Mutex
 	state  State
@@ -188,13 +195,20 @@ func (s *Supervisor) runStdio(ctx context.Context) {
 		// Block until the child dies or the supervisor is stopped.
 		<-done
 		childErr := <-waitErr
+		if ctx.Err() == nil {
+			// Stop routing new calls to this client while its reader consumes any
+			// response bytes the child wrote immediately before exiting.
+			s.setState(StateRestarting)
+		}
+		if !waitForDone(ctx, client.Done(), childOutputDrainWait) && ctx.Err() == nil {
+			s.logger.Warn("timed out draining downstream stdout after exit", logging.Category(categoryServer))
+		}
 		client.Close()
 
 		if ctx.Err() != nil {
 			return
 		}
 		// Crash: restart with backoff.
-		s.setState(StateRestarting)
 		s.logger.Warn("downstream server exited; restarting", logging.Category(categoryServer), "err", childErr)
 		if !s.afterFailedStart(ctx, &attempt, "restart", childErr) {
 			return
@@ -239,6 +253,9 @@ func (s *Supervisor) startChild() (*exec.Cmd, *mcp.Client, io.ReadWriteCloser, <
 	go s.drainStderr(stderr)
 
 	conn := mcp.NewStdioConn(stdout, stdin)
+	if s.wrapConn != nil {
+		conn = s.wrapConn(conn)
+	}
 	client := mcp.NewClient(conn, mcp.ClientOptions{
 		Info:           proxyClientInfo(),
 		OnToolsChanged: s.handleDownstreamListChanged,
@@ -664,21 +681,21 @@ func (s *Supervisor) Shutdown(ctx context.Context) {
 // rather than polling. A cancelled ctx collapses each wait stage to zero.
 func (s *Supervisor) reapChild(ctx context.Context, cmd *exec.Cmd, done <-chan struct{}) {
 	pid := cmd.Process.Pid
-	if waitChildExit(ctx, done, shutdownStdinWait) {
+	if waitForDone(ctx, done, shutdownStdinWait) {
 		return
 	}
 	_ = syscall.Kill(-pid, syscall.SIGTERM)
-	if waitChildExit(ctx, done, shutdownTermWait) {
+	if waitForDone(ctx, done, shutdownTermWait) {
 		return
 	}
 	_ = syscall.Kill(-pid, syscall.SIGKILL)
-	waitChildExit(ctx, done, shutdownTermWait)
+	waitForDone(ctx, done, shutdownTermWait)
 }
 
-// waitChildExit reports whether done closed within d (the run loop closes it
-// after cmd.Wait). A cancelled ctx returns immediately as not-yet-exited so the
-// caller escalates without delay.
-func waitChildExit(ctx context.Context, done <-chan struct{}, d time.Duration) bool {
+// waitForDone reports whether done closed within d. A cancelled ctx returns
+// immediately as not-yet-done so callers can abandon draining or escalate child
+// shutdown without delay.
+func waitForDone(ctx context.Context, done <-chan struct{}, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {

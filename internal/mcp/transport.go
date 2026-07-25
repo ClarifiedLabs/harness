@@ -31,6 +31,12 @@ type cancelTransport interface {
 	CallCancelable(ctx context.Context, method string, params json.RawMessage, onCancel func(id json.RawMessage)) (json.RawMessage, error)
 }
 
+// doneTransport is implemented by persistent transports that expose their
+// connection lifetime.
+type doneTransport interface {
+	Done() <-chan struct{}
+}
+
 // peerTransport adapts a *jsonrpc.Peer to the Transport (and cancelTransport)
 // interfaces. It is the transport used for stream connections such as downstream
 // stdio pipes and test in-memory peers.
@@ -55,6 +61,10 @@ func (t peerTransport) CallCancelable(ctx context.Context, method string, params
 
 func (t peerTransport) Notify(_ context.Context, method string, params json.RawMessage) error {
 	return t.peer.Notify(method, params)
+}
+
+func (t peerTransport) Done() <-chan struct{} {
+	return t.peer.Done()
 }
 
 func (t peerTransport) Close() error {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -14,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"harness/internal/mcp"
 )
 
 // syscallZero is the no-op signal used to probe whether a pid is still alive.
@@ -38,6 +41,40 @@ func helperSpawn(t *testing.T, env map[string]string) func() *exec.Cmd {
 type testLogBuf struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
+}
+
+// gatedReadConn holds back the first read containing match after consuming it
+// from the underlying connection. This lets a test prove that process-exit
+// handling does not close a client before its buffered response is decoded.
+type gatedReadConn struct {
+	io.ReadWriteCloser
+	match   []byte
+	blocked chan struct{}
+	release chan struct{}
+	tail    []byte
+	once    sync.Once
+}
+
+func (c *gatedReadConn) Read(p []byte) (int, error) {
+	n, err := c.ReadWriteCloser.Read(p)
+	if n == 0 || len(c.match) == 0 {
+		return n, err
+	}
+
+	combined := make([]byte, 0, len(c.tail)+n)
+	combined = append(combined, c.tail...)
+	combined = append(combined, p[:n]...)
+	matched := bytes.Contains(combined, c.match)
+
+	keep := min(len(combined), len(c.match)-1)
+	c.tail = append(c.tail[:0], combined[len(combined)-keep:]...)
+	if matched {
+		c.once.Do(func() {
+			close(c.blocked)
+			<-c.release
+		})
+	}
+	return n, err
 }
 
 func (b *testLogBuf) Write(p []byte) (int, error) {
@@ -167,6 +204,17 @@ func TestSupervisorStderrBurstDoesNotWedgeCalls(t *testing.T) {
 
 func TestSupervisorCrashRestartsAndRecaches(t *testing.T) {
 	var changed atomic.Int32
+	const responseMarker = "drain-race-marker"
+	responseBuffered := make(chan struct{})
+	releaseResponse := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseResponse:
+		default:
+			close(releaseResponse)
+		}
+	}()
+
 	rs := ResolvedServer{Name: "h", Transport: TransportStdio, Command: "helper"}
 	sup := newStdioSupervisor(t, rs,
 		map[string]string{
@@ -175,6 +223,14 @@ func TestSupervisorCrashRestartsAndRecaches(t *testing.T) {
 		},
 		slog.New(slog.DiscardHandler),
 		func() { changed.Add(1) })
+	sup.wrapConn = func(conn io.ReadWriteCloser) io.ReadWriteCloser {
+		return &gatedReadConn{
+			ReadWriteCloser: conn,
+			match:           []byte(responseMarker),
+			blocked:         responseBuffered,
+			release:         releaseResponse,
+		}
+	}
 	ctx := t.Context()
 	sup.Start(ctx)
 	defer sup.Shutdown(context.Background())
@@ -194,13 +250,45 @@ func TestSupervisorCrashRestartsAndRecaches(t *testing.T) {
 		t.Fatalf("tools not re-cached after restart: %+v", sup.Tools())
 	}
 
-	// A subsequent call succeeds against the restarted child.
-	res, err := sup.CallTool(context.Background(), "echo", json.RawMessage(`{"after":"restart"}`))
-	if err != nil {
-		t.Fatalf("CallTool after restart: %v", err)
+	// Hold the restarted child's response inside the connection reader until
+	// the supervisor has observed that child exit. The call must remain live
+	// while the supervisor drains stdout instead of closing the client.
+	type callResult struct {
+		res *mcp.CallToolResult
+		err error
 	}
-	if res.IsError {
-		t.Fatalf("call after restart errored: %+v", res)
+	callDone := make(chan callResult, 1)
+	go func() {
+		res, err := sup.CallTool(context.Background(), "echo", json.RawMessage(`{"after":"`+responseMarker+`"}`))
+		callDone <- callResult{res: res, err: err}
+	}()
+
+	select {
+	case <-responseBuffered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restarted child response was not buffered")
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		return sup.State() == StateRestarting || sup.Starts() >= 3
+	})
+	select {
+	case got := <-callDone:
+		t.Fatalf("CallTool completed before buffered response was released: result=%+v err=%v", got.res, got.err)
+	default:
+	}
+
+	close(releaseResponse)
+	var got callResult
+	select {
+	case got = <-callDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CallTool did not complete after buffered response was released")
+	}
+	if got.err != nil {
+		t.Fatalf("CallTool after restart: %v", got.err)
+	}
+	if got.res.IsError {
+		t.Fatalf("call after restart errored: %+v", got.res)
 	}
 }
 

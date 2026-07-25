@@ -303,6 +303,15 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
+// Done is closed when a stream-backed client's transport stops. It returns nil
+// for transports without a persistent connection lifecycle, such as HTTP.
+func (c *Client) Done() <-chan struct{} {
+	if transport, ok := c.transport.(doneTransport); ok {
+		return transport.Done()
+	}
+	return nil
+}
+
 // Close closes the underlying transport.
 func (c *Client) Close() error {
 	return c.transport.Close()
