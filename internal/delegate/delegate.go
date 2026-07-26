@@ -428,15 +428,17 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	var terminalMessageCount int
 	var terminalUpdated time.Time
 	var terminalOnce sync.Once
+	flushDisplay := func() {}
 	finish := func() {
 		terminalOnce.Do(func() {
+			flushDisplay()
 			progress.markFinished()
-			activity.Close()
 			if terminalUpdated.IsZero() {
 				terminalUpdated = r.now()
 			}
 			_, err := r.saveChildMeta(runtime, launch, childID, req, terminalStatus, created, terminalUpdated, terminalUsage, terminalErr, terminalMessageCount)
 			result.SaveError = errors.Join(result.SaveError, err)
+			activity.Finish(terminalStatus, terminalUsage.Turns)
 		})
 	}
 	defer finish()
@@ -472,7 +474,8 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	child.SetCacheAffinityID(childCacheAffinityID(runtime.CacheAffinityID, childID))
 	child.SetSystem(launch.System)
 
-	sink := newChildSink(childDir, childTodos, hasTodoTool, progress, activity)
+	sink := newChildSink(childDir, childTodos, hasTodoTool, progress, activity, inlineReasoningEnabled(launch.Reasoning))
+	flushDisplay = sink.flushDisplay
 	sink.User(req.Task)
 	runErr := child.RunPrompt(ctx, req.Task, sink)
 	usage := sink.usage
@@ -630,6 +633,15 @@ func childTerminalStatus(err error) string {
 		return session.ChildStatusCanceled
 	}
 	return session.ChildStatusFailed
+}
+
+func inlineReasoningEnabled(reasoning llm.ReasoningConfig) bool {
+	switch strings.ToLower(strings.TrimSpace(reasoning.Summary)) {
+	case "auto", "concise", "detailed":
+		return true
+	default:
+		return false
+	}
 }
 
 func lastAssistantText(msgs []llm.Message) string {
@@ -872,22 +884,41 @@ type childSink struct {
 	usage       agent.PromptUsage
 	progress    *Progress // compatibility live progress; may be nil
 	activity    *ActivityRegistration
+	assistant   *inlineLineAccumulator
+	reasoning   bool
 	sessionDir  string
 	todos       *todo.Store
 	todoContext bool
-	pending     map[string]llm.ToolCall
+	pending     map[string]pendingChildTool
 	turn        int
 	attempt     int
 	appendMu    sync.Mutex
 	appendErr   error
 }
 
-func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progress *Progress, activity ...*ActivityRegistration) *childSink {
-	var registration *ActivityRegistration
-	if len(activity) > 0 {
-		registration = activity[0]
+type pendingChildTool struct {
+	call    llm.ToolCall
+	summary string
+}
+
+func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progress *Progress, activity *ActivityRegistration, reasoning ...bool) *childSink {
+	sink := &childSink{
+		sessionDir:  sessionDir,
+		todos:       todos,
+		todoContext: todoContext,
+		progress:    progress,
+		activity:    activity,
+		pending:     make(map[string]pendingChildTool),
 	}
-	return &childSink{sessionDir: sessionDir, todos: todos, todoContext: todoContext, progress: progress, activity: registration, pending: make(map[string]llm.ToolCall)}
+	if len(reasoning) > 0 {
+		sink.reasoning = reasoning[0]
+	}
+	if activity.hasFeed() {
+		sink.assistant = newInlineLineAccumulator(activityChunkMaxBytes, func(text string, continuation bool) {
+			sink.activity.publishText(ActivityEventAssistant, text, sink.turn, sink.attempt, continuation)
+		})
+	}
+	return sink
 }
 
 // Progress is a lock-protected snapshot of one delegate run's live activity,
@@ -1003,15 +1034,15 @@ func (s *childSink) User(text string) {
 
 func (s *childSink) TextDelta(text string) {
 	s.append(session.Event{Type: session.EventAssistantDelta, Prompt: 1, Turn: s.turn, Attempt: s.attempt, Text: text})
-	// Keep model-authored text out of process-wide live status. The durable child
-	// transcript remains the authoritative replay surface.
 	s.activity.MarkActivity("replying")
+	s.assistant.Write(text)
 }
 
 func (s *childSink) AssistantPhase(phase string) {
 	if phase == "" || !llm.ValidAssistantPhase(phase) {
 		return
 	}
+	s.flushDisplay()
 	s.append(session.Event{Type: session.EventAssistantPhase, Prompt: 1, Turn: s.turn, Attempt: s.attempt, Phase: phase})
 }
 
@@ -1020,21 +1051,31 @@ func (s *childSink) ReasoningSummary(text string) {
 	if text == "" {
 		return
 	}
-	// Reasoning text remains only in the established replay path. The active
-	// registry records a semantic phase, never raw reasoning content.
+	s.flushDisplay()
 	s.activity.MarkActivity("thinking")
 	s.append(session.Event{Type: session.EventReasoningSummary, Prompt: 1, Turn: s.turn, Attempt: s.attempt, Text: text})
+	if !s.reasoning || !s.activity.hasFeed() {
+		return
+	}
+	accumulator := newInlineLineAccumulator(activityChunkMaxBytes, func(line string, continuation bool) {
+		s.activity.publishText(ActivityEventReasoning, line, s.turn, s.attempt, continuation)
+	})
+	accumulator.Write(text)
+	accumulator.Flush()
 }
 
 func (s *childSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
+	s.flushDisplay()
 	s.turn = turn
 	s.attempt = attempt
 	s.progress.markTurn(turn, attempt, ctx)
 	s.activity.MarkTurn(turn, attempt, ctx)
 	s.append(session.Event{Type: session.EventTurnAttemptStart, Prompt: 1, Turn: turn, Attempt: attempt, Context: childContextSnapshot(ctx)})
+	s.activity.publish(ActivityEvent{Kind: ActivityEventTurnStart, Turn: turn, Attempt: attempt})
 }
 
 func (s *childSink) TurnAttemptAbandoned(turn, attempt int) {
+	s.flushDisplay()
 	s.activity.MarkActivity(fmt.Sprintf("retrying after attempt %d", attempt))
 	s.append(session.Event{
 		Type:    session.EventTurnAttemptAbandoned,
@@ -1043,6 +1084,7 @@ func (s *childSink) TurnAttemptAbandoned(turn, attempt int) {
 		Attempt: attempt,
 		Display: fmt.Sprintf("[turn: %d attempt %d discarded; retrying]", turn, attempt),
 	})
+	s.activity.publish(ActivityEvent{Kind: ActivityEventAttemptDiscarded, Turn: turn, Attempt: attempt})
 }
 
 func (s *childSink) TurnAttemptComplete(u agent.TurnAttemptUsage) {
@@ -1057,6 +1099,10 @@ func (*childSink) ToolUseStart(llm.ToolCall) {}
 func (*childSink) ToolUseDelta(int, string) {}
 
 func (s *childSink) ModelRequestEvent(event llm.ModelRequestEvent) {
+	kind, text, publish := safeModelRequestLine(event)
+	if publish {
+		s.flushDisplay()
+	}
 	if activity := safeModelRequestActivity(event); activity != "" {
 		s.activity.MarkActivity(activity)
 	}
@@ -1068,26 +1114,41 @@ func (s *childSink) ModelRequestEvent(event llm.ModelRequestEvent) {
 		Attempt:      s.attempt,
 		ModelRequest: &copyEvent,
 	})
+	if publish {
+		s.activity.publishText(kind, text, s.turn, s.attempt, false)
+	}
 }
 
 func (s *childSink) ToolStart(call llm.ToolCall) {
-	s.pending[call.ID] = call
+	s.flushDisplay()
+	summary := safeToolActivity(call)
+	s.pending[call.ID] = pendingChildTool{call: call, summary: summary}
 	s.progress.markTool()
-	s.activity.MarkActivity(safeToolActivity(call))
+	s.activity.MarkActivity(summary)
 	s.append(session.Event{Type: session.EventToolStart, Prompt: 1, Turn: s.turn, ToolID: call.ID, Tool: call.Name, Input: call.Input})
+	s.activity.publishText(ActivityEventToolStart, summary, s.turn, s.attempt, false)
 }
 
 func (s *childSink) ToolResult(result llm.ToolResult) {
-	call := s.pending[result.ForID]
+	s.flushDisplay()
+	pending := s.pending[result.ForID]
 	delete(s.pending, result.ForID)
+	call := pending.call
+	summary := pending.summary
+	if summary == "" {
+		summary = safeToolActivity(call)
+	}
 	display := fmt.Sprintf("[tool: %s completed]", call.Name)
+	kind := ActivityEventToolComplete
 	if result.IsError {
 		display = fmt.Sprintf("[tool: %s error: %s]", call.Name, preview(firstLine(result.Text), 120))
 		s.activity.MarkActivity("tool " + sanitizeRetainedText(call.Name, maxToolNameRunes) + " failed")
+		kind = ActivityEventToolError
 	} else {
 		s.activity.MarkActivity("tool " + sanitizeRetainedText(call.Name, maxToolNameRunes) + " complete")
 	}
 	s.append(session.Event{Type: session.EventToolResult, Prompt: 1, Turn: s.turn, ToolID: result.ForID, Tool: call.Name, Display: display})
+	s.activity.publishText(kind, summary, s.turn, s.attempt, false)
 }
 
 func (s *childSink) ArchiveToolResult(result llm.ToolResult) (agent.ToolResultArchive, error) {
@@ -1102,7 +1163,11 @@ func (s *childSink) ArchiveToolResult(result llm.ToolResult) (agent.ToolResultAr
 }
 
 func (s *childSink) Notice(msg string) {
+	s.flushDisplay()
 	s.append(session.Event{Type: session.EventNotice, Prompt: 1, Turn: s.turn, Display: msg})
+	if text, ok := safeNoticeLine(msg); ok {
+		s.activity.publishText(ActivityEventNotice, text, s.turn, s.attempt, false)
+	}
 }
 
 func (s *childSink) TurnComplete(usage agent.TurnUsage) {
@@ -1125,11 +1190,19 @@ func (s *childSink) RequestContext() []string {
 }
 
 func (s *childSink) PromptComplete(usage agent.PromptUsage) {
+	s.flushDisplay()
 	s.usage = usage
 	u := usage.Usage
 	s.activity.MarkUsage(u)
 	s.activity.MarkActivity("finishing")
 	s.append(session.Event{Type: session.EventPromptUsage, Prompt: 1, Usage: &u})
+}
+
+func (s *childSink) flushDisplay() {
+	if s == nil || s.assistant == nil {
+		return
+	}
+	s.assistant.Flush()
 }
 
 func (s *childSink) append(ev session.Event) {

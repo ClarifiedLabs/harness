@@ -1092,8 +1092,10 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
 (agent definitions, compaction knobs, `agents_md_warn_bytes`,
 `delegate_max_turns`, `delegate_max_depth`) are config-file-only (listed below).
 `delegate_output` has the normal flag/env/file/default precedence and accepts
-`status`, `off`, and the reserved `lines` value (currently equivalent to
-`status`).
+`status`, `off`, and `lines`. `status` enables only the compact TTY row,
+`off` constructs no delegate display registry/feed, and `lines` adds curated
+scrolling child activity on stderr (including on non-TTY output). Quiet
+constructs neither registry nor feed.
 
 - Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_MODEL`, plus
   most `HARNESS_*` equivalents for user-facing flags. `trace_proxy` /
@@ -2161,16 +2163,32 @@ this subsection records the common runner those argv tools point at.
 - A shared process-local `delegate.ActivityRegistry` tracks every running child,
   including concurrent background work and recursively rebound nested delegates.
   Registration starts only after child identity and running metadata setup, and
-  the existing exactly-once terminalization closure removes it on completion,
-  failure, or cancellation. Renderer snapshots are immutable and taken before
-  the terminal mutex. Stable display labels (`d1`, `d2`, …) are independent of
-  durable child IDs; the greatest activity sequence selects the latest child,
-  with durable ID as a deterministic tie-break.
+  the Runner's exactly-once terminalization closure flushes pending display text,
+  persists final child metadata, publishes the terminal lifecycle event, and
+  removes the registry entry. Stable display labels (`d1`, `d2`, …) are
+  independent of durable child IDs; the registry is their sole allocator. The
+  greatest activity sequence selects the latest active child, with durable ID as
+  a deterministic tie-break.
 - Registry activity is bounded and ANSI/control-sanitized before retention. It
   may contain turn/attempt, context and usage totals, retry state, a semantic
   assistant reply state, and allowlisted path fields for local file tools. It
   never retains model-authored reply text, reasoning, raw tool results, command
   text, URLs/search patterns, unknown arguments, or generic serialized JSON.
+- In `delegate_output=lines`, the registry owns one optional `ActivityFeed`.
+  Publishers append structured, sanitized events only after the corresponding
+  replay event; they never call UI code or wait for a consumer. The feed assigns
+  one process-local sequence, retains at most 512 events / 256 KiB, returns
+  64-event / 64-KiB batches, and rotates a close-and-replace notification
+  channel. Start/terminal lifecycle records evict ordinary records first;
+  sequence reads synthesize a gap for each missing interval. The active registry,
+  not this lossy feed, remains authoritative for current status.
+- The child display coalescer preserves ordinary spaces, strips split CSI/OSC,
+  normalizes CRLF, drops invalid UTF-8, expands tabs, replaces controls, and
+  emits at most 2,048 UTF-8 bytes per assistant/reasoning chunk. Feed events are
+  capped at 4,096 bytes. Tool completion reuses the safe summary captured at
+  start; notice and model-request publication uses exact/numeric allowlists and
+  structured fields, never result/provider/error text. Reasoning requires an
+  already-resolved child summary mode of `auto`, `concise`, or `detailed`.
 
 ### 9.15 background jobs
 
@@ -2356,8 +2374,7 @@ backoff allows.
   model-backed compaction or handoff summary, or a join-required background
   delegate is outstanding, the static waiting line is replaced by a single in-place
   line painted with `\r\x1b[2K` and repainted ~once a second by a `time.Ticker`
-  goroutine (with a mutex + stop-and-drain handshake so it never interleaves with
-  streamed bytes): `[turn: 1 · 12s · ctx 30% 60.0k/200.0k │ prompt 18s]`,
+  goroutine (with a stop-and-drain handshake): `[turn: 1 · 12s · ctx 30% 60.0k/200.0k │ prompt 18s]`,
   `[tool: grep args=["x"] · 3s]`, `[context: compacting · 3s]`,
   `[handoff: generating brief · 3s]`, or
   `[background: waiting for delegates · 12s │ prompt 30s]`, with the same compact key
@@ -2373,9 +2390,35 @@ backoff allows.
   The registry is authoritative
   when configured; legacy foreground/background progress closures are only a
   compatibility fallback for isolated renderers. `delegate_output=off` omits
-  delegate details without disabling unrelated status, `lines` currently aliases
-  `status`, and quiet/non-TTY rendering still suppresses the row. It is erased the
+  delegate details without disabling unrelated status; `lines` keeps this row and
+  additionally enables scrolling child lines. Quiet/non-TTY rendering suppresses
+  the row. It is erased the
   instant real output or a tool line scrolls in — not a sticky bar or scroll region.
+- **Inline delegate activity.** `delegate_output=lines` starts one prompt-scoped
+  feed consumer independently of the live-status ticker. It discards pre-prompt
+  feed history, reads one bounded batch, and advances its sole cursor only after
+  a best-effort stderr write. An incomplete parent plain or Markdown source line
+  holds the cursor in place; newline-complete lines are safe even inside a code
+  fence or buffered table, and querying the boundary never flushes Markdown or
+  adds a parent newline. Detaching delegate progress requests an acknowledged
+  drain; prompt completion finishes the parent line, drains through a captured
+  tail, and stops the consumer. Missing sequences render as
+  `[delegate output] omitted N event` / `N events`. Inline lines are ANSI-free,
+  timestamp-free, absent from parent persistence/context, and never write
+  stdout.
+- **Physical output coordination.** The CLI constructs one
+  `OutputCoordinator` from the real stdout/stderr streams and gives its adapters
+  to the renderer, app, logger, prompt editor/pickers, and inline consumer.
+  Renderer assistant/status state uses one `renderMu`; registry/feed snapshots
+  happen before it, and physical writes acquire the coordinator only afterward.
+  The coordinator owns the drawn prompt snapshot and desired transient status
+  bytes, so status erase/activity write/status repaint and prompt
+  clear/log-or-activity/prompt redraw are atomic. Code holding its mutex does not
+  acquire renderer, feed/registry, or logging locks or wait for goroutines.
+  Wrappers expose the underlying file only for TTY capability checks; writes
+  still pass through the coordinator. This preserves stdout bytes while
+  preventing prompt, ticker, log, parent, and child terminal bytes from
+  interleaving.
 - **During-prompt input line.** Keystrokes typed during a prompt are read in raw,
   echo-off mode and shown on that wait line after a `>` marker
   (`[turn: 1 · 12s │ prompt 18s] > draft`). Pressing Enter during a prompt
@@ -2810,7 +2853,10 @@ type UsageTotals struct {
   paths, error, usage, and message count. The delegate Runner creates `running`
   metadata, then owns one terminal transition to `completed`, `failed`, or
   `canceled`; state-save failure does not skip the terminal metadata attempt.
-  `prompt_usage` remains the final normal child event.
+  `prompt_usage` remains the final normal child event. Inline delegate lines are
+  process-local display events only: they are not appended to either parent or
+  child persistence. Child `raw.ndjson` retains the exact replay callbacks and
+  remains the full-fidelity source for `session replay --follow`.
 - `harness session replay <session-dir>` prints `raw.ndjson` as the familiar
   user-facing terminal view, filtering assistant/reasoning deltas from retry
   attempts that were explicitly discarded before a later successful attempt.

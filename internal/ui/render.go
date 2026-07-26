@@ -43,6 +43,7 @@ const submittedPromptRule = markdown.HorizontalRule
 // plus NO_COLOR / -no-color); Now is injected so durations are
 // deterministic in tests (design §10, §13).
 type RenderOptions struct {
+	Output                  *OutputCoordinator
 	Color                   bool
 	Markdown                bool
 	Verbose                 bool
@@ -58,6 +59,7 @@ type RenderOptions struct {
 	// interactive, non-quiet TTY; tests set it explicitly.
 	LiveStatus               bool
 	DelegateActivity         *delegate.ActivityRegistry
+	DelegateFeed             *delegate.ActivityFeed
 	DisableDelegateStatus    bool
 	Model                    string
 	Registry                 *llm.Registry
@@ -72,6 +74,7 @@ type RenderOptions struct {
 // one-liners, the usage line, and notices go to errw so one-shot stdout carries
 // only the model's answer (design §10).
 type Renderer struct {
+	output                  *OutputCoordinator
 	out                     io.Writer
 	errw                    io.Writer
 	color                   bool
@@ -93,10 +96,11 @@ type Renderer struct {
 	currentTurnStart time.Time
 	promptStart      time.Time
 
-	assistantMu       sync.Mutex // guards streamed assistant state and writes to out
+	renderMu          sync.Mutex // guards assistant/Markdown and logical live-status state
 	assistantLineOpen bool
 	assistantMarkdown *markdown.Stream
 	assistantPhase    string
+	activityBoundary  chan struct{}
 
 	visiblePreFinalOutput bool
 	visibleFinalOutput    bool
@@ -125,13 +129,11 @@ type Renderer struct {
 	compactionWarned bool
 
 	// Live wait-time counter + during-prompt input line (r12 + during-prompt
-	// input). statusMu guards every field below and serialises the ticker
-	// goroutine against the synchronous event-sink writes so the two never
-	// interleave terminal bytes.
+	// input). renderMu guards every field below; OutputCoordinator serializes
+	// the resulting physical terminal writes.
 	liveStatus            bool
 	delegateActivity      *delegate.ActivityRegistry
 	disableDelegateStatus bool
-	statusMu              sync.Mutex
 	statusActive          bool                  // in a wait; the ticker should keep the line painted
 	statusDrawn           bool                  // a status line is currently on the terminal
 	statusLabel           string                // e.g. "turn: 3" or "tool: grep args=[\"x\"]"
@@ -145,6 +147,18 @@ type Renderer struct {
 	ticker                *time.Ticker
 	tickerStop            chan struct{}
 	tickerDone            chan struct{}
+
+	delegateFeed    *delegate.ActivityFeed
+	activityMu      sync.Mutex
+	activityCursor  uint64
+	activityControl chan activityControl
+	activityDone    chan struct{}
+}
+
+type activityControl struct {
+	through uint64
+	stop    bool
+	ack     chan struct{}
 }
 
 // NewRenderer builds a Renderer. A nil Now defaults to time.Now.
@@ -153,9 +167,18 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 	if now == nil {
 		now = time.Now
 	}
+	output := opts.Output
+	if output == nil {
+		output = NewOutputCoordinator(out, errw)
+	}
+	activityFeed := opts.DelegateFeed
+	if opts.Quiet {
+		activityFeed = nil
+	}
 	return &Renderer{
-		out:                     out,
-		errw:                    errw,
+		output:                  output,
+		out:                     output.Stdout(),
+		errw:                    output.Stderr(),
 		color:                   opts.Color,
 		markdown:                opts.Markdown,
 		verbose:                 opts.Verbose,
@@ -165,6 +188,7 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 		suppressUsage:           opts.SuppressUsage,
 		liveStatus:              opts.LiveStatus && !opts.Quiet,
 		delegateActivity:        opts.DelegateActivity,
+		delegateFeed:            activityFeed,
 		disableDelegateStatus:   opts.DisableDelegateStatus,
 		model:                   opts.Model,
 		registry:                opts.Registry,
@@ -174,6 +198,7 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 		timestampLayout:         opts.TimestampLayout,
 		width:                   opts.Width,
 		pending:                 make(map[string]llm.ToolCall),
+		activityBoundary:        make(chan struct{}),
 	}
 }
 
@@ -182,9 +207,10 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 // prompt.
 func (r *Renderer) StartPrompt() {
 	now := r.now()
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	r.promptStart = now
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
+	r.startActivityConsumer()
 }
 
 // StartPromptRun records the prompt execution start for its usage line.
@@ -194,21 +220,25 @@ func (r *Renderer) StartPromptRun() {
 	now := r.now()
 	r.promptRunStart = now
 	r.currentTurnStart = time.Time{}
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	if r.promptStart.IsZero() {
 		r.promptStart = now
 	}
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
 	r.largeRequestWarned = false
 	r.compactionWarned = false
 	r.promptCost = 0
 	r.promptCostKnown = false
 	r.promptCostSet = false
+	r.renderMu.Lock()
 	r.assistantMarkdown = nil
+	r.assistantLineOpen = false
 	r.assistantPhase = ""
 	r.visiblePreFinalOutput = false
 	r.visibleFinalOutput = false
 	r.finalSeparatorPrinted = false
+	r.signalActivityBoundaryLocked()
+	r.renderMu.Unlock()
 }
 
 // SetModel updates the model used for subsequent usage/cost summaries.
@@ -235,8 +265,8 @@ func (r *Renderer) TextDelta(text string) {
 	if text == "" {
 		return
 	}
-	r.statusClear()
-	r.assistantMu.Lock()
+	r.renderMu.Lock()
+	r.statusClearLocked()
 	r.writeFinalSeparatorIfNeededLocked()
 	if r.markdown {
 		r.ensureAssistantMarkdownLocked()
@@ -248,7 +278,8 @@ func (r *Renderer) TextDelta(text string) {
 	}
 	r.markAssistantTextVisibleLocked()
 	lineOpen := r.assistantLineOpen
-	r.assistantMu.Unlock()
+	r.signalActivityBoundaryLocked()
+	r.renderMu.Unlock()
 	r.resumeLiveModelWaitAfterAssistantText(text, lineOpen)
 }
 
@@ -256,39 +287,47 @@ func (r *Renderer) AssistantPhase(phase string) {
 	if !llm.ValidAssistantPhase(phase) || phase == "" {
 		return
 	}
+	r.renderMu.Lock()
 	r.assistantPhase = phase
+	r.renderMu.Unlock()
 }
 
 func (r *Renderer) ReasoningSummary(text string) {
 	if r.suppressReasoningOutput {
 		return
 	}
-	r.statusClear()
 	r.flushToolUseStarts()
-	r.finishAssistantLine()
+	r.renderMu.Lock()
+	defer r.renderMu.Unlock()
+	r.statusClearLocked()
+	r.finishAssistantLineLocked()
 	block := r.reasoningSummaryBlock(text)
 	if block == "" {
 		return
 	}
 	io.WriteString(r.out, block)
 	r.visiblePreFinalOutput = true
+	r.signalActivityBoundaryLocked()
 }
 
 func (r *Renderer) ReasoningSummaryStatus(text string) {
 	if r.suppressReasoningOutput {
 		return
 	}
-	r.statusClear()
 	r.flushToolUseStarts()
-	r.finishAssistantLine()
+	r.renderMu.Lock()
+	defer r.renderMu.Unlock()
+	r.statusClearLocked()
+	r.finishAssistantLineLocked()
 	io.WriteString(r.errw, r.reasoningSummaryBlock(text))
+	r.signalActivityBoundaryLocked()
 }
 
 func (r *Renderer) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
 	r.flushToolUseStarts()
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	r.statusModel = ""
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
 	if attempt <= 1 {
 		r.currentTurnStart = r.now()
 	}
@@ -336,14 +375,14 @@ func (r *Renderer) ModelRequestEvent(event llm.ModelRequestEvent) string {
 	}
 
 	activity := r.delegateActivitySnapshot()
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	r.statusModel = modelRequestStatus(event)
 	if r.liveStatus && r.statusLabel != "" {
 		r.statusActive = true
 		r.ensureTickerLocked()
 		r.paintLocked(activity)
 	}
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
 	return line
 }
 
@@ -351,14 +390,14 @@ func (r *Renderer) ModelRequestEvent(event llm.ModelRequestEvent) string {
 // HTTP/provider stack unwinds.
 func (r *Renderer) CancelRequested() {
 	activity := r.delegateActivitySnapshot()
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	r.statusModel = "cancelling; Ctrl-C again to force exit"
 	if r.liveStatus && r.statusLabel != "" {
 		r.statusActive = true
 		r.ensureTickerLocked()
 		r.paintLocked(activity)
 	}
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
 }
 
 // CompactionStart begins a transient live wait while old context is summarized.
@@ -386,12 +425,15 @@ func (r *Renderer) PromptWorkWaitStart() {
 // are opaque func() agent.DelegateProgressSnapshot closures type-asserted at
 // render time; entries that are not the expected closure type are skipped.
 func (r *Renderer) SetBackgroundProgress(progress []any) {
+	if len(progress) == 0 {
+		r.drainActivity()
+	}
 	if !r.liveStatus {
 		return
 	}
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	r.statusBgProgress = progress
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
 }
 
 // SetToolProgress attaches (progress != nil) or clears (nil) the live-progress
@@ -399,17 +441,21 @@ func (r *Renderer) SetBackgroundProgress(progress []any) {
 // show child-run activity. progress is an opaque func() agent.DelegateProgressSnapshot
 // closure type-asserted at render time.
 func (r *Renderer) SetToolProgress(name string, progress any) {
+	if progress == nil {
+		r.drainActivity()
+	}
 	if !r.liveStatus {
 		return
 	}
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	r.statusProgress = progress
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
 }
 
 // PromptWorkWaitComplete clears the background-work wait before the parent
 // resumes model work or completes the prompt.
 func (r *Renderer) PromptWorkWaitComplete() {
+	r.drainActivity()
 	r.endWait()
 }
 
@@ -475,10 +521,10 @@ func (r *Renderer) resumeLiveModelWaitAfterAssistantText(delta string, lineOpen 
 	if !r.liveStatus || lineOpen || !strings.HasSuffix(delta, "\n") {
 		return
 	}
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	label := r.statusLabel
 	statusCtx := r.statusCtx
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
 	if label != "" {
 		r.beginWait(label, statusCtx)
 	}
@@ -500,6 +546,7 @@ func (r *Renderer) ToolStart(call llm.ToolCall) {
 }
 
 func (r *Renderer) ToolResult(result llm.ToolResult) {
+	r.drainActivity()
 	r.flushToolUseStarts()
 	call := r.pending[result.ForID]
 	delete(r.pending, result.ForID)
@@ -517,9 +564,11 @@ func (r *Renderer) ToolResult(result llm.ToolResult) {
 }
 
 func (r *Renderer) ToolDiff(_ llm.ToolCall, text string) {
-	r.statusClear()
 	r.flushToolUseStarts()
-	r.finishAssistantLine()
+	r.renderMu.Lock()
+	defer r.renderMu.Unlock()
+	r.statusClearLocked()
+	r.finishAssistantLineLocked()
 	if text == "" {
 		return
 	}
@@ -578,8 +627,10 @@ func (r *Renderer) usageOutput(line string) {
 	if r.suppressUsage {
 		return
 	}
-	r.statusClear()
-	r.finishAssistantLine()
+	r.renderMu.Lock()
+	defer r.renderMu.Unlock()
+	r.statusClearLocked()
+	r.finishAssistantLineLocked()
 	out := r.timestampStatusLine(line)
 	if r.color {
 		fmt.Fprintf(r.errw, "%s%s%s\n", ansiDim, out, ansiReset)
@@ -611,8 +662,10 @@ func (r *Renderer) dimLine(s string) {
 // writeDimLine writes a status-shaped line even in quiet mode. Terminal model
 // errors use it because quiet suppresses progress, not actionable failures.
 func (r *Renderer) writeDimLine(s string) {
-	r.statusClear()
-	r.finishAssistantLine()
+	r.renderMu.Lock()
+	defer r.renderMu.Unlock()
+	r.statusClearLocked()
+	r.finishAssistantLineLocked()
 	s = r.timestampStatusLine(s)
 	if r.color {
 		fmt.Fprintf(r.errw, "%s%s%s\n", ansiDim, s, ansiReset)
@@ -629,8 +682,10 @@ func (r *Renderer) writeDimLine(s string) {
 // rule is dimmed only when color is on. Unlike status lines, this separator is
 // structural and is printed even in quiet mode.
 func (r *Renderer) SubmittedPromptSeparator() {
-	r.statusClear()
-	r.finishAssistantLine()
+	r.renderMu.Lock()
+	defer r.renderMu.Unlock()
+	r.statusClearLocked()
+	r.finishAssistantLineLocked()
 	fmt.Fprintln(r.errw, r.separatorRule())
 }
 
@@ -689,10 +744,277 @@ func (r *Renderer) outputWidth() int {
 //
 // The counter is a single transient status line repainted in place with
 // \r\x1b[2K (no scroll region, no sticky bar). beginWait activates it; any
-// scrolling write erases it via statusClear, which the synchronous event-sink
-// methods call before touching out/errw. A time.Ticker repaints it ~1/sec while
+// scrolling write erases it under renderMu before touching out/errw. A
+// time.Ticker repaints it ~1/sec while
 // a wait is in progress; the ticker and the foreground writers are serialised by
-// statusMu and a stop-and-drain handshake so their bytes never interleave.
+// renderMu and a stop-and-drain handshake so their logical state cannot race.
+
+func (r *Renderer) startActivityConsumer() {
+	if r.delegateFeed == nil {
+		return
+	}
+	r.activityMu.Lock()
+	running := r.activityDone != nil
+	r.activityMu.Unlock()
+	if running {
+		r.stopActivityConsumer()
+	}
+
+	tail := r.delegateFeed.Tail()
+	control := make(chan activityControl, 1)
+	done := make(chan struct{})
+	r.activityMu.Lock()
+	if tail > r.activityCursor {
+		r.activityCursor = tail
+	}
+	r.activityControl = control
+	r.activityDone = done
+	r.activityMu.Unlock()
+	go r.consumeActivity(control, done)
+}
+
+func (r *Renderer) drainActivity() {
+	r.controlActivity(false)
+}
+
+func (r *Renderer) stopActivityConsumer() {
+	r.controlActivity(true)
+}
+
+func (r *Renderer) controlActivity(stop bool) {
+	if r.delegateFeed == nil {
+		return
+	}
+	through := r.delegateFeed.Tail()
+	r.activityMu.Lock()
+	control, done := r.activityControl, r.activityDone
+	if done == nil {
+		if through > r.activityCursor {
+			r.activityCursor = through
+		}
+		r.activityMu.Unlock()
+		return
+	}
+	r.activityMu.Unlock()
+
+	ack := make(chan struct{})
+	request := activityControl{through: through, stop: stop, ack: ack}
+	select {
+	case control <- request:
+	case <-done:
+		return
+	}
+	select {
+	case <-ack:
+		if stop {
+			<-done
+		}
+	case <-done:
+	}
+}
+
+func (r *Renderer) consumeActivity(control <-chan activityControl, done chan struct{}) {
+	defer func() {
+		r.activityMu.Lock()
+		if r.activityDone == done {
+			r.activityControl = nil
+			r.activityDone = nil
+		}
+		r.activityMu.Unlock()
+		close(done)
+	}()
+
+	for {
+		cursor := r.currentActivityCursor()
+		batch := r.delegateFeed.ReadAfter(cursor, 0)
+		if len(batch.Items) > 0 {
+			written, boundary := r.writeActivityBatch(batch)
+			if written {
+				r.setActivityCursor(batch.Through)
+				continue
+			}
+			select {
+			case request := <-control:
+				if r.handleActivityControl(request) {
+					return
+				}
+			case <-batch.Changed:
+			case <-boundary:
+			}
+			continue
+		}
+
+		_, boundary := r.activityBoundaryState()
+		select {
+		case request := <-control:
+			if r.handleActivityControl(request) {
+				return
+			}
+		case <-batch.Changed:
+		case <-boundary:
+		}
+	}
+}
+
+func (r *Renderer) handleActivityControl(request activityControl) bool {
+	cursor := r.currentActivityCursor()
+	for cursor < request.through {
+		batch := r.delegateFeed.ReadAfter(cursor, request.through)
+		if len(batch.Items) == 0 {
+			break
+		}
+		written, _ := r.writeActivityBatch(batch)
+		if !written {
+			break
+		}
+		cursor = batch.Through
+		r.setActivityCursor(cursor)
+	}
+	if request.stop && cursor < request.through {
+		r.setActivityCursor(request.through)
+	}
+	close(request.ack)
+	return request.stop
+}
+
+func (r *Renderer) currentActivityCursor() uint64 {
+	r.activityMu.Lock()
+	defer r.activityMu.Unlock()
+	return r.activityCursor
+}
+
+func (r *Renderer) setActivityCursor(cursor uint64) {
+	r.activityMu.Lock()
+	if cursor > r.activityCursor {
+		r.activityCursor = cursor
+	}
+	r.activityMu.Unlock()
+}
+
+func (r *Renderer) writeActivityBatch(batch delegate.FeedBatch) (bool, <-chan struct{}) {
+	r.renderMu.Lock()
+	defer r.renderMu.Unlock()
+	if !r.assistantAtLineBoundaryLocked() {
+		return false, r.activityBoundary
+	}
+	_ = r.output.WriteActivity([]byte(formatActivityBatch(batch)))
+	return true, r.activityBoundary
+}
+
+func (r *Renderer) activityBoundaryState() (bool, <-chan struct{}) {
+	r.renderMu.Lock()
+	defer r.renderMu.Unlock()
+	return r.assistantAtLineBoundaryLocked(), r.activityBoundary
+}
+
+func (r *Renderer) assistantAtLineBoundaryLocked() bool {
+	if r.assistantLineOpen {
+		return false
+	}
+	return r.assistantMarkdown == nil || r.assistantMarkdown.AtLineBoundary()
+}
+
+func (r *Renderer) signalActivityBoundaryLocked() {
+	if !r.assistantAtLineBoundaryLocked() {
+		return
+	}
+	close(r.activityBoundary)
+	r.activityBoundary = make(chan struct{})
+}
+
+func formatActivityBatch(batch delegate.FeedBatch) string {
+	var out strings.Builder
+	for _, item := range batch.Items {
+		if item.Kind == delegate.FeedItemGap {
+			count := item.Gap.Last - item.Gap.First + 1
+			noun := "events"
+			if count == 1 {
+				noun = "event"
+			}
+			fmt.Fprintf(&out, "[delegate output] omitted %d %s\n", count, noun)
+			continue
+		}
+		if item.Kind != delegate.FeedItemEvent {
+			continue
+		}
+		event := item.Event
+		prefix := event.DisplayID
+		if prefix == "" {
+			prefix = event.ChildID
+		}
+		if prefix == "" {
+			prefix = "?"
+		}
+		agentName := event.Agent
+		if agentName == "" {
+			agentName = "auto"
+		}
+		fmt.Fprintf(&out, "[delegate %s", prefix)
+		fmt.Fprintf(&out, " %s", agentName)
+		if event.Depth > 1 {
+			fmt.Fprintf(&out, " depth=%d", event.Depth)
+		}
+		out.WriteString("] ")
+		switch event.Kind {
+		case delegate.ActivityEventStart:
+			out.WriteString("started")
+			if event.TranscriptPath != "" {
+				fmt.Fprintf(&out, " · transcript %s", event.TranscriptPath)
+			}
+		case delegate.ActivityEventTurnStart:
+			fmt.Fprintf(&out, "turn %d started", event.Turn)
+			if event.Attempt > 1 {
+				fmt.Fprintf(&out, " · attempt %d", event.Attempt)
+			}
+		case delegate.ActivityEventAssistant:
+			if event.Continuation {
+				out.WriteString("assistant+: ")
+			} else {
+				out.WriteString("assistant: ")
+			}
+			out.WriteString(event.Text)
+		case delegate.ActivityEventReasoning:
+			if event.Continuation {
+				out.WriteString("reasoning+: ")
+			} else {
+				out.WriteString("reasoning: ")
+			}
+			out.WriteString(event.Text)
+		case delegate.ActivityEventToolStart:
+			fmt.Fprintf(&out, "%s started", event.Text)
+		case delegate.ActivityEventToolComplete:
+			fmt.Fprintf(&out, "%s completed", event.Text)
+		case delegate.ActivityEventToolError:
+			fmt.Fprintf(&out, "%s failed", event.Text)
+		case delegate.ActivityEventNotice:
+			fmt.Fprintf(&out, "notice: %s", event.Text)
+		case delegate.ActivityEventRetry, delegate.ActivityEventModelIssue:
+			out.WriteString(event.Text)
+		case delegate.ActivityEventAttemptDiscarded:
+			fmt.Fprintf(&out, "turn %d attempt %d discarded; retrying", event.Turn, event.Attempt)
+		case delegate.ActivityEventTerminal:
+			status := event.Status
+			if status == "" {
+				status = "finished"
+			}
+			out.WriteString(status)
+			if event.Turn > 0 {
+				fmt.Fprintf(&out, " · %s", turnCount(event.Turn))
+			}
+		default:
+			out.WriteString(event.Text)
+		}
+		out.WriteByte('\n')
+	}
+	return out.String()
+}
+
+func turnCount(turns int) string {
+	if turns == 1 {
+		return "1 turn"
+	}
+	return fmt.Sprintf("%d turns", turns)
+}
 
 // beginWait activates (or refreshes) the transient counter for a model wait or a
 // tool-execution gap. It finishes any open assistant line first so the counter
@@ -703,27 +1025,24 @@ func (r *Renderer) beginWait(label string, statusCtx agent.ContextEstimate) {
 	}
 	r.finishAssistantLine()
 	activity := r.delegateActivitySnapshot()
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	r.statusLabel = label
 	r.statusStart = r.now()
 	r.statusCtx = statusCtx
 	r.statusActive = true
 	r.ensureTickerLocked()
 	r.paintLocked(activity)
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
 }
 
-// statusClear erases the on-screen counter and deactivates it. Every method that
-// writes scrolling output to out/errw calls this first; it is a no-op unless a
-// live counter is currently drawn.
-func (r *Renderer) statusClear() {
+// statusClearLocked erases and deactivates the on-screen counter before a
+// scrolling write. Caller holds renderMu.
+func (r *Renderer) statusClearLocked() {
 	if !r.liveStatus {
 		return
 	}
-	r.statusMu.Lock()
 	r.eraseLocked()
 	r.statusActive = false
-	r.statusMu.Unlock()
 }
 
 // endWait erases and deactivates a completed phase while preserving turn-wide
@@ -733,7 +1052,7 @@ func (r *Renderer) endWait() {
 	if !r.liveStatus {
 		return
 	}
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	r.eraseLocked()
 	r.statusActive = false
 	r.statusLabel = ""
@@ -741,7 +1060,7 @@ func (r *Renderer) endWait() {
 	r.statusProgress = nil
 	r.statusBgProgress = nil
 	r.statusModel = ""
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
 }
 
 // SetInputLine updates the during-prompt typed buffer shown after "> " on the
@@ -753,23 +1072,25 @@ func (r *Renderer) SetInputLine(buf string, cursor int) {
 		return
 	}
 	activity := r.delegateActivitySnapshot()
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	r.statusInput = buf
 	r.statusInputCursor = cursor
 	if r.statusActive {
 		r.paintLocked(activity)
 	}
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
 }
 
 // StopProgress erases the counter, clears the typed buffer, and stops the ticker,
 // draining its goroutine so no stray repaint can follow. Idempotent; called at
 // every prompt boundary (PromptComplete, the REPL prompt-done handoff, and one-shot).
 func (r *Renderer) StopProgress() {
+	r.finishAssistantLine()
+	r.stopActivityConsumer()
 	if !r.liveStatus {
 		return
 	}
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	r.eraseLocked()
 	r.statusActive = false
 	r.statusInput = ""
@@ -782,7 +1103,7 @@ func (r *Renderer) StopProgress() {
 	r.promptStart = time.Time{}
 	t, stop, done := r.ticker, r.tickerStop, r.tickerDone
 	r.ticker, r.tickerStop, r.tickerDone = nil, nil, nil
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
 	if t != nil {
 		t.Stop()
 		close(stop)
@@ -819,23 +1140,23 @@ func (r *Renderer) ensureTickerLocked() {
 // mutex so delegate publishers never wait for terminal rendering.
 func (r *Renderer) tick() {
 	activity := r.delegateActivitySnapshot()
-	r.statusMu.Lock()
+	r.renderMu.Lock()
 	if r.statusActive {
 		r.paintLocked(activity)
 	}
-	r.statusMu.Unlock()
+	r.renderMu.Unlock()
 }
 
-// eraseLocked clears a drawn counter line. Caller holds statusMu.
+// eraseLocked clears a drawn counter line. Caller holds renderMu.
 func (r *Renderer) eraseLocked() {
 	if !r.statusDrawn {
 		return
 	}
-	io.WriteString(r.errw, "\r\x1b[2K")
+	r.output.ClearStatus()
 	r.statusDrawn = false
 }
 
-// paintLocked redraws the counter in place. Caller holds statusMu. When a
+// paintLocked redraws the counter in place. Caller holds renderMu. When a
 // during-prompt buffer is present it parks the terminal cursor at the edit column
 // on the same single row, so cursor-motion keys (arrows/Home/End) land visibly.
 func (r *Renderer) paintLocked(activity delegate.ActivitySnapshot) {
@@ -857,14 +1178,14 @@ func (r *Renderer) paintLocked(activity delegate.ActivitySnapshot) {
 			fmt.Fprintf(&b, "\x1b[%dC", cursorCol)
 		}
 	}
-	io.WriteString(r.errw, b.String())
+	r.output.SetStatus([]byte(b.String()))
 	r.statusDrawn = true
 }
 
 // statusTextLocked renders the counter, clipped to the terminal width so it
 // never wraps (a wrapped line would defeat the single-line \r\x1b[2K erase). It
 // also reports the terminal column for the during-prompt edit cursor and whether a
-// typed buffer is present. Caller holds statusMu; activity was snapshotted before
+// typed buffer is present. Caller holds renderMu; activity was snapshotted before
 // taking that mutex.
 func (r *Renderer) statusTextLocked(activity delegate.ActivitySnapshot) (text string, cursorCol int, hasInput bool) {
 	now := r.now()
@@ -1515,14 +1836,15 @@ func runeWidth(r rune) int {
 }
 
 func (r *Renderer) finishAssistantLine() {
-	r.assistantMu.Lock()
-	defer r.assistantMu.Unlock()
+	r.renderMu.Lock()
+	defer r.renderMu.Unlock()
 	r.finishAssistantLineLocked()
 }
 
 func (r *Renderer) finishAssistantLineLocked() {
 	r.flushAssistantMarkdownLocked()
 	if !r.assistantLineOpen {
+		r.signalActivityBoundaryLocked()
 		return
 	}
 	fmt.Fprintln(r.out)
@@ -1530,6 +1852,7 @@ func (r *Renderer) finishAssistantLineLocked() {
 	if r.assistantMarkdown != nil {
 		r.assistantMarkdown.CloseLine()
 	}
+	r.signalActivityBoundaryLocked()
 }
 
 func (r *Renderer) flushAssistantMarkdownLocked() {

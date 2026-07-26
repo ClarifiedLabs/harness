@@ -2785,6 +2785,93 @@ func TestRunDelegateToolUsesCurrentAgentTools(t *testing.T) {
 	}
 }
 
+func TestRunDelegateLinesUseStderrWithoutChangingParentStdout(t *testing.T) {
+	steps := func() []llmtest.Step {
+		return []llmtest.Step{
+			{
+				Events: []llm.StreamEvent{{
+					Kind:      llm.EventToolCallDone,
+					ToolID:    "call_delegate",
+					ToolName:  "delegate",
+					ToolInput: json.RawMessage(`{"task":"inspect only"}`),
+				}},
+				Stop: llm.StopToolUse,
+			},
+			{
+				Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "child report"}},
+				Stop:   llm.StopEndTurn,
+			},
+			{
+				Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "parent done"}},
+				Stop:   llm.StopEndTurn,
+			},
+		}
+	}
+
+	statusProvider := llmtest.New("status", steps()...)
+	statusEnv, statusOut, statusErr, _ := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-delegate-output", "status", "-p", "hi"},
+		statusProvider, "")
+	if code := run(statusEnv); code != ui.ExitOK {
+		t.Fatalf("status exit code = %d, stderr=%q", code, statusErr.String())
+	}
+
+	linesProvider := llmtest.New("lines", steps()...)
+	linesEnv, linesOut, linesErr, _ := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-delegate-output", "lines", "-p", "hi"},
+		linesProvider, "")
+	if code := run(linesEnv); code != ui.ExitOK {
+		t.Fatalf("lines exit code = %d, stderr=%q", code, linesErr.String())
+	}
+
+	if got, want := linesOut.String(), statusOut.String(); got != want {
+		t.Fatalf("lines changed parent stdout:\ngot  %q\nwant %q", got, want)
+	}
+	if strings.Contains(statusErr.String(), "[delegate d") {
+		t.Fatalf("status mode emitted scrolling delegate lines: %q", statusErr.String())
+	}
+	for _, want := range []string{
+		"[delegate d1 auto] started",
+		"[delegate d1 auto] assistant: child report",
+		"[delegate d1 auto] completed · 1 turn",
+	} {
+		if !strings.Contains(linesErr.String(), want) {
+			t.Fatalf("lines stderr missing %q: %q", want, linesErr.String())
+		}
+	}
+}
+
+func TestRunQuietSuppressesDelegateLines(t *testing.T) {
+	fp := llmtest.New("quiet-lines",
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				ToolID:    "call_delegate",
+				ToolName:  "delegate",
+				ToolInput: json.RawMessage(`{"task":"inspect only"}`),
+			}},
+			Stop: llm.StopToolUse,
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "child report"}},
+			Stop:   llm.StopEndTurn,
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "parent done"}},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	env, _, errw, _ := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-delegate-output", "lines", "-q", "-p", "hi"},
+		fp, "")
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, stderr=%q", code, errw.String())
+	}
+	if strings.Contains(errw.String(), "[delegate d") {
+		t.Fatalf("quiet mode emitted delegate lines: %q", errw.String())
+	}
+}
+
 func TestRunDelegateMaxDepthRemovesDelegateFromDeepestChild(t *testing.T) {
 	fp := llmtest.New("fake",
 		llmtest.Step{

@@ -119,7 +119,7 @@ interrupted.
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
 -agent <name>     agent: auto (default), explore, plan, independent, or a config-defined agent
 -handoff-agent <name>   default implementation agent for plan handoffs (default auto)
--delegate-output <mode> delegate UI: status (default), off, or lines (reserved; currently behaves as status)
+-delegate-output <mode> delegate UI: status (default), off, or curated scrolling lines on stderr
 -search-tools <mode>   search tools to expose: auto, grep, rg, or both
 -web-search <mode>     server-side web search: off or auto (default off)
 -trace-proxy      send W3C trace headers to the model and MCP proxies
@@ -306,10 +306,37 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   tool also has config-file-only `delegate_max_turns` (per-child turn cap)
   and `delegate_max_depth` (recursive depth cap, root depth `0`).
   `delegate_output` / `HARNESS_DELEGATE_OUTPUT` / `-delegate-output` accepts
-  `status` (the default one-row TTY display), `off` (delegate details only), and
-  the reserved `lines` mode. Until inline delegate output is implemented,
-  `lines` behaves as `status`. Quiet mode remains authoritative and suppresses
-  delegate status regardless of this setting.
+  `status` (the default one-row TTY display), `off` (no delegate-specific UI),
+  and `lines` (the status row on a TTY plus curated scrolling child activity on
+  stderr). On non-TTY output, `status` is silent while `lines` still writes
+  stderr. Quiet mode is authoritative and suppresses both forms, including
+  child reasoning summaries when `-reasoning-summary` was explicitly enabled.
+  `-v` and `-tool-stream` do not enable or expand child lines.
+
+  | mode | stdout TTY | stdout non-TTY |
+  |---|---|---|
+  | `status` | compact delegate status row | no delegate output |
+  | `off` | no delegate-specific output | no delegate output |
+  | `lines` | compact status row plus scrolling stderr lines | scrolling stderr lines |
+
+  Inline lines use stable, ANSI-free prefixes:
+
+  ```text
+  [delegate d1 explore] assistant: Checking the call path.
+  [delegate d2 plan depth=2] tool read_file path="docs/design.md" started
+  [delegate d1 explore] completed · 3 turns
+  ```
+
+  They never write stdout or enter the parent transcript/model context. Harness
+  emits only bounded, sanitized lifecycle, assistant, allowlisted tool/notice,
+  structured retry, and permitted reasoning-summary fields; it omits tasks,
+  raw tool results, error/provider text, commands, URLs, request IDs, and opaque
+  reasoning. An incomplete parent plain/Markdown line delays delivery until a
+  natural line boundary rather than changing parent stdout. The process-local
+  feed retains at most 512 events / 256 KiB and reports loss as
+  `[delegate output] omitted N events`. Use
+  `harness session replay --follow <child-session>` for complete durable child
+  output.
 - Tool-surface limits for MCP and LSP are config-file-only: `mcp.max_tools` caps
   how many discovered remote MCP tools are auto-exposed (`0` = unlimited),
   `mcp.disabled_servers` is a list of remote MCP server names dropped from

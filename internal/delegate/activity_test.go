@@ -11,7 +11,7 @@ import (
 )
 
 func TestActivityRegistryTracksLatestNestedDelegateAndRemovesOnce(t *testing.T) {
-	registry := NewActivityRegistry()
+	registry := NewActivityRegistry(nil)
 	parent := registry.Register(ActivityStart{ID: "child-parent", Depth: 1, Agent: "explore", TranscriptPath: "/tmp/parent"})
 	nested := registry.Register(ActivityStart{ID: "child-nested", ParentID: "child-parent", Depth: 2, Agent: "plan"})
 	parent.MarkTurn(1, 1, agent.ContextEstimate{Total: 10, Window: 100})
@@ -32,14 +32,14 @@ func TestActivityRegistryTracksLatestNestedDelegateAndRemovesOnce(t *testing.T) 
 		t.Fatalf("latest nested activity = %+v", snapshot.Recent)
 	}
 
-	nested.Close()
-	nested.Close()
+	nested.Finish("completed", 2)
+	nested.Finish("completed", 2)
 	nested.MarkActivity("must be ignored")
 	snapshot = registry.Snapshot()
 	if len(snapshot.Active) != 1 || snapshot.Recent.ID != "child-parent" {
 		t.Fatalf("after nested removal = %+v", snapshot)
 	}
-	parent.Close()
+	parent.Finish("completed", 1)
 	if got := registry.Snapshot(); len(got.Active) != 0 {
 		t.Fatalf("active delegates after close = %+v, want none", got.Active)
 	}
@@ -57,7 +57,7 @@ func TestActivityRegistryLatestTieBreakIsDeterministic(t *testing.T) {
 }
 
 func TestActivityRegistryUsesIndependentRegistrationKeys(t *testing.T) {
-	registry := NewActivityRegistry()
+	registry := NewActivityRegistry(nil)
 	prefix := strings.Repeat("x", maxChildIDRunes)
 	first := registry.Register(ActivityStart{ID: prefix + "-first", Agent: "explore"})
 	second := registry.Register(ActivityStart{ID: prefix + "-second", Agent: "plan"})
@@ -65,17 +65,17 @@ func TestActivityRegistryUsesIndependentRegistrationKeys(t *testing.T) {
 		t.Fatalf("colliding display IDs overwrote registry membership: %+v", got.Active)
 	}
 
-	first.Close()
+	first.Finish("completed", 0)
 	first.MarkActivity("stale update")
 	got := registry.Snapshot()
 	if len(got.Active) != 1 || got.Active[0].DisplayID != "d2" || got.Active[0].Activity == "stale update" {
 		t.Fatalf("stale registration affected live entry: %+v", got.Active)
 	}
-	second.Close()
+	second.Finish("completed", 0)
 }
 
 func TestActivityRegistrySanitizesAndBoundsRetainedText(t *testing.T) {
-	registry := NewActivityRegistry()
+	registry := NewActivityRegistry(nil)
 	longAgent := "wide漢字\x1b[31mred\x1b[0m\n" + strings.Repeat("x", 100)
 	registration := registry.Register(ActivityStart{
 		ID:             strings.Repeat("child", 40),
@@ -133,7 +133,7 @@ func TestSafeToolActivityUsesArgumentAllowlist(t *testing.T) {
 	}
 
 	resultBody := "raw result secret"
-	sinkRegistry := NewActivityRegistry()
+	sinkRegistry := NewActivityRegistry(nil)
 	registration := sinkRegistry.Register(ActivityStart{ID: "child", Agent: "explore"})
 	sink := newChildSink("", nil, false, nil, registration)
 	sink.ToolStart(llm.ToolCall{ID: "call", Name: "run_command", Input: json.RawMessage(`{"command":"echo secret"}`)})
@@ -144,9 +144,9 @@ func TestSafeToolActivityUsesArgumentAllowlist(t *testing.T) {
 }
 
 func TestChildSinkDoesNotRetainAssistantTextInActivity(t *testing.T) {
-	registry := NewActivityRegistry()
+	registry := NewActivityRegistry(nil)
 	registration := registry.Register(ActivityStart{ID: "child", Agent: "explore"})
-	defer registration.Close()
+	defer registration.Finish("completed", 0)
 	sink := newChildSink("", nil, false, nil, registration)
 	sink.TextDelta("Authorization: Bearer secret-token")
 
@@ -157,7 +157,7 @@ func TestChildSinkDoesNotRetainAssistantTextInActivity(t *testing.T) {
 }
 
 func TestActivityRegistryConcurrentPublishSnapshotAndClose(t *testing.T) {
-	registry := NewActivityRegistry()
+	registry := NewActivityRegistry(nil)
 	const workers = 24
 	var wg sync.WaitGroup
 	wg.Add(workers)
@@ -170,7 +170,7 @@ func TestActivityRegistryConcurrentPublishSnapshotAndClose(t *testing.T) {
 				registration.MarkActivity("thinking")
 				_ = registry.Snapshot()
 			}
-			registration.Close()
+			registration.Finish("completed", 50)
 		}(i)
 	}
 	wg.Wait()

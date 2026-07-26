@@ -198,6 +198,24 @@ Child agents get private todo stores. Their transcripts are saved under
 `children/<child-id>/` alongside the parent session. Foreground and background
 child token/cost usage is included exactly once in parent prompt/session usage.
 
+`delegate_output=lines` adds a curated prompt-scoped view of foreground,
+background, concurrent, and nested child activity to parent stderr. Direct
+children use `[delegate dN agent]`; nested children add `depth=N`. The view
+includes lifecycle, line-coalesced assistant output, safe tool summaries,
+strictly allowlisted harness notices, structured retry/HTTP status fields, and
+provider-visible reasoning summaries only when the resolved child reasoning
+summary mode permits them. It excludes the delegated task, raw tool inputs and
+results, commands, URLs, provider messages/IDs, error strings, and opaque
+reasoning. `-v` and `-tool-stream` affect only parent diagnostics.
+
+Inline output is bounded and best-effort. It may wait for a natural parent
+assistant line boundary, and feed eviction appears as
+`[delegate output] omitted N events`. It never changes parent stdout, transcript,
+model context, delegate results, or usage. The child `raw.ndjson` remains the
+complete source; use `harness session replay --follow` when full-fidelity output
+is required. `delegate_output=status` keeps only the compact TTY row, `off`
+disables delegate UI, and quiet disables both status and lines.
+
 Because JSON-schema composition is rejected by some providers, `delegate.tools`
 advertises only the conservative intersection of tool names supported by every
 currently selectable agent. Omit `tools` to give the chosen child role its full

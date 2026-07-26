@@ -114,6 +114,13 @@ func (s *Stream) LineOpen() bool {
 	return s.lineOpen
 }
 
+// AtLineBoundary reports whether external scrolling output can be inserted
+// without flushing buffered source or splitting a physical output line. A
+// complete buffered table/fence line remains a safe boundary.
+func (s *Stream) AtLineBoundary() bool {
+	return s.pending == "" && !s.lineOpen
+}
+
 // CloseLine tells the stream that the caller wrote an external newline after an
 // open rendered line.
 func (s *Stream) CloseLine() {

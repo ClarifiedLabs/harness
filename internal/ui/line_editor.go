@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -124,12 +123,9 @@ type promptLineEditor struct {
 	// the same vi mode.
 	cursorShapeSeq string
 
-	// terminalMu serializes prompt redraw/finish writes against asynchronous log
-	// writes that temporarily clear and repaint the active prompt. activePrompt is
-	// a display-only snapshot of the last drawn prompt state, protected by the same
-	// mutex so background logs can move the prompt below themselves without racing
-	// the input goroutine's terminal bytes.
-	terminalMu   sync.Mutex
+	// activePrompt is a display-only snapshot of the last drawn prompt state.
+	// When the writer is coordinated, OutputCoordinator's mutex protects it and
+	// serializes asynchronous writes around prompt redraws.
 	activePrompt *lineEditState
 }
 
@@ -232,65 +228,62 @@ func (e *promptLineEditor) read(prompt string) (replInput, bool, error) {
 }
 
 func (e *promptLineEditor) redrawPromptState(s *lineEditState, mode viMode) error {
-	e.terminalMu.Lock()
-	defer e.terminalMu.Unlock()
-	if err := e.applyPromptCursorShape(mode); err != nil {
-		return err
-	}
-	if err := s.redraw(e.w, e.terminalColumns()); err != nil {
-		return err
-	}
-	e.activePrompt = s.promptSnapshot()
-	return nil
+	return withPromptOutput(e, func(w io.Writer) error {
+		if err := e.applyPromptCursorShape(w, mode); err != nil {
+			return err
+		}
+		if err := s.redraw(w, e.terminalColumns()); err != nil {
+			return err
+		}
+		e.activePrompt = s.promptSnapshot()
+		return nil
+	})
 }
 
 func (e *promptLineEditor) finishPromptState(s *lineEditState) error {
-	e.terminalMu.Lock()
-	defer e.terminalMu.Unlock()
-	if err := s.finish(e.w); err != nil {
-		return err
-	}
-	e.activePrompt = nil
-	return nil
+	return withPromptOutput(e, func(w io.Writer) error {
+		if err := s.finish(w); err != nil {
+			return err
+		}
+		e.activePrompt = nil
+		return nil
+	})
 }
 
 func (e *promptLineEditor) clearPromptSnapshot() {
-	e.terminalMu.Lock()
-	e.activePrompt = nil
-	e.terminalMu.Unlock()
+	_ = withPromptOutput(e, func(io.Writer) error {
+		e.activePrompt = nil
+		return nil
+	})
 }
 
 func (e *promptLineEditor) resetPromptCursorShapeLocked() error {
-	e.terminalMu.Lock()
-	defer e.terminalMu.Unlock()
-	return e.resetPromptCursorShape()
+	return withPromptOutput(e, e.resetPromptCursorShape)
 }
 
-func (e *promptLineEditor) writeBackground(p []byte) (int, error) {
-	e.terminalMu.Lock()
-	defer e.terminalMu.Unlock()
+func (e *promptLineEditor) writeBackgroundRaw(w io.Writer, p []byte) (int, error) {
 	if e.activePrompt == nil || !e.activePrompt.drawn {
-		return e.w.Write(p)
+		return w.Write(p)
 	}
 	prompt := e.activePrompt
-	if err := prompt.moveToPromptStart(e.w); err != nil {
+	if err := prompt.moveToPromptStart(w); err != nil {
 		return 0, err
 	}
 	// The prompt has been erased from the screen; redraw it from the current cursor
 	// position after the log line scrolls.
 	prompt.drawn = false
-	n, err := e.w.Write(p)
+	n, err := w.Write(p)
 	if err != nil {
 		return n, err
 	}
-	if err := prompt.redraw(e.w, e.terminalColumns()); err != nil {
+	if err := prompt.redraw(w, e.terminalColumns()); err != nil {
 		return n, err
 	}
 	e.activePrompt = prompt
 	return n, nil
 }
 
-func (e *promptLineEditor) applyPromptCursorShape(mode viMode) error {
+func (e *promptLineEditor) applyPromptCursorShape(w io.Writer, mode viMode) error {
 	if e.editMode != promptEditModeVi {
 		return nil
 	}
@@ -302,18 +295,18 @@ func (e *promptLineEditor) applyPromptCursorShape(mode viMode) error {
 	if seq == e.cursorShapeSeq {
 		return nil
 	}
-	if _, err := io.WriteString(e.w, seq); err != nil {
+	if _, err := io.WriteString(w, seq); err != nil {
 		return err
 	}
 	e.cursorShapeSeq = seq
 	return nil
 }
 
-func (e *promptLineEditor) resetPromptCursorShape() error {
+func (e *promptLineEditor) resetPromptCursorShape(w io.Writer) error {
 	if e.cursorShapeSeq == "" {
 		return nil
 	}
-	if _, err := io.WriteString(e.w, term.CursorShapeSequence(term.CursorShapeDefault)); err != nil {
+	if _, err := io.WriteString(w, term.CursorShapeSequence(term.CursorShapeDefault)); err != nil {
 		return err
 	}
 	e.cursorShapeSeq = ""

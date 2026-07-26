@@ -216,11 +216,6 @@ type App struct {
 	// Prompt is the REPL input prompt format.
 	Prompt string
 
-	// PromptLogWriter, when set, is attached to the raw prompt editor while the
-	// REPL is running so asynchronous slog output can clear/redraw the active
-	// prompt instead of printing after it on the same terminal row.
-	PromptLogWriter *PromptRedrawWriter
-
 	// PromptEditMode selects the raw prompt editor keymap: "emacs" (default)
 	// or "vi". It applies only to interactive TTY prompts.
 	PromptEditMode string
@@ -410,9 +405,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}()
 
 	reader := newREPLReader(in, app.Errw, usePromptEditor, app.PromptEditMode)
-	if app.PromptLogWriter != nil && reader.editor != nil {
-		app.PromptLogWriter.setPromptEditor(reader.editor)
-		defer app.PromptLogWriter.setPromptEditor(nil)
+	if output := outputCoordinatorFromWriter(app.Errw); output != nil && reader.editor != nil {
+		output.setPromptEditor(reader.editor)
+		defer output.setPromptEditor(nil)
 	}
 	app.SetPromptEditMode = func(mode string) {
 		if reader.editor != nil {
@@ -1056,7 +1051,7 @@ func promptLineEditorEnabled(in io.Reader, w io.Writer) bool {
 	if !ok || !term.IsTerminal(inf) {
 		return false
 	}
-	wf, ok := w.(*os.File)
+	wf, ok := unwrapOutputWriter(w).(*os.File)
 	return ok && term.IsTerminal(wf)
 }
 
@@ -1291,7 +1286,7 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 }
 
 func (app *App) echoEditedPrompt(replPrompt, submitted string) {
-	if f, ok := app.Errw.(*os.File); ok && term.IsTerminal(f) {
+	if f, ok := unwrapOutputWriter(app.Errw).(*os.File); ok && term.IsTerminal(f) {
 		fmt.Fprintf(app.Errw, "\r\x1b[2K%s%s\n", replPrompt, submitted)
 		return
 	}

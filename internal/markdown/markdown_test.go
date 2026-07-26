@@ -156,3 +156,22 @@ func TestStreamBuffersTablesUntilBlockEnds(t *testing.T) {
 		t.Fatalf("table flush =\n%q\nwant\n%q", got, want)
 	}
 }
+
+func TestStreamBoundaryQueryDoesNotFlushPendingTextOrTable(t *testing.T) {
+	stream := NewStream(Options{Enabled: true})
+	if got := stream.Write("partial"); got != "" {
+		t.Fatalf("partial write = %q, want buffered", got)
+	}
+	if stream.AtLineBoundary() {
+		t.Fatal("incomplete source line reported as a safe boundary")
+	}
+	if got := stream.Write("\n| A | B |\n| --- | --- |\n"); got != "partial\n" {
+		t.Fatalf("complete line/table write = %q, want only partial line", got)
+	}
+	if !stream.AtLineBoundary() {
+		t.Fatal("newline-complete buffered table should be a safe boundary")
+	}
+	if got := stream.Flush(); !strings.Contains(got, "| A") {
+		t.Fatalf("boundary query flushed or lost table: %q", got)
+	}
+}

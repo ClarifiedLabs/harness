@@ -404,7 +404,7 @@ func TestDelegatePersistsChildTranscript(t *testing.T) {
 		Usage:  llm.Usage{InputTokens: 11, OutputTokens: 5},
 	})
 	sessionPath := filepath.Join(t.TempDir(), "session")
-	activityRegistry := NewActivityRegistry()
+	activityRegistry := NewActivityRegistry(nil)
 	state := NewState(Runtime{
 		Provider:    fp,
 		Model:       "claude-opus-4-8",
@@ -497,7 +497,8 @@ func TestDelegatePersistsTerminalChildStatuses(t *testing.T) {
 			childTools := &tools.Registry{}
 			sessionPath := filepath.Join(t.TempDir(), "session")
 			runtime := Runtime{Provider: fp, Model: "model", Registry: llm.NewRegistry(nil), SessionPath: sessionPath}
-			activityRegistry := NewActivityRegistry()
+			feed := NewActivityFeed()
+			activityRegistry := NewActivityRegistry(feed)
 			runner := NewRunner(func() Runtime { return runtime }, func(runtime Runtime, _ string) (Launch, error) {
 				return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools}, nil
 			}, Options{ActivityRegistry: activityRegistry})
@@ -516,6 +517,14 @@ func TestDelegatePersistsTerminalChildStatuses(t *testing.T) {
 			if meta.Status != tc.wantStatus || meta.Error == "" {
 				t.Fatalf("terminal metadata = %+v, want status %q with error", meta, tc.wantStatus)
 			}
+			events, _ := readAllActivity(t, feed, 0)
+			terminal := events[len(events)-1]
+			if terminal.Kind != ActivityEventTerminal || terminal.Status != tc.wantStatus {
+				t.Fatalf("terminal feed event = %+v, want status %q", terminal, tc.wantStatus)
+			}
+			if terminal.Text != "" {
+				t.Fatalf("terminal feed event leaked error text: %+v", terminal)
+			}
 		})
 	}
 	if got := childTerminalStatus(context.DeadlineExceeded); got != session.ChildStatusCanceled {
@@ -528,9 +537,11 @@ func TestDelegateTerminalizesPostMetadataSetupFailure(t *testing.T) {
 	childTools := &tools.Registry{}
 	sessionPath := filepath.Join(t.TempDir(), "session")
 	runtime := Runtime{Provider: fp, Model: "model", Registry: llm.NewRegistry(nil), SessionPath: sessionPath}
+	feed := NewActivityFeed()
+	activityRegistry := NewActivityRegistry(feed)
 	runner := NewRunner(func() Runtime { return runtime }, func(runtime Runtime, _ string) (Launch, error) {
 		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools}, nil
-	}, Options{})
+	}, Options{ActivityRegistry: activityRegistry})
 	setupErr := errors.New("build child tools")
 	runner.childToolBuilder = func(Runtime, Launch, string, *todo.Store, []string) (*tools.Registry, error) {
 		return nil, setupErr
@@ -551,11 +562,24 @@ func TestDelegateTerminalizesPostMetadataSetupFailure(t *testing.T) {
 	if !progress.Snapshot().Finished {
 		t.Fatalf("progress = %+v, want finished", progress.Snapshot())
 	}
+	events, gaps := readAllActivity(t, feed, 0)
+	if len(gaps) != 0 || len(events) != 2 {
+		t.Fatalf("setup failure feed = events %+v gaps %+v, want start+terminal", events, gaps)
+	}
+	if events[0].Kind != ActivityEventStart || events[0].TranscriptPath != result.TranscriptPath {
+		t.Fatalf("setup start event = %+v", events[0])
+	}
+	if events[1].Kind != ActivityEventTerminal || events[1].Status != session.ChildStatusFailed || events[1].Turn != 0 {
+		t.Fatalf("setup terminal event = %+v", events[1])
+	}
+	if strings.Contains(events[1].Text, setupErr.Error()) {
+		t.Fatalf("setup error leaked into terminal event: %+v", events[1])
+	}
 }
 
 func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	dir := t.TempDir()
-	sink := newChildSink(dir, todo.NewStore(), false, NewProgress())
+	sink := newChildSink(dir, todo.NewStore(), false, NewProgress(), nil)
 	ctx := agent.ContextEstimate{Total: 123, Window: 456, System: 7, Tools: 8, Messages: 9}
 	sink.User("inspect")
 	sink.TurnAttemptStart(2, 3, ctx)
@@ -612,7 +636,7 @@ func TestChildSinkRetainsFirstAppendError(t *testing.T) {
 	if err := os.WriteFile(path, []byte("file"), 0o644); err != nil {
 		t.Fatalf("write blocking file: %v", err)
 	}
-	sink := newChildSink(path, todo.NewStore(), false, NewProgress())
+	sink := newChildSink(path, todo.NewStore(), false, NewProgress(), nil)
 	sink.User("first")
 	first := sink.appendError()
 	if first == nil {
@@ -746,7 +770,7 @@ func TestDelegateCapsMaxTurns(t *testing.T) {
 
 func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T) {
 	originalState := NewState(Runtime{})
-	activityRegistry := NewActivityRegistry()
+	activityRegistry := NewActivityRegistry(nil)
 	nested := New(originalState.Snapshot, nil, Options{MaxDepth: 3, ActivityRegistry: activityRegistry})
 	catalog := &tools.Registry{}
 	catalog.Register(fakeChildTool{name: "read_file", out: "ok"})
@@ -811,7 +835,7 @@ func TestNestedDelegateSharesLiveRegistryUntilIndependentCompletion(t *testing.T
 			Stop:   llm.StopEndTurn,
 		},
 	)
-	activityRegistry := NewActivityRegistry()
+	activityRegistry := NewActivityRegistry(nil)
 	runtime := Runtime{
 		Provider:    fp,
 		Model:       "m",
@@ -1020,7 +1044,7 @@ func TestProgressSnapshotZeroAndFinished(t *testing.T) {
 		t.Fatalf("fresh progress = %+v, want zero and not finished", got)
 	}
 
-	s := newChildSink("", todo.NewStore(), false, p)
+	s := newChildSink("", todo.NewStore(), false, p, nil)
 	ctx := agent.ContextEstimate{Total: 1000, Window: 200000}
 	s.TurnAttemptStart(3, 1, ctx)
 	if got := p.Snapshot(); got.Turn != 3 || got.Attempt != 1 || got.Context.Total != 1000 || got.Context.Window != 200000 {
@@ -1089,7 +1113,7 @@ func TestProgressClosureLiveDuringRun(t *testing.T) {
 		llmtest.Step{Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 11, OutputTokens: 5}},
 	)
 	state := NewState(Runtime{Provider: fp, Model: "m", Registry: llm.NewRegistry(nil)})
-	activityRegistry := NewActivityRegistry()
+	activityRegistry := NewActivityRegistry(nil)
 	tool := New(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
 		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools, Agent: "explore"}, nil
 	}, Options{ActivityRegistry: activityRegistry})
@@ -1190,7 +1214,7 @@ func TestProgressBackgroundExposedOnJob(t *testing.T) {
 		Usage: llm.Usage{InputTokens: 11},
 	})
 	state := NewState(Runtime{Provider: fp, Model: "m", Registry: llm.NewRegistry(nil), SessionPath: filepath.Join(t.TempDir(), "session")})
-	activityRegistry := NewActivityRegistry()
+	activityRegistry := NewActivityRegistry(nil)
 	runner := NewRunner(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
 		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools, Agent: "explore"}, nil
 	}, Options{ActivityRegistry: activityRegistry})

@@ -3,10 +3,12 @@ package delegate
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -70,17 +72,22 @@ type ActivityRegistry struct {
 	active      map[uint64]ActiveDelegate
 	nextDisplay uint64
 	sequence    uint64
+	feed        *ActivityFeed
 }
 
-func NewActivityRegistry() *ActivityRegistry {
-	return &ActivityRegistry{active: make(map[uint64]ActiveDelegate)}
+func NewActivityRegistry(feed *ActivityFeed) *ActivityRegistry {
+	return &ActivityRegistry{
+		active: make(map[uint64]ActiveDelegate),
+		feed:   feed,
+	}
 }
 
-// ActivityRegistration is one exactly-once active-registry membership. Close
-// is idempotent so Runner's terminalization path can safely own removal.
+// ActivityRegistration is one exactly-once active-registry membership.
+// Runner owns Finish, which publishes the terminal event before removal.
 type ActivityRegistration struct {
 	registry *ActivityRegistry
 	key      uint64
+	entry    ActiveDelegate
 	once     sync.Once
 }
 
@@ -115,7 +122,12 @@ func (r *ActivityRegistry) Register(start ActivityStart) *ActivityRegistration {
 	key := entry.displayOrder
 	r.active[key] = entry
 	r.mu.Unlock()
-	return &ActivityRegistration{registry: r, key: key}
+	registration := &ActivityRegistration{registry: r, key: key, entry: entry}
+	registration.publish(ActivityEvent{
+		Kind:           ActivityEventStart,
+		TranscriptPath: entry.TranscriptPath,
+	})
+	return registration
 }
 
 func (r *ActivityRegistry) Snapshot() ActivitySnapshot {
@@ -173,15 +185,46 @@ func (r *ActivityRegistry) remove(key uint64) {
 	r.mu.Unlock()
 }
 
-func (h *ActivityRegistration) Close() {
+func (h *ActivityRegistration) Finish(status string, turns int) {
 	if h == nil {
 		return
 	}
 	h.once.Do(func() {
+		h.publish(ActivityEvent{
+			Kind:   ActivityEventTerminal,
+			Turn:   max(turns, 0),
+			Status: status,
+		})
 		if h.registry != nil {
 			h.registry.remove(h.key)
 		}
 	})
+}
+
+func (h *ActivityRegistration) publish(event ActivityEvent) {
+	if h == nil || h.registry == nil || h.registry.feed == nil {
+		return
+	}
+	event.ChildID = h.entry.ID
+	event.DisplayID = h.entry.DisplayID
+	event.ParentID = h.entry.ParentID
+	event.Depth = h.entry.Depth
+	event.Agent = h.entry.Agent
+	h.registry.feed.publish(event)
+}
+
+func (h *ActivityRegistration) publishText(kind ActivityEventKind, text string, turn, attempt int, continuation bool) {
+	h.publish(ActivityEvent{
+		Kind:         kind,
+		Turn:         turn,
+		Attempt:      attempt,
+		Text:         text,
+		Continuation: continuation,
+	})
+}
+
+func (h *ActivityRegistration) hasFeed() bool {
+	return h != nil && h.registry != nil && h.registry.feed != nil
 }
 
 func (h *ActivityRegistration) MarkTurn(turn, attempt int, ctx agent.ContextEstimate) {
@@ -238,6 +281,69 @@ func safeModelRequestActivity(event llm.ModelRequestEvent) string {
 	default:
 		return ""
 	}
+}
+
+func safeModelRequestLine(event llm.ModelRequestEvent) (ActivityEventKind, string, bool) {
+	switch event.State {
+	case llm.ModelRequestRetryScheduled:
+		text := "retrying model request"
+		if event.RetryDelayMS > 0 {
+			text += " in " + (time.Duration(event.RetryDelayMS) * time.Millisecond).String()
+		}
+		if event.Attempt > 0 && event.MaxAttempts > 0 {
+			text += fmt.Sprintf(" · attempt %d/%d", event.Attempt, event.MaxAttempts)
+		}
+		return ActivityEventRetry, text, true
+	case llm.ModelRequestUpstreamAttemptFailed:
+		if event.Outcome == llm.ModelRequestOutcomeTerminal {
+			return "", "", false
+		}
+		if event.StatusCode > 0 {
+			return ActivityEventModelIssue, fmt.Sprintf("model request HTTP %d", event.StatusCode), true
+		}
+		return ActivityEventModelIssue, "model request interrupted", true
+	default:
+		return "", "", false
+	}
+}
+
+var safeNoticePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^\[stopped: reached max turns \([0-9]+\)\]$`),
+	regexp.MustCompile(`^\[stopped: prompt token budget [0-9]+ exceeded\]$`),
+	regexp.MustCompile(`^\[stopped: prompt cost budget \$[0-9]+(?:\.[0-9]+)? reached \(\$[0-9]+(?:\.[0-9]+)? spent\)\]$`),
+	regexp.MustCompile(`^\[stopped: [0-9]+ consecutive tool turns all failed\]$`),
+	regexp.MustCompile(`^\[stopped: [0-9]+ identical tool turns repeated with no change\]$`),
+	regexp.MustCompile(`^\[context window adjusted: provider reported [0-9]+ tokens; retrying request\]$`),
+	regexp.MustCompile(`^\[compacted: [0-9]+ turns → checkpoint · ctx ~[0-9]+(?:\.[0-9]+)?k → ~[0-9]+(?:\.[0-9]+)?k\]$`),
+	regexp.MustCompile(`^\[compacted: archived oversized turn payload · ctx ~[0-9]+(?:\.[0-9]+)?k → ~[0-9]+(?:\.[0-9]+)?k\]$`),
+}
+
+var safeFixedNotices = map[string]bool{
+	"[cancelled]":                                         true,
+	"[stopped: model reached max tokens]":                 true,
+	"[stopped: stop sequence matched]":                    true,
+	"[context overflow: compacting and retrying request]": true,
+	"[responses state disabled: provider rejected stored responses; retrying stateless]": true,
+	"[responses state reset: previous response unavailable; retrying with full context]": true,
+	"[compact: transcript over budget but nothing left to shrink]":                       true,
+}
+
+func safeNoticeLine(message string) (string, bool) {
+	message = strings.TrimSpace(message)
+	if !safeFixedNotices[message] {
+		allowed := false
+		for _, pattern := range safeNoticePatterns {
+			if pattern.MatchString(message) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return "", false
+		}
+	}
+	message = strings.TrimSuffix(strings.TrimPrefix(message, "["), "]")
+	return sanitizeInlineText(message, activityNoticeMaxBytes), true
 }
 
 // safeToolActivity applies a strict allowlist. Every tool may expose its

@@ -264,7 +264,9 @@ func run(env environment) int {
 		}
 		return ui.ExitOK
 	}
-	promptLogWriter := ui.NewPromptRedrawWriter(stderr)
+	terminalOutput := ui.NewOutputCoordinator(stdout, stderr)
+	stdout = terminalOutput.Stdout()
+	stderr = terminalOutput.Stderr()
 
 	// Load a resumed session up front: its saved agent selects the tool set and
 	// any agent-specific model target when no -agent flag overrides it.
@@ -327,7 +329,7 @@ func run(env environment) int {
 		created = cloneCreated
 		resumeCloned = true
 	}
-	logger, diagnosticLogger, diagnosticsSink, err := newHarnessLogger(promptLogWriter, cfg.LogLevel, sessionPath, !cfg.DebugRequest)
+	logger, diagnosticLogger, diagnosticsSink, err := newHarnessLogger(terminalOutput.Stderr(), cfg.LogLevel, sessionPath, !cfg.DebugRequest)
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
@@ -585,8 +587,15 @@ func run(env environment) int {
 		return resolveDelegateLaunch(runtime, name, agents, toolCatalog, pendingMCP, catalog, proxyClient, buildSystem, cfg)
 	}
 	var delegateActivity *delegate.ActivityRegistry
-	if cfg.DelegateOutput != config.DelegateOutputOff {
-		delegateActivity = delegate.NewActivityRegistry()
+	var delegateFeed *delegate.ActivityFeed
+	if !cfg.Quiet {
+		switch cfg.DelegateOutput {
+		case config.DelegateOutputStatus:
+			delegateActivity = delegate.NewActivityRegistry(nil)
+		case config.DelegateOutputLines:
+			delegateFeed = delegate.NewActivityFeed()
+			delegateActivity = delegate.NewActivityRegistry(delegateFeed)
+		}
 	}
 	delegateOpts := delegate.Options{
 		MaxTurns:                  cfg.DelegateMaxTurns,
@@ -968,6 +977,7 @@ func run(env environment) int {
 
 	color := !cfg.NoColor && env.colorTTY
 	renderer := ui.NewRenderer(stdout, stderr, ui.RenderOptions{
+		Output:     terminalOutput,
 		Color:      color,
 		Markdown:   env.colorTTY,
 		Verbose:    cfg.Verbose,
@@ -981,6 +991,7 @@ func run(env environment) int {
 		// renderer also gates them off under -quiet (r12 + during-prompt input).
 		LiveStatus:               env.colorTTY,
 		DelegateActivity:         delegateActivity,
+		DelegateFeed:             delegateFeed,
 		DisableDelegateStatus:    cfg.DelegateOutput == config.DelegateOutputOff,
 		Model:                    registryModel,
 		Registry:                 modelRegistry,
@@ -994,8 +1005,8 @@ func run(env environment) int {
 	app := &ui.App{
 		Agent:                  ag,
 		Renderer:               renderer,
-		Out:                    stdout,
-		Errw:                   stderr,
+		Out:                    terminalOutput.Stdout(),
+		Errw:                   terminalOutput.Stderr(),
 		Logger:                 logger,
 		DiagnosticLogger:       diagnosticLogger,
 		Provider:               cfg.Provider,
@@ -1064,7 +1075,6 @@ func run(env environment) int {
 		},
 		OnPromptFinished: env.promptFinished,
 		Prompt:           cfg.ReplPrompt,
-		PromptLogWriter:  promptLogWriter,
 		PromptEditMode:   cfg.ReplEditMode,
 		HistFile:         cfg.HistFile,
 		HistFileSize:     cfg.HistFileSize,

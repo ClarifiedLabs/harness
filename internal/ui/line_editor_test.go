@@ -45,10 +45,12 @@ func readViEditedInput(t *testing.T, input string) (replInput, bool, error) {
 	return editor.read("> ")
 }
 
-func TestPromptRedrawWriterMovesActivePromptBelowBackgroundLog(t *testing.T) {
+func TestOutputCoordinatorMovesActivePromptBelowBackgroundLog(t *testing.T) {
 	var out bytes.Buffer
-	editor := newPromptLineEditor(strings.NewReader(""), &out)
+	output := NewOutputCoordinator(io.Discard, &out)
+	editor := newPromptLineEditor(strings.NewReader(""), output.Stderr())
 	editor.columns = func() int { return 80 }
+	output.setPromptEditor(editor)
 	state := lineEditState{prompt: "> "}
 	state.setText("draft")
 	if err := editor.redrawPromptState(&state, viModeInsert); err != nil {
@@ -56,10 +58,8 @@ func TestPromptRedrawWriterMovesActivePromptBelowBackgroundLog(t *testing.T) {
 	}
 	out.Reset()
 
-	w := NewPromptRedrawWriter(&out)
-	w.setPromptEditor(editor)
 	msg := []byte("[info] background refresh finished\n")
-	n, err := w.Write(msg)
+	n, err := output.Stderr().Write(msg)
 	if err != nil {
 		t.Fatalf("write background log: %v", err)
 	}

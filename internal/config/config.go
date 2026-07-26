@@ -93,7 +93,7 @@ type Config struct {
 	CompactToolResultMaxBytes          int               `json:"compact_tool_result_max_bytes"` // config-only; 0 = agent default, negative disables
 	DelegateMaxTurns                   int               `json:"delegate_max_turns"`            // config-only; default 20, per delegate call cap
 	DelegateMaxDepth                   int               `json:"delegate_max_depth"`            // config-only; default 3, root depth is 0
-	DelegateOutput                     string            `json:"delegate_output"`               // -delegate-output: status, off, or reserved lines mode
+	DelegateOutput                     string            `json:"delegate_output"`               // -delegate-output: status, off, or curated scrolling lines
 	ResponsesStateful                  bool              `json:"responses_stateful"`            // -responses-stateful
 	NoSteer                            bool              `json:"no_steer"`                      // -no-steer: disable in-prompt steering (queue input for the next prompt)
 
@@ -1092,7 +1092,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.handoffAgent = fs.String("handoff-agent", "", "agent a plan->implementation handoff switches to by default (default auto)")
 	f.searchTools = fs.String("search-tools", "auto", "search tools to expose: auto, grep, rg, or both")
 	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")
-	f.delegateOutput = fs.String("delegate-output", DelegateOutputStatus, "delegate display: status, off, or lines (lines currently behaves as status)")
+	f.delegateOutput = fs.String("delegate-output", DelegateOutputStatus, "delegate display: status, off, or curated scrolling lines on stderr")
 	f.responsesStateful = fs.Bool("responses-stateful", true, "enable OpenAI Responses previous_response_id continuation when supported")
 	f.noSteer = fs.Bool("no-steer", false, "disable in-prompt steering: queue input for the next prompt instead of injecting it before the next turn")
 	f.traceProxy = fs.Bool("trace-proxy", false, "send W3C trace headers to harness-model-proxy and harness-mcp-proxy")
