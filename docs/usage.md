@@ -865,10 +865,20 @@ and are unavailable in one-shot mode.
 Inspect saved sessions with:
 
 ```sh
-harness session replay ~/.local/state/harness/sessions/20260611T123456Z
+harness session replay [-f|--follow] [-q|--quiet] ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
 harness session stats ~/.local/state/harness/sessions/20260611T123456Z
 ```
+
+`session replay --follow` first renders the existing complete `raw.ndjson`
+records, then renders complete records as they are appended. It uses the same
+user-facing view as ordinary replay; `-q`/`--quiet` suppresses status lines but
+keeps prompts and assistant text. A followed child exits successfully after its
+terminal metadata is observed and the log receives one final drain. If that
+metadata update failed, a child `prompt_usage` record can establish completion.
+A followed root session has no terminal marker and continues until interrupted.
+An existing directory without `raw.ndjson` is valid while following; a missing
+directory is an immediate error.
 
 `session stats` prints a deterministic, human-readable report for one session:
 root conversation turns, navigation count, tree entries/branches/leaves/depth,
@@ -952,7 +962,8 @@ likely slow response startup, harness prints one warning per prompt to stderr.
   prints the session token summary, and exits 130.
 - Ctrl-D at the prompt saves, prints the summary, and exits 0.
 - Ctrl-C during startup or helper-command network work cancels the in-flight
-  request and exits 130 instead of waiting for the request timeout.
+  request and exits 130 instead of waiting for the request timeout. This includes
+  `session replay --follow`, where it ends an otherwise open-ended root follow.
 
 ## Hooks
 

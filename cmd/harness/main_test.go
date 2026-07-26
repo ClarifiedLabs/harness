@@ -2218,6 +2218,91 @@ func TestRunSessionReplaySubcommand(t *testing.T) {
 	}
 }
 
+func TestRunSessionReplayFlags(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "child")
+	if err := session.AppendEvent(dir, session.Event{Type: session.EventUser, Prompt: 1, Text: "hello"}); err != nil {
+		t.Fatalf("append user event: %v", err)
+	}
+	if err := session.AppendEvent(dir, session.Event{Type: session.EventNotice, Prompt: 1, Display: "[hidden status]"}); err != nil {
+		t.Fatalf("append notice event: %v", err)
+	}
+	meta, err := json.Marshal(session.ChildMeta{ID: "child-1", Kind: "delegate", Status: session.ChildStatusCompleted})
+	if err != nil {
+		t.Fatalf("marshal child metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), meta, 0o644); err != nil {
+		t.Fatalf("write child metadata: %v", err)
+	}
+
+	for _, args := range [][]string{
+		{"session", "replay", "-q", dir},
+		{"session", "replay", "--quiet", dir},
+		{"session", "replay", "-f", "-q", dir},
+		{"session", "replay", "--follow", "--quiet", dir},
+	} {
+		t.Run(strings.Join(args[2:len(args)-1], "_"), func(t *testing.T) {
+			var out, errw bytes.Buffer
+			code := run(environment{
+				args:   args,
+				stdout: &out,
+				stderr: &errw,
+				getenv: func(string) string { return "" },
+			})
+			if code != ui.ExitOK {
+				t.Fatalf("exit = %d; stderr=%q", code, errw.String())
+			}
+			if !strings.Contains(out.String(), "> hello") || strings.Contains(out.String(), "hidden status") {
+				t.Fatalf("quiet replay output = %q", out.String())
+			}
+		})
+	}
+}
+
+func TestRunSessionReplayFlagErrorsAndHelp(t *testing.T) {
+	for _, help := range []string{"-h", "--help"} {
+		t.Run(help, func(t *testing.T) {
+			var out, errw bytes.Buffer
+			code := run(environment{args: []string{"session", "replay", help}, stdout: &out, stderr: &errw})
+			if code != ui.ExitOK || !strings.Contains(out.String(), sessionReplayUsage) || errw.Len() != 0 {
+				t.Fatalf("help: exit=%d stdout=%q stderr=%q", code, out.String(), errw.String())
+			}
+		})
+	}
+
+	for name, args := range map[string][]string{
+		"unknown flag": {"session", "replay", "--bogus"},
+		"missing path": {"session", "replay"},
+		"extra path":   {"session", "replay", "one", "two"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out, errw bytes.Buffer
+			code := run(environment{args: args, stdout: &out, stderr: &errw})
+			if code != ui.ExitUsage || !strings.Contains(errw.String(), sessionReplayUsage) {
+				t.Fatalf("parse error: exit=%d stdout=%q stderr=%q", code, out.String(), errw.String())
+			}
+		})
+	}
+}
+
+func TestRunSessionReplayFollowSIGINTExits130(t *testing.T) {
+	dir := t.TempDir()
+	sigCh := make(chan os.Signal, 1)
+	sigCh <- syscall.SIGINT
+	var out, errw bytes.Buffer
+	code := run(environment{
+		args:   []string{"session", "replay", "--follow", dir},
+		stdout: &out,
+		stderr: &errw,
+		sigCh:  sigCh,
+	})
+	if code != ui.ExitInterrupt {
+		t.Fatalf("exit = %d, want 130; stderr=%q", code, errw.String())
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("SIGINT stderr = %q, want empty", errw.String())
+	}
+}
+
 func TestRunSessionStatsSubcommand(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	created := time.Date(2026, 7, 18, 5, 0, 0, 0, time.UTC)

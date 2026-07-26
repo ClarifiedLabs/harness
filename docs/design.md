@@ -1513,7 +1513,8 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
 - **Second ^C within ~1 s, or ^C at the idle prompt** → save session, print the
   session token summary, exit 130.
 - **^C during startup or helper-command network work** → cancel the in-flight
-  request and exit 130.
+  request and exit 130. `session replay --follow` uses its own context on the
+  early helper-command path and follows the same exit rule.
 - **^D at the prompt** → save session, print the session token summary, exit 0.
 
 ### 8.5 System prompt (`internal/sysprompt`)
@@ -2390,8 +2391,9 @@ backoff allows.
 - `-q`/`--quiet` suppresses bracketed status messages (tool calls, turns,
   notices), disables live tool-stream progress and the live wait counter, suppresses
   reasoning summary output unless `-reasoning-summary` is explicitly set on the
-  CLI, and suppresses status lines in `harness session replay`; it does not filter
-  slog diagnostics. The per-prompt usage/cost line is governed by a separate
+  CLI, and suppresses status lines in `harness session replay`; replay parses its
+  own `-q`/`--quiet` flags rather than inheriting top-level argument scanning. Quiet
+  mode does not filter slog diagnostics. The per-prompt usage/cost line is governed by a separate
   `RenderOptions.SuppressUsage` (default false; the wiring sets it only for
   `-q` **and** non-TTY output), so a quiet interactive run still prints one cost line.
   One-shot runs additionally print a final `[session summary: …]` cost line to stderr
@@ -2776,12 +2778,21 @@ type UsageTotals struct {
   `state.json`, `raw.ndjson`, `meta.json`, and artifacts. Parent resume ignores these
   child transcripts; they are forensic sidecars. `meta.json` is a `ChildMeta` index —
   id, parent id, kind, agent, provider/model, status, task preview, transcript/replay
-  paths, error, usage, and message count.
+  paths, error, usage, and message count. The delegate Runner creates `running`
+  metadata, then owns one terminal transition to `completed`, `failed`, or
+  `canceled`; state-save failure does not skip the terminal metadata attempt.
+  `prompt_usage` remains the final normal child event.
 - `harness session replay <session-dir>` prints `raw.ndjson` as the familiar
   user-facing terminal view, filtering assistant/reasoning deltas from retry
   attempts that were explicitly discarded before a later successful attempt.
   Raw assistant deltas remain unchanged on disk; replay renders Markdown at
-  display time.
+  display time. `session replay --follow` keeps the same stateful renderer and
+  consumes only newline-complete append-only records with the ordinary 16 MiB
+  record limit. It filters discarded attempts in the initial batch; a later live
+  discard marker is printed rather than retracting visible output. Terminal child
+  metadata triggers one final drain and a child `prompt_usage` record is a fallback
+  completion marker. Root sessions have no terminal marker and follow until their
+  context is canceled. Log rotation is not supported.
 - `harness session timings <session-dir>` reads `raw.ndjson` timestamps and
   prints prompt totals, turn-attempt durations, tool durations, largest event gaps,
   context/payload estimates, and model API issue counts/provider time/scheduled

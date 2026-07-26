@@ -2,7 +2,9 @@ package session
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -780,6 +782,364 @@ func TestReplayFiltersAbandonedAttemptOutput(t *testing.T) {
 	if strings.Contains(latest, "discarded partial") || strings.Contains(latest, "discarded reasoning") ||
 		latest != "[stream interrupted: retrying]\nfinal answer" {
 		t.Fatalf("latest output did not filter abandoned attempt correctly: %q", latest)
+	}
+}
+
+func writeFollowMeta(t *testing.T, dir, status string) {
+	t.Helper()
+	data, err := json.Marshal(ChildMeta{ID: "child-1", Kind: "delegate", Status: status})
+	if err != nil {
+		t.Fatalf("marshal child metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), data, 0o644); err != nil {
+		t.Fatalf("write child metadata: %v", err)
+	}
+}
+
+func appendFollowBytes(t *testing.T, dir string, data []byte) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(dir, eventLog), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open raw event log: %v", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		t.Fatalf("append raw event log: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close raw event log: %v", err)
+	}
+}
+
+func TestFollowInitialAndAppendedEventsMatchReplayExactlyOnce(t *testing.T) {
+	dir := t.TempDir()
+	writeFollowMeta(t, dir, ChildStatusRunning)
+	initial := []Event{
+		{Type: EventUser, Prompt: 1, Text: "answer"},
+		{Type: EventAssistantPhase, Prompt: 1, Turn: 1, Phase: llm.AssistantPhaseCommentary},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "Working **now**."},
+	}
+	for _, ev := range initial {
+		if err := AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent initial: %v", err)
+		}
+	}
+
+	waitCalls := 0
+	wait := func(context.Context) error {
+		waitCalls++
+		if waitCalls > 1 {
+			return errors.New("unexpected extra wait")
+		}
+		for _, ev := range []Event{
+			{Type: EventAssistantPhase, Prompt: 1, Turn: 1, Phase: llm.AssistantPhaseFinal},
+			{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "Done **once**."},
+		} {
+			if err := AppendEvent(dir, ev); err != nil {
+				t.Fatalf("AppendEvent live: %v", err)
+			}
+		}
+		writeFollowMeta(t, dir, ChildStatusCompleted)
+		return nil
+	}
+
+	var followed strings.Builder
+	if err := followWithWaiter(context.Background(), dir, &followed, ReplayOptions{Markdown: true}, wait); err != nil {
+		t.Fatalf("Follow: %v", err)
+	}
+	var replayed strings.Builder
+	if err := Replay(dir, &replayed, ReplayOptions{Markdown: true}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if got, want := followed.String(), replayed.String(); got != want {
+		t.Fatalf("follow output differs from replay:\nwant %q\n got %q", want, got)
+	}
+	got := followed.String()
+	if strings.Count(got, "Working now.") != 1 || strings.Count(got, "Done once.") != 1 ||
+		strings.Index(got, "Working now.") > strings.Index(got, "Done once.") {
+		t.Fatalf("follow did not render initial and live records once in order: %q", got)
+	}
+}
+
+func TestFollowRetainsSplitRecordUntilNewline(t *testing.T) {
+	dir := t.TempDir()
+	writeFollowMeta(t, dir, ChildStatusRunning)
+	record, err := json.Marshal(Event{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "split output"})
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	cut := len(record) / 2
+	var out strings.Builder
+	waitCalls := 0
+	wait := func(context.Context) error {
+		switch waitCalls {
+		case 0:
+			appendFollowBytes(t, dir, record[:cut])
+		case 1:
+			if strings.Contains(out.String(), "split output") {
+				t.Fatalf("incomplete record rendered early: %q", out.String())
+			}
+			appendFollowBytes(t, dir, append(record[cut:], '\n'))
+			writeFollowMeta(t, dir, ChildStatusCompleted)
+		default:
+			return errors.New("unexpected extra wait")
+		}
+		waitCalls++
+		return nil
+	}
+	if err := followWithWaiter(context.Background(), dir, &out, ReplayOptions{}, wait); err != nil {
+		t.Fatalf("Follow: %v", err)
+	}
+	if got, want := out.String(), "split output\n"; got != want {
+		t.Fatalf("split record output = %q, want %q", got, want)
+	}
+}
+
+func TestFollowRejectsOversizedAndCorruptRecords(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{name: "corrupt", data: []byte("{not json}\n"), want: "replay decode"},
+		{name: "oversized", data: append(bytes.Repeat([]byte("x"), maxReplayRecordSize+1), '\n'), want: "replay record exceeds 16777216 bytes"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFollowMeta(t, dir, ChildStatusCompleted)
+			appendFollowBytes(t, dir, tt.data)
+			var out strings.Builder
+			err := Follow(context.Background(), dir, &out, ReplayOptions{})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Follow error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestFollowAllowsMissingRawLogForTerminalChildren(t *testing.T) {
+	for _, status := range []string{ChildStatusCompleted, ChildStatusFailed, ChildStatusCanceled} {
+		t.Run(status, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFollowMeta(t, dir, status)
+			var out strings.Builder
+			if err := Follow(context.Background(), dir, &out, ReplayOptions{}); err != nil {
+				t.Fatalf("Follow terminal child: %v", err)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("output with missing raw log = %q", out.String())
+			}
+		})
+	}
+}
+
+func TestFollowFiltersInitialAbandonmentButKeepsLiveOutputAndMarker(t *testing.T) {
+	dir := t.TempDir()
+	writeFollowMeta(t, dir, ChildStatusRunning)
+	initial := []Event{
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 1, Text: "initial discarded"},
+		{Type: EventTurnAttemptAbandoned, Prompt: 1, Turn: 1, Attempt: 1, Display: "[initial discarded marker]"},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 2, Text: "initial kept"},
+	}
+	for _, ev := range initial {
+		if err := AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent initial: %v", err)
+		}
+	}
+	wait := func(context.Context) error {
+		for _, ev := range []Event{
+			{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 3, Text: "live remains"},
+			{Type: EventTurnAttemptAbandoned, Prompt: 1, Turn: 1, Attempt: 3, Display: "[live discarded marker]"},
+		} {
+			if err := AppendEvent(dir, ev); err != nil {
+				t.Fatalf("AppendEvent live: %v", err)
+			}
+		}
+		writeFollowMeta(t, dir, ChildStatusFailed)
+		return nil
+	}
+	var out strings.Builder
+	if err := followWithWaiter(context.Background(), dir, &out, ReplayOptions{}, wait); err != nil {
+		t.Fatalf("Follow: %v", err)
+	}
+	got := out.String()
+	if strings.Contains(got, "initial discarded\n") || !strings.Contains(got, "[initial discarded marker]") ||
+		!strings.Contains(got, "initial kept") || !strings.Contains(got, "live remains") ||
+		!strings.Contains(got, "[live discarded marker]") {
+		t.Fatalf("unexpected abandonment follow output: %q", got)
+	}
+}
+
+func TestFollowPromptUsageCompletesChildButNotRoot(t *testing.T) {
+	t.Run("child fallback", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFollowMeta(t, dir, ChildStatusRunning)
+		if err := AppendEvent(dir, Event{Type: EventPromptUsage, Prompt: 1, Display: "[prompt done]"}); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+		wait := func(context.Context) error {
+			t.Fatal("child prompt_usage fallback unexpectedly waited")
+			return nil
+		}
+		var out strings.Builder
+		if err := followWithWaiter(context.Background(), dir, &out, ReplayOptions{}, wait); err != nil {
+			t.Fatalf("Follow: %v", err)
+		}
+	})
+
+	t.Run("child identity appears after usage", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := AppendEvent(dir, Event{Type: EventPromptUsage, Prompt: 1, Display: "[prompt done]"}); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+		waitCalls := 0
+		wait := func(context.Context) error {
+			waitCalls++
+			if waitCalls > 1 {
+				return errors.New("unexpected extra wait")
+			}
+			writeFollowMeta(t, dir, ChildStatusRunning)
+			return nil
+		}
+		var out strings.Builder
+		if err := followWithWaiter(context.Background(), dir, &out, ReplayOptions{}, wait); err != nil {
+			t.Fatalf("Follow: %v", err)
+		}
+		if waitCalls != 1 {
+			t.Fatalf("wait calls = %d, want 1", waitCalls)
+		}
+	})
+
+	t.Run("root cancellation", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := AppendEvent(dir, Event{Type: EventPromptUsage, Prompt: 1, Display: "[root prompt done]"}); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+		waitCalls := 0
+		wait := func(context.Context) error {
+			waitCalls++
+			return context.Canceled
+		}
+		var out strings.Builder
+		err := followWithWaiter(context.Background(), dir, &out, ReplayOptions{}, wait)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Follow root error = %v, want context cancellation", err)
+		}
+		if waitCalls != 1 || !strings.Contains(out.String(), "[root prompt done]") {
+			t.Fatalf("root prompt_usage completed follow: waits=%d output=%q", waitCalls, out.String())
+		}
+	})
+}
+
+type followCallbackWriter struct {
+	bytes.Buffer
+	match   string
+	onMatch func()
+}
+
+func (w *followCallbackWriter) Write(p []byte) (int, error) {
+	n, err := w.Buffer.Write(p)
+	if w.onMatch != nil && strings.Contains(string(p), w.match) {
+		fn := w.onMatch
+		w.onMatch = nil
+		fn()
+	}
+	return n, err
+}
+
+func TestFollowCompletionPerformsFinalDrain(t *testing.T) {
+	dir := t.TempDir()
+	writeFollowMeta(t, dir, ChildStatusRunning)
+	if err := AppendEvent(dir, Event{Type: EventPromptUsage, Prompt: 1, Display: "[prompt done]"}); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+	out := &followCallbackWriter{match: "[prompt done]"}
+	out.onMatch = func() {
+		if err := AppendEvent(dir, Event{Type: EventNotice, Prompt: 1, Display: "[late final event]"}); err != nil {
+			t.Fatalf("AppendEvent from writer: %v", err)
+		}
+	}
+	wait := func(context.Context) error {
+		t.Fatal("completion fallback unexpectedly waited")
+		return nil
+	}
+	if err := followWithWaiter(context.Background(), dir, out, ReplayOptions{}, wait); err != nil {
+		t.Fatalf("Follow: %v", err)
+	}
+	got := out.String()
+	if strings.Index(got, "[prompt done]") < 0 || strings.Index(got, "[late final event]") < strings.Index(got, "[prompt done]") {
+		t.Fatalf("final drain output missing or out of order: %q", got)
+	}
+}
+
+func TestFollowErrorsOnPartialRecordAtChildCompletion(t *testing.T) {
+	dir := t.TempDir()
+	writeFollowMeta(t, dir, ChildStatusCompleted)
+	appendFollowBytes(t, dir, []byte(`{"type":"notice"}`))
+	var out strings.Builder
+	err := Follow(context.Background(), dir, &out, ReplayOptions{})
+	if err == nil || !strings.Contains(err.Error(), "replay ended with incomplete record") {
+		t.Fatalf("Follow error = %v, want incomplete record error", err)
+	}
+}
+
+func TestFollowValidatesMetadataAndAppearingSchema(t *testing.T) {
+	t.Run("metadata", func(t *testing.T) {
+		tests := []struct {
+			name string
+			data string
+			want string
+		}{
+			{name: "malformed", data: "{", want: "decode child metadata"},
+			{name: "missing identity", data: `{"status":"running"}`, want: "id and kind are required"},
+			{name: "unknown status", data: `{"id":"c","kind":"delegate","status":"paused"}`, want: `unknown status "paused"`},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(tt.data), 0o644); err != nil {
+					t.Fatalf("write metadata: %v", err)
+				}
+				var out strings.Builder
+				err := followWithWaiter(context.Background(), dir, &out, ReplayOptions{}, func(context.Context) error {
+					return errors.New("unexpected wait")
+				})
+				if err == nil || !strings.Contains(err.Error(), tt.want) {
+					t.Fatalf("Follow error = %v, want containing %q", err, tt.want)
+				}
+			})
+		}
+	})
+
+	t.Run("schema appears", func(t *testing.T) {
+		dir := t.TempDir()
+		wait := func(context.Context) error {
+			if err := os.WriteFile(filepath.Join(dir, stateFile), []byte(`{"version":3}`), 0o644); err != nil {
+				t.Fatalf("write state: %v", err)
+			}
+			return nil
+		}
+		var out strings.Builder
+		err := followWithWaiter(context.Background(), dir, &out, ReplayOptions{}, wait)
+		if err == nil || !strings.Contains(err.Error(), "unsupported schema version 3 (want 4)") {
+			t.Fatalf("Follow error = %v, want appearing schema rejection", err)
+		}
+	})
+}
+
+func TestFollowRequiresExistingDirectory(t *testing.T) {
+	var out strings.Builder
+	missing := filepath.Join(t.TempDir(), "missing")
+	if err := Follow(context.Background(), missing, &out, ReplayOptions{}); err == nil {
+		t.Fatal("Follow accepted nonexistent directory")
+	}
+	path := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(path, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if err := Follow(context.Background(), path, &out, ReplayOptions{}); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("Follow file error = %v, want non-directory error", err)
 	}
 }
 

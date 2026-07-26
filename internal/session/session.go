@@ -10,6 +10,7 @@ package session
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,6 +94,14 @@ type ChildMeta struct {
 	Usage        llm.Usage `json:"usage,omitempty"`
 	MessageCount int       `json:"message_count,omitempty"`
 }
+
+// Child session lifecycle statuses recognized by Follow.
+const (
+	ChildStatusRunning   = "running"
+	ChildStatusCompleted = "completed"
+	ChildStatusFailed    = "failed"
+	ChildStatusCanceled  = "canceled"
+)
 
 // Save writes state.json atomically under dir. Parent directories are created,
 // and the session directory itself is the stable path printed to the user.
@@ -428,6 +437,52 @@ func (d *assistantDisplay) markAssistantTextVisible() {
 	}
 }
 
+type replayRenderer struct {
+	w         io.Writer
+	opts      ReplayOptions
+	assistant *assistantDisplay
+}
+
+func newReplayRenderer(w io.Writer, opts ReplayOptions) *replayRenderer {
+	return &replayRenderer{
+		w:         w,
+		opts:      opts,
+		assistant: newAssistantDisplay(w, opts),
+	}
+}
+
+func (r *replayRenderer) Render(ev Event) {
+	switch ev.Type {
+	case EventUser:
+		r.assistant.Finish()
+		r.assistant = newAssistantDisplay(r.w, r.opts)
+		fmt.Fprintf(r.w, "> %s\n", ev.Text)
+		for _, img := range ev.Images {
+			fmt.Fprintf(r.w, "[image: %s %s %d bytes detail=%s]\n", img.Name, img.MediaType, img.Bytes, img.Detail)
+		}
+	case EventAssistantDelta:
+		r.assistant.Write(ev.Text)
+	case EventAssistantPhase:
+		r.assistant.Phase(ev.Phase)
+	case EventReasoningSummary:
+		r.assistant.Finish()
+		lines := ReasoningSummaryLines(ev.Text, ReasoningSummaryFormat{Width: r.opts.Width})
+		if len(lines) != 0 {
+			fmt.Fprintln(r.w, strings.Join(lines, "\n"))
+			r.assistant.MarkPreFinalOutput()
+		}
+	case EventToolResult, EventToolDiff, EventNotice, EventBranch, EventTurnAttemptAbandoned, EventTurnAttemptUsage, EventTurnComplete, EventPromptUsage, EventModelRequest:
+		r.assistant.Finish()
+		if ev.Display != "" && !r.opts.Quiet {
+			fmt.Fprintln(r.w, ev.Display)
+		}
+	}
+}
+
+func (r *replayRenderer) Finish() {
+	r.assistant.Finish()
+}
+
 // Replay prints a user-facing reconstruction of raw.ndjson.
 func Replay(dir string, w io.Writer, opts ReplayOptions) error {
 	events, err := readEvents(dir)
@@ -436,36 +491,263 @@ func Replay(dir string, w io.Writer, opts ReplayOptions) error {
 	}
 	events = filterAbandonedAttemptOutput(events)
 
-	assistant := newAssistantDisplay(w, opts)
-
+	renderer := newReplayRenderer(w, opts)
 	for _, ev := range events {
-		switch ev.Type {
-		case EventUser:
-			assistant.Finish()
-			assistant = newAssistantDisplay(w, opts)
-			fmt.Fprintf(w, "> %s\n", ev.Text)
-			for _, img := range ev.Images {
-				fmt.Fprintf(w, "[image: %s %s %d bytes detail=%s]\n", img.Name, img.MediaType, img.Bytes, img.Detail)
+		renderer.Render(ev)
+	}
+	renderer.Finish()
+	return nil
+}
+
+const (
+	followPollInterval   = 100 * time.Millisecond
+	maxReplayRecordSize  = 16 * 1024 * 1024
+	followReadBufferSize = 64 * 1024
+)
+
+type followWaiter func(context.Context) error
+
+// Follow prints the current replay and then renders newline-complete records as
+// they are appended. Root sessions run until ctx is canceled. Child sessions
+// also stop after terminal metadata or a prompt_usage completion fallback.
+func Follow(ctx context.Context, dir string, w io.Writer, opts ReplayOptions) error {
+	return followWithWaiter(ctx, dir, w, opts, waitForFollowPoll)
+}
+
+func waitForFollowPoll(ctx context.Context) error {
+	timer := time.NewTimer(followPollInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+type followTarget struct {
+	child  bool
+	status string
+}
+
+func (t followTarget) terminal() bool {
+	switch t.status {
+	case ChildStatusCompleted, ChildStatusFailed, ChildStatusCanceled:
+		return true
+	default:
+		return false
+	}
+}
+
+func readFollowTarget(dir string) (followTarget, error) {
+	path := filepath.Join(dir, "meta.json")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return followTarget{}, nil
+	}
+	if err != nil {
+		return followTarget{}, fmt.Errorf("session: read child metadata %s: %w", path, err)
+	}
+	var meta ChildMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return followTarget{}, fmt.Errorf("session: decode child metadata %s: %w", path, err)
+	}
+	if meta.ID == "" || meta.Kind == "" {
+		return followTarget{}, fmt.Errorf("session: invalid child metadata %s: id and kind are required", path)
+	}
+	switch meta.Status {
+	case ChildStatusRunning, ChildStatusCompleted, ChildStatusFailed, ChildStatusCanceled:
+		return followTarget{child: true, status: meta.Status}, nil
+	default:
+		return followTarget{}, fmt.Errorf("session: invalid child metadata %s: unknown status %q", path, meta.Status)
+	}
+}
+
+type eventFollower struct {
+	path    string
+	offset  int64
+	partial []byte
+	seen    bool
+}
+
+func newEventFollower(dir string) *eventFollower {
+	return &eventFollower{path: filepath.Join(dir, eventLog)}
+}
+
+func (f *eventFollower) Read() ([]Event, error) {
+	file, err := os.Open(f.path)
+	if errors.Is(err, os.ErrNotExist) {
+		if f.seen {
+			return nil, fmt.Errorf("session: followed event log disappeared: %s", f.path)
+		}
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("session: open followed event log: %w", err)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("session: stat followed event log: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("session: followed event log is not a regular file: %s", f.path)
+	}
+	if info.Size() < f.offset {
+		return nil, fmt.Errorf("session: followed event log was truncated: %s", f.path)
+	}
+	if _, err := file.Seek(f.offset, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("session: seek followed event log: %w", err)
+	}
+	f.seen = true
+
+	var events []Event
+	buf := make([]byte, followReadBufferSize)
+	for {
+		n, readErr := file.Read(buf)
+		if n > 0 {
+			f.offset += int64(n)
+			decoded, err := f.consume(buf[:n])
+			if err != nil {
+				return nil, err
 			}
-		case EventAssistantDelta:
-			assistant.Write(ev.Text)
-		case EventAssistantPhase:
-			assistant.Phase(ev.Phase)
-		case EventReasoningSummary:
-			assistant.Finish()
-			lines := ReasoningSummaryLines(ev.Text, ReasoningSummaryFormat{Width: opts.Width})
-			if len(lines) != 0 {
-				fmt.Fprintln(w, strings.Join(lines, "\n"))
-				assistant.MarkPreFinalOutput()
+			events = append(events, decoded...)
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return events, nil
 			}
-		case EventToolResult, EventToolDiff, EventNotice, EventBranch, EventTurnAttemptAbandoned, EventTurnAttemptUsage, EventTurnComplete, EventPromptUsage, EventModelRequest:
-			assistant.Finish()
-			if ev.Display != "" && !opts.Quiet {
-				fmt.Fprintln(w, ev.Display)
-			}
+			return nil, fmt.Errorf("session: read followed event log: %w", readErr)
 		}
 	}
-	assistant.Finish()
+}
+
+func (f *eventFollower) consume(data []byte) ([]Event, error) {
+	var events []Event
+	start := 0
+	for i, b := range data {
+		if b != '\n' {
+			continue
+		}
+		fragment := data[start:i]
+		if len(f.partial)+len(fragment) > maxReplayRecordSize {
+			return nil, fmt.Errorf("session: replay record exceeds %d bytes", maxReplayRecordSize)
+		}
+		var record []byte
+		if len(f.partial) == 0 {
+			record = fragment
+		} else {
+			f.partial = append(f.partial, fragment...)
+			record = f.partial
+		}
+		var ev Event
+		if err := json.Unmarshal(record, &ev); err != nil {
+			return nil, fmt.Errorf("session: replay decode: %w", err)
+		}
+		events = append(events, ev)
+		f.partial = f.partial[:0]
+		start = i + 1
+	}
+	if start < len(data) {
+		fragment := data[start:]
+		if len(f.partial)+len(fragment) > maxReplayRecordSize {
+			return nil, fmt.Errorf("session: replay record exceeds %d bytes", maxReplayRecordSize)
+		}
+		f.partial = append(f.partial, fragment...)
+	}
+	return events, nil
+}
+
+func followWithWaiter(ctx context.Context, dir string, w io.Writer, opts ReplayOptions, wait followWaiter) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("session: follow directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("session: follow path is not a directory: %s", dir)
+	}
+	if err := validateReplaySchema(dir); err != nil {
+		return err
+	}
+	target, err := readFollowTarget(dir)
+	if err != nil {
+		return err
+	}
+
+	renderer := newReplayRenderer(w, opts)
+	defer renderer.Finish()
+	follower := newEventFollower(dir)
+	initial, err := follower.Read()
+	if err != nil {
+		return err
+	}
+	for _, ev := range filterAbandonedAttemptOutput(initial) {
+		renderer.Render(ev)
+	}
+	sawPromptUsage := hasPromptUsage(initial)
+	if followComplete(target, sawPromptUsage) {
+		return finalFollowDrain(dir, follower, renderer)
+	}
+
+	for {
+		if err := wait(ctx); err != nil {
+			if drainErr := finalFollowDrain(dir, follower, renderer); drainErr != nil {
+				return errors.Join(err, drainErr)
+			}
+			return err
+		}
+		if err := validateReplaySchema(dir); err != nil {
+			return err
+		}
+		target, err = readFollowTarget(dir)
+		if err != nil {
+			return err
+		}
+		events, err := follower.Read()
+		if err != nil {
+			return err
+		}
+		for _, ev := range events {
+			renderer.Render(ev)
+		}
+		sawPromptUsage = sawPromptUsage || hasPromptUsage(events)
+		if followComplete(target, sawPromptUsage) {
+			return finalFollowDrain(dir, follower, renderer)
+		}
+	}
+}
+
+func hasPromptUsage(events []Event) bool {
+	for _, ev := range events {
+		if ev.Type == EventPromptUsage {
+			return true
+		}
+	}
+	return false
+}
+
+func followComplete(target followTarget, sawPromptUsage bool) bool {
+	return target.terminal() || (target.child && target.status == ChildStatusRunning && sawPromptUsage)
+}
+
+func finalFollowDrain(dir string, follower *eventFollower, renderer *replayRenderer) error {
+	if err := validateReplaySchema(dir); err != nil {
+		return err
+	}
+	if _, err := readFollowTarget(dir); err != nil {
+		return err
+	}
+	events, err := follower.Read()
+	if err != nil {
+		return err
+	}
+	for _, ev := range events {
+		renderer.Render(ev)
+	}
+	if len(follower.partial) != 0 {
+		return fmt.Errorf("session: replay ended with incomplete record (%d bytes)", len(follower.partial))
+	}
 	return nil
 }
 
@@ -595,7 +877,7 @@ func readEvents(dir string) ([]Event, error) {
 	defer f.Close()
 
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	sc.Buffer(make([]byte, 0, followReadBufferSize), maxReplayRecordSize)
 	var events []Event
 	for sc.Scan() {
 		var ev Event

@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -128,7 +129,7 @@ func run(env environment) int {
 		return ui.ExitOK
 	}
 	if len(args) > 0 && args[0] == "session" {
-		return runSessionCommand(args[1:], stdout, stderr, sessionReplayOptions(env, argsQuiet(args)))
+		return runSessionCommand(env, args[1:])
 	}
 	if len(args) > 0 && args[0] == "lsp" {
 		return runLSPCommand(env, args[1:])
@@ -1674,47 +1675,85 @@ func configAgentsFromDefinitions(agents map[string]agentdef.Definition) map[stri
 	return out
 }
 
-func runSessionCommand(args []string, stdout, stderr io.Writer, replayOpts session.ReplayOptions) int {
+func runSessionCommand(env environment, args []string) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "usage: harness session <replay|timings|stats> <session-dir>")
+		fmt.Fprintln(env.stderr, "usage: harness session <replay|timings|stats> <session-dir>")
 		return ui.ExitUsage
 	}
 	switch args[0] {
 	case "replay":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: harness session replay <session-dir>")
-			return ui.ExitUsage
-		}
-		if err := session.Replay(args[1], stdout, replayOpts); err != nil {
-			fmt.Fprintf(stderr, "harness: session replay: %v\n", err)
-			return ui.ExitRuntime
-		}
-		return ui.ExitOK
+		return runSessionReplay(env, args[1:])
 	case "timings":
 		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: harness session timings <session-dir>")
+			fmt.Fprintln(env.stderr, "usage: harness session timings <session-dir>")
 			return ui.ExitUsage
 		}
-		if err := session.Timings(args[1], stdout); err != nil {
-			fmt.Fprintf(stderr, "harness: session timings: %v\n", err)
+		if err := session.Timings(args[1], env.stdout); err != nil {
+			fmt.Fprintf(env.stderr, "harness: session timings: %v\n", err)
 			return ui.ExitRuntime
 		}
 		return ui.ExitOK
 	case "stats":
 		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: harness session stats <session-dir>")
+			fmt.Fprintln(env.stderr, "usage: harness session stats <session-dir>")
 			return ui.ExitUsage
 		}
-		if err := session.Stats(args[1], stdout); err != nil {
-			fmt.Fprintf(stderr, "harness: session stats: %v\n", err)
+		if err := session.Stats(args[1], env.stdout); err != nil {
+			fmt.Fprintf(env.stderr, "harness: session stats: %v\n", err)
 			return ui.ExitRuntime
 		}
 		return ui.ExitOK
 	default:
-		fmt.Fprintf(stderr, "harness: unknown session command %q\n", args[0])
-		fmt.Fprintln(stderr, "usage: harness session <replay|timings|stats> <session-dir>")
+		fmt.Fprintf(env.stderr, "harness: unknown session command %q\n", args[0])
+		fmt.Fprintln(env.stderr, "usage: harness session <replay|timings|stats> <session-dir>")
 		return ui.ExitUsage
 	}
+}
+
+const sessionReplayUsage = "usage: harness session replay [-f|--follow] [-q|--quiet] <session-dir>"
+
+func runSessionReplay(env environment, args []string) int {
+	fs := flag.NewFlagSet("session replay", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var follow, quiet bool
+	fs.BoolVar(&follow, "f", false, "follow appended replay events")
+	fs.BoolVar(&follow, "follow", false, "follow appended replay events")
+	fs.BoolVar(&quiet, "q", false, "suppress replay status lines")
+	fs.BoolVar(&quiet, "quiet", false, "suppress replay status lines")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(env.stdout, sessionReplayUsage)
+			return ui.ExitOK
+		}
+		fmt.Fprintf(env.stderr, "harness: session replay: %v\n", err)
+		fmt.Fprintln(env.stderr, sessionReplayUsage)
+		return ui.ExitUsage
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(env.stderr, sessionReplayUsage)
+		return ui.ExitUsage
+	}
+
+	dir := fs.Arg(0)
+	opts := sessionReplayOptions(env, quiet)
+	if !follow {
+		if err := session.Replay(dir, env.stdout, opts); err != nil {
+			fmt.Fprintf(env.stderr, "harness: session replay: %v\n", err)
+			return ui.ExitRuntime
+		}
+		return ui.ExitOK
+	}
+
+	ctx, cancel, interrupted := signalCancelContext(env.sigCh)
+	defer cancel()
+	if err := session.Follow(ctx, dir, env.stdout, opts); err != nil {
+		if interrupted() && errors.Is(err, context.Canceled) {
+			return ui.ExitInterrupt
+		}
+		fmt.Fprintf(env.stderr, "harness: session replay: %v\n", err)
+		return ui.ExitRuntime
+	}
+	return ui.ExitOK
 }
 
 func sessionReplayOptions(env environment, quiet bool) session.ReplayOptions {
@@ -1730,17 +1769,6 @@ func sessionReplayOptions(env environment, quiet bool) session.ReplayOptions {
 		Width:    width,
 		Quiet:    quiet,
 	}
-}
-
-// argsQuiet reports whether -q, --quiet, or -quiet appears anywhere in args.
-// It is used before config.Load for subcommands dispatched early (e.g. "session").
-func argsQuiet(args []string) bool {
-	for _, a := range args {
-		if a == "-q" || a == "--quiet" || a == "-quiet" {
-			return true
-		}
-	}
-	return false
 }
 
 func envColorDisabled(getenv func(string) string) bool {

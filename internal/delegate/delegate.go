@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -155,9 +156,10 @@ type RuntimeRebinder interface {
 // Runner starts configured child agents. It is shared by synchronous delegate
 // and background delegation.
 type Runner struct {
-	snapshot func() Runtime
-	resolve  func(Runtime, string) (Launch, error)
-	opts     Options
+	snapshot         func() Runtime
+	resolve          func(Runtime, string) (Launch, error)
+	opts             Options
+	childToolBuilder func(Runtime, Launch, string, *todo.Store, []string) (*tools.Registry, error)
 }
 
 func NewRunner(snapshot func() Runtime, resolve func(Runtime, string) (Launch, error), opts Options) *Runner {
@@ -357,7 +359,7 @@ func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 // progress object the child sink updates so a parent wait ticker can read child
 // activity while this (synchronous) call blocks; a fresh Progress is created
 // when nil for callers that do not surface live progress.
-func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (RunResult, error) {
+func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (result RunResult, retErr error) {
 	if r == nil {
 		return RunResult{}, fmt.Errorf("delegate runner is not initialized")
 	}
@@ -408,14 +410,35 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (R
 	if childID == "" {
 		childID = nextChildID(req.Kind)
 	}
-	now := r.now()
-	childDir, saveErr := r.saveChildMeta(runtime, launch, childID, req, "running", now, now, agent.PromptUsage{}, nil, 0)
+	created := r.now()
+	childDir, saveErr := r.saveChildMeta(runtime, launch, childID, req, session.ChildStatusRunning, created, created, agent.PromptUsage{}, nil, 0)
+	result = RunResult{ChildID: childID, TranscriptPath: childDir, SaveError: saveErr}
+
+	terminalStatus := session.ChildStatusFailed
+	var terminalUsage agent.PromptUsage
+	var terminalErr error
+	var terminalMessageCount int
+	var terminalUpdated time.Time
+	var terminalOnce sync.Once
+	finish := func() {
+		terminalOnce.Do(func() {
+			progress.markFinished()
+			if terminalUpdated.IsZero() {
+				terminalUpdated = r.now()
+			}
+			_, err := r.saveChildMeta(runtime, launch, childID, req, terminalStatus, created, terminalUpdated, terminalUsage, terminalErr, terminalMessageCount)
+			result.SaveError = errors.Join(result.SaveError, err)
+		})
+	}
+	defer finish()
 
 	childTodos := todo.NewStore()
 	hasTodoTool := slices.Contains(toolNames, updateTodosToolName)
-	childTools, err := r.childTools(runtime, launch, childID, childTodos, toolNames)
+	childTools, err := r.buildChildTools(runtime, launch, childID, childTodos, toolNames)
 	if err != nil {
-		return RunResult{ChildID: childID, TranscriptPath: childDir, SaveError: saveErr}, err
+		terminalErr = err
+		finish()
+		return result, err
 	}
 	child := agent.New(launch.Provider, childTools, agent.Options{
 		MaxTurns:                  maxTurns,
@@ -442,30 +465,29 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (R
 
 	sink := newChildSink(childDir, childTodos, hasTodoTool, progress)
 	sink.User(req.Task)
-	defer progress.markFinished()
 	runErr := child.RunPrompt(ctx, req.Task, sink)
 	usage := sink.usage
-	status := "completed"
-	errText := ""
-	if runErr != nil {
-		status = "failed"
-		errText = runErr.Error()
+	terminalUsage = usage
+	terminalMessageCount = len(child.Transcript())
+	terminalStatus = childTerminalStatus(runErr)
+	terminalUpdated = r.now()
+	stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, usage, created, terminalUpdated)
+	persistenceErr := errors.Join(sink.appendError(), stateErr)
+	result = RunResult{
+		Usage:          usage.Usage,
+		Turns:          usage.Turns,
+		ChildID:        childID,
+		TranscriptPath: childDir,
+		Agent:          launch.Agent,
+		ProviderName:   launch.ProviderName,
+		Model:          launch.Model,
+		SaveError:      errors.Join(result.SaveError, persistenceErr),
+		Progress:       progress.Closure(),
 	}
-	if err := r.saveChildSession(runtime, launch, childID, req, child, childTodos, usage, status, errText, now); err != nil && saveErr == nil {
-		saveErr = err
-	}
+	terminalErr = errors.Join(runErr, persistenceErr)
+	finish()
 	if runErr != nil {
-		return RunResult{
-			Usage:          usage.Usage,
-			Turns:          usage.Turns,
-			ChildID:        childID,
-			TranscriptPath: childDir,
-			Agent:          launch.Agent,
-			ProviderName:   launch.ProviderName,
-			Model:          launch.Model,
-			SaveError:      saveErr,
-			Progress:       progress.Closure(),
-		}, runErr
+		return result, runErr
 	}
 	report := strings.TrimSpace(lastAssistantText(child.Transcript()))
 	if report == "" {
@@ -476,22 +498,19 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (R
 	if childDir != "" {
 		report += fmt.Sprintf(", transcript %s", childDir)
 	}
-	if saveErr != nil {
-		report += fmt.Sprintf(", transcript save failed: %v", saveErr)
+	if result.SaveError != nil {
+		report += fmt.Sprintf(", transcript save failed: %v", result.SaveError)
 	}
 	report += "]"
-	return RunResult{
-		Report:         report,
-		Usage:          usage.Usage,
-		Turns:          usage.Turns,
-		ChildID:        childID,
-		TranscriptPath: childDir,
-		Agent:          launch.Agent,
-		ProviderName:   launch.ProviderName,
-		Model:          launch.Model,
-		SaveError:      saveErr,
-		Progress:       progress.Closure(),
-	}, nil
+	result.Report = report
+	return result, nil
+}
+
+func (r *Runner) buildChildTools(parent Runtime, launch Launch, childID string, todos *todo.Store, names []string) (*tools.Registry, error) {
+	if r.childToolBuilder != nil {
+		return r.childToolBuilder(parent, launch, childID, todos, names)
+	}
+	return r.childTools(parent, launch, childID, todos, names)
 }
 
 func (r *Runner) childTools(parent Runtime, launch Launch, childID string, todos *todo.Store, names []string) (*tools.Registry, error) {
@@ -592,6 +611,16 @@ func turnPhrase(n int) string {
 		return "1 turn"
 	}
 	return fmt.Sprintf("%d turns", n)
+}
+
+func childTerminalStatus(err error) string {
+	if err == nil {
+		return session.ChildStatusCompleted
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return session.ChildStatusCanceled
+	}
+	return session.ChildStatusFailed
 }
 
 func lastAssistantText(msgs []llm.Message) string {
@@ -799,13 +828,12 @@ func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, re
 	return session.SaveChildMeta(parent.SessionPath, meta)
 }
 
-func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string, req RunRequest, child *agent.Agent, todos *todo.Store, usage agent.PromptUsage, status, errText string, created time.Time) error {
+func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string, child *agent.Agent, todos *todo.Store, usage agent.PromptUsage, created, updated time.Time) error {
 	if parent.SessionPath == "" {
 		return nil
 	}
-	updated := r.now()
 	childDir := session.ChildSessionDir(parent.SessionPath, childID)
-	if err := (session.Session{
+	return (session.Session{
 		Version:         session.Version,
 		Provider:        launch.ProviderName,
 		Model:           launch.Model,
@@ -820,15 +848,7 @@ func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string,
 		ResponseState:   child.ResponseState(),
 		Todos:           todos.Snapshot(),
 		Usage:           session.UsageTotals{Usage: usage.Usage, CostUSD: usage.Usage.CostUSD},
-	}).Save(childDir); err != nil {
-		return err
-	}
-	var runErr error
-	if errText != "" {
-		runErr = fmt.Errorf("%s", errText)
-	}
-	_, err := r.saveChildMeta(parent, launch, childID, req, status, created, updated, usage, runErr, len(child.Transcript()))
-	return err
+	}).Save(childDir)
 }
 
 func preview(s string, limit int) string {
@@ -848,6 +868,8 @@ type childSink struct {
 	pending     map[string]llm.ToolCall
 	turn        int
 	attempt     int
+	appendMu    sync.Mutex
+	appendErr   error
 }
 
 func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progress *Progress) *childSink {
@@ -969,6 +991,13 @@ func (s *childSink) TextDelta(text string) {
 	s.append(session.Event{Type: session.EventAssistantDelta, Prompt: 1, Turn: s.turn, Attempt: s.attempt, Text: text})
 }
 
+func (s *childSink) AssistantPhase(phase string) {
+	if phase == "" || !llm.ValidAssistantPhase(phase) {
+		return
+	}
+	s.append(session.Event{Type: session.EventAssistantPhase, Prompt: 1, Turn: s.turn, Attempt: s.attempt, Phase: phase})
+}
+
 func (s *childSink) ReasoningSummary(text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -981,7 +1010,17 @@ func (s *childSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimat
 	s.turn = turn
 	s.attempt = attempt
 	s.progress.markTurn(turn, attempt, ctx)
-	s.append(session.Event{Type: session.EventTurnAttemptStart, Prompt: 1, Turn: turn, Attempt: attempt})
+	s.append(session.Event{Type: session.EventTurnAttemptStart, Prompt: 1, Turn: turn, Attempt: attempt, Context: childContextSnapshot(ctx)})
+}
+
+func (s *childSink) TurnAttemptAbandoned(turn, attempt int) {
+	s.append(session.Event{
+		Type:    session.EventTurnAttemptAbandoned,
+		Prompt:  1,
+		Turn:    turn,
+		Attempt: attempt,
+		Display: fmt.Sprintf("[turn: %d attempt %d discarded; retrying]", turn, attempt),
+	})
 }
 
 func (s *childSink) TurnAttemptComplete(u agent.TurnAttemptUsage) {
@@ -993,6 +1032,17 @@ func (s *childSink) TurnAttemptComplete(u agent.TurnAttemptUsage) {
 func (*childSink) ToolUseStart(llm.ToolCall) {}
 
 func (*childSink) ToolUseDelta(int, string) {}
+
+func (s *childSink) ModelRequestEvent(event llm.ModelRequestEvent) {
+	copyEvent := event
+	s.append(session.Event{
+		Type:         session.EventModelRequest,
+		Prompt:       1,
+		Turn:         s.turn,
+		Attempt:      s.attempt,
+		ModelRequest: &copyEvent,
+	})
+}
 
 func (s *childSink) ToolStart(call llm.ToolCall) {
 	s.pending[call.ID] = call
@@ -1045,7 +1095,6 @@ func (s *childSink) RequestContext() []string {
 
 func (s *childSink) PromptComplete(usage agent.PromptUsage) {
 	s.usage = usage
-	s.progress.markFinished()
 	u := usage.Usage
 	s.append(session.Event{Type: session.EventPromptUsage, Prompt: 1, Usage: &u})
 }
@@ -1054,7 +1103,37 @@ func (s *childSink) append(ev session.Event) {
 	if s.sessionDir == "" {
 		return
 	}
-	_ = session.AppendEvent(s.sessionDir, ev)
+	s.appendMu.Lock()
+	defer s.appendMu.Unlock()
+	if err := session.AppendEvent(s.sessionDir, ev); err != nil && s.appendErr == nil {
+		s.appendErr = err
+	}
+}
+
+func (s *childSink) appendError() error {
+	if s == nil {
+		return nil
+	}
+	s.appendMu.Lock()
+	defer s.appendMu.Unlock()
+	return s.appendErr
+}
+
+func childContextSnapshot(ctx agent.ContextEstimate) *session.ContextSnapshot {
+	if ctx == (agent.ContextEstimate{}) {
+		return nil
+	}
+	return &session.ContextSnapshot{
+		Total:           ctx.Total,
+		Window:          ctx.Window,
+		System:          ctx.System,
+		Tools:           ctx.Tools,
+		Messages:        ctx.Messages,
+		PayloadTotal:    ctx.PayloadTotal,
+		PayloadSystem:   ctx.PayloadSystem,
+		PayloadTools:    ctx.PayloadTools,
+		PayloadMessages: ctx.PayloadMessages,
+	}
 }
 
 func firstLine(s string) string {

@@ -1,8 +1,10 @@
 package delegate
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -461,6 +463,194 @@ func TestDelegatePersistsChildTranscript(t *testing.T) {
 	}
 }
 
+func TestDelegatePersistsTerminalChildStatuses(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		step       func(context.CancelFunc) llmtest.Step
+		wantStatus string
+		wantErr    error
+	}{
+		{
+			name: "failed",
+			step: func(context.CancelFunc) llmtest.Step {
+				return llmtest.Step{Err: &llm.APIError{StatusCode: 400, Message: "bad request", Retryable: false}}
+			},
+			wantStatus: session.ChildStatusFailed,
+		},
+		{
+			name: "canceled",
+			step: func(cancel context.CancelFunc) llmtest.Step {
+				return llmtest.Step{Block: func(context.Context) { cancel() }}
+			},
+			wantStatus: session.ChildStatusCanceled,
+			wantErr:    context.Canceled,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			fp := llmtest.New("fake", tc.step(cancel))
+			childTools := &tools.Registry{}
+			sessionPath := filepath.Join(t.TempDir(), "session")
+			runtime := Runtime{Provider: fp, Model: "model", Registry: llm.NewRegistry(nil), SessionPath: sessionPath}
+			runner := NewRunner(func() Runtime { return runtime }, func(runtime Runtime, _ string) (Launch, error) {
+				return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools}, nil
+			}, Options{})
+
+			_, runErr := runner.Run(ctx, RunRequest{Kind: "delegate", Task: "inspect", ChildID: "child-status"}, nil)
+			if runErr == nil {
+				t.Fatal("Run should fail")
+			}
+			if tc.wantErr != nil && !errors.Is(runErr, tc.wantErr) {
+				t.Fatalf("Run error = %v, want %v", runErr, tc.wantErr)
+			}
+			meta := readDelegateChildMeta(t, filepath.Join(sessionPath, "children", "child-status"))
+			if meta.Status != tc.wantStatus || meta.Error == "" {
+				t.Fatalf("terminal metadata = %+v, want status %q with error", meta, tc.wantStatus)
+			}
+		})
+	}
+	if got := childTerminalStatus(context.DeadlineExceeded); got != session.ChildStatusCanceled {
+		t.Fatalf("deadline status = %q, want canceled", got)
+	}
+}
+
+func TestDelegateTerminalizesPostMetadataSetupFailure(t *testing.T) {
+	fp := llmtest.New("fake")
+	childTools := &tools.Registry{}
+	sessionPath := filepath.Join(t.TempDir(), "session")
+	runtime := Runtime{Provider: fp, Model: "model", Registry: llm.NewRegistry(nil), SessionPath: sessionPath}
+	runner := NewRunner(func() Runtime { return runtime }, func(runtime Runtime, _ string) (Launch, error) {
+		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools}, nil
+	}, Options{})
+	setupErr := errors.New("build child tools")
+	runner.childToolBuilder = func(Runtime, Launch, string, *todo.Store, []string) (*tools.Registry, error) {
+		return nil, setupErr
+	}
+	progress := NewProgress()
+
+	result, err := runner.Run(context.Background(), RunRequest{Kind: "delegate", Task: "inspect", ChildID: "child-setup"}, progress)
+	if !errors.Is(err, setupErr) {
+		t.Fatalf("Run error = %v, want setup error", err)
+	}
+	if result.TranscriptPath == "" {
+		t.Fatal("setup failure should retain the child transcript path")
+	}
+	meta := readDelegateChildMeta(t, filepath.Join(sessionPath, "children", "child-setup"))
+	if meta.Status != session.ChildStatusFailed || !strings.Contains(meta.Error, setupErr.Error()) {
+		t.Fatalf("terminal metadata = %+v, want failed setup error", meta)
+	}
+	if !progress.Snapshot().Finished {
+		t.Fatalf("progress = %+v, want finished", progress.Snapshot())
+	}
+}
+
+func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
+	dir := t.TempDir()
+	sink := newChildSink(dir, todo.NewStore(), false, NewProgress())
+	ctx := agent.ContextEstimate{Total: 123, Window: 456, System: 7, Tools: 8, Messages: 9}
+	sink.User("inspect")
+	sink.TurnAttemptStart(2, 3, ctx)
+	sink.AssistantPhase("")
+	sink.AssistantPhase("invalid")
+	sink.AssistantPhase(llm.AssistantPhaseCommentary)
+	sink.TextDelta("working")
+	sink.TurnAttemptAbandoned(2, 3)
+	requestEvent := llm.ModelRequestEvent{State: llm.ModelRequestRetryScheduled, Sequence: 4, RetryDelayMS: 25}
+	sink.ModelRequestEvent(requestEvent)
+	sink.PromptComplete(agent.PromptUsage{Usage: llm.Usage{InputTokens: 11, OutputTokens: 5}})
+
+	events := readDelegateChildEvents(t, dir)
+	wantTypes := []string{
+		session.EventUser,
+		session.EventTurnAttemptStart,
+		session.EventAssistantPhase,
+		session.EventAssistantDelta,
+		session.EventTurnAttemptAbandoned,
+		session.EventModelRequest,
+		session.EventPromptUsage,
+	}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("event count = %d, want %d: %+v", len(events), len(wantTypes), events)
+	}
+	for i, want := range wantTypes {
+		if events[i].Type != want {
+			t.Fatalf("event %d type = %q, want %q", i, events[i].Type, want)
+		}
+	}
+	start := events[1]
+	if start.Context == nil || start.Context.Total != ctx.Total || start.Context.Window != ctx.Window || start.Context.System != ctx.System {
+		t.Fatalf("turn context = %+v, want %+v", start.Context, ctx)
+	}
+	if events[2].Phase != llm.AssistantPhaseCommentary {
+		t.Fatalf("assistant phase = %q", events[2].Phase)
+	}
+	if !strings.Contains(events[4].Display, "attempt 3 discarded") {
+		t.Fatalf("discard display = %q", events[4].Display)
+	}
+	if events[5].ModelRequest == nil || *events[5].ModelRequest != requestEvent {
+		t.Fatalf("model request event = %+v, want %+v", events[5].ModelRequest, requestEvent)
+	}
+	if events[len(events)-1].Type != session.EventPromptUsage {
+		t.Fatalf("last event = %q, want prompt_usage", events[len(events)-1].Type)
+	}
+	if sink.progress.Snapshot().Finished {
+		t.Fatal("child sink must not independently terminalize progress")
+	}
+}
+
+func TestChildSinkRetainsFirstAppendError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(path, []byte("file"), 0o644); err != nil {
+		t.Fatalf("write blocking file: %v", err)
+	}
+	sink := newChildSink(path, todo.NewStore(), false, NewProgress())
+	sink.User("first")
+	first := sink.appendError()
+	if first == nil {
+		t.Fatal("append error = nil")
+	}
+	sink.User("second")
+	if got := sink.appendError(); got != first {
+		t.Fatalf("append error changed from %v to %v", first, got)
+	}
+}
+
+func readDelegateChildMeta(t *testing.T, childDir string) session.ChildMeta {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(childDir, "meta.json"))
+	if err != nil {
+		t.Fatalf("read child metadata: %v", err)
+	}
+	var meta session.ChildMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("decode child metadata: %v", err)
+	}
+	return meta
+}
+
+func readDelegateChildEvents(t *testing.T, childDir string) []session.Event {
+	t.Helper()
+	f, err := os.Open(filepath.Join(childDir, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("open child replay: %v", err)
+	}
+	defer f.Close()
+	var events []session.Event
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var ev session.Event
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			t.Fatalf("decode child replay: %v", err)
+		}
+		events = append(events, ev)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan child replay: %v", err)
+	}
+	return events
+}
+
 func TestDelegateChildTodoStoreIsPrivate(t *testing.T) {
 	parentTodos := todo.NewStore()
 	parentTools := &tools.Registry{}
@@ -767,8 +957,12 @@ func TestProgressSnapshotZeroAndFinished(t *testing.T) {
 	}
 
 	s.PromptComplete(agent.PromptUsage{Turns: 3})
+	if got := p.Snapshot(); got.Finished || got.Turn != 3 {
+		t.Fatalf("after PromptComplete = %+v, want unfinished turn 3", got)
+	}
+	p.markFinished()
 	if got := p.Snapshot(); !got.Finished || got.Turn != 3 {
-		t.Fatalf("after PromptComplete = %+v, want finished turn 3", got)
+		t.Fatalf("after Runner terminalization = %+v, want finished turn 3", got)
 	}
 }
 
@@ -803,7 +997,7 @@ func TestProgressClosureLiveDuringRun(t *testing.T) {
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Events: []llm.StreamEvent{{Kind: llm.EventToolCallDone, ToolID: "r1", ToolName: "read_file", ToolInput: json.RawMessage(`{}`)}},
-			Stop:  llm.StopToolUse,
+			Stop:   llm.StopToolUse,
 		},
 		llmtest.Step{Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 11, OutputTokens: 5}},
 	)
