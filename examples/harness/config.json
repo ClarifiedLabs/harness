@@ -43,6 +43,7 @@
   "compact_tool_result_max_bytes": 4096,
   "delegate_max_turns": 20,
   "delegate_max_depth": 3,
+  "delegate_output": "status",
   "verbose": false,
   "tool_stream": true,
   "show_diffs": true,

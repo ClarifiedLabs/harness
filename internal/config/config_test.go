@@ -949,6 +949,66 @@ func TestDelegateMaxDepthMustBePositive(t *testing.T) {
 	}
 }
 
+func TestDelegateOutputPrecedence(t *testing.T) {
+	c, err := Load(nil, noEnv, "")
+	if err != nil {
+		t.Fatalf("Load default: %v", err)
+	}
+	if c.DelegateOutput != DelegateOutputStatus {
+		t.Fatalf("default delegate output = %q, want status", c.DelegateOutput)
+	}
+
+	cfgPath := writeConfig(t, `{"delegate_output":"lines"}`)
+	c, err = Load(nil, noEnv, cfgPath)
+	if err != nil {
+		t.Fatalf("Load file: %v", err)
+	}
+	if c.DelegateOutput != DelegateOutputLines {
+		t.Fatalf("file delegate output = %q, want lines", c.DelegateOutput)
+	}
+
+	env := envFrom(map[string]string{"HARNESS_DELEGATE_OUTPUT": " OFF "})
+	c, err = Load(nil, env, cfgPath)
+	if err != nil {
+		t.Fatalf("Load env: %v", err)
+	}
+	if c.DelegateOutput != DelegateOutputOff {
+		t.Fatalf("env delegate output = %q, want off", c.DelegateOutput)
+	}
+
+	c, err = Load([]string{"-delegate-output", "status"}, env, cfgPath)
+	if err != nil {
+		t.Fatalf("Load flag: %v", err)
+	}
+	if c.DelegateOutput != DelegateOutputStatus {
+		t.Fatalf("flag delegate output = %q, want status", c.DelegateOutput)
+	}
+}
+
+func TestDelegateOutputRejectsUnknownMode(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		getenv func(string) string
+		file   string
+	}{
+		{name: "file", getenv: noEnv, file: `{"delegate_output":"stream"}`},
+		{name: "environment", getenv: envFrom(map[string]string{"HARNESS_DELEGATE_OUTPUT": "stream"})},
+		{name: "flag", args: []string{"-delegate-output", "stream"}, getenv: noEnv},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := ""
+			if tc.file != "" {
+				path = writeConfig(t, tc.file)
+			}
+			_, err := Load(tc.args, tc.getenv, path)
+			if err == nil || !strings.Contains(err.Error(), "delegate_output") {
+				t.Fatalf("Load error = %v, want delegate_output validation error", err)
+			}
+		})
+	}
+}
+
 func TestBoolFlagsParsed(t *testing.T) {
 	c, err := Load([]string{"-model", "gpt-5.5", "-no-env", "-no-color", "-v", "-q"}, noEnv, "")
 	if err != nil {

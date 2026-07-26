@@ -1091,6 +1091,9 @@ MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, the global tool-result caps, an
 the per-tool `rg`/`grep`/`read_file` caps. Others
 (agent definitions, compaction knobs, `agents_md_warn_bytes`,
 `delegate_max_turns`, `delegate_max_depth`) are config-file-only (listed below).
+`delegate_output` has the normal flag/env/file/default precedence and accepts
+`status`, `off`, and the reserved `lines` value (currently equivalent to
+`status`).
 
 - Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_MODEL`, plus
   most `HARNESS_*` equivalents for user-facing flags. `trace_proxy` /
@@ -1128,6 +1131,8 @@ the per-tool `rg`/`grep`/`read_file` caps. Others
   built-in values.
   `delegate_max_turns` (default `20`) and `delegate_max_depth` (default `3`,
   root depth `0`) are config-only for the delegate tool. Both must be positive.
+  `delegate_output` defaults to `status`; its environment and CLI forms are
+  `HARNESS_DELEGATE_OUTPUT` and `-delegate-output`.
 - Hooks use inline `hooks` plus config-relative `hook_configs` files. They are
   additive in order: inline first, then each listed file. `--hooks <file>`
   replaces the configured hook set for one launch.
@@ -2153,6 +2158,19 @@ this subsection records the common runner those argv tools point at.
   Child transcripts are saved under `children/<child-id>/` in the parent session
   directory for forensics. Child token usage is reported through `MeteredTool` and
   folded into the parent prompt/session usage totals.
+- A shared process-local `delegate.ActivityRegistry` tracks every running child,
+  including concurrent background work and recursively rebound nested delegates.
+  Registration starts only after child identity and running metadata setup, and
+  the existing exactly-once terminalization closure removes it on completion,
+  failure, or cancellation. Renderer snapshots are immutable and taken before
+  the terminal mutex. Stable display labels (`d1`, `d2`, …) are independent of
+  durable child IDs; the greatest activity sequence selects the latest child,
+  with durable ID as a deterministic tie-break.
+- Registry activity is bounded and ANSI/control-sanitized before retention. It
+  may contain turn/attempt, context and usage totals, retry state, a semantic
+  assistant reply state, and allowlisted path fields for local file tools. It
+  never retains model-authored reply text, reasoning, raw tool results, command
+  text, URLs/search patterns, unknown arguments, or generic serialized JSON.
 
 ### 9.15 background jobs
 
@@ -2345,8 +2363,19 @@ backoff allows.
   `[background: waiting for delegates · 12s │ prompt 30s]`, with the same compact key
   arguments as the completed tool summary and the running context-window percentage
   and compact used/window token counts appended for model waits
-  (`· ctx 30% 60.0k/200.0k`). It is erased the instant real output or a
-  tool line scrolls in — not a sticky bar or scroll region.
+  (`· ctx 30% 60.0k/200.0k`). Active delegate registry state is appended to the
+  same row as `· delegate d1 explore: turn 2 · thinking`; concurrent children use
+  `· 3 delegates · latest d2 plan: tool read_file path="…"`. Join-required
+  background work keeps the normal wait lifecycle active until it terminalizes;
+  delegate state alone never repaints over streamed or idle prompt text.
+  Field-aware clipping drops the activity body before the stable display ID, and
+  during-prompt input reserves enough columns to keep its edit cursor visible.
+  The registry is authoritative
+  when configured; legacy foreground/background progress closures are only a
+  compatibility fallback for isolated renderers. `delegate_output=off` omits
+  delegate details without disabling unrelated status, `lines` currently aliases
+  `status`, and quiet/non-TTY rendering still suppresses the row. It is erased the
+  instant real output or a tool line scrolls in — not a sticky bar or scroll region.
 - **During-prompt input line.** Keystrokes typed during a prompt are read in raw,
   echo-off mode and shown on that wait line after a `>` marker
   (`[turn: 1 · 12s │ prompt 18s] > draft`). Pressing Enter during a prompt

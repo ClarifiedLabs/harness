@@ -584,6 +584,10 @@ func run(env environment) int {
 	resolveDelegate := func(runtime delegate.Runtime, name string) (delegate.Launch, error) {
 		return resolveDelegateLaunch(runtime, name, agents, toolCatalog, pendingMCP, catalog, proxyClient, buildSystem, cfg)
 	}
+	var delegateActivity *delegate.ActivityRegistry
+	if cfg.DelegateOutput != config.DelegateOutputOff {
+		delegateActivity = delegate.NewActivityRegistry()
+	}
 	delegateOpts := delegate.Options{
 		MaxTurns:                  cfg.DelegateMaxTurns,
 		MaxDepth:                  cfg.DelegateMaxDepth,
@@ -598,6 +602,7 @@ func run(env environment) int {
 		AgentCandidates: func(delegate.Runtime) []delegate.AgentCandidate {
 			return delegateAgentCandidates(agents)
 		},
+		ActivityRegistry: delegateActivity,
 	}
 	delegateRunner := delegate.NewRunner(delegateState.Snapshot, resolveDelegate, delegateOpts)
 	// One todo store per process backs the update_todos tool; the App persists it
@@ -975,6 +980,8 @@ func run(env environment) int {
 		// The in-place wait counter and during-prompt input line need a TTY; the
 		// renderer also gates them off under -quiet (r12 + during-prompt input).
 		LiveStatus:               env.colorTTY,
+		DelegateActivity:         delegateActivity,
+		DisableDelegateStatus:    cfg.DelegateOutput == config.DelegateOutputOff,
 		Model:                    registryModel,
 		Registry:                 modelRegistry,
 		CompactionTriggerPercent: cfg.CompactTriggerPercent,

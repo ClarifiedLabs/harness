@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"harness/internal/agent"
+	"harness/internal/delegate"
 	"harness/internal/diff"
 	"harness/internal/llm"
 	"harness/internal/markdown"
@@ -56,6 +57,8 @@ type RenderOptions struct {
 	// input line (r12 + during-prompt input). Gated by the caller to an
 	// interactive, non-quiet TTY; tests set it explicitly.
 	LiveStatus               bool
+	DelegateActivity         *delegate.ActivityRegistry
+	DisableDelegateStatus    bool
 	Model                    string
 	Registry                 *llm.Registry
 	CompactionTriggerPercent int
@@ -86,9 +89,11 @@ type Renderer struct {
 	timestampLayout         string
 	width                   func() int
 
-	promptRunStart    time.Time
-	currentTurnStart  time.Time
-	promptStart       time.Time
+	promptRunStart   time.Time
+	currentTurnStart time.Time
+	promptStart      time.Time
+
+	assistantMu       sync.Mutex // guards streamed assistant state and writes to out
 	assistantLineOpen bool
 	assistantMarkdown *markdown.Stream
 	assistantPhase    string
@@ -123,21 +128,23 @@ type Renderer struct {
 	// input). statusMu guards every field below and serialises the ticker
 	// goroutine against the synchronous event-sink writes so the two never
 	// interleave terminal bytes.
-	liveStatus        bool
-	statusMu          sync.Mutex
-	statusActive      bool                  // in a wait; the ticker should keep the line painted
-	statusDrawn       bool                  // a status line is currently on the terminal
-	statusLabel       string                // e.g. "turn: 3" or "tool: grep args=[\"x\"]"
-	statusStart       time.Time             // when the current wait began
-	statusCtx         agent.ContextEstimate // context usage to append for model waits (r27)
-	statusProgress    any                   // foreground delegate live-progress closure, or nil
-	statusBgProgress  []any                 // background delegate progress closures while joining
-	statusModel       string                // proxy correlation/retry/cancellation state
-	statusInput       string                // during-prompt typed buffer shown after "> "
-	statusInputCursor int                   // rune index of the edit cursor within statusInput
-	ticker            *time.Ticker
-	tickerStop        chan struct{}
-	tickerDone        chan struct{}
+	liveStatus            bool
+	delegateActivity      *delegate.ActivityRegistry
+	disableDelegateStatus bool
+	statusMu              sync.Mutex
+	statusActive          bool                  // in a wait; the ticker should keep the line painted
+	statusDrawn           bool                  // a status line is currently on the terminal
+	statusLabel           string                // e.g. "turn: 3" or "tool: grep args=[\"x\"]"
+	statusStart           time.Time             // when the current wait began
+	statusCtx             agent.ContextEstimate // context usage to append for model waits (r27)
+	statusProgress        any                   // foreground delegate live-progress closure, or nil
+	statusBgProgress      []any                 // background delegate progress closures while joining
+	statusModel           string                // proxy correlation/retry/cancellation state
+	statusInput           string                // during-prompt typed buffer shown after "> "
+	statusInputCursor     int                   // rune index of the edit cursor within statusInput
+	ticker                *time.Ticker
+	tickerStop            chan struct{}
+	tickerDone            chan struct{}
 }
 
 // NewRenderer builds a Renderer. A nil Now defaults to time.Now.
@@ -157,6 +164,8 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 		suppressReasoningOutput: opts.SuppressReasoningOutput,
 		suppressUsage:           opts.SuppressUsage,
 		liveStatus:              opts.LiveStatus && !opts.Quiet,
+		delegateActivity:        opts.DelegateActivity,
+		disableDelegateStatus:   opts.DisableDelegateStatus,
 		model:                   opts.Model,
 		registry:                opts.Registry,
 		compactionWarnPercent:   resolvedCompactionWarnPercent(opts.CompactionTriggerPercent),
@@ -227,19 +236,20 @@ func (r *Renderer) TextDelta(text string) {
 		return
 	}
 	r.statusClear()
-	r.writeFinalSeparatorIfNeeded()
+	r.assistantMu.Lock()
+	r.writeFinalSeparatorIfNeededLocked()
 	if r.markdown {
-		r.ensureAssistantMarkdown()
+		r.ensureAssistantMarkdownLocked()
 		io.WriteString(r.out, r.assistantMarkdown.Write(text))
 		r.assistantLineOpen = r.assistantMarkdown.LineOpen()
-		r.markAssistantTextVisible()
-		r.resumeLiveModelWaitAfterAssistantText(text)
-		return
+	} else {
+		io.WriteString(r.out, text)
+		r.assistantLineOpen = !strings.HasSuffix(text, "\n")
 	}
-	io.WriteString(r.out, text)
-	r.assistantLineOpen = !strings.HasSuffix(text, "\n")
-	r.markAssistantTextVisible()
-	r.resumeLiveModelWaitAfterAssistantText(text)
+	r.markAssistantTextVisibleLocked()
+	lineOpen := r.assistantLineOpen
+	r.assistantMu.Unlock()
+	r.resumeLiveModelWaitAfterAssistantText(text, lineOpen)
 }
 
 func (r *Renderer) AssistantPhase(phase string) {
@@ -325,12 +335,13 @@ func (r *Renderer) ModelRequestEvent(event llm.ModelRequestEvent) string {
 		}
 	}
 
+	activity := r.delegateActivitySnapshot()
 	r.statusMu.Lock()
 	r.statusModel = modelRequestStatus(event)
 	if r.liveStatus && r.statusLabel != "" {
 		r.statusActive = true
 		r.ensureTickerLocked()
-		r.paintLocked()
+		r.paintLocked(activity)
 	}
 	r.statusMu.Unlock()
 	return line
@@ -339,12 +350,13 @@ func (r *Renderer) ModelRequestEvent(event llm.ModelRequestEvent) string {
 // CancelRequested immediately makes a graceful cancellation visible while the
 // HTTP/provider stack unwinds.
 func (r *Renderer) CancelRequested() {
+	activity := r.delegateActivitySnapshot()
 	r.statusMu.Lock()
 	r.statusModel = "cancelling; Ctrl-C again to force exit"
 	if r.liveStatus && r.statusLabel != "" {
 		r.statusActive = true
 		r.ensureTickerLocked()
-		r.paintLocked()
+		r.paintLocked(activity)
 	}
 	r.statusMu.Unlock()
 }
@@ -455,12 +467,12 @@ func (r *Renderer) ToolUseStart(call llm.ToolCall) {
 
 func (r *Renderer) ToolUseDelta(_ int, _ string) {}
 
-func (r *Renderer) resumeLiveModelWaitAfterAssistantText(delta string) {
+func (r *Renderer) resumeLiveModelWaitAfterAssistantText(delta string, lineOpen bool) {
 	// Markdown buffers an incomplete source line, so LineOpen remains false while
 	// a token is merely pending. Restarting the status line then would flush that
 	// token and finish it with a newline. A newline-terminated delta guarantees
 	// there is no partial source line for beginWait to flush.
-	if !r.liveStatus || r.assistantLineOpen || !strings.HasSuffix(delta, "\n") {
+	if !r.liveStatus || lineOpen || !strings.HasSuffix(delta, "\n") {
 		return
 	}
 	r.statusMu.Lock()
@@ -690,13 +702,14 @@ func (r *Renderer) beginWait(label string, statusCtx agent.ContextEstimate) {
 		return
 	}
 	r.finishAssistantLine()
+	activity := r.delegateActivitySnapshot()
 	r.statusMu.Lock()
 	r.statusLabel = label
 	r.statusStart = r.now()
 	r.statusCtx = statusCtx
 	r.statusActive = true
 	r.ensureTickerLocked()
-	r.paintLocked()
+	r.paintLocked(activity)
 	r.statusMu.Unlock()
 }
 
@@ -739,11 +752,12 @@ func (r *Renderer) SetInputLine(buf string, cursor int) {
 	if !r.liveStatus {
 		return
 	}
+	activity := r.delegateActivitySnapshot()
 	r.statusMu.Lock()
 	r.statusInput = buf
 	r.statusInputCursor = cursor
 	if r.statusActive {
-		r.paintLocked()
+		r.paintLocked(activity)
 	}
 	r.statusMu.Unlock()
 }
@@ -801,11 +815,13 @@ func (r *Renderer) ensureTickerLocked() {
 
 // tick repaints the counter on a timer. It paints only while a wait is active,
 // so a tick that races StopProgress (which sets statusActive=false under the
-// same mutex) is a no-op.
+// same mutex) is a no-op. Registry state is snapshotted before the terminal
+// mutex so delegate publishers never wait for terminal rendering.
 func (r *Renderer) tick() {
+	activity := r.delegateActivitySnapshot()
 	r.statusMu.Lock()
 	if r.statusActive {
-		r.paintLocked()
+		r.paintLocked(activity)
 	}
 	r.statusMu.Unlock()
 }
@@ -822,8 +838,8 @@ func (r *Renderer) eraseLocked() {
 // paintLocked redraws the counter in place. Caller holds statusMu. When a
 // during-prompt buffer is present it parks the terminal cursor at the edit column
 // on the same single row, so cursor-motion keys (arrows/Home/End) land visibly.
-func (r *Renderer) paintLocked() {
-	text, cursorCol, hasInput := r.statusTextLocked()
+func (r *Renderer) paintLocked(activity delegate.ActivitySnapshot) {
+	text, cursorCol, hasInput := r.statusTextLocked(activity)
 	var b strings.Builder
 	b.WriteString("\r\x1b[2K")
 	if r.color {
@@ -848,39 +864,196 @@ func (r *Renderer) paintLocked() {
 // statusTextLocked renders the counter, clipped to the terminal width so it
 // never wraps (a wrapped line would defeat the single-line \r\x1b[2K erase). It
 // also reports the terminal column for the during-prompt edit cursor and whether a
-// typed buffer is present. Caller holds statusMu.
-func (r *Renderer) statusTextLocked() (text string, cursorCol int, hasInput bool) {
+// typed buffer is present. Caller holds statusMu; activity was snapshotted before
+// taking that mutex.
+func (r *Renderer) statusTextLocked(activity delegate.ActivitySnapshot) (text string, cursorCol int, hasInput bool) {
 	now := r.now()
-	elapsedSecs := nonNegativeSeconds(now.Sub(r.statusStart))
-	var b strings.Builder
-	fmt.Fprintf(&b, "[%s · %ds", r.statusLabel, elapsedSecs)
-	if used := contextUsed(r.statusCtx); r.statusCtx.Window > 0 && used > 0 {
-		fmt.Fprintf(&b, " · ctx %d%% %s/%s", contextPercent(r.statusCtx), humanTokens(used), humanTokens(r.statusCtx.Window))
-	}
-	// Live delegate activity. A single foreground tool's child run is appended
-	// inline; the background join wait summarizes each outstanding job.
-	if len(r.statusBgProgress) > 0 {
-		writeBackgroundProgress(&b, r.statusBgProgress)
-	} else if r.statusProgress != nil {
-		writeDelegateProgress(&b, r.statusProgress)
-	}
-	if r.statusModel != "" {
-		fmt.Fprintf(&b, " · %s", r.statusModel)
+	var base strings.Builder
+	var suffix strings.Builder
+	if r.statusActive && r.statusLabel != "" {
+		elapsedSecs := nonNegativeSeconds(now.Sub(r.statusStart))
+		fmt.Fprintf(&base, "[%s · %ds", r.statusLabel, elapsedSecs)
+		if used := contextUsed(r.statusCtx); r.statusCtx.Window > 0 && used > 0 {
+			fmt.Fprintf(&base, " · ctx %d%% %s/%s", contextPercent(r.statusCtx), humanTokens(used), humanTokens(r.statusCtx.Window))
+		}
+		if r.statusModel != "" {
+			fmt.Fprintf(&suffix, " · %s", r.statusModel)
+		}
+	} else {
+		// A background child can outlive the parent prompt. In that state the
+		// registry owns the row and no stale parent timing fields are displayed.
+		base.WriteByte('[')
 	}
 	// The session total is set off from the current-turn fields with a distinct
 	// "│" divider and placed last so the turn's own elapsed time and the running
 	// prompt total are easy to tell apart at a glance.
-	if !r.promptStart.IsZero() {
-		fmt.Fprintf(&b, " │ prompt %ds", nonNegativeSeconds(now.Sub(r.promptStart)))
+	if r.statusActive && !r.promptStart.IsZero() {
+		fmt.Fprintf(&suffix, " │ prompt %ds", nonNegativeSeconds(now.Sub(r.promptStart)))
 	}
-	b.WriteByte(']')
+
 	maxW := r.outputWidth() - 1
+	activeAuthoritative := r.delegateActivity != nil
+	if activeAuthoritative && len(activity.Active) > 0 && !r.disableDelegateStatus {
+		status, label := fitActiveDelegateStatus(base.String(), suffix.String(), activity, maxW)
+		if r.statusInput == "" {
+			return status, 0, false
+		}
+		input := sanitizeInputLine(r.statusInput)
+		if displayWidth(status)+3+displayWidth(input) <= maxW {
+			text, cursorCol = clipStatusLine(status+" > ", input, r.statusInputCursor, maxW)
+			return text, cursorCol, true
+		}
+		return clipDelegateStatusInput(label, input, r.statusInputCursor, maxW)
+	}
+
+	var b strings.Builder
+	b.WriteString(base.String())
+	// The shared registry is authoritative whenever configured. Opaque progress
+	// closures remain only as compatibility fallback for isolated renderers.
+	if !r.disableDelegateStatus && !activeAuthoritative {
+		if len(r.statusBgProgress) > 0 {
+			writeBackgroundProgress(&b, r.statusBgProgress)
+		} else if r.statusProgress != nil {
+			writeDelegateProgress(&b, r.statusProgress)
+		}
+	}
+	b.WriteString(suffix.String())
+	b.WriteByte(']')
 	if r.statusInput == "" {
 		return clipDisplayTail(b.String(), maxW), 0, false
 	}
 	prefix := b.String() + " > "
 	text, cursorCol = clipStatusLine(prefix, sanitizeInputLine(r.statusInput), r.statusInputCursor, maxW)
 	return text, cursorCol, true
+}
+
+func (r *Renderer) delegateActivitySnapshot() delegate.ActivitySnapshot {
+	if r.delegateActivity == nil || r.disableDelegateStatus {
+		return delegate.ActivitySnapshot{}
+	}
+	return r.delegateActivity.Snapshot()
+}
+
+// fitActiveDelegateStatus gives the current delegate identity priority over its
+// activity body and optional model/prompt fields. Normal grammar is:
+//
+//	· delegate d1 explore: turn 2 · tool read_file
+//	· 3 delegates · latest d4 plan: turn 1 · thinking
+//
+// The greatest registry activity sequence selects the displayed child; equal
+// sequences are already broken deterministically by child ID in the registry.
+func fitActiveDelegateStatus(base, suffix string, snapshot delegate.ActivitySnapshot, maxW int) (string, string) {
+	latest := snapshot.Recent
+	label := strings.TrimSpace(latest.DisplayID + " " + latest.Agent)
+	if label == "" {
+		label = "delegate"
+	}
+	separator := " · "
+	if base == "[" {
+		separator = ""
+	}
+	marker := separator + "delegate "
+	if len(snapshot.Active) > 1 {
+		marker = fmt.Sprintf("%s%d delegates · latest ", separator, len(snapshot.Active))
+	}
+	body := activeDelegateBody(latest)
+	ending := suffix + "]"
+	fixed := base + marker + label
+	if body != "" {
+		full := fixed + ": " + body + ending
+		if displayWidth(full) <= maxW {
+			return full, label
+		}
+		// Activity is the first field clipped; the display ID and agent survive.
+		budget := maxW - displayWidth(fixed+": "+ending)
+		if budget > 0 {
+			return fixed + ": " + clipDisplayHead(body, budget) + ending, label
+		}
+	}
+	if line := fixed + ending; displayWidth(line) <= maxW {
+		return line, label
+	}
+	// Drop optional model/prompt details only after the activity body.
+	if line := fixed + "]"; displayWidth(line) <= maxW {
+		return line, label
+	}
+	// The active identity is the final compact form. clipDisplayHead keeps the
+	// short display ID before truncating a long or wide agent name.
+	budget := maxW - 2
+	if budget <= 0 {
+		return clipDisplayHead("["+label+"]", maxW), label
+	}
+	return "[" + clipDisplayHead(label, budget) + "]", label
+}
+
+func activeDelegateBody(entry delegate.ActiveDelegate) string {
+	parts := make([]string, 0, 4)
+	if entry.Turn > 0 {
+		turn := fmt.Sprintf("turn %d", entry.Turn)
+		if entry.Attempt > 1 {
+			turn += fmt.Sprintf(" attempt %d", entry.Attempt)
+		}
+		parts = append(parts, turn)
+	}
+	if entry.Activity != "" {
+		parts = append(parts, entry.Activity)
+	}
+	if used := contextUsed(entry.Context); entry.Context.Window > 0 && used > 0 {
+		parts = append(parts, fmt.Sprintf("ctx %d%%", contextPercent(entry.Context)))
+	}
+	if entry.Usage.CostKnown && entry.Usage.CostUSD > 0 {
+		parts = append(parts, fmt.Sprintf("$%.3f", entry.Usage.CostUSD))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// clipDelegateStatusInput falls back to a compact identity prefix and reserves
+// a cursor-following input window. Thus narrow terminals retain both the child
+// label and the edit cursor instead of tail-clipping the entire status prefix.
+func clipDelegateStatusInput(label, input string, cursor, maxW int) (string, int, bool) {
+	if maxW <= 0 {
+		return "", 0, true
+	}
+	const fixedWidth = 5 // "[" + "] > "
+	const preferredInputWidth = 4
+	labelBudget := maxW - fixedWidth - preferredInputWidth
+	id, _, _ := strings.Cut(strings.TrimSpace(label), " ")
+	idWidth := displayWidth(id)
+	if labelBudget < idWidth {
+		// On very narrow rows, shrink the input window before truncating the
+		// stable display ID. Keep at least one column for the edit cursor.
+		labelBudget = min(idWidth, maxW-fixedWidth-1)
+	}
+	if labelBudget <= 0 {
+		text, col := clipStatusLine("", input, cursor, maxW)
+		return text, col, true
+	}
+	compactLabel := clipDelegateLabel(label, labelBudget)
+	prefix := "[" + compactLabel + "] > "
+	inputWidth := maxW - displayWidth(prefix)
+	window, inputCol := clipStatusLine("", input, cursor, inputWidth)
+	return prefix + window, displayWidth(prefix) + inputCol, true
+}
+
+func clipDelegateLabel(label string, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	id, agentName, _ := strings.Cut(strings.TrimSpace(label), " ")
+	if displayWidth(id) > budget {
+		return clipDisplayHead(id, budget)
+	}
+	if agentName == "" || displayWidth(id)+1+displayWidth(agentName) <= budget {
+		return strings.TrimSpace(id + " " + agentName)
+	}
+	// Preserve the complete stable ID before spending remaining columns on the
+	// agent role. One leftover column is not useful enough to replace identity
+	// with an ellipsis.
+	remaining := budget - displayWidth(id) - 1
+	if remaining < 2 {
+		return id
+	}
+	return id + " " + clipDisplayHead(agentName, remaining)
 }
 
 func modelRequestStatus(event llm.ModelRequestEvent) string {
@@ -1257,6 +1430,32 @@ func sanitizeInputLine(s string) string {
 	}, s)
 }
 
+// clipDisplayHead trims s to at most max display columns, retaining leading
+// identity fields and appending an ellipsis when truncated.
+func clipDisplayHead(s string, maxW int) string {
+	if maxW <= 0 {
+		return ""
+	}
+	if displayWidth(s) <= maxW {
+		return s
+	}
+	if maxW == 1 {
+		return "…"
+	}
+	var b strings.Builder
+	width := 0
+	for _, r := range s {
+		w := runeWidth(r)
+		if width+w > maxW-1 {
+			break
+		}
+		b.WriteRune(r)
+		width += w
+	}
+	b.WriteRune('…')
+	return b.String()
+}
+
 // clipDisplayTail trims s to at most max display columns, dropping leading runes
 // (so the cursor end stays visible) and prefixing "…" when truncated. A
 // conservative wide-rune width keeps East-Asian text from wrapping.
@@ -1316,7 +1515,13 @@ func runeWidth(r rune) int {
 }
 
 func (r *Renderer) finishAssistantLine() {
-	r.flushAssistantMarkdown()
+	r.assistantMu.Lock()
+	defer r.assistantMu.Unlock()
+	r.finishAssistantLineLocked()
+}
+
+func (r *Renderer) finishAssistantLineLocked() {
+	r.flushAssistantMarkdownLocked()
 	if !r.assistantLineOpen {
 		return
 	}
@@ -1327,7 +1532,7 @@ func (r *Renderer) finishAssistantLine() {
 	}
 }
 
-func (r *Renderer) flushAssistantMarkdown() {
+func (r *Renderer) flushAssistantMarkdownLocked() {
 	if !r.markdown || r.assistantMarkdown == nil {
 		return
 	}
@@ -1335,7 +1540,7 @@ func (r *Renderer) flushAssistantMarkdown() {
 	r.assistantLineOpen = r.assistantMarkdown.LineOpen()
 }
 
-func (r *Renderer) ensureAssistantMarkdown() {
+func (r *Renderer) ensureAssistantMarkdownLocked() {
 	if r.assistantMarkdown != nil {
 		return
 	}
@@ -1346,19 +1551,19 @@ func (r *Renderer) ensureAssistantMarkdown() {
 	})
 }
 
-func (r *Renderer) writeFinalSeparatorIfNeeded() {
+func (r *Renderer) writeFinalSeparatorIfNeededLocked() {
 	if r.assistantPhase != llm.AssistantPhaseFinal ||
 		!r.visiblePreFinalOutput ||
 		r.visibleFinalOutput ||
 		r.finalSeparatorPrinted {
 		return
 	}
-	r.finishAssistantLine()
+	r.finishAssistantLineLocked()
 	fmt.Fprintln(r.out, r.separatorRule())
 	r.finalSeparatorPrinted = true
 }
 
-func (r *Renderer) markAssistantTextVisible() {
+func (r *Renderer) markAssistantTextVisibleLocked() {
 	switch r.assistantPhase {
 	case llm.AssistantPhaseFinal:
 		r.visibleFinalOutput = true

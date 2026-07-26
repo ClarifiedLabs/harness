@@ -119,6 +119,7 @@ interrupted.
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
 -agent <name>     agent: auto (default), explore, plan, independent, or a config-defined agent
 -handoff-agent <name>   default implementation agent for plan handoffs (default auto)
+-delegate-output <mode> delegate UI: status (default), off, or lines (reserved; currently behaves as status)
 -search-tools <mode>   search tools to expose: auto, grep, rg, or both
 -web-search <mode>     server-side web search: off or auto (default off)
 -trace-proxy      send W3C trace headers to the model and MCP proxies
@@ -238,9 +239,15 @@ Harness uses these terms consistently:
   the turn count.
 
 While a prompt runs, status uses `[turn: N … │ prompt …]`; completion uses
-`[prompt: N turns …]`. The [Flags](#flags) section lists defaults and config
-forms; [design section 8.1](design.md#81-prompt-and-turn-loop) records the exact
-loop mechanics.
+`[prompt: N turns …]`. On an interactive TTY, active delegates are included in
+that same transient row as `delegate d1 <agent>: <activity>`. Concurrent runs
+show the count and most recently active child, for example
+`3 delegates · latest d2 plan: tool read_file path="docs/usage.md"`. Background
+and nested delegates use the same row while a model, tool, or prompt-work join
+wait is active. These rows are process-local display state, not durable output,
+and are absent from non-TTY output. The [Flags](#flags)
+section lists defaults and config forms; [design section 8.1](design.md#81-prompt-and-turn-loop)
+records the exact loop mechanics.
 
 ## Configuration And Environment
 
@@ -298,6 +305,11 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   `read_file_result_max_lines`, or matching `HARNESS_*` env vars. The delegate
   tool also has config-file-only `delegate_max_turns` (per-child turn cap)
   and `delegate_max_depth` (recursive depth cap, root depth `0`).
+  `delegate_output` / `HARNESS_DELEGATE_OUTPUT` / `-delegate-output` accepts
+  `status` (the default one-row TTY display), `off` (delegate details only), and
+  the reserved `lines` mode. Until inline delegate output is implemented,
+  `lines` behaves as `status`. Quiet mode remains authoritative and suppresses
+  delegate status regardless of this setting.
 - Tool-surface limits for MCP and LSP are config-file-only: `mcp.max_tools` caps
   how many discovered remote MCP tools are auto-exposed (`0` = unlimited),
   `mcp.disabled_servers` is a list of remote MCP server names dropped from

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"harness/internal/agent"
+	"harness/internal/delegate"
 	"harness/internal/llm"
 )
 
@@ -819,6 +820,293 @@ func liveRenderer(out, errw *bytes.Buffer, now func() time.Time) *Renderer {
 		Now:        now,
 		Width:      func() int { return 80 },
 	})
+}
+
+func TestLiveDelegateStatusShowsForegroundActivity(t *testing.T) {
+	var out, errw bytes.Buffer
+	registry := delegate.NewActivityRegistry()
+	registration := registry.Register(delegate.ActivityStart{ID: "durable-child", Agent: "explore", Depth: 1})
+	registration.MarkTurn(2, 1, agent.ContextEstimate{Total: 20, Window: 100})
+	registration.MarkActivity("thinking")
+	r := NewRenderer(&out, &errw, RenderOptions{
+		LiveStatus:       true,
+		DelegateActivity: registry,
+		Width:            func() int { return 100 },
+	})
+	t.Cleanup(func() {
+		registration.Close()
+		r.StopProgress()
+	})
+
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	got := errw.String()
+	if !strings.Contains(got, "delegate d1 explore: turn 2 · thinking · ctx 20%") {
+		t.Fatalf("foreground delegate status = %q", got)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("delegate status must not touch stdout, got %q", out.String())
+	}
+}
+
+func TestLiveDelegateStatusUsesWaitLifecycleAcrossBackgroundJoin(t *testing.T) {
+	var out, errw bytes.Buffer
+	registry := delegate.NewActivityRegistry()
+	registration := registry.Register(delegate.ActivityStart{ID: "background-child", Agent: "explore"})
+	registration.MarkActivity("thinking")
+	r := NewRenderer(&out, &errw, RenderOptions{
+		LiveStatus:       true,
+		DelegateActivity: registry,
+		Width:            func() int { return 80 },
+	})
+	r.SetBackgroundProgress([]any{func() agent.DelegateProgressSnapshot {
+		return agent.DelegateProgressSnapshot{Agent: "legacy", Turn: 9}
+	}})
+	t.Cleanup(func() {
+		registration.Close()
+		r.StopProgress()
+	})
+
+	r.StartPromptRun()
+	r.PromptWorkWaitStart()
+	if got := errw.String(); !strings.Contains(got, "delegate d1 explore:") || strings.Contains(got, "legacy") {
+		t.Fatalf("authoritative background join status = %q", got)
+	}
+
+	registration.Close()
+	errw.Reset()
+	r.tick()
+	if got := errw.String(); strings.Contains(got, "delegate d1") {
+		t.Fatalf("completed background delegate remained visible: %q", got)
+	}
+	r.PromptWorkWaitComplete()
+	r.StopProgress()
+	r.statusMu.Lock()
+	tickerRunning := r.ticker != nil
+	r.statusMu.Unlock()
+	if tickerRunning {
+		t.Fatal("status ticker still running after the prompt boundary")
+	}
+}
+
+func TestLiveDelegateTickDoesNotEraseStreamingParentOutput(t *testing.T) {
+	var out, errw bytes.Buffer
+	registry := delegate.NewActivityRegistry()
+	registration := registry.Register(delegate.ActivityStart{ID: "background-child", Agent: "explore"})
+	defer registration.Close()
+	r := NewRenderer(&out, &errw, RenderOptions{
+		LiveStatus:       true,
+		DelegateActivity: registry,
+		Width:            func() int { return 80 },
+	})
+	defer r.StopProgress()
+
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	r.TextDelta("partial parent response")
+	errw.Reset()
+	r.tick()
+	if got := errw.String(); got != "" {
+		t.Fatalf("delegate tick touched terminal during parent output: %q", got)
+	}
+	if got := out.String(); got != "partial parent response" {
+		t.Fatalf("parent output = %q", got)
+	}
+}
+
+func TestLiveDelegateStatusSelectsLatestConcurrentNestedChild(t *testing.T) {
+	var out, errw bytes.Buffer
+	registry := delegate.NewActivityRegistry()
+	first := registry.Register(delegate.ActivityStart{ID: "first", Agent: "explore", Depth: 1})
+	latest := registry.Register(delegate.ActivityStart{ID: "nested", ParentID: "first", Agent: "plan", Depth: 2})
+	third := registry.Register(delegate.ActivityStart{ID: "third", Agent: "auto", Depth: 1})
+	latest.MarkTurn(3, 2, agent.ContextEstimate{})
+	latest.MarkActivity("tool read_file path=\"internal/ui/render.go\"")
+	r := NewRenderer(&out, &errw, RenderOptions{
+		LiveStatus:       true,
+		DelegateActivity: registry,
+		Width:            func() int { return 120 },
+	})
+	r.SetToolProgress("delegate", func() agent.DelegateProgressSnapshot {
+		return agent.DelegateProgressSnapshot{Agent: "legacy", Turn: 9}
+	})
+	t.Cleanup(func() {
+		first.Close()
+		latest.Close()
+		third.Close()
+		r.StopProgress()
+	})
+
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	got := errw.String()
+	if !strings.Contains(got, "3 delegates · latest d2 plan: turn 3 attempt 2 · tool read_file") {
+		t.Fatalf("concurrent delegate status = %q", got)
+	}
+	if strings.Contains(got, "latest d3") || strings.Contains(got, "legacy") {
+		t.Fatalf("status selected registration order or legacy progress instead of authoritative activity: %q", got)
+	}
+}
+
+func TestLiveDelegateStatusRespectsQuietAndNonTTYGates(t *testing.T) {
+	registry := delegate.NewActivityRegistry()
+	registration := registry.Register(delegate.ActivityStart{ID: "child", Agent: "explore"})
+	defer registration.Close()
+	for _, tc := range []struct {
+		name       string
+		liveStatus bool
+		quiet      bool
+	}{
+		{name: "quiet", liveStatus: true, quiet: true},
+		{name: "non-TTY", liveStatus: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errw bytes.Buffer
+			r := NewRenderer(&out, &errw, RenderOptions{
+				LiveStatus:       tc.liveStatus,
+				Quiet:            tc.quiet,
+				DelegateActivity: registry,
+			})
+			r.StartPromptRun()
+			r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+			r.StopProgress()
+			if strings.Contains(out.String(), "delegate d1") || strings.Contains(errw.String(), "delegate d1") {
+				t.Fatalf("gated output exposed delegate status: stdout=%q stderr=%q", out.String(), errw.String())
+			}
+			if tc.quiet && (out.Len() != 0 || errw.Len() != 0) {
+				t.Fatalf("quiet mode touched output: stdout=%q stderr=%q", out.String(), errw.String())
+			}
+		})
+	}
+}
+
+func TestLiveDelegateStatusPreservesIdentityAtNarrowUnicodeWidth(t *testing.T) {
+	var out, errw bytes.Buffer
+	registry := delegate.NewActivityRegistry()
+	registration := registry.Register(delegate.ActivityStart{ID: strings.Repeat("durable", 20), Agent: "探索漢字レビュー担当"})
+	registration.MarkActivity("tool read_file path=\"非常に長いパス.go\"")
+	const terminalWidth = 18
+	r := NewRenderer(&out, &errw, RenderOptions{
+		LiveStatus:       true,
+		DelegateActivity: registry,
+		Width:            func() int { return terminalWidth },
+	})
+	defer registration.Close()
+
+	activity := registry.Snapshot()
+	r.statusMu.Lock()
+	text, _, _ := r.statusTextLocked(activity)
+	r.statusMu.Unlock()
+	if !strings.Contains(text, "d1") {
+		t.Fatalf("narrow status dropped delegate identity: %q", text)
+	}
+	if got := displayWidth(text); got > terminalWidth-1 {
+		t.Fatalf("narrow status width = %d, max %d: %q", got, terminalWidth-1, text)
+	}
+	if strings.ContainsAny(text, "\r\n") {
+		t.Fatalf("narrow status wrapped: %q", text)
+	}
+}
+
+func TestLiveDelegateStatusPreservesIDWithNarrowPromptInput(t *testing.T) {
+	var out, errw bytes.Buffer
+	registry := delegate.NewActivityRegistry()
+	registration := registry.Register(delegate.ActivityStart{ID: "child", Agent: "探索漢字レビュー担当"})
+	defer registration.Close()
+	const terminalWidth = 11
+	r := NewRenderer(&out, &errw, RenderOptions{
+		LiveStatus:       true,
+		DelegateActivity: registry,
+		Width:            func() int { return terminalWidth },
+	})
+
+	r.statusMu.Lock()
+	r.statusInput = "abc"
+	r.statusInputCursor = 3
+	text, cursorCol, showCursor := r.statusTextLocked(registry.Snapshot())
+	r.statusMu.Unlock()
+	if !showCursor || !strings.Contains(text, "d1") || !strings.Contains(text, "> abc") {
+		t.Fatalf("narrow delegate input status = %q cursor=%d show=%v", text, cursorCol, showCursor)
+	}
+	if got := displayWidth(text); got > terminalWidth-1 {
+		t.Fatalf("narrow input status width = %d, max %d: %q", got, terminalWidth-1, text)
+	}
+	if cursorCol != displayWidth(text) {
+		t.Fatalf("narrow input cursor column = %d, want %d", cursorCol, displayWidth(text))
+	}
+}
+
+func TestLiveDelegateStatusUpdatesDuringPromptInput(t *testing.T) {
+	var out, errw bytes.Buffer
+	registry := delegate.NewActivityRegistry()
+	registration := registry.Register(delegate.ActivityStart{ID: "child", Agent: "explore"})
+	registration.MarkTurn(1, 1, agent.ContextEstimate{})
+	r := NewRenderer(&out, &errw, RenderOptions{
+		LiveStatus:       true,
+		DelegateActivity: registry,
+		Width:            func() int { return 120 },
+	})
+	t.Cleanup(func() {
+		registration.Close()
+		r.StopProgress()
+	})
+
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	r.SetInputLine("hello", 5)
+	registration.MarkActivity("tool read_file path=\"README.md\"")
+	errw.Reset()
+	r.tick()
+	got := errw.String()
+	if !strings.Contains(got, "d1 explore") || !strings.Contains(got, "tool read_file") || !strings.Contains(got, "> hello") {
+		t.Fatalf("during-prompt delegate status = %q", got)
+	}
+	if !strings.Contains(got, "\r\x1b[") {
+		t.Fatalf("during-prompt status did not restore the edit cursor: %q", got)
+	}
+}
+
+func TestDelegateStatusOffSuppressesRegistryAndLegacyOnly(t *testing.T) {
+	var out, errw bytes.Buffer
+	registry := delegate.NewActivityRegistry()
+	registration := registry.Register(delegate.ActivityStart{ID: "child", Agent: "explore"})
+	registration.MarkActivity("thinking")
+	r := NewRenderer(&out, &errw, RenderOptions{
+		LiveStatus:            true,
+		DelegateActivity:      registry,
+		DisableDelegateStatus: true,
+		Width:                 func() int { return 80 },
+	})
+	t.Cleanup(func() {
+		registration.Close()
+		r.StopProgress()
+	})
+	r.SetToolProgress("delegate", func() agent.DelegateProgressSnapshot {
+		return agent.DelegateProgressSnapshot{Agent: "legacy", Turn: 9}
+	})
+	r.StartPromptRun()
+	r.TurnAttemptStart(2, 1, agent.ContextEstimate{})
+	got := errw.String()
+	if strings.Contains(got, "delegate") || strings.Contains(got, "turn 9") {
+		t.Fatalf("delegate_output=off leaked delegate detail: %q", got)
+	}
+	if !strings.Contains(got, "[turn: 2 ·") {
+		t.Fatalf("delegate_output=off suppressed unrelated live status: %q", got)
+	}
+}
+
+func TestLiveDelegateStatusRetainsLegacyFallbackWithoutRegistry(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := liveRenderer(&out, &errw, time.Now)
+	defer r.StopProgress()
+	r.SetToolProgress("delegate", func() agent.DelegateProgressSnapshot {
+		return agent.DelegateProgressSnapshot{Agent: "legacy", Turn: 4, Tools: 2}
+	})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	if got := errw.String(); !strings.Contains(got, "turn 4 · 2 tools") {
+		t.Fatalf("legacy delegate progress fallback = %q", got)
+	}
 }
 
 func TestLiveCounterPaintsInPlaceAndCarriesContextUsage(t *testing.T) {

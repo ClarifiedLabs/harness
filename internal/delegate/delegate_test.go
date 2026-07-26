@@ -404,6 +404,7 @@ func TestDelegatePersistsChildTranscript(t *testing.T) {
 		Usage:  llm.Usage{InputTokens: 11, OutputTokens: 5},
 	})
 	sessionPath := filepath.Join(t.TempDir(), "session")
+	activityRegistry := NewActivityRegistry()
 	state := NewState(Runtime{
 		Provider:    fp,
 		Model:       "claude-opus-4-8",
@@ -420,7 +421,7 @@ func TestDelegatePersistsChildTranscript(t *testing.T) {
 			Agent:    "auto",
 			Tools:    childTools,
 		}, nil
-	}, Options{})
+	}, Options{ActivityRegistry: activityRegistry})
 
 	result, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"inspect the repo"}`))
 	if err != nil {
@@ -428,6 +429,9 @@ func TestDelegatePersistsChildTranscript(t *testing.T) {
 	}
 	if !strings.Contains(result.Text, "transcript "+sessionPath) {
 		t.Fatalf("delegate result should include transcript path, got %q", result.Text)
+	}
+	if got := activityRegistry.Snapshot(); len(got.Active) != 0 {
+		t.Fatalf("active delegates after completion = %+v, want none", got.Active)
 	}
 	children, err := os.ReadDir(filepath.Join(sessionPath, "children"))
 	if err != nil {
@@ -493,9 +497,10 @@ func TestDelegatePersistsTerminalChildStatuses(t *testing.T) {
 			childTools := &tools.Registry{}
 			sessionPath := filepath.Join(t.TempDir(), "session")
 			runtime := Runtime{Provider: fp, Model: "model", Registry: llm.NewRegistry(nil), SessionPath: sessionPath}
+			activityRegistry := NewActivityRegistry()
 			runner := NewRunner(func() Runtime { return runtime }, func(runtime Runtime, _ string) (Launch, error) {
 				return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools}, nil
-			}, Options{})
+			}, Options{ActivityRegistry: activityRegistry})
 
 			_, runErr := runner.Run(ctx, RunRequest{Kind: "delegate", Task: "inspect", ChildID: "child-status"}, nil)
 			if runErr == nil {
@@ -503,6 +508,9 @@ func TestDelegatePersistsTerminalChildStatuses(t *testing.T) {
 			}
 			if tc.wantErr != nil && !errors.Is(runErr, tc.wantErr) {
 				t.Fatalf("Run error = %v, want %v", runErr, tc.wantErr)
+			}
+			if got := activityRegistry.Snapshot(); len(got.Active) != 0 {
+				t.Fatalf("active delegates after terminalization = %+v, want none", got.Active)
 			}
 			meta := readDelegateChildMeta(t, filepath.Join(sessionPath, "children", "child-status"))
 			if meta.Status != tc.wantStatus || meta.Error == "" {
@@ -738,7 +746,8 @@ func TestDelegateCapsMaxTurns(t *testing.T) {
 
 func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T) {
 	originalState := NewState(Runtime{})
-	nested := New(originalState.Snapshot, nil, Options{MaxDepth: 3})
+	activityRegistry := NewActivityRegistry()
+	nested := New(originalState.Snapshot, nil, Options{MaxDepth: 3, ActivityRegistry: activityRegistry})
 	catalog := &tools.Registry{}
 	catalog.Register(fakeChildTool{name: "read_file", out: "ok"})
 	catalog.Register(nested)
@@ -759,6 +768,9 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 		t.Fatalf("rebound delegate = %T, want initialized *Tool", tool)
 	}
 	snapshot := rebound.runner.snapshot()
+	if rebound.runner.opts.ActivityRegistry != activityRegistry {
+		t.Fatal("nested delegate rebind did not preserve the shared activity registry")
+	}
 	if snapshot.Depth != 1 || snapshot.MaxPromptTokens != 1234 || snapshot.MaxPromptCostUSD != 2.5 {
 		t.Fatalf("child runtime safety fields = depth %d tokens %d cost %v", snapshot.Depth, snapshot.MaxPromptTokens, snapshot.MaxPromptCostUSD)
 	}
@@ -767,6 +779,81 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 	}
 	if want := childCacheAffinityID("parent-cache", "child-1"); snapshot.CacheAffinityID != want {
 		t.Fatalf("child runtime cache affinity = %q, want %q", snapshot.CacheAffinityID, want)
+	}
+}
+
+func TestNestedDelegateSharesLiveRegistryUntilIndependentCompletion(t *testing.T) {
+	nestedStarted := make(chan struct{})
+	releaseNested := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				ToolID:    "nested-call",
+				ToolName:  delegateToolName,
+				ToolInput: json.RawMessage(`{"task":"nested inspection"}`),
+			}},
+			Stop: llm.StopToolUse,
+		},
+		llmtest.Step{
+			Block: func(ctx context.Context) {
+				close(nestedStarted)
+				select {
+				case <-releaseNested:
+				case <-ctx.Done():
+				}
+			},
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "nested report"}},
+			Stop:   llm.StopEndTurn,
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "outer report"}},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	activityRegistry := NewActivityRegistry()
+	runtime := Runtime{
+		Provider:    fp,
+		Model:       "m",
+		Registry:    llm.NewRegistry(nil),
+		SessionPath: filepath.Join(t.TempDir(), "session"),
+	}
+	state := NewState(runtime)
+	catalog := &tools.Registry{}
+	var root *Tool
+	resolve := func(runtime Runtime, _ string) (Launch, error) {
+		return Launch{
+			Provider: runtime.Provider,
+			Model:    runtime.Model,
+			Registry: runtime.Registry,
+			Agent:    "explore",
+			Tools:    catalog,
+		}, nil
+	}
+	root = New(state.Snapshot, resolve, Options{MaxDepth: 3, ActivityRegistry: activityRegistry})
+	catalog.Register(root)
+
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := root.RunMetered(context.Background(), json.RawMessage(`{"task":"outer inspection"}`))
+		runDone <- err
+	}()
+	<-nestedStarted
+	snapshot := activityRegistry.Snapshot()
+	if len(snapshot.Active) != 2 {
+		t.Fatalf("active nested delegates = %+v, want two", snapshot.Active)
+	}
+	outer, nested := snapshot.Active[0], snapshot.Active[1]
+	if outer.Depth != 1 || nested.Depth != 2 || nested.ParentID != outer.ID || outer.DisplayID != "d1" || nested.DisplayID != "d2" {
+		t.Fatalf("nested registry lineage = outer %+v nested %+v", outer, nested)
+	}
+
+	close(releaseNested)
+	if err := <-runDone; err != nil {
+		t.Fatalf("nested delegate run: %v", err)
+	}
+	if got := activityRegistry.Snapshot(); len(got.Active) != 0 {
+		t.Fatalf("nested registry after completion = %+v, want none", got.Active)
 	}
 }
 
@@ -1002,9 +1089,10 @@ func TestProgressClosureLiveDuringRun(t *testing.T) {
 		llmtest.Step{Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 11, OutputTokens: 5}},
 	)
 	state := NewState(Runtime{Provider: fp, Model: "m", Registry: llm.NewRegistry(nil)})
+	activityRegistry := NewActivityRegistry()
 	tool := New(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
 		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools, Agent: "explore"}, nil
-	}, Options{})
+	}, Options{ActivityRegistry: activityRegistry})
 
 	input := json.RawMessage(`{"task":"inspect"}`)
 	// StartProgress stashes the live progress keyed by input; the closure the
@@ -1036,6 +1124,13 @@ func TestProgressClosureLiveDuringRun(t *testing.T) {
 	if got := snapshot(); got.Agent != "explore" {
 		t.Fatalf("live closure agent = %q, want explore", got.Agent)
 	}
+	activity := activityRegistry.Snapshot()
+	if len(activity.Active) != 1 || activity.Recent.DisplayID != "d1" || activity.Recent.Agent != "explore" || activity.Recent.Turn != 1 {
+		t.Fatalf("live registry snapshot = %+v", activity)
+	}
+	if activity.Recent.Activity != "tool read_file" {
+		t.Fatalf("live registry activity = %q, want tool read_file", activity.Recent.Activity)
+	}
 
 	close(releaseTool) // let the child tool finish so the run completes
 	if err := <-runDone; err != nil {
@@ -1044,6 +1139,9 @@ func TestProgressClosureLiveDuringRun(t *testing.T) {
 	// After the run returns the closure reports the final, finished snapshot.
 	if got := snapshot(); !got.Finished {
 		t.Fatalf("closure after run = %+v, want finished", got)
+	}
+	if got := activityRegistry.Snapshot(); len(got.Active) != 0 {
+		t.Fatalf("registry after run = %+v, want no active delegates", got.Active)
 	}
 }
 
@@ -1078,11 +1176,24 @@ func (t *blockingChildTool) Run(ctx context.Context, _ json.RawMessage) (string,
 // child run completes, so the parent wait ticker can read it mid-run.
 func TestProgressBackgroundExposedOnJob(t *testing.T) {
 	childTools := &tools.Registry{}
-	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 11}})
-	state := NewState(Runtime{Provider: fp, Model: "m", Registry: llm.NewRegistry(nil)})
+	modelStarted := make(chan struct{})
+	releaseModel := make(chan struct{})
+	fp := llmtest.New("fake", llmtest.Step{
+		Block: func(ctx context.Context) {
+			close(modelStarted)
+			select {
+			case <-releaseModel:
+			case <-ctx.Done():
+			}
+		},
+		Stop:  llm.StopEndTurn,
+		Usage: llm.Usage{InputTokens: 11},
+	})
+	state := NewState(Runtime{Provider: fp, Model: "m", Registry: llm.NewRegistry(nil), SessionPath: filepath.Join(t.TempDir(), "session")})
+	activityRegistry := NewActivityRegistry()
 	runner := NewRunner(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
 		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools, Agent: "explore"}, nil
-	}, Options{})
+	}, Options{ActivityRegistry: activityRegistry})
 	started := make(chan tools.BackgroundJobRequest, 1)
 	starter := &capturingStarter{req: started}
 	tool := NewTool(runner, starter)
@@ -1106,10 +1217,30 @@ func TestProgressBackgroundExposedOnJob(t *testing.T) {
 	if got := snapshot(); got.Turn != 0 || got.Finished {
 		t.Fatalf("closure before job run = %+v, want zero", got)
 	}
-	// Run the job to completion and confirm the closure reports finished.
-	completed, err := req.Run(context.Background(), "bg_x")
-	if err != nil {
-		t.Fatalf("background run: %v", err)
+	// Run the job asynchronously, observe the authoritative shared registry while
+	// the provider is blocked, then release it and confirm exactly-once cleanup.
+	type backgroundRun struct {
+		result tools.BackgroundJobResult
+		err    error
+	}
+	runDone := make(chan backgroundRun, 1)
+	go func() {
+		completed, runErr := req.Run(context.Background(), "bg_x")
+		runDone <- backgroundRun{result: completed, err: runErr}
+	}()
+	<-modelStarted
+	activity := activityRegistry.Snapshot()
+	if len(activity.Active) != 1 || activity.Recent.DisplayID != "d1" || activity.Recent.Agent != "explore" || activity.Recent.TranscriptPath == "" {
+		t.Fatalf("live background registry snapshot = %+v", activity)
+	}
+	close(releaseModel)
+	completedRun := <-runDone
+	if completedRun.err != nil {
+		t.Fatalf("background run: %v", completedRun.err)
+	}
+	completed := completedRun.result
+	if got := activityRegistry.Snapshot(); len(got.Active) != 0 {
+		t.Fatalf("background registry after completion = %+v, want none", got.Active)
 	}
 	if completed.Progress == nil {
 		t.Fatalf("background result should carry progress closure")
