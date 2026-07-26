@@ -127,11 +127,13 @@ type BackgroundJobRequest struct {
 	Kind        string
 	Description string
 	Agent       string
+	ResourceKey string
+	Access      string
 	// WaitForPrompt marks work whose result must be incorporated before the parent
 	// agent may finish its current prompt. Ordinary background commands leave this
 	// false; background delegates set it so the parent joins and synthesizes them.
 	WaitForPrompt bool
-	Progress       any
+	Progress      any
 	Run           func(context.Context, string) (BackgroundJobResult, error)
 }
 
@@ -143,6 +145,7 @@ type BackgroundJobRequest struct {
 // assertion by the renderer only. Keeping it `any` avoids a tools -> agent cycle.
 type BackgroundJobResult struct {
 	Text           string
+	OriginalText   string
 	TranscriptPath string
 	Usage          llm.Usage
 	Progress       any
@@ -151,8 +154,10 @@ type BackgroundJobResult struct {
 // BackgroundJobInfo is the minimal start acknowledgement a tool needs to return
 // immediately after queueing a background job.
 type BackgroundJobInfo struct {
-	ID     string
-	Status string
+	ID          string
+	Status      string
+	ResourceKey string
+	Access      string
 }
 
 // BackgroundJobStarter is implemented by the background job manager and injected

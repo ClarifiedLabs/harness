@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -169,6 +170,51 @@ func TestPreferredCompactionBoundaryUsesTokenFloorAndRoundCap(t *testing.T) {
 	}
 }
 
+func TestCompactForContinuationCheckpointsAndArchivesCompleteTranscript(t *testing.T) {
+	transcript := makeTurns(3)
+	transcript[0].Origin = llm.MessageOriginPrompt
+	fp := llmtest.New("fake", summaryStep("CONTINUATION STATE", 120, 18))
+	a := newAgent(fp, tools.Default(), Options{Model: "claude-opus-4-8"})
+	a.SetSystem("system prompt")
+	a.SetTranscript(transcript)
+	a.SetProxySessionID("proxy-source")
+	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "response-source"})
+
+	var archived CompactionArchive
+	a.SetCompactionArchiver(func(_ context.Context, archive CompactionArchive) (string, error) {
+		archived = archive
+		return "compactions/0001.input.json", nil
+	})
+	usage, changed, err := a.CompactForContinuation(context.Background(), &recordSink{})
+	if err != nil {
+		t.Fatalf("CompactForContinuation: %v", err)
+	}
+	if !changed || usage.InputTokens != 120 || usage.OutputTokens != 18 {
+		t.Fatalf("continuation compaction = changed %t usage %+v", changed, usage)
+	}
+	if len(fp.Requests) != 1 || len(fp.Requests[0].Messages) != len(transcript)+1 ||
+		!strings.Contains(dump(fp.Requests[0].Messages), "C answer") {
+		t.Fatalf("summary request omitted complete transcript: %s", dump(fp.Requests[0].Messages))
+	}
+	if !reflect.DeepEqual(archived.Messages, transcript) || archived.Summary != "CONTINUATION STATE" {
+		t.Fatalf("archive = %+v, want complete source transcript and summary", archived)
+	}
+
+	got := a.Transcript()
+	mustValid(t, got)
+	if len(got) != 1 || got[0].Origin != llm.MessageOriginCompactionCheckpoint || got[0].Compaction == nil {
+		t.Fatalf("continuation transcript = %+v, want one typed checkpoint", got)
+	}
+	if got[0].Compaction.Summary != "CONTINUATION STATE" ||
+		!strings.Contains(got[0].Content[0].Text, "A question") ||
+		!strings.Contains(got[0].Content[0].Text, "compactions/0001.input.json") {
+		t.Fatalf("continuation checkpoint = %+v", got[0])
+	}
+	if a.ProxySessionID() == "proxy-source" || a.ProxySessionID() == "" || a.ResponseState() != nil {
+		t.Fatalf("continuation compaction retained remote anchor: proxy=%q state=%+v", a.ProxySessionID(), a.ResponseState())
+	}
+}
+
 // Regression: low-water pressure used to drop retained rounds after the summary
 // and archive boundary had already been fixed. Every moved round must be included
 // in a regenerated summary and in the final raw archive.
@@ -251,6 +297,140 @@ func TestCompactionFileActivityIsCumulativeAndModifiedWins(t *testing.T) {
 	}
 	if got, want := strings.Join(modified, ","), "a.go,already.go,edit.go,patch.go"; got != want {
 		t.Fatalf("modified files = %q, want %q", got, want)
+	}
+}
+
+func TestIdleCompactionAppliesMatchingSnapshot(t *testing.T) {
+	fp := llmtest.New("fake", summaryStep("idle summary", 100, 12))
+	a := newAgent(fp, tools.Default(), Options{Model: "local", ContextWindow: 10_000})
+	a.SetTranscript(makeTurns(10))
+	var archives []CompactionArchive
+	a.SetCompactionArchiver(func(_ context.Context, archive CompactionArchive) (string, error) {
+		archives = append(archives, archive)
+		return "compactions/idle.input.json", nil
+	})
+
+	work, ok, err := a.PrepareIdleCompaction(1)
+	if err != nil || !ok {
+		t.Fatalf("PrepareIdleCompaction = ok %t err %v, want work", ok, err)
+	}
+	result, err := work(context.Background())
+	if err != nil {
+		t.Fatalf("idle work: %v", err)
+	}
+	if result.Usage.InputTokens != 100 || result.Usage.OutputTokens != 12 {
+		t.Fatalf("idle usage = %+v, want 100/12", result.Usage)
+	}
+	if len(archives) != 0 {
+		t.Fatal("background preparation ran the live archive callback")
+	}
+
+	sink := &recordSink{}
+	applied, err := a.ApplyIdleCompaction(context.Background(), sink, result)
+	if err != nil || !applied {
+		t.Fatalf("ApplyIdleCompaction = applied %t err %v", applied, err)
+	}
+	if len(archives) != 1 || archives[0].Summary != "idle summary" {
+		t.Fatalf("applied archives = %+v, want one idle summary", archives)
+	}
+	got := a.Transcript()
+	if len(got) != 16 || got[0].Origin != llm.MessageOriginCompactionCheckpoint {
+		t.Fatalf("idle transcript = %d messages, want checkpoint + 8 turns", len(got))
+	}
+	if !strings.Contains(got[0].Content[0].Text, "compactions/idle.input.json") {
+		t.Fatalf("idle checkpoint missing archive reference: %q", got[0].Content[0].Text)
+	}
+	if len(sink.notices) != 1 || !strings.HasPrefix(sink.notices[0], "[idle compacted:") {
+		t.Fatalf("idle notices = %v", sink.notices)
+	}
+}
+
+func TestIdleCompactionDiscardsStaleSnapshotBeforeArchiving(t *testing.T) {
+	for _, mutate := range []struct {
+		name string
+		run  func(*Agent)
+	}{
+		{
+			name: "transcript",
+			run: func(a *Agent) {
+				a.SetTranscript(append(cloneMessages(a.Transcript()), userText("new prompt")))
+			},
+		},
+		{
+			name: "runtime",
+			run: func(a *Agent) {
+				a.SetReasoning(llm.ReasoningConfig{Profile: "high"})
+			},
+		},
+	} {
+		t.Run(mutate.name, func(t *testing.T) {
+			fp := llmtest.New("fake", summaryStep("idle summary", 10, 2))
+			a := newAgent(fp, tools.Default(), Options{Model: "local", ContextWindow: 10_000})
+			a.SetTranscript(makeTurns(10))
+			archived := false
+			a.SetCompactionArchiver(func(_ context.Context, _ CompactionArchive) (string, error) {
+				archived = true
+				return "archive", nil
+			})
+			work, ok, err := a.PrepareIdleCompaction(1)
+			if err != nil || !ok {
+				t.Fatalf("PrepareIdleCompaction = ok %t err %v", ok, err)
+			}
+			result, err := work(context.Background())
+			if err != nil {
+				t.Fatalf("idle work: %v", err)
+			}
+			mutate.run(a)
+			before := cloneMessages(a.Transcript())
+
+			applied, err := a.ApplyIdleCompaction(context.Background(), &recordSink{}, result)
+			if err != nil || applied {
+				t.Fatalf("ApplyIdleCompaction = applied %t err %v, want stale discard", applied, err)
+			}
+			if archived {
+				t.Fatal("stale idle candidate ran archive callback")
+			}
+			if !reflect.DeepEqual(a.Transcript(), before) {
+				t.Fatal("stale idle candidate changed the live transcript")
+			}
+		})
+	}
+}
+
+func TestPrepareIdleCompactionEligibility(t *testing.T) {
+	a := newAgent(llmtest.New("fake"), tools.Default(), Options{Model: "local", ContextWindow: 1_000_000})
+	a.SetTranscript(makeTurns(2))
+	if _, ok, err := a.PrepareIdleCompaction(40); err != nil || ok {
+		t.Fatalf("below-threshold preparation = ok %t err %v", ok, err)
+	}
+	if _, ok, err := a.PrepareIdleCompaction(100); err == nil || ok {
+		t.Fatalf("invalid trigger preparation = ok %t err %v", ok, err)
+	}
+
+	disabled := newAgent(llmtest.New("fake"), tools.Default(), Options{
+		Model:                 "local",
+		ContextWindow:         1,
+		DisableAutoCompaction: true,
+	})
+	disabled.SetTranscript(makeTurns(10))
+	if _, ok, err := disabled.PrepareIdleCompaction(1); err != nil || ok {
+		t.Fatalf("disabled preparation = ok %t err %v", ok, err)
+	}
+
+	hookConfig, err := hooks.DecodeEventMap(json.RawMessage(`{
+		"PreCompact": [{"hooks": [{"type": "command", "command": "true"}]}]
+	}`))
+	if err != nil {
+		t.Fatalf("decode hook config: %v", err)
+	}
+	hooked := newAgent(llmtest.New("fake"), tools.Default(), Options{
+		Model:         "local",
+		ContextWindow: 10_000,
+		Hooks:         &hooks.Runner{Config: hookConfig},
+	})
+	hooked.SetTranscript(makeTurns(10))
+	if _, ok, err := hooked.PrepareIdleCompaction(1); err != nil || ok {
+		t.Fatalf("hooked preparation = ok %t err %v", ok, err)
 	}
 }
 

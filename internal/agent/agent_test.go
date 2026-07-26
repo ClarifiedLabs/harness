@@ -43,6 +43,7 @@ type recordSink struct {
 	completedTurns []TurnUsage
 	turnCounts     []int
 	maintenance    []MaintenanceUsage
+	retention      []RetentionEvent
 }
 
 type turnAttemptEvent struct {
@@ -99,8 +100,21 @@ func (s *recordSink) PromptComplete(u PromptUsage) {
 	s.promptUsage = append(s.promptUsage, u)
 	s.turnCounts = append(s.turnCounts, u.Turns)
 }
+func (s *recordSink) RetentionApplied(event RetentionEvent) {
+	s.retention = append(s.retention, event)
+}
 func (s *recordSink) MaintenanceComplete(u MaintenanceUsage) {
 	s.maintenance = append(s.maintenance, u)
+}
+
+func assertPromptTermination(t *testing.T, sink *recordSink, want TerminationReason) {
+	t.Helper()
+	if len(sink.promptUsage) != 1 {
+		t.Fatalf("PromptComplete calls = %d, want 1", len(sink.promptUsage))
+	}
+	if got := sink.promptUsage[0].TerminationReason; got != want {
+		t.Fatalf("termination reason = %q, want %q", got, want)
+	}
 }
 
 func TestReportMaintenanceSkipsLocalZeroUsage(t *testing.T) {
@@ -1654,6 +1668,36 @@ func TestMaxTurnsStop(t *testing.T) {
 	if !sawMaxTurns {
 		t.Errorf("sink not told about max-turns stop, notices=%v", sink.notices)
 	}
+	assertPromptTermination(t, sink, TerminationTurnLimit)
+}
+
+func TestModelCompletionOnFinalBudgetTurnIsNotTurnLimit(t *testing.T) {
+	n := 0
+	tool := &recordTool{name: "work", run: func(context.Context, json.RawMessage) (string, error) {
+		n++
+		return fmt.Sprintf("step %d", n), nil
+	}}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+	work := llmtest.Step{
+		Events: []llm.StreamEvent{toolDone(0, "id", "work", `{}`)},
+		Stop:   llm.StopToolUse,
+	}
+	done := llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("finished within budget")},
+		Stop:   llm.StopEndTurn,
+	}
+	fp := llmtest.New("fake", work, work, done)
+	a := newAgent(fp, reg, Options{MaxTurns: 3})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if sink.promptUsage[0].Turns != 3 {
+		t.Fatalf("turns used = %d, want 3", sink.promptUsage[0].Turns)
+	}
+	assertPromptTermination(t, sink, TerminationModelCompleted)
 }
 
 func TestNonPositiveMaxTurnsIsUnlimited(t *testing.T) {
@@ -1696,6 +1740,7 @@ func TestNonPositiveMaxTurnsIsUnlimited(t *testing.T) {
 			t.Errorf("unlimited max turns should not emit stop notice, got %q", n)
 		}
 	}
+	assertPromptTermination(t, sink, TerminationModelCompleted)
 }
 
 func TestCancellationMidStreamKeepsPartialText(t *testing.T) {
@@ -1744,6 +1789,7 @@ func TestCancellationMidStreamKeepsPartialText(t *testing.T) {
 	if len(sink.completedTurns) != 1 || sink.promptUsage[0].Turns != 1 {
 		t.Fatalf("retained partial response should complete one turn: turns=%+v prompt=%+v", sink.completedTurns, sink.promptUsage)
 	}
+	assertPromptTermination(t, sink, TerminationCancelled)
 }
 
 func TestCancellationWithNoTextDropsMessage(t *testing.T) {
@@ -1771,6 +1817,7 @@ func TestCancellationWithNoTextDropsMessage(t *testing.T) {
 	if len(sink.completedTurns) != 0 || sink.promptUsage[0].Turns != 0 {
 		t.Fatalf("uncommitted failed attempt counted as a turn: turns=%+v prompt=%+v", sink.completedTurns, sink.promptUsage)
 	}
+	assertPromptTermination(t, sink, TerminationCancelled)
 }
 
 func TestUsageAccumulatedAcrossTurns(t *testing.T) {
@@ -1808,6 +1855,7 @@ func TestUsageAccumulatedAcrossTurns(t *testing.T) {
 	if pu.Turns != 2 {
 		t.Errorf("prompt turns = %d, want 2", pu.Turns)
 	}
+	assertPromptTermination(t, sink, TerminationModelCompleted)
 }
 
 func TestTurnAttemptUsageEmittedForEachProviderReturn(t *testing.T) {
@@ -2400,14 +2448,16 @@ func TestMidStreamNonRetryableNotRetried(t *testing.T) {
 	)
 	a := newAgent(fp, tools.Default(), Options{})
 	a.SetSleep(func(time.Duration) {})
+	sink := &recordSink{}
 
-	err := a.RunPrompt(context.Background(), "hi", &recordSink{})
+	err := a.RunPrompt(context.Background(), "hi", sink)
 	if err == nil {
 		t.Fatal("RunPrompt should fail")
 	}
 	if len(fp.Requests) != 1 {
 		t.Errorf("provider called %d times, want 1 (no retry)", len(fp.Requests))
 	}
+	assertPromptTermination(t, sink, TerminationError)
 }
 
 func TestTruncatedStreamRetried(t *testing.T) {

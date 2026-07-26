@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -141,6 +142,41 @@ type ToolProgressSink interface {
 	ToolProgress(call llm.ToolCall, progress any)
 }
 
+// RetentionEvent describes one transcript-retention epoch. It is diagnostics
+// only and is never added to the transcript or provider request.
+type RetentionEvent struct {
+	Policy              string
+	Trigger             string
+	BlocksTrimmed       int
+	BytesBefore         int
+	BytesAfter          int
+	ContextTokensBefore int
+	ContextTokensAfter  int
+	ResponseStateReset  bool
+	NextRequestStateful bool
+}
+
+// RetentionEventSink is implemented by sinks that persist retention decisions
+// and their effect on Responses continuation.
+type RetentionEventSink interface {
+	RetentionApplied(RetentionEvent)
+}
+
+// RetentionPolicy selects when the live transcript retention pass runs.
+type RetentionPolicy string
+
+const (
+	// RetentionPolicyAuto uses pressure epochs for every provider.
+	RetentionPolicyAuto RetentionPolicy = "auto"
+	// RetentionPolicyAge runs the legacy age-based pass before every request.
+	RetentionPolicyAge RetentionPolicy = "age"
+	// RetentionPolicyPressure runs hysteretic context-pressure epochs.
+	RetentionPolicyPressure RetentionPolicy = "pressure"
+	// RetentionPolicyDisabled turns off live retention while leaving compaction
+	// and provider-overflow recovery unchanged.
+	RetentionPolicyDisabled RetentionPolicy = "disabled"
+)
+
 // HookContextReceiver is implemented by sinks that can keep hook-generated
 // context available for later turns without adding it to the saved transcript.
 type HookContextReceiver interface {
@@ -212,9 +248,53 @@ type PromptUsage struct {
 	// Wasted is the subset of Usage spent on turn attempts that were
 	// discarded and re-requested after a mid-stream failure (r51+r52). It is
 	// already included in Usage; surfacing it lets the UI show the retry cost.
-	Wasted  llm.Usage
-	Context ContextEstimate
+	Wasted            llm.Usage
+	Context           ContextEstimate
+	TerminationReason TerminationReason
 }
+
+// PromptCheckpointKind identifies a resumable model boundary. Request
+// boundaries contain a valid transcript ready for the provider. Tool-dispatch
+// boundaries intentionally contain an assistant tool-use message whose results
+// are not complete yet. Closed-turn boundaries contain a fully validated turn.
+type PromptCheckpointKind string
+
+const (
+	PromptCheckpointRequestBoundary PromptCheckpointKind = "request_boundary"
+	PromptCheckpointToolDispatch    PromptCheckpointKind = "tool_dispatch"
+	PromptCheckpointClosedTurn      PromptCheckpointKind = "closed_turn"
+)
+
+// PromptCheckpoint is the exact prompt accounting at a resumable boundary.
+// The sink can snapshot the Agent transcript and provider continuation state
+// synchronously while the loop is paused at that boundary.
+type PromptCheckpoint struct {
+	Kind  PromptCheckpointKind
+	Turn  int
+	Usage PromptUsage
+}
+
+// PromptCheckpointSink is implemented by durable root and child session sinks.
+// Checkpoint failures are reported by the sink and do not corrupt agent-loop
+// control flow or turn an otherwise successful model/tool turn into a failure.
+type PromptCheckpointSink interface {
+	PromptCheckpoint(PromptCheckpoint)
+}
+
+// TerminationReason records why Harness stopped a prompt loop. It describes
+// loop control, not semantic task completion.
+type TerminationReason string
+
+const (
+	TerminationModelCompleted TerminationReason = "model_completed"
+	TerminationTurnLimit      TerminationReason = "turn_limit"
+	TerminationTokenLimit     TerminationReason = "token_limit"
+	TerminationCostLimit      TerminationReason = "cost_limit"
+	TerminationRepeatGuard    TerminationReason = "repeat_guard"
+	TerminationErrorGuard     TerminationReason = "error_guard"
+	TerminationCancelled      TerminationReason = "cancelled"
+	TerminationError          TerminationReason = "error"
+)
 
 // TurnAttemptUsage is the token accounting for one provider request attempt.
 // Turn is the logical turn in the current prompt; Attempt is 1
@@ -252,10 +332,22 @@ type ContextEstimate struct {
 	PayloadMessages int
 }
 
+// TurnMilestone injects one internal steering message after a closed tool turn.
+// It is concrete rather than percentage-based so callers own policy while the
+// provider-neutral agent loop owns deterministic delivery.
+type TurnMilestone struct {
+	AfterTurns int
+	Message    string
+}
+
 // Options configures an Agent. The zero value is valid; MaxTurns <= 0 means
 // unlimited.
 type Options struct {
 	MaxTurns int
+	// TurnMilestones inject internal steering after the named number of completed
+	// tool turns, immediately before the next model request. Invalid/empty
+	// milestones are ignored and equal thresholds retain caller order.
+	TurnMilestones []TurnMilestone
 	// MaxPromptTokens stops a prompt once its accumulated tokens reach
 	// this ceiling; zero means unlimited. Enforcement lives in the turn loop.
 	MaxPromptTokens int
@@ -316,6 +408,15 @@ type Options struct {
 	// ResponsesStateful enables Responses API previous_response_id chaining.
 	// Main only sets it when the selected provider is Responses-capable.
 	ResponsesStateful bool
+	// ManagedContinuationStateful reports that an orchestration proxy, rather
+	// than this Agent, owns provider continuation for the selected target.
+	ManagedContinuationStateful bool
+	// DisableManagedContinuation asks that proxy to run statelessly. It does not
+	// affect direct ResponsesStateful ownership.
+	DisableManagedContinuation bool
+	// RetentionPolicy selects live-transcript retention behavior. The zero value
+	// uses the provider-aware automatic policy.
+	RetentionPolicy RetentionPolicy
 	// Interactive marks a session whose multi-minute pauses justify the 1h
 	// Anthropic prompt-cache breakpoint on the stable prefix (set for the REPL).
 	// One-shot, delegate, and non-interactive runs leave it false to take the
@@ -331,41 +432,47 @@ type Options struct {
 // Agent drives the turn loop against one provider and tool registry, owning the
 // running transcript.
 type Agent struct {
-	provider                  llm.Provider
-	tools                     *tools.Registry
-	toolSpecs                 []llm.ToolSchema
-	registry                  *llm.Registry
-	transcript                []llm.Message
-	validatedPrefix           int // count of leading transcript messages already known valid (r62)
-	system                    string
-	model                     string
-	maxTurns                  int
-	maxPromptTokens           int     // accumulated-token ceiling per prompt; 0 = unlimited
-	maxOutputTokens           int     // per-turn output cap; 0 = automatic
-	maxPromptCostUSD          float64 // accumulated USD ceiling per prompt; 0 = unlimited
-	contextWindow             int     // -context-window override; 0 = use the registry default
-	observedContextWindow     int     // smaller provider-reported limit learned from an overflow error
-	reasoning                 llm.ReasoningConfig
-	serverTools               []llm.ServerTool
-	now                       func() time.Time
-	sleep                     func(context.Context, time.Duration) error // mid-stream retry backoff; nil-free, set in New
-	compactKeepTurns          int
-	compactKeepTokens         int
-	compactTriggerPercent     int
-	compactTargetPercent      int
-	disableAutoCompaction     bool
-	compactSummaryMaxTokens   int
-	compactToolResultMaxBytes int
-	compactFallbackNotice     compactFallbackNoticeState
-	archiveCompaction         CompactionArchiver
-	hooks                     *hooks.Runner
-	showDiffs                 bool
-	responsesStateful         bool
-	interactive               bool            // 1h Anthropic cache breakpoint; see Options.Interactive
-	steer                     chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
-	responseState             llm.ResponseState
-	proxySessionID            string
-	cacheAffinityID           string
+	provider                    llm.Provider
+	tools                       *tools.Registry
+	toolSpecs                   []llm.ToolSchema
+	registry                    *llm.Registry
+	transcript                  []llm.Message
+	validatedPrefix             int // count of leading transcript messages already known valid (r62)
+	system                      string
+	model                       string
+	maxTurns                    int
+	turnMilestones              []TurnMilestone
+	maxPromptTokens             int     // accumulated-token ceiling per prompt; 0 = unlimited
+	maxOutputTokens             int     // per-turn output cap; 0 = automatic
+	maxPromptCostUSD            float64 // accumulated USD ceiling per prompt; 0 = unlimited
+	contextWindow               int     // -context-window override; 0 = use the registry default
+	observedContextWindow       int     // smaller provider-reported limit learned from an overflow error
+	reasoning                   llm.ReasoningConfig
+	serverTools                 []llm.ServerTool
+	now                         func() time.Time
+	sleep                       func(context.Context, time.Duration) error // mid-stream retry backoff; nil-free, set in New
+	compactKeepTurns            int
+	compactKeepTokens           int
+	compactTriggerPercent       int
+	compactTargetPercent        int
+	disableAutoCompaction       bool
+	compactSummaryMaxTokens     int
+	compactToolResultMaxBytes   int
+	compactFallbackNotice       compactFallbackNoticeState
+	compactionRuntimeVersion    uint64
+	archiveCompaction           CompactionArchiver
+	hooks                       *hooks.Runner
+	showDiffs                   bool
+	responsesStateful           bool
+	interactive                 bool            // 1h Anthropic cache breakpoint; see Options.Interactive
+	steer                       chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
+	responseState               llm.ResponseState
+	managedContinuationStateful bool
+	disableManagedContinuation  bool
+	retentionPolicy             RetentionPolicy
+	retentionEpochArmed         bool
+	proxySessionID              string
+	cacheAffinityID             string
 }
 
 type compactFallbackNoticeState struct {
@@ -384,38 +491,70 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		now = time.Now
 	}
 	a := &Agent{
-		provider:                  provider,
-		tools:                     registry,
-		toolSpecs:                 registry.Specs(),
-		registry:                  modelRegistry,
-		model:                     opts.Model,
-		maxTurns:                  opts.MaxTurns,
-		maxPromptTokens:           opts.MaxPromptTokens,
-		maxOutputTokens:           opts.MaxOutputTokens,
-		maxPromptCostUSD:          opts.MaxPromptCostUSD,
-		contextWindow:             opts.ContextWindow,
-		reasoning:                 opts.Reasoning,
-		serverTools:               cloneServerTools(opts.ServerTools),
-		now:                       now,
-		sleep:                     sleepContext,
-		compactKeepTurns:          opts.CompactKeepTurns,
-		compactKeepTokens:         opts.CompactKeepTokens,
-		compactTriggerPercent:     opts.CompactTriggerPercent,
-		compactTargetPercent:      opts.CompactTargetPercent,
-		disableAutoCompaction:     opts.DisableAutoCompaction,
-		compactSummaryMaxTokens:   opts.CompactSummaryMaxTokens,
-		compactToolResultMaxBytes: opts.CompactToolResultMaxBytes,
-		hooks:                     opts.Hooks,
-		showDiffs:                 opts.ShowDiffs,
-		responsesStateful:         opts.ResponsesStateful,
-		interactive:               opts.Interactive,
-		proxySessionID:            newProxySessionID(),
-		cacheAffinityID:           newCacheAffinityID(),
+		provider:                    provider,
+		tools:                       registry,
+		toolSpecs:                   registry.Specs(),
+		registry:                    modelRegistry,
+		model:                       opts.Model,
+		maxTurns:                    opts.MaxTurns,
+		turnMilestones:              normalizeTurnMilestones(opts.TurnMilestones),
+		maxPromptTokens:             opts.MaxPromptTokens,
+		maxOutputTokens:             opts.MaxOutputTokens,
+		maxPromptCostUSD:            opts.MaxPromptCostUSD,
+		contextWindow:               opts.ContextWindow,
+		reasoning:                   opts.Reasoning,
+		serverTools:                 cloneServerTools(opts.ServerTools),
+		now:                         now,
+		sleep:                       sleepContext,
+		compactKeepTurns:            opts.CompactKeepTurns,
+		compactKeepTokens:           opts.CompactKeepTokens,
+		compactTriggerPercent:       opts.CompactTriggerPercent,
+		compactTargetPercent:        opts.CompactTargetPercent,
+		disableAutoCompaction:       opts.DisableAutoCompaction,
+		compactSummaryMaxTokens:     opts.CompactSummaryMaxTokens,
+		compactToolResultMaxBytes:   opts.CompactToolResultMaxBytes,
+		hooks:                       opts.Hooks,
+		showDiffs:                   opts.ShowDiffs,
+		responsesStateful:           opts.ResponsesStateful,
+		managedContinuationStateful: opts.ManagedContinuationStateful,
+		disableManagedContinuation:  opts.DisableManagedContinuation,
+		retentionPolicy:             normalizeRetentionPolicy(opts.RetentionPolicy),
+		interactive:                 opts.Interactive,
+		retentionEpochArmed:         true,
+		proxySessionID:              newProxySessionID(),
+		cacheAffinityID:             newCacheAffinityID(),
 	}
 	if opts.Steer {
 		a.steer = make(chan SteerInput, 16)
 	}
 	return a
+}
+
+func normalizeTurnMilestones(milestones []TurnMilestone) []TurnMilestone {
+	out := make([]TurnMilestone, 0, len(milestones))
+	for _, milestone := range milestones {
+		milestone.Message = strings.TrimSpace(milestone.Message)
+		if milestone.AfterTurns <= 0 || milestone.Message == "" {
+			continue
+		}
+		out = append(out, milestone)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].AfterTurns < out[j].AfterTurns
+	})
+	return out
+}
+
+func dueTurnMilestones(milestones []TurnMilestone, next, turns int) (string, int) {
+	if next >= len(milestones) || milestones[next].AfterTurns > turns {
+		return "", next
+	}
+	var messages []string
+	for next < len(milestones) && milestones[next].AfterTurns <= turns {
+		messages = append(messages, milestones[next].Message)
+		next++
+	}
+	return strings.Join(messages, "\n\n"), next
 }
 
 // window returns the context window the compaction trigger and degradation
@@ -437,6 +576,8 @@ func (a *Agent) window() int {
 // SetSystem sets the system prompt sent on every request.
 func (a *Agent) SetSystem(system string) {
 	a.system = system
+	a.compactionRuntimeVersion++
+	a.retentionEpochArmed = true
 	a.resetResponseState()
 }
 
@@ -455,6 +596,8 @@ func (a *Agent) SetTools(registry *tools.Registry) {
 	if registry != nil {
 		a.tools = registry
 		a.toolSpecs = registry.Specs()
+		a.compactionRuntimeVersion++
+		a.retentionEpochArmed = true
 		a.resetResponseState()
 	}
 }
@@ -463,7 +606,9 @@ func (a *Agent) SetTools(registry *tools.Registry) {
 func (a *Agent) SetProvider(provider llm.Provider) {
 	if provider != nil {
 		a.provider = provider
+		a.compactionRuntimeVersion++
 		a.observedContextWindow = 0
+		a.retentionEpochArmed = true
 		a.resetResponseState()
 	}
 }
@@ -473,13 +618,17 @@ func (a *Agent) SetProvider(provider llm.Provider) {
 func (a *Agent) SetModel(model string, contextWindow int) {
 	a.model = model
 	a.contextWindow = contextWindow
+	a.compactionRuntimeVersion++
 	a.observedContextWindow = 0
+	a.retentionEpochArmed = true
 	a.resetResponseState()
 }
 
 // SetReasoning replaces the reasoning controls sent on subsequent requests.
 func (a *Agent) SetReasoning(reasoning llm.ReasoningConfig) {
 	a.reasoning = reasoning
+	a.compactionRuntimeVersion++
+	a.retentionEpochArmed = true
 	a.resetResponseState()
 }
 
@@ -487,11 +636,16 @@ func (a *Agent) SetReasoning(reasoning llm.ReasoningConfig) {
 // requests.
 func (a *Agent) SetServerTools(serverTools []llm.ServerTool) {
 	a.serverTools = cloneServerTools(serverTools)
+	a.compactionRuntimeVersion++
+	a.retentionEpochArmed = true
 	a.resetResponseState()
 }
 
 // SetHooks replaces the lifecycle hook runner used by subsequent turns.
-func (a *Agent) SetHooks(runner *hooks.Runner) { a.hooks = runner }
+func (a *Agent) SetHooks(runner *hooks.Runner) {
+	a.hooks = runner
+	a.compactionRuntimeVersion++
+}
 
 // Steer injects text as an in-prompt steering message. It is the simple text-only
 // helper for callers that do not need images or request-only context.
@@ -541,6 +695,7 @@ func (a *Agent) DrainSteerContent() SteerInput {
 func (a *Agent) SetTranscript(msgs []llm.Message) {
 	a.transcript = msgs
 	a.validatedPrefix = 0 // resumed/replaced content must be fully re-validated (r62)
+	a.retentionEpochArmed = true
 	a.resetResponseState()
 }
 
@@ -551,7 +706,19 @@ func (a *Agent) SetResponsesStateful(enabled bool) {
 		return
 	}
 	a.responsesStateful = enabled
+	a.retentionEpochArmed = true
 	a.resetResponseState()
+}
+
+// SetManagedContinuation updates proxy-owned continuation capability and its
+// explicit disable control after a model or agent switch.
+func (a *Agent) SetManagedContinuation(stateful, disabled bool) {
+	if a.managedContinuationStateful == stateful && a.disableManagedContinuation == disabled {
+		return
+	}
+	a.managedContinuationStateful = stateful
+	a.disableManagedContinuation = disabled
+	a.retentionEpochArmed = true
 }
 
 // ResponseState returns a copy of the current Responses continuation state.
@@ -612,17 +779,18 @@ func (a *Agent) ContextRequest() llm.Request {
 // the message shape used by RunPromptContentWithContext.
 func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 	return llm.Request{
-		Model:           a.model,
-		Purpose:         llm.RequestPurposeTurn,
-		System:          a.system,
-		Messages:        append([]llm.Message(nil), a.transcript...),
-		Tools:           cloneToolSpecs(a.toolSpecs),
-		ServerTools:     cloneServerTools(a.serverTools),
-		Reasoning:       a.reasoning,
-		RequestContext:  append([]string(nil), extraContext...),
-		ProxySessionID:  a.proxySessionID,
-		CacheAffinityID: a.cacheAffinityID,
-		LongCacheTTL:    a.interactive,
+		Model:               a.model,
+		Purpose:             llm.RequestPurposeTurn,
+		System:              a.system,
+		Messages:            append([]llm.Message(nil), a.transcript...),
+		Tools:               cloneToolSpecs(a.toolSpecs),
+		ServerTools:         cloneServerTools(a.serverTools),
+		Reasoning:           a.reasoning,
+		RequestContext:      append([]string(nil), extraContext...),
+		DisableContinuation: a.disableManagedContinuation,
+		ProxySessionID:      a.proxySessionID,
+		CacheAffinityID:     a.cacheAffinityID,
+		LongCacheTTL:        a.interactive,
 	}
 }
 
@@ -670,6 +838,7 @@ func (a *Agent) SetCacheAffinityID(id string) {
 func (a *Agent) ResetSessionIDs() {
 	a.proxySessionID = newProxySessionID()
 	a.cacheAffinityID = newCacheAffinityID()
+	a.retentionEpochArmed = true
 	a.resetResponseState()
 }
 
@@ -841,6 +1010,7 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 		MaxTokens:            a.maxOutputTokens,
 		StoreResponse:        a.responsesStateful,
 		RequestContext:       append([]string(nil), requestContext...),
+		DisableContinuation:  a.disableManagedContinuation,
 		ProxySessionID:       a.proxySessionID,
 		CacheAffinityID:      a.cacheAffinityID,
 		LongCacheTTL:         a.interactive,
@@ -1012,7 +1182,7 @@ func (a *Agent) RunPromptContent(ctx context.Context, userText string, images []
 // RunPromptContentWithContext is RunPromptContent plus request-only hook context.
 // extraContext is visible to model requests for this prompt but is not persisted
 // into the transcript.
-func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string, images []llm.ContentBlock, extraContext []string, promptID int, sink EventSink) error {
+func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string, images []llm.ContentBlock, extraContext []string, promptID int, sink EventSink) (retErr error) {
 	a.compactFallbackNotice = compactFallbackNoticeState{}
 	promptIndex := len(a.transcript)
 	promptMessage := a.userMessage(userText, images)
@@ -1032,13 +1202,66 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 	appendBoundary := 0       // transcript length measured by lastInput (drives the r44 trigger)
 	var steerContext []string
 	forcePromptWorkSynthesis := false
+	nextMilestone := 0
+	injectTurnMilestones := func() error {
+		msg, next := dueTurnMilestones(a.turnMilestones, nextMilestone, turns)
+		if msg == "" {
+			return nil
+		}
+		nextMilestone = next
+		message := a.textMessage(llm.RoleUser, msg)
+		message.Origin = llm.MessageOriginInternal
+		a.transcript = append(a.transcript, message)
+		return a.validateTranscript("after turn milestone")
+	}
+	var terminationReason TerminationReason
+	checkpoint := func(kind PromptCheckpointKind) {
+		reportPromptCheckpoint(sink, PromptCheckpoint{
+			Kind: kind,
+			Turn: turns,
+			Usage: PromptUsage{
+				Turns:       turns,
+				Usage:       total,
+				Maintenance: maintenanceTotal,
+				Wasted:      wastedTotal,
+				Context:     lastContext,
+			},
+		})
+	}
+	defer func() {
+		reason := terminationReason
+		if retErr != nil {
+			reason = TerminationError
+			if errors.Is(retErr, context.Canceled) || errors.Is(retErr, context.DeadlineExceeded) {
+				reason = TerminationCancelled
+			}
+		} else if reason == "" {
+			reason = TerminationModelCompleted
+		}
+		sink.PromptComplete(PromptUsage{
+			Turns:             turns,
+			Usage:             total,
+			Maintenance:       maintenanceTotal,
+			Wasted:            wastedTotal,
+			Context:           lastContext,
+			TerminationReason: reason,
+		})
+	}()
 
 	for unlimited || turns < a.maxTurns || forcePromptWorkSynthesis {
 		// Live-transcript retention (design §12, r9+r20): shrink stale large
 		// tool outputs and aged images before building the request, so they are
 		// not re-sent verbatim every turn. Pure local edit, invariant-preserving.
-		if a.applyRetention(sink) {
+		retention := a.applyRetentionPolicy(sink, a.estimateContext(nil).Total)
+		if retention.changed {
+			retention.event.ResponseStateReset = a.responseState.PreviousResponseID != "" || a.managedContinuationActive()
 			a.resetResponseState()
+			// The last provider measurement describes the pre-retention
+			// transcript. Do not combine it with a delta from the rewritten
+			// transcript when evaluating compaction; restart from a full local
+			// estimate just as a successful compaction does.
+			lastInput = 0
+			appendBoundary = 0
 		}
 		if err := a.validateRetainedTranscript("before model request"); err != nil {
 			if initialPromptPending && promptIndex < len(a.transcript) {
@@ -1047,7 +1270,6 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 					a.validatedPrefix = len(a.transcript)
 				}
 			}
-			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
 		initialPromptPending = false
@@ -1081,7 +1303,6 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			}
 		}
 		if err := a.validateRetainedTranscript("before model request"); err != nil {
-			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
 		modelReq = a.countModelRequestInput(ctx, modelReq)
@@ -1098,7 +1319,6 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 				appendBoundary = 0
 				requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
 				if err := a.validateRetainedTranscript("after input-count compaction"); err != nil {
-					sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 					return err
 				}
 				modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
@@ -1106,7 +1326,6 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			}
 		}
 		if err := a.validateRetainedTranscript("before model request"); err != nil {
-			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
 
@@ -1120,6 +1339,12 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		total = add(total, drainPromptWorkUsage(sink))
 		pendingBeforeRequest := pendingPromptWork(sink)
 		forcePromptWorkSynthesis = false
+		if retention.observed {
+			retention.event.NextRequestStateful = modelReq.usedPrevious ||
+				(a.managedContinuationActive() && !retention.changed)
+			reportRetention(sink, retention.event)
+		}
+		checkpoint(PromptCheckpointRequestBoundary)
 		res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
 		if err != nil && !res.hasPartialOutput() {
 			if learned, ok := contextOverflowWindow(err); ok {
@@ -1195,8 +1420,8 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			}
 			if turns > 0 && cancelled && res.text != "" {
 				sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: add(res.usage, wasted), Wasted: wasted, Context: lastContext})
+				checkpoint(PromptCheckpointClosedTurn)
 			}
-			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
 
@@ -1205,7 +1430,11 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		a.updateResponseState(res)
 
 		if res.stopReason != llm.StopToolUse {
+			if err := a.validateTranscript("after assistant turn"); err != nil {
+				return err
+			}
 			sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: add(res.usage, wasted), Wasted: wasted, Context: lastContext})
+			checkpoint(PromptCheckpointClosedTurn)
 			// A model may try to finalize while background delegates are still
 			// running. Join them, then issue another model request with their reports
 			// injected as request context so the parent actually synthesizes them.
@@ -1213,14 +1442,12 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 				usage, waitErr := waitForPromptWork(ctx, sink)
 				total = add(total, usage)
 				if waitErr != nil {
-					sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 					return waitErr
 				}
 				message := a.textMessage(llm.RoleUser, "[background delegates completed; synthesize their reports from request context before finishing]")
 				message.Origin = llm.MessageOriginInternal
 				a.transcript = append(a.transcript, message)
 				if err := a.validateTranscript("after background delegate join"); err != nil {
-					sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 					return err
 				}
 				forcePromptWorkSynthesis = true
@@ -1252,19 +1479,16 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 					a.transcript = append(a.transcript, message)
 					stopHookActive = true
 					if err := a.validateTranscript("after stop hook continuation"); err != nil {
-						sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 						return err
 					}
 					continue
 				}
 			}
-			if err := a.validateTranscript("after assistant turn"); err != nil {
-				sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
-				return err
-			}
+			terminationReason = TerminationModelCompleted
 			break
 		}
 
+		checkpoint(PromptCheckpointToolDispatch)
 		results, parallelBatches, toolUsage := a.dispatchCalls(ctx, res.toolCalls, promptID, turns, sink)
 		total = add(total, toolUsage)
 		a.transcript = append(a.transcript, llm.Message{
@@ -1274,10 +1498,10 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			ParallelToolBatches: parallelBatches,
 		})
 		if err := a.validateTranscript("after tool results"); err != nil {
-			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return err
 		}
 		sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: add(add(res.usage, wasted), toolUsage), Wasted: wasted, Context: lastContext})
+		checkpoint(PromptCheckpointClosedTurn)
 
 		// Give a newly launched background delegate one subsequent parent model
 		// round for useful independent work. If work was already pending before
@@ -1286,8 +1510,10 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			usage, waitErr := waitForPromptWork(ctx, sink)
 			total = add(total, usage)
 			if waitErr != nil {
-				sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 				return waitErr
+			}
+			if err := injectTurnMilestones(); err != nil {
+				return err
 			}
 			forcePromptWorkSynthesis = true
 			continue
@@ -1323,7 +1549,6 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 				if a.validatedPrefix > len(a.transcript) {
 					a.validatedPrefix = len(a.transcript)
 				}
-				sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 				return err
 			}
 		}
@@ -1331,12 +1556,17 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		// Hard stop: an unrelenting error storm. Finalize with a tools-disabled
 		// summary so the turn ends on an assistant message, not a dangling result.
 		if guard.shouldBreakErrors() {
+			terminationReason = TerminationErrorGuard
 			sink.Notice(errorStormNotice(guard.errorRuns))
 			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, requestContext, turns+1)
 			total = add(total, fu)
 			lastContext = fctx
 			if completed {
 				turns++
+				if err := a.validateTranscript("after error-guard summary"); err != nil {
+					return err
+				}
+				checkpoint(PromptCheckpointClosedTurn)
 			}
 			break
 		}
@@ -1345,12 +1575,17 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		// steering nudge. Finalize the same way so the turn ends on an assistant
 		// message (the success-loop analogue of the error-storm break).
 		if guard.shouldBreakRepeat() {
+			terminationReason = TerminationRepeatGuard
 			sink.Notice(repeatLoopNotice(guard.repeatRuns))
 			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, requestContext, turns+1)
 			total = add(total, fu)
 			lastContext = fctx
 			if completed {
 				turns++
+				if err := a.validateTranscript("after repeat-guard summary"); err != nil {
+					return err
+				}
+				checkpoint(PromptCheckpointClosedTurn)
 			}
 			break
 		}
@@ -1358,6 +1593,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		// Token budget: stop before the next (paid) request. No final summary —
 		// the whole point is to stop spending.
 		if a.maxPromptTokens > 0 && totalTokens(total) >= a.maxPromptTokens {
+			terminationReason = TerminationTokenLimit
 			sink.Notice(promptTokenBudgetNotice(a.maxPromptTokens))
 			break
 		}
@@ -1367,9 +1603,17 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		// silently has no cost ceiling.
 		if a.maxPromptCostUSD > 0 {
 			if total.CostKnown && total.CostUSD >= a.maxPromptCostUSD {
+				terminationReason = TerminationCostLimit
 				sink.Notice(promptCostBudgetNotice(a.maxPromptCostUSD, total.CostUSD))
 				break
 			}
+		}
+
+		// Caller-defined milestones are injected only after a complete tool
+		// round, when another request can consume them. Multiple milestones due
+		// on the same turn are coalesced into one internal message.
+		if err := injectTurnMilestones(); err != nil {
+			return err
 		}
 
 		// One steering nudge per condition (repetition / error storm share a slot).
@@ -1378,7 +1622,6 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			message.Origin = llm.MessageOriginInternal
 			a.transcript = append(a.transcript, message)
 			if err := a.validateTranscript("after loop-guard steer"); err != nil {
-				sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 				return err
 			}
 		}
@@ -1391,21 +1634,28 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			message.Origin = llm.MessageOriginInternal
 			a.transcript = append(a.transcript, message)
 			if err := a.validateTranscript("after wrap-up steer"); err != nil {
-				sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 				return err
 			}
 		}
 
 		if !unlimited && turns >= a.maxTurns {
+			terminationReason = TerminationTurnLimit
 			sink.Notice(maxTurnsNotice(a.maxTurns))
 			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, requestContext, turns+1)
 			total = add(total, fu)
 			lastContext = fctx
 			if completed {
 				turns++
+				if err := a.validateTranscript("after turn-limit summary"); err != nil {
+					return err
+				}
+				checkpoint(PromptCheckpointClosedTurn)
 			}
 			break
 		}
+	}
+	if terminationReason == "" && !unlimited && turns >= a.maxTurns {
+		terminationReason = TerminationTurnLimit
 	}
 
 	// Budget/guard exits can bypass the normal synthesis continuation. They still
@@ -1414,7 +1664,6 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		usage, waitErr := waitForPromptWork(ctx, sink)
 		total = add(total, usage)
 		if waitErr != nil {
-			sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 			return waitErr
 		}
 	}
@@ -1436,12 +1685,22 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, steerContext), sink))
 	}
 	if err := a.validateTranscript("after prompt"); err != nil {
-		sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 		return err
 	}
 
-	sink.PromptComplete(PromptUsage{Turns: turns, Usage: total, Maintenance: maintenanceTotal, Wasted: wastedTotal, Context: lastContext})
 	return nil
+}
+
+func reportPromptCheckpoint(sink EventSink, checkpoint PromptCheckpoint) {
+	if checkpointSink, ok := sink.(PromptCheckpointSink); ok {
+		checkpointSink.PromptCheckpoint(checkpoint)
+	}
+}
+
+func reportRetention(sink EventSink, event RetentionEvent) {
+	if retentionSink, ok := sink.(RetentionEventSink); ok {
+		retentionSink.RetentionApplied(event)
+	}
 }
 
 func emitModelErrorDiagnostic(sink EventSink, err error, prompt, turn, attempt int) {

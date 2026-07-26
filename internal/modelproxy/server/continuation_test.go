@@ -63,13 +63,18 @@ func newContinuationTestServer(t *testing.T, provider llm.Provider) *httptest.Se
 }
 
 func postContinuationStream(t *testing.T, srv *httptest.Server, messages []llm.Message) {
+	postContinuationStreamWithOptions(t, srv, messages, false)
+}
+
+func postContinuationStreamWithOptions(t *testing.T, srv *httptest.Server, messages []llm.Message, disable bool) {
 	t.Helper()
 	body, err := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:gpt-5.5",
 		Request: llm.Request{
-			Model:          "openai:gpt-5.5",
-			ProxySessionID: "continuation-test",
-			Messages:       messages,
+			Model:               "openai:gpt-5.5",
+			ProxySessionID:      "continuation-test",
+			Messages:            messages,
+			DisableContinuation: disable,
 		},
 	})
 	if err != nil {
@@ -85,6 +90,52 @@ func postContinuationStream(t *testing.T, srv *httptest.Server, messages []llm.M
 		t.Fatalf("stream status = %d body=%s", resp.StatusCode, data)
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
+}
+
+func TestHandlerContinuationCanBeExplicitlyDisabled(t *testing.T) {
+	fp := llmtest.New("responses",
+		llmtest.Step{
+			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "first answer"}},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "resp-first",
+		},
+		llmtest.Step{
+			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "second answer"}},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "resp-second",
+		},
+	)
+	srv := newContinuationTestServer(t, fp)
+	defer srv.Close()
+
+	first := []llm.Message{{
+		Role:    llm.RoleUser,
+		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}},
+	}}
+	postContinuationStream(t, srv, first)
+	second := append([]llm.Message(nil), first...)
+	second = append(second,
+		llm.BuildAssistantMessage(nil, "first answer", nil, "", llm.StopEndTurn),
+		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}},
+	)
+	postContinuationStreamWithOptions(t, srv, second, true)
+
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	}
+	request := fp.Requests[1]
+	if request.PreviousResponseID != "" || request.StoreResponse || len(request.Messages) != len(second) {
+		t.Fatalf(
+			"disabled continuation request = prev %q store=%t messages=%d, want full %d",
+			request.PreviousResponseID,
+			request.StoreResponse,
+			len(request.Messages),
+			len(second),
+		)
+	}
+	if request.DisableContinuation {
+		t.Fatal("proxy-only disable flag leaked to concrete provider")
+	}
 }
 
 func TestContinuationFingerprintIncludesNestedRichContent(t *testing.T) {

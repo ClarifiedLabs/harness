@@ -33,7 +33,7 @@ type Options struct {
 
 // ResultPreparer applies the same tool-specific output limits used by ordinary
 // foreground dispatch.
-type ResultPreparer func(toolName, resultID, text string) llm.ToolResult
+type ResultPreparer func(toolName, resultID, text, original string) llm.ToolResult
 
 // Manager owns the process-local background job table.
 type Manager struct {
@@ -47,15 +47,17 @@ type Manager struct {
 
 // Job is one background run.
 type Job struct {
-	ID      string
-	Kind    string
-	Task    string
-	Agent   string
-	Status  string
-	Created time.Time
-	Updated time.Time
-	Result  tools.BackgroundJobResult
-	Error   string
+	ID          string
+	Kind        string
+	Task        string
+	Agent       string
+	ResourceKey string
+	Access      string
+	Status      string
+	Created     time.Time
+	Updated     time.Time
+	Result      tools.BackgroundJobResult
+	Error       string
 	// progress is the opaque live-progress closure (func() agent.DelegateProgressSnapshot)
 	// set at job start so the parent wait ticker can read child activity mid-run.
 	progress         any
@@ -70,15 +72,17 @@ type Job struct {
 
 // Snapshot is a copy of one job safe for callers to inspect.
 type Snapshot struct {
-	ID      string
-	Kind    string
-	Task    string
-	Agent   string
-	Status  string
-	Created time.Time
-	Updated time.Time
-	Result  tools.BackgroundJobResult
-	Error   string
+	ID          string
+	Kind        string
+	Task        string
+	Agent       string
+	ResourceKey string
+	Access      string
+	Status      string
+	Created     time.Time
+	Updated     time.Time
+	Result      tools.BackgroundJobResult
+	Error       string
 	// Progress is the opaque live-progress closure (func() agent.DelegateProgressSnapshot)
 	// for the renderer to read mid-run; nil when the job did not supply one.
 	Progress       any
@@ -106,7 +110,7 @@ func NewManager(opts Options) *Manager {
 	return &Manager{
 		jobs:          make(map[string]*Job),
 		changed:       make(chan struct{}),
-		prepareResult: limits.PrepareResult,
+		prepareResult: limits.PrepareResultWithOriginal,
 		now:           now,
 	}
 }
@@ -123,14 +127,37 @@ func (m *Manager) SetResultPreparer(prepare ResultPreparer) {
 }
 
 func (m *Manager) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.BackgroundJobInfo, error) {
-	snap, err := m.start(req.Kind, req.Description, req.Agent, req.WaitForPrompt, req.Progress, req.Run)
+	resourceKey, access, err := tools.NormalizeBackgroundLease(req.ResourceKey, req.Access)
 	if err != nil {
 		return tools.BackgroundJobInfo{}, err
 	}
-	return tools.BackgroundJobInfo{ID: snap.ID, Status: snap.Status}, nil
+	snap, err := m.start(
+		req.Kind,
+		req.Description,
+		req.Agent,
+		resourceKey,
+		access,
+		req.WaitForPrompt,
+		req.Progress,
+		req.Run,
+	)
+	if err != nil {
+		return tools.BackgroundJobInfo{}, err
+	}
+	return tools.BackgroundJobInfo{
+		ID:          snap.ID,
+		Status:      snap.Status,
+		ResourceKey: snap.ResourceKey,
+		Access:      snap.Access,
+	}, nil
 }
 
-func (m *Manager) start(kind, task, agent string, waitForPrompt bool, progress any, run func(context.Context, string) (tools.BackgroundJobResult, error)) (Snapshot, error) {
+func (m *Manager) start(
+	kind, task, agent, resourceKey, access string,
+	waitForPrompt bool,
+	progress any,
+	run func(context.Context, string) (tools.BackgroundJobResult, error),
+) (Snapshot, error) {
 	if m == nil {
 		return Snapshot{}, fmt.Errorf("background manager is not initialized")
 	}
@@ -144,6 +171,8 @@ func (m *Manager) start(kind, task, agent string, waitForPrompt bool, progress a
 		Kind:          strings.TrimSpace(kind),
 		Task:          strings.TrimSpace(task),
 		Agent:         strings.TrimSpace(agent),
+		ResourceKey:   resourceKey,
+		Access:        access,
 		Status:        StatusRunning,
 		Created:       started,
 		Updated:       started,
@@ -153,6 +182,11 @@ func (m *Manager) start(kind, task, agent string, waitForPrompt bool, progress a
 		waitForPrompt: waitForPrompt,
 	}
 	m.mu.Lock()
+	if conflict := m.leaseConflictLocked(resourceKey, access); conflict != nil {
+		m.mu.Unlock()
+		cancel()
+		return Snapshot{}, conflict
+	}
 	m.jobs[job.ID] = job
 	m.order = append(m.order, job.ID)
 	snap := snapshotJob(job)
@@ -163,6 +197,11 @@ func (m *Manager) start(kind, task, agent string, waitForPrompt bool, progress a
 		result, err := run(ctx, job.ID)
 		finished := m.now()
 		m.mu.Lock()
+		if job.Status == StatusAbandoned {
+			m.mu.Unlock()
+			close(job.done)
+			return
+		}
 		job.Result = result
 		if result.Progress != nil {
 			job.progress = result.Progress
@@ -186,6 +225,29 @@ func (m *Manager) start(kind, task, agent string, waitForPrompt bool, progress a
 	}()
 
 	return snap, nil
+}
+
+func (m *Manager) leaseConflictLocked(resourceKey, access string) error {
+	if resourceKey == "" {
+		return nil
+	}
+	for _, id := range m.order {
+		job := m.jobs[id]
+		if job == nil || job.finished || job.ResourceKey != resourceKey {
+			continue
+		}
+		if access == tools.BackgroundAccessReadOnly && job.Access == tools.BackgroundAccessReadOnly {
+			continue
+		}
+		return fmt.Errorf(
+			"background resource %q access %q conflicts with active job %s (%s)",
+			resourceKey,
+			access,
+			job.ID,
+			job.Access,
+		)
+	}
+	return nil
 }
 
 func (m *Manager) List() []Snapshot {
@@ -231,7 +293,7 @@ func (m *Manager) Shutdown() {
 	var cancels []context.CancelFunc
 	changed := false
 	for _, job := range m.jobs {
-		if job.Status != StatusRunning {
+		if job.finished {
 			continue
 		}
 		if job.cancel != nil {
@@ -241,6 +303,7 @@ func (m *Manager) Shutdown() {
 		job.Updated = m.now()
 		job.Error = "abandoned on harness exit"
 		job.cancel = nil
+		job.finished = true
 		changed = true
 	}
 	if changed {
@@ -266,22 +329,57 @@ func (m *Manager) Clear() {
 // and returns when the first of those jobs finishes. Results returned from a
 // successful wait count as delivered completion context.
 func (m *Manager) Wait(ctx context.Context, id string, timeout time.Duration) (WaitResult, error) {
+	var ids []string
+	if strings.TrimSpace(id) != "" {
+		ids = []string{id}
+	}
+	return m.WaitFor(ctx, ids, "first", timeout)
+}
+
+// WaitFor blocks until the first or all jobs in a stable selection finish.
+// A nil ids slice snapshots the jobs running at call time; a non-nil slice
+// selects those exact ids. Jobs launched after selection are never included.
+func (m *Manager) WaitFor(ctx context.Context, ids []string, until string, timeout time.Duration) (WaitResult, error) {
 	if m == nil {
 		return WaitResult{}, fmt.Errorf("background manager is not initialized")
 	}
 	if err := ctx.Err(); err != nil {
 		return WaitResult{}, err
 	}
+	until = strings.TrimSpace(until)
+	if until == "" {
+		until = "first"
+	}
+	if until != "first" && until != "all" {
+		return WaitResult{}, fmt.Errorf(`until must be "first" or "all"`)
+	}
 
 	m.mu.Lock()
 	targets := make(map[string]*Job)
-	if id != "" {
-		job, ok := m.jobs[id]
-		if !ok {
+	if ids != nil {
+		if len(ids) == 0 {
 			m.mu.Unlock()
-			return WaitResult{}, fmt.Errorf("unknown background job %q", id)
+			return WaitResult{}, fmt.Errorf("ids must contain at least one background job id")
 		}
-		targets[id] = job
+		seen := make(map[string]struct{}, len(ids))
+		for _, rawID := range ids {
+			id := strings.TrimSpace(rawID)
+			if id == "" {
+				m.mu.Unlock()
+				return WaitResult{}, fmt.Errorf("ids must not contain an empty background job id")
+			}
+			if _, duplicate := seen[id]; duplicate {
+				m.mu.Unlock()
+				return WaitResult{}, fmt.Errorf("ids must not contain duplicate background job %q", id)
+			}
+			seen[id] = struct{}{}
+			job, ok := m.jobs[id]
+			if !ok {
+				m.mu.Unlock()
+				return WaitResult{}, fmt.Errorf("unknown background job %q", id)
+			}
+			targets[id] = job
+		}
 	} else {
 		for _, jobID := range m.order {
 			job := m.jobs[jobID]
@@ -307,10 +405,21 @@ func (m *Manager) Wait(ctx context.Context, id string, timeout time.Duration) (W
 			if !selected || !job.finished {
 				continue
 			}
-			job.contextDelivered = true
 			completed = append(completed, snapshotJob(job))
 		}
-		if len(completed) > 0 {
+		ready := len(completed) > 0
+		if until == "all" {
+			ready = len(completed) == len(targets)
+		}
+		if ready {
+			for id := range targets {
+				if job := m.jobs[id]; job != nil && job.finished {
+					job.contextDelivered = true
+				}
+			}
+			for i := range completed {
+				completed[i].ContextPending = false
+			}
 			m.mu.Unlock()
 			return WaitResult{Jobs: completed}, nil
 		}
@@ -321,11 +430,11 @@ func (m *Manager) Wait(ctx context.Context, id string, timeout time.Duration) (W
 		case <-changed:
 		case <-timer.C:
 			m.mu.Lock()
-			var jobs []Snapshot
-			if id != "" {
-				jobs = append(jobs, snapshotJob(targets[id]))
-			} else {
-				jobs = m.listLocked()
+			jobs := make([]Snapshot, 0, len(targets))
+			for _, jobID := range m.order {
+				if job := targets[jobID]; job != nil {
+					jobs = append(jobs, snapshotJob(job))
+				}
 			}
 			m.mu.Unlock()
 			return WaitResult{Jobs: jobs, TimedOut: true}, nil
@@ -477,6 +586,9 @@ func contextFor(job *Job, prepare ResultPreparer, archiver toolresult.Archiver) 
 	if job.Agent != "" {
 		fmt.Fprintf(&b, "agent: %s\n", job.Agent)
 	}
+	if job.ResourceKey != "" {
+		fmt.Fprintf(&b, "resource: %s\naccess: %s\n", job.ResourceKey, job.Access)
+	}
 	if job.Result.TranscriptPath != "" {
 		fmt.Fprintf(&b, "transcript: %s\n", job.Result.TranscriptPath)
 	}
@@ -484,7 +596,7 @@ func contextFor(job *Job, prepare ResultPreparer, archiver toolresult.Archiver) 
 		fmt.Fprintf(&b, "error: %s\n", job.Error)
 	}
 	if strings.TrimSpace(job.Result.Text) != "" {
-		result := prepare(job.Kind, job.ID, job.Result.Text)
+		result := prepare(job.Kind, job.ID, job.Result.Text, job.Result.OriginalText)
 		result, _ = toolresult.PrepareTruncated(result, archiver)
 		fmt.Fprintf(&b, "result:\n%s", strings.TrimSpace(result.Text))
 	}
@@ -511,6 +623,8 @@ func snapshotJob(job *Job) Snapshot {
 		Kind:           job.Kind,
 		Task:           job.Task,
 		Agent:          job.Agent,
+		ResourceKey:    job.ResourceKey,
+		Access:         job.Access,
 		Status:         job.Status,
 		Created:        job.Created,
 		Updated:        job.Updated,
@@ -543,7 +657,7 @@ func NewJobsTool(manager *Manager) *JobsTool {
 func (*JobsTool) Name() string { return "background_jobs" }
 
 func (*JobsTool) Description() string {
-	return "List, inspect, wait for, or cancel background jobs. If the next or final response depends on a running job, call action=wait once instead of polling get/list; completions otherwise arrive automatically."
+	return "List, inspect, wait for, or cancel background jobs. If the next or final response depends on running work, call action=wait once instead of polling get/list; use ids with until=all to join a group."
 }
 
 func (*JobsTool) Schema() json.RawMessage {
@@ -551,7 +665,9 @@ func (*JobsTool) Schema() json.RawMessage {
   "type": "object",
   "properties": {
     "action": {"type": "string", "enum": ["list", "get", "wait", "cancel"], "description": "Operation to perform. Use wait, not get/list polling, when later work depends on completion. Defaults to list."},
-    "id": {"type": "string", "description": "Background job id for get, cancel, or an optional targeted wait."},
+    "id": {"type": "string", "description": "Background job id for get, cancel, or a targeted wait. Mutually exclusive with ids."},
+    "ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true, "description": "Background job ids for wait. Mutually exclusive with id."},
+    "until": {"type": "string", "enum": ["first", "all"], "description": "Wait completion condition for the stable selected snapshot (default first). Use all to join every selected job."},
     "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Wait timeout. Omit for ordinary dependency waits (default 120 seconds); do not use a short timeout as a status probe. There is no configured maximum."}
   }
 }`)
@@ -568,60 +684,95 @@ func (*JobsTool) ReadOnly(input json.RawMessage) bool {
 }
 
 func (t *JobsTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	result, err := t.RunResult(ctx, input)
+	return result.Text, err
+}
+
+func (t *JobsTool) RunResult(ctx context.Context, input json.RawMessage) (tools.RunResult, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return tools.RunResult{}, err
 	}
 	var args struct {
-		Action         string `json:"action"`
-		ID             string `json:"id"`
-		TimeoutSeconds int    `json:"timeout_seconds"`
+		Action         string   `json:"action"`
+		ID             string   `json:"id"`
+		IDs            []string `json:"ids"`
+		Until          string   `json:"until"`
+		TimeoutSeconds int      `json:"timeout_seconds"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
-		return "", err
+		return tools.RunResult{}, err
 	}
 	action := strings.TrimSpace(args.Action)
 	if action == "" {
 		action = "list"
 	}
 	if t.manager == nil {
-		return "", fmt.Errorf("background manager is not initialized")
+		return tools.RunResult{}, fmt.Errorf("background manager is not initialized")
 	}
+	// ids/until are wait-only; reject them elsewhere to catch model mistakes.
 	switch action {
 	case "list":
-		return formatList(t.manager.List()), nil
+		if len(args.IDs) > 0 || strings.TrimSpace(args.Until) != "" {
+			return tools.RunResult{}, fmt.Errorf("ids and until are only valid for wait")
+		}
+		return tools.RunResult{Text: formatList(t.manager.List())}, nil
 	case "get":
+		if len(args.IDs) > 0 || strings.TrimSpace(args.Until) != "" {
+			return tools.RunResult{}, fmt.Errorf("ids and until are only valid for wait")
+		}
 		id := strings.TrimSpace(args.ID)
 		if id == "" {
-			return "", fmt.Errorf("id is required for get")
+			return tools.RunResult{}, fmt.Errorf("id is required for get")
 		}
 		snap, ok := t.manager.Get(id)
 		if !ok {
-			return "", fmt.Errorf("unknown background job %q", id)
+			return tools.RunResult{}, fmt.Errorf("unknown background job %q", id)
 		}
-		return formatGet(snap), nil
+		return formatGetResult(snap), nil
 	case "wait":
 		timeout, err := backgroundWaitDuration(args.TimeoutSeconds)
 		if err != nil {
-			return "", err
+			return tools.RunResult{}, err
 		}
-		result, err := t.manager.Wait(ctx, strings.TrimSpace(args.ID), timeout)
+		ids, err := backgroundWaitIDs(args.ID, args.IDs)
 		if err != nil {
-			return "", err
+			return tools.RunResult{}, err
 		}
-		return formatWait(result, timeout), nil
+		result, err := t.manager.WaitFor(ctx, ids, args.Until, timeout)
+		if err != nil {
+			return tools.RunResult{}, err
+		}
+		return formatWaitResult(result, timeout), nil
 	case "cancel":
+		if len(args.IDs) > 0 || strings.TrimSpace(args.Until) != "" {
+			return tools.RunResult{}, fmt.Errorf("ids and until are only valid for wait")
+		}
 		id := strings.TrimSpace(args.ID)
 		if id == "" {
-			return "", fmt.Errorf("id is required for cancel")
+			return tools.RunResult{}, fmt.Errorf("id is required for cancel")
 		}
 		snap, ok := t.manager.Cancel(id)
 		if !ok {
-			return "", fmt.Errorf("unknown background job %q", id)
+			return tools.RunResult{}, fmt.Errorf("unknown background job %q", id)
 		}
-		return fmt.Sprintf("background job %s %s", snap.ID, snap.Status), nil
+		return tools.RunResult{Text: fmt.Sprintf("background job %s %s", snap.ID, snap.Status)}, nil
 	default:
-		return "", fmt.Errorf("unknown action %q", action)
+		return tools.RunResult{}, fmt.Errorf("unknown action %q", action)
 	}
+}
+
+func backgroundWaitIDs(id string, ids []string) ([]string, error) {
+	id = strings.TrimSpace(id)
+	if id != "" && ids != nil {
+		return nil, fmt.Errorf("id and ids are mutually exclusive")
+	}
+	if id != "" {
+		return []string{id}, nil
+	}
+	if ids == nil {
+		return nil, nil
+	}
+	return ids, nil
 }
 
 func (*JobsTool) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
@@ -674,6 +825,31 @@ func formatWait(result WaitResult, timeout time.Duration) string {
 	return b.String()
 }
 
+func formatWaitResult(result WaitResult, timeout time.Duration) tools.RunResult {
+	text := formatWait(result, timeout)
+	originalResult, changed := waitResultWithOriginalText(result)
+	if !changed {
+		return tools.RunResult{Text: text}
+	}
+	return tools.RunResult{
+		Text:         text,
+		OriginalText: formatWait(originalResult, timeout),
+	}
+}
+
+func waitResultWithOriginalText(result WaitResult) (WaitResult, bool) {
+	original := result
+	original.Jobs = append([]Snapshot(nil), result.Jobs...)
+	changed := false
+	for i := range original.Jobs {
+		if full := original.Jobs[i].Result.OriginalText; full != "" && full != original.Jobs[i].Result.Text {
+			original.Jobs[i].Result.Text = full
+			changed = true
+		}
+	}
+	return original, changed
+}
+
 func formatList(jobs []Snapshot) string {
 	if len(jobs) == 0 {
 		return "No background jobs."
@@ -686,6 +862,9 @@ func formatList(jobs []Snapshot) string {
 		}
 		if job.Agent != "" {
 			fmt.Fprintf(&b, "\t%s", job.Agent)
+		}
+		if job.ResourceKey != "" {
+			fmt.Fprintf(&b, "\t%s:%s", job.Access, job.ResourceKey)
 		}
 		fmt.Fprintf(&b, "\t%s\n", preview(job.Task, 80))
 	}
@@ -701,6 +880,9 @@ func formatGet(job Snapshot) string {
 	if job.Agent != "" {
 		fmt.Fprintf(&b, "agent: %s\n", job.Agent)
 	}
+	if job.ResourceKey != "" {
+		fmt.Fprintf(&b, "resource: %s\naccess: %s\n", job.ResourceKey, job.Access)
+	}
 	if job.Result.TranscriptPath != "" {
 		fmt.Fprintf(&b, "transcript: %s\n", job.Result.TranscriptPath)
 	}
@@ -711,6 +893,15 @@ func formatGet(job Snapshot) string {
 		fmt.Fprintf(&b, "result:\n%s\n", strings.TrimSpace(job.Result.Text))
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func formatGetResult(job Snapshot) tools.RunResult {
+	text := formatGet(job)
+	if job.Result.OriginalText == "" || job.Result.OriginalText == job.Result.Text {
+		return tools.RunResult{Text: text}
+	}
+	job.Result.Text = job.Result.OriginalText
+	return tools.RunResult{Text: text, OriginalText: formatGet(job)}
 }
 
 func addUsage(a, b llm.Usage) llm.Usage {
@@ -749,5 +940,6 @@ func preview(s string, max int) string {
 }
 
 var _ tools.Tool = (*JobsTool)(nil)
+var _ tools.ResultTool = (*JobsTool)(nil)
 var _ tools.SelfTimeouter = (*JobsTool)(nil)
 var _ tools.BackgroundJobStarter = (*Manager)(nil)

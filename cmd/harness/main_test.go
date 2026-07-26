@@ -244,6 +244,8 @@ type testInfoModelJSON struct {
 	ServerTools              []string   `json:"server_tools"`
 	BaseTargetID             string     `json:"base_target_id"`
 	Variant                  string     `json:"variant"`
+	APIType                  string     `json:"api_type"`
+	ContinuationStateful     bool       `json:"continuation_stateful"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd"`
 	Reasoning                bool       `json:"reasoning"`
 }
@@ -323,6 +325,10 @@ func TestRunOneShotEnablesAdvertisedWebSearch(t *testing.T) {
 	for i := range proxy.catalog.Targets {
 		if proxy.catalog.Targets[i].ID == "openrouter:openai/gpt-5.5" {
 			proxy.catalog.Targets[i].ServerTools = []string{llm.ServerToolWebSearch}
+		}
+		if proxy.catalog.Targets[i].ID == "openai:gpt-5.5" {
+			proxy.catalog.Targets[i].APIType = "responses"
+			proxy.catalog.Targets[i].ContinuationStateful = true
 		}
 	}
 
@@ -986,6 +992,45 @@ func TestRunDebugRequestInitialPromptDoesNotSaveSession(t *testing.T) {
 	}
 }
 
+func TestRunDebugRequestDisablesProxyContinuation(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, out, errw, _, _ := fakeProviderEnvWithProxy(t, []string{
+		"--debug-request",
+		"-model", "openai:gpt-5.5",
+		"-responses-stateful=false",
+		"-p", "inspect request",
+	}, fp, "")
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	var got debugRequestOutput
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("debug request JSON: %v\n%s", err, out.String())
+	}
+	if !got.Request.DisableContinuation {
+		t.Fatalf("debug request = %+v, want disable_continuation", got.Request)
+	}
+}
+
+func TestManagedContinuationStatefulForProviderUsesCatalogAndConfig(t *testing.T) {
+	catalog := protocol.Catalog{Targets: []protocol.Target{{
+		ID:                   "openai:gpt-5.5",
+		Aliases:              []string{"gpt-5.5"},
+		APIType:              "responses",
+		ContinuationStateful: true,
+	}}}
+	cfg := config.Config{ResponsesStateful: true}
+	for _, target := range []string{"openai:gpt-5.5", "gpt-5.5"} {
+		if !managedContinuationStatefulForProvider(cfg, catalog, target) {
+			t.Fatalf("stateful target %q was not recognized", target)
+		}
+	}
+	cfg.ResponsesStateful = false
+	if managedContinuationStatefulForProvider(cfg, catalog, "openai:gpt-5.5") {
+		t.Fatal("disabled Responses continuation was treated as stateful")
+	}
+}
+
 func TestRunShowConfigExitsZeroWithoutModelProxy(t *testing.T) {
 	dir := t.TempDir()
 	getenv := func(k string) string {
@@ -1200,6 +1245,10 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 		if proxy.catalog.Targets[i].ID == "openrouter:openai/gpt-5.5" {
 			proxy.catalog.Targets[i].ServerTools = []string{llm.ServerToolWebSearch}
 		}
+		if proxy.catalog.Targets[i].ID == "openai:gpt-5.5" {
+			proxy.catalog.Targets[i].APIType = "responses"
+			proxy.catalog.Targets[i].ContinuationStateful = true
+		}
 	}
 
 	code := run(env)
@@ -1232,6 +1281,9 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 		t.Fatalf("openrouter price = %+v\n%s", openRouterModel.PricePerMillionTokensUSD, out.String())
 	}
 	openAIModel := findJSONModel(t, got.Models, "openai:gpt-5.5")
+	if openAIModel.APIType != "responses" || !openAIModel.ContinuationStateful {
+		t.Fatalf("openai continuation metadata = %+v\n%s", openAIModel, out.String())
+	}
 	if openAIModel.PricePerMillionTokensUSD == nil || len(openAIModel.PricePerMillionTokensUSD.Tiers) != 1 ||
 		openAIModel.PricePerMillionTokensUSD.Tiers[0].Threshold != 272_000 {
 		t.Fatalf("openai tiered price = %+v\n%s", openAIModel.PricePerMillionTokensUSD, out.String())
@@ -2771,8 +2823,12 @@ func TestRunDelegateToolUsesCurrentAgentTools(t *testing.T) {
 	if !strings.Contains(fp.Requests[0].System, "CUSTOM ROOT SYSTEM") {
 		t.Fatalf("root system missing configured custom prompt: %q", fp.Requests[0].System)
 	}
-	if !strings.HasSuffix(fp.Requests[1].System, prompts.DelegateChild()) || !strings.Contains(fp.Requests[1].System, "CUSTOM ROOT SYSTEM") {
-		t.Fatalf("child system should contain custom root prompt followed by delegate suffix: %q", fp.Requests[1].System)
+	childSystem := fp.Requests[1].System
+	rootIndex := strings.Index(childSystem, "CUSTOM ROOT SYSTEM")
+	delegateIndex := strings.Index(childSystem, prompts.DelegateChild())
+	budgetIndex := strings.Index(childSystem, "[delegate budget]")
+	if rootIndex < 0 || delegateIndex <= rootIndex || budgetIndex <= delegateIndex {
+		t.Fatalf("child system should contain custom root prompt, delegate suffix, then budget context: %q", childSystem)
 	}
 	if strings.Contains(fp.Requests[0].System, prompts.DelegateChild()) {
 		t.Fatalf("custom root system unexpectedly contains delegate child suffix: %q", fp.Requests[0].System)

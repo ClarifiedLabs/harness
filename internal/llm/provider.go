@@ -95,6 +95,11 @@ type Request struct {
 	StoreResponse      bool     `json:"store_response,omitempty"`
 	PreviousResponseID string   `json:"previous_response_id,omitempty"`
 	RequestContext     []string `json:"request_context,omitempty"`
+	// DisableContinuation tells an orchestration proxy not to create or reuse
+	// provider continuation state for this request. Concrete provider dialects
+	// ignore it; it exists so a caller can run a genuinely stateless comparison
+	// even when the proxy normally manages continuation automatically.
+	DisableContinuation bool `json:"disable_continuation,omitempty"`
 
 	// ProxySessionID is a harness-local session key used by harness-model-proxy
 	// to isolate continuation and websocket state. Concrete provider dialects

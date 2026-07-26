@@ -107,12 +107,26 @@ to prefer `rg`.
   into the command environment, so build/test toolchains are still found without
   paying the login-profile cost on every call.
 - `argv`: direct program invocation with literal args and no shell
+- `name`: optional top-level receipt label; unavailable with `steps`
+- `output_mode`: top-level `auto` (default), `receipt`, or `full`; unavailable
+  with `steps`
 - `steps`: up to 16 named `command`/`argv` entries, run serially. Top-level
   `cwd` and `timeout_seconds` are inherited unless a step overrides them.
 
 Foreground calls capture combined stdout/stderr and append `[exit code: N]`.
 Non-zero exit is not a tool error; it is returned as ordinary command output so
 the model can react to failing builds, tests, and searches.
+
+For an ordinary top-level command, `output_mode:"auto"` preserves successful
+output through 8 KiB. Above that threshold it returns a compact `PASS` receipt
+with the command label, duration, exit status, output byte count, and a bounded
+tail; the complete result is archived through the normal tool-result artifact
+path. Failures return a `FAIL` receipt with bounded diagnostics in `auto`; a
+clipped original is archived. `receipt` always uses the compact successful
+form, while `full` keeps the prior bounded full-output behavior. Every form
+retains the `[exit code: N]` trailer. The same policy and artifact recovery
+apply to background command completion and explicit `background_jobs` get/wait
+results.
 
 Steps stop on the first failure by default (`stop_on_failure:false` continues).
 Successful output is replaced with one `PASS <name> (<duration>)` receipt per
@@ -123,6 +137,16 @@ later request. `steps` is foreground-only.
 
 `run_command`, `grep`, `rg`, and `web_fetch` can set `background:true` to return
 a job id immediately. `delegate` can also run as a background child agent.
+Local background work carries a canonical resource lease. `run_command` and
+`delegate` default to an `exclusive` lease on their canonical cwd; callers may
+set `resource_key` and `access:"read_only"` only when the work cannot mutate
+that resource. Background `grep` and `rg` automatically use a `read_only` lease
+on their cwd. Multiple read-only jobs may share a resource, while an exclusive
+job conflicts with every active lease for the same resource and reports the
+existing job id. Jobs on different resources remain concurrent. The lease is an
+exact-key match on the canonical cwd: it does not protect the whole workspace,
+so two jobs on sibling or nested directories do not conflict. `web_fetch`
+does not lease the local workspace.
 Completed background job summaries are delivered once as request-only context to
 the parent agent. Background delegates are join-required: after one useful parent
 turn, harness waits for them and makes the parent synthesize their reports
@@ -131,10 +155,13 @@ prompt/session totals. Ordinary background commands remain detached. Jobs live o
 in the current harness process and are abandoned when that process exits.
 Completion is normally delivered automatically. When later work has a strict
 dependency, `background_jobs {"action":"wait"}` waits on manager notifications
-instead of polling `get` or `list`; add `id` to target one job, or omit it to return when the
-first currently running job finishes. Its timeout defaults to 120 seconds and a
-timeout returns the latest status as a normal result. Omit `timeout_seconds` for
-ordinary dependency waits; do not use a short timeout as a status probe.
+instead of polling `get` or `list`; add `id` to target one job, use `ids` with
+`until:"all"` to join a group, or omit both to select the jobs currently
+running. `until` defaults to `first`. The selected set is stable: jobs launched
+after the wait starts are never added. Its timeout defaults to 120 seconds and
+a timeout returns the latest selected status as a normal result. Omit
+`timeout_seconds` for ordinary dependency waits; do not use a short timeout as
+a status probe.
 
 For repository orientation, `git {"workflow":"workspace_summary"}` combines
 branch/porcelain status, HEAD, staged and unstaged diff stats, and both whitespace
@@ -180,14 +207,74 @@ user questions, and must return a concise evidence-backed report. The parent
 should synthesize and verify that report. Prefer direct tools for known files or
 symbols, one- or two-step tasks, immediate blockers, and tightly coupled work.
 
+Set `mode:"implementation"` only for scoped mutating implementation. It adds an
+implementation-mode system block plus deterministic steering after the
+25%, 50%, and 75% turn boundaries: finish orientation and choose the concrete
+path, perform substantive implementation unless concretely blocked, then
+prioritize completion, verification, and an exact handoff. Omit `mode` for
+exploration and review delegates.
+
+Set `continue_child_id` to a terminal sibling delegate ID when the same child
+runtime should continue retained work. Harness leaves the source child
+unchanged and creates a fresh child record containing the prior transcript,
+todos, prompt-cache/proxy identifiers, and provider continuation anchor. The
+new prompt explicitly tells the child to re-check repository state. Omitted
+`agent`, `mode`, and `max_turns` values inherit the source contract; explicitly
+supplied values must match it. The continuation receives a fresh loop allowance
+equal to that effective budget; prior physical turns and usage are not counted
+again. When the retained request is already at or below 60% of the current
+context window, the fresh child reuses the complete transcript and safe remote
+continuation anchor directly.
+
+Continuation is intentionally strict. The source must belong to the immediate
+parent, have terminal metadata and resumable `state.json`, and carry the same
+runtime fingerprint as the current provider, model, system prompt, tools,
+reasoning and server-tool settings, safety budgets, and compaction policy.
+When retained context plus the new prompt exceeds 60%, Harness makes one
+tool-less maintenance call that summarizes the complete source transcript into
+a typed compaction checkpoint. The checkpoint keeps the active prompt and
+steering instructions verbatim, carries typed file activity, preserves the raw
+source messages in the new child's `compactions/` archive, and resets the remote
+provider anchor. Harness re-estimates the checkpoint request and continues only
+when it is at or below 60%; a failed summary or still-oversized exact
+instructions reject the continuation instead of dropping state. Checkpoint
+usage is charged to the new child and returned even when that final pressure
+check rejects it.
+
+Legacy children without a fingerprint, children from another parent, changed
+runtimes, and missing state remain ineligible. Foreground and background
+delegates use the same checks; background launch receipts show the inherited
+budget, mode, and source child. The final delegate receipt distinguishes a
+compact-checkpoint continuation. Child metadata and `session stats` record the
+continuation mode plus before/after/window token estimates.
+
 Foreground delegates run in the ordinary serialized tool loop because children
 share the checkout and may write. Use `background:true` only for independent
-read-only or disjoint work while useful parent work remains. Completion is delivered automatically as one-shot request context; do not poll or
+read-only or disjoint work while useful parent work remains. Background calls
+default to an exclusive lease on the canonical process cwd. Set
+`access:"read_only"` only for a child that cannot mutate the resource; set
+`resource_key` when the child owns a different worktree or narrower coordination
+unit. Lease conflicts fail before a child starts and identify the active job.
+Completion is delivered automatically as one-shot request context; do not poll or
 duplicate a background child's work. Harness permits one subsequent useful parent
 model round, then joins outstanding background delegates and continues the parent
 for synthesis before allowing the turn to end.
 
-Each call runs for at most `delegate_max_turns` turns (default `20`).
+For an independent review group, launch the reviewer delegates directly from
+the parent in one assistant turn, give genuinely read-only reviewers the same
+`resource_key` with `access:"read_only"`, and synthesize their reports in the
+parent. If an immediate dependency requires an explicit join, pass the returned
+job IDs to one `background_jobs` call with `until:"all"`. Do not create a
+coordinator child whose only work is launching reviewers and waiting for them;
+that adds a model loop without adding review independence or evidence.
+
+The `max_turns` schema publishes the active numeric `delegate_max_turns`
+maximum (default `20`). Omitting `max_turns` uses that maximum; a lower value
+selects a smaller tool-enabled loop budget, and an over-cap value is rejected
+before a child is launched. Children receive the exact effective budget in
+their system context. If the final budgeted turn still requests tools, Harness
+may make one additional tools-disabled wind-down request so the transcript ends
+with a concise handoff; `turns_used` records that physical request too.
 Recursion starts at root depth `0` and is limited by `delegate_max_depth`
 (default `3`); the deepest child does not receive `delegate`, and an over-depth
 launch fails before a model request. Children inherit the root
@@ -197,6 +284,12 @@ per-child ceilings, not a hierarchy-wide shared budget.
 Child agents get private todo stores. Their transcripts are saved under
 `children/<child-id>/` alongside the parent session. Foreground and background
 child token/cost usage is included exactly once in parent prompt/session usage.
+Child metadata records background resource/access leases, requested and effective
+turn budgets, physical turns used, and a structured termination reason:
+`model_completed`, `turn_limit`,
+`token_limit`, `cost_limit`, `repeat_guard`, `error_guard`, `cancelled`, or
+`error`. A termination reason describes why Harness stopped the loop; it does
+not claim that the delegated task is semantically complete.
 
 `delegate_output=lines` adds a curated prompt-scoped view of foreground,
 background, concurrent, and nested child activity to parent stderr. Direct

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -33,44 +34,57 @@ const maxAgentDescriptionBytes = 160
 const delegateToolName = "delegate"
 const updateTodosToolName = "update_todos"
 
+const ModeImplementation = "implementation"
+const continuationContextPercent = 60
+
+const (
+	continuationModeRetained   = "retained"
+	continuationModeCheckpoint = "compact_checkpoint"
+)
+const continuationFingerprintVersion = 2
+
 var childSeq atomic.Uint64
 
 // Runtime is the parent agent state a delegate call needs to start a child.
 type Runtime struct {
-	Provider          llm.Provider
-	ProviderName      string
-	Model             string
-	ContextWindow     int
-	MaxOutputTokens   int
-	Registry          *llm.Registry
-	Reasoning         llm.ReasoningConfig
-	ServerTools       []llm.ServerTool
-	ResponsesStateful bool
-	System            string
-	Agent             string
-	ToolNames         []string
-	SessionPath       string
-	CacheAffinityID   string
-	ParentChildID     string
-	Depth             int
-	MaxPromptTokens   int
-	MaxPromptCostUSD  float64
+	Provider                    llm.Provider
+	ProviderName                string
+	Model                       string
+	ContextWindow               int
+	MaxOutputTokens             int
+	Registry                    *llm.Registry
+	Reasoning                   llm.ReasoningConfig
+	ServerTools                 []llm.ServerTool
+	ResponsesStateful           bool
+	ManagedContinuationStateful bool
+	DisableManagedContinuation  bool
+	System                      string
+	Agent                       string
+	ToolNames                   []string
+	SessionPath                 string
+	CacheAffinityID             string
+	ParentChildID               string
+	Depth                       int
+	MaxPromptTokens             int
+	MaxPromptCostUSD            float64
 }
 
 // Launch is the fully resolved child-agent runtime for one delegate call.
 type Launch struct {
-	Provider          llm.Provider
-	ProviderName      string
-	Model             string
-	ContextWindow     int
-	MaxOutputTokens   int
-	Registry          *llm.Registry
-	Reasoning         llm.ReasoningConfig
-	ServerTools       []llm.ServerTool
-	ResponsesStateful bool
-	System            string
-	Agent             string
-	Tools             *tools.Registry
+	Provider                    llm.Provider
+	ProviderName                string
+	Model                       string
+	ContextWindow               int
+	MaxOutputTokens             int
+	Registry                    *llm.Registry
+	Reasoning                   llm.ReasoningConfig
+	ServerTools                 []llm.ServerTool
+	ResponsesStateful           bool
+	ManagedContinuationStateful bool
+	DisableManagedContinuation  bool
+	System                      string
+	Agent                       string
+	Tools                       *tools.Registry
 }
 
 // AgentCandidate is a configured agent that may be delegated to when its tools
@@ -115,6 +129,7 @@ type Options struct {
 	DisableAutoCompaction     bool
 	CompactSummaryMaxTokens   int
 	CompactToolResultMaxBytes int
+	RetentionPolicy           agent.RetentionPolicy
 	AgentCandidates           func(Runtime) []AgentCandidate
 	ActivityRegistry          *ActivityRegistry
 	Now                       func() time.Time
@@ -122,25 +137,41 @@ type Options struct {
 
 // RunRequest is one child-agent launch request.
 type RunRequest struct {
-	Kind       string
-	Task       string
-	Agent      string
-	MaxTurns   *int
-	ChildID    string
-	Background bool
+	Kind            string
+	Mode            string
+	Task            string
+	Agent           string
+	MaxTurns        *int
+	ContinueChildID string
+	ChildID         string
+	Background      bool
+	ResourceKey     string
+	Access          string
+
+	maxTurnsInherited         bool
+	leaseAcquired             bool
+	continuationMode          string
+	continuationContextBefore int
+	continuationContextAfter  int
+	continuationContextWindow int
 }
 
 // RunResult is the complete outcome of one child-agent run.
 type RunResult struct {
-	Report         string
-	Usage          llm.Usage
-	Turns          int
-	ChildID        string
-	TranscriptPath string
-	Agent          string
-	ProviderName   string
-	Model          string
-	SaveError      error
+	Report            string
+	Usage             llm.Usage
+	Turns             int
+	EffectiveMaxTurns int
+	TerminationReason agent.TerminationReason
+	Mode              string
+	ContinuedFrom     string
+	ContinuationMode  string
+	ChildID           string
+	TranscriptPath    string
+	Agent             string
+	ProviderName      string
+	Model             string
+	SaveError         error
 	// Progress carries the live-progress closure (func() agent.DelegateProgressSnapshot)
 	// for foreground delegates so the parent wait ticker can read child activity while
 	// the (synchronous) run is in progress. It is nil for failure-before-run paths.
@@ -182,7 +213,7 @@ func (r *Runner) Schema() json.RawMessage {
 		runtime := r.snapshot()
 		agents = DelegatableAgentCandidates(runtime.ToolNames, r.opts.AgentCandidates(runtime))
 	}
-	return schema(agents)
+	return schema(agents, r.configuredMaxTurns())
 }
 
 // Tool is a model-callable configured-agent launcher.
@@ -215,7 +246,7 @@ func (*Tool) Description() string {
 
 func (t *Tool) Schema() json.RawMessage {
 	if t == nil || t.runner == nil {
-		return schema(nil)
+		return schema(nil, DefaultMaxTurns)
 	}
 	return t.runner.Schema()
 }
@@ -240,29 +271,53 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 		return tools.MeteredResult{}, err
 	}
 	if req.Background {
-		if err := t.runner.checkDepth(); err != nil {
+		prepared, err := t.runner.prepareRun(req)
+		if err != nil {
 			return tools.MeteredResult{}, err
 		}
+		req = prepared.req
+		maxTurns := prepared.maxTurns
 		if err := ctx.Err(); err != nil {
 			return tools.MeteredResult{}, err
 		}
 		if t.background == nil {
 			return tools.MeteredResult{}, fmt.Errorf("background manager is not initialized")
 		}
+		defaultResource, err := tools.DefaultBackgroundResource("")
+		if err != nil {
+			return tools.MeteredResult{}, err
+		}
+		req.ResourceKey, req.Access, err = tools.ResolveBackgroundLease(
+			req.ResourceKey,
+			req.Access,
+			defaultResource,
+			tools.BackgroundAccessExclusive,
+		)
+		if err != nil {
+			return tools.MeteredResult{}, err
+		}
+		req.leaseAcquired = true
 		// Create the progress here so its closure is available to the parent wait
 		// ticker immediately (the job runs in a goroutine that starts now); the
 		// same progress feeds the child sink inside the job's Run closure.
 		progress := NewProgress()
+		jobAgent := req.Agent
+		if prepared.continuation != nil {
+			jobAgent = prepared.continuation.meta.Agent
+		}
 		info, err := t.background.StartBackgroundJob(tools.BackgroundJobRequest{
 			Kind:          "delegate",
 			Description:   req.Task,
-			Agent:         req.Agent,
+			Agent:         jobAgent,
+			ResourceKey:   req.ResourceKey,
+			Access:        req.Access,
 			WaitForPrompt: true,
 			Progress:      progress.Closure(),
 			Run: func(ctx context.Context, childID string) (tools.BackgroundJobResult, error) {
-				req.Background = false
-				req.ChildID = childID
-				result, err := t.runner.Run(ctx, req, progress)
+				childReq := req
+				childReq.Background = false
+				childReq.ChildID = childID
+				result, err := t.runner.Run(ctx, childReq, progress)
 				return tools.BackgroundJobResult{
 					Text:           result.Report,
 					TranscriptPath: result.TranscriptPath,
@@ -274,7 +329,19 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 		if err != nil {
 			return tools.MeteredResult{}, err
 		}
-		return tools.MeteredResult{Text: fmt.Sprintf("background job %s started", info.ID), Progress: progress.Closure()}, nil
+		receipt := fmt.Sprintf("background job %s started (turn budget: %d", info.ID, maxTurns)
+		if req.Mode != "" {
+			receipt += ", mode: " + req.Mode
+		}
+		if req.ContinueChildID != "" {
+			receipt += ", continues: " + req.ContinueChildID
+		}
+		receipt += ", resource: " + req.ResourceKey + ", access: " + req.Access
+		receipt += ")"
+		return tools.MeteredResult{
+			Text:     receipt,
+			Progress: progress.Closure(),
+		}, nil
 	}
 	// Foreground: the live progress was created by StartProgress (called by the
 	// agent just before dispatch) and stashed keyed by input so this Run reuses
@@ -332,10 +399,14 @@ func (t *Tool) RebindRuntime(snapshot func() Runtime) tools.Tool {
 
 func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 	var args struct {
-		Task       string `json:"task"`
-		Agent      string `json:"agent"`
-		MaxTurns   *int   `json:"max_turns"`
-		Background bool   `json:"background"`
+		Task        string `json:"task"`
+		Agent       string `json:"agent"`
+		Mode        string `json:"mode"`
+		MaxTurns    *int   `json:"max_turns"`
+		ContinueID  string `json:"continue_child_id"`
+		Background  bool   `json:"background"`
+		ResourceKey string `json:"resource_key"`
+		Access      string `json:"access"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return RunRequest{}, err
@@ -347,12 +418,25 @@ func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 	if kind == "" {
 		kind = "delegate"
 	}
+	mode, err := normalizeMode(args.Mode)
+	if err != nil {
+		return RunRequest{}, err
+	}
+	resourceKey := strings.TrimSpace(args.ResourceKey)
+	access := strings.TrimSpace(args.Access)
+	if !args.Background && (resourceKey != "" || access != "") {
+		return RunRequest{}, fmt.Errorf("resource_key and access require background:true")
+	}
 	return RunRequest{
-		Kind:       kind,
-		Task:       task,
-		Agent:      strings.TrimSpace(args.Agent),
-		MaxTurns:   args.MaxTurns,
-		Background: args.Background,
+		Kind:            kind,
+		Mode:            mode,
+		Task:            task,
+		Agent:           strings.TrimSpace(args.Agent),
+		MaxTurns:        args.MaxTurns,
+		ContinueChildID: strings.TrimSpace(args.ContinueID),
+		Background:      args.Background,
+		ResourceKey:     resourceKey,
+		Access:          access,
 	}, nil
 }
 
@@ -364,28 +448,18 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	if r == nil {
 		return RunResult{}, fmt.Errorf("delegate runner is not initialized")
 	}
-	if req.Kind == "" {
-		req.Kind = "delegate"
-	}
 	if progress == nil {
 		progress = NewProgress()
 	}
-	if r.snapshot == nil {
-		return RunResult{}, fmt.Errorf("delegate runtime is not initialized")
-	}
-	maxTurns, err := r.maxTurns(req.MaxTurns)
+	prepared, err := r.prepareRun(req)
 	if err != nil {
 		return RunResult{}, err
 	}
-
-	runtime := r.snapshot()
+	req = prepared.req
+	runtime := prepared.runtime
+	maxTurns := prepared.maxTurns
+	continuation := prepared.continuation
 	maxDepth := r.maxDepth()
-	if err := r.validateDepth(runtime); err != nil {
-		return RunResult{}, err
-	}
-	if runtime.Provider == nil {
-		return RunResult{}, fmt.Errorf("delegate runtime is not initialized")
-	}
 	if r.resolve == nil {
 		return RunResult{}, fmt.Errorf("delegate resolver is not initialized")
 	}
@@ -399,21 +473,51 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	if launch.Tools == nil {
 		return RunResult{}, fmt.Errorf("delegate tool registry is not initialized")
 	}
-	launch.System = childSystemPrompt(launch.System)
+	launch.System = childBudgetSystemPrompt(childSystemPrompt(withoutChildBudget(launch.System)), maxTurns)
+	var turnMilestones []agent.TurnMilestone
+	if req.Mode == ModeImplementation {
+		launch.System = implementationSystemPrompt(launch.System, maxTurns)
+		turnMilestones = implementationTurnMilestones(maxTurns)
+	}
 	progress.SetAgent(launch.Agent)
 
 	toolNames := launch.Tools.Names()
 	if runtime.Depth+1 >= maxDepth {
 		toolNames = withoutTool(toolNames, delegateToolName)
 	}
+	runtimeFingerprint, err := r.runtimeFingerprint(runtime, launch, req, maxTurns, toolNames)
+	if err != nil {
+		return RunResult{}, err
+	}
+	if continuation != nil {
+		if continuation.meta.Agent != launch.Agent {
+			return RunResult{}, continuationIncompatibleError(req.ContinueChildID, "resolved agent does not match the saved agent")
+		}
+		if continuation.state.System != launch.System {
+			return RunResult{}, continuationIncompatibleError(req.ContinueChildID, "saved system prompt does not match the current runtime")
+		}
+		if continuation.meta.RuntimeFingerprint != runtimeFingerprint {
+			return RunResult{}, continuationIncompatibleError(req.ContinueChildID, "provider, model, prompt, tools, or runtime policy changed")
+		}
+	}
 
 	childID := strings.TrimSpace(req.ChildID)
 	if childID == "" {
 		childID = nextChildID(req.Kind)
 	}
+	if childID == req.ContinueChildID {
+		return RunResult{}, fmt.Errorf("delegate continuation must use a fresh child id, not %q", childID)
+	}
 	created := r.now()
-	childDir, saveErr := r.saveChildMeta(runtime, launch, childID, req, session.ChildStatusRunning, created, created, agent.PromptUsage{}, nil, 0)
-	result = RunResult{ChildID: childID, TranscriptPath: childDir, SaveError: saveErr}
+	childDir, saveErr := r.saveChildMeta(runtime, launch, childID, req, maxTurns, runtimeFingerprint, session.ChildStatusRunning, created, created, agent.PromptUsage{}, nil, 0)
+	result = RunResult{
+		ChildID:           childID,
+		TranscriptPath:    childDir,
+		EffectiveMaxTurns: maxTurns,
+		Mode:              req.Mode,
+		ContinuedFrom:     req.ContinueChildID,
+		SaveError:         saveErr,
+	}
 	activity := r.opts.ActivityRegistry.Register(ActivityStart{
 		ID:             childID,
 		ParentID:       runtime.ParentChildID,
@@ -436,7 +540,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 			if terminalUpdated.IsZero() {
 				terminalUpdated = r.now()
 			}
-			_, err := r.saveChildMeta(runtime, launch, childID, req, terminalStatus, created, terminalUpdated, terminalUsage, terminalErr, terminalMessageCount)
+			_, err := r.saveChildMeta(runtime, launch, childID, req, maxTurns, runtimeFingerprint, terminalStatus, created, terminalUpdated, terminalUsage, terminalErr, terminalMessageCount)
 			result.SaveError = errors.Join(result.SaveError, err)
 			activity.Finish(terminalStatus, terminalUsage.Turns)
 		})
@@ -445,56 +549,200 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 
 	childTodos := todo.NewStore()
 	hasTodoTool := slices.Contains(toolNames, updateTodosToolName)
-	childTools, err := r.buildChildTools(runtime, launch, childID, childTodos, toolNames)
+	cacheAffinityID := childCacheAffinityID(runtime.CacheAffinityID, childID)
+	if continuation != nil {
+		cacheAffinityID = continuation.state.CacheAffinityID
+	}
+	childTools, err := r.buildChildTools(runtime, launch, childID, childTodos, toolNames, cacheAffinityID)
 	if err != nil {
 		terminalErr = err
 		finish()
 		return result, err
 	}
 	child := agent.New(launch.Provider, childTools, agent.Options{
-		MaxTurns:                  maxTurns,
-		MaxPromptTokens:           runtime.MaxPromptTokens,
-		MaxOutputTokens:           launch.MaxOutputTokens,
-		MaxPromptCostUSD:          runtime.MaxPromptCostUSD,
-		Model:                     launch.Model,
-		ContextWindow:             launch.ContextWindow,
-		Registry:                  launch.Registry,
-		Reasoning:                 launch.Reasoning,
-		ServerTools:               launch.ServerTools,
-		ResponsesStateful:         launch.ResponsesStateful,
-		CompactKeepTurns:          r.opts.CompactKeepTurns,
-		CompactKeepTokens:         r.opts.CompactKeepTokens,
-		CompactTriggerPercent:     r.opts.CompactTriggerPercent,
-		CompactTargetPercent:      r.opts.CompactTargetPercent,
-		DisableAutoCompaction:     r.opts.DisableAutoCompaction,
-		CompactSummaryMaxTokens:   r.opts.CompactSummaryMaxTokens,
-		CompactToolResultMaxBytes: r.opts.CompactToolResultMaxBytes,
-		Now:                       r.opts.Now,
+		MaxTurns:                    maxTurns,
+		TurnMilestones:              turnMilestones,
+		MaxPromptTokens:             runtime.MaxPromptTokens,
+		MaxOutputTokens:             launch.MaxOutputTokens,
+		MaxPromptCostUSD:            runtime.MaxPromptCostUSD,
+		Model:                       launch.Model,
+		ContextWindow:               launch.ContextWindow,
+		Registry:                    launch.Registry,
+		Reasoning:                   launch.Reasoning,
+		ServerTools:                 launch.ServerTools,
+		ResponsesStateful:           launch.ResponsesStateful,
+		ManagedContinuationStateful: launch.ManagedContinuationStateful,
+		DisableManagedContinuation:  launch.DisableManagedContinuation,
+		RetentionPolicy:             r.opts.RetentionPolicy,
+		CompactKeepTurns:            r.opts.CompactKeepTurns,
+		CompactKeepTokens:           r.opts.CompactKeepTokens,
+		CompactTriggerPercent:       r.opts.CompactTriggerPercent,
+		CompactTargetPercent:        r.opts.CompactTargetPercent,
+		DisableAutoCompaction:       r.opts.DisableAutoCompaction,
+		CompactSummaryMaxTokens:     r.opts.CompactSummaryMaxTokens,
+		CompactToolResultMaxBytes:   r.opts.CompactToolResultMaxBytes,
+		Now:                         r.opts.Now,
 	})
-	child.SetCacheAffinityID(childCacheAffinityID(runtime.CacheAffinityID, childID))
 	child.SetSystem(launch.System)
+	child.SetCacheAffinityID(cacheAffinityID)
+	prompt := req.Task
+	if continuation != nil {
+		prompt = continuationPrompt(req.ContinueChildID, req.Task)
+		childTodos.Replace(continuation.state.Todos)
+		child.SetTranscript(continuation.state.Messages)
+	}
+
+	// One tree per child run keeps tree.ndjson identity stable across the
+	// per-closed-turn checkpoints and the final consolidated save.
+	var childTree *session.Tree
+	ensureChildTree := func(messages []llm.Message) (*session.Tree, error) {
+		if childTree == nil {
+			tree, err := session.LinearTree(created, "", messages)
+			if err != nil {
+				return nil, err
+			}
+			childTree = tree
+		}
+		return childTree, nil
+	}
 
 	sink := newChildSink(childDir, childTodos, hasTodoTool, progress, activity, inlineReasoningEnabled(launch.Reasoning))
+	sink.messageCount = func() int { return len(child.Transcript()) }
+	sink.checkpoint = func(checkpoint agent.PromptCheckpoint) error {
+		updated := r.now()
+		tree, err := ensureChildTree(child.Transcript())
+		if err != nil {
+			return err
+		}
+		state := r.childSessionState(launch, child, childTodos, checkpoint.Usage, created, updated, tree)
+		var checkpointErr error
+		switch checkpoint.Kind {
+		case agent.PromptCheckpointClosedTurn:
+			checkpointErr = session.SaveClosedTurnCheckpoint(childDir, state, 1, checkpoint.Turn)
+			if checkpointErr == nil {
+				_, checkpointErr = r.saveChildMeta(
+					runtime,
+					launch,
+					childID,
+					req,
+					maxTurns,
+					runtimeFingerprint,
+					session.ChildStatusRunning,
+					created,
+					updated,
+					checkpoint.Usage,
+					nil,
+					len(child.Transcript()),
+				)
+			}
+		default:
+			checkpointErr = session.SaveActiveTurnCheckpoint(
+				childDir,
+				state,
+				string(checkpoint.Kind),
+				1,
+				checkpoint.Turn,
+			)
+		}
+		return checkpointErr
+	}
+	child.SetCompactionArchiver(func(_ context.Context, archive agent.CompactionArchive) (string, error) {
+		return session.SaveCompaction(childDir, session.Compaction{
+			Time:          r.now(),
+			Summary:       archive.Summary,
+			Usage:         archive.Usage,
+			Messages:      archive.Messages,
+			Focus:         archive.Focus,
+			ReadFiles:     archive.ReadFiles,
+			ModifiedFiles: archive.ModifiedFiles,
+		})
+	})
 	flushDisplay = sink.flushDisplay
-	sink.User(req.Task)
-	runErr := child.RunPrompt(ctx, req.Task, sink)
+	sink.User(prompt)
+
+	failBeforePrompt := func(runErr error) (RunResult, error) {
+		terminalUsage = sink.usage
+		terminalMessageCount = len(child.Transcript())
+		terminalUpdated = r.now()
+		stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, terminalUsage, created, terminalUpdated, ensureChildTree)
+		persistenceErr := errors.Join(sink.appendError(), stateErr)
+		terminalErr = errors.Join(runErr, persistenceErr)
+		result.Usage = terminalUsage.Usage
+		result.Turns = terminalUsage.Turns
+		result.TerminationReason = terminalUsage.TerminationReason
+		result.ContinuationMode = req.continuationMode
+		result.Agent = launch.Agent
+		result.ProviderName = launch.ProviderName
+		result.Model = launch.Model
+		result.Progress = progress.Closure()
+		result.SaveError = errors.Join(result.SaveError, persistenceErr)
+		finish()
+		return result, terminalErr
+	}
+
+	if continuation != nil {
+		requestContext := todo.RequestContext(continuation.state.Todos)
+		before := estimateContinuationContext(child, continuation.state.Messages, prompt, requestContext)
+		req.continuationContextBefore = before.Total
+		req.continuationContextAfter = before.Total
+		req.continuationContextWindow = before.Window
+		if before.Window <= 0 {
+			return failBeforePrompt(continuationContextError(req.ContinueChildID, before))
+		}
+		if before.Total*100 > before.Window*continuationContextPercent {
+			compactUsage, changed, compactErr := child.CompactForContinuation(ctx, sink)
+			sink.addPreflightMaintenance("continuation_compaction", compactUsage)
+			if compactErr != nil {
+				return failBeforePrompt(continuationIncompatibleError(
+					req.ContinueChildID,
+					fmt.Sprintf("could not create a compact continuation checkpoint: %v", compactErr),
+				))
+			}
+			if !changed {
+				return failBeforePrompt(continuationIncompatibleError(
+					req.ContinueChildID,
+					"could not create a compact continuation checkpoint",
+				))
+			}
+			req.continuationMode = continuationModeCheckpoint
+			checkpoint := child.Transcript()
+			after := estimateContinuationContext(child, checkpoint, prompt, requestContext)
+			req.continuationContextAfter = after.Total
+			req.continuationContextWindow = after.Window
+			if after.Window <= 0 || after.Total*100 > after.Window*continuationContextPercent {
+				return failBeforePrompt(continuationCheckpointContextError(req.ContinueChildID, after))
+			}
+		} else {
+			req.continuationMode = continuationModeRetained
+			child.SetProxySessionID(continuation.state.ProxySessionID)
+			child.SetResponseState(continuation.state.ResponseState)
+		}
+		result.ContinuationMode = req.continuationMode
+	}
+
+	runErr := child.RunPrompt(ctx, prompt, sink)
 	usage := sink.usage
 	terminalUsage = usage
 	terminalMessageCount = len(child.Transcript())
 	terminalStatus = childTerminalStatus(runErr)
 	terminalUpdated = r.now()
-	stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, usage, created, terminalUpdated)
+	stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, usage, created, terminalUpdated, ensureChildTree)
 	persistenceErr := errors.Join(sink.appendError(), stateErr)
 	result = RunResult{
-		Usage:          usage.Usage,
-		Turns:          usage.Turns,
-		ChildID:        childID,
-		TranscriptPath: childDir,
-		Agent:          launch.Agent,
-		ProviderName:   launch.ProviderName,
-		Model:          launch.Model,
-		SaveError:      errors.Join(result.SaveError, persistenceErr),
-		Progress:       progress.Closure(),
+		Usage:             usage.Usage,
+		Turns:             usage.Turns,
+		EffectiveMaxTurns: maxTurns,
+		TerminationReason: usage.TerminationReason,
+		Mode:              req.Mode,
+		ContinuedFrom:     req.ContinueChildID,
+		ContinuationMode:  req.continuationMode,
+		ChildID:           childID,
+		TranscriptPath:    childDir,
+		Agent:             launch.Agent,
+		ProviderName:      launch.ProviderName,
+		Model:             launch.Model,
+		SaveError:         errors.Join(result.SaveError, persistenceErr),
+		Progress:          progress.Closure(),
 	}
 	terminalErr = errors.Join(runErr, persistenceErr)
 	finish()
@@ -505,8 +753,18 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	if report == "" {
 		report = "(delegate completed without a final text response)"
 	}
-	report += fmt.Sprintf("\n\n[delegate: %s, %d input tokens, %d output tokens",
-		turnPhrase(usage.Turns), usage.Usage.InputTokens, usage.Usage.OutputTokens)
+	report += fmt.Sprintf("\n\n[delegate: %s, turn budget %d", turnPhrase(usage.Turns), maxTurns)
+	if req.Mode != "" {
+		report += ", mode " + req.Mode
+	}
+	if req.ContinueChildID != "" {
+		report += ", continued from " + req.ContinueChildID
+		if req.continuationMode == continuationModeCheckpoint {
+			report += " via compact checkpoint"
+		}
+	}
+	report += fmt.Sprintf(", termination %s, %d input tokens, %d output tokens",
+		usage.TerminationReason, usage.Usage.InputTokens, usage.Usage.OutputTokens)
 	if childDir != "" {
 		report += fmt.Sprintf(", transcript %s", childDir)
 	}
@@ -518,14 +776,396 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	return result, nil
 }
 
-func (r *Runner) buildChildTools(parent Runtime, launch Launch, childID string, todos *todo.Store, names []string) (*tools.Registry, error) {
+type preparedRun struct {
+	req          RunRequest
+	runtime      Runtime
+	maxTurns     int
+	continuation *continuationSource
+}
+
+type continuationSource struct {
+	meta  session.ChildMeta
+	state session.Session
+}
+
+func (r *Runner) prepareRun(req RunRequest) (preparedRun, error) {
+	if r == nil {
+		return preparedRun{}, fmt.Errorf("delegate runner is not initialized")
+	}
+	if req.Kind == "" {
+		req.Kind = "delegate"
+	}
+	req.Kind = strings.TrimSpace(req.Kind)
+	if req.Kind == "" {
+		req.Kind = "delegate"
+	}
+	req.Task = strings.TrimSpace(req.Task)
+	if req.Task == "" {
+		return preparedRun{}, fmt.Errorf("task is required")
+	}
+	var err error
+	req.Mode, err = normalizeMode(req.Mode)
+	if err != nil {
+		return preparedRun{}, err
+	}
+	req.Agent = strings.TrimSpace(req.Agent)
+	req.ContinueChildID = strings.TrimSpace(req.ContinueChildID)
+	req.ChildID = strings.TrimSpace(req.ChildID)
+	req.ResourceKey = strings.TrimSpace(req.ResourceKey)
+	req.Access = strings.TrimSpace(req.Access)
+	if !req.Background && !req.leaseAcquired && (req.ResourceKey != "" || req.Access != "") {
+		return preparedRun{}, fmt.Errorf("resource_key and access require background:true")
+	}
+	if r.snapshot == nil {
+		return preparedRun{}, fmt.Errorf("delegate runtime is not initialized")
+	}
+	runtime := r.snapshot()
+	if err := r.validateDepth(runtime); err != nil {
+		return preparedRun{}, err
+	}
+	if runtime.Provider == nil {
+		return preparedRun{}, fmt.Errorf("delegate runtime is not initialized")
+	}
+
+	var continuation *continuationSource
+	if req.ContinueChildID != "" {
+		continuation, err = loadContinuationSource(runtime, req.ContinueChildID)
+		if err != nil {
+			return preparedRun{}, err
+		}
+		if continuation.meta.Kind != req.Kind {
+			return preparedRun{}, continuationIncompatibleError(
+				req.ContinueChildID,
+				fmt.Sprintf("saved kind %q does not match requested kind %q", continuation.meta.Kind, req.Kind),
+			)
+		}
+		sourceMode, err := normalizeMode(continuation.meta.Mode)
+		if err != nil {
+			return preparedRun{}, continuationIncompatibleError(req.ContinueChildID, "saved mode is invalid")
+		}
+		switch {
+		case req.Mode == "":
+			req.Mode = sourceMode
+		case req.Mode != sourceMode:
+			return preparedRun{}, continuationIncompatibleError(
+				req.ContinueChildID,
+				fmt.Sprintf("mode %q does not match saved mode %q", req.Mode, sourceMode),
+			)
+		}
+		switch {
+		case req.Agent == "":
+			req.Agent = continuation.meta.RequestedAgent
+		case req.Agent != continuation.meta.Agent:
+			return preparedRun{}, continuationIncompatibleError(
+				req.ContinueChildID,
+				fmt.Sprintf("agent %q does not match saved agent %q", req.Agent, continuation.meta.Agent),
+			)
+		}
+		if continuation.meta.EffectiveMaxTurns <= 0 {
+			return preparedRun{}, continuationIncompatibleError(req.ContinueChildID, "saved turn budget is unavailable")
+		}
+		switch {
+		case req.MaxTurns == nil:
+			inherited := continuation.meta.EffectiveMaxTurns
+			req.MaxTurns = &inherited
+			req.maxTurnsInherited = true
+		case *req.MaxTurns != continuation.meta.EffectiveMaxTurns:
+			return preparedRun{}, continuationIncompatibleError(
+				req.ContinueChildID,
+				fmt.Sprintf("turn budget %d does not match saved budget %d", *req.MaxTurns, continuation.meta.EffectiveMaxTurns),
+			)
+		}
+	}
+	maxTurns, err := r.maxTurns(req.MaxTurns)
+	if err != nil {
+		if continuation != nil {
+			return preparedRun{}, continuationIncompatibleError(req.ContinueChildID, err.Error())
+		}
+		return preparedRun{}, err
+	}
+	return preparedRun{
+		req:          req,
+		runtime:      runtime,
+		maxTurns:     maxTurns,
+		continuation: continuation,
+	}, nil
+}
+
+func loadContinuationSource(runtime Runtime, childID string) (*continuationSource, error) {
+	if runtime.SessionPath == "" {
+		return nil, fmt.Errorf("delegate continuation requires an active persisted session")
+	}
+	if err := validateContinuationChildID(childID); err != nil {
+		return nil, err
+	}
+	dir := session.ChildSessionDir(runtime.SessionPath, childID)
+	metaPath := filepath.Join(dir, "meta.json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return nil, fmt.Errorf("delegate continuation %q: read metadata: %w", childID, err)
+	}
+	var meta session.ChildMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("delegate continuation %q: decode metadata: %w", childID, err)
+	}
+	if meta.ID != childID {
+		return nil, fmt.Errorf("delegate continuation %q: metadata id is %q", childID, meta.ID)
+	}
+	if meta.ParentID != runtime.ParentChildID {
+		return nil, fmt.Errorf(
+			"delegate continuation %q belongs to parent %q, not current parent %q",
+			childID,
+			meta.ParentID,
+			runtime.ParentChildID,
+		)
+	}
+	switch meta.Status {
+	case session.ChildStatusCompleted, session.ChildStatusFailed, session.ChildStatusCanceled, session.ChildStatusAbandoned:
+	default:
+		return nil, fmt.Errorf("delegate continuation %q is not terminal (status %q)", childID, meta.Status)
+	}
+	if meta.RuntimeFingerprint == "" {
+		return nil, continuationIncompatibleError(childID, "saved runtime fingerprint is unavailable")
+	}
+	state, err := session.Load(dir)
+	if err != nil {
+		return nil, fmt.Errorf("delegate continuation %q: load resumable state: %w", childID, err)
+	}
+	if err := llm.ValidateTranscript(state.Messages); err != nil {
+		return nil, fmt.Errorf("delegate continuation %q: invalid saved transcript: %w", childID, err)
+	}
+	if state.Provider != meta.Provider || state.Model != meta.Model || state.Agent != meta.Agent {
+		return nil, continuationIncompatibleError(childID, "saved state identity does not match child metadata")
+	}
+	if state.ProxySessionID == "" || state.CacheAffinityID == "" {
+		return nil, continuationIncompatibleError(childID, "saved runtime identifiers are unavailable")
+	}
+	if state.ResponseState != nil &&
+		(state.ResponseState.PreviousResponseID == "" || state.ResponseState.AnchorMessages < 0 || state.ResponseState.AnchorMessages > len(state.Messages)) {
+		return nil, continuationIncompatibleError(childID, "saved provider continuation anchor is invalid")
+	}
+	return &continuationSource{meta: meta, state: state}, nil
+}
+
+func validateContinuationChildID(childID string) error {
+	if childID == "" {
+		return fmt.Errorf("continue_child_id must not be empty")
+	}
+	for _, r := range childID {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			continue
+		}
+		return fmt.Errorf("continue_child_id %q contains unsupported characters", childID)
+	}
+	return nil
+}
+
+func continuationIncompatibleError(childID, reason string) error {
+	return fmt.Errorf("delegate continuation %q is incompatible: %s; start a fresh delegate", childID, reason)
+}
+
+func continuationPrompt(childID, task string) string {
+	return fmt.Sprintf(
+		"[delegate continuation from %s]\nContinue from the retained transcript and state. Re-check current repository state before relying on earlier observations, then address:\n\n%s",
+		childID,
+		strings.TrimSpace(task),
+	)
+}
+
+func estimateContinuationContext(child *agent.Agent, messages []llm.Message, prompt, requestContext string) agent.ContextEstimate {
+	if requestContext != "" {
+		prompt += "\n\n" + requestContext
+	}
+	probe := append([]llm.Message(nil), messages...)
+	probe = append(probe, llm.Message{
+		Role:   llm.RoleUser,
+		Origin: llm.MessageOriginPrompt,
+		Content: []llm.ContentBlock{{
+			Kind: llm.BlockText,
+			Text: prompt,
+		}},
+	})
+	child.SetTranscript(probe)
+	estimate := child.EstimateContext()
+	child.SetTranscript(messages)
+	return estimate
+}
+
+func addDelegateUsage(a, b llm.Usage) llm.Usage {
+	return llm.Usage{
+		InputTokens:        a.InputTokens + b.InputTokens,
+		OutputTokens:       a.OutputTokens + b.OutputTokens,
+		CacheReadTokens:    a.CacheReadTokens + b.CacheReadTokens,
+		CacheWriteTokens:   a.CacheWriteTokens + b.CacheWriteTokens,
+		CacheWrite1hTokens: a.CacheWrite1hTokens + b.CacheWrite1hTokens,
+		ReasoningTokens:    a.ReasoningTokens + b.ReasoningTokens,
+		CostUSD:            a.CostUSD + b.CostUSD,
+		CostKnown:          aggregateDelegateCostKnown(a, b),
+	}
+}
+
+func aggregateDelegateCostKnown(a, b llm.Usage) bool {
+	switch {
+	case delegateUsageHasTokens(a) && !a.CostKnown:
+		return false
+	case delegateUsageHasTokens(b) && !b.CostKnown:
+		return false
+	default:
+		return a.CostKnown || b.CostKnown
+	}
+}
+
+func delegateUsageHasTokens(usage llm.Usage) bool {
+	return usage.InputTokens != 0 ||
+		usage.OutputTokens != 0 ||
+		usage.CacheReadTokens != 0 ||
+		usage.CacheWriteTokens != 0 ||
+		usage.CacheWrite1hTokens != 0 ||
+		usage.ReasoningTokens != 0
+}
+
+func continuationContextError(childID string, estimate agent.ContextEstimate) error {
+	if estimate.Window <= 0 {
+		return continuationIncompatibleError(childID, "current context window is unavailable")
+	}
+	percent := (estimate.Total*100 + estimate.Window - 1) / estimate.Window
+	return continuationIncompatibleError(
+		childID,
+		fmt.Sprintf(
+			"retained context is about %d%% of the window, above the %d%% continuation limit",
+			percent,
+			continuationContextPercent,
+		),
+	)
+}
+
+func continuationCheckpointContextError(childID string, estimate agent.ContextEstimate) error {
+	if estimate.Window <= 0 {
+		return continuationIncompatibleError(childID, "current context window is unavailable")
+	}
+	percent := (estimate.Total*100 + estimate.Window - 1) / estimate.Window
+	return continuationIncompatibleError(
+		childID,
+		fmt.Sprintf(
+			"compact checkpoint is about %d%% of the window, above the %d%% continuation limit",
+			percent,
+			continuationContextPercent,
+		),
+	)
+}
+
+func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunRequest, maxTurns int, toolNames []string) (string, error) {
+	toolRegistry, err := launch.Tools.Subset(toolNames)
+	if err != nil {
+		return "", fmt.Errorf("delegate runtime fingerprint: %w", err)
+	}
+	providerImplementation := ""
+	if launch.Provider != nil {
+		providerImplementation = launch.Provider.Name()
+	}
+	contextWindow := launch.ContextWindow
+	if contextWindow <= 0 {
+		contextWindow = launch.Registry.ContextWindow(launch.Model)
+	}
+	fingerprint := struct {
+		Version                     int                   `json:"version"`
+		Provider                    string                `json:"provider"`
+		ProviderImplementation      string                `json:"provider_implementation"`
+		Model                       string                `json:"model"`
+		Agent                       string                `json:"agent"`
+		RequestedAgent              string                `json:"requested_agent,omitempty"`
+		Mode                        string                `json:"mode,omitempty"`
+		MaxTurns                    int                   `json:"max_turns"`
+		Depth                       int                   `json:"depth"`
+		MaxDepth                    int                   `json:"max_depth"`
+		ContextWindow               int                   `json:"context_window"`
+		MaxOutputTokens             int                   `json:"max_output_tokens"`
+		ModelOutputLimit            int                   `json:"model_output_limit"`
+		MaxPromptTokens             int                   `json:"max_prompt_tokens"`
+		MaxPromptCostUSD            float64               `json:"max_prompt_cost_usd"`
+		Reasoning                   llm.ReasoningConfig   `json:"reasoning"`
+		ServerTools                 []llm.ServerTool      `json:"server_tools,omitempty"`
+		ResponsesStateful           bool                  `json:"responses_stateful"`
+		ManagedContinuationStateful bool                  `json:"managed_continuation_stateful"`
+		DisableManagedContinuation  bool                  `json:"disable_managed_continuation"`
+		RetentionPolicy             agent.RetentionPolicy `json:"retention_policy"`
+		System                      string                `json:"system"`
+		Tools                       []llm.ToolSchema      `json:"tools"`
+		TurnMilestones              []agent.TurnMilestone `json:"turn_milestones,omitempty"`
+		Compaction                  struct {
+			KeepTurns          int  `json:"keep_turns"`
+			KeepTokens         int  `json:"keep_tokens"`
+			TriggerPercent     int  `json:"trigger_percent"`
+			TargetPercent      int  `json:"target_percent"`
+			Disabled           bool `json:"disabled"`
+			SummaryMaxTokens   int  `json:"summary_max_tokens"`
+			ToolResultMaxBytes int  `json:"tool_result_max_bytes"`
+		} `json:"compaction"`
+	}{
+		Version:                     continuationFingerprintVersion,
+		Provider:                    launch.ProviderName,
+		ProviderImplementation:      providerImplementation,
+		Model:                       launch.Model,
+		Agent:                       launch.Agent,
+		RequestedAgent:              req.Agent,
+		Mode:                        req.Mode,
+		MaxTurns:                    maxTurns,
+		Depth:                       runtime.Depth + 1,
+		MaxDepth:                    r.maxDepth(),
+		ContextWindow:               contextWindow,
+		MaxOutputTokens:             launch.MaxOutputTokens,
+		ModelOutputLimit:            launch.Registry.OutputLimit(launch.Model),
+		MaxPromptTokens:             runtime.MaxPromptTokens,
+		MaxPromptCostUSD:            runtime.MaxPromptCostUSD,
+		Reasoning:                   launch.Reasoning,
+		ServerTools:                 slices.Clone(launch.ServerTools),
+		ResponsesStateful:           launch.ResponsesStateful,
+		ManagedContinuationStateful: launch.ManagedContinuationStateful,
+		DisableManagedContinuation:  launch.DisableManagedContinuation,
+		RetentionPolicy:             r.opts.RetentionPolicy,
+		System:                      launch.System,
+		Tools:                       toolRegistry.Specs(),
+	}
+	if req.Mode == ModeImplementation {
+		fingerprint.TurnMilestones = implementationTurnMilestones(maxTurns)
+	}
+	fingerprint.Compaction.KeepTurns = r.opts.CompactKeepTurns
+	fingerprint.Compaction.KeepTokens = r.opts.CompactKeepTokens
+	fingerprint.Compaction.TriggerPercent = r.opts.CompactTriggerPercent
+	fingerprint.Compaction.TargetPercent = r.opts.CompactTargetPercent
+	fingerprint.Compaction.Disabled = r.opts.DisableAutoCompaction
+	fingerprint.Compaction.SummaryMaxTokens = r.opts.CompactSummaryMaxTokens
+	fingerprint.Compaction.ToolResultMaxBytes = r.opts.CompactToolResultMaxBytes
+	data, err := json.Marshal(fingerprint)
+	if err != nil {
+		return "", fmt.Errorf("delegate runtime fingerprint: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func normalizeMode(mode string) (string, error) {
+	mode = strings.TrimSpace(mode)
+	switch mode {
+	case "", ModeImplementation:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("mode must be %q when provided", ModeImplementation)
+	}
+}
+
+func (r *Runner) buildChildTools(parent Runtime, launch Launch, childID string, todos *todo.Store, names []string, cacheAffinityID string) (*tools.Registry, error) {
 	if r.childToolBuilder != nil {
 		return r.childToolBuilder(parent, launch, childID, todos, names)
 	}
-	return r.childTools(parent, launch, childID, todos, names)
+	return r.childToolsWithCacheAffinity(parent, launch, childID, cacheAffinityID, todos, names)
 }
 
 func (r *Runner) childTools(parent Runtime, launch Launch, childID string, todos *todo.Store, names []string) (*tools.Registry, error) {
+	return r.childToolsWithCacheAffinity(parent, launch, childID, childCacheAffinityID(parent.CacheAffinityID, childID), todos, names)
+}
+
+func (r *Runner) childToolsWithCacheAffinity(parent Runtime, launch Launch, childID, cacheAffinityID string, todos *todo.Store, names []string) (*tools.Registry, error) {
 	if names == nil {
 		names = launch.Tools.Names()
 	}
@@ -550,7 +1190,7 @@ func (r *Runner) childTools(parent Runtime, launch Launch, childID string, todos
 		Agent:             launch.Agent,
 		ToolNames:         names,
 		SessionPath:       parent.SessionPath,
-		CacheAffinityID:   childCacheAffinityID(parent.CacheAffinityID, childID),
+		CacheAffinityID:   cacheAffinityID,
 		ParentChildID:     childID,
 		Depth:             parent.Depth + 1,
 		MaxPromptTokens:   parent.MaxPromptTokens,
@@ -569,16 +1209,6 @@ func (r *Runner) childTools(parent Runtime, launch Launch, childID string, todos
 	return childTools, nil
 }
 
-func (r *Runner) checkDepth() error {
-	if r == nil {
-		return fmt.Errorf("delegate runner is not initialized")
-	}
-	if r.snapshot == nil {
-		return fmt.Errorf("delegate runtime is not initialized")
-	}
-	return r.validateDepth(r.snapshot())
-}
-
 func (r *Runner) validateDepth(runtime Runtime) error {
 	maxDepth := r.maxDepth()
 	if runtime.Depth >= maxDepth {
@@ -595,10 +1225,7 @@ func (r *Runner) maxDepth() int {
 }
 
 func (r *Runner) maxTurns(requested *int) (int, error) {
-	cap := r.opts.MaxTurns
-	if cap <= 0 {
-		cap = DefaultMaxTurns
-	}
+	cap := r.configuredMaxTurns()
 	if requested == nil {
 		return cap, nil
 	}
@@ -606,9 +1233,16 @@ func (r *Runner) maxTurns(requested *int) (int, error) {
 		return 0, fmt.Errorf("max_turns must be positive")
 	}
 	if *requested > cap {
-		return cap, nil
+		return 0, fmt.Errorf("max_turns %d exceeds configured maximum %d", *requested, cap)
 	}
 	return *requested, nil
+}
+
+func (r *Runner) configuredMaxTurns() int {
+	if r == nil || r.opts.MaxTurns <= 0 {
+		return DefaultMaxTurns
+	}
+	return r.opts.MaxTurns
 }
 
 func (r *Runner) now() time.Time {
@@ -674,6 +1308,69 @@ func childSystemPrompt(system string) string {
 		return child
 	}
 	return strings.TrimSpace(system) + "\n\n" + child
+}
+
+func childBudgetSystemPrompt(system string, maxTurns int) string {
+	return fmt.Sprintf(
+		"%s\n\n[delegate budget]\nYour tool-enabled loop budget is exactly %d turns. If you exhaust it with another tool call, Harness may issue one additional tools-disabled wind-down request. Harness records why the loop stops; finish substantive work and verification within the stated budget.",
+		strings.TrimSpace(system),
+		maxTurns,
+	)
+}
+
+func withoutChildBudget(system string) string {
+	const marker = "\n\n[delegate budget]\n"
+	if index := strings.LastIndex(system, marker); index >= 0 {
+		return strings.TrimSpace(system[:index])
+	}
+	return strings.TrimSpace(system)
+}
+
+func implementationTurnMilestones(maxTurns int) []agent.TurnMilestone {
+	quarter := implementationMilestoneTurn(maxTurns, 1)
+	half := implementationMilestoneTurn(maxTurns, 2)
+	threeQuarters := implementationMilestoneTurn(maxTurns, 3)
+	return []agent.TurnMilestone{
+		{
+			AfterTurns: quarter,
+			Message: fmt.Sprintf(
+				"[implementation milestone: 25%% after turn %d] The orientation budget has elapsed. Finish orientation now and commit to a concrete implementation path; if blocked, state the specific blocker and evidence.",
+				quarter,
+			),
+		},
+		{
+			AfterTurns: half,
+			Message: fmt.Sprintf(
+				"[implementation milestone: 50%% after turn %d] Substantive implementation should now be underway. Stop broad exploration and make the scoped changes unless a concrete blocker prevents it.",
+				half,
+			),
+		},
+		{
+			AfterTurns: threeQuarters,
+			Message: fmt.Sprintf(
+				"[implementation milestone: 75%% after turn %d] Prioritize finishing and verification, avoid new scope, and prepare an exact handoff with changed paths, checks run, and any remainder. Commit only when commit ownership was explicitly delegated.",
+				threeQuarters,
+			),
+		},
+	}
+}
+
+func implementationMilestoneTurn(maxTurns, quarter int) int {
+	if maxTurns <= 0 {
+		maxTurns = DefaultMaxTurns
+	}
+	return (maxTurns/4)*quarter + ((maxTurns%4)*quarter+3)/4
+}
+
+func implementationSystemPrompt(system string, maxTurns int) string {
+	milestones := implementationTurnMilestones(maxTurns)
+	return fmt.Sprintf(
+		"%s\n\n[implementation mode]\nThis is scoped mutating implementation work. By the end of turn %d (25%%), finish orientation and choose the concrete path. By the end of turn %d (50%%), perform substantive implementation unless concretely blocked. By the end of turn %d (75%%), prioritize completion, verification, and an exact handoff. Harness reinforces each boundary with an internal steering message.",
+		strings.TrimSpace(system),
+		milestones[0].AfterTurns,
+		milestones[1].AfterTurns,
+		milestones[2].AfterTurns,
+	)
 }
 
 func withoutTool(names []string, excluded string) []string {
@@ -755,7 +1452,10 @@ func normalizeAgentDescription(description string) string {
 	return strings.TrimSpace(description[:keep]) + "..."
 }
 
-func schema(agents []AgentCandidate) json.RawMessage {
+func schema(agents []AgentCandidate, maxTurns int) json.RawMessage {
+	if maxTurns <= 0 {
+		maxTurns = DefaultMaxTurns
+	}
 	agentDescription := "Agent; defaults to the current one."
 	agentNames := make([]string, 0, len(agents))
 	if len(agents) > 0 {
@@ -783,14 +1483,33 @@ func schema(agents []AgentCandidate) json.RawMessage {
 			"description": "Self-contained child prompt: objective, scope, constraints, report, and verification.",
 		},
 		"agent": agent,
+		"mode": map[string]any{
+			"type":        "string",
+			"enum":        []string{ModeImplementation},
+			"description": "Optional implementation mode for mutating work; adds deterministic 25%/50%/75% milestone steering. Omit for exploration and review.",
+		},
 		"max_turns": map[string]any{
 			"type":        "integer",
 			"minimum":     1,
-			"description": "Optional turn cap; clamped to the configured maximum.",
+			"maximum":     maxTurns,
+			"description": fmt.Sprintf("Optional turn budget; defaults to and cannot exceed the configured maximum of %d.", maxTurns),
+		},
+		"continue_child_id": map[string]any{
+			"type":        "string",
+			"description": "Optional terminal sibling child ID to continue in a fresh child. Harness requires the same parent, agent, mode, turn budget, and runtime fingerprint plus resumable state below the context-pressure limit.",
 		},
 		"background": map[string]any{
 			"type":        "boolean",
 			"description": "Only independent, non-overlapping work while parent work remains; Harness joins automatically, so do not poll or duplicate.",
+		},
+		"resource_key": map[string]any{
+			"type":        "string",
+			"description": "Background-only lease resource. Defaults to the canonical process cwd.",
+		},
+		"access": map[string]any{
+			"type":        "string",
+			"enum":        []string{tools.BackgroundAccessReadOnly, tools.BackgroundAccessExclusive},
+			"description": "Background-only lease access. Defaults to exclusive; declare read_only only when the child cannot mutate the resource.",
 		},
 	}
 	body := map[string]any{
@@ -825,23 +1544,50 @@ func nextChildID(kind string) string {
 	return fmt.Sprintf("%s_%s_%06d", prefix, time.Now().UTC().Format("20060102T150405Z"), childSeq.Add(1))
 }
 
-func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, req RunRequest, status string, created, updated time.Time, usage agent.PromptUsage, runErr error, messageCount int) (string, error) {
+func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, req RunRequest, effectiveMaxTurns int, runtimeFingerprint, status string, created, updated time.Time, usage agent.PromptUsage, runErr error, messageCount int) (string, error) {
 	if parent.SessionPath == "" {
 		return "", nil
 	}
 	meta := session.ChildMeta{
-		ID:           childID,
-		ParentID:     parent.ParentChildID,
-		Kind:         req.Kind,
-		Agent:        launch.Agent,
-		Provider:     launch.ProviderName,
-		Model:        launch.Model,
-		Status:       status,
-		TaskPreview:  preview(req.Task, 240),
-		Created:      created,
-		Updated:      updated,
-		Usage:        usage.Usage,
-		MessageCount: messageCount,
+		ID:                 childID,
+		ParentID:           parent.ParentChildID,
+		Kind:               req.Kind,
+		Mode:               req.Mode,
+		ContinuedFrom:      req.ContinueChildID,
+		ContinuationMode:   req.continuationMode,
+		ContinuationBefore: req.continuationContextBefore,
+		ContinuationAfter:  req.continuationContextAfter,
+		ContinuationWindow: req.continuationContextWindow,
+		RuntimeFingerprint: runtimeFingerprint,
+		Agent:              launch.Agent,
+		RequestedAgent:     req.Agent,
+		ResourceKey:        req.ResourceKey,
+		Access:             req.Access,
+		Provider:           launch.ProviderName,
+		Model:              launch.Model,
+		Status:             status,
+		TaskPreview:        preview(req.Task, 240),
+		Created:            created,
+		Updated:            updated,
+		Usage:              usage.Usage,
+		MessageCount:       messageCount,
+		EffectiveMaxTurns:  effectiveMaxTurns,
+		TurnsUsed:          usage.Turns,
+		TerminationReason:  string(usage.TerminationReason),
+	}
+	if req.MaxTurns != nil && !req.maxTurnsInherited {
+		requested := *req.MaxTurns
+		meta.RequestedMaxTurns = &requested
+	}
+	if meta.TerminationReason == "" && status != session.ChildStatusRunning {
+		switch {
+		case status == session.ChildStatusCompleted:
+			meta.TerminationReason = string(agent.TerminationModelCompleted)
+		case errors.Is(runErr, context.Canceled), errors.Is(runErr, context.DeadlineExceeded):
+			meta.TerminationReason = string(agent.TerminationCancelled)
+		default:
+			meta.TerminationReason = string(agent.TerminationError)
+		}
 	}
 	if runErr != nil {
 		meta.Error = runErr.Error()
@@ -849,12 +1595,20 @@ func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, re
 	return session.SaveChildMeta(parent.SessionPath, meta)
 }
 
-func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string, child *agent.Agent, todos *todo.Store, usage agent.PromptUsage, created, updated time.Time) error {
+func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string, child *agent.Agent, todos *todo.Store, usage agent.PromptUsage, created, updated time.Time, ensureTree func([]llm.Message) (*session.Tree, error)) error {
 	if parent.SessionPath == "" {
 		return nil
 	}
 	childDir := session.ChildSessionDir(parent.SessionPath, childID)
-	return (session.Session{
+	tree, err := ensureTree(child.Transcript())
+	if err != nil {
+		return err
+	}
+	return r.childSessionState(launch, child, todos, usage, created, updated, tree).SaveConsolidated(childDir)
+}
+
+func (r *Runner) childSessionState(launch Launch, child *agent.Agent, todos *todo.Store, usage agent.PromptUsage, created, updated time.Time, tree *session.Tree) session.Session {
+	return session.Session{
 		Version:         session.Version,
 		Provider:        launch.ProviderName,
 		Model:           launch.Model,
@@ -869,7 +1623,8 @@ func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string,
 		ResponseState:   child.ResponseState(),
 		Todos:           todos.Snapshot(),
 		Usage:           session.UsageTotals{Usage: usage.Usage, CostUSD: usage.Usage.CostUSD},
-	}).Save(childDir)
+		Tree:            tree,
+	}
 }
 
 func preview(s string, limit int) string {
@@ -881,19 +1636,22 @@ func preview(s string, limit int) string {
 }
 
 type childSink struct {
-	usage       agent.PromptUsage
-	progress    *Progress // compatibility live progress; may be nil
-	activity    *ActivityRegistration
-	assistant   *inlineLineAccumulator
-	reasoning   bool
-	sessionDir  string
-	todos       *todo.Store
-	todoContext bool
-	pending     map[string]pendingChildTool
-	turn        int
-	attempt     int
-	appendMu    sync.Mutex
-	appendErr   error
+	usage                agent.PromptUsage
+	preflightMaintenance llm.Usage
+	progress             *Progress // compatibility live progress; may be nil
+	activity             *ActivityRegistration
+	assistant            *inlineLineAccumulator
+	reasoning            bool
+	sessionDir           string
+	todos                *todo.Store
+	todoContext          bool
+	pending              map[string]pendingChildTool
+	turn                 int
+	attempt              int
+	appendMu             sync.Mutex
+	appendErr            error
+	checkpoint           func(agent.PromptCheckpoint) error
+	messageCount         func() int
 }
 
 type pendingChildTool struct {
@@ -1182,6 +1940,60 @@ func (s *childSink) MaintenanceComplete(usage agent.MaintenanceUsage) {
 	s.append(session.Event{Type: session.EventMaintenanceUsage, Prompt: 1, Purpose: usage.Purpose, Usage: &u})
 }
 
+func (s *childSink) addPreflightMaintenance(purpose string, usage llm.Usage) {
+	if usage == (llm.Usage{}) {
+		return
+	}
+	s.preflightMaintenance = addDelegateUsage(s.preflightMaintenance, usage)
+	s.usage.Usage = addDelegateUsage(s.usage.Usage, usage)
+	s.usage.Maintenance = addDelegateUsage(s.usage.Maintenance, usage)
+	s.MaintenanceComplete(agent.MaintenanceUsage{Purpose: purpose, Usage: usage})
+}
+
+func (s *childSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
+	if s == nil || s.checkpoint == nil {
+		return
+	}
+	checkpoint.Usage.Usage = addDelegateUsage(checkpoint.Usage.Usage, s.preflightMaintenance)
+	checkpoint.Usage.Maintenance = addDelegateUsage(checkpoint.Usage.Maintenance, s.preflightMaintenance)
+	started := time.Now()
+	if err := s.checkpoint(checkpoint); err != nil {
+		s.retainAppendError(err)
+		return
+	}
+	messageCount := 0
+	if s.messageCount != nil {
+		messageCount = s.messageCount()
+	}
+	s.append(session.Event{
+		Type:         session.EventCheckpoint,
+		Prompt:       1,
+		Turn:         checkpoint.Turn,
+		Purpose:      string(checkpoint.Kind),
+		DurationMS:   time.Since(started).Milliseconds(),
+		MessageCount: messageCount,
+	})
+}
+
+func (s *childSink) RetentionApplied(event agent.RetentionEvent) {
+	s.append(session.Event{
+		Type:   session.EventRetention,
+		Prompt: 1,
+		Turn:   s.turn + 1,
+		Retention: &session.RetentionSnapshot{
+			Policy:              event.Policy,
+			Trigger:             event.Trigger,
+			BlocksTrimmed:       event.BlocksTrimmed,
+			BytesBefore:         event.BytesBefore,
+			BytesAfter:          event.BytesAfter,
+			ContextTokensBefore: event.ContextTokensBefore,
+			ContextTokensAfter:  event.ContextTokensAfter,
+			ResponseStateReset:  event.ResponseStateReset,
+			NextRequestStateful: event.NextRequestStateful,
+		},
+	})
+}
+
 func (s *childSink) RequestContext() []string {
 	if s.todos == nil || !s.todoContext {
 		return nil
@@ -1191,11 +2003,18 @@ func (s *childSink) RequestContext() []string {
 
 func (s *childSink) PromptComplete(usage agent.PromptUsage) {
 	s.flushDisplay()
+	usage.Usage = addDelegateUsage(usage.Usage, s.preflightMaintenance)
+	usage.Maintenance = addDelegateUsage(usage.Maintenance, s.preflightMaintenance)
 	s.usage = usage
 	u := usage.Usage
 	s.activity.MarkUsage(u)
 	s.activity.MarkActivity("finishing")
-	s.append(session.Event{Type: session.EventPromptUsage, Prompt: 1, Usage: &u})
+	s.append(session.Event{
+		Type:              session.EventPromptUsage,
+		Prompt:            1,
+		Usage:             &u,
+		TerminationReason: string(usage.TerminationReason),
+	})
 }
 
 func (s *childSink) flushDisplay() {
@@ -1212,6 +2031,17 @@ func (s *childSink) append(ev session.Event) {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
 	if err := session.AppendEvent(s.sessionDir, ev); err != nil && s.appendErr == nil {
+		s.appendErr = err
+	}
+}
+
+func (s *childSink) retainAppendError(err error) {
+	if s == nil || err == nil {
+		return
+	}
+	s.appendMu.Lock()
+	defer s.appendMu.Unlock()
+	if s.appendErr == nil {
 		s.appendErr = err
 	}
 }

@@ -92,8 +92,12 @@ func TestGrepBackgroundStartsJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out != "background job bg_test started" {
+	if !strings.HasPrefix(out, "background job bg_test started (resource: ") ||
+		!strings.HasSuffix(out, ", access: read_only)") {
 		t.Fatalf("start output = %q", out)
+	}
+	if starter.req.ResourceKey == "" || starter.req.Access != BackgroundAccessReadOnly {
+		t.Fatalf("job lease = %q/%q, want canonical cwd/read_only", starter.req.ResourceKey, starter.req.Access)
 	}
 	if starter.req.Kind != "grep" {
 		t.Fatalf("job kind = %q, want grep", starter.req.Kind)
@@ -231,8 +235,12 @@ func TestRipgrepBackgroundStartsJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out != "background job bg_test started" {
+	if !strings.HasPrefix(out, "background job bg_test started (resource: ") ||
+		!strings.HasSuffix(out, ", access: read_only)") {
 		t.Fatalf("start output = %q", out)
+	}
+	if starter.req.ResourceKey == "" || starter.req.Access != BackgroundAccessReadOnly {
+		t.Fatalf("job lease = %q/%q, want canonical cwd/read_only", starter.req.ResourceKey, starter.req.Access)
 	}
 	if starter.req.Kind != "rg" {
 		t.Fatalf("job kind = %q, want rg", starter.req.Kind)

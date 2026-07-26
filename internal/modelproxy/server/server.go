@@ -973,6 +973,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	req.Request.Model = model
 	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
 	req.Request.Reasoning = h.reasoningForTarget(target, req.ReasoningProfile, req.Request.Reasoning)
+	disableContinuation := req.Request.DisableContinuation
 	sessionKey, providerRequest := prepareProviderRequest(req.Request)
 	req.Request = providerRequest
 	if requestBudget, ok, message := h.checkCostBudget(cw, r, target, req.Request, diagnosticFor(llm.APIErrorStageProxyPrepare)); !ok {
@@ -994,8 +995,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiType = opts.Provider
-	stateful := providerContinuationStateful(target.pc)
+	stateful := providerContinuationStateful(target.pc) && !disableContinuation
 	cacheKey := h.continuationKey(target.baseTargetID, sessionKey)
+	if disableContinuation {
+		h.resetContinuation(cacheKey)
+	}
 	fullRequest := req.Request
 	fullRequest.Messages = append([]llm.Message(nil), req.Request.Messages...)
 	provider, err := h.streamProvider(opts, target.baseTargetID, sessionKey)
@@ -2119,6 +2123,7 @@ func prepareProviderRequest(req llm.Request) (sessionKey string, providerReq llm
 	cacheAffinityID := strings.TrimSpace(req.CacheAffinityID)
 	providerReq.ProxySessionID = ""
 	providerReq.CacheAffinityID = ""
+	providerReq.DisableContinuation = false
 	if cacheAffinityID != "" {
 		providerReq.PromptCacheKey = providerPromptCacheKey(cacheAffinityID)
 	}
@@ -2332,17 +2337,19 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				}
 			}
 			target := protocol.Target{
-				ID:              id,
-				Aliases:         aliases,
-				DisplayName:     entry.Name,
-				ProviderLabel:   pc.Name,
-				ModelLabel:      entry.Name,
-				ContextWindow:   entry.ContextWindow,
-				OutputLimit:     entry.OutputLimit,
-				InputModalities: append([]string(nil), entry.InputModalities...),
-				ServerTools:     targetServerTools(pc, entry),
-				Price:           price,
-				Reasoning:       targetReasoningSupported(entry),
+				ID:                   id,
+				Aliases:              aliases,
+				DisplayName:          entry.Name,
+				ProviderLabel:        pc.Name,
+				ModelLabel:           entry.Name,
+				ContextWindow:        entry.ContextWindow,
+				OutputLimit:          entry.OutputLimit,
+				InputModalities:      append([]string(nil), entry.InputModalities...),
+				ServerTools:          targetServerTools(pc, entry),
+				APIType:              pc.APIType,
+				ContinuationStateful: providerContinuationStateful(pc),
+				Price:                price,
+				Reasoning:            targetReasoningSupported(entry),
 			}
 			out.Targets = append(out.Targets, target)
 			rt := resolvedTarget{targetID: id, baseTargetID: id, pc: pc, entry: entry}

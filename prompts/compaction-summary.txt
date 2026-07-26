@@ -1,8 +1,11 @@
-Compact this coding session so the assistant can continue without re-deriving context. Be concise, specific, and factual. A deterministic file-activity index may be attached as metadata; use it as a supplement, but preserve semantic file states in Files touched.
+Compact this session for accurate continuation. Typed `read_files`/`modified_files` are authoritative for recognized file activity; omit read-only inspected files. Active todos persist separately and are re-injected; do not repeat them.
 
-Use this structure:
-- Task: current goal.
-- Decisions: choices and rationale.
-- Files touched: one `path: state` line per created, changed, deleted, or inspected file, including unfinished intent.
-- Key facts: relevant code, environment, and constraints.
-- Open TODOs: every pending or in-progress item, verbatim when previously stated; omit none.
+Return:
+- Task: goal, acceptance criteria, active work.
+- Decisions: still-constraining choices.
+- Changed files: semantic state or unfinished intent for meaningful created/modified/deleted files.
+- Work state: base/head/worktrees, blockers, gates, verification, completed-work receipts.
+- Key facts: relevant code, environment, constraints.
+- Open work: unresolved intent, blockers, or gates absent from typed todos.
+
+Be concise and factual. Do not invent.

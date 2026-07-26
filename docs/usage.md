@@ -28,10 +28,11 @@ Use `harness --models` to print the targets and whether they support portable
 reasoning profiles. Use `harness --agents` to print the resolved built-in and
 config-defined agents. Both commands exit before creating a session.
 
-`--models --format json` also shows each target's `server_tools`, price, and
-variant relationship (`base_target_id` / `variant`). When a target advertises
-`web_search`, `-web-search auto` lets harness declare the provider-hosted web
-search tool for model calls. The default is `off`.
+`--models --format json` also shows each target's `api_type`,
+`continuation_stateful`, `server_tools`, price, and variant relationship
+(`base_target_id` / `variant`). When a target advertises `web_search`,
+`-web-search auto` lets harness declare the provider-hosted web search tool for
+model calls. The default is `off`.
 
 ## Interactive Initial Prompt
 
@@ -114,6 +115,7 @@ interrupted.
 -reasoning <profile> reasoning profile: default, none, minimal, low, medium, high, xhigh, or max
 -reasoning-summary <mode> reasoning summary for Responses API: auto, concise, detailed, or none
 -responses-stateful   use Responses API previous_response_id continuation when supported (default true)
+-retention-policy <mode>   live transcript retention: auto, age, pressure, or disabled (default auto)
 -no-steer         disable in-prompt steering: queue input for the next prompt instead of injecting it before the next turn (default off; see "Steering")
 -image-detail <level>   default image detail: auto, low, high, or original
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
@@ -293,7 +295,8 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
 - Context-efficiency knobs are config-file-only except where noted:
   `agents_md_warn_bytes`, `compact_keep_turns`, `compact_keep_tokens`,
   `compact_auto_enabled`, `compact_trigger_percent`,
-  `compact_target_percent`, `compact_summary_max_tokens`, and
+  `compact_target_percent`, `compact_idle_after_seconds`,
+  `compact_idle_trigger_percent`, `compact_summary_max_tokens`, and
   `compact_tool_result_max_bytes`.
   Tool-result truncation is controlled by config `tool_result_max_bytes` /
   `tool_result_max_lines` or env `HARNESS_TOOL_RESULT_MAX_BYTES` /
@@ -303,7 +306,8 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   `HARNESS_*` env vars. `read_file` defaults to 500 lines and a 32 KB result cap;
   configure `read_file_default_limit`, `read_file_result_max_bytes`, and
   `read_file_result_max_lines`, or matching `HARNESS_*` env vars. The delegate
-  tool also has config-file-only `delegate_max_turns` (per-child turn cap)
+  tool also has config-file-only `delegate_max_turns` (maximum per-child
+  tool-enabled loop budget)
   and `delegate_max_depth` (recursive depth cap, root depth `0`).
   `delegate_output` / `HARNESS_DELEGATE_OUTPUT` / `-delegate-output` accepts
   `status` (the default one-row TTY display), `off` (no delegate-specific UI),
@@ -386,10 +390,19 @@ Responses continuation is on by default for proxy providers that report both
 `-responses-stateful=false`. If a provider rejects stored Responses requests,
 harness disables stateful continuation for that agent and retries the request
 stateless.
+
+Live transcript retention defaults to `auto`, which uses pressure-triggered
+epochs for both stateful and stateless providers. Experiments can override this
+with `retention_policy`, `HARNESS_RETENTION_POLICY`, or `-retention-policy`;
+accepted values are `auto`, `age`, `pressure`, and `disabled`. Disabling live
+retention does not disable compaction or provider-overflow recovery.
+
 The model proxy also content-addresses the exact provider-neutral transcript
 prefix represented by each stored response. It reuses `previous_response_id`
 only when the incoming prefix matches; retention, compaction, branch changes,
 or any other prefix rewrite cause a full resend that establishes a fresh anchor.
+`-responses-stateful=false` marks each proxy request stateless and clears any
+stored continuation for that proxy session before forwarding complete history.
 Responses provider configs may also set `responses_websocket:true` to have the
 model proxy use the Responses WebSocket transport instead of HTTP SSE. The proxy
 defaults this on for `codex_oauth` Responses providers and preserves an explicit
@@ -867,7 +880,8 @@ and are unavailable in one-shot mode.
 
 - A session path is a directory. `tree.ndjson` is the canonical append-only
   conversation tree; `state.json` is compact mutable state containing the active
-  leaf and runtime settings; `raw.ndjson` is the chronological replay log.
+  leaf and runtime settings; `active-turn.json` is a transient atomic recovery
+  record for the current model/tool boundary; `raw.ndjson` is the chronological replay log.
   `compactions/` stores raw messages removed from active context, `children/`
   stores child-agent transcripts and metadata, and `artifacts/tool-results/`
   stores full outputs omitted from model context.
@@ -875,10 +889,23 @@ and are unavailable in one-shot mode.
   its active-leaf pointer. An interrupted final tree record is ignored on load;
   malformed earlier records are errors. Auto-save uses
   `~/.local/state/harness/sessions/<timestamp>`, honoring `$XDG_STATE_HOME`.
+- Harness checkpoints root and child runs before provider requests, before tool
+  dispatch, and after each validated closed turn. A crash during tool execution
+  recovers that open call as an explicit `interrupted` error instead of
+  automatically executing it again. Closed-turn checkpoints include current
+  todos, plans, usage, cache/proxy IDs, and a safe provider continuation anchor.
 - `-session <dir>` chooses an explicit session directory. `-resume <dir>` loads
-  its active tree path and continues. Combining distinct `-resume <source>` and
-  `-session <destination>` clones the active branch into the destination with
-  fresh usage accounting. `/clear` rotates to a fresh directory.
+  its active tree path and continues, applying a newer active-turn recovery
+  record when present and printing the recovered boundary. Child runs still
+  marked `running` from the prior process become `abandoned`; their durable
+  checkpoint remains eligible for compatible child-ID continuation. Continued
+  children record whether they restored retained history directly or first
+  built a compact checkpoint, together with before/after/window context
+  estimates; `session stats` prints those fields and counts checkpoint summary
+  calls as maintenance. Combining distinct `-resume <source>` and
+  `-session <destination>` clones the active
+  branch into the destination with fresh usage accounting. `/clear` rotates to
+  a fresh directory.
 - `/tree` opens a searchable, paged line picker over safe tree nodes. Its compact
   graph stays flat along linear history and adds indentation only at real forks;
   semantic row labels and condensed tool batches keep checkpoints readable
@@ -919,12 +946,26 @@ A followed root session has no terminal marker and continues until interrupted.
 An existing directory without `raw.ndjson` is valid while following; a missing
 directory is an immediate error.
 
+`session timings` labels a prompt without a terminal `prompt_usage` event as
+`in progress` and measures its elapsed time through the latest recorded event.
+
 `session stats` prints a deterministic, human-readable report for one session:
 root conversation turns, navigation count, tree entries/branches/leaves/depth,
 direct and delegate tool/command activity, parallel batches, compactions, and a
-hierarchical delegate breakdown. The root token and
-cost totals come from `state.json` and already include delegate and compaction
-usage; delegate totals similarly include any nested delegates.
+hierarchical delegate breakdown. A child that has metadata and replay events
+but no `state.json` checkpoint is included with `checkpoint: unavailable`
+instead of aborting the report. The root token and cost totals come from
+`state.json` and already include delegate and compaction usage; delegate totals
+similarly include any nested delegates. The separate `Direct model activity
+(non-overlapping)` section sums `turn_attempt_usage` and `maintenance_usage`
+from each physical root and child replay exactly once. New prompt replay events
+and child metadata also expose structured termination reasons; the stats report
+summarizes them without treating them as task-success labels. When checkpoint
+events are present, conversation statistics also report closed-turn checkpoint
+count, average/maximum save duration, and lag in completed turns and seconds.
+Retention activity is reported as epoch count, pressure-versus-age passes,
+blocks/bytes trimmed, Responses-state resets, and whether the following request
+used stateful continuation or full context.
 
 ### Session diagnostics
 
@@ -932,7 +973,10 @@ usage; delegate totals similarly include any nested delegates.
 process stderr that is hidden from the terminal by default. `raw.ndjson` is the
 chronological replay and analysis log. In addition to visible conversation
 events, it records model-request acceptance and completion, every failed
-upstream attempt, scheduled retries, terminal failures, and cancellation.
+upstream attempt, scheduled retries, terminal failures, cancellation, and
+retention epochs. Retention records include the trigger, reclaimed blocks/bytes,
+context estimates, continuation reset, and next-request shape; they never enter
+model context.
 
 Model-request lifecycle records carry parsed provider messages, timing, and
 request correlation used by `harness session timings`. They never become
@@ -951,6 +995,24 @@ model context window, or on `/compact`. `compact_auto_enabled: false` disables
 only threshold-based compaction; `/compact` and provider-overflow recovery still
 work. Harness compacts toward `compact_target_percent` (default 65) after fixed
 system/tool overhead.
+
+Interactive idle compaction is an opt-in experiment. Set
+`compact_idle_after_seconds` above zero (default `0`, disabled) to prepare a
+summary after that much REPL idle time when the estimated full context has
+reached `compact_idle_trigger_percent` (default `35`; it must be lower than the
+normal trigger). The summary runs against an immutable snapshot. Submitted
+input cancels the work and starts immediately; a late result is discarded. A
+candidate is archived and applied only if both the transcript and relevant
+compaction runtime are unchanged. Sessions with `PreCompact` or `PostCompact`
+hooks skip speculative compaction because hook side effects cannot safely run
+on a candidate. `compact_auto_enabled: false` also disables idle preparation.
+
+Every started idle attempt records an `idle_compaction` replay event with its
+applied/discarded/failed/no-change outcome, wall time, trigger, message counts,
+and context before/after when applied. Metered summary usage returned by the
+worker is recorded as `maintenance_usage` with purpose `idle_compaction`, even
+when the candidate is discarded. `session stats` summarizes outcomes, duration,
+and applied context reduction.
 
 The recent raw suffix is selected in whole completed turns, newest first, until
 it first reaches `compact_keep_tokens` (default `20000`) or
@@ -975,8 +1037,10 @@ cumulative index of successful supported `read_file`, `write_file`, `edit`, and
 `apply_patch` paths from compacted history. The index records requested paths at
 tool-call success granularity—so a successful batched read includes paths that
 reported inline per-file errors—and does not infer effects from commands, Git,
-MCP, or custom tools. The model-authored `Files touched` section remains the
-semantic source for file state and unsupported operations.
+MCP, or custom tools. The model records semantic state only for meaningful
+changes and unfinished mutation intent; it does not duplicate read-only
+inspected paths. Active todos are persisted separately and re-injected after a
+successful compaction.
 
 Use `/compact optional focus text` to emphasize one manual summary. Focus is
 trimmed, recorded in hook/archive/tree metadata, and applies only to that

@@ -39,6 +39,8 @@
   "compact_auto_enabled": true,
   "compact_trigger_percent": 78,
   "compact_target_percent": 65,
+  "compact_idle_after_seconds": 0,
+  "compact_idle_trigger_percent": 35,
   "compact_summary_max_tokens": 2048,
   "compact_tool_result_max_bytes": 4096,
   "delegate_max_turns": 20,

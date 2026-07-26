@@ -28,7 +28,7 @@ func TestCompactionUpdatePreservesPriorState(t *testing.T) {
 	if update == strings.ToLower(CompactionSummary()) {
 		t.Fatal("compaction update must be distinct from the initial prompt")
 	}
-	for _, want := range []string{"prior progress summary", "preserve", "supersedes", "complete replacement", "files touched", "open todos"} {
+	for _, want := range []string{"prior progress summary", "preserve", "supersedes", "complete replacement", "changed files", "work state", "open work"} {
 		if !strings.Contains(update, want) {
 			t.Fatalf("compaction update missing %q:\n%s", want, CompactionUpdate())
 		}
@@ -110,11 +110,34 @@ func TestSystemPromptRequiresPreciseInvestigationCitations(t *testing.T) {
 	}
 }
 
-func TestCompactionSummaryDemandsFileStateAndTodos(t *testing.T) {
-	summary := strings.ToLower(CompactionSummary())
-	for _, want := range []string{"files touched", "open todos"} {
-		if !strings.Contains(summary, want) {
-			t.Fatalf("compaction summary missing %q:\n%s", want, CompactionSummary())
+func TestCompactionPromptsUseTypedInventories(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"summary": CompactionSummary(),
+		"update":  CompactionUpdate(),
+	} {
+		lower := strings.ToLower(prompt)
+		for _, want := range []string{
+			"`read_files`",
+			"`modified_files`",
+			"authoritative for recognized file activity",
+			"omit read-only inspected files",
+			"active todos persist separately and are re-injected",
+			"do not repeat them",
+			"changed files",
+			"work state",
+			"open work",
+		} {
+			if !strings.Contains(lower, want) {
+				t.Errorf("%s compaction prompt missing %q:\n%s", name, want, prompt)
+			}
+		}
+		for _, redundant := range []string{
+			"one `path: state` line per created, changed, deleted, or inspected file",
+			"every pending or in-progress item, verbatim",
+		} {
+			if strings.Contains(lower, strings.ToLower(redundant)) {
+				t.Errorf("%s compaction prompt still requires redundant inventory %q:\n%s", name, redundant, prompt)
+			}
 		}
 	}
 }

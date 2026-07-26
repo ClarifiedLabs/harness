@@ -143,6 +143,7 @@ func TestRepeatLoopHardStops(t *testing.T) {
 	if last.Role != llm.RoleAssistant || len(last.Content) == 0 || !strings.Contains(last.Content[0].Text, "repeating") {
 		t.Errorf("turn should end on the assistant wind-down summary, got %+v", last)
 	}
+	assertPromptTermination(t, sink, TerminationRepeatGuard)
 }
 
 // TestErrorStormSteersThenBreaks verifies the consecutive-error backoff: one
@@ -198,6 +199,7 @@ func TestErrorStormSteersThenBreaks(t *testing.T) {
 	if last.Role != llm.RoleAssistant || len(last.Content) == 0 || !strings.Contains(last.Content[0].Text, "blocked") {
 		t.Errorf("turn should end on the assistant wind-down summary, got %+v", last)
 	}
+	assertPromptTermination(t, sink, TerminationErrorGuard)
 }
 
 // TestTurnTokenBudgetStops verifies the per-prompt token budget halts a tool loop
@@ -237,6 +239,7 @@ func TestTurnTokenBudgetStops(t *testing.T) {
 	if !sawBudget {
 		t.Errorf("expected prompt token budget notice, notices=%v", sink.notices)
 	}
+	assertPromptTermination(t, sink, TerminationTokenLimit)
 }
 
 // TestZeroTokenBudgetUnlimited verifies MaxPromptTokens == 0 imposes no ceiling.
@@ -306,6 +309,7 @@ func TestPromptCostBudgetStops(t *testing.T) {
 	if !sawBudget {
 		t.Errorf("expected prompt cost budget notice, notices=%v", sink.notices)
 	}
+	assertPromptTermination(t, sink, TerminationCostLimit)
 }
 
 // TestPromptCostBudgetUnpricedModelNeverFires verifies the cost budget cannot
@@ -340,6 +344,83 @@ func TestPromptCostBudgetUnpricedModelNeverFires(t *testing.T) {
 		if strings.Contains(msg, "cost budget") {
 			t.Errorf("unpriced model must not trigger a cost budget stop, got %q", msg)
 		}
+	}
+}
+
+func TestTurnMilestonesSteerAtConcreteClosedTurnBoundaries(t *testing.T) {
+	tool := &recordTool{name: "work", run: func(context.Context, json.RawMessage) (string, error) {
+		return "progress", nil
+	}}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+	work := llmtest.Step{
+		Events: []llm.StreamEvent{toolDone(0, "id", "work", `{}`)},
+		Stop:   llm.StopToolUse,
+	}
+	done := llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn}
+	fp := llmtest.New("fake", work, work, work, done)
+	a := newAgent(fp, reg, Options{
+		MaxTurns: 6,
+		TurnMilestones: []TurnMilestone{
+			{AfterTurns: 3, Message: "[milestone 75] verify"},
+			{AfterTurns: 1, Message: "[milestone 25] orient"},
+			{AfterTurns: 2, Message: "[milestone 50] implement"},
+			{AfterTurns: 0, Message: "ignored"},
+			{AfterTurns: 2, Message: "   "},
+		},
+	})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(fp.Requests) != 4 {
+		t.Fatalf("requests = %d, want 4", len(fp.Requests))
+	}
+	requestText := func(index int) string {
+		var parts []string
+		for _, msg := range fp.Requests[index].Messages {
+			for _, block := range msg.Content {
+				if block.Kind == llm.BlockText {
+					parts = append(parts, block.Text)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	if got := requestText(1); !strings.Contains(got, "[milestone 25]") || strings.Contains(got, "[milestone 50]") {
+		t.Fatalf("second request milestone context = %q", got)
+	}
+	if got := requestText(2); !strings.Contains(got, "[milestone 50]") || strings.Contains(got, "[milestone 75]") {
+		t.Fatalf("third request milestone context = %q", got)
+	}
+	if got := requestText(3); !strings.Contains(got, "[milestone 75]") {
+		t.Fatalf("fourth request milestone context = %q", got)
+	}
+	for _, marker := range []string{"[milestone 25]", "[milestone 50]", "[milestone 75]"} {
+		if got := countUserMessagesContaining(a.Transcript(), marker); got != 1 {
+			t.Fatalf("%s injected %d times, want once", marker, got)
+		}
+	}
+	assertPromptTermination(t, sink, TerminationModelCompleted)
+}
+
+func TestTurnMilestoneIsNotAppendedAfterNaturalCompletion(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("done immediately")},
+		Stop:   llm.StopEndTurn,
+	})
+	a := newAgent(fp, &tools.Registry{}, Options{
+		MaxTurns:       4,
+		TurnMilestones: []TurnMilestone{{AfterTurns: 1, Message: "[milestone]"}},
+	})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if got := countUserMessagesContaining(a.Transcript(), "[milestone]"); got != 0 {
+		t.Fatalf("milestone appended after natural completion %d times", got)
 	}
 }
 

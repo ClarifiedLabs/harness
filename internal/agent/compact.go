@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -76,12 +77,234 @@ type CompactionArchive struct {
 // suitable for inclusion in the active summary.
 type CompactionArchiver func(context.Context, CompactionArchive) (string, error)
 
+// IdleCompactionResult is the output of background compaction work captured by
+// PrepareIdleCompaction. Usage is public so the REPL can account for every
+// maintenance request, including a candidate later discarded as stale.
+// The candidate itself is opaque and can only be applied by
+// ApplyIdleCompaction.
+type IdleCompactionResult struct {
+	Usage    llm.Usage
+	Prepared bool
+
+	candidate *idleCompactionCandidate
+}
+
+type idleCompactionCandidate struct {
+	owner       *Agent
+	fingerprint [sha256.Size]byte
+	transcript  []llm.Message
+	archive     CompactionArchive
+	notices     []string
+}
+
 const (
 	checkpointHeader   = "=== Compaction checkpoint ===\n"
 	checkpointPreamble = "The following active instructions are preserved verbatim. Continue from the summarized progress without repeating completed work.\n"
 	checkpointProgress = "\nProgress summary:\n"
-	checkpointFiles    = "\n\nCumulative recognized file activity in compacted history (requested paths from successful supported tool calls):\n"
+	checkpointFiles    = "\n\nAuthoritative recognized file-activity index for compacted history (requested paths from successful supported tool calls):\n"
 )
+
+// PrepareIdleCompaction captures an immutable compaction snapshot and returns
+// work safe to run in a background goroutine. The caller must invoke this method
+// on the goroutine that owns the Agent. The returned closure shares only the
+// provider; it mutates a private Agent and never runs compaction hooks or archive
+// callbacks.
+//
+// ok is false when automatic compaction is disabled, the configured idle
+// threshold has not been reached, or PreCompact/PostCompact hooks make
+// speculative execution unsafe. triggerPercent must be in [1, 99].
+func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Context) (IdleCompactionResult, error), ok bool, err error) {
+	if triggerPercent < 1 || triggerPercent > 99 {
+		return nil, false, fmt.Errorf("idle compaction trigger percent must be between 1 and 99")
+	}
+	if !a.autoCompactionEnabled() || a.compactionHooksConfigured() {
+		return nil, false, nil
+	}
+	if estimate := a.estimateContext(nil).Total; estimate*100 < a.window()*triggerPercent {
+		return nil, false, nil
+	}
+	turns := completedTurnSpans(a.transcript)
+	boundary := a.preferredCompactionBoundary(turns)
+	if (boundary == 0 || countCompletedTurns(a.transcript[:boundary]) == 0) &&
+		estimateTokens(a.transcript) <= a.compactBudget() {
+		return nil, false, nil
+	}
+	fingerprint, err := a.idleCompactionFingerprint()
+	if err != nil {
+		return nil, false, err
+	}
+	snapshot := cloneMessages(a.transcript)
+	worker := New(a.provider, a.tools, Options{
+		Model:                       a.model,
+		ContextWindow:               a.contextWindow,
+		Registry:                    a.registry,
+		Reasoning:                   a.reasoning,
+		ServerTools:                 a.serverTools,
+		Now:                         a.now,
+		CompactKeepTurns:            a.compactKeepTurns,
+		CompactKeepTokens:           a.compactKeepTokens,
+		CompactTriggerPercent:       a.compactTriggerPercent,
+		CompactTargetPercent:        a.compactTargetPercent,
+		CompactSummaryMaxTokens:     a.compactSummaryMaxTokens,
+		CompactToolResultMaxBytes:   a.compactToolResultMaxBytes,
+		Interactive:                 a.interactive,
+		RetentionPolicy:             a.retentionPolicy,
+		DisableAutoCompaction:       a.disableAutoCompaction,
+		ResponsesStateful:           false,
+		ManagedContinuationStateful: false,
+	})
+	worker.SetSystem(a.system)
+	worker.SetTranscript(snapshot)
+	worker.observedContextWindow = a.observedContextWindow
+	worker.sleep = a.sleep
+
+	return func(ctx context.Context) (IdleCompactionResult, error) {
+		var archived CompactionArchive
+		worker.SetCompactionArchiver(func(_ context.Context, archive CompactionArchive) (string, error) {
+			archived = cloneCompactionArchive(archive)
+			return "", nil
+		})
+		sink := &idleCompactionSink{}
+		usage, changed, err := worker.compactInternal(ctx, sink, "idle", false, false, "")
+		result := IdleCompactionResult{Usage: usage}
+		if err != nil || !changed {
+			return result, err
+		}
+		if len(archived.Messages) == 0 {
+			return result, fmt.Errorf("idle compaction produced no archive metadata")
+		}
+		result.candidate = &idleCompactionCandidate{
+			owner:       a,
+			fingerprint: fingerprint,
+			transcript:  cloneMessages(worker.transcript),
+			archive:     archived,
+			notices:     append([]string(nil), sink.notices...),
+		}
+		result.Prepared = true
+		return result, nil
+	}, true, nil
+}
+
+// ApplyIdleCompaction installs a prepared candidate only while the exact source
+// transcript and relevant compaction runtime remain unchanged. A stale
+// candidate is silently discarded with applied=false. Archive persistence and
+// checkpoint notices occur only after this ownership check, on the caller's
+// goroutine.
+func (a *Agent) ApplyIdleCompaction(ctx context.Context, sink EventSink, result IdleCompactionResult) (applied bool, err error) {
+	candidate := result.candidate
+	if candidate == nil || candidate.owner != a || a.compactionHooksConfigured() {
+		return false, nil
+	}
+	fingerprint, err := a.idleCompactionFingerprint()
+	if err != nil {
+		return false, err
+	}
+	if fingerprint != candidate.fingerprint {
+		return false, nil
+	}
+	compacted := cloneMessages(candidate.transcript)
+	if err := llm.ValidateTranscript(compacted); err != nil {
+		return false, fmt.Errorf("idle compaction candidate invalid: %w", err)
+	}
+
+	archiveRef := ""
+	if a.archiveCompaction != nil {
+		ref, err := a.archiveCompaction(ctx, cloneCompactionArchive(candidate.archive))
+		if err != nil {
+			return false, fmt.Errorf("idle compaction archive: %w", err)
+		}
+		archiveRef = ref
+	}
+	compacted[0] = a.checkpointMessage(
+		candidate.archive.Summary,
+		candidate.archive.Messages,
+		archiveRef,
+		candidate.archive.Focus,
+		candidate.archive.ReadFiles,
+		candidate.archive.ModifiedFiles,
+	)
+	a.transcript = compacted
+	a.validatedPrefix = 0
+	// A compacted transcript is a new baseline: re-arm pressure retention so the
+	// next high-water pass can fire an epoch even when compaction lands between
+	// the low and high watermarks.
+	a.retentionEpochArmed = true
+	a.ResetProxySessionID()
+	a.compactFallbackNotice = compactFallbackNoticeState{}
+	for _, notice := range candidate.notices {
+		if strings.HasPrefix(notice, "[compacted:") {
+			notice = "[idle compacted:" + strings.TrimPrefix(notice, "[compacted:")
+		}
+		sink.Notice(notice)
+	}
+	return true, nil
+}
+
+func (a *Agent) compactionHooksConfigured() bool {
+	return a.hooks != nil && (a.hooks.HasEvent(hooks.PreCompact) || a.hooks.HasEvent(hooks.PostCompact))
+}
+
+func (a *Agent) idleCompactionFingerprint() ([sha256.Size]byte, error) {
+	digest := sha256.New()
+	err := json.NewEncoder(digest).Encode(struct {
+		Transcript                []llm.Message    `json:"transcript"`
+		System                    string           `json:"system"`
+		Model                     string           `json:"model"`
+		Tools                     []llm.ToolSchema `json:"tools"`
+		ServerTools               []llm.ServerTool `json:"server_tools"`
+		ContextWindow             int              `json:"context_window"`
+		ObservedContextWindow     int              `json:"observed_context_window"`
+		CompactKeepTurns          int              `json:"compact_keep_turns"`
+		CompactKeepTokens         int              `json:"compact_keep_tokens"`
+		CompactTargetPercent      int              `json:"compact_target_percent"`
+		CompactSummaryMaxTokens   int              `json:"compact_summary_max_tokens"`
+		CompactToolResultMaxBytes int              `json:"compact_tool_result_max_bytes"`
+		RuntimeVersion            uint64           `json:"runtime_version"`
+	}{
+		Transcript:                a.transcript,
+		System:                    a.system,
+		Model:                     a.model,
+		Tools:                     a.toolSpecs,
+		ServerTools:               a.serverTools,
+		ContextWindow:             a.contextWindow,
+		ObservedContextWindow:     a.observedContextWindow,
+		CompactKeepTurns:          a.compactKeepTurns,
+		CompactKeepTokens:         a.compactKeepTokens,
+		CompactTargetPercent:      a.compactTargetPercent,
+		CompactSummaryMaxTokens:   a.compactSummaryMaxTokens,
+		CompactToolResultMaxBytes: a.compactToolResultMaxBytes,
+		RuntimeVersion:            a.compactionRuntimeVersion,
+	})
+	if err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("fingerprint idle compaction snapshot: %w", err)
+	}
+	var fingerprint [sha256.Size]byte
+	copy(fingerprint[:], digest.Sum(nil))
+	return fingerprint, nil
+}
+
+func cloneCompactionArchive(archive CompactionArchive) CompactionArchive {
+	archive.Messages = cloneMessages(archive.Messages)
+	archive.ReadFiles = append([]string(nil), archive.ReadFiles...)
+	archive.ModifiedFiles = append([]string(nil), archive.ModifiedFiles...)
+	return archive
+}
+
+type idleCompactionSink struct {
+	notices []string
+}
+
+func (*idleCompactionSink) TextDelta(string)                           {}
+func (*idleCompactionSink) ReasoningSummary(string)                    {}
+func (*idleCompactionSink) TurnAttemptStart(int, int, ContextEstimate) {}
+func (*idleCompactionSink) TurnAttemptComplete(TurnAttemptUsage)       {}
+func (*idleCompactionSink) ToolUseStart(llm.ToolCall)                  {}
+func (*idleCompactionSink) ToolUseDelta(int, string)                   {}
+func (*idleCompactionSink) ToolStart(llm.ToolCall)                     {}
+func (*idleCompactionSink) ToolResult(llm.ToolResult)                  {}
+func (s *idleCompactionSink) Notice(message string)                    { s.notices = append(s.notices, message) }
+func (*idleCompactionSink) TurnComplete(TurnUsage)                     {}
+func (*idleCompactionSink) PromptComplete(PromptUsage)                 {}
 
 // MaybeCompact compacts the transcript when automatic compaction is enabled and
 // lastInputTokens reaches the configured fraction of the model's context
@@ -114,8 +337,19 @@ func (a *Agent) Compact(ctx context.Context, sink EventSink) (llm.Usage, error) 
 // emphasis. The trimmed focus is stored for observability on this checkpoint
 // only and is never inherited by later compactions.
 func (a *Agent) CompactWithFocus(ctx context.Context, sink EventSink, focus string) (llm.Usage, error) {
-	u, _, err := a.compactInternal(ctx, sink, "manual", false, strings.TrimSpace(focus))
+	u, _, err := a.compactInternal(ctx, sink, "manual", false, false, strings.TrimSpace(focus))
 	return u, err
+}
+
+// CompactForContinuation collapses the complete transcript into one typed
+// checkpoint for a fresh compatible delegate. Unlike ordinary compaction it
+// retains no verbatim conversational suffix: every completed turn is included
+// in the summary input and raw archive, while active prompt/steering
+// instructions remain verbatim in the checkpoint. It never truncates the
+// resulting checkpoint to a target percentage; callers must estimate the final
+// request and reject it when the exact instructions still do not fit safely.
+func (a *Agent) CompactForContinuation(ctx context.Context, sink EventSink) (llm.Usage, bool, error) {
+	return a.compactInternal(ctx, sink, "continuation", false, true, "")
 }
 
 // compact returns the summary-call usage, a changed flag (true only when the
@@ -124,7 +358,7 @@ func (a *Agent) CompactWithFocus(ctx context.Context, sink EventSink, focus stri
 // block) returns changed=false so the mid-loop caller does not churn its trigger
 // state every turn.
 func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (llm.Usage, bool, error) {
-	return a.compactInternal(ctx, sink, trigger, false, "")
+	return a.compactInternal(ctx, sink, trigger, false, false, "")
 }
 
 // compactTriggered is used when a measured request footprint or provider
@@ -132,10 +366,10 @@ func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (ll
 // there may be no older turn to summarize and the byte estimate can still be
 // optimistic, so force the current-turn shrink path instead of no-oping.
 func (a *Agent) compactTriggered(ctx context.Context, sink EventSink, trigger string) (llm.Usage, bool, error) {
-	return a.compactInternal(ctx, sink, trigger, true, "")
+	return a.compactInternal(ctx, sink, trigger, true, false, "")
 }
 
-func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger string, forceCurrent bool, focus string) (llm.Usage, bool, error) {
+func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger string, forceCurrent, collapseAll bool, focus string) (llm.Usage, bool, error) {
 	if progress, ok := sink.(CompactionProgressSink); ok {
 		progress.CompactionStart()
 		defer progress.CompactionComplete()
@@ -161,19 +395,24 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 
 	before := a.estimateContext(nil).Total
 	turns := completedTurnSpans(a.transcript)
-	boundary := a.preferredCompactionBoundary(turns)
-	if boundary == 0 || countCompletedTurns(a.transcript[:boundary]) == 0 {
-		if !forceCurrent && estimateTokens(a.transcript) <= a.compactBudget() {
-			return llm.Usage{}, false, nil
+	boundary := len(a.transcript)
+	if !collapseAll {
+		boundary = a.preferredCompactionBoundary(turns)
+		if boundary == 0 || countCompletedTurns(a.transcript[:boundary]) == 0 {
+			if !forceCurrent && estimateTokens(a.transcript) <= a.compactBudget() {
+				return llm.Usage{}, false, nil
+			}
+			if len(turns) < 2 {
+				changed, err := a.degradeCurrent(sink, trigger)
+				return llm.Usage{}, changed, err
+			}
+			// Under pressure there must be a completed round to summarize. Start with
+			// only the newest round retained; this also avoids paying for a summary of
+			// an initial prompt alone.
+			boundary = turns[len(turns)-1].Start
 		}
-		if len(turns) < 2 {
-			changed, err := a.degradeCurrent(sink, trigger)
-			return llm.Usage{}, changed, err
-		}
-		// Under pressure there must be a completed round to summarize. Start with
-		// only the newest round retained; this also avoids paying for a summary of
-		// an initial prompt alone.
-		boundary = turns[len(turns)-1].Start
+	} else if len(a.transcript) == 0 {
+		return llm.Usage{}, false, nil
 	}
 
 	var summary string
@@ -194,7 +433,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 		}
 		summary = generated
 		compacted = append([]llm.Message{a.checkpointMessage(summary, older, "", focus, readFiles, modifiedFiles)}, cloneMessages(kept)...)
-		if a.estimateContextForTranscript(nil, compacted).Total <= a.window()*a.targetPercent()/100 {
+		if collapseAll || a.estimateContextForTranscript(nil, compacted).Total <= a.window()*a.targetPercent()/100 {
 			break
 		}
 		next, ok := nextCompactionBoundary(turns, boundary)
@@ -206,7 +445,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 
 	// Once only the newest round remains, local degradation is the only safe
 	// lower rung. It mutates deep copies and cannot silently discard a round.
-	if a.estimateContextForTranscript(nil, compacted).Total > a.window()*a.targetPercent()/100 {
+	if !collapseAll && a.estimateContextForTranscript(nil, compacted).Total > a.window()*a.targetPercent()/100 {
 		a.trimToolResults(compacted, sink)
 		truncateUntilFits(compacted, a.compactBudget())
 	}
@@ -243,7 +482,8 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	compacted[0] = a.checkpointMessage(summary, older, archiveRef, focus, readFiles, modifiedFiles)
 
 	a.transcript = compacted
-	a.validatedPrefix = 0 // the transcript was rewritten; re-validate from scratch (r62)
+	a.validatedPrefix = 0        // the transcript was rewritten; re-validate from scratch (r62)
+	a.retentionEpochArmed = true // a compacted transcript is a new retention baseline
 	a.ResetProxySessionID()
 	a.compactFallbackNotice = compactFallbackNoticeState{}
 	after := a.estimateContextForTranscript(nil, compacted).Total
@@ -298,7 +538,8 @@ func (a *Agent) degradeCurrent(sink EventSink, trigger string) (bool, error) {
 		return false, err
 	}
 	a.transcript = compacted
-	a.validatedPrefix = 0 // the transcript was rewritten; re-validate from scratch (r62)
+	a.validatedPrefix = 0        // the transcript was rewritten; re-validate from scratch (r62)
+	a.retentionEpochArmed = true // a compacted transcript is a new retention baseline
 	a.ResetProxySessionID()
 	a.noticeCurrentShrink(sink, trigger, before, after)
 	return true, nil

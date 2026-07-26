@@ -1385,14 +1385,28 @@ emit prompt_usage(prompt, completedTurns)
   incremental per-call changes when the same file is edited repeatedly.
 - **Background jobs:** tools with `background:true` start process-local jobs and
   return a job id immediately. `delegate` uses the same flag for background child
-  agents. Completed job summaries are delivered once as request-only context on a
-  later parent model request; they are not appended to the parent transcript.
+  agents. Local jobs carry canonical resource/access leases: read-only leases may
+  coexist, while exclusive access conflicts with every unfinished lease on the
+  same resource. Completed job summaries are delivered once as request-only
+  context on a later parent model request; they are not appended to the parent
+  transcript.
 - **Max-turns guard:** when `max_turns` is positive, on hit print
   `[stopped: reached max turns (250)]`, keep the transcript (it is valid — the
   last turn's results are appended), and return to the prompt. A non-positive
   `max_turns` disables this guard. One turn before the limit the loop injects a
   one-shot RoleUser wrap-up steer
   ("stop calling tools now and reply with a final message").
+- **Structured termination:** every `PromptUsage` carries exactly one loop
+  termination reason: `model_completed`, `turn_limit`, `token_limit`,
+  `cost_limit`, `repeat_guard`, `error_guard`, `cancelled`, or `error`.
+  Prompt replay events and delegate metadata persist it. The reason records
+  loop control only; acceptance criteria and repository state remain the task
+  completion oracle.
+- **Caller-defined turn milestones:** `agent.Options.TurnMilestones` contains
+  concrete closed-tool-turn boundaries and internal steering text. The agent
+  normalizes them by turn, coalesces messages due on the same boundary, and
+  injects each exactly once before the next model request. Core agent code owns
+  deterministic delivery but no delegate-specific percentage policy.
 - **Runaway guards (`internal/agent/loopguard.go`).** A per-run `turnGuard` (loop
   frame only, never on the shared registry) watches each tool turn:
   - *Repeated identical calls.* Each turn's call-set is reduced to an
@@ -1741,6 +1755,8 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `timeout_seconds` | int | default 120, no maximum |
 | `background` | bool | when true, start as a process-local background job and return a job id immediately |
 
+- Background `grep` and `rg` jobs automatically acquire a `read_only` lease on
+  their canonical cwd.
 - Search exposure is configurable with `search_tools` / `HARNESS_SEARCH_TOOLS` /
   `-search-tools`: `auto` (default), `grep`, `rg`, or `both`.
 - Provider-hosted web search is not a local tool in this registry. It is exposed
@@ -1878,7 +1894,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.7 `run_command`
 
-> Run one command or ordered steps. Each uses shell command or argv as an array of strings; steps stop on failure and return compact receipts while archiving verbose output. Background supports one command.
+> Run one command or ordered steps using a shell command or argv as an array of strings. Auto output returns compact archived receipts for large success and bounded failure diagnostics. Background supports one command.
 
 | param | type | notes |
 |---|---|---|
@@ -1891,10 +1907,14 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `steps[].cwd` | string | overrides the inherited top-level cwd |
 | `steps[].timeout_seconds` | int | overrides the inherited top-level timeout |
 | `stop_on_failure` | bool | default true |
+| `name` | string | optional top-level receipt label; unavailable with `steps` |
+| `output_mode` | string | top-level `auto` (default), `receipt`, or `full`; unavailable with `steps` |
 | `stdin` | string | written to the command's standard input |
 | `cwd` | string | default process cwd |
 | `timeout_seconds` | int | foreground default 120, background default 1200, no maximum |
 | `background` | bool | when true, start as a process-local background job and return a job id immediately |
+| `resource_key` | string | background only; defaults to the canonical command cwd |
+| `access` | string | background only; `read_only` or `exclusive` (default) |
 
 - Exactly one of top-level `command`, top-level `argv`, or `steps` is required.
 - `command` is executed via a **non-login** `bash -c` (fallback `sh -c` if bash is
@@ -1913,6 +1933,21 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 - `[exit code: N]` always appended. **Non-zero exit is NOT an error result** — a failing
   build is exactly the signal the model needs; only infrastructure failures (shell
   couldn't start) set `is_error`.
+- Top-level `output_mode:"auto"` keeps successful output through 8 KiB. Larger
+  success becomes a `PASS` receipt containing the normalized, 160-byte-capped
+  `name` or command identity, duration, status, output byte count, a tail capped
+  at 512 bytes/eight lines, and the exit-code trailer. When that tail clips the
+  output (or the wait did not finish, so the receipt drops the partial-reap
+  status line), the complete formatted result is carried as
+  `RunResult.OriginalText`, so dispatch archives it and appends the standard
+  targeted recovery hint. A fully represented small success needs no duplicate
+  artifact. `receipt` always selects this success path; `full` preserves the
+  prior bounded full output.
+- Non-success under `auto`/`receipt` becomes a `FAIL` receipt with at most 4 KiB
+  and 40 lines from the output tail. A clipped original is archived (likewise an
+  unclipped original whose wait did not finish); a fully represented small
+  failure needs no duplicate artifact. `full` preserves the previous full
+  failure result. Infrastructure failures remain tool errors.
 - Runs in its own process group/session with no controlling TTY under the turn
   context; timeout or ^C kills the group (children included) and reports output
   captured so far.
@@ -1925,10 +1960,17 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 - With `background:true`, the command uses the same process-group and output
   formatting rules, but runs under the background job manager instead of blocking
   the current tool call. Background jobs default to a 1200-second timeout
-  (20 minutes) unless `timeout_seconds` is set explicitly. When later work depends
+  (20 minutes) unless `timeout_seconds` is set explicitly. It also defaults to an
+  exclusive lease on the canonical command cwd. Set `access:"read_only"` only
+  for a command that cannot mutate that resource; `resource_key` may identify a
+  different coordination unit. When later work depends
   on completion, use one `background_jobs` `wait` call rather than polling
   `get`/`list`; otherwise completed output is delivered once as request-only
   context. Use `/background` for interactive inspection or cancellation.
+  The background result carries both compact and original text. Automatic
+  completion uses the originating `run_command` limits/artifact path; explicit
+  `background_jobs` get/wait results carry the full aggregate as their own
+  `OriginalText`, so choosing an explicit wait never discards recovery.
 - Environment inherited unmodified.
 - `stdin`, when provided, is written verbatim to the command's standard input; absent
   means `/dev/null` (programs see immediate EOF, never hang on input). Prefer it over
@@ -2116,8 +2158,12 @@ this subsection records the common runner those argv tools point at.
 |---|---|---|
 | `task` | string, required | complete child prompt: objective, scope, constraints, expected report, and verification |
 | `agent` | string | optional configured agent name; omitted uses the current active agent; remains a simple enum for provider compatibility |
-| `max_turns` | int | optional per-call turn cap; capped at `delegate_max_turns` |
+| `mode` | string | optional; `implementation` enables deterministic mutating-work milestones; omit for exploration/review |
+| `max_turns` | int | optional tool-enabled loop budget; defaults to `delegate_max_turns`; the schema publishes that numeric maximum and over-cap values are rejected |
+| `continue_child_id` | string | optional terminal sibling child ID; continues compatible retained state in a fresh child record |
 | `background` | bool | only for independent non-overlapping work; after one useful parent model round, harness joins outstanding delegates and requires synthesis; do not poll or duplicate |
+| `resource_key` | string | background only; defaults to the canonical process cwd |
+| `access` | string | background only; `read_only` or `exclusive` (default) |
 
 - Implemented in `internal/delegate`, not `internal/tools`, to avoid an import cycle:
   the delegate tool starts a child `agent.Agent`, while `internal/agent` already
@@ -2130,8 +2176,8 @@ this subsection records the common runner those argv tools point at.
   entry; incompatible names and descriptions are absent. `delegate` opts into
   preserving schema descriptions in `tools.Registry.Specs`; other tools retain the
   normal schema-description stripping behavior.
-- Child agents start with an empty transcript and use the requested agent
-  definition's prompt, configured tools, and optional model target. Delegate
+- Child agents normally start with an empty transcript and use the requested
+  agent definition's prompt, configured tools, and optional model target. Delegate
   calls cannot narrow or expand that tool set; callers select or define a different
   agent when they need a different capability bundle. If no `agent` is provided,
   the child uses exactly the current parent agent's active tools.
@@ -2139,7 +2185,81 @@ this subsection records the common runner those argv tools point at.
   prompt only in `Runner.Run`; root prompts, including a configured custom static
   prompt, never receive it. The suffix says the child reports to the parent, owns
   only its delegated scope, does not ask the user questions, returns an
-  evidence-backed report, and avoids recursive delegation by default.
+  evidence-backed report, and avoids recursive delegation by default. A second
+  child-only block states the exact effective tool-enabled turn budget and
+  discloses the possible additional tools-disabled wind-down request.
+- `max_turns` has JSON Schema bound `minimum: 1`; its numeric `maximum` equals
+  the active `delegate_max_turns`. The runner validates the same bound even if a provider
+  emits invalid arguments despite the schema; it never silently clamps. The
+  foreground result receipt and background launch receipt state the effective
+  budget.
+- `mode` currently accepts only `implementation` and is validated by both the
+  decoder and runner. The delegate layer converts the effective turn budget to
+  concrete ceiling-rounded 25%/50%/75% boundaries, adds the full schedule to
+  child system context, and passes generic `agent.TurnMilestone` values to the
+  loop. Milestones are delivered only when another request can consume them;
+  several boundaries on one short-budget turn are coalesced. Child metadata,
+  result receipts, and session stats preserve the mode.
+- `continue_child_id` names an already-terminal child of the same immediate
+  parent. Continuation never appends to or overwrites that source directory:
+  the Runner creates a fresh child ID and seeds it with the source transcript,
+  private todos, proxy session ID, cache-affinity ID, and provider response
+  anchor. The continuation user message identifies the source and warns the
+  child to re-check current repository state. Source usage is not charged again;
+  the new child's usage contains only its new physical model calls. Its turn
+  counter also starts at zero with a fresh allowance equal to the source's
+  effective budget.
+- A continuation inherits omitted `agent`, `mode`, and `max_turns` values and
+  rejects explicitly conflicting values. It also requires exact source metadata
+  identity, terminal status, the same immediate parent, a valid resumable
+  `state.json`, and non-empty persisted runtime identifiers. New child metadata
+  records `continued_from` and a SHA-256 `runtime_fingerprint`. The fingerprint
+  covers the effective provider implementation/name, model, resolved and
+  requested agent selection, mode and turn budget, depth policy, resolved
+  context/output settings, prompt/cost ceilings, reasoning, server tools,
+  stateful-Responses setting, final child system prompt, model-facing tool
+  schemas, implementation milestones, and compaction policy. Preserving the
+  requested selection keeps an omitted agent on the parent's live tool subset
+  while an explicitly selected agent remains explicit. Current runtime and
+  source fingerprints must match.
+  Children created before fingerprints were introduced are deliberately not
+  resumable through this path.
+- Before the first continued request, the Runner estimates the retained
+  transcript, typed todo request context, and continuation prompt against the
+  current context window. At or below 60%, it restores the complete transcript
+  and compatible provider continuation anchor. Above 60%, it performs one
+  tool-less maintenance summary over the complete source transcript and
+  replaces the new child's active history with a single typed compaction
+  checkpoint. This all-history boundary is distinct from normal compaction's
+  recent-turn suffix: no work after an earlier checkpoint can be omitted. The
+  checkpoint preserves active prompt/steering instructions verbatim, stores
+  summary and file activity in `CompactionMetadata`, archives every removed
+  source message under the new child, and resets remote continuation state.
+- The Runner re-estimates the compact checkpoint plus the pending prompt and
+  continues only at or below 60%. A failed summary, blocked/no-op rewrite, or
+  still-oversized checkpoint is rejected; exact instructions are never
+  truncated to force acceptance. Maintenance usage is included in the new
+  child's prompt/session totals and replay log even when the post-checkpoint
+  pressure check rejects. Source usage and files remain unchanged.
+  `ChildMeta` records `continuation_mode` (`retained` or
+  `compact_checkpoint`) and the before/after/window estimates; the delegate
+  receipt and `session stats` expose the selected path. Foreground and
+  background paths apply the same contract. The latter resolves inherited
+  agent/mode/budget fields before scheduling so its launch receipt is truthful.
+- Background launches resolve their resource before scheduling and default to an
+  exclusive lease on the canonical process cwd. A caller may declare
+  `access:"read_only"` only when the child cannot mutate the resource. Lease
+  conflicts fail before child/session creation and identify the active job.
+  Resource and access are persisted in the new child's metadata.
+- Review groups deliberately compose ordinary background `delegate` calls with
+  one stable `background_jobs` `ids`/`until:"all"` join. The parent owns
+  synthesis; a coordinator child whose only role is launching and waiting adds
+  model turns and processed context without adding an independent verdict.
+  A dedicated `delegate_group` remains deferred until session telemetry shows
+  that launch-call overhead or a typed verdict/quorum contract—not coordinator
+  misuse—is the remaining bottleneck. Avoiding a second launch path also keeps
+  resource conflicts and exactly-once result/usage delivery centralized in the
+  background manager.
 - A named child agent may only run when its configured tools are a subset of the
   current parent agent's active tools. Non-subset calls return a tool error before
   any child model request is made. This exact subset check remains the
@@ -2193,8 +2313,9 @@ this subsection records the common runner those argv tools point at.
 ### 9.15 background jobs
 
 Tools that opt into the reusable background job contract hand the manager a job
-kind, description, and cancellable runner. The manager owns ids, status,
-list/get/wait/cancel, one-shot notices, and request-only context delivery.
+kind, description, optional canonical resource/access lease, and cancellable
+runner. The manager owns ids, status, list/get/wait/cancel, lease enforcement,
+one-shot notices, and request-only context delivery.
 `run_command`, `grep`, `rg`,
 `web_fetch`, and `delegate` support this path via `background:true`; background
 delegate jobs still use the same launch validation, child transcript, private todo,
@@ -2206,17 +2327,30 @@ and token-accounting behavior as synchronous delegate.
 |---|---|---|
 | `action` | string | `list`, `get`, `wait`, or `cancel`; omitted means `list` |
 | `id` | string | required for `get` and `cancel`; optional for `wait` |
+| `ids` | array of strings | optional multi-job selection for `wait`; mutually exclusive with `id` |
+| `until` | string | `first` (default) or `all` for `wait` |
 | `timeout_seconds` | integer | `wait` timeout; omit for ordinary dependency waits (default 120 seconds), rather than using a short timeout as a status probe |
 
 - Jobs live only in the current harness process. Running jobs are abandoned on process
   exit and cleared on `/clear`.
-- `wait` is event-driven rather than polling. With an `id`, it waits for that job
-  to finish. Without an `id`, it snapshots the jobs currently running and returns
-  when the first finishes; if none are running, it returns the current list
-  immediately. A timeout is a normal result containing the latest status. Jobs
-  returned as completed are marked as delivered so the same result is not
-  automatically injected again. Completion notices and nested usage accounting
-  remain one-shot and independent.
+- Resource keys are absolute paths with symlinks resolved through the longest
+  existing prefix. Multiple `read_only` jobs may share an exact resource key.
+  `exclusive` conflicts with every unfinished lease for that key; the
+  deterministic error identifies the first active job in launch order. Different
+  resource keys do not conflict. Completion and failure release immediately.
+  Cancellation retains the lease until runner cleanup finishes. Abandonment
+  releases it immediately and late runner return cannot overwrite the abandoned
+  status. Snapshots, `get` output, completion context, launch receipts, and
+  delegate child metadata expose the normalized lease.
+- `wait` is event-driven rather than polling. `id` selects one job; `ids`
+  selects an explicit group; omitting both snapshots the jobs currently running.
+  `until:"first"` returns on the first selected completion, while
+  `until:"all"` joins every selected job. Selection is stable, so later launches
+  never extend an in-flight wait. If an untargeted wait finds no running jobs, it
+  returns the current list immediately. A timeout is a normal result containing
+  the latest selected status. Jobs returned as completed are marked as delivered
+  so the same result is not automatically injected again. Completion notices and
+  nested usage accounting remain one-shot and independent.
 - The system prompt and background-capable tool schemas route a strict completion
   dependency to one `wait` call. `get` and `list` are for nonblocking inspection,
   not repeated status polling.
@@ -2230,11 +2364,17 @@ and token-accounting behavior as synchronous delegate.
   dispatch; when truncated, the full result is archived under
   `artifacts/tool-results/` and the request context includes the same absolute path and
   targeted `read_file`/`rg` guidance as a foreground result.
+- A job may carry compact `Text` plus complete `OriginalText`. Automatic
+  completion uses `Registry.PrepareResultWithOriginal`; `background_jobs`
+  implements `ResultTool` so explicit get/wait output preserves the same
+  archive opportunity instead of consuming completion context and losing the
+  suppressed original.
 - Background delegate results carry child model usage through the manager exactly
   once; the agent folds it into the parent prompt and session totals before completion,
   including failed child runs that returned partial usage.
-- Background jobs run in the same cwd/tool policy as ordinary tools. Harness
-  serializes session/job metadata, not concurrent filesystem edits.
+- Background jobs run in the same cwd/tool policy as ordinary tools. Resource
+  leases coordinate opted-in local background work; they do not sandbox paths or
+  serialize foreground filesystem edits.
 
 ### 9.16 MCP tools (`internal/mcptools`)
 
@@ -2783,15 +2923,24 @@ type UsageTotals struct {
 - A session path is a directory. `tree.ndjson` is canonical append-only
   conversation data; its first record is a session header and later records are
   immutable typed entries. `state.json` stores mutable runtime state and the
-  active leaf. `raw.ndjson` remains chronological replay data,
+  active leaf. `active-turn.json` is a transient atomic recovery record for the
+  current provider boundary. `raw.ndjson` remains chronological replay data,
   `diagnostics.ndjson` stores JSON slog diagnostics, `compactions/` stores raw
   messages removed from active context, and `artifacts/tool-results/` stores full
   truncated tool output.
 - Segment entries are safe navigation boundaries. An assistant tool-use message
   and its immediately following tool-result message share one segment so a
   branch cannot split the provider transcript invariant.
-- A save requested while tool calls are still open first appends synthetic
-  `interrupted` results, then records the resulting valid atomic segment.
+- Before each provider request and before dispatching emitted tool calls,
+  Harness atomically replaces `active-turn.json` with the complete resumable
+  runtime state: transcript, todos, plans, usage, cache/proxy IDs, and safe
+  Responses continuation anchor. An open tool-use is stored with synthetic
+  `interrupted` results. Recovery therefore never automatically re-executes a
+  tool whose process-local completion is unknown.
+- After every validated closed conversational turn, root and child sinks first
+  write the recovery record, then append/sync the tree and atomically replace
+  `state.json`. Only after that canonical save succeeds is `active-turn.json`
+  removed. Prompt-end/manual saves use the same consolidation order.
 - Saves append and `fsync` new tree entries before atomically replacing
   `state.json` via temp-file plus rename. A malformed final tree record is
   treated as an interrupted append; malformed non-final records, missing
@@ -2807,15 +2956,17 @@ type UsageTotals struct {
   prewarming, handoff-summary, and branch-summary calls without creating turns.
   `model_request` records proxy/request lifecycle and every API issue with timing,
   parsed error, and correlation metadata; these events are replay/analysis data
-  only and never become conversation-tree entries or model context. `branch`
-  records navigation source/target IDs in chronological replay.
-- When Responses stateful continuation is active, `state.json` stores the last
-  `previous_response_id` and the number of local messages represented by it.
-  Resume only restores this state when the active provider/model still match and
-  the selected provider reports `api_type: "responses"` and
-  `responses_stateful:true`; compaction, `/clear`, provider/model/tool/system
-  changes, rejected prior response ids, and rejected stored-response requests
-  clear it.
+  only and never become conversation-tree entries or model context. `checkpoint`
+  records the boundary kind, save duration, and message count; stats use
+  closed-turn records to expose save overhead and lag. `branch` records
+  navigation source/target IDs in chronological replay.
+- Direct Responses integrations store the last `previous_response_id` and its
+  local message anchor in `state.json`. The CLI's model proxy normally owns
+  continuation instead: catalog targets expose `api_type` and
+  `continuation_stateful`, while requests carry an explicit stateless override
+  for `-responses-stateful=false`. The proxy content-addresses the represented
+  prefix, clears continuation on an override or prefix rewrite, and sends full
+  history before establishing a fresh anchor.
 - Gemini Interactions continuation is proxy-managed. The proxy defaults
   `interactions_stateful` on, content-addresses each stored prefix, and falls
   back to full history when state is absent or rejected. Sessions retain signed
@@ -2825,9 +2976,13 @@ type UsageTotals struct {
   resume is self-contained; `raw.ndjson` records only image metadata for replay.
 - Auto-save to `~/.local/state/harness/sessions/<timestamp>`; the path is printed at
   startup. `-session` chooses a directory; `-resume` loads `state.json` plus its
-  active tree path. Distinct `-resume <source>` and `-session <destination>` clone
-  the active path with parent lineage and fresh usage. `/clear` rotates to a
-  fresh directory.
+  active tree path, or applies a newer `active-turn.json` recovery record before
+  continuing. Resume reports the recovered phase. It also marks child metadata
+  left `running` by the prior process as `abandoned`; such children are terminal
+  and may be continued by child ID when their saved runtime contract still
+  matches. Distinct `-resume <source>` and `-session <destination>` clone the
+  active path with parent lineage and fresh usage. `/clear` rotates to a fresh
+  directory.
 - `/tree` renders a harness-native searchable/paged line picker over tree nodes.
   The renderer keeps unary paths in one graph lane, adds lanes only for sibling
   branches, labels checkpoint kinds, condenses repeated tools, and clips rows to
@@ -2850,10 +3005,18 @@ type UsageTotals struct {
   `state.json`, `raw.ndjson`, `meta.json`, and artifacts. Parent resume ignores these
   child transcripts; they are forensic sidecars. `meta.json` is a `ChildMeta` index —
   id, parent id, kind, agent, provider/model, status, task preview, transcript/replay
-  paths, error, usage, and message count. The delegate Runner creates `running`
+  paths, error, usage, message count, mode, resolved/requested agent,
+  background resource/access lease,
+  continuation source/runtime fingerprint, requested/effective turn budgets,
+  physical turns used, and termination reason. The delegate Runner creates `running`
   metadata, then owns one terminal transition to `completed`, `failed`, or
-  `canceled`; state-save failure does not skip the terminal metadata attempt.
-  `prompt_usage` remains the final normal child event. Inline delegate lines are
+  `canceled`; a later parent resume changes stale `running` metadata to
+  `abandoned`. State-save failure does not skip the terminal metadata attempt.
+  Terminal reasons are `model_completed`, `turn_limit`, `token_limit`,
+  `cost_limit`, `repeat_guard`, `error_guard`, `cancelled`, or `error`;
+  `turn_limit` does not imply semantic incompleteness, and `model_completed`
+  does not prove acceptance. `prompt_usage` remains the final normal child event
+  and carries the same reason. Inline delegate lines are
   process-local display events only: they are not appended to either parent or
   child persistence. Child `raw.ndjson` retains the exact replay callbacks and
   remains the full-fidelity source for `session replay --follow`.
@@ -2871,17 +3034,28 @@ type UsageTotals struct {
 - `harness session timings <session-dir>` reads `raw.ndjson` timestamps and
   prints prompt totals, turn-attempt durations, tool durations, largest event gaps,
   context/payload estimates, and model API issue counts/provider time/scheduled
-  retry wait.
+  retry wait. A prompt without `prompt_usage` is labeled `in progress`, and its
+  elapsed time ends at the latest recorded event rather than being reported as
+  zero.
 - `harness session stats <session-dir>` reads the existing root and child
   `state.json` and `raw.ndjson` files, `compactions/*.meta.json` plus their input
   transcripts, and `children/*/meta.json`. It reports turns, direct tool and
   command activity, lifetime parallel batches, compactions, tree
   entries/branches/leaves/depth, navigation events, authoritative token/cost
-  totals, and a hierarchical delegate breakdown. Conversation statistics
-  distinguish prompts, turns, model calls, retries, and maintenance calls. Root usage already includes delegate and
+  totals, and a hierarchical delegate breakdown. A child without a completed
+  `state.json` checkpoint is reconstructed from its metadata and replay for
+  analysis and marked `checkpoint: unavailable`. Conversation statistics
+  distinguish prompts, turns, model calls, retries, and maintenance calls.
+  Sessions with closed-turn checkpoint events also report checkpoint count,
+  average/maximum save time, and lag in completed turns and seconds. Root usage already includes delegate and
   maintenance spend and is never
   summed with child usage; each child usage total likewise includes its nested
   delegates. Direct tool activity is instead summed once from every replay log.
+  The non-overlapping direct model-activity total likewise sums physical
+  `turn_attempt_usage` and `maintenance_usage` records once from every root and
+  child replay. Compaction metadata uses the writer's canonical field shape;
+  the stats reader accepts unknown additive fields while still rejecting
+  malformed JSON and trailing values.
 - Transcripts are provider-neutral; resuming under a different provider/model works.
   When flags disagree with the state, flags win with a warning. Tool-result messages
   may include local-only `parallel_tool_batches` metadata; provider adapters ignore it.
@@ -2922,17 +3096,28 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   provider-overflow recovery retry remain enabled. The terminal warning follows
   the configured trigger and is suppressed with automatic compaction.
 - **Live-transcript retention pass.** Before each model request the agent runs a
-  pure-local retention pass (no model round-trip) over aged history: read-only
-  tool-result blocks older than `compact_keep_turns` completed turns and larger than
-  `defaultSummaryToolResultSize` (4096 bytes) are trimmed to a head slice plus a hint
-  (`[older tool output trimmed …]`, or an archive pointer when the sink can archive
-  the full output), and `BlockImage` blocks two or more turns old are swapped for a
-  text placeholder. It only ever shortens text or turns an image into text, so the §4
-  transcript invariant still holds, and it is idempotent (already-trimmed/placeholder
-  blocks are skipped). Any such edit clears direct agent continuation state; the
-  model proxy independently verifies the full prefix fingerprint before reusing its
-  remote continuation. This keeps the window smaller between full compactions
-  without leaving removed content in provider-visible remote history.
+  pure-local retention pass (no model round-trip). The default `auto` policy
+  uses pressure-triggered epochs for both stateful and stateless providers
+  instead of editing on ordinary age progression. An armed epoch runs when the
+  estimated full context reaches 60% of the effective window, trims every
+  currently eligible read-only tool-result block and aged image in one pass,
+  and disarms until context falls to 50% or below. Compaction remains the safety
+  net if an epoch cannot reclaim enough.
+- A pressure edit clears the direct or proxy-owned `previous_response_id`
+  exactly once, while a below-pressure stateful request preserves it and sends
+  only the appended delta. Stateless providers get the same batched transcript
+  bounding without continuation reset semantics.
+- The `retention_policy` experiment control can force legacy `age`, `pressure`,
+  or `disabled`. Age mode trims eligible read-only results older than
+  `compact_keep_turns` completed turns and images two or more turns old before
+  each request. Disabling the local pass does not disable compaction or
+  provider-overflow recovery. Delegate continuation fingerprints include the
+  selected policy.
+- Both retention policies preserve the §4 transcript invariant and are
+  idempotent. `raw.ndjson` `retention` events record policy/trigger, blocks and
+  bytes trimmed, estimated context before/after, whether Responses state was
+  reset, and whether the next request used stateful continuation or full
+  context. `session stats` summarizes those epochs and request shapes.
 - **Turn boundary:** a completed turn begins at an assistant response and includes
   its immediately following tool-result message when that response requested tools.
   User prompts, steering messages, and synthetic context are inputs to a turn, not
@@ -2944,9 +3129,12 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   regenerate the summary over the enlarged removed set, and repeat until the target
   is met or only the newest turn remains. Send
   everything older to the model with the summarization instruction in
-  `prompts/compaction-summary.txt`: preserve the task/goal, decisions made, files
-  created/modified and their current state, key facts learned, open TODOs; do not
-  invent. Summary output is capped by `compact_summary_max_tokens` (default 2048).
+  `prompts/compaction-summary.txt`: preserve the task/goal and acceptance
+  criteria, still-constraining decisions, semantic state for meaningful file
+  changes, active worktree/blocker/gate/verification state, key facts, and
+  unresolved intent; do not invent. The model does not enumerate read-only
+  inspected files or reproduce the typed active todo list. Summary output is
+  capped by `compact_summary_max_tokens` (default 2048).
   A first compaction uses `prompts/compaction-summary.txt`. A repeated compaction
   removes the structured prior checkpoint from ordinary summary history, passes its
   exact generated summary once as data, and uses `prompts/compaction-update.txt` to
@@ -2958,14 +3146,22 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   preserves current instructions explicitly without pretending the summary was a
   conversational assistant turn. `/compact [focus]` adds one-shot emphasis to all
   summary phases and records that focus only on the resulting checkpoint/archive.
+- **Typed compacted-history state:** the active todo store is persisted in
+  session state independently of the transcript. A successful compaction resets
+  its injection marker, so the first subsequent model request receives the
+  current typed list even if the raw `update_todos` result aged out. The
+  model-authored summary carries only unresolved intent, blockers, and gates
+  that are not represented by that list.
 - **Deterministic compacted-history files:** correlate each validated assistant
   tool-use message with its immediate result message. Successful supported
   `read_file`, `write_file`, `edit`, and `apply_patch` calls contribute normalized,
   sorted cumulative read/modified paths; modified wins over read. Batched reads are
   call-level and therefore retain every requested path even when one result is an
   inline per-file error. Commands, Git, MCP, malformed inputs, failed calls, and
-  unsupported/custom tools are skipped. The JSON index supplements the semantic
-  model-authored `Files touched` section.
+  unsupported/custom tools are skipped. The JSON index is the authoritative
+  recognized file-activity inventory in the active checkpoint and summary
+  request. The model records semantic state only for meaningful changes and
+  unfinished mutation intent; it does not duplicate read-only inspected paths.
 - Before summarization, large old tool results and tool inputs are reduced to
   previews (`compact_tool_result_max_bytes`, default 4096; a **negative** value disables
   this reduction entirely), and old images are replaced with text placeholders. If older
@@ -2978,6 +3174,25 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   `[post-compact hook blocked after compaction: <reason>]` notice. Both receive a
   `trigger` field (`auto` or `manual`); a focused manual compaction also supplies
   `focus` to both hooks.
+- **Speculative idle compaction:** the interactive REPL can opt in with
+  `compact_idle_after_seconds` (zero disables) and a lower
+  `compact_idle_trigger_percent`. At the timer boundary the owning goroutine
+  captures a deep transcript copy plus a SHA-256 fingerprint covering the
+  transcript and compaction-relevant runtime. A private Agent performs the
+  model work against that snapshot; it shares only the provider and cannot call
+  the live archiver or mutate session state. Submitted input cancels the worker
+  and marks any late result for discard, so prompt execution never waits for
+  speculative summarization. The owning goroutine applies a completed candidate
+  only when that fingerprint still matches, then runs the live archive callback,
+  installs the checkpoint, saves, and prewarms. Configured `PreCompact` or
+  `PostCompact` hooks make the idle path ineligible because their external side
+  effects cannot be rolled back.
+- Each started idle attempt emits an `idle_compaction` replay event with
+  outcome, wall time, threshold, message counts, and context before/after when
+  applied. Summary tokens returned by the worker are `maintenance_usage` under
+  purpose `idle_compaction`, including canceled or stale work. `session stats`
+  reports attempt outcomes, average/maximum wall time, and average applied
+  context reduction.
 - Before replacing active history, raw removed messages are archived under
   `compactions/`; the active summary includes the archive reference.
 - **Summary call hardening (`summarizeOne`).** The summarization request runs with

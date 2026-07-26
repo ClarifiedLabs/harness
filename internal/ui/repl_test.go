@@ -217,6 +217,198 @@ func TestTurnCompleteUnpricedModelOmitsCost(t *testing.T) {
 	}
 }
 
+func TestRetentionTelemetryIsPersistedWithoutEnteringTranscript(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	sink := newREPLSink(app.Renderer, app, 3)
+	sink.RetentionApplied(agent.RetentionEvent{
+		Policy:              "pressure_epoch",
+		Trigger:             "context_pressure",
+		BlocksTrimmed:       2,
+		BytesBefore:         30_000,
+		BytesAfter:          5_000,
+		ContextTokensBefore: 8_000,
+		ContextTokensAfter:  2_000,
+		ResponseStateReset:  true,
+	})
+
+	data, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read replay: %v", err)
+	}
+	var event session.Event
+	if err := json.Unmarshal(bytes.TrimSpace(data), &event); err != nil {
+		t.Fatalf("decode replay: %v", err)
+	}
+	if event.Type != session.EventRetention || event.Prompt != 3 || event.Turn != 1 || event.Retention == nil {
+		t.Fatalf("retention event = %+v", event)
+	}
+	if event.Retention.BlocksTrimmed != 2 || !event.Retention.ResponseStateReset || event.Retention.NextRequestStateful {
+		t.Fatalf("retention snapshot = %+v", event.Retention)
+	}
+	if len(app.Agent.Transcript()) != 0 {
+		t.Fatalf("retention telemetry entered transcript: %+v", app.Agent.Transcript())
+	}
+}
+
+func TestPromptCheckpointRecoversToolDispatchBeforeResult(t *testing.T) {
+	var out, errw lockedBuffer
+	tool := &blockingTool{name: "mutate", ran: make(chan struct{}), release: make(chan struct{})}
+	fp := llmtest.New("responses", llmtest.Step{
+		Events:     []llm.StreamEvent{toolStep("mutate", `{}`, "call-1")},
+		Stop:       llm.StopToolUse,
+		Usage:      llm.Usage{InputTokens: 7, OutputTokens: 2},
+		ResponseID: "resp-1",
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	registry := tools.Default()
+	registry.Register(tool)
+	app.Agent = agent.New(fp, registry, agent.Options{
+		Model:             "claude-opus-4-8",
+		ResponsesStateful: true,
+	})
+	app.Agent.SetSystem(app.System)
+	app.Todos = todo.NewStore()
+	app.Todos.Replace([]todo.Item{{Content: "mutate once", Status: "in_progress"}})
+	app.Plans = plan.NewStore()
+	app.Plans.Replace([]plan.Plan{{Title: "Safe mutation", Body: "Run once", Path: "plans/safe.md"}})
+
+	promptID := app.beginPrompt("change it", nil)
+	app.Renderer.StartPromptRun()
+	done := make(chan error, 1)
+	go func() {
+		done <- app.Agent.RunPromptContentWithContext(
+			context.Background(),
+			"change it",
+			nil,
+			nil,
+			promptID,
+			newREPLSink(app.Renderer, app, promptID),
+		)
+	}()
+	select {
+	case <-tool.ran:
+	case <-time.After(time.Second):
+		t.Fatal("tool did not start")
+	}
+
+	recovered, err := session.Load(app.SessionPath)
+	if err != nil {
+		t.Fatalf("Load active tool dispatch: %v", err)
+	}
+	if recovered.Recovery == nil || recovered.Recovery.Phase != string(agent.PromptCheckpointToolDispatch) {
+		t.Fatalf("recovery = %+v", recovered.Recovery)
+	}
+	if err := llm.ValidateTranscript(recovered.Messages); err != nil {
+		t.Fatalf("recovered transcript: %v", err)
+	}
+	if len(recovered.Messages) != 3 {
+		t.Fatalf("messages = %d, want prompt/tool-use/interrupted result", len(recovered.Messages))
+	}
+	result := recovered.Messages[2].Content[0]
+	if !result.ResultError || result.ResultText != "interrupted" || result.ResultForID != "call-1" {
+		t.Fatalf("interrupted result = %+v", result)
+	}
+	if recovered.ResponseState == nil || recovered.ResponseState.PreviousResponseID != "resp-1" {
+		t.Fatalf("response state = %+v", recovered.ResponseState)
+	}
+	if recovered.Usage.InputTokens != 7 || len(recovered.Todos) != 1 || len(recovered.Plans) != 1 {
+		t.Fatalf("durable state = usage %+v todos %+v plans %+v", recovered.Usage, recovered.Todos, recovered.Plans)
+	}
+
+	close(tool.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunPrompt: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunPrompt did not finish")
+	}
+}
+
+func TestClosedTurnCheckpointIsDurableBeforeNextModelResponse(t *testing.T) {
+	var out, errw lockedBuffer
+	nextRequest := make(chan struct{})
+	release := make(chan struct{})
+	fp := llmtest.New("responses",
+		llmtest.Step{
+			Events:     []llm.StreamEvent{toolStep("update_todos", `{"todos":[{"content":"verified","status":"completed"}]}`, "todo-1")},
+			Stop:       llm.StopToolUse,
+			Usage:      llm.Usage{InputTokens: 9, OutputTokens: 3},
+			ResponseID: "resp-1",
+		},
+		llmtest.Step{
+			Block: func(context.Context) {
+				close(nextRequest)
+				<-release
+			},
+			Stop: llm.StopEndTurn,
+		},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+	store := todo.NewStore()
+	registry := tools.Default()
+	registry.Register(todo.NewTool(store))
+	app.Agent = agent.New(fp, registry, agent.Options{
+		Model:             "claude-opus-4-8",
+		ResponsesStateful: true,
+	})
+	app.Agent.SetSystem(app.System)
+	app.Todos = store
+
+	ctx, cancel := context.WithCancel(context.Background())
+	promptID := app.beginPrompt("track it", nil)
+	app.Renderer.StartPromptRun()
+	done := make(chan error, 1)
+	go func() {
+		done <- app.Agent.RunPromptContentWithContext(
+			ctx,
+			"track it",
+			nil,
+			nil,
+			promptID,
+			newREPLSink(app.Renderer, app, promptID),
+		)
+	}()
+	select {
+	case <-nextRequest:
+	case <-time.After(time.Second):
+		t.Fatal("second model request did not start")
+	}
+
+	recovered, err := session.Load(app.SessionPath)
+	if err != nil {
+		t.Fatalf("Load closed checkpoint: %v", err)
+	}
+	if err := llm.ValidateTranscript(recovered.Messages); err != nil {
+		t.Fatalf("closed transcript: %v", err)
+	}
+	if len(recovered.Messages) != 3 {
+		t.Fatalf("messages = %d, want one complete tool turn", len(recovered.Messages))
+	}
+	if recovered.Usage.InputTokens != 9 || recovered.Usage.OutputTokens != 3 {
+		t.Fatalf("checkpoint usage = %+v", recovered.Usage)
+	}
+	if len(recovered.Todos) != 1 || recovered.Todos[0].Status != "completed" {
+		t.Fatalf("checkpoint todos = %+v", recovered.Todos)
+	}
+	if recovered.ResponseState == nil || recovered.ResponseState.PreviousResponseID != "resp-1" || recovered.ResponseState.AnchorMessages != 2 {
+		t.Fatalf("checkpoint response state = %+v", recovered.ResponseState)
+	}
+
+	cancel()
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunPrompt error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunPrompt did not stop")
+	}
+}
+
 func TestOneShotPromptHookBlockSkipsTurn(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("should not run")}, Stop: llm.StopEndTurn})
@@ -1612,6 +1804,358 @@ func TestREPLCompactShowsLiveProgressWhileSummaryBlocked(t *testing.T) {
 	if got := errw.String(); !strings.Contains(got, "[compacted:") {
 		t.Fatalf("completed /compact should retain its durable report, errw=%q", got)
 	}
+}
+
+func TestREPLIdleCompactionAppliesStableSnapshot(t *testing.T) {
+	var out, errw lockedBuffer
+	inSummary := make(chan struct{})
+	releaseSummary := make(chan struct{})
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("IDLE SUMMARY")},
+		Stop:   llm.StopEndTurn,
+		Usage:  llm.Usage{InputTokens: 100, OutputTokens: 12},
+		Block: func(context.Context) {
+			close(inSummary)
+			<-releaseSummary
+		},
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Agent.SetModel("claude-opus-4-8", 10_000)
+	app.Agent.SetTranscript(compactionSeed())
+	app.Agent.SetCompactionArchiver(func(_ context.Context, archive agent.CompactionArchive) (string, error) {
+		ref, err := session.SaveCompaction(app.SessionPath, session.Compaction{
+			Time:          time.Now(),
+			Summary:       archive.Summary,
+			Usage:         archive.Usage,
+			Messages:      archive.Messages,
+			Focus:         archive.Focus,
+			ReadFiles:     archive.ReadFiles,
+			ModifiedFiles: archive.ModifiedFiles,
+		})
+		if err != nil {
+			return "", err
+		}
+		if err := app.PrepareCompaction(app.Agent.Transcript(), len(archive.Messages), archive.Summary, ref, archive.TokensBefore, archive.Focus, archive.ReadFiles, archive.ModifiedFiles); err != nil {
+			return "", err
+		}
+		return ref, nil
+	})
+	app.IdleCompactionAfter = time.Minute
+	app.IdleCompactionTriggerPercent = 1
+	idleTimer := make(chan time.Time, 1)
+	timerCalls := 0
+	app.idleCompactionAfter = func(time.Duration) <-chan time.Time {
+		timerCalls++
+		if timerCalls == 1 {
+			return idleTimer
+		}
+		return nil
+	}
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- Run(pr, app, nil) }()
+	idleTimer <- time.Now()
+	select {
+	case <-inSummary:
+	case <-time.After(time.Second):
+		t.Fatal("idle compaction did not start")
+	}
+	close(releaseSummary)
+	waitFor(t, func() bool {
+		return strings.Contains(errw.String(), "[idle compacted:")
+	}, "idle compaction application")
+
+	writePipe(t, pw, "/usage\n/exit\n")
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want %d", code, ExitOK)
+	}
+	got := app.Agent.Transcript()
+	if len(got) != 16 || got[0].Origin != llm.MessageOriginCompactionCheckpoint {
+		t.Fatalf("idle transcript = %d messages, want checkpoint + 8 turns", len(got))
+	}
+	if !strings.Contains(got[0].Content[0].Text, "compactions/0001.input.json") {
+		t.Fatalf("idle checkpoint missing archive reference: %q", got[0].Content[0].Text)
+	}
+	if text := errw.String(); !strings.Contains(text, "100 in") || !strings.Contains(text, "12 out") {
+		t.Fatalf("idle maintenance usage missing from /usage:\n%s", text)
+	}
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want one idle summary", fp.RequestCount())
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read idle telemetry: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"type":"idle_compaction"`)) || !bytes.Contains(raw, []byte(`"outcome":"applied"`)) {
+		t.Fatalf("applied idle telemetry missing:\n%s", raw)
+	}
+}
+
+func TestREPLIdleCompactionDiscardsLateResultAfterInput(t *testing.T) {
+	var out, errw lockedBuffer
+	inSummary := make(chan struct{})
+	releaseSummary := make(chan struct{})
+	partialUsage := llm.Usage{InputTokens: 75, OutputTokens: 5}
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{
+				textDelta("STALE SUMMARY"),
+				{Kind: llm.EventUsage, Usage: &partialUsage},
+			},
+			Stop: llm.StopEndTurn,
+			Block: func(context.Context) {
+				close(inSummary)
+				<-releaseSummary
+			},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("new answer")},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+	app.Agent.SetModel("claude-opus-4-8", 10_000)
+	app.Agent.SetTranscript(compactionSeed())
+	app.IdleCompactionAfter = time.Minute
+	app.IdleCompactionTriggerPercent = 1
+	idleTimer := make(chan time.Time, 1)
+	timerCalls := 0
+	app.idleCompactionAfter = func(time.Duration) <-chan time.Time {
+		timerCalls++
+		if timerCalls == 1 {
+			return idleTimer
+		}
+		return nil
+	}
+	promptFinished := make(chan struct{}, 1)
+	app.OnPromptFinished = func() { promptFinished <- struct{}{} }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- Run(pr, app, nil) }()
+	idleTimer <- time.Now()
+	select {
+	case <-inSummary:
+	case <-time.After(time.Second):
+		t.Fatal("idle compaction did not start")
+	}
+
+	writePipe(t, pw, "continue now\n")
+	select {
+	case <-promptFinished:
+	case <-time.After(time.Second):
+		t.Fatal("submitted prompt waited for idle compaction")
+	}
+	close(releaseSummary)
+	maintenancePath := filepath.Join(app.SessionPath, "raw.ndjson")
+	waitFor(t, func() bool {
+		data, _ := os.ReadFile(maintenancePath)
+		return bytes.Contains(data, []byte(`"type":"idle_compaction"`)) &&
+			bytes.Contains(data, []byte(`"outcome":"discarded"`))
+	}, "discarded idle usage accounting")
+
+	writePipe(t, pw, "/usage\n/exit\n")
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want %d", code, ExitOK)
+	}
+	got := app.Agent.Transcript()
+	if len(got) != 22 || got[0].Origin == llm.MessageOriginCompactionCheckpoint {
+		t.Fatalf("late idle result changed transcript: %d messages, first origin %q", len(got), got[0].Origin)
+	}
+	if text := transcriptTextForTest(got); !strings.Contains(text, "continue now") || !strings.Contains(text, "new answer") || strings.Contains(text, "STALE SUMMARY") {
+		t.Fatalf("transcript after stale idle result:\n%s", text)
+	}
+	if text := errw.String(); !strings.Contains(text, "75 in") || !strings.Contains(text, "5 out") {
+		t.Fatalf("discarded idle usage missing from /usage:\n%s", text)
+	}
+	raw, err := os.ReadFile(maintenancePath)
+	if err != nil {
+		t.Fatalf("read idle telemetry: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"purpose":"idle_compaction"`)) {
+		t.Fatalf("discarded idle maintenance usage missing:\n%s", raw)
+	}
+}
+
+func TestREPLIdleCompactionFinishDuringActivePrompt(t *testing.T) {
+	var out, errw lockedBuffer
+	inSummary := make(chan struct{})
+	releaseSummary := make(chan struct{})
+	promptStarted := make(chan struct{})
+	releasePrompt := make(chan struct{})
+	idleUsage := llm.Usage{InputTokens: 75, OutputTokens: 5}
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{
+				textDelta("STALE SUMMARY"),
+				{Kind: llm.EventUsage, Usage: &idleUsage},
+			},
+			Stop: llm.StopEndTurn,
+			Block: func(context.Context) {
+				close(inSummary)
+				<-releaseSummary
+			},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				ToolID:    "grep-1",
+				ToolName:  "grep",
+				ToolInput: json.RawMessage(`{"pattern":"x"}`),
+			}},
+			Stop: llm.StopToolUse,
+			Block: func(context.Context) {
+				close(promptStarted)
+				<-releasePrompt
+			},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("prompt answer")},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+	app.Agent.SetModel("claude-opus-4-8", 10_000)
+	app.Agent.SetTranscript(compactionSeed())
+	app.IdleCompactionAfter = time.Minute
+	app.IdleCompactionTriggerPercent = 1
+	idleTimer := make(chan time.Time, 1)
+	timerCalls := 0
+	app.idleCompactionAfter = func(time.Duration) <-chan time.Time {
+		timerCalls++
+		if timerCalls == 1 {
+			return idleTimer
+		}
+		return nil
+	}
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- Run(pr, app, nil) }()
+	idleTimer <- time.Now()
+	select {
+	case <-inSummary:
+	case <-time.After(time.Second):
+		t.Fatal("idle compaction did not start")
+	}
+
+	writePipe(t, pw, "keep working\n")
+	select {
+	case <-promptStarted:
+	case <-time.After(time.Second):
+		t.Fatal("submitted prompt did not start")
+	}
+	// Release the worker while the prompt is mid-run, then release the model.
+	// The agent closes the tool-use turn with a PromptCheckpoint that reads the
+	// app's usage maps from the prompt goroutine at the same time the REPL
+	// receives the idle result in the active branch, whose accounting must be
+	// queued and drained after the run — not applied concurrently with it.
+	close(releaseSummary)
+	close(releasePrompt)
+
+	writePipe(t, pw, "/usage\n/exit\n")
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want %d", code, ExitOK)
+	}
+	if got := app.Agent.Transcript(); len(got) != 24 || got[0].Origin == llm.MessageOriginCompactionCheckpoint {
+		t.Fatalf("late idle result changed transcript: %d messages", len(got))
+	}
+	if text := errw.String(); !strings.Contains(text, "75 in") || !strings.Contains(text, "5 out") {
+		t.Fatalf("discarded idle usage missing from /usage:\n%s", text)
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read idle telemetry: %v", err)
+	}
+	if got := bytes.Count(raw, []byte(`"purpose":"idle_compaction"`)); got != 1 {
+		t.Fatalf("idle maintenance usage records = %d, want exactly 1:\n%s", got, raw)
+	}
+	if got := bytes.Count(raw, []byte(`"outcome":"discarded"`)); got != 1 {
+		t.Fatalf("discarded idle events = %d, want exactly 1:\n%s", got, raw)
+	}
+}
+
+func TestREPLExitDoesNotWaitForIdleCompaction(t *testing.T) {
+	var out, errw lockedBuffer
+	inSummary := make(chan struct{})
+	releaseSummary := make(chan struct{})
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("UNUSED SUMMARY")},
+		Stop:   llm.StopEndTurn,
+		Block: func(context.Context) {
+			close(inSummary)
+			<-releaseSummary
+		},
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Agent.SetModel("claude-opus-4-8", 10_000)
+	app.Agent.SetTranscript(compactionSeed())
+	app.IdleCompactionAfter = time.Minute
+	app.IdleCompactionTriggerPercent = 1
+	idleTimer := make(chan time.Time, 1)
+	timerCalls := 0
+	app.idleCompactionAfter = func(time.Duration) <-chan time.Time {
+		timerCalls++
+		if timerCalls == 1 {
+			return idleTimer
+		}
+		return nil
+	}
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- Run(pr, app, nil) }()
+	idleTimer <- time.Now()
+	select {
+	case <-inSummary:
+	case <-time.After(time.Second):
+		t.Fatal("idle compaction did not start")
+	}
+	writePipe(t, pw, "/exit\n")
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want %d", code, ExitOK)
+	}
+	close(releaseSummary)
+
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read idle telemetry: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"type":"idle_compaction"`)) || !bytes.Contains(raw, []byte(`"outcome":"discarded"`)) {
+		t.Fatalf("exit-discard telemetry missing:\n%s", raw)
+	}
+	if got := app.Agent.Transcript(); len(got) != 20 || got[0].Origin == llm.MessageOriginCompactionCheckpoint {
+		t.Fatalf("exit applied in-flight idle candidate: %d messages", len(got))
+	}
+}
+
+func compactionSeed() []llm.Message {
+	var seed []llm.Message
+	for i := range 10 {
+		label := string(rune('a' + i))
+		seed = append(seed,
+			llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: label + " q"}}},
+			llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: label + " a"}}},
+		)
+	}
+	return seed
+}
+
+func transcriptTextForTest(messages []llm.Message) string {
+	var text []string
+	for _, message := range messages {
+		for _, block := range message.Content {
+			if block.Kind == llm.BlockText {
+				text = append(text, block.Text)
+			}
+		}
+	}
+	return strings.Join(text, "\n")
 }
 
 func TestREPLModelCommand(t *testing.T) {

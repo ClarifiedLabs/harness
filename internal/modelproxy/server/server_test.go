@@ -233,6 +233,9 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatalf("read stream response: %v", err)
+	}
 	if captured.Provider != "openai" || captured.ProviderName != "openrouter" ||
 		captured.BaseURL != "https://openrouter.ai/api/v1" || captured.APIKey != "sk-env" ||
 		captured.ContextWindow != 1_050_000 || captured.OutputLimit != 64_000 ||
@@ -1197,6 +1200,15 @@ func TestHandlerCatalogExposesTargetsOnly(t *testing.T) {
 		if _, ok := targets[id]; !ok {
 			t.Fatalf("target %q missing from catalog: %+v", id, handler.Catalog().Targets)
 		}
+	}
+	if target := targets["openai:gpt-5.5"]; target.APIType != "responses" || !target.ContinuationStateful {
+		t.Fatalf("stateful Responses target metadata = %+v", target)
+	}
+	if target := targets["stateless-compatible:gpt-5.5"]; target.APIType != "responses" || target.ContinuationStateful {
+		t.Fatalf("stateless Responses target metadata = %+v", target)
+	}
+	if target := targets["openrouter:openai/gpt-5.5"]; target.APIType != "openai" || target.ContinuationStateful {
+		t.Fatalf("OpenAI chat target metadata = %+v", target)
 	}
 }
 

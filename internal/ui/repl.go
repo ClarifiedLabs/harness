@@ -42,18 +42,20 @@ const (
 
 // ModelSelection is the runtime model/provider bundle returned by App.SwitchModel.
 type ModelSelection struct {
-	Provider          string
-	Model             string
-	RegistryModel     string
-	BaseURL           string
-	Runtime           llm.Provider
-	ContextWindow     int // agent override; 0 means use the registry
-	Reasoning         llm.ReasoningConfig
-	BaseTargetID      string
-	Variant           string
-	FastTargetID      string
-	ServerTools       []llm.ServerTool
-	ResponsesStateful bool
+	Provider                    string
+	Model                       string
+	RegistryModel               string
+	BaseURL                     string
+	Runtime                     llm.Provider
+	ContextWindow               int // agent override; 0 means use the registry
+	Reasoning                   llm.ReasoningConfig
+	BaseTargetID                string
+	Variant                     string
+	FastTargetID                string
+	ServerTools                 []llm.ServerTool
+	ResponsesStateful           bool
+	ManagedContinuationStateful bool
+	DisableManagedContinuation  bool
 	// ReasoningSet says Reasoning intentionally replaces the requested config,
 	// including zero value for provider default.
 	ReasoningSet bool
@@ -71,22 +73,24 @@ type AgentSummary struct {
 // new tool registry, fully reassembled system prompt, and model target runtime
 // for subsequent turns.
 type AgentSelection struct {
-	Name              string
-	Tools             *tools.Registry
-	System            string
-	Provider          string
-	Model             string
-	RegistryModel     string
-	BaseURL           string
-	Runtime           llm.Provider
-	ContextWindow     int
-	Reasoning         llm.ReasoningConfig
-	BaseTargetID      string
-	Variant           string
-	FastTargetID      string
-	ServerTools       []llm.ServerTool
-	ResponsesStateful bool
-	ReasoningSet      bool
+	Name                        string
+	Tools                       *tools.Registry
+	System                      string
+	Provider                    string
+	Model                       string
+	RegistryModel               string
+	BaseURL                     string
+	Runtime                     llm.Provider
+	ContextWindow               int
+	Reasoning                   llm.ReasoningConfig
+	BaseTargetID                string
+	Variant                     string
+	FastTargetID                string
+	ServerTools                 []llm.ServerTool
+	ResponsesStateful           bool
+	ManagedContinuationStateful bool
+	DisableManagedContinuation  bool
+	ReasoningSet                bool
 }
 
 // App bundles the dependencies the REPL and one-shot driver need. main builds it
@@ -135,6 +139,13 @@ type App struct {
 	Prewarm func()
 	// shiftTabPrewarmAfter is test-injectable; production uses time.After.
 	shiftTabPrewarmAfter func(time.Duration) <-chan time.Time
+
+	// IdleCompactionAfter enables speculative interactive compaction after the
+	// REPL has remained idle for this duration. Zero disables it.
+	IdleCompactionAfter          time.Duration
+	IdleCompactionTriggerPercent int
+	// idleCompactionAfter is test-injectable; production uses time.After.
+	idleCompactionAfter func(time.Duration) <-chan time.Time
 
 	AgentName             string         // current agent definition name
 	AvailableAgents       []AgentSummary // sorted agent names/descriptions for /agent listing
@@ -263,6 +274,11 @@ type App struct {
 type queuedMaintenanceUsage struct {
 	agent.MaintenanceUsage
 	modelKey string
+}
+
+type idleCompactionFinished struct {
+	result agent.IdleCompactionResult
+	err    error
 }
 
 // helpText lists the meta-commands (design §10).
@@ -483,6 +499,15 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		restoreEsc                func() error
 		escPresses                escapePresses
 		pendingShiftTabPrewarm    <-chan time.Time
+		pendingIdleCompaction     <-chan time.Time
+		idleCompactionDone        <-chan idleCompactionFinished
+		cancelIdleCompactionWork  context.CancelFunc
+		idleCompactionDiscard     bool
+		idleCompactionModelKey    string
+		idleCompactionStarted     time.Time
+		idleCompactionTrigger     int
+		idleCompactionContext     int
+		idleCompactionMessages    int
 	)
 
 	prewarmAfter := app.shiftTabPrewarmAfter
@@ -509,6 +534,187 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		defer func() { app.Prewarm = prewarm }()
 	}
 
+	idleAfter := app.idleCompactionAfter
+	if idleAfter == nil {
+		idleAfter = time.After
+	}
+	cancelIdleCompaction := func() {
+		pendingIdleCompaction = nil
+		if cancelIdleCompactionWork != nil {
+			idleCompactionDiscard = true
+			cancelIdleCompactionWork()
+		}
+	}
+	scheduleIdleCompaction := func() {
+		if app.IdleCompactionAfter <= 0 || pendingIdleCompaction != nil || idleCompactionDone != nil {
+			return
+		}
+		pendingIdleCompaction = idleAfter(app.IdleCompactionAfter)
+	}
+	startIdleCompaction := func() {
+		pendingIdleCompaction = nil
+		trigger := app.IdleCompactionTriggerPercent
+		if trigger == 0 {
+			trigger = 35
+		}
+		work, ok, err := app.Agent.PrepareIdleCompaction(trigger)
+		if err != nil {
+			app.renderHookNotices([]string{"[idle compact failed: " + err.Error() + "]"})
+			return
+		}
+		if !ok {
+			return
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan idleCompactionFinished, 1)
+		idleCompactionDone = done
+		cancelIdleCompactionWork = cancel
+		idleCompactionDiscard = false
+		idleCompactionModelKey = app.usageKey()
+		idleCompactionStarted = time.Now()
+		idleCompactionTrigger = trigger
+		idleCompactionContext = app.Agent.EstimateContext().Total
+		idleCompactionMessages = len(app.Agent.Transcript())
+		go func() {
+			result, err := work(ctx)
+			done <- idleCompactionFinished{result: result, err: err}
+		}()
+	}
+	finishIdleCompaction := func(finished idleCompactionFinished, allowApply bool) bool {
+		discard := idleCompactionDiscard
+		modelKey := idleCompactionModelKey
+		started := idleCompactionStarted
+		trigger := idleCompactionTrigger
+		contextBefore := idleCompactionContext
+		messagesBefore := idleCompactionMessages
+		if cancelIdleCompactionWork != nil {
+			cancelIdleCompactionWork()
+		}
+		idleCompactionDone = nil
+		cancelIdleCompactionWork = nil
+		idleCompactionDiscard = false
+		idleCompactionModelKey = ""
+		idleCompactionStarted = time.Time{}
+		idleCompactionTrigger = 0
+		idleCompactionContext = 0
+		idleCompactionMessages = 0
+		record := func(outcome string, contextAfter, messagesAfter int) {
+			app.recordEvent(session.Event{
+				Type:       session.EventIdleCompaction,
+				Prompt:     app.PromptNumber,
+				DurationMS: time.Since(started).Milliseconds(),
+				IdleCompaction: &session.IdleCompactionSnapshot{
+					Outcome:             outcome,
+					TriggerPercent:      trigger,
+					ContextTokensBefore: contextBefore,
+					ContextTokensAfter:  contextAfter,
+					MessagesBefore:      messagesBefore,
+					MessagesAfter:       messagesAfter,
+				},
+			})
+		}
+		if finished.result.Usage != (llm.Usage{}) {
+			app.addMaintenanceUsageForModel("idle_compaction", finished.result.Usage, modelKey)
+		}
+		if !allowApply || discard {
+			record("discarded", 0, 0)
+			return false
+		}
+		if finished.err != nil {
+			record("failed", 0, 0)
+			if !errors.Is(finished.err, context.Canceled) && !errors.Is(finished.err, context.DeadlineExceeded) {
+				app.renderHookNotices([]string{"[idle compact failed: " + finished.err.Error() + "]"})
+			}
+			return false
+		}
+		if !finished.result.Prepared {
+			record("no_change", contextBefore, messagesBefore)
+			return false
+		}
+		sink := newAccumulatingSink(app.Renderer, app, app.PromptNumber)
+		applied, err := app.Agent.ApplyIdleCompaction(context.Background(), sink, finished.result)
+		if err != nil {
+			record("failed", 0, 0)
+			app.renderHookNotices([]string{"[idle compact failed: " + err.Error() + "]"})
+			return false
+		}
+		if !applied {
+			record("discarded", 0, 0)
+			return false
+		}
+		record("applied", app.Agent.EstimateContext().Total, len(app.Agent.Transcript()))
+		app.saveOrWarn(app.SessionPath)
+		app.prewarm()
+		return true
+	}
+	// deferIdleCompaction settles an idle-compaction worker that finished while
+	// a prompt run owns app usage/renderer/session state. It queues the usage
+	// for drainMaintenanceUsage and stashes the discard event for the promptDone
+	// branch instead of touching that shared state on the select goroutine.
+	deferredIdleEvents := []session.Event{}
+	deferIdleCompaction := func(finished idleCompactionFinished) {
+		modelKey := idleCompactionModelKey
+		started := idleCompactionStarted
+		trigger := idleCompactionTrigger
+		contextBefore := idleCompactionContext
+		messagesBefore := idleCompactionMessages
+		if cancelIdleCompactionWork != nil {
+			cancelIdleCompactionWork()
+		}
+		idleCompactionDone = nil
+		cancelIdleCompactionWork = nil
+		idleCompactionDiscard = false
+		idleCompactionModelKey = ""
+		idleCompactionStarted = time.Time{}
+		idleCompactionTrigger = 0
+		idleCompactionContext = 0
+		idleCompactionMessages = 0
+		if finished.result.Usage != (llm.Usage{}) {
+			app.QueueMaintenanceUsageForModel(modelKey, agent.MaintenanceUsage{Purpose: "idle_compaction", Usage: finished.result.Usage})
+		}
+		deferredIdleEvents = append(deferredIdleEvents, session.Event{
+			Type:       session.EventIdleCompaction,
+			Prompt:     app.PromptNumber,
+			DurationMS: time.Since(started).Milliseconds(),
+			IdleCompaction: &session.IdleCompactionSnapshot{
+				Outcome:             "discarded",
+				TriggerPercent:      trigger,
+				ContextTokensBefore: contextBefore,
+				MessagesBefore:      messagesBefore,
+			},
+		})
+	}
+	finishOutstandingIdleCompaction := func() {
+		cancelIdleCompaction()
+		if idleCompactionDone == nil {
+			return
+		}
+		select {
+		case finished := <-idleCompactionDone:
+			finishIdleCompaction(finished, false)
+		default:
+			app.recordEvent(session.Event{
+				Type:       session.EventIdleCompaction,
+				Prompt:     app.PromptNumber,
+				DurationMS: time.Since(idleCompactionStarted).Milliseconds(),
+				IdleCompaction: &session.IdleCompactionSnapshot{
+					Outcome:             "discarded",
+					TriggerPercent:      idleCompactionTrigger,
+					ContextTokensBefore: idleCompactionContext,
+					MessagesBefore:      idleCompactionMessages,
+				},
+			})
+			idleCompactionDone = nil
+			cancelIdleCompactionWork = nil
+			idleCompactionDiscard = false
+			idleCompactionModelKey = ""
+			idleCompactionStarted = time.Time{}
+			idleCompactionTrigger = 0
+			idleCompactionContext = 0
+			idleCompactionMessages = 0
+		}
+	}
+
 	requestRead := func(req replReadRequest) {
 		if readPending || inputEnded {
 			return
@@ -528,6 +734,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}
 	finish := func(code int) int {
 		cancelShiftTabPrewarm()
+		finishOutstandingIdleCompaction()
 		if app.Renderer != nil {
 			app.Renderer.StopProgress()
 			app.Renderer.finishAssistantLine()
@@ -554,6 +761,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}
 	forceFinish := func() int {
 		cancelShiftTabPrewarm()
+		cancelIdleCompaction()
 		disableActivePromptTerm()
 		if app.Renderer != nil {
 			app.Renderer.StopProgress()
@@ -565,6 +773,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		return ExitInterrupt
 	}
 	startRun := func(run func()) {
+		cancelIdleCompaction()
 		done := make(chan struct{}, 1)
 		active = true
 		plainPromptRead = false
@@ -722,6 +931,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}
 	handleIdleReadResult := func(res replReadResult) (exit bool, code int) {
 		readPending = false
+		cancelIdleCompaction()
 		if res.input.ended {
 			inputEnded = true
 			return false, ExitOK
@@ -765,6 +975,8 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			select {
 			case <-exit:
 				return forceFinish()
+			case finished := <-idleCompactionDone:
+				deferIdleCompaction(finished)
 			case <-promptDone:
 				if app.Renderer != nil {
 					app.Renderer.StopProgress()
@@ -805,6 +1017,14 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				activeReadPause = false
 				promptDone = nil
 				escPresses.reset()
+				// The run no longer owns usage/renderer/session state: flush the
+				// accounting deferred while it was active, exactly once, before the
+				// next beginPrompt or save drains the queue.
+				for _, ev := range deferredIdleEvents {
+					app.recordEvent(ev)
+				}
+				deferredIdleEvents = nil
+				app.drainMaintenanceUsage()
 				// Recover any steer submitted during the prompt that the loop never
 				// consumed (the prompt ended without another turn to inject into, or
 				// was broken by budget/cancel). Run it as the next prompt so the
@@ -937,6 +1157,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			warnInputErr()
 			return finish(ExitOK)
 		}
+		scheduleIdleCompaction()
 		if !promptPrinted {
 			prompt = renderPrompt()
 			app.pollBackgroundNotices()
@@ -961,6 +1182,22 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		case <-exit:
 			// SIGINT exit request at the idle prompt (design §8.4).
 			return finish(ExitInterrupt)
+		case <-pendingIdleCompaction:
+			startIdleCompaction()
+		case finished := <-idleCompactionDone:
+			// Prefer already-submitted input over applying a candidate that
+			// became ready at the same instant.
+			select {
+			case res := <-inputs:
+				finishIdleCompaction(finished, false)
+				if exit, code := handleIdleReadResult(res); exit {
+					return finish(code)
+				}
+			default:
+				if finishIdleCompaction(finished, true) {
+					promptPrinted = false
+				}
+			}
 		case <-pendingShiftTabPrewarm:
 			expired := pendingShiftTabPrewarm
 			// If a submitted line and the debounce become ready together, honor the
@@ -2231,6 +2468,7 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	app.Agent.SetReasoning(selection.Reasoning)
 	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
+	app.Agent.SetManagedContinuation(selection.ManagedContinuationStateful, selection.DisableManagedContinuation)
 	if selection.BaseTargetID == "" {
 		selection.BaseTargetID = selection.Model
 	}
@@ -2790,6 +3028,7 @@ func (app *App) applyAgentSwitchWithPrewarm(name string, prewarm bool) error {
 	app.FastTargetID = selection.FastTargetID
 	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
+	app.Agent.SetManagedContinuation(selection.ManagedContinuationStateful, selection.DisableManagedContinuation)
 	app.Agent.ResetProxySessionID()
 	app.AgentName = selection.Name
 	app.System = selection.System // so saved sessions capture the agent's prompt
@@ -3411,10 +3650,40 @@ func (app *App) save(path string) error {
 		return nil
 	}
 	app.drainMaintenanceUsage()
-	if err := app.ensureSessionTree(); err != nil {
+	s, err := app.sessionSnapshot(nil)
+	if err != nil {
 		return err
 	}
-	s := session.Session{
+	return s.SaveConsolidated(path)
+}
+
+func (app *App) sessionSnapshot(current *agent.PromptUsage) (session.Session, error) {
+	if err := app.ensureSessionTree(); err != nil {
+		return session.Session{}, err
+	}
+	usage := app.usage
+	var usageByModel map[string]session.UsageTotals
+	if len(app.usageByModel) > 0 {
+		usageByModel = make(map[string]session.UsageTotals, len(app.usageByModel))
+		maps.Copy(usageByModel, app.usageByModel)
+	}
+	if current != nil {
+		cost, known := app.promptCost(current.Usage)
+		if !known && app.Registry != nil {
+			cost, known = app.Registry.Cost(app.usageKey(), current.Usage)
+		}
+		if !known {
+			cost = 0
+		}
+		addTotals(&usage, current.Usage, cost)
+		if usageByModel == nil {
+			usageByModel = make(map[string]session.UsageTotals)
+		}
+		bucket := usageByModel[app.usageKey()]
+		addTotals(&bucket, current.Usage, cost)
+		usageByModel[app.usageKey()] = bucket
+	}
+	return session.Session{
 		Version:         session.Version,
 		Provider:        app.Provider,
 		Model:           app.Model,
@@ -3430,10 +3699,9 @@ func (app *App) save(path string) error {
 		ResponseState:   app.Agent.ResponseState(),
 		Todos:           app.todoSnapshot(),
 		Plans:           app.planSnapshot(),
-		Usage:           app.usage,
-		UsageByModel:    app.usageByModel,
-	}
-	return s.Save(path)
+		Usage:           usage,
+		UsageByModel:    usageByModel,
+	}, nil
 }
 
 func (app *App) ensureSessionTree() error {
@@ -4345,6 +4613,66 @@ func (s *accumulatingSink) MaintenanceComplete(u agent.MaintenanceUsage) {
 	})
 }
 
+func (s *accumulatingSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
+	if s == nil || s.app == nil || s.app.SessionPath == "" {
+		return
+	}
+	state, err := s.app.sessionSnapshot(&checkpoint.Usage)
+	if err != nil {
+		fmt.Fprintf(s.app.Errw, "[checkpoint failed: %v]\n", err)
+		return
+	}
+	started := time.Now()
+	switch checkpoint.Kind {
+	case agent.PromptCheckpointClosedTurn:
+		err = session.SaveClosedTurnCheckpoint(s.app.SessionPath, state, s.prompt, checkpoint.Turn)
+	default:
+		err = session.SaveActiveTurnCheckpoint(
+			s.app.SessionPath,
+			state,
+			string(checkpoint.Kind),
+			s.prompt,
+			checkpoint.Turn,
+		)
+	}
+	elapsed := time.Since(started)
+	if err != nil {
+		fmt.Fprintf(s.app.Errw, "[checkpoint failed: %v]\n", err)
+		return
+	}
+	s.app.recordEvent(session.Event{
+		Type:         session.EventCheckpoint,
+		Prompt:       s.prompt,
+		Turn:         checkpoint.Turn,
+		Purpose:      string(checkpoint.Kind),
+		DurationMS:   elapsed.Milliseconds(),
+		MessageCount: len(s.app.Agent.Transcript()),
+	})
+}
+
+func (s *accumulatingSink) RetentionApplied(event agent.RetentionEvent) {
+	s.app.recordEvent(session.Event{
+		Type:      session.EventRetention,
+		Prompt:    s.prompt,
+		Turn:      s.turn + 1,
+		Retention: retentionSnapshot(event),
+	})
+}
+
+func retentionSnapshot(event agent.RetentionEvent) *session.RetentionSnapshot {
+	return &session.RetentionSnapshot{
+		Policy:              event.Policy,
+		Trigger:             event.Trigger,
+		BlocksTrimmed:       event.BlocksTrimmed,
+		BytesBefore:         event.BytesBefore,
+		BytesAfter:          event.BytesAfter,
+		ContextTokensBefore: event.ContextTokensBefore,
+		ContextTokensAfter:  event.ContextTokensAfter,
+		ResponseStateReset:  event.ResponseStateReset,
+		NextRequestStateful: event.NextRequestStateful,
+	}
+}
+
 func (s *accumulatingSink) AddHookContext(ctx []string) {
 	s.app.AddHookContext(ctx)
 }
@@ -4455,10 +4783,11 @@ func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
 		s.r.cumInput, s.r.cumOutput, s.r.cumCost)
 	usage := u.Usage
 	s.app.recordEvent(session.Event{
-		Type:    session.EventPromptUsage,
-		Prompt:  s.prompt,
-		Display: line,
-		Usage:   &usage,
+		Type:              session.EventPromptUsage,
+		Prompt:            s.prompt,
+		Display:           line,
+		Usage:             &usage,
+		TerminationReason: string(u.TerminationReason),
 	})
 }
 

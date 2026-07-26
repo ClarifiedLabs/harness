@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"harness/internal/agent"
 	"harness/internal/llm"
@@ -17,7 +18,6 @@ import (
 	"harness/internal/session"
 	"harness/internal/todo"
 	"harness/internal/tools"
-	"harness/prompts"
 )
 
 type fakeChildTool struct {
@@ -40,6 +40,55 @@ type fakeBackgroundStarter struct {
 func (f *fakeBackgroundStarter) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.BackgroundJobInfo, error) {
 	f.req = req
 	return tools.BackgroundJobInfo{ID: "bg_delegate", Status: "running"}, nil
+}
+
+type continuationFixture struct {
+	runner      *Runner
+	provider    *llmtest.FakeProvider
+	state       *State
+	sessionPath string
+}
+
+func newContinuationFixture(t *testing.T, contextWindow int, stateful bool, steps ...llmtest.Step) continuationFixture {
+	t.Helper()
+	provider := llmtest.New("fake", steps...)
+	sessionPath := filepath.Join(t.TempDir(), "session")
+	runtime := Runtime{
+		Provider:          provider,
+		ProviderName:      "responses",
+		Model:             "model-v1",
+		ContextWindow:     contextWindow,
+		Registry:          llm.NewRegistry(nil),
+		ResponsesStateful: stateful,
+		System:            "base system",
+		SessionPath:       sessionPath,
+		CacheAffinityID:   "parent-cache",
+	}
+	state := NewState(runtime)
+	catalog := &tools.Registry{}
+	catalog.Register(todo.NewTool(todo.NewStore()))
+	runner := NewRunner(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
+		if name == "" {
+			name = "worker"
+		}
+		return Launch{
+			Provider:          runtime.Provider,
+			ProviderName:      runtime.ProviderName,
+			Model:             runtime.Model,
+			ContextWindow:     runtime.ContextWindow,
+			Registry:          runtime.Registry,
+			ResponsesStateful: runtime.ResponsesStateful,
+			System:            runtime.System,
+			Agent:             name,
+			Tools:             catalog,
+		}, nil
+	}, Options{MaxTurns: 4, DisableAutoCompaction: true})
+	return continuationFixture{
+		runner:      runner,
+		provider:    provider,
+		state:       state,
+		sessionPath: sessionPath,
+	}
 }
 
 func TestDelegateSchemaListsOnlyDelegatableAgents(t *testing.T) {
@@ -287,14 +336,522 @@ func TestDelegateRunsChildAgentAndReturnsFinalReport(t *testing.T) {
 	if req.Model != "claude-opus-4-8" {
 		t.Fatalf("request model = %q", req.Model)
 	}
-	if req.System != "parent system\n\n"+prompts.DelegateChild() {
-		t.Fatalf("child system = %q, want parent system plus child suffix", req.System)
+	wantSystem := childBudgetSystemPrompt(childSystemPrompt("parent system"), 3)
+	if req.System != wantSystem {
+		t.Fatalf("child system = %q, want %q", req.System, wantSystem)
 	}
 	if len(req.Messages) != 1 || req.Messages[0].Content[0].Text != "inspect the repo" {
 		t.Fatalf("child transcript = %+v", req.Messages)
 	}
 	if len(req.Tools) != 1 || req.Tools[0].Name != "read_file" {
 		t.Fatalf("child tools = %+v, want only read_file", req.Tools)
+	}
+}
+
+func TestDelegateImplementationModeInjectsMilestonesAndPersistsMode(t *testing.T) {
+	childTools := &tools.Registry{}
+	childTools.Register(fakeChildTool{name: "write_file", out: "changed"})
+	work := func(id string) llmtest.Step {
+		return llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				ToolID:    id,
+				ToolName:  "write_file",
+				ToolInput: json.RawMessage(`{"path":"x"}`),
+			}},
+			Stop: llm.StopToolUse,
+		}
+	}
+	fp := llmtest.New("fake", work("one"), work("two"), work("three"), llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "implemented and verified"}},
+		Stop:   llm.StopEndTurn,
+	})
+	sessionPath := filepath.Join(t.TempDir(), "session")
+	tool := New(func() Runtime {
+		return Runtime{Provider: fp, Model: "model", Registry: llm.NewRegistry(nil), SessionPath: sessionPath}
+	}, func(runtime Runtime, _ string) (Launch, error) {
+		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools}, nil
+	}, Options{MaxTurns: 4})
+
+	result, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"implement it","mode":"implementation"}`))
+	if err != nil {
+		t.Fatalf("RunMetered: %v", err)
+	}
+	if !strings.Contains(result.Text, "mode implementation, termination model_completed") {
+		t.Fatalf("delegate receipt = %q", result.Text)
+	}
+	if len(fp.Requests) != 4 {
+		t.Fatalf("requests = %d, want 4", len(fp.Requests))
+	}
+	system := fp.Requests[0].System
+	for _, want := range []string{
+		"[implementation mode]",
+		"turn 1 (25%)",
+		"turn 2 (50%)",
+		"turn 3 (75%)",
+	} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("implementation system missing %q: %q", want, system)
+		}
+	}
+	requestText := func(index int) string {
+		var parts []string
+		for _, msg := range fp.Requests[index].Messages {
+			for _, block := range msg.Content {
+				if block.Kind == llm.BlockText {
+					parts = append(parts, block.Text)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	for index, marker := range []string{"25% after turn 1", "50% after turn 2", "75% after turn 3"} {
+		if got := requestText(index + 1); !strings.Contains(got, marker) {
+			t.Fatalf("request %d missing milestone %q: %q", index+2, marker, got)
+		}
+	}
+	children, err := os.ReadDir(filepath.Join(sessionPath, "children"))
+	if err != nil || len(children) != 1 {
+		t.Fatalf("children = %v, err = %v", children, err)
+	}
+	meta := readDelegateChildMeta(t, filepath.Join(sessionPath, "children", children[0].Name()))
+	if meta.Mode != ModeImplementation {
+		t.Fatalf("child mode = %q, want implementation", meta.Mode)
+	}
+}
+
+func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *testing.T) {
+	fixture := newContinuationFixture(t, 100_000, true,
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				ToolID:    "todo-source",
+				ToolName:  "update_todos",
+				ToolInput: json.RawMessage(`{"todos":[{"content":"finish child work","status":"in_progress"}]}`),
+			}},
+			Stop:       llm.StopToolUse,
+			ResponseID: "resp-tools",
+		},
+		llmtest.Step{
+			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source handoff"}},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "resp-source",
+		},
+		llmtest.Step{
+			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "continued completion"}},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "resp-continued",
+		},
+	)
+	budget := 4
+	source, err := fixture.runner.Run(context.Background(), RunRequest{
+		Task:     "start the work",
+		Agent:    "worker",
+		Mode:     ModeImplementation,
+		MaxTurns: &budget,
+		ChildID:  "source",
+	}, nil)
+	if err != nil {
+		t.Fatalf("source Run: %v", err)
+	}
+	continued, err := fixture.runner.Run(context.Background(), RunRequest{
+		Task:            "finish and verify it",
+		ContinueChildID: "source",
+		ChildID:         "continued",
+	}, nil)
+	if err != nil {
+		t.Fatalf("continuation Run: %v", err)
+	}
+	if continued.ChildID == source.ChildID || continued.ContinuedFrom != "source" || continued.EffectiveMaxTurns != budget || continued.Mode != ModeImplementation {
+		t.Fatalf("continuation result = %+v", continued)
+	}
+	if !strings.Contains(continued.Report, "continued from source") {
+		t.Fatalf("continuation receipt = %q", continued.Report)
+	}
+	if len(fixture.provider.Requests) != 3 {
+		t.Fatalf("model requests = %d, want two source plus one continuation", len(fixture.provider.Requests))
+	}
+	request := fixture.provider.Requests[2]
+	if request.PreviousResponseID != "resp-source" {
+		t.Fatalf("continuation previous response = %q, want resp-source", request.PreviousResponseID)
+	}
+	if len(request.Messages) != 1 || !strings.Contains(request.Messages[0].Content[0].Text, "[delegate continuation from source]") {
+		t.Fatalf("continuation delta messages = %+v", request.Messages)
+	}
+	if len(request.RequestContext) != 1 || !strings.Contains(request.RequestContext[0], "finish child work") {
+		t.Fatalf("continuation todo context = %+v", request.RequestContext)
+	}
+
+	sourceDir := session.ChildSessionDir(fixture.sessionPath, "source")
+	continuedDir := session.ChildSessionDir(fixture.sessionPath, "continued")
+	sourceState, err := session.Load(sourceDir)
+	if err != nil {
+		t.Fatalf("load source state: %v", err)
+	}
+	continuedState, err := session.Load(continuedDir)
+	if err != nil {
+		t.Fatalf("load continued state: %v", err)
+	}
+	if continuedState.ProxySessionID != sourceState.ProxySessionID || continuedState.CacheAffinityID != sourceState.CacheAffinityID {
+		t.Fatalf(
+			"continuation session IDs = proxy %q cache %q, want source proxy %q cache %q",
+			continuedState.ProxySessionID,
+			continuedState.CacheAffinityID,
+			sourceState.ProxySessionID,
+			sourceState.CacheAffinityID,
+		)
+	}
+	if continuedState.ResponseState == nil || continuedState.ResponseState.PreviousResponseID != "resp-continued" {
+		t.Fatalf("continued response state = %+v", continuedState.ResponseState)
+	}
+	if len(continuedState.Todos) != 1 || continuedState.Todos[0].Content != "finish child work" {
+		t.Fatalf("continued todos = %+v", continuedState.Todos)
+	}
+	if len(continuedState.Messages) != len(sourceState.Messages)+2 {
+		t.Fatalf("continued messages = %d, want source %d + 2", len(continuedState.Messages), len(sourceState.Messages))
+	}
+	if got := continuedState.Messages[len(sourceState.Messages)].Content[0].Text; !strings.Contains(got, "[delegate continuation from source]") || !strings.Contains(got, "finish and verify it") {
+		t.Fatalf("continued user prompt = %q", got)
+	}
+
+	sourceMeta := readDelegateChildMeta(t, sourceDir)
+	continuedMeta := readDelegateChildMeta(t, continuedDir)
+	if sourceMeta.Status != session.ChildStatusCompleted || sourceMeta.ContinuedFrom != "" {
+		t.Fatalf("source metadata changed unexpectedly: %+v", sourceMeta)
+	}
+	if continuedMeta.ContinuedFrom != "source" || continuedMeta.Mode != ModeImplementation || continuedMeta.RuntimeFingerprint == "" || continuedMeta.RuntimeFingerprint != sourceMeta.RuntimeFingerprint {
+		t.Fatalf("continued metadata = %+v, source fingerprint %q", continuedMeta, sourceMeta.RuntimeFingerprint)
+	}
+	if continuedMeta.ContinuationMode != continuationModeRetained ||
+		continuedMeta.ContinuationBefore != continuedMeta.ContinuationAfter ||
+		continuedMeta.ContinuationWindow != 100_000 {
+		t.Fatalf("retained continuation metadata = %+v", continuedMeta)
+	}
+	if sourceMeta.RequestedAgent != "worker" || continuedMeta.RequestedAgent != "worker" {
+		t.Fatalf("requested agent was not inherited exactly: source %q continued %q", sourceMeta.RequestedAgent, continuedMeta.RequestedAgent)
+	}
+	if continuedMeta.RequestedMaxTurns != nil || continuedMeta.EffectiveMaxTurns != budget {
+		t.Fatalf("continued budget metadata = %+v, want inherited effective budget", continuedMeta)
+	}
+	if continuedMeta.TaskPreview != "finish and verify it" {
+		t.Fatalf("continued task preview = %q, want raw task", continuedMeta.TaskPreview)
+	}
+}
+
+func TestDelegateContinuationAcceptsAbandonedChildCheckpoint(t *testing.T) {
+	fixture := newContinuationFixture(
+		t,
+		100_000,
+		false,
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "partial handoff"}}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "recovered"}}, Stop: llm.StopEndTurn},
+	)
+	if _, err := fixture.runner.Run(context.Background(), RunRequest{Task: "start", ChildID: "source"}, nil); err != nil {
+		t.Fatalf("source Run: %v", err)
+	}
+	sourceDir := session.ChildSessionDir(fixture.sessionPath, "source")
+	meta := readDelegateChildMeta(t, sourceDir)
+	meta.Status = session.ChildStatusAbandoned
+	meta.TerminationReason = "cancelled"
+	if _, err := session.SaveChildMeta(fixture.sessionPath, meta); err != nil {
+		t.Fatalf("SaveChildMeta: %v", err)
+	}
+
+	result, err := fixture.runner.Run(context.Background(), RunRequest{
+		Task:            "continue safely",
+		ContinueChildID: "source",
+		ChildID:         "continued",
+	}, nil)
+	if err != nil {
+		t.Fatalf("continuation Run: %v", err)
+	}
+	if result.ContinuedFrom != "source" || !strings.Contains(result.Report, "continued from source") {
+		t.Fatalf("continuation result = %+v", result)
+	}
+}
+
+func TestDelegateContinuationRejectsUnrelatedNonterminalAndNonresumableChildren(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mutate    func(t *testing.T, fixture continuationFixture, meta *session.ChildMeta)
+		wantError string
+	}{
+		{
+			name: "different parent",
+			mutate: func(_ *testing.T, _ continuationFixture, meta *session.ChildMeta) {
+				meta.ParentID = "other-parent"
+			},
+			wantError: "belongs to parent",
+		},
+		{
+			name: "still running",
+			mutate: func(_ *testing.T, _ continuationFixture, meta *session.ChildMeta) {
+				meta.Status = session.ChildStatusRunning
+			},
+			wantError: "is not terminal",
+		},
+		{
+			name: "legacy metadata",
+			mutate: func(_ *testing.T, _ continuationFixture, meta *session.ChildMeta) {
+				meta.RuntimeFingerprint = ""
+			},
+			wantError: "saved runtime fingerprint is unavailable",
+		},
+		{
+			name: "missing state",
+			mutate: func(t *testing.T, fixture continuationFixture, _ *session.ChildMeta) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(session.ChildSessionDir(fixture.sessionPath, "source"), "state.json")); err != nil {
+					t.Fatalf("remove source state: %v", err)
+				}
+			},
+			wantError: "load resumable state",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newContinuationFixture(t, 100_000, false, llmtest.Step{
+				Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source done"}},
+				Stop:   llm.StopEndTurn,
+			})
+			if _, err := fixture.runner.Run(context.Background(), RunRequest{Task: "source", ChildID: "source"}, nil); err != nil {
+				t.Fatalf("source Run: %v", err)
+			}
+			sourceDir := session.ChildSessionDir(fixture.sessionPath, "source")
+			meta := readDelegateChildMeta(t, sourceDir)
+			tc.mutate(t, fixture, &meta)
+			if _, err := session.SaveChildMeta(fixture.sessionPath, meta); err != nil {
+				t.Fatalf("save mutated metadata: %v", err)
+			}
+			_, err := fixture.runner.Run(context.Background(), RunRequest{
+				Task:            "continue",
+				ContinueChildID: "source",
+				ChildID:         "target",
+			}, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("continuation error = %v, want %q", err, tc.wantError)
+			}
+			if len(fixture.provider.Requests) != 1 {
+				t.Fatalf("rejected continuation made %d model requests, want source request only", len(fixture.provider.Requests))
+			}
+			if _, err := os.Stat(session.ChildSessionDir(fixture.sessionPath, "target")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rejected continuation created target child: %v", err)
+			}
+		})
+	}
+}
+
+func TestDelegateContinuationRejectsContractAndRuntimeMismatches(t *testing.T) {
+	fixture := newContinuationFixture(t, 100_000, false, llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source done"}},
+		Stop:   llm.StopEndTurn,
+	})
+	if _, err := fixture.runner.Run(context.Background(), RunRequest{Task: "source", ChildID: "source"}, nil); err != nil {
+		t.Fatalf("source Run: %v", err)
+	}
+	three := 3
+	for _, tc := range []struct {
+		name      string
+		req       RunRequest
+		wantError string
+	}{
+		{
+			name:      "turn budget",
+			req:       RunRequest{Task: "continue", ContinueChildID: "source", ChildID: "budget-target", MaxTurns: &three},
+			wantError: "turn budget 3 does not match saved budget 4",
+		},
+		{
+			name:      "mode",
+			req:       RunRequest{Task: "continue", ContinueChildID: "source", ChildID: "mode-target", Mode: ModeImplementation},
+			wantError: `mode "implementation" does not match saved mode ""`,
+		},
+		{
+			name:      "agent",
+			req:       RunRequest{Task: "continue", ContinueChildID: "source", ChildID: "agent-target", Agent: "reviewer"},
+			wantError: `agent "reviewer" does not match saved agent "worker"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := fixture.runner.Run(context.Background(), tc.req, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("continuation error = %v, want %q", err, tc.wantError)
+			}
+		})
+	}
+	_, err := fixture.runner.Run(context.Background(), RunRequest{
+		Task:            "continue",
+		ContinueChildID: "../source",
+		ChildID:         "path-target",
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "contains unsupported characters") {
+		t.Fatalf("unsafe continuation id error = %v", err)
+	}
+	runtime := fixture.state.Snapshot()
+	runtime.Model = "model-v2"
+	fixture.state.Set(runtime)
+	_, err = fixture.runner.Run(context.Background(), RunRequest{
+		Task:            "continue",
+		ContinueChildID: "source",
+		ChildID:         "runtime-target",
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "provider, model, prompt, tools, or runtime policy changed") {
+		t.Fatalf("runtime mismatch error = %v", err)
+	}
+	if len(fixture.provider.Requests) != 1 {
+		t.Fatalf("rejected continuations made %d model requests, want source request only", len(fixture.provider.Requests))
+	}
+}
+
+func TestDelegateContinuationRejectsRetentionPolicyChange(t *testing.T) {
+	fixture := newContinuationFixture(t, 100_000, false, llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source done"}},
+		Stop:   llm.StopEndTurn,
+	})
+	fixture.runner.opts.RetentionPolicy = agent.RetentionPolicyAge
+	if _, err := fixture.runner.Run(context.Background(), RunRequest{Task: "source", ChildID: "source"}, nil); err != nil {
+		t.Fatalf("source Run: %v", err)
+	}
+	fixture.runner.opts.RetentionPolicy = agent.RetentionPolicyPressure
+	_, err := fixture.runner.Run(context.Background(), RunRequest{
+		Task:            "continue",
+		ContinueChildID: "source",
+		ChildID:         "target",
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "provider, model, prompt, tools, or runtime policy changed") {
+		t.Fatalf("retention-policy mismatch error = %v", err)
+	}
+	if len(fixture.provider.Requests) != 1 {
+		t.Fatalf("rejected continuation made %d model requests, want source request only", len(fixture.provider.Requests))
+	}
+}
+
+func TestDelegateContinuationCompactsRetainedContextAboveLimit(t *testing.T) {
+	fixture := newContinuationFixture(
+		t,
+		1_000,
+		false,
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: strings.Repeat("source details ", 220)}},
+			Stop:   llm.StopEndTurn,
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "all source state preserved"}},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 120, OutputTokens: 12},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "continued after checkpoint"}},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 80, OutputTokens: 8},
+		},
+	)
+	if _, err := fixture.runner.Run(context.Background(), RunRequest{
+		Task:    "inspect and retain the important state",
+		ChildID: "source",
+	}, nil); err != nil {
+		t.Fatalf("source Run: %v", err)
+	}
+	sourceDir := session.ChildSessionDir(fixture.sessionPath, "source")
+	sourceBefore, err := os.ReadFile(filepath.Join(sourceDir, "state.json"))
+	if err != nil {
+		t.Fatalf("read source state: %v", err)
+	}
+	result, err := fixture.runner.Run(context.Background(), RunRequest{
+		Task:            "continue",
+		ContinueChildID: "source",
+		ChildID:         "target",
+	}, nil)
+	if err != nil {
+		t.Fatalf("compact continuation: %v", err)
+	}
+	if result.ContinuationMode != continuationModeCheckpoint ||
+		!strings.Contains(result.Report, "continued from source via compact checkpoint") {
+		t.Fatalf("compact continuation result = %+v", result)
+	}
+	if result.Usage.InputTokens != 200 || result.Usage.OutputTokens != 20 {
+		t.Fatalf("compact continuation usage = %+v, want summary plus continued request", result.Usage)
+	}
+	if len(fixture.provider.Requests) != 3 {
+		t.Fatalf("model requests = %d, want source, checkpoint, continuation", len(fixture.provider.Requests))
+	}
+	request := fixture.provider.Requests[2]
+	if request.PreviousResponseID != "" || len(request.Messages) != 2 ||
+		request.Messages[0].Origin != llm.MessageOriginCompactionCheckpoint {
+		t.Fatalf("compact continuation request = previous %q messages %+v", request.PreviousResponseID, request.Messages)
+	}
+	targetDir := session.ChildSessionDir(fixture.sessionPath, "target")
+	targetState, err := session.Load(targetDir)
+	if err != nil {
+		t.Fatalf("load target state: %v", err)
+	}
+	if targetState.Messages[0].Origin != llm.MessageOriginCompactionCheckpoint ||
+		targetState.Messages[0].Compaction == nil ||
+		targetState.Messages[0].Compaction.Summary != "all source state preserved" {
+		t.Fatalf("target checkpoint = %+v", targetState.Messages[0])
+	}
+	if targetState.Usage.InputTokens != 200 || targetState.Usage.OutputTokens != 20 {
+		t.Fatalf("target state usage = %+v, want summary plus continuation", targetState.Usage)
+	}
+	if matches, err := filepath.Glob(filepath.Join(targetDir, "compactions", "*.input.json")); err != nil || len(matches) != 1 {
+		t.Fatalf("continuation archives = %v, err = %v", matches, err)
+	}
+	sourceAfter, err := os.ReadFile(filepath.Join(sourceDir, "state.json"))
+	if err != nil || !slices.Equal(sourceBefore, sourceAfter) {
+		t.Fatalf("source state changed during compact continuation: err=%v", err)
+	}
+	meta := readDelegateChildMeta(t, targetDir)
+	if meta.ContinuationMode != continuationModeCheckpoint ||
+		meta.ContinuationBefore <= meta.ContinuationAfter ||
+		meta.ContinuationWindow != 1_000 {
+		t.Fatalf("compact continuation metadata = %+v", meta)
+	}
+}
+
+func TestDelegateContinuationRejectsCompactCheckpointAboveLimit(t *testing.T) {
+	fixture := newContinuationFixture(
+		t,
+		200,
+		false,
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source done"}},
+			Stop:   llm.StopEndTurn,
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "summary"}},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 20, OutputTokens: 2},
+		},
+	)
+	if _, err := fixture.runner.Run(context.Background(), RunRequest{
+		Task:    strings.Repeat("large retained context ", 100),
+		ChildID: "source",
+	}, nil); err != nil {
+		t.Fatalf("source Run: %v", err)
+	}
+	result, err := fixture.runner.Run(context.Background(), RunRequest{
+		Task:            "continue",
+		ContinueChildID: "source",
+		ChildID:         "target",
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "compact checkpoint is about") ||
+		!strings.Contains(err.Error(), "above the 60% continuation limit") {
+		t.Fatalf("context-pressure error = %v", err)
+	}
+	if len(fixture.provider.Requests) != 2 {
+		t.Fatalf("context-rejected continuation made %d model requests, want source plus checkpoint", len(fixture.provider.Requests))
+	}
+	if result.Usage.InputTokens != 20 || result.Usage.OutputTokens != 2 {
+		t.Fatalf("context-rejected continuation usage = %+v, want checkpoint usage", result.Usage)
+	}
+	meta := readDelegateChildMeta(t, session.ChildSessionDir(fixture.sessionPath, "target"))
+	if meta.Status != session.ChildStatusFailed ||
+		meta.ContinuationMode != continuationModeCheckpoint ||
+		meta.ContinuationBefore == 0 ||
+		meta.ContinuationAfter == 0 ||
+		!strings.Contains(meta.Error, "above the 60% continuation limit") {
+		t.Fatalf("context-rejected target metadata = %+v", meta)
+	}
+	if result.TranscriptPath == "" {
+		t.Fatal("context-rejected continuation should retain its forensic child path")
 	}
 }
 
@@ -328,7 +885,7 @@ func TestDelegateIgnoresLegacyToolsFieldAndUsesConfiguredTools(t *testing.T) {
 
 func TestDelegateSchemaOmitsPerCallTools(t *testing.T) {
 	state := NewState(Runtime{ToolNames: []string{"read_file", "rg", "delegate"}})
-	tool := New(state.Snapshot, nil, Options{})
+	tool := New(state.Snapshot, nil, Options{MaxTurns: 37})
 
 	var schema struct {
 		Properties map[string]json.RawMessage `json:"properties"`
@@ -338,6 +895,54 @@ func TestDelegateSchemaOmitsPerCallTools(t *testing.T) {
 	}
 	if _, ok := schema.Properties["tools"]; ok {
 		t.Fatalf("delegate schema unexpectedly advertises per-call tools: %s", tool.Schema())
+	}
+	if _, ok := schema.Properties["continue_child_id"]; !ok {
+		t.Fatalf("delegate schema is missing continue_child_id: %s", tool.Schema())
+	}
+	var maxTurns struct {
+		Minimum int `json:"minimum"`
+		Maximum int `json:"maximum"`
+	}
+	if err := json.Unmarshal(schema.Properties["max_turns"], &maxTurns); err != nil {
+		t.Fatalf("max_turns schema: %v", err)
+	}
+	if maxTurns.Minimum != 1 || maxTurns.Maximum != 37 {
+		t.Fatalf("max_turns bounds = %+v, want 1..37", maxTurns)
+	}
+	var mode struct {
+		Enum []string `json:"enum"`
+	}
+	if err := json.Unmarshal(schema.Properties["mode"], &mode); err != nil {
+		t.Fatalf("mode schema: %v", err)
+	}
+	if !slices.Equal(mode.Enum, []string{ModeImplementation}) {
+		t.Fatalf("mode enum = %v, want implementation", mode.Enum)
+	}
+	var access struct {
+		Enum []string `json:"enum"`
+	}
+	if err := json.Unmarshal(schema.Properties["access"], &access); err != nil {
+		t.Fatalf("access schema: %v", err)
+	}
+	if !slices.Equal(access.Enum, []string{tools.BackgroundAccessReadOnly, tools.BackgroundAccessExclusive}) {
+		t.Fatalf("access enum = %v", access.Enum)
+	}
+	if _, ok := schema.Properties["resource_key"]; !ok {
+		t.Fatalf("delegate schema is missing resource_key: %s", tool.Schema())
+	}
+	if _, err := DecodeRunRequest(json.RawMessage(`{"task":"inspect","mode":"review"}`), "delegate"); err == nil || !strings.Contains(err.Error(), `mode must be "implementation"`) {
+		t.Fatalf("invalid mode error = %v", err)
+	}
+	if _, err := DecodeRunRequest(json.RawMessage(`{"task":"inspect","access":"read_only"}`), "delegate"); err == nil || !strings.Contains(err.Error(), "require background:true") {
+		t.Fatalf("foreground lease error = %v", err)
+	}
+	decoded, err := DecodeRunRequest(json.RawMessage(`{"task":"inspect","continue_child_id":" child_1 "}`), "delegate")
+	if err != nil || decoded.ContinueChildID != "child_1" {
+		t.Fatalf("decoded continuation = %+v, err = %v", decoded, err)
+	}
+	runner := NewRunner(nil, nil, Options{})
+	if _, err := runner.Run(context.Background(), RunRequest{Task: "inspect", Mode: "review"}, nil); err == nil || !strings.Contains(err.Error(), `mode must be "implementation"`) {
+		t.Fatalf("direct runner invalid mode error = %v", err)
 	}
 }
 
@@ -359,15 +964,34 @@ func TestDelegateBackgroundStartsJob(t *testing.T) {
 	starter := &fakeBackgroundStarter{}
 	tool := NewTool(runner, starter)
 
-	result, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"inspect asynchronously","agent":"explore","background":true}`))
+	resource := t.TempDir()
+	input, err := json.Marshal(map[string]any{
+		"task":         "inspect asynchronously",
+		"agent":        "explore",
+		"background":   true,
+		"resource_key": resource,
+		"access":       tools.BackgroundAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	result, err := tool.RunMetered(context.Background(), input)
 	if err != nil {
 		t.Fatalf("RunMetered: %v", err)
 	}
-	if result.Text != "background job bg_delegate started" {
+	if !strings.HasPrefix(result.Text, "background job bg_delegate started (turn budget: 20, resource: ") ||
+		!strings.HasSuffix(result.Text, ", access: read_only)") {
 		t.Fatalf("result = %q", result.Text)
 	}
 	if starter.req.Kind != "delegate" || starter.req.Description != "inspect asynchronously" || starter.req.Agent != "explore" || !starter.req.WaitForPrompt {
 		t.Fatalf("background request = %+v", starter.req)
+	}
+	wantResource, err := tools.CanonicalBackgroundResource(resource)
+	if err != nil {
+		t.Fatalf("canonical resource: %v", err)
+	}
+	if starter.req.ResourceKey != wantResource || starter.req.Access != tools.BackgroundAccessReadOnly {
+		t.Fatalf("background lease = %q/%q, want %q/read_only", starter.req.ResourceKey, starter.req.Access, wantResource)
 	}
 	if len(fp.Requests) != 0 {
 		t.Fatalf("background start should not run child synchronously, got %d requests", len(fp.Requests))
@@ -378,6 +1002,60 @@ func TestDelegateBackgroundStartsJob(t *testing.T) {
 	}
 	if completed.Text == "" || completed.Usage.InputTokens != 11 || completed.Usage.OutputTokens != 5 {
 		t.Fatalf("background result = %+v, want report and child usage 11/5", completed)
+	}
+}
+
+func TestDelegateBackgroundContinuationInheritsContractBeforeStart(t *testing.T) {
+	fixture := newContinuationFixture(t, 100_000, false,
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source done"}},
+			Stop:   llm.StopEndTurn,
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "continued done"}},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	if _, err := fixture.runner.Run(context.Background(), RunRequest{
+		Task:    "source",
+		Mode:    ModeImplementation,
+		ChildID: "source",
+	}, nil); err != nil {
+		t.Fatalf("source Run: %v", err)
+	}
+	starter := &fakeBackgroundStarter{}
+	tool := NewTool(fixture.runner, starter)
+	result, err := tool.RunMetered(
+		context.Background(),
+		json.RawMessage(`{"task":"continue asynchronously","continue_child_id":"source","background":true}`),
+	)
+	if err != nil {
+		t.Fatalf("RunMetered: %v", err)
+	}
+	if !strings.HasPrefix(result.Text, "background job bg_delegate started (turn budget: 4, mode: implementation, continues: source, resource: ") ||
+		!strings.HasSuffix(result.Text, ", access: exclusive)") {
+		t.Fatalf("background receipt = %q", result.Text)
+	}
+	if starter.req.Agent != "worker" {
+		t.Fatalf("background inherited agent = %q, want worker", starter.req.Agent)
+	}
+	completed, err := starter.req.Run(context.Background(), "bg_delegate")
+	if err != nil {
+		t.Fatalf("background continuation: %v", err)
+	}
+	if !strings.Contains(completed.Text, "continued from source") {
+		t.Fatalf("background continuation report = %q", completed.Text)
+	}
+	if len(fixture.provider.Requests) != 2 {
+		t.Fatalf("model requests = %d, want source plus continuation", len(fixture.provider.Requests))
+	}
+	sourceMeta := readDelegateChildMeta(t, session.ChildSessionDir(fixture.sessionPath, "source"))
+	continuedMeta := readDelegateChildMeta(t, session.ChildSessionDir(fixture.sessionPath, "bg_delegate"))
+	if sourceMeta.RequestedAgent != "" || continuedMeta.RequestedAgent != "" {
+		t.Fatalf("omitted agent selection changed across continuation: source %q continued %q", sourceMeta.RequestedAgent, continuedMeta.RequestedAgent)
+	}
+	if continuedMeta.ResourceKey == "" || continuedMeta.Access != tools.BackgroundAccessExclusive {
+		t.Fatalf("continued child lease = %q/%q, want canonical cwd/exclusive", continuedMeta.ResourceKey, continuedMeta.Access)
 	}
 }
 
@@ -423,7 +1101,7 @@ func TestDelegatePersistsChildTranscript(t *testing.T) {
 		}, nil
 	}, Options{ActivityRegistry: activityRegistry})
 
-	result, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"inspect the repo"}`))
+	result, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"inspect the repo","max_turns":7}`))
 	if err != nil {
 		t.Fatalf("RunMetered: %v", err)
 	}
@@ -464,6 +1142,215 @@ func TestDelegatePersistsChildTranscript(t *testing.T) {
 	}
 	if meta.Kind != "delegate" || meta.Status != "completed" || meta.MessageCount != 2 {
 		t.Fatalf("child meta = %+v", meta)
+	}
+	if meta.RequestedMaxTurns == nil || *meta.RequestedMaxTurns != 7 || meta.EffectiveMaxTurns != 7 || meta.TurnsUsed != 1 {
+		t.Fatalf("child budget metadata = %+v, want requested/effective 7 and one turn", meta)
+	}
+	if meta.TerminationReason != string(agent.TerminationModelCompleted) {
+		t.Fatalf("child termination = %q, want model_completed", meta.TerminationReason)
+	}
+	events := readDelegateChildEvents(t, childDir)
+	if got := events[len(events)-1].TerminationReason; got != string(agent.TerminationModelCompleted) {
+		t.Fatalf("prompt_usage termination = %q, want model_completed", got)
+	}
+}
+
+func TestDelegatePersistsTurnLimitTermination(t *testing.T) {
+	childTools := &tools.Registry{}
+	childTools.Register(fakeChildTool{name: "read_file", out: "contents"})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				ToolID:    "read",
+				ToolName:  "read_file",
+				ToolInput: json.RawMessage(`{}`),
+			}},
+			Stop: llm.StopToolUse,
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "budget exhausted"}},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	sessionPath := filepath.Join(t.TempDir(), "session")
+	runner := NewRunner(func() Runtime {
+		return Runtime{Provider: fp, Model: "model", Registry: llm.NewRegistry(nil), SessionPath: sessionPath}
+	}, func(runtime Runtime, _ string) (Launch, error) {
+		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools}, nil
+	}, Options{MaxTurns: 1})
+
+	result, err := runner.Run(context.Background(), RunRequest{Kind: "delegate", Task: "inspect", ChildID: "limited"}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.EffectiveMaxTurns != 1 || result.Turns != 2 || result.TerminationReason != agent.TerminationTurnLimit {
+		t.Fatalf("run result = %+v, want budget 1, two physical turns, turn_limit", result)
+	}
+	if !strings.Contains(result.Report, "turn budget 1, termination turn_limit") {
+		t.Fatalf("report = %q", result.Report)
+	}
+	meta := readDelegateChildMeta(t, filepath.Join(sessionPath, "children", "limited"))
+	if meta.EffectiveMaxTurns != 1 || meta.TurnsUsed != 2 || meta.TerminationReason != string(agent.TerminationTurnLimit) {
+		t.Fatalf("metadata = %+v, want budget 1, two physical turns, turn_limit", meta)
+	}
+}
+
+func TestDelegatePersistsClosedTurnBeforeNextModelResponse(t *testing.T) {
+	nextRequest := make(chan struct{})
+	release := make(chan struct{})
+	fixture := newContinuationFixture(
+		t,
+		32_000,
+		true,
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				ToolID:    "todo-1",
+				ToolName:  "update_todos",
+				ToolInput: json.RawMessage(`{"todos":[{"content":"child checkpoint","status":"completed"}]}`),
+			}},
+			Stop:       llm.StopToolUse,
+			Usage:      llm.Usage{InputTokens: 13, OutputTokens: 4},
+			ResponseID: "child-resp-1",
+		},
+		llmtest.Step{
+			Block: func(context.Context) {
+				close(nextRequest)
+				<-release
+			},
+			Stop: llm.StopEndTurn,
+		},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	type runOutcome struct {
+		result RunResult
+		err    error
+	}
+	done := make(chan runOutcome, 1)
+	go func() {
+		result, err := fixture.runner.Run(ctx, RunRequest{
+			Kind:    "delegate",
+			Task:    "checkpoint child work",
+			ChildID: "checkpoint-child",
+		}, NewProgress())
+		done <- runOutcome{result: result, err: err}
+	}()
+	select {
+	case <-nextRequest:
+	case <-time.After(time.Second):
+		t.Fatal("child second model request did not start")
+	}
+
+	childDir := session.ChildSessionDir(fixture.sessionPath, "checkpoint-child")
+	recovered, err := session.Load(childDir)
+	if err != nil {
+		t.Fatalf("Load child checkpoint: %v", err)
+	}
+	if err := llm.ValidateTranscript(recovered.Messages); err != nil {
+		t.Fatalf("child transcript: %v", err)
+	}
+	if len(recovered.Messages) != 3 || recovered.Usage.InputTokens != 13 || recovered.Usage.OutputTokens != 4 {
+		t.Fatalf("child checkpoint messages/usage = %d/%+v", len(recovered.Messages), recovered.Usage)
+	}
+	if len(recovered.Todos) != 1 || recovered.Todos[0].Status != "completed" {
+		t.Fatalf("child checkpoint todos = %+v", recovered.Todos)
+	}
+	if recovered.ResponseState == nil || recovered.ResponseState.PreviousResponseID != "child-resp-1" || recovered.ResponseState.AnchorMessages != 2 {
+		t.Fatalf("child checkpoint response state = %+v", recovered.ResponseState)
+	}
+	meta := readDelegateChildMeta(t, childDir)
+	if meta.Status != session.ChildStatusRunning || meta.TurnsUsed != 1 || meta.MessageCount != 3 || meta.Usage.InputTokens != 13 {
+		t.Fatalf("running child metadata = %+v", meta)
+	}
+
+	cancel()
+	close(release)
+	select {
+	case outcome := <-done:
+		if !errors.Is(outcome.err, context.Canceled) {
+			t.Fatalf("Runner error = %v, want context.Canceled; result=%+v", outcome.err, outcome.result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("child runner did not stop")
+	}
+}
+
+func TestDelegatePersistsAllClosedTurnsInChildTree(t *testing.T) {
+	fixture := newContinuationFixture(
+		t,
+		32_000,
+		false,
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				ToolID:    "todo-1",
+				ToolName:  "update_todos",
+				ToolInput: json.RawMessage(`{"todos":[{"content":"first turn","status":"completed"}]}`),
+			}},
+			Stop:  llm.StopToolUse,
+			Usage: llm.Usage{InputTokens: 11, OutputTokens: 3},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				ToolID:    "todo-2",
+				ToolName:  "update_todos",
+				ToolInput: json.RawMessage(`{"todos":[{"content":"second turn","status":"completed"}]}`),
+			}},
+			Stop:  llm.StopToolUse,
+			Usage: llm.Usage{InputTokens: 12, OutputTokens: 4},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "both turns done"}},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 13, OutputTokens: 5},
+		},
+	)
+	result, err := fixture.runner.Run(context.Background(), RunRequest{
+		Kind:    "delegate",
+		Task:    "multi-turn child work",
+		ChildID: "multi-turn-child",
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.SaveError != nil {
+		t.Fatalf("SaveError = %v, want nil", result.SaveError)
+	}
+	if strings.Contains(result.Report, "save failed") {
+		t.Fatalf("report mentions a save failure: %q", result.Report)
+	}
+	if result.Turns != 3 {
+		t.Fatalf("turns = %d, want 3", result.Turns)
+	}
+
+	childDir := session.ChildSessionDir(fixture.sessionPath, "multi-turn-child")
+	tree, err := session.LoadTree(childDir, "")
+	if err != nil {
+		t.Fatalf("LoadTree: %v", err)
+	}
+	messages, err := tree.BuildContext()
+	if err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+	// One user prompt plus two tool-use turns (assistant+tool each) and the
+	// final text turn.
+	if len(messages) != 6 {
+		t.Fatalf("tree messages = %d, want the full 6-message transcript (turn 1 must not be frozen)", len(messages))
+	}
+	if err := llm.ValidateTranscript(messages); err != nil {
+		t.Fatalf("tree transcript invalid: %v", err)
+	}
+	loaded, err := session.Load(childDir)
+	if err != nil {
+		t.Fatalf("Load child session: %v", err)
+	}
+	if len(loaded.Messages) != len(messages) {
+		t.Fatalf("loaded messages = %d, want %d", len(loaded.Messages), len(messages))
+	}
+	if _, err := os.Stat(filepath.Join(childDir, "active-turn.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("active-turn.json after successful run: err = %v, want not-exist", err)
 	}
 }
 
@@ -517,6 +1404,13 @@ func TestDelegatePersistsTerminalChildStatuses(t *testing.T) {
 			if meta.Status != tc.wantStatus || meta.Error == "" {
 				t.Fatalf("terminal metadata = %+v, want status %q with error", meta, tc.wantStatus)
 			}
+			wantTermination := string(agent.TerminationError)
+			if tc.wantStatus == session.ChildStatusCanceled {
+				wantTermination = string(agent.TerminationCancelled)
+			}
+			if meta.TerminationReason != wantTermination {
+				t.Fatalf("terminal reason = %q, want %q", meta.TerminationReason, wantTermination)
+			}
 			events, _ := readAllActivity(t, feed, 0)
 			terminal := events[len(events)-1]
 			if terminal.Kind != ActivityEventTerminal || terminal.Status != tc.wantStatus {
@@ -559,6 +1453,9 @@ func TestDelegateTerminalizesPostMetadataSetupFailure(t *testing.T) {
 	if meta.Status != session.ChildStatusFailed || !strings.Contains(meta.Error, setupErr.Error()) {
 		t.Fatalf("terminal metadata = %+v, want failed setup error", meta)
 	}
+	if meta.EffectiveMaxTurns != DefaultMaxTurns || meta.TurnsUsed != 0 || meta.TerminationReason != string(agent.TerminationError) {
+		t.Fatalf("setup failure budget/termination metadata = %+v", meta)
+	}
 	if !progress.Snapshot().Finished {
 		t.Fatalf("progress = %+v, want finished", progress.Snapshot())
 	}
@@ -590,7 +1487,18 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	sink.TurnAttemptAbandoned(2, 3)
 	requestEvent := llm.ModelRequestEvent{State: llm.ModelRequestRetryScheduled, Sequence: 4, RetryDelayMS: 25}
 	sink.ModelRequestEvent(requestEvent)
-	sink.PromptComplete(agent.PromptUsage{Usage: llm.Usage{InputTokens: 11, OutputTokens: 5}})
+	sink.RetentionApplied(agent.RetentionEvent{
+		Policy:             "pressure_epoch",
+		Trigger:            "context_pressure",
+		BlocksTrimmed:      1,
+		BytesBefore:        10_000,
+		BytesAfter:         4_000,
+		ResponseStateReset: true,
+	})
+	sink.PromptComplete(agent.PromptUsage{
+		Usage:             llm.Usage{InputTokens: 11, OutputTokens: 5},
+		TerminationReason: agent.TerminationTurnLimit,
+	})
 
 	events := readDelegateChildEvents(t, dir)
 	wantTypes := []string{
@@ -600,6 +1508,7 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 		session.EventAssistantDelta,
 		session.EventTurnAttemptAbandoned,
 		session.EventModelRequest,
+		session.EventRetention,
 		session.EventPromptUsage,
 	}
 	if len(events) != len(wantTypes) {
@@ -623,11 +1532,44 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	if events[5].ModelRequest == nil || *events[5].ModelRequest != requestEvent {
 		t.Fatalf("model request event = %+v, want %+v", events[5].ModelRequest, requestEvent)
 	}
+	retention := events[len(events)-2].Retention
+	if retention == nil || retention.Policy != "pressure_epoch" || retention.BlocksTrimmed != 1 || !retention.ResponseStateReset {
+		t.Fatalf("retention event = %+v", events[len(events)-2])
+	}
 	if events[len(events)-1].Type != session.EventPromptUsage {
 		t.Fatalf("last event = %q, want prompt_usage", events[len(events)-1].Type)
 	}
+	if got := events[len(events)-1].TerminationReason; got != string(agent.TerminationTurnLimit) {
+		t.Fatalf("prompt termination = %q, want turn_limit", got)
+	}
 	if sink.progress.Snapshot().Finished {
 		t.Fatal("child sink must not independently terminalize progress")
+	}
+}
+
+func TestChildSinkFoldsPreflightMaintenanceIntoPromptUsage(t *testing.T) {
+	dir := t.TempDir()
+	sink := newChildSink(dir, todo.NewStore(), false, NewProgress(), nil)
+	sink.addPreflightMaintenance("continuation_compaction", llm.Usage{InputTokens: 7, OutputTokens: 2})
+	sink.PromptComplete(agent.PromptUsage{
+		Turns:       1,
+		Usage:       llm.Usage{InputTokens: 11, OutputTokens: 5},
+		Maintenance: llm.Usage{InputTokens: 3, OutputTokens: 1},
+	})
+
+	if sink.usage.Usage.InputTokens != 18 || sink.usage.Usage.OutputTokens != 7 ||
+		sink.usage.Maintenance.InputTokens != 10 || sink.usage.Maintenance.OutputTokens != 3 {
+		t.Fatalf("prompt usage with preflight maintenance = %+v", sink.usage)
+	}
+	events := readDelegateChildEvents(t, dir)
+	if len(events) != 2 ||
+		events[0].Type != session.EventMaintenanceUsage ||
+		events[0].Purpose != "continuation_compaction" ||
+		events[1].Type != session.EventPromptUsage ||
+		events[1].Usage == nil ||
+		events[1].Usage.InputTokens != 18 ||
+		events[1].Usage.OutputTokens != 7 {
+		t.Fatalf("preflight maintenance replay events = %+v", events)
 	}
 }
 
@@ -740,7 +1682,7 @@ func TestDelegateChildTodoStoreIsPrivate(t *testing.T) {
 	}
 }
 
-func TestDelegateCapsMaxTurns(t *testing.T) {
+func TestDelegateRejectsInvalidMaxTurns(t *testing.T) {
 	childTools := &tools.Registry{}
 	childTools.Register(fakeChildTool{name: "read_file", out: "ok"})
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
@@ -759,12 +1701,19 @@ func TestDelegateCapsMaxTurns(t *testing.T) {
 		t.Fatalf("explicit max_turns=0 should be rejected")
 	}
 
-	result, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"go","max_turns":99}`))
+	if _, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"go","max_turns":99}`)); err == nil || !strings.Contains(err.Error(), "exceeds configured maximum 20") {
+		t.Fatalf("over-cap max_turns error = %v", err)
+	}
+
+	result, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"go","max_turns":12}`))
 	if err != nil {
-		t.Fatalf("RunMetered with capped max_turns: %v", err)
+		t.Fatalf("RunMetered with valid max_turns: %v", err)
 	}
 	if !strings.Contains(result.Text, "[delegate: 1 turn") {
 		t.Fatalf("delegate output = %q", result.Text)
+	}
+	if !strings.Contains(result.Text, "turn budget 12, termination model_completed") {
+		t.Fatalf("delegate output lacks effective budget and termination: %q", result.Text)
 	}
 }
 
@@ -803,6 +1752,23 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 	}
 	if want := childCacheAffinityID("parent-cache", "child-1"); snapshot.CacheAffinityID != want {
 		t.Fatalf("child runtime cache affinity = %q, want %q", snapshot.CacheAffinityID, want)
+	}
+
+	continuedTools, err := runner.childToolsWithCacheAffinity(parent, launch, "child-2", "retained-cache", todo.NewStore(), []string{"read_file", "delegate"})
+	if err != nil {
+		t.Fatalf("continued childTools: %v", err)
+	}
+	continuedDelegate, ok := continuedTools.Lookup("delegate")
+	if !ok {
+		t.Fatal("continued child delegate tool missing")
+	}
+	continuedRebound, ok := continuedDelegate.(*Tool)
+	if !ok || continuedRebound.runner == nil {
+		t.Fatalf("continued rebound delegate = %T, want initialized *Tool", continuedDelegate)
+	}
+	continuedSnapshot := continuedRebound.runner.snapshot()
+	if continuedSnapshot.ParentChildID != "child-2" || continuedSnapshot.CacheAffinityID != "retained-cache" {
+		t.Fatalf("continued child runtime lineage/cache = parent %q cache %q", continuedSnapshot.ParentChildID, continuedSnapshot.CacheAffinityID)
 	}
 }
 
@@ -1026,7 +1992,7 @@ func TestDelegatePassesRequestedAgentToResolver(t *testing.T) {
 		t.Fatalf("resolver agent = %q, want style_review", gotName)
 	}
 	req := fp.Requests[0]
-	if req.Model != "style-model" || req.System != "style system\n\n"+prompts.DelegateChild() {
+	if req.Model != "style-model" || req.System != childBudgetSystemPrompt(childSystemPrompt("style system"), DefaultMaxTurns) {
 		t.Fatalf("request model/system = %q/%q", req.Model, req.System)
 	}
 	if len(req.Tools) != 1 || req.Tools[0].Name != "write_file" {

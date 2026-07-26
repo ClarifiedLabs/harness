@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -32,8 +33,9 @@ import (
 const Version = 4
 
 const (
-	stateFile = "state.json"
-	eventLog  = "raw.ndjson"
+	stateFile      = "state.json"
+	eventLog       = "raw.ndjson"
+	activeTurnFile = "active-turn.json"
 )
 
 // Session is the compact, resumable conversation state.
@@ -66,6 +68,20 @@ type Session struct {
 	// that switches models still reports accurate per-model cost. Usage remains
 	// the authoritative session aggregate.
 	UsageByModel map[string]UsageTotals `json:"usage_by_model,omitempty"`
+	// Recovery is populated only when Load recovered an active model boundary
+	// that had not yet been consolidated into state.json/tree.ndjson.
+	Recovery *RecoveryInfo `json:"-"`
+	// RecoveryWarning describes a corrupt active-turn checkpoint Load ignored
+	// because the canonical state/tree loaded cleanly.
+	RecoveryWarning string `json:"-"`
+}
+
+// RecoveryInfo describes an active-turn checkpoint applied by Load.
+type RecoveryInfo struct {
+	Phase   string
+	Prompt  int
+	Turn    int
+	SavedAt time.Time
 }
 
 // UsageTotals is the cumulative token accounting plus dollar cost for a session.
@@ -78,21 +94,35 @@ type UsageTotals struct {
 // ChildMeta is the forensic index for a child-agent run stored under a parent
 // session's children/ directory.
 type ChildMeta struct {
-	ID           string    `json:"id"`
-	ParentID     string    `json:"parent_id,omitempty"`
-	Kind         string    `json:"kind"`
-	Agent        string    `json:"agent,omitempty"`
-	Provider     string    `json:"provider,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	Status       string    `json:"status"`
-	TaskPreview  string    `json:"task_preview,omitempty"`
-	Transcript   string    `json:"transcript,omitempty"`
-	Replay       string    `json:"replay,omitempty"`
-	Error        string    `json:"error,omitempty"`
-	Created      time.Time `json:"created,omitempty"`
-	Updated      time.Time `json:"updated,omitempty"`
-	Usage        llm.Usage `json:"usage,omitempty"`
-	MessageCount int       `json:"message_count,omitempty"`
+	ID                 string    `json:"id"`
+	ParentID           string    `json:"parent_id,omitempty"`
+	Kind               string    `json:"kind"`
+	Mode               string    `json:"mode,omitempty"`
+	ContinuedFrom      string    `json:"continued_from,omitempty"`
+	ContinuationMode   string    `json:"continuation_mode,omitempty"`
+	ContinuationBefore int       `json:"continuation_context_before,omitempty"`
+	ContinuationAfter  int       `json:"continuation_context_after,omitempty"`
+	ContinuationWindow int       `json:"continuation_context_window,omitempty"`
+	RuntimeFingerprint string    `json:"runtime_fingerprint,omitempty"`
+	Agent              string    `json:"agent,omitempty"`
+	RequestedAgent     string    `json:"requested_agent,omitempty"`
+	ResourceKey        string    `json:"resource_key,omitempty"`
+	Access             string    `json:"access,omitempty"`
+	Provider           string    `json:"provider,omitempty"`
+	Model              string    `json:"model,omitempty"`
+	Status             string    `json:"status"`
+	TaskPreview        string    `json:"task_preview,omitempty"`
+	Transcript         string    `json:"transcript,omitempty"`
+	Replay             string    `json:"replay,omitempty"`
+	Error              string    `json:"error,omitempty"`
+	Created            time.Time `json:"created,omitempty"`
+	Updated            time.Time `json:"updated,omitempty"`
+	Usage              llm.Usage `json:"usage,omitempty"`
+	MessageCount       int       `json:"message_count,omitempty"`
+	RequestedMaxTurns  *int      `json:"requested_max_turns,omitempty"`
+	EffectiveMaxTurns  int       `json:"effective_max_turns"`
+	TurnsUsed          int       `json:"turns_used"`
+	TerminationReason  string    `json:"termination_reason,omitempty"`
 }
 
 // Child session lifecycle statuses recognized by Follow.
@@ -101,6 +131,7 @@ const (
 	ChildStatusCompleted = "completed"
 	ChildStatusFailed    = "failed"
 	ChildStatusCanceled  = "canceled"
+	ChildStatusAbandoned = "abandoned"
 )
 
 // Save writes state.json atomically under dir. Parent directories are created,
@@ -119,11 +150,36 @@ func (s Session) Save(dir string) error {
 	// immutable tree segment is valid on disk.
 	s.Messages = repair(s.Messages)
 	if s.Tree == nil {
-		tree, err := LinearTree(s.Created, s.CWD, s.Messages)
-		if err != nil {
-			return fmt.Errorf("session: build tree: %w", err)
+		// Prefer the tree already on disk: minting a fresh LinearTree ID for a
+		// directory that already holds tree.ndjson makes Tree.Save reject every
+		// later save with a tree-id mismatch. The disk tree is authoritative
+		// when its context already matches the messages being saved; only a
+		// genuinely different transcript is synced in (a transcript-rewriting
+		// compaction) or reported as divergence.
+		disk, err := LoadTree(dir, s.ActiveLeaf)
+		switch {
+		case err == nil:
+			s.Tree = disk
+			diskMessages, err := disk.BuildContext()
+			if err != nil {
+				return fmt.Errorf("session: build tree context: %w", err)
+			}
+			if !transcriptsEqualMessages(diskMessages, s.Messages) {
+				// A longer or rewritten transcript: SyncTranscript appends the new
+				// suffix or records a context-reset entry for the rewrite case.
+				if err := s.Tree.SyncTranscript(s.Messages); err != nil {
+					return err
+				}
+			}
+		case errors.Is(err, os.ErrNotExist):
+			tree, err := LinearTree(s.Created, s.CWD, s.Messages)
+			if err != nil {
+				return fmt.Errorf("session: build tree: %w", err)
+			}
+			s.Tree = tree
+		default:
+			return fmt.Errorf("session: load tree: %w", err)
 		}
-		s.Tree = tree
 	} else if err := s.Tree.SyncTranscript(s.Messages); err != nil {
 		return err
 	}
@@ -162,6 +218,98 @@ func (s Session) Save(dir string) error {
 	return nil
 }
 
+// SaveConsolidated writes the canonical state/tree checkpoint and removes any
+// older active-turn recovery record only after the canonical save succeeds.
+func (s Session) SaveConsolidated(dir string) error {
+	if err := s.Save(dir); err != nil {
+		return err
+	}
+	return ClearActiveTurnCheckpoint(dir)
+}
+
+type activeTurnCheckpoint struct {
+	Version  int           `json:"version"`
+	Phase    string        `json:"phase"`
+	Prompt   int           `json:"prompt,omitempty"`
+	Turn     int           `json:"turn,omitempty"`
+	SavedAt  time.Time     `json:"saved_at"`
+	State    Session       `json:"state"`
+	Messages []llm.Message `json:"messages"`
+}
+
+// SaveActiveTurnCheckpoint atomically persists a provider boundary without
+// mutating the canonical conversation tree. A dangling assistant tool-use is
+// stored with synthetic interrupted results, so recovery never automatically
+// re-executes a tool whose process-local completion is unknown.
+func SaveActiveTurnCheckpoint(dir string, state Session, phase string, prompt, turn int) error {
+	if dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("session: create dir: %w", err)
+	}
+	state.Version = Version
+	state.Messages = stampMissingMessageTimes(state.Messages, sessionTimestamp(state.Updated, state.Created))
+	state.Messages = repair(state.Messages)
+	if len(state.Messages) == 0 {
+		// loadActiveTurnCheckpoint rejects an empty checkpoint; never write one.
+		return nil
+	}
+	if err := llm.ValidateTranscript(state.Messages); err != nil {
+		return fmt.Errorf("session: active-turn transcript: %w", err)
+	}
+	if state.ResponseState != nil &&
+		(state.ResponseState.PreviousResponseID == "" ||
+			state.ResponseState.AnchorMessages < 0 ||
+			state.ResponseState.AnchorMessages > len(state.Messages)) {
+		return errors.New("session: active-turn response state is invalid")
+	}
+	if state.Tree != nil {
+		state.ID = state.Tree.Header.ID
+		if state.CWD == "" {
+			state.CWD = state.Tree.Header.CWD
+		}
+		if state.ParentSession == "" {
+			state.ParentSession = state.Tree.Header.ParentSession
+		}
+		if state.ParentEntryID == "" {
+			state.ParentEntryID = state.Tree.Header.ParentEntryID
+		}
+	}
+	checkpoint := activeTurnCheckpoint{
+		Version:  Version,
+		Phase:    strings.TrimSpace(phase),
+		Prompt:   prompt,
+		Turn:     turn,
+		SavedAt:  state.Updated,
+		State:    state,
+		Messages: state.Messages,
+	}
+	return writeJSONAtomic(filepath.Join(dir, activeTurnFile), checkpoint)
+}
+
+// SaveClosedTurnCheckpoint first records a recovery-safe active checkpoint,
+// then consolidates it into the canonical state and tree.
+func SaveClosedTurnCheckpoint(dir string, state Session, prompt, turn int) error {
+	if err := SaveActiveTurnCheckpoint(dir, state, "closed_turn", prompt, turn); err != nil {
+		return err
+	}
+	return state.SaveConsolidated(dir)
+}
+
+// ClearActiveTurnCheckpoint removes a recovery record after its state has been
+// consolidated. Missing records are already clear.
+func ClearActiveTurnCheckpoint(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	err := os.Remove(filepath.Join(dir, activeTurnFile))
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return fmt.Errorf("session: remove active-turn checkpoint: %w", err)
+}
+
 // ChildSessionDir returns the directory where a child-agent run should store
 // its resumable state and replay log under parentDir.
 func ChildSessionDir(parentDir, childID string) string {
@@ -194,9 +342,154 @@ func SaveChildMeta(parentDir string, meta ChildMeta) (string, error) {
 	return dir, nil
 }
 
-// Load reads state.json plus the active tree path, yielding a transcript that
-// can be sent to either provider dialect.
+// AbandonRunningChildren marks process-local child runs left in "running"
+// state by a prior process as terminal and resumable. It walks nested child
+// directories without following symlinks. A child directory with a missing or
+// malformed meta.json (e.g. a crash between MkdirAll and the first metadata
+// write) is skipped and counted, not fatal, so one corrupt child cannot block
+// resuming an otherwise healthy session.
+func AbandonRunningChildren(parentDir string, at time.Time) (abandoned, skipped int, err error) {
+	if parentDir == "" {
+		return 0, 0, nil
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	var walk func(string) error
+	walk = func(childrenDir string) error {
+		entries, err := os.ReadDir(childrenDir)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("session: read child sessions %s: %w", childrenDir, err)
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			childDir := filepath.Join(childrenDir, entry.Name())
+			metaPath := filepath.Join(childDir, "meta.json")
+			data, err := os.ReadFile(metaPath)
+			if err != nil {
+				skipped++
+				continue
+			}
+			var meta ChildMeta
+			if err := json.Unmarshal(data, &meta); err != nil || meta.ID == "" {
+				skipped++
+				continue
+			}
+			if meta.Status == ChildStatusRunning {
+				meta.Status = ChildStatusAbandoned
+				meta.Updated = at
+				if meta.Error == "" {
+					meta.Error = "abandoned when the parent session was resumed"
+				}
+				if meta.TerminationReason == "" {
+					meta.TerminationReason = "cancelled"
+				}
+				if err := writeJSONAtomic(metaPath, meta); err != nil {
+					return err
+				}
+				abandoned++
+			}
+			if err := walk(filepath.Join(childDir, "children")); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(filepath.Join(parentDir, "children")); err != nil {
+		return abandoned, skipped, err
+	}
+	return abandoned, skipped, nil
+}
+
+// Load reads canonical state plus any newer active-turn recovery checkpoint,
+// yielding a transcript that can be sent to either provider dialect.
 func Load(dir string) (Session, error) {
+	saved, savedErr := loadSavedSession(dir)
+	checkpoint, checkpointErr := loadActiveTurnCheckpoint(dir)
+	if checkpointErr != nil {
+		if errors.Is(checkpointErr, os.ErrNotExist) {
+			return saved, savedErr
+		}
+		// A corrupt checkpoint must not make a healthy session unloadable: only
+		// fail when the canonical state is broken too.
+		if savedErr != nil {
+			return Session{}, errors.Join(savedErr, checkpointErr)
+		}
+		saved.RecoveryWarning = checkpointErr.Error()
+		return saved, nil
+	}
+	if savedErr == nil && !checkpoint.State.Updated.After(saved.Updated) {
+		// The canonical save is at least as new as the checkpoint (an equal
+		// Updated means the process crashed between Save and checkpoint
+		// cleanup), so the recovery record is stale.
+		if err := ClearActiveTurnCheckpoint(dir); err != nil {
+			return Session{}, err
+		}
+		return saved, nil
+	}
+
+	recovered := checkpoint.State
+	recovered.Messages = repair(checkpoint.Messages)
+	if err := llm.ValidateTranscript(recovered.Messages); err != nil {
+		return Session{}, fmt.Errorf("session: recover active turn: %w", err)
+	}
+	if recovered.ResponseState != nil &&
+		(recovered.ResponseState.PreviousResponseID == "" ||
+			recovered.ResponseState.AnchorMessages < 0 ||
+			recovered.ResponseState.AnchorMessages > len(recovered.Messages)) {
+		recovered.ResponseState = nil
+	}
+
+	if savedErr == nil && saved.Tree != nil {
+		recovered.Tree = saved.Tree
+		if err := recovered.Tree.SyncTranscript(recovered.Messages); err != nil {
+			return Session{}, fmt.Errorf("session: recover active tree: %w", err)
+		}
+	} else {
+		// Reuse the on-disk tree when it already materializes the recovered
+		// transcript: a rebuilt LinearTree gets fresh entry IDs and times that
+		// Tree.Save would reject as diverging from the existing tree.ndjson.
+		tree, err := adoptDiskTree(dir, recovered.Messages)
+		if err != nil {
+			return Session{}, err
+		}
+		if tree == nil {
+			tree, err = LinearTree(recovered.Created, recovered.CWD, recovered.Messages)
+			if err != nil {
+				return Session{}, fmt.Errorf("session: recover active tree: %w", err)
+			}
+			// Preserve the checkpoint's tree identity so every later Tree.Save
+			// appends to the existing tree.ndjson instead of failing on an ID
+			// mismatch (the ID and parent linkage are not recoverable from disk
+			// when state.json is unreadable).
+			if checkpoint.State.ID != "" {
+				tree.Header.ID = checkpoint.State.ID
+				tree.Header.ParentSession = checkpoint.State.ParentSession
+				tree.Header.ParentEntryID = checkpoint.State.ParentEntryID
+			}
+		}
+		recovered.Tree = tree
+	}
+	recovered.ID = recovered.Tree.Header.ID
+	recovered.CWD = recovered.Tree.Header.CWD
+	recovered.ParentSession = recovered.Tree.Header.ParentSession
+	recovered.ParentEntryID = recovered.Tree.Header.ParentEntryID
+	recovered.ActiveLeaf = recovered.Tree.ActiveLeaf
+	recovered.Recovery = &RecoveryInfo{
+		Phase:   checkpoint.Phase,
+		Prompt:  checkpoint.Prompt,
+		Turn:    checkpoint.Turn,
+		SavedAt: checkpoint.SavedAt,
+	}
+	return recovered, nil
+}
+
+func loadSavedSession(dir string) (Session, error) {
 	data, err := os.ReadFile(filepath.Join(dir, stateFile))
 	if err != nil {
 		return Session{}, err
@@ -232,28 +525,57 @@ func Load(dir string) (Session, error) {
 	return s, nil
 }
 
+func loadActiveTurnCheckpoint(dir string) (activeTurnCheckpoint, error) {
+	path := filepath.Join(dir, activeTurnFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return activeTurnCheckpoint{}, err
+	}
+	var checkpoint activeTurnCheckpoint
+	if err := json.Unmarshal(data, &checkpoint); err != nil {
+		return activeTurnCheckpoint{}, fmt.Errorf("session: decode %s: %w", path, err)
+	}
+	if checkpoint.Version != Version || checkpoint.State.Version != Version {
+		return activeTurnCheckpoint{}, fmt.Errorf(
+			"session: unsupported active-turn schema version %d/%d (want %d)",
+			checkpoint.Version,
+			checkpoint.State.Version,
+			Version,
+		)
+	}
+	if len(checkpoint.Messages) == 0 {
+		return activeTurnCheckpoint{}, fmt.Errorf("session: active-turn checkpoint %s has no messages", path)
+	}
+	return checkpoint, nil
+}
+
 // Event is one append-only replay record. Display carries the exact user-facing
 // line for events that the renderer shows as dim one-liners.
 type Event struct {
-	Time         time.Time              `json:"time,omitempty"`
-	Type         string                 `json:"type"`
-	Prompt       int                    `json:"prompt,omitempty"`
-	Turn         int                    `json:"turn,omitempty"`
-	Attempt      int                    `json:"attempt,omitempty"`
-	Text         string                 `json:"text,omitempty"`
-	Phase        string                 `json:"phase,omitempty"`
-	Display      string                 `json:"display,omitempty"`
-	ToolID       string                 `json:"tool_id,omitempty"`
-	Tool         string                 `json:"tool,omitempty"`
-	Input        json.RawMessage        `json:"input,omitempty"`
-	Images       []ImageInfo            `json:"images,omitempty"`
-	Usage        *llm.Usage             `json:"usage,omitempty"`
-	Purpose      string                 `json:"purpose,omitempty"`
-	FromEntryID  string                 `json:"from_entry_id,omitempty"`
-	ToEntryID    string                 `json:"to_entry_id,omitempty"`
-	Summary      string                 `json:"summary,omitempty"`
-	Context      *ContextSnapshot       `json:"context,omitempty"`
-	ModelRequest *llm.ModelRequestEvent `json:"model_request,omitempty"`
+	Time              time.Time               `json:"time,omitempty"`
+	Type              string                  `json:"type"`
+	Prompt            int                     `json:"prompt,omitempty"`
+	Turn              int                     `json:"turn,omitempty"`
+	Attempt           int                     `json:"attempt,omitempty"`
+	Text              string                  `json:"text,omitempty"`
+	Phase             string                  `json:"phase,omitempty"`
+	Display           string                  `json:"display,omitempty"`
+	ToolID            string                  `json:"tool_id,omitempty"`
+	Tool              string                  `json:"tool,omitempty"`
+	Input             json.RawMessage         `json:"input,omitempty"`
+	Images            []ImageInfo             `json:"images,omitempty"`
+	Usage             *llm.Usage              `json:"usage,omitempty"`
+	Purpose           string                  `json:"purpose,omitempty"`
+	FromEntryID       string                  `json:"from_entry_id,omitempty"`
+	ToEntryID         string                  `json:"to_entry_id,omitempty"`
+	Summary           string                  `json:"summary,omitempty"`
+	Context           *ContextSnapshot        `json:"context,omitempty"`
+	Retention         *RetentionSnapshot      `json:"retention,omitempty"`
+	IdleCompaction    *IdleCompactionSnapshot `json:"idle_compaction,omitempty"`
+	ModelRequest      *llm.ModelRequestEvent  `json:"model_request,omitempty"`
+	TerminationReason string                  `json:"termination_reason,omitempty"`
+	DurationMS        int64                   `json:"duration_ms,omitempty"`
+	MessageCount      int                     `json:"message_count,omitempty"`
 }
 
 // ContextSnapshot is the session-log copy of agent.ContextEstimate. It lives in
@@ -268,6 +590,30 @@ type ContextSnapshot struct {
 	PayloadSystem   int `json:"payload_system,omitempty"`
 	PayloadTools    int `json:"payload_tools,omitempty"`
 	PayloadMessages int `json:"payload_messages,omitempty"`
+}
+
+// RetentionSnapshot is the replay-safe copy of one agent retention epoch.
+type RetentionSnapshot struct {
+	Policy              string `json:"policy"`
+	Trigger             string `json:"trigger"`
+	BlocksTrimmed       int    `json:"blocks_trimmed,omitempty"`
+	BytesBefore         int    `json:"bytes_before,omitempty"`
+	BytesAfter          int    `json:"bytes_after,omitempty"`
+	ContextTokensBefore int    `json:"context_tokens_before,omitempty"`
+	ContextTokensAfter  int    `json:"context_tokens_after,omitempty"`
+	ResponseStateReset  bool   `json:"response_state_reset,omitempty"`
+	NextRequestStateful bool   `json:"next_request_stateful,omitempty"`
+}
+
+// IdleCompactionSnapshot records one speculative REPL-idle attempt without
+// placing it in model context.
+type IdleCompactionSnapshot struct {
+	Outcome             string `json:"outcome"`
+	TriggerPercent      int    `json:"trigger_percent"`
+	ContextTokensBefore int    `json:"context_tokens_before,omitempty"`
+	ContextTokensAfter  int    `json:"context_tokens_after,omitempty"`
+	MessagesBefore      int    `json:"messages_before,omitempty"`
+	MessagesAfter       int    `json:"messages_after,omitempty"`
 }
 
 // ImageInfo records replay-safe image attachment metadata. It intentionally
@@ -298,6 +644,9 @@ const (
 	EventTurnComplete         = "turn_complete"
 	EventPromptUsage          = "prompt_usage"
 	EventMaintenanceUsage     = "maintenance_usage"
+	EventCheckpoint           = "checkpoint"
+	EventRetention            = "retention"
+	EventIdleCompaction       = "idle_compaction"
 	EventBranch               = "branch"
 	EventModelRequest         = "model_request"
 )
@@ -532,7 +881,7 @@ type followTarget struct {
 
 func (t followTarget) terminal() bool {
 	switch t.status {
-	case ChildStatusCompleted, ChildStatusFailed, ChildStatusCanceled:
+	case ChildStatusCompleted, ChildStatusFailed, ChildStatusCanceled, ChildStatusAbandoned:
 		return true
 	default:
 		return false
@@ -556,7 +905,7 @@ func readFollowTarget(dir string) (followTarget, error) {
 		return followTarget{}, fmt.Errorf("session: invalid child metadata %s: id and kind are required", path)
 	}
 	switch meta.Status {
-	case ChildStatusRunning, ChildStatusCompleted, ChildStatusFailed, ChildStatusCanceled:
+	case ChildStatusRunning, ChildStatusCompleted, ChildStatusFailed, ChildStatusCanceled, ChildStatusAbandoned:
 		return followTarget{child: true, status: meta.Status}, nil
 	default:
 		return followTarget{}, fmt.Errorf("session: invalid child metadata %s: unknown status %q", path, meta.Status)
@@ -918,15 +1267,23 @@ func writePromptTimings(w io.Writer, prompt int, events []Event) {
 	}
 	user := firstEventTime(events, EventUser)
 	done := lastEventTime(events, EventPromptUsage)
+	complete := !done.IsZero()
+	if !complete {
+		done = lastRecordedEventTime(events)
+	}
 	total := time.Duration(0)
 	if !user.IsZero() && !done.IsZero() && !done.Before(user) {
 		total = done.Sub(user)
 	}
 	firstVisible := firstVisibleDuration(events, user)
+	label := fmt.Sprintf("prompt %d", prompt)
+	if !complete {
+		label += " (in progress)"
+	}
 	if firstVisible > 0 {
-		fmt.Fprintf(w, "prompt %d: total %s, first visible %s\n", prompt, formatDuration(total), formatDuration(firstVisible))
+		fmt.Fprintf(w, "%s: total %s, first visible %s\n", label, formatDuration(total), formatDuration(firstVisible))
 	} else {
-		fmt.Fprintf(w, "prompt %d: total %s\n", prompt, formatDuration(total))
+		fmt.Fprintf(w, "%s: total %s\n", label, formatDuration(total))
 	}
 	writeModelTimings(w, events)
 	writeModelAPIIssueTimings(w, events)
@@ -1067,6 +1424,16 @@ func lastEventTime(events []Event, typ string) time.Time {
 	return time.Time{}
 }
 
+func lastRecordedEventTime(events []Event) time.Time {
+	var latest time.Time
+	for _, ev := range events {
+		if ev.Time.After(latest) {
+			latest = ev.Time
+		}
+	}
+	return latest
+}
+
 // ReasoningSummaryFormat controls the replay-safe plain-text form for a
 // semantic reasoning summary event.
 type ReasoningSummaryFormat struct {
@@ -1171,6 +1538,20 @@ type Compaction struct {
 	ModifiedFiles []string      `json:"modified_files,omitempty"`
 }
 
+// compactionMetadata is the canonical shape of compactions/*.meta.json. Keep
+// readers on this type so analysis code cannot drift from the persisted format
+// when metadata fields are added.
+type compactionMetadata struct {
+	Time          time.Time `json:"time"`
+	Usage         llm.Usage `json:"usage"`
+	MessageCount  int       `json:"message_count"`
+	Input         string    `json:"input"`
+	Summary       string    `json:"summary"`
+	Focus         string    `json:"focus,omitempty"`
+	ReadFiles     []string  `json:"read_files,omitempty"`
+	ModifiedFiles []string  `json:"modified_files,omitempty"`
+}
+
 // SaveCompaction writes one numbered compaction archive and returns the relative
 // path to its input JSON file.
 func SaveCompaction(dir string, c Compaction) (string, error) {
@@ -1195,16 +1576,7 @@ func SaveCompaction(dir string, c Compaction) (string, error) {
 	if err := os.WriteFile(filepath.Join(base, prefix+".summary.md"), []byte(c.Summary), 0o644); err != nil {
 		return "", fmt.Errorf("session: write compaction summary: %w", err)
 	}
-	meta := struct {
-		Time          time.Time `json:"time"`
-		Usage         llm.Usage `json:"usage"`
-		MessageCount  int       `json:"message_count"`
-		Input         string    `json:"input"`
-		Summary       string    `json:"summary"`
-		Focus         string    `json:"focus,omitempty"`
-		ReadFiles     []string  `json:"read_files,omitempty"`
-		ModifiedFiles []string  `json:"modified_files,omitempty"`
-	}{
+	meta := compactionMetadata{
 		Time:          c.Time,
 		Usage:         c.Usage,
 		MessageCount:  len(c.Messages),
@@ -1242,8 +1614,24 @@ func writeJSONAtomic(path string, v any) error {
 		return fmt.Errorf("session: marshal %s: %w", path, err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("session: write temp %s: %w", path, err)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("session: write temp %s: %w", tmp, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("session: write temp %s: %w", tmp, err)
+	}
+	// Flush before rename so a crash cannot leave a renamed-but-empty file.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("session: sync temp %s: %w", tmp, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("session: close temp %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
@@ -1338,6 +1726,36 @@ func sessionTimestamp(updated, created time.Time) time.Time {
 		return updated
 	}
 	return created
+}
+
+// adoptDiskTree loads the on-disk tree when it already materializes messages,
+// returning nil (without error) when there is no usable tree or its context
+// differs.
+func adoptDiskTree(dir string, messages []llm.Message) (*Tree, error) {
+	disk, err := LoadTree(dir, "")
+	if err != nil {
+		return nil, nil //nolint:nilerr // an unreadable/absent tree falls back to a rebuild
+	}
+	diskMessages, err := disk.BuildContext()
+	if err != nil || !transcriptsEqualMessages(diskMessages, messages) {
+		return nil, nil
+	}
+	return disk, nil
+}
+
+// transcriptsEqualMessages reports whether two materialized transcripts hold
+// the same messages, used to decide whether the on-disk tree already reflects
+// the messages being saved.
+func transcriptsEqualMessages(a, b []llm.Message) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !reflect.DeepEqual(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // DefaultPath returns <stateDir>/harness/sessions/<timestamp>/.

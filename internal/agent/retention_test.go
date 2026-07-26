@@ -42,7 +42,7 @@ func TestRetentionTrimsOldReadOnlyResults(t *testing.T) {
 	}
 	msgs = append(msgs, userText("qR"), asstToolUse("tR", "rd", `{}`), toolResult("tR", big), asstText("aR"))
 
-	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{})
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
 	a.applyRetention(&recordSink{})
 	mustValid(t, a.Transcript())
@@ -67,7 +67,7 @@ func TestRetentionKeepsMutatingResults(t *testing.T) {
 		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
 	}
 
-	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{})
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
 	a.applyRetention(&recordSink{})
 
@@ -88,7 +88,7 @@ func TestRetentionReplacesAgedImages(t *testing.T) {
 		userText("q2"), asstText("a2"),
 		userImage("new.png", data, "q3"), asstText("a3"),
 	}
-	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{})
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
 	a.applyRetention(&recordSink{})
 	mustValid(t, a.Transcript())
@@ -125,7 +125,7 @@ func TestRetentionReplacesAgedRichResultImages(t *testing.T) {
 		userText("q2"), asstText("a2"),
 		userText("q3"), asstText("a3"),
 	}
-	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{})
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
 	a.applyRetention(&recordSink{})
 	got := a.Transcript()
@@ -154,7 +154,7 @@ func TestRetentionIdempotent(t *testing.T) {
 	for i := 1; i <= 9; i++ {
 		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
 	}
-	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{})
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
 
 	if changed := a.applyRetention(&recordSink{}); !changed {
@@ -170,18 +170,190 @@ func TestRetentionIdempotent(t *testing.T) {
 	}
 }
 
-func TestRetentionRewriteClearsDirectResponseState(t *testing.T) {
+func TestRetentionPolicyOverridesProviderDefault(t *testing.T) {
+	oldImageTranscript := func() []llm.Message {
+		return []llm.Message{
+			userImage("old.png", agentOnePixelPNG, "q0"), asstText("a0"),
+			userText("q1"), asstText("a1"),
+			userText("q2"), asstText("a2"),
+			userText("q3"), asstText("a3"),
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		policy     RetentionPolicy
+		stateful   bool
+		managed    bool
+		disabled   bool
+		context    int
+		wantChange bool
+		wantPolicy string
+	}{
+		{name: "force age for stateful", policy: RetentionPolicyAge, stateful: true, context: 1, wantChange: true, wantPolicy: "age"},
+		{name: "disable stateless", policy: RetentionPolicyDisabled, context: 100_000, wantChange: false},
+		{name: "force pressure for stateless", policy: RetentionPolicyPressure, context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
+		{name: "auto uses pressure for stateless", context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
+		{name: "auto detects proxy managed continuation", managed: true, context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
+		{name: "disabled proxy continuation still uses pressure", managed: true, disabled: true, context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
+				ResponsesStateful:           tc.stateful,
+				ManagedContinuationStateful: tc.managed,
+				DisableManagedContinuation:  tc.disabled,
+				RetentionPolicy:             tc.policy,
+				ContextWindow:               100_000,
+			})
+			a.SetTranscript(oldImageTranscript())
+			pass := a.applyRetentionPolicy(&recordSink{}, tc.context)
+			if pass.changed != tc.wantChange {
+				t.Fatalf("retention changed = %t, want %t (pass %+v)", pass.changed, tc.wantChange, pass)
+			}
+			if tc.wantPolicy != "" && pass.event.Policy != tc.wantPolicy {
+				t.Fatalf("retention policy = %q, want %q (pass %+v)", pass.event.Policy, tc.wantPolicy, pass)
+			}
+			if got := a.DebugRequest(false, "", nil, nil).Request.DisableContinuation; got != tc.disabled {
+				t.Fatalf("request disable_continuation = %t, want %t", got, tc.disabled)
+			}
+		})
+	}
+}
+
+func TestPressureRetentionThresholdAndHysteresis(t *testing.T) {
+	oldImageTranscript := func() []llm.Message {
+		return []llm.Message{
+			userImage("old.png", agentOnePixelPNG, "q0"), asstText("a0"),
+			userText("q1"), asstText("a1"),
+			userText("q2"), asstText("a2"),
+			userText("q3"), asstText("a3"),
+		}
+	}
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
+		RetentionPolicy: RetentionPolicyPressure,
+		ContextWindow:   100_000,
+	})
+	a.SetTranscript(oldImageTranscript())
+	sink := &recordSink{}
+
+	if pass := a.applyRetentionPolicy(sink, 59_999); pass.changed || pass.observed {
+		t.Fatalf("pressure below high-water mark = %+v, want no epoch", pass)
+	}
+	first := a.applyRetentionPolicy(sink, 60_000)
+	if !first.changed || first.event.Policy != "pressure_epoch" {
+		t.Fatalf("pressure at high-water mark = %+v, want epoch", first)
+	}
+
+	// Restore an eligible block to prove the disarmed epoch cannot immediately
+	// run again while context remains above the low-water mark.
+	a.SetTranscript(oldImageTranscript())
+	a.retentionEpochArmed = false
+	if pass := a.applyRetentionPolicy(sink, 59_000); pass.changed || pass.observed {
+		t.Fatalf("disarmed pressure above low-water mark = %+v, want no epoch", pass)
+	}
+	if pass := a.applyRetentionPolicy(sink, 50_000); pass.changed || pass.observed {
+		t.Fatalf("low-water rearm pass = %+v, want no epoch", pass)
+	}
+	if !a.retentionEpochArmed {
+		t.Fatal("pressure epoch did not rearm at low-water mark")
+	}
+	if pass := a.applyRetentionPolicy(sink, 60_000); !pass.changed {
+		t.Fatalf("rearmed pressure at high-water mark = %+v, want epoch", pass)
+	}
+}
+
+func TestPressureRetentionRearmsAfterCompaction(t *testing.T) {
+	big := strings.Repeat("x", 300_000) // ~75k tokens at 4 bytes/token
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
+		RetentionPolicy: RetentionPolicyPressure,
+		ContextWindow:   100_000,
+	})
+	// The aged image sits two turns back (past retentionImageKeepTurns) so it is
+	// an eligible pressure block; the newest turn carries a large read-only tool
+	// result that degradeCurrent can trim so the shrink lands under budget.
+	a.SetTranscript([]llm.Message{
+		userImage("old.png", agentOnePixelPNG, "q1"), asstText("a1"),
+		userText("q2"), asstText("a2"),
+		userText("q3"), asstToolUse("call_big", "rd", `{}`), toolResult("call_big", big),
+	})
+	sink := &recordSink{}
+
+	// Fire an epoch at the high-water mark; the epoch disarms itself.
+	if pass := a.applyRetentionPolicy(sink, 60_000); !pass.changed {
+		t.Fatalf("pressure at high-water mark = %+v, want epoch", pass)
+	}
+	if a.retentionEpochArmed {
+		t.Fatal("epoch should disarm after firing")
+	}
+
+	// A transcript-rewriting shrink (degradeCurrent) must re-arm the epoch: a
+	// compacted transcript is a new baseline, even when it lands between the
+	// watermarks.
+	changed, err := a.degradeCurrent(sink, "manual")
+	if err != nil || !changed {
+		t.Fatalf("degradeCurrent = changed %t err %v", changed, err)
+	}
+	if !a.retentionEpochArmed {
+		t.Fatal("compaction did not re-arm the pressure epoch")
+	}
+
+	// The next high-water pass produces an epoch instead of leaving pressure
+	// retention disabled for the rest of the session. observed (not changed) is
+	// the signal: degradeCurrent already consumed the aged image, so the epoch
+	// fires but trims nothing new.
+	if pass := a.applyRetentionPolicy(sink, 55_000); pass.changed {
+		t.Fatalf("mid-water pass = %+v, want no epoch", pass)
+	}
+	if pass := a.applyRetentionPolicy(sink, 60_000); !pass.observed {
+		t.Fatalf("post-compaction high-water mark = %+v, want epoch", pass)
+	}
+}
+
+func TestRetentionArchivesExactReadOnlyResultWithStableRecoveryPath(t *testing.T) {
+	big := strings.Repeat("full-output-", 1000)
+	msgs := []llm.Message{
+		userText("q0"), asstToolUse("t0", "rd", `{}`), toolResult("t0", big), asstText("a0"),
+	}
+	for i := 1; i <= 9; i++ {
+		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+	}
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
+	a.SetTranscript(msgs)
+	sink := &archiveSink{archive: ToolResultArchive{
+		DisplayPath: "artifacts/tool-results/result.txt",
+		ModelPath:   "/session/artifacts/tool-results/result.txt",
+	}}
+
+	if changed := a.applyRetention(sink); !changed {
+		t.Fatal("retention pass reported unchanged")
+	}
+	if len(sink.archived) != 1 || sink.archived[0].Text != big {
+		t.Fatalf("archived result = %+v", sink.archived)
+	}
+	got := a.Transcript()[2].Content[0].ResultText
+	if !strings.Contains(got, "/session/artifacts/tool-results/result.txt") {
+		t.Fatalf("trimmed result lacks stable recovery path: %q", got)
+	}
+}
+
+func TestStatefulRetentionPreservesResponseStateBelowPressure(t *testing.T) {
 	msgs := []llm.Message{
 		userImage("old.png", agentOnePixelPNG, "q0"), asstText("a0"),
 		userText("q1"), asstText("a1"),
 		userText("q2"), asstText("a2"),
 		userText("q3"), asstText("a3"),
 	}
-	fp := llmtest.New("responses", llmtest.Step{
-		Events:     []llm.StreamEvent{textDelta("done")},
-		Stop:       llm.StopEndTurn,
-		ResponseID: "resp-new",
-	})
+	fp := llmtest.New("responses",
+		llmtest.Step{
+			Events:     []llm.StreamEvent{textDelta("done")},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "resp-new",
+		},
+		llmtest.Step{
+			Events:     []llm.StreamEvent{textDelta("done again")},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "resp-next",
+		},
+	)
 	a := newAgent(fp, readOnlyRegistry(), Options{ResponsesStateful: true})
 	a.SetTranscript(msgs)
 	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "resp-old", AnchorMessages: len(msgs)})
@@ -192,11 +364,153 @@ func TestRetentionRewriteClearsDirectResponseState(t *testing.T) {
 	if len(fp.Requests) != 1 {
 		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
 	}
-	if fp.Requests[0].PreviousResponseID != "" || len(fp.Requests[0].Messages) != len(msgs)+1 {
+	if fp.Requests[0].PreviousResponseID != "resp-old" || len(fp.Requests[0].Messages) != 1 {
 		t.Fatalf("request after retention = prev %q messages %d", fp.Requests[0].PreviousResponseID, len(fp.Requests[0].Messages))
 	}
-	if fp.Requests[0].Messages[0].Content[0].Kind != llm.BlockText {
-		t.Fatalf("old image was not replaced: %+v", fp.Requests[0].Messages[0].Content[0])
+	if a.Transcript()[0].Content[0].Kind != llm.BlockImage {
+		t.Fatalf("old image changed below pressure: %+v", a.Transcript()[0].Content[0])
+	}
+}
+
+func TestStatefulRetentionPressureEpochTrimsEligibleBlocksAndResetsOnce(t *testing.T) {
+	big := strings.Repeat("x", 30_000)
+	msgs := []llm.Message{
+		userText("q0"), asstToolUse("t0", "rd", `{}`), toolResult("t0", big), asstText("a0"),
+		userText("q1"), asstToolUse("t1", "rd", `{}`), toolResult("t1", big), asstText("a1"),
+	}
+	for i := 2; i <= 10; i++ {
+		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+	}
+	fp := llmtest.New("responses", llmtest.Step{
+		Events:     []llm.StreamEvent{textDelta("done")},
+		Stop:       llm.StopEndTurn,
+		ResponseID: "resp-new",
+	})
+	a := newAgent(fp, readOnlyRegistry(), Options{
+		ResponsesStateful:     true,
+		ContextWindow:         20_000,
+		DisableAutoCompaction: true,
+	})
+	a.SetTranscript(msgs)
+	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "resp-old", AnchorMessages: len(msgs)})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "next", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if err := a.RunPrompt(context.Background(), "next again", sink); err != nil {
+		t.Fatalf("second RunPrompt: %v", err)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	}
+	if fp.Requests[0].PreviousResponseID != "" || len(fp.Requests[0].Messages) != len(msgs)+1 {
+		t.Fatalf("pressure request = prev %q messages %d", fp.Requests[0].PreviousResponseID, len(fp.Requests[0].Messages))
+	}
+	if fp.Requests[1].PreviousResponseID != "resp-new" || len(fp.Requests[1].Messages) != 1 {
+		t.Fatalf("post-epoch request = prev %q messages %d", fp.Requests[1].PreviousResponseID, len(fp.Requests[1].Messages))
+	}
+	for _, index := range []int{2, 6} {
+		if got := a.Transcript()[index].Content[0].ResultText; !strings.Contains(got, retentionTrimMarker) {
+			t.Fatalf("eligible result at %d was not trimmed: %q", index, got)
+		}
+	}
+	if len(sink.retention) != 1 {
+		t.Fatalf("retention events = %d, want one epoch: %+v", len(sink.retention), sink.retention)
+	}
+	event := sink.retention[0]
+	if event.Policy != "pressure_epoch" || event.Trigger != "context_pressure" || event.BlocksTrimmed != 2 {
+		t.Fatalf("retention event = %+v", event)
+	}
+	if !event.ResponseStateReset || event.NextRequestStateful || event.BytesAfter >= event.BytesBefore || event.ContextTokensAfter >= event.ContextTokensBefore {
+		t.Fatalf("retention effect = %+v", event)
+	}
+}
+
+func TestManagedContinuationRetentionReportsProxyReset(t *testing.T) {
+	big := strings.Repeat("x", 70_000)
+	msgs := []llm.Message{
+		userText("q0"), asstToolUse("t0", "rd", `{}`), toolResult("t0", big), asstText("a0"),
+	}
+	for i := 1; i <= 9; i++ {
+		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+	}
+	fp := llmtest.New("model-proxy", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("done")},
+		Stop:   llm.StopEndTurn,
+	})
+	a := newAgent(fp, readOnlyRegistry(), Options{
+		ManagedContinuationStateful: true,
+		ContextWindow:               20_000,
+		DisableAutoCompaction:       true,
+	})
+	a.SetTranscript(msgs)
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "next", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(sink.retention) != 1 {
+		t.Fatalf("retention events = %d, want one: %+v", len(sink.retention), sink.retention)
+	}
+	event := sink.retention[0]
+	if !event.ResponseStateReset || event.NextRequestStateful {
+		t.Fatalf("managed continuation retention event = %+v", event)
+	}
+	if len(fp.Requests) != 1 || fp.Requests[0].DisableContinuation {
+		t.Fatalf("managed continuation provider request = %+v", fp.Requests)
+	}
+}
+
+func TestRetentionRewriteResetsCompactionMeasurement(t *testing.T) {
+	old := strings.Repeat("o", 12_000)
+	fresh := strings.Repeat("n", 16_000)
+	msgs := []llm.Message{
+		userText("q0"), asstToolUse("old", "rd", `{}`), toolResult("old", old), asstText("a0"),
+	}
+	for i := 1; i <= 9; i++ {
+		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+	}
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{
+		name:     "rd",
+		readOnly: true,
+		run: func(context.Context, json.RawMessage) (string, error) {
+			return fresh, nil
+		},
+	})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "fresh", "rd", `{}`)},
+			Stop:   llm.StopToolUse,
+			// Deliberately larger than the local estimate. Once retention
+			// rewrites the prefix, this measurement must not be reused.
+			Usage: llm.Usage{InputTokens: 7_600},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("done")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 6_500},
+		},
+	)
+	a := newAgent(fp, reg, Options{
+		ContextWindow:   10_000,
+		RetentionPolicy: RetentionPolicyPressure,
+	})
+	a.SetTranscript(msgs)
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "next", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(sink.retention) != 1 || sink.retention[0].BlocksTrimmed == 0 {
+		t.Fatalf("retention events = %+v, want one changed pressure epoch", sink.retention)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want two conversational requests without a stale-trigger compaction", len(fp.Requests))
+	}
+	if len(sink.maintenance) != 0 {
+		t.Fatalf("maintenance calls = %+v, want none", sink.maintenance)
 	}
 }
 

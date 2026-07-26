@@ -21,6 +21,15 @@ func runRunCommand(t *testing.T, args map[string]any) (string, error) {
 	return runTool(t, runCommand{}, args)
 }
 
+func runRunCommandResult(t *testing.T, args map[string]any) (RunResult, error) {
+	t.Helper()
+	input, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return (runCommand{}).RunResult(context.Background(), input)
+}
+
 func TestRunCommandEchoExitZero(t *testing.T) {
 	out, err := runRunCommand(t, map[string]any{"command": "echo hello"})
 	if err != nil {
@@ -215,14 +224,10 @@ func TestRunCommandModelSchemaAvoidsTopLevelComposition(t *testing.T) {
 			if !ok {
 				t.Fatalf("schema properties missing: %s", modelRaw)
 			}
-			if _, ok := props["command"]; !ok {
-				t.Fatalf("schema missing command property: %s", modelRaw)
-			}
-			if _, ok := props["argv"]; !ok {
-				t.Fatalf("schema missing argv property: %s", modelRaw)
-			}
-			if _, ok := props["steps"]; !ok {
-				t.Fatalf("schema missing steps property: %s", modelRaw)
+			for _, property := range []string{"command", "argv", "steps", "name", "output_mode"} {
+				if _, ok := props[property]; !ok {
+					t.Fatalf("schema missing %s property: %s", property, modelRaw)
+				}
 			}
 
 			var rawSchema map[string]any
@@ -248,6 +253,133 @@ func TestRunCommandModelSchemaAvoidsTopLevelComposition(t *testing.T) {
 				t.Fatalf("description should advertise argv shape: %q", tc.tool.Description())
 			}
 		})
+	}
+}
+
+func TestRunCommandTopLevelOutputModes(t *testing.T) {
+	largeOutput := strings.Repeat("x", runCommandAutoReceiptBytes+100)
+	largeArgs := map[string]any{
+		"argv":  []string{"sh", "-c", "cat; printf '\\nSUMMARY ok\\n'"},
+		"stdin": largeOutput,
+		"name":  "go test",
+	}
+
+	t.Run("auto compacts large success", func(t *testing.T) {
+		result, err := runRunCommandResult(t, largeArgs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"PASS go test", "SUMMARY ok", "output)", "[exit code: 0]"} {
+			if !strings.Contains(result.Text, want) {
+				t.Fatalf("receipt missing %q:\n%s", want, result.Text)
+			}
+		}
+		if len(result.Text) >= 1024 || strings.Count(result.Text, "x") >= runCommandAutoReceiptBytes {
+			t.Fatalf("large success receipt is not compact: %d bytes", len(result.Text))
+		}
+		if !strings.Contains(result.OriginalText, largeOutput) || !strings.Contains(result.OriginalText, "[exit code: 0]") {
+			t.Fatalf("large success original was not preserved: %d bytes", len(result.OriginalText))
+		}
+	})
+
+	t.Run("auto preserves small success", func(t *testing.T) {
+		result, err := runRunCommandResult(t, map[string]any{
+			"argv": []string{"printf", "small output"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result.Text, "small output") || result.OriginalText != "" {
+			t.Fatalf("small auto result = %+v", result)
+		}
+	})
+
+	t.Run("receipt compacts small success", func(t *testing.T) {
+		result, err := runRunCommandResult(t, map[string]any{
+			"argv":        []string{"printf", "small output"},
+			"name":        "small check",
+			"output_mode": "receipt",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A small unclipped success is fully shown in the receipt, so nothing is
+		// archived and the result is not marked truncated.
+		if !strings.Contains(result.Text, "PASS small check") ||
+			!strings.Contains(result.Text, "small output") {
+			t.Fatalf("receipt result = %+v", result)
+		}
+		if result.OriginalText != "" {
+			t.Fatalf("small receipt should not archive: %+v", result)
+		}
+		if strings.Contains(result.Text, "archived") {
+			t.Fatalf("small receipt should not carry an archive hint:\n%s", result.Text)
+		}
+	})
+
+	t.Run("receipt archives clipped success", func(t *testing.T) {
+		args := make(map[string]any, len(largeArgs)+1)
+		for key, value := range largeArgs {
+			args[key] = value
+		}
+		args["output_mode"] = "receipt"
+		result, err := runRunCommandResult(t, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.OriginalText == "" {
+			t.Fatalf("clipped receipt should archive its original: %+v", result)
+		}
+		if !strings.Contains(result.OriginalText, largeOutput) {
+			t.Fatalf("clipped receipt original missing output: %d bytes", len(result.OriginalText))
+		}
+	})
+
+	t.Run("full preserves large success", func(t *testing.T) {
+		args := make(map[string]any, len(largeArgs)+1)
+		for key, value := range largeArgs {
+			args[key] = value
+		}
+		args["output_mode"] = "full"
+		result, err := runRunCommandResult(t, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Text) <= runCommandAutoReceiptBytes || result.OriginalText != "" ||
+			!strings.Contains(result.Text, "SUMMARY ok") {
+			t.Fatalf("full result = text %d bytes, original %d bytes", len(result.Text), len(result.OriginalText))
+		}
+	})
+}
+
+func TestRunCommandAutoBoundsFailureAndPreservesClippedOriginal(t *testing.T) {
+	largeOutput := strings.Repeat("x", runCommandFailureOutputBytes+1000)
+	result, err := runRunCommandResult(t, map[string]any{
+		"command": "cat; printf '\\nfailure-tail\\n'; exit 7",
+		"stdin":   largeOutput,
+		"name":    "failing test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"FAIL failing test", "failure-tail", "[showing output tail]", "[exit code: 7]"} {
+		if !strings.Contains(result.Text, want) {
+			t.Fatalf("failure receipt missing %q:\n%s", want, result.Text)
+		}
+	}
+	if len(result.Text) > runCommandFailureOutputBytes+512 {
+		t.Fatalf("failure receipt = %d bytes, want bounded diagnostic", len(result.Text))
+	}
+	if !strings.Contains(result.OriginalText, largeOutput) || !strings.Contains(result.OriginalText, "[exit code: 7]") {
+		t.Fatalf("failure original was not preserved: %d bytes", len(result.OriginalText))
+	}
+
+	small, err := runRunCommandResult(t, map[string]any{"command": "printf small-failure; exit 2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(small.Text, "small-failure") || small.OriginalText != "" {
+		t.Fatalf("small failure result = %+v", small)
 	}
 }
 
@@ -365,6 +497,8 @@ func TestRunCommandStepsValidation(t *testing.T) {
 		{"top level command", map[string]any{"command": "true", "steps": []map[string]any{{"command": "true"}}}, "steps or a top-level"},
 		{"top level stdin", map[string]any{"stdin": "x", "steps": []map[string]any{{"command": "true"}}}, "top-level stdin"},
 		{"background", map[string]any{"background": true, "steps": []map[string]any{{"command": "true"}}}, "background"},
+		{"top-level name", map[string]any{"name": "checks", "steps": []map[string]any{{"command": "true"}}}, "unavailable with steps"},
+		{"top-level output mode", map[string]any{"output_mode": "full", "steps": []map[string]any{{"command": "true"}}}, "unavailable with steps"},
 		{"missing step command", map[string]any{"steps": []map[string]any{{"name": "empty"}}}, "steps[0]"},
 		{"step command and argv", map[string]any{"steps": []map[string]any{{"command": "true", "argv": []string{"true"}}}}, "steps[0]"},
 		{"bad step timeout", map[string]any{"steps": []map[string]any{{"command": "true", "timeout_seconds": -1}}}, "timeout_seconds"},
@@ -376,6 +510,16 @@ func TestRunCommandStepsValidation(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestRunCommandRejectsInvalidOutputMode(t *testing.T) {
+	_, err := runRunCommandResult(t, map[string]any{
+		"command":     "true",
+		"output_mode": "verbose",
+	})
+	if err == nil || !strings.Contains(err.Error(), `output_mode must be "auto", "receipt", or "full"`) {
+		t.Fatalf("invalid output mode error = %v", err)
 	}
 }
 
@@ -398,6 +542,27 @@ func TestRunCommandStepsDispatchArchivesSuppressedOutput(t *testing.T) {
 	}
 }
 
+func TestRunCommandTopLevelDispatchArchivesReceiptOriginal(t *testing.T) {
+	r := &Registry{}
+	r.Register(runCommand{})
+	res := r.Dispatch(context.Background(), llm.ToolCall{
+		ID:    "top-level",
+		Name:  "run_command",
+		Input: json.RawMessage(`{"argv":["printf","verbose-success"],"name":"check","output_mode":"receipt"}`),
+	})
+	// A small unclipped success is fully shown in the receipt, so dispatch does
+	// not archive or truncate.
+	if res.IsError || res.Truncated {
+		t.Fatalf("dispatch result = %+v", res)
+	}
+	if !strings.Contains(res.Text, "PASS check") || !strings.Contains(res.Text, "verbose-success") {
+		t.Fatalf("receipt dispatch result = %+v", res)
+	}
+	if res.OriginalText != "" {
+		t.Fatalf("unclipped receipt should not archive: %+v", res)
+	}
+}
+
 type fakeBackgroundStarter struct {
 	req BackgroundJobRequest
 }
@@ -416,8 +581,12 @@ func TestRunCommandBackgroundStartsJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out != "background job bg_test started" {
+	if !strings.HasPrefix(out, "background job bg_test started (resource: ") ||
+		!strings.HasSuffix(out, ", access: exclusive)") {
 		t.Fatalf("start output = %q", out)
+	}
+	if starter.req.ResourceKey == "" || starter.req.Access != BackgroundAccessExclusive {
+		t.Fatalf("job lease = %q/%q, want canonical cwd/exclusive", starter.req.ResourceKey, starter.req.Access)
 	}
 	if starter.req.Kind != "run_command" {
 		t.Fatalf("job kind = %q, want run_command", starter.req.Kind)
@@ -447,7 +616,8 @@ func TestRunCommandBackgroundArgvStartsJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out != "background job bg_test started" {
+	if !strings.HasPrefix(out, "background job bg_test started (resource: ") ||
+		!strings.HasSuffix(out, ", access: exclusive)") {
 		t.Fatalf("start output = %q", out)
 	}
 	if starter.req.Description != "printf %s background argv" {
@@ -459,6 +629,63 @@ func TestRunCommandBackgroundArgvStartsJob(t *testing.T) {
 	}
 	if !strings.Contains(result.Text, "background argv") || !strings.Contains(result.Text, "[exit code: 0]") {
 		t.Fatalf("background result = %q", result.Text)
+	}
+}
+
+func TestRunCommandBackgroundPreservesReceiptOriginal(t *testing.T) {
+	starter := &fakeBackgroundStarter{}
+	_, err := runTool(t, runCommand{background: starter}, map[string]any{
+		"argv":        []string{"printf", "background output"},
+		"name":        "background check",
+		"output_mode": "receipt",
+		"background":  true,
+	})
+	if err != nil {
+		t.Fatalf("start background receipt: %v", err)
+	}
+	result, err := starter.req.Run(context.Background(), "bg_test")
+	if err != nil {
+		t.Fatalf("background run: %v", err)
+	}
+	if !strings.Contains(result.Text, "PASS background check") ||
+		!strings.Contains(result.Text, "background output") {
+		t.Fatalf("background receipt result = %+v", result)
+	}
+	if result.OriginalText != "" {
+		t.Fatalf("unclipped background receipt should not archive: %+v", result)
+	}
+}
+
+func TestRunCommandBackgroundLeaseOverrideAndForegroundValidation(t *testing.T) {
+	starter := &fakeBackgroundStarter{}
+	resource := t.TempDir()
+	out, err := runTool(t, runCommand{background: starter}, map[string]any{
+		"command":      "printf read-only",
+		"background":   true,
+		"resource_key": resource,
+		"access":       BackgroundAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("background override: %v", err)
+	}
+	wantResource, err := CanonicalBackgroundResource(resource)
+	if err != nil {
+		t.Fatalf("canonical resource: %v", err)
+	}
+	if starter.req.ResourceKey != wantResource || starter.req.Access != BackgroundAccessReadOnly {
+		t.Fatalf("job lease = %q/%q, want %q/read_only", starter.req.ResourceKey, starter.req.Access, wantResource)
+	}
+	if !strings.Contains(out, "access: read_only") {
+		t.Fatalf("start output = %q", out)
+	}
+
+	_, err = runTool(t, runCommand{background: starter}, map[string]any{
+		"command":      "printf foreground",
+		"resource_key": resource,
+		"access":       BackgroundAccessExclusive,
+	})
+	if err == nil || !strings.Contains(err.Error(), "require background:true") {
+		t.Fatalf("foreground lease error = %v", err)
 	}
 }
 
@@ -501,6 +728,37 @@ func TestRunCommandTimeoutKillsGroup(t *testing.T) {
 	}
 	if !strings.Contains(out, "timed out") {
 		t.Errorf("timeout should be noted in output: %q", out)
+	}
+}
+
+func TestRunCommandReceiptTimeoutPreservesOriginalWhenWaitIncomplete(t *testing.T) {
+	oldUnit := processTimeoutUnit
+	oldGrace := processReapGrace
+	processTimeoutUnit = 25 * time.Millisecond
+	processReapGrace = 25 * time.Millisecond
+	oldKill := killProcessGroup
+	killProcessGroup = func(int) {}
+	t.Cleanup(func() {
+		processTimeoutUnit = oldUnit
+		processReapGrace = oldGrace
+		killProcessGroup = oldKill
+	})
+
+	result, err := runRunCommandResult(t, map[string]any{
+		// Short, unclipped partial output, but the wait does not finish: the
+		// receipt drops the partial-reap signal, so the original must be kept.
+		"command":         `echo started; sleep 5`,
+		"timeout_seconds": 1,
+		"output_mode":     "receipt",
+	})
+	if err != nil {
+		t.Fatalf("timeout must report a result, not a tool error: %v", err)
+	}
+	if result.OriginalText == "" {
+		t.Fatalf("incomplete-wait receipt must keep its original: %+v", result)
+	}
+	if !strings.Contains(result.OriginalText, "wait did not finish") {
+		t.Fatalf("original should carry the partial-reap signal:\n%s", result.OriginalText)
 	}
 }
 

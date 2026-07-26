@@ -1198,6 +1198,33 @@ func TestTimingsTreatsReasoningSummaryAsVisible(t *testing.T) {
 	}
 }
 
+func TestTimingsLabelsInProgressPromptAndUsesLastEvent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	base := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	events := []Event{
+		{Time: base, Type: EventUser, Prompt: 1, Text: "keep working"},
+		{Time: base.Add(400 * time.Millisecond), Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "Checking."},
+		{Time: base.Add(5 * time.Second), Type: EventTurnComplete, Prompt: 1, Turn: 1},
+	}
+	for _, ev := range events {
+		if err := AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	var out strings.Builder
+	if err := Timings(dir, &out); err != nil {
+		t.Fatalf("Timings: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "prompt 1 (in progress): total 5s, first visible 400ms") {
+		t.Fatalf("in-progress timings = %q", got)
+	}
+	if strings.Contains(got, "total 0s") {
+		t.Fatalf("in-progress timings reported a zero total: %q", got)
+	}
+}
+
 func TestLatestTurnOutputReturnsLatestVisibleOutputWithoutUserPrompt(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	events := []Event{
@@ -1272,6 +1299,360 @@ func TestLatestTurnOutputMissingLogIsEmpty(t *testing.T) {
 	}
 	if got != "" {
 		t.Fatalf("missing log output = %q, want empty", got)
+	}
+}
+
+func TestLoadRecoversActiveToolDispatchWithoutReexecutingTool(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	at := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+	state := Session{
+		Version:         Version,
+		Provider:        "responses",
+		Model:           "gpt-test",
+		Created:         at,
+		Updated:         at.Add(time.Second),
+		System:          "test system",
+		ProxySessionID:  "proxy-1",
+		CacheAffinityID: "cache-1",
+		Prompt:          1,
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Time: at, Origin: llm.MessageOriginPrompt, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "change it"}}},
+			{Role: llm.RoleAssistant, Time: at.Add(time.Second), Content: []llm.ContentBlock{{
+				Kind:      llm.BlockToolUse,
+				ToolUseID: "call-1",
+				ToolName:  "write_file",
+				ToolInput: json.RawMessage(`{"path":"x"}`),
+			}}},
+		},
+		ResponseState: &llm.ResponseState{PreviousResponseID: "resp-1", AnchorMessages: 2},
+		Todos:         []todo.Item{{Content: "change it", Status: "in_progress"}},
+		Plans:         []plan.Plan{{Title: "Plan 1", Body: "Do it", Path: "plans/1.md"}},
+		Usage:         UsageTotals{Usage: llm.Usage{InputTokens: 11, OutputTokens: 3}},
+	}
+	if err := SaveActiveTurnCheckpoint(dir, state, "tool_dispatch", 1, 1); err != nil {
+		t.Fatalf("SaveActiveTurnCheckpoint: %v", err)
+	}
+
+	recovered, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if recovered.Recovery == nil || recovered.Recovery.Phase != "tool_dispatch" || recovered.Recovery.Turn != 1 {
+		t.Fatalf("recovery metadata = %+v", recovered.Recovery)
+	}
+	if err := llm.ValidateTranscript(recovered.Messages); err != nil {
+		t.Fatalf("recovered transcript: %v", err)
+	}
+	if len(recovered.Messages) != 3 {
+		t.Fatalf("recovered messages = %d, want prompt/tool-use/interrupted result", len(recovered.Messages))
+	}
+	result := recovered.Messages[2].Content[0]
+	if result.Kind != llm.BlockToolResult || result.ResultForID != "call-1" || !result.ResultError || result.ResultText != "interrupted" {
+		t.Fatalf("recovered tool result = %+v", result)
+	}
+	if recovered.ResponseState == nil || recovered.ResponseState.PreviousResponseID != "resp-1" || recovered.ResponseState.AnchorMessages != 2 {
+		t.Fatalf("response state = %+v", recovered.ResponseState)
+	}
+	if len(recovered.Todos) != 1 || len(recovered.Plans) != 1 || recovered.Usage.InputTokens != 11 {
+		t.Fatalf("recovered durable state = todos %+v plans %+v usage %+v", recovered.Todos, recovered.Plans, recovered.Usage)
+	}
+
+	if err := recovered.SaveConsolidated(dir); err != nil {
+		t.Fatalf("SaveConsolidated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, activeTurnFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("active checkpoint after consolidation: %v", err)
+	}
+	reloaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load consolidated: %v", err)
+	}
+	if reloaded.Recovery != nil || !reflect.DeepEqual(reloaded.Messages, recovered.Messages) {
+		t.Fatalf("consolidated recovery = %+v messages equal = %v", reloaded.Recovery, reflect.DeepEqual(reloaded.Messages, recovered.Messages))
+	}
+}
+
+func testCheckpointState(at time.Time, text string) Session {
+	return Session{
+		Version:  Version,
+		Provider: "responses",
+		Model:    "gpt-test",
+		Created:  at,
+		Updated:  at,
+		System:   "test system",
+		Prompt:   1,
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Time: at, Origin: llm.MessageOriginPrompt, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: text}}},
+		},
+	}
+}
+
+func TestLoadToleratesCorruptActiveTurnCheckpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(t *testing.T, dir string)
+	}{
+		{
+			name: "garbage bytes",
+			write: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, activeTurnFile), []byte("{not json"), 0o644); err != nil {
+					t.Fatalf("write corrupt checkpoint: %v", err)
+				}
+			},
+		},
+		{
+			name: "unsupported version",
+			write: func(t *testing.T, dir string) {
+				t.Helper()
+				checkpoint := map[string]any{
+					"version":  Version + 1,
+					"phase":    "closed_turn",
+					"saved_at": time.Now(),
+					"state":    map[string]any{"version": Version + 1},
+					"messages": []any{map[string]any{"role": "user"}},
+				}
+				data, err := json.Marshal(checkpoint)
+				if err != nil {
+					t.Fatalf("marshal checkpoint: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, activeTurnFile), data, 0o644); err != nil {
+					t.Fatalf("write version-skewed checkpoint: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "session")
+			at := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+			state := testCheckpointState(at, "healthy saved state")
+			if err := state.Save(dir); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			tc.write(t, dir)
+
+			loaded, err := Load(dir)
+			if err != nil {
+				t.Fatalf("Load with corrupt checkpoint: %v", err)
+			}
+			if loaded.RecoveryWarning == "" {
+				t.Fatal("Load should report the ignored checkpoint via RecoveryWarning")
+			}
+			if loaded.Recovery != nil {
+				t.Fatalf("Recovery = %+v, want nil for an ignored checkpoint", loaded.Recovery)
+			}
+			if len(loaded.Messages) != 1 || loaded.Messages[0].Content[0].Text != "healthy saved state" {
+				t.Fatalf("loaded messages = %+v, want the saved state", loaded.Messages)
+			}
+		})
+	}
+}
+
+func TestLoadDropsStaleCheckpointWithEqualUpdated(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	at := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+	state := testCheckpointState(at, "saved turn")
+	if err := SaveActiveTurnCheckpoint(dir, state, "closed_turn", 1, 1); err != nil {
+		t.Fatalf("SaveActiveTurnCheckpoint: %v", err)
+	}
+	// A crash between Save and ClearActiveTurnCheckpoint leaves a checkpoint
+	// whose Updated equals the consolidated state's.
+	if err := state.Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Recovery != nil {
+		t.Fatalf("Recovery = %+v, want nil for an equal-Updated checkpoint", loaded.Recovery)
+	}
+	if _, err := os.Stat(filepath.Join(dir, activeTurnFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale checkpoint should be removed: %v", err)
+	}
+}
+
+func TestSaveAdoptsExistingTreeWhenTreeNil(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	at := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+	first := testCheckpointState(at, "first turn")
+	if err := first.Save(dir); err != nil {
+		t.Fatalf("first Save: %v", err)
+	}
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// A distinct Session value with Tree == nil (e.g. a delegate child checkpoint)
+	// must adopt the on-disk tree identity instead of minting a conflicting ID.
+	second := testCheckpointState(at.Add(time.Minute), "second turn")
+	second.Messages = append(append([]llm.Message{}, loaded.Messages...), llm.Message{
+		Role:    llm.RoleAssistant,
+		Time:    at.Add(time.Minute),
+		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second answer"}},
+	})
+	if err := second.Save(dir); err != nil {
+		t.Fatalf("second Save: %v", err)
+	}
+
+	tree, err := LoadTree(dir, "")
+	if err != nil {
+		t.Fatalf("LoadTree: %v", err)
+	}
+	if tree.Header.ID != loaded.ID {
+		t.Fatalf("tree ID = %q, want the original %q", tree.Header.ID, loaded.ID)
+	}
+	messages, err := tree.BuildContext()
+	if err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+	if len(messages) != 2 || messages[0].Content[0].Text != "first turn" || messages[1].Content[0].Text != "second answer" {
+		t.Fatalf("tree messages = %+v, want both turns under one growing tree", messages)
+	}
+}
+
+func TestLoadRecoveryPreservesCheckpointTreeIdentity(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	at := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+	state := testCheckpointState(at, "crashed turn")
+	state.ParentSession = "parent-1"
+	state.ParentEntryID = "entry-1"
+	// Consolidate once so tree.ndjson exists, then reload so state.ID carries
+	// the tree identity Save stamped into state.json, as it does in production.
+	if err := state.SaveConsolidated(dir); err != nil {
+		t.Fatalf("SaveConsolidated: %v", err)
+	}
+	saved, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// The checkpoint snapshots the exact loaded session (same tree identity and
+	// message timestamps as on disk), simulating a crash before consolidation.
+	state = saved
+	if err := SaveActiveTurnCheckpoint(dir, state, "tool_dispatch", 1, 2); err != nil {
+		t.Fatalf("SaveActiveTurnCheckpoint: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, stateFile), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("corrupt state.json: %v", err)
+	}
+
+	recovered, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if recovered.Recovery == nil || recovered.Recovery.Phase != "tool_dispatch" {
+		t.Fatalf("recovery metadata = %+v", recovered.Recovery)
+	}
+	if recovered.ID != state.ID {
+		t.Fatalf("recovered ID = %q, want checkpoint tree ID %q", recovered.ID, state.ID)
+	}
+	if recovered.ParentSession != "parent-1" || recovered.ParentEntryID != "entry-1" {
+		t.Fatalf("recovered parent linkage = %q/%q", recovered.ParentSession, recovered.ParentEntryID)
+	}
+	if err := recovered.SaveConsolidated(dir); err != nil {
+		t.Fatalf("SaveConsolidated after recovery: %v", err)
+	}
+	reloaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load consolidated: %v", err)
+	}
+	if reloaded.ID != state.ID {
+		t.Fatalf("reloaded ID = %q, want %q", reloaded.ID, state.ID)
+	}
+}
+
+func TestAbandonRunningChildrenMakesInterruptedCheckpointTerminal(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "session")
+	runningDir, err := SaveChildMeta(root, ChildMeta{
+		ID:         "running-child",
+		Kind:       "delegate",
+		Status:     ChildStatusRunning,
+		Created:    time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC),
+		Transcript: filepath.Join("children", "running-child", stateFile),
+	})
+	if err != nil {
+		t.Fatalf("SaveChildMeta running: %v", err)
+	}
+	_, err = SaveChildMeta(root, ChildMeta{
+		ID:      "complete-child",
+		Kind:    "delegate",
+		Status:  ChildStatusCompleted,
+		Created: time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("SaveChildMeta complete: %v", err)
+	}
+	at := time.Date(2026, 7, 26, 19, 0, 0, 0, time.UTC)
+	count, skipped, err := AbandonRunningChildren(root, at)
+	if err != nil {
+		t.Fatalf("AbandonRunningChildren: %v", err)
+	}
+	if count != 1 || skipped != 0 {
+		t.Fatalf("abandoned = %d skipped = %d, want 1/0", count, skipped)
+	}
+	data, err := os.ReadFile(filepath.Join(runningDir, "meta.json"))
+	if err != nil {
+		t.Fatalf("read running metadata: %v", err)
+	}
+	var meta ChildMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("decode running metadata: %v", err)
+	}
+	if meta.Status != ChildStatusAbandoned || !meta.Updated.Equal(at) || meta.TerminationReason != "cancelled" || !strings.Contains(meta.Error, "resumed") {
+		t.Fatalf("abandoned metadata = %+v", meta)
+	}
+	target, err := readFollowTarget(runningDir)
+	if err != nil {
+		t.Fatalf("readFollowTarget: %v", err)
+	}
+	if !target.terminal() {
+		t.Fatalf("abandoned target = %+v, want terminal", target)
+	}
+}
+
+func TestAbandonRunningChildrenSkipsUnreadableChildren(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "session")
+	runningDir, err := SaveChildMeta(root, ChildMeta{
+		ID:      "running-child",
+		Kind:    "delegate",
+		Status:  ChildStatusRunning,
+		Created: time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("SaveChildMeta running: %v", err)
+	}
+	// A child directory left before its first metadata write (crash between
+	// MkdirAll and SaveChildMeta) plus one with malformed metadata.
+	if err := os.MkdirAll(filepath.Join(root, "children", "orphan-child"), 0o755); err != nil {
+		t.Fatalf("mkdir orphan child: %v", err)
+	}
+	corruptDir := filepath.Join(root, "children", "corrupt-child")
+	if err := os.MkdirAll(corruptDir, 0o755); err != nil {
+		t.Fatalf("mkdir corrupt child: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(corruptDir, "meta.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt meta: %v", err)
+	}
+
+	abandoned, skipped, err := AbandonRunningChildren(root, time.Date(2026, 7, 26, 19, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("AbandonRunningChildren: %v", err)
+	}
+	if abandoned != 1 || skipped != 2 {
+		t.Fatalf("abandoned = %d skipped = %d, want 1/2", abandoned, skipped)
+	}
+	data, err := os.ReadFile(filepath.Join(runningDir, "meta.json"))
+	if err != nil {
+		t.Fatalf("read running metadata: %v", err)
+	}
+	var meta ChildMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("decode running metadata: %v", err)
+	}
+	if meta.Status != ChildStatusAbandoned {
+		t.Fatalf("running child status = %q, want abandoned", meta.Status)
 	}
 }
 

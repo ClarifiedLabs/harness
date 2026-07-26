@@ -15,6 +15,16 @@ import (
 // is pure waste.
 const retentionImageKeepTurns = 2
 
+const (
+	// Retention should pre-empt the 78% compaction trigger with enough room for
+	// another large tool result. Provider-backed calibration found that later
+	// 65% and 70% epochs could still cross into compaction on the next result;
+	// 60% avoided that collision and materially reduced uncached input versus
+	// age-based retention.
+	retentionPressureHighPct = 60
+	retentionPressureLowPct  = 50
+)
+
 // retentionTrimMarker is the idempotency sentinel left in a tool result the
 // retention pass has already shrunk, so repeated passes never re-trim it.
 const retentionTrimMarker = "[older tool output trimmed"
@@ -26,39 +36,132 @@ const retentionTrimMarker = "[older tool output trimmed"
 // transcript invariant is preserved. The pass is idempotent: already-trimmed or
 // already-archived blocks are skipped.
 func (a *Agent) applyRetention(sink EventSink) bool {
+	return a.applyRetentionPolicy(sink, a.estimateContext(nil).Total).changed
+}
+
+type retentionPass struct {
+	event    RetentionEvent
+	observed bool
+	changed  bool
+}
+
+// applyRetentionPolicy selects pressure-triggered epochs for the default auto
+// policy, regardless of provider continuation support. Pressure epochs use
+// hysteresis: after one epoch, retention does not run again until the full
+// context falls below the low-water mark. Compaction remains the safety net when
+// an epoch cannot reclaim enough. Explicit age mode preserves the legacy path
+// for experiments and compatibility.
+func (a *Agent) applyRetentionPolicy(sink EventSink, contextTokens int) retentionPass {
+	policy := a.retentionPolicy
+	if policy == RetentionPolicyDisabled {
+		return retentionPass{}
+	}
+	if policy == RetentionPolicyAuto {
+		policy = RetentionPolicyPressure
+	}
 	if len(a.transcript) == 0 {
-		return false
+		return retentionPass{}
 	}
 	starts := turnStarts(a.transcript)
 	resultBoundary := keepBoundary(starts, a.keepTurns())
 	imageBoundary := keepBoundary(starts, retentionImageKeepTurns)
 	if resultBoundary == 0 && imageBoundary == 0 {
-		return false // nothing old enough to shrink
+		return retentionPass{} // nothing old enough to shrink
 	}
-	changed := false
+
+	event := RetentionEvent{
+		Policy:              "age",
+		Trigger:             "turn_age",
+		ContextTokensBefore: contextTokens,
+	}
+	observed := false
+	if policy == RetentionPolicyPressure {
+		event.Policy = "pressure_epoch"
+		event.Trigger = "context_pressure"
+		window := a.window()
+		if window <= 0 {
+			return retentionPass{}
+		}
+		if contextTokens*100 <= window*retentionPressureLowPct {
+			a.retentionEpochArmed = true
+		}
+		if !a.retentionEpochArmed || contextTokens*100 < window*retentionPressureHighPct {
+			return retentionPass{}
+		}
+		a.retentionEpochArmed = false
+		observed = true
+	}
+	event.BytesBefore = retentionTranscriptBytes(a.transcript)
 	readOnly := a.readOnlyResultIDsIn(a.transcript)
 	for i := range a.transcript {
 		for j := range a.transcript[i].Content {
 			b := &a.transcript[i].Content[j]
+			blockChanged := false
 			switch b.Kind {
 			case llm.BlockToolResult:
 				// Only read-only results are re-derivable on demand, so only they
 				// are safe to drop the body of.
 				if i < resultBoundary && readOnly[b.ResultForID] {
-					changed = a.trimToolResultBlock(b, sink) || changed
+					blockChanged = a.trimToolResultBlock(b, sink) || blockChanged
 				}
 				if i < imageBoundary {
-					changed = degradeToolResultImages(b, func(llm.ContentBlock) bool { return true }) || changed
+					blockChanged = degradeToolResultImages(b, func(llm.ContentBlock) bool { return true }) || blockChanged
 				}
 			case llm.BlockImage:
 				if i < imageBoundary {
 					*b = llm.ContentBlock{Kind: llm.BlockText, Text: imageSummaryPlaceholder(*b)}
-					changed = true
+					blockChanged = true
 				}
+			}
+			if blockChanged {
+				event.BlocksTrimmed++
 			}
 		}
 	}
-	return changed
+	event.BytesAfter = retentionTranscriptBytes(a.transcript)
+	event.ContextTokensAfter = a.estimateContext(nil).Total
+	changed := event.BlocksTrimmed > 0
+	if changed {
+		observed = true
+	}
+	return retentionPass{event: event, observed: observed, changed: changed}
+}
+
+func (a *Agent) managedContinuationActive() bool {
+	return a.managedContinuationStateful && !a.disableManagedContinuation
+}
+
+func normalizeRetentionPolicy(policy RetentionPolicy) RetentionPolicy {
+	switch policy {
+	case "", RetentionPolicyAuto:
+		return RetentionPolicyAuto
+	case RetentionPolicyAge, RetentionPolicyPressure, RetentionPolicyDisabled:
+		return policy
+	default:
+		return RetentionPolicyAuto
+	}
+}
+
+func retentionTranscriptBytes(messages []llm.Message) int {
+	total := 0
+	for _, message := range messages {
+		total += len(message.Role) + len(message.Phase)
+		for _, block := range message.Content {
+			total += retentionContentBlockBytes(block)
+		}
+	}
+	return total
+}
+
+func retentionContentBlockBytes(block llm.ContentBlock) int {
+	total := len(block.Text) + len(block.ResultText) + len(block.ToolInput) + len(block.ToolName)
+	total += len(block.ImageData) + len(block.ImageMediaType) + len(block.ImageDetail) + len(block.ImageName)
+	total += len(block.ReasoningID) + len(block.ReasoningEncrypted) + len(block.RedactedData) + len(block.ThinkingSignature)
+	total += len(block.InteractionThoughtSummary) + len(block.InteractionThoughtSignature) + len(block.InteractionStep)
+	for _, child := range block.ResultContent {
+		total += retentionContentBlockBytes(child)
+	}
+	return total
 }
 
 // trimToolResults shrinks every large read-only tool result in msgs in place.

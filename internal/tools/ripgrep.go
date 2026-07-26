@@ -77,9 +77,15 @@ func (r ripgrep) Run(ctx context.Context, input json.RawMessage) (string, error)
 		}
 		args.Args = guardRipgrepArgs(args.Args)
 		prog := r.program
+		resourceKey, err := DefaultBackgroundResource(args.Cwd)
+		if err != nil {
+			return "", err
+		}
 		info, err := r.background.StartBackgroundJob(BackgroundJobRequest{
 			Kind:        "rg",
 			Description: desc,
+			ResourceKey: resourceKey,
+			Access:      BackgroundAccessReadOnly,
 			Run: func(ctx context.Context, id string) (BackgroundJobResult, error) {
 				out, err := runProgram(ctx, prog, args, "rg", true)
 				return BackgroundJobResult{Text: out}, err
@@ -88,7 +94,12 @@ func (r ripgrep) Run(ctx context.Context, input json.RawMessage) (string, error)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("background job %s started", info.ID), nil
+		return fmt.Sprintf(
+			"background job %s started (resource: %s, access: %s)",
+			info.ID,
+			resourceKey,
+			BackgroundAccessReadOnly,
+		), nil
 	}
 	args, err := decodeSearchCommandArgs(input)
 	if err != nil {

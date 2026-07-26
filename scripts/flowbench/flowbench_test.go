@@ -26,6 +26,26 @@ func TestBenchmarkEnvIsolatesGoCache(t *testing.T) {
 	}
 }
 
+func TestBenchmarkEnvDisablesIntegrations(t *testing.T) {
+	t.Setenv("HARNESS_LSP_SERENA_ENABLE", "true")
+	env := benchmarkEnv("")
+	for _, key := range []string{"HARNESS_MCP_ENABLE", "HARNESS_LSP_ENABLE", "HARNESS_LSP_SERENA_ENABLE"} {
+		if got := envValue(env, key); got != "false" {
+			t.Fatalf("%s = %q, want \"false\"", key, got)
+		}
+	}
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			return strings.TrimPrefix(item, prefix)
+		}
+	}
+	return ""
+}
+
 func TestDryRunAlternatesPairs(t *testing.T) {
 	c := allCases()["search_context"]
 	records := dryRunRecords(runConfig{

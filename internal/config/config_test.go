@@ -97,19 +97,23 @@ func TestModelPrecedenceFlagBeatsEnvBeatsFileBeatsDefault(t *testing.T) {
 
 func TestCompactionConfigDefaultsAndFileOverrides(t *testing.T) {
 	defaults := loadOK(t, nil, noEnv, "")
-	if defaults.CompactKeepTokens != 20_000 || !defaults.CompactAutoEnabled || defaults.CompactTriggerPercent != 78 || defaults.CompactTargetPercent != 65 {
-		t.Fatalf("compaction defaults = tokens=%d auto=%t trigger=%d target=%d", defaults.CompactKeepTokens, defaults.CompactAutoEnabled, defaults.CompactTriggerPercent, defaults.CompactTargetPercent)
+	if defaults.CompactKeepTokens != 20_000 || !defaults.CompactAutoEnabled || defaults.CompactTriggerPercent != 78 || defaults.CompactTargetPercent != 65 || defaults.CompactIdleAfterSeconds != 0 || defaults.CompactIdleTriggerPercent != 35 {
+		t.Fatalf("compaction defaults = tokens=%d auto=%t trigger=%d target=%d idle_after=%d idle_trigger=%d",
+			defaults.CompactKeepTokens, defaults.CompactAutoEnabled, defaults.CompactTriggerPercent, defaults.CompactTargetPercent, defaults.CompactIdleAfterSeconds, defaults.CompactIdleTriggerPercent)
 	}
 
 	path := writeConfig(t, `{
 		"compact_keep_tokens": 12345,
 		"compact_auto_enabled": false,
 		"compact_trigger_percent": 90,
-		"compact_target_percent": 70
+		"compact_target_percent": 70,
+		"compact_idle_after_seconds": 600,
+		"compact_idle_trigger_percent": 35
 	}`)
 	got := loadOK(t, nil, noEnv, path)
-	if got.CompactKeepTokens != 12_345 || got.CompactAutoEnabled || got.CompactTriggerPercent != 90 || got.CompactTargetPercent != 70 {
-		t.Fatalf("compaction overrides = tokens=%d auto=%t trigger=%d target=%d", got.CompactKeepTokens, got.CompactAutoEnabled, got.CompactTriggerPercent, got.CompactTargetPercent)
+	if got.CompactKeepTokens != 12_345 || got.CompactAutoEnabled || got.CompactTriggerPercent != 90 || got.CompactTargetPercent != 70 || got.CompactIdleAfterSeconds != 600 || got.CompactIdleTriggerPercent != 35 {
+		t.Fatalf("compaction overrides = tokens=%d auto=%t trigger=%d target=%d idle_after=%d idle_trigger=%d",
+			got.CompactKeepTokens, got.CompactAutoEnabled, got.CompactTriggerPercent, got.CompactTargetPercent, got.CompactIdleAfterSeconds, got.CompactIdleTriggerPercent)
 	}
 }
 
@@ -120,6 +124,10 @@ func TestCompactionConfigRejectsInvalidValues(t *testing.T) {
 		`{"compact_target_percent":78,"compact_trigger_percent":78}`,
 		`{"compact_target_percent":90,"compact_trigger_percent":80}`,
 		`{"compact_trigger_percent":100}`,
+		`{"compact_idle_after_seconds":-1}`,
+		`{"compact_idle_trigger_percent":0}`,
+		`{"compact_idle_trigger_percent":100}`,
+		`{"compact_idle_after_seconds":60,"compact_idle_trigger_percent":78}`,
 	} {
 		t.Run(body, func(t *testing.T) {
 			if _, err := Load(nil, noEnv, writeConfig(t, body)); err == nil {
@@ -215,6 +223,7 @@ func TestHarnessEnvMapping(t *testing.T) {
 		"HARNESS_REASONING":                  "HIGH",
 		"HARNESS_REASONING_SUMMARY":          "AUTO",
 		"HARNESS_RESPONSES_STATEFUL":         "true",
+		"HARNESS_RETENTION_POLICY":           "pressure",
 		"HARNESS_TRACE_PROXY":                "true",
 		"HARNESS_SEARCH_TOOLS":               "both",
 		"HARNESS_TOOL_RESULT_MAX_BYTES":      "32768",
@@ -264,6 +273,9 @@ func TestHarnessEnvMapping(t *testing.T) {
 	}
 	if !c.ResponsesStateful {
 		t.Fatalf("responses_stateful false, want true")
+	}
+	if c.RetentionPolicy != "pressure" {
+		t.Fatalf("retention_policy = %q, want pressure", c.RetentionPolicy)
 	}
 	if !c.TraceProxy {
 		t.Fatalf("trace_proxy false, want true")
@@ -477,6 +489,29 @@ func TestResponsesStatefulDefaultAndPrecedence(t *testing.T) {
 		wantEnv:  true,
 		wantFile: false,
 	})
+}
+
+func TestRetentionPolicyDefaultPrecedenceAndValidation(t *testing.T) {
+	c := loadOK(t, []string{"-model", "gpt-5.5"}, noEnv, "")
+	if c.RetentionPolicy != "auto" {
+		t.Fatalf("default retention_policy = %q, want auto", c.RetentionPolicy)
+	}
+
+	checkPrecedence(t, precedenceCase[string]{
+		file:     `{"retention_policy":"age"}`,
+		env:      map[string]string{"HARNESS_RETENTION_POLICY": "disabled"},
+		baseArgs: []string{"-model", "gpt-5.5"},
+		flagArgs: []string{"-retention-policy", "pressure"},
+		got:      func(c Config) string { return c.RetentionPolicy },
+		wantFlag: "pressure",
+		wantEnv:  "disabled",
+		wantFile: "age",
+	})
+
+	if _, err := Load([]string{"-retention-policy", "unknown"}, noEnv, ""); err == nil ||
+		!strings.Contains(err.Error(), "invalid retention_policy") {
+		t.Fatalf("invalid retention policy error = %v", err)
+	}
 }
 
 func TestNoSteerDefaultAndPrecedence(t *testing.T) {

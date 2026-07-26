@@ -37,20 +37,32 @@ type statsReport struct {
 	compactions         compactionStats
 	delegateCompactions compactionStats
 	statusCounts        map[string]int
+	terminationCounts   map[string]int
+	directUsage         llm.Usage
+	directModelCalls    int
+	delegateModelCalls  int
+	directMaintCalls    int
+	delegateMaintCalls  int
 }
 
 type collectedSessionStats struct {
-	state            Session
-	prompts          int
-	turns            int
-	modelCalls       int
-	retries          int
-	maintenanceCalls int
-	maintenanceUsage llm.Usage
-	navigations      int
-	tree             treeStats
-	tools            toolStats
-	compactions      compactionStats
+	state             Session
+	checkpointed      bool
+	prompts           int
+	turns             int
+	modelCalls        int
+	retries           int
+	maintenanceCalls  int
+	maintenanceUsage  llm.Usage
+	directUsage       llm.Usage
+	navigations       int
+	terminationCounts map[string]int
+	checkpoints       checkpointStats
+	retention         retentionStats
+	idleCompactions   idleCompactionStats
+	tree              treeStats
+	tools             toolStats
+	compactions       compactionStats
 }
 
 type treeStats struct {
@@ -94,12 +106,35 @@ type compactionStats struct {
 	usage        llm.Usage
 }
 
-type compactionMeta struct {
-	Time         time.Time `json:"time"`
-	Usage        llm.Usage `json:"usage"`
-	MessageCount int       `json:"message_count"`
-	Input        string    `json:"input"`
-	Summary      string    `json:"summary"`
+type checkpointStats struct {
+	saves      int
+	totalMS    int64
+	maxMS      int64
+	lagTurns   int
+	lagSeconds float64
+}
+
+type retentionStats struct {
+	epochs              int
+	pressureEpochs      int
+	agePasses           int
+	blocksTrimmed       int
+	bytesTrimmed        int
+	responseStateResets int
+	statefulRequests    int
+	fullContextRequests int
+}
+
+type idleCompactionStats struct {
+	attempts           int
+	applied            int
+	discarded          int
+	failed             int
+	noChange           int
+	totalMS            int64
+	maxMS              int64
+	appliedBeforeTotal int
+	appliedAfterTotal  int
 }
 
 func collectStats(dir string) (statsReport, error) {
@@ -113,12 +148,16 @@ func collectStats(dir string) (statsReport, error) {
 	}
 
 	report := statsReport{
-		path:         dir,
-		root:         root,
-		delegates:    delegates,
-		tools:        cloneToolStats(root.tools),
-		compactions:  root.compactions,
-		statusCounts: make(map[string]int),
+		path:              dir,
+		root:              root,
+		delegates:         delegates,
+		tools:             cloneToolStats(root.tools),
+		compactions:       root.compactions,
+		statusCounts:      make(map[string]int),
+		terminationCounts: make(map[string]int),
+		directUsage:       root.directUsage,
+		directModelCalls:  root.modelCalls,
+		directMaintCalls:  root.maintenanceCalls,
 	}
 	for _, child := range delegates {
 		report.tools.add(child.stats.tools)
@@ -126,18 +165,48 @@ func collectStats(dir string) (statsReport, error) {
 		report.compactions.add(child.stats.compactions)
 		report.delegateCompactions.add(child.stats.compactions)
 		report.statusCounts[child.meta.Status]++
+		if child.meta.TerminationReason != "" {
+			report.terminationCounts[child.meta.TerminationReason]++
+		}
+		report.directUsage = addUsage(report.directUsage, child.stats.directUsage)
+		report.directModelCalls += child.stats.modelCalls
+		report.delegateModelCalls += child.stats.modelCalls
+		report.directMaintCalls += child.stats.maintenanceCalls
+		report.delegateMaintCalls += child.stats.maintenanceCalls
 	}
 	return report, nil
 }
 
 func collectSessionStats(dir string) (collectedSessionStats, error) {
+	return collectSessionStatsWithFallback(dir, nil)
+}
+
+func collectSessionStatsWithFallback(dir string, child *ChildMeta) (collectedSessionStats, error) {
 	state, err := Load(dir)
 	if err != nil {
-		return collectedSessionStats{}, fmt.Errorf("load state in %s: %w", dir, err)
+		if child == nil || !errors.Is(err, os.ErrNotExist) {
+			return collectedSessionStats{}, fmt.Errorf("load state in %s: %w", dir, err)
+		}
+		state = Session{
+			ID:       child.ID,
+			Provider: child.Provider,
+			Model:    child.Model,
+			Agent:    child.Agent,
+			Created:  child.Created,
+			Updated:  child.Updated,
+			Usage: UsageTotals{
+				Usage:   child.Usage,
+				CostUSD: child.Usage.CostUSD,
+			},
+		}
 	}
+	checkpointed := err == nil
 	events, err := readEvents(dir)
 	if err != nil {
-		return collectedSessionStats{}, fmt.Errorf("read replay in %s: %w", dir, err)
+		if child == nil || !errors.Is(err, os.ErrNotExist) {
+			return collectedSessionStats{}, fmt.Errorf("read replay in %s: %w", dir, err)
+		}
+		events = nil
 	}
 	tools, err := collectToolStats(events)
 	if err != nil {
@@ -155,7 +224,9 @@ func collectSessionStats(dir string) (collectedSessionStats, error) {
 	modelCalls := 0
 	maintenanceCalls := 0
 	navigations := 0
+	var terminationCounts map[string]int
 	var maintenanceUsage llm.Usage
+	var directUsage llm.Usage
 	for _, ev := range events {
 		switch ev.Type {
 		case EventUser:
@@ -164,6 +235,9 @@ func collectSessionStats(dir string) (collectedSessionStats, error) {
 			}
 		case EventTurnAttemptUsage:
 			modelCalls++
+			if ev.Usage != nil {
+				directUsage = addUsage(directUsage, *ev.Usage)
+			}
 			if ev.Prompt > 0 && ev.Turn > 0 {
 				attemptedTurns[[2]int{ev.Prompt, ev.Turn}] = struct{}{}
 			}
@@ -175,9 +249,17 @@ func collectSessionStats(dir string) (collectedSessionStats, error) {
 			maintenanceCalls++
 			if ev.Usage != nil {
 				maintenanceUsage = addUsage(maintenanceUsage, *ev.Usage)
+				directUsage = addUsage(directUsage, *ev.Usage)
 			}
 		case EventBranch:
 			navigations++
+		case EventPromptUsage:
+			if ev.TerminationReason != "" {
+				if terminationCounts == nil {
+					terminationCounts = make(map[string]int)
+				}
+				terminationCounts[ev.TerminationReason]++
+			}
 		}
 	}
 	retries := modelCalls - len(attemptedTurns)
@@ -185,18 +267,113 @@ func collectSessionStats(dir string) (collectedSessionStats, error) {
 		retries = 0
 	}
 	return collectedSessionStats{
-		state:            state,
-		prompts:          len(prompts),
-		turns:            len(turns),
-		modelCalls:       modelCalls,
-		retries:          retries,
-		maintenanceCalls: maintenanceCalls,
-		maintenanceUsage: maintenanceUsage,
-		navigations:      navigations,
-		tree:             collectTreeStats(state.Tree),
-		tools:            tools,
-		compactions:      compactions,
+		state:             state,
+		checkpointed:      checkpointed,
+		prompts:           len(prompts),
+		turns:             len(turns),
+		modelCalls:        modelCalls,
+		retries:           retries,
+		maintenanceCalls:  maintenanceCalls,
+		maintenanceUsage:  maintenanceUsage,
+		directUsage:       directUsage,
+		navigations:       navigations,
+		terminationCounts: terminationCounts,
+		checkpoints:       collectCheckpointStats(events),
+		retention:         collectRetentionStats(events),
+		idleCompactions:   collectIdleCompactionStats(events),
+		tree:              collectTreeStats(state.Tree),
+		tools:             tools,
+		compactions:       compactions,
 	}, nil
+}
+
+func collectRetentionStats(events []Event) retentionStats {
+	var stats retentionStats
+	for _, event := range events {
+		if event.Type != EventRetention || event.Retention == nil {
+			continue
+		}
+		retention := event.Retention
+		stats.epochs++
+		switch retention.Policy {
+		case "pressure_epoch":
+			stats.pressureEpochs++
+		case "age":
+			stats.agePasses++
+		}
+		stats.blocksTrimmed += retention.BlocksTrimmed
+		stats.bytesTrimmed += max(retention.BytesBefore-retention.BytesAfter, 0)
+		if retention.ResponseStateReset {
+			stats.responseStateResets++
+		}
+		if retention.NextRequestStateful {
+			stats.statefulRequests++
+		} else {
+			stats.fullContextRequests++
+		}
+	}
+	return stats
+}
+
+func collectIdleCompactionStats(events []Event) idleCompactionStats {
+	var stats idleCompactionStats
+	for _, event := range events {
+		if event.Type != EventIdleCompaction || event.IdleCompaction == nil {
+			continue
+		}
+		stats.attempts++
+		stats.totalMS += event.DurationMS
+		stats.maxMS = max(stats.maxMS, event.DurationMS)
+		switch event.IdleCompaction.Outcome {
+		case "applied":
+			stats.applied++
+			stats.appliedBeforeTotal += event.IdleCompaction.ContextTokensBefore
+			stats.appliedAfterTotal += event.IdleCompaction.ContextTokensAfter
+		case "discarded":
+			stats.discarded++
+		case "failed":
+			stats.failed++
+		case "no_change":
+			stats.noChange++
+		}
+	}
+	return stats
+}
+
+func collectCheckpointStats(events []Event) checkpointStats {
+	var stats checkpointStats
+	lastClosed := -1
+	for i, event := range events {
+		if event.Type != EventCheckpoint || event.Purpose != "closed_turn" {
+			continue
+		}
+		stats.saves++
+		stats.totalMS += event.DurationMS
+		stats.maxMS = max(stats.maxMS, event.DurationMS)
+		lastClosed = i
+	}
+	if stats.saves == 0 {
+		return stats
+	}
+	var firstLag time.Time
+	var latest time.Time
+	for i := lastClosed + 1; i < len(events); i++ {
+		event := events[i]
+		if event.Time.After(latest) {
+			latest = event.Time
+		}
+		if event.Type != EventTurnComplete {
+			continue
+		}
+		stats.lagTurns++
+		if firstLag.IsZero() || event.Time.Before(firstLag) {
+			firstLag = event.Time
+		}
+	}
+	if !firstLag.IsZero() && latest.After(firstLag) {
+		stats.lagSeconds = latest.Sub(firstLag).Seconds()
+	}
+	return stats
 }
 
 func collectToolStats(events []Event) (toolStats, error) {
@@ -267,8 +444,11 @@ func collectCompactionStats(dir string, tree *Tree) (compactionStats, parallelSt
 	sort.Strings(names)
 	for _, name := range names {
 		metaPath := filepath.Join(base, name)
-		var meta compactionMeta
-		if err := decodeJSONFile(metaPath, &meta, true); err != nil {
+		var meta compactionMetadata
+		// Metadata is additive. Decode the canonical fields while tolerating
+		// fields written by a newer Harness; malformed JSON and trailing values
+		// are still rejected by decodeJSONFile.
+		if err := decodeJSONFile(metaPath, &meta, false); err != nil {
 			return compactionStats{}, parallelStats{}, fmt.Errorf("decode compaction metadata %s: %w", metaPath, err)
 		}
 		var messages []llm.Message
@@ -360,7 +540,7 @@ func collectDelegateStats(rootDir string) ([]*delegateStats, error) {
 			return nil, fmt.Errorf("decode delegate metadata %s: duplicate id %q", metaPath, meta.ID)
 		}
 		seenIDs[meta.ID] = struct{}{}
-		stats, err := collectSessionStats(dir)
+		stats, err := collectSessionStatsWithFallback(dir, &meta)
 		if err != nil {
 			return nil, fmt.Errorf("collect delegate %s: %w", meta.ID, err)
 		}
@@ -457,6 +637,7 @@ func writeStats(report statsReport, w io.Writer) error {
 	writeTreeStats(&b, report.root.tree)
 	writeOverallToolStats(&b, report)
 	writeRootUsage(&b, report.root.state)
+	writeDirectUsage(&b, report)
 	writeOverallCompactions(&b, report)
 	writeDelegates(&b, report)
 	_, err := io.WriteString(w, b.String())
@@ -496,7 +677,66 @@ func writeConversationValues(w io.Writer, indent string, stats collectedSessionS
 	if stats.maintenanceCalls > 0 {
 		fmt.Fprintf(w, "%smaintenance usage: %d in / %d out\n", indent, stats.maintenanceUsage.InputTokens, stats.maintenanceUsage.OutputTokens)
 	}
+	if !stats.checkpointed {
+		fmt.Fprintf(w, "%scheckpoint: unavailable\n", indent)
+	}
+	if stats.checkpoints.saves > 0 {
+		averageMS := stats.checkpoints.totalMS / int64(stats.checkpoints.saves)
+		fmt.Fprintf(w, "%sclosed-turn checkpoints: %d\n", indent, stats.checkpoints.saves)
+		fmt.Fprintf(
+			w,
+			"%scheckpoint save time: average %s / max %s\n",
+			indent,
+			formatDuration(time.Duration(averageMS)*time.Millisecond),
+			formatDuration(time.Duration(stats.checkpoints.maxMS)*time.Millisecond),
+		)
+		fmt.Fprintf(w, "%scheckpoint lag turns: %d\n", indent, stats.checkpoints.lagTurns)
+		fmt.Fprintf(w, "%scheckpoint lag seconds: %.3f\n", indent, stats.checkpoints.lagSeconds)
+	}
+	if stats.retention.epochs > 0 {
+		fmt.Fprintf(w, "%sretention epochs: %d\n", indent, stats.retention.epochs)
+		fmt.Fprintf(w, "%s  pressure/age: %d / %d\n", indent, stats.retention.pressureEpochs, stats.retention.agePasses)
+		fmt.Fprintf(w, "%s  blocks trimmed: %d\n", indent, stats.retention.blocksTrimmed)
+		fmt.Fprintf(w, "%s  bytes trimmed: %d\n", indent, stats.retention.bytesTrimmed)
+		fmt.Fprintf(w, "%s  response-state resets: %d\n", indent, stats.retention.responseStateResets)
+		fmt.Fprintf(w, "%s  next requests stateful/full-context: %d / %d\n", indent, stats.retention.statefulRequests, stats.retention.fullContextRequests)
+	}
+	if stats.idleCompactions.attempts > 0 {
+		averageMS := stats.idleCompactions.totalMS / int64(stats.idleCompactions.attempts)
+		fmt.Fprintf(w, "%sidle compaction attempts: %d\n", indent, stats.idleCompactions.attempts)
+		fmt.Fprintf(
+			w,
+			"%s  outcomes applied/discarded/failed/no-change: %d / %d / %d / %d\n",
+			indent,
+			stats.idleCompactions.applied,
+			stats.idleCompactions.discarded,
+			stats.idleCompactions.failed,
+			stats.idleCompactions.noChange,
+		)
+		fmt.Fprintf(
+			w,
+			"%s  wall time average/max: %s / %s\n",
+			indent,
+			formatDuration(time.Duration(averageMS)*time.Millisecond),
+			formatDuration(time.Duration(stats.idleCompactions.maxMS)*time.Millisecond),
+		)
+		if stats.idleCompactions.applied > 0 {
+			fmt.Fprintf(
+				w,
+				"%s  applied context average before/after: %d / %d\n",
+				indent,
+				stats.idleCompactions.appliedBeforeTotal/stats.idleCompactions.applied,
+				stats.idleCompactions.appliedAfterTotal/stats.idleCompactions.applied,
+			)
+		}
+	}
 	fmt.Fprintf(w, "%sactive messages: %d\n", indent, len(stats.state.Messages))
+	if len(stats.terminationCounts) > 0 {
+		fmt.Fprintf(w, "%sprompt termination reasons:\n", indent)
+		for _, reason := range sortedMapKeys(stats.terminationCounts) {
+			fmt.Fprintf(w, "%s  %s: %d\n", indent, reason, stats.terminationCounts[reason])
+		}
+	}
 }
 
 func writeTreeStats(w io.Writer, stats treeStats) {
@@ -551,6 +791,16 @@ func writeRootUsage(w io.Writer, state Session) {
 	}
 }
 
+func writeDirectUsage(w io.Writer, report statsReport) {
+	fmt.Fprintln(w, "Direct model activity (non-overlapping)")
+	writeSplitValue(w, "  ", "conversational calls", report.directModelCalls,
+		report.root.modelCalls, report.delegateModelCalls)
+	writeSplitValue(w, "  ", "maintenance calls", report.directMaintCalls,
+		report.root.maintenanceCalls, report.delegateMaintCalls)
+	fmt.Fprintln(w, "  usage (turn attempts plus maintenance):")
+	writeUsageValues(w, "    ", report.directUsage, report.directUsage.CostUSD)
+}
+
 func writeUsageValues(w io.Writer, indent string, usage llm.Usage, cost float64) {
 	fmt.Fprintf(w, "%suncached input: %d\n", indent, usage.InputTokens)
 	fmt.Fprintf(w, "%scache read: %d\n", indent, usage.CacheReadTokens)
@@ -583,6 +833,14 @@ func writeDelegates(w io.Writer, report statsReport) {
 		fmt.Fprintln(w, "  statuses:")
 		for _, status := range sortedMapKeys(report.statusCounts) {
 			fmt.Fprintf(w, "    %s: %d\n", status, report.statusCounts[status])
+		}
+	}
+	if len(report.terminationCounts) == 0 {
+		fmt.Fprintln(w, "  termination reasons: none")
+	} else {
+		fmt.Fprintln(w, "  termination reasons:")
+		for _, reason := range sortedMapKeys(report.terminationCounts) {
+			fmt.Fprintf(w, "    %s: %d\n", reason, report.terminationCounts[reason])
 		}
 	}
 	if len(report.delegates) == 0 {
@@ -650,8 +908,30 @@ func writeDelegate(w io.Writer, child *delegateStats, indent string) {
 	detail := indent + "  "
 	fmt.Fprintf(w, "%sDelegate %s\n", indent, meta.ID)
 	fmt.Fprintf(w, "%sstatus: %s\n", detail, meta.Status)
+	if meta.Mode != "" {
+		fmt.Fprintf(w, "%smode: %s\n", detail, meta.Mode)
+	}
+	if meta.ContinuedFrom != "" {
+		fmt.Fprintf(w, "%scontinued from: %s\n", detail, meta.ContinuedFrom)
+		if meta.ContinuationMode != "" {
+			fmt.Fprintf(w, "%scontinuation mode: %s\n", detail, meta.ContinuationMode)
+		}
+		if meta.ContinuationWindow > 0 {
+			fmt.Fprintf(
+				w,
+				"%scontinuation context: %d → %d tokens (window %d)\n",
+				detail,
+				meta.ContinuationBefore,
+				meta.ContinuationAfter,
+				meta.ContinuationWindow,
+			)
+		}
+	}
 	if meta.ParentID != "" {
 		fmt.Fprintf(w, "%sparent: %s\n", detail, meta.ParentID)
+	}
+	if meta.ResourceKey != "" {
+		fmt.Fprintf(w, "%sresource: %s (%s)\n", detail, meta.ResourceKey, meta.Access)
 	}
 	fmt.Fprintf(w, "%sagent: %s\n", detail, meta.Agent)
 	fmt.Fprintf(w, "%sprovider/model: %s/%s\n", detail, meta.Provider, meta.Model)
@@ -659,6 +939,17 @@ func writeDelegate(w io.Writer, child *delegateStats, indent string) {
 	fmt.Fprintf(w, "%screated: %s\n", detail, meta.Created.Format(time.RFC3339))
 	fmt.Fprintf(w, "%supdated: %s\n", detail, meta.Updated.Format(time.RFC3339))
 	fmt.Fprintf(w, "%sduration: %s\n", detail, formatDuration(meta.Updated.Sub(meta.Created)))
+	if meta.EffectiveMaxTurns > 0 {
+		if meta.RequestedMaxTurns != nil {
+			fmt.Fprintf(w, "%sturn budget: %d requested, %d effective\n", detail, *meta.RequestedMaxTurns, meta.EffectiveMaxTurns)
+		} else {
+			fmt.Fprintf(w, "%sturn budget: %d effective (configured default)\n", detail, meta.EffectiveMaxTurns)
+		}
+		fmt.Fprintf(w, "%sturns used: %d\n", detail, meta.TurnsUsed)
+	}
+	if meta.TerminationReason != "" {
+		fmt.Fprintf(w, "%stermination reason: %s\n", detail, meta.TerminationReason)
+	}
 	writeConversationValues(w, detail, stats)
 	fmt.Fprintf(w, "%stool calls: %d\n", detail, stats.tools.calls)
 	if len(stats.tools.byName) == 0 {

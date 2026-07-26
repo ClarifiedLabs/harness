@@ -70,8 +70,11 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 	saveStatsFixture(t, dir, state, events)
 
 	_, err := SaveCompaction(dir, Compaction{
-		Time:    base.Add(time.Minute),
-		Summary: "summary",
+		Time:          base.Add(time.Minute),
+		Summary:       "summary",
+		Focus:         "finish diagnostics",
+		ReadFiles:     []string{"internal/session/stats.go"},
+		ModifiedFiles: []string{"internal/session/stats_test.go"},
 		Usage: llm.Usage{
 			InputTokens:      1,
 			CacheReadTokens:  1,
@@ -157,7 +160,7 @@ func TestStatsDoesNotCountFailedFirstAttemptAsTurnOrRetry(t *testing.T) {
 	saveStatsFixture(t, dir, Session{}, []Event{
 		{Type: EventUser, Prompt: 1, Text: "try once"},
 		{Type: EventTurnAttemptUsage, Prompt: 1, Turn: 1, Attempt: 1},
-		{Type: EventPromptUsage, Prompt: 1},
+		{Type: EventPromptUsage, Prompt: 1, TerminationReason: "error"},
 	})
 
 	report, err := collectStats(dir)
@@ -168,11 +171,15 @@ func TestStatsDoesNotCountFailedFirstAttemptAsTurnOrRetry(t *testing.T) {
 		t.Fatalf("conversation stats = prompts %d turns %d calls %d retries %d, want 1/0/1/0",
 			report.root.prompts, report.root.turns, report.root.modelCalls, report.root.retries)
 	}
+	if report.root.terminationCounts["error"] != 1 {
+		t.Fatalf("termination counts = %+v, want error=1", report.root.terminationCounts)
+	}
 }
 
 func TestStatsDelegateHierarchyAndNoDoubleCounting(t *testing.T) {
 	base := time.Date(2026, 7, 18, 2, 0, 0, 0, time.UTC)
 	rootDir := filepath.Join(t.TempDir(), "session")
+	requestedTurns := 8
 	saveStatsFixture(t, rootDir, Session{
 		Provider: "anthropic",
 		Model:    "root-model",
@@ -183,15 +190,28 @@ func TestStatsDelegateHierarchyAndNoDoubleCounting(t *testing.T) {
 	}, []Event{{Type: EventToolStart, Turn: 1, ToolID: "root", Tool: "read_file", Input: json.RawMessage(`{}`)}})
 
 	topDir, err := SaveChildMeta(rootDir, ChildMeta{
-		ID:          "top",
-		Kind:        "delegate",
-		Agent:       "explore",
-		Provider:    "openai",
-		Model:       "top-model",
-		Status:      "completed",
-		TaskPreview: "top\ntask",
-		Created:     base.Add(time.Minute),
-		Updated:     base.Add(3 * time.Minute),
+		ID:                 "top",
+		Kind:               "delegate",
+		Mode:               "implementation",
+		ContinuedFrom:      "previous",
+		ContinuationMode:   "compact_checkpoint",
+		ContinuationBefore: 7_000,
+		ContinuationAfter:  2_000,
+		ContinuationWindow: 10_000,
+		RuntimeFingerprint: "fingerprint",
+		Agent:              "explore",
+		ResourceKey:        "/workspace/project",
+		Access:             "exclusive",
+		Provider:           "openai",
+		Model:              "top-model",
+		Status:             "completed",
+		TaskPreview:        "top\ntask",
+		Created:            base.Add(time.Minute),
+		Updated:            base.Add(3 * time.Minute),
+		RequestedMaxTurns:  &requestedTurns,
+		EffectiveMaxTurns:  8,
+		TurnsUsed:          2,
+		TerminationReason:  "model_completed",
 	})
 	if err != nil {
 		t.Fatalf("SaveChildMeta top: %v", err)
@@ -206,17 +226,20 @@ func TestStatsDelegateHierarchyAndNoDoubleCounting(t *testing.T) {
 	}, []Event{{Type: EventToolStart, Turn: 1, ToolID: "top-command", Tool: "run_command", Input: json.RawMessage(`{"argv":["go","test"]}`)}})
 
 	nestedDir, err := SaveChildMeta(rootDir, ChildMeta{
-		ID:          "nested",
-		ParentID:    "top",
-		Kind:        "delegate",
-		Agent:       "independent",
-		Provider:    "responses",
-		Model:       "nested-model",
-		Status:      "failed",
-		TaskPreview: "nested task",
-		Error:       "saved failure",
-		Created:     base.Add(2 * time.Minute),
-		Updated:     base.Add(4 * time.Minute),
+		ID:                "nested",
+		ParentID:          "top",
+		Kind:              "delegate",
+		Agent:             "independent",
+		Provider:          "responses",
+		Model:             "nested-model",
+		Status:            "failed",
+		TaskPreview:       "nested task",
+		Error:             "saved failure",
+		Created:           base.Add(2 * time.Minute),
+		Updated:           base.Add(4 * time.Minute),
+		EffectiveMaxTurns: 20,
+		TurnsUsed:         1,
+		TerminationReason: "error",
 	})
 	if err != nil {
 		t.Fatalf("SaveChildMeta nested: %v", err)
@@ -243,11 +266,22 @@ func TestStatsDelegateHierarchyAndNoDoubleCounting(t *testing.T) {
 		"Usage (includes delegates)\n  uncached input: 1000\n",
 		"Delegates (2)\n",
 		"    completed: 1\n    failed: 1\n",
+		"  termination reasons:\n    error: 1\n    model_completed: 1\n",
 		"  Delegate top\n",
+		"    mode: implementation\n",
+		"    continued from: previous\n",
+		"    continuation mode: compact_checkpoint\n",
+		"    continuation context: 7000 → 2000 tokens (window 10000)\n",
+		"    resource: /workspace/project (exclusive)\n",
+		"    turn budget: 8 requested, 8 effective\n",
+		"    turns used: 2\n",
+		"    termination reason: model_completed\n",
 		"    task: top task\n",
 		"    usage (includes nested delegates):\n      uncached input: 300\n",
 		"    Delegate nested\n",
 		"      parent: top\n",
+		"      turn budget: 20 effective (configured default)\n",
+		"      termination reason: error\n",
 		"      usage (includes nested delegates):\n        uncached input: 100\n",
 		"      error: saved failure\n",
 	} {
@@ -258,6 +292,122 @@ func TestStatsDelegateHierarchyAndNoDoubleCounting(t *testing.T) {
 	assertOrdered(t, got, "  Delegate top\n", "    Delegate nested\n")
 	if strings.Contains(got, "uncached input: 1400") || strings.Contains(got, "uncached input: 400") {
 		t.Fatalf("stats double-counted inclusive delegate usage:\n%s", got)
+	}
+}
+
+func TestStatsIncludesRunningChildWithoutCheckpoint(t *testing.T) {
+	base := time.Date(2026, 7, 26, 17, 0, 0, 0, time.UTC)
+	rootDir := filepath.Join(t.TempDir(), "session")
+	rootUsage := llm.Usage{InputTokens: 10, OutputTokens: 1, CostUSD: 0.01, CostKnown: true}
+	saveStatsFixture(t, rootDir, Session{
+		Provider: "openai",
+		Model:    "root-model",
+		Created:  base,
+		Updated:  base.Add(time.Minute),
+		Usage:    UsageTotals{Usage: llm.Usage{InputTokens: 1000}, CostUSD: 1},
+	}, []Event{
+		{Time: base, Type: EventUser, Prompt: 1, Text: "delegate it"},
+		{Time: base.Add(time.Second), Type: EventTurnAttemptUsage, Prompt: 1, Turn: 1, Attempt: 1, Usage: &rootUsage},
+		{Time: base.Add(2 * time.Second), Type: EventTurnComplete, Prompt: 1, Turn: 1},
+	})
+
+	childDir, err := SaveChildMeta(rootDir, ChildMeta{
+		ID:          "live-child",
+		Kind:        "delegate",
+		Agent:       "code",
+		Provider:    "responses",
+		Model:       "child-model",
+		Status:      ChildStatusRunning,
+		TaskPreview: "still working",
+		Created:     base.Add(3 * time.Second),
+		Updated:     base.Add(3 * time.Second),
+		Usage:       llm.Usage{InputTokens: 900},
+	})
+	if err != nil {
+		t.Fatalf("SaveChildMeta: %v", err)
+	}
+	childUsage := llm.Usage{InputTokens: 20, OutputTokens: 2, CostUSD: 0.02, CostKnown: true}
+	for _, ev := range []Event{
+		{Time: base.Add(3 * time.Second), Type: EventUser, Prompt: 1, Text: "work"},
+		{Time: base.Add(4 * time.Second), Type: EventTurnAttemptUsage, Prompt: 1, Turn: 1, Attempt: 1, Usage: &childUsage},
+		{Time: base.Add(5 * time.Second), Type: EventTurnComplete, Prompt: 1, Turn: 1},
+		{Time: base.Add(6 * time.Second), Type: EventToolStart, Prompt: 1, Turn: 2, ToolID: "read", Tool: "read_file", Input: json.RawMessage(`{}`)},
+	} {
+		if err := AppendEvent(childDir, ev); err != nil {
+			t.Fatalf("AppendEvent child: %v", err)
+		}
+	}
+
+	var out bytes.Buffer
+	if err := Stats(rootDir, &out); err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"Direct model activity (non-overlapping)\n",
+		"  conversational calls: 2 total (1 root, 1 delegates)\n",
+		"    uncached input: 30\n",
+		"    output: 3\n",
+		"    cost: $0.0300\n",
+		"Delegates (1)\n",
+		"    running: 1\n",
+		"  Delegate live-child\n",
+		"    status: running\n",
+		"    prompts: 1\n",
+		"    turns: 1\n",
+		"    checkpoint: unavailable\n",
+		"    tool calls: 1\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stats output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "uncached input: 930") {
+		t.Fatalf("direct usage included the child's metadata aggregate:\n%s", got)
+	}
+}
+
+func TestStatsCompactionMetadataAllowsAdditiveFields(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	saveStatsFixture(t, dir, Session{}, nil)
+	_, err := SaveCompaction(dir, Compaction{
+		Summary: "summary",
+		Messages: []llm.Message{{
+			Role:    llm.RoleUser,
+			Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "old context"}},
+		}},
+		Focus:         "active focus",
+		ReadFiles:     []string{"read.go"},
+		ModifiedFiles: []string{"modified.go"},
+	})
+	if err != nil {
+		t.Fatalf("SaveCompaction: %v", err)
+	}
+
+	metaPath := filepath.Join(dir, "compactions", "0001.meta.json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("ReadFile metadata: %v", err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("Unmarshal metadata: %v", err)
+	}
+	meta["future_additive_field"] = map[string]any{"enabled": true}
+	data, err = json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("Marshal metadata: %v", err)
+	}
+	if err := os.WriteFile(metaPath, data, 0o644); err != nil {
+		t.Fatalf("WriteFile metadata: %v", err)
+	}
+
+	report, err := collectStats(dir)
+	if err != nil {
+		t.Fatalf("collectStats: %v", err)
+	}
+	if report.compactions.runs != 1 || report.compactions.messageCount != 1 {
+		t.Fatalf("compaction stats = %+v", report.compactions)
 	}
 }
 
@@ -327,6 +477,22 @@ func TestStatsReturnsContextualErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("trailing compaction metadata", func(t *testing.T) {
+		dir := newRoot(t)
+		baseDir := filepath.Join(dir, "compactions")
+		if err := os.MkdirAll(baseDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		data := `{"input":"compactions/0001.input.json"} {}`
+		if err := os.WriteFile(filepath.Join(baseDir, "0001.meta.json"), []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		err := Stats(dir, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "unexpected trailing JSON value") {
+			t.Fatalf("Stats error = %v", err)
+		}
+	})
+
 	t.Run("malformed delegate metadata", func(t *testing.T) {
 		dir := newRoot(t)
 		childDir := filepath.Join(dir, "children", "broken")
@@ -341,6 +507,128 @@ func TestStatsReturnsContextualErrors(t *testing.T) {
 			t.Fatalf("Stats error = %v", err)
 		}
 	})
+}
+
+func TestCollectCheckpointStatsReportsSaveOverheadAndLag(t *testing.T) {
+	base := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+	stats := collectCheckpointStats([]Event{
+		{Time: base, Type: EventTurnComplete, Prompt: 1, Turn: 1},
+		{Time: base.Add(time.Second), Type: EventCheckpoint, Prompt: 1, Turn: 1, Purpose: "closed_turn", DurationMS: 12},
+		{Time: base.Add(2 * time.Second), Type: EventCheckpoint, Prompt: 1, Turn: 1, Purpose: "request_boundary", DurationMS: 2},
+		{Time: base.Add(3 * time.Second), Type: EventTurnComplete, Prompt: 1, Turn: 2},
+		{Time: base.Add(5 * time.Second), Type: EventTurnAttemptStart, Prompt: 1, Turn: 3},
+	})
+	if stats.saves != 1 || stats.totalMS != 12 || stats.maxMS != 12 {
+		t.Fatalf("checkpoint save stats = %+v", stats)
+	}
+	if stats.lagTurns != 1 || stats.lagSeconds != 2 {
+		t.Fatalf("checkpoint lag = %+v, want 1 turn / 2 seconds", stats)
+	}
+	var out bytes.Buffer
+	writeConversationValues(&out, "", collectedSessionStats{checkpoints: stats})
+	for _, want := range []string{
+		"closed-turn checkpoints: 1",
+		"checkpoint save time: average 12ms / max 12ms",
+		"checkpoint lag turns: 1",
+		"checkpoint lag seconds: 2.000",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("checkpoint stats output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestCollectRetentionStatsReportsEpochEffectsAndRequestShape(t *testing.T) {
+	events := []Event{
+		{Type: EventRetention, Retention: &RetentionSnapshot{
+			Policy:              "pressure_epoch",
+			Trigger:             "context_pressure",
+			BlocksTrimmed:       3,
+			BytesBefore:         30_000,
+			BytesAfter:          8_000,
+			ResponseStateReset:  true,
+			NextRequestStateful: false,
+		}},
+		{Type: EventRetention, Retention: &RetentionSnapshot{
+			Policy:              "age",
+			Trigger:             "turn_age",
+			BlocksTrimmed:       1,
+			BytesBefore:         9_000,
+			BytesAfter:          4_000,
+			NextRequestStateful: true,
+		}},
+	}
+	stats := collectRetentionStats(events)
+	if stats != (retentionStats{
+		epochs:              2,
+		pressureEpochs:      1,
+		agePasses:           1,
+		blocksTrimmed:       4,
+		bytesTrimmed:        27_000,
+		responseStateResets: 1,
+		statefulRequests:    1,
+		fullContextRequests: 1,
+	}) {
+		t.Fatalf("retention stats = %+v", stats)
+	}
+	var out bytes.Buffer
+	writeConversationValues(&out, "", collectedSessionStats{retention: stats})
+	for _, want := range []string{
+		"retention epochs: 2",
+		"pressure/age: 1 / 1",
+		"blocks trimmed: 4",
+		"bytes trimmed: 27000",
+		"response-state resets: 1",
+		"next requests stateful/full-context: 1 / 1",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("retention stats output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestCollectIdleCompactionStatsReportsOutcomesAndSavings(t *testing.T) {
+	events := []Event{
+		{Type: EventIdleCompaction, DurationMS: 2_000, IdleCompaction: &IdleCompactionSnapshot{
+			Outcome:             "applied",
+			ContextTokensBefore: 100_000,
+			ContextTokensAfter:  25_000,
+		}},
+		{Type: EventIdleCompaction, DurationMS: 4_000, IdleCompaction: &IdleCompactionSnapshot{
+			Outcome:             "applied",
+			ContextTokensBefore: 120_000,
+			ContextTokensAfter:  35_000,
+		}},
+		{Type: EventIdleCompaction, DurationMS: 1_000, IdleCompaction: &IdleCompactionSnapshot{Outcome: "discarded"}},
+		{Type: EventIdleCompaction, DurationMS: 500, IdleCompaction: &IdleCompactionSnapshot{Outcome: "failed"}},
+		{Type: EventIdleCompaction, DurationMS: 500, IdleCompaction: &IdleCompactionSnapshot{Outcome: "no_change"}},
+	}
+	stats := collectIdleCompactionStats(events)
+	if stats != (idleCompactionStats{
+		attempts:           5,
+		applied:            2,
+		discarded:          1,
+		failed:             1,
+		noChange:           1,
+		totalMS:            8_000,
+		maxMS:              4_000,
+		appliedBeforeTotal: 220_000,
+		appliedAfterTotal:  60_000,
+	}) {
+		t.Fatalf("idle compaction stats = %+v", stats)
+	}
+	var out bytes.Buffer
+	writeConversationValues(&out, "", collectedSessionStats{idleCompactions: stats})
+	for _, want := range []string{
+		"idle compaction attempts: 5",
+		"outcomes applied/discarded/failed/no-change: 2 / 1 / 1 / 1",
+		"wall time average/max: 1.6s / 4s",
+		"applied context average before/after: 110000 / 30000",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("idle stats output missing %q:\n%s", want, out.String())
+		}
+	}
 }
 
 func TestWriteUsageValuesShowsOneHourCacheWrites(t *testing.T) {

@@ -476,7 +476,7 @@ func benchmarkEnv(goCache string) []string {
 	env := os.Environ()
 	env = setEnv(env, "HARNESS_MCP_ENABLE", "false")
 	env = setEnv(env, "HARNESS_LSP_ENABLE", "false")
-	env = setEnv(env, "HARNESS_SERENA_ENABLE", "false")
+	env = setEnv(env, "HARNESS_LSP_SERENA_ENABLE", "false")
 	env = setEnv(env, "NO_COLOR", "1")
 	if goCache != "" {
 		env = setEnv(env, "GOCACHE", goCache)

@@ -134,3 +134,50 @@ Future changes should rerun the affected case against its immediate parent
 revision. Do not substitute unpaired token medians for paired savings, treat a
 tool being present as adoption, or waive correctness failures without
 transcript evidence of an oracle/infrastructure defect.
+
+## Retention policy benchmark
+
+`scripts/retentionbench` is a separate live-model matrix for the transcript
+retention experiment. It compares `age`, `disabled`, and `pressure` policies
+under both stateful and stateless request shapes. Every run must read more than
+ten deterministic files in order, exactly one `read_file` call per model turn,
+then reproduce every marker. This provides an objective correctness oracle
+while creating old tool results large enough to exercise retention.
+
+Build the candidate Harness, inspect the six-run smoke matrix, then run it:
+
+```sh
+go build -o /tmp/harness-retention-candidate ./cmd/harness
+
+go run ./scripts/retentionbench \
+  -harness /tmp/harness-retention-candidate \
+  -model openai-codex:gpt-5.6-terra \
+  -repetitions 1 \
+  -dry-run
+
+go run ./scripts/retentionbench \
+  -harness /tmp/harness-retention-candidate \
+  -model openai-codex:gpt-5.6-terra \
+  -repetitions 3 \
+  -results /tmp/harness-retention-results
+```
+
+The default scored matrix has 18 runs: three policies, stateful and stateless
+fixtures, and three rotated repetitions. Use `-stateful true` for a smaller
+stateful-only smoke run. MCP, LSP, and Serena are disabled in child processes;
+the configured model proxy and credentials are inherited. All fixtures require
+current `api_type` continuation-control metadata from both the benchmark
+Harness and model proxy, and stateful fixtures additionally require
+`continuation_stateful:true`; preflight rejects older proxy protocols instead
+of silently measuring the wrong request shape.
+
+`runs.json` preserves per-run correctness, policy exercise, total and
+post-turn-10 uncached/cache tokens, maximum processed input for any request,
+the configured context window, retention epochs and resets, compactions,
+termination, cost, and paths to the complete sessions and command output.
+`summary.json` and `summary.md` report medians by policy and request shape,
+including maximum request input as a share of the configured window. A policy
+is recommended only when every run is correct, every run actually exercised
+that policy, and it has the lowest median post-turn-10 uncached input among the
+eligible policies. Provider-backed results remain evidence for a default
+decision; they do not rewrite configuration automatically.

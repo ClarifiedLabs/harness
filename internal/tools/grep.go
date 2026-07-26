@@ -61,9 +61,15 @@ func (t grep) Run(ctx context.Context, input json.RawMessage) (string, error) {
 			desc = "grep " + strings.Join(args.Args, " ")
 		}
 		args.Args = guardGrepArgs(args.Args)
+		resourceKey, err := DefaultBackgroundResource(args.Cwd)
+		if err != nil {
+			return "", err
+		}
 		info, err := t.background.StartBackgroundJob(BackgroundJobRequest{
 			Kind:        "grep",
 			Description: desc,
+			ResourceKey: resourceKey,
+			Access:      BackgroundAccessReadOnly,
 			Run: func(ctx context.Context, id string) (BackgroundJobResult, error) {
 				out, err := runProgram(ctx, "grep", args, "grep", true)
 				return BackgroundJobResult{Text: clampLongGrepLines(out)}, err
@@ -72,7 +78,12 @@ func (t grep) Run(ctx context.Context, input json.RawMessage) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("background job %s started", info.ID), nil
+		return fmt.Sprintf(
+			"background job %s started (resource: %s, access: %s)",
+			info.ID,
+			resourceKey,
+			BackgroundAccessReadOnly,
+		), nil
 	}
 
 	args.Args = guardGrepArgs(args.Args)

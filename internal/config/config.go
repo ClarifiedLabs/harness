@@ -89,12 +89,15 @@ type Config struct {
 	CompactAutoEnabled                 bool              `json:"compact_auto_enabled"`          // config-only; threshold triggers only
 	CompactTriggerPercent              int               `json:"compact_trigger_percent"`       // config-only; automatic high-water mark
 	CompactTargetPercent               int               `json:"compact_target_percent"`        // config-only; post-compaction low-water mark
+	CompactIdleAfterSeconds            int               `json:"compact_idle_after_seconds"`    // config-only; 0 disables speculative REPL-idle compaction
+	CompactIdleTriggerPercent          int               `json:"compact_idle_trigger_percent"`  // config-only; idle snapshot threshold
 	CompactSummaryMaxTokens            int               `json:"compact_summary_max_tokens"`    // config-only; 0 = agent default
 	CompactToolResultMaxBytes          int               `json:"compact_tool_result_max_bytes"` // config-only; 0 = agent default, negative disables
 	DelegateMaxTurns                   int               `json:"delegate_max_turns"`            // config-only; default 20, per delegate call cap
 	DelegateMaxDepth                   int               `json:"delegate_max_depth"`            // config-only; default 3, root depth is 0
 	DelegateOutput                     string            `json:"delegate_output"`               // -delegate-output: status, off, or curated scrolling lines
 	ResponsesStateful                  bool              `json:"responses_stateful"`            // -responses-stateful
+	RetentionPolicy                    string            `json:"retention_policy"`              // -retention-policy: auto, age, pressure, or disabled
 	NoSteer                            bool              `json:"no_steer"`                      // -no-steer: disable in-prompt steering (queue input for the next prompt)
 
 	// Agent definition. Empty means "not specified" so main can let a resumed
@@ -323,12 +326,15 @@ type fileConfig struct {
 	CompactAutoEnabled                 *bool                      `json:"compact_auto_enabled"`
 	CompactTriggerPercent              *int                       `json:"compact_trigger_percent"`
 	CompactTargetPercent               *int                       `json:"compact_target_percent"`
+	CompactIdleAfterSeconds            *int                       `json:"compact_idle_after_seconds"`
+	CompactIdleTriggerPercent          *int                       `json:"compact_idle_trigger_percent"`
 	CompactSummaryMaxTokens            *int                       `json:"compact_summary_max_tokens"`
 	CompactToolResultMaxBytes          *int                       `json:"compact_tool_result_max_bytes"`
 	DelegateMaxTurns                   *int                       `json:"delegate_max_turns"`
 	DelegateMaxDepth                   *int                       `json:"delegate_max_depth"`
 	DelegateOutput                     string                     `json:"delegate_output"`
 	ResponsesStateful                  *bool                      `json:"responses_stateful"`
+	RetentionPolicy                    string                     `json:"retention_policy"`
 	NoSteer                            *bool                      `json:"no_steer"`
 	Verbose                            *bool                      `json:"verbose"`
 	ToolStream                         *bool                      `json:"tool_stream"`
@@ -553,6 +559,17 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	if c.CompactTargetPercent < 1 || c.CompactTriggerPercent > 99 || c.CompactTargetPercent >= c.CompactTriggerPercent {
 		return Config{}, fmt.Errorf("compaction percentages must satisfy 1 <= compact_target_percent < compact_trigger_percent <= 99")
 	}
+	c.CompactIdleAfterSeconds = intValue(fc.CompactIdleAfterSeconds, 0)
+	if c.CompactIdleAfterSeconds < 0 {
+		return Config{}, fmt.Errorf("compact_idle_after_seconds must be non-negative")
+	}
+	c.CompactIdleTriggerPercent = intValue(fc.CompactIdleTriggerPercent, 35)
+	if c.CompactIdleTriggerPercent < 1 || c.CompactIdleTriggerPercent > 99 {
+		return Config{}, fmt.Errorf("compact_idle_trigger_percent must be between 1 and 99")
+	}
+	if c.CompactIdleAfterSeconds > 0 && c.CompactIdleTriggerPercent >= c.CompactTriggerPercent {
+		return Config{}, fmt.Errorf("compact_idle_trigger_percent must be less than compact_trigger_percent when idle compaction is enabled")
+	}
 	c.CompactSummaryMaxTokens = intValue(fc.CompactSummaryMaxTokens, 0)
 	c.CompactToolResultMaxBytes = intValue(fc.CompactToolResultMaxBytes, 0)
 	c.DelegateMaxTurns = intValue(fc.DelegateMaxTurns, defaultDelegateMaxTurns)
@@ -572,6 +589,11 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	}
 	c.ResponsesStateful = resolveBool(set["responses-stateful"], *f.responsesStateful,
 		getenv("HARNESS_RESPONSES_STATEFUL"), fc.ResponsesStateful, true)
+	c.RetentionPolicy, err = canonicalRetentionPolicy(resolveString(set["retention-policy"], *f.retentionPolicy,
+		getenv("HARNESS_RETENTION_POLICY"), fc.RetentionPolicy, "auto"))
+	if err != nil {
+		return Config{}, err
+	}
 	c.NoSteer = resolveBool(set["no-steer"], *f.noSteer,
 		getenv("HARNESS_NO_STEER"), fc.NoSteer, false)
 	c.Agent = strings.ToLower(strings.TrimSpace(resolveString(set["agent"], *f.agent,
@@ -974,6 +996,18 @@ func canonicalWebSearch(mode string) (string, error) {
 	}
 }
 
+func canonicalRetentionPolicy(policy string) (string, error) {
+	policy = strings.ToLower(strings.TrimSpace(policy))
+	switch policy {
+	case "", "auto":
+		return "auto", nil
+	case "age", "pressure", "disabled":
+		return policy, nil
+	default:
+		return "", fmt.Errorf("invalid retention_policy %q (want auto, age, pressure, or disabled)", policy)
+	}
+}
+
 func canonicalReplEditMode(mode string) (string, error) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch mode {
@@ -1040,6 +1074,7 @@ type flags struct {
 	showDiffs                        *bool
 	delegateOutput                   *string
 	responsesStateful                *bool
+	retentionPolicy                  *string
 	noSteer                          *bool
 	traceProxy                       *bool
 	noColor                          *bool
@@ -1093,7 +1128,8 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.searchTools = fs.String("search-tools", "auto", "search tools to expose: auto, grep, rg, or both")
 	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")
 	f.delegateOutput = fs.String("delegate-output", DelegateOutputStatus, "delegate display: status, off, or curated scrolling lines on stderr")
-	f.responsesStateful = fs.Bool("responses-stateful", true, "enable OpenAI Responses previous_response_id continuation when supported")
+	f.responsesStateful = fs.Bool("responses-stateful", true, "enable provider-agnostic managed continuation (server-side conversation state) when supported")
+	f.retentionPolicy = fs.String("retention-policy", "auto", "live transcript retention: auto, age, pressure, or disabled")
 	f.noSteer = fs.Bool("no-steer", false, "disable in-prompt steering: queue input for the next prompt instead of injecting it before the next turn")
 	f.traceProxy = fs.Bool("trace-proxy", false, "send W3C trace headers to harness-model-proxy and harness-mcp-proxy")
 	f.verbose = fs.Bool("v", false, "show tool result snippets and tool-call progress details")

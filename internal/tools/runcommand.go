@@ -21,6 +21,17 @@ const (
 	runCommandBackgroundDefaultTimeout = 1200
 	runCommandMaxSteps                 = 16
 	runCommandFailureOutputBytes       = 4096
+	runCommandAutoReceiptBytes         = 8 * 1024
+	runCommandSuccessTailBytes         = 512
+	runCommandSuccessTailLines         = 8
+	runCommandFailureTailLines         = 40
+	runCommandReceiptLabelBytes        = 160
+)
+
+const (
+	runCommandOutputAuto    = "auto"
+	runCommandOutputReceipt = "receipt"
+	runCommandOutputFull    = "full"
 )
 
 var (
@@ -56,6 +67,8 @@ const runCommandSchemaFmt = `{
       }
     },
     "stop_on_failure": {"type": "boolean", "description": "Stop after the first non-zero, timed out, cancelled, or unstartable step (default true)."},
+    "name": {"type": "string", "description": "Concise top-level receipt label. Unavailable with steps."},
+    "output_mode": {"type": "string", "enum": ["auto", "receipt", "full"], "description": "Top-level output policy: auto compacts successful output over 8KB and bounds failures; receipt always compacts success; full keeps bounded full output. Defaults to auto. Unavailable with steps."},
     "stdin": {"type": "string", "description": "Written to the command's standard input. Omit for no stdin."},
     "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
     "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default %d; no maximum)."}
@@ -90,10 +103,14 @@ const runCommandBackgroundSchemaFmt = `{
       }
     },
     "stop_on_failure": {"type": "boolean", "description": "Stop after the first non-zero, timed out, cancelled, or unstartable step (default true)."},
+    "name": {"type": "string", "description": "Concise top-level receipt label. Unavailable with steps."},
+    "output_mode": {"type": "string", "enum": ["auto", "receipt", "full"], "description": "Top-level output policy: auto compacts successful output over 8KB and bounds failures; receipt always compacts success; full keeps bounded full output. Defaults to auto. Unavailable with steps."},
     "stdin": {"type": "string", "description": "Written to the command's standard input. Omit for no stdin."},
     "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
     "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default %d for background; no maximum)."},
-    "background": {"type": "boolean", "description": "When true, start the command as a process-local background job and return a job id immediately. If later work depends on completion, call background_jobs action=wait once; do not poll get/list."}
+    "background": {"type": "boolean", "description": "When true, start the command as a process-local background job and return a job id immediately. If later work depends on completion, call background_jobs action=wait once; do not poll get/list."},
+    "resource_key": {"type": "string", "description": "Background-only lease resource. Defaults to the canonical cwd."},
+    "access": {"type": "string", "enum": ["read_only", "exclusive"], "description": "Background-only lease access. Defaults to exclusive; declare read_only only when the command cannot mutate the resource."}
   }
 }`
 
@@ -106,7 +123,7 @@ type runCommand struct {
 func (runCommand) Name() string { return "run_command" }
 
 func (runCommand) Description() string {
-	return "Run one command or ordered steps. Each uses shell command or argv as an array of strings; steps stop on failure and return compact receipts while archiving verbose output. Background supports one command."
+	return "Run one command or ordered steps using a shell command or argv as an array of strings. Auto output returns compact archived receipts for large success and bounded failure diagnostics. Background supports one command."
 }
 
 func (t runCommand) Schema() json.RawMessage {
@@ -141,10 +158,14 @@ type runCommandArgs struct {
 	Argv           []string         `json:"argv"`
 	Steps          []runCommandStep `json:"steps"`
 	StopOnFailure  *bool            `json:"stop_on_failure"`
+	Name           string           `json:"name"`
+	OutputMode     string           `json:"output_mode"`
 	Stdin          string           `json:"stdin"`
 	Cwd            string           `json:"cwd"`
 	TimeoutSeconds int              `json:"timeout_seconds"`
 	Background     bool             `json:"background"`
+	ResourceKey    string           `json:"resource_key"`
+	Access         string           `json:"access"`
 }
 
 type runCommandStep struct {
@@ -169,6 +190,12 @@ func (t runCommand) RunResult(ctx context.Context, input json.RawMessage) (RunRe
 	if err := validateRunCommandArgs(args); err != nil {
 		return RunResult{}, err
 	}
+	args.Name = strings.TrimSpace(args.Name)
+	outputMode, err := normalizeRunCommandOutputMode(args.OutputMode)
+	if err != nil {
+		return RunResult{}, err
+	}
+	args.OutputMode = outputMode
 	if args.TimeoutSeconds < 0 {
 		return RunResult{}, badArgs("timeout_seconds must be >= 0")
 	}
@@ -195,22 +222,44 @@ func (t runCommand) RunResult(ctx context.Context, input json.RawMessage) (RunRe
 				args.TimeoutSeconds = runCommandBackgroundDefaultTimeout
 			}
 		}
+		defaultResource, err := DefaultBackgroundResource(args.Cwd)
+		if err != nil {
+			return RunResult{}, err
+		}
+		resourceKey, access, err := ResolveBackgroundLease(
+			args.ResourceKey,
+			args.Access,
+			defaultResource,
+			BackgroundAccessExclusive,
+		)
+		if err != nil {
+			return RunResult{}, err
+		}
 		info, err := t.background.StartBackgroundJob(BackgroundJobRequest{
 			Kind:        "run_command",
 			Description: runCommandDescription(args),
+			ResourceKey: resourceKey,
+			Access:      access,
 			Run: func(ctx context.Context, id string) (BackgroundJobResult, error) {
-				out, err := runCommandArgsCommand(ctx, args)
-				return BackgroundJobResult{Text: out}, err
+				result, err := runCommandTopLevel(ctx, args)
+				return BackgroundJobResult{
+					Text:         result.Text,
+					OriginalText: result.OriginalText,
+				}, err
 			},
 		})
 		if err != nil {
 			return RunResult{}, err
 		}
-		return RunResult{Text: fmt.Sprintf("background job %s started", info.ID)}, nil
+		return RunResult{Text: fmt.Sprintf(
+			"background job %s started (resource: %s, access: %s)",
+			info.ID,
+			resourceKey,
+			access,
+		)}, nil
 	}
 
-	out, err := runCommandArgsCommand(ctx, args)
-	return RunResult{Text: out}, err
+	return runCommandTopLevel(ctx, args)
 }
 
 // SelfTimeout reports run_command's own per-call deadline so its documented
@@ -261,6 +310,8 @@ func validateRunCommandArgs(args runCommandArgs) error {
 	hasCommand := strings.TrimSpace(args.Command) != ""
 	hasArgv := len(args.Argv) > 0
 	hasSteps := len(args.Steps) > 0
+	hasLease := strings.TrimSpace(args.ResourceKey) != "" || strings.TrimSpace(args.Access) != ""
+	hasTopLevelOutput := strings.TrimSpace(args.Name) != "" || strings.TrimSpace(args.OutputMode) != ""
 	switch {
 	case hasSteps && (hasCommand || hasArgv):
 		return badArgs("provide steps or a top-level command/argv, not both")
@@ -268,6 +319,10 @@ func validateRunCommandArgs(args runCommandArgs) error {
 		return badArgs("top-level stdin is unavailable with steps; set stdin on a step")
 	case hasSteps && args.Background:
 		return badArgs("steps cannot run in the background")
+	case hasSteps && hasTopLevelOutput:
+		return badArgs("name and output_mode are unavailable with steps")
+	case !args.Background && hasLease:
+		return badArgs("resource_key and access require background:true")
 	case len(args.Steps) > runCommandMaxSteps:
 		return badArgs("steps must contain at most %d items", runCommandMaxSteps)
 	case hasCommand && hasArgv:
@@ -308,12 +363,146 @@ func runCommandDescription(args runCommandArgs) string {
 	return args.Command
 }
 
-func runCommandArgsCommand(ctx context.Context, args runCommandArgs) (string, error) {
+func runCommandTopLevel(ctx context.Context, args runCommandArgs) (RunResult, error) {
+	started := time.Now()
 	result, err := runCommandArgsProcess(ctx, args)
 	if err != nil {
-		return "", err
+		return RunResult{}, err
 	}
-	return formatProcessResult(result), nil
+	return formatRunCommandResult(args, result, conciseDuration(time.Since(started))), nil
+}
+
+func normalizeRunCommandOutputMode(mode string) (string, error) {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		return runCommandOutputAuto, nil
+	}
+	switch mode {
+	case runCommandOutputAuto, runCommandOutputReceipt, runCommandOutputFull:
+		return mode, nil
+	default:
+		return "", badArgs(`output_mode must be "auto", "receipt", or "full"`)
+	}
+}
+
+func formatRunCommandResult(args runCommandArgs, result processResult, elapsed string) RunResult {
+	full := formatProcessResult(result)
+	if args.OutputMode == runCommandOutputFull {
+		return RunResult{Text: full}
+	}
+	if result.success() {
+		if args.OutputMode == runCommandOutputAuto && len(result.Output) <= runCommandAutoReceiptBytes {
+			return RunResult{Text: full}
+		}
+		text, clipped := formatRunCommandReceipt(args, result, elapsed, runCommandSuccessTailBytes, runCommandSuccessTailLines)
+		original := ""
+		// Archive only when something was cut, or when the receipt drops the
+		// partial-reap signal that formatProcessResult emits for an incomplete
+		// wait (timeoutStatusLine); an unclipped, complete receipt is
+		// self-contained and archiving it is pure noise.
+		if clipped || !result.WaitComplete {
+			original = full
+		}
+		return RunResult{Text: text, OriginalText: original}
+	}
+
+	text, clipped := formatRunCommandReceipt(args, result, elapsed, runCommandFailureOutputBytes, runCommandFailureTailLines)
+	original := ""
+	// As on the success path, keep the original when the receipt drops the
+	// partial-reap signal (timeoutStatusLine) for an incomplete wait.
+	if clipped || !result.WaitComplete {
+		original = full
+	}
+	return RunResult{Text: text, OriginalText: original}
+}
+
+func formatRunCommandReceipt(args runCommandArgs, result processResult, elapsed string, tailBytes, tailLines int) (string, bool) {
+	status := "PASS"
+	if !result.success() {
+		status = "FAIL"
+	}
+	var b strings.Builder
+	fmt.Fprintf(
+		&b,
+		"%s %s (%s; %s; %s output)",
+		status,
+		runCommandReceiptLabel(args),
+		elapsed,
+		result.receiptStatus(),
+		HumanBytes(len(result.Output)),
+	)
+	if len(result.Output) == 0 {
+		fmt.Fprintf(&b, "\n[exit code: %d]", result.ExitCode)
+		return b.String(), false
+	}
+	tail, clipped := commandOutputTail(result.Output, tailBytes, tailLines)
+	if strings.TrimSpace(tail) == "" {
+		fmt.Fprintf(&b, "\n[exit code: %d]", result.ExitCode)
+		return b.String(), clipped
+	}
+	if clipped {
+		b.WriteString("\n[showing output tail]\n")
+	} else {
+		b.WriteString("\noutput:\n")
+	}
+	b.WriteString(strings.TrimRight(tail, "\n"))
+	fmt.Fprintf(&b, "\n[exit code: %d]", result.ExitCode)
+	return b.String(), clipped
+}
+
+func runCommandReceiptLabel(args runCommandArgs) string {
+	label := strings.TrimSpace(args.Name)
+	if label == "" {
+		label = runCommandDescription(args)
+	}
+	label = strings.Join(strings.Fields(label), " ")
+	if label == "" {
+		label = "command"
+	}
+	if len(label) <= runCommandReceiptLabelBytes {
+		return label
+	}
+	clipped := label[:runCommandReceiptLabelBytes-len("...")]
+	for !utf8.ValidString(clipped) {
+		clipped = clipped[:len(clipped)-1]
+	}
+	return strings.TrimSpace(clipped) + "..."
+}
+
+func commandOutputTail(output string, maxBytes, maxLines int) (string, bool) {
+	if output == "" {
+		return "", false
+	}
+	start := 0
+	clipped := false
+	if maxBytes > 0 && len(output) > maxBytes {
+		start = len(output) - maxBytes
+		clipped = true
+		for start < len(output) && !utf8.RuneStart(output[start]) {
+			start++
+		}
+	}
+	tail := output[start:]
+	if maxLines > 0 {
+		lineCount := strings.Count(tail, "\n")
+		if !strings.HasSuffix(tail, "\n") {
+			lineCount++
+		}
+		if lineCount > maxLines {
+			skip := lineCount - maxLines
+			index := 0
+			for i := 0; i < skip; i++ {
+				newline := strings.IndexByte(tail[index:], '\n')
+				if newline < 0 {
+					break
+				}
+				index += newline + 1
+			}
+			tail = tail[index:]
+			clipped = true
+		}
+	}
+	return tail, clipped
 }
 
 func runCommandArgsProcess(ctx context.Context, args runCommandArgs) (processResult, error) {

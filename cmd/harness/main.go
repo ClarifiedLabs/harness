@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -278,10 +279,36 @@ func run(env environment) int {
 			return ui.ExitRuntime
 		}
 		resumed = &s
+		if s.Recovery != nil {
+			fmt.Fprintf(
+				stderr,
+				"[recovered active session boundary: %s, prompt %d, turn %d]\n",
+				s.Recovery.Phase,
+				s.Recovery.Prompt,
+				s.Recovery.Turn,
+			)
+		}
+		if s.RecoveryWarning != "" {
+			fmt.Fprintf(stderr, "[ignored unreadable active-turn checkpoint: %s]\n", s.RecoveryWarning)
+		}
 	}
-	created := now()
+	startedAt := now()
+	created := startedAt
 	if resumed != nil && !resumed.Created.IsZero() {
 		created = resumed.Created
+	}
+	if resumed != nil {
+		abandoned, skipped, err := session.AbandonRunningChildren(cfg.Resume, startedAt)
+		if err != nil {
+			fmt.Fprintf(stderr, "harness: resume child sessions: %v\n", err)
+			return ui.ExitRuntime
+		}
+		if abandoned > 0 {
+			fmt.Fprintf(stderr, "[marked %d interrupted child session(s) abandoned]\n", abandoned)
+		}
+		if skipped > 0 {
+			fmt.Fprintf(stderr, "[skipped %d unreadable child session(s)]\n", skipped)
+		}
 	}
 	sessionPath := cfg.Session
 	if sessionPath == "" {
@@ -560,23 +587,25 @@ func run(env environment) int {
 		RunCommandTimeoutSeconds:           cfg.RunCommandTimeoutSeconds,
 		RunCommandBackgroundTimeoutSeconds: cfg.RunCommandBackgroundTimeoutSeconds,
 	})
-	backgroundManager.SetResultPreparer(toolCatalog.PrepareResult)
+	backgroundManager.SetResultPreparer(toolCatalog.PrepareResultWithOriginal)
 	for _, disabled := range disabledTools {
 		logger.Warn(disabled.Message(), logging.Category("cli_tools"))
 	}
 	delegateState := delegate.NewState(delegate.Runtime{
-		ProviderName:      cfg.Provider,
-		Model:             cfg.Model,
-		ContextWindow:     cfg.ContextWindow,
-		MaxOutputTokens:   cfg.MaxOutputTokens,
-		Registry:          modelRegistry,
-		Reasoning:         reasoning,
-		ServerTools:       serverTools,
-		ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider),
-		Agent:             agentName,
-		Depth:             0,
-		MaxPromptTokens:   cfg.MaxPromptTokens,
-		MaxPromptCostUSD:  cfg.MaxPromptCostUSD,
+		ProviderName:                cfg.Provider,
+		Model:                       cfg.Model,
+		ContextWindow:               cfg.ContextWindow,
+		MaxOutputTokens:             cfg.MaxOutputTokens,
+		Registry:                    modelRegistry,
+		Reasoning:                   reasoning,
+		ServerTools:                 serverTools,
+		ResponsesStateful:           responsesStatefulForProvider(cfg, catalog, cfg.Provider),
+		ManagedContinuationStateful: managedContinuationStatefulForProvider(cfg, catalog, cfg.Provider),
+		DisableManagedContinuation:  !cfg.ResponsesStateful,
+		Agent:                       agentName,
+		Depth:                       0,
+		MaxPromptTokens:             cfg.MaxPromptTokens,
+		MaxPromptCostUSD:            cfg.MaxPromptCostUSD,
 	})
 	// pendingMCP is assigned below (interactive REPL only) before any turn can run,
 	// so this closure — invoked lazily at delegation time — captures the live value.
@@ -607,6 +636,7 @@ func run(env environment) int {
 		DisableAutoCompaction:     !cfg.CompactAutoEnabled,
 		CompactSummaryMaxTokens:   cfg.CompactSummaryMaxTokens,
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
+		RetentionPolicy:           agent.RetentionPolicy(cfg.RetentionPolicy),
 		Now:                       now,
 		AgentCandidates: func(delegate.Runtime) []delegate.AgentCandidate {
 			return delegateAgentCandidates(agents)
@@ -783,26 +813,30 @@ func run(env environment) int {
 		snap.Reasoning = nextReasoning
 		snap.ServerTools = webSearchServerToolsForModel(next.Provider, modelRegistry, next.RegistryModel, cfg.WebSearch)
 		snap.ResponsesStateful = responsesStatefulForProvider(cfg, catalog, next.Provider)
+		snap.ManagedContinuationStateful = managedContinuationStatefulForProvider(cfg, catalog, next.Provider)
+		snap.DisableManagedContinuation = !cfg.ResponsesStateful
 		snap.Agent = a.Name
 		snap.ToolNames = reg.Names()
 		delegateState.Set(snap)
 		return ui.AgentSelection{
-			Name:              a.Name,
-			Tools:             reg,
-			System:            system,
-			Provider:          next.Provider,
-			Model:             next.Model,
-			RegistryModel:     next.RegistryModel,
-			BaseURL:           proxyClient.URL(),
-			Runtime:           runtime,
-			ContextWindow:     cfg.ContextWindow,
-			Reasoning:         nextReasoning,
-			BaseTargetID:      next.BaseTargetID,
-			Variant:           next.Variant,
-			FastTargetID:      next.FastTargetID,
-			ServerTools:       snap.ServerTools,
-			ReasoningSet:      true,
-			ResponsesStateful: snap.ResponsesStateful,
+			Name:                        a.Name,
+			Tools:                       reg,
+			System:                      system,
+			Provider:                    next.Provider,
+			Model:                       next.Model,
+			RegistryModel:               next.RegistryModel,
+			BaseURL:                     proxyClient.URL(),
+			Runtime:                     runtime,
+			ContextWindow:               cfg.ContextWindow,
+			Reasoning:                   nextReasoning,
+			BaseTargetID:                next.BaseTargetID,
+			Variant:                     next.Variant,
+			FastTargetID:                next.FastTargetID,
+			ServerTools:                 snap.ServerTools,
+			ReasoningSet:                true,
+			ResponsesStateful:           snap.ResponsesStateful,
+			ManagedContinuationStateful: snap.ManagedContinuationStateful,
+			DisableManagedContinuation:  snap.DisableManagedContinuation,
 		}, nil
 	}
 
@@ -848,49 +882,56 @@ func run(env environment) int {
 		snap.Reasoning = nextReasoning
 		snap.ServerTools = webSearchServerToolsForModel(next.Provider, modelRegistry, next.RegistryModel, cfg.WebSearch)
 		snap.ResponsesStateful = responsesStatefulForProvider(cfg, catalog, next.Provider)
+		snap.ManagedContinuationStateful = managedContinuationStatefulForProvider(cfg, catalog, next.Provider)
+		snap.DisableManagedContinuation = !cfg.ResponsesStateful
 		delegateState.Set(snap)
 		reasoning = nextReasoning
 		serverTools = snap.ServerTools
 		return ui.ModelSelection{
-			Provider:          next.Provider,
-			Model:             next.Model,
-			RegistryModel:     next.RegistryModel,
-			BaseURL:           proxyClient.URL(),
-			Runtime:           runtime,
-			ContextWindow:     cfg.ContextWindow,
-			Reasoning:         nextReasoning,
-			BaseTargetID:      next.BaseTargetID,
-			Variant:           next.Variant,
-			FastTargetID:      next.FastTargetID,
-			ServerTools:       snap.ServerTools,
-			ReasoningSet:      true,
-			ResponsesStateful: snap.ResponsesStateful,
+			Provider:                    next.Provider,
+			Model:                       next.Model,
+			RegistryModel:               next.RegistryModel,
+			BaseURL:                     proxyClient.URL(),
+			Runtime:                     runtime,
+			ContextWindow:               cfg.ContextWindow,
+			Reasoning:                   nextReasoning,
+			BaseTargetID:                next.BaseTargetID,
+			Variant:                     next.Variant,
+			FastTargetID:                next.FastTargetID,
+			ServerTools:                 snap.ServerTools,
+			ReasoningSet:                true,
+			ResponsesStateful:           snap.ResponsesStateful,
+			ManagedContinuationStateful: snap.ManagedContinuationStateful,
+			DisableManagedContinuation:  snap.DisableManagedContinuation,
 		}, nil
 	}
 
 	ag := agent.New(provider, toolRegistry, agent.Options{
-		MaxTurns:                  cfg.MaxTurns,
-		MaxPromptTokens:           cfg.MaxPromptTokens,
-		MaxOutputTokens:           cfg.MaxOutputTokens,
-		MaxPromptCostUSD:          cfg.MaxPromptCostUSD,
-		Model:                     cfg.Model,
-		ContextWindow:             cfg.ContextWindow,
-		Registry:                  modelRegistry,
-		Reasoning:                 reasoning,
-		ServerTools:               serverTools,
-		Now:                       now,
-		CompactKeepTurns:          cfg.CompactKeepTurns,
-		CompactKeepTokens:         cfg.CompactKeepTokens,
-		CompactTriggerPercent:     cfg.CompactTriggerPercent,
-		CompactTargetPercent:      cfg.CompactTargetPercent,
-		DisableAutoCompaction:     !cfg.CompactAutoEnabled,
-		CompactSummaryMaxTokens:   cfg.CompactSummaryMaxTokens,
-		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
-		Hooks:                     hookRunner,
-		ShowDiffs:                 cfg.ShowDiffs,
-		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
-		Interactive:               interactiveSession,
-		Steer:                     !cfg.NoSteer,
+		MaxTurns:                    cfg.MaxTurns,
+		MaxPromptTokens:             cfg.MaxPromptTokens,
+		MaxOutputTokens:             cfg.MaxOutputTokens,
+		MaxPromptCostUSD:            cfg.MaxPromptCostUSD,
+		Model:                       cfg.Model,
+		ContextWindow:               cfg.ContextWindow,
+		Registry:                    modelRegistry,
+		Reasoning:                   reasoning,
+		ServerTools:                 serverTools,
+		Now:                         now,
+		CompactKeepTurns:            cfg.CompactKeepTurns,
+		CompactKeepTokens:           cfg.CompactKeepTokens,
+		CompactTriggerPercent:       cfg.CompactTriggerPercent,
+		CompactTargetPercent:        cfg.CompactTargetPercent,
+		DisableAutoCompaction:       !cfg.CompactAutoEnabled,
+		CompactSummaryMaxTokens:     cfg.CompactSummaryMaxTokens,
+		CompactToolResultMaxBytes:   cfg.CompactToolResultMaxBytes,
+		Hooks:                       hookRunner,
+		ShowDiffs:                   cfg.ShowDiffs,
+		ResponsesStateful:           responsesStatefulForProvider(cfg, catalog, cfg.Provider),
+		ManagedContinuationStateful: managedContinuationStatefulForProvider(cfg, catalog, cfg.Provider),
+		DisableManagedContinuation:  !cfg.ResponsesStateful,
+		RetentionPolicy:             agent.RetentionPolicy(cfg.RetentionPolicy),
+		Interactive:                 interactiveSession,
+		Steer:                       !cfg.NoSteer,
 	})
 	if env.agentSleep != nil {
 		ag.SetSleep(env.agentSleep)
@@ -931,23 +972,25 @@ func run(env environment) int {
 	activeToolNames := toolRegistry.Names()
 
 	delegateState.Set(delegate.Runtime{
-		Provider:          provider,
-		ProviderName:      cfg.Provider,
-		Model:             cfg.Model,
-		ContextWindow:     cfg.ContextWindow,
-		MaxOutputTokens:   cfg.MaxOutputTokens,
-		Registry:          modelRegistry,
-		Reasoning:         reasoning,
-		ServerTools:       serverTools,
-		ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider),
-		System:            systemPrompt,
-		Agent:             agentName,
-		ToolNames:         activeToolNames,
-		SessionPath:       sessionPath,
-		CacheAffinityID:   ag.CacheAffinityID(),
-		Depth:             0,
-		MaxPromptTokens:   cfg.MaxPromptTokens,
-		MaxPromptCostUSD:  cfg.MaxPromptCostUSD,
+		Provider:                    provider,
+		ProviderName:                cfg.Provider,
+		Model:                       cfg.Model,
+		ContextWindow:               cfg.ContextWindow,
+		MaxOutputTokens:             cfg.MaxOutputTokens,
+		Registry:                    modelRegistry,
+		Reasoning:                   reasoning,
+		ServerTools:                 serverTools,
+		ResponsesStateful:           responsesStatefulForProvider(cfg, catalog, cfg.Provider),
+		ManagedContinuationStateful: managedContinuationStatefulForProvider(cfg, catalog, cfg.Provider),
+		DisableManagedContinuation:  !cfg.ResponsesStateful,
+		System:                      systemPrompt,
+		Agent:                       agentName,
+		ToolNames:                   activeToolNames,
+		SessionPath:                 sessionPath,
+		CacheAffinityID:             ag.CacheAffinityID(),
+		Depth:                       0,
+		MaxPromptTokens:             cfg.MaxPromptTokens,
+		MaxPromptCostUSD:            cfg.MaxPromptCostUSD,
 	})
 	if hookRunner != nil {
 		hookRunner.SetSession(sessionPath)
@@ -1049,12 +1092,14 @@ func run(env environment) int {
 		RefreshAgentSummaries: func() []ui.AgentSummary {
 			return agentSummaries(agents, delegateState.Snapshot().ToolNames)
 		},
-		SwitchAgent:  switchAgent,
-		Todos:        todoStore,
-		Plans:        planStore,
-		Handoff:      handoffPending,
-		HandoffAgent: cfg.HandoffAgent,
-		SessionPath:  sessionPath,
+		SwitchAgent:                  switchAgent,
+		Todos:                        todoStore,
+		Plans:                        planStore,
+		Handoff:                      handoffPending,
+		HandoffAgent:                 cfg.HandoffAgent,
+		IdleCompactionAfter:          time.Duration(cfg.CompactIdleAfterSeconds) * time.Second,
+		IdleCompactionTriggerPercent: cfg.CompactIdleTriggerPercent,
+		SessionPath:                  sessionPath,
 		SessionTree: func() *session.Tree {
 			if resumed != nil {
 				return resumed.Tree
@@ -1495,6 +1540,8 @@ type modelListEntry struct {
 	ServerTools              []string   `json:"server_tools,omitempty"`
 	BaseTargetID             string     `json:"base_target_id,omitempty"`
 	Variant                  string     `json:"variant,omitempty"`
+	APIType                  string     `json:"api_type,omitempty"`
+	ContinuationStateful     bool       `json:"continuation_stateful,omitempty"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd,omitempty"`
 	Reasoning                bool       `json:"reasoning"`
 }
@@ -1565,6 +1612,8 @@ func catalogModelListRows(catalog protocol.Catalog) []modelListEntry {
 			ServerTools:              append([]string(nil), target.ServerTools...),
 			BaseTargetID:             strings.TrimSpace(target.BaseTargetID),
 			Variant:                  strings.TrimSpace(target.Variant),
+			APIType:                  strings.TrimSpace(target.APIType),
+			ContinuationStateful:     target.ContinuationStateful,
 			PricePerMillionTokensUSD: modelListPrice(target.Price),
 			Reasoning:                target.Reasoning,
 		})
@@ -1958,18 +2007,20 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 		provider = proxyClient.Provider(providerName)
 	}
 	return delegate.Launch{
-		Provider:          provider,
-		ProviderName:      providerName,
-		Model:             model,
-		ContextWindow:     runtime.ContextWindow,
-		MaxOutputTokens:   runtime.MaxOutputTokens,
-		Registry:          runtime.Registry,
-		Reasoning:         launchReasoning,
-		ServerTools:       serverTools,
-		ResponsesStateful: responsesStatefulForProvider(cfg, modelCatalog, providerName),
-		System:            system,
-		Agent:             target,
-		Tools:             reg,
+		Provider:                    provider,
+		ProviderName:                providerName,
+		Model:                       model,
+		ContextWindow:               runtime.ContextWindow,
+		MaxOutputTokens:             runtime.MaxOutputTokens,
+		Registry:                    runtime.Registry,
+		Reasoning:                   launchReasoning,
+		ServerTools:                 serverTools,
+		ResponsesStateful:           responsesStatefulForProvider(cfg, modelCatalog, providerName),
+		ManagedContinuationStateful: managedContinuationStatefulForProvider(cfg, modelCatalog, providerName),
+		DisableManagedContinuation:  !cfg.ResponsesStateful,
+		System:                      system,
+		Agent:                       target,
+		Tools:                       reg,
 	}, nil
 }
 
@@ -2143,6 +2194,18 @@ func reasoningModeForProvider(catalog protocol.Catalog, providerID string) strin
 }
 
 func responsesStatefulForProvider(cfg config.Config, catalog protocol.Catalog, providerID string) bool {
+	return false
+}
+
+func managedContinuationStatefulForProvider(cfg config.Config, catalog protocol.Catalog, providerID string) bool {
+	if !cfg.ResponsesStateful {
+		return false
+	}
+	for _, target := range catalog.Targets {
+		if target.ID == providerID || slices.Contains(target.Aliases, providerID) {
+			return target.ContinuationStateful
+		}
+	}
 	return false
 }
 
