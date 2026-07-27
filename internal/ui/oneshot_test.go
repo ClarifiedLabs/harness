@@ -668,6 +668,106 @@ func TestOneShotModelAPIIssuePersistsOutsideConversationState(t *testing.T) {
 	}
 }
 
+func TestOneShotRecoverableContinuationMissDoesNotRenderTerminalError(t *testing.T) {
+	const message = "previous response is unavailable on this proxy instance"
+	fp := llmtest.New("responses",
+		llmtest.Step{Err: &llm.APIError{
+			StatusCode: 409,
+			Code:       "previous_response_unavailable",
+			Message:    message,
+			Diagnostic: &llm.APIErrorDiagnostic{
+				Stage:           llm.APIErrorStageProxyPrepare,
+				ProxyInstanceID: "proxy-b",
+				ProxyRequestID:  41,
+				TraceID:         "trace-rollout",
+				TargetID:        "openai-codex:gpt-5.6-terra",
+				Provider:        "openai-codex",
+				APIType:         "responses",
+				Model:           "gpt-5.6-terra",
+			},
+		}},
+		llmtest.Step{
+			Events:     []llm.StreamEvent{textDelta("recovered")},
+			Stop:       llm.StopEndTurn,
+			ResponseID: "resp-new",
+		},
+	)
+	var out, errw, diagnostics bytes.Buffer
+	app := newTestApp(t, &out, &errw, fp)
+	app.Renderer = NewRenderer(&out, &errw, RenderOptions{
+		Model:      "gpt-5.6-terra",
+		ToolStream: true,
+		Quiet:      true,
+	})
+	app.DiagnosticLogger = slog.New(slog.NewJSONHandler(&diagnostics, nil))
+	app.Agent.SetResponsesStateful(true)
+	app.Agent.SetTranscript([]llm.Message{uiUserMsg("remember"), uiAsstMsg("ack")})
+	digest, err := llm.FingerprintMessages(app.Agent.Transcript())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.Agent.SetResponseState(&llm.ResponseState{
+		PreviousResponseID: "resp-old",
+		AnchorMessages:     2,
+		AnchorDigest:       digest,
+	})
+
+	if code := OneShot(app, "recall"); code != ExitOK {
+		t.Fatalf("OneShot exit = %d, stderr=%q", code, errw.String())
+	}
+	if strings.TrimSpace(out.String()) != "recovered" {
+		t.Fatalf("stdout = %q, want recovered response", out.String())
+	}
+	if strings.Contains(errw.String(), message) || strings.Contains(errw.String(), "[error:") {
+		t.Fatalf("recoverable continuation miss rendered as terminal error: %q", errw.String())
+	}
+	if len(fp.Requests) != 2 ||
+		fp.Requests[0].PreviousResponseID != "resp-old" ||
+		fp.Requests[1].PreviousResponseID != "" ||
+		len(fp.Requests[1].Messages) != 3 {
+		t.Fatalf("continuation requests = %+v", fp.Requests)
+	}
+	if !strings.Contains(diagnostics.String(), `"msg":"model API issue"`) ||
+		!strings.Contains(diagnostics.String(), `"api_code":"previous_response_unavailable"`) {
+		t.Fatalf("diagnostics lost recoverable miss: %s", diagnostics.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw event log: %v", err)
+	}
+	if !strings.Contains(string(raw), `"state":"failed"`) ||
+		!strings.Contains(string(raw), `"code":"previous_response_unavailable"`) {
+		t.Fatalf("raw lifecycle lost recoverable miss: %s", raw)
+	}
+	loaded, err := session.Load(app.SessionPath)
+	if err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+	if loaded.ResponseState == nil ||
+		loaded.ResponseState.PreviousResponseID != "resp-new" ||
+		loaded.ResponseState.AnchorMessages != 4 {
+		t.Fatalf("recovered response state = %+v", loaded.ResponseState)
+	}
+}
+
+func TestOneShotUnrecoveredContinuationMissStillRendersTerminalError(t *testing.T) {
+	const message = "previous response is unavailable on this proxy instance"
+	fp := llmtest.New("responses", llmtest.Step{Err: &llm.APIError{
+		StatusCode: 409,
+		Code:       "previous_response_unavailable",
+		Message:    message,
+	}})
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, fp)
+
+	if code := OneShot(app, "go"); code != ExitRuntime {
+		t.Fatalf("OneShot exit = %d, want %d", code, ExitRuntime)
+	}
+	if !strings.Contains(errw.String(), "[error:") || !strings.Contains(errw.String(), message) {
+		t.Fatalf("unrecovered continuation miss was hidden: %q", errw.String())
+	}
+}
+
 func TestREPLCompatibilityDiagnosticDisplayedOnce(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Err: &llm.APIError{
 		StatusCode: 400,

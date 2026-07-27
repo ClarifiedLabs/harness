@@ -364,12 +364,20 @@ func (r *Renderer) ModelRequestEvent(event llm.ModelRequestEvent) string {
 	line := ""
 	switch event.State {
 	case llm.ModelRequestUpstreamAttemptFailed, llm.ModelRequestFailed:
-		line = modelRequestIssueLine(event)
-		if line != "" {
-			if event.Outcome == llm.ModelRequestOutcomeTerminal {
-				r.writeDimLine(line)
-			} else {
-				r.dimLine(line)
+		// A previous-response/interaction rejection is terminal for this proxy
+		// request, but the agent can discard the stale anchor and resend full
+		// context immediately. Do not eagerly render it as a terminal prompt
+		// error. The structured event is still persisted and logged by the sink;
+		// if recovery does not succeed, the caller's final error path renders the
+		// returned error normally.
+		if !continuationFailureMayRecover(event) {
+			line = modelRequestIssueLine(event)
+			if line != "" {
+				if event.Outcome == llm.ModelRequestOutcomeTerminal {
+					r.writeDimLine(line)
+				} else {
+					r.dimLine(line)
+				}
 			}
 		}
 	}
@@ -384,6 +392,21 @@ func (r *Renderer) ModelRequestEvent(event llm.ModelRequestEvent) string {
 	}
 	r.renderMu.Unlock()
 	return line
+}
+
+func continuationFailureMayRecover(event llm.ModelRequestEvent) bool {
+	if event.Outcome != llm.ModelRequestOutcomeTerminal {
+		return false
+	}
+	code := strings.ToLower(event.Code)
+	if strings.Contains(code, "previous_response") || strings.Contains(code, "previous_interaction") {
+		return true
+	}
+	message := strings.ToLower(event.Message)
+	return strings.Contains(message, "previous_response_id") ||
+		strings.Contains(message, "previous response") ||
+		strings.Contains(message, "previous_interaction_id") ||
+		strings.Contains(message, "previous interaction")
 }
 
 // CancelRequested immediately makes a graceful cancellation visible while the

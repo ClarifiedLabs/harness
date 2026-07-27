@@ -410,7 +410,10 @@ An unsupported target rejects continuation with
 known-unavailable ID before streaming with
 `previous_response_unavailable`; an upstream previous-ID rejection is also
 passed through unchanged. In either case harness clears its local anchor and
-performs one full-context resend.
+performs one full-context resend. A miss that recovers is retained in proxy
+logs, metrics, and session diagnostics but is not rendered as a terminal model
+error; the normal state-reset notice remains visible unless quiet mode suppresses
+it. If the resend fails, harness still renders the final error normally.
 
 Retention, compaction, branch navigation, agent changes, and true base-model
 changes reset the CLI-owned anchor. Switching a target between its base and
