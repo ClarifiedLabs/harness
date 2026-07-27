@@ -510,14 +510,14 @@ func TestStreamAppendsMessagesPath(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	// Custom base URL with a prefix; the dialect appends /v1/messages.
-	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/anthropic", Sleep: func(time.Duration) {}})
+	// Catalog-style base URLs include /v1; the dialect appends only /messages.
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/coding/v1", Sleep: func(time.Duration) {}})
 	_, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("claude-opus-4-8")))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if gotPath != "/anthropic/v1/messages" {
-		t.Errorf("request path = %q, want /anthropic/v1/messages", gotPath)
+	if gotPath != "/coding/v1/messages" {
+		t.Errorf("request path = %q, want /coding/v1/messages", gotPath)
 	}
 }
 

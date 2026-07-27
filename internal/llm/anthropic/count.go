@@ -10,7 +10,7 @@ import (
 	"harness/internal/llm"
 )
 
-const countTokensPath = "/v1/messages/count_tokens"
+const countTokensPath = "/messages/count_tokens"
 
 type countRequest struct {
 	Model        string          `json:"model"`

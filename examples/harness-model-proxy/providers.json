@@ -106,7 +106,7 @@
     {
       "name": "example-anthropic-provider",
       "api_type": "anthropic",
-      "base_url": "https://anthropic.example.test",
+      "base_url": "https://anthropic.example.test/v1",
       "api_key": "",
       "api_key_env": ["EXAMPLE_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
       "models": [

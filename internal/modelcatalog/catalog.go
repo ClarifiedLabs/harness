@@ -136,7 +136,7 @@ func (p Provider) BaseURL() string {
 	case p.ID == "openai" || npm == npmOpenAI:
 		return "https://api.openai.com/v1"
 	case p.ID == "anthropic" || npm == npmAnthropic:
-		return "https://api.anthropic.com"
+		return "https://api.anthropic.com/v1"
 	default:
 		return ""
 	}

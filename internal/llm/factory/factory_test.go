@@ -62,7 +62,7 @@ func TestEmptyKeyAllowedWithCustomBaseURL(t *testing.T) {
 	}
 
 	// Same for a custom Anthropic-style endpoint.
-	if _, err := New(Options{Provider: "anthropic", Model: "claude-x", BaseURL: "http://localhost:8080"}); err != nil {
+	if _, err := New(Options{Provider: "anthropic", Model: "claude-x", BaseURL: "http://localhost:8080/v1"}); err != nil {
 		t.Errorf("expected empty key allowed with custom anthropic base URL: %v", err)
 	}
 
