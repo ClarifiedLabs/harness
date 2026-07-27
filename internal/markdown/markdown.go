@@ -8,19 +8,63 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"harness/internal/term/highlight"
 )
 
+// Styling stays inside the sixteen ANSI colors so it renders in the reader's
+// own theme rather than imposing one. Cyan for code and links is the terminal
+// convention (Codex, rich, glow all land there); yellow reads at under 3:1
+// against most light backgrounds, which is why it is not used.
+//
+// Spans close with the specific "off" code for what they turned on rather than
+// a blanket reset, so nesting survives: see style.
 const (
 	ansiBold          = "\x1b[1m"
+	ansiBoldOff       = "\x1b[22m"
 	ansiBoldUnderline = "\x1b[1;4m"
 	ansiItalic        = "\x1b[3m"
+	ansiItalicOff     = "\x1b[23m"
+	ansiUnderline     = "\x1b[4m"
+	ansiUnderlineOff  = "\x1b[24m"
 	ansiLink          = "\x1b[36;4m"
-	ansiCode          = "\x1b[33m"
-	ansiReset         = "\x1b[0m"
+	ansiCode          = "\x1b[36m"
+	ansiColorOff      = "\x1b[39m"
 	minTableRule      = 3
 	codeFenceTick     = "```"
 	codeFenceTilde    = "~~~"
 )
+
+// style records the attributes the surrounding context has already switched on.
+// A nested span consults it before closing: turning bold off at the end of an
+// inline span would also end the bold of the heading containing it, so any
+// attribute the outer context still needs is left alone.
+type style struct {
+	bold      bool
+	italic    bool
+	underline bool
+}
+
+func (s style) boldOff() string {
+	if s.bold {
+		return ""
+	}
+	return ansiBoldOff
+}
+
+func (s style) italicOff() string {
+	if s.italic {
+		return ""
+	}
+	return ansiItalicOff
+}
+
+func (s style) underlineOff() string {
+	if s.underline {
+		return ""
+	}
+	return ansiUnderlineOff
+}
 
 // DefaultWidth is the fallback terminal width used by callers that want wrapping
 // even when the terminal size cannot be determined.
@@ -61,7 +105,11 @@ type Stream struct {
 	table       []tableLine
 	inFence     bool
 	fenceMarker string
-	lineOpen    bool
+	// code highlights the body of the open fence. It is nil for an unlabeled
+	// fence, an unrecognized language, or when ANSI is off, and a nil
+	// highlighter leaves lines untouched.
+	code     *highlight.State
+	lineOpen bool
 }
 
 // NewStream returns a new line-buffered renderer.
@@ -132,18 +180,25 @@ func (s *Stream) renderLine(out *strings.Builder, line string, newline bool) {
 
 	if s.inFence {
 		s.flushTable(out)
-		s.writeLine(out, s.opts.Prefix+"  "+line, newline)
+		// The closing delimiter is not code, so it is written unstyled.
 		if strings.HasPrefix(strings.TrimSpace(line), s.fenceMarker) {
 			s.inFence = false
 			s.fenceMarker = ""
+			s.code = nil
+			s.writeLine(out, s.opts.Prefix+"  "+line, newline)
+			return
 		}
+		s.writeLine(out, s.opts.Prefix+"  "+s.code.Line(line), newline)
 		return
 	}
 
-	if marker, ok := fenceMarker(line); ok {
+	if marker, info, ok := fenceMarker(line); ok {
 		s.flushTable(out)
 		s.inFence = true
 		s.fenceMarker = marker
+		if s.opts.ANSI {
+			s.code = highlight.New(info)
+		}
 		s.writeLine(out, s.opts.Prefix+"  "+line, newline)
 		return
 	}
@@ -188,13 +243,16 @@ func (s *Stream) renderHeading(line string) (string, bool) {
 	if n == 0 || n < len(rest) && rest[n] != ' ' && rest[n] != '\t' {
 		return "", false
 	}
-	rendered := s.opts.Prefix + leading + s.renderInline(rest)
+	// A heading is the outermost span on its line, so it closes unconditionally
+	// rather than consulting an enclosing style.
+	outer := style{bold: true, underline: n == 1}
+	on, off := ansiBold, ansiBoldOff
+	if n == 1 {
+		on, off = ansiBoldUnderline, ansiUnderlineOff+ansiBoldOff
+	}
+	rendered := s.opts.Prefix + leading + s.renderInline(rest, outer)
 	if s.opts.ANSI {
-		style := ansiBold
-		if n == 1 {
-			style = ansiBoldUnderline
-		}
-		rendered = style + rendered + ansiReset
+		rendered = on + rendered + off
 	}
 	return rendered, true
 }
@@ -260,7 +318,7 @@ func (s *Stream) formatTable(lines []tableLine) []tableLine {
 		for c := 0; c < cols; c++ {
 			cell := ""
 			if c < len(row) {
-				cell = s.renderInline(strings.TrimSpace(row[c]))
+				cell = s.renderInline(strings.TrimSpace(row[c]), style{})
 			}
 			rows[i][c] = cell
 			if w := visibleLen(cell); w > widths[c] {
@@ -303,11 +361,13 @@ func (s *Stream) writeLine(out *strings.Builder, line string, newline bool) {
 	s.lineOpen = line != ""
 }
 
-func (s *Stream) renderInline(text string) string {
-	return renderInline(text, s.opts.ANSI)
+func (s *Stream) renderInline(text string, outer style) string {
+	return renderInline(text, s.opts.ANSI, outer)
 }
 
-func renderInline(text string, ansi bool) string {
+// renderInline styles the spans within a line. outer describes the attributes
+// already active around text so nested spans can close without cancelling them.
+func renderInline(text string, ansi bool, outer style) string {
 	var out strings.Builder
 	for i := 0; i < len(text); {
 		if text[i] == '`' {
@@ -315,7 +375,7 @@ func renderInline(text string, ansi bool) string {
 				end += i + 1
 				inner := text[i+1 : end]
 				if ansi {
-					out.WriteString(ansiCode + inner + ansiReset)
+					out.WriteString(ansiCode + inner + ansiColorOff)
 				} else {
 					out.WriteString(inner)
 				}
@@ -324,11 +384,11 @@ func renderInline(text string, ansi bool) string {
 			}
 		}
 		if label, url, n, ok := markdownLink(text[i:]); ok {
-			renderedURL := renderURL(url, ansi)
+			renderedURL := renderURL(url, ansi, outer)
 			if strings.TrimSpace(label) == "" || strings.TrimSpace(label) == url {
 				out.WriteString(renderedURL)
 			} else {
-				out.WriteString(renderInline(label, ansi))
+				out.WriteString(renderInline(label, ansi, outer))
 				out.WriteString(" <")
 				out.WriteString(renderedURL)
 				out.WriteByte('>')
@@ -337,12 +397,12 @@ func renderInline(text string, ansi bool) string {
 			continue
 		}
 		if url, trailing, n, ok := rawURL(text[i:]); ok {
-			out.WriteString(renderURL(url, ansi))
+			out.WriteString(renderURL(url, ansi, outer))
 			out.WriteString(trailing)
 			i += n
 			continue
 		}
-		if rendered, n, ok := emphasis(text, i, ansi); ok {
+		if rendered, n, ok := emphasis(text, i, ansi, outer); ok {
 			out.WriteString(rendered)
 			i += n
 			continue
@@ -353,11 +413,11 @@ func renderInline(text string, ansi bool) string {
 	return out.String()
 }
 
-func renderURL(url string, ansi bool) string {
+func renderURL(url string, ansi bool, outer style) string {
 	if !ansi {
 		return url
 	}
-	return ansiLink + url + ansiReset
+	return ansiLink + url + ansiColorOff + outer.underlineOff()
 }
 
 func markdownLink(s string) (label, url string, n int, ok bool) {
@@ -402,7 +462,7 @@ func isURLStart(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "mailto:")
 }
 
-func emphasis(s string, i int, ansi bool) (string, int, bool) {
+func emphasis(s string, i int, ansi bool, outer style) (string, int, bool) {
 	for _, marker := range []string{"***", "___", "**", "__", "*", "_"} {
 		if !strings.HasPrefix(s[i:], marker) || !emphasisBoundaryStart(s, i, marker) {
 			continue
@@ -416,16 +476,21 @@ func emphasis(s string, i int, ansi bool) (string, int, bool) {
 		if end == start || !emphasisBoundaryEnd(s, end, marker) {
 			continue
 		}
-		content := renderInline(s[start:end], ansi)
+		inner, on, off := outer, "", ""
+		switch marker {
+		case "***", "___":
+			inner.bold, inner.italic = true, true
+			on, off = ansiBold+ansiItalic, outer.italicOff()+outer.boldOff()
+		case "**", "__":
+			inner.bold = true
+			on, off = ansiBold, outer.boldOff()
+		default:
+			inner.italic = true
+			on, off = ansiItalic, outer.italicOff()
+		}
+		content := renderInline(s[start:end], ansi, inner)
 		if ansi {
-			switch marker {
-			case "***", "___":
-				content = ansiBold + ansiItalic + content + ansiReset
-			case "**", "__":
-				content = ansiBold + content + ansiReset
-			default:
-				content = ansiItalic + content + ansiReset
-			}
+			content = on + content + off
 		}
 		return content, end + len(marker) - i, true
 	}
@@ -457,15 +522,16 @@ func isAlphaNum(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
-func fenceMarker(line string) (string, bool) {
+// fenceMarker reports whether line opens a fenced code block, returning the
+// fence delimiter and the info string that names the language.
+func fenceMarker(line string) (marker, info string, ok bool) {
 	trimmed := strings.TrimSpace(line)
-	if strings.HasPrefix(trimmed, codeFenceTick) {
-		return codeFenceTick, true
+	for _, m := range []string{codeFenceTick, codeFenceTilde} {
+		if strings.HasPrefix(trimmed, m) {
+			return m, strings.TrimSpace(strings.TrimLeft(trimmed, string(m[0]))), true
+		}
 	}
-	if strings.HasPrefix(trimmed, codeFenceTilde) {
-		return codeFenceTilde, true
-	}
-	return "", false
+	return "", "", false
 }
 
 func splitLeadingWhitespace(s string) (string, string) {
@@ -517,30 +583,164 @@ func wrapBody(body, firstPrefix, nextPrefix string, width int, ansi bool) []stri
 	if body == "" {
 		return []string{strings.TrimRight(firstPrefix, " ")}
 	}
-	rendered := renderInline(body, ansi)
+	rendered := renderInline(body, ansi, style{})
 	if width <= visibleLen(firstPrefix)+8 || visibleLen(firstPrefix)+visibleLen(rendered) <= width {
 		return []string{firstPrefix + rendered}
 	}
-	words := strings.Fields(body)
+	// Wrap the rendered text, not the source. Breaking the source first and
+	// rendering each line separately splits a span that straddles the break
+	// into two halves, neither of which parses: "**a b**" wrapped between the
+	// words leaves a literal "**a" and "b**". It also measured width in source
+	// columns rather than the columns the reader sees.
+	words := renderedFields(rendered)
 	if len(words) == 0 {
 		return []string{strings.TrimRight(firstPrefix, " ")}
 	}
-	var out []string
-	prefix := firstPrefix
-	line := words[0]
-	limit := width - visibleLen(prefix)
+	var (
+		out    []string
+		active spanState
+		prefix = firstPrefix
+		line   = words[0]
+		limit  = width - visibleLen(firstPrefix)
+	)
+	active.scan(words[0])
 	for _, word := range words[1:] {
 		if visibleLen(line)+1+visibleLen(word) > limit {
-			out = append(out, prefix+renderInline(line, ansi))
+			// Close whatever is still open before the break so the next line's
+			// indent does not inherit it, then reopen past the indent.
+			out = append(out, prefix+line+active.off())
 			prefix = nextPrefix
 			limit = width - visibleLen(prefix)
-			line = word
+			line = active.on() + word
+			active.scan(word)
 			continue
 		}
 		line += " " + word
+		active.scan(word)
 	}
-	out = append(out, prefix+renderInline(line, ansi))
-	return out
+	return append(out, prefix+line+active.off())
+}
+
+// renderedFields splits rendered text on visible whitespace without treating an
+// ANSI-only segment as a word. SGR sequences separated from visible text by
+// whitespace can occur around padded or empty spans (for example, "` code `").
+// Attach those sequences to a neighboring visible word so wrapping cannot add a
+// space for a zero-width token.
+func renderedFields(rendered string) []string {
+	fields := strings.Fields(rendered)
+	words := make([]string, 0, len(fields))
+	var leading strings.Builder
+	for _, field := range fields {
+		if visibleLen(field) == 0 {
+			if len(words) == 0 {
+				leading.WriteString(field)
+			} else {
+				words[len(words)-1] += field
+			}
+			continue
+		}
+		if leading.Len() != 0 {
+			field = leading.String() + field
+			leading.Reset()
+		}
+		words = append(words, field)
+	}
+	return words
+}
+
+// spanState is the styling left open at some point in already-rendered text.
+// A wrap point falls wherever the width runs out, which may be inside an
+// emphasis or link span, so the wrapper replays the escapes it has passed to
+// know what to close at the break and restore after it.
+type spanState struct {
+	bold      bool
+	italic    bool
+	underline bool
+	color     string
+}
+
+// scan advances st over s, applying every SGR sequence it contains.
+func (st *spanState) scan(s string) {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\x1b' || i+1 >= len(s) || s[i+1] != '[' {
+			continue
+		}
+		end := i + 2
+		for end < len(s) && (s[end] == ';' || s[end] >= '0' && s[end] <= '9') {
+			end++
+		}
+		if end >= len(s) || s[end] != 'm' {
+			i = end
+			continue
+		}
+		for param := range strings.SplitSeq(s[i+2:end], ";") {
+			st.apply(param)
+		}
+		i = end
+	}
+}
+
+func (st *spanState) apply(param string) {
+	switch param {
+	case "", "0":
+		*st = spanState{}
+	case "1":
+		st.bold = true
+	case "3":
+		st.italic = true
+	case "4":
+		st.underline = true
+	case "22":
+		st.bold = false
+	case "23":
+		st.italic = false
+	case "24":
+		st.underline = false
+	case "39":
+		st.color = ""
+	default:
+		// 30-37 and 90-97 set the foreground. Nothing else is emitted here, so
+		// anything unrecognized is left alone rather than guessed at.
+		if len(param) == 2 && (param[0] == '3' || param[0] == '9') && param[1] <= '7' {
+			st.color = param
+		}
+	}
+}
+
+// on returns the escapes that re-establish the state after a break.
+func (st spanState) on() string {
+	var b strings.Builder
+	if st.bold {
+		b.WriteString(ansiBold)
+	}
+	if st.italic {
+		b.WriteString(ansiItalic)
+	}
+	if st.underline {
+		b.WriteString(ansiUnderline)
+	}
+	if st.color != "" {
+		b.WriteString("\x1b[" + st.color + "m")
+	}
+	return b.String()
+}
+
+// off returns the escapes that clear it again.
+func (st spanState) off() string {
+	var b strings.Builder
+	if st.color != "" {
+		b.WriteString(ansiColorOff)
+	}
+	if st.underline {
+		b.WriteString(ansiUnderlineOff)
+	}
+	if st.italic {
+		b.WriteString(ansiItalicOff)
+	}
+	if st.bold {
+		b.WriteString(ansiBoldOff)
+	}
+	return b.String()
 }
 
 type tableLine struct {

@@ -13,6 +13,25 @@ import (
 	"harness/internal/session"
 )
 
+func stripRenderTestANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			i += 2
+			for i < len(s) && (s[i] < '@' || s[i] > '~') {
+				i++
+			}
+			if i < len(s) {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
 // fixedClock returns successive instants spaced by step, so duration math in the
 // usage line is deterministic without sleeping (design §13).
 func fixedClock(start time.Time, step time.Duration) func() time.Time {
@@ -431,6 +450,33 @@ func TestTextDeltaRendersMarkdownWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestTextDeltaHighlightsTaggedFenceAcrossDeltas(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{Markdown: true, Color: true})
+
+	for _, delta := range []string{"```go\nfu", "nc main() {\n", "``", "`\n"} {
+		r.TextDelta(delta)
+	}
+
+	got := out.String()
+	lines := strings.Split(got, "\n")
+	if len(lines) != 4 {
+		t.Fatalf("highlighted fence lines = %q", lines)
+	}
+	if !strings.Contains(lines[1], "\x1b[") {
+		t.Fatalf("tagged fence body was not colored: %q", lines[1])
+	}
+	if strings.Contains(lines[0], "\x1b[") || strings.Contains(lines[2], "\x1b[") {
+		t.Fatalf("fence delimiters were colored: opening=%q closing=%q", lines[0], lines[2])
+	}
+	if stripped, want := stripRenderTestANSI(got), "  ```go\n  func main() {\n  ```\n"; stripped != want {
+		t.Fatalf("stripped streamed fence = %q, want %q", stripped, want)
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("assistant fence must not touch stderr, got %q", errw.String())
+	}
+}
+
 func TestFormatMarkdownUsesRendererPolicy(t *testing.T) {
 	const input = "* first item has several words\n  + child item\n1. ordered item"
 	var out, errw bytes.Buffer
@@ -631,9 +677,9 @@ func TestReasoningSummaryRendersTimestampedIndentedToStdout(t *testing.T) {
 
 	got := out.String()
 	want := "[16:15:34 reasoning]\n" +
-		"  \x1b[1mExploring context usage reduction" + ansiReset + "\n" +
+		"  \x1b[1mExploring context usage reduction\x1b[22m\n" +
 		"\n" +
-		"  Inspecting schemas <\x1b[36;4mhttps://foo.example.com/docs" + ansiReset + ">\n" +
+		"  Inspecting schemas <\x1b[36;4mhttps://foo.example.com/docs\x1b[39m\x1b[24m>\n" +
 		"[end reasoning]\n"
 	if got != want {
 		t.Fatalf("reasoning summary output mismatch:\nwant %q\n got %q", want, got)

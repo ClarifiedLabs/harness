@@ -4864,7 +4864,7 @@ func TestHandoffCommandRendersMarkdownBriefWithoutChangingSource(t *testing.T) {
 	display := errw.String()
 	for _, want := range []string{
 		"Handoff brief:\nVerify behavior",
-		"docs <https://example.com/design>",
+		"docs\n<https://example.com/design>",
 		"- alpha beta gamma delta\n  epsilon zeta eta theta",
 	} {
 		if !strings.Contains(display, want) {

@@ -20,6 +20,25 @@ import (
 
 const sessionOnePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
 
+func stripSessionTestANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			i += 2
+			for i < len(s) && (s[i] < '@' || s[i] > '~') {
+				i++
+			}
+			if i < len(s) {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
 func TestReplayQuietSuppressesStatusLines(t *testing.T) {
 	dir := t.TempDir()
 
@@ -654,6 +673,69 @@ func TestReplayPrintsUserFacingView(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("replay missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestReplayHighlightsTaggedFenceOnlyWithANSI(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	for _, ev := range []Event{
+		{Type: EventUser, Prompt: 1, Text: "show code"},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "```go\nfu"},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "nc main() {\n```\n"},
+		{Type: EventTurnComplete, Prompt: 1, Turn: 1},
+	} {
+		if err := AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	var plain strings.Builder
+	if err := Replay(dir, &plain, ReplayOptions{Markdown: true}); err != nil {
+		t.Fatalf("plain Replay: %v", err)
+	}
+	wantPlain := "> show code\n  ```go\n  func main() {\n  ```\n"
+	if got := plain.String(); got != wantPlain {
+		t.Fatalf("plain replay = %q, want %q", got, wantPlain)
+	}
+	if strings.Contains(plain.String(), "\x1b[") {
+		t.Fatalf("ANSI-off replay contains escapes: %q", plain.String())
+	}
+
+	var colored strings.Builder
+	if err := Replay(dir, &colored, ReplayOptions{Markdown: true, ANSI: true}); err != nil {
+		t.Fatalf("colored Replay: %v", err)
+	}
+	if colored.String() == plain.String() || !strings.Contains(strings.Split(colored.String(), "\n")[2], "\x1b[") {
+		t.Fatalf("ANSI replay did not highlight fence body: %q", colored.String())
+	}
+	if got := stripSessionTestANSI(colored.String()); got != plain.String() {
+		t.Fatalf("stripped colored replay = %q, want plain %q", got, plain.String())
+	}
+
+	stored, err := readEvents(dir)
+	if err != nil {
+		t.Fatalf("readEvents: %v", err)
+	}
+	var storedAssistant strings.Builder
+	for _, ev := range stored {
+		if ev.Type == EventAssistantDelta {
+			storedAssistant.WriteString(ev.Text)
+		}
+	}
+	if got, want := storedAssistant.String(), "```go\nfunc main() {\n```\n"; got != want || strings.Contains(got, "\x1b[") {
+		t.Fatalf("stored assistant deltas = %q, want raw %q", got, want)
+	}
+
+	latest, err := LatestTurnOutput(dir)
+	if err != nil {
+		t.Fatalf("LatestTurnOutput: %v", err)
+	}
+	wantLatest := "  ```go\n  func main() {\n  ```"
+	if latest != wantLatest {
+		t.Fatalf("latest turn output = %q, want %q", latest, wantLatest)
+	}
+	if strings.Contains(latest, "\x1b[") {
+		t.Fatalf("LatestTurnOutput contains ANSI: %q", latest)
 	}
 }
 

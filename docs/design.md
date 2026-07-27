@@ -2564,16 +2564,30 @@ backoff allows.
 ### Rendering
 
 - Assistant text, reasoning summaries, and handoff briefs displayed for approval
-  use a small stdlib-only Markdown renderer on terminal output: emphasis becomes
-  ANSI bold/italic when color is enabled, headings keep their `#` markers and
-  render bold (with H1 headings also underlined), thematic breaks render as
-  `────────────────────`, lists normalize and indent continuations, paragraphs
-  and list bodies wrap to terminal width (80 columns when the width is
-  unavailable), tables are padded, and URLs render visibly with cyan
-  highlighting. Displayed handoff briefs follow the same Markdown, color, and
-  width policy, while their archived and implementation-context copies retain
-  the original Markdown source. Redirected one-shot stdout remains raw model
-  text.
+  use a small stdlib-only Markdown renderer on terminal output. Emphasis becomes
+  ANSI bold/italic when color is enabled, inline code and links use cyan,
+  headings keep their `#` markers and render bold (with H1 headings also
+  underlined), thematic breaks render as `────────────────────`, lists normalize
+  and indent continuations, and tables are padded. Inline spans close only the
+  bold, italic, underline, or foreground attribute they opened instead of issuing
+  a blanket SGR reset, so nested code, links, and emphasis preserve their outer
+  heading or emphasis style.
+- Paragraphs and list bodies are rendered once and then wrapped by visible
+  rendered width (80 columns when terminal width is unavailable), so Markdown
+  delimiters do not consume columns and spans may cross a break. The wrapper
+  tracks active SGR attributes, closes them before each newline, and reopens them
+  after the continuation prefix so list indentation is never styled. Displayed
+  handoff briefs follow the same Markdown, color, and width policy, while their
+  archived and implementation-context copies retain the original Markdown
+  source. Redirected one-shot stdout remains raw model text.
+- Recognized language tags on fenced code blocks use the stateful, stdlib-only,
+  additive highlighter in `internal/term/highlight` when ANSI is enabled. Aliases
+  and decorated info strings are normalized; untagged, unknown, and `text`
+  fences fall back to plain code. Opening and closing delimiters remain unstyled,
+  code lines are never wrapped, and stripping ANSI reproduces the renderer's
+  normalized plain output. Lexer state follows multiline comments and raw strings
+  across completed streamed lines and arbitrary input deltas, then resets at the
+  closing delimiter so it cannot leak into a later fence.
 - The built-in system prompt asks tool-using models for brief user-facing
   commentary before tool calls and at meaningful work milestones. These
   commentary messages are normal assistant text; Responses `phase` metadata is
@@ -2636,10 +2650,11 @@ backoff allows.
 - **Inline delegate activity.** `delegate_output=lines` starts one prompt-scoped
   feed consumer independently of the live-status ticker. It discards pre-prompt
   feed history, reads one bounded batch, and advances its sole cursor only after
-  a best-effort stderr write. An incomplete parent plain or Markdown source line
-  holds the cursor in place; newline-complete lines are safe even inside a code
-  fence or buffered table, and querying the boundary never flushes Markdown or
-  adds a parent newline. Detaching delegate progress requests an acknowledged
+  a best-effort stderr write. An incomplete parent plain or Markdown source line,
+  including a partial highlighted code line, holds the cursor in place;
+  newline-complete fence and buffered-table lines are safe. Querying the boundary
+  never flushes Markdown, advances or resets highlighter state, or adds a parent
+  newline. Detaching delegate progress requests an acknowledged
   drain; prompt completion finishes the parent line, drains through a captured
   tail, and stops the consumer. Missing sequences render as
   `[delegate output] omitted N event` / `N events`. Inline lines are ANSI-free,

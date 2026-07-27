@@ -57,9 +57,13 @@ notices, explicitly enabled reasoning summaries, and errors go to stderr. Tool
 preamble/commentary messages are assistant text, so they stream with the answer
 rather than as bracketed status lines.
 
-When stdout is a terminal, basic Markdown is rendered for readability; redirected
-or piped one-shot stdout stays raw model text. Bracketed status lines are
-timestamped by default; disable them when you want untimestamped diagnostics:
+When stdout is a terminal, basic Markdown is rendered for readability. With
+color enabled, recognized language tags on fenced code blocks also enable syntax
+highlighting; untagged, unknown-language, and `text` fences remain plain. The
+`-no-color` flag or `NO_COLOR` disables highlighting and all other ANSI styling
+while structural Markdown rendering remains readable. Redirected or piped
+one-shot stdout stays raw model text. Bracketed status lines are timestamped by
+default; disable them when you want untimestamped diagnostics:
 
 ```sh
 harness -model openai:gpt-5.5 -timestamps=none -p "explain this repo in one paragraph" > answer.txt
@@ -1116,8 +1120,12 @@ harness session stats ~/.local/state/harness/sessions/20260611T123456Z
 `session replay --follow` first renders the existing complete `raw.ndjson`
 records, then renders complete records as they are appended. It uses the same
 user-facing view as ordinary replay; `-q`/`--quiet` suppresses status lines but
-keeps prompts and assistant text. A followed child exits successfully after its
-terminal metadata is observed and the log receives one final drain. If that
+keeps prompts and assistant text. Terminal replay applies the same color-gated
+syntax highlighting to recognized tagged assistant fences; untagged and unknown
+fences remain plain, and replay without ANSI emits no highlighting. Rendering is
+display-only: stored events and ANSI-free latest-turn output remain unchanged. A
+followed child exits successfully after its terminal metadata is observed and
+the log receives one final drain. If that
 metadata update failed, a child `prompt_usage` record can establish completion.
 A followed root session has no terminal marker and continues until interrupted.
 An existing directory without `raw.ndjson` is valid while following; a missing
