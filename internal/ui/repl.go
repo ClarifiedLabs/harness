@@ -4544,8 +4544,8 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	s.app.recordEvent(session.Event{Type: session.EventToolResult, Prompt: s.prompt, Turn: s.turn, ToolID: res.ForID, Tool: call.Name, Display: line})
 }
 
-func (s *accumulatingSink) ToolDiff(call llm.ToolCall, text string) {
-	s.r.ToolDiff(call, text)
+func (s *accumulatingSink) ToolDiff(call llm.ToolCall, path, text string) {
+	s.r.ToolDiff(call, path, text)
 	s.app.recordEvent(session.Event{
 		Type:    session.EventToolDiff,
 		Prompt:  s.prompt,

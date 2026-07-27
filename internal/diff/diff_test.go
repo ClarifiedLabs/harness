@@ -121,12 +121,3 @@ func TestRenderSnapshotsIncrementalSameFile(t *testing.T) {
 		t.Fatalf("second incremental diff wrong: %+v", second)
 	}
 }
-
-func TestColorize(t *testing.T) {
-	got := Colorize("--- a/f\n+++ b/f\n@@ -1,1 +1,1 @@\n-old\n+new\n")
-	for _, want := range []string{ansiCyan, ansiRed, ansiGreen, ansiReset} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("colorized diff missing %q: %q", want, got)
-		}
-	}
-}

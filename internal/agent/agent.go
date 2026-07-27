@@ -110,7 +110,7 @@ type ToolResultArchiver = toolresult.Archiver
 // ToolDiffSink is implemented by renderers that want user-facing file diffs
 // after a mutating tool result. Diffs are not transcript/tool-result content.
 type ToolDiffSink interface {
-	ToolDiff(call llm.ToolCall, text string)
+	ToolDiff(call llm.ToolCall, path, text string)
 }
 
 // DelegateProgressSnapshot is a best-effort, lock-protected snapshot of one
@@ -2090,7 +2090,7 @@ func (a *Agent) emitToolDiff(call llm.ToolCall, state toolDiffState, sink EventS
 			sink.Notice(fmt.Sprintf("[diff: skipped binary file %s]", fd.Path))
 		case strings.TrimSpace(fd.Text) != "":
 			if ds, ok := sink.(ToolDiffSink); ok {
-				ds.ToolDiff(call, fd.Text)
+				ds.ToolDiff(call, fd.Path, fd.Text)
 			}
 		}
 	}

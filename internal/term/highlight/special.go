@@ -60,22 +60,34 @@ func init() {
 // lexDiff colors unified diffs by line prefix. Header lines are checked before
 // the bare +/- cases so "+++" and "---" are not mistaken for content.
 func lexDiff(_ *State, line string) string {
+	if style := diffHeaderStyle(line); style != "" {
+		return styled(style, line)
+	}
 	switch {
-	case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
-		return styled(styleBuiltin, line)
-	case strings.HasPrefix(line, "@@"):
-		return styled(styleKeyword, line)
-	case strings.HasPrefix(line, "diff "), strings.HasPrefix(line, "index "),
-		strings.HasPrefix(line, "new file"), strings.HasPrefix(line, "deleted file"),
-		strings.HasPrefix(line, "old mode"), strings.HasPrefix(line, "new mode"),
-		strings.HasPrefix(line, "similarity "), strings.HasPrefix(line, "rename "):
-		return styled(styleComment, line)
 	case strings.HasPrefix(line, "+"):
 		return styled(styleAdded, line)
 	case strings.HasPrefix(line, "-"):
 		return styled(styleRemoved, line)
 	}
 	return line
+}
+
+// diffHeaderStyle returns the whole-line style for a unified-diff header or
+// git metadata line, or "" when the line is diff content. DiffState shares
+// this classification so the two cannot drift.
+func diffHeaderStyle(line string) string {
+	switch {
+	case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
+		return styleBuiltin
+	case strings.HasPrefix(line, "@@"):
+		return styleKeyword
+	case strings.HasPrefix(line, "diff "), strings.HasPrefix(line, "index "),
+		strings.HasPrefix(line, "new file"), strings.HasPrefix(line, "deleted file"),
+		strings.HasPrefix(line, "old mode"), strings.HasPrefix(line, "new mode"),
+		strings.HasPrefix(line, "similarity "), strings.HasPrefix(line, "rename "):
+		return styleComment
+	}
+	return ""
 }
 
 // lexYAML colors mapping keys distinctly and hands the value to the scanner.

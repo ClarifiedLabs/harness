@@ -242,9 +242,11 @@ func (s *promptWorkSink) PromptWorkWaitComplete() {
 type diffRecordSink struct {
 	recordSink
 	diffs []string
+	paths []string
 }
 
-func (s *diffRecordSink) ToolDiff(_ llm.ToolCall, text string) {
+func (s *diffRecordSink) ToolDiff(_ llm.ToolCall, path, text string) {
+	s.paths = append(s.paths, path)
 	s.diffs = append(s.diffs, text)
 }
 
@@ -3008,6 +3010,9 @@ func TestShowDiffsEmitsPerToolDiffWithoutChangingToolResult(t *testing.T) {
 	mustValid(t, a.Transcript())
 	if len(sink.diffs) != 1 {
 		t.Fatalf("diff events = %d, want 1", len(sink.diffs))
+	}
+	if sink.paths[0] != path {
+		t.Fatalf("diff path = %q, want %q", sink.paths[0], path)
 	}
 	if !strings.Contains(sink.diffs[0], "-bar\n+baz\n") {
 		t.Fatalf("diff missing edit:\n%s", sink.diffs[0])

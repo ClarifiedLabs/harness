@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -15,9 +16,9 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/delegate"
-	"harness/internal/diff"
 	"harness/internal/llm"
 	"harness/internal/markdown"
+	"harness/internal/term/highlight"
 	"harness/internal/tools"
 )
 
@@ -586,7 +587,7 @@ func (r *Renderer) ToolResult(result llm.ToolResult) {
 	}
 }
 
-func (r *Renderer) ToolDiff(_ llm.ToolCall, text string) {
+func (r *Renderer) ToolDiff(_ llm.ToolCall, path, text string) {
 	r.flushToolUseStarts()
 	r.renderMu.Lock()
 	defer r.renderMu.Unlock()
@@ -596,12 +597,36 @@ func (r *Renderer) ToolDiff(_ llm.ToolCall, text string) {
 		return
 	}
 	if r.color {
-		text = diff.Colorize(text)
+		text = colorizeDiff(path, text)
 	}
 	io.WriteString(r.errw, text)
 	if !strings.HasSuffix(text, "\n") {
 		fmt.Fprintln(r.errw)
 	}
+}
+
+// colorizeDiff syntax-highlights a unified diff: added and removed lines get
+// a tinted background with a colored sigil, and line content is highlighted
+// in the mutated file's language (plain when the language is unknown).
+func colorizeDiff(path, text string) string {
+	lang := strings.TrimPrefix(filepath.Ext(path), ".")
+	if lang == "" {
+		// Extensionless names (Makefile, Dockerfile) resolve by basename.
+		lang = filepath.Base(path)
+	}
+	d := highlight.NewDiff(lang)
+	lines := strings.SplitAfter(text, "\n")
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		if strings.HasSuffix(line, "\n") {
+			lines[i] = d.Line(strings.TrimSuffix(line, "\n")) + "\n"
+		} else {
+			lines[i] = d.Line(line)
+		}
+	}
+	return strings.Join(lines, "")
 }
 
 func (r *Renderer) toolProgress() bool {

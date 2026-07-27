@@ -244,7 +244,7 @@ func TestToolDiffWritesToErr(t *testing.T) {
 	r := NewRenderer(&out, &errw, RenderOptions{})
 
 	r.TextDelta("partial")
-	r.ToolDiff(llm.ToolCall{ID: "c1", Name: "edit"}, "--- a/f.txt\n+++ b/f.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n")
+	r.ToolDiff(llm.ToolCall{ID: "c1", Name: "edit"}, "f.txt", "--- a/f.txt\n+++ b/f.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n")
 
 	if got := out.String(); got != "partial\n" {
 		t.Fatalf("ToolDiff should finish assistant line, got out=%q", got)
@@ -259,11 +259,45 @@ func TestToolDiffColor(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{Color: true})
 
-	r.ToolDiff(llm.ToolCall{ID: "c1", Name: "edit"}, "--- a/f.txt\n+++ b/f.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n")
+	text := "--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-func old() {}\n+func main() {}\n"
+	r.ToolDiff(llm.ToolCall{ID: "c1", Name: "edit"}, "main.go", text)
 
 	got := errw.String()
-	if !strings.Contains(got, "\x1b[31m-old") || !strings.Contains(got, "\x1b[32m+new") || !strings.Contains(got, "\x1b[36m@@") {
-		t.Fatalf("colored diff missing ANSI styling:\n%q", got)
+	for _, want := range []string{
+		"\x1b[36m---",        // header cyan
+		"\x1b[35m@@",         // hunk magenta
+		"\x1b[102m\x1b[32m+", // added line: bright green bg, green sigil
+		"\x1b[101m\x1b[31m-", // removed line: bright red bg, red sigil
+		"\x1b[35mfunc",       // Go keyword in magenta
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("colored diff missing %q:\n%q", want, got)
+		}
+	}
+	if stripped := stripRenderTestANSI(got); stripped != text {
+		t.Fatalf("strip-ANSI roundtrip altered the diff:\n in: %q\nout: %q", text, stripped)
+	}
+}
+
+func TestToolDiffColorUnknownLanguage(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{Color: true})
+
+	text := "--- a/notes.txt\n+++ b/notes.txt\n@@ -1,1 +1,1 @@\n-old\n+new func\n"
+	r.ToolDiff(llm.ToolCall{ID: "c1", Name: "edit"}, "notes.txt", text)
+
+	got := errw.String()
+	for _, want := range []string{"\x1b[102m", "\x1b[32m+", "\x1b[101m", "\x1b[31m-"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("colored diff missing %q:\n%q", want, got)
+		}
+	}
+	// Unknown language: content is plain, so no keyword span on "func".
+	if strings.Contains(got, "\x1b[35mfunc") {
+		t.Fatalf("unknown language should not gain token spans:\n%q", got)
+	}
+	if stripped := stripRenderTestANSI(got); stripped != text {
+		t.Fatalf("strip-ANSI roundtrip altered the diff:\n in: %q\nout: %q", text, stripped)
 	}
 }
 
