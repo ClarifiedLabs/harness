@@ -112,6 +112,82 @@ func TestHandlerContinuationPassesClientStateUnchanged(t *testing.T) {
 	}
 }
 
+func TestHandlerContinuationAcceptsToolResultDelta(t *testing.T) {
+	fp := &countingFakeProvider{
+		FakeProvider: llmtest.New("responses", llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp-next"}),
+		count:        123,
+	}
+	srv := newContinuationTestServer(t, fp)
+	defer srv.Close()
+
+	request := llm.Request{
+		PreviousResponseID: "resp-old",
+		Messages: []llm.Message{{
+			Role: llm.RoleUser,
+			Content: []llm.ContentBlock{{
+				Kind:        llm.BlockToolResult,
+				ResultForID: "remote-call",
+				ResultText:  "done",
+			}},
+		}},
+	}
+	resp, body := postStreamRequest(t, srv, request)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d body=%s", resp.StatusCode, body)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	}
+	got := fp.Requests[0]
+	if got.PreviousResponseID != "resp-old" ||
+		len(got.Messages) != 1 ||
+		len(got.Messages[0].Content) != 1 ||
+		got.Messages[0].Content[0].Kind != llm.BlockToolResult ||
+		got.Messages[0].Content[0].ResultForID != "remote-call" {
+		t.Fatalf("provider continuation request = %+v", got)
+	}
+
+	data, err := json.Marshal(protocol.TokenCountRequest{
+		TargetID: "openai:gpt-5.5",
+		Request:  request,
+	})
+	if err != nil {
+		t.Fatalf("marshal input token request: %v", err)
+	}
+	resp, err = srv.Client().Post(srv.URL+"/v1/input_tokens", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST input_tokens: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("input_tokens status = %d body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestHandlerFullRequestRejectsOrphanToolResult(t *testing.T) {
+	fp := llmtest.New("responses", llmtest.Step{Stop: llm.StopEndTurn})
+	srv := newContinuationTestServer(t, fp)
+	defer srv.Close()
+
+	resp, body := postStreamRequest(t, srv, llm.Request{
+		Messages: []llm.Message{{
+			Role: llm.RoleUser,
+			Content: []llm.ContentBlock{{
+				Kind:        llm.BlockToolResult,
+				ResultForID: "orphan-call",
+				ResultText:  "done",
+			}},
+		}},
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400", resp.StatusCode, body)
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("provider requests = %d, want 0", len(fp.Requests))
+	}
+}
+
 func TestHandlerInteractionsContinuationPassesClientStateUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "google.json"), []byte(`{
