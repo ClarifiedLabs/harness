@@ -1,6 +1,9 @@
 package highlight
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // Languages whose structure is carried by line shape rather than by tokens get
 // their own small lexer instead of the generic scanner. Each may still delegate
@@ -57,37 +60,130 @@ func init() {
 	}()
 }
 
-// lexDiff colors unified diffs by line prefix. Header lines are checked before
-// the bare +/- cases so "+++" and "---" are not mistaken for content.
-func lexDiff(_ *State, line string) string {
-	if style := diffHeaderStyle(line); style != "" {
+// lexDiff colors unified diffs by line prefix. Its phase state distinguishes
+// file headers from body lines whose source happens to begin with ++ or --.
+func lexDiff(s *State, line string) string {
+	if style, _ := s.diffHeaders.headerStyle(line); style != "" {
 		return styled(style, line)
 	}
 	switch {
 	case strings.HasPrefix(line, "+"):
+		s.diffHeaders.markContent('+')
 		return styled(styleAdded, line)
 	case strings.HasPrefix(line, "-"):
+		s.diffHeaders.markContent('-')
 		return styled(styleRemoved, line)
+	case strings.HasPrefix(line, " "):
+		s.diffHeaders.markContent(' ')
 	}
 	return line
 }
 
-// diffHeaderStyle returns the whole-line style for a unified-diff header or
-// git metadata line, or "" when the line is diff content. DiffState shares
-// this classification so the two cannot drift.
-func diffHeaderStyle(line string) string {
+// diffLineState tracks whether a unified diff has reached file content. Once it
+// has, +++ and --- are body lines rather than file headers. Hunk counts return
+// the state to header mode between hunks or files; a git preamble also resets it.
+// DiffState shares this classification with fenced diffs.
+type diffLineState struct {
+	content      bool
+	countedHunk  bool
+	oldRemaining int
+	newRemaining int
+}
+
+func (s *diffLineState) markContent(prefix byte) {
+	s.content = true
+	if !s.countedHunk {
+		return
+	}
+	switch prefix {
+	case ' ':
+		if s.oldRemaining > 0 {
+			s.oldRemaining--
+		}
+		if s.newRemaining > 0 {
+			s.newRemaining--
+		}
+	case '-':
+		if s.oldRemaining > 0 {
+			s.oldRemaining--
+		}
+	case '+':
+		if s.newRemaining > 0 {
+			s.newRemaining--
+		}
+	}
+	if s.oldRemaining == 0 && s.newRemaining == 0 {
+		s.content = false
+		s.countedHunk = false
+	}
+}
+
+// headerStyle returns the whole-line style for a unified-diff header or git
+// metadata line, plus whether line begins a new file. It returns an empty style
+// when line is diff content.
+func (s *diffLineState) headerStyle(line string) (style string, fileStart bool) {
 	switch {
-	case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
-		return styleBuiltin
+	case strings.HasPrefix(line, "diff "):
+		*s = diffLineState{}
+		return styleComment, true
 	case strings.HasPrefix(line, "@@"):
-		return styleKeyword
-	case strings.HasPrefix(line, "diff "), strings.HasPrefix(line, "index "),
+		s.content = true
+		s.countedHunk = false
+		s.oldRemaining, s.newRemaining = 0, 0
+		if oldCount, newCount, ok := diffHunkCounts(line); ok {
+			s.oldRemaining, s.newRemaining = oldCount, newCount
+			s.countedHunk = true
+			if oldCount == 0 && newCount == 0 {
+				s.content = false
+			}
+		}
+		return styleKeyword, false
+	case !s.content && diffFileHeader(line, "---"):
+		return styleBuiltin, true
+	case !s.content && diffFileHeader(line, "+++"):
+		s.content = true
+		return styleBuiltin, false
+	case strings.HasPrefix(line, "index "),
 		strings.HasPrefix(line, "new file"), strings.HasPrefix(line, "deleted file"),
 		strings.HasPrefix(line, "old mode"), strings.HasPrefix(line, "new mode"),
 		strings.HasPrefix(line, "similarity "), strings.HasPrefix(line, "rename "):
-		return styleComment
+		return styleComment, false
 	}
-	return ""
+	return "", false
+}
+
+func diffFileHeader(line, marker string) bool {
+	return strings.HasPrefix(line, marker+" ") || strings.HasPrefix(line, marker+"\t")
+}
+
+func diffHunkCounts(line string) (oldCount, newCount int, ok bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 4 || fields[0] != "@@" {
+		return 0, 0, false
+	}
+	oldCount, oldOK := diffRangeCount(fields[1], '-')
+	newCount, newOK := diffRangeCount(fields[2], '+')
+	return oldCount, newCount, oldOK && newOK
+}
+
+func diffRangeCount(field string, sign byte) (int, bool) {
+	if len(field) < 2 || field[0] != sign {
+		return 0, false
+	}
+	rangeText := field[1:]
+	startText, countText, hasCount := strings.Cut(rangeText, ",")
+	start, err := strconv.Atoi(startText)
+	if err != nil || start < 0 {
+		return 0, false
+	}
+	if !hasCount {
+		return 1, true
+	}
+	count, err := strconv.Atoi(countText)
+	if err != nil || count < 0 {
+		return 0, false
+	}
+	return count, true
 }
 
 // lexYAML colors mapping keys distinctly and hands the value to the scanner.

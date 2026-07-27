@@ -98,6 +98,123 @@ func TestDiffHeadersAndContextHaveNoBackground(t *testing.T) {
 	}
 }
 
+func TestDiffBodyLinesThatResembleFileHeaders(t *testing.T) {
+	headers := []string{
+		"--- a/counter.cpp",
+		"+++ b/counter.cpp",
+		"@@ -1,1 +1,1 @@",
+	}
+	body := []struct {
+		line, foreground, background string
+	}{
+		{"--- counter;", styleRemoved, bgRemoved},
+		{"+++ counter;", styleAdded, bgAdded},
+	}
+
+	t.Run("displayed diff", func(t *testing.T) {
+		d := NewDiff("cpp")
+		for _, line := range headers {
+			d.Line(line)
+		}
+		for _, tc := range body {
+			got := d.Line(tc.line)
+			if !strings.HasPrefix(got, tc.background) || !strings.Contains(got, tc.foreground+tc.line[:1]) {
+				t.Errorf("body line %q was not tinted as content: %q", tc.line, got)
+			}
+			if stripped := stripANSI(got); stripped != tc.line {
+				t.Errorf("body line %q altered: %q", tc.line, stripped)
+			}
+		}
+	})
+
+	t.Run("diff fence", func(t *testing.T) {
+		s := New("diff")
+		for _, line := range headers {
+			s.Line(line)
+		}
+		for _, tc := range body {
+			got := s.Line(tc.line)
+			if !strings.HasPrefix(got, tc.foreground) {
+				t.Errorf("body line %q was classified as a header: %q", tc.line, got)
+			}
+			if stripped := stripANSI(got); stripped != tc.line {
+				t.Errorf("body line %q altered: %q", tc.line, stripped)
+			}
+		}
+	})
+}
+
+func TestDiffFenceRecognizesHeadersAfterCompletedHunk(t *testing.T) {
+	s := New("diff")
+	for _, line := range []string{
+		"--- a/one.go",
+		"+++ b/one.go",
+		"@@ -1 +1 @@",
+		"-old",
+		"+new",
+	} {
+		s.Line(line)
+	}
+
+	for _, line := range []string{"--- a/two.go", "+++ b/two.go"} {
+		got := s.Line(line)
+		if !strings.HasPrefix(got, styleBuiltin) {
+			t.Errorf("next-file header %q was classified as content: %q", line, got)
+		}
+	}
+}
+
+func TestDiffResetsSyntaxStateBetweenFiles(t *testing.T) {
+	d := NewDiff("go")
+	for _, line := range []string{
+		"--- a/one.go",
+		"+++ b/one.go",
+		"@@ -1 +1 @@",
+		"-/* old",
+		"+/* new",
+		"--- a/two.go",
+		"+++ b/two.go",
+		"@@ -1 +1 @@",
+	} {
+		d.Line(line)
+	}
+
+	for _, line := range []string{"-func old() {}", "+func new() {}"} {
+		got := d.Line(line)
+		if strings.Contains(got, styleComment) || !strings.Contains(got, styleKeyword+"func") {
+			t.Errorf("previous file's syntax state contaminated %q: %q", line, got)
+		}
+	}
+}
+
+func TestDiffKeepsOldAndNewMultiLineStateSeparate(t *testing.T) {
+	d := NewDiff("go")
+	for _, line := range []string{
+		"--- a/state.go",
+		"+++ b/state.go",
+		"@@ -1,3 +1,2 @@",
+	} {
+		d.Line(line)
+	}
+
+	removed := d.Line("-/* old")
+	if !strings.Contains(removed, styleComment+"/* old") {
+		t.Fatalf("removed line did not open old-side comment state: %q", removed)
+	}
+	added := d.Line("+replacement()")
+	if strings.Contains(added, styleComment) || !strings.Contains(added, styleFunction+"replacement") {
+		t.Errorf("old-side comment state contaminated added line: %q", added)
+	}
+	context := d.Line(" shared()")
+	if strings.Contains(context, styleComment) || !strings.Contains(context, styleFunction+"shared") {
+		t.Errorf("old-side comment state contaminated new-side context: %q", context)
+	}
+	closed := d.Line("-*/")
+	if !strings.Contains(closed, styleComment+"*/") {
+		t.Errorf("old-side comment state was not retained for deletion: %q", closed)
+	}
+}
+
 func TestDiffMultiLineCommentState(t *testing.T) {
 	d := NewDiff("go")
 	d.Line(" /*")

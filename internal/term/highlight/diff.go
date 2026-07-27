@@ -12,9 +12,11 @@ const (
 
 // DiffState highlights unified diff lines: header lines are line-styled, +/-
 // lines get a tinted background with a colored sigil, and line content is
-// syntax-highlighted with an inner language state.
+// syntax-highlighted with independent old- and new-file language states.
 type DiffState struct {
-	content *State // inner language highlighter; nil for unknown languages
+	oldContent  *State // nil for unknown languages
+	newContent  *State // nil for unknown languages
+	diffHeaders diffLineState
 }
 
 // NewDiff resolves lang like New ("go", ".py", "Makefile"); empty or unknown
@@ -25,27 +27,52 @@ func NewDiff(lang string) *DiffState {
 	if !ok {
 		return &DiffState{}
 	}
-	return &DiffState{content: &State{lang: l}}
+	return &DiffState{
+		oldContent: &State{lang: l},
+		newContent: &State{lang: l},
+	}
 }
 
-// Line styles one diff line (no trailing newline), advancing the inner
-// content state on +, -, and context lines only.
+// Line styles one diff line (no trailing newline), advancing the appropriate
+// old/new content states on +, -, and context lines only.
 func (d *DiffState) Line(line string) string {
 	if d == nil || line == "" {
 		return line
 	}
-	if style := diffHeaderStyle(line); style != "" {
+	if style, fileStart := d.diffHeaders.headerStyle(line); style != "" {
+		if fileStart {
+			d.resetContentStates()
+		}
 		return styled(style, line)
 	}
+	content := line[1:]
 	switch line[0] {
 	case '+':
-		return tintLine(bgAdded, styled(styleAdded, "+")+d.content.Line(line[1:]))
+		d.diffHeaders.markContent('+')
+		return tintLine(bgAdded, styled(styleAdded, "+")+d.newContent.Line(content))
 	case '-':
-		return tintLine(bgRemoved, styled(styleRemoved, "-")+d.content.Line(line[1:]))
+		d.diffHeaders.markContent('-')
+		return tintLine(bgRemoved, styled(styleRemoved, "-")+d.oldContent.Line(content))
 	case ' ':
-		return " " + d.content.Line(line[1:])
+		d.diffHeaders.markContent(' ')
+		// Context belongs to both sides. Advance both lexers, but display the
+		// mutated file's interpretation because that is the content users keep.
+		d.oldContent.Line(content)
+		return " " + d.newContent.Line(content)
 	}
 	return line
+}
+
+func (d *DiffState) resetContentStates() {
+	resetState := func(s *State) {
+		if s == nil {
+			return
+		}
+		lang := s.lang
+		*s = State{lang: lang}
+	}
+	resetState(d.oldContent)
+	resetState(d.newContent)
 }
 
 // tintLine wraps line in bg, re-applying bg after every inner reset so token

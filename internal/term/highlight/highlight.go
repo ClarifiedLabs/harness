@@ -55,7 +55,8 @@ type State struct {
 	mode mode
 	// end is the delimiter that closes the construct left open by the
 	// previous line.
-	end string
+	end         string
+	diffHeaders diffLineState
 }
 
 // New returns a highlighter for a fenced code block's info string, or nil when
