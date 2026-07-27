@@ -9,11 +9,20 @@ import "strings"
 const (
 	bgAdded   = "\x1b[48;5;22m"
 	bgRemoved = "\x1b[48;5;52m"
+	// eraseToEOL clears from the cursor to the end of the row. Emitted while
+	// a background color is active, terminals with BCE (background color
+	// erase) fill the cleared cells with that color, extending the tint to
+	// the window edge without printing padding spaces: rows keep their
+	// original bytes, so window-shrink reflow has nothing to wrap and
+	// copy-paste stays clean. Terminals without BCE erase with the default
+	// background, degrading the tint to the text width.
+	eraseToEOL = "\x1b[0K"
 )
 
 // DiffState highlights unified diff lines: header lines are line-styled, +/-
-// lines get a tinted background with a colored sigil, and line content is
-// syntax-highlighted with independent old- and new-file language states.
+// lines get a full-row tinted background with a colored sigil, and line
+// content is syntax-highlighted with independent old- and new-file language
+// states.
 type DiffState struct {
 	oldContent  *State // nil for unknown languages
 	newContent  *State // nil for unknown languages
@@ -77,12 +86,13 @@ func (d *DiffState) resetContentStates() {
 }
 
 // tintLine wraps line in bg, re-applying bg after every inner reset so token
-// colors cannot punch holes in the background. The final reset closes the
-// background before the caller re-appends the newline.
+// colors cannot punch holes in the background. eraseToEOL then extends the
+// still-active background to the window edge (BCE), and the final reset
+// closes it before the caller re-appends the newline.
 func tintLine(bg, line string) string {
 	if line == "" {
 		return line
 	}
 	line = strings.ReplaceAll(line, styleReset, styleReset+bg)
-	return bg + line + styleReset
+	return bg + line + eraseToEOL + styleReset
 }

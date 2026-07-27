@@ -132,7 +132,8 @@ interrupted.
 -v                show tool result snippets (first ~5 lines, dimmed) and tool-call progress details
 -tool-stream      show tool-call progress details (default false)
 -show-diffs       show per-tool-call file diffs for built-in file edits (default true; use -show-diffs=false to disable);
-                  diffs are syntax-highlighted with tinted added/removed line backgrounds when color is on
+                  diffs are syntax-highlighted with full-width tinted added/removed line backgrounds when color is on
+                  (via background color erase; the tint covers only the text on terminals without BCE)
 -q, --quiet       suppress status diagnostics and reasoning output unless -reasoning-summary is set;
                   still prints one per-prompt usage/cost line at an interactive terminal (suppressed only
                   when output is also non-TTY/piped), and one-shot runs always print the session summary

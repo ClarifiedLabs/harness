@@ -269,6 +269,7 @@ func TestToolDiffColor(t *testing.T) {
 		"\x1b[48;5;22m\x1b[32m+", // added line: subdued green bg, green sigil
 		"\x1b[48;5;52m\x1b[31m-", // removed line: subdued red bg, red sigil
 		"\x1b[35mfunc",           // Go keyword in magenta
+		"\x1b[0K",                // erase-to-EOL extends the tint to the window edge
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("colored diff missing %q:\n%q", want, got)

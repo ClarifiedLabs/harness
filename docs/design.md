@@ -1484,7 +1484,11 @@ emit prompt_usage(prompt, completedTurns)
   incremental per-call changes when the same file is edited repeatedly. Displayed
   diffs are colored by `internal/term/highlight` with subdued red/green line
   backgrounds, colored `+`/`-` sigils, and content syntax-highlighted in the
-  mutated file's language (plain content for unknown languages).
+  mutated file's language (plain content for unknown languages). The tint
+  spans the full terminal row via erase-to-EOL under the active background
+  (BCE) rather than padding spaces, so window-shrink reflow has nothing to
+  wrap and copy-paste keeps the original bytes; terminals without BCE show a
+  text-width tint.
 - **Background jobs:** tools with `background:true` start process-local jobs and
   return a job id immediately. `delegate` uses the same flag for background child
   agents. Local jobs carry canonical resource/access leases: read-only leases may

@@ -39,8 +39,9 @@ func TestDiffRemovedLineTint(t *testing.T) {
 }
 
 // Background integrity: on a tinted line every reset except the final one is
-// immediately followed by the bg sequence, and the line ends with a reset so
-// no color bleeds into the next line.
+// immediately followed by the bg sequence, and the line closes with an
+// erase-to-EOL (emitted under the still-active background) plus a reset, so
+// the tint spans the full row and no color bleeds into the next line.
 func TestDiffBackgroundIntegrity(t *testing.T) {
 	d := NewDiff("go")
 	for _, tc := range []struct{ line, bg string }{
@@ -51,15 +52,30 @@ func TestDiffBackgroundIntegrity(t *testing.T) {
 		if !strings.HasPrefix(got, tc.bg) {
 			t.Errorf("%q missing background prefix: %q", tc.line, got)
 		}
-		if !strings.HasSuffix(got, tc.bg+styleReset) && !strings.HasSuffix(got, styleReset) {
-			t.Errorf("%q does not end with a reset: %q", tc.line, got)
+		if !strings.HasSuffix(got, eraseToEOL+styleReset) {
+			t.Errorf("%q does not close with erase-to-EOL and a reset: %q", tc.line, got)
 		}
 		inner := strings.TrimPrefix(got, tc.bg)
-		inner = strings.TrimSuffix(inner, styleReset)
+		inner = strings.TrimSuffix(inner, eraseToEOL+styleReset)
 		inner = strings.ReplaceAll(inner, styleReset+tc.bg, "")
 		if strings.Contains(inner, styleReset) {
 			t.Errorf("%q has an inner reset punching a hole in the background: %q", tc.line, got)
 		}
+	}
+}
+
+// The tint reaches the window edge via erase-to-EOL under the active
+// background, not via padding spaces, so the emitted bytes carry no trailing
+// blanks and window-shrink reflow has nothing to wrap.
+func TestDiffTintErasesToEndOfLine(t *testing.T) {
+	d := NewDiff("go")
+	got := d.Line("+")
+	want := bgAdded + styleAdded + "+" + styleReset + bgAdded + eraseToEOL + styleReset
+	if got != want {
+		t.Errorf("lone + tint = %q, want %q", got, want)
+	}
+	if stripped := stripANSI(got); stripped != "+" {
+		t.Errorf("erase-to-EOL altered the text: %q", stripped)
 	}
 }
 
@@ -81,6 +97,9 @@ func TestDiffHeadersAndContextHaveNoBackground(t *testing.T) {
 		if strings.Contains(got, bgAdded) || strings.Contains(got, bgRemoved) {
 			t.Errorf("header %q gained a background: %q", line, got)
 		}
+		if strings.Contains(got, eraseToEOL) {
+			t.Errorf("header %q gained an erase-to-EOL: %q", line, got)
+		}
 		if stripped := stripANSI(got); stripped != line {
 			t.Errorf("header %q altered: %q", line, stripped)
 		}
@@ -89,6 +108,9 @@ func TestDiffHeadersAndContextHaveNoBackground(t *testing.T) {
 	got := d.Line(" package main")
 	if strings.Contains(got, bgAdded) || strings.Contains(got, bgRemoved) {
 		t.Errorf("context line gained a background: %q", got)
+	}
+	if strings.Contains(got, eraseToEOL) {
+		t.Errorf("context line gained an erase-to-EOL: %q", got)
 	}
 	if !strings.Contains(got, styleKeyword+"package") {
 		t.Errorf("context line content not highlighted: %q", got)
@@ -254,7 +276,7 @@ func TestDiffUnknownLanguage(t *testing.T) {
 	}
 	// Plain content: no token spans, so the content sits directly under the
 	// re-applied background left by the sigil's reset.
-	if !strings.Contains(got, bgAdded+"plain func text"+styleReset) {
+	if !strings.Contains(got, bgAdded+"plain func text"+eraseToEOL+styleReset) {
 		t.Errorf("content should be plain under the tint: %q", got)
 	}
 	if stripped := stripANSI(got); stripped != "+plain func text" {
@@ -265,7 +287,7 @@ func TestDiffUnknownLanguage(t *testing.T) {
 func TestDiffEmptyLanguage(t *testing.T) {
 	d := NewDiff("")
 	got := d.Line("-gone")
-	if !strings.HasPrefix(got, bgRemoved) || !strings.Contains(got, bgRemoved+"gone"+styleReset) {
+	if !strings.HasPrefix(got, bgRemoved) || !strings.Contains(got, bgRemoved+"gone"+eraseToEOL+styleReset) {
 		t.Errorf("empty language should tint with plain content: %q", got)
 	}
 }
