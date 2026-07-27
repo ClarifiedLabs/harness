@@ -53,25 +53,25 @@ brew install harness-full
 <!-- release-artifacts:start -->
 Or download the latest signed package containing all three binaries:
 
-- Apple silicon (arm64): [`.pkg` (v0.3.0)](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness_v0.3.0_darwin_arm64.pkg)
+- Apple silicon (arm64): [`.pkg` (v0.3.1)](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness_v0.3.1_darwin_arm64.pkg)
 
 ### Linux
 
-The latest release, v0.3.0, is available for amd64/x86_64 and arm64/aarch64:
+The latest release, v0.3.1, is available for amd64/x86_64 and arm64/aarch64:
 
 | Binary | amd64 / x86_64 | arm64 / aarch64 |
 |---|---|---|
-| `harness` | [`.deb`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness_0.3.0_amd64.deb) · [`.rpm`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness-0.3.0-1.x86_64.rpm) | [`.deb`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness_0.3.0_arm64.deb) · [`.rpm`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness-0.3.0-1.aarch64.rpm) |
-| `harness-model-proxy` | [`.deb`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness-model-proxy_0.3.0_amd64.deb) · [`.rpm`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness-model-proxy-0.3.0-1.x86_64.rpm) | [`.deb`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness-model-proxy_0.3.0_arm64.deb) · [`.rpm`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness-model-proxy-0.3.0-1.aarch64.rpm) |
-| `harness-mcp-proxy` | [`.deb`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness-mcp-proxy_0.3.0_amd64.deb) · [`.rpm`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness-mcp-proxy-0.3.0-1.x86_64.rpm) | [`.deb`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness-mcp-proxy_0.3.0_arm64.deb) · [`.rpm`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.0/harness-mcp-proxy-0.3.0-1.aarch64.rpm) |
+| `harness` | [`.deb`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness_0.3.1_amd64.deb) · [`.rpm`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness-0.3.1-1.x86_64.rpm) | [`.deb`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness_0.3.1_arm64.deb) · [`.rpm`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness-0.3.1-1.aarch64.rpm) |
+| `harness-model-proxy` | [`.deb`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness-model-proxy_0.3.1_amd64.deb) · [`.rpm`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness-model-proxy-0.3.1-1.x86_64.rpm) | [`.deb`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness-model-proxy_0.3.1_arm64.deb) · [`.rpm`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness-model-proxy-0.3.1-1.aarch64.rpm) |
+| `harness-mcp-proxy` | [`.deb`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness-mcp-proxy_0.3.1_amd64.deb) · [`.rpm`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness-mcp-proxy-0.3.1-1.x86_64.rpm) | [`.deb`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness-mcp-proxy_0.3.1_arm64.deb) · [`.rpm`](https://github.com/ClarifiedLabs/harness/releases/download/v0.3.1/harness-mcp-proxy-0.3.1-1.aarch64.rpm) |
 
 ### Docker
 
 Multi-architecture images are available for Linux amd64 and arm64:
 
-- [`ghcr.io/clarifiedlabs/harness:0.3.0`](https://github.com/ClarifiedLabs/harness/pkgs/container/harness)
-- [`ghcr.io/clarifiedlabs/harness-model-proxy:0.3.0`](https://github.com/ClarifiedLabs/harness/pkgs/container/harness-model-proxy)
-- [`ghcr.io/clarifiedlabs/harness-mcp-proxy:0.3.0`](https://github.com/ClarifiedLabs/harness/pkgs/container/harness-mcp-proxy)
+- [`ghcr.io/clarifiedlabs/harness:0.3.1`](https://github.com/ClarifiedLabs/harness/pkgs/container/harness)
+- [`ghcr.io/clarifiedlabs/harness-model-proxy:0.3.1`](https://github.com/ClarifiedLabs/harness/pkgs/container/harness-model-proxy)
+- [`ghcr.io/clarifiedlabs/harness-mcp-proxy:0.3.1`](https://github.com/ClarifiedLabs/harness/pkgs/container/harness-mcp-proxy)
 <!-- release-artifacts:end -->
 
 ### Configure the model proxy
