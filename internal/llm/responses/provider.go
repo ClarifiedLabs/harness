@@ -81,6 +81,14 @@ func New(cfg Config) *Provider {
 
 func (p *Provider) Name() string { return "responses" }
 
+// Close releases any live Responses WebSocket connection.
+func (p *Provider) Close() error {
+	p.wsMu.Lock()
+	defer p.wsMu.Unlock()
+	p.closeWebSocketLocked()
+	return nil
+}
+
 // CanContinueResponse reports whether transport-local state permits responseID
 // to be resumed. Non-WebSocket Responses continuations have no connection
 // liveness constraint.

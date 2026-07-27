@@ -135,23 +135,22 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 	}
 	snapshot := cloneMessages(a.transcript)
 	worker := New(a.provider, a.tools, Options{
-		Model:                       a.model,
-		ContextWindow:               a.contextWindow,
-		Registry:                    a.registry,
-		Reasoning:                   a.reasoning,
-		ServerTools:                 a.serverTools,
-		Now:                         a.now,
-		CompactKeepTurns:            a.compactKeepTurns,
-		CompactKeepTokens:           a.compactKeepTokens,
-		CompactTriggerPercent:       a.compactTriggerPercent,
-		CompactTargetPercent:        a.compactTargetPercent,
-		CompactSummaryMaxTokens:     a.compactSummaryMaxTokens,
-		CompactToolResultMaxBytes:   a.compactToolResultMaxBytes,
-		Interactive:                 a.interactive,
-		RetentionPolicy:             a.retentionPolicy,
-		DisableAutoCompaction:       a.disableAutoCompaction,
-		ResponsesStateful:           false,
-		ManagedContinuationStateful: false,
+		Model:                     a.model,
+		ContextWindow:             a.contextWindow,
+		Registry:                  a.registry,
+		Reasoning:                 a.reasoning,
+		ServerTools:               a.serverTools,
+		Now:                       a.now,
+		CompactKeepTurns:          a.compactKeepTurns,
+		CompactKeepTokens:         a.compactKeepTokens,
+		CompactTriggerPercent:     a.compactTriggerPercent,
+		CompactTargetPercent:      a.compactTargetPercent,
+		CompactSummaryMaxTokens:   a.compactSummaryMaxTokens,
+		CompactToolResultMaxBytes: a.compactToolResultMaxBytes,
+		Interactive:               a.interactive,
+		RetentionPolicy:           a.retentionPolicy,
+		DisableAutoCompaction:     a.disableAutoCompaction,
+		ResponsesStateful:         false,
 	})
 	worker.SetSystem(a.system)
 	worker.SetTranscript(snapshot)
@@ -758,13 +757,19 @@ func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Mes
 // thinking budget (r13, mirrors PrewarmRequest). It returns the assembled text,
 // usage, and the stop reason.
 func (a *Agent) streamSummary(ctx context.Context, system string, older []llm.Message, maxTokens int, purpose llm.RequestPurpose) (string, llm.Usage, llm.StopReason, error) {
+	proxySessionID, cacheAffinityID := a.maintenanceIdentities(purpose)
 	req := llm.Request{
-		Model:     a.model,
-		Purpose:   purpose,
-		System:    system,
-		Messages:  older,
-		MaxTokens: maxTokens,
-		Reasoning: llm.ReasoningConfig{},
+		Model:           a.model,
+		Purpose:         purpose,
+		System:          system,
+		Messages:        older,
+		MaxTokens:       maxTokens,
+		Reasoning:       llm.ReasoningConfig{},
+		ProxySessionID:  proxySessionID,
+		CacheAffinityID: cacheAffinityID,
+		CachePolicy: llm.CachePolicy{
+			StaticTTL: llm.CacheTTLDefault,
+		},
 	}
 	if err := validateRequestImageContent(req.Messages); err != nil {
 		return "", llm.Usage{}, "", fmt.Errorf("validate compaction request images: %w", err)
@@ -780,6 +785,17 @@ func (a *Agent) streamSummary(ctx context.Context, system string, older []llm.Me
 			return "", total, stop, serr
 		}
 	}
+}
+
+func (a *Agent) maintenanceIdentities(purpose llm.RequestPurpose) (proxySessionID, cacheAffinityID string) {
+	owner := a.cacheAffinityID
+	if owner == "" {
+		owner = a.proxySessionID
+	}
+	cacheDigest := sha256.Sum256([]byte("harness-maintenance-cache-affinity-v1\x00" + owner + "\x00" + string(purpose)))
+	proxyDigest := sha256.Sum256([]byte("harness-maintenance-proxy-session-v1\x00" + owner + "\x00" + string(purpose)))
+	return "harness-session-" + fmt.Sprintf("%x", proxyDigest[:8]),
+		"harness-cache-" + fmt.Sprintf("%x", cacheDigest[:8])
 }
 
 func (a *Agent) collectSummary(ctx context.Context, req llm.Request) (string, llm.Usage, llm.StopReason, error) {

@@ -633,12 +633,15 @@ func TestLoadConfigRejectsInlineAPIKeysAndLoadsKeyFilePath(t *testing.T) {
 	}
 }
 
-func TestLoadConfigParsesModelsDevCacheTTL(t *testing.T) {
+func TestLoadConfigParsesDurationAndInstanceSettings(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{
   "provider_configs": ["p.json"],
-  "models_dev_cache_ttl": "12h"
+  "models_dev_cache_ttl": "12h",
+  "drain_delay": "7s",
+  "shutdown_timeout": "4m",
+  "instance_id": "pod-a"
 }`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -648,6 +651,11 @@ func TestLoadConfigParsesModelsDevCacheTTL(t *testing.T) {
 	}
 	if !cfg.ModelsDevCacheTTL.Set || cfg.ModelsDevCacheTTL.Duration != 12*time.Hour {
 		t.Fatalf("string ttl = %+v, want 12h set", cfg.ModelsDevCacheTTL)
+	}
+	if !cfg.DrainDelay.Set || cfg.DrainDelay.Duration != 7*time.Second ||
+		!cfg.ShutdownTimeout.Set || cfg.ShutdownTimeout.Duration != 4*time.Minute ||
+		cfg.InstanceID != "pod-a" {
+		t.Fatalf("lifecycle settings = drain %+v shutdown %+v instance %q", cfg.DrainDelay, cfg.ShutdownTimeout, cfg.InstanceID)
 	}
 
 	if err := os.WriteFile(path, []byte(`{
@@ -665,7 +673,7 @@ func TestLoadConfigParsesModelsDevCacheTTL(t *testing.T) {
 	}
 }
 
-func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
+func TestHandlerStreamPassesResponseStateFields(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
   "name": "openai",
@@ -713,7 +721,7 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	}
 	body, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:gpt-5.5",
-		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a", Messages: firstMessages},
+		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a", Messages: firstMessages, StoreResponse: true},
 	})
 	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 	if err != nil {
@@ -751,7 +759,13 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	)
 	body, _ = json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:gpt-5.5:fast",
-		Request:  llm.Request{Model: "openai:gpt-5.5:fast", PromptCacheKey: "session-a", Messages: fullMessages},
+		Request: llm.Request{
+			Model:              "openai:gpt-5.5:fast",
+			PromptCacheKey:     "session-a",
+			Messages:           fullMessages[len(fullMessages)-1:],
+			StoreResponse:      true,
+			PreviousResponseID: "resp_1",
+		},
 	})
 	resp, err = srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 	if err != nil {
@@ -776,7 +790,13 @@ func TestHandlerStreamManagesResponseStateFields(t *testing.T) {
 	)
 	body, _ = json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:gpt-5.5",
-		Request:  llm.Request{Model: "openai:gpt-5.5", PromptCacheKey: "session-a", Messages: fullMessages},
+		Request: llm.Request{
+			Model:              "openai:gpt-5.5",
+			PromptCacheKey:     "session-a",
+			Messages:           fullMessages[len(fullMessages)-1:],
+			StoreResponse:      true,
+			PreviousResponseID: "resp_2",
+		},
 	})
 	resp, err = srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
 	if err != nil {
@@ -967,7 +987,7 @@ func TestHandlerStreamDoesNotContinueShorterTranscriptWithSamePromptCacheKey(t *
 	}
 }
 
-func TestHandlerStreamRetriesPreviousResponseRejectionWithFullHistory(t *testing.T) {
+func TestHandlerStreamDoesNotRetryPreviousResponseRejection(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
   "name": "openai",
@@ -1039,14 +1059,11 @@ func TestHandlerStreamRetriesPreviousResponseRejectionWithFullHistory(t *testing
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	if len(fp.Requests) != 3 {
-		t.Fatalf("provider requests = %d, want 3: %+v", len(fp.Requests), fp.Requests)
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2: %+v", len(fp.Requests), fp.Requests)
 	}
-	if fp.Requests[1].PreviousResponseID != "resp_1" || len(fp.Requests[1].Messages) != 1 {
-		t.Fatalf("continued request = prev %q messages %d, want resp_1 and trimmed tail", fp.Requests[1].PreviousResponseID, len(fp.Requests[1].Messages))
-	}
-	if fp.Requests[2].PreviousResponseID != "" || fp.Requests[2].StoreResponse || len(fp.Requests[2].Messages) != len(fullMessages) {
-		t.Fatalf("stateless retry = prev %q store=%v messages=%d, want full history without previous response", fp.Requests[2].PreviousResponseID, fp.Requests[2].StoreResponse, len(fp.Requests[2].Messages))
+	if fp.Requests[1].PreviousResponseID != "" || len(fp.Requests[1].Messages) != len(fullMessages) {
+		t.Fatalf("provider request = prev %q messages %d, want unchanged full request", fp.Requests[1].PreviousResponseID, len(fp.Requests[1].Messages))
 	}
 
 	records := strings.Split(strings.TrimSpace(logs.String()), "\n")
@@ -1057,8 +1074,8 @@ func TestHandlerStreamRetriesPreviousResponseRejectionWithFullHistory(t *testing
 	if err := json.Unmarshal([]byte(records[len(records)-1]), &last); err != nil {
 		t.Fatalf("decode last log %q: %v", records[len(records)-1], err)
 	}
-	if _, ok := last["err"]; ok {
-		t.Fatalf("successful retry should not log stale err: %+v", last)
+	if _, ok := last["err"]; !ok {
+		t.Fatalf("terminal upstream rejection should be logged: %+v", last)
 	}
 }
 

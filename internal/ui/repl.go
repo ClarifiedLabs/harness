@@ -42,20 +42,18 @@ const (
 
 // ModelSelection is the runtime model/provider bundle returned by App.SwitchModel.
 type ModelSelection struct {
-	Provider                    string
-	Model                       string
-	RegistryModel               string
-	BaseURL                     string
-	Runtime                     llm.Provider
-	ContextWindow               int // agent override; 0 means use the registry
-	Reasoning                   llm.ReasoningConfig
-	BaseTargetID                string
-	Variant                     string
-	FastTargetID                string
-	ServerTools                 []llm.ServerTool
-	ResponsesStateful           bool
-	ManagedContinuationStateful bool
-	DisableManagedContinuation  bool
+	Provider          string
+	Model             string
+	RegistryModel     string
+	BaseURL           string
+	Runtime           llm.Provider
+	ContextWindow     int // agent override; 0 means use the registry
+	Reasoning         llm.ReasoningConfig
+	BaseTargetID      string
+	Variant           string
+	FastTargetID      string
+	ServerTools       []llm.ServerTool
+	ResponsesStateful bool
 	// ReasoningSet says Reasoning intentionally replaces the requested config,
 	// including zero value for provider default.
 	ReasoningSet bool
@@ -73,24 +71,22 @@ type AgentSummary struct {
 // new tool registry, fully reassembled system prompt, and model target runtime
 // for subsequent turns.
 type AgentSelection struct {
-	Name                        string
-	Tools                       *tools.Registry
-	System                      string
-	Provider                    string
-	Model                       string
-	RegistryModel               string
-	BaseURL                     string
-	Runtime                     llm.Provider
-	ContextWindow               int
-	Reasoning                   llm.ReasoningConfig
-	BaseTargetID                string
-	Variant                     string
-	FastTargetID                string
-	ServerTools                 []llm.ServerTool
-	ResponsesStateful           bool
-	ManagedContinuationStateful bool
-	DisableManagedContinuation  bool
-	ReasoningSet                bool
+	Name              string
+	Tools             *tools.Registry
+	System            string
+	Provider          string
+	Model             string
+	RegistryModel     string
+	BaseURL           string
+	Runtime           llm.Provider
+	ContextWindow     int
+	Reasoning         llm.ReasoningConfig
+	BaseTargetID      string
+	Variant           string
+	FastTargetID      string
+	ServerTools       []llm.ServerTool
+	ResponsesStateful bool
+	ReasoningSet      bool
 }
 
 // App bundles the dependencies the REPL and one-shot driver need. main builds it
@@ -274,6 +270,7 @@ type App struct {
 type queuedMaintenanceUsage struct {
 	agent.MaintenanceUsage
 	modelKey string
+	prewarm  *agent.PrewarmResult
 }
 
 type idleCompactionFinished struct {
@@ -2463,18 +2460,27 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	if !selection.ReasoningSet && selection.Reasoning.Empty() && !reasoning.Empty() {
 		selection.Reasoning = reasoning
 	}
+	if selection.BaseTargetID == "" {
+		selection.BaseTargetID = selection.Model
+	}
+	baseChanged := oldBaseTargetID == "" || selection.BaseTargetID != oldBaseTargetID
+	responseState := app.Agent.ResponseState()
 	app.Agent.SetProvider(selection.Runtime)
 	app.Agent.SetModel(selection.Model, selection.ContextWindow)
 	app.Agent.SetReasoning(selection.Reasoning)
 	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
-	app.Agent.SetManagedContinuation(selection.ManagedContinuationStateful, selection.DisableManagedContinuation)
-	if selection.BaseTargetID == "" {
-		selection.BaseTargetID = selection.Model
-	}
-	baseChanged := oldBaseTargetID == "" || selection.BaseTargetID != oldBaseTargetID
 	if baseChanged {
 		app.Agent.ResetProxySessionID()
+	} else if selection.ResponsesStateful &&
+		responseState != nil &&
+		responseState.AnchorMessages >= 0 &&
+		responseState.AnchorMessages <= len(app.Agent.Transcript()) &&
+		llm.MatchesMessageFingerprint(
+			app.Agent.Transcript()[:responseState.AnchorMessages],
+			responseState.AnchorDigest,
+		) {
+		app.Agent.SetResponseState(responseState)
 	}
 	if selection.RegistryModel == "" {
 		selection.RegistryModel = selection.Model
@@ -3028,7 +3034,6 @@ func (app *App) applyAgentSwitchWithPrewarm(name string, prewarm bool) error {
 	app.FastTargetID = selection.FastTargetID
 	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
-	app.Agent.SetManagedContinuation(selection.ManagedContinuationStateful, selection.DisableManagedContinuation)
 	app.Agent.ResetProxySessionID()
 	app.AgentName = selection.Name
 	app.System = selection.System // so saved sessions capture the agent's prompt
@@ -3597,13 +3602,30 @@ func (app *App) QueueMaintenanceUsageForModel(modelKey string, usage agent.Maint
 	app.maintenanceMu.Unlock()
 }
 
+// QueuePrewarmResultForModel routes a background prewarm completion through
+// the same owner-goroutine queue as maintenance accounting.
+func (app *App) QueuePrewarmResultForModel(modelKey string, result agent.PrewarmResult) {
+	app.maintenanceMu.Lock()
+	app.pendingMaintenance = append(app.pendingMaintenance, queuedMaintenanceUsage{
+		MaintenanceUsage: agent.MaintenanceUsage{Purpose: "prewarm", Usage: result.Usage},
+		modelKey:         modelKey,
+		prewarm:          &result,
+	})
+	app.maintenanceMu.Unlock()
+}
+
 func (app *App) drainMaintenanceUsage() {
 	app.maintenanceMu.Lock()
 	pending := app.pendingMaintenance
 	app.pendingMaintenance = nil
 	app.maintenanceMu.Unlock()
 	for _, item := range pending {
-		app.addMaintenanceUsageForModel(item.Purpose, item.Usage, item.modelKey)
+		if item.prewarm != nil {
+			app.Agent.ApplyPrewarmResult(*item.prewarm)
+		}
+		if item.Usage != (llm.Usage{}) {
+			app.addMaintenanceUsageForModel(item.Purpose, item.Usage, item.modelKey)
+		}
 	}
 }
 
@@ -4470,6 +4492,7 @@ func modelRequestLogAttrs(prompt, turn, attempt int, event llm.ModelRequestEvent
 		"sequence", event.Sequence,
 		"state", string(event.State),
 		"outcome", string(event.Outcome),
+		"proxy_instance_id", event.ProxyInstanceID,
 		"proxy_request_id", event.ProxyRequestID,
 		"upstream_request_id", event.UpstreamRequestID,
 		"trace_id", event.TraceID,
@@ -4567,6 +4590,7 @@ func (s *accumulatingSink) ModelErrorDiagnostic(event agent.ModelErrorDiagnostic
 		"api_code", event.Code,
 		"api_message", event.Message,
 		"error_stage", string(diagnostic.Stage),
+		"proxy_instance_id", diagnostic.ProxyInstanceID,
 		"proxy_request_id", diagnostic.ProxyRequestID,
 		"upstream_request_id", diagnostic.UpstreamRequestID,
 		"trace_id", diagnostic.TraceID,

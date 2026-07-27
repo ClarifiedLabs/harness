@@ -2431,6 +2431,102 @@ func TestREPLFastCommandSwitchesSiblingTargetsWithoutRotatingSession(t *testing.
 	}
 }
 
+func TestSwitchModelPreservesValidContinuationAcrossFastVariants(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("responses")
+	app := newTestApp(t, &out, &errw, fp)
+	baseTarget := "openai:gpt-5.5"
+	fastTarget := baseTarget + ":fast"
+	app.Provider = baseTarget
+	app.Model = baseTarget
+	app.RegistryModel = baseTarget
+	app.BaseTargetID = baseTarget
+	app.FastTargetID = fastTarget
+	app.Agent.SetModel(baseTarget, 0)
+	app.Agent.SetResponsesStateful(true)
+	app.Agent.SetTranscript([]llm.Message{uiUserMsg("hello"), uiAsstMsg("answer")})
+	digest, err := llm.FingerprintMessages(app.Agent.Transcript())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.Agent.SetResponseState(&llm.ResponseState{
+		PreviousResponseID: "resp-base",
+		AnchorMessages:     len(app.Agent.Transcript()),
+		AnchorDigest:       digest,
+	})
+	proxySessionID := app.Agent.ProxySessionID()
+	app.SwitchModel = func(model string, reasoning llm.ReasoningConfig) (ModelSelection, error) {
+		base := baseTarget
+		if model == "other:model" {
+			base = model
+		}
+		return ModelSelection{
+			Provider:          model,
+			Model:             model,
+			RegistryModel:     model,
+			Runtime:           fp,
+			BaseTargetID:      base,
+			FastTargetID:      fastTarget,
+			ResponsesStateful: true,
+			ReasoningSet:      true,
+			Reasoning:         reasoning,
+		}, nil
+	}
+
+	if !app.switchModel(fastTarget, llm.ReasoningConfig{}) {
+		t.Fatalf("fast switch failed: %s", errw.String())
+	}
+	if state := app.Agent.ResponseState(); state == nil || state.PreviousResponseID != "resp-base" || state.AnchorDigest != digest {
+		t.Fatalf("fast state = %+v", state)
+	}
+	if app.Agent.ProxySessionID() != proxySessionID {
+		t.Fatal("fast sibling switch rotated proxy session")
+	}
+	if !app.switchModel(baseTarget, llm.ReasoningConfig{}) {
+		t.Fatal("base switch failed")
+	}
+	if state := app.Agent.ResponseState(); state == nil || state.PreviousResponseID != "resp-base" {
+		t.Fatalf("base state = %+v", state)
+	}
+	if !app.switchModel("other:model", llm.ReasoningConfig{}) {
+		t.Fatal("true model switch failed")
+	}
+	if app.Agent.ResponseState() != nil || app.Agent.ProxySessionID() == proxySessionID {
+		t.Fatalf("true model switch retained continuation: state=%+v proxy=%q", app.Agent.ResponseState(), app.Agent.ProxySessionID())
+	}
+}
+
+func TestSwitchModelDoesNotRestoreMismatchedContinuationDigest(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("responses")
+	app := newTestApp(t, &out, &errw, fp)
+	app.BaseTargetID = "openai:gpt-5.5"
+	app.Agent.SetResponsesStateful(true)
+	app.Agent.SetTranscript([]llm.Message{uiUserMsg("hello"), uiAsstMsg("answer")})
+	app.Agent.SetResponseState(&llm.ResponseState{
+		PreviousResponseID: "resp-bad",
+		AnchorMessages:     len(app.Agent.Transcript()),
+		AnchorDigest:       strings.Repeat("0", 64),
+	})
+	app.SwitchModel = func(model string, reasoning llm.ReasoningConfig) (ModelSelection, error) {
+		return ModelSelection{
+			Provider:          model,
+			Model:             model,
+			RegistryModel:     model,
+			Runtime:           fp,
+			BaseTargetID:      "openai:gpt-5.5",
+			ResponsesStateful: true,
+			ReasoningSet:      true,
+		}, nil
+	}
+	if !app.switchModel("openai:gpt-5.5:fast", llm.ReasoningConfig{}) {
+		t.Fatal("switch failed")
+	}
+	if state := app.Agent.ResponseState(); state != nil {
+		t.Fatalf("mismatched state restored: %+v", state)
+	}
+}
+
 func TestREPLFastCommandReportsUnavailableForCurrentModel(t *testing.T) {
 	var out, errw bytes.Buffer
 	app := newTestApp(t, &out, &errw, llmtest.New("fake"))

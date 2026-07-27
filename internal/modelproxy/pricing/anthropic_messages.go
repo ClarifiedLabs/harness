@@ -25,7 +25,7 @@ func (AnthropicMessages) PriceUsage(in Input) Result {
 	// A long-TTL request can place stable system/tool anchors in the 1-hour
 	// bucket. If an Anthropic-compatible endpoint reports cache writes without
 	// the TTL breakdown, do not silently price them at the cheaper 5-minute rate.
-	if in.Request.LongCacheTTL &&
+	if in.Request.CachePolicy.StaticTTL == llm.CacheTTLExtended &&
 		in.Usage.CacheWriteTokens+in.Usage.CacheWrite1hTokens > 0 &&
 		!in.Usage.CacheWriteTTLKnown {
 		return Result{Handled: true}

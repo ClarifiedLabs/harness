@@ -16,6 +16,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/factory"
 	"harness/internal/llm/llmtest"
+	"harness/internal/metrics"
 	"harness/internal/modelproxy/protocol"
 )
 
@@ -31,13 +32,7 @@ func (p *continuationAwareFakeProvider) CanContinueResponse(responseID string) b
 	return responseID != "" && responseID == p.availableResponseID
 }
 
-func (p *continuationAwareFakeProvider) setAvailableResponse(responseID string) {
-	p.mu.Lock()
-	p.availableResponseID = responseID
-	p.mu.Unlock()
-}
-
-func newContinuationTestServer(t *testing.T, provider llm.Provider) *httptest.Server {
+func newContinuationTestServer(t *testing.T, provider llm.Provider, registries ...*metrics.Registry) *httptest.Server {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
@@ -49,9 +44,14 @@ func newContinuationTestServer(t *testing.T, provider llm.Provider) *httptest.Se
 }`), 0o600); err != nil {
 		t.Fatalf("write provider config: %v", err)
 	}
+	var registry *metrics.Registry
+	if len(registries) > 0 {
+		registry = registries[0]
+	}
 	handler, err := NewHandler(Options{
 		ConfigDir: dir,
 		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		Metrics:   registry,
 		New: func(factory.Options) (llm.Provider, error) {
 			return provider, nil
 		},
@@ -59,24 +59,13 @@ func newContinuationTestServer(t *testing.T, provider llm.Provider) *httptest.Se
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
+	t.Cleanup(func() { _ = handler.Close() })
 	return httptest.NewServer(handler)
 }
 
-func postContinuationStream(t *testing.T, srv *httptest.Server, messages []llm.Message) {
-	postContinuationStreamWithOptions(t, srv, messages, false)
-}
-
-func postContinuationStreamWithOptions(t *testing.T, srv *httptest.Server, messages []llm.Message, disable bool) {
+func postStreamRequest(t *testing.T, srv *httptest.Server, request llm.Request) (*http.Response, []byte) {
 	t.Helper()
-	body, err := json.Marshal(protocol.StreamRequest{
-		TargetID: "openai:gpt-5.5",
-		Request: llm.Request{
-			Model:               "openai:gpt-5.5",
-			ProxySessionID:      "continuation-test",
-			Messages:            messages,
-			DisableContinuation: disable,
-		},
-	})
+	body, err := json.Marshal(protocol.StreamRequest{TargetID: "openai:gpt-5.5", Request: request})
 	if err != nil {
 		t.Fatalf("marshal stream request: %v", err)
 	}
@@ -84,224 +73,57 @@ func postContinuationStreamWithOptions(t *testing.T, srv *httptest.Server, messa
 	if err != nil {
 		t.Fatalf("POST stream: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		t.Fatalf("stream status = %d body=%s", resp.StatusCode, data)
-	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-}
-
-func TestHandlerContinuationCanBeExplicitlyDisabled(t *testing.T) {
-	fp := llmtest.New("responses",
-		llmtest.Step{
-			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "first answer"}},
-			Stop:       llm.StopEndTurn,
-			ResponseID: "resp-first",
-		},
-		llmtest.Step{
-			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "second answer"}},
-			Stop:       llm.StopEndTurn,
-			ResponseID: "resp-second",
-		},
-	)
-	srv := newContinuationTestServer(t, fp)
-	defer srv.Close()
-
-	first := []llm.Message{{
-		Role:    llm.RoleUser,
-		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}},
-	}}
-	postContinuationStream(t, srv, first)
-	second := append([]llm.Message(nil), first...)
-	second = append(second,
-		llm.BuildAssistantMessage(nil, "first answer", nil, "", llm.StopEndTurn),
-		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}},
-	)
-	postContinuationStreamWithOptions(t, srv, second, true)
-
-	if len(fp.Requests) != 2 {
-		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
-	}
-	request := fp.Requests[1]
-	if request.PreviousResponseID != "" || request.StoreResponse || len(request.Messages) != len(second) {
-		t.Fatalf(
-			"disabled continuation request = prev %q store=%t messages=%d, want full %d",
-			request.PreviousResponseID,
-			request.StoreResponse,
-			len(request.Messages),
-			len(second),
-		)
-	}
-	if request.DisableContinuation {
-		t.Fatal("proxy-only disable flag leaked to concrete provider")
-	}
-}
-
-func TestContinuationFingerprintIncludesNestedRichContent(t *testing.T) {
-	base := []llm.Message{
-		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{
-			Kind:      llm.BlockToolUse,
-			ToolUseID: "call",
-			ToolName:  "view_image",
-			ToolInput: json.RawMessage(`{"path":"screen.png"}`),
-		}}},
-		{Role: llm.RoleUser, Content: []llm.ContentBlock{{
-			Kind:        llm.BlockToolResult,
-			ResultForID: "call",
-			ResultText:  "attached",
-			ResultContent: []llm.ContentBlock{{
-				Kind:           llm.BlockImage,
-				ImageMediaType: "image/png",
-				ImageData:      serverOnePixelPNG,
-			}},
-		}}},
-	}
-	want, err := fingerprintMessages(base)
+	data, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if err != nil {
-		t.Fatalf("fingerprint base: %v", err)
+		t.Fatalf("read stream: %v", err)
 	}
-	for _, mutate := range []func([]llm.Message){
-		func(messages []llm.Message) { messages[1].Content[0].ResultText = "trimmed" },
-		func(messages []llm.Message) { messages[1].Content[0].ResultContent = nil },
-	} {
-		changed := append([]llm.Message(nil), base...)
-		changed[0].Content = append([]llm.ContentBlock(nil), base[0].Content...)
-		changed[1].Content = append([]llm.ContentBlock(nil), base[1].Content...)
-		changed[1].Content[0].ResultContent = append([]llm.ContentBlock(nil), base[1].Content[0].ResultContent...)
-		mutate(changed)
-		got, err := fingerprintMessages(changed)
-		if err != nil {
-			t.Fatalf("fingerprint changed: %v", err)
-		}
-		if got == want {
-			t.Fatal("fingerprint ignored nested rich-content rewrite")
-		}
-	}
+	return resp, data
 }
 
-func TestHandlerContinuationHonorsExplicitAssistantPhase(t *testing.T) {
-	fp := llmtest.New("responses",
-		llmtest.Step{
-			Events: []llm.StreamEvent{
-				{Kind: llm.EventAssistantPhase, Phase: llm.AssistantPhaseCommentary},
-				{Kind: llm.EventTextDelta, Text: "working"},
-			},
-			Stop:       llm.StopEndTurn,
-			ResponseID: "resp-phase",
-		},
-		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp-done"},
-	)
+func TestHandlerContinuationPassesClientStateUnchanged(t *testing.T) {
+	fp := llmtest.New("responses", llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp-next"})
 	srv := newContinuationTestServer(t, fp)
 	defer srv.Close()
 
-	first := []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}}}}
-	postContinuationStream(t, srv, first)
-	second := append([]llm.Message(nil), first...)
-	second = append(second,
-		llm.BuildAssistantMessage(nil, "working", nil, llm.AssistantPhaseCommentary, llm.StopEndTurn),
-		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "next"}}},
-	)
-	postContinuationStream(t, srv, second)
-
-	if len(fp.Requests) != 2 {
-		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
-	}
-	if fp.Requests[1].PreviousResponseID != "resp-phase" || len(fp.Requests[1].Messages) != 1 {
-		t.Fatalf("continued request = prev %q messages %d", fp.Requests[1].PreviousResponseID, len(fp.Requests[1].Messages))
-	}
-}
-
-func TestHandlerContinuationResendsFullHistoryWhenProviderConnectionClosed(t *testing.T) {
-	fp := &continuationAwareFakeProvider{FakeProvider: llmtest.New("responses",
-		llmtest.Step{
-			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "first answer"}},
-			Stop:       llm.StopEndTurn,
-			ResponseID: "resp-closed",
-		},
-		llmtest.Step{
-			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "second answer"}},
-			Stop:       llm.StopEndTurn,
-			ResponseID: "resp-live",
-		},
-		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp-third"},
-	)}
-	srv := newContinuationTestServer(t, fp)
-	defer srv.Close()
-
-	first := []llm.Message{{
+	messages := []llm.Message{{
 		Role:    llm.RoleUser,
-		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}},
+		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "suffix"}},
 	}}
-	postContinuationStream(t, srv, first)
-
-	second := append([]llm.Message(nil), first...)
-	second = append(second,
-		llm.BuildAssistantMessage(nil, "first answer", nil, "", llm.StopEndTurn),
-		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}},
-	)
-	postContinuationStream(t, srv, second)
-	if len(fp.Requests) != 2 {
-		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	resp, body := postStreamRequest(t, srv, llm.Request{
+		ProxySessionID:     "harness-session-one",
+		CacheAffinityID:    "harness-cache-one",
+		Messages:           messages,
+		StoreResponse:      true,
+		PreviousResponseID: "resp-old",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
 	}
-	if fp.Requests[1].PreviousResponseID != "" || len(fp.Requests[1].Messages) != len(second) {
-		t.Fatalf(
-			"closed-connection request = prev %q messages %d, want full history with %d messages",
-			fp.Requests[1].PreviousResponseID,
-			len(fp.Requests[1].Messages),
-			len(second),
-		)
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
 	}
-
-	fp.setAvailableResponse("resp-live")
-	third := append([]llm.Message(nil), second...)
-	third = append(third,
-		llm.BuildAssistantMessage(nil, "second answer", nil, "", llm.StopEndTurn),
-		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "third"}}},
-	)
-	postContinuationStream(t, srv, third)
-	if len(fp.Requests) != 3 {
-		t.Fatalf("provider requests = %d, want 3", len(fp.Requests))
+	got := fp.Requests[0]
+	if !got.StoreResponse || got.PreviousResponseID != "resp-old" || len(got.Messages) != 1 || got.Messages[0].Content[0].Text != "suffix" {
+		t.Fatalf("provider continuation request = %+v", got)
 	}
-	if fp.Requests[2].PreviousResponseID != "resp-live" || len(fp.Requests[2].Messages) != 1 {
-		t.Fatalf(
-			"live-connection request = prev %q messages %d, want resp-live and one tail message",
-			fp.Requests[2].PreviousResponseID,
-			len(fp.Requests[2].Messages),
-		)
+	if got.ProxySessionID != "" || got.CacheAffinityID != "" {
+		t.Fatalf("harness-local identities reached provider: %+v", got)
 	}
 }
 
-func TestHandlerInteractionsContinuationIncludesSignedProviderState(t *testing.T) {
+func TestHandlerInteractionsContinuationPassesClientStateUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "google.json"), []byte(`{
   "name": "google",
   "api_type": "interactions",
   "base_url": "https://generativelanguage.googleapis.com/v1beta",
-  "api_key": "gemini-key",
-  "models": [{"name":"gemini-3.6-flash","context_window":1000000}]
+  "api_key": "test-key",
+  "models": [{"name":"gemini","context_window":128000}]
 }`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	thoughtEvent := llm.StreamEvent{
-		Kind:            llm.EventReasoningSummary,
-		ReasoningFormat: llm.ReasoningFormatGeminiInteractions,
-		Text:            "searching",
-		Signature:       "thought-sig",
-	}
-	searchEvent := llm.StreamEvent{
-		Kind:            llm.EventInteractionStep,
-		InteractionStep: json.RawMessage(`{"type":"google_search_call","id":"search-1","signature":"search-sig"}`),
-	}
-	fp := llmtest.New("interactions",
-		llmtest.Step{
-			Events:     []llm.StreamEvent{thoughtEvent, searchEvent, {Kind: llm.EventTextDelta, Text: "answer"}},
-			Stop:       llm.StopEndTurn,
-			ResponseID: "interaction-1",
-		},
-		llmtest.Step{Err: &llm.APIError{Code: "previous_interaction_not_found", Message: "previous_interaction_id is invalid"}},
-		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "interaction-2"},
-	)
+	fp := llmtest.New("interactions", llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "interaction-next"})
 	handler, err := NewHandler(Options{
 		ConfigDir: dir,
 		Config:    Config{ProviderConfigs: []string{"google.json"}},
@@ -312,116 +134,230 @@ func TestHandlerInteractionsContinuationIncludesSignedProviderState(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer handler.Close()
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	first := []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first"}}}}
-	postTargetContinuationStream(t, srv, "google:gemini-3.6-flash", first)
-	reasoning := []llm.ContentBlock{
-		{
-			Kind:                        llm.BlockInteractionThought,
-			InteractionThoughtSummary:   "searching",
-			InteractionThoughtSignature: "thought-sig",
+	data, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "google:gemini",
+		Request: llm.Request{
+			StoreResponse:      true,
+			PreviousResponseID: "interaction-old",
+			Messages: []llm.Message{{
+				Role:    llm.RoleUser,
+				Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "suffix"}},
+			}},
 		},
-		{
-			Kind:            llm.BlockInteractionStep,
-			InteractionStep: json.RawMessage(`{"type":"google_search_call","id":"search-1","signature":"search-sig"}`),
-		},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
 	}
-	second := append([]llm.Message(nil), first...)
-	second = append(second,
-		llm.BuildAssistantMessage(reasoning, "answer", nil, "", llm.StopEndTurn),
-		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "next"}}},
-	)
-	postTargetContinuationStream(t, srv, "google:gemini-3.6-flash", second)
-
-	if len(fp.Requests) != 3 {
-		t.Fatalf("provider requests = %d, want 3", len(fp.Requests))
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
 	}
-	if !fp.Requests[0].StoreResponse {
-		t.Fatal("first Interactions request should store state")
-	}
-	if fp.Requests[1].PreviousResponseID != "interaction-1" || len(fp.Requests[1].Messages) != 1 {
-		t.Fatalf("continued request = prev %q messages %d", fp.Requests[1].PreviousResponseID, len(fp.Requests[1].Messages))
-	}
-	if fp.Requests[2].PreviousResponseID != "" || fp.Requests[2].StoreResponse || len(fp.Requests[2].Messages) != len(second) {
-		t.Fatalf("stateless retry = prev %q store=%v messages=%d, want full signed history",
-			fp.Requests[2].PreviousResponseID, fp.Requests[2].StoreResponse, len(fp.Requests[2].Messages))
-	}
-	if got := fp.Requests[2].Messages[1].Content; len(got) < 2 ||
-		got[0].Kind != llm.BlockInteractionThought ||
-		got[1].Kind != llm.BlockInteractionStep {
-		t.Fatalf("stateless retry interaction state = %+v", got)
+	if len(fp.Requests) != 1 ||
+		!fp.Requests[0].StoreResponse ||
+		fp.Requests[0].PreviousResponseID != "interaction-old" ||
+		len(fp.Requests[0].Messages) != 1 ||
+		fp.Requests[0].Messages[0].Content[0].Text != "suffix" {
+		t.Fatalf("interactions continuation request = %+v", fp.Requests)
 	}
 }
 
-func postTargetContinuationStream(t *testing.T, srv *httptest.Server, target string, messages []llm.Message) {
-	t.Helper()
-	body, err := json.Marshal(protocol.StreamRequest{
-		TargetID: target,
-		Request: llm.Request{
-			Model:          target,
-			ProxySessionID: "continuation-test",
-			Messages:       messages,
+func TestHandlerContinuationUnavailableReturns409BeforeStream(t *testing.T) {
+	fp := &continuationAwareFakeProvider{FakeProvider: llmtest.New("responses")}
+	srv := newContinuationTestServer(t, fp)
+	defer srv.Close()
+
+	resp, body := postStreamRequest(t, srv, llm.Request{
+		ProxySessionID:     "harness-session-one",
+		PreviousResponseID: "resp-on-other-pod",
+		Messages:           []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "suffix"}}}},
+	})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+	var proxyErr protocol.Error
+	if err := json.Unmarshal(body, &proxyErr); err != nil {
+		t.Fatalf("decode error: %v body=%s", err, body)
+	}
+	if proxyErr.Code != protocol.ErrCodePreviousResponseUnavailable || proxyErr.Retryable {
+		t.Fatalf("error = %+v", proxyErr)
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("provider received %d requests before liveness rejection", len(fp.Requests))
+	}
+}
+
+func TestHandlerUnsupportedContinuationIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte(`{
+  "name": "chat",
+  "api_type": "openai",
+  "base_url": "https://example.test/v1",
+  "api_key": "sk-test",
+  "models": [{"name":"model","context_window":128000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	constructions := 0
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"chat.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			constructions++
+			return llmtest.New("openai"), nil
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	defer handler.Close()
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	data, _ := json.Marshal(protocol.StreamRequest{
+		TargetID: "chat:model",
+		Request: llm.Request{
+			StoreResponse: true,
+			Messages:      []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hello"}}}},
+		},
+	})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", "application/json", bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		t.Fatalf("stream status = %d body=%s", resp.StatusCode, data)
+	var proxyErr protocol.Error
+	if err := json.NewDecoder(resp.Body).Decode(&proxyErr); err != nil {
+		t.Fatal(err)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusBadRequest || proxyErr.Code != protocol.ErrCodeContinuationUnsupported || constructions != 0 {
+		t.Fatalf("status=%d error=%+v constructions=%d", resp.StatusCode, proxyErr, constructions)
+	}
 }
 
-func TestHandlerContinuationMismatchResendsAndEstablishesFreshAnchor(t *testing.T) {
-	fp := llmtest.New("responses",
-		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp-original"},
-		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp-fresh"},
-		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp-third"},
-	)
+func TestHandlerUpstreamPreviousResponseRejectionPassesThrough(t *testing.T) {
+	fp := llmtest.New("responses", llmtest.Step{Err: &llm.APIError{
+		StatusCode: http.StatusBadRequest,
+		Code:       "previous_response_not_found",
+		Message:    "missing",
+		Retryable:  false,
+	}})
 	srv := newContinuationTestServer(t, fp)
 	defer srv.Close()
 
-	first := []llm.Message{{
-		Role: llm.RoleUser,
-		Content: []llm.ContentBlock{
-			{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: serverOnePixelPNG},
-			{Kind: llm.BlockText, Text: "inspect"},
-		},
-	}}
-	postContinuationStream(t, srv, first)
-
-	rewritten := []llm.Message{{
-		Role: llm.RoleUser,
-		Content: []llm.ContentBlock{
-			{Kind: llm.BlockText, Text: "[image omitted by retention]"},
-			{Kind: llm.BlockText, Text: "inspect"},
-		},
-	}}
-	rewritten = append(rewritten,
-		llm.BuildAssistantMessage(nil, "", nil, "", llm.StopEndTurn),
-		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "second"}}},
-	)
-	postContinuationStream(t, srv, rewritten)
-	if fp.Requests[1].PreviousResponseID != "" || len(fp.Requests[1].Messages) != len(rewritten) {
-		t.Fatalf("mismatch request = prev %q messages %d, want full %d", fp.Requests[1].PreviousResponseID, len(fp.Requests[1].Messages), len(rewritten))
+	resp, body := postStreamRequest(t, srv, llm.Request{
+		PreviousResponseID: "resp-old",
+		Messages:           []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "suffix"}}}},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
 	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	found := false
+	for {
+		var envelope protocol.StreamEnvelope
+		if err := dec.Decode(&envelope); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Error != nil && envelope.Error.Code == "previous_response_not_found" {
+			found = true
+		}
+	}
+	if !found || len(fp.Requests) != 1 {
+		t.Fatalf("upstream rejection not passed through: found=%t requests=%d body=%s", found, len(fp.Requests), body)
+	}
+}
 
-	third := append([]llm.Message(nil), rewritten...)
-	third = append(third,
-		llm.BuildAssistantMessage(nil, "", nil, "", llm.StopEndTurn),
-		llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "third"}}},
-	)
-	postContinuationStream(t, srv, third)
-	if fp.Requests[2].PreviousResponseID != "resp-fresh" || len(fp.Requests[2].Messages) != 1 {
-		t.Fatalf("fresh continuation = prev %q messages %d", fp.Requests[2].PreviousResponseID, len(fp.Requests[2].Messages))
+func TestHandlerContinuationMetricsRecordOneBoundedResult(t *testing.T) {
+	tests := []struct {
+		name     string
+		previous string
+		provider func() llm.Provider
+		want     string
+	}{
+		{
+			name: "not offered",
+			provider: func() llm.Provider {
+				return llmtest.New("responses", llmtest.Step{Stop: llm.StopEndTurn})
+			},
+			want: "not_offered",
+		},
+		{
+			name:     "served",
+			previous: "resp-old",
+			provider: func() llm.Provider {
+				return llmtest.New("responses", llmtest.Step{Stop: llm.StopEndTurn})
+			},
+			want: "served",
+		},
+		{
+			name:     "unavailable",
+			previous: "resp-other-pod",
+			provider: func() llm.Provider {
+				return &continuationAwareFakeProvider{FakeProvider: llmtest.New("responses")}
+			},
+			want: "unavailable",
+		},
+		{
+			name:     "rejected upstream",
+			previous: "resp-old",
+			provider: func() llm.Provider {
+				return llmtest.New("responses", llmtest.Step{Err: &llm.APIError{
+					Code:    "previous_response_not_found",
+					Message: "missing",
+				}})
+			},
+			want: "rejected_upstream",
+		},
+		{
+			name:     "failed",
+			previous: "resp-old",
+			provider: func() llm.Provider {
+				return llmtest.New("responses", llmtest.Step{Err: &llm.APIError{
+					Code:    "server_error",
+					Message: "boom",
+				}})
+			},
+			want: "failed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := metrics.New()
+			srv := newContinuationTestServer(t, tc.provider(), reg)
+			defer srv.Close()
+			_, _ = postStreamRequest(t, srv, llm.Request{
+				PreviousResponseID: tc.previous,
+				Messages: []llm.Message{{
+					Role:    llm.RoleUser,
+					Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hello"}},
+				}},
+			})
+			var out strings.Builder
+			reg.Render(&out)
+			want := `model_proxy_continuation_total{result="` + tc.want + `"} 1`
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("missing %q:\n%s", want, out.String())
+			}
+			if strings.Count(out.String(), "model_proxy_continuation_total{") != 1 {
+				t.Fatalf("continuation metric recorded more than one result:\n%s", out.String())
+			}
+		})
+	}
+}
+
+func TestOperationalMetricLabelNormalizationIsBounded(t *testing.T) {
+	if got := normalizeContinuationResult("client-controlled"); got != "failed" {
+		t.Fatalf("continuation sentinel = %q", got)
+	}
+	if got := normalizeWSPoolEvent("client-controlled"); got != "unknown" {
+		t.Fatalf("pool sentinel = %q", got)
 	}
 }
 
@@ -448,6 +384,7 @@ func TestHandlerRejectsInvalidRichContentBeforeProviderOrCounter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
+	defer handler.Close()
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 

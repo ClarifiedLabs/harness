@@ -1128,7 +1128,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.searchTools = fs.String("search-tools", "auto", "search tools to expose: auto, grep, rg, or both")
 	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")
 	f.delegateOutput = fs.String("delegate-output", DelegateOutputStatus, "delegate display: status, off, or curated scrolling lines on stderr")
-	f.responsesStateful = fs.Bool("responses-stateful", true, "enable provider-agnostic managed continuation (server-side conversation state) when supported")
+	f.responsesStateful = fs.Bool("responses-stateful", true, "enable CLI-owned provider continuation when the selected target supports it")
 	f.retentionPolicy = fs.String("retention-policy", "auto", "live transcript retention: auto, age, pressure, or disabled")
 	f.noSteer = fs.Bool("no-steer", false, "disable in-prompt steering: queue input for the next prompt instead of injecting it before the next turn")
 	f.traceProxy = fs.Bool("trace-proxy", false, "send W3C trace headers to harness-model-proxy and harness-mcp-proxy")

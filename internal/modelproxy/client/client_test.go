@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"harness/internal/llm"
+	"harness/internal/llm/llmtest"
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/tracing"
 )
@@ -122,6 +123,7 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 			RetryAfterMS: 250,
 			Diagnostic: &llm.APIErrorDiagnostic{
 				Stage:             llm.APIErrorStageUpstreamStream,
+				ProxyInstanceID:   "proxy-a",
 				ProxyRequestID:    123,
 				UpstreamRequestID: "upstream-456",
 				TraceID:           "trace-789",
@@ -173,11 +175,65 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 	if apiErr.RetryAfter != 250*time.Millisecond {
 		t.Fatalf("retry after = %v, want 250ms", apiErr.RetryAfter)
 	}
-	if apiErr.Diagnostic == nil || apiErr.Diagnostic.ProxyRequestID != 123 || apiErr.Diagnostic.UpstreamRequestID != "upstream-456" || apiErr.Diagnostic.TraceID != "trace-789" {
+	if apiErr.Diagnostic == nil ||
+		apiErr.Diagnostic.ProxyInstanceID != "proxy-a" ||
+		apiErr.Diagnostic.ProxyRequestID != 123 ||
+		apiErr.Diagnostic.UpstreamRequestID != "upstream-456" ||
+		apiErr.Diagnostic.TraceID != "trace-789" {
 		t.Fatalf("diagnostic = %+v", apiErr.Diagnostic)
 	}
-	if len(requestEvents) != 1 || requestEvents[0].State != llm.ModelRequestFailed || requestEvents[0].ProxyRequestID != 123 || requestEvents[0].Message != "slow down" {
+	if len(requestEvents) != 1 ||
+		requestEvents[0].State != llm.ModelRequestFailed ||
+		requestEvents[0].ProxyInstanceID != "proxy-a" ||
+		requestEvents[0].ProxyRequestID != 123 ||
+		requestEvents[0].Message != "slow down" {
 		t.Fatalf("synthesized request events = %+v", requestEvents)
+	}
+}
+
+func TestProviderStreamSendsOpaqueSessionRoutingHint(t *testing.T) {
+	const sessionID = "harness-session-0123456789abcdef"
+	var header string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header = r.Header.Get("X-Harness-Session")
+		w.Header().Set("content-type", protocol.ContentTypeNDJSON)
+		_ = json.NewEncoder(w).Encode(protocol.StreamEnvelope{Event: &llm.StreamEvent{Kind: llm.EventDone}})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := llmtest.Drain(c.Provider("openai:test").Stream(context.Background(), llm.Request{
+		Model:          "test",
+		ProxySessionID: sessionID,
+	})); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if header != sessionID {
+		t.Fatalf("X-Harness-Session = %q, want %q", header, sessionID)
+	}
+}
+
+func TestProviderStreamOmitsEmptySessionRoutingHint(t *testing.T) {
+	var present bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, present = r.Header["X-Harness-Session"]
+		w.Header().Set("content-type", protocol.ContentTypeNDJSON)
+		_ = json.NewEncoder(w).Encode(protocol.StreamEnvelope{Event: &llm.StreamEvent{Kind: llm.EventDone}})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := llmtest.Drain(c.Provider("openai:test").Stream(context.Background(), llm.Request{Model: "test"})); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if present {
+		t.Fatal("empty ProxySessionID unexpectedly sent X-Harness-Session")
 	}
 }
 

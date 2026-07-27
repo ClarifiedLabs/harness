@@ -298,7 +298,7 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 	// runs finish well inside 5 minutes, so the longer retention is never used —
 	// taking it would just pay 2x the write price for nothing.
 	anchor := ephemeral
-	if req.LongCacheTTL {
+	if req.CachePolicy.StaticTTL == llm.CacheTTLExtended {
 		anchor = ephemeral1h
 	}
 
@@ -357,7 +357,7 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 		})
 	}
 
-	placeCacheBreakpoints(w.Messages, len(w.Messages))
+	placeCacheBreakpoints(w.Messages, req.CachePolicy.StableMessagePrefix)
 
 	return w
 }
@@ -437,26 +437,28 @@ func buildContent(blocks []llm.ContentBlock, includeThinking bool) []wireContent
 	return out
 }
 
-// placeCacheBreakpoints marks the cacheable tail of the transcript. realCount is
-// the number of leading messages that belong to the persisted transcript. Volatile
-// request-only context (todo/hook reminders) lives in an uncached system block, so
-// message breakpoints stay on content that recurs byte-for-byte next turn. Putting
-// the breakpoint on a volatile context tail — as the prior implementation did —
-// meant the message prefix never matched across turns, so only the system and tool
-// anchors ever cache-read.
-//
-// Two ephemeral breakpoints are placed, within the 4-breakpoint budget alongside
-// the system and last-tool anchors: one on the last real message (the rolling
-// write point read back next turn) and one on the previous real message (a stable
-// anchor that lags a turn, so a long tool-heavy step still cache-reads within the
-// 20-block lookback window). This also uses the fourth breakpoint that was
-// previously left unused (design §7, §16).
-func placeCacheBreakpoints(msgs []wireMessage, realCount int) {
-	if realCount > len(msgs) {
-		realCount = len(msgs)
+// placeCacheBreakpoints spends the two message breakpoints on the rolling
+// request tail and on the caller-declared retention-stable prefix. Invalid
+// external prefix counts are clamped. When the stable position is absent or
+// duplicates the rolling tail, the previous message is used as the lagging
+// fallback.
+func placeCacheBreakpoints(msgs []wireMessage, stablePrefix int) {
+	realCount := len(msgs)
+	if stablePrefix < 0 {
+		stablePrefix = 0
 	}
-	markLastBlock(msgs, realCount-1)
-	markLastBlock(msgs, realCount-2)
+	if stablePrefix > realCount {
+		stablePrefix = realCount
+	}
+	last := realCount - 1
+	second := stablePrefix - 1
+	if stablePrefix == 0 || second == last {
+		second = realCount - 2
+	}
+	markLastBlock(msgs, last)
+	if second != last {
+		markLastBlock(msgs, second)
+	}
 }
 
 // markLastBlock sets an ephemeral breakpoint on the last content block of

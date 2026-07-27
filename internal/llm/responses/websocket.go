@@ -75,7 +75,7 @@ func (p *Provider) runWebSocketLocked(ctx context.Context, req llm.Request, yiel
 		if err != nil {
 			return &llm.APIError{Message: "marshal websocket request: " + err.Error()}
 		}
-		emitted, retryFresh, err := p.runWebSocketOnConn(ctx, conn, string(body), yield)
+		emitted, retryFresh, err := p.runWebSocketOnConn(ctx, conn, string(body), req.Purpose == llm.RequestPurposePrewarm, yield)
 		if err == nil {
 			return nil
 		}
@@ -87,7 +87,7 @@ func (p *Provider) runWebSocketLocked(ctx context.Context, req llm.Request, yiel
 	}
 }
 
-func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body string, yield func(llm.StreamEvent, error) bool) (emitted bool, retryFresh bool, err error) {
+func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body string, prewarm bool, yield func(llm.StreamEvent, error) bool) (emitted bool, retryFresh bool, err error) {
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -103,6 +103,10 @@ func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body s
 			emitted = true
 			if ev.Kind == llm.EventDone {
 				p.wsResponseID = ev.ResponseID
+				if prewarm {
+					zero := 0
+					ev.ResponseIDAnchor = &zero
+				}
 			}
 		}
 		return yield(ev, err)

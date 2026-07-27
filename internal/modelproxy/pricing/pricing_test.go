@@ -326,7 +326,7 @@ func TestAnthropicMessagesLongTTLWithoutBreakdownIsUnknown(t *testing.T) {
 	got := NewComposite().PriceUsage(Input{
 		Provider: llm.ProviderConfig{Name: "anthropic", APIType: "anthropic"},
 		Model:    llm.ModelEntry{Name: "claude", Price: llm.Price{Input: 5, Output: 25, CacheWrite: 6.25}},
-		Request:  llm.Request{LongCacheTTL: true},
+		Request:  llm.Request{CachePolicy: llm.CachePolicy{StaticTTL: llm.CacheTTLExtended}},
 		Usage:    llm.Usage{CacheWriteTokens: 1000},
 	})
 	if !got.Handled || got.Known {

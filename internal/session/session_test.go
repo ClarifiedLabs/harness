@@ -225,7 +225,11 @@ func TestAppendEventStampsMissingTime(t *testing.T) {
 
 func TestSaveLoadRoundTrip(t *testing.T) {
 	s := sampleSession()
-	s.ResponseState = &llm.ResponseState{PreviousResponseID: "resp_1", AnchorMessages: len(s.Messages)}
+	digest, err := llm.FingerprintMessages(s.Messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ResponseState = &llm.ResponseState{PreviousResponseID: "resp_1", AnchorMessages: len(s.Messages), AnchorDigest: digest}
 	if err := llm.ValidateTranscript(s.Messages); err != nil {
 		t.Fatalf("sample transcript invalid: %v", err)
 	}
@@ -1324,11 +1328,15 @@ func TestLoadRecoversActiveToolDispatchWithoutReexecutingTool(t *testing.T) {
 				ToolInput: json.RawMessage(`{"path":"x"}`),
 			}}},
 		},
-		ResponseState: &llm.ResponseState{PreviousResponseID: "resp-1", AnchorMessages: 2},
-		Todos:         []todo.Item{{Content: "change it", Status: "in_progress"}},
-		Plans:         []plan.Plan{{Title: "Plan 1", Body: "Do it", Path: "plans/1.md"}},
-		Usage:         UsageTotals{Usage: llm.Usage{InputTokens: 11, OutputTokens: 3}},
+		Todos: []todo.Item{{Content: "change it", Status: "in_progress"}},
+		Plans: []plan.Plan{{Title: "Plan 1", Body: "Do it", Path: "plans/1.md"}},
+		Usage: UsageTotals{Usage: llm.Usage{InputTokens: 11, OutputTokens: 3}},
 	}
+	digest, err := llm.FingerprintMessages(state.Messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.ResponseState = &llm.ResponseState{PreviousResponseID: "resp-1", AnchorMessages: 2, AnchorDigest: digest}
 	if err := SaveActiveTurnCheckpoint(dir, state, "tool_dispatch", 1, 1); err != nil {
 		t.Fatalf("SaveActiveTurnCheckpoint: %v", err)
 	}

@@ -13,6 +13,9 @@ const (
 	DefaultURL = "http://127.0.0.1:8765"
 
 	ContentTypeNDJSON = "application/x-ndjson"
+
+	ErrCodePreviousResponseUnavailable = "previous_response_unavailable"
+	ErrCodeContinuationUnsupported     = "continuation_unsupported"
 )
 
 type Catalog struct {
@@ -24,8 +27,8 @@ type Catalog struct {
 }
 
 // PricingInfo describes how fresh a catalog's prices are. The proxy derives its
-// catalog from provider config files at startup and never rebuilds it, so the
-// served prices are only as current as the last setup/refresh.
+// catalog from provider config plus the validated models.dev cache and swaps a
+// rebuilt snapshot after an enabled cache refresh.
 type PricingInfo struct {
 	// SourceDate is when the price data behind the catalog was last written
 	// (the newest provider config modification time).
@@ -49,8 +52,10 @@ func (p *PricingInfo) Stale(now time.Time) bool {
 // captures every priced request the proxy has handled this run, including
 // delegated child-agent spend that is otherwise invisible to a parent session.
 type UsageReport struct {
-	Models []ModelUsage  `json:"models"`
-	Budget *BudgetReport `json:"budget,omitempty"`
+	Instance string        `json:"instance"`
+	Since    time.Time     `json:"since"`
+	Models   []ModelUsage  `json:"models"`
+	Budget   *BudgetReport `json:"budget,omitempty"`
 }
 
 // BudgetReport describes the current authenticated API key's cost-budget window.

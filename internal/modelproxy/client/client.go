@@ -180,6 +180,9 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 		httpReq.Header.Set("content-type", "application/json")
 		httpReq.Header.Set("accept", protocol.ContentTypeNDJSON)
 		httpReq.Header.Set(requesterHeader, "harness")
+		if req.ProxySessionID != "" {
+			httpReq.Header.Set("X-Harness-Session", req.ProxySessionID)
+		}
 		p.client.setAuth(httpReq)
 		p.client.setTrace(httpReq)
 
@@ -271,6 +274,7 @@ func modelRequestEventFromClientError(err error, state llm.ModelRequestState) ll
 		event.RetryAfterMS = apiErr.RetryAfter.Milliseconds()
 		if apiErr.Diagnostic != nil {
 			event.Stage = apiErr.Diagnostic.Stage
+			event.ProxyInstanceID = apiErr.Diagnostic.ProxyInstanceID
 			event.ProxyRequestID = apiErr.Diagnostic.ProxyRequestID
 			event.UpstreamRequestID = apiErr.Diagnostic.UpstreamRequestID
 			event.TraceID = apiErr.Diagnostic.TraceID

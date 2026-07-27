@@ -408,19 +408,13 @@ type Options struct {
 	// ResponsesStateful enables Responses API previous_response_id chaining.
 	// Main only sets it when the selected provider is Responses-capable.
 	ResponsesStateful bool
-	// ManagedContinuationStateful reports that an orchestration proxy, rather
-	// than this Agent, owns provider continuation for the selected target.
-	ManagedContinuationStateful bool
-	// DisableManagedContinuation asks that proxy to run statelessly. It does not
-	// affect direct ResponsesStateful ownership.
-	DisableManagedContinuation bool
 	// RetentionPolicy selects live-transcript retention behavior. The zero value
 	// uses the provider-aware automatic policy.
 	RetentionPolicy RetentionPolicy
 	// Interactive marks a session whose multi-minute pauses justify the 1h
 	// Anthropic prompt-cache breakpoint on the stable prefix (set for the REPL).
 	// One-shot, delegate, and non-interactive runs leave it false to take the
-	// cheaper 5-minute breakpoint. Forwarded to llm.Request.LongCacheTTL.
+	// cheaper 5-minute breakpoint.
 	Interactive bool
 	// Steer enables in-prompt steering: input submitted while a prompt runs is
 	// injected as a RoleUser message before the next turn rather than waiting
@@ -432,47 +426,46 @@ type Options struct {
 // Agent drives the turn loop against one provider and tool registry, owning the
 // running transcript.
 type Agent struct {
-	provider                    llm.Provider
-	tools                       *tools.Registry
-	toolSpecs                   []llm.ToolSchema
-	registry                    *llm.Registry
-	transcript                  []llm.Message
-	validatedPrefix             int // count of leading transcript messages already known valid (r62)
-	system                      string
-	model                       string
-	maxTurns                    int
-	turnMilestones              []TurnMilestone
-	maxPromptTokens             int     // accumulated-token ceiling per prompt; 0 = unlimited
-	maxOutputTokens             int     // per-turn output cap; 0 = automatic
-	maxPromptCostUSD            float64 // accumulated USD ceiling per prompt; 0 = unlimited
-	contextWindow               int     // -context-window override; 0 = use the registry default
-	observedContextWindow       int     // smaller provider-reported limit learned from an overflow error
-	reasoning                   llm.ReasoningConfig
-	serverTools                 []llm.ServerTool
-	now                         func() time.Time
-	sleep                       func(context.Context, time.Duration) error // mid-stream retry backoff; nil-free, set in New
-	compactKeepTurns            int
-	compactKeepTokens           int
-	compactTriggerPercent       int
-	compactTargetPercent        int
-	disableAutoCompaction       bool
-	compactSummaryMaxTokens     int
-	compactToolResultMaxBytes   int
-	compactFallbackNotice       compactFallbackNoticeState
-	compactionRuntimeVersion    uint64
-	archiveCompaction           CompactionArchiver
-	hooks                       *hooks.Runner
-	showDiffs                   bool
-	responsesStateful           bool
-	interactive                 bool            // 1h Anthropic cache breakpoint; see Options.Interactive
-	steer                       chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
-	responseState               llm.ResponseState
-	managedContinuationStateful bool
-	disableManagedContinuation  bool
-	retentionPolicy             RetentionPolicy
-	retentionEpochArmed         bool
-	proxySessionID              string
-	cacheAffinityID             string
+	provider                  llm.Provider
+	tools                     *tools.Registry
+	toolSpecs                 []llm.ToolSchema
+	registry                  *llm.Registry
+	transcript                []llm.Message
+	validatedPrefix           int // count of leading transcript messages already known valid (r62)
+	system                    string
+	model                     string
+	maxTurns                  int
+	turnMilestones            []TurnMilestone
+	maxPromptTokens           int     // accumulated-token ceiling per prompt; 0 = unlimited
+	maxOutputTokens           int     // per-turn output cap; 0 = automatic
+	maxPromptCostUSD          float64 // accumulated USD ceiling per prompt; 0 = unlimited
+	contextWindow             int     // -context-window override; 0 = use the registry default
+	observedContextWindow     int     // smaller provider-reported limit learned from an overflow error
+	reasoning                 llm.ReasoningConfig
+	serverTools               []llm.ServerTool
+	now                       func() time.Time
+	sleep                     func(context.Context, time.Duration) error // mid-stream retry backoff; nil-free, set in New
+	compactKeepTurns          int
+	compactKeepTokens         int
+	compactTriggerPercent     int
+	compactTargetPercent      int
+	disableAutoCompaction     bool
+	compactSummaryMaxTokens   int
+	compactToolResultMaxBytes int
+	compactFallbackNotice     compactFallbackNoticeState
+	compactionRuntimeVersion  uint64
+	archiveCompaction         CompactionArchiver
+	hooks                     *hooks.Runner
+	showDiffs                 bool
+	responsesStateful         bool
+	interactive               bool            // 1h Anthropic cache breakpoint; see Options.Interactive
+	steer                     chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
+	responseState             llm.ResponseState
+	responseStateEpoch        uint64
+	retentionPolicy           RetentionPolicy
+	retentionEpochArmed       bool
+	proxySessionID            string
+	cacheAffinityID           string
 }
 
 type compactFallbackNoticeState struct {
@@ -491,38 +484,36 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		now = time.Now
 	}
 	a := &Agent{
-		provider:                    provider,
-		tools:                       registry,
-		toolSpecs:                   registry.Specs(),
-		registry:                    modelRegistry,
-		model:                       opts.Model,
-		maxTurns:                    opts.MaxTurns,
-		turnMilestones:              normalizeTurnMilestones(opts.TurnMilestones),
-		maxPromptTokens:             opts.MaxPromptTokens,
-		maxOutputTokens:             opts.MaxOutputTokens,
-		maxPromptCostUSD:            opts.MaxPromptCostUSD,
-		contextWindow:               opts.ContextWindow,
-		reasoning:                   opts.Reasoning,
-		serverTools:                 cloneServerTools(opts.ServerTools),
-		now:                         now,
-		sleep:                       sleepContext,
-		compactKeepTurns:            opts.CompactKeepTurns,
-		compactKeepTokens:           opts.CompactKeepTokens,
-		compactTriggerPercent:       opts.CompactTriggerPercent,
-		compactTargetPercent:        opts.CompactTargetPercent,
-		disableAutoCompaction:       opts.DisableAutoCompaction,
-		compactSummaryMaxTokens:     opts.CompactSummaryMaxTokens,
-		compactToolResultMaxBytes:   opts.CompactToolResultMaxBytes,
-		hooks:                       opts.Hooks,
-		showDiffs:                   opts.ShowDiffs,
-		responsesStateful:           opts.ResponsesStateful,
-		managedContinuationStateful: opts.ManagedContinuationStateful,
-		disableManagedContinuation:  opts.DisableManagedContinuation,
-		retentionPolicy:             normalizeRetentionPolicy(opts.RetentionPolicy),
-		interactive:                 opts.Interactive,
-		retentionEpochArmed:         true,
-		proxySessionID:              newProxySessionID(),
-		cacheAffinityID:             newCacheAffinityID(),
+		provider:                  provider,
+		tools:                     registry,
+		toolSpecs:                 registry.Specs(),
+		registry:                  modelRegistry,
+		model:                     opts.Model,
+		maxTurns:                  opts.MaxTurns,
+		turnMilestones:            normalizeTurnMilestones(opts.TurnMilestones),
+		maxPromptTokens:           opts.MaxPromptTokens,
+		maxOutputTokens:           opts.MaxOutputTokens,
+		maxPromptCostUSD:          opts.MaxPromptCostUSD,
+		contextWindow:             opts.ContextWindow,
+		reasoning:                 opts.Reasoning,
+		serverTools:               cloneServerTools(opts.ServerTools),
+		now:                       now,
+		sleep:                     sleepContext,
+		compactKeepTurns:          opts.CompactKeepTurns,
+		compactKeepTokens:         opts.CompactKeepTokens,
+		compactTriggerPercent:     opts.CompactTriggerPercent,
+		compactTargetPercent:      opts.CompactTargetPercent,
+		disableAutoCompaction:     opts.DisableAutoCompaction,
+		compactSummaryMaxTokens:   opts.CompactSummaryMaxTokens,
+		compactToolResultMaxBytes: opts.CompactToolResultMaxBytes,
+		hooks:                     opts.Hooks,
+		showDiffs:                 opts.ShowDiffs,
+		responsesStateful:         opts.ResponsesStateful,
+		retentionPolicy:           normalizeRetentionPolicy(opts.RetentionPolicy),
+		interactive:               opts.Interactive,
+		retentionEpochArmed:       true,
+		proxySessionID:            newProxySessionID(),
+		cacheAffinityID:           newCacheAffinityID(),
 	}
 	if opts.Steer {
 		a.steer = make(chan SteerInput, 16)
@@ -710,17 +701,6 @@ func (a *Agent) SetResponsesStateful(enabled bool) {
 	a.resetResponseState()
 }
 
-// SetManagedContinuation updates proxy-owned continuation capability and its
-// explicit disable control after a model or agent switch.
-func (a *Agent) SetManagedContinuation(stateful, disabled bool) {
-	if a.managedContinuationStateful == stateful && a.disableManagedContinuation == disabled {
-		return
-	}
-	a.managedContinuationStateful = stateful
-	a.disableManagedContinuation = disabled
-	a.retentionEpochArmed = true
-}
-
 // ResponseState returns a copy of the current Responses continuation state.
 func (a *Agent) ResponseState() *llm.ResponseState {
 	if a.responseState.PreviousResponseID == "" {
@@ -741,6 +721,7 @@ func (a *Agent) SetResponseState(state *llm.ResponseState) {
 
 func (a *Agent) resetResponseState() {
 	a.responseState = llm.ResponseState{}
+	a.responseStateEpoch++
 }
 
 // SetSleep replaces the mid-stream retry backoff function. Tests inject a no-op
@@ -779,23 +760,22 @@ func (a *Agent) ContextRequest() llm.Request {
 // the message shape used by RunPromptContentWithContext.
 func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 	return llm.Request{
-		Model:               a.model,
-		Purpose:             llm.RequestPurposeTurn,
-		System:              a.system,
-		Messages:            append([]llm.Message(nil), a.transcript...),
-		Tools:               cloneToolSpecs(a.toolSpecs),
-		ServerTools:         cloneServerTools(a.serverTools),
-		Reasoning:           a.reasoning,
-		RequestContext:      append([]string(nil), extraContext...),
-		DisableContinuation: a.disableManagedContinuation,
-		ProxySessionID:      a.proxySessionID,
-		CacheAffinityID:     a.cacheAffinityID,
-		LongCacheTTL:        a.interactive,
+		Model:           a.model,
+		Purpose:         llm.RequestPurposeTurn,
+		System:          a.system,
+		Messages:        append([]llm.Message(nil), a.transcript...),
+		Tools:           cloneToolSpecs(a.toolSpecs),
+		ServerTools:     cloneServerTools(a.serverTools),
+		Reasoning:       a.reasoning,
+		RequestContext:  append([]string(nil), extraContext...),
+		ProxySessionID:  a.proxySessionID,
+		CacheAffinityID: a.cacheAffinityID,
+		CachePolicy:     a.cachePolicyForTranscript(a.transcript, 0, false),
 	}
 }
 
-// ProxySessionID returns the opaque local key used to isolate proxy-managed
-// model state for this agent session.
+// ProxySessionID returns the opaque local key used for proxy sticky routing and
+// connection-affine transport isolation for this agent session.
 func (a *Agent) ProxySessionID() string {
 	return a.proxySessionID
 }
@@ -810,8 +790,8 @@ func (a *Agent) SetProxySessionID(id string) {
 	a.proxySessionID = id
 }
 
-// ResetProxySessionID rotates proxy-managed continuation and WebSocket state
-// without changing prompt-cache affinity.
+// ResetProxySessionID rotates transport affinity and the CLI-owned continuation
+// anchor without changing prompt-cache affinity.
 func (a *Agent) ResetProxySessionID() {
 	a.proxySessionID = newProxySessionID()
 	a.resetResponseState()
@@ -872,9 +852,12 @@ func (a *Agent) PrewarmRequest() (llm.Request, bool) {
 		// The Messages API requires at least one message; this placeholder rides
 		// after the cached prefix and is never persisted.
 		req.Messages = []llm.Message{a.userMessage("warm cache", nil)}
+		req.CachePolicy.StableMessagePrefix = 0
 	}
 	req.MaxTokens = 1 // smallest legal cap: only the prefill matters
 	req.Purpose = llm.RequestPurposePrewarm
+	req.StoreResponse = a.responsesStateful
+	req.CachePolicy.StaticTTL = llm.CacheTTLDefault
 	req.Reasoning = llm.ReasoningConfig{} // no thinking/effort — a pure prefix write
 	req.RequestContext = nil
 	return req, true
@@ -882,34 +865,92 @@ func (a *Agent) PrewarmRequest() (llm.Request, bool) {
 
 // PrewarmFunc captures the current provider and a PrewarmRequest snapshot and
 // returns a closure that streams the warm-up request, discards its output, and
-// returns any provider-reported usage for maintenance accounting.
+// returns provider-reported usage plus any explicitly safe response anchor.
 // Call it on the goroutine that owns the agent (before the input loop); the
 // returned closure shares no mutable agent state, so it is safe to run in a
 // background goroutine. ok is false when there is nothing to warm.
-func (a *Agent) PrewarmFunc() (func(context.Context) llm.Usage, bool) {
+type PrewarmResult struct {
+	Usage              llm.Usage
+	ResponseState      *llm.ResponseState
+	ResponseStateEpoch uint64
+	ProxySessionID     string
+	TranscriptMessages int
+}
+
+func (a *Agent) PrewarmFunc() (func(context.Context) PrewarmResult, bool) {
 	req, ok := a.PrewarmRequest()
 	if !ok {
 		return nil, false
 	}
 	provider := a.provider
-	return func(ctx context.Context) llm.Usage {
-		var usage llm.Usage
+	epoch := a.responseStateEpoch
+	proxySessionID := a.proxySessionID
+	transcript := cloneMessages(a.transcript)
+	return func(ctx context.Context) PrewarmResult {
+		result := PrewarmResult{
+			ResponseStateEpoch: epoch,
+			ProxySessionID:     proxySessionID,
+			TranscriptMessages: len(transcript),
+		}
 		if err := validateRequestImageContent(req.Messages); err != nil {
-			return usage
+			return result
 		}
 		for event, err := range provider.Stream(ctx, req) {
 			if err != nil {
 				// Best-effort: a failed warm-up just means the first real request
 				// pays the cold-cache cost. Preserve usage already reported before
 				// the failure because those tokens may still be billed.
-				return usage
+				return result
 			}
 			if (event.Kind == llm.EventUsage || event.Kind == llm.EventDone) && event.Usage != nil {
-				usage = mergeUsage(usage, *event.Usage)
+				result.Usage = mergeUsage(result.Usage, *event.Usage)
+			}
+			if event.Kind == llm.EventDone &&
+				event.ResponseID != "" &&
+				event.ResponseIDAnchor != nil &&
+				*event.ResponseIDAnchor >= 0 &&
+				*event.ResponseIDAnchor <= len(transcript) {
+				digest, digestErr := llm.FingerprintMessages(transcript[:*event.ResponseIDAnchor])
+				if digestErr == nil {
+					result.ResponseState = &llm.ResponseState{
+						PreviousResponseID: event.ResponseID,
+						AnchorMessages:     *event.ResponseIDAnchor,
+						AnchorDigest:       digest,
+					}
+				}
 			}
 		}
-		return usage
+		return result
 	}, true
+}
+
+// ApplyPrewarmResult installs a background prewarm anchor only when the
+// initiating agent state is still current. It must be called on the goroutine
+// that owns the Agent.
+func (a *Agent) ApplyPrewarmResult(result PrewarmResult) bool {
+	state := result.ResponseState
+	if !a.responsesStateful ||
+		state == nil ||
+		state.PreviousResponseID == "" ||
+		result.ResponseStateEpoch != a.responseStateEpoch ||
+		result.ProxySessionID != a.proxySessionID ||
+		result.TranscriptMessages != len(a.transcript) ||
+		a.responseState.PreviousResponseID != "" ||
+		state.AnchorMessages < 0 ||
+		state.AnchorMessages > len(a.transcript) ||
+		!llm.MatchesMessageFingerprint(
+			a.transcript[:state.AnchorMessages],
+			state.AnchorDigest,
+		) {
+		return false
+	}
+	a.responseState = *state
+	return true
+}
+
+// ResponseStateEpoch identifies the current continuation-reset generation.
+func (a *Agent) ResponseStateEpoch() uint64 {
+	return a.responseStateEpoch
 }
 
 // EstimateContext estimates the next request footprint using the current
@@ -998,6 +1039,7 @@ func (a *Agent) modelRequest(requestContext []string) modelRequest {
 
 func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []llm.Message) modelRequest {
 	payloadMessages, usedPrevious := a.payloadMessagesIn(transcript)
+	payloadStart := len(transcript) - len(payloadMessages)
 	estimate := a.estimatePayloadContextForTranscript(requestContext, transcript, payloadMessages)
 	req := llm.Request{
 		Model:                a.model,
@@ -1010,10 +1052,9 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 		MaxTokens:            a.maxOutputTokens,
 		StoreResponse:        a.responsesStateful,
 		RequestContext:       append([]string(nil), requestContext...),
-		DisableContinuation:  a.disableManagedContinuation,
 		ProxySessionID:       a.proxySessionID,
 		CacheAffinityID:      a.cacheAffinityID,
-		LongCacheTTL:         a.interactive,
+		CachePolicy:          a.cachePolicyForTranscript(transcript, payloadStart, false),
 		EstimatedInputTokens: estimate.Total,
 		ContextWindowHint:    estimate.Window,
 	}
@@ -1084,17 +1125,25 @@ func (a *Agent) countInputTokens(ctx context.Context, req llm.Request) (int, boo
 }
 
 func (a *Agent) payloadMessagesIn(transcript []llm.Message) ([]llm.Message, bool) {
-	if !a.validResponseStateFor(len(transcript)) {
+	if !a.validResponseStateFor(transcript) {
 		return transcript, false
 	}
 	return transcript[a.responseState.AnchorMessages:], true
 }
 
-func (a *Agent) validResponseStateFor(messageCount int) bool {
-	return a.responsesStateful &&
+func (a *Agent) validResponseStateFor(transcript []llm.Message) bool {
+	valid := a.responsesStateful &&
 		a.responseState.PreviousResponseID != "" &&
 		a.responseState.AnchorMessages >= 0 &&
-		a.responseState.AnchorMessages <= messageCount
+		a.responseState.AnchorMessages <= len(transcript) &&
+		llm.MatchesMessageFingerprint(
+			transcript[:a.responseState.AnchorMessages],
+			a.responseState.AnchorDigest,
+		)
+	if !valid && a.responseState.PreviousResponseID != "" {
+		a.resetResponseState()
+	}
+	return valid
 }
 
 func (a *Agent) estimatePayloadContextForTranscript(requestContext []string, transcript, payloadMessages []llm.Message) ContextEstimate {
@@ -1121,9 +1170,15 @@ func (a *Agent) updateResponseState(res turnResult) {
 		a.resetResponseState()
 		return
 	}
+	digest, err := llm.FingerprintMessages(a.transcript)
+	if err != nil {
+		a.resetResponseState()
+		return
+	}
 	a.responseState = llm.ResponseState{
 		PreviousResponseID: res.responseID,
 		AnchorMessages:     len(a.transcript),
+		AnchorDigest:       digest,
 	}
 }
 
@@ -1254,7 +1309,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		// not re-sent verbatim every turn. Pure local edit, invariant-preserving.
 		retention := a.applyRetentionPolicy(sink, a.estimateContext(nil).Total)
 		if retention.changed {
-			retention.event.ResponseStateReset = a.responseState.PreviousResponseID != "" || a.managedContinuationActive()
+			retention.event.ResponseStateReset = a.responseState.PreviousResponseID != ""
 			a.resetResponseState()
 			// The last provider measurement describes the pre-retention
 			// transcript. Do not combine it with a delta from the rewritten
@@ -1340,8 +1395,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		pendingBeforeRequest := pendingPromptWork(sink)
 		forcePromptWorkSynthesis = false
 		if retention.observed {
-			retention.event.NextRequestStateful = modelReq.usedPrevious ||
-				(a.managedContinuationActive() && !retention.changed)
+			retention.event.NextRequestStateful = modelReq.usedPrevious
 			reportRetention(sink, retention.event)
 		}
 		checkpoint(PromptCheckpointRequestBoundary)
@@ -2560,6 +2614,7 @@ func modelRequestEventFromError(err error, state llm.ModelRequestState) llm.Mode
 		event.RetryAfterMS = apiErr.RetryAfter.Milliseconds()
 		if apiErr.Diagnostic != nil {
 			event.Stage = apiErr.Diagnostic.Stage
+			event.ProxyInstanceID = apiErr.Diagnostic.ProxyInstanceID
 			event.ProxyRequestID = apiErr.Diagnostic.ProxyRequestID
 			event.UpstreamRequestID = apiErr.Diagnostic.UpstreamRequestID
 			event.TraceID = apiErr.Diagnostic.TraceID

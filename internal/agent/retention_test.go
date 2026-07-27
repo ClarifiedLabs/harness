@@ -183,8 +183,6 @@ func TestRetentionPolicyOverridesProviderDefault(t *testing.T) {
 		name       string
 		policy     RetentionPolicy
 		stateful   bool
-		managed    bool
-		disabled   bool
 		context    int
 		wantChange bool
 		wantPolicy string
@@ -193,16 +191,12 @@ func TestRetentionPolicyOverridesProviderDefault(t *testing.T) {
 		{name: "disable stateless", policy: RetentionPolicyDisabled, context: 100_000, wantChange: false},
 		{name: "force pressure for stateless", policy: RetentionPolicyPressure, context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
 		{name: "auto uses pressure for stateless", context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
-		{name: "auto detects proxy managed continuation", managed: true, context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
-		{name: "disabled proxy continuation still uses pressure", managed: true, disabled: true, context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
-				ResponsesStateful:           tc.stateful,
-				ManagedContinuationStateful: tc.managed,
-				DisableManagedContinuation:  tc.disabled,
-				RetentionPolicy:             tc.policy,
-				ContextWindow:               100_000,
+				ResponsesStateful: tc.stateful,
+				RetentionPolicy:   tc.policy,
+				ContextWindow:     100_000,
 			})
 			a.SetTranscript(oldImageTranscript())
 			pass := a.applyRetentionPolicy(&recordSink{}, tc.context)
@@ -212,10 +206,111 @@ func TestRetentionPolicyOverridesProviderDefault(t *testing.T) {
 			if tc.wantPolicy != "" && pass.event.Policy != tc.wantPolicy {
 				t.Fatalf("retention policy = %q, want %q (pass %+v)", pass.event.Policy, tc.wantPolicy, pass)
 			}
-			if got := a.DebugRequest(false, "", nil, nil).Request.DisableContinuation; got != tc.disabled {
-				t.Fatalf("request disable_continuation = %t, want %t", got, tc.disabled)
+		})
+	}
+}
+
+func TestStableMessagePrefix(t *testing.T) {
+	big := strings.Repeat("x", defaultSummaryToolResultSize+100)
+	trimmed := big[:defaultSummaryToolResultSize] + "\n" + retentionTrimMarker + "]"
+	tests := []struct {
+		name     string
+		messages []llm.Message
+		want     int
+	}{
+		{
+			name:     "text only",
+			messages: []llm.Message{userText("q"), asstText("a")},
+			want:     2,
+		},
+		{
+			name: "recent read only result",
+			messages: []llm.Message{
+				userText("q"), asstToolUse("call", "rd", `{}`), toolResult("call", big),
+			},
+			want: 2,
+		},
+		{
+			name: "already trimmed result",
+			messages: []llm.Message{
+				userText("q"), asstToolUse("call", "rd", `{}`), toolResult("call", trimmed),
+			},
+			want: 3,
+		},
+		{
+			name: "mutating result",
+			messages: []llm.Message{
+				userText("q"), asstToolUse("call", "write_file", `{}`), toolResult("call", big),
+			},
+			want: 3,
+		},
+		{
+			name:     "top level image",
+			messages: []llm.Message{userImage("screen.png", agentOnePixelPNG, "inspect"), asstText("a")},
+			want:     0,
+		},
+		{
+			name: "nested result image",
+			messages: []llm.Message{
+				userText("q"),
+				asstToolUse("call", "rd", `{}`),
+				{
+					Role: llm.RoleUser,
+					Content: []llm.ContentBlock{{
+						Kind:        llm.BlockToolResult,
+						ResultForID: "call",
+						ResultText:  "attached",
+						ResultContent: []llm.ContentBlock{{
+							Kind:           llm.BlockImage,
+							ImageMediaType: "image/png",
+							ImageData:      agentOnePixelPNG,
+						}},
+					}},
+				},
+			},
+			want: 2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{})
+			if got := a.stableMessagePrefixIn(tc.messages); got != tc.want {
+				t.Fatalf("stable prefix = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRetentionLeavesDeclaredStablePrefixByteIdentical(t *testing.T) {
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
+	a.SetTranscript([]llm.Message{
+		userText("q0"),
+		asstText("a0"),
+		userImage("screen.png", agentOnePixelPNG, "inspect"),
+		asstText("a1"),
+	})
+	stable := a.stableMessagePrefixIn(a.Transcript())
+	if stable != 2 {
+		t.Fatalf("initial stable prefix = %d, want 2", stable)
+	}
+	before, err := llm.FingerprintMessages(a.Transcript()[:stable])
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.transcript = append(a.transcript,
+		userText("q2"), asstText("a2"),
+		userText("q3"), asstText("a3"),
+		userText("q4"), asstText("a4"),
+	)
+	if pass := a.applyRetentionPolicy(&recordSink{}, 0); !pass.changed {
+		t.Fatal("retention did not degrade the now-old image")
+	}
+	after, err := llm.FingerprintMessages(a.Transcript()[:stable])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("declared stable prefix changed: before=%s after=%s", before, after)
 	}
 }
 
@@ -356,7 +451,11 @@ func TestStatefulRetentionPreservesResponseStateBelowPressure(t *testing.T) {
 	)
 	a := newAgent(fp, readOnlyRegistry(), Options{ResponsesStateful: true})
 	a.SetTranscript(msgs)
-	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "resp-old", AnchorMessages: len(msgs)})
+	digest, err := llm.FingerprintMessages(msgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "resp-old", AnchorMessages: len(msgs), AnchorDigest: digest})
 
 	if err := a.RunPrompt(context.Background(), "next", &recordSink{}); err != nil {
 		t.Fatalf("RunPrompt: %v", err)
@@ -392,7 +491,11 @@ func TestStatefulRetentionPressureEpochTrimsEligibleBlocksAndResetsOnce(t *testi
 		DisableAutoCompaction: true,
 	})
 	a.SetTranscript(msgs)
-	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "resp-old", AnchorMessages: len(msgs)})
+	digest, err := llm.FingerprintMessages(msgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "resp-old", AnchorMessages: len(msgs), AnchorDigest: digest})
 	sink := &recordSink{}
 
 	if err := a.RunPrompt(context.Background(), "next", sink); err != nil {
@@ -424,41 +527,6 @@ func TestStatefulRetentionPressureEpochTrimsEligibleBlocksAndResetsOnce(t *testi
 	}
 	if !event.ResponseStateReset || event.NextRequestStateful || event.BytesAfter >= event.BytesBefore || event.ContextTokensAfter >= event.ContextTokensBefore {
 		t.Fatalf("retention effect = %+v", event)
-	}
-}
-
-func TestManagedContinuationRetentionReportsProxyReset(t *testing.T) {
-	big := strings.Repeat("x", 70_000)
-	msgs := []llm.Message{
-		userText("q0"), asstToolUse("t0", "rd", `{}`), toolResult("t0", big), asstText("a0"),
-	}
-	for i := 1; i <= 9; i++ {
-		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
-	}
-	fp := llmtest.New("model-proxy", llmtest.Step{
-		Events: []llm.StreamEvent{textDelta("done")},
-		Stop:   llm.StopEndTurn,
-	})
-	a := newAgent(fp, readOnlyRegistry(), Options{
-		ManagedContinuationStateful: true,
-		ContextWindow:               20_000,
-		DisableAutoCompaction:       true,
-	})
-	a.SetTranscript(msgs)
-	sink := &recordSink{}
-
-	if err := a.RunPrompt(context.Background(), "next", sink); err != nil {
-		t.Fatalf("RunPrompt: %v", err)
-	}
-	if len(sink.retention) != 1 {
-		t.Fatalf("retention events = %d, want one: %+v", len(sink.retention), sink.retention)
-	}
-	event := sink.retention[0]
-	if !event.ResponseStateReset || event.NextRequestStateful {
-		t.Fatalf("managed continuation retention event = %+v", event)
-	}
-	if len(fp.Requests) != 1 || fp.Requests[0].DisableContinuation {
-		t.Fatalf("managed continuation provider request = %+v", fp.Requests)
 	}
 }
 

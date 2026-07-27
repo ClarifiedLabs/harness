@@ -284,6 +284,35 @@ dialect when models.dev identifies them. Cost appears when the model has
 configured pricing or pricing can be found through models.dev; unknown model
 names show token counts without a dollar figure.
 
+### Stateful continuation and proxy-rollout matrix
+
+Run `make test-live-models`, then exercise every catalog target that reports
+`continuation_stateful:true` (at minimum one durable HTTP Responses target,
+OpenAI Codex Responses WebSocket, and Gemini Interactions):
+
+1. Start an explicit session, complete two turns including a tool call, and
+   confirm `state.json` contains a response ID, anchor count, and lowercase
+   fingerprint.
+2. Interrupt a later streamed turn, resume the same session, and confirm the
+   recovered transcript either continues from a matching anchor or safely sends
+   full history.
+3. Replace the serving proxy pod between completed turns. Durable HTTP/
+   Interactions state should work through either replica. Codex `store:false`
+   may print exactly one `previous response unavailable` reset notice and resend
+   complete valid history once.
+4. With sticky routing enabled, repeat Codex turns and confirm they stay on one
+   proxy instance and avoid the 409/reset path. Then deliberately break
+   stickiness or close the socket and confirm recovery remains correct.
+5. During a long stream, terminate its pod. Verify `/readyz` becomes 503 while
+   `/healthz` remains 200, the stream reaches its terminal event before the
+   drain timeout, new work reaches another pod, and the metrics endpoint remains
+   scrapeable until teardown finishes.
+
+Across replicas, verify pinned catalogs are identical, correlate logs by
+`(proxy_instance_id, proxy_request_id)`, sum request/usage/continuation counters
+in Prometheus, and confirm `/v1/usage` visibly reports each pod's `instance` and
+`since`.
+
 ### Google Gemini Interactions
 
 ```sh

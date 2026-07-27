@@ -59,10 +59,10 @@ func TestStartEndpointDisabledOrNilRegistryNoOp(t *testing.T) {
 	defer ln.Close()
 	addr := ln.Addr().String()
 
-	if err := StartEndpoint(context.Background(), nil, New(), Settings{Listen: addr, ListenExplicit: true}); err != nil {
+	if _, err := StartEndpoint(context.Background(), nil, New(), Settings{Listen: addr, ListenExplicit: true}); err != nil {
 		t.Fatalf("disabled StartEndpoint() error = %v", err)
 	}
-	if err := StartEndpoint(context.Background(), nil, nil, Settings{Enabled: true, Listen: addr, ListenExplicit: true}); err != nil {
+	if _, err := StartEndpoint(context.Background(), nil, nil, Settings{Enabled: true, Listen: addr, ListenExplicit: true}); err != nil {
 		t.Fatalf("nil registry StartEndpoint() error = %v", err)
 	}
 }
@@ -73,7 +73,7 @@ func TestStartEndpointImplicitBindFailureWarns(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 
-	if err := StartEndpoint(context.Background(), logger, New(), Settings{Enabled: true, Listen: ln.Addr().String()}); err != nil {
+	if _, err := StartEndpoint(context.Background(), logger, New(), Settings{Enabled: true, Listen: ln.Addr().String()}); err != nil {
 		t.Fatalf("StartEndpoint() error = %v", err)
 	}
 	if got := logs.String(); !strings.Contains(got, "metrics endpoint disabled (listen failed)") || !strings.Contains(got, ln.Addr().String()) {
@@ -86,7 +86,7 @@ func TestStartEndpointExplicitBindFailureReturnsError(t *testing.T) {
 	defer ln.Close()
 	addr := ln.Addr().String()
 
-	err := StartEndpoint(context.Background(), nil, New(), Settings{Enabled: true, Listen: addr, ListenExplicit: true})
+	_, err := StartEndpoint(context.Background(), nil, New(), Settings{Enabled: true, Listen: addr, ListenExplicit: true})
 	if err == nil || !strings.Contains(err.Error(), "metrics listen "+addr+":") {
 		t.Fatalf("StartEndpoint() error = %v, want metrics listen error", err)
 	}
@@ -97,7 +97,7 @@ func TestStartEndpointServesUnauthenticatedAndStopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	reg := NewWithBuildInfo(BuildInfo{Name: "test_build_info", Help: "test", Version: "dev"})
-	if err := StartEndpoint(ctx, nil, reg, Settings{Enabled: true, Listen: addr, ListenExplicit: true}); err != nil {
+	if _, err := StartEndpoint(ctx, nil, reg, Settings{Enabled: true, Listen: addr, ListenExplicit: true}); err != nil {
 		t.Fatalf("StartEndpoint() error = %v", err)
 	}
 

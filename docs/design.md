@@ -372,10 +372,28 @@ type Request struct {
     StoreResponse      bool
     PreviousResponseID string
     RequestContext     []string // request-only hook/todo/background context
-    ProxySessionID     string   // harness-local key for proxy continuation/websocket state
+    ProxySessionID     string   // harness-local sticky-routing/transport-affinity key
     CacheAffinityID    string   // harness-local conversation key for stable prompt-cache routing
     PromptCacheKey     string   // provider-facing cache-affinity key; proxy derives from CacheAffinityID
-    LongCacheTTL       bool     // Anthropic 1h cache TTL; set only for interactive sessions
+    CachePolicy        CachePolicy
+}
+
+type CacheTTL string
+
+const (
+    CacheTTLDefault  CacheTTL = "5m"
+    CacheTTLExtended CacheTTL = "1h"
+)
+
+type CachePolicy struct {
+    StaticTTL           CacheTTL // stable system/tool breakpoint TTL
+    StableMessagePrefix int      // leading Request.Messages safe from future retention rewrites
+}
+
+type ResponseState struct {
+    PreviousResponseID string
+    AnchorMessages     int
+    AnchorDigest       string // lowercase SHA-256 fingerprint of the represented prefix
 }
 
 type ReasoningConfig struct {
@@ -402,7 +420,10 @@ caching. Fresh todo/background/hook context applies to the current request witho
 looking like the latest user prompt or becoming part of the persisted transcript.
 Responses streams surface `response.id` on terminal `EventDone.ResponseID`; the
 agent stores that with the local transcript anchor for optional
-`previous_response_id` continuation.
+`previous_response_id` continuation. `EventDone.ResponseIDAnchor` is an optional
+`*int` used only by out-of-band prewarm: nil means the response ID must not be
+installed, while Responses WebSocket `generate:false` reports an explicit zero
+anchor.
 
 `iter.Seq2[StreamEvent, error]` (range-over-func) was chosen over channels: the consumer
 is a plain `for ev, err := range stream` with natural early-`break` cancellation, and the
@@ -556,7 +577,7 @@ Edge cases:
 | Server tools | `web_search`, or OpenRouter `openrouter:web_search` | OpenRouter `openrouter:web_search`; MiMo `web_search`; Kimi `builtin_function.$web_search`; Z.AI nested `web_search` options | `web_search_20250305` named `web_search` | `google_search` |
 | Parallel tool hint | `parallel_tool_calls:true` when tools are present | `parallel_tool_calls:true` when tools are present | not sent | not sent |
 | Prompt cache key | provider-configured; OpenAI auto emits `prompt_cache_key`; managed `openai-codex` configs select it explicitly | provider-configured; OpenAI auto emits `prompt_cache_key`, OpenRouter auto emits `session_id` | not sent (explicit `cache_control` breakpoints instead) | not sent; stored continuation and Gemini implicit caching handle stable prefixes |
-| Stateful continuation | `store:true` plus `previous_response_id` by default, with content-addressed full-history fallback; `responses_stateful:false` sends `store:false` | ignored | ignored | `store:true` plus `previous_interaction_id` by default, with signed full-history fallback; `interactions_stateful:false` sends `store:false` |
+| Stateful continuation | CLI-owned `store:true` + `previous_response_id`, fingerprint-validated suffix trimming, and one full-history fallback; `responses_stateful:false` sends `store:false` | ignored | ignored | CLI-owned `store:true` + `previous_interaction_id`, fingerprint-validated suffix trimming, and signed full-history fallback; `interactions_stateful:false` sends `store:false` |
 | Assistant phase | assistant input items include stored `phase` when present | ignored | ignored | ignored |
 | Response format | provider default unless explicitly requested by a caller | provider default | provider default | forced to plain text; generated media is rejected |
 | Token cap | input-aware `max_output_tokens` | input-aware `max_completion_tokens` for `api.openai.com`; `max_tokens` for compatible/custom endpoints | required input-aware `max_tokens` | input-aware `generation_config.max_output_tokens` |
@@ -695,15 +716,18 @@ context-overflow error, the agent records the smaller reported window for the
 session, rebuilds the request, and retries once before surfacing the error.
 
 **Prompt cache and proxy session mapping.** Harness deliberately uses two opaque
-local keys. `Request.ProxySessionID` isolates Responses continuation state and
-cached Responses WebSocket providers; transcript rewrites, branch navigation,
-and model/agent/tool changes rotate it. `Request.CacheAffinityID` is the longer
-lived cache-routing identity: it is persisted in `state.json`, restored on
-resume, and preserved across those continuation resets. Delegate agents derive
-their own distinct affinity key from the parent's and their fixed child id
+local keys. `Request.ProxySessionID` is a transport-affinity identity: the proxy
+uses it in the bounded Responses WebSocket connection key, and the proxy client
+sends it as `X-Harness-Session` so a load balancer can consistently hash stream
+traffic. It is not authoritative continuation state. Compaction, branch
+navigation, and real model/agent changes rotate it; a base ↔ fast variant switch
+preserves it and a still-valid continuation anchor. `Request.CacheAffinityID`
+is the longer-lived cache-routing identity: it is persisted in `state.json`,
+restored on resume, and preserved across continuation resets. Delegate agents
+derive their own distinct affinity key from the parent's and their fixed child id
 (`harness-cache-` + `sha256(parentID + "\x00" + childID)`), so each child routes
 to its own cache shard — a child's system prompt and tool subset differ from the
-parent's, so it never reads the parent's cached prefix, and sharing the key would
+parent’s, so it never reads the parent's cached prefix, and sharing the key would
 only thrash the shared shard under concurrency. A genuinely new logical session
 (`/clear`, clone/fork extraction, or a
 new process session) rotates both keys.
@@ -722,29 +746,47 @@ stable key into non-auth routing headers such as `x-session-id`.
 Anthropic does not use this key directly (it pins explicit `cache_control`
 breakpoints).
 
-For ChatGPT Codex over Responses WebSocket, prewarm sends an empty
-`response.create` with `generate:false`. Its response id is saved at transcript
-anchor zero, allowing the first real user request to continue from the warmed
-system-and-tools prefix without generating or persisting a disposable assistant
-turn while that socket remains live. The WebSocket client continuously drains
-frames and answers ping heartbeats between model requests. A close frame or
-transport EOF marks the socket and its last response ID unavailable before the
-next request. Other transports retain the minimal one-token neutral warm-up
-request (subject to a provider's configured output-token floor).
+Compaction, handoff-summary, and branch-summary requests derive deterministic
+purpose-separated cache and proxy IDs from the owning session identity with
+SHA-256 and fixed domain strings. This keeps maintenance traffic on a consistent
+cache shard without letting it reuse or compete with the main conversation's
+WebSocket/continuation chain. Prewarm intentionally retains the main session
+identities.
 
-The proxy stores each continuation as the previous response ID, anchor message
-count, and SHA-256 of the exact provider-neutral anchor prefix (with only message
-timestamps normalized). It reconstructs the returned assistant message from
-reasoning, text, tool calls, explicit assistant phase, and stop reason before
-hashing the new anchor. Continuation trimming is allowed only for an unchanged
-prefix with an appended suffix. Short or changed prefixes—including retention
-edits to image or tool-result content—delete the stale entry, send full context,
-and let the successful response establish a fresh anchor. Providers with
-connection-scoped continuation also get a liveness check before trimming; a
-known-closed connection deletes the stale entry and sends full history on a
-fresh connection. The existing pre-stream `previous_response_not_found`
-full-history retry remains as protection for closure races and genuine upstream
-misses.
+For ChatGPT Codex over Responses WebSocket, prewarm sends an empty
+`response.create` with `generate:false`. Only this path marks its terminal event
+with an explicit response-ID anchor at transcript index zero. The background
+closure captures the provider, response-state epoch, proxy session, and
+transcript snapshot; its result returns through the REPL maintenance queue and
+is installed on the owner goroutine only if the epoch, session, transcript
+length/fingerprint, and empty-current-anchor checks still hold. A real turn
+therefore wins the race. HTTP prewarm leaves the anchor nil and contributes
+usage only. The WebSocket client continuously drains frames and answers ping
+heartbeats between model requests; a close frame or transport EOF makes its last
+response ID unavailable.
+
+The CLI owns every continuation as a previous response/interaction ID, anchor
+message count, and SHA-256 of the exact provider-neutral anchor prefix.
+`FingerprintMessages` prefixes the encoded input with the message count, zeroes
+only `Message.Time`, JSON-encodes every other message/content field (including
+nested rich tool results), and emits lowercase hexadecimal. Empty, malformed,
+or non-matching fingerprints never trim. Before each request the agent validates
+the saved index and fingerprint, then sends only
+`transcript[AnchorMessages:]`; after appending the assistant message it hashes
+the complete new transcript and updates the anchor. Session resume additionally
+requires exact saved/current provider and model identity plus a
+continuation-capable catalog target. Clone/fork extraction deliberately clears
+the anchor.
+
+The model proxy holds no authoritative per-session continuation or cache-policy
+state. It rejects continuation on an unsupported target, leases a provider,
+optionally rejects a connection-affine previous ID with 409
+`previous_response_unavailable` before writing status/events, and otherwise
+forwards messages, `store`, and the previous ID unchanged. It does not retry
+previous/store rejections. The agent recognizes local or upstream previous-ID
+rejections, clears its anchor, and performs one full-history resend. Thus HTTP
+stored continuation is replica-independent, while Codex `store:false` uses
+sticky routing only as a hit-rate optimization.
 
 Shift-Tab agent switches defer prewarm behind a 500ms idle debounce;
 each additional cycle replaces the pending target, so only the final settled
@@ -754,9 +796,10 @@ explicit `/agent`, handoff and model changes, and standalone `/compact` retain
 immediate prewarming. Submitting a real prompt cancels a pending delayed warmup
 before the turn starts.
 
-**Responses reasoning persistence.** In the default stateless (`store:false`) mode
-the provider would otherwise re-derive chain-of-thought on every tool turn. For a
-reasoning request harness sends `include: ["reasoning.encrypted_content"]`,
+**Responses reasoning persistence.** On stateless or full-history fallback
+requests, the provider would otherwise re-derive chain-of-thought on every tool
+turn. For a reasoning request harness sends
+`include: ["reasoning.encrypted_content"]`,
 captures each reasoning item's id and `encrypted_content`, and persists it on the
 transcript as a `BlockReasoning` content block (§4). On the next request
 `buildInput` re-emits that as a `reasoning` input item immediately before its
@@ -765,28 +808,29 @@ gated on the request itself being a reasoning request — a reasoning-off call
 (compaction summary, prewarm) drops the encrypted items, since a reasoning input
 item without the matching `include` is rejected.
 
-**Anthropic prompt caching (v2):** `cache_control: {"type":"ephemeral"}` breakpoints on
-all **four** allowed positions, refreshed every call: the last entry of the tool-schema
-array (the static prefix, so it survives a system-prompt/agent switch), the system block,
-and the last two content blocks of the persisted transcript — the last real message (the
-rolling write point read back next turn) and the previous real message (a stable anchor
-that lags a turn, keeping reads within the 20-block lookback on long tool-heavy steps).
-The two stable anchors (system + last tool) use a 1-hour TTL **only for interactive
-(TTY) sessions** (`Request.LongCacheTTL`, set from `Options.Interactive`) — written
-~once and read every turn, so the long TTL survives multi-minute pauses for a
-one-time doubled write — while one-shot and delegate runs keep the 5-minute default
-on all four breakpoints to avoid paying the 1h write premium on a short-lived
-session. The rolling message anchors always keep the 5-minute default. An interactive (TTY) session
-also fires a background `max_tokens:1` warm-up at startup so the first real request reads
-a warm prefix instead of paying the cold write.
-Crucially, the message breakpoints land on the persisted transcript, **not** on
-volatile request-only context (todo/hook reminders), which is carried in an
-uncached system block: pinning the breakpoint to per-turn content — as v1 did —
-meant the message prefix never matched across turns, so only the system and tool
-anchors ever cache-read while the whole transcript was re-billed at full rate.
-An agentic loop re-sends a growing prefix every step; caching makes
-that prefix ~10× cheaper. OpenAI caches automatically (longest stable prefix), so
-no explicit cache-control opt-in exists or is needed.
+**Anthropic prompt caching:** the CLI declares semantic policy; the dialect
+chooses wire placement within Anthropic's four-breakpoint budget. The last tool
+schema and stable system block use `CachePolicy.StaticTTL`: interactive turns
+request `1h`, while one-shot, delegate, prewarm, compaction, handoff-summary, and
+branch-summary requests use `5m`. Message breakpoints always retain the
+provider-default five-minute TTL.
+
+After applying retention and before building a request, the agent computes
+`StableMessagePrefix`: the count of leading actual request messages that a
+future retention pass cannot rewrite. It stops before a recent large,
+read-only, untrimmed tool result or a recent undegraded top-level/tool-result
+image. Text, tool-call metadata, mutating results, already-trimmed results, and
+already-degraded images are stable. For continuation suffixes, the count is
+translated relative to the sliced `Request.Messages`; invalid external counts
+are clamped by the Anthropic dialect.
+
+The two message breakpoints land on the last request message and the end of the
+declared stable prefix. Positions are deduplicated; when the stable position is
+zero/absent or equals the tail, the previous real message is the lagging
+fallback. Volatile request-only context remains an uncached system block.
+Retention can therefore invalidate the rolling tail without ever mutating the
+declared stable-prefix breakpoint. OpenAI caching remains automatic, so its
+dialects ignore this breakpoint policy.
 
 ### 5.5 Errors and retries (`internal/retry`)
 
@@ -1186,6 +1230,31 @@ constructs neither registry nor feed.
   the whole refresh. A referenced provider file that has gone missing is likewise
   warned about and dropped from `provider_configs`. Unreadable or malformed files
   still error.
+- **Model-proxy lifecycle and probes.** `cmd/harness-model-proxy` binds the API
+  listener before announcing startup and uses separate background, handler-work,
+  API-stop, and metrics lifetimes. An outer lifecycle handler routes unauthenticated
+  `GET /healthz` and `GET /readyz` before API-key middleware; other methods return
+  405. The first termination signal makes readiness fail, stops background
+  catalog/API-key refresh, waits the drain-propagation delay, and invokes
+  `http.Server.Shutdown` without cancelling request contexts. A bounded timeout
+  force-closes remaining work. Only after the API drain does the command close the
+  WebSocket pool, mark health false, and explicitly shut down metrics.
+  `drain_delay`, `shutdown_timeout`, and `instance_id` use serve
+  flag > environment > config > default precedence. Defaults are `5s`, `5m`, and
+  a random 16-byte hex ID; instance IDs validate against
+  `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. The ownership flip is a coordinated
+  breaking cutover: the initial deployment must not route CLI traffic through a
+  mixed old/new proxy fleet. Once complete, the stateless wire contract supports
+  normal proxy-only rolling updates.
+- **Bounded Responses WebSocket pool.** The proxy keys pooled transports by
+  separately hashed connection configuration and `ProxySessionID`. Defaults are
+  64 connections, 10-minute idle TTL, 50-minute absolute age, and a 30-second
+  janitor tick. Acquisitions lease an entry; idle capacity pressure evicts LRU,
+  while all-busy pressure creates an unpooled provider that closes on release.
+  Expired active entries leave lookup immediately but close only after their last
+  idempotent release. Shutdown rejects new leases, closes idle entries, retires
+  active ones, and stops the janitor. No provider `Close` runs under the pool
+  mutex.
 - **API-key authentication between harness and the model proxy** is optional and
   disabled by default; it becomes required as soon as the first key is stored in
   the dedicated accepted-key file. Keys are generated with
@@ -1222,14 +1291,18 @@ constructs neither registry nor feed.
   `harness-model-proxy auth login|logout|status <provider>`. Browser PKCE and
   device-code flows are supported. `codex_oauth` is the OpenAI Codex ChatGPT
   subscription auth path: login uses OpenAI's device-code endpoints, refresh uses
-  the Codex JSON refresh exchange, terminal 4xx refresh failures are marked in the
-  token file so the proxy stops replaying the same dead refresh token, and request
-  headers include `Authorization`, `ChatGPT-Account-ID`, and `X-OpenAI-Fedramp`
-  when required. Token files are written under the proxy config dir via temp-file
-  then rename.
+  the Codex JSON refresh exchange, and request headers include `Authorization`,
+  `ChatGPT-Account-ID`, and `X-OpenAI-Fedramp` when required. A terminal refresh
+  failure is cached only in that `Source`, keyed by the SHA-256 digest of the
+  failed refresh token. Before returning it—and immediately after receiving the
+  terminal response—the process rereads the shared token file and adopts a valid
+  access/refresh token rotated by a peer. Failure markers are never persisted;
+  tolerant decoding ignores old marker fields. Successful token files are written
+  under the proxy config dir via temp-file then rename.
 - The model proxy logs a structured start and completion record per `/v1/stream`
   request with
-  requester, provider, model, request/response bytes, duration, token usage, stop
+  `proxy_instance_id`, requester, provider, model, request/response bytes,
+  duration, token usage, stop
   reason, tool-call count, and `cost_usd` when the request has known cost
   (from the config for manual flat-priced providers, the models.dev cache for
   managed providers, or tiered prices derived from `model.cost.tiers`).
@@ -1245,6 +1318,8 @@ constructs neither registry nor feed.
   occurs, even when a later retry succeeds. These records include the proxy and
   upstream request ids, upstream attempt, status/code, parsed provider message,
   retryability, retry-after/delay, attempt duration, and request elapsed time.
+  Model-request events and API error diagnostics carry the same instance ID;
+  `(proxy_instance_id, proxy_request_id)` is the cross-replica correlation key.
   Retry scheduling is logged separately at INFO; cancellation is distinguished
   from an upstream failure.
 - `POST /v1/input_tokens` accepts `{provider, request}` and returns
@@ -1256,9 +1331,10 @@ constructs neither registry nor feed.
   preflight diagnostics and are not added to usage or cost aggregation.
 - **Usage aggregation and model-proxy budgets.** The proxy keeps a mutex-guarded
   `{provider, model}` usage map and serves it read-only at `GET /v1/usage` as
-  `{"models": [ {provider, model, requests, input_tokens, output_tokens,
+  `{"instance":..., "since":..., "models":[{provider, model, requests, input_tokens, output_tokens,
   cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd}, … ]}`, sorted
-  by `provider:model`. Because every priced `/v1/stream` attempt with usage is
+  by `provider:model`; `since` is the handler construction time. Because every
+  priced `/v1/stream` attempt with usage is
   recorded, delegate child-agent spend that flows through the proxy is included,
   including failed attempts that streamed usage before the error. Cost budgets are
   per API key: `harness-model-proxy generate-api-key -budget-usd 25 -budget-period
@@ -1276,12 +1352,16 @@ constructs neither registry nor feed.
   When the authenticated key has a budget, `/v1/usage` includes
   `budget:{limit_usd, period_seconds, window_start, window_end, spent_usd,
   remaining_usd}`. API-key files (including budget metadata) are hot-reloaded.
+  Both rollup and enforcement are per pod. Strict enforcement therefore requires
+  one replica; a shared budget directory across replicas is unsupported because
+  its read-modify-write protocol is not coordinated.
 - **Prometheus metrics.** The proxy also exposes `/metrics` (Prometheus text
   exposition 0.0.4) on a **separate port** (default `127.0.0.1:9090`) with **no
   API-key auth**, so a scraper can reach it off the harness CLI path. Counter
   families — `model_proxy_requests_total`, `model_proxy_errors_total`,
   `model_proxy_input_tokens_total`, `model_proxy_output_tokens_total`,
   `model_proxy_cache_read_tokens_total`, `model_proxy_cache_write_tokens_total`,
+  `model_proxy_cache_write_1h_tokens_total`,
   `model_proxy_reasoning_tokens_total`, `model_proxy_cost_usd_total`, and
   `model_proxy_request_duration_seconds_total` — are labeled by `provider`,
   `model`, bounded request `purpose`, and `key`, while the
@@ -1301,6 +1381,16 @@ constructs neither registry nor feed.
   client disconnecting mid-stream is not counted as an error. An empty label value
   is treated as absent (Prometheus semantics), so an omitted `provider`/`model`
   collapses to a single aggregate series rather than `provider=""`.
+  Operational continuation/transport families are intentionally separate:
+  `model_proxy_continuation_total{result}` has the bounded values
+  `not_offered`, `served`, `unavailable`, `rejected_upstream`, and `failed`;
+  `model_proxy_ws_pool_events_total{event}` has `hit`, `miss`, `create`,
+  `evict_lru`, `evict_idle`, `evict_age`, and `overflow`; gauges
+  `model_proxy_ws_pool_connections` and `model_proxy_ws_pool_capacity` expose
+  current pooled entries and the configured bound. Exactly one continuation
+  result is recorded per stream request. These families carry neither API-key
+  nor instance labels; Prometheus scrape-target identity supplies the replica,
+  and unknown enum inputs normalize to bounded sentinels.
   `-no-metrics` disables the endpoint — and, via a nil registry, the per-request
   recording itself — and `-metrics-listen` moves it (both override the config-file
   `metrics` object's `enabled`/`listen`; the default is enabled). When the listen
@@ -1309,8 +1399,10 @@ constructs neither registry nor feed.
   Histograms are out of scope; `requests_total` + `duration_seconds_total` give an
   average. The exposition is hand-rolled via the reusable stdlib-only
   `internal/metrics` package; config/flag resolution, build-info setup, separate
-  endpoint lifecycle, bind-failure policy, and context-driven shutdown are shared
-  by both proxy binaries, while metric-family registration remains service-specific.
+  endpoint lifecycle, bind-failure policy, and explicit idempotent shutdown
+  handles are shared by both proxy binaries, while metric-family registration
+  remains service-specific. The model proxy keeps this endpoint alive until the
+  API drain and handler/pool teardown finish.
 - **Pricing staleness.** The `GET /v1/models` catalog response carries an optional
   `pricing` object — `{source_date, max_age_seconds}` — and `max_age_seconds` is the
   configured models.dev refresh interval. `source_date` dates the served prices:
@@ -1321,7 +1413,10 @@ constructs neither registry nor feed.
   client can compare them to detect stale prices. Static context-tier schedules
   are included in `Target.Price`; only dynamic or route-dependent models may omit
   it even when request-time `cost_usd` can be calculated by a provider-specific
-  pricer.
+  pricer. Replicated production deployments pin one identical
+  `models.dev.api.json` in the image or a read-only volume and set
+  `models_dev_cache_ttl:0`; a catalog change is a deployment, not an independent
+  per-pod refresh.
 - **Selection rule:** `harness` fetches `GET /v1/models` from the proxy. Model
   selection resolves provider-qualified proxy target IDs, not arbitrary
   provider-local names. The target comes from `-model`, `HARNESS_MODEL`, config
@@ -2893,7 +2988,7 @@ type Session struct {
     Agent         string             `json:"agent,omitempty"`
     Prompt        int                `json:"prompt,omitempty"`
     ResponseState *llm.ResponseState `json:"response_state,omitempty"` // Responses stateful continuation anchor
-    ProxySessionID string `json:"proxy_session_id,omitempty"` // proxy continuation/websocket isolation key
+    ProxySessionID string `json:"proxy_session_id,omitempty"` // sticky-routing/WebSocket isolation key
     CacheAffinityID string `json:"cache_affinity_id,omitempty"` // stable prompt-cache routing identity
     Todos         []todo.Item        `json:"todos,omitempty"`          // update_todos list, reseeded on resume
     Plans         []plan.Plan        `json:"plans,omitempty"`          // record_plan list, reseeded on resume
@@ -2960,18 +3055,17 @@ type UsageTotals struct {
   records the boundary kind, save duration, and message count; stats use
   closed-turn records to expose save overhead and lag. `branch` records
   navigation source/target IDs in chronological replay.
-- Direct Responses integrations store the last `previous_response_id` and its
-  local message anchor in `state.json`. The CLI's model proxy normally owns
-  continuation instead: catalog targets expose `api_type` and
-  `continuation_stateful`, while requests carry an explicit stateless override
-  for `-responses-stateful=false`. The proxy content-addresses the represented
-  prefix, clears continuation on an override or prefix rewrite, and sends full
-  history before establishing a fresh anchor.
-- Gemini Interactions continuation is proxy-managed. The proxy defaults
-  `interactions_stateful` on, content-addresses each stored prefix, and falls
-  back to full history when state is absent or rejected. Sessions retain signed
-  Interactions thought and Google Search steps so a restarted proxy can replay
-  the conversation statelessly.
+- Sessions store the CLI-owned previous response/interaction ID, anchored message
+  count, and transcript fingerprint in `state.json`. Resume restores it only
+  when continuation is enabled for the exact current target, saved/current
+  provider and model match, the index is in range, and the fingerprint matches
+  the materialized active prefix. `active-turn.json` enforces the same invariant;
+  invalid recovery state is discarded. `-responses-stateful=false` installs no
+  anchor and sends complete history on every request.
+- Gemini Interactions uses the same CLI-owned continuation contract.
+  `interactions_stateful` controls the target's catalog capability; sessions
+  retain signed thought and Google Search steps so a missing/rejected stored
+  interaction can be replayed from complete history through any proxy replica.
 - Image bytes are embedded in `tree.ndjson` as provider-neutral base64 blocks so
   resume is self-contained; `raw.ndjson` records only image metadata for replay.
 - Auto-save to `~/.local/state/harness/sessions/<timestamp>`; the path is printed at
@@ -3103,7 +3197,7 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   currently eligible read-only tool-result block and aged image in one pass,
   and disarms until context falls to 50% or below. Compaction remains the safety
   net if an epoch cannot reclaim enough.
-- A pressure edit clears the direct or proxy-owned `previous_response_id`
+- A pressure edit clears the CLI-owned `previous_response_id`
   exactly once, while a below-pressure stateful request preserves it and sends
   only the appended delta. Stateless providers get the same batched transcript
   bounding without continuation reset semantics.

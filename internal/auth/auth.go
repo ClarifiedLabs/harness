@@ -81,6 +81,9 @@ type Source struct {
 
 	mu     sync.Mutex
 	cached token
+
+	codexRefreshFailure       string
+	codexRefreshFailureDigest [sha256.Size]byte
 }
 
 type token struct {
@@ -92,9 +95,6 @@ type token struct {
 	Scope        string    `json:"scope,omitempty"`
 	AccountID    string    `json:"account_id,omitempty"`
 	FedRAMP      bool      `json:"fedramp,omitempty"`
-
-	RefreshFailed  bool   `json:"refresh_failed,omitempty"`
-	RefreshFailure string `json:"refresh_failure,omitempty"`
 }
 
 // Options configures a Source.
@@ -236,27 +236,51 @@ func (s *Source) currentToken(ctx context.Context) (token, error) {
 			return token{}, err
 		}
 		if s.validForConfig(tok) {
+			s.clearCodexRefreshFailure()
 			s.cached = tok
 			return tok, nil
 		}
-		if tok.RefreshFailed {
-			return token{}, codexReauthError(s.name, tok.RefreshFailure)
+		refreshDigest := sha256.Sum256([]byte(tok.RefreshToken))
+		if s.codexRefreshFailure != "" {
+			if refreshDigest == s.codexRefreshFailureDigest {
+				return token{}, codexReauthError(s.name, s.codexRefreshFailure)
+			}
+			s.clearCodexRefreshFailure()
 		}
 		if tok.RefreshToken == "" {
 			return token{}, fmt.Errorf("auth: no valid OpenAI Codex token for %s; run auth login %s", s.name, s.name)
 		}
 		next, err := s.refreshCodex(ctx, tok)
 		if err != nil {
+			var terminal *codexTerminalRefreshError
+			if errors.As(err, &terminal) {
+				if peer, readErr := s.loadStoredToken(); readErr == nil &&
+					(peer.RefreshToken != tok.RefreshToken || peer.AccessToken != tok.AccessToken) &&
+					s.validForConfig(peer) {
+					s.clearCodexRefreshFailure()
+					s.cached = peer
+					return peer, nil
+				}
+				s.codexRefreshFailure = terminal.message
+				s.codexRefreshFailureDigest = refreshDigest
+				return token{}, codexReauthError(s.name, terminal.message)
+			}
 			return token{}, err
 		}
 		if err := writeTokenFile(s.tokenPath(), next); err != nil {
 			return token{}, err
 		}
+		s.clearCodexRefreshFailure()
 		s.cached = next
 		return next, nil
 	default:
 		return token{}, fmt.Errorf("auth: unsupported type %q", s.cfg.Type)
 	}
+}
+
+func (s *Source) clearCodexRefreshFailure() {
+	s.codexRefreshFailure = ""
+	s.codexRefreshFailureDigest = [sha256.Size]byte{}
 }
 
 func (s *Source) runTokenCommand(ctx context.Context) (token, error) {
@@ -656,14 +680,6 @@ func Status(cfg Config, configDir, name string, w io.Writer, now time.Time) erro
 		fmt.Fprintf(w, "%s: token file has no access token\n", name)
 		return nil
 	}
-	if normalizeType(cfg.Type) == TypeCodexOAuth && tok.RefreshFailed {
-		if tok.RefreshFailure != "" {
-			fmt.Fprintf(w, "%s: refresh failed (%s); run auth login %s\n", name, tok.RefreshFailure, name)
-		} else {
-			fmt.Fprintf(w, "%s: refresh failed; run auth login %s\n", name, name)
-		}
-		return nil
-	}
 	if tok.Expiry.IsZero() {
 		fmt.Fprintf(w, "%s: logged in (no expiry)\n", name)
 		return nil
@@ -1041,12 +1057,7 @@ func (s *Source) refreshCodex(ctx context.Context, old token) (token, error) {
 		code, desc := parseOAuthErrorBody(data)
 		message := codexRefreshFailureMessage(status, code, desc)
 		if codexTerminalRefreshFailure(status, code) {
-			old.RefreshFailed = true
-			old.RefreshFailure = message
-			if err := writeTokenFile(s.tokenPath(), old); err != nil {
-				return token{}, err
-			}
-			return token{}, codexReauthError(s.name, message)
+			return token{}, &codexTerminalRefreshError{message: message}
 		}
 		return token{}, fmt.Errorf("auth: OpenAI Codex token refresh failed: %s", message)
 	}
@@ -1066,8 +1077,6 @@ func (s *Source) refreshCodex(ctx context.Context, old token) (token, error) {
 	}
 	next := old
 	next.AccessToken = wire.AccessToken
-	next.RefreshFailed = false
-	next.RefreshFailure = ""
 	if wire.IDToken != "" {
 		next.IDToken = wire.IDToken
 	}
@@ -1085,6 +1094,14 @@ func (s *Source) refreshCodex(ctx context.Context, old token) (token, error) {
 		next.Expiry = s.now().Add(time.Duration(wire.ExpiresIn) * time.Second)
 	}
 	return enrichCodexToken(next, s.now())
+}
+
+type codexTerminalRefreshError struct {
+	message string
+}
+
+func (e *codexTerminalRefreshError) Error() string {
+	return e.message
 }
 
 func postJSON(ctx context.Context, client *http.Client, endpoint string, body any) (int, []byte, error) {

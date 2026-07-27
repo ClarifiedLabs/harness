@@ -501,7 +501,14 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 			sourceState.CacheAffinityID,
 		)
 	}
-	if continuedState.ResponseState == nil || continuedState.ResponseState.PreviousResponseID != "resp-continued" {
+	if continuedState.ResponseState == nil ||
+		continuedState.ResponseState.PreviousResponseID != "resp-continued" ||
+		continuedState.ResponseState.AnchorMessages < 0 ||
+		continuedState.ResponseState.AnchorMessages > len(continuedState.Messages) ||
+		!llm.MatchesMessageFingerprint(
+			continuedState.Messages[:continuedState.ResponseState.AnchorMessages],
+			continuedState.ResponseState.AnchorDigest,
+		) {
 		t.Fatalf("continued response state = %+v", continuedState.ResponseState)
 	}
 	if len(continuedState.Todos) != 1 || continuedState.Todos[0].Content != "finish child work" {
@@ -1256,7 +1263,13 @@ func TestDelegatePersistsClosedTurnBeforeNextModelResponse(t *testing.T) {
 	if len(recovered.Todos) != 1 || recovered.Todos[0].Status != "completed" {
 		t.Fatalf("child checkpoint todos = %+v", recovered.Todos)
 	}
-	if recovered.ResponseState == nil || recovered.ResponseState.PreviousResponseID != "child-resp-1" || recovered.ResponseState.AnchorMessages != 2 {
+	if recovered.ResponseState == nil ||
+		recovered.ResponseState.PreviousResponseID != "child-resp-1" ||
+		recovered.ResponseState.AnchorMessages != 2 ||
+		!llm.MatchesMessageFingerprint(
+			recovered.Messages[:recovered.ResponseState.AnchorMessages],
+			recovered.ResponseState.AnchorDigest,
+		) {
 		t.Fatalf("child checkpoint response state = %+v", recovered.ResponseState)
 	}
 	meta := readDelegateChildMeta(t, childDir)

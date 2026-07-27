@@ -37,6 +37,7 @@ const (
 // metadata and aggregate fingerprints, never model-visible text or image data.
 type APIErrorDiagnostic struct {
 	Stage             APIErrorStage            `json:"stage,omitempty"`
+	ProxyInstanceID   string                   `json:"proxy_instance_id,omitempty"`
 	ProxyRequestID    uint64                   `json:"proxy_request_id,omitempty"`
 	TargetID          string                   `json:"target_id,omitempty"`
 	Provider          string                   `json:"provider,omitempty"`

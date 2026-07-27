@@ -261,7 +261,11 @@ func SaveActiveTurnCheckpoint(dir string, state Session, phase string, prompt, t
 	if state.ResponseState != nil &&
 		(state.ResponseState.PreviousResponseID == "" ||
 			state.ResponseState.AnchorMessages < 0 ||
-			state.ResponseState.AnchorMessages > len(state.Messages)) {
+			state.ResponseState.AnchorMessages > len(state.Messages) ||
+			!llm.MatchesMessageFingerprint(
+				state.Messages[:state.ResponseState.AnchorMessages],
+				state.ResponseState.AnchorDigest,
+			)) {
 		return errors.New("session: active-turn response state is invalid")
 	}
 	if state.Tree != nil {
@@ -441,7 +445,11 @@ func Load(dir string) (Session, error) {
 	if recovered.ResponseState != nil &&
 		(recovered.ResponseState.PreviousResponseID == "" ||
 			recovered.ResponseState.AnchorMessages < 0 ||
-			recovered.ResponseState.AnchorMessages > len(recovered.Messages)) {
+			recovered.ResponseState.AnchorMessages > len(recovered.Messages) ||
+			!llm.MatchesMessageFingerprint(
+				recovered.Messages[:recovered.ResponseState.AnchorMessages],
+				recovered.ResponseState.AnchorDigest,
+			)) {
 		recovered.ResponseState = nil
 	}
 

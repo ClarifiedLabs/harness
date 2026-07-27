@@ -542,10 +542,11 @@ func TestOneShotSaveFailureWarned(t *testing.T) {
 func TestOneShotCompatibilityDiagnosticDisplayedLoggedAndRecordedSafely(t *testing.T) {
 	payload := uiOnePixelPNG
 	diagnostic := &llm.APIErrorDiagnostic{
-		Stage:          llm.APIErrorStageUpstreamHTTP,
-		ProxyRequestID: 77,
-		TargetID:       "openai:vision",
-		TraceID:        "trace-abc",
+		Stage:           llm.APIErrorStageUpstreamHTTP,
+		ProxyInstanceID: "proxy-a",
+		ProxyRequestID:  77,
+		TargetID:        "openai:vision",
+		TraceID:         "trace-abc",
 		Compatibility: &llm.CompatibilityDiagnostic{
 			Category:    llm.CompatibilityCategoryMultimodalToolResultRejected,
 			Reason:      "image_unsupported",
@@ -584,7 +585,7 @@ func TestOneShotCompatibilityDiagnosticDisplayedLoggedAndRecordedSafely(t *testi
 		t.Fatalf("compatibility notice count in stderr = %d: %s", strings.Count(errw.String(), "model compatibility:"), errw.String())
 	}
 	logText := diagnostics.String()
-	for _, want := range []string{`"msg":"model compatibility diagnostic"`, `"prompt":1`, `"turn":1`, `"attempt":1`, `"proxy_request_id":77`, `"trace_id":"trace-abc"`, `"api_message":"sanitized image rejection"`} {
+	for _, want := range []string{`"msg":"model compatibility diagnostic"`, `"prompt":1`, `"turn":1`, `"attempt":1`, `"proxy_instance_id":"proxy-a"`, `"proxy_request_id":77`, `"trace_id":"trace-abc"`, `"api_message":"sanitized image rejection"`} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("diagnostic log %q missing %q", logText, want)
 		}

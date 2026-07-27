@@ -23,10 +23,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,9 +40,13 @@ import (
 	"testing"
 	"time"
 
+	"harness/internal/agent"
 	"harness/internal/llm"
+	"harness/internal/llm/factory"
+	modelclient "harness/internal/modelproxy/client"
 	modelserver "harness/internal/modelproxy/server"
 	"harness/internal/session"
+	"harness/internal/tools"
 )
 
 var (
@@ -258,31 +264,530 @@ func startHarness(t *testing.T, bin, baseURL string, extraArgs ...string) (*exec
 	return cmd, stdout, errBuf, home
 }
 
-func startModelProxy(t *testing.T, baseURL string) string {
+type modelProxyRouteMode int
+
+const (
+	modelProxyRoundRobin modelProxyRouteMode = iota
+	modelProxySticky
+)
+
+type modelProxyClusterOptions struct {
+	replicas           int
+	apiType            string
+	responsesWebSocket bool
+	route              modelProxyRouteMode
+	newProvider        func(replica int, opts factory.Options) (llm.Provider, error)
+}
+
+type modelProxyCluster struct {
+	server     *httptest.Server
+	handlers   []*modelserver.Handler
+	lifecycles []*modelserver.Lifecycle
+	router     *modelProxyReplicaRouter
+}
+
+func startModelProxy(t *testing.T, baseURL string, options ...modelProxyClusterOptions) string {
 	t.Helper()
+	return startModelProxyCluster(t, baseURL, options...).server.URL
+}
+
+func startModelProxyCluster(t *testing.T, baseURL string, options ...modelProxyClusterOptions) *modelProxyCluster {
+	t.Helper()
+	opts := modelProxyClusterOptions{replicas: 1, apiType: "openai"}
+	if len(options) > 0 {
+		opts = options[0]
+		if opts.replicas <= 0 {
+			opts.replicas = 1
+		}
+		if opts.apiType == "" {
+			opts.apiType = "openai"
+		}
+	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(fmt.Sprintf(`{
-  "name": "openai",
-  "api_type": "openai",
-  "base_url": %q,
-  "models": [{"name":"mock-model","context_window":128000}]
-}`, baseURL)), 0o600); err != nil {
+	providerConfig := map[string]any{
+		"name":     "openai",
+		"api_type": opts.apiType,
+		"base_url": baseURL,
+		"api_key":  "test-key",
+		"models": []map[string]any{{
+			"name":           "mock-model",
+			"context_window": 128000,
+		}},
+	}
+	if opts.responsesWebSocket {
+		providerConfig["responses_websocket"] = true
+	}
+	data, err := json.Marshal(providerConfig)
+	if err != nil {
+		t.Fatalf("marshal proxy provider config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), data, 0o600); err != nil {
 		t.Fatalf("write proxy provider config: %v", err)
 	}
-	handler, err := modelserver.NewHandler(modelserver.Options{
-		ConfigDir: dir,
-		Config: modelserver.Config{
-			ProviderConfigs:      []string{"openai.json"},
-			DefaultContextWindow: 128000,
-		},
-		Getenv: func(string) string { return "" },
-	})
-	if err != nil {
-		t.Fatalf("start model proxy: %v", err)
+
+	cluster := &modelProxyCluster{}
+	for replica := 0; replica < opts.replicas; replica++ {
+		replica := replica
+		handlerOpts := modelserver.Options{
+			ConfigDir: dir,
+			Config: modelserver.Config{
+				ProviderConfigs:      []string{"openai.json"},
+				DefaultContextWindow: 128000,
+			},
+			Getenv:     func(string) string { return "" },
+			InstanceID: fmt.Sprintf("replica-%d", replica),
+		}
+		if opts.newProvider != nil {
+			handlerOpts.New = func(providerOpts factory.Options) (llm.Provider, error) {
+				return opts.newProvider(replica, providerOpts)
+			}
+		}
+		handler, err := modelserver.NewHandler(handlerOpts)
+		if err != nil {
+			for _, prior := range cluster.handlers {
+				_ = prior.Close()
+			}
+			t.Fatalf("start model proxy replica %d: %v", replica, err)
+		}
+		cluster.handlers = append(cluster.handlers, handler)
+		cluster.lifecycles = append(cluster.lifecycles, modelserver.NewLifecycle(handler))
 	}
-	proxy := httptest.NewServer(handler)
-	t.Cleanup(proxy.Close)
-	return proxy.URL
+	cluster.router = newModelProxyReplicaRouter(cluster.lifecycles, opts.route)
+	cluster.server = httptest.NewServer(cluster.router)
+	t.Cleanup(func() {
+		cluster.server.Close()
+		for _, handler := range cluster.handlers {
+			_ = handler.Close()
+		}
+	})
+	return cluster
+}
+
+func (c *modelProxyCluster) drain(replica int) {
+	c.lifecycles[replica].BeginDrain()
+	c.router.drain(replica)
+}
+
+type modelProxyReplicaRouter struct {
+	mu       sync.Mutex
+	handlers []http.Handler
+	ready    []bool
+	route    modelProxyRouteMode
+	next     uint64
+	routes   []int
+}
+
+func newModelProxyReplicaRouter(handlers []*modelserver.Lifecycle, route modelProxyRouteMode) *modelProxyReplicaRouter {
+	out := &modelProxyReplicaRouter{
+		handlers: make([]http.Handler, len(handlers)),
+		ready:    make([]bool, len(handlers)),
+		route:    route,
+	}
+	for i, handler := range handlers {
+		out.handlers[i] = handler
+		out.ready[i] = true
+	}
+	return out
+}
+
+func (r *modelProxyReplicaRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	replica := r.selectReplica(req)
+	if replica < 0 {
+		http.Error(w, "no ready model proxy replicas", http.StatusServiceUnavailable)
+		return
+	}
+	r.handlers[replica].ServeHTTP(w, req)
+}
+
+func (r *modelProxyReplicaRouter) selectReplica(req *http.Request) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.handlers) == 0 {
+		return -1
+	}
+	// Catalog, usage, token-count, and probe requests do not consume the stream
+	// round-robin sequence. Any ready replica can serve their stateless data.
+	if req.URL.Path != "/v1/stream" {
+		for i, ready := range r.ready {
+			if ready {
+				return i
+			}
+		}
+		return -1
+	}
+
+	start := int(r.next % uint64(len(r.handlers)))
+	if r.route == modelProxySticky {
+		if sessionID := req.Header.Get("X-Harness-Session"); sessionID != "" {
+			digest := sha256.Sum256([]byte(sessionID))
+			start = int(digest[0]) % len(r.handlers)
+		}
+	} else {
+		r.next++
+	}
+	for offset := 0; offset < len(r.handlers); offset++ {
+		replica := (start + offset) % len(r.handlers)
+		if r.ready[replica] {
+			r.routes = append(r.routes, replica)
+			return replica
+		}
+	}
+	return -1
+}
+
+func (r *modelProxyReplicaRouter) drain(replica int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ready[replica] = false
+}
+
+func (r *modelProxyReplicaRouter) streamRoutes() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int(nil), r.routes...)
+}
+
+type replicaRequestRecord struct {
+	replica int
+	request llm.Request
+}
+
+type replicaRequestRecorder struct {
+	mu           sync.Mutex
+	requests     []replicaRequestRecord
+	blockFirst   bool
+	firstStarted chan struct{}
+	releaseFirst chan struct{}
+	startOnce    sync.Once
+	releaseOnce  sync.Once
+}
+
+func newReplicaRequestRecorder(blockFirst bool) *replicaRequestRecorder {
+	r := &replicaRequestRecorder{blockFirst: blockFirst}
+	if blockFirst {
+		r.firstStarted = make(chan struct{})
+		r.releaseFirst = make(chan struct{})
+	}
+	return r
+}
+
+func (r *replicaRequestRecorder) stream(
+	ctx context.Context,
+	replica int,
+	req llm.Request,
+	onDone func(string),
+) iter.Seq2[llm.StreamEvent, error] {
+	return func(yield func(llm.StreamEvent, error) bool) {
+		r.mu.Lock()
+		index := len(r.requests)
+		r.requests = append(r.requests, replicaRequestRecord{replica: replica, request: req})
+		r.mu.Unlock()
+
+		if r.blockFirst && index == 0 {
+			r.startOnce.Do(func() { close(r.firstStarted) })
+			select {
+			case <-r.releaseFirst:
+			case <-ctx.Done():
+				yield(llm.StreamEvent{}, ctx.Err())
+				return
+			}
+		}
+
+		if !yield(llm.StreamEvent{Kind: llm.EventTextDelta, Text: fmt.Sprintf("replica-%d", replica)}, nil) {
+			return
+		}
+		responseID := fmt.Sprintf("resp-%d-%d", replica, index+1)
+		if onDone != nil {
+			onDone(responseID)
+		}
+		yield(llm.StreamEvent{
+			Kind:       llm.EventDone,
+			ResponseID: responseID,
+			StopReason: llm.StopEndTurn,
+			Usage:      &llm.Usage{InputTokens: 1, OutputTokens: 1},
+		}, nil)
+	}
+}
+
+func (r *replicaRequestRecorder) snapshot() []replicaRequestRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]replicaRequestRecord(nil), r.requests...)
+}
+
+func (r *replicaRequestRecorder) unblock() {
+	if r.releaseFirst != nil {
+		r.releaseOnce.Do(func() { close(r.releaseFirst) })
+	}
+}
+
+type durableReplicaProvider struct {
+	replica  int
+	recorder *replicaRequestRecorder
+}
+
+func (*durableReplicaProvider) Name() string { return "responses-http-fake" }
+
+func (p *durableReplicaProvider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
+	return p.recorder.stream(ctx, p.replica, req, nil)
+}
+
+type socketReplicaProvider struct {
+	replica  int
+	recorder *replicaRequestRecorder
+	mu       sync.Mutex
+	response string
+	closed   bool
+}
+
+func (*socketReplicaProvider) Name() string { return "responses-websocket-fake" }
+
+func (p *socketReplicaProvider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
+	return p.recorder.stream(ctx, p.replica, req, func(responseID string) {
+		p.mu.Lock()
+		p.response = responseID
+		p.mu.Unlock()
+	})
+}
+
+func (p *socketReplicaProvider) CanContinueResponse(responseID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.closed && responseID != "" && responseID == p.response
+}
+
+func (p *socketReplicaProvider) Close() error {
+	p.mu.Lock()
+	p.closed = true
+	p.response = ""
+	p.mu.Unlock()
+	return nil
+}
+
+type integrationAgentSink struct {
+	mu      sync.Mutex
+	notices []string
+}
+
+func (*integrationAgentSink) TextDelta(string)                                 {}
+func (*integrationAgentSink) ReasoningSummary(string)                          {}
+func (*integrationAgentSink) TurnAttemptStart(int, int, agent.ContextEstimate) {}
+func (*integrationAgentSink) TurnAttemptComplete(agent.TurnAttemptUsage)       {}
+func (*integrationAgentSink) ToolUseStart(llm.ToolCall)                        {}
+func (*integrationAgentSink) ToolUseDelta(int, string)                         {}
+func (*integrationAgentSink) ToolStart(llm.ToolCall)                           {}
+func (*integrationAgentSink) ToolResult(llm.ToolResult)                        {}
+func (s *integrationAgentSink) Notice(message string) {
+	s.mu.Lock()
+	s.notices = append(s.notices, message)
+	s.mu.Unlock()
+}
+func (*integrationAgentSink) TurnComplete(agent.TurnUsage)     {}
+func (*integrationAgentSink) PromptComplete(agent.PromptUsage) {}
+
+func (s *integrationAgentSink) noticeCount(fragment string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for _, notice := range s.notices {
+		if strings.Contains(notice, fragment) {
+			count++
+		}
+	}
+	return count
+}
+
+func newReplicaAgent(t *testing.T, proxyURL string, stateful bool) *agent.Agent {
+	t.Helper()
+	client, err := modelclient.New(proxyURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agent.New(client.Provider("openai:mock-model"), tools.Default(), agent.Options{
+		Model:                 "mock-model",
+		ResponsesStateful:     stateful,
+		DisableAutoCompaction: true,
+	})
+}
+
+func TestMultiReplicaHTTPContinuationIsPodIndependent(t *testing.T) {
+	recorder := newReplicaRequestRecorder(false)
+	cluster := startModelProxyCluster(t, "https://example.invalid/v1", modelProxyClusterOptions{
+		replicas: 2,
+		apiType:  "responses",
+		route:    modelProxyRoundRobin,
+		newProvider: func(replica int, _ factory.Options) (llm.Provider, error) {
+			return &durableReplicaProvider{replica: replica, recorder: recorder}, nil
+		},
+	})
+	a := newReplicaAgent(t, cluster.server.URL, true)
+	sink := &integrationAgentSink{}
+	if err := a.RunPrompt(context.Background(), "first", sink); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RunPrompt(context.Background(), "second", sink); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := recorder.snapshot()
+	if len(requests) != 2 || requests[0].replica != 0 || requests[1].replica != 1 {
+		t.Fatalf("provider requests = %+v", requests)
+	}
+	if requests[0].request.PreviousResponseID != "" ||
+		requests[1].request.PreviousResponseID == "" ||
+		len(requests[1].request.Messages) != 1 {
+		t.Fatalf("HTTP continuation did not cross replicas: first=%+v second=%+v", requests[0].request, requests[1].request)
+	}
+}
+
+func TestMultiReplicaWebSocketMissResendsFullContextOnce(t *testing.T) {
+	recorder := newReplicaRequestRecorder(false)
+	cluster := startModelProxyCluster(t, "https://example.invalid/v1", modelProxyClusterOptions{
+		replicas:           2,
+		apiType:            "responses",
+		responsesWebSocket: true,
+		route:              modelProxyRoundRobin,
+		newProvider: func(replica int, _ factory.Options) (llm.Provider, error) {
+			return &socketReplicaProvider{replica: replica, recorder: recorder}, nil
+		},
+	})
+	a := newReplicaAgent(t, cluster.server.URL, true)
+	sink := &integrationAgentSink{}
+	if err := a.RunPrompt(context.Background(), "first", sink); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RunPrompt(context.Background(), "second", sink); err != nil {
+		t.Fatal(err)
+	}
+
+	if routes := cluster.router.streamRoutes(); len(routes) != 3 || routes[0] != 0 || routes[1] != 1 || routes[2] != 0 {
+		t.Fatalf("stream routes = %v, want initial, miss, retry", routes)
+	}
+	requests := recorder.snapshot()
+	if len(requests) != 2 {
+		t.Fatalf("upstream requests = %d, want miss rejected before upstream", len(requests))
+	}
+	if requests[1].request.PreviousResponseID != "" || len(requests[1].request.Messages) != 3 {
+		t.Fatalf("retry request = %+v, want one full-context resend", requests[1].request)
+	}
+	if got := sink.noticeCount("previous response unavailable"); got != 1 {
+		t.Fatalf("reset notices = %d, want 1", got)
+	}
+}
+
+func TestMultiReplicaWebSocketStickyRoutingAvoidsMiss(t *testing.T) {
+	recorder := newReplicaRequestRecorder(false)
+	cluster := startModelProxyCluster(t, "https://example.invalid/v1", modelProxyClusterOptions{
+		replicas:           2,
+		apiType:            "responses",
+		responsesWebSocket: true,
+		route:              modelProxySticky,
+		newProvider: func(replica int, _ factory.Options) (llm.Provider, error) {
+			return &socketReplicaProvider{replica: replica, recorder: recorder}, nil
+		},
+	})
+	a := newReplicaAgent(t, cluster.server.URL, true)
+	sink := &integrationAgentSink{}
+	if err := a.RunPrompt(context.Background(), "first", sink); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RunPrompt(context.Background(), "second", sink); err != nil {
+		t.Fatal(err)
+	}
+
+	routes := cluster.router.streamRoutes()
+	if len(routes) != 2 || routes[0] != routes[1] {
+		t.Fatalf("sticky stream routes = %v", routes)
+	}
+	requests := recorder.snapshot()
+	if len(requests) != 2 || requests[1].request.PreviousResponseID == "" || len(requests[1].request.Messages) != 1 {
+		t.Fatalf("sticky provider requests = %+v", requests)
+	}
+	if got := sink.noticeCount("previous response unavailable"); got != 0 {
+		t.Fatalf("sticky routing produced %d continuation misses", got)
+	}
+}
+
+func TestMultiReplicaResponsesStatefulDisabledAlwaysSendsFullContext(t *testing.T) {
+	recorder := newReplicaRequestRecorder(false)
+	cluster := startModelProxyCluster(t, "https://example.invalid/v1", modelProxyClusterOptions{
+		replicas: 2,
+		apiType:  "responses",
+		route:    modelProxyRoundRobin,
+		newProvider: func(replica int, _ factory.Options) (llm.Provider, error) {
+			return &durableReplicaProvider{replica: replica, recorder: recorder}, nil
+		},
+	})
+	a := newReplicaAgent(t, cluster.server.URL, false)
+	sink := &integrationAgentSink{}
+	if err := a.RunPrompt(context.Background(), "first", sink); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RunPrompt(context.Background(), "second", sink); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := recorder.snapshot()
+	if len(requests) != 2 {
+		t.Fatalf("provider requests = %d", len(requests))
+	}
+	for i, request := range requests {
+		if request.request.StoreResponse || request.request.PreviousResponseID != "" {
+			t.Fatalf("request %d carried continuation: %+v", i, request.request)
+		}
+	}
+	if len(requests[0].request.Messages) != 1 || len(requests[1].request.Messages) != 3 {
+		t.Fatalf("stateless message counts = %d, %d", len(requests[0].request.Messages), len(requests[1].request.Messages))
+	}
+}
+
+func TestMultiReplicaDrainFinishesInflightAndRoutesNewWorkElsewhere(t *testing.T) {
+	recorder := newReplicaRequestRecorder(true)
+	defer recorder.unblock()
+	cluster := startModelProxyCluster(t, "https://example.invalid/v1", modelProxyClusterOptions{
+		replicas: 2,
+		apiType:  "responses",
+		route:    modelProxyRoundRobin,
+		newProvider: func(replica int, _ factory.Options) (llm.Provider, error) {
+			return &durableReplicaProvider{replica: replica, recorder: recorder}, nil
+		},
+	})
+	first := newReplicaAgent(t, cluster.server.URL, true)
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- first.RunPrompt(context.Background(), "in flight", &integrationAgentSink{})
+	}()
+	select {
+	case <-recorder.firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first replica did not start stream")
+	}
+
+	cluster.drain(0)
+	probe := httptest.NewRecorder()
+	cluster.lifecycles[0].ServeHTTP(probe, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if probe.Code != http.StatusServiceUnavailable {
+		t.Fatalf("draining replica readiness = %d, want 503", probe.Code)
+	}
+
+	second := newReplicaAgent(t, cluster.server.URL, true)
+	if err := second.RunPrompt(context.Background(), "new work", &integrationAgentSink{}); err != nil {
+		t.Fatal(err)
+	}
+	requests := recorder.snapshot()
+	if len(requests) != 2 || requests[1].replica != 1 {
+		t.Fatalf("new work did not route to ready replica: %+v", requests)
+	}
+
+	recorder.unblock()
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("in-flight stream did not finish: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("in-flight stream did not finish after drain")
+	}
 }
 
 // safeBuffer is a tiny concurrency-safe writer for capturing subprocess stderr.

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -38,6 +39,8 @@ import (
 
 const maxStreamRequestBytes = 64 << 20
 
+var instanceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
 var reasoningProfileRank = map[string]int{
 	"none":    0,
 	"minimal": 1,
@@ -54,6 +57,9 @@ type Config struct {
 	LogLevel             string        `json:"log_level,omitempty"`
 	LogFormat            string        `json:"log_format,omitempty"`
 	ModelsDevCacheTTL    Duration      `json:"models_dev_cache_ttl,omitempty"`
+	DrainDelay           Duration      `json:"drain_delay,omitempty"`
+	ShutdownTimeout      Duration      `json:"shutdown_timeout,omitempty"`
+	InstanceID           string        `json:"instance_id,omitempty"`
 	APIKeysFile          string        `json:"api_keys_file,omitempty"`
 	Metrics              MetricsConfig `json:"metrics,omitempty"`
 }
@@ -73,7 +79,8 @@ func (c CostBudgetConfig) Enabled() bool {
 type MetricsConfig = metrics.Config
 
 // Duration is a JSON duration setting. Strings use Go duration syntax such as
-// "24h"; numeric values are seconds, so 0 disables the setting.
+// "24h"; numeric values are seconds. Set distinguishes an explicit zero so
+// each caller can apply its own zero-value semantics.
 type Duration struct {
 	Duration time.Duration
 	Set      bool
@@ -156,6 +163,10 @@ type Options struct {
 	// the handler level; the command wires a registry in when the metrics
 	// endpoint is enabled.
 	Metrics *metrics.Registry
+	// InstanceID identifies this proxy process in diagnostics and per-process
+	// usage reports. Empty generates a random 16-byte hexadecimal identifier.
+	InstanceID string
+	wsPool     wsPoolOptions
 }
 
 // usageKey identifies an aggregate usage bucket by provider and model.
@@ -198,6 +209,10 @@ type metricsCollectors struct {
 	reasoning    *metrics.Counter
 	cost         *metrics.Counter
 	duration     *metrics.Counter
+	continuation *metrics.Counter
+	wsPoolEvents *metrics.Counter
+	wsPoolSize   *metrics.Gauge
+	wsPoolCap    *metrics.Gauge
 }
 
 type Handler struct {
@@ -216,6 +231,8 @@ type Handler struct {
 	logger               *slog.Logger
 	newProvider          func(factory.Options) (llm.Provider, error)
 	nextRequestID        atomic.Uint64
+	instanceID           string
+	startedAt            time.Time
 
 	metrics    *metrics.Registry
 	metricFams *metricsCollectors
@@ -226,12 +243,7 @@ type Handler struct {
 	usageMu sync.Mutex
 	usage   map[usageKey]*protocol.ModelUsage
 
-	providerMu    sync.Mutex
-	providerCache map[string]llm.Provider
-
-	continuationMu       sync.Mutex
-	continuations        map[string]continuationEntry
-	disabledContinuation map[string]bool
+	wsPool *wsPool
 }
 
 func NewHandler(opts Options) (*Handler, error) {
@@ -271,6 +283,16 @@ func NewHandler(opts Options) (*Handler, error) {
 	if maxAge <= 0 {
 		maxAge = opts.Config.ModelsDevCacheTTL.Duration
 	}
+	configuredInstanceID := opts.InstanceID
+	if strings.TrimSpace(configuredInstanceID) == "" {
+		configuredInstanceID = opts.Config.InstanceID
+	}
+	instanceID, err := resolveInstanceID(configuredInstanceID)
+	if err != nil {
+		return nil, err
+	}
+	logger = logger.With("proxy_instance_id", instanceID)
+	startedAt := now()
 	h := &Handler{
 		providers:            providers,
 		authSources:          authSources,
@@ -282,11 +304,10 @@ func NewHandler(opts Options) (*Handler, error) {
 		now:                  now,
 		logger:               logger,
 		newProvider:          newProvider,
+		instanceID:           instanceID,
+		startedAt:            startedAt,
 		keyBudgets:           map[string]*costBudgetTracker{},
 		usage:                map[usageKey]*protocol.ModelUsage{},
-		providerCache:        map[string]llm.Provider{},
-		continuations:        map[string]continuationEntry{},
-		disabledContinuation: map[string]bool{},
 	}
 	if opts.Metrics != nil {
 		h.metrics = opts.Metrics
@@ -297,7 +318,41 @@ func NewHandler(opts Options) (*Handler, error) {
 		return nil, err
 	}
 	h.snapshot.Store(snapshot)
+	poolOpts := opts.wsPool
+	externalPoolEvent := poolOpts.onEvent
+	poolOpts.onEvent = func(event string) {
+		if externalPoolEvent != nil {
+			externalPoolEvent(event)
+		}
+		h.recordWSPoolEvent(event)
+	}
+	externalPoolSize := poolOpts.onSize
+	poolOpts.onSize = func(current, capacity int) {
+		if externalPoolSize != nil {
+			externalPoolSize(current, capacity)
+		}
+		if h.metricFams != nil {
+			h.metricFams.wsPoolSize.Set(float64(current), nil)
+			h.metricFams.wsPoolCap.Set(float64(capacity), nil)
+		}
+	}
+	h.wsPool = newWSPool(poolOpts)
 	return h, nil
+}
+
+func resolveInstanceID(configured string) (string, error) {
+	id := strings.TrimSpace(configured)
+	if id == "" {
+		var raw [16]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			return "", fmt.Errorf("model proxy: generate instance id: %w", err)
+		}
+		return hex.EncodeToString(raw[:]), nil
+	}
+	if !instanceIDPattern.MatchString(id) {
+		return "", fmt.Errorf("model proxy: invalid instance id %q (want [A-Za-z0-9][A-Za-z0-9._-]{0,127})", configured)
+	}
+	return id, nil
 }
 
 // registerMetricFamilies pre-registers the proxy's Prometheus counter
@@ -315,6 +370,42 @@ func registerMetricFamilies(r *metrics.Registry) *metricsCollectors {
 		reasoning:    r.Counter("model_proxy_reasoning_tokens_total", "Reasoning tokens."),
 		cost:         r.Counter("model_proxy_cost_usd_total", "Estimated cost in US dollars."),
 		duration:     r.Counter("model_proxy_request_duration_seconds_total", "Total request wall-clock duration in seconds."),
+		continuation: r.Counter("model_proxy_continuation_total", "Number of stream requests by provider-continuation result."),
+		wsPoolEvents: r.Counter("model_proxy_ws_pool_events_total", "Number of Responses WebSocket pool events."),
+		wsPoolSize:   r.Gauge("model_proxy_ws_pool_connections", "Current number of pooled Responses WebSocket connections."),
+		wsPoolCap:    r.Gauge("model_proxy_ws_pool_capacity", "Configured maximum Responses WebSocket pool size."),
+	}
+}
+
+func (h *Handler) recordWSPoolEvent(event string) {
+	if h.metricFams == nil {
+		return
+	}
+	h.metricFams.wsPoolEvents.Inc(map[string]string{"event": normalizeWSPoolEvent(event)})
+}
+
+func (h *Handler) recordContinuation(result string) {
+	if h.metricFams == nil {
+		return
+	}
+	h.metricFams.continuation.Inc(map[string]string{"result": normalizeContinuationResult(result)})
+}
+
+func normalizeWSPoolEvent(event string) string {
+	switch event {
+	case "hit", "miss", "create", "evict_lru", "evict_idle", "evict_age", "overflow":
+		return event
+	default:
+		return "unknown"
+	}
+}
+
+func normalizeContinuationResult(result string) string {
+	switch result {
+	case "not_offered", "served", "unavailable", "rejected_upstream", "failed":
+		return result
+	default:
+		return "failed"
 	}
 }
 
@@ -355,6 +446,7 @@ func (h *Handler) RecordRejectedStream(r *http.Request) {
 	labels := map[string]string{"key": key, "purpose": string(llm.RequestPurposeUnknown)}
 	h.metricFams.requests.Inc(labels)
 	h.metricFams.errors.Inc(labels)
+	h.recordContinuation("not_offered")
 }
 
 // streamFailed reports whether a completed stream should count as an error for
@@ -621,6 +713,15 @@ func (h *Handler) Catalog() protocol.Catalog {
 	return h.snapshot.Load().catalog
 }
 
+// InstanceID returns the stable identity stamped into this handler's logs,
+// diagnostics, events, and per-process usage report.
+func (h *Handler) InstanceID() string {
+	if h == nil {
+		return ""
+	}
+	return h.instanceID
+}
+
 func (h *Handler) logTracedProxyRequest(r *http.Request, cw *countingResponseWriter, start time.Time, requestBytes int, tc tracing.Context) {
 	attrs := []any{
 		"requester", requesterName(r),
@@ -693,7 +794,11 @@ func (h *Handler) usageSnapshot() protocol.UsageReport {
 
 func (h *Handler) usageSnapshotForRequest(r *http.Request) protocol.UsageReport {
 	h.usageMu.Lock()
-	report := protocol.UsageReport{Models: make([]protocol.ModelUsage, 0, len(h.usage))}
+	report := protocol.UsageReport{
+		Instance: h.instanceID,
+		Since:    h.startedAt,
+		Models:   make([]protocol.ModelUsage, 0, len(h.usage)),
+	}
 	for _, acc := range h.usage {
 		report.Models = append(report.Models, *acc)
 	}
@@ -818,31 +923,33 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	requestID := h.nextRequestID.Add(1)
 	cw := &countingResponseWriter{ResponseWriter: w}
 	var (
-		targetID        string
-		providerID      string
-		apiType         string
-		model           string
-		purpose         = llm.RequestPurposeUnknown
-		usage           llm.Usage
-		stop            llm.StopReason
-		streamErr       string
-		events          int
-		toolCalls       int
-		reqBytes        int
-		errAttrs        []any
-		budget          *costBudgetTracker
-		requestShape    *llm.MultimodalRequestShape
-		finalDiagnostic *llm.APIErrorDiagnostic
-		eventSequence   int
+		targetID           string
+		providerID         string
+		apiType            string
+		model              string
+		purpose            = llm.RequestPurposeUnknown
+		usage              llm.Usage
+		stop               llm.StopReason
+		streamErr          string
+		events             int
+		toolCalls          int
+		reqBytes           int
+		errAttrs           []any
+		budget             *costBudgetTracker
+		requestShape       *llm.MultimodalRequestShape
+		finalDiagnostic    *llm.APIErrorDiagnostic
+		eventSequence      int
+		continuationResult = "not_offered"
 	)
 	diagnosticFor := func(stage llm.APIErrorStage) *llm.APIErrorDiagnostic {
 		diagnostic := &llm.APIErrorDiagnostic{
-			Stage:          stage,
-			ProxyRequestID: requestID,
-			TargetID:       targetID,
-			Provider:       providerID,
-			APIType:        apiType,
-			Model:          model,
+			Stage:           stage,
+			ProxyInstanceID: h.instanceID,
+			ProxyRequestID:  requestID,
+			TargetID:        targetID,
+			Provider:        providerID,
+			APIType:         apiType,
+			Model:           model,
 		}
 		if traceOK {
 			diagnostic.TraceID = traceCtx.TraceID
@@ -908,6 +1015,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		// resolved (provider/model empty), so requests_total/errors_total reflect
 		// all client-facing failures, not just post-resolution ones.
 		h.recordMetrics(r, providerID, model, purpose, usage, time.Since(start), failed)
+		h.recordContinuation(continuationResult)
 		if streamErr != "" {
 			attrs = append(attrs, "err", streamErr)
 			attrs = append(attrs, errAttrs...)
@@ -937,6 +1045,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		streamErr = "malformed stream request"
 		writeFailure(http.StatusBadRequest, llm.APIErrorStageProxyDecode, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "malformed stream request"})
 		return
+	}
+	if req.Request.PreviousResponseID != "" {
+		continuationResult = "failed"
 	}
 	if err := validateProxyRequestMessages(req.Request.Messages); err != nil {
 		streamErr = "invalid model request content"
@@ -973,9 +1084,19 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	req.Request.Model = model
 	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
 	req.Request.Reasoning = h.reasoningForTarget(target, req.ReasoningProfile, req.Request.Reasoning)
-	disableContinuation := req.Request.DisableContinuation
 	sessionKey, providerRequest := prepareProviderRequest(req.Request)
 	req.Request = providerRequest
+	stateful := providerContinuationStateful(target.pc)
+	if !stateful && (req.Request.StoreResponse || req.Request.PreviousResponseID != "") {
+		streamErr = "target does not support provider continuation"
+		writeFailure(http.StatusBadRequest, llm.APIErrorStageProxyPrepare, &protocol.Error{
+			StatusCode: http.StatusBadRequest,
+			Code:       protocol.ErrCodeContinuationUnsupported,
+			Message:    streamErr,
+			Retryable:  false,
+		})
+		return
+	}
 	if requestBudget, ok, message := h.checkCostBudget(cw, r, target, req.Request, diagnosticFor(llm.APIErrorStageProxyPrepare)); !ok {
 		streamErr = message
 		finalDiagnostic = diagnosticFor(llm.APIErrorStageProxyPrepare)
@@ -995,20 +1116,29 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiType = opts.Provider
-	stateful := providerContinuationStateful(target.pc) && !disableContinuation
-	cacheKey := h.continuationKey(target.baseTargetID, sessionKey)
-	if disableContinuation {
-		h.resetContinuation(cacheKey)
-	}
-	fullRequest := req.Request
-	fullRequest.Messages = append([]llm.Message(nil), req.Request.Messages...)
-	provider, err := h.streamProvider(opts, target.baseTargetID, sessionKey)
+	semanticRequest := req.Request
+	semanticRequest.Messages = append([]llm.Message(nil), req.Request.Messages...)
+	provider, releaseProvider, err := h.streamProvider(opts, target.baseTargetID, sessionKey)
 	if err != nil {
 		streamErr = err.Error()
 		writeFailure(http.StatusBadRequest, llm.APIErrorStageProviderRuntime, protocol.ErrorFrom(err))
 		return
 	}
-	req.Request = h.applyContinuation(cacheKey, stateful, provider, req.Request)
+	defer releaseProvider()
+	if req.Request.PreviousResponseID != "" {
+		if availability, ok := provider.(responseContinuationAvailability); ok &&
+			!availability.CanContinueResponse(req.Request.PreviousResponseID) {
+			continuationResult = "unavailable"
+			streamErr = "previous response is unavailable on this proxy instance"
+			writeFailure(http.StatusConflict, llm.APIErrorStageProxyPrepare, &protocol.Error{
+				StatusCode: http.StatusConflict,
+				Code:       protocol.ErrCodePreviousResponseUnavailable,
+				Message:    streamErr,
+				Retryable:  false,
+			})
+			return
+		}
+	}
 
 	cw.Header().Set("content-type", protocol.ContentTypeNDJSON)
 	cw.WriteHeader(http.StatusOK)
@@ -1022,6 +1152,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	enrichModelRequestEvent := func(event llm.ModelRequestEvent) llm.ModelRequestEvent {
 		eventSequence++
 		event.Sequence = eventSequence
+		event.ProxyInstanceID = h.instanceID
 		event.ProxyRequestID = requestID
 		event.TargetID = targetID
 		event.Provider = providerID
@@ -1078,12 +1209,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	type streamRetry int
 	const (
 		streamRetryNone streamRetry = iota
-		streamRetryContinuation
 		streamRetryServerTools
 		streamRetryMinOutputTokens
 	)
 	retryMinOutputTokens := 0
-	streamAttempt := func(request, semanticRequest llm.Request) (streamRetry, continuationEntry) {
+	streamAttempt := func(request, semanticRequest llm.Request) streamRetry {
 		attemptStart := time.Now()
 		semanticRequest.StoreResponse = request.StoreResponse
 		semanticRequest.PreviousResponseID = request.PreviousResponseID
@@ -1094,11 +1224,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		requestShape = richToolResultShape(semanticRequest, apiType)
 		finalDiagnostic = nil
 		sentEvents := false
-		var finalState continuationEntry
-		var assistantText strings.Builder
-		var assistantReasoning []llm.ContentBlock
-		var assistantCalls []llm.ToolCall
-		var assistantPhase string
+		attemptToolCalls := 0
 		var pendingTerminalEvent *llm.ModelRequestEvent
 		cancelEventSent := false
 		for ev, err := range provider.Stream(r.Context(), request) {
@@ -1116,7 +1242,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 					}
 					_ = enc.Encode(protocol.StreamEnvelope{Error: protocol.ErrorFrom(rawErr)})
 					flush()
-					return streamRetryNone, continuationEntry{}
+					return streamRetryNone
 				}
 				diagnostic := diagnosticFor(upstreamErrorStage(rawErr))
 				diagnostic.UpstreamRequestID = upstreamRequestIDFromError(rawErr)
@@ -1127,17 +1253,12 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				err = withAPIErrorDiagnostic(err, diagnostic)
 				streamErr = err.Error()
 				errAttrs = streamErrorLogAttrs(err)
+				if !sentEvents && request.PreviousResponseID != "" && previousResponseRejected(err) {
+					continuationResult = "rejected_upstream"
+				}
 
 				retryKind := streamRetryNone
-				if !sentEvents && request.PreviousResponseID != "" && previousResponseRejected(err) {
-					h.resetContinuation(cacheKey)
-					retryKind = streamRetryContinuation
-				}
-				if retryKind == streamRetryNone && !sentEvents && request.StoreResponse && storeResponseRejected(err) {
-					h.disableContinuation(cacheKey)
-					retryKind = streamRetryContinuation
-				}
-				if retryKind == streamRetryNone && !sentEvents && len(request.ServerTools) > 0 && serverToolRejected(err) {
+				if !sentEvents && len(request.ServerTools) > 0 && serverToolRejected(err) {
 					retryKind = streamRetryServerTools
 				}
 				if retryKind == streamRetryNone && !sentEvents {
@@ -1167,7 +1288,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 					issue.State = llm.ModelRequestUpstreamAttemptFailed
 					issue.Outcome = llm.ModelRequestOutcomeRetrying
 					if !writeModelRequestEvent(issue) {
-						return streamRetryNone, continuationEntry{}
+						return streamRetryNone
 					}
 					retryEvent := issue
 					retryEvent.State = llm.ModelRequestRetryScheduled
@@ -1175,16 +1296,16 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 					retryEvent.Attempt++
 					retryEvent.AttemptDurationMS = 0
 					if !writeModelRequestEvent(retryEvent) {
-						return streamRetryNone, continuationEntry{}
+						return streamRetryNone
 					}
-					return retryKind, continuationEntry{}
+					return retryKind
 				}
 				if !writeModelRequestEvent(issue) {
-					return streamRetryNone, continuationEntry{}
+					return streamRetryNone
 				}
 				_ = enc.Encode(protocol.StreamEnvelope{Error: protocol.ErrorFrom(err)})
 				flush()
-				return streamRetryNone, continuationEntry{}
+				return streamRetryNone
 			}
 			if ev.Kind == llm.EventModelRequest && ev.ModelRequest != nil {
 				status := redactModelRequestEvent(*ev.ModelRequest, semanticRequest)
@@ -1196,7 +1317,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				if !writeModelRequestEvent(status) {
-					return streamRetryNone, continuationEntry{}
+					return streamRetryNone
 				}
 				continue
 			}
@@ -1208,30 +1329,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				ev.Usage = &usage
 			}
 			switch ev.Kind {
-			case llm.EventTextDelta:
-				assistantText.WriteString(ev.Text)
-			case llm.EventReasoningSummary:
-				if block, ok := llm.PersistedReasoningBlock(ev); ok {
-					assistantReasoning = append(assistantReasoning, block)
-				}
-			case llm.EventInteractionStep:
-				if block, ok := llm.PersistedInteractionStep(ev); ok {
-					assistantReasoning = append(assistantReasoning, block)
-				}
-			case llm.EventAssistantPhase:
-				if ev.Phase != "" && llm.ValidAssistantPhase(ev.Phase) {
-					assistantPhase = ev.Phase
-				}
 			case llm.EventToolCallDone:
 				toolCalls++
-				assistantCalls = append(assistantCalls, llm.ToolCall{
-					ID:                ev.ToolID,
-					Name:              ev.ToolName,
-					Input:             ev.ToolInput,
-					InvalidInputError: ev.InvalidInputError,
-				})
+				attemptToolCalls++
 			case llm.EventDone:
-				if len(assistantCalls) > 0 {
+				if attemptToolCalls > 0 {
 					ev.StopReason = llm.StopToolUse
 				}
 				stop = ev.StopReason
@@ -1240,71 +1342,41 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				}
 				usage = h.priceUsage(targetID, request, usage)
 				ev.Usage = &usage
-				if ev.ResponseID != "" && request.StoreResponse {
-					if request.Purpose == llm.RequestPurposePrewarm {
-						if fingerprint, hashErr := fingerprintMessages(nil); hashErr == nil {
-							finalState = continuationEntry{
-								PreviousResponseID: ev.ResponseID,
-								AnchorMessages:     0,
-								Fingerprint:        fingerprint,
-							}
-						}
-					} else {
-						assistant := llm.BuildAssistantMessage(
-							assistantReasoning,
-							assistantText.String(),
-							assistantCalls,
-							assistantPhase,
-							ev.StopReason,
-						)
-						if fingerprint, hashErr := fingerprintMessagesWithAssistant(semanticRequest.Messages, assistant); hashErr == nil {
-							finalState = continuationEntry{
-								PreviousResponseID: ev.ResponseID,
-								AnchorMessages:     len(semanticRequest.Messages) + 1,
-								Fingerprint:        fingerprint,
-							}
-						}
-					}
-				}
 			}
 			event := ev
 			if err := enc.Encode(protocol.StreamEnvelope{Event: &event}); err != nil {
 				streamErr = err.Error()
-				return streamRetryNone, continuationEntry{}
+				return streamRetryNone
 			}
 			flush()
 		}
 		if pendingTerminalEvent != nil {
 			if !writeModelRequestEvent(*pendingTerminalEvent) {
-				return streamRetryNone, continuationEntry{}
+				return streamRetryNone
 			}
 		}
-		return streamRetryNone, finalState
+		return streamRetryNone
 	}
 	attemptRequest := req.Request
-	retry, state := streamAttempt(attemptRequest, fullRequest)
+	retry := streamAttempt(attemptRequest, semanticRequest)
 	for retry != streamRetryNone {
 		switch retry {
-		case streamRetryContinuation:
-			fullRequest.StoreResponse = false
-			fullRequest.PreviousResponseID = ""
-			attemptRequest = fullRequest
 		case streamRetryServerTools:
 			attemptRequest.ServerTools = nil
-			fullRequest.ServerTools = nil
+			semanticRequest.ServerTools = nil
 		case streamRetryMinOutputTokens:
 			attemptRequest.MaxTokens = retryMinOutputTokens
-			fullRequest.MaxTokens = retryMinOutputTokens
+			semanticRequest.MaxTokens = retryMinOutputTokens
 		default:
 			retry = streamRetryNone
 			continue
 		}
-		retry, state = streamAttempt(attemptRequest, fullRequest)
-	}
-	if state.PreviousResponseID != "" {
-		h.saveContinuation(cacheKey, state)
+		retry = streamAttempt(attemptRequest, semanticRequest)
 	}
 	if streamErr == "" {
+		if req.Request.PreviousResponseID != "" {
+			continuationResult = "served"
+		}
 		writeModelRequestEvent(llm.ModelRequestEvent{
 			State:     llm.ModelRequestCompleted,
 			ElapsedMS: time.Since(start).Milliseconds(),
@@ -1319,51 +1391,72 @@ func validateProxyRequestMessages(messages []llm.Message) error {
 	return llm.ValidateTranscript(messages)
 }
 
-func (h *Handler) streamProvider(opts factory.Options, providerID, promptCacheKey string) (llm.Provider, error) {
+func (h *Handler) streamProvider(opts factory.Options, providerID, promptCacheKey string) (llm.Provider, func(), error) {
 	if !opts.ResponsesWebSocket {
-		return h.newProvider(opts)
+		provider, err := h.newProvider(opts)
+		return provider, func() {}, err
 	}
 	key := streamProviderCacheKey(opts, providerID, promptCacheKey)
-	h.providerMu.Lock()
-	defer h.providerMu.Unlock()
-	if provider := h.providerCache[key]; provider != nil {
-		return provider, nil
-	}
-	provider, err := h.newProvider(opts)
-	if err != nil {
-		return nil, err
-	}
-	h.providerCache[key] = provider
-	return provider, nil
+	return h.wsPool.Acquire(key, func() (llm.Provider, error) {
+		return h.newProvider(opts)
+	})
 }
 
-func streamProviderCacheKey(opts factory.Options, providerID, promptCacheKey string) string {
-	auth := sha256.New()
-	auth.Write([]byte(opts.APIKey))
+func streamProviderCacheKey(opts factory.Options, providerID, promptCacheKey string) wsPoolKey {
+	type authHeader struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}
+	type connectionConfig struct {
+		ProviderID        string `json:"provider_id"`
+		Provider          string `json:"provider"`
+		ProviderName      string `json:"provider_name"`
+		Model             string `json:"model"`
+		BaseURL           string `json:"base_url"`
+		ContextWindow     int    `json:"context_window"`
+		OutputLimit       int    `json:"output_limit"`
+		MinOutputTokens   int    `json:"min_output_tokens"`
+		OmitMaxOutput     bool   `json:"omit_max_output_tokens"`
+		APIKey            string `json:"api_key"`
+		AuthHeadersSHA256 string `json:"auth_headers_sha256"`
+	}
 	keys := make([]string, 0, len(opts.AuthHeaders))
 	for key := range opts.AuthHeaders {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	headers := make([]authHeader, 0, len(keys))
 	for _, key := range keys {
-		auth.Write([]byte{0})
-		auth.Write([]byte(strings.ToLower(key)))
-		auth.Write([]byte{0})
-		auth.Write([]byte(opts.AuthHeaders[key]))
+		headers = append(headers, authHeader{Name: strings.ToLower(key), Value: opts.AuthHeaders[key]})
 	}
-	return strings.Join([]string{
-		providerID,
-		opts.Provider,
-		opts.ProviderName,
-		opts.Model,
-		opts.BaseURL,
-		strconv.Itoa(opts.ContextWindow),
-		strconv.Itoa(opts.OutputLimit),
-		strconv.Itoa(opts.MinOutputTokens),
-		strconv.FormatBool(opts.OmitMaxOutputTokens),
-		promptCacheKey,
-		hex.EncodeToString(auth.Sum(nil)),
-	}, "\x00")
+	headerJSON, _ := json.Marshal(headers)
+	headerDigest := sha256.Sum256(headerJSON)
+	connectionJSON, _ := json.Marshal(connectionConfig{
+		ProviderID:        providerID,
+		Provider:          opts.Provider,
+		ProviderName:      opts.ProviderName,
+		Model:             opts.Model,
+		BaseURL:           opts.BaseURL,
+		ContextWindow:     opts.ContextWindow,
+		OutputLimit:       opts.OutputLimit,
+		MinOutputTokens:   opts.MinOutputTokens,
+		OmitMaxOutput:     opts.OmitMaxOutputTokens,
+		APIKey:            opts.APIKey,
+		AuthHeadersSHA256: hex.EncodeToString(headerDigest[:]),
+	})
+	return wsPoolKey{
+		Connection: sha256.Sum256(connectionJSON),
+		Session:    sha256.Sum256([]byte(promptCacheKey)),
+	}
+}
+
+// Close stops transport maintenance and releases idle provider connections.
+// Active leases retire and close when their request finishes.
+func (h *Handler) Close() error {
+	if h == nil || h.wsPool == nil {
+		return nil
+	}
+	return h.wsPool.Close()
 }
 
 type countingResponseWriter struct {
@@ -2110,20 +2203,12 @@ func stringSliceContains(values []string, want string) bool {
 	return false
 }
 
-func (h *Handler) continuationKey(targetID, promptCacheKey string) string {
-	if strings.TrimSpace(promptCacheKey) == "" {
-		return ""
-	}
-	return targetID + "\x00" + promptCacheKey
-}
-
 func prepareProviderRequest(req llm.Request) (sessionKey string, providerReq llm.Request) {
 	providerReq = req
 	proxySessionID := strings.TrimSpace(req.ProxySessionID)
 	cacheAffinityID := strings.TrimSpace(req.CacheAffinityID)
 	providerReq.ProxySessionID = ""
 	providerReq.CacheAffinityID = ""
-	providerReq.DisableContinuation = false
 	if cacheAffinityID != "" {
 		providerReq.PromptCacheKey = providerPromptCacheKey(cacheAffinityID)
 	}
@@ -2136,25 +2221,6 @@ func prepareProviderRequest(req llm.Request) (sessionKey string, providerReq llm
 func providerPromptCacheKey(sessionID string) string {
 	sum := sha256.Sum256([]byte(sessionID))
 	return hex.EncodeToString(sum[:])
-}
-
-func (h *Handler) resetContinuation(key string) {
-	if key == "" {
-		return
-	}
-	h.continuationMu.Lock()
-	delete(h.continuations, key)
-	h.continuationMu.Unlock()
-}
-
-func (h *Handler) disableContinuation(key string) {
-	if key == "" {
-		return
-	}
-	h.continuationMu.Lock()
-	h.disabledContinuation[key] = true
-	delete(h.continuations, key)
-	h.continuationMu.Unlock()
 }
 
 func previousResponseRejected(err error) bool {
@@ -2174,20 +2240,6 @@ func previousResponseRejected(err error) bool {
 		strings.Contains(msg, "previous response") ||
 		strings.Contains(msg, "previous_interaction_id") ||
 		strings.Contains(msg, "previous interaction")
-}
-
-func storeResponseRejected(err error) bool {
-	var apiErr *llm.APIError
-	if !errors.As(err, &apiErr) {
-		return false
-	}
-	code := strings.ToLower(apiErr.Code)
-	if strings.Contains(code, "store") {
-		return true
-	}
-	msg := strings.ToLower(apiErr.Message)
-	return strings.Contains(msg, "store") &&
-		(strings.Contains(msg, "false") || strings.Contains(msg, "unsupported") || strings.Contains(msg, "not supported"))
 }
 
 func providerOmitMaxOutputTokens(pc llm.ProviderConfig) bool {

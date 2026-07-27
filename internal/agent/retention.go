@@ -127,8 +127,61 @@ func (a *Agent) applyRetentionPolicy(sink EventSink, contextTokens int) retentio
 	return retentionPass{event: event, observed: observed, changed: changed}
 }
 
-func (a *Agent) managedContinuationActive() bool {
-	return a.managedContinuationStateful && !a.disableManagedContinuation
+func (a *Agent) cachePolicyForTranscript(transcript []llm.Message, payloadStart int, maintenance bool) llm.CachePolicy {
+	staticTTL := llm.CacheTTLDefault
+	if a.interactive && !maintenance {
+		staticTTL = llm.CacheTTLExtended
+	}
+	stable := a.stableMessagePrefixIn(transcript) - payloadStart
+	if stable < 0 {
+		stable = 0
+	}
+	if max := len(transcript) - payloadStart; stable > max {
+		stable = max
+	}
+	return llm.CachePolicy{
+		StaticTTL:           staticTTL,
+		StableMessagePrefix: stable,
+	}
+}
+
+// stableMessagePrefixIn returns the count of leading messages that no future
+// retention pass can rewrite.
+func (a *Agent) stableMessagePrefixIn(messages []llm.Message) int {
+	starts := turnStarts(messages)
+	resultBoundary := keepBoundary(starts, a.keepTurns())
+	imageBoundary := keepBoundary(starts, retentionImageKeepTurns)
+	readOnly := a.readOnlyResultIDsIn(messages)
+	for i, message := range messages {
+		for _, block := range message.Content {
+			switch block.Kind {
+			case llm.BlockToolResult:
+				if i >= resultBoundary &&
+					readOnly[block.ResultForID] &&
+					len(block.ResultText) > defaultSummaryToolResultSize &&
+					!retentionTrimmed(block.ResultText) {
+					return i
+				}
+				if i >= imageBoundary && containsUndegradedImage(block.ResultContent) {
+					return i
+				}
+			case llm.BlockImage:
+				if i >= imageBoundary {
+					return i
+				}
+			}
+		}
+	}
+	return len(messages)
+}
+
+func containsUndegradedImage(blocks []llm.ContentBlock) bool {
+	for _, block := range blocks {
+		if block.Kind == llm.BlockImage {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeRetentionPolicy(policy RetentionPolicy) RetentionPolicy {

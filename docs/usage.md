@@ -114,7 +114,7 @@ interrupted.
 -context-window <n>   override the model's context window (tokens)
 -reasoning <profile> reasoning profile: default, none, minimal, low, medium, high, xhigh, or max
 -reasoning-summary <mode> reasoning summary for Responses API: auto, concise, detailed, or none
--responses-stateful   use Responses API previous_response_id continuation when supported (default true)
+-responses-stateful   use CLI-owned provider continuation when the selected target supports it (default true)
 -retention-policy <mode>   live transcript retention: auto, age, pressure, or disabled (default auto)
 -no-steer         disable in-prompt steering: queue input for the next prompt instead of injecting it before the next turn (default off; see "Steering")
 -image-detail <level>   default image detail: auto, low, high, or original
@@ -385,11 +385,16 @@ displayed only when explicitly enabled. `-q` disables reasoning summary output
 unless `-reasoning-summary` is explicitly set on the CLI.
 
 Responses continuation is on by default for proxy providers that report both
-`api_type: "responses"` and `responses_stateful:true`. Disable it with
+provider continuation support and `continuation_stateful:true` in the proxy
+catalog. This includes supported Responses and Gemini Interactions targets.
+Disable it with
 `responses_stateful:false`, `HARNESS_RESPONSES_STATEFUL=false`, or
-`-responses-stateful=false`. If a provider rejects stored Responses requests,
-harness disables stateful continuation for that agent and retries the request
-stateless.
+`-responses-stateful=false`. Harness owns the response/interaction ID, the
+anchored message count, and a SHA-256 fingerprint of the exact provider-neutral
+transcript prefix represented by that ID. It persists this state with the
+session and sends only the appended suffix on the next request. A missing,
+malformed, out-of-range, or fingerprint-mismatched anchor is discarded before
+the request and the complete transcript is sent safely.
 
 Live transcript retention defaults to `auto`, which uses pressure-triggered
 epochs for both stateful and stateless providers. Experiments can override this
@@ -397,25 +402,38 @@ with `retention_policy`, `HARNESS_RETENTION_POLICY`, or `-retention-policy`;
 accepted values are `auto`, `age`, `pressure`, and `disabled`. Disabling live
 retention does not disable compaction or provider-overflow recovery.
 
-The model proxy also content-addresses the exact provider-neutral transcript
-prefix represented by each stored response. It reuses `previous_response_id`
-only when the incoming prefix matches; retention, compaction, branch changes,
-or any other prefix rewrite cause a full resend that establishes a fresh anchor.
-`-responses-stateful=false` marks each proxy request stateless and clears any
-stored continuation for that proxy session before forwarding complete history.
+The model proxy is a stateless continuation pass-through: it never stores,
+reconstructs, trims, resets, or retries a continuation. It forwards the
+CLI-supplied messages, `store`, and previous-response/interaction ID unchanged.
+An unsupported target rejects continuation with
+`continuation_unsupported`. A connection-affine WebSocket provider can reject a
+known-unavailable ID before streaming with
+`previous_response_unavailable`; an upstream previous-ID rejection is also
+passed through unchanged. In either case harness clears its local anchor and
+performs one full-context resend.
+
+Retention, compaction, branch navigation, agent changes, and true base-model
+changes reset the CLI-owned anchor. Switching a target between its base and
+`/fast` variant preserves a valid anchor because both variants share the same
+provider/model continuation chain. `-responses-stateful=false` sends complete
+messages without `store` or a previous ID on every request.
+
 Responses provider configs may also set `responses_websocket:true` to have the
 model proxy use the Responses WebSocket transport instead of HTTP SSE. The proxy
 defaults this on for `codex_oauth` Responses providers and preserves an explicit
-`responses_websocket:false` override.
+`responses_websocket:false` override. WebSocket connections live in a bounded
+per-pod lease pool. Harness sends its opaque session ID as
+`X-Harness-Session`, allowing a load balancer to keep that connection-affine
+traffic on one pod as a performance optimization. Correctness does not depend
+on stickiness: a pod/socket miss produces the reset-and-resend path above.
 
-Gemini Interactions continuation is managed entirely by the model proxy and is
-on by default for `api_type:"interactions"`. It sends `store:true` and reuses
-`previous_interaction_id` only while the content-addressed transcript prefix
-matches. Set `interactions_stateful:false` in the provider config to send
-`store:false` with complete history. Missing/rejected stored state also retries
-with complete history; signed `thought`, Google Search call, and Google Search
-result steps are persisted invisibly so this fallback remains valid after proxy
-restart. Stored interactions are retained by Google under the account's
+Gemini Interactions targets are continuation-capable by default; set
+`interactions_stateful:false` in the provider config to make the catalog reject
+continuation for that target. The CLI owns and persists
+`previous_interaction_id` under the same fingerprint contract. Signed `thought`,
+Google Search call, and Google Search result steps remain in the invisible
+provider-neutral transcript so a full-history fallback is valid after a proxy
+restart. Stored interactions remain subject to the provider account's
 applicable retention policy.
 
 ## Model Proxy
@@ -443,8 +461,11 @@ count-token endpoint. The proxy also uses the Responses WebSocket transport by
 default for this provider, matching Codex's stateful continuation path while
 sending `store:false` to the ChatGPT backend. Managed setup explicitly emits the
 hashed conversation cache key as `prompt_cache_key`. Its startup warm-up uses
-WebSocket `generate:false`, then reuses that response id for the first real
-request. After setup, run:
+WebSocket `generate:false`; only that transport returns an explicit transcript
+anchor at message zero, which the owner goroutine installs if the model,
+session, transcript, and continuation generation are still unchanged. HTTP
+warm-up usage is retained but its disposable response ID is never installed.
+After setup, run:
 
 ```sh
 harness-model-proxy auth login openai-codex
@@ -453,7 +474,11 @@ harness-model-proxy auth login openai-codex
 Provider configs accept an optional `auth` block in place of `api_key` /
 `api_key_env`; when `auth` is present, API-key fields are ignored and there is no
 fallback if auth fails. Supported auth shapes include `token_command`, `oauth2`,
-and `codex_oauth`.
+and `codex_oauth`. Codex terminal refresh failures are cached only in the
+failing process and keyed by a digest of the rejected refresh token; they are
+never written into the shared token file. A replica rereads the file before
+returning that cached failure and immediately after a terminal refresh response,
+so it can adopt a valid token rotated by a peer without overwriting it.
 
 Provider configs may also set `prompt_cache` to control how the stable harness
 conversation cache key is sent to OpenAI-compatible backends. This cache
@@ -467,6 +492,17 @@ URLs. `affinity_headers` can
 copy the same key into non-auth routing headers such as `x-session-id`. The
 proxy derives the provider-facing value as a SHA-256 hash of harness's local
 cache-affinity key, so providers do not receive the raw identifier.
+
+For Anthropic, harness also declares cache semantics directly on each neutral
+request. Interactive turns request a one-hour TTL only for stable system/tool
+anchors; one-shot, delegate, prewarm, compaction, handoff, and branch-summary
+requests use the default five-minute TTL. Message breakpoints always use the
+provider's default five-minute TTL. Harness computes a leading message prefix
+that future retention cannot rewrite, and the Anthropic dialect places one
+message breakpoint there plus a rolling tail breakpoint within the four-anchor
+limit. Maintenance requests derive deterministic, purpose-separated proxy and
+cache IDs from the owning session, so they do not reuse or compete with the main
+conversation's connection/continuation chain.
 
 For hand-written model-proxy config shape references, see
 `examples/harness-model-proxy/config.json` and
@@ -510,6 +546,120 @@ no longer support) are reported with a warning and removed rather than failing t
 refresh: a missing model is dropped, and a provider that loses all its models is
 deleted along with its `provider_configs` reference.
 
+### Serving, probes, and rolling updates
+
+The model proxy exposes unauthenticated process probes on its API listener,
+outside API-key middleware:
+
+- `GET /readyz` returns `200` normally and `503` as soon as SIGTERM or SIGINT
+  starts a drain.
+- `GET /healthz` remains `200` until final teardown begins.
+- Other methods on either probe path return `405`.
+
+The first termination signal removes readiness, stops background catalog/key
+refresh work, waits for load-balancer propagation, and then gracefully closes
+the API listener without cancelling in-flight handler contexts. Once the stream
+drain reaches its bound, the server force-closes remaining requests. It then
+closes the bounded WebSocket pool and shuts down the metrics listener last.
+
+Lifecycle settings use flag > environment > config > default precedence:
+
+| Purpose | Serve flag | Environment | Config | Default |
+|---|---|---|---|---|
+| readiness propagation delay | `-drain-delay` | `HARNESS_MODEL_PROXY_DRAIN_DELAY` | `drain_delay` | `5s` |
+| maximum stream drain | `-shutdown-timeout` | `HARNESS_MODEL_PROXY_SHUTDOWN_TIMEOUT` | `shutdown_timeout` | `5m` |
+| process identity | `-instance-id` | `HARNESS_MODEL_PROXY_INSTANCE_ID` | `instance_id` | random 16-byte hex |
+
+Instance IDs must match `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. A Kubernetes pod
+name or UID is a useful value. It appears in request events, error diagnostics,
+`/v1/usage`, and structured logs; correlate a request by
+`(proxy_instance_id, proxy_request_id)`.
+
+A minimal Kubernetes fragment is:
+
+```yaml
+spec:
+  terminationGracePeriodSeconds: 330
+  containers:
+    - name: model-proxy
+      args:
+        - serve
+        - -listen=0.0.0.0:8765
+        - -metrics-listen=0.0.0.0:9090
+      env:
+        - name: HARNESS_MODEL_PROXY_INSTANCE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+      readinessProbe:
+        httpGet: {path: /readyz, port: 8765}
+      livenessProbe:
+        httpGet: {path: /healthz, port: 8765}
+```
+
+Set `terminationGracePeriodSeconds` greater than the drain delay plus shutdown
+timeout; use at least `330` seconds with the defaults. The metrics default
+(`127.0.0.1:9090`) is not pod-scrapable, so bind
+`-metrics-listen 0.0.0.0:9090` in a pod.
+
+Harness sends `X-Harness-Session` only on stream requests with a session ID.
+Use it for consistent hashing when Codex Responses WebSockets are enabled:
+
+```nginx
+upstream harness_model_proxy {
+    hash $http_x_harness_session consistent;
+    server model-proxy-0:8765;
+    server model-proxy-1:8765;
+}
+```
+
+```haproxy
+backend harness_model_proxy
+  balance hdr(X-Harness-Session)
+  hash-type consistent
+  server proxy0 model-proxy-0:8765 check
+  server proxy1 model-proxy-1:8765 check
+```
+
+For Envoy, use a `RING_HASH` cluster and a route header hash policy:
+
+```yaml
+route:
+  cluster: harness_model_proxy
+  hash_policy:
+    - header:
+        header_name: X-Harness-Session
+clusters:
+  - name: harness_model_proxy
+    lb_policy: RING_HASH
+```
+
+See the official [NGINX upstream hash](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#hash),
+[HAProxy balancing](https://www.haproxy.com/documentation/haproxy-configuration-manual/latest/#4-balance),
+and [Envoy route hash-policy](https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/route/v3/route_components.proto#config-route-v3-routeaction-hashpolicy-header)
+references for the complete surrounding configuration.
+
+Stickiness improves WebSocket continuation hit rate but is never required for
+correctness. HTTP stored continuations work on any replica; a Codex
+`store:false` socket miss returns 409 and the CLI resends complete history once.
+
+For a replicated production deployment, bake `models.dev.api.json` into the
+image or mount an identical read-only copy in every pod. Set
+`models_dev_cache_ttl: 0` and treat a catalog change as a deployment. Cost
+budgets and `/v1/usage` remain deliberately per pod: strict budget enforcement
+requires one replica, and sharing one budget-state directory between independent
+replicas is unsupported because their read-modify-write cycles are not
+coordinated. `/v1/usage` includes `instance` and `since` so that per-pod reports
+are explicit.
+
+The continuation ownership change is a coordinated cutover: old and new CLI/
+proxy combinations are not wire-compatible. Finish active CLI turns, stop the
+CLIs, deploy the complete new proxy fleet without sending traffic through a
+mixed-version Service, wait for every pod to become ready, and only then
+start/update the CLI. Validate one HTTP stateful session and one Codex
+WebSocket session through a forced pod replacement. Future proxy-only rollouts
+can use the normal readiness-driven rolling strategy.
+
 ### Harness-to-proxy authentication
 
 Model-proxy API-key authentication is disabled by default and becomes required
@@ -537,7 +687,9 @@ configuration.
 ### Usage, pricing, and budgets
 
 The read-only `GET /v1/usage` endpoint aggregates token and cost totals per model
-target, including delegate child-agent spend. `GET /v1/models` includes complete
+target for the serving process, including delegate child-agent spend. Its
+top-level `instance` and `since` fields identify that per-pod lifetime.
+`GET /v1/models` includes complete
 static pricing schedules, including context-length tiers, plus `source_date` and
 `max_age_seconds` fields for detecting stale catalog prices. Managed-provider
 `source_date` values track the models.dev cache; manual-only setups use the
@@ -555,7 +707,8 @@ known-cost spend reaches its fixed-window limit. Spend persists under the proxy
 config directory across restarts. Unpriced targets are allowed by default and do
 not count toward the budget; add `-budget-reject-unpriced` to reject them.
 `/v1/usage` includes the authenticated key's current budget state when it has a
-budget.
+budget. Both usage and budget enforcement are per pod; use one replica when a
+strict global limit is required.
 
 For first-party Google Interactions targets, thought tokens are billed at the
 model's output-token rate when the catalog does not provide a separate reasoning
@@ -592,8 +745,27 @@ Token counters are recorded for every stream that produced usage, priced or not,
 `model_proxy_cache_write_tokens_total` records default-rate writes and
 `model_proxy_cache_write_1h_tokens_total` records Anthropic's 1-hour writes.
 
+Continuation and transport health use bounded, proxy-observable families:
+
+- `model_proxy_continuation_total{result=...}` records exactly one of
+  `not_offered`, `served`, `unavailable`, `rejected_upstream`, or `failed` per
+  stream request.
+- `model_proxy_ws_pool_events_total{event=...}` records `hit`, `miss`, `create`,
+  `evict_lru`, `evict_idle`, `evict_age`, or `overflow`.
+- `model_proxy_ws_pool_connections` and
+  `model_proxy_ws_pool_capacity` expose current pooled connections and the
+  configured bound.
+
+These families have no API-key or instance label. Prometheus scrape-target
+labels identify replicas, and all existing request/usage plus new operational
+counters can be summed across targets without double counting client-side
+retries. CLI-only resets remain in session diagnostics rather than being
+reported back to the proxy.
+
 Use `-no-metrics` to disable the endpoint or `-metrics-listen` to move it. The
-equivalent proxy-config `metrics` object accepts `enabled` and `listen`.
+equivalent proxy-config `metrics` object accepts `enabled` and `listen`. The
+listener has an explicit lifetime and remains available until API draining,
+handler teardown, and connection-pool closure have completed.
 
 ### Provider failures and retries
 

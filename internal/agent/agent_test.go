@@ -130,6 +130,19 @@ func TestReportMaintenanceSkipsLocalZeroUsage(t *testing.T) {
 	}
 }
 
+func TestModelRequestEventFromErrorCopiesProxyIdentity(t *testing.T) {
+	event := modelRequestEventFromError(&llm.APIError{
+		Message: "failed",
+		Diagnostic: &llm.APIErrorDiagnostic{
+			ProxyInstanceID: "proxy-a",
+			ProxyRequestID:  42,
+		},
+	}, llm.ModelRequestFailed)
+	if event.ProxyInstanceID != "proxy-a" || event.ProxyRequestID != 42 {
+		t.Fatalf("model request event identity = %+v", event)
+	}
+}
+
 func TestModelRequestTelemetryNeverEntersTranscriptOrNextRequest(t *testing.T) {
 	const providerMessage = "private quota diagnostic"
 	fp := llmtest.New("fake",
@@ -901,14 +914,14 @@ func TestSessionIDsHaveDistinctContinuationAndCacheLifetimes(t *testing.T) {
 	}
 }
 
-func TestLongCacheTTLReflectsInteractive(t *testing.T) {
+func TestCachePolicyTTLReflectsInteractive(t *testing.T) {
 	interactive := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	a := newAgent(interactive, tools.Default(), Options{Interactive: true})
 	if err := a.RunPrompt(context.Background(), "hi", &recordSink{}); err != nil {
 		t.Fatalf("RunPrompt: %v", err)
 	}
-	if !interactive.Requests[0].LongCacheTTL {
-		t.Fatal("interactive session must set LongCacheTTL on requests")
+	if interactive.Requests[0].CachePolicy.StaticTTL != llm.CacheTTLExtended {
+		t.Fatal("interactive session must request the extended static cache TTL")
 	}
 
 	oneshot := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
@@ -916,8 +929,8 @@ func TestLongCacheTTLReflectsInteractive(t *testing.T) {
 	if err := b.RunPrompt(context.Background(), "hi", &recordSink{}); err != nil {
 		t.Fatalf("RunPrompt: %v", err)
 	}
-	if oneshot.Requests[0].LongCacheTTL {
-		t.Fatal("one-shot session must not set LongCacheTTL")
+	if oneshot.Requests[0].CachePolicy.StaticTTL != llm.CacheTTLDefault {
+		t.Fatal("one-shot session must request the default static cache TTL")
 	}
 }
 
@@ -958,13 +971,13 @@ func TestPrewarmFuncStreamsAndDiscards(t *testing.T) {
 	if !ok {
 		t.Fatal("PrewarmFunc ok=false")
 	}
-	usage := warm(context.Background())
+	result := warm(context.Background())
 
 	if len(fp.Requests) != 1 {
 		t.Fatalf("provider received %d requests, want 1", len(fp.Requests))
 	}
-	if usage.InputTokens != 12 || usage.OutputTokens != 1 {
-		t.Errorf("prewarm usage = %+v, want 12 in / 1 out", usage)
+	if result.Usage.InputTokens != 12 || result.Usage.OutputTokens != 1 {
+		t.Errorf("prewarm usage = %+v, want 12 in / 1 out", result.Usage)
 	}
 	if fp.Requests[0].MaxTokens != 1 {
 		t.Errorf("warm request MaxTokens = %d, want 1", fp.Requests[0].MaxTokens)
@@ -986,9 +999,9 @@ func TestPrewarmFuncPreservesUsageReportedBeforeFailure(t *testing.T) {
 	if !ok {
 		t.Fatal("PrewarmFunc ok=false")
 	}
-	usage := warm(context.Background())
-	if usage.InputTokens != 9 || usage.OutputTokens != 1 {
-		t.Fatalf("prewarm failure usage = %+v, want reported 9 in / 1 out", usage)
+	result := warm(context.Background())
+	if result.Usage.InputTokens != 9 || result.Usage.OutputTokens != 1 {
+		t.Fatalf("prewarm failure usage = %+v, want reported 9 in / 1 out", result.Usage)
 	}
 }
 
@@ -1007,8 +1020,8 @@ func TestPrewarmFuncSkipsInvalidRichTranscript(t *testing.T) {
 	if !ok {
 		t.Fatal("PrewarmFunc ok=false")
 	}
-	if usage := warm(context.Background()); usage != (llm.Usage{}) {
-		t.Fatalf("prewarm usage = %+v, want zero", usage)
+	if result := warm(context.Background()); result.Usage != (llm.Usage{}) {
+		t.Fatalf("prewarm usage = %+v, want zero", result.Usage)
 	}
 	if len(fp.Requests) != 0 {
 		t.Fatalf("provider requests = %d, want 0", len(fp.Requests))
@@ -2067,7 +2080,10 @@ func TestResponsesStatefulSendsDeltaAfterResponseID(t *testing.T) {
 		t.Fatalf("second request messages = %+v, want only tool result delta", fp.Requests[1].Messages)
 	}
 	state := a.ResponseState()
-	if state == nil || state.PreviousResponseID != "resp_2" || state.AnchorMessages != len(a.Transcript()) {
+	if state == nil ||
+		state.PreviousResponseID != "resp_2" ||
+		state.AnchorMessages != len(a.Transcript()) ||
+		!llm.MatchesMessageFingerprint(a.Transcript(), state.AnchorDigest) {
 		t.Fatalf("response state = %+v, transcript len %d", state, len(a.Transcript()))
 	}
 }
@@ -2087,7 +2103,11 @@ func TestResponsesStatefulRetriesFullContextWhenPreviousResponseRejected(t *test
 		textMessageAt(fixedNow(), llm.RoleUser, "old"),
 		textMessageAt(fixedNow(), llm.RoleAssistant, "answer"),
 	})
-	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "missing", AnchorMessages: 2})
+	digest, err := llm.FingerprintMessages(a.Transcript())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "missing", AnchorMessages: 2, AnchorDigest: digest})
 
 	if err := a.RunPrompt(context.Background(), "next", &recordSink{}); err != nil {
 		t.Fatalf("RunPrompt: %v", err)
@@ -2100,6 +2120,151 @@ func TestResponsesStatefulRetriesFullContextWhenPreviousResponseRejected(t *test
 	}
 	if fp.Requests[1].PreviousResponseID != "" || len(fp.Requests[1].Messages) != 3 {
 		t.Fatalf("retry request = prev %q messages %d, want full context", fp.Requests[1].PreviousResponseID, len(fp.Requests[1].Messages))
+	}
+}
+
+func TestResponsesStateFingerprintRejectsSameLengthTranscriptMutation(t *testing.T) {
+	fp := llmtest.New("responses", llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp-next"})
+	a := newAgent(fp, tools.Default(), Options{ResponsesStateful: true})
+	a.SetTranscript([]llm.Message{
+		userText("old"),
+		asstText("answer"),
+	})
+	digest, err := llm.FingerprintMessages(a.Transcript())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetResponseState(&llm.ResponseState{
+		PreviousResponseID: "resp-old",
+		AnchorMessages:     len(a.Transcript()),
+		AnchorDigest:       digest,
+	})
+	a.transcript[0].Content[0].Text = "new" // same byte length, simulating an unannounced rewrite
+
+	if err := a.RunPrompt(context.Background(), "next", &recordSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fp.Requests) != 1 || fp.Requests[0].PreviousResponseID != "" || len(fp.Requests[0].Messages) != 3 {
+		t.Fatalf("request after mutation = %+v", fp.Requests)
+	}
+}
+
+func TestResponsesStateMissingOrMalformedDigestIsDiscarded(t *testing.T) {
+	for _, digest := range []string{"", "not-a-digest"} {
+		t.Run(digest, func(t *testing.T) {
+			fp := llmtest.New("responses", llmtest.Step{Stop: llm.StopEndTurn})
+			a := newAgent(fp, tools.Default(), Options{ResponsesStateful: true})
+			a.SetTranscript([]llm.Message{userText("old"), asstText("answer")})
+			a.SetResponseState(&llm.ResponseState{
+				PreviousResponseID: "resp-old",
+				AnchorMessages:     2,
+				AnchorDigest:       digest,
+			})
+			if err := a.RunPrompt(context.Background(), "next", &recordSink{}); err != nil {
+				t.Fatal(err)
+			}
+			if fp.Requests[0].PreviousResponseID != "" || len(fp.Requests[0].Messages) != 3 {
+				t.Fatalf("request = %+v", fp.Requests[0])
+			}
+		})
+	}
+}
+
+func TestPrewarmResultInstallsOnlyCurrentExplicitAnchor(t *testing.T) {
+	zero := 0
+	fp := llmtest.New("responses", llmtest.Step{
+		Events: []llm.StreamEvent{{
+			Kind:             llm.EventDone,
+			ResponseID:       "resp-prewarm",
+			ResponseIDAnchor: &zero,
+		}},
+		Stop: llm.StopEndTurn,
+	})
+	a := newAgent(fp, tools.Default(), Options{ResponsesStateful: true})
+	warm, ok := a.PrewarmFunc()
+	if !ok {
+		t.Fatal("PrewarmFunc ok=false")
+	}
+	result := warm(context.Background())
+	if result.ResponseState == nil ||
+		result.ResponseState.AnchorMessages != 0 ||
+		result.ResponseState.AnchorDigest == "" ||
+		result.ResponseStateEpoch != a.ResponseStateEpoch() ||
+		result.ProxySessionID != a.ProxySessionID() {
+		t.Fatalf("prewarm result = %+v", result)
+	}
+	if !a.ApplyPrewarmResult(result) {
+		t.Fatal("current prewarm result was not installed")
+	}
+	if state := a.ResponseState(); state == nil || state.PreviousResponseID != "resp-prewarm" {
+		t.Fatalf("installed state = %+v", state)
+	}
+
+	// A normal turn that wins the race prevents the background result from
+	// replacing its newer anchor.
+	a.responseState = llm.ResponseState{
+		PreviousResponseID: "resp-turn",
+		AnchorMessages:     0,
+		AnchorDigest:       result.ResponseState.AnchorDigest,
+	}
+	if a.ApplyPrewarmResult(result) {
+		t.Fatal("prewarm replaced a real-turn anchor")
+	}
+}
+
+func TestPrewarmResultRejectsStaleEpochIdentityAndTranscript(t *testing.T) {
+	emptyDigest, err := llm.FingerprintMessages(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newResult := func(a *Agent) PrewarmResult {
+		return PrewarmResult{
+			ResponseState: &llm.ResponseState{
+				PreviousResponseID: "resp-prewarm",
+				AnchorMessages:     0,
+				AnchorDigest:       emptyDigest,
+			},
+			ResponseStateEpoch: a.ResponseStateEpoch(),
+			ProxySessionID:     a.ProxySessionID(),
+			TranscriptMessages: len(a.Transcript()),
+		}
+	}
+	t.Run("epoch", func(t *testing.T) {
+		a := newAgent(llmtest.New("responses"), tools.Default(), Options{ResponsesStateful: true})
+		result := newResult(a)
+		a.SetModel("different", 0)
+		if a.ApplyPrewarmResult(result) {
+			t.Fatal("stale model epoch installed")
+		}
+	})
+	t.Run("proxy session", func(t *testing.T) {
+		a := newAgent(llmtest.New("responses"), tools.Default(), Options{ResponsesStateful: true})
+		result := newResult(a)
+		result.ProxySessionID = "foreign"
+		if a.ApplyPrewarmResult(result) {
+			t.Fatal("foreign proxy session installed")
+		}
+	})
+	t.Run("transcript length", func(t *testing.T) {
+		a := newAgent(llmtest.New("responses"), tools.Default(), Options{ResponsesStateful: true})
+		result := newResult(a)
+		result.TranscriptMessages++
+		if a.ApplyPrewarmResult(result) {
+			t.Fatal("stale transcript length installed")
+		}
+	})
+}
+
+func TestHTTPPrewarmWithoutAnchorDoesNotProduceResponseState(t *testing.T) {
+	fp := llmtest.New("responses", llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp-http"})
+	a := newAgent(fp, tools.Default(), Options{ResponsesStateful: true})
+	warm, ok := a.PrewarmFunc()
+	if !ok {
+		t.Fatal("PrewarmFunc ok=false")
+	}
+	result := warm(context.Background())
+	if result.ResponseState != nil || a.ApplyPrewarmResult(result) {
+		t.Fatalf("HTTP-style prewarm installed state: result=%+v state=%+v", result, a.ResponseState())
 	}
 }
 

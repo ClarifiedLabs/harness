@@ -19,6 +19,15 @@ const (
 	DefaultShutdownTimeout = 5 * time.Second
 )
 
+// ServeOptions separates the signal that begins graceful shutdown from the
+// context inherited by request handlers. This lets servers stop accepting new
+// work while allowing already-running handlers to finish.
+type ServeOptions struct {
+	StopContext     context.Context
+	WorkContext     context.Context
+	ShutdownTimeout time.Duration
+}
+
 // New returns an http.Server with the shared helper-binary defaults.
 func New(addr string, handler http.Handler) *http.Server {
 	return &http.Server{
@@ -79,4 +88,59 @@ func Serve(ctx context.Context, srv *http.Server, ln net.Listener) error {
 		}
 		return nil
 	}
+}
+
+// ServeWithOptions serves an already-bound listener until the server exits or
+// StopContext is cancelled. Unlike Serve, request handlers inherit WorkContext,
+// so beginning graceful shutdown does not itself cancel in-flight work.
+//
+// If graceful shutdown exceeds ShutdownTimeout, ServeWithOptions force-closes
+// the server and waits for Serve to return before returning the shutdown error.
+func ServeWithOptions(srv *http.Server, ln net.Listener, opts ServeOptions) error {
+	stopCtx := opts.StopContext
+	if stopCtx == nil {
+		stopCtx = context.Background()
+	}
+	workCtx := opts.WorkContext
+	if workCtx == nil {
+		workCtx = context.Background()
+	}
+	shutdownTimeout := opts.ShutdownTimeout
+	if shutdownTimeout <= 0 {
+		shutdownTimeout = DefaultShutdownTimeout
+	}
+	srv.BaseContext = func(net.Listener) context.Context { return workCtx }
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Serve(ln)
+	}()
+
+	select {
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-stopCtx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	cancel()
+	if shutdownErr != nil {
+		closeErr := srv.Close()
+		if closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+			shutdownErr = errors.Join(shutdownErr, closeErr)
+		}
+	}
+
+	serveErr := <-errCh
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		if shutdownErr != nil {
+			return errors.Join(shutdownErr, serveErr)
+		}
+		return serveErr
+	}
+	return shutdownErr
 }

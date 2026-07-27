@@ -149,7 +149,7 @@ func runServe(env environment, args []string) int {
 		metricsSettings := metrics.Resolve(cfg.Metrics, defaultMetricsListen, serveMetricsOverrides(fs, *noMetrics, *metricsListen))
 		reg := newMCPMetricsRegistry(metricsSettings.Enabled)
 		d := mcpproxy.NewDaemonWithOptions(cfg, logger, mcpproxy.DaemonOptions{APIKeys: authStore, Metrics: reg})
-		if err := metrics.StartEndpoint(ctx, logger.With(logging.Category(serveCategory)), reg, metricsSettings); err != nil {
+		if _, err := metrics.StartEndpoint(ctx, logger.With(logging.Category(serveCategory)), reg, metricsSettings); err != nil {
 			fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
 			return exitRuntime
 		}

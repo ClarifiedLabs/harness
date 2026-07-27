@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -170,12 +171,12 @@ func TestCodexOAuthRefreshReturnsChatGPTHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read stored token: %v", err)
 	}
-	if stored.RefreshToken != "rt-new" || stored.AccountID != "account-new" || stored.RefreshFailed {
+	if stored.RefreshToken != "rt-new" || stored.AccountID != "account-new" {
 		t.Fatalf("stored token after refresh = %+v", stored)
 	}
 }
 
-func TestCodexOAuthTerminalRefreshFailureIsQuarantined(t *testing.T) {
+func TestCodexOAuthTerminalRefreshFailureIsProcessLocal(t *testing.T) {
 	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	idToken := testJWT(t, map[string]any{
 		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "account-123"},
@@ -207,14 +208,133 @@ func TestCodexOAuthTerminalRefreshFailureIsQuarantined(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read stored token: %v", err)
 	}
-	if !stored.RefreshFailed || !strings.Contains(stored.RefreshFailure, "refresh_token_invalidated") {
-		t.Fatalf("stored quarantine = %+v", stored)
+	if stored.RefreshToken != "rt-old" || stored.AccessToken != "expired" {
+		t.Fatalf("terminal failure changed stored token = %+v", stored)
 	}
 	if _, err := src.Headers(context.Background()); err == nil || !strings.Contains(err.Error(), "cannot be refreshed") {
 		t.Fatalf("second Headers error = %v, want reauth error", err)
 	}
 	if refreshCalls != 1 {
 		t.Fatalf("refresh calls = %d, want 1", refreshCalls)
+	}
+	replacement := old
+	replacement.AccessToken = "peer-access"
+	replacement.RefreshToken = "rt-peer"
+	replacement.Expiry = now.Add(time.Hour)
+	body, _ = json.Marshal(replacement)
+	if err := os.WriteFile(filepath.Join(dir, "codex.json"), body, 0o600); err != nil {
+		t.Fatalf("write peer token: %v", err)
+	}
+	headers, err := src.Headers(context.Background())
+	if err != nil {
+		t.Fatalf("Headers after peer replacement: %v", err)
+	}
+	if headers["Authorization"] != "Bearer peer-access" || refreshCalls != 1 {
+		t.Fatalf("headers=%v refresh calls=%d, want peer token without refresh", headers, refreshCalls)
+	}
+}
+
+func TestCodexOAuthReplicaRefreshRaceAdoptsPeerToken(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	firstRefreshStarted := make(chan struct{})
+	secondRefreshStarted := make(chan struct{})
+	winnerStored := make(chan struct{})
+	var refreshCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch refreshCalls.Add(1) {
+		case 1:
+			close(firstRefreshStarted)
+			<-secondRefreshStarted
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"access_token":"peer-access",
+				"refresh_token":"peer-refresh",
+				"token_type":"Bearer",
+				"expires_in":3600
+			}`))
+		case 2:
+			close(secondRefreshStarted)
+			<-winnerStored
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"rotated by peer"}`))
+		default:
+			t.Errorf("unexpected refresh request %d", refreshCalls.Load())
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex.json")
+	old := token{
+		AccessToken:  "expired",
+		RefreshToken: "shared-refresh",
+		AccountID:    "account-1",
+		Expiry:       now.Add(-time.Hour),
+	}
+	data, _ := json.Marshal(old)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Type: TypeCodexOAuth, Issuer: srv.URL, ClientID: "client", TokenFile: "codex.json"}
+	options := Options{Name: "openai-codex", ConfigDir: dir, Now: func() time.Time { return now }, Client: srv.Client()}
+	winner, err := NewSource(cfg, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loser, err := NewSource(cfg, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type headerResult struct {
+		headers map[string]string
+		err     error
+	}
+	winnerResult := make(chan headerResult, 1)
+	go func() {
+		headers, err := winner.Headers(context.Background())
+		winnerResult <- headerResult{headers: headers, err: err}
+	}()
+	select {
+	case <-firstRefreshStarted:
+	case <-time.After(time.Second):
+		t.Fatal("winner refresh did not start")
+	}
+	loserResult := make(chan headerResult, 1)
+	go func() {
+		headers, err := loser.Headers(context.Background())
+		loserResult <- headerResult{headers: headers, err: err}
+	}()
+
+	won := <-winnerResult
+	if won.err != nil {
+		t.Fatalf("winner Headers: %v", won.err)
+	}
+	close(winnerStored)
+	lost := <-loserResult
+	if lost.err != nil {
+		t.Fatalf("loser did not adopt peer token: %v", lost.err)
+	}
+	for name, headers := range map[string]map[string]string{"winner": won.headers, "loser": lost.headers} {
+		if headers["Authorization"] != "Bearer peer-access" || headers["ChatGPT-Account-ID"] != "account-1" {
+			t.Fatalf("%s headers = %v", name, headers)
+		}
+	}
+	storedData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(storedData), "refresh_failed") || strings.Contains(string(storedData), "refresh_failure") {
+		t.Fatalf("terminal failure was persisted: %s", storedData)
+	}
+	stored, err := readTokenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.AccessToken != "peer-access" || stored.RefreshToken != "peer-refresh" || refreshCalls.Load() != 2 {
+		t.Fatalf("stored=%+v refresh calls=%d", stored, refreshCalls.Load())
 	}
 }
 

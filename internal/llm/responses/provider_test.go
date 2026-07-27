@@ -391,6 +391,24 @@ func TestStreamCompletedFallbackEmitsPhaseBeforeText(t *testing.T) {
 	}
 }
 
+func TestStreamHTTPPrewarmDoesNotReturnOutOfBandAnchor(t *testing.T) {
+	srv := llmtest.ServeSSEFixture(t, "text_only.sse")
+	p := testProvider(t, srv, nil)
+	req := llmtest.SimpleRequest("gpt-5.4")
+	req.Purpose = llm.RequestPurposePrewarm
+	req.StoreResponse = true
+
+	events, err := llmtest.Drain(p.Stream(context.Background(), req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Kind == llm.EventDone && event.ResponseIDAnchor != nil {
+			t.Fatalf("HTTP prewarm returned out-of-band anchor %d", *event.ResponseIDAnchor)
+		}
+	}
+}
+
 func TestStreamToolCall(t *testing.T) {
 	srv := llmtest.ServeSSEFixture(t, "tool_call.sse")
 	p := testProvider(t, srv, nil)
@@ -918,6 +936,58 @@ func TestStreamWebSocketResponseCreate(t *testing.T) {
 	if done == nil || done.ResponseID != "resp_ws" {
 		t.Fatalf("done = %+v, want response id resp_ws", done)
 	}
+}
+
+func TestStreamWebSocketPrewarmReturnsExplicitZeroAnchor(t *testing.T) {
+	var gotRequest string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatalf("response writer is not a hijacker")
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		defer conn.Close()
+		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+		fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+		fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+		fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", testAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+		if err := rw.Flush(); err != nil {
+			t.Fatalf("flush handshake: %v", err)
+		}
+		gotRequest, err = ws.ReadClientText(rw.Reader)
+		if err != nil {
+			t.Fatalf("read websocket request: %v", err)
+		}
+		if err := ws.WriteServerText(conn, `{"type":"response.completed","response":{"id":"resp_warm","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":0,"total_tokens":3}}}`); err != nil {
+			t.Fatalf("write completed: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, Sleep: func(time.Duration) {}})
+	req := llmtest.SimpleRequest("gpt-5.4")
+	req.Purpose = llm.RequestPurposePrewarm
+	req.StoreResponse = true
+	events, err := llmtest.Drain(p.Stream(context.Background(), req))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if !strings.Contains(gotRequest, `"generate":false`) {
+		t.Fatalf("prewarm request missing generate:false: %s", gotRequest)
+	}
+	for _, event := range events {
+		if event.Kind != llm.EventDone {
+			continue
+		}
+		if event.ResponseID != "resp_warm" || event.ResponseIDAnchor == nil || *event.ResponseIDAnchor != 0 {
+			t.Fatalf("prewarm done = %+v, want response id and zero anchor", event)
+		}
+		return
+	}
+	t.Fatal("prewarm stream had no EventDone")
 }
 
 func TestWebSocketContinuationRequiresOriginatingLiveConnection(t *testing.T) {

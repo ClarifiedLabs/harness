@@ -47,44 +47,40 @@ var childSeq atomic.Uint64
 
 // Runtime is the parent agent state a delegate call needs to start a child.
 type Runtime struct {
-	Provider                    llm.Provider
-	ProviderName                string
-	Model                       string
-	ContextWindow               int
-	MaxOutputTokens             int
-	Registry                    *llm.Registry
-	Reasoning                   llm.ReasoningConfig
-	ServerTools                 []llm.ServerTool
-	ResponsesStateful           bool
-	ManagedContinuationStateful bool
-	DisableManagedContinuation  bool
-	System                      string
-	Agent                       string
-	ToolNames                   []string
-	SessionPath                 string
-	CacheAffinityID             string
-	ParentChildID               string
-	Depth                       int
-	MaxPromptTokens             int
-	MaxPromptCostUSD            float64
+	Provider          llm.Provider
+	ProviderName      string
+	Model             string
+	ContextWindow     int
+	MaxOutputTokens   int
+	Registry          *llm.Registry
+	Reasoning         llm.ReasoningConfig
+	ServerTools       []llm.ServerTool
+	ResponsesStateful bool
+	System            string
+	Agent             string
+	ToolNames         []string
+	SessionPath       string
+	CacheAffinityID   string
+	ParentChildID     string
+	Depth             int
+	MaxPromptTokens   int
+	MaxPromptCostUSD  float64
 }
 
 // Launch is the fully resolved child-agent runtime for one delegate call.
 type Launch struct {
-	Provider                    llm.Provider
-	ProviderName                string
-	Model                       string
-	ContextWindow               int
-	MaxOutputTokens             int
-	Registry                    *llm.Registry
-	Reasoning                   llm.ReasoningConfig
-	ServerTools                 []llm.ServerTool
-	ResponsesStateful           bool
-	ManagedContinuationStateful bool
-	DisableManagedContinuation  bool
-	System                      string
-	Agent                       string
-	Tools                       *tools.Registry
+	Provider          llm.Provider
+	ProviderName      string
+	Model             string
+	ContextWindow     int
+	MaxOutputTokens   int
+	Registry          *llm.Registry
+	Reasoning         llm.ReasoningConfig
+	ServerTools       []llm.ServerTool
+	ResponsesStateful bool
+	System            string
+	Agent             string
+	Tools             *tools.Registry
 }
 
 // AgentCandidate is a configured agent that may be delegated to when its tools
@@ -560,28 +556,26 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		return result, err
 	}
 	child := agent.New(launch.Provider, childTools, agent.Options{
-		MaxTurns:                    maxTurns,
-		TurnMilestones:              turnMilestones,
-		MaxPromptTokens:             runtime.MaxPromptTokens,
-		MaxOutputTokens:             launch.MaxOutputTokens,
-		MaxPromptCostUSD:            runtime.MaxPromptCostUSD,
-		Model:                       launch.Model,
-		ContextWindow:               launch.ContextWindow,
-		Registry:                    launch.Registry,
-		Reasoning:                   launch.Reasoning,
-		ServerTools:                 launch.ServerTools,
-		ResponsesStateful:           launch.ResponsesStateful,
-		ManagedContinuationStateful: launch.ManagedContinuationStateful,
-		DisableManagedContinuation:  launch.DisableManagedContinuation,
-		RetentionPolicy:             r.opts.RetentionPolicy,
-		CompactKeepTurns:            r.opts.CompactKeepTurns,
-		CompactKeepTokens:           r.opts.CompactKeepTokens,
-		CompactTriggerPercent:       r.opts.CompactTriggerPercent,
-		CompactTargetPercent:        r.opts.CompactTargetPercent,
-		DisableAutoCompaction:       r.opts.DisableAutoCompaction,
-		CompactSummaryMaxTokens:     r.opts.CompactSummaryMaxTokens,
-		CompactToolResultMaxBytes:   r.opts.CompactToolResultMaxBytes,
-		Now:                         r.opts.Now,
+		MaxTurns:                  maxTurns,
+		TurnMilestones:            turnMilestones,
+		MaxPromptTokens:           runtime.MaxPromptTokens,
+		MaxOutputTokens:           launch.MaxOutputTokens,
+		MaxPromptCostUSD:          runtime.MaxPromptCostUSD,
+		Model:                     launch.Model,
+		ContextWindow:             launch.ContextWindow,
+		Registry:                  launch.Registry,
+		Reasoning:                 launch.Reasoning,
+		ServerTools:               launch.ServerTools,
+		ResponsesStateful:         launch.ResponsesStateful,
+		RetentionPolicy:           r.opts.RetentionPolicy,
+		CompactKeepTurns:          r.opts.CompactKeepTurns,
+		CompactKeepTokens:         r.opts.CompactKeepTokens,
+		CompactTriggerPercent:     r.opts.CompactTriggerPercent,
+		CompactTargetPercent:      r.opts.CompactTargetPercent,
+		DisableAutoCompaction:     r.opts.DisableAutoCompaction,
+		CompactSummaryMaxTokens:   r.opts.CompactSummaryMaxTokens,
+		CompactToolResultMaxBytes: r.opts.CompactToolResultMaxBytes,
+		Now:                       r.opts.Now,
 	})
 	child.SetSystem(launch.System)
 	child.SetCacheAffinityID(cacheAffinityID)
@@ -941,7 +935,13 @@ func loadContinuationSource(runtime Runtime, childID string) (*continuationSourc
 		return nil, continuationIncompatibleError(childID, "saved runtime identifiers are unavailable")
 	}
 	if state.ResponseState != nil &&
-		(state.ResponseState.PreviousResponseID == "" || state.ResponseState.AnchorMessages < 0 || state.ResponseState.AnchorMessages > len(state.Messages)) {
+		(state.ResponseState.PreviousResponseID == "" ||
+			state.ResponseState.AnchorMessages < 0 ||
+			state.ResponseState.AnchorMessages > len(state.Messages) ||
+			!llm.MatchesMessageFingerprint(
+				state.Messages[:state.ResponseState.AnchorMessages],
+				state.ResponseState.AnchorDigest,
+			)) {
 		return nil, continuationIncompatibleError(childID, "saved provider continuation anchor is invalid")
 	}
 	return &continuationSource{meta: meta, state: state}, nil
@@ -1068,31 +1068,29 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		contextWindow = launch.Registry.ContextWindow(launch.Model)
 	}
 	fingerprint := struct {
-		Version                     int                   `json:"version"`
-		Provider                    string                `json:"provider"`
-		ProviderImplementation      string                `json:"provider_implementation"`
-		Model                       string                `json:"model"`
-		Agent                       string                `json:"agent"`
-		RequestedAgent              string                `json:"requested_agent,omitempty"`
-		Mode                        string                `json:"mode,omitempty"`
-		MaxTurns                    int                   `json:"max_turns"`
-		Depth                       int                   `json:"depth"`
-		MaxDepth                    int                   `json:"max_depth"`
-		ContextWindow               int                   `json:"context_window"`
-		MaxOutputTokens             int                   `json:"max_output_tokens"`
-		ModelOutputLimit            int                   `json:"model_output_limit"`
-		MaxPromptTokens             int                   `json:"max_prompt_tokens"`
-		MaxPromptCostUSD            float64               `json:"max_prompt_cost_usd"`
-		Reasoning                   llm.ReasoningConfig   `json:"reasoning"`
-		ServerTools                 []llm.ServerTool      `json:"server_tools,omitempty"`
-		ResponsesStateful           bool                  `json:"responses_stateful"`
-		ManagedContinuationStateful bool                  `json:"managed_continuation_stateful"`
-		DisableManagedContinuation  bool                  `json:"disable_managed_continuation"`
-		RetentionPolicy             agent.RetentionPolicy `json:"retention_policy"`
-		System                      string                `json:"system"`
-		Tools                       []llm.ToolSchema      `json:"tools"`
-		TurnMilestones              []agent.TurnMilestone `json:"turn_milestones,omitempty"`
-		Compaction                  struct {
+		Version                int                   `json:"version"`
+		Provider               string                `json:"provider"`
+		ProviderImplementation string                `json:"provider_implementation"`
+		Model                  string                `json:"model"`
+		Agent                  string                `json:"agent"`
+		RequestedAgent         string                `json:"requested_agent,omitempty"`
+		Mode                   string                `json:"mode,omitempty"`
+		MaxTurns               int                   `json:"max_turns"`
+		Depth                  int                   `json:"depth"`
+		MaxDepth               int                   `json:"max_depth"`
+		ContextWindow          int                   `json:"context_window"`
+		MaxOutputTokens        int                   `json:"max_output_tokens"`
+		ModelOutputLimit       int                   `json:"model_output_limit"`
+		MaxPromptTokens        int                   `json:"max_prompt_tokens"`
+		MaxPromptCostUSD       float64               `json:"max_prompt_cost_usd"`
+		Reasoning              llm.ReasoningConfig   `json:"reasoning"`
+		ServerTools            []llm.ServerTool      `json:"server_tools,omitempty"`
+		ResponsesStateful      bool                  `json:"responses_stateful"`
+		RetentionPolicy        agent.RetentionPolicy `json:"retention_policy"`
+		System                 string                `json:"system"`
+		Tools                  []llm.ToolSchema      `json:"tools"`
+		TurnMilestones         []agent.TurnMilestone `json:"turn_milestones,omitempty"`
+		Compaction             struct {
 			KeepTurns          int  `json:"keep_turns"`
 			KeepTokens         int  `json:"keep_tokens"`
 			TriggerPercent     int  `json:"trigger_percent"`
@@ -1102,29 +1100,27 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 			ToolResultMaxBytes int  `json:"tool_result_max_bytes"`
 		} `json:"compaction"`
 	}{
-		Version:                     continuationFingerprintVersion,
-		Provider:                    launch.ProviderName,
-		ProviderImplementation:      providerImplementation,
-		Model:                       launch.Model,
-		Agent:                       launch.Agent,
-		RequestedAgent:              req.Agent,
-		Mode:                        req.Mode,
-		MaxTurns:                    maxTurns,
-		Depth:                       runtime.Depth + 1,
-		MaxDepth:                    r.maxDepth(),
-		ContextWindow:               contextWindow,
-		MaxOutputTokens:             launch.MaxOutputTokens,
-		ModelOutputLimit:            launch.Registry.OutputLimit(launch.Model),
-		MaxPromptTokens:             runtime.MaxPromptTokens,
-		MaxPromptCostUSD:            runtime.MaxPromptCostUSD,
-		Reasoning:                   launch.Reasoning,
-		ServerTools:                 slices.Clone(launch.ServerTools),
-		ResponsesStateful:           launch.ResponsesStateful,
-		ManagedContinuationStateful: launch.ManagedContinuationStateful,
-		DisableManagedContinuation:  launch.DisableManagedContinuation,
-		RetentionPolicy:             r.opts.RetentionPolicy,
-		System:                      launch.System,
-		Tools:                       toolRegistry.Specs(),
+		Version:                continuationFingerprintVersion,
+		Provider:               launch.ProviderName,
+		ProviderImplementation: providerImplementation,
+		Model:                  launch.Model,
+		Agent:                  launch.Agent,
+		RequestedAgent:         req.Agent,
+		Mode:                   req.Mode,
+		MaxTurns:               maxTurns,
+		Depth:                  runtime.Depth + 1,
+		MaxDepth:               r.maxDepth(),
+		ContextWindow:          contextWindow,
+		MaxOutputTokens:        launch.MaxOutputTokens,
+		ModelOutputLimit:       launch.Registry.OutputLimit(launch.Model),
+		MaxPromptTokens:        runtime.MaxPromptTokens,
+		MaxPromptCostUSD:       runtime.MaxPromptCostUSD,
+		Reasoning:              launch.Reasoning,
+		ServerTools:            slices.Clone(launch.ServerTools),
+		ResponsesStateful:      launch.ResponsesStateful,
+		RetentionPolicy:        r.opts.RetentionPolicy,
+		System:                 launch.System,
+		Tools:                  toolRegistry.Specs(),
 	}
 	if req.Mode == ModeImplementation {
 		fingerprint.TurnMilestones = implementationTurnMilestones(maxTurns)

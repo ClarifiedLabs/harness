@@ -941,7 +941,7 @@ func TestRunDebugRequestDumpsPromptAndSkipsModelStream(t *testing.T) {
 		t.Fatalf("reasoning profile not forwarded: output=%+v request=%+v", got.Reasoning, got.Request.Reasoning)
 	}
 	if got.ResponsesStateful || got.Request.StoreResponse {
-		t.Fatalf("responses stateful = output %v request %v, want proxy-managed state", got.ResponsesStateful, got.Request.StoreResponse)
+		t.Fatalf("responses stateful = output %v request %v, want CLI-owned state", got.ResponsesStateful, got.Request.StoreResponse)
 	}
 	if !got.PromptIncluded {
 		t.Fatal("prompt_included = false, want true")
@@ -992,7 +992,7 @@ func TestRunDebugRequestInitialPromptDoesNotSaveSession(t *testing.T) {
 	}
 }
 
-func TestRunDebugRequestDisablesProxyContinuation(t *testing.T) {
+func TestRunDebugRequestDisablesContinuation(t *testing.T) {
 	fp := llmtest.New("fake")
 	env, out, errw, _, _ := fakeProviderEnvWithProxy(t, []string{
 		"--debug-request",
@@ -1007,27 +1007,105 @@ func TestRunDebugRequestDisablesProxyContinuation(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("debug request JSON: %v\n%s", err, out.String())
 	}
-	if !got.Request.DisableContinuation {
-		t.Fatalf("debug request = %+v, want disable_continuation", got.Request)
+	if got.Request.StoreResponse || got.Request.PreviousResponseID != "" || len(got.Request.Messages) != 1 {
+		t.Fatalf("debug request = %+v, want full stateless request", got.Request)
 	}
 }
 
-func TestManagedContinuationStatefulForProviderUsesCatalogAndConfig(t *testing.T) {
+func TestResponsesStatefulForProviderUsesCatalogAndConfig(t *testing.T) {
+	catalog := protocol.Catalog{Targets: []protocol.Target{
+		{
+			ID:                   "openai:gpt-5.5",
+			Aliases:              []string{"gpt-5.5"},
+			APIType:              "responses",
+			ContinuationStateful: true,
+		},
+		{
+			ID:                   "google:gemini-3",
+			APIType:              "interactions",
+			ContinuationStateful: true,
+		},
+		{
+			ID:                   "openrouter:openai/gpt-5.5",
+			APIType:              "openai",
+			ContinuationStateful: false,
+		},
+	}}
+	cfg := config.Config{ResponsesStateful: true}
+	for _, target := range []string{"openai:gpt-5.5", "gpt-5.5", "google:gemini-3"} {
+		if !responsesStatefulForProvider(cfg, catalog, target) {
+			t.Fatalf("stateful target %q was not recognized", target)
+		}
+	}
+	if responsesStatefulForProvider(cfg, catalog, "openrouter:openai/gpt-5.5") {
+		t.Fatal("stateless target was treated as stateful")
+	}
+	cfg.ResponsesStateful = false
+	if responsesStatefulForProvider(cfg, catalog, "openai:gpt-5.5") {
+		t.Fatal("disabled Responses continuation was treated as stateful")
+	}
+}
+
+func TestSessionResponseStateCompatibilityRequiresExactFingerprintAndTarget(t *testing.T) {
+	messages := []llm.Message{
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hello"}}},
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
+	}
+	digest, err := llm.FingerprintMessages(messages)
+	if err != nil {
+		t.Fatal(err)
+	}
 	catalog := protocol.Catalog{Targets: []protocol.Target{{
 		ID:                   "openai:gpt-5.5",
-		Aliases:              []string{"gpt-5.5"},
 		APIType:              "responses",
 		ContinuationStateful: true,
 	}}}
 	cfg := config.Config{ResponsesStateful: true}
-	for _, target := range []string{"openai:gpt-5.5", "gpt-5.5"} {
-		if !managedContinuationStatefulForProvider(cfg, catalog, target) {
-			t.Fatalf("stateful target %q was not recognized", target)
-		}
+	saved := session.Session{
+		Provider: "openai:gpt-5.5",
+		Model:    "gpt-5.5",
+		Messages: messages,
+		ResponseState: &llm.ResponseState{
+			PreviousResponseID: "resp_1",
+			AnchorMessages:     len(messages),
+			AnchorDigest:       digest,
+		},
+	}
+	if !sessionResponseStateCompatible(cfg, catalog, saved, saved.Provider, saved.Model) {
+		t.Fatal("matching saved continuation was rejected")
+	}
+
+	tests := []struct {
+		name     string
+		mutate   func(*session.Session)
+		provider string
+		model    string
+	}{
+		{name: "provider", provider: "other:gpt-5.5", model: saved.Model},
+		{name: "model", provider: saved.Provider, model: "gpt-5.5-fast"},
+		{name: "missing id", provider: saved.Provider, model: saved.Model, mutate: func(s *session.Session) { s.ResponseState.PreviousResponseID = "" }},
+		{name: "missing digest", provider: saved.Provider, model: saved.Model, mutate: func(s *session.Session) { s.ResponseState.AnchorDigest = "" }},
+		{name: "bad range", provider: saved.Provider, model: saved.Model, mutate: func(s *session.Session) { s.ResponseState.AnchorMessages = len(s.Messages) + 1 }},
+		{name: "mutated prefix", provider: saved.Provider, model: saved.Model, mutate: func(s *session.Session) { s.Messages[0].Content[0].Text = "changed" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := saved
+			candidate.Messages = append([]llm.Message(nil), saved.Messages...)
+			candidate.Messages[0].Content = append([]llm.ContentBlock(nil), saved.Messages[0].Content...)
+			state := *saved.ResponseState
+			candidate.ResponseState = &state
+			if tc.mutate != nil {
+				tc.mutate(&candidate)
+			}
+			if sessionResponseStateCompatible(cfg, catalog, candidate, tc.provider, tc.model) {
+				t.Fatal("incompatible continuation was accepted")
+			}
+		})
 	}
 	cfg.ResponsesStateful = false
-	if managedContinuationStatefulForProvider(cfg, catalog, "openai:gpt-5.5") {
-		t.Fatal("disabled Responses continuation was treated as stateful")
+	if sessionResponseStateCompatible(cfg, catalog, saved, saved.Provider, saved.Model) {
+		t.Fatal("disabled continuation restored saved state")
 	}
 }
 
@@ -3366,7 +3444,7 @@ func TestRunDoesNotManageResponsesStateInHarness(t *testing.T) {
 		t.Fatalf("responses exit code = %d, want 0; errw=%q", code, errw.String())
 	}
 	if len(proxy.requests) != 1 || proxy.requests[0].Request.StoreResponse {
-		t.Fatalf("responses request StoreResponse = %+v, want proxy-managed state", proxy.requests)
+		t.Fatalf("responses request StoreResponse = %+v, want CLI-owned state", proxy.requests)
 	}
 
 	fp = llmtest.New("fake", okStepWithUsage(1, 1))
@@ -3400,7 +3478,7 @@ func TestRunDoesNotManageResponsesStateInHarness(t *testing.T) {
 		t.Fatalf("codex responses exit code = %d, want 0; errw=%q", code, errw.String())
 	}
 	if len(proxy.requests) != 1 || proxy.requests[0].Request.StoreResponse {
-		t.Fatalf("codex responses request StoreResponse = %+v, want proxy-managed state", proxy.requests)
+		t.Fatalf("codex responses request StoreResponse = %+v, want CLI-owned state", proxy.requests)
 	}
 }
 

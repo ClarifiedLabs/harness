@@ -96,6 +96,50 @@ func TestGenerateSummaryUsesGivenSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestMaintenanceRequestIdentitiesAreDeterministicAndPurposeScoped(t *testing.T) {
+	fp := llmtest.New("fake",
+		summaryStep("one", 1, 1),
+		summaryStep("two", 1, 1),
+		summaryStep("branch", 1, 1),
+	)
+	a := newAgent(fp, tools.Default(), Options{Model: "model"})
+	a.SetTranscript(makeTurns(1))
+	a.SetProxySessionID("harness-session-main")
+	a.SetCacheAffinityID("harness-cache-main")
+	if _, _, err := a.GenerateSummary(context.Background(), "handoff"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.GenerateSummary(context.Background(), "handoff again"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.GenerateBranchSummary(context.Background(), a.Transcript(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("requests = %d, want 3", len(fp.Requests))
+	}
+	first, second, branch := fp.Requests[0], fp.Requests[1], fp.Requests[2]
+	if first.ProxySessionID == "" ||
+		first.CacheAffinityID == "" ||
+		first.ProxySessionID == "harness-session-main" ||
+		first.CacheAffinityID == "harness-cache-main" {
+		t.Fatalf("handoff identities = proxy %q cache %q", first.ProxySessionID, first.CacheAffinityID)
+	}
+	if first.ProxySessionID != second.ProxySessionID || first.CacheAffinityID != second.CacheAffinityID {
+		t.Fatalf("same-purpose identities changed: first=%q/%q second=%q/%q",
+			first.ProxySessionID, first.CacheAffinityID, second.ProxySessionID, second.CacheAffinityID)
+	}
+	if branch.ProxySessionID == first.ProxySessionID || branch.CacheAffinityID == first.CacheAffinityID {
+		t.Fatalf("branch identities were not purpose-separated: branch=%q/%q handoff=%q/%q",
+			branch.ProxySessionID, branch.CacheAffinityID, first.ProxySessionID, first.CacheAffinityID)
+	}
+	for i, request := range fp.Requests {
+		if request.CachePolicy.StaticTTL != llm.CacheTTLDefault {
+			t.Fatalf("request %d static TTL = %q, want default", i, request.CachePolicy.StaticTTL)
+		}
+	}
+}
+
 func TestCompactKeepsLastEightTurns(t *testing.T) {
 	// Ten whole turns; compaction keeps the latest eight assistant turns and
 	// checkpoints the earlier progress and active instructions.

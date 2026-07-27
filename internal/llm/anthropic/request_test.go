@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,7 +24,7 @@ func TestBuildRequestGolden(t *testing.T) {
 
 	// The golden documents an interactive request, whose stable anchors take the
 	// 1h breakpoint.
-	req.LongCacheTTL = true
+	req.CachePolicy.StaticTTL = llm.CacheTTLExtended
 	// claude-opus-4-8 window is 1,000,000, so the default cap is a quarter
 	// of the context window.
 	const contextWindow = 1_000_000
@@ -132,6 +133,40 @@ func TestRichToolResultCacheBreakpointStaysOnParent(t *testing.T) {
 		if child.CacheControl != nil {
 			t.Fatalf("rich child %d cache_control = %+v, want nil", i, child.CacheControl)
 		}
+	}
+}
+
+func TestPlaceCacheBreakpointsUsesStablePrefixAndRollingTail(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		stablePrefix int
+		want         []int
+	}{
+		{name: "zero falls back to previous", stablePrefix: 0, want: []int{2, 3}},
+		{name: "distinct stable prefix", stablePrefix: 2, want: []int{1, 3}},
+		{name: "duplicate tail falls back", stablePrefix: 4, want: []int{2, 3}},
+		{name: "invalid high clamps", stablePrefix: 99, want: []int{2, 3}},
+		{name: "invalid low falls back", stablePrefix: -1, want: []int{2, 3}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			messages := make([]wireMessage, 4)
+			for i := range messages {
+				messages[i] = wireMessage{Role: "user", Content: []wireContent{{Type: "text", Text: "x"}}}
+			}
+			placeCacheBreakpoints(messages, tc.stablePrefix)
+			got := []int{}
+			for i, message := range messages {
+				if message.Content[0].CacheControl != nil {
+					if message.Content[0].CacheControl.TTL != "" {
+						t.Fatalf("message breakpoint %d used non-default TTL: %+v", i, message.Content[0].CacheControl)
+					}
+					got = append(got, i)
+				}
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("breakpoints = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -427,7 +462,7 @@ func TestBuildRequestStableAnchorsUse1hTTL(t *testing.T) {
 	// ~once and read every turn, so it carries a 1h TTL; the rolling message
 	// breakpoint is rewritten each turn and keeps the default 5m window (no ttl).
 	req := basicRequest()
-	req.LongCacheTTL = true
+	req.CachePolicy.StaticTTL = llm.CacheTTLExtended
 	w := buildRequest(req, 1_000_000, 0)
 
 	if len(w.System) == 0 || w.System[0].CacheControl == nil || w.System[0].CacheControl.TTL != "1h" {
@@ -445,11 +480,11 @@ func TestBuildRequestStableAnchorsUse1hTTL(t *testing.T) {
 }
 
 func TestBuildRequestStableAnchorsUse5mTTLWhenNotInteractive(t *testing.T) {
-	// One-shot/delegate/non-interactive runs (LongCacheTTL false) finish inside the
+	// One-shot/delegate/non-interactive runs use the default TTL and finish inside the
 	// 5m window, so the stable anchors take the default 5m breakpoint (no ttl) —
 	// half the write price of the 1h breakpoint they would never use.
 	req := basicRequest()
-	req.LongCacheTTL = false
+	req.CachePolicy.StaticTTL = llm.CacheTTLDefault
 	w := buildRequest(req, 1_000_000, 0)
 
 	if len(w.System) == 0 || w.System[0].CacheControl == nil || w.System[0].CacheControl.Type != "ephemeral" || w.System[0].CacheControl.TTL != "" {

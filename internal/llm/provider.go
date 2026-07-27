@@ -95,15 +95,11 @@ type Request struct {
 	StoreResponse      bool     `json:"store_response,omitempty"`
 	PreviousResponseID string   `json:"previous_response_id,omitempty"`
 	RequestContext     []string `json:"request_context,omitempty"`
-	// DisableContinuation tells an orchestration proxy not to create or reuse
-	// provider continuation state for this request. Concrete provider dialects
-	// ignore it; it exists so a caller can run a genuinely stateless comparison
-	// even when the proxy normally manages continuation automatically.
-	DisableContinuation bool `json:"disable_continuation,omitempty"`
 
-	// ProxySessionID is a harness-local session key used by harness-model-proxy
-	// to isolate continuation and websocket state. Concrete provider dialects
-	// must not forward this value upstream.
+	// ProxySessionID is a harness-local session key used as a sticky-routing hint
+	// and to isolate connection-affine WebSocket transports. The CLI, not the
+	// proxy, owns continuation anchors. Concrete provider dialects must not
+	// forward this value upstream.
 	ProxySessionID string `json:"proxy_session_id,omitempty"`
 
 	// CacheAffinityID is a stable harness-local conversation key used by
@@ -119,12 +115,21 @@ type Request struct {
 	// CacheAffinityID instead of forwarding the local conversation id.
 	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 
-	// LongCacheTTL requests the 1-hour Anthropic prompt-cache breakpoint on the
-	// stable system+tools anchors (worth its 2x write cost only across the
-	// multi-minute pauses of an interactive REPL). One-shot, delegate, and other
-	// non-interactive runs leave it false to take the cheaper 5-minute breakpoint.
-	// Ignored by non-Anthropic dialects.
-	LongCacheTTL bool `json:"long_cache_ttl,omitempty"`
+	// CachePolicy declares caller-owned semantic cache boundaries. Dialects
+	// choose provider-specific breakpoint placement.
+	CachePolicy CachePolicy `json:"cache_policy,omitempty"`
+}
+
+type CacheTTL string
+
+const (
+	CacheTTLDefault  CacheTTL = "5m"
+	CacheTTLExtended CacheTTL = "1h"
+)
+
+type CachePolicy struct {
+	StaticTTL           CacheTTL `json:"static_ttl,omitempty"`
+	StableMessagePrefix int      `json:"stable_message_prefix,omitempty"`
 }
 
 // ResponseState is resumable provider continuation state. PreviousResponseID
@@ -134,6 +139,7 @@ type Request struct {
 type ResponseState struct {
 	PreviousResponseID string `json:"previous_response_id,omitempty"`
 	AnchorMessages     int    `json:"anchor_messages,omitempty"`
+	AnchorDigest       string `json:"anchor_digest,omitempty"`
 }
 
 // ToolSchema is the model-facing declaration of one tool. Parameters is the raw
@@ -210,6 +216,7 @@ type ModelRequestEvent struct {
 	State             ModelRequestState   `json:"state"`
 	Outcome           ModelRequestOutcome `json:"outcome,omitempty"`
 	Sequence          int                 `json:"sequence,omitempty"`
+	ProxyInstanceID   string              `json:"proxy_instance_id,omitempty"`
 	ProxyRequestID    uint64              `json:"proxy_request_id,omitempty"`
 	UpstreamRequestID string              `json:"upstream_request_id,omitempty"`
 	TraceID           string              `json:"trace_id,omitempty"`
@@ -286,6 +293,9 @@ type StreamEvent struct {
 	Usage      *Usage     `json:"usage,omitempty"`       // EventUsage / EventDone
 	StopReason StopReason `json:"stop_reason,omitempty"` // EventDone
 	ResponseID string     `json:"response_id,omitempty"` // EventDone, provider continuation id
+	// ResponseIDAnchor is meaningful only on EventDone. A nil value means the
+	// response ID must not be installed as an out-of-band prewarm anchor.
+	ResponseIDAnchor *int `json:"response_id_anchor,omitempty"`
 
 	// ModelRequest carries EventModelRequest telemetry. It is intentionally
 	// separate from every content-bearing field above.

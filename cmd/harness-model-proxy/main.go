@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,6 +38,8 @@ const (
 	// defaultMetricsListen is the separate, unauthenticated port for the
 	// Prometheus /metrics endpoint. It stays off the harness CLI's API-key path.
 	defaultMetricsListen = "127.0.0.1:9090"
+	defaultDrainDelay    = 5 * time.Second
+	defaultShutdownTime  = 5 * time.Minute
 )
 
 type environment struct {
@@ -136,6 +139,9 @@ func runServe(env environment, args []string) int {
 	logFormat := fs.String("log-format", "", "log format: json, text")
 	noMetrics := fs.Bool("no-metrics", false, "disable the Prometheus /metrics endpoint")
 	metricsListen := fs.String("metrics-listen", "", "Prometheus /metrics listen address (default: "+defaultMetricsListen+")")
+	drainDelayFlag := fs.String("drain-delay", "", "readiness propagation delay before API shutdown (default: 5s)")
+	shutdownTimeoutFlag := fs.String("shutdown-timeout", "", "maximum graceful stream drain time (default: 5m)")
+	instanceIDFlag := fs.String("instance-id", "", "proxy instance identifier")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			usageServe(env.stdout)
@@ -170,6 +176,36 @@ func runServe(env environment, args []string) int {
 		return exitUsage
 	}
 	env.modelsDevCacheTTL = &modelsTTL
+	drainDelay, err := resolveServeDuration(
+		"drain-delay",
+		*drainDelayFlag,
+		flagWasSet(fs, "drain-delay"),
+		env.getenv("HARNESS_MODEL_PROXY_DRAIN_DELAY"),
+		cfg.DrainDelay,
+		defaultDrainDelay,
+	)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitUsage
+	}
+	shutdownTimeout, err := resolveServeDuration(
+		"shutdown-timeout",
+		*shutdownTimeoutFlag,
+		flagWasSet(fs, "shutdown-timeout"),
+		env.getenv("HARNESS_MODEL_PROXY_SHUTDOWN_TIMEOUT"),
+		cfg.ShutdownTimeout,
+		defaultShutdownTime,
+	)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitUsage
+	}
+	instanceID := resolveServeInstanceID(
+		*instanceIDFlag,
+		flagWasSet(fs, "instance-id"),
+		env.getenv("HARNESS_MODEL_PROXY_INSTANCE_ID"),
+		cfg.InstanceID,
+	)
 
 	level := cfg.LogLevel
 	if *logLevel != "" {
@@ -212,6 +248,7 @@ func runServe(env environment, args []string) int {
 		ModelsDevSourceDate: initialSourceDate,
 		Now:                 env.now,
 		Metrics:             reg,
+		InstanceID:          instanceID,
 		Warn: func(msg string) {
 			logger.Warn(msg)
 		},
@@ -220,36 +257,89 @@ func runServe(env environment, args []string) int {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime
 	}
+	logger = logger.With("proxy_instance_id", handler.InstanceID())
 	addr := defaultListen
 	if *listen != "" {
 		addr = *listen
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if env.sigCh != nil {
-		go func() {
-			select {
-			case <-env.sigCh:
-				cancel()
-			case <-ctx.Done():
-			}
-		}()
-	}
-	startModelsDevCacheRefresh(ctx, env, configDir, modelsTTL, logger, func(catalog *modelcatalog.Catalog, sourceDate time.Time) {
+	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
+	defer cancelBackground()
+	startModelsDevCacheRefresh(backgroundCtx, env, configDir, modelsTTL, logger, func(catalog *modelcatalog.Catalog, sourceDate time.Time) {
 		handler.UpdateModelsDevCatalog(catalog, sourceDate)
 	})
-	go apikey.WatchFile(ctx, keyFile, keyFileState, 2*time.Second, authStore, func(err error) {
+	go apikey.WatchFile(backgroundCtx, keyFile, keyFileState, 2*time.Second, authStore, func(err error) {
 		logger.Warn("reload api keys failed", "path", keyFile, "err", err)
 	})
 
-	if err := metrics.StartEndpoint(ctx, logger, reg, metricsSettings); err != nil {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		_ = handler.Close()
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitRuntime
+	}
+	metricsEndpoint, err := metrics.StartEndpoint(context.Background(), logger, reg, metricsSettings)
+	if err != nil {
+		ln.Close()
+		_ = handler.Close()
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime
 	}
 
-	srv := httpserve.New(addr, server.ObserveAuth(handler, authStore, authStore.Middleware(handler)))
+	protected := server.ObserveAuth(handler, authStore, authStore.Middleware(handler))
+	lifecycle := server.NewLifecycle(protected)
+	srv := httpserve.New("", lifecycle)
+	stopAPI, cancelAPIStop := context.WithCancel(context.Background())
+	defer cancelAPIStop()
+	workCtx, cancelWork := context.WithCancel(context.Background())
+	defer cancelWork()
+	apiErr := make(chan error, 1)
+	go func() {
+		apiErr <- httpserve.ServeWithOptions(srv, ln, httpserve.ServeOptions{
+			StopContext:     stopAPI,
+			WorkContext:     workCtx,
+			ShutdownTimeout: shutdownTimeout,
+		})
+	}()
 	logger.Info("model proxy listening", "addr", addr)
-	if err := httpserve.Run(ctx, srv); err != nil {
+
+	var serveErr error
+	if env.sigCh == nil {
+		serveErr = <-apiErr
+	} else {
+		select {
+		case serveErr = <-apiErr:
+		case <-env.sigCh:
+			lifecycle.BeginDrain()
+			cancelBackground()
+			apiFinished := false
+			if drainDelay > 0 {
+				timer := time.NewTimer(drainDelay)
+				select {
+				case <-timer.C:
+				case serveErr = <-apiErr:
+					apiFinished = true
+				}
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+			}
+			if !apiFinished {
+				cancelAPIStop()
+				serveErr = <-apiErr
+			}
+		}
+	}
+	lifecycle.BeginTeardown()
+	cancelBackground()
+	cancelWork()
+	closeErr := handler.Close()
+	metricsCtx, cancelMetrics := context.WithTimeout(context.Background(), httpserve.DefaultShutdownTimeout)
+	metricsErr := metricsEndpoint.Shutdown(metricsCtx)
+	cancelMetrics()
+	if err := errors.Join(serveErr, closeErr, metricsErr); err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime
 	}
@@ -356,7 +446,7 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `harness-model-proxy - provider and model proxy for harness
 
 Usage:
-  harness-model-proxy serve             [-config path] [-api-keys-file path] [-listen addr] [-models-dev-cache-ttl d] [-log-level level] [-log-format format] [-no-metrics] [-metrics-listen addr]
+  harness-model-proxy serve             [-config path] [-api-keys-file path] [-listen addr] [-models-dev-cache-ttl d] [-drain-delay d] [-shutdown-timeout d] [-instance-id id] [-log-level level] [-log-format format] [-no-metrics] [-metrics-listen addr]
   harness-model-proxy setup             [-force] [-models-dev-cache-ttl d]
   harness-model-proxy refresh-models    [-config path] [-models-dev-cache-ttl d]
   harness-model-proxy auth              <login|logout|status> [-config path] <provider>
@@ -383,6 +473,9 @@ serve flags:
   -log-format format      json|text (overrides config)
   -no-metrics             disable the Prometheus /metrics endpoint
   -metrics-listen addr    Prometheus /metrics listen address (default: `+defaultMetricsListen+`)
+  -drain-delay d          readiness propagation delay before API shutdown (default: 5s)
+  -shutdown-timeout d     maximum graceful stream drain time (default: 5m)
+  -instance-id id         proxy instance identifier (default: random)
 
 setup flags:
   -force                  overwrite existing provider files
@@ -407,7 +500,7 @@ func usageServe(w io.Writer) {
 	fmt.Fprint(w, `harness-model-proxy serve - load config and serve the HTTP model proxy
 
 Usage:
-  harness-model-proxy serve [-config path] [-api-keys-file path] [-listen addr] [-models-dev-cache-ttl d] [-log-level level] [-log-format format] [-no-metrics] [-metrics-listen addr]
+  harness-model-proxy serve [-config path] [-api-keys-file path] [-listen addr] [-models-dev-cache-ttl d] [-drain-delay d] [-shutdown-timeout d] [-instance-id id] [-log-level level] [-log-format format] [-no-metrics] [-metrics-listen addr]
 
 With no arguments, harness-model-proxy serves HTTP (the default action).
 
@@ -420,6 +513,9 @@ Flags:
   -log-format format      json|text (overrides config)
   -no-metrics             disable the Prometheus /metrics endpoint
   -metrics-listen addr    Prometheus /metrics listen address (default: `+defaultMetricsListen+`)
+  -drain-delay d          readiness propagation delay before API shutdown (default: 5s)
+  -shutdown-timeout d     maximum graceful stream drain time (default: 5m)
+  -instance-id id         proxy instance identifier (default: random)
 `)
 }
 
@@ -632,6 +728,44 @@ func parseModelsDevCacheTTLFlag(value string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid -models-dev-cache-ttl %q: duration must be non-negative", value)
 	}
 	return ttl, nil
+}
+
+func resolveServeDuration(name, flagValue string, flagSet bool, envValue string, configured server.Duration, fallback time.Duration) (time.Duration, error) {
+	if flagSet {
+		return parseServeDuration(name, flagValue)
+	}
+	if strings.TrimSpace(envValue) != "" {
+		return parseServeDuration(name, envValue)
+	}
+	if configured.Set {
+		return configured.Duration, nil
+	}
+	return fallback, nil
+}
+
+func parseServeDuration(name, value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "0" {
+		return 0, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid -%s %q: %w", name, value, err)
+	}
+	if duration < 0 {
+		return 0, fmt.Errorf("invalid -%s %q: duration must be non-negative", name, value)
+	}
+	return duration, nil
+}
+
+func resolveServeInstanceID(flagValue string, flagSet bool, envValue, configured string) string {
+	if flagSet {
+		return strings.TrimSpace(flagValue)
+	}
+	if value := strings.TrimSpace(envValue); value != "" {
+		return value
+	}
+	return strings.TrimSpace(configured)
 }
 
 func flagWasSet(fs *flag.FlagSet, name string) bool {
