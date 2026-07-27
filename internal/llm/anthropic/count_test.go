@@ -26,7 +26,7 @@ func TestCountInputTokens(t *testing.T) {
 	defer srv.Close()
 
 	p := New(Config{
-		BaseURL:     srv.URL,
+		BaseURL:     srv.URL + "/anthropic/v1",
 		AuthHeaders: map[string]string{"x-api-key": "sk-ant", "anthropic-beta": "existing-beta"},
 	})
 	got, err := p.CountInputTokens(context.Background(), llm.Request{
@@ -45,8 +45,8 @@ func TestCountInputTokens(t *testing.T) {
 	if got.InputTokens != 2345 || got.Source != "anthropic" {
 		t.Fatalf("count = %+v, want 2345 anthropic", got)
 	}
-	if gotPath != "/v1/messages/count_tokens" {
-		t.Fatalf("path = %q, want /v1/messages/count_tokens", gotPath)
+	if gotPath != "/anthropic/v1/messages/count_tokens" {
+		t.Fatalf("path = %q, want /anthropic/v1/messages/count_tokens", gotPath)
 	}
 	if gotKey != "sk-ant" || gotVersion == "" {
 		t.Fatalf("headers x-api-key=%q anthropic-version=%q", gotKey, gotVersion)

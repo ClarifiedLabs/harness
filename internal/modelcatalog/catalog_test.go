@@ -134,7 +134,7 @@ func TestFirstPartyProviderFallbacks(t *testing.T) {
 		t.Fatalf("openai APIType = %q", got)
 	}
 	anthropic, _ := c.Provider("anthropic")
-	if got := anthropic.BaseURL(); got != "https://api.anthropic.com" {
+	if got := anthropic.BaseURL(); got != "https://api.anthropic.com/v1" {
 		t.Fatalf("anthropic BaseURL = %q", got)
 	}
 	if got := anthropic.APIType(); got != "anthropic" {
@@ -227,7 +227,7 @@ func TestProviderFallbacksFromNPM(t *testing.T) {
 		{
 			name:        "anthropic sdk",
 			provider:    Provider{ID: "custom-anthropic", NPM: "@ai-sdk/anthropic"},
-			wantBaseURL: "https://api.anthropic.com",
+			wantBaseURL: "https://api.anthropic.com/v1",
 			wantAPIType: "anthropic",
 		},
 		{

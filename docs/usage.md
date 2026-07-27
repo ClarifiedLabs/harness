@@ -454,6 +454,8 @@ first-party OpenAI and Anthropic defaults from exact `@ai-sdk/openai` and
 the native Gemini Interactions endpoint. Managed Google configs use
 `api_type:"interactions"`, explicitly default `interactions_stateful:true`, and
 advertise `web_search`; Vertex Google package variants are not auto-configured.
+Anthropic `base_url` values are versioned API prefixes (normally ending in
+`/v1`); the dialect appends `/messages` or `/messages/count_tokens`.
 
 The special `openai-codex` provider uses ChatGPT subscription auth instead of an
 API key, exposes models from the OpenAI Codex catalog, and reports token usage

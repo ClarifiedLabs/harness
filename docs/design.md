@@ -587,6 +587,10 @@ Edge cases:
 | Temperature | omitted when nil | omitted when nil | omitted when nil | always omitted |
 | Reasoning controls | `reasoning.effort` / summary | provider-specific effort/budget | effort/budget/toggle | `thinking_level` and `thinking_summaries` |
 
+Anthropic provider `base_url` values are versioned API prefixes, matching
+models.dev and `@ai-sdk/anthropic` semantics. The dialect appends `/messages` or
+`/messages/count_tokens`; it does not add another `/v1`.
+
 #### OpenAI Responses support boundary
 
 Harness implements the model-and-tools subset of Responses needed by the coding

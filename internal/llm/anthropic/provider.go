@@ -20,19 +20,19 @@ import (
 )
 
 const (
-	defaultBaseURL = "https://api.anthropic.com"
-	messagesPath   = "/v1/messages"
+	defaultBaseURL = "https://api.anthropic.com/v1"
+	messagesPath   = "/messages"
 	apiVersion     = "2023-06-01"
 
 	maxPauseContinuations = 5
 )
 
-// Config configures a Provider. A custom BaseURL supplies scheme/host/prefix
-// only; the dialect appends its standard /v1/messages path (design §7).
+// Config configures a Provider. A custom BaseURL is a versioned API prefix;
+// the dialect appends its standard /messages path (design §7).
 type Config struct {
 	APIKey        string
 	AuthHeaders   map[string]string
-	BaseURL       string // default https://api.anthropic.com
+	BaseURL       string // default https://api.anthropic.com/v1
 	ContextWindow int    // resolved by main from provider config registry
 	OutputLimit   int    // model's real max-output-token limit; 0 = unknown
 	HTTPClient    *http.Client
