@@ -264,14 +264,19 @@ func TestToolDiffColor(t *testing.T) {
 
 	got := errw.String()
 	for _, want := range []string{
-		"\x1b[36m---",        // header cyan
-		"\x1b[35m@@",         // hunk magenta
-		"\x1b[102m\x1b[32m+", // added line: bright green bg, green sigil
-		"\x1b[101m\x1b[31m-", // removed line: bright red bg, red sigil
-		"\x1b[35mfunc",       // Go keyword in magenta
+		"\x1b[36m---",            // header cyan
+		"\x1b[35m@@",             // hunk magenta
+		"\x1b[48;5;22m\x1b[32m+", // added line: subdued green bg, green sigil
+		"\x1b[48;5;52m\x1b[31m-", // removed line: subdued red bg, red sigil
+		"\x1b[35mfunc",           // Go keyword in magenta
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("colored diff missing %q:\n%q", want, got)
+		}
+	}
+	for _, bright := range []string{"\x1b[102m", "\x1b[101m"} {
+		if strings.Contains(got, bright) {
+			t.Fatalf("colored diff retained bright background %q:\n%q", bright, got)
 		}
 	}
 	if stripped := stripRenderTestANSI(got); stripped != text {
@@ -287,7 +292,7 @@ func TestToolDiffColorUnknownLanguage(t *testing.T) {
 	r.ToolDiff(llm.ToolCall{ID: "c1", Name: "edit"}, "notes.txt", text)
 
 	got := errw.String()
-	for _, want := range []string{"\x1b[102m", "\x1b[32m+", "\x1b[101m", "\x1b[31m-"} {
+	for _, want := range []string{"\x1b[48;5;22m", "\x1b[32m+", "\x1b[48;5;52m", "\x1b[31m-"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("colored diff missing %q:\n%q", want, got)
 		}

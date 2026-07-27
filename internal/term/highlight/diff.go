@@ -2,12 +2,13 @@ package highlight
 
 import "strings"
 
-// Background tints for added and removed diff lines, GitHub-style. These stay
-// inside the 16-color palette so they follow the terminal's theme like the
-// foreground styles do.
+// Background tints for added and removed diff lines, GitHub-style. Use the
+// darkest red and green entries in the ANSI-256 cube: the basic bright
+// backgrounds are too intense for a full line, while these keep the syntax
+// foreground colors distinct over a subdued tint.
 const (
-	bgAdded   = "\x1b[102m"
-	bgRemoved = "\x1b[101m"
+	bgAdded   = "\x1b[48;5;22m"
+	bgRemoved = "\x1b[48;5;52m"
 )
 
 // DiffState highlights unified diff lines: header lines are line-styled, +/-
