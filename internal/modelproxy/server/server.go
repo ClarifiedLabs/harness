@@ -836,7 +836,7 @@ func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "malformed input token request"})
 		return
 	}
-	if err := validateProxyRequestMessages(req.Request.Messages); err != nil {
+	if err := validateProxyRequestMessages(req.Request); err != nil {
 		writeError(cw, http.StatusBadRequest, &protocol.Error{
 			StatusCode: http.StatusBadRequest,
 			Code:       "invalid_request",
@@ -1049,7 +1049,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	if req.Request.PreviousResponseID != "" {
 		continuationResult = "failed"
 	}
-	if err := validateProxyRequestMessages(req.Request.Messages); err != nil {
+	if err := validateProxyRequestMessages(req.Request); err != nil {
 		streamErr = "invalid model request content"
 		writeFailure(http.StatusBadRequest, llm.APIErrorStageProxyDecode, &protocol.Error{
 			StatusCode: http.StatusBadRequest,
@@ -1384,11 +1384,14 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func validateProxyRequestMessages(messages []llm.Message) error {
-	if _, err := inputimage.ValidateMessages(messages); err != nil {
+func validateProxyRequestMessages(req llm.Request) error {
+	if _, err := inputimage.ValidateMessages(req.Messages); err != nil {
 		return err
 	}
-	return llm.ValidateTranscript(messages)
+	if req.PreviousResponseID != "" {
+		return llm.ValidateMessageContent(req.Messages)
+	}
+	return llm.ValidateTranscript(req.Messages)
 }
 
 func (h *Handler) streamProvider(opts factory.Options, providerID, promptCacheKey string) (llm.Provider, func(), error) {
