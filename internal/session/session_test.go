@@ -124,6 +124,8 @@ func sampleSession() Session {
 		Model:           "claude-opus-4-8",
 		Created:         created,
 		Updated:         created.Add(2 * time.Minute),
+		Build:           BuildMetadata{Version: "v1.2.3", Commit: "abc123", Modified: true},
+		Runtime:         RuntimeProfile{RetentionPolicy: "auto", ContextWindow: 200_000, SearchBackend: "rg"},
 		System:          "be terse",
 		ProxySessionID:  "harness-session-test",
 		CacheAffinityID: "harness-cache-test",
@@ -149,7 +151,7 @@ func sampleSession() Session {
 	}
 }
 
-func TestLoadAndReplayRejectPreV4SessionSchema(t *testing.T) {
+func TestLoadAndReplayRejectPreV5SessionSchema(t *testing.T) {
 	dir := t.TempDir()
 	data, err := json.Marshal(Session{Version: 2, Messages: []llm.Message{}})
 	if err != nil {
@@ -162,11 +164,11 @@ func TestLoadAndReplayRejectPreV4SessionSchema(t *testing.T) {
 		t.Fatalf("AppendEvent: %v", err)
 	}
 
-	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 4)") {
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 5)") {
 		t.Fatalf("Load error = %v, want clear v2 rejection", err)
 	}
 	var replay strings.Builder
-	if err := Replay(dir, &replay, ReplayOptions{}); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 4)") {
+	if err := Replay(dir, &replay, ReplayOptions{}); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 5)") {
 		t.Fatalf("Replay error = %v, want clear v2 rejection", err)
 	}
 }
@@ -1208,7 +1210,7 @@ func TestFollowValidatesMetadataAndAppearingSchema(t *testing.T) {
 		}
 		var out strings.Builder
 		err := followWithWaiter(context.Background(), dir, &out, ReplayOptions{}, wait)
-		if err == nil || !strings.Contains(err.Error(), "unsupported schema version 3 (want 4)") {
+		if err == nil || !strings.Contains(err.Error(), "unsupported schema version 3 (want 5)") {
 			t.Fatalf("Follow error = %v, want appearing schema rejection", err)
 		}
 	})

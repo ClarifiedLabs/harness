@@ -23,6 +23,23 @@ func readOnlyRegistry() *tools.Registry {
 	return reg
 }
 
+func TestRetentionBytesIncludeNestedPlaintextThinking(t *testing.T) {
+	const thinking = "private chain of thought"
+	messages := []llm.Message{{
+		Role: llm.RoleUser,
+		Content: []llm.ContentBlock{{
+			Kind: llm.BlockToolResult,
+			ResultContent: []llm.ContentBlock{{
+				Kind:     llm.BlockThinking,
+				Thinking: thinking,
+			}},
+		}},
+	}}
+	if got := retentionTranscriptBytes(messages); got < len(thinking) {
+		t.Fatalf("retention bytes = %d, want at least %d nested thinking bytes", got, len(thinking))
+	}
+}
+
 func userImage(name, data, text string) llm.Message {
 	return llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{
 		{Kind: llm.BlockImage, ImageName: name, ImageMediaType: "image/png", ImageData: data},

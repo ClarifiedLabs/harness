@@ -65,6 +65,8 @@ type Runtime struct {
 	Depth             int
 	MaxPromptTokens   int
 	MaxPromptCostUSD  float64
+	Build             session.BuildMetadata
+	RuntimeProfile    session.RuntimeProfile
 }
 
 // Launch is the fully resolved child-agent runtime for one delegate call.
@@ -608,7 +610,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		if err != nil {
 			return err
 		}
-		state := r.childSessionState(launch, child, childTodos, checkpoint.Usage, created, updated, tree)
+		state := r.childSessionState(runtime, launch, child, childTodos, checkpoint.Usage, created, updated, tree)
 		var checkpointErr error
 		switch checkpoint.Kind {
 		case agent.PromptCheckpointClosedTurn:
@@ -1191,6 +1193,8 @@ func (r *Runner) childToolsWithCacheAffinity(parent Runtime, launch Launch, chil
 		Depth:             parent.Depth + 1,
 		MaxPromptTokens:   parent.MaxPromptTokens,
 		MaxPromptCostUSD:  parent.MaxPromptCostUSD,
+		Build:             parent.Build,
+		RuntimeProfile:    parent.RuntimeProfile,
 	}
 	childState := NewState(childRuntime)
 	for _, name := range childTools.Names() {
@@ -1561,6 +1565,8 @@ func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, re
 		Access:             req.Access,
 		Provider:           launch.ProviderName,
 		Model:              launch.Model,
+		Build:              parent.Build,
+		Runtime:            parent.RuntimeProfile,
 		Status:             status,
 		TaskPreview:        preview(req.Task, 240),
 		Created:            created,
@@ -1600,16 +1606,18 @@ func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string,
 	if err != nil {
 		return err
 	}
-	return r.childSessionState(launch, child, todos, usage, created, updated, tree).SaveConsolidated(childDir)
+	return r.childSessionState(parent, launch, child, todos, usage, created, updated, tree).SaveConsolidated(childDir)
 }
 
-func (r *Runner) childSessionState(launch Launch, child *agent.Agent, todos *todo.Store, usage agent.PromptUsage, created, updated time.Time, tree *session.Tree) session.Session {
+func (r *Runner) childSessionState(parent Runtime, launch Launch, child *agent.Agent, todos *todo.Store, usage agent.PromptUsage, created, updated time.Time, tree *session.Tree) session.Session {
 	return session.Session{
 		Version:         session.Version,
 		Provider:        launch.ProviderName,
 		Model:           launch.Model,
 		Created:         created,
 		Updated:         updated,
+		Build:           parent.Build,
+		Runtime:         parent.RuntimeProfile,
 		System:          launch.System,
 		Agent:           launch.Agent,
 		ProxySessionID:  child.ProxySessionID(),
@@ -1653,6 +1661,7 @@ type childSink struct {
 type pendingChildTool struct {
 	call    llm.ToolCall
 	summary string
+	started time.Time
 }
 
 func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progress *Progress, activity *ActivityRegistration, reasoning ...bool) *childSink {
@@ -1876,7 +1885,7 @@ func (s *childSink) ModelRequestEvent(event llm.ModelRequestEvent) {
 func (s *childSink) ToolStart(call llm.ToolCall) {
 	s.flushDisplay()
 	summary := safeToolActivity(call)
-	s.pending[call.ID] = pendingChildTool{call: call, summary: summary}
+	s.pending[call.ID] = pendingChildTool{call: call, summary: summary, started: time.Now()}
 	s.progress.markTool()
 	s.activity.MarkActivity(summary)
 	s.append(session.Event{Type: session.EventToolStart, Prompt: 1, Turn: s.turn, ToolID: call.ID, Tool: call.Name, Input: call.Input})
@@ -1901,7 +1910,31 @@ func (s *childSink) ToolResult(result llm.ToolResult) {
 	} else {
 		s.activity.MarkActivity("tool " + sanitizeRetainedText(call.Name, maxToolNameRunes) + " complete")
 	}
-	s.append(session.Event{Type: session.EventToolResult, Prompt: 1, Turn: s.turn, ToolID: result.ForID, Tool: call.Name, Display: display})
+	shownBytes := result.ShownBytes
+	if shownBytes == 0 {
+		shownBytes = len(result.Text)
+	}
+	originalBytes := result.OriginalBytes
+	if originalBytes == 0 {
+		originalBytes = shownBytes
+	}
+	var durationMS int64
+	if !pending.started.IsZero() {
+		durationMS = time.Since(pending.started).Milliseconds()
+	}
+	s.append(session.Event{
+		Type:                session.EventToolResult,
+		Prompt:              1,
+		Turn:                s.turn,
+		ToolID:              result.ForID,
+		Tool:                call.Name,
+		Display:             display,
+		DurationMS:          durationMS,
+		ResultError:         result.IsError,
+		ResultTruncated:     result.Truncated,
+		ResultOriginalBytes: originalBytes,
+		ResultShownBytes:    shownBytes,
+	})
 	s.activity.publishText(kind, summary, s.turn, s.attempt, false)
 }
 

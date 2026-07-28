@@ -1511,6 +1511,7 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 		Tools:    toolBytes / bytesPerToken,
 		Messages: messageBytes/bytesPerToken + opaqueBytes/opaqueBytesPerToken + images*imageTokenEstimate,
 		Window:   window,
+		Source:   ContextEstimateSourceBytes,
 	}
 	est.Total = est.System + est.Tools + est.Messages
 	est.PayloadSystem = est.System

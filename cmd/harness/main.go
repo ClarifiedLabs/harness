@@ -590,6 +590,24 @@ func run(env environment) int {
 	for _, disabled := range disabledTools {
 		logger.Warn(disabled.Message(), logging.Category("cli_tools"))
 	}
+	build := buildinfo.Current()
+	sessionBuild := session.BuildMetadata{
+		Version:  build.Version,
+		Commit:   build.Commit,
+		Date:     build.Date,
+		Modified: build.Modified,
+	}
+	sessionRuntime := session.RuntimeProfile{
+		RetentionPolicy:           cfg.RetentionPolicy,
+		ContextWindow:             cfg.ContextWindow,
+		ToolResultMaxBytes:        cfg.ToolResultMaxBytes,
+		ToolResultMaxLines:        cfg.ToolResultMaxLines,
+		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
+		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
+		DelegateMaxTurns:          cfg.DelegateMaxTurns,
+		Prewarm:                   env.prewarmCache && !env.stdinPiped,
+		SearchBackend:             cfg.SearchTools,
+	}
 	delegateState := delegate.NewState(delegate.Runtime{
 		ProviderName:      cfg.Provider,
 		Model:             cfg.Model,
@@ -603,6 +621,8 @@ func run(env environment) int {
 		Depth:             0,
 		MaxPromptTokens:   cfg.MaxPromptTokens,
 		MaxPromptCostUSD:  cfg.MaxPromptCostUSD,
+		Build:             sessionBuild,
+		RuntimeProfile:    sessionRuntime,
 	})
 	// pendingMCP is assigned below (interactive REPL only) before any turn can run,
 	// so this closure — invoked lazily at delegation time — captures the live value.
@@ -977,6 +997,8 @@ func run(env environment) int {
 		Depth:             0,
 		MaxPromptTokens:   cfg.MaxPromptTokens,
 		MaxPromptCostUSD:  cfg.MaxPromptCostUSD,
+		Build:             sessionBuild,
+		RuntimeProfile:    sessionRuntime,
 	})
 	if hookRunner != nil {
 		hookRunner.SetSession(sessionPath)
@@ -1086,6 +1108,8 @@ func run(env environment) int {
 		IdleCompactionAfter:          time.Duration(cfg.CompactIdleAfterSeconds) * time.Second,
 		IdleCompactionTriggerPercent: cfg.CompactIdleTriggerPercent,
 		SessionPath:                  sessionPath,
+		SessionBuild:                 sessionBuild,
+		SessionRuntime:               sessionRuntime,
 		SessionTree: func() *session.Tree {
 			if resumed != nil {
 				return resumed.Tree

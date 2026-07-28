@@ -1493,6 +1493,26 @@ func TestAgentEstimatesCountRichResultImagesAtFlatWeight(t *testing.T) {
 	}
 }
 
+func TestContextEstimatesIncludePlaintextThinking(t *testing.T) {
+	thinking := strings.Repeat("deliberation", 400)
+	msgs := []llm.Message{{
+		Role: llm.RoleAssistant,
+		Content: []llm.ContentBlock{{
+			Kind:              llm.BlockThinking,
+			Thinking:          thinking,
+			ThinkingSignature: "signature",
+		}},
+	}}
+
+	wantMinimum := len(thinking) / bytesPerToken
+	if got := estimateTokens(msgs); got < wantMinimum {
+		t.Fatalf("transcript estimate = %d, want at least %d plaintext-thinking tokens", got, wantMinimum)
+	}
+	if got := estimateRequest(llm.Request{Messages: msgs}, 100_000); got.Messages < wantMinimum {
+		t.Fatalf("request estimate = %d message tokens, want at least %d", got.Messages, wantMinimum)
+	}
+}
+
 func TestSummarizeUsageSurvivesZeroedDoneFrame(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{

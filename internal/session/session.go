@@ -28,9 +28,9 @@ import (
 	"harness/internal/todo"
 )
 
-// Version is the on-disk schema version. v4 moves the canonical conversation
-// from a linear state.json snapshot into tree.ndjson.
-const Version = 4
+// Version is the on-disk schema version. v5 adds build/runtime attribution and
+// richer efficiency telemetry.
+const Version = 5
 
 const (
 	stateFile      = "state.json"
@@ -40,21 +40,23 @@ const (
 
 // Session is the compact, resumable conversation state.
 type Session struct {
-	Version         int       `json:"version"`
-	ID              string    `json:"id"`
-	CWD             string    `json:"cwd,omitempty"`
-	ParentSession   string    `json:"parent_session,omitempty"`
-	ParentEntryID   string    `json:"parent_entry_id,omitempty"`
-	ActiveLeaf      string    `json:"active_leaf,omitempty"`
-	Provider        string    `json:"provider"`
-	Model           string    `json:"model"`
-	Created         time.Time `json:"created"`
-	Updated         time.Time `json:"updated"`
-	System          string    `json:"system"`
-	Agent           string    `json:"agent,omitempty"`
-	ProxySessionID  string    `json:"proxy_session_id,omitempty"`
-	CacheAffinityID string    `json:"cache_affinity_id,omitempty"`
-	Prompt          int       `json:"prompt,omitempty"`
+	Version         int            `json:"version"`
+	ID              string         `json:"id"`
+	CWD             string         `json:"cwd,omitempty"`
+	ParentSession   string         `json:"parent_session,omitempty"`
+	ParentEntryID   string         `json:"parent_entry_id,omitempty"`
+	ActiveLeaf      string         `json:"active_leaf,omitempty"`
+	Provider        string         `json:"provider"`
+	Model           string         `json:"model"`
+	Created         time.Time      `json:"created"`
+	Updated         time.Time      `json:"updated"`
+	Build           BuildMetadata  `json:"build"`
+	Runtime         RuntimeProfile `json:"runtime"`
+	System          string         `json:"system"`
+	Agent           string         `json:"agent,omitempty"`
+	ProxySessionID  string         `json:"proxy_session_id,omitempty"`
+	CacheAffinityID string         `json:"cache_affinity_id,omitempty"`
+	Prompt          int            `json:"prompt,omitempty"`
 	// Messages is materialized from Tree on load and is never written to
 	// state.json. It remains available to callers that need the active linear
 	// provider transcript.
@@ -76,6 +78,28 @@ type Session struct {
 	RecoveryWarning string `json:"-"`
 }
 
+// BuildMetadata identifies the harness binary that created a session.
+type BuildMetadata struct {
+	Version  string `json:"version"`
+	Commit   string `json:"commit,omitempty"`
+	Date     string `json:"date,omitempty"`
+	Modified bool   `json:"modified,omitempty"`
+}
+
+// RuntimeProfile records non-secret efficiency controls needed to compare
+// sessions produced by different runtime configurations.
+type RuntimeProfile struct {
+	RetentionPolicy           string `json:"retention_policy,omitempty"`
+	ContextWindow             int    `json:"context_window,omitempty"`
+	ToolResultMaxBytes        int    `json:"tool_result_max_bytes,omitempty"`
+	ToolResultMaxLines        int    `json:"tool_result_max_lines,omitempty"`
+	CompactToolResultMaxBytes int    `json:"compact_tool_result_max_bytes,omitempty"`
+	ResponsesStateful         bool   `json:"responses_stateful,omitempty"`
+	DelegateMaxTurns          int    `json:"delegate_max_turns,omitempty"`
+	Prewarm                   bool   `json:"prewarm,omitempty"`
+	SearchBackend             string `json:"search_backend,omitempty"`
+}
+
 // RecoveryInfo describes an active-turn checkpoint applied by Load.
 type RecoveryInfo struct {
 	Phase   string
@@ -94,35 +118,37 @@ type UsageTotals struct {
 // ChildMeta is the forensic index for a child-agent run stored under a parent
 // session's children/ directory.
 type ChildMeta struct {
-	ID                 string    `json:"id"`
-	ParentID           string    `json:"parent_id,omitempty"`
-	Kind               string    `json:"kind"`
-	Mode               string    `json:"mode,omitempty"`
-	ContinuedFrom      string    `json:"continued_from,omitempty"`
-	ContinuationMode   string    `json:"continuation_mode,omitempty"`
-	ContinuationBefore int       `json:"continuation_context_before,omitempty"`
-	ContinuationAfter  int       `json:"continuation_context_after,omitempty"`
-	ContinuationWindow int       `json:"continuation_context_window,omitempty"`
-	RuntimeFingerprint string    `json:"runtime_fingerprint,omitempty"`
-	Agent              string    `json:"agent,omitempty"`
-	RequestedAgent     string    `json:"requested_agent,omitempty"`
-	ResourceKey        string    `json:"resource_key,omitempty"`
-	Access             string    `json:"access,omitempty"`
-	Provider           string    `json:"provider,omitempty"`
-	Model              string    `json:"model,omitempty"`
-	Status             string    `json:"status"`
-	TaskPreview        string    `json:"task_preview,omitempty"`
-	Transcript         string    `json:"transcript,omitempty"`
-	Replay             string    `json:"replay,omitempty"`
-	Error              string    `json:"error,omitempty"`
-	Created            time.Time `json:"created,omitempty"`
-	Updated            time.Time `json:"updated,omitempty"`
-	Usage              llm.Usage `json:"usage,omitempty"`
-	MessageCount       int       `json:"message_count,omitempty"`
-	RequestedMaxTurns  *int      `json:"requested_max_turns,omitempty"`
-	EffectiveMaxTurns  int       `json:"effective_max_turns"`
-	TurnsUsed          int       `json:"turns_used"`
-	TerminationReason  string    `json:"termination_reason,omitempty"`
+	ID                 string         `json:"id"`
+	ParentID           string         `json:"parent_id,omitempty"`
+	Kind               string         `json:"kind"`
+	Mode               string         `json:"mode,omitempty"`
+	ContinuedFrom      string         `json:"continued_from,omitempty"`
+	ContinuationMode   string         `json:"continuation_mode,omitempty"`
+	ContinuationBefore int            `json:"continuation_context_before,omitempty"`
+	ContinuationAfter  int            `json:"continuation_context_after,omitempty"`
+	ContinuationWindow int            `json:"continuation_context_window,omitempty"`
+	RuntimeFingerprint string         `json:"runtime_fingerprint,omitempty"`
+	Agent              string         `json:"agent,omitempty"`
+	RequestedAgent     string         `json:"requested_agent,omitempty"`
+	ResourceKey        string         `json:"resource_key,omitempty"`
+	Access             string         `json:"access,omitempty"`
+	Provider           string         `json:"provider,omitempty"`
+	Model              string         `json:"model,omitempty"`
+	Build              BuildMetadata  `json:"build"`
+	Runtime            RuntimeProfile `json:"runtime"`
+	Status             string         `json:"status"`
+	TaskPreview        string         `json:"task_preview,omitempty"`
+	Transcript         string         `json:"transcript,omitempty"`
+	Replay             string         `json:"replay,omitempty"`
+	Error              string         `json:"error,omitempty"`
+	Created            time.Time      `json:"created,omitempty"`
+	Updated            time.Time      `json:"updated,omitempty"`
+	Usage              llm.Usage      `json:"usage,omitempty"`
+	MessageCount       int            `json:"message_count,omitempty"`
+	RequestedMaxTurns  *int           `json:"requested_max_turns,omitempty"`
+	EffectiveMaxTurns  int            `json:"effective_max_turns"`
+	TurnsUsed          int            `json:"turns_used"`
+	TerminationReason  string         `json:"termination_reason,omitempty"`
 }
 
 // Child session lifecycle statuses recognized by Follow.
@@ -560,44 +586,49 @@ func loadActiveTurnCheckpoint(dir string) (activeTurnCheckpoint, error) {
 // Event is one append-only replay record. Display carries the exact user-facing
 // line for events that the renderer shows as dim one-liners.
 type Event struct {
-	Time              time.Time               `json:"time,omitempty"`
-	Type              string                  `json:"type"`
-	Prompt            int                     `json:"prompt,omitempty"`
-	Turn              int                     `json:"turn,omitempty"`
-	Attempt           int                     `json:"attempt,omitempty"`
-	Text              string                  `json:"text,omitempty"`
-	Phase             string                  `json:"phase,omitempty"`
-	Display           string                  `json:"display,omitempty"`
-	ToolID            string                  `json:"tool_id,omitempty"`
-	Tool              string                  `json:"tool,omitempty"`
-	Input             json.RawMessage         `json:"input,omitempty"`
-	Images            []ImageInfo             `json:"images,omitempty"`
-	Usage             *llm.Usage              `json:"usage,omitempty"`
-	Purpose           string                  `json:"purpose,omitempty"`
-	FromEntryID       string                  `json:"from_entry_id,omitempty"`
-	ToEntryID         string                  `json:"to_entry_id,omitempty"`
-	Summary           string                  `json:"summary,omitempty"`
-	Context           *ContextSnapshot        `json:"context,omitempty"`
-	Retention         *RetentionSnapshot      `json:"retention,omitempty"`
-	IdleCompaction    *IdleCompactionSnapshot `json:"idle_compaction,omitempty"`
-	ModelRequest      *llm.ModelRequestEvent  `json:"model_request,omitempty"`
-	TerminationReason string                  `json:"termination_reason,omitempty"`
-	DurationMS        int64                   `json:"duration_ms,omitempty"`
-	MessageCount      int                     `json:"message_count,omitempty"`
+	Time                time.Time               `json:"time,omitempty"`
+	Type                string                  `json:"type"`
+	Prompt              int                     `json:"prompt,omitempty"`
+	Turn                int                     `json:"turn,omitempty"`
+	Attempt             int                     `json:"attempt,omitempty"`
+	Text                string                  `json:"text,omitempty"`
+	Phase               string                  `json:"phase,omitempty"`
+	Display             string                  `json:"display,omitempty"`
+	ToolID              string                  `json:"tool_id,omitempty"`
+	Tool                string                  `json:"tool,omitempty"`
+	Input               json.RawMessage         `json:"input,omitempty"`
+	Images              []ImageInfo             `json:"images,omitempty"`
+	Usage               *llm.Usage              `json:"usage,omitempty"`
+	Purpose             string                  `json:"purpose,omitempty"`
+	FromEntryID         string                  `json:"from_entry_id,omitempty"`
+	ToEntryID           string                  `json:"to_entry_id,omitempty"`
+	Summary             string                  `json:"summary,omitempty"`
+	Context             *ContextSnapshot        `json:"context,omitempty"`
+	Retention           *RetentionSnapshot      `json:"retention,omitempty"`
+	IdleCompaction      *IdleCompactionSnapshot `json:"idle_compaction,omitempty"`
+	ModelRequest        *llm.ModelRequestEvent  `json:"model_request,omitempty"`
+	TerminationReason   string                  `json:"termination_reason,omitempty"`
+	DurationMS          int64                   `json:"duration_ms,omitempty"`
+	MessageCount        int                     `json:"message_count,omitempty"`
+	ResultError         bool                    `json:"result_error,omitempty"`
+	ResultTruncated     bool                    `json:"result_truncated,omitempty"`
+	ResultOriginalBytes int                     `json:"result_original_bytes,omitempty"`
+	ResultShownBytes    int                     `json:"result_shown_bytes,omitempty"`
 }
 
 // ContextSnapshot is the session-log copy of agent.ContextEstimate. It lives in
 // session to avoid importing the agent package into persistence code.
 type ContextSnapshot struct {
-	Total           int `json:"total,omitempty"`
-	Window          int `json:"window,omitempty"`
-	System          int `json:"system,omitempty"`
-	Tools           int `json:"tools,omitempty"`
-	Messages        int `json:"messages,omitempty"`
-	PayloadTotal    int `json:"payload_total,omitempty"`
-	PayloadSystem   int `json:"payload_system,omitempty"`
-	PayloadTools    int `json:"payload_tools,omitempty"`
-	PayloadMessages int `json:"payload_messages,omitempty"`
+	Total           int    `json:"total,omitempty"`
+	Window          int    `json:"window,omitempty"`
+	System          int    `json:"system,omitempty"`
+	Tools           int    `json:"tools,omitempty"`
+	Messages        int    `json:"messages,omitempty"`
+	Source          string `json:"source,omitempty"`
+	PayloadTotal    int    `json:"payload_total,omitempty"`
+	PayloadSystem   int    `json:"payload_system,omitempty"`
+	PayloadTools    int    `json:"payload_tools,omitempty"`
+	PayloadMessages int    `json:"payload_messages,omitempty"`
 }
 
 // RetentionSnapshot is the replay-safe copy of one agent retention epoch.

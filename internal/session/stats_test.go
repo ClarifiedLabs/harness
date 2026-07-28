@@ -66,6 +66,7 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 		{Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "shell", Tool: "run_command", Input: json.RawMessage(`{"command":"SECRET shell text"}`)},
 		{Type: EventToolStart, Prompt: 1, Turn: 2, ToolID: "a", Tool: "a_tool", Input: json.RawMessage(`{}`)},
 		{Type: EventToolStart, Prompt: 2, Turn: 1, ToolID: "argv", Tool: "run_command", Input: json.RawMessage(`{"argv":["SECRET-ARGV"],"background":true}`)},
+		{Type: EventToolResult, Prompt: 1, Turn: 2, ToolID: "a", Tool: "a_tool", ResultTruncated: true, ResultOriginalBytes: 4000, ResultShownBytes: 1000, DurationMS: 25},
 	}
 	saveStatsFixture(t, dir, state, events)
 
@@ -106,6 +107,10 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 	if report.tools.calls != 4 || report.tools.commands != (commandStats{calls: 2, foreground: 1, background: 1, shell: 1, argv: 1}) {
 		t.Fatalf("tool stats = %+v", report.tools)
 	}
+	if report.tools.turns != 3 || report.tools.resultTruncations != 1 ||
+		report.tools.resultOriginalBytes != 4000 || report.tools.resultShownBytes != 1000 {
+		t.Fatalf("tool efficiency stats = %+v", report.tools)
+	}
 	if report.tools.parallel != (parallelStats{batches: 2, calls: 5, largest: 3}) {
 		t.Fatalf("parallel stats = %+v", report.tools.parallel)
 	}
@@ -127,6 +132,9 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 		"Conversation\n  prompts: 2\n  turns: 3\n  model calls: 4\n  retries: 1\n  maintenance calls: 1\n  navigations: 1\n  maintenance usage: 9 in / 3 out\n  active messages: 1\n",
 		"Tree\n  entries:",
 		"  tool calls: 4 total (4 root, 0 delegates)\n",
+		"  tool-bearing turns: 3 total (3 root, 0 delegates)\n",
+		"  calls per tool-bearing turn: 1.33\n",
+		"  results: 0 errors / 1 truncated / 1000 B shown / 4000 B original\n",
 		"  command calls: 2 total (2 root, 0 delegates)\n",
 		"    foreground: 1 total (1 root, 0 delegates)\n",
 		"    background: 1 total (1 root, 0 delegates)\n",
@@ -429,7 +437,8 @@ func TestStatsEmptyOptionalDirectories(t *testing.T) {
 	for _, want := range []string{
 		"Conversation\n  prompts: 0\n  turns: 0\n  model calls: 0\n  retries: 0\n  maintenance calls: 0\n  navigations: 0\n  active messages: 0\n",
 		"Tree\n  entries: 0\n  branches: 0\n  leaves: 0\n",
-		"Tools\n  tool calls: 0 total (0 root, 0 delegates)\n  by tool: none\n",
+		"Tools\n  tool calls: 0 total (0 root, 0 delegates)\n",
+		"  by tool: none\n",
 		"  command calls: 0 total (0 root, 0 delegates)\n",
 		"  parallel batches: 0 total (0 root, 0 delegates)\n",
 		"Usage (includes delegates)\n  uncached input: 0\n  cache read: 0\n  cache write: 0\n  output: 0\n  reasoning: 0\n  total tokens: 0\n  cost: $0.0000\n",

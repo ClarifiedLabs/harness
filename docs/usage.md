@@ -1213,9 +1213,11 @@ directory is an immediate error.
 `in progress` and measures its elapsed time through the latest recorded event.
 
 `session stats` prints a deterministic, human-readable report for one session:
-root conversation turns, navigation count, tree entries/branches/leaves/depth,
-direct and delegate tool/command activity, parallel batches, compactions, and a
-hierarchical delegate breakdown. A child that has metadata and replay events
+build/runtime attribution, root conversation turns, navigation count, tree
+entries/branches/leaves/depth, direct and delegate tool/command activity,
+calls per tool-bearing turn, standalone todo/single-inspection turns, result
+size/truncation/timing totals, parallel batches, compactions, and a hierarchical
+delegate breakdown. A child that has metadata and replay events
 but no `state.json` checkpoint is included with `checkpoint: unavailable`
 instead of aborting the report. The root token and cost totals come from
 `state.json` and already include delegate and compaction usage; delegate totals

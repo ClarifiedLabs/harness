@@ -194,6 +194,8 @@ type App struct {
 
 	SessionPath          string // current save path; /clear rotates it
 	SessionTree          *session.Tree
+	SessionBuild         session.BuildMetadata
+	SessionRuntime       session.RuntimeProfile
 	StateDir             string    // for rotating to a fresh auto-save path on /clear
 	Created              time.Time // session creation time (preserved across saves)
 	PromptNumber         int       // last started prompt, persisted for replay numbering
@@ -3765,6 +3767,8 @@ func (app *App) sessionSnapshot(current *agent.PromptUsage) (session.Session, er
 		Model:           app.Model,
 		Created:         app.Created,
 		Updated:         app.clock()(),
+		Build:           app.SessionBuild,
+		Runtime:         app.SessionRuntime,
 		System:          app.System,
 		Agent:           app.AgentName,
 		ProxySessionID:  app.Agent.ProxySessionID(),
@@ -4386,6 +4390,7 @@ type accumulatingSink struct {
 	planCountAtPromptStart      int
 	reasoningOutput             bool
 	pending                     map[string]llm.ToolCall
+	pendingStarted              map[string]time.Time
 	turn                        int
 	attempt                     int
 	inMaintenance               bool
@@ -4393,7 +4398,11 @@ type accumulatingSink struct {
 }
 
 func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
-	return &accumulatingSink{r: r, app: app, prompt: prompt, pending: make(map[string]llm.ToolCall)}
+	return &accumulatingSink{
+		r: r, app: app, prompt: prompt,
+		pending:        make(map[string]llm.ToolCall),
+		pendingStarted: make(map[string]time.Time),
+	}
 }
 
 func newREPLSink(r *Renderer, app *App, prompt int) *accumulatingSink {
@@ -4580,13 +4589,16 @@ func (s *accumulatingSink) ToolUseDelta(index int, delta string) {
 
 func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 	s.pending[c.ID] = c
+	s.pendingStarted[c.ID] = s.app.clock()()
 	s.r.ToolStart(c)
 	s.app.recordEvent(session.Event{Type: session.EventToolStart, Prompt: s.prompt, Turn: s.turn, ToolID: c.ID, Tool: c.Name, Input: c.Input})
 }
 
 func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	call := s.pending[res.ForID]
+	started := s.pendingStarted[res.ForID]
 	delete(s.pending, res.ForID)
+	delete(s.pendingStarted, res.ForID)
 	line := ToolResultLine(call, res)
 	s.r.ToolResult(res)
 	if s.printTodoUpdate && call.Name == "update_todos" && !res.IsError {
@@ -4595,7 +4607,31 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	if s.printPlanUpdate && call.Name == "record_plan" && !res.IsError {
 		s.app.printPlanStatus(s.planDisplayState())
 	}
-	s.app.recordEvent(session.Event{Type: session.EventToolResult, Prompt: s.prompt, Turn: s.turn, ToolID: res.ForID, Tool: call.Name, Display: line})
+	shownBytes := res.ShownBytes
+	if shownBytes == 0 {
+		shownBytes = len(res.Text)
+	}
+	originalBytes := res.OriginalBytes
+	if originalBytes == 0 {
+		originalBytes = shownBytes
+	}
+	var durationMS int64
+	if !started.IsZero() {
+		durationMS = s.app.clock()().Sub(started).Milliseconds()
+	}
+	s.app.recordEvent(session.Event{
+		Type:                session.EventToolResult,
+		Prompt:              s.prompt,
+		Turn:                s.turn,
+		ToolID:              res.ForID,
+		Tool:                call.Name,
+		Display:             line,
+		DurationMS:          durationMS,
+		ResultError:         res.IsError,
+		ResultTruncated:     res.Truncated,
+		ResultOriginalBytes: originalBytes,
+		ResultShownBytes:    shownBytes,
+	})
 }
 
 func (s *accumulatingSink) ToolDiff(call llm.ToolCall, path, text string) {
@@ -4880,6 +4916,7 @@ func contextSnapshot(ctx agent.ContextEstimate) *session.ContextSnapshot {
 		System:          ctx.System,
 		Tools:           ctx.Tools,
 		Messages:        ctx.Messages,
+		Source:          ctx.Source,
 		PayloadTotal:    ctx.PayloadTotal,
 		PayloadSystem:   ctx.PayloadSystem,
 		PayloadTools:    ctx.PayloadTools,

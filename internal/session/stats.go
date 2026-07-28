@@ -80,10 +80,20 @@ type delegateStats struct {
 }
 
 type toolStats struct {
-	calls    int
-	byName   map[string]int
-	commands commandStats
-	parallel parallelStats
+	calls               int
+	byName              map[string]int
+	commands            commandStats
+	parallel            parallelStats
+	turns               int
+	soloTodoTurns       int
+	singleInspectTurns  int
+	resultErrors        int
+	resultTruncations   int
+	resultOriginalBytes int
+	resultShownBytes    int
+	resultTotalMS       int64
+	resultMaxMS         int64
+	searchNoMatches     int
 }
 
 type commandStats struct {
@@ -378,12 +388,31 @@ func collectCheckpointStats(events []Event) checkpointStats {
 
 func collectToolStats(events []Event) (toolStats, error) {
 	stats := toolStats{byName: make(map[string]int)}
+	turnCalls := make(map[[2]int][]string)
 	for _, ev := range events {
+		if ev.Type == EventToolResult {
+			stats.resultErrors += boolInt(ev.ResultError)
+			stats.resultTruncations += boolInt(ev.ResultTruncated)
+			stats.resultOriginalBytes += ev.ResultOriginalBytes
+			stats.resultShownBytes += ev.ResultShownBytes
+			stats.resultTotalMS += ev.DurationMS
+			stats.resultMaxMS = max(stats.resultMaxMS, ev.DurationMS)
+			if ev.Tool == "search" || ev.Tool == "search_context" || ev.Tool == "rg" || ev.Tool == "grep" {
+				if strings.Contains(strings.ToLower(ev.Display), "no matches") {
+					stats.searchNoMatches++
+				}
+			}
+			continue
+		}
 		if ev.Type != EventToolStart {
 			continue
 		}
 		stats.calls++
 		stats.byName[ev.Tool]++
+		if ev.Prompt > 0 && ev.Turn > 0 {
+			key := [2]int{ev.Prompt, ev.Turn}
+			turnCalls[key] = append(turnCalls[key], ev.Tool)
+		}
 		if ev.Tool != "run_command" {
 			continue
 		}
@@ -407,7 +436,27 @@ func collectToolStats(events []Event) (toolStats, error) {
 			stats.commands.argv++
 		}
 	}
+	stats.turns = len(turnCalls)
+	for _, names := range turnCalls {
+		if len(names) != 1 {
+			continue
+		}
+		if names[0] == "update_todos" {
+			stats.soloTodoTurns++
+		}
+		switch names[0] {
+		case "read_file", "search", "search_context", "rg", "grep", "glob", "list_dir", "git_readonly":
+			stats.singleInspectTurns++
+		}
+	}
 	return stats, nil
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func collectCompactionStats(dir string, tree *Tree) (compactionStats, parallelStats, error) {
@@ -577,6 +626,16 @@ func (stats *toolStats) add(other toolStats) {
 		stats.byName = make(map[string]int)
 	}
 	stats.calls += other.calls
+	stats.turns += other.turns
+	stats.soloTodoTurns += other.soloTodoTurns
+	stats.singleInspectTurns += other.singleInspectTurns
+	stats.resultErrors += other.resultErrors
+	stats.resultTruncations += other.resultTruncations
+	stats.resultOriginalBytes += other.resultOriginalBytes
+	stats.resultShownBytes += other.resultShownBytes
+	stats.resultTotalMS += other.resultTotalMS
+	stats.resultMaxMS = max(stats.resultMaxMS, other.resultMaxMS)
+	stats.searchNoMatches += other.searchNoMatches
 	for name, count := range other.byName {
 		stats.byName[name] += count
 	}
@@ -660,6 +719,21 @@ func writeSessionStats(w io.Writer, report statsReport) {
 	fmt.Fprintf(w, "  created: %s\n", state.Created.Format(time.RFC3339))
 	fmt.Fprintf(w, "  updated: %s\n", state.Updated.Format(time.RFC3339))
 	fmt.Fprintf(w, "  duration: %s\n", formatDuration(state.Updated.Sub(state.Created)))
+	if state.Build.Version != "" {
+		fmt.Fprintf(w, "  build: %s", state.Build.Version)
+		if state.Build.Commit != "" {
+			fmt.Fprintf(w, " (%s)", state.Build.Commit)
+		}
+		if state.Build.Modified {
+			fmt.Fprint(w, " modified")
+		}
+		fmt.Fprintln(w)
+	}
+	if state.Runtime.SearchBackend != "" {
+		fmt.Fprintf(w, "  runtime: retention=%s context=%d search=%s delegate-max=%d prewarm=%t\n",
+			state.Runtime.RetentionPolicy, state.Runtime.ContextWindow, state.Runtime.SearchBackend,
+			state.Runtime.DelegateMaxTurns, state.Runtime.Prewarm)
+	}
 }
 
 func writeConversationStats(w io.Writer, stats collectedSessionStats) {
@@ -755,6 +829,22 @@ func writeOverallToolStats(w io.Writer, report statsReport) {
 	all := report.tools
 	fmt.Fprintln(w, "Tools")
 	writeSplitValue(w, "  ", "tool calls", all.calls, root.calls, delegates.calls)
+	writeSplitValue(w, "  ", "tool-bearing turns", all.turns, root.turns, delegates.turns)
+	if all.turns > 0 {
+		fmt.Fprintf(w, "  calls per tool-bearing turn: %.2f\n", float64(all.calls)/float64(all.turns))
+	}
+	writeSplitValue(w, "  ", "standalone todo turns", all.soloTodoTurns, root.soloTodoTurns, delegates.soloTodoTurns)
+	writeSplitValue(w, "  ", "single inspection turns", all.singleInspectTurns, root.singleInspectTurns, delegates.singleInspectTurns)
+	fmt.Fprintf(w, "  results: %d errors / %d truncated / %d B shown / %d B original\n",
+		all.resultErrors, all.resultTruncations, all.resultShownBytes, all.resultOriginalBytes)
+	if all.calls > 0 {
+		fmt.Fprintf(w, "  tool wall time: average %s / max %s\n",
+			formatDuration(time.Duration(all.resultTotalMS/int64(all.calls))*time.Millisecond),
+			formatDuration(time.Duration(all.resultMaxMS)*time.Millisecond))
+	}
+	if all.searchNoMatches > 0 {
+		fmt.Fprintf(w, "  search no-match results: %d\n", all.searchNoMatches)
+	}
 	if len(all.byName) == 0 {
 		fmt.Fprintln(w, "  by tool: none")
 	} else {

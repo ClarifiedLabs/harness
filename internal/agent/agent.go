@@ -319,12 +319,19 @@ type MaintenanceSink interface {
 }
 
 // ContextEstimate is a coarse request-footprint estimate for UI diagnostics.
+const (
+	ContextEstimateSourceBytes              = "bytes"
+	ContextEstimateSourceProviderCount      = "provider_count"
+	ContextEstimateSourceResponseUsageDelta = "response_usage_delta"
+)
+
 type ContextEstimate struct {
 	Total    int
 	Window   int
 	System   int
 	Tools    int
 	Messages int
+	Source   string
 
 	PayloadTotal    int
 	PayloadSystem   int
@@ -1130,7 +1137,7 @@ func (a *Agent) DebugRequest(includeUser bool, userText string, images []llm.Con
 }
 
 func (a *Agent) countModelRequestInput(ctx context.Context, mr modelRequest) modelRequest {
-	count, ok := a.countInputTokens(ctx, mr.request)
+	count, source, ok := a.countInputTokens(ctx, mr.request)
 	if !ok || count <= 0 {
 		return mr
 	}
@@ -1141,6 +1148,7 @@ func (a *Agent) countModelRequestInput(ctx context.Context, mr modelRequest) mod
 	mr.estimate.PayloadTotal += delta
 	mr.estimate.Messages += delta
 	mr.estimate.PayloadMessages += delta
+	mr.estimate.Source = source
 	if mr.estimate.Messages < 0 {
 		mr.estimate.Messages = 0
 	}
@@ -1150,22 +1158,22 @@ func (a *Agent) countModelRequestInput(ctx context.Context, mr modelRequest) mod
 	return mr
 }
 
-func (a *Agent) countInputTokens(ctx context.Context, req llm.Request) (int, bool) {
+func (a *Agent) countInputTokens(ctx context.Context, req llm.Request) (int, string, bool) {
 	if err := validateRequestImageContent(req.Messages); err != nil {
-		return 0, false
+		return 0, "", false
 	}
 	if counter, ok := a.provider.(llm.InputTokenCounter); ok {
 		count, err := counter.CountInputTokens(ctx, req)
 		if err == nil && count.InputTokens > 0 {
-			return count.InputTokens, true
+			return count.InputTokens, ContextEstimateSourceProviderCount, true
 		}
 	}
 	if tokencount.ShouldEstimateOpenAIChat(a.provider.Name()) {
 		if count := tokencount.EstimateOpenAIChat(req); count > 0 {
-			return count, true
+			return count, ContextEstimateSourceBytes, true
 		}
 	}
-	return 0, false
+	return 0, "", false
 }
 
 func (a *Agent) payloadMessagesIn(transcript []llm.Message) ([]llm.Message, bool) {

@@ -106,7 +106,7 @@ type Tree struct {
 	pending      *pendingCompaction
 }
 
-// NewTree returns an empty v4 tree.
+// NewTree returns an empty current-schema tree.
 func NewTree(created time.Time, cwd, parentSession, parentEntryID string) *Tree {
 	if created.IsZero() {
 		created = time.Now()

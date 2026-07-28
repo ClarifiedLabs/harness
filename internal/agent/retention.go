@@ -220,7 +220,7 @@ func retentionTranscriptBytes(messages []llm.Message) int {
 func retentionContentBlockBytes(block llm.ContentBlock) int {
 	total := len(block.Text) + len(block.ResultText) + len(block.ToolInput) + len(block.ToolName)
 	total += len(block.ImageData) + len(block.ImageMediaType) + len(block.ImageDetail) + len(block.ImageName)
-	total += len(block.ReasoningID) + len(block.ReasoningEncrypted) + len(block.RedactedData) + len(block.ThinkingSignature)
+	total += len(block.ReasoningID) + len(block.ReasoningEncrypted) + len(block.RedactedData) + len(block.Thinking) + len(block.ThinkingSignature)
 	total += len(block.InteractionThoughtSummary) + len(block.InteractionThoughtSignature) + len(block.InteractionStep)
 	for _, child := range block.ResultContent {
 		total += retentionContentBlockBytes(child)

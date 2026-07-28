@@ -3014,7 +3014,7 @@ output belongs in hook context.
 
 ```go
 type Session struct {
-    Version       int                `json:"version"` // 4: append-only conversation tree
+    Version       int                `json:"version"` // 5: build/runtime attribution and efficiency telemetry
     ID            string             `json:"id"`
     CWD           string             `json:"cwd,omitempty"`
     ParentSession string             `json:"parent_session,omitempty"`
@@ -3024,6 +3024,8 @@ type Session struct {
     Model         string             `json:"model"`
     Created       time.Time          `json:"created"`
     Updated       time.Time          `json:"updated"`
+    Build         BuildMetadata      `json:"build"`
+    Runtime       RuntimeProfile     `json:"runtime"`
     System        string             `json:"system"`
     Agent         string             `json:"agent,omitempty"`
     Prompt        int                `json:"prompt,omitempty"`
@@ -3052,7 +3054,7 @@ type UsageTotals struct {
 }
 ```
 
-- Schema v4 is intentionally breaking: loading or replaying an older
+- Schema v5 is intentionally breaking: loading or replaying an older
   `state.json` returns a clear unsupported-version error; there are no aliases,
   migrations, or legacy linear-session fallback.
 - A session path is a directory. `tree.ndjson` is canonical append-only
@@ -3176,7 +3178,10 @@ type UsageTotals struct {
   transcripts, and `children/*/meta.json`. It reports turns, direct tool and
   command activity, lifetime parallel batches, compactions, tree
   entries/branches/leaves/depth, navigation events, authoritative token/cost
-  totals, and a hierarchical delegate breakdown. A child without a completed
+  totals, calls per tool-bearing turn, standalone todo/single-inspection turns,
+  result truncation/byte/timing totals, and a hierarchical delegate breakdown.
+  The session header includes build identity and the non-secret runtime profile
+  used for efficiency comparisons. A child without a completed
   `state.json` checkpoint is reconstructed from its metadata and replay for
   analysis and marked `checkpoint: unavailable`. Conversation statistics
   distinguish prompts, turns, model calls, retries, and maintenance calls.
