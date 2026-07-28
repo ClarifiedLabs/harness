@@ -252,9 +252,10 @@ func (s *diffRecordSink) ToolDiff(_ llm.ToolCall, path, text string) {
 
 type archiveSink struct {
 	recordSink
-	archive    ToolResultArchive
-	archiveErr error
-	archived   []llm.ToolResult
+	archive     ToolResultArchive
+	archiveErr  error
+	archived    []llm.ToolResult
+	activations []SkillActivationEvent
 }
 
 type countingProvider struct {
@@ -273,6 +274,10 @@ func (p *countingProvider) CountInputTokens(context.Context, llm.Request) (llm.I
 func (s *archiveSink) ArchiveToolResult(r llm.ToolResult) (ToolResultArchive, error) {
 	s.archived = append(s.archived, r)
 	return s.archive, s.archiveErr
+}
+
+func (s *archiveSink) SkillActivated(event SkillActivationEvent) {
+	s.activations = append(s.activations, event)
 }
 
 // recordTool is a fake tool whose Run is scriptable; it records the inputs it

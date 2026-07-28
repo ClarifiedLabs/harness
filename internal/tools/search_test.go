@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -211,6 +212,81 @@ func TestSearchBatchesQueriesAndUsesStandardLibraryFallback(t *testing.T) {
 	for _, want := range []string{"## query 1: alpha", "2\t" + source, "## query 2: beta", "true: " + source + ":2"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSearchBatchedContextDeduplicatesOverlapsAndTagsQueries(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "sample.go")
+	if err := os.WriteFile(source, []byte("one\ntwo\nalpha\nbeta\nfive\nsix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(searchArgs{Queries: []searchQuery{
+		{Pattern: "alpha", Paths: []string{source}, Output: "context", ContextLines: 2},
+		{Pattern: "beta", Paths: []string{source}, Output: "context", ContextLines: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (searchTool{}).RunResult(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"## query 1: alpha",
+		"## query 2: beta",
+		"## shared source context",
+		source + ":1-6 (queries: 1, 2)",
+		"[shared context: 6 unique source lines; 4 duplicate lines suppressed across queries]",
+	} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("output missing %q:\n%s", want, result.Text)
+		}
+	}
+	for _, line := range []string{"3\talpha", "4\tbeta"} {
+		if count := strings.Count(result.Text, line); count != 1 {
+			t.Errorf("%q rendered %d times, want once:\n%s", line, count, result.Text)
+		}
+	}
+	if result.Metrics[searchMetricContextLinesBeforeDedupe] != 10 ||
+		result.Metrics[searchMetricUniqueContextLines] != 6 {
+		t.Fatalf("dedupe metrics = %+v, want 10 selected / 6 unique", result.Metrics)
+	}
+}
+
+func TestSearchBatchedContextKeepsPerQueryLineBudgets(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "large.go")
+	lines := make([]string, 500)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i+1)
+	}
+	lines[100] = "first-marker"
+	lines[399] = "second-marker"
+	if err := os.WriteFile(source, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(searchArgs{Queries: []searchQuery{
+		{Pattern: "first-marker", Paths: []string{source}, Output: "context", ContextLines: 100},
+		{Pattern: "second-marker", Paths: []string{source}, Output: "context", ContextLines: 100},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (searchTool{}).RunResult(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Metrics[searchMetricUniqueContextLines]; got != 402 {
+		t.Fatalf("unique source lines = %d, want 402 (two independent per-query budgets)", got)
+	}
+	for _, want := range []string{
+		source + ":1-201 (queries: 1)",
+		source + ":300-500 (queries: 2)",
+		"101\tfirst-marker",
+		"400\tsecond-marker",
+	} {
+		if !strings.Contains(result.Text, want) {
+			t.Fatalf("output missing %q:\n%s", want, result.Text)
 		}
 	}
 }

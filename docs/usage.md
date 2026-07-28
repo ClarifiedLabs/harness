@@ -124,7 +124,7 @@ interrupted.
 -no-steer         disable in-prompt steering: queue input for the next prompt instead of injecting it before the next turn (default off; see "Steering")
 -image-detail <level>   default image detail: auto, low, high, or original
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
--agent <name>     agent: auto (default), explore, plan, independent, or a config-defined agent
+-agent <name>     agent: auto (default), explore, plan, review, independent, or a config-defined agent
 -handoff-agent <name>   default implementation agent for plan handoffs (default auto)
 -delegate-output <mode> delegate UI: status (default), off, or curated scrolling lines on stderr
 -web-search <mode>     server-side web search: off or auto (default off)
@@ -926,8 +926,9 @@ interactive TTY prompt, lines starting with `!` run a local shell command and
 return to the prompt without contacting the model; `!!` sends a literal leading
 `!`. In one-shot mode, initial `-i` prompts, non-TTY/scripted input, pasted text, and edited prompts,
 `!text` is literal prompt text. In a normal typed prompt, `$name` mentions the
-named skill anywhere in the text; the model receives request-only context
-telling it to read that skill's `SKILL.md` before acting. `$$` escapes a
+named skill anywhere in the text; Harness reads that skill's complete
+`SKILL.md` before the first model request and supplies it as request-only
+context. A failed read aborts the prompt before model work. `$$` escapes a
 literal `$`.
 
 In terminals that support bracketed paste, pasted text fills the prompt for
@@ -1086,22 +1087,23 @@ prewarm would be wasted. Standalone `/compact` keeps immediate prewarming;
 submitting a real prompt cancels any pending delayed warmup. Harness does not
 issue speculative generated completions to prewarm other providers.
 
-Four agents are built in:
+Five agents are built in:
 
 | agent | tools | behavior |
 |---|---|---|
 | `auto` | all available built-in tools plus discovered MCP tools, including `update_todos`, `delegate`, and background job tools | the default; the model decides what to do |
 | `explore` | read-only inspection/search tools, `web_fetch`, optional `git_readonly`, `update_todos`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
 | `plan` | inspection tools, read-only MCP tools, `write_tmp_file`, `update_todos`, `delegate`, and `background_jobs` | collaborate on a plan without modifying the project |
+| `review` | the same read-only inspection and MCP surface as `explore` | findings-first review of a concrete change; if no range is supplied, inspect the working-tree diff and untracked files |
 | `independent` | all available built-in tools plus discovered MCP tools, including `update_todos`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
 
 Define new agents or override built-ins in the config file under `agents`.
 **Breaking configuration rule:** every new custom agent must have a nonblank
 `description` that tells the parent *when to use it*. Startup, `--agents`, and
 `--show-config` fail when this selection metadata is missing or whitespace-only;
-there is no generated fallback. An override of `auto`, `explore`, `plan`, or
-`independent` may omit `description` and inherit the built-in value. Other fields
-continue to merge onto a built-in of the same name:
+there is no generated fallback. An override of `auto`, `explore`, `plan`,
+`review`, or `independent` may omit `description` and inherit the built-in
+value. Other fields continue to merge onto a built-in of the same name:
 
 ```json
 {
@@ -1131,9 +1133,9 @@ sandbox for real isolation.
 
 `workspace_access` controls the default background-delegate lease:
 `read_only` permits concurrent children on one scope, while `exclusive`
-conflicts with every active lease for that scope. Built-in `explore` and `plan`
-use `read_only`; `auto`, `independent`, and new custom agents default to
-`exclusive`. Implementation-mode delegates are always exclusive.
+conflicts with every active lease for that scope. Built-in `explore`, `plan`,
+and `review` use `read_only`; `auto`, `independent`, and new custom agents
+default to `exclusive`. Implementation-mode delegates are always exclusive.
 
 ### Planning and implementation handoff
 
@@ -1241,14 +1243,19 @@ directory is an immediate error.
 build/runtime attribution, root conversation turns, navigation count, tree
 entries/branches/leaves/depth, direct and delegate tool/command activity,
 calls per tool-bearing turn, standalone todo/single-inspection turns, result
-size/truncation/timing totals, parallel batches, compactions, and a hierarchical
-delegate breakdown. A child that has metadata and replay events
+size/truncation/timing totals and per-tool result volume, normalized repeated
+call aggregates with arguments redacted, command-step use, `SKILL.md`
+reads/activations, batched-search context deduplication, active-context
+composition and the latest request estimate, parallel batches, compactions,
+and a hierarchical delegate breakdown with the highest direct-token children.
+A child that has metadata and replay events
 but no `state.json` checkpoint is included with `checkpoint: unavailable`
 instead of aborting the report. The root token and cost totals come from
 `state.json` and already include delegate and compaction usage; delegate totals
 similarly include any nested delegates. The separate `Direct model activity
 (non-overlapping)` section sums `turn_attempt_usage` and `maintenance_usage`
-from each physical root and child replay exactly once. New prompt replay events
+from each physical root and child replay exactly once and splits root from
+delegate activity. New prompt replay events
 and child metadata also expose structured termination reasons; the stats report
 summarizes them without treating them as task-success labels. When checkpoint
 events are present, conversation statistics also report closed-turn checkpoint
@@ -1266,7 +1273,9 @@ events, it records model-request acceptance and completion, every failed
 upstream attempt, scheduled retries, terminal failures, cancellation, and
 retention epochs. Retention records include the trigger, reclaimed blocks/bytes,
 context estimates, continuation reset, and next-request shape; they never enter
-model context.
+model context. Tool-result records may carry aggregate integer `result_metrics`,
+and skill activation records carry only source and status; neither includes
+skill bodies or adds model-visible content.
 
 Model-request lifecycle records carry parsed provider messages, timing, and
 request correlation used by `harness session timings`. They never become

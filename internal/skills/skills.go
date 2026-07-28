@@ -1,7 +1,8 @@
 // Package skills discovers and parses Agent Skills from SKILL.md files, builds
 // a catalog for prompt disclosure, and supplies behavioral instructions so the
-// model can activate skills via its existing file-read tool (progressive
-// disclosure: catalog → SKILL.md body → bundled resources on demand).
+// model can activate skills via explicit request context or its existing
+// file-read tool (progressive disclosure: catalog → SKILL.md body → bundled
+// resources on demand).
 package skills
 
 import (
@@ -15,6 +16,10 @@ import (
 
 // skillFile is the canonical filename inside each skill subdirectory.
 const skillFile = "SKILL.md"
+
+// ActiveContextMarker is the stable prefix for a fully activated skill body in
+// request-only context.
+const ActiveContextMarker = "[active skill instructions]"
 
 // maxScanDepth bounds recursive scanning of a skill directory to prevent
 // runaway traversal in large or cyclic directory trees.
@@ -74,6 +79,28 @@ func (s Skill) Read() (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// ActiveContext wraps a fully loaded SKILL.md as request-only authoritative
+// context. Keeping the wrapper here gives explicit $mentions and tool-driven
+// activation the same stable contract without adding another model-visible
+// tool.
+func ActiveContext(name, location, body string) string {
+	var b strings.Builder
+	b.WriteString(ActiveContextMarker + "\n")
+	if name = oneLine(name); name != "" {
+		fmt.Fprintf(&b, "name: %s\n", name)
+	}
+	if location != "" {
+		fmt.Fprintf(&b, "source: %s\n", location)
+	}
+	b.WriteString("The following full SKILL.md is authoritative for this prompt:\n\n")
+	b.WriteString(body)
+	if !strings.HasSuffix(body, "\n") {
+		b.WriteByte('\n')
+	}
+	b.WriteString("[end active skill instructions]")
+	return b.String()
 }
 
 // discovered bundles a parsed skill with its scope for collision resolution.

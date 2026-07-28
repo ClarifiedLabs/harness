@@ -72,6 +72,13 @@ queries execute concurrently and results stay in input order. Harness uses
 ripgrep when it is installed and a bounded standard-library walker otherwise,
 so the tool contract does not depend on the host CLI.
 
+For a batch with more than one `context` or `matches` query, Harness renders
+each query's match summary followed by one shared source-context section.
+Overlapping or adjacent source windows are merged and labeled with the query
+numbers they serve, so the same lines do not consume the result repeatedly.
+Each query still receives its own existing 400-source-line allowance; batching
+does not impose a new aggregate cap.
+
 `inspect` batches heterogeneous repository orientation in the same way. Its
 `operations[]` may invoke `read_file`, `search`, `glob`, `list_dir`, or
 `workspace_summary`; operations execute concurrently and render under indexed
@@ -137,12 +144,15 @@ later request. `steps` is foreground-only.
 a job id immediately. `delegate` can also run as a background child agent.
 Local background work carries a canonical resource lease. `run_command`
 defaults to an `exclusive` lease on its canonical cwd; callers may set
-`resource_key` and `access:"read_only"` only when the command cannot mutate
-that resource. A delegate's access defaults from its selected agent, and its
-`scope` defaults to the canonical cwd. Built-in `explore` and `plan` agents are
-read-only; `auto`, `independent`, custom, and implementation-mode delegates are
-exclusive by default. Background `grep` and `rg` automatically use a
-`read_only` lease on their cwd. Multiple read-only jobs may share a resource,
+`background_lease:{"resource_key":"...","access":"read_only"}` only when the
+command will not mutate that resource. The lease is scheduling metadata: it
+coordinates concurrent jobs but neither restricts what the command can do nor
+makes it read-only. Legacy top-level `resource_key` and `access` inputs remain
+accepted but are not advertised. A delegate's access defaults from its selected
+agent, and its `scope` defaults to the canonical cwd. Built-in `explore`,
+`plan`, and `review` agents are read-only; `auto`, `independent`, custom, and
+implementation-mode delegates are exclusive by default. Background `grep` and
+`rg` automatically use a `read_only` lease on their cwd. Multiple read-only jobs may share a resource,
 while an exclusive job conflicts with every active lease for the same resource
 and reports the existing job id. Jobs on different resources remain concurrent.
 The lease is an exact-key match on the canonical path: it does not protect the
@@ -172,6 +182,17 @@ work, `git {"workflow":"commit","paths":[...],"message":"type: subject"}` stages
 only the exact repository-relative file paths, runs the staged whitespace check,
 commits only those paths, and returns the new commit plus remaining workspace
 status. It rejects `.`, directories, globs, and pathspec magic.
+
+`git_readonly` exposes an audited query-only allowlist for restricted agents:
+`blame`, `cat-file`, `check-attr`, `check-ignore`, `check-mailmap`,
+`check-ref-format`, `cherry`, `count-objects`, `describe`, `diff`,
+`diff-files`, `diff-index`, `diff-tree`, `for-each-ref`, `grep`, `log`,
+`ls-files`, `ls-tree`, `merge-base`, `name-rev`, `range-diff`, `rev-list`,
+`rev-parse`, `shortlog`, `show`, `show-branch`, `show-ref`, and `status`.
+Mixed read/write commands such as `branch`, `config`, `remote`, `reflog`,
+`submodule`, `tag`, and `worktree` are intentionally excluded. The runner
+disables pagers, optional locks, filesystem monitors, external diff/textconv
+helpers, prompts, output-file flags, and signature helpers.
 
 `update_todos` is available to every built-in agent. Use it for meaningful
 multi-step work, update it at phase boundaries, and do not spend a turn only on
@@ -206,6 +227,7 @@ Built-in child roles are:
 | `explore` | broad code search, architecture/dependency tracing, root-cause investigation, or questions spanning many files; read-only and not intended for a known-file lookup |
 | `independent` | bounded end-to-end work that can proceed without parent or user input |
 | `plan` | collaborative read-only planning; available only when its complete tool set is a subset of the parent |
+| `review` | findings-first read-only review of a concrete code change |
 | `auto` | the current general-purpose behavior |
 
 A child always receives the selected agent's configured tool set. Delegate calls
@@ -261,9 +283,10 @@ continuation mode plus before/after/window token estimates.
 Foreground delegates run in the ordinary serialized tool loop because children
 share the checkout and may write. Use `background:true` only for independent
 read-only or disjoint work while useful parent work remains. Background
-`explore` and `plan` calls default to shared `read_only` access;
-`auto`/`independent` and implementation mode default to `exclusive`. Set `scope`
-to a narrower workspace path for mutating siblings that own disjoint areas.
+`explore`, `plan`, and `review` calls default to shared `read_only` access;
+`auto`/`independent` and implementation mode default to `exclusive`. Set
+`scope` to a narrower workspace path for mutating siblings that own disjoint
+areas.
 Lease conflicts fail before a child starts and identify the active job.
 Completion is delivered automatically as one-shot request context; do not poll or
 duplicate a background child's work. Harness permits one subsequent useful parent
@@ -346,7 +369,11 @@ variable.
 Truncated results include a marker in the model-visible text, a warning in the
 UI, and the full output is archived under the session directory when available.
 The model-visible tool result includes the absolute artifact path so the next
-turn can inspect it with `read_file` or `search`.
+turn can inspect it with `read_file` or `search`. When live retention later
+removes an old read-only result body, Harness leaves a typed receipt with the
+tool, status, byte counts, bounded head, and recovery path; the exact original
+is preserved in the same artifact store. If that artifact write fails, the
+original stays in live context instead of being discarded.
 
 Disabled optional CLI-backed default tools are reported on stderr at startup.
 These warnings are suppressed by `-q` / `--quiet` or `--log-level error`.

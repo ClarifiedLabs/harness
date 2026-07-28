@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1922,6 +1923,7 @@ func (s *childSink) ToolResult(result llm.ToolResult) {
 		ResultTruncated:     result.Truncated,
 		ResultOriginalBytes: originalBytes,
 		ResultShownBytes:    shownBytes,
+		ResultMetrics:       maps.Clone(result.Metrics),
 	})
 	s.activity.publishText(kind, summary, s.turn, s.attempt, false)
 }
@@ -2008,6 +2010,16 @@ func (s *childSink) RetentionApplied(event agent.RetentionEvent) {
 			ResponseStateReset:  event.ResponseStateReset,
 			NextRequestStateful: event.NextRequestStateful,
 		},
+	})
+}
+
+func (s *childSink) SkillActivated(event agent.SkillActivationEvent) {
+	s.append(session.Event{
+		Type:    session.EventSkillActivation,
+		Prompt:  1,
+		Turn:    max(s.turn, 1),
+		Purpose: event.Source,
+		Summary: event.Status,
 	})
 }
 

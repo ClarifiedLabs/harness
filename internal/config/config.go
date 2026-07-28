@@ -1106,7 +1106,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.imageDetail = fs.String("image-detail", "auto", "default image detail: auto, low, high, or original")
 	f.images = &imageVals
 	fs.Var(&imageVals, "image", "attach an image in one-shot mode; repeatable; optionally detail:path")
-	f.agent = fs.String("agent", "", "agent: auto, explore, plan, independent, or a config-defined agent (default auto)")
+	f.agent = fs.String("agent", "", "agent: auto, explore, plan, review, independent, or a config-defined agent (default auto)")
 	f.handoffAgent = fs.String("handoff-agent", "", "agent a plan->implementation handoff switches to by default (default auto)")
 	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")
 	f.delegateOutput = fs.String("delegate-output", DelegateOutputStatus, "delegate display: status, off, or curated scrolling lines on stderr")

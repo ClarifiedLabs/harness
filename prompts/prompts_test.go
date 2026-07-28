@@ -143,13 +143,31 @@ func TestCompactionPromptsUseTypedInventories(t *testing.T) {
 }
 
 func TestBuiltinAgentPrompt(t *testing.T) {
-	for _, name := range []string{"auto", "explore", "independent", "plan"} {
+	for _, name := range []string{"auto", "explore", "independent", "plan", "review"} {
 		if _, ok := BuiltinAgentPrompt(name); !ok {
 			t.Fatalf("BuiltinAgentPrompt(%q) not found", name)
 		}
 	}
 	if got, ok := BuiltinAgentPrompt("unknown"); ok || got != "" {
 		t.Fatalf("unknown prompt = %q, %v; want empty, false", got, ok)
+	}
+}
+
+func TestReviewPromptIsFindingsFirstAndReadOnly(t *testing.T) {
+	review := strings.ToLower(mustAgentPrompt(t, "review"))
+	for _, want := range []string{
+		"read-only",
+		"working-tree diff",
+		"untracked files",
+		"findings first",
+		"ordered by severity",
+		"repository-relative path and line",
+		"do not modify",
+		"residual risks",
+	} {
+		if !strings.Contains(review, want) {
+			t.Fatalf("review prompt missing %q:\n%s", want, review)
+		}
 	}
 }
 
@@ -163,6 +181,7 @@ func TestPromptFilesDoNotExposeFinalNewline(t *testing.T) {
 		"explore":            mustAgentPrompt(t, "explore"),
 		"independent":        mustAgentPrompt(t, "independent"),
 		"plan":               mustAgentPrompt(t, "plan"),
+		"review":             mustAgentPrompt(t, "review"),
 	} {
 		if text[len(text)-1:] == "\n" || text[len(text)-1:] == "\r" {
 			t.Fatalf("%s prompt exposes final newline", name)
@@ -183,6 +202,7 @@ func TestPromptByteBudgets(t *testing.T) {
 		"explore":            {mustAgentPrompt(t, "explore"), 300},
 		"independent":        {mustAgentPrompt(t, "independent"), 500},
 		"plan":               {mustAgentPrompt(t, "plan"), 800},
+		"review":             {mustAgentPrompt(t, "review"), 700},
 	}
 	total := 0
 	for name, item := range budgets {

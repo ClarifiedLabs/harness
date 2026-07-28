@@ -1343,12 +1343,9 @@ func TestREPLTypedSkillMentionAddsRequestContext(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	app := newTestApp(t, &out, &errw, fp)
+	commit := testSkill(t, "commit", "Create a git commit", "REPL SKILL BODY")
 	app.Skills = map[string]skills.Skill{
-		"commit": {
-			Name:        "commit",
-			Description: "Create a git commit",
-			Location:    "/skills/commit/SKILL.md",
-		},
+		"commit": commit,
 	}
 
 	if code := Run(strings.NewReader("please use $commit\n/exit\n"), app, nil); code != 0 {
@@ -1362,9 +1359,9 @@ func TestREPLTypedSkillMentionAddsRequestContext(t *testing.T) {
 		t.Fatalf("user prompt should be preserved, got %q", got)
 	}
 	got := strings.Join(req.RequestContext, "\n\n")
-	if !strings.Contains(got, "[explicit skill mentions]") ||
-		!strings.Contains(got, "path: /skills/commit/SKILL.md") ||
-		!strings.Contains(got, "read the full SKILL.md") {
+	if !strings.Contains(got, "[active skill instructions]") ||
+		!strings.Contains(got, "source: "+commit.Location) ||
+		!strings.Contains(got, "REPL SKILL BODY") {
 		t.Fatalf("request context missing skill instructions:\n%s", got)
 	}
 }
@@ -1373,12 +1370,9 @@ func TestREPLPromptEditorTabCompletesSkillMention(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	app := newTestApp(t, &out, &errw, fp)
+	commit := testSkill(t, "commit", "Create a git commit", "TAB SKILL BODY")
 	app.Skills = map[string]skills.Skill{
-		"commit": {
-			Name:        "commit",
-			Description: "Create a git commit",
-			Location:    "/skills/commit/SKILL.md",
-		},
+		"commit": commit,
 	}
 
 	if code := run(strings.NewReader("please $com\tnow\r/exit\r"), app, nil, true); code != 0 {
@@ -1391,7 +1385,8 @@ func TestREPLPromptEditorTabCompletesSkillMention(t *testing.T) {
 	if got := req.Messages[0].Content[0].Text; got != "please $commit now" {
 		t.Fatalf("tab-completed prompt = %q, want %q", got, "please $commit now")
 	}
-	if got := strings.Join(req.RequestContext, "\n\n"); !strings.Contains(got, "[explicit skill mentions]") {
+	if got := strings.Join(req.RequestContext, "\n\n"); !strings.Contains(got, "[active skill instructions]") ||
+		!strings.Contains(got, "TAB SKILL BODY") {
 		t.Fatalf("tab-completed prompt should add skill context:\n%s", got)
 	}
 }
@@ -1400,9 +1395,10 @@ func TestREPLTypedEscapedSkillMentionStillScansLaterMentions(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	app := newTestApp(t, &out, &errw, fp)
+	review := testSkill(t, "review", "Review code", "REVIEW SKILL BODY")
 	app.Skills = map[string]skills.Skill{
 		"commit": {Name: "commit", Description: "Create a git commit", Location: "/skills/commit/SKILL.md"},
-		"review": {Name: "review", Description: "Review code", Location: "/skills/review/SKILL.md"},
+		"review": review,
 	}
 
 	if code := Run(strings.NewReader("$$commit and use $review\n/exit\n"), app, nil); code != 0 {
@@ -1416,10 +1412,10 @@ func TestREPLTypedEscapedSkillMentionStillScansLaterMentions(t *testing.T) {
 		t.Fatalf("user prompt should unescape only the escaped dollar, got %q", got)
 	}
 	got := strings.Join(req.RequestContext, "\n\n")
-	if strings.Contains(got, "path: /skills/commit/SKILL.md") {
+	if strings.Contains(got, "name: commit") {
 		t.Fatalf("escaped skill mention should not add commit context:\n%s", got)
 	}
-	if !strings.Contains(got, "path: /skills/review/SKILL.md") {
+	if !strings.Contains(got, "source: "+review.Location) || !strings.Contains(got, "REVIEW SKILL BODY") {
 		t.Fatalf("later skill mention should add review context:\n%s", got)
 	}
 }
@@ -1444,7 +1440,7 @@ func TestREPLPastedSkillMentionStaysLiteral(t *testing.T) {
 	if got := req.Messages[0].Content[0].Text; got != pasted {
 		t.Fatalf("pasted prompt = %q, want %q", got, pasted)
 	}
-	if got := strings.Join(req.RequestContext, "\n\n"); strings.Contains(got, "[explicit skill mentions]") {
+	if got := strings.Join(req.RequestContext, "\n\n"); strings.Contains(got, "[active skill instructions]") {
 		t.Fatalf("pasted prompt should not add skill context:\n%s", got)
 	}
 }
@@ -5562,8 +5558,9 @@ func TestREPLDuringPromptSteerCarriesSkillContext(t *testing.T) {
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
 	)
 	app := liveTestApp(t, &out, &errw, fp)
+	steer := testSkill(t, "steer", "steer skill", "STEER SKILL BODY")
 	app.Skills = map[string]skills.Skill{
-		"steer": {Name: "steer", Description: "steer skill", Location: filepath.Join(t.TempDir(), "SKILL.md")},
+		"steer": steer,
 	}
 	reg := tools.Default()
 	reg.Register(tool)
@@ -5607,7 +5604,7 @@ func TestREPLDuringPromptSteerCarriesSkillContext(t *testing.T) {
 
 	var sawSkillContext bool
 	for _, item := range fp.Requests[1].RequestContext {
-		if strings.Contains(item, "steer skill") {
+		if strings.Contains(item, "STEER SKILL BODY") {
 			sawSkillContext = true
 		}
 	}

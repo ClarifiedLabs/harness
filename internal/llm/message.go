@@ -187,4 +187,7 @@ type ToolResult struct {
 	OriginalBytes int
 	ShownBytes    int
 	Usage         Usage
+	// Metrics is diagnostics-only tool telemetry and is never copied into a
+	// model-visible ContentBlock.
+	Metrics map[string]int
 }

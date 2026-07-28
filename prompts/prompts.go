@@ -51,7 +51,7 @@ func DelegateChild() string {
 // BuiltinAgentPrompt returns the prompt body for a built-in agent name.
 func BuiltinAgentPrompt(name string) (string, bool) {
 	switch name {
-	case "auto", "explore", "independent", "plan":
+	case "auto", "explore", "independent", "plan", "review":
 	default:
 		return "", false
 	}

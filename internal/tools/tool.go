@@ -59,6 +59,9 @@ type RunResult struct {
 	Text         string
 	OriginalText string
 	Usage        llm.Usage
+	// Metrics is diagnostics-only aggregate telemetry. It is persisted with the
+	// tool-result event but never enters model-visible transcript content.
+	Metrics map[string]int
 }
 
 // ResultTool is an optional extension for tools that proactively summarize
@@ -767,6 +770,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		original string
 		content  []llm.ContentBlock
 		usage    llm.Usage
+		metrics  map[string]int
 		err      error
 	}
 	done := make(chan outcome, 1) // buffered: an abandoned Run can still send and exit
@@ -784,7 +788,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		}
 		if rt, ok := t.(ResultTool); ok {
 			result, err := rt.RunResult(ctx, input)
-			done <- outcome{out: result.Text, original: result.OriginalText, usage: result.Usage, err: err}
+			done <- outcome{out: result.Text, original: result.OriginalText, usage: result.Usage, metrics: result.Metrics, err: err}
 			return
 		}
 		if mt, ok := t.(MeteredTool); ok {
@@ -800,10 +804,11 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 	var original string
 	var content []llm.ContentBlock
 	var usage llm.Usage
+	var metrics map[string]int
 	var err error
 	select {
 	case o := <-done:
-		out, original, content, usage, err = o.out, o.original, o.content, o.usage, o.err
+		out, original, content, usage, metrics, err = o.out, o.original, o.content, o.usage, o.metrics, o.err
 	case <-ctx.Done():
 		// The Run goroutine is abandoned if it ignores ctx; its eventual send
 		// lands in the buffered channel and is dropped. The abandoned Run may
@@ -822,6 +827,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 	}
 
 	res.Usage = usage
+	res.Metrics = maps.Clone(metrics)
 	if err != nil {
 		// Report a timeout only when the ceiling itself expired (the derived
 		// context's deadline fired) and it was not an outer cancellation. A
@@ -848,6 +854,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 	prepared := r.PrepareResultWithOriginal(call.Name, call.ID, out, original)
 	prepared.Content = append([]llm.ContentBlock(nil), content...)
 	prepared.Usage = usage
+	prepared.Metrics = maps.Clone(metrics)
 	return prepared
 }
 

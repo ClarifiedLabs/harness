@@ -163,6 +163,72 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 	}
 }
 
+func TestStatsOptimizationDiagnosticsAreAggregatedAndRedacted(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	skillInput := json.RawMessage(`{"path":"/SECRET-SKILL/SKILL.md"}`)
+	state := Session{
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hello"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+				{Kind: llm.BlockThinking, Thinking: "reason", ThinkingSignature: "opaque"},
+				{Kind: llm.BlockText, Text: "answer"},
+				{Kind: llm.BlockToolUse, ToolUseID: "active-read", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"x.go"}`)},
+			}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "active-read", ToolName: "read_file", ResultText: "tool output"}}},
+		},
+	}
+	events := []Event{
+		{Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "read-1", Tool: "read_file", Input: skillInput},
+		{Type: EventToolResult, Prompt: 1, Turn: 1, ToolID: "read-1", Tool: "read_file", ResultError: true, ResultTruncated: true, ResultOriginalBytes: 1000, ResultShownBytes: 100, DurationMS: 12},
+		{Type: EventToolStart, Prompt: 1, Turn: 2, ToolID: "read-2", Tool: "read_file", Input: skillInput},
+		{Type: EventToolStart, Prompt: 1, Turn: 3, ToolID: "read-3", Tool: "read_file", Input: skillInput},
+		{Type: EventToolStart, Prompt: 1, Turn: 4, ToolID: "steps", Tool: "run_command", Input: json.RawMessage(`{"steps":[{"command":"SECRET shell"},{"argv":["SECRET-ARGV"]}]}`)},
+		{Type: EventSkillActivation, Prompt: 1, Turn: 4, Purpose: "explicit", Summary: "activated"},
+		{Type: EventSkillActivation, Prompt: 1, Turn: 4, Purpose: "read_file", Summary: "already_active"},
+		{Type: EventToolResult, Prompt: 1, Turn: 4, ToolID: "search", Tool: "search", ResultMetrics: map[string]int{
+			"context_lines_before_dedupe": 10,
+			"unique_context_lines":        6,
+		}},
+		{Type: EventModelRequest, Prompt: 1, Turn: 4, Context: &ContextSnapshot{
+			Total: 90, Window: 1000, System: 10, Tools: 20, Messages: 60, Source: "estimated",
+		}},
+	}
+	saveStatsFixture(t, dir, state, events)
+
+	var out bytes.Buffer
+	if err := Stats(dir, &out); err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"Active context\n",
+		"  messages/content blocks: 3 / 5\n",
+		"  user/assistant text: 5 B / 6 B\n",
+		"  tool inputs/results: 15 B / 11 B\n",
+		"  latest request estimate: 90 / 1000 tokens (estimated)\n",
+		"  result volume by tool (largest first):\n",
+		"    read_file: 1 results, 1 errors, 1 truncated, 100 B shown / 1000 B original\n",
+		"  repeated normalized calls (inputs redacted):\n",
+		"    read_file: 2 duplicate executions across 1 repeated inputs (max 3 identical)\n",
+		"  SKILL.md tool reads: 3 (1 unique paths, 2 re-reads)\n",
+		"  skill activations: 2\n",
+		"    explicit/activated: 1\n",
+		"    read_file/already_active: 1\n",
+		"  batched search context: 10 selected source lines / 6 unique (4 duplicates suppressed)\n",
+		"    step batches: 1 total (1 root, 0 delegates)\n",
+		"    step commands: 2 total (2 root, 0 delegates)\n",
+		"      step shell-string: 1 total (1 root, 0 delegates)\n",
+		"      step argv: 1 total (1 root, 0 delegates)\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stats output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "SECRET") {
+		t.Fatalf("stats output leaked tool input: %s", got)
+	}
+}
+
 func TestStatsDoesNotCountFailedFirstAttemptAsTurnOrRetry(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	saveStatsFixture(t, dir, Session{}, []Event{

@@ -4666,6 +4666,7 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 		ResultTruncated:     res.Truncated,
 		ResultOriginalBytes: originalBytes,
 		ResultShownBytes:    shownBytes,
+		ResultMetrics:       maps.Clone(res.Metrics),
 	})
 }
 
@@ -4805,6 +4806,16 @@ func (s *accumulatingSink) RetentionApplied(event agent.RetentionEvent) {
 		Prompt:    s.prompt,
 		Turn:      s.turn + 1,
 		Retention: retentionSnapshot(event),
+	})
+}
+
+func (s *accumulatingSink) SkillActivated(event agent.SkillActivationEvent) {
+	s.recordEvent(session.Event{
+		Type:    session.EventSkillActivation,
+		Prompt:  s.prompt,
+		Turn:    max(s.turn, 1),
+		Purpose: event.Source,
+		Summary: event.Status,
 	})
 }
 

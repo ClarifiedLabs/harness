@@ -161,6 +161,17 @@ type RetentionEventSink interface {
 	RetentionApplied(RetentionEvent)
 }
 
+// SkillActivationEvent is diagnostics-only telemetry for explicit and
+// read_file-driven skill activation.
+type SkillActivationEvent struct {
+	Source string
+	Status string
+}
+
+type SkillActivationEventSink interface {
+	SkillActivated(SkillActivationEvent)
+}
+
 // RetentionPolicy selects when the live transcript retention pass runs.
 type RetentionPolicy string
 
@@ -1249,6 +1260,7 @@ func (a *Agent) RunPromptContent(ctx context.Context, userText string, images []
 // into the transcript.
 func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string, images []llm.ContentBlock, extraContext []string, promptID int, sink EventSink) (retErr error) {
 	a.compactFallbackNotice = compactFallbackNoticeState{}
+	reportExplicitSkillContexts(extraContext, sink)
 	promptIndex := len(a.transcript)
 	promptMessage := a.userMessage(userText, images)
 	promptMessage.Origin = llm.MessageOriginPrompt
@@ -1269,6 +1281,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 	var wastedTotal llm.Usage            // tokens spent on retried-and-discarded turn attempts (r51+r52)
 	appendBoundary := a.measuredBoundary // transcript length measured by lastInput (drives the r44 trigger)
 	var steerContext []string
+	var activeSkills activeSkillSet
 	forcePromptWorkSynthesis := false
 	var terminationReason TerminationReason
 	checkpoint := func(kind PromptCheckpointKind) {
@@ -1334,7 +1347,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			return err
 		}
 		initialPromptPending = false
-		requestContext := a.requestContext(appendPromptContext(extraContext, steerContext), sink)
+		requestContext := a.requestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink)
 		modelReq := a.modelRequest(requestContext)
 		lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 		// Proactive trigger (spec §4): a turn whose tool results balloon the
@@ -1358,7 +1371,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 				// transcript and would re-trigger every turn.
 				lastInput = 0
 				appendBoundary = 0
-				requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
+				requestContext = a.requestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink)
 				modelReq = a.modelRequest(requestContext)
 				lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 			}
@@ -1378,7 +1391,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			if err == nil && changed {
 				lastInput = 0
 				appendBoundary = 0
-				requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
+				requestContext = a.requestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink)
 				if err := a.validateRetainedTranscript("after input-count compaction"); err != nil {
 					return err
 				}
@@ -1429,7 +1442,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 					if verr := a.validateRetainedTranscript("after context-overflow compaction"); verr != nil {
 						err = verr
 					} else {
-						requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
+						requestContext = a.requestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink)
 						modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 						lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 						res, wasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
@@ -1550,6 +1563,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 
 		checkpoint(PromptCheckpointToolDispatch)
 		results, parallelBatches, toolUsage := a.dispatchCalls(ctx, res.toolCalls, promptID, turns, sink)
+		a.activateSkillReadResults(res.toolCalls, results, &activeSkills, sink)
 		total = add(total, toolUsage)
 		a.transcript = append(a.transcript, llm.Message{
 			Role:                llm.RoleUser,
@@ -1596,7 +1610,8 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			steerMessage.Origin = llm.MessageOriginSteer
 			a.transcript = append(a.transcript, steerMessage)
 			steerContext = append(steerContext, steered.RequestContext...)
-			requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
+			reportExplicitSkillContexts(steered.RequestContext, sink)
+			requestContext = a.requestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink)
 			guard.repeatRuns = 0
 			guard.repeatSteered = false
 			guard.errorRuns = 0
@@ -1724,7 +1739,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 	// prompt total and is also reported separately as maintenance. A compaction
 	// error never fails the prompt — the warning was already reported and
 	// the transcript was kept intact.
-	lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, steerContext), sink))
+	lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink))
 	compUsage, changed, err := a.MaybeCompact(ctx, a.triggerTokens(lastInput, appendBoundary), sink)
 	if compUsage != (llm.Usage{}) {
 		total = add(total, compUsage)
@@ -1732,7 +1747,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		reportMaintenance(sink, "compaction", compUsage)
 	}
 	if err == nil && changed {
-		lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, steerContext), sink))
+		lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink))
 	}
 	if err := a.validateTranscript("after prompt"); err != nil {
 		return err
@@ -2772,9 +2787,11 @@ func cleanContext(context []string) []string {
 	return out
 }
 
-func appendPromptContext(extraContext, steerContext []string) []string {
-	out := append([]string(nil), extraContext...)
-	out = append(out, steerContext...)
+func appendPromptContext(contexts ...[]string) []string {
+	var out []string
+	for _, context := range contexts {
+		out = append(out, context...)
+	}
 	return out
 }
 

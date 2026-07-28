@@ -323,6 +323,7 @@ func TestDispatchPreservesResultToolOriginal(t *testing.T) {
 			Text:         "compact receipt",
 			OriginalText: "complete verbose transcript",
 			Usage:        llm.Usage{InputTokens: 2},
+			Metrics:      map[string]int{"unique_lines": 12},
 		},
 	})
 
@@ -335,6 +336,9 @@ func TestDispatchPreservesResultToolOriginal(t *testing.T) {
 	}
 	if res.Usage.InputTokens != 2 {
 		t.Fatalf("usage = %+v", res.Usage)
+	}
+	if res.Metrics["unique_lines"] != 12 {
+		t.Fatalf("metrics = %+v", res.Metrics)
 	}
 }
 

@@ -242,8 +242,9 @@ func TestREPLEditedSkillMentionAddsRequestContext(t *testing.T) {
 		Stop:   llm.StopEndTurn,
 	})
 	app := newTestApp(t, &out, &errw, fp)
+	commit := testSkill(t, "commit", "Create a git commit", "EDITOR SKILL BODY")
 	app.Skills = map[string]skills.Skill{
-		"commit": {Name: "commit", Description: "Create a git commit", Location: "/skills/commit/SKILL.md"},
+		"commit": commit,
 	}
 	app.OpenEditor = func(path string) error {
 		data, err := os.ReadFile(path)
@@ -266,7 +267,9 @@ func TestREPLEditedSkillMentionAddsRequestContext(t *testing.T) {
 		t.Fatalf("edited prompt = %q", got)
 	}
 	got := strings.Join(req.RequestContext, "\n\n")
-	if !strings.Contains(got, "[explicit skill mentions]") || !strings.Contains(got, "path: /skills/commit/SKILL.md") {
+	if !strings.Contains(got, "[active skill instructions]") ||
+		!strings.Contains(got, "source: "+commit.Location) ||
+		!strings.Contains(got, "EDITOR SKILL BODY") {
 		t.Fatalf("edited prompt should add skill context:\n%s", got)
 	}
 }
@@ -315,8 +318,9 @@ func TestREPLEditorPrefillInteractiveSlashTextIsPromptWithEnrichment(t *testing.
 		Stop:   llm.StopEndTurn,
 	})
 	app := newTestApp(t, &out, &errw, fp)
+	commit := testSkill(t, "commit", "Create a git commit", "EDITOR PREFILL SKILL BODY")
 	app.Skills = map[string]skills.Skill{
-		"commit": {Name: "commit", Description: "Create a git commit", Location: "/skills/commit/SKILL.md"},
+		"commit": commit,
 	}
 	path := writeUIImage(t)
 	prompt := "/help please use $commit @" + path
@@ -346,7 +350,9 @@ func TestREPLEditorPrefillInteractiveSlashTextIsPromptWithEnrichment(t *testing.
 		t.Fatalf("second block = %+v, want prompt %q", content[1], prompt)
 	}
 	got := strings.Join(fp.Requests[0].RequestContext, "\n\n")
-	if !strings.Contains(got, "[explicit skill mentions]") || !strings.Contains(got, "path: /skills/commit/SKILL.md") {
+	if !strings.Contains(got, "[active skill instructions]") ||
+		!strings.Contains(got, "source: "+commit.Location) ||
+		!strings.Contains(got, "EDITOR PREFILL SKILL BODY") {
 		t.Fatalf("edited prompt should add skill context:\n%s", got)
 	}
 }

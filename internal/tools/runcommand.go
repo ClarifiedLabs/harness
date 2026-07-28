@@ -109,8 +109,15 @@ const runCommandBackgroundSchemaFmt = `{
     "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
     "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default %d for background; no maximum)."},
     "background": {"type": "boolean", "description": "When true, start the command as a process-local background job and return a job id immediately. If later work depends on completion, call background_jobs action=wait once; do not poll get/list."},
-    "resource_key": {"type": "string", "description": "Background-only lease resource. Defaults to the canonical cwd."},
-    "access": {"type": "string", "enum": ["read_only", "exclusive"], "description": "Background-only lease access. Defaults to exclusive; declare read_only only when the command cannot mutate the resource."}
+    "background_lease": {
+      "type": "object",
+      "description": "Optional scheduling lease for a background job. This coordinates concurrent jobs; it does not restrict command behavior or make the command read-only.",
+      "properties": {
+        "resource_key": {"type": "string", "description": "Coordination resource. Defaults to the canonical cwd."},
+        "access": {"type": "string", "enum": ["read_only", "exclusive"], "description": "Lease sharing mode. Defaults to exclusive; use read_only only when this job will not mutate the coordinated resource."}
+      },
+      "additionalProperties": false
+    }
   }
 }`
 
@@ -123,7 +130,7 @@ type runCommand struct {
 func (runCommand) Name() string { return "run_command" }
 
 func (runCommand) Description() string {
-	return "Run one command or ordered steps using a shell command or argv as an array of strings. Auto output returns compact archived receipts for large success and bounded failure diagnostics. Background supports one command."
+	return "Run one command or ordered steps using a shell command or argv as an array of strings. Auto output returns compact archived receipts for large success and bounded failure diagnostics. Background supports one command; background_lease only coordinates jobs and does not restrict command behavior."
 }
 
 func (t runCommand) Schema() json.RawMessage {
@@ -154,18 +161,28 @@ func hasBackgroundFlag(input json.RawMessage) bool {
 }
 
 type runCommandArgs struct {
-	Command        string           `json:"command"`
-	Argv           []string         `json:"argv"`
-	Steps          []runCommandStep `json:"steps"`
-	StopOnFailure  *bool            `json:"stop_on_failure"`
-	Name           string           `json:"name"`
-	OutputMode     string           `json:"output_mode"`
-	Stdin          string           `json:"stdin"`
-	Cwd            string           `json:"cwd"`
-	TimeoutSeconds int              `json:"timeout_seconds"`
-	Background     bool             `json:"background"`
-	ResourceKey    string           `json:"resource_key"`
-	Access         string           `json:"access"`
+	Command         string           `json:"command"`
+	Argv            []string         `json:"argv"`
+	Steps           []runCommandStep `json:"steps"`
+	StopOnFailure   *bool            `json:"stop_on_failure"`
+	Name            string           `json:"name"`
+	OutputMode      string           `json:"output_mode"`
+	Stdin           string           `json:"stdin"`
+	Cwd             string           `json:"cwd"`
+	TimeoutSeconds  int              `json:"timeout_seconds"`
+	Background      bool             `json:"background"`
+	BackgroundLease *runCommandLease `json:"background_lease"`
+
+	// Backward-compatible input aliases. They deliberately stay out of the
+	// model-facing schema because top-level access was easy to misread as a
+	// command-safety restriction rather than background scheduling metadata.
+	ResourceKey string `json:"resource_key"`
+	Access      string `json:"access"`
+}
+
+type runCommandLease struct {
+	ResourceKey string `json:"resource_key"`
+	Access      string `json:"access"`
 }
 
 type runCommandStep struct {
@@ -183,8 +200,8 @@ func (t runCommand) Run(ctx context.Context, input json.RawMessage) (string, err
 }
 
 func (t runCommand) RunResult(ctx context.Context, input json.RawMessage) (RunResult, error) {
-	var args runCommandArgs
-	if err := json.Unmarshal(input, &args); err != nil {
+	args, err := decodeRunCommandArgs(input)
+	if err != nil {
 		return RunResult{}, err
 	}
 	if err := validateRunCommandArgs(args); err != nil {
@@ -262,6 +279,21 @@ func (t runCommand) RunResult(ctx context.Context, input json.RawMessage) (RunRe
 	return runCommandTopLevel(ctx, args)
 }
 
+func decodeRunCommandArgs(input json.RawMessage) (runCommandArgs, error) {
+	var args runCommandArgs
+	if err := json.Unmarshal(input, &args); err != nil {
+		return runCommandArgs{}, err
+	}
+	if args.BackgroundLease != nil {
+		if strings.TrimSpace(args.ResourceKey) != "" || strings.TrimSpace(args.Access) != "" {
+			return runCommandArgs{}, badArgs("provide background_lease or legacy top-level resource_key/access, not both")
+		}
+		args.ResourceKey = args.BackgroundLease.ResourceKey
+		args.Access = args.BackgroundLease.Access
+	}
+	return args, nil
+}
+
 // SelfTimeout reports run_command's own per-call deadline so its documented
 // "no maximum" timeout_seconds is honored even under a shorter dispatch ceiling.
 // Background jobs run outside Dispatch (it returns once the job is queued), so
@@ -310,7 +342,7 @@ func validateRunCommandArgs(args runCommandArgs) error {
 	hasCommand := strings.TrimSpace(args.Command) != ""
 	hasArgv := len(args.Argv) > 0
 	hasSteps := len(args.Steps) > 0
-	hasLease := strings.TrimSpace(args.ResourceKey) != "" || strings.TrimSpace(args.Access) != ""
+	hasLease := args.BackgroundLease != nil || strings.TrimSpace(args.ResourceKey) != "" || strings.TrimSpace(args.Access) != ""
 	hasTopLevelOutput := strings.TrimSpace(args.Name) != "" || strings.TrimSpace(args.OutputMode) != ""
 	switch {
 	case hasSteps && (hasCommand || hasArgv):
@@ -322,7 +354,7 @@ func validateRunCommandArgs(args runCommandArgs) error {
 	case hasSteps && hasTopLevelOutput:
 		return badArgs("name and output_mode are unavailable with steps")
 	case !args.Background && hasLease:
-		return badArgs("resource_key and access require background:true")
+		return badArgs("background_lease requires background:true")
 	case len(args.Steps) > runCommandMaxSteps:
 		return badArgs("steps must contain at most %d items", runCommandMaxSteps)
 	case hasCommand && hasArgv:

@@ -261,11 +261,38 @@ func (a *Agent) trimToolResultBlock(b *llm.ContentBlock, sink EventSink) bool {
 	head := full[:defaultSummaryToolResultSize]
 	hint := genericRetentionHint(len(head), len(full))
 	if archiver, ok := sink.(ToolResultArchiver); ok {
-		if archive, err := archiver.ArchiveToolResult(llm.ToolResult{ForID: b.ResultForID, Text: full}); err == nil && archive.ModelPath != "" {
-			hint = toolresult.ArchivedHint(archive.ModelPath)
+		archiveInput := llm.ToolResult{
+			ForID:         b.ResultForID,
+			Text:          head,
+			IsError:       b.ResultError,
+			Truncated:     true,
+			OriginalText:  full,
+			OriginalBytes: len(full),
+			ShownBytes:    len(head),
 		}
+		archive, err := archiver.ArchiveToolResult(archiveInput)
+		if err != nil || archive.ModelPath == "" {
+			// A configured session archiver is the durability boundary. Keep
+			// the original live result when it cannot preserve the exact bytes;
+			// trimming anyway would make a transient disk failure destructive.
+			return false
+		}
+		hint = toolresult.ArchivedHint(archive.ModelPath)
 	}
-	b.ResultText = head + "\n" + hint
+	status := "success"
+	if b.ResultError {
+		status = "error"
+	}
+	b.ResultText = fmt.Sprintf(
+		"%s receipt]\ntool: %s\nstatus: %s\noutput: first %d of %d bytes\n\n%s\n%s",
+		retentionTrimMarker,
+		b.ToolName,
+		status,
+		len(head),
+		len(full),
+		head,
+		hint,
+	)
 	return true
 }
 

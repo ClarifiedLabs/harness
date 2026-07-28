@@ -1,6 +1,7 @@
 package session
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,7 @@ type statsReport struct {
 	statusCounts        map[string]int
 	terminationCounts   map[string]int
 	directUsage         llm.Usage
+	delegateDirectUsage llm.Usage
 	directModelCalls    int
 	delegateModelCalls  int
 	directMaintCalls    int
@@ -63,6 +65,8 @@ type collectedSessionStats struct {
 	tree              treeStats
 	tools             toolStats
 	compactions       compactionStats
+	context           contextCompositionStats
+	latestContext     *ContextSnapshot
 }
 
 type treeStats struct {
@@ -94,14 +98,50 @@ type toolStats struct {
 	resultTotalMS       int64
 	resultMaxMS         int64
 	searchNoMatches     int
+	searchContextLines  int
+	searchUniqueLines   int
+	resultsByName       map[string]toolResultStats
+	callShapes          map[string]map[string]int
+	skillReads          int
+	skillReadPaths      map[string]int
+	skillActivations    map[string]int
 }
 
 type commandStats struct {
-	calls      int
-	foreground int
-	background int
-	shell      int
-	argv       int
+	calls        int
+	foreground   int
+	background   int
+	shell        int
+	argv         int
+	stepBatches  int
+	stepCommands int
+	stepShell    int
+	stepArgv     int
+}
+
+type toolResultStats struct {
+	results       int
+	errors        int
+	truncations   int
+	originalBytes int
+	shownBytes    int
+	totalMS       int64
+	maxMS         int64
+}
+
+type contextCompositionStats struct {
+	messages               int
+	blocks                 int
+	userTextBytes          int
+	assistantTextBytes     int
+	toolInputBytes         int
+	toolResultBytes        int
+	reasoningTextBytes     int
+	reasoningOpaqueBytes   int
+	interactionTextBytes   int
+	interactionOpaqueBytes int
+	imageEncodedBytes      int
+	otherBytes             int
 }
 
 type parallelStats struct {
@@ -179,6 +219,7 @@ func collectStats(dir string) (statsReport, error) {
 			report.terminationCounts[child.meta.TerminationReason]++
 		}
 		report.directUsage = addUsage(report.directUsage, child.stats.directUsage)
+		report.delegateDirectUsage = addUsage(report.delegateDirectUsage, child.stats.directUsage)
 		report.directModelCalls += child.stats.modelCalls
 		report.delegateModelCalls += child.stats.modelCalls
 		report.directMaintCalls += child.stats.maintenanceCalls
@@ -237,7 +278,12 @@ func collectSessionStatsWithFallback(dir string, child *ChildMeta) (collectedSes
 	var terminationCounts map[string]int
 	var maintenanceUsage llm.Usage
 	var directUsage llm.Usage
+	var latestContext *ContextSnapshot
 	for _, ev := range events {
+		if ev.Context != nil {
+			snapshot := *ev.Context
+			latestContext = &snapshot
+		}
 		switch ev.Type {
 		case EventUser:
 			if ev.Prompt > 0 {
@@ -294,7 +340,52 @@ func collectSessionStatsWithFallback(dir string, child *ChildMeta) (collectedSes
 		tree:              collectTreeStats(state.Tree),
 		tools:             tools,
 		compactions:       compactions,
+		context:           collectContextComposition(state.Messages),
+		latestContext:     latestContext,
 	}, nil
+}
+
+func collectContextComposition(messages []llm.Message) contextCompositionStats {
+	stats := contextCompositionStats{messages: len(messages)}
+	for _, message := range messages {
+		for _, block := range message.Content {
+			stats.blocks++
+			switch block.Kind {
+			case llm.BlockText:
+				if message.Role == llm.RoleUser {
+					stats.userTextBytes += len(block.Text)
+				} else {
+					stats.assistantTextBytes += len(block.Text)
+				}
+			case llm.BlockImage:
+				stats.imageEncodedBytes += len(block.ImageData)
+			case llm.BlockToolUse:
+				stats.toolInputBytes += len(block.ToolInput)
+			case llm.BlockToolResult:
+				stats.toolResultBytes += len(block.ResultText)
+				for _, content := range block.ResultContent {
+					if content.Kind == llm.BlockImage {
+						stats.imageEncodedBytes += len(content.ImageData)
+					}
+				}
+			case llm.BlockThinking:
+				stats.reasoningTextBytes += len(block.Thinking)
+				stats.reasoningOpaqueBytes += len(block.ThinkingSignature)
+			case llm.BlockRedactedThinking:
+				stats.reasoningOpaqueBytes += len(block.RedactedData)
+			case llm.BlockReasoning:
+				stats.reasoningOpaqueBytes += len(block.ReasoningID) + len(block.ReasoningEncrypted)
+			case llm.BlockInteractionThought:
+				stats.interactionTextBytes += len(block.InteractionThoughtSummary)
+				stats.interactionOpaqueBytes += len(block.InteractionThoughtSignature)
+			case llm.BlockInteractionStep:
+				stats.otherBytes += len(block.InteractionStep)
+			default:
+				stats.otherBytes += len(block.Text) + len(block.ResultText) + len(block.ToolInput)
+			}
+		}
+	}
+	return stats
 }
 
 func collectRetentionStats(events []Event) retentionStats {
@@ -387,9 +478,23 @@ func collectCheckpointStats(events []Event) checkpointStats {
 }
 
 func collectToolStats(events []Event) (toolStats, error) {
-	stats := toolStats{byName: make(map[string]int)}
+	stats := toolStats{
+		byName:           make(map[string]int),
+		resultsByName:    make(map[string]toolResultStats),
+		callShapes:       make(map[string]map[string]int),
+		skillReadPaths:   make(map[string]int),
+		skillActivations: make(map[string]int),
+	}
 	turnCalls := make(map[[2]int][]string)
 	for _, ev := range events {
+		if ev.Type == EventSkillActivation {
+			key := strings.Trim(strings.TrimSpace(ev.Purpose)+"/"+strings.TrimSpace(ev.Summary), "/")
+			if key == "" {
+				key = "unknown"
+			}
+			stats.skillActivations[key]++
+			continue
+		}
 		if ev.Type == EventToolResult {
 			stats.resultErrors += boolInt(ev.ResultError)
 			stats.resultTruncations += boolInt(ev.ResultTruncated)
@@ -397,10 +502,25 @@ func collectToolStats(events []Event) (toolStats, error) {
 			stats.resultShownBytes += ev.ResultShownBytes
 			stats.resultTotalMS += ev.DurationMS
 			stats.resultMaxMS = max(stats.resultMaxMS, ev.DurationMS)
+			if ev.Tool != "" {
+				result := stats.resultsByName[ev.Tool]
+				result.results++
+				result.errors += boolInt(ev.ResultError)
+				result.truncations += boolInt(ev.ResultTruncated)
+				result.originalBytes += ev.ResultOriginalBytes
+				result.shownBytes += ev.ResultShownBytes
+				result.totalMS += ev.DurationMS
+				result.maxMS = max(result.maxMS, ev.DurationMS)
+				stats.resultsByName[ev.Tool] = result
+			}
 			if ev.Tool == "search" || ev.Tool == "rg" || ev.Tool == "grep" {
 				if strings.Contains(strings.ToLower(ev.Display), "no matches") {
 					stats.searchNoMatches++
 				}
+			}
+			if ev.Tool == "search" {
+				stats.searchContextLines += ev.ResultMetrics["context_lines_before_dedupe"]
+				stats.searchUniqueLines += ev.ResultMetrics["unique_context_lines"]
 			}
 			continue
 		}
@@ -409,9 +529,20 @@ func collectToolStats(events []Event) (toolStats, error) {
 		}
 		stats.calls++
 		stats.byName[ev.Tool]++
+		shape := normalizedToolCallHash(ev.Input)
+		if stats.callShapes[ev.Tool] == nil {
+			stats.callShapes[ev.Tool] = make(map[string]int)
+		}
+		stats.callShapes[ev.Tool][shape]++
 		if ev.Prompt > 0 && ev.Turn > 0 {
 			key := [2]int{ev.Prompt, ev.Turn}
 			turnCalls[key] = append(turnCalls[key], ev.Tool)
+		}
+		if ev.Tool == "read_file" {
+			for _, pathHash := range skillReadPathHashes(ev.Input) {
+				stats.skillReads++
+				stats.skillReadPaths[pathHash]++
+			}
 		}
 		if ev.Tool != "run_command" {
 			continue
@@ -420,6 +551,10 @@ func collectToolStats(events []Event) (toolStats, error) {
 			Command    string   `json:"command"`
 			Argv       []string `json:"argv"`
 			Background bool     `json:"background"`
+			Steps      []struct {
+				Command string   `json:"command"`
+				Argv    []string `json:"argv"`
+			} `json:"steps"`
 		}
 		if err := json.Unmarshal(ev.Input, &input); err != nil {
 			return toolStats{}, fmt.Errorf("decode run_command input for %s: %w", ev.ToolID, err)
@@ -434,6 +569,17 @@ func collectToolStats(events []Event) (toolStats, error) {
 			stats.commands.shell++
 		} else if len(input.Argv) != 0 {
 			stats.commands.argv++
+		}
+		if len(input.Steps) > 0 {
+			stats.commands.stepBatches++
+			stats.commands.stepCommands += len(input.Steps)
+			for _, step := range input.Steps {
+				if step.Command != "" {
+					stats.commands.stepShell++
+				} else if len(step.Argv) != 0 {
+					stats.commands.stepArgv++
+				}
+			}
 		}
 	}
 	stats.turns = len(turnCalls)
@@ -450,6 +596,73 @@ func collectToolStats(events []Event) (toolStats, error) {
 		}
 	}
 	return stats, nil
+}
+
+func normalizedToolCallHash(input json.RawMessage) string {
+	normalized := []byte(input)
+	var value any
+	if json.Unmarshal(input, &value) == nil {
+		if encoded, err := json.Marshal(value); err == nil {
+			normalized = encoded
+		}
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(normalized))
+}
+
+func skillReadPathHashes(input json.RawMessage) []string {
+	var args struct {
+		Path          string   `json:"path"`
+		Paths         []string `json:"paths"`
+		FilePath      string   `json:"file_path"`
+		FilePathCamel string   `json:"filePath"`
+		File          string   `json:"file"`
+		Filename      string   `json:"filename"`
+		FilepathAlt   string   `json:"filepath"`
+		AbsolutePath  string   `json:"absolute_path"`
+		TargetFile    string   `json:"target_file"`
+		Files         []string `json:"files"`
+	}
+	if json.Unmarshal(input, &args) != nil {
+		return nil
+	}
+	paths := args.Paths
+	if len(paths) == 0 {
+		paths = args.Files
+	}
+	if len(paths) == 0 {
+		path := args.Path
+		if path == "" {
+			path = firstNonEmptyString(
+				args.FilePath,
+				args.FilePathCamel,
+				args.File,
+				args.Filename,
+				args.FilepathAlt,
+				args.AbsolutePath,
+				args.TargetFile,
+			)
+		}
+		if path != "" {
+			paths = []string{path}
+		}
+	}
+	hashes := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if filepath.Base(filepath.Clean(path)) != "SKILL.md" {
+			continue
+		}
+		hashes = append(hashes, fmt.Sprintf("%x", sha256.Sum256([]byte(filepath.Clean(path)))))
+	}
+	return hashes
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func boolInt(value bool) int {
@@ -625,6 +838,18 @@ func (stats *toolStats) add(other toolStats) {
 	if stats.byName == nil {
 		stats.byName = make(map[string]int)
 	}
+	if stats.resultsByName == nil {
+		stats.resultsByName = make(map[string]toolResultStats)
+	}
+	if stats.callShapes == nil {
+		stats.callShapes = make(map[string]map[string]int)
+	}
+	if stats.skillReadPaths == nil {
+		stats.skillReadPaths = make(map[string]int)
+	}
+	if stats.skillActivations == nil {
+		stats.skillActivations = make(map[string]int)
+	}
 	stats.calls += other.calls
 	stats.turns += other.turns
 	stats.soloTodoTurns += other.soloTodoTurns
@@ -636,8 +861,30 @@ func (stats *toolStats) add(other toolStats) {
 	stats.resultTotalMS += other.resultTotalMS
 	stats.resultMaxMS = max(stats.resultMaxMS, other.resultMaxMS)
 	stats.searchNoMatches += other.searchNoMatches
+	stats.searchContextLines += other.searchContextLines
+	stats.searchUniqueLines += other.searchUniqueLines
+	stats.skillReads += other.skillReads
 	for name, count := range other.byName {
 		stats.byName[name] += count
+	}
+	for name, result := range other.resultsByName {
+		combined := stats.resultsByName[name]
+		combined.add(result)
+		stats.resultsByName[name] = combined
+	}
+	for name, shapes := range other.callShapes {
+		if stats.callShapes[name] == nil {
+			stats.callShapes[name] = make(map[string]int)
+		}
+		for shape, count := range shapes {
+			stats.callShapes[name][shape] += count
+		}
+	}
+	for path, count := range other.skillReadPaths {
+		stats.skillReadPaths[path] += count
+	}
+	for activation, count := range other.skillActivations {
+		stats.skillActivations[activation] += count
 	}
 	stats.commands.add(other.commands)
 	stats.parallel.add(other.parallel)
@@ -649,6 +896,25 @@ func cloneToolStats(stats toolStats) toolStats {
 	for name, count := range stats.byName {
 		clone.byName[name] = count
 	}
+	clone.resultsByName = make(map[string]toolResultStats, len(stats.resultsByName))
+	for name, result := range stats.resultsByName {
+		clone.resultsByName[name] = result
+	}
+	clone.callShapes = make(map[string]map[string]int, len(stats.callShapes))
+	for name, shapes := range stats.callShapes {
+		clone.callShapes[name] = make(map[string]int, len(shapes))
+		for shape, count := range shapes {
+			clone.callShapes[name][shape] = count
+		}
+	}
+	clone.skillReadPaths = make(map[string]int, len(stats.skillReadPaths))
+	for path, count := range stats.skillReadPaths {
+		clone.skillReadPaths[path] = count
+	}
+	clone.skillActivations = make(map[string]int, len(stats.skillActivations))
+	for activation, count := range stats.skillActivations {
+		clone.skillActivations[activation] = count
+	}
 	return clone
 }
 
@@ -658,6 +924,20 @@ func (stats *commandStats) add(other commandStats) {
 	stats.background += other.background
 	stats.shell += other.shell
 	stats.argv += other.argv
+	stats.stepBatches += other.stepBatches
+	stats.stepCommands += other.stepCommands
+	stats.stepShell += other.stepShell
+	stats.stepArgv += other.stepArgv
+}
+
+func (stats *toolResultStats) add(other toolResultStats) {
+	stats.results += other.results
+	stats.errors += other.errors
+	stats.truncations += other.truncations
+	stats.originalBytes += other.originalBytes
+	stats.shownBytes += other.shownBytes
+	stats.totalMS += other.totalMS
+	stats.maxMS = max(stats.maxMS, other.maxMS)
 }
 
 func (stats *parallelStats) add(other parallelStats) {
@@ -694,6 +974,7 @@ func writeStats(report statsReport, w io.Writer) error {
 	writeSessionStats(&b, report)
 	writeConversationStats(&b, report.root)
 	writeTreeStats(&b, report.root.tree)
+	writeActiveContextStats(&b, report.root)
 	writeOverallToolStats(&b, report)
 	writeRootUsage(&b, report.root.state)
 	writeDirectUsage(&b, report)
@@ -823,6 +1104,45 @@ func writeTreeStats(w io.Writer, stats treeStats) {
 	fmt.Fprintf(w, "  context resets: %d\n", stats.contextResets)
 }
 
+func writeActiveContextStats(w io.Writer, stats collectedSessionStats) {
+	context := stats.context
+	fmt.Fprintln(w, "Active context")
+	fmt.Fprintf(w, "  messages/content blocks: %d / %d\n", context.messages, context.blocks)
+	textBytes := context.userTextBytes + context.assistantTextBytes +
+		context.toolInputBytes + context.toolResultBytes +
+		context.reasoningTextBytes + context.interactionTextBytes
+	opaqueBytes := context.reasoningOpaqueBytes + context.interactionOpaqueBytes + context.otherBytes
+	payloadBytes := textBytes + opaqueBytes + context.imageEncodedBytes
+	estimatedTokens := divideRoundUp(textBytes, 4) + divideRoundUp(opaqueBytes, 8)
+	fmt.Fprintf(w, "  active payload: %d B (est. %d text/tool tokens; images excluded)\n", payloadBytes, estimatedTokens)
+	fmt.Fprintf(w, "  user/assistant text: %d B / %d B\n", context.userTextBytes, context.assistantTextBytes)
+	fmt.Fprintf(w, "  tool inputs/results: %d B / %d B\n", context.toolInputBytes, context.toolResultBytes)
+	fmt.Fprintf(w, "  reasoning text/opaque: %d B / %d B\n",
+		context.reasoningTextBytes+context.interactionTextBytes,
+		context.reasoningOpaqueBytes+context.interactionOpaqueBytes)
+	if context.imageEncodedBytes > 0 {
+		fmt.Fprintf(w, "  encoded images: %d B\n", context.imageEncodedBytes)
+	}
+	if context.otherBytes > 0 {
+		fmt.Fprintf(w, "  other opaque payload: %d B\n", context.otherBytes)
+	}
+	if snapshot := stats.latestContext; snapshot != nil {
+		fmt.Fprintf(w, "  latest request estimate: %d / %d tokens (%s)\n", snapshot.Total, snapshot.Window, snapshot.Source)
+		fmt.Fprintf(w, "    system/tools/messages: %d / %d / %d\n", snapshot.System, snapshot.Tools, snapshot.Messages)
+		if snapshot.PayloadTotal > 0 {
+			fmt.Fprintf(w, "    measured payload system/tools/messages: %d / %d / %d\n",
+				snapshot.PayloadSystem, snapshot.PayloadTools, snapshot.PayloadMessages)
+		}
+	}
+}
+
+func divideRoundUp(value, divisor int) int {
+	if value <= 0 {
+		return 0
+	}
+	return (value + divisor - 1) / divisor
+}
+
 func writeOverallToolStats(w io.Writer, report statsReport) {
 	root := report.root.tools
 	delegates := report.delegateTools
@@ -845,6 +1165,48 @@ func writeOverallToolStats(w io.Writer, report statsReport) {
 	if all.searchNoMatches > 0 {
 		fmt.Fprintf(w, "  search no-match results: %d\n", all.searchNoMatches)
 	}
+	if all.searchContextLines > 0 {
+		duplicates := max(all.searchContextLines-all.searchUniqueLines, 0)
+		fmt.Fprintf(w, "  batched search context: %d selected source lines / %d unique (%d duplicates suppressed)\n",
+			all.searchContextLines, all.searchUniqueLines, duplicates)
+	}
+	if len(all.resultsByName) > 0 {
+		fmt.Fprintln(w, "  result volume by tool (largest first):")
+		for _, name := range topResultTools(all.resultsByName, 8) {
+			result := all.resultsByName[name]
+			fmt.Fprintf(w, "    %s: %d results, %d errors, %d truncated, %d B shown / %d B original\n",
+				name, result.results, result.errors, result.truncations, result.shownBytes, result.originalBytes)
+		}
+	}
+	repeats := repeatedToolCalls(all.callShapes)
+	if len(repeats) > 0 {
+		fmt.Fprintln(w, "  repeated normalized calls (inputs redacted):")
+		for i, repeat := range repeats {
+			if i == 8 {
+				break
+			}
+			fmt.Fprintf(w, "    %s: %d duplicate executions across %d repeated inputs (max %d identical)\n",
+				repeat.name, repeat.duplicates, repeat.inputs, repeat.maximum)
+		}
+	}
+	if all.skillReads > 0 {
+		repeats := 0
+		for _, count := range all.skillReadPaths {
+			repeats += max(count-1, 0)
+		}
+		fmt.Fprintf(w, "  SKILL.md tool reads: %d (%d unique paths, %d re-reads)\n",
+			all.skillReads, len(all.skillReadPaths), repeats)
+	}
+	if len(all.skillActivations) > 0 {
+		total := 0
+		for _, count := range all.skillActivations {
+			total += count
+		}
+		fmt.Fprintf(w, "  skill activations: %d\n", total)
+		for _, activation := range sortedMapKeys(all.skillActivations) {
+			fmt.Fprintf(w, "    %s: %d\n", activation, all.skillActivations[activation])
+		}
+	}
 	if len(all.byName) == 0 {
 		fmt.Fprintln(w, "  by tool: none")
 	} else {
@@ -858,9 +1220,63 @@ func writeOverallToolStats(w io.Writer, report statsReport) {
 	writeSplitValue(w, "    ", "background", all.commands.background, root.commands.background, delegates.commands.background)
 	writeSplitValue(w, "    ", "shell-string", all.commands.shell, root.commands.shell, delegates.commands.shell)
 	writeSplitValue(w, "    ", "argv", all.commands.argv, root.commands.argv, delegates.commands.argv)
+	writeSplitValue(w, "    ", "step batches", all.commands.stepBatches, root.commands.stepBatches, delegates.commands.stepBatches)
+	writeSplitValue(w, "    ", "step commands", all.commands.stepCommands, root.commands.stepCommands, delegates.commands.stepCommands)
+	writeSplitValue(w, "      ", "step shell-string", all.commands.stepShell, root.commands.stepShell, delegates.commands.stepShell)
+	writeSplitValue(w, "      ", "step argv", all.commands.stepArgv, root.commands.stepArgv, delegates.commands.stepArgv)
 	writeSplitValue(w, "  ", "parallel batches", all.parallel.batches, root.parallel.batches, delegates.parallel.batches)
 	writeSplitValue(w, "  ", "parallel calls", all.parallel.calls, root.parallel.calls, delegates.parallel.calls)
 	fmt.Fprintf(w, "  largest parallel batch: %d (root %d, delegates %d)\n", all.parallel.largest, root.parallel.largest, delegates.parallel.largest)
+}
+
+type repeatedToolCall struct {
+	name       string
+	duplicates int
+	inputs     int
+	maximum    int
+}
+
+func repeatedToolCalls(callShapes map[string]map[string]int) []repeatedToolCall {
+	var repeated []repeatedToolCall
+	for name, shapes := range callShapes {
+		item := repeatedToolCall{name: name}
+		for _, count := range shapes {
+			if count < 2 {
+				continue
+			}
+			item.inputs++
+			item.duplicates += count - 1
+			item.maximum = max(item.maximum, count)
+		}
+		if item.duplicates > 0 {
+			repeated = append(repeated, item)
+		}
+	}
+	sort.Slice(repeated, func(i, j int) bool {
+		if repeated[i].duplicates != repeated[j].duplicates {
+			return repeated[i].duplicates > repeated[j].duplicates
+		}
+		return repeated[i].name < repeated[j].name
+	})
+	return repeated
+}
+
+func topResultTools(results map[string]toolResultStats, limit int) []string {
+	names := sortedMapKeys(results)
+	sort.SliceStable(names, func(i, j int) bool {
+		left, right := results[names[i]], results[names[j]]
+		if left.originalBytes != right.originalBytes {
+			return left.originalBytes > right.originalBytes
+		}
+		if left.results != right.results {
+			return left.results > right.results
+		}
+		return names[i] < names[j]
+	})
+	if len(names) > limit {
+		names = names[:limit]
+	}
+	return names
 }
 
 func writeSplitValue(w io.Writer, indent, label string, total, root, delegates int) {
@@ -919,6 +1335,23 @@ func writeDirectUsage(w io.Writer, report statsReport) {
 		report.root.maintenanceCalls, report.delegateMaintCalls)
 	fmt.Fprintln(w, "  usage (turn attempts plus maintenance):")
 	writeUsageValues(w, "    ", report.directUsage, report.directUsage.CostUSD)
+	fmt.Fprintln(w, "  usage split:")
+	writeCompactUsage(w, "    root", report.root.directUsage)
+	writeCompactUsage(w, "    delegates", report.delegateDirectUsage)
+}
+
+func writeCompactUsage(w io.Writer, label string, usage llm.Usage) {
+	cacheWrite := usage.CacheWriteTokens + usage.CacheWrite1hTokens
+	fmt.Fprintf(w, "%s: %d tokens (%d uncached in, %d cache read, %d cache write, %d output, %d reasoning), $%.4f\n",
+		label,
+		totalTokens(usage),
+		usage.InputTokens,
+		usage.CacheReadTokens,
+		cacheWrite,
+		usage.OutputTokens,
+		usage.ReasoningTokens,
+		usage.CostUSD,
+	)
 }
 
 func writeUsageValues(w io.Writer, indent string, usage llm.Usage, cost float64) {
@@ -966,6 +1399,7 @@ func writeDelegates(w io.Writer, report statsReport) {
 	if len(report.delegates) == 0 {
 		return
 	}
+	writeTopDelegates(w, report.delegates)
 
 	byID := make(map[string]*delegateStats, len(report.delegates))
 	children := make(map[string][]*delegateStats)
@@ -1010,6 +1444,30 @@ func writeDelegates(w io.Writer, report statsReport) {
 	sort.Strings(remaining)
 	for _, id := range remaining {
 		render(byID[id], "  ")
+	}
+}
+
+func writeTopDelegates(w io.Writer, delegates []*delegateStats) {
+	ranked := append([]*delegateStats(nil), delegates...)
+	sort.Slice(ranked, func(i, j int) bool {
+		left := totalTokens(ranked[i].stats.directUsage)
+		right := totalTokens(ranked[j].stats.directUsage)
+		if left != right {
+			return left > right
+		}
+		return ranked[i].meta.ID < ranked[j].meta.ID
+	})
+	if len(ranked) > 5 {
+		ranked = ranked[:5]
+	}
+	fmt.Fprintln(w, "  highest direct token use:")
+	for _, child := range ranked {
+		fmt.Fprintf(w, "    %s (%s): %d tokens, %d model calls\n",
+			child.meta.ID,
+			child.meta.Agent,
+			totalTokens(child.stats.directUsage),
+			child.stats.modelCalls,
+		)
 	}
 }
 

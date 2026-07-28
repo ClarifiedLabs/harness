@@ -1,10 +1,11 @@
 // Package agentdef defines named agent definitions: bundles of an allowed-tool
 // set, an optional model target override, and extra system-prompt instructions.
-// Four built-ins ship with the harness (auto, explore, plan, independent); config-file
-// entries field-level merge onto them (an omitted field keeps the built-in
-// value) or define new agents. The agent prompt is appended to the system prompt
-// as a final section; the tool list is realized by main via tools.Registry.Subset,
-// which gates both what the model sees and what dispatches.
+// Five built-ins ship with the harness (auto, explore, plan, review,
+// independent); config-file entries field-level merge onto them (an omitted
+// field keeps the built-in value) or define new agents. The agent prompt is
+// appended to the system prompt as a final section; the tool list is realized
+// by main via tools.Registry.Subset, which gates both what the model sees and
+// what dispatches.
 package agentdef
 
 import (
@@ -74,11 +75,12 @@ type FileDefinition struct {
 	Reasoning       string   `json:"reasoning"`
 }
 
-// Builtins returns fresh copies of the four built-in agents keyed by name.
+// Builtins returns fresh copies of the five built-in agents keyed by name.
 func Builtins() map[string]Definition {
 	explorePrompt, _ := prompts.BuiltinAgentPrompt("explore")
 	independentPrompt, _ := prompts.BuiltinAgentPrompt("independent")
 	planPrompt, _ := prompts.BuiltinAgentPrompt("plan")
+	reviewPrompt, _ := prompts.BuiltinAgentPrompt("review")
 	return map[string]Definition{
 		"auto": {
 			Name:            "auto",
@@ -111,13 +113,21 @@ func Builtins() map[string]Definition {
 			WorkspaceAccess: WorkspaceAccessReadOnly,
 			Prompt:          planPrompt,
 		},
+		"review": {
+			Name:            "review",
+			Description:     "Findings-first review of a concrete code change; read-only.",
+			AllowedTools:    inspectionTools(),
+			MCPTools:        MCPToolsReadOnly,
+			WorkspaceAccess: WorkspaceAccessReadOnly,
+			Prompt:          reviewPrompt,
+		},
 	}
 }
 
 func inspectionTools() []string {
 	names := []string{"read_file", "view_image", "list_dir", "glob", "search", "inspect", "update_todos"}
 	// run_command widens exploration (gh, builds, screenshots, live apps) for the
-	// read-only agents (explore, plan). Neither has first-class file-mutation
+	// read-only agents (explore, plan, review). None has first-class file-mutation
 	// tools (edit, write_file, apply_patch), so "don't modify the project" stays
 	// a prompt-level contract, not an enforced gate.
 	names = append(names, "run_command", "web_fetch")
@@ -137,9 +147,9 @@ func planTools() []string {
 func defaultTools() []string {
 	// git already covers every git_readonly operation, so the default set omits
 	// git_readonly to avoid advertising duplicate functionality. Read-only
-	// agents (explore, plan) that require git_readonly remain delegatable from
-	// here because delegate.MissingTools treats an available git as satisfying a
-	// required git_readonly.
+	// agents (explore, plan, review) that require git_readonly remain delegatable
+	// from here because delegate.MissingTools treats an available git as
+	// satisfying a required git_readonly.
 	names := tools.DefaultNames()
 	return append(names, "update_todos", "record_plan", "delegate", "background_jobs")
 }

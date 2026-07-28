@@ -313,6 +313,9 @@ func TestGitReadOnlyClassificationUsesArgs(t *testing.T) {
 		{name: "log", in: `{"args":["log","--oneline"]}`, want: true},
 		{name: "show", in: `{"args":["show","HEAD"]}`, want: true},
 		{name: "grep", in: `{"args":["grep","-n","needle"]}`, want: true},
+		{name: "rev parse", in: `{"args":["rev-parse","--show-toplevel"]}`, want: true},
+		{name: "merge base", in: `{"args":["merge-base","HEAD","main"]}`, want: true},
+		{name: "bisect changes repository state", in: `{"args":["bisect","start"]}`, want: false},
 		{name: "commit", in: `{"args":["commit","-m","x"]}`, want: false},
 		{name: "global option", in: `{"args":["-C","/tmp","status"]}`, want: false},
 		{name: "output flag", in: `{"args":["diff","--output=/tmp/out"]}`, want: false},
@@ -432,5 +435,29 @@ func TestGitCommandSeam(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("GIT_TERMINAL_PROMPT=0 not set in env: %v", cmd.Env)
+	}
+}
+
+func TestGitReadonlyCommandSeamDisablesOptionalWritesAndHelpers(t *testing.T) {
+	cmd := buildGitReadonlyCommand(context.Background(), "", []string{"diff", "--stat"})
+
+	for _, want := range []string{
+		"--no-pager",
+		"--no-optional-locks",
+		"-c",
+		"core.fsmonitor=false",
+		"diff",
+		"--no-ext-diff",
+		"--no-textconv",
+		"--stat",
+	} {
+		if !slices.Contains(cmd.Args[1:], want) {
+			t.Errorf("read-only git args missing %q: %v", want, cmd.Args)
+		}
+	}
+	for _, want := range []string{"GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0"} {
+		if !slices.Contains(cmd.Env, want) {
+			t.Errorf("read-only git env missing %q", want)
+		}
 	}
 }

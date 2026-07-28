@@ -252,6 +252,26 @@ func TestRunCommandModelSchemaAvoidsTopLevelComposition(t *testing.T) {
 			if !strings.Contains(tc.tool.Description(), "argv as an array of strings") {
 				t.Fatalf("description should advertise argv shape: %q", tc.tool.Description())
 			}
+			if strings.Contains(tc.tool.Description(), "background_lease") &&
+				!strings.Contains(tc.tool.Description(), "does not restrict command behavior") {
+				t.Fatalf("description should distinguish lease scheduling from command safety: %q", tc.tool.Description())
+			}
+			if _, ok := rawProps["resource_key"]; ok {
+				t.Fatalf("schema should not advertise legacy top-level resource_key: %s", tc.tool.Schema())
+			}
+			if _, ok := rawProps["access"]; ok {
+				t.Fatalf("schema should not advertise ambiguous top-level access: %s", tc.tool.Schema())
+			}
+			if tc.tool.background != nil {
+				lease, ok := rawProps["background_lease"].(map[string]any)
+				if !ok {
+					t.Fatalf("background schema missing typed background_lease: %s", tc.tool.Schema())
+				}
+				description, _ := lease["description"].(string)
+				if !strings.Contains(description, "does not restrict command behavior") {
+					t.Fatalf("background_lease description is ambiguous: %q", description)
+				}
+			}
 		})
 	}
 }
@@ -660,10 +680,12 @@ func TestRunCommandBackgroundLeaseOverrideAndForegroundValidation(t *testing.T) 
 	starter := &fakeBackgroundStarter{}
 	resource := t.TempDir()
 	out, err := runTool(t, runCommand{background: starter}, map[string]any{
-		"command":      "printf read-only",
-		"background":   true,
-		"resource_key": resource,
-		"access":       BackgroundAccessReadOnly,
+		"command":    "printf read-only",
+		"background": true,
+		"background_lease": map[string]any{
+			"resource_key": resource,
+			"access":       BackgroundAccessReadOnly,
+		},
 	})
 	if err != nil {
 		t.Fatalf("background override: %v", err)
@@ -680,12 +702,49 @@ func TestRunCommandBackgroundLeaseOverrideAndForegroundValidation(t *testing.T) 
 	}
 
 	_, err = runTool(t, runCommand{background: starter}, map[string]any{
-		"command":      "printf foreground",
-		"resource_key": resource,
-		"access":       BackgroundAccessExclusive,
+		"command": "printf foreground",
+		"background_lease": map[string]any{
+			"resource_key": resource,
+			"access":       BackgroundAccessExclusive,
+		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "require background:true") {
+	if err == nil || !strings.Contains(err.Error(), "requires background:true") {
 		t.Fatalf("foreground lease error = %v", err)
+	}
+}
+
+func TestRunCommandAcceptsLegacyTopLevelBackgroundLeaseAliases(t *testing.T) {
+	starter := &fakeBackgroundStarter{}
+	resource := t.TempDir()
+	_, err := runTool(t, runCommand{background: starter}, map[string]any{
+		"command":      "printf compatibility",
+		"background":   true,
+		"resource_key": resource,
+		"access":       BackgroundAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("legacy background lease: %v", err)
+	}
+	wantResource, err := CanonicalBackgroundResource(resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starter.req.ResourceKey != wantResource || starter.req.Access != BackgroundAccessReadOnly {
+		t.Fatalf("legacy lease = %q/%q, want %q/read_only", starter.req.ResourceKey, starter.req.Access, wantResource)
+	}
+}
+
+func TestRunCommandRejectsNestedAndLegacyLeaseTogether(t *testing.T) {
+	_, err := runTool(t, runCommand{background: &fakeBackgroundStarter{}}, map[string]any{
+		"command":      "true",
+		"background":   true,
+		"resource_key": t.TempDir(),
+		"background_lease": map[string]any{
+			"access": BackgroundAccessReadOnly,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("mixed lease error = %v", err)
 	}
 }
 

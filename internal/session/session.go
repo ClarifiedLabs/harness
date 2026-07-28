@@ -621,6 +621,7 @@ type Event struct {
 	ResultTruncated     bool                    `json:"result_truncated,omitempty"`
 	ResultOriginalBytes int                     `json:"result_original_bytes,omitempty"`
 	ResultShownBytes    int                     `json:"result_shown_bytes,omitempty"`
+	ResultMetrics       map[string]int          `json:"result_metrics,omitempty"`
 }
 
 // ContextSnapshot is the session-log copy of agent.ContextEstimate. It lives in
@@ -692,6 +693,7 @@ const (
 	EventMaintenanceUsage     = "maintenance_usage"
 	EventCheckpoint           = "checkpoint"
 	EventRetention            = "retention"
+	EventSkillActivation      = "skill_activation"
 	EventIdleCompaction       = "idle_compaction"
 	EventBranch               = "branch"
 	EventModelRequest         = "model_request"
@@ -1714,7 +1716,7 @@ func SaveToolResultArtifact(dir string, prompt, turn int, result llm.ToolResult)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", fmt.Errorf("session: create artifact dir: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(result.OriginalText), 0o644); err != nil {
+	if err := writeBytesAtomic(path, []byte(result.OriginalText)); err != nil {
 		return "", fmt.Errorf("session: write tool artifact: %w", err)
 	}
 	return rel, nil
@@ -1725,6 +1727,10 @@ func writeJSONAtomic(path string, v any) error {
 	if err != nil {
 		return fmt.Errorf("session: marshal %s: %w", path, err)
 	}
+	return writeBytesAtomic(path, data)
+}
+
+func writeBytesAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {

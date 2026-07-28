@@ -21,10 +21,39 @@ const gitReadonlySchema = `{
   "required": ["args"]
 }`
 
-// gitReadonlySubcommands is the git_readonly allowlist. bisect is included
-// even though it checks out commits (moves HEAD): it is repository
-// exploration, accepted by design.
-var gitReadonlySubcommands = []string{"bisect", "blame", "diff", "grep", "log", "show", "status"}
+// gitReadonlySubcommands is an audited query-only allowlist. Commands with
+// mixed read/write modes (for example branch, config, remote, reflog,
+// submodule, tag, and worktree) stay out even when some invocations are safe.
+var gitReadonlySubcommands = []string{
+	"blame",
+	"cat-file",
+	"check-attr",
+	"check-ignore",
+	"check-mailmap",
+	"check-ref-format",
+	"cherry",
+	"count-objects",
+	"describe",
+	"diff",
+	"diff-files",
+	"diff-index",
+	"diff-tree",
+	"for-each-ref",
+	"grep",
+	"log",
+	"ls-files",
+	"ls-tree",
+	"merge-base",
+	"name-rev",
+	"range-diff",
+	"rev-list",
+	"rev-parse",
+	"shortlog",
+	"show",
+	"show-branch",
+	"show-ref",
+	"status",
+}
 
 type gitReadonly struct {
 	program string
@@ -41,7 +70,7 @@ func newGitReadonly() (gitReadonly, bool) {
 func (gitReadonly) Name() string { return "git_readonly" }
 
 func (gitReadonly) Description() string {
-	return "Run restricted git status/log/diff/show/grep/blame/bisect without shell or pager; bisect may check out commits. Input is an object; args must be an array of strings, not a string."
+	return "Run an audited query-only set of git commands (including status, diff, log, rev-parse, and merge-base) without shell, pager, hooks, text conversion, or external diff helpers. Input is an object; args must be an array of strings, not a string."
 }
 
 func (gitReadonly) Schema() json.RawMessage { return json.RawMessage(gitReadonlySchema) }
@@ -56,48 +85,51 @@ func (g gitReadonly) Run(ctx context.Context, input json.RawMessage) (string, er
 	if len(gi.Args) == 0 {
 		return "", badArgs("args is required and must be a non-empty array")
 	}
+	if err := validateGitReadonlyArgs(gi.Args); err != nil {
+		return "", err
+	}
+	return runGitReadonlyArgs(ctx, g.program, gi)
+}
+
+func validateGitReadonlyArgs(args []string) error {
+	if len(args) == 0 {
+		return badArgs("args is required and must be a non-empty array")
+	}
 	// The first argument must be a bare allowlisted subcommand. Global git
 	// options (-c, -C, --git-dir, --exec-path, --paginate, ...) precede the
 	// subcommand, so requiring a non-flag first argument blocks every global
 	// option injection.
-	sub := gi.Args[0]
+	sub := args[0]
 	if strings.HasPrefix(sub, "-") || !slices.Contains(gitReadonlySubcommands, sub) {
-		return "", badArgs("first argument must be one of: %s", strings.Join(gitReadonlySubcommands, ", "))
-	}
-	// bisect run/view/visualize execute a command or launch a viewer, escaping
-	// the read-only boundary; the other bisect operations only move HEAD. The
-	// operation is always the token right after "bisect".
-	if sub == "bisect" && len(gi.Args) > 1 {
-		switch gi.Args[1] {
-		case "run", "view", "visualize":
-			return "", badArgs("git_readonly does not allow %q (it runs commands or launches a viewer)", "bisect "+gi.Args[1])
-		}
+		return badArgs("first argument must be one of: %s", strings.Join(gitReadonlySubcommands, ", "))
 	}
 	// A few subcommand-local flags still write files or launch programs even on
-	// read-only subcommands; reject them so the boundary holds. Ordinary flags
-	// pass through.
-	for _, a := range gi.Args[1:] {
-		if disallowedReadonlyFlag(a) {
-			return "", badArgs("flag %q is not allowed in git_readonly", a)
+	// query subcommands. Signature pretty formats can invoke a configured GPG
+	// program, so inspect --format/--pretty values as well as direct flags.
+	for i, arg := range args[1:] {
+		if disallowedReadonlyFlag(arg) {
+			return badArgs("flag %q is not allowed in git_readonly", arg)
+		}
+		if signatureFormatFlag(arg, args[1:], i) {
+			return badArgs("signature format %q is not allowed in git_readonly", arg)
 		}
 	}
 	// git grep's -O/--open-files-in-pager opens matches in a pager (an arbitrary
 	// program). -O can hide inside a clustered short-flag group, e.g. -inO<pager>,
 	// so the long-form check above is not enough.
 	if sub == "grep" {
-		for _, a := range gi.Args[1:] {
-			if shortFlagOpensPager(a) {
-				return "", badArgs("flag %q opens a pager and is not allowed in git_readonly", a)
+		for _, arg := range args[1:] {
+			if shortFlagOpensPager(arg) {
+				return badArgs("flag %q opens a pager and is not allowed in git_readonly", arg)
 			}
 		}
 	}
-	return runGitArgs(ctx, g.program, gi)
+	return nil
 }
 
 // disallowedReadonlyFlag reports whether a subcommand-local flag can write a
-// file or launch a program in long form: --output/--output-directory (diff,
-// log, show write to a file) and --open-files-in-pager (grep opens a pager).
-// Clustered short-form -O is handled separately by shortFlagOpensPager.
+// file or launch a program in long form. Clustered grep -O is handled
+// separately by shortFlagOpensPager.
 func disallowedReadonlyFlag(arg string) bool {
 	switch {
 	case arg == "--output" || strings.HasPrefix(arg, "--output="):
@@ -106,9 +138,29 @@ func disallowedReadonlyFlag(arg string) bool {
 		return true
 	case arg == "--open-files-in-pager" || strings.HasPrefix(arg, "--open-files-in-pager="):
 		return true
+	case arg == "--ext-diff" || strings.HasPrefix(arg, "--ext-diff="):
+		return true
+	case arg == "--textconv" || strings.HasPrefix(arg, "--textconv="):
+		return true
+	case arg == "--filters" || strings.HasPrefix(arg, "--filters="):
+		return true
+	case arg == "--show-signature" || strings.HasPrefix(arg, "--show-signature="):
+		return true
 	default:
 		return false
 	}
+}
+
+func signatureFormatFlag(arg string, args []string, index int) bool {
+	for _, prefix := range []string{"--format=", "--pretty="} {
+		if strings.HasPrefix(arg, prefix) {
+			return strings.Contains(strings.TrimPrefix(arg, prefix), "%G")
+		}
+	}
+	if (arg == "--format" || arg == "--pretty") && index+1 < len(args) {
+		return strings.Contains(args[index+1], "%G")
+	}
+	return false
 }
 
 // shortFlagOpensPager reports whether arg is a git grep short-flag cluster

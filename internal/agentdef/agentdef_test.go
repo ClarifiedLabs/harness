@@ -14,8 +14,8 @@ func TestDefaultIsAuto(t *testing.T) {
 
 func TestBuiltins(t *testing.T) {
 	m := Builtins()
-	if len(m) != 4 {
-		t.Fatalf("want 4 builtin agents, got %d: %v", len(m), Names(m))
+	if len(m) != 5 {
+		t.Fatalf("want 5 builtin agents, got %d: %v", len(m), Names(m))
 	}
 	for name, a := range m {
 		if a.Name != name {
@@ -103,17 +103,39 @@ func TestBuiltins(t *testing.T) {
 			t.Errorf("plan tools unexpectedly include file-mutation tool %q: %v", forbidden, plan.AllowedTools)
 		}
 	}
+
+	review := m["review"]
+	if review.Prompt == "" {
+		t.Error("review must carry a prompt")
+	}
+	if !slices.Equal(review.AllowedTools, inspectionTools()) {
+		t.Errorf("review tools = %v, want inspection set", review.AllowedTools)
+	}
+	if review.MCPTools != MCPToolsReadOnly {
+		t.Errorf("review MCPTools = %q, want %q", review.MCPTools, MCPToolsReadOnly)
+	}
+	if review.WorkspaceAccess != WorkspaceAccessReadOnly {
+		t.Errorf("review WorkspaceAccess = %q, want read_only", review.WorkspaceAccess)
+	}
+	if review.Model != "" || review.Reasoning != "" {
+		t.Errorf("review should inherit model/reasoning, got %q/%q", review.Model, review.Reasoning)
+	}
+	for _, forbidden := range []string{"write_file", "edit", "apply_patch", "record_plan", "request_implementation", "delegate", "background_jobs"} {
+		if slices.Contains(review.AllowedTools, forbidden) {
+			t.Errorf("review tools unexpectedly include %q: %v", forbidden, review.AllowedTools)
+		}
+	}
 }
 
 func TestResolveNilKeepsBuiltins(t *testing.T) {
 	m := Resolve(nil)
-	if !slices.Equal(Names(m), []string{"auto", "explore", "independent", "plan"}) {
+	if !slices.Equal(Names(m), []string{"auto", "explore", "independent", "plan", "review"}) {
 		t.Errorf("Names = %v", Names(m))
 	}
 }
 
 func TestInspectionAgentsIncludeGlob(t *testing.T) {
-	for _, name := range []string{"explore", "plan"} {
+	for _, name := range []string{"explore", "plan", "review"} {
 		agent := Builtins()[name]
 		if !slices.Contains(agent.AllowedTools, "glob") {
 			t.Fatalf("%s agent tools missing glob: %v", name, agent.AllowedTools)
@@ -124,7 +146,7 @@ func TestInspectionAgentsIncludeGlob(t *testing.T) {
 func TestInspectionAgentsOmitGitReadonlyWhenGitMissing(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
-	for _, name := range []string{"explore", "plan"} {
+	for _, name := range []string{"explore", "plan", "review"} {
 		agent := Builtins()[name]
 		if slices.Contains(agent.AllowedTools, "git_readonly") {
 			t.Fatalf("%s agent includes unavailable git_readonly: %v", name, agent.AllowedTools)
@@ -227,12 +249,12 @@ func TestResolveMetadataOverrideKeepsOtherFields(t *testing.T) {
 
 // A new agent with no allowed_tools inherits the default tool set.
 func TestResolveNewAgentInheritsDefaultTools(t *testing.T) {
-	m := Resolve(map[string]FileDefinition{"review": {Prompt: "review the diff"}})
-	rev, ok := m["review"]
+	m := Resolve(map[string]FileDefinition{"custom_review": {Prompt: "review the diff"}})
+	rev, ok := m["custom_review"]
 	if !ok {
 		t.Fatal("new agent not resolved")
 	}
-	if rev.Name != "review" || rev.Prompt != "review the diff" {
+	if rev.Name != "custom_review" || rev.Prompt != "review the diff" {
 		t.Errorf("rev = %+v", rev)
 	}
 	if !slices.Equal(rev.AllowedTools, defaultTools()) {
@@ -240,6 +262,20 @@ func TestResolveNewAgentInheritsDefaultTools(t *testing.T) {
 	}
 	if rev.MCPTools != MCPToolsAll {
 		t.Errorf("MCPTools = %q, want all", rev.MCPTools)
+	}
+}
+
+func TestResolvePromptOnlyReviewOverrideKeepsReadOnlyDefaults(t *testing.T) {
+	m := Resolve(map[string]FileDefinition{"review": {Prompt: "custom review"}})
+	review := m["review"]
+	if review.Prompt != "custom review" {
+		t.Fatalf("review prompt = %q", review.Prompt)
+	}
+	builtin := Builtins()["review"]
+	if !slices.Equal(review.AllowedTools, builtin.AllowedTools) ||
+		review.MCPTools != MCPToolsReadOnly ||
+		review.WorkspaceAccess != WorkspaceAccessReadOnly {
+		t.Fatalf("prompt-only review override changed defaults: %+v", review)
 	}
 }
 
@@ -288,14 +324,14 @@ func TestParseMCPToolsMode(t *testing.T) {
 
 func TestValidateRequiresParentFacingDescription(t *testing.T) {
 	for _, description := range []string{"", " \t\n "} {
-		m := Resolve(map[string]FileDefinition{"review": {Description: description}})
+		m := Resolve(map[string]FileDefinition{"custom_review": {Description: description}})
 		err := Validate(m)
-		if err == nil || !strings.Contains(err.Error(), `agent "review"`) || !strings.Contains(err.Error(), "description must state when the parent should use it") {
+		if err == nil || !strings.Contains(err.Error(), `agent "custom_review"`) || !strings.Contains(err.Error(), "description must state when the parent should use it") {
 			t.Fatalf("Validate description %q error = %v", description, err)
 		}
 	}
 
-	m := Resolve(map[string]FileDefinition{"review": {Description: "Use after implementation for an independent correctness review."}})
+	m := Resolve(map[string]FileDefinition{"custom_review": {Description: "Use after implementation for an independent correctness review."}})
 	if err := Validate(m); err != nil {
 		t.Fatalf("Validate useful custom description: %v", err)
 	}
@@ -373,7 +409,7 @@ func TestPlanToolsAllowRunCommandButNotFileMutation(t *testing.T) {
 
 func TestNamesSorted(t *testing.T) {
 	m := Resolve(map[string]FileDefinition{"zz": {}, "aa": {}})
-	if got := Names(m); !slices.Equal(got, []string{"aa", "auto", "explore", "independent", "plan", "zz"}) {
+	if got := Names(m); !slices.Equal(got, []string{"aa", "auto", "explore", "independent", "plan", "review", "zz"}) {
 		t.Errorf("Names = %v", got)
 	}
 }

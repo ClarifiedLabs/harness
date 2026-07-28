@@ -105,6 +105,19 @@ type lineWindow struct {
 	End   int
 }
 
+type taggedLineWindow struct {
+	Path     string
+	Start    int
+	End      int
+	QueryIDs []int
+}
+
+type searchContextPlan struct {
+	windows       []taggedLineWindow
+	selectedLines int
+	limited       bool
+}
+
 type rgJSONText struct {
 	Text  string `json:"text"`
 	Bytes string `json:"bytes"`
@@ -130,9 +143,14 @@ func (searchTool) Schema() json.RawMessage { return json.RawMessage(searchSchema
 func (searchTool) ReadOnly(json.RawMessage) bool { return true }
 
 func (s searchTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	result, err := s.RunResult(ctx, input)
+	return result.Text, err
+}
+
+func (s searchTool) RunResult(ctx context.Context, input json.RawMessage) (RunResult, error) {
 	args, err := decodeSearchArgs(input)
 	if err != nil {
-		return "", err
+		return RunResult{}, err
 	}
 
 	results := make([]searchResult, len(args.Queries))
@@ -150,20 +168,16 @@ func (s searchTool) Run(ctx context.Context, input json.RawMessage) (string, err
 	}
 	wg.Wait()
 
-	var b strings.Builder
 	for i, result := range results {
 		if result.err != nil {
-			return "", fmt.Errorf("query %d: %w", i+1, result.err)
+			return RunResult{}, fmt.Errorf("query %d: %w", i+1, result.err)
 		}
-		if len(results) > 1 {
-			if i > 0 {
-				b.WriteString("\n\n")
-			}
-			fmt.Fprintf(&b, "## query %d: %s\n", i+1, args.Queries[i].Pattern)
-		}
-		b.WriteString(renderSearchResult(args.Queries[i], result))
 	}
-	return b.String(), nil
+	if len(results) > 1 {
+		text, metrics := renderBatchedSearchResults(args.Queries, results)
+		return RunResult{Text: text, Metrics: metrics}, nil
+	}
+	return RunResult{Text: renderSearchResult(args.Queries[0], results[0])}, nil
 }
 
 func decodeSearchArgs(input json.RawMessage) (searchArgs, error) {
@@ -453,6 +467,174 @@ func matchesSearchGlobs(path string, globs []string) bool {
 	return included || !haveInclude
 }
 
+const (
+	searchMetricContextLinesBeforeDedupe = "context_lines_before_dedupe"
+	searchMetricUniqueContextLines       = "unique_context_lines"
+)
+
+func renderBatchedSearchResults(queries []searchQuery, results []searchResult) (string, map[string]int) {
+	var b strings.Builder
+	var shared []taggedLineWindow
+	selectedLines := 0
+	for i, result := range results {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		fmt.Fprintf(&b, "## query %d: %s\n", i+1, queries[i].Pattern)
+		query := queries[i]
+		if query.Output != "context" && query.Output != "matches" || result.total == 0 {
+			b.WriteString(renderSearchResult(query, result))
+			continue
+		}
+		contextLines := query.ContextLines
+		if query.Output == "matches" {
+			contextLines = 0
+		}
+		b.WriteString(renderSearchContextSummary(result.matches, result.total, result.omittedFiles, result.capped))
+		fmt.Fprintf(&b, "\ncontext: included in shared source below (query %d)", i+1)
+		plan := planSearchContext(result.matches, contextLines, i+1)
+		if plan.limited {
+			fmt.Fprintf(&b, "\n[query %d context truncated at %d source lines; narrow the pattern or bounds]", i+1, searchOutputLines)
+		}
+		shared = append(shared, plan.windows...)
+		selectedLines += plan.selectedLines
+	}
+	if len(shared) == 0 {
+		return b.String(), nil
+	}
+
+	b.WriteString("\n\n## shared source context")
+	uniqueLines := 0
+	for _, window := range mergeTaggedLineWindows(shared) {
+		body, lines, err := readSearchContextWindow(window.Path, lineWindow{Start: window.Start, End: window.End})
+		fmt.Fprintf(&b, "\n\n==> %s:%d-%d (queries: %s) <==\n",
+			window.Path, window.Start, window.End, formatQueryIDs(window.QueryIDs))
+		if err != nil {
+			fmt.Fprintf(&b, "error: %v", err)
+			continue
+		}
+		b.WriteString(body)
+		uniqueLines += lines
+	}
+	duplicates := max(selectedLines-uniqueLines, 0)
+	fmt.Fprintf(&b, "\n\n[shared context: %d unique source lines; %d duplicate lines suppressed across queries]",
+		uniqueLines, duplicates)
+	return b.String(), map[string]int{
+		searchMetricContextLinesBeforeDedupe: selectedLines,
+		searchMetricUniqueContextLines:       uniqueLines,
+	}
+}
+
+func renderSearchContextSummary(matches []searchMatch, total, omittedFiles int, capped bool) string {
+	paths := uniqueSearchPaths(matches)
+	var b strings.Builder
+	fmt.Fprintf(&b, "matches: %d shown", len(matches))
+	if capped {
+		fmt.Fprintf(&b, " of at least %d", total)
+	} else {
+		fmt.Fprintf(&b, " of %d", total)
+	}
+	fmt.Fprintf(&b, " across %d files", len(paths))
+	if omittedFiles > 0 {
+		fmt.Fprintf(&b, " (%d additional files omitted)", omittedFiles)
+	}
+	return b.String()
+}
+
+func planSearchContext(matches []searchMatch, contextLines, queryID int) searchContextPlan {
+	grouped := map[string][]lineWindow{}
+	for _, match := range matches {
+		start := max(1, match.Start-contextLines)
+		grouped[match.Path] = append(grouped[match.Path], lineWindow{Start: start, End: match.End + contextLines})
+	}
+	paths := make([]string, 0, len(grouped))
+	for path := range grouped {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	remaining := searchOutputLines
+	var plan searchContextPlan
+	for _, path := range paths {
+		for _, window := range mergeLineWindows(grouped[path]) {
+			if remaining <= 0 {
+				plan.limited = true
+				return plan
+			}
+			if size := window.End - window.Start + 1; size > remaining {
+				window.End = window.Start + remaining - 1
+				plan.limited = true
+			}
+			_, lines, _ := readSearchContextWindow(path, window)
+			plan.windows = append(plan.windows, taggedLineWindow{
+				Path:     path,
+				Start:    window.Start,
+				End:      window.End,
+				QueryIDs: []int{queryID},
+			})
+			plan.selectedLines += lines
+			remaining -= lines
+		}
+	}
+	return plan
+}
+
+func mergeTaggedLineWindows(windows []taggedLineWindow) []taggedLineWindow {
+	if len(windows) == 0 {
+		return nil
+	}
+	sort.Slice(windows, func(i, j int) bool {
+		if windows[i].Path != windows[j].Path {
+			return windows[i].Path < windows[j].Path
+		}
+		if windows[i].Start != windows[j].Start {
+			return windows[i].Start < windows[j].Start
+		}
+		return windows[i].End < windows[j].End
+	})
+	out := []taggedLineWindow{cloneTaggedLineWindow(windows[0])}
+	for _, next := range windows[1:] {
+		last := &out[len(out)-1]
+		if next.Path == last.Path && next.Start <= last.End+1 {
+			if next.End > last.End {
+				last.End = next.End
+			}
+			last.QueryIDs = mergeQueryIDs(last.QueryIDs, next.QueryIDs)
+			continue
+		}
+		out = append(out, cloneTaggedLineWindow(next))
+	}
+	return out
+}
+
+func cloneTaggedLineWindow(window taggedLineWindow) taggedLineWindow {
+	window.QueryIDs = append([]int(nil), window.QueryIDs...)
+	return window
+}
+
+func mergeQueryIDs(left, right []int) []int {
+	seen := make(map[int]bool, len(left)+len(right))
+	for _, id := range left {
+		seen[id] = true
+	}
+	for _, id := range right {
+		seen[id] = true
+	}
+	ids := make([]int, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	return ids
+}
+
+func formatQueryIDs(ids []int) string {
+	values := make([]string, len(ids))
+	for i, id := range ids {
+		values[i] = fmt.Sprintf("%d", id)
+	}
+	return strings.Join(values, ", ")
+}
+
 func renderSearchResult(args searchQuery, result searchResult) string {
 	if result.total == 0 {
 		if args.Output == "exists" {
@@ -566,16 +748,7 @@ func renderSearchContext(matches []searchMatch, total, omittedFiles int, capped 
 	sort.Strings(paths)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "matches: %d shown", len(matches))
-	if capped {
-		fmt.Fprintf(&b, " of at least %d", total)
-	} else {
-		fmt.Fprintf(&b, " of %d", total)
-	}
-	fmt.Fprintf(&b, " across %d files", len(paths))
-	if omittedFiles > 0 {
-		fmt.Fprintf(&b, " (%d additional files omitted)", omittedFiles)
-	}
+	b.WriteString(renderSearchContextSummary(matches, total, omittedFiles, capped))
 	b.WriteByte('\n')
 
 	remaining := searchOutputLines

@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -104,6 +103,9 @@ func (g gitTool) Run(ctx context.Context, input json.RawMessage) (string, error)
 		return "", badArgs("args or workflow is required")
 	}
 
+	if gitArgsReadOnly(gi.Args) {
+		return runGitReadonlyArgs(ctx, g.program, gi)
+	}
 	return runGitArgs(ctx, g.program, gi)
 }
 
@@ -137,26 +139,10 @@ func decodeGitArgs(input json.RawMessage) (gitInput, error) {
 }
 
 func gitArgsReadOnly(args []string) bool {
-	sub := args[0]
-	if strings.HasPrefix(sub, "-") || !slices.Contains(gitReadOnlyParallelSubcommands, sub) {
-		return false
-	}
-	for _, a := range args[1:] {
-		if disallowedReadonlyFlag(a) {
-			return false
-		}
-	}
-	if sub == "grep" {
-		for _, a := range args[1:] {
-			if shortFlagOpensPager(a) {
-				return false
-			}
-		}
-	}
-	return true
+	return validateGitReadonlyArgs(args) == nil
 }
 
-var gitReadOnlyParallelSubcommands = []string{"blame", "diff", "grep", "log", "show", "status"}
+var gitReadOnlyParallelSubcommands = gitReadonlySubcommands
 
 // runGitArgs executes git with userArgs and formats the combined output plus
 // the exit-code marker; shared by git and git_readonly.
@@ -165,6 +151,20 @@ func runGitArgs(ctx context.Context, program string, input gitInput) (string, er
 		return "", err
 	}
 	cmd := buildGitCommand(ctx, program, input.Args)
+	cmd.Dir = input.Cwd
+
+	out, err := runProcess(ctx, cmd, 0)
+	if err != nil {
+		return "", fmt.Errorf("failed to run git: %w", err)
+	}
+	return out, nil
+}
+
+func runGitReadonlyArgs(ctx context.Context, program string, input gitInput) (string, error) {
+	if err := validateCwd(input.Cwd); err != nil {
+		return "", err
+	}
+	cmd := buildGitReadonlyCommand(ctx, program, input.Args)
 	cmd.Dir = input.Cwd
 
 	out, err := runProcess(ctx, cmd, 0)
@@ -375,7 +375,12 @@ func (g gitTool) commitPaths(ctx context.Context, input gitInput) (string, error
 }
 
 func runGitWorkflowCommand(ctx context.Context, program, cwd string, args ...string) (processResult, error) {
-	cmd := buildGitCommand(ctx, program, args)
+	var cmd *exec.Cmd
+	if gitArgsReadOnly(args) {
+		cmd = buildGitReadonlyCommand(ctx, program, args)
+	} else {
+		cmd = buildGitCommand(ctx, program, args)
+	}
 	cmd.Dir = cwd
 	result, err := runProcessDetailed(ctx, cmd, 0)
 	if err != nil {
@@ -405,4 +410,33 @@ func buildGitCommand(ctx context.Context, program string, userArgs []string) *ex
 	cmd := exec.CommandContext(ctx, program, argv...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	return cmd
+}
+
+// buildGitReadonlyCommand additionally suppresses optional index writes,
+// filesystem-monitor hooks, external diff drivers, and text-conversion
+// programs. The allowlist validator separately rejects flags that can write
+// files or explicitly request an external helper.
+func buildGitReadonlyCommand(ctx context.Context, program string, userArgs []string) *exec.Cmd {
+	if program == "" {
+		program = "git"
+	}
+	hardened := hardenReadonlyGitArgs(userArgs)
+	argv := append([]string{"--no-pager", "--no-optional-locks", "-c", "core.fsmonitor=false"}, hardened...)
+	cmd := exec.CommandContext(ctx, program, argv...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
+	return cmd
+}
+
+func hardenReadonlyGitArgs(args []string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	hardened := []string{args[0]}
+	switch args[0] {
+	case "diff", "diff-files", "diff-index", "diff-tree", "log", "show":
+		hardened = append(hardened, "--no-ext-diff", "--no-textconv")
+	case "grep":
+		hardened = append(hardened, "--no-textconv")
+	}
+	return append(hardened, args[1:]...)
 }

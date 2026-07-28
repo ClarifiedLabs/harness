@@ -12,6 +12,7 @@ type skillMentionResolution struct {
 	Prompt  string
 	Context []string
 	Unknown string
+	Err     error
 }
 
 func resolveSkillMentions(prompt string, available map[string]skills.Skill) skillMentionResolution {
@@ -40,7 +41,8 @@ func resolveSkillMentions(prompt string, available map[string]skills.Skill) skil
 		i = end - 1
 	}
 	if len(selected) > 0 {
-		return skillMentionResolution{Prompt: resolvedPrompt, Context: []string{explicitSkillContext(selected)}}
+		context, err := explicitSkillContext(selected)
+		return skillMentionResolution{Prompt: resolvedPrompt, Context: context, Err: err}
 	}
 	if name, ok := standaloneUnknownSkillMention(prompt); ok {
 		return skillMentionResolution{Prompt: resolvedPrompt, Unknown: name}
@@ -119,33 +121,26 @@ func unescapeDollarEscapes(prompt string) string {
 	return b.String()
 }
 
-func explicitSkillContext(selected []skills.Skill) string {
-	var b strings.Builder
-	b.WriteString("[explicit skill mentions]\n")
-	b.WriteString("The user explicitly mentioned the following skill(s) in this prompt. ")
-	b.WriteString("For each listed skill, use the file-read tool to read the full SKILL.md before taking task actions. ")
-	b.WriteString("Read each listed SKILL.md completely, then follow the skill instructions. ")
-	b.WriteString("Resolve relative paths against the directory containing that SKILL.md.\n")
+func explicitSkillContext(selected []skills.Skill) ([]string, error) {
+	context := make([]string, 0, len(selected))
 	for _, skill := range selected {
-		fmt.Fprintf(&b, "\n- %s", singleLine(skill.Name))
-		if desc := singleLine(skill.Description); desc != "" {
-			fmt.Fprintf(&b, ": %s", desc)
+		body, err := skill.Read()
+		if err != nil {
+			return nil, fmt.Errorf("read skill %q at %s: %w", skill.Name, skill.Location, err)
 		}
-		if skill.Location != "" {
-			fmt.Fprintf(&b, "\n  path: %s", skill.Location)
-		}
+		context = append(context, skills.ActiveContext(skill.Name, skill.Location, body))
 	}
-	return b.String()
-}
-
-func singleLine(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+	return context, nil
 }
 
 func (app *App) resolveSkillMentionContext(prompt string) (string, []string, bool) {
 	res := resolveSkillMentions(prompt, app.Skills)
 	if res.Unknown != "" {
 		fmt.Fprintf(app.Errw, "unknown skill %q; type /skills\n", res.Unknown)
+		return res.Prompt, nil, false
+	}
+	if res.Err != nil {
+		fmt.Fprintf(app.Errw, "skill activation failed: %v\n", res.Err)
 		return res.Prompt, nil, false
 	}
 	return res.Prompt, res.Context, true

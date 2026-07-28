@@ -44,7 +44,7 @@ func committedRepo(t *testing.T) string {
 
 func TestGitReadonlyAllowsReadSubcommands(t *testing.T) {
 	gitAvailable(t)
-	committedRepo(t)
+	dir := committedRepo(t)
 
 	status, err := runGitReadonly(t, "status", "--porcelain")
 	if err != nil {
@@ -70,6 +70,22 @@ func TestGitReadonlyAllowsReadSubcommands(t *testing.T) {
 	if !strings.Contains(patch, "+hi") {
 		t.Errorf("log -p should include the diff: %q", patch)
 	}
+
+	top, err := runGitReadonly(t, "rev-parse", "--show-toplevel")
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	if !strings.Contains(top, dir) {
+		t.Errorf("rev-parse should show the repository root: %q", top)
+	}
+
+	base, err := runGitReadonly(t, "merge-base", "HEAD", "HEAD")
+	if err != nil {
+		t.Fatalf("merge-base: %v", err)
+	}
+	if !strings.Contains(base, "[exit code: 0]") {
+		t.Errorf("merge-base missing exit code marker: %q", base)
+	}
 }
 
 func TestGitReadonlyRejectsWriteSubcommands(t *testing.T) {
@@ -79,6 +95,9 @@ func TestGitReadonlyRejectsWriteSubcommands(t *testing.T) {
 		{"checkout", "main"},
 		{"add", "."},
 		{"reset", "--hard"},
+		{"bisect", "start"},
+		{"branch", "--show-current"},
+		{"config", "--get", "user.name"},
 	} {
 		out, err := runGitReadonly(t, args...)
 		if err == nil {
@@ -107,8 +126,8 @@ func TestGitReadonlyRejectsGlobalFlagInjection(t *testing.T) {
 }
 
 // Some allowlisted subcommands carry flags that break the read-only boundary:
-// diff/log/show --output writes a file, grep -O/--open-files-in-pager executes
-// a command, and bisect run executes arbitrary commands per revision.
+// diff/log/show --output writes a file; grep's pager, external diff/textconv
+// helpers, cat-file filters, and signature display can execute programs.
 func TestGitReadonlyRejectsWriteAndExecCapableFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"diff", "--output=/tmp/pwn"},
@@ -122,10 +141,12 @@ func TestGitReadonlyRejectsWriteAndExecCapableFlags(t *testing.T) {
 		{"grep", "-inO/tmp/pager", "x"},
 		{"grep", "-nO", "x"},
 		{"grep", "-iO/tmp/pager", "x"},
-		{"bisect", "run", "sh", "-c", "true"},
-		// bisect view / visualize launch a viewer program.
-		{"bisect", "view"},
-		{"bisect", "visualize"},
+		{"diff", "--ext-diff"},
+		{"log", "--textconv"},
+		{"cat-file", "--filters", "HEAD:file"},
+		{"show", "--show-signature"},
+		{"log", "--format=%GG"},
+		{"log", "--pretty", "%G? %s"},
 	} {
 		out, err := runGitReadonly(t, args...)
 		if err == nil {
@@ -150,9 +171,20 @@ func TestGitReadonlyRejectionListsAllowedSubcommands(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, sub := range []string{"status", "log", "diff", "show", "grep", "blame", "bisect"} {
+	for _, sub := range gitReadonlySubcommands {
 		if !strings.Contains(err.Error(), sub) {
 			t.Errorf("error should list allowed subcommand %q: %v", sub, err)
+		}
+	}
+	if strings.Contains(err.Error(), "bisect") {
+		t.Errorf("error should not advertise state-changing bisect: %v", err)
+	}
+}
+
+func TestGitReadonlyAllowlistClassifiesEveryEntryAsReadOnly(t *testing.T) {
+	for _, sub := range gitReadonlySubcommands {
+		if !gitArgsReadOnly([]string{sub}) {
+			t.Errorf("%q is in gitReadonlySubcommands but not classified read-only", sub)
 		}
 	}
 }

@@ -1227,7 +1227,7 @@ func TestRunShowConfigIncludesRuntimeDefaults(t *testing.T) {
 	if !ok {
 		t.Fatalf("agents = %T, want object\n%s", got["agents"], out.String())
 	}
-	for _, name := range []string{"auto", "explore", "independent", "plan"} {
+	for _, name := range []string{"auto", "explore", "independent", "plan", "review"} {
 		if _, ok := agents[name]; !ok {
 			t.Fatalf("agents missing built-in %q\n%s", name, out.String())
 		}
@@ -1271,6 +1271,7 @@ func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
 		"explore              [default model] [mcp: read_only] Broad read-only search",
 		"independent          [default model] [mcp: all] End-to-end work without user input.",
 		"plan                 [default model] [mcp: read_only] Collaborative implementation planning; explores freely (including running commands) but does not modify the project.",
+		"review               [default model] [mcp: read_only] Findings-first review of a concrete code change; read-only.",
 		"security (selected)  [openai:gpt-5.5] [mcp: all] Security review",
 	} {
 		if !strings.Contains(got, want) {
@@ -1642,7 +1643,7 @@ func TestRunRejectsCustomAgentWithoutUsefulDescription(t *testing.T) {
 		for _, mode := range []string{"startup", "show-config"} {
 			t.Run(tc.name+"/"+mode, func(t *testing.T) {
 				cfgPath := filepath.Join(t.TempDir(), "config.json")
-				body := `{"agents":{"review":{"allowed_tools":["read_file"]` + tc.description + `}}}`
+				body := `{"agents":{"custom_review":{"allowed_tools":["read_file"]` + tc.description + `}}}`
 				if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
 					t.Fatalf("write config: %v", err)
 				}
@@ -1657,7 +1658,7 @@ func TestRunRejectsCustomAgentWithoutUsefulDescription(t *testing.T) {
 				if code := run(env); code != ui.ExitUsage {
 					t.Fatalf("exit code = %d, want usage; stderr=%q", code, errw.String())
 				}
-				if got := errw.String(); !strings.Contains(got, `agent "review"`) || !strings.Contains(got, "description must state when the parent should use it") {
+				if got := errw.String(); !strings.Contains(got, `agent "custom_review"`) || !strings.Contains(got, "description must state when the parent should use it") {
 					t.Fatalf("stderr = %q, want required-description error", got)
 				}
 				if len(fp.Requests) != 0 {
@@ -3091,7 +3092,7 @@ func TestRunDelegateSchemaListsOnlyDelegatableAgents(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
 	got, description := delegateAgentProperty(t, fp.Requests[0])
-	want := []string{"explore", "plan", "style"}
+	want := []string{"explore", "plan", "review", "style"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("delegate agent enum = %v, want %v", got, want)
 	}
@@ -3126,7 +3127,7 @@ func TestRunDelegateSchemaAutoListsOnlyAutoSubsetAgents(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
 	got := delegateAgentEnum(t, fp.Requests[0])
-	want := []string{"auto", "explore", "independent", "style"}
+	want := []string{"auto", "explore", "independent", "review", "style"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("delegate agent enum = %v, want %v", got, want)
 	}
@@ -3393,6 +3394,24 @@ func TestRunExploreAgentRestrictsToolsAndAddsPrompt(t *testing.T) {
 	}
 	if !strings.Contains(fp.Requests[0].System, "explore agent") {
 		t.Fatalf("explore agent system prompt missing role guidance: %q", fp.Requests[0].System)
+	}
+}
+
+func TestRunReviewAgentUsesReadOnlyInspectionToolsAndPrompt(t *testing.T) {
+	fp := llmtest.New("fake", okStepWithUsage(1, 1))
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-agent", "review", "-p", "hi"}, fp, "")
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if got, want := toolNames(fp.Requests[0]), expectedExploreToolNames(); !slices.Equal(got, want) {
+		t.Fatalf("review agent tools = %v, want %v", got, want)
+	}
+	system := fp.Requests[0].System
+	for _, want := range []string{"read-only review agent", "findings first", "do not modify the project"} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("review agent system prompt missing %q: %q", want, system)
+		}
 	}
 }
 

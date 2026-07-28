@@ -439,12 +439,50 @@ func TestRetentionArchivesExactReadOnlyResultWithStableRecoveryPath(t *testing.T
 	if changed := a.applyRetention(sink); !changed {
 		t.Fatal("retention pass reported unchanged")
 	}
-	if len(sink.archived) != 1 || sink.archived[0].Text != big {
+	if len(sink.archived) != 1 {
 		t.Fatalf("archived result = %+v", sink.archived)
+	}
+	archived := sink.archived[0]
+	if !archived.Truncated || archived.OriginalText != big ||
+		archived.OriginalBytes != len(big) ||
+		archived.ShownBytes != defaultSummaryToolResultSize {
+		t.Fatalf("archive receipt did not preserve exact original: %+v", archived)
 	}
 	got := a.Transcript()[2].Content[0].ResultText
 	if !strings.Contains(got, "/session/artifacts/tool-results/result.txt") {
 		t.Fatalf("trimmed result lacks stable recovery path: %q", got)
+	}
+	for _, want := range []string{
+		retentionTrimMarker + " receipt]",
+		"status: success",
+		fmt.Sprintf("output: first %d of %d bytes", defaultSummaryToolResultSize, len(big)),
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("trimmed result missing typed field %q: %q", want, got)
+		}
+	}
+}
+
+func TestRetentionKeepsOriginalWhenArtifactWriteFails(t *testing.T) {
+	big := strings.Repeat("full-output-", 1000)
+	msgs := []llm.Message{
+		userText("q0"), asstToolUse("t0", "rd", `{}`), toolResult("t0", big), asstText("a0"),
+	}
+	for i := 1; i <= 9; i++ {
+		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+	}
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
+	a.SetTranscript(msgs)
+	sink := &archiveSink{archiveErr: errors.New("disk unavailable")}
+
+	if changed := a.applyRetention(sink); changed {
+		t.Fatal("retention trimmed a result whose exact artifact could not be written")
+	}
+	if got := a.Transcript()[2].Content[0].ResultText; got != big {
+		t.Fatalf("result changed after artifact failure: got %d bytes, want %d", len(got), len(big))
+	}
+	if len(sink.archived) != 1 || sink.archived[0].OriginalText != big {
+		t.Fatalf("archive attempt = %+v", sink.archived)
 	}
 }
 

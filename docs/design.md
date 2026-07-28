@@ -279,6 +279,7 @@ type ToolResult struct { // becomes a BlockToolResult
     ShownBytes    int    // size after truncation
     Usage         Usage          // metered tools (e.g. delegate) report child token usage
     Content       []ContentBlock // optional shallow image children
+    Metrics       map[string]int // diagnostics only; never copied into a content block
 }
 ```
 
@@ -1687,6 +1688,21 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
   `@~/path` expands through the current user's home directory; relative `@file`
   references in the config file resolve from that config file's directory.
   `-no-env` drops the env block.
+- Explicit `$skillName` mentions are resolved before provider work. Harness reads
+  the complete `SKILL.md` once, wraps it as typed request-only active-skill
+  context, and keeps that exact context on every request for the prompt,
+  including after compaction. A read failure aborts the prompt before a model
+  call, eliminating the former activation round trip.
+- Implicit skill selection remains progressive: the model sees the compact
+  catalog and may issue one `read_file` call. A successful complete single-file
+  read of `SKILL.md` from the beginning activates its decoded body for the rest
+  of that prompt. The transcript result is replaced with a typed activation
+  receipt containing source and digest; the exact line-numbered result is
+  archived through the ordinary artifact path. Re-reading unchanged content
+  does not duplicate active context, while changed content replaces it. Partial
+  or multi-file reads stay ordinary tool results and do not activate. If a
+  configured artifact write fails, activation still succeeds but the complete
+  original result remains in the transcript instead of being replaced.
 
 ## 9. Tool set (`internal/tools`)
 
@@ -1730,6 +1746,7 @@ type RunResult struct {
     Text         string
     OriginalText string
     Usage        llm.Usage
+    Metrics      map[string]int // diagnostics only; persisted with the result event
 }
 
 type Registry struct{ /* ordered map */ }
@@ -1853,7 +1870,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   `[truncated: showing first 1000 of <N> matches; narrow the pattern or root]`
   marker (the total gains a `+` when the scan cap was hit).
 - Available to the default `auto`/`independent` agents and the shared
-  inspection set used by `explore` and `plan`.
+  inspection set used by `explore`, `plan`, and `review`.
 
 ### 9.3 `search`, `inspect`, and raw search commands
 
@@ -1874,6 +1891,12 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 - Context output groups matches by file, merges touching windows, numbers source
   lines, and renders at most 400 source lines. No match is a successful
   `(no matches)` result and all collection/output bounds are explicit.
+- In a multi-query batch, every `context`/`matches` query keeps that independent
+  400-line allowance, but the renderer emits one shared source section. It unions
+  overlapping or adjacent file windows, annotates them with contributing query
+  numbers, and prints each source line once. `RunResult.Metrics` records selected
+  and unique source-line counts for session analysis without entering model
+  context. There is no new aggregate 400-line cap.
 - `inspect.operations[]` (1–16) selects `read_file`, `search`, `glob`,
   `list_dir`, or `workspace_summary` and supplies that operation's `input`
   object. The operations run concurrently, errors are reported inline, each
@@ -1979,7 +2002,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.7 `run_command`
 
-> Run one command or ordered steps using a shell command or argv as an array of strings. Auto output returns compact archived receipts for large success and bounded failure diagnostics. Background supports one command.
+> Run one command or ordered steps using a shell command or argv as an array of strings. Auto output returns compact archived receipts for large success and bounded failure diagnostics. Background supports one command; background_lease only coordinates jobs and does not restrict command behavior.
 
 | param | type | notes |
 |---|---|---|
@@ -1998,8 +2021,9 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `cwd` | string | default process cwd |
 | `timeout_seconds` | int | foreground default 120, background default 1200, no maximum |
 | `background` | bool | when true, start as a process-local background job and return a job id immediately |
-| `resource_key` | string | background only; defaults to the canonical command cwd |
-| `access` | string | background only; `read_only` or `exclusive` (default) |
+| `background_lease` | object | background-only scheduling lease; does not restrict command behavior |
+| `background_lease.resource_key` | string | coordination resource; defaults to the canonical command cwd |
+| `background_lease.access` | string | `read_only` or `exclusive` (default) sharing mode |
 
 - Exactly one of top-level `command`, top-level `argv`, or `steps` is required.
 - `command` is executed via a **non-login** `bash -c` (fallback `sh -c` if bash is
@@ -2046,9 +2070,14 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   formatting rules, but runs under the background job manager instead of blocking
   the current tool call. Background jobs default to a 1200-second timeout
   (20 minutes) unless `timeout_seconds` is set explicitly. It also defaults to an
-  exclusive lease on the canonical command cwd. Set `access:"read_only"` only
-  for a command that cannot mutate that resource; `resource_key` may identify a
-  different coordination unit. When later work depends
+  exclusive lease on the canonical command cwd. Set
+  `background_lease.access:"read_only"` only for a command that cannot mutate
+  the coordinated resource; `background_lease.resource_key` may identify a
+  different coordination unit. This object affects scheduling only: it does
+  not constrain execution or turn an arbitrary command into a read-only one.
+  Legacy top-level `resource_key` and `access` fields remain accepted as hidden
+  compatibility aliases, and mixing them with `background_lease` is rejected.
+  When later work depends
   on completion, use one `background_jobs` `wait` call rather than polling
   `get`/`list`; otherwise completed output is delivered once as request-only
   context. Use `/background` for interactive inspection or cancellation.
@@ -2168,7 +2197,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.11 `git_readonly`
 
-> Run restricted git status/log/diff/show/grep/blame/bisect without shell or pager; bisect may check out commits. Input is an object; args must be an array of strings, not a string.
+> Run an audited query-only set of git commands (including status, diff, log, rev-parse, and merge-base) without shell, pager, hooks, text conversion, or external diff helpers. Input is an object; args must be an array of strings, not a string.
 
 | param | type | notes |
 |---|---|---|
@@ -2176,23 +2205,27 @@ this subsection records the common runner those argv tools point at.
 | `cwd` | string | default process cwd |
 
 - A restricted sibling of `git` (§9.9) used by restricted agents (§14). It is
-  registered only when git is installed and reuses the same `--no-pager` /
-  `GIT_TERMINAL_PROMPT=0` plumbing. It is scheduled as read-only, but allowed
-  `bisect` operations can move `HEAD`.
+  registered only when git is installed. Its runner injects `--no-pager`,
+  `--no-optional-locks`, and `-c core.fsmonitor=false`, plus
+  `GIT_TERMINAL_PROMPT=0` and `GIT_OPTIONAL_LOCKS=0`. Diff-capable commands
+  additionally disable external diff and text-conversion helpers.
 - The advertised shape is `{"args":[...]}`. `args` must be a JSON array of
   strings, not a string or JSON-encoded array. The decoder also accepts a bare
   string array because earlier wording told models to provide that shape.
-- **Allowlist by bare subcommand:** `args[0]` must be one of `status`, `log`, `diff`,
-  `show`, `grep`, `blame`, `bisect` and must not start with `-`. Because global git
-  options (`-c`, `-C`, `--git-dir`, `--exec-path`, `--paginate`) precede the
-  subcommand, requiring a non-flag first argument blocks every global-option
-  injection. Subcommand-local flags after `args[0]` pass through.
-- A few local flags still break the restricted boundary and are rejected:
-  `--output`/`--output-directory` (write a file) and `-O`/`--open-files-in-pager`
-  (launch a pager/editor). `bisect run <cmd>` is rejected because it executes
-  commands, and `bisect view` / `bisect visualize` are rejected because they
-  launch a viewer; other `bisect` operations are allowed even though they move
-  `HEAD`.
+- **Audited allowlist by bare subcommand:** `blame`, `cat-file`, `check-attr`,
+  `check-ignore`, `check-mailmap`, `check-ref-format`, `cherry`,
+  `count-objects`, `describe`, `diff`, `diff-files`, `diff-index`, `diff-tree`,
+  `for-each-ref`, `grep`, `log`, `ls-files`, `ls-tree`, `merge-base`,
+  `name-rev`, `range-diff`, `rev-list`, `rev-parse`, `shortlog`, `show`,
+  `show-branch`, `show-ref`, and `status`. Mixed read/write verbs such as
+  `branch`, `config`, `remote`, `reflog`, `submodule`, `tag`, and `worktree`
+  stay excluded even when some invocations are observational. `bisect` is also
+  excluded because it mutates repository state.
+- `args[0]` must be a bare allowlisted subcommand and cannot start with `-`.
+  This blocks all global option injection. Subcommand flags that can write a
+  file or launch configured programs are rejected: output-file flags, pager
+  flags (including clustered `grep -O`), external diff/textconv/filter flags,
+  signature display, and `%G` pretty/format placeholders.
 
 ### 9.12 `write_tmp_file`
 
@@ -2343,8 +2376,9 @@ this subsection records the common runner those argv tools point at.
   background paths apply the same contract. The latter resolves inherited
   agent/mode/budget fields before scheduling so its launch receipt is truthful.
 - Background launches resolve their scope before scheduling. Built-in
-  `explore`/`plan` default to shared `read_only` access; `auto`/`independent`
-  default to `exclusive`, and `mode:"implementation"` is always exclusive.
+  `explore`/`plan`/`review` default to shared `read_only` access;
+  `auto`/`independent` default to `exclusive`, and `mode:"implementation"` is
+  always exclusive.
   Custom agents set `workspace_access`. Mutating sibling delegates can declare
   distinct `scope` paths to run concurrently. Lease conflicts fail before
   child/session creation; normalized scope and access are persisted in metadata.
@@ -2877,9 +2911,9 @@ Empty edited content returns to the prompt without running a turn.
 Lines starting with `/` are commands; `//` escapes a literal slash. At an
 interactive TTY prompt, lines starting with `!` run a local shell command; `!!`
 escapes a literal bang. In a normal typed prompt, `$skillName` mentions an
-available skill anywhere in the text; the next turn gets request-only
-context telling it to read that skill's `SKILL.md` before acting. `$$` escapes a
-literal `$`. Literal `@path` / `@"path with spaces"` references remain prompt text
+available skill anywhere in the text; Harness reads the complete `SKILL.md`
+before model work and supplies it as request-only active-skill context for the
+prompt. `$$` escapes a literal `$`. Literal `@path` / `@"path with spaces"` references remain prompt text
 and never expand file contents; when they point at supported image extensions,
 typed REPL prompts, initial `-i` prompts, and one-shot prompts auto-attach the
 image if the model supports image input. Pasted and external-editor prompts keep
@@ -3082,7 +3116,10 @@ type UsageTotals struct {
   only and never become conversation-tree entries or model context. `checkpoint`
   records the boundary kind, save duration, and message count; stats use
   closed-turn records to expose save overhead and lag. `branch` records
-  navigation source/target IDs in chronological replay.
+  navigation source/target IDs in chronological replay. Tool-result events may
+  carry diagnostics-only integer `result_metrics` supplied by the tool; those
+  values are never copied into transcript blocks. `skill_activation` records
+  only activation source and status, not instruction contents.
 - Sessions store the CLI-owned previous response/interaction ID, anchored message
   count, and transcript fingerprint in `state.json`. Resume restores it only
   when continuation is enabled for the exact current target, saved/current
@@ -3172,7 +3209,11 @@ type UsageTotals struct {
   command activity, lifetime parallel batches, compactions, tree
   entries/branches/leaves/depth, navigation events, authoritative token/cost
   totals, calls per tool-bearing turn, standalone todo/single-inspection turns,
-  result truncation/byte/timing totals, and a hierarchical delegate breakdown.
+  result truncation/byte/timing totals and per-tool volume, redacted aggregates
+  of repeated normalized calls, command-step shape, skill reads/activations,
+  batched-search selected-versus-unique context lines, active transcript
+  composition, the latest request estimate, and a hierarchical delegate
+  breakdown with the five highest direct-token children.
   The session header includes build identity and the non-secret runtime profile
   used for efficiency comparisons. A child without a completed
   `state.json` checkpoint is reconstructed from its metadata and replay for
@@ -3185,7 +3226,9 @@ type UsageTotals struct {
   delegates. Direct tool activity is instead summed once from every replay log.
   The non-overlapping direct model-activity total likewise sums physical
   `turn_attempt_usage` and `maintenance_usage` records once from every root and
-  child replay. Compaction metadata uses the writer's canonical field shape;
+  child replay and prints a root/delegate split. Normalized call reporting
+  hashes canonical JSON and emits counts only; it never prints tool arguments
+  or skill paths. Compaction metadata uses the writer's canonical field shape;
   the stats reader accepts unknown additive fields while still rejecting
   malformed JSON and trailing values.
 - Transcripts are provider-neutral; resuming under a different provider/model works.
@@ -3250,6 +3293,12 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   bytes trimmed, estimated context before/after, whether Responses state was
   reset, and whether the next request used stateful continuation or full
   context. `session stats` summarizes those epochs and request shapes.
+- Before replacing an eligible result body, retention atomically archives the
+  exact original through the tool-result artifact path. The live transcript
+  keeps a typed receipt with tool name, success/error status, shown/original
+  byte counts, a bounded head, and the targeted recovery hint. If no session
+  archiver is available, the receipt retains the generic recovery guidance; if
+  a configured archiver fails, retention leaves the original body untouched.
 - **Turn boundary:** a completed turn begins at an assistant response and includes
   its immediately following tool-result message when that response requested tools.
   User prompts, steering messages, and synthetic context are inputs to a turn, not
@@ -3420,25 +3469,29 @@ reviewer, or the wide-open default without separate binaries.
   `request_implementation` in interactive sessions; its
   `prompts/agents/auto.txt` is a one-byte file — a single newline — that trims to
   empty, so it contributes no prompt body), `explore` (the shared inspection
-  tools — `read_file`, `list_dir`, `glob`, configured search tool(s),
+  tools — `read_file`, `view_image`, `list_dir`, `glob`, `search`, `inspect`,
   `run_command`, `web_fetch`, optional `git_readonly`, and `update_todos` — and
   read-only MCP tools; no file mutation, implementation handoff, background jobs, or
   delegation; prompt in `prompts/agents/explore.txt`), `plan` (the shared
   inspection tools, read-only MCP tools, `write_tmp_file`, `record_plan`,
   `request_implementation`, `update_todos`, `delegate`, and background job
-  tools, plus `prompts/agents/plan.txt`; both `explore` and `plan` gain
-  `run_command` from the shared inspection set so they can explore via external
-  tools (`gh`, builds, screenshots, live apps) but have no first-class
-  file-mutation tools, keeping "don't modify the project" a prompt-level
-  contract), and `independent` (all available built-in tools
+  tools, plus `prompts/agents/plan.txt`), `review` (the shared inspection tools
+  and read-only MCP tools, plus a findings-first prompt in
+  `prompts/agents/review.txt` that reviews the working-tree diff and untracked
+  files when no range is supplied), and `independent` (all available built-in tools
   plus discovered MCP tools, including `update_todos`, `record_plan`, `delegate`
   and background job tools, a complete-without-asking prompt from
-  `prompts/agents/independent.txt`). `auto`/`independent` advertise `git` but not
+  `prompts/agents/independent.txt`). `explore`, `plan`, and `review` gain
+  `run_command` from the shared inspection set so they can use external tools
+  (`gh`, builds, screenshots, live apps) but have no first-class file-mutation
+  tools; their read-only behavior remains a prompt-level contract.
+  `auto`/`independent` advertise `git` but not
   `git_readonly` — `git` covers every read-only operation, so listing both would
   duplicate functionality and waste context. The delegation subset guard treats an
   available `git` as satisfying a required `git_readonly`, so these parents can
-  still delegate to `explore`/`plan`. `record_plan` (§9.17) is in every default
-  agent's set, and `update_todos` is in every built-in agent's set;
+  still delegate to `explore`/`plan`/`review`. `record_plan` (§9.17) is exposed
+  to `auto`, `plan`, and `independent`, and `update_todos` is in every built-in
+  agent's set;
   `request_implementation` (§9.18) is exposed to `plan` and to interactive
   `auto`, but not to one-shot `auto` or `independent`.
 - **Descriptions are required selection metadata:** after resolution, every agent
@@ -3448,7 +3501,7 @@ reviewer, or the wide-open default without separate binaries.
 - **Config `agents`** entries **field-level merge** onto a built-in of the same name:
   a non-empty `description`, `allowed_tools`, `mcp_tools`, `prompt`, `model`, or
   `reasoning` replaces, and an omitted field inherits. Thus an override
-  of `auto`, `explore`, `plan`, or `independent` may inherit its built-in
+  of `auto`, `explore`, `plan`, `review`, or `independent` may inherit its built-in
   description. A new name defines a new agent (no `allowed_tools` ⇒ the full
   default set). Agent prompts
   accept `@file` and are expanded once at startup (fail-fast); relative config-file
@@ -3456,11 +3509,12 @@ reviewer, or the wide-open default without separate binaries.
 - **MCP exposure:** `mcp_tools` is one of `disabled`, `read_only`, or `all` (with
   `read-only`/`readonly` accepted as aliases for `read_only`) and controls automatic
   exposure of discovered MCP tools. An invalid value is a fail-fast validation error
-  (surfaced by `main`/`--show-config` after field-level merging). Built-ins default to
-  `all` for `auto`/`independent` and `read_only` for `explore`/`plan`; a new agent with no
-  explicit `allowed_tools` defaults to `all`, while an explicit `allowed_tools`
-  whitelist defaults to `disabled` unless `mcp_tools` opts it back in. Explicit
-  `mcp__...` names in `allowed_tools` remain strict whitelist entries.
+  (surfaced by `main`/`--show-config` after field-level merging). Built-ins
+  default to `all` for `auto`/`independent` and `read_only` for
+  `explore`/`plan`/`review`; a new agent with no explicit `allowed_tools`
+  defaults to `all`, while an explicit `allowed_tools` whitelist defaults to
+  `disabled` unless `mcp_tools` opts it back in. Explicit `mcp__...` names in
+  `allowed_tools` remain strict whitelist entries.
 - **Model:** an agent without `model` uses the current session target. An agent
   with `model` replaces it with that complete `<provider>:<model>` catalog target
   ID. `/agent <name>` prints the model target and warns when a switch changes it
