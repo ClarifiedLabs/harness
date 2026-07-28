@@ -3070,24 +3070,162 @@ func TestREPLShiftTabPendingPrewarmCancelledByExplicitAgentSwitch(t *testing.T) 
 
 	writePipe(t, pw, "\x1b[Z")
 	pending := nextShiftTabDelay(t, delayRequests)
+	// The explicit /agent switch supersedes the stale Shift-Tab timer and rides
+	// the same debounce: a new timer is scheduled for the settled selection.
 	writePipe(t, pw, "/agent plan\r")
+	latest := nextShiftTabDelay(t, delayRequests)
+	pending.fire <- time.Now() // stale; must do nothing
+	select {
+	case name := <-warmed:
+		t.Fatalf("stale Shift-Tab timer prewarmed %q", name)
+	case <-time.After(50 * time.Millisecond):
+	}
+	latest.fire <- time.Now()
 	select {
 	case name := <-warmed:
 		if name != "plan" {
 			t.Fatalf("explicit switch prewarmed %q, want plan", name)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("explicit /agent did not prewarm immediately")
+		t.Fatal("explicit /agent debounce did not prewarm")
 	}
-	pending.fire <- time.Now()
 	writePipe(t, pw, "/exit\r")
 	if code := waitRun(t, codeCh); code != ExitOK {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	select {
 	case name := <-warmed:
-		t.Fatalf("stale Shift-Tab timer caused duplicate prewarm for %q", name)
+		t.Fatalf("duplicate prewarm for %q", name)
 	default:
+	}
+}
+
+// TestPrewarmDefersWhilePromptActive pins the mid-prompt gate: warm-up
+// requests made while a prompt runs (agent/model switch, /compact) coalesce
+// into one warm-up fired at prompt completion, since a running prompt
+// refreshes the cache prefix every turn.
+func TestPrewarmDefersWhilePromptActive(t *testing.T) {
+	app := &App{}
+	warms := 0
+	app.Prewarm = func() { warms++ }
+
+	app.promptActive = true
+	app.prewarm()
+	app.prewarm() // coalesces; no flag explosion
+	if warms != 0 {
+		t.Fatalf("prewarm fired %d times mid-prompt, want deferred", warms)
+	}
+	if !app.pendingPrewarm {
+		t.Fatal("mid-prompt prewarm did not set the pending flag")
+	}
+
+	app.promptActive = false
+	app.releasePendingPrewarm()
+	if warms != 1 || app.pendingPrewarm {
+		t.Fatalf("release fired %d warm-ups (pending=%v), want exactly one", warms, app.pendingPrewarm)
+	}
+	app.releasePendingPrewarm()
+	if warms != 1 {
+		t.Fatalf("second release fired again (%d), want once", warms)
+	}
+
+	// An exit with a pending warm-up drops it: nothing fires without release.
+	app.promptActive = true
+	app.prewarm()
+	app.promptActive = false
+	if warms != 1 {
+		t.Fatalf("dropped pending prewarm fired (%d), want still one", warms)
+	}
+}
+
+// TestREPLRapidAgentSwitchesPrewarmOnlySettledSelection drives three rapid
+// /agent switches and asserts exactly one debounced prewarm, for the final
+// agent — the /agent path rides the same debounce as Shift-Tab cycling.
+func TestREPLRapidAgentSwitchesPrewarmOnlySettledSelection(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.AvailableAgents = []AgentSummary{{Name: "auto"}, {Name: "explore"}, {Name: "plan"}}
+	app.SwitchAgent = func(name string) (AgentSelection, error) {
+		return AgentSelection{Name: name, Tools: tools.Default(), System: strings.ToUpper(name), Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel, Runtime: fp}, nil
+	}
+	delayRequests := make(chan shiftTabDelayRequest, 4)
+	app.shiftTabPrewarmAfter = func(delay time.Duration) <-chan time.Time {
+		fire := make(chan time.Time, 1)
+		delayRequests <- shiftTabDelayRequest{delay: delay, fire: fire}
+		return fire
+	}
+	warmed := make(chan string, 2)
+	app.Prewarm = func() { warmed <- app.AgentName }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	writePipe(t, pw, "/agent explore\r")
+	first := nextShiftTabDelay(t, delayRequests)
+	writePipe(t, pw, "/agent plan\r")
+	second := nextShiftTabDelay(t, delayRequests)
+	writePipe(t, pw, "/agent auto\r")
+	latest := nextShiftTabDelay(t, delayRequests)
+	first.fire <- time.Now()  // stale
+	second.fire <- time.Now() // stale
+	latest.fire <- time.Now()
+	select {
+	case name := <-warmed:
+		if name != "auto" {
+			t.Fatalf("prewarmed %q, want the settled agent auto", name)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("settled selection was not prewarmed")
+	}
+	writePipe(t, pw, "/exit\r")
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	select {
+	case name := <-warmed:
+		t.Fatalf("rapid /agent switches prewarmed more than once: %q", name)
+	default:
+	}
+}
+
+// TestREPLCompactPrewarmsImmediatelyWhenIdle keeps /compact's immediate
+// warm-up: compaction rewrites the prefix and no prompt is running to refresh
+// it, so the debounce would only add cold-cache latency.
+func TestREPLCompactPrewarmsImmediatelyWhenIdle(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("CANNED SUMMARY")}, Stop: llm.StopEndTurn},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+	// Seed enough whole turns that /compact has something older to summarize.
+	var seed []llm.Message
+	for i := 0; i < 10; i++ {
+		label := string(rune('a' + i))
+		seed = append(seed,
+			llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: label + " q"}}},
+			llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: label + " a"}}},
+		)
+	}
+	app.Agent.SetTranscript(seed)
+	warms := make(chan struct{}, 1)
+	app.Prewarm = func() { warms <- struct{}{} }
+	select {
+	case <-warms:
+		t.Fatal("prewarm fired before /compact")
+	default:
+	}
+
+	if code := run(strings.NewReader("/compact\r/exit\r"), app, nil, true); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	select {
+	case <-warms:
+	default:
+		t.Fatal("/compact while idle did not prewarm immediately")
 	}
 }
 

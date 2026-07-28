@@ -1043,10 +1043,15 @@ mid-session with `/agent <name>`.
 
 Shift-Tab switches use the same full agent runtime selection as `/agent` and emit
 the existing `[agent switched: <name>]` notice and provider/model line.
-Their prewarm uses a 500ms idle debounce, so rapid cycles warm only the final
-settled agent. It is not suppressed merely because the model ID is unchanged:
-system/tool prefixes and response continuation differ by agent. Startup, explicit
-`/agent`, handoff and model changes, and standalone `/compact` keep immediate
+All switch-driven prewarms — Shift-Tab cycling, explicit `/agent`, `/model`,
+and startup agent resolution — use a 500ms idle debounce, so rapid cycles or
+resolution bursts warm only the final settled selection. It is not suppressed
+merely because the model ID is unchanged:
+system/tool prefixes and response continuation differ by agent. A warm-up
+requested while a prompt is running is deferred and fired once when the prompt
+completes (including interrupt/error exits): a running prompt refreshes the
+cache prefix every turn, so a mid-prompt prewarm would be wasted.
+Standalone `/compact` keeps immediate
 prewarming; submitting a real prompt cancels any pending delayed warmup.
 
 Four agents are built in:

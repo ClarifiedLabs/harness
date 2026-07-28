@@ -264,12 +264,12 @@ func TestToolDiffColor(t *testing.T) {
 
 	got := errw.String()
 	for _, want := range []string{
-		"\x1b[36m---",            // header cyan
-		"\x1b[35m@@",             // hunk magenta
+		"\x1b[36m---",                  // header cyan
+		"\x1b[35m@@",                   // hunk magenta
 		"\x1b[48;2;33;58;43m\x1b[32m+", // added line: subdued green bg, green sigil
 		"\x1b[48;2;74;34;29m\x1b[31m-", // removed line: subdued red bg, red sigil
-		"\x1b[35mfunc",           // Go keyword in magenta
-		"\x1b[0K",                // erase-to-EOL extends the tint to the window edge
+		"\x1b[35mfunc",                 // Go keyword in magenta
+		"\x1b[0K",                      // erase-to-EOL extends the tint to the window edge
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("colored diff missing %q:\n%q", want, got)

@@ -133,6 +133,18 @@ type App struct {
 	// cache-invalidating event (agent/model switch, compaction) so the next real
 	// request reads a warm prefix (r43). nil disables it (piped/one-shot, tests).
 	Prewarm func()
+	// SchedulePrewarm, when installed by the REPL loop, routes a switch-driven
+	// warm-up (/agent, /model, startup agent resolution) through the shift-tab
+	// debounce so rapid cycling or resolution bursts warm only the settled
+	// selection. Nil falls back to an immediate prewarm.
+	SchedulePrewarm func()
+	// promptActive tracks a running prompt so prewarm() defers mid-prompt
+	// warm-ups — a running prompt refreshes the cache prefix every turn, so a
+	// mid-prompt prewarm is pure waste. Requests coalesce into pendingPrewarm,
+	// fired once when the prompt completes (the switched-to agent's prefix is
+	// genuinely cold then, including after interrupt/error exits).
+	promptActive   bool
+	pendingPrewarm bool
 	// shiftTabPrewarmAfter is test-injectable; production uses time.After.
 	shiftTabPrewarmAfter func(time.Duration) <-chan time.Time
 
@@ -530,6 +542,12 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		defer func() { app.Prewarm = prewarm }()
 	}
+	// All switch-driven prewarms (/agent, /model, startup resolution) ride the
+	// same debounce as Shift-Tab cycling so bursts warm only the settled
+	// selection. Restore the caller's hook when the REPL exits.
+	prevSchedulePrewarm := app.SchedulePrewarm
+	app.SchedulePrewarm = scheduleShiftTabPrewarm
+	defer func() { app.SchedulePrewarm = prevSchedulePrewarm }()
 
 	idleAfter := app.idleCompactionAfter
 	if idleAfter == nil {
@@ -773,6 +791,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		cancelIdleCompaction()
 		done := make(chan struct{}, 1)
 		active = true
+		app.promptActive = true
 		plainPromptRead = false
 		promptPrinted = false
 		escPresses.reset()
@@ -1013,6 +1032,12 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				active = false
 				activeReadPause = false
 				promptDone = nil
+				app.promptActive = false
+				// A prewarm requested mid-prompt (agent/model switch) fires now,
+				// once, for the settled selection: the prompt kept its own prefix
+				// warm, but the switched-to agent's is genuinely cold — including
+				// after interrupt/error exits.
+				app.releasePendingPrewarm()
 				escPresses.reset()
 				// The run no longer owns usage/renderer/session state: flush the
 				// accounting deferred while it was active, exactly once, before the
@@ -2502,17 +2527,45 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 		app.onModelChanged()
 	}
 	if baseChanged {
-		app.prewarm() // the new underlying model/provider invalidated the warm cache prefix (r43)
+		app.schedulePrewarm() // the new underlying model/provider invalidated the warm cache prefix (r43)
 	}
 	return true
 }
 
 // prewarm triggers a background prompt-cache warm-up after a cache-invalidating
-// event, when one is wired (r43).
+// event, when one is wired (r43). Mid-prompt requests coalesce into a single
+// warm-up fired at prompt completion: a running prompt refreshes the cache
+// prefix every turn, so warming during it is pure waste.
 func (app *App) prewarm() {
-	if app.Prewarm != nil {
-		app.Prewarm()
+	if app.Prewarm == nil {
+		return
 	}
+	if app.promptActive {
+		app.pendingPrewarm = true
+		return
+	}
+	app.Prewarm()
+}
+
+// releasePendingPrewarm fires a warm-up deferred while a prompt was active,
+// once, at prompt completion. An app exit with a pending warm-up drops it.
+func (app *App) releasePendingPrewarm() {
+	if !app.pendingPrewarm {
+		return
+	}
+	app.pendingPrewarm = false
+	app.prewarm()
+}
+
+// schedulePrewarm routes a switch-driven warm-up through the REPL's debounce
+// when installed, so rapid agent/model cycling or startup resolution warms
+// only the settled selection; otherwise it prewarms immediately.
+func (app *App) schedulePrewarm() {
+	if app.SchedulePrewarm != nil {
+		app.SchedulePrewarm()
+		return
+	}
+	app.prewarm()
 }
 
 func (app *App) switchModelAndPromptDefault(model string, reasoning llm.ReasoningConfig, readLine func(string) (string, error)) {
@@ -2998,9 +3051,9 @@ func (app *App) cycleAgent() bool {
 
 // applyAgentSwitch performs the agent switch and reports an error instead of
 // printing it, so callers that must abort on failure (the handoff) can. The
-// /agent command wraps it and prints failures. Existing callers prewarm
-// immediately; Shift-Tab uses applyAgentSwitchWithPrewarm to defer only that
-// warm-up to the idle loop.
+// /agent command wraps it and prints failures. Callers route the warm-up
+// through the REPL debounce (schedulePrewarm); Shift-Tab uses
+// applyAgentSwitchWithPrewarm to defer only that warm-up to the idle loop.
 func (app *App) applyAgentSwitch(name string) error {
 	return app.applyAgentSwitchWithPrewarm(name, true)
 }
@@ -3063,10 +3116,11 @@ func (app *App) applyAgentSwitchWithPrewarm(name string, prewarm bool) error {
 		fmt.Fprintln(app.Errw, "[warning: model target changed; the new model may start without prompt cache, increasing token usage or cost]")
 	}
 	// The agent's tools/system (and possibly model/provider) changed, so re-warm
-	// the cache prefix in the background (r43), unless the idle Shift-Tab path is
+	// the cache prefix in the background (r43) — debounced so rapid cycling
+	// warms only the settled selection — unless the idle Shift-Tab path is
 	// deferring this switch's warm-up.
 	if prewarm {
-		app.prewarm()
+		app.schedulePrewarm()
 	}
 	return nil
 }
