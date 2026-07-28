@@ -135,16 +135,19 @@ later request. `steps` is foreground-only.
 
 `run_command`, `grep`, `rg`, and `web_fetch` can set `background:true` to return
 a job id immediately. `delegate` can also run as a background child agent.
-Local background work carries a canonical resource lease. `run_command` and
-`delegate` default to an `exclusive` lease on their canonical cwd; callers may
-set `resource_key` and `access:"read_only"` only when the work cannot mutate
-that resource. Background `grep` and `rg` automatically use a `read_only` lease
-on their cwd. Multiple read-only jobs may share a resource, while an exclusive
-job conflicts with every active lease for the same resource and reports the
-existing job id. Jobs on different resources remain concurrent. The lease is an
-exact-key match on the canonical cwd: it does not protect the whole workspace,
-so two jobs on sibling or nested directories do not conflict. `web_fetch`
-does not lease the local workspace.
+Local background work carries a canonical resource lease. `run_command`
+defaults to an `exclusive` lease on its canonical cwd; callers may set
+`resource_key` and `access:"read_only"` only when the command cannot mutate
+that resource. A delegate's access defaults from its selected agent, and its
+`scope` defaults to the canonical cwd. Built-in `explore` and `plan` agents are
+read-only; `auto`, `independent`, custom, and implementation-mode delegates are
+exclusive by default. Background `grep` and `rg` automatically use a
+`read_only` lease on their cwd. Multiple read-only jobs may share a resource,
+while an exclusive job conflicts with every active lease for the same resource
+and reports the existing job id. Jobs on different resources remain concurrent.
+The lease is an exact-key match on the canonical path: it does not protect the
+whole workspace, so two jobs on sibling or nested directories do not conflict.
+`web_fetch` does not lease the local workspace.
 Completed background job summaries are delivered once as request-only context to
 the parent agent. Background delegates are join-required: after one useful parent
 turn, harness waits for them and makes the parent synthesize their reports
@@ -258,20 +261,20 @@ continuation mode plus before/after/window token estimates.
 
 Foreground delegates run in the ordinary serialized tool loop because children
 share the checkout and may write. Use `background:true` only for independent
-read-only or disjoint work while useful parent work remains. Background calls
-default to an exclusive lease on the canonical process cwd. Set
-`access:"read_only"` only for a child that cannot mutate the resource; set
-`resource_key` when the child owns a different worktree or narrower coordination
-unit. Lease conflicts fail before a child starts and identify the active job.
+read-only or disjoint work while useful parent work remains. Background
+`explore` and `plan` calls default to shared `read_only` access;
+`auto`/`independent` and implementation mode default to `exclusive`. Set `scope`
+to a narrower workspace path for mutating siblings that own disjoint areas.
+Lease conflicts fail before a child starts and identify the active job.
 Completion is delivered automatically as one-shot request context; do not poll or
 duplicate a background child's work. Harness permits one subsequent useful parent
 model round, then joins outstanding background delegates and continues the parent
 for synthesis before allowing the turn to end.
 
 For an independent review group, launch the reviewer delegates directly from
-the parent in one assistant turn, give genuinely read-only reviewers the same
-`resource_key` with `access:"read_only"`, and synthesize their reports in the
-parent. If an immediate dependency requires an explicit join, pass the returned
+the parent in one assistant turn; read-only agent defaults let them share the
+same scope. Synthesize their reports in the parent. If an immediate dependency
+requires an explicit join, pass the returned
 job IDs to one `background_jobs` call with `until:"all"`. Do not create a
 coordinator child whose only work is launching reviewers and waiting for them;
 that adds a model loop without adding review independence or evidence.

@@ -31,7 +31,9 @@ type Definition struct {
 	Description  string
 	AllowedTools []string
 	MCPTools     MCPToolsMode
-	Prompt       string
+	// WorkspaceAccess is the default lease access for background delegation.
+	WorkspaceAccess string
+	Prompt          string
 	// Model is a complete provider-qualified model-proxy target id. Empty
 	// inherits the current session target.
 	Model string
@@ -52,18 +54,24 @@ const (
 	MCPToolsAll      MCPToolsMode = "all"
 )
 
+const (
+	WorkspaceAccessReadOnly  = tools.BackgroundAccessReadOnly
+	WorkspaceAccessExclusive = tools.BackgroundAccessExclusive
+)
+
 // FileDefinition mirrors one entry of the config file's "agents" object. Empty fields
 // drive the field-level merge: they inherit from the same-named built-in, or
 // for new agents from the defaults (default tool set, no prompt). Description
 // is required parent-facing "when to use" metadata for new agents; a built-in
 // override may omit it and inherit the built-in description.
 type FileDefinition struct {
-	Description  string   `json:"description"`
-	AllowedTools []string `json:"allowed_tools"`
-	MCPTools     string   `json:"mcp_tools"`
-	Prompt       string   `json:"prompt"`
-	Model        string   `json:"model"`
-	Reasoning    string   `json:"reasoning"`
+	Description     string   `json:"description"`
+	AllowedTools    []string `json:"allowed_tools"`
+	MCPTools        string   `json:"mcp_tools"`
+	WorkspaceAccess string   `json:"workspace_access"`
+	Prompt          string   `json:"prompt"`
+	Model           string   `json:"model"`
+	Reasoning       string   `json:"reasoning"`
 }
 
 // Builtins returns fresh copies of the four built-in agents keyed by name.
@@ -73,31 +81,35 @@ func Builtins() map[string]Definition {
 	planPrompt, _ := prompts.BuiltinAgentPrompt("plan")
 	return map[string]Definition{
 		"auto": {
-			Name:         "auto",
-			Description:  "General-purpose agent.",
-			AllowedTools: defaultTools(),
-			MCPTools:     MCPToolsAll,
+			Name:            "auto",
+			Description:     "General-purpose agent.",
+			AllowedTools:    defaultTools(),
+			MCPTools:        MCPToolsAll,
+			WorkspaceAccess: WorkspaceAccessExclusive,
 		},
 		"explore": {
-			Name:         "explore",
-			Description:  "Broad read-only search, tracing, and root-cause analysis; not known-file lookup.",
-			AllowedTools: inspectionTools(),
-			MCPTools:     MCPToolsReadOnly,
-			Prompt:       explorePrompt,
+			Name:            "explore",
+			Description:     "Broad read-only search, tracing, and root-cause analysis; not known-file lookup.",
+			AllowedTools:    inspectionTools(),
+			MCPTools:        MCPToolsReadOnly,
+			WorkspaceAccess: WorkspaceAccessReadOnly,
+			Prompt:          explorePrompt,
 		},
 		"independent": {
-			Name:         "independent",
-			Description:  "End-to-end work without user input.",
-			AllowedTools: defaultTools(),
-			MCPTools:     MCPToolsAll,
-			Prompt:       independentPrompt,
+			Name:            "independent",
+			Description:     "End-to-end work without user input.",
+			AllowedTools:    defaultTools(),
+			MCPTools:        MCPToolsAll,
+			WorkspaceAccess: WorkspaceAccessExclusive,
+			Prompt:          independentPrompt,
 		},
 		"plan": {
-			Name:         "plan",
-			Description:  "Collaborative implementation planning; explores freely (including running commands) but does not modify the project.",
-			AllowedTools: planTools(),
-			MCPTools:     MCPToolsReadOnly,
-			Prompt:       planPrompt,
+			Name:            "plan",
+			Description:     "Collaborative implementation planning; explores freely (including running commands) but does not modify the project.",
+			AllowedTools:    planTools(),
+			MCPTools:        MCPToolsReadOnly,
+			WorkspaceAccess: WorkspaceAccessReadOnly,
+			Prompt:          planPrompt,
 		},
 	}
 }
@@ -147,7 +159,7 @@ func Resolve(file map[string]FileDefinition) map[string]Definition {
 	for name, fm := range file {
 		a, ok := agents[name]
 		if !ok {
-			a = Definition{Name: name, AllowedTools: defaultTools(), MCPTools: MCPToolsAll}
+			a = Definition{Name: name, AllowedTools: defaultTools(), MCPTools: MCPToolsAll, WorkspaceAccess: WorkspaceAccessExclusive}
 		}
 		allowedOverride := len(fm.AllowedTools) > 0
 		if fm.Description != "" {
@@ -168,6 +180,14 @@ func Resolve(file map[string]FileDefinition) map[string]Definition {
 			// behavior that whitelists opt out of automatic MCP tools unless the
 			// agent also opts back in with mcp_tools.
 			a.MCPTools = MCPToolsDisabled
+		}
+		if fm.WorkspaceAccess != "" {
+			access, err := ParseWorkspaceAccess(fm.WorkspaceAccess)
+			if err == nil {
+				a.WorkspaceAccess = access
+			} else {
+				a.WorkspaceAccess = fm.WorkspaceAccess
+			}
 		}
 		if fm.Prompt != "" {
 			a.Prompt = fm.Prompt
@@ -201,6 +221,18 @@ func ParseMCPToolsMode(s string) (MCPToolsMode, error) {
 	}
 }
 
+func ParseWorkspaceAccess(s string) (string, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case WorkspaceAccessReadOnly, "readonly":
+		return WorkspaceAccessReadOnly, nil
+	case WorkspaceAccessExclusive:
+		return WorkspaceAccessExclusive, nil
+	default:
+		return "", fmt.Errorf("invalid workspace_access %q (want read_only or exclusive)", s)
+	}
+}
+
 // Validate reports invalid resolved agent definitions. Resolve keeps invalid
 // mcp_tools strings in place so callers that can return contextual errors (main,
 // --show-config) can fail fast after all field-level merging is done.
@@ -210,6 +242,9 @@ func Validate(agents map[string]Definition) error {
 			return fmt.Errorf("agent %q: description must state when the parent should use it", name)
 		}
 		if _, err := ParseMCPToolsMode(string(agents[name].MCPTools)); err != nil {
+			return fmt.Errorf("agent %q: %w", name, err)
+		}
+		if _, err := ParseWorkspaceAccess(agents[name].WorkspaceAccess); err != nil {
 			return fmt.Errorf("agent %q: %w", name, err)
 		}
 	}

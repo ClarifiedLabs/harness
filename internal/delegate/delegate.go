@@ -88,9 +88,10 @@ type Launch struct {
 // AgentCandidate is a configured agent that may be delegated to when its tools
 // are a subset of the calling agent's current tools.
 type AgentCandidate struct {
-	Name        string
-	Description string
-	ToolNames   []string
+	Name            string
+	Description     string
+	ToolNames       []string
+	WorkspaceAccess string
 }
 
 // State stores the current runtime snapshot. Main updates it on startup and
@@ -239,7 +240,7 @@ func NewTool(runner *Runner, background ...tools.BackgroundJobStarter) *Tool {
 func (*Tool) Name() string { return "delegate" }
 
 func (*Tool) Description() string {
-	return "Delegate broad exploration or separable work; keep small or tightly coupled tasks local. Launch independent calls together, then synthesize without polling."
+	return "Delegate broad exploration or separable work; keep small or tightly coupled tasks local. Launch independent calls together, then synthesize without polling. Read-only background agents share leases automatically; mutating siblings need distinct scope paths."
 }
 
 func (t *Tool) Schema() json.RawMessage {
@@ -334,7 +335,7 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 		if req.ContinueChildID != "" {
 			receipt += ", continues: " + req.ContinueChildID
 		}
-		receipt += ", resource: " + req.ResourceKey + ", access: " + req.Access
+		receipt += ", scope: " + req.ResourceKey + ", access: " + req.Access
 		receipt += ")"
 		return tools.MeteredResult{
 			Text:     receipt,
@@ -397,14 +398,14 @@ func (t *Tool) RebindRuntime(snapshot func() Runtime) tools.Tool {
 
 func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 	var args struct {
-		Task        string `json:"task"`
-		Agent       string `json:"agent"`
-		Mode        string `json:"mode"`
-		MaxTurns    *int   `json:"max_turns"`
-		ContinueID  string `json:"continue_child_id"`
-		Background  bool   `json:"background"`
-		ResourceKey string `json:"resource_key"`
-		Access      string `json:"access"`
+		Task       string `json:"task"`
+		Agent      string `json:"agent"`
+		Mode       string `json:"mode"`
+		MaxTurns   *int   `json:"max_turns"`
+		ContinueID string `json:"continue_child_id"`
+		Background bool   `json:"background"`
+		Scope      string `json:"scope"`
+		Access     string `json:"access"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return RunRequest{}, err
@@ -420,10 +421,10 @@ func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 	if err != nil {
 		return RunRequest{}, err
 	}
-	resourceKey := strings.TrimSpace(args.ResourceKey)
+	resourceKey := strings.TrimSpace(args.Scope)
 	access := strings.TrimSpace(args.Access)
 	if !args.Background && (resourceKey != "" || access != "") {
-		return RunRequest{}, fmt.Errorf("resource_key and access require background:true")
+		return RunRequest{}, fmt.Errorf("scope and access require background:true")
 	}
 	return RunRequest{
 		Kind:            kind,
@@ -810,7 +811,7 @@ func (r *Runner) prepareRun(req RunRequest) (preparedRun, error) {
 	req.ResourceKey = strings.TrimSpace(req.ResourceKey)
 	req.Access = strings.TrimSpace(req.Access)
 	if !req.Background && !req.leaseAcquired && (req.ResourceKey != "" || req.Access != "") {
-		return preparedRun{}, fmt.Errorf("resource_key and access require background:true")
+		return preparedRun{}, fmt.Errorf("scope and access require background:true")
 	}
 	if r.snapshot == nil {
 		return preparedRun{}, fmt.Errorf("delegate runtime is not initialized")
@@ -879,12 +880,40 @@ func (r *Runner) prepareRun(req RunRequest) (preparedRun, error) {
 		}
 		return preparedRun{}, err
 	}
+	if req.Background {
+		if req.Mode == ModeImplementation {
+			req.Access = tools.BackgroundAccessExclusive
+		} else if req.Access == "" {
+			req.Access = r.defaultWorkspaceAccess(runtime, req, continuation)
+		}
+	}
 	return preparedRun{
 		req:          req,
 		runtime:      runtime,
 		maxTurns:     maxTurns,
 		continuation: continuation,
 	}, nil
+}
+
+func (r *Runner) defaultWorkspaceAccess(runtime Runtime, req RunRequest, continuation *continuationSource) string {
+	if continuation != nil {
+		switch continuation.meta.Access {
+		case tools.BackgroundAccessReadOnly, tools.BackgroundAccessExclusive:
+			return continuation.meta.Access
+		}
+	}
+	agentName := req.Agent
+	if agentName == "" {
+		agentName = runtime.Agent
+	}
+	if r.opts.AgentCandidates != nil {
+		for _, candidate := range r.opts.AgentCandidates(runtime) {
+			if candidate.Name == agentName && candidate.WorkspaceAccess == tools.BackgroundAccessReadOnly {
+				return tools.BackgroundAccessReadOnly
+			}
+		}
+	}
+	return tools.BackgroundAccessExclusive
 }
 
 func loadContinuationSource(runtime Runtime, childID string) (*continuationSource, error) {
@@ -1502,14 +1531,14 @@ func schema(agents []AgentCandidate, maxTurns int) json.RawMessage {
 			"type":        "boolean",
 			"description": "Only independent, non-overlapping work while parent work remains; Harness joins automatically, so do not poll or duplicate.",
 		},
-		"resource_key": map[string]any{
+		"scope": map[string]any{
 			"type":        "string",
-			"description": "Background-only lease resource. Defaults to the canonical process cwd.",
+			"description": "Background-only workspace path scope. Defaults to the process cwd; give mutating sibling delegates distinct paths so they can run concurrently.",
 		},
 		"access": map[string]any{
 			"type":        "string",
 			"enum":        []string{tools.BackgroundAccessReadOnly, tools.BackgroundAccessExclusive},
-			"description": "Background-only lease access. Defaults to exclusive; declare read_only only when the child cannot mutate the resource.",
+			"description": "Background-only lease access. Defaults from the selected agent (explore/plan read_only; auto/independent exclusive); override only when the task contract is stricter.",
 		},
 	}
 	body := map[string]any{

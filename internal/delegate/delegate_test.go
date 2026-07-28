@@ -934,8 +934,8 @@ func TestDelegateSchemaOmitsPerCallTools(t *testing.T) {
 	if !slices.Equal(access.Enum, []string{tools.BackgroundAccessReadOnly, tools.BackgroundAccessExclusive}) {
 		t.Fatalf("access enum = %v", access.Enum)
 	}
-	if _, ok := schema.Properties["resource_key"]; !ok {
-		t.Fatalf("delegate schema is missing resource_key: %s", tool.Schema())
+	if _, ok := schema.Properties["scope"]; !ok {
+		t.Fatalf("delegate schema is missing scope: %s", tool.Schema())
 	}
 	if _, err := DecodeRunRequest(json.RawMessage(`{"task":"inspect","mode":"review"}`), "delegate"); err == nil || !strings.Contains(err.Error(), `mode must be "implementation"`) {
 		t.Fatalf("invalid mode error = %v", err)
@@ -973,11 +973,11 @@ func TestDelegateBackgroundStartsJob(t *testing.T) {
 
 	resource := t.TempDir()
 	input, err := json.Marshal(map[string]any{
-		"task":         "inspect asynchronously",
-		"agent":        "explore",
-		"background":   true,
-		"resource_key": resource,
-		"access":       tools.BackgroundAccessReadOnly,
+		"task":       "inspect asynchronously",
+		"agent":      "explore",
+		"background": true,
+		"scope":      resource,
+		"access":     tools.BackgroundAccessReadOnly,
 	})
 	if err != nil {
 		t.Fatalf("marshal input: %v", err)
@@ -986,7 +986,7 @@ func TestDelegateBackgroundStartsJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunMetered: %v", err)
 	}
-	if !strings.HasPrefix(result.Text, "background job bg_delegate started (turn budget: 20, resource: ") ||
+	if !strings.HasPrefix(result.Text, "background job bg_delegate started (turn budget: 20, scope: ") ||
 		!strings.HasSuffix(result.Text, ", access: read_only)") {
 		t.Fatalf("result = %q", result.Text)
 	}
@@ -1009,6 +1009,77 @@ func TestDelegateBackgroundStartsJob(t *testing.T) {
 	}
 	if completed.Text == "" || completed.Usage.InputTokens != 11 || completed.Usage.OutputTokens != 5 {
 		t.Fatalf("background result = %+v, want report and child usage 11/5", completed)
+	}
+}
+
+func TestDelegateBackgroundInfersAgentAccessAndScope(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	state := NewState(Runtime{
+		Provider: fp,
+		Model:    "claude-opus-4-8",
+		Registry: llm.NewRegistry(nil),
+		Agent:    "auto",
+	})
+	runner := NewRunner(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
+		return Launch{
+			Provider: runtime.Provider,
+			Model:    runtime.Model,
+			Registry: runtime.Registry,
+			Agent:    name,
+			Tools:    &tools.Registry{},
+		}, nil
+	}, Options{
+		AgentCandidates: func(Runtime) []AgentCandidate {
+			return []AgentCandidate{
+				{Name: "auto", WorkspaceAccess: tools.BackgroundAccessExclusive},
+				{Name: "explore", WorkspaceAccess: tools.BackgroundAccessReadOnly},
+			}
+		},
+	})
+	starter := &fakeBackgroundStarter{}
+	tool := NewTool(runner, starter)
+	scope := t.TempDir()
+	input, err := json.Marshal(map[string]any{
+		"task":       "inspect asynchronously",
+		"agent":      "explore",
+		"background": true,
+		"scope":      scope,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.RunMetered(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	wantScope, err := tools.CanonicalBackgroundResource(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starter.req.ResourceKey != wantScope || starter.req.Access != tools.BackgroundAccessReadOnly {
+		t.Fatalf("inferred lease = %q/%q, want %q/read_only", starter.req.ResourceKey, starter.req.Access, wantScope)
+	}
+}
+
+func TestDelegateImplementationModeDefaultsExclusive(t *testing.T) {
+	runner := NewRunner(func() Runtime {
+		return Runtime{Provider: llmtest.New("fake"), Agent: "plan"}
+	}, nil, Options{
+		AgentCandidates: func(Runtime) []AgentCandidate {
+			return []AgentCandidate{{Name: "plan", WorkspaceAccess: tools.BackgroundAccessReadOnly}}
+		},
+	})
+	prepared, err := runner.prepareRun(RunRequest{
+		Task:       "implement",
+		Mode:       ModeImplementation,
+		Agent:      "plan",
+		Background: true,
+		Access:     tools.BackgroundAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.req.Access != tools.BackgroundAccessExclusive {
+		t.Fatalf("implementation access = %q, want exclusive", prepared.req.Access)
 	}
 }
 
@@ -1039,7 +1110,7 @@ func TestDelegateBackgroundContinuationInheritsContractBeforeStart(t *testing.T)
 	if err != nil {
 		t.Fatalf("RunMetered: %v", err)
 	}
-	if !strings.HasPrefix(result.Text, "background job bg_delegate started (turn budget: 4, mode: implementation, continues: source, resource: ") ||
+	if !strings.HasPrefix(result.Text, "background job bg_delegate started (turn budget: 4, mode: implementation, continues: source, scope: ") ||
 		!strings.HasSuffix(result.Text, ", access: exclusive)") {
 		t.Fatalf("background receipt = %q", result.Text)
 	}

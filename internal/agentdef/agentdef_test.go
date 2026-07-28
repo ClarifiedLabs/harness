@@ -36,6 +36,9 @@ func TestBuiltins(t *testing.T) {
 	if auto.MCPTools != MCPToolsAll {
 		t.Errorf("auto MCPTools = %q, want %q", auto.MCPTools, MCPToolsAll)
 	}
+	if auto.WorkspaceAccess != WorkspaceAccessExclusive {
+		t.Errorf("auto WorkspaceAccess = %q, want exclusive", auto.WorkspaceAccess)
+	}
 
 	explore := m["explore"]
 	if explore.Prompt == "" {
@@ -46,6 +49,9 @@ func TestBuiltins(t *testing.T) {
 	}
 	if explore.MCPTools != MCPToolsReadOnly {
 		t.Errorf("explore MCPTools = %q, want %q", explore.MCPTools, MCPToolsReadOnly)
+	}
+	if explore.WorkspaceAccess != WorkspaceAccessReadOnly {
+		t.Errorf("explore WorkspaceAccess = %q, want read_only", explore.WorkspaceAccess)
 	}
 	if !slices.Contains(explore.AllowedTools, "run_command") {
 		t.Errorf("explore tools missing run_command: %v", explore.AllowedTools)
@@ -66,6 +72,9 @@ func TestBuiltins(t *testing.T) {
 	if ind.MCPTools != MCPToolsAll {
 		t.Errorf("independent MCPTools = %q, want %q", ind.MCPTools, MCPToolsAll)
 	}
+	if ind.WorkspaceAccess != WorkspaceAccessExclusive {
+		t.Errorf("independent WorkspaceAccess = %q, want exclusive", ind.WorkspaceAccess)
+	}
 
 	plan := m["plan"]
 	if plan.Prompt == "" {
@@ -77,6 +86,9 @@ func TestBuiltins(t *testing.T) {
 	}
 	if plan.MCPTools != MCPToolsReadOnly {
 		t.Errorf("plan MCPTools = %q, want %q", plan.MCPTools, MCPToolsReadOnly)
+	}
+	if plan.WorkspaceAccess != WorkspaceAccessReadOnly {
+		t.Errorf("plan WorkspaceAccess = %q, want read_only", plan.WorkspaceAccess)
 	}
 	if !slices.Contains(plan.AllowedTools, "run_command") {
 		t.Errorf("plan tools missing run_command: %v", plan.AllowedTools)
@@ -170,6 +182,24 @@ func TestResolveMCPToolsOverride(t *testing.T) {
 	}
 	if m["ro"].MCPTools != MCPToolsReadOnly {
 		t.Errorf("ro MCPTools = %q, want read_only", m["ro"].MCPTools)
+	}
+}
+
+func TestResolveWorkspaceAccessOverride(t *testing.T) {
+	m := Resolve(map[string]FileDefinition{
+		"plan": {WorkspaceAccess: "exclusive"},
+		"ro":   {Description: "read-only worker", WorkspaceAccess: "readonly"},
+	})
+	if m["plan"].WorkspaceAccess != WorkspaceAccessExclusive {
+		t.Fatalf("plan workspace access = %q", m["plan"].WorkspaceAccess)
+	}
+	if m["ro"].WorkspaceAccess != WorkspaceAccessReadOnly {
+		t.Fatalf("ro workspace access = %q", m["ro"].WorkspaceAccess)
+	}
+	if err := Validate(Resolve(map[string]FileDefinition{
+		"plan": {WorkspaceAccess: "shared_write"},
+	})); err == nil || !strings.Contains(err.Error(), "workspace_access") {
+		t.Fatalf("invalid workspace access error = %v", err)
 	}
 }
 

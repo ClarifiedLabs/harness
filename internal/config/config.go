@@ -273,12 +273,13 @@ func DefaultSerenaArgs() []string {
 // agentdef.FileDefinition; config deliberately does not import internal/agentdef (which
 // would pull in the tools/llm layers), so main performs the conversion.
 type FileAgentConfig struct {
-	Description  string   `json:"description"`
-	AllowedTools []string `json:"allowed_tools"`
-	MCPTools     string   `json:"mcp_tools"`
-	Prompt       string   `json:"prompt"`
-	Model        string   `json:"model"` // provider-qualified model-proxy target id
-	Reasoning    string   `json:"reasoning"`
+	Description     string   `json:"description"`
+	AllowedTools    []string `json:"allowed_tools"`
+	MCPTools        string   `json:"mcp_tools"`
+	WorkspaceAccess string   `json:"workspace_access"`
+	Prompt          string   `json:"prompt"`
+	Model           string   `json:"model"` // provider-qualified model-proxy target id
+	Reasoning       string   `json:"reasoning"`
 }
 
 // ImageAttachment is one -image flag value after parsing and detail resolution.

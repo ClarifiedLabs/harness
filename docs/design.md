@@ -2256,7 +2256,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.14 `delegate`
 
-> Delegate broad exploration or separable work; keep small or tightly coupled tasks local. Launch independent calls together, then synthesize without polling.
+> Delegate broad exploration or separable work; keep small or tightly coupled tasks local. Launch independent calls together, then synthesize without polling. Read-only background agents share leases automatically; mutating siblings need distinct scope paths.
 
 | param | type | notes |
 |---|---|---|
@@ -2266,8 +2266,8 @@ this subsection records the common runner those argv tools point at.
 | `max_turns` | int | optional tool-enabled loop budget; defaults to `delegate_max_turns`; the schema publishes that numeric maximum and over-cap values are rejected |
 | `continue_child_id` | string | optional terminal sibling child ID; continues compatible retained state in a fresh child record |
 | `background` | bool | only for independent non-overlapping work; after one useful parent model round, harness joins outstanding delegates and requires synthesis; do not poll or duplicate |
-| `resource_key` | string | background only; defaults to the canonical process cwd |
-| `access` | string | background only; `read_only` or `exclusive` (default) |
+| `scope` | string | background only; workspace path scope, default process cwd |
+| `access` | string | background only; `read_only` or `exclusive`; default inherited from the selected agent |
 
 - Implemented in `internal/delegate`, not `internal/tools`, to avoid an import cycle:
   the delegate tool starts a child `agent.Agent`, while `internal/agent` already
@@ -2350,11 +2350,12 @@ this subsection records the common runner those argv tools point at.
   receipt and `session stats` expose the selected path. Foreground and
   background paths apply the same contract. The latter resolves inherited
   agent/mode/budget fields before scheduling so its launch receipt is truthful.
-- Background launches resolve their resource before scheduling and default to an
-  exclusive lease on the canonical process cwd. A caller may declare
-  `access:"read_only"` only when the child cannot mutate the resource. Lease
-  conflicts fail before child/session creation and identify the active job.
-  Resource and access are persisted in the new child's metadata.
+- Background launches resolve their scope before scheduling. Built-in
+  `explore`/`plan` default to shared `read_only` access; `auto`/`independent`
+  default to `exclusive`, and `mode:"implementation"` is always exclusive.
+  Custom agents set `workspace_access`. Mutating sibling delegates can declare
+  distinct `scope` paths to run concurrently. Lease conflicts fail before
+  child/session creation; normalized scope and access are persisted in metadata.
 - Review groups deliberately compose ordinary background `delegate` calls with
   one stable `background_jobs` `ids`/`until:"all"` join. The parent owns
   synthesis; a coordinator child whose only role is launching and waiting adds

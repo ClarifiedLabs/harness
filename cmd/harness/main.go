@@ -1749,12 +1749,13 @@ func fileAgentDefinitions(agents map[string]config.FileAgentConfig) map[string]a
 	out := make(map[string]agentdef.FileDefinition, len(agents))
 	for name, fa := range agents {
 		out[name] = agentdef.FileDefinition{
-			Description:  fa.Description,
-			AllowedTools: fa.AllowedTools,
-			MCPTools:     fa.MCPTools,
-			Prompt:       fa.Prompt,
-			Model:        fa.Model,
-			Reasoning:    fa.Reasoning,
+			Description:     fa.Description,
+			AllowedTools:    fa.AllowedTools,
+			MCPTools:        fa.MCPTools,
+			WorkspaceAccess: fa.WorkspaceAccess,
+			Prompt:          fa.Prompt,
+			Model:           fa.Model,
+			Reasoning:       fa.Reasoning,
 		}
 	}
 	return out
@@ -1764,12 +1765,13 @@ func configAgentsFromDefinitions(agents map[string]agentdef.Definition) map[stri
 	out := make(map[string]config.FileAgentConfig, len(agents))
 	for name, a := range agents {
 		out[name] = config.FileAgentConfig{
-			Description:  a.Description,
-			AllowedTools: a.AllowedTools,
-			MCPTools:     string(a.MCPTools),
-			Prompt:       a.Prompt,
-			Model:        a.Model,
-			Reasoning:    a.Reasoning,
+			Description:     a.Description,
+			AllowedTools:    a.AllowedTools,
+			MCPTools:        string(a.MCPTools),
+			WorkspaceAccess: a.WorkspaceAccess,
+			Prompt:          a.Prompt,
+			Model:           a.Model,
+			Reasoning:       a.Reasoning,
 		}
 	}
 	return out
@@ -2072,7 +2074,7 @@ func delegateAgentCandidates(agents map[string]agentdef.Definition) []delegate.A
 	out := make([]delegate.AgentCandidate, 0, len(names))
 	for _, name := range names {
 		a := agents[name]
-		out = append(out, delegate.AgentCandidate{Name: name, Description: a.Description, ToolNames: a.AllowedTools})
+		out = append(out, delegate.AgentCandidate{Name: name, Description: a.Description, ToolNames: a.AllowedTools, WorkspaceAccess: a.WorkspaceAccess})
 	}
 	return out
 }

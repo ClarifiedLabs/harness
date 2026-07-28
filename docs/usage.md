@@ -1102,8 +1102,9 @@ continue to merge onto a built-in of the same name:
     "plan": { "prompt": "@~/.config/harness/plan-prompt.md" },
     "security_review": {
       "description": "Use after implementation for an independent review of concrete security issues.",
-      "allowed_tools": ["read_file", "list_dir", "grep", "git_readonly"],
+      "allowed_tools": ["read_file", "list_dir", "search", "git_readonly"],
       "mcp_tools": "read_only",
+      "workspace_access": "read_only",
       "model": "anthropic:claude-opus-4-8",
       "prompt": "Review the diff and surrounding code for security issues. Report only concrete findings."
     }
@@ -1119,6 +1120,12 @@ tools: `disabled`, `read_only`, or `all`. Explicit `mcp__...` names in
 `allowed_tools` still work as a strict whitelist. Tool gating is the one place
 the harness restricts tools; the underlying tools still assume an external
 sandbox for real isolation.
+
+`workspace_access` controls the default background-delegate lease:
+`read_only` permits concurrent children on one scope, while `exclusive`
+conflicts with every active lease for that scope. Built-in `explore` and `plan`
+use `read_only`; `auto`, `independent`, and new custom agents default to
+`exclusive`. Implementation-mode delegates are always exclusive.
 
 ### Planning and implementation handoff
 
