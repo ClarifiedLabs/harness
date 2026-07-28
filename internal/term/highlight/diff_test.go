@@ -27,6 +27,17 @@ func TestDiffAddedLineGoContent(t *testing.T) {
 	}
 }
 
+// The diff background tints are the Codex CLI's dark-terminal palette:
+// truecolor #213A2B for added lines and #4A221D for removed lines.
+func TestDiffBackgroundsAreCodexPalette(t *testing.T) {
+	if want := "\x1b[48;2;33;58;43m"; bgAdded != want {
+		t.Errorf("added background = %q, want Codex #213A2B %q", bgAdded, want)
+	}
+	if want := "\x1b[48;2;74;34;29m"; bgRemoved != want {
+		t.Errorf("removed background = %q, want Codex #4A221D %q", bgRemoved, want)
+	}
+}
+
 func TestDiffRemovedLineTint(t *testing.T) {
 	d := NewDiff("go")
 	got := d.Line(`-return "x"`)

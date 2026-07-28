@@ -2,13 +2,15 @@ package highlight
 
 import "strings"
 
-// Background tints for added and removed diff lines, GitHub-style. Use the
-// darkest red and green entries in the ANSI-256 cube: the basic bright
-// backgrounds are too intense for a full line, while these keep the syntax
-// foreground colors distinct over a subdued tint.
+// Background tints for added and removed diff lines, taken from the Codex
+// CLI's dark-terminal palette: #213A2B green, #4A221D red. These truecolor
+// tints are more desaturated than the darkest ANSI-256 cube entries (22 and
+// 52, used here before), so syntax foreground colors stay distinct over a
+// subdued tint. Terminals without 24-bit color quantize them to their
+// nearest palette entries.
 const (
-	bgAdded   = "\x1b[48;5;22m"
-	bgRemoved = "\x1b[48;5;52m"
+	bgAdded   = "\x1b[48;2;33;58;43m"
+	bgRemoved = "\x1b[48;2;74;34;29m"
 	// eraseToEOL clears from the cursor to the end of the row. Emitted while
 	// a background color is active, terminals with BCE (background color
 	// erase) fill the cleared cells with that color, extending the tint to

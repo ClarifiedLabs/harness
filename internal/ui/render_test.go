@@ -266,8 +266,8 @@ func TestToolDiffColor(t *testing.T) {
 	for _, want := range []string{
 		"\x1b[36m---",            // header cyan
 		"\x1b[35m@@",             // hunk magenta
-		"\x1b[48;5;22m\x1b[32m+", // added line: subdued green bg, green sigil
-		"\x1b[48;5;52m\x1b[31m-", // removed line: subdued red bg, red sigil
+		"\x1b[48;2;33;58;43m\x1b[32m+", // added line: subdued green bg, green sigil
+		"\x1b[48;2;74;34;29m\x1b[31m-", // removed line: subdued red bg, red sigil
 		"\x1b[35mfunc",           // Go keyword in magenta
 		"\x1b[0K",                // erase-to-EOL extends the tint to the window edge
 	} {
@@ -293,7 +293,7 @@ func TestToolDiffColorUnknownLanguage(t *testing.T) {
 	r.ToolDiff(llm.ToolCall{ID: "c1", Name: "edit"}, "notes.txt", text)
 
 	got := errw.String()
-	for _, want := range []string{"\x1b[48;5;22m", "\x1b[32m+", "\x1b[48;5;52m", "\x1b[31m-"} {
+	for _, want := range []string{"\x1b[48;2;33;58;43m", "\x1b[32m+", "\x1b[48;2;74;34;29m", "\x1b[31m-"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("colored diff missing %q:\n%q", want, got)
 		}
