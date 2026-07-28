@@ -375,6 +375,14 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   provider-specific count APIs for OpenAI Responses and Anthropic Messages when
   available through `harness-model-proxy`; a local `o200k_base` BPE estimate for
   OpenAI/OpenRouter Chat Completions; then the coarse byte-based heuristic.
+  Once a turn reports real usage, the *reported* context (`turn_attempt_start`
+  and `/context`) anchors to that actual input (uncached plus cache read/write)
+  plus a local estimate of only the messages appended since — count APIs can
+  systematically miss provider-billed opaque replay state such as thinking
+  signatures. Compaction or retention resets the anchor until the next measured
+  turn. In the byte heuristic, opaque payloads (thinking signatures,
+  encrypted/redacted reasoning, interaction steps) are weighted separately from
+  prose (8 vs 4 bytes/token) because base64-style blobs tokenize much coarser.
 
 Harness automatically adds static AGENTS instructions from
 `~/.agents/AGENTS.md`, then from `AGENTS.md` in the current working directory.

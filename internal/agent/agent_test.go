@@ -3571,3 +3571,77 @@ func TestPostPromptEstimateDoesNotConsumeRequestContext(t *testing.T) {
 		t.Fatal("post-prompt estimate did not use PeekRequestContext")
 	}
 }
+
+// TestReportedContextAnchorsToMeasuredUsage pins WI-2: after a turn reports
+// real usage, the next turn_attempt_start context total anchors to that
+// measurement plus a local delta estimate, even when the provider count-token
+// endpoint returns a much lower figure (Kimi's count route excludes billed
+// thinking-signature replay).
+func TestReportedContextAnchorsToMeasuredUsage(t *testing.T) {
+	fp := &countingProvider{
+		FakeProvider: llmtest.New("fake",
+			llmtest.Step{
+				Events: []llm.StreamEvent{textDelta("one"), toolDone(0, "call_1", "probe", `{}`)},
+				Stop:   llm.StopToolUse,
+				Usage:  llm.Usage{InputTokens: 800, CacheReadTokens: 200},
+			},
+			llmtest.Step{Events: []llm.StreamEvent{textDelta("two")}, Stop: llm.StopEndTurn},
+		),
+		count: 10, // count API claims the request is tiny
+	}
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{name: "probe", readOnly: true, run: func(context.Context, json.RawMessage) (string, error) {
+		return "ok", nil
+	}})
+	a := newAgent(fp, reg, Options{})
+	sink := &recordSink{}
+	if err := a.RunPrompt(context.Background(), "work", sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.contexts) != 2 {
+		t.Fatalf("turn_attempt_start contexts = %d, want 2", len(sink.contexts))
+	}
+	if sink.contexts[0].Total >= 1000 {
+		t.Fatalf("turn 1 context = %d, want the low count-adjusted estimate before any measurement", sink.contexts[0].Total)
+	}
+	if sink.contexts[1].Total < 1000 {
+		t.Fatalf("turn 2 context = %d, want >= the measured 1000 (800 input + 200 cache read) despite the low count", sink.contexts[1].Total)
+	}
+	// Per-section estimates still come from the estimator, not the anchor.
+	if sink.contexts[1].System != sink.contexts[0].System || sink.contexts[1].Tools != sink.contexts[0].Tools {
+		t.Fatalf("section estimates changed under anchoring: %+v vs %+v", sink.contexts[0], sink.contexts[1])
+	}
+}
+
+// TestMeasuredAnchorClearsAfterCompaction pins the fallback half of WI-2: a
+// compaction that rewrites the transcript clears the measured anchor, so the
+// reported context returns to the local estimate until the next measured turn
+// (the anchor must not make the estimate non-monotonic across a shrink).
+func TestMeasuredAnchorClearsAfterCompaction(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 5000}},
+		summaryStep("CANNED SUMMARY", 200, 40),
+	)
+	a := newAgent(fp, tools.Default(), Options{Model: "claude-opus-4-8"})
+	a.SetSystem("system prompt")
+	a.SetTranscript(makeTurns(10))
+
+	if err := a.RunPrompt(context.Background(), "keep going", &recordSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.ContextRequest().EstimatedInputTokens; got < 5000 {
+		t.Fatalf("/context estimate after measured turn = %d, want anchored to >= 5000", got)
+	}
+
+	if _, err := a.Compact(context.Background(), &recordSink{}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	got := a.ContextRequest().EstimatedInputTokens
+	if got >= 5000 {
+		t.Fatalf("/context estimate after compaction = %d, want the unanchored local estimate", got)
+	}
+	want := a.EstimateContext().Total
+	if got != want {
+		t.Fatalf("/context estimate after compaction = %d, want the estimator's %d", got, want)
+	}
+}

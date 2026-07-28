@@ -1667,3 +1667,29 @@ func TestPostTurnCompactionUsesFreshTranscriptEstimate(t *testing.T) {
 		t.Errorf("prompt input tokens = %d, want 60 including summary call", got)
 	}
 }
+
+// TestEstimateTokensWeightsOpaqueFieldsSeparately pins the WI-2 estimator
+// split: provider-opaque payloads (thinking signatures, encrypted/redacted
+// reasoning, interaction steps) tokenize far coarser than prose, so they use
+// opaqueBytesPerToken while text (including thinking text) uses bytesPerToken.
+func TestEstimateTokensWeightsOpaqueFieldsSeparately(t *testing.T) {
+	thinking := strings.Repeat("t", 400)
+	signature := strings.Repeat("s", 4340) // session-observed Kimi signature size
+	msgs := []llm.Message{{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+		{Kind: llm.BlockThinking, Thinking: thinking, ThinkingSignature: signature},
+	}}}
+	got := estimateTokens(msgs)
+	want := len(thinking)/bytesPerToken + len(signature)/opaqueBytesPerToken
+	if got != want {
+		t.Fatalf("estimateTokens = %d, want %d (text %d bytes / %d + signature %d bytes / %d)",
+			got, want, len(thinking), bytesPerToken, len(signature), opaqueBytesPerToken)
+	}
+
+	// The request-side estimator agrees (its block also counts the kind tag and
+	// the message role).
+	req := estimateRequest(llm.Request{Messages: msgs}, 0)
+	wantReq := (len(string(llm.RoleAssistant))+len(string(llm.BlockThinking))+len(thinking))/bytesPerToken + len(signature)/opaqueBytesPerToken
+	if req.Messages != wantReq {
+		t.Fatalf("estimateRequest messages = %d, want %d", req.Messages, wantReq)
+	}
+}

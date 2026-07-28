@@ -462,10 +462,18 @@ type Agent struct {
 	steer                     chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
 	responseState             llm.ResponseState
 	responseStateEpoch        uint64
-	retentionPolicy           RetentionPolicy
-	retentionEpochArmed       bool
-	proxySessionID            string
-	cacheAffinityID           string
+	// measuredInput/measuredBoundary persist the last turn's actual billed
+	// input (uncached + cache read/write) and the transcript length it
+	// measured, so the next reported context estimate can anchor to actuals
+	// instead of a count-API/byte estimate that may systematically miss opaque
+	// replay state. Zeroed whenever compaction or retention rewrites the
+	// transcript outside a run's own tracking.
+	measuredInput       int
+	measuredBoundary    int
+	retentionPolicy     RetentionPolicy
+	retentionEpochArmed bool
+	proxySessionID      string
+	cacheAffinityID     string
 }
 
 type compactFallbackNoticeState struct {
@@ -757,20 +765,29 @@ func (a *Agent) ContextRequest() llm.Request {
 }
 
 // ContextRequestWithContext is ContextRequest plus request-only context, matching
-// the message shape used by RunPromptContentWithContext.
+// the message shape used by RunPromptContentWithContext. EstimatedInputTokens
+// is the current estimate anchored to the last measured turn when one exists.
 func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
+	est := a.anchorContextEstimate(estimateRequest(llm.Request{
+		System:         a.system,
+		Messages:       a.transcript,
+		Tools:          a.toolSpecs,
+		ServerTools:    a.serverTools,
+		RequestContext: extraContext,
+	}, a.window()), a.measuredInput, a.measuredBoundary)
 	return llm.Request{
-		Model:           a.model,
-		Purpose:         llm.RequestPurposeTurn,
-		System:          a.system,
-		Messages:        append([]llm.Message(nil), a.transcript...),
-		Tools:           cloneToolSpecs(a.toolSpecs),
-		ServerTools:     cloneServerTools(a.serverTools),
-		Reasoning:       a.reasoning,
-		RequestContext:  append([]string(nil), extraContext...),
-		ProxySessionID:  a.proxySessionID,
-		CacheAffinityID: a.cacheAffinityID,
-		CachePolicy:     a.cachePolicyForTranscript(a.transcript, 0, false),
+		Model:                a.model,
+		Purpose:              llm.RequestPurposeTurn,
+		System:               a.system,
+		Messages:             append([]llm.Message(nil), a.transcript...),
+		Tools:                cloneToolSpecs(a.toolSpecs),
+		ServerTools:          cloneServerTools(a.serverTools),
+		Reasoning:            a.reasoning,
+		RequestContext:       append([]string(nil), extraContext...),
+		ProxySessionID:       a.proxySessionID,
+		CacheAffinityID:      a.cacheAffinityID,
+		CachePolicy:          a.cachePolicyForTranscript(a.transcript, 0, false),
+		EstimatedInputTokens: est.Total,
 	}
 }
 
@@ -974,6 +991,24 @@ func (a *Agent) triggerTokens(lastInput, boundary int) int {
 		boundary = len(a.transcript)
 	}
 	return lastInput + estimateTokens(a.transcript[boundary:])
+}
+
+// anchorContextEstimate anchors the reported context total to the last
+// measured input (actual billed usage: uncached + cache read/write) plus a
+// local estimate of the messages appended since that measurement — the same
+// r44 pattern as the compaction trigger. Provider count-token endpoints can
+// systematically under-report opaque replay state (some Anthropic-compatible
+// endpoints bill thinking signatures the count route ignores), so once a turn
+// has been measured, actuals are the honest baseline. With no measurement
+// (fresh run, or after a compaction/retention reset) the estimate passes
+// through unchanged. Per-section (system/tools/messages) estimates and the
+// payload breakdown stay estimator-based; only the reported total anchors.
+func (a *Agent) anchorContextEstimate(est ContextEstimate, lastInput, boundary int) ContextEstimate {
+	if lastInput <= 0 {
+		return est
+	}
+	est.Total = a.triggerTokens(lastInput, boundary)
+	return est
 }
 
 func (a *Agent) estimateContext(extraContext []string) ContextEstimate {
@@ -1247,14 +1282,17 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 
 	var total llm.Usage
 	var maintenanceTotal llm.Usage
-	var lastInput int // input tokens the final turn reported (drives the trigger)
+	// Seed the measurement anchor from the previous prompt's final measured
+	// turn so the reported context and the r44 trigger stay anchored to
+	// actuals across prompts; compaction/retention resets below clear it.
+	lastInput := a.measuredInput // input tokens the final measured turn reported (drives the trigger)
 	var lastContext ContextEstimate
 	turns := 0
 	unlimited := a.maxTurns <= 0
 	stopHookActive := false
 	var guard turnGuard
-	var wastedTotal llm.Usage // tokens spent on retried-and-discarded turn attempts (r51+r52)
-	appendBoundary := 0       // transcript length measured by lastInput (drives the r44 trigger)
+	var wastedTotal llm.Usage            // tokens spent on retried-and-discarded turn attempts (r51+r52)
+	appendBoundary := a.measuredBoundary // transcript length measured by lastInput (drives the r44 trigger)
 	var steerContext []string
 	forcePromptWorkSynthesis := false
 	nextMilestone := 0
@@ -1284,6 +1322,10 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		})
 	}
 	defer func() {
+		// Persist the measurement anchor for the next prompt and for /context;
+		// it stays zero after a compaction/retention reset until the next
+		// measured turn.
+		a.measuredInput, a.measuredBoundary = lastInput, appendBoundary
 		reason := terminationReason
 		if retErr != nil {
 			reason = TerminationError
@@ -1330,7 +1372,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		initialPromptPending = false
 		requestContext := a.requestContext(appendPromptContext(extraContext, steerContext), sink)
 		modelReq := a.modelRequest(requestContext)
-		lastContext = modelReq.estimate
+		lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 		// Proactive trigger (spec §4): a turn whose tool results balloon the
 		// context compacts before the next request, not after the turn. The
 		// trigger leans on the last real input count plus an estimate of only the
@@ -1354,14 +1396,14 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 				appendBoundary = 0
 				requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
 				modelReq = a.modelRequest(requestContext)
-				lastContext = modelReq.estimate
+				lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 			}
 		}
 		if err := a.validateRetainedTranscript("before model request"); err != nil {
 			return err
 		}
 		modelReq = a.countModelRequestInput(ctx, modelReq)
-		lastContext = modelReq.estimate
+		lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 		if a.autoCompactionEnabled() && a.overThreshold(modelReq.estimate.Total) {
 			compUsage, changed, err := a.compactTriggered(ctx, sink, "input-count")
 			if compUsage != (llm.Usage{}) {
@@ -1377,7 +1419,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 					return err
 				}
 				modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
-				lastContext = modelReq.estimate
+				lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 			}
 		}
 		if err := a.validateRetainedTranscript("before model request"); err != nil {
@@ -1425,7 +1467,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 					} else {
 						requestContext = a.requestContext(appendPromptContext(extraContext, steerContext), sink)
 						modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
-						lastContext = modelReq.estimate
+						lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 						res, wasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
 					}
 				}
@@ -1435,7 +1477,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			a.SetResponsesStateful(false)
 			sink.Notice("[responses state disabled: provider rejected stored responses; retrying stateless]")
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
-			lastContext = modelReq.estimate
+			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 			var retryWasted llm.Usage
 			res, retryWasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
 			wasted = add(wasted, retryWasted)
@@ -1444,7 +1486,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			a.resetResponseState()
 			sink.Notice("[responses state reset: previous response unavailable; retrying with full context]")
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
-			lastContext = modelReq.estimate
+			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 			var retryWasted llm.Usage
 			res, retryWasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
 			wasted = add(wasted, retryWasted)

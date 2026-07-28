@@ -56,6 +56,23 @@ func (a *Agent) compactBudget() int {
 // tokenizer or another model round-trip (design §12).
 const bytesPerToken = 4
 
+// clearMeasuredContext drops the actual-usage anchor: a compaction rewrite
+// shrunk the transcript, so the pre-rewrite measurement would overstate every
+// later estimate until the next measured turn.
+func (a *Agent) clearMeasuredContext() {
+	a.measuredInput = 0
+	a.measuredBoundary = 0
+}
+
+// opaqueBytesPerToken weights provider-opaque payloads (thinking signatures,
+// encrypted/redacted reasoning, interaction thought signatures and steps).
+// Base64-ish opaque blobs tokenize far coarser than prose — a session with
+// 4,340-char thinking signatures measured ~13.8 chars/token, English text
+// runs ~4.5 — so they get their own divisor between the two. Still coarse;
+// it only reduces the systematic over/under-counting bias in estimates that
+// cannot use a measured anchor (retention pressure, degradation ladder).
+const opaqueBytesPerToken = 8
+
 const (
 	defaultSummaryMaxTokens      = 2048
 	defaultSummaryToolResultSize = 4096
@@ -224,6 +241,7 @@ func (a *Agent) ApplyIdleCompaction(ctx context.Context, sink EventSink, result 
 	)
 	a.transcript = compacted
 	a.validatedPrefix = 0
+	a.clearMeasuredContext()
 	// A compacted transcript is a new baseline: re-arm pressure retention so the
 	// next high-water pass can fire an epoch even when compaction lands between
 	// the low and high watermarks.
@@ -482,6 +500,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 
 	a.transcript = compacted
 	a.validatedPrefix = 0        // the transcript was rewritten; re-validate from scratch (r62)
+	a.clearMeasuredContext()     // the pre-compaction measurement no longer describes it
 	a.retentionEpochArmed = true // a compacted transcript is a new retention baseline
 	a.ResetProxySessionID()
 	a.compactFallbackNotice = compactFallbackNoticeState{}
@@ -538,6 +557,7 @@ func (a *Agent) degradeCurrent(sink EventSink, trigger string) (bool, error) {
 	}
 	a.transcript = compacted
 	a.validatedPrefix = 0        // the transcript was rewritten; re-validate from scratch (r62)
+	a.clearMeasuredContext()     // the pre-shrink measurement no longer describes it
 	a.retentionEpochArmed = true // a compacted transcript is a new retention baseline
 	a.ResetProxySessionID()
 	a.noticeCurrentShrink(sink, trigger, before, after)
@@ -1435,30 +1455,33 @@ const imageTokenEstimate = 1600
 // than their base64 byte length. Coarse by design: it only gates the
 // degradation ladder and retention reclaim check (design §12).
 func estimateTokens(msgs []llm.Message) int {
-	bytes, images := 0, 0
+	bytes, opaque, images := 0, 0, 0
 	for _, m := range msgs {
 		for _, b := range m.Content {
-			blockBytes, blockImages := estimateTranscriptContentBlock(b)
+			blockBytes, blockOpaque, blockImages := estimateTranscriptContentBlock(b)
 			bytes += blockBytes
+			opaque += blockOpaque
 			images += blockImages
 		}
 	}
-	return bytes/bytesPerToken + images*imageTokenEstimate
+	return bytes/bytesPerToken + opaque/opaqueBytesPerToken + images*imageTokenEstimate
 }
 
-func estimateTranscriptContentBlock(b llm.ContentBlock) (bytes, images int) {
+func estimateTranscriptContentBlock(b llm.ContentBlock) (bytes, opaque, images int) {
 	if b.Kind == llm.BlockImage {
-		return len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName), 1
+		return len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName), 0, 1
 	}
-	bytes = len(b.Text) + len(b.ResultText) + len(b.ToolInput) + len(b.ToolName)
-	bytes += len(b.ReasoningID) + len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
-	bytes += len(b.InteractionThoughtSummary) + len(b.InteractionThoughtSignature) + len(b.InteractionStep)
+	bytes = len(b.Text) + len(b.Thinking) + len(b.ResultText) + len(b.ToolInput) + len(b.ToolName)
+	bytes += len(b.ReasoningID) + len(b.InteractionThoughtSummary)
+	opaque = len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
+	opaque += len(b.InteractionThoughtSignature) + len(b.InteractionStep)
 	for _, child := range b.ResultContent {
-		childBytes, childImages := estimateTranscriptContentBlock(child)
+		childBytes, childOpaque, childImages := estimateTranscriptContentBlock(child)
 		bytes += childBytes
+		opaque += childOpaque
 		images += childImages
 	}
-	return bytes, images
+	return bytes, opaque, images
 }
 
 func estimateRequest(req llm.Request, window int) ContextEstimate {
@@ -1471,12 +1494,14 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 		toolBytes += len(t.Name) + len(t.Kind) + len(t.Parameters)
 	}
 	messageBytes := 0
+	opaqueBytes := 0
 	images := 0
 	for _, m := range req.Messages {
 		messageBytes += len(m.Role)
 		for _, b := range m.Content {
-			blockBytes, blockImages := estimateRequestContentBlock(b)
+			blockBytes, blockOpaque, blockImages := estimateRequestContentBlock(b)
 			messageBytes += blockBytes
+			opaqueBytes += blockOpaque
 			images += blockImages
 		}
 	}
@@ -1484,7 +1509,7 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 	est := ContextEstimate{
 		System:   systemBytes / bytesPerToken,
 		Tools:    toolBytes / bytesPerToken,
-		Messages: messageBytes/bytesPerToken + images*imageTokenEstimate,
+		Messages: messageBytes/bytesPerToken + opaqueBytes/opaqueBytesPerToken + images*imageTokenEstimate,
 		Window:   window,
 	}
 	est.Total = est.System + est.Tools + est.Messages
@@ -1495,20 +1520,22 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 	return est
 }
 
-func estimateRequestContentBlock(b llm.ContentBlock) (bytes, images int) {
+func estimateRequestContentBlock(b llm.ContentBlock) (bytes, opaque, images int) {
 	if b.Kind == llm.BlockImage {
-		return len(b.Kind) + len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName), 1
+		return len(b.Kind) + len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName), 0, 1
 	}
-	bytes = len(b.Kind) + len(b.Text) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolInput) +
+	bytes = len(b.Kind) + len(b.Text) + len(b.Thinking) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolInput) +
 		len(b.ResultForID) + len(b.ResultText)
-	bytes += len(b.ReasoningID) + len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
-	bytes += len(b.InteractionThoughtSummary) + len(b.InteractionThoughtSignature) + len(b.InteractionStep)
+	bytes += len(b.ReasoningID) + len(b.InteractionThoughtSummary)
+	opaque = len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
+	opaque += len(b.InteractionThoughtSignature) + len(b.InteractionStep)
 	for _, child := range b.ResultContent {
-		childBytes, childImages := estimateRequestContentBlock(child)
+		childBytes, childOpaque, childImages := estimateRequestContentBlock(child)
 		bytes += childBytes
+		opaque += childOpaque
 		images += childImages
 	}
-	return bytes, images
+	return bytes, opaque, images
 }
 
 // compactionReport describes semantic turn reclamation and the resulting full
