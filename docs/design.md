@@ -2104,13 +2104,15 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.9 `git`
 
-> Run git without a shell or pager. Input is an object: use workflow workspace_summary for branch, status, diff sizes, and whitespace checks; otherwise args must be an array of strings, not a string.
+> Run git without a shell or pager. Use workspace_summary for compact status or workflow commit with an explicit paths[] list and message to stage, check, commit, and report in one call; otherwise args must be an array of strings.
 
 | param | type | notes |
 |---|---|---|
 | `args` | array of strings | argv after `git`; mutually exclusive with `workflow`; must not be a string or JSON-encoded array |
-| `workflow` | string | `workspace_summary`; mutually exclusive with `args` |
+| `workflow` | string | `workspace_summary` or `commit`; mutually exclusive with `args` |
 | `cwd` | string | default process cwd |
+| `paths` | array of strings | required for `commit`; exact repository-relative files only (max 100) |
+| `message` | string | required for `commit`; conventional commit message |
 
 - `git` is registered only when `exec.LookPath("git")` succeeds at registry
   construction time. If git is not installed, the model never sees the `git` tool name.
@@ -2133,6 +2135,12 @@ this subsection records the common runner those argv tools point at.
   diffstat/whitespace sections, reports `whitespace: clean` when applicable, and
   handles an unborn repository explicitly. It does not include the full patch;
   the model uses a subsequent raw `git diff` only when patch inspection is needed.
+- `commit` validates an explicit file list, rejects broad paths, directories,
+  globs, pathspec magic, duplicates, and absolute paths, then runs `git add`,
+  staged `diff --check`, a staged-change check, and `git commit` scoped by `--`
+  to those paths. Unrelated staged changes remain staged. The compact receipt
+  reports the new short hash/subject, committed files, and remaining status.
+  Failures leave the staging area recoverable.
 
 ### 9.10 `web_fetch`
 
@@ -2238,6 +2246,9 @@ this subsection records the common runner those argv tools point at.
   before the idle prompt when the current visible agent has `update_todos`, and
   the visible todo status is printed after each successful `update_todos` call.
   One-shot runs and child-agent private todo stores do not print there.
+- Built-in `auto` and `independent` omit the tool to avoid progress-only model
+  turns; `plan` keeps it and custom agents can whitelist it. When exposed, prompt
+  guidance asks the model to co-issue it with an independent substantive call.
 
 ### 9.14 `delegate`
 
@@ -2533,7 +2544,8 @@ backoff allows.
 
 ### 9.18 `request_implementation` (`internal/plan` + `internal/tools`)
 
-- The plan agent's request to hand the recorded plan to an implementation agent.
+- The plan agent's or interactive auto agent's request to hand the recorded plan
+  to an implementation agent.
   Input is `{brief, agent?}`. It requires and always selects the most recently
   recorded plan; the implementation agent reads the plan as its task spec rather
   than being handed only the brief. Model selection belongs to the target agent's
@@ -3391,7 +3403,8 @@ reviewer, or the wide-open default without separate binaries.
   selection path—not a display-name or model-only swap—so it recomposes the agent
   prompt, tools, model/reasoning selection, and response continuation state.
 - **Built-ins:** `auto` (all available built-in tools plus discovered MCP tools,
-  including `record_plan`, `delegate` and background job tools; its
+  including `record_plan`, `delegate` and background job tools, and
+  `request_implementation` in interactive sessions; its
   `prompts/agents/auto.txt` is a one-byte file — a single newline — that trims to
   empty, so it contributes no prompt body), `explore` (the shared inspection
   tools — `read_file`, `list_dir`, `glob`, configured search tool(s),
@@ -3413,7 +3426,8 @@ reviewer, or the wide-open default without separate binaries.
   available `git` as satisfying a required `git_readonly`, so these parents can
   still delegate to `explore`/`plan`. `record_plan` (§9.17) is in every default
   agent's set;
-  `request_implementation` (§9.18) is plan-only.
+  `request_implementation` (§9.18) is exposed to `plan` and to interactive
+  `auto`, but not to one-shot `auto` or `independent`.
 - **Descriptions are required selection metadata:** after resolution, every agent
   must have a nonblank trimmed `description` stating when a parent should use it.
   A new custom name without one is a fail-fast startup/`--agents`/`--show-config`

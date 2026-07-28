@@ -1122,9 +1122,10 @@ sandbox for real isolation.
 The `plan` agent investigates and designs without modifying the project. It can
 use `record_plan` to persist a durable Markdown plan under the session, then
 `request_implementation` to propose handing the latest plan to an implementation
-agent. At the prompt boundary, Harness displays the handoff brief and asks for
-approval before switching agents and starting implementation with a clean
-context seeded by the plan.
+agent. Interactive `auto` also exposes that handoff tool, so a plan recorded
+without switching modes can take the same path. At the prompt boundary, Harness
+displays the handoff brief and asks for approval before switching agents and
+starting implementation with a clean context seeded by the plan.
 
 `/handoff [-a agent] [-m model] [message]` performs the same review manually.
 `-a` overrides the configured target agent, `-m` applies a one-off model

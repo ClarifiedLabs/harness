@@ -2853,6 +2853,22 @@ func TestRunDefaultAgentTools(t *testing.T) {
 	}
 }
 
+func TestRunInteractiveAutoExposesImplementationHandoff(t *testing.T) {
+	fp := llmtest.New("fake", okStepWithUsage(1, 1))
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8"}, fp, "hi\n/exit\n")
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	names := toolNames(fp.Requests[0])
+	if !slices.Contains(names, "request_implementation") {
+		t.Fatalf("interactive auto tools missing request_implementation: %v", names)
+	}
+	if slices.Contains(names, "update_todos") {
+		t.Fatalf("interactive auto tools include progress-only update_todos: %v", names)
+	}
+}
+
 func TestRunDelegateToolUsesCurrentAgentTools(t *testing.T) {
 	fp := llmtest.New("fake",
 		llmtest.Step{
@@ -3718,7 +3734,28 @@ func expectedDefaultToolNames() []string {
 	// The default set omits git_readonly: git already covers it, and read-only
 	// agents remain delegatable via the git->git_readonly subset rule.
 	names := tools.DefaultNames()
-	return append(names, "update_todos", "delegate", "background_jobs", "record_plan")
+	return append(names, "delegate", "background_jobs", "record_plan")
+}
+
+func TestEnableInteractiveAutoHandoff(t *testing.T) {
+	agents := agentdef.Builtins()
+	enableInteractiveAutoHandoff(agents)
+	if !slices.Contains(agents["auto"].AllowedTools, "request_implementation") {
+		t.Fatalf("interactive auto tools missing request_implementation: %v", agents["auto"].AllowedTools)
+	}
+	enableInteractiveAutoHandoff(agents)
+	count := 0
+	for _, name := range agents["auto"].AllowedTools {
+		if name == "request_implementation" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("request_implementation count = %d, want 1", count)
+	}
+	if slices.Contains(agents["independent"].AllowedTools, "request_implementation") {
+		t.Fatalf("interactive handoff leaked to independent: %v", agents["independent"].AllowedTools)
+	}
 }
 
 func TestResolveCatalogSelectionHonorsExplicitProvider(t *testing.T) {

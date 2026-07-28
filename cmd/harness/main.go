@@ -365,10 +365,14 @@ func run(env environment) int {
 		return ui.ExitUsage
 	}
 
+	interactiveSession := !cfg.PromptSet && !env.stdinPiped
 	agents, err := resolveConfiguredAgents(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
+	}
+	if interactiveSession {
+		enableInteractiveAutoHandoff(agents)
 	}
 	agentName := cfg.Agent
 	if resumed != nil && resumed.Agent != "" {
@@ -405,7 +409,6 @@ func run(env environment) int {
 	if startupAgent.Reasoning != "" {
 		reasoning.Profile = startupAgent.Reasoning
 	}
-	interactiveSession := !cfg.PromptSet && !env.stdinPiped
 	startProvider, startModel := agentModelInputs(startupAgent, cfg.Provider, cfg.Model)
 	selection, err := resolveCatalogSelection(catalog, startProvider, startModel, cfg.Provider)
 	if err != nil {
@@ -1456,6 +1459,20 @@ func resolveConfiguredAgents(cfg config.Config) (map[string]agentdef.Definition,
 		return nil, err
 	}
 	return agents, nil
+}
+
+func enableInteractiveAutoHandoff(agents map[string]agentdef.Definition) {
+	auto, ok := agents[agentdef.Default]
+	if !ok {
+		return
+	}
+	for _, name := range auto.AllowedTools {
+		if name == "request_implementation" {
+			return
+		}
+	}
+	auto.AllowedTools = append(auto.AllowedTools, "request_implementation")
+	agents[agentdef.Default] = auto
 }
 
 func searchBackend() string {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -21,10 +22,18 @@ const gitSchema = `{
     },
     "workflow": {
       "type": "string",
-      "enum": ["workspace_summary"],
-      "description": "Run a compact read-only workspace survey. Mutually exclusive with args."
+      "enum": ["workspace_summary", "commit"],
+      "description": "Run a structured workspace survey or explicit-path commit. Mutually exclusive with args."
     },
-    "cwd": {"type": "string", "description": "Working directory (default: process cwd)."}
+    "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
+    "paths": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 1,
+      "maxItems": 100,
+      "description": "Exact repository-relative file paths for workflow commit; broad paths and globs are rejected."
+    },
+    "message": {"type": "string", "description": "Conventional commit message for workflow commit."}
   }
 }`
 
@@ -58,7 +67,7 @@ func GitAvailable() bool {
 func (gitTool) Name() string { return "git" }
 
 func (gitTool) Description() string {
-	return "Run git without a shell or pager. Input is an object: use workflow workspace_summary for branch, status, diff sizes, and whitespace checks; otherwise args must be an array of strings, not a string."
+	return "Run git without a shell or pager. Input is an object: use workspace_summary for compact status or workflow commit with an explicit paths[] list and message to stage, check, commit, and report in one call; otherwise args must be an array of strings, not a string."
 }
 
 func (gitTool) Schema() json.RawMessage { return json.RawMessage(gitSchema) }
@@ -87,6 +96,8 @@ func (g gitTool) Run(ctx context.Context, input json.RawMessage) (string, error)
 		return "", badArgs("provide args or workflow, not both")
 	case gi.Workflow == gitWorkflowWorkspaceSummary:
 		return g.workspaceSummary(ctx, gi.Cwd)
+	case gi.Workflow == gitWorkflowCommit:
+		return g.commitPaths(ctx, gi)
 	case gi.Workflow != "":
 		return "", badArgs("unknown workflow %q", gi.Workflow)
 	case len(gi.Args) == 0:
@@ -101,9 +112,12 @@ type gitInput struct {
 	Args     []string `json:"args"`
 	Workflow string   `json:"workflow"`
 	Cwd      string   `json:"cwd"`
+	Paths    []string `json:"paths"`
+	Message  string   `json:"message"`
 }
 
 const gitWorkflowWorkspaceSummary = "workspace_summary"
+const gitWorkflowCommit = "commit"
 
 func decodeGitArgs(input json.RawMessage) (gitInput, error) {
 	// Bare array still works for args-only calls.
@@ -115,6 +129,9 @@ func decodeGitArgs(input json.RawMessage) (gitInput, error) {
 	var gi gitInput
 	if err := json.Unmarshal(input, &gi); err != nil {
 		return gitInput{}, err
+	}
+	if gi.Workflow != gitWorkflowCommit && (len(gi.Paths) > 0 || strings.TrimSpace(gi.Message) != "") {
+		return gitInput{}, badArgs("paths and message require workflow commit")
 	}
 	return gi, nil
 }
@@ -237,6 +254,122 @@ func (g gitTool) workspaceSummary(ctx context.Context, cwd string) (string, erro
 		} else if !stagedCheck.success() {
 			writeGitSummarySection(&b, "staged whitespace check", stagedCheck.receiptStatus())
 		}
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+func (g gitTool) commitPaths(ctx context.Context, input gitInput) (string, error) {
+	if err := validateCwd(input.Cwd); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(input.Message) == "" {
+		return "", badArgs("message is required for workflow commit")
+	}
+	if len(input.Paths) == 0 {
+		return "", badArgs("paths is required for workflow commit")
+	}
+	if len(input.Paths) > 100 {
+		return "", badArgs("paths must contain at most 100 items")
+	}
+	seen := map[string]bool{}
+	for i, path := range input.Paths {
+		path = filepath.ToSlash(strings.TrimSpace(path))
+		clean := filepath.ToSlash(filepath.Clean(path))
+		switch {
+		case path == "":
+			return "", badArgs("paths[%d] must not be empty", i)
+		case filepath.IsAbs(path):
+			return "", badArgs("paths[%d] must be repository-relative", i)
+		case clean != path || path == "." || path == ".." || strings.HasPrefix(path, "../") || strings.HasSuffix(path, "/"):
+			return "", badArgs("paths[%d] must name an explicit file, not %q", i, path)
+		case strings.ContainsAny(path, "*?[") || strings.HasPrefix(path, ":("):
+			return "", badArgs("paths[%d] must not contain pathspec magic or globs", i)
+		case seen[path]:
+			return "", badArgs("paths[%d] duplicates %q", i, path)
+		}
+		checkPath := path
+		if input.Cwd != "" {
+			checkPath = filepath.Join(input.Cwd, filepath.FromSlash(path))
+		}
+		if info, err := os.Stat(checkPath); err == nil && info.IsDir() {
+			return "", badArgs("paths[%d] must name a file, not directory %q", i, path)
+		}
+		seen[path] = true
+		input.Paths[i] = path
+	}
+
+	addArgs := append([]string{"add", "--"}, input.Paths...)
+	add, err := runGitWorkflowCommand(ctx, g.program, input.Cwd, addArgs...)
+	if err != nil {
+		return "", err
+	}
+	if !add.success() {
+		return "", fmt.Errorf("git commit workflow add failed (%s): %s", add.receiptStatus(), strings.TrimSpace(add.Output))
+	}
+
+	checkArgs := append([]string{"diff", "--cached", "--check", "--"}, input.Paths...)
+	check, err := runGitWorkflowCommand(ctx, g.program, input.Cwd, checkArgs...)
+	if err != nil {
+		return "", err
+	}
+	if !check.success() {
+		return "", fmt.Errorf("git commit workflow whitespace check failed (%s): %s", check.receiptStatus(), strings.TrimSpace(check.Output))
+	}
+
+	quietArgs := append([]string{"diff", "--cached", "--quiet", "--"}, input.Paths...)
+	quiet, err := runGitWorkflowCommand(ctx, g.program, input.Cwd, quietArgs...)
+	if err != nil {
+		return "", err
+	}
+	if quiet.ExitCode == 0 {
+		return "", badArgs("no staged changes in the requested paths")
+	}
+	if quiet.ExitCode != 1 {
+		return "", fmt.Errorf("git commit workflow diff failed (%s): %s", quiet.receiptStatus(), strings.TrimSpace(quiet.Output))
+	}
+
+	commitArgs := []string{"commit", "-m", input.Message, "--"}
+	commitArgs = append(commitArgs, input.Paths...)
+	commit, err := runGitWorkflowCommand(ctx, g.program, input.Cwd, commitArgs...)
+	if err != nil {
+		return "", err
+	}
+	if !commit.success() {
+		return "", fmt.Errorf("git commit workflow commit failed (%s): %s", commit.receiptStatus(), strings.TrimSpace(commit.Output))
+	}
+
+	head, err := runGitWorkflowCommand(ctx, g.program, input.Cwd, "log", "-1", "--format=%h %s")
+	if err != nil {
+		return "", err
+	}
+	files, err := runGitWorkflowCommand(ctx, g.program, input.Cwd, "show", "--format=", "--name-only", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	status, err := runGitWorkflowCommand(ctx, g.program, input.Cwd, "status", "--short")
+	if err != nil {
+		return "", err
+	}
+	for _, check := range []struct {
+		label  string
+		result processResult
+	}{
+		{label: "head", result: head},
+		{label: "files", result: files},
+		{label: "status", result: status},
+	} {
+		if !check.result.success() {
+			return "", fmt.Errorf("git commit workflow %s failed (%s): %s", check.label, check.result.receiptStatus(), strings.TrimSpace(check.result.Output))
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "committed: %s\n", strings.TrimSpace(head.Output))
+	writeGitSummarySection(&b, "files", files.Output)
+	if remaining := strings.TrimSpace(status.Output); remaining == "" {
+		b.WriteString("workspace: clean\n")
+	} else {
+		writeGitSummarySection(&b, "remaining workspace", remaining)
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
 }

@@ -25,7 +25,7 @@ This page is the operational overview.
 | `delegate` | run a configured child agent and return its final report |
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
 | `record_plan` | persist a self-contained markdown implementation plan in the session; the user is shown the plan file path |
-| `request_implementation` | request an approved handoff of the latest recorded plan (plan agent only) |
+| `request_implementation` | request an approved handoff of the latest recorded plan (plan and interactive auto agents) |
 
 `apply_patch` (Codex-format add/delete/update/move patches) is no longer in the
 default tool set — `edit` and `write_file` subsume it. It still ships in the tool
@@ -164,7 +164,17 @@ a status probe.
 For repository orientation, `git {"workflow":"workspace_summary"}` combines
 branch/porcelain status, HEAD, staged and unstaged diff stats, and both whitespace
 checks into one read-only result. Use ordinary `git {"args":[...]}` afterward
-when the actual patch or another native subcommand is needed.
+when the actual patch or another native subcommand is needed. To record finished
+work, `git {"workflow":"commit","paths":[...],"message":"type: subject"}` stages
+only the exact repository-relative file paths, runs the staged whitespace check,
+commits only those paths, and returns the new commit plus remaining workspace
+status. It rejects `.`, directories, globs, and pathspec magic.
+
+`update_todos` is retained for the plan agent and explicit custom-agent
+whitelists, but is omitted from `auto` and `independent`: progress-only calls
+consume model turns without advancing work. When it is available, issue it
+alongside an independent substantive call rather than as the only call in a
+turn.
 
 ## File Mutation
 
