@@ -207,7 +207,8 @@ func TestRetentionPolicyOverridesProviderDefault(t *testing.T) {
 		{name: "force age for stateful", policy: RetentionPolicyAge, stateful: true, context: 1, wantChange: true, wantPolicy: "age"},
 		{name: "disable stateless", policy: RetentionPolicyDisabled, context: 100_000, wantChange: false},
 		{name: "force pressure for stateless", policy: RetentionPolicyPressure, context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
-		{name: "auto uses pressure for stateless", context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
+		{name: "auto uses pressure when high", context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
+		{name: "auto bounds replay when low", context: 1, wantChange: true, wantPolicy: "auto_age"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
@@ -447,7 +448,7 @@ func TestRetentionArchivesExactReadOnlyResultWithStableRecoveryPath(t *testing.T
 	}
 }
 
-func TestStatefulRetentionPreservesResponseStateBelowPressure(t *testing.T) {
+func TestExplicitPressureRetentionPreservesResponseStateBelowPressure(t *testing.T) {
 	msgs := []llm.Message{
 		userImage("old.png", agentOnePixelPNG, "q0"), asstText("a0"),
 		userText("q1"), asstText("a1"),
@@ -466,7 +467,11 @@ func TestStatefulRetentionPreservesResponseStateBelowPressure(t *testing.T) {
 			ResponseID: "resp-next",
 		},
 	)
-	a := newAgent(fp, readOnlyRegistry(), Options{ResponsesStateful: true})
+	a := newAgent(fp, readOnlyRegistry(), Options{
+		ResponsesStateful: true,
+		RetentionPolicy:   RetentionPolicyPressure,
+		ContextWindow:     1_000_000,
+	})
 	a.SetTranscript(msgs)
 	digest, err := llm.FingerprintMessages(msgs)
 	if err != nil {

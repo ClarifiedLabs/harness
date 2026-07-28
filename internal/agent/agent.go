@@ -1366,7 +1366,8 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		// Live-transcript retention (design §12, r9+r20): shrink stale large
 		// tool outputs and aged images before building the request, so they are
 		// not re-sent verbatim every turn. Pure local edit, invariant-preserving.
-		retention := a.applyRetentionPolicy(sink, a.estimateContext(nil).Total)
+		retentionTokens := max(a.estimateContext(nil).Total, a.triggerTokens(lastInput, appendBoundary))
+		retention := a.applyRetentionPolicy(sink, retentionTokens)
 		if retention.changed {
 			retention.event.ResponseStateReset = a.responseState.PreviousResponseID != ""
 			a.resetResponseState()

@@ -45,19 +45,15 @@ type retentionPass struct {
 	changed  bool
 }
 
-// applyRetentionPolicy selects pressure-triggered epochs for the default auto
-// policy, regardless of provider continuation support. Pressure epochs use
-// hysteresis: after one epoch, retention does not run again until the full
-// context falls below the low-water mark. Compaction remains the safety net when
-// an epoch cannot reclaim enough. Explicit age mode preserves the legacy path
-// for experiments and compatibility.
+// applyRetentionPolicy makes the default auto policy a bounded replay window:
+// read-only result bodies older than keepTurns are trimmed even when the request
+// remains below pressure thresholds. When pressure is high, the event is tagged
+// as a pressure epoch and hysteresis prevents repeated scans. Explicit pressure
+// mode remains pressure-only; explicit age mode always uses the turn boundary.
 func (a *Agent) applyRetentionPolicy(sink EventSink, contextTokens int) retentionPass {
 	policy := a.retentionPolicy
 	if policy == RetentionPolicyDisabled {
 		return retentionPass{}
-	}
-	if policy == RetentionPolicyAuto {
-		policy = RetentionPolicyPressure
 	}
 	if len(a.transcript) == 0 {
 		return retentionPass{}
@@ -75,7 +71,12 @@ func (a *Agent) applyRetentionPolicy(sink EventSink, contextTokens int) retentio
 		ContextTokensBefore: contextTokens,
 	}
 	observed := false
-	if policy == RetentionPolicyPressure {
+	pressure := policy == RetentionPolicyPressure
+	if policy == RetentionPolicyAuto {
+		window := a.window()
+		pressure = window > 0 && contextTokens*100 >= window*retentionPressureHighPct && a.retentionEpochArmed
+	}
+	if pressure {
 		event.Policy = "pressure_epoch"
 		event.Trigger = "context_pressure"
 		window := a.window()
@@ -101,6 +102,11 @@ func (a *Agent) applyRetentionPolicy(sink EventSink, contextTokens int) retentio
 		}
 		a.retentionEpochArmed = false
 		observed = true
+	} else if policy == RetentionPolicyAuto {
+		event.Policy = "auto_age"
+		if window := a.window(); window > 0 && contextTokens*100 <= window*retentionPressureLowPct {
+			a.retentionEpochArmed = true
+		}
 	}
 	event.BytesBefore = retentionTranscriptBytes(a.transcript)
 	readOnly := a.readOnlyResultIDsIn(a.transcript)

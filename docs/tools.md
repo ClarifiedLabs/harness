@@ -19,7 +19,7 @@ This page is the operational overview.
 | `run_command` | run a shell command or direct argv program |
 | `git` | run host git with `--no-pager`, including a compact `workspace_summary` workflow |
 | `git_readonly` | restricted git subcommands for read-only agents |
-| `web_fetch` | fetch HTTP(S) content and reduce HTML to readable text, keeping block structure and rendering links as `text (url)` |
+| `web_fetch` | fetch bounded HTTP(S) text, removing common HTML chrome while preserving block structure and links |
 | `write_tmp_file` | write scratch files under a private temp directory |
 | `update_todos` | replace the current todo list for multi-step work |
 | `delegate` | run a configured child agent and return its final report |

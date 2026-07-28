@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	webFetchDefaultMaxBytes = 1 << 20 // 1 MB
-	webFetchMaxBytes        = 5 << 20 // 5 MB
+	webFetchDefaultMaxBytes = 256 << 10 // 256 KB
+	webFetchMaxBytes        = 5 << 20   // 5 MB
 	webFetchDefaultTimeout  = 30
 	webFetchMaxRedirects    = 5
 )
@@ -27,7 +27,7 @@ const webFetchBackgroundSchema = `{
   "type": "object",
   "properties": {
     "url": {"type": "string", "description": "Absolute http or https URL to fetch."},
-    "max_bytes": {"type": "integer", "description": "Maximum response bytes to read (default 1MB, cap 5MB)."},
+    "max_bytes": {"type": "integer", "description": "Maximum response bytes to read (default 256KB, cap 5MB)."},
     "timeout_seconds": {"type": "integer", "description": "Maximum time to wait for the fetch, in seconds (default 30; no maximum)."},
     "background": {"type": "boolean", "description": "When true, start the fetch as a process-local background job and return a job id immediately. If later work depends on completion, call background_jobs action=wait once; do not poll get/list."}
   },
@@ -38,7 +38,7 @@ const webFetchSchema = `{
   "type": "object",
   "properties": {
     "url": {"type": "string", "description": "Absolute http or https URL to fetch."},
-    "max_bytes": {"type": "integer", "description": "Maximum response bytes to read (default 1MB, cap 5MB)."},
+    "max_bytes": {"type": "integer", "description": "Maximum response bytes to read (default 256KB, cap 5MB)."},
     "timeout_seconds": {"type": "integer", "description": "Maximum time to wait for the fetch, in seconds (default 30; no maximum)."}
   },
   "required": ["url"]
@@ -182,15 +182,23 @@ func doWebFetch(ctx context.Context, rawURL string, maxBytes int, timeoutSeconds
 		return "", fmt.Errorf("unsupported content type %q (binary content is not fetched as text)", contentType)
 	}
 
-	// Read one extra byte so the cap can be reported without a Content-Length.
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)))
+	// Read one extra byte so the cap can be reported without trusting
+	// Content-Length.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
 	if err != nil {
 		return "", err
+	}
+	truncated := len(raw) > maxBytes
+	if truncated {
+		raw = raw[:maxBytes]
 	}
 
 	body := string(raw)
 	if mediaType == "text/html" {
 		body = reduceHTML(body)
+	}
+	if truncated {
+		body += fmt.Sprintf("\n[response truncated after %s; lower max_bytes or use a more specific URL when possible]", HumanBytes(maxBytes))
 	}
 
 	header := fmt.Sprintf("# %s (%s, %s)", resp.Request.URL.String(), resp.Status, contentType)
@@ -230,8 +238,9 @@ func validateHTTPURL(raw string) error {
 // structure also lets the central line-cap truncate cleanly instead of chopping
 // one giant collapsed paragraph mid-word.
 func reduceHTML(s string) string {
-	s = stripElement(s, "script")
-	s = stripElement(s, "style")
+	for _, element := range []string{"script", "style", "noscript", "template", "svg", "nav", "footer"} {
+		s = stripElement(s, element)
+	}
 	s = renderAnchors(s)
 	s = stripTagsWithBreaks(s)
 	s = html.UnescapeString(s)

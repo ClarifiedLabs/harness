@@ -172,6 +172,21 @@ func TestReduceHTMLStructure(t *testing.T) {
 	}
 }
 
+func TestReduceHTMLDropsPageChrome(t *testing.T) {
+	in := `<nav>many links</nav><main><h1>Article</h1><p>Useful body.</p></main><footer>legal boilerplate</footer><svg><text>icon</text></svg>`
+	out := reduceHTML(in)
+	for _, dropped := range []string{"many links", "legal boilerplate", "icon"} {
+		if strings.Contains(out, dropped) {
+			t.Errorf("page chrome %q was retained: %q", dropped, out)
+		}
+	}
+	for _, want := range []string{"Article", "Useful body."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("content %q was dropped: %q", want, out)
+		}
+	}
+}
+
 func TestReduceHTMLBrAndPerLineCollapse(t *testing.T) {
 	if got := reduceHTML("a  b<br>c   d"); got != "a b\nc d" {
 		t.Errorf("br + per-line collapse wrong: %q", got)
@@ -230,6 +245,12 @@ func TestWebFetchMaxBytes(t *testing.T) {
 	}
 	if strings.Count(body, "x") > 200 {
 		t.Errorf("max_bytes did not stop reading: kept %d bytes", strings.Count(body, "x"))
+	}
+	// Regression: the reader used to stop at exactly max_bytes despite claiming
+	// to read one extra byte, so callers could not tell a capped response from a
+	// naturally exact-sized response.
+	if !strings.Contains(body, "[response truncated after 100B") {
+		t.Errorf("capped response did not report truncation: %q", body)
 	}
 }
 

@@ -2149,14 +2149,15 @@ this subsection records the common runner those argv tools point at.
 | param | type | notes |
 |---|---|---|
 | `url` | string, required | http/https only |
-| `max_bytes` | int | default 1 MB, cap 5 MB |
+| `max_bytes` | int | default 256 KB, cap 5 MB |
 | `timeout_seconds` | int | default 30, no maximum |
 | `background` | bool | when true, start as a process-local background job and return a job id immediately |
 
 - Default 30 s timeout, configurable without a maximum; up to 5 redirects, each
   hop re-validated as http/https.
 - `text/html` → hand-rolled reduction that preserves links and block structure:
-  drop `<script>`/`<style>` blocks; render `<a href>` as `text (url)`; emit a newline
+  drop script/style/template/SVG and common nav/footer chrome; render
+  `<a href>` as `text (url)`; emit a newline
   at block boundaries (`<br>` and the closing tags of `p`/`div`/`li`/`tr`/`h1`–`h6`);
   strip remaining tags; `html.UnescapeString` (stdlib); collapse whitespace per line
   while keeping the inserted line breaks. Explicitly "readable-ish text", not a
@@ -2165,6 +2166,9 @@ this subsection records the common runner those argv tools point at.
   absent `Content-Type` is treated as text. Binary content types → error.
 - Output prefixed `# <final-url> (<status>, <content-type>)`. Non-2xx responses return
   status + body as content (not `is_error` — the model may want the error page).
+  The reader consumes one byte beyond `max_bytes` to distinguish a capped
+  response and appends an explicit truncation marker. Model-visible output has a
+  32 KB/500-line default cap; the standard artifact path preserves omitted text.
 
 ### 9.11 `git_readonly`
 
@@ -3217,17 +3221,17 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   the configured trigger and is suppressed with automatic compaction.
 - **Live-transcript retention pass.** Before each model request the agent runs a
   pure-local retention pass (no model round-trip). The default `auto` policy
-  uses pressure-triggered epochs for both stateful and stateless providers
-  instead of editing on ordinary age progression. An armed epoch runs when the
-  estimated full context reaches 60% of the effective window, trims every
-  currently eligible read-only tool-result block and aged image in one pass,
-  and disarms until context falls to 50% or below. Compaction remains the safety
-  net if an epoch cannot reclaim enough.
-- A pressure edit clears the CLI-owned `previous_response_id`
+  trims read-only result bodies older than the eight-turn compaction keep window
+  even below pressure, preventing unbounded verbatim replay. It also uses the
+  larger of the full local estimate and the last provider measurement plus
+  appended-message delta. At 60% of the effective window an armed pressure epoch
+  trims every eligible result and aged image in one pass, then disarms until
+  context falls to 50% or below. Compaction remains the safety net.
+- Any retention edit clears the CLI-owned `previous_response_id`
   exactly once, while a below-pressure stateful request preserves it and sends
   only the appended delta. Stateless providers get the same batched transcript
   bounding without continuation reset semantics.
-- The `retention_policy` experiment control can force legacy `age`, `pressure`,
+- The `retention_policy` experiment control can force `age`, `pressure`,
   or `disabled`. Age mode trims eligible read-only results older than
   `compact_keep_turns` completed turns and images two or more turns old before
   each request. Disabling the local pass does not disable compaction or

@@ -658,6 +658,11 @@ func TestDefaultWithOptionsUsesNoisyToolResultDefaults(t *testing.T) {
 		t.Fatalf("read_file limits = %d/%d, want %d/%d",
 			readLimits.maxBytes, readLimits.maxLines, defaultReadFileResultBytes, defaultMaxResultLines)
 	}
+	fetchLimits := r.resultLimitsFor("web_fetch")
+	if fetchLimits.maxBytes != defaultSearchResultBytes || fetchLimits.maxLines != defaultSearchResultLines {
+		t.Fatalf("web_fetch limits = %d/%d, want %d/%d",
+			fetchLimits.maxBytes, fetchLimits.maxLines, defaultSearchResultBytes, defaultSearchResultLines)
+	}
 }
 
 func TestGlobalResultLimitsOverrideNoisyToolDefaults(t *testing.T) {

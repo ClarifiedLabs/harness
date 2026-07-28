@@ -351,6 +351,9 @@ func registerExecTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 		*disabled = append(*disabled, missingBinaryTool("git", "git"))
 	}
 	r.Register(webFetch{background: opts.Background})
+	r.SetToolResultLimits("web_fetch",
+		defaultToolResultBytes(0, 0, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
+		defaultToolResultLines(0, 0, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
 }
 
 // Default returns a Registry preloaded with every built-in tool.
