@@ -709,3 +709,111 @@ func TestCompactionTrimsKeptTurnsWhenReclaimLow(t *testing.T) {
 		t.Errorf("expected all 4 kept read-only results trimmed, got %d:\n%s", trimmed, dump(a.Transcript()))
 	}
 }
+
+// TestPressureRetentionFloorTriggersBelowWindowPercentage pins the
+// retention_floor_tokens fallback: on a 1M window the 60% high-water mark is
+// 600K, so without a floor nothing trims at 200K; with the floor configured,
+// the same hysteretic epoch fires at the floor instead.
+func TestPressureRetentionFloorTriggersBelowWindowPercentage(t *testing.T) {
+	oldImageTranscript := func() []llm.Message {
+		return []llm.Message{
+			userImage("old.png", agentOnePixelPNG, "q0"), asstText("a0"),
+			userText("q1"), asstText("a1"),
+			userText("q2"), asstText("a2"),
+			userText("q3"), asstText("a3"),
+		}
+	}
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
+		RetentionPolicy:      RetentionPolicyPressure,
+		ContextWindow:        1_000_000,
+		RetentionFloorTokens: 200_000,
+	})
+	a.SetTranscript(oldImageTranscript())
+	sink := &recordSink{}
+
+	if pass := a.applyRetentionPolicy(sink, 199_999); pass.changed || pass.observed {
+		t.Fatalf("context below floor = %+v, want no epoch", pass)
+	}
+	// Above the floor but far below the 60% window high-water mark (600K).
+	first := a.applyRetentionPolicy(sink, 200_000)
+	if !first.changed || first.event.Policy != "pressure_epoch" {
+		t.Fatalf("context at floor = %+v, want epoch", first)
+	}
+
+	// Hysteresis uses the floor-scaled low-water mark (200K * 50/60 ≈ 166.7K).
+	a.SetTranscript(oldImageTranscript())
+	a.retentionEpochArmed = false
+	if pass := a.applyRetentionPolicy(sink, 190_000); pass.changed || pass.observed {
+		t.Fatalf("disarmed above scaled low-water = %+v, want no epoch", pass)
+	}
+	if pass := a.applyRetentionPolicy(sink, 166_000); pass.changed || pass.observed {
+		t.Fatalf("scaled low-water rearm pass = %+v, want no epoch", pass)
+	}
+	if !a.retentionEpochArmed {
+		t.Fatal("floor epoch did not rearm at the scaled low-water mark")
+	}
+	second := a.applyRetentionPolicy(sink, 200_000)
+	if !second.changed {
+		t.Fatalf("rearmed floor pass = %+v, want epoch", second)
+	}
+
+	// After the floor trim consumed the aged image, the retention-stable prefix
+	// spans the whole transcript: nothing remains a future pass could rewrite.
+	if stable := a.stableMessagePrefixIn(a.Transcript()); stable != len(a.Transcript()) {
+		t.Fatalf("stable prefix after floor trim = %d, want %d (whole transcript)", stable, len(a.Transcript()))
+	}
+}
+
+func TestPressureRetentionFloorDisabledByDefault(t *testing.T) {
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
+		RetentionPolicy: RetentionPolicyPressure,
+		ContextWindow:   1_000_000,
+	})
+	a.SetTranscript([]llm.Message{
+		userImage("old.png", agentOnePixelPNG, "q0"), asstText("a0"),
+		userText("q1"), asstText("a1"),
+		userText("q2"), asstText("a2"),
+		userText("q3"), asstText("a3"),
+	})
+	if pass := a.applyRetentionPolicy(&recordSink{}, 200_000); pass.changed || pass.observed {
+		t.Fatalf("20%% of window without a floor = %+v, want no epoch", pass)
+	}
+}
+
+func TestPressureRetentionFloorAboveWindowPercentageIsNoOp(t *testing.T) {
+	// A floor above the 60% window high-water mark must not RAISE the trigger:
+	// the window percentage still governs.
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
+		RetentionPolicy:      RetentionPolicyPressure,
+		ContextWindow:        1_000_000,
+		RetentionFloorTokens: 900_000,
+	})
+	a.SetTranscript([]llm.Message{
+		userImage("old.png", agentOnePixelPNG, "q0"), asstText("a0"),
+		userText("q1"), asstText("a1"),
+		userText("q2"), asstText("a2"),
+		userText("q3"), asstText("a3"),
+	})
+	if pass := a.applyRetentionPolicy(&recordSink{}, 599_999); pass.changed || pass.observed {
+		t.Fatalf("just below 60%% with high floor = %+v, want no epoch", pass)
+	}
+	if pass := a.applyRetentionPolicy(&recordSink{}, 600_000); !pass.changed {
+		t.Fatalf("at 60%% with high floor = %+v, want epoch (window governs)", pass)
+	}
+}
+
+func TestPressureRetentionFloorNothingOldEnough(t *testing.T) {
+	// A transcript within the keep-turns boundary has nothing old enough to
+	// trim; the floor pass is a no-op (not even observed).
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
+		RetentionPolicy:      RetentionPolicyPressure,
+		ContextWindow:        1_000_000,
+		RetentionFloorTokens: 100_000,
+	})
+	a.SetTranscript([]llm.Message{
+		userText("q1"), asstText("a1"),
+	})
+	if pass := a.applyRetentionPolicy(&recordSink{}, 900_000); pass.changed || pass.observed {
+		t.Fatalf("floor pass with nothing old enough = %+v, want no epoch", pass)
+	}
+}

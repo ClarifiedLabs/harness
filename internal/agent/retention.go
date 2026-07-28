@@ -82,10 +82,21 @@ func (a *Agent) applyRetentionPolicy(sink EventSink, contextTokens int) retentio
 		if window <= 0 {
 			return retentionPass{}
 		}
-		if contextTokens*100 <= window*retentionPressureLowPct {
+		high := window * retentionPressureHighPct
+		low := window * retentionPressureLowPct
+		// Absolute-context fallback (retention_floor_tokens): on very large
+		// windows the 60% high-water mark may never be reached, so aged
+		// read-only results would accumulate forever. A configured floor below
+		// the window percentage takes over the hysteresis, with the low-water
+		// re-arm scaled proportionally. Disabled at 0 (default).
+		if floor := a.retentionFloorTokens; floor > 0 && floor*100 < high {
+			high = floor * 100
+			low = floor * retentionPressureLowPct * 100 / retentionPressureHighPct
+		}
+		if contextTokens*100 <= low {
 			a.retentionEpochArmed = true
 		}
-		if !a.retentionEpochArmed || contextTokens*100 < window*retentionPressureHighPct {
+		if !a.retentionEpochArmed || contextTokens*100 < high {
 			return retentionPass{}
 		}
 		a.retentionEpochArmed = false

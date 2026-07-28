@@ -2060,3 +2060,20 @@ func TestMCPHeadersNoEnvLeakageWithFileHeaders(t *testing.T) {
 		t.Errorf("Headers has %d entries, want 1 (file only)", n)
 	}
 }
+
+func TestRetentionFloorTokensDefaultAndValidation(t *testing.T) {
+	c := loadOK(t, []string{"-model", "gpt-5.5"}, noEnv, "")
+	if c.RetentionFloorTokens != 0 {
+		t.Fatalf("default retention_floor_tokens = %d, want 0 (disabled)", c.RetentionFloorTokens)
+	}
+
+	c = loadOK(t, []string{"-model", "gpt-5.5"}, noEnv, writeConfig(t, `{"retention_floor_tokens":200000}`))
+	if c.RetentionFloorTokens != 200000 {
+		t.Fatalf("retention_floor_tokens = %d, want 200000", c.RetentionFloorTokens)
+	}
+
+	if _, err := Load([]string{"-model", "gpt-5.5"}, noEnv, writeConfig(t, `{"retention_floor_tokens":-1}`)); err == nil ||
+		!strings.Contains(err.Error(), "retention_floor_tokens") {
+		t.Fatalf("negative retention_floor_tokens error = %v", err)
+	}
+}

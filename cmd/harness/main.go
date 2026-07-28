@@ -917,6 +917,7 @@ func run(env environment) int {
 		ShowDiffs:                 cfg.ShowDiffs,
 		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		RetentionPolicy:           agent.RetentionPolicy(cfg.RetentionPolicy),
+		RetentionFloorTokens:      cfg.RetentionFloorTokens,
 		Interactive:               interactiveSession,
 		Steer:                     !cfg.NoSteer,
 	})

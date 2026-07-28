@@ -302,8 +302,8 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   `agents_md_warn_bytes`, `compact_keep_turns`, `compact_keep_tokens`,
   `compact_auto_enabled`, `compact_trigger_percent`,
   `compact_target_percent`, `compact_idle_after_seconds`,
-  `compact_idle_trigger_percent`, `compact_summary_max_tokens`, and
-  `compact_tool_result_max_bytes`.
+  `compact_idle_trigger_percent`, `compact_summary_max_tokens`,
+  `compact_tool_result_max_bytes`, and `retention_floor_tokens`.
   Tool-result truncation is controlled by config `tool_result_max_bytes` /
   `tool_result_max_lines` or env `HARNESS_TOOL_RESULT_MAX_BYTES` /
   `HARNESS_TOOL_RESULT_MAX_LINES`. `rg` and `grep` default to 32 KB / 500 lines
@@ -414,7 +414,14 @@ Live transcript retention defaults to `auto`, which uses pressure-triggered
 epochs for both stateful and stateless providers. Experiments can override this
 with `retention_policy`, `HARNESS_RETENTION_POLICY`, or `-retention-policy`;
 accepted values are `auto`, `age`, `pressure`, and `disabled`. Disabling live
-retention does not disable compaction or provider-overflow recovery.
+retention does not disable compaction or provider-overflow recovery. The
+config-only `retention_floor_tokens` adds an absolute-context fallback to the
+pressure epoch: when the estimated context exceeds the floor, the same
+hysteretic trim of aged read-only tool results runs even below the 60%% window
+high-water mark — which a very large (e.g. 1M-token) window may never reach.
+It defaults to 0 (disabled) and stays opt-in because trimming rewrites history
+and invalidates the cache prefix from the first trimmed block, the same
+tradeoff pressure retention already makes at the high-water mark.
 
 The model proxy is a stateless continuation pass-through: it never stores,
 reconstructs, trims, resets, or retries a continuation. It forwards the

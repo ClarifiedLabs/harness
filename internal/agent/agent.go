@@ -411,6 +411,13 @@ type Options struct {
 	// RetentionPolicy selects live-transcript retention behavior. The zero value
 	// uses the provider-aware automatic policy.
 	RetentionPolicy RetentionPolicy
+	// RetentionFloorTokens is an absolute-context fallback for the pressure
+	// retention epoch: when the estimated context exceeds it, the same
+	// hysteretic trim pass runs even below the window-percentage high-water
+	// mark (60%), which on very large windows is otherwise never reached. Zero
+	// disables the floor. Opt-in: trimming rewrites history and invalidates the
+	// cache prefix from the first trimmed block.
+	RetentionFloorTokens int
 	// Interactive marks a session whose multi-minute pauses justify the 1h
 	// Anthropic prompt-cache breakpoint on the stable prefix (set for the REPL).
 	// One-shot, delegate, and non-interactive runs leave it false to take the
@@ -468,12 +475,13 @@ type Agent struct {
 	// instead of a count-API/byte estimate that may systematically miss opaque
 	// replay state. Zeroed whenever compaction or retention rewrites the
 	// transcript outside a run's own tracking.
-	measuredInput       int
-	measuredBoundary    int
-	retentionPolicy     RetentionPolicy
-	retentionEpochArmed bool
-	proxySessionID      string
-	cacheAffinityID     string
+	measuredInput        int
+	measuredBoundary     int
+	retentionPolicy      RetentionPolicy
+	retentionFloorTokens int
+	retentionEpochArmed  bool
+	proxySessionID       string
+	cacheAffinityID      string
 }
 
 type compactFallbackNoticeState struct {
@@ -518,6 +526,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		showDiffs:                 opts.ShowDiffs,
 		responsesStateful:         opts.ResponsesStateful,
 		retentionPolicy:           normalizeRetentionPolicy(opts.RetentionPolicy),
+		retentionFloorTokens:      opts.RetentionFloorTokens,
 		interactive:               opts.Interactive,
 		retentionEpochArmed:       true,
 		proxySessionID:            newProxySessionID(),

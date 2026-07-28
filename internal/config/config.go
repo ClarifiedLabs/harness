@@ -98,6 +98,7 @@ type Config struct {
 	DelegateOutput                     string            `json:"delegate_output"`               // -delegate-output: status, off, or curated scrolling lines
 	ResponsesStateful                  bool              `json:"responses_stateful"`            // -responses-stateful
 	RetentionPolicy                    string            `json:"retention_policy"`              // -retention-policy: auto, age, pressure, or disabled
+	RetentionFloorTokens               int               `json:"retention_floor_tokens"`        // config-only; 0 = disabled (window percentages govern)
 	NoSteer                            bool              `json:"no_steer"`                      // -no-steer: disable in-prompt steering (queue input for the next prompt)
 
 	// Agent definition. Empty means "not specified" so main can let a resumed
@@ -335,6 +336,7 @@ type fileConfig struct {
 	DelegateOutput                     string                     `json:"delegate_output"`
 	ResponsesStateful                  *bool                      `json:"responses_stateful"`
 	RetentionPolicy                    string                     `json:"retention_policy"`
+	RetentionFloorTokens               *int                       `json:"retention_floor_tokens"`
 	NoSteer                            *bool                      `json:"no_steer"`
 	Verbose                            *bool                      `json:"verbose"`
 	ToolStream                         *bool                      `json:"tool_stream"`
@@ -593,6 +595,10 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		getenv("HARNESS_RETENTION_POLICY"), fc.RetentionPolicy, "auto"))
 	if err != nil {
 		return Config{}, err
+	}
+	c.RetentionFloorTokens = intValue(fc.RetentionFloorTokens, 0)
+	if c.RetentionFloorTokens < 0 {
+		return Config{}, fmt.Errorf("retention_floor_tokens must be non-negative")
 	}
 	c.NoSteer = resolveBool(set["no-steer"], *f.noSteer,
 		getenv("HARNESS_NO_STEER"), fc.NoSteer, false)
