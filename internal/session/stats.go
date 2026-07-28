@@ -780,6 +780,7 @@ func writeSplitValue(w io.Writer, indent, label string, total, root, delegates i
 func writeRootUsage(w io.Writer, state Session) {
 	fmt.Fprintln(w, "Usage (includes delegates)")
 	writeUsageValues(w, "  ", state.Usage.Usage, state.Usage.CostUSD)
+	writeReasoningReplay(w, "  ", state)
 	if len(state.UsageByModel) == 0 {
 		return
 	}
@@ -789,6 +790,35 @@ func writeRootUsage(w io.Writer, state Session) {
 		fmt.Fprintf(w, "    %s:\n", name)
 		writeUsageValues(w, "      ", usage.Usage, usage.CostUSD)
 	}
+}
+
+// writeReasoningReplay surfaces the reasoning-replay share of the active
+// branch: the persisted thinking payloads the Anthropic dialect replays
+// verbatim on every request while thinking is enabled (some providers bill
+// that replay — Kimi counts preserved thinking toward token consumption).
+// The token estimate mirrors the agent estimator's weights: prose at 4
+// bytes/token, provider-opaque blobs (signatures, redacted/encrypted
+// reasoning) at 8. The cumulative reasoning-token figure is already in the
+// usage lines above.
+func writeReasoningReplay(w io.Writer, indent string, state Session) {
+	blocks, textBytes, opaqueBytes := 0, 0, 0
+	for _, m := range state.Messages {
+		for _, b := range m.Content {
+			text := len(b.Thinking)
+			opaque := len(b.ThinkingSignature) + len(b.RedactedData) + len(b.ReasoningEncrypted)
+			if text+opaque == 0 {
+				continue
+			}
+			blocks++
+			textBytes += text
+			opaqueBytes += opaque
+		}
+	}
+	if blocks == 0 {
+		return
+	}
+	est := textBytes/4 + opaqueBytes/8
+	fmt.Fprintf(w, "%sreasoning replay: %d blocks, %d bytes (est. %d tokens of active context)\n", indent, blocks, textBytes+opaqueBytes, est)
 }
 
 func writeDirectUsage(w io.Writer, report statsReport) {

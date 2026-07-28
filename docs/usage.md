@@ -537,9 +537,24 @@ for Coding — to replay persisted assistant reasoning as `reasoning_content` on
 later requests. Replay is gated on reasoning being enabled for the request, so
 compaction summaries and prewarm requests stay clean. With replay enabled, the
 dialect tags streamed `reasoning_content` for persistence (as thinking blocks
-with no signature); without it the text remains display-only. `"current_turn"`
-is an Anthropic-dialect-only reduction mode documented under reasoning replay
-in the context-efficiency section.
+with no signature); without it the text remains display-only.
+
+For the Anthropic dialect, `reasoning_replay:"current_turn"` drops thinking
+and redacted-thinking blocks from every assistant message older than the
+in-flight tool chain (the last real user turn forward keeps its thinking, as
+the protocol requires). The reduction is wire-only: the persisted transcript
+keeps every block, so session replay and later full-replay requests are
+unaffected. Enable it ONLY where the provider documents Anthropic-style
+history dropping — api.anthropic.com ignores and does not bill old-turn
+thinking. **Do not enable `current_turn` for kimi-k3 or kimi-k2.7-code**:
+Kimi's Preserved Thinking guide makes historical thinking mandatory in
+multi-turn tool loops, and Kimi bills it ("`reasoning_content` counts toward
+token consumption… historical thinking content keeps occupying the context
+window and is billed accordingly"), so there it is a required cost, not
+waste. `harness session stats` shows a "reasoning replay" line — block count,
+payload bytes, and an estimated token share of the active branch — so the
+replay cost is visible before deciding; the cumulative reasoning-token count
+stays in the regular usage lines.
 
 Anthropic-dialect provider configs may set `usage_input_includes_cache:true`
 when the endpoint reports `input_tokens` as TOTAL input (cached tokens

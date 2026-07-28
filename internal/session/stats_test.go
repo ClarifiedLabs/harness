@@ -719,3 +719,69 @@ func TestStatsUncachedInputReflectsNormalizedUsage(t *testing.T) {
 		}
 	}
 }
+
+// TestStatsReasoningReplayLine pins the reasoning-replay visibility line: the
+// thinking payloads the Anthropic dialect replays on every request, weighted
+// like the agent estimator (prose 4 bytes/token, opaque blobs 8).
+func TestStatsReasoningReplayLine(t *testing.T) {
+	base := time.Date(2026, 7, 27, 14, 0, 0, 0, time.UTC)
+	dir := filepath.Join(t.TempDir(), "session")
+	thinking := strings.Repeat("t", 400)
+	signature := strings.Repeat("s", 4340) // session-observed Kimi signature size
+	redacted := strings.Repeat("r", 100)
+	messages := []llm.Message{
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "work"}}},
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+			{Kind: llm.BlockThinking, Thinking: thinking, ThinkingSignature: signature},
+			{Kind: llm.BlockRedactedThinking, RedactedData: redacted},
+			{Kind: llm.BlockText, Text: "answer"},
+		}},
+	}
+	saveStatsFixture(t, dir, Session{
+		Provider: "anthropic",
+		Model:    "claude-opus-4-8",
+		Created:  base,
+		Updated:  base.Add(time.Minute),
+		Messages: messages,
+		Usage:    UsageTotals{Usage: llm.Usage{InputTokens: 10, ReasoningTokens: 60}},
+	}, nil)
+
+	var out bytes.Buffer
+	if err := Stats(dir, &out); err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	// bytes = 400 + 4340 + 100 = 4840; est = 400/4 + (4340+100)/8 = 100 + 555 = 655.
+	want := "  reasoning replay: 2 blocks, 4840 bytes (est. 655 tokens of active context)\n"
+	if got := out.String(); !strings.Contains(got, want) {
+		t.Fatalf("stats output missing %q:\n%s", want, got)
+	}
+	// And the cumulative reasoning tokens stay in the regular usage lines.
+	if got := out.String(); !strings.Contains(got, "  reasoning: 60\n") {
+		t.Fatalf("stats output missing cumulative reasoning line:\n%s", got)
+	}
+}
+
+// TestStatsReasoningReplayLineHiddenWithoutThinking keeps the line out of
+// sessions with no reasoning payloads (e.g. reasoning-off runs).
+func TestStatsReasoningReplayLineHiddenWithoutThinking(t *testing.T) {
+	base := time.Date(2026, 7, 27, 14, 0, 0, 0, time.UTC)
+	dir := filepath.Join(t.TempDir(), "session")
+	saveStatsFixture(t, dir, Session{
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Created:  base,
+		Updated:  base.Add(time.Minute),
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hello"}}},
+		},
+	}, nil)
+
+	var out bytes.Buffer
+	if err := Stats(dir, &out); err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if got := out.String(); strings.Contains(got, "reasoning replay") {
+		t.Fatalf("reasoning replay line present without thinking payloads:\n%s", got)
+	}
+}

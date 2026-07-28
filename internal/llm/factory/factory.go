@@ -76,6 +76,7 @@ func New(opts Options) (llm.Provider, error) {
 			ContextWindow:           opts.ContextWindow,
 			OutputLimit:             opts.OutputLimit,
 			UsageInputIncludesCache: opts.UsageInputIncludesCache,
+			ReasoningReplay:         opts.ReasoningReplay,
 		}), nil
 	case "openai":
 		if opts.APIKey == "" && opts.BaseURL == "" && len(opts.AuthHeaders) == 0 {

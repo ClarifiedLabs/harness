@@ -41,8 +41,14 @@ type Config struct {
 	// cache read/write tokens so llm.Usage.InputTokens keeps its "uncached
 	// input" contract. Default off (real Anthropic semantics).
 	UsageInputIncludesCache bool
-	HTTPClient              *http.Client
-	Sleep                   func(time.Duration) // nil = time.Sleep
+	// ReasoningReplay controls how much historical thinking the wire replay
+	// carries: empty/"full" replays every persisted thinking block (the
+	// default, required by providers mandating preserved thinking);
+	// "current_turn" drops thinking older than the in-flight tool chain for
+	// providers that document Anthropic-style history dropping.
+	ReasoningReplay llm.ReasoningReplay
+	HTTPClient      *http.Client
+	Sleep           func(time.Duration) // nil = time.Sleep
 }
 
 // Provider is the Anthropic Messages dialect.
@@ -53,6 +59,7 @@ type Provider struct {
 	contextWindow           int
 	outputLimit             int
 	usageInputIncludesCache bool
+	reasoningReplay         llm.ReasoningReplay
 	client                  *http.Client
 	sleep                   func(time.Duration)
 }
@@ -67,6 +74,7 @@ func New(cfg Config) *Provider {
 		contextWindow:           cfg.ContextWindow,
 		outputLimit:             cfg.OutputLimit,
 		usageInputIncludesCache: cfg.UsageInputIncludesCache,
+		reasoningReplay:         cfg.ReasoningReplay,
 		client:                  client,
 		sleep:                   sleep,
 	}
@@ -80,7 +88,7 @@ func (p *Provider) Name() string { return "anthropic" }
 // every attempt and sleep.
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
-		wireReq := buildRequest(req, p.contextWindow, p.outputLimit)
+		wireReq := buildRequestWithReasoningReplay(req, p.contextWindow, p.outputLimit, p.reasoningReplay)
 		var aggregate llm.Usage
 		for continuations := 0; ; {
 			body, err := json.Marshal(wireReq)

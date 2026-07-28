@@ -209,3 +209,51 @@ func TestUsageInputIncludesCacheReachesAnthropicDialect(t *testing.T) {
 		t.Fatalf("usage = %+v, want uncached input 851 with cache read 208128", done.Usage)
 	}
 }
+
+// TestReasoningReplayCurrentTurnReachesAnthropicDialect verifies the
+// reasoning_replay "current_turn" mode is threaded through the factory into
+// the Anthropic wire body.
+func TestReasoningReplayCurrentTurnReachesAnthropicDialect(t *testing.T) {
+	var captured []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n")
+		fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
+		fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n")
+		fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	p, err := New(Options{Provider: "anthropic", Model: "claude-opus-4-8", BaseURL: srv.URL, APIKey: "k", ReasoningReplay: llm.ReasoningReplayCurrentTurn})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	enabled := true
+	req := llm.Request{
+		Model:     "claude-opus-4-8",
+		Reasoning: llm.ReasoningConfig{Enabled: &enabled},
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+				{Kind: llm.BlockThinking, Thinking: "old thought", ThinkingSignature: "sig-old"},
+				{Kind: llm.BlockText, Text: "answer"},
+			}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "more"}}},
+		},
+	}
+	for _, err := range p.Stream(context.Background(), req) {
+		if err != nil {
+			t.Fatalf("stream: %v", err)
+		}
+	}
+	if bytes.Contains(captured, []byte("sig-old")) {
+		t.Fatalf("historical thinking replayed under current_turn: %s", captured)
+	}
+	if !bytes.Contains(captured, []byte("answer")) {
+		t.Fatalf("assistant text missing from request: %s", captured)
+	}
+}

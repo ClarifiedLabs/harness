@@ -308,7 +308,19 @@ any assistant `Phase` outside `""`, `AssistantPhaseCommentary` (`commentary`), o
 | assistant text | assistant message content | `message` item with `output_text` content and optional phase | assistant message with `text` content |
 | tool_use | assistant `tool_calls[].function` with JSON-string arguments | `function_call` item with string arguments | `tool_use` content with object input |
 | tool_result | sibling `role:"tool"` message; rich images follow in one neighboring user message | `function_call_output` item; rich images follow in one neighboring user message | `tool_result` content inside a user message, including nested image children |
-| opaque reasoning replay | ignored | `reasoning` item with encrypted content | signed `thinking` or opaque `redacted_thinking` content |
+| opaque reasoning replay | ignored by default; `reasoning_content` on assistant messages when the provider opts in (`reasoning_replay`) | `reasoning` item with encrypted content | signed `thinking` or opaque `redacted_thinking` content; `reasoning_replay:"current_turn"` drops blocks older than the in-flight tool chain |
+
+Reasoning replay is gated per dialect. Chat Completions replays persisted
+thinking text as `reasoning_content` only when the provider config opts in
+AND reasoning is enabled for the request (compaction/prewarm stay clean);
+streamed `reasoning_content` is tagged for persistence only under the opt-in.
+Anthropic replays signed thinking verbatim whenever thinking is enabled (the
+protocol requires it on the trailing tool-use chain); the opt-in
+`reasoning_replay:"current_turn"` mode trims everything before the last real
+user turn for providers that document history dropping — wire-only, the
+transcript keeps every block. `harness session stats` reports the active
+branch's replay share as a "reasoning replay" line (blocks, bytes, estimated
+tokens at the estimator's prose/opaque weights).
 
 Mapping subtleties that must be handled:
 

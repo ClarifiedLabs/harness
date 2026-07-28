@@ -668,3 +668,112 @@ func TestBuildRequestUserImage(t *testing.T) {
 		t.Fatalf("second content = %+v", content[1])
 	}
 }
+
+// thinkingChainRequest builds a transcript with thinking blocks on both sides
+// of the last real user turn (index 4): the trailing tool-use chain (5..8)
+// spans two consecutive tool rounds.
+func thinkingChainRequest() llm.Request {
+	enabled := true
+	return llm.Request{
+		Model:     "claude-opus-4-8",
+		Reasoning: llm.ReasoningConfig{Enabled: &enabled},
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "fix it"}}}, // 0
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{ // 1
+				{Kind: llm.BlockThinking, Thinking: "old plan", ThinkingSignature: "sig-old"},
+				{Kind: llm.BlockRedactedThinking, RedactedData: "redacted-old"},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
+			}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}}, // 2
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{ // 3
+				{Kind: llm.BlockThinking, Thinking: "old summary", ThinkingSignature: "sig-old2"},
+				{Kind: llm.BlockText, Text: "interim"},
+			}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "continue"}}}, // 4 <- boundary
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{ // 5
+				{Kind: llm.BlockThinking, Thinking: "chain thought 1", ThinkingSignature: "sig-keep1"},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_2", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"b.go"}`)},
+			}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_2", ResultText: "ok"}}}, // 6
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{ // 7
+				{Kind: llm.BlockThinking, Thinking: "chain thought 2", ThinkingSignature: "sig-keep2"},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_3", ToolName: "edit", ToolInput: json.RawMessage(`{"path":"b.go"}`)},
+			}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_3", ResultText: "done"}}}, // 8
+		},
+	}
+}
+
+func wireContentTypes(msg wireMessage) []string {
+	types := make([]string, 0, len(msg.Content))
+	for _, c := range msg.Content {
+		types = append(types, c.Type)
+	}
+	return types
+}
+
+func TestBuildRequestReasoningReplayCurrentTurn(t *testing.T) {
+	w := buildRequestWithReasoningReplay(thinkingChainRequest(), 1_000_000, 0, llm.ReasoningReplayCurrentTurn)
+
+	// Historical assistant messages (before the last real user turn at index 4)
+	// lose thinking AND redacted_thinking but keep their other blocks.
+	if got := wireContentTypes(w.Messages[1]); len(got) != 1 || got[0] != "tool_use" {
+		t.Fatalf("message 1 blocks = %v, want only tool_use (thinking+redacted dropped)", got)
+	}
+	if got := wireContentTypes(w.Messages[3]); len(got) != 1 || got[0] != "text" {
+		t.Fatalf("message 3 blocks = %v, want only text", got)
+	}
+	// The in-flight chain keeps thinking verbatim, across both tool rounds.
+	for _, i := range []int{5, 7} {
+		got := w.Messages[i].Content
+		if len(got) != 2 || got[0].Type != "thinking" || got[1].Type != "tool_use" {
+			t.Fatalf("message %d blocks = %v, want thinking+tool_use kept", i, wireContentTypes(w.Messages[i]))
+		}
+	}
+	if w.Messages[5].Content[0].Signature != "sig-keep1" || w.Messages[7].Content[0].Signature != "sig-keep2" {
+		t.Fatalf("chain signatures = %q, %q; want verbatim replay",
+			w.Messages[5].Content[0].Signature, w.Messages[7].Content[0].Signature)
+	}
+}
+
+func TestBuildRequestReasoningReplayFullUnchanged(t *testing.T) {
+	for _, mode := range []llm.ReasoningReplay{"", llm.ReasoningReplayFull} {
+		w := buildRequestWithReasoningReplay(thinkingChainRequest(), 1_000_000, 0, mode)
+		for _, i := range []int{1, 3, 5, 7} {
+			if w.Messages[i].Content[0].Type != "thinking" && w.Messages[i].Content[0].Type != "redacted_thinking" {
+				t.Fatalf("mode %q message %d lost its leading thinking block: %v", mode, i, wireContentTypes(w.Messages[i]))
+			}
+		}
+	}
+}
+
+func TestBuildRequestReasoningReplayCurrentTurnKeepsAllWithoutUserText(t *testing.T) {
+	// A transcript of nothing but tool rounds has no real user turn, so the
+	// boundary stays at index 0 and every thinking block is kept.
+	req := thinkingChainRequest()
+	enabled := true
+	req.Reasoning = llm.ReasoningConfig{Enabled: &enabled}
+	req.Messages = req.Messages[5:] // assistant + tool rounds only... starts with assistant
+	w := buildRequestWithReasoningReplay(req, 1_000_000, 0, llm.ReasoningReplayCurrentTurn)
+	for i, m := range w.Messages {
+		if m.Role == "assistant" && m.Content[0].Type != "thinking" {
+			t.Fatalf("message %d lost thinking though no user text turn exists: %v", i, wireContentTypes(m))
+		}
+	}
+}
+
+func TestBuildRequestReasoningOffStillStripsAllThinking(t *testing.T) {
+	disabled := false
+	req := thinkingChainRequest()
+	req.Reasoning = llm.ReasoningConfig{Enabled: &disabled}
+	for _, mode := range []llm.ReasoningReplay{"", llm.ReasoningReplayCurrentTurn} {
+		w := buildRequestWithReasoningReplay(req, 1_000_000, 0, mode)
+		for i, m := range w.Messages {
+			for _, c := range m.Content {
+				if c.Type == "thinking" || c.Type == "redacted_thinking" {
+					t.Fatalf("mode %q message %d replays thinking though thinking is off", mode, i)
+				}
+			}
+		}
+	}
+}

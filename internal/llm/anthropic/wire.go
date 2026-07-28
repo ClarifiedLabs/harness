@@ -282,6 +282,10 @@ type wireEvent struct {
 // tool-schema entry (when tools are present), the system block, and the last
 // content block of the final message, refreshed every call (design §5.4, §7).
 func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
+	return buildRequestWithReasoningReplay(req, contextWindow, outputLimit, "")
+}
+
+func buildRequestWithReasoningReplay(req llm.Request, contextWindow, outputLimit int, reasoningReplay llm.ReasoningReplay) wireRequest {
 	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
 	w := wireRequest{
 		Model:       req.Model,
@@ -343,11 +347,24 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 	// be echoed back while thinking is on; when thinking is off it must be omitted.
 	// (Across a model switch the old signatures belong to a different model; the
 	// current API drops such blocks rather than echoing them.)
+	//
+	// reasoning_replay "current_turn" further drops thinking from every assistant
+	// message BEFORE the last real user turn (the in-flight tool chain keeps its
+	// thinking, as the protocol requires). This is wire-only — the persisted
+	// transcript keeps every block — and is strictly opt-in for providers that
+	// document Anthropic-style history dropping (api.anthropic.com strips and
+	// does not bill old-turn thinking server-side). Providers that mandate
+	// preserved thinking (kimi-k3, kimi-k2.7-code) must keep full replay.
 	includeThinking := w.Thinking != nil && w.Thinking.Type != "disabled"
-	for _, m := range req.Messages {
+	trimThinkingBefore := -1
+	if includeThinking && reasoningReplay == llm.ReasoningReplayCurrentTurn {
+		trimThinkingBefore = thinkingReplayBoundary(req.Messages)
+	}
+	for i, m := range req.Messages {
+		keepThinking := includeThinking && (trimThinkingBefore < 0 || i >= trimThinkingBefore)
 		w.Messages = append(w.Messages, wireMessage{
 			Role:    string(m.Role),
-			Content: buildContent(m.Content, includeThinking),
+			Content: buildContent(m.Content, keepThinking),
 		})
 	}
 
@@ -371,6 +388,27 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 	}
 
 	return w
+}
+
+// thinkingReplayBoundary returns the index of the last user message carrying a
+// non-tool-result block — the most recent real user turn. Thinking on
+// assistant messages before it is historical; from it forward is the in-flight
+// tool chain. A transcript of nothing but tool rounds yields 0, keeping every
+// thinking block.
+func thinkingReplayBoundary(messages []llm.Message) int {
+	boundary := 0
+	for i, m := range messages {
+		if m.Role != llm.RoleUser {
+			continue
+		}
+		for _, b := range m.Content {
+			if b.Kind != llm.BlockToolResult {
+				boundary = i
+				break
+			}
+		}
+	}
+	return boundary
 }
 
 func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
