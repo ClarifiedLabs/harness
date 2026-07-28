@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -99,5 +100,23 @@ func TestResolveSkillMentionsStandaloneUnknownSkill(t *testing.T) {
 	}
 	if len(res.Context) != 0 {
 		t.Fatalf("Context = %d, want 0", len(res.Context))
+	}
+}
+
+func TestSortedSkillNamesSortsAndTreatsEmptyAsDisabled(t *testing.T) {
+	if got := sortedSkillNames(nil); got != nil {
+		t.Fatalf("sortedSkillNames(nil) = %v, want nil", got)
+	}
+	if got := sortedSkillNames(map[string]skills.Skill{}); got != nil {
+		t.Fatalf("sortedSkillNames(empty) = %v, want nil", got)
+	}
+	got := sortedSkillNames(map[string]skills.Skill{
+		"gamma": {Name: "gamma"},
+		"alpha": {Name: "alpha"},
+		"beta":  {Name: "beta"},
+	})
+	want := []string{"alpha", "beta", "gamma"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("sortedSkillNames = %v, want %v", got, want)
 	}
 }

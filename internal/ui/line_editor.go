@@ -95,7 +95,8 @@ type promptLineEditor struct {
 	cycleAgent bool
 
 	// skillNames is the sorted list of discovered skill names used for $skill
-	// tab completion. nil/empty disables the feature.
+	// tab completion; candidate listings rely on that order, so prefix matches
+	// are not re-sorted. nil/empty disables the feature.
 	skillNames []string
 
 	// Non-bracketed paste-burst heuristic (interactive TTY only). When now is
@@ -1309,7 +1310,6 @@ func (e *promptLineEditor) completeSkillMention(s *lineEditState) (bool, error) 
 	if len(matches) == 0 {
 		return true, nil
 	}
-	sort.Strings(matches)
 	if len(matches) == 1 {
 		s.replaceRange(start, s.cursor, "$"+matches[0]+" ")
 		return true, nil
@@ -1364,13 +1364,10 @@ func skillCompletionContext(buf []rune, cursor int) (start int, token string, ok
 	return dollar, string(buf[dollar+1 : cursor]), true
 }
 
-// isSkillMentionRune mirrors isSkillMentionChar in skill_mentions.go for the
+// isSkillMentionRune adapts isSkillMentionChar (skill_mentions.go) for the
 // editor's rune buffers; skill mention characters are ASCII.
 func isSkillMentionRune(r rune) bool {
-	return r >= 'a' && r <= 'z' ||
-		r >= 'A' && r <= 'Z' ||
-		r >= '0' && r <= '9' ||
-		r == '-' || r == '_' || r == ':'
+	return r < 128 && isSkillMentionChar(byte(r))
 }
 
 func longestCommonStringPrefix(values []string) string {
@@ -1557,22 +1554,11 @@ func expandCompletionDir(dirPart string) (string, bool) {
 }
 
 func longestCommonCompletionPrefix(candidates []bangCompletionCandidate) string {
-	if len(candidates) == 0 {
-		return ""
+	values := make([]string, len(candidates))
+	for i, candidate := range candidates {
+		values[i] = candidate.value
 	}
-	common := []rune(candidates[0].value)
-	for _, candidate := range candidates[1:] {
-		next := []rune(candidate.value)
-		n := 0
-		for n < len(common) && n < len(next) && common[n] == next[n] {
-			n++
-		}
-		common = common[:n]
-		if len(common) == 0 {
-			return ""
-		}
-	}
-	return string(common)
+	return longestCommonStringPrefix(values)
 }
 
 func traceREPLInputf(format string, args ...any) {

@@ -1369,6 +1369,33 @@ func TestREPLTypedSkillMentionAddsRequestContext(t *testing.T) {
 	}
 }
 
+func TestREPLPromptEditorTabCompletesSkillMention(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Skills = map[string]skills.Skill{
+		"commit": {
+			Name:        "commit",
+			Description: "Create a git commit",
+			Location:    "/skills/commit/SKILL.md",
+		},
+	}
+
+	if code := run(strings.NewReader("please $com\tnow\r/exit\r"), app, nil, true); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
+	}
+	req := fp.Requests[0]
+	if got := req.Messages[0].Content[0].Text; got != "please $commit now" {
+		t.Fatalf("tab-completed prompt = %q, want %q", got, "please $commit now")
+	}
+	if got := strings.Join(req.RequestContext, "\n\n"); !strings.Contains(got, "[explicit skill mentions]") {
+		t.Fatalf("tab-completed prompt should add skill context:\n%s", got)
+	}
+}
+
 func TestREPLTypedEscapedSkillMentionStillScansLaterMentions(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
