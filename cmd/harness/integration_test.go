@@ -980,6 +980,15 @@ func TestSmokeResumeInterrupted(t *testing.T) {
 		t.Errorf("resumed run should complete with the mock's text, got %q", outBytes)
 	}
 
+	// The resume recap reports the interrupted tool execution on stderr and
+	// never leaks into the one-shot stdout stream.
+	if strings.Contains(string(outBytes), "last exchange") {
+		t.Errorf("resume recap must not touch stdout, got %q", outBytes)
+	}
+	if got := errBuf.String(); !strings.Contains(got, "[turn interrupted during tool execution: read_file did not complete]") {
+		t.Errorf("resume stderr missing the interrupted-tools recap, got %q", got)
+	}
+
 	reqs := mock.recorded()
 	if len(reqs) != 1 {
 		t.Fatalf("resume one-shot should issue exactly 1 request, got %d", len(reqs))

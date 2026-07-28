@@ -1175,7 +1175,12 @@ and are unavailable in one-shot mode.
   todos, plans, usage, cache/proxy IDs, and a safe provider continuation anchor.
 - `-session <dir>` chooses an explicit session directory. `-resume <dir>` loads
   its active tree path and continues, applying a newer active-turn recovery
-  record when present and printing the recovered boundary. Child runs still
+  record when present and printing the recovered boundary. Resume also prints a
+  bounded recap of the last exchange to stderr before the first prompt — the
+  most recent human prompt and assistant reply — with an explicit trailer when
+  the prior session ended mid-turn (interrupted mid-reply, during tool
+  execution, or before the model replied) rather than cleanly at the prompt.
+  Child runs still
   marked `running` from the prior process become `abandoned`; their durable
   checkpoint remains eligible for compatible child-ID continuation. Continued
   children record whether they restored retained history directly or first

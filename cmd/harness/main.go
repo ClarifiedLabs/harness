@@ -1253,6 +1253,9 @@ func run(env environment) int {
 		app.PendingImages = images
 		fmt.Fprintf(stderr, "session: %s\n", sessionPath)
 		fmt.Fprintln(stderr, ui.ProviderLine(cfg.Provider, cfg.Model, registryModel, reasoning, modelRegistry))
+		if resumed != nil {
+			ui.PrintResumeRecap(app, resumed)
+		}
 		code := ui.OneShot(app, prompt)
 		select {
 		case <-exitCh:
@@ -1316,6 +1319,9 @@ func run(env environment) int {
 	// Surface the active agent and the discoverability cues that were otherwise
 	// invisible: /help for commands and how to interrupt a turn (r58, r23).
 	fmt.Fprintf(stderr, "agent: %s · type /help for commands · interrupt a turn with Ctrl-C or double-Esc\n", agentName)
+	if resumed != nil {
+		ui.PrintResumeRecap(app, resumed)
+	}
 	if cfg.InitialPromptSet {
 		return ui.RunWithInitialPrompt(stdin, app, exitCh, cfg.InitialPrompt)
 	}

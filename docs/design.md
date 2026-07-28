@@ -3099,7 +3099,11 @@ type UsageTotals struct {
 - Auto-save to `~/.local/state/harness/sessions/<timestamp>`; the path is printed at
   startup. `-session` chooses a directory; `-resume` loads `state.json` plus its
   active tree path, or applies a newer `active-turn.json` recovery record before
-  continuing. Resume reports the recovered phase. It also marks child metadata
+  continuing. Resume reports the recovered phase. Resume also prints a stderr
+  recap of the last durable exchange before the first prompt, classified from
+  the transcript alone (recovery marker, tail message role/phase/origin, and
+  synthetic `interrupted` tool results) as clean, recovered, interrupted
+  mid-reply, interrupted during tool execution, or an unanswered prompt. It also marks child metadata
   left `running` by the prior process as `abandoned`; such children are terminal
   and may be continued by child ID when their saved runtime contract still
   matches. Distinct `-resume <source>` and `-session <destination>` clone the
