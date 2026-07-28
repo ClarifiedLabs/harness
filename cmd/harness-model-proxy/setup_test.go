@@ -1672,3 +1672,127 @@ func readTestModelsDevCachePath(t *testing.T, path string) *modelcatalog.Catalog
 	}
 	return catalog
 }
+
+// testSetupCatalogWithKimiForCoding mirrors the models.dev shape for Kimi for
+// Coding: the Anthropic SDK package and the shared /coding/v1 base URL.
+func testSetupCatalogWithKimiForCoding() *modelcatalog.Catalog {
+	return &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
+		"kimi-for-coding": {
+			ID:   "kimi-for-coding",
+			Name: "Kimi For Coding",
+			API:  "https://api.kimi.com/coding/v1",
+			NPM:  "@ai-sdk/anthropic",
+			Env:  []string{"KIMI_API_KEY"},
+			Models: map[string]modelcatalog.Model{
+				"kimi-k3": {
+					ID:          "kimi-k3",
+					Name:        "Kimi K3",
+					ReleaseDate: "2026-07-01",
+					Modalities:  modelcatalog.Modalities{Input: []string{"text"}},
+					Reasoning:   true,
+					Limit:       modelcatalog.Limit{Context: 1000000, Output: 64000},
+				},
+			},
+		},
+	}}
+}
+
+// TestRunSetupWritesKimiForCodingOpenAIDialect verifies setup resolves
+// kimi-for-coding to the OpenAI chat-completions dialect with reasoning replay
+// enabled, despite models.dev listing the Anthropic SDK package.
+func TestRunSetupWritesKimiForCodingOpenAIDialect(t *testing.T) {
+	home := t.TempDir()
+	var out, errw bytes.Buffer
+	env := environment{
+		stdin:  strings.NewReader("kimi-for-coding\n\nall\nsave\n"),
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(k string) string {
+			if k == "HOME" {
+				return home
+			}
+			return ""
+		},
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
+			return testSetupCatalogWithKimiForCoding(), nil
+		},
+		terminalRows: func() int { return 12 },
+	}
+
+	if err := runSetup(context.Background(), env, false); err != nil {
+		t.Fatalf("runSetup: %v; stderr=%q", err, errw.String())
+	}
+
+	providerData, err := os.ReadFile(filepath.Join(home, ".config", "harness-model-proxy", "kimi-for-coding.json"))
+	if err != nil {
+		t.Fatalf("read provider config: %v", err)
+	}
+	if !strings.Contains(string(providerData), `"reasoning_replay": true`) {
+		t.Fatalf("provider config = %s, want reasoning_replay:true", providerData)
+	}
+	var provider setupProviderConfig
+	if err := json.Unmarshal(providerData, &provider); err != nil {
+		t.Fatalf("decode provider config: %v", err)
+	}
+	if provider.APIType != "openai" {
+		t.Fatalf("api_type = %q, want openai (dual-protocol override)", provider.APIType)
+	}
+	if provider.ReasoningReplay != llm.ReasoningReplayFull {
+		t.Fatalf("reasoning_replay = %q, want full", provider.ReasoningReplay)
+	}
+	if provider.BaseURL != "https://api.kimi.com/coding/v1" {
+		t.Fatalf("base_url = %q, want the shared /coding/v1 base", provider.BaseURL)
+	}
+}
+
+// TestRunRefreshModelsRewritesKimiForCodingToOpenAI verifies refresh-models
+// upgrades an existing Anthropic-dialect kimi-for-coding config to the OpenAI
+// dialect with reasoning replay while refreshing model metadata.
+func TestRunRefreshModelsRewritesKimiForCodingToOpenAI(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["kimi-for-coding.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kimi-for-coding.json"), []byte(`{
+  "name": "kimi-for-coding",
+  "api_type": "anthropic",
+  "base_url": "https://api.kimi.com/coding/v1",
+  "managed": true,
+  "models": [{"name":"kimi-k3","context_window":256000}]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	env := environment{
+		stdout: &out,
+		stderr: &bytes.Buffer{},
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
+			return testSetupCatalogWithKimiForCoding(), nil
+		},
+	}
+
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "kimi-for-coding.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"reasoning_replay": true`) {
+		t.Fatalf("provider config after refresh = %s, want reasoning_replay:true", data)
+	}
+	var provider setupProviderConfig
+	if err := json.Unmarshal(data, &provider); err != nil {
+		t.Fatal(err)
+	}
+	if provider.APIType != "openai" {
+		t.Fatalf("api_type after refresh = %q, want openai", provider.APIType)
+	}
+	if provider.ReasoningReplay != llm.ReasoningReplayFull {
+		t.Fatalf("reasoning_replay after refresh = %q, want full", provider.ReasoningReplay)
+	}
+	if len(provider.Models) != 1 || provider.Models[0].Name != "kimi-k3" || provider.Models[0].ContextWindow != 1000000 {
+		t.Fatalf("models after refresh = %+v, want kimi-k3 metadata refreshed", provider.Models)
+	}
+}

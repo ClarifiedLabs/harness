@@ -482,6 +482,20 @@ After setup, run:
 harness-model-proxy auth login openai-codex
 ```
 
+The `kimi-for-coding` provider is deliberately configured with
+`api_type:"openai"` even though models.dev lists the Anthropic SDK package.
+Kimi for Coding serves both protocols off one base URL (OpenAI at
+`/coding/v1/chat/completions`, Anthropic at `/coding/v1/messages`; see Kimi's
+service-endpoint docs), and the OpenAI chat-completions shape replays preserved
+thinking as compact `reasoning_content` — the sanctioned mechanism, matching
+Kimi's own CLI (`packages/kosong/src/providers/kimi.ts`) and Kimi's Preserved
+Thinking guide — instead of the Anthropic shape's much larger signed thinking
+blobs. Managed setup and `refresh-models` therefore also write
+`reasoning_replay:true` for this provider so historical assistant reasoning
+round-trips (see the `reasoning_replay` provider quirk above). Do not disable
+reasoning replay for kimi-k3: Kimi's docs make preserved thinking mandatory in
+tool-call loops.
+
 Provider configs accept an optional `auth` block in place of `api_key` /
 `api_key_env`; when `auth` is present, API-key fields are ignored and there is no
 fallback if auth fails. Supported auth shapes include `token_command`, `oauth2`,

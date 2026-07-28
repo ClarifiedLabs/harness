@@ -147,6 +147,16 @@ func (p Provider) BaseURL() string {
 // provider.shape field (responses/completions), then OpenAI-compatible heuristics.
 func (p Provider) APIType() string {
 	npm := strings.ToLower(strings.TrimSpace(p.NPM))
+	// Kimi for Coding serves both protocols off one base
+	// (https://www.kimi.com/code/docs/en/#service-endpoint: OpenAI at
+	// /coding/v1/chat/completions, Anthropic at /coding/v1/messages). models.dev
+	// lists the Anthropic SDK package, but harness deliberately selects the
+	// OpenAI chat-completions shape: preserved thinking is replayed as compact
+	// reasoning_content (see the reasoning_replay provider quirk) instead of
+	// Anthropic's much larger signed thinking blobs.
+	if p.ID == "kimi-for-coding" {
+		return "openai"
+	}
 	if p.ID == "anthropic" || strings.Contains(npm, "anthropic") || slices.Contains(p.Env, "ANTHROPIC_API_KEY") {
 		return "anthropic"
 	}

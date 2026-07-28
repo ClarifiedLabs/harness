@@ -242,6 +242,21 @@ func TestProviderFallbacksFromNPM(t *testing.T) {
 			wantBaseURL: "",
 			wantAPIType: "",
 		},
+		{
+			// Kimi for Coding lists the Anthropic SDK package on models.dev but
+			// is deliberately driven over its OpenAI chat-completions endpoint
+			// (dual-protocol service; compact reasoning_content replay).
+			name:        "kimi-for-coding overrides anthropic sdk to openai",
+			provider:    Provider{ID: "kimi-for-coding", NPM: "@ai-sdk/anthropic", API: "https://api.kimi.com/coding/v1"},
+			wantBaseURL: "https://api.kimi.com/coding/v1",
+			wantAPIType: "openai",
+		},
+		{
+			name:        "other anthropic sdk provider unaffected",
+			provider:    Provider{ID: "kimi", NPM: "@ai-sdk/anthropic"},
+			wantBaseURL: "https://api.anthropic.com/v1",
+			wantAPIType: "anthropic",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

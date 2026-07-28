@@ -46,7 +46,10 @@ type setupProviderConfig struct {
 	PriceSource string `json:"price_source,omitempty"`
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for compatible
 	// backends that reject the standard parameter, such as ChatGPT Codex.
-	OmitMaxOutputTokens  bool                  `json:"omit_max_output_tokens,omitempty"`
+	OmitMaxOutputTokens bool `json:"omit_max_output_tokens,omitempty"`
+	// ReasoningReplay controls how much historical reasoning state the dialect
+	// replays on the wire; see llm.ReasoningReplay.
+	ReasoningReplay      llm.ReasoningReplay   `json:"reasoning_replay,omitempty"`
 	MinOutputTokens      int                   `json:"min_output_tokens,omitempty"`
 	PromptCache          llm.PromptCacheConfig `json:"prompt_cache,omitempty"`
 	ResponsesStateful    *bool                 `json:"responses_stateful,omitempty"`
@@ -145,6 +148,9 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	provider := setupProviderFromCatalog(providerMeta, apiKey, authCfg, models)
 	if existingProvider.Config.OmitMaxOutputTokens {
 		provider.OmitMaxOutputTokens = true
+	}
+	if existingProvider.Config.ReasoningReplay != "" {
+		provider.ReasoningReplay = existingProvider.Config.ReasoningReplay
 	}
 	if existingProvider.Config.MinOutputTokens > 0 {
 		provider.MinOutputTokens = existingProvider.Config.MinOutputTokens
@@ -290,6 +296,9 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			next := setupProviderFromCatalog(meta, current.APIKey, current.Auth, updatedModels)
 			if current.OmitMaxOutputTokens {
 				next.OmitMaxOutputTokens = true
+			}
+			if current.ReasoningReplay != "" {
+				next.ReasoningReplay = current.ReasoningReplay
 			}
 			if current.MinOutputTokens > 0 {
 				next.MinOutputTokens = current.MinOutputTokens
@@ -850,6 +859,12 @@ func applySyntheticProviderDefaults(provider modelcatalog.Provider, cfg *setupPr
 	if strings.EqualFold(strings.TrimSpace(provider.ID), "google") && cfg.InteractionsStateful == nil {
 		stateful := true
 		cfg.InteractionsStateful = &stateful
+	}
+	// Kimi for Coding's OpenAI endpoint requires preserved thinking in
+	// multi-turn tool loops (Kimi's own CLI replays reasoning on both
+	// protocols); harness replays it as compact reasoning_content.
+	if strings.EqualFold(strings.TrimSpace(provider.ID), "kimi-for-coding") && cfg.ReasoningReplay == "" {
+		cfg.ReasoningReplay = llm.ReasoningReplayFull
 	}
 }
 
