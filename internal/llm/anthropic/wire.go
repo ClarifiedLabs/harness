@@ -309,12 +309,6 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 			CacheControl: anchor,
 		}}
 	}
-	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
-		w.System = append(w.System, wireTextBlock{
-			Type: "text",
-			Text: contextText,
-		})
-	}
 
 	if len(req.StopSeqs) > 0 {
 		w.StopSequences = req.StopSeqs
@@ -358,6 +352,23 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
 	}
 
 	placeCacheBreakpoints(w.Messages, req.CachePolicy.StableMessagePrefix)
+
+	// Volatile per-request context (e.g. a one-shot todo reminder) rides a
+	// trailing user-role message appended AFTER the cache breakpoints were
+	// placed, so the rolling tail breakpoint stays on the last real transcript
+	// message. It must not join the system head: appearing/changing there
+	// would invalidate every cached byte after it (the OpenAI and Responses
+	// dialects already place volatile context last). Anthropic merges
+	// consecutive same-role messages, so a trailing user message after a
+	// tool-result batch (also user-role) is legal, and being request-only the
+	// next request's prefix realigns with the persisted transcript. It never
+	// carries CacheControl.
+	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
+		w.Messages = append(w.Messages, wireMessage{
+			Role:    string(llm.RoleUser),
+			Content: []wireContent{{Type: "text", Text: contextText}},
+		})
+	}
 
 	return w
 }

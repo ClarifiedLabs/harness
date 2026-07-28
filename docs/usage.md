@@ -557,7 +557,10 @@ requests use the default five-minute TTL. Message breakpoints always use the
 provider's default five-minute TTL. Harness computes a leading message prefix
 that future retention cannot rewrite, and the Anthropic dialect places one
 message breakpoint there plus a rolling tail breakpoint within the four-anchor
-limit. Maintenance requests derive deterministic, purpose-separated proxy and
+limit. Volatile request-only context (todo reminders, hook output, background
+notices) rides a trailing user-role message appended after the breakpoints are
+placed — never the system head — so its appearance or change does not
+invalidate the cached prefix. Maintenance requests derive deterministic, purpose-separated proxy and
 cache IDs from the owning session, so they do not reuse or compete with the main
 conversation's connection/continuation chain.
 

@@ -412,8 +412,10 @@ type ToolSchema struct {
 ```
 
 `RequestContext` is request-only instruction context: Chat Completions appends it
-as a trailing system message after the transcript, Anthropic adds it as an
-uncached system text block, and Responses adds it as a late `role:"developer"`
+as a trailing system message after the transcript, Anthropic appends it as a
+trailing user-role message (single uncached text block) placed after the
+cache breakpoints are laid so the rolling tail breakpoint stays on the last
+real transcript message, and Responses adds it as a late `role:"developer"`
 input item immediately before the current user message or trailing tool-call/output
 group. All three keep the stable system+tools+transcript prefix intact for prefix
 caching. Fresh todo/background/hook context applies to the current request without

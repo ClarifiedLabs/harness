@@ -552,10 +552,12 @@ func TestBuildRequestServerTools(t *testing.T) {
 }
 
 func TestBuildRequestCacheBreakpointSkipsRequestContext(t *testing.T) {
-	// The volatile request-only context (e.g. a [todo] reminder) must not become
-	// the final user-like message or carry the cache breakpoint: pinning the
-	// breakpoint to per-turn content defeats transcript caching. The breakpoint
-	// must land on the last real transcript message instead.
+	// The volatile request-only context (e.g. a [todo] reminder) rides a
+	// trailing user message, not the system head: appearing or changing at the
+	// head of the request would invalidate every cached byte after it. It must
+	// not carry a cache breakpoint either — pinning the breakpoint to per-turn
+	// content defeats transcript caching. The breakpoint must land on the last
+	// real transcript message instead.
 	req := llm.Request{
 		Model:  "claude-opus-4-8",
 		System: "system prompt",
@@ -568,25 +570,62 @@ func TestBuildRequestCacheBreakpointSkipsRequestContext(t *testing.T) {
 	}
 	w := buildRequest(req, 1_000_000, 0)
 
-	if len(w.Messages) != 3 {
-		t.Fatalf("messages = %d, want only 3 real transcript messages", len(w.Messages))
+	if len(w.Messages) != 4 {
+		t.Fatalf("messages = %d, want 3 transcript messages + trailing context", len(w.Messages))
 	}
-	if len(w.System) != 2 {
-		t.Fatalf("system blocks = %d, want stable system + request context", len(w.System))
+	if len(w.System) != 1 {
+		t.Fatalf("system blocks = %d, want exactly the stable system prompt", len(w.System))
 	}
 	if w.System[0].Text != "system prompt" || w.System[0].CacheControl == nil {
 		t.Fatalf("stable system block = %+v, want cached system prompt", w.System[0])
 	}
-	if !strings.Contains(w.System[1].Text, "todo: ship it") {
-		t.Fatalf("request-context system block = %+v, want context text", w.System[1])
+	contextMsg := w.Messages[3]
+	if contextMsg.Role != "user" || len(contextMsg.Content) != 1 || !strings.Contains(contextMsg.Content[0].Text, "todo: ship it") {
+		t.Fatalf("trailing message = %+v, want user message carrying the request context", contextMsg)
 	}
-	if w.System[1].CacheControl != nil {
-		t.Errorf("request-context system block must not carry cache_control, got %+v", w.System[1].CacheControl)
+	if contextMsg.Content[0].CacheControl != nil {
+		t.Errorf("request-context message must not carry cache_control, got %+v", contextMsg.Content[0].CacheControl)
 	}
 	// The last real message must carry the ephemeral breakpoint.
 	lastReal := w.Messages[2]
 	if got := lastReal.Content[len(lastReal.Content)-1]; got.CacheControl == nil || got.CacheControl.Type != "ephemeral" {
 		t.Errorf("last real message must carry the ephemeral breakpoint, got %+v", got)
+	}
+}
+
+func TestBuildRequestContextKeepsPrefixStable(t *testing.T) {
+	// Two requests differing only in RequestContext must serialize
+	// byte-identically through the last transcript message: that is the prefix
+	// the provider's prompt cache matches on.
+	messages := []llm.Message{
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "work on it"}}},
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "on it"}}},
+	}
+	base := llm.Request{Model: "claude-opus-4-8", System: "system prompt", Messages: messages}
+
+	without := buildRequest(base, 1_000_000, 0)
+
+	withCtx := base
+	withCtx.RequestContext = []string{"todo: ship it"}
+	withContext := buildRequest(withCtx, 1_000_000, 0)
+
+	marshal := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return string(b)
+	}
+	if got, want := marshal(withContext.System), marshal(without.System); got != want {
+		t.Fatalf("system changed with request context:\n without: %s\n with:    %s", want, got)
+	}
+	if len(without.Messages) != 2 || len(withContext.Messages) != 3 {
+		t.Fatalf("message counts = %d, %d; want 2 and 3", len(without.Messages), len(withContext.Messages))
+	}
+	for i := range without.Messages {
+		if got, want := marshal(withContext.Messages[i]), marshal(without.Messages[i]); got != want {
+			t.Fatalf("transcript message %d changed with request context:\n without: %s\n with:    %s", i, want, got)
+		}
 	}
 }
 
