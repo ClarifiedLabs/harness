@@ -959,7 +959,13 @@ uses `$VISUAL`, then `$EDITOR`, then `vi`. In normal prompt text, Tab completes
 literal `@path` file references; paths containing whitespace, quotes, or
 backslashes are inserted as `@"..."`. These references remain prompt text and do
 not expand file contents. Supported image references auto-attach as images using
-the default image detail when the model supports images. On `!` command lines,
+the default image detail when the model supports images. Tab also completes
+`$skill` mentions against the discovered skill set: a unique match completes
+inline with a trailing space, multiple matches extend to their common prefix or
+list candidates below the prompt, and no match leaves the buffer unchanged.
+Skill completion respects the `$$` escape and, like `@` completion, is skipped
+on `!` shell and `/` command lines but works on escaped `!!` and `//` prompt
+lines. On `!` command lines,
 Tab completes the first word from `PATH` and completes path words with `/`, `~/`,
 `./`, `../`, and nested relative path prefixes.
 

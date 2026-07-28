@@ -2796,7 +2796,15 @@ or the current user's home directory while preserving the typed prefix; paths th
 need quoting are inserted as `@"..."`, and directories keep the cursor inside the
 closing quote so completion can continue. `@` completion is skipped for slash-command
 lines and single-bang shell escapes, but works on escaped prompt lines such as `//...`
-and `!!...`. In raw prompt-editor buffers that start with `!`, the first word still
+and `!!...`. `$skillName` tokens in normal prompt text complete against the discovered
+skill set with case-sensitive prefix matching: a unique match inserts the full name
+plus a trailing space, multiple matches extend to the longest common prefix or list
+`$name` candidates below the prompt, and no match is a no-op. `$` completion follows
+the same line gating as `@` and mirrors the `resolveSkillMentions` escape rule, so an
+even-length run of `$` characters (consumed as `$$` escapes) suppresses completion
+while an odd-length run ends in a real mention start. When no skills are discovered,
+Tab keeps its previous fall-through behavior. In raw prompt-editor buffers that start
+with `!`, the first word still
 completes executable names from `PATH` unless it starts with `/`, `~/`, `./`, `../`,
 or otherwise contains `/`; path words complete filesystem entries with the same path
 prefix rules.

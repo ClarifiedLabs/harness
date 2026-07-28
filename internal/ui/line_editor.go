@@ -94,6 +94,10 @@ type promptLineEditor struct {
 	// reads and during-prompt capture leave it false so the key remains inert.
 	cycleAgent bool
 
+	// skillNames is the sorted list of discovered skill names used for $skill
+	// tab completion. nil/empty disables the feature.
+	skillNames []string
+
 	// Non-bracketed paste-burst heuristic (interactive TTY only). When now is
 	// non-nil and pasteHeuristic is true, updatePasteTiming tracks inter-keystroke
 	// gaps and enters pasteMode when bytes arrive faster than a human can type
@@ -1149,6 +1153,9 @@ func (e *promptLineEditor) completePromptTab(s *lineEditState) (bool, error) {
 	if handled, err := e.completeAtFileReference(s); err != nil || handled {
 		return handled, err
 	}
+	if handled, err := e.completeSkillMention(s); err != nil || handled {
+		return handled, err
+	}
 	return e.completeBangLine(s)
 }
 
@@ -1283,6 +1290,106 @@ func formatPromptRefCandidate(path string, isDir bool) string {
 		return "@\"" + escapePromptRefPath(path) + "\""
 	}
 	return "@" + path
+}
+
+func (e *promptLineEditor) completeSkillMention(s *lineEditState) (bool, error) {
+	if len(e.skillNames) == 0 {
+		return false, nil
+	}
+	start, token, ok := skillCompletionContext(s.buf, s.cursor)
+	if !ok {
+		return false, nil
+	}
+	var matches []string
+	for _, name := range e.skillNames {
+		if strings.HasPrefix(name, token) {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) == 0 {
+		return true, nil
+	}
+	sort.Strings(matches)
+	if len(matches) == 1 {
+		s.replaceRange(start, s.cursor, "$"+matches[0]+" ")
+		return true, nil
+	}
+	common := longestCommonStringPrefix(matches)
+	if len([]rune(common)) > len([]rune(token)) {
+		s.replaceRange(start, s.cursor, "$"+common)
+		return true, nil
+	}
+	if err := e.finishPromptState(s); err != nil {
+		return true, err
+	}
+	for _, name := range matches {
+		if _, err := fmt.Fprintln(e.w, "$"+name); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
+}
+
+// skillCompletionContext locates the $skill token being typed at the cursor.
+// start is the index of the '$' that begins the mention so replacement covers
+// it; token is the partial name after it (possibly empty). The $$ escape
+// mirrors resolveSkillMentions: an even-length run of '$' ending at the
+// token's '$' is fully consumed by escapes, an odd-length run leaves the
+// final '$' as a real mention start.
+func skillCompletionContext(buf []rune, cursor int) (start int, token string, ok bool) {
+	if !promptRefCompletionAllowed(buf) {
+		return 0, "", false
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(buf) {
+		cursor = len(buf)
+	}
+	i := cursor
+	for i > 0 && isSkillMentionRune(buf[i-1]) {
+		i--
+	}
+	if i == 0 || buf[i-1] != '$' {
+		return 0, "", false
+	}
+	dollar := i - 1
+	run := 1
+	for dollar-run >= 0 && buf[dollar-run] == '$' {
+		run++
+	}
+	if run%2 == 0 {
+		return 0, "", false
+	}
+	return dollar, string(buf[dollar+1 : cursor]), true
+}
+
+// isSkillMentionRune mirrors isSkillMentionChar in skill_mentions.go for the
+// editor's rune buffers; skill mention characters are ASCII.
+func isSkillMentionRune(r rune) bool {
+	return r >= 'a' && r <= 'z' ||
+		r >= 'A' && r <= 'Z' ||
+		r >= '0' && r <= '9' ||
+		r == '-' || r == '_' || r == ':'
+}
+
+func longestCommonStringPrefix(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	common := []rune(values[0])
+	for _, value := range values[1:] {
+		next := []rune(value)
+		n := 0
+		for n < len(common) && n < len(next) && common[n] == next[n] {
+			n++
+		}
+		common = common[:n]
+		if len(common) == 0 {
+			return ""
+		}
+	}
+	return string(common)
 }
 
 func (e *promptLineEditor) completeBangLine(s *lineEditState) (bool, error) {

@@ -736,6 +736,228 @@ func TestPromptLineEditorAtFileTabSkipsShellAndSlashLines(t *testing.T) {
 	}
 }
 
+func TestPromptLineEditorSkillTabUniqueCompletion(t *testing.T) {
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("please $com\t\r"), &out)
+	editor.skillNames = []string{"commit", "review"}
+
+	input, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "please $commit " {
+		t.Fatalf("input text = %q, want unique $skill completion with trailing space", input.text)
+	}
+}
+
+func TestPromptLineEditorSkillTabCompletesCommonPrefix(t *testing.T) {
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("$al\t\r"), &out)
+	editor.skillNames = []string{"alpha-review", "alpha-test"}
+
+	input, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "$alpha-" {
+		t.Fatalf("input text = %q, want common $skill prefix", input.text)
+	}
+}
+
+func TestPromptLineEditorSkillTabListsCandidates(t *testing.T) {
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("$al\t\t\r"), &out)
+	editor.skillNames = []string{"alpha-review", "alpha-test"}
+
+	input, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "$alpha-" {
+		t.Fatalf("input text = %q, want unchanged common prefix", input.text)
+	}
+	got := out.String()
+	if !strings.Contains(got, "$alpha-review\n") || !strings.Contains(got, "$alpha-test\n") {
+		t.Fatalf("completion list missing $ candidates: %q", got)
+	}
+}
+
+func TestPromptLineEditorSkillTabCompletesColonName(t *testing.T) {
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("$build\t\r"), &out)
+	editor.skillNames = []string{"build-ios-apps:swiftui-patterns"}
+
+	input, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "$build-ios-apps:swiftui-patterns " {
+		t.Fatalf("input text = %q, want colon-qualified $skill completion", input.text)
+	}
+}
+
+func TestPromptLineEditorSkillTabWithoutSkillsInsertsLiteralTab(t *testing.T) {
+	input, ok, err := readEditedInput(t, "a$bc\t\r")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "a$bc\t" {
+		t.Fatalf("input text = %q, want literal tab when no skills are configured", input.text)
+	}
+}
+
+func TestPromptLineEditorSkillTabNoMatchIsNoOp(t *testing.T) {
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("$zzz\t\r"), &out)
+	editor.skillNames = []string{"commit"}
+
+	input, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if input.text != "$zzz" {
+		t.Fatalf("input text = %q, want unchanged token with no matching skill", input.text)
+	}
+}
+
+func TestPromptLineEditorSkillTabRespectsDollarEscape(t *testing.T) {
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("$$com\t\r$$$com\t\r"), &out)
+	editor.skillNames = []string{"commit"}
+
+	escaped, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if escaped.text != "$$com\t" {
+		t.Fatalf("escaped $$ should not complete, got %q", escaped.text)
+	}
+
+	odd, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if odd.text != "$$$commit " {
+		t.Fatalf("odd $ run should complete the final $, got %q", odd.text)
+	}
+}
+
+func TestPromptLineEditorSkillTabSkipsShellAndSlashLines(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	// Keep the bang fallback from finding $com* commands so an unchanged buffer
+	// proves skill completion did not fire on the single-bang line.
+	t.Setenv("PATH", dir)
+
+	var out bytes.Buffer
+	editor := newPromptLineEditor(strings.NewReader("!$com\t\r/note $com\t\r!!$com\t\r//$com\t\r"), &out)
+	editor.skillNames = []string{"commit"}
+
+	bang, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if bang.text != "!$com" {
+		t.Fatalf("single-bang shell line should not complete $skill: %q", bang.text)
+	}
+
+	slash, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if slash.text != "/note $com\t" {
+		t.Fatalf("slash command line should insert a tab, got %q", slash.text)
+	}
+
+	escapedBang, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if escapedBang.text != "!!$commit " {
+		t.Fatalf("escaped bang prompt should complete $skill, got %q", escapedBang.text)
+	}
+
+	escapedSlash, ok, err := editor.read("> ")
+	if err != nil {
+		t.Fatalf("read = %v", err)
+	}
+	if !ok {
+		t.Fatal("read returned ok=false")
+	}
+	if escapedSlash.text != "//$commit " {
+		t.Fatalf("escaped slash prompt should complete $skill, got %q", escapedSlash.text)
+	}
+}
+
+func TestSkillCompletionContext(t *testing.T) {
+	tests := []struct {
+		name      string
+		buf       string
+		cursor    int
+		wantStart int
+		wantToken string
+		wantOK    bool
+	}{
+		{"bare dollar", "$", 1, 0, "", true},
+		{"glued to preceding text", "use$com", 7, 3, "com", true},
+		{"after space", "please $com", 11, 7, "com", true},
+		{"cursor mid token", "use$com", 5, 3, "c", true},
+		{"colon and dash chars", "$build-ios:sw", 13, 0, "build-ios:sw", true},
+		{"escaped even run", "$$com", 5, 0, "", false},
+		{"escaped even run after text", "a$$$$com", 8, 0, "", false},
+		{"odd run completes", "$$$com", 6, 2, "com", true},
+		{"no dollar", "com", 3, 0, "", false},
+		{"single bang line", "!$com", 5, 0, "", false},
+		{"slash command line", "/note $com", 10, 0, "", false},
+		{"escaped bang line", "!!$com", 6, 2, "com", true},
+		{"escaped slash line", "//$com", 6, 2, "com", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			start, token, ok := skillCompletionContext([]rune(tt.buf), tt.cursor)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if start != tt.wantStart || token != tt.wantToken {
+				t.Fatalf("start, token = %d, %q, want %d, %q", start, token, tt.wantStart, tt.wantToken)
+			}
+		})
+	}
+}
+
 func TestPromptLineEditorBangTabCompletesCommandFromPath(t *testing.T) {
 	dir := t.TempDir()
 	writeExecutableForCompletion(t, filepath.Join(dir, "harness-test-cmd"))

@@ -432,6 +432,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}()
 
 	reader := newREPLReader(in, app.Errw, usePromptEditor, app.PromptEditMode)
+	if reader.editor != nil {
+		reader.editor.skillNames = sortedSkillNames(app.Skills)
+	}
 	if output := outputCoordinatorFromWriter(app.Errw); output != nil && reader.editor != nil {
 		output.setPromptEditor(reader.editor)
 		defer output.setPromptEditor(nil)

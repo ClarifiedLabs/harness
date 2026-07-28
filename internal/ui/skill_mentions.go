@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"harness/internal/skills"
@@ -63,6 +64,20 @@ func skillMentionToken(s string, dollar int) (name string, end int, ok bool) {
 		return "", end, false
 	}
 	return s[start:end], end, true
+}
+
+// sortedSkillNames returns the sorted skill names for $skill tab completion.
+// nil/empty input returns nil, which disables completion.
+func sortedSkillNames(m map[string]skills.Skill) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func isSkillMentionChar(c byte) bool {
