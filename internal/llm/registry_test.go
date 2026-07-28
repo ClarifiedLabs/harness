@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,4 +134,62 @@ func TestMergeModelFillsOutputLimit(t *testing.T) {
 	if got := r.OutputLimit("gpt-x"); got != 48_000 {
 		t.Fatalf("output limit = %d, want 48000 (explicit value preserved)", got)
 	}
+}
+
+func TestReasoningReplayJSON(t *testing.T) {
+	t.Run("accepts bool and string forms", func(t *testing.T) {
+		cases := []struct {
+			json string
+			want ReasoningReplay
+		}{
+			{`true`, ReasoningReplayFull},
+			{`false`, ""},
+			{`"full"`, ReasoningReplayFull},
+			{`"current_turn"`, ReasoningReplayCurrentTurn},
+			{`""`, ""},
+		}
+		for _, tc := range cases {
+			var r ReasoningReplay
+			if err := json.Unmarshal([]byte(tc.json), &r); err != nil {
+				t.Fatalf("unmarshal %s: %v", tc.json, err)
+			}
+			if r != tc.want {
+				t.Errorf("unmarshal %s = %q, want %q", tc.json, r, tc.want)
+			}
+		}
+	})
+	t.Run("rejects unknown values", func(t *testing.T) {
+		for _, bad := range []string{`"sometimes"`, `3`} {
+			var r ReasoningReplay
+			if err := json.Unmarshal([]byte(bad), &r); err == nil {
+				t.Errorf("unmarshal %s: expected error, got %q", bad, r)
+			}
+		}
+	})
+	t.Run("round-trips through provider config", func(t *testing.T) {
+		cfg := ProviderConfig{Name: "kimi-for-coding", APIType: "openai", ReasoningReplay: ReasoningReplayFull}
+		b, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if !strings.Contains(string(b), `"reasoning_replay":true`) {
+			t.Fatalf("marshaled config = %s, want reasoning_replay:true", b)
+		}
+		var back ProviderConfig
+		if err := json.Unmarshal(b, &back); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if back.ReasoningReplay != ReasoningReplayFull {
+			t.Fatalf("round-trip = %q, want full", back.ReasoningReplay)
+		}
+	})
+	t.Run("omitted when unset", func(t *testing.T) {
+		b, err := json.Marshal(ProviderConfig{Name: "openai"})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if strings.Contains(string(b), "reasoning_replay") {
+			t.Fatalf("reasoning_replay emitted though unset: %s", b)
+		}
+	})
 }

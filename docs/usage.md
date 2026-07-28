@@ -504,6 +504,21 @@ copy the same key into non-auth routing headers such as `x-session-id`. The
 proxy derives the provider-facing value as a SHA-256 hash of harness's local
 cache-affinity key, so providers do not receive the raw identifier.
 
+Provider configs may set `reasoning_replay` to control how much historical
+reasoning state a dialect replays on the wire. The default leaves each
+dialect's behavior unchanged: the OpenAI chat-completions dialect replays
+nothing (strict OpenAI-compatible servers reject unknown fields), and the
+Anthropic dialect replays all signed thinking blocks verbatim. Set
+`reasoning_replay:true` (or `"full"`) on an OpenAI-dialect provider whose
+endpoint requires preserved thinking in multi-turn tool loops — such as Kimi
+for Coding — to replay persisted assistant reasoning as `reasoning_content` on
+later requests. Replay is gated on reasoning being enabled for the request, so
+compaction summaries and prewarm requests stay clean. With replay enabled, the
+dialect tags streamed `reasoning_content` for persistence (as thinking blocks
+with no signature); without it the text remains display-only. `"current_turn"`
+is an Anthropic-dialect-only reduction mode documented under reasoning replay
+in the context-efficiency section.
+
 For Anthropic, harness also declares cache semantics directly on each neutral
 request. Interactive turns request a one-hour TTL only for stable system/tool
 anchors; one-shot, delegate, prewarm, compaction, handoff, and branch-summary

@@ -4,7 +4,10 @@ import "encoding/json"
 
 // PersistedReasoningBlock converts a reasoning stream event into the neutral
 // block that must be replayed on a subsequent request. Plain display-only
-// summaries are intentionally not persisted.
+// summaries are intentionally not persisted — with one exception: an event
+// tagged ReasoningFormatOpenAIChat is unsigned chat-completions
+// reasoning_content the provider explicitly asked to round-trip, so it is
+// persisted as a thinking block with an empty signature.
 func PersistedReasoningBlock(ev StreamEvent) (ContentBlock, bool) {
 	if ev.ReasoningEncrypted != "" {
 		return ContentBlock{Kind: BlockReasoning, ReasoningID: ev.ReasoningID, ReasoningEncrypted: ev.ReasoningEncrypted}, true
@@ -13,6 +16,9 @@ func PersistedReasoningBlock(ev StreamEvent) (ContentBlock, bool) {
 		return ContentBlock{Kind: BlockRedactedThinking, RedactedData: ev.RedactedData}, true
 	}
 	if ev.Signature == "" {
+		if ev.ReasoningFormat == ReasoningFormatOpenAIChat && ev.Text != "" {
+			return ContentBlock{Kind: BlockThinking, Thinking: ev.Text}, true
+		}
 		return ContentBlock{}, false
 	}
 	if ev.ReasoningFormat == ReasoningFormatGeminiInteractions {

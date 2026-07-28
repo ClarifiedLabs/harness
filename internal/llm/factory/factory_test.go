@@ -1,8 +1,16 @@
 package factory
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"harness/internal/llm"
 )
 
 func TestInferProvider(t *testing.T) {
@@ -108,6 +116,61 @@ func TestReasoningModeInference(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := reasoningMode(tc.opts.ProviderName, tc.opts.Provider, tc.opts.BaseURL, tc.opts.ReasoningMode); got != tc.want {
 				t.Fatalf("reasoningMode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReasoningReplayReachesOpenAIDialect verifies the provider-config
+// reasoning_replay quirk is threaded through the factory into the
+// chat-completions wire body.
+func TestReasoningReplayReachesOpenAIDialect(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode llm.ReasoningReplay
+		want bool
+	}{
+		{"full replays", llm.ReasoningReplayFull, true},
+		{"default omits", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				captured, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+				fmt.Fprintf(w, "data: [DONE]\n\n")
+			}))
+			defer srv.Close()
+
+			p, err := New(Options{
+				Provider:        "openai",
+				ProviderName:    "kimi-for-coding",
+				Model:           "kimi-k3",
+				BaseURL:         srv.URL,
+				APIKey:          "k",
+				ReasoningReplay: tc.mode,
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			req := llm.Request{
+				Model:     "kimi-k3",
+				Reasoning: llm.ReasoningConfig{Effort: "max"},
+				Messages: []llm.Message{
+					{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
+					{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+						{Kind: llm.BlockThinking, Thinking: "prior reasoning"},
+						{Kind: llm.BlockText, Text: "answer"},
+					}},
+				},
+			}
+			for range p.Stream(context.Background(), req) {
+			}
+			got := bytes.Contains(captured, []byte(`"reasoning_content":"prior reasoning"`))
+			if got != tc.want {
+				t.Fatalf("reasoning_content present = %v, want %v; body: %s", got, tc.want, captured)
 			}
 		})
 	}

@@ -38,6 +38,10 @@ type Config struct {
 	ReasoningMode   string // "openai", "openrouter", or "google"; empty defaults to "openai"
 	ProviderName    string
 	PromptCache     llm.PromptCacheConfig
+	// ReasoningReplay replays persisted assistant reasoning as reasoning_content
+	// on later requests (Kimi for Coding-style preserved thinking). Default off
+	// so strict OpenAI-compatible servers never see the non-standard field.
+	ReasoningReplay bool
 	HTTPClient      *http.Client
 	Sleep           func(time.Duration) // nil = time.Sleep
 }
@@ -53,6 +57,7 @@ type Provider struct {
 	reasoningMode   string
 	providerName    string
 	promptCache     llm.PromptCacheConfig
+	reasoningReplay bool
 	client          *http.Client
 	sleep           func(time.Duration)
 }
@@ -70,6 +75,7 @@ func New(cfg Config) *Provider {
 		reasoningMode:   cfg.ReasoningMode,
 		providerName:    cfg.ProviderName,
 		promptCache:     cfg.PromptCache,
+		reasoningReplay: cfg.ReasoningReplay,
 		client:          client,
 		sleep:           sleep,
 	}
@@ -83,7 +89,7 @@ func (p *Provider) Name() string { return "openai" }
 // every attempt and sleep.
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
-		body, err := json.Marshal(buildRequestWithOptionsAndMin(req, p.contextWindow, p.outputLimit, p.reasoningMode, p.promptCache, p.baseURL, p.providerName, p.minOutputTokens))
+		body, err := json.Marshal(buildRequestWithOptionsAndMin(req, p.contextWindow, p.outputLimit, p.reasoningMode, p.promptCache, p.baseURL, p.providerName, p.minOutputTokens, p.reasoningReplay))
 		if err != nil {
 			yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
 			return
@@ -137,7 +143,14 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 		}
 		text := reasoning.String()
 		reasoning.Reset()
-		return yield(llm.StreamEvent{Kind: llm.EventReasoningSummary, Text: text}, nil)
+		event := llm.StreamEvent{Kind: llm.EventReasoningSummary, Text: text}
+		if p.reasoningReplay {
+			// Tag the reasoning as replayable so the agent persists it as a
+			// thinking block the next request replays as reasoning_content.
+			// Without the provider opt-in the text stays display-only.
+			event.ReasoningFormat = llm.ReasoningFormatOpenAIChat
+		}
+		return yield(event, nil)
 	}
 
 	for ev, err := range sse.Read(ctx, r) {

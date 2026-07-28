@@ -248,6 +248,11 @@ const (
 	ReasoningFormatAnthropic          ReasoningFormat = "anthropic_thinking"
 	ReasoningFormatOpenAIResponses    ReasoningFormat = "openai_responses"
 	ReasoningFormatGeminiInteractions ReasoningFormat = "gemini_interactions"
+	// ReasoningFormatOpenAIChat marks chat-completions reasoning_content that
+	// carries no provider signature. It is emitted only when the provider opted
+	// into reasoning replay, and is persisted as an unsigned thinking block so
+	// the next request can replay it as reasoning_content.
+	ReasoningFormatOpenAIChat ReasoningFormat = "openai_chat"
 )
 
 // StreamEvent is one event in a provider stream. Which fields are populated

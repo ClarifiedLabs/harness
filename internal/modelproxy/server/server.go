@@ -1689,6 +1689,7 @@ func (h *Handler) runtimeOptionsForTarget(ctx context.Context, target resolvedTa
 		OutputLimit:         entry.OutputLimit,
 		MinOutputTokens:     pc.MinOutputTokens,
 		PromptCache:         pc.PromptCache,
+		ReasoningReplay:     pc.ReasoningReplay,
 		OmitMaxOutputTokens: providerOmitMaxOutputTokens(pc),
 		ResponsesWebSocket:  providerResponsesWebSocket(pc),
 	}, nil

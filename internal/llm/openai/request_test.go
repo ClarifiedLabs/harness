@@ -38,7 +38,7 @@ func TestBuildMessagesRichToolResultsFollowAllToolStrings(t *testing.T) {
 	messages := buildMessages(llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{
 		{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "PNG attached", ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "YWJj", ImageDetail: "high"}}},
 		{Kind: llm.BlockToolResult, ResultForID: "call_2", ResultText: "JPEG attached", ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/jpeg", ImageData: "ZGVm"}}},
-	}})
+	}}, false)
 	if len(messages) != 3 || messages[0].Role != "tool" || messages[0].ToolCallID != "call_1" || messages[1].ToolCallID != "call_2" || messages[2].Role != "user" {
 		t.Fatalf("rich message order = %+v", messages)
 	}
@@ -55,7 +55,7 @@ func TestBuildMessagesRichToolResultKeepsEmptyToolString(t *testing.T) {
 	messages := buildMessages(llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{
 		Kind: llm.BlockToolResult, ResultForID: "call_1",
 		ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "YWJj"}},
-	}}})
+	}}}, false)
 	if len(messages) != 2 || messages[0].Role != "tool" || messages[0].ToolCallID != "call_1" || messages[0].Content != "" || messages[1].Role != "user" {
 		t.Fatalf("messages = %+v, want empty tool string followed by image user message", messages)
 	}
@@ -163,7 +163,7 @@ func TestBuildRequestMaxTokensClampsExplicitValue(t *testing.T) {
 func TestBuildRequestMaxTokensRaisedToConfiguredFloor(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 999_999
-	w := buildRequestWithOptionsAndMin(req, 1_000_000, 0, "openai", llm.PromptCacheConfig{}, defaultBaseURL, "testai", 16)
+	w := buildRequestWithOptionsAndMin(req, 1_000_000, 0, "openai", llm.PromptCacheConfig{}, defaultBaseURL, "testai", 16, false)
 	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 16 {
 		t.Fatalf("max_completion_tokens = %v, want 16 (configured floor)", w.MaxCompletionTokens)
 	}
@@ -661,5 +661,79 @@ func TestBuildRequestUserImage(t *testing.T) {
 	}
 	if parts[1].Type != "text" || parts[1].Text != "describe it" {
 		t.Fatalf("second part = %+v", parts[1])
+	}
+}
+
+// reasoningReplayRequest carries an assistant turn with two persisted thinking
+// blocks (unsigned, as chat-completions reasoning_content round-trips) ahead of
+// a tool call and its result.
+func reasoningReplayRequest() llm.Request {
+	return llm.Request{
+		Model:     "kimi-k3",
+		Reasoning: llm.ReasoningConfig{Effort: "max"},
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "fix it"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+				{Kind: llm.BlockThinking, Thinking: "first thought"},
+				{Kind: llm.BlockThinking, Thinking: "second thought"},
+				{Kind: llm.BlockText, Text: "reading the file"},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
+			}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}},
+		},
+	}
+}
+
+func assistantWireMessage(t *testing.T, w wireRequest) wireMessage {
+	t.Helper()
+	for _, m := range w.Messages {
+		if m.Role == "assistant" {
+			return m
+		}
+	}
+	t.Fatal("no assistant wire message")
+	return wireMessage{}
+}
+
+func TestBuildRequestReasoningContentReplayOptIn(t *testing.T) {
+	w := buildRequestWithOptionsAndMin(reasoningReplayRequest(), 0, 0, "openai", llm.PromptCacheConfig{}, defaultBaseURL, "kimi-for-coding", 0, true)
+	msg := assistantWireMessage(t, w)
+	if msg.ReasoningContent != "first thought\nsecond thought" {
+		t.Fatalf("reasoning_content = %q, want concatenated thinking blocks", msg.ReasoningContent)
+	}
+}
+
+func TestBuildRequestReasoningContentReplayDefaultOff(t *testing.T) {
+	// Default (option unset) keeps the field off the wire so strict
+	// OpenAI-compatible servers never see it.
+	b, err := json.Marshal(buildRequest(reasoningReplayRequest(), 0, 0))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte("reasoning_content")) {
+		t.Fatalf("reasoning_content present without opt-in: %s", b)
+	}
+}
+
+func TestBuildRequestReasoningContentReplayRequiresReasoningEnabled(t *testing.T) {
+	// A reasoning-less request (compaction summary, prewarm) must not carry
+	// replay payloads even when the provider opted in.
+	req := reasoningReplayRequest()
+	req.Reasoning = llm.ReasoningConfig{}
+	b, err := json.Marshal(buildRequestWithOptionsAndMin(req, 0, 0, "openai", llm.PromptCacheConfig{}, defaultBaseURL, "kimi-for-coding", 0, true))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte("reasoning_content")) {
+		t.Fatalf("reasoning_content present though reasoning is disabled: %s", b)
+	}
+}
+
+func TestBuildRequestReasoningContentOnlyOnAssistantMessages(t *testing.T) {
+	w := buildRequestWithOptionsAndMin(reasoningReplayRequest(), 0, 0, "openai", llm.PromptCacheConfig{}, defaultBaseURL, "kimi-for-coding", 0, true)
+	for _, m := range w.Messages {
+		if m.Role != "assistant" && m.ReasoningContent != "" {
+			t.Fatalf("%s message carries reasoning_content %q", m.Role, m.ReasoningContent)
+		}
 	}
 }

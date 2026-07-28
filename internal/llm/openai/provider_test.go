@@ -2,7 +2,9 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -735,5 +737,89 @@ func TestNormalizeStopReason(t *testing.T) {
 		if got := normalizeStopReason(in); got != want {
 			t.Errorf("normalizeStopReason(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestStreamReasoningContentRoundTrip streams reasoning_content deltas with the
+// replay option on, persists the resulting thinking block, and confirms the
+// next request replays it as reasoning_content (Kimi for Coding preserved
+// thinking).
+func TestStreamReasoningContentRoundTrip(t *testing.T) {
+	var captured []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		llmtest.WriteBody(w, []byte(`data: {"choices":[{"delta":{"reasoning_content":"checking"},"finish_reason":null}]}`+"\n\n"))
+		llmtest.WriteBody(w, []byte(`data: {"choices":[{"delta":{"reasoning_content":" inputs"},"finish_reason":null}]}`+"\n\n"))
+		llmtest.WriteBody(w, []byte(`data: {"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+	p := New(Config{APIKey: "test-key", BaseURL: srv.URL, ReasoningReplay: true, Sleep: func(time.Duration) {}})
+
+	req := llmtest.SimpleRequest("kimi-k3")
+	req.Reasoning = llm.ReasoningConfig{Effort: "max"}
+	events, err := llmtest.Drain(p.Stream(context.Background(), req))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if events[0].Kind != llm.EventReasoningSummary || events[0].Text != "checking inputs" {
+		t.Fatalf("first event = %+v, want combined reasoning summary", events[0])
+	}
+	if events[0].ReasoningFormat != llm.ReasoningFormatOpenAIChat {
+		t.Fatalf("reasoning format = %q, want %q", events[0].ReasoningFormat, llm.ReasoningFormatOpenAIChat)
+	}
+	block, ok := llm.PersistedReasoningBlock(events[0])
+	if !ok || block.Kind != llm.BlockThinking || block.Thinking != "checking inputs" || block.ThinkingSignature != "" {
+		t.Fatalf("persisted block = %+v, ok=%v; want unsigned thinking block", block, ok)
+	}
+
+	// The follow-up request carrying the persisted block replays it as
+	// reasoning_content on the assistant message.
+	next := llm.Request{
+		Model:     "kimi-k3",
+		Reasoning: llm.ReasoningConfig{Effort: "max"},
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{block, {Kind: llm.BlockText, Text: "Done."}}},
+		},
+	}
+	if _, err := llmtest.Drain(p.Stream(context.Background(), next)); err != nil {
+		t.Fatalf("follow-up stream: %v", err)
+	}
+	var body struct {
+		Messages []struct {
+			Role             string `json:"role"`
+			ReasoningContent string `json:"reasoning_content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(captured, &body); err != nil {
+		t.Fatalf("decode captured request: %v", err)
+	}
+	if len(body.Messages) != 2 || body.Messages[1].ReasoningContent != "checking inputs" {
+		t.Fatalf("captured messages = %+v, want assistant reasoning_content replay", body.Messages)
+	}
+}
+
+// TestStreamReasoningContentNotPersistedByDefault confirms reasoning text stays
+// display-only when the provider did not opt into replay.
+func TestStreamReasoningContentNotPersistedByDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		llmtest.WriteBody(w, []byte(`data: {"choices":[{"delta":{"reasoning_content":"checking"},"finish_reason":"stop"}]}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+	events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4")))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if events[0].Kind != llm.EventReasoningSummary || events[0].ReasoningFormat != "" {
+		t.Fatalf("first event = %+v, want untagged reasoning summary", events[0])
+	}
+	if block, ok := llm.PersistedReasoningBlock(events[0]); ok {
+		t.Fatalf("persisted %+v without provider opt-in", block)
 	}
 }

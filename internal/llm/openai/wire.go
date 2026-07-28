@@ -57,12 +57,17 @@ type wireGoogleThinkingConfig struct {
 
 // wireMessage is one request message. An assistant message with tool_calls but
 // no text omits content; a tool message carries tool_call_id. Content is either
-// a string or []wireContentPart, and nil means omitted.
+// a string or []wireContentPart, and nil means omitted. ReasoningContent
+// replays prior assistant reasoning for endpoints that require preserved
+// thinking in multi-turn tool loops (Kimi for Coding); it is emitted only when
+// the provider opts in via reasoning_replay, since strict OpenAI-compatible
+// servers reject unknown fields.
 type wireMessage struct {
-	Role       string         `json:"role"`
-	Content    any            `json:"content,omitempty"`
-	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role             string         `json:"role"`
+	Content          any            `json:"content,omitempty"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	ToolCalls        []wireToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
 }
 
 type wireContentPart struct {
@@ -195,10 +200,10 @@ func buildRequestForMode(req llm.Request, contextWindow, outputLimit int, reason
 }
 
 func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, reasoningMode string, promptCache llm.PromptCacheConfig, baseURL, providerName string) wireRequest {
-	return buildRequestWithOptionsAndMin(req, contextWindow, outputLimit, reasoningMode, promptCache, baseURL, providerName, 0)
+	return buildRequestWithOptionsAndMin(req, contextWindow, outputLimit, reasoningMode, promptCache, baseURL, providerName, 0, false)
 }
 
-func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit int, reasoningMode string, promptCache llm.PromptCacheConfig, baseURL, providerName string, minOutputTokens int) wireRequest {
+func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit int, reasoningMode string, promptCache llm.PromptCacheConfig, baseURL, providerName string, minOutputTokens int, reasoningReplay bool) wireRequest {
 	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
 	w := wireRequest{
 		Model:         req.Model,
@@ -235,6 +240,12 @@ func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit i
 		}
 	}
 
+	// Replay persisted reasoning (reasoning_content) only when the provider
+	// opted in AND reasoning is enabled for this request — mirrors the
+	// Responses dialect's replayReasoning gate, so reasoning-less requests
+	// (compaction summaries, prewarm) stay clean of replay payloads.
+	replayReasoning := reasoningReplay && (req.Reasoning.Effort != "" || req.Reasoning.Summary != "")
+
 	// The system message carries only the stable system prompt. Volatile
 	// per-request context is appended as a trailing system message after the
 	// transcript (below) so the leading system+tools+transcript prefix stays
@@ -247,7 +258,7 @@ func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit i
 	}
 
 	for _, m := range req.Messages {
-		w.Messages = append(w.Messages, buildMessages(m)...)
+		w.Messages = append(w.Messages, buildMessages(m, replayReasoning)...)
 	}
 
 	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
@@ -357,14 +368,18 @@ func (w *wireRequest) googleThinkingBudget(budget int) {
 // buildMessages maps one internal message onto its OpenAI wire messages. A
 // message mixing tool_result blocks with text/tool_use is impossible under the
 // transcript invariant, so a user message is either plain text or a batch of
-// tool results; each tool result becomes its own role:"tool" message.
-func buildMessages(m llm.Message) []wireMessage {
+// tool results; each tool result becomes its own role:"tool" message. When
+// replayReasoning is set, an assistant message's persisted thinking blocks are
+// concatenated into reasoning_content (mirroring Kimi's own CLI); empty
+// reasoning is never emitted.
+func buildMessages(m llm.Message, replayReasoning bool) []wireMessage {
 	var text string
 	var hasText bool
 	var parts []wireContentPart
 	var calls []wireToolCall
 	var results []wireMessage
 	var resultImages []wireContentPart
+	var reasoning strings.Builder
 
 	flushTextPart := func() {
 		if text == "" {
@@ -392,6 +407,13 @@ func buildMessages(m llm.Message) []wireMessage {
 					Detail: b.ImageDetail,
 				},
 			})
+		case llm.BlockThinking:
+			if replayReasoning && b.Thinking != "" {
+				if reasoning.Len() > 0 {
+					reasoning.WriteString("\n")
+				}
+				reasoning.WriteString(b.Thinking)
+			}
 		case llm.BlockToolUse:
 			args := string(b.ToolInput)
 			if args == "" {
@@ -437,6 +459,9 @@ func buildMessages(m llm.Message) []wireMessage {
 	}
 
 	msg := wireMessage{Role: string(m.Role), ToolCalls: calls}
+	if m.Role == llm.RoleAssistant {
+		msg.ReasoningContent = reasoning.String()
+	}
 	// An assistant message with tool calls but no text omits content; a normal
 	// text message (or empty assistant text) keeps content present.
 	if len(parts) > 0 {

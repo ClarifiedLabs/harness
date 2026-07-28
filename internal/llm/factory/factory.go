@@ -35,6 +35,9 @@ type Options struct {
 	OutputLimit     int // model's real max-output-token limit; 0 = unknown
 	MinOutputTokens int
 	PromptCache     llm.PromptCacheConfig
+	// ReasoningReplay carries the provider config's reasoning_replay mode to the
+	// dialect (design §7); empty keeps each dialect's default.
+	ReasoningReplay llm.ReasoningReplay
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for providers
 	// that reject the standard parameter.
 	OmitMaxOutputTokens bool
@@ -83,6 +86,9 @@ func New(opts Options) (llm.Provider, error) {
 			ReasoningMode:   reasoningMode(opts.ProviderName, provider, opts.BaseURL, opts.ReasoningMode),
 			ProviderName:    opts.ProviderName,
 			PromptCache:     opts.PromptCache,
+			// The chat-completions dialect replays reasoning_content only on an
+			// explicit full-replay opt-in; its default is no replay.
+			ReasoningReplay: opts.ReasoningReplay == llm.ReasoningReplayFull,
 		}), nil
 	case "responses":
 		if opts.APIKey == "" && opts.BaseURL == "" && len(opts.AuthHeaders) == 0 {

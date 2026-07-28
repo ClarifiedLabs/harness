@@ -42,7 +42,10 @@ type ProviderConfig struct {
 	PriceSource string `json:"price_source,omitempty"`
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for compatible
 	// backends that reject the standard parameter, such as ChatGPT Codex.
-	OmitMaxOutputTokens  bool              `json:"omit_max_output_tokens,omitempty"`
+	OmitMaxOutputTokens bool `json:"omit_max_output_tokens,omitempty"`
+	// ReasoningReplay controls how much historical reasoning state the dialect
+	// replays on the wire. See the ReasoningReplay type for accepted values.
+	ReasoningReplay      ReasoningReplay   `json:"reasoning_replay,omitempty"`
 	MinOutputTokens      int               `json:"min_output_tokens,omitempty"`
 	PromptCache          PromptCacheConfig `json:"prompt_cache,omitempty"`
 	ResponsesStateful    *bool             `json:"responses_stateful,omitempty"`
@@ -53,6 +56,72 @@ type ProviderConfig struct {
 	APIKeyEnv            []string          `json:"api_key_env"`
 	Auth                 *auth.Config      `json:"auth,omitempty"`
 	Models               []ModelEntry      `json:"models"`
+}
+
+// ReasoningReplay controls how much historical reasoning state a dialect
+// replays onto the wire for providers that require (or bill) preserved
+// reasoning in multi-turn tool loops. The zero value keeps each dialect's
+// default: the OpenAI chat-completions dialect replays nothing (strict
+// OpenAI-compatible servers reject unknown fields), while the Anthropic
+// dialect replays all signed thinking blocks verbatim.
+//
+// Accepted values in provider config JSON:
+//   - true / "full"        — replay all persisted reasoning (enables
+//     reasoning_content replay in the OpenAI dialect; explicit default for
+//     Anthropic)
+//   - "current_turn"       — Anthropic dialect only: drop thinking blocks
+//     older than the in-flight tool chain. Do NOT use with providers that
+//     mandate preserved thinking (kimi-k3, kimi-k2.7-code).
+//   - false / ""           — dialect default
+//
+// The JSON form accepts either a boolean or a string so a single key serves
+// both dialects.
+type ReasoningReplay string
+
+const (
+	// ReasoningReplayFull replays every persisted reasoning block.
+	ReasoningReplayFull ReasoningReplay = "full"
+	// ReasoningReplayCurrentTurn keeps only the in-flight tool chain's
+	// reasoning (Anthropic dialect only).
+	ReasoningReplayCurrentTurn ReasoningReplay = "current_turn"
+)
+
+// UnmarshalJSON accepts either a boolean (true = full, false = default) or a
+// mode string.
+func (r *ReasoningReplay) UnmarshalJSON(data []byte) error {
+	var b bool
+	if err := json.Unmarshal(data, &b); err == nil {
+		if b {
+			*r = ReasoningReplayFull
+		} else {
+			*r = ""
+		}
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("reasoning_replay must be a boolean or string: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "default", "off", "false":
+		*r = ""
+	case "full", "on", "true":
+		*r = ReasoningReplayFull
+	case "current_turn":
+		*r = ReasoningReplayCurrentTurn
+	default:
+		return fmt.Errorf("unknown reasoning_replay value %q (want true, \"full\", or \"current_turn\")", s)
+	}
+	return nil
+}
+
+// MarshalJSON writes "full" as the boolean true (the two are equivalent) and
+// every other mode as its string.
+func (r ReasoningReplay) MarshalJSON() ([]byte, error) {
+	if r == ReasoningReplayFull {
+		return []byte("true"), nil
+	}
+	return json.Marshal(string(r))
 }
 
 // PromptCacheConfig controls how a provider receives the stable

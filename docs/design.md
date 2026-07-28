@@ -623,7 +623,7 @@ implementation and are not presented as first-party OpenAI fields.
 | Surface | Supported | Intentionally unsupported |
 |---|---|---|
 | Operation | streaming `POST /chat/completions` | stored completion CRUD and legacy `/v1/completions` |
-| Request controls | messages, modern function tools, parallel calls, output cap, temperature, stop sequences, reasoning effort, prompt cache key, service tier, usage streaming | audio/modalities, legacy functions, custom tools, arbitrary formats, prediction, moderation, sampling/logprob controls |
+| Request controls | messages, modern function tools, parallel calls, output cap, temperature, stop sequences, reasoning effort, opt-in `reasoning_content` replay (`reasoning_replay` provider quirk, gated on reasoning being enabled for the request), prompt cache key, service tier, usage streaming | audio/modalities, legacy functions, custom tools, arbitrary formats, prediction, moderation, sampling/logprob controls |
 | Content | system/user/assistant/tool text, user images, refusal text | developer/function roles, file/audio input, generated audio |
 | Stream/usage | text/refusal/tool-call deltas, compatible reasoning summaries, cached input, non-reasoning output, and reasoning tokens | legacy `function_call`, audio output, prediction/audio token details |
 
