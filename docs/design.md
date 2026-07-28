@@ -1523,11 +1523,6 @@ emit prompt_usage(prompt, completedTurns)
   Prompt replay events and delegate metadata persist it. The reason records
   loop control only; acceptance criteria and repository state remain the task
   completion oracle.
-- **Caller-defined turn milestones:** `agent.Options.TurnMilestones` contains
-  concrete closed-tool-turn boundaries and internal steering text. The agent
-  normalizes them by turn, coalesces messages due on the same boundary, and
-  injects each exactly once before the next model request. Core agent code owns
-  deterministic delivery but no delegate-specific percentage policy.
 - **Runaway guards (`internal/agent/loopguard.go`).** A per-run `turnGuard` (loop
   frame only, never on the shared registry) watches each tool turn:
   - *Repeated identical calls.* Each turn's call-set is reduced to an
@@ -2261,7 +2256,7 @@ this subsection records the common runner those argv tools point at.
 |---|---|---|
 | `task` | string, required | complete child prompt: objective, scope, constraints, expected report, and verification |
 | `agent` | string | optional configured agent name; omitted uses the current active agent; remains a simple enum for provider compatibility |
-| `mode` | string | optional; `implementation` enables deterministic mutating-work milestones; omit for exploration/review |
+| `mode` | string | optional; `implementation` marks scoped mutating work and adds implementation-specific child instructions; omit for exploration/review |
 | `max_turns` | int | optional tool-enabled loop budget; defaults to `delegate_max_turns`; the schema publishes that numeric maximum and over-cap values are rejected |
 | `continue_child_id` | string | optional terminal sibling child ID; continues compatible retained state in a fresh child record |
 | `background` | bool | only for independent non-overlapping work; after one useful parent model round, harness joins outstanding delegates and requires synthesis; do not poll or duplicate |
@@ -2297,12 +2292,10 @@ this subsection records the common runner those argv tools point at.
   foreground result receipt and background launch receipt state the effective
   budget.
 - `mode` currently accepts only `implementation` and is validated by both the
-  decoder and runner. The delegate layer converts the effective turn budget to
-  concrete ceiling-rounded 25%/50%/75% boundaries, adds the full schedule to
-  child system context, and passes generic `agent.TurnMilestone` values to the
-  loop. Milestones are delivered only when another request can consume them;
-  several boundaries on one short-budget turn are coalesced. Child metadata,
-  result receipts, and session stats preserve the mode.
+  decoder and runner. It adds a static child-only instruction identifying the
+  task as scoped mutating work and requiring implementation, verification, and
+  an exact handoff with changed paths, checks run, and any remaining work.
+  Child metadata, result receipts, and session stats preserve the mode.
 - `continue_child_id` names an already-terminal child of the same immediate
   parent. Continuation never appends to or overwrites that source directory:
   the Runner creates a fresh child ID and seeds it with the source transcript,
@@ -2321,7 +2314,7 @@ this subsection records the common runner those argv tools point at.
   requested agent selection, mode and turn budget, depth policy, resolved
   context/output settings, prompt/cost ceilings, reasoning, server tools,
   stateful-Responses setting, final child system prompt, model-facing tool
-  schemas, implementation milestones, and compaction policy. Preserving the
+  schemas, and compaction policy. Preserving the
   requested selection keeps an omitted agent on the parent's live tool subset
   while an explicitly selected agent remains explicit. Current runtime and
   source fingerprints must match.

@@ -348,7 +348,7 @@ func TestDelegateRunsChildAgentAndReturnsFinalReport(t *testing.T) {
 	}
 }
 
-func TestDelegateImplementationModeInjectsMilestonesAndPersistsMode(t *testing.T) {
+func TestDelegateImplementationModeAddsStaticPromptAndPersistsMode(t *testing.T) {
 	childTools := &tools.Registry{}
 	childTools.Register(fakeChildTool{name: "write_file", out: "changed"})
 	work := func(id string) llmtest.Step {
@@ -386,28 +386,12 @@ func TestDelegateImplementationModeInjectsMilestonesAndPersistsMode(t *testing.T
 	system := fp.Requests[0].System
 	for _, want := range []string{
 		"[implementation mode]",
-		"turn 1 (25%)",
-		"turn 2 (50%)",
-		"turn 3 (75%)",
+		"scoped mutating implementation work",
+		"Make the requested changes, verify them",
+		"return an exact handoff",
 	} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("implementation system missing %q: %q", want, system)
-		}
-	}
-	requestText := func(index int) string {
-		var parts []string
-		for _, msg := range fp.Requests[index].Messages {
-			for _, block := range msg.Content {
-				if block.Kind == llm.BlockText {
-					parts = append(parts, block.Text)
-				}
-			}
-		}
-		return strings.Join(parts, "\n")
-	}
-	for index, marker := range []string{"25% after turn 1", "50% after turn 2", "75% after turn 3"} {
-		if got := requestText(index + 1); !strings.Contains(got, marker) {
-			t.Fatalf("request %d missing milestone %q: %q", index+2, marker, got)
 		}
 	}
 	children, err := os.ReadDir(filepath.Join(sessionPath, "children"))

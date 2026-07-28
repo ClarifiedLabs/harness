@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -339,22 +338,10 @@ type ContextEstimate struct {
 	PayloadMessages int
 }
 
-// TurnMilestone injects one internal steering message after a closed tool turn.
-// It is concrete rather than percentage-based so callers own policy while the
-// provider-neutral agent loop owns deterministic delivery.
-type TurnMilestone struct {
-	AfterTurns int
-	Message    string
-}
-
 // Options configures an Agent. The zero value is valid; MaxTurns <= 0 means
 // unlimited.
 type Options struct {
 	MaxTurns int
-	// TurnMilestones inject internal steering after the named number of completed
-	// tool turns, immediately before the next model request. Invalid/empty
-	// milestones are ignored and equal thresholds retain caller order.
-	TurnMilestones []TurnMilestone
 	// MaxPromptTokens stops a prompt once its accumulated tokens reach
 	// this ceiling; zero means unlimited. Enforcement lives in the turn loop.
 	MaxPromptTokens int
@@ -449,7 +436,6 @@ type Agent struct {
 	system                    string
 	model                     string
 	maxTurns                  int
-	turnMilestones            []TurnMilestone
 	maxPromptTokens           int     // accumulated-token ceiling per prompt; 0 = unlimited
 	maxOutputTokens           int     // per-turn output cap; 0 = automatic
 	maxPromptCostUSD          float64 // accumulated USD ceiling per prompt; 0 = unlimited
@@ -513,7 +499,6 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		registry:                  modelRegistry,
 		model:                     opts.Model,
 		maxTurns:                  opts.MaxTurns,
-		turnMilestones:            normalizeTurnMilestones(opts.TurnMilestones),
 		maxPromptTokens:           opts.MaxPromptTokens,
 		maxOutputTokens:           opts.MaxOutputTokens,
 		maxPromptCostUSD:          opts.MaxPromptCostUSD,
@@ -543,33 +528,6 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		a.steer = make(chan SteerInput, 16)
 	}
 	return a
-}
-
-func normalizeTurnMilestones(milestones []TurnMilestone) []TurnMilestone {
-	out := make([]TurnMilestone, 0, len(milestones))
-	for _, milestone := range milestones {
-		milestone.Message = strings.TrimSpace(milestone.Message)
-		if milestone.AfterTurns <= 0 || milestone.Message == "" {
-			continue
-		}
-		out = append(out, milestone)
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].AfterTurns < out[j].AfterTurns
-	})
-	return out
-}
-
-func dueTurnMilestones(milestones []TurnMilestone, next, turns int) (string, int) {
-	if next >= len(milestones) || milestones[next].AfterTurns > turns {
-		return "", next
-	}
-	var messages []string
-	for next < len(milestones) && milestones[next].AfterTurns <= turns {
-		messages = append(messages, milestones[next].Message)
-		next++
-	}
-	return strings.Join(messages, "\n\n"), next
 }
 
 // window returns the context window the compaction trigger and degradation
@@ -1312,18 +1270,6 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 	appendBoundary := a.measuredBoundary // transcript length measured by lastInput (drives the r44 trigger)
 	var steerContext []string
 	forcePromptWorkSynthesis := false
-	nextMilestone := 0
-	injectTurnMilestones := func() error {
-		msg, next := dueTurnMilestones(a.turnMilestones, nextMilestone, turns)
-		if msg == "" {
-			return nil
-		}
-		nextMilestone = next
-		message := a.textMessage(llm.RoleUser, msg)
-		message.Origin = llm.MessageOriginInternal
-		a.transcript = append(a.transcript, message)
-		return a.validateTranscript("after turn milestone")
-	}
 	var terminationReason TerminationReason
 	checkpoint := func(kind PromptCheckpointKind) {
 		reportPromptCheckpoint(sink, PromptCheckpoint{
@@ -1626,9 +1572,6 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			if waitErr != nil {
 				return waitErr
 			}
-			if err := injectTurnMilestones(); err != nil {
-				return err
-			}
 			forcePromptWorkSynthesis = true
 			continue
 		}
@@ -1721,13 +1664,6 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 				sink.Notice(promptCostBudgetNotice(a.maxPromptCostUSD, total.CostUSD))
 				break
 			}
-		}
-
-		// Caller-defined milestones are injected only after a complete tool
-		// round, when another request can consume them. Multiple milestones due
-		// on the same turn are coalesced into one internal message.
-		if err := injectTurnMilestones(); err != nil {
-			return err
 		}
 
 		// One steering nudge per condition (repetition / error storm share a slot).

@@ -220,11 +220,9 @@ should synthesize and verify that report. Prefer direct tools for known files or
 symbols, one- or two-step tasks, immediate blockers, and tightly coupled work.
 
 Set `mode:"implementation"` only for scoped mutating implementation. It adds an
-implementation-mode system block plus deterministic steering after the
-25%, 50%, and 75% turn boundaries: finish orientation and choose the concrete
-path, perform substantive implementation unless concretely blocked, then
-prioritize completion, verification, and an exact handoff. Omit `mode` for
-exploration and review delegates.
+implementation-mode system block directing the child to make the requested
+changes, verify them, and return an exact handoff with changed paths, checks
+run, and any remaining work. Omit `mode` for exploration and review delegates.
 
 Set `continue_child_id` to a terminal sibling delegate ID when the same child
 runtime should continue retained work. Harness leaves the source child

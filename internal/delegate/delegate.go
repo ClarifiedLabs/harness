@@ -41,7 +41,7 @@ const (
 	continuationModeRetained   = "retained"
 	continuationModeCheckpoint = "compact_checkpoint"
 )
-const continuationFingerprintVersion = 2
+const continuationFingerprintVersion = 3
 
 var childSeq atomic.Uint64
 
@@ -473,10 +473,8 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		return RunResult{}, fmt.Errorf("delegate tool registry is not initialized")
 	}
 	launch.System = childBudgetSystemPrompt(childSystemPrompt(withoutChildBudget(launch.System)), maxTurns)
-	var turnMilestones []agent.TurnMilestone
 	if req.Mode == ModeImplementation {
-		launch.System = implementationSystemPrompt(launch.System, maxTurns)
-		turnMilestones = implementationTurnMilestones(maxTurns)
+		launch.System = implementationSystemPrompt(launch.System)
 	}
 	progress.SetAgent(launch.Agent)
 
@@ -560,7 +558,6 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 	child := agent.New(launch.Provider, childTools, agent.Options{
 		MaxTurns:                  maxTurns,
-		TurnMilestones:            turnMilestones,
 		MaxPromptTokens:           runtime.MaxPromptTokens,
 		MaxOutputTokens:           launch.MaxOutputTokens,
 		MaxPromptCostUSD:          runtime.MaxPromptCostUSD,
@@ -1124,7 +1121,6 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		RetentionPolicy        agent.RetentionPolicy `json:"retention_policy"`
 		System                 string                `json:"system"`
 		Tools                  []llm.ToolSchema      `json:"tools"`
-		TurnMilestones         []agent.TurnMilestone `json:"turn_milestones,omitempty"`
 		Compaction             struct {
 			KeepTurns          int  `json:"keep_turns"`
 			KeepTokens         int  `json:"keep_tokens"`
@@ -1156,9 +1152,6 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		RetentionPolicy:        r.opts.RetentionPolicy,
 		System:                 launch.System,
 		Tools:                  toolRegistry.Specs(),
-	}
-	if req.Mode == ModeImplementation {
-		fingerprint.TurnMilestones = implementationTurnMilestones(maxTurns)
 	}
 	fingerprint.Compaction.KeepTurns = r.opts.CompactKeepTurns
 	fingerprint.Compaction.KeepTokens = r.opts.CompactKeepTokens
@@ -1359,50 +1352,10 @@ func withoutChildBudget(system string) string {
 	return strings.TrimSpace(system)
 }
 
-func implementationTurnMilestones(maxTurns int) []agent.TurnMilestone {
-	quarter := implementationMilestoneTurn(maxTurns, 1)
-	half := implementationMilestoneTurn(maxTurns, 2)
-	threeQuarters := implementationMilestoneTurn(maxTurns, 3)
-	return []agent.TurnMilestone{
-		{
-			AfterTurns: quarter,
-			Message: fmt.Sprintf(
-				"[implementation milestone: 25%% after turn %d] The orientation budget has elapsed. Finish orientation now and commit to a concrete implementation path; if blocked, state the specific blocker and evidence.",
-				quarter,
-			),
-		},
-		{
-			AfterTurns: half,
-			Message: fmt.Sprintf(
-				"[implementation milestone: 50%% after turn %d] Substantive implementation should now be underway. Stop broad exploration and make the scoped changes unless a concrete blocker prevents it.",
-				half,
-			),
-		},
-		{
-			AfterTurns: threeQuarters,
-			Message: fmt.Sprintf(
-				"[implementation milestone: 75%% after turn %d] Prioritize finishing and verification, avoid new scope, and prepare an exact handoff with changed paths, checks run, and any remainder. Commit only when commit ownership was explicitly delegated.",
-				threeQuarters,
-			),
-		},
-	}
-}
-
-func implementationMilestoneTurn(maxTurns, quarter int) int {
-	if maxTurns <= 0 {
-		maxTurns = DefaultMaxTurns
-	}
-	return (maxTurns/4)*quarter + ((maxTurns%4)*quarter+3)/4
-}
-
-func implementationSystemPrompt(system string, maxTurns int) string {
-	milestones := implementationTurnMilestones(maxTurns)
+func implementationSystemPrompt(system string) string {
 	return fmt.Sprintf(
-		"%s\n\n[implementation mode]\nThis is scoped mutating implementation work. By the end of turn %d (25%%), finish orientation and choose the concrete path. By the end of turn %d (50%%), perform substantive implementation unless concretely blocked. By the end of turn %d (75%%), prioritize completion, verification, and an exact handoff. Harness reinforces each boundary with an internal steering message.",
+		"%s\n\n[implementation mode]\nThis is scoped mutating implementation work. Make the requested changes, verify them, and return an exact handoff with changed paths, checks run, and any remaining work. Commit only when commit ownership was explicitly delegated.",
 		strings.TrimSpace(system),
-		milestones[0].AfterTurns,
-		milestones[1].AfterTurns,
-		milestones[2].AfterTurns,
 	)
 }
 
@@ -1519,7 +1472,7 @@ func schema(agents []AgentCandidate, maxTurns int) json.RawMessage {
 		"mode": map[string]any{
 			"type":        "string",
 			"enum":        []string{ModeImplementation},
-			"description": "Optional implementation mode for mutating work; adds deterministic 25%/50%/75% milestone steering. Omit for exploration and review.",
+			"description": "Optional implementation mode for scoped mutating work; instructs the child to implement, verify, and report an exact handoff. Omit for exploration and review.",
 		},
 		"max_turns": map[string]any{
 			"type":        "integer",
