@@ -582,7 +582,7 @@ requests use the default five-minute TTL. Message breakpoints always use the
 provider's default five-minute TTL. Harness computes a leading message prefix
 that future retention cannot rewrite, and the Anthropic dialect places one
 message breakpoint there plus a rolling tail breakpoint within the four-anchor
-limit. Volatile request-only context (todo reminders, hook output, background
+limit. Volatile request-only context (recovery todo reminders, hook output, background
 notices) rides a trailing user-role message appended after the breakpoints are
 placed — never the system head — so its appearance or change does not
 invalidate the cached prefix. Maintenance requests derive deterministic, purpose-separated proxy and
@@ -1084,10 +1084,10 @@ Four agents are built in:
 
 | agent | tools | behavior |
 |---|---|---|
-| `auto` | all available built-in tools plus discovered MCP tools, including `delegate` and background job tools | the default; the model decides what to do |
-| `explore` | read-only inspection/search tools, `web_fetch`, optional `git_readonly`, and read-only MCP tools; no mutation, todo, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
+| `auto` | all available built-in tools plus discovered MCP tools, including `update_todos`, `delegate`, and background job tools | the default; the model decides what to do |
+| `explore` | read-only inspection/search tools, `web_fetch`, optional `git_readonly`, `update_todos`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
 | `plan` | inspection tools, read-only MCP tools, `write_tmp_file`, `update_todos`, `delegate`, and `background_jobs` | collaborate on a plan without modifying the project |
-| `independent` | all available built-in tools plus discovered MCP tools, including `delegate` and background job tools | complete the task end-to-end without pausing for input |
+| `independent` | all available built-in tools plus discovered MCP tools, including `update_todos`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
 
 Define new agents or override built-ins in the config file under `agents`.
 **Breaking configuration rule:** every new custom agent must have a nonblank
@@ -1318,8 +1318,9 @@ tool-call success granularity—so a successful batched read includes paths that
 reported inline per-file errors—and does not infer effects from commands, Git,
 MCP, or custom tools. The model records semantic state only for meaningful
 changes and unfinished mutation intent; it does not duplicate read-only
-inspected paths. Active todos are persisted separately and re-injected after a
-successful compaction.
+inspected paths. Active todos are persisted separately; after a successful
+compaction, the next model request receives a one-shot recovery reminder
+containing only unresolved items.
 
 Use `/compact optional focus text` to emphasize one manual summary. Focus is
 trimmed, recorded in hook/archive/tree metadata, and applies only to that

@@ -3813,7 +3813,7 @@ func (app *App) PrepareCompaction(before []llm.Message, olderCount int, summary,
 	// Compaction rewrites the transcript and may drop the raw update_todos
 	// result, so re-inject the todo reminder on the next request.
 	if app.Todos != nil {
-		app.Todos.ResetContextInjected()
+		app.Todos.RequireRequestContext()
 	}
 	return nil
 }
@@ -3993,11 +3993,9 @@ func (app *App) todoRequestContext() string {
 	if app.Todos == nil || !app.agentHasTool("update_todos") {
 		return ""
 	}
-	// Only re-render the reminder when the list changed since it was last
-	// injected (see accumulatingSink.RequestContext, which marks the injection).
-	// The list already lives in the transcript via the update_todos result, so
-	// re-sending an unchanged reminder every turn is pure overhead.
-	return app.Todos.ChangedRequestContext()
+	// Normal updates already live in the transcript. Only restored state or a
+	// transcript rewrite schedules this one-shot recovery reminder.
+	return app.Todos.PendingRequestContext()
 }
 
 // todoContextDisplay renders the current list for display paths like /context,
@@ -4829,8 +4827,8 @@ func (s *accumulatingSink) RequestContext() []string {
 	var out []string
 	if ctx := s.app.todoRequestContext(); ctx != "" {
 		out = append(out, ctx)
-		// This sink supplies context to real model requests, so record the list as
-		// injected; todoRequestContext stays quiet until the list changes again.
+		// This sink supplies context to real model requests, so consume the
+		// one-shot recovery reminder.
 		if s.app.Todos != nil {
 			s.app.Todos.MarkContextInjected()
 		}
@@ -4840,7 +4838,7 @@ func (s *accumulatingSink) RequestContext() []string {
 }
 
 // PeekRequestContext mirrors RequestContext without consuming anything: the
-// todo change marker stays unmarked and completed background context stays
+// todo recovery marker stays pending and completed background context stays
 // queued, so post-prompt size estimates never eat context that still needs to
 // reach the model on a later real request.
 func (s *accumulatingSink) PeekRequestContext() []string {

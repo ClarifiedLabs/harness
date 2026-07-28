@@ -115,7 +115,7 @@ func Builtins() map[string]Definition {
 }
 
 func inspectionTools() []string {
-	names := []string{"read_file", "view_image", "list_dir", "glob", "search", "inspect"}
+	names := []string{"read_file", "view_image", "list_dir", "glob", "search", "inspect", "update_todos"}
 	// run_command widens exploration (gh, builds, screenshots, live apps) for the
 	// read-only agents (explore, plan). Neither has first-class file-mutation
 	// tools (edit, write_file, apply_patch), so "don't modify the project" stays
@@ -131,7 +131,7 @@ func planTools() []string {
 	// run_command comes from the shared inspection set; plan adds no first-class
 	// file-mutation tools (edit, write_file, apply_patch), so "don't modify the
 	// project" stays a prompt-level contract (prompts/agents/plan.txt).
-	return append(inspectionTools(), "write_tmp_file", "record_plan", "request_implementation", "update_todos", "delegate", "background_jobs")
+	return append(inspectionTools(), "write_tmp_file", "record_plan", "request_implementation", "delegate", "background_jobs")
 }
 
 func defaultTools() []string {
@@ -141,13 +141,13 @@ func defaultTools() []string {
 	// here because delegate.MissingTools treats an available git as satisfying a
 	// required git_readonly.
 	names := tools.DefaultNames()
-	return append(names, "record_plan", "delegate", "background_jobs")
+	return append(names, "update_todos", "record_plan", "delegate", "background_jobs")
 }
 
-// DefaultTools returns the default allowed-tool set (the built-in tool names
-// plus delegate) that auto/independent and any config agent without an explicit
-// allowed_tools list inherit. main uses it to detect default-inheriting agents
-// when extending them with discovered MCP tools.
+// DefaultTools returns the default allowed-tool set that auto/independent and
+// any config agent without an explicit allowed_tools list inherit. main uses it
+// to detect default-inheriting agents when extending them with discovered MCP
+// tools.
 func DefaultTools() []string { return defaultTools() }
 
 // Resolve merges config-file agent entries onto the built-ins and returns the

@@ -1761,8 +1761,11 @@ func TestDelegateChildTodoStoreIsPrivate(t *testing.T) {
 	if len(childSession.Todos) != 1 || childSession.Todos[0].Content != "child work" {
 		t.Fatalf("child todos = %+v", childSession.Todos)
 	}
-	if len(fp.Requests) < 2 || len(fp.Requests[1].RequestContext) == 0 || !strings.Contains(fp.Requests[1].RequestContext[0], "[todo]") {
-		t.Fatalf("second child request should include private todo context: %+v", fp.Requests)
+	if len(fp.Requests) < 2 {
+		t.Fatalf("provider requests = %d, want at least 2", len(fp.Requests))
+	}
+	if got := strings.Join(fp.Requests[1].RequestContext, "\n"); strings.Contains(got, "[todo]") {
+		t.Fatalf("second child request duplicated transcript-backed todo context: %q", got)
 	}
 }
 

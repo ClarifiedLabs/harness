@@ -3369,7 +3369,7 @@ func TestREPLContextIncludesTodoRequestContext(t *testing.T) {
 	store := todo.NewStore()
 	store.Replace([]todo.Item{
 		{Content: "explore", Status: todo.StatusCompleted},
-		{Content: "implement", Status: todo.StatusInProgress, ActiveForm: "Implementing"},
+		{Content: "implement", Status: todo.StatusInProgress},
 	})
 	reg := tools.Default()
 	reg.Register(todo.NewTool(store))
@@ -3384,9 +3384,8 @@ func TestREPLContextIncludesTodoRequestContext(t *testing.T) {
 	}
 	got := errw.String()
 	for _, want := range []string{
-		`[todo]\nTodos (1/2 done):`,
-		`[x] explore`,
-		`[~] Implementing`,
+		`[todo]\n1/2 complete`,
+		`[~] implement`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("/context output missing %q:\n%s", want, got)
@@ -3394,7 +3393,7 @@ func TestREPLContextIncludesTodoRequestContext(t *testing.T) {
 	}
 }
 
-func TestREPLInjectsTodoContextOnlyWhenChanged(t *testing.T) {
+func TestREPLInjectsRestoredTodoContextOnce(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake",
 		llmtest.Step{Stop: llm.StopEndTurn},
@@ -3402,7 +3401,7 @@ func TestREPLInjectsTodoContextOnlyWhenChanged(t *testing.T) {
 	)
 	app := newTestApp(t, &out, &errw, fp)
 	store := todo.NewStore()
-	store.Replace([]todo.Item{{Content: "explore", Status: todo.StatusInProgress, ActiveForm: "Exploring"}})
+	store.Restore([]todo.Item{{Content: "explore", Status: todo.StatusInProgress}})
 	reg := tools.Default()
 	reg.Register(todo.NewTool(store))
 	app.Agent.SetTools(reg)
@@ -3414,24 +3413,23 @@ func TestREPLInjectsTodoContextOnlyWhenChanged(t *testing.T) {
 	if len(fp.Requests) != 2 {
 		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
 	}
-	// The first prompt injects the reminder (the list is new to this session).
-	if got := strings.Join(fp.Requests[0].RequestContext, "\n"); !strings.Contains(got, "[~] Exploring") {
+	// Restored unresolved work is injected once on the first request.
+	if got := strings.Join(fp.Requests[0].RequestContext, "\n"); !strings.Contains(got, "[~] explore") {
 		t.Fatalf("first request context = %q, want the todo reminder", got)
 	}
-	// The list is unchanged for the second prompt, so the reminder is suppressed
-	// (it already lives in the transcript via the update_todos result).
+	// The reminder is one-shot; the second request relies on transcript state.
 	if got := strings.Join(fp.Requests[1].RequestContext, "\n"); strings.Contains(got, "[todo]") {
-		t.Fatalf("second request context = %q, want the unchanged todo reminder suppressed", got)
+		t.Fatalf("second request context = %q, want the recovery reminder consumed", got)
 	}
 }
 
 func TestREPLPrintsTodoStatusAfterUpdateTodosBeforeUsageAndPrompt(t *testing.T) {
 	var out, setupErrw bytes.Buffer
-	status := "Todos (1/2 done):\n  [x] explore\n  [~] Testing"
+	status := "Todos (1/2 done):\n  [x] explore\n  [~] test"
 	errw := newSignalBuffer("\x00")
 	fp := llmtest.New("fake",
 		llmtest.Step{
-			Events: []llm.StreamEvent{toolStep("update_todos", `{"todos":[{"content":"explore","status":"completed"},{"content":"test","status":"in_progress","active_form":"Testing"}]}`, "call_todo")},
+			Events: []llm.StreamEvent{toolStep("update_todos", `{"todos":[{"content":"explore","status":"completed"},{"content":"test","status":"in_progress"}]}`, "call_todo")},
 			Stop:   llm.StopToolUse,
 		},
 		llmtest.Step{
@@ -6255,7 +6253,7 @@ func pumpDuringPromptKey(rr *replReader) (replInput, bool, error) {
 	return res.input, res.done, nil
 }
 
-func TestContextDumpShowsTodoReminderAfterInjection(t *testing.T) {
+func TestContextDumpShowsTodoSemanticContextWithoutPendingReminder(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
@@ -6264,29 +6262,28 @@ func TestContextDumpShowsTodoReminderAfterInjection(t *testing.T) {
 	reg.Register(todo.NewTool(store))
 	app.Agent.SetTools(reg)
 	app.Todos = store
-	store.Replace([]todo.Item{{Content: "explore", Status: todo.StatusInProgress, ActiveForm: "Exploring"}})
-	store.MarkContextInjected() // a prior real request already carried the reminder
+	store.Replace([]todo.Item{{Content: "explore", Status: todo.StatusInProgress}})
 
 	// /context answers "what context does the model have" for the user, so it
-	// renders the full list even though the next real request suppresses the
-	// unchanged reminder (the list already lives in the transcript).
+	// renders the semantic recovery view even when no injection is pending.
 	req := app.contextRequest()
-	if got := strings.Join(req.RequestContext, "\n"); !strings.Contains(got, "[~] Exploring") {
-		t.Fatalf("/context request context = %q, want the full todo reminder", got)
+	if got := strings.Join(req.RequestContext, "\n"); !strings.Contains(got, "[~] explore") {
+		t.Fatalf("/context request context = %q, want the todo reminder", got)
 	}
 
-	// The display path must not consume the change signal real requests rely on.
+	// The display path must not consume a recovery reminder real requests need.
 	store.Replace([]todo.Item{
 		{Content: "explore", Status: todo.StatusCompleted},
 		{Content: "test", Status: todo.StatusInProgress},
 	})
+	store.RequireRequestContext()
 	app.contextRequest()
-	if store.ChangedRequestContext() == "" {
-		t.Fatal("/context consumed the todo change signal; the next real request would drop the reminder")
+	if store.PendingRequestContext() == "" {
+		t.Fatal("/context consumed the todo recovery reminder")
 	}
 }
 
-func TestAccumulatingSinkPeekDoesNotMarkTodoInjected(t *testing.T) {
+func TestAccumulatingSinkPeekDoesNotConsumeTodoRecovery(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
@@ -6295,20 +6292,20 @@ func TestAccumulatingSinkPeekDoesNotMarkTodoInjected(t *testing.T) {
 	reg.Register(todo.NewTool(store))
 	app.Agent.SetTools(reg)
 	app.Todos = store
-	store.Replace([]todo.Item{{Content: "explore", Status: todo.StatusInProgress, ActiveForm: "Exploring"}})
+	store.Restore([]todo.Item{{Content: "explore", Status: todo.StatusInProgress}})
 
 	sink := &accumulatingSink{r: app.Renderer, app: app}
 	for i := range 2 {
 		got := strings.Join(sink.PeekRequestContext(), "\n")
-		if !strings.Contains(got, "[~] Exploring") {
+		if !strings.Contains(got, "[~] explore") {
 			t.Fatalf("peek %d = %q, want the todo reminder (peeks must not consume it)", i+1, got)
 		}
 	}
-	// The real attach still marks: the next unchanged render goes quiet.
-	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[~] Exploring") {
+	// The real attach consumes the one-shot reminder.
+	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[~] explore") {
 		t.Fatalf("RequestContext = %q, want the todo reminder", got)
 	}
-	if got := store.ChangedRequestContext(); got != "" {
-		t.Fatalf("after a real attach, ChangedRequestContext = %q, want empty", got)
+	if got := store.PendingRequestContext(); got != "" {
+		t.Fatalf("after a real attach, PendingRequestContext = %q, want empty", got)
 	}
 }

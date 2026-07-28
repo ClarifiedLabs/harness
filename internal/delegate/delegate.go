@@ -585,7 +585,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	prompt := req.Task
 	if continuation != nil {
 		prompt = continuationPrompt(req.ContinueChildID, req.Task)
-		childTodos.Replace(continuation.state.Todos)
+		childTodos.Restore(continuation.state.Todos)
 		child.SetTranscript(continuation.state.Messages)
 	}
 
@@ -644,7 +644,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		return checkpointErr
 	}
 	child.SetCompactionArchiver(func(_ context.Context, archive agent.CompactionArchive) (string, error) {
-		return session.SaveCompaction(childDir, session.Compaction{
+		ref, err := session.SaveCompaction(childDir, session.Compaction{
 			Time:          r.now(),
 			Summary:       archive.Summary,
 			Usage:         archive.Usage,
@@ -653,6 +653,10 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 			ReadFiles:     archive.ReadFiles,
 			ModifiedFiles: archive.ModifiedFiles,
 		})
+		if err == nil {
+			childTodos.RequireRequestContext()
+		}
+		return ref, err
 	})
 	flushDisplay = sink.flushDisplay
 	sink.User(prompt)
@@ -2058,7 +2062,12 @@ func (s *childSink) RequestContext() []string {
 	if s.todos == nil || !s.todoContext {
 		return nil
 	}
-	return []string{todo.RequestContext(s.todos.Snapshot())}
+	ctx := s.todos.PendingRequestContext()
+	if ctx == "" {
+		return nil
+	}
+	s.todos.MarkContextInjected()
+	return []string{ctx}
 }
 
 func (s *childSink) PromptComplete(usage agent.PromptUsage) {

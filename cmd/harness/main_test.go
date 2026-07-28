@@ -2868,7 +2868,7 @@ func TestRunDefaultAgentTools(t *testing.T) {
 	}
 }
 
-func TestRunInteractiveAutoExposesImplementationHandoff(t *testing.T) {
+func TestRunInteractiveAutoExposesImplementationHandoffAndTodos(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8"}, fp, "hi\n/exit\n")
 
@@ -2879,8 +2879,8 @@ func TestRunInteractiveAutoExposesImplementationHandoff(t *testing.T) {
 	if !slices.Contains(names, "request_implementation") {
 		t.Fatalf("interactive auto tools missing request_implementation: %v", names)
 	}
-	if slices.Contains(names, "update_todos") {
-		t.Fatalf("interactive auto tools include progress-only update_todos: %v", names)
+	if !slices.Contains(names, "update_todos") {
+		t.Fatalf("interactive auto tools missing update_todos: %v", names)
 	}
 }
 
@@ -3727,6 +3727,11 @@ func toolsOutputHasDescribedTool(output, name string) bool {
 }
 
 func expectedExploreToolNames() []string {
+	names := expectedInspectionToolNames()
+	return append(names, "update_todos")
+}
+
+func expectedInspectionToolNames() []string {
 	names := []string{"read_file", "view_image", "list_dir", "glob", "search"}
 	// explore (and plan) gain run_command for exploration; it lands right after
 	// the search tool in catalog registration order.
@@ -3738,7 +3743,7 @@ func expectedExploreToolNames() []string {
 }
 
 func expectedPlanToolNames() []string {
-	names := expectedExploreToolNames()
+	names := expectedInspectionToolNames()
 	// plan's realized tool list is the shared inspection set (which now includes
 	// run_command) followed by the main-registered tools (update_todos, delegate,
 	// background_jobs, record_plan, request_implementation) in catalog order.
@@ -3749,7 +3754,7 @@ func expectedDefaultToolNames() []string {
 	// The default set omits git_readonly: git already covers it, and read-only
 	// agents remain delegatable via the git->git_readonly subset rule.
 	names := tools.DefaultNames()
-	return append(names, "delegate", "background_jobs", "record_plan")
+	return append(names, "update_todos", "delegate", "background_jobs", "record_plan")
 }
 
 func TestEnableInteractiveAutoHandoff(t *testing.T) {

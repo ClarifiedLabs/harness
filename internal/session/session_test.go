@@ -492,7 +492,7 @@ func TestSaveLoadPreservesTodos(t *testing.T) {
 	s := sampleSession()
 	s.Todos = []todo.Item{
 		{Content: "explore", Status: todo.StatusCompleted},
-		{Content: "implement", Status: todo.StatusInProgress, ActiveForm: "Implementing"},
+		{Content: "implement", Status: todo.StatusInProgress},
 		{Content: "test", Status: todo.StatusPending},
 	}
 	path := filepath.Join(t.TempDir(), "session")

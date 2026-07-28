@@ -21,21 +21,18 @@ const (
 	StatusCompleted  = "completed"
 )
 
-// Item is one todo entry. ActiveForm is an optional present-tense label shown
-// while the item is in progress (e.g. "Running the tests").
+// Item is one todo entry.
 type Item struct {
-	Content    string `json:"content"`
-	Status     string `json:"status"`
-	ActiveForm string `json:"active_form,omitempty"`
+	Content string `json:"content"`
+	Status  string `json:"status"`
 }
 
-// Store holds the current todo list. It is mutated in place across tool calls,
-// so a single instance is constructed per process and shared (mirrors
-// delegate.State). Methods are safe for concurrent use.
+// Store holds one agent's current todo list across tool calls. Root and child
+// agents use separate stores. Methods are safe for concurrent use.
 type Store struct {
-	mu           sync.Mutex
-	items        []Item
-	lastInjected []Item // list last rendered into request context; nil = never
+	mu                    sync.Mutex
+	items                 []Item
+	requestContextPending bool
 }
 
 // NewStore returns an empty Store.
@@ -54,64 +51,60 @@ func (s *Store) Snapshot() []Item {
 	return out
 }
 
-// Replace swaps the list for a copy of items.
+// Replace swaps the list for a copy of items. A normal update_todos call is
+// already present in the transcript, so replacing the list clears any pending
+// recovery reminder.
 func (s *Store) Replace(items []Item) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.replace(items)
+	s.requestContextPending = false
+}
+
+// Restore replaces the list from persisted state and schedules one compact
+// recovery reminder for the next request when work remains.
+func (s *Store) Restore(items []Item) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replace(items)
+	s.requestContextPending = RequestContext(s.items) != ""
+}
+
+func (s *Store) replace(items []Item) {
 	if len(items) == 0 {
 		s.items = nil
 		return
 	}
-	next := make([]Item, len(items))
-	copy(next, items)
-	s.items = next
+	s.items = append([]Item(nil), items...)
 }
 
-// ChangedRequestContext renders the todo reminder only when the list differs
-// from what was last injected into a request (see MarkContextInjected). The
-// list is already part of the transcript via the update_todos tool result, so
-// re-sending an unchanged reminder every turn is pure overhead: it spends a
-// per-turn trailing-context write and, on providers without prefix caching,
-// perturbs the request. Returning "" when nothing changed lets callers skip the
-// injection entirely. An empty or all-completed list always yields "".
-func (s *Store) ChangedRequestContext() string {
+// PendingRequestContext renders a compact reminder only when persisted state
+// was restored or the transcript was rewritten. Normal update_todos calls need
+// no reminder because their arguments already contain the complete list.
+func (s *Store) PendingRequestContext() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if itemsEqual(s.items, s.lastInjected) {
+	if !s.requestContextPending {
 		return ""
 	}
 	return RequestContext(s.items)
 }
 
-// MarkContextInjected records the current list as injected into a request, so a
-// subsequent ChangedRequestContext returns "" until the list changes again. Call
-// it after the rendered context has actually been attached to a request.
+// MarkContextInjected records that the pending recovery reminder was attached
+// to a real model request.
 func (s *Store) MarkContextInjected() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastInjected = append([]Item(nil), s.items...)
+	s.requestContextPending = false
 }
 
-// ResetContextInjected forgets the last-injected list so the next
-// ChangedRequestContext re-renders the current list. Call it when the transcript
-// is rewritten (compaction, branch, fork/clone) and the raw update_todos result
-// may no longer be present, so the model sees the list again.
-func (s *Store) ResetContextInjected() {
+// RequireRequestContext schedules a one-shot recovery reminder when unresolved
+// work exists. Call it after compaction, branching, or another transcript
+// rewrite that may remove the latest update_todos call.
+func (s *Store) RequireRequestContext() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastInjected = nil
-}
-
-func itemsEqual(a, b []Item) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	s.requestContextPending = RequestContext(s.items) != ""
 }
 
 const schema = `{
@@ -123,9 +116,8 @@ const schema = `{
       "items": {
         "type": "object",
         "properties": {
-          "content": {"type": "string", "description": "What needs to be done. Keep each item concise and action-oriented."},
-          "status": {"type": "string", "enum": ["pending", "in_progress", "completed"], "description": "Current state. Keep exactly one item in_progress while working."},
-          "active_form": {"type": "string", "description": "Optional present-tense label shown while in progress, e.g. \"Running the tests\"."}
+          "content": {"type": "string", "description": "Concise action label shown in every state, e.g. \"Run focused tests\"."},
+          "status": {"type": "string", "enum": ["pending", "in_progress", "completed"], "description": "Current state. Keep exactly one item in_progress while working."}
         },
         "required": ["content", "status"]
       }
@@ -181,51 +173,65 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	return toolResult(args.Todos), nil
 }
 
-// Render formats items as the model-facing tool result and progress view.
+// Render formats the complete user-facing progress view.
 func Render(items []Item) string {
 	if len(items) == 0 {
 		return "Todo list cleared."
 	}
-	done := 0
-	for _, item := range items {
-		if item.Status == StatusCompleted {
-			done++
-		}
-	}
+	done := completedCount(items)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Todos (%d/%d done):", done, len(items))
 	for _, item := range items {
-		label := item.Content
 		switch item.Status {
 		case StatusCompleted:
-			fmt.Fprintf(&b, "\n  [x] %s", label)
+			fmt.Fprintf(&b, "\n  [x] %s", item.Content)
 		case StatusInProgress:
-			if strings.TrimSpace(item.ActiveForm) != "" {
-				label = item.ActiveForm
-			}
-			fmt.Fprintf(&b, "\n  [~] %s", label)
+			fmt.Fprintf(&b, "\n  [~] %s", item.Content)
 		default:
-			fmt.Fprintf(&b, "\n  [ ] %s", label)
+			fmt.Fprintf(&b, "\n  [ ] %s", item.Content)
 		}
 	}
 	return b.String()
 }
 
 func toolResult(items []Item) string {
-	out := Render(items)
-	if allCompleted(items) {
-		out += "\nAll todos are complete."
+	if len(items) == 0 {
+		return "Todo list cleared."
 	}
-	return out
+	done := completedCount(items)
+	if allCompleted(items) {
+		return fmt.Sprintf("Todos updated (%d/%d complete); all complete.", done, len(items))
+	}
+	return fmt.Sprintf("Todos updated (%d/%d complete).", done, len(items))
 }
 
-// RequestContext renders a short, request-only reminder for the model. Callers
-// append it to ephemeral context, not the saved transcript.
+// RequestContext renders unresolved work as a compact, request-only recovery
+// reminder. Callers append it to ephemeral context, not the saved transcript.
 func RequestContext(items []Item) string {
 	if len(items) == 0 || allCompleted(items) {
 		return ""
 	}
-	return "[todo]\n" + Render(items)
+	var b strings.Builder
+	fmt.Fprintf(&b, "[todo]\n%d/%d complete", completedCount(items), len(items))
+	for _, item := range items {
+		switch item.Status {
+		case StatusInProgress:
+			fmt.Fprintf(&b, "\n  [~] %s", item.Content)
+		case StatusPending:
+			fmt.Fprintf(&b, "\n  [ ] %s", item.Content)
+		}
+	}
+	return b.String()
+}
+
+func completedCount(items []Item) int {
+	done := 0
+	for _, item := range items {
+		if item.Status == StatusCompleted {
+			done++
+		}
+	}
+	return done
 }
 
 func allCompleted(items []Item) bool {

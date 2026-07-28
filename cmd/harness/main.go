@@ -963,7 +963,7 @@ func run(env environment) int {
 			fmt.Fprintf(stderr, "harness: session model %q overridden by %q (flags win)\n", s.Model, cfg.Model)
 		}
 		ag.SetTranscript(s.Messages)
-		todoStore.Replace(s.Todos)
+		todoStore.Restore(s.Todos)
 		planStore.Replace(s.Plans)
 		resumedUsageByModel = s.UsageByModel
 		totals = s.Usage

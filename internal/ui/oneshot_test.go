@@ -317,7 +317,7 @@ func TestOneShotDoesNotPrintTodoPromptStatus(t *testing.T) {
 	store := todo.NewStore()
 	store.Replace([]todo.Item{
 		{Content: "explore", Status: todo.StatusCompleted},
-		{Content: "test", Status: todo.StatusInProgress, ActiveForm: "Testing"},
+		{Content: "test", Status: todo.StatusInProgress},
 	})
 	reg := tools.Default()
 	reg.Register(todo.NewTool(store))
@@ -327,7 +327,7 @@ func TestOneShotDoesNotPrintTodoPromptStatus(t *testing.T) {
 	if code := OneShot(app, "work on it"); code != ExitOK {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if got := errw.String(); strings.Contains(got, "Todos (1/2 done):") || strings.Contains(got, "[~] Testing") {
+	if got := errw.String(); strings.Contains(got, "Todos (1/2 done):") || strings.Contains(got, "[~] test") {
 		t.Fatalf("one-shot mode should not print the interactive todo prompt status:\n%s", got)
 	}
 }
@@ -409,11 +409,11 @@ func TestOneShotSkipsTodoContextWhenToolUnavailable(t *testing.T) {
 	}
 }
 
-func TestOneShotRefreshesTodoContextAfterUpdateTodos(t *testing.T) {
+func TestOneShotDoesNotDuplicateTodoContextAfterUpdateTodos(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake",
 		llmtest.Step{
-			Events: []llm.StreamEvent{toolStep("update_todos", `{"todos":[{"content":"explore","status":"completed"},{"content":"test","status":"in_progress","active_form":"Testing"}]}`, "call_todo")},
+			Events: []llm.StreamEvent{toolStep("update_todos", `{"todos":[{"content":"explore","status":"completed"},{"content":"test","status":"in_progress"}]}`, "call_todo")},
 			Stop:   llm.StopToolUse,
 		},
 		llmtest.Step{Stop: llm.StopEndTurn},
@@ -436,13 +436,8 @@ func TestOneShotRefreshesTodoContextAfterUpdateTodos(t *testing.T) {
 		t.Fatalf("first request should have no empty-list reminder:\n%s", firstContext)
 	}
 	secondContext := strings.Join(fp.Requests[1].RequestContext, "\n\n")
-	for _, want := range []string{"Todos (1/2 done):", "[x] explore", "[~] Testing"} {
-		if !strings.Contains(secondContext, want) {
-			t.Errorf("second request context missing %q:\n%s", want, secondContext)
-		}
-	}
-	if strings.Contains(secondContext, "No active todo list") {
-		t.Fatalf("second request should not reuse stale empty-list reminder:\n%s", secondContext)
+	if secondContext != "" {
+		t.Fatalf("second request should rely on the transcript tool call, got duplicate context:\n%s", secondContext)
 	}
 }
 

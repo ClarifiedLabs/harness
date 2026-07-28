@@ -173,11 +173,12 @@ only the exact repository-relative file paths, runs the staged whitespace check,
 commits only those paths, and returns the new commit plus remaining workspace
 status. It rejects `.`, directories, globs, and pathspec magic.
 
-`update_todos` is retained for the plan agent and explicit custom-agent
-whitelists, but is omitted from `auto` and `independent`: progress-only calls
-consume model turns without advancing work. When it is available, issue it
-alongside an independent substantive call rather than as the only call in a
-turn.
+`update_todos` is available to every built-in agent. Use it for meaningful
+multi-step work, update it at phase boundaries, and do not spend a turn only on
+bookkeeping. Each call replaces the whole list. Harness returns a compact
+completion-count acknowledgment to the model while the interactive REPL renders
+the full checklist for the user. Custom agents with an explicit `allowed_tools`
+list may omit it.
 
 ## File Mutation
 

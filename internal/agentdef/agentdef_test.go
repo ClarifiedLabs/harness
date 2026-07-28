@@ -56,9 +56,14 @@ func TestBuiltins(t *testing.T) {
 	if !slices.Contains(explore.AllowedTools, "run_command") {
 		t.Errorf("explore tools missing run_command: %v", explore.AllowedTools)
 	}
-	for _, forbidden := range []string{"write_file", "edit", "apply_patch", "record_plan", "request_implementation", "update_todos", "delegate", "background_jobs"} {
+	for _, forbidden := range []string{"write_file", "edit", "apply_patch", "record_plan", "request_implementation", "delegate", "background_jobs"} {
 		if slices.Contains(explore.AllowedTools, forbidden) {
 			t.Errorf("explore tools unexpectedly include %q: %v", forbidden, explore.AllowedTools)
+		}
+	}
+	for name, def := range m {
+		if !slices.Contains(def.AllowedTools, "update_todos") {
+			t.Errorf("built-in %s tools missing update_todos: %v", name, def.AllowedTools)
 		}
 	}
 
@@ -328,15 +333,16 @@ func TestResolveReasoningOverride(t *testing.T) {
 	}
 }
 
-func TestDefaultToolsOmitBookkeepingAndHandoffTools(t *testing.T) {
+func TestDefaultToolsIncludeTodosButOmitImplementationHandoff(t *testing.T) {
 	def := defaultTools()
 	if !slices.Contains(def, "record_plan") {
 		t.Errorf("default tools missing record_plan: %v", def)
 	}
-	for _, name := range []string{"update_todos", "request_implementation"} {
-		if slices.Contains(def, name) {
-			t.Errorf("default tools should not include %s: %v", name, def)
-		}
+	if !slices.Contains(def, "update_todos") {
+		t.Errorf("default tools missing update_todos: %v", def)
+	}
+	if slices.Contains(def, "request_implementation") {
+		t.Errorf("default tools should not include request_implementation: %v", def)
 	}
 }
 

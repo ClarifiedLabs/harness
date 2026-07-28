@@ -2221,39 +2221,37 @@ this subsection records the common runner those argv tools point at.
 | param | type | notes |
 |---|---|---|
 | `todos` | array, required | the complete list; replaces the previous one entirely |
-| `todos[].content` | string, required | what needs to be done; keep each item concise and action-oriented |
+| `todos[].content` | string, required | concise action label shown in every state |
 | `todos[].status` | string, required | `pending`, `in_progress`, or `completed` |
-| `todos[].active_form` | string | optional present-tense label shown while in progress |
 
 - **Whole-list replace semantics** (like Claude Code's TodoWrite): each call carries
   the complete list, so there is no per-item merge and no IDs. The transcript already
   records the latest list; the in-memory store is a convenience for rendering and resume.
 - Validates non-empty `content`, a known `status`, and at most one `in_progress` item;
-  returns a rendered checklist as the tool result: a `Todos (<done>/<total> done):`
-  header followed by one `[x]`/`[~]`/`[ ]` line per item (an `in_progress` item shows
-  its `active_form` label when set). An empty list renders `Todo list cleared.`
-  When all todos are completed, the tool result also includes a one-time
-  `All todos are complete.` cue.
+  returns only a compact count acknowledgment such as
+  `Todos updated (1/3 complete).` or, at completion,
+  `Todos updated (3/3 complete); all complete.` An empty list returns
+  `Todo list cleared.` Keeping task titles out of the tool result avoids duplicating
+  the complete list already present in the tool-call arguments.
 - Implemented in `internal/todo`, not `internal/tools`, so `internal/session` can persist
-  `todo.Item` without importing the tools package. A single `todo.Store` is constructed
-  per process (like `write_tmp_file`); the list is saved in `state.json` (`Session.Todos`),
-  reseeded on resume, and cleared by `/clear`.
-- When `update_todos` is available, the REPL/one-shot drivers add a short request-only
-  reminder showing the current open list. The reminder is re-injected only when the
-  list changes since it was last injected (`Store.ChangedRequestContext` /
-  `MarkContextInjected`): the list already lives in the transcript via the tool
-  result, so re-sending an unchanged reminder every turn is pure overhead. The
-  injected marker resets when the transcript is rewritten (compaction, branch,
-  fork/clone) and the raw `update_todos` result may be gone, so the model sees the
-  list again. Completed lists are not added as request context, and request context
-  is not saved into the transcript.
+  `todo.Item` without importing the tools package. The root has one `todo.Store`;
+  each child agent gets a private store. The root list is saved in `state.json`
+  (`Session.Todos`), reseeded on resume, and cleared by `/clear`.
+- Normal updates add no request-only reminder: the complete list already lives in
+  the transcript's tool-call arguments. Resume and transcript rewrites (compaction,
+  branch, fork/clone, or child continuation) schedule one compact recovery reminder
+  for the next real model request. It shows the completion count plus only
+  `in_progress` and `pending` items; completed task titles are omitted. The reminder
+  is not saved into the transcript and is consumed only when attached to a real
+  request, so context previews do not lose it.
 - In the interactive REPL, the visible session's non-empty todo list is also printed
-  before the idle prompt when the current visible agent has `update_todos`, and
-  the visible todo status is printed after each successful `update_todos` call.
+  as a full `[x]`/`[~]`/`[ ]` checklist before the idle prompt when the current
+  visible agent has `update_todos`, and after each successful `update_todos` call.
   One-shot runs and child-agent private todo stores do not print there.
-- Built-in `auto` and `independent` omit the tool to avoid progress-only model
-  turns; `plan` keeps it and custom agents can whitelist it. When exposed, prompt
-  guidance asks the model to co-issue it with an independent substantive call.
+- Every built-in agent exposes the tool, including `explore`; custom agents with an
+  explicit `allowed_tools` list may omit it. Prompt guidance asks models to use it
+  for meaningful multi-step work, update it at phase boundaries, and never spend
+  a turn only on bookkeeping.
 
 ### 9.14 `delegate`
 
@@ -3276,9 +3274,10 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   conversational assistant turn. `/compact [focus]` adds one-shot emphasis to all
   summary phases and records that focus only on the resulting checkpoint/archive.
 - **Typed compacted-history state:** the active todo store is persisted in
-  session state independently of the transcript. A successful compaction resets
-  its injection marker, so the first subsequent model request receives the
-  current typed list even if the raw `update_todos` result aged out. The
+  session state independently of the transcript. A successful compaction schedules
+  a one-shot recovery reminder, so the first subsequent model request receives
+  the unresolved typed items even if the raw `update_todos` call aged out. Completed
+  task titles are omitted from that reminder. The
   model-authored summary carries only unresolved intent, blockers, and gates
   that are not represented by that list.
 - **Deterministic compacted-history files:** correlate each validated assistant
@@ -3412,13 +3411,13 @@ reviewer, or the wide-open default without separate binaries.
   selection path—not a display-name or model-only swap—so it recomposes the agent
   prompt, tools, model/reasoning selection, and response continuation state.
 - **Built-ins:** `auto` (all available built-in tools plus discovered MCP tools,
-  including `record_plan`, `delegate` and background job tools, and
+  including `update_todos`, `record_plan`, `delegate` and background job tools, and
   `request_implementation` in interactive sessions; its
   `prompts/agents/auto.txt` is a one-byte file — a single newline — that trims to
   empty, so it contributes no prompt body), `explore` (the shared inspection
   tools — `read_file`, `list_dir`, `glob`, configured search tool(s),
-  `run_command`, `web_fetch`, optional `git_readonly` — and read-only MCP tools;
-  no file mutation, implementation handoff, todos, background jobs, or
+  `run_command`, `web_fetch`, optional `git_readonly`, and `update_todos` — and
+  read-only MCP tools; no file mutation, implementation handoff, background jobs, or
   delegation; prompt in `prompts/agents/explore.txt`), `plan` (the shared
   inspection tools, read-only MCP tools, `write_tmp_file`, `record_plan`,
   `request_implementation`, `update_todos`, `delegate`, and background job
@@ -3427,14 +3426,14 @@ reviewer, or the wide-open default without separate binaries.
   tools (`gh`, builds, screenshots, live apps) but have no first-class
   file-mutation tools, keeping "don't modify the project" a prompt-level
   contract), and `independent` (all available built-in tools
-  plus discovered MCP tools, including `record_plan`, `delegate` and background
-  job tools, a complete-without-asking prompt from
+  plus discovered MCP tools, including `update_todos`, `record_plan`, `delegate`
+  and background job tools, a complete-without-asking prompt from
   `prompts/agents/independent.txt`). `auto`/`independent` advertise `git` but not
   `git_readonly` — `git` covers every read-only operation, so listing both would
   duplicate functionality and waste context. The delegation subset guard treats an
   available `git` as satisfying a required `git_readonly`, so these parents can
   still delegate to `explore`/`plan`. `record_plan` (§9.17) is in every default
-  agent's set;
+  agent's set, and `update_todos` is in every built-in agent's set;
   `request_implementation` (§9.18) is exposed to `plan` and to interactive
   `auto`, but not to one-shot `auto` or `independent`.
 - **Descriptions are required selection metadata:** after resolution, every agent

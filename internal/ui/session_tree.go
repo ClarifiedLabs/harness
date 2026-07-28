@@ -126,7 +126,7 @@ func (app *App) navigateTree(target string, readLine func(string) (string, error
 	if app.Todos != nil {
 		// Branching rewrites the transcript and may drop the raw update_todos
 		// result, so re-inject the todo reminder on the next request.
-		app.Todos.ResetContextInjected()
+		app.Todos.RequireRequestContext()
 	}
 	app.recordBranchEvent(from, leaf, summary, "tree")
 	app.saveOrWarn(app.SessionPath)
@@ -194,7 +194,7 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 	if app.Todos != nil {
 		// Fork/clone rewrites the transcript and may drop the raw update_todos
 		// result, so re-inject the todo reminder on the next request.
-		app.Todos.ResetContextInjected()
+		app.Todos.RequireRequestContext()
 	}
 	if app.OnSessionPathChanged != nil {
 		app.OnSessionPathChanged(app.SessionPath)

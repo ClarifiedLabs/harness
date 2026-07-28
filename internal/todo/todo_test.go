@@ -21,15 +21,19 @@ func TestRunWritesAndRenders(t *testing.T) {
 	tool := NewTool(store)
 	out, err := runTool(t, tool, map[string]any{"todos": []map[string]any{
 		{"content": "explore", "status": "completed"},
-		{"content": "implement", "status": "in_progress", "active_form": "Implementing the tool"},
+		{"content": "implement", "status": "in_progress"},
 		{"content": "test", "status": "pending"},
 	}})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	for _, want := range []string{"Todos (1/3 done):", "[x] explore", "[~] Implementing the tool", "[ ] test"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q\n%s", want, out)
+	if out != "Todos updated (1/3 complete)." {
+		t.Fatalf("Run output = %q", out)
+	}
+	rendered := Render(store.Snapshot())
+	for _, want := range []string{"Todos (1/3 done):", "[x] explore", "[~] implement", "[ ] test"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("rendered list missing %q\n%s", want, rendered)
 		}
 	}
 	if got := store.Snapshot(); len(got) != 3 {
@@ -47,10 +51,8 @@ func TestRunCompletedListReportsCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	for _, want := range []string{"Todos (2/2 done):", "[x] explore", "[x] summarize", "All todos are complete."} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q\n%s", want, out)
-		}
+	if out != "Todos updated (2/2 complete); all complete." {
+		t.Fatalf("Run output = %q", out)
 	}
 }
 
@@ -143,83 +145,71 @@ func TestRequestContextOmitsCompletedList(t *testing.T) {
 func TestRequestContextIncludesExistingList(t *testing.T) {
 	got := RequestContext([]Item{
 		{Content: "explore", Status: StatusCompleted},
-		{Content: "implement", Status: StatusInProgress, ActiveForm: "Implementing"},
+		{Content: "implement", Status: StatusInProgress},
 		{Content: "test", Status: StatusPending},
 	})
 	for _, want := range []string{
 		"[todo]",
-		"Todos (1/3 done):",
-		"[x] explore",
-		"[~] Implementing",
+		"1/3 complete",
+		"[~] implement",
 		"[ ] test",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("RequestContext(items) missing %q\n%s", want, got)
 		}
 	}
+	if strings.Contains(got, "explore") {
+		t.Fatalf("RequestContext(items) included completed item:\n%s", got)
+	}
 }
 
-func TestChangedRequestContextSuppressesUntilChange(t *testing.T) {
+func TestRestoreRequestsContextOnce(t *testing.T) {
 	store := NewStore()
-	store.Replace([]Item{
-		{Content: "explore", Status: StatusInProgress, ActiveForm: "Exploring"},
+	store.Restore([]Item{
+		{Content: "explore", Status: StatusInProgress},
 		{Content: "implement", Status: StatusPending},
 	})
 
-	// First render: the list has never been injected, so it is returned.
-	first := store.ChangedRequestContext()
-	if !strings.Contains(first, "[~] Exploring") {
-		t.Fatalf("first ChangedRequestContext = %q, want the rendered list", first)
+	first := store.PendingRequestContext()
+	if !strings.Contains(first, "[~] explore") {
+		t.Fatalf("first PendingRequestContext = %q, want the unresolved list", first)
 	}
 	store.MarkContextInjected()
-
-	// Unchanged list: suppressed on subsequent turns.
-	if got := store.ChangedRequestContext(); got != "" {
-		t.Fatalf("unchanged ChangedRequestContext = %q, want empty", got)
+	if got := store.PendingRequestContext(); got != "" {
+		t.Fatalf("consumed PendingRequestContext = %q, want empty", got)
 	}
 
-	// A status flip re-renders.
+	// Normal tool-backed updates are already in the transcript and do not
+	// schedule another request-only copy.
 	store.Replace([]Item{
 		{Content: "explore", Status: StatusCompleted},
-		{Content: "implement", Status: StatusInProgress, ActiveForm: "Implementing"},
+		{Content: "implement", Status: StatusInProgress},
 	})
-	changed := store.ChangedRequestContext()
-	if !strings.Contains(changed, "[x] explore") || !strings.Contains(changed, "[~] Implementing") {
-		t.Fatalf("changed ChangedRequestContext = %q, want the updated list", changed)
-	}
-	store.MarkContextInjected()
-	if got := store.ChangedRequestContext(); got != "" {
-		t.Fatalf("re-suppressed ChangedRequestContext = %q, want empty", got)
+	if got := store.PendingRequestContext(); got != "" {
+		t.Fatalf("tool-backed PendingRequestContext = %q, want empty", got)
 	}
 }
 
-func TestChangedRequestContextEmptyAndCompleted(t *testing.T) {
+func TestRestoreContextEmptyAndCompleted(t *testing.T) {
 	store := NewStore()
-	// Empty list never renders.
-	if got := store.ChangedRequestContext(); got != "" {
-		t.Fatalf("empty ChangedRequestContext = %q, want empty", got)
+	store.Restore(nil)
+	if got := store.PendingRequestContext(); got != "" {
+		t.Fatalf("empty PendingRequestContext = %q, want empty", got)
 	}
-	// An all-completed list renders "" even on first injection.
-	store.Replace([]Item{{Content: "done", Status: StatusCompleted}})
-	if got := store.ChangedRequestContext(); got != "" {
-		t.Fatalf("completed ChangedRequestContext = %q, want empty", got)
+	store.Restore([]Item{{Content: "done", Status: StatusCompleted}})
+	if got := store.PendingRequestContext(); got != "" {
+		t.Fatalf("completed PendingRequestContext = %q, want empty", got)
 	}
 }
 
-func TestResetContextInjectedForcesReinject(t *testing.T) {
+func TestRequireRequestContextAfterTranscriptRewrite(t *testing.T) {
 	store := NewStore()
-	store.Replace([]Item{{Content: "explore", Status: StatusInProgress, ActiveForm: "Exploring"}})
-	if got := store.ChangedRequestContext(); got == "" {
-		t.Fatal("first ChangedRequestContext should render")
+	store.Replace([]Item{{Content: "explore", Status: StatusInProgress}})
+	if got := store.PendingRequestContext(); got != "" {
+		t.Fatalf("tool-backed PendingRequestContext = %q, want empty", got)
 	}
-	store.MarkContextInjected()
-	if got := store.ChangedRequestContext(); got != "" {
-		t.Fatalf("suppressed ChangedRequestContext = %q, want empty", got)
-	}
-	// After a transcript rewrite the reminder must re-render even though the
-	// list is unchanged.
-	store.ResetContextInjected()
-	if got := store.ChangedRequestContext(); !strings.Contains(got, "[~] Exploring") {
-		t.Fatalf("post-reset ChangedRequestContext = %q, want the rendered list", got)
+	store.RequireRequestContext()
+	if got := store.PendingRequestContext(); !strings.Contains(got, "[~] explore") {
+		t.Fatalf("post-rewrite PendingRequestContext = %q, want unresolved work", got)
 	}
 }
