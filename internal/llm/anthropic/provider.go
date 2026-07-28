@@ -35,32 +35,40 @@ type Config struct {
 	BaseURL       string // default https://api.anthropic.com/v1
 	ContextWindow int    // resolved by main from provider config registry
 	OutputLimit   int    // model's real max-output-token limit; 0 = unknown
-	HTTPClient    *http.Client
-	Sleep         func(time.Duration) // nil = time.Sleep
+	// UsageInputIncludesCache marks Anthropic-compatible endpoints whose usage
+	// reports input_tokens as TOTAL input (cached tokens included) rather than
+	// real Anthropic's uncached-only figure. When set, normalization subtracts
+	// cache read/write tokens so llm.Usage.InputTokens keeps its "uncached
+	// input" contract. Default off (real Anthropic semantics).
+	UsageInputIncludesCache bool
+	HTTPClient              *http.Client
+	Sleep                   func(time.Duration) // nil = time.Sleep
 }
 
 // Provider is the Anthropic Messages dialect.
 type Provider struct {
-	apiKey        string
-	authHeaders   map[string]string
-	baseURL       string
-	contextWindow int
-	outputLimit   int
-	client        *http.Client
-	sleep         func(time.Duration)
+	apiKey                  string
+	authHeaders             map[string]string
+	baseURL                 string
+	contextWindow           int
+	outputLimit             int
+	usageInputIncludesCache bool
+	client                  *http.Client
+	sleep                   func(time.Duration)
 }
 
 // New constructs a Provider from cfg, applying defaults.
 func New(cfg Config) *Provider {
 	base, client, sleep := llm.HTTPDefaults(cfg.BaseURL, defaultBaseURL, cfg.HTTPClient, cfg.Sleep)
 	return &Provider{
-		apiKey:        cfg.APIKey,
-		authHeaders:   cfg.AuthHeaders,
-		baseURL:       base,
-		contextWindow: cfg.ContextWindow,
-		outputLimit:   cfg.OutputLimit,
-		client:        client,
-		sleep:         sleep,
+		apiKey:                  cfg.APIKey,
+		authHeaders:             cfg.AuthHeaders,
+		baseURL:                 base,
+		contextWindow:           cfg.ContextWindow,
+		outputLimit:             cfg.OutputLimit,
+		usageInputIncludesCache: cfg.UsageInputIncludesCache,
+		client:                  client,
+		sleep:                   sleep,
 	}
 }
 
@@ -207,7 +215,7 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 		case "message_start":
 			if data.Message != nil {
 				rawUsage = mergeWireUsage(rawUsage, data.Message.Usage)
-				usage = normalizeAnthropicUsage(rawUsage)
+				usage = normalizeAnthropicUsage(rawUsage, p.usageInputIncludesCache)
 				u := addAnthropicUsage(base, usage)
 				if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
 					return streamDecodeResult{}, false, nil
@@ -359,7 +367,7 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 			}
 			if data.Usage != nil {
 				rawUsage = mergeWireUsage(rawUsage, *data.Usage)
-				usage = normalizeAnthropicUsage(rawUsage)
+				usage = normalizeAnthropicUsage(rawUsage, p.usageInputIncludesCache)
 			}
 			u := addAnthropicUsage(base, usage)
 			if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
@@ -419,7 +427,7 @@ func clearMessageCacheBreakpoints(messages []wireMessage) {
 	}
 }
 
-func normalizeAnthropicUsage(u wireUsage) llm.Usage {
+func normalizeAnthropicUsage(u wireUsage, usageInputIncludesCache bool) llm.Usage {
 	input := max(u.InputTokens, 0)
 	outputTotal := max(u.OutputTokens, 0)
 	reasoning := min(max(u.OutputTokensDetails.ThinkingTokens, 0), outputTotal)
@@ -434,6 +442,14 @@ func normalizeAnthropicUsage(u wireUsage) llm.Usage {
 		cacheTotal = max(cacheTotal, cache5m+cache1h)
 		cache1h = min(cache1h, cacheTotal)
 		ttlKnown = cacheTotal > 0
+	}
+	if usageInputIncludesCache {
+		// Some Anthropic-compatible endpoints (e.g. Kimi's /anthropic route)
+		// report input_tokens as total input INCLUDING cached tokens; real
+		// Anthropic reports it excluding them. Subtract the cache buckets so
+		// InputTokens keeps the llm.Usage "uncached input" contract. Merging
+		// (mergeWireUsage) runs on raw wire values, so normalize once here.
+		input = max(input-cacheRead-cacheTotal, 0)
 	}
 	return llm.Usage{
 		InputTokens:        input,

@@ -678,3 +678,44 @@ func assertOrdered(t *testing.T, text string, values ...string) {
 		last = index
 	}
 }
+
+// TestStatsUncachedInputReflectsNormalizedUsage pins that session stats prints
+// Usage.InputTokens as recorded (the dialect-normalized uncached figure)
+// rather than re-deriving it, so a provider whose usage was normalized at the
+// dialect (usage_input_includes_cache) shows the true uncached input instead
+// of double-counting cache reads. Regression coverage for the Kimi-shaped
+// session where input_tokens=208979 with cache_read=208128 reported "uncached
+// input" of 19M against a true ~860K.
+func TestStatsUncachedInputReflectsNormalizedUsage(t *testing.T) {
+	base := time.Date(2026, 7, 27, 14, 0, 0, 0, time.UTC)
+	dir := filepath.Join(t.TempDir(), "session")
+	usage := llm.Usage{InputTokens: 851, OutputTokens: 100, CacheReadTokens: 208128}
+	saveStatsFixture(t, dir, Session{
+		Provider: "anthropic",
+		Model:    "kimi-k3",
+		Created:  base,
+		Updated:  base.Add(time.Minute),
+		Usage:    UsageTotals{Usage: usage},
+	}, []Event{
+		{Time: base, Type: EventUser, Prompt: 1, Text: "work"},
+		{Time: base.Add(time.Second), Type: EventTurnAttemptUsage, Prompt: 1, Turn: 1, Attempt: 1, Usage: &usage},
+		{Time: base.Add(2 * time.Second), Type: EventTurnComplete, Prompt: 1, Turn: 1},
+	})
+
+	var out bytes.Buffer
+	if err := Stats(dir, &out); err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"  uncached input: 851\n",
+		"  cache read: 208128\n",
+		// total = 851 + 208128 + 100; a total-input figure (208979) here would
+		// mean the cache read is being double-counted.
+		"  total tokens: 209079\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stats output missing %q:\n%s", want, got)
+		}
+	}
+}

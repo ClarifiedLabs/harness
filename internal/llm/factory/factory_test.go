@@ -175,3 +175,37 @@ func TestReasoningReplayReachesOpenAIDialect(t *testing.T) {
 		})
 	}
 }
+
+// TestUsageInputIncludesCacheReachesAnthropicDialect verifies the
+// usage_input_includes_cache provider quirk is threaded through the factory
+// into Anthropic usage normalization.
+func TestUsageInputIncludesCacheReachesAnthropicDialect(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":208979,\"output_tokens\":1,\"cache_read_input_tokens\":208128}}}\n\n")
+		fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
+		fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":208979,\"output_tokens\":2,\"cache_read_input_tokens\":208128}}\n\n")
+		fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	p, err := New(Options{Provider: "anthropic", Model: "kimi-k3", BaseURL: srv.URL, APIKey: "k", UsageInputIncludesCache: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	var done llm.StreamEvent
+	for ev, err := range p.Stream(context.Background(), llm.Request{Model: "kimi-k3", Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}}}}) {
+		if err != nil {
+			t.Fatalf("stream: %v", err)
+		}
+		if ev.Kind == llm.EventDone {
+			done = ev
+		}
+	}
+	if done.Usage == nil || done.Usage.InputTokens != 851 || done.Usage.CacheReadTokens != 208128 {
+		t.Fatalf("usage = %+v, want uncached input 851 with cache read 208128", done.Usage)
+	}
+}

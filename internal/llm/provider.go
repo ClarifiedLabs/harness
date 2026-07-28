@@ -321,7 +321,12 @@ const (
 // normalization InputTokens means the same thing across dialects: uncached
 // input billed at full rate (see design §6).
 type Usage struct {
-	InputTokens     int `json:"input_tokens"` // uncached input, billed at full rate
+	// InputTokens is uncached input, billed at full rate. Dialects must
+	// normalize provider usage into this contract: endpoints that report
+	// input INCLUDING cached tokens subtract the cache buckets (see the
+	// usage_input_includes_cache provider quirk) so session accounting and
+	// pricing never double-count cache reads.
+	InputTokens     int `json:"input_tokens"`
 	OutputTokens    int `json:"output_tokens"`
 	CacheReadTokens int `json:"cache_read_tokens"`
 	// CacheWriteTokens is the default-rate cache-write bucket. Anthropic's

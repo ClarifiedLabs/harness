@@ -533,6 +533,15 @@ with no signature); without it the text remains display-only. `"current_turn"`
 is an Anthropic-dialect-only reduction mode documented under reasoning replay
 in the context-efficiency section.
 
+Anthropic-dialect provider configs may set `usage_input_includes_cache:true`
+when the endpoint reports `input_tokens` as TOTAL input (cached tokens
+included) instead of real Anthropic's uncached-only figure — observed on
+Anthropic-compatible third-party routes. The dialect then subtracts cache
+read/write tokens during usage normalization so `harness session stats`
+"uncached input" and cost accounting keep the uncached-input contract instead
+of double-counting cache reads. The quirk is explicit config only; harness
+does not sniff hosts. Leave it off for api.anthropic.com.
+
 For Anthropic, harness also declares cache semantics directly on each neutral
 request. Interactive turns request a one-hour TTL only for stable system/tool
 anchors; one-shot, delegate, prewarm, compaction, handoff, and branch-summary

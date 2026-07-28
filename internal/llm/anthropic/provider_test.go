@@ -715,7 +715,7 @@ func TestNormalizeAnthropicUsageClampsMalformedDetails(t *testing.T) {
 	usage.CacheCreationInputTokens = 2
 	usage.OutputTokensDetails.ThinkingTokens = 9
 	usage.CacheCreation = &wireCacheCreation{Ephemeral5mInputTokens: -4, Ephemeral1hInputTokens: 5}
-	got := normalizeAnthropicUsage(usage)
+	got := normalizeAnthropicUsage(usage, false)
 	if got.InputTokens != 0 || got.OutputTokens != 0 || got.ReasoningTokens != 3 ||
 		got.CacheWriteTokens != 0 || got.CacheWrite1hTokens != 5 {
 		t.Fatalf("normalized usage = %+v", got)
@@ -725,7 +725,7 @@ func TestNormalizeAnthropicUsageClampsMalformedDetails(t *testing.T) {
 func TestMergeWireUsageKeepsOutputAndReasoningDisjoint(t *testing.T) {
 	start := wireUsage{OutputTokens: 1}
 	final := wireUsage{OutputTokens: 3, OutputTokensDetails: wireOutputDetails{ThinkingTokens: 3}}
-	got := normalizeAnthropicUsage(mergeWireUsage(start, final))
+	got := normalizeAnthropicUsage(mergeWireUsage(start, final), false)
 	if got.OutputTokens != 0 || got.ReasoningTokens != 3 {
 		t.Fatalf("merged usage = %+v, want zero output and three reasoning", got)
 	}
@@ -904,5 +904,30 @@ func TestStreamPauseTurnLimit(t *testing.T) {
 	}
 	if calls != maxPauseContinuations+1 {
 		t.Fatalf("calls = %d, want %d", calls, maxPauseContinuations+1)
+	}
+}
+
+// TestNormalizeAnthropicUsageInputIncludesCache covers Anthropic-compatible
+// endpoints (Kimi's /anthropic route) that report input_tokens as TOTAL input
+// including cached tokens, unlike real Anthropic's uncached-only figure.
+func TestNormalizeAnthropicUsageInputIncludesCache(t *testing.T) {
+	// Session-observed shape: input_tokens=208979 with cache_read=208128 — if
+	// disjoint that would imply a 417K prefill against a ~209K-token request.
+	usage := wireUsage{InputTokens: 208979, OutputTokens: 100, CacheReadInputTokens: 208128}
+
+	off := normalizeAnthropicUsage(usage, false)
+	if off.InputTokens != 208979 {
+		t.Fatalf("default InputTokens = %d, want raw 208979 (real Anthropic semantics)", off.InputTokens)
+	}
+	on := normalizeAnthropicUsage(usage, true)
+	if on.InputTokens != 851 || on.CacheReadTokens != 208128 {
+		t.Fatalf("normalized usage = %+v, want uncached input 851 with cache read 208128", on)
+	}
+
+	// input smaller than the cache buckets clamps to zero rather than going
+	// negative.
+	clamped := normalizeAnthropicUsage(wireUsage{InputTokens: 10, CacheReadInputTokens: 8, CacheCreationInputTokens: 5}, true)
+	if clamped.InputTokens != 0 {
+		t.Fatalf("clamped InputTokens = %d, want 0", clamped.InputTokens)
 	}
 }

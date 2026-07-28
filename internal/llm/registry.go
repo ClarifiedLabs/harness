@@ -45,17 +45,23 @@ type ProviderConfig struct {
 	OmitMaxOutputTokens bool `json:"omit_max_output_tokens,omitempty"`
 	// ReasoningReplay controls how much historical reasoning state the dialect
 	// replays on the wire. See the ReasoningReplay type for accepted values.
-	ReasoningReplay      ReasoningReplay   `json:"reasoning_replay,omitempty"`
-	MinOutputTokens      int               `json:"min_output_tokens,omitempty"`
-	PromptCache          PromptCacheConfig `json:"prompt_cache,omitempty"`
-	ResponsesStateful    *bool             `json:"responses_stateful,omitempty"`
-	ResponsesWebSocket   *bool             `json:"responses_websocket,omitempty"`
-	InteractionsStateful *bool             `json:"interactions_stateful,omitempty"`
-	ServerTools          []string          `json:"server_tools,omitempty"`
-	ServiceTiers         []ServiceTier     `json:"service_tiers,omitempty"`
-	APIKeyEnv            []string          `json:"api_key_env"`
-	Auth                 *auth.Config      `json:"auth,omitempty"`
-	Models               []ModelEntry      `json:"models"`
+	ReasoningReplay ReasoningReplay `json:"reasoning_replay,omitempty"`
+	// UsageInputIncludesCache marks Anthropic-compatible endpoints whose usage
+	// reports input_tokens as total input (cached tokens included) rather than
+	// real Anthropic's uncached-only figure. The dialect subtracts the cache
+	// buckets so Usage.InputTokens stays "uncached input". Anthropic dialect
+	// only; default off.
+	UsageInputIncludesCache bool              `json:"usage_input_includes_cache,omitempty"`
+	MinOutputTokens         int               `json:"min_output_tokens,omitempty"`
+	PromptCache             PromptCacheConfig `json:"prompt_cache,omitempty"`
+	ResponsesStateful       *bool             `json:"responses_stateful,omitempty"`
+	ResponsesWebSocket      *bool             `json:"responses_websocket,omitempty"`
+	InteractionsStateful    *bool             `json:"interactions_stateful,omitempty"`
+	ServerTools             []string          `json:"server_tools,omitempty"`
+	ServiceTiers            []ServiceTier     `json:"service_tiers,omitempty"`
+	APIKeyEnv               []string          `json:"api_key_env"`
+	Auth                    *auth.Config      `json:"auth,omitempty"`
+	Models                  []ModelEntry      `json:"models"`
 }
 
 // ReasoningReplay controls how much historical reasoning state a dialect

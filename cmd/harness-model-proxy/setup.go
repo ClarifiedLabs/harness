@@ -49,8 +49,11 @@ type setupProviderConfig struct {
 	OmitMaxOutputTokens bool `json:"omit_max_output_tokens,omitempty"`
 	// ReasoningReplay controls how much historical reasoning state the dialect
 	// replays on the wire; see llm.ReasoningReplay.
-	ReasoningReplay      llm.ReasoningReplay   `json:"reasoning_replay,omitempty"`
-	MinOutputTokens      int                   `json:"min_output_tokens,omitempty"`
+	ReasoningReplay llm.ReasoningReplay `json:"reasoning_replay,omitempty"`
+	// UsageInputIncludesCache marks Anthropic-compatible endpoints that report
+	// input_tokens including cached tokens; see llm.ProviderConfig.
+	UsageInputIncludesCache bool                  `json:"usage_input_includes_cache,omitempty"`
+	MinOutputTokens         int                   `json:"min_output_tokens,omitempty"`
 	PromptCache          llm.PromptCacheConfig `json:"prompt_cache,omitempty"`
 	ResponsesStateful    *bool                 `json:"responses_stateful,omitempty"`
 	ResponsesWebSocket   *bool                 `json:"responses_websocket,omitempty"`
@@ -151,6 +154,9 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	}
 	if existingProvider.Config.ReasoningReplay != "" {
 		provider.ReasoningReplay = existingProvider.Config.ReasoningReplay
+	}
+	if existingProvider.Config.UsageInputIncludesCache {
+		provider.UsageInputIncludesCache = true
 	}
 	if existingProvider.Config.MinOutputTokens > 0 {
 		provider.MinOutputTokens = existingProvider.Config.MinOutputTokens
@@ -299,6 +305,9 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			}
 			if current.ReasoningReplay != "" {
 				next.ReasoningReplay = current.ReasoningReplay
+			}
+			if current.UsageInputIncludesCache {
+				next.UsageInputIncludesCache = true
 			}
 			if current.MinOutputTokens > 0 {
 				next.MinOutputTokens = current.MinOutputTokens

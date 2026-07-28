@@ -38,6 +38,10 @@ type Options struct {
 	// ReasoningReplay carries the provider config's reasoning_replay mode to the
 	// dialect (design §7); empty keeps each dialect's default.
 	ReasoningReplay llm.ReasoningReplay
+	// UsageInputIncludesCache marks Anthropic-compatible endpoints that report
+	// input_tokens including cached tokens; the anthropic dialect subtracts the
+	// cache buckets during usage normalization.
+	UsageInputIncludesCache bool
 	// OmitMaxOutputTokens suppresses Responses max_output_tokens for providers
 	// that reject the standard parameter.
 	OmitMaxOutputTokens bool
@@ -66,11 +70,12 @@ func New(opts Options) (llm.Provider, error) {
 			return nil, fmt.Errorf("llm: ANTHROPIC_API_KEY is required (or set a custom base URL for a local server)")
 		}
 		return anthropic.New(anthropic.Config{
-			APIKey:        opts.APIKey,
-			AuthHeaders:   opts.AuthHeaders,
-			BaseURL:       opts.BaseURL,
-			ContextWindow: opts.ContextWindow,
-			OutputLimit:   opts.OutputLimit,
+			APIKey:                  opts.APIKey,
+			AuthHeaders:             opts.AuthHeaders,
+			BaseURL:                 opts.BaseURL,
+			ContextWindow:           opts.ContextWindow,
+			OutputLimit:             opts.OutputLimit,
+			UsageInputIncludesCache: opts.UsageInputIncludesCache,
 		}), nil
 	case "openai":
 		if opts.APIKey == "" && opts.BaseURL == "" && len(opts.AuthHeaders) == 0 {

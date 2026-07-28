@@ -1679,19 +1679,20 @@ func (h *Handler) runtimeOptionsForTarget(ctx context.Context, target resolvedTa
 		contextWindow = h.defaultContextWindow
 	}
 	return factory.Options{
-		Provider:            apiType,
-		ProviderName:        pc.Name,
-		Model:               entry.Name,
-		BaseURL:             pc.BaseURL,
-		APIKey:              apiKey,
-		AuthHeaders:         authHeaders,
-		ContextWindow:       contextWindow,
-		OutputLimit:         entry.OutputLimit,
-		MinOutputTokens:     pc.MinOutputTokens,
-		PromptCache:         pc.PromptCache,
-		ReasoningReplay:     pc.ReasoningReplay,
-		OmitMaxOutputTokens: providerOmitMaxOutputTokens(pc),
-		ResponsesWebSocket:  providerResponsesWebSocket(pc),
+		Provider:                apiType,
+		ProviderName:            pc.Name,
+		Model:                   entry.Name,
+		BaseURL:                 pc.BaseURL,
+		APIKey:                  apiKey,
+		AuthHeaders:             authHeaders,
+		ContextWindow:           contextWindow,
+		OutputLimit:             entry.OutputLimit,
+		MinOutputTokens:         pc.MinOutputTokens,
+		PromptCache:             pc.PromptCache,
+		ReasoningReplay:         pc.ReasoningReplay,
+		OmitMaxOutputTokens:     providerOmitMaxOutputTokens(pc),
+		ResponsesWebSocket:      providerResponsesWebSocket(pc),
+		UsageInputIncludesCache: pc.UsageInputIncludesCache,
 	}, nil
 }
 
