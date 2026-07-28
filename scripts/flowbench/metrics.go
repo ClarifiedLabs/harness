@@ -32,7 +32,7 @@ type metrics struct {
 	GitCalls                    int            `json:"git_calls"`
 	BackgroundPolls             int            `json:"background_polls"`
 	BackgroundWaits             int            `json:"background_waits"`
-	UsedSearchContext           bool           `json:"used_search_context"`
+	UsedSearch                  bool           `json:"used_search"`
 	UsedCommandSteps            bool           `json:"used_command_steps"`
 	UsedWorkspaceSummary        bool           `json:"used_workspace_summary"`
 	StartedRaceSuite            bool           `json:"started_race_suite"`
@@ -84,8 +84,8 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		byTurn[ev.Turn] = append(byTurn[ev.Turn], ev.Tool)
 		raw := string(ev.Input)
 		switch ev.Tool {
-		case "search_context":
-			m.UsedSearchContext = true
+		case "search":
+			m.UsedSearch = true
 		case "run_command":
 			commandInputs = append(commandInputs, strings.Join(flattenJSONStrings(ev.Input), " "))
 			if runCommandInvokesGit(ev.Input) {

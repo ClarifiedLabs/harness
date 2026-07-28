@@ -12,9 +12,8 @@ This page is the operational overview.
 | `view_image` | attach a local PNG, JPEG, WebP, or non-animated GIF to the next model request |
 | `list_dir` | list directory entries with type and size, non-recursive |
 | `glob` | recursively find files/dirs by glob, including `**` patterns; read-only |
-| `grep` | run host `grep` with argv-style args |
-| `rg` | run host ripgrep when available |
-| `search_context` | search with ripgrep and return bounded surrounding source |
+| `search` | run up to 16 bounded content queries with context, lines, files, counts, or existence output |
+| `inspect` | run up to 16 independent read/search/glob/list/workspace-summary operations concurrently |
 | `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
 | `write_file` | create or overwrite a file, creating parent directories |
 | `run_command` | run a shell command or direct argv program |
@@ -63,13 +62,25 @@ When [MCP](mcp.md) is enabled, downstream MCP tools also appear, namespaced as
 intelligence tools are also registered; most are read-only, while `lsp_rename`
 applies language-server text edits.
 
-## Search Tools
+## Search and Inspection
 
-Harness registers `rg` plus `search_context` when ripgrep is installed, otherwise
-it registers `grep`. Configure this with `search_tools`,
-`HARNESS_SEARCH_TOOLS`, or `-search-tools`: `auto`, `grep`, `rg`, or `both`.
+The default model surface exposes one typed `search` tool. It accepts a
+`queries[]` array of up to 16 independent searches. Each query has a pattern,
+optional `paths[]` and `globs[]`, literal/regex and case controls, bounds, and an
+`output` mode: `context`, `matches`, `files`, `count`, or `exists`. Independent
+queries execute concurrently and results stay in input order. Harness uses
+ripgrep when it is installed and a bounded standard-library walker otherwise,
+so the tool contract does not depend on the host CLI.
 
-`grep`, `rg`, `git`, and direct-argv `run_command` calls expect JSON arrays of
+`inspect` batches heterogeneous repository orientation in the same way. Its
+`operations[]` may invoke `read_file`, `search`, `glob`, `list_dir`, or
+`workspace_summary`; operations execute concurrently and render under indexed
+headers. Prefer it to one read-only lookup per model turn. After three
+consecutive single-lookup turns, harness adds a one-time soft reminder to batch.
+
+Raw `grep` and optional `rg` wrappers remain in the constructible catalog for a
+custom agent that explicitly names them in `allowed_tools`; built-in agents do
+not advertise them. `grep`, `rg`, `git`, and direct-argv `run_command` calls expect JSON arrays of
 strings for argv-style fields, not shell strings and not JSON-encoded arrays. The
 tools are thin wrappers around host CLIs, so native CLI semantics decide regex
 syntax, ignore behavior, output shape, and supported flags.
@@ -79,24 +90,11 @@ Normal `rg` searches add `--max-columns=1024 --max-columns-preview
 limits. The wrapper rejects short `-r` forms because replacement output must use
 `--replace` explicitly.
 
-`search_context` is the structured path for searches that would otherwise need
-an `rg` call followed by one or more `read_file` calls. It accepts `pattern`,
-optional `path`/`globs`/`fixed_strings`, and bounded `context_lines`,
-`max_matches`, and `max_files` values. It consumes `rg --json`, orders results
-by path and line, merges overlapping source windows, and returns at most 400
-line-numbered source lines with explicit match/file/output truncation markers.
-Use one raw `rg` with a combined pattern for broad repository orientation,
-filenames, counts, native flags, or background searches. Once a target symbol or
-call site is known, use `search_context` instead of an `rg`→`read_file` sequence.
-Preserve its returned paths and symbol names when citing evidence.
-
 The host `grep` tool injects `-I` (skip binary files) unless the call already sets
 a binary policy (`-I`/`-a`/`--text`/`--binary-files`) or is a help/version
 invocation; `-I` is placed before any `--` operand separator. Matched lines longer
 than 1024 bytes are clamped in-process (host `grep` has no portable
-`--max-columns`), trailing them with `… [N chars clamped]`. Under `-search-tools
-both`, `grep` and `rg` are both registered and `grep`'s description steers the model
-to prefer `rg`.
+`--max-columns`), trailing them with `… [N chars clamped]`.
 
 ## Command Execution
 
@@ -336,8 +334,7 @@ variable.
 Truncated results include a marker in the model-visible text, a warning in the
 UI, and the full output is archived under the session directory when available.
 The model-visible tool result includes the absolute artifact path so the next
-turn can inspect it with `read_file` or search it with `rg`.
+turn can inspect it with `read_file` or `search`.
 
-Disabled optional CLI-backed tools are reported on stderr at startup. For
-example, an explicit `-search-tools rg` request warns if `rg` is unavailable.
+Disabled optional CLI-backed default tools are reported on stderr at startup.
 These warnings are suppressed by `-q` / `--quiet` or `--log-level error`.

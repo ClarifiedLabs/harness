@@ -173,7 +173,6 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 		"-model", model,
 		"-reasoning", "medium",
 		"-agent", "independent",
-		"-search-tools", "rg",
 		"-web-search", "off",
 		"-no-env",
 		"-no-color",

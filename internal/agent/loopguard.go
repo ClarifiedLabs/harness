@@ -28,25 +28,30 @@ const (
 	repeatBreak = 8
 	// errorStormSteer / errorStormBreak count consecutive turns whose tool
 	// results were all errors: steer once at the first, hard-stop at the second.
-	errorStormSteer = 5
-	errorStormBreak = 10
+	errorStormSteer           = 5
+	errorStormBreak           = 10
+	orientationSteerThreshold = 3
 )
 
 const repeatSteer = "[loop guard] The last several tool calls repeated with identical results. Stop repeating them: change your approach, try different inputs or another tool, or stop and report the blocker. Do not re-issue the same calls expecting a different outcome."
 
 const errorStormSteerMsg = "[loop guard] Several consecutive tool calls have all failed. Re-read the latest error output and change your approach, or stop and report what is blocking you — do not keep retrying the same way."
 
+const orientationSteer = "[efficiency] The last several turns each performed one repository lookup. Batch independent reads and searches in one inspect call (or use read_file paths[] / search queries[]) before continuing."
+
 const wrapUpSteer = "[turn budget] You are about to reach this prompt's turn limit. Stop calling tools now and reply with a final message: summarize what you completed, what remains, and any next steps."
 
 // turnGuard is the per-run runaway-protection state. The zero value is ready to
 // use; one is created per RunPrompt call and discarded when the turn ends.
 type turnGuard struct {
-	lastCallSig   string // signature of the previous turn's calls+results
-	repeatRuns    int    // consecutive turns with that identical signature
-	repeatSteered bool   // steering already injected for the current repeat streak
-	errorRuns     int    // consecutive turns whose tool results were all errors
-	errorSteered  bool   // steering already injected for the current error streak
-	wrapUpSteered bool   // one-shot maxTurns wrap-up steering injected
+	lastCallSig        string // signature of the previous turn's calls+results
+	repeatRuns         int    // consecutive turns with that identical signature
+	repeatSteered      bool   // steering already injected for the current repeat streak
+	errorRuns          int    // consecutive turns whose tool results were all errors
+	errorSteered       bool   // steering already injected for the current error streak
+	orientationRuns    int    // consecutive turns with one unbatched orientation lookup
+	orientationSteered bool
+	wrapUpSteered      bool // one-shot maxTurns wrap-up steering injected
 }
 
 // recordTools folds one turn's tool calls and results into the guard's
@@ -67,6 +72,12 @@ func (g *turnGuard) recordTools(calls []llm.ToolCall, results []llm.ContentBlock
 		g.errorRuns = 0
 		g.errorSteered = false
 	}
+	if isSingleOrientationTurn(calls) {
+		g.orientationRuns++
+	} else {
+		g.orientationRuns = 0
+		g.orientationSteered = false
+	}
 }
 
 // steerMessage returns the single steering nudge to inject this turn, or
@@ -77,11 +88,40 @@ func (g *turnGuard) steerMessage() string {
 		g.repeatSteered = true
 		return repeatSteer
 	}
+	if g.orientationRuns >= orientationSteerThreshold && !g.orientationSteered {
+		g.orientationSteered = true
+		return orientationSteer
+	}
 	if g.errorRuns >= errorStormSteer && g.errorRuns < errorStormBreak && !g.errorSteered {
 		g.errorSteered = true
 		return errorStormSteerMsg
 	}
 	return ""
+}
+
+func isSingleOrientationTurn(calls []llm.ToolCall) bool {
+	if len(calls) != 1 {
+		return false
+	}
+	call := calls[0]
+	switch call.Name {
+	case "glob", "list_dir", "git_readonly":
+		return true
+	case "read_file":
+		var args struct {
+			Paths []string `json:"paths"`
+		}
+		_ = json.Unmarshal(call.Input, &args)
+		return len(args.Paths) < 2
+	case "search":
+		var args struct {
+			Queries []json.RawMessage `json:"queries"`
+		}
+		_ = json.Unmarshal(call.Input, &args)
+		return len(args.Queries) < 2
+	default:
+		return false
+	}
 }
 
 // shouldBreakErrors reports whether the error storm has reached the hard stop.

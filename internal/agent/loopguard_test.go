@@ -35,6 +35,33 @@ func toolUseStep() llmtest.Step {
 	}
 }
 
+func TestOrientationGuardSteersToBatching(t *testing.T) {
+	var guard turnGuard
+	results := []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultText: "ok"}}
+	for i := 0; i < orientationSteerThreshold; i++ {
+		input := json.RawMessage(fmt.Sprintf(`{"path":"file-%d.go"}`, i))
+		guard.recordTools([]llm.ToolCall{{Name: "read_file", Input: input}}, results)
+	}
+	if got := guard.steerMessage(); !strings.Contains(got, "inspect") || !strings.Contains(got, "paths[]") {
+		t.Fatalf("orientation steer = %q", got)
+	}
+	if got := guard.steerMessage(); got != "" {
+		t.Fatalf("orientation steer repeated: %q", got)
+	}
+}
+
+func TestOrientationGuardIgnoresBatchedLookups(t *testing.T) {
+	for _, call := range []llm.ToolCall{
+		{Name: "inspect", Input: json.RawMessage(`{"operations":[{},{}]}`)},
+		{Name: "read_file", Input: json.RawMessage(`{"paths":["a","b"]}`)},
+		{Name: "search", Input: json.RawMessage(`{"queries":[{"pattern":"a"},{"pattern":"b"}]}`)},
+	} {
+		if isSingleOrientationTurn([]llm.ToolCall{call}) {
+			t.Errorf("%s batched call classified as single orientation lookup", call.Name)
+		}
+	}
+}
+
 // TestRepetitionGuardSteersOnce verifies that identical (calls+results) model
 // turns trigger exactly one steering nudge, not one per repeat.
 func TestRepetitionGuardSteersOnce(t *testing.T) {

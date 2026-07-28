@@ -226,7 +226,7 @@ func primaryValue(c benchmarkCase, m metrics) int {
 func adopted(name string, m metrics) bool {
 	switch name {
 	case "search_context":
-		return m.UsedSearchContext
+		return m.UsedSearch
 	case "command_steps":
 		return m.UsedCommandSteps
 	case "todo_coissue":

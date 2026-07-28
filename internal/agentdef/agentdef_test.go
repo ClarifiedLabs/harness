@@ -4,8 +4,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"harness/internal/tools"
 )
 
 func TestDefaultIsAuto(t *testing.T) {
@@ -32,7 +30,7 @@ func TestBuiltins(t *testing.T) {
 	if auto.Prompt != "" {
 		t.Errorf("auto must have no extra prompt (current behavior), got %q", auto.Prompt)
 	}
-	if !slices.Equal(auto.AllowedTools, defaultTools(Options{})) {
+	if !slices.Equal(auto.AllowedTools, defaultTools()) {
 		t.Errorf("auto tools = %v, want default set", auto.AllowedTools)
 	}
 	if auto.MCPTools != MCPToolsAll {
@@ -43,7 +41,7 @@ func TestBuiltins(t *testing.T) {
 	if explore.Prompt == "" {
 		t.Error("explore must carry a prompt")
 	}
-	if !slices.Equal(explore.AllowedTools, inspectionTools(Options{})) {
+	if !slices.Equal(explore.AllowedTools, inspectionTools()) {
 		t.Errorf("explore tools = %v, want inspection set", explore.AllowedTools)
 	}
 	if explore.MCPTools != MCPToolsReadOnly {
@@ -62,7 +60,7 @@ func TestBuiltins(t *testing.T) {
 	if ind.Prompt == "" {
 		t.Error("independent must carry a prompt")
 	}
-	if !slices.Equal(ind.AllowedTools, defaultTools(Options{})) {
+	if !slices.Equal(ind.AllowedTools, defaultTools()) {
 		t.Errorf("independent tools = %v, want default set", ind.AllowedTools)
 	}
 	if ind.MCPTools != MCPToolsAll {
@@ -73,7 +71,7 @@ func TestBuiltins(t *testing.T) {
 	if plan.Prompt == "" {
 		t.Error("plan must carry a prompt")
 	}
-	wantPlan := planTools(Options{})
+	wantPlan := planTools()
 	if !slices.Equal(plan.AllowedTools, wantPlan) {
 		t.Errorf("plan tools = %v, want %v", plan.AllowedTools, wantPlan)
 	}
@@ -202,7 +200,7 @@ func TestResolveNewAgentInheritsDefaultTools(t *testing.T) {
 	if rev.Name != "review" || rev.Prompt != "review the diff" {
 		t.Errorf("rev = %+v", rev)
 	}
-	if !slices.Equal(rev.AllowedTools, defaultTools(Options{})) {
+	if !slices.Equal(rev.AllowedTools, defaultTools()) {
 		t.Errorf("tools = %v, want default set", rev.AllowedTools)
 	}
 	if rev.MCPTools != MCPToolsAll {
@@ -210,22 +208,15 @@ func TestResolveNewAgentInheritsDefaultTools(t *testing.T) {
 	}
 }
 
-func TestBuiltinsWithSearchToolsOption(t *testing.T) {
-	m := BuiltinsWithOptions(Options{SearchTools: tools.SearchToolsBoth})
-	for _, name := range []string{"auto", "independent"} {
-		if !slices.Contains(m[name].AllowedTools, "grep") {
-			t.Fatalf("%s tools missing grep with search_tools=both: %v", name, m[name].AllowedTools)
+func TestBuiltinsUseTypedSearchOnly(t *testing.T) {
+	for name, agent := range Builtins() {
+		if !slices.Contains(agent.AllowedTools, "search") || !slices.Contains(agent.AllowedTools, "inspect") {
+			t.Fatalf("%s tools missing typed repository tools: %v", name, agent.AllowedTools)
 		}
-		if tools.RipgrepAvailable() && !slices.Contains(m[name].AllowedTools, "search_context") {
-			t.Fatalf("%s tools missing search_context with search_tools=both: %v", name, m[name].AllowedTools)
-		}
-	}
-	for _, name := range []string{"explore", "plan"} {
-		if !slices.Contains(m[name].AllowedTools, "grep") {
-			t.Fatalf("%s tools missing grep with search_tools=both: %v", name, m[name].AllowedTools)
-		}
-		if tools.RipgrepAvailable() && !slices.Contains(m[name].AllowedTools, "search_context") {
-			t.Fatalf("%s tools missing search_context with search_tools=both: %v", name, m[name].AllowedTools)
+		for _, raw := range []string{"grep", "rg"} {
+			if slices.Contains(agent.AllowedTools, raw) {
+				t.Fatalf("%s tools unexpectedly include raw %s: %v", name, raw, agent.AllowedTools)
+			}
 		}
 	}
 }
@@ -308,7 +299,7 @@ func TestResolveReasoningOverride(t *testing.T) {
 }
 
 func TestDefaultToolsIncludeRecordPlanNotRequestImplementation(t *testing.T) {
-	def := defaultTools(Options{})
+	def := defaultTools()
 	if !slices.Contains(def, "record_plan") {
 		t.Errorf("default tools missing record_plan: %v", def)
 	}
@@ -318,7 +309,7 @@ func TestDefaultToolsIncludeRecordPlanNotRequestImplementation(t *testing.T) {
 }
 
 func TestPlanToolsIncludeRecordPlanAndRequestImplementation(t *testing.T) {
-	pt := planTools(Options{})
+	pt := planTools()
 	for _, name := range []string{"record_plan", "request_implementation"} {
 		if !slices.Contains(pt, name) {
 			t.Errorf("plan tools missing %q: %v", name, pt)
@@ -331,7 +322,7 @@ func TestPlanToolsIncludeRecordPlanAndRequestImplementation(t *testing.T) {
 // first-class file-mutation tools, so "don't modify the project" remains a
 // prompt-level contract.
 func TestPlanToolsAllowRunCommandButNotFileMutation(t *testing.T) {
-	pt := planTools(Options{})
+	pt := planTools()
 	if !slices.Contains(pt, "run_command") {
 		t.Errorf("plan tools missing run_command: %v", pt)
 	}

@@ -225,7 +225,6 @@ func TestHarnessEnvMapping(t *testing.T) {
 		"HARNESS_RESPONSES_STATEFUL":         "true",
 		"HARNESS_RETENTION_POLICY":           "pressure",
 		"HARNESS_TRACE_PROXY":                "true",
-		"HARNESS_SEARCH_TOOLS":               "both",
 		"HARNESS_TOOL_RESULT_MAX_BYTES":      "32768",
 		"HARNESS_TOOL_RESULT_MAX_LINES":      "500",
 		"HARNESS_RG_RESULT_MAX_BYTES":        "24576",
@@ -279,9 +278,6 @@ func TestHarnessEnvMapping(t *testing.T) {
 	}
 	if !c.TraceProxy {
 		t.Fatalf("trace_proxy false, want true")
-	}
-	if c.SearchTools != "both" {
-		t.Fatalf("search_tools = %q, want both", c.SearchTools)
 	}
 	if c.ToolResultMaxBytes != 32768 {
 		t.Fatalf("tool result max bytes = %d, want 32768", c.ToolResultMaxBytes)
@@ -531,23 +527,6 @@ func TestNoSteerDefaultAndPrecedence(t *testing.T) {
 		wantEnv:  false,
 		wantFile: true,
 	})
-}
-
-func TestSearchToolsPrecedenceAndValidation(t *testing.T) {
-	checkPrecedence(t, precedenceCase[string]{
-		file:     `{"search_tools":"grep"}`,
-		env:      map[string]string{"HARNESS_SEARCH_TOOLS": "ripgrep"},
-		baseArgs: []string{"-model", "gpt-5.5"},
-		flagArgs: []string{"-search-tools", "both"},
-		got:      func(c Config) string { return c.SearchTools },
-		wantFlag: "both",
-		wantEnv:  "rg",
-		wantFile: "grep",
-	})
-
-	if _, err := Load([]string{"-search-tools", "ack"}, noEnv, ""); err == nil {
-		t.Fatalf("expected invalid search_tools to fail")
-	}
 }
 
 func TestWebSearchPrecedenceAndValidation(t *testing.T) {

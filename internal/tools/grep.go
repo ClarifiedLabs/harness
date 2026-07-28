@@ -16,18 +16,12 @@ const grepMaxLineLen = 1024
 
 type grep struct {
 	background BackgroundJobStarter
-	// preferRG steers the model toward rg when both are registered (search_tools=both).
-	preferRG bool
 }
 
 func (grep) Name() string { return "grep" }
 
 func (t grep) Description() string {
-	desc := "Run grep without a shell. Input is an object; args must be an array of strings, not a string. Skips binary files unless overridden; background returns a job id."
-	if t.preferRG {
-		desc += " Prefer rg when available."
-	}
-	return desc
+	return "Run raw grep without a shell for specialized command-line behavior not covered by search. Input is an object; args must be an array of strings, not a string. Skips binary files unless overridden; background returns a job id."
 }
 
 func (t grep) Schema() json.RawMessage {

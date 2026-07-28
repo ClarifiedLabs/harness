@@ -126,7 +126,6 @@ interrupted.
 -agent <name>     agent: auto (default), explore, plan, independent, or a config-defined agent
 -handoff-agent <name>   default implementation agent for plan handoffs (default auto)
 -delegate-output <mode> delegate UI: status (default), off, or curated scrolling lines on stderr
--search-tools <mode>   search tools to expose: auto, grep, rg, or both
 -web-search <mode>     server-side web search: off or auto (default off)
 -trace-proxy      send W3C trace headers to the model and MCP proxies
 -v                show tool result snippets (first ~5 lines, dimmed) and tool-call progress details

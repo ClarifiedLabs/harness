@@ -45,8 +45,9 @@ For each item:
 
 The implementations were:
 
-- `search_context`: bounded ripgrep JSON parsing, grouped context windows,
-  deterministic limits, truncation, and artifact-compatible citations.
+- `search` (the benchmark case retains its historical `search_context` name):
+  bounded ripgrep JSON parsing, grouped context windows, deterministic limits,
+  truncation, and artifact-compatible citations.
 - `run_command.steps`: 1–16 serial commands, stop-on-failure behavior, compact
   `PASS` receipts, bounded failure output, and archived suppressed output.
 - Todo coissuing guidance in the system, independent, plan, and tool prompts.
@@ -107,7 +108,7 @@ ordering, `-resume` for validated completed records, and
 
 | Item | Correctness / adoption | Primary result | Paired token result | Disposition |
 |---|---|---|---|---|
-| Contextual search preference | 8/8 completed candidates correct and adopted; stopped before OpenAI repetition 3 | Median search/read transitions 4→1.5 (62.5%) | DeepSeek −1.8%, Alibaba −5.2%; OpenAI regressed 85% and 143% in its two pairs | Forced preference rejected; `search_context` retained as an optional targeted tool |
+| Contextual search preference | 8/8 completed candidates correct and adopted; stopped before OpenAI repetition 3 | Median search/read transitions 4→1.5 (62.5%) | DeepSeek −1.8%, Alibaba −5.2%; OpenAI regressed 85% and 143% in its two pairs | Historical result; superseded by the typed batched `search` design |
 | Ordered command steps | 9/9 correct, 8/9 adopted | Median command transitions 1→0 (100%) | Aggregate +8.5%; DeepSeek +8.1%, Alibaba +20.9%, OpenAI −10.4% | Formal gate missed by 0.4 points on OpenAI; retained as an optional structured verification primitive |
 | Todo coissuing | 2/2 completed candidates correct, 0/2 adopted | Both candidates still had two todo-only turns | First pair regressed 33.8% | Early rejection; prompt/tool-description steering reverted |
 | Git workspace summary | 8/8 completed candidates correct and adopted | Median git interactions 12→8 (33%); 50% became unreachable | DeepSeek −8.3%, Alibaba +4.6%, OpenAI −24.0% on completed pairs | Automatic promotion rejected; safe read-only workflow retained as optional |

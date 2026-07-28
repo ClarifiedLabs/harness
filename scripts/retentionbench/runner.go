@@ -304,7 +304,6 @@ func executeOne(ctx context.Context, cfg runConfig, results string, entry matrix
 		"-model", cfg.Model,
 		"-reasoning", "low",
 		"-agent", "explore",
-		"-search-tools", "rg",
 		"-web-search", "off",
 		"-no-env",
 		"-no-color",

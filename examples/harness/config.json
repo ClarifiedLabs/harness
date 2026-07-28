@@ -21,7 +21,6 @@
   "reasoning_summary": "",
   "responses_stateful": true,
   "no_steer": false,
-  "search_tools": "auto",
   "web_search": "off",
   "image_detail": "auto",
   "agents_md_warn_bytes": 8192,

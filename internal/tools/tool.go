@@ -195,7 +195,6 @@ type Options struct {
 	GrepResultBytes      int
 	GrepResultLines      int
 	Background           BackgroundJobStarter
-	SearchTools          string
 	// DispatchTimeout is the per-call ceiling applied by Dispatch (zero = none).
 	// It backstops tools that ignore ctx (e.g. a hung MCP/web_fetch/lsp call) so
 	// one stuck call cannot stall a turn forever. A tool that enforces its own
@@ -272,7 +271,7 @@ func (r *Registry) resultLimitsFor(toolName string) resultLimits {
 }
 
 // RegisterFileTools registers the built-in file tools (read_file, list_dir,
-// glob, grep, optional rg, edit, write_file) on r, in that order. It is the only
+// glob, search, edit, write_file) on r, in that order. It is the only
 // exported path to these tools; their types are unexported by design. apply_patch
 // is intentionally not here — it ships only in the constructible Catalog (see
 // CatalogWithOptions) since edit+write_file subsume it.
@@ -288,42 +287,29 @@ func registerFileTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 	r.Register(viewImage{})
 	r.Register(listDir{})
 	r.Register(glob{})
-	registerSearchTools(r, disabled, opts)
+	registerSearchTool(r, opts)
 	r.Register(edit{})
 	r.Register(writeFile{})
 }
 
-const (
-	SearchToolsAuto = "auto"
-	SearchToolsGrep = "grep"
-	SearchToolsRG   = "rg"
-	SearchToolsBoth = "both"
-)
+func registerSearchTool(r *Registry, opts Options) {
+	rg, _ := newRipgrep(opts.Background)
+	r.Register(searchTool{program: rg.program})
+	r.SetToolResultLimits("search",
+		defaultToolResultBytes(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
+		defaultToolResultLines(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
+}
 
-func registerSearchTools(r *Registry, disabled *[]DisabledTool, opts Options) {
-	mode := normalizeSearchTools(opts.SearchTools)
-	rg, hasRG := newRipgrep(opts.Background)
-	addGrep := mode == SearchToolsGrep || mode == SearchToolsBoth || (mode == SearchToolsAuto && !hasRG) || (mode == SearchToolsRG && !hasRG)
-	addRG := hasRG && (mode == SearchToolsRG || mode == SearchToolsBoth || mode == SearchToolsAuto)
-	if addGrep {
-		// In "both" mode grep and rg ship side by side with near-identical schemas;
-		// steer the model to rg so it converges on one tool.
-		r.Register(grep{background: opts.Background, preferRG: mode == SearchToolsBoth && addRG})
-		r.SetToolResultLimits("grep",
-			defaultToolResultBytes(opts.GrepResultBytes, opts.GrepResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
-			defaultToolResultLines(opts.GrepResultBytes, opts.GrepResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
-	}
-	if addRG {
+func registerRawSearchTools(r *Registry, opts Options) {
+	r.Register(grep{background: opts.Background})
+	r.SetToolResultLimits("grep",
+		defaultToolResultBytes(opts.GrepResultBytes, opts.GrepResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
+		defaultToolResultLines(opts.GrepResultBytes, opts.GrepResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
+	if rg, ok := newRipgrep(opts.Background); ok {
 		r.Register(rg)
 		r.SetToolResultLimits("rg",
 			defaultToolResultBytes(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
 			defaultToolResultLines(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
-		r.Register(searchContext{program: rg.program})
-		r.SetToolResultLimits("search_context",
-			defaultToolResultBytes(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
-			defaultToolResultLines(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
-	} else if (mode == SearchToolsRG || mode == SearchToolsBoth) && !hasRG && disabled != nil {
-		*disabled = append(*disabled, missingBinaryTool("rg", "rg"))
 	}
 }
 
@@ -351,21 +337,6 @@ func defaultToolResultLines(configBytes, configLines, globalBytes, globalLines, 
 		return 0
 	}
 	return defaultLines
-}
-
-func normalizeSearchTools(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", SearchToolsAuto:
-		return SearchToolsAuto
-	case SearchToolsGrep:
-		return SearchToolsGrep
-	case SearchToolsRG, "ripgrep":
-		return SearchToolsRG
-	case SearchToolsBoth:
-		return SearchToolsBoth
-	default:
-		return SearchToolsAuto
-	}
 }
 
 func registerExecTools(r *Registry, disabled *[]DisabledTool, opts Options) {
@@ -397,6 +368,7 @@ func DefaultWithOptions(opts Options) (*Registry, []DisabledTool) {
 	var disabled []DisabledTool
 	registerFileTools(r, &disabled, opts)
 	registerExecTools(r, &disabled, opts)
+	registerInspectTool(r)
 	return r, disabled
 }
 
@@ -428,6 +400,9 @@ func CatalogWithDiagnostics() (*Registry, []DisabledTool) {
 // configurable limits.
 func CatalogWithOptions(opts Options) (*Registry, []DisabledTool) {
 	r, disabled := DefaultWithOptions(opts)
+	// Raw search commands remain constructible for custom agents that explicitly
+	// whitelist them, but the default model surface exposes only typed search.
+	registerRawSearchTools(r, opts)
 	// apply_patch overlaps edit+write_file, so it is kept out of the default
 	// request and registered only here, where agents may still whitelist it by
 	// name. This auto-drops it from auto/independent allowed lists derived from

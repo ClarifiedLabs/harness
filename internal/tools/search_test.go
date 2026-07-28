@@ -10,12 +10,12 @@ import (
 	"testing"
 )
 
-func TestSearchDescriptionsRouteCodeInvestigationToSearchContext(t *testing.T) {
-	if description := (searchContext{}).Description(); !strings.Contains(description, "Targeted code lookup after broad discovery") || !strings.Contains(description, "instead of rg followed by read_file") || !strings.Contains(description, "one raw rg with a combined pattern") {
-		t.Fatalf("search_context description does not state the preferred flow: %q", description)
+func TestSearchDescriptionsPreferTypedSearch(t *testing.T) {
+	if description := (searchTool{}).Description(); !strings.Contains(description, "16 independent queries") || !strings.Contains(description, "batched call") {
+		t.Fatalf("search description does not state the preferred flow: %q", description)
 	}
-	if description := (ripgrep{}).Description(); !strings.Contains(description, "use search_context instead") || !strings.Contains(description, "broad repository discovery") || !strings.Contains(description, "combined patterns") {
-		t.Fatalf("rg description does not route surrounding-source work: %q", description)
+	if description := (ripgrep{}).Description(); !strings.Contains(description, "Prefer the typed search tool") {
+		t.Fatalf("rg description does not route ordinary lookup: %q", description)
 	}
 }
 
@@ -29,10 +29,10 @@ func TestSearchContextReturnsMergedNumberedWindows(t *testing.T) {
 		rgMatchJSON(t, source, 3, "three\n"),
 		rgMatchJSON(t, source, 5, "five\n"),
 	}, 0)
-	tool := searchContext{program: program}
-	out, err := tool.Run(context.Background(), json.RawMessage(`{
+	tool := searchTool{program: program}
+	out, err := tool.Run(context.Background(), searchTestInput(`{
 		"pattern":"needle",
-		"path":".",
+		"paths":["."],
 		"context_lines":1
 	}`))
 	if err != nil {
@@ -66,8 +66,8 @@ func TestSearchContextBoundsFilesAndMatches(t *testing.T) {
 		rgMatchJSON(t, first, 1, "match\n"),
 		rgMatchJSON(t, second, 1, "match\n"),
 	}, 0)
-	tool := searchContext{program: program}
-	out, err := tool.Run(context.Background(), json.RawMessage(`{
+	tool := searchTool{program: program}
+	out, err := tool.Run(context.Background(), searchTestInput(`{
 		"pattern":"match",
 		"context_lines":0,
 		"max_files":1,
@@ -89,8 +89,8 @@ func TestSearchContextDecodesBytePaths(t *testing.T) {
 	}
 	path64 := base64.StdEncoding.EncodeToString([]byte(source))
 	event := `{"type":"match","data":{"path":{"bytes":"` + path64 + `"},"lines":{"text":"match\n"},"line_number":1}}`
-	tool := searchContext{program: fakeRG(t, []string{event}, 0)}
-	out, err := tool.Run(context.Background(), json.RawMessage(`{"pattern":"match","context_lines":0}`))
+	tool := searchTool{program: fakeRG(t, []string{event}, 0)}
+	out, err := tool.Run(context.Background(), searchTestInput(`{"pattern":"match","context_lines":0}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,15 +101,15 @@ func TestSearchContextDecodesBytePaths(t *testing.T) {
 
 func TestSearchContextNoMatchesAndRGFailure(t *testing.T) {
 	t.Run("no matches", func(t *testing.T) {
-		tool := searchContext{program: fakeRG(t, nil, 1)}
-		out, err := tool.Run(context.Background(), json.RawMessage(`{"pattern":"none"}`))
+		tool := searchTool{program: fakeRG(t, nil, 1)}
+		out, err := tool.Run(context.Background(), searchTestInput(`{"pattern":"none"}`))
 		if err != nil || out != "(no matches)" {
 			t.Fatalf("Run = %q, %v", out, err)
 		}
 	})
 	t.Run("failure", func(t *testing.T) {
-		tool := searchContext{program: fakeRG(t, []string{"not json"}, 2)}
-		if _, err := tool.Run(context.Background(), json.RawMessage(`{"pattern":"x"}`)); err == nil {
+		tool := searchTool{program: fakeRG(t, []string{"not json"}, 2)}
+		if _, err := tool.Run(context.Background(), searchTestInput(`{"pattern":"x"}`)); err == nil {
 			t.Fatal("expected error")
 		}
 	})
@@ -121,11 +121,11 @@ func TestSearchContextStopsAtMatchBound(t *testing.T) {
 	if err := os.WriteFile(source, []byte("one\ntwo\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tool := searchContext{program: fakeRG(t, []string{
+	tool := searchTool{program: fakeRG(t, []string{
 		rgMatchJSON(t, source, 1, "one\n"),
 		rgMatchJSON(t, source, 2, "two\n"),
 	}, 0)}
-	out, err := tool.Run(context.Background(), json.RawMessage(`{"pattern":"x","context_lines":0,"max_matches":1}`))
+	out, err := tool.Run(context.Background(), searchTestInput(`{"pattern":"x","context_lines":0,"max_matches":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,12 +144,12 @@ func TestSearchContextAgainstHostRG(t *testing.T) {
 	if err := os.WriteFile(source, []byte("package sample\n\nfunc Needle() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tool := searchContext{program: program}
-	input, err := json.Marshal(map[string]any{
-		"pattern":       "Needle",
-		"path":          dir,
-		"context_lines": 1,
-	})
+	tool := searchTool{program: program}
+	input, err := json.Marshal(searchArgs{Queries: []searchQuery{{
+		Pattern:      "Needle",
+		Paths:        []string{dir},
+		ContextLines: 1,
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,20 +162,21 @@ func TestSearchContextAgainstHostRG(t *testing.T) {
 	}
 }
 
-func TestDecodeSearchContextArgsDefaultsAndValidation(t *testing.T) {
-	args, err := decodeSearchContextArgs(json.RawMessage(`{"pattern":"x"}`))
+func TestDecodeSearchArgsDefaultsAndValidation(t *testing.T) {
+	args, err := decodeSearchArgs(searchTestInput(`{"pattern":"x"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if args.Path != "." || args.ContextLines != 20 || args.MaxMatches != 40 || args.MaxFiles != 8 {
-		t.Fatalf("defaults = %+v", args)
+	query := args.Queries[0]
+	if len(query.Paths) != 1 || query.Paths[0] != "." || query.ContextLines != 20 || query.MaxMatches != 40 || query.MaxFiles != 8 || query.Output != "context" || query.Case != "smart" {
+		t.Fatalf("defaults = %+v", query)
 	}
-	zero, err := decodeSearchContextArgs(json.RawMessage(`{"pattern":"x","context_lines":0}`))
+	zero, err := decodeSearchArgs(searchTestInput(`{"pattern":"x","context_lines":0}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if zero.ContextLines != 0 {
-		t.Fatalf("explicit zero context = %d", zero.ContextLines)
+	if zero.Queries[0].ContextLines != 0 {
+		t.Fatalf("explicit zero context = %d", zero.Queries[0].ContextLines)
 	}
 	for _, input := range []string{
 		`{}`,
@@ -184,8 +185,32 @@ func TestDecodeSearchContextArgsDefaultsAndValidation(t *testing.T) {
 		`{"pattern":"x","max_files":51}`,
 		`{"pattern":"x","globs":[""]}`,
 	} {
-		if _, err := decodeSearchContextArgs(json.RawMessage(input)); err == nil {
+		if _, err := decodeSearchArgs(searchTestInput(input)); err == nil {
 			t.Errorf("decode %s: expected error", input)
+		}
+	}
+}
+
+func TestSearchBatchesQueriesAndUsesStandardLibraryFallback(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "sample.go")
+	if err := os.WriteFile(source, []byte("Alpha\nbeta\nALPHA\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(searchArgs{Queries: []searchQuery{
+		{Pattern: "alpha", Paths: []string{dir}, Output: "count"},
+		{Pattern: "beta", Paths: []string{dir}, Output: "exists"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := (searchTool{}).Run(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"## query 1: alpha", "2\t" + source, "## query 2: beta", "true: " + source + ":2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
 }
@@ -218,6 +243,10 @@ func rgMatchJSON(t *testing.T, path string, line int, text string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func searchTestInput(query string) json.RawMessage {
+	return json.RawMessage(`{"queries":[` + query + `]}`)
 }
 
 func fakeRG(t *testing.T, lines []string, exitCode int) string {

@@ -646,12 +646,12 @@ func TestDispatchTruncateLinesStillRespectsBytes(t *testing.T) {
 }
 
 func TestDefaultWithOptionsUsesNoisyToolResultDefaults(t *testing.T) {
-	r, _ := DefaultWithOptions(Options{SearchTools: SearchToolsGrep})
+	r, _ := DefaultWithOptions(Options{})
 
-	grepLimits := r.resultLimitsFor("grep")
-	if grepLimits.maxBytes != defaultSearchResultBytes || grepLimits.maxLines != defaultSearchResultLines {
-		t.Fatalf("grep limits = %d/%d, want %d/%d",
-			grepLimits.maxBytes, grepLimits.maxLines, defaultSearchResultBytes, defaultSearchResultLines)
+	searchLimits := r.resultLimitsFor("search")
+	if searchLimits.maxBytes != defaultSearchResultBytes || searchLimits.maxLines != defaultSearchResultLines {
+		t.Fatalf("search limits = %d/%d, want %d/%d",
+			searchLimits.maxBytes, searchLimits.maxLines, defaultSearchResultBytes, defaultSearchResultLines)
 	}
 	readLimits := r.resultLimitsFor("read_file")
 	if readLimits.maxBytes != defaultReadFileResultBytes || readLimits.maxLines != defaultMaxResultLines {
@@ -664,10 +664,9 @@ func TestGlobalResultLimitsOverrideNoisyToolDefaults(t *testing.T) {
 	r, _ := DefaultWithOptions(Options{
 		MaxResultBytes: 1234,
 		MaxResultLines: 321,
-		SearchTools:    SearchToolsGrep,
 	})
 
-	for _, name := range []string{"grep", "read_file"} {
+	for _, name := range []string{"search", "read_file"} {
 		limits := r.resultLimitsFor(name)
 		if limits.maxBytes != 1234 || limits.maxLines != 321 {
 			t.Fatalf("%s limits = %d/%d, want global 1234/321", name, limits.maxBytes, limits.maxLines)
@@ -679,14 +678,13 @@ func TestPerToolResultLimitsOverrideGlobalByField(t *testing.T) {
 	r, _ := DefaultWithOptions(Options{
 		MaxResultBytes:      1000,
 		MaxResultLines:      200,
-		GrepResultBytes:     3000,
+		RGResultBytes:       3000,
 		ReadFileResultLines: 40,
-		SearchTools:         SearchToolsGrep,
 	})
 
-	grepLimits := r.resultLimitsFor("grep")
-	if grepLimits.maxBytes != 3000 || grepLimits.maxLines != 200 {
-		t.Fatalf("grep limits = %d/%d, want 3000/200", grepLimits.maxBytes, grepLimits.maxLines)
+	searchLimits := r.resultLimitsFor("search")
+	if searchLimits.maxBytes != 3000 || searchLimits.maxLines != 200 {
+		t.Fatalf("search limits = %d/%d, want 3000/200", searchLimits.maxBytes, searchLimits.maxLines)
 	}
 	readLimits := r.resultLimitsFor("read_file")
 	if readLimits.maxBytes != 1000 || readLimits.maxLines != 40 {
@@ -696,13 +694,12 @@ func TestPerToolResultLimitsOverrideGlobalByField(t *testing.T) {
 
 func TestPerToolResultLimitSingleFieldInheritsGlobalDefault(t *testing.T) {
 	r, _ := DefaultWithOptions(Options{
-		GrepResultLines: 123,
-		SearchTools:     SearchToolsGrep,
+		RGResultLines: 123,
 	})
 
-	grepLimits := r.resultLimitsFor("grep")
-	if grepLimits.maxBytes != defaultMaxResultBytes || grepLimits.maxLines != 123 {
-		t.Fatalf("grep limits = %d/%d, want %d/123", grepLimits.maxBytes, grepLimits.maxLines, defaultMaxResultBytes)
+	searchLimits := r.resultLimitsFor("search")
+	if searchLimits.maxBytes != defaultMaxResultBytes || searchLimits.maxLines != 123 {
+		t.Fatalf("search limits = %d/%d, want %d/123", searchLimits.maxBytes, searchLimits.maxLines, defaultMaxResultBytes)
 	}
 }
 
@@ -717,66 +714,22 @@ func TestDefaultNamesMatchDefaultRegistry(t *testing.T) {
 }
 
 func expectedDefaultNames() []string {
-	if RipgrepAvailable() {
-		return expectedDefaultNamesForSearch(SearchToolsRG)
-	}
-	return expectedDefaultNamesForSearch(SearchToolsGrep)
-}
-
-func expectedDefaultNamesForSearch(mode string) []string {
-	want := []string{"read_file", "view_image", "list_dir", "glob"}
-	switch mode {
-	case SearchToolsBoth:
-		want = append(want, "grep")
-		if RipgrepAvailable() {
-			want = append(want, "rg", "search_context")
-		}
-	case SearchToolsRG:
-		if RipgrepAvailable() {
-			want = append(want, "rg", "search_context")
-		} else {
-			want = append(want, "grep")
-		}
-	case SearchToolsGrep:
-		want = append(want, "grep")
-	default:
-		if RipgrepAvailable() {
-			want = append(want, "rg", "search_context")
-		} else {
-			want = append(want, "grep")
-		}
-	}
+	want := []string{"read_file", "view_image", "list_dir", "glob", "search"}
 	// apply_patch is not in the default set; it ships only in the Catalog (r56).
 	want = append(want, "edit", "write_file", "run_command")
 	if GitAvailable() {
 		want = append(want, "git")
 	}
-	return append(want, "web_fetch")
-}
-
-func TestDefaultNamesWithSearchToolOptions(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		mode string
-		want []string
-	}{
-		{name: "auto", mode: SearchToolsAuto, want: expectedDefaultNames()},
-		{name: "grep", mode: SearchToolsGrep, want: expectedDefaultNamesForSearch(SearchToolsGrep)},
-		{name: "rg", mode: SearchToolsRG, want: expectedDefaultNamesForSearch(SearchToolsRG)},
-		{name: "both", mode: SearchToolsBoth, want: expectedDefaultNamesForSearch(SearchToolsBoth)},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			got := DefaultNamesWithOptions(Options{SearchTools: tt.mode})
-			if !slices.Equal(got, tt.want) {
-				t.Fatalf("DefaultNamesWithOptions(%q) = %v, want %v", tt.mode, got, tt.want)
-			}
-		})
-	}
+	return append(want, "web_fetch", "inspect")
 }
 
 func TestCatalogRegistersDefaultPlusModeTools(t *testing.T) {
 	r := Catalog()
 	want := append([]string{}, DefaultNames()...)
+	want = append(want, "grep")
+	if RipgrepAvailable() {
+		want = append(want, "rg")
+	}
 	want = append(want, "apply_patch") // relocated out of the default set (r56)
 	if GitAvailable() {
 		want = append(want, "git_readonly")
@@ -827,15 +780,15 @@ func TestCatalogDiagnosticsForMissingCLITools(t *testing.T) {
 	}
 }
 
-func TestCatalogDiagnosticsForExplicitMissingRipgrep(t *testing.T) {
+func TestTypedSearchFallsBackAndRawRipgrepIsOmittedWhenMissing(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
-	r, disabled := CatalogWithOptions(Options{SearchTools: SearchToolsBoth})
+	r, _ := CatalogWithOptions(Options{})
 	if slices.Contains(r.Names(), "rg") {
 		t.Fatalf("CatalogWithOptions registered rg without its binary; names=%v", r.Names())
 	}
-	if !disabledContains(disabled, "rg") {
-		t.Fatalf("disabled diagnostics missing rg: %+v", disabled)
+	if !slices.Contains(r.Names(), "search") {
+		t.Fatalf("typed search missing without rg: %v", r.Names())
 	}
 }
 
@@ -864,7 +817,7 @@ func disabledContains(disabled []DisabledTool, name string) bool {
 // Subset gating must be airtight: an excluded tool is neither advertised in
 // Specs nor dispatchable — both read the same filtered registry.
 func TestSubsetFiltersSpecsAndDispatch(t *testing.T) {
-	sub, err := CatalogWithOptionsMust(t, Options{SearchTools: SearchToolsBoth}).Subset([]string{"grep", "read_file"}) // deliberately out of order
+	sub, err := CatalogWithOptionsMust(t, Options{}).Subset([]string{"grep", "read_file"}) // deliberately out of order
 	if err != nil {
 		t.Fatalf("Subset: %v", err)
 	}

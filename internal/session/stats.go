@@ -397,7 +397,7 @@ func collectToolStats(events []Event) (toolStats, error) {
 			stats.resultShownBytes += ev.ResultShownBytes
 			stats.resultTotalMS += ev.DurationMS
 			stats.resultMaxMS = max(stats.resultMaxMS, ev.DurationMS)
-			if ev.Tool == "search" || ev.Tool == "search_context" || ev.Tool == "rg" || ev.Tool == "grep" {
+			if ev.Tool == "search" || ev.Tool == "rg" || ev.Tool == "grep" {
 				if strings.Contains(strings.ToLower(ev.Display), "no matches") {
 					stats.searchNoMatches++
 				}
@@ -445,7 +445,7 @@ func collectToolStats(events []Event) (toolStats, error) {
 			stats.soloTodoTurns++
 		}
 		switch names[0] {
-		case "read_file", "search", "search_context", "rg", "grep", "glob", "list_dir", "git_readonly":
+		case "read_file", "search", "rg", "grep", "glob", "list_dir", "git_readonly":
 			stats.singleInspectTurns++
 		}
 	}

@@ -581,7 +581,6 @@ func run(env environment) int {
 		GrepResultBytes:                    cfg.GrepResultMaxBytes,
 		GrepResultLines:                    cfg.GrepResultMaxLines,
 		Background:                         backgroundManager,
-		SearchTools:                        cfg.SearchTools,
 		DispatchTimeout:                    time.Duration(cfg.ToolTimeoutSeconds) * time.Second,
 		RunCommandTimeoutSeconds:           cfg.RunCommandTimeoutSeconds,
 		RunCommandBackgroundTimeoutSeconds: cfg.RunCommandBackgroundTimeoutSeconds,
@@ -606,7 +605,7 @@ func run(env environment) int {
 		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		DelegateMaxTurns:          cfg.DelegateMaxTurns,
 		Prewarm:                   env.prewarmCache && !env.stdinPiped,
-		SearchBackend:             cfg.SearchTools,
+		SearchBackend:             searchBackend(),
 	}
 	delegateState := delegate.NewState(delegate.Runtime{
 		ProviderName:      cfg.Provider,
@@ -1452,11 +1451,18 @@ func showConfigDefaults(cfg config.Config) config.Config {
 }
 
 func resolveConfiguredAgents(cfg config.Config) (map[string]agentdef.Definition, error) {
-	agents := agentdef.ResolveWithOptions(fileAgentDefinitions(cfg.Agents), agentdef.Options{SearchTools: cfg.SearchTools})
+	agents := agentdef.Resolve(fileAgentDefinitions(cfg.Agents))
 	if err := agentdef.Validate(agents); err != nil {
 		return nil, err
 	}
 	return agents, nil
+}
+
+func searchBackend() string {
+	if tools.RipgrepAvailable() {
+		return "rg"
+	}
+	return "go"
 }
 
 func resolvedConfigAgentName(cfg config.Config, agents map[string]agentdef.Definition) (string, error) {

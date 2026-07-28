@@ -72,7 +72,6 @@ type Config struct {
 	ReasoningSummary                   string            `json:"reasoning_summary"`
 	ImageDetail                        string            `json:"image_detail"`
 	Images                             []ImageAttachment `json:"images"`
-	SearchTools                        string            `json:"search_tools"`
 	WebSearch                          string            `json:"web_search"`
 	AgentsMDWarnBytes                  int               `json:"agents_md_warn_bytes"`          // config-only warning threshold in bytes; default 8192, explicit 0 disables
 	ToolResultMaxBytes                 int               `json:"tool_result_max_bytes"`         // 0 = tool default
@@ -310,7 +309,6 @@ type fileConfig struct {
 	Reasoning                          string                     `json:"reasoning"`
 	ReasoningSummary                   string                     `json:"reasoning_summary"`
 	ImageDetail                        string                     `json:"image_detail"`
-	SearchTools                        string                     `json:"search_tools"`
 	WebSearch                          string                     `json:"web_search"`
 	AgentsMDWarnBytes                  *int                       `json:"agents_md_warn_bytes"`
 	ToolResultMaxBytes                 *int                       `json:"tool_result_max_bytes"`
@@ -425,7 +423,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	fResume, fSession := f.resume, f.session
 	fMaxTurns, fDefaultContextWindow, fContextWindow := f.maxTurns, f.defaultContextWindow, f.contextWindow
 	fReasoning, fReasoningSummary := f.reasoning, f.reasoningSummary
-	fImageDetail, fSearchTools, fWebSearch := f.imageDetail, f.searchTools, f.webSearch
+	fImageDetail, fWebSearch := f.imageDetail, f.webSearch
 	fPrompt, fInitialPrompt, fReplPrompt, fReplEditMode, fOutputFormat := f.prompt, f.initialPrompt, f.replPrompt, f.replEditMode, f.outputFormat
 	fVerbose, fToolStream, fShowDiffs, fNoColor := f.verbose, f.toolStream, f.showDiffs, f.noColor
 	fTimestamps, fNoTimestamps := f.timestamps, f.noTimestamps
@@ -505,11 +503,6 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	}
 	c.ImageDetail, err = canonicalImageDetail(resolveString(set["image-detail"], *fImageDetail,
 		getenv("HARNESS_IMAGE_DETAIL"), fc.ImageDetail, "auto"))
-	if err != nil {
-		return Config{}, err
-	}
-	c.SearchTools, err = canonicalSearchTools(resolveString(set["search-tools"], *fSearchTools,
-		getenv("HARNESS_SEARCH_TOOLS"), fc.SearchTools, "auto"))
 	if err != nil {
 		return Config{}, err
 	}
@@ -974,22 +967,6 @@ func canonicalReasoningSummary(summary string) (string, error) {
 	}
 }
 
-func canonicalSearchTools(mode string) (string, error) {
-	mode = strings.ToLower(strings.TrimSpace(mode))
-	switch mode {
-	case "", "auto":
-		return "auto", nil
-	case "grep":
-		return "grep", nil
-	case "rg", "ripgrep":
-		return "rg", nil
-	case "both":
-		return "both", nil
-	default:
-		return "", fmt.Errorf("invalid search_tools %q (want auto, grep, rg, or both)", mode)
-	}
-}
-
 func canonicalWebSearch(mode string) (string, error) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch mode {
@@ -1065,7 +1042,6 @@ type flags struct {
 	reasoning                        *string
 	reasoningSummary                 *string
 	imageDetail                      *string
-	searchTools                      *string
 	webSearch                        *string
 	images                           *imageFlags
 	agent                            *string
@@ -1131,7 +1107,6 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	fs.Var(&imageVals, "image", "attach an image in one-shot mode; repeatable; optionally detail:path")
 	f.agent = fs.String("agent", "", "agent: auto, explore, plan, independent, or a config-defined agent (default auto)")
 	f.handoffAgent = fs.String("handoff-agent", "", "agent a plan->implementation handoff switches to by default (default auto)")
-	f.searchTools = fs.String("search-tools", "auto", "search tools to expose: auto, grep, rg, or both")
 	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")
 	f.delegateOutput = fs.String("delegate-output", DelegateOutputStatus, "delegate display: status, off, or curated scrolling lines on stderr")
 	f.responsesStateful = fs.Bool("responses-stateful", true, "enable CLI-owned provider continuation when the selected target supports it")

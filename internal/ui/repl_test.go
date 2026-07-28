@@ -2661,7 +2661,7 @@ func TestREPLAgentCommandSwitchesNextTurn(t *testing.T) {
 	})
 	app.Reasoning = llm.ReasoningConfig{Profile: "max"}
 	app.Agent.SetReasoning(app.Reasoning)
-	catalog, _ := tools.CatalogWithOptions(tools.Options{SearchTools: tools.SearchToolsGrep})
+	catalog, _ := tools.CatalogWithOptions(tools.Options{})
 	planTools, err := catalog.Subset([]string{"read_file", "grep"})
 	if err != nil {
 		t.Fatalf("subset: %v", err)
@@ -2903,7 +2903,7 @@ func TestREPLShiftTabCyclesAgentsAndDebouncesFinalPrewarm(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	app.AvailableAgents = []AgentSummary{{Name: "auto"}, {Name: "explore"}, {Name: "plan"}}
 
-	catalog, _ := tools.CatalogWithOptions(tools.Options{SearchTools: tools.SearchToolsGrep})
+	catalog, _ := tools.CatalogWithOptions(tools.Options{})
 	toolSets := make(map[string]*tools.Registry)
 	for name, names := range map[string][]string{
 		"auto":    {"read_file"},

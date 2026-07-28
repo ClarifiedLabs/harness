@@ -146,7 +146,7 @@ func TestSummarizeAcceptance(t *testing.T) {
 		for rep := 1; rep <= 3; rep++ {
 			records = append(records,
 				runRecord{Model: model, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, RGToReadTransitions: 2}},
-				runRecord{Model: model, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 70, RGToReadTransitions: 0, UsedSearchContext: true}},
+				runRecord{Model: model, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 70, RGToReadTransitions: 0, UsedSearch: true}},
 			)
 		}
 	}
@@ -189,7 +189,7 @@ func TestWriteSummarySeparatesPairedAndUnpairedTokenMetrics(t *testing.T) {
 					Repetition: rep,
 					Variant:    "candidate",
 					Score:      score{Pass: true},
-					Metrics:    metrics{TotalTokens: 80, UsedSearchContext: true},
+					Metrics:    metrics{TotalTokens: 80, UsedSearch: true},
 				},
 			)
 		}
@@ -248,7 +248,7 @@ func TestSummarizeUsesPairedMedianReductions(t *testing.T) {
 					Repetition: rep + 1,
 					Variant:    "candidate",
 					Score:      score{Pass: true},
-					Metrics:    metrics{TotalTokens: tokens[1], UsedSearchContext: true},
+					Metrics:    metrics{TotalTokens: tokens[1], UsedSearch: true},
 				},
 			)
 		}

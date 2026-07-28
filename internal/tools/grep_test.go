@@ -440,17 +440,20 @@ printf '\n'
 	r := &Registry{}
 	RegisterFileTools(r)
 	names := r.Names()
-	grepIndex := slices.Index(names, "grep")
-	rgIndex := slices.Index(names, "rg")
+	searchIndex := slices.Index(names, "search")
 	editIndex := slices.Index(names, "edit")
-	if rgIndex < 0 {
-		t.Fatalf("RegisterFileTools did not include rg: %v", names)
+	if searchIndex < 0 {
+		t.Fatalf("RegisterFileTools did not include typed search: %v", names)
 	}
-	if grepIndex >= 0 {
-		t.Fatalf("auto search mode should expose rg instead of grep when rg is available: %v", names)
+	if slices.Contains(names, "rg") || slices.Contains(names, "grep") {
+		t.Fatalf("default file tools should omit raw search commands: %v", names)
 	}
-	if !(rgIndex < editIndex) {
-		t.Errorf("rg should be registered before edit: %v", names)
+	if !(searchIndex < editIndex) {
+		t.Errorf("search should be registered before edit: %v", names)
+	}
+	search, ok := r.Lookup("search")
+	if !ok || search.(searchTool).program == "" {
+		t.Fatalf("typed search should select available rg backend: %#v", search)
 	}
 }
 
@@ -532,33 +535,25 @@ func TestGrepClampsLongMatchedLine(t *testing.T) {
 	}
 }
 
-// r60: in search_tools=both mode grep advises preferring rg, so the model
-// converges on one tool when both ship with near-identical schemas.
-func TestGrepDescriptionPrefersRGInBothMode(t *testing.T) {
-	if !strings.Contains((grep{preferRG: true}).Description(), "Prefer rg") {
-		t.Error("both-mode grep should advise preferring rg")
-	}
-	if strings.Contains((grep{}).Description(), "Prefer rg") {
-		t.Error("default grep should not mention an rg preference")
+func TestRawGrepDescriptionRoutesOrdinaryLookupToSearch(t *testing.T) {
+	if !strings.Contains((grep{}).Description(), "not covered by search") {
+		t.Errorf("raw grep description should distinguish typed search: %q", (grep{}).Description())
 	}
 }
 
-func TestRegisterSearchToolsBothModeGrepPrefersRG(t *testing.T) {
+func TestRawSearchToolsRemainCatalogConstructible(t *testing.T) {
 	dir := t.TempDir()
 	makeExecutable(t, filepath.Join(dir, "rg"), "#!/bin/sh\nexit 0\n")
 	t.Setenv("PATH", dir)
 
-	r := &Registry{}
-	registerSearchTools(r, nil, Options{SearchTools: SearchToolsBoth})
-	if !slices.Contains(r.Names(), "rg") {
-		t.Fatalf("both mode should register rg alongside grep: %v", r.Names())
-	}
-	g, ok := r.Lookup("grep")
-	if !ok {
-		t.Fatalf("both mode should register grep: %v", r.Names())
-	}
-	if !strings.Contains(g.Description(), "Prefer rg") {
-		t.Errorf("both-mode grep description should prefer rg: %q", g.Description())
+	r, _ := CatalogWithOptions(Options{})
+	for _, name := range []string{"grep", "rg"} {
+		if !slices.Contains(r.Names(), name) {
+			t.Fatalf("catalog missing raw %s: %v", name, r.Names())
+		}
+		if slices.Contains(DefaultNames(), name) {
+			t.Fatalf("default model surface includes raw %s: %v", name, DefaultNames())
+		}
 	}
 }
 

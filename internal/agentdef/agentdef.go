@@ -66,16 +66,8 @@ type FileDefinition struct {
 	Reasoning    string   `json:"reasoning"`
 }
 
-type Options struct {
-	SearchTools string
-}
-
 // Builtins returns fresh copies of the four built-in agents keyed by name.
 func Builtins() map[string]Definition {
-	return BuiltinsWithOptions(Options{})
-}
-
-func BuiltinsWithOptions(opts Options) map[string]Definition {
 	explorePrompt, _ := prompts.BuiltinAgentPrompt("explore")
 	independentPrompt, _ := prompts.BuiltinAgentPrompt("independent")
 	planPrompt, _ := prompts.BuiltinAgentPrompt("plan")
@@ -83,36 +75,35 @@ func BuiltinsWithOptions(opts Options) map[string]Definition {
 		"auto": {
 			Name:         "auto",
 			Description:  "General-purpose agent.",
-			AllowedTools: defaultTools(opts),
+			AllowedTools: defaultTools(),
 			MCPTools:     MCPToolsAll,
 		},
 		"explore": {
 			Name:         "explore",
 			Description:  "Broad read-only search, tracing, and root-cause analysis; not known-file lookup.",
-			AllowedTools: inspectionTools(opts),
+			AllowedTools: inspectionTools(),
 			MCPTools:     MCPToolsReadOnly,
 			Prompt:       explorePrompt,
 		},
 		"independent": {
 			Name:         "independent",
 			Description:  "End-to-end work without user input.",
-			AllowedTools: defaultTools(opts),
+			AllowedTools: defaultTools(),
 			MCPTools:     MCPToolsAll,
 			Prompt:       independentPrompt,
 		},
 		"plan": {
 			Name:         "plan",
 			Description:  "Collaborative implementation planning; explores freely (including running commands) but does not modify the project.",
-			AllowedTools: planTools(opts),
+			AllowedTools: planTools(),
 			MCPTools:     MCPToolsReadOnly,
 			Prompt:       planPrompt,
 		},
 	}
 }
 
-func inspectionTools(opts Options) []string {
-	names := []string{"read_file", "view_image", "list_dir", "glob"}
-	names = append(names, searchToolNames(opts.SearchTools)...)
+func inspectionTools() []string {
+	names := []string{"read_file", "view_image", "list_dir", "glob", "search", "inspect"}
 	// run_command widens exploration (gh, builds, screenshots, live apps) for the
 	// read-only agents (explore, plan). Neither has first-class file-mutation
 	// tools (edit, write_file, apply_patch), so "don't modify the project" stays
@@ -124,31 +115,20 @@ func inspectionTools(opts Options) []string {
 	return names
 }
 
-func planTools(opts Options) []string {
+func planTools() []string {
 	// run_command comes from the shared inspection set; plan adds no first-class
 	// file-mutation tools (edit, write_file, apply_patch), so "don't modify the
 	// project" stays a prompt-level contract (prompts/agents/plan.txt).
-	return append(inspectionTools(opts), "write_tmp_file", "record_plan", "request_implementation", "update_todos", "delegate", "background_jobs")
+	return append(inspectionTools(), "write_tmp_file", "record_plan", "request_implementation", "update_todos", "delegate", "background_jobs")
 }
 
-func searchToolNames(mode string) []string {
-	names := tools.DefaultNamesWithOptions(tools.Options{SearchTools: mode})
-	var out []string
-	for _, name := range names {
-		if name == "grep" || name == "rg" || name == "search_context" {
-			out = append(out, name)
-		}
-	}
-	return out
-}
-
-func defaultTools(opts Options) []string {
+func defaultTools() []string {
 	// git already covers every git_readonly operation, so the default set omits
 	// git_readonly to avoid advertising duplicate functionality. Read-only
 	// agents (explore, plan) that require git_readonly remain delegatable from
 	// here because delegate.MissingTools treats an available git as satisfying a
 	// required git_readonly.
-	names := tools.DefaultNamesWithOptions(tools.Options{SearchTools: opts.SearchTools})
+	names := tools.DefaultNames()
 	return append(names, "record_plan", "update_todos", "delegate", "background_jobs")
 }
 
@@ -156,22 +136,18 @@ func defaultTools(opts Options) []string {
 // plus delegate) that auto/independent and any config agent without an explicit
 // allowed_tools list inherit. main uses it to detect default-inheriting agents
 // when extending them with discovered MCP tools.
-func DefaultTools() []string { return defaultTools(Options{}) }
+func DefaultTools() []string { return defaultTools() }
 
 // Resolve merges config-file agent entries onto the built-ins and returns the
 // full agent set. Merge is field-level: a non-empty field replaces, an empty
 // field inherits (from the built-in of the same name, or from the defaults for
 // a new agent).
 func Resolve(file map[string]FileDefinition) map[string]Definition {
-	return ResolveWithOptions(file, Options{})
-}
-
-func ResolveWithOptions(file map[string]FileDefinition, opts Options) map[string]Definition {
-	agents := BuiltinsWithOptions(opts)
+	agents := Builtins()
 	for name, fm := range file {
 		a, ok := agents[name]
 		if !ok {
-			a = Definition{Name: name, AllowedTools: defaultTools(opts), MCPTools: MCPToolsAll}
+			a = Definition{Name: name, AllowedTools: defaultTools(), MCPTools: MCPToolsAll}
 		}
 		allowedOverride := len(fm.AllowedTools) > 0
 		if fm.Description != "" {

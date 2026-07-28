@@ -1974,7 +1974,7 @@ func TestStreamSummaryRejectsInvalidRichContentBeforeProvider(t *testing.T) {
 // dispatch, so an agent switch immediately changes what the model sees and can
 // call.
 func TestSetToolsChangesAdvertisedAndDispatchableTools(t *testing.T) {
-	catalog, _ := tools.CatalogWithOptions(tools.Options{SearchTools: tools.SearchToolsGrep})
+	catalog, _ := tools.CatalogWithOptions(tools.Options{})
 	full, err := catalog.Subset([]string{"read_file", "grep"})
 	if err != nil {
 		t.Fatalf("subset: %v", err)

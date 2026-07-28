@@ -1859,74 +1859,43 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 - Available to the default `auto`/`independent` agents and the shared
   inspection set used by `explore` and `plan`.
 
-### 9.3 `grep`, optional `rg`, and `search_context`
+### 9.3 `search`, `inspect`, and raw search commands
 
-> `grep`: Run grep without a shell. Input is an object; args must be an array of strings, not a string. Skips binary files unless overridden; background returns a job id. (Under `-search-tools both`, the description also says to prefer `rg`.)
+> `search`: Search files with up to 16 independent queries in one call. Returns bounded context, matching lines, file names, counts, or existence; use paths and globs to narrow work.
 
-> `rg`: Run raw `rg` for broad repository discovery, combined patterns, filenames, counts, native flags, or background searches. Once a target is known, use `search_context` for surrounding source.
+> `inspect`: Run up to 16 independent read-only repository operations concurrently. Batch `read_file`, `search`, `glob`, `list_dir`, and `workspace_summary` during orientation.
 
-> `search_context`: Targeted code lookup after broad discovery: return bounded, merged line-numbered source around a known symbol, call site, or text match. Use this instead of `rg` followed by `read_file`; use one raw `rg` with a combined pattern for broad multi-concept orientation.
-
-| param | type | notes |
-|---|---|---|
-| `args` | array of strings, required | arguments passed after the program name; must be a JSON array, not a string or JSON-encoded array |
-| `stdin` | string | written to the program's standard input |
-| `cwd` | string | default process cwd |
-| `timeout_seconds` | int | default 120, no maximum |
-| `background` | bool | when true, start as a process-local background job and return a job id immediately |
-
-- Background `grep` and `rg` jobs automatically acquire a `read_only` lease on
-  their canonical cwd.
-- Search exposure is configurable with `search_tools` / `HARNESS_SEARCH_TOOLS` /
-  `-search-tools`: `auto` (default), `grep`, `rg`, or `both`.
-- Provider-hosted web search is not a local tool in this registry. It is exposed
-  through `Request.ServerTools` when `web_search` is `auto` and the selected
-  model-proxy target advertises `server_tools:["web_search"]`.
-- In `auto`, harness registers `rg` when `exec.LookPath("rg")` succeeds and
-  otherwise registers `grep`; it does not warn for the automatic fallback.
-- `grep` always invokes `grep` from the harness process PATH. Explicit `rg` or
-  `both` registers `rg` only when `exec.LookPath("rg")` succeeds; otherwise that
-  tool name is hidden and a disabled-tool diagnostic is emitted. If explicit `rg`
-  is requested but unavailable, harness still registers `grep` so the agent keeps
-  one search tool.
-- Missing explicitly requested optional CLI-backed tools are reported once at startup
-  through the plaintext slog handler, e.g.
-  `[warn] [cli_tools] Tool "rg" is disabled. Reason: "rg" binary not found.`
-  `--log-level`/`LOG_LEVEL` filters these diagnostics by level.
-- The advertised shape is `{"args":[...]}`. `args` must be a JSON array of
-  strings, not a string or JSON-encoded array. The decoder also accepts a bare
-  string array because earlier wording told models to provide that shape.
-- Both tools use `exec.Command(program, args...)`: no shell, glob expansion, pipes,
-  redirection, `$VAR`, or `~` expansion. Each argument arrives byte-for-byte.
-- Search semantics are the host tool's semantics. Regex syntax, recursion,
-  gitignore/default ignore behavior, binary handling, hidden files, and output shape are
-  selected with native CLI flags (`grep -R -n`, `grep -F`, `rg -n`, `rg --hidden`,
-  `rg --no-ignore`, etc.), not reimplemented by the harness.
-- Normal `rg` searches are guarded with `--max-columns=1024 --max-columns-preview`
-  and `--max-filesize=10M` to avoid huge single-line matches and accidental searches
-  through very large text files. Explicit native `rg` args win: pass `-M`,
-  `--max-columns`, or `--max-filesize` to override those defaults. Raw/introspection
-  modes such as `--json`, `--files`, `--type-list`, `--help`, and `--version` are
-  passed through unchanged.
-- Host `grep` has no portable `--max-columns`, so it is guarded in-process. `-I`
-  (skip binary files) is prepended before any `--` operand separator unless the call
-  already sets a binary policy (`-I`/`-a`/`--text`/`--binary-files`) or is a
-  help/version invocation. Matched output lines longer than `grepMaxLineLen` (1024
-  bytes) are cut on a rune boundary and suffixed with `… [N chars clamped]`; the
-  `[exit code: N]` trailer and short lines pass through unchanged.
-- Under `-search-tools both`, both `grep` and `rg` are registered and `grep`'s
-  `Description()` gains a suffix steering the model to prefer `rg` as the faster
-  default.
-- Whenever the selected mode exposes `rg`, it also exposes `search_context`.
-  The structured input requires `pattern`; `path` defaults to `.`, optional
-  `globs` and `fixed_strings` retain ripgrep matching semantics, and bounded
-  `context_lines` (default 20), `max_matches` (40), and `max_files` (8) control
-  collection. The tool streams `rg --json --sort=path`, groups matches by file,
-  merges touching source windows, and renders at most 400 numbered source lines.
-  No match is a successful `(no matches)` result; collection and output bounds
-  are called out explicitly. This is the deterministic search→read flow, while
-  raw `rg` remains available for native flags, lists, and counts.
-- Same process conventions as `run_command` (§9.7): own process group, timeout or ^C
+- `search` is the only content-search tool in built-in agent definitions. Input
+  is `queries[]` (1–16). Every query requires `pattern`; `paths[]` defaults to
+  `"."`; optional `globs[]`, `fixed_strings`, and `case` (`smart`, `sensitive`,
+  `insensitive`) control matching. `output` is `context` (default), `matches`,
+  `files`, `count`, or `exists`. `context_lines` (default 20), `max_matches`
+  (40), and `max_files` (8) bound collection.
+- With ripgrep available, `search` streams `rg --json --sort=path`; otherwise a
+  standard-library walker supplies the same model-facing contract, skips hidden
+  directories and binary files, and uses Go regular expressions. Query workers
+  run concurrently and their rendered results retain input order.
+- Context output groups matches by file, merges touching windows, numbers source
+  lines, and renders at most 400 source lines. No match is a successful
+  `(no matches)` result and all collection/output bounds are explicit.
+- `inspect.operations[]` (1–16) selects `read_file`, `search`, `glob`,
+  `list_dir`, or `workspace_summary` and supplies that operation's `input`
+  object. The operations run concurrently, errors are reported inline, each
+  result gets a per-operation cap, and indexed output preserves request order.
+- Three consecutive turns containing one unbatched orientation lookup trigger
+  one soft steering message recommending `inspect`, `read_file.paths[]`, or
+  `search.queries[]`. It does not block execution.
+- Raw `grep` and optional `rg` are registered only in the complete tool catalog,
+  not the default set. Custom agents may explicitly whitelist them for native
+  CLI flags or background execution. Their input remains argv-style
+  `{"args":[...]}` with optional `stdin`, `cwd`, `timeout_seconds`, and
+  `background`; no shell expansion occurs. Background calls acquire a
+  `read_only` cwd lease.
+- Raw `rg` retains the max-column/max-filesize guards and raw `grep` retains
+  binary skipping and long-line clamping. Provider-hosted web search remains a
+  separate `Request.ServerTools` capability controlled by `web_search`.
+- Raw command process execution follows the same conventions as `run_command`
+  (§9.7): own process group, timeout or ^C
   kills the group, combined stdout+stderr, `[exit code: N]` trailer, and non-zero exit
   is NOT an error result. For search this matters because no matches is commonly exit
   code 1.
