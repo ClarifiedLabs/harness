@@ -771,17 +771,17 @@ cache shard without letting it reuse or compete with the main conversation's
 WebSocket/continuation chain. Prewarm intentionally retains the main session
 identities.
 
-For ChatGPT Codex over Responses WebSocket, prewarm sends an empty
-`response.create` with `generate:false`. Only this path marks its terminal event
-with an explicit response-ID anchor at transcript index zero. The background
-closure captures the provider, response-state epoch, proxy session, and
-transcript snapshot; its result returns through the REPL maintenance queue and
-is installed on the owner goroutine only if the epoch, session, transcript
-length/fingerprint, and empty-current-anchor checks still hold. A real turn
-therefore wins the race. HTTP prewarm leaves the anchor nil and contributes
-usage only. The WebSocket client continuously drains frames and answers ping
-heartbeats between model requests; a close frame or transport EOF makes its last
-response ID unavailable.
+The proxy catalog advertises `prewarm:true` only for Responses WebSocket
+targets that can send an empty `response.create` with `generate:false`; the CLI
+does not issue speculative generated completions to other targets. Only this
+path marks its terminal event with an explicit response-ID anchor at transcript
+index zero. The background closure captures the provider, response-state epoch,
+proxy session, and transcript snapshot; its result returns through the REPL
+maintenance queue and is installed on the owner goroutine only if the epoch,
+session, transcript length/fingerprint, and empty-current-anchor checks still
+hold. A real turn therefore wins the race. The WebSocket client continuously
+drains frames and answers ping heartbeats between model requests; a close frame
+or transport EOF makes its last response ID unavailable.
 
 The CLI owns every continuation as a previous response/interaction ID, anchor
 message count, and SHA-256 of the exact provider-neutral anchor prefix.
@@ -806,7 +806,8 @@ rejections, clears its anchor, and performs one full-history resend. Thus HTTP
 stored continuation is replica-independent, while Codex `store:false` uses
 sticky routing only as a hit-rate optimization.
 
-Shift-Tab agent switches defer prewarm behind a 500ms idle debounce;
+On catalog targets that advertise prewarm support, Shift-Tab agent switches
+defer prewarm behind a 500ms idle debounce;
 each additional cycle replaces the pending target, so only the final settled
 agent warms. Equality of model IDs must not suppress that warmup because the
 agent's system/tool prefix and response continuation can differ. Startup,
@@ -3140,12 +3141,15 @@ type UsageTotals struct {
   does not prove acceptance. `prompt_usage` remains the final normal child event
   and carries the same reason. Inline delegate lines are
   process-local display events only: they are not appended to either parent or
-  child persistence. Child `raw.ndjson` retains the exact replay callbacks and
+  child persistence. Child `raw.ndjson` retains the complete replay content and
   remains the full-fidelity source for `session replay --follow`.
 - `harness session replay <session-dir>` prints `raw.ndjson` as the familiar
   user-facing terminal view, filtering assistant/reasoning deltas from retry
   attempts that were explicitly discarded before a later successful attempt.
-  Raw assistant deltas remain unchanged on disk; replay renders Markdown at
+  Consecutive assistant stream fragments for one prompt/turn/attempt are
+  coalesced into bounded 4 KiB/250ms records before they reach disk; a non-delta
+  event flushes pending text first, so replay ordering and output are unchanged
+  while per-token append/open/encode overhead is avoided. Replay renders Markdown at
   display time. `session replay --follow` keeps the same stateful renderer and
   consumes only newline-complete append-only records with the ordinary 16 MiB
   record limit. It filters discarded attempts in the initial batch; a later live

@@ -607,7 +607,7 @@ func run(env environment) int {
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
 		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		DelegateMaxTurns:          cfg.DelegateMaxTurns,
-		Prewarm:                   env.prewarmCache && !env.stdinPiped,
+		Prewarm:                   env.prewarmCache && !env.stdinPiped && prewarmForProvider(catalog, cfg.Provider),
 		SearchBackend:             searchBackend(),
 	}
 	delegateState := delegate.NewState(delegate.Runtime{
@@ -1274,14 +1274,16 @@ func run(env environment) int {
 		app.PendingImages = images
 	}
 
-	// Pre-warm the prompt cache in the background so the first real request reads
-	// a warm tools+system prefix instead of paying the cold cache-write latency.
-	// Gated to an interactive terminal: with piped/scripted stdin (one-shot is
-	// already handled above, plus CI and tests) there is no human-perceived
-	// first-turn latency to hide, so the extra request would be pure waste. The
-	// snapshot is captured synchronously here; only the stream runs in the
-	// goroutine, so it never races the loop.
+	// Pre-warm in the background only when the proxy target advertises a
+	// zero-generation warmup. Generated one-token completions duplicate prompt
+	// processing and can become very expensive on resumed transcripts. Piped and
+	// one-shot runs are also excluded because there is no idle user time in which
+	// to hide startup latency. The snapshot is captured synchronously here; only
+	// the stream runs in the goroutine, so it never races the loop.
 	prewarm := func() {
+		if !prewarmForProvider(catalog, app.Provider) {
+			return
+		}
 		if warm, ok := app.Agent.PrewarmFunc(); ok {
 			modelKey := app.RegistryModel
 			if modelKey == "" {
@@ -1576,6 +1578,7 @@ type modelListEntry struct {
 	Variant                  string     `json:"variant,omitempty"`
 	APIType                  string     `json:"api_type,omitempty"`
 	ContinuationStateful     bool       `json:"continuation_stateful,omitempty"`
+	Prewarm                  bool       `json:"prewarm,omitempty"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd,omitempty"`
 	Reasoning                bool       `json:"reasoning"`
 }
@@ -1648,6 +1651,7 @@ func catalogModelListRows(catalog protocol.Catalog) []modelListEntry {
 			Variant:                  strings.TrimSpace(target.Variant),
 			APIType:                  strings.TrimSpace(target.APIType),
 			ContinuationStateful:     target.ContinuationStateful,
+			Prewarm:                  target.Prewarm,
 			PricePerMillionTokensUSD: modelListPrice(target.Price),
 			Reasoning:                target.Reasoning,
 		})
@@ -2233,6 +2237,11 @@ func responsesStatefulForProvider(cfg config.Config, catalog protocol.Catalog, p
 	}
 	target, ok := catalogTarget(catalog, providerID)
 	return ok && target.ContinuationStateful
+}
+
+func prewarmForProvider(catalog protocol.Catalog, providerID string) bool {
+	target, ok := catalogTarget(catalog, providerID)
+	return ok && target.Prewarm
 }
 
 func webSearchServerToolsForModel(provider string, registry *llm.Registry, model, mode string) []llm.ServerTool {

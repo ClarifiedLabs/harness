@@ -36,6 +36,13 @@ const (
 	stateFile      = "state.json"
 	eventLog       = "raw.ndjson"
 	activeTurnFile = "active-turn.json"
+
+	// assistantDeltaChunkBytes bounds how much streamed assistant text can be
+	// pending between durable replay writes. Provider deltas are commonly only a
+	// few bytes; coalescing them avoids thousands of open/encode/close cycles
+	// while limiting crash loss to less than one small chunk.
+	assistantDeltaChunkBytes = 4 << 10
+	assistantDeltaFlushAfter = 250 * time.Millisecond
 )
 
 // Session is the compact, resumable conversation state.
@@ -711,6 +718,72 @@ func AppendEvent(dir string, ev Event) error {
 		return fmt.Errorf("session: append event: %w", err)
 	}
 	return nil
+}
+
+// EventAppender writes replay events while coalescing consecutive assistant
+// deltas for the same prompt/turn/attempt into bounded chunks. Non-delta events
+// flush pending text first, preserving replay order.
+type EventAppender struct {
+	dir       string
+	pending   Event
+	pendingAt time.Time
+	now       func() time.Time
+}
+
+func NewEventAppender(dir string) *EventAppender {
+	return &EventAppender{dir: dir, now: time.Now}
+}
+
+func (a *EventAppender) Append(ev Event) error {
+	if a == nil || a.dir == "" {
+		return nil
+	}
+	now := time.Now()
+	if a.now != nil {
+		now = a.now()
+	}
+	if ev.Time.IsZero() {
+		ev.Time = now
+	}
+	if ev.Type != EventAssistantDelta {
+		return errors.Join(a.Flush(), AppendEvent(a.dir, ev))
+	}
+	if ev.Text == "" {
+		return nil
+	}
+	if a.pending.Type != "" && !sameAssistantDeltaStream(a.pending, ev) {
+		if err := a.Flush(); err != nil {
+			return err
+		}
+	}
+	if a.pending.Type == "" {
+		a.pending = ev
+		a.pendingAt = now
+	} else {
+		a.pending.Text += ev.Text
+	}
+	if len(a.pending.Text) >= assistantDeltaChunkBytes || now.Sub(a.pendingAt) >= assistantDeltaFlushAfter {
+		return a.Flush()
+	}
+	return nil
+}
+
+func (a *EventAppender) Flush() error {
+	if a == nil || a.pending.Type == "" {
+		return nil
+	}
+	pending := a.pending
+	a.pending = Event{}
+	a.pendingAt = time.Time{}
+	return AppendEvent(a.dir, pending)
+}
+
+func sameAssistantDeltaStream(a, b Event) bool {
+	return a.Type == EventAssistantDelta &&
+		b.Type == EventAssistantDelta &&
+		a.Prompt == b.Prompt &&
+		a.Turn == b.Turn &&
+		a.Attempt == b.Attempt
 }
 
 // ReplayOptions controls the plain-text replay renderer.

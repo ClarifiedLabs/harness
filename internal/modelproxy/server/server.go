@@ -2405,6 +2405,7 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				ServerTools:          targetServerTools(pc, entry),
 				APIType:              pc.APIType,
 				ContinuationStateful: providerContinuationStateful(pc),
+				Prewarm:              providerResponsesWebSocket(pc),
 				Price:                price,
 				Reasoning:            targetReasoningSupported(entry),
 			}

@@ -244,6 +244,82 @@ func TestAppendEventStampsMissingTime(t *testing.T) {
 	}
 }
 
+func TestEventAppenderCoalescesAssistantDeltasAndPreservesOrder(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	appender := NewEventAppender(dir)
+	firstTime := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
+	if err := appender.Append(Event{
+		Time: firstTime, Type: EventAssistantDelta, Prompt: 2, Turn: 3, Attempt: 1, Text: "hello ",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := appender.Append(Event{
+		Type: EventAssistantDelta, Prompt: 2, Turn: 3, Attempt: 1, Text: "world",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := appender.Append(Event{Type: EventNotice, Prompt: 2, Turn: 3, Display: "[done]"}); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := readEvents(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want one coalesced delta plus notice", events)
+	}
+	if events[0].Type != EventAssistantDelta || events[0].Text != "hello world" || !events[0].Time.Equal(firstTime) {
+		t.Fatalf("coalesced event = %+v", events[0])
+	}
+	if events[1].Type != EventNotice {
+		t.Fatalf("second event = %+v, want notice", events[1])
+	}
+}
+
+func TestEventAppenderBoundsPendingAssistantText(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	appender := NewEventAppender(dir)
+	if err := appender.Append(Event{
+		Type: EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 1,
+		Text: strings.Repeat("x", assistantDeltaChunkBytes),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := readEvents(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || len(events[0].Text) != assistantDeltaChunkBytes {
+		t.Fatalf("events = %+v, want one threshold-flushed chunk", events)
+	}
+}
+
+func TestEventAppenderFlushesAssistantTextForLiveFollowers(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	appender := NewEventAppender(dir)
+	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
+	appender.now = func() time.Time { return now }
+	if err := appender.Append(Event{
+		Type: EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 1, Text: "hello ",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(assistantDeltaFlushAfter)
+	if err := appender.Append(Event{
+		Type: EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 1, Text: "world",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := readEvents(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Text != "hello world" {
+		t.Fatalf("events = %+v, want one interval-flushed chunk", events)
+	}
+}
+
 func TestSaveLoadRoundTrip(t *testing.T) {
 	s := sampleSession()
 	digest, err := llm.FingerprintMessages(s.Messages)

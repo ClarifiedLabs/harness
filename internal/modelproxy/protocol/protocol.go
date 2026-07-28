@@ -96,6 +96,7 @@ type Target struct {
 	Variant              string    `json:"variant,omitempty"`
 	APIType              string    `json:"api_type,omitempty"`
 	ContinuationStateful bool      `json:"continuation_stateful,omitempty"`
+	Prewarm              bool      `json:"prewarm,omitempty"`
 	Price                llm.Price `json:"price,omitempty"`
 	Reasoning            bool      `json:"reasoning,omitempty"`
 }

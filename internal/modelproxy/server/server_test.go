@@ -1218,8 +1218,13 @@ func TestHandlerCatalogExposesTargetsOnly(t *testing.T) {
 			t.Fatalf("target %q missing from catalog: %+v", id, handler.Catalog().Targets)
 		}
 	}
-	if target := targets["openai:gpt-5.5"]; target.APIType != "responses" || !target.ContinuationStateful {
+	if target := targets["openai:gpt-5.5"]; target.APIType != "responses" || !target.ContinuationStateful || target.Prewarm {
 		t.Fatalf("stateful Responses target metadata = %+v", target)
+	}
+	for _, id := range []string{"openai-codex:gpt-5.5", "codex-compatible:gpt-5.5"} {
+		if target := targets[id]; !target.Prewarm {
+			t.Fatalf("WebSocket target %q does not advertise safe prewarm: %+v", id, target)
+		}
 	}
 	if target := targets["stateless-compatible:gpt-5.5"]; target.APIType != "responses" || target.ContinuationStateful {
 		t.Fatalf("stateless Responses target metadata = %+v", target)

@@ -650,6 +650,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		sink := newAccumulatingSink(app.Renderer, app, app.PromptNumber)
 		applied, err := app.Agent.ApplyIdleCompaction(context.Background(), sink, finished.result)
+		sink.FlushEvents()
 		if err != nil {
 			record("failed", 0, 0)
 			app.renderHookNotices([]string{"[idle compact failed: " + err.Error() + "]"})
@@ -3441,6 +3442,7 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 
 		sink := newREPLSink(app.Renderer, app, promptID)
 		err := app.Agent.RunPromptContentWithContext(ctx, prepared.prompt, imageBlocks(prepared.images), app.promptHookContext(prepared.promptContext), promptID, sink)
+		sink.FlushEvents()
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 		}
@@ -3531,6 +3533,7 @@ func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 
 		sink := newREPLSink(app.Renderer, app, promptID)
 		err := app.Agent.RunPromptContentWithContext(ctx, input.Text, input.Images, app.promptHookContext(input.RequestContext), promptID, sink)
+		sink.FlushEvents()
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 		}
@@ -3546,6 +3549,7 @@ func (app *App) compact(focus string) {
 	ctx := context.Background()
 	sink := newAccumulatingSink(app.Renderer, app, app.PromptNumber)
 	u, err := app.Agent.CompactWithFocus(ctx, sink, focus)
+	sink.FlushEvents()
 	if u != (llm.Usage{}) {
 		app.addMaintenanceUsage("compaction", u)
 	}
@@ -4382,6 +4386,7 @@ func (app *App) summaryWidth() int {
 type accumulatingSink struct {
 	r                           *Renderer
 	app                         *App
+	events                      *session.EventAppender
 	prompt                      int
 	printTodoUpdate             bool
 	printTodoPromptBeforeUsage  bool
@@ -4398,11 +4403,15 @@ type accumulatingSink struct {
 }
 
 func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
-	return &accumulatingSink{
+	s := &accumulatingSink{
 		r: r, app: app, prompt: prompt,
 		pending:        make(map[string]llm.ToolCall),
 		pendingStarted: make(map[string]time.Time),
 	}
+	if app != nil {
+		s.events = session.NewEventAppender(app.SessionPath)
+	}
+	return s
 }
 
 func newREPLSink(r *Renderer, app *App, prompt int) *accumulatingSink {
@@ -4416,6 +4425,31 @@ func newREPLSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 	}
 	s.reasoningOutput = true
 	return s
+}
+
+func (s *accumulatingSink) recordEvent(ev session.Event) {
+	if s == nil || s.app == nil || s.app.SessionPath == "" {
+		return
+	}
+	if ev.Time.IsZero() {
+		ev.Time = s.app.clock()()
+	}
+	if s.events == nil {
+		s.app.recordEvent(ev)
+		return
+	}
+	if err := s.events.Append(ev); err != nil {
+		fmt.Fprintf(s.app.Errw, "[session event log failed: %v]\n", err)
+	}
+}
+
+func (s *accumulatingSink) FlushEvents() {
+	if s == nil || s.events == nil {
+		return
+	}
+	if err := s.events.Flush(); err != nil {
+		fmt.Fprintf(s.app.Errw, "[session event log failed: %v]\n", err)
+	}
 }
 
 func (s *accumulatingSink) planDisplayState() plan.DisplayState {
@@ -4435,7 +4469,7 @@ func (s *accumulatingSink) planDisplayState() plan.DisplayState {
 
 func (s *accumulatingSink) TextDelta(text string) {
 	s.r.TextDelta(text)
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:    session.EventAssistantDelta,
 		Prompt:  s.prompt,
 		Turn:    s.turn,
@@ -4449,7 +4483,7 @@ func (s *accumulatingSink) AssistantPhase(phase string) {
 		return
 	}
 	s.r.AssistantPhase(phase)
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:    session.EventAssistantPhase,
 		Prompt:  s.prompt,
 		Turn:    s.turn,
@@ -4468,7 +4502,7 @@ func (s *accumulatingSink) ReasoningSummary(text string) {
 	} else {
 		s.r.ReasoningSummaryStatus(text)
 	}
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:    session.EventReasoningSummary,
 		Prompt:  s.prompt,
 		Turn:    s.turn,
@@ -4491,7 +4525,7 @@ func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.Context
 	s.turn = turn
 	s.attempt = attempt
 	s.r.TurnAttemptStart(turn, attempt, ctx)
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:    session.EventTurnAttemptStart,
 		Prompt:  s.prompt,
 		Turn:    s.turn,
@@ -4501,7 +4535,7 @@ func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.Context
 }
 
 func (s *accumulatingSink) TurnAttemptAbandoned(turn, attempt int) {
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:    session.EventTurnAttemptAbandoned,
 		Prompt:  s.prompt,
 		Turn:    turn,
@@ -4513,7 +4547,7 @@ func (s *accumulatingSink) TurnAttemptAbandoned(turn, attempt int) {
 func (s *accumulatingSink) TurnAttemptComplete(u agent.TurnAttemptUsage) {
 	s.r.TurnAttemptComplete(u)
 	usage := u.Usage
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:    session.EventTurnAttemptUsage,
 		Prompt:  s.prompt,
 		Turn:    u.Turn,
@@ -4528,7 +4562,7 @@ func (s *accumulatingSink) ModelRequestEvent(event llm.ModelRequestEvent) {
 		s.terminalModelErrorDisplayed = true
 	}
 	copyEvent := event
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:         session.EventModelRequest,
 		Prompt:       s.prompt,
 		Turn:         s.turn,
@@ -4591,7 +4625,7 @@ func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 	s.pending[c.ID] = c
 	s.pendingStarted[c.ID] = s.app.clock()()
 	s.r.ToolStart(c)
-	s.app.recordEvent(session.Event{Type: session.EventToolStart, Prompt: s.prompt, Turn: s.turn, ToolID: c.ID, Tool: c.Name, Input: c.Input})
+	s.recordEvent(session.Event{Type: session.EventToolStart, Prompt: s.prompt, Turn: s.turn, ToolID: c.ID, Tool: c.Name, Input: c.Input})
 }
 
 func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
@@ -4619,7 +4653,7 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	if !started.IsZero() {
 		durationMS = s.app.clock()().Sub(started).Milliseconds()
 	}
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:                session.EventToolResult,
 		Prompt:              s.prompt,
 		Turn:                s.turn,
@@ -4636,7 +4670,7 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 
 func (s *accumulatingSink) ToolDiff(call llm.ToolCall, path, text string) {
 	s.r.ToolDiff(call, path, text)
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:    session.EventToolDiff,
 		Prompt:  s.prompt,
 		Turn:    s.turn,
@@ -4663,7 +4697,7 @@ func (s *accumulatingSink) Notice(msg string) {
 	if s.inMaintenance {
 		turn = 0
 	}
-	s.app.recordEvent(session.Event{Type: session.EventNotice, Prompt: s.prompt, Turn: turn, Display: msg})
+	s.recordEvent(session.Event{Type: session.EventNotice, Prompt: s.prompt, Turn: turn, Display: msg})
 }
 
 func (s *accumulatingSink) ModelErrorDiagnostic(event agent.ModelErrorDiagnostic) {
@@ -4708,7 +4742,7 @@ func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
 	}
 	line := s.r.TurnComplete(u)
 	usage := u.Usage
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:    session.EventTurnComplete,
 		Prompt:  s.prompt,
 		Turn:    u.Turn,
@@ -4719,7 +4753,7 @@ func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
 
 func (s *accumulatingSink) MaintenanceComplete(u agent.MaintenanceUsage) {
 	usage := u.Usage
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:    session.EventMaintenanceUsage,
 		Prompt:  s.prompt,
 		Purpose: u.Purpose,
@@ -4754,7 +4788,7 @@ func (s *accumulatingSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
 		fmt.Fprintf(s.app.Errw, "[checkpoint failed: %v]\n", err)
 		return
 	}
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:         session.EventCheckpoint,
 		Prompt:       s.prompt,
 		Turn:         checkpoint.Turn,
@@ -4765,7 +4799,7 @@ func (s *accumulatingSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
 }
 
 func (s *accumulatingSink) RetentionApplied(event agent.RetentionEvent) {
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:      session.EventRetention,
 		Prompt:    s.prompt,
 		Turn:      s.turn + 1,
@@ -4896,7 +4930,7 @@ func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
 	line := usageLine(u, s.r.now().Sub(s.r.promptRunStart), cost, costKnown,
 		s.r.cumInput, s.r.cumOutput, s.r.cumCost)
 	usage := u.Usage
-	s.app.recordEvent(session.Event{
+	s.recordEvent(session.Event{
 		Type:              session.EventPromptUsage,
 		Prompt:            s.prompt,
 		Display:           line,

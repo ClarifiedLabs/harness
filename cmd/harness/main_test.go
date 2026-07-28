@@ -246,6 +246,7 @@ type testInfoModelJSON struct {
 	Variant                  string     `json:"variant"`
 	APIType                  string     `json:"api_type"`
 	ContinuationStateful     bool       `json:"continuation_stateful"`
+	Prewarm                  bool       `json:"prewarm"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd"`
 	Reasoning                bool       `json:"reasoning"`
 }
@@ -1046,6 +1047,19 @@ func TestResponsesStatefulForProviderUsesCatalogAndConfig(t *testing.T) {
 	}
 }
 
+func TestPrewarmForProviderRequiresAdvertisedSafeSupport(t *testing.T) {
+	catalog := protocol.Catalog{Targets: []protocol.Target{
+		{ID: "openai-codex:gpt-5.5", Aliases: []string{"gpt-5.5"}, Prewarm: true},
+		{ID: "anthropic:claude-opus-4-8"},
+	}}
+	if !prewarmForProvider(catalog, "openai-codex:gpt-5.5") || !prewarmForProvider(catalog, "gpt-5.5") {
+		t.Fatal("advertised prewarm support was not recognized")
+	}
+	if prewarmForProvider(catalog, "anthropic:claude-opus-4-8") || prewarmForProvider(catalog, "missing") {
+		t.Fatal("unsupported target was allowed to prewarm")
+	}
+}
+
 func TestSessionResponseStateCompatibilityRequiresExactFingerprintAndTarget(t *testing.T) {
 	messages := []llm.Message{
 		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hello"}}},
@@ -1326,6 +1340,7 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 		if proxy.catalog.Targets[i].ID == "openai:gpt-5.5" {
 			proxy.catalog.Targets[i].APIType = "responses"
 			proxy.catalog.Targets[i].ContinuationStateful = true
+			proxy.catalog.Targets[i].Prewarm = true
 		}
 	}
 
@@ -1359,7 +1374,7 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 		t.Fatalf("openrouter price = %+v\n%s", openRouterModel.PricePerMillionTokensUSD, out.String())
 	}
 	openAIModel := findJSONModel(t, got.Models, "openai:gpt-5.5")
-	if openAIModel.APIType != "responses" || !openAIModel.ContinuationStateful {
+	if openAIModel.APIType != "responses" || !openAIModel.ContinuationStateful || !openAIModel.Prewarm {
 		t.Fatalf("openai continuation metadata = %+v\n%s", openAIModel, out.String())
 	}
 	if openAIModel.PricePerMillionTokensUSD == nil || len(openAIModel.PricePerMillionTokensUSD.Tiers) != 1 ||

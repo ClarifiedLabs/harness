@@ -29,7 +29,8 @@ reasoning profiles. Use `harness --agents` to print the resolved built-in and
 config-defined agents. Both commands exit before creating a session.
 
 `--models --format json` also shows each target's `api_type`,
-`continuation_stateful`, `server_tools`, price, and variant relationship
+`continuation_stateful`, zero-generation `prewarm` support, `server_tools`,
+price, and variant relationship
 (`base_target_id` / `variant`). When a target advertises `web_search`,
 `-web-search auto` lets harness declare the provider-hosted web search tool for
 model calls. The default is `off`.
@@ -1067,16 +1068,17 @@ mid-session with `/agent <name>`.
 
 Shift-Tab switches use the same full agent runtime selection as `/agent` and emit
 the existing `[agent switched: <name>]` notice and provider/model line.
-All switch-driven prewarms — Shift-Tab cycling, explicit `/agent`, `/model`,
-and startup agent resolution — use a 500ms idle debounce, so rapid cycles or
-resolution bursts warm only the final settled selection. It is not suppressed
-merely because the model ID is unchanged:
-system/tool prefixes and response continuation differ by agent. A warm-up
-requested while a prompt is running is deferred and fired once when the prompt
-completes (including interrupt/error exits): a running prompt refreshes the
-cache prefix every turn, so a mid-prompt prewarm would be wasted.
-Standalone `/compact` keeps immediate
-prewarming; submitting a real prompt cancels any pending delayed warmup.
+For targets that advertise zero-generation prewarm support, all switch-driven
+prewarms — Shift-Tab cycling, explicit `/agent`, handoff, `/model`, and startup
+agent resolution — use a 500ms idle debounce, so rapid cycles or resolution
+bursts warm only the final settled selection. Prewarming is not suppressed
+merely because the model ID is unchanged: system/tool prefixes and response
+continuation differ by agent. A warm-up requested while a prompt is running is
+deferred and fired once when the prompt completes (including interrupt/error
+exits): a running prompt refreshes the cache prefix every turn, so a mid-prompt
+prewarm would be wasted. Standalone `/compact` keeps immediate prewarming;
+submitting a real prompt cancels any pending delayed warmup. Harness does not
+issue speculative generated completions to prewarm other providers.
 
 Four agents are built in:
 
@@ -1150,7 +1152,9 @@ and are unavailable in one-shot mode.
 - A session path is a directory. `tree.ndjson` is the canonical append-only
   conversation tree; `state.json` is compact mutable state containing the active
   leaf and runtime settings; `active-turn.json` is a transient atomic recovery
-  record for the current model/tool boundary; `raw.ndjson` is the chronological replay log.
+  record for the current model/tool boundary; `raw.ndjson` is the chronological
+  replay log. Consecutive assistant stream fragments are stored in bounded 4 KiB
+  or 250ms chunks rather than one record per provider delta.
   `compactions/` stores raw messages removed from active context, `children/`
   stores child-agent transcripts and metadata, and `artifacts/tool-results/`
   stores full outputs omitted from model context.

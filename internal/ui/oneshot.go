@@ -85,6 +85,7 @@ func OneShot(app *App, prompt string) int {
 	var err error
 	select {
 	case err = <-done:
+		sink.FlushEvents()
 	case <-app.ForceExit:
 		if app.Renderer != nil {
 			app.Renderer.StopProgress()

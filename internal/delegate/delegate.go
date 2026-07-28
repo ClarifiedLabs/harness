@@ -1676,6 +1676,7 @@ type childSink struct {
 	assistant            *inlineLineAccumulator
 	reasoning            bool
 	sessionDir           string
+	events               *session.EventAppender
 	todos                *todo.Store
 	todoContext          bool
 	pending              map[string]pendingChildTool
@@ -1696,6 +1697,7 @@ type pendingChildTool struct {
 func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progress *Progress, activity *ActivityRegistration, reasoning ...bool) *childSink {
 	sink := &childSink{
 		sessionDir:  sessionDir,
+		events:      session.NewEventAppender(sessionDir),
 		todos:       todos,
 		todoContext: todoContext,
 		progress:    progress,
@@ -2077,9 +2079,22 @@ func (s *childSink) PromptComplete(usage agent.PromptUsage) {
 
 func (s *childSink) flushDisplay() {
 	if s == nil || s.assistant == nil {
+		s.flushEvents()
 		return
 	}
 	s.assistant.Flush()
+	s.flushEvents()
+}
+
+func (s *childSink) flushEvents() {
+	if s == nil || s.events == nil {
+		return
+	}
+	s.appendMu.Lock()
+	defer s.appendMu.Unlock()
+	if err := s.events.Flush(); err != nil && s.appendErr == nil {
+		s.appendErr = err
+	}
 }
 
 func (s *childSink) append(ev session.Event) {
@@ -2088,7 +2103,7 @@ func (s *childSink) append(ev session.Event) {
 	}
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
-	if err := session.AppendEvent(s.sessionDir, ev); err != nil && s.appendErr == nil {
+	if err := s.events.Append(ev); err != nil && s.appendErr == nil {
 		s.appendErr = err
 	}
 }
