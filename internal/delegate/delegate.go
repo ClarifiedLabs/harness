@@ -133,6 +133,27 @@ type Options struct {
 	AgentCandidates           func(Runtime) []AgentCandidate
 	ActivityRegistry          *ActivityRegistry
 	Now                       func() time.Time
+	// OpenChildView, when non-nil, opens a display-only external view (e.g. a
+	// tmux window following the child session) once the child's meta.json
+	// exists but before the child agent runs. Every failure is swallowed by
+	// the runner: the view must never affect the child run.
+	OpenChildView func(ChildView) (ChildViewHandle, error)
+}
+
+// ChildView describes one followable delegate child to Options.OpenChildView.
+// Name is a display label (the child ID), Dir the child session directory
+// already holding a running meta.json, and Log a short operator-log label
+// (agent plus child ID).
+type ChildView struct {
+	Name string
+	Dir  string
+	Log  string
+}
+
+// ChildViewHandle owns one opened external child view. Close must be
+// idempotent and must not fail the caller.
+type ChildViewHandle interface {
+	Close()
 }
 
 // RunRequest is one child-agent launch request.
@@ -523,6 +544,14 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		Agent:          launch.Agent,
 		TranscriptPath: childDir,
 	})
+	// The child directory is self-describing on disk now (running meta.json),
+	// so an external viewer can follow it. nil when the parent has no session
+	// (childDir == "") or no viewer is configured; failures are swallowed.
+	view := openChildView(r.opts.OpenChildView, ChildView{
+		Name: childID,
+		Dir:  childDir,
+		Log:  fmt.Sprintf("%s %s", launch.Agent, childID),
+	})
 
 	terminalStatus := session.ChildStatusFailed
 	var terminalUsage agent.PromptUsage
@@ -535,6 +564,12 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		terminalOnce.Do(func() {
 			flushDisplay()
 			progress.markFinished()
+			// Success closes the view immediately (the viewer's own exit is
+			// cosmetic). Failure leaves the window open: it holds the final
+			// state of a session the operator probably wants to inspect.
+			if terminalStatus == session.ChildStatusCompleted && view != nil {
+				view.Close()
+			}
 			if terminalUpdated.IsZero() {
 				terminalUpdated = r.now()
 			}
@@ -1294,6 +1329,21 @@ func childTerminalStatus(err error) string {
 		return session.ChildStatusCanceled
 	}
 	return session.ChildStatusFailed
+}
+
+// openChildView opens the configured external child view, swallowing every
+// failure: the view is display-only and must never affect the child run. A
+// nil opener (feature off) or an empty child dir (no parent session) yields a
+// nil handle.
+func openChildView(open func(ChildView) (ChildViewHandle, error), view ChildView) ChildViewHandle {
+	if open == nil || view.Dir == "" {
+		return nil
+	}
+	handle, err := open(view)
+	if err != nil || handle == nil {
+		return nil
+	}
+	return handle
 }
 
 func inlineReasoningEnabled(reasoning llm.ReasoningConfig) bool {

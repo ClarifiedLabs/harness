@@ -3071,6 +3071,137 @@ func TestRunDelegateMaxDepthRemovesDelegateFromDeepestChild(t *testing.T) {
 	}
 }
 
+// delegateSteps scripts one foreground delegate call: parent tool call,
+// child text, parent final text.
+func delegateSteps() []llmtest.Step {
+	return []llmtest.Step{
+		{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				ToolID:    "call_delegate",
+				ToolName:  "delegate",
+				ToolInput: json.RawMessage(`{"task":"inspect only"}`),
+			}},
+			Stop: llm.StopToolUse,
+		},
+		{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "child report"}}, Stop: llm.StopEndTurn},
+		{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "parent done"}}, Stop: llm.StopEndTurn},
+	}
+}
+
+// Outside tmux the feature degrades to one stderr warning; the delegate run
+// itself is unaffected.
+func TestRunDelegateTmuxWithoutTMUXWarnsAndStillDelegates(t *testing.T) {
+	fp := llmtest.New("fake", delegateSteps()...)
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-delegate-tmux", "-p", "hi"}, fp, "")
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, stderr=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want parent, child, parent", len(fp.Requests))
+	}
+	if !strings.Contains(errw.String(), "delegate_tmux is enabled but TMUX is not set") {
+		t.Fatalf("missing tmux warning: %q", errw.String())
+	}
+}
+
+// Quiet mode suppresses the degradation warning, not the delegate run.
+func TestRunDelegateTmuxQuietSuppressesWarning(t *testing.T) {
+	fp := llmtest.New("fake", delegateSteps()...)
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-delegate-tmux", "-q", "-p", "hi"}, fp, "")
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, stderr=%q", code, errw.String())
+	}
+	if strings.Contains(errw.String(), "delegate_tmux") {
+		t.Fatalf("quiet should suppress the tmux warning: %q", errw.String())
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want parent, child, parent", len(fp.Requests))
+	}
+}
+
+// Inside tmux a window opens for the child and closes on success, independent
+// of delegate_output. A fake tmux on PATH records the real argv marshalling.
+func TestRunDelegateTmuxOpensWindowWithFakeTmux(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	binDir := t.TempDir()
+	fake := "#!/bin/sh\nprintf '%s\n' \"$*\" >> \"$FAKE_TMUX_LOG\"\nif [ \"$1\" = \"new-window\" ]; then printf '@1\\n'; fi\n"
+	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(fake), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("FAKE_TMUX_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	fp := llmtest.New("fake", delegateSteps()...)
+	env, _, errw, getenv := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-delegate-tmux", "-delegate-output", "off", "-p", "hi"}, fp, "")
+	env.getenv = func(k string) string {
+		if k == "TMUX" {
+			return "/tmp/fake-tmux,0,0"
+		}
+		return getenv(k)
+	}
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, stderr=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want parent, child, parent", len(fp.Requests))
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("fake tmux never ran: %v (stderr=%q)", err, errw.String())
+	}
+	log := string(data)
+	if !strings.Contains(log, "new-window -d -a -P") ||
+		!strings.Contains(log, "session replay --follow -- ") ||
+		!strings.Contains(log, "/children/delegate_") {
+		t.Fatalf("new-window invocation missing or malformed: %q", log)
+	}
+	if !strings.Contains(log, "kill-window -t @1") {
+		t.Fatalf("successful child should close its window: %q", log)
+	}
+	if strings.Contains(errw.String(), "delegate_tmux") {
+		t.Fatalf("no warning expected inside tmux: %q", errw.String())
+	}
+}
+
+// --show-config surfaces the resolved value and its winning source.
+func TestRunShowConfigIncludesDelegateTmux(t *testing.T) {
+	dir := t.TempDir()
+	getenv := func(k string) string {
+		switch k {
+		case "HOME":
+			return dir
+		case "HARNESS_DELEGATE_TMUX":
+			return "true"
+		default:
+			return ""
+		}
+	}
+	var out, errw bytes.Buffer
+	env := environment{
+		args:   []string{"--show-config", "-model", "openrouter:openai/gpt-5.5"},
+		stdin:  strings.NewReader(""),
+		stdout: &out,
+		stderr: &errw,
+		getenv: getenv,
+		now:    func() time.Time { return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC) },
+	}
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, stderr=%q", code, errw.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, out.String())
+	}
+	if got["delegate_tmux"] != true || got["delegate_tmux_cli"] != "env" {
+		t.Fatalf("delegate tmux fields = %v/%v, want true/env", got["delegate_tmux"], got["delegate_tmux_cli"])
+	}
+	if got["delegate_tmux_max_windows"] != float64(4) {
+		t.Fatalf("delegate_tmux_max_windows = %v, want 4", got["delegate_tmux_max_windows"])
+	}
+}
+
 func TestRunDelegateSchemaListsOnlyDelegatableAgents(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	cfgPath := filepath.Join(t.TempDir(), "config.json")

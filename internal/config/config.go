@@ -95,6 +95,9 @@ type Config struct {
 	DelegateMaxTurns                   int               `json:"delegate_max_turns"`            // config-only; default 20, per delegate call cap
 	DelegateMaxDepth                   int               `json:"delegate_max_depth"`            // config-only; default 3, root depth is 0
 	DelegateOutput                     string            `json:"delegate_output"`               // -delegate-output: status, off, or curated scrolling lines
+	DelegateTmux                       bool              `json:"delegate_tmux"`                 // -delegate-tmux: follow each delegate child in its own tmux window
+	DelegateTmuxMaxWindows             int               `json:"delegate_tmux_max_windows"`     // config-only; cap on simultaneous delegate windows
+	DelegateTmuxCLI                    string            `json:"delegate_tmux_cli"`             // resolved source of delegate_tmux: default, file, env, or flag
 	ResponsesStateful                  bool              `json:"responses_stateful"`            // -responses-stateful
 	RetentionPolicy                    string            `json:"retention_policy"`              // -retention-policy: auto, age, pressure, or disabled
 	RetentionFloorTokens               int               `json:"retention_floor_tokens"`        // config-only; 0 = disabled (window percentages govern)
@@ -242,15 +245,16 @@ type LSPServerConfig struct {
 }
 
 const (
-	defaultMaxTurns           = 250
-	defaultContextWindow      = 256_000
-	defaultDelegateMaxTurns   = 20
-	defaultDelegateMaxDepth   = 3
-	defaultToolTimeoutSeconds = 600
-	DefaultSerenaCommand      = "serena"
-	TimestampShort            = "short"
-	TimestampFull             = "full"
-	TimestampNone             = "none"
+	defaultMaxTurns               = 250
+	defaultContextWindow          = 256_000
+	defaultDelegateMaxTurns       = 20
+	defaultDelegateMaxDepth       = 3
+	defaultDelegateTmuxMaxWindows = 4
+	defaultToolTimeoutSeconds     = 600
+	DefaultSerenaCommand          = "serena"
+	TimestampShort                = "short"
+	TimestampFull                 = "full"
+	TimestampNone                 = "none"
 
 	// DefaultHistFile controls the default REPL history file location. The
 	// actual default is resolved by the caller (cmd/harness/main.go) against
@@ -333,6 +337,8 @@ type fileConfig struct {
 	DelegateMaxTurns                   *int                       `json:"delegate_max_turns"`
 	DelegateMaxDepth                   *int                       `json:"delegate_max_depth"`
 	DelegateOutput                     string                     `json:"delegate_output"`
+	DelegateTmux                       *bool                      `json:"delegate_tmux"`
+	DelegateTmuxMaxWindows             *int                       `json:"delegate_tmux_max_windows"`
 	ResponsesStateful                  *bool                      `json:"responses_stateful"`
 	RetentionPolicy                    string                     `json:"retention_policy"`
 	RetentionFloorTokens               *int                       `json:"retention_floor_tokens"`
@@ -582,6 +588,21 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	case DelegateOutputStatus, DelegateOutputOff, DelegateOutputLines:
 	default:
 		return Config{}, fmt.Errorf("delegate_output must be one of status, off, or lines")
+	}
+	c.DelegateTmux = resolveBool(set["delegate-tmux"], *f.delegateTmux,
+		getenv("HARNESS_DELEGATE_TMUX"), fc.DelegateTmux, false)
+	c.DelegateTmuxCLI = "default"
+	switch {
+	case set["delegate-tmux"]:
+		c.DelegateTmuxCLI = "flag"
+	case getenv("HARNESS_DELEGATE_TMUX") != "":
+		c.DelegateTmuxCLI = "env"
+	case fc.DelegateTmux != nil:
+		c.DelegateTmuxCLI = "file"
+	}
+	c.DelegateTmuxMaxWindows = intValue(fc.DelegateTmuxMaxWindows, defaultDelegateTmuxMaxWindows)
+	if c.DelegateTmuxMaxWindows <= 0 {
+		return Config{}, fmt.Errorf("delegate_tmux_max_windows must be positive")
 	}
 	c.ResponsesStateful = resolveBool(set["responses-stateful"], *f.responsesStateful,
 		getenv("HARNESS_RESPONSES_STATEFUL"), fc.ResponsesStateful, true)
@@ -1056,6 +1077,7 @@ type flags struct {
 	verbose, toolStream              *bool
 	showDiffs                        *bool
 	delegateOutput                   *string
+	delegateTmux                     *bool
 	responsesStateful                *bool
 	retentionPolicy                  *string
 	noSteer                          *bool
@@ -1110,6 +1132,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.handoffAgent = fs.String("handoff-agent", "", "agent a plan->implementation handoff switches to by default (default auto)")
 	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")
 	f.delegateOutput = fs.String("delegate-output", DelegateOutputStatus, "delegate display: status, off, or curated scrolling lines on stderr")
+	f.delegateTmux = fs.Bool("delegate-tmux", false, "follow each delegate child session in its own tmux window (requires tmux; also HARNESS_DELEGATE_TMUX)")
 	f.responsesStateful = fs.Bool("responses-stateful", true, "enable CLI-owned provider continuation when the selected target supports it")
 	f.retentionPolicy = fs.String("retention-policy", "auto", "live transcript retention: auto, age, pressure, or disabled")
 	f.noSteer = fs.Bool("no-steer", false, "disable in-prompt steering: queue input for the next prompt instead of injecting it before the next turn")

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2351,4 +2352,181 @@ type capturingStarter struct {
 func (c *capturingStarter) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.BackgroundJobInfo, error) {
 	c.req <- req
 	return tools.BackgroundJobInfo{ID: "bg_delegate", Status: "running"}, nil
+}
+
+// childViewRecorder records OpenChildView calls and handle Close calls for
+// the display-only external-view seam.
+type childViewRecorder struct {
+	mu     sync.Mutex
+	events []string
+	fail   error
+}
+
+func (r *childViewRecorder) open(view ChildView) (ChildViewHandle, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fail != nil {
+		r.events = append(r.events, "error "+view.Name)
+		return nil, r.fail
+	}
+	r.events = append(r.events, "open "+view.Name+" "+view.Dir+" "+view.Log)
+	return &childViewHandle{recorder: r, name: view.Name}, nil
+}
+
+func (r *childViewRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string{}, r.events...)
+}
+
+type childViewHandle struct {
+	recorder *childViewRecorder
+	name     string
+}
+
+func (h *childViewHandle) Close() {
+	h.recorder.mu.Lock()
+	defer h.recorder.mu.Unlock()
+	h.recorder.events = append(h.recorder.events, "close "+h.name)
+}
+
+func newChildViewRunner(fp *llmtest.FakeProvider, sessionPath string, recorder *childViewRecorder) *Runner {
+	childTools := &tools.Registry{}
+	runtime := Runtime{Provider: fp, Model: "model", Registry: llm.NewRegistry(nil), SessionPath: sessionPath}
+	return NewRunner(func() Runtime { return runtime }, func(runtime Runtime, name string) (Launch, error) {
+		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Agent: name, Tools: childTools}, nil
+	}, Options{OpenChildView: recorder.open})
+}
+
+// The view opens once the child directory is self-describing and closes when
+// the child completes successfully.
+func TestDelegateChildViewClosesOnSuccess(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "done"}},
+		Stop:   llm.StopEndTurn,
+	})
+	sessionPath := filepath.Join(t.TempDir(), "session")
+	recorder := &childViewRecorder{}
+	runner := newChildViewRunner(fp, sessionPath, recorder)
+
+	if _, err := runner.Run(context.Background(), RunRequest{Kind: "delegate", Task: "inspect", Agent: "worker", ChildID: "child-ok"}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := []string{
+		"open child-ok " + session.ChildSessionDir(sessionPath, "child-ok") + " worker child-ok",
+		"close child-ok",
+	}
+	if got := recorder.snapshot(); !slices.Equal(got, want) {
+		t.Fatalf("view events = %v, want %v", got, want)
+	}
+}
+
+// Failed and canceled children keep their view open: the window holds the
+// final state of a session the operator probably wants to inspect.
+func TestDelegateChildViewKeptOnFailureAndCancel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		step func(context.CancelFunc) llmtest.Step
+	}{
+		{
+			name: "failed",
+			step: func(context.CancelFunc) llmtest.Step {
+				return llmtest.Step{Err: &llm.APIError{StatusCode: 400, Message: "bad request", Retryable: false}}
+			},
+		},
+		{
+			name: "canceled",
+			step: func(cancel context.CancelFunc) llmtest.Step {
+				return llmtest.Step{Block: func(context.Context) { cancel() }}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			fp := llmtest.New("fake", tc.step(cancel))
+			sessionPath := filepath.Join(t.TempDir(), "session")
+			recorder := &childViewRecorder{}
+			runner := newChildViewRunner(fp, sessionPath, recorder)
+
+			if _, err := runner.Run(ctx, RunRequest{Kind: "delegate", Task: "inspect", ChildID: "child-bad"}, nil); err == nil {
+				t.Fatal("Run should fail")
+			}
+			want := []string{"open child-bad " + session.ChildSessionDir(sessionPath, "child-bad") + "  child-bad"}
+			if got := recorder.snapshot(); !slices.Equal(got, want) {
+				t.Fatalf("view events = %v, want %v (no close)", got, want)
+			}
+		})
+	}
+}
+
+// A view-open failure is swallowed: the child run is unaffected.
+func TestDelegateChildViewSwallowsOpenErrors(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "done anyway"}},
+		Stop:   llm.StopEndTurn,
+	})
+	sessionPath := filepath.Join(t.TempDir(), "session")
+	recorder := &childViewRecorder{fail: errors.New("tmux unavailable")}
+	runner := newChildViewRunner(fp, sessionPath, recorder)
+
+	result, err := runner.Run(context.Background(), RunRequest{Kind: "delegate", Task: "inspect", ChildID: "child-viewless"}, nil)
+	if err != nil {
+		t.Fatalf("Run must ignore view failures: %v", err)
+	}
+	if !strings.Contains(result.Report, "done anyway") {
+		t.Fatalf("report = %q", result.Report)
+	}
+	if got := recorder.snapshot(); !slices.Equal(got, []string{"error child-viewless"}) {
+		t.Fatalf("view events = %v", got)
+	}
+}
+
+// Without a parent session there is no child directory to follow, so the
+// opener is never called.
+func TestDelegateChildViewSkippedWithoutSession(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "done"}},
+		Stop:   llm.StopEndTurn,
+	})
+	recorder := &childViewRecorder{}
+	runner := newChildViewRunner(fp, "", recorder)
+
+	if _, err := runner.Run(context.Background(), RunRequest{Kind: "delegate", Task: "inspect", ChildID: "child-nosession"}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := recorder.snapshot(); len(got) != 0 {
+		t.Fatalf("view events = %v, want none without a parent session", got)
+	}
+}
+
+// A continuation is a fresh child run: the view opens for the new child ID
+// and directory, not the source.
+func TestDelegateChildViewOpensPerContinuationRun(t *testing.T) {
+	fixture := newContinuationFixture(t, 100_000, false,
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source done"}}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "continued done"}}, Stop: llm.StopEndTurn},
+	)
+	recorder := &childViewRecorder{}
+	fixture.runner.opts.OpenChildView = recorder.open
+
+	if _, err := fixture.runner.Run(context.Background(), RunRequest{Task: "start", ChildID: "source"}, nil); err != nil {
+		t.Fatalf("source Run: %v", err)
+	}
+	if _, err := fixture.runner.Run(context.Background(), RunRequest{
+		Task:            "continue",
+		ContinueChildID: "source",
+		ChildID:         "continued",
+	}, nil); err != nil {
+		t.Fatalf("continuation Run: %v", err)
+	}
+	want := []string{
+		"open source " + session.ChildSessionDir(fixture.sessionPath, "source") + " worker source",
+		"close source",
+		"open continued " + session.ChildSessionDir(fixture.sessionPath, "continued") + " worker continued",
+		"close continued",
+	}
+	if got := recorder.snapshot(); !slices.Equal(got, want) {
+		t.Fatalf("view events = %v, want %v", got, want)
+	}
 }

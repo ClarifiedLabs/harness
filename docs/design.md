@@ -1199,6 +1199,9 @@ constructs neither registry nor feed.
   root depth `0`) are config-only for the delegate tool. Both must be positive.
   `delegate_output` defaults to `status`; its environment and CLI forms are
   `HARNESS_DELEGATE_OUTPUT` and `-delegate-output`.
+  `delegate_tmux` (default off) follows each delegate child in its own tmux
+  window; its forms are `HARNESS_DELEGATE_TMUX` and `-delegate-tmux`.
+  `delegate_tmux_max_windows` (default `4`, config-only) must be positive.
 - Hooks use inline `hooks` plus config-relative `hook_configs` files. They are
   additive in order: inline first, then each listed file. `--hooks <file>`
   replaces the configured hook set for one launch.
@@ -2438,6 +2441,20 @@ this subsection records the common runner those argv tools point at.
   channel. Start/terminal lifecycle records evict ordinary records first;
   sequence reads synthesize a gap for each missing interval. The active registry,
   not this lossy feed, remains authoritative for current status.
+- When `delegate_tmux` is on and harness runs inside tmux, the Runner also
+  opens one detached tmux window per child through the display-only
+  `OpenChildView` seam, right after the running `meta.json` exists and before
+  the child agent runs. The window runs `harness session replay --follow --
+  <child-dir>` from the same binary; the follower tolerates the
+  not-yet-streaming child directory and exits on terminal metadata, so windows
+  are self-cleaning. `internal/tmux` caps simultaneous windows
+  (`delegate_tmux_max_windows`, default 4), kills the window on child success,
+  keeps failed/canceled windows open under `remain-on-exit` for inspection,
+  and drains every tracked window at process exit. Every step is best-effort:
+  construction outside tmux degrades to one stderr warning (suppressed by
+  quiet), the Runner swallows open failures, and no tmux failure ever
+  propagates into the delegate run. The path is independent of
+  `delegate_output`, which governs only the in-process status/lines display.
 - The child display coalescer preserves ordinary spaces, strips split CSI/OSC,
   normalizes CRLF, drops invalid UTF-8, expands tabs, replaces controls, and
   emits at most 2,048 UTF-8 bytes per assistant/reasoning chunk. Feed events are

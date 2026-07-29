@@ -11,7 +11,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -40,6 +42,7 @@ import (
 	"harness/internal/skills"
 	"harness/internal/sysprompt"
 	"harness/internal/term"
+	"harness/internal/tmux"
 	"harness/internal/todo"
 	"harness/internal/tools"
 	"harness/internal/tracing"
@@ -645,6 +648,14 @@ func run(env environment) int {
 			delegateActivity = delegate.NewActivityRegistry(delegateFeed)
 		}
 	}
+	// The tmux delegate viewer is display-only: construction degrades to nil
+	// with one warning outside tmux, and the runner swallows every open
+	// failure. Shutdown (nil-safe) kills any lingering windows at exit.
+	var childViewer *tmux.Viewer
+	if cfg.DelegateTmux {
+		childViewer = setupDelegateTmuxViewer(cfg, getenv, stderr, logger)
+		defer childViewer.Shutdown()
+	}
 	delegateOpts := delegate.Options{
 		MaxTurns:                  cfg.DelegateMaxTurns,
 		MaxDepth:                  cfg.DelegateMaxDepth,
@@ -661,6 +672,14 @@ func run(env environment) int {
 			return delegateAgentCandidates(agents)
 		},
 		ActivityRegistry: delegateActivity,
+	}
+	if cfg.DelegateTmux {
+		// The closure stays non-nil even when setup degraded to a nil viewer:
+		// a mid-run Shutdown then quietly stops new windows instead of
+		// re-arming the feature.
+		delegateOpts.OpenChildView = func(start delegate.ChildView) (delegate.ChildViewHandle, error) {
+			return childViewer.Open(tmux.View{Name: start.Name, Dir: start.Dir, Log: start.Log})
+		}
 	}
 	delegateRunner := delegate.NewRunner(delegateState.Snapshot, resolveDelegate, delegateOpts)
 	// One todo store per process backs the update_todos tool; the App persists it
@@ -1785,6 +1804,40 @@ func configAgentsFromDefinitions(agents map[string]agentdef.Definition) map[stri
 		}
 	}
 	return out
+}
+
+// setupDelegateTmuxViewer builds the tmux delegate-window viewer when
+// delegate_tmux is enabled. The feature is display-only: any setup failure
+// degrades to a nil viewer plus one stderr warning (suppressed by -q), and
+// the OpenChildView closure on a nil viewer returns an error the delegate
+// runner swallows.
+func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stderr io.Writer, logger *slog.Logger) *tmux.Viewer {
+	if getenv("TMUX") == "" {
+		if !cfg.Quiet {
+			fmt.Fprintln(stderr, "harness: warning: delegate_tmux is enabled but TMUX is not set; delegate windows disabled")
+		}
+		return nil
+	}
+	// os.Executable may resolve through a symlink (Homebrew); EvalSymlinks
+	// makes the path the window command runs stable.
+	harnessBin, err := os.Executable()
+	if err == nil {
+		if resolved, resolveErr := filepath.EvalSymlinks(harnessBin); resolveErr == nil {
+			harnessBin = resolved
+		}
+	}
+	tmuxBin, lookErr := exec.LookPath("tmux")
+	if err != nil || lookErr != nil {
+		if !cfg.Quiet {
+			fmt.Fprintln(stderr, "harness: warning: delegate_tmux is enabled but the harness or tmux binary could not be resolved; delegate windows disabled")
+		}
+		return nil
+	}
+	return tmux.NewViewer(tmux.Client{Binary: tmuxBin}, tmux.ViewerOptions{
+		HarnessBinary: harnessBin,
+		MaxWindows:    cfg.DelegateTmuxMaxWindows,
+		Logger:        logger,
+	})
 }
 
 func runSessionCommand(env environment, args []string) int {

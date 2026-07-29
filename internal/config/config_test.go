@@ -999,6 +999,67 @@ func TestDelegateOutputPrecedence(t *testing.T) {
 	}
 }
 
+func TestDelegateTmuxPrecedenceFlagBeatsEnvBeatsFileBeatsDefault(t *testing.T) {
+	checkPrecedence(t, precedenceCase[bool]{
+		file:     `{"delegate_tmux":true}`,
+		env:      map[string]string{"HARNESS_DELEGATE_TMUX": "true"},
+		flagArgs: []string{"-delegate-tmux"},
+		got:      func(c Config) bool { return c.DelegateTmux },
+		wantFlag: true,
+		wantEnv:  true,
+		wantFile: true,
+	})
+
+	c := loadOK(t, nil, noEnv, "")
+	if c.DelegateTmux {
+		t.Fatal("delegate_tmux should default to off")
+	}
+	if c.DelegateTmuxCLI != "default" {
+		t.Fatalf("delegate_tmux_cli default = %q, want default", c.DelegateTmuxCLI)
+	}
+	if c.DelegateTmuxMaxWindows != 4 {
+		t.Fatalf("delegate_tmux_max_windows default = %d, want 4", c.DelegateTmuxMaxWindows)
+	}
+}
+
+func TestDelegateTmuxCLITracksWinningSource(t *testing.T) {
+	cfgPath := writeConfig(t, `{"delegate_tmux":true}`)
+
+	// Flag wins over env and file, even when env disagrees.
+	c := loadOK(t, []string{"-delegate-tmux"}, envFrom(map[string]string{"HARNESS_DELEGATE_TMUX": "false"}), cfgPath)
+	if !c.DelegateTmux || c.DelegateTmuxCLI != "flag" {
+		t.Fatalf("flag source: tmux=%t cli=%q", c.DelegateTmux, c.DelegateTmuxCLI)
+	}
+	// Env wins over file.
+	c = loadOK(t, nil, envFrom(map[string]string{"HARNESS_DELEGATE_TMUX": "true"}), cfgPath)
+	if !c.DelegateTmux || c.DelegateTmuxCLI != "env" {
+		t.Fatalf("env source: tmux=%t cli=%q", c.DelegateTmux, c.DelegateTmuxCLI)
+	}
+	// File alone.
+	c = loadOK(t, nil, noEnv, cfgPath)
+	if !c.DelegateTmux || c.DelegateTmuxCLI != "file" {
+		t.Fatalf("file source: tmux=%t cli=%q", c.DelegateTmux, c.DelegateTmuxCLI)
+	}
+	// Nothing set.
+	c = loadOK(t, nil, noEnv, "")
+	if c.DelegateTmux || c.DelegateTmuxCLI != "default" {
+		t.Fatalf("default source: tmux=%t cli=%q", c.DelegateTmux, c.DelegateTmuxCLI)
+	}
+}
+
+func TestDelegateTmuxMaxWindowsConfig(t *testing.T) {
+	cfgPath := writeConfig(t, `{"delegate_tmux_max_windows":7}`)
+	if c := loadOK(t, nil, noEnv, cfgPath); c.DelegateTmuxMaxWindows != 7 {
+		t.Fatalf("file delegate_tmux_max_windows = %d, want 7", c.DelegateTmuxMaxWindows)
+	}
+	for _, value := range []string{"0", "-1"} {
+		cfgPath := writeConfig(t, `{"delegate_tmux_max_windows":`+value+`}`)
+		if _, err := Load(nil, noEnv, cfgPath); err == nil {
+			t.Fatalf("delegate_tmux_max_windows=%s should be invalid", value)
+		}
+	}
+}
+
 func TestDelegateOutputRejectsUnknownMode(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

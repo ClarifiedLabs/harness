@@ -127,6 +127,7 @@ interrupted.
 -agent <name>     agent: auto (default), explore, plan, review, independent, or a config-defined agent
 -handoff-agent <name>   default implementation agent for plan handoffs (default auto)
 -delegate-output <mode> delegate UI: status (default), off, or curated scrolling lines on stderr
+-delegate-tmux    follow each delegate child session in its own live tmux window (requires tmux)
 -web-search <mode>     server-side web search: off or auto (default off)
 -trace-proxy      send W3C trace headers to the model and MCP proxies
 -v                show tool result snippets (first ~5 lines, dimmed) and tool-call progress details
@@ -348,7 +349,14 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   feed retains at most 512 events / 256 KiB and reports loss as
   `[delegate output] omitted N events`. Use
   `harness session replay --follow <child-session>` for complete durable child
-  output.
+  output. `delegate_tmux` / `HARNESS_DELEGATE_TMUX` / `-delegate-tmux`
+  (default off) automates that full-fidelity view: inside a tmux session each
+  delegate child opens its own detached window following its session live.
+  Successful children close their window, failed ones stay for inspection,
+  and all windows close when harness exits. Config-only
+  `delegate_tmux_max_windows` (default 4) caps simultaneous windows. The
+  feature is display-only and independent of `delegate_output`; outside tmux
+  it degrades to one startup warning (suppressed by quiet).
 - Tool-surface limits for MCP and LSP are config-file-only: `mcp.max_tools` caps
   how many discovered remote MCP tools are auto-exposed (`0` = unlimited),
   `mcp.disabled_servers` is a list of remote MCP server names dropped from
