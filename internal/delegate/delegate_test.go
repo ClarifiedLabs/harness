@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -2531,5 +2532,75 @@ func TestDelegateChildViewOpensPerContinuationRun(t *testing.T) {
 	}
 	if got := recorder.snapshot(); !slices.Equal(got, want) {
 		t.Fatalf("view events = %v, want %v", got, want)
+	}
+}
+
+// childMetaOrderRecorder records view open/close events and captures the child
+// metadata status visible to Close, so we can assert saveChildMeta completed
+// before the view was torn down.
+type childMetaOrderRecorder struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *childMetaOrderRecorder) open(view ChildView) (ChildViewHandle, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, "open "+view.Name)
+	return &childMetaOrderHandle{recorder: r, name: view.Name, dir: view.Dir}, nil
+}
+
+func (r *childMetaOrderRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string{}, r.events...)
+}
+
+type childMetaOrderHandle struct {
+	recorder *childMetaOrderRecorder
+	name     string
+	dir      string
+}
+
+func (h *childMetaOrderHandle) Close() {
+	status := "missing"
+	reason := ""
+	if data, err := os.ReadFile(filepath.Join(h.dir, "meta.json")); err == nil {
+		var meta session.ChildMeta
+		if err := json.Unmarshal(data, &meta); err == nil {
+			status = meta.Status
+			reason = meta.TerminationReason
+		}
+	}
+	h.recorder.mu.Lock()
+	defer h.recorder.mu.Unlock()
+	h.recorder.events = append(h.recorder.events, fmt.Sprintf("close %s status=%s reason=%s", h.name, status, reason))
+}
+
+// The external tmux view is closed only after the parent persists the child's
+// terminal metadata, so the follower has a terminal meta.json to drain.
+func TestDelegateChildViewClosesAfterSaveMeta(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "done"}},
+		Stop:   llm.StopEndTurn,
+	})
+	sessionPath := filepath.Join(t.TempDir(), "session")
+	recorder := &childMetaOrderRecorder{}
+	childTools := &tools.Registry{}
+	runtime := Runtime{Provider: fp, Model: "model", Registry: llm.NewRegistry(nil), SessionPath: sessionPath}
+	runner := NewRunner(func() Runtime { return runtime }, func(runtime Runtime, name string) (Launch, error) {
+		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Agent: name, Tools: childTools}, nil
+	}, Options{OpenChildView: recorder.open})
+
+	if _, err := runner.Run(context.Background(), RunRequest{Kind: "delegate", Task: "inspect", Agent: "worker", ChildID: "child-ok"}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	events := recorder.snapshot()
+	want := []string{
+		"open child-ok",
+		"close child-ok status=completed reason=model_completed",
+	}
+	if !slices.Equal(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
 	}
 }

@@ -196,10 +196,11 @@ type Viewer struct {
 	layout     Layout
 	parentPane string
 
-	mu     sync.Mutex
-	open   map[string]*ViewHandle
-	order  []string
-	closed bool
+	mu       sync.Mutex
+	open     map[string]*ViewHandle
+	order    []string
+	closed   bool
+	inflight int // openings between cap check and registration
 
 	splitMu sync.Mutex
 }
@@ -249,20 +250,28 @@ func (v *Viewer) Open(view View) (*ViewHandle, error) {
 		v.mu.Unlock()
 		return nil, errShutdown
 	}
-	if len(v.open) >= v.opts.MaxWindows {
+	if len(v.open)+v.inflight >= v.opts.MaxWindows {
 		max := v.opts.MaxWindows
 		v.mu.Unlock()
 		v.logDebug(fmt.Sprintf("tmux: delegate view cap (%d) reached; no view for %s", max, view.Log))
 		return nil, errWindowCap
 	}
+	v.inflight++
 	v.mu.Unlock()
 
+	var handle *ViewHandle
+	var err error
 	switch v.layout {
 	case LayoutPane:
-		return v.openPane(view)
+		handle, err = v.openPane(view)
 	default:
-		return v.openWindow(view)
+		handle, err = v.openWindow(view)
 	}
+
+	v.mu.Lock()
+	v.inflight--
+	v.mu.Unlock()
+	return handle, err
 }
 
 func (v *Viewer) openWindow(view View) (*ViewHandle, error) {
@@ -309,12 +318,6 @@ func (v *Viewer) openPane(view View) (*ViewHandle, error) {
 	if v.closed {
 		v.mu.Unlock()
 		return nil, errShutdown
-	}
-	if len(v.open) >= v.opts.MaxWindows {
-		max := v.opts.MaxWindows
-		v.mu.Unlock()
-		v.logDebug(fmt.Sprintf("tmux: delegate view cap (%d) reached; no view for %s", max, view.Log))
-		return nil, errWindowCap
 	}
 	target := v.parentPane
 	horizontal := true
@@ -384,6 +387,10 @@ func (h *ViewHandle) Close() {
 // close removes id from the tracked set and kills it. Whoever removes the id
 // from the map owns the kill: if Shutdown drained first, close is a no-op.
 func (v *Viewer) close(id string) {
+	if v.layout == LayoutPane {
+		v.splitMu.Lock()
+		defer v.splitMu.Unlock()
+	}
 	v.mu.Lock()
 	_, tracked := v.open[id]
 	layout := v.layout
@@ -420,6 +427,10 @@ func (v *Viewer) killPane(id string) {
 func (v *Viewer) Shutdown() {
 	if v == nil {
 		return
+	}
+	if v.layout == LayoutPane {
+		v.splitMu.Lock()
+		defer v.splitMu.Unlock()
 	}
 	v.mu.Lock()
 	if v.closed {

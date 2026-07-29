@@ -564,17 +564,21 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		terminalOnce.Do(func() {
 			flushDisplay()
 			progress.markFinished()
+			if terminalUpdated.IsZero() {
+				terminalUpdated = r.now()
+			}
+			// Persist child metadata before tearing down the external tmux view:
+			// the follower process reads meta.json and needs terminal status to be
+			// on disk (and the pane still alive) before it can finish its final
+			// drain and exit cleanly.
+			_, err := r.saveChildMeta(runtime, launch, childID, req, maxTurns, runtimeFingerprint, terminalStatus, created, terminalUpdated, terminalUsage, terminalErr, terminalMessageCount)
+			result.SaveError = errors.Join(result.SaveError, err)
 			// Close every terminal view. In particular, leaving failed or
 			// canceled followers under tmux's remain-on-exit would strand a dead
 			// pane until the parent Harness process shuts down.
 			if view != nil {
 				view.Close()
 			}
-			if terminalUpdated.IsZero() {
-				terminalUpdated = r.now()
-			}
-			_, err := r.saveChildMeta(runtime, launch, childID, req, maxTurns, runtimeFingerprint, terminalStatus, created, terminalUpdated, terminalUsage, terminalErr, terminalMessageCount)
-			result.SaveError = errors.Join(result.SaveError, err)
 			activity.Finish(terminalStatus, terminalUsage.Turns)
 		})
 	}

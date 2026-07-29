@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeTmux records argv and emulates new-window/split-window -P id output.
@@ -650,4 +651,213 @@ func parseShellFields(t *testing.T, line string) []string {
 		fields = append(fields, b.String())
 	}
 	return fields
+}
+
+// blockingFakeTmux records argv and lets tests synchronize inside new-window
+// or split-window calls.
+type blockingFakeTmux struct {
+	mu         sync.Mutex
+	calls      [][]string
+	nextID     int
+	nextPaneID int
+	entering   chan string
+	release    chan struct{}
+}
+
+func (f *blockingFakeTmux) run(_ context.Context, args ...string) (string, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, append([]string{}, args...))
+	f.mu.Unlock()
+	if f.entering != nil && len(args) > 0 && (args[0] == "new-window" || args[0] == "split-window") {
+		f.entering <- args[0]
+	}
+	if f.release != nil && len(args) > 0 && (args[0] == "new-window" || args[0] == "split-window") {
+		<-f.release
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch args[0] {
+	case "new-window":
+		f.nextID++
+		return fmt.Sprintf("@%d\n", f.nextID), nil
+	case "split-window":
+		f.nextPaneID++
+		return fmt.Sprintf("%%%d\n", f.nextPaneID), nil
+	}
+	return "", nil
+}
+
+func (f *blockingFakeTmux) recorded() [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][]string{}, f.calls...)
+}
+
+// TestViewerConcurrentOpenRespectsCap stresses the MaxWindows check by keeping
+// two opens blocked inside tmux while more goroutines attempt to open. The
+// inflight slot reservation must prevent the cap from being exceeded.
+func TestViewerConcurrentOpenRespectsCap(t *testing.T) {
+	entering := make(chan string, 8)
+	release := make(chan struct{})
+	fake := &blockingFakeTmux{entering: entering, release: release}
+	viewer := NewViewer(Client{Binary: "/tmux", run: fake.run}, ViewerOptions{
+		HarnessBinary: "/harness",
+		MaxWindows:    2,
+	})
+
+	const n = 4
+	var wg sync.WaitGroup
+	handles := make([]*ViewHandle, n)
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			handles[idx], errs[idx] = viewer.Open(View{
+				Name: fmt.Sprintf("c%d", idx),
+				Dir:  fmt.Sprintf("/d%d", idx),
+				Log:  fmt.Sprintf("a c%d", idx),
+			})
+		}(i)
+	}
+
+	// Wait for exactly MaxWindows calls to enter tmux; the remaining opens
+	// should have been rejected at the inflight-aware cap check.
+	for i := 0; i < 2; i++ {
+		select {
+		case cmd := <-entering:
+			if cmd != "new-window" {
+				t.Fatalf("expected new-window, got %q", cmd)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for open to enter tmux")
+		}
+	}
+
+	// No additional open should make it into tmux while the first two are
+	// still in-flight.
+	select {
+	case cmd := <-entering:
+		t.Fatalf("cap exceeded: unexpected third tmux call %q", cmd)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	viewer.mu.Lock()
+	openCount := len(viewer.open)
+	inflight := viewer.inflight
+	viewer.mu.Unlock()
+	if openCount != 0 || inflight != 2 {
+		t.Fatalf("open=%d inflight=%d, want 0 and 2", openCount, inflight)
+	}
+
+	// Release the two blocked opens.
+	release <- struct{}{}
+	release <- struct{}{}
+
+	wg.Wait()
+
+	success := 0
+	for i, h := range handles {
+		if errs[i] == nil && h != nil {
+			success++
+		} else if errs[i] != nil && !errors.Is(errs[i], errWindowCap) {
+			t.Fatalf("unexpected error for %d: %v", i, errs[i])
+		}
+	}
+	if success != 2 {
+		t.Fatalf("successful opens = %d, want 2", success)
+	}
+}
+
+// TestViewerPaneCloseDuringSplitTargetProtected verifies that closing one pane
+// cannot race past openPane's target selection and kill the pane another open
+// is about to split from.
+func TestViewerPaneCloseDuringSplitTargetProtected(t *testing.T) {
+	entering := make(chan string, 4)
+	release := make(chan struct{})
+	fake := &blockingFakeTmux{entering: entering, release: release}
+	viewer := NewViewer(Client{Binary: "/tmux", run: fake.run}, ViewerOptions{
+		HarnessBinary: "/harness",
+		MaxWindows:    4,
+		Layout:        LayoutPane,
+		ParentPane:    "%9",
+	})
+
+	// Open the first pane in a goroutine so the fake can block on its
+	// split-window without freezing the test goroutine.
+	var h1 *ViewHandle
+	var h1err error
+	h1done := make(chan struct{})
+	go func() {
+		h1, h1err = viewer.Open(View{Name: "c1", Dir: "/d1", Log: "a c1"})
+		close(h1done)
+	}()
+	select {
+	case cmd := <-entering:
+		if cmd != "split-window" {
+			t.Fatalf("expected split-window for first pane, got %q", cmd)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for first split-window")
+	}
+	release <- struct{}{}
+	select {
+	case <-h1done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for first open to finish")
+	}
+	if h1err != nil {
+		t.Fatalf("Open 1: %v", h1err)
+	}
+
+	// Start opening a second pane; it selects h1's pane as its split target
+	// and then blocks inside split-window.
+	var h2 *ViewHandle
+	var h2err error
+	done := make(chan struct{})
+	go func() {
+		h2, h2err = viewer.Open(View{Name: "c2", Dir: "/d2", Log: "a c2"})
+		close(done)
+	}()
+	select {
+	case cmd := <-entering:
+		if cmd != "split-window" {
+			t.Fatalf("expected split-window for second pane, got %q", cmd)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for second split-window")
+	}
+
+	// Release h2's split from another goroutine so the test can close h1
+	// concurrently without deadlocking on the fake. With splitMu held across
+	// the entire openPane, close cannot kill h1 until the split completes.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		release <- struct{}{}
+	}()
+	h1.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for second open to finish")
+	}
+	if h2err != nil {
+		t.Fatalf("Open 2 failed because its split target was killed mid-split: %v", h2err)
+	}
+
+	viewer.mu.Lock()
+	_, hasH1 := viewer.open[h1.ID()]
+	_, hasH2 := viewer.open[h2.ID()]
+	orderLen := len(viewer.order)
+	viewer.mu.Unlock()
+	if hasH1 {
+		t.Fatalf("h1 still tracked after Close")
+	}
+	if !hasH2 {
+		t.Fatalf("h2 not tracked after Open")
+	}
+	if orderLen != 1 || (orderLen > 0 && viewer.order[0] != h2.ID()) {
+		t.Fatalf("order = %v, want [%s]", viewer.order, h2.ID())
+	}
 }
