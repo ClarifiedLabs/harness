@@ -243,6 +243,7 @@ func TestHarnessEnvMapping(t *testing.T) {
 		"HARNESS_SHOW_DIFFS":                 "true",
 		"HARNESS_REPL_PROMPT":                "env> ",
 		"HARNESS_REPL_EDIT_MODE":             "vi",
+		"HARNESS_DELEGATE_TMUX_LAYOUT":       "window",
 		"LOG_LEVEL":                          "WARN",
 	})
 	c, err := Load(nil, env, "")
@@ -326,6 +327,9 @@ func TestHarnessEnvMapping(t *testing.T) {
 	}
 	if c.ReplEditMode != "vi" {
 		t.Fatalf("repl edit mode %q, want vi", c.ReplEditMode)
+	}
+	if c.DelegateTmuxLayout != "window" {
+		t.Fatalf("delegate_tmux_layout %q, want window", c.DelegateTmuxLayout)
 	}
 }
 
@@ -1057,6 +1061,47 @@ func TestDelegateTmuxMaxWindowsConfig(t *testing.T) {
 		if _, err := Load(nil, noEnv, cfgPath); err == nil {
 			t.Fatalf("delegate_tmux_max_windows=%s should be invalid", value)
 		}
+	}
+}
+
+func TestDelegateTmuxLayoutPrecedenceFlagBeatsEnvBeatsFileBeatsDefault(t *testing.T) {
+	checkPrecedence(t, precedenceCase[string]{
+		file:     `{"delegate_tmux_layout":"window"}`,
+		env:      map[string]string{"HARNESS_DELEGATE_TMUX_LAYOUT": "pane"},
+		flagArgs: []string{"-delegate-tmux-layout", "window"},
+		got:      func(c Config) string { return c.DelegateTmuxLayout },
+		wantFlag: "window",
+		wantEnv:  "pane",
+		wantFile: "window",
+	})
+
+	c := loadOK(t, nil, noEnv, "")
+	if c.DelegateTmuxLayout != DelegateTmuxLayoutPane {
+		t.Fatalf("delegate_tmux_layout default = %q, want pane", c.DelegateTmuxLayout)
+	}
+}
+
+func TestDelegateTmuxLayoutRejectsUnknownValue(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		getenv func(string) string
+		file   string
+	}{
+		{name: "file", getenv: noEnv, file: `{"delegate_tmux_layout":"vertical"}`},
+		{name: "environment", getenv: envFrom(map[string]string{"HARNESS_DELEGATE_TMUX_LAYOUT": "vertical"})},
+		{name: "flag", args: []string{"-delegate-tmux-layout", "vertical"}, getenv: noEnv},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := ""
+			if tc.file != "" {
+				path = writeConfig(t, tc.file)
+			}
+			_, err := Load(tc.args, tc.getenv, path)
+			if err == nil || !strings.Contains(err.Error(), "delegate_tmux_layout") {
+				t.Fatalf("Load error = %v, want delegate_tmux_layout validation error", err)
+			}
+		})
 	}
 }
 

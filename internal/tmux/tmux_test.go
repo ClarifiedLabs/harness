@@ -7,29 +7,39 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 )
 
-// fakeTmux records argv and emulates new-window's -P window-id output.
+// fakeTmux records argv and emulates new-window/split-window -P id output.
 type fakeTmux struct {
-	mu      sync.Mutex
-	calls   [][]string
-	nextID  int
-	failNew error
+	mu         sync.Mutex
+	calls      [][]string
+	nextID     int
+	nextPaneID int
+	failNew    error
+	failSplit  error
 }
 
 func (f *fakeTmux) run(_ context.Context, args ...string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, append([]string{}, args...))
-	if args[0] == "new-window" {
+	switch args[0] {
+	case "new-window":
 		if f.failNew != nil {
 			return "", f.failNew
 		}
 		f.nextID++
 		return fmt.Sprintf("@%d\n", f.nextID), nil
+	case "split-window":
+		if f.failSplit != nil {
+			return "", f.failSplit
+		}
+		f.nextPaneID++
+		return fmt.Sprintf("%%%d\n", f.nextPaneID), nil
 	}
 	return "", nil
 }
@@ -362,6 +372,245 @@ exit 0
 		{"rename-window", "-t", "@6", "--", "c2"},
 		{"kill-window", "-t", "@6"},
 	})
+}
+
+// TestViewerPaneGoldenArgv asserts the exact tmux invocations for one pane
+// open/close cycle: horizontal split of the parent pane, per-pane option and
+// title, and kill-pane; no automatic-rename or select-layout for a single pane.
+func TestViewerPaneGoldenArgv(t *testing.T) {
+	fake := &fakeTmux{}
+	viewer := NewViewer(Client{Binary: "/usr/local/bin/tmux", run: fake.run}, ViewerOptions{
+		HarnessBinary: "/usr/local/bin/harness",
+		MaxWindows:    2,
+		Layout:        LayoutPane,
+		ParentPane:    "%9",
+	})
+
+	h, err := viewer.Open(View{
+		Name: "delegate_20260729T120000Z_000001",
+		Dir:  "/sessions/children/delegate_20260729T120000Z_000001",
+		Log:  "auto delegate_20260729T120000Z_000001",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if h.ID() != "%1" {
+		t.Fatalf("handle ID = %q, want %%1", h.ID())
+	}
+	h.Close()
+
+	assertCalls(t, fake.recorded(), [][]string{
+		{"split-window", "-d", "-h", "-t", "%9", "-P", "-F", "#{pane_id}", "--",
+			"/usr/local/bin/harness", "session", "replay", "--follow", "--",
+			"/sessions/children/delegate_20260729T120000Z_000001"},
+		{"set-option", "-p", "-q", "-t", "%1", "remain-on-exit", "on"},
+		{"select-pane", "-T", "delegate_20260729T120000Z_000001", "-t", "%1"},
+		{"kill-pane", "-t", "%1"},
+	})
+}
+
+// TestViewerPaneStacksAdditionalDelegates checks that the second and third
+// delegates split the previous delegate pane vertically and even the column,
+// and that closing a middle pane leaves the others intact.
+func TestViewerPaneStacksAdditionalDelegates(t *testing.T) {
+	fake := &fakeTmux{}
+	viewer := NewViewer(Client{Binary: "/tmux", run: fake.run}, ViewerOptions{
+		HarnessBinary: "/harness",
+		MaxWindows:    4,
+		Layout:        LayoutPane,
+		ParentPane:    "%9",
+	})
+
+	h1, err := viewer.Open(View{Name: "c1", Dir: "/d1", Log: "a c1"})
+	if err != nil {
+		t.Fatalf("Open 1: %v", err)
+	}
+	h2, err := viewer.Open(View{Name: "c2", Dir: "/d2", Log: "a c2"})
+	if err != nil {
+		t.Fatalf("Open 2: %v", err)
+	}
+	h3, err := viewer.Open(View{Name: "c3", Dir: "/d3", Log: "a c3"})
+	if err != nil {
+		t.Fatalf("Open 3: %v", err)
+	}
+	if h1.ID() != "%1" || h2.ID() != "%2" || h3.ID() != "%3" {
+		t.Fatalf("handle IDs = %q/%q/%q, want %%1/%%2/%%3", h1.ID(), h2.ID(), h3.ID())
+	}
+
+	h2.Close()
+	viewer.Shutdown()
+
+	assertCalls(t, fake.recorded(), [][]string{
+		{"split-window", "-d", "-h", "-t", "%9", "-P", "-F", "#{pane_id}", "--", "/harness", "session", "replay", "--follow", "--", "/d1"},
+		{"set-option", "-p", "-q", "-t", "%1", "remain-on-exit", "on"},
+		{"select-pane", "-T", "c1", "-t", "%1"},
+		{"split-window", "-d", "-v", "-t", "%1", "-P", "-F", "#{pane_id}", "--", "/harness", "session", "replay", "--follow", "--", "/d2"},
+		{"set-option", "-p", "-q", "-t", "%2", "remain-on-exit", "on"},
+		{"select-pane", "-T", "c2", "-t", "%2"},
+		{"select-layout", "-E", "-t", "%2"},
+		{"split-window", "-d", "-v", "-t", "%2", "-P", "-F", "#{pane_id}", "--", "/harness", "session", "replay", "--follow", "--", "/d3"},
+		{"set-option", "-p", "-q", "-t", "%3", "remain-on-exit", "on"},
+		{"select-pane", "-T", "c3", "-t", "%3"},
+		{"select-layout", "-E", "-t", "%3"},
+		{"kill-pane", "-t", "%2"},
+		{"kill-pane", "-t", "%1"},
+		{"kill-pane", "-t", "%3"},
+	})
+}
+
+// TestViewerPaneCapShared ensures the cap is checked while holding splitMu so
+// a third concurrent opener never reaches tmux.
+func TestViewerPaneCapShared(t *testing.T) {
+	fake := &fakeTmux{}
+	viewer := NewViewer(Client{Binary: "/tmux", run: fake.run}, ViewerOptions{
+		HarnessBinary: "/harness",
+		MaxWindows:    2,
+		Layout:        LayoutPane,
+		ParentPane:    "%9",
+	})
+	if _, err := viewer.Open(View{Name: "c1", Dir: "/d1", Log: "a c1"}); err != nil {
+		t.Fatalf("Open 1: %v", err)
+	}
+	if _, err := viewer.Open(View{Name: "c2", Dir: "/d2", Log: "a c2"}); err != nil {
+		t.Fatalf("Open 2: %v", err)
+	}
+	if _, err := viewer.Open(View{Name: "c3", Dir: "/d3", Log: "a c3"}); !errors.Is(err, errWindowCap) {
+		t.Fatalf("Open 3 error = %v, want window cap", err)
+	}
+	if got := countCalls(fake.recorded(), "split-window"); got != 2 {
+		t.Fatalf("split-window calls = %d, want 2 (cap rejected before spawning)", got)
+	}
+}
+
+// TestViewerPaneRequiresParentPane ensures pane layout fails fast without a
+// parent pane and never touches tmux.
+func TestViewerPaneRequiresParentPane(t *testing.T) {
+	fake := &fakeTmux{}
+	viewer := NewViewer(Client{Binary: "/tmux", run: fake.run}, ViewerOptions{
+		HarnessBinary: "/harness",
+		MaxWindows:    1,
+		Layout:        LayoutPane,
+	})
+	if _, err := viewer.Open(View{Name: "c1", Dir: "/d1", Log: "a c1"}); err == nil {
+		t.Fatal("pane layout without parent pane should fail")
+	}
+	if got := countCalls(fake.recorded(), "split-window"); got != 0 {
+		t.Fatalf("split-window calls = %d, want 0", got)
+	}
+}
+
+// TestViewerPaneConcurrentFirstOpensSerialize verifies that two simultaneous
+// first-opens cannot both horizontally split the parent: one opens first, and
+// the second stacks vertically on it.
+func TestViewerPaneConcurrentFirstOpensSerialize(t *testing.T) {
+	fake := &fakeTmux{}
+	viewer := NewViewer(Client{Binary: "/tmux", run: fake.run}, ViewerOptions{
+		HarnessBinary: "/harness",
+		MaxWindows:    4,
+		Layout:        LayoutPane,
+		ParentPane:    "%9",
+	})
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var handles [2]*ViewHandle
+	var errs [2]error
+	for i := range 2 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			handles[i], errs[i] = viewer.Open(View{Name: fmt.Sprintf("c%d", i+1), Dir: fmt.Sprintf("/d%d", i+1), Log: fmt.Sprintf("a c%d", i+1)})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Open %d: %v", i+1, err)
+		}
+	}
+
+	calls := fake.recorded()
+	hSplits := countCallsWithTarget(calls, "split-window", "-h", "%9")
+	vSplits := countCallsWithTarget(calls, "split-window", "-v", "%1")
+	if hSplits != 1 || vSplits != 1 {
+		t.Fatalf("got %d horizontal parent splits and %d vertical %%1 splits, want 1/1\ncalls: %v", hSplits, vSplits, calls)
+	}
+	for _, h := range handles {
+		h.Close()
+	}
+}
+
+func countCallsWithTarget(calls [][]string, name, flag, target string) int {
+	n := 0
+	for _, c := range calls {
+		if len(c) == 0 || c[0] != name {
+			continue
+		}
+		if slices.Contains(c, flag) && slices.Contains(c, target) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestViewerPaneDrainOnShutdown covers the same drain/close-after-shutdown
+// invariants for pane layout.
+func TestViewerPaneDrainOnShutdown(t *testing.T) {
+	fake := &fakeTmux{}
+	viewer := NewViewer(Client{Binary: "/tmux", run: fake.run}, ViewerOptions{
+		HarnessBinary: "/harness",
+		MaxWindows:    4,
+		Layout:        LayoutPane,
+		ParentPane:    "%9",
+	})
+	h1, err := viewer.Open(View{Name: "c1", Dir: "/d1", Log: "a c1"})
+	if err != nil {
+		t.Fatalf("Open 1: %v", err)
+	}
+	if _, err := viewer.Open(View{Name: "c2", Dir: "/d2", Log: "a c2"}); err != nil {
+		t.Fatalf("Open 2: %v", err)
+	}
+	h1.Close()
+	viewer.Shutdown()
+	viewer.Shutdown()
+
+	var kills [][]string
+	for _, c := range fake.recorded() {
+		if c[0] == "kill-pane" {
+			kills = append(kills, c)
+		}
+	}
+	if len(kills) != 2 {
+		t.Fatalf("kill-pane calls = %v, want exactly 2", kills)
+	}
+	assertCalls(t, kills, [][]string{{"kill-pane", "-t", "%1"}, {"kill-pane", "-t", "%2"}})
+}
+
+// TestViewerPaneSplitFailurePropagatesAndLogs mirrors the window failure test
+// for the pane path.
+func TestViewerPaneSplitFailurePropagatesAndLogs(t *testing.T) {
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	fake := &fakeTmux{failSplit: fmt.Errorf("exit status 1: no server")}
+	viewer := NewViewer(Client{Binary: "/tmux", run: fake.run}, ViewerOptions{
+		HarnessBinary: "/harness",
+		MaxWindows:    1,
+		Layout:        LayoutPane,
+		ParentPane:    "%9",
+		Logger:        logger,
+	})
+	if _, err := viewer.Open(View{Name: "c", Dir: "/d", Log: "explore c"}); err == nil {
+		t.Fatal("Open should return the tmux failure")
+	}
+	if !strings.Contains(logs.String(), "explore c") || !strings.Contains(logs.String(), "category=tmux") {
+		t.Fatalf("warning should name the delegate and category, got %q", logs.String())
+	}
+	viewer.Shutdown()
+	if got := countCalls(fake.recorded(), "kill-pane"); got != 0 {
+		t.Fatalf("kill-pane calls = %d, want 0", got)
+	}
 }
 
 // parseShellFields decodes one recorder line: single-quoted fields with an

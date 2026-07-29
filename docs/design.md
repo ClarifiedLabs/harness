@@ -1200,8 +1200,11 @@ constructs neither registry nor feed.
   `delegate_output` defaults to `status`; its environment and CLI forms are
   `HARNESS_DELEGATE_OUTPUT` and `-delegate-output`.
   `delegate_tmux` (default off) follows each delegate child in its own tmux
-  window; its forms are `HARNESS_DELEGATE_TMUX` and `-delegate-tmux`.
-  `delegate_tmux_max_windows` (default `4`, config-only) must be positive.
+  view; its forms are `HARNESS_DELEGATE_TMUX` and `-delegate-tmux`.
+  `delegate_tmux_layout` defaults to `pane`; its forms are
+  `HARNESS_DELEGATE_TMUX_LAYOUT` and `-delegate-tmux-layout`.
+  `delegate_tmux_max_windows` (default `4`, config-only) caps simultaneous
+  views in either layout and must be positive.
 - Hooks use inline `hooks` plus config-relative `hook_configs` files. They are
   additive in order: inline first, then each listed file. `--hooks <file>`
   replaces the configured hook set for one launch.
@@ -2442,17 +2445,22 @@ this subsection records the common runner those argv tools point at.
   sequence reads synthesize a gap for each missing interval. The active registry,
   not this lossy feed, remains authoritative for current status.
 - When `delegate_tmux` is on and harness runs inside tmux, the Runner also
-  opens one detached tmux window per child through the display-only
-  `OpenChildView` seam, right after the running `meta.json` exists and before
-  the child agent runs. The window runs `harness session replay --follow --
-  <child-dir>` from the same binary; the follower tolerates the
-  not-yet-streaming child directory and exits on terminal metadata, so windows
-  are self-cleaning. `internal/tmux` caps simultaneous windows
-  (`delegate_tmux_max_windows`, default 4), kills the window on child success,
-  keeps failed/canceled windows open under `remain-on-exit` for inspection,
-  and drains every tracked window at process exit. Every step is best-effort:
-  construction outside tmux degrades to one stderr warning (suppressed by
-  quiet), the Runner swallows open failures, and no tmux failure ever
+  opens one display-only tmux view per child through the `OpenChildView` seam,
+  right after the running `meta.json` exists and before the child agent runs.
+  The view runs `harness session replay --follow -- <child-dir>` from the same
+  binary; the follower tolerates the not-yet-streaming child directory and
+  exits on terminal metadata, so views are self-cleaning. The default
+  `delegate_tmux_layout=pane` splits a right-hand pane stack from the harness
+  pane (`split-window -h` for the first pane, `split-window -v` against the
+  most recent delegate pane for subsequent panes, and `select-layout -E` after
+  each open once two or more delegate panes exist); `window` preserves the
+  historical one-detached-window-per-child behavior. `internal/tmux` caps
+  simultaneous views (`delegate_tmux_max_windows`, default 4), kills the view
+  on child success, keeps failed/canceled views open under `remain-on-exit` for
+  inspection, and drains every tracked view at process exit. Every step is
+  best-effort: construction outside tmux degrades to one stderr warning
+  (suppressed by quiet), pane layout degrades to windows when `TMUX_PANE` is
+  missing, the Runner swallows open failures, and no tmux failure ever
   propagates into the delegate run. The path is independent of
   `delegate_output`, which governs only the in-process status/lines display.
 - The child display coalescer preserves ordinary spaces, strips split CSI/OSC,

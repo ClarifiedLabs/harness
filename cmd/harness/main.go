@@ -1806,7 +1806,7 @@ func configAgentsFromDefinitions(agents map[string]agentdef.Definition) map[stri
 	return out
 }
 
-// setupDelegateTmuxViewer builds the tmux delegate-window viewer when
+// setupDelegateTmuxViewer builds the tmux delegate-view viewer when
 // delegate_tmux is enabled. The feature is display-only: any setup failure
 // degrades to a nil viewer plus one stderr warning (suppressed by -q), and
 // the OpenChildView closure on a nil viewer returns an error the delegate
@@ -1814,12 +1814,12 @@ func configAgentsFromDefinitions(agents map[string]agentdef.Definition) map[stri
 func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stderr io.Writer, logger *slog.Logger) *tmux.Viewer {
 	if getenv("TMUX") == "" {
 		if !cfg.Quiet {
-			fmt.Fprintln(stderr, "harness: warning: delegate_tmux is enabled but TMUX is not set; delegate windows disabled")
+			fmt.Fprintln(stderr, "harness: warning: delegate_tmux is enabled but TMUX is not set; delegate views disabled")
 		}
 		return nil
 	}
 	// os.Executable may resolve through a symlink (Homebrew); EvalSymlinks
-	// makes the path the window command runs stable.
+	// makes the path the view command runs stable.
 	harnessBin, err := os.Executable()
 	if err == nil {
 		if resolved, resolveErr := filepath.EvalSymlinks(harnessBin); resolveErr == nil {
@@ -1829,13 +1829,26 @@ func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stde
 	tmuxBin, lookErr := exec.LookPath("tmux")
 	if err != nil || lookErr != nil {
 		if !cfg.Quiet {
-			fmt.Fprintln(stderr, "harness: warning: delegate_tmux is enabled but the harness or tmux binary could not be resolved; delegate windows disabled")
+			fmt.Fprintln(stderr, "harness: warning: delegate_tmux is enabled but the harness or tmux binary could not be resolved; delegate views disabled")
 		}
 		return nil
+	}
+	layout := tmux.Layout(cfg.DelegateTmuxLayout)
+	parentPane := ""
+	if layout == tmux.LayoutPane {
+		parentPane = getenv("TMUX_PANE")
+		if parentPane == "" {
+			if !cfg.Quiet {
+				fmt.Fprintf(stderr, "harness: warning: delegate_tmux_layout=%s but TMUX_PANE is not set; delegate views use windows\n", cfg.DelegateTmuxLayout)
+			}
+			layout = tmux.LayoutWindow
+		}
 	}
 	return tmux.NewViewer(tmux.Client{Binary: tmuxBin}, tmux.ViewerOptions{
 		HarnessBinary: harnessBin,
 		MaxWindows:    cfg.DelegateTmuxMaxWindows,
+		Layout:        layout,
+		ParentPane:    parentPane,
 		Logger:        logger,
 	})
 }

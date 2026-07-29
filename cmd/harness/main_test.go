@@ -3134,7 +3134,7 @@ func TestRunDelegateTmuxOpensWindowWithFakeTmux(t *testing.T) {
 
 	fp := llmtest.New("fake", delegateSteps()...)
 	env, _, errw, getenv := fakeProviderEnv(t,
-		[]string{"-model", "claude-opus-4-8", "-delegate-tmux", "-delegate-output", "off", "-p", "hi"}, fp, "")
+		[]string{"-model", "claude-opus-4-8", "-delegate-tmux", "-delegate-tmux-layout", "window", "-delegate-output", "off", "-p", "hi"}, fp, "")
 	env.getenv = func(k string) string {
 		if k == "TMUX" {
 			return "/tmp/fake-tmux,0,0"
@@ -3162,6 +3162,102 @@ func TestRunDelegateTmuxOpensWindowWithFakeTmux(t *testing.T) {
 	}
 	if strings.Contains(errw.String(), "delegate_tmux") {
 		t.Fatalf("no warning expected inside tmux: %q", errw.String())
+	}
+}
+
+// Inside tmux with the default pane layout a right-hand pane splits from the
+// parent and closes on success. A fake tmux on PATH records the real argv.
+func TestRunDelegateTmuxOpensPaneWithFakeTmux(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	binDir := t.TempDir()
+	fake := `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_TMUX_LOG"
+if [ "$1" = "new-window" ]; then printf '@1\n'; fi
+if [ "$1" = "split-window" ]; then printf '%%1\n'; fi
+`
+	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(fake), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("FAKE_TMUX_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	fp := llmtest.New("fake", delegateSteps()...)
+	env, _, errw, getenv := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-delegate-tmux", "-delegate-output", "off", "-p", "hi"}, fp, "")
+	env.getenv = func(k string) string {
+		switch k {
+		case "TMUX":
+			return "/tmp/fake-tmux,0,0"
+		case "TMUX_PANE":
+			return "%0"
+		}
+		return getenv(k)
+	}
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, stderr=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want parent, child, parent", len(fp.Requests))
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("fake tmux never ran: %v (stderr=%q)", err, errw.String())
+	}
+	log := string(data)
+	if !strings.Contains(log, "split-window -d -h -t %0 -P -F #{pane_id}") ||
+		!strings.Contains(log, "session replay --follow -- ") ||
+		!strings.Contains(log, "/children/delegate_") {
+		t.Fatalf("pane split invocation missing or malformed: %q", log)
+	}
+	if !strings.Contains(log, "set-option -p -q -t %1 remain-on-exit on") {
+		t.Fatalf("per-pane remain-on-exit missing: %q", log)
+	}
+	if !strings.Contains(log, "kill-pane -t %1") {
+		t.Fatalf("successful child should close its pane: %q", log)
+	}
+	if strings.Contains(log, "new-window") {
+		t.Fatalf("pane layout should not open a window: %q", log)
+	}
+	if strings.Contains(errw.String(), "warning") {
+		t.Fatalf("no warning expected inside tmux with TMUX_PANE: %q", errw.String())
+	}
+}
+
+// Pane layout falls back to windows when TMUX_PANE is missing, with a warning.
+func TestRunDelegateTmuxPaneFallsBackToWindowWithoutTmuxPane(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	binDir := t.TempDir()
+	fake := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_TMUX_LOG\"\nif [ \"$1\" = \"new-window\" ]; then printf '@1\\n'; fi\n"
+	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(fake), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("FAKE_TMUX_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	fp := llmtest.New("fake", delegateSteps()...)
+	env, _, errw, getenv := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-delegate-tmux", "-delegate-output", "off", "-p", "hi"}, fp, "")
+	env.getenv = func(k string) string {
+		if k == "TMUX" {
+			return "/tmp/fake-tmux,0,0"
+		}
+		return getenv(k)
+	}
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, stderr=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want parent, child, parent", len(fp.Requests))
+	}
+	if !strings.Contains(errw.String(), "delegate_tmux_layout=pane but TMUX_PANE is not set") {
+		t.Fatalf("missing TMUX_PANE fallback warning: %q", errw.String())
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("fake tmux never ran: %v (stderr=%q)", err, errw.String())
+	}
+	if !strings.Contains(string(data), "new-window -d -a -P") {
+		t.Fatalf("fallback should open a window: %q", string(data))
 	}
 }
 
@@ -3199,6 +3295,9 @@ func TestRunShowConfigIncludesDelegateTmux(t *testing.T) {
 	}
 	if got["delegate_tmux_max_windows"] != float64(4) {
 		t.Fatalf("delegate_tmux_max_windows = %v, want 4", got["delegate_tmux_max_windows"])
+	}
+	if got["delegate_tmux_layout"] != "pane" {
+		t.Fatalf("delegate_tmux_layout = %v, want pane", got["delegate_tmux_layout"])
 	}
 }
 

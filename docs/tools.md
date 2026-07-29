@@ -337,16 +337,19 @@ results, commands, URLs, provider messages/IDs, error strings, and opaque
 reasoning. `-v` and `-tool-stream` affect only parent diagnostics.
 
 With `delegate_tmux` on (flag, env, or config) inside a tmux session, each
-delegate child also opens its own detached tmux window running
+delegate child also opens a display-only tmux view running
 `harness session replay --follow` on the child session directory — the
-full-fidelity live view, without the feed's curation bounds. Successful
-children close their window; failed or canceled windows stay open for
-inspection, and any remaining windows close when harness exits. At most
-`delegate_tmux_max_windows` (default 4) windows are open at once; additional
-children simply run without one. The windows are display-only: outside tmux
-the feature degrades to a single startup warning, and no window failure ever
-affects the delegate run. `delegate_output` continues to govern the inline
-status/lines display independently.
+full-fidelity live view, without the feed's curation bounds.
+`delegate_tmux_layout` selects `pane` (default) or `window`: pane splits a
+right-hand stack from the harness pane, while window keeps the historical
+behavior of one detached window per child. Successful children close their
+view; failed or canceled views stay open for inspection, and any remaining
+views close when harness exits. At most `delegate_tmux_max_windows` (default
+4) views are open at once; additional children simply run without one. The
+views are display-only: outside tmux the feature degrades to a single startup
+warning, pane layout degrades to windows if `TMUX_PANE` is missing, and no
+view failure ever affects the delegate run. `delegate_output` continues to
+govern the inline status/lines display independently.
 
 Inline output is bounded and best-effort. It may wait for a natural parent
 assistant line boundary, and feed eviction appears as
