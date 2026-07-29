@@ -314,7 +314,9 @@ func TestSmokeDelegateTmuxPane(t *testing.T) {
 		srv.Close()
 	})
 
-	cmd, stdout, errBuf, home := startHarness(t, bin, srv.URL+"/v1", "-delegate-tmux", "-p", "delegate the inspection")
+	// No -delegate-tmux: the auto default inside tmux (TMUX/TMUX_PANE set by
+	// configureHarnessEnvironment) is what enables the pane view here.
+	cmd, stdout, errBuf, home := startHarness(t, bin, srv.URL+"/v1", "-p", "delegate the inspection")
 	cleanupHarnessProcess(t, gate, cmd)
 	waitForChildRequest(t, gate, cmd, errBuf)
 	childDir := childSessionDir(t, home)

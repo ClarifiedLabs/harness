@@ -3295,6 +3295,115 @@ if [ "$1" = "split-window" ]; then printf '%%1\n'; fi
 	}
 }
 
+// Inside tmux delegate_tmux turns on by default: no flag is needed for a
+// pane to open for the child.
+func TestRunDelegateTmuxAutoEnabledInsideTmux(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	binDir := t.TempDir()
+	fake := `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_TMUX_LOG"
+if [ "$1" = "new-window" ]; then printf '@1\n'; fi
+if [ "$1" = "split-window" ]; then printf '%%1\n'; fi
+`
+	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(fake), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("FAKE_TMUX_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	fp := llmtest.New("fake", delegateSteps()...)
+	env, _, errw, getenv := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-delegate-output", "off", "-p", "hi"}, fp, "")
+	env.getenv = func(k string) string {
+		switch k {
+		case "TMUX":
+			return "/tmp/fake-tmux,0,0"
+		case "TMUX_PANE":
+			return "%0"
+		}
+		return getenv(k)
+	}
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, stderr=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want parent, child, parent", len(fp.Requests))
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("fake tmux never ran: %v (stderr=%q)", err, errw.String())
+	}
+	if log := string(data); !strings.Contains(log, "split-window -d -h -t %0 -P -F #{pane_id}") {
+		t.Fatalf("auto-enabled delegate_tmux should split a pane: %q", log)
+	}
+	if strings.Contains(errw.String(), "warning") {
+		t.Fatalf("no warning expected inside tmux with TMUX_PANE: %q", errw.String())
+	}
+}
+
+// The auto default flips only the default: an explicit false keeps the
+// feature off even inside tmux.
+func TestRunDelegateTmuxAutoRespectsExplicitOff(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	binDir := t.TempDir()
+	fake := "#!/bin/sh\nprintf '%s\n' \"$*\" >> \"$FAKE_TMUX_LOG\"\nif [ \"$1\" = \"split-window\" ]; then printf '%%1\\n'; fi\n"
+	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(fake), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("FAKE_TMUX_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	fp := llmtest.New("fake", delegateSteps()...)
+	env, _, errw, getenv := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-delegate-tmux=false", "-delegate-output", "off", "-p", "hi"}, fp, "")
+	env.getenv = func(k string) string {
+		switch k {
+		case "TMUX":
+			return "/tmp/fake-tmux,0,0"
+		case "TMUX_PANE":
+			return "%0"
+		}
+		return getenv(k)
+	}
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, stderr=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want parent, child, parent", len(fp.Requests))
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("explicit off should not touch tmux, log stat err=%v", err)
+	}
+}
+
+// An auto-enabled setup that cannot resolve tmux degrades silently: no
+// stderr warning, and the delegate run is unaffected.
+func TestRunDelegateTmuxAutoDegradesSilentlyWithoutTmuxBinary(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // exec.LookPath reads the real process PATH.
+
+	fp := llmtest.New("fake", delegateSteps()...)
+	env, _, errw, getenv := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-delegate-output", "off", "-p", "hi"}, fp, "")
+	env.getenv = func(k string) string {
+		switch k {
+		case "TMUX":
+			return "/tmp/fake-tmux,0,0"
+		case "TMUX_PANE":
+			return "%0"
+		}
+		return getenv(k)
+	}
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, stderr=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want parent, child, parent", len(fp.Requests))
+	}
+	if strings.Contains(errw.String(), "delegate_tmux") {
+		t.Fatalf("auto-enabled setup should not warn: %q", errw.String())
+	}
+}
+
 // Pane layout falls back to windows when TMUX_PANE is missing, with a warning.
 func TestRunDelegateTmuxPaneFallsBackToWindowWithoutTmuxPane(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "tmux.log")

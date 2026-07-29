@@ -371,7 +371,9 @@ summary mode permits them. It excludes the delegated task, raw tool inputs and
 results, commands, URLs, provider messages/IDs, error strings, and opaque
 reasoning. `-v` and `-tool-stream` affect only parent diagnostics.
 
-With `delegate_tmux` on (flag, env, or config) inside a tmux session, each
+With `delegate_tmux` on (default: on inside tmux, where `$TMUX` is set; any
+explicit flag, env, or config setting — including `false` — overrides it)
+inside a tmux session, each
 delegate child also opens a display-only tmux view running
 `harness session replay --follow` on the child session directory — the
 full-fidelity live view, without the feed's curation bounds.

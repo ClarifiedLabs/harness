@@ -1063,6 +1063,40 @@ func TestDelegateTmuxPrecedenceFlagBeatsEnvBeatsFileBeatsDefault(t *testing.T) {
 	if c.DelegateTmuxMaxWindows != 4 {
 		t.Fatalf("delegate_tmux_max_windows default = %d, want 4", c.DelegateTmuxMaxWindows)
 	}
+
+	// Inside tmux with no explicit source the default flips to on (auto).
+	c = loadOK(t, nil, envFrom(map[string]string{"TMUX": "/tmp/tmux-1000/default,1,0"}), "")
+	if !c.DelegateTmux {
+		t.Fatal("delegate_tmux should default to on inside tmux")
+	}
+	if c.DelegateTmuxCLI != "auto" {
+		t.Fatalf("delegate_tmux_cli inside tmux = %q, want auto", c.DelegateTmuxCLI)
+	}
+}
+
+func TestDelegateTmuxExplicitOffBeatsAutoDefault(t *testing.T) {
+	tmuxEnv := map[string]string{"TMUX": "/tmp/tmux-1000/default,1,0"}
+
+	t.Run("file", func(t *testing.T) {
+		cfgPath := writeConfig(t, `{"delegate_tmux":false}`)
+		c := loadOK(t, nil, envFrom(tmuxEnv), cfgPath)
+		if c.DelegateTmux || c.DelegateTmuxCLI != "file" {
+			t.Fatalf("file off inside tmux: tmux=%t cli=%q, want false/file", c.DelegateTmux, c.DelegateTmuxCLI)
+		}
+	})
+	t.Run("env", func(t *testing.T) {
+		env := map[string]string{"TMUX": tmuxEnv["TMUX"], "HARNESS_DELEGATE_TMUX": "false"}
+		c := loadOK(t, nil, envFrom(env), "")
+		if c.DelegateTmux || c.DelegateTmuxCLI != "env" {
+			t.Fatalf("env off inside tmux: tmux=%t cli=%q, want false/env", c.DelegateTmux, c.DelegateTmuxCLI)
+		}
+	})
+	t.Run("flag", func(t *testing.T) {
+		c := loadOK(t, []string{"-delegate-tmux=false"}, envFrom(tmuxEnv), "")
+		if c.DelegateTmux || c.DelegateTmuxCLI != "flag" {
+			t.Fatalf("flag off inside tmux: tmux=%t cli=%q, want false/flag", c.DelegateTmux, c.DelegateTmuxCLI)
+		}
+	})
 }
 
 func TestDelegateTmuxCLITracksWinningSource(t *testing.T) {

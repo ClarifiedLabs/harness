@@ -96,10 +96,10 @@ type Config struct {
 	DelegateMaxTurns                   int               `json:"delegate_max_turns"`            // config-only; default 20, per delegate call cap
 	DelegateMaxDepth                   int               `json:"delegate_max_depth"`            // config-only; default 3, root depth is 0
 	DelegateOutput                     string            `json:"delegate_output"`               // -delegate-output: status, off, or curated scrolling lines
-	DelegateTmux                       bool              `json:"delegate_tmux"`                 // -delegate-tmux: follow each delegate child in its own tmux window
+	DelegateTmux                       bool              `json:"delegate_tmux"`                 // -delegate-tmux: follow each delegate child in its own tmux window (default: on inside tmux)
 	DelegateTmuxMaxWindows             int               `json:"delegate_tmux_max_windows"`     // config-only; cap on simultaneous delegate views in either layout
 	DelegateTmuxLayout                 string            `json:"delegate_tmux_layout"`          // -delegate-tmux-layout: pane (default) or window
-	DelegateTmuxCLI                    string            `json:"delegate_tmux_cli"`             // resolved source of delegate_tmux: default, file, env, or flag
+	DelegateTmuxCLI                    string            `json:"delegate_tmux_cli"`             // resolved source of delegate_tmux: default, auto, file, env, or flag
 	ResponsesStateful                  bool              `json:"responses_stateful"`            // -responses-stateful
 	RetentionPolicy                    string            `json:"retention_policy"`              // -retention-policy: auto, age, pressure, or disabled
 	RetentionFloorTokens               int               `json:"retention_floor_tokens"`        // config-only; 0 = disabled (window percentages govern)
@@ -602,7 +602,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		return Config{}, fmt.Errorf("delegate_output must be one of status, off, or lines")
 	}
 	c.DelegateTmux = resolveBool(set["delegate-tmux"], *f.delegateTmux,
-		getenv("HARNESS_DELEGATE_TMUX"), fc.DelegateTmux, false)
+		getenv("HARNESS_DELEGATE_TMUX"), fc.DelegateTmux, getenv("TMUX") != "")
 	c.DelegateTmuxCLI = "default"
 	switch {
 	case set["delegate-tmux"]:
@@ -611,6 +611,8 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		c.DelegateTmuxCLI = "env"
 	case fc.DelegateTmux != nil:
 		c.DelegateTmuxCLI = "file"
+	case getenv("TMUX") != "":
+		c.DelegateTmuxCLI = "auto"
 	}
 	c.DelegateTmuxMaxWindows = intValue(fc.DelegateTmuxMaxWindows, defaultDelegateTmuxMaxWindows)
 	if c.DelegateTmuxMaxWindows <= 0 {
@@ -1154,7 +1156,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.handoffAgent = fs.String("handoff-agent", "", "agent a plan->implementation handoff switches to by default (default auto)")
 	f.webSearch = fs.String("web-search", "off", "server-side web search: off or auto (also HARNESS_WEB_SEARCH)")
 	f.delegateOutput = fs.String("delegate-output", DelegateOutputStatus, "delegate display: status, off, or curated scrolling lines on stderr")
-	f.delegateTmux = fs.Bool("delegate-tmux", false, "follow each delegate child session in its own tmux view (requires tmux; also HARNESS_DELEGATE_TMUX)")
+	f.delegateTmux = fs.Bool("delegate-tmux", false, "follow each delegate child session in its own tmux view (default: on inside tmux; also HARNESS_DELEGATE_TMUX)")
 	f.delegateTmuxLayout = fs.String("delegate-tmux-layout", "", "tmux delegate layout: pane (default right-hand stack) or window (also HARNESS_DELEGATE_TMUX_LAYOUT)")
 	f.responsesStateful = fs.Bool("responses-stateful", true, "enable CLI-owned provider continuation when the selected target supports it")
 	f.retentionPolicy = fs.String("retention-policy", "auto", "live transcript retention: auto, age, pressure, or disabled")

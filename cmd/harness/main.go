@@ -1819,14 +1819,21 @@ func configAgentsFromDefinitions(agents map[string]agentdef.Definition) map[stri
 
 // setupDelegateTmuxViewer builds the tmux delegate-view viewer when
 // delegate_tmux is enabled. The feature is display-only: any setup failure
-// degrades to a nil viewer plus one stderr warning (suppressed by -q), and
-// the OpenChildView closure on a nil viewer returns an error the delegate
-// runner swallows.
+// degrades to a nil viewer plus one stderr warning when delegate_tmux was
+// explicitly enabled (suppressed by -q); auto-enabled setups log at debug
+// level only. The OpenChildView closure on a nil viewer returns an error the
+// delegate runner swallows.
 func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stderr io.Writer, logger *slog.Logger) *tmux.Viewer {
-	if getenv("TMUX") == "" {
-		if !cfg.Quiet {
-			fmt.Fprintln(stderr, "harness: warning: delegate_tmux is enabled but TMUX is not set; delegate views disabled")
+	explicit := cfg.DelegateTmuxCLI == "flag" || cfg.DelegateTmuxCLI == "env" || cfg.DelegateTmuxCLI == "file"
+	warnf := func(format string, args ...any) {
+		if explicit && !cfg.Quiet {
+			fmt.Fprintf(stderr, "harness: warning: "+format+"\n", args...)
+			return
 		}
+		logger.Debug(fmt.Sprintf(format, args...))
+	}
+	if getenv("TMUX") == "" {
+		warnf("delegate_tmux is enabled but TMUX is not set; delegate views disabled")
 		return nil
 	}
 	// os.Executable may resolve through a symlink (Homebrew); EvalSymlinks
@@ -1839,9 +1846,7 @@ func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stde
 	}
 	tmuxBin, lookErr := exec.LookPath("tmux")
 	if err != nil || lookErr != nil {
-		if !cfg.Quiet {
-			fmt.Fprintln(stderr, "harness: warning: delegate_tmux is enabled but the harness or tmux binary could not be resolved; delegate views disabled")
-		}
+		warnf("delegate_tmux is enabled but the harness or tmux binary could not be resolved; delegate views disabled")
 		return nil
 	}
 	layout := tmux.Layout(cfg.DelegateTmuxLayout)
@@ -1849,9 +1854,7 @@ func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stde
 	if layout == tmux.LayoutPane {
 		parentPane = getenv("TMUX_PANE")
 		if parentPane == "" {
-			if !cfg.Quiet {
-				fmt.Fprintf(stderr, "harness: warning: delegate_tmux_layout=%s but TMUX_PANE is not set; delegate views use windows\n", cfg.DelegateTmuxLayout)
-			}
+			warnf("delegate_tmux_layout=%s but TMUX_PANE is not set; delegate views use windows", cfg.DelegateTmuxLayout)
 			layout = tmux.LayoutWindow
 		}
 	}

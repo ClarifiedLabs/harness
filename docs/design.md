@@ -1201,8 +1201,9 @@ constructs neither registry nor feed.
   root depth `0`) are config-only for the delegate tool. Both must be positive.
   `delegate_output` defaults to `status`; its environment and CLI forms are
   `HARNESS_DELEGATE_OUTPUT` and `-delegate-output`.
-  `delegate_tmux` (default off) follows each delegate child in its own tmux
-  view; its forms are `HARNESS_DELEGATE_TMUX` and `-delegate-tmux`.
+  `delegate_tmux` (default on inside tmux, off otherwise) follows each delegate
+  child in its own tmux view; its forms are `HARNESS_DELEGATE_TMUX` and
+  `-delegate-tmux`.
   `delegate_tmux_layout` defaults to `pane`; its forms are
   `HARNESS_DELEGATE_TMUX_LAYOUT` and `-delegate-tmux-layout`.
   `delegate_tmux_max_windows` (default `4`, config-only) caps simultaneous

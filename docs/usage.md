@@ -129,7 +129,7 @@ interrupted.
 -agent <name>     agent: auto (default), explore, plan, review, independent, or a config-defined agent
 -handoff-agent <name>   default implementation agent for plan handoffs (default auto)
 -delegate-output <mode> delegate UI: status (default), off, or curated scrolling lines on stderr
--delegate-tmux    follow each delegate child session in its own live tmux view (requires tmux)
+-delegate-tmux    follow each delegate child session in its own live tmux view (default: on inside tmux)
 -delegate-tmux-layout <mode> delegate tmux layout: pane (default right-hand stack) or window (requires -delegate-tmux)
 -web-search <mode>     server-side web search: off or auto (default off)
 -trace-proxy      send W3C trace headers to the model and MCP proxies
@@ -355,15 +355,18 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   `[delegate output] omitted N events`. Use
   `harness session replay --follow <child-session>` for complete durable child
   output. `delegate_tmux` / `HARNESS_DELEGATE_TMUX` / `-delegate-tmux`
-  (default off) automates that full-fidelity view: inside a tmux session each
-  delegate child opens its own live tmux view. `delegate_tmux_layout` /
+  automates that full-fidelity view: inside a tmux session each
+  delegate child opens its own live tmux view. The default is on inside tmux
+  (`$TMUX` set) and off otherwise; an explicit `false` from the flag, env, or
+  config file keeps it off inside tmux. `delegate_tmux_layout` /
   `HARNESS_DELEGATE_TMUX_LAYOUT` / `-delegate-tmux-layout` selects `pane`
   (default right-hand pane stack) or `window` (one detached window per child).
   Every child closes its view when it ends, including failed or canceled
   children; any still-tracked views close when harness exits. Config-only
   `delegate_tmux_max_windows` (default 4) caps simultaneous views. The feature
   is display-only and independent of `delegate_output`; outside tmux it
-  degrades to one startup warning (suppressed by quiet), and pane layout
+  degrades to one startup warning when explicitly enabled (suppressed by
+  quiet, or logged at debug level when auto-enabled), and pane layout
   degrades to windows if `TMUX_PANE` is missing.
 - Tool-surface limits for MCP and LSP are config-file-only: `mcp.max_tools` caps
   how many discovered remote MCP tools are auto-exposed (`0` = unlimited),
