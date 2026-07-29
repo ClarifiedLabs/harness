@@ -564,10 +564,10 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		terminalOnce.Do(func() {
 			flushDisplay()
 			progress.markFinished()
-			// Success closes the view immediately (the viewer's own exit is
-			// cosmetic). Failure leaves the window open: it holds the final
-			// state of a session the operator probably wants to inspect.
-			if terminalStatus == session.ChildStatusCompleted && view != nil {
+			// Close every terminal view. In particular, leaving failed or
+			// canceled followers under tmux's remain-on-exit would strand a dead
+			// pane until the parent Harness process shuts down.
+			if view != nil {
 				view.Close()
 			}
 			if terminalUpdated.IsZero() {

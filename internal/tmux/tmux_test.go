@@ -175,9 +175,9 @@ func countCalls(calls [][]string, name string) int {
 	return n
 }
 
-// TestViewerDrainOnShutdown covers the failed-window-kept path: a window whose
-// handle is never Closed stays tracked and is killed by Shutdown, alongside
-// any still-open ones. A second Shutdown is a no-op.
+// TestViewerDrainOnShutdown covers a caller that never closes a handle: the
+// view stays tracked and is killed by Shutdown alongside any still-open ones.
+// A second Shutdown is a no-op.
 func TestViewerDrainOnShutdown(t *testing.T) {
 	fake := &fakeTmux{}
 	viewer := NewViewer(Client{Binary: "/tmux", run: fake.run}, ViewerOptions{HarnessBinary: "/harness", MaxWindows: 4})

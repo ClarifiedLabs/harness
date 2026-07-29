@@ -342,12 +342,12 @@ delegate child also opens a display-only tmux view running
 full-fidelity live view, without the feed's curation bounds.
 `delegate_tmux_layout` selects `pane` (default) or `window`: pane splits a
 right-hand stack from the harness pane, while window keeps the historical
-behavior of one detached window per child. Successful children close their
-view; failed or canceled views stay open for inspection, and any remaining
-views close when harness exits. At most `delegate_tmux_max_windows` (default
-4) views are open at once; additional children simply run without one. The
-views are display-only: outside tmux the feature degrades to a single startup
-warning, pane layout degrades to windows if `TMUX_PANE` is missing, and no
+behavior of one detached window per child. Every child closes its view when it
+ends, including failed or canceled children, and any still-tracked views close
+when harness exits. At most `delegate_tmux_max_windows` (default 4) views are
+open at once; additional children simply run without one. The views are
+display-only: outside tmux the feature degrades to a single startup warning,
+pane layout degrades to windows if `TMUX_PANE` is missing, and no
 view failure ever affects the delegate run. `delegate_output` continues to
 govern the inline status/lines display independently.
 

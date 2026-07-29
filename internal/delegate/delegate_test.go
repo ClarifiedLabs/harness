@@ -2421,9 +2421,9 @@ func TestDelegateChildViewClosesOnSuccess(t *testing.T) {
 	}
 }
 
-// Failed and canceled children keep their view open: the window holds the
-// final state of a session the operator probably wants to inspect.
-func TestDelegateChildViewKeptOnFailureAndCancel(t *testing.T) {
+// Failed and canceled children close their view just like successful children,
+// so a terminal follower cannot leave a dead pane behind until Harness exits.
+func TestDelegateChildViewClosesOnFailureAndCancel(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		step func(context.CancelFunc) llmtest.Step
@@ -2452,9 +2452,12 @@ func TestDelegateChildViewKeptOnFailureAndCancel(t *testing.T) {
 			if _, err := runner.Run(ctx, RunRequest{Kind: "delegate", Task: "inspect", ChildID: "child-bad"}, nil); err == nil {
 				t.Fatal("Run should fail")
 			}
-			want := []string{"open child-bad " + session.ChildSessionDir(sessionPath, "child-bad") + "  child-bad"}
+			want := []string{
+				"open child-bad " + session.ChildSessionDir(sessionPath, "child-bad") + "  child-bad",
+				"close child-bad",
+			}
 			if got := recorder.snapshot(); !slices.Equal(got, want) {
-				t.Fatalf("view events = %v, want %v (no close)", got, want)
+				t.Fatalf("view events = %v, want %v", got, want)
 			}
 		})
 	}

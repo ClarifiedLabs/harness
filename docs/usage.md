@@ -355,12 +355,12 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   delegate child opens its own live tmux view. `delegate_tmux_layout` /
   `HARNESS_DELEGATE_TMUX_LAYOUT` / `-delegate-tmux-layout` selects `pane`
   (default right-hand pane stack) or `window` (one detached window per child).
-  Successful children close their view, failed ones stay for inspection, and
-  all views close when harness exits. Config-only `delegate_tmux_max_windows`
-  (default 4) caps simultaneous views. The feature is display-only and
-  independent of `delegate_output`; outside tmux it degrades to one startup
-  warning (suppressed by quiet), and pane layout degrades to windows if
-  `TMUX_PANE` is missing.
+  Every child closes its view when it ends, including failed or canceled
+  children; any still-tracked views close when harness exits. Config-only
+  `delegate_tmux_max_windows` (default 4) caps simultaneous views. The feature
+  is display-only and independent of `delegate_output`; outside tmux it
+  degrades to one startup warning (suppressed by quiet), and pane layout
+  degrades to windows if `TMUX_PANE` is missing.
 - Tool-surface limits for MCP and LSP are config-file-only: `mcp.max_tools` caps
   how many discovered remote MCP tools are auto-exposed (`0` = unlimited),
   `mcp.disabled_servers` is a list of remote MCP server names dropped from

@@ -2449,18 +2449,20 @@ this subsection records the common runner those argv tools point at.
   right after the running `meta.json` exists and before the child agent runs.
   The view runs `harness session replay --follow -- <child-dir>` from the same
   binary; the follower tolerates the not-yet-streaming child directory and
-  exits on terminal metadata, so views are self-cleaning. The default
+  exits on terminal metadata. The default
   `delegate_tmux_layout=pane` splits a right-hand pane stack from the harness
   pane (`split-window -h` for the first pane, `split-window -v` against the
   most recent delegate pane for subsequent panes, and `select-layout -E` after
   each open once two or more delegate panes exist); `window` preserves the
   historical one-detached-window-per-child behavior. `internal/tmux` caps
-  simultaneous views (`delegate_tmux_max_windows`, default 4), kills the view
-  on child success, keeps failed/canceled views open under `remain-on-exit` for
-  inspection, and drains every tracked view at process exit. Every step is
-  best-effort: construction outside tmux degrades to one stderr warning
-  (suppressed by quiet), pane layout degrades to windows when `TMUX_PANE` is
-  missing, the Runner swallows open failures, and no tmux failure ever
+  simultaneous views (`delegate_tmux_max_windows`, default 4), closes the view
+  on every terminal child outcome (completed, failed, or canceled), and drains
+  every still-tracked view at process exit. `remain-on-exit` only bridges the
+  race between a fast follower exit and that explicit close; it does not retain
+  terminal views. Every step is best-effort: construction outside tmux degrades
+  to one stderr warning (suppressed by quiet), pane layout degrades to windows
+  when `TMUX_PANE` is missing, the Runner swallows open failures, and no tmux
+  failure ever
   propagates into the delegate run. The path is independent of
   `delegate_output`, which governs only the in-process status/lines display.
 - The child display coalescer preserves ordinary spaces, strips split CSI/OSC,
