@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"harness/internal/goal"
 	"harness/internal/llm"
 	"harness/internal/markdown"
 	"harness/internal/plan"
@@ -72,6 +73,7 @@ type Session struct {
 	ResponseState *llm.ResponseState `json:"response_state,omitempty"`
 	Todos         []todo.Item        `json:"todos,omitempty"`
 	Plans         []plan.Plan        `json:"plans,omitempty"`
+	Goal          *goal.State        `json:"goal,omitempty"`
 	Usage         UsageTotals        `json:"usage"`
 	// UsageByModel breaks usage and cost down per "provider/model" so a session
 	// that switches models still reports accurate per-model cost. Usage remains

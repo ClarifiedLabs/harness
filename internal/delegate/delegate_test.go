@@ -2267,11 +2267,15 @@ func (t *blockingChildTool) Run(ctx context.Context, _ json.RawMessage) (string,
 // live progress closure on its job snapshot immediately at start, before the
 // child run completes, so the parent wait ticker can read it mid-run.
 func TestProgressBackgroundExposedOnJob(t *testing.T) {
+	type contextKey string
+	const inheritedKey contextKey = "prompt-generation"
 	childTools := &tools.Registry{}
 	modelStarted := make(chan struct{})
+	inheritedValue := make(chan any, 1)
 	releaseModel := make(chan struct{})
 	fp := llmtest.New("fake", llmtest.Step{
 		Block: func(ctx context.Context) {
+			inheritedValue <- ctx.Value(inheritedKey)
 			close(modelStarted)
 			select {
 			case <-releaseModel:
@@ -2290,7 +2294,8 @@ func TestProgressBackgroundExposedOnJob(t *testing.T) {
 	starter := &capturingStarter{req: started}
 	tool := NewTool(runner, starter)
 
-	result, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"bg","background":true}`))
+	parentCtx := context.WithValue(context.Background(), inheritedKey, "generation-7")
+	result, err := tool.RunMetered(parentCtx, json.RawMessage(`{"task":"bg","background":true}`))
 	if err != nil {
 		t.Fatalf("RunMetered: %v", err)
 	}
@@ -2321,6 +2326,9 @@ func TestProgressBackgroundExposedOnJob(t *testing.T) {
 		runDone <- backgroundRun{result: completed, err: runErr}
 	}()
 	<-modelStarted
+	if got := <-inheritedValue; got != "generation-7" {
+		t.Fatalf("background child context value = %v, want inherited generation", got)
+	}
 	activity := activityRegistry.Snapshot()
 	if len(activity.Active) != 1 || activity.Recent.DisplayID != "d1" || activity.Recent.Agent != "explore" || activity.Recent.TranscriptPath == "" {
 		t.Fatalf("live background registry snapshot = %+v", activity)

@@ -20,6 +20,7 @@ import (
 	"harness/internal/agentdef"
 	"harness/internal/config"
 	"harness/internal/delegate"
+	"harness/internal/goal"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/modelproxy/protocol"
@@ -668,6 +669,22 @@ func TestRunREPLModelCommandDoesNotPromptOrSaveWhenStdinPiped(t *testing.T) {
 	}
 }
 
+func TestRunREPLGoalCommandRejectedWhenStdinPiped(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "gpt-5.5"}, fp, "/goal ship it\n/exit\n")
+	env.stdinPiped = true
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 0 {
+		t.Fatalf("provider requests = %d, want none", fp.RequestCount())
+	}
+	if !strings.Contains(errw.String(), "goals are only available in interactive sessions") {
+		t.Fatalf("missing piped goal rejection: %q", errw.String())
+	}
+}
+
 func TestRunREPLModelCommandAcceptsProviderQualifiedModel(t *testing.T) {
 	fp := llmtest.New("fake", okStep())
 	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t,
@@ -890,7 +907,7 @@ func TestRunEnvBlockReportsAbsoluteCwd(t *testing.T) {
 func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 	flags := []string{
 		"-p", "-i", "-initial-prompt", "-model", "-model-proxy-url", "-system-prompt",
-		"-no-env", "-resume", "-session", "-max-turns", "-max-output-tokens", "-default-context-window", "-context-window",
+		"-no-env", "-resume", "-session", "-max-turns", "-max-output-tokens", "-goal-max-continuations", "-default-context-window", "-context-window",
 		"-reasoning", "-reasoning-summary", "-trace-proxy", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks",
 	}
 	for _, arg := range []string{"-h", "--help"} {
@@ -2223,6 +2240,56 @@ func TestRunResumeFlagsWinWarning(t *testing.T) {
 	}
 }
 
+func TestRunResumeActiveGoalContinuesAutonomously(t *testing.T) {
+	dir := t.TempDir()
+	sessPath := filepath.Join(dir, "prior")
+	prior := session.Session{
+		Provider: "anthropic",
+		Model:    "claude-opus-4-8",
+		Created:  time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+		Goal: &goal.State{
+			Objective: "finish the resumed objective",
+			Status:    goal.StatusActive,
+			SetAt:     time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+		},
+	}
+	if err := prior.Save(sessPath); err != nil {
+		t.Fatal(err)
+	}
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{{
+				Kind:      llm.EventToolCallDone,
+				ToolID:    "call_goal",
+				ToolName:  "update_goal",
+				ToolInput: json.RawMessage(`{"status":"complete"}`),
+			}},
+			Stop: llm.StopToolUse,
+		},
+		okStepWithUsage(1, 1),
+	)
+	env, _, errw, _ := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-resume", sessPath}, fp, "/exit\n")
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("resume exit = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("requests = %d, want autonomous tool round and final", len(fp.Requests))
+	}
+	messages := fp.Requests[0].Messages
+	last := messages[len(messages)-1]
+	if last.Role != llm.RoleUser || len(last.Content) == 0 || !strings.Contains(last.Content[0].Text, "finish the resumed objective") {
+		t.Fatalf("first resumed request does not contain goal continuation: %+v", last)
+	}
+	loaded, err := session.Load(sessPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Goal == nil || loaded.Goal.Status != goal.StatusComplete {
+		t.Fatalf("persisted resumed goal = %+v, want complete", loaded.Goal)
+	}
+}
+
 func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "source")
@@ -2869,7 +2936,7 @@ func TestRunDefaultAgentTools(t *testing.T) {
 	}
 }
 
-func TestRunInteractiveAutoExposesImplementationHandoffAndTodos(t *testing.T) {
+func TestRunInteractiveAutoExposesImplementationHandoffTodosAndGoals(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8"}, fp, "hi\n/exit\n")
 
@@ -2882,6 +2949,11 @@ func TestRunInteractiveAutoExposesImplementationHandoffAndTodos(t *testing.T) {
 	}
 	if !slices.Contains(names, "update_todos") {
 		t.Fatalf("interactive auto tools missing update_todos: %v", names)
+	}
+	for _, name := range []string{"create_goal", "update_goal"} {
+		if !slices.Contains(names, name) {
+			t.Fatalf("interactive auto tools missing %s: %v", name, names)
+		}
 	}
 }
 
@@ -4003,7 +4075,7 @@ func expectedDefaultToolNames() []string {
 	// The default set omits git_readonly: git already covers it, and read-only
 	// agents remain delegatable via the git->git_readonly subset rule.
 	names := tools.DefaultNames()
-	return append(names, "update_todos", "delegate", "background_jobs", "record_plan")
+	return append(names, "update_todos", "delegate", "background_jobs", "record_plan", "create_goal", "update_goal")
 }
 
 func TestEnableInteractiveAutoHandoff(t *testing.T) {

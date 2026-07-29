@@ -63,6 +63,7 @@ type Config struct {
 	MaxPromptTokens                    int               `json:"max_prompt_tokens"`                      // -max-prompt-tokens, accumulated-token ceiling per prompt; 0 = unlimited
 	MaxOutputTokens                    int               `json:"max_output_tokens"`                      // -max-output-tokens, per-turn output cap; 0 = automatic
 	MaxPromptCostUSD                   float64           `json:"max_prompt_cost_usd"`                    // -max-prompt-cost, accumulated USD ceiling per prompt; 0 = unlimited (needs known model cost)
+	GoalMaxContinuations               int               `json:"goal_max_continuations"`                 // -goal-max-continuations, autonomous continuation cap per goal; 0 = unlimited; default 25
 	ToolTimeoutSeconds                 int               `json:"tool_timeout_seconds"`                   // -tool-timeout, per-tool-call dispatch ceiling (s); default 600, <=0 disables
 	RunCommandTimeoutSeconds           int               `json:"run_command_timeout_seconds"`            // 0 = tool default (120)
 	RunCommandBackgroundTimeoutSeconds int               `json:"run_command_background_timeout_seconds"` // 0 = tool default (1200)
@@ -248,6 +249,7 @@ type LSPServerConfig struct {
 const (
 	defaultMaxTurns               = 250
 	defaultContextWindow          = 256_000
+	defaultGoalMaxContinuations   = 25
 	defaultDelegateMaxTurns       = 20
 	defaultDelegateMaxDepth       = 3
 	defaultDelegateTmuxMaxWindows = 4
@@ -262,8 +264,8 @@ const (
 	// stateDir, so this constant is used only as documentation and test seed.
 	// DefaultHistFileSize and DefaultHistSize mirror bash-style HISTFILESIZE
 	// and HISTSIZE caps.
-	DefaultHistFileSize  = 1000
-	DefaultHistSize      = 1000
+	DefaultHistFileSize      = 1000
+	DefaultHistSize          = 1000
 	DefaultReplEditMode      = "emacs"
 	DelegateOutputStatus     = "status"
 	DelegateOutputOff        = "off"
@@ -309,6 +311,7 @@ type fileConfig struct {
 	MaxPromptTokens                    *int                       `json:"max_prompt_tokens"`
 	MaxOutputTokens                    *int                       `json:"max_output_tokens"`
 	MaxPromptCostUSD                   *float64                   `json:"max_prompt_cost_usd"`
+	GoalMaxContinuations               *int                       `json:"goal_max_continuations"`
 	ToolTimeoutSeconds                 *int                       `json:"tool_timeout_seconds"`
 	RunCommandTimeoutSeconds           *int                       `json:"run_command_timeout_seconds"`
 	RunCommandBackgroundTimeoutSeconds *int                       `json:"run_command_background_timeout_seconds"`
@@ -496,6 +499,11 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 		getenv("HARNESS_MAX_OUTPUT_TOKENS"), fc.MaxOutputTokens, 0)
 	c.MaxPromptCostUSD = resolveFloat(set["max-prompt-cost"], *f.maxPromptCost,
 		getenv("HARNESS_MAX_PROMPT_COST"), fc.MaxPromptCostUSD, 0)
+	c.GoalMaxContinuations = resolveInt(set["goal-max-continuations"], *f.goalMaxContinuations,
+		getenv("HARNESS_GOAL_MAX_CONTINUATIONS"), fc.GoalMaxContinuations, defaultGoalMaxContinuations)
+	if c.GoalMaxContinuations < 0 {
+		return Config{}, fmt.Errorf("goal_max_continuations must be non-negative")
+	}
 	c.ToolTimeoutSeconds = resolveInt(set["tool-timeout"], *f.toolTimeout,
 		getenv("HARNESS_TOOL_TIMEOUT"), fc.ToolTimeoutSeconds, defaultToolTimeoutSeconds)
 	c.DefaultContextWindow = resolveInt(set["default-context-window"], *fDefaultContextWindow,
@@ -1069,6 +1077,7 @@ type flags struct {
 	maxPromptTokens                  *int
 	maxOutputTokens                  *int
 	maxPromptCost                    *float64
+	goalMaxContinuations             *int
 	toolTimeout                      *int
 	defaultContextWindow             *int
 	contextWindow                    *int
@@ -1132,6 +1141,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.maxPromptTokens = fs.Int("max-prompt-tokens", 0, "stop a prompt after this many accumulated tokens; 0 means unlimited")
 	f.maxOutputTokens = fs.Int("max-output-tokens", 0, "per-turn output token cap; 0 uses the automatic cap")
 	f.maxPromptCost = fs.Float64("max-prompt-cost", 0, "stop a prompt once its accumulated model cost reaches this many USD; 0 means unlimited (requires known model cost)")
+	f.goalMaxContinuations = fs.Int("goal-max-continuations", defaultGoalMaxContinuations, "autonomous continuation cap per goal; 0 means unlimited (also HARNESS_GOAL_MAX_CONTINUATIONS)")
 	f.toolTimeout = fs.Int("tool-timeout", defaultToolTimeoutSeconds, "per-tool-call timeout backstop in seconds; <=0 disables (run_command's own timeout_seconds still applies)")
 	f.defaultContextWindow = fs.Int("default-context-window", defaultContextWindow, "default context window for configured models without context metadata (tokens)")
 	f.contextWindow = fs.Int("context-window", 0, "context window override (tokens)")

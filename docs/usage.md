@@ -115,6 +115,8 @@ interrupted.
                     0 means unlimited (default 0). Applies only when provider usage reports
                     known cost; breaks before the next paid request with a
                     `[stopped: prompt cost budget $X reached]` notice. Complements -max-prompt-tokens.
+-goal-max-continuations <n>   autonomous continuations allowed per goal before pausing
+                    (default 25); 0 means unlimited (also HARNESS_GOAL_MAX_CONTINUATIONS)
 -default-context-window <n>   fallback window for configured models without context metadata (default 256000)
 -context-window <n>   override the model's context window (tokens)
 -reasoning <profile> reasoning profile: default, none, minimal, low, medium, high, xhigh, or max
@@ -230,6 +232,8 @@ The agent loop has several controls against runaway work:
   usage reports a known cost. Unpriced models cannot enforce this limit.
 - `-tool-timeout` is a per-tool-call backstop; `run_command`'s own
   `timeout_seconds` remains authoritative.
+- `-goal-max-continuations` caps autonomous `/goal` continuation prompts before
+  pausing the goal; `0` disables that count cap.
 - Repeated identical tool results and consecutive all-error tool turns are
   steered first and eventually stopped if the model does not change course.
 
@@ -270,7 +274,7 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
 
 - Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_MODEL`,
   `HARNESS_MAX_TURNS`, `HARNESS_MAX_PROMPT_TOKENS`,
-  `HARNESS_MAX_OUTPUT_TOKENS`, `HARNESS_TOOL_TIMEOUT`,
+  `HARNESS_MAX_OUTPUT_TOKENS`, `HARNESS_GOAL_MAX_CONTINUATIONS`, `HARNESS_TOOL_TIMEOUT`,
   `HARNESS_DEFAULT_CONTEXT_WINDOW`, `HARNESS_TIMESTAMPS`,
   `HARNESS_IMAGE_DETAIL`, and most other `HARNESS_*` equivalents for
   user-facing flags. The convention is `HARNESS_` plus the flag name uppercased
@@ -1030,6 +1034,11 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/background` | list background jobs |
 | `/background <id>` | show a background job's status, result, and transcript path |
 | `/background cancel <id>` | cancel a running background job |
+| `/goal` | show the current goal and status |
+| `/goal <text>` | set or replace the goal and immediately start working on it; only exact `clear`, `pause`, and `resume` arguments are subcommands |
+| `/goal clear` | remove the current goal |
+| `/goal pause` | pause autonomous continuation for the active goal |
+| `/goal resume` | reactivate a paused, blocked, or complete goal with a fresh continuation count and immediately submit a continuation prompt |
 | `/skills` | list available skills |
 | `/vi on\|off` | enable or disable vi-style prompt editing (persisted as the default) |
 | `!command` | run a local shell command at an interactive TTY prompt |
@@ -1079,6 +1088,44 @@ the current work without canceling and retyping the prompt.
 `-no-steer`, `HARNESS_NO_STEER`, or config `no_steer` disables steering and
 queues submitted input as the next prompt. Steering is available only in the
 interactive REPL, not one-shot mode.
+
+### Session goals
+
+`/goal <text>` turns an interactive session into an autonomous continuation
+loop. Harness starts a visible continuation prompt containing the objective,
+then, after each completed prompt, submits another whenever the goal is still
+active and no user input is already queued. The continuation keeps the complete
+objective, requires evidence-based progress and a requirement-by-requirement
+completion audit, and tells the model to mark the goal blocked only after the
+same blocker recurs for at least three consecutive goal turns.
+
+The `create_goal` and `update_goal` tools let the model create an explicitly
+requested goal or mark the active goal `complete`/`blocked`. While active, the
+objective is also regenerated as request-only context on every model round, so
+it remains salient after compaction without duplicating the reminder in the
+transcript. Autonomous continuation stops when the model marks the goal complete
+or blocked, the user clears or pauses it, a prompt returns `context.Canceled`
+from user interruption (including cancellation during pre-prompt tool refresh or
+a submission hook), a continuation prompt is rejected by a submission hook, or
+the continuation cap is reached. Errors and deadline expiry do not pause a goal. Rejected continuation
+prompts pause without consuming the cap. The cap defaults to 25 and is configured with
+`-goal-max-continuations`, `HARNESS_GOAL_MAX_CONTINUATIONS`, or
+`goal_max_continuations`; `0` means unlimited. `/goal resume` reactivates a
+paused, blocked, or complete goal with a fresh continuation count; it rejects an
+already-active goal rather than resetting the safety count. If a goal changes or
+becomes terminal while a rendered prompt is waiting on tool refresh or submission
+hooks, Harness skips that stale prompt without consuming the count or overwriting
+the newer state.
+
+Goal state is saved in `state.json`, with idle command and safety-limit
+transitions checkpointed immediately. It is restored by `-resume`, copied by
+`/clone`, and removed by `/clear`. A restored active goal continues at the first
+idle boundary. Switching to an agent without `update_goal` idles the loop;
+switching back to a capable agent restarts it at the next idle boundary. The
+autonomous driver and `/goal` command are interactive-REPL-only; one-shot and
+piped runs expose the tool schemas for stable agent configuration, but goal tool
+calls return an error and no continuation loop runs. Token budgets, an interactive goal menu, and a
+`get_goal` tool are not part of this version.
 
 ## Agents
 

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"harness/internal/goal"
 	"harness/internal/llm"
 	"harness/internal/markdown"
 	"harness/internal/plan"
@@ -509,6 +510,42 @@ func TestSaveLoadPreservesTodos(t *testing.T) {
 }
 
 // A second save over the same path (the after-every-turn case) round-trips too.
+func TestSaveLoadPreservesGoal(t *testing.T) {
+	s := sampleSession()
+	s.Goal = &goal.State{
+		Objective:     "refactor the parser",
+		Status:        goal.StatusActive,
+		Continuations: 3,
+		SetAt:         time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC),
+	}
+	path := filepath.Join(t.TempDir(), "session")
+	if err := s.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got.Goal, s.Goal) {
+		t.Errorf("Goal = %+v, want %+v", got.Goal, s.Goal)
+	}
+}
+
+func TestLoadSessionWithoutGoalKey(t *testing.T) {
+	s := sampleSession()
+	path := filepath.Join(t.TempDir(), "session")
+	if err := s.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Goal != nil {
+		t.Fatalf("Goal = %+v, want nil for state without goal", got.Goal)
+	}
+}
+
 func TestSaveLoadSaveRoundTrip(t *testing.T) {
 	s := sampleSession()
 	path := filepath.Join(t.TempDir(), "session")

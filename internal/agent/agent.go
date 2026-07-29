@@ -1262,16 +1262,43 @@ func (a *Agent) RunPromptContent(ctx context.Context, userText string, images []
 	return a.RunPromptContentWithContext(ctx, userText, images, nil, 0, sink)
 }
 
-// RunPromptContentWithContext is RunPromptContent plus request-only hook context.
-// extraContext is visible to model requests for this prompt but is not persisted
-// into the transcript.
-func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string, images []llm.ContentBlock, extraContext []string, promptID int, sink EventSink) (retErr error) {
-	a.compactFallbackNotice = compactFallbackNoticeState{}
-	reportExplicitSkillContexts(extraContext, sink)
+// PromptAdmission identifies a user message already appended to an Agent's
+// transcript but not yet submitted to the provider. Its fields are private so
+// only Agent can construct a valid admission.
+type PromptAdmission struct {
+	agent       *Agent
+	promptIndex int
+}
+
+// AdmitPromptContent appends one prompt-origin user message synchronously and
+// returns the admission needed to execute it. Splitting admission from execution
+// lets callers make transcript insertion part of a larger atomic state transition.
+func (a *Agent) AdmitPromptContent(userText string, images []llm.ContentBlock) PromptAdmission {
 	promptIndex := len(a.transcript)
 	promptMessage := a.userMessage(userText, images)
 	promptMessage.Origin = llm.MessageOriginPrompt
 	a.transcript = append(a.transcript, promptMessage)
+	return PromptAdmission{agent: a, promptIndex: promptIndex}
+}
+
+// RunPromptContentWithContext is RunPromptContent plus request-only hook context.
+// extraContext is visible to model requests for this prompt but is not persisted
+// into the transcript.
+func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string, images []llm.ContentBlock, extraContext []string, promptID int, sink EventSink) error {
+	admission := a.AdmitPromptContent(userText, images)
+	return a.RunAdmittedPromptWithContext(ctx, admission, extraContext, promptID, sink)
+}
+
+// RunAdmittedPromptWithContext executes a prompt previously inserted by
+// AdmitPromptContent. Callers must execute admissions in creation order and at
+// most once; Agent prompt execution is serialized by its owner.
+func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission PromptAdmission, extraContext []string, promptID int, sink EventSink) (retErr error) {
+	if admission.agent != a || admission.promptIndex < 0 || admission.promptIndex >= len(a.transcript) || a.transcript[admission.promptIndex].Origin != llm.MessageOriginPrompt {
+		return fmt.Errorf("invalid or stale prompt admission")
+	}
+	a.compactFallbackNotice = compactFallbackNoticeState{}
+	reportExplicitSkillContexts(extraContext, sink)
+	promptIndex := admission.promptIndex
 	initialPromptPending := true
 
 	var total llm.Usage

@@ -20,6 +20,7 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/background"
+	"harness/internal/goal"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
@@ -180,6 +181,16 @@ type App struct {
 	// Plans holds the recorded plans (the record_plan tool's store), persisted
 	// in state.json and reset on /clear. nil disables persistence.
 	Plans *plan.Store
+	// Goal holds the session goal (the create_goal/update_goal tool store),
+	// persisted in state.json and reset on /clear. nil disables persistence and
+	// the autonomous continuation loop.
+	Goal *goal.Store
+	// GoalMaxContinuations is the safety cap for autonomous continuations per
+	// goal; 0 means unlimited. Reaching the cap auto-pauses the goal.
+	GoalMaxContinuations int
+	// GoalAutoContinue enables the REPL idle-boundary continuation loop. It is
+	// wired from the same interactive-session condition as request_implementation.
+	GoalAutoContinue bool
 	// The REPL prints the latest recorded plan's path after record_plan and again
 	// before the per-prompt usage line (mirroring the todo status). These fields
 	// let the idle prompt avoid printing that same plan line again.
@@ -205,6 +216,9 @@ type App struct {
 	// It is primarily useful to coordinate embedders and tests whose process
 	// remains alive after a forced REPL exit.
 	OnPromptFinished func()
+	// onInputDelivered is a test seam invoked while completed input publication
+	// is serialized with prompt completion.
+	onInputDelivered func()
 
 	// History configuration (bash-style REPL history persistence).
 	// HistFile is the path to the history file (empty disables persistence).
@@ -279,6 +293,11 @@ type App struct {
 
 	maintenanceMu      sync.Mutex
 	pendingMaintenance []queuedMaintenanceUsage
+
+	// lastPromptInterrupted is set by the run closure when a prompt ends because
+	// of context cancellation. It is read by the REPL loop to pause an active goal
+	// after a user interruption; deadline expiry does not count as interruption.
+	lastPromptInterrupted bool
 }
 
 type queuedMaintenanceUsage struct {
@@ -318,6 +337,7 @@ const helpText = `commands:
   /handoff [-a agent] [-m model] [message]
                     hand off the recorded plan with optional implementation guidance
   /background [id] list background jobs, inspect one, or cancel with "cancel <id>"
+  /goal [text]     set, view, clear, pause, or resume the active autonomous goal
   /skills          list available skills
   /vi on|off       enable or disable vi-style prompt editing
   !command         run a local shell command at an interactive prompt
@@ -477,10 +497,22 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}
 	readReq := make(chan replReadRequest)
 	inputs := make(chan replReadResult, 1)
+	// Serialize completed reader delivery with prompt completion publication. If
+	// a read is delivered first, the promptDone branch can always drain it before
+	// scheduling an autonomous continuation, even when select chose promptDone.
+	var promptBoundary sync.Mutex
+	deliverInput := func(result replReadResult) {
+		promptBoundary.Lock()
+		inputs <- result
+		if app.onInputDelivered != nil {
+			app.onInputDelivered()
+		}
+		promptBoundary.Unlock()
+	}
 	go func() {
 		for req := range readReq {
 			input, ok, err := reader.read(req)
-			inputs <- replReadResult{input: input, ok: ok, err: err}
+			deliverInput(replReadResult{input: input, ok: ok, err: err})
 			if !ok {
 				break
 			}
@@ -490,7 +522,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		// races the end of input does not block forever on an orphaned channel.
 		// The main loop treats ended results as no-ops and exits via inputEnded.
 		for range readReq {
-			inputs <- replReadResult{input: replInput{ended: true}}
+			deliverInput(replReadResult{input: replInput{ended: true}})
 		}
 	}()
 	defer close(readReq)
@@ -522,7 +554,12 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		idleCompactionTrigger     int
 		idleCompactionContext     int
 		idleCompactionMessages    int
+		pendingGoalCheckpoint     bool
 	)
+	var goalChanges <-chan struct{}
+	if app.Goal != nil {
+		goalChanges = app.Goal.Changes()
+	}
 
 	prewarmAfter := app.shiftTabPrewarmAfter
 	if prewarmAfter == nil {
@@ -796,6 +833,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	startRun := func(run func()) {
 		cancelIdleCompaction()
 		done := make(chan struct{}, 1)
+		app.lastPromptInterrupted = false
 		active = true
 		app.promptActive = true
 		plainPromptRead = false
@@ -820,15 +858,47 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		promptDone = done
 		go func() {
 			run()
+			promptBoundary.Lock()
 			done <- struct{}{}
+			promptBoundary.Unlock()
 		}()
 	}
-	startPromptRun := func(prompt string, resolveSkillMentions, attachPromptImages bool) {
-		run, ok := app.preparePromptRun(prompt, promptOptions{resolveSkillMentions: resolveSkillMentions, attachPromptImages: attachPromptImages})
+	startPromptRun := func(ctx context.Context, prompt string, resolveSkillMentions, attachPromptImages, goalPrompt, goalContinuation bool, goalRevision uint64) bool {
+		admissionOK := true
+		opts := promptOptions{
+			resolveSkillMentions: resolveSkillMentions,
+			attachPromptImages:   attachPromptImages,
+			preflightContext:     ctx,
+		}
+		if goalPrompt {
+			opts.beforeBegin = func(begin func() bool) (uint64, uint64, bool) {
+				if app.Goal == nil {
+					admissionOK = false
+					return 0, 0, false
+				}
+				if goalContinuation && !app.agentHasTool("update_goal") {
+					admissionOK = false
+					return 0, 0, false
+				}
+				count, admittedRevision, generation, admitted, capped := app.Goal.AdmitPrompt(goalRevision, app.GoalMaxContinuations, goalContinuation, begin)
+				admissionOK = admitted
+				if capped {
+					app.goalContinuationCapped(count)
+				} else if admitted && goalContinuation {
+					app.saveOrWarn(app.SessionPath)
+				}
+				return admittedRevision, generation, admitted
+			}
+		}
+		run, ok := app.preparePromptRun(prompt, opts)
 		if !ok {
-			return
+			if goalPrompt && admissionOK && (ctx == nil || ctx.Err() == nil) {
+				app.pauseGoalAfterRejectedPrompt(goalRevision)
+			}
+			return false
 		}
 		startRun(run)
+		return true
 	}
 	startPreparedPrompt := func(input agent.SteerInput) {
 		run, ok := app.prepareSteeredPrompt(input)
@@ -879,7 +949,11 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		return ctx, cancel, interrupted.Load
 	}
-	startPromptInteraction := func(prompt string, resolveSkillMentions, attachPromptImages bool) (exit bool, code int) {
+	startPromptInteraction := func(prompt string, resolveSkillMentions, attachPromptImages, goalPrompt, goalContinuation bool, goalRevision uint64) (exit bool, code int) {
+		interruptionRevision, ownsActiveGoal := goalRevision, goalPrompt
+		if !ownsActiveGoal && app.Goal != nil && app.GoalAutoContinue {
+			interruptionRevision, ownsActiveGoal = app.Goal.ActiveRevisionSnapshot()
+		}
 		cancelShiftTabPrewarm()
 		if app.Renderer != nil {
 			app.Renderer.SubmittedPromptSeparator()
@@ -887,14 +961,34 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		ctx, cancel, interrupted := exitContext()
 		err := app.refreshMCP(ctx)
-		cancel()
-		if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if interrupted() || errors.Is(err, context.Canceled) {
+			cancel()
+			if ownsActiveGoal {
+				app.pauseGoalAfterInterruption(interruptionRevision)
+			}
 			return true, ExitInterrupt
 		}
-		startPromptRun(prompt, resolveSkillMentions, attachPromptImages)
+		if errors.Is(err, context.DeadlineExceeded) {
+			cancel()
+			return true, ExitInterrupt
+		}
+		started := startPromptRun(ctx, prompt, resolveSkillMentions, attachPromptImages, goalPrompt, goalContinuation, goalRevision)
+		wasInterrupted := interrupted() || errors.Is(ctx.Err(), context.Canceled)
+		deadlineExceeded := errors.Is(ctx.Err(), context.DeadlineExceeded)
+		cancel()
+		if !started && (wasInterrupted || deadlineExceeded) {
+			if wasInterrupted && ownsActiveGoal {
+				app.pauseGoalAfterInterruption(interruptionRevision)
+			}
+			return true, ExitInterrupt
+		}
 		return false, ExitOK
 	}
 	startPreparedPromptInteraction := func(input agent.SteerInput) (exit bool, code int) {
+		interruptionRevision, ownsActiveGoal := uint64(0), false
+		if app.Goal != nil && app.GoalAutoContinue {
+			interruptionRevision, ownsActiveGoal = app.Goal.ActiveRevisionSnapshot()
+		}
 		cancelShiftTabPrewarm()
 		if app.Renderer != nil {
 			app.Renderer.StartPrompt()
@@ -902,7 +996,13 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		ctx, cancel, interrupted := exitContext()
 		err := app.refreshMCP(ctx)
 		cancel()
-		if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if interrupted() || errors.Is(err, context.Canceled) {
+			if ownsActiveGoal {
+				app.pauseGoalAfterInterruption(interruptionRevision)
+			}
+			return true, ExitInterrupt
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
 			return true, ExitInterrupt
 		}
 		startPreparedPrompt(input)
@@ -939,7 +1039,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				// bypassing command and shell dispatch while preserving normal
 				// prompt enrichment for editor output.
 				app.echoEditedPrompt(prompt, action.prefill)
-				return startPromptInteraction(action.prefill, true, true)
+				return startPromptInteraction(action.prefill, true, true, false, false, 0)
 			}
 			return false, ExitOK
 		}
@@ -947,7 +1047,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			if action.echoEditedPrompt {
 				app.echoEditedPrompt(prompt, action.prompt)
 			}
-			return startPromptInteraction(action.prompt, action.resolveSkillMentions, action.attachPromptImages)
+			return startPromptInteraction(action.prompt, action.resolveSkillMentions, action.attachPromptImages, action.goalPrompt, action.goalContinuation, action.goalRevision)
 		}
 		return false, ExitOK
 	}
@@ -973,16 +1073,36 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}
 
 	if initialPrompt != nil {
+		interruptionRevision, ownsActiveGoal := uint64(0), false
+		if app.Goal != nil && app.GoalAutoContinue {
+			interruptionRevision, ownsActiveGoal = app.Goal.ActiveRevisionSnapshot()
+		}
 		if app.Renderer != nil {
 			app.Renderer.StartPrompt()
 		}
 		ctx, cancel, interrupted := exitContext()
 		err := app.refreshMCP(ctx)
-		cancel()
-		if interrupted() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if interrupted() || errors.Is(err, context.Canceled) {
+			cancel()
+			if ownsActiveGoal {
+				app.pauseGoalAfterInterruption(interruptionRevision)
+			}
 			return finish(ExitInterrupt)
 		}
-		startPromptRun(*initialPrompt, true, true)
+		if errors.Is(err, context.DeadlineExceeded) {
+			cancel()
+			return finish(ExitInterrupt)
+		}
+		started := startPromptRun(ctx, *initialPrompt, true, true, false, false, 0)
+		wasInterrupted := interrupted() || errors.Is(ctx.Err(), context.Canceled)
+		deadlineExceeded := errors.Is(ctx.Err(), context.DeadlineExceeded)
+		cancel()
+		if !started && (wasInterrupted || deadlineExceeded) {
+			if wasInterrupted && ownsActiveGoal {
+				app.pauseGoalAfterInterruption(interruptionRevision)
+			}
+			return finish(ExitInterrupt)
+		}
 	}
 
 	for {
@@ -999,6 +1119,10 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				return forceFinish()
 			case finished := <-idleCompactionDone:
 				deferIdleCompaction(finished)
+			case <-goalChanges:
+				// Prompt execution owns transcript/session state, so defer the
+				// checkpoint until that owner publishes completion.
+				pendingGoalCheckpoint = true
 			case <-promptDone:
 				if app.Renderer != nil {
 					app.Renderer.StopProgress()
@@ -1039,6 +1163,10 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				activeReadPause = false
 				promptDone = nil
 				app.promptActive = false
+				if pendingGoalCheckpoint {
+					app.saveOrWarn(app.SessionPath)
+					pendingGoalCheckpoint = false
+				}
 				// A prewarm requested mid-prompt (agent/model switch) fires now,
 				// once, for the settled selection: the prompt kept its own prefix
 				// warm, but the switched-to agent's is genuinely cold — including
@@ -1053,6 +1181,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				}
 				deferredIdleEvents = nil
 				app.drainMaintenanceUsage()
+				if !app.lastPromptInterrupted {
+					app.pauseGoalAtContinuationCap()
+				}
 				// Recover any steer submitted during the prompt that the loop never
 				// consumed (the prompt ended without another turn to inject into, or
 				// was broken by budget/cancel). Run it as the next prompt so the
@@ -1094,13 +1225,31 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 						}
 					}
 					if app.handoffCommand("", readHandoffLine) {
-						if exit, code := startPromptInteraction(implementationStartPrompt, true, false); exit {
+						if exit, code := startPromptInteraction(implementationStartPrompt, true, false, false, false, 0); exit {
 							return finish(code)
 						}
 						continue
 					}
 					if approvalInterrupted {
 						return finish(ExitInterrupt)
+					}
+				}
+				// Prefer a line the user submitted while the prompt was finishing
+				// over autonomous continuation, even when promptDone won the select
+				// race. A still-blocked read does not suppress goal work.
+				if !usePromptEditor && readPending {
+					select {
+					case res := <-inputs:
+						readPending = false
+						switch {
+						case res.input.ended:
+							inputEnded = true
+						case !res.ok:
+							setInputEnded(res.err)
+						default:
+							queued = append(queued, res.input)
+						}
+					default:
 					}
 				}
 				if !usePromptEditor && readPending {
@@ -1110,7 +1259,17 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					// drawn and no terminal echo until that stale read finishes.
 					plainPromptRead = true
 				} else if !usePromptEditor {
+					plainPromptRead = false
 					enableIdlePromptTerm()
+				}
+				// Autonomous goal continuation: after a non-interrupted prompt, if
+				// there is no queued user input and an active goal remains, queue the
+				// next continuation prompt to run as a normal user turn.
+				if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" {
+					if cont, ok := app.goalContinuationReady(); ok {
+						queued = append(queued, replInput{text: cont.Text, modelPrompt: true, goalPrompt: true, goalContinuation: true, goalRevision: cont.Revision})
+						continue
+					}
 				}
 			case res := <-inputs:
 				readPending = false
@@ -1159,6 +1318,29 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				queued = append(queued, input)
 			}
 			continue
+		}
+
+		// Prefer a line that the reader has already delivered over autonomous
+		// continuation at every idle boundary, including one woken by a shared
+		// child-agent goal transition.
+		if !inputEnded && readPending && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" {
+			select {
+			case res := <-inputs:
+				if exit, code := handleIdleReadResult(res); exit {
+					return finish(code)
+				}
+				continue
+			default:
+			}
+		}
+
+		// An active goal continues at every idle boundary before waiting for fresh
+		// input. This starts restored goals and restarts goals after switching from
+		// an agent without update_goal back to one that can finish the goal.
+		if !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" {
+			if cont, ok := app.goalContinuationReady(); ok {
+				queued = append(queued, replInput{text: cont.Text, modelPrompt: true, goalPrompt: true, goalContinuation: true, goalRevision: cont.Revision})
+			}
 		}
 
 		if len(preparedQueued) > 0 {
@@ -1212,6 +1394,20 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			return finish(ExitInterrupt)
 		case <-pendingIdleCompaction:
 			startIdleCompaction()
+		case <-goalChanges:
+			// Shared child-agent tools can transition the root goal while the
+			// REPL is idle. Persist the transition and wake the idle boundary,
+			// while still preferring a user line already delivered by the reader.
+			cancelIdleCompaction()
+			app.saveOrWarn(app.SessionPath)
+			select {
+			case res := <-inputs:
+				if exit, code := handleIdleReadResult(res); exit {
+					return finish(code)
+				}
+			default:
+				promptPrinted = false
+			}
 		case finished := <-idleCompactionDone:
 			// Prefer already-submitted input over applying a candidate that
 			// became ready at the same instant.
@@ -1333,6 +1529,13 @@ type replInput struct {
 	// bypasses prompt-level command and shell dispatch while preserving normal
 	// prompt enrichment.
 	modelPrompt bool
+	// goalPrompt marks rendered goal-driving input so rejection pauses the goal.
+	goalPrompt bool
+	// goalContinuation marks an autonomous goal prompt. Its continuation count is
+	// consumed only after prompt hooks and other admission checks succeed.
+	goalContinuation bool
+	// goalRevision binds goal-driving input to the exact state it was rendered from.
+	goalRevision uint64
 	// deposit marks an accumulated during-prompt buffer that did not end with Enter;
 	// it is handed back as editable prefill in the next prompt.
 	deposit bool
@@ -1379,6 +1582,9 @@ type replAction struct {
 	echoEditedPrompt     bool
 	resolveSkillMentions bool
 	attachPromptImages   bool
+	goalPrompt           bool
+	goalContinuation     bool
+	goalRevision         uint64
 	// prefill deposits text into the next prompt as editable content instead
 	// of running a turn. Used when returning from an external editor so the
 	// user can review before submitting.
@@ -1395,6 +1601,8 @@ type replCommandResult struct {
 	prefillSet           bool
 	resolveSkillMentions bool
 	attachPromptImages   bool
+	goalPrompt           bool
+	goalRevision         uint64
 }
 
 const implementationStartPrompt = "Begin implementing the recorded plan now."
@@ -1509,7 +1717,7 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 		return replAction{}
 	}
 	if input.modelPrompt {
-		return replAction{prompt: line, run: true, resolveSkillMentions: true, attachPromptImages: true}
+		return replAction{prompt: line, run: true, resolveSkillMentions: true, attachPromptImages: true, goalPrompt: input.goalPrompt, goalContinuation: input.goalContinuation, goalRevision: input.goalRevision}
 	}
 	if input.pasted {
 		return replAction{prompt: line, run: true}
@@ -1543,7 +1751,7 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 			return replAction{prefill: result.prefill, prefillSet: true, prefillModelPrompt: true}
 		}
 		if result.prompt != "" {
-			return replAction{prompt: result.prompt, run: true, resolveSkillMentions: result.resolveSkillMentions, attachPromptImages: result.attachPromptImages}
+			return replAction{prompt: result.prompt, run: true, resolveSkillMentions: result.resolveSkillMentions, attachPromptImages: result.attachPromptImages, goalPrompt: result.goalPrompt, goalRevision: result.goalRevision}
 		}
 		return replAction{}
 	}
@@ -2149,6 +2357,8 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		}
 	case "/background":
 		app.backgroundCommand(arg)
+	case "/goal":
+		return app.goalCommand(arg)
 	case "/skills":
 		fmt.Fprintln(app.Errw, app.skillsSummary())
 	case "/tools":
@@ -2165,12 +2375,153 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 	return replCommandResult{}
 }
 
+// goalCommand handles /goal show/clear/pause/resume/set.
+func (app *App) goalCommand(arg string) replCommandResult {
+	if app.Goal == nil {
+		fmt.Fprintln(app.Errw, "[goals unavailable]")
+		return replCommandResult{}
+	}
+	if !app.GoalAutoContinue {
+		fmt.Fprintln(app.Errw, "[goals are only available in interactive sessions]")
+		return replCommandResult{}
+	}
+	arg = strings.TrimSpace(arg)
+	switch arg {
+	case "":
+		app.showGoalStatus()
+	case "clear":
+		if app.Goal.Snapshot() == nil {
+			fmt.Fprintln(app.Errw, "[no goal set]")
+		} else {
+			app.Goal.Clear()
+			fmt.Fprintln(app.Errw, "[goal cleared]")
+			app.saveOrWarn(app.SessionPath)
+		}
+	case "pause":
+		if app.Goal.Pause() {
+			fmt.Fprintln(app.Errw, "[goal paused]")
+			app.saveOrWarn(app.SessionPath)
+		} else {
+			fmt.Fprintln(app.Errw, "[no active goal]")
+		}
+	case "resume":
+		if app.Goal.Snapshot() == nil {
+			fmt.Fprintln(app.Errw, "[no goal set]")
+		} else if err := app.Goal.Resume(); err != nil {
+			fmt.Fprintf(app.Errw, "[goal error: %v]\n", err)
+		} else {
+			fmt.Fprintln(app.Errw, "[goal resumed]")
+			app.saveOrWarn(app.SessionPath)
+			preview := app.Goal.ContinuationPreview(app.GoalMaxContinuations)
+			return replCommandResult{prompt: preview.Text, goalPrompt: true, goalRevision: preview.Revision}
+		}
+	default:
+		// Set a new objective. Exact-match subcommands above mean "/goal clear the
+		// backlog" sets an objective rather than clearing.
+		replaced := app.Goal.Snapshot() != nil
+		if err := app.Goal.Set(arg); err != nil {
+			fmt.Fprintf(app.Errw, "[goal error: %v]\n", err)
+			return replCommandResult{}
+		}
+		if replaced {
+			fmt.Fprintf(app.Errw, "[goal replaced: %s]\n", app.Goal.Objective())
+		} else {
+			fmt.Fprintf(app.Errw, "[goal set: %s]\n", app.Goal.Objective())
+		}
+		app.saveOrWarn(app.SessionPath)
+		preview := app.Goal.ContinuationPreview(app.GoalMaxContinuations)
+		return replCommandResult{prompt: preview.Text, goalPrompt: true, goalRevision: preview.Revision}
+	}
+	return replCommandResult{}
+}
+
+func (app *App) showGoalStatus() {
+	state := app.Goal.Snapshot()
+	if state == nil {
+		fmt.Fprintln(app.Errw, "[no goal set]")
+		return
+	}
+	continuations := fmt.Sprintf("%d", state.Continuations)
+	if app.GoalMaxContinuations > 0 {
+		continuations += fmt.Sprintf("/%d", app.GoalMaxContinuations)
+	}
+	elapsed := app.clock()().Sub(state.SetAt).Round(time.Second)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	fmt.Fprintf(app.Errw, "goal: %s\nobjective: %s\ncontinuations: %s\nelapsed: %s\n", state.Status, state.Objective, continuations, elapsed)
+}
+
+func (app *App) goalOnPromptEnd(ctx context.Context, err error, revision uint64, ownedActiveGoal bool) {
+	app.lastPromptInterrupted = errors.Is(err, context.Canceled)
+	if !app.lastPromptInterrupted || app.Goal == nil {
+		return
+	}
+	paused := false
+	if generation, ok := goal.GenerationFromContext(ctx, app.Goal); ok {
+		paused = app.Goal.PauseActiveGeneration(generation)
+	} else if ownedActiveGoal {
+		paused = app.Goal.PauseActiveRevision(revision)
+	}
+	if paused {
+		fmt.Fprintln(app.Errw, "[goal paused; /goal resume to continue]")
+	}
+}
+
+// goalContinuationReady reports whether the REPL should auto-continue an active
+// goal at the current idle boundary. It returns the continuation prompt and
+// true when a continuation should run. It applies the safety cap and pauses the
+// goal when the cap is reached.
+func (app *App) goalContinuationReady() (goal.PromptPreview, bool) {
+	if app.Goal == nil || !app.GoalAutoContinue || !app.agentHasTool("update_goal") || !app.Goal.Active() {
+		return goal.PromptPreview{}, false
+	}
+	if app.pauseGoalAtContinuationCap() {
+		return goal.PromptPreview{}, false
+	}
+	preview := app.Goal.NextContinuationPreview(app.GoalMaxContinuations)
+	return preview, preview.Text != ""
+}
+
+func (app *App) pauseGoalAfterRejectedPrompt(revision uint64) {
+	if app.Goal == nil || !app.Goal.PauseActiveRevision(revision) {
+		return
+	}
+	fmt.Fprintln(app.Errw, "[goal paused because its continuation prompt was rejected; /goal resume to continue]")
+	app.saveOrWarn(app.SessionPath)
+}
+
+func (app *App) pauseGoalAfterInterruption(revision uint64) {
+	if app.Goal == nil || !app.Goal.PauseActiveRevision(revision) {
+		return
+	}
+	fmt.Fprintln(app.Errw, "[goal paused; /goal resume to continue]")
+	app.saveOrWarn(app.SessionPath)
+}
+
+func (app *App) goalContinuationCapped(continuations int) {
+	fmt.Fprintf(app.Errw, "[goal paused after %d continuations; /goal resume to continue]\n", continuations)
+	app.saveOrWarn(app.SessionPath)
+}
+
+func (app *App) pauseGoalAtContinuationCap() bool {
+	if app.Goal == nil {
+		return false
+	}
+	continuations, paused := app.Goal.PauseAtContinuationCap(app.GoalMaxContinuations)
+	if !paused {
+		return false
+	}
+	app.goalContinuationCapped(continuations)
+	return true
+}
+
 // knownCommands is the meta-command vocabulary used for "did you mean …?"
 // suggestions on an unknown command (r59).
 var knownCommands = []string{
 	"/help", "/exit", "/quit", "/clear", "/compact", "/tree", "/fork", "/clone", "/context", "/usage",
 	"/tools", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
-	"/agent", "/mode", "/plan", "/auto", "/handoff", "/background", "/skills", "/vi",
+	"/agent", "/mode", "/plan", "/auto", "/handoff", "/background", "/goal", "/skills", "/vi",
 }
 
 // suggestCommand returns the closest known command to cmd, or "" when nothing is
@@ -2388,6 +2739,9 @@ func (app *App) contextRequest() llm.Request {
 	// still model context via the transcript's update_todos result. Going through
 	// todoRequestContext here would show nothing after the first real injection.
 	if ctx := app.todoContextDisplay(); ctx != "" {
+		out = append(out, ctx)
+	}
+	if ctx := app.goalRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
 	return app.Agent.ContextRequestWithContext(out)
@@ -3375,6 +3729,9 @@ func (app *App) clear() {
 	if app.Plans != nil {
 		app.Plans.Replace(nil)
 	}
+	if app.Goal != nil {
+		app.Goal.Clear()
+	}
 	app.SetUsage(session.UsageTotals{})
 	app.usageByModel = nil
 	app.Created = app.clock()()
@@ -3399,6 +3756,14 @@ func (app *App) clear() {
 type promptOptions struct {
 	resolveSkillMentions bool
 	attachPromptImages   bool
+	preflightContext     context.Context
+	// beforeBegin runs after all prompt enrichment and hooks accept the prompt and
+	// receives the callback that records the prompt. It returns the active goal
+	// revision and identity generation owned by the run; false cancels admission.
+	// Goal admission invokes begin while holding the goal-store lock so shared child
+	// tools cannot make the rendered text stale between validation and transcript
+	// insertion.
+	beforeBegin func(begin func() bool) (goalRevision, goalGeneration uint64, admitted bool)
 }
 
 type preparedPrompt struct {
@@ -3418,8 +3783,51 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 	if !ok {
 		return nil, false
 	}
-	promptID := app.beginPrompt(prepared.prompt, prepared.images)
+	preflightCtx := opts.preflightContext
+	if preflightCtx == nil {
+		preflightCtx = context.Background()
+	}
+	promptID := 0
+	goalRevision, goalGeneration, goalActive := uint64(0), uint64(0), false
+	var admission agent.PromptAdmission
+	begin := func() bool {
+		if preflightCtx.Err() != nil {
+			return false
+		}
+		admission = app.Agent.AdmitPromptContent(prepared.prompt, imageBlocks(prepared.images))
+		promptID = app.beginPrompt(prepared.prompt, prepared.images)
+		return true
+	}
+	if opts.beforeBegin != nil {
+		var admitted bool
+		goalRevision, goalGeneration, admitted = opts.beforeBegin(begin)
+		goalActive = admitted
+		if !admitted {
+			if app.Renderer != nil {
+				app.Renderer.StopProgress()
+			}
+			return nil, false
+		}
+	} else if app.Goal != nil {
+		var admitted bool
+		goalRevision, goalGeneration, goalActive, admitted = app.Goal.AdmitAnyPrompt(begin)
+		goalActive = goalActive && app.GoalAutoContinue
+		if !admitted {
+			if app.Renderer != nil {
+				app.Renderer.StopProgress()
+			}
+			return nil, false
+		}
+	} else if !begin() {
+		if app.Renderer != nil {
+			app.Renderer.StopProgress()
+		}
+		return nil, false
+	}
 	ctx := context.Background()
+	if app.Goal != nil {
+		ctx = goal.WithGeneration(ctx, app.Goal, goalGeneration)
+	}
 	var cancel context.CancelFunc
 	if app.Interrupt != nil {
 		ctx, cancel = context.WithCancel(ctx)
@@ -3444,8 +3852,9 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 		}
 
 		sink := newREPLSink(app.Renderer, app, promptID)
-		err := app.Agent.RunPromptContentWithContext(ctx, prepared.prompt, imageBlocks(prepared.images), app.promptHookContext(prepared.promptContext), promptID, sink)
+		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, app.promptHookContext(prepared.promptContext), promptID, sink)
 		sink.FlushEvents()
+		app.goalOnPromptEnd(ctx, err, goalRevision, goalActive)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 		}
@@ -3467,7 +3876,17 @@ func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnB
 			return preparedPrompt{}, false
 		}
 	}
-	promptHook := app.runPromptSubmitHook(context.Background(), prompt, app.PromptNumber+1)
+	ctx := opts.preflightContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	promptHook := app.runPromptSubmitHook(ctx, prompt, app.PromptNumber+1)
+	if ctx.Err() != nil {
+		if app.Renderer != nil && stopProgressOnBlock {
+			app.Renderer.StopProgress()
+		}
+		return preparedPrompt{}, false
+	}
 	if promptHook.Block {
 		reason := promptHook.Reason()
 		if reason == "" {
@@ -3509,8 +3928,27 @@ func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 	if steerInputEmpty(input) {
 		return nil, false
 	}
+	goalRevision, goalGeneration, goalActive := uint64(0), uint64(0), false
+	var admission agent.PromptAdmission
+	begin := func() bool {
+		admission = app.Agent.AdmitPromptContent(input.Text, input.Images)
+		return true
+	}
+	if app.Goal != nil {
+		var admitted bool
+		goalRevision, goalGeneration, goalActive, admitted = app.Goal.AdmitAnyPrompt(begin)
+		if !admitted {
+			return nil, false
+		}
+		goalActive = goalActive && app.GoalAutoContinue
+	} else {
+		begin()
+	}
 	promptID := app.beginPrompt(input.Text, nil)
 	ctx := context.Background()
+	if app.Goal != nil {
+		ctx = goal.WithGeneration(ctx, app.Goal, goalGeneration)
+	}
 	var cancel context.CancelFunc
 	if app.Interrupt != nil {
 		ctx, cancel = context.WithCancel(ctx)
@@ -3535,8 +3973,9 @@ func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 		}
 
 		sink := newREPLSink(app.Renderer, app, promptID)
-		err := app.Agent.RunPromptContentWithContext(ctx, input.Text, input.Images, app.promptHookContext(input.RequestContext), promptID, sink)
+		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, app.promptHookContext(input.RequestContext), promptID, sink)
 		sink.FlushEvents()
+		app.goalOnPromptEnd(ctx, err, goalRevision, goalActive)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 		}
@@ -3786,6 +4225,7 @@ func (app *App) sessionSnapshot(current *agent.PromptUsage) (session.Session, er
 		ResponseState:   app.Agent.ResponseState(),
 		Todos:           app.todoSnapshot(),
 		Plans:           app.planSnapshot(),
+		Goal:            app.goalSnapshot(),
 		Usage:           usage,
 		UsageByModel:    usageByModel,
 	}, nil
@@ -3837,6 +4277,24 @@ func (app *App) todoSnapshot() []todo.Item {
 		return nil
 	}
 	return app.Todos.Snapshot()
+}
+
+// goalSnapshot returns the current goal for persistence, or nil when the goal
+// store is not wired (one-shot mode and tests leave it nil).
+func (app *App) goalSnapshot() *goal.State {
+	if app.Goal == nil {
+		return nil
+	}
+	return app.Goal.Snapshot()
+}
+
+// goalRequestContext returns the active-goal reminder for inclusion in model
+// request context. It is regenerated each request so it survives compaction.
+func (app *App) goalRequestContext() string {
+	if app.Goal == nil || !app.GoalAutoContinue || !app.agentHasTool("update_goal") {
+		return ""
+	}
+	return app.Goal.Reminder()
 }
 
 func (app *App) beginPrompt(prompt string, images []inputimage.Loaded) int {
@@ -4851,6 +5309,9 @@ func (s *accumulatingSink) RequestContext() []string {
 	if ctx := s.app.todoRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
+	if ctx := s.app.goalRequestContext(); ctx != "" {
+		out = append(out, ctx)
+	}
 	out = append(out, s.app.backgroundRequestContext(s)...)
 	return out
 }
@@ -4862,6 +5323,9 @@ func (s *accumulatingSink) RequestContext() []string {
 func (s *accumulatingSink) PeekRequestContext() []string {
 	var out []string
 	if ctx := s.app.todoRequestContext(); ctx != "" {
+		out = append(out, ctx)
+	}
+	if ctx := s.app.goalRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
 	if s.app.Background != nil {

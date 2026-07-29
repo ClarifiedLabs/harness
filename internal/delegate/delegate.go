@@ -238,6 +238,18 @@ func (r *Runner) Schema() json.RawMessage {
 }
 
 // Tool is a model-callable configured-agent launcher.
+type inheritedValuesContext struct {
+	context.Context
+	values context.Context
+}
+
+func (c inheritedValuesContext) Value(key any) any {
+	if value := c.Context.Value(key); value != nil {
+		return value
+	}
+	return c.values.Value(key)
+}
+
 type Tool struct {
 	runner     *Runner
 	background tools.BackgroundJobStarter
@@ -322,6 +334,10 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 		// ticker immediately (the job runs in a goroutine that starts now); the
 		// same progress feeds the child sink inside the job's Run closure.
 		progress := NewProgress()
+		// Background jobs own independent cancellation, but child tools still need
+		// prompt-scoped values (for example a goal-generation binding). Preserve
+		// values without coupling the job lifetime to the parent prompt.
+		parentValues := context.WithoutCancel(ctx)
 		jobAgent := req.Agent
 		if prepared.continuation != nil {
 			jobAgent = prepared.continuation.meta.Agent
@@ -335,6 +351,7 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 			WaitForPrompt: true,
 			Progress:      progress.Closure(),
 			Run: func(ctx context.Context, childID string) (tools.BackgroundJobResult, error) {
+				ctx = inheritedValuesContext{Context: ctx, values: parentValues}
 				childReq := req
 				childReq.Background = false
 				childReq.ChildID = childID

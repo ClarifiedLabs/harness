@@ -867,6 +867,45 @@ func TestMaxPromptCostResolution(t *testing.T) {
 	}
 }
 
+func TestGoalMaxContinuationsPrecedenceAndValidation(t *testing.T) {
+	c, err := Load([]string{"-model", "gpt-5.5"}, noEnv, "")
+	if err != nil {
+		t.Fatalf("Load default: %v", err)
+	}
+	if c.GoalMaxContinuations != 25 {
+		t.Fatalf("default goal max continuations = %d, want 25", c.GoalMaxContinuations)
+	}
+
+	cfgPath := writeConfig(t, `{"goal_max_continuations":7}`)
+	c, err = Load(nil, noEnv, cfgPath)
+	if err != nil {
+		t.Fatalf("Load file: %v", err)
+	}
+	if c.GoalMaxContinuations != 7 {
+		t.Fatalf("file goal max continuations = %d, want 7", c.GoalMaxContinuations)
+	}
+
+	c, err = Load(nil, envFrom(map[string]string{"HARNESS_GOAL_MAX_CONTINUATIONS": "9"}), cfgPath)
+	if err != nil {
+		t.Fatalf("Load env: %v", err)
+	}
+	if c.GoalMaxContinuations != 9 {
+		t.Fatalf("env goal max continuations = %d, want 9", c.GoalMaxContinuations)
+	}
+
+	c, err = Load([]string{"-goal-max-continuations", "0"}, envFrom(map[string]string{"HARNESS_GOAL_MAX_CONTINUATIONS": "9"}), cfgPath)
+	if err != nil {
+		t.Fatalf("Load flag: %v", err)
+	}
+	if c.GoalMaxContinuations != 0 {
+		t.Fatalf("flag goal max continuations = %d, want 0 (unlimited)", c.GoalMaxContinuations)
+	}
+
+	if _, err := Load([]string{"-goal-max-continuations", "-1"}, noEnv, ""); err == nil {
+		t.Fatal("negative goal max continuations accepted")
+	}
+}
+
 func TestMaxTurnsFlagBeatsFile(t *testing.T) {
 	cfgPath := writeConfig(t, `{"max_turns":7}`)
 	c, err := Load([]string{"-max-turns", "9"}, noEnv, cfgPath)

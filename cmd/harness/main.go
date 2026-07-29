@@ -28,6 +28,7 @@ import (
 	"harness/internal/buildinfo"
 	"harness/internal/config"
 	"harness/internal/delegate"
+	"harness/internal/goal"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
@@ -696,6 +697,12 @@ func run(env environment) int {
 	handoffPending := plan.NewPending()
 	toolCatalog.Register(plan.NewTool(planStore, func() string { return delegateState.Snapshot().SessionPath }))
 	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, planStore, interactiveSession, agentdef.Names(agents)))
+	// Goals are a root-session, REPL-only feature. The tools are registered in the
+	// catalog so agents can opt in by name, but they refuse to run outside an
+	// interactive session.
+	goalStore := goal.NewStore()
+	toolCatalog.Register(goal.NewCreateTool(goalStore, interactiveSession))
+	toolCatalog.Register(goal.NewUpdateTool(goalStore, interactiveSession))
 	// MCP (opt-in): one-shot runs synchronously so the single request can use MCP
 	// tools immediately. Interactive REPL starts remote HTTP discovery in the
 	// background and applies discovered tools at a prompt boundary, so an
@@ -984,6 +991,7 @@ func run(env environment) int {
 		ag.SetTranscript(s.Messages)
 		todoStore.Restore(s.Todos)
 		planStore.Replace(s.Plans)
+		goalStore.Restore(s.Goal)
 		resumedUsageByModel = s.UsageByModel
 		totals = s.Usage
 		// A resumed session keeps its saved full system prompt unless a static
@@ -1124,6 +1132,9 @@ func run(env environment) int {
 		SwitchAgent:                  switchAgent,
 		Todos:                        todoStore,
 		Plans:                        planStore,
+		Goal:                         goalStore,
+		GoalMaxContinuations:         cfg.GoalMaxContinuations,
+		GoalAutoContinue:             interactiveSession,
 		Handoff:                      handoffPending,
 		HandoffAgent:                 cfg.HandoffAgent,
 		IdleCompactionAfter:          time.Duration(cfg.CompactIdleAfterSeconds) * time.Second,
