@@ -1753,6 +1753,35 @@ func TestDelegateChildTodoStoreIsPrivate(t *testing.T) {
 	}
 }
 
+func TestChildSinkAdvancesTodoStaleReminder(t *testing.T) {
+	store := todo.NewStore()
+	store.Replace([]todo.Item{{Content: "implement", Status: todo.StatusInProgress}})
+	sink := newChildSink("", store, true, NewProgress(), nil)
+
+	for request := 1; request < 12; request++ {
+		if got := sink.RequestContext(); len(got) != 0 {
+			t.Fatalf("request %d context = %q, want none", request, got)
+		}
+		sink.TurnAttemptStart(request, 1, agent.ContextEstimate{})
+		sink.TurnAttemptStart(request, 2, agent.ContextEstimate{})
+	}
+	for peek := range 2 {
+		if got := strings.Join(sink.PeekRequestContext(), "\n"); !strings.Contains(got, "[~] implement") {
+			t.Fatalf("peek %d context = %q, want due reminder", peek+1, got)
+		}
+	}
+	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[~] implement") {
+		t.Fatalf("request 12 context = %q, want stale todo reminder", got)
+	}
+	sink.TurnAttemptStart(12, 1, agent.ContextEstimate{})
+
+	store.Replace([]todo.Item{{Content: "test", Status: todo.StatusPending}})
+	sink.TranscriptRewritten()
+	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[ ] test") {
+		t.Fatalf("post-rewrite context = %q, want immediate child recovery reminder", got)
+	}
+}
+
 func TestDelegateRejectsInvalidMaxTurns(t *testing.T) {
 	childTools := &tools.Registry{}
 	childTools.Register(fakeChildTool{name: "read_file", out: "ok"})

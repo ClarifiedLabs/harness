@@ -3996,14 +3996,12 @@ func (app *App) todoRequestContext() string {
 	if app.Todos == nil || !app.agentHasTool("update_todos") {
 		return ""
 	}
-	// Normal updates already live in the transcript. Only restored state or a
-	// transcript rewrite schedules this one-shot recovery reminder.
 	return app.Todos.PendingRequestContext()
 }
 
 // todoContextDisplay renders the current list for display paths like /context,
-// regardless of injection marking. It must never consume the change signal
-// real requests rely on.
+// regardless of the reminder schedule. It must never advance the request count
+// or consume a recovery reminder.
 func (app *App) todoContextDisplay() string {
 	if app.Todos == nil || !app.agentHasTool("update_todos") {
 		return ""
@@ -4399,6 +4397,7 @@ type accumulatingSink struct {
 	pendingStarted              map[string]time.Time
 	turn                        int
 	attempt                     int
+	todoTurn                    int
 	inMaintenance               bool
 	terminalModelErrorDisplayed bool
 }
@@ -4523,6 +4522,10 @@ func (s *accumulatingSink) CompactionComplete() {
 }
 
 func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
+	if s.app != nil && s.app.Todos != nil && s.app.agentHasTool("update_todos") {
+		s.app.Todos.CommitModelRound(turn != s.todoTurn)
+		s.todoTurn = turn
+	}
 	s.turn = turn
 	s.attempt = attempt
 	s.r.TurnAttemptStart(turn, attempt, ctx)
@@ -4837,24 +4840,25 @@ func (s *accumulatingSink) AddHookContext(ctx []string) {
 	s.app.AddHookContext(ctx)
 }
 
+func (s *accumulatingSink) TranscriptRewritten() {
+	if s.app != nil && s.app.Todos != nil {
+		s.app.Todos.RequireRequestContext()
+	}
+}
+
 func (s *accumulatingSink) RequestContext() []string {
 	var out []string
 	if ctx := s.app.todoRequestContext(); ctx != "" {
 		out = append(out, ctx)
-		// This sink supplies context to real model requests, so consume the
-		// one-shot recovery reminder.
-		if s.app.Todos != nil {
-			s.app.Todos.MarkContextInjected()
-		}
 	}
 	out = append(out, s.app.backgroundRequestContext(s)...)
 	return out
 }
 
-// PeekRequestContext mirrors RequestContext without consuming anything: the
-// todo recovery marker stays pending and completed background context stays
-// queued, so post-prompt size estimates never eat context that still needs to
-// reach the model on a later real request.
+// PeekRequestContext mirrors RequestContext without consuming anything: todo
+// recovery and stale-list reminders stay pending, and completed background
+// context stays queued, so post-prompt size estimates never eat context that
+// still needs to reach the model on a later real request.
 func (s *accumulatingSink) PeekRequestContext() []string {
 	var out []string
 	if ctx := s.app.todoRequestContext(); ctx != "" {

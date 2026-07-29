@@ -151,6 +151,8 @@ func TestRequestContextIncludesExistingList(t *testing.T) {
 	for _, want := range []string{
 		"[todo]",
 		"1/3 complete",
+		"Reconcile this list with current progress.",
+		"Call update_todos if any status or scope changed.",
 		"[~] implement",
 		"[ ] test",
 	} {
@@ -163,7 +165,13 @@ func TestRequestContextIncludesExistingList(t *testing.T) {
 	}
 }
 
-func TestRestoreRequestsContextOnce(t *testing.T) {
+func nextModelRoundContext(store *Store) string {
+	ctx := store.PendingRequestContext()
+	store.CommitModelRound(true)
+	return ctx
+}
+
+func TestRestoreRequestsContextImmediately(t *testing.T) {
 	store := NewStore()
 	store.Restore([]Item{
 		{Content: "explore", Status: StatusInProgress},
@@ -174,13 +182,26 @@ func TestRestoreRequestsContextOnce(t *testing.T) {
 	if !strings.Contains(first, "[~] explore") {
 		t.Fatalf("first PendingRequestContext = %q, want the unresolved list", first)
 	}
-	store.MarkContextInjected()
+	if got := nextModelRoundContext(store); !strings.Contains(got, "[~] explore") {
+		t.Fatalf("first NextRequestContext = %q, want the unresolved list", got)
+	}
 	if got := store.PendingRequestContext(); got != "" {
 		t.Fatalf("consumed PendingRequestContext = %q, want empty", got)
 	}
 
-	// Normal tool-backed updates are already in the transcript and do not
-	// schedule another request-only copy.
+	// A recovery reminder restarts stale tracking rather than causing another
+	// reminder before the initial interval has elapsed.
+	for request := 1; request < staleReminderInitialRounds; request++ {
+		if got := nextModelRoundContext(store); got != "" {
+			t.Fatalf("NextRequestContext request %d after recovery = %q, want empty", request, got)
+		}
+	}
+	if got := nextModelRoundContext(store); !strings.Contains(got, "[~] explore") {
+		t.Fatalf("stale NextRequestContext = %q, want the unresolved list", got)
+	}
+
+	// Normal tool-backed updates restart tracking without scheduling an
+	// immediate request-only copy.
 	store.Replace([]Item{
 		{Content: "explore", Status: StatusCompleted},
 		{Content: "implement", Status: StatusInProgress},
@@ -211,5 +232,73 @@ func TestRequireRequestContextAfterTranscriptRewrite(t *testing.T) {
 	store.RequireRequestContext()
 	if got := store.PendingRequestContext(); !strings.Contains(got, "[~] explore") {
 		t.Fatalf("post-rewrite PendingRequestContext = %q, want unresolved work", got)
+	}
+}
+
+func TestCommitModelRoundDoesNotAdvanceRetry(t *testing.T) {
+	store := NewStore()
+	store.Replace([]Item{{Content: "implement", Status: StatusInProgress}})
+
+	for round := 1; round < staleReminderInitialRounds-1; round++ {
+		if got := nextModelRoundContext(store); got != "" {
+			t.Fatalf("round %d = %q, want empty", round, got)
+		}
+	}
+	for retry := range 3 {
+		store.CommitModelRound(false)
+		if got := store.PendingRequestContext(); got != "" {
+			t.Fatalf("retry %d peek = %q, want empty", retry+1, got)
+		}
+	}
+	if got := nextModelRoundContext(store); got != "" {
+		t.Fatalf("round 11 = %q, want empty", got)
+	}
+	if got := store.PendingRequestContext(); !strings.Contains(got, "[~] implement") {
+		t.Fatalf("round 12 preview = %q, want due reminder", got)
+	}
+}
+
+func TestStaleRequestContextUsesExponentialCadence(t *testing.T) {
+	store := NewStore()
+	store.Replace([]Item{{Content: "implement", Status: StatusInProgress}})
+
+	for _, gap := range []int{12, 24, 48, 96} {
+		for request := 1; request < gap; request++ {
+			if got := nextModelRoundContext(store); got != "" {
+				t.Fatalf("gap %d request %d = %q, want empty", gap, request, got)
+			}
+		}
+		for peek := range 2 {
+			if got := store.PendingRequestContext(); !strings.Contains(got, "[~] implement") {
+				t.Fatalf("gap %d peek %d = %q, want due reminder", gap, peek+1, got)
+			}
+		}
+		if got := nextModelRoundContext(store); !strings.Contains(got, "[~] implement") {
+			t.Fatalf("gap %d due request = %q, want reminder", gap, got)
+		}
+		if got := store.PendingRequestContext(); got != "" {
+			t.Fatalf("gap %d post-reminder peek = %q, want empty", gap, got)
+		}
+	}
+}
+
+func TestReplaceRestartsStaleRequestContextSchedule(t *testing.T) {
+	store := NewStore()
+	store.Replace([]Item{{Content: "old", Status: StatusInProgress}})
+	for request := 1; request < staleReminderInitialRounds; request++ {
+		if got := nextModelRoundContext(store); got != "" {
+			t.Fatalf("old request %d = %q, want empty", request, got)
+		}
+	}
+
+	store.Replace([]Item{{Content: "new", Status: StatusInProgress}})
+	for request := 1; request < staleReminderInitialRounds; request++ {
+		if got := nextModelRoundContext(store); got != "" {
+			t.Fatalf("new request %d = %q, want empty", request, got)
+		}
+	}
+	got := nextModelRoundContext(store)
+	if !strings.Contains(got, "[~] new") || strings.Contains(got, "old") {
+		t.Fatalf("due NextRequestContext = %q, want only replacement list", got)
 	}
 }

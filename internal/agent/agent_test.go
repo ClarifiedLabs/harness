@@ -654,7 +654,8 @@ func TestContextOverflowLearnsWindowAndRetries(t *testing.T) {
 		ContextWindow: 1_000_000,
 	})
 
-	if err := a.RunPrompt(context.Background(), "hello", &recordSink{}); err != nil {
+	sink := &changingRequestContextSink{}
+	if err := a.RunPrompt(context.Background(), "hello", sink); err != nil {
 		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(fp.Requests) != 2 {
@@ -665,6 +666,14 @@ func TestContextOverflowLearnsWindowAndRetries(t *testing.T) {
 	}
 	if fp.Requests[1].ContextWindowHint != 262_144 {
 		t.Fatalf("retry ContextWindowHint = %d, want 262144", fp.Requests[1].ContextWindowHint)
+	}
+	if sink.requestCalls != 1 {
+		t.Fatalf("RequestContext calls = %d, want 1 for one logical round", sink.requestCalls)
+	}
+	for request, got := range fp.Requests {
+		if context := strings.Join(got.RequestContext, "\n"); !strings.Contains(context, "[request context 1]") {
+			t.Fatalf("provider request %d context = %q, want preserved one-shot context", request+1, context)
+		}
 	}
 }
 
@@ -695,7 +704,7 @@ func TestContextOverflowWithoutWindowShrinksCurrentTurnAndRetries(t *testing.T) 
 		},
 	)
 	a := newAgent(fp, reg, Options{ContextWindow: 10_000, DisableAutoCompaction: true})
-	sink := &recordSink{}
+	sink := &changingRequestContextSink{}
 
 	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
 		t.Fatalf("RunPrompt: %v", err)
@@ -718,6 +727,13 @@ func TestContextOverflowWithoutWindowShrinksCurrentTurnAndRetries(t *testing.T) 
 	}
 	full := toolResultText(fp.Requests[1])
 	trimmed := toolResultText(fp.Requests[2])
+	failedContext := strings.Join(fp.Requests[1].RequestContext, "\n")
+	retryContext := strings.Join(fp.Requests[2].RequestContext, "\n")
+	if !strings.Contains(failedContext, "[request context 2]") ||
+		!strings.Contains(retryContext, "[request context 2]") ||
+		!strings.Contains(retryContext, "[request context 3]") {
+		t.Fatalf("overflow contexts: failed=%q retry=%q, want old context preserved and refreshed context merged", failedContext, retryContext)
+	}
 	if len(full) != 20_000 {
 		t.Fatalf("failed request tool result length = %d, want 20000", len(full))
 	}
@@ -726,6 +742,66 @@ func TestContextOverflowWithoutWindowShrinksCurrentTurnAndRetries(t *testing.T) 
 	}
 	if !slices.Contains(sink.notices, "[context overflow: compacting and retrying request]") {
 		t.Fatalf("notices = %+v, want context overflow retry notice", sink.notices)
+	}
+	if sink.rewriteCalls != 1 {
+		t.Fatalf("TranscriptRewritten calls = %d, want 1 for local overflow degradation", sink.rewriteCalls)
+	}
+}
+
+func TestContextOverflowRetryResetsAppendBoundary(t *testing.T) {
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{
+		name:     "big_read",
+		readOnly: true,
+		run: func(context.Context, json.RawMessage) (string, error) {
+			return strings.Repeat("x", 1_000), nil
+		},
+	})
+	reg.Register(&recordTool{
+		name:     "small_read",
+		readOnly: true,
+		run: func(context.Context, json.RawMessage) (string, error) {
+			return "ok", nil
+		},
+	})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "call_1", "big_read", `{}`)},
+			Stop:   llm.StopToolUse,
+			Usage:  llm.Usage{InputTokens: 100},
+		},
+		llmtest.Step{Err: &llm.APIError{
+			StatusCode: 400,
+			Code:       "context_length_exceeded",
+			Message:    "input exceeds the model context window",
+		}},
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "call_2", "small_read", `{}`)},
+			Stop:   llm.StopToolUse,
+			Usage:  llm.Usage{InputTokens: 700},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("done")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 100},
+		},
+		// A stale append boundary can spuriously trigger a summary request before
+		// the final step above; keep a fallback so the assertion reports the extra
+		// call rather than failing for an exhausted script.
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("fallback")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, reg, Options{
+		ContextWindow:             1_000,
+		CompactTriggerPercent:     90,
+		CompactKeepTurns:          1,
+		CompactToolResultMaxBytes: 128,
+	})
+
+	if err := a.RunPrompt(context.Background(), "go", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(fp.Requests) != 4 {
+		t.Fatalf("provider requests = %d, want 4 without redundant post-overflow compaction", len(fp.Requests))
 	}
 }
 
@@ -1636,7 +1712,7 @@ func TestMaxTurnsStop(t *testing.T) {
 	}
 	fp := llmtest.New("fake", always, always, always, summary)
 	a := newAgent(fp, reg, Options{MaxTurns: 3})
-	sink := &recordSink{}
+	sink := &peekCountingSink{}
 
 	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
 		t.Fatalf("RunPrompt: %v", err)
@@ -1646,6 +1722,9 @@ func TestMaxTurnsStop(t *testing.T) {
 	// 3 capped turns + 1 tools-disabled wind-down request.
 	if len(fp.Requests) != 4 {
 		t.Errorf("provider called %d times, want 4 (3 turns + final summary)", len(fp.Requests))
+	}
+	if sink.requestCalls != len(fp.Requests) {
+		t.Errorf("RequestContext calls = %d, want %d (including final summary)", sink.requestCalls, len(fp.Requests))
 	}
 	// The final summary request must advertise no tools so the model cannot keep
 	// calling them.
@@ -1688,7 +1767,7 @@ func TestMaxTurnsStop(t *testing.T) {
 	if !sawMaxTurns {
 		t.Errorf("sink not told about max-turns stop, notices=%v", sink.notices)
 	}
-	assertPromptTermination(t, sink, TerminationTurnLimit)
+	assertPromptTermination(t, &sink.recordSink, TerminationTurnLimit)
 }
 
 func TestModelCompletionOnFinalBudgetTurnIsNotTurnLimit(t *testing.T) {
@@ -3466,7 +3545,7 @@ func TestDrainSteerJoinsMultiple(t *testing.T) {
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
 	)
 	a := newAgent(fp, reg, Options{Steer: true})
-	sink := &recordSink{}
+	sink := &peekCountingSink{}
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- a.RunPrompt(context.Background(), "go", sink) }()
@@ -3477,6 +3556,9 @@ func TestDrainSteerJoinsMultiple(t *testing.T) {
 
 	if err := <-errCh; err != nil {
 		t.Fatalf("RunPrompt: %v", err)
+	}
+	if sink.requestCalls != len(fp.Requests) {
+		t.Fatalf("RequestContext calls = %d, provider requests = %d", sink.requestCalls, len(fp.Requests))
 	}
 	msgs := a.Transcript()
 	mustValid(t, msgs)
@@ -3537,8 +3619,8 @@ func TestDrainSteerRecoversUnconsumed(t *testing.T) {
 }
 
 // peekCountingSink counts consuming vs peek context gathering. Its
-// RequestContext models the REPL sink, whose call consumes one-shot signals
-// (todo change marking, completed background context draining).
+// RequestContext models a sink that consumes generic one-shot signals such as
+// completed background context.
 type peekCountingSink struct {
 	recordSink
 	requestCalls int
@@ -3555,6 +3637,21 @@ func (s *peekCountingSink) PeekRequestContext() []string {
 	return []string{"[one-shot context]"}
 }
 
+type changingRequestContextSink struct {
+	recordSink
+	requestCalls int
+	rewriteCalls int
+}
+
+func (s *changingRequestContextSink) RequestContext() []string {
+	s.requestCalls++
+	return []string{fmt.Sprintf("[request context %d]", s.requestCalls)}
+}
+
+func (s *changingRequestContextSink) TranscriptRewritten() {
+	s.rewriteCalls++
+}
+
 func TestPostPromptEstimateDoesNotConsumeRequestContext(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn})
 	a := newAgent(fp, tools.Default(), Options{})
@@ -3567,7 +3664,7 @@ func TestPostPromptEstimateDoesNotConsumeRequestContext(t *testing.T) {
 		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
 	}
 	// RequestContext consumes one-shot signals, so it must run exactly once per
-	// request actually sent; the post-prompt sizing estimate has to use the
+	// conversational model round; the post-prompt sizing estimate has to use the
 	// non-consuming peek instead.
 	if sink.requestCalls != len(fp.Requests) {
 		t.Fatalf("RequestContext calls = %d, want %d (one per request sent)", sink.requestCalls, len(fp.Requests))

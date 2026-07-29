@@ -194,10 +194,11 @@ type HookContextReceiver interface {
 }
 
 // RequestContextProvider is implemented by sinks that can add fresh
-// request-only context before each model request. RequestContext may consume
-// one-shot signals as it attaches them (todo change marking, completed
-// background context draining), so it must only be called for a request that
-// is actually sent.
+// request-only context before conversational model rounds. RequestContext may
+// consume one-shot signals as it attaches them; sizing-only paths use
+// RequestContextPeeker when available. Transport and compatibility retries
+// reuse attached context, while a retry after a transcript rewrite may refresh
+// and merge it.
 type RequestContextProvider interface {
 	RequestContext() []string
 }
@@ -207,6 +208,12 @@ type RequestContextProvider interface {
 // carry without consuming anything, for local sizing estimates.
 type RequestContextPeeker interface {
 	PeekRequestContext() []string
+}
+
+// TranscriptRewriteSink is implemented by sinks that need to recover
+// request-only state after compaction or another transcript rewrite.
+type TranscriptRewriteSink interface {
+	TranscriptRewritten()
 }
 
 // PromptWorkCoordinator is implemented by sinks that own background work whose
@@ -1347,7 +1354,8 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			return err
 		}
 		initialPromptPending = false
-		requestContext := a.requestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink)
+		baseRequestContext := appendPromptContext(extraContext, activeSkills.contexts(), steerContext)
+		requestContext := a.requestContext(baseRequestContext, sink)
 		modelReq := a.modelRequest(requestContext)
 		lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 		// Proactive trigger (spec §4): a turn whose tool results balloon the
@@ -1371,7 +1379,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 				// transcript and would re-trigger every turn.
 				lastInput = 0
 				appendBoundary = 0
-				requestContext = a.requestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink)
+				requestContext = a.requestContext(baseRequestContext, sink)
 				modelReq = a.modelRequest(requestContext)
 				lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 			}
@@ -1391,7 +1399,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			if err == nil && changed {
 				lastInput = 0
 				appendBoundary = 0
-				requestContext = a.requestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink)
+				requestContext = a.requestContext(baseRequestContext, sink)
 				if err := a.validateRetainedTranscript("after input-count compaction"); err != nil {
 					return err
 				}
@@ -1442,8 +1450,12 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 					if verr := a.validateRetainedTranscript("after context-overflow compaction"); verr != nil {
 						err = verr
 					} else {
-						requestContext = a.requestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink)
+						if changed {
+							refreshed := a.requestContext(baseRequestContext, sink)
+							requestContext = appendMissingRequestContext(requestContext, refreshed)
+						}
 						modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
+						appendBoundary = len(a.transcript)
 						lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 						res, wasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
 					}
@@ -1611,7 +1623,6 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 			a.transcript = append(a.transcript, steerMessage)
 			steerContext = append(steerContext, steered.RequestContext...)
 			reportExplicitSkillContexts(steered.RequestContext, sink)
-			requestContext = a.requestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink)
 			guard.repeatRuns = 0
 			guard.repeatSteered = false
 			guard.errorRuns = 0
@@ -1630,7 +1641,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		if guard.shouldBreakErrors() {
 			terminationReason = TerminationErrorGuard
 			sink.Notice(errorStormNotice(guard.errorRuns))
-			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, requestContext, turns+1)
+			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
 			total = add(total, fu)
 			lastContext = fctx
 			if completed {
@@ -1649,7 +1660,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		if guard.shouldBreakRepeat() {
 			terminationReason = TerminationRepeatGuard
 			sink.Notice(repeatLoopNotice(guard.repeatRuns))
-			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, requestContext, turns+1)
+			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
 			total = add(total, fu)
 			lastContext = fctx
 			if completed {
@@ -1706,7 +1717,7 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 		if !unlimited && turns >= a.maxTurns {
 			terminationReason = TerminationTurnLimit
 			sink.Notice(maxTurnsNotice(a.maxTurns))
-			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, requestContext, turns+1)
+			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
 			total = add(total, fu)
 			lastContext = fctx
 			if completed {
@@ -1845,9 +1856,10 @@ func reportMaintenance(sink EventSink, purpose string, usage llm.Usage) {
 // failed or empty summary leaves the already-valid transcript untouched. Any
 // tool calls the model emits despite tools being disabled are ignored — only
 // the summary text is appended, so no unanswered tool_use can be created. It
-// returns the request's usage (counted toward the turn total) and estimate.
-func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, requestContext []string, turn int) (llm.Usage, ContextEstimate, bool) {
-	modelReq := a.modelRequest(requestContext)
+// gathers fresh request-only context for this distinct model round and returns
+// the request's usage (counted toward the turn total) and estimate.
+func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraContext []string, turn int) (llm.Usage, ContextEstimate, bool) {
+	modelReq := a.modelRequest(a.requestContext(extraContext, sink))
 	modelReq.request.Tools = nil // no tools: force a text-only wind-down
 	modelReq.request.ServerTools = nil
 	res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, turn, modelReq.estimate)
@@ -2262,13 +2274,12 @@ func (a *Agent) requestContext(extraContext []string, sink EventSink) []string {
 }
 
 // estimateRequestContext gathers request context for local sizing only. No
-// request is sent, so prefer the sink's non-consuming peek: RequestContext's
-// attach semantics would eat one-shot signals that still need to reach the
-// model on a later real request.
+// request is sent, so use the sink's non-consuming peek when available and
+// otherwise omit dynamic context rather than consuming a one-shot signal.
 func (a *Agent) estimateRequestContext(extraContext []string, sink EventSink) []string {
 	peeker, ok := sink.(RequestContextPeeker)
 	if !ok {
-		return a.requestContext(extraContext, sink)
+		return append([]string(nil), extraContext...)
 	}
 	return mergeRequestContext(extraContext, peeker.PeekRequestContext())
 }
@@ -2279,6 +2290,25 @@ func mergeRequestContext(extraContext, items []string) []string {
 		if strings.TrimSpace(item) != "" {
 			out = append(out, item)
 		}
+	}
+	return out
+}
+
+func appendMissingRequestContext(base, fresh []string) []string {
+	out := append([]string(nil), base...)
+	seen := make(map[string]struct{}, len(out))
+	for _, item := range out {
+		seen[item] = struct{}{}
+	}
+	for _, item := range fresh {
+		if strings.TrimSpace(item) == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		out = append(out, item)
+		seen[item] = struct{}{}
 	}
 	return out
 }

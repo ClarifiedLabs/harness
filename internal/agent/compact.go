@@ -242,6 +242,7 @@ func (a *Agent) ApplyIdleCompaction(ctx context.Context, sink EventSink, result 
 	a.transcript = compacted
 	a.validatedPrefix = 0
 	a.clearMeasuredContext()
+	notifyTranscriptRewritten(sink)
 	// A compacted transcript is a new baseline: re-arm pressure retention so the
 	// next high-water pass can fire an epoch even when compaction lands between
 	// the low and high watermarks.
@@ -502,6 +503,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	a.validatedPrefix = 0        // the transcript was rewritten; re-validate from scratch (r62)
 	a.clearMeasuredContext()     // the pre-compaction measurement no longer describes it
 	a.retentionEpochArmed = true // a compacted transcript is a new retention baseline
+	notifyTranscriptRewritten(sink)
 	a.ResetProxySessionID()
 	a.compactFallbackNotice = compactFallbackNoticeState{}
 	after := a.estimateContextForTranscript(nil, compacted).Total
@@ -559,12 +561,19 @@ func (a *Agent) degradeCurrent(sink EventSink, trigger string) (bool, error) {
 	a.validatedPrefix = 0        // the transcript was rewritten; re-validate from scratch (r62)
 	a.clearMeasuredContext()     // the pre-shrink measurement no longer describes it
 	a.retentionEpochArmed = true // a compacted transcript is a new retention baseline
+	notifyTranscriptRewritten(sink)
 	a.ResetProxySessionID()
 	a.noticeCurrentShrink(sink, trigger, before, after)
 	return true, nil
 }
 
 const smallCurrentShrinkNoticeTokens = 1000
+
+func notifyTranscriptRewritten(sink EventSink) {
+	if receiver, ok := sink.(TranscriptRewriteSink); ok {
+		receiver.TranscriptRewritten()
+	}
+}
 
 func (a *Agent) noticeCurrentNoShrink(sink EventSink, trigger string) {
 	if trigger != "manual" {

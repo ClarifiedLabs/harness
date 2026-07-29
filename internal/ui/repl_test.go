@@ -6325,11 +6325,48 @@ func TestAccumulatingSinkPeekDoesNotConsumeTodoRecovery(t *testing.T) {
 			t.Fatalf("peek %d = %q, want the todo reminder (peeks must not consume it)", i+1, got)
 		}
 	}
-	// The real attach consumes the one-shot reminder.
+	// Attaching is still a preview; only the final send boundary consumes the
+	// one-shot reminder.
 	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[~] explore") {
 		t.Fatalf("RequestContext = %q, want the todo reminder", got)
 	}
-	if got := store.PendingRequestContext(); got != "" {
-		t.Fatalf("after a real attach, PendingRequestContext = %q, want empty", got)
+	if got := store.PendingRequestContext(); got == "" {
+		t.Fatal("RequestContext consumed the reminder before a model request")
 	}
+	sink.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	if got := store.PendingRequestContext(); got != "" {
+		t.Fatalf("after the send boundary, PendingRequestContext = %q, want empty", got)
+	}
+
+	store.Replace([]todo.Item{{Content: "implement", Status: todo.StatusInProgress}})
+	sink.TranscriptRewritten()
+	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[~] implement") {
+		t.Fatalf("post-rewrite RequestContext = %q, want immediate recovery reminder", got)
+	}
+	sink.TurnAttemptStart(2, 1, agent.ContextEstimate{})
+}
+
+func TestAccumulatingSinkAdvancesTodoStaleReminder(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	store := todo.NewStore()
+	reg := tools.Default()
+	reg.Register(todo.NewTool(store))
+	app.Agent.SetTools(reg)
+	app.Todos = store
+	store.Replace([]todo.Item{{Content: "implement", Status: todo.StatusInProgress}})
+
+	sink := &accumulatingSink{r: app.Renderer, app: app}
+	for request := 1; request < 12; request++ {
+		if got := sink.RequestContext(); len(got) != 0 {
+			t.Fatalf("request %d context = %q, want none", request, got)
+		}
+		sink.TurnAttemptStart(request, 1, agent.ContextEstimate{})
+		sink.TurnAttemptStart(request, 2, agent.ContextEstimate{})
+	}
+	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[~] implement") {
+		t.Fatalf("request 12 context = %q, want stale todo reminder", got)
+	}
+	sink.TurnAttemptStart(12, 1, agent.ContextEstimate{})
 }

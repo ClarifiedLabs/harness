@@ -27,16 +27,22 @@ type Item struct {
 	Status  string `json:"status"`
 }
 
+const staleReminderInitialRounds = 12
+
 // Store holds one agent's current todo list across tool calls. Root and child
 // agents use separate stores. Methods are safe for concurrent use.
 type Store struct {
 	mu                    sync.Mutex
 	items                 []Item
 	requestContextPending bool
+	requestsSinceReminder int
+	staleReminderInterval int
 }
 
 // NewStore returns an empty Store.
-func NewStore() *Store { return &Store{} }
+func NewStore() *Store {
+	return &Store{staleReminderInterval: staleReminderInitialRounds}
+}
 
 // Snapshot returns a copy of the current list; callers may mutate the result
 // without affecting the Store.
@@ -53,12 +59,13 @@ func (s *Store) Snapshot() []Item {
 
 // Replace swaps the list for a copy of items. A normal update_todos call is
 // already present in the transcript, so replacing the list clears any pending
-// recovery reminder.
+// recovery reminder and restarts stale-list tracking.
 func (s *Store) Replace(items []Item) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.replace(items)
 	s.requestContextPending = false
+	s.resetStaleReminderSchedule()
 }
 
 // Restore replaces the list from persisted state and schedules one compact
@@ -68,6 +75,7 @@ func (s *Store) Restore(items []Item) {
 	defer s.mu.Unlock()
 	s.replace(items)
 	s.requestContextPending = RequestContext(s.items) != ""
+	s.resetStaleReminderSchedule()
 }
 
 func (s *Store) replace(items []Item) {
@@ -78,24 +86,56 @@ func (s *Store) replace(items []Item) {
 	s.items = append([]Item(nil), items...)
 }
 
-// PendingRequestContext renders a compact reminder only when persisted state
-// was restored or the transcript was rewritten. Normal update_todos calls need
-// no reminder because their arguments already contain the complete list.
+// PendingRequestContext previews todo context for the next conversational
+// model round without consuming it or advancing the stale-reminder schedule.
 func (s *Store) PendingRequestContext() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.requestContextPending {
+	ctx := RequestContext(s.items)
+	if ctx == "" {
 		return ""
 	}
-	return RequestContext(s.items)
+	if s.requestContextPending {
+		return ctx
+	}
+	s.ensureStaleReminderInterval()
+	if s.requestsSinceReminder+1 >= s.staleReminderInterval {
+		return ctx
+	}
+	return ""
 }
 
-// MarkContextInjected records that the pending recovery reminder was attached
-// to a real model request.
-func (s *Store) MarkContextInjected() {
+// CommitModelRound advances stale-list tracking at the final send boundary.
+// newRound must be false for another transport or provider attempt at the same
+// conversational turn. A retry can still acknowledge recovery context required
+// by a transcript rewrite without advancing the cadence.
+func (s *Store) CommitModelRound(newRound bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.requestContextPending = false
+
+	if RequestContext(s.items) == "" {
+		s.requestContextPending = false
+		s.resetStaleReminderSchedule()
+		return
+	}
+	if s.requestContextPending {
+		s.requestContextPending = false
+		s.resetStaleReminderSchedule()
+		return
+	}
+	if !newRound {
+		return
+	}
+
+	s.ensureStaleReminderInterval()
+	s.requestsSinceReminder++
+	if s.requestsSinceReminder < s.staleReminderInterval {
+		return
+	}
+	s.requestsSinceReminder = 0
+	if s.staleReminderInterval <= int(^uint(0)>>1)/2 {
+		s.staleReminderInterval *= 2
+	}
 }
 
 // RequireRequestContext schedules a one-shot recovery reminder when unresolved
@@ -105,6 +145,17 @@ func (s *Store) RequireRequestContext() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.requestContextPending = RequestContext(s.items) != ""
+}
+
+func (s *Store) resetStaleReminderSchedule() {
+	s.requestsSinceReminder = 0
+	s.staleReminderInterval = staleReminderInitialRounds
+}
+
+func (s *Store) ensureStaleReminderInterval() {
+	if s.staleReminderInterval <= 0 {
+		s.staleReminderInterval = staleReminderInitialRounds
+	}
 }
 
 const schema = `{
@@ -213,6 +264,7 @@ func RequestContext(items []Item) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "[todo]\n%d/%d complete", completedCount(items), len(items))
+	b.WriteString("\nReconcile this list with current progress. Call update_todos if any status or scope changed.")
 	for _, item := range items {
 		switch item.Status {
 		case StatusInProgress:

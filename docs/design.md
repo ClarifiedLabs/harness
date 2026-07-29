@@ -2265,13 +2265,18 @@ this subsection records the common runner those argv tools point at.
   `todo.Item` without importing the tools package. The root has one `todo.Store`;
   each child agent gets a private store. The root list is saved in `state.json`
   (`Session.Todos`), reseeded on resume, and cleared by `/clear`.
-- Normal updates add no request-only reminder: the complete list already lives in
-  the transcript's tool-call arguments. Resume and transcript rewrites (compaction,
-  branch, fork/clone, or child continuation) schedule one compact recovery reminder
-  for the next real model request. It shows the completion count plus only
-  `in_progress` and `pending` items; completed task titles are omitted. The reminder
-  is not saved into the transcript and is consumed only when attached to a real
-  request, so context previews do not lose it.
+- Normal updates restart stale-list tracking without immediately duplicating the
+  complete list already present in the transcript's tool-call arguments. If unresolved
+  work goes 12 conversational model rounds without another update, Harness injects a
+  compact reminder; ignored reminders use exponentially increasing gaps of 24, 48, 96, ...
+  rounds. Resume and transcript rewrites (compaction, branch, fork/clone, or child
+  continuation) schedule an immediate recovery reminder and restart that cadence. The
+  reminder asks the model to reconcile current progress and shows the completion count
+  plus only `in_progress` and `pending` items; completed task titles are omitted. It is
+  request-only rather than saved in the transcript, and context previews do not advance
+  or consume the schedule. Transport and provider-compatibility retries reuse the same
+  request context and do not advance the cadence again; a context-overflow retry also
+  preserves attached context while merging any recovery context required by a rewrite.
 - In the interactive REPL, the visible session's non-empty todo list is also printed
   as a full `[x]`/`[~]`/`[ ]` checklist before the idle prompt when the current
   visible agent has `update_todos`, and after each successful `update_todos` call.

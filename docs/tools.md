@@ -198,8 +198,10 @@ helpers, prompts, output-file flags, and signature helpers.
 multi-step work, update it at phase boundaries, and do not spend a turn only on
 bookkeeping. Each call replaces the whole list. Harness returns a compact
 completion-count acknowledgment to the model while the interactive REPL renders
-the full checklist for the user. Custom agents with an explicit `allowed_tools`
-list may omit it.
+the full checklist for the user. When unresolved work receives no update for 12
+conversational model rounds, Harness injects a compact reconciliation reminder;
+repeated reminders back off exponentially. Custom agents with an explicit
+`allowed_tools` list may omit the tool.
 
 ## File Mutation
 

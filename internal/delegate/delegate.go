@@ -1640,6 +1640,7 @@ type childSink struct {
 	pending              map[string]pendingChildTool
 	turn                 int
 	attempt              int
+	todoTurn             int
 	appendMu             sync.Mutex
 	appendErr            error
 	checkpoint           func(agent.PromptCheckpoint) error
@@ -1817,6 +1818,10 @@ func (s *childSink) ReasoningSummary(text string) {
 }
 
 func (s *childSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
+	if s.todos != nil && s.todoContext {
+		s.todos.CommitModelRound(turn != s.todoTurn)
+		s.todoTurn = turn
+	}
 	s.flushDisplay()
 	s.turn = turn
 	s.attempt = attempt
@@ -2013,6 +2018,12 @@ func (s *childSink) RetentionApplied(event agent.RetentionEvent) {
 	})
 }
 
+func (s *childSink) TranscriptRewritten() {
+	if s.todos != nil && s.todoContext {
+		s.todos.RequireRequestContext()
+	}
+}
+
 func (s *childSink) SkillActivated(event agent.SkillActivationEvent) {
 	s.append(session.Event{
 		Type:    session.EventSkillActivation,
@@ -2031,7 +2042,17 @@ func (s *childSink) RequestContext() []string {
 	if ctx == "" {
 		return nil
 	}
-	s.todos.MarkContextInjected()
+	return []string{ctx}
+}
+
+func (s *childSink) PeekRequestContext() []string {
+	if s.todos == nil || !s.todoContext {
+		return nil
+	}
+	ctx := s.todos.PendingRequestContext()
+	if ctx == "" {
+		return nil
+	}
 	return []string{ctx}
 }
 
