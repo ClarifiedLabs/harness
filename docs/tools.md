@@ -13,7 +13,7 @@ This page is the operational overview.
 | `list_dir` | list directory entries with type and size, non-recursive |
 | `glob` | recursively find files/dirs by glob, including `**` patterns; read-only |
 | `search` | run up to 16 bounded content queries with context, lines, files, counts, or existence output |
-| `inspect` | run up to 16 independent read/search/glob/list/workspace-summary operations concurrently |
+| `inspect` | run up to 16 independent read/search/glob/list/workspace-summary/read-only-git operations concurrently |
 | `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
 | `write_file` | create or overwrite a file, creating parent directories |
 | `run_command` | run a shell command or direct argv program |
@@ -109,10 +109,14 @@ Each query still receives its own existing 400-source-line allowance; batching
 does not impose a new aggregate cap.
 
 `inspect` batches heterogeneous repository orientation in the same way. Its
-`operations[]` may invoke `read_file`, `search`, `glob`, `list_dir`, or
-`workspace_summary`; operations execute concurrently and render under indexed
-headers. Prefer it to one read-only lookup per model turn. After three
-consecutive single-lookup turns, harness adds a one-time soft reminder to batch.
+`operations[]` may invoke `read_file`, `search`, `glob`, `list_dir`,
+`workspace_summary`, or `git_readonly`; operations execute concurrently and
+render under indexed headers. Nested `git_readonly` uses the same `args` and
+optional `cwd` input and the same audited command allowlist as the top-level
+tool. When the `git` binary is unavailable, `inspect` omits both
+`workspace_summary` and `git_readonly` from its advertised operations. Prefer
+`inspect` to one read-only lookup per model turn. After three consecutive
+single-lookup turns, harness adds a one-time soft reminder to batch.
 
 Raw `grep` and optional `rg` wrappers remain in the constructible catalog for a
 custom agent that explicitly names them in `allowed_tools`; built-in agents do

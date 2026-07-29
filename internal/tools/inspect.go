@@ -10,7 +10,16 @@ import (
 
 const inspectMaxOperations = 16
 
-const inspectSchema = `{
+var inspectOperationOrder = [...]string{
+	"read_file",
+	"search",
+	"glob",
+	"list_dir",
+	"workspace_summary",
+	"git_readonly",
+}
+
+const inspectSchemaTemplate = `{
   "type": "object",
   "properties": {
     "operations": {
@@ -20,8 +29,8 @@ const inspectSchema = `{
       "items": {
         "type": "object",
         "properties": {
-          "tool": {"type": "string", "enum": ["read_file", "search", "glob", "list_dir", "workspace_summary"], "description": "Read-only operation to run."},
-          "input": {"type": "object", "description": "Input object for the selected tool; workspace_summary accepts optional cwd."}
+          "tool": {"type": "string", "enum": %s, "description": "Read-only operation to run."},
+          "input": {"type": "object", "description": %s}
         },
         "required": ["tool", "input"]
       }
@@ -45,11 +54,40 @@ type inspectOperation struct {
 
 func (inspectTool) Name() string { return "inspect" }
 
-func (inspectTool) Description() string {
-	return "Run up to 16 independent read-only repository operations concurrently. Batch read_file, search, glob, list_dir, and workspace_summary during orientation instead of spending one model turn per lookup."
+func (t inspectTool) Description() string {
+	return fmt.Sprintf("Run up to 16 independent read-only repository operations concurrently. Batch %s during orientation instead of spending one model turn per lookup.", strings.Join(t.operationNames(), ", "))
 }
 
-func (inspectTool) Schema() json.RawMessage { return json.RawMessage(inspectSchema) }
+func (t inspectTool) Schema() json.RawMessage {
+	operationNames, _ := json.Marshal(t.operationNames())
+	inputDescription, _ := json.Marshal(t.inputDescription())
+	return json.RawMessage(fmt.Sprintf(inspectSchemaTemplate, operationNames, inputDescription))
+}
+
+func (t inspectTool) operationNames() []string {
+	names := make([]string, 0, len(inspectOperationOrder))
+	for _, name := range inspectOperationOrder {
+		if _, ok := t.tools[name]; ok {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func (t inspectTool) inputDescription() string {
+	description := "Input object for the selected tool"
+	if _, ok := t.tools["workspace_summary"]; ok {
+		description += "; workspace_summary accepts optional cwd"
+	}
+	if _, ok := t.tools["git_readonly"]; ok {
+		if _, workspaceSummaryAvailable := t.tools["workspace_summary"]; workspaceSummaryAvailable {
+			description += ", and git_readonly accepts args plus optional cwd"
+		} else {
+			description += "; git_readonly accepts args plus optional cwd"
+		}
+	}
+	return description + "."
+}
 
 func (inspectTool) ReadOnly(json.RawMessage) bool { return true }
 
@@ -124,6 +162,9 @@ func registerInspectTool(r *Registry) {
 	}
 	if tool, ok := r.Lookup("git"); ok {
 		available["workspace_summary"] = tool
+		// gitTool.ReadOnly applies the audited git_readonly allowlist, and Run
+		// routes accepted argv through the same hardened read-only execution path.
+		available["git_readonly"] = tool
 	}
 	r.Register(inspectTool{tools: available})
 }

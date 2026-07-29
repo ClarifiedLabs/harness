@@ -1884,7 +1884,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 > `search`: Search files with up to 16 independent queries in one call. Returns bounded context, matching lines, file names, counts, or existence; use paths and globs to narrow work.
 
-> `inspect`: Run up to 16 independent read-only repository operations concurrently. Batch `read_file`, `search`, `glob`, `list_dir`, and `workspace_summary` during orientation.
+> `inspect`: Run up to 16 independent read-only repository operations concurrently. Batch `read_file`, `search`, `glob`, `list_dir`, `workspace_summary`, and `git_readonly` during orientation.
 
 - `search` is the only content-search tool in built-in agent definitions. Input
   is `queries[]` (1–16). Every query requires `pattern`; `paths[]` defaults to
@@ -1906,9 +1906,14 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   and unique source-line counts for session analysis without entering model
   context. There is no new aggregate 400-line cap.
 - `inspect.operations[]` (1–16) selects `read_file`, `search`, `glob`,
-  `list_dir`, or `workspace_summary` and supplies that operation's `input`
-  object. The operations run concurrently, errors are reported inline, each
-  result gets a per-operation cap, and indexed output preserves request order.
+  `list_dir`, `workspace_summary`, or `git_readonly` and supplies that
+  operation's `input` object. Nested `git_readonly` uses the ordinary `git`
+  tool's audited read-only classifier and hardened execution path, so mutating
+  argv is rejected before execution. The schema enum and description are built
+  from the operations registered in the composite; without a `git` binary they
+  omit both `workspace_summary` and `git_readonly`. The operations run
+  concurrently, errors are reported inline, each result gets a per-operation
+  cap, and indexed output preserves request order.
 - Three consecutive turns containing one unbatched orientation lookup trigger
   one soft steering message recommending `inspect`, `read_file.paths[]`, or
   `search.queries[]`. It does not block execution.
