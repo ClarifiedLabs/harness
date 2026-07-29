@@ -936,6 +936,44 @@ func TestLiveDelegateStatusShowsForegroundActivity(t *testing.T) {
 	}
 }
 
+func TestLiveDelegateStatusKeepsElapsedCounterWithLongBackgroundWaitArgs(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 7, 29, 10, 13, 28, 0, time.Local)
+	registry := delegate.NewActivityRegistry(nil)
+	registration := registry.Register(delegate.ActivityStart{ID: "background-child", Agent: "auto"})
+	registration.MarkTurn(2, 1, agent.ContextEstimate{})
+	registration.MarkActivity("tool run_command")
+	r := NewRenderer(&out, &errw, RenderOptions{
+		LiveStatus:       true,
+		DelegateActivity: registry,
+		Now:              func() time.Time { return now },
+		Width:            func() int { return 80 },
+	})
+	t.Cleanup(func() {
+		registration.Finish("completed", 0)
+		r.StopProgress()
+	})
+
+	r.StartPrompt()
+	r.ToolStart(llm.ToolCall{
+		ID:    "wait",
+		Name:  "background_jobs",
+		Input: json.RawMessage(`{"action":"wait","ids":["bg_20260729T171254Z_000006"],"timeout_seconds":5400,"until":"all"}`),
+	})
+	now = now.Add(12 * time.Second)
+	errw.Reset()
+	r.tick()
+
+	got := errw.String()
+	want := "[tool: background_jobs · 12s · delegate d1 auto: turn 2 · tool run_command]"
+	if !strings.Contains(got, want) {
+		t.Fatalf("long background wait status = %q, want compact live counter %q", got, want)
+	}
+	if strings.Contains(got, "[d1 auto]") {
+		t.Fatalf("long background wait collapsed to static delegate identity: %q", got)
+	}
+}
+
 func TestLiveDelegateStatusUsesWaitLifecycleAcrossBackgroundJoin(t *testing.T) {
 	var out, errw bytes.Buffer
 	registry := delegate.NewActivityRegistry(nil)

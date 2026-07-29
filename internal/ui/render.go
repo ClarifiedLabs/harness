@@ -1238,10 +1238,12 @@ func (r *Renderer) paintLocked(activity delegate.ActivitySnapshot) {
 func (r *Renderer) statusTextLocked(activity delegate.ActivitySnapshot) (text string, cursorCol int, hasInput bool) {
 	now := r.now()
 	var base strings.Builder
+	var compactBase strings.Builder
 	var suffix strings.Builder
 	if r.statusActive && r.statusLabel != "" {
 		elapsedSecs := nonNegativeSeconds(now.Sub(r.statusStart))
 		fmt.Fprintf(&base, "[%s · %ds", r.statusLabel, elapsedSecs)
+		fmt.Fprintf(&compactBase, "[%s · %ds", compactWaitLabel(r.statusLabel), elapsedSecs)
 		if used := contextUsed(r.statusCtx); r.statusCtx.Window > 0 && used > 0 {
 			fmt.Fprintf(&base, " · ctx %d%% %s/%s", contextPercent(r.statusCtx), humanTokens(used), humanTokens(r.statusCtx.Window))
 		}
@@ -1263,7 +1265,7 @@ func (r *Renderer) statusTextLocked(activity delegate.ActivitySnapshot) (text st
 	maxW := r.outputWidth() - 1
 	activeAuthoritative := r.delegateActivity != nil
 	if activeAuthoritative && len(activity.Active) > 0 && !r.disableDelegateStatus {
-		status, label := fitActiveDelegateStatus(base.String(), suffix.String(), activity, maxW)
+		status, label := fitActiveDelegateStatus(base.String(), compactBase.String(), suffix.String(), activity, maxW)
 		if r.statusInput == "" {
 			return status, 0, false
 		}
@@ -1303,15 +1305,34 @@ func (r *Renderer) delegateActivitySnapshot() delegate.ActivitySnapshot {
 	return r.delegateActivity.Snapshot()
 }
 
+// compactWaitLabel removes tool arguments from the narrow-row fallback. The
+// full label remains preferred, but an elapsed counter is more useful than a
+// static delegate identity when arguments consume the whole terminal width.
+func compactWaitLabel(label string) string {
+	const toolPrefix = "tool: "
+	rest, ok := strings.CutPrefix(label, toolPrefix)
+	if !ok {
+		return label
+	}
+	name, _, _ := strings.Cut(rest, " ")
+	if name == "" {
+		return label
+	}
+	return toolPrefix + name
+}
+
 // fitActiveDelegateStatus gives the current delegate identity priority over its
-// activity body and optional model/prompt fields. Normal grammar is:
+// activity body and optional model/prompt fields. If a full tool label is too
+// wide, it uses compactBase so the current wait's elapsed counter remains
+// visible instead of collapsing to a static delegate identity. Normal grammar
+// is:
 //
 //	· delegate d1 explore: turn 2 · tool read_file
 //	· 3 delegates · latest d4 plan: turn 1 · thinking
 //
 // The greatest registry activity sequence selects the displayed child; equal
 // sequences are already broken deterministically by child ID in the registry.
-func fitActiveDelegateStatus(base, suffix string, snapshot delegate.ActivitySnapshot, maxW int) (string, string) {
+func fitActiveDelegateStatus(base, compactBase, suffix string, snapshot delegate.ActivitySnapshot, maxW int) (string, string) {
 	latest := snapshot.Recent
 	label := strings.TrimSpace(latest.DisplayID + " " + latest.Agent)
 	if label == "" {
@@ -1345,6 +1366,24 @@ func fitActiveDelegateStatus(base, suffix string, snapshot delegate.ActivitySnap
 	// Drop optional model/prompt details only after the activity body.
 	if line := fixed + "]"; displayWidth(line) <= maxW {
 		return line, label
+	}
+	// Long foreground tool arguments can make base wider than the terminal before
+	// delegate details are even considered. Retry with the argument-free wait
+	// label and no optional suffix, preserving both the live counter and identity.
+	if compactBase != "" && compactBase != base {
+		compactFixed := compactBase + marker + label
+		if body != "" {
+			if line := compactFixed + ": " + body + "]"; displayWidth(line) <= maxW {
+				return line, label
+			}
+			budget := maxW - displayWidth(compactFixed+": "+"]")
+			if budget > 0 {
+				return compactFixed + ": " + clipDisplayHead(body, budget) + "]", label
+			}
+		}
+		if line := compactFixed + "]"; displayWidth(line) <= maxW {
+			return line, label
+		}
 	}
 	// The active identity is the final compact form. clipDisplayHead keeps the
 	// short display ID before truncating a long or wide agent name.

@@ -318,8 +318,10 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   `delegate_output` / `HARNESS_DELEGATE_OUTPUT` / `-delegate-output` accepts
   `status` (the default one-row TTY display), `off` (no delegate-specific UI),
   and `lines` (the status row on a TTY plus curated scrolling child activity on
-  stderr). On non-TTY output, `status` is silent while `lines` still writes
-  stderr. Quiet mode is authoritative and suppresses both forms, including
+  stderr). The TTY row updates once per second; when tool arguments and delegate
+  details do not all fit, it keeps a compact wait label, elapsed counter, and
+  delegate identity. On non-TTY output, `status` is silent while `lines` still
+  writes stderr. Quiet mode is authoritative and suppresses both forms, including
   child reasoning summaries when `-reasoning-summary` was explicitly enabled.
   `-v` and `-tool-stream` do not enable or expand child lines.
 
