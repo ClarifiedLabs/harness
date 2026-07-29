@@ -6,12 +6,13 @@ golden suites (`go test ./...`).
 
 The legs split into three groups:
 
-- **Hermetic legs** drive the real, freshly-built `harness` binary as a
+- **Automated integration legs** drive the real, freshly-built `harness` binary as a
   subprocess through an in-process `harness-model-proxy` whose provider config
   points at a throwaway OpenAI-compatible mock server bound to `127.0.0.1` (no
-  network, no API keys). They are automated in `cmd/harness/integration_test.go`
-  behind the `integration` build tag. The proxy and mock live only in `_test.go`,
-  so they are never compiled into the shipped binaries.
+  external network, no API keys). They are automated behind the `integration`
+  build tag. The proxy and mock live only in `_test.go`, so they are never
+  compiled into the shipped binaries. Real-tmux and real-`gopls` legs use those
+  optional local programs and skip when they are unavailable.
 - **Opt-in automated live-model legs** drive a freshly-built `harness` binary
   through a separately running `harness-model-proxy` and make real upstream
   calls. They live behind the `livemodel` build tag and are not part of the
@@ -23,6 +24,8 @@ The legs split into three groups:
 ## Prerequisites
 
 - Go 1.26 or newer, as declared by `go.mod`.
+- `tmux` on `PATH` to run the optional real-tmux delegate legs; otherwise those
+  legs skip. Each test uses its own temporary server socket and unique session.
 - `gopls` on `PATH` to run the optional real-LSP integration leg; otherwise that
   leg skips.
 - A separately running, configured `harness-model-proxy` is needed for the
@@ -30,7 +33,7 @@ The legs split into three groups:
 - Provider credentials, Ollama, and a real downstream MCP server are needed only
   for their respective live or manual legs.
 
-## Hermetic legs (automated)
+## Automated integration legs
 
 Run them all:
 
@@ -50,8 +53,8 @@ part of the same `make test-integration` run.
 | Local OpenAI-compatible server, tool round-trip | `TestSmokeToolRoundTrip` | The mock streams a `read_file` tool call, the harness executes it, and a **second** request to the mock carries the `role:"tool"` result with the file's content. The assistant's final text lands on **stdout**; the session directory's `state.json` and `tree.ndjson` are written, and the loaded active path passes `ValidateTranscript`. |
 | `^C` during a stream | `TestSmokeInterruptMidStream` | The mock streams `partial answer` then stalls briefly. After the partial text reaches stdout, the test sends `SIGINT` to the subprocess. The process exits **130**; the saved session keeps the partial assistant text and passes `ValidateTranscript` (the §4 cancel-repair: keep streamed text, strip un-executed tool calls). |
 | Resume of an interrupted session | `TestSmokeResumeInterrupted` | A crafted save requested with a **dangling `tool_use`** synthesizes a `tool_result` (`is_error`, text `interrupted`) before immutable tree storage, then resumes with `-resume`. The mock's single request is verified to contain that `role:"tool"` / `tool_call_id` message, and the run completes against the mock's text turn. |
-| Delegate tmux window | `TestSmokeDelegateTmuxWindow` | A scripted foreground delegate runs with `-delegate-tmux -delegate-tmux-layout window` under a fake `tmux` on `PATH` (`TMUX` set). The recorder sees exactly one `new-window -d -a -P -F #{window_id}` whose command is the same harness binary running `session replay --follow -- <child-dir>` with the child dir as a single argument, then exactly one `kill-window` when the successful child closes its window. The delegate flow completes (3 mock requests) with no degradation warning. |
-| Delegate tmux pane | `TestSmokeDelegateTmuxPane` | A scripted foreground delegate runs with `-delegate-tmux` under a fake `tmux` on `PATH` (`TMUX` and `TMUX_PANE` set). The recorder sees exactly one `split-window -d -h -t <parent-pane> -P -F #{pane_id}` with the same `session replay --follow -- <child-dir>` command, per-pane `remain-on-exit`, a `select-pane -T <child-id>`, and exactly one `kill-pane` on success. The delegate flow completes (3 mock requests) with no degradation warning. |
+| Delegate tmux window | `TestSmokeDelegateTmuxWindow` | A scripted foreground delegate runs with `-delegate-tmux -delegate-tmux-layout window` against a real tmux server on a private temporary socket. While the child request is gated, the server contains one detached, correctly named delegate window with `remain-on-exit=on` and `automatic-rename=off`; after completion only the base window remains. The delegate flow completes (3 mock requests) with no degradation warning. |
+| Delegate tmux pane | `TestSmokeDelegateTmuxPane` | A scripted foreground delegate runs with `-delegate-tmux` against a real tmux server on a private temporary socket. While the child request is gated, the server contains a titled, right-hand split from the recorded parent pane with `remain-on-exit=on`; after completion only the base pane remains. The delegate flow completes (3 mock requests) with no degradation warning. |
 
 ### MCP proxy legs (automated)
 

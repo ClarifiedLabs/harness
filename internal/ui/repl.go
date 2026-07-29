@@ -1336,9 +1336,42 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 
 		// An active goal continues at every idle boundary before waiting for fresh
 		// input. This starts restored goals and restarts goals after switching from
-		// an agent without update_goal back to one that can finish the goal.
+		// an agent without update_goal back to one that can finish the goal. A
+		// background transition can wake this boundary while the raw idle editor is
+		// blocked. Reclaim that read before starting autonomous work: a submitted
+		// line wins, a partial draft is restored as prefill, and only an empty
+		// deposit permits the continuation immediately.
 		if !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" {
 			if cont, ok := app.goalContinuationReady(); ok {
+				if usePromptEditor && readPending {
+					reader.cancelPromptRead()
+					res := <-inputs
+					readPending = false
+					reader.drainPromptCancel()
+					switch {
+					case res.input.ended:
+						inputEnded = true
+						continue
+					case !res.ok:
+						setInputEnded(res.err)
+						continue
+					case res.input.deposit:
+						promptPrinted = false
+						pendingPrefill = res.input.text
+						pendingPrefillModelPrompt = false
+						pendingPrefillPasted = res.input.pasted
+						if pendingPrefill != "" {
+							continue
+						}
+					default:
+						// Enter/control input raced the cancellation. Handle it
+						// against current state, then recompute goal readiness.
+						if exit, code := handleIdleReadResult(res); exit {
+							return finish(code)
+						}
+						continue
+					}
+				}
 				queued = append(queued, replInput{text: cont.Text, modelPrompt: true, goalPrompt: true, goalContinuation: true, goalRevision: cont.Revision})
 			}
 		}
@@ -1536,8 +1569,9 @@ type replInput struct {
 	goalContinuation bool
 	// goalRevision binds goal-driving input to the exact state it was rendered from.
 	goalRevision uint64
-	// deposit marks an accumulated during-prompt buffer that did not end with Enter;
-	// it is handed back as editable prefill in the next prompt.
+	// deposit marks an accumulated buffer that did not end with Enter. During a
+	// prompt, or when an autonomous continuation reclaims an idle editor read, it
+	// is handed back as editable prefill in the next prompt.
 	deposit bool
 	// ended marks an inert reply the read goroutine sends after the reader has
 	// ended (EOF or a terminal read error) so a racing requestRead does not block
@@ -2121,8 +2155,8 @@ func (rr *replReader) emitPromptInput() {
 	}
 }
 
-// cancelPromptRead releases a blocked during-prompt keystroke read so it deposits
-// its buffer; a no-op without a cancelable reader.
+// cancelPromptRead releases a blocked prompt read so it deposits its buffer; a
+// no-op without a cancelable reader.
 func (rr *replReader) cancelPromptRead() {
 	if rr.cancelable != nil {
 		rr.cancelable.cancelRead()

@@ -79,10 +79,12 @@ satisfied. `blocked` is appropriate only when the same blocking condition has
 recurred for at least three consecutive goal turns despite best efforts. Either
 status stops the REPL continuation loop; `/goal resume` can reactivate a blocked
 or complete goal with a fresh continuation count. Goal-tool calls are bound to
-the goal generation present when their root prompt began (including inherited
-foreground and background child work), so delayed work cannot update a goal the
-user has since replaced or cleared. A goal created by a prompt remains available
-to `update_goal` in a later tool round of that same prompt.
+the goal generation present when their root prompt began. Each foreground or
+background delegate snapshots that binding when launched, so delayed work cannot
+update a goal the user has since replaced or cleared, and one child cannot make
+an already-launched sibling current again. A successful child `create_goal`
+advances its still-current parent prompt binding, so later tool rounds in that
+lineage may update the new goal.
 
 Both tools share the root session goal store. They are available to the default
 (`auto`) and `independent` agents, but goal management remains a root-conversation

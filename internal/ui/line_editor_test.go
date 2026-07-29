@@ -77,6 +77,44 @@ func TestOutputCoordinatorMovesActivePromptBelowBackgroundLog(t *testing.T) {
 	}
 }
 
+func TestPromptLineEditorCancellationDepositsDraft(t *testing.T) {
+	reader, writer := io.Pipe()
+	t.Cleanup(func() {
+		_ = writer.Close()
+		_ = reader.Close()
+	})
+	cancelable := newCancelableReader(reader)
+	var out lockedBuffer
+	editor := newPromptLineEditor(cancelable, &out)
+	type readResult struct {
+		input replInput
+		ok    bool
+		err   error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		input, ok, err := editor.read("> ")
+		done <- readResult{input: input, ok: ok, err: err}
+	}()
+
+	if _, err := io.WriteString(writer, "unsent draft"); err != nil {
+		t.Fatalf("write draft: %v", err)
+	}
+	waitFor(t, func() bool { return strings.Contains(out.String(), "> unsent draft") }, "draft redraw")
+	cancelable.cancelRead()
+
+	result := <-done
+	if result.err != nil || !result.ok {
+		t.Fatalf("canceled read = ok %v err %v", result.ok, result.err)
+	}
+	if !result.input.deposit || result.input.text != "unsent draft" {
+		t.Fatalf("canceled input = %+v, want deposited draft", result.input)
+	}
+	if len(editor.history) != 0 {
+		t.Fatalf("canceled draft was committed to history: %v", editor.history)
+	}
+}
+
 func readViEditedInputWithHistory(t *testing.T, input string, history []string) (replInput, bool, error) {
 	t.Helper()
 	var out bytes.Buffer

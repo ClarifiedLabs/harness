@@ -6745,6 +6745,56 @@ func TestBackgroundGoalCreationWakesIdleREPLAndPersists(t *testing.T) {
 	}
 }
 
+func TestBackgroundGoalCreationPreservesIdleEditorDraft(t *testing.T) {
+	var out, errw lockedBuffer
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("user prompt done")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{toolStep("update_goal", `{"status":"complete"}`, "call_1")}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("goal done")}, Stop: llm.StopEndTurn},
+	)
+	app := newTestAppWithGoal(t, &out, &errw, fp)
+	finished := make(chan struct{}, 2)
+	app.OnPromptFinished = func() { finished <- struct{}{} }
+	reader, writer := io.Pipe()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(reader, app, nil, true) }()
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "idle editor prompt")
+
+	writePipe(t, writer, "unsent draft")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> unsent draft") }, "typed idle draft")
+	if err := app.Goal.Create("wake without losing input"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		return strings.Count(errw.String(), "> unsent draft") >= 2
+	}, "deposited draft redisplay")
+
+	if got := fp.RequestCount(); got != 0 {
+		t.Fatalf("goal started over an unsent draft: requests=%d", got)
+	}
+	select {
+	case code := <-codeCh:
+		t.Fatalf("REPL exited while preserving draft: code=%d stderr=%q", code, errw.String())
+	default:
+	}
+
+	writePipe(t, writer, "\r")
+	<-finished // submitted user draft
+	<-finished // autonomous continuation, including update_goal
+	writePipe(t, writer, "/exit\r")
+	_ = writer.Close()
+	if code := <-codeCh; code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 3 {
+		t.Fatalf("requests = %d, want user prompt plus goal tool/final rounds", fp.RequestCount())
+	}
+	prompts := transcriptPrompts(app)
+	if !strings.HasPrefix(prompts, "unsent draft|") || !strings.Contains(prompts, "wake without losing input") {
+		t.Fatalf("prompt order = %q, want preserved draft before goal continuation", prompts)
+	}
+}
+
 func TestGoalPromptAdmissionSkipsGoalCompletedDuringRefresh(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")

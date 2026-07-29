@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"harness/internal/agent"
+	"harness/internal/goal"
 	"harness/internal/llm"
 	"harness/internal/session"
 	"harness/internal/todo"
@@ -337,7 +338,7 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 		// Background jobs own independent cancellation, but child tools still need
 		// prompt-scoped values (for example a goal-generation binding). Preserve
 		// values without coupling the job lifetime to the parent prompt.
-		parentValues := context.WithoutCancel(ctx)
+		parentValues := goal.ForkGenerationContext(context.WithoutCancel(ctx))
 		jobAgent := req.Agent
 		if prepared.continuation != nil {
 			jobAgent = prepared.continuation.meta.Agent
@@ -386,7 +387,7 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 	// the very object the renderer's closure reads. Fall back to a fresh progress
 	// when no StartProgress ran (e.g. Run called directly outside dispatch).
 	progress := t.takeProgress(input)
-	result, err := t.runner.Run(ctx, req, progress)
+	result, err := t.runner.Run(goal.ForkGenerationContext(ctx), req, progress)
 	if err != nil {
 		return tools.MeteredResult{Usage: result.Usage, Progress: result.Progress}, err
 	}

@@ -2,20 +2,25 @@
 
 package main
 
-// Integration leg for delegate tmux windows (design §9.14): the real binary
-// runs a scripted foreground delegate under a fake tmux on PATH. The fake
-// records every invocation so the test asserts the exact argv marshalling —
-// one detached window following the child session dir, closed on success.
+// Integration legs for delegate tmux views (design §9.14): the real harness
+// binary and real tmux CLI run against a private tmux server socket. Unit tests
+// retain exact argv coverage; these tests assert the resulting tmux state and
+// cleanup without touching any ambient tmux server.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // delegateCallTurn scripts an assistant turn that calls the delegate tool
@@ -48,38 +53,175 @@ func delegateCallTurn(callID, task string) string {
 	return strings.Join([]string{start, "", args, "", done, "", "data: [DONE]", ""}, "\n")
 }
 
-func TestSmokeDelegateTmuxWindow(t *testing.T) {
-	bin := buildBinary(t)
+type isolatedTmux struct {
+	binary     string
+	socket     string
+	session    string
+	serverPID  string
+	baseWindow string
+	parentPane string
+	target     string
+	paneTarget string
+}
 
-	// Fake tmux records argv one argument per line under an argc header, so a
-	// space in a path can never be confused with an argument separator.
-	logPath := filepath.Join(t.TempDir(), "tmux.log")
-	binDir := t.TempDir()
-	fake := `#!/bin/sh
-{
-  printf 'argc=%d\n' "$#"
-  for a in "$@"; do printf '%s\n' "$a"; done
-} >> "$FAKE_TMUX_LOG"
-if [ "$1" = "new-window" ]; then printf '@1\n'; fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(fake), 0o755); err != nil {
-		t.Fatalf("write fake tmux: %v", err)
+func startIsolatedTmux(t *testing.T) *isolatedTmux {
+	t.Helper()
+	binary, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux is not available on PATH")
 	}
-	t.Setenv("FAKE_TMUX_LOG", logPath)
-	t.Setenv("TMUX", "/tmp/fake-tmux-socket,0,0")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	server := &isolatedTmux{
+		binary:  binary,
+		socket:  filepath.Join(t.TempDir(), "tmux.sock"),
+		session: fmt.Sprintf("harness_test_%d_%d", os.Getpid(), time.Now().UnixNano()),
+	}
+	server.run(t, "-f", "/dev/null", "new-session", "-d", "-s", server.session, "-x", "120", "-y", "40", "sleep 120")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(ctx, server.binary, "-S", server.socket, "kill-server").Run()
+	})
+	server.serverPID = server.run(t, "display-message", "-p", "-t", server.session, "#{pid}")
+	server.baseWindow = server.run(t, "display-message", "-p", "-t", server.session+":0", "#{window_id}")
+	server.parentPane = server.run(t, "display-message", "-p", "-t", server.session+":0.0", "#{pane_id}")
+	server.target = server.session
+	server.paneTarget = server.session + ":0"
+	return server
+}
 
-	mock := &recordingMock{scripts: []string{
-		delegateCallTurn("call_delegate", "inspect only"),
-		textTurn("child report"),
-		textTurn("parent done"),
-	}}
-	srv := httptest.NewServer(mock)
-	defer srv.Close()
+func (s *isolatedTmux) run(t *testing.T, args ...string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fullArgs := append([]string{"-S", s.socket}, args...)
+	cmd := exec.CommandContext(ctx, s.binary, fullArgs...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tmux %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
 
-	cmd, stdout, errBuf, home := startHarness(t, bin, srv.URL+"/v1", "-delegate-tmux", "-delegate-tmux-layout", "window", "-p", "delegate the inspection")
-	outBytes, _ := io.ReadAll(stdout)
+func (s *isolatedTmux) configureHarnessEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("TMUX", fmt.Sprintf("%s,%s,0", s.socket, s.serverPID))
+	t.Setenv("TMUX_PANE", s.parentPane)
+}
+
+type tmuxWindowState struct {
+	id     string
+	name   string
+	active bool
+}
+
+func (s *isolatedTmux) windows(t *testing.T) []tmuxWindowState {
+	t.Helper()
+	out := s.run(t, "list-windows", "-t", s.target, "-F", "#{window_id}\t#{window_name}\t#{window_active}")
+	var states []tmuxWindowState
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.SplitN(line, "\t", 3)
+		if len(fields) != 3 {
+			t.Fatalf("malformed tmux window state %q", line)
+		}
+		states = append(states, tmuxWindowState{id: fields[0], name: fields[1], active: fields[2] == "1"})
+	}
+	return states
+}
+
+type tmuxPaneState struct {
+	id    string
+	title string
+	left  int
+}
+
+func (s *isolatedTmux) panes(t *testing.T) []tmuxPaneState {
+	t.Helper()
+	out := s.run(t, "list-panes", "-t", s.paneTarget, "-F", "#{pane_id}\t#{pane_title}\t#{pane_left}")
+	var states []tmuxPaneState
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.SplitN(line, "\t", 3)
+		if len(fields) != 3 {
+			t.Fatalf("malformed tmux pane state %q", line)
+		}
+		left, err := strconv.Atoi(fields[2])
+		if err != nil {
+			t.Fatalf("pane left coordinate %q: %v", fields[2], err)
+		}
+		states = append(states, tmuxPaneState{id: fields[0], title: fields[1], left: left})
+	}
+	return states
+}
+
+func (s *isolatedTmux) option(t *testing.T, scope, target, name string) string {
+	t.Helper()
+	return s.run(t, "show-options", scope, "-v", "-t", target, name)
+}
+
+type requestGate struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newRequestGate() *requestGate {
+	return &requestGate{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *requestGate) beforeResponse(ctx context.Context, index int) {
+	if index != 1 {
+		return
+	}
+	close(g.started)
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+	}
+}
+
+func (g *requestGate) open() {
+	g.once.Do(func() { close(g.release) })
+}
+
+func waitForChildRequest(t *testing.T, gate *requestGate, cmd *exec.Cmd, errBuf *safeBuffer) {
+	t.Helper()
+	select {
+	case <-gate.started:
+	case <-time.After(10 * time.Second):
+		gate.open()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		t.Fatalf("delegate child request did not start; stderr=%s", errBuf.String())
+	}
+}
+
+func cleanupHarnessProcess(t *testing.T, gate *requestGate, cmd *exec.Cmd) {
+	t.Helper()
+	t.Cleanup(func() {
+		gate.open()
+		if cmd.Process != nil && cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+}
+
+func childSessionDir(t *testing.T, home string) string {
+	t.Helper()
+	children, err := filepath.Glob(filepath.Join(home, "state", "harness", "sessions", "*", "children", "delegate_*"))
+	if err != nil || len(children) != 1 {
+		t.Fatalf("child session dirs = %v, err=%v, want exactly 1", children, err)
+	}
+	return children[0]
+}
+
+func finishTmuxHarness(t *testing.T, gate *requestGate, cmd *exec.Cmd, stdout io.ReadCloser, errBuf *safeBuffer, mock *recordingMock) {
+	t.Helper()
+	gate.open()
+	outBytes, err := io.ReadAll(stdout)
+	if err != nil {
+		t.Fatalf("read harness stdout: %v", err)
+	}
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("harness exited with error: %v; stderr=%s", err, errBuf.String())
 	}
@@ -89,187 +231,122 @@ exit 0
 	if strings.Contains(errBuf.String(), "delegate_tmux") {
 		t.Errorf("no degradation warning expected inside tmux, stderr=%s", errBuf.String())
 	}
-
-	// The scripted delegate completed: parent tool call, child prompt, parent final.
 	if reqs := mock.recorded(); len(reqs) != 3 {
 		t.Fatalf("delegate flow should produce 3 requests, got %d", len(reqs))
 	}
+}
 
-	// The child session directory exists on disk.
-	children, err := filepath.Glob(filepath.Join(home, "state", "harness", "sessions", "*", "children", "delegate_*"))
-	if err != nil || len(children) != 1 {
-		t.Fatalf("child session dirs = %v, err=%v, want exactly 1", children, err)
+func TestSmokeDelegateTmuxWindow(t *testing.T) {
+	server := startIsolatedTmux(t)
+	server.configureHarnessEnvironment(t)
+	bin := buildBinary(t)
+	gate := newRequestGate()
+	t.Cleanup(gate.open)
+	mock := &recordingMock{
+		scripts: []string{
+			delegateCallTurn("call_delegate", "inspect only"),
+			textTurn("child report"),
+			textTurn("parent done"),
+		},
+		beforeResponse: gate.beforeResponse,
 	}
-	resolvedBin, err := filepath.EvalSymlinks(bin)
-	if err != nil {
-		resolvedBin = bin
-	}
+	srv := httptest.NewServer(mock)
+	t.Cleanup(func() {
+		gate.open()
+		srv.Close()
+	})
 
-	invocations := parseRecordedInvocations(t, logPath)
-	var newWindow, killWindow [][]string
-	for _, argv := range invocations {
-		switch argv[0] {
-		case "new-window":
-			newWindow = append(newWindow, argv)
-		case "kill-window":
-			killWindow = append(killWindow, argv)
+	cmd, stdout, errBuf, home := startHarness(t, bin, srv.URL+"/v1", "-delegate-tmux", "-delegate-tmux-layout", "window", "-p", "delegate the inspection")
+	cleanupHarnessProcess(t, gate, cmd)
+	waitForChildRequest(t, gate, cmd, errBuf)
+	childDir := childSessionDir(t, home)
+
+	windows := server.windows(t)
+	if len(windows) != 2 {
+		t.Fatalf("live tmux windows = %+v, want base plus delegate", windows)
+	}
+	var delegateWindow tmuxWindowState
+	for _, state := range windows {
+		if state.id != server.baseWindow {
+			delegateWindow = state
 		}
 	}
-	if len(newWindow) != 1 {
-		t.Fatalf("new-window invocations = %d, want 1: %v", len(newWindow), invocations)
+	if delegateWindow.id == "" {
+		t.Fatalf("delegate window missing from %+v", windows)
 	}
-	wantWindow := []string{
-		"new-window", "-d", "-a", "-P", "-F", "#{window_id}", "--",
-		resolvedBin, "session", "replay", "--follow", "--", children[0],
+	if want := filepath.Base(childDir); delegateWindow.name != want {
+		t.Fatalf("delegate window name = %q, want %q", delegateWindow.name, want)
 	}
-	if !equalStringSlices(newWindow[0], wantWindow) {
-		t.Fatalf("new-window argv:\ngot:  %v\nwant: %v", newWindow[0], wantWindow)
+	if delegateWindow.active {
+		t.Fatalf("delegate window %s is active; new-window -d should leave the base active", delegateWindow.id)
 	}
-	if len(killWindow) != 1 || !equalStringSlices(killWindow[0], []string{"kill-window", "-t", "@1"}) {
-		t.Fatalf("a successful child closes its window exactly once, got %v", killWindow)
+	if got := server.option(t, "-w", delegateWindow.id, "remain-on-exit"); got != "on" {
+		t.Fatalf("delegate remain-on-exit = %q, want on", got)
+	}
+	if got := server.option(t, "-w", delegateWindow.id, "automatic-rename"); got != "off" {
+		t.Fatalf("delegate automatic-rename = %q, want off", got)
+	}
+
+	finishTmuxHarness(t, gate, cmd, stdout, errBuf, mock)
+	after := server.windows(t)
+	if len(after) != 1 || after[0].id != server.baseWindow {
+		t.Fatalf("windows after child completion = %+v, want only base %s", after, server.baseWindow)
 	}
 }
 
 func TestSmokeDelegateTmuxPane(t *testing.T) {
+	server := startIsolatedTmux(t)
+	server.configureHarnessEnvironment(t)
 	bin := buildBinary(t)
-
-	logPath := filepath.Join(t.TempDir(), "tmux.log")
-	binDir := t.TempDir()
-	fake := `#!/bin/sh
-{
-  printf 'argc=%d\n' "$#"
-  for a in "$@"; do printf '%s\n' "$a"; done
-} >> "$FAKE_TMUX_LOG"
-if [ "$1" = "split-window" ]; then printf '%%1\n'; fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(fake), 0o755); err != nil {
-		t.Fatalf("write fake tmux: %v", err)
+	gate := newRequestGate()
+	t.Cleanup(gate.open)
+	mock := &recordingMock{
+		scripts: []string{
+			delegateCallTurn("call_delegate", "inspect only"),
+			textTurn("child report"),
+			textTurn("parent done"),
+		},
+		beforeResponse: gate.beforeResponse,
 	}
-	t.Setenv("FAKE_TMUX_LOG", logPath)
-	t.Setenv("TMUX", "/tmp/fake-tmux-socket,0,0")
-	t.Setenv("TMUX_PANE", "%0")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	mock := &recordingMock{scripts: []string{
-		delegateCallTurn("call_delegate", "inspect only"),
-		textTurn("child report"),
-		textTurn("parent done"),
-	}}
 	srv := httptest.NewServer(mock)
-	defer srv.Close()
+	t.Cleanup(func() {
+		gate.open()
+		srv.Close()
+	})
 
 	cmd, stdout, errBuf, home := startHarness(t, bin, srv.URL+"/v1", "-delegate-tmux", "-p", "delegate the inspection")
-	outBytes, _ := io.ReadAll(stdout)
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("harness exited with error: %v; stderr=%s", err, errBuf.String())
-	}
-	if !strings.Contains(string(outBytes), "parent done") {
-		t.Errorf("final assistant text should be on stdout, got %q (stderr=%s)", outBytes, errBuf.String())
-	}
-	if strings.Contains(errBuf.String(), "delegate_tmux") {
-		t.Errorf("no degradation warning expected inside tmux, stderr=%s", errBuf.String())
-	}
+	cleanupHarnessProcess(t, gate, cmd)
+	waitForChildRequest(t, gate, cmd, errBuf)
+	childDir := childSessionDir(t, home)
 
-	if reqs := mock.recorded(); len(reqs) != 3 {
-		t.Fatalf("delegate flow should produce 3 requests, got %d", len(reqs))
+	panes := server.panes(t)
+	if len(panes) != 2 {
+		t.Fatalf("live tmux panes = %+v, want base plus delegate", panes)
 	}
-
-	children, err := filepath.Glob(filepath.Join(home, "state", "harness", "sessions", "*", "children", "delegate_*"))
-	if err != nil || len(children) != 1 {
-		t.Fatalf("child session dirs = %v, err=%v, want exactly 1", children, err)
-	}
-	resolvedBin, err := filepath.EvalSymlinks(bin)
-	if err != nil {
-		resolvedBin = bin
-	}
-
-	invocations := parseRecordedInvocations(t, logPath)
-	var split, killPane [][]string
-	for _, argv := range invocations {
-		switch argv[0] {
-		case "split-window":
-			split = append(split, argv)
-		case "kill-pane":
-			killPane = append(killPane, argv)
+	var basePane, delegatePane tmuxPaneState
+	for _, state := range panes {
+		if state.id == server.parentPane {
+			basePane = state
+		} else {
+			delegatePane = state
 		}
 	}
-	if len(split) != 1 {
-		t.Fatalf("split-window invocations = %d, want 1: %v", len(split), invocations)
+	if basePane.id == "" || delegatePane.id == "" {
+		t.Fatalf("base/delegate pane missing from %+v", panes)
 	}
-	wantSplit := []string{
-		"split-window", "-d", "-h", "-t", "%0", "-P", "-F", "#{pane_id}", "--",
-		resolvedBin, "session", "replay", "--follow", "--", children[0],
+	if delegatePane.left <= basePane.left {
+		t.Fatalf("delegate pane left=%d, base left=%d; want right-hand split", delegatePane.left, basePane.left)
 	}
-	if !equalStringSlices(split[0], wantSplit) {
-		t.Fatalf("split-window argv:\ngot:  %v\nwant: %v", split[0], wantSplit)
+	if want := filepath.Base(childDir); delegatePane.title != want {
+		t.Fatalf("delegate pane title = %q, want %q", delegatePane.title, want)
 	}
-	if len(killPane) != 1 || !equalStringSlices(killPane[0], []string{"kill-pane", "-t", "%1"}) {
-		t.Fatalf("a successful child closes its pane exactly once, got %v", killPane)
+	if got := server.option(t, "-p", delegatePane.id, "remain-on-exit"); got != "on" {
+		t.Fatalf("delegate pane remain-on-exit = %q, want on", got)
 	}
 
-	hasRemainOnExit := false
-	hasPaneTitle := false
-	for _, argv := range invocations {
-		if len(argv) >= 6 && argv[0] == "set-option" && argv[1] == "-p" && argv[5] == "remain-on-exit" {
-			hasRemainOnExit = true
-		}
-		if len(argv) >= 4 && argv[0] == "select-pane" && argv[1] == "-T" {
-			hasPaneTitle = true
-		}
+	finishTmuxHarness(t, gate, cmd, stdout, errBuf, mock)
+	after := server.panes(t)
+	if len(after) != 1 || after[0].id != server.parentPane {
+		t.Fatalf("panes after child completion = %+v, want only base %s", after, server.parentPane)
 	}
-	if !hasRemainOnExit {
-		t.Fatalf("missing per-pane remain-on-exit in %v", invocations)
-	}
-	if !hasPaneTitle {
-		t.Fatalf("missing pane title in %v", invocations)
-	}
-}
-
-// parseRecordedInvocations reads the fake tmux log into one argv slice per
-// invocation, keyed by the argc= header lines.
-func parseRecordedInvocations(t *testing.T, logPath string) [][]string {
-	t.Helper()
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("fake tmux never ran: %v", err)
-	}
-	var invocations [][]string
-	var current []string
-	remaining := 0
-	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
-		if strings.HasPrefix(line, "argc=") {
-			if current != nil && remaining != 0 {
-				t.Fatalf("truncated invocation in recorder log: %v", current)
-			}
-			current = nil
-			if _, err := fmt.Sscanf(line, "argc=%d", &remaining); err != nil {
-				t.Fatalf("bad recorder line %q: %v", line, err)
-			}
-			if remaining == 0 {
-				invocations = append(invocations, []string{})
-				current = nil
-			}
-			continue
-		}
-		current = append(current, line)
-		remaining--
-		if remaining == 0 {
-			invocations = append(invocations, current)
-			current = nil
-		}
-	}
-	return invocations
-}
-
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

@@ -26,6 +26,7 @@ type toolBinding struct {
 	mu         sync.Mutex
 	store      *Store
 	generation uint64
+	parent     *toolBinding
 }
 
 // WithGeneration binds goal-tool calls descended from ctx to one goal/session
@@ -36,6 +37,28 @@ func WithGeneration(ctx context.Context, store *Store, generation uint64) contex
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, bindingContextKey{}, &toolBinding{store: store, generation: generation})
+}
+
+// ForkGenerationContext gives a child agent an independent snapshot of the
+// current goal generation. Successful create_goal calls advance the child's
+// ancestor chain when it still represents the same generation, while siblings
+// that were already forked retain their original generation and become stale.
+func ForkGenerationContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	parent, ok := ctx.Value(bindingContextKey{}).(*toolBinding)
+	if !ok || parent == nil {
+		return ctx
+	}
+	parent.mu.Lock()
+	child := &toolBinding{
+		store:      parent.store,
+		generation: parent.generation,
+		parent:     parent,
+	}
+	parent.mu.Unlock()
+	return context.WithValue(ctx, bindingContextKey{}, child)
 }
 
 func bindingFor(ctx context.Context, store *Store) (*toolBinding, uint64, bool) {
@@ -60,8 +83,30 @@ func GenerationFromContext(ctx context.Context, store *Store) (uint64, bool) {
 
 func (b *toolBinding) advance(generation uint64) {
 	b.mu.Lock()
+	previous := b.generation
 	b.generation = generation
+	parent := b.parent
 	b.mu.Unlock()
+	if parent != nil {
+		parent.advanceFrom(previous, generation)
+	}
+}
+
+// advanceFrom conditionally propagates a descendant's successful generation
+// transition. Locks are never nested, so arbitrarily deep delegate chains do
+// not invert binding mutex order.
+func (b *toolBinding) advanceFrom(expected, generation uint64) {
+	b.mu.Lock()
+	if b.generation != expected {
+		b.mu.Unlock()
+		return
+	}
+	b.generation = generation
+	parent := b.parent
+	b.mu.Unlock()
+	if parent != nil {
+		parent.advanceFrom(expected, generation)
+	}
 }
 
 const updateSchema = `{

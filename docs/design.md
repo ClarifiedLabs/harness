@@ -2655,15 +2655,17 @@ backoff allows.
   but goal management is explicitly a root-conversation concern rather than a
   per-child store. Store transitions are revisioned and terminal statuses cannot
   be overwritten by stale pause/continuation work. Each admitted root prompt also
-  captures a goal-identity generation in its context. Foreground and background
-  delegates inherit that binding, so delayed `create_goal`/`update_goal` calls
-  cannot mutate a user-replaced or cleared goal; a successful `create_goal`
-  advances the same prompt binding so a later round may update its new goal. A
-  coalesced change signal
+  captures a goal-identity generation in its context. Each foreground and
+  background delegate snapshots that binding at launch, so delayed
+  `create_goal`/`update_goal` calls cannot mutate a user-replaced or cleared goal
+  and already-launched siblings remain stale. A successful child `create_goal`
+  conditionally advances its still-current ancestor bindings so later rounds in
+  that lineage may update the new goal. A coalesced change signal
   wakes the idle root REPL to checkpoint and pursue child-created goals while
-  preserving already-delivered user-input priority. Both tools remain registered
-  in one-shot/piped mode so agent tool-set resolution stays stable, but return a
-  mode error there.
+  preserving user-input priority: an unfinished raw-editor draft is reclaimed as
+  editable prefill and defers autonomous continuation until it is submitted or
+  cleared. Both tools remain registered in one-shot/piped mode so agent tool-set
+  resolution stays stable, but return a mode error there.
 
 ## 10. CLI / REPL (`internal/ui`)
 
@@ -3545,9 +3547,11 @@ test that touches one.
 Beyond the unit tables, `//go:build integration` suites build the real binaries and drive
 them as subprocesses against hermetic local mock servers (no API keys, no network):
 `cmd/harness` exercises tool round-trip, `^C` mid-stream (exit 130 + valid resumable
-transcript), resume-of-interrupted-session, and the LSP shim end to end. Run the fast
-unit tests with `make test` (`go test ./...`) and the integration legs with
-`make test-integration` (`go test -tags=integration ./cmd/harness`).
+transcript), resume-of-interrupted-session, isolated real-tmux delegate views, and
+the LSP shim end to end. The tmux legs use a private temporary server socket and
+skip when `tmux` is unavailable. Run the fast unit tests with `make test`
+(`go test ./...`) and the integration legs with `make test-integration`
+(`go test -tags=integration ./cmd/harness`).
 Opt-in upstream model checks, including separate ChatGPT-subscription and
 first-party OpenAI Responses legs, use the `livemodel` tag via
 `make test-live-models`; see `docs/smoke.md` for setup and expectations.

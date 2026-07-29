@@ -98,6 +98,9 @@ type recordingMock struct {
 	// slow, when set, is the per-line delay used to keep a stream open long
 	// enough for the ^C leg to interrupt it mid-flight.
 	slow time.Duration
+	// beforeResponse is an optional integration-test gate invoked after the
+	// request is recorded but before response headers are written.
+	beforeResponse func(context.Context, int)
 }
 
 // openAIRequest is the subset of the wire request the tests inspect.
@@ -127,8 +130,12 @@ func (m *recordingMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	slow := m.slow
+	beforeResponse := m.beforeResponse
 	m.mu.Unlock()
 
+	if beforeResponse != nil {
+		beforeResponse(r.Context(), idx)
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)

@@ -100,6 +100,39 @@ func TestGoalBindingAdvancesAfterSamePromptCreate(t *testing.T) {
 	}
 }
 
+func TestForkedGoalBindingsAdvanceAncestorsButNotSiblings(t *testing.T) {
+	store := NewStore()
+	parent := WithGeneration(context.Background(), store, store.Generation())
+	child := ForkGenerationContext(parent)
+	staleSibling := ForkGenerationContext(parent)
+
+	if _, err := NewCreateTool(store, true).Run(child, json.RawMessage(`{"objective":"child objective"}`)); err != nil {
+		t.Fatalf("child create_goal: %v", err)
+	}
+	createdGeneration := store.Generation()
+	for name, ctx := range map[string]context.Context{"parent": parent, "child": child} {
+		if got, ok := GenerationFromContext(ctx, store); !ok || got != createdGeneration {
+			t.Fatalf("%s generation = %d, %v; want %d, true", name, got, ok, createdGeneration)
+		}
+	}
+	if got, ok := GenerationFromContext(staleSibling, store); !ok || got == createdGeneration {
+		t.Fatalf("stale sibling generation = %d, %v; want prior generation", got, ok)
+	}
+	if _, err := NewUpdateTool(store, true).Run(staleSibling, json.RawMessage(`{"status":"complete"}`)); err == nil || !strings.Contains(err.Error(), "stale update_goal") {
+		t.Fatalf("stale sibling update error = %v", err)
+	}
+	if _, err := NewUpdateTool(store, true).Run(parent, json.RawMessage(`{"status":"complete"}`)); err != nil {
+		t.Fatalf("parent update of child-created goal: %v", err)
+	}
+
+	if _, err := NewCreateTool(store, true).Run(child, json.RawMessage(`{"objective":"next child objective"}`)); err != nil {
+		t.Fatalf("second child create_goal: %v", err)
+	}
+	if got, ok := GenerationFromContext(parent, store); !ok || got != store.Generation() {
+		t.Fatalf("parent generation after second propagation = %d, %v; want %d, true", got, ok, store.Generation())
+	}
+}
+
 func TestCreateToolRejectsStaleEmptyGeneration(t *testing.T) {
 	store := NewStore()
 	ctx := WithGeneration(context.Background(), store, store.Generation())

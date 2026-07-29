@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"harness/internal/agent"
+	"harness/internal/goal"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/session"
@@ -2263,19 +2264,72 @@ func (t *blockingChildTool) Run(ctx context.Context, _ json.RawMessage) (string,
 	}
 }
 
+func TestForegroundDelegateForksGoalGeneration(t *testing.T) {
+	store := goal.NewStore()
+	initialGeneration := store.Generation()
+	childStarted := make(chan struct{})
+	inspectChild := make(chan struct{})
+	childGeneration := make(chan uint64, 1)
+	fp := llmtest.New("fake", llmtest.Step{
+		Block: func(ctx context.Context) {
+			close(childStarted)
+			<-inspectChild
+			generation, _ := goal.GenerationFromContext(ctx, store)
+			childGeneration <- generation
+		},
+		Stop: llm.StopEndTurn,
+	})
+	state := NewState(Runtime{
+		Provider:    fp,
+		Model:       "m",
+		Registry:    llm.NewRegistry(nil),
+		SessionPath: filepath.Join(t.TempDir(), "session"),
+	})
+	runner := NewRunner(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
+		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: &tools.Registry{}, Agent: "explore"}, nil
+	}, Options{ActivityRegistry: NewActivityRegistry(nil)})
+	tool := NewTool(runner)
+	parentCtx := goal.WithGeneration(context.Background(), store, initialGeneration)
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := tool.RunMetered(parentCtx, json.RawMessage(`{"task":"inspect"}`))
+		runDone <- err
+	}()
+
+	<-childStarted
+	if _, err := goal.NewCreateTool(store, true).Run(parentCtx, json.RawMessage(`{"objective":"new root goal"}`)); err != nil {
+		t.Fatalf("parent create_goal: %v", err)
+	}
+	close(inspectChild)
+	if got := <-childGeneration; got != initialGeneration {
+		t.Fatalf("foreground child generation = %d, want launch snapshot %d", got, initialGeneration)
+	}
+	if err := <-runDone; err != nil {
+		t.Fatalf("foreground delegate: %v", err)
+	}
+	if got, ok := goal.GenerationFromContext(parentCtx, store); !ok || got != store.Generation() {
+		t.Fatalf("parent generation = %d, %v; want %d, true", got, ok, store.Generation())
+	}
+}
+
 // TestProgressBackgroundExposedOnJob verifies a background delegate publishes a
 // live progress closure on its job snapshot immediately at start, before the
 // child run completes, so the parent wait ticker can read it mid-run.
 func TestProgressBackgroundExposedOnJob(t *testing.T) {
 	type contextKey string
 	const inheritedKey contextKey = "prompt-generation"
+	goalStore := goal.NewStore()
+	initialGoalGeneration := goalStore.Generation()
 	childTools := &tools.Registry{}
 	modelStarted := make(chan struct{})
 	inheritedValue := make(chan any, 1)
+	inheritedGoalGeneration := make(chan uint64, 1)
 	releaseModel := make(chan struct{})
 	fp := llmtest.New("fake", llmtest.Step{
 		Block: func(ctx context.Context) {
 			inheritedValue <- ctx.Value(inheritedKey)
+			generation, _ := goal.GenerationFromContext(ctx, goalStore)
+			inheritedGoalGeneration <- generation
 			close(modelStarted)
 			select {
 			case <-releaseModel:
@@ -2294,7 +2348,11 @@ func TestProgressBackgroundExposedOnJob(t *testing.T) {
 	starter := &capturingStarter{req: started}
 	tool := NewTool(runner, starter)
 
-	parentCtx := context.WithValue(context.Background(), inheritedKey, "generation-7")
+	parentCtx := goal.WithGeneration(
+		context.WithValue(context.Background(), inheritedKey, "generation-7"),
+		goalStore,
+		initialGoalGeneration,
+	)
 	result, err := tool.RunMetered(parentCtx, json.RawMessage(`{"task":"bg","background":true}`))
 	if err != nil {
 		t.Fatalf("RunMetered: %v", err)
@@ -2314,6 +2372,9 @@ func TestProgressBackgroundExposedOnJob(t *testing.T) {
 	if got := snapshot(); got.Turn != 0 || got.Finished {
 		t.Fatalf("closure before job run = %+v, want zero", got)
 	}
+	if _, err := goal.NewCreateTool(goalStore, true).Run(parentCtx, json.RawMessage(`{"objective":"created after scheduling"}`)); err != nil {
+		t.Fatalf("parent create_goal: %v", err)
+	}
 	// Run the job asynchronously, observe the authoritative shared registry while
 	// the provider is blocked, then release it and confirm exactly-once cleanup.
 	type backgroundRun struct {
@@ -2328,6 +2389,9 @@ func TestProgressBackgroundExposedOnJob(t *testing.T) {
 	<-modelStarted
 	if got := <-inheritedValue; got != "generation-7" {
 		t.Fatalf("background child context value = %v, want inherited generation", got)
+	}
+	if got := <-inheritedGoalGeneration; got != initialGoalGeneration {
+		t.Fatalf("background child goal generation = %d, want scheduling snapshot %d", got, initialGoalGeneration)
 	}
 	activity := activityRegistry.Snapshot()
 	if len(activity.Active) != 1 || activity.Recent.DisplayID != "d1" || activity.Recent.Agent != "explore" || activity.Recent.TranscriptPath == "" {

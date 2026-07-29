@@ -255,6 +255,16 @@ func (e *promptLineEditor) finishPromptState(s *lineEditState) error {
 	})
 }
 
+func (e *promptLineEditor) erasePromptState(s *lineEditState) error {
+	return withPromptOutput(e, func(w io.Writer) error {
+		if err := s.erase(w); err != nil {
+			return err
+		}
+		e.activePrompt = nil
+		return nil
+	})
+}
+
 func (e *promptLineEditor) clearPromptSnapshot() {
 	_ = withPromptOutput(e, func(io.Writer) error {
 		e.activePrompt = nil
@@ -329,6 +339,13 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 func (e *promptLineEditor) readPrefilledClassified(prompt, prefill string, purePaste bool) (replInput, bool, error) {
 	state := lineEditState{prompt: prompt}
 	defer e.clearPromptSnapshot()
+	depositCanceled := func() (replInput, bool, error) {
+		e.tracef("read canceled with buffered text len=%d purePaste=%v", len(state.buf), e.purePaste)
+		if err := e.erasePromptState(&state); err != nil {
+			return replInput{}, false, err
+		}
+		return replInput{text: string(state.buf), pasted: e.purePaste, deposit: true}, true, nil
+	}
 	if prefill != "" {
 		state.setText(prefill)
 	}
@@ -357,6 +374,9 @@ func (e *promptLineEditor) readPrefilledClassified(prompt, prefill string, pureP
 	for {
 		r, size, err := e.r.ReadRune()
 		if err != nil {
+			if errors.Is(err, errReadCanceled) {
+				return depositCanceled()
+			}
 			if errors.Is(err, io.EOF) && len(state.buf) > 0 {
 				e.tracef("read eof with buffered text len=%d purePaste=%v", len(state.buf), e.purePaste)
 				if err := e.finishPromptState(&state); err != nil {
@@ -376,6 +396,9 @@ func (e *promptLineEditor) readPrefilledClassified(prompt, prefill string, pureP
 
 		result, err := e.handleKey(&vi, &state, &history, prompt, r, false)
 		if err != nil {
+			if errors.Is(err, errReadCanceled) {
+				return depositCanceled()
+			}
 			return replInput{}, false, err
 		}
 		if result.done {
@@ -2163,6 +2186,19 @@ func (s *lineEditState) finish(w io.Writer) error {
 		}
 	}
 	if _, err := fmt.Fprint(w, "\n"); err != nil {
+		return err
+	}
+	s.drawn = false
+	s.rows = 0
+	s.cursorRow = 0
+	s.cursorCol = 0
+	s.endRow = 0
+	s.endCol = 0
+	return nil
+}
+
+func (s *lineEditState) erase(w io.Writer) error {
+	if err := s.moveToPromptStart(w); err != nil {
 		return err
 	}
 	s.drawn = false
