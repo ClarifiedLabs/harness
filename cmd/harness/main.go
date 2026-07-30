@@ -289,7 +289,7 @@ func run(env environment) int {
 	// coordinator stdout. stderr is unchanged. The run stream itself writes to
 	// the raw stdout handle.
 	rawStdout := stdout
-	jsonRunMode := cfg.OutputFormat == "json" && (cfg.PromptSet || env.stdinPiped)
+	jsonRunMode := cfg.OutputFormat == "json" && (cfg.PromptSet || env.stdinPiped) && !cfg.DebugRequest
 	coordinatorOut := stdout
 	if jsonRunMode {
 		coordinatorOut = io.Discard

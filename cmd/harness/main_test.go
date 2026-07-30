@@ -1222,6 +1222,51 @@ func TestRunDebugRequestDumpsPromptAndSkipsModelStream(t *testing.T) {
 	}
 }
 
+func TestRunDebugRequestNotMutedInJSONRunMode(t *testing.T) {
+	t.Run("prompt flag", func(t *testing.T) {
+		fp := llmtest.New("fake", okStepWithUsage(1, 1))
+		env, out, errw, _, _ := fakeProviderEnvWithProxy(t, []string{
+			"--debug-request",
+			"-format", "json",
+			"-model", "openai:gpt-5.5",
+			"-p", "inspect request",
+		}, fp, "")
+		env.stdinPiped = true
+
+		if code := run(env); code != ui.ExitOK {
+			t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+		}
+		var got debugRequestOutput
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatalf("debug request JSON: %v\n%s", err, out.String())
+		}
+		if !got.PromptIncluded {
+			t.Fatal("prompt_included = false, want true")
+		}
+	})
+
+	t.Run("piped stdin", func(t *testing.T) {
+		fp := llmtest.New("fake", okStepWithUsage(1, 1))
+		env, out, errw, _, _ := fakeProviderEnvWithProxy(t, []string{
+			"--debug-request",
+			"-format", "json",
+			"-model", "openai:gpt-5.5",
+		}, fp, "inspect request")
+		env.stdinPiped = true
+
+		if code := run(env); code != ui.ExitOK {
+			t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+		}
+		if out.Len() == 0 {
+			t.Fatal("debug request output muted in JSON run mode")
+		}
+		var got debugRequestOutput
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatalf("debug request JSON: %v\n%s", err, out.String())
+		}
+	})
+}
+
 func TestRunDebugRequestInitialPromptDoesNotSaveSession(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	sessionPath := filepath.Join(t.TempDir(), "session")
