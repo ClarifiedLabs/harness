@@ -299,6 +299,51 @@ func TestRecorderRetainsFirstErrorAndCallsOnError(t *testing.T) {
 	}
 }
 
+func TestRecorderMirrorPanicDoesNotWedgeRecorder(t *testing.T) {
+	dir := t.TempDir()
+	panics := 0
+	rec := New(Config{
+		Dir:    dir,
+		Prompt: 1,
+		Mirror: func(session.Event) {
+			panics++
+			if panics == 1 {
+				panic("mirror boom")
+			}
+		},
+	})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("first Notice did not propagate the mirror panic")
+			}
+		}()
+		rec.Notice("first", 0)
+	}()
+	// A mirror panic must not leave the recorder locked: later calls proceed.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rec.Notice("second", 0)
+		rec.Flush()
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recorder wedged after mirror panic")
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	if !strings.Contains(string(raw), "second") {
+		t.Fatalf("raw.ndjson missing event after mirror panic:\n%s", raw)
+	}
+	if err := rec.Err(); err != nil {
+		t.Fatalf("Err = %v, want nil (mirror panic is not an append failure)", err)
+	}
+}
+
 func TestRecorderAssistantPhaseGate(t *testing.T) {
 	dir := t.TempDir()
 	rec := New(Config{Dir: dir, Prompt: 1})

@@ -347,6 +347,20 @@ func TestSaveBackfillsMissingMessageTimestamps(t *testing.T) {
 	}
 }
 
+func TestAppendEventReportsWriteFailure(t *testing.T) {
+	// The event log path occupied by a directory: open fails and AppendEvent
+	// must report it (the contract the JSON run stream's fatal-on-raw-error
+	// semantics rely on).
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "raw.ndjson"), 0o755); err != nil {
+		t.Fatalf("mkdir blocking event log: %v", err)
+	}
+	err := AppendEvent(dir, Event{Type: EventUser, Prompt: 1, Text: "hello"})
+	if err == nil || !strings.Contains(err.Error(), "session: open event log") {
+		t.Fatalf("AppendEvent error = %v, want open event log failure", err)
+	}
+}
+
 func TestAppendEventStampsMissingTime(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	if err := AppendEvent(dir, Event{Type: EventUser, Prompt: 1, Text: "hello"}); err != nil {

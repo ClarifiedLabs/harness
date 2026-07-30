@@ -95,20 +95,6 @@ func (r *Recorder) now() time.Time {
 	return time.Now()
 }
 
-func (r *Recorder) noteError(err error) {
-	if err == nil {
-		return
-	}
-	r.mu.Lock()
-	if r.err == nil {
-		r.err = err
-	}
-	r.mu.Unlock()
-	if r.cfg.OnError != nil {
-		r.cfg.OnError(err)
-	}
-}
-
 // Err returns the first append failure, if any.
 func (r *Recorder) Err() error {
 	if r == nil {
@@ -122,6 +108,10 @@ func (r *Recorder) Err() error {
 // Append records one fully-formed event, stamping the clock time when unset.
 // It is the shared path for event kinds the recorder does not assemble itself
 // (checkpoints, retention, skill activations, idle compactions).
+//
+// The Mirror callback (JSON run-stream mirroring) deliberately runs under the
+// mutex so mirrored events keep their append order; the unlock is deferred so
+// a panicking mirror cannot wedge every later recorder call.
 func (r *Recorder) Append(ev session.Event) {
 	if r == nil {
 		return
@@ -129,21 +119,32 @@ func (r *Recorder) Append(ev session.Event) {
 	if ev.Time.IsZero() {
 		ev.Time = r.now()
 	}
-	r.mu.Lock()
-	err := r.events.Append(ev)
-	r.mu.Unlock()
-	r.noteError(err)
+	if err := r.appendLocked(func() error { return r.events.Append(ev) }); err != nil && r.cfg.OnError != nil {
+		r.cfg.OnError(err)
+	}
 }
 
-// Flush writes any buffered assistant-delta chunk.
+// Flush writes any buffered assistant-delta chunk. Mirror delivery semantics
+// match Append.
 func (r *Recorder) Flush() {
 	if r == nil {
 		return
 	}
+	if err := r.appendLocked(r.events.Flush); err != nil && r.cfg.OnError != nil {
+		r.cfg.OnError(err)
+	}
+}
+
+// appendLocked runs one EventAppender write under the mutex with a deferred
+// unlock and retains the first failure.
+func (r *Recorder) appendLocked(write func() error) error {
 	r.mu.Lock()
-	err := r.events.Flush()
-	r.mu.Unlock()
-	r.noteError(err)
+	defer r.mu.Unlock()
+	err := write()
+	if err != nil && r.err == nil {
+		r.err = err
+	}
+	return err
 }
 
 // User records the prompt's user event and starts the prompt clock.

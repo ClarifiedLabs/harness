@@ -705,7 +705,10 @@ const (
 	EventModelRequest         = "model_request"
 )
 
-// AppendEvent appends ev as one JSON line to raw.ndjson under dir.
+// AppendEvent appends ev as one JSON line to raw.ndjson under dir. A close
+// failure is reported: without fsync it is the last chance to surface a
+// delayed write error, and the returned error is the contract the JSON run
+// stream's fatal-on-raw-error semantics rely on.
 func AppendEvent(dir string, ev Event) error {
 	if dir == "" {
 		return nil
@@ -720,10 +723,13 @@ func AppendEvent(dir string, ev Event) error {
 	if err != nil {
 		return fmt.Errorf("session: open event log: %w", err)
 	}
-	defer f.Close()
 	enc := json.NewEncoder(f)
 	if err := enc.Encode(ev); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("session: append event: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("session: close event log: %w", err)
 	}
 	return nil
 }
