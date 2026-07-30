@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"harness/internal/llm"
 )
 
 const (
@@ -262,8 +264,32 @@ func decodeSearchArgs(input json.RawMessage) (searchArgs, error) {
 		if query.MaxFiles == 0 {
 			query.MaxFiles = searchDefaultMaxFiles
 		}
+		if err := validateSearchPattern(i, *query); err != nil {
+			return searchArgs{}, err
+		}
 	}
 	return args, nil
+}
+
+// validateSearchPattern pre-compiles a query's effective regex (respecting
+// fixed_strings and the smart-case (?i) prefix, mirroring the stdlib walker's
+// transformation) so an invalid pattern fails fast with an actionable error
+// instead of surfacing an rg stderr dump. Go's RE2 and ripgrep's default
+// engine are both RE2-class, so divergence is exotic. The kinded regex_invalid
+// class keeps the failure out of the invalid-arguments bucket: switching to
+// literal text is the fix, not different argument shapes.
+func validateSearchPattern(i int, query searchQuery) error {
+	if query.FixedStrings {
+		return nil // regexp.QuoteMeta output always compiles
+	}
+	pattern := query.Pattern
+	if query.Case == "insensitive" || query.Case == "smart" && strings.ToLower(query.Pattern) == query.Pattern {
+		pattern = "(?i)" + pattern
+	}
+	if _, err := regexp.Compile(pattern); err != nil {
+		return WithKind(fmt.Errorf("queries[%d].pattern: invalid regex: %w; use fixed_strings: true for literal text", i, err), llm.ToolErrorRegexInvalid)
+	}
+	return nil
 }
 
 func (s searchTool) searchRG(ctx context.Context, args searchQuery) searchResult {

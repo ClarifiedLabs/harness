@@ -109,6 +109,10 @@ directory (plus one parent level when the directory itself is missing), never a
 recursive walk — so a mistyped path can be retargeted without a list_dir round
 trip.
 
+Invalid search regexes are rejected at argument decode with `invalid regex:
+<compile error>; use fixed_strings: true for literal text` (error kind
+`regex_invalid`), before ripgrep or the stdlib walker runs.
+
 For a batch with more than one `context` or `matches` query, Harness renders
 each query's match summary followed by one shared source-context section.
 Overlapping or adjacent source windows are merged and labeled with the query

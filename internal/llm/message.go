@@ -190,11 +190,11 @@ const (
 	ToolErrorBlocked              ToolErrorKind = "blocked"
 	ToolErrorUnsupportedModality  ToolErrorKind = "unsupported_modality"
 	ToolErrorInvalidResult        ToolErrorKind = "invalid_result"
+	ToolErrorRegexInvalid         ToolErrorKind = "regex_invalid"
 
 	// Kinds assigned only by the offline analysis layer (text classification
 	// of legacy logs and model_request failure mapping); producers never set
 	// them at dispatch time.
-	ToolErrorRegexInvalid          ToolErrorKind = "regex_invalid"
 	ToolErrorProviderInternalError ToolErrorKind = "provider_internal_error"
 	ToolErrorProviderAuth          ToolErrorKind = "provider_auth"
 	ToolErrorProviderRequest       ToolErrorKind = "provider_request"

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"harness/internal/llm"
 )
 
 func TestSearchDescriptionsPreferTypedSearch(t *testing.T) {
@@ -97,6 +99,64 @@ func TestSearchContextDecodesBytePaths(t *testing.T) {
 	}
 	if !strings.Contains(out, source+":1-1") {
 		t.Fatalf("decoded path absent:\n%s", out)
+	}
+}
+
+// An invalid regex fails fast at argument decode with an actionable message
+// and the regex_invalid kind; it never reaches rg or the stdlib walker.
+func TestSearchInvalidRegexPrevalidated(t *testing.T) {
+	_, err := (searchTool{}).Run(context.Background(), searchTestInput(`{"pattern":"(["}`))
+	if err == nil {
+		t.Fatal("expected invalid regex error")
+	}
+	if got := KindOf(err); got != llm.ToolErrorRegexInvalid {
+		t.Errorf("kind = %q, want %q", got, llm.ToolErrorRegexInvalid)
+	}
+	for _, want := range []string{"queries[0].pattern", "invalid regex", "fixed_strings: true"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err, want)
+		}
+	}
+}
+
+// The same metacharacters are legal under fixed_strings and must not be
+// pre-validated as a regex.
+func TestSearchFixedStringsSkipsRegexValidation(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("a ([ b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(map[string]any{
+		"queries": []any{map[string]any{
+			"pattern":       "([",
+			"paths":         []string{dir},
+			"fixed_strings": true,
+			"output":        "files",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := (searchTool{}).Run(context.Background(), input)
+	if err != nil {
+		t.Fatalf("fixed_strings search failed: %v", err)
+	}
+	if !strings.Contains(out, "f.txt") {
+		t.Errorf("expected literal match, got %q", out)
+	}
+}
+
+// The kinded decode error must keep its regex_invalid class through
+// Registry.Dispatch rather than collapsing into invalid_args.
+func TestSearchInvalidRegexKindSurvivesDispatch(t *testing.T) {
+	reg := &Registry{}
+	reg.Register(searchTool{})
+	res := reg.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "search", Input: searchTestInput(`{"pattern":"(["}`)})
+	if !res.IsError || res.ErrorKind != llm.ToolErrorRegexInvalid {
+		t.Fatalf("result = %+v, want is_error with kind %q", res, llm.ToolErrorRegexInvalid)
+	}
+	if !strings.Contains(res.Text, "invalid regex") || !strings.Contains(res.Text, "fixed_strings: true") {
+		t.Fatalf("dispatch text = %q", res.Text)
 	}
 }
 

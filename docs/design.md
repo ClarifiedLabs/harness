@@ -1934,6 +1934,12 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   run concurrently and their rendered results retain input order.
 - A `paths[]` entry that does not exist is rejected before any search runs, with
   the same `similar existing paths` suggestions as read_file.
+- Patterns are pre-compiled at argument decode (respecting `fixed_strings` and
+  the smart-case `(?i)` transform the stdlib walker applies; Go RE2 and
+  ripgrep's default engine are both RE2-class). An invalid regex fails fast as
+  `queries[N].pattern: invalid regex: <compile error>; use fixed_strings: true
+  for literal text` with the kinded `regex_invalid` class instead of surfacing
+  an rg stderr dump or an `invalid_args` bucket.
 - Context output groups matches by file, merges touching windows, numbers source
   lines, and renders at most 400 source lines. No match is a successful
   `(no matches)` result and all collection/output bounds are explicit.
