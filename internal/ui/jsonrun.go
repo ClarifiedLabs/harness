@@ -99,11 +99,19 @@ func (d *jsonDriver) run() int {
 				// immediately, and piped prompts must still complete. An
 				// explicit shutdown message cancels; EOF waits for the
 				// active prompt and queue to finish, then exits 0.
-				if d.active == nil {
-					return ExitOK
-				}
 				d.eofSeen = true
 				d.msgs = nil // closed channel would busy-select
+				if d.active == nil && d.approval != nil {
+					// EOF with a pending handoff approval declines it (never
+					// auto-approves): the completed prompt was already saved
+					// by finishPrompt; any queued prompts drain below.
+					d.approval = nil
+					fmt.Fprintln(d.app.Errw, "[handoff cancelled]")
+					d.startNextQueued()
+				}
+				if d.active == nil && len(d.queued) == 0 && d.approval == nil {
+					return ExitOK
+				}
 				continue
 			}
 			if m.lineErr != nil {
@@ -115,6 +123,12 @@ func (d *jsonDriver) run() int {
 			}
 		case pd := <-d.done:
 			d.finishPrompt(pd.err)
+			// Control messages that raced prompt completion are handled now,
+			// before the boundary can start the next queued prompt on top of
+			// them.
+			if code, exit := d.drainBufferedControls(); exit {
+				return code
+			}
 			if d.shutdownRequested || (d.eofSeen && len(d.queued) == 0) {
 				return ExitOK
 			}
@@ -135,13 +149,71 @@ func (d *jsonDriver) readInput() {
 		if err != nil {
 			var lineErr *runstream.LineError
 			if errors.As(err, &lineErr) {
-				d.msgs <- jsonInputMsg{lineErr: lineErr}
+				if !d.send(jsonInputMsg{lineErr: lineErr}) {
+					return
+				}
 				continue
 			}
 			return
 		}
-		d.msgs <- jsonInputMsg{in: in}
+		if !d.send(jsonInputMsg{in: in}) {
+			return
+		}
 	}
+}
+
+// send delivers one decoded input message, aborting on force-exit so the
+// reader goroutine never blocks on a full buffer after the run loop has
+// exited. With no force-exit channel it behaves like a plain blocking send.
+func (d *jsonDriver) send(m jsonInputMsg) bool {
+	select {
+	case d.msgs <- m:
+		return true
+	case <-d.app.ForceExit:
+		return false
+	}
+}
+
+// drainBufferedControls handles every input message buffered in d.msgs at
+// prompt completion, before the run loop's shutdown check and boundary work,
+// so a control message that raced completion is never applied to (or lost
+// behind) the next prompt. The buffer length is snapshotted once so a fast
+// producer cannot keep the drain alive indefinitely. Prompt messages queue
+// behind recovered steer input instead of starting directly: the boundary's
+// approval check and startNextQueued own prompt start order. A drained
+// interrupt stops the run with ExitInterrupt: the prompt it targeted already
+// finished, so it must not cancel or no-op against the next prompt.
+func (d *jsonDriver) drainBufferedControls() (int, bool) {
+	n := len(d.msgs)
+	for i := 0; i < n; i++ {
+		select {
+		case m, ok := <-d.msgs:
+			if !ok {
+				d.eofSeen = true
+				d.msgs = nil
+				return 0, false
+			}
+			if m.lineErr != nil {
+				d.w.InputError(m.lineErr.ID, m.lineErr.Message)
+				continue
+			}
+			switch m.in.Type {
+			case runstream.InputPrompt:
+				d.queued = append(d.queued, jsonPromptRequest{
+					id: m.in.ID, text: m.in.Text, agent: m.in.Agent, model: m.in.Model, images: m.in.Images,
+				})
+			case runstream.InputInterrupt:
+				return ExitInterrupt, true
+			default:
+				if code, exit := d.handle(m.in); exit {
+					return code, true
+				}
+			}
+		default:
+			return 0, false
+		}
+	}
+	return 0, false
 }
 
 func (d *jsonDriver) handle(in runstream.Input) (int, bool) {
@@ -149,9 +221,17 @@ func (d *jsonDriver) handle(in runstream.Input) (int, bool) {
 	case runstream.InputPrompt:
 		d.handlePrompt(in)
 	case runstream.InputInterrupt:
-		// Same as ^C in the TTY REPL; a no-op when idle.
-		if d.active != nil {
+		// Same as ^C in the TTY REPL; a no-op when truly idle.
+		switch {
+		case d.active != nil:
 			d.active.cancel()
+		case d.approval != nil:
+			// Interrupt with a pending handoff approval cancels the
+			// handoff and exits 130, mirroring the TTY approval Ctrl-C
+			// path; it never auto-approves.
+			d.approval = nil
+			fmt.Fprintln(d.app.Errw, "[handoff cancelled]")
+			return ExitInterrupt, true
 		}
 	case runstream.InputApprovalResponse:
 		d.handleApproval(in)
@@ -172,13 +252,19 @@ func (d *jsonDriver) handlePrompt(in runstream.Input) {
 	case d.approval != nil:
 		d.w.InputError(in.ID, "handoff approval pending; answer it with approval_response first")
 	case d.active != nil:
-		if in.Agent != "" || in.Model != "" || len(in.Images) > 0 {
+		switch {
+		case len(d.queued) > 0:
+			// Steer gate: never steer while earlier prompts still wait, or a
+			// later accepted steer would recover ahead of them at prompt
+			// completion. Queueing keeps submission order by construction.
+			d.queued = append(d.queued, req)
+		case in.Agent != "" || in.Model != "" || len(in.Images) > 0:
 			// Switches and attachments apply at prompt start; queue for the
 			// next prompt instead of steering.
 			d.queued = append(d.queued, req)
-			return
+		default:
+			d.steer(req)
 		}
-		d.steer(req)
 	default:
 		d.startPrompt(req)
 	}

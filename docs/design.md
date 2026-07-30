@@ -3170,7 +3170,17 @@ Two run modes share the stream:
   keystrokes: a bare `prompt` message mid-run steers like Enter-during-prompt
   (late steers are recovered as the next prompt), `interrupt` is the in-band
   ^C, `shutdown` cancels and exits 0, and stdin EOF drains the active/queued
-  prompts before exiting so pipe-shaped clients work. Handoff approval uses
+  prompts before exiting so pipe-shaped clients work. Control messages are
+  never lost behind prompt completion: messages buffered when a prompt
+  finishes are handled before the boundary can start the next queued prompt —
+  a raced `shutdown` exits 0 and a raced `interrupt` exits 130 instead of
+  cancelling the next prompt. `interrupt` with a pending handoff approval
+  cancels the handoff and exits 130 (the TTY approval Ctrl-C path); stdin EOF
+  with a pending approval declines the handoff (never auto-approves) and
+  drains the queue. Steering is attempted only while no earlier input is
+  queued, which keeps queued and recovered input in submission order without
+  sequence numbers. The input-reader goroutine aborts blocked sends on
+  force-exit so it cannot leak. Handoff approval uses
   the protocol (`approval_request`/`approval_response`) with the same
   post-approval helper the TTY `/handoff` flow calls. TTY-coupled behaviors
   (goals, slash commands, idle compaction, pickers, history) stay off: main

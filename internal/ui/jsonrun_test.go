@@ -734,6 +734,270 @@ func TestRunJSONHandoffApprovalDeclined(t *testing.T) {
 	}
 }
 
+func TestRunJSONInterruptDuringApprovalCancelsHandoff(t *testing.T) {
+	pending := plan.NewPending()
+	fp := llmtest.New("fake", handoffPlanStep(pending))
+	app, stream, errw, w := newHandoffJSONApp(t, fp, pending)
+
+	pw, codeCh := runJSONPipe(t, app)
+	writePipe(t, pw, "{\"type\":\"prompt\",\"text\":\"make a plan\"}\n")
+	waitFor(t, func() bool { return strings.Contains(stream.String(), "\"type\":\"approval_request\"") }, "approval request")
+
+	// Interrupt with a pending approval cancels the handoff and exits 130,
+	// mirroring the TTY approval Ctrl-C path; it never auto-approves.
+	writePipe(t, pw, "{\"type\":\"interrupt\"}\n")
+	if code := waitRun(t, codeCh); code != ExitInterrupt {
+		t.Fatalf("exit code = %d, want %d (130)", code, ExitInterrupt)
+	}
+	w.Close(runstream.RunEnd{ExitCode: ExitInterrupt})
+	if !strings.Contains(errw.String(), "[handoff cancelled]") {
+		t.Fatalf("missing cancellation notice: %q", errw.String())
+	}
+	if fp.RequestCount() != 1 {
+		t.Fatalf("model requests = %d, want plan only (no auto-approved implementation)", fp.RequestCount())
+	}
+	if strings.Contains(transcriptPrompts(app), implementationStartPrompt) {
+		t.Fatalf("interrupted handoff should not submit implementation prompt: %q", transcriptPrompts(app))
+	}
+}
+
+func TestRunJSONEOFAfterCompletionDeclinesPendingApprovalAndDrainsQueue(t *testing.T) {
+	pending := plan.NewPending()
+	fp := llmtest.New("fake",
+		handoffPlanStep(pending),
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
+	)
+	app, stream, errw, w := newHandoffJSONApp(t, fp, pending)
+	// Hold the first prompt's completion so the second prompt message is
+	// buffered at the completion boundary and queues behind the approval.
+	finishing := make(chan struct{})
+	proceed := make(chan struct{})
+	var once sync.Once
+	app.OnPromptFinished = func() { once.Do(func() { close(finishing); <-proceed }) }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	d := &jsonDriver{app: app, w: app.RunStream, dec: runstream.NewDecoder(pr)}
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- d.run() }()
+
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p1\",\"text\":\"make a plan\"}\n")
+	<-finishing
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p2\",\"text\":\"second\"}\n")
+	waitFor(t, func() bool { return len(d.msgs) >= 1 }, "second prompt buffered at completion")
+	close(proceed)
+	waitFor(t, func() bool { return strings.Contains(stream.String(), "\"type\":\"approval_request\"") }, "approval request")
+
+	// Stdin EOF with a pending approval declines the handoff (never
+	// auto-approves) and drains the queued prompt before exiting 0.
+	if err := pw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	w.Close(runstream.RunEnd{ExitCode: ExitOK})
+	if !strings.Contains(errw.String(), "[handoff cancelled]") {
+		t.Fatalf("missing decline notice: %q", errw.String())
+	}
+	lines := decodeRunStreamLines(t, stream.String())
+	starts := linesOfType(lines, "prompt_start")
+	if len(starts) != 2 || starts[0]["id"] != "p1" || starts[1]["id"] != "p2" {
+		t.Fatalf("prompt starts = %v, want p1 then the drained p2", starts)
+	}
+	if fp.RequestCount() != 2 {
+		t.Fatalf("model requests = %d, want plan + drained prompt (no implementation)", fp.RequestCount())
+	}
+	if strings.Contains(transcriptPrompts(app), implementationStartPrompt) {
+		t.Fatalf("EOF-declined handoff should not submit implementation prompt: %q", transcriptPrompts(app))
+	}
+}
+
+func TestRunJSONShutdownAtCompletionDiscardsQueuedPrompt(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("first answer")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
+	)
+	app, stream, _, w := newJSONRunApp(t, fp)
+	finishing := make(chan struct{})
+	proceed := make(chan struct{})
+	var once sync.Once
+	app.OnPromptFinished = func() { once.Do(func() { close(finishing); <-proceed }) }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	d := &jsonDriver{app: app, w: app.RunStream, dec: runstream.NewDecoder(pr)}
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- d.run() }()
+
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p1\",\"text\":\"first\"}\n")
+	<-finishing
+	// Shutdown races prompt completion: it must be handled before the
+	// boundary can start the queued second prompt.
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p2\",\"text\":\"second\"}\n")
+	writePipe(t, pw, "{\"type\":\"shutdown\"}\n")
+	waitFor(t, func() bool { return len(d.msgs) >= 2 }, "prompt+shutdown buffered at completion")
+	close(proceed)
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	w.Close(runstream.RunEnd{ExitCode: ExitOK})
+	lines := decodeRunStreamLines(t, stream.String())
+	starts := linesOfType(lines, "prompt_start")
+	if len(starts) != 1 || starts[0]["id"] != "p1" {
+		t.Fatalf("prompt starts = %v, want p1 only (shutdown discards the queued prompt)", starts)
+	}
+	if fp.RequestCount() != 1 {
+		t.Fatalf("model requests = %d, want 1 (queued prompt never ran)", fp.RequestCount())
+	}
+}
+
+func TestRunJSONInterruptAtCompletionExits130InsteadOfStealingNextPrompt(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("first answer")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
+	)
+	app, stream, _, w := newJSONRunApp(t, fp)
+	finishing := make(chan struct{})
+	proceed := make(chan struct{})
+	var once sync.Once
+	app.OnPromptFinished = func() { once.Do(func() { close(finishing); <-proceed }) }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	d := &jsonDriver{app: app, w: app.RunStream, dec: runstream.NewDecoder(pr)}
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- d.run() }()
+
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p1\",\"text\":\"first\"}\n")
+	<-finishing
+	// Interrupt races prompt completion: the prompt it targeted is already
+	// finished, so it stops the run instead of cancelling the next prompt.
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p2\",\"text\":\"second\"}\n")
+	writePipe(t, pw, "{\"type\":\"interrupt\"}\n")
+	waitFor(t, func() bool { return len(d.msgs) >= 2 }, "prompt+interrupt buffered at completion")
+	close(proceed)
+
+	if code := waitRun(t, codeCh); code != ExitInterrupt {
+		t.Fatalf("exit code = %d, want %d (130)", code, ExitInterrupt)
+	}
+	w.Close(runstream.RunEnd{ExitCode: ExitInterrupt})
+	lines := decodeRunStreamLines(t, stream.String())
+	starts := linesOfType(lines, "prompt_start")
+	if len(starts) != 1 || starts[0]["id"] != "p1" {
+		t.Fatalf("prompt starts = %v, want p1 only (interrupt must not steal the next prompt)", starts)
+	}
+	if fp.RequestCount() != 1 {
+		t.Fatalf("model requests = %d, want 1 (queued prompt never ran)", fp.RequestCount())
+	}
+}
+
+func TestRunJSONSteerFallbackKeepsSubmissionOrder(t *testing.T) {
+	release := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{Stop: llm.StopEndTurn, Block: func(context.Context) { <-release }},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("alpha answer")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("bravo answer")}, Stop: llm.StopEndTurn},
+	)
+	app, stream, _, w := newJSONRunApp(t, fp)
+	steerAgent(app, fp, nil)
+	base := app.Steer
+	first := true
+	app.Steer = func(input agent.SteerInput) bool {
+		if first {
+			first = false
+			return false // alpha: behave like a full steer queue
+		}
+		return base(input)
+	}
+
+	pw, codeCh := runJSONPipe(t, app)
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p1\",\"text\":\"first\"}\n")
+	waitFor(t, func() bool { return strings.Contains(stream.String(), "\"type\":\"prompt_start\"") }, "first prompt_start")
+	// alpha queues when steering refuses it; bravo submits after, so the
+	// steer gate must queue it behind alpha rather than letting it steer and
+	// recover first at completion.
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"a\",\"text\":\"alpha\"}\n")
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"b\",\"text\":\"bravo\"}\n")
+	writePipe(t, pw, "{bogus\n")
+	waitFor(t, func() bool { return strings.Contains(stream.String(), "\"type\":\"input_error\"") }, "barrier input_error")
+	close(release)
+	waitFor(t, func() bool { return strings.Count(stream.String(), "\"type\":\"prompt_end\"") >= 3 }, "all prompt ends")
+	writePipe(t, pw, "{\"type\":\"shutdown\"}\n")
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	w.Close(runstream.RunEnd{ExitCode: ExitOK})
+
+	if fp.RequestCount() != 3 {
+		t.Fatalf("model requests = %d, want first + alpha + bravo", fp.RequestCount())
+	}
+	lastUserText := func(r llm.Request) string {
+		for i := len(r.Messages) - 1; i >= 0; i-- {
+			m := r.Messages[i]
+			if m.Role == llm.RoleUser && len(m.Content) > 0 {
+				return m.Content[len(m.Content)-1].Text
+			}
+		}
+		return ""
+	}
+	if got := lastUserText(fp.Requests[1]); got != "alpha" {
+		t.Fatalf("second request prompt = %q, want alpha (submitted first)", got)
+	}
+	if got := lastUserText(fp.Requests[2]); got != "bravo" {
+		t.Fatalf("third request prompt = %q, want bravo (submitted second)", got)
+	}
+}
+
+func TestRunJSONForceExitAbortsBlockedInputReader(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("first answer")}, Stop: llm.StopEndTurn},
+	)
+	app, stream, _, w := newJSONRunApp(t, fp)
+	forceExit := make(chan struct{})
+	app.ForceExit = forceExit
+	finishing := make(chan struct{})
+	proceed := make(chan struct{})
+	var once sync.Once
+	app.OnPromptFinished = func() { once.Do(func() { close(finishing); <-proceed }) }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	d := &jsonDriver{app: app, w: app.RunStream, dec: runstream.NewDecoder(pr)}
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- d.run() }()
+
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p1\",\"text\":\"first\"}\n")
+	<-finishing
+	// Overfill the input buffer while the run loop is parked in prompt
+	// completion: the reader blocks on send with the buffer full.
+	var buf strings.Builder
+	for i := 0; i < 40; i++ {
+		buf.WriteString("{\"type\":\"prompt\",\"text\":\"extra\"}\n")
+	}
+	writePipe(t, pw, buf.String())
+	waitFor(t, func() bool { return len(d.msgs) == cap(d.msgs) }, "input buffer full")
+	close(forceExit)
+	close(proceed)
+
+	if code := waitRun(t, codeCh); code != ExitInterrupt {
+		t.Fatalf("exit code = %d, want %d (130)", code, ExitInterrupt)
+	}
+	w.Close(runstream.RunEnd{ExitCode: ExitInterrupt})
+	_ = stream
+	// The reader goroutine must abort its blocked send on force-exit and
+	// close the message channel instead of leaking.
+	waitFor(t, func() bool {
+		select {
+		case _, ok := <-d.msgs:
+			return !ok
+		default:
+			return false
+		}
+	}, "input reader aborted after force-exit")
+}
+
 func TestRunJSONUnknownApprovalIDRejected(t *testing.T) {
 	pending := plan.NewPending()
 	fp := llmtest.New("fake", handoffPlanStep(pending))

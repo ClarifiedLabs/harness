@@ -5882,6 +5882,75 @@ func TestREPLRejectedSteerAdmissionRunsPreparedInputNext(t *testing.T) {
 	}
 }
 
+func TestREPLSteerFallbackKeepsSubmissionOrder(t *testing.T) {
+	var out, errw lockedBuffer
+	inPrompt := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{Stop: llm.StopEndTurn, Block: func(context.Context) { close(inPrompt); <-releaseTurn }},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("alpha answer")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("bravo answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp)
+	ag := agent.New(fp, tools.Default(), agent.Options{Model: "claude-opus-4-8", Steer: true})
+	ag.SetSystem("you are a test")
+	ag.SetSleep(func(time.Duration) {})
+	app.Agent = ag
+	rejected := make(chan struct{})
+	var once sync.Once
+	app.Steer = func(input agent.SteerInput) bool {
+		select {
+		case <-rejected:
+			return ag.SteerContent(input)
+		default:
+			once.Do(func() { close(rejected) })
+			return false // alpha: behave like a full steer queue
+		}
+	}
+	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
+	delivered := make(chan struct{}, 8)
+	app.onInputDelivered = func() { delivered <- struct{}{} }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-inPrompt:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+	// alpha queues when steering refuses it; bravo submits after, so the
+	// steer gate must queue it behind alpha rather than letting it steer and
+	// recover first at completion.
+	writePipe(t, pw, "alpha\r")
+	select {
+	case <-rejected:
+	case <-time.After(time.Second):
+		t.Fatal("steer admission was not attempted")
+	}
+	drain := len(delivered)
+	writePipe(t, pw, "bravo\r")
+	writePipe(t, pw, "/boguscommand\r")
+	// The command's delivery proves the run loop received bravo first (the
+	// input channel holds one result), so bravo is processed while the turn
+	// is still blocked.
+	waitFor(t, func() bool { return len(delivered) >= drain+2 }, "bravo and command delivered")
+	close(releaseTurn)
+	waitFor(t, func() bool { return fp.RequestCount() == 3 }, "queued prompts ran")
+	_ = pw.Close()
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	if got := transcriptPrompts(app); got != "first|alpha|bravo" {
+		t.Fatalf("prompts = %q, want submission order first|alpha|bravo", got)
+	}
+}
+
 // steerDuringPrompt classifies a during-prompt input as model-bound (steer it) or
 // not (queue it). This pins the prefix rules without driving a full REPL.
 func TestSteerDuringPromptClassification(t *testing.T) {

@@ -143,14 +143,16 @@ ignored:
 
 | `type` | Fields | Semantics |
 |---|---|---|
-| `prompt` | `text` (required, or `images`), `id?`, `agent?`, `model?`, `images?` `[{path, detail?}]` | Run a prompt. Sent while a prompt runs, a bare prompt **steers** into the running prompt (injected before the next model request, like Enter-during-prompt in the TTY REPL). If immediate steering admission is busy, the input queues for the next prompt rather than being dropped. Steers that race prompt completion are recovered separately in submission order, retaining each input's `id`. With `agent`/`model`/`images` the message queues instead of steering, then the switch happens before that prompt starts (unknown agent/model → `input_error`, nothing runs). `id` is echoed in `prompt_start`/`prompt_end` for correlation. |
-| `interrupt` | — | Cancel the active prompt (the in-band ^C): `prompt_end` with `termination_reason:"cancelled"`, and the session keeps accepting input. No-op when idle. |
+| `prompt` | `text` (required, or `images`), `id?`, `agent?`, `model?`, `images?` `[{path, detail?}]` | Run a prompt. Sent while a prompt runs, a bare prompt **steers** into the running prompt (injected before the next model request, like Enter-during-prompt in the TTY REPL). Steering is attempted only when no earlier input is still queued, so queued and recovered input always runs in submission order. If immediate steering admission is busy, the input queues for the next prompt rather than being dropped. Steers that race prompt completion are recovered separately in submission order, retaining each input's `id`. With `agent`/`model`/`images` the message queues instead of steering, then the switch happens before that prompt starts (unknown agent/model → `input_error`, nothing runs). `id` is echoed in `prompt_start`/`prompt_end` for correlation. |
+| `interrupt` | — | Cancel the active prompt (the in-band ^C): `prompt_end` with `termination_reason:"cancelled"`, and the session keeps accepting input. With a handoff approval pending, cancels the handoff and exits 130 (matching the TTY approval Ctrl-C). An interrupt that races prompt completion exits 130 rather than cancelling the next prompt. No-op when truly idle. |
 | `approval_response` | `id`, `approve` (both required) | Answer a pending `approval_request`. Unknown id → `input_error` and the pending request survives. |
 | `shutdown` | — | Cancel any active prompt, save the session, emit `run_end`, exit 0. |
 
 Stdin EOF is a graceful **drain**, not a cancel: the active prompt and any
 queued prompts finish, then harness saves the session, emits `run_end`, and
-exits 0.
+exits 0. EOF with a handoff approval pending declines the handoff (`[handoff
+cancelled]` on stderr, never auto-approve), then drains queued prompts the
+same way.
 
 Malformed JSON, an unknown `type`, missing required fields, prompt-preparation
 failure, or a `prompt` sent while an approval is pending produce an
@@ -1180,6 +1182,8 @@ the current work without canceling and retyping the prompt.
 - `!shell`, `/commands`, and `/edit` retain their queued behavior and run at the
   next idle prompt.
 - A steer does not consume a `max-turns` slot and resets the loop-guard streaks.
+- Steering is attempted only while no earlier submitted input is still queued,
+  so queued and recovered input always runs in submission order.
 - If the prompt finishes before another model request, the submitted steer is
   recovered and run as the next prompt.
 - Ctrl-C or double-Esc still cancels the active prompt.

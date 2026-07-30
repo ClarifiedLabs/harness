@@ -1319,7 +1319,15 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					continue
 				}
 				escPresses.reset()
-				handled, prepared := app.steerDuringPrompt(input)
+				// Steer gate: never steer while earlier input still waits in
+				// either queue, or a later accepted steer would recover ahead
+				// of it at prompt completion. Queueing keeps submission order
+				// by construction.
+				var handled bool
+				var prepared *agent.SteerInput
+				if len(queued) == 0 && len(preparedQueued) == 0 {
+					handled, prepared = app.steerDuringPrompt(input)
+				}
 				if prepared != nil {
 					preparedQueued = append(preparedQueued, *prepared)
 				}
