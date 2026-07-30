@@ -132,7 +132,11 @@ func (r readFile) Run(ctx context.Context, input json.RawMessage) (string, error
 	if limit == 0 {
 		limit = defaultLimit
 	}
-	return readOneFile(args.Path, offset, limit)
+	out, err := readOneFile(args.Path, offset, limit)
+	if err != nil {
+		return "", notExistingPathError(args.Path, err)
+	}
+	return out, nil
 }
 
 // readManyFiles reads each path from line 1 under its own "==> path <==" header,
@@ -155,7 +159,7 @@ func readManyFiles(paths []string, explicitLimit, defaultLimit int) (string, err
 		fmt.Fprintf(&b, "==> %s <==\n", p)
 		body, err := readOneFile(p, 1, perPath)
 		if err != nil {
-			fmt.Fprintf(&b, "error: %s", err.Error())
+			fmt.Fprintf(&b, "error: %s", notExistingPathError(p, err).Error())
 			continue
 		}
 		b.WriteString(body)

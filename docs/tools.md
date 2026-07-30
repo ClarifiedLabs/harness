@@ -103,6 +103,12 @@ queries execute concurrently and results stay in input order. Harness uses
 ripgrep when it is installed and a bounded standard-library walker otherwise,
 so the tool contract does not depend on the host CLI.
 
+A `search` `paths[]` entry or `read_file` path that does not exist fails with
+`similar existing paths: <up to 3>` appended — a bounded scan of the same
+directory (plus one parent level when the directory itself is missing), never a
+recursive walk — so a mistyped path can be retargeted without a list_dir round
+trip.
+
 For a batch with more than one `context` or `matches` query, Harness renders
 each query's match summary followed by one shared source-context section.
 Overlapping or adjacent source windows are merged and labeled with the query

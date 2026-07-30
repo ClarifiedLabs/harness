@@ -152,6 +152,13 @@ func (s searchTool) RunResult(ctx context.Context, input json.RawMessage) (RunRe
 	if err != nil {
 		return RunResult{}, err
 	}
+	for i := range args.Queries {
+		for _, path := range args.Queries[i].Paths {
+			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+				return RunResult{}, fmt.Errorf("queries[%d].paths: %w", i, notExistingPathError(path, err))
+			}
+		}
+	}
 
 	results := make([]searchResult, len(args.Queries))
 	var wg sync.WaitGroup

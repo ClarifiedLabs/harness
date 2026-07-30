@@ -1837,6 +1837,11 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   when both a canonical name and an alias are set.
 - Output is line-numbered (`cat -n` style: right-aligned number, tab, line). Line
   numbers make `edit` targeting and grep cross-referencing far more reliable.
+- **Not-found suggestions:** an ENOENT failure (single mode or inline per file in
+  `paths[]` mode) appends `similar existing paths: <up to 3>` from a bounded
+  same-directory name-similarity scan, plus a one-level parent scan when the
+  directory itself is missing (a mistyped directory component); no walking
+  (`similarExistingPaths`).
 - **Truncation notice:** when a single-file read is cut off at its line window the
   result ends with `[file truncated at line N; continue with offset=N+1]`, so the
   model knows to page rather than assuming it saw the whole file.
@@ -1927,6 +1932,8 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   standard-library walker supplies the same model-facing contract, skips hidden
   directories and binary files, and uses Go regular expressions. Query workers
   run concurrently and their rendered results retain input order.
+- A `paths[]` entry that does not exist is rejected before any search runs, with
+  the same `similar existing paths` suggestions as read_file.
 - Context output groups matches by file, merges touching windows, numbers source
   lines, and renders at most 400 source lines. No match is a successful
   `(no matches)` result and all collection/output bounds are explicit.
