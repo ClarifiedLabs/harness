@@ -214,9 +214,10 @@ branch/porcelain status, HEAD, staged and unstaged diff stats, and both whitespa
 checks into one read-only result. Use ordinary `git {"args":[...]}` afterward
 when the actual patch or another native subcommand is needed. To record finished
 work, `git {"workflow":"commit","paths":[...],"message":"type: subject"}` stages
-only the exact repository-relative file paths, runs the staged whitespace check,
+only the exact repository-relative file or directory paths (a directory
+includes everything beneath it), runs the staged whitespace check,
 commits only those paths, and returns the new commit plus remaining workspace
-status. It rejects `.`, directories, globs, and pathspec magic.
+status. It rejects `.`, `..`, globs, and pathspec magic.
 
 `git_readonly` exposes an audited query-only allowlist for restricted agents:
 `blame`, `cat-file`, `check-attr`, `check-ignore`, `check-mailmap`,

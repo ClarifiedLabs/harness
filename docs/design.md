@@ -2150,7 +2150,7 @@ this subsection records the common runner those argv tools point at.
 | `args` | array of strings | argv after `git`; mutually exclusive with `workflow`; must not be a string or JSON-encoded array |
 | `workflow` | string | `workspace_summary` or `commit`; mutually exclusive with `args` |
 | `cwd` | string | default process cwd |
-| `paths` | array of strings | required for `commit`; exact repository-relative files only (max 100) |
+| `paths` | array of strings | required for `commit`; exact repository-relative files or directories (max 100); a directory includes everything beneath it; `.` rejected |
 | `message` | string | required for `commit`; conventional commit message |
 
 - `git` is registered only when `exec.LookPath("git")` succeeds at registry
@@ -2174,8 +2174,10 @@ this subsection records the common runner those argv tools point at.
   diffstat/whitespace sections, reports `whitespace: clean` when applicable, and
   handles an unborn repository explicitly. It does not include the full patch;
   the model uses a subsequent raw `git diff` only when patch inspection is needed.
-- `commit` validates an explicit file list, rejects broad paths, directories,
-  globs, pathspec magic, duplicates, and absolute paths, then runs `git add`,
+- `commit` validates an explicit list of repository-relative files and
+  directories (a directory stages and commits everything beneath it), rejects
+  `.`, `..`, trailing slashes, globs, pathspec magic, duplicates, and absolute
+  paths, then runs `git add`,
   staged `diff --check`, a staged-change check, and `git commit` scoped by `--`
   to those paths. Unrelated staged changes remain staged. The compact receipt
   reports the new short hash/subject, committed files, and remaining status.

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -145,11 +146,103 @@ func TestGitCommitWorkflowCommitsOnlyExplicitPaths(t *testing.T) {
 	}
 }
 
+func TestGitCommitWorkflowAcceptsDirectory(t *testing.T) {
+	gitAvailable(t)
+	dir := scratchRepo(t)
+	mustWrite(t, dir+"/unrelated.txt", "initial\n")
+	if _, err := runGit(t, dir, "add", "unrelated.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(t, dir, "commit", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Mkdir(dir+"/pkg", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, dir+"/pkg/a.txt", "a\n")
+	mustWrite(t, dir+"/pkg/b.txt", "b\n")
+	mustWrite(t, dir+"/unrelated.txt", "unrelated change\n")
+	if _, err := runGit(t, dir, "add", "unrelated.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runGitCommitWorkflow(t, dir, "feat: add pkg", "pkg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"pkg/a.txt", "pkg/b.txt"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("commit receipt missing %q:\n%s", want, out)
+		}
+	}
+	show, err := runGit(t, dir, "show", "--format=", "--name-only", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(show, "pkg/a.txt") || !strings.Contains(show, "pkg/b.txt") {
+		t.Fatalf("commit files = %q, want pkg/a.txt and pkg/b.txt", show)
+	}
+	if strings.Contains(show, "unrelated.txt") {
+		t.Fatalf("commit should not include unrelated.txt: %q", show)
+	}
+	status, err := runGit(t, dir, "status", "--short")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(status, "M  unrelated.txt") {
+		t.Fatalf("unrelated staged change was not preserved: %q", status)
+	}
+}
+
+func TestGitCommitWorkflowAcceptsMixedPaths(t *testing.T) {
+	gitAvailable(t)
+	dir := scratchRepo(t)
+	if err := os.Mkdir(dir+"/pkg2", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, dir+"/pkg2/c.txt", "c\n")
+	mustWrite(t, dir+"/toplevel.txt", "top\n")
+
+	out, err := runGitCommitWorkflow(t, dir, "feat: add pkg2 and toplevel", "pkg2", "toplevel.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	show, err := runGit(t, dir, "show", "--format=", "--name-only", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"pkg2/c.txt", "toplevel.txt"} {
+		if !strings.Contains(show, want) {
+			t.Errorf("commit files = %q, want %q (receipt:\n%s)", show, want, out)
+		}
+	}
+}
+
+func TestGitCommitWorkflowRejectsEmptyDirectory(t *testing.T) {
+	gitAvailable(t)
+	dir := scratchRepo(t)
+	mustWrite(t, dir+"/seed.txt", "seed\n")
+	if _, err := runGit(t, dir, "add", "seed.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(t, dir, "commit", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir+"/empty", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGitCommitWorkflow(t, dir, "feat: empty", "empty"); err == nil {
+		t.Fatal("commit workflow with an empty directory succeeded, want error")
+	}
+}
+
 func TestGitCommitWorkflowRequiresExplicitPaths(t *testing.T) {
 	for _, input := range []string{
 		`{"workflow":"commit","message":"feat: x"}`,
 		`{"workflow":"commit","message":"feat: x","paths":["."]}`,
 		`{"workflow":"commit","message":"feat: x","paths":["*.go"]}`,
+		`{"workflow":"commit","message":"feat: x","paths":["pkg/"]}`,
 		`{"workflow":"commit","paths":["file.go"]}`,
 	} {
 		if _, err := (gitTool{}).Run(context.Background(), json.RawMessage(input)); err == nil {

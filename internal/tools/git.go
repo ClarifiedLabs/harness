@@ -30,7 +30,7 @@ const gitSchema = `{
       "items": {"type": "string"},
       "minItems": 1,
       "maxItems": 100,
-      "description": "Exact repository-relative file paths for workflow commit; broad paths and globs are rejected."
+      "description": "Exact repository-relative file or directory paths for workflow commit; a directory stages and commits everything beneath it; '.', globs, and pathspec magic are rejected."
     },
     "message": {"type": "string", "description": "Conventional commit message for workflow commit."}
   }
@@ -281,18 +281,11 @@ func (g gitTool) commitPaths(ctx context.Context, input gitInput) (string, error
 		case filepath.IsAbs(path):
 			return "", badArgs("paths[%d] must be repository-relative", i)
 		case clean != path || path == "." || path == ".." || strings.HasPrefix(path, "../") || strings.HasSuffix(path, "/"):
-			return "", badArgs("paths[%d] must name an explicit file, not %q", i, path)
+			return "", badArgs("paths[%d] must name an explicit file or directory, not %q", i, path)
 		case strings.ContainsAny(path, "*?[") || strings.HasPrefix(path, ":("):
 			return "", badArgs("paths[%d] must not contain pathspec magic or globs", i)
 		case seen[path]:
 			return "", badArgs("paths[%d] duplicates %q", i, path)
-		}
-		checkPath := path
-		if input.Cwd != "" {
-			checkPath = filepath.Join(input.Cwd, filepath.FromSlash(path))
-		}
-		if info, err := os.Stat(checkPath); err == nil && info.IsDir() {
-			return "", badArgs("paths[%d] must name a file, not directory %q", i, path)
 		}
 		seen[path] = true
 		input.Paths[i] = path
