@@ -1,9 +1,38 @@
 package llm
 
 import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestNormalizedToolCallHash(t *testing.T) {
+	t.Run("key order insensitive", func(t *testing.T) {
+		a := NormalizedToolCallHash(json.RawMessage(`{"path":"x","limit":2}`))
+		b := NormalizedToolCallHash(json.RawMessage(`{"limit":2,"path":"x"}`))
+		if a != b {
+			t.Fatalf("hashes differ for reordered keys: %s vs %s", a, b)
+		}
+	})
+
+	t.Run("different inputs differ", func(t *testing.T) {
+		a := NormalizedToolCallHash(json.RawMessage(`{"path":"x"}`))
+		b := NormalizedToolCallHash(json.RawMessage(`{"path":"y"}`))
+		if a == b {
+			t.Fatalf("hashes equal for different inputs: %s", a)
+		}
+	})
+
+	t.Run("invalid JSON hashes raw bytes", func(t *testing.T) {
+		raw := json.RawMessage(`{"path":`)
+		want := fmt.Sprintf("%x", sha256.Sum256([]byte(raw)))
+		if got := NormalizedToolCallHash(raw); got != want {
+			t.Fatalf("NormalizedToolCallHash(%s) = %s, want raw-bytes hash %s", raw, got, want)
+		}
+	})
+}
 
 func TestNormalizeToolInputObject(t *testing.T) {
 	tests := []struct {

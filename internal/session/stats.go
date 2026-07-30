@@ -535,7 +535,7 @@ func collectToolStats(events []Event) (toolStats, error) {
 		}
 		stats.calls++
 		stats.byName[ev.Tool]++
-		shape := normalizedToolCallHash(ev.Input)
+		shape := llm.NormalizedToolCallHash(ev.Input)
 		if stats.callShapes[ev.Tool] == nil {
 			stats.callShapes[ev.Tool] = make(map[string]int)
 		}
@@ -604,16 +604,6 @@ func collectToolStats(events []Event) (toolStats, error) {
 	return stats, nil
 }
 
-func normalizedToolCallHash(input json.RawMessage) string {
-	normalized := []byte(input)
-	var value any
-	if json.Unmarshal(input, &value) == nil {
-		if encoded, err := json.Marshal(value); err == nil {
-			normalized = encoded
-		}
-	}
-	return fmt.Sprintf("%x", sha256.Sum256(normalized))
-}
 
 func skillReadPathHashes(input json.RawMessage) []string {
 	var args struct {

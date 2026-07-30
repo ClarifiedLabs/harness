@@ -2,11 +2,26 @@ package llm
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 )
+
+// NormalizedToolCallHash returns a stable SHA-256 hex digest of a tool-call
+// input. Valid JSON is canonicalized first (keys sorted via unmarshal/marshal)
+// so key order does not change the hash; invalid JSON hashes the raw bytes.
+func NormalizedToolCallHash(input json.RawMessage) string {
+	normalized := []byte(input)
+	var value any
+	if json.Unmarshal(input, &value) == nil {
+		if encoded, err := json.Marshal(value); err == nil {
+			normalized = encoded
+		}
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(normalized))
+}
 
 const toolInputPreviewBytes = 160
 
