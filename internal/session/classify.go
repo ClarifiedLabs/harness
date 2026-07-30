@@ -41,6 +41,8 @@ func ClassifyToolError(display, excerpt string) ClassifiedFailure {
 		return ClassifiedFailure{Kind: llm.ToolErrorEditOldTextAmbiguous, Confidence: "high"}
 	case strings.Contains(display, "error parsing regexp"):
 		return ClassifiedFailure{Kind: llm.ToolErrorRegexInvalid, Confidence: "low"}
+	case strings.Contains(display, "→ error: [loop guard] blocked: "):
+		return ClassifiedFailure{Kind: llm.ToolErrorBlocked, Confidence: "high"}
 	case strings.Contains(display, "→ error: blocked by ") && strings.Contains(display, " hook"):
 		return ClassifiedFailure{Kind: llm.ToolErrorHookBlocked, Confidence: "high"}
 	case strings.Contains(display, "→ error: tool ") && strings.Contains(display, " requires ") && strings.Contains(display, " input, but the current model"),

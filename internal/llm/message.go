@@ -187,6 +187,7 @@ const (
 	ToolErrorEditOldTextNotFound  ToolErrorKind = "edit_oldtext_not_found"
 	ToolErrorEditOldTextAmbiguous ToolErrorKind = "edit_oldtext_ambiguous"
 	ToolErrorHookBlocked          ToolErrorKind = "hook_blocked"
+	ToolErrorBlocked              ToolErrorKind = "blocked"
 	ToolErrorUnsupportedModality  ToolErrorKind = "unsupported_modality"
 	ToolErrorInvalidResult        ToolErrorKind = "invalid_result"
 

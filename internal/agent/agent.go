@@ -479,6 +479,9 @@ type Agent struct {
 	archiveCompaction         CompactionArchiver
 	hooks                     *hooks.Runner
 	showDiffs                 bool
+	// failGuard is the per-prompt repeated-identical-failure guard (design
+	// §8.1). It is non-nil only while RunAdmittedPromptWithContext executes.
+	failGuard *failureGuard
 	responsesStateful         bool
 	interactive               bool            // 1h Anthropic cache breakpoint; see Options.Interactive
 	steer                     chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
@@ -1325,6 +1328,8 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 	unlimited := a.maxTurns <= 0
 	stopHookActive := false
 	var guard turnGuard
+	a.failGuard = newFailureGuard()
+	defer func() { a.failGuard = nil }()
 	var wastedTotal llm.Usage            // tokens spent on retried-and-discarded turn attempts (r51+r52)
 	appendBoundary := a.measuredBoundary // transcript length measured by lastInput (drives the r44 trigger)
 	var steerContext []string
@@ -2050,7 +2055,16 @@ func (a *Agent) dispatchTool(ctx context.Context, call llm.ToolCall) llm.ToolRes
 			ErrorKind: llm.ToolErrorUnsupportedModality,
 		}
 	}
-	return a.tools.Dispatch(ctx, call)
+	if g := a.failGuard; g != nil {
+		if res, blocked := g.beforeCall(call); blocked {
+			return res
+		}
+	}
+	res := a.tools.Dispatch(ctx, call)
+	if g := a.failGuard; g != nil {
+		res = g.afterCall(a.tools, call, res)
+	}
+	return res
 }
 
 func acceptRichResult(r llm.ToolResult, encodedTotal *int, imageSupported bool) llm.ToolResult {

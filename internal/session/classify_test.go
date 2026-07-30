@@ -76,6 +76,12 @@ func TestClassifyToolError(t *testing.T) {
 			confidence: "low",
 		},
 		{
+			name:       "blocked by loop guard",
+			display:    `[run_command command="go build ./..."] → error: [loop guard] blocked: this exact call (go build ./...) already failed …`,
+			want:       llm.ToolErrorBlocked,
+			confidence: "high",
+		},
+		{
 			name:       "blocked by hook",
 			display:    `[write_file path=x] → error: blocked by PreToolUse hook: no writes`,
 			want:       llm.ToolErrorHookBlocked,

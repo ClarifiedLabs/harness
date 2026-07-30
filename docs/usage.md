@@ -334,6 +334,9 @@ The agent loop has several controls against runaway work:
   pausing the goal; `0` disables that count cap.
 - Repeated identical tool results and consecutive all-error tool turns are
   steered first and eventually stopped if the model does not change course.
+- One exact tool call (same tool, same input) that keeps failing with the same
+  error is steered on the 2nd identical failure and blocked before it runs on
+  the 3rd. A successful edit or write resets that per-prompt counter.
 
 Turn-limit and loop-guard stops make one best-effort tools-disabled request so
 the model can finish with a summary. Token and cost budgets stop without another

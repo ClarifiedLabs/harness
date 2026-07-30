@@ -1544,6 +1544,18 @@ emit prompt_usage(prompt, completedTurns)
     approach"); at 10 it breaks with `[stopped: N consecutive tool turns all
     failed]`. (Repetition and error-storm steers share one slot, so a turn is
     nudged at most once.)
+  - *Repeated identical failures (`internal/agent/failguard.go`).* A per-prompt
+    `failureGuard` on the Agent (never on the shared registry) keys each
+    dispatched call by tool name + normalized input hash and counts consecutive
+    failures with the *same error text* — a fix-and-rerun loop whose errors
+    differ never trips it. The 2nd identical failure appends a steering hint to
+    the error; the 3rd identical attempt is hard-blocked before dispatch with a
+    `blocked`-kinded error (blocked attempts are not recorded, so the streak
+    does not grow while blocked). Any successful call reporting mutated paths
+    resets the whole map; read-only successes deliberately do not. Guard state
+    is created and dropped inside `RunAdmittedPromptWithContext`, so a fresh
+    prompt always starts clean, and the map is mutex-protected because the
+    read-only batch path dispatches concurrently.
   - *Prompt-token budget.* When `-max-prompt-tokens` is positive, before each next
     (paid) model request it compares the prompt's cumulative usage
     (input + cache-read + cache-write + output + reasoning) against the budget and
