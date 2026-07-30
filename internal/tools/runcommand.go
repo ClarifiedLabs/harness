@@ -352,7 +352,7 @@ func validateRunCommandArgs(args runCommandArgs) error {
 	case hasSteps && args.Background:
 		return badArgs("steps cannot run in the background")
 	case hasSteps && hasTopLevelOutput:
-		return badArgs("name and output_mode are unavailable with steps")
+		return badArgs("name and output_mode are unavailable with steps; drop them, or set name on each step instead")
 	case !args.Background && hasLease:
 		return badArgs("background_lease requires background:true")
 	case len(args.Steps) > runCommandMaxSteps:

@@ -95,7 +95,7 @@ func applyFile(f FilePatch) (string, error) {
 func applyCreate(f FilePatch) (string, error) {
 	path := f.New
 	if _, err := os.Stat(path); err == nil {
-		return path, fmt.Errorf("cannot create %s: file already exists", path)
+		return path, fmt.Errorf("cannot create %s: file already exists; use edit instead (or delete the file first)", path)
 	}
 	var b strings.Builder
 	for _, h := range f.Hunks {

@@ -168,6 +168,9 @@ func TestApplyCreateWhereExistsRejected(t *testing.T) {
 	if len(res.Rejected) != 1 {
 		t.Fatalf("want 1 rejection, got %+v", res.Rejected)
 	}
+	if !strings.Contains(res.Rejected[0].Reason, "file already exists; use edit instead (or delete the file first)") {
+		t.Errorf("rejection should state the corrective action: %q", res.Rejected[0].Reason)
+	}
 	if got := readFile(t, p); got != "already here\n" {
 		t.Errorf("existing file should be untouched: %q", got)
 	}

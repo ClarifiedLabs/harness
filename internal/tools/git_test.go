@@ -237,6 +237,21 @@ func TestGitCommitWorkflowRejectsEmptyDirectory(t *testing.T) {
 	}
 }
 
+func TestGitCommitWorkflowWhitespaceRejectionSuggestsFix(t *testing.T) {
+	gitAvailable(t)
+	dir := scratchRepo(t)
+	mustWrite(t, dir+"/bad.txt", "line with trailing space \n")
+	if _, err := runGitCommitWorkflow(t, dir, "feat: bad", "bad.txt"); err == nil {
+		t.Fatal("commit workflow with trailing whitespace succeeded, want error")
+	} else {
+		for _, want := range []string{"whitespace check failed", "strip trailing whitespace"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err, want)
+			}
+		}
+	}
+}
+
 func TestGitCommitWorkflowRequiresExplicitPaths(t *testing.T) {
 	for _, input := range []string{
 		`{"workflow":"commit","message":"feat: x"}`,

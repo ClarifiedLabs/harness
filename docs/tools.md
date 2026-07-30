@@ -162,6 +162,8 @@ than 1024 bytes are clamped in-process (host `grep` has no portable
   with `steps`
 - `steps`: up to 16 named `command`/`argv` entries, run serially. Top-level
   `cwd` and `timeout_seconds` are inherited unless a step overrides them.
+  Passing top-level `name` or `output_mode` with `steps` is rejected with
+  guidance to drop them or set `name` on each step instead.
 
 Foreground calls capture combined stdout/stderr and append `[exit code: N]`.
 Non-zero exit is not a tool error; it is returned as ordinary command output so
@@ -227,7 +229,9 @@ work, `git {"workflow":"commit","paths":[...],"message":"type: subject"}` stages
 only the exact repository-relative file or directory paths (a directory
 includes everything beneath it), runs the staged whitespace check,
 commits only those paths, and returns the new commit plus remaining workspace
-status. It rejects `.`, `..`, globs, and pathspec magic.
+status. It rejects `.`, `..`, globs, and pathspec magic. A failed whitespace
+check rejects with the offending lines plus a corrective sentence (strip the
+trailing whitespace and re-stage before retrying).
 
 `git_readonly` exposes an audited query-only allowlist for restricted agents:
 `blame`, `cat-file`, `check-attr`, `check-ignore`, `check-mailmap`,

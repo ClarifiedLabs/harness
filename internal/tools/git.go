@@ -306,7 +306,7 @@ func (g gitTool) commitPaths(ctx context.Context, input gitInput) (string, error
 		return "", err
 	}
 	if !check.success() {
-		return "", fmt.Errorf("git commit workflow whitespace check failed (%s): %s", check.receiptStatus(), strings.TrimSpace(check.Output))
+		return "", fmt.Errorf("git commit workflow whitespace check failed (%s): %s; fix the listed whitespace errors (strip trailing whitespace) and re-stage the paths before retrying", check.receiptStatus(), strings.TrimSpace(check.Output))
 	}
 
 	quietArgs := append([]string{"diff", "--cached", "--quiet", "--"}, input.Paths...)

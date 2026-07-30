@@ -2058,6 +2058,8 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   forward from the current file cursor. Pure insertion update hunks insert at EOF.
 - Patches apply in file order and stop at the first rejected file. Files applied
   before the rejection remain changed; the rejected file is left untouched.
+  `*** Add File` on an existing path rejects with `use edit instead (or delete
+  the file first)` appended.
 - Success reports `Success. Updated the following files:` followed by `A`, `M`, or
   `D` status lines.
 
@@ -2076,8 +2078,8 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `steps[].cwd` | string | overrides the inherited top-level cwd |
 | `steps[].timeout_seconds` | int | overrides the inherited top-level timeout |
 | `stop_on_failure` | bool | default true |
-| `name` | string | optional top-level receipt label; unavailable with `steps` |
-| `output_mode` | string | top-level `auto` (default), `receipt`, or `full`; unavailable with `steps` |
+| `name` | string | optional top-level receipt label; unavailable with `steps` (the rejection says to drop it or set `name` on each step) |
+| `output_mode` | string | top-level `auto` (default), `receipt`, or `full`; unavailable with `steps` (same corrective rejection) |
 | `stdin` | string | written to the command's standard input |
 | `cwd` | string | default process cwd |
 | `timeout_seconds` | int | foreground default 120, background default 1200, no maximum |
@@ -2228,6 +2230,8 @@ this subsection records the common runner those argv tools point at.
   staged `diff --check`, a staged-change check, and `git commit` scoped by `--`
   to those paths. Unrelated staged changes remain staged. The compact receipt
   reports the new short hash/subject, committed files, and remaining status.
+  A failed whitespace check rejects with a corrective sentence naming the
+  whitespace errors and telling the model to strip them and re-stage.
   Failures leave the staging area recoverable.
 
 ### 9.10 `web_fetch`
