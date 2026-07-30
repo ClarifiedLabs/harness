@@ -284,6 +284,13 @@ implementation-mode system block directing the child to make the requested
 changes, verify them, and return an exact handoff with changed paths, checks
 run, and any remaining work. Omit `mode` for exploration and review delegates.
 
+When a child run fails only for transient provider reasons (rate limit,
+overloaded, 5xx, provider-side timeout), the delegate error names those classes
+and tells the parent to retry the delegate call once and then report the
+blocker rather than retrying further; it is recorded with the `rate_limited` or
+`provider_error` error kind. Permanent failures (unknown agent, tool-subset
+rejection, non-retryable 4xx) are returned unchanged.
+
 Set `continue_child_id` to a terminal sibling delegate ID when the same child
 runtime should continue retained work. Harness leaves the source child
 unchanged and creates a fresh child record containing the prior transcript,

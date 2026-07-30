@@ -365,7 +365,7 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 					TranscriptPath: result.TranscriptPath,
 					Usage:          result.Usage,
 					Progress:       result.Progress,
-				}, err
+				}, annotateRunError(ctx, err)
 			},
 		})
 		if err != nil {
@@ -392,7 +392,7 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 	progress := t.takeProgress(input)
 	result, err := t.runner.Run(goal.ForkGenerationContext(ctx), req, progress)
 	if err != nil {
-		return tools.MeteredResult{Usage: result.Usage, Progress: result.Progress}, err
+		return tools.MeteredResult{Usage: result.Usage, Progress: result.Progress}, annotateRunError(ctx, err)
 	}
 	return tools.MeteredResult{Text: result.Report, Usage: result.Usage, Progress: result.Progress}, nil
 }

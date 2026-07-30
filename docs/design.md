@@ -2450,6 +2450,14 @@ this subsection records the common runner those argv tools point at.
   current parent agent's active tools. Non-subset calls return a tool error before
   any child model request is made. This exact subset check remains the
   capability-escalation guard.
+- A child run that fails only with transient provider classes (rate limit,
+  overloaded, 5xx, or a provider-side timeout while the parent context is
+  intact) is rewritten at the tool boundary (`internal/delegate/errors.go`):
+  the error names the failure classes, tells the parent model to retry the
+  delegate call once and then report the blocker rather than retrying further,
+  and stamps the diagnostics-only `rate_limited`/`provider_error` kind.
+  Permanent failures (unknown agent, subset rejection, non-retryable 4xx) pass
+  through verbatim.
 - Root depth is `0`. A launch is rejected before resolution/model I/O when the
   current depth reaches `delegate_max_depth`; child runtimes increment depth, and
   the deepest allowed child has `delegate` removed before its registry/specs are

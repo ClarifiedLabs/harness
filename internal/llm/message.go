@@ -195,14 +195,18 @@ const (
 	// of legacy logs and model_request failure mapping); producers never set
 	// them at dispatch time.
 	ToolErrorRegexInvalid          ToolErrorKind = "regex_invalid"
-	ToolErrorRateLimited           ToolErrorKind = "rate_limited"
-	ToolErrorProviderOverloaded    ToolErrorKind = "provider_overloaded"
 	ToolErrorProviderInternalError ToolErrorKind = "provider_internal_error"
 	ToolErrorProviderAuth          ToolErrorKind = "provider_auth"
 	ToolErrorProviderRequest       ToolErrorKind = "provider_request"
 	ToolErrorProvider5xx           ToolErrorKind = "provider_5xx"
-	ToolErrorProviderError         ToolErrorKind = "provider_error"
 	ToolErrorOther                 ToolErrorKind = "other"
+
+	// Transient provider kinds: stamped at dispatch time by the delegate tool
+	// (delegate.annotateRunError) and inferred by the offline analysis layer
+	// for legacy logs and model_request failures.
+	ToolErrorRateLimited        ToolErrorKind = "rate_limited"
+	ToolErrorProviderOverloaded ToolErrorKind = "provider_overloaded"
+	ToolErrorProviderError      ToolErrorKind = "provider_error"
 )
 
 // ToolResult is a flat view that becomes a BlockToolResult, carried from the
