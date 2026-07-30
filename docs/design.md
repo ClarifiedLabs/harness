@@ -185,6 +185,9 @@ const (
 type ContentBlock struct {
     Kind BlockKind `json:"kind"`
 
+    // Request-replay provenance for provider-owned opaque reasoning
+    ReasoningReplayDomain string `json:"reasoning_replay_domain,omitempty"`
+
     // BlockText
     Text string `json:"text,omitempty"`
 
@@ -235,8 +238,10 @@ Design notes:
   internal, and compaction-checkpoint boundaries; provider adapters ignore it.
 - **Reasoning blocks are opaque replay state.** Anthropic thinking/signatures,
   Responses encrypted reasoning items, and Gemini Interactions thought
-  summaries/signatures use distinct kinds, are replayed only to compatible
-  requests, and are never treated as ordinary user-visible text.
+  summaries/signatures use distinct kinds and record the active target's
+  `ReasoningReplayDomain`. Request assembly replays them only when that domain
+  matches the selected target; filtering is request-only and never rewrites the
+  transcript. They are never treated as ordinary user-visible text.
 - **`ParallelToolBatches` is local execution metadata.** It appears on the user message
   carrying tool results and is ignored by provider request builders. Each entry names,
   in emission order, every tool-use ID in one group selected for concurrent dispatch.
@@ -834,6 +839,21 @@ gated on the request itself being a reasoning request — a reasoning-off call
 (compaction summary, prewarm) drops the encrypted items, since a reasoning input
 item without the matching `include` is rejected.
 
+**Opaque reasoning replay domains.** The model catalog gives every base target
+a provider-local replay domain. The default is the exact base target ID;
+service-tier variants inherit it. A model entry can set
+`reasoning_replay_domain` to a shared provider-local label when the provider
+explicitly guarantees that multiple model IDs accept the same opaque reasoning
+state. Prompt-cache affinity remains a separate mechanism and does not widen
+this boundary. The agent stamps captured thinking, redacted thinking, Responses
+reasoning items, and Interactions thought/step blocks with the active domain.
+Before token estimation and request construction it removes mismatched blocks
+from a request-only message copy. Blocks from transcripts predating provenance
+metadata therefore do not cross into a configured target. A structured
+`invalid_encrypted_content` API error disables replay for the active domain for
+the rest of that agent and triggers one full-context retry without opaque
+reasoning; the durable transcript remains unchanged.
+
 **Anthropic prompt caching:** the CLI declares semantic policy; the dialect
 chooses wire placement within Anthropic's four-breakpoint budget. The last tool
 schema and stable system block use `CachePolicy.StaticTTL`: interactive turns
@@ -1142,7 +1162,8 @@ models that omit a flat catalog `Target.Price`. Configured models without
 context-window metadata use a
 conservative 256k default, configurable with `-default-context-window` and
 overridable for a run with `-context-window`. Model prices, context windows,
-output limits, and reasoning support are loaded from the model proxy catalog.
+output limits, reasoning support, and provider-local opaque-reasoning replay
+domains are loaded from the model proxy catalog.
 Harness presents reasoning as the portable profile list `default`, `none`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The CLI sends the
 selected profile to the model proxy, and the proxy maps it to the closest supported

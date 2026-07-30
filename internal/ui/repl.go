@@ -45,18 +45,19 @@ const (
 
 // ModelSelection is the runtime model/provider bundle returned by App.SwitchModel.
 type ModelSelection struct {
-	Provider          string
-	Model             string
-	RegistryModel     string
-	BaseURL           string
-	Runtime           llm.Provider
-	ContextWindow     int // agent override; 0 means use the registry
-	Reasoning         llm.ReasoningConfig
-	BaseTargetID      string
-	Variant           string
-	FastTargetID      string
-	ServerTools       []llm.ServerTool
-	ResponsesStateful bool
+	Provider              string
+	Model                 string
+	RegistryModel         string
+	BaseURL               string
+	Runtime               llm.Provider
+	ContextWindow         int // agent override; 0 means use the registry
+	Reasoning             llm.ReasoningConfig
+	BaseTargetID          string
+	ReasoningReplayDomain string
+	Variant               string
+	FastTargetID          string
+	ServerTools           []llm.ServerTool
+	ResponsesStateful     bool
 	// ReasoningSet says Reasoning intentionally replaces the requested config,
 	// including zero value for provider default.
 	ReasoningSet bool
@@ -74,22 +75,23 @@ type AgentSummary struct {
 // new tool registry, fully reassembled system prompt, and model target runtime
 // for subsequent turns.
 type AgentSelection struct {
-	Name              string
-	Tools             *tools.Registry
-	System            string
-	Provider          string
-	Model             string
-	RegistryModel     string
-	BaseURL           string
-	Runtime           llm.Provider
-	ContextWindow     int
-	Reasoning         llm.ReasoningConfig
-	BaseTargetID      string
-	Variant           string
-	FastTargetID      string
-	ServerTools       []llm.ServerTool
-	ResponsesStateful bool
-	ReasoningSet      bool
+	Name                  string
+	Tools                 *tools.Registry
+	System                string
+	Provider              string
+	Model                 string
+	RegistryModel         string
+	BaseURL               string
+	Runtime               llm.Provider
+	ContextWindow         int
+	Reasoning             llm.ReasoningConfig
+	BaseTargetID          string
+	ReasoningReplayDomain string
+	Variant               string
+	FastTargetID          string
+	ServerTools           []llm.ServerTool
+	ResponsesStateful     bool
+	ReasoningSet          bool
 }
 
 // App bundles the dependencies the REPL and one-shot driver need. main builds it
@@ -106,21 +108,22 @@ type App struct {
 	// them through the ordinary terminal log handler.
 	DiagnosticLogger *slog.Logger
 
-	Provider      string
-	Model         string
-	RegistryModel string
-	BaseURL       string
-	Registry      *llm.Registry
-	System        string
-	Reasoning     llm.ReasoningConfig
-	BaseTargetID  string
-	Variant       string
-	FastTargetID  string
-	ImageDetail   string
-	PendingImages []inputimage.Loaded
-	Hooks         *hooks.Runner
-	HookContext   []string
-	Background    *background.Manager
+	Provider              string
+	Model                 string
+	RegistryModel         string
+	BaseURL               string
+	Registry              *llm.Registry
+	System                string
+	Reasoning             llm.ReasoningConfig
+	BaseTargetID          string
+	ReasoningReplayDomain string
+	Variant               string
+	FastTargetID          string
+	ImageDetail           string
+	PendingImages         []inputimage.Loaded
+	Hooks                 *hooks.Runner
+	HookContext           []string
+	Background            *background.Manager
 
 	AvailableModels        []string
 	SwitchModel            func(model string, reasoning llm.ReasoningConfig) (ModelSelection, error)
@@ -2904,10 +2907,14 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	if selection.BaseTargetID == "" {
 		selection.BaseTargetID = selection.Model
 	}
+	if selection.ReasoningReplayDomain == "" {
+		selection.ReasoningReplayDomain = selection.BaseTargetID
+	}
 	baseChanged := oldBaseTargetID == "" || selection.BaseTargetID != oldBaseTargetID
 	responseState := app.Agent.ResponseState()
 	app.Agent.SetProvider(selection.Runtime)
 	app.Agent.SetModel(selection.Model, selection.ContextWindow)
+	app.Agent.SetReasoningReplayDomain(selection.ReasoningReplayDomain)
 	app.Agent.SetReasoning(selection.Reasoning)
 	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
@@ -2936,6 +2943,7 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	app.BaseURL = selection.BaseURL
 	app.Reasoning = selection.Reasoning
 	app.BaseTargetID = selection.BaseTargetID
+	app.ReasoningReplayDomain = selection.ReasoningReplayDomain
 	app.Variant = selection.Variant
 	app.FastTargetID = selection.FastTargetID
 	fmt.Fprintf(app.Errw, "[model switched: model=%s proxy-url=%s reasoning=%s]\n", modelDisplayName(app.Provider, app.Model), app.BaseURL, app.reasoningLabel())
@@ -3498,7 +3506,12 @@ func (app *App) applyAgentSwitchWithPrewarm(name string, prewarm bool) error {
 	if selection.BaseTargetID == "" {
 		selection.BaseTargetID = selection.Model
 	}
+	if selection.ReasoningReplayDomain == "" {
+		selection.ReasoningReplayDomain = selection.BaseTargetID
+	}
 	app.BaseTargetID = selection.BaseTargetID
+	app.ReasoningReplayDomain = selection.ReasoningReplayDomain
+	app.Agent.SetReasoningReplayDomain(selection.ReasoningReplayDomain)
 	app.Variant = selection.Variant
 	app.FastTargetID = selection.FastTargetID
 	app.Agent.SetServerTools(selection.ServerTools)

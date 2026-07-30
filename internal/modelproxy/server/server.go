@@ -2408,20 +2408,21 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				}
 			}
 			target := protocol.Target{
-				ID:                   id,
-				Aliases:              aliases,
-				DisplayName:          entry.Name,
-				ProviderLabel:        pc.Name,
-				ModelLabel:           entry.Name,
-				ContextWindow:        entry.ContextWindow,
-				OutputLimit:          entry.OutputLimit,
-				InputModalities:      append([]string(nil), entry.InputModalities...),
-				ServerTools:          targetServerTools(pc, entry),
-				APIType:              pc.APIType,
-				ContinuationStateful: providerContinuationStateful(pc),
-				Prewarm:              providerResponsesWebSocket(pc),
-				Price:                price,
-				Reasoning:            targetReasoningSupported(entry),
+				ID:                    id,
+				Aliases:               aliases,
+				DisplayName:           entry.Name,
+				ProviderLabel:         pc.Name,
+				ModelLabel:            entry.Name,
+				ContextWindow:         entry.ContextWindow,
+				OutputLimit:           entry.OutputLimit,
+				InputModalities:       append([]string(nil), entry.InputModalities...),
+				ServerTools:           targetServerTools(pc, entry),
+				APIType:               pc.APIType,
+				ContinuationStateful:  providerContinuationStateful(pc),
+				Prewarm:               providerResponsesWebSocket(pc),
+				Price:                 price,
+				Reasoning:             targetReasoningSupported(entry),
+				ReasoningReplayDomain: reasoningReplayDomain(pc.Name, entry, id),
 			}
 			out.Targets = append(out.Targets, target)
 			rt := resolvedTarget{targetID: id, baseTargetID: id, pc: pc, entry: entry}
@@ -2480,6 +2481,13 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 		return protocol.Catalog{}, nil, fmt.Errorf("model proxy: no configured models")
 	}
 	return out, targets, nil
+}
+
+func reasoningReplayDomain(provider string, entry llm.ModelEntry, targetID string) string {
+	if domain := strings.TrimSpace(entry.ReasoningReplayDomain); domain != "" {
+		return provider + ":" + domain
+	}
+	return targetID
 }
 
 func defaultServiceTier(tier llm.ServiceTier) bool {

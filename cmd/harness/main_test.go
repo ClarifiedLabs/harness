@@ -4633,7 +4633,7 @@ func TestEnableInteractiveAutoHandoff(t *testing.T) {
 func TestResolveCatalogSelectionHonorsExplicitProvider(t *testing.T) {
 	catalog := protocol.Catalog{Targets: []protocol.Target{
 		{ID: "openai:gpt-5.5", Aliases: []string{"gpt-5.5"}},
-		{ID: "openrouter:gpt-5.5", Aliases: []string{"gpt-5.5"}},
+		{ID: "openrouter:gpt-5.5", Aliases: []string{"gpt-5.5"}, ReasoningReplayDomain: "openrouter:gpt-family"},
 		{ID: "openrouter:openai/gpt-5.5", Aliases: []string{"openai/gpt-5.5"}},
 	}}
 
@@ -4641,7 +4641,9 @@ func TestResolveCatalogSelectionHonorsExplicitProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve explicit provider: %v", err)
 	}
-	if got.Model != "openrouter:gpt-5.5" || got.Provider != "openrouter:gpt-5.5" {
+	if got.Model != "openrouter:gpt-5.5" ||
+		got.Provider != "openrouter:gpt-5.5" ||
+		got.ReasoningReplayDomain != "openrouter:gpt-family" {
 		t.Fatalf("selection = %+v, want openrouter:gpt-5.5", got)
 	}
 
@@ -4651,6 +4653,9 @@ func TestResolveCatalogSelectionHonorsExplicitProvider(t *testing.T) {
 	}
 	if got.Model != "openrouter:openai/gpt-5.5" {
 		t.Fatalf("selection = %+v, want openrouter:openai/gpt-5.5", got)
+	}
+	if got.ReasoningReplayDomain != got.BaseTargetID {
+		t.Fatalf("default replay domain = %q, want base target %q", got.ReasoningReplayDomain, got.BaseTargetID)
 	}
 }
 

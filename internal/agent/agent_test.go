@@ -941,6 +941,147 @@ func TestEncryptedReasoningPersistedAndReplayed(t *testing.T) {
 	}
 }
 
+func TestOpaqueReasoningReplayRequiresMatchingDomain(t *testing.T) {
+	encrypted := llm.StreamEvent{
+		Kind:               llm.EventReasoningSummary,
+		ReasoningID:        "rs_fugu",
+		ReasoningEncrypted: "FUGU-ONLY",
+	}
+	first := llmtest.New("responses",
+		llmtest.Step{Events: []llm.StreamEvent{encrypted, textDelta("first")}, Stop: llm.StopEndTurn},
+	)
+	second := llmtest.New("responses",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(first, tools.Default(), Options{
+		Model:                 "sakana:fugu-ultra",
+		ReasoningReplayDomain: "sakana:fugu-ultra",
+	})
+
+	if err := a.RunPrompt(context.Background(), "one", &recordSink{}); err != nil {
+		t.Fatalf("first RunPrompt: %v", err)
+	}
+	var persisted bool
+	for _, message := range a.Transcript() {
+		for _, block := range message.Content {
+			if block.ReasoningEncrypted == "FUGU-ONLY" {
+				persisted = block.ReasoningReplayDomain == "sakana:fugu-ultra"
+			}
+		}
+	}
+	if !persisted {
+		t.Fatalf("reasoning provenance not persisted:\n%s", dump(a.Transcript()))
+	}
+
+	a.SetProvider(second)
+	a.SetModel("openai-codex:gpt-5.6-sol", 0)
+	a.SetReasoningReplayDomain("openai-codex:gpt-5.6-sol")
+	if err := a.RunPrompt(context.Background(), "two", &recordSink{}); err != nil {
+		t.Fatalf("second RunPrompt: %v", err)
+	}
+	if requestHasReasoningEncrypted(second.Requests[0], "FUGU-ONLY") {
+		t.Fatalf("cross-domain reasoning reached request:\n%s", dump(second.Requests[0].Messages))
+	}
+	if !requestHasReasoningEncrypted(llm.Request{Messages: a.Transcript()}, "FUGU-ONLY") {
+		t.Fatalf("request filtering mutated durable transcript:\n%s", dump(a.Transcript()))
+	}
+}
+
+func TestOpaqueReasoningReplaysAcrossModelsInSameDomain(t *testing.T) {
+	encrypted := llm.StreamEvent{
+		Kind:               llm.EventReasoningSummary,
+		ReasoningID:        "rs_k3",
+		ReasoningEncrypted: "K3-FAMILY",
+	}
+	fp := llmtest.New("responses",
+		llmtest.Step{Events: []llm.StreamEvent{encrypted, textDelta("first")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Default(), Options{
+		Model:                 "kimi:k3-256k",
+		ReasoningReplayDomain: "kimi:k3-family",
+	})
+
+	if err := a.RunPrompt(context.Background(), "one", &recordSink{}); err != nil {
+		t.Fatalf("first RunPrompt: %v", err)
+	}
+	a.SetModel("kimi:k3", 0)
+	a.SetReasoningReplayDomain("kimi:k3-family")
+	if err := a.RunPrompt(context.Background(), "two", &recordSink{}); err != nil {
+		t.Fatalf("second RunPrompt: %v", err)
+	}
+	if !requestHasReasoningEncrypted(fp.Requests[1], "K3-FAMILY") {
+		t.Fatalf("same-domain reasoning was not replayed:\n%s", dump(fp.Requests[1].Messages))
+	}
+}
+
+func TestInvalidEncryptedContentRetriesWithoutOpaqueReasoning(t *testing.T) {
+	fp := llmtest.New("responses",
+		llmtest.Step{Err: &llm.APIError{
+			StatusCode: 400,
+			Code:       "invalid_encrypted_content",
+			Message:    "encrypted content could not be verified",
+		}},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("recovered")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("still recovered")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Default(), Options{
+		Model:                 "openai:gpt",
+		ReasoningReplayDomain: "openai:gpt",
+	})
+	a.SetTranscript([]llm.Message{
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "old"}}},
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+			{
+				Kind:                  llm.BlockReasoning,
+				ReasoningReplayDomain: "openai:gpt",
+				ReasoningID:           "rs_bad",
+				ReasoningEncrypted:    "INVALID",
+			},
+			{Kind: llm.BlockText, Text: "old answer"},
+		}},
+	})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "next", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want failed request plus fallback", len(fp.Requests))
+	}
+	if !requestHasReasoningEncrypted(fp.Requests[0], "INVALID") {
+		t.Fatalf("first request did not exercise encrypted replay:\n%s", dump(fp.Requests[0].Messages))
+	}
+	if requestHasReasoningEncrypted(fp.Requests[1], "INVALID") {
+		t.Fatalf("fallback still replayed rejected reasoning:\n%s", dump(fp.Requests[1].Messages))
+	}
+	const notice = "[reasoning replay disabled: provider rejected encrypted content; retrying without opaque reasoning]"
+	if !slices.Contains(sink.notices, notice) {
+		t.Fatalf("notices = %v, want %q", sink.notices, notice)
+	}
+	if !requestHasReasoningEncrypted(llm.Request{Messages: a.Transcript()}, "INVALID") {
+		t.Fatalf("fallback mutated durable transcript:\n%s", dump(a.Transcript()))
+	}
+
+	if err := a.RunPrompt(context.Background(), "again", sink); err != nil {
+		t.Fatalf("second RunPrompt: %v", err)
+	}
+	if requestHasReasoningEncrypted(fp.Requests[2], "INVALID") {
+		t.Fatalf("disabled domain replayed reasoning on a later turn:\n%s", dump(fp.Requests[2].Messages))
+	}
+}
+
+func requestHasReasoningEncrypted(req llm.Request, encrypted string) bool {
+	for _, message := range req.Messages {
+		for _, block := range message.Content {
+			if providerOwnedReasoningBlock(block.Kind) && block.ReasoningEncrypted == encrypted {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func TestSessionIDsHaveDistinctContinuationAndCacheLifetimes(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn}, llmtest.Step{Stop: llm.StopEndTurn})
 	a := newAgent(fp, tools.Default(), Options{})

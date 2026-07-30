@@ -646,20 +646,21 @@ func run(env environment) int {
 		SearchBackend:             searchBackend(),
 	}
 	delegateState := delegate.NewState(delegate.Runtime{
-		ProviderName:      cfg.Provider,
-		Model:             cfg.Model,
-		ContextWindow:     cfg.ContextWindow,
-		MaxOutputTokens:   cfg.MaxOutputTokens,
-		Registry:          modelRegistry,
-		Reasoning:         reasoning,
-		ServerTools:       serverTools,
-		ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider),
-		Agent:             agentName,
-		Depth:             0,
-		MaxPromptTokens:   cfg.MaxPromptTokens,
-		MaxPromptCostUSD:  cfg.MaxPromptCostUSD,
-		Build:             sessionBuild,
-		RuntimeProfile:    sessionRuntime,
+		ProviderName:          cfg.Provider,
+		Model:                 cfg.Model,
+		ReasoningReplayDomain: selection.ReasoningReplayDomain,
+		ContextWindow:         cfg.ContextWindow,
+		MaxOutputTokens:       cfg.MaxOutputTokens,
+		Registry:              modelRegistry,
+		Reasoning:             reasoning,
+		ServerTools:           serverTools,
+		ResponsesStateful:     responsesStatefulForProvider(cfg, catalog, cfg.Provider),
+		Agent:                 agentName,
+		Depth:                 0,
+		MaxPromptTokens:       cfg.MaxPromptTokens,
+		MaxPromptCostUSD:      cfg.MaxPromptCostUSD,
+		Build:                 sessionBuild,
+		RuntimeProfile:        sessionRuntime,
 	})
 	// pendingMCP is assigned below (interactive REPL only) before any turn can run,
 	// so this closure — invoked lazily at delegation time — captures the live value.
@@ -884,6 +885,7 @@ func run(env environment) int {
 		snap.Provider = runtime
 		snap.ProviderName = next.Provider
 		snap.Model = next.Model
+		snap.ReasoningReplayDomain = next.ReasoningReplayDomain
 		snap.ContextWindow = cfg.ContextWindow
 		snap.MaxOutputTokens = cfg.MaxOutputTokens
 		snap.System = system
@@ -894,22 +896,23 @@ func run(env environment) int {
 		snap.ToolNames = reg.Names()
 		delegateState.Set(snap)
 		return ui.AgentSelection{
-			Name:              a.Name,
-			Tools:             reg,
-			System:            system,
-			Provider:          next.Provider,
-			Model:             next.Model,
-			RegistryModel:     next.RegistryModel,
-			BaseURL:           proxyClient.URL(),
-			Runtime:           runtime,
-			ContextWindow:     cfg.ContextWindow,
-			Reasoning:         nextReasoning,
-			BaseTargetID:      next.BaseTargetID,
-			Variant:           next.Variant,
-			FastTargetID:      next.FastTargetID,
-			ServerTools:       snap.ServerTools,
-			ReasoningSet:      true,
-			ResponsesStateful: snap.ResponsesStateful,
+			Name:                  a.Name,
+			Tools:                 reg,
+			System:                system,
+			Provider:              next.Provider,
+			Model:                 next.Model,
+			RegistryModel:         next.RegistryModel,
+			BaseURL:               proxyClient.URL(),
+			Runtime:               runtime,
+			ContextWindow:         cfg.ContextWindow,
+			Reasoning:             nextReasoning,
+			BaseTargetID:          next.BaseTargetID,
+			ReasoningReplayDomain: next.ReasoningReplayDomain,
+			Variant:               next.Variant,
+			FastTargetID:          next.FastTargetID,
+			ServerTools:           snap.ServerTools,
+			ReasoningSet:          true,
+			ResponsesStateful:     snap.ResponsesStateful,
 		}, nil
 	}
 
@@ -950,6 +953,7 @@ func run(env environment) int {
 		snap.Provider = runtime
 		snap.ProviderName = next.Provider
 		snap.Model = next.Model
+		snap.ReasoningReplayDomain = next.ReasoningReplayDomain
 		snap.ContextWindow = cfg.ContextWindow
 		snap.MaxOutputTokens = cfg.MaxOutputTokens
 		snap.Reasoning = nextReasoning
@@ -959,19 +963,20 @@ func run(env environment) int {
 		reasoning = nextReasoning
 		serverTools = snap.ServerTools
 		return ui.ModelSelection{
-			Provider:          next.Provider,
-			Model:             next.Model,
-			RegistryModel:     next.RegistryModel,
-			BaseURL:           proxyClient.URL(),
-			Runtime:           runtime,
-			ContextWindow:     cfg.ContextWindow,
-			Reasoning:         nextReasoning,
-			BaseTargetID:      next.BaseTargetID,
-			Variant:           next.Variant,
-			FastTargetID:      next.FastTargetID,
-			ServerTools:       snap.ServerTools,
-			ReasoningSet:      true,
-			ResponsesStateful: snap.ResponsesStateful,
+			Provider:              next.Provider,
+			Model:                 next.Model,
+			RegistryModel:         next.RegistryModel,
+			BaseURL:               proxyClient.URL(),
+			Runtime:               runtime,
+			ContextWindow:         cfg.ContextWindow,
+			Reasoning:             nextReasoning,
+			BaseTargetID:          next.BaseTargetID,
+			ReasoningReplayDomain: next.ReasoningReplayDomain,
+			Variant:               next.Variant,
+			FastTargetID:          next.FastTargetID,
+			ServerTools:           snap.ServerTools,
+			ReasoningSet:          true,
+			ResponsesStateful:     snap.ResponsesStateful,
 		}, nil
 	}
 
@@ -984,6 +989,7 @@ func run(env environment) int {
 		ContextWindow:             cfg.ContextWindow,
 		Registry:                  modelRegistry,
 		Reasoning:                 reasoning,
+		ReasoningReplayDomain:     selection.ReasoningReplayDomain,
 		ServerTools:               serverTools,
 		Now:                       now,
 		CompactKeepTurns:          cfg.CompactKeepTurns,
@@ -1041,25 +1047,26 @@ func run(env environment) int {
 	activeToolNames := toolRegistry.Names()
 
 	delegateState.Set(delegate.Runtime{
-		Provider:          provider,
-		ProviderName:      cfg.Provider,
-		Model:             cfg.Model,
-		ContextWindow:     cfg.ContextWindow,
-		MaxOutputTokens:   cfg.MaxOutputTokens,
-		Registry:          modelRegistry,
-		Reasoning:         reasoning,
-		ServerTools:       serverTools,
-		ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider),
-		System:            systemPrompt,
-		Agent:             agentName,
-		ToolNames:         activeToolNames,
-		SessionPath:       sessionPath,
-		CacheAffinityID:   ag.CacheAffinityID(),
-		Depth:             0,
-		MaxPromptTokens:   cfg.MaxPromptTokens,
-		MaxPromptCostUSD:  cfg.MaxPromptCostUSD,
-		Build:             sessionBuild,
-		RuntimeProfile:    sessionRuntime,
+		Provider:              provider,
+		ProviderName:          cfg.Provider,
+		Model:                 cfg.Model,
+		ContextWindow:         cfg.ContextWindow,
+		MaxOutputTokens:       cfg.MaxOutputTokens,
+		Registry:              modelRegistry,
+		Reasoning:             reasoning,
+		ReasoningReplayDomain: selection.ReasoningReplayDomain,
+		ServerTools:           serverTools,
+		ResponsesStateful:     responsesStatefulForProvider(cfg, catalog, cfg.Provider),
+		System:                systemPrompt,
+		Agent:                 agentName,
+		ToolNames:             activeToolNames,
+		SessionPath:           sessionPath,
+		CacheAffinityID:       ag.CacheAffinityID(),
+		Depth:                 0,
+		MaxPromptTokens:       cfg.MaxPromptTokens,
+		MaxPromptCostUSD:      cfg.MaxPromptCostUSD,
+		Build:                 sessionBuild,
+		RuntimeProfile:        sessionRuntime,
 	})
 	if hookRunner != nil {
 		hookRunner.SetSession(sessionPath)
@@ -1129,6 +1136,7 @@ func run(env environment) int {
 		System:                 systemPrompt,
 		Reasoning:              reasoning,
 		BaseTargetID:           selection.BaseTargetID,
+		ReasoningReplayDomain:  selection.ReasoningReplayDomain,
 		Variant:                selection.Variant,
 		FastTargetID:           selection.FastTargetID,
 		ImageDetail:            cfg.ImageDetail,
@@ -2106,12 +2114,13 @@ func defaultTerminalCols() int {
 }
 
 type catalogSelection struct {
-	Provider      string
-	Model         string
-	RegistryModel string
-	BaseTargetID  string
-	Variant       string
-	FastTargetID  string
+	Provider              string
+	Model                 string
+	RegistryModel         string
+	BaseTargetID          string
+	ReasoningReplayDomain string
+	Variant               string
+	FastTargetID          string
 }
 
 func catalogSelectionForTarget(catalog protocol.Catalog, target protocol.Target) catalogSelection {
@@ -2119,13 +2128,19 @@ func catalogSelectionForTarget(catalog protocol.Catalog, target protocol.Target)
 	if baseTargetID == "" {
 		baseTargetID = target.ID
 	}
+	reasoningReplayDomain := target.ReasoningReplayDomain
+	if reasoningReplayDomain == "" {
+		// The conservative default is the exact base target.
+		reasoningReplayDomain = baseTargetID
+	}
 	return catalogSelection{
-		Provider:      target.ID,
-		Model:         target.ID,
-		RegistryModel: target.ID,
-		BaseTargetID:  baseTargetID,
-		Variant:       target.Variant,
-		FastTargetID:  fastTargetID(catalog, baseTargetID),
+		Provider:              target.ID,
+		Model:                 target.ID,
+		RegistryModel:         target.ID,
+		BaseTargetID:          baseTargetID,
+		ReasoningReplayDomain: reasoningReplayDomain,
+		Variant:               target.Variant,
+		FastTargetID:          fastTargetID(catalog, baseTargetID),
 	}
 }
 
@@ -2188,6 +2203,7 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 	model := runtime.Model
 	system := runtime.System
 	launchReasoning := runtime.Reasoning
+	reasoningReplayDomain := runtime.ReasoningReplayDomain
 	serverTools := runtime.ServerTools
 	if target != runtime.Agent {
 		next, err := resolveAgentCatalogSelection(modelCatalog, def, runtime.ProviderName, runtime.Model)
@@ -2201,6 +2217,7 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 		}
 		providerName = next.Provider
 		model = next.Model
+		reasoningReplayDomain = next.ReasoningReplayDomain
 		serverTools = webSearchServerToolsForModel(next.Provider, runtime.Registry, next.RegistryModel, cfg.WebSearch)
 		provider = proxyClient.Provider(next.Provider)
 		system = buildSystem(def.Prompt)
@@ -2212,18 +2229,19 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 		provider = proxyClient.Provider(providerName)
 	}
 	return delegate.Launch{
-		Provider:          provider,
-		ProviderName:      providerName,
-		Model:             model,
-		ContextWindow:     runtime.ContextWindow,
-		MaxOutputTokens:   runtime.MaxOutputTokens,
-		Registry:          runtime.Registry,
-		Reasoning:         launchReasoning,
-		ServerTools:       serverTools,
-		ResponsesStateful: responsesStatefulForProvider(cfg, modelCatalog, providerName),
-		System:            system,
-		Agent:             target,
-		Tools:             reg,
+		Provider:              provider,
+		ProviderName:          providerName,
+		Model:                 model,
+		ContextWindow:         runtime.ContextWindow,
+		MaxOutputTokens:       runtime.MaxOutputTokens,
+		Registry:              runtime.Registry,
+		Reasoning:             launchReasoning,
+		ReasoningReplayDomain: reasoningReplayDomain,
+		ServerTools:           serverTools,
+		ResponsesStateful:     responsesStatefulForProvider(cfg, modelCatalog, providerName),
+		System:                system,
+		Agent:                 target,
+		Tools:                 reg,
 	}, nil
 }
 

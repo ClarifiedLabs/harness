@@ -1455,6 +1455,21 @@ func TestRunRefreshModelsSIGINTCancelsCatalogFetch(t *testing.T) {
 	}
 }
 
+func TestPreserveReasoningReplayDomains(t *testing.T) {
+	next := []setupModelConfig{{Name: "k3"}, {Name: "new"}}
+	preserveReasoningReplayDomains([]llm.ModelEntry{
+		{Name: "k3", ReasoningReplayDomain: "k3-family"},
+		{Name: "removed", ReasoningReplayDomain: "old-family"},
+	}, next)
+
+	if next[0].ReasoningReplayDomain != "k3-family" {
+		t.Fatalf("preserved domain = %q, want k3-family", next[0].ReasoningReplayDomain)
+	}
+	if next[1].ReasoningReplayDomain != "" {
+		t.Fatalf("new model domain = %q, want empty default", next[1].ReasoningReplayDomain)
+	}
+}
+
 func testSetupCatalog() *modelcatalog.Catalog {
 	return &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
 		"testai": {

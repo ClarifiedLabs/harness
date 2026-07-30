@@ -392,6 +392,10 @@ type Options struct {
 	// Reasoning is forwarded to every model request. Empty means provider
 	// default.
 	Reasoning llm.ReasoningConfig
+	// ReasoningReplayDomain identifies model targets that can safely replay the
+	// same provider-owned opaque reasoning. Empty preserves the standalone
+	// Agent zero-value behavior.
+	ReasoningReplayDomain string
 	// ServerTools are provider-hosted tools such as web_search that are declared
 	// alongside local function tools but handled entirely by the provider.
 	ServerTools []llm.ServerTool
@@ -464,6 +468,8 @@ type Agent struct {
 	contextWindow             int     // -context-window override; 0 = use the registry default
 	observedContextWindow     int     // smaller provider-reported limit learned from an overflow error
 	reasoning                 llm.ReasoningConfig
+	reasoningReplayDomain     string
+	disabledReasoningReplay   map[string]bool
 	serverTools               []llm.ServerTool
 	now                       func() time.Time
 	sleep                     func(context.Context, time.Duration) error // mid-stream retry backoff; nil-free, set in New
@@ -481,12 +487,12 @@ type Agent struct {
 	showDiffs                 bool
 	// failGuard is the per-prompt repeated-identical-failure guard (design
 	// §8.1). It is non-nil only while RunAdmittedPromptWithContext executes.
-	failGuard *failureGuard
-	responsesStateful         bool
-	interactive               bool            // 1h Anthropic cache breakpoint; see Options.Interactive
-	steer                     chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
-	responseState             llm.ResponseState
-	responseStateEpoch        uint64
+	failGuard          *failureGuard
+	responsesStateful  bool
+	interactive        bool            // 1h Anthropic cache breakpoint; see Options.Interactive
+	steer              chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
+	responseState      llm.ResponseState
+	responseStateEpoch uint64
 	// measuredInput/measuredBoundary persist the last turn's actual billed
 	// input (uncached + cache read/write) and the transcript length it
 	// measured, so the next reported context estimate can anchor to actuals
@@ -529,6 +535,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		maxPromptCostUSD:          opts.MaxPromptCostUSD,
 		contextWindow:             opts.ContextWindow,
 		reasoning:                 opts.Reasoning,
+		reasoningReplayDomain:     opts.ReasoningReplayDomain,
 		serverTools:               cloneServerTools(opts.ServerTools),
 		now:                       now,
 		sleep:                     sleepContext,
@@ -625,6 +632,15 @@ func (a *Agent) SetModel(model string, contextWindow int) {
 // SetReasoning replaces the reasoning controls sent on subsequent requests.
 func (a *Agent) SetReasoning(reasoning llm.ReasoningConfig) {
 	a.reasoning = reasoning
+	a.compactionRuntimeVersion++
+	a.retentionEpochArmed = true
+	a.resetResponseState()
+}
+
+// SetReasoningReplayDomain changes which persisted provider-owned reasoning
+// blocks may be sent on subsequent requests.
+func (a *Agent) SetReasoningReplayDomain(domain string) {
+	a.reasoningReplayDomain = domain
 	a.compactionRuntimeVersion++
 	a.retentionEpochArmed = true
 	a.resetResponseState()
@@ -1024,6 +1040,7 @@ func (a *Agent) estimateContext(extraContext []string) ContextEstimate {
 }
 
 func (a *Agent) estimateContextForTranscript(extraContext []string, transcript []llm.Message) ContextEstimate {
+	transcript = a.filterReasoningReplay(transcript)
 	est := estimateRequest(llm.Request{
 		System:         a.system,
 		Messages:       transcript,
@@ -1083,6 +1100,7 @@ func (a *Agent) modelRequest(requestContext []string) modelRequest {
 func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []llm.Message) modelRequest {
 	payloadMessages, usedPrevious := a.payloadMessagesIn(transcript)
 	payloadStart := len(transcript) - len(payloadMessages)
+	payloadMessages = a.filterReasoningReplay(payloadMessages)
 	estimate := a.estimatePayloadContextForTranscript(requestContext, transcript, payloadMessages)
 	req := llm.Request{
 		Model:                a.model,
@@ -1109,6 +1127,79 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 		estimate:     estimate,
 		usedPrevious: usedPrevious,
 	}
+}
+
+func providerOwnedReasoningBlock(kind llm.BlockKind) bool {
+	switch kind {
+	case llm.BlockThinking,
+		llm.BlockRedactedThinking,
+		llm.BlockReasoning,
+		llm.BlockInteractionThought,
+		llm.BlockInteractionStep:
+		return true
+	default:
+		return false
+	}
+}
+
+// filterReasoningReplay returns request-only copies when a transcript contains
+// opaque reasoning that is incompatible with the selected target. The durable
+// transcript is never mutated.
+func (a *Agent) filterReasoningReplay(messages []llm.Message) []llm.Message {
+	domain := a.reasoningReplayDomain
+	disabled := a.disabledReasoningReplay[domain]
+	var out []llm.Message
+	for i, message := range messages {
+		var content []llm.ContentBlock
+		for j, block := range message.Content {
+			if !providerOwnedReasoningBlock(block.Kind) ||
+				(!disabled && block.ReasoningReplayDomain == domain) {
+				if content != nil {
+					content = append(content, block)
+				}
+				continue
+			}
+			if out == nil {
+				out = append([]llm.Message(nil), messages...)
+			}
+			if content == nil {
+				content = make([]llm.ContentBlock, 0, len(message.Content)-1)
+				content = append(content, message.Content[:j]...)
+			}
+		}
+		if content != nil {
+			out[i].Content = content
+		}
+	}
+	if out == nil {
+		return messages
+	}
+	return out
+}
+
+func hasProviderOwnedReasoning(messages []llm.Message) bool {
+	for _, message := range messages {
+		for _, block := range message.Content {
+			if providerOwnedReasoningBlock(block.Kind) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func invalidEncryptedContent(err error) bool {
+	var apiErr *llm.APIError
+	return errors.As(err, &apiErr) &&
+		strings.EqualFold(strings.TrimSpace(apiErr.Code), "invalid_encrypted_content")
+}
+
+func (a *Agent) disableCurrentReasoningReplay() {
+	if a.disabledReasoningReplay == nil {
+		a.disabledReasoningReplay = make(map[string]bool)
+	}
+	a.disabledReasoningReplay[a.reasoningReplayDomain] = true
+	a.resetResponseState()
 }
 
 // DebugRequest snapshots the next provider-neutral model request without
@@ -1519,6 +1610,18 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
 			a.resetResponseState()
 			sink.Notice("[responses state reset: previous response unavailable; retrying with full context]")
+			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
+			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
+			var retryWasted llm.Usage
+			res, retryWasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
+			wasted = add(wasted, retryWasted)
+		}
+		if err != nil &&
+			!res.hasPartialOutput() &&
+			hasProviderOwnedReasoning(modelReq.request.Messages) &&
+			invalidEncryptedContent(err) {
+			a.disableCurrentReasoningReplay()
+			sink.Notice("[reasoning replay disabled: provider rejected encrypted content; retrying without opaque reasoning]")
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 			var retryWasted llm.Usage
@@ -2632,10 +2735,12 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 				sink.ReasoningSummary(summary)
 			}
 			if block, ok := llm.PersistedReasoningBlock(ev); ok {
+				block.ReasoningReplayDomain = a.reasoningReplayDomain
 				res.reasoning = append(res.reasoning, block)
 			}
 		case llm.EventInteractionStep:
 			if block, ok := llm.PersistedInteractionStep(ev); ok {
+				block.ReasoningReplayDomain = a.reasoningReplayDomain
 				res.reasoning = append(res.reasoning, block)
 			}
 		case llm.EventAssistantPhase:

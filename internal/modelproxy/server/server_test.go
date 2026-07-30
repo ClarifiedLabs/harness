@@ -74,6 +74,41 @@ func TestCatalogPricesAnthropicSpeedVariantBuckets(t *testing.T) {
 	}
 }
 
+func TestCatalogReasoningReplayDomainsAreProviderLocalAndVariantStable(t *testing.T) {
+	providers := []llm.ProviderConfig{{
+		Name: "kimi",
+		Models: []llm.ModelEntry{
+			{Name: "k3-256k", ReasoningReplayDomain: "k3-family"},
+			{
+				Name:                  "k3",
+				ReasoningReplayDomain: "k3-family",
+				ServiceTiers: []llm.ServiceTier{{
+					ID:    "fast",
+					Price: llm.Price{Input: 1, Output: 2},
+				}},
+			},
+			{Name: "unrelated"},
+		},
+	}}
+	catalog, _, err := catalogFromProviderConfigs(providers, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := make(map[string]protocol.Target, len(catalog.Targets))
+	for _, target := range catalog.Targets {
+		targets[target.ID] = target
+	}
+
+	for _, id := range []string{"kimi:k3-256k", "kimi:k3", "kimi:k3:fast"} {
+		if got := targets[id].ReasoningReplayDomain; got != "kimi:k3-family" {
+			t.Errorf("%s replay domain = %q, want kimi:k3-family", id, got)
+		}
+	}
+	if got := targets["kimi:unrelated"].ReasoningReplayDomain; got != "kimi:unrelated" {
+		t.Errorf("unrelated replay domain = %q, want exact target id", got)
+	}
+}
+
 func (b *lockedLogBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

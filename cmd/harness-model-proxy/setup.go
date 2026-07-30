@@ -54,15 +54,15 @@ type setupProviderConfig struct {
 	// input_tokens including cached tokens; see llm.ProviderConfig.
 	UsageInputIncludesCache bool                  `json:"usage_input_includes_cache,omitempty"`
 	MinOutputTokens         int                   `json:"min_output_tokens,omitempty"`
-	PromptCache          llm.PromptCacheConfig `json:"prompt_cache,omitempty"`
-	ResponsesStateful    *bool                 `json:"responses_stateful,omitempty"`
-	ResponsesWebSocket   *bool                 `json:"responses_websocket,omitempty"`
-	InteractionsStateful *bool                 `json:"interactions_stateful,omitempty"`
-	ServerTools          []string              `json:"server_tools,omitempty"`
-	ServiceTiers         []llm.ServiceTier     `json:"service_tiers,omitempty"`
-	APIKeyEnv            []string              `json:"api_key_env,omitempty"`
-	Auth                 *auth.Config          `json:"auth,omitempty"`
-	Models               []setupModelConfig    `json:"models"`
+	PromptCache             llm.PromptCacheConfig `json:"prompt_cache,omitempty"`
+	ResponsesStateful       *bool                 `json:"responses_stateful,omitempty"`
+	ResponsesWebSocket      *bool                 `json:"responses_websocket,omitempty"`
+	InteractionsStateful    *bool                 `json:"interactions_stateful,omitempty"`
+	ServerTools             []string              `json:"server_tools,omitempty"`
+	ServiceTiers            []llm.ServiceTier     `json:"service_tiers,omitempty"`
+	APIKeyEnv               []string              `json:"api_key_env,omitempty"`
+	Auth                    *auth.Config          `json:"auth,omitempty"`
+	Models                  []setupModelConfig    `json:"models"`
 }
 
 type setupModelConfig struct {
@@ -76,6 +76,7 @@ type setupModelConfig struct {
 	Reasoning                 *bool                 `json:"reasoning,omitempty"`
 	ReasoningSummarySupported *bool                 `json:"reasoning_summary_supported,omitempty"`
 	ReasoningOptions          []llm.ReasoningOption `json:"reasoning_options,omitempty"`
+	ReasoningReplayDomain     string                `json:"reasoning_replay_domain,omitempty"`
 }
 
 func runSetup(ctx context.Context, env environment, force bool) error {
@@ -149,6 +150,7 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	}
 
 	provider := setupProviderFromCatalog(providerMeta, apiKey, authCfg, models)
+	preserveReasoningReplayDomains(existingProvider.Config.Models, provider.Models)
 	if existingProvider.Config.OmitMaxOutputTokens {
 		provider.OmitMaxOutputTokens = true
 	}
@@ -300,6 +302,7 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 				continue
 			}
 			next := setupProviderFromCatalog(meta, current.APIKey, current.Auth, updatedModels)
+			preserveReasoningReplayDomains(current.Models, next.Models)
 			if current.OmitMaxOutputTokens {
 				next.OmitMaxOutputTokens = true
 			}
@@ -491,6 +494,18 @@ func setupProviderFromCatalog(provider modelcatalog.Provider, apiKey string, aut
 		APIKeyEnv:   cfg.APIKeyEnv,
 		Auth:        authCfg,
 		Models:      entries,
+	}
+}
+
+func preserveReasoningReplayDomains(current []llm.ModelEntry, next []setupModelConfig) {
+	domains := make(map[string]string, len(current))
+	for _, model := range current {
+		if model.ReasoningReplayDomain != "" {
+			domains[model.Name] = model.ReasoningReplayDomain
+		}
+	}
+	for i := range next {
+		next[i].ReasoningReplayDomain = domains[next[i].Name]
 	}
 }
 

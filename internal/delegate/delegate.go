@@ -43,48 +43,50 @@ const (
 	continuationModeRetained   = "retained"
 	continuationModeCheckpoint = "compact_checkpoint"
 )
-const continuationFingerprintVersion = 3
+const continuationFingerprintVersion = 4
 
 var childSeq atomic.Uint64
 
 // Runtime is the parent agent state a delegate call needs to start a child.
 type Runtime struct {
-	Provider          llm.Provider
-	ProviderName      string
-	Model             string
-	ContextWindow     int
-	MaxOutputTokens   int
-	Registry          *llm.Registry
-	Reasoning         llm.ReasoningConfig
-	ServerTools       []llm.ServerTool
-	ResponsesStateful bool
-	System            string
-	Agent             string
-	ToolNames         []string
-	SessionPath       string
-	CacheAffinityID   string
-	ParentChildID     string
-	Depth             int
-	MaxPromptTokens   int
-	MaxPromptCostUSD  float64
-	Build             session.BuildMetadata
-	RuntimeProfile    session.RuntimeProfile
+	Provider              llm.Provider
+	ProviderName          string
+	Model                 string
+	ContextWindow         int
+	MaxOutputTokens       int
+	Registry              *llm.Registry
+	Reasoning             llm.ReasoningConfig
+	ReasoningReplayDomain string
+	ServerTools           []llm.ServerTool
+	ResponsesStateful     bool
+	System                string
+	Agent                 string
+	ToolNames             []string
+	SessionPath           string
+	CacheAffinityID       string
+	ParentChildID         string
+	Depth                 int
+	MaxPromptTokens       int
+	MaxPromptCostUSD      float64
+	Build                 session.BuildMetadata
+	RuntimeProfile        session.RuntimeProfile
 }
 
 // Launch is the fully resolved child-agent runtime for one delegate call.
 type Launch struct {
-	Provider          llm.Provider
-	ProviderName      string
-	Model             string
-	ContextWindow     int
-	MaxOutputTokens   int
-	Registry          *llm.Registry
-	Reasoning         llm.ReasoningConfig
-	ServerTools       []llm.ServerTool
-	ResponsesStateful bool
-	System            string
-	Agent             string
-	Tools             *tools.Registry
+	Provider              llm.Provider
+	ProviderName          string
+	Model                 string
+	ContextWindow         int
+	MaxOutputTokens       int
+	Registry              *llm.Registry
+	Reasoning             llm.ReasoningConfig
+	ReasoningReplayDomain string
+	ServerTools           []llm.ServerTool
+	ResponsesStateful     bool
+	System                string
+	Agent                 string
+	Tools                 *tools.Registry
 }
 
 // AgentCandidate is a configured agent that may be delegated to when its tools
@@ -626,6 +628,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		ContextWindow:             launch.ContextWindow,
 		Registry:                  launch.Registry,
 		Reasoning:                 launch.Reasoning,
+		ReasoningReplayDomain:     launch.ReasoningReplayDomain,
 		ServerTools:               launch.ServerTools,
 		ResponsesStateful:         launch.ResponsesStateful,
 		RetentionPolicy:           r.opts.RetentionPolicy,
@@ -1179,6 +1182,7 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		MaxPromptTokens        int                   `json:"max_prompt_tokens"`
 		MaxPromptCostUSD       float64               `json:"max_prompt_cost_usd"`
 		Reasoning              llm.ReasoningConfig   `json:"reasoning"`
+		ReasoningReplayDomain  string                `json:"reasoning_replay_domain"`
 		ServerTools            []llm.ServerTool      `json:"server_tools,omitempty"`
 		ResponsesStateful      bool                  `json:"responses_stateful"`
 		RetentionPolicy        agent.RetentionPolicy `json:"retention_policy"`
@@ -1210,6 +1214,7 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		MaxPromptTokens:        runtime.MaxPromptTokens,
 		MaxPromptCostUSD:       runtime.MaxPromptCostUSD,
 		Reasoning:              launch.Reasoning,
+		ReasoningReplayDomain:  launch.ReasoningReplayDomain,
 		ServerTools:            slices.Clone(launch.ServerTools),
 		ResponsesStateful:      launch.ResponsesStateful,
 		RetentionPolicy:        r.opts.RetentionPolicy,

@@ -115,6 +115,11 @@ const (
 type ContentBlock struct {
 	Kind BlockKind `json:"kind"`
 
+	// Provider-owned opaque reasoning replay. The domain records which configured
+	// model targets may receive this block again; it is harness metadata and is
+	// never forwarded upstream.
+	ReasoningReplayDomain string `json:"reasoning_replay_domain,omitempty"`
+
 	// BlockText
 	Text string `json:"text,omitempty"`
 

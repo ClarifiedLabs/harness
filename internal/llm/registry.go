@@ -150,6 +150,9 @@ type ModelEntry struct {
 	Reasoning                 *bool             `json:"reasoning,omitempty"`
 	ReasoningSummarySupported *bool             `json:"reasoning_summary_supported,omitempty"`
 	ReasoningOptions          []ReasoningOption `json:"reasoning_options,omitempty"`
+	// ReasoningReplayDomain is a provider-local compatibility label for opaque
+	// reasoning returned by this model. Empty gives the model its own domain.
+	ReasoningReplayDomain string `json:"reasoning_replay_domain,omitempty"`
 }
 
 // DefaultContextWindow is used for any model not in the registry — arbitrary

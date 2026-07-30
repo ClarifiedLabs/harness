@@ -671,6 +671,32 @@ compaction summaries and prewarm requests stay clean. With replay enabled, the
 dialect tags streamed `reasoning_content` for persistence (as thinking blocks
 with no signature); without it the text remains display-only.
 
+Opaque reasoning compatibility is configured separately, per model, with
+`reasoning_replay_domain`. Without that field, a model and its service-tier
+variants get one exact-target domain; switching to any other base model omits
+the old provider-owned reasoning from requests while retaining it in the saved
+transcript. Models from the same configured provider can opt into replay across
+model IDs by declaring the same provider-local label:
+
+```json
+{
+  "models": [
+    {"name": "k3-256k", "reasoning_replay_domain": "k3-family"},
+    {"name": "k3", "reasoning_replay_domain": "k3-family"}
+  ]
+}
+```
+
+The model proxy namespaces that label by provider, so matching text in two
+different provider configs never authorizes cross-provider replay. Prompt-cache
+affinity is independent: documentation that two models share a prompt cache
+does not by itself establish that their signed or encrypted reasoning payloads
+are interchangeable. If a provider nevertheless returns
+`invalid_encrypted_content`, harness disables opaque replay for that domain for
+the rest of the current agent session and retries the request once without those
+blocks.
+`setup` and `refresh-models` preserve hand-configured replay-domain labels.
+
 For the Anthropic dialect, `reasoning_replay:"current_turn"` drops thinking
 and redacted-thinking blocks from every assistant message older than the
 in-flight tool chain (the last real user turn forward keeps its thinking, as

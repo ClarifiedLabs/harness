@@ -112,7 +112,8 @@ func validateImageBlock(block ContentBlock) error {
 }
 
 func imageBlockHasForeignFields(block ContentBlock) bool {
-	return block.Text != "" ||
+	return block.ReasoningReplayDomain != "" ||
+		block.Text != "" ||
 		block.ToolUseID != "" ||
 		block.ToolName != "" ||
 		len(block.ToolInput) > 0 ||

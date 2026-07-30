@@ -83,22 +83,23 @@ type ModelUsage struct {
 }
 
 type Target struct {
-	ID                   string    `json:"id"`
-	Aliases              []string  `json:"aliases,omitempty"`
-	DisplayName          string    `json:"display_name,omitempty"`
-	ProviderLabel        string    `json:"provider_label,omitempty"`
-	ModelLabel           string    `json:"model_label,omitempty"`
-	ContextWindow        int       `json:"context_window,omitempty"`
-	OutputLimit          int       `json:"output_limit,omitempty"`
-	InputModalities      []string  `json:"input_modalities,omitempty"`
-	ServerTools          []string  `json:"server_tools,omitempty"`
-	BaseTargetID         string    `json:"base_target_id,omitempty"`
-	Variant              string    `json:"variant,omitempty"`
-	APIType              string    `json:"api_type,omitempty"`
-	ContinuationStateful bool      `json:"continuation_stateful,omitempty"`
-	Prewarm              bool      `json:"prewarm,omitempty"`
-	Price                llm.Price `json:"price,omitempty"`
-	Reasoning            bool      `json:"reasoning,omitempty"`
+	ID                    string    `json:"id"`
+	Aliases               []string  `json:"aliases,omitempty"`
+	DisplayName           string    `json:"display_name,omitempty"`
+	ProviderLabel         string    `json:"provider_label,omitempty"`
+	ModelLabel            string    `json:"model_label,omitempty"`
+	ContextWindow         int       `json:"context_window,omitempty"`
+	OutputLimit           int       `json:"output_limit,omitempty"`
+	InputModalities       []string  `json:"input_modalities,omitempty"`
+	ServerTools           []string  `json:"server_tools,omitempty"`
+	BaseTargetID          string    `json:"base_target_id,omitempty"`
+	Variant               string    `json:"variant,omitempty"`
+	APIType               string    `json:"api_type,omitempty"`
+	ContinuationStateful  bool      `json:"continuation_stateful,omitempty"`
+	Prewarm               bool      `json:"prewarm,omitempty"`
+	Price                 llm.Price `json:"price,omitempty"`
+	Reasoning             bool      `json:"reasoning,omitempty"`
+	ReasoningReplayDomain string    `json:"reasoning_replay_domain,omitempty"`
 }
 
 type StreamRequest struct {
