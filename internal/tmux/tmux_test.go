@@ -100,6 +100,31 @@ func TestSanitizeWindowName(t *testing.T) {
 	}
 }
 
+// The command deadline includes OS process startup and scheduling, not just
+// time spent waiting on the tmux server. Keep enough headroom that a busy host
+// does not kill a healthy invocation before it gets a chance to run.
+func TestClientCommandTimeoutHasSchedulingHeadroom(t *testing.T) {
+	t.Parallel()
+
+	before := time.Now()
+	client := Client{
+		Binary: "/tmux",
+		run: func(ctx context.Context, _ ...string) (string, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("tmux invocation context has no deadline")
+			}
+			if got := deadline.Sub(before); got < 5*time.Second {
+				t.Fatalf("tmux invocation deadline = %s, want at least 5s of scheduling headroom", got)
+			}
+			return "", nil
+		},
+	}
+	if _, err := client.output("display-message"); err != nil {
+		t.Fatalf("output: %v", err)
+	}
+}
+
 // TestViewerGoldenArgv asserts the exact tmux invocations for one open/close
 // cycle: detached insert-after window creation with -P id printing, -- before
 // the harness command, no -t on new-window, and explicit @id targets for the

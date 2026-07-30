@@ -25,8 +25,9 @@ const (
 	// does not override it. Config validation enforces the same default.
 	defaultMaxWindows = 4
 	// commandTimeout bounds every tmux CLI invocation so a wedged tmux server
-	// can never stall a delegate turn.
-	commandTimeout = 2 * time.Second
+	// can never stall a delegate turn. It also needs enough headroom for the
+	// subprocess to be scheduled on a busy host.
+	commandTimeout = 10 * time.Second
 	// maxWindowNameRunes caps the sanitized view name.
 	maxWindowNameRunes = 48
 )
