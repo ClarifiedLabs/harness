@@ -2044,9 +2044,10 @@ func decodedImageSize(data string) int {
 func (a *Agent) dispatchTool(ctx context.Context, call llm.ToolCall) llm.ToolResult {
 	if modality, ok := a.tools.RequiredModality(call); ok && !a.registry.SupportsInputModality(a.model, modality) {
 		return llm.ToolResult{
-			ForID:   call.ID,
-			Text:    fmt.Sprintf("tool %q requires %s input, but the current model does not advertise %s support", call.Name, modality, modality),
-			IsError: true,
+			ForID:     call.ID,
+			Text:      fmt.Sprintf("tool %q requires %s input, but the current model does not advertise %s support", call.Name, modality, modality),
+			IsError:   true,
+			ErrorKind: llm.ToolErrorUnsupportedModality,
 		}
 	}
 	return a.tools.Dispatch(ctx, call)
@@ -2064,6 +2065,7 @@ func acceptRichResult(r llm.ToolResult, encodedTotal *int, imageSupported bool) 
 		r.Text = "tool result includes images, but the current model does not advertise image support"
 		r.Content = nil
 		r.IsError = true
+		r.ErrorKind = llm.ToolErrorUnsupportedModality
 		r.Truncated = false
 		r.OriginalText = ""
 		r.OriginalBytes = 0
@@ -2075,6 +2077,7 @@ func acceptRichResult(r llm.ToolResult, encodedTotal *int, imageSupported bool) 
 		r.Text = "tool result images rejected: " + err.Error()
 		r.Content = nil
 		r.IsError = true
+		r.ErrorKind = llm.ToolErrorUnsupportedModality
 		r.Truncated = false
 		r.OriginalText = ""
 		r.OriginalBytes = 0
@@ -2161,7 +2164,7 @@ func (a *Agent) emitToolDiff(call llm.ToolCall, state toolDiffState, sink EventS
 
 func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink) llm.ToolResult {
 	if call.InvalidInputError != "" {
-		return llm.ToolResult{ForID: call.ID, Text: invalidToolInputResult(call), IsError: true}
+		return llm.ToolResult{ForID: call.ID, Text: invalidToolInputResult(call), IsError: true, ErrorKind: llm.ToolErrorInvalidArgs}
 	}
 	if a.isKimiWebSearchCall(call) {
 		text := strings.TrimSpace(string(call.Input))
@@ -2189,7 +2192,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 			if reason == "" {
 				reason = "blocked by PreToolUse hook"
 			}
-			return llm.ToolResult{ForID: call.ID, Text: reason, IsError: true}
+			return llm.ToolResult{ForID: call.ID, Text: reason, IsError: true, ErrorKind: llm.ToolErrorHookBlocked}
 		}
 	}
 
@@ -2220,6 +2223,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 			r.Text = reason
 			r.Content = nil
 			r.IsError = true
+			r.ErrorKind = llm.ToolErrorHookBlocked
 		}
 	}
 	return r

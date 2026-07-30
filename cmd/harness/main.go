@@ -1946,7 +1946,7 @@ func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stde
 
 func runSessionCommand(env environment, args []string) int {
 	if len(args) < 1 {
-		fmt.Fprintln(env.stderr, "usage: harness session <replay|timings|stats> <session-dir>")
+		fmt.Fprintln(env.stderr, "usage: harness session <replay|timings|stats|errors> <session-dir>")
 		return ui.ExitUsage
 	}
 	switch args[0] {
@@ -1972,9 +1972,11 @@ func runSessionCommand(env environment, args []string) int {
 			return ui.ExitRuntime
 		}
 		return ui.ExitOK
+	case "errors":
+		return runSessionErrors(env, args[1:])
 	default:
 		fmt.Fprintf(env.stderr, "harness: unknown session command %q\n", args[0])
-		fmt.Fprintln(env.stderr, "usage: harness session <replay|timings|stats> <session-dir>")
+		fmt.Fprintln(env.stderr, "usage: harness session <replay|timings|stats|errors> <session-dir>")
 		return ui.ExitUsage
 	}
 }

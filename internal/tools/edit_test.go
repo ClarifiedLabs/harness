@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"harness/internal/llm"
 )
 
 func runEdit(t *testing.T, args map[string]any) (string, error) {
@@ -487,6 +489,50 @@ func TestEditSnippet(t *testing.T) {
 		}
 		if !strings.HasSuffix(snip, "…") {
 			t.Errorf("trimmed snippet should end with an ellipsis:\n%s", snip)
+		}
+	})
+}
+
+// The edit failure kinds ride on a wrapper that must not change the
+// user/model-facing message text.
+func TestEditFailureKindsPreserveMessages(t *testing.T) {
+	t.Run("not found", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "f.txt")
+		mustWrite(t, p, "alpha\nbeta\ngamma\n")
+
+		_, err := runEdit(t, map[string]any{
+			"files": []any{editFileArg(p, map[string]any{"oldText": "zzzzz qqqqq", "newText": "x"})},
+		})
+		if err == nil {
+			t.Fatal("expected not-found error")
+		}
+		if got := KindOf(err); got != llm.ToolErrorEditOldTextNotFound {
+			t.Errorf("kind = %q, want %q", got, llm.ToolErrorEditOldTextNotFound)
+		}
+		want := fmt.Sprintf("could not find oldText in %s; oldText must match exactly including whitespace and newlines", p)
+		if err.Error() != want {
+			t.Errorf("message = %q, want exactly %q", err.Error(), want)
+		}
+	})
+
+	t.Run("ambiguous", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "f.txt")
+		mustWrite(t, p, "x x x\n")
+
+		_, err := runEdit(t, map[string]any{
+			"files": []any{editFileArg(p, map[string]any{"oldText": "x", "newText": "y"})},
+		})
+		if err == nil {
+			t.Fatal("expected ambiguous-match error")
+		}
+		if got := KindOf(err); got != llm.ToolErrorEditOldTextAmbiguous {
+			t.Errorf("kind = %q, want %q", got, llm.ToolErrorEditOldTextAmbiguous)
+		}
+		want := fmt.Sprintf("found 3 occurrences of oldText in %s; provide more context to make it unique", p)
+		if err.Error() != want {
+			t.Errorf("message = %q, want exactly %q", err.Error(), want)
 		}
 	})
 }

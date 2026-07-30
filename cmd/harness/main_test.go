@@ -2879,6 +2879,143 @@ func TestRunSessionStatsErrors(t *testing.T) {
 	})
 }
 
+func TestRunSessionErrors(t *testing.T) {
+	tmp := t.TempDir()
+	getenv := func(k string) string {
+		if k == "XDG_STATE_HOME" {
+			return tmp
+		}
+		return ""
+	}
+	sessionsRoot := filepath.Join(tmp, "harness", "sessions")
+	now := func() time.Time { return time.Date(2026, 7, 30, 13, 0, 0, 0, time.UTC) }
+	appendEvent := func(dir string, ev session.Event) {
+		t.Helper()
+		if err := session.AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	recentDir := filepath.Join(sessionsRoot, "20260730T120000Z")
+	if err := (session.Session{Agent: "code", Provider: "openai", Model: "gpt-x"}).Save(recentDir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	appendEvent(recentDir, session.Event{Type: session.EventToolResult, Prompt: 1, Turn: 1, Tool: "edit", ResultError: true,
+		ErrorKind: string(llm.ToolErrorEditOldTextNotFound), ErrorExcerpt: "could not find oldText in a.go…"})
+	appendEvent(recentDir, session.Event{Type: session.EventModelRequest, Prompt: 1, Turn: 2,
+		ModelRequest: &llm.ModelRequestEvent{State: llm.ModelRequestFailed, StatusCode: 429, Message: "slow down"}})
+
+	oldDir := filepath.Join(sessionsRoot, "20260720T120000Z")
+	if err := (session.Session{Agent: "explore", Provider: "anthropic", Model: "claude-x"}).Save(oldDir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	appendEvent(oldDir, session.Event{Type: session.EventToolResult, Prompt: 1, Turn: 1, Tool: "frobnicate", ResultError: true,
+		Display: `[frobnicate] → error: unknown tool "frobnicate"`})
+
+	t.Run("since limits the scan window", func(t *testing.T) {
+		var out, errw bytes.Buffer
+		code := run(environment{
+			args:   []string{"session", "errors", "--since", "24h"},
+			stdout: &out,
+			stderr: &errw,
+			getenv: getenv,
+			now:    now,
+		})
+		if code != ui.ExitOK {
+			t.Fatalf("exit = %d; stderr = %q", code, errw.String())
+		}
+		got := out.String()
+		if !strings.Contains(got, "Session errors: "+recentDir) {
+			t.Fatalf("missing recent session block:\n%s", got)
+		}
+		if strings.Contains(got, oldDir) {
+			t.Fatalf("old session must be outside the --since window:\n%s", got)
+		}
+		if !strings.Contains(got, "[code] [gpt-x] [p1 t1] [0%] edit: edit_oldtext_not_found — could not find oldText in a.go…") {
+			t.Fatalf("missing structured error row:\n%s", got)
+		}
+		if !strings.Contains(got, "[code] [gpt-x] [p1 t2] [0%] -: rate_limited — slow down") {
+			t.Fatalf("missing model request row:\n%s", got)
+		}
+		if !strings.Contains(got, "Scanned 1 sessions: 1 failed tool results, 1 model request failures") {
+			t.Fatalf("missing scan footer:\n%s", got)
+		}
+	})
+
+	t.Run("json scans all sessions", func(t *testing.T) {
+		var out, errw bytes.Buffer
+		code := run(environment{
+			args:   []string{"session", "errors", "--all", "--format", "json"},
+			stdout: &out,
+			stderr: &errw,
+			getenv: getenv,
+			now:    now,
+		})
+		if code != ui.ExitOK {
+			t.Fatalf("exit = %d; stderr = %q", code, errw.String())
+		}
+		var report struct {
+			SessionsScanned int `json:"sessions_scanned"`
+			Summary         struct {
+				FailedToolResults    int            `json:"failed_tool_results"`
+				ModelRequestFailures int            `json:"model_request_failures"`
+				ByKind               map[string]int `json:"by_kind"`
+			} `json:"summary"`
+			Rows []struct {
+				Session    string `json:"session"`
+				Tool       string `json:"tool"`
+				Kind       string `json:"kind"`
+				Confidence string `json:"confidence"`
+			} `json:"rows"`
+		}
+		if err := json.Unmarshal([]byte(out.String()), &report); err != nil {
+			t.Fatalf("json output does not decode: %v\n%s", err, out.String())
+		}
+		if report.SessionsScanned != 2 {
+			t.Errorf("sessions_scanned = %d, want 2", report.SessionsScanned)
+		}
+		if report.Summary.FailedToolResults != 2 || report.Summary.ModelRequestFailures != 1 {
+			t.Errorf("summary = %+v, want 2 tool + 1 model", report.Summary)
+		}
+		if report.Summary.ByKind["rate_limited"] != 1 || report.Summary.ByKind["unknown_tool"] != 1 || report.Summary.ByKind["edit_oldtext_not_found"] != 1 {
+			t.Errorf("by_kind = %v", report.Summary.ByKind)
+		}
+		if len(report.Rows) != 3 {
+			t.Fatalf("rows = %d, want 3", len(report.Rows))
+		}
+		var legacySession, legacyKind string
+		for _, row := range report.Rows {
+			if row.Tool == "frobnicate" {
+				legacySession, legacyKind = row.Session, row.Kind
+			}
+		}
+		if legacyKind != "unknown_tool" || legacySession != oldDir {
+			t.Errorf("legacy classified row = %q/%q, want unknown_tool from %s", legacyKind, legacySession, oldDir)
+		}
+	})
+
+	t.Run("filters apply to an explicit dir", func(t *testing.T) {
+		var out, errw bytes.Buffer
+		code := run(environment{
+			args:   []string{"session", "errors", "--kind", "rate_limited", recentDir},
+			stdout: &out,
+			stderr: &errw,
+			getenv: getenv,
+			now:    now,
+		})
+		if code != ui.ExitOK {
+			t.Fatalf("exit = %d; stderr = %q", code, errw.String())
+		}
+		got := out.String()
+		if !strings.Contains(got, "-: rate_limited") {
+			t.Fatalf("kind-filtered output should keep the model request row:\n%s", got)
+		}
+		if strings.Contains(got, "edit_oldtext_not_found") {
+			t.Fatalf("kind filter must drop the edit row:\n%s", got)
+		}
+	})
+}
+
 // TestRunSigintExitDuringPromptNoRace exercises the SIGINT-exit-while-a-turn-is-in-
 // flight path through run() with a non-nil injected signal channel. The first ^C
 // cancels the in-flight prompt and the second requests immediate process exit.

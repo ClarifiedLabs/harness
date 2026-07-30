@@ -174,6 +174,36 @@ type ToolCall struct {
 	InvalidInputError string
 }
 
+// ToolErrorKind is a stable, provider-neutral class for a failed tool result.
+// It is diagnostics-only metadata: never sent to providers or hooks.
+type ToolErrorKind string
+
+const (
+	ToolErrorUnknownTool          ToolErrorKind = "unknown_tool"
+	ToolErrorInvalidArgs          ToolErrorKind = "invalid_args"
+	ToolErrorTimeout              ToolErrorKind = "timeout"
+	ToolErrorPanic                ToolErrorKind = "panic"
+	ToolErrorPathNotFound         ToolErrorKind = "path_not_found"
+	ToolErrorEditOldTextNotFound  ToolErrorKind = "edit_oldtext_not_found"
+	ToolErrorEditOldTextAmbiguous ToolErrorKind = "edit_oldtext_ambiguous"
+	ToolErrorHookBlocked          ToolErrorKind = "hook_blocked"
+	ToolErrorUnsupportedModality  ToolErrorKind = "unsupported_modality"
+	ToolErrorInvalidResult        ToolErrorKind = "invalid_result"
+
+	// Kinds assigned only by the offline analysis layer (text classification
+	// of legacy logs and model_request failure mapping); producers never set
+	// them at dispatch time.
+	ToolErrorRegexInvalid          ToolErrorKind = "regex_invalid"
+	ToolErrorRateLimited           ToolErrorKind = "rate_limited"
+	ToolErrorProviderOverloaded    ToolErrorKind = "provider_overloaded"
+	ToolErrorProviderInternalError ToolErrorKind = "provider_internal_error"
+	ToolErrorProviderAuth          ToolErrorKind = "provider_auth"
+	ToolErrorProviderRequest       ToolErrorKind = "provider_request"
+	ToolErrorProvider5xx           ToolErrorKind = "provider_5xx"
+	ToolErrorProviderError         ToolErrorKind = "provider_error"
+	ToolErrorOther                 ToolErrorKind = "other"
+)
+
 // ToolResult is a flat view that becomes a BlockToolResult, carried from the
 // tool layer back into the agent loop. When IsError is true, Text contains only
 // the explanation: UI and provider adapters add any required error marker.
@@ -190,4 +220,8 @@ type ToolResult struct {
 	// Metrics is diagnostics-only tool telemetry and is never copied into a
 	// model-visible ContentBlock.
 	Metrics map[string]int
+	// ErrorKind is the diagnostics-only structured class of a failed result
+	// (empty = unclassified; the analysis layer text-classifies). Like Metrics
+	// it is never copied into a model-visible ContentBlock.
+	ErrorKind ToolErrorKind
 }

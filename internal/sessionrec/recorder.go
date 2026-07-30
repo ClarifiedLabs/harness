@@ -265,6 +265,10 @@ func (r *Recorder) ToolResult(res llm.ToolResult) {
 	if !pending.started.IsZero() {
 		durationMS = r.now().Sub(pending.started).Milliseconds()
 	}
+	var errorExcerpt string
+	if res.IsError {
+		errorExcerpt = session.ErrorExcerpt(res.Text)
+	}
 	r.Append(session.Event{
 		Type:                session.EventToolResult,
 		Prompt:              r.cfg.Prompt,
@@ -274,6 +278,8 @@ func (r *Recorder) ToolResult(res llm.ToolResult) {
 		Display:             ToolResultLine(pending.call, res),
 		DurationMS:          durationMS,
 		ResultError:         res.IsError,
+		ErrorKind:           string(res.ErrorKind),
+		ErrorExcerpt:        errorExcerpt,
 		ResultTruncated:     res.Truncated,
 		ResultOriginalBytes: originalBytes,
 		ResultShownBytes:    shownBytes,

@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"harness/internal/llm"
 )
 
 const editSchema = `{
@@ -473,7 +475,7 @@ func editNotFoundError(path, content, oldText string, editIndex, totalEdits int)
 	if n, text, ok := nearestSimilarLine(content, oldText); ok {
 		msg += fmt.Sprintf("; nearest similar line is L%d: %s", n, text)
 	}
-	return fmt.Errorf("%s", msg)
+	return WithKind(fmt.Errorf("%s", msg), llm.ToolErrorEditOldTextNotFound)
 }
 
 // nearestEditHintMaxLineLen skips candidate lines longer than this when scoring
@@ -577,9 +579,9 @@ func diceCoefficient(a, b map[string]int) float64 {
 
 func editDuplicateError(path string, editIndex, totalEdits, occurrences int) error {
 	if totalEdits == 1 {
-		return fmt.Errorf("found %d occurrences of oldText in %s; provide more context to make it unique", occurrences, path)
+		return WithKind(fmt.Errorf("found %d occurrences of oldText in %s; provide more context to make it unique", occurrences, path), llm.ToolErrorEditOldTextAmbiguous)
 	}
-	return fmt.Errorf("found %d occurrences of edits[%d].oldText in %s; each oldText must be unique", occurrences, editIndex, path)
+	return WithKind(fmt.Errorf("found %d occurrences of edits[%d].oldText in %s; each oldText must be unique", occurrences, editIndex, path), llm.ToolErrorEditOldTextAmbiguous)
 }
 
 // editSnippetContextLines is how many lines of context are shown above and below

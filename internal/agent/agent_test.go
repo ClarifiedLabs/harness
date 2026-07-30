@@ -1157,6 +1157,34 @@ func TestPreToolUseHookBlocksToolAndPreservesTranscript(t *testing.T) {
 	}
 }
 
+func TestPreToolUseHookBlockStampsErrorKind(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "call_1", "writer", `{"path":"x"}`)},
+			Stop:   llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{name: "writer", run: func(_ context.Context, _ json.RawMessage) (string, error) {
+		return "should not run", nil
+	}})
+	runner := testHookRunner(t, `{"PreToolUse":[{"hooks":[{"type":"command","command":"printf '{\"decision\":\"block\",\"reason\":\"no writes\"}'"}]}]}`)
+	a := newAgent(fp, reg, Options{Hooks: runner})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	mustValid(t, a.Transcript())
+	if len(sink.results) != 1 || !sink.results[0].IsError {
+		t.Fatalf("hook-blocked result = %+v", sink.results)
+	}
+	if got := sink.results[0].ErrorKind; got != llm.ToolErrorHookBlocked {
+		t.Fatalf("ErrorKind = %q, want %q", got, llm.ToolErrorHookBlocked)
+	}
+}
+
 func TestPostToolUseHookReplacesToolResult(t *testing.T) {
 	fp := llmtest.New("fake",
 		llmtest.Step{

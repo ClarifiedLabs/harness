@@ -45,6 +45,7 @@ type statsReport struct {
 	delegateModelCalls  int
 	directMaintCalls    int
 	delegateMaintCalls  int
+	errors              ErrorSummary
 }
 
 type collectedSessionStats struct {
@@ -225,6 +226,11 @@ func collectStats(dir string) (statsReport, error) {
 		report.directMaintCalls += child.stats.maintenanceCalls
 		report.delegateMaintCalls += child.stats.maintenanceCalls
 	}
+	errorRows, err := CollectErrors(dir, ErrorFilter{})
+	if err != nil {
+		return statsReport{}, err
+	}
+	report.errors = SummarizeErrors(errorRows)
 	return report, nil
 }
 
@@ -976,6 +982,7 @@ func writeStats(report statsReport, w io.Writer) error {
 	writeTreeStats(&b, report.root.tree)
 	writeActiveContextStats(&b, report.root)
 	writeOverallToolStats(&b, report)
+	writeErrorStats(&b, report)
 	writeRootUsage(&b, report.root.state)
 	writeDirectUsage(&b, report)
 	writeOverallCompactions(&b, report)
@@ -1227,6 +1234,60 @@ func writeOverallToolStats(w io.Writer, report statsReport) {
 	writeSplitValue(w, "  ", "parallel batches", all.parallel.batches, root.parallel.batches, delegates.parallel.batches)
 	writeSplitValue(w, "  ", "parallel calls", all.parallel.calls, root.parallel.calls, delegates.parallel.calls)
 	fmt.Fprintf(w, "  largest parallel batch: %d (root %d, delegates %d)\n", all.parallel.largest, root.parallel.largest, delegates.parallel.largest)
+}
+
+// writeErrorStats prints the Errors section: classified tool and model
+// failures across root and delegate sessions. It is omitted entirely when
+// nothing failed, keeping clean sessions quiet.
+func writeErrorStats(w io.Writer, report statsReport) {
+	summary := report.errors
+	if summary.FailedToolResults == 0 && summary.ModelRequestFailures == 0 {
+		return
+	}
+	fmt.Fprintln(w, "Errors")
+	fmt.Fprintf(w, "  failed tool results: %d\n", summary.FailedToolResults)
+	if summary.ModelRequestFailures > 0 {
+		fmt.Fprintf(w, "  model request failures: %d\n", summary.ModelRequestFailures)
+	}
+	if len(summary.ByTool) > 0 {
+		fmt.Fprintf(w, "  by tool: %s\n", formatErrorCounts(summary.ByTool))
+	}
+	if len(summary.ByKind) > 0 {
+		fmt.Fprintf(w, "  by kind: %s\n", formatErrorCounts(summary.ByKind))
+	}
+	if len(summary.ByModel) > 0 {
+		fmt.Fprintf(w, "  by model: %s\n", formatErrorCounts(summary.ByModel))
+	}
+	if len(summary.Repeats) > 0 {
+		fmt.Fprintln(w, "  repeated failures:")
+		for _, repeat := range summary.Repeats {
+			tool := repeat.Tool
+			if tool == "" {
+				tool = "-"
+			}
+			fmt.Fprintf(w, "    %s: %s (%d consecutive)\n", tool, repeat.Kind, repeat.Consecutive)
+		}
+	}
+}
+
+// formatErrorCounts renders a count map as "name (n), ...", highest counts
+// first with alphabetical tie-breaks for deterministic output.
+func formatErrorCounts(counts map[string]int) string {
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if counts[keys[i]] != counts[keys[j]] {
+			return counts[keys[i]] > counts[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	parts := make([]string, len(keys))
+	for i, key := range keys {
+		parts[i] = fmt.Sprintf("%s (%d)", key, counts[key])
+	}
+	return strings.Join(parts, ", ")
 }
 
 type repeatedToolCall struct {

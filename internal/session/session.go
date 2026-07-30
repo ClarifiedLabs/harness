@@ -608,26 +608,62 @@ type Event struct {
 	Tool    string    `json:"tool,omitempty"`
 	// Path is the mutated file for tool_diff events. Replay uses it to detect
 	// the language for diff colorizing.
-	Path                string                  `json:"path,omitempty"`
-	Input               json.RawMessage         `json:"input,omitempty"`
-	Images              []ImageInfo             `json:"images,omitempty"`
-	Usage               *llm.Usage              `json:"usage,omitempty"`
-	Purpose             string                  `json:"purpose,omitempty"`
-	FromEntryID         string                  `json:"from_entry_id,omitempty"`
-	ToEntryID           string                  `json:"to_entry_id,omitempty"`
-	Summary             string                  `json:"summary,omitempty"`
-	Context             *ContextSnapshot        `json:"context,omitempty"`
-	Retention           *RetentionSnapshot      `json:"retention,omitempty"`
-	IdleCompaction      *IdleCompactionSnapshot `json:"idle_compaction,omitempty"`
-	ModelRequest        *llm.ModelRequestEvent  `json:"model_request,omitempty"`
-	TerminationReason   string                  `json:"termination_reason,omitempty"`
-	DurationMS          int64                   `json:"duration_ms,omitempty"`
-	MessageCount        int                     `json:"message_count,omitempty"`
-	ResultError         bool                    `json:"result_error,omitempty"`
-	ResultTruncated     bool                    `json:"result_truncated,omitempty"`
-	ResultOriginalBytes int                     `json:"result_original_bytes,omitempty"`
-	ResultShownBytes    int                     `json:"result_shown_bytes,omitempty"`
-	ResultMetrics       map[string]int          `json:"result_metrics,omitempty"`
+	Path              string                  `json:"path,omitempty"`
+	Input             json.RawMessage         `json:"input,omitempty"`
+	Images            []ImageInfo             `json:"images,omitempty"`
+	Usage             *llm.Usage              `json:"usage,omitempty"`
+	Purpose           string                  `json:"purpose,omitempty"`
+	FromEntryID       string                  `json:"from_entry_id,omitempty"`
+	ToEntryID         string                  `json:"to_entry_id,omitempty"`
+	Summary           string                  `json:"summary,omitempty"`
+	Context           *ContextSnapshot        `json:"context,omitempty"`
+	Retention         *RetentionSnapshot      `json:"retention,omitempty"`
+	IdleCompaction    *IdleCompactionSnapshot `json:"idle_compaction,omitempty"`
+	ModelRequest      *llm.ModelRequestEvent  `json:"model_request,omitempty"`
+	TerminationReason string                  `json:"termination_reason,omitempty"`
+	DurationMS        int64                   `json:"duration_ms,omitempty"`
+	MessageCount      int                     `json:"message_count,omitempty"`
+	ResultError       bool                    `json:"result_error,omitempty"`
+	// ErrorKind is the structured diagnostics-only class of a failed tool
+	// result (llm.ToolErrorKind). It is empty on legacy logs, where the
+	// analysis layer text-classifies instead.
+	ErrorKind string `json:"error_kind,omitempty"`
+	// ErrorExcerpt is the bounded, rune-safe excerpt of the failed result
+	// text (see ErrorExcerpt); stored so analysis never needs tree.ndjson.
+	ErrorExcerpt        string         `json:"error_excerpt,omitempty"`
+	ResultTruncated     bool           `json:"result_truncated,omitempty"`
+	ResultOriginalBytes int            `json:"result_original_bytes,omitempty"`
+	ResultShownBytes    int            `json:"result_shown_bytes,omitempty"`
+	ResultMetrics       map[string]int `json:"result_metrics,omitempty"`
+}
+
+const (
+	// errorExcerptMaxLines and errorExcerptMaxRunes bound the stored
+	// ErrorExcerpt of a failed tool result.
+	errorExcerptMaxLines = 2
+	errorExcerptMaxRunes = 240
+)
+
+// ErrorExcerpt is the rune-safe stored excerpt of a failed tool result: the
+// first errorExcerptMaxLines lines and at most errorExcerptMaxRunes runes,
+// with an ellipsis appended when either bound cut content. Unlike the
+// display-layer byte clip in sessionrec, this never splits a multi-byte rune,
+// so persisted excerpts stay valid UTF-8.
+func ErrorExcerpt(text string) string {
+	lines := strings.Split(text, "\n")
+	truncated := len(lines) > errorExcerptMaxLines
+	if truncated {
+		lines = lines[:errorExcerptMaxLines]
+	}
+	excerpt := strings.Join(lines, "\n")
+	if runes := []rune(excerpt); len(runes) > errorExcerptMaxRunes {
+		excerpt = string(runes[:errorExcerptMaxRunes])
+		truncated = true
+	}
+	if truncated {
+		excerpt += "…"
+	}
+	return excerpt
 }
 
 // ContextSnapshot is the session-log copy of agent.ContextEstimate. It lives in

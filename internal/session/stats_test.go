@@ -721,6 +721,64 @@ func TestWriteUsageValuesShowsOneHourCacheWrites(t *testing.T) {
 	}
 }
 
+func TestStatsErrorsSection(t *testing.T) {
+	t.Run("classified failures render and legacy rows classify", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "session")
+		events := []Event{
+			{Type: EventToolResult, Prompt: 1, Turn: 1, Tool: "edit", ResultError: true,
+				ErrorKind: string(llm.ToolErrorEditOldTextNotFound), ErrorExcerpt: "could not find oldText in a.go…"},
+			{Type: EventToolResult, Prompt: 1, Turn: 2, Tool: "frobnicate", ResultError: true,
+				Display: `[frobnicate] → error: unknown tool "frobnicate"`},
+			{Type: EventToolResult, Prompt: 1, Turn: 3, Tool: "read_file", ResultError: true,
+				Display: `[read_file path=/missing] → error: stat /missing: no such file or directory`},
+			{Type: EventToolResult, Prompt: 1, Turn: 4, Tool: "read_file", ResultError: true,
+				Display: `[read_file path=/missing] → error: stat /missing: no such file or directory`},
+			{Type: EventToolResult, Prompt: 1, Turn: 5, Tool: "read_file", ResultError: true,
+				Display: `[read_file path=/missing] → error: stat /missing: no such file or directory`},
+			{Type: EventModelRequest, Prompt: 1, Turn: 6, ModelRequest: &llm.ModelRequestEvent{
+				State: llm.ModelRequestFailed, StatusCode: 500, Message: "boom",
+			}},
+		}
+		saveStatsFixture(t, dir, Session{Provider: "anthropic", Model: "claude-test", Agent: "code"}, events)
+
+		var buf bytes.Buffer
+		if err := Stats(dir, &buf); err != nil {
+			t.Fatalf("Stats: %v", err)
+		}
+		out := buf.String()
+		assertOrdered(t, out, "Tools", "\nErrors\n")
+		for _, want := range []string{
+			"failed tool results: 5",
+			"model request failures: 1",
+			"by tool: read_file (3), edit (1), frobnicate (1)",
+			"by kind: path_not_found (3), edit_oldtext_not_found (1), provider_5xx (1), unknown_tool (1)",
+			"by model: claude-test (6)",
+			"repeated failures:",
+			"read_file: path_not_found (3 consecutive)",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("stats output missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("section omitted without failures", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "session")
+		saveStatsFixture(t, dir, Session{Provider: "anthropic", Model: "claude-test"}, []Event{
+			{Type: EventUser, Prompt: 1, Text: "hi"},
+			{Type: EventToolResult, Prompt: 1, Turn: 1, Tool: "glob", Display: "[glob] → 2 lines, 10 B"},
+		})
+
+		var buf bytes.Buffer
+		if err := Stats(dir, &buf); err != nil {
+			t.Fatalf("Stats: %v", err)
+		}
+		if strings.Contains(buf.String(), "\nErrors\n") {
+			t.Fatalf("Errors section must be omitted when nothing failed:\n%s", buf.String())
+		}
+	})
+}
+
 func saveStatsFixture(t *testing.T, dir string, state Session, events []Event) {
 	t.Helper()
 	if err := state.Save(dir); err != nil {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"harness/internal/agent"
 	"harness/internal/llm"
@@ -82,6 +83,70 @@ func TestRecorderMirrorMatchesRawNdjson(t *testing.T) {
 	}
 	if deltas != 1 {
 		t.Fatalf("mirrored deltas = %d, want one coalesced event", deltas)
+	}
+}
+
+func TestRecorderToolResultErrorFields(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 1})
+	rec.ToolStart(llm.ToolCall{ID: "c1", Name: "edit"})
+	rec.ToolResult(llm.ToolResult{ForID: "c1", Text: "line1\nline2\nline3", IsError: true, ErrorKind: llm.ToolErrorEditOldTextNotFound})
+	rec.ToolStart(llm.ToolCall{ID: "c2", Name: "read_file"})
+	// Multi-byte runes: the stored excerpt must never split one.
+	rec.ToolResult(llm.ToolResult{ForID: "c2", Text: strings.Repeat("é", 300), IsError: true, ErrorKind: llm.ToolErrorPathNotFound})
+	rec.ToolStart(llm.ToolCall{ID: "c3", Name: "glob"})
+	rec.ToolResult(llm.ToolResult{ForID: "c3", Text: "ok"})
+	rec.Flush()
+	if err := rec.Err(); err != nil {
+		t.Fatalf("Err = %v, want nil", err)
+	}
+
+	events := readEvents(t, dir)
+	var results []session.Event
+	for _, ev := range events {
+		if ev.Type == session.EventToolResult {
+			results = append(results, ev)
+		}
+	}
+	if len(results) != 3 {
+		t.Fatalf("tool_result events = %d, want 3", len(results))
+	}
+
+	if !results[0].ResultError {
+		t.Fatalf("results[0].ResultError = false, want true")
+	}
+	if got := results[0].ErrorKind; got != string(llm.ToolErrorEditOldTextNotFound) {
+		t.Errorf("results[0].ErrorKind = %q, want %q", got, llm.ToolErrorEditOldTextNotFound)
+	}
+	if want := "line1\nline2…"; results[0].ErrorExcerpt != want {
+		t.Errorf("results[0].ErrorExcerpt = %q, want %q (2-line cap, ellipsized)", results[0].ErrorExcerpt, want)
+	}
+
+	excerpt := results[1].ErrorExcerpt
+	if !strings.HasSuffix(excerpt, "…") {
+		t.Errorf("results[1].ErrorExcerpt should end with an ellipsis: %q", excerpt)
+	}
+	if got := len([]rune(excerpt)); got != 241 {
+		t.Errorf("results[1].ErrorExcerpt = %d runes, want 240 + ellipsis", got)
+	}
+	if !utf8.ValidString(excerpt) {
+		t.Errorf("excerpt not valid UTF-8: %q", excerpt)
+	}
+
+	if results[2].ResultError || results[2].ErrorKind != "" || results[2].ErrorExcerpt != "" {
+		t.Errorf("successful result must carry no error fields: %+v", results[2])
+	}
+
+	// Pin the wire names so downstream tooling can rely on them.
+	raw, err := os.ReadFile(filepath.Join(dir, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	if !strings.Contains(string(raw), `"error_kind":"edit_oldtext_not_found"`) {
+		t.Errorf("raw.ndjson missing error_kind field:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), `"error_excerpt":"line1\nline2…"`) {
+		t.Errorf("raw.ndjson missing error_excerpt field:\n%s", raw)
 	}
 }
 

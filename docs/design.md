@@ -1607,6 +1607,24 @@ when wrapped. Type errors are translated into JSON terminology (for example,
 struct/type details. Tool-specific semantic validation continues to use concise
 `badArgs` messages under the same `invalid arguments: ` prefix.
 
+Every `is_error` result also carries a diagnostics-only `ErrorKind`
+(`llm.ToolErrorKind`) that, like `Metrics`, never enters model-visible content.
+The dispatch/agent layers stamp `unknown_tool`, `invalid_args`, `timeout`,
+`panic`, `hook_blocked`, `unsupported_modality`, and `invalid_result` directly;
+a tool declares one by wrapping its error with `tools.WithKind` (used for
+`edit_oldtext_not_found` / `edit_oldtext_ambiguous`), which leaves the error
+message unchanged. An outer cancellation stays deliberately unclassified. The
+session recorder persists the kind plus a bounded, rune-safe `error_excerpt`
+(2 lines / 240 runes) on failed `tool_result` events. Offline analysis
+(`harness session stats`, `harness session errors`) uses the stored kind when
+present and otherwise classifies legacy logs from the recorded display line,
+additionally producing `path_not_found`, `regex_invalid`, and `other`; failed
+`model_request` events are mapped from their structured status/code to
+`rate_limited`, `provider_overloaded`, `provider_internal_error`,
+`provider_auth`, `provider_request`, `provider_5xx`, or `provider_error`.
+`run_command` non-zero exits stay in-band results, not tool errors (§9.7–9.8),
+so they never get a kind.
+
 **Per-tool dispatch timeout backstop (`-tool-timeout`, default 600s, `<=0`
 disables).** `Dispatch` runs each tool under a derived `context.WithTimeout` so a
 hung tool that ignores cancellation cannot stall a turn; on expiry it returns the
@@ -3276,7 +3294,11 @@ type UsageTotals struct {
   closed-turn records to expose save overhead and lag. `branch` records
   navigation source/target IDs in chronological replay. Tool-result events may
   carry diagnostics-only integer `result_metrics` supplied by the tool; those
-  values are never copied into transcript blocks. `skill_activation` records
+  values are never copied into transcript blocks. Failed tool-result events
+  additionally carry the structured `error_kind` and a bounded, rune-safe
+  `error_excerpt` (2 lines / 240 runes) consumed by the stats Errors section
+  and `harness session errors`; legacy logs without them are text-classified
+  from the recorded display line. `skill_activation` records
   only activation source and status, not instruction contents.
 - Sessions store the CLI-owned previous response/interaction ID, anchored message
   count, and transcript fingerprint in `state.json`. Resume restores it only
@@ -3409,6 +3431,15 @@ type UsageTotals struct {
   or skill paths. Compaction metadata uses the writer's canonical field shape;
   the stats reader accepts unknown additive fields while still rejecting
   malformed JSON and trailing values.
+- `harness session errors [dir]` lists classified failures — failed tool
+  results and failed model requests — for one session (root plus delegate
+  children), or scans recent sessions under the default sessions root when no
+  directory is given (`--since <dur>`, default `24h`; `--all` disables the
+  window). `--tool`, `--kind`, `--model`, and `--agent` filter rows, and
+  `--format json` emits scope, per-session row, and aggregate summary data.
+  The stats report renders the same collector's aggregate as its Errors
+  section, including repeat loops (the same tool and kind failing at least
+  three times consecutively).
 - Transcripts are provider-neutral; resuming under a different provider/model works.
   When flags disagree with the state, flags win with a warning. Tool-result messages
   may include local-only `parallel_tool_batches` metadata; provider adapters ignore it.

@@ -1384,6 +1384,7 @@ Inspect saved sessions with:
 harness session replay [-f|--follow] [-q|--quiet] ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
 harness session stats ~/.local/state/harness/sessions/20260611T123456Z
+harness session errors [--tool T] [--kind K] [--model M] [--agent A] [--since D|--all] [--format text|json] [dir]
 ```
 
 `session replay --follow` first renders the existing complete `raw.ndjson`
@@ -1430,7 +1431,24 @@ events are present, conversation statistics also report closed-turn checkpoint
 count, average/maximum save duration, and lag in completed turns and seconds.
 Retention activity is reported as epoch count, pressure-versus-age passes,
 blocks/bytes trimmed, Responses-state resets, and whether the following request
-used stateful continuation or full context.
+used stateful continuation or full context. When failures occurred, an `Errors`
+section follows the tool report: failed tool-result and model-request counts,
+per-tool/kind/model breakdowns, and repeat loops (the same tool and kind
+failing at least three times consecutively).
+
+`session errors` lists the classified failures behind that section: every
+failed tool result and failed model request in one session (root plus delegate
+children), one row per failure with agent, model, prompt/turn, context
+percentage, tool, error kind, and a bounded excerpt. With an explicit session
+directory it analyzes that session; without one it scans sessions under the
+default sessions root created within `--since` (a duration, default `24h`;
+`--all` disables the window) and prints per-session blocks plus an overall
+footer. `--tool`, `--kind`, `--model`, and `--agent` keep only matching rows,
+and `--format json` emits the scope, summary, and rows as JSON. Error kinds
+come from the structured `error_kind` field on new logs (with a `high`
+confidence marker) and from text classification of the recorded display line
+on legacy logs; see the design document's tool failure handling section for
+the kind vocabulary.
 
 ### Session diagnostics
 
@@ -1442,7 +1460,9 @@ upstream attempt, scheduled retries, terminal failures, cancellation, and
 retention epochs. Retention records include the trigger, reclaimed blocks/bytes,
 context estimates, continuation reset, and next-request shape; they never enter
 model context. Tool-result records may carry aggregate integer `result_metrics`,
-and skill activation records carry only source and status; neither includes
+and failed results carry a structured `error_kind` plus a bounded, rune-safe
+`error_excerpt` (2 lines / 240 runes) for error analysis; skill activation records
+carry only source and status; neither includes
 skill bodies or adds model-visible content.
 
 Model-request lifecycle records carry parsed provider messages, timing, and

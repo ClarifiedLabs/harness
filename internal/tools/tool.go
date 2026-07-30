@@ -738,6 +738,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 	if !ok {
 		res.Text = fmt.Sprintf("unknown tool %q", call.Name)
 		res.IsError = true
+		res.ErrorKind = llm.ToolErrorUnknownTool
 		return res
 	}
 
@@ -778,7 +779,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		defer func() {
 			if rec := recover(); rec != nil {
 				log.Printf("tool %q panicked: %v", call.Name, rec)
-				done <- outcome{err: fmt.Errorf("tool panicked: %v", rec)}
+				done <- outcome{err: WithKind(fmt.Errorf("tool panicked: %v", rec), llm.ToolErrorPanic)}
 			}
 		}()
 		if rich, ok := t.(RichTool); ok {
@@ -814,11 +815,13 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		// lands in the buffered channel and is dropped. The abandoned Run may
 		// still mutate external state (write files, leave a subprocess running)
 		// after we return, so built-in long-running tools are expected to honor
-		// ctx and apply their own user-configurable timeouts.
+		// ctx and apply their own user-configurable timeouts. An outer
+		// cancellation is deliberately left unclassified (no ErrorKind).
 		if parent.Err() != nil {
 			res.Text = parent.Err().Error()
 		} else if timeout > 0 {
 			res.Text = fmt.Sprintf("tool timed out after %s", timeout)
+			res.ErrorKind = llm.ToolErrorTimeout
 		} else {
 			res.Text = ctx.Err().Error()
 		}
@@ -837,10 +840,13 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		// timeout with the wrong duration (spec §6).
 		if timeout > 0 && ctx.Err() == context.DeadlineExceeded && parent.Err() == nil {
 			res.Text = fmt.Sprintf("tool timed out after %s", timeout)
+			res.ErrorKind = llm.ToolErrorTimeout
 		} else if detail, invalid := invalidArgumentsDetail(err); invalid {
 			res.Text = "invalid arguments: " + detail
+			res.ErrorKind = llm.ToolErrorInvalidArgs
 		} else {
 			res.Text = err.Error()
+			res.ErrorKind = KindOf(err)
 		}
 		res.IsError = true
 		return res
@@ -849,6 +855,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 	if err := llm.ValidateToolResultContent(content, false); err != nil {
 		res.Text = "invalid rich tool result: " + err.Error()
 		res.IsError = true
+		res.ErrorKind = llm.ToolErrorInvalidResult
 		return res
 	}
 	prepared := r.PrepareResultWithOriginal(call.Name, call.ID, out, original)
