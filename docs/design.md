@@ -1985,7 +1985,11 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   a different edit still raises the overlap error.
 - Duplicate file entries are rejected; combine a file's replacements in one
   `files[]` entry.
-- 0 occurrences → error naming the missing `oldText`.
+- 0 occurrences → error naming the missing `oldText`: it quotes the first
+  non-empty `oldText` line, appends a nearest-region hint (up to 3 numbered
+  lines centered on the most similar content line, with the similarity score),
+  and tells the model to re-read the file and re-issue with exact `oldText` (or
+  use write_file when the intent is to append or create).
 - N>1 occurrences → error asking for more context to make `oldText` unique.
 - Overlapping replacements in one file → error asking the model to merge or
   retarget the edits.

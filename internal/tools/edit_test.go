@@ -365,7 +365,8 @@ func TestEditReplaceAllDefaultsOff(t *testing.T) {
 }
 
 // r35: a near-miss oldText (not caught by fuzzy normalization) gets a
-// nearest-similar-line hint so the model can recover without a re-read.
+// nearest-region hint quoting the searched text so the model can recover
+// without a re-read.
 func TestEditNotFoundIncludesNearestLineHint(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.go")
@@ -380,11 +381,23 @@ func TestEditNotFoundIncludesNearestLineHint(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected not-found error")
 	}
-	if !strings.Contains(err.Error(), "nearest similar line is L3:") {
-		t.Errorf("expected nearest-line hint pointing to L3: %v", err)
+	if KindOf(err) != llm.ToolErrorEditOldTextNotFound {
+		t.Errorf("error kind = %q, want %q", KindOf(err), llm.ToolErrorEditOldTextNotFound)
+	}
+	if !strings.Contains(err.Error(), `searched for "func calcTotal(items []int) int {"`) {
+		t.Errorf("error should quote the searched-for line: %v", err)
+	}
+	if !strings.Contains(err.Error(), "nearest region (similarity") || !strings.Contains(err.Error(), "at L3:") {
+		t.Errorf("expected nearest-region hint pointing to L3: %v", err)
 	}
 	if !strings.Contains(err.Error(), "calculateTotal") {
 		t.Errorf("hint should echo the similar line: %v", err)
+	}
+	if !strings.Contains(err.Error(), "3\tfunc calculateTotal(items []int) int {") || !strings.Contains(err.Error(), "4\t\treturn 0") {
+		t.Errorf("hint should render numbered region lines: %v", err)
+	}
+	if !strings.Contains(err.Error(), "re-read the file") || !strings.Contains(err.Error(), "write_file") {
+		t.Errorf("error should state the corrective action: %v", err)
 	}
 }
 
@@ -400,14 +413,14 @@ func TestEditNotFoundNoHintWhenDissimilar(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected not-found error")
 	}
-	if strings.Contains(err.Error(), "nearest similar line") {
+	if strings.Contains(err.Error(), "nearest region") {
 		t.Errorf("dissimilar oldText should not produce a hint: %v", err)
 	}
 }
 
 func TestNearestSimilarLine(t *testing.T) {
 	content := "import os\nimport sys\n\ndef compute_average(values):\n    return sum(values) / len(values)\n"
-	n, text, ok := nearestSimilarLine(content, "def compute_avg(values):")
+	n, text, score, ok := nearestSimilarLine(content, "def compute_avg(values):")
 	if !ok {
 		t.Fatal("expected a nearest line")
 	}
@@ -417,8 +430,11 @@ func TestNearestSimilarLine(t *testing.T) {
 	if !strings.Contains(text, "compute_average") {
 		t.Errorf("nearest line text = %q", text)
 	}
+	if score < nearestEditHintMinScore {
+		t.Errorf("score = %f, want >= %f", score, nearestEditHintMinScore)
+	}
 
-	if _, _, ok := nearestSimilarLine(content, "wholly unrelated xyzzy"); ok {
+	if _, _, _, ok := nearestSimilarLine(content, "wholly unrelated xyzzy"); ok {
 		t.Error("unrelated needle should not match any line")
 	}
 }
@@ -510,7 +526,7 @@ func TestEditFailureKindsPreserveMessages(t *testing.T) {
 		if got := KindOf(err); got != llm.ToolErrorEditOldTextNotFound {
 			t.Errorf("kind = %q, want %q", got, llm.ToolErrorEditOldTextNotFound)
 		}
-		want := fmt.Sprintf("could not find oldText in %s; oldText must match exactly including whitespace and newlines", p)
+		want := fmt.Sprintf("could not find oldText in %s; oldText must match exactly including whitespace and newlines; searched for %q; re-read the file, then re-issue with exact oldText; if the intent is to append or create, use write_file instead", p, "zzzzz qqqqq")
 		if err.Error() != want {
 			t.Errorf("message = %q, want exactly %q", err.Error(), want)
 		}

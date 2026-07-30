@@ -472,10 +472,35 @@ func editNotFoundError(path, content, oldText string, editIndex, totalEdits int)
 	} else {
 		msg = fmt.Sprintf("could not find edits[%d].oldText in %s; oldText must match exactly including whitespace and newlines", editIndex, path)
 	}
-	if n, text, ok := nearestSimilarLine(content, oldText); ok {
-		msg += fmt.Sprintf("; nearest similar line is L%d: %s", n, text)
+	if needle := firstNonEmptyLine(oldText); needle != "" {
+		msg += fmt.Sprintf("; searched for %q", truncateHintText(needle))
 	}
+	if hint := nearestRegionHint(content, oldText); hint != "" {
+		msg += "; " + hint
+	}
+	msg += "; re-read the file, then re-issue with exact oldText; if the intent is to append or create, use write_file instead"
 	return WithKind(fmt.Errorf("%s", msg), llm.ToolErrorEditOldTextNotFound)
+}
+
+// nearestRegionHint renders up to 3 numbered lines centered on the content line
+// most similar to oldText's first non-empty line, so the model can retarget the
+// edit without a full re-read. Line numbers match read_file's numbering (the
+// content is LF-normalized, which preserves line count). Returns "" when no
+// line is similar enough to be useful.
+func nearestRegionHint(content, oldText string) string {
+	lineNo, _, score, ok := nearestSimilarLine(content, oldText)
+	if !ok {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	start := max(lineNo-editSnippetContextLines, 1)
+	end := min(lineNo+editSnippetContextLines, len(lines))
+	var b strings.Builder
+	fmt.Fprintf(&b, "nearest region (similarity %.2f) at L%d:", score, lineNo)
+	for n := start; n <= end; n++ {
+		fmt.Fprintf(&b, "\n%d\t%s", n, truncateHintText(strings.TrimRightFunc(lines[n-1], unicode.IsSpace)))
+	}
+	return b.String()
 }
 
 // nearestEditHintMaxLineLen skips candidate lines longer than this when scoring
@@ -496,14 +521,14 @@ const nearestEditHintMinScore = 0.34
 // of forcing a re-read. Similarity is character-bigram Dice (stdlib only); the
 // returned line number is 1-based and aligns with read_file's numbering because
 // content is LF-normalized (line count preserved).
-func nearestSimilarLine(content, oldText string) (lineNo int, text string, ok bool) {
+func nearestSimilarLine(content, oldText string) (lineNo int, text string, score float64, ok bool) {
 	needle := firstNonEmptyLine(oldText)
 	if needle == "" || content == "" {
-		return 0, "", false
+		return 0, "", 0, false
 	}
 	needleBigrams := charBigrams(strings.ToLower(needle))
 	if len(needleBigrams) == 0 {
-		return 0, "", false
+		return 0, "", 0, false
 	}
 
 	lines := strings.Split(content, "\n")
@@ -521,9 +546,9 @@ func nearestSimilarLine(content, oldText string) (lineNo int, text string, ok bo
 		}
 	}
 	if bestIdx < 0 || bestScore < nearestEditHintMinScore {
-		return 0, "", false
+		return 0, "", 0, false
 	}
-	return bestIdx + 1, truncateHintText(strings.TrimSpace(lines[bestIdx])), true
+	return bestIdx + 1, truncateHintText(strings.TrimSpace(lines[bestIdx])), bestScore, true
 }
 
 func firstNonEmptyLine(s string) string {
