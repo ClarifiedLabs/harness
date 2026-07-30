@@ -3137,19 +3137,45 @@ output belongs in hook context.
 - Exit codes: `0` completed, `1` runtime error, `2` usage error, `130` interrupted.
 - Runs exactly one prompt interaction, saves the session, exits.
 
-#### JSON run stream (`-p -format json`, `internal/runstream`)
+#### JSON run stream (`-format json`, `internal/runstream`)
 
-`-format json` turns one-shot stdout into a versioned NDJSON run stream
+`-format json` turns run stdout into a versioned NDJSON stream
 (`run_start.v`, currently `1`): line 1 is a `run_start` envelope, the last
 line is a `run_end` envelope (`exit_code` mirrors the process exit code), and
-the prompt is bracketed by `prompt_start`/`prompt_end` (`prompt_end` carries
+each prompt is bracketed by `prompt_start`/`prompt_end` (`prompt_end` carries
 `exit_code`, `termination_reason`, a usage summary, and `final_text` — the
 last assistant text message, extracted the way delegate child reports do).
 Between the envelopes the stream carries the session's own `session.Event`
 objects, mirrored post-coalescing, so stdout and `raw.ndjson` can never
 diverge (§11). The human renderer's stdout path is muted by discarding the
-output coordinator's stdout; stderr behavior is unchanged. `-format json`
-without `-p` is a usage error (exit 2): the TTY REPL has no JSON mode.
+output coordinator's stdout; stderr behavior is unchanged. `internal/runstream`
+owns the whole public schema in both directions — event envelopes plus the
+NDJSON input decoder — with doc comments stating the consumer/producer rules;
+stdout-only envelopes are never persisted.
+
+Two run modes share the stream:
+
+- **One-shot** (`-p -format json`, `run_start` `"mode":"oneshot"`): exactly
+  one prompt; `-format json` without `-p` and TTY stdin is a usage error
+  (exit 2), as is `-i` with `-format json`.
+- **Interactive** (`-format json`, no `-p`, piped stdin, `"mode":"interactive"`):
+  `ui.RunJSON` (`internal/ui/jsonrun.go`, package `ui`) is an alternative
+  front end for the REPL's `App` machinery. A decoder goroutine feeds a
+  driver state machine (idle / prompt-running / approval-pending); each
+  prompt mirrors the REPL's sequence — optional agent/model switch,
+  prompt-submit hooks, `beginPrompt`, `newREPLSink` with the recorder mirror
+  set, `Agent.RunPromptContentWithContext` on a goroutine with a driver-owned
+  ctx+cancel, `FlushEvents`, `prompt_end`, save, boundary work (background
+  notices, MCP refresh, pending-handoff check). In-band control replaces
+  keystrokes: a bare `prompt` message mid-run steers like Enter-during-prompt
+  (late steers are recovered as the next prompt), `interrupt` is the in-band
+  ^C, `shutdown` cancels and exits 0, and stdin EOF drains the active/queued
+  prompts before exiting so pipe-shaped clients work. Handoff approval uses
+  the protocol (`approval_request`/`approval_response`) with the same
+  post-approval helper the TTY `/handoff` flow calls. TTY-coupled behaviors
+  (goals, slash commands, idle compaction, pickers, history) stay off: main
+  wires the mode through an explicit `machineInteractive` predicate, and bad
+  input lines surface as `input_error` events without killing the session.
 
 ## 11. Session persistence (`internal/session`)
 

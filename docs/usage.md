@@ -110,8 +110,62 @@ unchanged; `-q`, `-v`, and `-tool-stream` remain stderr-only.
 
 The stream protocol is versioned (`run_start.v`, currently `1`). Consumers
 must ignore unknown event types and must handle EOF without `run_end`
-(process crash). `-format json` without `-p` is a usage error (exit 2): the
-TTY REPL has no JSON mode.
+(process crash).
+
+#### Interactive JSON session (piped stdin, no `-p`)
+
+`harness -format json` with no `-p` and **piped stdin** runs a full
+interactive session driven by NDJSON messages on stdin, with the same event
+stream on stdout (`run_start` reports `"mode":"interactive"`). This is the
+embedding surface for apps driving harness as a subprocess: stdin is the
+control channel, stdout the event channel, stderr stays human diagnostics.
+The simplest client is one line:
+
+```sh
+printf '%s\n' '{"type":"prompt","text":"explain this repo"}' | harness -model openai:gpt-5.5 -format json
+```
+
+With TTY stdin, `-format json` without `-p` is a usage error (exit 2) — the
+TTY REPL has no JSON mode; `-i` is likewise rejected. A resolvable model is
+required (`-model` or a configured default): the startup model/reasoning
+pickers do not run without a TTY.
+
+Input messages — one JSON object per line, max 16 MiB per line, unknown keys
+ignored:
+
+| `type` | Fields | Semantics |
+|---|---|---|
+| `prompt` | `text` (required, or `images`), `id?`, `agent?`, `model?`, `images?` `[{path, detail?}]` | Run a prompt. Sent while a prompt runs, a bare prompt **steers** into the running prompt (injected before the next model request, like Enter-during-prompt in the TTY REPL); a steer that races prompt completion is recovered and runs as the next prompt. With `agent`/`model`/`images` the message queues instead of steering, then the switch happens before that prompt starts (unknown agent/model → `input_error`, nothing runs). `id` is echoed in `prompt_start`/`prompt_end` for correlation. |
+| `interrupt` | — | Cancel the active prompt (the in-band ^C): `prompt_end` with `termination_reason:"cancelled"`, and the session keeps accepting input. No-op when idle. |
+| `approval_response` | `id`, `approve` (both required) | Answer a pending `approval_request`. Unknown id → `input_error` and the pending request survives. |
+| `shutdown` | — | Cancel any active prompt, save the session, emit `run_end`, exit 0. |
+
+Stdin EOF is a graceful **drain**, not a cancel: the active prompt and any
+queued prompts finish, then harness saves the session, emits `run_end`, and
+exits 0.
+
+Malformed JSON, an unknown `type`, missing required fields, or a `prompt`
+sent while an approval is pending produce an
+`{"type":"input_error","id?":…,"message":…}` event and the session keeps
+running — bad input never kills it.
+
+Additional output events beyond the one-shot vocabulary:
+
+| `type` | Fields | When |
+|---|---|---|
+| `prompt_start` | `prompt` (server-assigned number), `id?`, `text`, `agent`, `model`, `has_images` | Before each prompt |
+| `approval_request` | `id`, `kind:"implementation_handoff"`, `brief`, `plan_path`, `agent`, `model` | The model's `request_implementation` tool recorded a handoff; the driver waits for the matching `approval_response` (the input reader stays live, so `interrupt`/`shutdown` still work) |
+| `input_error` | `id?`, `message` | Rejected input line |
+
+Session events between `prompt_start`/`prompt_end` carry the server-assigned
+`prompt` number. Approving a handoff performs the same agent switch the TTY
+`/handoff` flow does and starts the implementation agent on the recorded
+plan (its prompt appears as a normal `prompt_start`); declining prints
+`[handoff cancelled]` on stderr. Slash commands, session goals, idle
+compaction, history, and interactive pickers are not part of the JSON mode —
+agent and model switching are `prompt` fields, and a client that needs a
+picker's data can use `--models --format json` / `--agents --format json`
+and send an explicit switch.
 
 ## Flags
 
@@ -176,7 +230,7 @@ TTY REPL has no JSON mode.
 -no-timestamps   alias for -timestamps=none
 -repl-prompt <text>    REPL input prompt format (default "[{agent}] > "; supports placeholders such as {agent}, {model}, and {reasoning})
 -repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
---format <text|json>  output format for informational commands and one-shot (-p) run output (default text)
+--format <text|json>  output format: text or json (informational commands; with -p: NDJSON run events; without -p and piped stdin: interactive NDJSON session) (default text)
 --show-config    dump the resolved config, including defaults, as JSON and exit
 --debug-request  dump the first provider-neutral model request as JSON and exit without calling the model
 --agents         list configured agents and exit

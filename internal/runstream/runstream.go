@@ -28,11 +28,17 @@ const Version = 1
 // keep their raw.ndjson type names ("user", "assistant_delta", "tool_start",
 // ...), which never collide with these envelope names.
 const (
-	TypeRunStart    = "run_start"
-	TypeRunEnd      = "run_end"
-	TypePromptStart = "prompt_start"
-	TypePromptEnd   = "prompt_end"
+	TypeRunStart        = "run_start"
+	TypeRunEnd          = "run_end"
+	TypePromptStart     = "prompt_start"
+	TypePromptEnd       = "prompt_end"
+	TypeApprovalRequest = "approval_request"
+	TypeInputError      = "input_error"
 )
+
+// ApprovalKindImplementationHandoff marks an approval_request asking whether
+// to execute a request_implementation tool handoff.
+const ApprovalKindImplementationHandoff = "implementation_handoff"
 
 // Run modes published as run_start.mode.
 const (
@@ -63,11 +69,17 @@ type RunEnd struct {
 	Time              time.Time `json:"time"`
 }
 
-// PromptStart opens a prompt. ID echoes the client-supplied prompt id
-// (interactive mode) for correlation; it is empty in one-shot mode.
+// PromptStart opens a prompt. Prompt is the server-assigned prompt number
+// (interactive mode); ID echoes the client-supplied prompt id for
+// correlation. Text/Agent/Model describe the accepted prompt in interactive
+// mode; one-shot leaves them to run_start and the user event.
 type PromptStart struct {
 	Type      string    `json:"type"`
+	Prompt    int       `json:"prompt,omitempty"`
 	ID        string    `json:"id,omitempty"`
+	Text      string    `json:"text,omitempty"`
+	Agent     string    `json:"agent,omitempty"`
+	Model     string    `json:"model,omitempty"`
 	HasImages bool      `json:"has_images,omitempty"`
 	Time      time.Time `json:"time"`
 }
@@ -86,13 +98,38 @@ type PromptEndUsage struct {
 // text message (the delegate child-report extraction pattern).
 type PromptEnd struct {
 	Type              string         `json:"type"`
+	Prompt            int            `json:"prompt,omitempty"`
 	ID                string         `json:"id,omitempty"`
 	ExitCode          int            `json:"exit_code"`
 	TerminationReason string         `json:"termination_reason,omitempty"`
 	Error             string         `json:"error,omitempty"`
 	Usage             PromptEndUsage `json:"usage"`
 	FinalText         string         `json:"final_text"`
+	DurationMS        int64          `json:"duration_ms,omitempty"`
 	Time              time.Time      `json:"time"`
+}
+
+// ApprovalRequest asks the client to approve or deny a pending action. The
+// client answers with an approval_response input message carrying the same
+// ID; the prompt boundary waits (interrupt/shutdown still work).
+type ApprovalRequest struct {
+	Type     string    `json:"type"`
+	ID       string    `json:"id"`
+	Kind     string    `json:"kind"`
+	Brief    string    `json:"brief"`
+	PlanPath string    `json:"plan_path"`
+	Agent    string    `json:"agent,omitempty"`
+	Model    string    `json:"model,omitempty"`
+	Time     time.Time `json:"time"`
+}
+
+// InputError reports one rejected input line or message; the session keeps
+// running. ID echoes the offending message's id when it had one.
+type InputError struct {
+	Type    string    `json:"type"`
+	ID      string    `json:"id,omitempty"`
+	Message string    `json:"message"`
+	Time    time.Time `json:"time"`
 }
 
 // Writer serializes envelopes and mirrored session events as NDJSON on
@@ -112,7 +149,7 @@ type Writer struct {
 	closed     bool
 	lastPrompt PromptEnd
 
-	errMu   sync.Mutex // guards writeErr
+	errMu    sync.Mutex // guards writeErr
 	writeErr error
 }
 
@@ -189,10 +226,15 @@ func (w *Writer) Mirror(ev session.Event) {
 	w.send(ev)
 }
 
-// PromptStart emits the prompt_start envelope. id echoes the client-supplied
-// prompt id (interactive mode); it is empty in one-shot mode.
-func (w *Writer) PromptStart(id string, hasImages bool) {
-	w.send(PromptStart{Type: TypePromptStart, ID: id, HasImages: hasImages, Time: time.Now()})
+// PromptStart emits the prompt_start envelope.
+func (w *Writer) PromptStart(start PromptStart) {
+	if start.Type == "" {
+		start.Type = TypePromptStart
+	}
+	if start.Time.IsZero() {
+		start.Time = time.Now()
+	}
+	w.send(start)
 }
 
 // PromptEnd emits the prompt_end envelope and remembers it so Close can
@@ -208,6 +250,23 @@ func (w *Writer) PromptEnd(end PromptEnd) {
 		end.Time = time.Now()
 	}
 	w.send(end)
+}
+
+// RequestApproval emits an approval_request envelope for a pending action.
+func (w *Writer) RequestApproval(req ApprovalRequest) {
+	if req.Type == "" {
+		req.Type = TypeApprovalRequest
+	}
+	if req.Time.IsZero() {
+		req.Time = time.Now()
+	}
+	w.send(req)
+}
+
+// InputError reports one rejected input line or message; the session keeps
+// running.
+func (w *Writer) InputError(id, message string) {
+	w.send(InputError{Type: TypeInputError, ID: id, Message: message, Time: time.Now()})
 }
 
 // Close emits the run_end envelope, closes the queue, and waits for the

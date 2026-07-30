@@ -280,9 +280,6 @@ func run(env environment) int {
 		case !env.stdinPiped:
 			fmt.Fprintln(stderr, "harness: -format json without -p: nothing to read JSON messages from; use -p or pipe stdin")
 			return ui.ExitUsage
-		default:
-			fmt.Fprintln(stderr, "harness: -format json interactive sessions are not available in this build; use -p for one-shot JSON output")
-			return ui.ExitUsage
 		}
 	}
 	// The JSON run modes give stdout exclusively to the NDJSON event stream:
@@ -291,7 +288,7 @@ func run(env environment) int {
 	// coordinator stdout. stderr is unchanged. The run stream itself writes to
 	// the raw stdout handle.
 	rawStdout := stdout
-	jsonRunMode := cfg.OutputFormat == "json" && cfg.PromptSet
+	jsonRunMode := cfg.OutputFormat == "json" && (cfg.PromptSet || env.stdinPiped)
 	coordinatorOut := stdout
 	if jsonRunMode {
 		coordinatorOut = io.Discard
@@ -398,12 +395,17 @@ func run(env environment) int {
 	}
 
 	interactiveSession := !cfg.PromptSet && !env.stdinPiped
+	// machineInteractive: an embedding app drives the session with NDJSON
+	// messages on piped stdin (design §10 interactive JSON mode). It shares
+	// the interactive-only tool/steer wiring but not TTY-coupled behaviors
+	// (goal auto-continue loop, startup pickers, prewarm, idle compaction).
+	machineInteractive := cfg.OutputFormat == "json" && env.stdinPiped && !cfg.PromptSet
 	agents, err := resolveConfiguredAgents(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
 	}
-	if interactiveSession {
+	if interactiveSession || machineInteractive {
 		enableInteractiveAutoHandoff(agents)
 	}
 	agentName := cfg.Agent
@@ -725,7 +727,7 @@ func run(env environment) int {
 	planStore := plan.NewStore()
 	handoffPending := plan.NewPending()
 	toolCatalog.Register(plan.NewTool(planStore, func() string { return delegateState.Snapshot().SessionPath }))
-	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, planStore, interactiveSession, agentdef.Names(agents)))
+	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, planStore, interactiveSession || machineInteractive, agentdef.Names(agents)))
 	// Goals are a root-session, REPL-only feature. The tools are registered in the
 	// catalog so agents can opt in by name, but they refuse to run outside an
 	// interactive session.
@@ -1286,9 +1288,9 @@ func run(env environment) int {
 
 	// Mid-prompt steering: route input submitted during a running prompt into the
 	// agent as the next turn's input (design §8.1). Disabled
-	// by -no-steer, and only wired for the interactive REPL — one-shot mode has
-	// no during-prompt input.
-	if !cfg.NoSteer && interactiveSession {
+	// by -no-steer, and only wired for interactive sessions — one-shot mode has
+	// no during-prompt input. Interactive JSON sessions steer via prompt messages.
+	if !cfg.NoSteer && (interactiveSession || machineInteractive) {
 		steerAgent := ag
 		app.Steer = func(input agent.SteerInput) { steerAgent.SteerContent(input) }
 		app.DrainSteer = func() agent.SteerInput { return steerAgent.DrainSteerContent() }
@@ -1337,6 +1339,33 @@ func run(env environment) int {
 		if stream != nil {
 			stream.Close(runstream.RunEnd{ExitCode: code})
 		}
+		return code
+	}
+
+	// Interactive JSON mode: NDJSON input messages on piped stdin drive the
+	// session (design §10); the JSON run stream owns stdout.
+	if machineInteractive {
+		stream := runstream.NewWriter(rawStdout, runstream.RunStart{
+			Mode:      runstream.ModeInteractive,
+			SessionID: filepath.Base(sessionPath),
+			Agent:     agentName,
+			Provider:  cfg.Provider,
+			Model:     registryModel,
+			Time:      now(),
+		}, stderr)
+		app.RunStream = stream
+		fmt.Fprintf(stderr, "session: %s\n", sessionPath)
+		fmt.Fprintln(stderr, ui.ProviderLine(cfg.Provider, cfg.Model, registryModel, reasoning, modelRegistry))
+		if resumed != nil {
+			ui.PrintResumeRecap(app, resumed)
+		}
+		code := ui.RunJSON(stdin, app)
+		select {
+		case <-exitCh:
+			code = ui.ExitInterrupt
+		default:
+		}
+		stream.Close(runstream.RunEnd{ExitCode: code})
 		return code
 	}
 

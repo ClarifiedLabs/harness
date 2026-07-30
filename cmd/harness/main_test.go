@@ -408,29 +408,64 @@ func TestRunFormatJSONWithoutPromptRequiresPipedStdin(t *testing.T) {
 	}
 }
 
-func TestRunFormatJSONPipedStdinWithoutPromptRejected(t *testing.T) {
-	dir := t.TempDir()
-	getenv := func(k string) string {
-		if k == "HOME" {
-			return dir
-		}
-		return ""
-	}
-	var out, errw bytes.Buffer
-	code := run(environment{
-		args:       []string{"-format", "json"},
-		stdin:      strings.NewReader(""),
-		stdout:     &out,
-		stderr:     &errw,
-		getenv:     getenv,
-		stdinPiped: true,
-		sigCh:      nil,
+func TestRunInteractiveJSONSession(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "42"}},
+		Stop:   llm.StopEndTurn,
+		Usage:  llm.Usage{InputTokens: 5, OutputTokens: 1},
 	})
-	if code != ui.ExitUsage {
-		t.Fatalf("exit code = %d, want %d; errw=%q", code, ui.ExitUsage, errw.String())
+	env, out, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-format", "json"}, fp, "")
+	env.stdinPiped = true
+	env.stdin = strings.NewReader("{\"type\":\"prompt\",\"id\":\"p1\",\"text\":\"what is the answer\"}\n")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0 (stdin EOF == shutdown); errw=%q", code, errw.String())
 	}
-	if !strings.Contains(errw.String(), "interactive sessions are not available") {
-		t.Fatalf("stderr = %q, want the interactive-mode guidance", errw.String())
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	var types []string
+	var start, promptStart, promptEnd, runEnd map[string]any
+	for i, line := range lines {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("stdout line %d is not JSON (%q): %v\nfull stdout:\n%s", i, line, err, out.String())
+		}
+		typ, _ := m["type"].(string)
+		types = append(types, typ)
+		switch typ {
+		case "run_start":
+			start = m
+		case "prompt_start":
+			promptStart = m
+		case "prompt_end":
+			promptEnd = m
+		case "run_end":
+			runEnd = m
+		}
+	}
+	if start["mode"] != "interactive" {
+		t.Fatalf("run_start mode = %v, want interactive", start["mode"])
+	}
+	if types[1] != "prompt_start" {
+		t.Fatalf("second line = %q, want prompt_start; types=%v", types[1], types)
+	}
+	if promptStart["id"] != "p1" || promptStart["text"] != "what is the answer" || promptStart["prompt"] != float64(1) {
+		t.Fatalf("prompt_start = %v", promptStart)
+	}
+	if promptStart["agent"] == nil || promptStart["model"] == nil {
+		t.Fatalf("prompt_start should echo agent/model: %v", promptStart)
+	}
+	if types[2] != "user" {
+		t.Fatalf("third line = %q, want the mirrored user event; types=%v", types[2], types)
+	}
+	if promptEnd["id"] != "p1" || promptEnd["final_text"] != "42" || promptEnd["exit_code"] != float64(0) {
+		t.Fatalf("prompt_end = %v", promptEnd)
+	}
+	if runEnd["exit_code"] != float64(0) {
+		t.Fatalf("run_end = %v", runEnd)
+	}
+	if !strings.Contains(errw.String(), "session:") {
+		t.Errorf("session path should be printed on stderr, errw=%q", errw.String())
 	}
 }
 

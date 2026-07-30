@@ -1173,7 +1173,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.noTimestamps = fs.Bool("no-timestamps", false, "disable bracketed status timestamps")
 	f.replPrompt = fs.String("repl-prompt", replprompt.DefaultFormat, "REPL input prompt format (supports {agent}, {model}, {reasoning})")
 	f.replEditMode = fs.String("repl-edit-mode", DefaultReplEditMode, "REPL prompt edit mode: emacs or vi")
-	f.outputFormat = fs.String("format", "text", "output format for informational commands and one-shot (-p) run output: text or json")
+	f.outputFormat = fs.String("format", "text", "output format: text or json (informational commands; with -p: NDJSON run events; without -p and piped stdin: interactive NDJSON session)")
 	f.showConfig = fs.Bool("show-config", false, "dump resolved config including defaults and exit")
 	f.debugRequest = fs.Bool("debug-request", false, "dump the first provider-neutral model request as JSON and exit without calling the model")
 	f.showAgents = fs.Bool("agents", false, "list configured agents and exit")

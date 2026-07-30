@@ -3583,20 +3583,20 @@ func splitHandoffCommandToken(s string) (token, rest string) {
 	return s, ""
 }
 
-// handoffCommand handles /handoff [-a agent] [-m model] [message]: hand off to
-// an implementation agent to carry out the most recently recorded plan, after
-// interactive approval. It consumes any request the request_implementation tool
-// recorded, applies manual overrides and guidance, fills in the brief, and
-// switches with a clean, plan-seeded context.
-func (app *App) handoffCommand(arg string, readLine func(string) (string, error)) bool {
+// prepareHandoff assembles a handoff request from any pending
+// request_implementation tool request plus the given /handoff options: it
+// fills in the plan path, generates the brief when needed, and resolves the
+// target agent. Failures are reported on app.Errw. handoffCommand (TTY
+// approval) and the JSON run driver (protocol approval) share it.
+func (app *App) prepareHandoff(arg string) (plan.HandoffRequest, bool) {
 	if app.SwitchAgent == nil {
 		fmt.Fprintln(app.Errw, "[handoff unavailable]")
-		return false
+		return plan.HandoffRequest{}, false
 	}
 	opts, err := parseHandoffCommandOptions(arg)
 	if err != nil {
 		fmt.Fprintf(app.Errw, "[handoff: %v; usage: %s]\n", err, handoffCommandUsage)
-		return false
+		return plan.HandoffRequest{}, false
 	}
 	var req plan.HandoffRequest
 	if app.Handoff != nil {
@@ -3620,7 +3620,7 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 	}
 	if req.PlanPath == "" {
 		fmt.Fprintln(app.Errw, "[handoff: no recorded plan; record one with record_plan first]")
-		return false
+		return plan.HandoffRequest{}, false
 	}
 	req.Brief = strings.TrimSpace(req.Brief)
 	if req.Brief == "" {
@@ -3636,16 +3636,10 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 		}
 		if err != nil {
 			fmt.Fprintf(app.Errw, "[handoff: could not generate brief: %v]\n", err)
-			return false
+			return plan.HandoffRequest{}, false
 		}
 		req.Brief = strings.TrimSpace(brief)
 	}
-	displayBrief := req.Brief
-	if app.Renderer != nil {
-		displayBrief = app.Renderer.FormatMarkdown(displayBrief)
-	}
-	fmt.Fprintf(app.Errw, "Handoff brief:\n%s\n", displayBrief)
-
 	target := req.Agent
 	if target == "" {
 		target = app.HandoffAgent
@@ -3654,8 +3648,26 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 		target = "auto"
 	}
 	req.Agent = target
+	return req, true
+}
 
-	approval := fmt.Sprintf("Hand off to %q", target)
+// handoffCommand handles /handoff [-a agent] [-m model] [message]: hand off to
+// an implementation agent to carry out the most recently recorded plan, after
+// interactive approval. It consumes any request the request_implementation tool
+// recorded, applies manual overrides and guidance, fills in the brief, and
+// switches with a clean, plan-seeded context.
+func (app *App) handoffCommand(arg string, readLine func(string) (string, error)) bool {
+	req, ok := app.prepareHandoff(arg)
+	if !ok {
+		return false
+	}
+	displayBrief := req.Brief
+	if app.Renderer != nil {
+		displayBrief = app.Renderer.FormatMarkdown(displayBrief)
+	}
+	fmt.Fprintf(app.Errw, "Handoff brief:\n%s\n", displayBrief)
+
+	approval := fmt.Sprintf("Hand off to %q", req.Agent)
 	if req.Model != "" {
 		approval += fmt.Sprintf(" using model %q", req.Model)
 	}
@@ -3746,6 +3758,9 @@ func (app *App) refreshMCP(ctx context.Context) error {
 	app.Agent.ResetProxySessionID()
 	if notice != "" {
 		fmt.Fprintln(app.Errw, notice)
+		if app.RunStream != nil {
+			app.RunStream.Mirror(session.Event{Type: session.EventNotice, Text: notice, Time: app.clock()()})
+		}
 	}
 	return nil
 }
@@ -4425,6 +4440,9 @@ func (app *App) pollBackgroundNotices() {
 			app.Renderer.Notice(notice)
 		} else {
 			fmt.Fprintln(app.Errw, notice)
+		}
+		if app.RunStream != nil {
+			app.RunStream.Mirror(session.Event{Type: session.EventNotice, Text: notice, Time: app.clock()()})
 		}
 	}
 }

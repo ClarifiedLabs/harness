@@ -88,7 +88,7 @@ func TestWriterEmitsVersionedRunStartFirst(t *testing.T) {
 func TestWriterMirrorsSessionEventsVerbatim(t *testing.T) {
 	var out lockedBuffer
 	w := NewWriter(&out, RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"}, nil)
-	w.PromptStart("", false)
+	w.PromptStart(PromptStart{})
 	w.Mirror(session.Event{Type: session.EventUser, Prompt: 1, Text: "do it"})
 	w.Mirror(session.Event{Type: session.EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 1, Text: "hello world"})
 	w.PromptEnd(PromptEnd{ExitCode: 0, TerminationReason: "model_completed", FinalText: "hello world"})

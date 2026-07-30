@@ -59,7 +59,7 @@ func OneShot(app *App, prompt string) int {
 	images := app.takePendingImages()
 	images = app.attachPromptImageReferences(prompt, images, pendingUnsupportedNotice)
 	if app.RunStream != nil {
-		app.RunStream.PromptStart("", len(images) > 0)
+		app.RunStream.PromptStart(runstream.PromptStart{HasImages: len(images) > 0})
 	}
 	promptID := app.beginPrompt(prompt, images)
 
