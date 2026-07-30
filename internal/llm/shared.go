@@ -3,6 +3,9 @@ package llm
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
+
+	"harness/internal/retry"
 )
 
 // ErrorResultPrefix marks a failed tool result. OpenAI Chat Completions tool
@@ -34,10 +37,13 @@ func ImageDataURL(b ContentBlock) string {
 // dialects (Chat Completions and Responses).
 func RetryableErrorCode(code string) bool {
 	switch code {
-	case "server_error", "rate_limit_exceeded", "rate_limit_error":
+	case "server_error", "api_error", "overloaded_error", "provider_overloaded",
+		"provider_unavailable", "timeout", "server", "unavailable",
+		"rate_limit_exceeded", "rate_limit_error":
 		return true
 	}
-	return false
+	status, err := strconv.Atoi(code)
+	return err == nil && retry.RetryableStatus(status)
 }
 
 // ParseErrorResponseByType maps a non-2xx HTTP response onto an *APIError whose
@@ -45,7 +51,10 @@ func RetryableErrorCode(code string) bool {
 // Anthropic dialects; the Responses dialect prefers the envelope's code field
 // and keeps its own wrapper.
 func ParseErrorResponseByType(resp *http.Response) *APIError {
-	apiErr, errType, _ := ParseErrorResponse(resp)
+	apiErr, errType, errCode := ParseErrorResponse(resp)
 	apiErr.Code = errType
+	if apiErr.Code == "" {
+		apiErr.Code = errCode
+	}
 	return apiErr
 }

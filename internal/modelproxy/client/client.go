@@ -270,6 +270,7 @@ func modelRequestEventFromClientError(err error, state llm.ModelRequestState) ll
 		event.StatusCode = apiErr.StatusCode
 		event.Code = apiErr.Code
 		event.Message = apiErr.Message
+		event.ResponsePayload = apiErr.ResponsePayload
 		event.Retryable = apiErr.Retryable
 		event.RetryAfterMS = apiErr.RetryAfter.Milliseconds()
 		if apiErr.Diagnostic != nil {
@@ -346,5 +347,9 @@ func readHTTPError(resp *http.Response) error {
 	if msg == "" {
 		msg = resp.Status
 	}
-	return &llm.APIError{StatusCode: resp.StatusCode, Message: msg}
+	return &llm.APIError{
+		StatusCode:      resp.StatusCode,
+		Message:         msg,
+		ResponsePayload: llm.SafeResponsePayload(body),
+	}
 }

@@ -389,6 +389,52 @@ func TestStreamErrorEventParsesRetryAfterHint(t *testing.T) {
 	}
 }
 
+func TestStreamOpenRouterNumericErrorPreservesDiagnosticPayload(t *testing.T) {
+	const generationID = "gen-openrouter-123"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Generation-Id", generationID)
+		w.WriteHeader(http.StatusOK)
+		llmtest.WriteBody(w, []byte("event: error\n"+`data: {"error":{"message":"Moonshot timed out","code":502,"metadata":{"error_type":"provider_unavailable","provider_code":"capacity","raw":"upstream read timeout"}},"choices":[]}`+"\n\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("moonshotai/kimi-k3")))
+	if err == nil {
+		t.Fatal("expected stream error")
+	}
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %T %v, want APIError", err, err)
+	}
+	if apiErr.Code != "provider_unavailable" || apiErr.Message != "Moonshot timed out" || !apiErr.Retryable {
+		t.Fatalf("apiErr = %+v", apiErr)
+	}
+	if apiErr.Diagnostic == nil || apiErr.Diagnostic.UpstreamRequestID != generationID {
+		t.Fatalf("diagnostic = %+v, want generation id %q", apiErr.Diagnostic, generationID)
+	}
+	payload := string(apiErr.ResponsePayload)
+	for _, want := range []string{`"code":502`, `"error_type":"provider_unavailable"`, `"provider_code":"capacity"`, `"raw":"upstream read timeout"`} {
+		if !strings.Contains(payload, want) {
+			t.Fatalf("response payload %s missing %s", payload, want)
+		}
+	}
+}
+
+func TestStreamNumericErrorCodeWithoutMetadataUsesHTTPRetryClass(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		llmtest.WriteBody(w, []byte(`data: {"error":{"message":"bad gateway","code":502}}`+"\n\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("moonshotai/kimi-k3")))
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != "502" || !apiErr.Retryable {
+		t.Fatalf("error = %#v, want retryable numeric 502", err)
+	}
+}
+
 func TestStreamNoUsage(t *testing.T) {
 	srv := llmtest.ServeSSEFixture(t, "no_usage.sse")
 	p := testProvider(t, srv, nil)

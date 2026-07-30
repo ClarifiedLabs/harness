@@ -862,14 +862,19 @@ dialects ignore this breakpoint policy.
 
 ```go
 type APIError struct {
-    StatusCode int
-    Code       string        // provider error code/type if parseable
-    Message    string
-    Retryable  bool
-    RetryAfter time.Duration // parsed Retry-After, 0 if absent
+    StatusCode      int
+    Code            string          // provider error code/type if parseable
+    Message         string
+    ResponsePayload DiagnosticPayload // bounded, redacted upstream response
+    Retryable       bool
+    RetryAfter      time.Duration     // parsed Retry-After, 0 if absent
 }
 ```
 
+- Provider error codes accept JSON strings, numbers, or null. OpenRouter's
+  canonical `error.metadata.error_type` wins over its numeric compatibility
+  code when present; numeric HTTP-like codes still participate in retry
+  classification.
 - **Retryable:** HTTP 429, 500, 502, 503, 529 (Anthropic overloaded), and transport
   errors (timeouts, resets, DNS).
 - **Fatal, no retry:** 400, 401, 403, 404, 422 — surfaced immediately with the
@@ -1351,8 +1356,17 @@ constructs neither registry nor feed.
   occurs, even when a later retry succeeds. These records include the proxy and
   upstream request ids, upstream attempt, status/code, parsed provider message,
   retryability, retry-after/delay, attempt duration, and request elapsed time.
+  When the provider returned a JSON error or a JSON fragment failed typed
+  decoding, `api_response_payload` contains a compact diagnostic copy capped at
+  16 KiB. Common prompt, generated-content, reasoning, tool-argument, credential,
+  and binary fields are redacted recursively; image-bearing requests omit the
+  payload because error messages can echo image data. Non-JSON fragments record
+  only byte length and SHA-256. The same `response_payload` crosses the proxy
+  protocol in model-request lifecycle events.
   Model-request events and API error diagnostics carry the same instance ID;
   `(proxy_instance_id, proxy_request_id)` is the cross-replica correlation key.
+  OpenRouter's `X-Generation-Id` is accepted as the upstream request ID, including
+  for errors received after an HTTP 2xx stream has opened.
   Retry scheduling is logged separately at INFO; cancellation is distinguished
   from an upstream failure.
 - `POST /v1/input_tokens` accepts `{provider, request}` and returns

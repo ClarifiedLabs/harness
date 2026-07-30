@@ -1471,7 +1471,14 @@ skill bodies or adds model-visible content.
 Model-request lifecycle records carry parsed provider messages, timing, and
 request correlation used by `harness session timings`. They never become
 conversation-tree entries or model context. The model proxy logs the same
-failed upstream attempts individually. Multimodal endpoint rejections add the
+failed upstream attempts individually. Failed provider JSON is also stored as
+`response_payload` on the lifecycle record in `raw.ndjson` and as
+`api_response_payload` in both the session and model-proxy diagnostic logs.
+These payloads are capped at 16 KiB and recursively redact common prompt,
+generated-content, reasoning, tool-argument, credential, and binary fields.
+Image-bearing requests omit them; malformed non-JSON responses retain only
+their byte length and SHA-256. OpenRouter `X-Generation-Id` values appear as
+`upstream_request_id` when available. Multimodal endpoint rejections add the
 sanitized records described in
 [Multimodal tool-result compatibility diagnostics](#multimodal-tool-result-compatibility-diagnostics);
 prompts, tool arguments, local paths, result text, and image base64 remain

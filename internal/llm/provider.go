@@ -210,8 +210,9 @@ const (
 )
 
 // ModelRequestEvent is structured, provider-neutral telemetry for one model
-// request. Message is the already parsed/redacted API error message; no request
-// body, credentials, or model output belongs in this structure.
+// request. Message is the already parsed/redacted API error message.
+// ResponsePayload is a bounded, redacted upstream response fragment; no request
+// body, credentials, or unredacted model output belongs in this structure.
 type ModelRequestEvent struct {
 	State             ModelRequestState   `json:"state"`
 	Outcome           ModelRequestOutcome `json:"outcome,omitempty"`
@@ -232,6 +233,7 @@ type ModelRequestEvent struct {
 	StatusCode        int                 `json:"status_code,omitempty"`
 	Code              string              `json:"code,omitempty"`
 	Message           string              `json:"message,omitempty"`
+	ResponsePayload   DiagnosticPayload   `json:"response_payload,omitempty"`
 	Retryable         bool                `json:"retryable,omitempty"`
 	RetryAfterMS      int64               `json:"retry_after_ms,omitempty"`
 	RetryDelayMS      int64               `json:"retry_delay_ms,omitempty"`

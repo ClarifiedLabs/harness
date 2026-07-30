@@ -123,12 +123,13 @@ type StreamEnvelope struct {
 }
 
 type Error struct {
-	StatusCode   int                     `json:"status_code,omitempty"`
-	Code         string                  `json:"code,omitempty"`
-	Message      string                  `json:"message,omitempty"`
-	Retryable    bool                    `json:"retryable,omitempty"`
-	RetryAfterMS int64                   `json:"retry_after_ms,omitempty"`
-	Diagnostic   *llm.APIErrorDiagnostic `json:"diagnostic,omitempty"`
+	StatusCode      int                     `json:"status_code,omitempty"`
+	Code            string                  `json:"code,omitempty"`
+	Message         string                  `json:"message,omitempty"`
+	ResponsePayload llm.DiagnosticPayload   `json:"response_payload,omitempty"`
+	Retryable       bool                    `json:"retryable,omitempty"`
+	RetryAfterMS    int64                   `json:"retry_after_ms,omitempty"`
+	Diagnostic      *llm.APIErrorDiagnostic `json:"diagnostic,omitempty"`
 }
 
 func ErrorFrom(err error) *Error {
@@ -138,12 +139,13 @@ func ErrorFrom(err error) *Error {
 	var apiErr *llm.APIError
 	if errors.As(err, &apiErr) {
 		return &Error{
-			StatusCode:   apiErr.StatusCode,
-			Code:         apiErr.Code,
-			Message:      apiErr.Message,
-			Retryable:    apiErr.Retryable,
-			RetryAfterMS: apiErr.RetryAfter.Milliseconds(),
-			Diagnostic:   apiErr.Diagnostic,
+			StatusCode:      apiErr.StatusCode,
+			Code:            apiErr.Code,
+			Message:         apiErr.Message,
+			ResponsePayload: apiErr.ResponsePayload,
+			Retryable:       apiErr.Retryable,
+			RetryAfterMS:    apiErr.RetryAfter.Milliseconds(),
+			Diagnostic:      apiErr.Diagnostic,
 		}
 	}
 	return &Error{Message: err.Error(), Retryable: true}
@@ -154,11 +156,12 @@ func (e *Error) APIError() *llm.APIError {
 		return nil
 	}
 	return &llm.APIError{
-		StatusCode: e.StatusCode,
-		Code:       e.Code,
-		Message:    e.Message,
-		Retryable:  e.Retryable,
-		RetryAfter: time.Duration(e.RetryAfterMS) * time.Millisecond,
-		Diagnostic: e.Diagnostic,
+		StatusCode:      e.StatusCode,
+		Code:            e.Code,
+		Message:         e.Message,
+		ResponsePayload: e.ResponsePayload,
+		Retryable:       e.Retryable,
+		RetryAfter:      time.Duration(e.RetryAfterMS) * time.Millisecond,
+		Diagnostic:      e.Diagnostic,
 	}
 }

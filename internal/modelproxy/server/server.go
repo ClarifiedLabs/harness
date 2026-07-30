@@ -1518,7 +1518,7 @@ func streamErrorLogAttrs(err error) []any {
 	attrs := []any{"err_go_type", fmt.Sprintf("%T", err)}
 	var apiErr *llm.APIError
 	if errors.As(err, &apiErr) {
-		return append(attrs,
+		attrs = append(attrs,
 			"err_kind", "api",
 			"api_status_code", apiErr.StatusCode,
 			"api_code", apiErr.Code,
@@ -1526,6 +1526,10 @@ func streamErrorLogAttrs(err error) []any {
 			"api_retryable", apiErr.Retryable,
 			"api_retry_after_ms", apiErr.RetryAfter.Milliseconds(),
 		)
+		if len(apiErr.ResponsePayload) > 0 {
+			attrs = append(attrs, "api_response_payload", json.RawMessage(apiErr.ResponsePayload))
+		}
+		return attrs
 	}
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -1549,6 +1553,7 @@ func modelRequestEventFromError(err error, state llm.ModelRequestState, outcome 
 		event.StatusCode = apiErr.StatusCode
 		event.Code = apiErr.Code
 		event.Message = apiErr.Message
+		event.ResponsePayload = apiErr.ResponsePayload
 		event.Retryable = apiErr.Retryable
 		event.RetryAfterMS = apiErr.RetryAfter.Milliseconds()
 		if apiErr.Diagnostic != nil {
@@ -1572,6 +1577,9 @@ func mergeModelRequestFailure(base, current llm.ModelRequestEvent) llm.ModelRequ
 	if base.UpstreamRequestID != "" {
 		current.UpstreamRequestID = base.UpstreamRequestID
 	}
+	if len(current.ResponsePayload) == 0 && len(base.ResponsePayload) > 0 {
+		current.ResponsePayload = base.ResponsePayload
+	}
 	return current
 }
 
@@ -1580,16 +1588,18 @@ func redactModelRequestEvent(event llm.ModelRequestEvent, req llm.Request) llm.M
 		return event
 	}
 	err := redactImageBearingError(&llm.APIError{
-		StatusCode: event.StatusCode,
-		Code:       event.Code,
-		Message:    event.Message,
-		Retryable:  event.Retryable,
-		RetryAfter: time.Duration(event.RetryAfterMS) * time.Millisecond,
+		StatusCode:      event.StatusCode,
+		Code:            event.Code,
+		Message:         event.Message,
+		ResponsePayload: event.ResponsePayload,
+		Retryable:       event.Retryable,
+		RetryAfter:      time.Duration(event.RetryAfterMS) * time.Millisecond,
 	}, req)
 	var apiErr *llm.APIError
 	if errors.As(err, &apiErr) {
 		event.Code = apiErr.Code
 		event.Message = apiErr.Message
+		event.ResponsePayload = apiErr.ResponsePayload
 		return event
 	}
 	event.Message = err.Error()
@@ -1597,7 +1607,7 @@ func redactModelRequestEvent(event llm.ModelRequestEvent, req llm.Request) llm.M
 }
 
 func modelRequestEventLogAttrs(event llm.ModelRequestEvent) []any {
-	return []any{
+	attrs := []any{
 		"request_id", event.ProxyRequestID,
 		"sequence", event.Sequence,
 		"state", string(event.State),
@@ -1622,6 +1632,10 @@ func modelRequestEventLogAttrs(event llm.ModelRequestEvent) []any {
 		"elapsed_ms", event.ElapsedMS,
 		"error_stage", string(event.Stage),
 	}
+	if len(event.ResponsePayload) > 0 {
+		attrs = append(attrs, "api_response_payload", json.RawMessage(event.ResponsePayload))
+	}
+	return attrs
 }
 
 func mergeUsage(acc, in llm.Usage) llm.Usage {

@@ -23,9 +23,10 @@ func TestErrorDiagnosticJSONCompatibility(t *testing.T) {
 	}
 
 	want := Error{
-		StatusCode: httpStatusBadRequest,
-		Code:       "invalid_request",
-		Message:    "unsupported image",
+		StatusCode:      httpStatusBadRequest,
+		Code:            "invalid_request",
+		Message:         "unsupported image",
+		ResponsePayload: llm.DiagnosticPayload(`{"error":{"code":400,"message":"unsupported image"}}`),
 		Diagnostic: &llm.APIErrorDiagnostic{
 			Stage:          llm.APIErrorStageUpstreamStream,
 			ProxyRequestID: 1,
@@ -57,8 +58,13 @@ func TestErrorDiagnosticJSONCompatibility(t *testing.T) {
 	if got.Diagnostic == nil || got.Diagnostic.ProxyRequestID != 1 || got.Diagnostic.MultimodalShape == nil || got.Diagnostic.MultimodalShape.ImageCount != 1 {
 		t.Fatalf("new diagnostic = %+v", got.Diagnostic)
 	}
+	if string(got.ResponsePayload) != string(want.ResponsePayload) {
+		t.Fatalf("response payload = %s, want %s", got.ResponsePayload, want.ResponsePayload)
+	}
 	gotAPI := got.APIError()
-	if gotAPI.Diagnostic == nil || gotAPI.Diagnostic.Compatibility == nil || gotAPI.Diagnostic.Compatibility.Category != llm.CompatibilityCategoryMultimodalToolResultRejected {
+	if gotAPI.Diagnostic == nil || gotAPI.Diagnostic.Compatibility == nil ||
+		gotAPI.Diagnostic.Compatibility.Category != llm.CompatibilityCategoryMultimodalToolResultRejected ||
+		string(gotAPI.ResponsePayload) != string(want.ResponsePayload) {
 		t.Fatalf("new reconstructed error = %#v", gotAPI)
 	}
 }

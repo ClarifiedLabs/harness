@@ -138,11 +138,12 @@ func TestRedactModelRequestEventRemovesImageRequestValues(t *testing.T) {
 	payload := strings.Repeat("QUJD", 30)
 	req := richImageRequest(payload)
 	event := llm.ModelRequestEvent{
-		State:      llm.ModelRequestUpstreamAttemptFailed,
-		StatusCode: 429,
-		Code:       "quota_" + payload,
-		Message:    "retry image data:image/png;base64," + payload + " from /private/screen.png",
-		Retryable:  true,
+		State:           llm.ModelRequestUpstreamAttemptFailed,
+		StatusCode:      429,
+		Code:            "quota_" + payload,
+		Message:         "retry image data:image/png;base64," + payload + " from /private/screen.png",
+		ResponsePayload: llm.DiagnosticPayload(`{"error":{"message":"` + payload + `"}}`),
+		Retryable:       true,
 	}
 	got := redactModelRequestEvent(event, req)
 	for _, secret := range []string{payload, "/private/screen.png"} {
@@ -152,6 +153,9 @@ func TestRedactModelRequestEventRemovesImageRequestValues(t *testing.T) {
 	}
 	if !strings.Contains(got.Message, "[REDACTED_") {
 		t.Fatalf("message = %q, want redaction marker", got.Message)
+	}
+	if len(got.ResponsePayload) != 0 {
+		t.Fatalf("response payload was not dropped for image-bearing request: %s", got.ResponsePayload)
 	}
 }
 

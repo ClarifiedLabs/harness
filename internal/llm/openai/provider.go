@@ -101,7 +101,9 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 		}
 		defer resp.Body.Close()
 
-		p.decode(ctx, resp.Body, yield)
+		p.decode(ctx, resp.Body, func(event llm.StreamEvent, err error) bool {
+			return yield(event, llm.WithUpstreamRequestID(err, resp.Header))
+		})
 	}
 }
 
@@ -172,11 +174,11 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 
 		var chunk wireChunk
 		if jsonErr := json.Unmarshal([]byte(data), &chunk); jsonErr != nil {
-			yield(llm.StreamEvent{}, &llm.APIError{Message: "decode stream chunk: " + jsonErr.Error()})
+			yield(llm.StreamEvent{}, llm.NewResponseDecodeError("decode stream chunk", jsonErr, []byte(data)))
 			return
 		}
 		if chunk.Error != nil {
-			yield(llm.StreamEvent{}, streamError(chunk.Error))
+			yield(llm.StreamEvent{}, streamError(chunk.Error, []byte(data)))
 			return
 		}
 		if chunk.ServiceTier != "" {
@@ -316,15 +318,22 @@ func rawJSONPresent(raw json.RawMessage) bool {
 	return value != "" && value != "null"
 }
 
-func streamError(err *wireError) *llm.APIError {
-	code := err.Type
+func streamError(err *wireError, raw []byte) *llm.APIError {
+	code := ""
+	if err.Metadata != nil {
+		code = err.Metadata.ErrorType
+	}
 	if code == "" {
-		code = err.Code
+		code = llm.JSONScalarString(err.Type)
+	}
+	if code == "" {
+		code = llm.JSONScalarString(err.Code)
 	}
 	apiErr := &llm.APIError{
-		Code:      code,
-		Message:   err.Message,
-		Retryable: llm.RetryableErrorCode(code),
+		Code:            code,
+		Message:         err.Message,
+		ResponsePayload: llm.SafeResponsePayload(raw),
+		Retryable:       llm.RetryableErrorCode(code),
 	}
 	if apiErr.Message == "" {
 		apiErr.Message = "stream error"

@@ -333,6 +333,10 @@ func redactImageBearingError(err error, req llm.Request) error {
 	var apiErr *llm.APIError
 	if errors.As(err, &apiErr) {
 		copyError := *apiErr
+		// Provider payloads may echo image data inside otherwise legitimate
+		// error-message fields, where generic field-name redaction cannot
+		// distinguish it safely.
+		copyError.ResponsePayload = ""
 		if code, ok := sanitizeImageErrorMessage(apiErr.Code, collected); ok {
 			copyError.Code = code
 		} else {

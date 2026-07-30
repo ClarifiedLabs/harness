@@ -1,7 +1,10 @@
 package llm
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -89,12 +92,44 @@ type ImageDimension struct {
 // (0 when absent) honored as a backoff floor. Diagnostic is optional so errors
 // from older providers and model proxies retain their original behavior.
 type APIError struct {
-	StatusCode int
-	Code       string // provider error code/type if parseable
-	Message    string
-	Retryable  bool
-	RetryAfter time.Duration
-	Diagnostic *APIErrorDiagnostic
+	StatusCode      int
+	Code            string // provider error code/type if parseable
+	Message         string
+	ResponsePayload DiagnosticPayload // bounded, redacted upstream response fragment
+	Retryable       bool
+	RetryAfter      time.Duration
+	Diagnostic      *APIErrorDiagnostic
+}
+
+// DiagnosticPayload is valid, compact JSON stored as a comparable string so
+// model-request lifecycle events remain comparable. It marshals as the embedded
+// JSON value rather than as an escaped JSON string.
+type DiagnosticPayload string
+
+func (p DiagnosticPayload) MarshalJSON() ([]byte, error) {
+	if p == "" {
+		return []byte("null"), nil
+	}
+	data := []byte(p)
+	if !json.Valid(data) {
+		return nil, fmt.Errorf("invalid diagnostic payload")
+	}
+	return data, nil
+}
+
+func (p *DiagnosticPayload) UnmarshalJSON(data []byte) error {
+	if p == nil {
+		return fmt.Errorf("nil diagnostic payload")
+	}
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		*p = ""
+		return nil
+	}
+	if !json.Valid(data) {
+		return fmt.Errorf("invalid diagnostic payload")
+	}
+	*p = DiagnosticPayload(string(data))
+	return nil
 }
 
 func (e *APIError) Error() string {
@@ -126,17 +161,28 @@ func ParseErrorResponse(resp *http.Response) (apiErr *APIError, errType, errCode
 	}
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	apiErr.ResponsePayload = SafeResponsePayload(body)
 	var env struct {
 		Error *struct {
-			Type    string `json:"type"`
-			Code    string `json:"code"`
-			Message string `json:"message"`
+			Type     json.RawMessage `json:"type"`
+			Code     json.RawMessage `json:"code"`
+			Status   string          `json:"status"`
+			Message  string          `json:"message"`
+			Metadata *struct {
+				ErrorType string `json:"error_type"`
+			} `json:"metadata"`
 		} `json:"error"`
 	}
 	if json.Unmarshal(body, &env) == nil && env.Error != nil {
 		apiErr.Message = env.Error.Message
-		errType = env.Error.Type
-		errCode = env.Error.Code
+		errType = JSONScalarString(env.Error.Type)
+		if errType == "" {
+			errType = env.Error.Status
+		}
+		errCode = JSONScalarString(env.Error.Code)
+		if env.Error.Metadata != nil && env.Error.Metadata.ErrorType != "" {
+			errCode = env.Error.Metadata.ErrorType
+		}
 	}
 	if apiErr.Message == "" {
 		apiErr.Message = strings.TrimSpace(string(body))
@@ -146,6 +192,7 @@ func ParseErrorResponse(resp *http.Response) (apiErr *APIError, errType, errCode
 
 func upstreamRequestID(header http.Header) string {
 	for _, name := range []string{
+		"X-Generation-Id",
 		"X-Request-ID",
 		"Request-ID",
 		"OpenAI-Request-ID",
@@ -160,6 +207,167 @@ func upstreamRequestID(header http.Header) string {
 		}
 	}
 	return ""
+}
+
+// WithUpstreamRequestID attaches a safe provider response identifier to an API
+// error without mutating the original. It is used for errors that arrive after
+// an HTTP 2xx response has already opened a stream.
+func WithUpstreamRequestID(err error, header http.Header) error {
+	requestID := upstreamRequestID(header)
+	if err == nil || requestID == "" {
+		return err
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return err
+	}
+	copyError := *apiErr
+	if apiErr.Diagnostic != nil {
+		copyDiagnostic := *apiErr.Diagnostic
+		copyError.Diagnostic = &copyDiagnostic
+	} else {
+		copyError.Diagnostic = &APIErrorDiagnostic{}
+	}
+	copyError.Diagnostic.UpstreamRequestID = requestID
+	return &copyError
+}
+
+const (
+	maxSafeResponsePayloadBytes = 16 << 10
+	maxSafeResponsePreviewBytes = 4 << 10
+	maxSafeResponseStringBytes  = 4 << 10
+)
+
+// NewResponseDecodeError preserves a bounded, redacted copy of a provider
+// response fragment alongside its decode failure. The payload is diagnostics
+// only and never becomes model-visible content.
+func NewResponseDecodeError(prefix string, cause error, raw []byte) *APIError {
+	message := strings.TrimSpace(prefix)
+	if cause != nil {
+		if message != "" {
+			message += ": "
+		}
+		message += cause.Error()
+	}
+	return &APIError{
+		Message:         message,
+		ResponsePayload: SafeResponsePayload(raw),
+	}
+}
+
+// JSONScalarString returns the text form of a JSON string or number. Provider
+// error codes commonly vary between those two forms; null and composite values
+// return an empty string.
+func JSONScalarString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	var value string
+	if json.Unmarshal(raw, &value) == nil {
+		return value
+	}
+	var number json.Number
+	if json.Unmarshal(raw, &number) == nil {
+		return number.String()
+	}
+	return ""
+}
+
+// SafeResponsePayload returns a compact JSON diagnostic for an upstream
+// response fragment. Common prompt, generated-content, tool-argument, and
+// binary fields are redacted recursively. Invalid JSON is represented by
+// length and digest because it cannot be inspected safely by field name.
+func SafeResponsePayload(raw []byte) DiagnosticPayload {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return ""
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(raw))
+
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return marshalResponsePayloadSummary("invalid_json", len(raw), digest, "")
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return marshalResponsePayloadSummary("multiple_json_values", len(raw), digest, "")
+	}
+
+	safe := redactResponsePayloadValue(value, false)
+	data, err := json.Marshal(safe)
+	if err != nil {
+		return marshalResponsePayloadSummary("marshal_failed", len(raw), digest, "")
+	}
+	if len(data) <= maxSafeResponsePayloadBytes {
+		return DiagnosticPayload(data)
+	}
+	preview := string(data[:maxSafeResponsePreviewBytes])
+	return marshalResponsePayloadSummary("truncated", len(raw), digest, preview)
+}
+
+func marshalResponsePayloadSummary(kind string, size int, digest, preview string) DiagnosticPayload {
+	summary := map[string]any{
+		"_capture": kind,
+		"bytes":    size,
+		"sha256":   digest,
+	}
+	if preview != "" {
+		summary["preview"] = preview
+	}
+	data, _ := json.Marshal(summary)
+	return DiagnosticPayload(data)
+}
+
+func redactResponsePayloadValue(value any, inError bool) any {
+	switch value := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(value))
+		for key, child := range value {
+			normalized := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+			childInError := inError || normalized == "error"
+			if redactResponsePayloadKey(normalized, inError) {
+				out[key] = "[redacted]"
+				continue
+			}
+			out[key] = redactResponsePayloadValue(child, childInError)
+		}
+		return out
+	case []any:
+		out := make([]any, len(value))
+		for i, child := range value {
+			out[i] = redactResponsePayloadValue(child, inError)
+		}
+		return out
+	case string:
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "data:") {
+			return "[redacted data URL]"
+		}
+		if len(value) > maxSafeResponseStringBytes {
+			return value[:maxSafeResponseStringBytes] + fmt.Sprintf("… [truncated %d bytes]", len(value)-maxSafeResponseStringBytes)
+		}
+		return value
+	default:
+		return value
+	}
+}
+
+func redactResponsePayloadKey(key string, inError bool) bool {
+	switch key {
+	case "api_key", "authorization", "credentials", "password", "secret", "token",
+		"access_token", "refresh_token", "id_token",
+		"prompt", "messages", "request", "request_body", "body",
+		"arguments", "partial_arguments", "input", "input_text",
+		"image", "image_url", "audio", "data":
+		return true
+	case "completion", "content", "generated_text", "output", "output_text",
+		"reasoning", "reasoning_content", "refusal", "summary", "text", "thinking":
+		return !inError
+	default:
+		return false
+	}
 }
 
 // NormalizeUpstreamRequestID returns a conservative identifier safe for

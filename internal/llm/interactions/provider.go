@@ -88,16 +88,16 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			return
 		}
 		defer resp.Body.Close()
-		decode(ctx, resp.Body, yield)
+		decode(ctx, resp.Body, func(event llm.StreamEvent, err error) bool {
+			return yield(event, llm.WithUpstreamRequestID(err, resp.Header))
+		})
 	}
 }
 
 func parseErrorResponse(resp *http.Response) *llm.APIError {
 	apiErr, errType, errCode := llm.ParseErrorResponse(resp)
 	// Native Gemini errors use a numeric error.code and a string error.status.
-	// The shared parser deliberately targets the string-code shapes used by the
-	// other dialects, so recover Gemini's structured fields if it left the raw
-	// envelope in Message.
+	// Prefer the status recovered from the preserved response payload.
 	var envelope struct {
 		Error *struct {
 			Code    json.RawMessage `json:"code"`
@@ -105,7 +105,7 @@ func parseErrorResponse(resp *http.Response) *llm.APIError {
 			Message string          `json:"message"`
 		} `json:"error"`
 	}
-	if json.Unmarshal([]byte(apiErr.Message), &envelope) == nil && envelope.Error != nil {
+	if json.Unmarshal([]byte(apiErr.ResponsePayload), &envelope) == nil && envelope.Error != nil {
 		if envelope.Error.Message != "" {
 			apiErr.Message = envelope.Error.Message
 		}
@@ -210,7 +210,7 @@ func decode(ctx context.Context, reader io.Reader, yield func(llm.StreamEvent, e
 func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) bool) (bool, error) {
 	var event wireEvent
 	if err := json.Unmarshal([]byte(data), &event); err != nil {
-		return false, &llm.APIError{Message: "decode stream event: " + err.Error()}
+		return false, llm.NewResponseDecodeError("decode stream event", err, []byte(data))
 	}
 	eventType := event.EventType
 	if eventType == "" {
@@ -239,10 +239,14 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 		return true, d.finish(event.Interaction, yield)
 	case "interaction.failed", "interaction.cancelled":
 		d.completed = true
-		return false, interactionError(event.Interaction, event.Error, event.Code, event.Message)
+		apiErr := interactionError(event.Interaction, event.Error, event.Code, event.Message)
+		apiErr.ResponsePayload = llm.SafeResponsePayload([]byte(data))
+		return false, apiErr
 	case "error":
 		d.completed = true
-		return false, interactionError(event.Interaction, event.Error, event.Code, event.Message)
+		apiErr := interactionError(event.Interaction, event.Error, event.Code, event.Message)
+		apiErr.ResponsePayload = llm.SafeResponsePayload([]byte(data))
+		return false, apiErr
 	default:
 		// interaction.in_progress, interaction.requires_action, and legacy
 		// status_update events carry no model output.
@@ -310,7 +314,7 @@ func (d *streamDecoder) delta(index int, raw json.RawMessage, yield func(llm.Str
 		Signature        string          `json:"signature"`
 	}
 	if err := json.Unmarshal(raw, &delta); err != nil {
-		return false, &llm.APIError{Message: "decode step delta: " + err.Error()}
+		return false, llm.NewResponseDecodeError("decode step delta", err, raw)
 	}
 	if step.kind == "model_output" && delta.Text != "" && (delta.Type == "" || delta.Type == "text") {
 		if !yield(llm.StreamEvent{Kind: llm.EventTextDelta, Text: delta.Text}, nil) {
@@ -327,7 +331,7 @@ func (d *streamDecoder) delta(index int, raw json.RawMessage, yield func(llm.Str
 		fragment := delta.PartialArguments
 		if fragment == "" && len(delta.Arguments) > 0 {
 			if err := json.Unmarshal(delta.Arguments, &fragment); err != nil {
-				return false, &llm.APIError{Message: "interactions: function arguments delta is not a string"}
+				return false, llm.NewResponseDecodeError("interactions: function arguments delta is not a string", err, delta.Arguments)
 			}
 		}
 		step.args = append(step.args, fragment...)

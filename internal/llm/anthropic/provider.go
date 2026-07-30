@@ -103,7 +103,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			result, consumed, decodeErr := p.decode(ctx, resp.Body, aggregate, yield)
 			_ = resp.Body.Close()
 			if decodeErr != nil {
-				yield(llm.StreamEvent{}, decodeErr)
+				yield(llm.StreamEvent{}, llm.WithUpstreamRequestID(decodeErr, resp.Header))
 				return
 			}
 			if !consumed {
@@ -216,7 +216,7 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 			continue
 		}
 		if jsonErr := json.Unmarshal([]byte(ev.Data), &data); jsonErr != nil {
-			return streamDecodeResult{}, true, &llm.APIError{Message: "decode stream event: " + jsonErr.Error()}
+			return streamDecodeResult{}, true, llm.NewResponseDecodeError("decode stream event", jsonErr, []byte(ev.Data))
 		}
 
 		switch data.Type {
@@ -239,7 +239,11 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 			}
 			var start wireContentBlockStart
 			if err := json.Unmarshal(data.ContentBlock, &start); err != nil {
-				return streamDecodeResult{}, true, fmt.Errorf("anthropic: decode content block %d: %w", data.Index, err)
+				return streamDecodeResult{}, true, llm.NewResponseDecodeError(
+					fmt.Sprintf("anthropic: decode content block %d", data.Index),
+					err,
+					data.ContentBlock,
+				)
 			}
 			block := &streamedBlock{content: wireContent{
 				Type:      start.Type,
@@ -403,7 +407,10 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 			}, true, nil
 
 		case "error":
-			apiErr := &llm.APIError{Message: "stream error"}
+			apiErr := &llm.APIError{
+				Message:         "stream error",
+				ResponsePayload: llm.SafeResponsePayload([]byte(ev.Data)),
+			}
 			if data.Error != nil {
 				apiErr.Code = data.Error.Type
 				apiErr.Message = data.Error.Message

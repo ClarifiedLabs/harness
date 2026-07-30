@@ -152,7 +152,9 @@ func (p *Provider) streamHTTP(ctx context.Context, req llm.Request, yield func(l
 	}
 	defer resp.Body.Close()
 
-	p.decode(ctx, resp.Body, yield)
+	p.decode(ctx, resp.Body, func(event llm.StreamEvent, err error) bool {
+		return yield(event, llm.WithUpstreamRequestID(err, resp.Header))
+	})
 }
 
 // connect performs the request via the shared retry-before-first-byte loop
@@ -226,7 +228,7 @@ func newStreamDecoder() *streamDecoder {
 func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) bool) (bool, error) {
 	var event wireEvent
 	if jsonErr := json.Unmarshal([]byte(data), &event); jsonErr != nil {
-		return false, &llm.APIError{Message: "decode stream event: " + jsonErr.Error()}
+		return false, llm.NewResponseDecodeError("decode stream event", jsonErr, []byte(data))
 	}
 
 	switch event.Type {
@@ -368,9 +370,12 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 
 	case "response.failed":
 		d.completed = true
-		apiErr := &llm.APIError{Message: "response failed"}
+		apiErr := &llm.APIError{
+			Message:         "response failed",
+			ResponsePayload: llm.SafeResponsePayload([]byte(data)),
+		}
 		if event.Response != nil && event.Response.Error != nil {
-			apiErr.Code = event.Response.Error.Code
+			apiErr.Code = responseErrorCode(event.Response.Error)
 			apiErr.Message = event.Response.Error.Message
 			apiErr.Retryable = llm.RetryableErrorCode(apiErr.Code)
 		}
@@ -379,7 +384,7 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 
 	case "error":
 		d.completed = true
-		return false, streamError(event)
+		return false, streamError(event, []byte(data))
 
 	case "response.created",
 		"response.in_progress",
@@ -489,25 +494,44 @@ func unsupportedResponseOutput(kind, outputType string) error {
 	return &llm.APIError{Message: "responses: unsupported " + kind + " type " + outputType}
 }
 
-func streamError(event wireEvent) *llm.APIError {
-	code := event.Code
+func streamError(event wireEvent, raw []byte) *llm.APIError {
+	code := event.ErrorType
+	if code == "" {
+		code = llm.JSONScalarString(event.Code)
+	}
 	message := event.Message
 	if event.Error != nil {
 		if event.Error.Message != "" {
 			message = event.Error.Message
 		}
-		if event.Error.Code != "" {
-			code = event.Error.Code
-		} else if event.Error.Type != "" {
-			code = event.Error.Type
+		if nestedCode := responseErrorCode(event.Error); nestedCode != "" {
+			code = nestedCode
 		}
 	}
-	apiErr := &llm.APIError{Code: code, Message: message, Retryable: llm.RetryableErrorCode(code)}
+	apiErr := &llm.APIError{
+		Code:            code,
+		Message:         message,
+		ResponsePayload: llm.SafeResponsePayload(raw),
+		Retryable:       llm.RetryableErrorCode(code),
+	}
 	if apiErr.Message == "" {
 		apiErr.Message = "stream error"
 	}
 	applyRetryAfterHint(apiErr)
 	return apiErr
+}
+
+func responseErrorCode(err *wireResponseError) string {
+	if err == nil {
+		return ""
+	}
+	if err.ErrorType != "" {
+		return err.ErrorType
+	}
+	if code := llm.JSONScalarString(err.Code); code != "" {
+		return code
+	}
+	return err.Type
 }
 
 func applyRetryAfterHint(apiErr *llm.APIError) {

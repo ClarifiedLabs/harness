@@ -650,8 +650,11 @@ func TestOneShotModelAPIIssuePersistsOutsideConversationState(t *testing.T) {
 				MaxAttempts:    5,
 				StatusCode:     429,
 				Message:        providerMessage,
-				RetryAfterMS:   500,
-				RetryDelayMS:   500,
+				ResponsePayload: llm.DiagnosticPayload(
+					`{"error":{"code":429,"message":"quota window temporarily exhausted","metadata":{"error_type":"rate_limit_exceeded"}}}`,
+				),
+				RetryAfterMS: 500,
+				RetryDelayMS: 500,
 			}},
 			{Kind: llm.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{
 				State:          llm.ModelRequestRetryScheduled,
@@ -674,14 +677,19 @@ func TestOneShotModelAPIIssuePersistsOutsideConversationState(t *testing.T) {
 	if !strings.Contains(errw.String(), providerMessage) || !strings.Contains(errw.String(), "proxy request 301") {
 		t.Fatalf("stderr missing provider issue: %q", errw.String())
 	}
-	if !strings.Contains(diagnostics.String(), `"msg":"model API issue"`) || !strings.Contains(diagnostics.String(), `"api_message":"`+providerMessage+`"`) {
+	if !strings.Contains(diagnostics.String(), `"msg":"model API issue"`) ||
+		!strings.Contains(diagnostics.String(), `"api_message":"`+providerMessage+`"`) ||
+		!strings.Contains(diagnostics.String(), `"api_response_payload":{"error":{"code":429`) {
 		t.Fatalf("diagnostics missing structured provider issue: %s", diagnostics.String())
 	}
 	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
 	if err != nil {
 		t.Fatalf("read raw event log: %v", err)
 	}
-	if strings.Count(string(raw), `"type":"model_request"`) != 3 || !strings.Contains(string(raw), providerMessage) || !strings.Contains(string(raw), `"proxy_request_id":301`) {
+	if strings.Count(string(raw), `"type":"model_request"`) != 3 ||
+		!strings.Contains(string(raw), providerMessage) ||
+		!strings.Contains(string(raw), `"proxy_request_id":301`) ||
+		!strings.Contains(string(raw), `"response_payload":{"error":{"code":429`) {
 		t.Fatalf("raw lifecycle events = %s", raw)
 	}
 	loaded, err := session.Load(app.SessionPath)

@@ -163,6 +163,7 @@ func modelRequestFailureEvent(apiErr *APIError, attempt int, attemptDuration tim
 		event.StatusCode = apiErr.StatusCode
 		event.Code = apiErr.Code
 		event.Message = apiErr.Message
+		event.ResponsePayload = apiErr.ResponsePayload
 		event.Retryable = apiErr.Retryable
 		event.RetryAfterMS = apiErr.RetryAfter.Milliseconds()
 		event.Stage = APIErrorStageUpstreamHTTP

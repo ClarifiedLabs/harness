@@ -356,11 +356,7 @@ func webSocketErrorEvent(data string) *llm.APIError {
 	code := ""
 	message := "websocket error"
 	if event.Error != nil {
-		if event.Error.Code != "" {
-			code = event.Error.Code
-		} else {
-			code = event.Error.Type
-		}
+		code = responseErrorCode(event.Error)
 		if event.Error.Message != "" {
 			message = event.Error.Message
 		}
@@ -370,9 +366,10 @@ func webSocketErrorEvent(data string) *llm.APIError {
 		status = event.StatusCode
 	}
 	return &llm.APIError{
-		StatusCode: status,
-		Code:       code,
-		Message:    message,
-		Retryable:  retry.RetryableStatus(status) || llm.RetryableErrorCode(code),
+		StatusCode:      status,
+		Code:            code,
+		Message:         message,
+		ResponsePayload: llm.SafeResponsePayload([]byte(data)),
+		Retryable:       retry.RetryableStatus(status) || llm.RetryableErrorCode(code),
 	}
 }

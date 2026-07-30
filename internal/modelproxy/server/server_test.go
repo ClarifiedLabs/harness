@@ -134,6 +134,42 @@ func modelProxyLogRecord(t *testing.T, logs string, message string) map[string]a
 	return matched
 }
 
+func TestModelProxyErrorLogsIncludeResponsePayload(t *testing.T) {
+	payload := llm.DiagnosticPayload(`{"error":{"code":502,"message":"provider timeout"}}`)
+	event := llm.ModelRequestEvent{
+		State:             llm.ModelRequestFailed,
+		Outcome:           llm.ModelRequestOutcomeTerminal,
+		ProxyRequestID:    440,
+		ResponsePayload:   payload,
+		AttemptDurationMS: 45_810,
+	}
+	apiErr := &llm.APIError{
+		Code:            "provider_unavailable",
+		Message:         "provider timeout",
+		ResponsePayload: payload,
+	}
+
+	var logs bytes.Buffer
+	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
+	if err != nil {
+		t.Fatalf("NewProxyLogger: %v", err)
+	}
+	logger.Warn("model upstream attempt failed", modelRequestEventLogAttrs(event)...)
+	logger.Warn("model request completed", streamErrorLogAttrs(apiErr)...)
+
+	for _, message := range []string{"model upstream attempt failed", "model request completed"} {
+		record := modelProxyLogRecord(t, logs.String(), message)
+		response, ok := record["api_response_payload"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s response payload = %#v", message, record["api_response_payload"])
+		}
+		providerErr, ok := response["error"].(map[string]any)
+		if !ok || providerErr["message"] != "provider timeout" || providerErr["code"] != float64(502) {
+			t.Fatalf("%s response payload = %#v", message, response)
+		}
+	}
+}
+
 func (p *countingFakeProvider) CountInputTokens(context.Context, llm.Request) (llm.InputTokenCount, error) {
 	if p.err != nil {
 		return llm.InputTokenCount{}, p.err

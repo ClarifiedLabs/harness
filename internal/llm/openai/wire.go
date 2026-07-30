@@ -131,10 +131,13 @@ type wireChunk struct {
 }
 
 type wireError struct {
-	Type    string `json:"type"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Param   string `json:"param"`
+	Type     json.RawMessage `json:"type"`
+	Code     json.RawMessage `json:"code"`
+	Message  string          `json:"message"`
+	Param    string          `json:"param"`
+	Metadata *struct {
+		ErrorType string `json:"error_type"`
+	} `json:"metadata"`
 }
 
 // wireChoice is one streamed choice: an incremental delta plus an optional

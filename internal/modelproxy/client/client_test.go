@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,11 +117,12 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 		done := llm.StreamEvent{Kind: llm.EventDone, ResponseID: "resp_1"}
 		_ = enc.Encode(protocol.StreamEnvelope{Event: &done})
 		_ = enc.Encode(protocol.StreamEnvelope{Error: &protocol.Error{
-			StatusCode:   http.StatusTooManyRequests,
-			Code:         "rate_limit",
-			Message:      "slow down",
-			Retryable:    true,
-			RetryAfterMS: 250,
+			StatusCode:      http.StatusTooManyRequests,
+			Code:            "rate_limit",
+			Message:         "slow down",
+			ResponsePayload: llm.DiagnosticPayload(`{"error":{"code":429,"message":"slow down"}}`),
+			Retryable:       true,
+			RetryAfterMS:    250,
 			Diagnostic: &llm.APIErrorDiagnostic{
 				Stage:             llm.APIErrorStageUpstreamStream,
 				ProxyInstanceID:   "proxy-a",
@@ -175,6 +177,9 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 	if apiErr.RetryAfter != 250*time.Millisecond {
 		t.Fatalf("retry after = %v, want 250ms", apiErr.RetryAfter)
 	}
+	if !strings.Contains(string(apiErr.ResponsePayload), `"code":429`) {
+		t.Fatalf("response payload = %s", apiErr.ResponsePayload)
+	}
 	if apiErr.Diagnostic == nil ||
 		apiErr.Diagnostic.ProxyInstanceID != "proxy-a" ||
 		apiErr.Diagnostic.ProxyRequestID != 123 ||
@@ -186,7 +191,8 @@ func TestProviderStreamEventsAndErrors(t *testing.T) {
 		requestEvents[0].State != llm.ModelRequestFailed ||
 		requestEvents[0].ProxyInstanceID != "proxy-a" ||
 		requestEvents[0].ProxyRequestID != 123 ||
-		requestEvents[0].Message != "slow down" {
+		requestEvents[0].Message != "slow down" ||
+		!strings.Contains(string(requestEvents[0].ResponsePayload), `"code":429`) {
 		t.Fatalf("synthesized request events = %+v", requestEvents)
 	}
 }

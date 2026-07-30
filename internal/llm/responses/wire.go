@@ -117,10 +117,11 @@ type wireEvent struct {
 	Response *wireResponse `json:"response"`
 
 	// error
-	Code    string             `json:"code"`
-	Message string             `json:"message"`
-	Param   string             `json:"param"`
-	Error   *wireResponseError `json:"error"`
+	Code      json.RawMessage    `json:"code"`
+	ErrorType string             `json:"error_type"`
+	Message   string             `json:"message"`
+	Param     string             `json:"param"`
+	Error     *wireResponseError `json:"error"`
 }
 
 type wireOutputItem struct {
@@ -150,10 +151,11 @@ type wireResponse struct {
 }
 
 type wireResponseError struct {
-	Type    string `json:"type"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Param   string `json:"param"`
+	Type      string          `json:"type"`
+	Code      json.RawMessage `json:"code"`
+	ErrorType string          `json:"error_type"`
+	Message   string          `json:"message"`
+	Param     string          `json:"param"`
 }
 
 type wireUsage struct {

@@ -5085,7 +5085,7 @@ func (s *accumulatingSink) ModelRequestEvent(event llm.ModelRequestEvent) {
 }
 
 func modelRequestLogAttrs(prompt, turn, attempt int, event llm.ModelRequestEvent) []any {
-	return []any{
+	attrs := []any{
 		"prompt", prompt,
 		"turn", turn,
 		"attempt", attempt,
@@ -5114,6 +5114,10 @@ func modelRequestLogAttrs(prompt, turn, attempt int, event llm.ModelRequestEvent
 		"elapsed_ms", event.ElapsedMS,
 		"error_stage", string(event.Stage),
 	}
+	if len(event.ResponsePayload) > 0 {
+		attrs = append(attrs, "api_response_payload", json.RawMessage(event.ResponsePayload))
+	}
+	return attrs
 }
 
 func (s *accumulatingSink) ToolUseStart(c llm.ToolCall) {
