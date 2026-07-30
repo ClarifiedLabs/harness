@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -1272,13 +1273,11 @@ func run(env environment) int {
 
 	// SIGINT wiring (design §8.4): a single handler cancels the active prompt or,
 	// on a second press / at the idle prompt, requests exit.
-	exitCh := make(chan struct{}, 1)
+	exitCh := make(chan struct{})
 	if env.sigCh != nil {
+		var exitOnce sync.Once
 		watcher := agent.NewInterruptWatcher(env.sigCh, now, func() {
-			select {
-			case exitCh <- struct{}{}:
-			default:
-			}
+			exitOnce.Do(func() { close(exitCh) })
 		})
 		stop := watcher.Start()
 		defer stop()
@@ -1292,7 +1291,7 @@ func run(env environment) int {
 	// no during-prompt input. Interactive JSON sessions steer via prompt messages.
 	if !cfg.NoSteer && (interactiveSession || machineInteractive) {
 		steerAgent := ag
-		app.Steer = func(input agent.SteerInput) { steerAgent.SteerContent(input) }
+		app.Steer = func(input agent.SteerInput) bool { return steerAgent.SteerContent(input) }
 		app.DrainSteer = func() agent.SteerInput { return steerAgent.DrainSteerContent() }
 	}
 
@@ -1314,7 +1313,7 @@ func run(env environment) int {
 		app.PendingImages = images
 		var stream *runstream.Writer
 		if jsonRunMode {
-			stream = runstream.NewWriter(rawStdout, runstream.RunStart{
+			stream = runstream.NewWriterWithAbort(rawStdout, runstream.RunStart{
 				Mode:      runstream.ModeOneshot,
 				SessionID: filepath.Base(sessionPath),
 				Agent:     agentName,
@@ -1322,7 +1321,7 @@ func run(env environment) int {
 				Model:     registryModel,
 				Images:    len(images),
 				Time:      now(),
-			}, stderr)
+			}, stderr, exitCh)
 			app.RunStream = stream
 		}
 		fmt.Fprintf(stderr, "session: %s\n", sessionPath)
@@ -1337,7 +1336,9 @@ func run(env environment) int {
 		default:
 		}
 		if stream != nil {
-			stream.Close(runstream.RunEnd{ExitCode: code})
+			if err := stream.Close(runstream.RunEnd{ExitCode: code}); err != nil && code == ui.ExitOK {
+				code = ui.ExitRuntime
+			}
 		}
 		return code
 	}
@@ -1345,14 +1346,14 @@ func run(env environment) int {
 	// Interactive JSON mode: NDJSON input messages on piped stdin drive the
 	// session (design §10); the JSON run stream owns stdout.
 	if machineInteractive {
-		stream := runstream.NewWriter(rawStdout, runstream.RunStart{
+		stream := runstream.NewWriterWithAbort(rawStdout, runstream.RunStart{
 			Mode:      runstream.ModeInteractive,
 			SessionID: filepath.Base(sessionPath),
 			Agent:     agentName,
 			Provider:  cfg.Provider,
 			Model:     registryModel,
 			Time:      now(),
-		}, stderr)
+		}, stderr, exitCh)
 		app.RunStream = stream
 		fmt.Fprintf(stderr, "session: %s\n", sessionPath)
 		fmt.Fprintln(stderr, ui.ProviderLine(cfg.Provider, cfg.Model, registryModel, reasoning, modelRegistry))
@@ -1365,7 +1366,9 @@ func run(env environment) int {
 			code = ui.ExitInterrupt
 		default:
 		}
-		stream.Close(runstream.RunEnd{ExitCode: code})
+		if err := stream.Close(runstream.RunEnd{ExitCode: code}); err != nil && code == ui.ExitOK {
+			code = ui.ExitRuntime
+		}
 		return code
 	}
 

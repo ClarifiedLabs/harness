@@ -205,18 +205,18 @@ type App struct {
 	// names none. Empty falls back to the built-in default agent.
 	HandoffAgent string
 
-	SessionPath          string // current save path; /clear rotates it
-	SessionTree          *session.Tree
-	SessionBuild         session.BuildMetadata
-	SessionRuntime       session.RuntimeProfile
-	StateDir             string    // for rotating to a fresh auto-save path on /clear
-	Created              time.Time // session creation time (preserved across saves)
-	PromptNumber         int       // last started prompt, persisted for replay numbering
-	Now                  func() time.Time
+	SessionPath    string // current save path; /clear rotates it
+	SessionTree    *session.Tree
+	SessionBuild   session.BuildMetadata
+	SessionRuntime session.RuntimeProfile
+	StateDir       string    // for rotating to a fresh auto-save path on /clear
+	Created        time.Time // session creation time (preserved across saves)
+	PromptNumber   int       // last started prompt, persisted for replay numbering
+	Now            func() time.Time
 	// RunStream, when set, mirrors the durable session event stream and the
 	// prompt boundary envelopes to the JSON run stream on stdout (design §10,
 	// -format json run modes). nil keeps stdout human-facing.
-	RunStream *runstream.Writer
+	RunStream            *runstream.Writer
 	OnSessionPathChanged func(string)
 	// OnPromptFinished observes completion after the per-prompt session save.
 	// It is primarily useful to coordinate embedders and tests whose process
@@ -242,12 +242,13 @@ type App struct {
 	// mode, where no REPL select loop exists to observe it.
 	ForceExit <-chan struct{}
 
-	// Steer, when set, routes a prepared model-bound prompt submitted during a
-	// running prompt into the agent as an in-prompt steering message (injected before
-	// the next model request) instead of queuing it for the next prompt. nil
-	// disables steering and queues the input for the next prompt. Non-model-bound
-	// during-prompt input (shell escapes, /commands, /edit) is never steered.
-	Steer func(agent.SteerInput)
+	// Steer, when set, tries to route a prepared model-bound prompt submitted
+	// during a running prompt into the agent as an in-prompt steering message
+	// (injected before the next model request) instead of queuing it for the next
+	// prompt. It returns whether the agent accepted the input; false lets the
+	// caller queue it without loss. nil disables steering. Non-model-bound input
+	// (shell escapes, /commands, /edit) is never steered.
+	Steer func(agent.SteerInput) bool
 	// DrainSteer recovers prepared steer input the running prompt never consumed
 	// (set alongside Steer). The REPL runs it as the next prompt at prompt completion so the
 	// input is not lost. Returns an empty input when nothing remains or steering
@@ -1318,7 +1319,11 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					continue
 				}
 				escPresses.reset()
-				if app.steerDuringPrompt(input) {
+				handled, prepared := app.steerDuringPrompt(input)
+				if prepared != nil {
+					preparedQueued = append(preparedQueued, *prepared)
+				}
+				if handled {
 					continue
 				}
 				queued = append(queued, input)
@@ -1694,52 +1699,55 @@ func steerInputEmpty(input agent.SteerInput) bool {
 
 // steerDuringPrompt routes a during-prompt-submitted input into the agent as a
 // in-prompt steering message when steering is enabled and the input is
-// model-bound (would start a prompt at idle). It returns true when it
-// consumed the input by steering. Non-model-bound input (shell escapes,
-// /commands, /edit requests) and any input when Steer is nil return false so the
-// caller queues them for the next prompt. The classification
-// mirrors handlePromptInput's prefix dispatch but performs no side effects,
-// since /commands and /edit must not run inside an active prompt.
-func (app *App) steerDuringPrompt(input replInput) bool {
+// model-bound (would start a prompt at idle). handled is true when the input was
+// accepted for steering or rejected during preparation. If the bounded steer
+// queue refuses an otherwise prepared input, queued contains that exact
+// model-bound content so the caller can run it later without repeating hooks or
+// losing consumed images/context. Non-model-bound input (shell escapes,
+// /commands, /edit requests) and any input when Steer is nil return false, nil
+// so the caller queues the original input. The classification mirrors
+// handlePromptInput's prefix dispatch but performs no command side effects.
+func (app *App) steerDuringPrompt(input replInput) (handled bool, queued *agent.SteerInput) {
 	if app.Steer == nil {
-		return false
+		return false, nil
 	}
 	if input.escape || input.interrupt || input.deposit || input.edit {
-		return false
+		return false, nil
 	}
 	line := input.text
 	if line == "" {
-		return false
+		return false, nil
 	}
 	if !input.interactive && !input.pasted {
-		return false
+		return false, nil
+	}
+	prepareAndSteer := func(text string, opts promptOptions) (bool, *agent.SteerInput) {
+		steered, err := app.prepareSteerInput(text, opts)
+		if err != nil {
+			return true, nil
+		}
+		if app.Steer(steered) {
+			return true, nil
+		}
+		return true, &steered
 	}
 	if input.pasted {
-		if steered, ok := app.prepareSteerInput(line, promptOptions{}); ok {
-			app.Steer(steered)
-		}
-		return true
+		return prepareAndSteer(line, promptOptions{})
 	}
 	if input.interactive {
 		// Mirror handlePromptInput's escape-prefix stripping so a steered !!foo
 		// or //foo reaches the model as !foo / /foo, exactly as it would at the
 		// idle prompt.
 		if strings.HasPrefix(line, "!!") || strings.HasPrefix(line, "//") {
-			if steered, ok := app.prepareSteerInput(line[1:], promptOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
-				app.Steer(steered)
-			}
-			return true
+			return prepareAndSteer(line[1:], promptOptions{resolveSkillMentions: true, attachPromptImages: true})
 		}
 		// !shell escapes and /commands (including /edit) are not model input —
 		// leave them queued for the idle prompt.
 		if strings.HasPrefix(line, "!") || strings.HasPrefix(line, "/") {
-			return false
+			return false, nil
 		}
 	}
-	if steered, ok := app.prepareSteerInput(line, promptOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
-		app.Steer(steered)
-	}
-	return true
+	return prepareAndSteer(line, promptOptions{resolveSkillMentions: true, attachPromptImages: true})
 }
 
 func (app *App) handlePromptInput(input replInput, readCommandLine func(string) (string, error)) replAction {
@@ -3758,9 +3766,7 @@ func (app *App) refreshMCP(ctx context.Context) error {
 	app.Agent.ResetProxySessionID()
 	if notice != "" {
 		fmt.Fprintln(app.Errw, notice)
-		if app.RunStream != nil {
-			app.RunStream.Mirror(session.Event{Type: session.EventNotice, Text: notice, Time: app.clock()()})
-		}
+		app.recordEvent(session.Event{Type: session.EventNotice, Text: notice, Time: app.clock()()})
 	}
 	return nil
 }
@@ -3834,8 +3840,8 @@ func (app *App) runPrompt(prompt string) {
 }
 
 func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), bool) {
-	prepared, ok := app.preparePrompt(prompt, opts, true)
-	if !ok {
+	prepared, err := app.preparePrompt(prompt, opts, true)
+	if err != nil {
 		return nil, false
 	}
 	preflightCtx := opts.preflightContext
@@ -3917,18 +3923,16 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 	}, true
 }
 
-func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnBlock bool) (preparedPrompt, bool) {
+func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnBlock bool) (preparedPrompt, error) {
 	var skillContext []string
 	if opts.resolveSkillMentions {
 		var ok bool
 		prompt, skillContext, ok = app.resolveSkillMentionContext(prompt)
 		if !ok {
-			if app.Renderer != nil {
-				if stopProgressOnBlock {
-					app.Renderer.StopProgress()
-				}
+			if app.Renderer != nil && stopProgressOnBlock {
+				app.Renderer.StopProgress()
 			}
-			return preparedPrompt{}, false
+			return preparedPrompt{}, errors.New("prompt skill resolution failed")
 		}
 	}
 	ctx := opts.preflightContext
@@ -3936,11 +3940,11 @@ func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnB
 		ctx = context.Background()
 	}
 	promptHook := app.runPromptSubmitHook(ctx, prompt, app.PromptNumber+1)
-	if ctx.Err() != nil {
+	if err := ctx.Err(); err != nil {
 		if app.Renderer != nil && stopProgressOnBlock {
 			app.Renderer.StopProgress()
 		}
-		return preparedPrompt{}, false
+		return preparedPrompt{}, err
 	}
 	if promptHook.Block {
 		reason := promptHook.Reason()
@@ -3955,7 +3959,7 @@ func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnB
 		} else {
 			fmt.Fprintf(app.Errw, "[prompt blocked: %s]\n", reason)
 		}
-		return preparedPrompt{}, false
+		return preparedPrompt{}, fmt.Errorf("prompt blocked: %s", reason)
 	}
 	pendingUnsupportedNotice := len(app.PendingImages) > 0 && !app.currentModelSupportsImages()
 	images := app.takePendingImages()
@@ -3964,19 +3968,19 @@ func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnB
 	}
 	promptContext := append([]string(nil), promptHook.AdditionalContext...)
 	promptContext = append(promptContext, skillContext...)
-	return preparedPrompt{prompt: prompt, images: images, promptContext: promptContext}, true
+	return preparedPrompt{prompt: prompt, images: images, promptContext: promptContext}, nil
 }
 
-func (app *App) prepareSteerInput(prompt string, opts promptOptions) (agent.SteerInput, bool) {
-	prepared, ok := app.preparePrompt(prompt, opts, false)
-	if !ok {
-		return agent.SteerInput{}, false
+func (app *App) prepareSteerInput(prompt string, opts promptOptions) (agent.SteerInput, error) {
+	prepared, err := app.preparePrompt(prompt, opts, false)
+	if err != nil {
+		return agent.SteerInput{}, err
 	}
 	return agent.SteerInput{
 		Text:           prepared.prompt,
 		Images:         imageBlocks(prepared.images),
 		RequestContext: prepared.promptContext,
-	}, true
+	}, nil
 }
 
 func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
@@ -4405,6 +4409,7 @@ func (app *App) renderHookNotices(notices []string) {
 		} else {
 			fmt.Fprintln(app.Errw, notice)
 		}
+		app.recordEvent(session.Event{Type: session.EventNotice, Text: notice})
 	}
 }
 
@@ -4441,9 +4446,7 @@ func (app *App) pollBackgroundNotices() {
 		} else {
 			fmt.Fprintln(app.Errw, notice)
 		}
-		if app.RunStream != nil {
-			app.RunStream.Mirror(session.Event{Type: session.EventNotice, Text: notice, Time: app.clock()()})
-		}
+		app.recordEvent(session.Event{Type: session.EventNotice, Text: notice, Time: app.clock()()})
 	}
 }
 
@@ -4611,15 +4614,14 @@ func sessionImages(images []inputimage.Loaded) []session.ImageInfo {
 }
 
 func (app *App) recordEvent(ev session.Event) {
-	if app.SessionPath == "" {
-		return
-	}
 	if ev.Time.IsZero() {
 		ev.Time = app.clock()()
 	}
-	if err := session.AppendEvent(app.SessionPath, ev); err != nil {
-		fmt.Fprintf(app.Errw, "[session event log failed: %v]\n", err)
-		return
+	if app.SessionPath != "" {
+		if err := session.AppendEvent(app.SessionPath, ev); err != nil {
+			fmt.Fprintf(app.Errw, "[session event log failed: %v]\n", err)
+			return
+		}
 	}
 	if app.RunStream != nil {
 		app.RunStream.Mirror(ev)
@@ -4920,6 +4922,8 @@ type accumulatingSink struct {
 	todoTurn                    int
 	inMaintenance               bool
 	terminalModelErrorDisplayed bool
+	attemptText                 strings.Builder
+	finalText                   string
 }
 
 func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
@@ -4997,6 +5001,7 @@ func (s *accumulatingSink) planDisplayState() plan.DisplayState {
 }
 
 func (s *accumulatingSink) TextDelta(text string) {
+	s.attemptText.WriteString(text)
 	s.r.TextDelta(text)
 	s.rec.TextDelta(text)
 }
@@ -5033,6 +5038,7 @@ func (s *accumulatingSink) CompactionComplete() {
 }
 
 func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
+	s.attemptText.Reset()
 	if s.app != nil && s.app.Todos != nil && s.app.agentHasTool("update_todos") {
 		s.app.Todos.CommitModelRound(turn != s.todoTurn)
 		s.todoTurn = turn
@@ -5044,6 +5050,7 @@ func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.Context
 }
 
 func (s *accumulatingSink) TurnAttemptAbandoned(turn, attempt int) {
+	s.attemptText.Reset()
 	s.rec.TurnAttemptAbandoned(turn, attempt)
 }
 
@@ -5186,6 +5193,7 @@ func (s *accumulatingSink) ModelErrorDiagnostic(event agent.ModelErrorDiagnostic
 }
 
 func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
+	s.finalText = s.attemptText.String()
 	// Price the turn when the provider did not supply a cost (proxy streams set
 	// CostKnown themselves), against the App's active model so a mid-prompt
 	// model switch is not mispriced (r63). Persist the priced usage so replay
@@ -5195,6 +5203,15 @@ func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
 	}
 	s.r.TurnComplete(u)
 	s.rec.TurnComplete(u)
+}
+
+// FinalText returns the most recent assistant text emitted during this prompt,
+// including partial text from a terminal failed attempt.
+func (s *accumulatingSink) FinalText() string {
+	if s.attemptText.Len() > 0 {
+		return s.attemptText.String()
+	}
+	return s.finalText
 }
 
 func (s *accumulatingSink) MaintenanceComplete(u agent.MaintenanceUsage) {

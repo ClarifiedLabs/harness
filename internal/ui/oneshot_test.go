@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"harness/internal/agent"
 	"harness/internal/background"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
@@ -240,15 +242,30 @@ func TestOneShotStandaloneUnknownSkillSkipsProvider(t *testing.T) {
 	app.Skills = map[string]skills.Skill{
 		"commit": {Name: "commit", Description: "Create a git commit", Location: "/skills/commit/SKILL.md"},
 	}
+	var stream bytes.Buffer
+	w := runstream.NewWriter(&stream, runstream.RunStart{
+		Mode: runstream.ModeOneshot, SessionID: "test-session", Provider: "fake", Model: "fake",
+	}, &errw)
+	app.RunStream = w
 
-	if code := OneShot(app, "$missing"); code != ExitUsage {
+	code := OneShot(app, "$missing")
+	if code != ExitUsage {
 		t.Fatalf("exit code = %d, want %d", code, ExitUsage)
 	}
+	w.Close(runstream.RunEnd{ExitCode: code})
 	if len(fp.Requests) != 0 {
 		t.Fatalf("provider requests = %d, want 0", len(fp.Requests))
 	}
 	if !strings.Contains(errw.String(), `unknown skill "missing"`) {
 		t.Fatalf("missing unknown skill notice, errw=%q", errw.String())
+	}
+	lines := decodeRunStreamLines(t, stream.String())
+	if len(lines) != 4 || lines[0]["type"] != "run_start" || lines[1]["type"] != "prompt_start" ||
+		lines[2]["type"] != "prompt_end" || lines[3]["type"] != "run_end" {
+		t.Fatalf("rejected one-shot framing = %v", lines)
+	}
+	if lines[2]["exit_code"] != float64(ExitUsage) || lines[2]["termination_reason"] != "error" || lines[2]["error"] == "" {
+		t.Fatalf("rejected prompt_end = %v", lines[2])
 	}
 }
 
@@ -957,6 +974,63 @@ func TestOneShotJSONRunStreamEvents(t *testing.T) {
 	if runEnd["type"] != "run_end" || runEnd["exit_code"] != float64(0) ||
 		runEnd["termination_reason"] != "model_completed" {
 		t.Fatalf("run_end = %v, want the one-shot outcome mirrored from prompt_end", runEnd)
+	}
+}
+
+type testExitStatusError int
+
+func (e testExitStatusError) Error() string { return fmt.Sprintf("subprocess exited %d", e) }
+func (e testExitStatusError) ExitCode() int { return int(e) }
+
+func TestAccumulatingSinkFinalTextClearsOnTextlessCompletedTurn(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	sink := newAccumulatingSink(app.Renderer, app, 1)
+	sink.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	sink.TextDelta("earlier turn text")
+	sink.TurnComplete(agent.TurnUsage{})
+	if got := sink.FinalText(); got != "earlier turn text" {
+		t.Fatalf("first final text = %q", got)
+	}
+	sink.TurnAttemptStart(2, 1, agent.ContextEstimate{})
+	sink.TurnComplete(agent.TurnUsage{})
+	if got := sink.FinalText(); got != "" {
+		t.Fatalf("textless latest turn final text = %q, want empty", got)
+	}
+	sink.FlushEvents()
+}
+
+func TestOneShotJSONRunStreamPreservesProcessExit130AsErrorAndDoesNotReuseFinalText(t *testing.T) {
+	var out, errw bytes.Buffer
+	fail := llmtest.Step{Err: testExitStatusError(130)}
+	fp := llmtest.New("fake", fail, fail, fail)
+	app := newTestApp(t, &out, &errw, fp)
+	app.Agent.SetTranscript([]llm.Message{
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "earlier prompt"}}},
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "stale answer"}}},
+	})
+	var stream bytes.Buffer
+	w := runstream.NewWriter(&stream, runstream.RunStart{
+		Mode: runstream.ModeOneshot, SessionID: "test-session", Provider: "fake", Model: "fake",
+	}, &errw)
+	app.RunStream = w
+
+	code := OneShot(app, "go")
+	if code != 130 {
+		t.Fatalf("exit code = %d, want underlying process status 130", code)
+	}
+	w.Close(runstream.RunEnd{ExitCode: code})
+
+	lines := decodeRunStreamLines(t, stream.String())
+	end := lines[len(lines)-2]
+	if end["type"] != "prompt_end" || end["exit_code"] != float64(130) || end["termination_reason"] != "error" || end["error"] == "" {
+		t.Fatalf("prompt_end = %v, want process failure rather than cancellation", end)
+	}
+	if got, exists := end["final_text"]; exists && got != "" {
+		t.Fatalf("failed prompt final_text = %v, want empty rather than prior transcript text", got)
+	}
+	if runEnd := lines[len(lines)-1]; runEnd["exit_code"] != float64(130) || runEnd["termination_reason"] != "error" || runEnd["error"] == "" {
+		t.Fatalf("run_end = %v, want process failure mirrored", runEnd)
 	}
 }
 

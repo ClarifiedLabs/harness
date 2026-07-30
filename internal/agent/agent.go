@@ -242,6 +242,10 @@ type SteerInput struct {
 	Text           string
 	Images         []llm.ContentBlock
 	RequestContext []string
+	// CorrelationID is opaque caller metadata. The agent never sends it to the
+	// model; interactive protocol drivers use it only when recovering an input
+	// that was not consumed before the prompt ended.
+	CorrelationID string
 }
 
 // TurnUsage is the accounting for one conversational turn. A turn contains one
@@ -640,29 +644,31 @@ func (a *Agent) SetHooks(runner *hooks.Runner) {
 
 // Steer injects text as an in-prompt steering message. It is the simple text-only
 // helper for callers that do not need images or request-only context.
-func (a *Agent) Steer(text string) {
+func (a *Agent) Steer(text string) bool {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return
+		return false
 	}
-	a.SteerContent(SteerInput{Text: text})
+	return a.SteerContent(SteerInput{Text: text})
 }
 
-// SteerContent injects prepared content as an in-prompt steering message: the loop
-// drains it before the next model request (between tool rounds) and appends it as
-// a RoleUser message. It is a no-op when steering was not enabled
-// (Options.Steer false), the input is empty, or the steer buffer is full, so a
-// flooding caller cannot block the REPL. SteerContent is safe to call
-// concurrently with a running prompt.
-func (a *Agent) SteerContent(input SteerInput) {
+// SteerContent tries to inject prepared content as an in-prompt steering
+// message: the loop drains it before the next model request (between tool
+// rounds) and appends it as a RoleUser message. It returns false when steering
+// was not enabled (Options.Steer false), the input is empty, or the steer buffer
+// is full, so non-blocking callers can queue the input elsewhere instead of
+// losing it. SteerContent is safe to call concurrently with a running prompt.
+func (a *Agent) SteerContent(input SteerInput) bool {
 	if a.steer == nil || steerInputEmpty(input) {
-		return
+		return false
 	}
 	input.Images = cloneImageBlocks(input.Images)
 	input.RequestContext = cleanContext(input.RequestContext)
 	select {
 	case a.steer <- input:
+		return true
 	default:
+		return false
 	}
 }
 
@@ -677,9 +683,16 @@ func (a *Agent) DrainSteer() string {
 }
 
 // DrainSteerContent pops all queued prepared in-prompt steer input that the loop
-// has not yet consumed. Non-blocking.
+// has not yet consumed and combines it into one model-bound input. Non-blocking.
 func (a *Agent) DrainSteerContent() SteerInput {
 	return a.drainSteer()
+}
+
+// DrainSteerContents pops queued steer inputs without combining them. Protocol
+// drivers use this form to preserve each input's correlation metadata when a
+// prompt ends before the agent consumes it. Non-blocking.
+func (a *Agent) DrainSteerContents() []SteerInput {
+	return a.drainSteerInputs()
 }
 
 // SetTranscript replaces the running transcript (used when resuming a session).
@@ -2716,21 +2729,29 @@ func (a *Agent) textMessage(role llm.Role, text string) llm.Message {
 // is non-blocking so a concurrent Steer caller can never stall the loop; inputs
 // queued after this drain are deferred to the next tool round.
 func (a *Agent) drainSteer() SteerInput {
-	if a.steer == nil {
-		return SteerInput{}
-	}
 	var out SteerInput
+	for _, input := range a.drainSteerInputs() {
+		if strings.TrimSpace(input.Text) != "" {
+			if out.Text != "" {
+				out.Text += "\n\n"
+			}
+			out.Text += input.Text
+		}
+		out.Images = append(out.Images, cloneImageBlocks(input.Images)...)
+		out.RequestContext = append(out.RequestContext, cleanContext(input.RequestContext)...)
+	}
+	return out
+}
+
+func (a *Agent) drainSteerInputs() []SteerInput {
+	if a.steer == nil {
+		return nil
+	}
+	var out []SteerInput
 	for {
 		select {
 		case input := <-a.steer:
-			if strings.TrimSpace(input.Text) != "" {
-				if out.Text != "" {
-					out.Text += "\n\n"
-				}
-				out.Text += input.Text
-			}
-			out.Images = append(out.Images, cloneImageBlocks(input.Images)...)
-			out.RequestContext = append(out.RequestContext, cleanContext(input.RequestContext)...)
+			out = append(out, input)
 		default:
 			return out
 		}

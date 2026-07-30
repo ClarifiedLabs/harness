@@ -75,7 +75,7 @@ func TestDecoderMalformedLineDoesNotStopStream(t *testing.T) {
 
 func TestDecoderUnknownTypeAndFieldValidation(t *testing.T) {
 	inputs, errs := decodeAll(t,
-		`{"type":"bogus"}`+"\n"+
+		`{"type":"bogus","id":"b1"}`+"\n"+
 			`{"type":"prompt","id":"p1"}`+"\n"+ // no text, no images
 			`{"type":"approval_response","approve":true}`+"\n"+ // no id
 			`{"type":"approval_response","id":"h1"}`+"\n") // no approve
@@ -89,6 +89,12 @@ func TestDecoderUnknownTypeAndFieldValidation(t *testing.T) {
 	for i, want := range kinds {
 		if errs[i].Kind != want {
 			t.Fatalf("error %d kind = %q, want %q", i, errs[i].Kind, want)
+		}
+	}
+	wantIDs := []string{"b1", "p1", "", "h1"}
+	for i, want := range wantIDs {
+		if errs[i].ID != want {
+			t.Fatalf("error %d ID = %q, want %q", i, errs[i].ID, want)
 		}
 	}
 }

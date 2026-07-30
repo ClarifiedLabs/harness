@@ -6,16 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"harness/internal/agent"
+	"harness/internal/background"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/plan"
 	"harness/internal/runstream"
+	"harness/internal/skills"
 	"harness/internal/tools"
 )
 
@@ -46,9 +50,12 @@ func steerAgent(app *App, fp *llmtest.FakeProvider, reg *tools.Registry) chan st
 	app.Agent = ag
 	steered := make(chan struct{})
 	var once sync.Once
-	app.Steer = func(input agent.SteerInput) {
-		ag.SteerContent(input)
-		once.Do(func() { close(steered) })
+	app.Steer = func(input agent.SteerInput) bool {
+		accepted := ag.SteerContent(input)
+		if accepted {
+			once.Do(func() { close(steered) })
+		}
+		return accepted
 	}
 	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
 	return steered
@@ -205,7 +212,7 @@ func TestRunJSONSteerInjectsBeforeNextModelRound(t *testing.T) {
 	}
 }
 
-func TestRunJSONSteerRecoveredAsNextPrompt(t *testing.T) {
+func TestRunJSONSteersRecoveredSeparatelyWithCorrelationIDs(t *testing.T) {
 	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
@@ -214,23 +221,44 @@ func TestRunJSONSteerRecoveredAsNextPrompt(t *testing.T) {
 			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
 			Block: func(context.Context) { close(inPrompt); <-releaseTurn },
 		},
-		llmtest.Step{Events: []llm.StreamEvent{textDelta("recovered answer")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("first recovered answer")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("second recovered answer")}, Stop: llm.StopEndTurn},
 	)
 	app, stream, _, w := newJSONRunApp(t, fp)
 	steerAgent(app, fp, nil)
+	baseSteer := app.Steer
+	accepted := make(chan string, 2)
+	app.Steer = func(input agent.SteerInput) bool {
+		ok := baseSteer(input)
+		if ok {
+			accepted <- input.CorrelationID
+		}
+		return ok
+	}
 
 	pw, codeCh := runJSONPipe(t, app)
-	writePipe(t, pw, "{\"type\":\"prompt\",\"text\":\"first\"}\n")
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"first\",\"text\":\"first\"}\n")
 	select {
 	case <-inPrompt:
 	case <-time.After(2 * time.Second):
 		t.Fatal("turn did not start")
 	}
-	// Steering lands after the last model request of the prompt: it must be
-	// recovered as the next prompt, matching TTY REPL semantics.
-	writePipe(t, pw, "{\"type\":\"prompt\",\"text\":\"redirect later\"}\n")
+	// Both inputs land after the prompt's last model request. Recovery must keep
+	// them separate and retain their protocol IDs instead of combining them.
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"s1\",\"text\":\"redirect one\"}\n")
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"s2\",\"text\":\"redirect two\"}\n")
+	for _, want := range []string{"s1", "s2"} {
+		select {
+		case got := <-accepted:
+			if got != want {
+				t.Fatalf("accepted steer ID = %q, want %q", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("steer %q was not accepted", want)
+		}
+	}
 	close(releaseTurn)
-	waitFor(t, func() bool { return strings.Count(stream.String(), "\"type\":\"prompt_end\"") >= 2 }, "recovered prompt_end")
+	waitFor(t, func() bool { return strings.Count(stream.String(), "\"type\":\"prompt_end\"") >= 3 }, "recovered prompt_end events")
 	writePipe(t, pw, "{\"type\":\"shutdown\"}\n")
 	code := <-codeCh
 	if code != ExitOK {
@@ -239,13 +267,16 @@ func TestRunJSONSteerRecoveredAsNextPrompt(t *testing.T) {
 	w.Close(runstream.RunEnd{ExitCode: code})
 
 	lines := decodeRunStreamLines(t, stream.String())
-	if got := countType(lines, "prompt_end"); got != 2 {
-		t.Fatalf("prompt_end count = %d, want 2 (steer recovered as next prompt); types=%v",
-			got, streamTypes(lines))
+	if got := countType(lines, "prompt_end"); got != 3 {
+		t.Fatalf("prompt_end count = %d, want 3; types=%v", got, streamTypes(lines))
 	}
 	users := linesOfType(lines, "user")
-	if len(users) != 2 || users[1]["text"] != "redirect later" {
-		t.Fatalf("user events = %v, want the recovered steer as the second prompt", users)
+	if len(users) != 3 || users[1]["text"] != "redirect one" || users[2]["text"] != "redirect two" {
+		t.Fatalf("user events = %v, want two separate recovered prompts", users)
+	}
+	starts := linesOfType(lines, "prompt_start")
+	if len(starts) != 3 || starts[1]["id"] != "s1" || starts[2]["id"] != "s2" {
+		t.Fatalf("prompt_start IDs = %v, want recovered IDs s1 then s2", starts)
 	}
 }
 
@@ -334,8 +365,8 @@ func TestRunJSONBadInputNeverKillsSession(t *testing.T) {
 
 	code := RunJSON(strings.NewReader(
 		"garbage\n"+
-			"{\"type\":\"bogus\"}\n"+
-			"{\"type\":\"prompt\"}\n"+
+			"{\"type\":\"bogus\",\"id\":\"badtype\"}\n"+
+			"{\"type\":\"prompt\",\"id\":\"empty\"}\n"+
 			"{\"type\":\"approval_response\",\"id\":\"h9\"}\n"+
 			"{\"type\":\"approval_response\",\"id\":\"h9\",\"approve\":true}\n"+
 			"{\"type\":\"prompt\",\"id\":\"ok1\",\"text\":\"hi\"}\n"+
@@ -345,9 +376,16 @@ func TestRunJSONBadInputNeverKillsSession(t *testing.T) {
 	}
 	w.Close(runstream.RunEnd{ExitCode: code})
 	lines := decodeRunStreamLines(t, stream.String())
-	if got := countType(lines, "input_error"); got != 5 {
+	errs := linesOfType(lines, "input_error")
+	if len(errs) != 5 {
 		t.Fatalf("input_error count = %d, want 5 (malformed, unknown type, missing text, missing approve, no pending approval); lines=%v",
-			got, streamTypes(lines))
+			len(errs), streamTypes(lines))
+	}
+	wantIDs := []any{nil, "badtype", "empty", "h9", "h9"}
+	for i, want := range wantIDs {
+		if errs[i]["id"] != want {
+			t.Fatalf("input_error %d ID = %v, want %v; errors=%v", i, errs[i]["id"], want, errs)
+		}
 	}
 	var sawPrompt bool
 	for _, line := range linesOfType(lines, "prompt_start") {
@@ -357,6 +395,204 @@ func TestRunJSONBadInputNeverKillsSession(t *testing.T) {
 	}
 	if !sawPrompt {
 		t.Fatalf("valid prompt after bad input did not run: %v", streamTypes(lines))
+	}
+}
+
+func TestRunJSONRejectedSteerAdmissionQueuesPreparedPrompt(t *testing.T) {
+	inPrompt := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{Stop: llm.StopEndTurn, Block: func(context.Context) { close(inPrompt); <-releaseTurn }},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("queued answer")}, Stop: llm.StopEndTurn},
+	)
+	app, stream, _, w := newJSONRunApp(t, fp)
+	steerAgent(app, fp, nil)
+	rejected := make(chan struct{})
+	app.Steer = func(agent.SteerInput) bool {
+		close(rejected)
+		return false
+	}
+
+	pw, codeCh := runJSONPipe(t, app)
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p1\",\"text\":\"first\"}\n")
+	select {
+	case <-inPrompt:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first prompt did not start")
+	}
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p2\",\"text\":\"must not drop\"}\n")
+	select {
+	case <-rejected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("steer admission was not attempted")
+	}
+	close(releaseTurn)
+	waitFor(t, func() bool { return strings.Count(stream.String(), "\"type\":\"prompt_end\"") >= 2 }, "queued prompt_end")
+	writePipe(t, pw, "{\"type\":\"shutdown\"}\n")
+	code := <-codeCh
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	w.Close(runstream.RunEnd{ExitCode: code})
+
+	lines := decodeRunStreamLines(t, stream.String())
+	starts := linesOfType(lines, "prompt_start")
+	if len(starts) != 2 || starts[1]["id"] != "p2" || starts[1]["text"] != "must not drop" {
+		t.Fatalf("prompt starts = %v, want rejected steer queued as p2", starts)
+	}
+}
+
+func TestRunJSONCancelledPromptDoesNotReusePriorFinalText(t *testing.T) {
+	secondStarted := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("old answer")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Block: func(ctx context.Context) { close(secondStarted); <-ctx.Done() }},
+	)
+	app, stream, _, w := newJSONRunApp(t, fp)
+	pw, codeCh := runJSONPipe(t, app)
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p1\",\"text\":\"first\"}\n")
+	waitFor(t, func() bool { return strings.Count(stream.String(), "\"type\":\"prompt_end\"") >= 1 }, "first prompt_end")
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p2\",\"text\":\"second\"}\n")
+	select {
+	case <-secondStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second prompt did not start")
+	}
+	writePipe(t, pw, "{\"type\":\"interrupt\"}\n")
+	waitFor(t, func() bool { return strings.Count(stream.String(), "\"type\":\"prompt_end\"") >= 2 }, "cancelled prompt_end")
+	writePipe(t, pw, "{\"type\":\"shutdown\"}\n")
+	code := <-codeCh
+	w.Close(runstream.RunEnd{ExitCode: code})
+
+	ends := linesOfType(decodeRunStreamLines(t, stream.String()), "prompt_end")
+	if len(ends) != 2 || ends[0]["final_text"] != "old answer" {
+		t.Fatalf("prompt ends = %v", ends)
+	}
+	if got, exists := ends[1]["final_text"]; exists && got != "" {
+		t.Fatalf("cancelled prompt final_text = %v, want empty rather than prior answer; end=%v", got, ends[1])
+	}
+}
+
+func TestRunJSONForceExitCancelsInitialMCPRefresh(t *testing.T) {
+	fp := llmtest.New("fake")
+	app, _, _, w := newJSONRunApp(t, fp)
+	forceExit := make(chan struct{}, 1)
+	app.ForceExit = forceExit
+	refreshStarted := make(chan struct{})
+	app.RefreshMCP = func(ctx context.Context, _ string) (*tools.Registry, string) {
+		close(refreshStarted)
+		<-ctx.Done()
+		return nil, ""
+	}
+
+	done := make(chan int, 1)
+	go func() { done <- RunJSON(strings.NewReader(""), app) }()
+	<-refreshStarted
+	forceExit <- struct{}{}
+	select {
+	case code := <-done:
+		if code != ExitInterrupt {
+			t.Fatalf("force exit during initial MCP refresh = %d, want %d", code, ExitInterrupt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("force exit did not cancel initial MCP refresh")
+	}
+	if err := w.Close(runstream.RunEnd{ExitCode: ExitInterrupt}); err != nil {
+		t.Fatalf("close run stream: %v", err)
+	}
+}
+
+func TestRunJSONInitialBoundaryRefreshesMCPAndPersistsNotice(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn})
+	app, stream, _, w := newJSONRunApp(t, fp)
+	app.AgentName = "auto"
+	manager := background.NewManager(background.Options{})
+	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "run_command",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			return tools.BackgroundJobResult{Text: "background result"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start background job: %v", err)
+	}
+	if _, err := manager.Wait(context.Background(), job.ID, time.Second); err != nil {
+		t.Fatalf("wait for background job: %v", err)
+	}
+	app.Background = manager
+	refreshed := &tools.Registry{}
+	refreshed.Register(mcpRefreshTool{name: "mcp__test__initial"})
+	calls := 0
+	const notice = "[mcp: tool list updated; 1 tools]"
+	app.RefreshMCP = func(context.Context, string) (*tools.Registry, string) {
+		calls++
+		return refreshed, notice
+	}
+
+	code := RunJSON(strings.NewReader("{\"type\":\"prompt\",\"id\":\"p1\",\"text\":\"hello\"}\n"), app)
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	w.Close(runstream.RunEnd{ExitCode: code})
+	if calls != 1 {
+		t.Fatalf("RefreshMCP calls = %d, want one initial boundary", calls)
+	}
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
+	}
+	var advertised bool
+	for _, tool := range fp.Requests[0].Tools {
+		advertised = advertised || tool.Name == "mcp__test__initial"
+	}
+	if !advertised {
+		t.Fatalf("initially refreshed tool was not advertised: %+v", fp.Requests[0].Tools)
+	}
+	lines := decodeRunStreamLines(t, stream.String())
+	var noticeIndex, promptIndex = -1, -1
+	for i, line := range lines {
+		switch line["type"] {
+		case "notice":
+			if line["text"] == notice {
+				noticeIndex = i
+			}
+		case "prompt_start":
+			promptIndex = i
+		}
+	}
+	if noticeIndex < 0 || promptIndex < 0 || noticeIndex > promptIndex {
+		t.Fatalf("initial MCP notice must precede prompt_start; types=%v", streamTypes(lines))
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	if !strings.Contains(string(raw), notice) || !strings.Contains(string(raw), "[background:") {
+		t.Fatalf("raw.ndjson omitted streamed boundary notices:\n%s", raw)
+	}
+}
+
+func TestRunJSONPromptPreparationRejectionReturnsCorrelatedInputError(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("valid answer")}, Stop: llm.StopEndTurn})
+	app, stream, _, w := newJSONRunApp(t, fp)
+	app.Skills = map[string]skills.Skill{
+		"known": {Name: "known", Location: "/skills/known/SKILL.md"},
+	}
+	code := RunJSON(strings.NewReader(
+		"{\"type\":\"prompt\",\"id\":\"bad\",\"text\":\"$missing\"}\n"+
+			"{\"type\":\"prompt\",\"id\":\"good\",\"text\":\"hello\"}\n"), app)
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	w.Close(runstream.RunEnd{ExitCode: code})
+
+	lines := decodeRunStreamLines(t, stream.String())
+	errs := linesOfType(lines, "input_error")
+	if len(errs) != 1 || errs[0]["id"] != "bad" || !strings.Contains(errs[0]["message"].(string), "skill resolution") {
+		t.Fatalf("input errors = %v, want correlated preparation rejection", errs)
+	}
+	starts := linesOfType(lines, "prompt_start")
+	if len(starts) != 1 || starts[0]["id"] != "good" {
+		t.Fatalf("prompt starts = %v, want only accepted prompt", starts)
 	}
 }
 

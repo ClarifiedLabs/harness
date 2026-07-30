@@ -3835,7 +3835,7 @@ func TestREPLDoubleEscapeStillCancelsAfterSubmittedSteer(t *testing.T) {
 		},
 	})
 	app := liveTestApp(t, &out, &errw, fp)
-	app.Steer = func(agent.SteerInput) {}
+	app.Steer = func(agent.SteerInput) bool { return true }
 	app.Interrupt = agent.NewInterruptWatcher(make(chan os.Signal), app.clock(), func() {})
 
 	pr, pw := io.Pipe()
@@ -4163,7 +4163,7 @@ func TestREPLTypeaheadDuringActiveTurnQueuesWhenSteerConfigured(t *testing.T) {
 	ag.SetSystem("you are a test")
 	ag.SetSleep(func(time.Duration) {})
 	app.Agent = ag
-	app.Steer = func(input agent.SteerInput) { ag.SteerContent(input) }
+	app.Steer = func(input agent.SteerInput) bool { return ag.SteerContent(input) }
 	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
 
 	pr, pw := io.Pipe()
@@ -5461,9 +5461,12 @@ func TestREPLDuringPromptSteerInjectsBeforeNextModelRound(t *testing.T) {
 	ag.SetSleep(func(time.Duration) {})
 	app.Agent = ag
 	steerQueued := make(chan struct{})
-	app.Steer = func(input agent.SteerInput) {
-		ag.SteerContent(input)
-		close(steerQueued)
+	app.Steer = func(input agent.SteerInput) bool {
+		accepted := ag.SteerContent(input)
+		if accepted {
+			close(steerQueued)
+		}
+		return accepted
 	}
 	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
 
@@ -5570,9 +5573,12 @@ func TestREPLDuringPromptSteerCarriesSkillContext(t *testing.T) {
 	ag.SetSleep(func(time.Duration) {})
 	app.Agent = ag
 	steerQueued := make(chan struct{})
-	app.Steer = func(input agent.SteerInput) {
-		ag.SteerContent(input)
-		close(steerQueued)
+	app.Steer = func(input agent.SteerInput) bool {
+		accepted := ag.SteerContent(input)
+		if accepted {
+			close(steerQueued)
+		}
+		return accepted
 	}
 	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
 
@@ -5644,7 +5650,7 @@ func TestREPLDuringPromptSteerPromptHookBlockSkipsInjection(t *testing.T) {
 	ag.SetSystem("you are a test")
 	ag.SetSleep(func(time.Duration) {})
 	app.Agent = ag
-	app.Steer = func(input agent.SteerInput) { ag.SteerContent(input) }
+	app.Steer = func(input agent.SteerInput) bool { return ag.SteerContent(input) }
 	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
 
 	pr, pw := io.Pipe()
@@ -5749,7 +5755,7 @@ func TestREPLDuringPromptSteerRecoveredWhenTurnEndsWithoutToolRound(t *testing.T
 	ag.SetSystem("you are a test")
 	ag.SetSleep(func(time.Duration) {})
 	app.Agent = ag
-	app.Steer = func(input agent.SteerInput) { ag.SteerContent(input) }
+	app.Steer = func(input agent.SteerInput) bool { return ag.SteerContent(input) }
 	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
 
 	pr, pw := io.Pipe()
@@ -5802,7 +5808,7 @@ func TestREPLDuringPromptRecoveredLiteralSlashSteerDoesNotRunCommand(t *testing.
 	ag.SetSystem("you are a test")
 	ag.SetSleep(func(time.Duration) {})
 	app.Agent = ag
-	app.Steer = func(input agent.SteerInput) { ag.SteerContent(input) }
+	app.Steer = func(input agent.SteerInput) bool { return ag.SteerContent(input) }
 	app.DrainSteer = func() agent.SteerInput { return ag.DrainSteerContent() }
 
 	pr, pw := io.Pipe()
@@ -5828,6 +5834,51 @@ func TestREPLDuringPromptRecoveredLiteralSlashSteerDoesNotRunCommand(t *testing.
 	}
 	if got := transcriptPrompts(app); got != "first|/exit" {
 		t.Fatalf("prompts = %q, want first|/exit (literal slash steer must not run /exit)", got)
+	}
+}
+
+func TestREPLRejectedSteerAdmissionRunsPreparedInputNext(t *testing.T) {
+	var out, errw lockedBuffer
+	inPrompt := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{Stop: llm.StopEndTurn, Block: func(context.Context) { close(inPrompt); <-releaseTurn }},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("queued answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp)
+	rejected := make(chan struct{})
+	app.Steer = func(agent.SteerInput) bool {
+		close(rejected)
+		return false
+	}
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-inPrompt:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+	writePipe(t, pw, "redirect\r")
+	select {
+	case <-rejected:
+	case <-time.After(time.Second):
+		t.Fatal("steer admission was not attempted")
+	}
+	close(releaseTurn)
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "request from prepared queued input")
+	_ = pw.Close()
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	if got := transcriptPrompts(app); got != "first|redirect" {
+		t.Fatalf("prompts = %q, want rejected steer retained as next prompt", got)
 	}
 }
 
@@ -5857,10 +5908,13 @@ func TestSteerDuringPromptClassification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var got string
 			var called bool
-			app := &App{Steer: func(input agent.SteerInput) { called = true; got = input.Text }}
-			steered := app.steerDuringPrompt(tc.input)
-			if steered != tc.wantSteer {
-				t.Fatalf("steerDuringPrompt = %v, want %v", steered, tc.wantSteer)
+			app := &App{Steer: func(input agent.SteerInput) bool { called = true; got = input.Text; return true }}
+			handled, queued := app.steerDuringPrompt(tc.input)
+			if handled != tc.wantSteer {
+				t.Fatalf("steerDuringPrompt handled = %v, want %v", handled, tc.wantSteer)
+			}
+			if queued != nil {
+				t.Fatalf("steerDuringPrompt queued = %+v after accepted steering", queued)
 			}
 			if tc.wantSteer {
 				if !called {
@@ -5875,8 +5929,17 @@ func TestSteerDuringPromptClassification(t *testing.T) {
 
 	// nil Steer disables steering: everything is queued (returns false).
 	app := &App{}
-	if app.steerDuringPrompt(replInput{text: "hi", interactive: true}) {
-		t.Fatalf("steerDuringPrompt should be false when Steer is nil")
+	if handled, queued := app.steerDuringPrompt(replInput{text: "hi", interactive: true}); handled || queued != nil {
+		t.Fatalf("steerDuringPrompt = (%v, %+v), want (false, nil) when Steer is nil", handled, queued)
+	}
+
+	// A full bounded steer queue must return the already-prepared model input,
+	// including literal-prefix normalization, rather than asking the idle loop to
+	// prepare and run the raw input again.
+	app.Steer = func(agent.SteerInput) bool { return false }
+	handled, queued := app.steerDuringPrompt(replInput{text: "//path", interactive: true})
+	if !handled || queued == nil || queued.Text != "/path" {
+		t.Fatalf("rejected steer = (%v, %+v), want prepared literal /path queued", handled, queued)
 	}
 }
 

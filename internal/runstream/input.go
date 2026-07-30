@@ -58,6 +58,9 @@ const (
 type LineError struct {
 	Kind    LineErrorKind
 	Message string
+	// ID is the best-effort correlation ID recovered from a syntactically valid
+	// input envelope, even when another field makes the message invalid.
+	ID string
 }
 
 func (e *LineError) Error() string { return e.Message }
@@ -83,14 +86,15 @@ func (d *Decoder) Decode() (Input, error) {
 		if len(line) == 0 {
 			continue
 		}
+		id := inputCorrelationID(line)
 		var in Input
 		if err := json.Unmarshal(line, &in); err != nil {
-			return Input{}, &LineError{Kind: LineMalformedJSON, Message: fmt.Sprintf("malformed JSON input: %v", err)}
+			return Input{}, &LineError{Kind: LineMalformedJSON, Message: fmt.Sprintf("malformed JSON input: %v", err), ID: id}
 		}
 		switch in.Type {
 		case InputPrompt:
 			if strings.TrimSpace(in.Text) == "" && len(in.Images) == 0 {
-				return Input{}, &LineError{Kind: LineInvalidFields, Message: "prompt requires text"}
+				return Input{}, &LineError{Kind: LineInvalidFields, Message: "prompt requires text", ID: in.ID}
 			}
 		case InputInterrupt, InputShutdown:
 		case InputApprovalResponse:
@@ -98,13 +102,23 @@ func (d *Decoder) Decode() (Input, error) {
 				return Input{}, &LineError{Kind: LineInvalidFields, Message: "approval_response requires id"}
 			}
 			if in.Approve == nil {
-				return Input{}, &LineError{Kind: LineInvalidFields, Message: "approval_response requires approve"}
+				return Input{}, &LineError{Kind: LineInvalidFields, Message: "approval_response requires approve", ID: in.ID}
 			}
 		default:
-			return Input{}, &LineError{Kind: LineUnknownType, Message: fmt.Sprintf("unknown input type %q", in.Type)}
+			return Input{}, &LineError{Kind: LineUnknownType, Message: fmt.Sprintf("unknown input type %q", in.Type), ID: in.ID}
 		}
 		return in, nil
 	}
+}
+
+func inputCorrelationID(line []byte) string {
+	var envelope struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(line, &envelope); err != nil {
+		return ""
+	}
+	return envelope.ID
 }
 
 // readLine accumulates one line up to MaxInputLine, discarding and rejecting

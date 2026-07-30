@@ -84,6 +84,11 @@ func (d *jsonDriver) run() int {
 	}
 	d.msgs = make(chan jsonInputMsg, 16)
 	d.done = make(chan jsonPromptDone, 1)
+	// Match the TTY REPL's first idle boundary: refresh dynamic tools and surface
+	// any resumed handoff before admitting the first protocol prompt.
+	if d.boundary() {
+		return ExitInterrupt
+	}
 	go d.readInput()
 	for {
 		select {
@@ -102,7 +107,7 @@ func (d *jsonDriver) run() int {
 				continue
 			}
 			if m.lineErr != nil {
-				d.w.InputError("", m.lineErr.Message)
+				d.w.InputError(m.lineErr.ID, m.lineErr.Message)
 				continue
 			}
 			if code, exit := d.handle(m.in); exit {
@@ -113,7 +118,9 @@ func (d *jsonDriver) run() int {
 			if d.shutdownRequested || (d.eofSeen && len(d.queued) == 0) {
 				return ExitOK
 			}
-			d.boundary()
+			if d.boundary() {
+				return ExitInterrupt
+			}
 		case <-d.app.ForceExit:
 			d.forceExitPrompt()
 			return ExitInterrupt
@@ -185,11 +192,18 @@ func (d *jsonDriver) steer(req jsonPromptRequest) {
 		d.queued = append(d.queued, req)
 		return
 	}
-	steered, ok := d.app.prepareSteerInput(req.text, promptOptions{resolveSkillMentions: true, attachPromptImages: false})
-	if !ok {
-		return // rejected by hooks or skills; already reported on Errw
+	steered, err := d.app.prepareSteerInput(req.text, promptOptions{resolveSkillMentions: true, attachPromptImages: false})
+	if err != nil {
+		d.w.InputError(req.id, err.Error())
+		return
 	}
-	d.app.Steer(steered)
+	steered.CorrelationID = req.id
+	if !d.app.Steer(steered) {
+		// Preserve the already-prepared input (and its protocol ID) when the
+		// agent's bounded non-blocking steer queue is full.
+		req.steer = &steered
+		d.queued = append(d.queued, req)
+	}
 }
 
 func (d *jsonDriver) handleApproval(in runstream.Input) {
@@ -248,8 +262,9 @@ func (d *jsonDriver) startPrompt(req jsonPromptRequest) {
 		contentImages = req.steer.Images
 		promptContext = req.steer.RequestContext
 	} else {
-		prepared, ok := app.preparePrompt(req.text, promptOptions{resolveSkillMentions: true, attachPromptImages: false}, false)
-		if !ok {
+		prepared, err := app.preparePrompt(req.text, promptOptions{resolveSkillMentions: true, attachPromptImages: false}, false)
+		if err != nil {
+			d.w.InputError(req.id, err.Error())
 			d.startNextQueued()
 			return
 		}
@@ -331,17 +346,10 @@ func (d *jsonDriver) finishPrompt(err error) {
 	}
 	active.cancel()
 
-	code := ExitOK
-	if err != nil {
-		switch {
-		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-			code = ExitInterrupt
-		default:
-			code = ExitRuntime
-			if !active.sink.terminalModelErrorDisplayed {
-				fmt.Fprintf(app.Errw, "[error: %v]\n", err)
-			}
-		}
+	interrupted := promptInterrupted(err)
+	code := promptExitCode(err)
+	if err != nil && !interrupted && !active.sink.terminalModelErrorDisplayed {
+		fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 	}
 	end := runstream.PromptEnd{
 		Prompt:            active.promptID,
@@ -349,26 +357,35 @@ func (d *jsonDriver) finishPrompt(err error) {
 		ExitCode:          code,
 		TerminationReason: string(active.sink.promptUsage.TerminationReason),
 		Usage:             promptEndUsage(active.sink.promptUsage),
-		FinalText:         finalAssistantText(app.Agent.Transcript()),
+		FinalText:         active.sink.FinalText(),
 		DurationMS:        app.clock()().Sub(active.started).Milliseconds(),
 	}
-	if code == ExitRuntime && err != nil {
+	if err != nil && !interrupted {
 		end.Error = err.Error()
 	}
 	if end.TerminationReason == "" {
-		switch code {
-		case ExitInterrupt:
+		switch {
+		case interrupted:
 			end.TerminationReason = string(agent.TerminationCancelled)
-		case ExitRuntime:
+		case err != nil:
 			end.TerminationReason = string(agent.TerminationError)
 		}
 	}
 	d.w.PromptEnd(end)
 
-	// Recover steered input the finished prompt never consumed and run it as
-	// the next prompt — the same semantics as the TTY REPL.
-	if leftover := app.drainLeftoverSteer(); !steerInputEmpty(leftover) {
-		d.queued = append([]jsonPromptRequest{{steer: &leftover}}, d.queued...)
+	// Recover steered input the finished prompt never consumed and run each one
+	// as its own next prompt, preserving protocol correlation and submission order.
+	leftovers := app.Agent.DrainSteerContents()
+	recovered := make([]jsonPromptRequest, 0, len(leftovers))
+	for _, leftover := range leftovers {
+		id := leftover.CorrelationID
+		leftover.CorrelationID = ""
+		if !steerInputEmpty(leftover) {
+			recovered = append(recovered, jsonPromptRequest{id: id, steer: &leftover})
+		}
+	}
+	if len(recovered) > 0 {
+		d.queued = append(recovered, d.queued...)
 	}
 
 	app.saveOrWarn(app.SessionPath)
@@ -400,13 +417,32 @@ func (d *jsonDriver) requestShutdown() {
 }
 
 // boundary does the idle-prompt-boundary work the REPL does: background
-// notices, MCP tool-list refresh, and the pending-handoff approval check.
-func (d *jsonDriver) boundary() {
+// notices, MCP tool-list refresh, and the pending-handoff approval check. It
+// reports whether force-exit interrupted the refresh.
+func (d *jsonDriver) boundary() bool {
 	app := d.app
 	app.pollBackgroundNotices()
-	// A boundary refresh never blocks the driver long; ctx errors simply skip
-	// the refresh for this boundary.
-	_ = app.refreshMCP(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	interrupted := make(chan struct{})
+	if app.ForceExit != nil {
+		go func() {
+			select {
+			case <-app.ForceExit:
+				close(interrupted)
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	_ = app.refreshMCP(ctx)
+	cancel()
+	select {
+	case <-interrupted:
+		return true
+	case <-app.ForceExit:
+		return true
+	default:
+	}
 	if !d.eofSeen && app.hasPendingHandoffRequest() {
 		req, ok := app.prepareHandoff("")
 		if ok {
@@ -421,10 +457,11 @@ func (d *jsonDriver) boundary() {
 				Agent:    req.Agent,
 				Model:    req.Model,
 			})
-			return // queued prompts wait for the approval decision
+			return false // queued prompts wait for the approval decision
 		}
 	}
 	d.startNextQueued()
+	return false
 }
 
 func (d *jsonDriver) startNextQueued() {

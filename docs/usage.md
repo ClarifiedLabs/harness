@@ -83,7 +83,9 @@ summary bypasses `-q`/`--quiet`, so a quiet one-shot run still reports what it
 spent.
 
 Exit codes: `0` completed, `1` runtime error, `2` usage error, `130`
-interrupted.
+interrupted. When an admitted prompt fails with an error carrying a concrete
+nonzero subprocess status, harness preserves that status instead of collapsing
+it to `1`.
 
 ### JSON run stream (`-format json`)
 
@@ -98,19 +100,25 @@ unchanged; `-q`, `-v`, and `-tool-stream` remain stderr-only.
   envelope (`exit_code` mirroring the process exit code, plus
   `termination_reason`/`error` on failures), even on error or interrupt
   (best-effort).
-- Each prompt is bracketed by `prompt_start`/`prompt_end` envelopes.
+- Each submitted one-shot prompt is bracketed by `prompt_start`/`prompt_end`
+  envelopes, including a prompt rejected by skill or hook preflight.
   `prompt_end` carries `exit_code`, `termination_reason`, a
   `usage` summary (`input_tokens`/`output_tokens`/`cost_usd`/`turns`), and
-  `final_text` (the last assistant text message).
-- Between the envelopes: the same `session.Event` objects the session records
-  to `raw.ndjson` (`user`, `assistant_delta` post-coalescing,
+  `final_text` containing only assistant text emitted for that prompt (empty
+  when it emitted none; never copied from an earlier session turn).
+- Between the envelopes: the same durable `session.Event` objects the session
+  records to `raw.ndjson` (`user`, `assistant_delta` post-coalescing,
   `assistant_phase`, `reasoning_summary`, `tool_start`, `tool_result`,
   `tool_diff`, `notice`, `turn_attempt_start`, `turn_attempt_usage`,
-  `turn_complete`, `prompt_usage`, `model_request`, `checkpoint`, …).
+  `turn_complete`, `prompt_usage`, `model_request`, `checkpoint`, …). Streamed
+  notices are therefore both visible to the client and replayable from the
+  session log.
 
-The stream protocol is versioned (`run_start.v`, currently `1`). Consumers
-must ignore unknown event types and must handle EOF without `run_end`
-(process crash).
+The stream protocol is versioned (`run_start.v`, currently `1`). Events use
+ordered bounded backpressure rather than silent dropping. Consumers must ignore
+unknown event types and must handle EOF without `run_end` (process crash, forced
+exit, or stdout write failure); a stdout write failure makes an otherwise
+successful process exit as a runtime error.
 
 #### Interactive JSON session (piped stdin, no `-p`)
 
@@ -135,7 +143,7 @@ ignored:
 
 | `type` | Fields | Semantics |
 |---|---|---|
-| `prompt` | `text` (required, or `images`), `id?`, `agent?`, `model?`, `images?` `[{path, detail?}]` | Run a prompt. Sent while a prompt runs, a bare prompt **steers** into the running prompt (injected before the next model request, like Enter-during-prompt in the TTY REPL); a steer that races prompt completion is recovered and runs as the next prompt. With `agent`/`model`/`images` the message queues instead of steering, then the switch happens before that prompt starts (unknown agent/model → `input_error`, nothing runs). `id` is echoed in `prompt_start`/`prompt_end` for correlation. |
+| `prompt` | `text` (required, or `images`), `id?`, `agent?`, `model?`, `images?` `[{path, detail?}]` | Run a prompt. Sent while a prompt runs, a bare prompt **steers** into the running prompt (injected before the next model request, like Enter-during-prompt in the TTY REPL). If immediate steering admission is busy, the input queues for the next prompt rather than being dropped. Steers that race prompt completion are recovered separately in submission order, retaining each input's `id`. With `agent`/`model`/`images` the message queues instead of steering, then the switch happens before that prompt starts (unknown agent/model → `input_error`, nothing runs). `id` is echoed in `prompt_start`/`prompt_end` for correlation. |
 | `interrupt` | — | Cancel the active prompt (the in-band ^C): `prompt_end` with `termination_reason:"cancelled"`, and the session keeps accepting input. No-op when idle. |
 | `approval_response` | `id`, `approve` (both required) | Answer a pending `approval_request`. Unknown id → `input_error` and the pending request survives. |
 | `shutdown` | — | Cancel any active prompt, save the session, emit `run_end`, exit 0. |
@@ -144,10 +152,12 @@ Stdin EOF is a graceful **drain**, not a cancel: the active prompt and any
 queued prompts finish, then harness saves the session, emits `run_end`, and
 exits 0.
 
-Malformed JSON, an unknown `type`, missing required fields, or a `prompt`
-sent while an approval is pending produce an
+Malformed JSON, an unknown `type`, missing required fields, prompt-preparation
+failure, or a `prompt` sent while an approval is pending produce an
 `{"type":"input_error","id?":…,"message":…}` event and the session keeps
-running — bad input never kills it.
+running — bad input never kills it. For a syntactically valid envelope, harness
+retains an available `id` even when the type or another field is invalid;
+malformed JSON may have no recoverable ID.
 
 Additional output events beyond the one-shot vocabulary:
 
@@ -156,6 +166,10 @@ Additional output events beyond the one-shot vocabulary:
 | `prompt_start` | `prompt` (server-assigned number), `id?`, `text`, `agent`, `model`, `has_images` | Before each prompt |
 | `approval_request` | `id`, `kind:"implementation_handoff"`, `brief`, `plan_path`, `agent`, `model` | The model's `request_implementation` tool recorded a handoff; the driver waits for the matching `approval_response` (the input reader stays live, so `interrupt`/`shutdown` still work) |
 | `input_error` | `id?`, `message` | Rejected input line |
+
+Before reading the first prompt and between completed prompts, interactive JSON
+runs the same idle boundary as the TTY REPL: it refreshes the MCP registry and
+records/emits any resulting notice before the next `prompt_start`.
 
 Session events between `prompt_start`/`prompt_end` carry the server-assigned
 `prompt` number. Approving a handoff performs the same agent switch the TTY

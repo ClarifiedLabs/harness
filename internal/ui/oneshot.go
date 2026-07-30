@@ -20,6 +20,29 @@ const (
 	ExitInterrupt = 130
 )
 
+// promptExitCode preserves an underlying subprocess status when an admitted
+// prompt fails because a child process exited non-zero. Cancellation remains
+// the conventional 130; other failures use the generic runtime status.
+func promptInterrupted(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func promptExitCode(err error) int {
+	if err == nil {
+		return ExitOK
+	}
+	if promptInterrupted(err) {
+		return ExitInterrupt
+	}
+	var exitErr interface{ ExitCode() int }
+	if errors.As(err, &exitErr) {
+		if code := exitErr.ExitCode(); code > 0 && code <= 255 {
+			return code
+		}
+	}
+	return ExitRuntime
+}
+
 // OneShot runs exactly one user prompt, saves the session, and exits (design §10).
 // Assistant text streams to app.Out; tool summaries, the usage line, notices,
 // and errors go to app.Errw. The return value is the process exit code:
@@ -38,6 +61,7 @@ func OneShot(app *App, prompt string) int {
 		if app.Renderer != nil {
 			app.Renderer.StopProgress()
 		}
+		emitRejectedOneShot(app, ExitUsage, "prompt skill resolution failed")
 		return ExitUsage
 	}
 	promptHook := app.runPromptSubmitHook(context.Background(), prompt, app.PromptNumber+1)
@@ -53,6 +77,7 @@ func OneShot(app *App, prompt string) int {
 			fmt.Fprintf(app.Errw, "[prompt blocked: %s]\n", reason)
 		}
 		app.saveOrWarn(app.SessionPath)
+		emitRejectedOneShot(app, ExitRuntime, "prompt blocked: "+reason)
 		return ExitRuntime
 	}
 	pendingUnsupportedNotice := len(app.PendingImages) > 0 && !app.currentModelSupportsImages()
@@ -122,33 +147,44 @@ func OneShot(app *App, prompt string) int {
 		fmt.Fprintln(app.Errw, summary)
 	}
 
-	code := ExitOK
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			code = ExitInterrupt
-		} else {
-			if !sink.terminalModelErrorDisplayed {
-				fmt.Fprintf(app.Errw, "[error: %v]\n", err)
-			}
-			code = ExitRuntime
-		}
+	interrupted := promptInterrupted(err)
+	code := promptExitCode(err)
+	if err != nil && !interrupted && !sink.terminalModelErrorDisplayed {
+		fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 	}
 	if app.RunStream != nil {
 		end := runstream.PromptEnd{
 			ExitCode:          code,
 			TerminationReason: string(sink.promptUsage.TerminationReason),
 			Usage:             promptEndUsage(sink.promptUsage),
-			FinalText:         finalAssistantText(app.Agent.Transcript()),
+			FinalText:         sink.FinalText(),
 		}
-		if code == ExitRuntime && err != nil {
+		if err != nil && !interrupted {
 			end.Error = err.Error()
 		}
-		if end.TerminationReason == "" && code == ExitInterrupt {
-			end.TerminationReason = string(agent.TerminationCancelled)
+		if end.TerminationReason == "" {
+			switch {
+			case interrupted:
+				end.TerminationReason = string(agent.TerminationCancelled)
+			case err != nil:
+				end.TerminationReason = string(agent.TerminationError)
+			}
 		}
 		app.RunStream.PromptEnd(end)
 	}
 	return code
+}
+
+func emitRejectedOneShot(app *App, code int, message string) {
+	if app.RunStream == nil {
+		return
+	}
+	app.RunStream.PromptStart(runstream.PromptStart{})
+	app.RunStream.PromptEnd(runstream.PromptEnd{
+		ExitCode:          code,
+		TerminationReason: string(agent.TerminationError),
+		Error:             message,
+	})
 }
 
 // promptEndUsage projects the agent's per-prompt accounting into the JSON run

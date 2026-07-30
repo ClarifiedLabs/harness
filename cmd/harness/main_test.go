@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -405,6 +406,67 @@ func TestRunFormatJSONWithoutPromptRequiresPipedStdin(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Fatalf("usage errors stay off stdout, got %q", out.String())
+	}
+}
+
+type rejectingWriter struct{ err error }
+
+func (w rejectingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestRunJSONStdoutFailureReturnsRuntimeError(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-p", "hello", "-format", "json"}, fp, "")
+	env.stdout = rejectingWriter{err: errors.New("stdout closed")}
+
+	code := run(env)
+	if code != ui.ExitRuntime {
+		t.Fatalf("run exit = %d, want %d for stdout write failure; stderr=%q", code, ui.ExitRuntime, errw.String())
+	}
+}
+
+type blockingWriter struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *blockingWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.release
+	return len(p), nil
+}
+
+func TestRunJSONForceExitDoesNotWaitForBlockedStdout(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-format", "json"}, fp, "")
+	blocked := &blockingWriter{started: make(chan struct{}), release: make(chan struct{})}
+	defer close(blocked.release)
+	env.stdout = blocked
+	inputReader, inputWriter := io.Pipe()
+	defer inputReader.Close()
+	defer inputWriter.Close()
+	env.stdin = inputReader
+	env.stdinPiped = true
+	signals := make(chan os.Signal, 1)
+	env.sigCh = signals
+
+	done := make(chan int, 1)
+	go func() { done <- run(env) }()
+	select {
+	case <-blocked.started:
+	case <-time.After(time.Second):
+		t.Fatal("JSON run did not attempt its run_start write")
+	}
+	// Interactive JSON is idle with its decoder blocked on input, so this signal
+	// must broadcast force-exit and release Close without waiting for stdout.
+	signals <- os.Interrupt
+	select {
+	case code := <-done:
+		if code != ui.ExitInterrupt {
+			t.Fatalf("force exit with blocked stdout = %d, want %d; stderr=%q", code, ui.ExitInterrupt, errw.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("force exit waited for blocked JSON stdout")
 	}
 }
 

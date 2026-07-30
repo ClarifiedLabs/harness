@@ -3518,12 +3518,37 @@ func TestSteerResetsLoopGuard(t *testing.T) {
 // false: the channel is nil and the loop never drains.
 func TestSteerDisabledNoChannel(t *testing.T) {
 	a := newAgent(llmtest.New("fake"), tools.Catalog(), Options{})
-	a.Steer("ignored") // must not panic on a nil channel
+	if a.Steer("ignored") { // must not panic on a nil channel
+		t.Fatal("Steer accepted input while disabled")
+	}
 	if a.steer != nil {
 		t.Fatalf("steer channel should be nil when disabled, got %v", a.steer)
 	}
 	if got := a.DrainSteer(); got != "" {
 		t.Fatalf("DrainSteer on disabled agent = %q, want empty", got)
+	}
+}
+
+func TestSteerContentReportsFullBufferAndPreservesDrainMetadata(t *testing.T) {
+	a := newAgent(llmtest.New("fake"), tools.Catalog(), Options{Steer: true})
+	for i := 0; i < cap(a.steer); i++ {
+		input := SteerInput{Text: fmt.Sprintf("steer %d", i), CorrelationID: fmt.Sprintf("p%d", i)}
+		if !a.SteerContent(input) {
+			t.Fatalf("SteerContent rejected input %d before buffer was full", i)
+		}
+	}
+	if a.SteerContent(SteerInput{Text: "overflow", CorrelationID: "overflow"}) {
+		t.Fatal("SteerContent accepted input after buffer was full")
+	}
+
+	got := a.DrainSteerContents()
+	if len(got) != cap(a.steer) {
+		t.Fatalf("drained inputs = %d, want %d", len(got), cap(a.steer))
+	}
+	for i, input := range got {
+		if input.Text != fmt.Sprintf("steer %d", i) || input.CorrelationID != fmt.Sprintf("p%d", i) {
+			t.Fatalf("drained input %d = %+v", i, input)
+		}
 	}
 }
 

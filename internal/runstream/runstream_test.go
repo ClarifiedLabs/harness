@@ -3,6 +3,7 @@ package runstream
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -115,30 +116,37 @@ func TestWriterMirrorsSessionEventsVerbatim(t *testing.T) {
 // gateWriter blocks all writes until the gate opens, forcing the writer's
 // buffer to fill so the backpressure path is exercised.
 type gateWriter struct {
-	gate <-chan struct{}
-	out  *lockedBuffer
+	gate    <-chan struct{}
+	entered chan<- struct{}
+	once    *sync.Once
+	out     *lockedBuffer
 }
 
 func (g gateWriter) Write(p []byte) (int, error) {
+	g.once.Do(func() { close(g.entered) })
 	<-g.gate
 	return g.out.Write(p)
 }
 
 func TestWriterBackpressureNeverDropsOrReorders(t *testing.T) {
 	gate := make(chan struct{})
+	entered := make(chan struct{})
 	var out lockedBuffer
-	w := NewWriter(gateWriter{gate: gate, out: &out}, RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"}, nil)
+	var once sync.Once
+	w := NewWriter(gateWriter{gate: gate, entered: entered, once: &once, out: &out}, RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"}, nil)
+	<-entered
 
 	const events = 600 // comfortably beyond the 256-message buffer
+	for i := 0; i < cap(w.messages); i++ {
+		w.Mirror(session.Event{Type: session.EventNotice, Text: fmt.Sprintf("n%04d", i)})
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < events; i++ {
+		for i := cap(w.messages); i < events; i++ {
 			w.Mirror(session.Event{Type: session.EventNotice, Text: fmt.Sprintf("n%04d", i)})
 		}
 	}()
-	// Let the producer fill the buffer and block, then drain.
-	time.Sleep(50 * time.Millisecond)
 	close(gate)
 	<-done
 	w.Close(RunEnd{ExitCode: 0})
@@ -206,7 +214,9 @@ func TestWriterWarnsOnceOnWriteFailure(t *testing.T) {
 	var errw bytes.Buffer
 	w := NewWriter(failWriter{}, RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"}, &errw)
 	w.Mirror(session.Event{Type: session.EventNotice, Text: "x"})
-	w.Close(RunEnd{ExitCode: 0})
+	if err := w.Close(RunEnd{ExitCode: 0}); err == nil {
+		t.Fatalf("Close error = nil, want the write failure")
+	}
 	if w.Err() == nil {
 		t.Fatalf("Err = nil, want the write failure")
 	}
@@ -215,6 +225,72 @@ func TestWriterWarnsOnceOnWriteFailure(t *testing.T) {
 	}
 }
 
+func TestWriterWriteFailureTruncatesStreamWithoutMisleadingRunEnd(t *testing.T) {
+	wantErr := errors.New("second write failed")
+	var out lockedBuffer
+	fw := &failSecondWriter{err: wantErr, out: &out}
+	w := NewWriter(fw, RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"}, nil)
+	w.Mirror(session.Event{Type: session.EventNotice, Text: "fails here"})
+	w.Mirror(session.Event{Type: session.EventNotice, Text: "must not resume"})
+	if err := w.Close(RunEnd{ExitCode: 0}); !errors.Is(err, wantErr) {
+		t.Fatalf("Close error = %v, want %v", err, wantErr)
+	}
+
+	lines := decodeLines(t, out.String())
+	if len(lines) != 1 || lines[0]["type"] != TypeRunStart {
+		t.Fatalf("stream after write failure = %v, want only run_start and no misleading run_end", lines)
+	}
+}
+
+func TestWriterAbortReleasesBlockedClose(t *testing.T) {
+	gate := make(chan struct{})
+	entered := make(chan struct{})
+	abort := make(chan struct{})
+	var out lockedBuffer
+	var once sync.Once
+	w := NewWriterWithAbort(
+		gateWriter{gate: gate, entered: entered, once: &once, out: &out},
+		RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"},
+		nil,
+		abort,
+	)
+	<-entered
+	for i := 0; i < cap(w.messages); i++ {
+		w.Mirror(session.Event{Type: session.EventNotice, Text: fmt.Sprintf("n%d", i)})
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- w.Close(RunEnd{ExitCode: 130}) }()
+	close(abort)
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close remained blocked after abort")
+	}
+	close(gate)
+	<-w.drained
+}
+
 type failWriter struct{}
 
 func (failWriter) Write([]byte) (int, error) { return 0, fmt.Errorf("broken pipe") }
+
+type failSecondWriter struct {
+	mu    sync.Mutex
+	calls int
+	err   error
+	out   *lockedBuffer
+}
+
+func (w *failSecondWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.calls++
+	if w.calls == 2 {
+		return 0, w.err
+	}
+	return w.out.Write(p)
+}
