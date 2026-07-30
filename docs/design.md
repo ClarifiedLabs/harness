@@ -1608,7 +1608,7 @@ apply their wire-specific representation (§4.1).
 | unknown tool name | `unknown tool "<name>"` |
 | JSON type mismatch | `invalid arguments: invalid value for "<field>": expected <JSON type>; got <JSON type>` |
 | invalid JSON syntax | `invalid arguments: invalid JSON at byte <offset>: <detail>` |
-| malformed streamed tool-call args | `invalid tool call arguments for <name>: <detail>` |
+| malformed streamed tool-call args | `invalid tool call arguments for <name>: <detail>` plus a per-tool corrective hint: rg/grep get the `{"args":[...]}` shape, and a truncated (unterminated-JSON) `write_file`/`edit` call is told to write in chunks (write_file then edit to append) or switch to apply_patch |
 | tool returned error | `<message>` |
 | tool panicked | `tool panicked: <recovered>` (also logged to stderr) |
 | tool exceeded the dispatch timeout | `tool timed out after <dur>` |
@@ -1622,9 +1622,12 @@ struct/type details. Tool-specific semantic validation continues to use concise
 Every `is_error` result also carries a diagnostics-only `ErrorKind`
 (`llm.ToolErrorKind`) that, like `Metrics`, never enters model-visible content.
 The dispatch/agent layers stamp `unknown_tool`, `invalid_args`, `timeout`,
-`panic`, `hook_blocked`, `unsupported_modality`, and `invalid_result` directly;
-a tool declares one by wrapping its error with `tools.WithKind` (used for
-`edit_oldtext_not_found` / `edit_oldtext_ambiguous`), which leaves the error
+`panic`, `hook_blocked`, `blocked` (the per-prompt identical-failure guard),
+`unsupported_modality`, `invalid_result`, and `regex_invalid` (search pattern
+pre-validation) directly; a tool declares one by wrapping its error with
+`tools.WithKind` (used for `edit_oldtext_not_found` /
+`edit_oldtext_ambiguous`), and the delegate tool stamps transient child
+failures as `rate_limited` / `provider_error`. WithKind leaves the error
 message unchanged. An outer cancellation stays deliberately unclassified. The
 session recorder persists the kind plus a bounded, rune-safe `error_excerpt`
 (2 lines / 240 runes) on failed `tool_result` events. Offline analysis
@@ -2026,6 +2029,9 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 - `os.MkdirAll` parents (0755), write 0644, overwrite without ceremony (no permission
   system by design). Reports `created`/`overwrote`, bytes, lines.
+- A very large `content` can arrive as truncated streamed arguments; that
+  failure path (§8.2 malformed streamed args) tells the model to write the file
+  in chunks (write_file then edit to append) or switch to apply_patch.
 - Existing directory at path, or trailing `/` → error.
 
 ### 9.6 `apply_patch`

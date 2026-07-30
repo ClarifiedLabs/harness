@@ -1638,6 +1638,64 @@ func TestFailingToolFedBackAsError(t *testing.T) {
 	}
 }
 
+func TestTruncatedWriteFileArgsSuggestChunkedWrite(t *testing.T) {
+	truncated := `invalid JSON at byte offset 152340: unexpected end of JSON input; input preview "{\"path\":\"big.go\",\"content\":\"package main..."`
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{invalidToolDone(0, "call_big", "write_file", truncated)},
+			Stop:   llm.StopToolUse,
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("will chunk")},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	a := newAgent(fp, tools.Default(), Options{})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "write big.go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(sink.results) != 1 || !sink.results[0].IsError {
+		t.Fatalf("results = %+v, want one error result", sink.results)
+	}
+	got := sink.results[0]
+	if got.ErrorKind != llm.ToolErrorInvalidArgs {
+		t.Errorf("kind = %q, want %q", got.ErrorKind, llm.ToolErrorInvalidArgs)
+	}
+	for _, want := range []string{"truncated", "write the file in chunks", "edit to append", "apply_patch"} {
+		if !strings.Contains(got.Text, want) {
+			t.Errorf("result text missing %q: %q", want, got.Text)
+		}
+	}
+}
+
+func TestNonTruncatedWriteFileArgsGetNoChunkSuggestion(t *testing.T) {
+	broken := `invalid JSON at byte offset 30: invalid character '}' looking for beginning of value; input preview "{\"path\":\"x.go\",}"`
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{invalidToolDone(0, "call_bad", "write_file", broken)},
+			Stop:   llm.StopToolUse,
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("fixed")},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	a := newAgent(fp, tools.Default(), Options{})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "write x.go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(sink.results) != 1 {
+		t.Fatalf("results = %+v, want one result", sink.results)
+	}
+	if strings.Contains(sink.results[0].Text, "write the file in chunks") {
+		t.Errorf("non-truncation error should not get the chunked-write sentence: %q", sink.results[0].Text)
+	}
+}
+
 func TestInvalidToolInputFedBackAsError(t *testing.T) {
 	var ran bool
 	tool := &recordTool{name: "rg", run: func(_ context.Context, _ json.RawMessage) (string, error) {

@@ -2278,6 +2278,12 @@ func invalidToolInputResult(call llm.ToolCall) string {
 	switch call.Name {
 	case "rg", "grep":
 		msg += ` For rg/grep, use {"args":["-n","PATTERN","."]}; do not use shell syntax or bare tokens inside JSON.`
+	case "write_file", "edit":
+		// A huge file body is the common cause of truncated streamed args; the
+		// fix is smaller writes, not another monolithic retry.
+		if strings.Contains(call.InvalidInputError, "unexpected end of JSON input") {
+			msg += " The arguments were truncated mid-JSON; write the file in chunks (write_file then edit to append), or switch to apply_patch for large inserts."
+		}
 	}
 	return msg
 }
