@@ -22,7 +22,7 @@ const editSchema = `{
     "files": {
       "type": "array",
       "minItems": 1,
-      "description": "Files to edit. Each file must appear once; all edits are matched against that file's original content.",
+      "description": "Files to edit. A path may appear more than once; repeated entries apply in order against the earlier entries' results. All edits within one entry are matched against the same base content.",
       "items": {
         "type": "object",
         "properties": {
@@ -84,6 +84,8 @@ type plannedEditFile struct {
 	path         string
 	content      string
 	body         string // LF-normalized updated content, used to render the snippet
+	bom          string
+	ending       string // detected line-ending style to restore on write
 	mode         fs.FileMode
 	replacements int
 	regions      []editRegion
@@ -162,16 +164,10 @@ func decodeEditArgs(input json.RawMessage) (editArgs, error) {
 	}
 
 	files := make([]editFile, 0, len(raw.Files))
-	seen := make(map[string]string, len(raw.Files))
 	for i, file := range raw.Files {
 		if strings.TrimSpace(file.Path) == "" {
 			return editArgs{}, badArgs("files[%d].path is required", i)
 		}
-		key := duplicatePathKey(file.Path)
-		if first, ok := seen[key]; ok {
-			return editArgs{}, badArgs("files[%d].path duplicates %q; combine edits for each file in one entry", i, first)
-		}
-		seen[key] = file.Path
 
 		if len(file.Edits) == 0 {
 			return editArgs{}, badArgs("files[%d].edits must contain at least one edit", i)
@@ -203,8 +199,27 @@ func duplicatePathKey(path string) string {
 
 func planEditFiles(files []editFile) ([]plannedEditFile, int, error) {
 	plans := make([]plannedEditFile, 0, len(files))
+	byPath := make(map[string]int, len(files)) // duplicatePathKey → plans index
 	totalReplacements := 0
 	for _, file := range files {
+		key := duplicatePathKey(file.Path)
+		if idx, ok := byPath[key]; ok {
+			// A repeated files[].path entry applies in order against the earlier
+			// entry's planned result, not the on-disk content (design §9.4). A
+			// stale or redundant oldText fails loudly with the ordinary not-found
+			// error before anything is written; nothing is silently double-applied.
+			prev := &plans[idx]
+			updated, replacements, regions, err := applyEditBlocks(prev.body, file.Edits, file.Path)
+			if err != nil {
+				return nil, 0, err
+			}
+			prev.content = prev.bom + restoreLineEndings(updated, prev.ending)
+			prev.body = updated
+			prev.replacements += replacements
+			prev.regions = append(prev.regions, regions...)
+			totalReplacements += replacements
+			continue
+		}
 		info, err := os.Stat(file.Path)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -230,10 +245,13 @@ func planEditFiles(files []editFile) ([]plannedEditFile, int, error) {
 			path:         file.Path,
 			content:      bom + restoreLineEndings(updated, ending),
 			body:         updated,
+			bom:          bom,
+			ending:       ending,
 			mode:         info.Mode(),
 			replacements: replacements,
 			regions:      regions,
 		})
+		byPath[key] = len(plans) - 1
 		totalReplacements += replacements
 	}
 	return plans, totalReplacements, nil

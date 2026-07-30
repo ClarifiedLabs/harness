@@ -256,6 +256,9 @@ repeated reminders back off exponentially. Custom agents with an explicit
 ## File Mutation
 
 `edit`, `write_file`, and `apply_patch` are the built-in file mutation tools.
+A repeated `edit` `files[].path` is applied in order against the earlier
+entry's result rather than rejected; a stale `oldText` in a repeated entry
+fails with the ordinary not-found error and nothing is written.
 By default, harness prints a unified before/after diff for each built-in file
 mutation tool call. Set `show_diffs`, `HARNESS_SHOW_DIFFS`, or `-show-diffs` to
 false to disable diff output. Diffs are generated from per-call file snapshots,

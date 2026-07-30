@@ -1985,22 +1985,25 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 | param | type | notes |
 |---|---|---|
-| `files` | array, required | one entry per file; each target file must already exist |
+| `files` | array, required | one entry per file (repeats allowed; see below); each target file must already exist |
 | `files[].path` | string, required | must exist (use write_file to create) |
 | `files[].edits` | array, required | one or more replacements for that file |
 | `files[].edits[].oldText` | string, required | exact text to replace; must be unique in the original file unless `replaceAll` is set |
 | `files[].edits[].newText` | string, required | replacement text; empty string deletes oldText |
 | `files[].edits[].replaceAll` | bool | optional; replace every occurrence of `oldText` instead of requiring a unique match (default false) |
 
-- All edits for a file match against that file's original content, not against
-  content after earlier edits in the same call.
+- All edits within one entry match against that entry's base content, not
+  against content after earlier edits in the same entry.
+- A repeated `files[].path` is accepted and applied in order: the later entry
+  matches against the earlier entry's planned result, and all planning still
+  precedes any write, so a stale or redundant `oldText` fails loudly with the
+  ordinary not-found error and leaves every file untouched. Nothing is
+  silently double-applied.
 - With `replaceAll`, every non-overlapping occurrence of `oldText` is replaced and
   each counts toward the reported replacement count; the uniqueness check is skipped
   but zero matches is still a not-found error. The overlap guard is relaxed only
   between spans of the **same** `replaceAll` block — a `replaceAll` span overlapping
   a different edit still raises the overlap error.
-- Duplicate file entries are rejected; combine a file's replacements in one
-  `files[]` entry.
 - 0 occurrences → error naming the missing `oldText`: it quotes the first
   non-empty `oldText` line, appends a nearest-region hint (up to 3 numbered
   lines centered on the most similar content line, with the similarity score),

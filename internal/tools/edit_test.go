@@ -228,7 +228,37 @@ func TestEditMissingRequiredArgs(t *testing.T) {
 	}
 }
 
-func TestEditDuplicateFileEntryRejected(t *testing.T) {
+// Repeated files[].path entries are accepted and applied in order, each
+// matching against the previous entry's result (r56): a common batch shape
+// from models that emit one entry per logical change.
+func TestEditDuplicateFileEntriesApplyInOrder(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	mustWrite(t, p, "alpha\nbeta\ngamma\n")
+
+	out, err := runEdit(t, map[string]any{
+		"files": []any{
+			editFileArg(p, map[string]any{"oldText": "beta", "newText": "BETA"}),
+			editFileArg(p,
+				map[string]any{"oldText": "BETA", "newText": "delta"},
+				map[string]any{"oldText": "alpha", "newText": "ALPHA"},
+			),
+		},
+	})
+	if err != nil {
+		t.Fatalf("duplicate path entries should apply in order: %v", err)
+	}
+	assertFileContent(t, p, "ALPHA\ndelta\ngamma\n")
+	if !strings.Contains(out, "edited 1 file(s), 3 replacement(s)") {
+		t.Errorf("success message = %q", out)
+	}
+}
+
+// A stale repeated entry fails loudly with the ordinary not-found error (never
+// silently re-applied against the original content), and the file is untouched
+// because all planning precedes any write. The "./" spelling also proves the
+// duplicate detection normalizes paths.
+func TestEditDuplicateFileEntryStaleFails(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
 	mustWrite(t, p, "alpha\n")
@@ -236,11 +266,14 @@ func TestEditDuplicateFileEntryRejected(t *testing.T) {
 	_, err := runEdit(t, map[string]any{
 		"files": []any{
 			editFileArg(p, map[string]any{"oldText": "alpha", "newText": "ALPHA"}),
-			editFileArg(filepath.Join(dir, ".", "f.txt"), map[string]any{"oldText": "alpha", "newText": "ALPHA"}),
+			editFileArg(filepath.Join(dir, ".", "f.txt"), map[string]any{"oldText": "alpha", "newText": "beta"}),
 		},
 	})
 	if err == nil {
-		t.Fatal("expected duplicate path error")
+		t.Fatal("expected not-found error for stale repeated entry")
+	}
+	if got := KindOf(err); got != llm.ToolErrorEditOldTextNotFound {
+		t.Errorf("kind = %q, want %q", got, llm.ToolErrorEditOldTextNotFound)
 	}
 	assertFileContent(t, p, "alpha\n")
 }
