@@ -398,6 +398,69 @@ func TestEventAppenderCoalescesAssistantDeltasAndPreservesOrder(t *testing.T) {
 	}
 }
 
+func TestEventAppenderMirrorReceivesWrittenEvents(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	appender := NewEventAppender(dir)
+	var mirrored []Event
+	appender.Mirror = func(ev Event) { mirrored = append(mirrored, ev) }
+
+	user := Event{Type: EventUser, Prompt: 1, Text: "do it"}
+	if err := appender.Append(user); err != nil {
+		t.Fatal(err)
+	}
+	if len(mirrored) != 1 || mirrored[0].Type != EventUser {
+		t.Fatalf("mirror = %+v, want the user event mirrored immediately", mirrored)
+	}
+	if mirrored[0].Time.IsZero() {
+		t.Fatalf("mirrored event lost its stamped time: %+v", mirrored[0])
+	}
+
+	if err := appender.Append(Event{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 1, Text: "hello "}); err != nil {
+		t.Fatal(err)
+	}
+	if err := appender.Append(Event{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 1, Text: "world"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(mirrored) != 1 {
+		t.Fatalf("mirror = %+v, want deltas mirrored only after coalescing", mirrored)
+	}
+	if err := appender.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if len(mirrored) != 2 || mirrored[1].Text != "hello world" {
+		t.Fatalf("mirror = %+v, want one coalesced delta after flush", mirrored)
+	}
+
+	events, err := readEvents(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != len(mirrored) {
+		t.Fatalf("raw.ndjson = %+v, mirror = %+v: streams diverged", events, mirrored)
+	}
+	for i := range events {
+		if events[i].Type != mirrored[i].Type || events[i].Text != mirrored[i].Text ||
+			!events[i].Time.Equal(mirrored[i].Time) {
+			t.Fatalf("event %d: raw = %+v, mirror = %+v", i, events[i], mirrored[i])
+		}
+	}
+}
+
+func TestEventAppenderMirrorSilentWithoutDir(t *testing.T) {
+	appender := NewEventAppender("")
+	called := false
+	appender.Mirror = func(Event) { called = true }
+	if err := appender.Append(Event{Type: EventUser, Text: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := appender.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("mirror fired with no session dir; nothing was durably written")
+	}
+}
+
 func TestEventAppenderBoundsPendingAssistantText(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	appender := NewEventAppender(dir)

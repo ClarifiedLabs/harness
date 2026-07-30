@@ -317,6 +317,149 @@ func TestRunOneShotAssistantToStdout(t *testing.T) {
 	}
 }
 
+func TestRunOneShotJSONStream(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "42"}},
+		Stop:   llm.StopEndTurn,
+		Usage:  llm.Usage{InputTokens: 5, OutputTokens: 1},
+	})
+	env, out, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-p", "what is the answer", "-format", "json"}, fp, "")
+
+	code := run(env)
+	if code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	var types []string
+	var deltas, finalText string
+	var promptEnd, runEnd map[string]any
+	for i, line := range lines {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("stdout line %d is not JSON (%q): %v\nfull stdout:\n%s", i, line, err, out.String())
+		}
+		typ, _ := m["type"].(string)
+		types = append(types, typ)
+		switch typ {
+		case "assistant_delta":
+			text, _ := m["text"].(string)
+			deltas += text
+		case "prompt_end":
+			promptEnd = m
+			finalText, _ = m["final_text"].(string)
+		case "run_end":
+			runEnd = m
+		}
+	}
+	if types[0] != "run_start" {
+		t.Fatalf("first line type = %q, want run_start; types=%v", types[0], types)
+	}
+	if types[1] != "prompt_start" {
+		t.Fatalf("second line type = %q, want prompt_start; types=%v", types[1], types)
+	}
+	if types[len(types)-1] != "run_end" {
+		t.Fatalf("last line type = %q, want run_end; types=%v", types[len(types)-1], types)
+	}
+	if types[2] != "user" {
+		t.Fatalf("third line type = %q, want the mirrored user event; types=%v", types[2], types)
+	}
+	if deltas != "42" || finalText != "42" {
+		t.Fatalf("assistant text: deltas=%q final_text=%q, want %q", deltas, finalText, "42")
+	}
+	if promptEnd["termination_reason"] != "model_completed" || runEnd["termination_reason"] != "model_completed" {
+		t.Fatalf("termination reasons: prompt_end=%v run_end=%v", promptEnd["termination_reason"], runEnd["termination_reason"])
+	}
+	if runEnd["exit_code"] != float64(0) {
+		t.Fatalf("run_end exit_code = %v, want 0", runEnd["exit_code"])
+	}
+	// The per-line json.Unmarshal above already proves stdout carries NDJSON
+	// only; human diagnostics stay on stderr, unchanged.
+	if !strings.Contains(errw.String(), "session:") {
+		t.Errorf("session path should be printed on stderr, errw=%q", errw.String())
+	}
+}
+
+func TestRunFormatJSONWithoutPromptRequiresPipedStdin(t *testing.T) {
+	dir := t.TempDir()
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return dir
+		}
+		return ""
+	}
+	var out, errw bytes.Buffer
+	code := run(environment{
+		args:       []string{"-format", "json"},
+		stdin:      strings.NewReader(""),
+		stdout:     &out,
+		stderr:     &errw,
+		getenv:     getenv,
+		stdinPiped: false,
+		sigCh:      nil,
+	})
+	if code != ui.ExitUsage {
+		t.Fatalf("exit code = %d, want %d; errw=%q", code, ui.ExitUsage, errw.String())
+	}
+	if !strings.Contains(errw.String(), "use -p or pipe stdin") {
+		t.Fatalf("stderr = %q, want the JSON-mode guidance", errw.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("usage errors stay off stdout, got %q", out.String())
+	}
+}
+
+func TestRunFormatJSONPipedStdinWithoutPromptRejected(t *testing.T) {
+	dir := t.TempDir()
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return dir
+		}
+		return ""
+	}
+	var out, errw bytes.Buffer
+	code := run(environment{
+		args:       []string{"-format", "json"},
+		stdin:      strings.NewReader(""),
+		stdout:     &out,
+		stderr:     &errw,
+		getenv:     getenv,
+		stdinPiped: true,
+		sigCh:      nil,
+	})
+	if code != ui.ExitUsage {
+		t.Fatalf("exit code = %d, want %d; errw=%q", code, ui.ExitUsage, errw.String())
+	}
+	if !strings.Contains(errw.String(), "interactive sessions are not available") {
+		t.Fatalf("stderr = %q, want the interactive-mode guidance", errw.String())
+	}
+}
+
+func TestRunFormatJSONInitialPromptRejected(t *testing.T) {
+	dir := t.TempDir()
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return dir
+		}
+		return ""
+	}
+	var out, errw bytes.Buffer
+	code := run(environment{
+		args:       []string{"-format", "json", "-i", "seed"},
+		stdin:      strings.NewReader(""),
+		stdout:     &out,
+		stderr:     &errw,
+		getenv:     getenv,
+		stdinPiped: false,
+		sigCh:      nil,
+	})
+	if code != ui.ExitUsage {
+		t.Fatalf("exit code = %d, want %d; errw=%q", code, ui.ExitUsage, errw.String())
+	}
+	if !strings.Contains(errw.String(), "-i is not supported with -format json") {
+		t.Fatalf("stderr = %q, want the -i rejection", errw.String())
+	}
+}
+
 func TestRunOneShotEnablesAdvertisedWebSearch(t *testing.T) {
 	fp := llmtest.New("fake", okStep())
 	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{

@@ -1,0 +1,220 @@
+package runstream
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"harness/internal/session"
+)
+
+// lockedBuffer is a bytes.Buffer safe for concurrent writes.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// decodeLines splits NDJSON output and decodes each line into a generic map.
+func decodeLines(t *testing.T, out string) []map[string]any {
+	t.Helper()
+	var lines []map[string]any
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("decode line %q: %v", line, err)
+		}
+		lines = append(lines, m)
+	}
+	return lines
+}
+
+func TestWriterEmitsVersionedRunStartFirst(t *testing.T) {
+	var out lockedBuffer
+	var errw bytes.Buffer
+	w := NewWriter(&out, RunStart{
+		Mode:      ModeOneshot,
+		SessionID: "20260730T020622Z",
+		Agent:     "auto",
+		Provider:  "anthropic",
+		Model:     "claude-opus-4-8",
+		Images:    2,
+	}, &errw)
+	w.Close(RunEnd{ExitCode: 0})
+
+	lines := decodeLines(t, out.String())
+	if len(lines) != 2 {
+		t.Fatalf("lines = %d, want run_start + run_end: %q", len(lines), out.String())
+	}
+	start := lines[0]
+	if start["type"] != TypeRunStart {
+		t.Fatalf("first line type = %v, want run_start", start["type"])
+	}
+	if start["v"] != float64(Version) {
+		t.Fatalf("run_start v = %v, want %d", start["v"], Version)
+	}
+	if start["mode"] != ModeOneshot || start["session_id"] != "20260730T020622Z" ||
+		start["provider"] != "anthropic" || start["model"] != "claude-opus-4-8" ||
+		start["agent"] != "auto" || start["images"] != float64(2) {
+		t.Fatalf("run_start = %v", start)
+	}
+	end := lines[1]
+	if end["type"] != TypeRunEnd || end["exit_code"] != float64(0) {
+		t.Fatalf("run_end = %v", end)
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("errw = %q, want no warnings", errw.String())
+	}
+}
+
+func TestWriterMirrorsSessionEventsVerbatim(t *testing.T) {
+	var out lockedBuffer
+	w := NewWriter(&out, RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"}, nil)
+	w.PromptStart("", false)
+	w.Mirror(session.Event{Type: session.EventUser, Prompt: 1, Text: "do it"})
+	w.Mirror(session.Event{Type: session.EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 1, Text: "hello world"})
+	w.PromptEnd(PromptEnd{ExitCode: 0, TerminationReason: "model_completed", FinalText: "hello world"})
+	w.Close(RunEnd{ExitCode: 0})
+
+	lines := decodeLines(t, out.String())
+	if len(lines) != 6 {
+		t.Fatalf("lines = %d, want 6: %q", len(lines), out.String())
+	}
+	wantTypes := []string{TypeRunStart, TypePromptStart, "user", "assistant_delta", TypePromptEnd, TypeRunEnd}
+	for i, want := range wantTypes {
+		if lines[i]["type"] != want {
+			t.Fatalf("line %d type = %v, want %v (stream: %q)", i, lines[i]["type"], want, out.String())
+		}
+	}
+	if lines[2]["text"] != "do it" || lines[3]["text"] != "hello world" {
+		t.Fatalf("mirrored events lost their payload: %q", out.String())
+	}
+	if lines[4]["final_text"] != "hello world" || lines[4]["termination_reason"] != "model_completed" {
+		t.Fatalf("prompt_end = %v", lines[4])
+	}
+}
+
+// gateWriter blocks all writes until the gate opens, forcing the writer's
+// buffer to fill so the backpressure path is exercised.
+type gateWriter struct {
+	gate <-chan struct{}
+	out  *lockedBuffer
+}
+
+func (g gateWriter) Write(p []byte) (int, error) {
+	<-g.gate
+	return g.out.Write(p)
+}
+
+func TestWriterBackpressureNeverDropsOrReorders(t *testing.T) {
+	gate := make(chan struct{})
+	var out lockedBuffer
+	w := NewWriter(gateWriter{gate: gate, out: &out}, RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"}, nil)
+
+	const events = 600 // comfortably beyond the 256-message buffer
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < events; i++ {
+			w.Mirror(session.Event{Type: session.EventNotice, Text: fmt.Sprintf("n%04d", i)})
+		}
+	}()
+	// Let the producer fill the buffer and block, then drain.
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+	<-done
+	w.Close(RunEnd{ExitCode: 0})
+
+	lines := decodeLines(t, out.String())
+	if len(lines) != events+2 {
+		t.Fatalf("lines = %d, want %d mirrored events + envelopes", len(lines), events+2)
+	}
+	for i := 0; i < events; i++ {
+		want := fmt.Sprintf("n%04d", i)
+		if lines[i+1]["text"] != want {
+			t.Fatalf("event %d = %v, want %q: stream reordered or dropped", i, lines[i+1]["text"], want)
+		}
+	}
+	if lines[len(lines)-1]["type"] != TypeRunEnd {
+		t.Fatalf("last line = %v, want run_end", lines[len(lines)-1])
+	}
+}
+
+func TestWriterCloseFillsOneshotOutcomeFromPromptEnd(t *testing.T) {
+	var out lockedBuffer
+	w := NewWriter(&out, RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"}, nil)
+	w.PromptEnd(PromptEnd{ExitCode: 1, TerminationReason: "error", Error: "provider exploded"})
+	w.Close(RunEnd{ExitCode: 1})
+
+	lines := decodeLines(t, out.String())
+	end := lines[len(lines)-1]
+	if end["termination_reason"] != "error" || end["error"] != "provider exploded" {
+		t.Fatalf("run_end = %v, want one-shot outcome filled from prompt_end", end)
+	}
+}
+
+func TestWriterCloseInteractiveLeavesRunEndProcessLevel(t *testing.T) {
+	var out lockedBuffer
+	w := NewWriter(&out, RunStart{Mode: ModeInteractive, SessionID: "s", Provider: "p", Model: "m"}, nil)
+	w.PromptEnd(PromptEnd{ExitCode: 0, TerminationReason: "model_completed"})
+	w.Close(RunEnd{ExitCode: 0})
+
+	lines := decodeLines(t, out.String())
+	end := lines[len(lines)-1]
+	if _, ok := end["termination_reason"]; ok {
+		t.Fatalf("interactive run_end = %v, want process-level (no termination reason)", end)
+	}
+}
+
+func TestWriterCloseTwiceEmitsOneRunEnd(t *testing.T) {
+	var out lockedBuffer
+	w := NewWriter(&out, RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"}, nil)
+	w.Close(RunEnd{ExitCode: 0})
+	w.Close(RunEnd{ExitCode: 1})
+	// Sends after close are dropped silently.
+	w.Mirror(session.Event{Type: session.EventNotice, Text: "late"})
+	w.PromptEnd(PromptEnd{ExitCode: 0})
+
+	lines := decodeLines(t, out.String())
+	if len(lines) != 2 {
+		t.Fatalf("lines = %d, want run_start + one run_end: %q", len(lines), out.String())
+	}
+	if lines[1]["exit_code"] != float64(0) {
+		t.Fatalf("run_end exit_code = %v, want first close's 0", lines[1]["exit_code"])
+	}
+}
+
+func TestWriterWarnsOnceOnWriteFailure(t *testing.T) {
+	var errw bytes.Buffer
+	w := NewWriter(failWriter{}, RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"}, &errw)
+	w.Mirror(session.Event{Type: session.EventNotice, Text: "x"})
+	w.Close(RunEnd{ExitCode: 0})
+	if w.Err() == nil {
+		t.Fatalf("Err = nil, want the write failure")
+	}
+	if got := strings.Count(errw.String(), "runstream: stdout write failed"); got != 1 {
+		t.Fatalf("warnings = %d, want exactly one: %q", got, errw.String())
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, fmt.Errorf("broken pipe") }

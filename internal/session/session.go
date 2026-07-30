@@ -736,6 +736,10 @@ type EventAppender struct {
 	pending   Event
 	pendingAt time.Time
 	now       func() time.Time
+	// Mirror, when non-nil, receives each event after it has been durably
+	// written (post-coalescing). JSON run modes use it to mirror the replay
+	// stream to stdout; mirror delivery never affects recording.
+	Mirror func(Event)
 }
 
 func NewEventAppender(dir string) *EventAppender {
@@ -754,7 +758,12 @@ func (a *EventAppender) Append(ev Event) error {
 		ev.Time = now
 	}
 	if ev.Type != EventAssistantDelta {
-		return errors.Join(a.Flush(), AppendEvent(a.dir, ev))
+		flushErr := a.Flush()
+		writeErr := AppendEvent(a.dir, ev)
+		if writeErr == nil && a.Mirror != nil {
+			a.Mirror(ev)
+		}
+		return errors.Join(flushErr, writeErr)
 	}
 	if ev.Text == "" {
 		return nil
@@ -783,7 +792,11 @@ func (a *EventAppender) Flush() error {
 	pending := a.pending
 	a.pending = Event{}
 	a.pendingAt = time.Time{}
-	return AppendEvent(a.dir, pending)
+	err := AppendEvent(a.dir, pending)
+	if err == nil && a.Mirror != nil {
+		a.Mirror(pending)
+	}
+	return err
 }
 
 func sameAssistantDeltaStream(a, b Event) bool {

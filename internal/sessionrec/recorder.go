@@ -36,6 +36,10 @@ type Config struct {
 	// usage as the cumulative totals (correct for single-prompt child
 	// sessions).
 	PromptUsageLine func(u agent.PromptUsage, promptElapsed time.Duration, cost float64, known bool) string
+	// Mirror, when non-nil, receives every event after it has been durably
+	// written to raw.ndjson (post-coalescing). JSON run modes use it to
+	// mirror the replay stream to stdout.
+	Mirror func(session.Event)
 	// OnError, when non-nil, is called for every append failure. The first
 	// error is also retained for Err.
 	OnError func(error)
@@ -75,9 +79,11 @@ func New(cfg Config) *Recorder {
 	if cfg.Prompt == 0 {
 		cfg.Prompt = 1
 	}
+	events := session.NewEventAppender(cfg.Dir)
+	events.Mirror = cfg.Mirror
 	return &Recorder{
 		cfg:     cfg,
-		events:  session.NewEventAppender(cfg.Dir),
+		events:  events,
 		pending: make(map[string]pendingCall),
 	}
 }

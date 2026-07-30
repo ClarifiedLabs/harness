@@ -3137,6 +3137,20 @@ output belongs in hook context.
 - Exit codes: `0` completed, `1` runtime error, `2` usage error, `130` interrupted.
 - Runs exactly one prompt interaction, saves the session, exits.
 
+#### JSON run stream (`-p -format json`, `internal/runstream`)
+
+`-format json` turns one-shot stdout into a versioned NDJSON run stream
+(`run_start.v`, currently `1`): line 1 is a `run_start` envelope, the last
+line is a `run_end` envelope (`exit_code` mirrors the process exit code), and
+the prompt is bracketed by `prompt_start`/`prompt_end` (`prompt_end` carries
+`exit_code`, `termination_reason`, a usage summary, and `final_text` — the
+last assistant text message, extracted the way delegate child reports do).
+Between the envelopes the stream carries the session's own `session.Event`
+objects, mirrored post-coalescing, so stdout and `raw.ndjson` can never
+diverge (§11). The human renderer's stdout path is muted by discarding the
+output coordinator's stdout; stderr behavior is unchanged. `-format json`
+without `-p` is a usage error (exit 2): the TTY REPL has no JSON mode.
+
 ## 11. Session persistence (`internal/session`)
 
 ```go
@@ -3300,7 +3314,11 @@ type UsageTotals struct {
   turn/prompt usage lines, model-request display lines, and `tool_diff`
   events (when diffs are enabled) as the parent by construction; a parity
   test drives one scripted run through both sink paths and pins identical
-  `raw.ndjson` output.
+  `raw.ndjson` output. The recorder's `Mirror` hook (`sessionrec.Config.Mirror`
+  → `session.EventAppender.Mirror`) receives every event after it has been
+  durably written, post-coalescing; `-format json` run modes (§10) install it
+  to mirror the identical event stream to stdout, so the live JSON stream and
+  the replay log can never diverge.
 - `harness session replay <session-dir>` prints `raw.ndjson` as the familiar
   user-facing terminal view, filtering assistant/reasoning deltas from retry
   attempts that were explicitly discarded before a later successful attempt.

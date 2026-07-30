@@ -34,6 +34,57 @@ func readEvents(t *testing.T, dir string) []session.Event {
 	return events
 }
 
+func TestRecorderMirrorMatchesRawNdjson(t *testing.T) {
+	dir := t.TempDir()
+	var mirrored []session.Event
+	rec := New(Config{
+		Dir:    dir,
+		Prompt: 1,
+		Mirror: func(ev session.Event) { mirrored = append(mirrored, ev) },
+	})
+	rec.User("task")
+	rec.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	rec.TextDelta("hello ")
+	rec.TextDelta("world")
+	rec.TurnComplete(agent.TurnUsage{Turn: 1, Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}})
+	rec.PromptComplete(agent.PromptUsage{Turns: 1, Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}})
+	rec.Flush()
+	if err := rec.Err(); err != nil {
+		t.Fatalf("Err = %v, want nil", err)
+	}
+
+	events := readEvents(t, dir)
+	if len(events) == 0 || len(events) != len(mirrored) {
+		t.Fatalf("raw.ndjson = %d events, mirror = %d: streams diverged\nraw=%+v\nmirror=%+v",
+			len(events), len(mirrored), events, mirrored)
+	}
+	for i := range events {
+		rawJSON, err := json.Marshal(events[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		mirrorJSON, err := json.Marshal(mirrored[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(rawJSON) != string(mirrorJSON) {
+			t.Fatalf("event %d diverged:\nraw:    %s\nmirror: %s", i, rawJSON, mirrorJSON)
+		}
+	}
+	var deltas int
+	for _, ev := range mirrored {
+		if ev.Type == session.EventAssistantDelta {
+			deltas++
+			if ev.Text != "hello world" {
+				t.Fatalf("mirrored delta = %q, want coalesced %q", ev.Text, "hello world")
+			}
+		}
+	}
+	if deltas != 1 {
+		t.Fatalf("mirrored deltas = %d, want one coalesced event", deltas)
+	}
+}
+
 func TestRecorderNoopsOnEmptyDir(t *testing.T) {
 	rec := New(Config{})
 	rec.User("task")

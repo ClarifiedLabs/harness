@@ -85,6 +85,34 @@ spent.
 Exit codes: `0` completed, `1` runtime error, `2` usage error, `130`
 interrupted.
 
+### JSON run stream (`-format json`)
+
+`harness -p "<task>" -format json` runs one-shot exactly as above, except
+**stdout carries only NDJSON** — one JSON object per line, no human text.
+Human diagnostics (tool summaries, the usage line, errors) stay on stderr,
+unchanged; `-q`, `-v`, and `-tool-stream` remain stderr-only.
+
+- Line 1 is always a `run_start` envelope
+  (`{"type":"run_start","v":1,"mode":"oneshot","session_id":…,"agent":…,
+  "provider":…,"model":…,"images":N}`); the last line is always a `run_end`
+  envelope (`exit_code` mirroring the process exit code, plus
+  `termination_reason`/`error` on failures), even on error or interrupt
+  (best-effort).
+- Each prompt is bracketed by `prompt_start`/`prompt_end` envelopes.
+  `prompt_end` carries `exit_code`, `termination_reason`, a
+  `usage` summary (`input_tokens`/`output_tokens`/`cost_usd`/`turns`), and
+  `final_text` (the last assistant text message).
+- Between the envelopes: the same `session.Event` objects the session records
+  to `raw.ndjson` (`user`, `assistant_delta` post-coalescing,
+  `assistant_phase`, `reasoning_summary`, `tool_start`, `tool_result`,
+  `tool_diff`, `notice`, `turn_attempt_start`, `turn_attempt_usage`,
+  `turn_complete`, `prompt_usage`, `model_request`, `checkpoint`, …).
+
+The stream protocol is versioned (`run_start.v`, currently `1`). Consumers
+must ignore unknown event types and must handle EOF without `run_end`
+(process crash). `-format json` without `-p` is a usage error (exit 2): the
+TTY REPL has no JSON mode.
+
 ## Flags
 
 ```text
@@ -148,7 +176,7 @@ interrupted.
 -no-timestamps   alias for -timestamps=none
 -repl-prompt <text>    REPL input prompt format (default "[{agent}] > "; supports placeholders such as {agent}, {model}, and {reasoning})
 -repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
---format <text|json>  output format for informational commands (default text)
+--format <text|json>  output format for informational commands and one-shot (-p) run output (default text)
 --show-config    dump the resolved config, including defaults, as JSON and exit
 --debug-request  dump the first provider-neutral model request as JSON and exit without calling the model
 --agents         list configured agents and exit

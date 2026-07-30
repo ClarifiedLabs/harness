@@ -39,6 +39,7 @@ import (
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/plan"
 	"harness/internal/reasoningprofile"
+	"harness/internal/runstream"
 	"harness/internal/session"
 	"harness/internal/skills"
 	"harness/internal/sysprompt"
@@ -268,7 +269,34 @@ func run(env environment) int {
 		}
 		return ui.ExitOK
 	}
-	terminalOutput := ui.NewOutputCoordinator(stdout, stderr)
+	if cfg.OutputFormat == "json" && !cfg.PromptSet && !cfg.DebugRequest {
+		// -format json without -p selects a JSON run mode (design §10). The
+		// TTY REPL has no JSON mode: without -p the session must be driven by
+		// NDJSON messages on piped stdin (interactive JSON sessions).
+		switch {
+		case cfg.InitialPromptSet:
+			fmt.Fprintln(stderr, "harness: -i is not supported with -format json; use -p or pipe stdin")
+			return ui.ExitUsage
+		case !env.stdinPiped:
+			fmt.Fprintln(stderr, "harness: -format json without -p: nothing to read JSON messages from; use -p or pipe stdin")
+			return ui.ExitUsage
+		default:
+			fmt.Fprintln(stderr, "harness: -format json interactive sessions are not available in this build; use -p for one-shot JSON output")
+			return ui.ExitUsage
+		}
+	}
+	// The JSON run modes give stdout exclusively to the NDJSON event stream:
+	// assistant text and reasoning flow as assistant_delta/reasoning_summary
+	// events, so the human renderer's stdout path is muted by discarding
+	// coordinator stdout. stderr is unchanged. The run stream itself writes to
+	// the raw stdout handle.
+	rawStdout := stdout
+	jsonRunMode := cfg.OutputFormat == "json" && cfg.PromptSet
+	coordinatorOut := stdout
+	if jsonRunMode {
+		coordinatorOut = io.Discard
+	}
+	terminalOutput := ui.NewOutputCoordinator(coordinatorOut, stderr)
 	stdout = terminalOutput.Stdout()
 	stderr = terminalOutput.Stderr()
 
@@ -1282,6 +1310,19 @@ func run(env environment) int {
 			fmt.Fprintf(stderr, "[image skipped: model %s does not support image input]\n", registryModel)
 		}
 		app.PendingImages = images
+		var stream *runstream.Writer
+		if jsonRunMode {
+			stream = runstream.NewWriter(rawStdout, runstream.RunStart{
+				Mode:      runstream.ModeOneshot,
+				SessionID: filepath.Base(sessionPath),
+				Agent:     agentName,
+				Provider:  cfg.Provider,
+				Model:     registryModel,
+				Images:    len(images),
+				Time:      now(),
+			}, stderr)
+			app.RunStream = stream
+		}
 		fmt.Fprintf(stderr, "session: %s\n", sessionPath)
 		fmt.Fprintln(stderr, ui.ProviderLine(cfg.Provider, cfg.Model, registryModel, reasoning, modelRegistry))
 		if resumed != nil {
@@ -1290,8 +1331,11 @@ func run(env environment) int {
 		code := ui.OneShot(app, prompt)
 		select {
 		case <-exitCh:
-			return ui.ExitInterrupt
+			code = ui.ExitInterrupt
 		default:
+		}
+		if stream != nil {
+			stream.Close(runstream.RunEnd{ExitCode: code})
 		}
 		return code
 	}

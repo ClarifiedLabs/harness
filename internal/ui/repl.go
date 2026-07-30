@@ -27,6 +27,7 @@ import (
 	"harness/internal/plan"
 	"harness/internal/reasoningprofile"
 	"harness/internal/replprompt"
+	"harness/internal/runstream"
 	"harness/internal/session"
 	"harness/internal/sessionrec"
 	"harness/internal/skills"
@@ -212,6 +213,10 @@ type App struct {
 	Created              time.Time // session creation time (preserved across saves)
 	PromptNumber         int       // last started prompt, persisted for replay numbering
 	Now                  func() time.Time
+	// RunStream, when set, mirrors the durable session event stream and the
+	// prompt boundary envelopes to the JSON run stream on stdout (design §10,
+	// -format json run modes). nil keeps stdout human-facing.
+	RunStream *runstream.Writer
 	OnSessionPathChanged func(string)
 	// OnPromptFinished observes completion after the per-prompt session save.
 	// It is primarily useful to coordinate embedders and tests whose process
@@ -4596,6 +4601,10 @@ func (app *App) recordEvent(ev session.Event) {
 	}
 	if err := session.AppendEvent(app.SessionPath, ev); err != nil {
 		fmt.Fprintf(app.Errw, "[session event log failed: %v]\n", err)
+		return
+	}
+	if app.RunStream != nil {
+		app.RunStream.Mirror(ev)
 	}
 }
 
@@ -4886,6 +4895,7 @@ type accumulatingSink struct {
 	printPlanPromptBeforeUsage  bool
 	planCountAtPromptStart      int
 	reasoningOutput             bool
+	promptUsage                 agent.PromptUsage // last PromptComplete, priced; JSON run modes report it in prompt_end
 	pendingNames                map[string]string
 	turn                        int
 	attempt                     int
@@ -4897,11 +4907,16 @@ type accumulatingSink struct {
 func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 	s := &accumulatingSink{r: r, app: app, prompt: prompt, pendingNames: make(map[string]string)}
 	if app != nil {
+		var mirror func(session.Event)
+		if app.RunStream != nil {
+			mirror = app.RunStream.Mirror
+		}
 		s.rec = sessionrec.New(sessionrec.Config{
 			Dir:                app.SessionPath,
 			Prompt:             prompt,
 			Clock:              app.clock(),
 			ReasoningSummaries: reasoningSummaryDisplayEnabled(app.Reasoning.Summary),
+			Mirror:             mirror,
 			PriceTurnUsage: func(u llm.Usage) (float64, bool) {
 				// Price against the App's active model so a mid-prompt model
 				// switch is not mispriced (r63).
@@ -5330,6 +5345,12 @@ func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
 	// Price the prompt against the App's own model (not the renderer's) so an
 	// in-prompt model switch is not mispriced, and hand it to the renderer (r63).
 	cost, costKnown := s.app.promptCost(u.Usage)
+	// Capture a priced copy for the JSON run stream's prompt_end envelope
+	// without changing the unpriced value the renderer and recorder consume.
+	s.promptUsage = u
+	if !s.promptUsage.Usage.CostKnown {
+		s.promptUsage.Usage.CostUSD, s.promptUsage.Usage.CostKnown = cost, costKnown
+	}
 	if s.printTodoPromptBeforeUsage {
 		s.r.StopProgress()
 		s.r.flushToolUseStarts()

@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"harness/internal/agent"
+	"harness/internal/llm"
+	"harness/internal/runstream"
 )
 
 // Exit codes for one-shot mode (design §10).
@@ -56,6 +58,9 @@ func OneShot(app *App, prompt string) int {
 	pendingUnsupportedNotice := len(app.PendingImages) > 0 && !app.currentModelSupportsImages()
 	images := app.takePendingImages()
 	images = app.attachPromptImageReferences(prompt, images, pendingUnsupportedNotice)
+	if app.RunStream != nil {
+		app.RunStream.PromptStart("", len(images) > 0)
+	}
 	promptID := app.beginPrompt(prompt, images)
 
 	ctx := context.Background()
@@ -91,6 +96,12 @@ func OneShot(app *App, prompt string) int {
 			app.Renderer.StopProgress()
 			app.Renderer.finishAssistantLine()
 		}
+		if app.RunStream != nil {
+			app.RunStream.PromptEnd(runstream.PromptEnd{
+				ExitCode:          ExitInterrupt,
+				TerminationReason: string(agent.TerminationCancelled),
+			})
+		}
 		// The process exits immediately after OneShot returns. Avoid racing the
 		// stuck prompt goroutine through save/background state.
 		return ExitInterrupt
@@ -111,16 +122,63 @@ func OneShot(app *App, prompt string) int {
 		fmt.Fprintln(app.Errw, summary)
 	}
 
+	code := ExitOK
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return ExitInterrupt
+			code = ExitInterrupt
+		} else {
+			if !sink.terminalModelErrorDisplayed {
+				fmt.Fprintf(app.Errw, "[error: %v]\n", err)
+			}
+			code = ExitRuntime
 		}
-		if !sink.terminalModelErrorDisplayed {
-			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
-		}
-		return ExitRuntime
 	}
-	return ExitOK
+	if app.RunStream != nil {
+		end := runstream.PromptEnd{
+			ExitCode:          code,
+			TerminationReason: string(sink.promptUsage.TerminationReason),
+			Usage:             promptEndUsage(sink.promptUsage),
+			FinalText:         finalAssistantText(app.Agent.Transcript()),
+		}
+		if code == ExitRuntime && err != nil {
+			end.Error = err.Error()
+		}
+		if end.TerminationReason == "" && code == ExitInterrupt {
+			end.TerminationReason = string(agent.TerminationCancelled)
+		}
+		app.RunStream.PromptEnd(end)
+	}
+	return code
+}
+
+// promptEndUsage projects the agent's per-prompt accounting into the JSON run
+// stream's prompt_end summary.
+func promptEndUsage(u agent.PromptUsage) runstream.PromptEndUsage {
+	return runstream.PromptEndUsage{
+		InputTokens:  u.Usage.InputTokens,
+		OutputTokens: u.Usage.OutputTokens,
+		CostUSD:      u.Usage.CostUSD,
+		CostKnown:    u.Usage.CostKnown,
+		Turns:        u.Turns,
+	}
+}
+
+// finalAssistantText returns the last assistant message's joined text blocks,
+// matching the delegate child-report extraction (internal/delegate).
+func finalAssistantText(msgs []llm.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != llm.RoleAssistant {
+			continue
+		}
+		var parts []string
+		for _, b := range msgs[i].Content {
+			if b.Kind == llm.BlockText && b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		return strings.Join(parts, "")
+	}
+	return ""
 }
 
 // BuildPrompt assembles the one-shot prompt from the -p flag value and optional

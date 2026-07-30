@@ -17,6 +17,7 @@ import (
 	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
+	"harness/internal/runstream"
 	"harness/internal/session"
 	"harness/internal/skills"
 	"harness/internal/todo"
@@ -879,6 +880,117 @@ func TestOneShotForceExitDoesNotWaitForStuckProvider(t *testing.T) {
 	}
 	close(release)
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "[prompt:") }, "released one-shot prompt cleanup")
+}
+
+func decodeRunStreamLines(t *testing.T, out string) []map[string]any {
+	t.Helper()
+	var lines []map[string]any
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("decode run-stream line %q: %v", line, err)
+		}
+		lines = append(lines, m)
+	}
+	return lines
+}
+
+func TestOneShotJSONRunStreamEvents(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("hello "), textDelta("world")},
+		Stop:   llm.StopEndTurn,
+		Usage:  llm.Usage{InputTokens: 20, OutputTokens: 6},
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	var stream bytes.Buffer
+	w := runstream.NewWriter(&stream, runstream.RunStart{
+		Mode: runstream.ModeOneshot, SessionID: "test-session", Provider: "fake", Model: "fake",
+	}, &errw)
+	app.RunStream = w
+
+	code := OneShot(app, "do it")
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	w.Close(runstream.RunEnd{ExitCode: code})
+
+	lines := decodeRunStreamLines(t, stream.String())
+	if len(lines) < 6 {
+		t.Fatalf("stream = %d lines, want at least 6: %q", len(lines), stream.String())
+	}
+	if lines[0]["type"] != "run_start" {
+		t.Fatalf("line 0 = %v, want run_start", lines[0]["type"])
+	}
+	if lines[1]["type"] != "prompt_start" {
+		t.Fatalf("line 1 = %v, want prompt_start", lines[1]["type"])
+	}
+	if lines[2]["type"] != "user" || lines[2]["text"] != "do it" {
+		t.Fatalf("line 2 = %v, want the mirrored user event", lines[2])
+	}
+	var deltas []string
+	for _, line := range lines {
+		if line["type"] == "assistant_delta" {
+			text, _ := line["text"].(string)
+			deltas = append(deltas, text)
+		}
+	}
+	if len(deltas) != 1 || deltas[0] != "hello world" {
+		t.Fatalf("assistant deltas = %v, want one coalesced %q", deltas, "hello world")
+	}
+	end := lines[len(lines)-2]
+	if end["type"] != "prompt_end" {
+		t.Fatalf("second-to-last line = %v, want prompt_end: %q", end["type"], stream.String())
+	}
+	if end["exit_code"] != float64(0) || end["termination_reason"] != "model_completed" ||
+		end["final_text"] != "hello world" {
+		t.Fatalf("prompt_end = %v", end)
+	}
+	usage, _ := end["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(20) || usage["output_tokens"] != float64(6) || usage["turns"] != float64(1) {
+		t.Fatalf("prompt_end usage = %v", usage)
+	}
+	runEnd := lines[len(lines)-1]
+	if runEnd["type"] != "run_end" || runEnd["exit_code"] != float64(0) ||
+		runEnd["termination_reason"] != "model_completed" {
+		t.Fatalf("run_end = %v, want the one-shot outcome mirrored from prompt_end", runEnd)
+	}
+}
+
+func TestOneShotJSONRunStreamError(t *testing.T) {
+	var out, errw bytes.Buffer
+	fail := llmtest.Step{Err: errContext("upstream 500")}
+	fp := llmtest.New("fake", fail, fail, fail)
+	app := newTestApp(t, &out, &errw, fp)
+	var stream bytes.Buffer
+	w := runstream.NewWriter(&stream, runstream.RunStart{
+		Mode: runstream.ModeOneshot, SessionID: "test-session", Provider: "fake", Model: "fake",
+	}, &errw)
+	app.RunStream = w
+
+	code := OneShot(app, "go")
+	if code != ExitRuntime {
+		t.Fatalf("exit code = %d, want %d", code, ExitRuntime)
+	}
+	w.Close(runstream.RunEnd{ExitCode: code})
+
+	lines := decodeRunStreamLines(t, stream.String())
+	end := lines[len(lines)-2]
+	if end["type"] != "prompt_end" || end["exit_code"] != float64(ExitRuntime) ||
+		end["termination_reason"] != "error" {
+		t.Fatalf("prompt_end = %v, want the runtime failure", end)
+	}
+	if msg, _ := end["error"].(string); !strings.Contains(msg, "upstream 500") {
+		t.Fatalf("prompt_end error = %v, want the provider error", end["error"])
+	}
+	runEnd := lines[len(lines)-1]
+	if runEnd["type"] != "run_end" || runEnd["exit_code"] != float64(ExitRuntime) ||
+		runEnd["termination_reason"] != "error" {
+		t.Fatalf("run_end = %v, want the failure mirrored from prompt_end", runEnd)
+	}
 }
 
 func TestBuildPromptDash(t *testing.T) {
