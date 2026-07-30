@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -935,6 +936,219 @@ func TestStreamWebSocketResponseCreate(t *testing.T) {
 	}
 	if done == nil || done.ResponseID != "resp_ws" {
 		t.Fatalf("done = %+v, want response id resp_ws", done)
+	}
+}
+
+func TestStreamWebSocketFailureFallsBackToStatelessHTTP(t *testing.T) {
+	type capturedRequest struct {
+		request wireRequest
+		err     error
+	}
+	var websocketAttempts atomic.Int32
+	var httpAttempts atomic.Int32
+	fallbackRequest := make(chan capturedRequest, 1)
+	recoveredRequest := make(chan string, 1)
+	releaseWebSocket := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			httpAttempts.Add(1)
+			var request wireRequest
+			err := json.NewDecoder(r.Body).Decode(&request)
+			fallbackRequest <- capturedRequest{request: request, err: err}
+			w.Header().Set("Content-Type", "text/event-stream")
+			llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"resp_http","status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}`+"\n\n"))
+			return
+		}
+
+		attempt := websocketAttempts.Add(1)
+		if attempt == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			llmtest.WriteBody(w, []byte(`{"detail":"websocket unavailable"}`))
+			return
+		}
+
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			t.Errorf("response writer is not a hijacker")
+			return
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+		fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+		fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+		fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", testAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+		if err := rw.Flush(); err != nil {
+			t.Errorf("flush handshake: %v", err)
+			return
+		}
+		request, err := ws.ReadClientText(rw.Reader)
+		if err != nil {
+			t.Errorf("read recovered websocket request: %v", err)
+			return
+		}
+		recoveredRequest <- request
+		if err := ws.WriteServerText(conn, `{"type":"response.completed","response":{"id":"resp_ws_recovered","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}`); err != nil {
+			t.Errorf("write recovered completion: %v", err)
+			return
+		}
+		<-releaseWebSocket
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(releaseWebSocket) })
+
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, Sleep: func(time.Duration) {}})
+	req := llmtest.SimpleRequest("gpt-5.4")
+	req.StoreResponse = true
+
+	events, err := llmtest.Drain(p.Stream(context.Background(), req))
+	if err != nil {
+		t.Fatalf("fallback Stream: %v", err)
+	}
+	captured := <-fallbackRequest
+	if captured.err != nil {
+		t.Fatalf("decode fallback request: %v", captured.err)
+	}
+	if captured.request.Store || captured.request.PreviousResponseID != "" {
+		t.Fatalf("fallback request carried continuation: %+v", captured.request)
+	}
+	if len(captured.request.Input) != len(req.Messages) {
+		t.Fatalf("fallback input items = %d, want full request with %d", len(captured.request.Input), len(req.Messages))
+	}
+	if got := websocketAttempts.Load(); got != 1 {
+		t.Fatalf("websocket attempts after fallback = %d, want 1", got)
+	}
+	if got := httpAttempts.Load(); got != 1 {
+		t.Fatalf("HTTP attempts after fallback = %d, want 1", got)
+	}
+	var fallbackDone *llm.StreamEvent
+	for i := range events {
+		if events[i].Kind == llm.EventDone {
+			fallbackDone = &events[i]
+		}
+	}
+	if fallbackDone == nil {
+		t.Fatal("HTTP fallback emitted no completion")
+	}
+	if fallbackDone.ResponseID != "" || fallbackDone.ResponseIDAnchor != nil {
+		t.Fatalf("HTTP fallback exposed continuation state: %+v", fallbackDone)
+	}
+	if p.CanContinueResponse("resp_http") {
+		t.Fatal("HTTP fallback response became a WebSocket continuation")
+	}
+
+	events, err = llmtest.Drain(p.Stream(context.Background(), req))
+	if err != nil {
+		t.Fatalf("recovered WebSocket Stream: %v", err)
+	}
+	request := <-recoveredRequest
+	for _, want := range []string{`"type":"response.create"`, `"store":false`} {
+		if !strings.Contains(request, want) {
+			t.Fatalf("recovered WebSocket request missing %s: %s", want, request)
+		}
+	}
+	if strings.Contains(request, "previous_response_id") {
+		t.Fatalf("recovered WebSocket request carried fallback response ID: %s", request)
+	}
+	var responseID string
+	for _, event := range events {
+		if event.Kind == llm.EventDone {
+			responseID = event.ResponseID
+		}
+	}
+	if responseID != "resp_ws_recovered" || !p.CanContinueResponse(responseID) {
+		t.Fatalf("recovered response ID = %q, available=%v", responseID, p.CanContinueResponse(responseID))
+	}
+	if got := httpAttempts.Load(); got != 1 {
+		t.Fatalf("HTTP attempts after WebSocket recovery = %d, want 1", got)
+	}
+}
+
+func TestStreamWebSocketContinuationDoesNotFallBackToHTTP(t *testing.T) {
+	var httpAttempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			httpAttempts.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"unexpected","status":"completed","output":[]}}`+"\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		llmtest.WriteBody(w, []byte(`{"detail":"websocket unavailable"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, Sleep: func(time.Duration) {}})
+	req := llmtest.SimpleRequest("gpt-5.4")
+	req.StoreResponse = true
+	req.PreviousResponseID = "resp_live"
+	if _, err := llmtest.Drain(p.Stream(context.Background(), req)); err == nil {
+		t.Fatal("continuation WebSocket failure unexpectedly succeeded")
+	}
+	if got := httpAttempts.Load(); got != 0 {
+		t.Fatalf("continuation crossed transports with %d HTTP attempts", got)
+	}
+}
+
+func TestStreamWebSocketFailureAfterOutputDoesNotFallBackToHTTP(t *testing.T) {
+	var httpAttempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			httpAttempts.Add(1)
+			return
+		}
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			t.Errorf("response writer is not a hijacker")
+			return
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+		fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+		fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+		fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", testAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+		if err := rw.Flush(); err != nil {
+			t.Errorf("flush handshake: %v", err)
+			return
+		}
+		if _, err := ws.ReadClientText(rw.Reader); err != nil {
+			t.Errorf("read websocket request: %v", err)
+			return
+		}
+		if err := ws.WriteServerText(conn, `{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"partial"}`); err != nil {
+			t.Errorf("write partial output: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, Sleep: func(time.Duration) {}})
+	events, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4")))
+	if err == nil {
+		t.Fatal("partial WebSocket failure unexpectedly succeeded")
+	}
+	var text strings.Builder
+	for _, event := range events {
+		if event.Kind == llm.EventTextDelta {
+			text.WriteString(event.Text)
+		}
+	}
+	if text.String() != "partial" {
+		t.Fatalf("text = %q, want partial", text.String())
+	}
+	if got := httpAttempts.Load(); got != 0 {
+		t.Fatalf("partial WebSocket response retried with %d HTTP attempts", got)
 	}
 }
 

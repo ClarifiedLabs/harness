@@ -731,7 +731,11 @@ to use the Responses WebSocket transport; the proxy defaults that on for
 `codex_oauth` Responses configs and preserves explicit true/false overrides.
 The Codex WebSocket request always carries `store:false`; its response IDs are
 continuation handles scoped to the originating live socket rather than durable
-stored Responses objects.
+stored Responses objects. If a WebSocket request without a previous response
+fails before output, the provider falls back to stateless HTTP with `store:false`
+and suppresses that HTTP response ID so the next request resends full context and
+can re-establish WebSocket continuation. A request carrying a socket-scoped
+previous response never crosses transports.
 If a provider rejects a request with a parseable
 context-overflow error, the agent records the smaller reported window for the
 session, rebuilds the request, and retries once before surfacing the error.

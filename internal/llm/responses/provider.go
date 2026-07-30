@@ -110,9 +110,27 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			if p.streamWebSocket(ctx, req, yield) {
 				return
 			}
+			p.streamHTTPFallback(ctx, req, yield)
+			return
 		}
 		p.streamHTTP(ctx, req, yield)
 	}
+}
+
+// streamHTTPFallback degrades a failed WebSocket request to a stateless HTTP
+// request. WebSocket continuation IDs are connection-scoped, so an HTTP response
+// ID must not be exposed as the next WebSocket anchor. streamWebSocket only
+// permits this crossover before output and when there is no previous response.
+func (p *Provider) streamHTTPFallback(ctx context.Context, req llm.Request, yield func(llm.StreamEvent, error) bool) {
+	req.StoreResponse = false
+	req.PreviousResponseID = ""
+	p.streamHTTP(ctx, req, func(event llm.StreamEvent, err error) bool {
+		if event.Kind == llm.EventDone {
+			event.ResponseID = ""
+			event.ResponseIDAnchor = nil
+		}
+		return yield(event, err)
+	})
 }
 
 func (p *Provider) streamHTTP(ctx context.Context, req llm.Request, yield func(llm.StreamEvent, error) bool) {
