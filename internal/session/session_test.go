@@ -40,6 +40,126 @@ func stripSessionTestANSI(s string) string {
 	return b.String()
 }
 
+func TestReplayDimsStatusLinesWithANSI(t *testing.T) {
+	dir := t.TempDir()
+	events := []Event{
+		{Type: EventUser, Prompt: 1, Text: "hello"},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "world"},
+		{Type: EventToolResult, Prompt: 1, Turn: 1, Display: "[read_file] path=a.go → 3 lines"},
+		{Type: EventTurnComplete, Prompt: 1, Turn: 1, Display: "[turn: 1 · 1.0s]"},
+		{Type: EventPromptUsage, Prompt: 1, Display: "[prompt: 1 turn · 1.0k in / 0.1k out · 0.1s]"},
+	}
+	for _, ev := range events {
+		if err := AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	var out strings.Builder
+	if err := Replay(dir, &out, ReplayOptions{ANSI: true}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	got := out.String()
+	for _, line := range []string{"[read_file] path=a.go → 3 lines", "[turn: 1 · 1.0s]", "[prompt: 1 turn"} {
+		if !strings.Contains(got, ansiDim+line) {
+			t.Fatalf("status line %q not dimmed:\n%q", line, got)
+		}
+	}
+	if !strings.Contains(got, "\n"+ansiDim+markdown.HorizontalRule+ansiReset+"\n") {
+		t.Fatalf("prompt separator not dimmed:\n%q", got)
+	}
+	if stripped := stripSessionTestANSI(got); !strings.Contains(stripped, "[turn: 1 · 1.0s]") {
+		t.Fatalf("stripped replay lost status text:\n%q", stripped)
+	}
+
+	var plain strings.Builder
+	if err := Replay(dir, &plain, ReplayOptions{}); err != nil {
+		t.Fatalf("plain Replay: %v", err)
+	}
+	if strings.Contains(plain.String(), ansiDim) {
+		t.Fatalf("ANSI-off replay dimmed status lines:\n%q", plain.String())
+	}
+}
+
+func TestReplayRendersTurnAttemptStartMarkers(t *testing.T) {
+	dir := t.TempDir()
+	events := []Event{
+		{Type: EventUser, Prompt: 1, Text: "hello"},
+		{Type: EventTurnAttemptStart, Prompt: 1, Turn: 1, Attempt: 1},
+		{Type: EventTurnAttemptStart, Prompt: 1, Turn: 1, Attempt: 2},
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "world"},
+	}
+	for _, ev := range events {
+		if err := AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	var out strings.Builder
+	if err := Replay(dir, &out, ReplayOptions{}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"[turn: 1 waiting]", "[turn: 1 attempt 2 waiting]"} {
+		if !strings.Contains(got, "\n"+want+"\n") {
+			t.Fatalf("replay missing %q:\n%s", want, got)
+		}
+	}
+
+	var dim strings.Builder
+	if err := Replay(dir, &dim, ReplayOptions{ANSI: true}); err != nil {
+		t.Fatalf("ANSI Replay: %v", err)
+	}
+	if !strings.Contains(dim.String(), ansiDim+"[turn: 1 waiting]"+ansiReset) {
+		t.Fatalf("turn waiting marker not dimmed:\n%q", dim.String())
+	}
+
+	var quiet strings.Builder
+	if err := Replay(dir, &quiet, ReplayOptions{Quiet: true}); err != nil {
+		t.Fatalf("quiet Replay: %v", err)
+	}
+	if strings.Contains(quiet.String(), "waiting") {
+		t.Fatalf("quiet replay printed turn waiting markers:\n%s", quiet.String())
+	}
+}
+
+func TestReplayColorizesToolDiffWithPath(t *testing.T) {
+	dir := t.TempDir()
+	diff := "--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-old\n+new"
+	events := []Event{
+		{Type: EventUser, Prompt: 1, Text: "change it"},
+		{Type: EventToolDiff, Prompt: 1, Turn: 1, Tool: "edit", Path: "main.go", Display: diff},
+	}
+	for _, ev := range events {
+		if err := AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	var colored strings.Builder
+	if err := Replay(dir, &colored, ReplayOptions{ANSI: true}); err != nil {
+		t.Fatalf("ANSI Replay: %v", err)
+	}
+	got := colored.String()
+	if !strings.Contains(got, "\x1b[") {
+		t.Fatalf("tool diff not colorized:\n%q", got)
+	}
+	if strings.Contains(got, ansiDim+"--- a/main.go") {
+		t.Fatalf("tool diff dimmed like a status line:\n%q", got)
+	}
+	if stripped := stripSessionTestANSI(got); !strings.Contains(stripped, "-old\n+new") {
+		t.Fatalf("stripped diff lost content:\n%q", stripped)
+	}
+
+	var plain strings.Builder
+	if err := Replay(dir, &plain, ReplayOptions{}); err != nil {
+		t.Fatalf("plain Replay: %v", err)
+	}
+	if strings.Contains(plain.String(), "\x1b[") || !strings.Contains(plain.String(), diff) {
+		t.Fatalf("ANSI-off replay mangled diff:\n%q", plain.String())
+	}
+}
+
 func TestReplayQuietSuppressesStatusLines(t *testing.T) {
 	dir := t.TempDir()
 
@@ -808,7 +928,7 @@ func TestReplayHighlightsTaggedFenceOnlyWithANSI(t *testing.T) {
 	if err := Replay(dir, &plain, ReplayOptions{Markdown: true}); err != nil {
 		t.Fatalf("plain Replay: %v", err)
 	}
-	wantPlain := "> show code\n  ```go\n  func main() {\n  ```\n"
+	wantPlain := "> show code\n" + markdown.HorizontalRule + "\n  ```go\n  func main() {\n  ```\n"
 	if got := plain.String(); got != wantPlain {
 		t.Fatalf("plain replay = %q, want %q", got, wantPlain)
 	}
@@ -820,7 +940,7 @@ func TestReplayHighlightsTaggedFenceOnlyWithANSI(t *testing.T) {
 	if err := Replay(dir, &colored, ReplayOptions{Markdown: true, ANSI: true}); err != nil {
 		t.Fatalf("colored Replay: %v", err)
 	}
-	if colored.String() == plain.String() || !strings.Contains(strings.Split(colored.String(), "\n")[2], "\x1b[") {
+	if colored.String() == plain.String() || !strings.Contains(strings.Split(colored.String(), "\n")[3], "\x1b[") {
 		t.Fatalf("ANSI replay did not highlight fence body: %q", colored.String())
 	}
 	if got := stripSessionTestANSI(colored.String()); got != plain.String() {
@@ -897,7 +1017,9 @@ func TestReplaySeparatesCommentaryAndFinalAnswer(t *testing.T) {
 	if err := Replay(dir, &replay, ReplayOptions{Markdown: true, ANSI: true}); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	wantReplay := "> answer this\nI have enough to answer.\n" +
+	wantReplay := "> answer this\n" +
+		ansiDim + markdown.HorizontalRule + ansiReset +
+		"\nI have enough to answer.\n" +
 		ansiDim + markdown.HorizontalRule + ansiReset +
 		"\nYes, with limits.\n"
 	if replay.String() != wantReplay {
@@ -935,10 +1057,13 @@ func TestReplayResetsPhaseStateBetweenTurns(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 	got := replay.String()
-	if strings.Contains(got, "\n"+markdown.HorizontalRule+"\n") {
+	// The separator after each user prompt is structural; a separator between
+	// the commentary text and the next prompt would mean phase state carried
+	// across turns.
+	if strings.Contains(got, "Working.\n"+markdown.HorizontalRule) {
 		t.Fatalf("replay carried phase state between turns:\n%s", got)
 	}
-	if !strings.Contains(got, "> second\nDone.\n") {
+	if !strings.Contains(got, "> second\n"+markdown.HorizontalRule+"\nDone.\n") {
 		t.Fatalf("second turn final answer missing:\n%s", got)
 	}
 }

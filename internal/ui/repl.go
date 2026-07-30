@@ -28,6 +28,7 @@ import (
 	"harness/internal/reasoningprofile"
 	"harness/internal/replprompt"
 	"harness/internal/session"
+	"harness/internal/sessionrec"
 	"harness/internal/skills"
 	"harness/internal/term"
 	"harness/internal/todo"
@@ -4877,7 +4878,7 @@ func (app *App) summaryWidth() int {
 type accumulatingSink struct {
 	r                           *Renderer
 	app                         *App
-	events                      *session.EventAppender
+	rec                         *sessionrec.Recorder
 	prompt                      int
 	printTodoUpdate             bool
 	printTodoPromptBeforeUsage  bool
@@ -4885,8 +4886,7 @@ type accumulatingSink struct {
 	printPlanPromptBeforeUsage  bool
 	planCountAtPromptStart      int
 	reasoningOutput             bool
-	pending                     map[string]llm.ToolCall
-	pendingStarted              map[string]time.Time
+	pendingNames                map[string]string
 	turn                        int
 	attempt                     int
 	todoTurn                    int
@@ -4895,13 +4895,28 @@ type accumulatingSink struct {
 }
 
 func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
-	s := &accumulatingSink{
-		r: r, app: app, prompt: prompt,
-		pending:        make(map[string]llm.ToolCall),
-		pendingStarted: make(map[string]time.Time),
-	}
+	s := &accumulatingSink{r: r, app: app, prompt: prompt, pendingNames: make(map[string]string)}
 	if app != nil {
-		s.events = session.NewEventAppender(app.SessionPath)
+		s.rec = sessionrec.New(sessionrec.Config{
+			Dir:                app.SessionPath,
+			Prompt:             prompt,
+			Clock:              app.clock(),
+			ReasoningSummaries: reasoningSummaryDisplayEnabled(app.Reasoning.Summary),
+			PriceTurnUsage: func(u llm.Usage) (float64, bool) {
+				// Price against the App's active model so a mid-prompt model
+				// switch is not mispriced (r63).
+				return app.Registry.Cost(app.usageKey(), u)
+			},
+			PricePromptUsage: app.promptCost,
+			PromptUsageLine: func(u agent.PromptUsage, promptElapsed time.Duration, cost float64, costKnown bool) string {
+				// Runs after App.addUsage refreshed the renderer's cumulative
+				// totals, so the recorded line matches the live one.
+				return usageLine(u, promptElapsed, cost, costKnown, s.r.cumInput, s.r.cumOutput, s.r.cumCost)
+			},
+			OnError: func(err error) {
+				fmt.Fprintf(app.Errw, "[session event log failed: %v]\n", err)
+			},
+		})
 	}
 	return s
 }
@@ -4920,28 +4935,17 @@ func newREPLSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 }
 
 func (s *accumulatingSink) recordEvent(ev session.Event) {
-	if s == nil || s.app == nil || s.app.SessionPath == "" {
+	if s == nil || s.rec == nil {
 		return
 	}
-	if ev.Time.IsZero() {
-		ev.Time = s.app.clock()()
-	}
-	if s.events == nil {
-		s.app.recordEvent(ev)
-		return
-	}
-	if err := s.events.Append(ev); err != nil {
-		fmt.Fprintf(s.app.Errw, "[session event log failed: %v]\n", err)
-	}
+	s.rec.Append(ev)
 }
 
 func (s *accumulatingSink) FlushEvents() {
-	if s == nil || s.events == nil {
+	if s == nil || s.rec == nil {
 		return
 	}
-	if err := s.events.Flush(); err != nil {
-		fmt.Fprintf(s.app.Errw, "[session event log failed: %v]\n", err)
-	}
+	s.rec.Flush()
 }
 
 func (s *accumulatingSink) planDisplayState() plan.DisplayState {
@@ -4961,13 +4965,7 @@ func (s *accumulatingSink) planDisplayState() plan.DisplayState {
 
 func (s *accumulatingSink) TextDelta(text string) {
 	s.r.TextDelta(text)
-	s.recordEvent(session.Event{
-		Type:    session.EventAssistantDelta,
-		Prompt:  s.prompt,
-		Turn:    s.turn,
-		Text:    text,
-		Attempt: s.attempt,
-	})
+	s.rec.TextDelta(text)
 }
 
 func (s *accumulatingSink) AssistantPhase(phase string) {
@@ -4975,13 +4973,7 @@ func (s *accumulatingSink) AssistantPhase(phase string) {
 		return
 	}
 	s.r.AssistantPhase(phase)
-	s.recordEvent(session.Event{
-		Type:    session.EventAssistantPhase,
-		Prompt:  s.prompt,
-		Turn:    s.turn,
-		Phase:   phase,
-		Attempt: s.attempt,
-	})
+	s.rec.AssistantPhase(phase)
 }
 
 func (s *accumulatingSink) ReasoningSummary(text string) {
@@ -4994,13 +4986,7 @@ func (s *accumulatingSink) ReasoningSummary(text string) {
 	} else {
 		s.r.ReasoningSummaryStatus(text)
 	}
-	s.recordEvent(session.Event{
-		Type:    session.EventReasoningSummary,
-		Prompt:  s.prompt,
-		Turn:    s.turn,
-		Text:    text,
-		Attempt: s.attempt,
-	})
+	s.rec.ReasoningSummary(text)
 }
 
 func (s *accumulatingSink) CompactionStart() {
@@ -5021,35 +5007,16 @@ func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.Context
 	s.turn = turn
 	s.attempt = attempt
 	s.r.TurnAttemptStart(turn, attempt, ctx)
-	s.recordEvent(session.Event{
-		Type:    session.EventTurnAttemptStart,
-		Prompt:  s.prompt,
-		Turn:    s.turn,
-		Attempt: attempt,
-		Context: contextSnapshot(ctx),
-	})
+	s.rec.TurnAttemptStart(turn, attempt, ctx)
 }
 
 func (s *accumulatingSink) TurnAttemptAbandoned(turn, attempt int) {
-	s.recordEvent(session.Event{
-		Type:    session.EventTurnAttemptAbandoned,
-		Prompt:  s.prompt,
-		Turn:    turn,
-		Attempt: attempt,
-		Display: fmt.Sprintf("[turn: %d attempt %d discarded; retrying]", turn, attempt),
-	})
+	s.rec.TurnAttemptAbandoned(turn, attempt)
 }
 
 func (s *accumulatingSink) TurnAttemptComplete(u agent.TurnAttemptUsage) {
 	s.r.TurnAttemptComplete(u)
-	usage := u.Usage
-	s.recordEvent(session.Event{
-		Type:    session.EventTurnAttemptUsage,
-		Prompt:  s.prompt,
-		Turn:    u.Turn,
-		Usage:   &usage,
-		Attempt: u.Attempt,
-	})
+	s.rec.TurnAttemptComplete(u)
 }
 
 func (s *accumulatingSink) ModelRequestEvent(event llm.ModelRequestEvent) {
@@ -5057,15 +5024,7 @@ func (s *accumulatingSink) ModelRequestEvent(event llm.ModelRequestEvent) {
 	if line != "" && event.Outcome == llm.ModelRequestOutcomeTerminal {
 		s.terminalModelErrorDisplayed = true
 	}
-	copyEvent := event
-	s.recordEvent(session.Event{
-		Type:         session.EventModelRequest,
-		Prompt:       s.prompt,
-		Turn:         s.turn,
-		Attempt:      s.attempt,
-		Display:      line,
-		ModelRequest: &copyEvent,
-	})
+	s.rec.ModelRequestEvent(event)
 	if s.app.DiagnosticLogger == nil {
 		return
 	}
@@ -5118,63 +5077,27 @@ func (s *accumulatingSink) ToolUseDelta(index int, delta string) {
 }
 
 func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
-	s.pending[c.ID] = c
-	s.pendingStarted[c.ID] = s.app.clock()()
+	s.pendingNames[c.ID] = c.Name
 	s.r.ToolStart(c)
-	s.recordEvent(session.Event{Type: session.EventToolStart, Prompt: s.prompt, Turn: s.turn, ToolID: c.ID, Tool: c.Name, Input: c.Input})
+	s.rec.ToolStart(c)
 }
 
 func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
-	call := s.pending[res.ForID]
-	started := s.pendingStarted[res.ForID]
-	delete(s.pending, res.ForID)
-	delete(s.pendingStarted, res.ForID)
-	line := ToolResultLine(call, res)
+	name := s.pendingNames[res.ForID]
+	delete(s.pendingNames, res.ForID)
 	s.r.ToolResult(res)
-	if s.printTodoUpdate && call.Name == "update_todos" && !res.IsError {
+	s.rec.ToolResult(res)
+	if s.printTodoUpdate && name == "update_todos" && !res.IsError {
 		s.app.printTodoUpdateStatus()
 	}
-	if s.printPlanUpdate && call.Name == "record_plan" && !res.IsError {
+	if s.printPlanUpdate && name == "record_plan" && !res.IsError {
 		s.app.printPlanStatus(s.planDisplayState())
 	}
-	shownBytes := res.ShownBytes
-	if shownBytes == 0 {
-		shownBytes = len(res.Text)
-	}
-	originalBytes := res.OriginalBytes
-	if originalBytes == 0 {
-		originalBytes = shownBytes
-	}
-	var durationMS int64
-	if !started.IsZero() {
-		durationMS = s.app.clock()().Sub(started).Milliseconds()
-	}
-	s.recordEvent(session.Event{
-		Type:                session.EventToolResult,
-		Prompt:              s.prompt,
-		Turn:                s.turn,
-		ToolID:              res.ForID,
-		Tool:                call.Name,
-		Display:             line,
-		DurationMS:          durationMS,
-		ResultError:         res.IsError,
-		ResultTruncated:     res.Truncated,
-		ResultOriginalBytes: originalBytes,
-		ResultShownBytes:    shownBytes,
-		ResultMetrics:       maps.Clone(res.Metrics),
-	})
 }
 
 func (s *accumulatingSink) ToolDiff(call llm.ToolCall, path, text string) {
 	s.r.ToolDiff(call, path, text)
-	s.recordEvent(session.Event{
-		Type:    session.EventToolDiff,
-		Prompt:  s.prompt,
-		Turn:    s.turn,
-		ToolID:  call.ID,
-		Tool:    call.Name,
-		Display: strings.TrimRight(text, "\n"),
-	})
+	s.rec.ToolDiff(call, path, text)
 }
 
 func (s *accumulatingSink) ArchiveToolResult(res llm.ToolResult) (agent.ToolResultArchive, error) {
@@ -5194,7 +5117,7 @@ func (s *accumulatingSink) Notice(msg string) {
 	if s.inMaintenance {
 		turn = 0
 	}
-	s.recordEvent(session.Event{Type: session.EventNotice, Prompt: s.prompt, Turn: turn, Display: msg})
+	s.rec.Notice(msg, turn)
 }
 
 func (s *accumulatingSink) ModelErrorDiagnostic(event agent.ModelErrorDiagnostic) {
@@ -5237,25 +5160,12 @@ func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
 	if !u.Usage.CostKnown {
 		u.Usage.CostUSD, u.Usage.CostKnown = s.app.Registry.Cost(s.app.usageKey(), u.Usage)
 	}
-	line := s.r.TurnComplete(u)
-	usage := u.Usage
-	s.recordEvent(session.Event{
-		Type:    session.EventTurnComplete,
-		Prompt:  s.prompt,
-		Turn:    u.Turn,
-		Display: line,
-		Usage:   &usage,
-	})
+	s.r.TurnComplete(u)
+	s.rec.TurnComplete(u)
 }
 
 func (s *accumulatingSink) MaintenanceComplete(u agent.MaintenanceUsage) {
-	usage := u.Usage
-	s.recordEvent(session.Event{
-		Type:    session.EventMaintenanceUsage,
-		Prompt:  s.prompt,
-		Purpose: u.Purpose,
-		Usage:   &usage,
-	})
+	s.rec.MaintenanceComplete(u)
 }
 
 func (s *accumulatingSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
@@ -5439,35 +5349,7 @@ func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
 	s.r.SetPromptCost(cost, costKnown)
 	s.r.PromptComplete(u)
 	s.app.addUsage(u)
-	// Regenerate the line for the session event record after cumulative totals
-	// have been updated by PromptComplete above.
-	line := usageLine(u, s.r.now().Sub(s.r.promptRunStart), cost, costKnown,
-		s.r.cumInput, s.r.cumOutput, s.r.cumCost)
-	usage := u.Usage
-	s.recordEvent(session.Event{
-		Type:              session.EventPromptUsage,
-		Prompt:            s.prompt,
-		Display:           line,
-		Usage:             &usage,
-		TerminationReason: string(u.TerminationReason),
-	})
-}
-
-func contextSnapshot(ctx agent.ContextEstimate) *session.ContextSnapshot {
-	if ctx.Total == 0 && ctx.Window == 0 && ctx.System == 0 && ctx.Tools == 0 && ctx.Messages == 0 &&
-		ctx.PayloadTotal == 0 && ctx.PayloadSystem == 0 && ctx.PayloadTools == 0 && ctx.PayloadMessages == 0 {
-		return nil
-	}
-	return &session.ContextSnapshot{
-		Total:           ctx.Total,
-		Window:          ctx.Window,
-		System:          ctx.System,
-		Tools:           ctx.Tools,
-		Messages:        ctx.Messages,
-		Source:          ctx.Source,
-		PayloadTotal:    ctx.PayloadTotal,
-		PayloadSystem:   ctx.PayloadSystem,
-		PayloadTools:    ctx.PayloadTools,
-		PayloadMessages: ctx.PayloadMessages,
-	}
+	// The recorder's prompt-usage line hook reads the renderer's cumulative
+	// totals, refreshed by addUsage above, so the recorded line matches live.
+	s.rec.PromptComplete(u)
 }

@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,8 +16,8 @@ import (
 	"harness/internal/delegate"
 	"harness/internal/llm"
 	"harness/internal/markdown"
+	"harness/internal/sessionrec"
 	"harness/internal/term/highlight"
-	"harness/internal/tools"
 )
 
 // ANSI styling is emitted only when RenderOptions.Color is set. Rendering stays
@@ -362,24 +360,18 @@ func (r *Renderer) TurnAttemptComplete(usage agent.TurnAttemptUsage) {
 // ModelRequestEvent renders and tracks diagnostics-only provider lifecycle
 // state. It returns the durable display line, if any, for raw session replay.
 func (r *Renderer) ModelRequestEvent(event llm.ModelRequestEvent) string {
-	line := ""
-	switch event.State {
-	case llm.ModelRequestUpstreamAttemptFailed, llm.ModelRequestFailed:
-		// A previous-response/interaction rejection is terminal for this proxy
-		// request, but the agent can discard the stale anchor and resend full
-		// context immediately. Do not eagerly render it as a terminal prompt
-		// error. The structured event is still persisted and logged by the sink;
-		// if recovery does not succeed, the caller's final error path renders the
-		// returned error normally.
-		if !continuationFailureMayRecover(event) {
-			line = modelRequestIssueLine(event)
-			if line != "" {
-				if event.Outcome == llm.ModelRequestOutcomeTerminal {
-					r.writeDimLine(line)
-				} else {
-					r.dimLine(line)
-				}
-			}
+	// A previous-response/interaction rejection is terminal for this proxy
+	// request, but the agent can discard the stale anchor and resend full
+	// context immediately. Do not eagerly render it as a terminal prompt
+	// error. The structured event is still persisted and logged by the sink;
+	// if recovery does not succeed, the caller's final error path renders the
+	// returned error normally.
+	line := sessionrec.ModelRequestDisplayLine(event)
+	if line != "" {
+		if event.Outcome == llm.ModelRequestOutcomeTerminal {
+			r.writeDimLine(line)
+		} else {
+			r.dimLine(line)
 		}
 	}
 
@@ -393,21 +385,6 @@ func (r *Renderer) ModelRequestEvent(event llm.ModelRequestEvent) string {
 	}
 	r.renderMu.Unlock()
 	return line
-}
-
-func continuationFailureMayRecover(event llm.ModelRequestEvent) bool {
-	if event.Outcome != llm.ModelRequestOutcomeTerminal {
-		return false
-	}
-	code := strings.ToLower(event.Code)
-	if strings.Contains(code, "previous_response") || strings.Contains(code, "previous_interaction") {
-		return true
-	}
-	message := strings.ToLower(event.Message)
-	return strings.Contains(message, "previous_response_id") ||
-		strings.Contains(message, "previous response") ||
-		strings.Contains(message, "previous_interaction_id") ||
-		strings.Contains(message, "previous interaction")
 }
 
 // CancelRequested immediately makes a graceful cancellation visible while the
@@ -608,26 +585,7 @@ func (r *Renderer) ToolDiff(_ llm.ToolCall, path, text string) {
 // colorizeDiff syntax-highlights a unified diff: added and removed lines get
 // a tinted background with a colored sigil, and line content is highlighted
 // in the mutated file's language (plain when the language is unknown).
-func colorizeDiff(path, text string) string {
-	lang := strings.TrimPrefix(filepath.Ext(path), ".")
-	if lang == "" {
-		// Extensionless names (Makefile, Dockerfile) resolve by basename.
-		lang = filepath.Base(path)
-	}
-	d := highlight.NewDiff(lang)
-	lines := strings.SplitAfter(text, "\n")
-	for i, line := range lines {
-		if line == "" {
-			continue
-		}
-		if strings.HasSuffix(line, "\n") {
-			lines[i] = d.Line(strings.TrimSuffix(line, "\n")) + "\n"
-		} else {
-			lines[i] = d.Line(line)
-		}
-	}
-	return strings.Join(lines, "")
-}
+func colorizeDiff(path, text string) string { return highlight.ColorizeDiff(path, text) }
 
 func (r *Renderer) toolProgress() bool {
 	return r.toolStream || r.verbose
@@ -1499,43 +1457,6 @@ func retryStatus(event llm.ModelRequestEvent) string {
 	return status
 }
 
-func modelRequestIssueLine(event llm.ModelRequestEvent) string {
-	var b strings.Builder
-	if event.Outcome == llm.ModelRequestOutcomeTerminal {
-		b.WriteString("[error: model API")
-	} else {
-		b.WriteString("[model API")
-	}
-	if event.StatusCode != 0 {
-		fmt.Fprintf(&b, " %d", event.StatusCode)
-	}
-	if event.Code != "" {
-		fmt.Fprintf(&b, " (%s)", event.Code)
-	}
-	if message := strings.Join(strings.Fields(event.Message), " "); message != "" {
-		b.WriteString(": ")
-		b.WriteString(message)
-	}
-	if event.Outcome == llm.ModelRequestOutcomeRetrying {
-		b.WriteString("; retrying")
-		if event.RetryDelayMS > 0 {
-			b.WriteString(" in ")
-			b.WriteString(formatRetryDelay(event.RetryDelayMS))
-		}
-	}
-	if event.ProxyRequestID != 0 {
-		fmt.Fprintf(&b, "; proxy request %d", event.ProxyRequestID)
-	}
-	if event.UpstreamRequestID != "" {
-		fmt.Fprintf(&b, "; upstream request %s", event.UpstreamRequestID)
-	}
-	if event.TraceID != "" {
-		fmt.Fprintf(&b, "; trace %s", event.TraceID)
-	}
-	b.WriteByte(']')
-	return b.String()
-}
-
 func joinStatusParts(left, right string) string {
 	switch {
 	case left == "":
@@ -1547,9 +1468,7 @@ func joinStatusParts(left, right string) string {
 	}
 }
 
-func formatRetryDelay(milliseconds int64) string {
-	return (time.Duration(milliseconds) * time.Millisecond).Round(time.Millisecond).String()
-}
+func formatRetryDelay(milliseconds int64) string { return sessionrec.FormatRetryDelay(milliseconds) }
 
 // clipStatusLine fits the during-prompt status line into maxW display columns and
 // reports the 0-based terminal column for the edit cursor. prefix is the counter
@@ -1683,36 +1602,12 @@ const compactDefaultTriggerPercent = 78
 
 // contextPercent is the share of the model's context window in use, for the
 // counter and the compaction notice (r27).
-func contextPercent(ctx agent.ContextEstimate) int {
-	if ctx.Window <= 0 {
-		return 0
-	}
-	used := contextUsed(ctx)
-	if used <= 0 {
-		return 0
-	}
-	pct := used * 100 / ctx.Window
-	if pct < 0 {
-		return 0
-	}
-	if pct > 100 {
-		pct = 100
-	}
-	return pct
-}
+func contextPercent(ctx agent.ContextEstimate) int { return sessionrec.ContextPercent(ctx) }
 
-func contextUsed(ctx agent.ContextEstimate) int {
-	return max(ctx.Total, ctx.PayloadTotal)
-}
+func contextUsed(ctx agent.ContextEstimate) int { return sessionrec.ContextUsed(ctx) }
 
 // cacheHitRatio is the percentage of input tokens served from cache (r15).
-func cacheHitRatio(u llm.Usage) int {
-	total := u.InputTokens + u.CacheReadTokens
-	if total <= 0 {
-		return 0
-	}
-	return u.CacheReadTokens * 100 / total
-}
+func cacheHitRatio(u llm.Usage) int { return sessionrec.CacheHitRatio(u) }
 
 // delegateProgressSnapshot type-asserts an opaque `any` to the concrete
 // func() agent.DelegateProgressSnapshot closure carried through tools/background
@@ -1982,173 +1877,25 @@ func (r *Renderer) markAssistantTextVisibleLocked() {
 	}
 }
 
-// formatArgs renders a tool call's input object as space-prefixed key=value
-// pairs in a stable (sorted) order. String values are quoted when they contain
-// whitespace; non-scalar values (objects, arrays) are summarized by their JSON
-// so the line stays one row.
-func formatArgs(input json.RawMessage) string {
-	if len(input) == 0 {
-		return ""
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(input, &obj); err != nil {
-		return ""
-	}
-	keys := make([]string, 0, len(obj))
-	for k := range obj {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+// The one-line summary formatters below are thin wrappers over
+// internal/sessionrec, the canonical home shared by live rendering and the
+// session recorder, so live output and raw.ndjson can never drift.
 
-	var b strings.Builder
-	for _, k := range keys {
-		fmt.Fprintf(&b, " %s=%s", k, formatValue(obj[k]))
-	}
-	return b.String()
-}
-
+func formatArgs(input json.RawMessage) string { return sessionrec.FormatArgs(input) }
 func formatToolArgs(name string, input json.RawMessage) string {
-	if name == "edit" {
-		if args := formatEditArgs(input); args != "" {
-			return args
-		}
-	}
-	return formatArgs(input)
+	return sessionrec.FormatToolArgs(name, input)
 }
-
-func formatEditArgs(input json.RawMessage) string {
-	var args struct {
-		Files []struct {
-			Path  string            `json:"path"`
-			Edits []json.RawMessage `json:"edits"`
-		} `json:"files"`
-	}
-	if err := json.Unmarshal(input, &args); err != nil || len(args.Files) == 0 {
-		return ""
-	}
-	paths := make([]string, 0, len(args.Files))
-	edits := 0
-	for _, file := range args.Files {
-		if file.Path != "" {
-			paths = append(paths, file.Path)
-		}
-		edits += len(file.Edits)
-	}
-	if len(args.Files) == 1 {
-		return fmt.Sprintf(" path=%s edits=%d", formatScalar(args.Files[0].Path), edits)
-	}
-	return fmt.Sprintf(" files=%d edits=%d paths=%s", len(args.Files), edits, formatScalar(strings.Join(paths, ",")))
-}
-
-func formatScalar(s string) string {
-	s = clip(s, 60)
-	if strings.ContainsAny(s, " \t\r\n") {
-		return fmt.Sprintf("%q", s)
-	}
-	return s
-}
-
-// formatValue renders one JSON value compactly for an args line. Strings with
-// whitespace are quoted; long strings are clipped.
-func formatValue(raw json.RawMessage) string {
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return formatScalar(s)
-	}
-	return clip(strings.TrimSpace(string(raw)), 60)
-}
-
-// resultSummary describes a tool result for the arrow target: an error marker
-// for is_error results, else a line count (when multi-line) and byte size.
-func resultSummary(result llm.ToolResult) string {
-	if result.IsError {
-		return "error: " + clip(firstLine(result.Text), 80)
-	}
-	n := len(result.Text)
-	lines := countLines(result.Text)
-	size := tools.HumanBytes(n)
-	prefix := ""
-	if result.Truncated {
-		if result.OriginalBytes > 0 {
-			prefix = fmt.Sprintf("truncated %s of %s, ", tools.HumanBytes(result.ShownBytes), tools.HumanBytes(result.OriginalBytes))
-		} else {
-			prefix = "truncated, "
-		}
-	}
-	var textSummary string
-	if lines <= 1 {
-		if n == 0 {
-			textSummary = prefix + "(empty), " + size
-		} else {
-			textSummary = prefix + size
-		}
-	} else {
-		textSummary = fmt.Sprintf("%s%d lines, %s", prefix, lines, size)
-	}
-	if len(result.Content) == 0 {
-		return textSummary
-	}
-	return textSummary + " + " + richImagesSummary(result.Content)
-}
-
-func richImagesSummary(content []llm.ContentBlock) string {
-	mimeSet := make(map[string]struct{}, len(content))
-	decodedBytes := 0
-	for _, image := range content {
-		mime := image.ImageMediaType
-		if mime == "" {
-			mime = "unknown"
-		}
-		mimeSet[mime] = struct{}{}
-		decodedBytes += imageDisplayBytes(image)
-	}
-	mimes := make([]string, 0, len(mimeSet))
-	for mime := range mimeSet {
-		mimes = append(mimes, mime)
-	}
-	sort.Strings(mimes)
-	label := "images"
-	if len(content) == 1 {
-		label = "image"
-	}
-	return fmt.Sprintf("%d %s (%s, %s)", len(content), label, strings.Join(mimes, ", "), tools.HumanBytes(decodedBytes))
-}
-
+func formatScalar(s string) string               { return sessionrec.FormatScalar(s) }
+func formatValue(raw json.RawMessage) string     { return sessionrec.FormatValue(raw) }
+func resultSummary(result llm.ToolResult) string { return sessionrec.ResultSummary(result) }
 func richImageMetadata(image llm.ContentBlock) string {
-	parts := []string{"image", image.ImageMediaType, tools.HumanBytes(imageDisplayBytes(image))}
-	if image.ImageWidth > 0 && image.ImageHeight > 0 {
-		parts = append(parts, fmt.Sprintf("%dx%d", image.ImageWidth, image.ImageHeight))
-	}
-	if image.ImageDetail != "" {
-		parts = append(parts, "detail="+image.ImageDetail)
-	}
-	return "[" + strings.Join(parts, ", ") + "]"
-}
-
-func imageDisplayBytes(image llm.ContentBlock) int {
-	if image.ImageBytes > 0 {
-		return image.ImageBytes
-	}
-	return decodedBase64Size(image.ImageData)
-}
-
-func decodedBase64Size(data string) int {
-	n := len(data) * 3 / 4
-	if strings.HasSuffix(data, "==") {
-		n -= 2
-	} else if strings.HasSuffix(data, "=") {
-		n--
-	}
-	if n < 0 {
-		return 0
-	}
-	return n
+	return sessionrec.RichImageMetadata(image)
 }
 
 // ToolResultLine renders the one-line tool summary used by live output and
 // session replay.
 func ToolResultLine(call llm.ToolCall, result llm.ToolResult) string {
-	return fmt.Sprintf("[%s]%s → %s", call.Name, formatToolArgs(call.Name, call.Input), resultSummary(result))
+	return sessionrec.ToolResultLine(call, result)
 }
 
 // usageLine renders the per-prompt summary with cumulative totals (design §10):
@@ -2159,60 +1906,11 @@ func ToolResultLine(call llm.ToolCall, result llm.ToolResult) string {
 // the session. Cumulative cost is omitted for models with no price entry;
 // per-prompt cost is also omitted when the model has no price entry.
 func usageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKnown bool, cumIn, cumOut int, cumCost float64) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "[prompt: %s · %s (%s) in / %s (%s) out",
-		turnPhrase(u.Turns),
-		humanTokens(u.Usage.InputTokens), humanTokens(cumIn),
-		humanTokens(u.Usage.OutputTokens), humanTokens(cumOut))
-	// Cache reads and reasoning tokens are billed and material to cost; surface
-	// them (with the cache-hit ratio) when non-zero (r15).
-	if u.Usage.CacheReadTokens > 0 {
-		fmt.Fprintf(&b, " · cache %s read", humanTokens(u.Usage.CacheReadTokens))
-		if ratio := cacheHitRatio(u.Usage); ratio > 0 {
-			fmt.Fprintf(&b, " (%d%%)", ratio)
-		}
-	}
-	if u.Usage.ReasoningTokens > 0 {
-		fmt.Fprintf(&b, " · %s reasoning", humanTokens(u.Usage.ReasoningTokens))
-	}
-	if u.Usage.CacheWrite1hTokens > 0 {
-		fmt.Fprintf(&b, " · %s cache write (1h)", humanTokens(u.Usage.CacheWrite1hTokens))
-	}
-	if costKnown {
-		fmt.Fprintf(&b, " · $%.3f ($%.3f)", cost, cumCost)
-	}
-	if u.Context.Total > 0 {
-		fmt.Fprintf(&b, " · ctx %s/%s", humanTokens(u.Context.Total), humanTokens(u.Context.Window))
-		if u.Context.PayloadTotal > 0 && u.Context.PayloadTotal != u.Context.Total {
-			fmt.Fprintf(&b, " payload %s", humanTokens(u.Context.PayloadTotal))
-		}
-		if u.Context.System > 0 || u.Context.Tools > 0 || u.Context.Messages > 0 {
-			fmt.Fprintf(&b, " (sys %s tools %s msgs %s)",
-				humanTokens(u.Context.System), humanTokens(u.Context.Tools), humanTokens(u.Context.Messages))
-		}
-	}
-	fmt.Fprintf(&b, " · %s]", humanDuration(elapsed))
-	return b.String()
+	return sessionrec.UsageLine(u, elapsed, cost, costKnown, cumIn, cumOut, cumCost)
 }
 
 func turnUsageLine(u agent.TurnUsage, elapsed, promptElapsed time.Duration) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "[turn: %d · %s", u.Turn, humanDuration(elapsed))
-	// Turn cost is known once the model stream closes: TurnComplete fires after
-	// the final usage frame, so Usage carries the turn's input/output/cache
-	// totals and either the proxy-priced cost or, for direct providers, a cost
-	// priced by the sink against the model registry.
-	if u.Usage.CostKnown {
-		fmt.Fprintf(&b, " · $%.3f", u.Usage.CostUSD)
-	}
-	if used := contextUsed(u.Context); u.Context.Window > 0 && used > 0 {
-		fmt.Fprintf(&b, " · ctx %d%% %s/%s", contextPercent(u.Context), humanTokens(used), humanTokens(u.Context.Window))
-	}
-	if promptElapsed >= 0 {
-		fmt.Fprintf(&b, " │ prompt %s", humanDuration(promptElapsed))
-	}
-	b.WriteByte(']')
-	return b.String()
+	return sessionrec.TurnUsageLine(u, elapsed, promptElapsed)
 }
 
 func largeRequestWarning(ctx agent.ContextEstimate) string {
@@ -2244,12 +1942,7 @@ func largeRequestWarning(ctx agent.ContextEstimate) string {
 		humanTokens(ctx.System), humanTokens(ctx.Tools), humanTokens(ctx.Messages), note)
 }
 
-func turnPhrase(n int) string {
-	if n == 1 {
-		return "1 turn"
-	}
-	return fmt.Sprintf("%d turns", n)
-}
+func turnPhrase(n int) string { return sessionrec.TurnPhrase(n) }
 
 // snippet returns the first snippetLines lines of s for the verbose preview.
 func snippet(s string) []string {
@@ -2263,44 +1956,15 @@ func snippet(s string) []string {
 	return lines
 }
 
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
-	return s
-}
+func firstLine(s string) string { return sessionrec.FirstLine(s) }
 
 // countLines counts text lines: a trailing newline does not add an empty line.
-func countLines(s string) int {
-	if s == "" {
-		return 0
-	}
-	n := strings.Count(s, "\n")
-	if !strings.HasSuffix(s, "\n") {
-		n++
-	}
-	return n
-}
+func countLines(s string) int { return sessionrec.CountLines(s) }
 
-func clip(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "…"
-}
+func clip(s string, max int) string { return sessionrec.Clip(s, max) }
 
 // humanTokens renders a token count compactly: 12400 -> "12.4k".
-func humanTokens(n int) string {
-	if n < 1000 {
-		return fmt.Sprintf("%d", n)
-	}
-	return fmt.Sprintf("%.1fk", float64(n)/1000)
-}
+func humanTokens(n int) string { return sessionrec.HumanTokens(n) }
 
 // humanDuration renders an elapsed turn duration: "4.3s" or "850ms".
-func humanDuration(d time.Duration) string {
-	if d < time.Second {
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	}
-	return fmt.Sprintf("%.1fs", d.Seconds())
-}
+func humanDuration(d time.Duration) string { return sessionrec.HumanDuration(d) }

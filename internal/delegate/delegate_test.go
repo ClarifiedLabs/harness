@@ -1555,6 +1555,9 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	sink.AssistantPhase("invalid")
 	sink.AssistantPhase(llm.AssistantPhaseCommentary)
 	sink.TextDelta("working")
+	sink.ToolStart(llm.ToolCall{ID: "call-1", Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)})
+	sink.ToolResult(llm.ToolResult{ForID: "call-1", Text: "package a\n\nfunc A() {}\n"})
+	sink.TurnComplete(agent.TurnUsage{Turn: 2, Usage: llm.Usage{InputTokens: 10, OutputTokens: 4}})
 	sink.TurnAttemptAbandoned(2, 3)
 	requestEvent := llm.ModelRequestEvent{State: llm.ModelRequestRetryScheduled, Sequence: 4, RetryDelayMS: 25}
 	sink.ModelRequestEvent(requestEvent)
@@ -1577,6 +1580,9 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 		session.EventTurnAttemptStart,
 		session.EventAssistantPhase,
 		session.EventAssistantDelta,
+		session.EventToolStart,
+		session.EventToolResult,
+		session.EventTurnComplete,
 		session.EventTurnAttemptAbandoned,
 		session.EventModelRequest,
 		session.EventRetention,
@@ -1597,11 +1603,19 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	if events[2].Phase != llm.AssistantPhaseCommentary {
 		t.Fatalf("assistant phase = %q", events[2].Phase)
 	}
-	if !strings.Contains(events[4].Display, "attempt 3 discarded") {
-		t.Fatalf("discard display = %q", events[4].Display)
+	// Tool and turn events record the same parent-fidelity Display lines the
+	// interactive renderer prints.
+	if got := events[5].Display; !strings.Contains(got, "[read_file]") || !strings.Contains(got, "path=a.go") || !strings.Contains(got, "3 lines") {
+		t.Fatalf("tool result display = %q, want parent-fidelity summary line", got)
 	}
-	if events[5].ModelRequest == nil || *events[5].ModelRequest != requestEvent {
-		t.Fatalf("model request event = %+v, want %+v", events[5].ModelRequest, requestEvent)
+	if got := events[6].Display; !strings.HasPrefix(got, "[turn: 2 · ") {
+		t.Fatalf("turn complete display = %q, want [turn: ...] line", got)
+	}
+	if !strings.Contains(events[7].Display, "attempt 3 discarded") {
+		t.Fatalf("discard display = %q", events[7].Display)
+	}
+	if events[8].ModelRequest == nil || *events[8].ModelRequest != requestEvent {
+		t.Fatalf("model request event = %+v, want %+v", events[8].ModelRequest, requestEvent)
 	}
 	retention := events[len(events)-2].Retention
 	if retention == nil || retention.Policy != "pressure_epoch" || retention.BlocksTrimmed != 1 || !retention.ResponseStateReset {
@@ -1612,6 +1626,9 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	}
 	if got := events[len(events)-1].TerminationReason; got != string(agent.TerminationTurnLimit) {
 		t.Fatalf("prompt termination = %q, want turn_limit", got)
+	}
+	if got := events[len(events)-1].Display; !strings.HasPrefix(got, "[prompt: ") {
+		t.Fatalf("prompt usage display = %q, want [prompt: ...] line", got)
 	}
 	if sink.progress.Snapshot().Finished {
 		t.Fatal("child sink must not independently terminalize progress")

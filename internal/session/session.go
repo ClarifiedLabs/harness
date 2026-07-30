@@ -26,6 +26,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/markdown"
 	"harness/internal/plan"
+	"harness/internal/term/highlight"
 	"harness/internal/todo"
 )
 
@@ -595,16 +596,19 @@ func loadActiveTurnCheckpoint(dir string) (activeTurnCheckpoint, error) {
 // Event is one append-only replay record. Display carries the exact user-facing
 // line for events that the renderer shows as dim one-liners.
 type Event struct {
-	Time                time.Time               `json:"time,omitempty"`
-	Type                string                  `json:"type"`
-	Prompt              int                     `json:"prompt,omitempty"`
-	Turn                int                     `json:"turn,omitempty"`
-	Attempt             int                     `json:"attempt,omitempty"`
-	Text                string                  `json:"text,omitempty"`
-	Phase               string                  `json:"phase,omitempty"`
-	Display             string                  `json:"display,omitempty"`
-	ToolID              string                  `json:"tool_id,omitempty"`
-	Tool                string                  `json:"tool,omitempty"`
+	Time    time.Time `json:"time,omitempty"`
+	Type    string    `json:"type"`
+	Prompt  int       `json:"prompt,omitempty"`
+	Turn    int       `json:"turn,omitempty"`
+	Attempt int       `json:"attempt,omitempty"`
+	Text    string    `json:"text,omitempty"`
+	Phase   string    `json:"phase,omitempty"`
+	Display string    `json:"display,omitempty"`
+	ToolID  string    `json:"tool_id,omitempty"`
+	Tool    string    `json:"tool,omitempty"`
+	// Path is the mutated file for tool_diff events. Replay uses it to detect
+	// the language for diff colorizing.
+	Path                string                  `json:"path,omitempty"`
 	Input               json.RawMessage         `json:"input,omitempty"`
 	Images              []ImageInfo             `json:"images,omitempty"`
 	Usage               *llm.Usage              `json:"usage,omitempty"`
@@ -925,23 +929,61 @@ func (r *replayRenderer) Render(ev Event) {
 		for _, img := range ev.Images {
 			fmt.Fprintf(r.w, "[image: %s %s %d bytes detail=%s]\n", img.Name, img.MediaType, img.Bytes, img.Detail)
 		}
+		// The separator after each prompt is structural: print it in quiet
+		// mode too so replay matches the live prompt boundary.
+		io.WriteString(r.w, renderFinalAnswerSeparator(r.opts.ANSI))
 	case EventAssistantDelta:
 		r.assistant.Write(ev.Text)
 	case EventAssistantPhase:
 		r.assistant.Phase(ev.Phase)
 	case EventReasoningSummary:
 		r.assistant.Finish()
-		lines := ReasoningSummaryLines(ev.Text, ReasoningSummaryFormat{Width: r.opts.Width})
+		lines := ReasoningSummaryLines(ev.Text, ReasoningSummaryFormat{Width: r.opts.Width, ANSI: r.opts.ANSI})
 		if len(lines) != 0 {
 			fmt.Fprintln(r.w, strings.Join(lines, "\n"))
 			r.assistant.MarkPreFinalOutput()
 		}
-	case EventToolResult, EventToolDiff, EventNotice, EventBranch, EventTurnAttemptAbandoned, EventTurnAttemptUsage, EventTurnComplete, EventPromptUsage, EventModelRequest:
+	case EventToolDiff:
 		r.assistant.Finish()
 		if ev.Display != "" && !r.opts.Quiet {
-			fmt.Fprintln(r.w, ev.Display)
+			// Diffs are content, not status: never dim them. Colorize when the
+			// event carries the mutated file path for language detection.
+			display := ev.Display
+			if r.opts.ANSI && ev.Path != "" {
+				display = highlight.ColorizeDiff(ev.Path, display)
+			}
+			fmt.Fprintln(r.w, display)
+		}
+	case EventTurnAttemptStart:
+		r.assistant.Finish()
+		if !r.opts.Quiet {
+			fmt.Fprintln(r.w, r.dimStatus(turnWaitingLine(ev)))
+		}
+	case EventToolResult, EventNotice, EventBranch, EventTurnAttemptAbandoned, EventTurnAttemptUsage, EventTurnComplete, EventPromptUsage, EventModelRequest:
+		r.assistant.Finish()
+		if ev.Display != "" && !r.opts.Quiet {
+			fmt.Fprintln(r.w, r.dimStatus(ev.Display))
 		}
 	}
+}
+
+// dimStatus wraps a stored status Display line in the dim attribute when the
+// replay targets a color terminal. Stored diffs are excluded by their caller.
+func (r *replayRenderer) dimStatus(line string) string {
+	if !r.opts.ANSI || line == "" {
+		return line
+	}
+	return ansiDim + line + ansiReset
+}
+
+// turnWaitingLine mirrors the live non-status turn-start fallback
+// (render.go TurnAttemptStart): "[turn: N waiting]" or, for retries,
+// "[turn: N attempt M waiting]".
+func turnWaitingLine(ev Event) string {
+	if ev.Attempt > 1 {
+		return fmt.Sprintf("[turn: %d attempt %d waiting]", ev.Turn, ev.Attempt)
+	}
+	return fmt.Sprintf("[turn: %d waiting]", ev.Turn)
 }
 
 func (r *replayRenderer) Finish() {
@@ -1556,6 +1598,9 @@ type ReasoningSummaryFormat struct {
 	Header string
 	Indent string
 	Width  int
+	// ANSI enables SGR styling in the rendered markdown body. Replay wires it
+	// from ReplayOptions.ANSI; LatestTurnOutput leaves it off.
+	ANSI bool
 }
 
 // ReasoningSummaryLines returns the replay-safe plain-text lines for a
@@ -1577,6 +1622,7 @@ func ReasoningSummaryLines(text string, format ReasoningSummaryFormat) []string 
 
 	body := markdown.Render(text, markdown.Options{
 		Enabled: true,
+		ANSI:    format.ANSI,
 		Width:   format.Width,
 		Prefix:  indent,
 	})

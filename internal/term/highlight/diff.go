@@ -1,6 +1,9 @@
 package highlight
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // Background tints for added and removed diff lines, taken from the Codex
 // CLI's dark-terminal palette: #213A2B green, #4A221D red. These truecolor
@@ -73,6 +76,31 @@ func (d *DiffState) Line(line string) string {
 		return " " + d.newContent.Line(content)
 	}
 	return line
+}
+
+// ColorizeDiff syntax-highlights a complete unified diff for the file at
+// path: added and removed lines get a tinted background with a colored sigil,
+// and line content is highlighted in the mutated file's language (plain when
+// the language is unknown). The file extension selects the language;
+// extensionless names (Makefile, Dockerfile) resolve by basename.
+func ColorizeDiff(path, text string) string {
+	lang := strings.TrimPrefix(filepath.Ext(path), ".")
+	if lang == "" {
+		lang = filepath.Base(path)
+	}
+	d := NewDiff(lang)
+	lines := strings.SplitAfter(text, "\n")
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		if strings.HasSuffix(line, "\n") {
+			lines[i] = d.Line(strings.TrimSuffix(line, "\n")) + "\n"
+		} else {
+			lines[i] = d.Line(line)
+		}
+	}
+	return strings.Join(lines, "")
 }
 
 func (d *DiffState) resetContentStates() {

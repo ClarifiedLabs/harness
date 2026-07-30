@@ -668,6 +668,7 @@ func run(env environment) int {
 		CompactSummaryMaxTokens:   cfg.CompactSummaryMaxTokens,
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
 		RetentionPolicy:           agent.RetentionPolicy(cfg.RetentionPolicy),
+		ShowDiffs:                 cfg.ShowDiffs,
 		Now:                       now,
 		AgentCandidates: func(delegate.Runtime) []delegate.AgentCandidate {
 			return delegateAgentCandidates(agents)

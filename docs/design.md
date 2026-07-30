@@ -3288,7 +3288,17 @@ type UsageTotals struct {
   and carries the same reason. Inline delegate lines are
   process-local display events only: they are not appended to either parent or
   child persistence. Child `raw.ndjson` retains the complete replay content and
-  remains the full-fidelity source for `session replay --follow`.
+  remains the full-fidelity source for `session replay --follow`. Parent and
+  child sessions are recorded through one canonical recorder
+  (`internal/sessionrec`): both sinks call the same recorder, which owns the
+  pending-tool map, turn/prompt duration math, unpriced-usage pricing hooks,
+  and the shared Display-line formatters (tool summaries, `[turn: …]` and
+  `[prompt: …]` lines, model API issue lines) that the live renderer also
+  uses. Child sessions therefore store the same tool-result summaries,
+  turn/prompt usage lines, model-request display lines, and `tool_diff`
+  events (when diffs are enabled) as the parent by construction; a parity
+  test drives one scripted run through both sink paths and pins identical
+  `raw.ndjson` output.
 - `harness session replay <session-dir>` prints `raw.ndjson` as the familiar
   user-facing terminal view, filtering assistant/reasoning deltas from retry
   attempts that were explicitly discarded before a later successful attempt.
@@ -3296,7 +3306,13 @@ type UsageTotals struct {
   coalesced into bounded 4 KiB/250ms records before they reach disk; a non-delta
   event flushes pending text first, so replay ordering and output are unchanged
   while per-token append/open/encode overhead is avoided. Replay renders Markdown at
-  display time. `session replay --follow` keeps the same stateful renderer and
+  display time. On a color terminal, stored status Display lines are dimmed,
+  `turn_attempt_start` renders the dim `[turn: N waiting]` /
+  `[turn: N attempt M waiting]` markers the live non-status path prints, a dim
+  horizontal rule separates each prompt block, and `tool_diff` events are
+  colorized through the same highlighter as live diffs using the recorded
+  file path for language detection; diffs are content and are never dimmed.
+  `session replay --follow` keeps the same stateful renderer and
   consumes only newline-complete append-only records with the ordinary 16 MiB
   record limit. It filters discarded attempts in the initial batch; a later live
   discard marker is printed rather than retracting visible output. Terminal child

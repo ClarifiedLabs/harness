@@ -1,0 +1,261 @@
+package sessionrec
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"harness/internal/agent"
+	"harness/internal/llm"
+	"harness/internal/session"
+)
+
+func readEvents(t *testing.T, dir string) []session.Event {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	var events []session.Event
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev session.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("decode event %q: %v", line, err)
+		}
+		events = append(events, ev)
+	}
+	return events
+}
+
+func TestRecorderNoopsOnEmptyDir(t *testing.T) {
+	rec := New(Config{})
+	rec.User("task")
+	rec.TurnAttemptStart(1, 1, agent.ContextEstimate{Total: 10})
+	rec.TextDelta("hello")
+	rec.AssistantPhase(llm.AssistantPhaseCommentary)
+	rec.ReasoningSummary("thinking")
+	rec.ToolStart(llm.ToolCall{ID: "c", Name: "read_file"})
+	rec.ToolResult(llm.ToolResult{ForID: "c", Text: "x"})
+	rec.ToolDiff(llm.ToolCall{ID: "c", Name: "edit"}, "a.go", "diff")
+	rec.Notice("note", 1)
+	rec.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestFailed})
+	rec.TurnComplete(agent.TurnUsage{Turn: 1})
+	rec.MaintenanceComplete(agent.MaintenanceUsage{Purpose: "compaction"})
+	rec.PromptComplete(agent.PromptUsage{Turns: 1})
+	rec.Flush()
+	if err := rec.Err(); err != nil {
+		t.Fatalf("Err = %v, want nil", err)
+	}
+}
+
+func TestRecorderNilSafe(t *testing.T) {
+	var rec *Recorder
+	rec.User("task")
+	rec.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	rec.TextDelta("hello")
+	rec.ToolResult(llm.ToolResult{ForID: "c"})
+	rec.PromptComplete(agent.PromptUsage{})
+	rec.Flush()
+	if err := rec.Err(); err != nil {
+		t.Fatalf("nil recorder Err = %v", err)
+	}
+}
+
+func TestRecorderTurnCompletePricesUnpricedUsage(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{
+		Dir:    dir,
+		Prompt: 1,
+		PriceTurnUsage: func(u llm.Usage) (float64, bool) {
+			if u.InputTokens != 100_000 {
+				t.Fatalf("pricing hook usage = %+v", u)
+			}
+			return 0.5, true
+		},
+	})
+	rec.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	rec.TurnComplete(agent.TurnUsage{Turn: 1, Usage: llm.Usage{InputTokens: 100_000, OutputTokens: 10_000}})
+
+	events := readEvents(t, dir)
+	turn := events[len(events)-1]
+	if turn.Type != session.EventTurnComplete || turn.Usage == nil {
+		t.Fatalf("turn event = %+v", turn)
+	}
+	if !turn.Usage.CostKnown || turn.Usage.CostUSD != 0.5 {
+		t.Fatalf("turn usage = %+v, want priced $0.5", turn.Usage)
+	}
+	if !strings.Contains(turn.Display, "$0.500") {
+		t.Fatalf("turn display = %q, want cost", turn.Display)
+	}
+}
+
+func TestRecorderTurnCompleteKeepsStreamedCost(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{
+		Dir:            dir,
+		Prompt:         1,
+		PriceTurnUsage: func(llm.Usage) (float64, bool) { return 9.9, true },
+	})
+	rec.TurnComplete(agent.TurnUsage{Turn: 1, Usage: llm.Usage{CostUSD: 0.25, CostKnown: true}})
+	events := readEvents(t, dir)
+	if got := events[0].Usage.CostUSD; got != 0.25 {
+		t.Fatalf("turn cost = %v, want streamed 0.25", got)
+	}
+}
+
+func TestRecorderTurnDurationsUseClock(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	rec := New(Config{Dir: dir, Prompt: 1, Clock: clock})
+	rec.User("task")
+	rec.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	now = now.Add(1500 * time.Millisecond)
+	rec.TurnComplete(agent.TurnUsage{Turn: 1})
+	now = now.Add(500 * time.Millisecond)
+	rec.PromptComplete(agent.PromptUsage{Turns: 1, Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}})
+
+	events := readEvents(t, dir)
+	if got := events[2].Display; !strings.Contains(got, "1.5s") || !strings.Contains(got, "prompt 1.5s") {
+		t.Fatalf("turn display = %q, want 1.5s durations", got)
+	}
+	if got := events[3].Display; !strings.HasSuffix(got, "2.0s]") {
+		t.Fatalf("prompt display = %q, want 2.0s elapsed", got)
+	}
+}
+
+func TestRecorderReasoningSummaryGate(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 1})
+	rec.ReasoningSummary("hidden")
+	if _, err := os.Stat(filepath.Join(dir, "raw.ndjson")); !os.IsNotExist(err) {
+		t.Fatalf("gated recorder wrote events: %+v", readEvents(t, dir))
+	}
+
+	rec = New(Config{Dir: dir, Prompt: 1, ReasoningSummaries: true})
+	rec.ReasoningSummary("shown")
+	rec.ReasoningSummary("   ")
+	events := readEvents(t, dir)
+	if len(events) != 1 || events[0].Type != session.EventReasoningSummary || events[0].Text != "shown" {
+		t.Fatalf("reasoning events = %+v", events)
+	}
+}
+
+func TestRecorderToolDiffRecordsPathAndTrimsDisplay(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 1})
+	rec.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	rec.ToolDiff(llm.ToolCall{ID: "c", Name: "edit"}, "main.go", "--- a/main.go\n+++ b/main.go\n")
+	events := readEvents(t, dir)
+	diff := events[len(events)-1]
+	if diff.Type != session.EventToolDiff || diff.Path != "main.go" || diff.Tool != "edit" || diff.ToolID != "c" {
+		t.Fatalf("tool diff event = %+v", diff)
+	}
+	if strings.HasSuffix(diff.Display, "\n") {
+		t.Fatalf("tool diff display not trimmed: %q", diff.Display)
+	}
+}
+
+func TestRecorderPromptUsageDefaultLine(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 1, Clock: func() time.Time { return time.Now() }})
+	rec.PromptComplete(agent.PromptUsage{
+		Turns:             2,
+		Usage:             llm.Usage{InputTokens: 1200, OutputTokens: 300, CostUSD: 0.01, CostKnown: true},
+		TerminationReason: agent.TerminationTurnLimit,
+	})
+	events := readEvents(t, dir)
+	ev := events[0]
+	if ev.Type != session.EventPromptUsage || ev.Usage == nil || ev.TerminationReason != "turn_limit" {
+		t.Fatalf("prompt usage event = %+v", ev)
+	}
+	// Single-prompt default: cumulative totals equal the prompt's own usage.
+	for _, want := range []string{"[prompt: 2 turns", "1.2k (1.2k) in / 300 (300) out", "$0.010 ($0.010)"} {
+		if !strings.Contains(ev.Display, want) {
+			t.Fatalf("prompt display %q missing %q", ev.Display, want)
+		}
+	}
+}
+
+func TestRecorderPromptUsageCustomLine(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{
+		Dir:    dir,
+		Prompt: 1,
+		PromptUsageLine: func(u agent.PromptUsage, _ time.Duration, cost float64, known bool) string {
+			return "custom-line"
+		},
+	})
+	rec.PromptComplete(agent.PromptUsage{Turns: 1})
+	if events := readEvents(t, dir); events[0].Display != "custom-line" {
+		t.Fatalf("prompt display = %q, want custom line", events[0].Display)
+	}
+}
+
+func TestRecorderModelRequestDisplayGate(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 1})
+	rec.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestRetryScheduled})
+	rec.ModelRequestEvent(llm.ModelRequestEvent{
+		State:      llm.ModelRequestUpstreamAttemptFailed,
+		StatusCode: 500,
+		Message:    "boom",
+		Outcome:    llm.ModelRequestOutcomeRetrying,
+	})
+	rec.ModelRequestEvent(llm.ModelRequestEvent{
+		State:   llm.ModelRequestFailed,
+		Code:    "previous_response_error",
+		Message: "previous response id rejected",
+		Outcome: llm.ModelRequestOutcomeTerminal,
+	})
+	events := readEvents(t, dir)
+	if events[0].Display != "" {
+		t.Fatalf("retry scheduled display = %q, want empty", events[0].Display)
+	}
+	if !strings.Contains(events[1].Display, "[model API 500: boom; retrying]") {
+		t.Fatalf("upstream failure display = %q", events[1].Display)
+	}
+	if events[2].Display != "" {
+		t.Fatalf("recoverable continuation failure display = %q, want empty", events[2].Display)
+	}
+}
+
+func TestRecorderRetainsFirstErrorAndCallsOnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(path, []byte("file"), 0o644); err != nil {
+		t.Fatalf("write blocking file: %v", err)
+	}
+	var calls int
+	rec := New(Config{Dir: path, Prompt: 1, OnError: func(error) { calls++ }})
+	rec.User("first")
+	first := rec.Err()
+	if first == nil {
+		t.Fatal("Err = nil, want append error")
+	}
+	rec.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	if got := rec.Err(); !errors.Is(got, first) && got.Error() != first.Error() {
+		t.Fatalf("Err changed from %v to %v", first, got)
+	}
+	if calls < 2 {
+		t.Fatalf("OnError calls = %d, want one per failure", calls)
+	}
+}
+
+func TestRecorderAssistantPhaseGate(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 1})
+	rec.AssistantPhase("")
+	rec.AssistantPhase("bogus")
+	rec.AssistantPhase(llm.AssistantPhaseFinal)
+	events := readEvents(t, dir)
+	if len(events) != 1 || events[0].Phase != llm.AssistantPhaseFinal {
+		t.Fatalf("phase events = %+v", events)
+	}
+}

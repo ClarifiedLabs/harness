@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,6 +23,7 @@ import (
 	"harness/internal/goal"
 	"harness/internal/llm"
 	"harness/internal/session"
+	"harness/internal/sessionrec"
 	"harness/internal/todo"
 	"harness/internal/tools"
 	"harness/prompts"
@@ -131,9 +131,12 @@ type Options struct {
 	CompactSummaryMaxTokens   int
 	CompactToolResultMaxBytes int
 	RetentionPolicy           agent.RetentionPolicy
-	AgentCandidates           func(Runtime) []AgentCandidate
-	ActivityRegistry          *ActivityRegistry
-	Now                       func() time.Time
+	// ShowDiffs lets child agents emit tool_diff events (recorded at parent
+	// fidelity); it mirrors the parent's diff display setting.
+	ShowDiffs        bool
+	AgentCandidates  func(Runtime) []AgentCandidate
+	ActivityRegistry *ActivityRegistry
+	Now              func() time.Time
 	// OpenChildView, when non-nil, opens a display-only external view (e.g. a
 	// tmux window following the child session) once the child's meta.json
 	// exists but before the child agent runs. Every failure is swallowed by
@@ -634,6 +637,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		CompactSummaryMaxTokens:   r.opts.CompactSummaryMaxTokens,
 		CompactToolResultMaxBytes: r.opts.CompactToolResultMaxBytes,
 		Now:                       r.opts.Now,
+		ShowDiffs:                 r.opts.ShowDiffs,
 	})
 	child.SetSystem(launch.System)
 	child.SetCacheAffinityID(cacheAffinityID)
@@ -659,6 +663,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 
 	sink := newChildSink(childDir, childTodos, hasTodoTool, progress, activity, inlineReasoningEnabled(launch.Reasoning))
+	sink.configureRecorder(r.opts.Now, launch.Registry, launch.Model)
 	sink.messageCount = func() int { return len(child.Transcript()) }
 	sink.checkpoint = func(checkpoint agent.PromptCheckpoint) error {
 		updated := r.now()
@@ -1706,7 +1711,7 @@ type childSink struct {
 	assistant            *inlineLineAccumulator
 	reasoning            bool
 	sessionDir           string
-	events               *session.EventAppender
+	rec                  *sessionrec.Recorder
 	todos                *todo.Store
 	todoContext          bool
 	pending              map[string]pendingChildTool
@@ -1722,13 +1727,11 @@ type childSink struct {
 type pendingChildTool struct {
 	call    llm.ToolCall
 	summary string
-	started time.Time
 }
 
 func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progress *Progress, activity *ActivityRegistration, reasoning ...bool) *childSink {
 	sink := &childSink{
 		sessionDir:  sessionDir,
-		events:      session.NewEventAppender(sessionDir),
 		todos:       todos,
 		todoContext: todoContext,
 		progress:    progress,
@@ -1738,12 +1741,43 @@ func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progre
 	if len(reasoning) > 0 {
 		sink.reasoning = reasoning[0]
 	}
+	sink.rec = sessionrec.New(childRecorderConfig(sessionDir, time.Now, nil, "", sink.reasoning))
 	if activity.hasFeed() {
 		sink.assistant = newInlineLineAccumulator(activityChunkMaxBytes, func(text string, continuation bool) {
 			sink.activity.publishText(ActivityEventAssistant, text, sink.turn, sink.attempt, continuation)
 		})
 	}
 	return sink
+}
+
+// childRecorderConfig returns the sessionrec configuration every delegate
+// child session uses: parent-fidelity replay recording priced against the
+// child's launch model. Child sessions run one prompt, so the recorder's
+// default prompt-usage line (cumulative totals equal to the prompt's own
+// usage) matches the parent's line shape.
+func childRecorderConfig(dir string, clock func() time.Time, registry *llm.Registry, model string, reasoning bool) sessionrec.Config {
+	return sessionrec.Config{
+		Dir:                dir,
+		Prompt:             1,
+		Clock:              clock,
+		ReasoningSummaries: reasoning,
+		PriceTurnUsage: func(u llm.Usage) (float64, bool) {
+			return registry.Cost(model, u)
+		},
+		PricePromptUsage: func(u llm.Usage) (float64, bool) {
+			if u.CostKnown {
+				return u.CostUSD, true
+			}
+			return registry.Cost(model, u)
+		},
+	}
+}
+
+// configureRecorder replaces the default recorder with one using the
+// runner's clock and the launch registry/model. The runner calls it once
+// after newChildSink; tests that do not configure pricing keep the defaults.
+func (s *childSink) configureRecorder(clock func() time.Time, registry *llm.Registry, model string) {
+	s.rec = sessionrec.New(childRecorderConfig(s.sessionDir, clock, registry, model, s.reasoning))
 }
 
 // Progress is a lock-protected snapshot of one delegate run's live activity,
@@ -1854,11 +1888,11 @@ func (p *Progress) Closure() func() agent.DelegateProgressSnapshot {
 }
 
 func (s *childSink) User(text string) {
-	s.append(session.Event{Type: session.EventUser, Prompt: 1, Text: text})
+	s.rec.User(text)
 }
 
 func (s *childSink) TextDelta(text string) {
-	s.append(session.Event{Type: session.EventAssistantDelta, Prompt: 1, Turn: s.turn, Attempt: s.attempt, Text: text})
+	s.rec.TextDelta(text)
 	s.activity.MarkActivity("replying")
 	s.assistant.Write(text)
 }
@@ -1868,7 +1902,7 @@ func (s *childSink) AssistantPhase(phase string) {
 		return
 	}
 	s.flushDisplay()
-	s.append(session.Event{Type: session.EventAssistantPhase, Prompt: 1, Turn: s.turn, Attempt: s.attempt, Phase: phase})
+	s.rec.AssistantPhase(phase)
 }
 
 func (s *childSink) ReasoningSummary(text string) {
@@ -1878,7 +1912,7 @@ func (s *childSink) ReasoningSummary(text string) {
 	}
 	s.flushDisplay()
 	s.activity.MarkActivity("thinking")
-	s.append(session.Event{Type: session.EventReasoningSummary, Prompt: 1, Turn: s.turn, Attempt: s.attempt, Text: text})
+	s.rec.ReasoningSummary(text)
 	if !s.reasoning || !s.activity.hasFeed() {
 		return
 	}
@@ -1899,28 +1933,21 @@ func (s *childSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimat
 	s.attempt = attempt
 	s.progress.markTurn(turn, attempt, ctx)
 	s.activity.MarkTurn(turn, attempt, ctx)
-	s.append(session.Event{Type: session.EventTurnAttemptStart, Prompt: 1, Turn: turn, Attempt: attempt, Context: childContextSnapshot(ctx)})
+	s.rec.TurnAttemptStart(turn, attempt, ctx)
 	s.activity.publish(ActivityEvent{Kind: ActivityEventTurnStart, Turn: turn, Attempt: attempt})
 }
 
 func (s *childSink) TurnAttemptAbandoned(turn, attempt int) {
 	s.flushDisplay()
 	s.activity.MarkActivity(fmt.Sprintf("retrying after attempt %d", attempt))
-	s.append(session.Event{
-		Type:    session.EventTurnAttemptAbandoned,
-		Prompt:  1,
-		Turn:    turn,
-		Attempt: attempt,
-		Display: fmt.Sprintf("[turn: %d attempt %d discarded; retrying]", turn, attempt),
-	})
+	s.rec.TurnAttemptAbandoned(turn, attempt)
 	s.activity.publish(ActivityEvent{Kind: ActivityEventAttemptDiscarded, Turn: turn, Attempt: attempt})
 }
 
 func (s *childSink) TurnAttemptComplete(u agent.TurnAttemptUsage) {
-	usage := u.Usage
-	s.progress.markUsage(usage)
-	s.activity.MarkUsage(usage)
-	s.append(session.Event{Type: session.EventTurnAttemptUsage, Prompt: 1, Turn: u.Turn, Attempt: u.Attempt, Usage: &usage})
+	s.progress.markUsage(u.Usage)
+	s.activity.MarkUsage(u.Usage)
+	s.rec.TurnAttemptComplete(u)
 }
 
 func (*childSink) ToolUseStart(llm.ToolCall) {}
@@ -1935,14 +1962,7 @@ func (s *childSink) ModelRequestEvent(event llm.ModelRequestEvent) {
 	if activity := safeModelRequestActivity(event); activity != "" {
 		s.activity.MarkActivity(activity)
 	}
-	copyEvent := event
-	s.append(session.Event{
-		Type:         session.EventModelRequest,
-		Prompt:       1,
-		Turn:         s.turn,
-		Attempt:      s.attempt,
-		ModelRequest: &copyEvent,
-	})
+	s.rec.ModelRequestEvent(event)
 	if publish {
 		s.activity.publishText(kind, text, s.turn, s.attempt, false)
 	}
@@ -1951,10 +1971,10 @@ func (s *childSink) ModelRequestEvent(event llm.ModelRequestEvent) {
 func (s *childSink) ToolStart(call llm.ToolCall) {
 	s.flushDisplay()
 	summary := safeToolActivity(call)
-	s.pending[call.ID] = pendingChildTool{call: call, summary: summary, started: time.Now()}
+	s.pending[call.ID] = pendingChildTool{call: call, summary: summary}
 	s.progress.markTool()
 	s.activity.MarkActivity(summary)
-	s.append(session.Event{Type: session.EventToolStart, Prompt: 1, Turn: s.turn, ToolID: call.ID, Tool: call.Name, Input: call.Input})
+	s.rec.ToolStart(call)
 	s.activity.publishText(ActivityEventToolStart, summary, s.turn, s.attempt, false)
 }
 
@@ -1967,42 +1987,23 @@ func (s *childSink) ToolResult(result llm.ToolResult) {
 	if summary == "" {
 		summary = safeToolActivity(call)
 	}
-	display := fmt.Sprintf("[tool: %s completed]", call.Name)
 	kind := ActivityEventToolComplete
 	if result.IsError {
-		display = fmt.Sprintf("[tool: %s error: %s]", call.Name, preview(firstLine(result.Text), 120))
 		s.activity.MarkActivity("tool " + sanitizeRetainedText(call.Name, maxToolNameRunes) + " failed")
 		kind = ActivityEventToolError
 	} else {
 		s.activity.MarkActivity("tool " + sanitizeRetainedText(call.Name, maxToolNameRunes) + " complete")
 	}
-	shownBytes := result.ShownBytes
-	if shownBytes == 0 {
-		shownBytes = len(result.Text)
-	}
-	originalBytes := result.OriginalBytes
-	if originalBytes == 0 {
-		originalBytes = shownBytes
-	}
-	var durationMS int64
-	if !pending.started.IsZero() {
-		durationMS = time.Since(pending.started).Milliseconds()
-	}
-	s.append(session.Event{
-		Type:                session.EventToolResult,
-		Prompt:              1,
-		Turn:                s.turn,
-		ToolID:              result.ForID,
-		Tool:                call.Name,
-		Display:             display,
-		DurationMS:          durationMS,
-		ResultError:         result.IsError,
-		ResultTruncated:     result.Truncated,
-		ResultOriginalBytes: originalBytes,
-		ResultShownBytes:    shownBytes,
-		ResultMetrics:       maps.Clone(result.Metrics),
-	})
+	s.rec.ToolResult(result)
 	s.activity.publishText(kind, summary, s.turn, s.attempt, false)
+}
+
+// ToolDiff records the rendered diff at parent fidelity. It deliberately
+// publishes nothing to the delegate activity feed: the feed's curated-kind
+// contract is pinned by feed tests.
+func (s *childSink) ToolDiff(call llm.ToolCall, path, text string) {
+	s.flushDisplay()
+	s.rec.ToolDiff(call, path, text)
 }
 
 func (s *childSink) ArchiveToolResult(result llm.ToolResult) (agent.ToolResultArchive, error) {
@@ -2018,22 +2019,20 @@ func (s *childSink) ArchiveToolResult(result llm.ToolResult) (agent.ToolResultAr
 
 func (s *childSink) Notice(msg string) {
 	s.flushDisplay()
-	s.append(session.Event{Type: session.EventNotice, Prompt: 1, Turn: s.turn, Display: msg})
+	s.rec.Notice(msg, s.turn)
 	if text, ok := safeNoticeLine(msg); ok {
 		s.activity.publishText(ActivityEventNotice, text, s.turn, s.attempt, false)
 	}
 }
 
 func (s *childSink) TurnComplete(usage agent.TurnUsage) {
-	u := usage.Usage
 	s.progress.markContext(usage.Context)
 	s.activity.MarkContext(usage.Context)
-	s.append(session.Event{Type: session.EventTurnComplete, Prompt: 1, Turn: usage.Turn, Usage: &u})
+	s.rec.TurnComplete(usage)
 }
 
 func (s *childSink) MaintenanceComplete(usage agent.MaintenanceUsage) {
-	u := usage.Usage
-	s.append(session.Event{Type: session.EventMaintenanceUsage, Prompt: 1, Purpose: usage.Purpose, Usage: &u})
+	s.rec.MaintenanceComplete(usage)
 }
 
 func (s *childSink) addPreflightMaintenance(purpose string, usage llm.Usage) {
@@ -2061,7 +2060,7 @@ func (s *childSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
 	if s.messageCount != nil {
 		messageCount = s.messageCount()
 	}
-	s.append(session.Event{
+	s.rec.Append(session.Event{
 		Type:         session.EventCheckpoint,
 		Prompt:       1,
 		Turn:         checkpoint.Turn,
@@ -2072,7 +2071,7 @@ func (s *childSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
 }
 
 func (s *childSink) RetentionApplied(event agent.RetentionEvent) {
-	s.append(session.Event{
+	s.rec.Append(session.Event{
 		Type:   session.EventRetention,
 		Prompt: 1,
 		Turn:   s.turn + 1,
@@ -2097,7 +2096,7 @@ func (s *childSink) TranscriptRewritten() {
 }
 
 func (s *childSink) SkillActivated(event agent.SkillActivationEvent) {
-	s.append(session.Event{
+	s.rec.Append(session.Event{
 		Type:    session.EventSkillActivation,
 		Prompt:  1,
 		Turn:    max(s.turn, 1),
@@ -2133,15 +2132,9 @@ func (s *childSink) PromptComplete(usage agent.PromptUsage) {
 	usage.Usage = addDelegateUsage(usage.Usage, s.preflightMaintenance)
 	usage.Maintenance = addDelegateUsage(usage.Maintenance, s.preflightMaintenance)
 	s.usage = usage
-	u := usage.Usage
-	s.activity.MarkUsage(u)
+	s.activity.MarkUsage(usage.Usage)
 	s.activity.MarkActivity("finishing")
-	s.append(session.Event{
-		Type:              session.EventPromptUsage,
-		Prompt:            1,
-		Usage:             &u,
-		TerminationReason: string(usage.TerminationReason),
-	})
+	s.rec.PromptComplete(usage)
 }
 
 func (s *childSink) flushDisplay() {
@@ -2154,25 +2147,10 @@ func (s *childSink) flushDisplay() {
 }
 
 func (s *childSink) flushEvents() {
-	if s == nil || s.events == nil {
+	if s == nil {
 		return
 	}
-	s.appendMu.Lock()
-	defer s.appendMu.Unlock()
-	if err := s.events.Flush(); err != nil && s.appendErr == nil {
-		s.appendErr = err
-	}
-}
-
-func (s *childSink) append(ev session.Event) {
-	if s.sessionDir == "" {
-		return
-	}
-	s.appendMu.Lock()
-	defer s.appendMu.Unlock()
-	if err := s.events.Append(ev); err != nil && s.appendErr == nil {
-		s.appendErr = err
-	}
+	s.rec.Flush()
 }
 
 func (s *childSink) retainAppendError(err error) {
@@ -2191,28 +2169,10 @@ func (s *childSink) appendError() error {
 		return nil
 	}
 	s.appendMu.Lock()
-	defer s.appendMu.Unlock()
-	return s.appendErr
-}
-
-func childContextSnapshot(ctx agent.ContextEstimate) *session.ContextSnapshot {
-	if ctx == (agent.ContextEstimate{}) {
-		return nil
+	err := s.appendErr
+	s.appendMu.Unlock()
+	if err != nil {
+		return errors.Join(err, s.rec.Err())
 	}
-	return &session.ContextSnapshot{
-		Total:           ctx.Total,
-		Window:          ctx.Window,
-		System:          ctx.System,
-		Tools:           ctx.Tools,
-		Messages:        ctx.Messages,
-		PayloadTotal:    ctx.PayloadTotal,
-		PayloadSystem:   ctx.PayloadSystem,
-		PayloadTools:    ctx.PayloadTools,
-		PayloadMessages: ctx.PayloadMessages,
-	}
-}
-
-func firstLine(s string) string {
-	line, _, _ := strings.Cut(s, "\n")
-	return line
+	return s.rec.Err()
 }

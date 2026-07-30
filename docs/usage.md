@@ -1289,7 +1289,11 @@ harness session stats ~/.local/state/harness/sessions/20260611T123456Z
 `session replay --follow` first renders the existing complete `raw.ndjson`
 records, then renders complete records as they are appended. It uses the same
 user-facing view as ordinary replay; `-q`/`--quiet` suppresses status lines but
-keeps prompts and assistant text. Terminal replay applies the same color-gated
+keeps prompts and assistant text. Replay draws a horizontal rule after each
+prompt, prints `[turn: N waiting]` markers for recorded attempt starts, and,
+on a color terminal, dims stored status lines and colorizes recorded
+`tool_diff` events using the mutated file's path for language detection.
+Terminal replay applies the same color-gated
 syntax highlighting to recognized tagged assistant fences; untagged and unknown
 fences remain plain, and replay without ANSI emits no highlighting. Rendering is
 display-only: stored events and ANSI-free latest-turn output remain unchanged. A
