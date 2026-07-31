@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"harness/internal/llm"
 )
@@ -19,6 +20,7 @@ import (
 const editSchema = `{
   "type": "object",
   "properties": {
+	"path": {"type": "string", "description": "Compatibility shorthand only when files has exactly one entry without its own path."},
     "files": {
       "type": "array",
       "minItems": 1,
@@ -88,6 +90,7 @@ type plannedEditFile struct {
 	ending       string // detected line-ending style to restore on write
 	mode         fs.FileMode
 	replacements int
+	fuzzyMatches int
 	regions      []editRegion
 }
 
@@ -115,7 +118,7 @@ type matchedEdit struct {
 func (edit) Name() string { return "edit" }
 
 func (edit) Description() string {
-	return "Atomically apply exact-text replacements across files[]; oldText must be unique unless replaceAll is true."
+	return "Apply targeted replacements with {files:[{path,edits:[{oldText,newText,replaceAll?}]}]}; copy recently read text, keep oldText short and unique, and prefer small batches for long replacements."
 }
 
 func (edit) Schema() json.RawMessage { return json.RawMessage(editSchema) }
@@ -134,33 +137,49 @@ func (edit) MutatedPaths(input json.RawMessage) ([]string, error) {
 	return paths, nil
 }
 
-func (edit) Run(_ context.Context, input json.RawMessage) (string, error) {
+func (edit) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	result, err := (edit{}).RunResult(ctx, input)
+	return result.Text, err
+}
+
+func (edit) RunResult(_ context.Context, input json.RawMessage) (RunResult, error) {
 	args, err := decodeEditArgs(input)
 	if err != nil {
-		return "", err
+		return RunResult{}, err
 	}
 
-	plans, replacements, err := planEditFiles(args.Files)
+	plans, replacements, fuzzyMatches, err := planEditFiles(args.Files)
 	if err != nil {
-		return "", err
+		return RunResult{}, err
 	}
 	for _, plan := range plans {
 		if err := os.WriteFile(plan.path, []byte(plan.content), plan.mode.Perm()); err != nil {
-			return "", err
+			return RunResult{}, err
 		}
 	}
-	return formatEditSuccess(plans, replacements), nil
+	text := formatEditSuccess(plans, replacements)
+	if fuzzyMatches > 0 {
+		text += fmt.Sprintf("\nMatched %d replacement(s) after normalizing trailing whitespace or typographic punctuation; untouched bytes were preserved.", fuzzyMatches)
+	}
+	return RunResult{Text: text, Metrics: map[string]int{"fuzzy_matches": fuzzyMatches}}, nil
 }
 
 func decodeEditArgs(input json.RawMessage) (editArgs, error) {
 	var raw struct {
 		Files []rawEditFile `json:"files"`
+		Path  string        `json:"path"`
 	}
 	if err := json.Unmarshal(input, &raw); err != nil {
 		return editArgs{}, err
 	}
 	if len(raw.Files) == 0 {
 		return editArgs{}, badArgs("files is required and must contain at least one file")
+	}
+	if strings.TrimSpace(raw.Path) != "" {
+		if len(raw.Files) != 1 || strings.TrimSpace(raw.Files[0].Path) != "" {
+			return editArgs{}, badArgs("top-level path is accepted only with exactly one files entry that omits path; use {files:[{path,edits}]} for multiple files")
+		}
+		raw.Files[0].Path = raw.Path
 	}
 
 	files := make([]editFile, 0, len(raw.Files))
@@ -197,10 +216,11 @@ func duplicatePathKey(path string) string {
 	return filepath.Clean(path)
 }
 
-func planEditFiles(files []editFile) ([]plannedEditFile, int, error) {
+func planEditFiles(files []editFile) ([]plannedEditFile, int, int, error) {
 	plans := make([]plannedEditFile, 0, len(files))
 	byPath := make(map[string]int, len(files)) // duplicatePathKey → plans index
 	totalReplacements := 0
+	totalFuzzyMatches := 0
 	for _, file := range files {
 		key := duplicatePathKey(file.Path)
 		if idx, ok := byPath[key]; ok {
@@ -209,37 +229,39 @@ func planEditFiles(files []editFile) ([]plannedEditFile, int, error) {
 			// stale or redundant oldText fails loudly with the ordinary not-found
 			// error before anything is written; nothing is silently double-applied.
 			prev := &plans[idx]
-			updated, replacements, regions, err := applyEditBlocks(prev.body, file.Edits, file.Path)
+			updated, replacements, fuzzyMatches, regions, err := applyEditBlocks(prev.body, file.Edits, file.Path)
 			if err != nil {
-				return nil, 0, err
+				return nil, 0, 0, err
 			}
 			prev.content = prev.bom + restoreLineEndings(updated, prev.ending)
 			prev.body = updated
 			prev.replacements += replacements
+			prev.fuzzyMatches += fuzzyMatches
 			prev.regions = append(prev.regions, regions...)
 			totalReplacements += replacements
+			totalFuzzyMatches += fuzzyMatches
 			continue
 		}
 		info, err := os.Stat(file.Path)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				return nil, 0, fmt.Errorf("%s does not exist; use write_file to create it", file.Path)
+				return nil, 0, 0, fmt.Errorf("%s does not exist; use write_file to create it", file.Path)
 			}
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		if info.IsDir() {
-			return nil, 0, fmt.Errorf("%s is a directory; use list_dir", file.Path)
+			return nil, 0, 0, fmt.Errorf("%s is a directory; use list_dir", file.Path)
 		}
 		data, err := os.ReadFile(file.Path)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 
 		bom, text := stripUTF8BOM(string(data))
 		ending := detectLineEnding(text)
-		updated, replacements, regions, err := applyEditBlocks(text, file.Edits, file.Path)
+		updated, replacements, fuzzyMatches, regions, err := applyEditBlocks(text, file.Edits, file.Path)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		plans = append(plans, plannedEditFile{
 			path:         file.Path,
@@ -249,12 +271,14 @@ func planEditFiles(files []editFile) ([]plannedEditFile, int, error) {
 			ending:       ending,
 			mode:         info.Mode(),
 			replacements: replacements,
+			fuzzyMatches: fuzzyMatches,
 			regions:      regions,
 		})
 		byPath[key] = len(plans) - 1
 		totalReplacements += replacements
+		totalFuzzyMatches += fuzzyMatches
 	}
-	return plans, totalReplacements, nil
+	return plans, totalReplacements, totalFuzzyMatches, nil
 }
 
 func stripUTF8BOM(content string) (bom, text string) {
@@ -288,7 +312,7 @@ func restoreLineEndings(content, ending string) string {
 	return content
 }
 
-func applyEditBlocks(content string, edits []editBlock, path string) (string, int, []editRegion, error) {
+func applyEditBlocks(content string, edits []editBlock, path string) (string, int, int, []editRegion, error) {
 	normalizedContent := normalizeToLF(content)
 	normalizedEdits := make([]editBlock, len(edits))
 	for i, block := range edits {
@@ -299,30 +323,24 @@ func applyEditBlocks(content string, edits []editBlock, path string) (string, in
 		}
 	}
 
-	useFuzzyBase := false
-	for _, block := range normalizedEdits {
-		match, ok := findEditText(normalizedContent, block.OldText)
-		if ok && match.usedFuzzyMatch {
-			useFuzzyBase = true
-			break
-		}
-	}
-
-	base := normalizedContent
-	if useFuzzyBase {
-		base = normalizeForFuzzyMatch(normalizedContent)
-	}
-
 	matches := make([]matchedEdit, 0, len(normalizedEdits))
+	fuzzyMatches := 0
+	var validationErrors []error
+	validationKind := llm.ToolErrorEditOldTextAmbiguous
 	for i, block := range normalizedEdits {
 		if block.ReplaceAll {
 			// Replace every occurrence: bypass the uniqueness check and record one
 			// span per non-overlapping match. Zero matches is still a not-found.
-			found := findAllEditText(base, block.OldText)
+			found := findAllEditText(normalizedContent, block.OldText)
 			if len(found) == 0 {
-				return "", 0, nil, editNotFoundError(path, normalizedContent, block.OldText, i, len(normalizedEdits))
+				validationErrors = append(validationErrors, editNotFoundError(path, normalizedContent, block.OldText, i, len(normalizedEdits)))
+				validationKind = llm.ToolErrorEditOldTextNotFound
+				continue
 			}
 			for _, m := range found {
+				if m.usedFuzzyMatch {
+					fuzzyMatches++
+				}
 				matches = append(matches, matchedEdit{
 					index:      m.index,
 					length:     m.length,
@@ -333,13 +351,19 @@ func applyEditBlocks(content string, edits []editBlock, path string) (string, in
 			}
 			continue
 		}
-		match, ok := findEditText(base, block.OldText)
+		match, ok := findEditText(normalizedContent, block.OldText)
 		if !ok {
-			return "", 0, nil, editNotFoundError(path, normalizedContent, block.OldText, i, len(normalizedEdits))
+			validationErrors = append(validationErrors, editNotFoundError(path, normalizedContent, block.OldText, i, len(normalizedEdits)))
+			validationKind = llm.ToolErrorEditOldTextNotFound
+			continue
 		}
-		count := countEditOccurrences(base, block.OldText)
+		count := len(findAllEditText(normalizedContent, block.OldText))
 		if count > 1 {
-			return "", 0, nil, editDuplicateError(path, i, len(normalizedEdits), count)
+			validationErrors = append(validationErrors, editDuplicateError(path, normalizedContent, block.OldText, i, len(normalizedEdits), count))
+			continue
+		}
+		if match.usedFuzzyMatch {
+			fuzzyMatches++
 		}
 		matches = append(matches, matchedEdit{
 			index:  match.index,
@@ -347,6 +371,16 @@ func applyEditBlocks(content string, edits []editBlock, path string) (string, in
 			text:   block.NewText,
 			order:  i,
 		})
+	}
+	if len(validationErrors) > 0 {
+		if len(validationErrors) == 1 {
+			return "", 0, 0, nil, validationErrors[0]
+		}
+		messages := make([]string, len(validationErrors))
+		for i, err := range validationErrors {
+			messages[i] = err.Error()
+		}
+		return "", 0, 0, nil, WithKind(fmt.Errorf("edit validation failed for %s:\n- %s", path, strings.Join(messages, "\n- ")), validationKind)
 	}
 
 	sort.SliceStable(matches, func(i, j int) bool {
@@ -365,19 +399,19 @@ func applyEditBlocks(content string, edits []editBlock, path string) (string, in
 			if (prev.replaceAll || next.replaceAll) && prev.order == next.order {
 				continue
 			}
-			return "", 0, nil, fmt.Errorf("edits[%d] and edits[%d] overlap in %s; merge them into one edit or target disjoint regions", prev.order, next.order, path)
+			return "", 0, 0, nil, fmt.Errorf("edits[%d] and edits[%d] overlap in %s; merge them into one edit or target disjoint regions", prev.order, next.order, path)
 		}
 	}
 
-	updated := base
+	updated := normalizedContent
 	for i := len(matches) - 1; i >= 0; i-- {
 		match := matches[i]
 		updated = updated[:match.index] + match.text + updated[match.index+match.length:]
 	}
-	if updated == base {
-		return "", 0, nil, fmt.Errorf("no changes made to %s; replacements produced identical content", path)
+	if updated == normalizedContent {
+		return "", 0, 0, nil, fmt.Errorf("no changes made to %s; replacements produced identical content", path)
 	}
-	return updated, len(matches), changedRegions(updated, matches), nil
+	return updated, len(matches), fuzzyMatches, changedRegions(updated, matches), nil
 }
 
 // changedRegions maps the applied edits to 1-based inclusive line ranges in the
@@ -418,10 +452,11 @@ func findEditText(content, oldText string) (textMatch, bool) {
 	if idx := strings.Index(content, oldText); idx >= 0 {
 		return textMatch{index: idx, length: len(oldText)}, true
 	}
-	fuzzyContent := normalizeForFuzzyMatch(content)
+	fuzzyContent := normalizeForFuzzyMatchWithOffsets(content)
 	fuzzyOldText := normalizeForFuzzyMatch(oldText)
-	if idx := strings.Index(fuzzyContent, fuzzyOldText); idx >= 0 {
-		return textMatch{index: idx, length: len(fuzzyOldText), usedFuzzyMatch: true}, true
+	if idx := strings.Index(fuzzyContent.text, fuzzyOldText); idx >= 0 {
+		start, end := fuzzyContent.offsets[idx], fuzzyContent.offsets[idx+len(fuzzyOldText)]
+		return textMatch{index: start, length: end - start, usedFuzzyMatch: true}, true
 	}
 	return textMatch{}, false
 }
@@ -435,9 +470,16 @@ func findAllEditText(content, oldText string) []textMatch {
 	if matches := indexAllEditText(content, oldText, false); len(matches) > 0 {
 		return matches
 	}
-	fuzzyContent := normalizeForFuzzyMatch(content)
+	fuzzyContent := normalizeForFuzzyMatchWithOffsets(content)
 	fuzzyOldText := normalizeForFuzzyMatch(oldText)
-	return indexAllEditText(fuzzyContent, fuzzyOldText, true)
+	normalized := indexAllEditText(fuzzyContent.text, fuzzyOldText, true)
+	matches := make([]textMatch, 0, len(normalized))
+	for _, match := range normalized {
+		start := fuzzyContent.offsets[match.index]
+		end := fuzzyContent.offsets[match.index+match.length]
+		matches = append(matches, textMatch{index: start, length: end - start, usedFuzzyMatch: true})
+	}
+	return matches
 }
 
 // indexAllEditText collects non-overlapping match spans of oldText in content.
@@ -458,29 +500,78 @@ func indexAllEditText(content, oldText string, fuzzy bool) []textMatch {
 }
 
 func normalizeForFuzzyMatch(content string) string {
-	lines := strings.Split(content, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimRightFunc(line, unicode.IsSpace)
-	}
-	content = strings.Join(lines, "\n")
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case '\u2018', '\u2019', '\u201A', '\u201B':
-			return '\''
-		case '\u201C', '\u201D', '\u201E', '\u201F':
-			return '"'
-		case '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212':
-			return '-'
-		case '\u00A0', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200A', '\u202F', '\u205F', '\u3000':
-			return ' '
-		default:
-			return r
-		}
-	}, content)
+	return normalizeForFuzzyMatchWithOffsets(content).text
 }
 
-func countEditOccurrences(content, oldText string) int {
-	return strings.Count(normalizeForFuzzyMatch(content), normalizeForFuzzyMatch(oldText))
+type normalizedText struct {
+	text    string
+	offsets []int // normalized byte boundary -> original byte boundary
+}
+
+// normalizeForFuzzyMatchWithOffsets builds the comparison form plus a byte
+// boundary map back to the untouched source. Fuzzy replacement can therefore
+// splice only the matched region instead of rewriting the normalized file.
+func normalizeForFuzzyMatchWithOffsets(content string) normalizedText {
+	var out strings.Builder
+	offsets := []int{0}
+	appendRune := func(r rune, rawStart, rawEnd int) {
+		normalized := normalizeFuzzyRune(r)
+		encoded := []byte(string(normalized))
+		out.Write(encoded)
+		for i := range encoded {
+			boundary := rawStart
+			if i == len(encoded)-1 {
+				boundary = rawEnd
+			}
+			offsets = append(offsets, boundary)
+		}
+	}
+	lineStart := 0
+	for lineStart <= len(content) {
+		relNewline := strings.IndexByte(content[lineStart:], '\n')
+		lineEnd := len(content)
+		hasNewline := relNewline >= 0
+		if hasNewline {
+			lineEnd = lineStart + relNewline
+		}
+		trimmedEnd := lineEnd
+		for trimmedEnd > lineStart {
+			r, size := utf8.DecodeLastRuneInString(content[lineStart:trimmedEnd])
+			if !unicode.IsSpace(r) {
+				break
+			}
+			trimmedEnd -= size
+		}
+		for raw := lineStart; raw < trimmedEnd; {
+			r, size := utf8.DecodeRuneInString(content[raw:trimmedEnd])
+			appendRune(r, raw, raw+size)
+			raw += size
+		}
+		// The normalized boundary at line end consumes ignored trailing space
+		// if the match ends there.
+		offsets[len(offsets)-1] = lineEnd
+		if !hasNewline {
+			break
+		}
+		appendRune('\n', lineEnd, lineEnd+1)
+		lineStart = lineEnd + 1
+	}
+	return normalizedText{text: out.String(), offsets: offsets}
+}
+
+func normalizeFuzzyRune(r rune) rune {
+	switch r {
+	case '\u2018', '\u2019', '\u201A', '\u201B':
+		return '\''
+	case '\u201C', '\u201D', '\u201E', '\u201F':
+		return '"'
+	case '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212':
+		return '-'
+	case '\u00A0', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200A', '\u202F', '\u205F', '\u3000':
+		return ' '
+	default:
+		return r
+	}
 }
 
 func editNotFoundError(path, content, oldText string, editIndex, totalEdits int) error {
@@ -496,8 +587,34 @@ func editNotFoundError(path, content, oldText string, editIndex, totalEdits int)
 	if hint := nearestRegionHint(content, oldText); hint != "" {
 		msg += "; " + hint
 	}
+	if hint := firstDivergentLineHint(content, oldText); hint != "" {
+		msg += "; " + hint
+	}
 	msg += "; re-read the file, then re-issue with exact oldText; if the intent is to append or create, use write_file instead"
 	return WithKind(fmt.Errorf("%s", msg), llm.ToolErrorEditOldTextNotFound)
+}
+
+func firstDivergentLineHint(content, oldText string) string {
+	lineNo, _, score, ok := nearestSimilarLine(content, oldText)
+	if !ok || score < 0.8 {
+		return ""
+	}
+	expected := strings.Split(oldText, "\n")
+	first := 0
+	for first < len(expected) && strings.TrimSpace(expected[first]) == "" {
+		first++
+	}
+	actual := strings.Split(content, "\n")
+	for i := first; i < len(expected); i++ {
+		actualIndex := lineNo - 1 + i - first
+		if actualIndex >= len(actual) {
+			return fmt.Sprintf("first divergence at expected line %d: expected %q, actual <end of file>", i+1, truncateHintText(expected[i]))
+		}
+		if normalizeForFuzzyMatch(expected[i]) != normalizeForFuzzyMatch(actual[actualIndex]) {
+			return fmt.Sprintf("first divergence at file line %d: expected %q, actual %q", actualIndex+1, truncateHintText(expected[i]), truncateHintText(actual[actualIndex]))
+		}
+	}
+	return ""
 }
 
 // nearestRegionHint renders up to 3 numbered lines centered on the content line
@@ -620,11 +737,22 @@ func diceCoefficient(a, b map[string]int) float64 {
 	return 2 * float64(inter) / float64(total)
 }
 
-func editDuplicateError(path string, editIndex, totalEdits, occurrences int) error {
-	if totalEdits == 1 {
-		return WithKind(fmt.Errorf("found %d occurrences of oldText in %s; provide more context to make it unique", occurrences, path), llm.ToolErrorEditOldTextAmbiguous)
+func editDuplicateError(path, content, oldText string, editIndex, totalEdits, occurrences int) error {
+	lines := make([]string, 0, 5)
+	for _, match := range findAllEditText(content, oldText) {
+		if len(lines) == 5 {
+			break
+		}
+		lines = append(lines, strconv.Itoa(lineNumberAt(content, match.index)))
 	}
-	return WithKind(fmt.Errorf("found %d occurrences of edits[%d].oldText in %s; each oldText must be unique", occurrences, editIndex, path), llm.ToolErrorEditOldTextAmbiguous)
+	lineHint := ""
+	if len(lines) > 0 {
+		lineHint = "; occurrences start at lines " + strings.Join(lines, ", ")
+	}
+	if totalEdits == 1 {
+		return WithKind(fmt.Errorf("found %d occurrences of oldText in %s%s; provide more context to make it unique", occurrences, path, lineHint), llm.ToolErrorEditOldTextAmbiguous)
+	}
+	return WithKind(fmt.Errorf("found %d occurrences of edits[%d].oldText in %s%s; each oldText must be unique", occurrences, editIndex, path, lineHint), llm.ToolErrorEditOldTextAmbiguous)
 }
 
 // editSnippetContextLines is how many lines of context are shown above and below

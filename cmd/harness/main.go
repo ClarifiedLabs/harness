@@ -1974,11 +1974,23 @@ func runSessionCommand(env environment, args []string) int {
 		}
 		return ui.ExitOK
 	case "stats":
-		if len(args) != 2 {
-			fmt.Fprintln(env.stderr, "usage: harness session stats <session-dir>")
+		fs := flag.NewFlagSet("session stats", flag.ContinueOnError)
+		fs.SetOutput(env.stderr)
+		format := fs.String("format", "text", "output format: text or json")
+		if err := fs.Parse(args[1:]); err != nil {
 			return ui.ExitUsage
 		}
-		if err := session.Stats(args[1], env.stdout); err != nil {
+		if fs.NArg() != 1 || (*format != "text" && *format != "json") {
+			fmt.Fprintln(env.stderr, "usage: harness session stats [--format text|json] <session-dir>")
+			return ui.ExitUsage
+		}
+		var err error
+		if *format == "json" {
+			err = session.StatsJSON(fs.Arg(0), env.stdout)
+		} else {
+			err = session.Stats(fs.Arg(0), env.stdout)
+		}
+		if err != nil {
 			fmt.Fprintf(env.stderr, "harness: session stats: %v\n", err)
 			return ui.ExitRuntime
 		}

@@ -748,11 +748,11 @@ func TestStatsErrorsSection(t *testing.T) {
 		out := buf.String()
 		assertOrdered(t, out, "Tools", "\nErrors\n")
 		for _, want := range []string{
-			"failed tool results: 5",
+			"failed tool results: 5/5 (100.0%)",
 			"model request failures: 1",
-			"by tool: read_file (3), edit (1), frobnicate (1)",
+			"by tool: read_file (3/3, 100.0%), edit (1/1, 100.0%), frobnicate (1/1, 100.0%)",
 			"by kind: path_not_found (3), edit_oldtext_not_found (1), provider_5xx (1), unknown_tool (1)",
-			"by model: claude-test (6)",
+			"by model: claude-test (5/5, 100.0%)",
 			"repeated failures:",
 			"read_file: path_not_found (3 consecutive)",
 		} {

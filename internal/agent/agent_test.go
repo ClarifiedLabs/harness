@@ -1999,6 +1999,15 @@ func TestTruncatedWriteFileArgsSuggestChunkedWrite(t *testing.T) {
 	}
 }
 
+func TestUnexpectedEOFEditArgsSuggestChunkedWrite(t *testing.T) {
+	got := invalidToolInputResult(llm.ToolCall{Name: "edit", InvalidInputError: "unexpected EOF"})
+	for _, want := range []string{"truncated", "write the file in chunks", "apply_patch"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("result missing %q: %q", want, got)
+		}
+	}
+}
+
 func TestNonTruncatedWriteFileArgsGetNoChunkSuggestion(t *testing.T) {
 	broken := `invalid JSON at byte offset 30: invalid character '}' looking for beginning of value; input preview "{\"path\":\"x.go\",}"`
 	fp := llmtest.New("fake",

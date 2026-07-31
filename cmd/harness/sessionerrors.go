@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"strings"
 	"time"
 
 	"harness/internal/session"
@@ -32,6 +32,7 @@ func runSessionErrors(env environment, args []string) int {
 	since := flags.String("since", "24h", "when scanning, include sessions created within this duration (e.g. 24h, 720h)")
 	all := flags.Bool("all", false, "scan all sessions, ignoring --since")
 	format := flags.String("format", "text", "output format: text or json")
+	beforeValue := flags.String("before", "", "include only events at or before this RFC3339 timestamp")
 	if err := flags.Parse(args); err != nil {
 		return ui.ExitUsage
 	}
@@ -40,24 +41,40 @@ func runSessionErrors(env environment, args []string) int {
 		return ui.ExitUsage
 	}
 	if flags.NArg() > 1 {
-		fmt.Fprintln(env.stderr, "usage: harness session errors [--tool T] [--kind K] [--model M] [--agent A] [--since D|--all] [--format text|json] [dir]")
+		fmt.Fprintln(env.stderr, "usage: harness session errors [--tool T] [--kind K] [--model M] [--agent A] [--since D|--all] [--before RFC3339] [--format text|json] [dir]")
 		return ui.ExitUsage
 	}
 	filter := session.ErrorFilter{Tool: *tool, Kind: *kind, Model: *model, Agent: *agent}
+	var before time.Time
+	if strings.TrimSpace(*beforeValue) != "" {
+		var err error
+		before, err = time.Parse(time.RFC3339, *beforeValue)
+		if err != nil {
+			fmt.Fprintf(env.stderr, "session errors: invalid --before %q: want RFC3339\n", *beforeValue)
+			return ui.ExitUsage
+		}
+	}
+	analyzedAt := time.Now().UTC()
+	if env.now != nil {
+		analyzedAt = env.now().UTC()
+	}
 
 	if flags.NArg() == 1 {
 		dir := flags.Arg(0)
-		rows, err := session.CollectErrors(dir, filter)
+		analysis, err := session.AnalyzeErrors(dir, filter, before)
 		if err != nil {
 			fmt.Fprintf(env.stderr, "session errors: %v\n", err)
 			return ui.ExitRuntime
 		}
 		report := sessionErrorsReport{
-			Scope:           map[string]any{"dir": dir},
+			Scope:           map[string]any{"dir": dir, "before": *beforeValue},
 			SessionsScanned: 1,
-			Rows:            rows,
+			AnalyzedAt:      analyzedAt,
+			Summary:         analysis.Summary,
+			Rows:            analysis.Rows,
+			Sources:         analysis.Sources,
 		}
-		return writeSessionErrors(env.stdout, *format, report, []sessionErrorBlock{{dir: dir, rows: rows}}, 0)
+		return writeSessionErrors(env.stdout, *format, report, []sessionErrorBlock{{dir: dir, rows: analysis.Rows}}, 0)
 	}
 
 	window, err := time.ParseDuration(*since)
@@ -76,31 +93,30 @@ func runSessionErrors(env environment, args []string) int {
 		return ui.ExitRuntime
 	}
 	var blocks []sessionErrorBlock
-	var rows []session.ErrorRow
+	var analyses []session.ErrorAnalysis
+	var skipped []sessionSkippedSession
 	for _, dir := range dirs {
-		sessionRows, err := session.CollectErrors(dir, filter)
+		analysis, err := session.AnalyzeErrors(dir, filter, before)
 		if err != nil {
-			fmt.Fprintf(env.stderr, "session errors: %v\n", err)
-			return ui.ExitRuntime
-		}
-		if len(sessionRows) == 0 {
+			skipped = append(skipped, sessionSkippedSession{Dir: dir, Reason: err.Error()})
 			continue
 		}
-		blocks = append(blocks, sessionErrorBlock{dir: dir, rows: sessionRows})
-		rows = append(rows, sessionRows...)
-	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		if !rows[i].At.Equal(rows[j].At) {
-			return rows[i].At.Before(rows[j].At)
+		analyses = append(analyses, analysis)
+		if len(analysis.Rows) > 0 {
+			blocks = append(blocks, sessionErrorBlock{dir: dir, rows: analysis.Rows})
 		}
-		return rows[i].Session < rows[j].Session
-	})
-	report := sessionErrorsReport{
-		Scope:           map[string]any{"sessions_root": root, "since": *since, "all": *all},
-		SessionsScanned: len(dirs),
-		Rows:            rows,
 	}
-	return writeSessionErrors(env.stdout, *format, report, blocks, len(dirs))
+	merged := session.MergeErrorAnalyses(analyses...)
+	report := sessionErrorsReport{
+		Scope:           map[string]any{"sessions_root": root, "since": *since, "all": *all, "before": *beforeValue},
+		SessionsScanned: len(analyses),
+		AnalyzedAt:      analyzedAt,
+		Summary:         merged.Summary,
+		Rows:            merged.Rows,
+		Sources:         merged.Sources,
+		SkippedSessions: skipped,
+	}
+	return writeSessionErrors(env.stdout, *format, report, blocks, len(analyses))
 }
 
 // sessionErrorBlock groups one session's rows for the text renderer.
@@ -111,10 +127,18 @@ type sessionErrorBlock struct {
 
 // sessionErrorsReport is the JSON output shape.
 type sessionErrorsReport struct {
-	Scope           map[string]any       `json:"scope"`
-	SessionsScanned int                  `json:"sessions_scanned"`
-	Summary         session.ErrorSummary `json:"summary"`
-	Rows            []session.ErrorRow   `json:"rows"`
+	Scope           map[string]any          `json:"scope"`
+	SessionsScanned int                     `json:"sessions_scanned"`
+	AnalyzedAt      time.Time               `json:"analyzed_at"`
+	Summary         session.ErrorSummary    `json:"summary"`
+	Rows            []session.ErrorRow      `json:"rows"`
+	Sources         []session.ErrorSource   `json:"sources"`
+	SkippedSessions []sessionSkippedSession `json:"skipped_sessions,omitempty"`
+}
+
+type sessionSkippedSession struct {
+	Dir    string `json:"dir"`
+	Reason string `json:"reason"`
 }
 
 // writeSessionErrors renders the report as JSON, or as per-session text
@@ -125,7 +149,12 @@ func writeSessionErrors(w io.Writer, format string, report sessionErrorsReport, 
 		rows = []session.ErrorRow{}
 	}
 	report.Rows = rows
-	report.Summary = session.SummarizeErrors(rows)
+	if report.Sources == nil {
+		report.Sources = []session.ErrorSource{}
+	}
+	if report.Summary.ByKind == nil {
+		report.Summary = session.SummarizeErrors(rows)
+	}
 	if format == "json" {
 		data, err := json.MarshalIndent(report, "", "  ")
 		if err != nil {
@@ -142,8 +171,11 @@ func writeSessionErrors(w io.Writer, format string, report sessionErrorsReport, 
 	}
 	if scanned > 0 {
 		summary := report.Summary
-		fmt.Fprintf(w, "Scanned %d sessions: %d failed tool results, %d model request failures\n",
-			scanned, summary.FailedToolResults, summary.ModelRequestFailures)
+		fmt.Fprintf(w, "Scanned %d sessions: %d/%d failed tool results (%.1f%%), %d model request failures\n",
+			scanned, summary.FailedToolResults, summary.ToolResults, summary.ToolErrorRate*100, summary.ModelRequestFailures)
+		if len(report.SkippedSessions) > 0 {
+			fmt.Fprintf(w, "Skipped %d unreadable or unsupported sessions\n", len(report.SkippedSessions))
+		}
 	}
 	return ui.ExitOK
 }

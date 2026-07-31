@@ -1976,9 +1976,9 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.3 `search`, `inspect`, and raw search commands
 
-> `search`: Search files with up to 16 independent queries in one call. Returns bounded context, matching lines, file names, counts, or existence; use paths and globs to narrow work.
+> `search`: Search files with up to 16 independent queries in one call. Patterns are regular expressions; use `fixed_strings:true` for literal punctuation.
 
-> `inspect`: Run up to 16 independent read-only repository operations concurrently. Batch `read_file`, `search`, `glob`, `list_dir`, `workspace_summary`, and `git_readonly` during orientation.
+> `inspect`: Run up to 32 independent read-only repository operations in waves of at most 16.
 
 - `search` is the only content-search tool in built-in agent definitions. Input
   is `queries[]` (1–16). Every query requires `pattern`; `paths[]` defaults to
@@ -1998,6 +1998,11 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   `queries[N].pattern: invalid regex: <compile error>; use fixed_strings: true
   for literal text` with the kinded `regex_invalid` class instead of surfacing
   an rg stderr dump or an `invalid_args` bucket.
+- Queries validate and execute independently. Valid results survive malformed,
+  missing-path, or runtime-failed siblings; the call fails only if every query
+  is invalid. Positive bounds above their maxima are clamped with a visible note
+  and `normalized_bounds` metric, while negative values remain errors. Runtime
+  ripgrep regex parser failures are remapped to `regex_invalid`.
 - Context output groups matches by file, merges touching windows, numbers source
   lines, and renders at most 400 source lines. No match is a successful
   `(no matches)` result and all collection/output bounds are explicit.
@@ -2007,15 +2012,16 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   numbers, and prints each source line once. `RunResult.Metrics` records selected
   and unique source-line counts for session analysis without entering model
   context. There is no new aggregate 400-line cap.
-- `inspect.operations[]` (1–16) selects `read_file`, `search`, `glob`,
+- `inspect.operations[]` (1–32) selects `read_file`, `search`, `glob`,
   `list_dir`, `workspace_summary`, or `git_readonly` and supplies that
   operation's `input` object. Nested `git_readonly` uses the ordinary `git`
   tool's audited read-only classifier and hardened execution path, so mutating
   argv is rejected before execution. The schema enum and description are built
   from the operations registered in the composite; without a `git` binary they
   omit both `workspace_summary` and `git_readonly`. The operations run
-  concurrently, errors are reported inline, each result gets a per-operation
-  cap, and indexed output preserves request order.
+  in waves of at most 16. Every operation is prevalidated: unsafe or malformed
+  operations are never executed but are reported inline while valid siblings
+  run. `operation_count` and `operation_errors` are diagnostics-only metrics.
 - Three consecutive turns containing one unbatched orientation lookup trigger
   one soft steering message recommending `inspect`, `read_file.paths[]`, or
   `search.queries[]`. It does not block execution.
@@ -2036,7 +2042,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.4 `edit`
 
-> Atomically apply exact-text replacements across files[]; oldText must be unique unless replaceAll is true.
+> Apply targeted replacements with `{files:[{path,edits:[{oldText,newText,replaceAll?}]}]}`; use short, recently read, unique text.
 
 | param | type | notes |
 |---|---|---|
@@ -2065,6 +2071,9 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   and tells the model to re-read the file and re-issue with exact `oldText` (or
   use write_file when the intent is to append or create).
 - N>1 occurrences → error asking for more context to make `oldText` unique.
+- Every block is preflighted before writing, so one response reports all
+  missing/ambiguous blocks for the file. Ambiguous errors list up to five start
+  lines, and close not-found candidates identify the first divergent line.
 - Overlapping replacements in one file → error asking the model to merge or
   retarget the edits.
 - Replacements that produce content identical to the original file → error
@@ -2072,7 +2081,12 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   rewriting the file unchanged.
 - The tool preserves an existing UTF-8 BOM and the file's first observed line
   ending style. If exact matching fails, it retries after normalizing trailing
-  whitespace, smart quotes, Unicode dashes, and special spaces.
+  whitespace, smart quotes, Unicode dashes, and special spaces. The normalized
+  match carries an offset map back to the original content; only that raw span
+  is replaced, so normalization cannot rewrite unrelated bytes.
+- A top-level `path` is normalized only when there is exactly one pathless
+  `files` entry. Nested plus top-level paths and multiple pathless entries are
+  rejected as ambiguous.
 - Success reports `edited <file-count> file(s), <replacement-count> replacement(s)`
   followed by one line per file.
 
@@ -2129,7 +2143,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.7 `run_command`
 
-> Run one command or ordered steps using a shell command or argv as an array of strings. Auto output returns compact archived receipts for large success and bounded failure diagnostics. Background supports one command; background_lease only coordinates jobs and does not restrict command behavior.
+> Run one command or ordered steps using a shell command or argv array. Steps accept a batch name and `output_mode:full` for the combined transcript; auto/receipt stay compact.
 
 | param | type | notes |
 |---|---|---|
@@ -2142,8 +2156,8 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `steps[].cwd` | string | overrides the inherited top-level cwd |
 | `steps[].timeout_seconds` | int | overrides the inherited top-level timeout |
 | `stop_on_failure` | bool | default true |
-| `name` | string | optional top-level receipt label; unavailable with `steps` (the rejection says to drop it or set `name` on each step) |
-| `output_mode` | string | top-level `auto` (default), `receipt`, or `full`; unavailable with `steps` (same corrective rejection) |
+| `name` | string | optional command or step-batch label |
+| `output_mode` | string | `auto` (default), `receipt`, or `full`; for steps, `full` returns the combined transcript and the others return compact receipts |
 | `stdin` | string | written to the command's standard input |
 | `cwd` | string | default process cwd |
 | `timeout_seconds` | int | foreground default 120, background default 1200, no maximum |
@@ -2184,6 +2198,9 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   unclipped original whose wait did not finish); a fully represented small
   failure needs no duplicate artifact. `full` preserves the previous full
   failure result. Infrastructure failures remain tool errors.
+- With `steps`, `name` labels the batch. `auto` and `receipt` return the compact
+  per-step receipt and archive suppressed output; `full` returns the complete
+  combined transcript directly, subject to ordinary dispatch truncation.
 - Runs in its own process group/session with no controlling TTY under the turn
   context; timeout or ^C kills the group (children included) and reports output
   captured so far.
@@ -3428,7 +3445,10 @@ type UsageTotals struct {
   values are never copied into transcript blocks. Failed tool-result events
   additionally carry the structured `error_kind` and a bounded, rune-safe
   `error_excerpt` (2 lines / 240 runes) consumed by the stats Errors section
-  and `harness session errors`; legacy logs without them are text-classified
+  and `harness session errors`; tool starts/results snapshot the active
+  `model_target`, `provider`, `api_type`, and `model` for stable attribution.
+  Legacy logs without those fields use the preceding `model_request`, then
+  session metadata. Legacy failures without a kind are text-classified.
   from the recorded display line. `skill_activation` records
   only activation source and status, not instruction contents.
 - Sessions store the CLI-owned previous response/interaction ID, anchored message
@@ -3567,15 +3587,23 @@ type UsageTotals struct {
   or skill paths. Compaction metadata uses the writer's canonical field shape;
   the stats reader accepts unknown additive fields while still rejecting
   malformed JSON and trailing values.
+  `--format json` emits the transcript-free tool/error subset with calls,
+  results, failures, rates, and partial composite-operation metrics.
 - `harness session errors [dir]` lists classified failures — failed tool
   results and failed model requests — for one session (root plus delegate
   children), or scans recent sessions under the default sessions root when no
   directory is given (`--since <dur>`, default `24h`; `--all` disables the
   window). `--tool`, `--kind`, `--model`, and `--agent` filter rows, and
-  `--format json` emits scope, per-session row, and aggregate summary data.
+  `--before <RFC3339>` applies an event-time cutoff. `--format json` emits
+  scope, per-session rows, aggregate summary data, and per-physical-stream
+  hashes/byte/event counts for the complete records analyzed. Each stream is
+  snapshotted at its starting byte length so concurrent appends cannot change
+  the scan. Multi-session scans report and skip unsupported/corrupt roots;
+  explicitly named invalid roots remain errors.
   The stats report renders the same collector's aggregate as its Errors
-  section, including repeat loops (the same tool and kind failing at least
-  three times consecutively).
+  section, including result denominators/rates and repeat loops calculated from
+  complete physical tool-result streams. A success or different failure ends
+  a streak, and root/child streams never join.
 - Transcripts are provider-neutral; resuming under a different provider/model works.
   When flags disagree with the state, flags win with a warning. Tool-result messages
   may include local-only `parallel_tool_batches` metadata; provider adapters ignore it.

@@ -150,6 +150,23 @@ func TestRecorderToolResultErrorFields(t *testing.T) {
 	}
 }
 
+func TestRecorderStampsEventTimeModelIdentityOnTools(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 1})
+	rec.ModelRequestEvent(llm.ModelRequestEvent{TargetID: "openai:model-a", Provider: "openai", APIType: "responses", Model: "model-a"})
+	rec.ToolStart(llm.ToolCall{ID: "c", Name: "edit"})
+	rec.ToolResult(llm.ToolResult{ForID: "c", Text: "ok"})
+	events := readEvents(t, dir)
+	for _, event := range events {
+		if event.Type != session.EventToolStart && event.Type != session.EventToolResult {
+			continue
+		}
+		if event.ModelTarget != "openai:model-a" || event.Provider != "openai" || event.APIType != "responses" || event.Model != "model-a" {
+			t.Fatalf("tool identity = %+v", event)
+		}
+	}
+}
+
 func TestRecorderNoopsOnEmptyDir(t *testing.T) {
 	rec := New(Config{})
 	rec.User("task")

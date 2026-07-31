@@ -70,6 +70,40 @@ func TestDryRunAlternatesPairs(t *testing.T) {
 	}
 }
 
+func TestToolAccuracyCasesRegistered(t *testing.T) {
+	cases := allCases()
+	for _, name := range []string{"edit_precision", "edit_drift_recovery", "tool_contracts"} {
+		c, ok := cases[name]
+		if !ok || c.Setup == nil || c.Score == nil {
+			t.Fatalf("case %q = %+v", name, c)
+		}
+	}
+	if cases["edit_drift_recovery"].SecondPrompt == "" || cases["edit_drift_recovery"].BetweenPrompts == nil {
+		t.Fatal("drift case is not configured as a two-phase run")
+	}
+}
+
+func TestRunInteractiveBenchmarkUsesPromptBoundaryHook(t *testing.T) {
+	script := `read first
+printf '%s\n' '{"type":"prompt_end","id":"phase-1"}'
+read second
+printf '%s\n' '{"type":"prompt_end","id":"phase-2"}'
+read shutdown
+printf '%s\n' '{"type":"run_end","exit_code":0}'`
+	called := 0
+	c := benchmarkCase{Prompt: "plan", SecondPrompt: "apply", BetweenPrompts: func(string) error { called++; return nil }}
+	stdout, _, err := runInteractiveBenchmark(exec.Command("sh", "-c", script), c, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called != 1 {
+		t.Fatalf("hook calls = %d", called)
+	}
+	if !strings.Contains(string(stdout), `"id":"phase-2"`) {
+		t.Fatalf("stdout = %s", stdout)
+	}
+}
+
 func TestFlattenJSONStrings(t *testing.T) {
 	got := flattenJSONStrings(json.RawMessage(`{"steps":[{"argv":["go","test","./..."]}],"stop_on_failure":true}`))
 	joined := ""
@@ -153,6 +187,32 @@ func TestSummarizeAcceptance(t *testing.T) {
 	agg := summarize(c, records)
 	if !agg.Accepted {
 		t.Fatalf("aggregate rejected: %v", agg.Failures)
+	}
+}
+
+func TestToolAccuracyAcceptanceAllowsStableEfficiencyAndRequiresErrorReduction(t *testing.T) {
+	c := allCases()["tool_contracts"]
+	var records []runRecord
+	for _, model := range defaultModels {
+		for rep := 1; rep <= 3; rep++ {
+			records = append(records,
+				runRecord{Model: model, Repetition: rep, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4, ToolErrors: 2}},
+				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"inspect": 1, "search": 1}, UsedCommandSteps: true}},
+			)
+		}
+	}
+	agg := summarize(c, records)
+	if !agg.Accepted {
+		t.Fatalf("tool accuracy aggregate rejected: %v", agg.Failures)
+	}
+	for i := range records {
+		if records[i].Variant == "candidate" {
+			records[i].Metrics.ToolErrors = 3
+		}
+	}
+	agg = summarize(c, records)
+	if agg.Accepted || !containsAnyFold(strings.Join(agg.Failures, "\n"), "tool errors increased", "reduction") {
+		t.Fatalf("regression was not rejected: %+v", agg)
 	}
 }
 

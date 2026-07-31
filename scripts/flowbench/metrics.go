@@ -14,6 +14,8 @@ import (
 )
 
 type metrics struct {
+	ModelTarget                 string         `json:"model_target,omitempty"`
+	APIType                     string         `json:"api_type,omitempty"`
 	TotalTokens                 int            `json:"total_tokens"`
 	InputTokens                 int            `json:"input_tokens"`
 	CacheReadTokens             int            `json:"cache_read_tokens"`
@@ -25,6 +27,9 @@ type metrics struct {
 	CostKnown                   bool           `json:"cost_known"`
 	Turns                       int            `json:"turns"`
 	ToolCalls                   map[string]int `json:"tool_calls"`
+	ToolErrors                  int            `json:"tool_errors"`
+	NestedToolErrors            int            `json:"nested_tool_errors"`
+	ErrorKinds                  map[string]int `json:"error_kinds"`
 	ToolResultBytes             int            `json:"tool_result_bytes"`
 	RGToReadTransitions         int            `json:"rg_to_read_transitions"`
 	CommandToCommandTransitions int            `json:"command_to_command_transitions"`
@@ -36,6 +41,9 @@ type metrics struct {
 	UsedCommandSteps            bool           `json:"used_command_steps"`
 	UsedWorkspaceSummary        bool           `json:"used_workspace_summary"`
 	StartedRaceSuite            bool           `json:"started_race_suite"`
+	ReadDriftAfterPhaseOne      bool           `json:"read_drift_after_phase_one"`
+	UnresolvedEditFailure       bool           `json:"unresolved_edit_failure"`
+	EditRecoveryTurns           int            `json:"edit_recovery_turns"`
 	CommandText                 string         `json:"-"`
 	FinalText                   string         `json:"-"`
 	AssistantText               string         `json:"-"`
@@ -62,6 +70,7 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		CostUSD:            state.Usage.CostUSD,
 		CostKnown:          u.CostKnown,
 		ToolCalls:          map[string]int{},
+		ErrorKinds:         map[string]int{},
 	}
 	m.TotalTokens = u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.CacheWrite1hTokens + u.OutputTokens + u.ReasoningTokens
 	m.FinalText = finalAssistantText(state.Messages)
@@ -73,9 +82,35 @@ func collectMetrics(sessionDir string) (metrics, error) {
 	}
 	byTurn := map[int][]string{}
 	var commandInputs []string
+	lastEditFailureTurn := 0
 	for _, ev := range events {
+		if ev.Type == session.EventModelRequest && ev.ModelRequest != nil {
+			if ev.ModelRequest.TargetID != "" {
+				m.ModelTarget = ev.ModelRequest.TargetID
+			}
+			if ev.ModelRequest.APIType != "" {
+				m.APIType = ev.ModelRequest.APIType
+			}
+		}
 		if ev.Type == session.EventTurnComplete && ev.Turn > m.Turns {
 			m.Turns = ev.Turn
+		}
+		if ev.Type == session.EventToolResult {
+			if ev.ResultError {
+				m.ToolErrors++
+				m.ErrorKinds[ev.ErrorKind]++
+			}
+			m.NestedToolErrors += ev.ResultMetrics["operation_errors"] + ev.ResultMetrics["query_errors"]
+			if ev.Tool == "edit" {
+				if ev.ResultError {
+					m.UnresolvedEditFailure = true
+					lastEditFailureTurn = ev.Turn
+				} else if m.UnresolvedEditFailure {
+					m.UnresolvedEditFailure = false
+					m.EditRecoveryTurns = max(ev.Turn-lastEditFailureTurn, 0)
+				}
+			}
+			continue
 		}
 		if ev.Type != session.EventToolStart {
 			continue
@@ -84,6 +119,10 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		byTurn[ev.Turn] = append(byTurn[ev.Turn], ev.Tool)
 		raw := string(ev.Input)
 		switch ev.Tool {
+		case "read_file":
+			if ev.Prompt >= 2 && strings.Contains(raw, "edit-drift.txt") {
+				m.ReadDriftAfterPhaseOne = true
+			}
 		case "search":
 			m.UsedSearch = true
 		case "run_command":

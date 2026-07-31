@@ -517,8 +517,6 @@ func TestRunCommandStepsValidation(t *testing.T) {
 		{"top level command", map[string]any{"command": "true", "steps": []map[string]any{{"command": "true"}}}, "steps or a top-level"},
 		{"top level stdin", map[string]any{"stdin": "x", "steps": []map[string]any{{"command": "true"}}}, "top-level stdin"},
 		{"background", map[string]any{"background": true, "steps": []map[string]any{{"command": "true"}}}, "background"},
-		{"top-level name", map[string]any{"name": "checks", "steps": []map[string]any{{"command": "true"}}}, "drop them, or set name on each step instead"},
-		{"top-level output mode", map[string]any{"output_mode": "full", "steps": []map[string]any{{"command": "true"}}}, "drop them, or set name on each step instead"},
 		{"missing step command", map[string]any{"steps": []map[string]any{{"name": "empty"}}}, "steps[0]"},
 		{"step command and argv", map[string]any{"steps": []map[string]any{{"command": "true", "argv": []string{"true"}}}}, "steps[0]"},
 		{"bad step timeout", map[string]any{"steps": []map[string]any{{"command": "true", "timeout_seconds": -1}}}, "timeout_seconds"},
@@ -530,6 +528,24 @@ func TestRunCommandStepsValidation(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestRunCommandStepsSupportsBatchNameAndFullOutput(t *testing.T) {
+	result, err := runRunCommandResult(t, map[string]any{
+		"name": "checks", "output_mode": "full",
+		"steps": []map[string]any{{"name": "one", "argv": []string{"printf", "STEP_ONE"}}, {"name": "two", "argv": []string{"printf", "STEP_TWO"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"== checks ==", "==> one <==", "STEP_ONE", "==> two <==", "STEP_TWO"} {
+		if !strings.Contains(result.Text, want) {
+			t.Fatalf("full step output missing %q:\n%s", want, result.Text)
+		}
+	}
+	if result.OriginalText != "" {
+		t.Fatalf("full output should not need archive: %+v", result)
 	}
 }
 

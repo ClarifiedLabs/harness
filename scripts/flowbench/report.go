@@ -30,14 +30,18 @@ type aggregate struct {
 }
 
 type modelAgg struct {
-	BaselinePasses        int     `json:"baseline_passes"`
-	CandidatePasses       int     `json:"candidate_passes"`
-	Adoptions             int     `json:"adoptions"`
-	BaselineMedianTokens  float64 `json:"baseline_median_tokens"`
-	CandidateMedianTokens float64 `json:"candidate_median_tokens"`
-	TokenSavingPct        float64 `json:"token_saving_pct"`
-	CostUSD               float64 `json:"cost_usd"`
-	CostBasis             string  `json:"cost_basis"`
+	BaselinePasses         int     `json:"baseline_passes"`
+	CandidatePasses        int     `json:"candidate_passes"`
+	Adoptions              int     `json:"adoptions"`
+	BaselineMedianTokens   float64 `json:"baseline_median_tokens"`
+	CandidateMedianTokens  float64 `json:"candidate_median_tokens"`
+	TokenSavingPct         float64 `json:"token_saving_pct"`
+	BaselineMedianTurns    float64 `json:"baseline_median_turns"`
+	CandidateMedianTurns   float64 `json:"candidate_median_turns"`
+	BaselineMedianPrimary  float64 `json:"baseline_median_primary"`
+	CandidateMedianPrimary float64 `json:"candidate_median_primary"`
+	CostUSD                float64 `json:"cost_usd"`
+	CostBasis              string  `json:"cost_basis"`
 }
 
 func writeRecords(results string, records []runRecord) error {
@@ -88,7 +92,6 @@ func writeSummary(results string, c benchmarkCase, records []runRecord) error {
 func summarize(c benchmarkCase, records []runRecord) aggregate {
 	agg := aggregate{
 		Case:              c.Name,
-		Runs:              len(records),
 		AdoptionsByModel:  map[string]int{},
 		Models:            map[string]modelAgg{},
 		SubscriptionCosts: "N/A (alibaba-token-plan and openai-codex)",
@@ -96,6 +99,10 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 	var baselineTokens, candidateTokens, baselinePrimary, candidatePrimary []float64
 	byModel := map[string][]runRecord{}
 	for _, record := range records {
+		if record.Invalid != "" {
+			continue
+		}
+		agg.Runs++
 		byModel[record.Model] = append(byModel[record.Model], record)
 		primary := float64(primaryValue(c, record.Metrics))
 		if strings.HasPrefix(record.Model, "deepseek:") {
@@ -134,7 +141,7 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 	}
 	sort.Strings(modelNames)
 	for _, model := range modelNames {
-		var bt, ct []float64
+		var bt, ct, baselineTurns, candidateTurns, baselineModelPrimary, candidateModelPrimary []float64
 		ma := modelAgg{CostBasis: "reported"}
 		var modelRecords []runRecord
 		for _, record := range byModel[model] {
@@ -144,11 +151,15 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 			}
 			if record.Variant == "baseline" {
 				bt = append(bt, float64(record.Metrics.TotalTokens))
+				baselineTurns = append(baselineTurns, float64(record.Metrics.Turns))
+				baselineModelPrimary = append(baselineModelPrimary, float64(primaryValue(c, record.Metrics)))
 				if record.Score.Pass {
 					ma.BaselinePasses++
 				}
 			} else {
 				ct = append(ct, float64(record.Metrics.TotalTokens))
+				candidateTurns = append(candidateTurns, float64(record.Metrics.Turns))
+				candidateModelPrimary = append(candidateModelPrimary, float64(primaryValue(c, record.Metrics)))
 				if record.Score.Pass {
 					ma.CandidatePasses++
 				}
@@ -162,6 +173,10 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 		ma.TokenSavingPct = medianPairedReduction(modelRecords, func(record runRecord) float64 {
 			return float64(record.Metrics.TotalTokens)
 		})
+		ma.BaselineMedianTurns = median(baselineTurns)
+		ma.CandidateMedianTurns = median(candidateTurns)
+		ma.BaselineMedianPrimary = median(baselineModelPrimary)
+		ma.CandidateMedianPrimary = median(candidateModelPrimary)
 		if strings.HasPrefix(model, "alibaba-token-plan:") || strings.HasPrefix(model, "openai-codex:") {
 			ma.CostUSD = 0
 			ma.CostBasis = "subscription (N/A)"
@@ -182,17 +197,35 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 	}
 	for _, model := range modelNames {
 		ma := agg.Models[model]
-		if ma.Adoptions < 2 {
-			agg.Failures = append(agg.Failures, fmt.Sprintf("%s adoption %d/3 is below 2/3", model, ma.Adoptions))
+		candidateForModel := 0
+		for _, record := range byModel[model] {
+			if record.Variant == "candidate" {
+				candidateForModel++
+			}
+		}
+		requiredAdoptions := (2*candidateForModel + 2) / 3
+		if ma.Adoptions < requiredAdoptions {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("%s adoption %d/%d is below the 2/3 gate", model, ma.Adoptions, candidateForModel))
 		}
 		if ma.TokenSavingPct < -10 {
 			agg.Failures = append(agg.Failures, fmt.Sprintf("%s median tokens regressed %.1f%%", model, -ma.TokenSavingPct))
 		}
+		if ma.BaselineMedianTurns > 0 && ma.CandidateMedianTurns > ma.BaselineMedianTurns*1.10 {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("%s median turns regressed beyond 10%%", model))
+		}
+		if (strings.HasPrefix(c.Name, "edit_") || c.Name == "tool_contracts") && ma.CandidateMedianPrimary > ma.BaselineMedianPrimary {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("%s median tool errors increased", model))
+		}
 	}
-	if agg.PrimaryReductionPct < c.MinimumReductionPct {
-		agg.Failures = append(agg.Failures, fmt.Sprintf("primary metric reduction %.1f%% is below %.1f%%", agg.PrimaryReductionPct, c.MinimumReductionPct))
+	toolAccuracy := strings.HasPrefix(c.Name, "edit_") || c.Name == "tool_contracts"
+	minimumPrimaryReduction := c.MinimumReductionPct
+	if toolAccuracy && agg.PrimaryBaselineMedian > 0 {
+		minimumPrimaryReduction = 50
 	}
-	if agg.TokenSavingPct <= 0 {
+	if agg.PrimaryReductionPct < minimumPrimaryReduction {
+		agg.Failures = append(agg.Failures, fmt.Sprintf("primary metric reduction %.1f%% is below %.1f%%", agg.PrimaryReductionPct, minimumPrimaryReduction))
+	}
+	if !toolAccuracy && agg.TokenSavingPct <= 0 {
 		agg.Failures = append(agg.Failures, "aggregate paired-median tokens did not decrease")
 	}
 	agg.Accepted = len(agg.Failures) == 0
@@ -218,6 +251,8 @@ func primaryValue(c benchmarkCase, m metrics) int {
 		return m.GitCalls
 	case "background_polls":
 		return m.BackgroundPolls
+	case "tool_errors":
+		return m.ToolErrors + m.NestedToolErrors
 	default:
 		return 0
 	}
@@ -235,6 +270,12 @@ func adopted(name string, m metrics) bool {
 		return m.UsedWorkspaceSummary
 	case "background_wait":
 		return m.BackgroundWaits > 0 && m.BackgroundPolls == 0
+	case "edit_precision":
+		return m.ToolCalls["edit"] > 0
+	case "edit_drift_recovery":
+		return m.ToolCalls["edit"] > 0 && m.ReadDriftAfterPhaseOne
+	case "tool_contracts":
+		return m.ToolCalls["inspect"] > 0 && m.ToolCalls["search"] > 0 && m.UsedCommandSteps
 	default:
 		return false
 	}

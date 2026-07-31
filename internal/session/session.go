@@ -606,6 +606,13 @@ type Event struct {
 	Display string    `json:"display,omitempty"`
 	ToolID  string    `json:"tool_id,omitempty"`
 	Tool    string    `json:"tool,omitempty"`
+	// ModelTarget, Provider, APIType, and Model snapshot the resolved model
+	// selection active when a tool was dispatched. Keeping this attribution on
+	// the tool events makes later analysis independent of mutable state.json.
+	ModelTarget string `json:"model_target,omitempty"`
+	Provider    string `json:"provider,omitempty"`
+	APIType     string `json:"api_type,omitempty"`
+	Model       string `json:"model,omitempty"`
 	// Path is the mutated file for tool_diff events. Replay uses it to detect
 	// the language for diff colorizing.
 	Path              string                  `json:"path,omitempty"`

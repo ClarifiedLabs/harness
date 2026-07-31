@@ -13,7 +13,7 @@ This page is the operational overview.
 | `list_dir` | list directory entries with type and size, non-recursive |
 | `glob` | recursively find files/dirs by glob, including `**` patterns; read-only |
 | `search` | run up to 16 bounded content queries with context, lines, files, counts, or existence output |
-| `inspect` | run up to 16 independent read/search/glob/list/workspace-summary/read-only-git operations concurrently |
+| `inspect` | run up to 32 independent read/search/glob/list/workspace-summary/read-only-git operations in bounded waves |
 | `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
 | `write_file` | create or overwrite a file, creating parent directories |
 | `run_command` | run a shell command or direct argv program |
@@ -112,6 +112,11 @@ trip.
 Invalid search regexes are rejected at argument decode with `invalid regex:
 <compile error>; use fixed_strings: true for literal text` (error kind
 `regex_invalid`), before ripgrep or the stdlib walker runs.
+In a batch, malformed or failed queries are rendered beside successful query
+results. A top-level error is returned only when every query is invalid. Positive
+context/result limits above the documented maxima are clamped and disclosed;
+negative limits remain errors. Ripgrep-only parser failures are also classified
+as `regex_invalid` and never cause a regex to be silently treated as literal.
 
 For a batch with more than one `context` or `matches` query, Harness renders
 each query's match summary followed by one shared source-context section.
@@ -121,9 +126,11 @@ Each query still receives its own existing 400-source-line allowance; batching
 does not impose a new aggregate cap.
 
 `inspect` batches heterogeneous repository orientation in the same way. Its
-`operations[]` may invoke `read_file`, `search`, `glob`, `list_dir`,
-`workspace_summary`, or `git_readonly`; operations execute concurrently and
-render under indexed headers. Nested `git_readonly` uses the same `args` and
+`operations[]` may contain up to 32 invocations of `read_file`, `search`, `glob`, `list_dir`,
+`workspace_summary`, or `git_readonly`; operations execute in waves of at most
+16 and render under indexed headers. Invalid operations are reported inline
+while valid operations still run; if all operations are invalid, the call
+fails. Nested `git_readonly` uses the same `args` and
 optional `cwd` input and the same audited command allowlist as the top-level
 tool. When the `git` binary is unavailable, `inspect` omits both
 `workspace_summary` and `git_readonly` from its advertised operations. Prefer
@@ -157,13 +164,11 @@ than 1024 bytes are clamped in-process (host `grep` has no portable
   into the command environment, so build/test toolchains are still found without
   paying the login-profile cost on every call.
 - `argv`: direct program invocation with literal args and no shell
-- `name`: optional top-level receipt label; unavailable with `steps`
-- `output_mode`: top-level `auto` (default), `receipt`, or `full`; unavailable
-  with `steps`
+- `name`: optional command or step-batch label
+- `output_mode`: `auto` (default), `receipt`, or `full`; with `steps`, `auto`
+  and `receipt` return compact receipts while `full` returns the combined step transcript
 - `steps`: up to 16 named `command`/`argv` entries, run serially. Top-level
   `cwd` and `timeout_seconds` are inherited unless a step overrides them.
-  Passing top-level `name` or `output_mode` with `steps` is rejected with
-  guidance to drop them or set `name` on each step instead.
 
 Foreground calls capture combined stdout/stderr and append `[exit code: N]`.
 Non-zero exit is not a tool error; it is returned as ordinary command output so
@@ -259,6 +264,13 @@ repeated reminders back off exponentially. Custom agents with an explicit
 A repeated `edit` `files[].path` is applied in order against the earlier
 entry's result rather than rejected; a stale `oldText` in a repeated entry
 fails with the ordinary not-found error and nothing is written.
+`edit` validates every replacement in a file before writing and reports all
+missing or ambiguous blocks together. Ambiguous errors include up to five
+occurrence line numbers; close not-found candidates include the first divergent
+line. Fuzzy matching uses a normalized comparison view but maps the selected
+span back to the original bytes, so unrelated whitespace and typographic
+punctuation are preserved. A single top-level `path` is accepted only as an
+unambiguous compatibility shorthand for exactly one pathless `files` entry.
 By default, harness prints a unified before/after diff for each built-in file
 mutation tool call. Set `show_diffs`, `HARNESS_SHOW_DIFFS`, or `-show-diffs` to
 false to disable diff output. Diffs are generated from per-call file snapshots,

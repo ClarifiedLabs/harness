@@ -29,6 +29,61 @@ func Stats(dir string, w io.Writer) error {
 	return nil
 }
 
+// StatsJSON writes the machine-readable session statistics needed for tool
+// accuracy comparisons without exposing transcript bodies or tool inputs.
+func StatsJSON(dir string, w io.Writer) error {
+	report, err := collectStats(dir)
+	if err != nil {
+		return err
+	}
+	type toolJSON struct {
+		Calls       int     `json:"calls"`
+		Results     int     `json:"results"`
+		Errors      int     `json:"errors"`
+		ErrorRate   float64 `json:"error_rate"`
+		Truncations int     `json:"truncations"`
+	}
+	tools := make(map[string]toolJSON)
+	names := make(map[string]bool)
+	for name := range report.tools.byName {
+		names[name] = true
+	}
+	for name := range report.tools.resultsByName {
+		names[name] = true
+	}
+	for name := range names {
+		result := report.tools.resultsByName[name]
+		rate := 0.0
+		if result.results > 0 {
+			rate = float64(result.errors) / float64(result.results)
+		}
+		tools[name] = toolJSON{
+			Calls: report.tools.byName[name], Results: result.results,
+			Errors: result.errors, ErrorRate: rate, Truncations: result.truncations,
+		}
+	}
+	payload := struct {
+		Path      string              `json:"path"`
+		SessionID string              `json:"session_id"`
+		Provider  string              `json:"provider"`
+		Model     string              `json:"model"`
+		Prompts   int                 `json:"prompts"`
+		Turns     int                 `json:"turns"`
+		Tools     map[string]toolJSON `json:"tools"`
+		Errors    ErrorSummary        `json:"errors"`
+	}{
+		Path: dir, SessionID: report.root.state.ID, Provider: report.root.state.Provider,
+		Model: report.root.state.Model, Prompts: report.root.prompts, Turns: report.root.turns,
+		Tools: tools, Errors: report.errors,
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(payload); err != nil {
+		return fmt.Errorf("session: write stats json: %w", err)
+	}
+	return nil
+}
+
 type statsReport struct {
 	path                string
 	root                collectedSessionStats
@@ -226,11 +281,11 @@ func collectStats(dir string) (statsReport, error) {
 		report.directMaintCalls += child.stats.maintenanceCalls
 		report.delegateMaintCalls += child.stats.maintenanceCalls
 	}
-	errorRows, err := CollectErrors(dir, ErrorFilter{})
+	errorAnalysis, err := AnalyzeErrors(dir, ErrorFilter{}, time.Time{})
 	if err != nil {
 		return statsReport{}, err
 	}
-	report.errors = SummarizeErrors(errorRows)
+	report.errors = errorAnalysis.Summary
 	return report, nil
 }
 
@@ -603,7 +658,6 @@ func collectToolStats(events []Event) (toolStats, error) {
 	}
 	return stats, nil
 }
-
 
 func skillReadPathHashes(input json.RawMessage) []string {
 	var args struct {
@@ -1235,18 +1289,21 @@ func writeErrorStats(w io.Writer, report statsReport) {
 		return
 	}
 	fmt.Fprintln(w, "Errors")
-	fmt.Fprintf(w, "  failed tool results: %d\n", summary.FailedToolResults)
+	fmt.Fprintf(w, "  failed tool results: %d/%d (%.1f%%)\n", summary.FailedToolResults, summary.ToolResults, summary.ToolErrorRate*100)
 	if summary.ModelRequestFailures > 0 {
 		fmt.Fprintf(w, "  model request failures: %d\n", summary.ModelRequestFailures)
 	}
 	if len(summary.ByTool) > 0 {
-		fmt.Fprintf(w, "  by tool: %s\n", formatErrorCounts(summary.ByTool))
+		fmt.Fprintf(w, "  by tool: %s\n", formatErrorRates(summary.ByTool, summary.ResultsByTool))
 	}
 	if len(summary.ByKind) > 0 {
 		fmt.Fprintf(w, "  by kind: %s\n", formatErrorCounts(summary.ByKind))
 	}
 	if len(summary.ByModel) > 0 {
-		fmt.Fprintf(w, "  by model: %s\n", formatErrorCounts(summary.ByModel))
+		fmt.Fprintf(w, "  by model: %s\n", formatErrorRates(summary.ByModel, summary.ResultsByModel))
+	}
+	if len(summary.CompositeDiagnostics) > 0 {
+		fmt.Fprintf(w, "  composite diagnostics: %s\n", formatErrorCounts(summary.CompositeDiagnostics))
 	}
 	if len(summary.Repeats) > 0 {
 		fmt.Fprintln(w, "  repeated failures:")
@@ -1258,6 +1315,30 @@ func writeErrorStats(w io.Writer, report statsReport) {
 			fmt.Fprintf(w, "    %s: %s (%d consecutive)\n", tool, repeat.Kind, repeat.Consecutive)
 		}
 	}
+}
+
+func formatErrorRates(errorsByKey, resultsByKey map[string]int) string {
+	keys := make([]string, 0, len(errorsByKey))
+	for key := range errorsByKey {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left, right := errorsByKey[keys[i]], errorsByKey[keys[j]]
+		if left != right {
+			return left > right
+		}
+		return keys[i] < keys[j]
+	})
+	parts := make([]string, len(keys))
+	for i, key := range keys {
+		results := resultsByKey[key]
+		rate := 0.0
+		if results > 0 {
+			rate = float64(errorsByKey[key]) / float64(results) * 100
+		}
+		parts[i] = fmt.Sprintf("%s (%d/%d, %.1f%%)", key, errorsByKey[key], results, rate)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // formatErrorCounts renders a count map as "name (n), ...", highest counts

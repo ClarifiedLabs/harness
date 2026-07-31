@@ -2459,7 +2459,8 @@ func invalidToolInputResult(call llm.ToolCall) string {
 	case "write_file", "edit":
 		// A huge file body is the common cause of truncated streamed args; the
 		// fix is smaller writes, not another monolithic retry.
-		if strings.Contains(call.InvalidInputError, "unexpected end of JSON input") {
+		if strings.Contains(call.InvalidInputError, "unexpected end of JSON input") ||
+			strings.Contains(call.InvalidInputError, "unexpected EOF") {
 			msg += " The arguments were truncated mid-JSON; write the file in chunks (write_file then edit to append), or switch to apply_patch for large inserts."
 		}
 	}

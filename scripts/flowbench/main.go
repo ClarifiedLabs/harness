@@ -12,6 +12,8 @@ import (
 func main() {
 	var (
 		caseName     = flag.String("case", "", "benchmark case name")
+		suiteName    = flag.String("suite", "", "benchmark suite name (tool_accuracy)")
+		profile      = flag.String("profile", "promotion", "suite profile: smoke or promotion")
 		baselineSHA  = flag.String("baseline", "", "baseline harness git revision")
 		candidateSHA = flag.String("candidate", "", "candidate harness git revision")
 		repo         = flag.String("repo", ".", "harness repository")
@@ -24,14 +26,26 @@ func main() {
 	)
 	flag.Parse()
 	cases := allCases()
-	if *caseName == "" || *baselineSHA == "" || *candidateSHA == "" {
+	if (*caseName == "") == (*suiteName == "") || *baselineSHA == "" || *candidateSHA == "" {
 		flag.Usage()
 		os.Exit(2)
 	}
-	c, ok := cases[*caseName]
-	if !ok {
-		fmt.Fprintf(os.Stderr, "flowbench: unknown case %q\n", *caseName)
-		os.Exit(2)
+	selectedCases := []benchmarkCase{}
+	if *caseName != "" {
+		c, ok := cases[*caseName]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "flowbench: unknown case %q\n", *caseName)
+			os.Exit(2)
+		}
+		selectedCases = append(selectedCases, c)
+	} else {
+		if *suiteName != "tool_accuracy" || (*profile != "smoke" && *profile != "promotion") {
+			fmt.Fprintf(os.Stderr, "flowbench: unsupported suite/profile %q/%q\n", *suiteName, *profile)
+			os.Exit(2)
+		}
+		for _, name := range []string{"edit_precision", "edit_drift_recovery", "tool_contracts"} {
+			selectedCases = append(selectedCases, cases[name])
+		}
 	}
 	absRepo, err := filepath.Abs(*repo)
 	if err != nil {
@@ -55,26 +69,36 @@ func main() {
 			selectedModels = append(selectedModels, model)
 		}
 	}
-	records, err := executeMatrix(context.Background(), runConfig{
-		Repo:         absRepo,
-		Results:      resultDir,
-		Case:         c,
-		BaselineSHA:  *baselineSHA,
-		CandidateSHA: *candidateSHA,
-		Models:       selectedModels,
-		Repetitions:  *repetitions,
-		DryRun:       *dryRun,
-		Resume:       *resume,
-		ImportRuns:   *importRuns,
+	explicitModels, explicitRepetitions := false, false
+	flag.Visit(func(f *flag.Flag) {
+		explicitModels = explicitModels || f.Name == "models"
+		explicitRepetitions = explicitRepetitions || f.Name == "repetitions"
 	})
-	if *dryRun {
-		for _, record := range records {
-			fmt.Printf("%02d\t%s\t%d\t%s\t%s\n", record.Order, record.Model, record.Repetition, record.Variant, record.HarnessSHA)
+	if *suiteName != "" && *profile == "smoke" {
+		if !explicitModels {
+			selectedModels = []string{"alibaba-token-plan:qwen3.8-max-preview"}
+		}
+		if !explicitRepetitions {
+			*repetitions = 1
+		}
+	}
+	for _, c := range selectedCases {
+		records, runErr := executeMatrix(context.Background(), runConfig{
+			Repo: absRepo, Results: resultDir, Case: c,
+			BaselineSHA: *baselineSHA, CandidateSHA: *candidateSHA,
+			Models: selectedModels, Repetitions: *repetitions,
+			DryRun: *dryRun, Resume: *resume, ImportRuns: *importRuns, Profile: *profile,
+		})
+		if *dryRun {
+			for _, record := range records {
+				fmt.Printf("%s\t%02d\t%s\t%d\t%s\t%s\n", c.Name, record.Order, record.Model, record.Repetition, record.Variant, record.HarnessSHA)
+			}
+		}
+		if runErr != nil {
+			fmt.Fprintf(os.Stderr, "flowbench: results %s\n", resultDir)
+			fmt.Fprintf(os.Stderr, "flowbench: %v\n", runErr)
+			os.Exit(1)
 		}
 	}
 	fmt.Fprintf(os.Stderr, "flowbench: results %s\n", resultDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "flowbench: %v\n", err)
-		os.Exit(1)
-	}
 }

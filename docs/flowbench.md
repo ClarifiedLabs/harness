@@ -100,9 +100,32 @@ go run ./scripts/flowbench \
 ```
 
 Available cases are `search_context`, `command_steps`, `todo_coissue`,
-`git_workspace_summary`, and `background_wait`. Use `-dry-run` to inspect
+`git_workspace_summary`, `background_wait`, `edit_precision`,
+`edit_drift_recovery`, and `tool_contracts`. Use `-dry-run` to inspect
 ordering, `-resume` for validated completed records, and
 `-import-baseline-runs <runs.json>` to reuse a matching immutable baseline.
+
+The tool-accuracy suite runs its three synthetic, exact-oracle cases together:
+
+```sh
+go run ./scripts/flowbench -suite tool_accuracy -profile smoke \
+  -baseline <before-revision> -candidate <after-revision> \
+  -results /tmp/harness-tool-accuracy
+
+go run ./scripts/flowbench -suite tool_accuracy -profile promotion \
+  -baseline <before-revision> -candidate <after-revision> \
+  -results /tmp/harness-tool-accuracy
+```
+
+`smoke` uses Qwen 3.8 for one paired repetition (six runs). `promotion` uses
+the three default model targets for three paired repetitions (54 runs).
+Explicit `-models` and `-repetitions` override a profile. `edit_precision`
+checks five replacements and byte-for-byte sentinel preservation;
+`edit_drift_recovery` mutates context only after the first interactive
+`prompt_end`; `tool_contracts` exercises 18-operation inspect, mixed
+literal/regex search, and full-output command steps. Run records hash prompts,
+fixtures, binaries, and raw events and retain invalid infrastructure samples for
+`-resume` to rerun rather than scoring them as model failures.
 
 ## Live results and disposition
 

@@ -22,6 +22,8 @@ type benchmarkCase struct {
 	PrimaryMetric        string
 	MinimumReductionPct  float64
 	TargetTokenSavingPct float64
+	SecondPrompt         string
+	BetweenPrompts       func(string) error
 }
 
 type scoreInput struct {
@@ -91,12 +93,172 @@ func allCases() map[string]benchmarkCase {
 			MinimumReductionPct:  50,
 			TargetTokenSavingPct: 8,
 		},
+		{
+			Name: "edit_precision",
+			Prompt: "Work directly; do not delegate or commit. Use the edit tool to make exactly the five requested replacements in .flowbench-tool-accuracy/edit-precision.txt: " +
+				"alpha pending->ready, beta pending->blocked, gamma 1->2, delta off->on, and epsilon old->new. Preserve every other byte, including sentinel punctuation and trailing spaces. Re-read to verify.",
+			Setup: setupEditPrecision, Score: scoreEditPrecision,
+			PrimaryMetric: "tool_errors", MinimumReductionPct: 0,
+		},
+		{
+			Name:           "edit_drift_recovery",
+			Prompt:         "Work directly; do not delegate or edit yet. Read .flowbench-tool-accuracy/edit-drift.txt and plan an exact edit that changes enabled=false to enabled=true only in the service beta block. Finish after describing the planned edit.",
+			SecondPrompt:   "The workspace may have changed since your plan. Now use the edit tool to make the requested beta-only change, re-reading as needed, and verify the exact result. Do not change anything else.",
+			BetweenPrompts: applyEditDrift,
+			Setup:          setupEditDrift, Score: scoreEditDrift,
+			PrimaryMetric: "tool_errors", MinimumReductionPct: 0,
+		},
+		{
+			Name: "tool_contracts",
+			Prompt: "Work directly; do not delegate or edit. Use one inspect call to read all 18 files under .flowbench-tool-accuracy/contracts. " +
+				"Use one batched search call containing literal fixed-string queries for Widget( and State{ plus a regex query for Marker[0-9]+. " +
+				"Use one run_command steps call with output_mode full that prints STEP_ALPHA and STEP_BETA. Report the first and last markers and both step outputs.",
+			Setup: setupToolContracts, Score: scoreToolContracts,
+			PrimaryMetric: "tool_errors", MinimumReductionPct: 0,
+		},
 	}
 	out := make(map[string]benchmarkCase, len(cases))
 	for _, c := range cases {
 		out[c.Name] = c
 	}
 	return out
+}
+
+const toolAccuracyFixture = ".flowbench-tool-accuracy"
+
+const editPrecisionBefore = "alpha: pending\nbeta: pending\ngamma: 1\ndelta: off\nepsilon: old\nsentinel: “keep—exactly”  \n"
+const editPrecisionAfter = "alpha: ready\nbeta: blocked\ngamma: 2\ndelta: on\nepsilon: new\nsentinel: “keep—exactly”  \n"
+
+func setupEditPrecision(dir string) error {
+	if err := setupClean(dir); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, toolAccuracyFixture)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(path, "edit-precision.txt"), []byte(editPrecisionBefore), 0o644)
+}
+
+const editDriftBefore = "service alpha\nowner: platform\nenabled=false\n\nservice beta\nowner: platform\nenabled=false\n"
+const editDriftChanged = "service alpha\nowner: platform\nenabled=false\n\nservice beta\nowner: runtime\nenabled=false\n"
+const editDriftAfter = "service alpha\nowner: platform\nenabled=false\n\nservice beta\nowner: runtime\nenabled=true\n"
+
+func setupEditDrift(dir string) error {
+	if err := setupClean(dir); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, toolAccuracyFixture)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(path, "edit-drift.txt"), []byte(editDriftBefore), 0o644)
+}
+
+func applyEditDrift(dir string) error {
+	path := filepath.Join(dir, toolAccuracyFixture, "edit-drift.txt")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if string(data) != editDriftBefore {
+		return fmt.Errorf("phase one changed drift fixture")
+	}
+	return os.WriteFile(path, []byte(editDriftChanged), 0o644)
+}
+
+func setupToolContracts(dir string) error {
+	if err := setupClean(dir); err != nil {
+		return err
+	}
+	root := filepath.Join(dir, toolAccuracyFixture, "contracts")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return err
+	}
+	for i := 1; i <= 18; i++ {
+		body := fmt.Sprintf("Marker%02d Widget( State{\n", i)
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("marker-%02d.txt", i)), []byte(body), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func scoreEditPrecision(in scoreInput) score {
+	var reasons []string
+	data, err := os.ReadFile(filepath.Join(in.Worktree, toolAccuracyFixture, "edit-precision.txt"))
+	if err != nil || string(data) != editPrecisionAfter {
+		reasons = append(reasons, "edit precision fixture does not match the exact oracle")
+	}
+	if in.Metrics.ToolCalls["edit"] == 0 {
+		reasons = append(reasons, "edit tool was not exercised")
+	}
+	if err := requireOnlyUntrackedFixture(in.Worktree, filepath.Join(toolAccuracyFixture, "edit-precision.txt")); err != nil {
+		reasons = append(reasons, err.Error())
+	}
+	return score{Pass: len(reasons) == 0, Reasons: reasons}
+}
+
+func scoreEditDrift(in scoreInput) score {
+	var reasons []string
+	data, err := os.ReadFile(filepath.Join(in.Worktree, toolAccuracyFixture, "edit-drift.txt"))
+	if err != nil || string(data) != editDriftAfter {
+		reasons = append(reasons, "drift fixture does not match the exact oracle")
+	}
+	if in.Metrics.ToolCalls["edit"] == 0 {
+		reasons = append(reasons, "edit tool was not exercised")
+	}
+	if !in.Metrics.ReadDriftAfterPhaseOne {
+		reasons = append(reasons, "drifted path was not re-read in phase two")
+	}
+	if in.Metrics.UnresolvedEditFailure {
+		reasons = append(reasons, "edit failure was not recovered")
+	}
+	if in.Metrics.EditRecoveryTurns > 2 {
+		reasons = append(reasons, "edit recovery exceeded two turns")
+	}
+	if err := requireOnlyUntrackedFixture(in.Worktree, filepath.Join(toolAccuracyFixture, "edit-drift.txt")); err != nil {
+		reasons = append(reasons, err.Error())
+	}
+	return score{Pass: len(reasons) == 0, Reasons: reasons}
+}
+
+func requireOnlyUntrackedFixture(worktree string, paths ...string) error {
+	status, err := gitOutput(worktree, "status", "--porcelain=v1", "--untracked-files=all")
+	if err != nil {
+		return err
+	}
+	want := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		want["?? "+filepath.ToSlash(path)] = true
+	}
+	for _, line := range strings.Split(strings.TrimSpace(status), "\n") {
+		if line == "" {
+			continue
+		}
+		if !want[line] {
+			return fmt.Errorf("unexpected workspace change: %s", line)
+		}
+		delete(want, line)
+	}
+	if len(want) != 0 {
+		return fmt.Errorf("expected fixture path is missing from workspace status")
+	}
+	return nil
+}
+
+func scoreToolContracts(in scoreInput) score {
+	result := requireOutput(in.Stdout, "Marker01", "Marker18", "STEP_ALPHA", "STEP_BETA")
+	for _, tool := range []string{"inspect", "search", "run_command"} {
+		if in.Metrics.ToolCalls[tool] == 0 {
+			result.Reasons = append(result.Reasons, "required tool not exercised: "+tool)
+		}
+	}
+	if in.FixtureBefore != in.FixtureAfter {
+		result.Reasons = append(result.Reasons, "contract fixture was modified")
+	}
+	result.Pass = len(result.Reasons) == 0
+	return result
 }
 
 func setupClean(dir string) error {

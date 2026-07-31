@@ -127,8 +127,49 @@ func TestInspectSupportsGitReadonlyAndRejectsMutation(t *testing.T) {
 
 	if _, err := run("commit", "-m", "must not run"); err == nil {
 		t.Fatal("mutating git operation succeeded through inspect")
-	} else if !strings.Contains(err.Error(), "not read-only") {
+	} else if !strings.Contains(err.Error(), "was not executed") {
 		t.Fatalf("mutating git operation returned unexpected error: %v", err)
+	}
+}
+
+func TestInspectRunsValidOperationsAlongsideRejectedOnes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ok.txt")
+	if err := os.WriteFile(path, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool := inspectTool{tools: map[string]Tool{"read_file": readFile{}}}
+	input := json.RawMessage(`{"operations":[{"tool":"missing","input":{}},{"tool":"read_file","input":{"path":` + quoteJSON(path) + `}}]}`)
+	result, err := tool.RunResult(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Text, `tool "missing" is not available`) || !strings.Contains(result.Text, "1\tok") {
+		t.Fatalf("partial output:\n%s", result.Text)
+	}
+	if result.Metrics["operation_errors"] != 1 || result.Metrics["operation_count"] != 2 {
+		t.Fatalf("metrics = %+v", result.Metrics)
+	}
+}
+
+func TestInspectAcceptsMoreThanOneConcurrencyWave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ok.txt")
+	if err := os.WriteFile(path, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	operations := make([]inspectOperation, 18)
+	for i := range operations {
+		operations[i] = inspectOperation{Tool: "read_file", Input: json.RawMessage(`{"path":` + quoteJSON(path) + `}`)}
+	}
+	input, err := json.Marshal(inspectArgs{Operations: operations})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (inspectTool{tools: map[string]Tool{"read_file": readFile{}}}).RunResult(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Metrics["operation_count"] != 18 || strings.Count(result.Text, "## ") != 18 {
+		t.Fatalf("result metrics/output = %+v, headers=%d", result.Metrics, strings.Count(result.Text, "## "))
 	}
 }
 

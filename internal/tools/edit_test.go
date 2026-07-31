@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -579,11 +581,77 @@ func TestEditFailureKindsPreserveMessages(t *testing.T) {
 		if got := KindOf(err); got != llm.ToolErrorEditOldTextAmbiguous {
 			t.Errorf("kind = %q, want %q", got, llm.ToolErrorEditOldTextAmbiguous)
 		}
-		want := fmt.Sprintf("found 3 occurrences of oldText in %s; provide more context to make it unique", p)
+		want := fmt.Sprintf("found 3 occurrences of oldText in %s; occurrences start at lines 1, 1, 1; provide more context to make it unique", p)
 		if err.Error() != want {
 			t.Errorf("message = %q, want exactly %q", err.Error(), want)
 		}
 	})
+}
+
+func TestEditFuzzyMatchPreservesUntouchedBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	before := "target: “old”   \nuntouched: “smart—text”   \n"
+	mustWrite(t, path, before)
+	input, err := json.Marshal(map[string]any{"files": []any{editFileArg(path, map[string]any{
+		"oldText": "target: \"old\"\n", "newText": "target: new\n",
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (edit{}).RunResult(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, path, "target: new\nuntouched: “smart—text”   \n")
+	if result.Metrics["fuzzy_matches"] != 1 {
+		t.Fatalf("metrics = %+v", result.Metrics)
+	}
+}
+
+func TestDecodeEditArgsAcceptsOnlyUnambiguousTopLevelPath(t *testing.T) {
+	args, err := decodeEditArgs(json.RawMessage(`{"path":"a.txt","files":[{"edits":[{"oldText":"a","newText":"b"}]}]}`))
+	if err != nil || len(args.Files) != 1 || args.Files[0].Path != "a.txt" {
+		t.Fatalf("decoded = %+v, %v", args, err)
+	}
+	for _, input := range []string{
+		`{"path":"a.txt","files":[{"path":"b.txt","edits":[{"oldText":"a","newText":"b"}]}]}`,
+		`{"path":"a.txt","files":[{"edits":[{"oldText":"a","newText":"b"}]},{"edits":[{"oldText":"c","newText":"d"}]}]}`,
+	} {
+		if _, err := decodeEditArgs(json.RawMessage(input)); err == nil {
+			t.Fatalf("ambiguous input accepted: %s", input)
+		}
+	}
+}
+
+func TestEditReportsAllInvalidBlocksBeforeWriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.txt")
+	mustWrite(t, path, "same\nsame\nkeep\n")
+	_, err := runEdit(t, map[string]any{"files": []any{editFileArg(path,
+		map[string]any{"oldText": "missing-one", "newText": "x"},
+		map[string]any{"oldText": "same", "newText": "y"},
+		map[string]any{"oldText": "missing-two", "newText": "z"},
+	)}})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	for _, want := range []string{"edits[0]", "edits[1]", "edits[2]", "occurrences start at lines 1, 2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q:\n%s", want, err)
+		}
+	}
+	assertFileContent(t, path, "same\nsame\nkeep\n")
+}
+
+func TestEditNotFoundReportsFirstDivergentLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.txt")
+	mustWrite(t, path, "section alpha\nactual value\nend\n")
+	_, err := runEdit(t, map[string]any{"files": []any{editFileArg(path, map[string]any{
+		"oldText": "section alpha\nexpected value\nend", "newText": "replacement",
+	})}})
+	if err == nil || !strings.Contains(err.Error(), `first divergence at file line 2: expected "expected value", actual "actual value"`) {
+		t.Fatalf("error = %v", err)
+	}
 }
 
 func assertFileContent(t *testing.T, path, want string) {

@@ -153,3 +153,73 @@ func TestCollectErrors(t *testing.T) {
 		t.Errorf("agent filter rows = %d, want 1", len(byAgent))
 	}
 }
+
+func TestAnalyzeErrorsUsesEventTimeModelAndCompleteResultStreaks(t *testing.T) {
+	dir := t.TempDir()
+	if err := (Session{Provider: "current", Model: "model-current"}).Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	events := []Event{
+		{Time: base, Type: EventModelRequest, ModelRequest: &llm.ModelRequestEvent{TargetID: "p:model-a", Provider: "p", APIType: "responses", Model: "model-a"}},
+		{Time: base.Add(time.Second), Type: EventToolResult, Tool: "edit", ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+		{Time: base.Add(2 * time.Second), Type: EventToolResult, Tool: "edit"},
+		{Time: base.Add(3 * time.Second), Type: EventToolResult, Tool: "edit", ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+		{Time: base.Add(4 * time.Second), Type: EventModelRequest, ModelRequest: &llm.ModelRequestEvent{TargetID: "p:model-b", Provider: "p", APIType: "anthropic", Model: "model-b"}},
+		{Time: base.Add(5 * time.Second), Type: EventToolResult, Tool: "search", ResultError: true, ErrorKind: string(llm.ToolErrorRegexInvalid)},
+	}
+	for _, event := range events {
+		if err := AppendEvent(dir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	analysis, err := AnalyzeErrors(dir, ErrorFilter{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(analysis.Rows) != 3 {
+		t.Fatalf("rows = %+v", analysis.Rows)
+	}
+	if analysis.Rows[0].Model != "model-a" || analysis.Rows[0].ModelTarget != "p:model-a" || analysis.Rows[0].APIType != "responses" {
+		t.Fatalf("first attribution = %+v", analysis.Rows[0])
+	}
+	if analysis.Rows[2].Model != "model-b" || analysis.Rows[2].APIType != "anthropic" {
+		t.Fatalf("last attribution = %+v", analysis.Rows[2])
+	}
+	if len(analysis.Summary.Repeats) != 0 {
+		t.Fatalf("success must break error streak: %+v", analysis.Summary.Repeats)
+	}
+	if analysis.Summary.ToolResults != 4 || analysis.Summary.FailedToolResults != 3 {
+		t.Fatalf("summary = %+v", analysis.Summary)
+	}
+}
+
+func TestAnalyzeErrorsIgnoresIncompleteTailAndHonorsBefore(t *testing.T) {
+	dir := t.TempDir()
+	if err := (Session{Provider: "p", Model: "m"}).Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	if err := AppendEvent(dir, Event{Time: base, Type: EventToolResult, Tool: "edit", ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendEvent(dir, Event{Time: base.Add(time.Minute), Type: EventToolResult, Tool: "search", ResultError: true, ErrorKind: string(llm.ToolErrorRegexInvalid)}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, eventLog), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"type":"tool_result"`)
+	_ = f.Close()
+	analysis, err := AnalyzeErrors(dir, ErrorFilter{}, base.Add(30*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(analysis.Rows) != 1 || analysis.Rows[0].Tool != "edit" {
+		t.Fatalf("rows = %+v", analysis.Rows)
+	}
+	if len(analysis.Sources) != 1 || analysis.Sources[0].Events != 1 || analysis.Sources[0].SHA256 == "" {
+		t.Fatalf("sources = %+v", analysis.Sources)
+	}
+}

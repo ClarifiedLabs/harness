@@ -1430,8 +1430,8 @@ Inspect saved sessions with:
 ```sh
 harness session replay [-f|--follow] [-q|--quiet] [--color-theme dark|light] [--config path] ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
-harness session stats ~/.local/state/harness/sessions/20260611T123456Z
-harness session errors [--tool T] [--kind K] [--model M] [--agent A] [--since D|--all] [--format text|json] [dir]
+harness session stats [--format text|json] ~/.local/state/harness/sessions/20260611T123456Z
+harness session errors [--tool T] [--kind K] [--model M] [--agent A] [--since D|--all] [--before RFC3339] [--format text|json] [dir]
 ```
 
 `session replay --follow` first renders the existing complete `raw.ndjson`
@@ -1493,6 +1493,8 @@ used stateful continuation or full context. When failures occurred, an `Errors`
 section follows the tool report: failed tool-result and model-request counts,
 per-tool/kind/model breakdowns, and repeat loops (the same tool and kind
 failing at least three times consecutively).
+`--format json` emits a transcript-free machine report with per-tool
+calls/results/errors/error rates and the structured error summary.
 
 `session errors` lists the classified failures behind that section: every
 failed tool result and failed model request in one session (root plus delegate
@@ -1507,6 +1509,14 @@ come from the structured `error_kind` field on new logs (with a `high`
 confidence marker) and from text classification of the recorded display line
 on legacy logs; see the design document's tool failure handling section for
 the kind vocabulary.
+`--before` applies an event-time cutoff. Each JSON report records `analyzed_at`
+and, for every physical root/child stream, the complete-record byte count,
+event count, and SHA-256 used. Scans snapshot each file before reading, skip and
+report corrupt or unsupported sessions, and never combine repeat streaks across
+physical agents. A success or different failure breaks a streak. Tool failures
+are attributed to the event-time model identity; older logs use the preceding
+`model_request` before falling back to session metadata. Summaries include
+tool-result denominators and composite inspect/search diagnostics carried in metrics.
 
 ### Session diagnostics
 
@@ -1522,6 +1532,9 @@ and failed results carry a structured `error_kind` plus a bounded, rune-safe
 `error_excerpt` (2 lines / 240 runes) for error analysis; skill activation records
 carry only source and status; neither includes
 skill bodies or adds model-visible content.
+New tool start/result records also snapshot `model_target`, `provider`,
+`api_type`, and `model`, making attribution stable if a resumed session later
+switches models.
 
 Model-request lifecycle records carry parsed provider messages, timing, and
 request correlation used by `harness session timings`. They never become

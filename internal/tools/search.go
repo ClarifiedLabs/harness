@@ -137,7 +137,7 @@ type rgJSONEvent struct {
 func (searchTool) Name() string { return "search" }
 
 func (searchTool) Description() string {
-	return "Search files with up to 16 independent queries in one call. Returns bounded context, matching lines, file names, counts, or existence; use paths and globs to narrow work. Prefer one batched call for repository orientation."
+	return "Search files with up to 16 independent queries in one call. Patterns are regular expressions; set fixed_strings:true for literal punctuation. Returns bounded context, matching lines, file names, counts, or existence; prefer one batched call for orientation."
 }
 
 func (searchTool) Schema() json.RawMessage { return json.RawMessage(searchSchema) }
@@ -150,21 +150,35 @@ func (s searchTool) Run(ctx context.Context, input json.RawMessage) (string, err
 }
 
 func (s searchTool) RunResult(ctx context.Context, input json.RawMessage) (RunResult, error) {
-	args, err := decodeSearchArgs(input)
+	args, queryErrors, normalizedBounds, err := decodeSearchArgsPartial(input)
 	if err != nil {
 		return RunResult{}, err
 	}
+	validQueries := 0
 	for i := range args.Queries {
+		if queryErrors[i] != nil {
+			continue
+		}
+		validQueries++
 		for _, path := range args.Queries[i].Paths {
 			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-				return RunResult{}, fmt.Errorf("queries[%d].paths: %w", i, notExistingPathError(path, err))
+				queryErrors[i] = fmt.Errorf("queries[%d].paths: %w", i, notExistingPathError(path, err))
+				validQueries--
+				break
 			}
 		}
+	}
+	if validQueries == 0 {
+		return RunResult{}, combineSearchQueryErrors(queryErrors)
 	}
 
 	results := make([]searchResult, len(args.Queries))
 	var wg sync.WaitGroup
 	for i := range args.Queries {
+		if queryErrors[i] != nil {
+			results[i].err = queryErrors[i]
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -177,56 +191,100 @@ func (s searchTool) RunResult(ctx context.Context, input json.RawMessage) (RunRe
 	}
 	wg.Wait()
 
-	for i, result := range results {
-		if result.err != nil {
-			return RunResult{}, fmt.Errorf("query %d: %w", i+1, result.err)
+	failedQueries := 0
+	for i := range results {
+		if results[i].err != nil {
+			failedQueries++
+			results[i].err = classifySearchRuntimeError(i, results[i].err)
 		}
 	}
+	if failedQueries == len(results) {
+		return RunResult{}, combineSearchResultsErrors(results)
+	}
+	metrics := map[string]int{"query_errors": failedQueries, "normalized_bounds": normalizedBounds}
 	if len(results) > 1 {
-		text, metrics := renderBatchedSearchResults(args.Queries, results)
+		text, renderMetrics := renderBatchedSearchResults(args.Queries, results)
+		for key, value := range renderMetrics {
+			metrics[key] = value
+		}
+		if normalizedBounds > 0 {
+			text += fmt.Sprintf("\n\n[normalized %d over-limit bound(s) to documented maxima]", normalizedBounds)
+		}
 		return RunResult{Text: text, Metrics: metrics}, nil
 	}
-	return RunResult{Text: renderSearchResult(args.Queries[0], results[0])}, nil
+	text := renderSearchResult(args.Queries[0], results[0])
+	if normalizedBounds > 0 {
+		text += fmt.Sprintf("\n[normalized %d over-limit bound(s) to documented maxima]", normalizedBounds)
+	}
+	return RunResult{Text: text, Metrics: metrics}, nil
 }
 
 func decodeSearchArgs(input json.RawMessage) (searchArgs, error) {
-	var args searchArgs
-	if err := json.Unmarshal(input, &args); err != nil {
+	args, failures, _, err := decodeSearchArgsPartial(input)
+	if err != nil {
 		return searchArgs{}, err
 	}
-	if len(args.Queries) == 0 {
-		return searchArgs{}, badArgs("queries is required and must be a non-empty array")
+	for _, failure := range failures {
+		if failure != nil {
+			return searchArgs{}, failure
+		}
 	}
-	if len(args.Queries) > searchMaxQueries {
-		return searchArgs{}, badArgs("queries must contain at most %d items", searchMaxQueries)
-	}
+	return args, nil
+}
 
-	var raw struct {
-		Queries []map[string]json.RawMessage `json:"queries"`
+func decodeSearchArgsPartial(input json.RawMessage) (searchArgs, []error, int, error) {
+	var envelope struct {
+		Queries []json.RawMessage `json:"queries"`
 	}
-	_ = json.Unmarshal(input, &raw)
-	for i := range args.Queries {
+	if err := json.Unmarshal(input, &envelope); err != nil {
+		return searchArgs{}, nil, 0, err
+	}
+	if len(envelope.Queries) == 0 {
+		return searchArgs{}, nil, 0, badArgs("queries is required and must be a non-empty array")
+	}
+	if len(envelope.Queries) > searchMaxQueries {
+		return searchArgs{}, nil, 0, badArgs("queries must contain at most %d items", searchMaxQueries)
+	}
+	args := searchArgs{Queries: make([]searchQuery, len(envelope.Queries))}
+	failures := make([]error, len(envelope.Queries))
+	normalized := 0
+	for i, rawQuery := range envelope.Queries {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(rawQuery, &fields); err != nil {
+			failures[i] = badArgs("queries[%d]: %v", i, err)
+			continue
+		}
 		query := &args.Queries[i]
+		if err := json.Unmarshal(rawQuery, query); err != nil {
+			failures[i] = badArgs("queries[%d]: %v", i, err)
+			continue
+		}
 		if query.Pattern == "" {
-			return searchArgs{}, badArgs("queries[%d].pattern is required", i)
+			failures[i] = badArgs("queries[%d].pattern is required", i)
+			continue
 		}
 		if len(query.Paths) == 0 {
 			query.Paths = []string{"."}
 		}
 		if len(query.Paths) > searchMaxGlobs {
-			return searchArgs{}, badArgs("queries[%d].paths must contain at most %d items", i, searchMaxGlobs)
+			failures[i] = badArgs("queries[%d].paths must contain at most %d items", i, searchMaxGlobs)
+			continue
 		}
 		for j, path := range query.Paths {
 			if strings.TrimSpace(path) == "" {
-				return searchArgs{}, badArgs("queries[%d].paths[%d] must not be empty", i, j)
+				failures[i] = badArgs("queries[%d].paths[%d] must not be empty", i, j)
 			}
 		}
+		if failures[i] != nil {
+			continue
+		}
 		if len(query.Globs) > searchMaxGlobs {
-			return searchArgs{}, badArgs("queries[%d].globs must contain at most %d items", i, searchMaxGlobs)
+			failures[i] = badArgs("queries[%d].globs must contain at most %d items", i, searchMaxGlobs)
+			continue
 		}
 		for j, glob := range query.Globs {
 			if strings.TrimSpace(glob) == "" {
-				return searchArgs{}, badArgs("queries[%d].globs[%d] must not be empty", i, j)
+				failures[i] = badArgs("queries[%d].globs[%d] must not be empty", i, j)
 			}
 		}
 		switch query.Case {
@@ -234,27 +292,43 @@ func decodeSearchArgs(input json.RawMessage) (searchArgs, error) {
 			query.Case = "smart"
 		case "smart", "sensitive", "insensitive":
 		default:
-			return searchArgs{}, badArgs("queries[%d].case must be smart, sensitive, or insensitive", i)
+			failures[i] = badArgs("queries[%d].case must be smart, sensitive, or insensitive", i)
 		}
 		switch query.Output {
 		case "":
 			query.Output = "context"
 		case "context", "matches", "files", "count", "exists":
 		default:
-			return searchArgs{}, badArgs("queries[%d].output must be context, matches, files, count, or exists", i)
+			failures[i] = badArgs("queries[%d].output must be context, matches, files, count, or exists", i)
+		}
+		if failures[i] != nil {
+			continue
 		}
 		switch {
-		case query.ContextLines < 0 || query.ContextLines > searchMaxLines:
-			return searchArgs{}, badArgs("queries[%d].context_lines must be between 0 and %d", i, searchMaxLines)
-		case query.MaxMatches < 0 || query.MaxMatches > searchMaxMatches:
-			return searchArgs{}, badArgs("queries[%d].max_matches must be between 1 and %d", i, searchMaxMatches)
-		case query.MaxFiles < 0 || query.MaxFiles > searchMaxFiles:
-			return searchArgs{}, badArgs("queries[%d].max_files must be between 1 and %d", i, searchMaxFiles)
+		case query.ContextLines < 0:
+			failures[i] = badArgs("queries[%d].context_lines must be >= 0", i)
+		case query.MaxMatches < 0:
+			failures[i] = badArgs("queries[%d].max_matches must be >= 1", i)
+		case query.MaxFiles < 0:
+			failures[i] = badArgs("queries[%d].max_files must be >= 1", i)
+		}
+		if failures[i] != nil {
+			continue
+		}
+		if query.ContextLines > searchMaxLines {
+			query.ContextLines = searchMaxLines
+			normalized++
+		}
+		if query.MaxMatches > searchMaxMatches {
+			query.MaxMatches = searchMaxMatches
+			normalized++
+		}
+		if query.MaxFiles > searchMaxFiles {
+			query.MaxFiles = searchMaxFiles
+			normalized++
 		}
 		if query.ContextLines == 0 {
-			if i >= len(raw.Queries) {
-				query.ContextLines = searchDefaultLines
-			} else if _, ok := raw.Queries[i]["context_lines"]; !ok {
+			if _, ok := fields["context_lines"]; !ok {
 				query.ContextLines = searchDefaultLines
 			}
 		}
@@ -265,10 +339,41 @@ func decodeSearchArgs(input json.RawMessage) (searchArgs, error) {
 			query.MaxFiles = searchDefaultMaxFiles
 		}
 		if err := validateSearchPattern(i, *query); err != nil {
-			return searchArgs{}, err
+			failures[i] = err
 		}
 	}
-	return args, nil
+	return args, failures, normalized, nil
+}
+
+func combineSearchQueryErrors(failures []error) error {
+	var messages []string
+	kind := llm.ToolErrorInvalidArgs
+	for _, failure := range failures {
+		if failure == nil {
+			continue
+		}
+		messages = append(messages, failure.Error())
+		if declared := KindOf(failure); declared != "" {
+			kind = declared
+		}
+	}
+	return WithKind(fmt.Errorf("all search queries failed validation:\n- %s", strings.Join(messages, "\n- ")), kind)
+}
+
+func combineSearchResultsErrors(results []searchResult) error {
+	failures := make([]error, len(results))
+	for i := range results {
+		failures[i] = results[i].err
+	}
+	return combineSearchQueryErrors(failures)
+}
+
+func classifySearchRuntimeError(i int, err error) error {
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "regex parse error") || strings.Contains(message, "invalid regex") {
+		return WithKind(fmt.Errorf("queries[%d].pattern: invalid regex: %v; use fixed_strings: true for literal text", i, err), llm.ToolErrorRegexInvalid)
+	}
+	return fmt.Errorf("query %d: %w", i+1, err)
 }
 
 // validateSearchPattern pre-compiles a query's effective regex (respecting
@@ -514,6 +619,10 @@ func renderBatchedSearchResults(queries []searchQuery, results []searchResult) (
 			b.WriteString("\n\n")
 		}
 		fmt.Fprintf(&b, "## query %d: %s\n", i+1, queries[i].Pattern)
+		if result.err != nil {
+			fmt.Fprintf(&b, "error: %v", result.err)
+			continue
+		}
 		query := queries[i]
 		if query.Output != "context" && query.Output != "matches" || result.total == 0 {
 			b.WriteString(renderSearchResult(query, result))

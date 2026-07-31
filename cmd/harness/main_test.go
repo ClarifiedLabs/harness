@@ -3191,8 +3191,32 @@ func TestRunSessionStatsErrors(t *testing.T) {
 		if code != ui.ExitUsage {
 			t.Fatalf("exit = %d, want %d", code, ui.ExitUsage)
 		}
-		if got, want := errw.String(), "usage: harness session stats <session-dir>\n"; got != want {
+		if got, want := errw.String(), "usage: harness session stats [--format text|json] <session-dir>\n"; got != want {
 			t.Fatalf("stderr = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("json format", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := (session.Session{Provider: "p", Model: "m"}).Save(dir); err != nil {
+			t.Fatal(err)
+		}
+		if err := session.AppendEvent(dir, session.Event{Type: session.EventToolResult, Tool: "edit", ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)}); err != nil {
+			t.Fatal(err)
+		}
+		var out, errw bytes.Buffer
+		code := run(environment{args: []string{"session", "stats", "--format", "json", dir}, stdout: &out, stderr: &errw, getenv: func(string) string { return "" }, now: time.Now})
+		if code != ui.ExitOK {
+			t.Fatalf("exit=%d stderr=%s", code, errw.String())
+		}
+		var report struct {
+			Errors session.ErrorSummary `json:"errors"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Errors.ToolResults != 1 || report.Errors.FailedToolResults != 1 {
+			t.Fatalf("report = %+v", report)
 		}
 	})
 
@@ -3273,7 +3297,7 @@ func TestRunSessionErrors(t *testing.T) {
 		if !strings.Contains(got, "[code] [gpt-x] [p1 t2] [0%] -: rate_limited — slow down") {
 			t.Fatalf("missing model request row:\n%s", got)
 		}
-		if !strings.Contains(got, "Scanned 1 sessions: 1 failed tool results, 1 model request failures") {
+		if !strings.Contains(got, "Scanned 1 sessions: 1/1 failed tool results (100.0%), 1 model request failures") {
 			t.Fatalf("missing scan footer:\n%s", got)
 		}
 	})
@@ -3350,6 +3374,44 @@ func TestRunSessionErrors(t *testing.T) {
 			t.Fatalf("kind filter must drop the edit row:\n%s", got)
 		}
 	})
+}
+
+func TestRunSessionErrorsScanReportsUnsupportedSessions(t *testing.T) {
+	stateRoot := t.TempDir()
+	sessionsRoot := filepath.Join(stateRoot, "harness", "sessions")
+	valid := filepath.Join(sessionsRoot, "20260731T120000Z")
+	if err := (session.Session{Provider: "p", Model: "m"}).Save(valid); err != nil {
+		t.Fatal(err)
+	}
+	unsupported := filepath.Join(sessionsRoot, "20260731T120001Z")
+	if err := os.MkdirAll(unsupported, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unsupported, "state.json"), []byte(`{"version":2}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errw bytes.Buffer
+	code := run(environment{args: []string{"session", "errors", "--all", "--format", "json"}, stdout: &out, stderr: &errw, getenv: func(key string) string {
+		if key == "XDG_STATE_HOME" {
+			return stateRoot
+		}
+		return ""
+	}, now: time.Now})
+	if code != ui.ExitOK {
+		t.Fatalf("exit=%d stderr=%s", code, errw.String())
+	}
+	var report struct {
+		SessionsScanned int `json:"sessions_scanned"`
+		Skipped         []struct {
+			Dir string `json:"dir"`
+		} `json:"skipped_sessions"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.SessionsScanned != 1 || len(report.Skipped) != 1 || report.Skipped[0].Dir != unsupported {
+		t.Fatalf("report = %+v", report)
+	}
 }
 
 // TestRunSigintExitDuringPromptNoRace exercises the SIGINT-exit-while-a-turn-is-in-

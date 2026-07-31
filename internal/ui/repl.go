@@ -4957,6 +4957,9 @@ func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 		s.rec = sessionrec.New(sessionrec.Config{
 			Dir:                app.SessionPath,
 			Prompt:             prompt,
+			ModelTarget:        app.RegistryModel,
+			Provider:           app.Provider,
+			Model:              app.Model,
 			Clock:              app.clock(),
 			ReasoningSummaries: reasoningSummaryDisplayEnabled(app.Reasoning.Summary),
 			Mirror:             mirror,

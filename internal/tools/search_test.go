@@ -241,14 +241,40 @@ func TestDecodeSearchArgsDefaultsAndValidation(t *testing.T) {
 	}
 	for _, input := range []string{
 		`{}`,
-		`{"pattern":"x","context_lines":101}`,
-		`{"pattern":"x","max_matches":201}`,
-		`{"pattern":"x","max_files":51}`,
+		`{"pattern":"x","context_lines":-1}`,
+		`{"pattern":"x","max_matches":-1}`,
+		`{"pattern":"x","max_files":-1}`,
 		`{"pattern":"x","globs":[""]}`,
 	} {
 		if _, err := decodeSearchArgs(searchTestInput(input)); err == nil {
 			t.Errorf("decode %s: expected error", input)
 		}
+	}
+	clamped, failures, normalized, err := decodeSearchArgsPartial(searchTestInput(`{"pattern":"x","context_lines":101,"max_matches":201,"max_files":51}`))
+	if err != nil || failures[0] != nil {
+		t.Fatalf("clamped decode = %+v, %v, %v", clamped, failures, err)
+	}
+	if normalized != 3 || clamped.Queries[0].ContextLines != 100 || clamped.Queries[0].MaxMatches != 200 || clamped.Queries[0].MaxFiles != 50 {
+		t.Fatalf("clamped = %+v normalized=%d", clamped.Queries[0], normalized)
+	}
+}
+
+func TestSearchRunsValidQueriesAlongsideInvalidRegex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("literal Widget(\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input := json.RawMessage(`{"queries":[{"pattern":"(["},{"pattern":"Widget(","fixed_strings":true,"paths":[` + quoteJSON(path) + `],"output":"exists"}]}`)
+	result, err := (searchTool{}).RunResult(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Text, "invalid regex") || !strings.Contains(result.Text, "true: "+path) {
+		t.Fatalf("partial search:\n%s", result.Text)
+	}
+	if result.Metrics["query_errors"] != 1 {
+		t.Fatalf("metrics = %+v", result.Metrics)
 	}
 }
 

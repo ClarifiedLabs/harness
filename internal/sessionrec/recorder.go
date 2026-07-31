@@ -18,6 +18,12 @@ type Config struct {
 	Dir string
 	// Prompt is the prompt number stamped on every recorded event.
 	Prompt int
+	// Initial model identity covers providers that do not emit successful
+	// model_request lifecycle events. Later lifecycle events refresh it.
+	ModelTarget string
+	Provider    string
+	APIType     string
+	Model       string
 	// Clock supplies event timestamps and turn/prompt durations. Nil uses
 	// time.Now.
 	Clock func() time.Time
@@ -67,11 +73,20 @@ type Recorder struct {
 	promptStart time.Time
 	turnStart   time.Time
 	pending     map[string]pendingCall
+	model       modelIdentity
+}
+
+type modelIdentity struct {
+	targetID string
+	provider string
+	apiType  string
+	model    string
 }
 
 type pendingCall struct {
 	call    llm.ToolCall
 	started time.Time
+	model   modelIdentity
 }
 
 // New returns a Recorder writing to cfg.Dir. An empty Dir records nothing.
@@ -85,6 +100,7 @@ func New(cfg Config) *Recorder {
 		cfg:     cfg,
 		events:  events,
 		pending: make(map[string]pendingCall),
+		model:   modelIdentity{targetID: cfg.ModelTarget, provider: cfg.Provider, apiType: cfg.APIType, model: cfg.Model},
 	}
 }
 
@@ -242,8 +258,13 @@ func (r *Recorder) ToolStart(call llm.ToolCall) {
 	if r == nil {
 		return
 	}
-	r.pending[call.ID] = pendingCall{call: call, started: r.now()}
-	r.Append(session.Event{Type: session.EventToolStart, Prompt: r.cfg.Prompt, Turn: r.turn, ToolID: call.ID, Tool: call.Name, Input: call.Input})
+	r.pending[call.ID] = pendingCall{call: call, started: r.now(), model: r.model}
+	r.Append(session.Event{
+		Type: session.EventToolStart, Prompt: r.cfg.Prompt, Turn: r.turn,
+		ToolID: call.ID, Tool: call.Name, Input: call.Input,
+		ModelTarget: r.model.targetID, Provider: r.model.provider,
+		APIType: r.model.apiType, Model: r.model.model,
+	})
 }
 
 // ToolResult records the shared one-line summary, duration, and metrics.
@@ -284,6 +305,10 @@ func (r *Recorder) ToolResult(res llm.ToolResult) {
 		ResultOriginalBytes: originalBytes,
 		ResultShownBytes:    shownBytes,
 		ResultMetrics:       maps.Clone(res.Metrics),
+		ModelTarget:         pending.model.targetID,
+		Provider:            pending.model.provider,
+		APIType:             pending.model.apiType,
+		Model:               pending.model.model,
 	})
 }
 
@@ -320,6 +345,18 @@ func (r *Recorder) ModelRequestEvent(event llm.ModelRequestEvent) {
 		return
 	}
 	copyEvent := event
+	if event.TargetID != "" {
+		r.model.targetID = event.TargetID
+	}
+	if event.Provider != "" {
+		r.model.provider = event.Provider
+	}
+	if event.APIType != "" {
+		r.model.apiType = event.APIType
+	}
+	if event.Model != "" {
+		r.model.model = event.Model
+	}
 	r.Append(session.Event{
 		Type:         session.EventModelRequest,
 		Prompt:       r.cfg.Prompt,

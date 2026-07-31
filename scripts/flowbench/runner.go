@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +34,7 @@ type runConfig struct {
 	DryRun       bool
 	Resume       bool
 	ImportRuns   string
+	Profile      string
 }
 
 type runRecord struct {
@@ -55,17 +58,25 @@ type runRecord struct {
 	Metrics       metrics   `json:"metrics"`
 	Score         score     `json:"score"`
 	Invalid       string    `json:"invalid,omitempty"`
+	Profile       string    `json:"profile,omitempty"`
+	Reasoning     string    `json:"reasoning"`
+	PromptSHA256  string    `json:"prompt_sha256"`
+	BinarySHA256  string    `json:"binary_sha256,omitempty"`
+	SchemaSet     string    `json:"schema_set"`
+	EventsSHA256  string    `json:"events_sha256,omitempty"`
+	Completed     bool      `json:"completed"`
+	APIType       string    `json:"api_type,omitempty"`
 }
 
 func executeMatrix(ctx context.Context, cfg runConfig) ([]runRecord, error) {
 	if cfg.Repetitions <= 0 {
 		return nil, fmt.Errorf("repetitions must be positive")
 	}
-	if err := requireCleanRepo(cfg.Repo); err != nil {
-		return nil, err
-	}
 	if cfg.DryRun {
 		return dryRunRecords(cfg), nil
+	}
+	if err := requireCleanRepo(cfg.Repo); err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(cfg.Results, 0o755); err != nil {
 		return nil, err
@@ -98,6 +109,7 @@ func executeMatrix(ctx context.Context, cfg runConfig) ([]runRecord, error) {
 		completed[recordKey(record.Model, record.Repetition, record.Variant)] = true
 	}
 	order := 0
+	var firstRunErr error
 	for _, model := range cfg.Models {
 		for rep := 1; rep <= cfg.Repetitions; rep++ {
 			variants := []string{"baseline", "candidate"}
@@ -115,7 +127,10 @@ func executeMatrix(ctx context.Context, cfg runConfig) ([]runRecord, error) {
 					return records, writeErr
 				}
 				if err != nil {
-					return records, err
+					if firstRunErr == nil {
+						firstRunErr = err
+					}
+					continue
 				}
 			}
 		}
@@ -123,7 +138,7 @@ func executeMatrix(ctx context.Context, cfg runConfig) ([]runRecord, error) {
 	if err := writeSummary(cfg.Results, cfg.Case, records); err != nil {
 		return records, err
 	}
-	return records, nil
+	return records, firstRunErr
 }
 
 func executeOne(ctx context.Context, cfg runConfig, binary, variant, model string, repetition, order int, worktree string) (runRecord, error) {
@@ -136,6 +151,13 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 		Order:      order,
 		TargetSHA:  targetSHA,
 		HarnessSHA: map[string]string{"baseline": cfg.BaselineSHA, "candidate": cfg.CandidateSHA}[variant],
+		Profile:    cfg.Profile, Reasoning: "medium",
+		PromptSHA256: digestString(cfg.Case.Prompt + "\n" + cfg.Case.SecondPrompt),
+	}
+	record.SchemaSet = "harness:" + record.HarnessSHA
+	if data, err := os.ReadFile(binary); err == nil {
+		sum := sha256.Sum256(data)
+		record.BinarySHA256 = hex.EncodeToString(sum[:])
 	}
 	if err := addWorktree(ctx, cfg.Repo, worktree, targetSHA); err != nil {
 		record.Invalid = err.Error()
@@ -159,7 +181,7 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 
 	runDir := filepath.Join(cfg.Results, cfg.Case.Name, sanitize(model), fmt.Sprintf("%02d-%s", repetition, variant))
 	sessionDir := filepath.Join(runDir, "session")
-	goCache := filepath.Join(filepath.Dir(worktree), "go-cache")
+	goCache := filepath.Join(filepath.Dir(worktree), "go-cache", sanitize(model), fmt.Sprintf("%02d-%s", repetition, variant))
 	if err := prepareRunDir(runDir, cfg.Resume); err != nil {
 		return record, err
 	}
@@ -182,21 +204,35 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 		"-max-turns", "200",
 		"-max-prompt-cost", "0",
 		"-session", sessionDir,
-		"-p", cfg.Case.Prompt,
+	}
+	if cfg.Case.SecondPrompt == "" {
+		args = append(args, "-p", cfg.Case.Prompt)
+	} else {
+		args = append(args, "-format", "json")
 	}
 	cmd := exec.CommandContext(runCtx, binary, args...)
 	cmd.Dir = worktree
 	cmd.Env = benchmarkEnv(goCache)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
 	record.Started = time.Now().UTC()
-	runErr := cmd.Run()
+	var stdout, stderr []byte
+	var runErr error
+	if cfg.Case.SecondPrompt == "" {
+		var stdoutBuffer, stderrBuffer bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdoutBuffer, &stderrBuffer
+		runErr = cmd.Run()
+		stdout, stderr = stdoutBuffer.Bytes(), stderrBuffer.Bytes()
+	} else {
+		stdout, stderr, runErr = runInteractiveBenchmark(cmd, cfg.Case, worktree)
+	}
 	record.Finished = time.Now().UTC()
 	record.WallSeconds = record.Finished.Sub(record.Started).Seconds()
 	record.ExitCode = exitStatus(runErr)
-	_ = os.WriteFile(record.StdoutPath, stdout.Bytes(), 0o644)
-	_ = os.WriteFile(record.StderrPath, stderr.Bytes(), 0o644)
+	_ = os.WriteFile(record.StdoutPath, stdout, 0o644)
+	_ = os.WriteFile(record.StderrPath, stderr, 0o644)
+	if data, err := os.ReadFile(filepath.Join(sessionDir, "raw.ndjson")); err == nil {
+		sum := sha256.Sum256(data)
+		record.EventsSHA256 = hex.EncodeToString(sum[:])
+	}
 	if runCtx.Err() != nil {
 		record.Invalid = runCtx.Err().Error()
 		return record, fmt.Errorf("%s %s repetition %d: %w", cfg.Case.Name, model, repetition, runCtx.Err())
@@ -211,6 +247,7 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 		return record, err
 	}
 	record.Metrics = m
+	record.APIType = m.APIType
 	if strings.TrimSpace(m.FinalText) == "" {
 		record.Invalid = "session ended without a final answer"
 		return record, fmt.Errorf("%s %s repetition %d %s: %s", cfg.Case.Name, model, repetition, variant, record.Invalid)
@@ -229,7 +266,98 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 		FixtureAfter:  after,
 		Metrics:       m,
 	})
+	record.Completed = true
 	return record, nil
+}
+
+func digestString(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func runInteractiveBenchmark(cmd *exec.Cmd, c benchmarkCase, worktree string) ([]byte, []byte, error) {
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, nil, err
+	}
+	var stderr bytes.Buffer
+	stderrDone := make(chan error, 1)
+	go func() { _, copyErr := io.Copy(&stderr, stderrPipe); stderrDone <- copyErr }()
+	abort := func(stdout *bytes.Buffer, cause error) ([]byte, []byte, error) {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		<-stderrDone
+		return append([]byte(nil), stdout.Bytes()...), append([]byte(nil), stderr.Bytes()...), cause
+	}
+	encoder := json.NewEncoder(stdin)
+	var stdout bytes.Buffer
+	if err := encoder.Encode(map[string]string{"type": "prompt", "id": "phase-1", "text": c.Prompt}); err != nil {
+		return abort(&stdout, err)
+	}
+	scanner := bufio.NewScanner(stdoutPipe)
+	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
+	phaseTwoSent := false
+	shutdownSent := false
+	for scanner.Scan() {
+		line := append([]byte(nil), scanner.Bytes()...)
+		stdout.Write(line)
+		stdout.WriteByte('\n')
+		var event struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+		}
+		if json.Unmarshal(line, &event) != nil || event.Type != "prompt_end" {
+			continue
+		}
+		switch event.ID {
+		case "phase-1":
+			if phaseTwoSent {
+				continue
+			}
+			if c.BetweenPrompts != nil {
+				if err := c.BetweenPrompts(worktree); err != nil {
+					return abort(&stdout, err)
+				}
+			}
+			if err := encoder.Encode(map[string]string{"type": "prompt", "id": "phase-2", "text": c.SecondPrompt}); err != nil {
+				return abort(&stdout, err)
+			}
+			phaseTwoSent = true
+		case "phase-2":
+			if !shutdownSent {
+				if err := encoder.Encode(map[string]string{"type": "shutdown"}); err != nil {
+					return abort(&stdout, err)
+				}
+				_ = stdin.Close()
+				shutdownSent = true
+			}
+		}
+	}
+	scanErr := scanner.Err()
+	waitErr := cmd.Wait()
+	copyErr := <-stderrDone
+	if scanErr != nil {
+		return stdout.Bytes(), stderr.Bytes(), scanErr
+	}
+	if copyErr != nil {
+		return stdout.Bytes(), stderr.Bytes(), copyErr
+	}
+	if !phaseTwoSent || !shutdownSent {
+		return stdout.Bytes(), stderr.Bytes(), fmt.Errorf("interactive benchmark ended before both prompt boundaries")
+	}
+	return stdout.Bytes(), stderr.Bytes(), waitErr
 }
 
 func prepareRunDir(runDir string, resume bool) error {
@@ -286,7 +414,7 @@ func resumeRecords(cfg runConfig) ([]runRecord, error) {
 		case record.TargetSHA != targetSHA:
 			return nil, fmt.Errorf("resume record %d target SHA %q, want %q", i, record.TargetSHA, targetSHA)
 		case record.Invalid != "":
-			return nil, fmt.Errorf("resume record %d is invalid: %s", i, record.Invalid)
+			continue
 		case seen[key]:
 			return nil, fmt.Errorf("duplicate resume record %q", key)
 		}

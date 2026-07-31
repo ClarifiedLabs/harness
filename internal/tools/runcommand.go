@@ -67,8 +67,8 @@ const runCommandSchemaFmt = `{
       }
     },
     "stop_on_failure": {"type": "boolean", "description": "Stop after the first non-zero, timed out, cancelled, or unstartable step (default true)."},
-    "name": {"type": "string", "description": "Concise top-level receipt label. Unavailable with steps."},
-    "output_mode": {"type": "string", "enum": ["auto", "receipt", "full"], "description": "Top-level output policy: auto compacts successful output over 8KB and bounds failures; receipt always compacts success; full keeps bounded full output. Defaults to auto. Unavailable with steps."},
+    "name": {"type": "string", "description": "Concise command or step-batch label."},
+    "output_mode": {"type": "string", "enum": ["auto", "receipt", "full"], "description": "Output policy. For steps, auto and receipt return compact per-step receipts; full returns the combined step transcript."},
     "stdin": {"type": "string", "description": "Written to the command's standard input. Omit for no stdin."},
     "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
     "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default %d; no maximum)."}
@@ -103,8 +103,8 @@ const runCommandBackgroundSchemaFmt = `{
       }
     },
     "stop_on_failure": {"type": "boolean", "description": "Stop after the first non-zero, timed out, cancelled, or unstartable step (default true)."},
-    "name": {"type": "string", "description": "Concise top-level receipt label. Unavailable with steps."},
-    "output_mode": {"type": "string", "enum": ["auto", "receipt", "full"], "description": "Top-level output policy: auto compacts successful output over 8KB and bounds failures; receipt always compacts success; full keeps bounded full output. Defaults to auto. Unavailable with steps."},
+    "name": {"type": "string", "description": "Concise command or step-batch label."},
+    "output_mode": {"type": "string", "enum": ["auto", "receipt", "full"], "description": "Output policy. For steps, auto and receipt return compact per-step receipts; full returns the combined step transcript."},
     "stdin": {"type": "string", "description": "Written to the command's standard input. Omit for no stdin."},
     "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
     "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default %d for background; no maximum)."},
@@ -130,7 +130,7 @@ type runCommand struct {
 func (runCommand) Name() string { return "run_command" }
 
 func (runCommand) Description() string {
-	return "Run one command or ordered steps using a shell command or argv as an array of strings. Auto output returns compact archived receipts for large success and bounded failure diagnostics. Background supports one command; background_lease only coordinates jobs and does not restrict command behavior."
+	return "Run a command or ordered steps using a shell command or argv as an array of strings. Steps accept a batch name and output_mode full for the combined transcript; auto/receipt stay compact. Background supports one command; background_lease only coordinates jobs and does not restrict command behavior."
 }
 
 func (t runCommand) Schema() json.RawMessage {
@@ -343,7 +343,6 @@ func validateRunCommandArgs(args runCommandArgs) error {
 	hasArgv := len(args.Argv) > 0
 	hasSteps := len(args.Steps) > 0
 	hasLease := args.BackgroundLease != nil || strings.TrimSpace(args.ResourceKey) != "" || strings.TrimSpace(args.Access) != ""
-	hasTopLevelOutput := strings.TrimSpace(args.Name) != "" || strings.TrimSpace(args.OutputMode) != ""
 	switch {
 	case hasSteps && (hasCommand || hasArgv):
 		return badArgs("provide steps or a top-level command/argv, not both")
@@ -351,8 +350,6 @@ func validateRunCommandArgs(args runCommandArgs) error {
 		return badArgs("top-level stdin is unavailable with steps; set stdin on a step")
 	case hasSteps && args.Background:
 		return badArgs("steps cannot run in the background")
-	case hasSteps && hasTopLevelOutput:
-		return badArgs("name and output_mode are unavailable with steps; drop them, or set name on each step instead")
 	case !args.Background && hasLease:
 		return badArgs("background_lease requires background:true")
 	case len(args.Steps) > runCommandMaxSteps:
@@ -630,9 +627,17 @@ func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error
 		}
 	}
 	text := strings.TrimRight(receipt.String(), "\n")
+	full := strings.TrimRight(transcript.String(), "\n")
+	if name := strings.TrimSpace(args.Name); name != "" {
+		text = fmt.Sprintf("Batch %s\n%s", name, text)
+		full = fmt.Sprintf("== %s ==\n%s", name, full)
+	}
+	if args.OutputMode == runCommandOutputFull {
+		return RunResult{Text: full}, nil
+	}
 	original := ""
 	if suppressed {
-		original = strings.TrimRight(transcript.String(), "\n")
+		original = full
 	}
 	return RunResult{Text: text, OriginalText: original}, nil
 }

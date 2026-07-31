@@ -8,7 +8,10 @@ import (
 	"sync"
 )
 
-const inspectMaxOperations = 16
+const (
+	inspectMaxOperations = 32
+	inspectWaveSize      = 16
+)
 
 var inspectOperationOrder = [...]string{
 	"read_file",
@@ -25,7 +28,7 @@ const inspectSchemaTemplate = `{
     "operations": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 16,
+      "maxItems": 32,
       "items": {
         "type": "object",
         "properties": {
@@ -55,7 +58,7 @@ type inspectOperation struct {
 func (inspectTool) Name() string { return "inspect" }
 
 func (t inspectTool) Description() string {
-	return fmt.Sprintf("Run up to 16 independent read-only repository operations concurrently. Batch %s during orientation instead of spending one model turn per lookup.", strings.Join(t.operationNames(), ", "))
+	return fmt.Sprintf("Run up to 32 independent read-only repository operations in bounded concurrent waves. Batch %s during orientation instead of spending one model turn per lookup.", strings.Join(t.operationNames(), ", "))
 }
 
 func (t inspectTool) Schema() json.RawMessage {
@@ -92,15 +95,20 @@ func (t inspectTool) inputDescription() string {
 func (inspectTool) ReadOnly(json.RawMessage) bool { return true }
 
 func (t inspectTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	result, err := t.RunResult(ctx, input)
+	return result.Text, err
+}
+
+func (t inspectTool) RunResult(ctx context.Context, input json.RawMessage) (RunResult, error) {
 	var args inspectArgs
 	if err := json.Unmarshal(input, &args); err != nil {
-		return "", err
+		return RunResult{}, err
 	}
 	if len(args.Operations) == 0 {
-		return "", badArgs("operations is required and must be a non-empty array")
+		return RunResult{}, badArgs("operations is required and must be a non-empty array")
 	}
 	if len(args.Operations) > inspectMaxOperations {
-		return "", badArgs("operations must contain at most %d items", inspectMaxOperations)
+		return RunResult{}, badArgs("operations must contain at most %d items", inspectMaxOperations)
 	}
 
 	type operationResult struct {
@@ -108,11 +116,12 @@ func (t inspectTool) Run(ctx context.Context, input json.RawMessage) (string, er
 		err  error
 	}
 	results := make([]operationResult, len(args.Operations))
-	var wg sync.WaitGroup
+	valid := make([]int, 0, len(args.Operations))
 	for i, operation := range args.Operations {
 		target, ok := t.tools[operation.Tool]
 		if !ok {
-			return "", badArgs("operations[%d].tool %q is not available", i, operation.Tool)
+			results[i].err = fmt.Errorf("tool %q is not available; choose one of: %s", operation.Tool, strings.Join(t.operationNames(), ", "))
+			continue
 		}
 		if len(operation.Input) == 0 || string(operation.Input) == "null" {
 			operation.Input = json.RawMessage(`{}`)
@@ -122,35 +131,83 @@ func (t inspectTool) Run(ctx context.Context, input json.RawMessage) (string, er
 				Cwd string `json:"cwd"`
 			}
 			if err := json.Unmarshal(operation.Input, &in); err != nil {
-				return "", badArgs("operations[%d].input: %v", i, err)
+				results[i].err = fmt.Errorf("invalid input: %v", err)
+				continue
 			}
 			operation.Input, _ = json.Marshal(gitInput{Workflow: gitWorkflowWorkspaceSummary, Cwd: in.Cwd})
 		}
 		if !target.ReadOnly(operation.Input) {
-			return "", badArgs("operations[%d] is not read-only", i)
+			results[i].err = inspectReadOnlyError(operation)
+			continue
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			results[i].text, results[i].err = target.Run(ctx, operation.Input)
-			results[i].text, _ = truncate(results[i].text, resultLimits{maxBytes: 16 * 1024, maxLines: 250})
-		}()
+		args.Operations[i] = operation
+		valid = append(valid, i)
 	}
-	wg.Wait()
+	if len(valid) == 0 {
+		var messages []string
+		for i, result := range results {
+			messages = append(messages, fmt.Sprintf("operations[%d]: %v", i, result.err))
+		}
+		return RunResult{}, badArgs("no valid read-only operations:\n%s", strings.Join(messages, "\n"))
+	}
+	for start := 0; start < len(valid); start += inspectWaveSize {
+		end := min(start+inspectWaveSize, len(valid))
+		var wg sync.WaitGroup
+		for _, index := range valid[start:end] {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				operation := args.Operations[i]
+				target := t.tools[operation.Tool]
+				results[i].text, results[i].err = target.Run(ctx, operation.Input)
+				results[i].text, _ = truncate(results[i].text, resultLimits{maxBytes: 16 * 1024, maxLines: 250})
+			}(index)
+		}
+		wg.Wait()
+	}
 
 	var b strings.Builder
+	operationErrors := 0
 	for i, result := range results {
 		if i > 0 {
 			b.WriteString("\n\n")
 		}
 		fmt.Fprintf(&b, "## %d. %s\n", i+1, args.Operations[i].Tool)
 		if result.err != nil {
+			operationErrors++
 			fmt.Fprintf(&b, "error: %v", result.err)
 			continue
 		}
 		b.WriteString(result.text)
 	}
-	return b.String(), nil
+	return RunResult{Text: b.String(), Metrics: map[string]int{
+		"operation_count": len(args.Operations), "operation_errors": operationErrors,
+	}}, nil
+}
+
+func inspectReadOnlyError(operation inspectOperation) error {
+	if operation.Tool != "git_readonly" {
+		return fmt.Errorf("operation is not read-only and was not executed")
+	}
+	var input struct {
+		Args []string `json:"args"`
+	}
+	_ = json.Unmarshal(operation.Input, &input)
+	subcommand := ""
+	if len(input.Args) > 0 {
+		subcommand = input.Args[0]
+	}
+	suggestion := "use an allowlisted query-only git subcommand"
+	switch subcommand {
+	case "branch", "tag":
+		suggestion = "use for-each-ref or show-ref"
+	case "submodule":
+		suggestion = "inspect .gitmodules and use status/diff for recorded changes"
+	}
+	if subcommand == "" {
+		return fmt.Errorf("git_readonly requires args; %s", suggestion)
+	}
+	return fmt.Errorf("git subcommand %q has mutating modes and was not executed; %s", subcommand, suggestion)
 }
 
 func registerInspectTool(r *Registry) {
