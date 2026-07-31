@@ -60,9 +60,10 @@ rather than as bracketed status lines.
 
 When stdout is a terminal, basic Markdown is rendered for readability. With
 color enabled, recognized language tags on fenced code blocks also enable syntax
-highlighting; untagged, unknown-language, and `text` fences remain plain. The
-`-no-color` flag or `NO_COLOR` disables highlighting and all other ANSI styling
-while structural Markdown rendering remains readable. Redirected or piped
+highlighting; untagged, unknown-language, and `text` fences remain plain. Choose
+`--color-theme dark` (the default) or `--color-theme light` to match the terminal
+profile. The `-no-color` flag or `NO_COLOR` disables highlighting and all other
+ANSI styling while structural Markdown rendering remains readable. Redirected or piped
 one-shot stdout stays raw model text. Bracketed status lines are timestamped by
 default; disable them when you want untimestamped diagnostics:
 
@@ -242,6 +243,7 @@ and send an explicit switch.
 --version        print release version and exit 0
 --log-level <level>  diagnostic log level: debug, info, warn, error (also LOG_LEVEL)
 -no-color         disable ANSI color (also: NO_COLOR env var; color is TTY-only anyway)
+-color-theme <dark|light>  syntax and displayed-diff palette (default dark; also HARNESS_COLOR_THEME)
 -timestamps <mode>  bracketed status timestamps: short (default), full/long, or none
 -no-timestamps   alias for -timestamps=none
 -repl-prompt <text>    REPL input prompt format (default "[{agent}] > "; supports placeholders such as {agent}, {model}, and {reasoning})
@@ -256,6 +258,16 @@ and send an explicit switch.
 -config <file>    alternate config path
 -h, --help        print this usage screen and exit 0
 ```
+
+`color_theme` changes the truecolor syntax roles and displayed added/removed diff
+rows used by live fenced Markdown, reasoning-summary fences, tool diffs, session
+replay, and follow. It does not recolor inline code, links, headings, status lines,
+or prose, and it does not set a terminal background. The only values are `dark`
+and `light`: there is intentionally no `auto`, because Harness does not probe or
+guess terminal backgrounds. Select the value matching the active terminal
+profile. Theme selection is independent of ANSI enablement; `-no-color`,
+`NO_COLOR`, and non-TTY output still suppress escapes without changing Markdown
+structure or source text.
 
 `-system-prompt` accepts a `@file` reference. A literal leading `@` is escaped as
 `@@`; `@~/path` expands through the current user's home directory. Relative
@@ -380,9 +392,9 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   `HARNESS_IMAGE_DETAIL`, and most other `HARNESS_*` equivalents for
   user-facing flags. The convention is `HARNESS_` plus the flag name uppercased
   with dashes turned into underscores. For example, `-context-window`, `-no-env`,
-  `-no-color`, `-resume`, and `-session` map to `HARNESS_CONTEXT_WINDOW`,
-  `HARNESS_NO_ENV`, `HARNESS_NO_COLOR`, `HARNESS_RESUME`, and
-  `HARNESS_SESSION`.
+  `-no-color`, `-color-theme`, `-resume`, and `-session` map to
+  `HARNESS_CONTEXT_WINDOW`, `HARNESS_NO_ENV`, `HARNESS_NO_COLOR`,
+  `HARNESS_COLOR_THEME`, `HARNESS_RESUME`, and `HARNESS_SESSION`.
 - The `-v` verbose flag uses `HARNESS_VERBOSE`. `--log-level` uses `LOG_LEVEL`.
   `HARNESS_NO_TIMESTAMPS` is an alias for `HARNESS_TIMESTAMPS=none`.
   `HARNESS_REPL_INPUT_TRACE` is a debug knob that appends timestamped
@@ -1410,7 +1422,7 @@ and are unavailable in one-shot mode.
 Inspect saved sessions with:
 
 ```sh
-harness session replay [-f|--follow] [-q|--quiet] ~/.local/state/harness/sessions/20260611T123456Z
+harness session replay [-f|--follow] [-q|--quiet] [--color-theme dark|light] [--config path] ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
 harness session stats ~/.local/state/harness/sessions/20260611T123456Z
 harness session errors [--tool T] [--kind K] [--model M] [--agent A] [--since D|--all] [--format text|json] [dir]
@@ -1424,9 +1436,14 @@ prompt, prints `[turn: N waiting]` markers for recorded attempt starts, and,
 on a color terminal, dims stored status lines and colorizes recorded
 `tool_diff` events using the mutated file's path for language detection.
 Terminal replay applies the same color-gated
-syntax highlighting to recognized tagged assistant fences; untagged and unknown
-fences remain plain, and replay without ANSI emits no highlighting. Rendering is
-display-only: stored events and ANSI-free latest-turn output remain unchanged. A
+syntax highlighting to recognized tagged assistant and reasoning-summary fences;
+untagged and unknown fences remain plain, and replay without ANSI emits no
+highlighting. Replay resolves `--color-theme`, `HARNESS_COLOR_THEME`, and
+`color_theme` from `--config` (or the normal default config path) with the same
+flag > environment > file > dark-default precedence. This focused replay load
+does not require or validate model/provider settings. Rendering uses the current
+theme for both replay and follow; no theme or ANSI metadata is persisted in the
+event log. Stored events and ANSI-free latest-turn output remain unchanged. A
 followed child exits successfully after its terminal metadata is observed and
 the log receives one final drain. If that
 metadata update failed, a child `prompt_usage` record can establish completion.

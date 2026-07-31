@@ -16,6 +16,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/markdown"
 	"harness/internal/plan"
+	"harness/internal/term/highlight"
 	"harness/internal/todo"
 )
 
@@ -1051,6 +1052,47 @@ func TestReplayHighlightsTaggedFenceOnlyWithANSI(t *testing.T) {
 	}
 }
 
+func TestReplayPropagatesLightThemeToEveryCodePath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	for _, ev := range []Event{
+		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "```go\nfunc assistant() {}\n```\n"},
+		{Type: EventReasoningSummary, Prompt: 1, Turn: 1, Text: "```go\nfunc reason() {}\n```"},
+		{Type: EventToolDiff, Prompt: 1, Turn: 1, Path: "main.go", Display: "@@ -1 +1 @@\n-func old() {}\n+func new() {}"},
+	} {
+		if err := AppendEvent(dir, ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	var out strings.Builder
+	opts := ReplayOptions{Markdown: true, ANSI: true, ColorTheme: highlight.ThemeLight}
+	if err := Replay(dir, &out, opts); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	got := out.String()
+	if count := strings.Count(got, "\x1b[38;2;0;0;255mfunc"); count != 4 {
+		t.Errorf("light keyword count = %d, want assistant/reasoning/old/new (4): %q", count, got)
+	}
+	for _, want := range []string{"\x1b[48;2;218;251;225m", "\x1b[48;2;255;235;233m"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("replayed diff missing light background %q: %q", want, got)
+		}
+	}
+	for _, dark := range []string{"\x1b[38;2;101;169;224mfunc", "\x1b[48;2;33;58;43m", "\x1b[48;2;74;34;29m"} {
+		if strings.Contains(got, dark) {
+			t.Errorf("light replay contains dark palette %q: %q", dark, got)
+		}
+	}
+
+	var plain strings.Builder
+	if err := Replay(dir, &plain, ReplayOptions{Markdown: true, ColorTheme: highlight.ThemeLight}); err != nil {
+		t.Fatalf("plain Replay: %v", err)
+	}
+	if strings.Contains(plain.String(), "\x1b[") {
+		t.Errorf("theme enabled ANSI in replay: %q", plain.String())
+	}
+}
+
 func TestReplayWrapsReasoningSummaryWithWidth(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	if err := AppendEvent(dir, Event{
@@ -1261,6 +1303,40 @@ func TestFollowInitialAndAppendedEventsMatchReplayExactlyOnce(t *testing.T) {
 	if strings.Count(got, "Working now.") != 1 || strings.Count(got, "Done once.") != 1 ||
 		strings.Index(got, "Working now.") > strings.Index(got, "Done once.") {
 		t.Fatalf("follow did not render initial and live records once in order: %q", got)
+	}
+}
+
+func TestFollowRetainsLightThemeAndMarkdownStateAcrossRecords(t *testing.T) {
+	dir := t.TempDir()
+	writeFollowMeta(t, dir, ChildStatusRunning)
+	if err := AppendEvent(dir, Event{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "```go\nfu"}); err != nil {
+		t.Fatalf("AppendEvent initial: %v", err)
+	}
+
+	waitCalls := 0
+	wait := func(context.Context) error {
+		waitCalls++
+		if waitCalls > 1 {
+			return errors.New("unexpected extra wait")
+		}
+		if err := AppendEvent(dir, Event{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "nc main() {}\n```\n"}); err != nil {
+			t.Fatalf("AppendEvent live: %v", err)
+		}
+		writeFollowMeta(t, dir, ChildStatusCompleted)
+		return nil
+	}
+
+	var out strings.Builder
+	opts := ReplayOptions{Markdown: true, ANSI: true, ColorTheme: highlight.ThemeLight}
+	if err := followWithWaiter(context.Background(), dir, &out, opts, wait); err != nil {
+		t.Fatalf("Follow: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "\x1b[38;2;0;0;255mfunc") || strings.Contains(got, "\x1b[38;2;101;169;224mfunc") {
+		t.Fatalf("follow lost light theme or streaming Markdown state: %q", got)
+	}
+	if stripped, want := stripSessionTestANSI(got), "  ```go\n  func main() {}\n  ```\n"; stripped != want {
+		t.Fatalf("follow source = %q, want %q", stripped, want)
 	}
 }
 

@@ -20,18 +20,7 @@ import (
 	"unicode/utf8"
 )
 
-// Colors come from the basic eight so they follow the terminal's own theme
-// rather than fighting it. Numbers and builtins deliberately share cyan: both
-// read as "a value", and confusing the two costs nothing.
-const (
-	styleComment  = "\x1b[90m"
-	styleKeyword  = "\x1b[35m"
-	styleString   = "\x1b[32m"
-	styleNumber   = "\x1b[36m"
-	styleBuiltin  = "\x1b[36m"
-	styleFunction = "\x1b[34m"
-	styleReset    = "\x1b[0m"
-)
+const styleReset = "\x1b[0m"
 
 // maxCharLiteral bounds how far a single-quote scan will look for its closing
 // quote. Beyond this the quote is treated as punctuation, which keeps Rust
@@ -51,22 +40,29 @@ const (
 // useful; call New. A nil *State is valid and highlights nothing, so callers
 // can hold one unconditionally.
 type State struct {
-	lang *Language
-	mode mode
+	lang    *Language
+	palette palette
+	mode    mode
 	// end is the delimiter that closes the construct left open by the
 	// previous line.
 	end         string
 	diffHeaders diffLineState
 }
 
-// New returns a highlighter for a fenced code block's info string, or nil when
-// the language is unknown or absent.
+// New returns a dark-theme highlighter for a fenced code block's info string,
+// or nil when the language is unknown or absent.
 func New(info string) *State {
+	return NewWithTheme(info, ThemeDark)
+}
+
+// NewWithTheme returns a highlighter using theme for a fenced code block's info
+// string, or nil when the language is unknown or absent.
+func NewWithTheme(info string, theme Theme) *State {
 	lang, ok := Lookup(info)
 	if !ok {
 		return nil
 	}
-	return &State{lang: lang}
+	return &State{lang: lang, palette: paletteFor(theme)}
 }
 
 // Line returns line with ANSI styling applied, advancing any multi-line state.
@@ -97,35 +93,35 @@ func (s *State) scan(line string) string {
 		if l.BlockOpen != "" && strings.HasPrefix(line[i:], l.BlockOpen) {
 			end, ok := closes(line, i+len(l.BlockOpen), l.BlockClose)
 			if !ok {
-				span(&b, styleComment, line[i:])
+				span(&b, s.palette.comment, line[i:])
 				s.suspend(modeComment, l.BlockClose)
 				return b.String()
 			}
-			span(&b, styleComment, line[i:end])
+			span(&b, s.palette.comment, line[i:end])
 			i = end
 			continue
 		}
 
 		if l.lineCommentAt(line, i) {
-			span(&b, styleComment, line[i:])
+			span(&b, s.palette.comment, line[i:])
 			return b.String()
 		}
 
 		if d := l.rawStringAt(line, i); d != "" {
 			end, ok := closes(line, i+len(d), d)
 			if !ok {
-				span(&b, styleString, line[i:])
+				span(&b, s.palette.string, line[i:])
 				s.suspend(modeString, d)
 				return b.String()
 			}
-			span(&b, styleString, line[i:end])
+			span(&b, s.palette.string, line[i:end])
 			i = end
 			continue
 		}
 
 		if strings.IndexByte(l.Chars, c) >= 0 {
 			if end, ok := scanChar(line, i, l.Escape); ok {
-				span(&b, styleString, line[i:end])
+				span(&b, s.palette.string, line[i:end])
 				i = end
 				continue
 			}
@@ -138,7 +134,7 @@ func (s *State) scan(line string) string {
 
 		if strings.IndexByte(l.Quotes, c) >= 0 {
 			if end, ok := scanQuoted(line, i, l.Escape); ok {
-				span(&b, styleString, line[i:end])
+				span(&b, s.palette.string, line[i:end])
 				i = end
 				continue
 			}
@@ -154,14 +150,14 @@ func (s *State) scan(line string) string {
 			for j < len(line) && l.isIdentPart(line[j]) {
 				j++
 			}
-			span(&b, l.classify(line, i, j), line[i:j])
+			span(&b, l.classify(line, i, j, s.palette), line[i:j])
 			i = j
 			continue
 		}
 
 		if isDigit(c) {
 			j := scanNumber(line, i)
-			span(&b, styleNumber, line[i:j])
+			span(&b, s.palette.number, line[i:j])
 			i = j
 			continue
 		}
@@ -179,9 +175,9 @@ func (s *State) resume(b *strings.Builder, line string) (int, bool) {
 	if s.mode == modeNormal {
 		return 0, false
 	}
-	style := styleComment
+	style := s.palette.comment
 	if s.mode == modeString {
-		style = styleString
+		style = s.palette.string
 	}
 	end, ok := closes(line, 0, s.end)
 	if !ok {
@@ -198,10 +194,10 @@ func (s *State) suspend(m mode, end string) {
 }
 
 // classify picks the style for the identifier at line[i:j].
-func (l *Language) classify(line string, i, j int) string {
+func (l *Language) classify(line string, i, j int, p palette) string {
 	word := line[i:j]
 	if l.VarPrefix != "" && strings.IndexByte(l.VarPrefix, line[i]) >= 0 {
-		return styleBuiltin
+		return p.builtin
 	}
 	key := word
 	if l.Fold {
@@ -209,11 +205,11 @@ func (l *Language) classify(line string, i, j int) string {
 	}
 	switch {
 	case l.Keywords[key]:
-		return styleKeyword
+		return p.keyword
 	case l.Builtins[key]:
-		return styleBuiltin
+		return p.builtin
 	case j < len(line) && line[j] == '(':
-		return styleFunction
+		return p.function
 	}
 	return ""
 }

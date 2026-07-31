@@ -80,6 +80,8 @@ type Options struct {
 	// ANSI applies terminal styling for emphasis and links. When false, supported
 	// Markdown markers are still normalized or stripped.
 	ANSI bool
+	// ColorTheme selects syntax colors when ANSI is enabled. Its zero value is dark.
+	ColorTheme highlight.Theme
 	// Width enables simple word wrapping for paragraphs and list item bodies when
 	// positive.
 	Width int
@@ -197,7 +199,7 @@ func (s *Stream) renderLine(out *strings.Builder, line string, newline bool) {
 		s.inFence = true
 		s.fenceMarker = marker
 		if s.opts.ANSI {
-			s.code = highlight.New(info)
+			s.code = highlight.NewWithTheme(info, s.opts.ColorTheme)
 		}
 		s.writeLine(out, s.opts.Prefix+"  "+line, newline)
 		return

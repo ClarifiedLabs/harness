@@ -11,6 +11,7 @@ import (
 	"harness/internal/delegate"
 	"harness/internal/llm"
 	"harness/internal/session"
+	"harness/internal/term/highlight"
 )
 
 func stripRenderTestANSI(s string) string {
@@ -264,12 +265,12 @@ func TestToolDiffColor(t *testing.T) {
 
 	got := errw.String()
 	for _, want := range []string{
-		"\x1b[36m---",                  // header cyan
-		"\x1b[35m@@",                   // hunk magenta
-		"\x1b[48;2;33;58;43m\x1b[32m+", // added line: subdued green bg, green sigil
-		"\x1b[48;2;74;34;29m\x1b[31m-", // removed line: subdued red bg, red sigil
-		"\x1b[35mfunc",                 // Go keyword in magenta
-		"\x1b[0K",                      // erase-to-EOL extends the tint to the window edge
+		"\x1b[38;2;78;201;176m---",                   // file header builtin/type color
+		"\x1b[38;2;101;169;224m@@",                   // hunk keyword color
+		"\x1b[48;2;33;58;43m\x1b[38;2;137;209;133m+", // added row and sigil
+		"\x1b[48;2;74;34;29m\x1b[38;2;244;135;113m-", // removed row and sigil
+		"\x1b[38;2;101;169;224mfunc",                 // Go keyword
+		"\x1b[0K",                                    // erase-to-EOL extends the tint to the window edge
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("colored diff missing %q:\n%q", want, got)
@@ -293,13 +294,13 @@ func TestToolDiffColorUnknownLanguage(t *testing.T) {
 	r.ToolDiff(llm.ToolCall{ID: "c1", Name: "edit"}, "notes.txt", text)
 
 	got := errw.String()
-	for _, want := range []string{"\x1b[48;2;33;58;43m", "\x1b[32m+", "\x1b[48;2;74;34;29m", "\x1b[31m-"} {
+	for _, want := range []string{"\x1b[48;2;33;58;43m", "\x1b[38;2;137;209;133m+", "\x1b[48;2;74;34;29m", "\x1b[38;2;244;135;113m-"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("colored diff missing %q:\n%q", want, got)
 		}
 	}
 	// Unknown language: content is plain, so no keyword span on "func".
-	if strings.Contains(got, "\x1b[35mfunc") {
+	if strings.Contains(got, "\x1b[38;2;101;169;224mfunc") {
 		t.Fatalf("unknown language should not gain token spans:\n%q", got)
 	}
 	if stripped := stripRenderTestANSI(got); stripped != text {
@@ -514,6 +515,60 @@ func TestTextDeltaHighlightsTaggedFenceAcrossDeltas(t *testing.T) {
 	}
 	if errw.Len() != 0 {
 		t.Fatalf("assistant fence must not touch stderr, got %q", errw.String())
+	}
+}
+
+func TestRendererPropagatesLightThemeToEveryCodePath(t *testing.T) {
+	const fence = "```go\nfunc main() {}\n```\n"
+	const lightKeyword = "\x1b[38;2;0;0;255mfunc"
+	const darkKeyword = "\x1b[38;2;101;169;224mfunc"
+
+	newLight := func(out, errw *bytes.Buffer) *Renderer {
+		return NewRenderer(out, errw, RenderOptions{Markdown: true, Color: true, ColorTheme: highlight.ThemeLight})
+	}
+	assertLight := func(name, got string) {
+		t.Helper()
+		if !strings.Contains(got, lightKeyword) || strings.Contains(got, darkKeyword) {
+			t.Errorf("%s did not use only the light keyword palette: %q", name, got)
+		}
+	}
+
+	var out, errw bytes.Buffer
+	r := newLight(&out, &errw)
+	assertLight("complete markdown", r.FormatMarkdown(fence))
+
+	out.Reset()
+	r = newLight(&out, &errw)
+	for _, delta := range []string{"```go\nfu", "nc main() {}\n```\n"} {
+		r.TextDelta(delta)
+	}
+	assertLight("streamed markdown", out.String())
+
+	out.Reset()
+	r = newLight(&out, &errw)
+	r.ReasoningSummary(fence)
+	assertLight("reasoning summary", out.String())
+
+	errw.Reset()
+	r = newLight(&out, &errw)
+	r.ToolDiff(llm.ToolCall{ID: "c1", Name: "edit"}, "main.go", "@@ -1 +1 @@\n-func old() {}\n+func main() {}\n")
+	assertLight("tool diff", errw.String())
+	for _, want := range []string{"\x1b[48;2;218;251;225m", "\x1b[48;2;255;235;233m"} {
+		if !strings.Contains(errw.String(), want) {
+			t.Errorf("tool diff missing light row background %q: %q", want, errw.String())
+		}
+	}
+
+	out.Reset()
+	errw.Reset()
+	plain := NewRenderer(&out, &errw, RenderOptions{Markdown: true, ColorTheme: highlight.ThemeLight})
+	if got := plain.FormatMarkdown(fence); strings.Contains(got, "\x1b[") {
+		t.Errorf("theme enabled ANSI in complete markdown: %q", got)
+	}
+	plain.TextDelta(fence)
+	plain.ToolDiff(llm.ToolCall{}, "main.go", "+func main() {}\n")
+	if strings.Contains(out.String()+errw.String(), "\x1b[") {
+		t.Errorf("theme enabled ANSI in live output: stdout=%q stderr=%q", out.String(), errw.String())
 	}
 }
 

@@ -129,6 +129,7 @@ type Config struct {
 	Quiet         bool   `json:"quiet"`       // -q / --quiet: suppress status messages and implicit reasoning output
 	LogLevel      string `json:"log_level"`   // --log-level / LOG_LEVEL: debug, info, warn, error
 	NoColor       bool   `json:"no_color"`    // -no-color or NO_COLOR
+	ColorTheme    string `json:"color_theme"` // -color-theme: dark or light
 	TimestampMode string `json:"timestamps"`  // -timestamps: short, full, or none
 	ReplPrompt    string `json:"repl_prompt"` // -repl-prompt: REPL input prompt format
 	ReplEditMode  string `json:"repl_edit_mode"`
@@ -258,6 +259,8 @@ const (
 	TimestampShort                = "short"
 	TimestampFull                 = "full"
 	TimestampNone                 = "none"
+	ColorThemeDark                = "dark"
+	ColorThemeLight               = "light"
 
 	// DefaultHistFile controls the default REPL history file location. The
 	// actual default is resolved by the caller (cmd/harness/main.go) against
@@ -355,6 +358,7 @@ type fileConfig struct {
 	ShowDiffs                          *bool                      `json:"show_diffs"`
 	LogLevel                           string                     `json:"log_level"`
 	NoColor                            *bool                      `json:"no_color"`
+	ColorTheme                         string                     `json:"color_theme"`
 	Timestamps                         string                     `json:"timestamps"`
 	NoTimestamps                       *bool                      `json:"no_timestamps"`
 	ReplPrompt                         string                     `json:"repl_prompt"`
@@ -440,7 +444,7 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	fImageDetail, fWebSearch := f.imageDetail, f.webSearch
 	fPrompt, fInitialPrompt, fReplPrompt, fReplEditMode, fOutputFormat := f.prompt, f.initialPrompt, f.replPrompt, f.replEditMode, f.outputFormat
 	fVerbose, fToolStream, fShowDiffs, fNoColor := f.verbose, f.toolStream, f.showDiffs, f.noColor
-	fTimestamps, fNoTimestamps := f.timestamps, f.noTimestamps
+	fColorTheme, fTimestamps, fNoTimestamps := f.colorTheme, f.timestamps, f.noTimestamps
 
 	// set records which flags were explicitly provided, so a flag only overrides
 	// env/file when actually present (flag defaults must not beat lower sources).
@@ -662,6 +666,10 @@ func Load(args []string, getenv func(string) string, configPath string) (Config,
 	c.LogLevel = canonicalLogLevel
 	c.NoColor = resolveBool(set["no-color"], *fNoColor,
 		getenv("HARNESS_NO_COLOR"), fc.NoColor, false)
+	c.ColorTheme, err = resolveColorTheme(*fColorTheme, set["color-theme"], getenv, fc.ColorTheme)
+	if err != nil {
+		return Config{}, err
+	}
 	c.TimestampMode, err = resolveTimestampMode(timestampInputs{
 		flagSet:      set["timestamps"],
 		flagValue:    *fTimestamps,
@@ -1095,6 +1103,7 @@ type flags struct {
 	replPrompt                       *string
 	replEditMode                     *string
 	logLevel                         *string
+	colorTheme                       *string
 	timestamps                       *string
 	verbose, toolStream              *bool
 	showDiffs                        *bool
@@ -1169,6 +1178,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.quiet = fs.Bool("quiet", false, "suppress status messages and reasoning output unless -reasoning-summary is set")
 	f.logLevel = fs.String("log-level", logging.LevelInfo, "diagnostic log level: debug, info, warn, error (also LOG_LEVEL)")
 	f.noColor = fs.Bool("no-color", false, "disable color output")
+	f.colorTheme = fs.String("color-theme", ColorThemeDark, "syntax and displayed diff color theme: dark or light (also HARNESS_COLOR_THEME)")
 	f.timestamps = fs.String("timestamps", TimestampShort, "bracketed status timestamps: short, full, long, or none")
 	f.noTimestamps = fs.Bool("no-timestamps", false, "disable bracketed status timestamps")
 	f.replPrompt = fs.String("repl-prompt", replprompt.DefaultFormat, "REPL input prompt format (supports {agent}, {model}, {reasoning})")
@@ -1364,6 +1374,30 @@ func resolveString(flagSet bool, flagVal, envVal, fileVal, def string) string {
 		return fileVal
 	}
 	return def
+}
+
+// LoadColorTheme resolves only color_theme, for standalone commands that run
+// without loading or validating model/provider configuration.
+func LoadColorTheme(flagValue string, flagSet bool, getenv func(string) string, configPath string) (string, error) {
+	fc, err := readConfigFile(configPath)
+	if err != nil {
+		return "", err
+	}
+	return resolveColorTheme(flagValue, flagSet, getenv, fc.ColorTheme)
+}
+
+func resolveColorTheme(flagValue string, flagSet bool, getenv func(string) string, fileValue string) (string, error) {
+	envValue := ""
+	if getenv != nil {
+		envValue = getenv("HARNESS_COLOR_THEME")
+	}
+	value := strings.ToLower(strings.TrimSpace(resolveString(flagSet, flagValue, envValue, fileValue, ColorThemeDark)))
+	switch value {
+	case ColorThemeDark, ColorThemeLight:
+		return value, nil
+	default:
+		return "", fmt.Errorf("color_theme must be dark or light")
+	}
 }
 
 // resolveInt mirrors resolveString for integers. fileVal of nil means unset.

@@ -46,6 +46,79 @@ func loadOK(t *testing.T, args []string, getenv func(string) string, configPath 
 	return c
 }
 
+func TestColorThemeDefaultPrecedenceAndCanonicalization(t *testing.T) {
+	fileLight := writeConfig(t, `{"color_theme":" light "}`)
+	fileDark := writeConfig(t, `{"color_theme":"dark"}`)
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		file string
+		want string
+	}{
+		{name: "default", want: ColorThemeDark},
+		{name: "file", file: fileLight, want: ColorThemeLight},
+		{name: "environment over file", env: map[string]string{"HARNESS_COLOR_THEME": " DARK "}, file: fileLight, want: ColorThemeDark},
+		{name: "flag over environment and file", args: []string{"--color-theme", "LIGHT"}, env: map[string]string{"HARNESS_COLOR_THEME": "dark"}, file: fileDark, want: ColorThemeLight},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := loadOK(t, tt.args, envFrom(tt.env), tt.file).ColorTheme
+			if got != tt.want {
+				t.Fatalf("ColorTheme = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestColorThemeRejectsInvalidSources(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		file string
+	}{
+		{name: "file", file: writeConfig(t, `{"color_theme":"auto"}`)},
+		{name: "environment", env: map[string]string{"HARNESS_COLOR_THEME": "auto"}},
+		{name: "flag", args: []string{"--color-theme", "auto"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(tt.args, envFrom(tt.env), tt.file)
+			if err == nil || !strings.Contains(err.Error(), "color_theme must be dark or light") {
+				t.Fatalf("Load error = %v, want accepted choices", err)
+			}
+		})
+	}
+}
+
+func TestLoadColorThemeIsStandaloneAndUsesSharedPrecedence(t *testing.T) {
+	path := writeConfig(t, `{"color_theme":"light","repl_edit_mode":"invalid-for-full-load"}`)
+	got, err := LoadColorTheme("", false, noEnv, path)
+	if err != nil {
+		t.Fatalf("LoadColorTheme: %v", err)
+	}
+	if got != ColorThemeLight {
+		t.Fatalf("LoadColorTheme = %q, want light", got)
+	}
+	got, err = LoadColorTheme("dark", true, envFrom(map[string]string{"HARNESS_COLOR_THEME": "light"}), path)
+	if err != nil || got != ColorThemeDark {
+		t.Fatalf("flag precedence = %q, %v; want dark, nil", got, err)
+	}
+	if _, err := LoadColorTheme("", false, noEnv, filepath.Join(t.TempDir(), "missing.json")); err == nil {
+		t.Fatal("LoadColorTheme missing config error = nil")
+	}
+}
+
+func TestUsageIncludesColorTheme(t *testing.T) {
+	var out bytes.Buffer
+	Usage(&out)
+	got := out.String()
+	if !strings.Contains(got, "-color-theme") || !strings.Contains(got, "HARNESS_COLOR_THEME") {
+		t.Fatalf("usage missing color theme flag/env: %q", got)
+	}
+}
+
 type precedenceCase[T comparable] struct {
 	file     string
 	env      map[string]string

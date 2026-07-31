@@ -9,11 +9,6 @@ import (
 // their own small lexer instead of the generic scanner. Each may still delegate
 // to the scanner for the parts that are ordinary code.
 
-const (
-	styleAdded   = "\x1b[32m"
-	styleRemoved = "\x1b[31m"
-)
-
 func init() {
 	languages["diff"] = &Language{lex: lexDiff}
 
@@ -63,16 +58,16 @@ func init() {
 // lexDiff colors unified diffs by line prefix. Its phase state distinguishes
 // file headers from body lines whose source happens to begin with ++ or --.
 func lexDiff(s *State, line string) string {
-	if style, _ := s.diffHeaders.headerStyle(line); style != "" {
+	if style, _ := s.diffHeaders.headerStyle(line, s.palette); style != "" {
 		return styled(style, line)
 	}
 	switch {
 	case strings.HasPrefix(line, "+"):
 		s.diffHeaders.markContent('+')
-		return styled(styleAdded, line)
+		return styled(s.palette.added, line)
 	case strings.HasPrefix(line, "-"):
 		s.diffHeaders.markContent('-')
-		return styled(styleRemoved, line)
+		return styled(s.palette.removed, line)
 	case strings.HasPrefix(line, " "):
 		s.diffHeaders.markContent(' ')
 	}
@@ -121,11 +116,11 @@ func (s *diffLineState) markContent(prefix byte) {
 // headerStyle returns the whole-line style for a unified-diff header or git
 // metadata line, plus whether line begins a new file. It returns an empty style
 // when line is diff content.
-func (s *diffLineState) headerStyle(line string) (style string, fileStart bool) {
+func (s *diffLineState) headerStyle(line string, p palette) (style string, fileStart bool) {
 	switch {
 	case strings.HasPrefix(line, "diff "):
 		*s = diffLineState{}
-		return styleComment, true
+		return p.comment, true
 	case strings.HasPrefix(line, "@@"):
 		s.content = true
 		s.countedHunk = false
@@ -137,17 +132,17 @@ func (s *diffLineState) headerStyle(line string) (style string, fileStart bool) 
 				s.content = false
 			}
 		}
-		return styleKeyword, false
+		return p.keyword, false
 	case !s.content && diffFileHeader(line, "---"):
-		return styleBuiltin, true
+		return p.builtin, true
 	case !s.content && diffFileHeader(line, "+++"):
 		s.content = true
-		return styleBuiltin, false
+		return p.builtin, false
 	case strings.HasPrefix(line, "index "),
 		strings.HasPrefix(line, "new file"), strings.HasPrefix(line, "deleted file"),
 		strings.HasPrefix(line, "old mode"), strings.HasPrefix(line, "new mode"),
 		strings.HasPrefix(line, "similarity "), strings.HasPrefix(line, "rename "):
-		return styleComment, false
+		return p.comment, false
 	}
 	return "", false
 }
@@ -200,7 +195,7 @@ func lexYAML(s *State, line string) string {
 
 	rest := line[i:]
 	if k := yamlKeyEnd(rest); k > 0 {
-		span(&b, styleBuiltin, rest[:k])
+		span(&b, s.palette.builtin, rest[:k])
 		b.WriteByte(':')
 		b.WriteString(s.scan(rest[k+1:]))
 		return b.String()
@@ -229,7 +224,7 @@ func yamlKeyEnd(s string) int {
 func lexTOML(s *State, line string) string {
 	trimmed := strings.TrimSpace(line)
 	if s.mode == modeNormal && strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-		return styled(styleKeyword, line)
+		return styled(s.palette.keyword, line)
 	}
 	return s.scan(line)
 }
@@ -249,16 +244,16 @@ func lexHTML(s *State, line string) string {
 		if strings.HasPrefix(line[i:], "<!--") {
 			end, ok := closes(line, i+len("<!--"), "-->")
 			if !ok {
-				span(&b, styleComment, line[i:])
+				span(&b, s.palette.comment, line[i:])
 				s.suspend(modeComment, "-->")
 				return b.String()
 			}
-			span(&b, styleComment, line[i:end])
+			span(&b, s.palette.comment, line[i:end])
 			i = end
 			continue
 		}
 		if line[i] == '<' && i+1 < len(line) && isTagStart(line[i+1]) {
-			i = htmlTag(&b, line, i)
+			i = htmlTag(&b, line, i, s.palette)
 			continue
 		}
 		b.WriteByte(line[i])
@@ -272,7 +267,7 @@ func isTagStart(c byte) bool {
 }
 
 // htmlTag styles the tag opening at line[i] and returns the offset past it.
-func htmlTag(b *strings.Builder, line string, i int) int {
+func htmlTag(b *strings.Builder, line string, i int, p palette) int {
 	b.WriteByte('<')
 	j := i + 1
 	if line[j] == '/' || line[j] == '!' || line[j] == '?' {
@@ -283,7 +278,7 @@ func htmlTag(b *strings.Builder, line string, i int) int {
 	for j < len(line) && isNameByte(line[j]) {
 		j++
 	}
-	span(b, styleKeyword, line[name:j])
+	span(b, p.keyword, line[name:j])
 
 	for j < len(line) && line[j] != '>' {
 		switch c := line[j]; {
@@ -292,14 +287,14 @@ func htmlTag(b *strings.Builder, line string, i int) int {
 			if !ok {
 				end = len(line)
 			}
-			span(b, styleString, line[j:end])
+			span(b, p.string, line[j:end])
 			j = end
 		case isLetter(c) || c == '_':
 			k := j
 			for k < len(line) && isNameByte(line[k]) {
 				k++
 			}
-			span(b, styleBuiltin, line[j:k])
+			span(b, p.builtin, line[j:k])
 			j = k
 		default:
 			b.WriteByte(c)

@@ -263,7 +263,10 @@ By default, harness prints a unified before/after diff for each built-in file
 mutation tool call. Set `show_diffs`, `HARNESS_SHOW_DIFFS`, or `-show-diffs` to
 false to disable diff output. Diffs are generated from per-call file snapshots,
 so repeated edits to the same file show incremental changes rather than a
-repository-wide diff.
+repository-wide diff. On a color terminal, displayed diff content and added/
+removed rows use the configured `color_theme` dark/light code palette; changing
+the palette does not change `show_diffs`, snapshot generation, diff text, or
+full-row background-erase behavior.
 
 ## Delegation
 

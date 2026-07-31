@@ -3,6 +3,8 @@ package markdown
 import (
 	"strings"
 	"testing"
+
+	"harness/internal/term/highlight"
 )
 
 func TestRenderDisabledReturnsRawText(t *testing.T) {
@@ -336,6 +338,32 @@ func TestRenderHighlightingIsAdditive(t *testing.T) {
 	}
 	if got := stripANSI(colored); got != plain {
 		t.Fatalf("stripped colored render = %q, want %q", got, plain)
+	}
+}
+
+func TestRenderUsesSelectedFenceThemeWithoutEnablingANSI(t *testing.T) {
+	input := "```go\nfunc main() {}\n```\n"
+	light := Render(input, Options{Enabled: true, ANSI: true, ColorTheme: highlight.ThemeLight})
+	if !strings.Contains(light, "\x1b[38;2;0;0;255mfunc") {
+		t.Fatalf("light fence missing keyword palette: %q", light)
+	}
+	if strings.Contains(light, "\x1b[38;2;101;169;224mfunc") {
+		t.Fatalf("light fence used dark keyword palette: %q", light)
+	}
+
+	stream := NewStream(Options{Enabled: true, ANSI: true, ColorTheme: highlight.ThemeLight})
+	var streamed strings.Builder
+	for _, delta := range []string{"```go\nfu", "nc main() {}\n```\n"} {
+		streamed.WriteString(stream.Write(delta))
+	}
+	streamed.WriteString(stream.Flush())
+	if got := streamed.String(); !strings.Contains(got, "\x1b[38;2;0;0;255mfunc") {
+		t.Fatalf("streamed light fence missing keyword palette: %q", got)
+	}
+
+	plain := Render(input, Options{Enabled: true, ColorTheme: highlight.ThemeLight})
+	if strings.Contains(plain, "\x1b[") {
+		t.Fatalf("theme enabled ANSI on its own: %q", plain)
 	}
 }
 

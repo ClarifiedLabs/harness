@@ -45,6 +45,7 @@ import (
 	"harness/internal/skills"
 	"harness/internal/sysprompt"
 	"harness/internal/term"
+	"harness/internal/term/highlight"
 	"harness/internal/tmux"
 	"harness/internal/todo"
 	"harness/internal/tools"
@@ -1098,6 +1099,7 @@ func run(env environment) int {
 	renderer := ui.NewRenderer(stdout, stderr, ui.RenderOptions{
 		Output:     terminalOutput,
 		Color:      color,
+		ColorTheme: highlightColorTheme(cfg.ColorTheme),
 		Markdown:   env.colorTTY,
 		Verbose:    cfg.Verbose,
 		ToolStream: cfg.ToolStream,
@@ -1989,16 +1991,19 @@ func runSessionCommand(env environment, args []string) int {
 	}
 }
 
-const sessionReplayUsage = "usage: harness session replay [-f|--follow] [-q|--quiet] <session-dir>"
+const sessionReplayUsage = "usage: harness session replay [-f|--follow] [-q|--quiet] [--color-theme dark|light] [--config path] <session-dir>"
 
 func runSessionReplay(env environment, args []string) int {
 	fs := flag.NewFlagSet("session replay", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var follow, quiet bool
+	var colorTheme, configPath string
 	fs.BoolVar(&follow, "f", false, "follow appended replay events")
 	fs.BoolVar(&follow, "follow", false, "follow appended replay events")
 	fs.BoolVar(&quiet, "q", false, "suppress replay status lines")
 	fs.BoolVar(&quiet, "quiet", false, "suppress replay status lines")
+	fs.StringVar(&colorTheme, "color-theme", config.ColorThemeDark, "syntax and displayed diff color theme: dark or light")
+	fs.StringVar(&configPath, "config", "", "alternate config path")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintln(env.stdout, sessionReplayUsage)
@@ -2013,8 +2018,22 @@ func runSessionReplay(env environment, args []string) int {
 		return ui.ExitUsage
 	}
 
+	colorThemeSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "color-theme" {
+			colorThemeSet = true
+		}
+	})
+	configPath = resolveConfigPath(args, env.getenv)
+	resolvedTheme, err := config.LoadColorTheme(colorTheme, colorThemeSet, env.getenv, configPath)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness: session replay: %v\n", err)
+		fmt.Fprintln(env.stderr, sessionReplayUsage)
+		return ui.ExitUsage
+	}
+
 	dir := fs.Arg(0)
-	opts := sessionReplayOptions(env, quiet)
+	opts := sessionReplayOptions(env, quiet, highlightColorTheme(resolvedTheme))
 	if !follow {
 		if err := session.Replay(dir, env.stdout, opts); err != nil {
 			fmt.Fprintf(env.stderr, "harness: session replay: %v\n", err)
@@ -2035,7 +2054,7 @@ func runSessionReplay(env environment, args []string) int {
 	return ui.ExitOK
 }
 
-func sessionReplayOptions(env environment, quiet bool) session.ReplayOptions {
+func sessionReplayOptions(env environment, quiet bool, colorTheme highlight.Theme) session.ReplayOptions {
 	width := markdown.DefaultWidth
 	if env.terminalCols != nil {
 		if cols := env.terminalCols(); cols > 0 {
@@ -2043,26 +2062,26 @@ func sessionReplayOptions(env environment, quiet bool) session.ReplayOptions {
 		}
 	}
 	return session.ReplayOptions{
-		Markdown: true,
-		ANSI:     env.colorTTY && !envColorDisabled(env.getenv),
-		Width:    width,
-		Quiet:    quiet,
+		Markdown:   true,
+		ANSI:       env.colorTTY && !envColorDisabled(env.getenv),
+		ColorTheme: colorTheme,
+		Width:      width,
+		Quiet:      quiet,
 	}
+}
+
+func highlightColorTheme(value string) highlight.Theme {
+	if value == config.ColorThemeLight {
+		return highlight.ThemeLight
+	}
+	return highlight.ThemeDark
 }
 
 func envColorDisabled(getenv func(string) string) bool {
 	if getenv == nil {
 		return false
 	}
-	if getenv("NO_COLOR") != "" {
-		return true
-	}
-	switch strings.ToLower(strings.TrimSpace(getenv("HARNESS_NO_COLOR"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return getenv("NO_COLOR") != "" || getenv("HARNESS_NO_COLOR") != ""
 }
 
 func loadConfiguredImages(images []config.ImageAttachment, supportsImages bool) ([]inputimage.Loaded, error) {
@@ -2685,6 +2704,9 @@ func pickerPageSize(env environment) int {
 func resolveConfigPath(args []string, getenv func(string) string) string {
 	if p := flagValue(args, "config"); p != "" {
 		return p
+	}
+	if getenv == nil {
+		getenv = func(string) string { return "" }
 	}
 	def := filepath.Join(defaultConfigDir(getenv), "config.json")
 	if _, err := os.Stat(def); err == nil {

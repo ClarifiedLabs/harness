@@ -44,6 +44,7 @@ const submittedPromptRule = markdown.HorizontalRule
 type RenderOptions struct {
 	Output                  *OutputCoordinator
 	Color                   bool
+	ColorTheme              highlight.Theme
 	Markdown                bool
 	Verbose                 bool
 	ToolStream              bool
@@ -77,6 +78,7 @@ type Renderer struct {
 	out                     io.Writer
 	errw                    io.Writer
 	color                   bool
+	colorTheme              highlight.Theme
 	markdown                bool
 	verbose                 bool
 	toolStream              bool
@@ -179,6 +181,7 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 		out:                     output.Stdout(),
 		errw:                    output.Stderr(),
 		color:                   opts.Color,
+		colorTheme:              opts.ColorTheme,
 		markdown:                opts.Markdown,
 		verbose:                 opts.Verbose,
 		toolStream:              opts.ToolStream,
@@ -254,9 +257,10 @@ func (r *Renderer) SetCumulativeUsage(inputTokens, outputTokens int, costUSD flo
 // ANSI, and terminal-width policy as streamed assistant text.
 func (r *Renderer) FormatMarkdown(text string) string {
 	return markdown.Render(text, markdown.Options{
-		Enabled: r.markdown,
-		ANSI:    r.color,
-		Width:   r.outputWidth(),
+		Enabled:    r.markdown,
+		ANSI:       r.color,
+		ColorTheme: r.colorTheme,
+		Width:      r.outputWidth(),
 	})
 }
 
@@ -574,7 +578,7 @@ func (r *Renderer) ToolDiff(_ llm.ToolCall, path, text string) {
 		return
 	}
 	if r.color {
-		text = colorizeDiff(path, text)
+		text = colorizeDiff(path, text, r.colorTheme)
 	}
 	io.WriteString(r.errw, text)
 	if !strings.HasSuffix(text, "\n") {
@@ -585,7 +589,9 @@ func (r *Renderer) ToolDiff(_ llm.ToolCall, path, text string) {
 // colorizeDiff syntax-highlights a unified diff: added and removed lines get
 // a tinted background with a colored sigil, and line content is highlighted
 // in the mutated file's language (plain when the language is unknown).
-func colorizeDiff(path, text string) string { return highlight.ColorizeDiff(path, text) }
+func colorizeDiff(path, text string, theme highlight.Theme) string {
+	return highlight.ColorizeDiffWithTheme(path, text, theme)
+}
 
 func (r *Renderer) toolProgress() bool {
 	return r.toolStream || r.verbose
@@ -719,10 +725,11 @@ func (r *Renderer) reasoningSummaryBlock(text string) string {
 		header = "[" + r.now().Format(r.timestampLayout) + " reasoning]"
 	}
 	body := markdown.Render(text, markdown.Options{
-		Enabled: true,
-		ANSI:    r.color,
-		Width:   r.outputWidth(),
-		Prefix:  "  ",
+		Enabled:    true,
+		ANSI:       r.color,
+		ColorTheme: r.colorTheme,
+		Width:      r.outputWidth(),
+		Prefix:     "  ",
 	})
 	var b strings.Builder
 	b.WriteString(header)
@@ -1850,9 +1857,10 @@ func (r *Renderer) ensureAssistantMarkdownLocked() {
 		return
 	}
 	r.assistantMarkdown = markdown.NewStream(markdown.Options{
-		Enabled: true,
-		ANSI:    r.color,
-		Width:   r.outputWidth(),
+		Enabled:    true,
+		ANSI:       r.color,
+		ColorTheme: r.colorTheme,
+		Width:      r.outputWidth(),
 	})
 }
 

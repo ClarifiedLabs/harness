@@ -50,6 +50,7 @@
   "show_diffs": true,
   "log_level": "info",
   "no_color": false,
+  "color_theme": "dark",
   "timestamps": "short",
   "repl_prompt": "[{agent}] > ",
   "repl_edit_mode": "emacs",

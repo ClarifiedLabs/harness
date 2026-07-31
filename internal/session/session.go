@@ -854,6 +854,7 @@ type ReplayOptions struct {
 	IncludeToolOutput bool
 	Markdown          bool
 	ANSI              bool
+	ColorTheme        highlight.Theme
 	Width             int
 	Quiet             bool // suppress bracketed status lines; assistant text and user prompts are unaffected
 }
@@ -882,9 +883,10 @@ func newAssistantDisplay(w io.Writer, opts ReplayOptions) *assistantDisplay {
 	}
 	if opts.Markdown {
 		d.markdown = markdown.NewStream(markdown.Options{
-			Enabled: true,
-			ANSI:    opts.ANSI,
-			Width:   opts.Width,
+			Enabled:    true,
+			ANSI:       opts.ANSI,
+			ColorTheme: opts.ColorTheme,
+			Width:      opts.Width,
 		})
 	}
 	return d
@@ -993,7 +995,7 @@ func (r *replayRenderer) Render(ev Event) {
 		r.assistant.Phase(ev.Phase)
 	case EventReasoningSummary:
 		r.assistant.Finish()
-		lines := ReasoningSummaryLines(ev.Text, ReasoningSummaryFormat{Width: r.opts.Width, ANSI: r.opts.ANSI})
+		lines := ReasoningSummaryLines(ev.Text, ReasoningSummaryFormat{Width: r.opts.Width, ANSI: r.opts.ANSI, ColorTheme: r.opts.ColorTheme})
 		if len(lines) != 0 {
 			fmt.Fprintln(r.w, strings.Join(lines, "\n"))
 			r.assistant.MarkPreFinalOutput()
@@ -1005,7 +1007,7 @@ func (r *replayRenderer) Render(ev Event) {
 			// event carries the mutated file path for language detection.
 			display := ev.Display
 			if r.opts.ANSI && ev.Path != "" {
-				display = highlight.ColorizeDiff(ev.Path, display)
+				display = highlight.ColorizeDiffWithTheme(ev.Path, display, r.opts.ColorTheme)
 			}
 			fmt.Fprintln(r.w, display)
 		}
@@ -1650,9 +1652,10 @@ func lastRecordedEventTime(events []Event) time.Time {
 // ReasoningSummaryFormat controls the replay-safe plain-text form for a
 // semantic reasoning summary event.
 type ReasoningSummaryFormat struct {
-	Header string
-	Indent string
-	Width  int
+	Header     string
+	Indent     string
+	Width      int
+	ColorTheme highlight.Theme
 	// ANSI enables SGR styling in the rendered markdown body. Replay wires it
 	// from ReplayOptions.ANSI; LatestTurnOutput leaves it off.
 	ANSI bool
@@ -1676,10 +1679,11 @@ func ReasoningSummaryLines(text string, format ReasoningSummaryFormat) []string 
 	}
 
 	body := markdown.Render(text, markdown.Options{
-		Enabled: true,
-		ANSI:    format.ANSI,
-		Width:   format.Width,
-		Prefix:  indent,
+		Enabled:    true,
+		ANSI:       format.ANSI,
+		ColorTheme: format.ColorTheme,
+		Width:      format.Width,
+		Prefix:     indent,
 	})
 
 	out := []string{header}
