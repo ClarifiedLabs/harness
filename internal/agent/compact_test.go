@@ -406,6 +406,12 @@ func TestIdleCompactionDiscardsStaleSnapshotBeforeArchiving(t *testing.T) {
 				a.SetReasoning(llm.ReasoningConfig{Profile: "high"})
 			},
 		},
+		{
+			name: "reasoning replay disabled",
+			run: func(a *Agent) {
+				a.disableCurrentReasoningReplay()
+			},
+		},
 	} {
 		t.Run(mutate.name, func(t *testing.T) {
 			fp := llmtest.New("fake", summaryStep("idle summary", 10, 2))
@@ -1685,6 +1691,244 @@ func TestPostTurnCompactionUsesFreshTranscriptEstimate(t *testing.T) {
 	}
 	if got := sink.promptUsage[0].Usage.InputTokens; got != 60 {
 		t.Errorf("prompt input tokens = %d, want 60 including summary call", got)
+	}
+}
+
+func opaqueMaintenanceTranscript(turns int) []llm.Message {
+	messages := makeTurns(turns)
+	messages[1].Content = append([]llm.ContentBlock{
+		{
+			Kind:                  llm.BlockReasoning,
+			ReasoningReplayDomain: "source-domain",
+			ReasoningID:           "rs_source",
+			ReasoningEncrypted:    "SOURCE-ONLY-OPAQUE",
+		},
+	}, messages[1].Content...)
+	return messages
+}
+
+func TestCompactionMaintenanceFiltersMismatchedOpaqueReasoning(t *testing.T) {
+	tests := []struct {
+		name      string
+		run       func(context.Context, *Agent, []llm.Message) ([]llm.Message, error)
+		exactLive bool
+	}{
+		{
+			name: "Compact",
+			run: func(ctx context.Context, a *Agent, _ []llm.Message) ([]llm.Message, error) {
+				var archived CompactionArchive
+				a.SetCompactionArchiver(func(_ context.Context, archive CompactionArchive) (string, error) {
+					archived = archive
+					return "archive", nil
+				})
+				_, err := a.Compact(ctx, &recordSink{})
+				return archived.Messages, err
+			},
+		},
+		{
+			name: "CompactForContinuation",
+			run: func(ctx context.Context, a *Agent, _ []llm.Message) ([]llm.Message, error) {
+				var archived CompactionArchive
+				a.SetCompactionArchiver(func(_ context.Context, archive CompactionArchive) (string, error) {
+					archived = archive
+					return "archive", nil
+				})
+				_, _, err := a.CompactForContinuation(ctx, &recordSink{})
+				return archived.Messages, err
+			},
+			exactLive: true,
+		},
+		{
+			name: "GenerateSummary",
+			run: func(ctx context.Context, a *Agent, _ []llm.Message) ([]llm.Message, error) {
+				_, _, err := a.GenerateSummary(ctx, "handoff")
+				return a.Transcript(), err
+			},
+			exactLive: true,
+		},
+		{
+			name: "GenerateBranchSummary",
+			run: func(ctx context.Context, a *Agent, source []llm.Message) ([]llm.Message, error) {
+				_, _, err := a.GenerateBranchSummary(ctx, source, "")
+				return source, err
+			},
+			exactLive: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fp := llmtest.New("fake", summaryStep("summary", 10, 2))
+			a := newAgent(fp, tools.Default(), Options{
+				Model:                 "target-model",
+				ReasoningReplayDomain: "target-domain",
+			})
+			source := opaqueMaintenanceTranscript(10)
+			before := cloneMessages(source)
+			a.SetTranscript(source)
+
+			durable, err := tt.run(context.Background(), a, source)
+			if err != nil {
+				t.Fatalf("%s: %v", tt.name, err)
+			}
+			if len(fp.Requests) != 1 {
+				t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+			}
+			if requestHasReasoningEncrypted(fp.Requests[0], "SOURCE-ONLY-OPAQUE") {
+				t.Fatalf("mismatched reasoning reached maintenance request:\n%s", dump(fp.Requests[0].Messages))
+			}
+			if !strings.Contains(dump(fp.Requests[0].Messages), "A answer") {
+				t.Fatalf("ordinary durable input was filtered from request:\n%s", dump(fp.Requests[0].Messages))
+			}
+			if !requestHasReasoningEncrypted(llm.Request{Messages: durable}, "SOURCE-ONLY-OPAQUE") {
+				t.Fatalf("request filtering removed reasoning from durable input:\n%s", dump(durable))
+			}
+			if tt.exactLive && !reflect.DeepEqual(durable, before) {
+				t.Fatalf("maintenance operation mutated durable input:\n%s", dump(durable))
+			}
+		})
+	}
+}
+
+func TestPrepareIdleCompactionSnapshotsReasoningReplayPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		disableBefore    bool
+		wantSameDomainIn bool
+	}{
+		{name: "same domain retained", wantSameDomainIn: true},
+		{name: "copied disabled map removes same domain", disableBefore: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			const domain = "target-domain"
+			fp := llmtest.New("fake", summaryStep("idle summary", 10, 2))
+			a := newAgent(fp, tools.Default(), Options{
+				Model:                 "target-model",
+				ContextWindow:         10_000,
+				ReasoningReplayDomain: domain,
+			})
+			transcript := opaqueMaintenanceTranscript(10)
+			transcript[1].Content = append([]llm.ContentBlock{{
+				Kind:                  llm.BlockReasoning,
+				ReasoningReplayDomain: domain,
+				ReasoningID:           "rs_target",
+				ReasoningEncrypted:    "TARGET-DOMAIN-OPAQUE",
+			}}, transcript[1].Content...)
+			a.SetTranscript(transcript)
+			if tt.disableBefore {
+				a.disableCurrentReasoningReplay()
+			}
+
+			work, ok, err := a.PrepareIdleCompaction(1)
+			if err != nil || !ok {
+				t.Fatalf("PrepareIdleCompaction = ok %t err %v, want work", ok, err)
+			}
+			if tt.disableBefore {
+				delete(a.disabledReasoningReplay, domain)
+			}
+			result, err := work(context.Background())
+			if err != nil || !result.Prepared {
+				t.Fatalf("idle work = prepared %t err %v", result.Prepared, err)
+			}
+			if len(fp.Requests) != 1 {
+				t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+			}
+			request := fp.Requests[0]
+			if requestHasReasoningEncrypted(request, "SOURCE-ONLY-OPAQUE") {
+				t.Fatalf("mismatched reasoning reached idle request:\n%s", dump(request.Messages))
+			}
+			if got := requestHasReasoningEncrypted(request, "TARGET-DOMAIN-OPAQUE"); got != tt.wantSameDomainIn {
+				t.Fatalf("same-domain reasoning present = %t, want %t:\n%s", got, tt.wantSameDomainIn, dump(request.Messages))
+			}
+			live := llm.Request{Messages: a.Transcript()}
+			if !requestHasReasoningEncrypted(live, "SOURCE-ONLY-OPAQUE") ||
+				!requestHasReasoningEncrypted(live, "TARGET-DOMAIN-OPAQUE") {
+				t.Fatalf("idle preparation mutated live transcript:\n%s", dump(a.Transcript()))
+			}
+		})
+	}
+}
+
+func TestGenerateSummaryInvalidEncryptedContentFallback(t *testing.T) {
+	invalidEncrypted := func(in, out int) llmtest.Step {
+		return llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: in, OutputTokens: out}}},
+			Err: &llm.APIError{
+				StatusCode: 400,
+				Code:       "invalid_encrypted_content",
+				Message:    "encrypted content could not be verified",
+			},
+		}
+	}
+	for _, tt := range []struct {
+		name        string
+		second      llmtest.Step
+		wantSummary string
+		wantErr     bool
+	}{
+		{name: "fallback succeeds", second: summaryStep("recovered", 7, 3), wantSummary: "recovered"},
+		{name: "fallback failure is not retried", second: invalidEncrypted(7, 3), wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fp := llmtest.New("fake", invalidEncrypted(11, 2), tt.second)
+			a := newAgent(fp, tools.Default(), Options{
+				Model:                 "target-model",
+				ReasoningReplayDomain: "source-domain",
+			})
+			a.SetTranscript(opaqueMaintenanceTranscript(2))
+			before := cloneMessages(a.Transcript())
+
+			summary, usage, err := a.GenerateSummary(context.Background(), "handoff")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("GenerateSummary error = %v, wantErr %t", err, tt.wantErr)
+			}
+			if summary != tt.wantSummary {
+				t.Fatalf("summary = %q, want %q", summary, tt.wantSummary)
+			}
+			if usage.InputTokens != 18 || usage.OutputTokens != 5 {
+				t.Fatalf("usage = %+v, want summed 18/5", usage)
+			}
+			if len(fp.Requests) != 2 {
+				t.Fatalf("provider requests = %d, want exactly 2", len(fp.Requests))
+			}
+			if !requestHasReasoningEncrypted(fp.Requests[0], "SOURCE-ONLY-OPAQUE") {
+				t.Fatalf("first request did not exercise encrypted replay:\n%s", dump(fp.Requests[0].Messages))
+			}
+			if requestHasReasoningEncrypted(fp.Requests[1], "SOURCE-ONLY-OPAQUE") {
+				t.Fatalf("fallback request retained opaque reasoning:\n%s", dump(fp.Requests[1].Messages))
+			}
+			if !reflect.DeepEqual(a.Transcript(), before) {
+				t.Fatalf("fallback mutated durable transcript:\n%s", dump(a.Transcript()))
+			}
+		})
+	}
+}
+
+func TestGenerateSummaryFiltersMismatchedOpaqueBeforeChunking(t *testing.T) {
+	const opaque = "LARGE-MISMATCH-"
+	fp := llmtest.New("fake", summaryStep("one pass", 10, 2))
+	a := newAgent(fp, tools.Default(), Options{
+		Model:                 "target-model",
+		ContextWindow:         4_000,
+		ReasoningReplayDomain: "target-domain",
+	})
+	transcript := opaqueMaintenanceTranscript(2)
+	transcript[1].Content[0].ReasoningEncrypted = opaque + strings.Repeat("x", 80_000)
+	a.SetTranscript(transcript)
+	before := cloneMessages(a.Transcript())
+
+	summary, _, err := a.GenerateSummary(context.Background(), "handoff")
+	if err != nil {
+		t.Fatalf("GenerateSummary: %v", err)
+	}
+	if summary != "one pass" || len(fp.Requests) != 1 {
+		t.Fatalf("filtered summary = %q with %d requests, want one unchunked pass", summary, len(fp.Requests))
+	}
+	if strings.Contains(dump(fp.Requests[0].Messages), opaque) {
+		t.Fatalf("large mismatched reasoning reached request:\n%s", dump(fp.Requests[0].Messages))
+	}
+	if !reflect.DeepEqual(a.Transcript(), before) {
+		t.Fatal("pre-chunk filtering mutated durable transcript")
 	}
 }
 

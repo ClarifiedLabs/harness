@@ -114,6 +114,12 @@ type idleCompactionCandidate struct {
 	notices     []string
 }
 
+type idleCompactionSnapshot struct {
+	transcript              []llm.Message
+	reasoningReplayDomain   string
+	disabledReasoningReplay map[string]bool
+}
+
 const (
 	checkpointHeader   = "=== Compaction checkpoint ===\n"
 	checkpointPreamble = "The following active instructions are preserved verbatim. Continue from the summarized progress without repeating completed work.\n"
@@ -150,9 +156,14 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 	if err != nil {
 		return nil, false, err
 	}
-	snapshot := cloneMessages(a.transcript)
+	snapshot := idleCompactionSnapshot{
+		transcript:              cloneMessages(a.transcript),
+		reasoningReplayDomain:   a.reasoningReplayDomain,
+		disabledReasoningReplay: cloneBoolMap(a.disabledReasoningReplay),
+	}
 	worker := New(a.provider, a.tools, Options{
 		Model:                     a.model,
+		ReasoningReplayDomain:     snapshot.reasoningReplayDomain,
 		ContextWindow:             a.contextWindow,
 		Registry:                  a.registry,
 		Reasoning:                 a.reasoning,
@@ -170,7 +181,8 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 		ResponsesStateful:         false,
 	})
 	worker.SetSystem(a.system)
-	worker.SetTranscript(snapshot)
+	worker.SetTranscript(snapshot.transcript)
+	worker.disabledReasoningReplay = snapshot.disabledReasoningReplay
 	worker.observedContextWindow = a.observedContextWindow
 	worker.sleep = a.sleep
 
@@ -299,6 +311,17 @@ func (a *Agent) idleCompactionFingerprint() ([sha256.Size]byte, error) {
 	var fingerprint [sha256.Size]byte
 	copy(fingerprint[:], digest.Sum(nil))
 	return fingerprint, nil
+}
+
+func cloneBoolMap(source map[string]bool) map[string]bool {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]bool, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func cloneCompactionArchive(archive CompactionArchive) CompactionArchive {
@@ -657,6 +680,7 @@ func (a *Agent) GenerateBranchSummary(ctx context.Context, messages []llm.Messag
 // summarize runs one tool-less model call over the older messages, with the
 // given system instruction, and returns the summary text and the call's usage.
 func (a *Agent) summarize(ctx context.Context, system string, older []llm.Message, purpose llm.RequestPurpose) (string, llm.Usage, error) {
+	older = a.providerVisibleMessages(older)
 	prepared := prepareSummaryMessages(older, a.summaryToolResultMaxBytes())
 	chunks := splitSummaryChunks(prepared, a.summaryChunkBudget())
 	if len(chunks) <= 1 {
@@ -696,6 +720,7 @@ func (a *Agent) summarizeCompaction(ctx context.Context, older []llm.Message, pr
 			newlyAged = append(newlyAged, message)
 		}
 	}
+	newlyAged = a.providerVisibleMessages(newlyAged)
 	prepared := prepareSummaryMessages(newlyAged, a.summaryToolResultMaxBytes())
 	chunks := splitSummaryChunks(prepared, a.summaryChunkBudget())
 	mapSystem := compactionSystem(prompts.CompactionSummary(), focus)
@@ -787,31 +812,44 @@ func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Mes
 // usage, and the stop reason.
 func (a *Agent) streamSummary(ctx context.Context, system string, older []llm.Message, maxTokens int, purpose llm.RequestPurpose) (string, llm.Usage, llm.StopReason, error) {
 	proxySessionID, cacheAffinityID := a.maintenanceIdentities(purpose)
-	req := llm.Request{
-		Model:           a.model,
-		Purpose:         purpose,
-		System:          system,
-		Messages:        older,
-		MaxTokens:       maxTokens,
-		Reasoning:       llm.ReasoningConfig{},
-		ProxySessionID:  proxySessionID,
-		CacheAffinityID: cacheAffinityID,
-		CachePolicy: llm.CachePolicy{
-			StaticTTL: llm.CacheTTLDefault,
-		},
-	}
-	if err := validateRequestImageContent(req.Messages); err != nil {
-		return "", llm.Usage{}, "", fmt.Errorf("validate compaction request images: %w", err)
-	}
+	original := older
 	var total llm.Usage
-	for attempt := 0; ; attempt++ {
-		text, usage, stop, err := a.collectSummary(ctx, req)
-		total = add(total, usage)
-		if err == nil || attempt >= streamRetries || !retryableStreamError(err) {
-			return text, total, stop, err
+	fallbackUsed := false
+	for {
+		req := llm.Request{
+			Model:           a.model,
+			Purpose:         purpose,
+			System:          system,
+			Messages:        a.providerVisibleMessages(original),
+			MaxTokens:       maxTokens,
+			Reasoning:       llm.ReasoningConfig{},
+			ProxySessionID:  proxySessionID,
+			CacheAffinityID: cacheAffinityID,
+			CachePolicy: llm.CachePolicy{
+				StaticTTL: llm.CacheTTLDefault,
+			},
 		}
-		if serr := a.sleep(ctx, retry.Next(attempt, streamRetryAfter(err))); serr != nil {
-			return "", total, stop, serr
+		if err := validateRequestImageContent(req.Messages); err != nil {
+			return "", total, "", fmt.Errorf("validate compaction request images: %w", err)
+		}
+		for attempt := 0; ; attempt++ {
+			text, usage, stop, err := a.collectSummary(ctx, req)
+			total = add(total, usage)
+			if err == nil {
+				return text, total, stop, nil
+			}
+			if attempt < streamRetries && retryableStreamError(err) {
+				if serr := a.sleep(ctx, retry.Next(attempt, streamRetryAfter(err))); serr != nil {
+					return "", total, stop, serr
+				}
+				continue
+			}
+			if !fallbackUsed && hasProviderOwnedReasoning(req.Messages) && invalidEncryptedContent(err) {
+				fallbackUsed = true
+				a.disableCurrentReasoningReplay()
+				break
+			}
+			return text, total, stop, err
 		}
 	}
 }

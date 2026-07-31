@@ -1379,11 +1379,43 @@ func resolveString(flagSet bool, flagVal, envVal, fileVal, def string) string {
 // LoadColorTheme resolves only color_theme, for standalone commands that run
 // without loading or validating model/provider configuration.
 func LoadColorTheme(flagValue string, flagSet bool, getenv func(string) string, configPath string) (string, error) {
-	fc, err := readConfigFile(configPath)
+	fileValue, err := readColorThemeConfigFile(configPath)
 	if err != nil {
 		return "", err
 	}
-	return resolveColorTheme(flagValue, flagSet, getenv, fc.ColorTheme)
+	return resolveColorTheme(flagValue, flagSet, getenv, fileValue)
+}
+
+// readColorThemeConfigFile deliberately decodes only color_theme. Standalone
+// commands still require a valid top-level JSON object, but unrelated settings
+// do not make theme resolution depend on the full harness configuration.
+func readColorThemeConfigFile(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return "", err
+	}
+	if object == nil {
+		return "", fmt.Errorf("config file must contain a JSON object")
+	}
+	raw, ok := object["color_theme"]
+	if !ok {
+		return "", nil
+	}
+	var value *string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", err
+	}
+	if value == nil {
+		return "", fmt.Errorf("color_theme must be a string")
+	}
+	return *value, nil
 }
 
 func resolveColorTheme(flagValue string, flagSet bool, getenv func(string) string, fileValue string) (string, error) {
@@ -1391,7 +1423,11 @@ func resolveColorTheme(flagValue string, flagSet bool, getenv func(string) strin
 	if getenv != nil {
 		envValue = getenv("HARNESS_COLOR_THEME")
 	}
-	value := strings.ToLower(strings.TrimSpace(resolveString(flagSet, flagValue, envValue, fileValue, ColorThemeDark)))
+	value := flagValue
+	if !flagSet {
+		value = resolveString(false, "", envValue, fileValue, ColorThemeDark)
+	}
+	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
 	case ColorThemeDark, ColorThemeLight:
 		return value, nil

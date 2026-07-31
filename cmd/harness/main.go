@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1997,13 +1998,12 @@ func runSessionReplay(env environment, args []string) int {
 	fs := flag.NewFlagSet("session replay", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var follow, quiet bool
-	var colorTheme, configPath string
 	fs.BoolVar(&follow, "f", false, "follow appended replay events")
 	fs.BoolVar(&follow, "follow", false, "follow appended replay events")
 	fs.BoolVar(&quiet, "q", false, "suppress replay status lines")
 	fs.BoolVar(&quiet, "quiet", false, "suppress replay status lines")
-	fs.StringVar(&colorTheme, "color-theme", config.ColorThemeDark, "syntax and displayed diff color theme: dark or light")
-	fs.StringVar(&configPath, "config", "", "alternate config path")
+	colorTheme := fs.String("color-theme", config.ColorThemeDark, "syntax and displayed diff color theme: dark or light")
+	configPath := fs.String("config", resolveConfigPath(nil, env.getenv), "alternate config path")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintln(env.stdout, sessionReplayUsage)
@@ -2024,8 +2024,7 @@ func runSessionReplay(env environment, args []string) int {
 			colorThemeSet = true
 		}
 	})
-	configPath = resolveConfigPath(args, env.getenv)
-	resolvedTheme, err := config.LoadColorTheme(colorTheme, colorThemeSet, env.getenv, configPath)
+	resolvedTheme, err := config.LoadColorTheme(*colorTheme, colorThemeSet, env.getenv, *configPath)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness: session replay: %v\n", err)
 		fmt.Fprintln(env.stderr, sessionReplayUsage)
@@ -2081,7 +2080,11 @@ func envColorDisabled(getenv func(string) string) bool {
 	if getenv == nil {
 		return false
 	}
-	return getenv("NO_COLOR") != "" || getenv("HARNESS_NO_COLOR") != ""
+	if getenv("NO_COLOR") != "" {
+		return true
+	}
+	disabled, err := strconv.ParseBool(getenv("HARNESS_NO_COLOR"))
+	return err == nil && disabled
 }
 
 func loadConfiguredImages(images []config.ImageAttachment, supportsImages bool) ([]inputimage.Loaded, error) {

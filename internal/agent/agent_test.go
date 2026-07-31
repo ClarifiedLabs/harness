@@ -643,11 +643,11 @@ func TestRunPromptUsesProviderInputTokenCount(t *testing.T) {
 
 func TestContextOverflowLearnsWindowAndRetries(t *testing.T) {
 	fp := llmtest.New("fake",
-		llmtest.Step{Err: &llm.APIError{
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 9}}}, Err: &llm.APIError{
 			StatusCode: 400,
 			Message:    "This endpoint's maximum context length is 262144 tokens. However, you requested about 266580 tokens.",
 		}},
-		llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 4}},
 	)
 	a := newAgent(fp, tools.Default(), Options{
 		Model:         "local",
@@ -674,6 +674,15 @@ func TestContextOverflowLearnsWindowAndRetries(t *testing.T) {
 		if context := strings.Join(got.RequestContext, "\n"); !strings.Contains(context, "[request context 1]") {
 			t.Fatalf("provider request %d context = %q, want preserved one-shot context", request+1, context)
 		}
+	}
+	if want := []turnAttemptEvent{{turn: 1, attempt: 1}, {turn: 1, attempt: 2}}; !slices.Equal(sink.attemptStarts, want) {
+		t.Fatalf("attempt starts = %+v, want %+v", sink.attemptStarts, want)
+	}
+	if want := []turnAttemptEvent{{turn: 1, attempt: 1}}; !slices.Equal(sink.abandoned, want) {
+		t.Fatalf("abandoned = %+v, want %+v", sink.abandoned, want)
+	}
+	if got := sink.completedTurns[0]; got.Attempts != 2 || got.Wasted.InputTokens != 9 || got.Usage.InputTokens != 13 {
+		t.Fatalf("turn usage = %+v, want attempts=2 wasted=9 total=13", got)
 	}
 }
 
@@ -1017,12 +1026,15 @@ func TestOpaqueReasoningReplaysAcrossModelsInSameDomain(t *testing.T) {
 
 func TestInvalidEncryptedContentRetriesWithoutOpaqueReasoning(t *testing.T) {
 	fp := llmtest.New("responses",
-		llmtest.Step{Err: &llm.APIError{
-			StatusCode: 400,
-			Code:       "invalid_encrypted_content",
-			Message:    "encrypted content could not be verified",
-		}},
-		llmtest.Step{Events: []llm.StreamEvent{textDelta("recovered")}, Stop: llm.StopEndTurn},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 11, OutputTokens: 2}}},
+			Err: &llm.APIError{
+				StatusCode: 400,
+				Code:       "invalid_encrypted_content",
+				Message:    "encrypted content could not be verified",
+			},
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("recovered")}, Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 7, OutputTokens: 3}},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("still recovered")}, Stop: llm.StopEndTurn},
 	)
 	a := newAgent(fp, tools.Default(), Options{
@@ -1055,6 +1067,27 @@ func TestInvalidEncryptedContentRetriesWithoutOpaqueReasoning(t *testing.T) {
 	if requestHasReasoningEncrypted(fp.Requests[1], "INVALID") {
 		t.Fatalf("fallback still replayed rejected reasoning:\n%s", dump(fp.Requests[1].Messages))
 	}
+	if want := []turnAttemptEvent{{turn: 1, attempt: 1}, {turn: 1, attempt: 2}}; !slices.Equal(sink.attemptStarts, want) {
+		t.Fatalf("attempt starts = %+v, want %+v", sink.attemptStarts, want)
+	}
+	if len(sink.attemptUsage) != 2 ||
+		sink.attemptUsage[0].Turn != 1 || sink.attemptUsage[0].Attempt != 1 || sink.attemptUsage[0].Usage.InputTokens != 11 ||
+		sink.attemptUsage[1].Turn != 1 || sink.attemptUsage[1].Attempt != 2 || sink.attemptUsage[1].Usage.InputTokens != 7 {
+		t.Fatalf("attempt completions = %+v, want attempts 1 then 2 with their exact usage", sink.attemptUsage)
+	}
+	if want := []turnAttemptEvent{{turn: 1, attempt: 1}}; !slices.Equal(sink.abandoned, want) {
+		t.Fatalf("abandoned attempts = %+v, want %+v", sink.abandoned, want)
+	}
+	turnUsage := sink.completedTurns[0]
+	if turnUsage.Attempts != 2 || turnUsage.Wasted.InputTokens != 11 || turnUsage.Usage.InputTokens != 18 || turnUsage.Usage.OutputTokens != 5 {
+		t.Fatalf("turn usage = %+v, want attempts=2 wasted=11/2 total=18/5", turnUsage)
+	}
+	if got := sink.promptUsage[0]; got.Wasted.InputTokens != 11 || got.Usage.InputTokens != 18 || got.Usage.OutputTokens != 5 {
+		t.Fatalf("prompt usage = %+v, want exact rejected+accepted accounting", got)
+	}
+	if a.disabledReasoningReplay["some-other-domain"] {
+		t.Fatal("encrypted fallback disabled an unrelated replay domain")
+	}
 	const notice = "[reasoning replay disabled: provider rejected encrypted content; retrying without opaque reasoning]"
 	if !slices.Contains(sink.notices, notice) {
 		t.Fatalf("notices = %v, want %q", sink.notices, notice)
@@ -1068,6 +1101,161 @@ func TestInvalidEncryptedContentRetriesWithoutOpaqueReasoning(t *testing.T) {
 	}
 	if requestHasReasoningEncrypted(fp.Requests[2], "INVALID") {
 		t.Fatalf("disabled domain replayed reasoning on a later turn:\n%s", dump(fp.Requests[2].Messages))
+	}
+}
+
+func TestProviderVisibleRequestBuildersShareFilteredSnapshot(t *testing.T) {
+	largeMismatch := strings.Repeat("A", 80_000)
+	a := newAgent(llmtest.New("fake"), tools.Default(), Options{ReasoningReplayDomain: "domain-b"})
+	a.SetTranscript([]llm.Message{
+		userText("question"),
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+			{Kind: llm.BlockReasoning, ReasoningReplayDomain: "domain-a", ReasoningEncrypted: largeMismatch},
+			{Kind: llm.BlockReasoning, ReasoningReplayDomain: "domain-b", ReasoningEncrypted: "KEEP-B"},
+			{Kind: llm.BlockReasoning, ReasoningEncrypted: "LEGACY"},
+			{Kind: llm.BlockText, Text: "answer"},
+		}},
+	})
+	before := dump(a.Transcript())
+
+	contextReq := a.ContextRequestWithContext([]string{"extra"})
+	prewarm, ok := a.PrewarmRequest()
+	if !ok {
+		t.Fatal("PrewarmRequest ok=false")
+	}
+	modelReq := a.modelRequest([]string{"extra"})
+	for name, req := range map[string]llm.Request{"context": contextReq, "prewarm": prewarm, "model": modelReq.request} {
+		if requestHasReasoningEncrypted(req, largeMismatch) || requestHasReasoningEncrypted(req, "LEGACY") {
+			t.Fatalf("%s request retained incompatible reasoning: %s", name, dump(req.Messages))
+		}
+		if !requestHasReasoningEncrypted(req, "KEEP-B") {
+			t.Fatalf("%s request dropped same-domain reasoning: %s", name, dump(req.Messages))
+		}
+	}
+	wantEstimate := estimateRequest(llm.Request{
+		System:         a.system,
+		Messages:       modelReq.request.Messages,
+		Tools:          a.toolSpecs,
+		ServerTools:    a.serverTools,
+		RequestContext: []string{"extra"},
+	}, a.window())
+	if modelReq.estimate.Total != wantEstimate.Total || modelReq.request.EstimatedInputTokens != wantEstimate.Total {
+		t.Fatalf("model estimate = %+v request=%d, want filtered total %d", modelReq.estimate, modelReq.request.EstimatedInputTokens, wantEstimate.Total)
+	}
+	if got, want := modelReq.request.CachePolicy.StableMessagePrefix, a.stableMessagePrefixIn(modelReq.request.Messages); got != want {
+		t.Fatalf("cache stable prefix = %d, want %d from provider-visible messages", got, want)
+	}
+
+	a.disableCurrentReasoningReplay()
+	if requestHasReasoningEncrypted(a.ContextRequest(), "KEEP-B") {
+		t.Fatal("disabled current domain remained provider-visible")
+	}
+	if after := dump(a.Transcript()); after != before {
+		t.Fatalf("request builders mutated durable transcript:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestEncryptedFallbackUsesOneShotGuard(t *testing.T) {
+	invalid := &llm.APIError{StatusCode: 400, Code: "invalid_encrypted_content", Message: "bad encrypted content"}
+	fp := llmtest.New("responses", llmtest.Step{Err: invalid}, llmtest.Step{Err: invalid}, llmtest.Step{Stop: llm.StopEndTurn})
+	a := newAgent(fp, tools.Default(), Options{ReasoningReplayDomain: "domain"})
+	a.SetTranscript([]llm.Message{userText("old"), {Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+		{Kind: llm.BlockReasoning, ReasoningReplayDomain: "domain", ReasoningEncrypted: "opaque"},
+		{Kind: llm.BlockText, Text: "answer"},
+	}}})
+	if err := a.RunPrompt(context.Background(), "next", &recordSink{}); !invalidEncryptedContent(err) {
+		t.Fatalf("RunPrompt error = %v, want fallback invalid_encrypted_content", err)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("requests = %d, want one fallback only", len(fp.Requests))
+	}
+}
+
+func TestMixedStreamRetryAndEncryptedFallbackShareAttemptSequence(t *testing.T) {
+	fp := llmtest.New("responses",
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 10}}}, Err: &llm.APIError{StatusCode: 503, Message: "retry", Retryable: true}},
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 20}}}, Err: &llm.APIError{StatusCode: 400, Code: "invalid_encrypted_content", Message: "bad"}},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 30}},
+	)
+	a := newAgent(fp, tools.Default(), Options{ReasoningReplayDomain: "domain"})
+	a.SetSleep(func(time.Duration) {})
+	a.SetTranscript([]llm.Message{userText("old"), {Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+		{Kind: llm.BlockReasoning, ReasoningReplayDomain: "domain", ReasoningEncrypted: "opaque"},
+		{Kind: llm.BlockText, Text: "answer"},
+	}}})
+	sink := &modelRequestRecordSink{}
+	if err := a.RunPrompt(context.Background(), "next", sink); err != nil {
+		t.Fatal(err)
+	}
+	wantAttempts := []turnAttemptEvent{{turn: 1, attempt: 1}, {turn: 1, attempt: 2}, {turn: 1, attempt: 3}}
+	if !slices.Equal(sink.attemptStarts, wantAttempts) {
+		t.Fatalf("attempt starts = %+v, want %+v", sink.attemptStarts, wantAttempts)
+	}
+	if want := []turnAttemptEvent{{turn: 1, attempt: 1}, {turn: 1, attempt: 2}}; !slices.Equal(sink.abandoned, want) {
+		t.Fatalf("abandoned = %+v, want %+v", sink.abandoned, want)
+	}
+	var retryScheduled *llm.ModelRequestEvent
+	for i := range sink.events {
+		if sink.events[i].State == llm.ModelRequestRetryScheduled {
+			retryScheduled = &sink.events[i]
+		}
+	}
+	if retryScheduled == nil || retryScheduled.Attempt != 2 {
+		t.Fatalf("retry events = %+v, want retry scheduled for absolute attempt 2", sink.events)
+	}
+	got := sink.completedTurns[0]
+	if got.Attempts != 3 || got.Wasted.InputTokens != 30 || got.Usage.InputTokens != 60 {
+		t.Fatalf("turn usage = %+v, want attempts=3 wasted=30 total=60", got)
+	}
+}
+
+func TestFinalizeWithSummaryInvalidEncryptedFallback(t *testing.T) {
+	invalid := llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 5, OutputTokens: 1}}},
+		Err:    &llm.APIError{StatusCode: 400, Code: "invalid_encrypted_content", Message: "bad encrypted content"},
+	}
+	fp := llmtest.New("responses", invalid, llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("final summary")},
+		Stop:   llm.StopEndTurn,
+		Usage:  llm.Usage{InputTokens: 7, OutputTokens: 2},
+	})
+	a := newAgent(fp, tools.Default(), Options{ReasoningReplayDomain: "domain"})
+	a.SetTranscript([]llm.Message{userText("old"), {Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+		{Kind: llm.BlockReasoning, ReasoningReplayDomain: "domain", ReasoningEncrypted: "opaque"},
+		{Kind: llm.BlockText, Text: "answer"},
+	}}})
+	sink := &recordSink{}
+
+	usage, wasted, _, completed := a.finalizeWithSummary(context.Background(), sink, nil, 4)
+	if !completed {
+		t.Fatal("finalization fallback did not complete")
+	}
+	if usage.InputTokens != 12 || usage.OutputTokens != 3 || wasted.InputTokens != 5 || wasted.OutputTokens != 1 {
+		t.Fatalf("finalization usage = %+v wasted=%+v, want total 12/3 and wasted 5/1", usage, wasted)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want rejected request plus one fallback", len(fp.Requests))
+	}
+	if !requestHasReasoningEncrypted(fp.Requests[0], "opaque") || requestHasReasoningEncrypted(fp.Requests[1], "opaque") {
+		t.Fatalf("finalization replay filtering = first %s second %s", dump(fp.Requests[0].Messages), dump(fp.Requests[1].Messages))
+	}
+	for i, request := range fp.Requests {
+		if len(request.Tools) != 0 || len(request.ServerTools) != 0 {
+			t.Fatalf("finalization request %d advertised tools", i+1)
+		}
+	}
+	if want := []turnAttemptEvent{{turn: 4, attempt: 1}, {turn: 4, attempt: 2}}; !slices.Equal(sink.attemptStarts, want) {
+		t.Fatalf("attempt starts = %+v, want %+v", sink.attemptStarts, want)
+	}
+	if want := []turnAttemptEvent{{turn: 4, attempt: 1}}; !slices.Equal(sink.abandoned, want) {
+		t.Fatalf("abandoned = %+v, want %+v", sink.abandoned, want)
+	}
+	if len(sink.completedTurns) != 1 || sink.completedTurns[0].Attempts != 2 || sink.completedTurns[0].Wasted.InputTokens != 5 {
+		t.Fatalf("completed final turn = %+v, want attempts=2 and rejected usage wasted", sink.completedTurns)
+	}
+	last := a.Transcript()[len(a.Transcript())-1]
+	if last.Phase != llm.AssistantPhaseFinal || last.Content[0].Text != "final summary" {
+		t.Fatalf("final transcript message = %+v", last)
 	}
 }
 
@@ -2403,10 +2591,11 @@ func TestResponsesStatefulSendsDeltaAfterResponseID(t *testing.T) {
 
 func TestResponsesStatefulRetriesFullContextWhenPreviousResponseRejected(t *testing.T) {
 	fp := llmtest.New("responses",
-		llmtest.Step{Err: &llm.APIError{StatusCode: 400, Code: "previous_response_not_found", Message: "missing previous_response_id"}},
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 12}}}, Err: &llm.APIError{StatusCode: 400, Code: "previous_response_not_found", Message: "missing previous_response_id"}},
 		llmtest.Step{
 			Events:     []llm.StreamEvent{textDelta("recovered")},
 			Stop:       llm.StopEndTurn,
+			Usage:      llm.Usage{InputTokens: 8},
 			ResponseID: "resp_new",
 		},
 	)
@@ -2421,8 +2610,9 @@ func TestResponsesStatefulRetriesFullContextWhenPreviousResponseRejected(t *test
 		t.Fatal(err)
 	}
 	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "missing", AnchorMessages: 2, AnchorDigest: digest})
+	sink := &recordSink{}
 
-	if err := a.RunPrompt(context.Background(), "next", &recordSink{}); err != nil {
+	if err := a.RunPrompt(context.Background(), "next", sink); err != nil {
 		t.Fatalf("RunPrompt: %v", err)
 	}
 	if len(fp.Requests) != 2 {
@@ -2433,6 +2623,12 @@ func TestResponsesStatefulRetriesFullContextWhenPreviousResponseRejected(t *test
 	}
 	if fp.Requests[1].PreviousResponseID != "" || len(fp.Requests[1].Messages) != 3 {
 		t.Fatalf("retry request = prev %q messages %d, want full context", fp.Requests[1].PreviousResponseID, len(fp.Requests[1].Messages))
+	}
+	if got := sink.completedTurns[0]; got.Attempts != 2 || got.Wasted.InputTokens != 12 || got.Usage.InputTokens != 20 {
+		t.Fatalf("turn usage = %+v, want attempts=2 wasted=12 total=20", got)
+	}
+	if want := []turnAttemptEvent{{turn: 1, attempt: 1}}; !slices.Equal(sink.abandoned, want) {
+		t.Fatalf("abandoned = %+v, want %+v", sink.abandoned, want)
 	}
 }
 
@@ -2583,10 +2779,11 @@ func TestHTTPPrewarmWithoutAnchorDoesNotProduceResponseState(t *testing.T) {
 
 func TestResponsesStatefulDisablesAndRetriesWhenStoreRejected(t *testing.T) {
 	fp := llmtest.New("responses",
-		llmtest.Step{Err: &llm.APIError{StatusCode: 400, Message: "Store must be set to false"}},
+		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 14}}}, Err: &llm.APIError{StatusCode: 400, Message: "Store must be set to false"}},
 		llmtest.Step{
 			Events: []llm.StreamEvent{textDelta("recovered")},
 			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 6},
 		},
 	)
 	a := newAgent(fp, tools.Default(), Options{ResponsesStateful: true})
@@ -2612,6 +2809,12 @@ func TestResponsesStatefulDisablesAndRetriesWhenStoreRejected(t *testing.T) {
 	}
 	if !slices.Contains(sink.notices, "[responses state disabled: provider rejected stored responses; retrying stateless]") {
 		t.Fatalf("notices = %+v, want responses-state disabled notice", sink.notices)
+	}
+	if got := sink.completedTurns[0]; got.Attempts != 2 || got.Wasted.InputTokens != 14 || got.Usage.InputTokens != 20 {
+		t.Fatalf("turn usage = %+v, want attempts=2 wasted=14 total=20", got)
+	}
+	if want := []turnAttemptEvent{{turn: 1, attempt: 1}}; !slices.Equal(sink.abandoned, want) {
+		t.Fatalf("abandoned = %+v, want %+v", sink.abandoned, want)
 	}
 }
 
@@ -2958,7 +3161,10 @@ func TestCancellationDuringRetryBackoff(t *testing.T) {
 	// A retryable failure schedules a retry; cancellation arrives during the
 	// backoff sleep, before the next attempt. The loop must honor it: return
 	// context.Canceled, attempt no further request, and leave a valid transcript.
-	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
+	fail := llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 13, OutputTokens: 2}}},
+		Err:    &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true},
+	}
 	fp := llmtest.New("fake", fail, fail, fail)
 	a := newAgent(fp, tools.Default(), Options{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2968,14 +3174,28 @@ func TestCancellationDuringRetryBackoff(t *testing.T) {
 		return context.Canceled
 	}
 
-	err := a.RunPrompt(ctx, "hi", &recordSink{})
+	sink := &recordSink{}
+	err := a.RunPrompt(ctx, "hi", sink)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("RunPrompt err = %v, want context.Canceled", err)
 	}
 	// One real attempt, then cancellation during the backoff stops the loop before
-	// any retry re-requests the step.
+	// any retry re-requests the step. Its absolute attempt metadata and billed
+	// usage remain observable even though its output was abandoned.
 	if len(fp.Requests) != 1 {
 		t.Errorf("provider called %d times, want 1 (no retry after cancel)", len(fp.Requests))
+	}
+	if want := []turnAttemptEvent{{turn: 1, attempt: 1}}; !slices.Equal(sink.attemptStarts, want) {
+		t.Fatalf("attempt starts = %+v, want %+v", sink.attemptStarts, want)
+	}
+	if len(sink.attemptUsage) != 1 || sink.attemptUsage[0].Attempt != 1 || sink.attemptUsage[0].Usage.InputTokens != 13 {
+		t.Fatalf("attempt completions = %+v, want physical attempt 1 usage", sink.attemptUsage)
+	}
+	if want := []turnAttemptEvent{{turn: 1, attempt: 1}}; !slices.Equal(sink.abandoned, want) {
+		t.Fatalf("abandoned = %+v, want %+v", sink.abandoned, want)
+	}
+	if got := sink.promptUsage[0]; got.Usage.InputTokens != 13 || got.Usage.OutputTokens != 2 || got.Wasted.InputTokens != 13 || got.Wasted.OutputTokens != 2 {
+		t.Fatalf("prompt usage = %+v, want canceled attempt billed and wasted exactly once", got)
 	}
 	mustValid(t, a.Transcript())
 }

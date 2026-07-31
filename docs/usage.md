@@ -265,9 +265,13 @@ replay, and follow. It does not recolor inline code, links, headings, status lin
 or prose, and it does not set a terminal background. The only values are `dark`
 and `light`: there is intentionally no `auto`, because Harness does not probe or
 guess terminal backgrounds. Select the value matching the active terminal
-profile. Theme selection is independent of ANSI enablement; `-no-color`,
-`NO_COLOR`, and non-TTY output still suppress escapes without changing Markdown
-structure or source text.
+profile. Theme selection is independent of ANSI enablement; `-no-color`, `NO_COLOR`,
+and non-TTY output still suppress escapes without changing Markdown structure
+or source text. `NO_COLOR` is presence-style: any non-empty value, including
+`false`, disables ANSI. `HARNESS_NO_COLOR` is instead parsed as a boolean, so a
+valid false value does not disable ANSI and a malformed value is ignored. An
+explicitly empty or whitespace-only `--color-theme=` is invalid rather than an
+instruction to fall through to environment, file, or default values.
 
 `-system-prompt` accepts a `@file` reference. A literal leading `@` is escaped as
 `@@`; `@~/path` expands through the current user's home directory. Relative
@@ -397,6 +401,8 @@ tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
   `HARNESS_COLOR_THEME`, `HARNESS_RESUME`, and `HARNESS_SESSION`.
 - The `-v` verbose flag uses `HARNESS_VERBOSE`. `--log-level` uses `LOG_LEVEL`.
   `HARNESS_NO_TIMESTAMPS` is an alias for `HARNESS_TIMESTAMPS=none`.
+  `HARNESS_NO_COLOR` uses normal boolean parsing; unlike the presence-style
+  `NO_COLOR`, its valid false values leave color enabled.
   `HARNESS_REPL_INPUT_TRACE` is a debug knob that appends timestamped
   terminal-input events to the given file path (`-` for stderr).
 - `HARNESS_WEB_SEARCH=auto` is equivalent to `-web-search auto`; `off` disables
@@ -1440,10 +1446,16 @@ syntax highlighting to recognized tagged assistant and reasoning-summary fences;
 untagged and unknown fences remain plain, and replay without ANSI emits no
 highlighting. Replay resolves `--color-theme`, `HARNESS_COLOR_THEME`, and
 `color_theme` from `--config` (or the normal default config path) with the same
-flag > environment > file > dark-default precedence. This focused replay load
-does not require or validate model/provider settings. Rendering uses the current
-theme for both replay and follow; no theme or ANSI metadata is persisted in the
-event log. Stored events and ANSI-free latest-turn output remain unchanged. A
+flag > environment > file > dark-default precedence. An explicitly empty theme
+flag is invalid. The focused replay loader requires a valid JSON object and a
+string `color_theme` when that field is present, but ignores all unrelated
+fields, including invalid model/provider settings. Repeated replay options that
+appear before the session path use the final parsed value. Parsing stops at the
+session path, so flag-looking tokens after it remain extra positional arguments
+and cause a usage error. ANSI enablement follows the normal environment rules:
+non-empty `NO_COLOR` always disables, while `HARNESS_NO_COLOR` is parsed as a
+boolean. Rendering uses the current theme for both replay and follow; no theme
+or ANSI metadata is persisted in the event log. Stored events and ANSI-free latest-turn output remain unchanged. A
 followed child exits successfully after its terminal metadata is observed and
 the log receives one final drain. If that
 metadata update failed, a child `prompt_usage` record can establish completion.

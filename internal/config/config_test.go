@@ -58,6 +58,8 @@ func TestColorThemeDefaultPrecedenceAndCanonicalization(t *testing.T) {
 	}{
 		{name: "default", want: ColorThemeDark},
 		{name: "file", file: fileLight, want: ColorThemeLight},
+		{name: "empty environment falls through to file", env: map[string]string{"HARNESS_COLOR_THEME": ""}, file: fileLight, want: ColorThemeLight},
+		{name: "empty environment falls through to default", env: map[string]string{"HARNESS_COLOR_THEME": ""}, want: ColorThemeDark},
 		{name: "environment over file", env: map[string]string{"HARNESS_COLOR_THEME": " DARK "}, file: fileLight, want: ColorThemeDark},
 		{name: "flag over environment and file", args: []string{"--color-theme", "LIGHT"}, env: map[string]string{"HARNESS_COLOR_THEME": "dark"}, file: fileDark, want: ColorThemeLight},
 	}
@@ -71,16 +73,25 @@ func TestColorThemeDefaultPrecedenceAndCanonicalization(t *testing.T) {
 	}
 }
 
-func TestColorThemeRejectsInvalidSources(t *testing.T) {
+func TestColorThemeRejectsInvalidAndExplicitEmptyValues(t *testing.T) {
+	validFile := writeConfig(t, `{"color_theme":"light"}`)
 	tests := []struct {
 		name string
 		args []string
 		env  map[string]string
 		file string
 	}{
-		{name: "file", file: writeConfig(t, `{"color_theme":"auto"}`)},
-		{name: "environment", env: map[string]string{"HARNESS_COLOR_THEME": "auto"}},
-		{name: "flag", args: []string{"--color-theme", "auto"}},
+		{name: "invalid file", file: writeConfig(t, `{"color_theme":"auto"}`)},
+		{name: "invalid environment", env: map[string]string{"HARNESS_COLOR_THEME": "auto"}},
+		{name: "invalid flag", args: []string{"--color-theme", "auto"}},
+		{name: "empty flag", args: []string{"--color-theme="}},
+		{name: "whitespace flag", args: []string{"--color-theme", " \t "}},
+		{
+			name: "empty flag overrides valid environment and file",
+			args: []string{"--color-theme="},
+			env:  map[string]string{"HARNESS_COLOR_THEME": "dark"},
+			file: validFile,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -92,21 +103,101 @@ func TestColorThemeRejectsInvalidSources(t *testing.T) {
 	}
 }
 
-func TestLoadColorThemeIsStandaloneAndUsesSharedPrecedence(t *testing.T) {
-	path := writeConfig(t, `{"color_theme":"light","repl_edit_mode":"invalid-for-full-load"}`)
-	got, err := LoadColorTheme("", false, noEnv, path)
-	if err != nil {
-		t.Fatalf("LoadColorTheme: %v", err)
+func TestLoadColorThemeFocusedFileReader(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "ignores invalid known full-config field",
+			body: `{"color_theme":"light","model":123}`,
+			want: ColorThemeLight,
+		},
+		{
+			name: "ignores unknown unrelated fields",
+			body: `{"color_theme":" DARK ","future_setting":{"invalid_for_full_config":true}}`,
+			want: ColorThemeDark,
+		},
 	}
-	if got != ColorThemeLight {
-		t.Fatalf("LoadColorTheme = %q, want light", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := LoadColorTheme("", false, noEnv, writeConfig(t, tt.body))
+			if err != nil {
+				t.Fatalf("LoadColorTheme: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("LoadColorTheme = %q, want %q", got, tt.want)
+			}
+		})
 	}
-	got, err = LoadColorTheme("dark", true, envFrom(map[string]string{"HARNESS_COLOR_THEME": "light"}), path)
-	if err != nil || got != ColorThemeDark {
-		t.Fatalf("flag precedence = %q, %v; want dark, nil", got, err)
-	}
+
 	if _, err := LoadColorTheme("", false, noEnv, filepath.Join(t.TempDir(), "missing.json")); err == nil {
 		t.Fatal("LoadColorTheme missing config error = nil")
+	}
+	if _, err := Load(nil, noEnv, writeConfig(t, `{"model":123}`)); err == nil {
+		t.Fatal("Load accepted incorrectly typed known full-config field")
+	}
+}
+
+func TestLoadColorThemeRejectsInvalidFocusedConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "malformed JSON", body: `{not valid json`},
+		{name: "top-level array", body: `[]`},
+		{name: "top-level string", body: `"light"`},
+		{name: "top-level number", body: `123`},
+		{name: "top-level null", body: `null`},
+		{name: "null theme", body: `{"color_theme":null}`},
+		{name: "numeric theme", body: `{"color_theme":123}`},
+		{name: "object theme", body: `{"color_theme":{"name":"light"}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := LoadColorTheme("", false, noEnv, writeConfig(t, tt.body)); err == nil {
+				t.Fatal("LoadColorTheme error = nil")
+			}
+		})
+	}
+}
+
+func TestLoadColorThemePrecedenceAndExplicitFlags(t *testing.T) {
+	path := writeConfig(t, `{"color_theme":"light","model":123}`)
+	tests := []struct {
+		name      string
+		flagValue string
+		flagSet   bool
+		env       map[string]string
+		want      string
+		wantErr   bool
+	}{
+		{name: "file", want: ColorThemeLight},
+		{name: "empty environment falls through", env: map[string]string{"HARNESS_COLOR_THEME": ""}, want: ColorThemeLight},
+		{name: "environment", env: map[string]string{"HARNESS_COLOR_THEME": " DARK "}, want: ColorThemeDark},
+		{name: "explicit dark", flagValue: " DARK ", flagSet: true, env: map[string]string{"HARNESS_COLOR_THEME": "light"}, want: ColorThemeDark},
+		{name: "explicit light", flagValue: "LIGHT", flagSet: true, env: map[string]string{"HARNESS_COLOR_THEME": "dark"}, want: ColorThemeLight},
+		{name: "explicit empty", flagSet: true, env: map[string]string{"HARNESS_COLOR_THEME": "dark"}, wantErr: true},
+		{name: "explicit whitespace", flagValue: " \t ", flagSet: true, env: map[string]string{"HARNESS_COLOR_THEME": "dark"}, wantErr: true},
+		{name: "explicit invalid", flagValue: "auto", flagSet: true, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := LoadColorTheme(tt.flagValue, tt.flagSet, envFrom(tt.env), path)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "color_theme must be dark or light") {
+					t.Fatalf("LoadColorTheme error = %v, want accepted choices", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadColorTheme: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("LoadColorTheme = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

@@ -847,12 +847,16 @@ explicitly guarantees that multiple model IDs accept the same opaque reasoning
 state. Prompt-cache affinity remains a separate mechanism and does not widen
 this boundary. The agent stamps captured thinking, redacted thinking, Responses
 reasoning items, and Interactions thought/step blocks with the active domain.
-Before token estimation and request construction it removes mismatched blocks
-from a request-only message copy. Blocks from transcripts predating provenance
-metadata therefore do not cross into a configured target. A structured
+A single provider-visible message path removes mismatched blocks from a
+request-only copy for normal turns, context/debug snapshots, prewarm,
+compaction, handoff and branch summaries, and detached idle compaction workers.
+Token estimates, summary chunking, and cache policy are all derived from that
+same filtered view. Blocks from transcripts predating provenance metadata
+therefore do not cross into a configured target. A structured
 `invalid_encrypted_content` API error disables replay for the active domain for
-the rest of that agent and triggers one full-context retry without opaque
-reasoning; the durable transcript remains unchanged.
+the rest of that agent and triggers one retry without opaque reasoning. The
+unfiltered transcript remains available to `Agent.Transcript()` and session
+persistence; switching models never erases historical reasoning.
 
 **Anthropic prompt caching:** the CLI declares semantic policy; the dialect
 chooses wire placement within Anthropic's four-breakpoint budget. The last tool
@@ -927,6 +931,10 @@ type APIError struct {
   to a short double-press window.
   A failed attempt that will be retried is marked as discarded in `raw.ndjson`, so
   replay and editor resume helpers do not treat its streamed text as durable output.
+  Physical attempt IDs remain monotonic across both these transport retries and
+  request-shape rebuilds such as context-overflow, stored-response, previous-response,
+  and encrypted-content compatibility fallbacks. Every discarded attempt's reported
+  usage remains in billed totals and is also surfaced as wasted usage.
 
 ## 6. Usage, cost, and the model registry
 
@@ -1503,9 +1511,10 @@ constructs neither registry nor feed.
 
 A **prompt** is one top-level user interaction. Within it, a **turn** is one
 completed model response plus the complete tool-result batch requested by that
-response. An **attempt** is one provider request for a turn; retries do not create
-additional turns. Turn numbers restart at 1 for every prompt. Model-backed
-maintenance such as compaction and prewarming is neither a prompt nor a turn.
+response. An **attempt** is one physical provider request for a turn; transport retries
+and rebuilt compatibility requests increment its ID but do not create additional
+turns. Turn numbers restart at 1 for every prompt. Model-backed maintenance such
+as compaction and prewarming is neither a prompt nor a turn.
 
 ```
 append user prompt message (origin=prompt)
@@ -1612,13 +1621,18 @@ emit prompt_usage(prompt, completedTurns)
 - **Non-normal model stops:** `max_tokens` and stop-sequence finishes end the prompt
   but emit a visible notice, so a truncated or externally stopped assistant answer
   does not look like an ordinary completion.
-- **Mid-stream retries:** each turn is wrapped in `streamWithRetry`, which
+- **Mid-stream retries:** each request shape is wrapped in `streamWithRetry`, which
   re-requests the step from scratch on a retryable terminal stream error up to
   `streamRetries` (2) times. These attempts do **not** count against `max-turns`;
-  failed-attempt usage is still billed and tracked (xref §5.5).
-- **Stateful-Responses fallback:** when a turn that reused a `previous_response_id`
-  fails because that response is no longer available (and nothing streamed), the agent
-  resets the stored Responses state, notes it, and retries once with the full context.
+  failed-attempt usage is still billed and tracked (xref §5.5). A per-turn
+  coordinator carries the next physical attempt ID and discarded usage across
+  request-shape rebuilds while giving each rebuilt request its own retry allowance.
+- **Compatibility fallbacks:** context-overflow rebuilds, stored-response rejection,
+  an unavailable `previous_response_id`, and rejected encrypted reasoning each
+  discard the prior physical attempt before one rebuilt request. Attempt IDs stay
+  monotonic, and discarded billed usage is included once in the turn/prompt total
+  and separately reported as wasted. Previous-response rejection resets the stored
+  Responses state and resends the full context.
 - **Stop hook:** a configured `Stop` hook fires when the model would end the prompt;
   it may block the break and force one more turn. `stop_hook_active` guards it so it
   fires at most once per prompt (`agent.go`).

@@ -1549,6 +1549,38 @@ func TestRunShowConfigExitsZeroWithoutModelProxy(t *testing.T) {
 	}
 }
 
+func TestRunShowConfigRejectsExplicitEmptyColorTheme(t *testing.T) {
+	dir := t.TempDir()
+	var out, errw bytes.Buffer
+	env := environment{
+		args:   []string{"--color-theme=", "--show-config"},
+		stdin:  strings.NewReader(""),
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(key string) string {
+			switch key {
+			case "HOME":
+				return dir
+			case "HARNESS_COLOR_THEME":
+				return "light"
+			default:
+				return ""
+			}
+		},
+		sigCh: nil,
+	}
+
+	if code := run(env); code != ui.ExitUsage {
+		t.Fatalf("exit code = %d, want usage; stdout=%q stderr=%q", code, out.String(), errw.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", out.String())
+	}
+	if got := errw.String(); !strings.Contains(got, "color_theme must be dark or light") {
+		t.Fatalf("stderr = %q, want invalid empty color theme", got)
+	}
+}
+
 func TestRunShowConfigIncludesRuntimeDefaults(t *testing.T) {
 	dir := t.TempDir()
 	getenv := func(k string) string {
@@ -2832,14 +2864,14 @@ func TestRunSessionReplayResolvesLightThemeWithoutModelConfig(t *testing.T) {
 	if err := session.AppendEvent(dir, session.Event{Type: session.EventAssistantDelta, Turn: 1, Text: "```go\nfunc main() {}\n```\n"}); err != nil {
 		t.Fatalf("append event: %v", err)
 	}
-	lightConfig := writeMainConfig(t, `{"color_theme":"light","repl_edit_mode":"invalid-for-full-load"}`)
-	darkConfig := writeMainConfig(t, `{"color_theme":"dark","repl_edit_mode":"invalid-for-full-load"}`)
+	lightConfig := writeMainConfig(t, `{"color_theme":"light","model":123}`)
+	darkConfig := writeMainConfig(t, `{"color_theme":"dark","model":123}`)
 	defaultHome := t.TempDir()
 	defaultConfig := filepath.Join(defaultHome, ".config", "harness", "config.json")
 	if err := os.MkdirAll(filepath.Dir(defaultConfig), 0o755); err != nil {
 		t.Fatalf("create default config directory: %v", err)
 	}
-	if err := os.WriteFile(defaultConfig, []byte(`{"color_theme":"light","repl_edit_mode":"invalid-for-full-load"}`), 0o644); err != nil {
+	if err := os.WriteFile(defaultConfig, []byte(`{"color_theme":"light","model":123}`), 0o644); err != nil {
 		t.Fatalf("write default config: %v", err)
 	}
 
@@ -2868,6 +2900,79 @@ func TestRunSessionReplayResolvesLightThemeWithoutModelConfig(t *testing.T) {
 			}
 			if got := out.String(); !strings.Contains(got, "\x1b[38;2;0;0;255mfunc") {
 				t.Fatalf("replay output missing light-theme keyword color: %q", got)
+			}
+		})
+	}
+}
+
+func TestRunSessionReplayRepeatedValueFlagsUseFinalValue(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	if err := session.AppendEvent(dir, session.Event{Type: session.EventAssistantDelta, Turn: 1, Text: "```go\nfunc main() {}\n```\n"}); err != nil {
+		t.Fatalf("append event: %v", err)
+	}
+	lightConfig := writeMainConfig(t, `{"color_theme":"light","model":123}`)
+	darkConfig := writeMainConfig(t, `{"color_theme":"dark"}`)
+	missingConfig := filepath.Join(t.TempDir(), "missing.json")
+
+	tests := []struct {
+		name        string
+		args        []string
+		env         map[string]string
+		wantCode    int
+		wantKeyword string
+		wantError   string
+	}{
+		{
+			name:        "final config path is valid",
+			args:        []string{"--config", missingConfig, "--config", lightConfig, dir},
+			wantCode:    ui.ExitOK,
+			wantKeyword: "\x1b[38;2;0;0;255mfunc",
+		},
+		{
+			name:      "final config path is missing",
+			args:      []string{"--config", lightConfig, "--config", missingConfig, dir},
+			wantCode:  ui.ExitUsage,
+			wantError: missingConfig,
+		},
+		{
+			name:        "mixed config and theme forms",
+			args:        []string{"--config=" + darkConfig, "--config", lightConfig, "--color-theme=dark", "--color-theme", "light", dir},
+			wantCode:    ui.ExitOK,
+			wantKeyword: "\x1b[38;2;0;0;255mfunc",
+		},
+		{
+			name:      "repeated theme final value is empty",
+			args:      []string{"--color-theme", "dark", "--color-theme=", dir},
+			env:       map[string]string{"HARNESS_COLOR_THEME": "light"},
+			wantCode:  ui.ExitUsage,
+			wantError: "color_theme must be dark or light",
+		},
+		{
+			name:      "empty theme overrides config",
+			args:      []string{"--config", lightConfig, "--color-theme=", dir},
+			wantCode:  ui.ExitUsage,
+			wantError: "color_theme must be dark or light",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, errw bytes.Buffer
+			code := run(environment{
+				args:     append([]string{"session", "replay"}, tt.args...),
+				stdout:   &out,
+				stderr:   &errw,
+				colorTTY: true,
+				getenv:   func(key string) string { return tt.env[key] },
+			})
+			if code != tt.wantCode {
+				t.Fatalf("exit = %d, want %d; stdout=%q stderr=%q", code, tt.wantCode, out.String(), errw.String())
+			}
+			if tt.wantKeyword != "" && !strings.Contains(out.String(), tt.wantKeyword) {
+				t.Fatalf("replay output missing final theme color %q: %q", tt.wantKeyword, out.String())
+			}
+			if tt.wantError != "" && !strings.Contains(errw.String(), tt.wantError) {
+				t.Fatalf("stderr = %q, want %q", errw.String(), tt.wantError)
 			}
 		})
 	}
@@ -2924,7 +3029,7 @@ func TestRunSessionReplayConfigReadErrorsAreUsageErrors(t *testing.T) {
 	}
 }
 
-func TestRunSessionReplayColorSuppressionWithLightTheme(t *testing.T) {
+func TestRunSessionReplayColorEnvironmentSemantics(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	if err := session.AppendEvent(dir, session.Event{Type: session.EventAssistantDelta, Turn: 1, Text: "```go\nfunc main() {}\n```\n"}); err != nil {
 		t.Fatalf("append event: %v", err)
@@ -2933,9 +3038,15 @@ func TestRunSessionReplayColorSuppressionWithLightTheme(t *testing.T) {
 		name     string
 		env      map[string]string
 		colorTTY bool
+		wantANSI bool
 	}{
-		{name: "NO_COLOR", env: map[string]string{"NO_COLOR": "set"}, colorTTY: true},
-		{name: "HARNESS_NO_COLOR", env: map[string]string{"HARNESS_NO_COLOR": "false"}, colorTTY: true},
+		{name: "NO_COLOR=1", env: map[string]string{"NO_COLOR": "1"}, colorTTY: true},
+		{name: "NO_COLOR=false", env: map[string]string{"NO_COLOR": "false"}, colorTTY: true},
+		{name: "HARNESS_NO_COLOR=true", env: map[string]string{"HARNESS_NO_COLOR": "true"}, colorTTY: true},
+		{name: "HARNESS_NO_COLOR=false", env: map[string]string{"HARNESS_NO_COLOR": "false"}, colorTTY: true, wantANSI: true},
+		{name: "malformed HARNESS_NO_COLOR", env: map[string]string{"HARNESS_NO_COLOR": "not-a-bool"}, colorTTY: true, wantANSI: true},
+		{name: "empty HARNESS_NO_COLOR", env: map[string]string{"HARNESS_NO_COLOR": ""}, colorTTY: true, wantANSI: true},
+		{name: "no variables", colorTTY: true, wantANSI: true},
 		{name: "non-TTY", colorTTY: false},
 	}
 	for _, tt := range tests {
@@ -2951,8 +3062,12 @@ func TestRunSessionReplayColorSuppressionWithLightTheme(t *testing.T) {
 			if code != ui.ExitOK {
 				t.Fatalf("exit = %d; stderr=%q", code, errw.String())
 			}
-			if strings.Contains(out.String(), "\x1b[") || !strings.Contains(out.String(), "func main") {
-				t.Fatalf("suppressed replay output = %q", out.String())
+			got := out.String()
+			if hasANSI := strings.Contains(got, "\x1b["); hasANSI != tt.wantANSI {
+				t.Fatalf("ANSI present = %t, want %t; output=%q", hasANSI, tt.wantANSI, got)
+			}
+			if !strings.Contains(got, "func") || !strings.Contains(got, "main") {
+				t.Fatalf("replay output missing code: %q", got)
 			}
 		})
 	}
@@ -2988,9 +3103,10 @@ func TestRunSessionReplayFlagErrorsAndHelp(t *testing.T) {
 	}
 
 	for name, args := range map[string][]string{
-		"unknown flag": {"session", "replay", "--bogus"},
-		"missing path": {"session", "replay"},
-		"extra path":   {"session", "replay", "one", "two"},
+		"unknown flag":    {"session", "replay", "--bogus"},
+		"missing path":    {"session", "replay"},
+		"extra path":      {"session", "replay", "one", "two"},
+		"flag after path": {"session", "replay", "one", "--quiet"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var out, errw bytes.Buffer

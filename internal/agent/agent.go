@@ -249,8 +249,9 @@ type SteerInput struct {
 }
 
 // TurnUsage is the accounting for one conversational turn. A turn contains one
-// successful provider response (plus any retry attempts) and the complete tool
-// result batch requested by that response.
+// accepted provider response (plus any transport retries or discarded
+// request-shape attempts) and the complete tool result batch requested by that
+// response.
 type TurnUsage struct {
 	Turn     int
 	Attempts int
@@ -266,9 +267,9 @@ type PromptUsage struct {
 	// Maintenance is the subset of Usage spent on model calls that are not
 	// conversational turns, such as automatic compaction.
 	Maintenance llm.Usage
-	// Wasted is the subset of Usage spent on turn attempts that were
-	// discarded and re-requested after a mid-stream failure (r51+r52). It is
-	// already included in Usage; surfacing it lets the UI show the retry cost.
+	// Wasted is the subset of Usage spent on turn attempts discarded after a
+	// mid-stream failure or a compatibility/request-shape rebuild. It is already
+	// included in Usage; surfacing it lets the UI show the retry cost.
 	Wasted            llm.Usage
 	Context           ContextEstimate
 	TerminationReason TerminationReason
@@ -792,9 +793,10 @@ func (a *Agent) ContextRequest() llm.Request {
 // the message shape used by RunPromptContentWithContext. EstimatedInputTokens
 // is the current estimate anchored to the last measured turn when one exists.
 func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
+	messages := a.providerVisibleMessages(a.transcript)
 	est := a.anchorContextEstimate(estimateRequest(llm.Request{
 		System:         a.system,
-		Messages:       a.transcript,
+		Messages:       messages,
 		Tools:          a.toolSpecs,
 		ServerTools:    a.serverTools,
 		RequestContext: extraContext,
@@ -803,14 +805,14 @@ func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 		Model:                a.model,
 		Purpose:              llm.RequestPurposeTurn,
 		System:               a.system,
-		Messages:             append([]llm.Message(nil), a.transcript...),
+		Messages:             append([]llm.Message(nil), messages...),
 		Tools:                cloneToolSpecs(a.toolSpecs),
 		ServerTools:          cloneServerTools(a.serverTools),
 		Reasoning:            a.reasoning,
 		RequestContext:       append([]string(nil), extraContext...),
 		ProxySessionID:       a.proxySessionID,
 		CacheAffinityID:      a.cacheAffinityID,
-		CachePolicy:          a.cachePolicyForTranscript(a.transcript, 0, false),
+		CachePolicy:          a.cachePolicyForTranscript(messages, 0, false),
 		EstimatedInputTokens: est.Total,
 	}
 }
@@ -1040,7 +1042,7 @@ func (a *Agent) estimateContext(extraContext []string) ContextEstimate {
 }
 
 func (a *Agent) estimateContextForTranscript(extraContext []string, transcript []llm.Message) ContextEstimate {
-	transcript = a.filterReasoningReplay(transcript)
+	transcript = a.providerVisibleMessages(transcript)
 	est := estimateRequest(llm.Request{
 		System:         a.system,
 		Messages:       transcript,
@@ -1093,6 +1095,56 @@ type TurnAttemptAbandonSink interface {
 	TurnAttemptAbandoned(turn, attempt int)
 }
 
+// turnAttemptCoordinator keeps physical attempt IDs and discarded billed usage
+// continuous across request-shape rebuilds within one logical turn. Each rebuilt
+// request receives a fresh local transport-retry budget.
+type turnAttemptCoordinator struct {
+	agent     *Agent
+	sink      EventSink
+	turn      int
+	next      int
+	wasted    llm.Usage
+	abandoned map[int]bool
+}
+
+func newTurnAttemptCoordinator(a *Agent, sink EventSink, turn int) *turnAttemptCoordinator {
+	return &turnAttemptCoordinator{
+		agent:     a,
+		sink:      sink,
+		turn:      turn,
+		next:      1,
+		abandoned: make(map[int]bool),
+	}
+}
+
+func (c *turnAttemptCoordinator) request(ctx context.Context, req llm.Request, estimate ContextEstimate) (turnResult, error) {
+	res, wasted, err := c.agent.streamWithRetry(ctx, req, c.sink, c.turn, c.next, estimate)
+	c.wasted = add(c.wasted, wasted)
+	if res.attempts >= c.next {
+		c.next = res.attempts + 1
+	}
+	return res, err
+}
+
+func (c *turnAttemptCoordinator) rerun(ctx context.Context, previous turnResult, req llm.Request, estimate ContextEstimate) (turnResult, error) {
+	if err := ctx.Err(); err != nil {
+		return previous, err
+	}
+	c.abandon(previous)
+	return c.request(ctx, req, estimate)
+}
+
+func (c *turnAttemptCoordinator) abandon(res turnResult) {
+	if res.attempts <= 0 || c.abandoned[res.attempts] {
+		return
+	}
+	c.abandoned[res.attempts] = true
+	c.wasted = add(c.wasted, res.usage)
+	if abandon, ok := c.sink.(TurnAttemptAbandonSink); ok {
+		abandon.TurnAttemptAbandoned(c.turn, res.attempts)
+	}
+}
+
 func (a *Agent) modelRequest(requestContext []string) modelRequest {
 	return a.modelRequestForTranscript(requestContext, a.transcript)
 }
@@ -1100,8 +1152,9 @@ func (a *Agent) modelRequest(requestContext []string) modelRequest {
 func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []llm.Message) modelRequest {
 	payloadMessages, usedPrevious := a.payloadMessagesIn(transcript)
 	payloadStart := len(transcript) - len(payloadMessages)
-	payloadMessages = a.filterReasoningReplay(payloadMessages)
-	estimate := a.estimatePayloadContextForTranscript(requestContext, transcript, payloadMessages)
+	visibleTranscript := a.providerVisibleMessages(transcript)
+	payloadMessages = a.providerVisibleMessages(payloadMessages)
+	estimate := a.estimatePayloadContextForTranscript(requestContext, visibleTranscript, payloadMessages)
 	req := llm.Request{
 		Model:                a.model,
 		Purpose:              llm.RequestPurposeTurn,
@@ -1115,7 +1168,7 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 		RequestContext:       append([]string(nil), requestContext...),
 		ProxySessionID:       a.proxySessionID,
 		CacheAffinityID:      a.cacheAffinityID,
-		CachePolicy:          a.cachePolicyForTranscript(transcript, payloadStart, false),
+		CachePolicy:          a.cachePolicyForTranscript(visibleTranscript, payloadStart, false),
 		EstimatedInputTokens: estimate.Total,
 		ContextWindowHint:    estimate.Window,
 	}
@@ -1142,10 +1195,10 @@ func providerOwnedReasoningBlock(kind llm.BlockKind) bool {
 	}
 }
 
-// filterReasoningReplay returns request-only copies when a transcript contains
-// opaque reasoning that is incompatible with the selected target. The durable
-// transcript is never mutated.
-func (a *Agent) filterReasoningReplay(messages []llm.Message) []llm.Message {
+// providerVisibleMessages returns request-only copies when messages contain
+// opaque reasoning that is incompatible with the selected target. Every
+// provider boundary uses this helper; the durable transcript is never mutated.
+func (a *Agent) providerVisibleMessages(messages []llm.Message) []llm.Message {
 	domain := a.reasoningReplayDomain
 	disabled := a.disabledReasoningReplay[domain]
 	var out []llm.Message
@@ -1198,7 +1251,13 @@ func (a *Agent) disableCurrentReasoningReplay() {
 	if a.disabledReasoningReplay == nil {
 		a.disabledReasoningReplay = make(map[string]bool)
 	}
-	a.disabledReasoningReplay[a.reasoningReplayDomain] = true
+	domain := a.reasoningReplayDomain
+	if a.disabledReasoningReplay[domain] {
+		return
+	}
+	a.disabledReasoningReplay[domain] = true
+	a.compactionRuntimeVersion++
+	a.retentionEpochArmed = true
 	a.resetResponseState()
 }
 
@@ -1562,7 +1621,8 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			reportRetention(sink, retention.event)
 		}
 		checkpoint(PromptCheckpointRequestBoundary)
-		res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
+		attempts := newTurnAttemptCoordinator(a, sink, turns+1)
+		res, err := attempts.request(ctx, modelReq.request, lastContext)
 		if err != nil && !res.hasPartialOutput() {
 			if learned, ok := contextOverflowWindow(err); ok {
 				if learned > 0 && a.observeContextWindow(learned) {
@@ -1593,7 +1653,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 						modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 						appendBoundary = len(a.transcript)
 						lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
-						res, wasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
+						res, err = attempts.rerun(ctx, res, modelReq.request, lastContext)
 					}
 				}
 			}
@@ -1603,18 +1663,18 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			sink.Notice("[responses state disabled: provider rejected stored responses; retrying stateless]")
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
-			var retryWasted llm.Usage
-			res, retryWasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
-			wasted = add(wasted, retryWasted)
+
+			res, err = attempts.rerun(ctx, res, modelReq.request, lastContext)
+
 		}
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
 			a.resetResponseState()
 			sink.Notice("[responses state reset: previous response unavailable; retrying with full context]")
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
-			var retryWasted llm.Usage
-			res, retryWasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
-			wasted = add(wasted, retryWasted)
+
+			res, err = attempts.rerun(ctx, res, modelReq.request, lastContext)
+
 		}
 		if err != nil &&
 			!res.hasPartialOutput() &&
@@ -1624,10 +1684,11 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			sink.Notice("[reasoning replay disabled: provider rejected encrypted content; retrying without opaque reasoning]")
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
-			var retryWasted llm.Usage
-			res, retryWasted, err = a.streamWithRetry(ctx, modelReq.request, sink, turns+1, lastContext)
-			wasted = add(wasted, retryWasted)
+
+			res, err = attempts.rerun(ctx, res, modelReq.request, lastContext)
+
 		}
+		wasted := attempts.wasted
 		wastedTotal = add(wastedTotal, wasted)
 		total = add(total, add(res.usage, wasted))
 		// Context-size signal, not billing: cached tokens occupy the window too.
@@ -1789,8 +1850,9 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		if guard.shouldBreakErrors() {
 			terminationReason = TerminationErrorGuard
 			sink.Notice(errorStormNotice(guard.errorRuns))
-			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
+			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
 			total = add(total, fu)
+			wastedTotal = add(wastedTotal, fw)
 			lastContext = fctx
 			if completed {
 				turns++
@@ -1808,8 +1870,9 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		if guard.shouldBreakRepeat() {
 			terminationReason = TerminationRepeatGuard
 			sink.Notice(repeatLoopNotice(guard.repeatRuns))
-			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
+			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
 			total = add(total, fu)
+			wastedTotal = add(wastedTotal, fw)
 			lastContext = fctx
 			if completed {
 				turns++
@@ -1865,8 +1928,9 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		if !unlimited && turns >= a.maxTurns {
 			terminationReason = TerminationTurnLimit
 			sink.Notice(maxTurnsNotice(a.maxTurns))
-			fu, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
+			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
 			total = add(total, fu)
+			wastedTotal = add(wastedTotal, fw)
 			lastContext = fctx
 			if completed {
 				turns++
@@ -2006,15 +2070,26 @@ func reportMaintenance(sink EventSink, purpose string, usage llm.Usage) {
 // the summary text is appended, so no unanswered tool_use can be created. It
 // gathers fresh request-only context for this distinct model round and returns
 // the request's usage (counted toward the turn total) and estimate.
-func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraContext []string, turn int) (llm.Usage, ContextEstimate, bool) {
-	modelReq := a.modelRequest(a.requestContext(extraContext, sink))
+func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraContext []string, turn int) (llm.Usage, llm.Usage, ContextEstimate, bool) {
+	requestContext := a.requestContext(extraContext, sink)
+	modelReq := a.modelRequest(requestContext)
 	modelReq.request.Tools = nil // no tools: force a text-only wind-down
 	modelReq.request.ServerTools = nil
-	res, wasted, err := a.streamWithRetry(ctx, modelReq.request, sink, turn, modelReq.estimate)
+	attempts := newTurnAttemptCoordinator(a, sink, turn)
+	res, err := attempts.request(ctx, modelReq.request, modelReq.estimate)
+	if err != nil && !res.hasPartialOutput() && hasProviderOwnedReasoning(modelReq.request.Messages) && invalidEncryptedContent(err) {
+		a.disableCurrentReasoningReplay()
+		sink.Notice("[reasoning replay disabled: provider rejected encrypted content; retrying without opaque reasoning]")
+		modelReq = a.modelRequest(requestContext)
+		modelReq.request.Tools = nil
+		modelReq.request.ServerTools = nil
+		res, err = attempts.rerun(ctx, res, modelReq.request, modelReq.estimate)
+	}
+	wasted := attempts.wasted
 	usage := add(res.usage, wasted)
 	if err != nil {
 		a.resetResponseState()
-		return usage, modelReq.estimate, false
+		return usage, wasted, modelReq.estimate, false
 	}
 	if strings.TrimSpace(res.text) != "" {
 		msg := a.textMessage(llm.RoleAssistant, res.text)
@@ -2023,7 +2098,7 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraCo
 		a.updateResponseState(res)
 	}
 	sink.TurnComplete(TurnUsage{Turn: turn, Attempts: res.attempts, Usage: usage, Wasted: wasted, Context: modelReq.estimate})
-	return usage, modelReq.estimate, true
+	return usage, wasted, modelReq.estimate, true
 }
 
 // dispatchCalls runs one turn's tool calls. Consecutive read-only calls
@@ -2511,23 +2586,24 @@ func toolResponsePayload(r llm.ToolResult) map[string]any {
 	}
 }
 
-// streamWithRetry runs stream, re-requesting the turn from scratch when it
-// fails mid-flight with a retryable error. Partial output from a failed
-// attempt is never committed to the transcript; wasted carries the usage
-// failed attempts reported (paid for, so counted) — it never drives the
-// compaction trigger.
-func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink EventSink, turn int, estimate ContextEstimate) (res turnResult, wasted llm.Usage, err error) {
+// streamWithRetry runs one request shape, re-requesting it from scratch when it
+// fails mid-flight with a retryable error. startAttempt keeps physical attempt
+// IDs absolute across compatibility/request-shape reruns. Partial output from a
+// failed attempt is never committed; wasted carries billed usage from local
+// transport retries and never drives the compaction trigger.
+func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink EventSink, turn, startAttempt int, estimate ContextEstimate) (res turnResult, wasted llm.Usage, err error) {
 	if err := validateRequestImageContent(req.Messages); err != nil {
 		return turnResult{}, llm.Usage{}, fmt.Errorf("validate model request images: %w", err)
 	}
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return turnResult{}, wasted, err
+			return res, wasted, err
 		}
-		sink.TurnAttemptStart(turn, attempt+1, estimate)
+		physicalAttempt := startAttempt + attempt
+		sink.TurnAttemptStart(turn, physicalAttempt, estimate)
 		res, err = a.stream(ctx, req, sink)
-		res.attempts = attempt + 1
-		sink.TurnAttemptComplete(TurnAttemptUsage{Turn: turn, Attempt: attempt + 1, Usage: res.usage})
+		res.attempts = physicalAttempt
+		sink.TurnAttemptComplete(TurnAttemptUsage{Turn: turn, Attempt: physicalAttempt, Usage: res.usage})
 		if err == nil || attempt >= streamRetries || !retryableStreamError(err) {
 			return res, wasted, err
 		}
@@ -2539,12 +2615,12 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 		delay := retry.Next(attempt, retryAfter)
 		retryEvent := modelRequestEventFromError(err, llm.ModelRequestRetryScheduled)
 		retryEvent.Outcome = ""
-		retryEvent.Attempt = attempt + 2
-		retryEvent.MaxAttempts = streamRetries + 1
+		retryEvent.Attempt = physicalAttempt + 1
+		retryEvent.MaxAttempts = startAttempt + streamRetries
 		retryEvent.RetryDelayMS = delay.Milliseconds()
 		emitModelRequestEvent(sink, retryEvent)
 		if abandon, ok := sink.(TurnAttemptAbandonSink); ok {
-			abandon.TurnAttemptAbandoned(turn, attempt+1)
+			abandon.TurnAttemptAbandoned(turn, physicalAttempt)
 		}
 		discarded := ""
 		if n := totalTokens(res.usage); n > 0 {
@@ -2552,7 +2628,15 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 		}
 		sink.Notice(fmt.Sprintf("[stream interrupted: %v; retrying turn in %s%s]", err, delay, discarded))
 		if serr := a.sleep(ctx, delay); serr != nil {
-			return turnResult{}, wasted, serr
+			// This physical attempt was already abandoned and moved into wasted.
+			// Preserve its terminal attempt/response metadata for diagnostics, but
+			// clear discarded output and usage so final accounting cannot count it
+			// again as an accepted terminal attempt.
+			res.text = ""
+			res.reasoning = nil
+			res.toolCalls = nil
+			res.usage = llm.Usage{}
+			return res, wasted, serr
 		}
 	}
 }
