@@ -22,12 +22,16 @@ type fakeTmux struct {
 	nextPaneID int
 	failNew    error
 	failSplit  error
+	hook       func(args []string) (string, error)
 }
 
 func (f *fakeTmux) run(_ context.Context, args ...string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, append([]string{}, args...))
+	if f.hook != nil {
+		return f.hook(args)
+	}
 	switch args[0] {
 	case "new-window":
 		if f.failNew != nil {
@@ -482,6 +486,102 @@ func TestViewerPaneStacksAdditionalDelegates(t *testing.T) {
 		{"kill-pane", "-t", "%1"},
 		{"kill-pane", "-t", "%3"},
 	})
+}
+
+func TestViewerPaneDoesNotTrackPaneThatDisappearsDuringSetup(t *testing.T) {
+	missingErr := errors.New("pane disappeared")
+	splits := 0
+	fake := &fakeTmux{}
+	fake.hook = func(args []string) (string, error) {
+		switch args[0] {
+		case "split-window":
+			splits++
+			return fmt.Sprintf("%%%d\n", splits), nil
+		case "select-pane":
+			if slices.Contains(args, "%1") {
+				return "", missingErr
+			}
+		case "list-panes":
+			return "", nil
+		}
+		return "", nil
+	}
+	viewer := NewViewer(Client{Binary: "/tmux", run: fake.run}, ViewerOptions{
+		HarnessBinary: "/harness",
+		MaxWindows:    4,
+		Layout:        LayoutPane,
+		ParentPane:    "%9",
+	})
+
+	if _, err := viewer.Open(View{Name: "gone", Dir: "/d1", Log: "a gone"}); !errors.Is(err, missingErr) {
+		t.Fatalf("Open vanished pane error = %v, want %v", err, missingErr)
+	}
+	h, err := viewer.Open(View{Name: "live", Dir: "/d2", Log: "a live"})
+	if err != nil {
+		t.Fatalf("Open after vanished pane: %v", err)
+	}
+	if h.ID() != "%2" {
+		t.Fatalf("replacement handle ID = %q, want %%2", h.ID())
+	}
+	h.Close()
+
+	calls := fake.recorded()
+	if got := countCallsWithTarget(calls, "split-window", "-h", "%9"); got != 2 {
+		t.Fatalf("horizontal parent splits = %d, want 2; calls: %v", got, calls)
+	}
+	if got := countCallsWithTarget(calls, "split-window", "-v", "%1"); got != 0 {
+		t.Fatalf("vertical splits from vanished pane = %d, want 0; calls: %v", got, calls)
+	}
+}
+
+func TestViewerPaneRetriesFromParentWhenStackTargetVanished(t *testing.T) {
+	splitErr := errors.New("split target disappeared")
+	splits := 0
+	fake := &fakeTmux{}
+	fake.hook = func(args []string) (string, error) {
+		switch args[0] {
+		case "split-window":
+			splits++
+			if slices.Contains(args, "%1") {
+				return "", splitErr
+			}
+			return fmt.Sprintf("%%%d\n", splits), nil
+		case "list-panes":
+			return "%9\n", nil
+		}
+		return "", nil
+	}
+	viewer := NewViewer(Client{Binary: "/tmux", run: fake.run}, ViewerOptions{
+		HarnessBinary: "/harness",
+		MaxWindows:    4,
+		Layout:        LayoutPane,
+		ParentPane:    "%9",
+	})
+
+	h1, err := viewer.Open(View{Name: "first", Dir: "/d1", Log: "a first"})
+	if err != nil {
+		t.Fatalf("Open first: %v", err)
+	}
+	h2, err := viewer.Open(View{Name: "second", Dir: "/d2", Log: "a second"})
+	if err != nil {
+		t.Fatalf("Open after stale split target: %v", err)
+	}
+	if h2.ID() != "%3" {
+		t.Fatalf("replacement handle ID = %q, want %%3", h2.ID())
+	}
+	h1.Close()
+	h2.Close()
+
+	calls := fake.recorded()
+	if got := countCallsWithTarget(calls, "split-window", "-v", "%1"); got != 1 {
+		t.Fatalf("vertical stale-target splits = %d, want 1; calls: %v", got, calls)
+	}
+	if got := countCallsWithTarget(calls, "split-window", "-h", "%9"); got != 2 {
+		t.Fatalf("horizontal parent splits = %d, want initial plus retry; calls: %v", got, calls)
+	}
+	if got := countCalls(calls, "kill-pane"); got != 1 {
+		t.Fatalf("kill-pane calls = %d, want only the replacement pane; calls: %v", got, calls)
+	}
 }
 
 // TestViewerPaneCapShared ensures the cap is checked while holding splitMu so

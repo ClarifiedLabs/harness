@@ -107,6 +107,22 @@ func (c Client) SplitPane(dirFlag, target string, windowCmd []string) (string, e
 	return id, nil
 }
 
+// paneExists reports whether id is present in a successful server-wide pane
+// listing. Listing globally distinguishes a missing target from a tmux server
+// failure without matching tmux's human-readable error text.
+func (c Client) paneExists(id string) (bool, error) {
+	out, err := c.output("list-panes", "-a", "-F", "#{pane_id}")
+	if err != nil {
+		return false, err
+	}
+	for _, paneID := range strings.Fields(out) {
+		if paneID == id {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // SetPaneOption sets one pane option on the pane with the given %id.
 func (c Client) SetPaneOption(id, name, value string) error {
 	_, err := c.output("set-option", "-p", "-q", "-t", id, name, value)
@@ -225,9 +241,9 @@ func NewViewer(client Client, opts ViewerOptions) *Viewer {
 }
 
 var (
-	errNilViewer   = errors.New("tmux: viewer unavailable")
+	errNilViewer    = errors.New("tmux: viewer unavailable")
 	errEmptyHarness = errors.New("tmux: harness binary path is empty")
-	errShutdown    = errors.New("tmux: viewer shut down")
+	errShutdown     = errors.New("tmux: viewer shut down")
 )
 
 // errWindowCap reports that the view cap rejected a new delegate view.
@@ -315,27 +331,61 @@ func (v *Viewer) openPane(view View) (*ViewHandle, error) {
 	v.splitMu.Lock()
 	defer v.splitMu.Unlock()
 
-	v.mu.Lock()
-	if v.closed {
+	var id string
+	for {
+		v.mu.Lock()
+		if v.closed {
+			v.mu.Unlock()
+			return nil, errShutdown
+		}
+		target := v.parentPane
+		horizontal := true
+		if n := len(v.order); n > 0 {
+			target = v.order[n-1]
+			horizontal = false
+		}
 		v.mu.Unlock()
-		return nil, errShutdown
-	}
-	target := v.parentPane
-	horizontal := true
-	if n := len(v.order); n > 0 {
-		target = v.order[n-1]
-		horizontal = false
-	}
-	v.mu.Unlock()
 
-	dirFlag := "-v"
-	if horizontal {
-		dirFlag = "-h"
-	}
-	id, err := v.client.SplitPane(dirFlag, target, []string{v.opts.HarnessBinary, "session", "replay", "--follow", "--", view.Dir})
-	if err != nil {
+		dirFlag := "-v"
+		if horizontal {
+			dirFlag = "-h"
+		}
+		var err error
+		id, err = v.client.SplitPane(dirFlag, target, []string{v.opts.HarnessBinary, "session", "replay", "--follow", "--", view.Dir})
+		if err == nil {
+			break
+		}
+		if target != v.parentPane {
+			missing, checkErr := v.forgetMissingPane(target)
+			if checkErr == nil && missing {
+				v.logDebug(fmt.Sprintf("tmux: discarded vanished delegate pane %s after split failure", target))
+				continue
+			}
+		}
 		v.logWarn(fmt.Sprintf("tmux: cannot open delegate pane for %s: %v", view.Log, err))
 		return nil, err
+	}
+
+	// Pane dressing is best-effort while the pane remains addressable. A failed
+	// rename can mean the pane command exited before remain-on-exit landed; do
+	// not register that vanished id as the target of future splits.
+	if err := v.client.SetPaneOption(id, "remain-on-exit", "on"); err != nil {
+		v.logDebug(fmt.Sprintf("tmux: cannot set remain-on-exit on %s: %v", id, err))
+	}
+	if renameErr := v.client.RenamePane(id, sanitizeWindowName(view.Name)); renameErr != nil {
+		v.logDebug(fmt.Sprintf("tmux: cannot name delegate pane %s: %v", id, renameErr))
+		exists, checkErr := v.client.paneExists(id)
+		if checkErr != nil {
+			v.killPane(id)
+			err := fmt.Errorf("tmux: cannot verify delegate pane %s after setup failure: %w", id, checkErr)
+			v.logWarn(fmt.Sprintf("tmux: cannot open delegate pane for %s: %v", view.Log, err))
+			return nil, err
+		}
+		if !exists {
+			err := fmt.Errorf("tmux: delegate pane %s disappeared during setup: %w", id, renameErr)
+			v.logWarn(fmt.Sprintf("tmux: cannot open delegate pane for %s: %v", view.Log, err))
+			return nil, err
+		}
 	}
 
 	handle := &ViewHandle{viewer: v, id: id}
@@ -350,20 +400,29 @@ func (v *Viewer) openPane(view View) (*ViewHandle, error) {
 	even := len(v.open) >= 2
 	v.mu.Unlock()
 
-	// Pane dressing is best-effort: failures leave a working but
-	// untitled pane.
-	if err := v.client.SetPaneOption(id, "remain-on-exit", "on"); err != nil {
-		v.logDebug(fmt.Sprintf("tmux: cannot set remain-on-exit on %s: %v", id, err))
-	}
-	if err := v.client.RenamePane(id, sanitizeWindowName(view.Name)); err != nil {
-		v.logDebug(fmt.Sprintf("tmux: cannot name delegate pane %s: %v", id, err))
-	}
 	if even {
 		if err := v.client.EvenOut(id); err != nil {
 			v.logDebug(fmt.Sprintf("tmux: cannot even out pane %s: %v", id, err))
 		}
 	}
 	return handle, nil
+}
+
+// forgetMissingPane drops id from the tracked stack only when a successful
+// server-wide listing proves that it no longer exists. splitMu must be held.
+func (v *Viewer) forgetMissingPane(id string) (bool, error) {
+	exists, err := v.client.paneExists(id)
+	if err != nil || exists {
+		return false, err
+	}
+	v.mu.Lock()
+	_, tracked := v.open[id]
+	if tracked {
+		delete(v.open, id)
+		v.order = removeString(v.order, id)
+	}
+	v.mu.Unlock()
+	return tracked, nil
 }
 
 // ViewHandle owns one open delegate view. Close is idempotent.

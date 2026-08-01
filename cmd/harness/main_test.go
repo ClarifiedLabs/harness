@@ -4057,6 +4057,74 @@ func TestRunDelegateTmuxOpensWindowWithFakeTmux(t *testing.T) {
 	}
 }
 
+func TestResolveHarnessLauncherPreservesUpgradeStableSymlink(t *testing.T) {
+	root := t.TempDir()
+	stable := filepath.Join(root, "bin", "harness")
+	oldBin := filepath.Join(root, "Cellar", "harness", "0.4.3", "bin", "harness")
+	newBin := filepath.Join(root, "Cellar", "harness", "0.4.4", "bin", "harness")
+	for _, bin := range []string{oldBin, newBin} {
+		if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", bin, err)
+		}
+		if err := os.WriteFile(bin, []byte("binary"), 0o755); err != nil {
+			t.Fatalf("write %s: %v", bin, err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(stable), 0o755); err != nil {
+		t.Fatalf("mkdir stable bin dir: %v", err)
+	}
+	oldTarget, err := filepath.Rel(filepath.Dir(stable), oldBin)
+	if err != nil {
+		t.Fatalf("relative old target: %v", err)
+	}
+	if err := os.Symlink(oldTarget, stable); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Setenv("PATH", filepath.Dir(stable))
+
+	for _, argv0 := range []string{stable, "harness"} {
+		got, err := resolveHarnessLauncher(argv0)
+		if err != nil {
+			t.Fatalf("resolveHarnessLauncher(%q): %v", argv0, err)
+		}
+		if got != stable {
+			t.Fatalf("resolveHarnessLauncher(%q) = %q, want stable link %q", argv0, got, stable)
+		}
+	}
+
+	if err := os.RemoveAll(filepath.Join(root, "Cellar", "harness", "0.4.3")); err != nil {
+		t.Fatalf("remove old version: %v", err)
+	}
+	if err := os.Remove(stable); err != nil {
+		t.Fatalf("remove old stable link: %v", err)
+	}
+	newTarget, err := filepath.Rel(filepath.Dir(stable), newBin)
+	if err != nil {
+		t.Fatalf("relative new target: %v", err)
+	}
+	if err := os.Symlink(newTarget, stable); err != nil {
+		t.Fatalf("retarget stable link: %v", err)
+	}
+	if _, err := os.Stat(stable); err != nil {
+		t.Fatalf("resolved launcher should survive link retarget: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(stable)
+	if err != nil {
+		t.Fatalf("resolve retargeted stable link: %v", err)
+	}
+	resolvedInfo, err := os.Stat(resolved)
+	if err != nil {
+		t.Fatalf("stat resolved stable link: %v", err)
+	}
+	newInfo, err := os.Stat(newBin)
+	if err != nil {
+		t.Fatalf("stat new version: %v", err)
+	}
+	if !os.SameFile(resolvedInfo, newInfo) {
+		t.Fatalf("retargeted stable link resolves to %q, want %q", resolved, newBin)
+	}
+}
+
 // Inside tmux with the default pane layout a right-hand pane splits from the
 // parent and closes on success. A fake tmux on PATH records the real argv.
 func TestRunDelegateTmuxOpensPaneWithFakeTmux(t *testing.T) {

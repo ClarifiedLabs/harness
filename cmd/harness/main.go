@@ -1905,6 +1905,22 @@ func configAgentsFromDefinitions(agents map[string]agentdef.Definition) map[stri
 	return out
 }
 
+// resolveHarnessLauncher returns the path used to launch this process without
+// resolving symlinks. Package-manager links such as /opt/homebrew/bin/harness
+// survive upgrades even when their current versioned target does not.
+func resolveHarnessLauncher(argv0 string) (string, error) {
+	argv0 = strings.TrimSpace(argv0)
+	if argv0 != "" {
+		if strings.ContainsRune(argv0, rune(os.PathSeparator)) {
+			return filepath.Abs(argv0)
+		}
+		if path, err := exec.LookPath(argv0); err == nil {
+			return path, nil
+		}
+	}
+	return os.Executable()
+}
+
 // setupDelegateTmuxViewer builds the tmux delegate-view viewer when
 // delegate_tmux is enabled. The feature is display-only: any setup failure
 // degrades to a nil viewer plus one stderr warning when delegate_tmux was
@@ -1924,14 +1940,9 @@ func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stde
 		warnf("delegate_tmux is enabled but TMUX is not set; delegate views disabled")
 		return nil
 	}
-	// os.Executable may resolve through a symlink (Homebrew); EvalSymlinks
-	// makes the path the view command runs stable.
-	harnessBin, err := os.Executable()
-	if err == nil {
-		if resolved, resolveErr := filepath.EvalSymlinks(harnessBin); resolveErr == nil {
-			harnessBin = resolved
-		}
-	}
+	// Preserve the invocation path rather than a versioned package-manager
+	// target so long-running sessions keep working across in-place upgrades.
+	harnessBin, err := resolveHarnessLauncher(os.Args[0])
 	tmuxBin, lookErr := exec.LookPath("tmux")
 	if err != nil || lookErr != nil {
 		warnf("delegate_tmux is enabled but the harness or tmux binary could not be resolved; delegate views disabled")
