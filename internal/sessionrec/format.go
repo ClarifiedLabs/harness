@@ -198,12 +198,12 @@ func decodedBase64Size(data string) int {
 
 // UsageLine renders the per-prompt summary with cumulative totals (design §10):
 //
-//	[prompt: 3 turns · 12.4k (15.0k) in / 1.8k (2.0k) out · $0.071 ($0.102) · 4.3s]
+//	[prompt: 3 turns · 12.4k (15.0k) in / 1.8k (2.0k) out · $0.071 ($0.102) · ctx 15.0k/128.0k · compactions 1 (2 total) · 4.3s]
 //
 // Per-prompt values are shown first; parenthesised values are cumulative across
 // the session. Cumulative cost is omitted for models with no price entry;
 // per-prompt cost is also omitted when the model has no price entry.
-func UsageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKnown bool, cumIn, cumOut int, cumCost float64) string {
+func UsageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKnown bool, cumIn, cumOut int, cumCost float64, cumCompactions int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[prompt: %s · %s (%s) in / %s (%s) out",
 		TurnPhrase(u.Turns),
@@ -236,8 +236,25 @@ func UsageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKno
 				HumanTokens(u.Context.System), HumanTokens(u.Context.Tools), HumanTokens(u.Context.Messages))
 		}
 	}
+	writePromptCompactions(&b, u.Compactions, cumCompactions)
 	fmt.Fprintf(&b, " · %s]", HumanDuration(elapsed))
 	return b.String()
+}
+
+func writePromptCompactions(b *strings.Builder, prompt, total int) {
+	if total <= 0 {
+		return
+	}
+	if prompt >= 1 {
+		fmt.Fprintf(b, " · compactions %d", prompt)
+		if total >= 2 {
+			fmt.Fprintf(b, " (%d total)", total)
+		}
+		return
+	}
+	if total >= 2 {
+		fmt.Fprintf(b, " · compactions %d total", total)
+	}
 }
 
 // TurnUsageLine renders the per-turn summary:

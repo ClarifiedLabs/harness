@@ -267,8 +267,9 @@ func sampleSession() Session {
 			}},
 		},
 		Usage: UsageTotals{
-			Usage:   llm.Usage{InputTokens: 1200, OutputTokens: 340, CacheReadTokens: 800, CacheWriteTokens: 0},
-			CostUSD: 0.0123,
+			Usage:       llm.Usage{InputTokens: 1200, OutputTokens: 340, CacheReadTokens: 800, CacheWriteTokens: 0},
+			CostUSD:     0.0123,
+			Compactions: 2,
 		},
 	}
 }
@@ -326,6 +327,9 @@ func TestSessionRoundTripsPlansAndUsageByModel(t *testing.T) {
 	}
 	if got.CacheAffinityID != "harness-cache-test" {
 		t.Errorf("cache_affinity_id = %q, want harness-cache-test", got.CacheAffinityID)
+	}
+	if got.Usage.Compactions != 2 {
+		t.Errorf("compactions = %d, want 2", got.Usage.Compactions)
 	}
 }
 

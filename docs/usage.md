@@ -79,9 +79,9 @@ harness -p "summarize:" < notes.txt
 ```
 
 At the end of a one-shot run harness prints a `[session summary: …]` cost line to
-stderr (cumulative input/cached/output/reasoning tokens and total cost). This
-summary bypasses `-q`/`--quiet`, so a quiet one-shot run still reports what it
-spent.
+stderr (cumulative input/cached/output/reasoning tokens, the always-present
+successful-compaction count, and total cost, in that order). This summary
+bypasses `-q`/`--quiet`, so a quiet one-shot run still reports what it spent.
 
 Exit codes: `0` completed, `1` runtime error, `2` usage error, `130`
 interrupted. When an admitted prompt fails with an error carrying a concrete
@@ -104,7 +104,8 @@ unchanged; `-q`, `-v`, and `-tool-stream` remain stderr-only.
 - Each submitted one-shot prompt is bracketed by `prompt_start`/`prompt_end`
   envelopes, including a prompt rejected by skill or hook preflight.
   `prompt_end` carries `exit_code`, `termination_reason`, a
-  `usage` summary (`input_tokens`/`output_tokens`/`cost_usd`/`turns`), and
+  `usage` summary
+  (`input_tokens`/`output_tokens`/`cost_usd`/`turns`/`compactions`), and
   `final_text` containing only assistant text emitted for that prompt (empty
   when it emitted none; never copied from an earlier session turn).
 - Between the envelopes: the same durable `session.Event` objects the session
@@ -369,8 +370,12 @@ Harness uses these terms consistently:
   and optional branch summaries are accounted separately and never increment
   the turn count.
 
-While a prompt runs, status uses `[turn: N … │ prompt …]`; completion uses
-`[prompt: N turns …]`. On an interactive TTY, active delegates are included in
+While a prompt runs, status uses `[turn: N … │ prompt …]`; completion places an
+optional compaction segment immediately after `ctx …` and before elapsed time.
+The prompt count appears only when it is at least 1, the cumulative total appears
+only when it is at least 2, and the whole segment is omitted when neither value
+qualifies. For example: `ctx … · compactions 1 (3 total) · 4.3s`. On an
+interactive TTY, active delegates are included in
 that same transient row as `delegate d1 <agent>: <activity>`. Concurrent runs
 show the count and most recently active child, for example
 `3 delegates · latest d2 plan: tool read_file path="docs/usage.md"`. Background
@@ -1157,7 +1162,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/clone` | copy the current branch into a new session with fresh usage accounting |
 | `/context` | dump the current provider-neutral model context as JSON |
 | `/context <file>` | save the current provider-neutral model context as JSON |
-| `/usage` | cumulative input, cached input, output, reasoning tokens, and cost |
+| `/usage` | cumulative input, cached input, output, reasoning tokens, cost, and successful compactions |
 | `/tools` | list enabled built-in and MCP tools with descriptions, plus disabled optional tools |
 | `/image` | list images queued for the next prompt |
 | `/image <path>` | attach an image to the next prompt |
@@ -1198,7 +1203,8 @@ and default-rate cache writes in session totals and token budgets.
 An unknown `/command` prints a `did you mean <command>?` suggestion (nearest known
 command by edit distance) instead of failing silently. The per-prompt usage line
 appends cache-read and reasoning token counts (with the cache-hit ratio) when they
-are non-zero, and a model with no configured price prints a one-time
+are non-zero, conditionally places compaction counters after context usage, and a
+model with no configured price prints a one-time
 `[note: no price configured …]` notice instead of silently dropping cost.
 
 ### Waiting and typing during a prompt

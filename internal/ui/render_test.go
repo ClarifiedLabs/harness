@@ -635,7 +635,7 @@ func TestTurnAttemptCompleteDoesNotPrintCostCheckpoints(t *testing.T) {
 			},
 		}),
 	})
-	r.SetCumulativeUsage(0, 0, 1.25)
+	r.SetCumulativeUsage(0, 0, 1.25, 0)
 	r.StartPromptRun()
 
 	r.TurnAttemptComplete(agent.TurnAttemptUsage{
@@ -1636,11 +1636,45 @@ func TestLiveInputLineSanitizesNewlines(t *testing.T) {
 	}
 }
 
+func TestUsageLineConditionallyShowsCompactionsAfterContext(t *testing.T) {
+	tests := []struct {
+		name   string
+		prompt int
+		total  int
+		want   string
+	}{
+		{name: "none", total: 0},
+		{name: "single previous prompt omitted", total: 1},
+		{name: "single current prompt", prompt: 1, total: 1, want: " · compactions 1"},
+		{name: "session total only", total: 2, want: " · compactions 2 total"},
+		{name: "current and total", prompt: 1, total: 3, want: " · compactions 1 (3 total)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			line := usageLine(agent.PromptUsage{
+				Turns:       2,
+				Compactions: tt.prompt,
+				Context:     agent.ContextEstimate{Total: 100, Window: 1000},
+			}, time.Second, 0.5, true, 0, 0, 0.5, tt.total)
+			if tt.want == "" {
+				if strings.Contains(line, "compaction") {
+					t.Fatalf("usage line should omit compactions, got %q", line)
+				}
+				return
+			}
+			wantSuffix := " · ctx 100/1.0k" + tt.want + " · 1.0s]"
+			if !strings.HasSuffix(line, wantSuffix) {
+				t.Fatalf("usage line = %q, want suffix %q", line, wantSuffix)
+			}
+		})
+	}
+}
+
 func TestUsageLineShowsCacheAndReasoning(t *testing.T) {
 	line := usageLine(agent.PromptUsage{
 		Turns: 1,
 		Usage: llm.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 3000, CacheWrite1hTokens: 125, ReasoningTokens: 450},
-	}, time.Second, 0, false, 1000, 200, 0)
+	}, time.Second, 0, false, 1000, 200, 0, 0)
 	if !strings.Contains(line, "cache 3.0k read") {
 		t.Errorf("usage line should report cache reads, got %q", line)
 	}

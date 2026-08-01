@@ -699,7 +699,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			return false
 		}
 		sink := newAccumulatingSink(app.Renderer, app, app.PromptNumber)
+		compactionsBefore := app.Agent.CompactionCount()
 		applied, err := app.Agent.ApplyIdleCompaction(context.Background(), sink, finished.result)
+		app.addCompactions(app.Agent.CompactionCount() - compactionsBefore)
 		sink.FlushEvents()
 		if err != nil {
 			record("failed", 0, 0)
@@ -4070,7 +4072,9 @@ func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 func (app *App) compact(focus string) {
 	ctx := context.Background()
 	sink := newAccumulatingSink(app.Renderer, app, app.PromptNumber)
+	compactionsBefore := app.Agent.CompactionCount()
 	u, err := app.Agent.CompactWithFocus(ctx, sink, focus)
+	app.addCompactions(app.Agent.CompactionCount() - compactionsBefore)
 	sink.FlushEvents()
 	if u != (llm.Usage{}) {
 		app.addMaintenanceUsage("compaction", u)
@@ -4089,7 +4093,7 @@ func (app *App) compact(focus string) {
 func (app *App) SetUsage(u session.UsageTotals) {
 	app.usage = u
 	if app.Renderer != nil {
-		app.Renderer.SetCumulativeUsage(u.InputTokens, u.OutputTokens, u.CostUSD)
+		app.Renderer.SetCumulativeUsage(u.InputTokens, u.OutputTokens, u.CostUSD, u.Compactions)
 	}
 }
 
@@ -4107,7 +4111,7 @@ func (app *App) SetUsageByModel(byModel map[string]session.UsageTotals) {
 	maps.Copy(app.usageByModel, byModel)
 	if app.Renderer != nil {
 		b := app.usageByModel[app.usageKey()]
-		app.Renderer.SetCumulativeUsage(b.InputTokens, b.OutputTokens, app.usage.CostUSD)
+		app.Renderer.SetCumulativeUsage(b.InputTokens, b.OutputTokens, app.usage.CostUSD, app.usage.Compactions)
 	}
 }
 
@@ -4137,6 +4141,7 @@ func (app *App) addUsage(u agent.PromptUsage) {
 func (app *App) addUsageForModel(u agent.PromptUsage, modelKey string) {
 	cost, _ := app.promptCost(u.Usage)
 	addTotals(&app.usage, u.Usage, cost)
+	app.usage.Compactions += u.Compactions
 	if app.usageByModel == nil {
 		app.usageByModel = map[string]session.UsageTotals{}
 	}
@@ -4145,7 +4150,18 @@ func (app *App) addUsageForModel(u agent.PromptUsage, modelKey string) {
 	app.usageByModel[modelKey] = bucket
 	if app.Renderer != nil {
 		active := app.usageByModel[app.usageKey()]
-		app.Renderer.SetCumulativeUsage(active.InputTokens, active.OutputTokens, app.usage.CostUSD)
+		app.Renderer.SetCumulativeUsage(active.InputTokens, active.OutputTokens, app.usage.CostUSD, app.usage.Compactions)
+	}
+}
+
+func (app *App) addCompactions(count int) {
+	if count <= 0 {
+		return
+	}
+	app.usage.Compactions += count
+	if app.Renderer != nil {
+		active := app.usageByModel[app.usageKey()]
+		app.Renderer.SetCumulativeUsage(active.InputTokens, active.OutputTokens, app.usage.CostUSD, app.usage.Compactions)
 	}
 }
 
@@ -4232,7 +4248,7 @@ func (app *App) onModelChanged() {
 	}
 	if app.Renderer != nil {
 		b := app.usageByModel[app.usageKey()]
-		app.Renderer.SetCumulativeUsage(b.InputTokens, b.OutputTokens, app.usage.CostUSD)
+		app.Renderer.SetCumulativeUsage(b.InputTokens, b.OutputTokens, app.usage.CostUSD, app.usage.Compactions)
 	}
 }
 
@@ -4280,6 +4296,7 @@ func (app *App) sessionSnapshot(current *agent.PromptUsage) (session.Session, er
 			cost = 0
 		}
 		addTotals(&usage, current.Usage, cost)
+		usage.Compactions += current.Compactions
 		if usageByModel == nil {
 			usageByModel = make(map[string]session.UsageTotals)
 		}
@@ -4656,25 +4673,34 @@ func (app *App) usageSummary() string {
 }
 
 // usageReport renders cumulative session usage under the given label. With at
-// most one model it is the single-line legacy format; with several it breaks
+// most one model it is a single aggregate line; with several it breaks
 // down per model target and always ends with the session-total cost.
 func (app *App) usageReport(label string) string {
 	var b strings.Builder
 	if len(app.usageByModel) <= 1 {
-		writeUsageTotals(&b, "["+label+": ", app.usage, "]")
+		writeUsageTotals(&b, "["+label+": ", app.usage, " · "+compactionPhrase(app.usage.Compactions))
+		b.WriteByte(']')
 		return b.String()
 	}
 	fmt.Fprintf(&b, "[%s by model:", label)
 	for _, key := range slices.Sorted(maps.Keys(app.usageByModel)) {
 		writeUsageTotals(&b, "\n  "+key+": ", app.usageByModel[key], "")
 	}
-	fmt.Fprintf(&b, "\n  total · $%.4f]", app.usage.CostUSD)
+	fmt.Fprintf(&b, "\n  total · %s · $%.4f]", compactionPhrase(app.usage.Compactions), app.usage.CostUSD)
 	return b.String()
 }
 
-// writeUsageTotals writes one usage line: prefix, the token counts (cache write
-// and cost shown only when non-zero), then suffix.
-func writeUsageTotals(b *strings.Builder, prefix string, u session.UsageTotals, suffix string) {
+// compactionPhrase formats the always-present cumulative session count.
+func compactionPhrase(count int) string {
+	if count == 1 {
+		return "1 compaction"
+	}
+	return fmt.Sprintf("%d compactions", count)
+}
+
+// writeUsageTotals writes one usage line: prefix, token counts, afterUsage,
+// then cost when non-zero.
+func writeUsageTotals(b *strings.Builder, prefix string, u session.UsageTotals, afterUsage string) {
 	fmt.Fprintf(b, "%s%d input / %d cached input / %d output / %d reasoning",
 		prefix, u.InputTokens, u.CacheReadTokens, u.OutputTokens, u.ReasoningTokens)
 	if u.CacheWriteTokens > 0 {
@@ -4683,10 +4709,10 @@ func writeUsageTotals(b *strings.Builder, prefix string, u session.UsageTotals, 
 	if u.CacheWrite1hTokens > 0 {
 		fmt.Fprintf(b, " / %d cache write (1h)", u.CacheWrite1hTokens)
 	}
+	b.WriteString(afterUsage)
 	if u.CostUSD > 0 {
 		fmt.Fprintf(b, " · $%.4f", u.CostUSD)
 	}
-	b.WriteString(suffix)
 }
 
 func (app *App) printExitUsageSummary() {
@@ -4972,7 +4998,7 @@ func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 			PromptUsageLine: func(u agent.PromptUsage, promptElapsed time.Duration, cost float64, costKnown bool) string {
 				// Runs after App.addUsage refreshed the renderer's cumulative
 				// totals, so the recorded line matches the live one.
-				return usageLine(u, promptElapsed, cost, costKnown, s.r.cumInput, s.r.cumOutput, s.r.cumCost)
+				return usageLine(u, promptElapsed, cost, costKnown, s.r.cumInput, s.r.cumOutput, s.r.cumCost, s.r.cumCompactions)
 			},
 			OnError: func(err error) {
 				fmt.Fprintf(app.Errw, "[session event log failed: %v]\n", err)

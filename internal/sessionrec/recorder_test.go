@@ -253,14 +253,17 @@ func TestRecorderTurnDurationsUseClock(t *testing.T) {
 	now = now.Add(1500 * time.Millisecond)
 	rec.TurnComplete(agent.TurnUsage{Turn: 1})
 	now = now.Add(500 * time.Millisecond)
-	rec.PromptComplete(agent.PromptUsage{Turns: 1, Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}})
+	rec.PromptComplete(agent.PromptUsage{Turns: 1, Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}, Compactions: 1})
 
 	events := readEvents(t, dir)
 	if got := events[2].Display; !strings.Contains(got, "1.5s") || !strings.Contains(got, "prompt 1.5s") {
 		t.Fatalf("turn display = %q, want 1.5s durations", got)
 	}
-	if got := events[3].Display; !strings.HasSuffix(got, "2.0s]") {
-		t.Fatalf("prompt display = %q, want 2.0s elapsed", got)
+	if got := events[3].Display; !strings.HasSuffix(got, "compactions 1 · 2.0s]") {
+		t.Fatalf("prompt display = %q, want compaction count before elapsed time", got)
+	}
+	if got := events[3].Compactions; got != 1 {
+		t.Fatalf("prompt event compactions = %d, want 1", got)
 	}
 }
 

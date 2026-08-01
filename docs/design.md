@@ -2972,8 +2972,12 @@ backoff allows.
 - Large estimated contexts, payloads, or tool schemas print one warning per
   prompt because they can materially slow first response latency.
 - Per-prompt usage line:
-  `[prompt: 3 turns · 12.4k (18.0k) in / 1.8k (2.6k) out · $0.071 ($0.101) · 4.3s]`
-  (cost omitted for usage without known cost). When non-zero it
+  `[prompt: 3 turns · 12.4k (18.0k) in / 1.8k (2.6k) out · $0.071 ($0.101) · ctx 18.0k/128.0k · compactions 1 (2 total) · 4.3s]`
+  (cost omitted for usage without known cost). The compaction segment follows
+  context usage. It includes the prompt count only at 1 or more and the cumulative
+  total only at 2 or more, and is omitted when neither qualifies. Counts include
+  only successful transcript rewrites, not failed, blocked, no-op, or discarded
+  idle attempts. When non-zero the line
   also appends cache-read tokens with the cache-hit ratio (`· cache 3.0k read (75%)`)
   and reasoning tokens (`· 450 reasoning`). A model with no known cost prints a
   one-time-per-model `[note: no price configured for "<model>"; ...]` notice instead of
@@ -3393,8 +3397,9 @@ type Entry struct {
 }
 
 type UsageTotals struct {
-    llm.Usage         // cumulative token counts
-    CostUSD   float64 `json:"cost_usd"` // 0 when the model has no price entry
+    llm.Usage          // cumulative token counts
+    CostUSD    float64 `json:"cost_usd"` // 0 when the model has no price entry
+    Compactions int    `json:"compactions,omitempty"`
 }
 ```
 
@@ -3433,7 +3438,8 @@ type UsageTotals struct {
   events identify `prompt`, `turn`, and (for provider requests) `attempt` separately.
   `turn_attempt_start`, `turn_attempt_abandoned`, and `turn_attempt_usage` describe
   provider calls; `turn_complete` closes a conversational turn; `prompt_usage`
-  closes the top-level prompt; `maintenance_usage` accounts for compaction,
+  closes the top-level prompt and carries its successful compaction count;
+  `maintenance_usage` accounts for compaction,
   prewarming, handoff-summary, and branch-summary calls without creating turns.
   `model_request` records proxy/request lifecycle and every API issue with timing,
   parsed error, and correlation metadata; these events are replay/analysis data
@@ -3510,7 +3516,8 @@ type UsageTotals struct {
   `cost_limit`, `repeat_guard`, `error_guard`, `cancelled`, or `error`;
   `turn_limit` does not imply semantic incompleteness, and `model_completed`
   does not prove acceptance. `prompt_usage` remains the final normal child event
-  and carries the same reason. Inline delegate lines are
+  and carries the same reason plus its successful compaction count. Inline
+  delegate lines are
   process-local display events only: they are not appended to either parent or
   child persistence. Child `raw.ndjson` retains the complete replay content and
   remains the full-fidelity source for `session replay --follow`. Parent and

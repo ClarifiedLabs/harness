@@ -975,7 +975,7 @@ func TestOneShotJSONRunStreamEvents(t *testing.T) {
 		t.Fatalf("prompt_end = %v", end)
 	}
 	usage, _ := end["usage"].(map[string]any)
-	if usage["input_tokens"] != float64(20) || usage["output_tokens"] != float64(6) || usage["turns"] != float64(1) {
+	if usage["input_tokens"] != float64(20) || usage["output_tokens"] != float64(6) || usage["turns"] != float64(1) || usage["compactions"] != float64(0) {
 		t.Fatalf("prompt_end usage = %v", usage)
 	}
 	runEnd := lines[len(lines)-1]

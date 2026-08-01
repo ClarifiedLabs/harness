@@ -196,6 +196,7 @@ func promptEndUsage(u agent.PromptUsage) runstream.PromptEndUsage {
 		CostUSD:      u.Usage.CostUSD,
 		CostKnown:    u.Usage.CostKnown,
 		Turns:        u.Turns,
+		Compactions:  u.Compactions,
 	}
 }
 

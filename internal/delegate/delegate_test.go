@@ -782,8 +782,8 @@ func TestDelegateContinuationCompactsRetainedContextAboveLimit(t *testing.T) {
 		targetState.Messages[0].Compaction.Summary != "all source state preserved" {
 		t.Fatalf("target checkpoint = %+v", targetState.Messages[0])
 	}
-	if targetState.Usage.InputTokens != 200 || targetState.Usage.OutputTokens != 20 {
-		t.Fatalf("target state usage = %+v, want summary plus continuation", targetState.Usage)
+	if targetState.Usage.InputTokens != 200 || targetState.Usage.OutputTokens != 20 || targetState.Usage.Compactions != 1 {
+		t.Fatalf("target state usage = %+v, want summary plus continuation and one compaction", targetState.Usage)
 	}
 	if matches, err := filepath.Glob(filepath.Join(targetDir, "compactions", "*.input.json")); err != nil || len(matches) != 1 {
 		t.Fatalf("continuation archives = %v, err = %v", matches, err)
@@ -1638,7 +1638,7 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 func TestChildSinkFoldsPreflightMaintenanceIntoPromptUsage(t *testing.T) {
 	dir := t.TempDir()
 	sink := newChildSink(dir, todo.NewStore(), false, NewProgress(), nil)
-	sink.addPreflightMaintenance("continuation_compaction", llm.Usage{InputTokens: 7, OutputTokens: 2})
+	sink.addPreflightMaintenance("continuation_compaction", llm.Usage{InputTokens: 7, OutputTokens: 2}, true)
 	sink.PromptComplete(agent.PromptUsage{
 		Turns:       1,
 		Usage:       llm.Usage{InputTokens: 11, OutputTokens: 5},
@@ -1646,7 +1646,8 @@ func TestChildSinkFoldsPreflightMaintenanceIntoPromptUsage(t *testing.T) {
 	})
 
 	if sink.usage.Usage.InputTokens != 18 || sink.usage.Usage.OutputTokens != 7 ||
-		sink.usage.Maintenance.InputTokens != 10 || sink.usage.Maintenance.OutputTokens != 3 {
+		sink.usage.Maintenance.InputTokens != 10 || sink.usage.Maintenance.OutputTokens != 3 ||
+		sink.usage.Compactions != 1 {
 		t.Fatalf("prompt usage with preflight maintenance = %+v", sink.usage)
 	}
 	events := readDelegateChildEvents(t, dir)
@@ -1656,7 +1657,8 @@ func TestChildSinkFoldsPreflightMaintenanceIntoPromptUsage(t *testing.T) {
 		events[1].Type != session.EventPromptUsage ||
 		events[1].Usage == nil ||
 		events[1].Usage.InputTokens != 18 ||
-		events[1].Usage.OutputTokens != 7 {
+		events[1].Usage.OutputTokens != 7 ||
+		events[1].Compactions != 1 {
 		t.Fatalf("preflight maintenance replay events = %+v", events)
 	}
 }

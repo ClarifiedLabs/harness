@@ -118,11 +118,12 @@ type RecoveryInfo struct {
 	SavedAt time.Time
 }
 
-// UsageTotals is the cumulative token accounting plus dollar cost for a session.
-// CostUSD is 0 when the model has no price entry in the registry.
+// UsageTotals is the cumulative token, cost, and compaction accounting for a
+// session. CostUSD is 0 when the model has no price entry in the registry.
 type UsageTotals struct {
 	llm.Usage
-	CostUSD float64 `json:"cost_usd"`
+	CostUSD     float64 `json:"cost_usd"`
+	Compactions int     `json:"compactions,omitempty"`
 }
 
 // ChildMeta is the forensic index for a child-agent run stored under a parent
@@ -619,6 +620,7 @@ type Event struct {
 	Input             json.RawMessage         `json:"input,omitempty"`
 	Images            []ImageInfo             `json:"images,omitempty"`
 	Usage             *llm.Usage              `json:"usage,omitempty"`
+	Compactions       int                     `json:"compactions,omitempty"`
 	Purpose           string                  `json:"purpose,omitempty"`
 	FromEntryID       string                  `json:"from_entry_id,omitempty"`
 	ToEntryID         string                  `json:"to_entry_id,omitempty"`

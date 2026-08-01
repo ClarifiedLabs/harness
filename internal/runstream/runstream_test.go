@@ -92,7 +92,7 @@ func TestWriterMirrorsSessionEventsVerbatim(t *testing.T) {
 	w.PromptStart(PromptStart{})
 	w.Mirror(session.Event{Type: session.EventUser, Prompt: 1, Text: "do it"})
 	w.Mirror(session.Event{Type: session.EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 1, Text: "hello world"})
-	w.PromptEnd(PromptEnd{ExitCode: 0, TerminationReason: "model_completed", FinalText: "hello world"})
+	w.PromptEnd(PromptEnd{ExitCode: 0, TerminationReason: "model_completed", FinalText: "hello world", Usage: PromptEndUsage{Compactions: 2}})
 	w.Close(RunEnd{ExitCode: 0})
 
 	lines := decodeLines(t, out.String())
@@ -110,6 +110,10 @@ func TestWriterMirrorsSessionEventsVerbatim(t *testing.T) {
 	}
 	if lines[4]["final_text"] != "hello world" || lines[4]["termination_reason"] != "model_completed" {
 		t.Fatalf("prompt_end = %v", lines[4])
+	}
+	usage, _ := lines[4]["usage"].(map[string]any)
+	if usage["compactions"] != float64(2) {
+		t.Fatalf("prompt_end compactions = %v, want 2", usage["compactions"])
 	}
 }
 

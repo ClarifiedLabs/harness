@@ -262,8 +262,9 @@ type TurnUsage struct {
 
 // PromptUsage is the per-prompt summary handed to the sink (design §10 usage line).
 type PromptUsage struct {
-	Turns int
-	Usage llm.Usage
+	Turns       int
+	Usage       llm.Usage
+	Compactions int // successful transcript rewrites during this prompt
 	// Maintenance is the subset of Usage spent on model calls that are not
 	// conversational turns, such as automatic compaction.
 	Maintenance llm.Usage
@@ -483,6 +484,7 @@ type Agent struct {
 	compactToolResultMaxBytes int
 	compactFallbackNotice     compactFallbackNoticeState
 	compactionRuntimeVersion  uint64
+	compactions               int
 	archiveCompaction         CompactionArchiver
 	hooks                     *hooks.Runner
 	showDiffs                 bool
@@ -776,6 +778,11 @@ func (a *Agent) SetSleep(sleep func(time.Duration)) {
 func (a *Agent) SetCompactionArchiver(archive CompactionArchiver) {
 	a.archiveCompaction = archive
 }
+
+// CompactionCount returns the number of successful compaction rewrites applied
+// by this agent instance. Failed, blocked, no-op, and discarded idle attempts do
+// not increment it.
+func (a *Agent) CompactionCount() int { return a.compactions }
 
 // Transcript returns the current transcript. The slice is owned by the Agent;
 // callers must not mutate it.
@@ -1475,6 +1482,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 	lastInput := a.measuredInput // input tokens the final measured turn reported (drives the trigger)
 	var lastContext ContextEstimate
 	turns := 0
+	compactionsAtStart := a.compactions
 	unlimited := a.maxTurns <= 0
 	stopHookActive := false
 	var guard turnGuard
@@ -1495,6 +1503,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 				Usage:       total,
 				Maintenance: maintenanceTotal,
 				Wasted:      wastedTotal,
+				Compactions: a.compactions - compactionsAtStart,
 				Context:     lastContext,
 			},
 		})
@@ -1518,6 +1527,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			Usage:             total,
 			Maintenance:       maintenanceTotal,
 			Wasted:            wastedTotal,
+			Compactions:       a.compactions - compactionsAtStart,
 			Context:           lastContext,
 			TerminationReason: reason,
 		})

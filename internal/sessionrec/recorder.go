@@ -55,7 +55,7 @@ type Config struct {
 // whose cumulative totals are the prompt's own usage (child sessions run one
 // prompt each).
 func DefaultPromptUsageLine(u agent.PromptUsage, promptElapsed time.Duration, cost float64, known bool) string {
-	return UsageLine(u, promptElapsed, cost, known, u.Usage.InputTokens, u.Usage.OutputTokens, cost)
+	return UsageLine(u, promptElapsed, cost, known, u.Usage.InputTokens, u.Usage.OutputTokens, cost, u.Compactions)
 }
 
 // Recorder appends parent-fidelity replay events to raw.ndjson. It owns the
@@ -431,6 +431,7 @@ func (r *Recorder) PromptComplete(u agent.PromptUsage) {
 		Prompt:            r.cfg.Prompt,
 		Display:           line(u, promptElapsed, cost, costKnown),
 		Usage:             &usage,
+		Compactions:       u.Compactions,
 		TerminationReason: string(u.TerminationReason),
 	})
 }

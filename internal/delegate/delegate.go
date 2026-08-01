@@ -755,7 +755,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		}
 		if before.Total*100 > before.Window*continuationContextPercent {
 			compactUsage, changed, compactErr := child.CompactForContinuation(ctx, sink)
-			sink.addPreflightMaintenance("continuation_compaction", compactUsage)
+			sink.addPreflightMaintenance("continuation_compaction", compactUsage, changed)
 			if compactErr != nil {
 				return failBeforePrompt(continuationIncompatibleError(
 					req.ContinueChildID,
@@ -1695,7 +1695,7 @@ func (r *Runner) childSessionState(parent Runtime, launch Launch, child *agent.A
 		Messages:        child.Transcript(),
 		ResponseState:   child.ResponseState(),
 		Todos:           todos.Snapshot(),
-		Usage:           session.UsageTotals{Usage: usage.Usage, CostUSD: usage.Usage.CostUSD},
+		Usage:           session.UsageTotals{Usage: usage.Usage, CostUSD: usage.Usage.CostUSD, Compactions: usage.Compactions},
 		Tree:            tree,
 	}
 }
@@ -1711,6 +1711,7 @@ func preview(s string, limit int) string {
 type childSink struct {
 	usage                agent.PromptUsage
 	preflightMaintenance llm.Usage
+	preflightCompactions int
 	progress             *Progress // compatibility live progress; may be nil
 	activity             *ActivityRegistration
 	assistant            *inlineLineAccumulator
@@ -2047,7 +2048,11 @@ func (s *childSink) MaintenanceComplete(usage agent.MaintenanceUsage) {
 	s.rec.MaintenanceComplete(usage)
 }
 
-func (s *childSink) addPreflightMaintenance(purpose string, usage llm.Usage) {
+func (s *childSink) addPreflightMaintenance(purpose string, usage llm.Usage, compacted bool) {
+	if compacted {
+		s.preflightCompactions++
+		s.usage.Compactions++
+	}
 	if usage == (llm.Usage{}) {
 		return
 	}
@@ -2063,6 +2068,7 @@ func (s *childSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
 	}
 	checkpoint.Usage.Usage = addDelegateUsage(checkpoint.Usage.Usage, s.preflightMaintenance)
 	checkpoint.Usage.Maintenance = addDelegateUsage(checkpoint.Usage.Maintenance, s.preflightMaintenance)
+	checkpoint.Usage.Compactions += s.preflightCompactions
 	started := time.Now()
 	if err := s.checkpoint(checkpoint); err != nil {
 		s.retainAppendError(err)
@@ -2143,6 +2149,7 @@ func (s *childSink) PromptComplete(usage agent.PromptUsage) {
 	s.flushDisplay()
 	usage.Usage = addDelegateUsage(usage.Usage, s.preflightMaintenance)
 	usage.Maintenance = addDelegateUsage(usage.Maintenance, s.preflightMaintenance)
+	usage.Compactions += s.preflightCompactions
 	s.usage = usage
 	s.activity.MarkUsage(usage.Usage)
 	s.activity.MarkActivity("finishing")

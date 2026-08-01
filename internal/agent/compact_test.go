@@ -1619,6 +1619,9 @@ func TestProactiveCompactionMidTurn(t *testing.T) {
 	if got := sink.promptUsage[0].Usage.InputTokens; got != 80 {
 		t.Errorf("prompt input tokens = %d, want 80", got)
 	}
+	if got := sink.promptUsage[0].Compactions; got != 1 {
+		t.Errorf("prompt compactions = %d, want 1", got)
+	}
 }
 
 func TestNoMidTurnCompactionUnderThreshold(t *testing.T) {
@@ -1644,6 +1647,9 @@ func TestNoMidTurnCompactionUnderThreshold(t *testing.T) {
 	}
 	if len(fp.Requests) != 2 {
 		t.Errorf("provider called %d times, want 2 (no summary call)", len(fp.Requests))
+	}
+	if got := sink.promptUsage[0].Compactions; got != 0 {
+		t.Errorf("prompt compactions = %d, want 0", got)
 	}
 	for _, n := range sink.notices {
 		if strings.Contains(n, "compacted:") {

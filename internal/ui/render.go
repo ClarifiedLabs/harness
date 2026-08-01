@@ -110,9 +110,10 @@ type Renderer struct {
 	pending         map[string]llm.ToolCall // tool_use id -> call, awaiting its result
 	pendingToolUses []string
 
-	cumInput  int
-	cumOutput int
-	cumCost   float64
+	cumInput       int
+	cumOutput      int
+	cumCost        float64
+	cumCompactions int
 
 	largeRequestWarned bool
 
@@ -247,10 +248,11 @@ func (r *Renderer) StartPromptRun() {
 func (r *Renderer) SetModel(model string) { r.model = model }
 
 // SetCumulativeUsage seeds the session totals used by per-prompt usage lines.
-func (r *Renderer) SetCumulativeUsage(inputTokens, outputTokens int, costUSD float64) {
+func (r *Renderer) SetCumulativeUsage(inputTokens, outputTokens int, costUSD float64, compactions int) {
 	r.cumInput = inputTokens
 	r.cumOutput = outputTokens
 	r.cumCost = costUSD
+	r.cumCompactions = compactions
 }
 
 // FormatMarkdown renders a complete Markdown block using the same enablement,
@@ -617,11 +619,12 @@ func (r *Renderer) PromptComplete(usage agent.PromptUsage) {
 	}
 	r.cumInput += usage.Usage.InputTokens
 	r.cumOutput += usage.Usage.OutputTokens
+	r.cumCompactions += usage.Compactions
 	if costKnown {
 		r.cumCost += cost
 	}
 
-	r.usageOutput(usageLine(usage, elapsed, cost, costKnown, r.cumInput, r.cumOutput, r.cumCost))
+	r.usageOutput(usageLine(usage, elapsed, cost, costKnown, r.cumInput, r.cumOutput, r.cumCost, r.cumCompactions))
 }
 
 // SetPromptCost records the prompt cost priced by the App against its own
@@ -1908,13 +1911,13 @@ func ToolResultLine(call llm.ToolCall, result llm.ToolResult) string {
 
 // usageLine renders the per-prompt summary with cumulative totals (design §10):
 //
-//	[prompt: 3 turns · 12.4k (15.0k) in / 1.8k (2.0k) out · $0.071 ($0.102) · 4.3s]
+//	[prompt: 3 turns · 12.4k (15.0k) in / 1.8k (2.0k) out · $0.071 ($0.102) · ctx 15.0k/128.0k · compactions 1 (2 total) · 4.3s]
 //
 // Per-prompt values are shown first; parenthesised values are cumulative across
 // the session. Cumulative cost is omitted for models with no price entry;
 // per-prompt cost is also omitted when the model has no price entry.
-func usageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKnown bool, cumIn, cumOut int, cumCost float64) string {
-	return sessionrec.UsageLine(u, elapsed, cost, costKnown, cumIn, cumOut, cumCost)
+func usageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKnown bool, cumIn, cumOut int, cumCost float64, cumCompactions int) string {
+	return sessionrec.UsageLine(u, elapsed, cost, costKnown, cumIn, cumOut, cumCost, cumCompactions)
 }
 
 func turnUsageLine(u agent.TurnUsage, elapsed, promptElapsed time.Duration) string {

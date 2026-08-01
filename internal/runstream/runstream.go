@@ -92,6 +92,7 @@ type PromptEndUsage struct {
 	CostUSD      float64 `json:"cost_usd,omitempty"`
 	CostKnown    bool    `json:"cost_known,omitempty"`
 	Turns        int     `json:"turns"`
+	Compactions  int     `json:"compactions"`
 }
 
 // PromptEnd closes a prompt with its outcome. FinalText is the last assistant

@@ -1528,7 +1528,7 @@ func TestREPLExitPrintsUsageSummary(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	got := errw.String()
-	want := "[session summary: 100 input / 30 cached input / 10 output / 4 reasoning / 20 cache write]\nresume with: harness -resume " + app.SessionPath
+	want := "[session summary: 100 input / 30 cached input / 10 output / 4 reasoning / 20 cache write · 0 compactions]\nresume with: harness -resume " + app.SessionPath
 	if !strings.Contains(got, want) {
 		t.Errorf("exit should print usage summary and resume hint %q, errw=%q", want, got)
 	}
@@ -1705,6 +1705,9 @@ func TestREPLUsageLineIncludesCompactUsage(t *testing.T) {
 	if !strings.Contains(got, "10 (410) out") {
 		t.Errorf("post-compact turn should include compact output usage in cumulative total, errw=%q", got)
 	}
+	if strings.Contains(got, "compactions 0") || strings.Contains(got, "(1 total)") {
+		t.Errorf("prompt summary should omit zero prompt and single session compaction counts, errw=%q", got)
+	}
 }
 
 func TestREPLCompactCommand(t *testing.T) {
@@ -1746,6 +1749,9 @@ func TestREPLCompactCommand(t *testing.T) {
 	// The summary call's tokens must fold into the cumulative session totals.
 	if !strings.Contains(got, "9100") || !strings.Contains(got, "400 out") {
 		t.Errorf("/usage should include the summary call usage after /compact, errw=%q", got)
+	}
+	if !strings.Contains(got, "1 compaction") {
+		t.Errorf("/usage and exit summary should include the compaction total, errw=%q", got)
 	}
 	// The summary call was actually issued (the only model call here).
 	if fp.RequestCount() != 1 {
@@ -1904,6 +1910,8 @@ func TestREPLIdleCompactionAppliesStableSnapshot(t *testing.T) {
 	}
 	if text := errw.String(); !strings.Contains(text, "100 in") || !strings.Contains(text, "12 out") {
 		t.Fatalf("idle maintenance usage missing from /usage:\n%s", text)
+	} else if !strings.Contains(text, "1 compaction") {
+		t.Fatalf("applied idle compaction missing from /usage:\n%s", text)
 	}
 	if fp.RequestCount() != 1 {
 		t.Fatalf("provider requests = %d, want one idle summary", fp.RequestCount())
@@ -4582,9 +4590,9 @@ func TestREPLRefreshMCPNoChangeKeepsTools(t *testing.T) {
 
 func TestAddUsageBucketsPerModel(t *testing.T) {
 	app := &App{Provider: "anthropic", Model: "opus", RegistryModel: "opus"}
-	app.addUsage(agent.PromptUsage{Usage: llm.Usage{InputTokens: 100, OutputTokens: 10}})
+	app.addUsage(agent.PromptUsage{Usage: llm.Usage{InputTokens: 100, OutputTokens: 10, CostUSD: 0.1, CostKnown: true}, Compactions: 2})
 	app.Provider, app.Model, app.RegistryModel = "openai", "gpt", "gpt"
-	app.addUsage(agent.PromptUsage{Usage: llm.Usage{InputTokens: 30, OutputTokens: 5}})
+	app.addUsage(agent.PromptUsage{Usage: llm.Usage{InputTokens: 30, OutputTokens: 5, CostUSD: 0.2, CostKnown: true}})
 
 	if len(app.usageByModel) != 2 {
 		t.Fatalf("want 2 model buckets, got %d: %+v", len(app.usageByModel), app.usageByModel)
@@ -4603,6 +4611,9 @@ func TestAddUsageBucketsPerModel(t *testing.T) {
 		if !strings.Contains(report, want) {
 			t.Errorf("multi-model report missing %q: %s", want, report)
 		}
+	}
+	if !strings.HasSuffix(report, "\n  total · 2 compactions · $0.3000]") {
+		t.Errorf("multi-model report should place compactions before total cost: %s", report)
 	}
 }
 
@@ -4641,11 +4652,11 @@ func TestQueuedMaintenanceUsageIsAccountedWithoutCreatingTurn(t *testing.T) {
 	}
 }
 
-func TestUsageReportSingleModelMatchesLegacyFormat(t *testing.T) {
+func TestUsageReportSingleModelIncludesCompactions(t *testing.T) {
 	app := &App{Provider: "anthropic", Model: "opus", RegistryModel: "opus"}
-	app.addUsage(agent.PromptUsage{Usage: llm.Usage{InputTokens: 100, CacheReadTokens: 30, OutputTokens: 10, ReasoningTokens: 4, CacheWriteTokens: 20}})
+	app.addUsage(agent.PromptUsage{Usage: llm.Usage{InputTokens: 100, CacheReadTokens: 30, OutputTokens: 10, ReasoningTokens: 4, CacheWriteTokens: 20, CostUSD: 0.5, CostKnown: true}, Compactions: 2})
 	got := app.usageReport("session summary")
-	want := "[session summary: 100 input / 30 cached input / 10 output / 4 reasoning / 20 cache write]"
+	want := "[session summary: 100 input / 30 cached input / 10 output / 4 reasoning / 20 cache write · 2 compactions · $0.5000]"
 	if got != want {
 		t.Errorf("single-model report = %q, want %q", got, want)
 	}
