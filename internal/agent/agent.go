@@ -2066,14 +2066,18 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			break
 		}
 
-		// Hard stop: a byte-identical successful repeat loop that ignored the one
-		// steering nudge. Finalize the same way so the turn ends on an assistant
-		// message (the success-loop analogue of the error-storm break).
-		if guard.shouldBreakRepeat() {
+		// Hard stop: an exact repeat loop or a command-family loop that ignored
+		// steering. Finalize the same way so the turn ends on an assistant message
+		// (the success-loop analogue of the error-storm break).
+		if guard.shouldBreakRepeat() || guard.shouldBreakCommandRepeat() {
 			reportTurnProgress(sink, progress)
 			startClosure(ClosureTriggerRepeatGuard, turns)
 			terminationReason = TerminationRepeatGuard
-			sink.Notice(repeatLoopNotice(guard.repeatRuns))
+			if guard.shouldBreakRepeat() {
+				sink.Notice(repeatLoopNotice(guard.repeatRuns))
+			} else {
+				sink.Notice(commandRepeatLoopNotice(guard.commandRuns))
+			}
 			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
 			total = add(total, fu)
 			wastedTotal = add(wastedTotal, fw)

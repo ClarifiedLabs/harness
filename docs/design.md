@@ -1595,6 +1595,14 @@ emit prompt_usage(prompt, completedTurns)
     order-insensitive signature of `name + canonical(JSON input) + result`. After
     3 identical signatures in a row it injects one RoleUser steering message; at 8
     it hard-stops with `[stopped: N identical tool turns repeated with no change]`.
+  - *Repeated shell-command families.* A single foreground `run_command` shell
+    turn is also fingerprinted by its working directory plus the command text before
+    the first unquoted pipe. Four consecutive turns with the same pipeline head
+    inject one steer even when downstream `grep`/`sed`/`awk` stages and results keep
+    changing. At twelve it hard-stops under `repeat_guard`. A different base command,
+    a non-command or multi-command turn, background execution, or user steering
+    resets the streak. This intentionally does not group argv calls or commands
+    without a pipeline, keeping the heuristic narrower than exact-repeat detection.
   - *Error storm.* It counts consecutive turns in which **every** tool result is an
     error. At 5 it steers ("re-read the latest error output and change your
     approach"); at 10 it breaks with `[stopped: N consecutive tool turns all
@@ -1609,7 +1617,8 @@ emit prompt_usage(prompt, completedTurns)
     inspection-only turns without explicit progress inject a phase-transition
     steer. These advisory streaks have no hard-stop condition, and a user steer
     resets them so the user's new direction gets a fresh window. The resulting
-    `turn_progress` event is diagnostics-only and never enters model history.
+    `turn_progress` event is diagnostics-only and never enters model history; it
+    includes both exact-repeat and shell-command-family streaks.
   - *Repeated identical failures (`internal/agent/failguard.go`).* A per-prompt
     `failureGuard` on the Agent (never on the shared registry) keys each
     dispatched call by tool name + normalized input hash and counts consecutive

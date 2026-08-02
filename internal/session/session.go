@@ -747,6 +747,7 @@ type TurnProgressSnapshot struct {
 	NewEvidenceCount        int            `json:"new_evidence_count,omitempty"`
 	UserSteer               bool           `json:"user_steer,omitempty"`
 	RepeatStreak            int            `json:"repeat_streak,omitempty"`
+	CommandRepeatStreak     int            `json:"command_repeat_streak,omitempty"`
 	ErrorStreak             int            `json:"error_streak,omitempty"`
 	SingleLookupStreak      int            `json:"single_lookup_streak,omitempty"`
 	InspectionNoProgressRun int            `json:"inspection_no_progress_run,omitempty"`

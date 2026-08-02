@@ -28,6 +28,12 @@ const (
 	// is finalized rather than left to burn turns/tokens — the success-loop
 	// analogue of errorStormBreak.
 	repeatBreak = 8
+	// commandRepeatSteer / commandRepeatBreak catch a shell-command loop whose
+	// JSON input keeps changing only because the model rewrites the downstream
+	// pipeline. This is deliberately slower than the exact-repeat guard because
+	// changing output filters can be legitimate short-lived investigation.
+	commandRepeatSteer = 4
+	commandRepeatBreak = 12
 	// errorStormSteer / errorStormBreak count consecutive turns whose tool
 	// results were all errors: steer once at the first, hard-stop at the second.
 	errorStormSteer           = 5
@@ -38,6 +44,8 @@ const (
 )
 
 const repeatSteer = "[loop guard] The last several tool calls repeated with identical results. Stop repeating them: change your approach, try different inputs or another tool, or stop and report the blocker. Do not re-issue the same calls expecting a different outcome."
+
+const commandRepeatSteerMsg = "[loop guard] The last several tool turns ran the same underlying shell command while changing only its output pipeline. Stop re-running it: use the evidence already collected, inspect or change the relevant code, or report the blocker. If repeated sampling is genuinely needed, batch it in one command."
 
 const errorStormSteerMsg = "[loop guard] Several consecutive tool calls have all failed. Re-read the latest error output and change your approach, or stop and report what is blocking you — do not keep retrying the same way."
 
@@ -53,6 +61,9 @@ type turnGuard struct {
 	lastCallSig              string // signature of the previous turn's calls+results
 	repeatRuns               int    // consecutive turns with that identical signature
 	repeatSteered            bool   // steering already injected for the current repeat streak
+	lastCommandSig           string // signature of the previous run_command pipeline head
+	commandRuns              int    // consecutive turns with that underlying shell command
+	commandSteered           bool   // steering already injected for the current command streak
 	errorRuns                int    // consecutive turns whose tool results were all errors
 	errorSteered             bool   // steering already injected for the current error streak
 	orientationRuns          int    // consecutive turns with one unbatched orientation lookup
@@ -68,6 +79,7 @@ type GuardSteerReason string
 
 const (
 	GuardSteerRepeat          GuardSteerReason = "repeat"
+	GuardSteerCommandRepeat   GuardSteerReason = "command_repeat"
 	GuardSteerBatching        GuardSteerReason = "batching"
 	GuardSteerPhaseTransition GuardSteerReason = "phase_transition"
 	GuardSteerErrorStorm      GuardSteerReason = "error_storm"
@@ -106,6 +118,7 @@ type TurnProgress struct {
 	NewEvidenceCount        int
 	UserSteer               bool
 	RepeatStreak            int
+	CommandRepeatStreak     int
 	ErrorStreak             int
 	SingleLookupStreak      int
 	InspectionNoProgressRun int
@@ -187,6 +200,17 @@ func (g *turnGuard) recordTurn(calls []llm.ToolCall, results []llm.ContentBlock,
 		g.repeatRuns = 1
 		g.repeatSteered = false
 	}
+	commandSig := commandPipelineSignature(calls)
+	if commandSig != "" && commandSig == g.lastCommandSig {
+		g.commandRuns++
+	} else {
+		g.lastCommandSig = commandSig
+		g.commandRuns = 0
+		if commandSig != "" {
+			g.commandRuns = 1
+		}
+		g.commandSteered = false
+	}
 	if allErrors(results) {
 		g.errorRuns++
 	} else {
@@ -221,6 +245,9 @@ func (g *turnGuard) recordTools(calls []llm.ToolCall, results []llm.ContentBlock
 func (g *turnGuard) resetForUserSteer(progress *TurnProgress) {
 	g.repeatRuns = 0
 	g.repeatSteered = false
+	g.lastCommandSig = ""
+	g.commandRuns = 0
+	g.commandSteered = false
 	g.errorRuns = 0
 	g.errorSteered = false
 	g.orientationRuns = 0
@@ -233,6 +260,7 @@ func (g *turnGuard) resetForUserSteer(progress *TurnProgress) {
 
 func (g *turnGuard) snapshotStreaks(progress *TurnProgress) {
 	progress.RepeatStreak = g.repeatRuns
+	progress.CommandRepeatStreak = g.commandRuns
 	progress.ErrorStreak = g.errorRuns
 	progress.SingleLookupStreak = g.orientationRuns
 	progress.InspectionNoProgressRun = g.semanticRuns
@@ -244,6 +272,10 @@ func (g *turnGuard) nextSteer() (GuardSteerReason, string) {
 	if g.repeatRuns >= repeatSteerThreshold && !g.repeatSteered {
 		g.repeatSteered = true
 		return GuardSteerRepeat, repeatSteer
+	}
+	if g.commandRuns >= commandRepeatSteer && !g.commandSteered && g.repeatRuns < repeatSteerThreshold {
+		g.commandSteered = true
+		return GuardSteerCommandRepeat, commandRepeatSteerMsg
 	}
 	if g.orientationRuns >= orientationSteerThreshold && !g.orientationSteered {
 		g.orientationSteered = true
@@ -343,6 +375,12 @@ func (g *turnGuard) shouldBreakErrors() bool { return g.errorRuns >= errorStormB
 // reach it; a call whose output changes resets the streak.
 func (g *turnGuard) shouldBreakRepeat() bool { return g.repeatRuns >= repeatBreak }
 
+// shouldBreakCommandRepeat reports whether the model ignored command-family
+// steering and kept rewriting only the output pipeline around the same shell
+// command. Its higher threshold keeps this fallback more conservative than an
+// exact byte-for-byte repeat.
+func (g *turnGuard) shouldBreakCommandRepeat() bool { return g.commandRuns >= commandRepeatBreak }
+
 func turnBudgetClosureReserve(maxTurns int) int {
 	if maxTurns <= 0 {
 		return 0
@@ -371,6 +409,79 @@ func shouldEnterTurnBudgetClosure(maxTurns, completedTurns int) bool {
 		return false
 	}
 	return completedTurns >= maxTurns-turnBudgetClosureReserve(maxTurns)
+}
+
+// commandPipelineSignature identifies a narrowly defined command family: one
+// foreground run_command shell invocation whose first unquoted pipeline segment
+// is unchanged. It intentionally ignores only downstream pipe stages, not flags,
+// argv calls, multi-step batches, working directories, or unrelated tool turns.
+// This catches loops that keep appending grep/sed/awk wrappers without treating a
+// fix-and-rerun command with changed arguments as the same attempt.
+func commandPipelineSignature(calls []llm.ToolCall) string {
+	if len(calls) != 1 || calls[0].Name != "run_command" {
+		return ""
+	}
+	var input struct {
+		Command    string `json:"command"`
+		Cwd        string `json:"cwd"`
+		Background bool   `json:"background"`
+		Steps      []struct {
+			Command string `json:"command"`
+			Cwd     string `json:"cwd"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal(calls[0].Input, &input); err != nil || input.Background {
+		return ""
+	}
+	command, cwd := input.Command, input.Cwd
+	if len(input.Steps) > 0 {
+		if len(input.Steps) != 1 {
+			return ""
+		}
+		command = input.Steps[0].Command
+		if input.Steps[0].Cwd != "" {
+			cwd = input.Steps[0].Cwd
+		}
+	}
+	head, piped := shellPipelineHead(command)
+	if !piped || head == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(cwd + "\x00" + head))
+	return fmt.Sprintf("%x", digest)
+}
+
+// shellPipelineHead returns the text before the first unquoted shell pipe.
+// Backslash and single/double quote tracking is intentionally small but enough
+// to avoid mistaking regex and quoted data pipes for shell operators.
+func shellPipelineHead(command string) (string, bool) {
+	var singleQuoted, doubleQuoted, escaped bool
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' && !singleQuoted {
+			escaped = true
+			continue
+		}
+		switch ch {
+		case '\'':
+			if !doubleQuoted {
+				singleQuoted = !singleQuoted
+			}
+		case '"':
+			if !singleQuoted {
+				doubleQuoted = !doubleQuoted
+			}
+		case '|':
+			if !singleQuoted && !doubleQuoted {
+				return strings.TrimSpace(command[:i]), true
+			}
+		}
+	}
+	return strings.TrimSpace(command), false
 }
 
 // callSetSignature builds an order-insensitive signature of a turn's tool
@@ -481,6 +592,10 @@ func errorStormNotice(n int) string {
 // repeat loop, mirroring errorStormNotice's shape.
 func repeatLoopNotice(n int) string {
 	return fmt.Sprintf("[stopped: %d identical tool turns repeated with no change]", n)
+}
+
+func commandRepeatLoopNotice(n int) string {
+	return fmt.Sprintf("[stopped: %d tool turns repeated the same underlying shell command]", n)
 }
 
 // promptTokenBudgetNotice is the hard-stop notice when the per-prompt token budget

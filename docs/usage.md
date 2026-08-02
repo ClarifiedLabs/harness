@@ -351,6 +351,9 @@ The agent loop has several controls against runaway work:
   pausing the goal; `0` disables that count cap.
 - Repeated identical tool results and consecutive all-error tool turns are
   steered first and eventually stopped if the model does not change course.
+  Consecutive single `run_command` turns that keep the same underlying shell
+  command while changing only downstream pipeline filters are likewise steered
+  after four turns and stopped after twelve ignored repeats.
 - Three consecutive turns that each perform one unbatched repository lookup get
   a batching steer. Twelve inspection-only turns without mutation, verification,
   wait, or coordination progress get one phase-transition steer. These semantic

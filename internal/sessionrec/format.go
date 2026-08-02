@@ -528,6 +528,7 @@ func TurnProgressSnapshot(progress agent.TurnProgress) *session.TurnProgressSnap
 		NewEvidenceCount:        progress.NewEvidenceCount,
 		UserSteer:               progress.UserSteer,
 		RepeatStreak:            progress.RepeatStreak,
+		CommandRepeatStreak:     progress.CommandRepeatStreak,
 		ErrorStreak:             progress.ErrorStreak,
 		SingleLookupStreak:      progress.SingleLookupStreak,
 		InspectionNoProgressRun: progress.InspectionNoProgressRun,

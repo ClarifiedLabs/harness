@@ -265,6 +265,101 @@ func TestRepetitionGuardIgnoresChangingResults(t *testing.T) {
 	}
 }
 
+func TestShellPipelineHeadIgnoresQuotedPipes(t *testing.T) {
+	tests := []struct {
+		command string
+		head    string
+		piped   bool
+	}{
+		{command: `go test ./pkg -run TestOne | grep PASS`, head: `go test ./pkg -run TestOne`, piped: true},
+		{command: `printf '%s|%s' a b | sed -n '1p'`, head: `printf '%s|%s' a b`, piped: true},
+		{command: `printf "a|b" | cat`, head: `printf "a|b"`, piped: true},
+		{command: `printf a\|b`, head: `printf a\|b`, piped: false},
+		{command: `go test ./pkg`, head: `go test ./pkg`, piped: false},
+	}
+	for _, tt := range tests {
+		head, piped := shellPipelineHead(tt.command)
+		if head != tt.head || piped != tt.piped {
+			t.Errorf("shellPipelineHead(%q) = (%q, %v), want (%q, %v)", tt.command, head, piped, tt.head, tt.piped)
+		}
+	}
+}
+
+func TestCommandPipelineLoopSteersThenHardStops(t *testing.T) {
+	n := 0
+	tool := &recordTool{name: "run_command", run: func(_ context.Context, _ json.RawMessage) (string, error) {
+		n++
+		return fmt.Sprintf("changing output %d", n), nil
+	}}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+
+	const base = `go test ./cmd/flow-worker -run TestWorkerRetries -count=1 -v 2>&1`
+	steps := make([]llmtest.Step, 0, commandRepeatBreak+1)
+	for i := 0; i < commandRepeatBreak; i++ {
+		input, err := json.Marshal(map[string]string{
+			"command": fmt.Sprintf("%s | sed -n '1,%dp'", base, i+1),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		steps = append(steps, llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, fmt.Sprintf("call_%d", i), "run_command", string(input))},
+			Stop:   llm.StopToolUse,
+		})
+	}
+	steps = append(steps, textStep("stopping after repeated command"))
+	fp := llmtest.New("fake", steps...)
+	a := newAgent(fp, reg, Options{MaxTurns: 0})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "investigate the test", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	mustValid(t, a.Transcript())
+	if got := countUserMessagesContaining(a.Transcript(), "same underlying shell command"); got != 1 {
+		t.Errorf("command-repeat steer injected %d times, want 1:\n%s", got, dump(a.Transcript()))
+	}
+	if len(sink.progress) != commandRepeatBreak {
+		t.Fatalf("progress events = %d, want %d", len(sink.progress), commandRepeatBreak)
+	}
+	if got := sink.progress[commandRepeatSteer-1].SteerReason; got != GuardSteerCommandRepeat {
+		t.Errorf("steer reason at threshold = %q, want %q", got, GuardSteerCommandRepeat)
+	}
+	if got := sink.progress[len(sink.progress)-1].CommandRepeatStreak; got != commandRepeatBreak {
+		t.Errorf("final command repeat streak = %d, want %d", got, commandRepeatBreak)
+	}
+	var sawBreak bool
+	for _, notice := range sink.notices {
+		if strings.Contains(notice, "repeated the same underlying shell command") {
+			sawBreak = true
+		}
+	}
+	if !sawBreak {
+		t.Errorf("expected command-repeat break notice, notices=%v", sink.notices)
+	}
+	if len(fp.Requests) != commandRepeatBreak+1 {
+		t.Errorf("provider called %d times, want %d (break + summary)", len(fp.Requests), commandRepeatBreak+1)
+	}
+}
+
+func TestCommandPipelineStreakResetsWhenBaseCommandChanges(t *testing.T) {
+	var guard turnGuard
+	result := []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultText: "ok"}}
+	for i := 0; i < commandRepeatSteer-1; i++ {
+		call := llm.ToolCall{Name: "run_command", Input: json.RawMessage(fmt.Sprintf(`{"command":"go test ./pkg | head -%d"}`, i+1))}
+		guard.recordTools([]llm.ToolCall{call}, result)
+	}
+	changed := llm.ToolCall{Name: "run_command", Input: json.RawMessage(`{"command":"go test ./other | head -1"}`)}
+	guard.recordTools([]llm.ToolCall{changed}, result)
+	if guard.commandRuns != 1 {
+		t.Fatalf("command streak after base change = %d, want 1", guard.commandRuns)
+	}
+	if reason, message := guard.nextSteer(); reason == GuardSteerCommandRepeat || strings.Contains(message, "underlying shell command") {
+		t.Fatalf("base command change triggered command-repeat steer: reason=%q message=%q", reason, message)
+	}
+}
+
 // TestRepeatLoopHardStops verifies that a byte-identical successful repeat loop
 // is hard-stopped (not merely steered once) after repeatBreak turns, mirroring
 // the error-storm break, so an unlimited-turn run can't spin forever re-issuing

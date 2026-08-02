@@ -336,6 +336,7 @@ func TestRecorderTurnProgressIsStructuredAndDisplayless(t *testing.T) {
 		NoExplicitProgress:      true,
 		NewEvidence:             true,
 		NewEvidenceCount:        2,
+		CommandRepeatStreak:     4,
 		InspectionNoProgressRun: 12,
 		SteerReason:             agent.GuardSteerPhaseTransition,
 	})
@@ -347,7 +348,7 @@ func TestRecorderTurnProgressIsStructuredAndDisplayless(t *testing.T) {
 	if event.Type != session.EventTurnProgress || event.Prompt != 2 || event.Turn != 4 || event.Display != "" || event.TurnProgress == nil {
 		t.Fatalf("turn progress event = %+v", event)
 	}
-	if event.TurnProgress.Activity["inspect"] != 3 || event.TurnProgress.InspectionNoProgressRun != 12 || event.TurnProgress.SteerReason != "phase_transition" {
+	if event.TurnProgress.Activity["inspect"] != 3 || event.TurnProgress.CommandRepeatStreak != 4 || event.TurnProgress.InspectionNoProgressRun != 12 || event.TurnProgress.SteerReason != "phase_transition" {
 		t.Fatalf("turn progress snapshot = %+v", event.TurnProgress)
 	}
 }
