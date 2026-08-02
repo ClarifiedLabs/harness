@@ -59,7 +59,7 @@ type Config struct {
 	HistSize     int    `json:"histsize"`
 
 	// Loop / model limits.
-	MaxTurns                           int               `json:"max_turns"`                              // -max-turns, default 250
+	MaxTurns                           int               `json:"max_turns"`                              // -max-turns, default 0 (unlimited)
 	MaxPromptTokens                    int               `json:"max_prompt_tokens"`                      // -max-prompt-tokens, accumulated-token ceiling per prompt; 0 = unlimited
 	MaxOutputTokens                    int               `json:"max_output_tokens"`                      // -max-output-tokens, per-turn output cap; 0 = automatic
 	MaxPromptCostUSD                   float64           `json:"max_prompt_cost_usd"`                    // -max-prompt-cost, accumulated USD ceiling per prompt; 0 = unlimited (needs known model cost)
@@ -248,7 +248,7 @@ type LSPServerConfig struct {
 }
 
 const (
-	defaultMaxTurns               = 250
+	defaultMaxTurns               = 0
 	defaultContextWindow          = 256_000
 	defaultGoalMaxContinuations   = 25
 	defaultDelegateMaxTurns       = 20
@@ -1148,7 +1148,7 @@ func newFlagSet() (*flag.FlagSet, flags) {
 	f.histFile = fs.String("histfile", "", "REPL history file path")
 	f.histFileSize = fs.Int("histfilesize", DefaultHistFileSize, "max REPL history entries stored on disk (0 disables)")
 	f.histSize = fs.Int("histsize", DefaultHistSize, "max REPL history entries loaded into memory (0 disables)")
-	f.maxTurns = fs.Int("max-turns", defaultMaxTurns, "turns per prompt; <=0 means unlimited")
+	f.maxTurns = fs.Int("max-turns", defaultMaxTurns, "turns per prompt; <=0 means unlimited (default 0)")
 	f.maxPromptTokens = fs.Int("max-prompt-tokens", 0, "stop a prompt after this many accumulated tokens; 0 means unlimited")
 	f.maxOutputTokens = fs.Int("max-output-tokens", 0, "per-turn output token cap; 0 uses the automatic cap")
 	f.maxPromptCost = fs.Float64("max-prompt-cost", 0, "stop a prompt once its accumulated model cost reaches this many USD; 0 means unlimited (requires known model cost)")

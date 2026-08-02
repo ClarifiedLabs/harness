@@ -2390,7 +2390,7 @@ func TestModelCompletionOnFinalBudgetTurnIsNotTurnLimit(t *testing.T) {
 }
 
 func TestNonPositiveMaxTurnsIsUnlimited(t *testing.T) {
-	const defaultConfigMaxTurns = 250
+	const formerDefaultMaxTurns = 250
 
 	n := 0
 	tool := &recordTool{name: "loop", run: func(_ context.Context, _ json.RawMessage) (string, error) {
@@ -2404,8 +2404,8 @@ func TestNonPositiveMaxTurnsIsUnlimited(t *testing.T) {
 		Events: []llm.StreamEvent{toolDone(0, "id", "loop", `{}`)},
 		Stop:   llm.StopToolUse,
 	}
-	turns := make([]llmtest.Step, defaultConfigMaxTurns+2)
-	for i := 0; i < defaultConfigMaxTurns+1; i++ {
+	turns := make([]llmtest.Step, formerDefaultMaxTurns+2)
+	for i := 0; i < formerDefaultMaxTurns+1; i++ {
 		turns[i] = toolUse
 	}
 	turns[len(turns)-1] = llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn}
@@ -2418,11 +2418,11 @@ func TestNonPositiveMaxTurnsIsUnlimited(t *testing.T) {
 	}
 	mustValid(t, a.Transcript())
 
-	if len(fp.Requests) != defaultConfigMaxTurns+2 {
-		t.Errorf("provider called %d times, want %d (past default cap)", len(fp.Requests), defaultConfigMaxTurns+2)
+	if len(fp.Requests) != formerDefaultMaxTurns+2 {
+		t.Errorf("provider called %d times, want %d (past the former default cap)", len(fp.Requests), formerDefaultMaxTurns+2)
 	}
-	if sink.promptUsage[0].Turns != defaultConfigMaxTurns+2 {
-		t.Errorf("PromptComplete turns = %d, want %d", sink.promptUsage[0].Turns, defaultConfigMaxTurns+2)
+	if sink.promptUsage[0].Turns != formerDefaultMaxTurns+2 {
+		t.Errorf("PromptComplete turns = %d, want %d", sink.promptUsage[0].Turns, formerDefaultMaxTurns+2)
 	}
 	if sink.promptUsage[0].ClosureTrigger != "" || sink.promptUsage[0].TurnBudgetExhausted {
 		t.Errorf("unlimited prompt reported turn-budget closure: %+v", sink.promptUsage[0])

@@ -785,8 +785,8 @@ func TestMaxTurnsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.MaxTurns != 250 {
-		t.Fatalf("default max-turns %d, want 250", c.MaxTurns)
+	if c.MaxTurns != 0 {
+		t.Fatalf("default max-turns %d, want 0 (unlimited)", c.MaxTurns)
 	}
 }
 
@@ -1715,9 +1715,9 @@ func TestUsageListsEveryFlag(t *testing.T) {
 			t.Errorf("docs/usage.md flag section missing manual flag alias %q", "-"+name)
 		}
 	}
-	// -max-turns default (250) must be visible so the reference is accurate.
-	if !strings.Contains(out, "250") {
-		t.Errorf("usage text should show the -max-turns default 250:\n%s", out)
+	// -max-turns default (0, unlimited) must be visible so the reference is accurate.
+	if !strings.Contains(out, "<=0 means unlimited (default 0)") {
+		t.Errorf("usage text should show the unlimited -max-turns default:\n%s", out)
 	}
 	if !strings.Contains(out, "256000") {
 		t.Errorf("usage text should show the -default-context-window default 256000:\n%s", out)
@@ -1806,8 +1806,8 @@ func TestWriteResolvedIncludesDefaults(t *testing.T) {
 	if got["provider"] != "openrouter" || got["model"] != "openai/gpt-5.5" {
 		t.Fatalf("provider/model = %v/%v, want openrouter/openai/gpt-5.5\n%s", got["provider"], got["model"], b.String())
 	}
-	if got["max_turns"] != float64(250) {
-		t.Fatalf("max_turns = %v, want default 250\n%s", got["max_turns"], b.String())
+	if got["max_turns"] != float64(0) {
+		t.Fatalf("max_turns = %v, want default 0 (unlimited)\n%s", got["max_turns"], b.String())
 	}
 	if got["default_context_window"] != float64(256000) {
 		t.Fatalf("default_context_window = %v, want default 256000\n%s", got["default_context_window"], b.String())

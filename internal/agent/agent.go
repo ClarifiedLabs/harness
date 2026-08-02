@@ -613,6 +613,14 @@ type compactFallbackNoticeState struct {
 	smallShrink bool
 }
 
+// MaxTurns returns the per-prompt turn limit. A non-positive value means
+// unlimited.
+func (a *Agent) MaxTurns() int { return a.maxTurns }
+
+// SetMaxTurns changes the turn limit for subsequent prompts. A non-positive
+// value means unlimited.
+func (a *Agent) SetMaxTurns(maxTurns int) { a.maxTurns = maxTurns }
+
 // New constructs an Agent. A non-positive Options.MaxTurns means unlimited.
 func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 	modelRegistry := opts.Registry

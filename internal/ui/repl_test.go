@@ -559,7 +559,7 @@ func TestREPLCommandDocumentationMatchesVocabulary(t *testing.T) {
 
 func replCommandSet(text string) map[string]bool {
 	commands := map[string]bool{}
-	for _, command := range regexp.MustCompile(`/[a-z]+`).FindAllString(text, -1) {
+	for _, command := range regexp.MustCompile(`/[a-z-]+`).FindAllString(text, -1) {
 		commands[command] = true
 	}
 	return commands
@@ -1164,6 +1164,43 @@ func TestSuggestCommand(t *testing.T) {
 		if got := suggestCommand(in); got != want {
 			t.Errorf("suggestCommand(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestREPLMaxTurnsCommand(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+
+	app.command("/max-turns 7", nil)
+	if got := app.Agent.MaxTurns(); got != 7 {
+		t.Fatalf("after set, MaxTurns = %d, want 7", got)
+	}
+	if !strings.Contains(errw.String(), "[max turns: 7]") {
+		t.Fatalf("set output = %q, want current limit", errw.String())
+	}
+
+	errw.Reset()
+	app.command("/max-turns", nil)
+	if !strings.Contains(errw.String(), "[max turns: 7]") {
+		t.Fatalf("status output = %q, want current limit", errw.String())
+	}
+
+	errw.Reset()
+	app.command("/max-turns 0", nil)
+	if got := app.Agent.MaxTurns(); got != 0 {
+		t.Fatalf("after unlimited, MaxTurns = %d, want 0", got)
+	}
+	if !strings.Contains(errw.String(), "[max turns: unlimited]") {
+		t.Fatalf("unlimited output = %q", errw.String())
+	}
+
+	errw.Reset()
+	app.command("/max-turns invalid", nil)
+	if got := app.Agent.MaxTurns(); got != 0 {
+		t.Fatalf("invalid value changed MaxTurns to %d", got)
+	}
+	if !strings.Contains(errw.String(), "[max-turns failed:") {
+		t.Fatalf("invalid output = %q, want failure", errw.String())
 	}
 }
 

@@ -1524,7 +1524,7 @@ as compaction and prewarming is neither a prompt nor a turn.
 
 ```
 append user prompt message (origin=prompt)
-for turn := 1; maxTurns <= 0 || turn <= maxTurns; turn++ { // default 250; <=0 unlimited
+for turn := 1; maxTurns <= 0 || turn <= maxTurns; turn++ { // default 0 (unlimited)
     stream := provider.Stream(ctx, request) // attempt 1; retryable failures increment attempt
     accumulate: print text deltas live; collect assembled tool calls;
                 capture usage + stop reason
@@ -1577,11 +1577,12 @@ emit prompt_usage(prompt, completedTurns)
   same resource. Completed job summaries are delivered once as request-only
   context on a later parent model request; they are not appended to the parent
   transcript.
-- **Max-turns guard:** when `max_turns` is positive, on hit print
-  `[stopped: reached max turns (250)]`, keep the transcript (it is valid — the
-  last turn's results are appended), and return to the prompt. A non-positive
-  `max_turns` disables this guard. One turn before the limit the loop injects a
-  one-shot RoleUser wrap-up steer
+- **Max-turns guard:** `max_turns` defaults to `0` (unlimited). When it is
+  positive, on hit print `[stopped: reached max turns (N)]`, keep the transcript
+  (it is valid — the last turn's results are appended), and return to the prompt.
+  A non-positive value disables this guard. The interactive `/max-turns` command
+  changes the value for subsequent prompts in the current REPL session. One turn
+  before a positive limit the loop injects a one-shot RoleUser wrap-up steer
   ("stop calling tools now and reply with a final message").
 - **Structured termination:** every `PromptUsage` carries exactly one loop
   termination reason: `model_completed`, `turn_limit`, `token_limit`,

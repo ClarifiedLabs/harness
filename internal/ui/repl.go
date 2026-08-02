@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -335,6 +336,7 @@ const helpText = `commands:
   /clone           clone the current branch into a new session
   /context [file]  dump current model context, or save it as JSON
   /usage           cumulative session tokens and cost
+  /max-turns [n]   show or set turns per prompt for this session (<=0 is unlimited)
   /tools           list available tools (built-in, MCP, and disabled)
   /image [opts]    attach an image to the next prompt, list, or clear
   /edit [draft]    open $VISUAL/$EDITOR (or vi) for a multi-line prompt
@@ -2369,6 +2371,8 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		app.contextDump(arg)
 	case "/usage":
 		fmt.Fprintln(app.Errw, app.usageSummary())
+	case "/max-turns":
+		app.maxTurnsCommand(arg)
 	case "/image":
 		app.imageCommand(arg)
 	case "/edit":
@@ -2584,7 +2588,7 @@ func (app *App) pauseGoalAtContinuationCap() bool {
 // suggestions on an unknown command (r59).
 var knownCommands = []string{
 	"/help", "/exit", "/quit", "/clear", "/compact", "/tree", "/fork", "/clone", "/context", "/usage",
-	"/tools", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
+	"/max-turns", "/tools", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
 	"/agent", "/mode", "/plan", "/auto", "/handoff", "/background", "/goal", "/skills", "/vi",
 }
 
@@ -3029,6 +3033,22 @@ func (app *App) promptSaveDefaultModel(readLine func(string) (string, error)) {
 
 func (app *App) effort(arg string) {
 	app.reasoningCommand(arg)
+}
+
+func (app *App) maxTurnsCommand(arg string) {
+	if arg != "" {
+		maxTurns, err := strconv.Atoi(arg)
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[max-turns failed: %q is not an integer; <=0 means unlimited]\n", arg)
+			return
+		}
+		app.Agent.SetMaxTurns(maxTurns)
+	}
+	if app.Agent.MaxTurns() <= 0 {
+		fmt.Fprintln(app.Errw, "[max turns: unlimited]")
+		return
+	}
+	fmt.Fprintf(app.Errw, "[max turns: %d]\n", app.Agent.MaxTurns())
 }
 
 func (app *App) viCommand(arg string) {

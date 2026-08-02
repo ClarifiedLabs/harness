@@ -201,7 +201,7 @@ and send an explicit switch.
 -histfile <path>      REPL history file path
 -histfilesize <n>     max REPL history entries stored on disk (0 disables, default 1000)
 -histsize <n>         max REPL history entries loaded into memory (0 disables, default 1000)
--max-turns <n>    turns per prompt; <=0 means unlimited (default 250)
+-max-turns <n>    turns per prompt; <=0 means unlimited (default 0)
 -tool-timeout <s>   per-tool-call timeout backstop in seconds; <=0 disables (default 600). A
                     hung tool that ignores cancellation is force-failed after this many
                     seconds so it cannot stall a turn; run_command's own timeout_seconds stays
@@ -340,7 +340,9 @@ dollar budgets fail closed.
 
 The agent loop has several controls against runaway work:
 
-- `-max-turns` limits model turns within one prompt.
+- `-max-turns` limits model turns within one prompt. It defaults to `0`
+  (unlimited); `/max-turns` can change it for subsequent prompts in the current
+  REPL session.
 - `-max-prompt-tokens` stops before the next paid request once cumulative input,
   cache, output, and reasoning tokens reach the configured budget.
 - `-max-prompt-cost` applies the equivalent cumulative USD ceiling when provider
@@ -1171,6 +1173,8 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/context` | dump the current provider-neutral model context as JSON |
 | `/context <file>` | save the current provider-neutral model context as JSON |
 | `/usage` | cumulative input, cached input, output, reasoning tokens, cost, and successful compactions |
+| `/max-turns` | show the current per-prompt turn limit |
+| `/max-turns <n>` | change the turn limit for subsequent prompts in this REPL session; `n <= 0` means unlimited |
 | `/tools` | list enabled built-in and MCP tools with descriptions, plus disabled optional tools |
 | `/image` | list images queued for the next prompt |
 | `/image <path>` | attach an image to the next prompt |
