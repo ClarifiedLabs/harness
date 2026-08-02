@@ -342,7 +342,7 @@ func TestProviderCountInputTokens(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		sawTarget = req.TargetID
-		_ = json.NewEncoder(w).Encode(protocol.TokenCountResponse{InputTokens: 3456, Source: "proxy"})
+		_ = json.NewEncoder(w).Encode(protocol.TokenCountResponse{InputTokens: 3456, Source: "proxy", Scope: llm.InputTokenCountScopeRequestPayload})
 	}))
 	defer srv.Close()
 
@@ -354,7 +354,7 @@ func TestProviderCountInputTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CountInputTokens: %v", err)
 	}
-	if sawTarget != "openai:gpt-5.5" || got.InputTokens != 3456 || got.Source != "proxy" {
+	if sawTarget != "openai:gpt-5.5" || got.InputTokens != 3456 || got.Source != "proxy" || got.Scope != llm.InputTokenCountScopeRequestPayload {
 		t.Fatalf("target/count = %q/%+v", sawTarget, got)
 	}
 }

@@ -21,6 +21,7 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/goal"
+	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/session"
 	"harness/internal/sessionrec"
@@ -144,6 +145,9 @@ type Options struct {
 	// exists but before the child agent runs. Every failure is swallowed by
 	// the runner: the view must never affect the child run.
 	OpenChildView func(ChildView) (ChildViewHandle, error)
+	// WorkflowStatus optionally supplies authoritative bounded status for a
+	// child ID. It is telemetry only and never changes child exit semantics.
+	WorkflowStatus func(childID string) agent.WorkflowStatus
 }
 
 // ChildView describes one followable delegate child to Options.OpenChildView.
@@ -185,20 +189,24 @@ type RunRequest struct {
 
 // RunResult is the complete outcome of one child-agent run.
 type RunResult struct {
-	Report            string
-	Usage             llm.Usage
-	Turns             int
-	EffectiveMaxTurns int
-	TerminationReason agent.TerminationReason
-	Mode              string
-	ContinuedFrom     string
-	ContinuationMode  string
-	ChildID           string
-	TranscriptPath    string
-	Agent             string
-	ProviderName      string
-	Model             string
-	SaveError         error
+	Report              string
+	Usage               llm.Usage
+	Turns               int
+	EffectiveMaxTurns   int
+	TerminationReason   agent.TerminationReason
+	ClosureTrigger      agent.ClosureTrigger
+	ClosureTurn         int
+	TurnBudgetExhausted bool
+	WorkflowStatus      agent.WorkflowStatus
+	Mode                string
+	ContinuedFrom       string
+	ContinuationMode    string
+	ChildID             string
+	TranscriptPath      string
+	Agent               string
+	ProviderName        string
+	Model               string
+	SaveError           error
 	// Progress carries the live-progress closure (func() agent.DelegateProgressSnapshot)
 	// for foreground delegates so the parent wait ticker can read child activity while
 	// the (synchronous) run is in progress. It is nil for failure-before-run paths.
@@ -666,6 +674,9 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 
 	sink := newChildSink(childDir, childTodos, hasTodoTool, progress, activity, inlineReasoningEnabled(launch.Reasoning))
+	if r.opts.WorkflowStatus != nil {
+		sink.workflowStatus = func() agent.WorkflowStatus { return r.opts.WorkflowStatus(childID) }
+	}
 	sink.configureRecorder(r.opts.Now, launch.Registry, launch.ProviderName, launch.Model)
 	sink.messageCount = func() int { return len(child.Transcript()) }
 	sink.checkpoint = func(checkpoint agent.PromptCheckpoint) error {
@@ -734,6 +745,10 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		result.Usage = terminalUsage.Usage
 		result.Turns = terminalUsage.Turns
 		result.TerminationReason = terminalUsage.TerminationReason
+		result.ClosureTrigger = terminalUsage.ClosureTrigger
+		result.ClosureTurn = terminalUsage.ClosureTurn
+		result.TurnBudgetExhausted = terminalUsage.TurnBudgetExhausted
+		result.WorkflowStatus = terminalUsage.WorkflowStatus
 		result.ContinuationMode = req.continuationMode
 		result.Agent = launch.Agent
 		result.ProviderName = launch.ProviderName
@@ -793,20 +808,24 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, usage, created, terminalUpdated, ensureChildTree)
 	persistenceErr := errors.Join(sink.appendError(), stateErr)
 	result = RunResult{
-		Usage:             usage.Usage,
-		Turns:             usage.Turns,
-		EffectiveMaxTurns: maxTurns,
-		TerminationReason: usage.TerminationReason,
-		Mode:              req.Mode,
-		ContinuedFrom:     req.ContinueChildID,
-		ContinuationMode:  req.continuationMode,
-		ChildID:           childID,
-		TranscriptPath:    childDir,
-		Agent:             launch.Agent,
-		ProviderName:      launch.ProviderName,
-		Model:             launch.Model,
-		SaveError:         errors.Join(result.SaveError, persistenceErr),
-		Progress:          progress.Closure(),
+		Usage:               usage.Usage,
+		Turns:               usage.Turns,
+		EffectiveMaxTurns:   maxTurns,
+		TerminationReason:   usage.TerminationReason,
+		ClosureTrigger:      usage.ClosureTrigger,
+		ClosureTurn:         usage.ClosureTurn,
+		TurnBudgetExhausted: usage.TurnBudgetExhausted,
+		WorkflowStatus:      usage.WorkflowStatus,
+		Mode:                req.Mode,
+		ContinuedFrom:       req.ContinueChildID,
+		ContinuationMode:    req.continuationMode,
+		ChildID:             childID,
+		TranscriptPath:      childDir,
+		Agent:               launch.Agent,
+		ProviderName:        launch.ProviderName,
+		Model:               launch.Model,
+		SaveError:           errors.Join(result.SaveError, persistenceErr),
+		Progress:            progress.Closure(),
 	}
 	terminalErr = errors.Join(runErr, persistenceErr)
 	finish()
@@ -829,6 +848,21 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 	report += fmt.Sprintf(", termination %s, %d input tokens, %d output tokens",
 		usage.TerminationReason, usage.Usage.InputTokens, usage.Usage.OutputTokens)
+	if usage.ClosureTrigger != "" {
+		report += fmt.Sprintf(", closure %s at turn %d", usage.ClosureTrigger, usage.ClosureTurn)
+		if usage.TurnBudgetExhausted {
+			report += " (budget exhausted)"
+		}
+	}
+	if usage.WorkflowStatus.Available {
+		report += ", workflow " + string(usage.WorkflowStatus.Outcome)
+		if usage.WorkflowStatus.RemainingRequirements != nil {
+			report += fmt.Sprintf(" (%d remaining)", *usage.WorkflowStatus.RemainingRequirements)
+		}
+		if usage.WorkflowStatus.ExpectedWait {
+			report += " (expected wait)"
+		}
+	}
 	if childDir != "" {
 		report += fmt.Sprintf(", transcript %s", childDir)
 	}
@@ -1618,33 +1652,38 @@ func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, re
 		return "", nil
 	}
 	meta := session.ChildMeta{
-		ID:                 childID,
-		ParentID:           parent.ParentChildID,
-		Kind:               req.Kind,
-		Mode:               req.Mode,
-		ContinuedFrom:      req.ContinueChildID,
-		ContinuationMode:   req.continuationMode,
-		ContinuationBefore: req.continuationContextBefore,
-		ContinuationAfter:  req.continuationContextAfter,
-		ContinuationWindow: req.continuationContextWindow,
-		RuntimeFingerprint: runtimeFingerprint,
-		Agent:              launch.Agent,
-		RequestedAgent:     req.Agent,
-		ResourceKey:        req.ResourceKey,
-		Access:             req.Access,
-		Provider:           launch.ProviderName,
-		Model:              launch.Model,
-		Build:              parent.Build,
-		Runtime:            parent.RuntimeProfile,
-		Status:             status,
-		TaskPreview:        preview(req.Task, 240),
-		Created:            created,
-		Updated:            updated,
-		Usage:              usage.Usage,
-		MessageCount:       messageCount,
-		EffectiveMaxTurns:  effectiveMaxTurns,
-		TurnsUsed:          usage.Turns,
-		TerminationReason:  string(usage.TerminationReason),
+		ID:                  childID,
+		ParentID:            parent.ParentChildID,
+		Kind:                req.Kind,
+		Mode:                req.Mode,
+		ContinuedFrom:       req.ContinueChildID,
+		ContinuationMode:    req.continuationMode,
+		ContinuationBefore:  req.continuationContextBefore,
+		ContinuationAfter:   req.continuationContextAfter,
+		ContinuationWindow:  req.continuationContextWindow,
+		RuntimeFingerprint:  runtimeFingerprint,
+		Agent:               launch.Agent,
+		RequestedAgent:      req.Agent,
+		ResourceKey:         req.ResourceKey,
+		Access:              req.Access,
+		Provider:            launch.ProviderName,
+		Model:               launch.Model,
+		Build:               parent.Build,
+		Runtime:             parent.RuntimeProfile,
+		Status:              status,
+		TaskPreview:         preview(req.Task, 240),
+		Created:             created,
+		Updated:             updated,
+		Usage:               usage.Usage,
+		MessageCount:        messageCount,
+		EffectiveMaxTurns:   effectiveMaxTurns,
+		TurnsUsed:           usage.Turns,
+		TerminationReason:   string(usage.TerminationReason),
+		ClosureTrigger:      string(usage.ClosureTrigger),
+		ClosureTurn:         usage.ClosureTurn,
+		TurnBudgetExhausted: usage.TurnBudgetExhausted,
+		WorkflowStatus:      sessionrec.WorkflowStatusSnapshot(usage.WorkflowStatus),
+		TelemetryVersion:    session.ReliabilityTelemetryVersion,
 	}
 	if req.MaxTurns != nil && !req.maxTurnsInherited {
 		requested := *req.MaxTurns
@@ -1728,6 +1767,7 @@ type childSink struct {
 	appendErr            error
 	checkpoint           func(agent.PromptCheckpoint) error
 	messageCount         func() int
+	workflowStatus       func() agent.WorkflowStatus
 }
 
 type pendingChildTool struct {
@@ -2079,31 +2119,44 @@ func (s *childSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
 		messageCount = s.messageCount()
 	}
 	s.rec.Append(session.Event{
-		Type:         session.EventCheckpoint,
-		Prompt:       1,
-		Turn:         checkpoint.Turn,
-		Purpose:      string(checkpoint.Kind),
-		DurationMS:   time.Since(started).Milliseconds(),
-		MessageCount: messageCount,
+		Type:                session.EventCheckpoint,
+		Prompt:              1,
+		Turn:                checkpoint.Turn,
+		Purpose:             string(checkpoint.Kind),
+		DurationMS:          time.Since(started).Milliseconds(),
+		MessageCount:        messageCount,
+		ClosureTrigger:      string(checkpoint.Usage.ClosureTrigger),
+		ClosureTurn:         checkpoint.Usage.ClosureTurn,
+		TurnBudgetExhausted: checkpoint.Usage.TurnBudgetExhausted,
+		WorkflowStatus:      sessionrec.WorkflowStatusSnapshot(checkpoint.Usage.WorkflowStatus),
 	})
+}
+
+func (s *childSink) ClosureStarted(event agent.ClosureEvent) {
+	s.rec.ClosureStarted(event)
+}
+
+func (s *childSink) TurnProgress(progress agent.TurnProgress) {
+	s.rec.TurnProgress(progress)
+}
+
+func (s *childSink) HookDiagnostic(diagnostic hooks.Diagnostic) {
+	s.rec.HookDiagnostic(diagnostic)
+}
+
+func (s *childSink) WorkflowStatus() agent.WorkflowStatus {
+	if s == nil || s.workflowStatus == nil {
+		return agent.WorkflowStatus{}
+	}
+	return s.workflowStatus()
 }
 
 func (s *childSink) RetentionApplied(event agent.RetentionEvent) {
 	s.rec.Append(session.Event{
-		Type:   session.EventRetention,
-		Prompt: 1,
-		Turn:   s.turn + 1,
-		Retention: &session.RetentionSnapshot{
-			Policy:              event.Policy,
-			Trigger:             event.Trigger,
-			BlocksTrimmed:       event.BlocksTrimmed,
-			BytesBefore:         event.BytesBefore,
-			BytesAfter:          event.BytesAfter,
-			ContextTokensBefore: event.ContextTokensBefore,
-			ContextTokensAfter:  event.ContextTokensAfter,
-			ResponseStateReset:  event.ResponseStateReset,
-			NextRequestStateful: event.NextRequestStateful,
-		},
+		Type:      session.EventRetention,
+		Prompt:    1,
+		Turn:      s.turn + 1,
+		Retention: sessionrec.RetentionSnapshot(event),
 	})
 }
 

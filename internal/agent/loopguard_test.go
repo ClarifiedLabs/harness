@@ -35,6 +35,33 @@ func toolUseStep() llmtest.Step {
 	}
 }
 
+func TestTurnBudgetClosureReserve(t *testing.T) {
+	tests := []struct {
+		maxTurns int
+		reserve  int
+	}{
+		{maxTurns: 0, reserve: 0},
+		{maxTurns: 1, reserve: 1},
+		{maxTurns: 2, reserve: 1},
+		{maxTurns: 3, reserve: 2},
+		{maxTurns: 20, reserve: 2},
+		{maxTurns: 21, reserve: 3},
+		{maxTurns: 250, reserve: 25},
+		{maxTurns: 1_000, reserve: 25},
+	}
+	for _, tt := range tests {
+		if got := turnBudgetClosureReserve(tt.maxTurns); got != tt.reserve {
+			t.Errorf("turnBudgetClosureReserve(%d) = %d, want %d", tt.maxTurns, got, tt.reserve)
+		}
+	}
+	if !shouldEnterTurnBudgetClosure(3, 1) {
+		t.Error("three-turn budget should enter closure after the first completed turn")
+	}
+	if shouldEnterTurnBudgetClosure(3, 0) {
+		t.Error("three-turn budget entered closure before only two turns remained")
+	}
+}
+
 func TestOrientationGuardSteersToBatching(t *testing.T) {
 	var guard turnGuard
 	results := []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultText: "ok"}}
@@ -59,6 +86,125 @@ func TestOrientationGuardIgnoresBatchedLookups(t *testing.T) {
 		if isSingleOrientationTurn([]llm.ToolCall{call}) {
 			t.Errorf("%s batched call classified as single orientation lookup", call.Name)
 		}
+	}
+}
+
+func TestSemanticInspectionStagnationSteersOnceWithoutStopping(t *testing.T) {
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{name: "read_file", readOnly: true})
+	var guard turnGuard
+	var batching, phase int
+	for i := 0; i < semanticSteerThreshold+5; i++ {
+		calls := []llm.ToolCall{{Name: "read_file", Input: json.RawMessage(fmt.Sprintf(`{"path":"file-%d.go"}`, i))}}
+		results := []llm.ContentBlock{{Kind: llm.BlockToolResult, ToolName: "read_file", ResultText: fmt.Sprintf("evidence-%d", i)}}
+		progress := guard.aggregateTurnProgress(reg, i+1, calls, results)
+		guard.recordTurn(calls, results, &progress)
+		reason, _ := guard.nextSteer()
+		switch reason {
+		case GuardSteerBatching:
+			batching++
+		case GuardSteerPhaseTransition:
+			phase++
+		}
+		if guard.shouldBreakErrors() || guard.shouldBreakRepeat() {
+			t.Fatal("semantic inspection streak triggered a hard stop")
+		}
+	}
+	if batching != 1 || phase != 1 {
+		t.Fatalf("steers: batching=%d phase=%d, want one each", batching, phase)
+	}
+	if guard.semanticRuns != semanticSteerThreshold+5 {
+		t.Fatalf("semantic streak = %d, want %d", guard.semanticRuns, semanticSteerThreshold+5)
+	}
+}
+
+func TestSemanticProgressSignalsResetInspectionStreak(t *testing.T) {
+	reg := tools.Default()
+	reg.Register(&recordTool{name: "read_file", readOnly: true})
+	reg.Register(&recordTool{name: "edit", readOnly: false})
+	var guard turnGuard
+	inspect := []llm.ToolCall{{Name: "read_file", Input: json.RawMessage(`{"path":"a"}`)}}
+	okResult := []llm.ContentBlock{{Kind: llm.BlockToolResult, ToolName: "read_file", ResultText: "evidence"}}
+	for i := 0; i < 4; i++ {
+		progress := guard.aggregateTurnProgress(reg, i+1, inspect, okResult)
+		guard.recordTurn(inspect, okResult, &progress)
+	}
+
+	mutation := []llm.ToolCall{{Name: "edit", Input: json.RawMessage(`{}`)}}
+	failedMutation := []llm.ContentBlock{{Kind: llm.BlockToolResult, ToolName: "edit", ResultText: "failed", ResultError: true}}
+	progress := guard.aggregateTurnProgress(reg, 5, mutation, failedMutation)
+	if progress.SuccessfulMutation || progress.ExplicitProgress {
+		t.Fatalf("failed mutation claimed progress: %+v", progress)
+	}
+	guard.recordTurn(mutation, failedMutation, &progress)
+	if guard.semanticRuns != 0 {
+		t.Fatalf("mutation attempt left inspection streak at %d", guard.semanticRuns)
+	}
+
+	verification := []llm.ToolCall{{Name: "run_command", Input: json.RawMessage(`{"argv":["go","test","./..."]}`)}}
+	failedVerification := []llm.ContentBlock{{Kind: llm.BlockToolResult, ToolName: "run_command", ResultText: "tests failed", ResultError: true}}
+	progress = guard.aggregateTurnProgress(reg, 6, verification, failedVerification)
+	if !progress.VerificationAttempt || progress.SuccessfulVerification || !progress.ExplicitProgress {
+		t.Fatalf("failed verification progress = %+v", progress)
+	}
+	guard.recordTurn(verification, failedVerification, &progress)
+
+	progress = TurnProgress{}
+	guard.semanticRuns = 7
+	guard.semanticSteered = true
+	guard.resetForUserSteer(&progress)
+	if guard.semanticRuns != 0 || !progress.UserSteer {
+		t.Fatalf("user steer did not reset semantic streak: guard=%+v progress=%+v", guard, progress)
+	}
+}
+
+func TestBoundedNewEvidenceDetectionIncludesRichContentDigest(t *testing.T) {
+	var evidence boundedEvidence
+	base := llm.ContentBlock{Kind: llm.BlockToolResult, ToolName: "view_image", ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: "first"}}}
+	if !evidence.add(toolResultEvidence(base)) || evidence.add(toolResultEvidence(base)) {
+		t.Fatal("identical rich result was not recognized as existing evidence")
+	}
+	base.ResultContent[0].ImageData = "second"
+	if !evidence.add(toolResultEvidence(base)) {
+		t.Fatal("changed rich image digest was not recognized as new evidence")
+	}
+	for i := 0; i < maxEvidenceSignatures+20; i++ {
+		result := llm.ContentBlock{Kind: llm.BlockToolResult, ToolName: "probe", ResultText: fmt.Sprintf("result-%d", i)}
+		evidence.add(toolResultEvidence(result))
+	}
+	if len(evidence.seen) != maxEvidenceSignatures || len(evidence.order) != maxEvidenceSignatures {
+		t.Fatalf("evidence window sizes = %d/%d, want %d", len(evidence.seen), len(evidence.order), maxEvidenceSignatures)
+	}
+}
+
+func TestSemanticProgressEventDoesNotEnterTranscript(t *testing.T) {
+	tool := &recordTool{name: "read_file", readOnly: true, run: func(_ context.Context, input json.RawMessage) (string, error) {
+		return string(input), nil
+	}}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+	steps := make([]llmtest.Step, 0, semanticSteerThreshold+1)
+	for i := 0; i < semanticSteerThreshold; i++ {
+		steps = append(steps, llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, fmt.Sprintf("id-%d", i), "read_file", fmt.Sprintf(`{"path":"file-%d.go"}`, i))},
+			Stop:   llm.StopToolUse,
+		})
+	}
+	steps = append(steps, textStep("done"))
+	a := newAgent(llmtest.New("fake", steps...), reg, Options{MaxTurns: semanticSteerThreshold + 2})
+	sink := &recordSink{}
+	if err := a.RunPrompt(context.Background(), "inspect", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	mustValid(t, a.Transcript())
+	if len(sink.progress) != semanticSteerThreshold {
+		t.Fatalf("progress events = %d, want %d", len(sink.progress), semanticSteerThreshold)
+	}
+	if got := countUserMessagesContaining(a.Transcript(), "recent turns have remained in inspection"); got != 1 {
+		t.Fatalf("phase-transition steer count = %d, want 1", got)
+	}
+	if sink.progress[len(sink.progress)-1].SteerReason != GuardSteerPhaseTransition {
+		t.Fatalf("last steer reason = %q, want %q", sink.progress[len(sink.progress)-1].SteerReason, GuardSteerPhaseTransition)
 	}
 }
 
@@ -171,6 +317,9 @@ func TestRepeatLoopHardStops(t *testing.T) {
 		t.Errorf("turn should end on the assistant wind-down summary, got %+v", last)
 	}
 	assertPromptTermination(t, sink, TerminationRepeatGuard)
+	if got := sink.promptUsage[0].ClosureTrigger; got != ClosureTriggerRepeatGuard {
+		t.Errorf("closure trigger = %q, want repeat_guard", got)
+	}
 }
 
 // TestErrorStormSteersThenBreaks verifies the consecutive-error backoff: one
@@ -227,6 +376,9 @@ func TestErrorStormSteersThenBreaks(t *testing.T) {
 		t.Errorf("turn should end on the assistant wind-down summary, got %+v", last)
 	}
 	assertPromptTermination(t, sink, TerminationErrorGuard)
+	if got := sink.promptUsage[0].ClosureTrigger; got != ClosureTriggerErrorGuard {
+		t.Errorf("closure trigger = %q, want error_guard", got)
+	}
 }
 
 // TestTurnTokenBudgetStops verifies the per-prompt token budget halts a tool loop

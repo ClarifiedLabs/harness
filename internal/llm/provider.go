@@ -30,10 +30,33 @@ type InputTokenCounter interface {
 // ErrInputTokenCountUnsupported marks providers without preflight counting.
 var ErrInputTokenCountUnsupported = errors.New("input token count unsupported")
 
+// InputTokenCountScope describes which model-visible input a provider counted.
+// Stateful continuation APIs may count either the effective logical context or
+// only the payload sent for the current request.
+type InputTokenCountScope string
+
+const (
+	InputTokenCountScopeUnknown          InputTokenCountScope = "unknown"
+	InputTokenCountScopeEffectiveContext InputTokenCountScope = "effective_context"
+	InputTokenCountScopeRequestPayload   InputTokenCountScope = "request_payload"
+)
+
+// NormalizeInputTokenCountScope maps missing and unrecognized values to
+// unknown so older providers and model proxies remain compatible.
+func NormalizeInputTokenCountScope(scope InputTokenCountScope) InputTokenCountScope {
+	switch scope {
+	case InputTokenCountScopeEffectiveContext, InputTokenCountScopeRequestPayload:
+		return scope
+	default:
+		return InputTokenCountScopeUnknown
+	}
+}
+
 // InputTokenCount is a provider-specific input-token count for one request.
 type InputTokenCount struct {
-	InputTokens int    `json:"input_tokens"`
-	Source      string `json:"source,omitempty"`
+	InputTokens int                  `json:"input_tokens"`
+	Source      string               `json:"source,omitempty"`
+	Scope       InputTokenCountScope `json:"scope,omitempty"`
 }
 
 // RequestPurpose classifies why a model request exists. Values are deliberately

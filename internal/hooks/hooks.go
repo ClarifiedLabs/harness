@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -51,8 +52,13 @@ var validEvents = func() map[Event]bool {
 }()
 
 const (
-	defaultTimeoutSeconds = 120
-	maxTimeoutSeconds     = 600
+	defaultTimeoutSeconds      = 120
+	maxTimeoutSeconds          = 600
+	defaultMaxTimeouts         = 3
+	maxMaxTimeouts             = 100
+	defaultCooldownSeconds     = 60
+	maxTimeoutCooldownSeconds  = 3600
+	maxConsecutiveTimeoutCount = 1_000_000
 )
 
 var hookTimeoutUnit = time.Second
@@ -74,11 +80,14 @@ type Group struct {
 
 // Handler is one command hook. Only type "command" is supported in v1.
 type Handler struct {
-	Type           string `json:"type"`
-	Command        string `json:"command"`
-	CommandWindows string `json:"command_windows,omitempty"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
-	StatusMessage  string `json:"status_message,omitempty"`
+	Type                   string `json:"type"`
+	Name                   string `json:"name,omitempty"`
+	Command                string `json:"command"`
+	CommandWindows         string `json:"command_windows,omitempty"`
+	TimeoutSeconds         int    `json:"timeout_seconds,omitempty"`
+	StatusMessage          string `json:"status_message,omitempty"`
+	MaxConsecutiveTimeouts *int   `json:"max_consecutive_timeouts,omitempty"`
+	TimeoutCooldownSeconds int    `json:"timeout_cooldown_seconds,omitempty"`
 }
 
 // Payload carries event-specific fields. Runner adds common fields before
@@ -91,6 +100,35 @@ type Result struct {
 	Reasons           []string
 	AdditionalContext []string
 	Notices           []string
+	Diagnostics       []Diagnostic
+}
+
+// DiagnosticOutcome is a bounded hook execution outcome.
+type DiagnosticOutcome string
+
+const (
+	OutcomeSuccess     DiagnosticOutcome = "success"
+	OutcomeTimeout     DiagnosticOutcome = "timeout"
+	OutcomeCircuitOpen DiagnosticOutcome = "circuit_open"
+	OutcomeCanceled    DiagnosticOutcome = "canceled"
+	OutcomeStartFailed DiagnosticOutcome = "start_failed"
+	OutcomeExitNonzero DiagnosticOutcome = "exit_nonzero"
+	OutcomeParseFailed DiagnosticOutcome = "parse_failed"
+)
+
+// Diagnostic contains bounded operational metadata only. It never includes the
+// command, input payload, stdout, or stderr.
+type Diagnostic struct {
+	Event               Event
+	Handler             string
+	Target              string
+	ToolID              string
+	TimeoutSeconds      int
+	Elapsed             time.Duration
+	ConsecutiveTimeouts int
+	Outcome             DiagnosticOutcome
+	CircuitOpen         bool
+	CircuitOpenUntil    time.Time
 }
 
 // Reason returns all block reasons in deterministic execution order.
@@ -267,6 +305,10 @@ func (g Group) matches(target string) bool {
 }
 
 func (h *Handler) validate() error {
+	h.Name = strings.TrimSpace(h.Name)
+	if len(h.Name) > 128 {
+		return fmt.Errorf("name must be <= 128 bytes")
+	}
 	if h.Type == "" {
 		h.Type = "command"
 	}
@@ -285,6 +327,23 @@ func (h *Handler) validate() error {
 	if h.TimeoutSeconds > maxTimeoutSeconds {
 		return fmt.Errorf("timeout_seconds must be <= %d", maxTimeoutSeconds)
 	}
+	if h.MaxConsecutiveTimeouts != nil {
+		if *h.MaxConsecutiveTimeouts < 0 {
+			return fmt.Errorf("max_consecutive_timeouts must be >= 0")
+		}
+		if *h.MaxConsecutiveTimeouts > maxMaxTimeouts {
+			return fmt.Errorf("max_consecutive_timeouts must be <= %d", maxMaxTimeouts)
+		}
+	}
+	if h.TimeoutCooldownSeconds == 0 {
+		h.TimeoutCooldownSeconds = defaultCooldownSeconds
+	}
+	if h.TimeoutCooldownSeconds < 0 {
+		return fmt.Errorf("timeout_cooldown_seconds must be >= 0")
+	}
+	if h.TimeoutCooldownSeconds > maxTimeoutCooldownSeconds {
+		return fmt.Errorf("timeout_cooldown_seconds must be <= %d", maxTimeoutCooldownSeconds)
+	}
 	return nil
 }
 
@@ -292,6 +351,7 @@ func (h *Handler) validate() error {
 func (h *Handler) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Type                  string `json:"type"`
+		Name                  string `json:"name"`
 		Command               string `json:"command"`
 		CommandWindows        string `json:"command_windows"`
 		CommandWindowsAlias   string `json:"commandWindows"`
@@ -299,6 +359,8 @@ func (h *Handler) UnmarshalJSON(data []byte) error {
 		TimeoutAlias          *int   `json:"timeout"`
 		StatusMessage         string `json:"status_message"`
 		StatusMessageAlias    string `json:"statusMessage"`
+		MaxTimeouts           *int   `json:"max_consecutive_timeouts"`
+		CooldownSeconds       *int   `json:"timeout_cooldown_seconds"`
 		UnsupportedAsync      *bool  `json:"async"`
 		UnsupportedPromptName string `json:"prompt"`
 	}
@@ -306,6 +368,7 @@ func (h *Handler) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	h.Type = strings.TrimSpace(raw.Type)
+	h.Name = raw.Name
 	h.Command = raw.Command
 	h.CommandWindows = raw.CommandWindows
 	if h.CommandWindows == "" {
@@ -320,6 +383,13 @@ func (h *Handler) UnmarshalJSON(data []byte) error {
 	if h.StatusMessage == "" {
 		h.StatusMessage = raw.StatusMessageAlias
 	}
+	if raw.MaxTimeouts != nil {
+		maxTimeouts := *raw.MaxTimeouts
+		h.MaxConsecutiveTimeouts = &maxTimeouts
+	}
+	if raw.CooldownSeconds != nil {
+		h.TimeoutCooldownSeconds = *raw.CooldownSeconds
+	}
 	return nil
 }
 
@@ -330,6 +400,17 @@ type Runner struct {
 	SessionID      string
 	TranscriptPath string
 	Model          string
+
+	mu       sync.Mutex
+	breakers map[string]*timeoutBreaker
+	now      func() time.Time
+	execute  func(context.Context, Handler, string, []byte) commandResult
+}
+
+type timeoutBreaker struct {
+	consecutive int
+	openUntil   time.Time
+	probeActive bool
 }
 
 // Empty reports whether the runner has no configured hooks.
@@ -380,16 +461,53 @@ func (r *Runner) Run(ctx context.Context, event Event, target string, payload Pa
 		return out
 	}
 	stdin = append(stdin, '\n')
+	toolID, _ := payload["tool_use_id"].(string)
 
-	for _, group := range groups {
+	for groupIndex, group := range groups {
 		if !eventIgnoresMatcher(event) && !group.matches(target) {
 			continue
 		}
-		for _, hook := range group.Hooks {
+		for hookIndex, hook := range group.Hooks {
+			identity := handlerIdentity(event, groupIndex, hookIndex, hook.Name)
+			stateKey := fmt.Sprintf("%s/%d/%d", event, groupIndex, hookIndex)
+			now := r.clock()()
+			run, count, openUntil := r.beforeHook(stateKey, hook, now)
+			if !run {
+				out.Notices = append(out.Notices, fmt.Sprintf("[hook %s handler %s circuit open until %s; skipped]", event, identity, openUntil.UTC().Format(time.RFC3339)))
+				out.Diagnostics = append(out.Diagnostics, Diagnostic{
+					Event: event, Handler: identity, Target: target, ToolID: toolID,
+					TimeoutSeconds: hook.TimeoutSeconds, ConsecutiveTimeouts: count,
+					Outcome: OutcomeCircuitOpen, CircuitOpen: true, CircuitOpenUntil: openUntil,
+				})
+				continue
+			}
 			if hook.StatusMessage != "" {
 				out.Notices = append(out.Notices, "[hook: "+hook.StatusMessage+"]")
 			}
-			cmdResult := runCommand(ctx, hook, r.CWD, stdin)
+			started := r.clock()()
+			cmdResult := r.commandRunner()(ctx, hook, r.CWD, stdin)
+			finished := r.clock()()
+			elapsed := finished.Sub(started)
+			if elapsed < 0 {
+				elapsed = 0
+			}
+			outcome := commandDiagnosticOutcome(cmdResult)
+			count, circuitOpen, openUntil := r.afterHook(stateKey, hook, outcome, finished)
+			diagnostic := Diagnostic{
+				Event: event, Handler: identity, Target: target, ToolID: toolID,
+				TimeoutSeconds: hook.TimeoutSeconds, Elapsed: elapsed,
+				ConsecutiveTimeouts: count, Outcome: outcome,
+				CircuitOpen: circuitOpen, CircuitOpenUntil: openUntil,
+			}
+			out.Diagnostics = append(out.Diagnostics, diagnostic)
+			if cmdResult.TimedOut {
+				message := fmt.Sprintf("[hook %s handler %s timed out after %ds; continuing", event, identity, hook.TimeoutSeconds)
+				if circuitOpen {
+					message += "; circuit open until " + openUntil.UTC().Format(time.RFC3339)
+				}
+				out.Notices = append(out.Notices, message+"]")
+				continue
+			}
 			parsed := parseCommandOutput(cmdResult)
 			out.Block = out.Block || parsed.Block
 			out.Reasons = append(out.Reasons, parsed.Reasons...)
@@ -398,6 +516,117 @@ func (r *Runner) Run(ctx context.Context, event Event, target string, payload Pa
 		}
 	}
 	return out
+}
+
+func handlerIdentity(event Event, groupIndex, hookIndex int, name string) string {
+	if name = strings.TrimSpace(name); name != "" {
+		return name
+	}
+	return fmt.Sprintf("%s/%d/%d", event, groupIndex, hookIndex)
+}
+
+func (r *Runner) clock() func() time.Time {
+	if r.now != nil {
+		return r.now
+	}
+	return time.Now
+}
+
+func (r *Runner) commandRunner() func(context.Context, Handler, string, []byte) commandResult {
+	if r.execute != nil {
+		return r.execute
+	}
+	return runCommand
+}
+
+func maxTimeouts(hook Handler) int {
+	if hook.MaxConsecutiveTimeouts == nil {
+		return defaultMaxTimeouts
+	}
+	return *hook.MaxConsecutiveTimeouts
+}
+
+func (r *Runner) beforeHook(identity string, hook Handler, now time.Time) (run bool, count int, openUntil time.Time) {
+	if maxTimeouts(hook) == 0 {
+		return true, 0, time.Time{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.breakers == nil {
+		r.breakers = make(map[string]*timeoutBreaker)
+	}
+	state := r.breakers[identity]
+	if state == nil {
+		state = &timeoutBreaker{}
+		r.breakers[identity] = state
+	}
+	if !state.openUntil.IsZero() && now.Before(state.openUntil) {
+		return false, state.consecutive, state.openUntil
+	}
+	if !state.openUntil.IsZero() && state.consecutive >= maxTimeouts(hook) {
+		if state.probeActive {
+			return false, state.consecutive, state.openUntil
+		}
+		state.probeActive = true
+	}
+	return true, state.consecutive, state.openUntil
+}
+
+func (r *Runner) afterHook(identity string, hook Handler, outcome DiagnosticOutcome, now time.Time) (count int, circuitOpen bool, openUntil time.Time) {
+	threshold := maxTimeouts(hook)
+	if threshold == 0 {
+		return 0, false, time.Time{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.breakers == nil {
+		r.breakers = make(map[string]*timeoutBreaker)
+	}
+	state := r.breakers[identity]
+	if state == nil {
+		state = &timeoutBreaker{}
+		r.breakers[identity] = state
+	}
+	state.probeActive = false
+	switch outcome {
+	case OutcomeTimeout:
+		if state.consecutive < maxConsecutiveTimeoutCount {
+			state.consecutive++
+		}
+		if state.consecutive >= threshold {
+			state.openUntil = now.Add(time.Duration(hook.TimeoutCooldownSeconds) * time.Second)
+		}
+	default:
+		state.consecutive = 0
+		state.openUntil = time.Time{}
+	}
+	return state.consecutive, !state.openUntil.IsZero() && now.Before(state.openUntil), state.openUntil
+}
+
+func commandDiagnosticOutcome(result commandResult) DiagnosticOutcome {
+	switch {
+	case result.StartErr != nil:
+		return OutcomeStartFailed
+	case result.TimedOut:
+		return OutcomeTimeout
+	case result.Canceled:
+		return OutcomeCanceled
+	case result.Code != 0:
+		return OutcomeExitNonzero
+	case malformedJSONObject(result.Stdout):
+		return OutcomeParseFailed
+	default:
+		return OutcomeSuccess
+	}
+}
+
+func malformedJSONObject(stdout string) bool {
+	stdout = strings.TrimSpace(stdout)
+	if stdout == "" || !strings.HasPrefix(stdout, "{") {
+		return false
+	}
+	var value hookOutput
+	return json.Unmarshal([]byte(stdout), &value) != nil
 }
 
 func (r *Runner) input(event Event, payload Payload) (map[string]any, error) {

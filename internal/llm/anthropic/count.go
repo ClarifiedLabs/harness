@@ -64,5 +64,9 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 	if out.InputTokens <= 0 {
 		return llm.InputTokenCount{}, llm.ErrInputTokenCountUnsupported
 	}
-	return llm.InputTokenCount{InputTokens: out.InputTokens, Source: "anthropic"}, nil
+	return llm.InputTokenCount{
+		InputTokens: out.InputTokens,
+		Source:      "anthropic",
+		Scope:       llm.InputTokenCountScopeEffectiveContext,
+	}, nil
 }

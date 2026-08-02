@@ -26,6 +26,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/plan"
+	"harness/internal/runstream"
 	"harness/internal/session"
 	"harness/internal/skills"
 	"harness/internal/todo"
@@ -407,6 +408,57 @@ func TestClosedTurnCheckpointIsDurableBeforeNextModelResponse(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("RunPrompt did not stop")
+	}
+}
+
+func TestDirectHookDiagnosticsPersistAndMirror(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	cfg, err := hooks.DecodeEventMap([]byte(`{
+		"SessionStart":[{"hooks":[{"name":"startup-policy","type":"command","command":"printf '{}'"}]}],
+		"UserPromptSubmit":[{"hooks":[{"name":"prompt-policy","type":"command","command":"printf '{}'"}]}]
+	}`))
+	if err != nil {
+		t.Fatalf("DecodeEventMap: %v", err)
+	}
+	app.Hooks = &hooks.Runner{Config: cfg}
+	var stream bytes.Buffer
+	writer := runstream.NewWriter(&stream, runstream.RunStart{
+		Mode: runstream.ModeInteractive, SessionID: "test-session", Provider: "fake", Model: "fake",
+	}, &errw)
+	app.RunStream = writer
+
+	app.RunSessionStartHook("startup")
+	result := app.runPromptSubmitHook(context.Background(), "hello", 7)
+	if result.Block || len(result.Diagnostics) != 1 {
+		t.Fatalf("prompt hook result = %+v", result)
+	}
+
+	data, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read hook diagnostics: %v", err)
+	}
+	var persisted []session.Event
+	for _, line := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
+		var event session.Event
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatalf("decode hook diagnostic: %v", err)
+		}
+		persisted = append(persisted, event)
+	}
+	if len(persisted) != 2 {
+		t.Fatalf("persisted hook diagnostics = %+v, want 2", persisted)
+	}
+	if persisted[0].Type != session.EventHookDiagnostic || persisted[0].Prompt != 0 || persisted[0].HookDiagnostic == nil || persisted[0].HookDiagnostic.Event != "SessionStart" || persisted[0].HookDiagnostic.Handler != "startup-policy" {
+		t.Fatalf("session-start diagnostic = %+v; all=%+v", persisted[0], persisted)
+	}
+	if persisted[1].Type != session.EventHookDiagnostic || persisted[1].Prompt != 7 || persisted[1].HookDiagnostic == nil || persisted[1].HookDiagnostic.Event != "UserPromptSubmit" || persisted[1].HookDiagnostic.Handler != "prompt-policy" {
+		t.Fatalf("prompt diagnostic = %+v", persisted[1])
+	}
+	writer.Close(runstream.RunEnd{})
+	mirrored := linesOfType(decodeRunStreamLines(t, stream.String()), string(session.EventHookDiagnostic))
+	if len(mirrored) != 2 {
+		t.Fatalf("mirrored hook diagnostics = %v; stream=%s", mirrored, stream.String())
 	}
 }
 

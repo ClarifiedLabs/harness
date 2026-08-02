@@ -10,6 +10,7 @@ import (
 	"harness/internal/agent"
 	"harness/internal/llm"
 	"harness/internal/runstream"
+	"harness/internal/sessionrec"
 )
 
 // Exit codes for one-shot mode (design §10).
@@ -154,10 +155,14 @@ func OneShot(app *App, prompt string) int {
 	}
 	if app.RunStream != nil {
 		end := runstream.PromptEnd{
-			ExitCode:          code,
-			TerminationReason: string(sink.promptUsage.TerminationReason),
-			Usage:             promptEndUsage(sink.promptUsage),
-			FinalText:         sink.FinalText(),
+			ExitCode:            code,
+			TerminationReason:   string(sink.promptUsage.TerminationReason),
+			ClosureTrigger:      string(sink.promptUsage.ClosureTrigger),
+			ClosureTurn:         sink.promptUsage.ClosureTurn,
+			TurnBudgetExhausted: sink.promptUsage.TurnBudgetExhausted,
+			WorkflowStatus:      sessionrec.WorkflowStatusSnapshot(sink.promptUsage.WorkflowStatus),
+			Usage:               promptEndUsage(sink.promptUsage),
+			FinalText:           sink.FinalText(),
 		}
 		if err != nil && !interrupted {
 			end.Error = err.Error()

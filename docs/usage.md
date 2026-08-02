@@ -351,6 +351,11 @@ The agent loop has several controls against runaway work:
   pausing the goal; `0` disables that count cap.
 - Repeated identical tool results and consecutive all-error tool turns are
   steered first and eventually stopped if the model does not change course.
+- Three consecutive turns that each perform one unbatched repository lookup get
+  a batching steer. Twelve inspection-only turns without mutation, verification,
+  wait, or coordination progress get one phase-transition steer. These semantic
+  guards are advisory and never hard-stop a run; explicit user steering resets
+  their streaks.
 - One exact tool call (same tool, same input) that keeps failing with the same
   error is steered on the 2nd identical failure and blocked before it runs on
   the 3rd. A successful edit or write resets that per-prompt counter.
@@ -1437,6 +1442,7 @@ Inspect saved sessions with:
 harness session replay [-f|--follow] [-q|--quiet] [--color-theme dark|light] [--config path] ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
 harness session stats [--format text|json] ~/.local/state/harness/sessions/20260611T123456Z
+harness session analyze [--since D|--all] [--before RFC3339] [--format text|json] [--] [dir]
 harness session errors [--tool T] [--kind K] [--model M] [--agent A] [--since D|--all] [--before RFC3339] [--format text|json] [dir]
 ```
 
@@ -1500,7 +1506,34 @@ section follows the tool report: failed tool-result and model-request counts,
 per-tool/kind/model breakdowns, and repeat loops (the same tool and kind
 failing at least three times consecutively).
 `--format json` emits a transcript-free machine report with per-tool
-calls/results/errors/error rates and the structured error summary.
+calls/results/errors/error rates and the structured error summary. The report
+also includes reliability telemetry reconstructed from the root and all
+physically nested delegate streams.
+
+`session analyze` emits a deterministic, versioned, transcript-free report for
+one session or a directory containing session roots. When `dir` is omitted,
+`--since D` controls recent session-root discovery (default `24h`) and `--all`
+removes that lookback; those discovery flags are mutually exclusive and do not
+apply to an explicit directory. Discovery recursively
+includes `children/<id>/` streams and never follows symlinks. The report records
+the immutable complete-record prefix byte count, event count, and SHA-256 for
+each `raw.ndjson`; missing, truncated, malformed, and symlinked streams remain
+visible as unavailable or incomplete rather than being silently dropped.
+`--before` applies an inclusive event-time cutoff and suppresses child-metadata
+fallbacks that could have been written after that cutoff. `--format json` is the
+stable input for corpus comparisons.
+
+Reliability fields carry explicit availability. A supported signal with no
+occurrences is an observed zero; a legacy or missing stream is unavailable.
+Progress reports inspection-only/no-progress streaks, first successful mutation
+and verification turns, and whether a batching steer was followed within two
+tool-bearing turns (pending cutoff cases are not failures). Hook diagnostics,
+closure triggers, workflow-status supply, context-accounting/provider-count
+scope, retention/reset totals, and arithmetic invariant violations are bounded
+counters only: prompt text, tool inputs/results, assistant text, and hook
+payloads are never copied into the report. Execution completion means a
+terminal `prompt_usage` record exists; termination reasons describe loop
+control, not task correctness.
 
 `session errors` lists the classified failures behind that section: every
 failed tool result and failed model request in one session (root plus delegate
@@ -1659,6 +1692,8 @@ receive the one-shot `focus` field.
             "type": "command",
             "command": "./hooks/pre-tool.sh",
             "timeout_seconds": 30,
+            "max_consecutive_timeouts": 3,
+            "timeout_cooldown_seconds": 60,
             "status_message": "Checking tool call"
           }
         ]
@@ -1677,6 +1712,18 @@ compaction hooks, and `startup|resume|clear|fork|clone` for `SessionStart`. Omit
 or `*` matches all. Hook commands may block with exit code `2` or JSON stdout
 such as `{"decision":"block","reason":"..."}` / `{"continue":false}`. Plain
 stdout is added as hook context only when the command exits `0`.
+
+Every handler has an independent deadline: `timeout_seconds` defaults to 120
+seconds and is capped at 600. A timeout records a bounded diagnostic, terminates
+that command, and continues to later matching handlers instead of hanging the
+prompt. After `max_consecutive_timeouts` (default 3), that handler's circuit is
+opened for `timeout_cooldown_seconds` (default 60, maximum 3600); skipped calls
+are also recorded. Set `max_consecutive_timeouts` to `0` to disable the circuit.
+A successful run or non-timeout failure clears the consecutive-timeout streak.
+Prompt cancellation remains distinct from timeout and is propagated to the hook
+process. Diagnostics include only event/handler identity, target/tool id,
+deadline, elapsed time, bounded outcome, streak, and circuit state—never command
+text, stdin payload, stdout, or stderr.
 
 `hook_configs` files may contain either a `{"hooks": {...}}` wrapper or a bare
 event map, and relative `hook_configs` paths resolve against the config-file

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"harness/internal/agent"
+	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/session"
 )
@@ -407,6 +408,50 @@ func (r *Recorder) MaintenanceComplete(u agent.MaintenanceUsage) {
 	r.Append(session.Event{Type: session.EventMaintenanceUsage, Prompt: r.cfg.Prompt, Purpose: u.Purpose, Usage: &usage})
 }
 
+// HookDiagnostic records bounded hook execution metadata without model-visible
+// or command/output content.
+func (r *Recorder) HookDiagnostic(diagnostic hooks.Diagnostic) {
+	if r == nil {
+		return
+	}
+	r.Append(session.Event{
+		Type:           session.EventHookDiagnostic,
+		Prompt:         r.cfg.Prompt,
+		Turn:           r.turn,
+		HookDiagnostic: HookDiagnosticSnapshot(diagnostic),
+	})
+}
+
+// TurnProgress records diagnostics-only semantic activity after a tool turn.
+func (r *Recorder) TurnProgress(progress agent.TurnProgress) {
+	if r == nil {
+		return
+	}
+	r.Append(session.Event{
+		Type:         session.EventTurnProgress,
+		Prompt:       r.cfg.Prompt,
+		Turn:         progress.Turn,
+		TurnProgress: TurnProgressSnapshot(progress),
+	})
+}
+
+// ClosureStarted records the first closure trigger while a prompt is still in
+// flight, so interrupted sessions retain the exact trigger turn.
+func (r *Recorder) ClosureStarted(event agent.ClosureEvent) {
+	if r == nil {
+		return
+	}
+	r.Append(session.Event{
+		Type:             session.EventClosure,
+		Prompt:           r.cfg.Prompt,
+		Turn:             event.Turn,
+		ClosureTrigger:   string(event.Trigger),
+		ClosureTurn:      event.Turn,
+		WorkflowStatus:   WorkflowStatusSnapshot(event.WorkflowStatus),
+		TelemetryVersion: session.ReliabilityTelemetryVersion,
+	})
+}
+
 // PromptComplete prices the prompt usage and records the closing prompt_usage
 // event. It must remain the last event written for a session prompt.
 func (r *Recorder) PromptComplete(u agent.PromptUsage) {
@@ -427,11 +472,16 @@ func (r *Recorder) PromptComplete(u agent.PromptUsage) {
 	}
 	usage := u.Usage
 	r.Append(session.Event{
-		Type:              session.EventPromptUsage,
-		Prompt:            r.cfg.Prompt,
-		Display:           line(u, promptElapsed, cost, costKnown),
-		Usage:             &usage,
-		Compactions:       u.Compactions,
-		TerminationReason: string(u.TerminationReason),
+		Type:                session.EventPromptUsage,
+		Prompt:              r.cfg.Prompt,
+		Display:             line(u, promptElapsed, cost, costKnown),
+		Usage:               &usage,
+		Compactions:         u.Compactions,
+		TerminationReason:   string(u.TerminationReason),
+		ClosureTrigger:      string(u.ClosureTrigger),
+		ClosureTurn:         u.ClosureTurn,
+		TurnBudgetExhausted: u.TurnBudgetExhausted,
+		WorkflowStatus:      WorkflowStatusSnapshot(u.WorkflowStatus),
+		TelemetryVersion:    session.ReliabilityTelemetryVersion,
 	})
 }

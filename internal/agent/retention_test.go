@@ -588,6 +588,15 @@ func TestStatefulRetentionPressureEpochTrimsEligibleBlocksAndResetsOnce(t *testi
 	if !event.ResponseStateReset || event.NextRequestStateful || event.BytesAfter >= event.BytesBefore || event.ContextTokensAfter >= event.ContextTokensBefore {
 		t.Fatalf("retention effect = %+v", event)
 	}
+	if !event.ContinuationStatePresent || !event.ContinuationStateReset || event.MeasurementAnchorReset ||
+		event.PreviousRequestMode != RetentionRequestModeStatefulSuffix || event.NextRequestMode != RetentionRequestModeFull {
+		t.Fatalf("retention causes/modes = %+v", event)
+	}
+	if event.BytesRemoved != event.BytesBefore-event.BytesAfter ||
+		event.EstimatedTokensRemoved != event.LocalEstimateTokensBefore-event.LocalEstimateTokensAfter ||
+		event.DecisionContextSource != ContextEstimateSourceBytes {
+		t.Fatalf("retention causal accounting = %+v", event)
+	}
 }
 
 func TestRetentionRewriteResetsCompactionMeasurement(t *testing.T) {
@@ -633,6 +642,11 @@ func TestRetentionRewriteResetsCompactionMeasurement(t *testing.T) {
 	}
 	if len(sink.retention) != 1 || sink.retention[0].BlocksTrimmed == 0 {
 		t.Fatalf("retention events = %+v, want one changed pressure epoch", sink.retention)
+	}
+	if event := sink.retention[0]; !event.MeasurementAnchorReset || event.ContinuationStatePresent || event.ContinuationStateReset ||
+		event.PreviousRequestMode != RetentionRequestModeStateless || event.NextRequestMode != RetentionRequestModeStateless ||
+		event.DecisionContextSource != ContextEstimateSourceResponseUsageDelta {
+		t.Fatalf("retention measurement reset = %+v", event)
 	}
 	if len(fp.Requests) != 2 {
 		t.Fatalf("provider requests = %d, want two conversational requests without a stale-trigger compaction", len(fp.Requests))

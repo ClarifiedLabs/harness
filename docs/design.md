@@ -1399,8 +1399,14 @@ constructs neither registry nor feed.
   Retry scheduling is logged separately at INFO; cancellation is distinguished
   from an upstream failure.
 - `POST /v1/input_tokens` accepts `{provider, request}` and returns
-  `{input_tokens, source}` when the configured provider implements
-  `InputTokenCounter`. `codex_oauth` Responses targets return a local
+  `{input_tokens, source, scope}` when the configured provider implements
+  `InputTokenCounter`. `scope` is `effective_context` only when the count covers
+  all logical context the next model call will process; it is `request_payload`
+  when it covers only the submitted payload (for example, a stateful continuation
+  whose prior context remains server-side), and `unknown` for a legacy response.
+  The client preserves that distinction in context telemetry and never treats a
+  payload-only count as the effective total. Legacy proxies that omit `scope`
+  remain compatible but their count is diagnostic rather than authoritative. `codex_oauth` Responses targets return a local
   `source:"o200k_base"` estimate instead of forwarding to a non-Codex
   `/responses/input_tokens` endpoint. Unsupported providers return `501` with
   `code:"input_token_count_unsupported"`. Count requests are best-effort
@@ -1592,8 +1598,18 @@ emit prompt_usage(prompt, completedTurns)
   - *Error storm.* It counts consecutive turns in which **every** tool result is an
     error. At 5 it steers ("re-read the latest error output and change your
     approach"); at 10 it breaks with `[stopped: N consecutive tool turns all
-    failed]`. (Repetition and error-storm steers share one slot, so a turn is
-    nudged at most once.)
+    failed]`. (All guard steers share one slot, so a turn is nudged at most once.)
+  - *Bounded activity telemetry and advisory semantic guards.* Each completed tool
+    turn is classified as inspect, mutate, verify, wait, coordinate, or other.
+    Batched schemas contribute their operation count rather than looking like one
+    operation. A successful mutation, verification attempt, successful wait, or
+    successful coordination is explicit progress. Result fingerprints are held in
+    a 256-entry FIFO set solely to mark bounded new evidence. Three consecutive
+    one-call/one-lookup turns inject a batching steer; twelve consecutive
+    inspection-only turns without explicit progress inject a phase-transition
+    steer. These advisory streaks have no hard-stop condition, and a user steer
+    resets them so the user's new direction gets a fresh window. The resulting
+    `turn_progress` event is diagnostics-only and never enters model history.
   - *Repeated identical failures (`internal/agent/failguard.go`).* A per-prompt
     `failureGuard` on the Agent (never on the shared registry) keys each
     dispatched call by tool name + normalized input hash and counts consecutive
@@ -3530,11 +3546,32 @@ type UsageTotals struct {
   turn/prompt usage lines, model-request display lines, and `tool_diff`
   events (when diffs are enabled) as the parent by construction; a parity
   test drives one scripted run through both sink paths and pins identical
-  `raw.ndjson` output. The recorder's `Mirror` hook (`sessionrec.Config.Mirror`
+  `raw.ndjson` output. Reliability telemetry schema v1 adds bounded structured
+  fields only: prompt closure trigger and workflow status; per-tool-turn activity,
+  first mutation/verification state, inspection/no-progress run, batching activity,
+  and optional steer reason; hook outcome/duration/timeout/circuit state; context
+  arithmetic and provider-count scope; and retention/reset decisions. A
+  `telemetry_version` capability marker makes an observed zero distinguishable
+  from a legacy unavailable signal. None of these fields contains prompt text,
+  assistant text, tool arguments/results, hook payloads, or environment values.
+  The recorder's `Mirror` hook (`sessionrec.Config.Mirror`
   → `session.EventAppender.Mirror`) receives every event after it has been
   durably written, post-coalescing; `-format json` run modes (§10) install it
   to mirror the identical event stream to stdout, so the live JSON stream and
   the replay log can never diverge.
+- `harness session analyze [--since D|--all] [--before RFC3339] [--format text|json] [--] [path]`
+  recursively analyzes one session or a corpus. With no path, `--since` limits
+  recent root discovery (default `24h`) and `--all` removes that lookback;
+  neither applies to an explicit path. It treats every physical root or
+  delegate log as a separate stream, recursively descends real `children/`
+  directories without following symlinks, hashes the immutable complete-record
+  prefix, and keeps missing/truncated/malformed sources explicit. Availability is
+  denominator-aware: schema-supported zeroes are available, while legacy fields
+  and absent streams are not inferred. A cutoff includes events at or before the
+  requested instant and disables untimestamped child-metadata fallback. Aggregate
+  execution completeness has a stable severity order (`incomplete` over
+  `unavailable` over `unknown` over `complete`). `session stats` reuses the same
+  derivation for a single root plus every physically nested delegate.
 - `harness session replay <session-dir>` prints `raw.ndjson` as the familiar
   user-facing terminal view, filtering assistant/reasoning deltas from retry
   attempts that were explicitly discarded before a later successful attempt.

@@ -931,6 +931,16 @@ func TestOneShotJSONRunStreamEvents(t *testing.T) {
 		Usage:  llm.Usage{InputTokens: 20, OutputTokens: 6},
 	})
 	app := newTestApp(t, &out, &errw, fp)
+	app.Agent = agent.New(fp, tools.Default(), agent.Options{Model: "claude-opus-4-8", MaxTurns: 1})
+	app.Agent.SetSystem("you are a test")
+	remaining := 1
+	app.WorkflowStatusFunc = func() agent.WorkflowStatus {
+		return agent.WorkflowStatus{
+			Available:             true,
+			Outcome:               agent.WorkflowOutcomeBlocked,
+			RemainingRequirements: &remaining,
+		}
+	}
 	var stream bytes.Buffer
 	w := runstream.NewWriter(&stream, runstream.RunStart{
 		Mode: runstream.ModeOneshot, SessionID: "test-session", Provider: "fake", Model: "fake",
@@ -971,8 +981,13 @@ func TestOneShotJSONRunStreamEvents(t *testing.T) {
 		t.Fatalf("second-to-last line = %v, want prompt_end: %q", end["type"], stream.String())
 	}
 	if end["exit_code"] != float64(0) || end["termination_reason"] != "model_completed" ||
+		end["closure_trigger"] != "turn_budget" || end["closure_turn"] != float64(1) || end["turn_budget_exhausted"] != true ||
 		end["final_text"] != "hello world" {
 		t.Fatalf("prompt_end = %v", end)
+	}
+	workflow, _ := end["workflow_status"].(map[string]any)
+	if workflow["outcome"] != "blocked" || workflow["remaining_requirements"] != float64(1) {
+		t.Fatalf("prompt_end workflow = %v", workflow)
 	}
 	usage, _ := end["usage"].(map[string]any)
 	if usage["input_tokens"] != float64(20) || usage["output_tokens"] != float64(6) || usage["turns"] != float64(1) || usage["compactions"] != float64(0) {
@@ -980,8 +995,15 @@ func TestOneShotJSONRunStreamEvents(t *testing.T) {
 	}
 	runEnd := lines[len(lines)-1]
 	if runEnd["type"] != "run_end" || runEnd["exit_code"] != float64(0) ||
-		runEnd["termination_reason"] != "model_completed" {
+		runEnd["termination_reason"] != "model_completed" || runEnd["closure_trigger"] != "turn_budget" ||
+		runEnd["turn_budget_exhausted"] != true {
 		t.Fatalf("run_end = %v, want the one-shot outcome mirrored from prompt_end", runEnd)
+	}
+	if events := linesOfType(lines, session.EventClosure); len(events) != 1 || events[0]["closure_trigger"] != "turn_budget" {
+		t.Fatalf("closure events = %v", events)
+	}
+	if events := linesOfType(lines, session.EventPromptUsage); len(events) != 1 || events[0]["closure_turn"] != float64(1) || events[0]["workflow_status"] == nil {
+		t.Fatalf("prompt usage events = %v", events)
 	}
 }
 

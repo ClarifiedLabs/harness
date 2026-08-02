@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"harness/internal/agent"
+	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/session"
 	"harness/internal/tools"
@@ -443,19 +444,133 @@ func CacheHitRatio(u llm.Usage) int {
 // form, returning nil when the estimate carries no data.
 func ContextSnapshot(ctx agent.ContextEstimate) *session.ContextSnapshot {
 	if ctx.Total == 0 && ctx.Window == 0 && ctx.System == 0 && ctx.Tools == 0 && ctx.Messages == 0 &&
-		ctx.PayloadTotal == 0 && ctx.PayloadSystem == 0 && ctx.PayloadTools == 0 && ctx.PayloadMessages == 0 {
+		ctx.PayloadTotal == 0 && ctx.PayloadSystem == 0 && ctx.PayloadTools == 0 && ctx.PayloadMessages == 0 &&
+		ctx.ProviderInputTokens == 0 {
 		return nil
 	}
 	return &session.ContextSnapshot{
-		Total:           ctx.Total,
-		Window:          ctx.Window,
-		System:          ctx.System,
-		Tools:           ctx.Tools,
-		Messages:        ctx.Messages,
-		Source:          ctx.Source,
-		PayloadTotal:    ctx.PayloadTotal,
-		PayloadSystem:   ctx.PayloadSystem,
-		PayloadTools:    ctx.PayloadTools,
-		PayloadMessages: ctx.PayloadMessages,
+		Total:               ctx.Total,
+		Window:              ctx.Window,
+		System:              ctx.System,
+		Tools:               ctx.Tools,
+		Messages:            ctx.Messages,
+		Source:              ctx.Source,
+		PayloadTotal:        ctx.PayloadTotal,
+		PayloadSystem:       ctx.PayloadSystem,
+		PayloadTools:        ctx.PayloadTools,
+		PayloadMessages:     ctx.PayloadMessages,
+		PayloadSource:       ctx.PayloadSource,
+		ProviderInputTokens: ctx.ProviderInputTokens,
+		ProviderInputSource: ctx.ProviderInputSource,
+		ProviderInputScope:  string(ctx.ProviderInputScope),
+	}
+}
+
+// HookDiagnosticSnapshot projects bounded hook metadata and deliberately omits
+// command, payload, stdout, and stderr content.
+func HookDiagnosticSnapshot(diagnostic hooks.Diagnostic) *session.HookDiagnosticSnapshot {
+	elapsed := diagnostic.Elapsed.Milliseconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	count := diagnostic.ConsecutiveTimeouts
+	if count < 0 {
+		count = 0
+	}
+	var openUntil *time.Time
+	if diagnostic.CircuitOpen && !diagnostic.CircuitOpenUntil.IsZero() {
+		value := diagnostic.CircuitOpenUntil
+		openUntil = &value
+	}
+	return &session.HookDiagnosticSnapshot{
+		Event:               string(diagnostic.Event),
+		Handler:             diagnostic.Handler,
+		Target:              diagnostic.Target,
+		ToolID:              diagnostic.ToolID,
+		TimeoutSeconds:      diagnostic.TimeoutSeconds,
+		ElapsedMS:           elapsed,
+		ConsecutiveTimeouts: count,
+		Outcome:             string(diagnostic.Outcome),
+		CircuitOpen:         diagnostic.CircuitOpen,
+		CircuitOpenUntil:    openUntil,
+	}
+}
+
+// TurnProgressSnapshot projects diagnostics-only progress without result bodies
+// or evidence hashes. The activity map is populated from a bounded vocabulary.
+func TurnProgressSnapshot(progress agent.TurnProgress) *session.TurnProgressSnapshot {
+	activity := make(map[string]int, 6)
+	for name, count := range map[string]int{
+		"inspect": progress.Activity.Inspect, "mutate": progress.Activity.Mutate,
+		"verify": progress.Activity.Verify, "wait": progress.Activity.Wait,
+		"coordinate": progress.Activity.Coordinate, "other": progress.Activity.Other,
+	} {
+		if count > 0 {
+			activity[name] = count
+		}
+	}
+	return &session.TurnProgressSnapshot{
+		ToolCalls:               progress.ToolCalls,
+		Operations:              progress.Operations,
+		Activity:                activity,
+		ErrorCount:              progress.ErrorCount,
+		BatchedOperationCount:   progress.BatchedOperationCount,
+		SingleLookupCount:       progress.SingleLookupCount,
+		InspectionOnly:          progress.InspectionOnly,
+		NoExplicitProgress:      progress.NoExplicitProgress,
+		ExplicitProgress:        progress.ExplicitProgress,
+		SuccessfulMutation:      progress.SuccessfulMutation,
+		VerificationAttempt:     progress.VerificationAttempt,
+		SuccessfulVerification:  progress.SuccessfulVerification,
+		SuccessfulWait:          progress.SuccessfulWait,
+		SuccessfulCoordination:  progress.SuccessfulCoordination,
+		NewEvidence:             progress.NewEvidence,
+		NewEvidenceCount:        progress.NewEvidenceCount,
+		UserSteer:               progress.UserSteer,
+		RepeatStreak:            progress.RepeatStreak,
+		ErrorStreak:             progress.ErrorStreak,
+		SingleLookupStreak:      progress.SingleLookupStreak,
+		InspectionNoProgressRun: progress.InspectionNoProgressRun,
+		SteerReason:             string(progress.SteerReason),
+	}
+}
+
+// WorkflowStatusSnapshot projects an available bounded workflow status into
+// its durable representation. Unavailable status is represented by nil.
+func WorkflowStatusSnapshot(status agent.WorkflowStatus) *session.WorkflowStatusSnapshot {
+	if !status.Available {
+		return nil
+	}
+	return &session.WorkflowStatusSnapshot{
+		Outcome:               string(status.Outcome),
+		RemainingRequirements: status.RemainingRequirements,
+		ExpectedWait:          status.ExpectedWait,
+	}
+}
+
+// RetentionSnapshot maps one agent retention epoch to its durable form. Root
+// and delegate sinks share this conversion to keep additive telemetry in sync.
+func RetentionSnapshot(event agent.RetentionEvent) *session.RetentionSnapshot {
+	return &session.RetentionSnapshot{
+		Policy:                    event.Policy,
+		Trigger:                   event.Trigger,
+		BlocksTrimmed:             event.BlocksTrimmed,
+		BytesBefore:               event.BytesBefore,
+		BytesAfter:                event.BytesAfter,
+		ContextTokensBefore:       event.ContextTokensBefore,
+		ContextTokensAfter:        event.ContextTokensAfter,
+		ResponseStateReset:        event.ResponseStateReset,
+		NextRequestStateful:       event.NextRequestStateful,
+		DecisionContextTokens:     event.DecisionContextTokens,
+		DecisionContextSource:     event.DecisionContextSource,
+		LocalEstimateTokensBefore: event.LocalEstimateTokensBefore,
+		LocalEstimateTokensAfter:  event.LocalEstimateTokensAfter,
+		EstimatedTokensRemoved:    event.EstimatedTokensRemoved,
+		BytesRemoved:              event.BytesRemoved,
+		MeasurementAnchorReset:    event.MeasurementAnchorReset,
+		ContinuationStatePresent:  event.ContinuationStatePresent,
+		ContinuationStateReset:    event.ContinuationStateReset,
+		PreviousRequestMode:       string(event.PreviousRequestMode),
+		NextRequestMode:           string(event.NextRequestMode),
 	}
 }

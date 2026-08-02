@@ -16,6 +16,7 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/goal"
+	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/session"
@@ -1214,6 +1215,9 @@ func TestDelegatePersistsChildTranscript(t *testing.T) {
 	if meta.TerminationReason != string(agent.TerminationModelCompleted) {
 		t.Fatalf("child termination = %q, want model_completed", meta.TerminationReason)
 	}
+	if meta.TelemetryVersion != session.ReliabilityTelemetryVersion {
+		t.Fatalf("child telemetry version = %d, want %d", meta.TelemetryVersion, session.ReliabilityTelemetryVersion)
+	}
 	events := readDelegateChildEvents(t, childDir)
 	if got := events[len(events)-1].TerminationReason; got != string(agent.TerminationModelCompleted) {
 		t.Fatalf("prompt_usage termination = %q, want model_completed", got)
@@ -1249,15 +1253,25 @@ func TestDelegatePersistsTurnLimitTermination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if result.EffectiveMaxTurns != 1 || result.Turns != 2 || result.TerminationReason != agent.TerminationTurnLimit {
-		t.Fatalf("run result = %+v, want budget 1, two physical turns, turn_limit", result)
+	if result.EffectiveMaxTurns != 1 || result.Turns != 2 || result.TerminationReason != agent.TerminationTurnLimit ||
+		result.ClosureTrigger != agent.ClosureTriggerTurnBudget || result.ClosureTurn != 1 || !result.TurnBudgetExhausted {
+		t.Fatalf("run result = %+v, want budget 1, two physical turns, turn_limit closure", result)
 	}
 	if !strings.Contains(result.Report, "turn budget 1, termination turn_limit") {
 		t.Fatalf("report = %q", result.Report)
 	}
 	meta := readDelegateChildMeta(t, filepath.Join(sessionPath, "children", "limited"))
-	if meta.EffectiveMaxTurns != 1 || meta.TurnsUsed != 2 || meta.TerminationReason != string(agent.TerminationTurnLimit) {
-		t.Fatalf("metadata = %+v, want budget 1, two physical turns, turn_limit", meta)
+	if meta.EffectiveMaxTurns != 1 || meta.TurnsUsed != 2 || meta.TerminationReason != string(agent.TerminationTurnLimit) ||
+		meta.ClosureTrigger != string(agent.ClosureTriggerTurnBudget) || meta.ClosureTurn != 1 || !meta.TurnBudgetExhausted {
+		t.Fatalf("metadata = %+v, want budget 1, two physical turns, turn_limit closure", meta)
+	}
+	events := readDelegateChildEvents(t, filepath.Join(sessionPath, "children", "limited"))
+	if len(events) < 2 || events[1].Type != session.EventClosure || events[1].ClosureTrigger != string(agent.ClosureTriggerTurnBudget) {
+		t.Fatalf("child closure events = %+v", events)
+	}
+	promptUsage := events[len(events)-1]
+	if promptUsage.Type != session.EventPromptUsage || promptUsage.ClosureTurn != 1 || !promptUsage.TurnBudgetExhausted {
+		t.Fatalf("child prompt usage = %+v", promptUsage)
 	}
 }
 
@@ -1405,10 +1419,10 @@ func TestDelegatePersistsAllClosedTurnsInChildTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildContext: %v", err)
 	}
-	// One user prompt plus two tool-use turns (assistant+tool each) and the
-	// final text turn.
-	if len(messages) != 6 {
-		t.Fatalf("tree messages = %d, want the full 6-message transcript (turn 1 must not be frozen)", len(messages))
+	// One user prompt, two tool-use turns (assistant+tool each), the early
+	// closure steer, and the final text turn.
+	if len(messages) != 7 {
+		t.Fatalf("tree messages = %d, want the full 7-message closure transcript (turn 1 must not be frozen)", len(messages))
 	}
 	if err := llm.ValidateTranscript(messages); err != nil {
 		t.Fatalf("tree transcript invalid: %v", err)
@@ -1569,6 +1583,8 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 		BytesAfter:         4_000,
 		ResponseStateReset: true,
 	})
+	sink.TurnProgress(agent.TurnProgress{Turn: 2, Activity: agent.ToolActivityCounts{Inspect: 1}, NewEvidence: true})
+	sink.HookDiagnostic(hooks.Diagnostic{Event: hooks.PreToolUse, Handler: "child-policy", Outcome: hooks.OutcomeSuccess})
 	sink.PromptComplete(agent.PromptUsage{
 		Usage:             llm.Usage{InputTokens: 11, OutputTokens: 5},
 		TerminationReason: agent.TerminationTurnLimit,
@@ -1586,6 +1602,8 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 		session.EventTurnAttemptAbandoned,
 		session.EventModelRequest,
 		session.EventRetention,
+		session.EventTurnProgress,
+		session.EventHookDiagnostic,
 		session.EventPromptUsage,
 	}
 	if len(events) != len(wantTypes) {
@@ -1617,9 +1635,15 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	if events[8].ModelRequest == nil || *events[8].ModelRequest != requestEvent {
 		t.Fatalf("model request event = %+v, want %+v", events[8].ModelRequest, requestEvent)
 	}
-	retention := events[len(events)-2].Retention
+	retention := events[len(events)-4].Retention
 	if retention == nil || retention.Policy != "pressure_epoch" || retention.BlocksTrimmed != 1 || !retention.ResponseStateReset {
-		t.Fatalf("retention event = %+v", events[len(events)-2])
+		t.Fatalf("retention event = %+v", events[len(events)-4])
+	}
+	if progress := events[len(events)-3].TurnProgress; progress == nil || events[len(events)-3].Turn != 2 || progress.Activity["inspect"] != 1 || !progress.NewEvidence || events[len(events)-3].Display != "" {
+		t.Fatalf("turn progress event = %+v", events[len(events)-3])
+	}
+	if diagnostic := events[len(events)-2].HookDiagnostic; diagnostic == nil || diagnostic.Event != "PreToolUse" || diagnostic.Handler != "child-policy" || diagnostic.Outcome != "success" || events[len(events)-2].Display != "" {
+		t.Fatalf("hook diagnostic event = %+v", events[len(events)-2])
 	}
 	if events[len(events)-1].Type != session.EventPromptUsage {
 		t.Fatalf("last event = %q, want prompt_usage", events[len(events)-1].Type)

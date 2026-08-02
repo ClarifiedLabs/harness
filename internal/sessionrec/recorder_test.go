@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"harness/internal/agent"
+	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/session"
 )
@@ -299,17 +300,92 @@ func TestRecorderToolDiffRecordsPathAndTrimsDisplay(t *testing.T) {
 	}
 }
 
+func TestRecorderHookDiagnosticIsStructuredAndDisplayless(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 2})
+	openUntil := time.Date(2026, 8, 1, 12, 1, 0, 0, time.UTC)
+	rec.HookDiagnostic(hooks.Diagnostic{
+		Event: hooks.PreToolUse, Handler: "policy", Target: "edit", ToolID: "tool-1",
+		TimeoutSeconds: 5, Elapsed: 1500 * time.Millisecond, ConsecutiveTimeouts: 3,
+		Outcome: hooks.OutcomeTimeout, CircuitOpen: true, CircuitOpenUntil: openUntil,
+	})
+	events := readEvents(t, dir)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.Type != session.EventHookDiagnostic || event.Prompt != 2 || event.Display != "" || event.HookDiagnostic == nil {
+		t.Fatalf("hook diagnostic event = %+v", event)
+	}
+	diagnostic := event.HookDiagnostic
+	if diagnostic.Event != "PreToolUse" || diagnostic.Handler != "policy" || diagnostic.Target != "edit" || diagnostic.ToolID != "tool-1" || diagnostic.ElapsedMS != 1500 || diagnostic.Outcome != "timeout" || !diagnostic.CircuitOpen || diagnostic.CircuitOpenUntil == nil || !diagnostic.CircuitOpenUntil.Equal(openUntil) {
+		t.Fatalf("hook diagnostic snapshot = %+v", diagnostic)
+	}
+}
+
+func TestRecorderTurnProgressIsStructuredAndDisplayless(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 2})
+	rec.TurnProgress(agent.TurnProgress{
+		Turn:                    4,
+		ToolCalls:               1,
+		Operations:              3,
+		Activity:                agent.ToolActivityCounts{Inspect: 3},
+		BatchedOperationCount:   3,
+		InspectionOnly:          true,
+		NoExplicitProgress:      true,
+		NewEvidence:             true,
+		NewEvidenceCount:        2,
+		InspectionNoProgressRun: 12,
+		SteerReason:             agent.GuardSteerPhaseTransition,
+	})
+	events := readEvents(t, dir)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.Type != session.EventTurnProgress || event.Prompt != 2 || event.Turn != 4 || event.Display != "" || event.TurnProgress == nil {
+		t.Fatalf("turn progress event = %+v", event)
+	}
+	if event.TurnProgress.Activity["inspect"] != 3 || event.TurnProgress.InspectionNoProgressRun != 12 || event.TurnProgress.SteerReason != "phase_transition" {
+		t.Fatalf("turn progress snapshot = %+v", event.TurnProgress)
+	}
+}
+
 func TestRecorderPromptUsageDefaultLine(t *testing.T) {
 	dir := t.TempDir()
 	rec := New(Config{Dir: dir, Prompt: 1, Clock: func() time.Time { return time.Now() }})
+	remaining := 1
+	rec.ClosureStarted(agent.ClosureEvent{
+		Trigger: agent.ClosureTriggerTurnBudget,
+		Turn:    2,
+		WorkflowStatus: agent.WorkflowStatus{
+			Available:             true,
+			Outcome:               agent.WorkflowOutcomeInProgress,
+			RemainingRequirements: &remaining,
+		},
+	})
 	rec.PromptComplete(agent.PromptUsage{
-		Turns:             2,
-		Usage:             llm.Usage{InputTokens: 1200, OutputTokens: 300, CostUSD: 0.01, CostKnown: true},
-		TerminationReason: agent.TerminationTurnLimit,
+		Turns:               2,
+		Usage:               llm.Usage{InputTokens: 1200, OutputTokens: 300, CostUSD: 0.01, CostKnown: true},
+		TerminationReason:   agent.TerminationTurnLimit,
+		ClosureTrigger:      agent.ClosureTriggerTurnBudget,
+		ClosureTurn:         2,
+		TurnBudgetExhausted: true,
+		WorkflowStatus: agent.WorkflowStatus{
+			Available:             true,
+			Outcome:               agent.WorkflowOutcomeInProgress,
+			RemainingRequirements: &remaining,
+		},
 	})
 	events := readEvents(t, dir)
-	ev := events[0]
-	if ev.Type != session.EventPromptUsage || ev.Usage == nil || ev.TerminationReason != "turn_limit" {
+	if closure := events[0]; closure.Type != session.EventClosure || closure.ClosureTrigger != "turn_budget" || closure.ClosureTurn != 2 || closure.WorkflowStatus == nil || closure.TelemetryVersion != session.ReliabilityTelemetryVersion {
+		t.Fatalf("closure event = %+v", closure)
+	}
+	ev := events[1]
+	if ev.Type != session.EventPromptUsage || ev.Usage == nil || ev.TerminationReason != "turn_limit" ||
+		ev.ClosureTrigger != "turn_budget" || ev.ClosureTurn != 2 || !ev.TurnBudgetExhausted ||
+		ev.WorkflowStatus == nil || ev.WorkflowStatus.Outcome != "in_progress" || ev.TelemetryVersion != session.ReliabilityTelemetryVersion {
 		t.Fatalf("prompt usage event = %+v", ev)
 	}
 	// Single-prompt default: cumulative totals equal the prompt's own usage.

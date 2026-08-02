@@ -92,7 +92,20 @@ func TestWriterMirrorsSessionEventsVerbatim(t *testing.T) {
 	w.PromptStart(PromptStart{})
 	w.Mirror(session.Event{Type: session.EventUser, Prompt: 1, Text: "do it"})
 	w.Mirror(session.Event{Type: session.EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 1, Text: "hello world"})
-	w.PromptEnd(PromptEnd{ExitCode: 0, TerminationReason: "model_completed", FinalText: "hello world", Usage: PromptEndUsage{Compactions: 2}})
+	remaining := 1
+	w.PromptEnd(PromptEnd{
+		ExitCode:            0,
+		TerminationReason:   "model_completed",
+		ClosureTrigger:      "turn_budget",
+		ClosureTurn:         3,
+		TurnBudgetExhausted: true,
+		WorkflowStatus: &session.WorkflowStatusSnapshot{
+			Outcome:               "in_progress",
+			RemainingRequirements: &remaining,
+		},
+		FinalText: "hello world",
+		Usage:     PromptEndUsage{Compactions: 2},
+	})
 	w.Close(RunEnd{ExitCode: 0})
 
 	lines := decodeLines(t, out.String())
@@ -108,8 +121,18 @@ func TestWriterMirrorsSessionEventsVerbatim(t *testing.T) {
 	if lines[2]["text"] != "do it" || lines[3]["text"] != "hello world" {
 		t.Fatalf("mirrored events lost their payload: %q", out.String())
 	}
-	if lines[4]["final_text"] != "hello world" || lines[4]["termination_reason"] != "model_completed" {
+	if lines[4]["final_text"] != "hello world" || lines[4]["termination_reason"] != "model_completed" ||
+		lines[4]["closure_trigger"] != "turn_budget" || lines[4]["closure_turn"] != float64(3) || lines[4]["turn_budget_exhausted"] != true {
 		t.Fatalf("prompt_end = %v", lines[4])
+	}
+	for _, index := range []int{4, 5} {
+		workflow, _ := lines[index]["workflow_status"].(map[string]any)
+		if workflow["outcome"] != "in_progress" || workflow["remaining_requirements"] != float64(1) {
+			t.Fatalf("line %d workflow status = %v", index, workflow)
+		}
+	}
+	if lines[5]["closure_trigger"] != "turn_budget" || lines[5]["turn_budget_exhausted"] != true {
+		t.Fatalf("run_end closure fields = %v", lines[5])
 	}
 	usage, _ := lines[4]["usage"].(map[string]any)
 	if usage["compactions"] != float64(2) {

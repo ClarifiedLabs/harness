@@ -422,6 +422,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 			payload["focus"] = focus
 		}
 		res := a.hooks.Run(ctx, hooks.PreCompact, trigger, payload)
+		reportHookDiagnostics(sink, res.Diagnostics)
 		for _, notice := range res.Notices {
 			sink.Notice(notice)
 		}
@@ -539,6 +540,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 			payload["focus"] = focus
 		}
 		res := a.hooks.Run(ctx, hooks.PostCompact, trigger, payload)
+		reportHookDiagnostics(sink, res.Diagnostics)
 		for _, notice := range res.Notices {
 			sink.Notice(notice)
 		}
@@ -1568,6 +1570,7 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 	est.PayloadTools = est.Tools
 	est.PayloadMessages = est.Messages
 	est.PayloadTotal = est.Total
+	est.PayloadSource = est.Source
 	return est
 }
 

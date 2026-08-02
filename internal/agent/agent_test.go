@@ -27,23 +27,25 @@ const agentOnePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQV
 // recordSink captures every sink callback so tests can assert what the UI would
 // have been told.
 type recordSink struct {
-	text           strings.Builder
-	attemptStarts  []turnAttemptEvent
-	contexts       []ContextEstimate
-	attemptUsage   []TurnAttemptUsage
-	reasoning      []string
-	phases         []string
-	toolUses       []llm.ToolCall
-	argDeltas      []string
-	starts         []llm.ToolCall
-	results        []llm.ToolResult
-	abandoned      []turnAttemptEvent
-	notices        []string
-	promptUsage    []PromptUsage
-	completedTurns []TurnUsage
-	turnCounts     []int
-	maintenance    []MaintenanceUsage
-	retention      []RetentionEvent
+	text            strings.Builder
+	attemptStarts   []turnAttemptEvent
+	contexts        []ContextEstimate
+	attemptUsage    []TurnAttemptUsage
+	reasoning       []string
+	phases          []string
+	toolUses        []llm.ToolCall
+	argDeltas       []string
+	starts          []llm.ToolCall
+	results         []llm.ToolResult
+	abandoned       []turnAttemptEvent
+	notices         []string
+	promptUsage     []PromptUsage
+	completedTurns  []TurnUsage
+	turnCounts      []int
+	maintenance     []MaintenanceUsage
+	retention       []RetentionEvent
+	progress        []TurnProgress
+	hookDiagnostics []hooks.Diagnostic
 }
 
 type turnAttemptEvent struct {
@@ -59,6 +61,17 @@ type diagnosticRecordSink struct {
 type modelRequestRecordSink struct {
 	recordSink
 	events []llm.ModelRequestEvent
+}
+
+type workflowRecordSink struct {
+	recordSink
+	status   WorkflowStatus
+	closures []ClosureEvent
+}
+
+func (s *workflowRecordSink) WorkflowStatus() WorkflowStatus { return s.status }
+func (s *workflowRecordSink) ClosureStarted(event ClosureEvent) {
+	s.closures = append(s.closures, event)
 }
 
 func (s *modelRequestRecordSink) ModelRequestEvent(event llm.ModelRequestEvent) {
@@ -102,6 +115,12 @@ func (s *recordSink) PromptComplete(u PromptUsage) {
 }
 func (s *recordSink) RetentionApplied(event RetentionEvent) {
 	s.retention = append(s.retention, event)
+}
+func (s *recordSink) TurnProgress(progress TurnProgress) {
+	s.progress = append(s.progress, progress)
+}
+func (s *recordSink) HookDiagnostic(diagnostic hooks.Diagnostic) {
+	s.hookDiagnostics = append(s.hookDiagnostics, diagnostic)
 }
 func (s *recordSink) MaintenanceComplete(u MaintenanceUsage) {
 	s.maintenance = append(s.maintenance, u)
@@ -261,6 +280,7 @@ type archiveSink struct {
 type countingProvider struct {
 	*llmtest.FakeProvider
 	count int
+	scope llm.InputTokenCountScope
 	err   error
 }
 
@@ -268,7 +288,7 @@ func (p *countingProvider) CountInputTokens(context.Context, llm.Request) (llm.I
 	if p.err != nil {
 		return llm.InputTokenCount{}, p.err
 	}
-	return llm.InputTokenCount{InputTokens: p.count, Source: "test"}, nil
+	return llm.InputTokenCount{InputTokens: p.count, Source: "test", Scope: p.scope}, nil
 }
 
 func (s *archiveSink) ArchiveToolResult(r llm.ToolResult) (ToolResultArchive, error) {
@@ -636,8 +656,63 @@ func TestRunPromptUsesProviderInputTokenCount(t *testing.T) {
 	if got := fp.Requests[0].EstimatedInputTokens; got != 12_345 {
 		t.Fatalf("EstimatedInputTokens = %d, want provider count 12345", got)
 	}
-	if len(sink.contexts) == 0 || sink.contexts[0].Total != 12_345 {
-		t.Fatalf("model start context = %+v, want total 12345", sink.contexts)
+	if len(sink.contexts) == 0 || sink.contexts[0].Total != 12_345 || sink.contexts[0].PayloadTotal != 12_345 {
+		t.Fatalf("model start context = %+v, want logical and payload totals 12345", sink.contexts)
+	}
+	if got := sink.contexts[0]; got.ProviderInputTokens != 12_345 || got.ProviderInputSource != "test" || got.ProviderInputScope != llm.InputTokenCountScopeUnknown {
+		t.Fatalf("provider observation = %+v, want unknown-scope test count", got)
+	}
+}
+
+func TestCountModelRequestInputSeparatesStatefulScopes(t *testing.T) {
+	baseEstimate := ContextEstimate{
+		Total: 100, System: 8, Tools: 4, Messages: 88, Source: ContextEstimateSourceBytes,
+		PayloadTotal: 22, PayloadSystem: 8, PayloadTools: 4, PayloadMessages: 10, PayloadSource: ContextEstimateSourceBytes,
+	}
+	tests := []struct {
+		name            string
+		scope           llm.InputTokenCountScope
+		count           int
+		wantTotal       int
+		wantMessages    int
+		wantPayload     int
+		wantPayloadMsgs int
+		wantRequest     int
+	}{
+		{name: "effective context", scope: llm.InputTokenCountScopeEffectiveContext, count: 30, wantTotal: 30, wantMessages: 18, wantPayload: 22, wantPayloadMsgs: 10, wantRequest: 30},
+		{name: "request payload below static sections", scope: llm.InputTokenCountScopeRequestPayload, count: 5, wantTotal: 100, wantMessages: 88, wantPayload: 5, wantPayloadMsgs: 10, wantRequest: 100},
+		{name: "unknown", scope: llm.InputTokenCountScope("future_scope"), count: 7, wantTotal: 100, wantMessages: 88, wantPayload: 22, wantPayloadMsgs: 10, wantRequest: 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &countingProvider{FakeProvider: llmtest.New("responses"), count: tt.count, scope: tt.scope}
+			a := &Agent{provider: provider}
+			got := a.countModelRequestInput(context.Background(), modelRequest{
+				request:      llm.Request{EstimatedInputTokens: 100, PreviousResponseID: "resp_1"},
+				estimate:     baseEstimate,
+				usedPrevious: true,
+			})
+			if got.estimate.Total != tt.wantTotal || got.estimate.Messages != tt.wantMessages ||
+				got.estimate.PayloadTotal != tt.wantPayload || got.estimate.PayloadMessages != tt.wantPayloadMsgs {
+				t.Fatalf("estimate = %+v, want totals/messages %d/%d and %d/%d", got.estimate, tt.wantTotal, tt.wantMessages, tt.wantPayload, tt.wantPayloadMsgs)
+			}
+			if got.request.EstimatedInputTokens != tt.wantRequest {
+				t.Fatalf("EstimatedInputTokens = %d, want %d", got.request.EstimatedInputTokens, tt.wantRequest)
+			}
+			if got.estimate.ProviderInputTokens != tt.count || got.estimate.ProviderInputSource != "test" ||
+				got.estimate.ProviderInputScope != llm.NormalizeInputTokenCountScope(tt.scope) {
+				t.Fatalf("provider observation = %+v", got.estimate)
+			}
+			for name, value := range map[string]int{
+				"total": got.estimate.Total, "system": got.estimate.System, "tools": got.estimate.Tools, "messages": got.estimate.Messages,
+				"payload_total": got.estimate.PayloadTotal, "payload_system": got.estimate.PayloadSystem,
+				"payload_tools": got.estimate.PayloadTools, "payload_messages": got.estimate.PayloadMessages,
+			} {
+				if value < 0 {
+					t.Fatalf("%s = %d, want nonnegative", name, value)
+				}
+			}
+		})
 	}
 }
 
@@ -1481,6 +1556,9 @@ func TestPreToolUseHookBlocksToolAndPreservesTranscript(t *testing.T) {
 	if len(tool.inputs) != 0 {
 		t.Fatalf("tool ran despite hook block: %v", tool.inputs)
 	}
+	if len(sink.hookDiagnostics) != 1 || sink.hookDiagnostics[0].Event != hooks.PreToolUse || sink.hookDiagnostics[0].Outcome != hooks.OutcomeSuccess {
+		t.Fatalf("hook diagnostics = %+v", sink.hookDiagnostics)
+	}
 	if len(sink.results) != 1 || !sink.results[0].IsError || !strings.Contains(sink.results[0].Text, "no writes") {
 		t.Fatalf("hook-blocked result = %+v", sink.results)
 	}
@@ -2163,7 +2241,14 @@ func TestMaxTurnsStop(t *testing.T) {
 	if len(last.Content) == 0 || !strings.Contains(last.Content[0].Text, "wrapping up") {
 		t.Errorf("final assistant message = %+v, want the wind-down summary", last.Content)
 	}
-	// A one-shot wrap-up nudge was injected before the final allowed turn.
+	usage := sink.promptUsage[0]
+	if usage.ClosureTrigger != ClosureTriggerTurnBudget || usage.ClosureTurn != 2 {
+		t.Errorf("closure = (%q, turn %d), want (turn_budget, turn 2)", usage.ClosureTrigger, usage.ClosureTurn)
+	}
+	if !usage.TurnBudgetExhausted {
+		t.Error("turn budget should be reported exhausted")
+	}
+	// A one-shot closure nudge was injected with two allowed turns remaining.
 	var sawWrapUp bool
 	for _, m := range a.Transcript() {
 		for _, b := range m.Content {
@@ -2173,7 +2258,12 @@ func TestMaxTurnsStop(t *testing.T) {
 		}
 	}
 	if !sawWrapUp {
-		t.Errorf("expected a wrap-up steering message before the final turn:\n%s", dump(a.Transcript()))
+		t.Errorf("expected a closure steering message with two turns remaining:\n%s", dump(a.Transcript()))
+	}
+	// Early closure remains tool-permitting; only the post-budget summary disables
+	// tools to preserve transcript validity.
+	if got := len(fp.Requests[1].Tools); got == 0 {
+		t.Error("first closure request advertised no tools; necessary closure work must remain possible")
 	}
 
 	var sawMaxTurns bool
@@ -2192,6 +2282,79 @@ func TestMaxTurnsStop(t *testing.T) {
 		t.Errorf("sink not told about max-turns stop, notices=%v", sink.notices)
 	}
 	assertPromptTermination(t, &sink.recordSink, TerminationTurnLimit)
+}
+
+func TestWorkflowStatusNormalizationIsBounded(t *testing.T) {
+	negative := -1
+	sink := &workflowRecordSink{status: WorkflowStatus{
+		Available:             true,
+		Outcome:               WorkflowOutcome("not-a-status"),
+		RemainingRequirements: &negative,
+	}}
+	got := sampleWorkflowStatus(sink)
+	if !got.Available || got.Outcome != WorkflowOutcomeUnknown || got.RemainingRequirements != nil {
+		t.Fatalf("sampleWorkflowStatus = %+v, want available unknown with no negative count", got)
+	}
+}
+
+func TestWorkflowStatusIsSampledAtClosureAndCompletion(t *testing.T) {
+	remaining := 2
+	sink := &workflowRecordSink{status: WorkflowStatus{
+		Available:             true,
+		Outcome:               WorkflowOutcomeInProgress,
+		RemainingRequirements: &remaining,
+	}}
+	work := llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn}
+	a := newAgent(llmtest.New("fake", work), &tools.Registry{}, Options{MaxTurns: 1})
+
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(sink.closures) != 1 {
+		t.Fatalf("ClosureStarted calls = %d, want 1", len(sink.closures))
+	}
+	closure := sink.closures[0]
+	if closure.Trigger != ClosureTriggerTurnBudget || closure.Turn != 1 {
+		t.Errorf("closure = %+v, want turn_budget on turn 1", closure)
+	}
+	usage := sink.promptUsage[0]
+	if usage.WorkflowStatus.Outcome != WorkflowOutcomeInProgress || usage.WorkflowStatus.RemainingRequirements == nil || *usage.WorkflowStatus.RemainingRequirements != 2 {
+		t.Errorf("prompt workflow status = %+v", usage.WorkflowStatus)
+	}
+	if usage.TerminationReason != TerminationModelCompleted {
+		t.Errorf("termination reason = %q, want model_completed", usage.TerminationReason)
+	}
+	if !usage.TurnBudgetExhausted {
+		t.Error("final allowed conversational turn should exhaust the turn budget independently of termination reason")
+	}
+}
+
+func TestEarlyClosureCanFinishBeforeBudgetExhaustion(t *testing.T) {
+	tool := &recordTool{name: "work", run: func(context.Context, json.RawMessage) (string, error) {
+		return "step complete", nil
+	}}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "id", "work", `{}`)}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("closed early")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, reg, Options{MaxTurns: 3})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	usage := sink.promptUsage[0]
+	if usage.TerminationReason != TerminationModelCompleted || usage.ClosureTrigger != ClosureTriggerTurnBudget || usage.ClosureTurn != 2 {
+		t.Fatalf("prompt usage = %+v", usage)
+	}
+	if usage.TurnBudgetExhausted {
+		t.Error("orderly completion on the first closure turn should not report budget exhaustion")
+	}
+	if len(fp.Requests[1].Tools) == 0 {
+		t.Error("early closure request should continue to advertise necessary tools")
+	}
 }
 
 func TestModelCompletionOnFinalBudgetTurnIsNotTurnLimit(t *testing.T) {
@@ -2219,6 +2382,9 @@ func TestModelCompletionOnFinalBudgetTurnIsNotTurnLimit(t *testing.T) {
 	}
 	if sink.promptUsage[0].Turns != 3 {
 		t.Fatalf("turns used = %d, want 3", sink.promptUsage[0].Turns)
+	}
+	if sink.promptUsage[0].ClosureTrigger != ClosureTriggerTurnBudget || !sink.promptUsage[0].TurnBudgetExhausted {
+		t.Errorf("final budget turn closure = %+v", sink.promptUsage[0])
 	}
 	assertPromptTermination(t, sink, TerminationModelCompleted)
 }
@@ -2257,6 +2423,9 @@ func TestNonPositiveMaxTurnsIsUnlimited(t *testing.T) {
 	}
 	if sink.promptUsage[0].Turns != defaultConfigMaxTurns+2 {
 		t.Errorf("PromptComplete turns = %d, want %d", sink.promptUsage[0].Turns, defaultConfigMaxTurns+2)
+	}
+	if sink.promptUsage[0].ClosureTrigger != "" || sink.promptUsage[0].TurnBudgetExhausted {
+		t.Errorf("unlimited prompt reported turn-budget closure: %+v", sink.promptUsage[0])
 	}
 	for _, n := range sink.notices {
 		if strings.Contains(n, "max turns") {

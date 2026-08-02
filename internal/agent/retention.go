@@ -25,6 +25,35 @@ const (
 	retentionPressureLowPct  = 50
 )
 
+func percentFloor(total, pct int) int {
+	if total <= 0 || pct <= 0 {
+		return 0
+	}
+	return total/100*pct + total%100*pct/100
+}
+
+func percentCeil(total, pct int) int {
+	if total <= 0 || pct <= 0 {
+		return 0
+	}
+	return total/100*pct + (total%100*pct+99)/100
+}
+
+func scaledFloor(value, numerator, denominator int) int {
+	if value <= 0 || numerator <= 0 || denominator <= 0 {
+		return 0
+	}
+	return value/denominator*numerator + value%denominator*numerator/denominator
+}
+
+func atOrAbovePercent(value, total, pct int) bool {
+	return value >= percentCeil(total, pct)
+}
+
+func atOrBelowPercent(value, total, pct int) bool {
+	return value <= percentFloor(total, pct)
+}
+
 // retentionTrimMarker is the idempotency sentinel left in a tool result the
 // retention pass has already shrunk, so repeated passes never re-trim it.
 const retentionTrimMarker = "[older tool output trimmed"
@@ -51,6 +80,10 @@ type retentionPass struct {
 // as a pressure epoch and hysteresis prevents repeated scans. Explicit pressure
 // mode remains pressure-only; explicit age mode always uses the turn boundary.
 func (a *Agent) applyRetentionPolicy(sink EventSink, contextTokens int) retentionPass {
+	return a.applyRetentionPolicyWithDecision(sink, ContextEstimate{Total: contextTokens, Source: ContextEstimateSourceBytes})
+}
+
+func (a *Agent) applyRetentionPolicyWithDecision(sink EventSink, decision ContextEstimate) retentionPass {
 	policy := a.retentionPolicy
 	if policy == RetentionPolicyDisabled {
 		return retentionPass{}
@@ -65,16 +98,20 @@ func (a *Agent) applyRetentionPolicy(sink EventSink, contextTokens int) retentio
 		return retentionPass{} // nothing old enough to shrink
 	}
 
+	localBefore := a.estimateContext(nil).Total
 	event := RetentionEvent{
-		Policy:              "age",
-		Trigger:             "turn_age",
-		ContextTokensBefore: contextTokens,
+		Policy:                    "age",
+		Trigger:                   "turn_age",
+		ContextTokensBefore:       decision.Total,
+		DecisionContextTokens:     decision.Total,
+		DecisionContextSource:     decision.Source,
+		LocalEstimateTokensBefore: localBefore,
 	}
 	observed := false
 	pressure := policy == RetentionPolicyPressure
 	if policy == RetentionPolicyAuto {
 		window := a.window()
-		pressure = window > 0 && contextTokens*100 >= window*retentionPressureHighPct && a.retentionEpochArmed
+		pressure = window > 0 && atOrAbovePercent(decision.Total, window, retentionPressureHighPct) && a.retentionEpochArmed
 	}
 	if pressure {
 		event.Policy = "pressure_epoch"
@@ -83,28 +120,28 @@ func (a *Agent) applyRetentionPolicy(sink EventSink, contextTokens int) retentio
 		if window <= 0 {
 			return retentionPass{}
 		}
-		high := window * retentionPressureHighPct
-		low := window * retentionPressureLowPct
+		high := percentCeil(window, retentionPressureHighPct)
+		low := percentFloor(window, retentionPressureLowPct)
 		// Absolute-context fallback (retention_floor_tokens): on very large
 		// windows the 60% high-water mark may never be reached, so aged
 		// read-only results would accumulate forever. A configured floor below
 		// the window percentage takes over the hysteresis, with the low-water
 		// re-arm scaled proportionally. Disabled at 0 (default).
-		if floor := a.retentionFloorTokens; floor > 0 && floor*100 < high {
-			high = floor * 100
-			low = floor * retentionPressureLowPct * 100 / retentionPressureHighPct
+		if floor := a.retentionFloorTokens; floor > 0 && floor < high {
+			high = floor
+			low = scaledFloor(floor, retentionPressureLowPct, retentionPressureHighPct)
 		}
-		if contextTokens*100 <= low {
+		if decision.Total <= low {
 			a.retentionEpochArmed = true
 		}
-		if !a.retentionEpochArmed || contextTokens*100 < high {
+		if !a.retentionEpochArmed || decision.Total < high {
 			return retentionPass{}
 		}
 		a.retentionEpochArmed = false
 		observed = true
 	} else if policy == RetentionPolicyAuto {
 		event.Policy = "auto_age"
-		if window := a.window(); window > 0 && contextTokens*100 <= window*retentionPressureLowPct {
+		if window := a.window(); window > 0 && atOrBelowPercent(decision.Total, window, retentionPressureLowPct) {
 			a.retentionEpochArmed = true
 		}
 	}
@@ -136,7 +173,10 @@ func (a *Agent) applyRetentionPolicy(sink EventSink, contextTokens int) retentio
 		}
 	}
 	event.BytesAfter = retentionTranscriptBytes(a.transcript)
-	event.ContextTokensAfter = a.estimateContext(nil).Total
+	event.BytesRemoved = max(event.BytesBefore-event.BytesAfter, 0)
+	event.LocalEstimateTokensAfter = a.estimateContext(nil).Total
+	event.EstimatedTokensRemoved = max(event.LocalEstimateTokensBefore-event.LocalEstimateTokensAfter, 0)
+	event.ContextTokensAfter = event.LocalEstimateTokensAfter
 	changed := event.BlocksTrimmed > 0
 	if changed {
 		observed = true

@@ -584,6 +584,38 @@ func TestStatsReturnsContextualErrors(t *testing.T) {
 	})
 }
 
+func TestStatsIncludesPhysicallyNestedDelegateTelemetry(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "session")
+	saveStatsFixture(t, root, Session{Provider: "fake", Model: "root"}, nil)
+	top, err := SaveChildMeta(root, ChildMeta{ID: "top", Kind: "delegate", Status: ChildStatusCompleted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveStatsFixture(t, top, Session{Provider: "fake", Model: "top"}, nil)
+	nested, err := SaveChildMeta(top, ChildMeta{ID: "nested", ParentID: "top", Kind: "delegate", Status: ChildStatusCompleted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveStatsFixture(t, nested, Session{Provider: "fake", Model: "nested"}, []Event{
+		{Type: EventTurnProgress, Prompt: 1, Turn: 1, TurnProgress: &TurnProgressSnapshot{InspectionNoProgressRun: 4}},
+		{Type: EventHookDiagnostic, Prompt: 1, HookDiagnostic: &HookDiagnosticSnapshot{Outcome: "timeout", CircuitOpen: true}},
+	})
+
+	var out bytes.Buffer
+	if err := StatsJSON(root, &out); err != nil {
+		t.Fatalf("StatsJSON: %v", err)
+	}
+	var report struct {
+		Telemetry TelemetryAnalysis `json:"telemetry"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if !report.Telemetry.Progress.Available || report.Telemetry.Progress.MaxInspectionNoProgressStreak.Value != 4 || report.Telemetry.Hooks.Timeouts != 1 || report.Telemetry.Hooks.CircuitOpened != 1 {
+		t.Fatalf("nested telemetry = %+v", report.Telemetry)
+	}
+}
+
 func TestCollectCheckpointStatsReportsSaveOverheadAndLag(t *testing.T) {
 	base := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
 	stats := collectCheckpointStats([]Event{
@@ -642,7 +674,7 @@ func TestCollectRetentionStatsReportsEpochEffectsAndRequestShape(t *testing.T) {
 		bytesTrimmed:        27_000,
 		responseStateResets: 1,
 		statefulRequests:    1,
-		fullContextRequests: 1,
+		unknownRequests:     1,
 	}) {
 		t.Fatalf("retention stats = %+v", stats)
 	}
@@ -654,7 +686,7 @@ func TestCollectRetentionStatsReportsEpochEffectsAndRequestShape(t *testing.T) {
 		"blocks trimmed: 4",
 		"bytes trimmed: 27000",
 		"response-state resets: 1",
-		"next requests stateful/full-context: 1 / 1",
+		"next requests stateful/full/stateless/unknown: 1 / 0 / 0 / 1",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("retention stats output missing %q:\n%s", want, out.String())

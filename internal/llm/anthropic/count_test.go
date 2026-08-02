@@ -42,8 +42,8 @@ func TestCountInputTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CountInputTokens: %v", err)
 	}
-	if got.InputTokens != 2345 || got.Source != "anthropic" {
-		t.Fatalf("count = %+v, want 2345 anthropic", got)
+	if got.InputTokens != 2345 || got.Source != "anthropic" || got.Scope != llm.InputTokenCountScopeEffectiveContext {
+		t.Fatalf("count = %+v, want 2345 anthropic effective-context", got)
 	}
 	if gotPath != "/anthropic/v1/messages/count_tokens" {
 		t.Fatalf("path = %q, want /anthropic/v1/messages/count_tokens", gotPath)

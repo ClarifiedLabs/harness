@@ -92,6 +92,11 @@ type ModelErrorDiagnosticSink interface {
 	ModelErrorDiagnostic(ModelErrorDiagnostic)
 }
 
+// HookDiagnosticSink optionally receives bounded hook execution diagnostics.
+type HookDiagnosticSink interface {
+	HookDiagnostic(hooks.Diagnostic)
+}
+
 // CompactionProgressSink is implemented by sinks that want transient progress
 // while compaction inspects or summarizes old context. The callbacks are
 // balanced around every invoked compaction, including local degradation.
@@ -141,6 +146,16 @@ type ToolProgressSink interface {
 	ToolProgress(call llm.ToolCall, progress any)
 }
 
+// RetentionRequestMode describes the request shape before or after a retention
+// observation. Empty means the mode was not recorded by an older event.
+type RetentionRequestMode string
+
+const (
+	RetentionRequestModeFull           RetentionRequestMode = "full"
+	RetentionRequestModeStatefulSuffix RetentionRequestMode = "stateful_suffix"
+	RetentionRequestModeStateless      RetentionRequestMode = "stateless"
+)
+
 // RetentionEvent describes one transcript-retention epoch. It is diagnostics
 // only and is never added to the transcript or provider request.
 type RetentionEvent struct {
@@ -153,6 +168,18 @@ type RetentionEvent struct {
 	ContextTokensAfter  int
 	ResponseStateReset  bool
 	NextRequestStateful bool
+
+	DecisionContextTokens     int
+	DecisionContextSource     string
+	LocalEstimateTokensBefore int
+	LocalEstimateTokensAfter  int
+	EstimatedTokensRemoved    int
+	BytesRemoved              int
+	MeasurementAnchorReset    bool
+	ContinuationStatePresent  bool
+	ContinuationStateReset    bool
+	PreviousRequestMode       RetentionRequestMode
+	NextRequestMode           RetentionRequestMode
 }
 
 // RetentionEventSink is implemented by sinks that persist retention decisions
@@ -260,6 +287,64 @@ type TurnUsage struct {
 	Context  ContextEstimate
 }
 
+// ClosureTrigger records why Harness first entered a prompt wind-down phase.
+// It is orthogonal to TerminationReason, which continues to describe loop control.
+type ClosureTrigger string
+
+const (
+	ClosureTriggerTurnBudget  ClosureTrigger = "turn_budget"
+	ClosureTriggerStagnation  ClosureTrigger = "stagnation"
+	ClosureTriggerRepeatGuard ClosureTrigger = "repeat_guard"
+	ClosureTriggerErrorGuard  ClosureTrigger = "error_guard"
+)
+
+// WorkflowOutcome is optional orchestrator-supplied task state. Harness never
+// infers semantic completion from a final model message.
+type WorkflowOutcome string
+
+const (
+	WorkflowOutcomeComplete   WorkflowOutcome = "complete"
+	WorkflowOutcomeWaiting    WorkflowOutcome = "waiting"
+	WorkflowOutcomeBlocked    WorkflowOutcome = "blocked"
+	WorkflowOutcomeEscalated  WorkflowOutcome = "escalated"
+	WorkflowOutcomeInProgress WorkflowOutcome = "in_progress"
+	WorkflowOutcomeUnknown    WorkflowOutcome = "unknown"
+)
+
+// WorkflowStatus is a bounded optional status seam for orchestrators. Available
+// distinguishes an absent provider from a provider that explicitly reports an
+// unknown outcome. RemainingRequirements is nil when not supplied.
+type WorkflowStatus struct {
+	Available             bool
+	Outcome               WorkflowOutcome
+	RemainingRequirements *int
+	ExpectedWait          bool
+}
+
+// WorkflowStatusProvider is optionally implemented by an EventSink. Detailed
+// model-visible requirements continue to use RequestContextProvider.
+type WorkflowStatusProvider interface {
+	WorkflowStatus() WorkflowStatus
+}
+
+// ClosureEvent is diagnostics-only and records the first closure trigger at the
+// point it is selected, including optional workflow status sampled then.
+type ClosureEvent struct {
+	Trigger        ClosureTrigger
+	Turn           int
+	WorkflowStatus WorkflowStatus
+}
+
+type ClosureEventSink interface {
+	ClosureStarted(ClosureEvent)
+}
+
+// TurnProgressSink optionally receives diagnostics-only semantic activity after
+// completed tool turns. These events never enter model history.
+type TurnProgressSink interface {
+	TurnProgress(TurnProgress)
+}
+
 // PromptUsage is the per-prompt summary handed to the sink (design §10 usage line).
 type PromptUsage struct {
 	Turns       int
@@ -271,9 +356,13 @@ type PromptUsage struct {
 	// Wasted is the subset of Usage spent on turn attempts discarded after a
 	// mid-stream failure or a compatibility/request-shape rebuild. It is already
 	// included in Usage; surfacing it lets the UI show the retry cost.
-	Wasted            llm.Usage
-	Context           ContextEstimate
-	TerminationReason TerminationReason
+	Wasted              llm.Usage
+	Context             ContextEstimate
+	TerminationReason   TerminationReason
+	ClosureTrigger      ClosureTrigger
+	ClosureTurn         int
+	TurnBudgetExhausted bool
+	WorkflowStatus      WorkflowStatus
 }
 
 // PromptCheckpointKind identifies a resumable model boundary. Request
@@ -360,6 +449,14 @@ type ContextEstimate struct {
 	PayloadSystem   int
 	PayloadTools    int
 	PayloadMessages int
+	PayloadSource   string
+
+	// ProviderInput* records the provider observation independently from the
+	// logical and request-payload estimates. Unknown-scope continuation counts
+	// remain observable without being applied to either accounting view.
+	ProviderInputTokens int
+	ProviderInputSource string
+	ProviderInputScope  llm.InputTokenCountScope
 }
 
 // Options configures an Agent. The zero value is valid; MaxTurns <= 0 means
@@ -1041,6 +1138,7 @@ func (a *Agent) anchorContextEstimate(est ContextEstimate, lastInput, boundary i
 		return est
 	}
 	est.Total = a.triggerTokens(lastInput, boundary)
+	est.Source = ContextEstimateSourceResponseUsageDelta
 	return est
 }
 
@@ -1286,43 +1384,76 @@ func (a *Agent) DebugRequest(includeUser bool, userText string, images []llm.Con
 }
 
 func (a *Agent) countModelRequestInput(ctx context.Context, mr modelRequest) modelRequest {
-	count, source, ok := a.countInputTokens(ctx, mr.request)
-	if !ok || count <= 0 {
+	count, providerObservation, ok := a.countInputTokens(ctx, mr.request)
+	if !ok || count.InputTokens <= 0 {
 		return mr
 	}
-	old := mr.request.EstimatedInputTokens
-	mr.request.EstimatedInputTokens = count
-	delta := count - old
-	mr.estimate.Total += delta
-	mr.estimate.PayloadTotal += delta
-	mr.estimate.Messages += delta
-	mr.estimate.PayloadMessages += delta
-	mr.estimate.Source = source
-	if mr.estimate.Messages < 0 {
-		mr.estimate.Messages = 0
+	scope := llm.NormalizeInputTokenCountScope(count.Scope)
+	if providerObservation {
+		mr.estimate.ProviderInputTokens = count.InputTokens
+		mr.estimate.ProviderInputSource = count.Source
+		mr.estimate.ProviderInputScope = scope
 	}
-	if mr.estimate.PayloadMessages < 0 {
-		mr.estimate.PayloadMessages = 0
+
+	// Without continuation state, the request payload and effective context are
+	// the same input regardless of whether an older provider declared scope.
+	if !mr.usedPrevious {
+		applyCountToContextEstimate(&mr.estimate.Total, &mr.estimate.Messages, &mr.estimate.Source,
+			mr.estimate.System, mr.estimate.Tools, count.InputTokens, countEstimateSource(providerObservation))
+		applyCountToContextEstimate(&mr.estimate.PayloadTotal, &mr.estimate.PayloadMessages, &mr.estimate.PayloadSource,
+			mr.estimate.PayloadSystem, mr.estimate.PayloadTools, count.InputTokens, countEstimateSource(providerObservation))
+		mr.request.EstimatedInputTokens = count.InputTokens
+		return mr
+	}
+
+	switch scope {
+	case llm.InputTokenCountScopeEffectiveContext:
+		applyCountToContextEstimate(&mr.estimate.Total, &mr.estimate.Messages, &mr.estimate.Source,
+			mr.estimate.System, mr.estimate.Tools, count.InputTokens, countEstimateSource(providerObservation))
+		mr.request.EstimatedInputTokens = count.InputTokens
+	case llm.InputTokenCountScopeRequestPayload:
+		applyCountToContextEstimate(&mr.estimate.PayloadTotal, &mr.estimate.PayloadMessages, &mr.estimate.PayloadSource,
+			mr.estimate.PayloadSystem, mr.estimate.PayloadTools, count.InputTokens, countEstimateSource(providerObservation))
 	}
 	return mr
 }
 
-func (a *Agent) countInputTokens(ctx context.Context, req llm.Request) (int, string, bool) {
+func applyCountToContextEstimate(total, messages *int, source *string, system, tools, count int, countSource string) {
+	*total = count
+	if static := system + tools; count >= static {
+		*messages = count - static
+	}
+	*source = countSource
+}
+
+func countEstimateSource(providerObservation bool) string {
+	if providerObservation {
+		return ContextEstimateSourceProviderCount
+	}
+	return ContextEstimateSourceBytes
+}
+
+func (a *Agent) countInputTokens(ctx context.Context, req llm.Request) (llm.InputTokenCount, bool, bool) {
 	if err := validateRequestImageContent(req.Messages); err != nil {
-		return 0, "", false
+		return llm.InputTokenCount{}, false, false
 	}
 	if counter, ok := a.provider.(llm.InputTokenCounter); ok {
 		count, err := counter.CountInputTokens(ctx, req)
 		if err == nil && count.InputTokens > 0 {
-			return count.InputTokens, ContextEstimateSourceProviderCount, true
+			count.Scope = llm.NormalizeInputTokenCountScope(count.Scope)
+			return count, true, true
 		}
 	}
 	if tokencount.ShouldEstimateOpenAIChat(a.provider.Name()) {
 		if count := tokencount.EstimateOpenAIChat(req); count > 0 {
-			return count, ContextEstimateSourceBytes, true
+			scope := llm.InputTokenCountScopeEffectiveContext
+			if req.PreviousResponseID != "" {
+				scope = llm.InputTokenCountScopeRequestPayload
+			}
+			return llm.InputTokenCount{InputTokens: count, Source: ContextEstimateSourceBytes, Scope: scope}, false, true
 		}
 	}
-	return 0, "", false
+	return llm.InputTokenCount{}, false, false
 }
 
 func (a *Agent) payloadMessagesIn(transcript []llm.Message) ([]llm.Message, bool) {
@@ -1330,6 +1461,16 @@ func (a *Agent) payloadMessagesIn(transcript []llm.Message) ([]llm.Message, bool
 		return transcript, false
 	}
 	return transcript[a.responseState.AnchorMessages:], true
+}
+
+func (a *Agent) retentionRequestMode(usedPrevious bool) RetentionRequestMode {
+	if usedPrevious {
+		return RetentionRequestModeStatefulSuffix
+	}
+	if a.responsesStateful {
+		return RetentionRequestModeFull
+	}
+	return RetentionRequestModeStateless
 }
 
 func (a *Agent) validResponseStateFor(transcript []llm.Message) bool {
@@ -1494,19 +1635,42 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 	var activeSkills activeSkillSet
 	forcePromptWorkSynthesis := false
 	var terminationReason TerminationReason
+	var closureTrigger ClosureTrigger
+	var closureTurn int
+	var turnBudgetExhausted bool
+	var workflowStatus WorkflowStatus
+	startClosure := func(trigger ClosureTrigger, turn int) {
+		if closureTrigger != "" {
+			return
+		}
+		closureTrigger = trigger
+		closureTurn = turn
+		workflowStatus = sampleWorkflowStatus(sink)
+		reportClosure(sink, ClosureEvent{Trigger: trigger, Turn: turn, WorkflowStatus: workflowStatus})
+	}
+	completeTurn := func() {
+		turns++
+		if !unlimited && turns >= a.maxTurns {
+			turnBudgetExhausted = true
+		}
+	}
+	promptUsage := func() PromptUsage {
+		return PromptUsage{
+			Turns:               turns,
+			Usage:               total,
+			Maintenance:         maintenanceTotal,
+			Wasted:              wastedTotal,
+			Compactions:         a.compactions - compactionsAtStart,
+			Context:             lastContext,
+			TerminationReason:   terminationReason,
+			ClosureTrigger:      closureTrigger,
+			ClosureTurn:         closureTurn,
+			TurnBudgetExhausted: turnBudgetExhausted,
+			WorkflowStatus:      workflowStatus,
+		}
+	}
 	checkpoint := func(kind PromptCheckpointKind) {
-		reportPromptCheckpoint(sink, PromptCheckpoint{
-			Kind: kind,
-			Turn: turns,
-			Usage: PromptUsage{
-				Turns:       turns,
-				Usage:       total,
-				Maintenance: maintenanceTotal,
-				Wasted:      wastedTotal,
-				Compactions: a.compactions - compactionsAtStart,
-				Context:     lastContext,
-			},
-		})
+		reportPromptCheckpoint(sink, PromptCheckpoint{Kind: kind, Turn: turns, Usage: promptUsage()})
 	}
 	defer func() {
 		// Persist the measurement anchor for the next prompt and for /context;
@@ -1522,25 +1686,50 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		} else if reason == "" {
 			reason = TerminationModelCompleted
 		}
-		sink.PromptComplete(PromptUsage{
-			Turns:             turns,
-			Usage:             total,
-			Maintenance:       maintenanceTotal,
-			Wasted:            wastedTotal,
-			Compactions:       a.compactions - compactionsAtStart,
-			Context:           lastContext,
-			TerminationReason: reason,
-		})
+		terminationReason = reason
+		workflowStatus = sampleWorkflowStatus(sink)
+		sink.PromptComplete(promptUsage())
 	}()
 
 	for unlimited || turns < a.maxTurns || forcePromptWorkSynthesis {
+		if !unlimited && !guard.turnBudgetClosureSteered && shouldEnterTurnBudgetClosure(a.maxTurns, turns) {
+			guard.turnBudgetClosureSteered = true
+			startClosure(ClosureTriggerTurnBudget, turns+1)
+			if turns == 0 {
+				// A budget that enters closure immediately has no prior closed tool
+				// turn where a RoleUser steer can be inserted, so carry closure as
+				// request-only context.
+				steerContext = append(steerContext, wrapUpSteer)
+			} else {
+				message := a.textMessage(llm.RoleUser, wrapUpSteer)
+				message.Origin = llm.MessageOriginInternal
+				a.transcript = append(a.transcript, message)
+				if err := a.validateTranscript("after turn-budget closure steer"); err != nil {
+					return err
+				}
+			}
+		}
+
 		// Live-transcript retention (design §12, r9+r20): shrink stale large
 		// tool outputs and aged images before building the request, so they are
 		// not re-sent verbatim every turn. Pure local edit, invariant-preserving.
-		retentionTokens := max(a.estimateContext(nil).Total, a.triggerTokens(lastInput, appendBoundary))
-		retention := a.applyRetentionPolicy(sink, retentionTokens)
+		localRetention := a.estimateContext(nil)
+		retentionDecision := localRetention
+		if anchored := a.triggerTokens(lastInput, appendBoundary); anchored > retentionDecision.Total {
+			retentionDecision.Total = anchored
+			if lastInput > 0 {
+				retentionDecision.Source = ContextEstimateSourceResponseUsageDelta
+			}
+		}
+		continuationPresent := a.validResponseStateFor(a.transcript)
+		previousRequestMode := a.retentionRequestMode(continuationPresent)
+		retention := a.applyRetentionPolicyWithDecision(sink, retentionDecision)
+		retention.event.ContinuationStatePresent = continuationPresent
+		retention.event.PreviousRequestMode = previousRequestMode
 		if retention.changed {
 			retention.event.ResponseStateReset = a.responseState.PreviousResponseID != ""
+			retention.event.ContinuationStateReset = continuationPresent
+			retention.event.MeasurementAnchorReset = lastInput > 0
 			a.resetResponseState()
 			// The last provider measurement describes the pre-retention
 			// transcript. Do not combine it with a delta from the rewritten
@@ -1628,6 +1817,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		forcePromptWorkSynthesis = false
 		if retention.observed {
 			retention.event.NextRequestStateful = modelReq.usedPrevious
+			retention.event.NextRequestMode = a.retentionRequestMode(modelReq.usedPrevious)
 			reportRetention(sink, retention.event)
 		}
 		checkpoint(PromptCheckpointRequestBoundary)
@@ -1714,7 +1904,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			cancelled := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 			if cancelled && res.text != "" {
 				a.transcript = append(a.transcript, a.partialAssistantMessage(res))
-				turns++
+				completeTurn()
 			}
 			if cancelled {
 				sink.Notice("[cancelled]")
@@ -1729,7 +1919,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			return err
 		}
 
-		turns++
+		completeTurn()
 		a.transcript = append(a.transcript, a.assistantMessage(res))
 		a.updateResponseState(res)
 
@@ -1767,6 +1957,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 					"stop_hook_active":       stopHookActive,
 					"last_assistant_message": res.text,
 				})
+				reportHookDiagnostics(sink, hookRes.Diagnostics)
 				for _, notice := range hookRes.Notices {
 					sink.Notice(notice)
 				}
@@ -1807,6 +1998,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		}
 		sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: add(add(res.usage, wasted), toolUsage), Wasted: wasted, Context: lastContext})
 		checkpoint(PromptCheckpointClosedTurn)
+		progress := guard.aggregateTurnProgress(a.tools, turns, res.toolCalls, results)
 
 		// Give a newly launched background delegate one subsequent parent model
 		// round for useful independent work. If work was already pending before
@@ -1818,13 +2010,14 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 				return waitErr
 			}
 			forcePromptWorkSynthesis = true
+			reportTurnProgress(sink, progress)
 			continue
 		}
 
 		// Runaway guardrails (design §8.1). The transcript now ends on a closed
 		// tool_use/tool_result pair, so injecting a steering RoleUser message or
 		// breaking here keeps the §4 invariant intact.
-		guard.recordTools(res.toolCalls, results)
+		guard.recordTurn(res.toolCalls, results, &progress)
 
 		// Mid-prompt steering (design §8.1): drain input the user submitted while
 		// this turn was running and inject it as a single RoleUser message the
@@ -1842,10 +2035,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			a.transcript = append(a.transcript, steerMessage)
 			steerContext = append(steerContext, steered.RequestContext...)
 			reportExplicitSkillContexts(steered.RequestContext, sink)
-			guard.repeatRuns = 0
-			guard.repeatSteered = false
-			guard.errorRuns = 0
-			guard.errorSteered = false
+			guard.resetForUserSteer(&progress)
 			if err := a.validateRetainedTranscript("after in-prompt steer"); err != nil {
 				a.transcript = a.transcript[:steerIndex]
 				if a.validatedPrefix > len(a.transcript) {
@@ -1858,6 +2048,8 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		// Hard stop: an unrelenting error storm. Finalize with a tools-disabled
 		// summary so the turn ends on an assistant message, not a dangling result.
 		if guard.shouldBreakErrors() {
+			reportTurnProgress(sink, progress)
+			startClosure(ClosureTriggerErrorGuard, turns)
 			terminationReason = TerminationErrorGuard
 			sink.Notice(errorStormNotice(guard.errorRuns))
 			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
@@ -1865,7 +2057,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			wastedTotal = add(wastedTotal, fw)
 			lastContext = fctx
 			if completed {
-				turns++
+				completeTurn()
 				if err := a.validateTranscript("after error-guard summary"); err != nil {
 					return err
 				}
@@ -1878,6 +2070,8 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		// steering nudge. Finalize the same way so the turn ends on an assistant
 		// message (the success-loop analogue of the error-storm break).
 		if guard.shouldBreakRepeat() {
+			reportTurnProgress(sink, progress)
+			startClosure(ClosureTriggerRepeatGuard, turns)
 			terminationReason = TerminationRepeatGuard
 			sink.Notice(repeatLoopNotice(guard.repeatRuns))
 			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
@@ -1885,7 +2079,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			wastedTotal = add(wastedTotal, fw)
 			lastContext = fctx
 			if completed {
-				turns++
+				completeTurn()
 				if err := a.validateTranscript("after repeat-guard summary"); err != nil {
 					return err
 				}
@@ -1897,6 +2091,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		// Token budget: stop before the next (paid) request. No final summary —
 		// the whole point is to stop spending.
 		if a.maxPromptTokens > 0 && totalTokens(total) >= a.maxPromptTokens {
+			reportTurnProgress(sink, progress)
 			terminationReason = TerminationTokenLimit
 			sink.Notice(promptTokenBudgetNotice(a.maxPromptTokens))
 			break
@@ -1907,14 +2102,16 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		// silently has no cost ceiling.
 		if a.maxPromptCostUSD > 0 {
 			if total.CostKnown && total.CostUSD >= a.maxPromptCostUSD {
+				reportTurnProgress(sink, progress)
 				terminationReason = TerminationCostLimit
 				sink.Notice(promptCostBudgetNotice(a.maxPromptCostUSD, total.CostUSD))
 				break
 			}
 		}
 
-		// One steering nudge per condition (repetition / error storm share a slot).
-		if msg := guard.steerMessage(); msg != "" {
+		// One steering nudge per condition. Semantic stagnation is advisory only.
+		if reason, msg := guard.nextSteer(); msg != "" {
+			progress.SteerReason = reason
 			message := a.textMessage(llm.RoleUser, msg)
 			message.Origin = llm.MessageOriginInternal
 			a.transcript = append(a.transcript, message)
@@ -1922,20 +2119,11 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 				return err
 			}
 		}
-
-		// Wrap-up nudge once, before the final allowed turn, so the model
-		// can stop calling tools and summarize within budget (r3).
-		if !unlimited && turns == a.maxTurns-1 && !guard.wrapUpSteered {
-			guard.wrapUpSteered = true
-			message := a.textMessage(llm.RoleUser, wrapUpSteer)
-			message.Origin = llm.MessageOriginInternal
-			a.transcript = append(a.transcript, message)
-			if err := a.validateTranscript("after wrap-up steer"); err != nil {
-				return err
-			}
-		}
+		reportTurnProgress(sink, progress)
 
 		if !unlimited && turns >= a.maxTurns {
+			turnBudgetExhausted = true
+			startClosure(ClosureTriggerTurnBudget, turns)
 			terminationReason = TerminationTurnLimit
 			sink.Notice(maxTurnsNotice(a.maxTurns))
 			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
@@ -1943,7 +2131,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			wastedTotal = add(wastedTotal, fw)
 			lastContext = fctx
 			if completed {
-				turns++
+				completeTurn()
 				if err := a.validateTranscript("after turn-limit summary"); err != nil {
 					return err
 				}
@@ -1952,8 +2140,12 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			break
 		}
 	}
-	if terminationReason == "" && !unlimited && turns >= a.maxTurns {
-		terminationReason = TerminationTurnLimit
+	if !unlimited && turns >= a.maxTurns {
+		turnBudgetExhausted = true
+		startClosure(ClosureTriggerTurnBudget, turns)
+		if terminationReason == "" {
+			terminationReason = TerminationTurnLimit
+		}
 	}
 
 	// Budget/guard exits can bypass the normal synthesis continuation. They still
@@ -1993,6 +2185,59 @@ func reportPromptCheckpoint(sink EventSink, checkpoint PromptCheckpoint) {
 	if checkpointSink, ok := sink.(PromptCheckpointSink); ok {
 		checkpointSink.PromptCheckpoint(checkpoint)
 	}
+}
+
+func reportClosure(sink EventSink, event ClosureEvent) {
+	if closureSink, ok := sink.(ClosureEventSink); ok {
+		closureSink.ClosureStarted(event)
+	}
+}
+
+func reportTurnProgress(sink EventSink, progress TurnProgress) {
+	if progressSink, ok := sink.(TurnProgressSink); ok {
+		progressSink.TurnProgress(progress)
+	}
+}
+
+func reportHookDiagnostics(sink EventSink, diagnostics []hooks.Diagnostic) {
+	diagnosticSink, ok := sink.(HookDiagnosticSink)
+	if !ok {
+		return
+	}
+	for _, diagnostic := range diagnostics {
+		diagnosticSink.HookDiagnostic(diagnostic)
+	}
+}
+
+func normalizeWorkflowOutcome(outcome WorkflowOutcome) WorkflowOutcome {
+	switch outcome {
+	case WorkflowOutcomeComplete, WorkflowOutcomeWaiting, WorkflowOutcomeBlocked,
+		WorkflowOutcomeEscalated, WorkflowOutcomeInProgress, WorkflowOutcomeUnknown:
+		return outcome
+	default:
+		return WorkflowOutcomeUnknown
+	}
+}
+
+func sampleWorkflowStatus(sink EventSink) WorkflowStatus {
+	provider, ok := sink.(WorkflowStatusProvider)
+	if !ok {
+		return WorkflowStatus{}
+	}
+	status := provider.WorkflowStatus()
+	if !status.Available {
+		return WorkflowStatus{}
+	}
+	status.Outcome = normalizeWorkflowOutcome(status.Outcome)
+	if status.RemainingRequirements != nil {
+		if *status.RemainingRequirements < 0 {
+			status.RemainingRequirements = nil
+		} else {
+			remaining := *status.RemainingRequirements
+			status.RemainingRequirements = &remaining
+		}
+	}
+	return status
 }
 
 func reportRetention(sink EventSink, event RetentionEvent) {
@@ -2385,6 +2630,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 			"tool_use_id": call.ID,
 			"tool_input":  rawJSONValue(call.Input),
 		})
+		reportHookDiagnostics(sink, res.Diagnostics)
 		for _, notice := range res.Notices {
 			sink.Notice(notice)
 		}
@@ -2411,6 +2657,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 			"tool_input":    rawJSONValue(call.Input),
 			"tool_response": toolResponsePayload(r),
 		})
+		reportHookDiagnostics(sink, res.Diagnostics)
 		for _, notice := range res.Notices {
 			sink.Notice(notice)
 		}

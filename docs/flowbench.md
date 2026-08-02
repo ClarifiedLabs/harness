@@ -205,3 +205,40 @@ is recommended only when every run is correct, every run actually exercised
 that policy, and it has the lowest median post-turn-10 uncached input among the
 eligible policies. Provider-backed results remain evidence for a default
 decision; they do not rewrite configuration automatically.
+
+## Reliability corpus comparison
+
+Use `scripts/reliabilitybench` after a paired baseline/candidate run when the
+question is behavioral reliability rather than one flowbench case's token and
+interaction oracle. Give it two immutable session directories or corpus
+snapshots produced by the same task/model matrix:
+
+```sh
+go run ./scripts/reliabilitybench \
+  -baseline /tmp/reliability-baseline-sessions \
+  -candidate /tmp/reliability-candidate-sessions \
+  -format text
+
+# Stable machine-readable comparison; the cutoff is inclusive.
+go run ./scripts/reliabilitybench \
+  -baseline /tmp/reliability-baseline-sessions \
+  -candidate /tmp/reliability-candidate-sessions \
+  -before 2026-08-01T12:00:00Z \
+  -format json > /tmp/reliability-comparison.json
+```
+
+The command runs the same recursive, transcript-free analyzer as `harness
+session analyze`, omits per-stream rows from the comparison output, and reports
+candidate-minus-baseline deltas. Each metric retains an availability bit;
+missing legacy telemetry, a zero denominator, an unobserved milestone, an
+incomplete execution corpus, or a cutoff-pending batching steer is not converted
+into a success or failure. Lower is preferred for error/timeout/streak/violation
+metrics and higher for completion, workflow-supply, and batching-compliance
+rates, but the command intentionally does not impose a promotion gate.
+
+Keep the two raw analyzer JSON reports with the benchmark evidence when
+reproducibility matters: they contain the complete-prefix byte counts and
+SHA-256 values that identify exactly which records were analyzed. Match session
+counts, models, task fixtures, ordering, and correctness oracles before treating
+a delta as causal. The semantic comparison complements flowbench; it does not
+replace transcript-backed correctness scoring or paired token/cost analysis.

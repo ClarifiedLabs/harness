@@ -34,6 +34,11 @@ import (
 // richer efficiency telemetry.
 const Version = 5
 
+// ReliabilityTelemetryVersion marks raw events and child metadata written with
+// closure/workflow observability. It is separate from the resumable state
+// version because these fields are additive diagnostics only.
+const ReliabilityTelemetryVersion = 1
+
 const (
 	stateFile      = "state.json"
 	eventLog       = "raw.ndjson"
@@ -129,37 +134,42 @@ type UsageTotals struct {
 // ChildMeta is the forensic index for a child-agent run stored under a parent
 // session's children/ directory.
 type ChildMeta struct {
-	ID                 string         `json:"id"`
-	ParentID           string         `json:"parent_id,omitempty"`
-	Kind               string         `json:"kind"`
-	Mode               string         `json:"mode,omitempty"`
-	ContinuedFrom      string         `json:"continued_from,omitempty"`
-	ContinuationMode   string         `json:"continuation_mode,omitempty"`
-	ContinuationBefore int            `json:"continuation_context_before,omitempty"`
-	ContinuationAfter  int            `json:"continuation_context_after,omitempty"`
-	ContinuationWindow int            `json:"continuation_context_window,omitempty"`
-	RuntimeFingerprint string         `json:"runtime_fingerprint,omitempty"`
-	Agent              string         `json:"agent,omitempty"`
-	RequestedAgent     string         `json:"requested_agent,omitempty"`
-	ResourceKey        string         `json:"resource_key,omitempty"`
-	Access             string         `json:"access,omitempty"`
-	Provider           string         `json:"provider,omitempty"`
-	Model              string         `json:"model,omitempty"`
-	Build              BuildMetadata  `json:"build"`
-	Runtime            RuntimeProfile `json:"runtime"`
-	Status             string         `json:"status"`
-	TaskPreview        string         `json:"task_preview,omitempty"`
-	Transcript         string         `json:"transcript,omitempty"`
-	Replay             string         `json:"replay,omitempty"`
-	Error              string         `json:"error,omitempty"`
-	Created            time.Time      `json:"created,omitempty"`
-	Updated            time.Time      `json:"updated,omitempty"`
-	Usage              llm.Usage      `json:"usage,omitempty"`
-	MessageCount       int            `json:"message_count,omitempty"`
-	RequestedMaxTurns  *int           `json:"requested_max_turns,omitempty"`
-	EffectiveMaxTurns  int            `json:"effective_max_turns"`
-	TurnsUsed          int            `json:"turns_used"`
-	TerminationReason  string         `json:"termination_reason,omitempty"`
+	ID                  string                  `json:"id"`
+	ParentID            string                  `json:"parent_id,omitempty"`
+	Kind                string                  `json:"kind"`
+	Mode                string                  `json:"mode,omitempty"`
+	ContinuedFrom       string                  `json:"continued_from,omitempty"`
+	ContinuationMode    string                  `json:"continuation_mode,omitempty"`
+	ContinuationBefore  int                     `json:"continuation_context_before,omitempty"`
+	ContinuationAfter   int                     `json:"continuation_context_after,omitempty"`
+	ContinuationWindow  int                     `json:"continuation_context_window,omitempty"`
+	RuntimeFingerprint  string                  `json:"runtime_fingerprint,omitempty"`
+	Agent               string                  `json:"agent,omitempty"`
+	RequestedAgent      string                  `json:"requested_agent,omitempty"`
+	ResourceKey         string                  `json:"resource_key,omitempty"`
+	Access              string                  `json:"access,omitempty"`
+	Provider            string                  `json:"provider,omitempty"`
+	Model               string                  `json:"model,omitempty"`
+	Build               BuildMetadata           `json:"build"`
+	Runtime             RuntimeProfile          `json:"runtime"`
+	Status              string                  `json:"status"`
+	TaskPreview         string                  `json:"task_preview,omitempty"`
+	Transcript          string                  `json:"transcript,omitempty"`
+	Replay              string                  `json:"replay,omitempty"`
+	Error               string                  `json:"error,omitempty"`
+	Created             time.Time               `json:"created,omitempty"`
+	Updated             time.Time               `json:"updated,omitempty"`
+	Usage               llm.Usage               `json:"usage,omitempty"`
+	MessageCount        int                     `json:"message_count,omitempty"`
+	RequestedMaxTurns   *int                    `json:"requested_max_turns,omitempty"`
+	EffectiveMaxTurns   int                     `json:"effective_max_turns"`
+	TurnsUsed           int                     `json:"turns_used"`
+	TerminationReason   string                  `json:"termination_reason,omitempty"`
+	ClosureTrigger      string                  `json:"closure_trigger,omitempty"`
+	ClosureTurn         int                     `json:"closure_turn,omitempty"`
+	TurnBudgetExhausted bool                    `json:"turn_budget_exhausted,omitempty"`
+	WorkflowStatus      *WorkflowStatusSnapshot `json:"workflow_status,omitempty"`
+	TelemetryVersion    int                     `json:"telemetry_version,omitempty"`
 }
 
 // Child session lifecycle statuses recognized by Follow.
@@ -616,23 +626,30 @@ type Event struct {
 	Model       string `json:"model,omitempty"`
 	// Path is the mutated file for tool_diff events. Replay uses it to detect
 	// the language for diff colorizing.
-	Path              string                  `json:"path,omitempty"`
-	Input             json.RawMessage         `json:"input,omitempty"`
-	Images            []ImageInfo             `json:"images,omitempty"`
-	Usage             *llm.Usage              `json:"usage,omitempty"`
-	Compactions       int                     `json:"compactions,omitempty"`
-	Purpose           string                  `json:"purpose,omitempty"`
-	FromEntryID       string                  `json:"from_entry_id,omitempty"`
-	ToEntryID         string                  `json:"to_entry_id,omitempty"`
-	Summary           string                  `json:"summary,omitempty"`
-	Context           *ContextSnapshot        `json:"context,omitempty"`
-	Retention         *RetentionSnapshot      `json:"retention,omitempty"`
-	IdleCompaction    *IdleCompactionSnapshot `json:"idle_compaction,omitempty"`
-	ModelRequest      *llm.ModelRequestEvent  `json:"model_request,omitempty"`
-	TerminationReason string                  `json:"termination_reason,omitempty"`
-	DurationMS        int64                   `json:"duration_ms,omitempty"`
-	MessageCount      int                     `json:"message_count,omitempty"`
-	ResultError       bool                    `json:"result_error,omitempty"`
+	Path                string                  `json:"path,omitempty"`
+	Input               json.RawMessage         `json:"input,omitempty"`
+	Images              []ImageInfo             `json:"images,omitempty"`
+	Usage               *llm.Usage              `json:"usage,omitempty"`
+	Compactions         int                     `json:"compactions,omitempty"`
+	Purpose             string                  `json:"purpose,omitempty"`
+	FromEntryID         string                  `json:"from_entry_id,omitempty"`
+	ToEntryID           string                  `json:"to_entry_id,omitempty"`
+	Summary             string                  `json:"summary,omitempty"`
+	Context             *ContextSnapshot        `json:"context,omitempty"`
+	Retention           *RetentionSnapshot      `json:"retention,omitempty"`
+	IdleCompaction      *IdleCompactionSnapshot `json:"idle_compaction,omitempty"`
+	ModelRequest        *llm.ModelRequestEvent  `json:"model_request,omitempty"`
+	HookDiagnostic      *HookDiagnosticSnapshot `json:"hook_diagnostic,omitempty"`
+	TurnProgress        *TurnProgressSnapshot   `json:"turn_progress,omitempty"`
+	TerminationReason   string                  `json:"termination_reason,omitempty"`
+	ClosureTrigger      string                  `json:"closure_trigger,omitempty"`
+	ClosureTurn         int                     `json:"closure_turn,omitempty"`
+	TurnBudgetExhausted bool                    `json:"turn_budget_exhausted,omitempty"`
+	WorkflowStatus      *WorkflowStatusSnapshot `json:"workflow_status,omitempty"`
+	TelemetryVersion    int                     `json:"telemetry_version,omitempty"`
+	DurationMS          int64                   `json:"duration_ms,omitempty"`
+	MessageCount        int                     `json:"message_count,omitempty"`
+	ResultError         bool                    `json:"result_error,omitempty"`
 	// ErrorKind is the structured diagnostics-only class of a failed tool
 	// result (llm.ToolErrorKind). It is empty on legacy logs, where the
 	// analysis layer text-classifies instead.
@@ -678,19 +695,74 @@ func ErrorExcerpt(text string) string {
 // ContextSnapshot is the session-log copy of agent.ContextEstimate. It lives in
 // session to avoid importing the agent package into persistence code.
 type ContextSnapshot struct {
-	Total           int    `json:"total,omitempty"`
-	Window          int    `json:"window,omitempty"`
-	System          int    `json:"system,omitempty"`
-	Tools           int    `json:"tools,omitempty"`
-	Messages        int    `json:"messages,omitempty"`
-	Source          string `json:"source,omitempty"`
-	PayloadTotal    int    `json:"payload_total,omitempty"`
-	PayloadSystem   int    `json:"payload_system,omitempty"`
-	PayloadTools    int    `json:"payload_tools,omitempty"`
-	PayloadMessages int    `json:"payload_messages,omitempty"`
+	Total               int    `json:"total,omitempty"`
+	Window              int    `json:"window,omitempty"`
+	System              int    `json:"system,omitempty"`
+	Tools               int    `json:"tools,omitempty"`
+	Messages            int    `json:"messages,omitempty"`
+	Source              string `json:"source,omitempty"`
+	PayloadTotal        int    `json:"payload_total,omitempty"`
+	PayloadSystem       int    `json:"payload_system,omitempty"`
+	PayloadTools        int    `json:"payload_tools,omitempty"`
+	PayloadMessages     int    `json:"payload_messages,omitempty"`
+	PayloadSource       string `json:"payload_source,omitempty"`
+	ProviderInputTokens int    `json:"provider_input_tokens,omitempty"`
+	ProviderInputSource string `json:"provider_input_source,omitempty"`
+	ProviderInputScope  string `json:"provider_input_scope,omitempty"`
+}
+
+// HookDiagnosticSnapshot contains bounded hook metadata without command,
+// payload, stdout, or stderr content.
+type HookDiagnosticSnapshot struct {
+	Event               string     `json:"event"`
+	Handler             string     `json:"handler"`
+	Target              string     `json:"target,omitempty"`
+	ToolID              string     `json:"tool_id,omitempty"`
+	TimeoutSeconds      int        `json:"timeout_seconds"`
+	ElapsedMS           int64      `json:"elapsed_ms,omitempty"`
+	ConsecutiveTimeouts int        `json:"consecutive_timeouts,omitempty"`
+	Outcome             string     `json:"outcome"`
+	CircuitOpen         bool       `json:"circuit_open,omitempty"`
+	CircuitOpenUntil    *time.Time `json:"circuit_open_until,omitempty"`
+}
+
+// TurnProgressSnapshot is the replay-safe, diagnostics-only summary of one
+// completed tool turn. It intentionally contains no result bodies or hashes.
+type TurnProgressSnapshot struct {
+	ToolCalls               int            `json:"tool_calls"`
+	Operations              int            `json:"operations"`
+	Activity                map[string]int `json:"activity,omitempty"`
+	ErrorCount              int            `json:"error_count,omitempty"`
+	BatchedOperationCount   int            `json:"batched_operation_count,omitempty"`
+	SingleLookupCount       int            `json:"single_lookup_count,omitempty"`
+	InspectionOnly          bool           `json:"inspection_only,omitempty"`
+	NoExplicitProgress      bool           `json:"no_explicit_progress,omitempty"`
+	ExplicitProgress        bool           `json:"explicit_progress,omitempty"`
+	SuccessfulMutation      bool           `json:"successful_mutation,omitempty"`
+	VerificationAttempt     bool           `json:"verification_attempt,omitempty"`
+	SuccessfulVerification  bool           `json:"successful_verification,omitempty"`
+	SuccessfulWait          bool           `json:"successful_wait,omitempty"`
+	SuccessfulCoordination  bool           `json:"successful_coordination,omitempty"`
+	NewEvidence             bool           `json:"new_evidence,omitempty"`
+	NewEvidenceCount        int            `json:"new_evidence_count,omitempty"`
+	UserSteer               bool           `json:"user_steer,omitempty"`
+	RepeatStreak            int            `json:"repeat_streak,omitempty"`
+	ErrorStreak             int            `json:"error_streak,omitempty"`
+	SingleLookupStreak      int            `json:"single_lookup_streak,omitempty"`
+	InspectionNoProgressRun int            `json:"inspection_no_progress_run,omitempty"`
+	SteerReason             string         `json:"steer_reason,omitempty"`
 }
 
 // RetentionSnapshot is the replay-safe copy of one agent retention epoch.
+// WorkflowStatusSnapshot is an optional orchestrator-supplied prompt outcome.
+// A nil Event.WorkflowStatus means no provider supplied status; Outcome may be
+// "unknown" when a provider explicitly supplied an unknown outcome.
+type WorkflowStatusSnapshot struct {
+	Outcome               string `json:"outcome"`
+	RemainingRequirements *int   `json:"remaining_requirements,omitempty"`
+	ExpectedWait          bool   `json:"expected_wait,omitempty"`
+}
+
 type RetentionSnapshot struct {
 	Policy              string `json:"policy"`
 	Trigger             string `json:"trigger"`
@@ -701,6 +773,18 @@ type RetentionSnapshot struct {
 	ContextTokensAfter  int    `json:"context_tokens_after,omitempty"`
 	ResponseStateReset  bool   `json:"response_state_reset,omitempty"`
 	NextRequestStateful bool   `json:"next_request_stateful,omitempty"`
+
+	DecisionContextTokens     int    `json:"decision_context_tokens,omitempty"`
+	DecisionContextSource     string `json:"decision_context_source,omitempty"`
+	LocalEstimateTokensBefore int    `json:"local_estimate_tokens_before,omitempty"`
+	LocalEstimateTokensAfter  int    `json:"local_estimate_tokens_after,omitempty"`
+	EstimatedTokensRemoved    int    `json:"estimated_tokens_removed,omitempty"`
+	BytesRemoved              int    `json:"bytes_removed,omitempty"`
+	MeasurementAnchorReset    bool   `json:"measurement_anchor_reset,omitempty"`
+	ContinuationStatePresent  bool   `json:"continuation_state_present,omitempty"`
+	ContinuationStateReset    bool   `json:"continuation_state_reset,omitempty"`
+	PreviousRequestMode       string `json:"previous_request_mode,omitempty"`
+	NextRequestMode           string `json:"next_request_mode,omitempty"`
 }
 
 // IdleCompactionSnapshot records one speculative REPL-idle attempt without
@@ -744,10 +828,13 @@ const (
 	EventMaintenanceUsage     = "maintenance_usage"
 	EventCheckpoint           = "checkpoint"
 	EventRetention            = "retention"
+	EventTurnProgress         = "turn_progress"
+	EventClosure              = "closure"
 	EventSkillActivation      = "skill_activation"
 	EventIdleCompaction       = "idle_compaction"
 	EventBranch               = "branch"
 	EventModelRequest         = "model_request"
+	EventHookDiagnostic       = "hook_diagnostic"
 )
 
 // AppendEvent appends ev as one JSON line to raw.ndjson under dir. A close

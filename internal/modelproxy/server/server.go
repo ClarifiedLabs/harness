@@ -872,9 +872,14 @@ func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cw.Header().Set("content-type", "application/json")
+		scope := llm.InputTokenCountScopeEffectiveContext
+		if req.Request.PreviousResponseID != "" {
+			scope = llm.InputTokenCountScopeRequestPayload
+		}
 		_ = json.NewEncoder(cw).Encode(protocol.TokenCountResponse{
 			InputTokens: count,
 			Source:      "o200k_base",
+			Scope:       scope,
 		})
 		return
 	}
@@ -914,6 +919,7 @@ func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(cw).Encode(protocol.TokenCountResponse{
 		InputTokens: count.InputTokens,
 		Source:      count.Source,
+		Scope:       llm.NormalizeInputTokenCountScope(count.Scope),
 	})
 }
 

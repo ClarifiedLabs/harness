@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"harness/internal/llm"
+	"harness/internal/tools"
 )
 
 // Runaway guardrails (design §8.1). All detection state lives in the per-run
@@ -31,6 +33,8 @@ const (
 	errorStormSteer           = 5
 	errorStormBreak           = 10
 	orientationSteerThreshold = 3
+	semanticSteerThreshold    = 12
+	maxEvidenceSignatures     = 256
 )
 
 const repeatSteer = "[loop guard] The last several tool calls repeated with identical results. Stop repeating them: change your approach, try different inputs or another tool, or stop and report the blocker. Do not re-issue the same calls expecting a different outcome."
@@ -39,25 +43,142 @@ const errorStormSteerMsg = "[loop guard] Several consecutive tool calls have all
 
 const orientationSteer = "[efficiency] The last several turns each performed one repository lookup. Batch independent reads and searches in one inspect call (or use read_file paths[] / search queries[]) before continuing."
 
-const wrapUpSteer = "[turn budget] You are about to reach this prompt's turn limit. Stop calling tools now and reply with a final message: summarize what you completed, what remains, and any next steps."
+const semanticProgressSteer = "[progress] The recent turns have remained in inspection without explicit progress. Synthesize the evidence, take the next concrete action appropriate to the task, validate the current result, or report the blocker."
+
+const wrapUpSteer = "[turn budget closure] The prompt is approaching its turn limit. Stop broad exploration. Use tools only for necessary artifact, mutation, validation, submission, or escalation actions, then report the resulting state, remaining requirements, and blockers."
 
 // turnGuard is the per-run runaway-protection state. The zero value is ready to
 // use; one is created per RunPrompt call and discarded when the turn ends.
 type turnGuard struct {
-	lastCallSig        string // signature of the previous turn's calls+results
-	repeatRuns         int    // consecutive turns with that identical signature
-	repeatSteered      bool   // steering already injected for the current repeat streak
-	errorRuns          int    // consecutive turns whose tool results were all errors
-	errorSteered       bool   // steering already injected for the current error streak
-	orientationRuns    int    // consecutive turns with one unbatched orientation lookup
-	orientationSteered bool
-	wrapUpSteered      bool // one-shot maxTurns wrap-up steering injected
+	lastCallSig              string // signature of the previous turn's calls+results
+	repeatRuns               int    // consecutive turns with that identical signature
+	repeatSteered            bool   // steering already injected for the current repeat streak
+	errorRuns                int    // consecutive turns whose tool results were all errors
+	errorSteered             bool   // steering already injected for the current error streak
+	orientationRuns          int    // consecutive turns with one unbatched orientation lookup
+	orientationSteered       bool
+	semanticRuns             int // consecutive inspection-only turns without explicit progress
+	semanticSteered          bool
+	evidence                 boundedEvidence
+	turnBudgetClosureSteered bool // one-shot early turn-budget closure steering injected
 }
 
-// recordTools folds one turn's tool calls and results into the guard's
-// sliding window. calls and results are positionally aligned (results[i] answers
-// calls[i]).
-func (g *turnGuard) recordTools(calls []llm.ToolCall, results []llm.ContentBlock) {
+// GuardSteerReason is the bounded diagnostic reason for an injected guard nudge.
+type GuardSteerReason string
+
+const (
+	GuardSteerRepeat          GuardSteerReason = "repeat"
+	GuardSteerBatching        GuardSteerReason = "batching"
+	GuardSteerPhaseTransition GuardSteerReason = "phase_transition"
+	GuardSteerErrorStorm      GuardSteerReason = "error_storm"
+)
+
+// ToolActivityCounts reports operation counts rather than just outer tool-call
+// counts, so a batched inspect/steps call remains visible as one model action.
+type ToolActivityCounts struct {
+	Inspect    int
+	Mutate     int
+	Verify     int
+	Wait       int
+	Coordinate int
+	Other      int
+}
+
+// TurnProgress is diagnostics-only. It is emitted after a tool turn and never
+// enters model history or influences tool dispatch, permissions, or hard stops.
+type TurnProgress struct {
+	Turn                    int
+	ToolCalls               int
+	Operations              int
+	Activity                ToolActivityCounts
+	ErrorCount              int
+	BatchedOperationCount   int
+	SingleLookupCount       int
+	InspectionOnly          bool
+	NoExplicitProgress      bool
+	ExplicitProgress        bool
+	SuccessfulMutation      bool
+	VerificationAttempt     bool
+	SuccessfulVerification  bool
+	SuccessfulWait          bool
+	SuccessfulCoordination  bool
+	NewEvidence             bool
+	NewEvidenceCount        int
+	UserSteer               bool
+	RepeatStreak            int
+	ErrorStreak             int
+	SingleLookupStreak      int
+	InspectionNoProgressRun int
+	SteerReason             GuardSteerReason
+}
+
+type boundedEvidence struct {
+	seen  map[[sha256.Size]byte]struct{}
+	order [][sha256.Size]byte
+}
+
+// aggregateTurnProgress classifies tool activity and detects bounded new result
+// evidence. Classification is observational only: dispatch already completed.
+func (g *turnGuard) aggregateTurnProgress(registry *tools.Registry, turn int, calls []llm.ToolCall, results []llm.ContentBlock) TurnProgress {
+	progress := TurnProgress{Turn: turn, ToolCalls: len(calls), InspectionOnly: len(calls) > 0}
+	for i, call := range calls {
+		activity := registry.CallActivity(call)
+		operations := activity.OperationCount
+		progress.Operations += operations
+		switch activity.Class {
+		case tools.ActivityInspect:
+			progress.Activity.Inspect += operations
+			if operations == 1 && !activity.Batched {
+				progress.SingleLookupCount++
+			}
+		case tools.ActivityMutate:
+			progress.Activity.Mutate += operations
+			progress.InspectionOnly = false
+		case tools.ActivityVerify:
+			progress.Activity.Verify += operations
+			progress.InspectionOnly = false
+		case tools.ActivityWait:
+			progress.Activity.Wait += operations
+			progress.InspectionOnly = false
+		case tools.ActivityCoordinate:
+			progress.Activity.Coordinate += operations
+			progress.InspectionOnly = false
+		default:
+			progress.Activity.Other += operations
+			progress.InspectionOnly = false
+		}
+		if activity.Batched {
+			progress.BatchedOperationCount += operations
+		}
+
+		failed := i >= len(results) || results[i].Kind != llm.BlockToolResult || results[i].ResultError
+		if failed {
+			progress.ErrorCount++
+		}
+		switch activity.Class {
+		case tools.ActivityMutate:
+			progress.SuccessfulMutation = progress.SuccessfulMutation || !failed
+		case tools.ActivityVerify:
+			progress.VerificationAttempt = true
+			progress.SuccessfulVerification = progress.SuccessfulVerification || !failed
+		case tools.ActivityWait:
+			progress.SuccessfulWait = progress.SuccessfulWait || !failed
+		case tools.ActivityCoordinate:
+			progress.SuccessfulCoordination = progress.SuccessfulCoordination || !failed
+		}
+		if i < len(results) && results[i].Kind == llm.BlockToolResult && g.evidence.add(toolResultEvidence(results[i])) {
+			progress.NewEvidenceCount++
+		}
+	}
+	progress.NewEvidence = progress.NewEvidenceCount > 0
+	progress.ExplicitProgress = progress.SuccessfulMutation || progress.VerificationAttempt || progress.SuccessfulWait || progress.SuccessfulCoordination
+	progress.NoExplicitProgress = !progress.ExplicitProgress
+	return progress
+}
+
+// recordTurn folds one completed tool turn into exact-repeat/error hard-stop
+// state and advisory progress state. The former calculations are unchanged.
+func (g *turnGuard) recordTurn(calls []llm.ToolCall, results []llm.ContentBlock, progress *TurnProgress) {
 	sig := callSetSignature(calls, results)
 	if sig != "" && sig == g.lastCallSig {
 		g.repeatRuns++
@@ -72,31 +193,120 @@ func (g *turnGuard) recordTools(calls []llm.ToolCall, results []llm.ContentBlock
 		g.errorRuns = 0
 		g.errorSteered = false
 	}
-	if isSingleOrientationTurn(calls) {
+	if progress.SingleLookupCount == 1 && progress.ToolCalls == 1 {
 		g.orientationRuns++
 	} else {
 		g.orientationRuns = 0
 		g.orientationSteered = false
 	}
+	if progress.InspectionOnly && progress.NoExplicitProgress {
+		g.semanticRuns++
+	} else {
+		g.semanticRuns = 0
+		g.semanticSteered = false
+	}
+	g.snapshotStreaks(progress)
 }
 
-// steerMessage returns the single steering nudge to inject this turn, or
-// "" when none is due. Repetition and the error storm share one slot so a turn
-// that is both repeating and erroring is nudged once, not twice.
-func (g *turnGuard) steerMessage() string {
+// recordTools retains the small legacy test helper while production passes the
+// richer aggregate through recordTurn.
+func (g *turnGuard) recordTools(calls []llm.ToolCall, results []llm.ContentBlock) {
+	progress := TurnProgress{ToolCalls: len(calls), InspectionOnly: len(calls) > 0, NoExplicitProgress: true}
+	if isSingleOrientationTurn(calls) {
+		progress.SingleLookupCount = 1
+	}
+	g.recordTurn(calls, results, &progress)
+}
+
+func (g *turnGuard) resetForUserSteer(progress *TurnProgress) {
+	g.repeatRuns = 0
+	g.repeatSteered = false
+	g.errorRuns = 0
+	g.errorSteered = false
+	g.orientationRuns = 0
+	g.orientationSteered = false
+	g.semanticRuns = 0
+	g.semanticSteered = false
+	progress.UserSteer = true
+	g.snapshotStreaks(progress)
+}
+
+func (g *turnGuard) snapshotStreaks(progress *TurnProgress) {
+	progress.RepeatStreak = g.repeatRuns
+	progress.ErrorStreak = g.errorRuns
+	progress.SingleLookupStreak = g.orientationRuns
+	progress.InspectionNoProgressRun = g.semanticRuns
+}
+
+// nextSteer returns one typed advisory reason and message. Semantic stagnation
+// has no break condition and cannot terminate a run.
+func (g *turnGuard) nextSteer() (GuardSteerReason, string) {
 	if g.repeatRuns >= repeatSteerThreshold && !g.repeatSteered {
 		g.repeatSteered = true
-		return repeatSteer
+		return GuardSteerRepeat, repeatSteer
 	}
 	if g.orientationRuns >= orientationSteerThreshold && !g.orientationSteered {
 		g.orientationSteered = true
-		return orientationSteer
+		return GuardSteerBatching, orientationSteer
+	}
+	if g.semanticRuns >= semanticSteerThreshold && !g.semanticSteered {
+		g.semanticSteered = true
+		return GuardSteerPhaseTransition, semanticProgressSteer
 	}
 	if g.errorRuns >= errorStormSteer && g.errorRuns < errorStormBreak && !g.errorSteered {
 		g.errorSteered = true
-		return errorStormSteerMsg
+		return GuardSteerErrorStorm, errorStormSteerMsg
 	}
-	return ""
+	return "", ""
+}
+
+// steerMessage is retained for focused legacy tests.
+func (g *turnGuard) steerMessage() string {
+	_, message := g.nextSteer()
+	return message
+}
+
+func (b *boundedEvidence) add(signature [sha256.Size]byte) bool {
+	if b.seen == nil {
+		b.seen = make(map[[sha256.Size]byte]struct{}, maxEvidenceSignatures)
+	}
+	if _, ok := b.seen[signature]; ok {
+		return false
+	}
+	if len(b.order) == maxEvidenceSignatures {
+		delete(b.seen, b.order[0])
+		copy(b.order, b.order[1:])
+		b.order = b.order[:len(b.order)-1]
+	}
+	b.seen[signature] = struct{}{}
+	b.order = append(b.order, signature)
+	return true
+}
+
+func toolResultEvidence(result llm.ContentBlock) [sha256.Size]byte {
+	h := sha256.New()
+	_, _ = h.Write([]byte(result.ToolName))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(strconv.FormatBool(result.ResultError)))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(result.ResultText))
+	for _, child := range result.ResultContent {
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(child.Kind))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(child.ImageMediaType))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(child.ImageDetail))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(strconv.Itoa(child.ImageWidth)))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(strconv.Itoa(child.ImageHeight)))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(child.ImageData))
+	}
+	var signature [sha256.Size]byte
+	copy(signature[:], h.Sum(nil))
+	return signature
 }
 
 func isSingleOrientationTurn(calls []llm.ToolCall) bool {
@@ -132,6 +342,36 @@ func (g *turnGuard) shouldBreakErrors() bool { return g.errorRuns >= errorStormB
 // tool results, so only genuinely stuck loops (same calls, same output) ever
 // reach it; a call whose output changes resets the streak.
 func (g *turnGuard) shouldBreakRepeat() bool { return g.repeatRuns >= repeatBreak }
+
+func turnBudgetClosureReserve(maxTurns int) int {
+	if maxTurns <= 0 {
+		return 0
+	}
+	if maxTurns <= 2 {
+		return 1
+	}
+	reserve := maxTurns / 10
+	if maxTurns%10 != 0 {
+		reserve++
+	}
+	if reserve < 2 {
+		reserve = 2
+	}
+	if reserve > 25 {
+		reserve = 25
+	}
+	if reserve > maxTurns {
+		reserve = maxTurns
+	}
+	return reserve
+}
+
+func shouldEnterTurnBudgetClosure(maxTurns, completedTurns int) bool {
+	if maxTurns <= 0 {
+		return false
+	}
+	return completedTurns >= maxTurns-turnBudgetClosureReserve(maxTurns)
+}
 
 // callSetSignature builds an order-insensitive signature of a turn's tool
 // calls and their results: per call, the tool name + canonicalized (sorted-key)

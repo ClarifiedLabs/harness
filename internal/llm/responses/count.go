@@ -67,5 +67,15 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 	if out.InputTokens <= 0 {
 		return llm.InputTokenCount{}, llm.ErrInputTokenCountUnsupported
 	}
-	return llm.InputTokenCount{InputTokens: out.InputTokens, Source: "responses"}, nil
+	scope := llm.InputTokenCountScopeEffectiveContext
+	if req.PreviousResponseID != "" {
+		// The endpoint accepts previous_response_id, but its public contract does
+		// not state whether the returned count includes server-held context.
+		scope = llm.InputTokenCountScopeUnknown
+	}
+	return llm.InputTokenCount{
+		InputTokens: out.InputTokens,
+		Source:      "responses",
+		Scope:       scope,
+	}, nil
 }

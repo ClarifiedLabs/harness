@@ -62,11 +62,15 @@ type RunStart struct {
 // RunEnd is always the last line of a JSON run stream (best-effort on
 // error/interrupt paths). ExitCode mirrors the process exit code.
 type RunEnd struct {
-	Type              string    `json:"type"`
-	ExitCode          int       `json:"exit_code"`
-	TerminationReason string    `json:"termination_reason,omitempty"`
-	Error             string    `json:"error,omitempty"`
-	Time              time.Time `json:"time"`
+	Type                string                          `json:"type"`
+	ExitCode            int                             `json:"exit_code"`
+	TerminationReason   string                          `json:"termination_reason,omitempty"`
+	ClosureTrigger      string                          `json:"closure_trigger,omitempty"`
+	ClosureTurn         int                             `json:"closure_turn,omitempty"`
+	TurnBudgetExhausted bool                            `json:"turn_budget_exhausted,omitempty"`
+	WorkflowStatus      *session.WorkflowStatusSnapshot `json:"workflow_status,omitempty"`
+	Error               string                          `json:"error,omitempty"`
+	Time                time.Time                       `json:"time"`
 }
 
 // PromptStart opens a prompt. Prompt is the server-assigned prompt number
@@ -98,16 +102,20 @@ type PromptEndUsage struct {
 // PromptEnd closes a prompt with its outcome. FinalText is the last assistant
 // text message (the delegate child-report extraction pattern).
 type PromptEnd struct {
-	Type              string         `json:"type"`
-	Prompt            int            `json:"prompt,omitempty"`
-	ID                string         `json:"id,omitempty"`
-	ExitCode          int            `json:"exit_code"`
-	TerminationReason string         `json:"termination_reason,omitempty"`
-	Error             string         `json:"error,omitempty"`
-	Usage             PromptEndUsage `json:"usage"`
-	FinalText         string         `json:"final_text"`
-	DurationMS        int64          `json:"duration_ms,omitempty"`
-	Time              time.Time      `json:"time"`
+	Type                string                          `json:"type"`
+	Prompt              int                             `json:"prompt,omitempty"`
+	ID                  string                          `json:"id,omitempty"`
+	ExitCode            int                             `json:"exit_code"`
+	TerminationReason   string                          `json:"termination_reason,omitempty"`
+	ClosureTrigger      string                          `json:"closure_trigger,omitempty"`
+	ClosureTurn         int                             `json:"closure_turn,omitempty"`
+	TurnBudgetExhausted bool                            `json:"turn_budget_exhausted,omitempty"`
+	WorkflowStatus      *session.WorkflowStatusSnapshot `json:"workflow_status,omitempty"`
+	Error               string                          `json:"error,omitempty"`
+	Usage               PromptEndUsage                  `json:"usage"`
+	FinalText           string                          `json:"final_text"`
+	DurationMS          int64                           `json:"duration_ms,omitempty"`
+	Time                time.Time                       `json:"time"`
 }
 
 // ApprovalRequest asks the client to approve or deny a pending action. The
@@ -339,6 +347,16 @@ func (w *Writer) Close(end RunEnd) error {
 	if w.mode == ModeOneshot {
 		if end.TerminationReason == "" {
 			end.TerminationReason = w.lastPrompt.TerminationReason
+		}
+		if end.ClosureTrigger == "" {
+			end.ClosureTrigger = w.lastPrompt.ClosureTrigger
+			end.ClosureTurn = w.lastPrompt.ClosureTurn
+		}
+		if !end.TurnBudgetExhausted {
+			end.TurnBudgetExhausted = w.lastPrompt.TurnBudgetExhausted
+		}
+		if end.WorkflowStatus == nil {
+			end.WorkflowStatus = w.lastPrompt.WorkflowStatus
 		}
 		if end.Error == "" {
 			end.Error = w.lastPrompt.Error

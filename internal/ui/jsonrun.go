@@ -12,6 +12,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/plan"
 	"harness/internal/runstream"
+	"harness/internal/sessionrec"
 )
 
 // RunJSON drives an interactive session from NDJSON input messages (design
@@ -438,13 +439,17 @@ func (d *jsonDriver) finishPrompt(err error) {
 		fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 	}
 	end := runstream.PromptEnd{
-		Prompt:            active.promptID,
-		ID:                active.id,
-		ExitCode:          code,
-		TerminationReason: string(active.sink.promptUsage.TerminationReason),
-		Usage:             promptEndUsage(active.sink.promptUsage),
-		FinalText:         active.sink.FinalText(),
-		DurationMS:        app.clock()().Sub(active.started).Milliseconds(),
+		Prompt:              active.promptID,
+		ID:                  active.id,
+		ExitCode:            code,
+		TerminationReason:   string(active.sink.promptUsage.TerminationReason),
+		ClosureTrigger:      string(active.sink.promptUsage.ClosureTrigger),
+		ClosureTurn:         active.sink.promptUsage.ClosureTurn,
+		TurnBudgetExhausted: active.sink.promptUsage.TurnBudgetExhausted,
+		WorkflowStatus:      sessionrec.WorkflowStatusSnapshot(active.sink.promptUsage.WorkflowStatus),
+		Usage:               promptEndUsage(active.sink.promptUsage),
+		FinalText:           active.sink.FinalText(),
+		DurationMS:          app.clock()().Sub(active.started).Milliseconds(),
 	}
 	if err != nil && !interrupted {
 		end.Error = err.Error()

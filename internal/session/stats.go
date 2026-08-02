@@ -71,10 +71,11 @@ func StatsJSON(dir string, w io.Writer) error {
 		Turns     int                 `json:"turns"`
 		Tools     map[string]toolJSON `json:"tools"`
 		Errors    ErrorSummary        `json:"errors"`
+		Telemetry TelemetryAnalysis   `json:"telemetry"`
 	}{
 		Path: dir, SessionID: report.root.state.ID, Provider: report.root.state.Provider,
 		Model: report.root.state.Model, Prompts: report.root.prompts, Turns: report.root.turns,
-		Tools: tools, Errors: report.errors,
+		Tools: tools, Errors: report.errors, Telemetry: report.telemetry,
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -101,6 +102,7 @@ type statsReport struct {
 	directMaintCalls    int
 	delegateMaintCalls  int
 	errors              ErrorSummary
+	telemetry           TelemetryAnalysis
 }
 
 type collectedSessionStats struct {
@@ -123,6 +125,7 @@ type collectedSessionStats struct {
 	compactions       compactionStats
 	context           contextCompositionStats
 	latestContext     *ContextSnapshot
+	telemetry         TelemetryAnalysis
 }
 
 type treeStats struct {
@@ -221,14 +224,18 @@ type checkpointStats struct {
 }
 
 type retentionStats struct {
-	epochs              int
-	pressureEpochs      int
-	agePasses           int
-	blocksTrimmed       int
-	bytesTrimmed        int
-	responseStateResets int
-	statefulRequests    int
-	fullContextRequests int
+	epochs                  int
+	pressureEpochs          int
+	agePasses               int
+	blocksTrimmed           int
+	bytesTrimmed            int
+	responseStateResets     int
+	measurementAnchorResets int
+	continuationResets      int
+	statefulRequests        int
+	fullContextRequests     int
+	statelessRequests       int
+	unknownRequests         int
 }
 
 type idleCompactionStats struct {
@@ -264,6 +271,7 @@ func collectStats(dir string) (statsReport, error) {
 		directUsage:       root.directUsage,
 		directModelCalls:  root.modelCalls,
 		directMaintCalls:  root.maintenanceCalls,
+		telemetry:         root.telemetry,
 	}
 	for _, child := range delegates {
 		report.tools.add(child.stats.tools)
@@ -280,6 +288,7 @@ func collectStats(dir string) (statsReport, error) {
 		report.delegateModelCalls += child.stats.modelCalls
 		report.directMaintCalls += child.stats.maintenanceCalls
 		report.delegateMaintCalls += child.stats.maintenanceCalls
+		report.telemetry.add(child.stats.telemetry)
 	}
 	errorAnalysis, err := AnalyzeErrors(dir, ErrorFilter{}, time.Time{})
 	if err != nil {
@@ -403,6 +412,7 @@ func collectSessionStatsWithFallback(dir string, child *ChildMeta) (collectedSes
 		compactions:       compactions,
 		context:           collectContextComposition(state.Messages),
 		latestContext:     latestContext,
+		telemetry:         deriveTelemetry(events, child),
 	}, nil
 }
 
@@ -460,18 +470,37 @@ func collectRetentionStats(events []Event) retentionStats {
 		switch retention.Policy {
 		case "pressure_epoch":
 			stats.pressureEpochs++
-		case "age":
+		case "age", "auto_age":
 			stats.agePasses++
 		}
 		stats.blocksTrimmed += retention.BlocksTrimmed
-		stats.bytesTrimmed += max(retention.BytesBefore-retention.BytesAfter, 0)
+		removed := retention.BytesRemoved
+		if removed == 0 {
+			removed = max(retention.BytesBefore-retention.BytesAfter, 0)
+		}
+		stats.bytesTrimmed += removed
 		if retention.ResponseStateReset {
 			stats.responseStateResets++
 		}
-		if retention.NextRequestStateful {
+		if retention.MeasurementAnchorReset {
+			stats.measurementAnchorResets++
+		}
+		if retention.ContinuationStateReset {
+			stats.continuationResets++
+		}
+		switch retention.NextRequestMode {
+		case "stateful_suffix":
 			stats.statefulRequests++
-		} else {
+		case "full":
 			stats.fullContextRequests++
+		case "stateless":
+			stats.statelessRequests++
+		default:
+			if retention.NextRequestStateful {
+				stats.statefulRequests++
+			} else {
+				stats.unknownRequests++
+			}
 		}
 	}
 	return stats
@@ -825,38 +854,55 @@ func collectParallelBatches(messages []llm.Message, seen map[string]struct{}, st
 }
 
 func collectDelegateStats(rootDir string) ([]*delegateStats, error) {
-	childrenDir := filepath.Join(rootDir, "children")
-	entries, err := os.ReadDir(childrenDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read delegates in %s: %w", rootDir, err)
-	}
 	var delegates []*delegateStats
 	seenIDs := make(map[string]struct{})
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	var collect func(string) error
+	collect = func(parentDir string) error {
+		childrenDir := filepath.Join(parentDir, "children")
+		info, err := os.Lstat(childrenDir)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
 		}
-		dir := filepath.Join(childrenDir, entry.Name())
-		metaPath := filepath.Join(dir, "meta.json")
-		var meta ChildMeta
-		if err := decodeJSONFile(metaPath, &meta, true); err != nil {
-			return nil, fmt.Errorf("decode delegate metadata %s: %w", metaPath, err)
-		}
-		if meta.ID == "" {
-			return nil, fmt.Errorf("decode delegate metadata %s: missing id", metaPath)
-		}
-		if _, ok := seenIDs[meta.ID]; ok {
-			return nil, fmt.Errorf("decode delegate metadata %s: duplicate id %q", metaPath, meta.ID)
-		}
-		seenIDs[meta.ID] = struct{}{}
-		stats, err := collectSessionStatsWithFallback(dir, &meta)
 		if err != nil {
-			return nil, fmt.Errorf("collect delegate %s: %w", meta.ID, err)
+			return fmt.Errorf("read delegates in %s: %w", parentDir, err)
 		}
-		delegates = append(delegates, &delegateStats{meta: meta, stats: stats})
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		entries, err := os.ReadDir(childrenDir)
+		if err != nil {
+			return fmt.Errorf("read delegates in %s: %w", parentDir, err)
+		}
+		for _, entry := range entries {
+			if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
+				continue
+			}
+			dir := filepath.Join(childrenDir, entry.Name())
+			metaPath := filepath.Join(dir, "meta.json")
+			var meta ChildMeta
+			if err := decodeJSONFile(metaPath, &meta, true); err != nil {
+				return fmt.Errorf("decode delegate metadata %s: %w", metaPath, err)
+			}
+			if meta.ID == "" {
+				return fmt.Errorf("decode delegate metadata %s: missing id", metaPath)
+			}
+			if _, ok := seenIDs[meta.ID]; ok {
+				return fmt.Errorf("decode delegate metadata %s: duplicate id %q", metaPath, meta.ID)
+			}
+			seenIDs[meta.ID] = struct{}{}
+			stats, err := collectSessionStatsWithFallback(dir, &meta)
+			if err != nil {
+				return fmt.Errorf("collect delegate %s: %w", meta.ID, err)
+			}
+			delegates = append(delegates, &delegateStats{meta: meta, stats: stats})
+			if err := collect(dir); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := collect(rootDir); err != nil {
+		return nil, err
 	}
 	return delegates, nil
 }
@@ -1027,6 +1073,8 @@ func writeStats(report statsReport, w io.Writer) error {
 	writeActiveContextStats(&b, report.root)
 	writeOverallToolStats(&b, report)
 	writeErrorStats(&b, report)
+	fmt.Fprintln(&b, "Operational telemetry")
+	writeTelemetryText(&b, "  ", report.telemetry)
 	writeRootUsage(&b, report.root.state)
 	writeDirectUsage(&b, report)
 	writeOverallCompactions(&b, report)
@@ -1105,7 +1153,9 @@ func writeConversationValues(w io.Writer, indent string, stats collectedSessionS
 		fmt.Fprintf(w, "%s  blocks trimmed: %d\n", indent, stats.retention.blocksTrimmed)
 		fmt.Fprintf(w, "%s  bytes trimmed: %d\n", indent, stats.retention.bytesTrimmed)
 		fmt.Fprintf(w, "%s  response-state resets: %d\n", indent, stats.retention.responseStateResets)
-		fmt.Fprintf(w, "%s  next requests stateful/full-context: %d / %d\n", indent, stats.retention.statefulRequests, stats.retention.fullContextRequests)
+		fmt.Fprintf(w, "%s  measurement-anchor/continuation resets: %d / %d\n", indent, stats.retention.measurementAnchorResets, stats.retention.continuationResets)
+		fmt.Fprintf(w, "%s  next requests stateful/full/stateless/unknown: %d / %d / %d / %d\n", indent,
+			stats.retention.statefulRequests, stats.retention.fullContextRequests, stats.retention.statelessRequests, stats.retention.unknownRequests)
 	}
 	if stats.idleCompactions.attempts > 0 {
 		averageMS := stats.idleCompactions.totalMS / int64(stats.idleCompactions.attempts)

@@ -114,8 +114,9 @@ type TokenCountRequest struct {
 }
 
 type TokenCountResponse struct {
-	InputTokens int    `json:"input_tokens"`
-	Source      string `json:"source,omitempty"`
+	InputTokens int                      `json:"input_tokens"`
+	Source      string                   `json:"source,omitempty"`
+	Scope       llm.InputTokenCountScope `json:"scope,omitempty"`
 }
 
 type StreamEnvelope struct {

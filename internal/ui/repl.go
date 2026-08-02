@@ -196,6 +196,9 @@ type App struct {
 	// GoalAutoContinue enables the REPL idle-boundary continuation loop. It is
 	// wired from the same interactive-session condition as request_implementation.
 	GoalAutoContinue bool
+	// WorkflowStatusFunc optionally exposes authoritative bounded workflow state
+	// supplied by an embedding orchestrator. Harness does not infer it from text.
+	WorkflowStatusFunc func() agent.WorkflowStatus
 	// The REPL prints the latest recorded plan's path after record_plan and again
 	// before the per-prompt usage line (mirroring the todo status). These fields
 	// let the idle prompt avoid printing that same plan line again.
@@ -4415,6 +4418,7 @@ func (app *App) runPromptSubmitHook(ctx context.Context, prompt string, promptID
 		"prompt_id": promptID,
 		"prompt":    prompt,
 	})
+	app.recordHookDiagnostics(promptID, res.Diagnostics)
 	app.renderHookNotices(res.Notices)
 	return res
 }
@@ -4424,6 +4428,7 @@ func (app *App) RunSessionStartHook(source string) {
 		return
 	}
 	res := app.Hooks.Run(context.Background(), hooks.SessionStart, source, hooks.Payload{"source": source})
+	app.recordHookDiagnostics(0, res.Diagnostics)
 	app.renderHookNotices(res.Notices)
 	if len(res.AdditionalContext) > 0 {
 		app.AddHookContext(res.AdditionalContext)
@@ -4649,6 +4654,16 @@ func sessionImages(images []inputimage.Loaded) []session.ImageInfo {
 		})
 	}
 	return out
+}
+
+func (app *App) recordHookDiagnostics(prompt int, diagnostics []hooks.Diagnostic) {
+	for _, diagnostic := range diagnostics {
+		app.recordEvent(session.Event{
+			Type:           session.EventHookDiagnostic,
+			Prompt:         prompt,
+			HookDiagnostic: sessionrec.HookDiagnosticSnapshot(diagnostic),
+		})
+	}
 }
 
 func (app *App) recordEvent(ev session.Event) {
@@ -5300,13 +5315,36 @@ func (s *accumulatingSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
 		return
 	}
 	s.recordEvent(session.Event{
-		Type:         session.EventCheckpoint,
-		Prompt:       s.prompt,
-		Turn:         checkpoint.Turn,
-		Purpose:      string(checkpoint.Kind),
-		DurationMS:   elapsed.Milliseconds(),
-		MessageCount: len(s.app.Agent.Transcript()),
+		Type:                session.EventCheckpoint,
+		Prompt:              s.prompt,
+		Turn:                checkpoint.Turn,
+		Purpose:             string(checkpoint.Kind),
+		DurationMS:          elapsed.Milliseconds(),
+		MessageCount:        len(s.app.Agent.Transcript()),
+		ClosureTrigger:      string(checkpoint.Usage.ClosureTrigger),
+		ClosureTurn:         checkpoint.Usage.ClosureTurn,
+		TurnBudgetExhausted: checkpoint.Usage.TurnBudgetExhausted,
+		WorkflowStatus:      sessionrec.WorkflowStatusSnapshot(checkpoint.Usage.WorkflowStatus),
 	})
+}
+
+func (s *accumulatingSink) ClosureStarted(event agent.ClosureEvent) {
+	s.rec.ClosureStarted(event)
+}
+
+func (s *accumulatingSink) TurnProgress(progress agent.TurnProgress) {
+	s.rec.TurnProgress(progress)
+}
+
+func (s *accumulatingSink) HookDiagnostic(diagnostic hooks.Diagnostic) {
+	s.rec.HookDiagnostic(diagnostic)
+}
+
+func (s *accumulatingSink) WorkflowStatus() agent.WorkflowStatus {
+	if s == nil || s.app == nil || s.app.WorkflowStatusFunc == nil {
+		return agent.WorkflowStatus{}
+	}
+	return s.app.WorkflowStatusFunc()
 }
 
 func (s *accumulatingSink) RetentionApplied(event agent.RetentionEvent) {
@@ -5314,7 +5352,7 @@ func (s *accumulatingSink) RetentionApplied(event agent.RetentionEvent) {
 		Type:      session.EventRetention,
 		Prompt:    s.prompt,
 		Turn:      s.turn + 1,
-		Retention: retentionSnapshot(event),
+		Retention: sessionrec.RetentionSnapshot(event),
 	})
 }
 
@@ -5326,20 +5364,6 @@ func (s *accumulatingSink) SkillActivated(event agent.SkillActivationEvent) {
 		Purpose: event.Source,
 		Summary: event.Status,
 	})
-}
-
-func retentionSnapshot(event agent.RetentionEvent) *session.RetentionSnapshot {
-	return &session.RetentionSnapshot{
-		Policy:              event.Policy,
-		Trigger:             event.Trigger,
-		BlocksTrimmed:       event.BlocksTrimmed,
-		BytesBefore:         event.BytesBefore,
-		BytesAfter:          event.BytesAfter,
-		ContextTokensBefore: event.ContextTokensBefore,
-		ContextTokensAfter:  event.ContextTokensAfter,
-		ResponseStateReset:  event.ResponseStateReset,
-		NextRequestStateful: event.NextRequestStateful,
-	}
 }
 
 func (s *accumulatingSink) AddHookContext(ctx []string) {

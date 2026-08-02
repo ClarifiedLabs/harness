@@ -209,7 +209,7 @@ func (p *countingFakeProvider) CountInputTokens(context.Context, llm.Request) (l
 	if p.err != nil {
 		return llm.InputTokenCount{}, p.err
 	}
-	return llm.InputTokenCount{InputTokens: p.count, Source: "test"}, nil
+	return llm.InputTokenCount{InputTokens: p.count, Source: "test", Scope: llm.InputTokenCountScopeEffectiveContext}, nil
 }
 
 func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
@@ -559,8 +559,8 @@ func TestHandlerInputTokens(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if out.InputTokens != 4321 || out.Source != "test" {
-		t.Fatalf("token count = %+v, want 4321 test", out)
+	if out.InputTokens != 4321 || out.Source != "test" || out.Scope != llm.InputTokenCountScopeEffectiveContext {
+		t.Fatalf("token count = %+v, want 4321 test effective-context", out)
 	}
 	if captured.Provider != "responses" || captured.Model != "gpt-5.5" {
 		t.Fatalf("captured options = %+v", captured)
@@ -619,8 +619,8 @@ func TestHandlerInputTokensUsesLocalEstimateForCodexOAuth(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if out.InputTokens <= 0 || out.Source != "o200k_base" {
-		t.Fatalf("token count = %+v, want positive o200k_base estimate", out)
+	if out.InputTokens <= 0 || out.Source != "o200k_base" || out.Scope != llm.InputTokenCountScopeEffectiveContext {
+		t.Fatalf("token count = %+v, want positive effective-context o200k_base estimate", out)
 	}
 	if constructions != 0 {
 		t.Fatalf("provider constructions = %d, want 0 for local codex token estimate", constructions)

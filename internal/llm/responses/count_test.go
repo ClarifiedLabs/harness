@@ -44,8 +44,8 @@ func TestCountInputTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CountInputTokens: %v", err)
 	}
-	if got.InputTokens != 1234 || got.Source != "responses" {
-		t.Fatalf("count = %+v, want 1234 responses", got)
+	if got.InputTokens != 1234 || got.Source != "responses" || got.Scope != llm.InputTokenCountScopeEffectiveContext {
+		t.Fatalf("count = %+v, want 1234 responses effective-context", got)
 	}
 	if gotPath != "/responses/input_tokens" {
 		t.Fatalf("path = %q, want /responses/input_tokens", gotPath)
@@ -58,5 +58,22 @@ func TestCountInputTokens(t *testing.T) {
 	}
 	if _, ok := gotFields["store"]; ok {
 		t.Fatalf("count request fields = %v, store is not part of the input-token count contract", gotFields)
+	}
+}
+
+func TestCountInputTokensLeavesContinuationScopeUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(countResponse{InputTokens: 55})
+	}))
+	defer srv.Close()
+
+	got, err := New(Config{BaseURL: srv.URL}).CountInputTokens(context.Background(), llm.Request{
+		Model: "gpt-5.5", PreviousResponseID: "resp_1",
+	})
+	if err != nil {
+		t.Fatalf("CountInputTokens: %v", err)
+	}
+	if got.Scope != llm.InputTokenCountScopeUnknown {
+		t.Fatalf("scope = %q, want unknown", got.Scope)
 	}
 }

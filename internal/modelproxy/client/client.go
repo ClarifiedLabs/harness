@@ -330,7 +330,11 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 	if out.InputTokens <= 0 {
 		return llm.InputTokenCount{}, llm.ErrInputTokenCountUnsupported
 	}
-	return llm.InputTokenCount{InputTokens: out.InputTokens, Source: out.Source}, nil
+	return llm.InputTokenCount{
+		InputTokens: out.InputTokens,
+		Source:      out.Source,
+		Scope:       llm.NormalizeInputTokenCountScope(out.Scope),
+	}, nil
 }
 
 func readHTTPError(resp *http.Response) error {
