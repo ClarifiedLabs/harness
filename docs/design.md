@@ -90,7 +90,7 @@ tool calls dispatch against the local registry:
 ### Package layout
 
 ```
-cmd/harness/main.go      flags, config load, proxy catalog wiring, signal setup, REPL-vs-oneshot dispatch (also hosts `harness lsp serve`, `harness session replay|timings|stats`)
+cmd/harness              config/session/LSP command dispatch, config load, proxy catalog wiring, signals, and REPL-vs-oneshot execution
 cmd/harness-model-proxy  provider setup/refresh and HTTP model proxy server; subcommands serve (default), setup, refresh-models, auth (login/logout/status), generate-api-key, version
 internal/modelproxy      proxy protocol, client Provider, server handler
 internal/modelproxy/pricing generic request-cost pricers: flat llm.Price plus provider-specific dynamic models
@@ -105,7 +105,8 @@ internal/tools           Tool interface, registry, dispatch (recover + central t
 internal/delegate        configured child-agent tool; starts child agents without an import cycle
 internal/background      process-local background job manager + tools
 internal/session         append-only conversation tree, mutable state, replay, archives, artifacts
-internal/config          flags > env > config-file resolution
+internal/config          typed harness definitions, strict source resolution, provenance, and redacted projections
+internal/configmeta      package-neutral parameter catalog, source vocabulary, and deterministic reference renderers
 internal/modelcatalog    normalized models.dev/OpenAI Codex catalogs for proxy setup/pricing metadata
 internal/ui              REPL, streaming renderer, tool summaries, usage line
 internal/sysprompt       embedded prompt files + environment context + AGENTS.md sections
@@ -1189,66 +1190,54 @@ is explicitly set on the CLI.
 
 ## 7. Configuration and model selection
 
-Precedence: **flags > environment > config file > built-in defaults** — for settings
-that *have* a flag. A few knobs have no flag and resolve **env > config file > default**:
-MCP/LSP enable, `mcp.proxy`, `mcp.local.enable`, the global tool-result caps, and
-the per-tool `rg`/`grep`/`read_file` caps. Others
-(agent definitions, compaction knobs, `agents_md_warn_bytes`,
-`delegate_max_turns`, `delegate_max_depth`) are config-file-only (listed below).
-`delegate_output` has the normal flag/env/file/default precedence and accepts
-`status`, `off`, and `lines`. `status` enables only the compact TTY row,
-`off` constructs no delegate display registry/feed, and `lines` adds curated
-scrolling child activity on stderr (including on non-TTY output). Quiet
-constructs neither registry nor feed.
+`internal/configmeta` defines the package-neutral configuration vocabulary:
+ordered `Catalog` entries describe stable keys, types, flags, environment names,
+JSON paths, accepted values, literal or derived defaults, descriptions, and
+sensitivity. The catalog rejects duplicate input surfaces and drives deterministic
+text, JSON, and Markdown renderers. It contains no harness loading logic;
+`internal/config` owns the typed harness definitions and resolution.
 
-- Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_MODEL`, plus
-  most `HARNESS_*` equivalents for user-facing flags. `trace_proxy` /
-  `HARNESS_TRACE_PROXY` / `-trace-proxy` opt in to W3C Trace Context headers for
-  harness-to-proxy HTTP requests. `--log-level` uses
-  `LOG_LEVEL`. `HARNESS_TIMESTAMPS` accepts `short`, `full`/`long`, or `none` (with
-  `off`/`false`/`disabled` as further aliases for `none`); `HARNESS_NO_TIMESTAMPS=true`
-  is also an alias for `none`. Provider API keys and provider base URLs are resolved
-  only by `harness-model-proxy`.
-- REPL history (bash-style): `HARNESS_HISTFILE` (path; default
-  `<stateDir>/harness/history`), `HARNESS_HISTFILESIZE` (on-disk entry cap;
-  default 1000, 0 disables persistence), `HARNESS_HISTSIZE` (in-memory recall
-  cap; default 1000, 0 disables recall). All three also have config-file keys
-  (`histfile`, `histfilesize`, `histsize`) and flags (`-histfile`, `-histfilesize`,
-  `-histsize`).
-- Config file (optional): `~/.config/harness/config.json` — model,
-  model_proxy_url, agent definitions, hooks, flag defaults, and
-  context-efficiency knobs.
-  `agents_md_warn_bytes` (applied to each AGENTS.md file independently),
-  `compact_keep_turns`, `compact_keep_tokens`, `compact_auto_enabled`,
-  `compact_trigger_percent`, `compact_target_percent`,
-  `compact_summary_max_tokens`, and `compact_tool_result_max_bytes` are
-  config-only.
-  Tool-result truncation uses config `tool_result_max_bytes` /
-  `tool_result_max_lines` or env `HARNESS_TOOL_RESULT_MAX_BYTES` /
-  `HARNESS_TOOL_RESULT_MAX_LINES`. `rg`/`grep` result caps use
-  `rg_result_max_bytes`, `rg_result_max_lines`, `grep_result_max_bytes`, and
-  `grep_result_max_lines`, or matching `HARNESS_*` env vars. `read_file` uses
-  `read_file_default_limit`, `read_file_result_max_bytes`, and
-  `read_file_result_max_lines`, or matching `HARNESS_*` env vars.
-  `run_command_timeout_seconds` and `run_command_background_timeout_seconds`
-  (with `HARNESS_RUN_COMMAND_TIMEOUT_SECONDS` and
-  `HARNESS_RUN_COMMAND_BACKGROUND_TIMEOUT_SECONDS` env vars) override the
-  built-in defaults of 120 s and 1200 s respectively; set to 0 to use the
-  built-in values.
-  `delegate_max_turns` (default `20`) and `delegate_max_depth` (default `3`,
-  root depth `0`) are config-only for the delegate tool. Both must be positive.
-  `delegate_output` defaults to `status`; its environment and CLI forms are
-  `HARNESS_DELEGATE_OUTPUT` and `-delegate-output`.
-  `delegate_tmux` (default on inside tmux, off otherwise) follows each delegate
-  child in its own tmux view; its forms are `HARNESS_DELEGATE_TMUX` and
-  `-delegate-tmux`.
-  `delegate_tmux_layout` defaults to `pane`; its forms are
-  `HARNESS_DELEGATE_TMUX_LAYOUT` and `-delegate-tmux-layout`.
-  `delegate_tmux_max_windows` (default `4`, config-only) caps simultaneous
-  views in either layout and must be positive.
-- Hooks use inline `hooks` plus config-relative `hook_configs` files. They are
-  additive in order: inline first, then each listed file. `--hooks <file>`
-  replaces the configured hook set for one launch.
+For scalar settings, one generic definition registers flags, parses and normalizes
+file/environment/flag candidates, applies **flag > environment > config file >
+default** precedence, assigns the typed value, records provenance, and supplies
+the projected inspection value. Every present source is validated before the
+winner is chosen: malformed lower-precedence values still fail. `LookupEnv`
+preserves absent versus explicitly empty values; an empty plain string can clear
+a setting when meaningful, while required strings/enums reject it. Strict JSON
+decoding rejects non-object input, unknown fields, trailing values, and explicit
+`null`; omission is the inheritance mechanism. Structured values such as agents,
+hooks, MCP headers/local configuration, LSP servers, and environment maps use
+custom definitions because they have dynamic maps or multi-input semantics, but
+they still contribute complete catalog metadata and provenance.
+
+Loading returns a `config.Result`: `Config` contains only source-resolved user
+settings, `RunOptions` contains invocation-only prompts, images, session/resume,
+format, quiet, debug, and informational controls, `Sources` maps stable keys to
+`default`, `derived`, `file`, `environment`, or `flag` origins, and `ConfigPath`
+records the selected file. `cmd/harness` injects contextual `RuntimeDefaults` for
+the model/MCP proxy URLs, history path, default agent, and tmux state; these are
+resolved during loading and marked `derived` rather than patched in afterward.
+Config path selection is centralized as `-config` > `HARNESS_CONFIG` > an
+existing conventional path; explicit paths must be non-empty and exist.
+
+`harness config list`, `show`, and `check` reuse this catalog and loader and are
+strictly offline. `show` uses a catalog-driven `Projection`, not direct `Config`
+serialization: it reconstructs nested JSON paths, optionally includes provenance,
+and redacts non-empty proxy API keys, MCP headers, configured environment-map
+values, and opaque LSP initialization options with no secret-display escape hatch.
+The projection is deterministic, versioned in JSON, limited to user settings, and
+does not embed prompts or materialize built-in agents. `check` additionally performs local semantic checks
+for agents, hooks, and `@file` references.
+
+`trace_proxy` / `HARNESS_TRACE_PROXY` / `-trace-proxy` opts in to W3C Trace
+Context headers for harness-to-proxy requests. `HARNESS_LOG_LEVEL` controls
+harness diagnostics; `HARNESS_TIMESTAMPS` accepts only `short`, `full`, or `none`.
+`HARNESS_NO_COLOR` is a strict boolean, while non-empty standard `NO_COLOR` is a
+presence-based override. Provider API keys and provider base URLs are resolved
+only by `harness-model-proxy`. The generated parameter matrix in
+[usage.md](usage.md#harness-configuration-parameters) is the canonical source
+for exact setting surfaces and defaults; `examples/harness/config.json` is a
+strictly valid, intentionally concise example rather than a duplicate schema.
 - `harness-model-proxy setup` creates a proxy config in the default proxy directory,
   appends a new provider config to an existing proxy config, or updates an existing
   configured provider. It reads cached models.dev provider metadata, fetching and
@@ -3010,14 +2999,14 @@ backoff allows.
   silently dropping cost.
 - Bracketed status lines are prefixed inside the bracket with local time by
   default, for example `[16:15:34 tool-call: name id=...]`.
-  `-timestamps=full` (or `long`) uses `yyyy-mm-dd hh:mm:ss`; `-timestamps=none`
-  or `-no-timestamps` disables status timestamps.
+  `-timestamps=full` uses `yyyy-mm-dd hh:mm:ss`; `-timestamps=none` disables
+  status timestamps.
 - ANSI color only when stdout is a TTY (`os.Stdout.Stat()` mode check);
   `NO_COLOR` env or `-no-color` disables color. Structural Markdown rendering
   remains legible without color.
 - Startup diagnostics use `log/slog` with a plaintext handler: `[level] [category]
-  message`. Default level is `info`; `--log-level` or `LOG_LEVEL` accepts `debug`,
-  `info`, `warn`, or `error`. Normal sessions also tee JSON diagnostics to
+  message`. Default level is `info`; `--log-level` or `HARNESS_LOG_LEVEL` accepts
+  `debug`, `info`, `warn`, or `error`. Normal sessions also tee JSON diagnostics to
   `diagnostics.ndjson` in the session directory; that sink accepts debug records so
   child MCP/LSP stderr is preserved even though it is hidden from the terminal by
   default and only shown with `--log-level debug`.
@@ -3247,10 +3236,9 @@ source of truth and also backs `config.Usage`, so runtime `-h` output cannot dri
 from accepted flags. Configuration resolution remains flags > environment > file
 > defaults, except for the documented config-only structured settings.
 
-`-show-config` includes the effective merged agent definitions and static
-`system_prompt`; it exits before contacting the model proxy. Dynamic runtime
-prompt sections such as env context, user/project `AGENTS.md`, skills, and the
-active agent prompt are not included in the `system_prompt` field.
+`harness config show` renders the redacted, source-resolved user-setting
+projection and exits without contacting the model proxy. It does not materialize
+built-in agents or embed the static or dynamic system prompt.
 
 `-debug-request` resolves the same startup context as a real first turn, then
 prints the provider-neutral `llm.Request`, context estimate, active tools,
@@ -3926,8 +3914,8 @@ reviewer, or the wide-open default without separate binaries.
   `auto`, but not to one-shot `auto` or `independent`.
 - **Descriptions are required selection metadata:** after resolution, every agent
   must have a nonblank trimmed `description` stating when a parent should use it.
-  A new custom name without one is a fail-fast startup/`--agents`/`--show-config`
-  error; there is no warning, generated fallback, or compatibility shim.
+  A new custom name without one is a fail-fast startup/`--agents`/`harness config
+  show`/`harness config check` error; there is no warning, generated fallback, or compatibility shim.
 - **Config `agents`** entries **field-level merge** onto a built-in of the same name:
   a non-empty `description`, `allowed_tools`, `mcp_tools`, `prompt`, `model`, or
   `reasoning` replaces, and an omitted field inherits. Thus an override
@@ -3939,7 +3927,7 @@ reviewer, or the wide-open default without separate binaries.
 - **MCP exposure:** `mcp_tools` is one of `disabled`, `read_only`, or `all` (with
   `read-only`/`readonly` accepted as aliases for `read_only`) and controls automatic
   exposure of discovered MCP tools. An invalid value is a fail-fast validation error
-  (surfaced by `main`/`--show-config` after field-level merging). Built-ins
+  (surfaced by startup or `harness config show|check` after field-level merging). Built-ins
   default to `all` for `auto`/`independent` and `read_only` for
   `explore`/`plan`/`review`; a new agent with no explicit `allowed_tools`
   defaults to `all`, while an explicit `allowed_tools` whitelist defaults to

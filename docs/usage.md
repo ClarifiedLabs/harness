@@ -242,15 +242,13 @@ and send an explicit switch.
                   still prints one per-prompt usage/cost line at an interactive terminal (suppressed only
                   when output is also non-TTY/piped), and one-shot runs always print the session summary
 --version        print release version and exit 0
---log-level <level>  diagnostic log level: debug, info, warn, error (also LOG_LEVEL)
--no-color         disable ANSI color (also: NO_COLOR env var; color is TTY-only anyway)
+--log-level <level>  diagnostic log level: debug, info, warn, error (also HARNESS_LOG_LEVEL)
+-no-color         disable ANSI color (also HARNESS_NO_COLOR or presence-style NO_COLOR; color is TTY-only anyway)
 -color-theme <dark|light>  syntax and displayed-diff palette (default dark; also HARNESS_COLOR_THEME)
--timestamps <mode>  bracketed status timestamps: short (default), full/long, or none
--no-timestamps   alias for -timestamps=none
+-timestamps <mode>  bracketed status timestamps: short (default), full, or none
 -repl-prompt <text>    REPL input prompt format (default "[{agent}] > "; supports placeholders such as {agent}, {model}, and {reasoning})
 -repl-edit-mode <mode> REPL prompt edit mode: emacs (default) or vi
 --format <text|json>  output format: text or json (informational commands; with -p: NDJSON run events; without -p and piped stdin: interactive NDJSON session) (default text)
---show-config    dump the resolved config, including defaults, as JSON and exit
 --debug-request  dump the first provider-neutral model request as JSON and exit without calling the model
 --agents         list configured agents and exit
 --models         list configured providers and models and exit
@@ -270,8 +268,8 @@ profile. Theme selection is independent of ANSI enablement; `-no-color`, `NO_COL
 and non-TTY output still suppress escapes without changing Markdown structure
 or source text. `NO_COLOR` is presence-style: any non-empty value, including
 `false`, disables ANSI. `HARNESS_NO_COLOR` is instead parsed as a boolean, so a
-valid false value does not disable ANSI and a malformed value is ignored. An
-explicitly empty or whitespace-only `--color-theme=` is invalid rather than an
+valid false value does not disable ANSI; malformed values fail configuration
+loading. An explicitly empty or whitespace-only `--color-theme=` is invalid rather than an
 instruction to fall through to environment, file, or default values.
 
 `-system-prompt` accepts a `@file` reference. A literal leading `@` is escaped as
@@ -397,40 +395,160 @@ records the exact loop mechanics.
 
 ## Configuration And Environment
 
-Precedence is **flags > environment > config file > built-in defaults** for any
-setting that has a flag. Settings with no flag use **environment > config file >
-default**. This covers the MCP/LSP `enable` and `proxy` keys, global
-tool-result caps (`HARNESS_TOOL_RESULT_MAX_BYTES` /
-`HARNESS_TOOL_RESULT_MAX_LINES`), and the per-tool caps for `rg`, `grep`, and
-`read_file`. A few context-efficiency knobs are config-file-only.
+For every applicable setting, precedence is exactly **flag > environment >
+config file > default**. A setting without a flag starts at environment; a
+config-file-only setting starts at the file. Every supplied candidate is parsed
+and validated even when a higher-precedence value wins, so a valid flag does not
+hide a malformed environment or file value. Repeated scalar flags use the last
+occurrence.
 
-- Environment: `HARNESS_MODEL_PROXY_URL`, `HARNESS_MODEL`,
-  `HARNESS_MAX_TURNS`, `HARNESS_MAX_PROMPT_TOKENS`,
-  `HARNESS_MAX_OUTPUT_TOKENS`, `HARNESS_GOAL_MAX_CONTINUATIONS`, `HARNESS_TOOL_TIMEOUT`,
-  `HARNESS_DEFAULT_CONTEXT_WINDOW`, `HARNESS_TIMESTAMPS`,
-  `HARNESS_IMAGE_DETAIL`, and most other `HARNESS_*` equivalents for
-  user-facing flags. The convention is `HARNESS_` plus the flag name uppercased
-  with dashes turned into underscores. For example, `-context-window`, `-no-env`,
-  `-no-color`, `-color-theme`, `-resume`, and `-session` map to
-  `HARNESS_CONTEXT_WINDOW`, `HARNESS_NO_ENV`, `HARNESS_NO_COLOR`,
-  `HARNESS_COLOR_THEME`, `HARNESS_RESUME`, and `HARNESS_SESSION`.
-- The `-v` verbose flag uses `HARNESS_VERBOSE`. `--log-level` uses `LOG_LEVEL`.
-  `HARNESS_NO_TIMESTAMPS` is an alias for `HARNESS_TIMESTAMPS=none`.
-  `HARNESS_NO_COLOR` uses normal boolean parsing; unlike the presence-style
-  `NO_COLOR`, its valid false values leave color enabled.
-  `HARNESS_REPL_INPUT_TRACE` is a debug knob that appends timestamped
-  terminal-input events to the given file path (`-` for stderr).
-- `HARNESS_WEB_SEARCH=auto` is equivalent to `-web-search auto`; `off` disables
-  it. `auto` only declares web search when the selected model-proxy target
-  advertises `server_tools:["web_search"]`.
-- Provider API-key environment variables are read only by
-  `harness-model-proxy`.
-- The optional config file is `~/.config/harness/config.json`, overrideable with
-  `-config`. It may set `model_proxy_url`, `model`, `agent`,
-  `agents`, `hooks`, `hook_configs`, and flag defaults. See
-  `examples/harness/config.json` for a representative schema.
-- `--show-config` prints the resolved config as JSON after applying file, env,
-  flag, and built-in defaults. It exits without contacting the model proxy.
+The config path itself resolves as **`-config` > `HARNESS_CONFIG` > an existing
+`~/.config/harness/config.json`**. A missing conventional file is allowed. An
+explicit flag or environment path must be non-empty, name an existing regular
+file, and decode successfully. Config JSON must be one object with no unknown
+fields, trailing values, or `null` scalar/structured settings. Omit a setting to
+inherit it.
+
+Source presence is distinct from content. An explicitly empty flag, environment
+value, or JSON string is therefore a real candidate: plain strings that support
+clearing (such as API keys) accept it, while required strings and enums reject
+it. Boolean, integer, and number text must use the documented syntax; invalid
+known environment values are errors rather than fallbacks. `HARNESS_NO_COLOR`
+is an ordinary strict boolean, while standard `NO_COLOR` is presence-based and
+disables ANSI when non-empty. `HARNESS_LOG_LEVEL` controls harness diagnostics.
+Provider API-key environment variables and model-proxy configuration remain
+owned by `harness-model-proxy`.
+
+Defaults marked *derived* below are injected from the runtime context: the model
+and MCP proxy URLs, history path, default agent, and whether Harness is running
+inside tmux. They participate in provenance like other defaults, so any explicit
+flag, environment, or file value—including `false` for tmux—wins.
+
+### Config commands
+
+```text
+harness config list  [-format text|json|markdown]
+harness config show  [-config path] [-format text|json] [-sources] [config-setting flags]
+harness config check [-config path]
+```
+
+All three commands are offline: they never contact the model proxy or another
+network service. `config list` renders the complete parameter catalog, including
+source names, types, accepted values, and default semantics. `config show`
+resolves settings and contextual defaults; `-sources` adds each winning source.
+Its stable JSON form is a versioned envelope. Output always redacts non-empty
+model/MCP proxy API keys, MCP header values, configured environment-map
+values, and opaque LSP initialization options; there is no show-secrets option.
+It contains user settings rather than a runtime dump and does not embed the
+built-in prompt or materialize built-in agents. `config check` strictly decodes and validates the selected file and local
+semantic dependencies such as agents, hooks, and `@file` references, then names
+the checked path on success. Explicitly selected missing files are errors.
+
+`HARNESS_RESUME` and `HARNESS_SESSION` are invocation-only counterparts to
+`-resume` and `-session`, not persistent settings. `HARNESS_REPL_INPUT_TRACE` is
+a diagnostic knob that appends timestamped terminal-input events to its path
+(`-` means stderr). `HARNESS_REPL_PASTE_HEURISTIC=off` disables the non-bracketed
+paste fallback. These process controls are intentionally outside the parameter
+catalog.
+
+### Harness configuration parameters
+
+This generated table is the canonical reference for harness setting flags,
+environment variables, JSON paths, types, and defaults. The concise
+`examples/harness/config.json` is an example, not a complete schema.
+
+<!-- harness-config-parameters:start -->
+| Key | Type | Accepted | Flags | Environment | JSON path | Default | Sensitive | Description |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `model` | `string` | - | `-model` | `HARNESS_MODEL` | `model` | unset (provider/model selected elsewhere) | no | Harness model setting. |
+| `model_proxy_url` | `string` | - | `-model-proxy-url` | `HARNESS_MODEL_PROXY_URL` | `model_proxy_url` | derived: runtime model proxy URL | no | Harness model proxy url setting. |
+| `model_proxy_api_key` | `string` | - | `-model-proxy-api-key` | `HARNESS_MODEL_PROXY_API_KEY` | `model_proxy_api_key` | unset | yes | Harness model proxy api key setting. |
+| `trace_proxy` | `boolean` | `true`, `false` | `-trace-proxy` | `HARNESS_TRACE_PROXY` | `trace_proxy` | false | no | Harness trace proxy setting. |
+| `system_prompt` | `string` | - | `-system-prompt` | `HARNESS_SYSTEM_PROMPT` | `system_prompt` | unset | no | Harness system prompt setting. |
+| `no_env` | `boolean` | `true`, `false` | `-no-env` | `HARNESS_NO_ENV` | `no_env` | false | no | Harness no env setting. |
+| `histfile` | `string` | - | `-histfile` | `HARNESS_HISTFILE` | `histfile` | derived: runtime history path | no | Harness histfile setting. |
+| `histfilesize` | `integer` | - | `-histfilesize` | `HARNESS_HISTFILESIZE` | `histfilesize` | 1000 (disk entry cap) | no | Harness histfilesize setting. |
+| `histsize` | `integer` | - | `-histsize` | `HARNESS_HISTSIZE` | `histsize` | 1000 (memory entry cap) | no | Harness histsize setting. |
+| `max_turns` | `integer` | - | `-max-turns` | `HARNESS_MAX_TURNS` | `max_turns` | 0 (non-positive means unlimited) | no | Harness max turns setting. |
+| `max_prompt_tokens` | `integer` | - | `-max-prompt-tokens` | `HARNESS_MAX_PROMPT_TOKENS` | `max_prompt_tokens` | 0 (unlimited) | no | Harness max prompt tokens setting. |
+| `max_output_tokens` | `integer` | - | `-max-output-tokens` | `HARNESS_MAX_OUTPUT_TOKENS` | `max_output_tokens` | 0 (automatic) | no | Harness max output tokens setting. |
+| `max_prompt_cost_usd` | `number` | - | `-max-prompt-cost` | `HARNESS_MAX_PROMPT_COST` | `max_prompt_cost_usd` | 0 (unlimited) | no | Harness max prompt cost usd setting. |
+| `goal_max_continuations` | `integer` | - | `-goal-max-continuations` | `HARNESS_GOAL_MAX_CONTINUATIONS` | `goal_max_continuations` | 25 (zero means unlimited) | no | Harness goal max continuations setting. |
+| `tool_timeout_seconds` | `integer` | - | `-tool-timeout` | `HARNESS_TOOL_TIMEOUT` | `tool_timeout_seconds` | 600 (non-positive disables) | no | Harness tool timeout seconds setting. |
+| `run_command_timeout_seconds` | `integer` | - | - | `HARNESS_RUN_COMMAND_TIMEOUT_SECONDS` | `run_command_timeout_seconds` | 0 (tool default) | no | Harness run command timeout seconds setting. |
+| `run_command_background_timeout_seconds` | `integer` | - | - | `HARNESS_RUN_COMMAND_BACKGROUND_TIMEOUT_SECONDS` | `run_command_background_timeout_seconds` | 0 (tool default) | no | Harness run command background timeout seconds setting. |
+| `default_context_window` | `integer` | - | `-default-context-window` | `HARNESS_DEFAULT_CONTEXT_WINDOW` | `default_context_window` | 256000 (tokens) | no | Harness default context window setting. |
+| `context_window` | `integer` | - | `-context-window` | `HARNESS_CONTEXT_WINDOW` | `context_window` | 0 (no override) | no | Harness context window setting. |
+| `reasoning` | `string` | `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `-reasoning` | `HARNESS_REASONING` | `reasoning` | provider default | no | Harness reasoning setting. |
+| `reasoning_summary` | `string` | `auto`, `concise`, `detailed`, `none` | `-reasoning-summary` | `HARNESS_REASONING_SUMMARY` | `reasoning_summary` | provider default | no | Harness reasoning summary setting. |
+| `image_detail` | `string` | `auto`, `low`, `high`, `original` | `-image-detail` | `HARNESS_IMAGE_DETAIL` | `image_detail` | "auto" | no | Harness image detail setting. |
+| `web_search` | `string` | `off`, `auto` | `-web-search` | `HARNESS_WEB_SEARCH` | `web_search` | "off" | no | Harness web search setting. |
+| `agents_md_warn_bytes` | `integer` | - | - | - | `agents_md_warn_bytes` | 8192 | no | Harness agents md warn bytes setting. |
+| `tool_result_max_bytes` | `integer` | - | - | `HARNESS_TOOL_RESULT_MAX_BYTES` | `tool_result_max_bytes` | 0 (tool default) | no | Harness tool result max bytes setting. |
+| `tool_result_max_lines` | `integer` | - | - | `HARNESS_TOOL_RESULT_MAX_LINES` | `tool_result_max_lines` | 0 (tool default) | no | Harness tool result max lines setting. |
+| `rg_result_max_bytes` | `integer` | - | - | `HARNESS_RG_RESULT_MAX_BYTES` | `rg_result_max_bytes` | 0 (tool default) | no | Harness rg result max bytes setting. |
+| `rg_result_max_lines` | `integer` | - | - | `HARNESS_RG_RESULT_MAX_LINES` | `rg_result_max_lines` | 0 (tool default) | no | Harness rg result max lines setting. |
+| `grep_result_max_bytes` | `integer` | - | - | `HARNESS_GREP_RESULT_MAX_BYTES` | `grep_result_max_bytes` | 0 (tool default) | no | Harness grep result max bytes setting. |
+| `grep_result_max_lines` | `integer` | - | - | `HARNESS_GREP_RESULT_MAX_LINES` | `grep_result_max_lines` | 0 (tool default) | no | Harness grep result max lines setting. |
+| `read_file_default_limit` | `integer` | - | - | `HARNESS_READ_FILE_DEFAULT_LIMIT` | `read_file_default_limit` | 0 (tool default) | no | Harness read file default limit setting. |
+| `read_file_result_max_bytes` | `integer` | - | - | `HARNESS_READ_FILE_RESULT_MAX_BYTES` | `read_file_result_max_bytes` | 0 (tool default) | no | Harness read file result max bytes setting. |
+| `read_file_result_max_lines` | `integer` | - | - | `HARNESS_READ_FILE_RESULT_MAX_LINES` | `read_file_result_max_lines` | 0 (tool default) | no | Harness read file result max lines setting. |
+| `compact_keep_turns` | `integer` | - | - | - | `compact_keep_turns` | 0 (all retained) | no | Harness compact keep turns setting. |
+| `compact_keep_tokens` | `integer` | - | - | - | `compact_keep_tokens` | 20000 | no | Harness compact keep tokens setting. |
+| `compact_auto_enabled` | `boolean` | `true`, `false` | - | - | `compact_auto_enabled` | true | no | Harness compact auto enabled setting. |
+| `compact_trigger_percent` | `integer` | - | - | - | `compact_trigger_percent` | 78 | no | Harness compact trigger percent setting. |
+| `compact_target_percent` | `integer` | - | - | - | `compact_target_percent` | 65 | no | Harness compact target percent setting. |
+| `compact_idle_after_seconds` | `integer` | - | - | - | `compact_idle_after_seconds` | 0 (disabled) | no | Harness compact idle after seconds setting. |
+| `compact_idle_trigger_percent` | `integer` | - | - | - | `compact_idle_trigger_percent` | 35 | no | Harness compact idle trigger percent setting. |
+| `compact_summary_max_tokens` | `integer` | - | - | - | `compact_summary_max_tokens` | 0 (automatic) | no | Harness compact summary max tokens setting. |
+| `compact_tool_result_max_bytes` | `integer` | - | - | - | `compact_tool_result_max_bytes` | 0 (automatic; negative disables truncation) | no | Harness compact tool result max bytes setting. |
+| `delegate_max_turns` | `integer` | - | - | - | `delegate_max_turns` | 20 | no | Harness delegate max turns setting. |
+| `delegate_max_depth` | `integer` | - | - | - | `delegate_max_depth` | 3 | no | Harness delegate max depth setting. |
+| `delegate_output` | `string` | `status`, `off`, `lines` | `-delegate-output` | `HARNESS_DELEGATE_OUTPUT` | `delegate_output` | "status" | no | Harness delegate output setting. |
+| `delegate_tmux` | `boolean` | `true`, `false` | `-delegate-tmux` | `HARNESS_DELEGATE_TMUX` | `delegate_tmux` | derived: enabled inside tmux | no | Harness delegate tmux setting. |
+| `delegate_tmux_max_windows` | `integer` | - | - | - | `delegate_tmux_max_windows` | 4 | no | Harness delegate tmux max windows setting. |
+| `delegate_tmux_layout` | `string` | `pane`, `window` | `-delegate-tmux-layout` | `HARNESS_DELEGATE_TMUX_LAYOUT` | `delegate_tmux_layout` | "pane" | no | Harness delegate tmux layout setting. |
+| `responses_stateful` | `boolean` | `true`, `false` | `-responses-stateful` | `HARNESS_RESPONSES_STATEFUL` | `responses_stateful` | true | no | Harness responses stateful setting. |
+| `retention_policy` | `string` | `auto`, `age`, `pressure`, `disabled` | `-retention-policy` | `HARNESS_RETENTION_POLICY` | `retention_policy` | "auto" | no | Harness retention policy setting. |
+| `retention_floor_tokens` | `integer` | - | - | - | `retention_floor_tokens` | 0 | no | Harness retention floor tokens setting. |
+| `no_steer` | `boolean` | `true`, `false` | `-no-steer` | `HARNESS_NO_STEER` | `no_steer` | false | no | Harness no steer setting. |
+| `agent` | `string` | - | `-agent` | `HARNESS_AGENT` | `agent` | derived: runtime default agent | no | Harness agent setting. |
+| `handoff_agent` | `string` | - | `-handoff-agent` | `HARNESS_HANDOFF_AGENT` | `handoff_agent` | "auto" | no | Harness handoff agent setting. |
+| `verbose` | `boolean` | `true`, `false` | `-v` | `HARNESS_VERBOSE` | `verbose` | false | no | Harness verbose setting. |
+| `tool_stream` | `boolean` | `true`, `false` | `-tool-stream` | `HARNESS_TOOL_STREAM` | `tool_stream` | false | no | Harness tool stream setting. |
+| `show_diffs` | `boolean` | `true`, `false` | `-show-diffs` | `HARNESS_SHOW_DIFFS` | `show_diffs` | true | no | Harness show diffs setting. |
+| `log_level` | `string` | `debug`, `info`, `warn`, `error` | `-log-level` | `HARNESS_LOG_LEVEL` | `log_level` | "info" | no | Harness log level setting. |
+| `no_color` | `boolean` | `true`, `false` | `-no-color` | `HARNESS_NO_COLOR`, `NO_COLOR` | `no_color` | false (NO_COLOR is a presence-based override) | no | Harness no color setting. |
+| `color_theme` | `string` | `dark`, `light` | `-color-theme` | `HARNESS_COLOR_THEME` | `color_theme` | "dark" | no | Harness color theme setting. |
+| `timestamps` | `string` | `short`, `full`, `none` | `-timestamps` | `HARNESS_TIMESTAMPS` | `timestamps` | "short" | no | Harness timestamps setting. |
+| `repl_prompt` | `string` | - | `-repl-prompt` | `HARNESS_REPL_PROMPT` | `repl_prompt` | "[{agent}] \\u003e " | no | Harness repl prompt setting. |
+| `repl_edit_mode` | `string` | `emacs`, `vi` | `-repl-edit-mode` | `HARNESS_REPL_EDIT_MODE` | `repl_edit_mode` | "emacs" | no | Harness repl edit mode setting. |
+| `mcp.enable` | `boolean` | `true`, `false` | - | `HARNESS_MCP_ENABLE` | `mcp.enable` | false | no | Harness mcp.enable setting. |
+| `mcp.proxy` | `string` | - | - | `HARNESS_MCP_PROXY` | `mcp.proxy` | derived: runtime MCP proxy URL | no | Harness mcp.proxy setting. |
+| `mcp.api_key` | `string` | - | `-mcp-proxy-api-key` | `HARNESS_MCP_PROXY_API_KEY` | `mcp.api_key` | unset | yes | Harness mcp.api key setting. |
+| `mcp.max_tools` | `integer` | - | - | - | `mcp.max_tools` | 0 (unlimited) | no | Harness mcp.max tools setting. |
+| `mcp.local.enable` | `boolean` | `true`, `false` | - | `HARNESS_MCP_LOCAL_ENABLE` | `mcp.local.enable` | false | no | Harness mcp.local.enable setting. |
+| `mcp.local.command` | `string` | - | - | - | `mcp.local.command` | unset | no | Harness mcp.local.command setting. |
+| `lsp.enable` | `boolean` | `true`, `false` | - | `HARNESS_LSP_ENABLE` | `lsp.enable` | false | no | Harness lsp.enable setting. |
+| `lsp.serena.enable` | `boolean` | `true`, `false` | - | `HARNESS_LSP_SERENA_ENABLE` | `lsp.serena.enable` | false | no | Harness lsp.serena.enable setting. |
+| `lsp.serena.command` | `string` | - | - | - | `lsp.serena.command` | "serena" | no | Harness lsp.serena.command setting. |
+| `agents` | `object` | - | - | - | `agents` | unset | no | Structured agents settings. |
+| `mcp.headers` | `object` | - | - | - | `mcp.headers` | unset | yes | Structured mcp.headers settings. |
+| `mcp.disabled_servers` | `string[]` | - | - | - | `mcp.disabled_servers` | unset | no | Structured mcp.disabled_servers settings. |
+| `mcp.local.args` | `string[]` | - | - | - | `mcp.local.args` | unset | no | Structured mcp.local.args settings. |
+| `mcp.local.env` | `object` | - | - | - | `mcp.local.env` | unset | yes | Structured mcp.local.env settings. |
+| `lsp.tools` | `string[]` | - | - | - | `lsp.tools` | unset | no | Structured lsp.tools settings. |
+| `lsp.servers` | `object` | - | - | - | `lsp.servers` | unset | yes | Structured lsp.servers settings. |
+| `lsp.serena.args` | `string[]` | - | - | - | `lsp.serena.args` | unset | no | Structured lsp.serena.args settings. |
+| `lsp.serena.env` | `object` | - | - | - | `lsp.serena.env` | unset | yes | Structured lsp.serena.env settings. |
+| `hooks` | `object` | - | `-hooks` | - | `hooks` | unset | no | Structured hooks settings. |
+| `hook_configs` | `string[]` | - | - | - | `hook_configs` | unset | no | Structured hook_configs settings. |
+<!-- harness-config-parameters:end -->
+
+`HARNESS_WEB_SEARCH=auto` is equivalent to `-web-search auto`; `off` disables it.
+`auto` only declares web search when the selected model-proxy target advertises
+`server_tools:["web_search"]`.
+
 - `--debug-request` prints the first provider-neutral `llm.Request`, context
   estimate, active tools, reasoning settings, and request byte counts. It
   resolves the model proxy catalog, then exits before prewarm, session hooks,
@@ -1328,8 +1446,8 @@ Five agents are built in:
 
 Define new agents or override built-ins in the config file under `agents`.
 **Breaking configuration rule:** every new custom agent must have a nonblank
-`description` that tells the parent *when to use it*. Startup, `--agents`, and
-`--show-config` fail when this selection metadata is missing or whitespace-only;
+`description` that tells the parent *when to use it*. Startup, `--agents`, `harness config show`, and `harness config check` fail
+when this selection metadata is missing or whitespace-only;
 there is no generated fallback. An override of `auto`, `explore`, `plan`,
 `review`, or `independent` may omit `description` and inherit the built-in
 value. Other fields continue to merge onto a built-in of the same name:

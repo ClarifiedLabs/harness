@@ -385,7 +385,7 @@ func liveChildEnvironment(home, proxyAPIKey string) []string {
 			continue
 		}
 		switch name {
-		case "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "NO_COLOR", "LOG_LEVEL":
+		case "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "NO_COLOR":
 			continue
 		}
 		env = append(env, entry)
@@ -419,7 +419,7 @@ func runLiveModel(
 		"-web-search", "off",
 		"-quiet",
 		"-no-color",
-		"-no-timestamps",
+		"-timestamps", "none",
 		"-session", sessionDir,
 	}
 	commonArgs = append(commonArgs, args...)

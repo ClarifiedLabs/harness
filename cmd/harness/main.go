@@ -7,6 +7,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 	"harness/internal/background"
 	"harness/internal/buildinfo"
 	"harness/internal/config"
+	"harness/internal/configmeta"
 	"harness/internal/delegate"
 	"harness/internal/goal"
 	"harness/internal/hooks"
@@ -52,7 +54,6 @@ import (
 	"harness/internal/tools"
 	"harness/internal/tracing"
 	"harness/internal/ui"
-	"harness/prompts"
 )
 
 const modelProxyCheckTimeout = 2 * time.Second
@@ -68,6 +69,7 @@ func main() {
 		stdout:       os.Stdout,
 		stderr:       os.Stderr,
 		getenv:       os.Getenv,
+		lookupEnv:    os.LookupEnv,
 		now:          time.Now,
 		colorTTY:     isTTY(os.Stdout),
 		stdinPiped:   pipedStdin(os.Stdin),
@@ -88,6 +90,7 @@ type environment struct {
 	stdout       io.Writer
 	stderr       io.Writer
 	getenv       func(string) string
+	lookupEnv    func(string) (string, bool)
 	now          func() time.Time
 	colorTTY     bool // stdout is a terminal (gates color)
 	stdinPiped   bool // stdin is piped/redirected (gates one-shot stdin read)
@@ -100,6 +103,45 @@ type environment struct {
 	// promptFinished is a test/embedding hook invoked after a prompt's final
 	// session save, including after run has returned for a forced exit.
 	promptFinished func()
+}
+
+func (env environment) envLookup() func(string) (string, bool) {
+	if env.lookupEnv != nil {
+		return env.lookupEnv
+	}
+	if env.getenv == nil {
+		return func(string) (string, bool) { return "", false }
+	}
+	return func(name string) (string, bool) {
+		value := env.getenv(name)
+		return value, value != ""
+	}
+}
+
+func harnessLoadOptions(env environment, args []string) config.LoadOptions {
+	getenv := env.getenv
+	if getenv == nil {
+		getenv = func(string) string { return "" }
+	}
+	return config.LoadOptions{
+		Args:              args,
+		LookupEnv:         env.envLookup(),
+		DefaultConfigPath: filepath.Join(defaultConfigDir(getenv), "config.json"),
+		Defaults: config.RuntimeDefaults{
+			ModelProxyURL: protocol.DefaultURL,
+			MCPProxyURL:   resolveMCPProxy(""),
+			HistoryPath:   session.HistoryPath(stateDir(getenv)),
+			Agent:         agentdef.Default,
+			TmuxActive:    getenv("TMUX") != "",
+		},
+	}
+}
+
+func writeInformationalJSON(w io.Writer, value any) error {
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
 }
 
 func signalCancelContext(sigCh <-chan os.Signal) (context.Context, context.CancelFunc, func() bool) {
@@ -136,6 +178,9 @@ func run(env environment) int {
 		fmt.Fprintln(stdout, buildinfo.Line("harness"))
 		return ui.ExitOK
 	}
+	if len(args) > 0 && args[0] == "config" {
+		return runConfigCommand(env, args[1:])
+	}
 	if len(args) > 0 && args[0] == "session" {
 		return runSessionCommand(env, args[1:])
 	}
@@ -143,9 +188,7 @@ func run(env environment) int {
 		return runLSPCommand(env, args[1:])
 	}
 
-	cfgPath := resolveConfigPath(args, getenv)
-
-	cfg, err := config.Load(args, getenv, cfgPath)
+	result, err := config.Load(harnessLoadOptions(env, args))
 	if err != nil {
 		// -h/--help is a request, not a misuse: print the usage screen to stdout
 		// and exit 0 (design §10).
@@ -156,20 +199,14 @@ func run(env environment) int {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
 	}
-	explicitReasoningOutput := explicitReasoningOutputFlag(args)
-	suppressReasoningOutput := cfg.Quiet && !explicitReasoningOutput
-	if cfg.ShowConfig {
-		out, err := buildShowConfigOutput(cfg)
-		if err != nil {
-			fmt.Fprintf(stderr, "harness: show config: %v\n", err)
-			return ui.ExitUsage
-		}
-		if err := config.WriteResolved(stdout, out); err != nil {
-			fmt.Fprintf(stderr, "harness: show config: %v\n", err)
-			return ui.ExitRuntime
-		}
-		return ui.ExitOK
+	cfg := result.Config
+	runOptions := result.Run
+	configWritePath := result.ConfigPath
+	if configWritePath == "" {
+		configWritePath = filepath.Join(defaultConfigDir(getenv), "config.json")
 	}
+	explicitReasoningOutput := result.Sources["reasoning_summary"].Kind == configmeta.SourceFlag && cfg.ReasoningSummary != "" && cfg.ReasoningSummary != "none"
+	suppressReasoningOutput := runOptions.Quiet && !explicitReasoningOutput
 	var proxyTracer *tracing.Tracer
 	if cfg.TraceProxy {
 		var err error
@@ -190,9 +227,9 @@ func run(env environment) int {
 	}
 	startupCtx, stopStartup, startupInterrupted := signalCancelContext(env.sigCh)
 	defer stopStartup()
-	if cfg.ShowAgents || cfg.ShowModels {
+	if runOptions.ShowAgents || runOptions.ShowModels {
 		var agents *agentsListOutput
-		if cfg.ShowAgents {
+		if runOptions.ShowAgents {
 			var err error
 			agents, err = buildAgentsListOutput(cfg)
 			if err != nil {
@@ -201,7 +238,7 @@ func run(env environment) int {
 			}
 		}
 		var models *modelsListOutput
-		if cfg.ShowModels {
+		if runOptions.ShowModels {
 			catalog, err := checkModelProxy(startupCtx, proxyClient)
 			if err != nil {
 				if startupInterrupted() || errors.Is(err, context.Canceled) {
@@ -215,7 +252,7 @@ func run(env environment) int {
 			}
 			models = buildModelsListOutput(catalog)
 		}
-		if cfg.OutputFormat == "json" {
+		if runOptions.OutputFormat == "json" {
 			out := infoOutput{Version: 1}
 			if agents != nil {
 				out.DefaultAgent = agents.DefaultAgent
@@ -227,7 +264,7 @@ func run(env environment) int {
 				out.ModelCount = models.ModelCount
 				out.Models = sortedModelListEntries(models.Models)
 			}
-			if err := config.WriteResolved(stdout, out); err != nil {
+			if err := writeInformationalJSON(stdout, out); err != nil {
 				fmt.Fprintf(stderr, "harness: info: %v\n", err)
 				return ui.ExitRuntime
 			}
@@ -244,7 +281,7 @@ func run(env environment) int {
 		}
 		return ui.ExitOK
 	}
-	if cfg.CheckModelProxy {
+	if runOptions.CheckModelProxy {
 		catalog, err := checkModelProxy(startupCtx, proxyClient)
 		if err != nil {
 			if startupInterrupted() || errors.Is(err, context.Canceled) {
@@ -256,14 +293,14 @@ func run(env environment) int {
 		if startupInterrupted() {
 			return ui.ExitInterrupt
 		}
-		if cfg.OutputFormat == "json" {
+		if runOptions.OutputFormat == "json" {
 			out := infoOutput{
 				Version:       1,
 				ModelProxyURL: proxyClient.URL(),
 				ProviderCount: 0,
 				ModelCount:    catalogModelCount(catalog),
 			}
-			if err := config.WriteResolved(stdout, out); err != nil {
+			if err := writeInformationalJSON(stdout, out); err != nil {
 				fmt.Fprintf(stderr, "harness: model proxy: %v\n", err)
 				return ui.ExitRuntime
 			}
@@ -272,12 +309,12 @@ func run(env environment) int {
 		}
 		return ui.ExitOK
 	}
-	if cfg.OutputFormat == "json" && !cfg.PromptSet && !cfg.DebugRequest {
+	if runOptions.OutputFormat == "json" && !runOptions.PromptSet && !runOptions.DebugRequest {
 		// -format json without -p selects a JSON run mode (design §10). The
 		// TTY REPL has no JSON mode: without -p the session must be driven by
 		// NDJSON messages on piped stdin (interactive JSON sessions).
 		switch {
-		case cfg.InitialPromptSet:
+		case runOptions.InitialPromptSet:
 			fmt.Fprintln(stderr, "harness: -i is not supported with -format json; use -p or pipe stdin")
 			return ui.ExitUsage
 		case !env.stdinPiped:
@@ -291,7 +328,7 @@ func run(env environment) int {
 	// coordinator stdout. stderr is unchanged. The run stream itself writes to
 	// the raw stdout handle.
 	rawStdout := stdout
-	jsonRunMode := cfg.OutputFormat == "json" && (cfg.PromptSet || env.stdinPiped) && !cfg.DebugRequest
+	jsonRunMode := runOptions.OutputFormat == "json" && (runOptions.PromptSet || env.stdinPiped) && !runOptions.DebugRequest
 	coordinatorOut := stdout
 	if jsonRunMode {
 		coordinatorOut = io.Discard
@@ -303,10 +340,10 @@ func run(env environment) int {
 	// Load a resumed session up front: its saved agent selects the tool set and
 	// any agent-specific model target when no -agent flag overrides it.
 	var resumed *session.Session
-	if cfg.Resume != "" {
-		s, err := session.Load(cfg.Resume)
+	if runOptions.Resume != "" {
+		s, err := session.Load(runOptions.Resume)
 		if err != nil {
-			fmt.Fprintf(stderr, "harness: resume %s: %v\n", cfg.Resume, err)
+			fmt.Fprintf(stderr, "harness: resume %s: %v\n", runOptions.Resume, err)
 			return ui.ExitRuntime
 		}
 		resumed = &s
@@ -329,7 +366,7 @@ func run(env environment) int {
 		created = resumed.Created
 	}
 	if resumed != nil {
-		abandoned, skipped, err := session.AbandonRunningChildren(cfg.Resume, startedAt)
+		abandoned, skipped, err := session.AbandonRunningChildren(runOptions.Resume, startedAt)
 		if err != nil {
 			fmt.Fprintf(stderr, "harness: resume child sessions: %v\n", err)
 			return ui.ExitRuntime
@@ -341,10 +378,10 @@ func run(env environment) int {
 			fmt.Fprintf(stderr, "[skipped %d unreadable child session(s)]\n", skipped)
 		}
 	}
-	sessionPath := cfg.Session
+	sessionPath := runOptions.Session
 	if sessionPath == "" {
-		if cfg.Resume != "" {
-			sessionPath = cfg.Resume
+		if runOptions.Resume != "" {
+			sessionPath = runOptions.Resume
 		} else {
 			sessionPath = session.DefaultPath(stateDir(getenv), created)
 		}
@@ -352,7 +389,7 @@ func run(env environment) int {
 	resumeCloned := false
 	resumeCloneFrom := ""
 	resumeCloneTo := ""
-	if resumed != nil && cfg.Session != "" && filepath.Clean(cfg.Session) != filepath.Clean(cfg.Resume) {
+	if resumed != nil && runOptions.Session != "" && filepath.Clean(runOptions.Session) != filepath.Clean(runOptions.Resume) {
 		cloneCreated := now()
 		resumeCloneFrom = resumed.Tree.ActiveLeaf
 		cloneCWD := resumed.CWD
@@ -387,22 +424,22 @@ func run(env environment) int {
 		created = cloneCreated
 		resumeCloned = true
 	}
-	logger, diagnosticLogger, diagnosticsSink, err := newHarnessLogger(terminalOutput.Stderr(), cfg.LogLevel, sessionPath, !cfg.DebugRequest)
+	logger, diagnosticLogger, diagnosticsSink, err := newHarnessLogger(terminalOutput.Stderr(), cfg.LogLevel, sessionPath, !runOptions.DebugRequest)
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
 	}
-	if len(cfg.Images) > 0 && !cfg.PromptSet && !cfg.InitialPromptSet {
+	if len(runOptions.Images) > 0 && !runOptions.PromptSet && !runOptions.InitialPromptSet {
 		fmt.Fprintln(stderr, "harness: -image requires -p one-shot mode or -i initial interactive prompt")
 		return ui.ExitUsage
 	}
 
-	interactiveSession := !cfg.PromptSet && !env.stdinPiped
+	interactiveSession := !runOptions.PromptSet && !env.stdinPiped
 	// machineInteractive: an embedding app drives the session with NDJSON
 	// messages on piped stdin (design §10 interactive JSON mode). It shares
 	// the interactive-only tool/steer wiring but not TTY-coupled behaviors
 	// (goal auto-continue loop, startup pickers, prewarm, idle compaction).
-	machineInteractive := cfg.OutputFormat == "json" && env.stdinPiped && !cfg.PromptSet
+	machineInteractive := runOptions.OutputFormat == "json" && env.stdinPiped && !runOptions.PromptSet
 	agents, err := resolveConfiguredAgents(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
@@ -412,11 +449,13 @@ func run(env environment) int {
 		enableInteractiveAutoHandoff(agents)
 	}
 	agentName := cfg.Agent
+	agentSource := result.Sources["agent"]
+	agentExplicit := agentSource.Kind != configmeta.SourceDefault && agentSource.Kind != configmeta.SourceDerived
 	if resumed != nil && resumed.Agent != "" {
-		if cfg.Agent == "" {
+		if !agentExplicit {
 			agentName = resumed.Agent
 		} else if cfg.Agent != resumed.Agent {
-			fmt.Fprintf(stderr, "harness: session agent %q overridden by %q (flags win)\n", resumed.Agent, cfg.Agent)
+			fmt.Fprintf(stderr, "harness: session agent %q overridden by %q (%s %s wins)\n", resumed.Agent, cfg.Agent, agentSource.Kind, agentSource.Name)
 		}
 	}
 	if agentName == "" {
@@ -450,7 +489,7 @@ func run(env environment) int {
 	selection, err := resolveCatalogSelection(catalog, startProvider, startModel, cfg.Provider)
 	if err != nil {
 		configuredSelectionUnavailable := startModel != "" || startProvider != ""
-		if configuredSelectionUnavailable && (cfg.PromptSet || env.stdinPiped) {
+		if configuredSelectionUnavailable && (runOptions.PromptSet || env.stdinPiped) {
 			fmt.Fprintf(stderr, "harness: %v\n", err)
 			return ui.ExitUsage
 		}
@@ -515,7 +554,7 @@ func run(env environment) int {
 			}
 		}
 		if saveDefault {
-			configPath := writableConfigPath(args, getenv)
+			configPath := configWritePath
 			if err := saveSelectedModel(configPath, selection.Provider, selection.Model, reasoning); err != nil {
 				fmt.Fprintf(stderr, "harness: save selected model: %v\n", err)
 				return ui.ExitRuntime
@@ -674,7 +713,7 @@ func run(env environment) int {
 	}
 	var delegateActivity *delegate.ActivityRegistry
 	var delegateFeed *delegate.ActivityFeed
-	if !cfg.Quiet {
+	if !runOptions.Quiet {
 		switch cfg.DelegateOutput {
 		case config.DelegateOutputStatus:
 			delegateActivity = delegate.NewActivityRegistry(nil)
@@ -688,7 +727,9 @@ func run(env environment) int {
 	// failure. Shutdown (nil-safe) kills any lingering windows at exit.
 	var childViewer *tmux.Viewer
 	if cfg.DelegateTmux {
-		childViewer = setupDelegateTmuxViewer(cfg, getenv, stderr, logger)
+		delegateTmuxSource := result.Sources["delegate_tmux"]
+		delegateTmuxExplicit := delegateTmuxSource.Kind == configmeta.SourceFlag || delegateTmuxSource.Kind == configmeta.SourceEnvironment || delegateTmuxSource.Kind == configmeta.SourceFile
+		childViewer = setupDelegateTmuxViewer(cfg, getenv, stderr, logger, delegateTmuxExplicit, runOptions.Quiet)
 		defer childViewer.Shutdown()
 	}
 	delegateOpts := delegate.Options{
@@ -746,7 +787,7 @@ func run(env environment) int {
 	var mcpConn *mcptools.Conn
 	var mcpSummary mcptools.Summary
 	if cfg.MCP.Enable {
-		if cfg.PromptSet {
+		if runOptions.PromptSet {
 			conn, summary, cleanup, ok := setupMCP(startupCtx, cfg.MCP, toolCatalog, logger, proxyTracer)
 			defer cleanup()
 			if startupInterrupted() {
@@ -768,7 +809,7 @@ func run(env environment) int {
 	// so it needs no live refresh: the refresh hook below is wired only to the
 	// HTTP conn, whose transport never pushes list_changed.
 	var localSummary mcptools.Summary
-	if localMCPEnabled(cfg.MCP.Local, cfg.PromptSet) {
+	if localMCPEnabled(cfg.MCP.Local, runOptions.PromptSet) {
 		_, summary, cleanup, ok := setupLocalMCP(startupCtx, cfg.MCP.Local, cfg.MCP.Local.EnableSet, toolCatalog, logger)
 		defer cleanup()
 		if startupInterrupted() {
@@ -1079,17 +1120,17 @@ func run(env environment) int {
 	ag.SetTools(toolRegistry)
 	ag.SetResponseState(resumeResponseState)
 
-	if cfg.DebugRequest {
-		includePrompt, prompt, images, err := debugRequestPrompt(cfg, stdin, env.stdinPiped, modelRegistry.SupportsInputModality(registryModel, "image"))
+	if runOptions.DebugRequest {
+		includePrompt, prompt, images, err := debugRequestPrompt(runOptions, stdin, env.stdinPiped, modelRegistry.SupportsInputModality(registryModel, "image"))
 		if err != nil {
 			fmt.Fprintf(stderr, "harness: debug request: %v\n", err)
 			return ui.ExitRuntime
 		}
-		if len(cfg.Images) > 0 && len(images) == 0 {
+		if len(runOptions.Images) > 0 && len(images) == 0 {
 			fmt.Fprintf(stderr, "[image skipped: model %s does not support image input]\n", registryModel)
 		}
 		out := buildDebugRequestOutput(ag, cfg, registryModel, agentName, includePrompt, prompt, images)
-		if err := config.WriteResolved(stdout, out); err != nil {
+		if err := writeInformationalJSON(stdout, out); err != nil {
 			fmt.Fprintf(stderr, "harness: debug request: %v\n", err)
 			return ui.ExitRuntime
 		}
@@ -1104,10 +1145,10 @@ func run(env environment) int {
 		Markdown:   env.colorTTY,
 		Verbose:    cfg.Verbose,
 		ToolStream: cfg.ToolStream,
-		Quiet:      cfg.Quiet,
+		Quiet:      runOptions.Quiet,
 		// -quiet still prints the single per-prompt cost line on a TTY (r25);
 		// a piped -quiet run stays fully silent for scripting.
-		SuppressUsage:           cfg.Quiet && !env.colorTTY,
+		SuppressUsage:           runOptions.Quiet && !env.colorTTY,
 		SuppressReasoningOutput: suppressReasoningOutput,
 		// The in-place wait counter and during-prompt input line need a TTY; the
 		// renderer also gates them off under -quiet (r12 + during-prompt input).
@@ -1162,10 +1203,10 @@ func run(env environment) int {
 			return nil
 		},
 		SaveDefaultModel: func(provider, model string, reasoning llm.ReasoningConfig) error {
-			return saveSelectedModel(writableConfigPath(args, getenv), provider, model, reasoning)
+			return saveSelectedModel(configWritePath, provider, model, reasoning)
 		},
 		SaveReplEditMode: func(mode string) error {
-			return config.SaveReplEditMode(writableConfigPath(args, getenv), mode)
+			return config.SaveReplEditMode(configWritePath, mode)
 		},
 		AgentName:       agentName,
 		AvailableAgents: agentSummaries(agents, activeToolNames),
@@ -1223,7 +1264,7 @@ func run(env environment) int {
 	}
 	// Wire the MCP tool-list refresh hook for the interactive REPL only: one-shot
 	// runs a single prompt with tools discovered before the request, so it needs no hook.
-	if mcpConn != nil && !cfg.PromptSet {
+	if mcpConn != nil && !runOptions.PromptSet {
 		staticSummary := mergeMCPSummaries(localSummary, lspSummary, serenaSummary)
 		refreshMCP := newMCPRefresher(mcpConn, toolCatalog, agents, mcpBases, mcpSummary, staticSummary, logger, pendingMCP, mcpLim)
 		app.RefreshMCP = func(ctx context.Context, agentName string) (*tools.Registry, string) {
@@ -1307,18 +1348,18 @@ func run(env environment) int {
 	}
 
 	// One-shot mode: a single prompt, then exit (design §10).
-	if cfg.PromptSet {
-		prompt, err := ui.BuildPrompt(cfg.Prompt, stdin, env.stdinPiped)
+	if runOptions.PromptSet {
+		prompt, err := ui.BuildPrompt(runOptions.Prompt, stdin, env.stdinPiped)
 		if err != nil {
 			fmt.Fprintf(stderr, "harness: read prompt: %v\n", err)
 			return ui.ExitRuntime
 		}
-		images, err := loadConfiguredImages(cfg.Images, modelRegistry.SupportsInputModality(registryModel, "image"))
+		images, err := loadConfiguredImages(runOptions.Images, modelRegistry.SupportsInputModality(registryModel, "image"))
 		if err != nil {
 			fmt.Fprintf(stderr, "harness: image: %v\n", err)
 			return ui.ExitRuntime
 		}
-		if len(cfg.Images) > 0 && len(images) == 0 {
+		if len(runOptions.Images) > 0 && len(images) == 0 {
 			fmt.Fprintf(stderr, "[image skipped: model %s does not support image input]\n", registryModel)
 		}
 		app.PendingImages = images
@@ -1383,13 +1424,13 @@ func run(env environment) int {
 		return code
 	}
 
-	if cfg.InitialPromptSet {
-		images, err := loadConfiguredImages(cfg.Images, modelRegistry.SupportsInputModality(registryModel, "image"))
+	if runOptions.InitialPromptSet {
+		images, err := loadConfiguredImages(runOptions.Images, modelRegistry.SupportsInputModality(registryModel, "image"))
 		if err != nil {
 			fmt.Fprintf(stderr, "harness: image: %v\n", err)
 			return ui.ExitRuntime
 		}
-		if len(cfg.Images) > 0 && len(images) == 0 {
+		if len(runOptions.Images) > 0 && len(images) == 0 {
 			fmt.Fprintf(stderr, "[image skipped: model %s does not support image input]\n", registryModel)
 		}
 		app.PendingImages = images
@@ -1421,7 +1462,7 @@ func run(env environment) int {
 		}
 	}
 	if env.prewarmCache && !env.stdinPiped {
-		if !cfg.InitialPromptSet {
+		if !runOptions.InitialPromptSet {
 			prewarm()
 		}
 		// Re-warm after cache-invalidating events (agent/model/provider switch,
@@ -1440,14 +1481,10 @@ func run(env environment) int {
 	if resumed != nil {
 		ui.PrintResumeRecap(app, resumed)
 	}
-	if cfg.InitialPromptSet {
-		return ui.RunWithInitialPrompt(stdin, app, exitCh, cfg.InitialPrompt)
+	if runOptions.InitialPromptSet {
+		return ui.RunWithInitialPrompt(stdin, app, exitCh, runOptions.InitialPrompt)
 	}
 	return ui.Run(stdin, app, exitCh)
-}
-
-type showConfigOutput struct {
-	config.Config
 }
 
 type debugRequestOutput struct {
@@ -1476,25 +1513,25 @@ type debugRequestByteCounts struct {
 	Total          int `json:"total"`
 }
 
-func debugRequestPrompt(cfg config.Config, stdin io.Reader, stdinPiped, supportsImages bool) (bool, string, []llm.ContentBlock, error) {
+func debugRequestPrompt(runOptions config.RunOptions, stdin io.Reader, stdinPiped, supportsImages bool) (bool, string, []llm.ContentBlock, error) {
 	var prompt string
 	includePrompt := false
 	switch {
-	case cfg.PromptSet:
-		p, err := ui.BuildPrompt(cfg.Prompt, stdin, stdinPiped)
+	case runOptions.PromptSet:
+		p, err := ui.BuildPrompt(runOptions.Prompt, stdin, stdinPiped)
 		if err != nil {
 			return false, "", nil, fmt.Errorf("read prompt: %w", err)
 		}
 		prompt = p
 		includePrompt = true
-	case cfg.InitialPromptSet:
-		prompt = cfg.InitialPrompt
+	case runOptions.InitialPromptSet:
+		prompt = runOptions.InitialPrompt
 		includePrompt = true
 	}
 	if !includePrompt {
 		return false, "", nil, nil
 	}
-	images, err := loadConfiguredImages(cfg.Images, supportsImages)
+	images, err := loadConfiguredImages(runOptions.Images, supportsImages)
 	if err != nil {
 		return false, "", nil, fmt.Errorf("image: %w", err)
 	}
@@ -1564,19 +1601,6 @@ func debugContentBlockBytes(b llm.ContentBlock) int {
 		total += debugContentBlockBytes(child)
 	}
 	return total
-}
-
-func showConfigDefaults(cfg config.Config) config.Config {
-	if cfg.ModelProxyURL == "" {
-		cfg.ModelProxyURL = protocol.DefaultURL
-	}
-	if cfg.Agent == "" {
-		cfg.Agent = agentdef.Default
-	}
-	if cfg.MCP.Proxy == "" {
-		cfg.MCP.Proxy = resolveMCPProxy("")
-	}
-	return cfg
 }
 
 func resolveConfiguredAgents(cfg config.Config) (map[string]agentdef.Definition, error) {
@@ -1834,45 +1858,6 @@ func modelListReasoningText(reasoning bool) string {
 	return "reasoning"
 }
 
-func buildShowConfigOutput(cfg config.Config) (showConfigOutput, error) {
-	cfg = showConfigDefaults(cfg)
-
-	agents, err := resolveConfiguredAgents(cfg)
-	if err != nil {
-		return showConfigOutput{}, err
-	}
-	agentName, err := resolvedConfigAgentName(cfg, agents)
-	if err != nil {
-		return showConfigOutput{}, err
-	}
-	cfg.Agent = agentName
-
-	configuredSystemPrompt, err := resolveAtFile(cfg.SystemPrompt)
-	if err != nil {
-		return showConfigOutput{}, fmt.Errorf("-system-prompt: %w", err)
-	}
-	staticSystemPrompt := configuredSystemPrompt
-	if staticSystemPrompt == "" {
-		staticSystemPrompt = prompts.System()
-	}
-
-	for name, a := range agents {
-		expanded, err := resolveAtFile(a.Prompt)
-		if err != nil {
-			return showConfigOutput{}, fmt.Errorf("agent %q prompt: %w", name, err)
-		}
-		a.Prompt = expanded
-		agents[name] = a
-	}
-
-	cfg.Agents = configAgentsFromDefinitions(agents)
-	cfg.SystemPrompt = staticSystemPrompt
-
-	return showConfigOutput{
-		Config: cfg,
-	}, nil
-}
-
 func fileAgentDefinitions(agents map[string]config.FileAgentConfig) map[string]agentdef.FileDefinition {
 	out := make(map[string]agentdef.FileDefinition, len(agents))
 	for name, fa := range agents {
@@ -1884,22 +1869,6 @@ func fileAgentDefinitions(agents map[string]config.FileAgentConfig) map[string]a
 			Prompt:          fa.Prompt,
 			Model:           fa.Model,
 			Reasoning:       fa.Reasoning,
-		}
-	}
-	return out
-}
-
-func configAgentsFromDefinitions(agents map[string]agentdef.Definition) map[string]config.FileAgentConfig {
-	out := make(map[string]config.FileAgentConfig, len(agents))
-	for name, a := range agents {
-		out[name] = config.FileAgentConfig{
-			Description:     a.Description,
-			AllowedTools:    a.AllowedTools,
-			MCPTools:        string(a.MCPTools),
-			WorkspaceAccess: a.WorkspaceAccess,
-			Prompt:          a.Prompt,
-			Model:           a.Model,
-			Reasoning:       a.Reasoning,
 		}
 	}
 	return out
@@ -1927,10 +1896,9 @@ func resolveHarnessLauncher(argv0 string) (string, error) {
 // explicitly enabled (suppressed by -q); auto-enabled setups log at debug
 // level only. The OpenChildView closure on a nil viewer returns an error the
 // delegate runner swallows.
-func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stderr io.Writer, logger *slog.Logger) *tmux.Viewer {
-	explicit := cfg.DelegateTmuxCLI == "flag" || cfg.DelegateTmuxCLI == "env" || cfg.DelegateTmuxCLI == "file"
+func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stderr io.Writer, logger *slog.Logger, explicit, quiet bool) *tmux.Viewer {
 	warnf := func(format string, args ...any) {
-		if explicit && !cfg.Quiet {
+		if explicit && !quiet {
 			fmt.Fprintf(stderr, "harness: warning: "+format+"\n", args...)
 			return
 		}
@@ -2028,7 +1996,7 @@ func runSessionReplay(env environment, args []string) int {
 	fs.BoolVar(&quiet, "q", false, "suppress replay status lines")
 	fs.BoolVar(&quiet, "quiet", false, "suppress replay status lines")
 	colorTheme := fs.String("color-theme", config.ColorThemeDark, "syntax and displayed diff color theme: dark or light")
-	configPath := fs.String("config", resolveConfigPath(nil, env.getenv), "alternate config path")
+	configPath := fs.String("config", "", "alternate config path")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintln(env.stdout, sessionReplayUsage)
@@ -2044,12 +2012,26 @@ func runSessionReplay(env environment, args []string) int {
 	}
 
 	colorThemeSet := false
+	configPathSet := false
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "color-theme" {
+		switch f.Name {
+		case "color-theme":
 			colorThemeSet = true
+		case "config":
+			configPathSet = true
 		}
 	})
-	resolvedTheme, err := config.LoadColorTheme(*colorTheme, colorThemeSet, env.getenv, *configPath)
+	loadOptions := harnessLoadOptions(env, nil)
+	if configPathSet {
+		loadOptions.Args = []string{"--config", *configPath}
+	}
+	resolvedConfigPath, err := config.ResolveConfigPath(loadOptions)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness: session replay: %v\n", err)
+		fmt.Fprintln(env.stderr, sessionReplayUsage)
+		return ui.ExitUsage
+	}
+	resolvedTheme, err := config.LoadColorTheme(*colorTheme, colorThemeSet, env.envLookup(), resolvedConfigPath)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness: session replay: %v\n", err)
 		fmt.Fprintln(env.stderr, sessionReplayUsage)
@@ -2642,13 +2624,6 @@ func saveSelectedModel(path, provider, model string, reasoning llm.ReasoningConf
 	return config.SaveSelectedModel(path, model, reasoning.Profile)
 }
 
-func writableConfigPath(args []string, getenv func(string) string) string {
-	if p := flagValue(args, "config"); p != "" {
-		return p
-	}
-	return filepath.Join(defaultConfigDir(getenv), "config.json")
-}
-
 type catalogModelPick struct {
 	target protocol.Target
 }
@@ -2725,24 +2700,6 @@ func pickerPageSize(env environment) int {
 	return ui.PickerPageSize(rows)
 }
 
-// resolveConfigPath determines the config-file path config.Load should read: an
-// explicit -config flag, or the implicit ~/.config/harness/config.json only when
-// it exists (so an absent default is silently skipped, but a typo'd -config
-// surfaces as an error in Load).
-func resolveConfigPath(args []string, getenv func(string) string) string {
-	if p := flagValue(args, "config"); p != "" {
-		return p
-	}
-	if getenv == nil {
-		getenv = func(string) string { return "" }
-	}
-	def := filepath.Join(defaultConfigDir(getenv), "config.json")
-	if _, err := os.Stat(def); err == nil {
-		return def
-	}
-	return ""
-}
-
 func defaultConfigDir(getenv func(string) string) string {
 	if home := getenv("HOME"); home != "" {
 		return filepath.Join(home, ".config", "harness")
@@ -2753,47 +2710,6 @@ func defaultConfigDir(getenv func(string) string) string {
 // homeDir returns the user's home directory, or empty string if unavailable.
 func homeDir(getenv func(string) string) string {
 	return getenv("HOME")
-}
-
-// flagValue extracts a string flag's value from raw args, supporting both
-// -flag=value and -flag value forms. It returns "" when absent.
-func flagValue(args []string, name string) string {
-	value, _ := flagValueOK(args, name)
-	return value
-}
-
-func flagValueOK(args []string, name string) (string, bool) {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--" {
-			break
-		}
-		for _, prefix := range []string{"-" + name, "--" + name} {
-			if a == prefix {
-				if i+1 < len(args) {
-					return args[i+1], true
-				}
-				return "", true
-			}
-			if strings.HasPrefix(a, prefix+"=") {
-				return a[len(prefix)+1:], true
-			}
-		}
-	}
-	return "", false
-}
-
-func explicitReasoningOutputFlag(args []string) bool {
-	value, ok := flagValueOK(args, "reasoning-summary")
-	if !ok {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "auto", "concise", "detailed", "on", "true", "enabled", "enable":
-		return true
-	default:
-		return false
-	}
 }
 
 // resolveAtFile expands a @file reference to the file's contents; a plain string

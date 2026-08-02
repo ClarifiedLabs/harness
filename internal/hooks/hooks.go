@@ -170,7 +170,7 @@ func (c *Config) Append(other Config) {
 	}
 }
 
-// MarshalJSON renders only configured events, suitable for --show-config.
+// MarshalJSON renders only configured events, suitable for config projections.
 func (c Config) MarshalJSON() ([]byte, error) {
 	out := make(map[string][]Group)
 	for _, ev := range eventOrder {
@@ -185,8 +185,8 @@ func (c Config) MarshalJSON() ([]byte, error) {
 }
 
 // UnmarshalJSON decodes an event map. It exists so Config can be embedded in
-// config.Config for show-config output and tests, but callers that need wrapper
-// support should use DecodeFile.
+// config.Config projections and tests, but callers that need wrapper support
+// should use DecodeFile.
 func (c *Config) UnmarshalJSON(data []byte) error {
 	cfg, err := DecodeEventMap(data)
 	if err != nil {

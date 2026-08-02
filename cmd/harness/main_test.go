@@ -867,9 +867,7 @@ func TestRunTimestampModes(t *testing.T) {
 	}{
 		{name: "default short", args: nil, wantStatus: "[12:00:00 turn:"},
 		{name: "full", args: []string{"-timestamps=full"}, wantStatus: "[2026-06-09 12:00:00 turn:"},
-		{name: "long alias", args: []string{"-timestamps=long"}, wantStatus: "[2026-06-09 12:00:00 turn:"},
 		{name: "none", args: []string{"-timestamps=none"}, wantStatus: "[turn:", wantNot: "12:00:00"},
-		{name: "no timestamps alias", args: []string{"-no-timestamps"}, wantStatus: "[turn:", wantNot: "12:00:00"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1211,7 +1209,7 @@ func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 	flags := []string{
 		"-p", "-i", "-initial-prompt", "-model", "-model-proxy-url", "-system-prompt",
 		"-no-env", "-resume", "-session", "-max-turns", "-max-output-tokens", "-goal-max-continuations", "-default-context-window", "-context-window",
-		"-reasoning", "-reasoning-summary", "-trace-proxy", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-color-theme", "-config", "-repl-prompt", "-repl-edit-mode", "-show-config", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks",
+		"-reasoning", "-reasoning-summary", "-trace-proxy", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-color-theme", "-config", "-repl-prompt", "-repl-edit-mode", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks",
 	}
 	for _, arg := range []string{"-h", "--help"} {
 		fp := llmtest.New("fake")
@@ -1488,154 +1486,25 @@ func TestSessionResponseStateCompatibilityRequiresExactFingerprintAndTarget(t *t
 	}
 }
 
-func TestRunShowConfigExitsZeroWithoutModelProxy(t *testing.T) {
+func TestRunShowConfigFlagRemoved(t *testing.T) {
 	dir := t.TempDir()
-	getenv := func(k string) string {
-		switch k {
-		case "HOME":
-			return dir
-		case "HARNESS_MODEL_PROXY_URL":
-			return "://invalid"
-		case "HARNESS_TOOL_STREAM":
-			return "false"
-		case "HARNESS_COLOR_THEME":
-			return "light"
-		default:
-			return ""
-		}
-	}
-	var out, errw bytes.Buffer
-	env := environment{
-		args:   []string{"--show-config", "-model", "openrouter:openai/gpt-5.5", "-max-turns", "42"},
-		stdin:  strings.NewReader(""),
-		stdout: &out,
-		stderr: &errw,
-		getenv: getenv,
-		now:    func() time.Time { return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC) },
-		sigCh:  nil,
-	}
-
-	code := run(env)
-	if code != ui.ExitOK {
-		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
-	}
-	if errw.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty", errw.String())
-	}
-	var got map[string]any
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("stdout is not JSON: %v\n%s", err, out.String())
-	}
-	if got["provider"] != "openrouter" || got["model"] != "openai/gpt-5.5" {
-		t.Fatalf("provider/model = %v/%v, want openrouter/openai/gpt-5.5\n%s", got["provider"], got["model"], out.String())
-	}
-	if got["max_turns"] != float64(42) {
-		t.Fatalf("max_turns = %v, want 42\n%s", got["max_turns"], out.String())
-	}
-	if got["model_proxy_url"] != "://invalid" {
-		t.Fatalf("model_proxy_url = %v, want env override ://invalid\n%s", got["model_proxy_url"], out.String())
-	}
-	if got["default_context_window"] != float64(256000) {
-		t.Fatalf("default_context_window = %v, want default 256000\n%s", got["default_context_window"], out.String())
-	}
-	if got["tool_stream"] != false {
-		t.Fatalf("tool_stream = %v, want env override false\n%s", got["tool_stream"], out.String())
-	}
-	if got["color_theme"] != "light" {
-		t.Fatalf("color_theme = %v, want env override light\n%s", got["color_theme"], out.String())
-	}
-	if got["show_config"] != true {
-		t.Fatalf("show_config = %v, want true\n%s", got["show_config"], out.String())
-	}
-}
-
-func TestRunShowConfigRejectsExplicitEmptyColorTheme(t *testing.T) {
-	dir := t.TempDir()
-	var out, errw bytes.Buffer
-	env := environment{
-		args:   []string{"--color-theme=", "--show-config"},
-		stdin:  strings.NewReader(""),
-		stdout: &out,
-		stderr: &errw,
-		getenv: func(key string) string {
-			switch key {
-			case "HOME":
-				return dir
-			case "HARNESS_COLOR_THEME":
-				return "light"
-			default:
-				return ""
-			}
-		},
-		sigCh: nil,
-	}
-
-	if code := run(env); code != ui.ExitUsage {
-		t.Fatalf("exit code = %d, want usage; stdout=%q stderr=%q", code, out.String(), errw.String())
-	}
-	if out.Len() != 0 {
-		t.Fatalf("stdout = %q, want empty", out.String())
-	}
-	if got := errw.String(); !strings.Contains(got, "color_theme must be dark or light") {
-		t.Fatalf("stderr = %q, want invalid empty color theme", got)
-	}
-}
-
-func TestRunShowConfigIncludesRuntimeDefaults(t *testing.T) {
-	dir := t.TempDir()
-	getenv := func(k string) string {
-		if k == "HOME" {
-			return dir
-		}
-		return ""
-	}
 	var out, errw bytes.Buffer
 	env := environment{
 		args:   []string{"--show-config"},
-		stdin:  strings.NewReader(""),
 		stdout: &out,
 		stderr: &errw,
-		getenv: getenv,
-		sigCh:  nil,
+		getenv: func(key string) string {
+			if key == "HOME" {
+				return dir
+			}
+			return ""
+		},
 	}
-
-	if code := run(env); code != ui.ExitOK {
-		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	if code := run(env); code != ui.ExitUsage {
+		t.Fatalf("exit = %d, want usage; stdout=%q stderr=%q", code, out.String(), errw.String())
 	}
-	var got map[string]any
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("stdout is not JSON: %v\n%s", err, out.String())
-	}
-	if got["model_proxy_url"] != protocol.DefaultURL {
-		t.Fatalf("model_proxy_url = %v, want %q\n%s", got["model_proxy_url"], protocol.DefaultURL, out.String())
-	}
-	if got["agent"] != "auto" {
-		t.Fatalf("agent = %v, want auto\n%s", got["agent"], out.String())
-	}
-	if got["color_theme"] != "dark" {
-		t.Fatalf("color_theme = %v, want default dark\n%s", got["color_theme"], out.String())
-	}
-	mcp, ok := got["mcp"].(map[string]any)
-	if !ok {
-		t.Fatalf("mcp = %T, want object\n%s", got["mcp"], out.String())
-	}
-	if mcp["proxy"] != resolveMCPProxy("") {
-		t.Fatalf("mcp.proxy = %v, want %q\n%s", mcp["proxy"], resolveMCPProxy(""), out.String())
-	}
-	if _, ok := got["system_prompt"].(string); !ok {
-		t.Fatalf("system_prompt = %T, want string\n%s", got["system_prompt"], out.String())
-	}
-	if got["system_prompt"] != prompts.System() {
-		t.Fatalf("system_prompt should be the static default prompt\n%s", out.String())
-	}
-	agents, ok := got["agents"].(map[string]any)
-	if !ok {
-		t.Fatalf("agents = %T, want object\n%s", got["agents"], out.String())
-	}
-	for _, name := range []string{"auto", "explore", "independent", "plan", "review"} {
-		if _, ok := agents[name]; !ok {
-			t.Fatalf("agents missing built-in %q\n%s", name, out.String())
-		}
+	if !strings.Contains(errw.String(), "flag provided but not defined: -show-config") {
+		t.Fatalf("stderr = %q, want removed-flag error", errw.String())
 	}
 }
 
@@ -2045,7 +1914,7 @@ func TestRunRejectsCustomAgentWithoutUsefulDescription(t *testing.T) {
 		{name: "omitted"},
 		{name: "whitespace", description: `,"description":"  \t \n "`},
 	} {
-		for _, mode := range []string{"startup", "show-config"} {
+		for _, mode := range []string{"startup", "config-check"} {
 			t.Run(tc.name+"/"+mode, func(t *testing.T) {
 				cfgPath := filepath.Join(t.TempDir(), "config.json")
 				body := `{"agents":{"custom_review":{"allowed_tools":["read_file"]` + tc.description + `}}}`
@@ -2056,10 +1925,16 @@ func TestRunRejectsCustomAgentWithoutUsefulDescription(t *testing.T) {
 				if mode == "startup" {
 					args = append(args, "-model", "claude-opus-4-8", "-p", "hi")
 				} else {
-					args = append(args, "--show-config")
+					args = []string{"config", "check", "-config", cfgPath}
 				}
 				fp := llmtest.New("fake")
-				env, _, errw, _ := fakeProviderEnv(t, args, fp, "")
+				var env environment
+				var errw *bytes.Buffer
+				if mode == "startup" {
+					env, _, errw, _ = fakeProviderEnv(t, args, fp, "")
+				} else {
+					env, _, errw = configCommandEnv(t, args, nil)
+				}
 				if code := run(env); code != ui.ExitUsage {
 					t.Fatalf("exit code = %d, want usage; stderr=%q", code, errw.String())
 				}
@@ -2071,166 +1946,6 @@ func TestRunRejectsCustomAgentWithoutUsefulDescription(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestRunShowConfigIncludesEffectiveAgentsAndSystemPrompt(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-	systemPath := filepath.Join(dir, "system.txt")
-	if err := os.WriteFile(systemPath, []byte("custom system prompt"), 0o644); err != nil {
-		t.Fatalf("write system: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("project rules"), 0o644); err != nil {
-		t.Fatalf("write AGENTS.md: %v", err)
-	}
-	agentPath := filepath.Join(dir, "review-agent.txt")
-	if err := os.WriteFile(agentPath, []byte("review prompt expanded"), 0o644); err != nil {
-		t.Fatalf("write agent prompt: %v", err)
-	}
-	cfgPath := filepath.Join(dir, "config.json")
-	cfgBody, err := json.Marshal(map[string]any{
-		"system_prompt": "@" + systemPath,
-		"agent":         "review",
-		"agents": map[string]any{
-			"review": map[string]any{
-				"description":   "Review the current change.",
-				"allowed_tools": []string{"read_file"},
-				"prompt":        "@" + agentPath,
-				"model":         "openai:gpt-5.5",
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal config: %v", err)
-	}
-	if err := os.WriteFile(cfgPath, cfgBody, 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	getenv := func(k string) string {
-		if k == "HOME" {
-			return dir
-		}
-		return ""
-	}
-	var out, errw bytes.Buffer
-	env := environment{
-		args:   []string{"--show-config", "-config", cfgPath, "-no-env"},
-		stdin:  strings.NewReader(""),
-		stdout: &out,
-		stderr: &errw,
-		getenv: getenv,
-		sigCh:  nil,
-	}
-
-	if code := run(env); code != ui.ExitOK {
-		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
-	}
-	var got map[string]any
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("stdout is not JSON: %v\n%s", err, out.String())
-	}
-	agents, ok := got["agents"].(map[string]any)
-	if !ok {
-		t.Fatalf("agents = %T, want object\n%s", got["agents"], out.String())
-	}
-	for _, name := range []string{"auto", "explore", "independent", "plan", "review"} {
-		if _, ok := agents[name]; !ok {
-			t.Fatalf("agents missing %q\n%s", name, out.String())
-		}
-	}
-	review, ok := agents["review"].(map[string]any)
-	if !ok {
-		t.Fatalf("review agent = %T, want object\n%s", agents["review"], out.String())
-	}
-	if review["prompt"] != "review prompt expanded" {
-		t.Fatalf("review prompt = %v, want expanded prompt\n%s", review["prompt"], out.String())
-	}
-	if _, ok := review["provider"]; ok || review["model"] != "openai:gpt-5.5" {
-		t.Fatalf("review model config = %v, want only openai:gpt-5.5\n%s", review, out.String())
-	}
-	plan, ok := agents["plan"].(map[string]any)
-	if !ok || plan["prompt"] == "" {
-		t.Fatalf("plan built-in prompt missing\n%s", out.String())
-	}
-	systemPrompt, ok := got["system_prompt"].(string)
-	if !ok {
-		t.Fatalf("system_prompt = %T, want string\n%s", got["system_prompt"], out.String())
-	}
-	if systemPrompt != "custom system prompt" {
-		t.Fatalf("system_prompt = %q, want static override only", systemPrompt)
-	}
-	for _, unwanted := range []string{"project rules", "review prompt expanded", "Environment:\n"} {
-		if strings.Contains(systemPrompt, unwanted) {
-			t.Fatalf("system_prompt should not contain dynamic section %q:\n%s", unwanted, systemPrompt)
-		}
-	}
-	if strings.Contains(systemPrompt, "@"+systemPath) || strings.Contains(systemPrompt, "@"+agentPath) {
-		t.Fatalf("system_prompt should contain expanded @file contents:\n%s", systemPrompt)
-	}
-}
-
-func TestRunShowConfigExpandsConfigRelativeAtFiles(t *testing.T) {
-	dir := t.TempDir()
-	configDir := filepath.Join(dir, "config")
-	promptDir := filepath.Join(dir, "prompts")
-	workDir := filepath.Join(dir, "work")
-	for _, path := range []string{configDir, promptDir, workDir} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatalf("create %s: %v", path, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(promptDir, "system.txt"), []byte("relative system prompt"), 0o644); err != nil {
-		t.Fatalf("write system prompt: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(promptDir, "review.txt"), []byte("relative review prompt"), 0o644); err != nil {
-		t.Fatalf("write review prompt: %v", err)
-	}
-	cfgPath := filepath.Join(configDir, "config.json")
-	body := `{
-  "system_prompt": "@../prompts/system.txt",
-  "agents": {
-    "review": {
-      "description": "Review the current change.",
-      "allowed_tools": ["read_file"],
-      "prompt": "@../prompts/review.txt"
-    }
-  }
-}`
-	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	t.Chdir(workDir)
-	getenv := func(k string) string {
-		if k == "HOME" {
-			return dir
-		}
-		return ""
-	}
-	var out, errw bytes.Buffer
-	env := environment{
-		args:   []string{"--show-config", "-config", cfgPath},
-		stdin:  strings.NewReader(""),
-		stdout: &out,
-		stderr: &errw,
-		getenv: getenv,
-		sigCh:  nil,
-	}
-
-	if code := run(env); code != ui.ExitOK {
-		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
-	}
-	var got map[string]any
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("stdout is not JSON: %v\n%s", err, out.String())
-	}
-	if got["system_prompt"] != "relative system prompt" {
-		t.Fatalf("system_prompt = %v, want relative prompt contents\n%s", got["system_prompt"], out.String())
-	}
-	agents := got["agents"].(map[string]any)
-	review := agents["review"].(map[string]any)
-	if review["prompt"] != "relative review prompt" {
-		t.Fatalf("review prompt = %v, want relative prompt contents\n%s", review["prompt"], out.String())
 	}
 }
 
@@ -2524,25 +2239,6 @@ func TestEffectiveReasoningSummaryRequiresExplicitSetting(t *testing.T) {
 				t.Fatalf("effectiveReasoningSummary = %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestExplicitReasoningOutputFlag(t *testing.T) {
-	cases := []struct {
-		args []string
-		want bool
-	}{
-		{args: []string{"-q"}, want: false},
-		{args: []string{"-q", "-reasoning-summary", "auto"}, want: true},
-		{args: []string{"-q", "--reasoning-summary=concise"}, want: true},
-		{args: []string{"-q", "-reasoning-summary", "on"}, want: true},
-		{args: []string{"-q", "-reasoning-summary", "none"}, want: false},
-		{args: []string{"-q", "-reasoning-summary", "default"}, want: false},
-	}
-	for _, tc := range cases {
-		if got := explicitReasoningOutputFlag(tc.args); got != tc.want {
-			t.Fatalf("explicitReasoningOutputFlag(%v) = %t, want %t", tc.args, got, tc.want)
-		}
 	}
 }
 
@@ -2864,14 +2560,14 @@ func TestRunSessionReplayResolvesLightThemeWithoutModelConfig(t *testing.T) {
 	if err := session.AppendEvent(dir, session.Event{Type: session.EventAssistantDelta, Turn: 1, Text: "```go\nfunc main() {}\n```\n"}); err != nil {
 		t.Fatalf("append event: %v", err)
 	}
-	lightConfig := writeMainConfig(t, `{"color_theme":"light","model":123}`)
-	darkConfig := writeMainConfig(t, `{"color_theme":"dark","model":123}`)
+	lightConfig := writeMainConfig(t, `{"color_theme":"light","model":"openai:gpt-5.5"}`)
+	darkConfig := writeMainConfig(t, `{"color_theme":"dark","model":"openai:gpt-5.5"}`)
 	defaultHome := t.TempDir()
 	defaultConfig := filepath.Join(defaultHome, ".config", "harness", "config.json")
 	if err := os.MkdirAll(filepath.Dir(defaultConfig), 0o755); err != nil {
 		t.Fatalf("create default config directory: %v", err)
 	}
-	if err := os.WriteFile(defaultConfig, []byte(`{"color_theme":"light","model":123}`), 0o644); err != nil {
+	if err := os.WriteFile(defaultConfig, []byte(`{"color_theme":"light","model":"openai:gpt-5.5"}`), 0o644); err != nil {
 		t.Fatalf("write default config: %v", err)
 	}
 
@@ -2910,7 +2606,7 @@ func TestRunSessionReplayRepeatedValueFlagsUseFinalValue(t *testing.T) {
 	if err := session.AppendEvent(dir, session.Event{Type: session.EventAssistantDelta, Turn: 1, Text: "```go\nfunc main() {}\n```\n"}); err != nil {
 		t.Fatalf("append event: %v", err)
 	}
-	lightConfig := writeMainConfig(t, `{"color_theme":"light","model":123}`)
+	lightConfig := writeMainConfig(t, `{"color_theme":"light","model":"openai:gpt-5.5"}`)
 	darkConfig := writeMainConfig(t, `{"color_theme":"dark"}`)
 	missingConfig := filepath.Join(t.TempDir(), "missing.json")
 
@@ -2945,13 +2641,13 @@ func TestRunSessionReplayRepeatedValueFlagsUseFinalValue(t *testing.T) {
 			args:      []string{"--color-theme", "dark", "--color-theme=", dir},
 			env:       map[string]string{"HARNESS_COLOR_THEME": "light"},
 			wantCode:  ui.ExitUsage,
-			wantError: "color_theme must be dark or light",
+			wantError: "color_theme must be dark, light",
 		},
 		{
 			name:      "empty theme overrides config",
 			args:      []string{"--config", lightConfig, "--color-theme=", dir},
 			wantCode:  ui.ExitUsage,
-			wantError: "color_theme must be dark or light",
+			wantError: "color_theme must be dark, light",
 		},
 	}
 
@@ -3002,7 +2698,7 @@ func TestRunSessionReplayRejectsInvalidThemeFromEverySource(t *testing.T) {
 				stderr: &errw,
 				getenv: func(key string) string { return tt.env[key] },
 			})
-			if code != ui.ExitUsage || !strings.Contains(errw.String(), "color_theme must be dark or light") || !strings.Contains(errw.String(), sessionReplayUsage) {
+			if code != ui.ExitUsage || !strings.Contains(errw.String(), "color_theme must be dark, light") || !strings.Contains(errw.String(), sessionReplayUsage) {
 				t.Fatalf("invalid theme: exit=%d stdout=%q stderr=%q", code, out.String(), errw.String())
 			}
 		})
@@ -4327,46 +4023,6 @@ func TestRunDelegateTmuxPaneFallsBackToWindowWithoutTmuxPane(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "new-window -d -a -P") {
 		t.Fatalf("fallback should open a window: %q", string(data))
-	}
-}
-
-// --show-config surfaces the resolved value and its winning source.
-func TestRunShowConfigIncludesDelegateTmux(t *testing.T) {
-	dir := t.TempDir()
-	getenv := func(k string) string {
-		switch k {
-		case "HOME":
-			return dir
-		case "HARNESS_DELEGATE_TMUX":
-			return "true"
-		default:
-			return ""
-		}
-	}
-	var out, errw bytes.Buffer
-	env := environment{
-		args:   []string{"--show-config", "-model", "openrouter:openai/gpt-5.5"},
-		stdin:  strings.NewReader(""),
-		stdout: &out,
-		stderr: &errw,
-		getenv: getenv,
-		now:    func() time.Time { return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC) },
-	}
-	if code := run(env); code != ui.ExitOK {
-		t.Fatalf("exit code = %d, stderr=%q", code, errw.String())
-	}
-	var got map[string]any
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("stdout is not JSON: %v\n%s", err, out.String())
-	}
-	if got["delegate_tmux"] != true || got["delegate_tmux_cli"] != "env" {
-		t.Fatalf("delegate tmux fields = %v/%v, want true/env", got["delegate_tmux"], got["delegate_tmux_cli"])
-	}
-	if got["delegate_tmux_max_windows"] != float64(4) {
-		t.Fatalf("delegate_tmux_max_windows = %v, want 4", got["delegate_tmux_max_windows"])
-	}
-	if got["delegate_tmux_layout"] != "pane" {
-		t.Fatalf("delegate_tmux_layout = %v, want pane", got["delegate_tmux_layout"])
 	}
 }
 

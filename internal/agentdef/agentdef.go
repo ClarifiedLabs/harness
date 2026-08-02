@@ -245,7 +245,7 @@ func ParseWorkspaceAccess(s string) (string, error) {
 
 // Validate reports invalid resolved agent definitions. Resolve keeps invalid
 // mcp_tools strings in place so callers that can return contextual errors (main,
-// --show-config) can fail fast after all field-level merging is done.
+// config show/check) can fail fast after all field-level merging is done.
 func Validate(agents map[string]Definition) error {
 	for _, name := range Names(agents) {
 		if strings.TrimSpace(agents[name].Description) == "" {
