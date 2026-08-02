@@ -187,9 +187,10 @@ and send an explicit switch.
 
 ## Flags
 
-`harness --help` lists each command-line configuration setting with its default
-and corresponding environment variable. These annotations are generated from
-the same configuration catalog used for parsing and the reference below.
+`harness --help` lists every root flag. Command-line configuration settings
+include their defaults and corresponding environment variables; these annotations
+are generated from the same configuration catalog used for parsing and the
+reference below.
 
 ```text
 -p <prompt|->     one-shot mode; "-" or piped stdin reads the prompt from stdin
@@ -245,7 +246,7 @@ the same configuration catalog used for parsing and the reference below.
 -q, --quiet       suppress status diagnostics and reasoning output unless -reasoning-summary is set;
                   still prints one per-prompt usage/cost line at an interactive terminal (suppressed only
                   when output is also non-TTY/piped), and one-shot runs always print the session summary
---version        print release version and exit 0
+-version, --version  print release version and exit 0
 --log-level <level>  diagnostic log level: debug, info, warn, error (also HARNESS_LOG_LEVEL)
 -no-color         disable ANSI color (also HARNESS_NO_COLOR or presence-style NO_COLOR; color is TTY-only anyway)
 -color-theme <dark|light>  syntax and displayed-diff palette (default dark; also HARNESS_COLOR_THEME)

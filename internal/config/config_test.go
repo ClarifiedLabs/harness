@@ -63,6 +63,11 @@ func TestCatalogAndGeneratedFlags(t *testing.T) {
 
 func TestGeneratedUsageIncludesConfigDefaultsAndEnvironment(t *testing.T) {
 	state := newFlagState()
+	for _, name := range []string{"h", "help", "version"} {
+		if state.set.Lookup(name) == nil {
+			t.Errorf("root meta flag %q is not generated", name)
+		}
+	}
 	for _, parameter := range Catalog().Parameters() {
 		for _, name := range parameter.Flags {
 			settingFlag := state.set.Lookup(name)
@@ -83,6 +88,7 @@ func TestGeneratedUsageIncludesConfigDefaultsAndEnvironment(t *testing.T) {
 	var usage bytes.Buffer
 	Usage(&usage)
 	for _, want := range []string{
+		"-h\tshow help and exit", "-help\n", "-version\n",
 		"Harness model setting. (env: HARNESS_MODEL) (default unset (provider/model selected elsewhere))",
 		"Harness max turns setting. (env: HARNESS_MAX_TURNS) (default 0 (non-positive means unlimited))",
 		"Harness no color setting. (env: HARNESS_NO_COLOR, NO_COLOR) (default false (NO_COLOR is a presence-based override))",
@@ -92,6 +98,35 @@ func TestGeneratedUsageIncludesConfigDefaultsAndEnvironment(t *testing.T) {
 		if !strings.Contains(usage.String(), want) {
 			t.Errorf("usage does not contain %q:\n%s", want, usage.String())
 		}
+	}
+}
+
+func TestRootMetaFlagsShortCircuitConfigResolution(t *testing.T) {
+	invalidConfig := writeConfig(t, `{"unknown_setting":true}`)
+	tests := []struct {
+		arg         string
+		wantHelp    bool
+		wantVersion bool
+	}{
+		{arg: "-h", wantHelp: true},
+		{arg: "--help", wantHelp: true},
+		{arg: "-version", wantVersion: true},
+		{arg: "--version", wantVersion: true},
+	}
+	for _, test := range tests {
+		t.Run(test.arg, func(t *testing.T) {
+			result, err := Load(LoadOptions{
+				Args:              []string{test.arg},
+				LookupEnv:         lookup(nil),
+				DefaultConfigPath: invalidConfig,
+			})
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if result.Run.Help != test.wantHelp || result.Run.Version != test.wantVersion {
+				t.Fatalf("run options = %+v, want Help=%t Version=%t", result.Run, test.wantHelp, test.wantVersion)
+			}
+		})
 	}
 }
 

@@ -738,23 +738,27 @@ func TestRunInitialPromptTreatsSlashAndBangLiterally(t *testing.T) {
 }
 
 func TestRunVersionFlag(t *testing.T) {
-	var out, errw bytes.Buffer
-	code := run(environment{
-		args:   []string{"--version"},
-		stdin:  strings.NewReader(""),
-		stdout: &out,
-		stderr: &errw,
-		getenv: func(string) string { return "" },
-		now:    func() time.Time { return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC) },
-	})
-	if code != ui.ExitOK {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-	}
-	if got := out.String(); got != "harness dev\n" {
-		t.Fatalf("stdout = %q, want harness version line", got)
-	}
-	if errw.Len() != 0 {
-		t.Fatalf("--version should not write stderr; stderr=%q", errw.String())
+	for _, arg := range []string{"-version", "--version"} {
+		t.Run(arg, func(t *testing.T) {
+			var out, errw bytes.Buffer
+			code := run(environment{
+				args:   []string{arg},
+				stdin:  strings.NewReader(""),
+				stdout: &out,
+				stderr: &errw,
+				getenv: func(string) string { return "" },
+				now:    func() time.Time { return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC) },
+			})
+			if code != ui.ExitOK {
+				t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+			}
+			if got := out.String(); got != "harness dev\n" {
+				t.Fatalf("stdout = %q, want harness version line", got)
+			}
+			if errw.Len() != 0 {
+				t.Fatalf("%s should not write stderr; stderr=%q", arg, errw.String())
+			}
+		})
 	}
 }
 
@@ -1209,7 +1213,7 @@ func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 	flags := []string{
 		"-p", "-i", "-initial-prompt", "-model", "-model-proxy-url", "-system-prompt",
 		"-no-env", "-resume", "-session", "-max-turns", "-max-output-tokens", "-goal-max-continuations", "-default-context-window", "-context-window",
-		"-reasoning", "-reasoning-summary", "-trace-proxy", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-color-theme", "-config", "-repl-prompt", "-repl-edit-mode", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks",
+		"-reasoning", "-reasoning-summary", "-trace-proxy", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-color-theme", "-config", "-repl-prompt", "-repl-edit-mode", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks", "-version", "-help",
 	}
 	for _, arg := range []string{"-h", "--help"} {
 		fp := llmtest.New("fake")

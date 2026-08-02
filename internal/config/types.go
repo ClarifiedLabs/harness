@@ -5,15 +5,11 @@ package config
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 
 	"harness/internal/configmeta"
 	"harness/internal/hooks"
 )
-
-// ErrHelp is returned when -h or --help is requested.
-var ErrHelp = flag.ErrHelp
 
 const (
 	DefaultSerenaCommand          = "serena"
@@ -167,6 +163,8 @@ type Config struct {
 
 // RunOptions contains controls that apply only to this invocation.
 type RunOptions struct {
+	Help             bool
+	Version          bool
 	Resume           string
 	Session          string
 	Images           []ImageAttachment

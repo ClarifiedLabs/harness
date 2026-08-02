@@ -45,6 +45,9 @@ func newFlagState() *flagState {
 		definition.register(state)
 	}
 
+	state.addInvocationFlag("h", "help", "show help and exit", true)
+	state.addInvocationFlag("help", "help", "show help and exit", true)
+	state.addInvocationFlag("version", "version", "print release version and exit", true)
 	state.addInvocationFlag("config", "config", "alternate config path", false)
 	state.addInvocationFlag("p", "prompt", "one-shot prompt", false)
 	state.addInvocationFlag("i", "initial_prompt", "initial interactive prompt", false)
@@ -107,6 +110,18 @@ func parseInvocationBool(state *flagState, key string) (bool, bool, error) {
 		result = parsed
 	}
 	return result, true, nil
+}
+
+func resolveMetaRunOptions(state *flagState) (RunOptions, error) {
+	var options RunOptions
+	var err error
+	if options.Help, _, err = parseInvocationBool(state, "help"); err != nil {
+		return RunOptions{}, err
+	}
+	if options.Version, _, err = parseInvocationBool(state, "version"); err != nil {
+		return RunOptions{}, err
+	}
+	return options, nil
 }
 
 func resolveRunOptions(context *resolveContext) error {

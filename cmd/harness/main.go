@@ -174,10 +174,6 @@ func run(env environment) int {
 	if now == nil {
 		now = time.Now
 	}
-	if len(args) > 0 && args[0] == "--version" {
-		fmt.Fprintln(stdout, buildinfo.Line("harness"))
-		return ui.ExitOK
-	}
 	if len(args) > 0 && args[0] == "config" {
 		return runConfigCommand(env, args[1:])
 	}
@@ -190,14 +186,16 @@ func run(env environment) int {
 
 	result, err := config.Load(harnessLoadOptions(env, args))
 	if err != nil {
-		// -h/--help is a request, not a misuse: print the usage screen to stdout
-		// and exit 0 (design §10).
-		if errors.Is(err, config.ErrHelp) {
-			config.Usage(stdout)
-			return ui.ExitOK
-		}
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
+	}
+	if result.Run.Help {
+		config.Usage(stdout)
+		return ui.ExitOK
+	}
+	if result.Run.Version {
+		fmt.Fprintln(stdout, buildinfo.Line("harness"))
+		return ui.ExitOK
 	}
 	cfg := result.Config
 	runOptions := result.Run

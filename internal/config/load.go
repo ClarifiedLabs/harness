@@ -41,6 +41,13 @@ func Load(options LoadOptions) (Result, error) {
 	if err := flags.set.Parse(options.Args); err != nil {
 		return Result{}, err
 	}
+	meta, err := resolveMetaRunOptions(flags)
+	if err != nil {
+		return Result{}, err
+	}
+	if meta.Help || meta.Version {
+		return Result{Run: meta}, nil
+	}
 	path, err := resolveConfigPath(flags, lookup, options.DefaultConfigPath)
 	if err != nil {
 		return Result{}, err
