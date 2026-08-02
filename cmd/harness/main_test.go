@@ -1225,6 +1225,15 @@ func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 				t.Errorf("run(%q) usage missing flag %q:\n%s", arg, f, text)
 			}
 		}
+		for _, annotation := range []string{
+			"(env: HARNESS_MAX_TURNS) (default 0 (non-positive means unlimited))",
+			"(env: HARNESS_NO_COLOR, NO_COLOR) (default false (NO_COLOR is a presence-based override))",
+			"(env: HARNESS_MODEL_PROXY_URL) (default derived: runtime model proxy URL)",
+		} {
+			if !strings.Contains(text, annotation) {
+				t.Errorf("run(%q) usage missing config annotation %q:\n%s", arg, annotation, text)
+			}
+		}
 		if len(fp.Requests) != 0 {
 			t.Errorf("run(%q) should not call the provider, got %d requests", arg, len(fp.Requests))
 		}

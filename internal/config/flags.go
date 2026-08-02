@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"harness/internal/configmeta"
 )
 
 type flagOccurrence struct{ name, value string }
@@ -58,11 +60,27 @@ func newFlagState() *flagState {
 	state.addInvocationFlag("models", "show_models", "list configured models and exit", true)
 	state.addInvocationFlag("check-model-proxy", "check_model_proxy", "check model proxy reachability and exit", true)
 	state.addInvocationFlag("hooks", "hooks_override", "override hook config file for this run", false)
+	annotateSettingFlags(state.set, parameterCatalog)
 	return state
 }
 
 func (state *flagState) addSettingFlag(name, key, description string, boolean bool) {
 	state.set.Var(&trackedFlag{state: state, key: key, name: name, boolean: boolean, setting: true}, name, description)
+}
+
+func annotateSettingFlags(set *flag.FlagSet, catalog configmeta.Catalog) {
+	for _, parameter := range catalog.Parameters() {
+		for _, name := range parameter.Flags {
+			settingFlag := set.Lookup(name)
+			if settingFlag == nil {
+				continue
+			}
+			if len(parameter.Environment) > 0 {
+				settingFlag.Usage += " (env: " + strings.Join(parameter.Environment, ", ") + ")"
+			}
+			settingFlag.DefValue = configmeta.FormatDefault(parameter.Default)
+		}
+	}
 }
 func (state *flagState) addInvocationFlag(name, key, description string, boolean bool) {
 	state.set.Var(&trackedFlag{state: state, key: key, name: name, boolean: boolean}, name, description)

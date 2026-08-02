@@ -61,6 +61,40 @@ func TestCatalogAndGeneratedFlags(t *testing.T) {
 	}
 }
 
+func TestGeneratedUsageIncludesConfigDefaultsAndEnvironment(t *testing.T) {
+	state := newFlagState()
+	for _, parameter := range Catalog().Parameters() {
+		for _, name := range parameter.Flags {
+			settingFlag := state.set.Lookup(name)
+			if settingFlag == nil {
+				t.Fatalf("catalog flag %q is not generated", name)
+			}
+			if want := configmeta.FormatDefault(parameter.Default); settingFlag.DefValue != want {
+				t.Errorf("flag %q default = %q, want %q", name, settingFlag.DefValue, want)
+			}
+			for _, environment := range parameter.Environment {
+				if !strings.Contains(settingFlag.Usage, environment) {
+					t.Errorf("flag %q usage %q does not name environment variable %q", name, settingFlag.Usage, environment)
+				}
+			}
+		}
+	}
+
+	var usage bytes.Buffer
+	Usage(&usage)
+	for _, want := range []string{
+		"Harness model setting. (env: HARNESS_MODEL) (default unset (provider/model selected elsewhere))",
+		"Harness max turns setting. (env: HARNESS_MAX_TURNS) (default 0 (non-positive means unlimited))",
+		"Harness no color setting. (env: HARNESS_NO_COLOR, NO_COLOR) (default false (NO_COLOR is a presence-based override))",
+		"Harness responses stateful setting. (env: HARNESS_RESPONSES_STATEFUL) (default true)",
+		"Harness model proxy url setting. (env: HARNESS_MODEL_PROXY_URL) (default derived: runtime model proxy URL)",
+	} {
+		if !strings.Contains(usage.String(), want) {
+			t.Errorf("usage does not contain %q:\n%s", want, usage.String())
+		}
+	}
+}
+
 func TestGeneratedUsageParameterTableIsCurrent(t *testing.T) {
 	usagePath := filepath.Join("..", "..", "docs", "usage.md")
 	usage, err := os.ReadFile(usagePath)

@@ -187,6 +187,10 @@ and send an explicit switch.
 
 ## Flags
 
+`harness --help` lists each command-line configuration setting with its default
+and corresponding environment variable. These annotations are generated from
+the same configuration catalog used for parsing and the reference below.
+
 ```text
 -p <prompt|->     one-shot mode; "-" or piped stdin reads the prompt from stdin
 -i, -initial-prompt <prompt>   run an initial prompt, then continue in the REPL

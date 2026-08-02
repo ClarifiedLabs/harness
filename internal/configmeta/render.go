@@ -25,7 +25,7 @@ func WriteText(w io.Writer, catalog Catalog) error {
 			joinOrAbsent(parameter.Flags, flagName),
 			joinOrAbsent(parameter.Environment, identity),
 			valueOrAbsent(parameter.JSONPath),
-			formatDefault(parameter.Default),
+			FormatDefault(parameter.Default),
 			yesNo(parameter.Sensitive),
 			oneLine(parameter.Description),
 		)
@@ -107,7 +107,7 @@ func WriteMarkdown(w io.Writer, catalog Catalog) error {
 			markdownList(parameter.Flags, flagName),
 			markdownList(parameter.Environment, identity),
 			markdownOptionalCode(parameter.JSONPath),
-			markdownText(formatDefault(parameter.Default)),
+			markdownText(FormatDefault(parameter.Default)),
 			yesNo(parameter.Sensitive),
 			markdownText(parameter.Description),
 		)
@@ -118,7 +118,8 @@ func WriteMarkdown(w io.Writer, catalog Catalog) error {
 	return nil
 }
 
-func formatDefault(value Default) string {
+// FormatDefault returns the catalog's concise, human-readable default value.
+func FormatDefault(value Default) string {
 	if value.Kind == "" {
 		return absent
 	}
