@@ -111,8 +111,8 @@ func TestLiveModels(t *testing.T) {
 
 	t.Run("OpenAIChatDisjointUsage", func(t *testing.T) {
 		target := pickLiveTarget(t, available,
-			"openrouter:deepseek/deepseek-v4-flash",
 			"openrouter:inclusionai/ling-3.0-flash:free",
+			"openrouter:deepseek/deepseek-v4-flash",
 		)
 		output, saved, _ := runLiveModel(t, bin, configPath, proxyURL, proxyAPIKey, target,
 			"-reasoning", "high",
@@ -233,28 +233,32 @@ func TestLiveModels(t *testing.T) {
 	})
 
 	t.Run("AnthropicReasoningSummary", func(t *testing.T) {
-		target := pickLiveTarget(t, available, "anthropic:claude-haiku-4-5")
+		const targetID = "anthropic:claude-haiku-4-5-20251001"
+		target := pickLiveTarget(t, available, targetID)
 		output, saved, sessionDir := runLiveModel(t, bin, configPath, proxyURL, proxyAPIKey, target,
 			"-reasoning", "low",
 			"-reasoning-summary", "concise",
 			"-max-turns", "1",
 			"-max-output-tokens", "2048",
-			"-p", "Think briefly, then reply with one sentence containing ANTHROPIC_OK.",
+			"-p", "Without using tools, solve this carefully: find the smallest positive integer n satisfying n mod 7 = 3, n mod 11 = 7, and n mod 13 = 5. Reply with one sentence containing ANTHROPIC_OK and the value of n.",
 		)
-		if !strings.Contains(output.stdout, "ANTHROPIC_OK") {
-			t.Fatalf("stdout = %q, want ANTHROPIC_OK", output.stdout)
+		if !strings.Contains(output.stdout, "ANTHROPIC_OK") || !strings.Contains(output.stdout, "304") {
+			t.Fatalf("stdout = %q, want ANTHROPIC_OK and 304", output.stdout)
 		}
 		if saved.Usage.ReasoningTokens <= 0 {
 			t.Fatalf("reasoning tokens = %d, want positive", saved.Usage.ReasoningTokens)
 		}
-		assertLiveReasoningSummary(t, readLiveEvents(t, sessionDir))
+		events := readLiveEvents(t, sessionDir)
+		assertLiveRecordedRoute(t, events, targetID, "anthropic")
+		assertLiveReasoningSummary(t, events)
 	})
 
 	t.Run("AnthropicToolRoundTrip", func(t *testing.T) {
+		const targetID = "anthropic:claude-haiku-4-5-20251001"
 		const marker = "LIVE_TOOL_OK_91827"
 
-		target := pickLiveTarget(t, available, "anthropic:claude-haiku-4-5")
-		output, saved, _ := runLiveModel(t, bin, configPath, proxyURL, proxyAPIKey, target,
+		target := pickLiveTarget(t, available, targetID)
+		output, saved, sessionDir := runLiveModel(t, bin, configPath, proxyURL, proxyAPIKey, target,
 			"-reasoning", "none",
 			"-max-turns", "3",
 			"-max-output-tokens", "256",
@@ -263,6 +267,25 @@ func TestLiveModels(t *testing.T) {
 		if !strings.Contains(output.stdout, marker) {
 			t.Fatalf("stdout = %q, want %s", output.stdout, marker)
 		}
+		assertLiveRecordedRoute(t, readLiveEvents(t, sessionDir), targetID, "anthropic")
+		assertLiveToolRoundTrip(t, saved.Messages, marker)
+	})
+
+	t.Run("OpenRouterHaikuToolRoundTrip", func(t *testing.T) {
+		const targetID = "openrouter:anthropic/claude-haiku-4.5"
+		const marker = "OPENROUTER_TOOL_OK_61403"
+
+		target := pickLiveTarget(t, available, targetID)
+		output, saved, sessionDir := runLiveModel(t, bin, configPath, proxyURL, proxyAPIKey, target,
+			"-reasoning", "none",
+			"-max-turns", "3",
+			"-max-output-tokens", "256",
+			"-p", "Use run_command exactly once to execute printf with OPENROUTER_TOOL_OK_61403 as its output. After the tool succeeds, reply with exactly OPENROUTER_TOOL_OK_61403. Do not answer before using the tool.",
+		)
+		if !strings.Contains(output.stdout, marker) {
+			t.Fatalf("stdout = %q, want %s", output.stdout, marker)
+		}
+		assertLiveRecordedRoute(t, readLiveEvents(t, sessionDir), targetID, "openai")
 		assertLiveToolRoundTrip(t, saved.Messages, marker)
 	})
 }
@@ -438,6 +461,24 @@ func runLiveModel(
 		t.Fatalf("stderr is missing session summary:\n%s", output.stderr)
 	}
 	return output, loadLiveSession(t, sessionDir), sessionDir
+}
+
+func assertLiveRecordedRoute(t *testing.T, events []session.Event, wantTarget, wantAPIType string) {
+	t.Helper()
+	found := false
+	for _, event := range events {
+		if event.Type != session.EventModelRequest || event.ModelRequest == nil || event.ModelRequest.TargetID == "" {
+			continue
+		}
+		found = true
+		if event.ModelRequest.TargetID != wantTarget || event.ModelRequest.APIType != wantAPIType {
+			t.Fatalf("recorded route = %q (%s), want %q (%s)",
+				event.ModelRequest.TargetID, event.ModelRequest.APIType, wantTarget, wantAPIType)
+		}
+	}
+	if !found {
+		t.Fatalf("raw session events contain no recorded route %q (%s)", wantTarget, wantAPIType)
+	}
 }
 
 func assertLiveReasoningSummary(t *testing.T, events []session.Event) {
