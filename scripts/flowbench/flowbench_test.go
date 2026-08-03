@@ -5,8 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"harness/internal/llm"
 	"harness/internal/session"
@@ -154,6 +156,51 @@ func TestSearchQueryCount(t *testing.T) {
 	}
 	if got := searchQueryCount(json.RawMessage(`{"pattern":"legacy"}`)); got != 0 {
 		t.Fatalf("searchQueryCount legacy input = %d, want 0", got)
+	}
+}
+
+func TestKnownPathContractEvidenceRequiresExactInputsAndSuccess(t *testing.T) {
+	validSearch := `{"queries":[{"pattern":"Widget(","fixed_strings":true,"paths":[".flowbench-tool-accuracy/known"]},{"pattern":"State{","fixed_strings":true,"paths":[".flowbench-tool-accuracy/known"]},{"pattern":"Marker[0-9]+","paths":[".flowbench-tool-accuracy/known"]}]}`
+	validCommand := `{"steps":[{"argv":["printf","STEP_ALPHA\n"]},{"argv":["printf","STEP_BETA\n"]}],"output_mode":"full"}`
+	evidence := func(searchInput, commandInput string, searchResult, commandResult session.Event) (int, int) {
+		return successfulKnownPathContracts([]session.Event{
+			{Type: session.EventToolStart, ToolID: "search", Tool: "search", Input: json.RawMessage(searchInput)},
+			searchResult,
+			{Type: session.EventToolStart, ToolID: "command", Tool: "run_command", Input: json.RawMessage(commandInput)},
+			commandResult,
+		})
+	}
+	successfulSearch := session.Event{Type: session.EventToolResult, ToolID: "search", Tool: "search"}
+	successfulCommand := session.Event{Type: session.EventToolResult, ToolID: "command", Tool: "run_command"}
+	if searches, commands := evidence(validSearch, validCommand, successfulSearch, successfulCommand); searches != 1 || commands != 1 {
+		t.Fatalf("valid evidence = %d/%d, want 1/1", searches, commands)
+	}
+	tests := []struct {
+		name          string
+		searchInput   string
+		commandInput  string
+		searchResult  session.Event
+		commandResult session.Event
+		wantSearch    int
+		wantCommand   int
+	}{
+		{name: "literal kind changed", searchInput: strings.Replace(validSearch, `"fixed_strings":true`, `"fixed_strings":false`, 1), commandInput: validCommand, searchResult: successfulSearch, commandResult: successfulCommand, wantCommand: 1},
+		{name: "pattern changed", searchInput: strings.Replace(validSearch, "Marker[0-9]+", "Marker.*", 1), commandInput: validCommand, searchResult: successfulSearch, commandResult: successfulCommand, wantCommand: 1},
+		{name: "scope broadened", searchInput: strings.Replace(validSearch, ".flowbench-tool-accuracy/known", ".", 1), commandInput: validCommand, searchResult: successfulSearch, commandResult: successfulCommand, wantCommand: 1},
+		{name: "search execution failed", searchInput: validSearch, commandInput: validCommand, searchResult: session.Event{Type: session.EventToolResult, ToolID: "search", Tool: "search", ResultError: true}, commandResult: successfulCommand, wantCommand: 1},
+		{name: "search query failed", searchInput: validSearch, commandInput: validCommand, searchResult: session.Event{Type: session.EventToolResult, ToolID: "search", Tool: "search", ResultMetrics: map[string]int{"query_errors": 1}}, commandResult: successfulCommand, wantCommand: 1},
+		{name: "empty second step", searchInput: validSearch, commandInput: strings.Replace(validCommand, `{"argv":["printf","STEP_BETA\n"]}`, `{}`, 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 1},
+		{name: "wrong step input", searchInput: validSearch, commandInput: strings.Replace(validCommand, "STEP_BETA", "STEP_OTHER", 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 1},
+		{name: "compact output", searchInput: validSearch, commandInput: strings.Replace(validCommand, `"full"`, `"receipt"`, 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 1},
+		{name: "command execution failed", searchInput: validSearch, commandInput: validCommand, searchResult: successfulSearch, commandResult: session.Event{Type: session.EventToolResult, ToolID: "command", Tool: "run_command", ResultError: true}, wantSearch: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			searches, commands := evidence(tt.searchInput, tt.commandInput, tt.searchResult, tt.commandResult)
+			if searches != tt.wantSearch || commands != tt.wantCommand {
+				t.Fatalf("evidence = %d/%d, want %d/%d", searches, commands, tt.wantSearch, tt.wantCommand)
+			}
+		})
 	}
 }
 
@@ -363,7 +410,7 @@ func TestToolAccuracyAcceptanceRequiresPositiveEfficiencyAndErrorReduction(t *te
 		for rep := 1; rep <= 3; rep++ {
 			records = append(records,
 				runRecord{Model: model, Repetition: rep, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4, ToolErrors: 2}},
-				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"inspect": 1, "search": 1}, UsedCommandSteps: true}},
+				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"inspect": 1, "search": 1, "run_command": 1}, ExactKnownPathSearches: 1, ExactKnownPathCommands: 1}},
 			)
 		}
 	}
@@ -520,7 +567,8 @@ func TestKnownAndUnknownPathScoresEnforceSeparateFlows(t *testing.T) {
 		InspectReadPaths:       contractFixturePaths("known", "contract-%02d.txt"),
 		SuccessfulInspectCalls: 1,
 		SearchQueries:          3,
-		UsedCommandSteps:       true,
+		ExactKnownPathSearches: 1,
+		ExactKnownPathCommands: 1,
 	}
 	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); !got.Pass {
 		t.Fatalf("known-path score rejected valid flow: %v", got.Reasons)
@@ -546,9 +594,9 @@ func TestKnownAndUnknownPathScoresEnforceSeparateFlows(t *testing.T) {
 		t.Fatal("known-path score accepted an extra inspect operation")
 	}
 	knownMetrics.InspectOperations = 18
-	knownMetrics.UsedCommandSteps = false
+	knownMetrics.ExactKnownPathCommands = 0
 	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); got.Pass {
-		t.Fatal("known-path score accepted command without steps")
+		t.Fatal("known-path score accepted assistant text without exact successful command evidence")
 	}
 
 	validDiscovery := metrics{
@@ -860,7 +908,7 @@ func TestFinalAssistantTextRequiresFinalPhase(t *testing.T) {
 	}
 }
 
-func TestResumeRecordsDropsInvalidSamplesForRerun(t *testing.T) {
+func TestResumeRecordsPreservesInvalidSamplesForRerun(t *testing.T) {
 	results := t.TempDir()
 	c := benchmarkCase{Name: "resume_invalid", Prompt: "prompt"}
 	cfg := runConfig{
@@ -881,8 +929,8 @@ func TestResumeRecordsDropsInvalidSamplesForRerun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 0 {
-		t.Fatalf("resumeRecords returned %d invalid records, want 0", len(records))
+	if len(records) != 1 || !reflect.DeepEqual(records[0], invalid) {
+		t.Fatalf("resumeRecords returned %+v, want the invalid evidence preserved", records)
 	}
 	data, err := os.ReadFile(filepath.Join(results, c.Name+"-runs.json"))
 	if err != nil {
@@ -897,6 +945,67 @@ func TestResumeRecordsDropsInvalidSamplesForRerun(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(results, "matrix-runs.json")); !os.IsNotExist(err) {
 		t.Fatalf("empty resume created matrix-runs.json: %v", err)
+	}
+}
+
+func TestResumeRecordsPreservesMixedInvalidEvidenceAndCompletesOnlyValidKeys(t *testing.T) {
+	results := t.TempDir()
+	c := benchmarkCase{Name: "resume_mixed", Prompt: "prompt", Score: func(scoreInput) score { return score{Pass: true} }}
+	cfg := runConfig{Results: results, Case: c, BaselineSHA: "baseline", CandidateSHA: "candidate", Models: []string{"provider:model"}, Repetitions: 1, Resume: true}
+	sessionDir := filepath.Join(results, "valid-session")
+	if err := (session.Session{Messages: []llm.Message{{Role: llm.RoleAssistant, Phase: llm.AssistantPhaseFinal, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "final"}}}}}).Save(sessionDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.AppendEvent(sessionDir, session.Event{Type: session.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{TargetID: "provider:model"}}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(sessionDir, "raw.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := runRecord{Version: runRecordVersion, Case: c.Name, Model: "provider:model", Repetition: 1, Variant: "baseline", TargetSHA: targetSHA, HarnessSHA: cfg.BaselineSHA, Completed: true, SessionDir: sessionDir, PromptSHA256: promptDigest(c), OracleVersion: oracleContractVersion, EventsSHA256: digestString(string(raw)), Score: score{Pass: true}}
+	invalid := runRecord{Version: runRecordVersion, Case: c.Name, Model: "provider:model", Repetition: 1, Variant: "candidate", Order: 2, TargetSHA: targetSHA, HarnessSHA: cfg.CandidateSHA, Invalid: "interrupted", Started: time.Unix(123, 0).UTC()}
+	if err := writeRecords(results, []runRecord{valid, invalid}); err != nil {
+		t.Fatal(err)
+	}
+	records, err := resumeRecords(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || !reflect.DeepEqual(records[1], invalid) {
+		t.Fatalf("resumed records = %+v; invalid evidence changed or disappeared", records)
+	}
+	completed := completedRecordKeys(records)
+	if !completed[recordKey(valid.Model, valid.Repetition, valid.Variant)] || completed[recordKey(invalid.Model, invalid.Repetition, invalid.Variant)] {
+		t.Fatalf("completed keys = %+v, want valid only", completed)
+	}
+	replacement := valid
+	replacement.Variant = "candidate"
+	replacement.Order = 3
+	replacement.HarnessSHA = cfg.CandidateSHA
+	replacement.Metrics.TotalTokens = 80
+	records = append(records, replacement)
+	if got := summarize(c, records); got.Runs != 2 {
+		t.Fatalf("summary runs = %d, want valid original plus replacement only", got.Runs)
+	}
+	if pairs := pairedRecords(records); len(pairs) != 1 || pairs[0].candidate.Invalid != "" {
+		t.Fatalf("pairs = %+v, want replacement paired without invalid evidence", pairs)
+	}
+	if err := writeRecords(results, records); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := resumeRecords(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded) != 3 || !reflect.DeepEqual(reloaded[1], invalid) {
+		t.Fatalf("second resume records = %+v; invalid evidence changed or disappeared", reloaded)
+	}
+	completed = completedRecordKeys(reloaded)
+	for _, variant := range []string{"baseline", "candidate"} {
+		if !completed[recordKey(valid.Model, valid.Repetition, variant)] {
+			t.Fatalf("second resume completed keys = %+v, missing %s", completed, variant)
+		}
 	}
 }
 

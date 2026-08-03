@@ -48,6 +48,8 @@ type metrics struct {
 	BackgroundWaits              int            `json:"background_waits"`
 	UsedSearch                   bool           `json:"used_search"`
 	SearchQueries                int            `json:"search_queries"`
+	ExactKnownPathSearches       int            `json:"exact_known_path_searches"`
+	ExactKnownPathCommands       int            `json:"exact_known_path_commands"`
 	UsedCommandSteps             bool           `json:"used_command_steps"`
 	UsedWorkspaceSummary         bool           `json:"used_workspace_summary"`
 	StartedRaceSuite             bool           `json:"started_race_suite"`
@@ -103,6 +105,7 @@ func collectMetrics(sessionDir string) (metrics, error) {
 	var commandInputs []string
 	editRecovery := editRecoveryState{}
 	m.ReadDriftAfterPhaseOne = successfulDriftReread(events)
+	m.ExactKnownPathSearches, m.ExactKnownPathCommands = successfulKnownPathContracts(events)
 	discoverySucceeded := false
 	discoveryStarts := make(map[string]bool)
 	for _, ev := range events {
@@ -245,6 +248,120 @@ func searchQueryCount(raw json.RawMessage) int {
 		return 0
 	}
 	return len(input.Queries)
+}
+
+func successfulKnownPathContracts(events []session.Event) (searches, commands int) {
+	type contractKind int
+	const (
+		searchContract contractKind = iota + 1
+		commandContract
+	)
+	starts := make(map[string]contractKind)
+	for _, ev := range events {
+		switch ev.Type {
+		case session.EventToolStart:
+			switch {
+			case ev.Tool == "search" && exactKnownPathSearchInput(ev.Input):
+				starts[ev.ToolID] = searchContract
+			case ev.Tool == "run_command" && exactKnownPathCommandInput(ev.Input):
+				starts[ev.ToolID] = commandContract
+			}
+		case session.EventToolResult:
+			kind, ok := starts[ev.ToolID]
+			if !ok || ev.ResultError {
+				continue
+			}
+			delete(starts, ev.ToolID)
+			switch kind {
+			case searchContract:
+				if ev.Tool == "search" && ev.ResultMetrics["query_errors"] == 0 {
+					searches++
+				}
+			case commandContract:
+				if ev.Tool == "run_command" {
+					commands++
+				}
+			}
+		}
+	}
+	return searches, commands
+}
+
+func exactKnownPathSearchInput(raw json.RawMessage) bool {
+	type query struct {
+		Pattern      string   `json:"pattern"`
+		Paths        []string `json:"paths"`
+		Globs        []string `json:"globs"`
+		FixedStrings bool     `json:"fixed_strings"`
+	}
+	var input struct {
+		Queries []query `json:"queries"`
+	}
+	if json.Unmarshal(raw, &input) != nil || len(input.Queries) != 3 {
+		return false
+	}
+	want := map[string]bool{
+		"literal\x00Widget(":    false,
+		"literal\x00State{":     false,
+		"regex\x00Marker[0-9]+": false,
+	}
+	for _, q := range input.Queries {
+		if len(q.Paths) != 1 || q.Paths[0] != toolAccuracyFixture+"/known" || len(q.Globs) != 0 {
+			return false
+		}
+		kind := "regex"
+		if q.FixedStrings {
+			kind = "literal"
+		}
+		key := kind + "\x00" + q.Pattern
+		if _, ok := want[key]; !ok || want[key] {
+			return false
+		}
+		want[key] = true
+	}
+	for _, found := range want {
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func exactKnownPathCommandInput(raw json.RawMessage) bool {
+	type step struct {
+		Name           string   `json:"name"`
+		Command        string   `json:"command"`
+		Argv           []string `json:"argv"`
+		Stdin          string   `json:"stdin"`
+		Cwd            string   `json:"cwd"`
+		TimeoutSeconds int      `json:"timeout_seconds"`
+	}
+	var input struct {
+		Command    string   `json:"command"`
+		Argv       []string `json:"argv"`
+		Steps      []step   `json:"steps"`
+		OutputMode string   `json:"output_mode"`
+		Stdin      string   `json:"stdin"`
+		Cwd        string   `json:"cwd"`
+		Background bool     `json:"background"`
+	}
+	if json.Unmarshal(raw, &input) != nil || input.Command != "" || len(input.Argv) != 0 ||
+		len(input.Steps) != 2 || input.OutputMode != "full" || input.Stdin != "" || input.Cwd != "" || input.Background {
+		return false
+	}
+	want := [][]string{{"printf", "STEP_ALPHA\n"}, {"printf", "STEP_BETA\n"}}
+	for i, step := range input.Steps {
+		if step.Name != "" || step.Command != "" || step.Stdin != "" || step.Cwd != "" || step.TimeoutSeconds != 0 ||
+			len(step.Argv) != len(want[i]) {
+			return false
+		}
+		for j := range want[i] {
+			if step.Argv[j] != want[i][j] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func isDiscoveryTool(name string) bool {

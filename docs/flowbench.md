@@ -76,7 +76,7 @@ limits:
 - unlimited prompt-token and prompt-cost caps (`0`);
 - 200 turns;
 - a 45-minute per-run deadline;
-- three repetitions per model.
+- five repetitions per model.
 
 Acceptance requires:
 
@@ -86,9 +86,9 @@ Acceptance requires:
 - at least 50% reduction in the case's primary interaction metric;
 - positive aggregate paired-median token savings.
 
-Matrices stop early only when a remaining run cannot mathematically restore a
-failed gate. Each model summary includes every paired token-saving percentage
-and turn delta in repetition order, sign counts, the token range, and the median
+Every configured pair runs. Each model summary includes every paired
+token-saving percentage and turn delta in repetition order, sign counts, the
+token range, and the median
 turn delta so a favorable median cannot conceal an unstable distribution.
 Alibaba Token Plan and OpenAI Codex are reported as subscription cost `N/A`;
 DeepSeek uses the provider-reported dollar amount.
@@ -135,11 +135,13 @@ Ambiguous/invalid edits, timeouts, panics, unresolved misses, over-budget
 recovery, and unrelated top-level or nested errors are never forgiven.
 
 `known_path_batching` enumerates all 18 fixture paths and requires one successful
-`inspect` call that reads each exact path once while retaining the literal/regex
-search and full-output command-step oracles. Its three search queries are scoped
-to the fixture directory instead of listing 18 paths, which would exceed the
-per-query path limit. `unknown_path_discovery` supplies
-only a root, requires a successful error-free `glob`, `list_dir`, or `search`
+`inspect` call that reads each exact path once. It also requires one successful
+three-query search batch with the exact two literal patterns, regex pattern, and
+known-directory scopes, plus one successful full-output `run_command` batch with
+the exact two non-empty argv steps. Assistant text and call counts alone do not
+satisfy these oracles. The search queries scope the fixture directory instead of
+listing 18 paths, which would exceed the per-query path limit.
+`unknown_path_discovery` supplies only a root, requires a successful error-free `glob`, `list_dir`, or `search`
 whose scope, pattern, and limits enumerate all fixture paths before any read,
 then requires one successful `inspect` call that reads each of the 18 exact
 discovered paths once. Both reject empty or partial discovery, duplicate or substituted
@@ -149,10 +151,10 @@ missing marker evidence, and fixture changes.
 Run records hash prompts, fixtures, binaries, and raw events and version their
 scoring oracle. Resume and baseline import reject stale record, prompt, oracle,
 or event-stream versions/hashes rather than reusing an unverified prior score.
-They retain invalid
-infrastructure samples for `-resume` to rerun rather than scoring them as model
-failures. Child runs use an empty explicit Harness config and are rejected when
-recorded telemetry names a model target other than the requested target,
+They retain invalid infrastructure samples as immutable evidence, leave their
+matrix keys incomplete, and append a replacement on `-resume` rather than
+scoring or deleting the invalid sample. Child runs use an empty explicit Harness
+config and are rejected when recorded telemetry names a model target other than the requested target,
 preventing local agent model pins from silently contaminating the matrix. Live
 provider receipts must keep direct Anthropic
 `anthropic:claude-haiku-4-5-20251001` distinct from OpenRouter
@@ -170,54 +172,51 @@ not satisfy the corresponding lane.
 | Background wait | Candidate 9/9 vs baseline 7/9; 8/9 adopted | Median polls 2→0 (100%) | Aggregate +5.7%; DeepSeek +32.2%, Alibaba +5.7%, OpenAI +1.3% | Accepted after routing descriptions discouraged `get`/`list` and short probe waits |
 | Initial edit precision smoke (`013255c`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median effective errors 0→0, but OpenAI 0→1 | Aggregate +5.7%; Alibaba −47.7%, OpenAI −20.9% | Rejected: Alibaba turns increased 4→6 and OpenAI turns increased 4→5 in addition to the token/error regressions |
 | Initial edit drift recovery smoke (`013255c`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median effective errors 0→0 | Aggregate +6.8% | Accepted at smoke |
-| Initial known-path batching smoke (`013255c`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median tool errors 0→0 | Aggregate +8.4% | Accepted at smoke after correcting the fixture's over-limit search-path instruction |
+| Initial known-path batching smoke (`013255c`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median tool errors 0→0 | Aggregate +8.4% | Historical v2 score; superseded by the exact v3 search/command oracle and not current promotion evidence |
 | Initial unknown-path discovery smoke (`013255c`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median tool errors 0→0 | Aggregate +5.8% | Accepted at smoke |
 | Revised edit-precision diagnostic (`9e5cabf`) | Baseline 6/6, candidate 6/6; 6/6 adopted | Median errors 0→0; Alibaba turns 6→6, OpenAI 4→4 | Aggregate +7.6%; Alibaba +6.7%, OpenAI +8.5% | Accepted over three alternating pairs on both previously regressed routes |
 | Revised edit-precision smoke (`9e5cabf`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median errors 0→0 | Aggregate +7.2% | Accepted at smoke |
 | Revised edit-drift smoke (`9e5cabf`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median errors 0→0; Sonnet turns 3→4 | Aggregate +7.1%; Sonnet −15.4% | Rejected on the Sonnet turn and token no-regression gates |
-| Revised known-path smoke (`9e5cabf`) | Baseline 3/5, candidate 5/5; 5/5 adopted | Median errors 0→0; OpenAI turns 2→4 | Aggregate +6.8%; OpenAI −90.6% | Rejected on the OpenAI turn and token no-regression gates |
+| Revised known-path smoke (`9e5cabf`) | Baseline 3/5, candidate 5/5; 5/5 adopted | Median errors 0→0; OpenAI turns 2→4 | Aggregate +6.8%; OpenAI −90.6% | Historical v2 score; superseded by v3 and still failed its v2 efficiency gates |
 | Revised unknown-path smoke (`9e5cabf`) | Baseline 4/5, candidate 5/5; 5/5 adopted | Median errors 0→0 | Aggregate +5.1% | Accepted at smoke |
 | Five-pair Sonnet edit-drift confirmation (`9e5cabf`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median errors 0→0; turns 4→4 | +5.6%; five positive deltas | Accepted |
-| Seven-pair OpenAI known-path confirmation (`9e5cabf`) | Baseline 7/7, candidate 7/7; 7/7 adopted | Median errors 0→0; turns 4→4 | +5.4%; four positive and three negative deltas | Accepted after the predeclared extension from a borderline five-pair split |
+| Seven-pair OpenAI known-path confirmation (`9e5cabf`) | Baseline 7/7, candidate 7/7; 7/7 adopted | Median errors 0→0; turns 4→4 | +5.4%; four positive and three negative deltas | Historical v2 score; superseded by v3 and requires a fresh run |
 | Five-pair promotion edit precision (`9e5cabf`) | Baseline 25/25, candidate 25/25; 25/25 adopted | Median errors 0→0 | Aggregate −4.1%; OpenAI +16.5% | Rejected: aggregate paired-median tokens increased |
 | Five-pair promotion edit drift (`9e5cabf`) | Baseline 25/25, candidate 25/25; 25/25 adopted | Median errors 0→0; aggregate turns unchanged | Aggregate −4.6%; every model's median regressed 4.2–8.0% | Rejected: aggregate paired-median tokens increased |
-| Five-pair promotion known-path batching (`9e5cabf`) | Baseline 20/25, candidate 20/25; 25/25 adopted | Alibaba candidate 1/5 and turns 2→3; OpenAI 4/5 | Aggregate −3.7% | Rejected: candidate correctness 20/25 was below the required 23/25 |
+| Five-pair promotion known-path batching (`9e5cabf`) | Baseline 20/25, candidate 20/25; 25/25 adopted | Alibaba candidate 1/5 and turns 2→3; OpenAI 4/5 | Aggregate −3.7% | Historical v2 score; superseded by v3 and not used as current evidence |
 | Five-pair promotion unknown-path discovery (`9e5cabf`) | Baseline 25/25, candidate 23/25; 23/25 adopted | Alibaba candidate/adoption 3/5 | Aggregate −4.3% | Rejected: correctness fell and Alibaba adoption was below 4/5 |
 
 The 2026-08-03 tool-accuracy smoke compared baseline `446e00c` with product
 candidate `013255c` over five configured provider routes, one alternating pair
 per route and case (40 valid runs). Because edit precision failed its per-model
 no-regression gates, the package did not advance to the three-pair promotion
-matrix against `0594353`. An interrupted OpenRouter pair exposed and received a
-regression fix for resume filtering in `15d5e97`; the final smoke contains no
-invalid records.
+matrix against `0594353`. An interrupted OpenRouter pair exposed and received a regression fix for resume
+filtering; the final smoke contains no invalid records.
 
 The follow-up edit-guidance candidate `9e5cabf` restored recently-read,
 non-overlapping batch guidance while keeping the default catalog under its
 existing schema budget. It cleared a 12-run, three-pair edit-precision diagnostic
 on Alibaba and OpenAI, then cleared edit precision across all five routes in a
 fresh 40-run smoke. That smoke exposed one-pair Sonnet edit-drift and OpenAI
-known-path regressions. Longer confirmation showed those results were not
-stable: Sonnet passed five pairs decisively, and OpenAI remained formally
-accepted after its borderline 3/2 split triggered a preserved seven-pair
-extension.
+known-path regressions. Longer confirmation showed the Sonnet result was not
+stable: it passed five pairs decisively. OpenAI's preserved seven-pair known-path extension passed the
+v2 oracle, but that result is superseded by v3 and requires a fresh run.
 
 Those focused gates allowed the full five-route, five-pair promotion matrix
-against `0594353` to run. Its 200 calls rejected the package on two independent
-correctness/adoption gates: known-path candidate correctness was 20/25 below the
-required 23/25, and unknown-path candidate correctness fell from 25/25 to 23/25
-with Alibaba adoption at 3/5. The edit cases were correct but were also rejected
-because aggregate tokens regressed 4.1% and 4.6% against `0594353`.
+against `0594353` to run. Its edit cases were correct but rejected because
+aggregate tokens regressed 4.1% and 4.6%, while unknown-path correctness fell
+from 25/25 to 23/25 with Alibaba adoption at 3/5. Those independent failures
+reject the package. The matrix's known-path scores used v2 and are no longer
+promotion evidence under the stronger v3 oracle.
 Candidate `9e5cabf` therefore fixes the focused edit behavior but does not qualify
 the full change package for promotion.
 
-Runner `fa94896` produced the paired distributions. Focused results are in
+The historical focused results are in
 `/tmp/harness-flowbench-edit-drift-446e00c-9e5cabf-r5` and
-`/tmp/harness-flowbench-known-path-446e00c-9e5cabf-r5`; the promotion receipt is
-in `/tmp/harness-flowbench-0594353-9e5cabf-promotion-r5`.
+`/tmp/harness-flowbench-known-path-446e00c-9e5cabf-r5`; the historical promotion
+receipt is in `/tmp/harness-flowbench-0594353-9e5cabf-promotion-r5`.
 
 Positive percentages mean token savings; negative percentages mean regressions.
-Every configured pair runs; the runner does not implement mathematical early stopping.
 
 The cited final/decisive matrices reported about $1.04 of DeepSeek usage. The
 entire analysis and iteration campaign—including discarded smoke matrices and
@@ -233,10 +232,10 @@ because they are bounded, useful, and do not force the model down the rejected
 path. Todo coissuing was pure steering and was removed after its measured
 regression. The typed tool-accuracy package stopped at smoke first because edit
 precision failed; a focused guidance revision fixed that case. Longer focused
-confirmation cleared the smoke's two efficiency anomalies, but the resulting
-five-pair promotion matrix exposed repeatable known-path and discovery
-correctness failures plus aggregate token regressions in every case, so the
-package still did not advance.
+confirmation cleared the smoke's Sonnet anomaly, but the resulting five-pair
+promotion matrix exposed discovery correctness failures and aggregate token
+regressions in every case, so the package still did not advance. Historical
+known-path scores require a fresh run under the v3 oracle.
 
 Future changes should rerun the affected case against its immediate parent
 revision. Treat a one-pair smoke failure as a trigger for a fresh five-pair

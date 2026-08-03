@@ -322,7 +322,8 @@ func adopted(name string, m metrics) bool {
 	case "edit_drift_recovery":
 		return m.ToolCalls["edit"] > 0 && m.ReadDriftAfterPhaseOne
 	case "known_path_batching":
-		return m.ToolCalls["inspect"] == 1 && m.ToolCalls["search"] > 0 && m.UsedCommandSteps
+		return m.ToolCalls["inspect"] == 1 && m.ToolCalls["search"] == 1 && m.ToolCalls["run_command"] == 1 &&
+			m.ExactKnownPathSearches == 1 && m.ExactKnownPathCommands == 1
 	case "unknown_path_discovery":
 		return m.DiscoveryBeforeRead && m.ToolCalls["inspect"] == 1
 	default:

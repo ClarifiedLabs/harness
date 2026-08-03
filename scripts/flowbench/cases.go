@@ -197,7 +197,7 @@ func knownPathBatchingPrompt() string {
 	paths := contractFixturePaths("known", "contract-%02d.txt")
 	return "Work directly; do not delegate or edit. Use exactly one inspect call to read these known paths: " + strings.Join(paths, ", ") + ". " +
 		"Use one batched search call containing literal fixed-string queries for Widget( and State{ plus a regex query for Marker[0-9]+. Scope every search query to the .flowbench-tool-accuracy/known directory; do not list the 18 files as query paths. " +
-		"Use one run_command steps call with output_mode full that prints STEP_ALPHA and STEP_BETA. Report Marker01, Marker18, and both step outputs."
+		"Use exactly one run_command call with output_mode full and two steps, in order: argv [\"printf\", \"STEP_ALPHA\\n\"] then argv [\"printf\", \"STEP_BETA\\n\"]. Report Marker01, Marker18, and both step outputs."
 }
 
 func setupKnownPathBatching(dir string) error {
@@ -294,11 +294,11 @@ func scoreKnownPathBatching(in scoreInput) score {
 		!sameFixturePaths(in.Metrics.InspectReadPaths, contractFixturePaths("known", "contract-%02d.txt")) {
 		result.Reasons = append(result.Reasons, "known paths were not read exactly once in one successful 18-operation inspect batch")
 	}
-	if in.Metrics.ToolCalls["search"] != 1 || in.Metrics.SearchQueries != 3 {
-		result.Reasons = append(result.Reasons, "search was not one three-query batch")
+	if in.Metrics.ToolCalls["search"] != 1 || in.Metrics.SearchQueries != 3 || in.Metrics.ExactKnownPathSearches != 1 {
+		result.Reasons = append(result.Reasons, "search was not one successful exact three-query literal/regex batch scoped to the known directory")
 	}
-	if !in.Metrics.UsedCommandSteps {
-		result.Reasons = append(result.Reasons, "command steps were not exercised")
+	if in.Metrics.ToolCalls["run_command"] != 1 || in.Metrics.ExactKnownPathCommands != 1 {
+		result.Reasons = append(result.Reasons, "run_command was not one successful exact full-output two-step argv batch")
 	}
 	if in.FixtureBefore != in.FixtureAfter {
 		result.Reasons = append(result.Reasons, "known-path fixture was modified")

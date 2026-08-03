@@ -38,8 +38,8 @@ type runConfig struct {
 }
 
 const (
-	runRecordVersion      = 2
-	oracleContractVersion = "flowbench-oracle-2026-08-03-v2"
+	runRecordVersion      = 3
+	oracleContractVersion = "flowbench-oracle-2026-08-03-v3"
 )
 
 type runRecord struct {
@@ -110,10 +110,7 @@ func executeMatrix(ctx context.Context, cfg runConfig) ([]runRecord, error) {
 	}
 
 	worktree := filepath.Join(tempRoot, "target-worktree")
-	completed := make(map[string]bool, len(records))
-	for _, record := range records {
-		completed[recordKey(record.Model, record.Repetition, record.Variant)] = true
-	}
+	completed := completedRecordKeys(records)
 	order := 0
 	var firstRunErr error
 	for _, model := range cfg.Models {
@@ -422,6 +419,7 @@ func resumeRecords(cfg runConfig) ([]runRecord, error) {
 		case record.TargetSHA != targetSHA:
 			return nil, fmt.Errorf("resume record %d target SHA %q, want %q", i, record.TargetSHA, targetSHA)
 		case record.Invalid != "":
+			records = append(records, record)
 			continue
 		case seen[key]:
 			return nil, fmt.Errorf("duplicate resume record %q", key)
@@ -577,6 +575,16 @@ func baselineOrder(modelIndex, repetitions, repetition int) int {
 
 func recordKey(model string, repetition int, variant string) string {
 	return fmt.Sprintf("%s\x00%d\x00%s", model, repetition, variant)
+}
+
+func completedRecordKeys(records []runRecord) map[string]bool {
+	completed := make(map[string]bool, len(records))
+	for _, record := range records {
+		if record.Invalid == "" {
+			completed[recordKey(record.Model, record.Repetition, record.Variant)] = true
+		}
+	}
+	return completed
 }
 
 func buildHarness(ctx context.Context, repo, worktree, sha, out string) error {
