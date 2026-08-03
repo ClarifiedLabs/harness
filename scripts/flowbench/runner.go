@@ -188,23 +188,14 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 	record.SessionDir = sessionDir
 	record.StdoutPath = filepath.Join(runDir, "stdout.txt")
 	record.StderrPath = filepath.Join(runDir, "stderr.txt")
+	configPath := filepath.Join(runDir, "config.json")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		return record, fmt.Errorf("write isolated benchmark config: %w", err)
+	}
 
 	runCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
 	defer cancel()
-	args := []string{
-		"-model", model,
-		"-reasoning", "medium",
-		"-agent", "independent",
-		"-web-search", "off",
-		"-no-env",
-		"-no-color",
-		"-timestamps", "none",
-		"-q",
-		"-max-prompt-tokens", "0",
-		"-max-turns", "200",
-		"-max-prompt-cost", "0",
-		"-session", sessionDir,
-	}
+	args := benchmarkArgs(model, sessionDir, configPath)
 	if cfg.Case.SecondPrompt == "" {
 		args = append(args, "-p", cfg.Case.Prompt)
 	} else {
@@ -243,6 +234,10 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 	}
 	m, err := collectMetrics(sessionDir)
 	if err != nil {
+		record.Invalid = err.Error()
+		return record, err
+	}
+	if err := validateMetricsModel(model, m); err != nil {
 		record.Invalid = err.Error()
 		return record, err
 	}
@@ -423,6 +418,9 @@ func resumeRecords(cfg runConfig) ([]runRecord, error) {
 		if err != nil {
 			return nil, fmt.Errorf("refresh resume record %d: %w", i, err)
 		}
+		if err := validateMetricsModel(record.Model, metrics); err != nil {
+			return nil, fmt.Errorf("refresh resume record %d: %w", i, err)
+		}
 		if strings.TrimSpace(metrics.FinalText) == "" {
 			return nil, fmt.Errorf("resume record %d has no final answer", i)
 		}
@@ -496,6 +494,9 @@ func importBaselineRecords(cfg runConfig, path string) ([]runRecord, error) {
 		seen[key] = true
 		metrics, err := collectMetrics(record.SessionDir)
 		if err != nil {
+			return nil, fmt.Errorf("refresh imported baseline record %d: %w", i, err)
+		}
+		if err := validateMetricsModel(record.Model, metrics); err != nil {
 			return nil, fmt.Errorf("refresh imported baseline record %d: %w", i, err)
 		}
 		if strings.TrimSpace(metrics.FinalText) == "" {
@@ -597,6 +598,31 @@ func preflightModels(ctx context.Context, binary string, models []string) error 
 		}
 	}
 	return nil
+}
+
+func benchmarkArgs(model, sessionDir, configPath string) []string {
+	return []string{
+		"-config", configPath,
+		"-model", model,
+		"-reasoning", "medium",
+		"-agent", "independent",
+		"-web-search", "off",
+		"-no-env",
+		"-no-color",
+		"-timestamps", "none",
+		"-q",
+		"-max-prompt-tokens", "0",
+		"-max-turns", "200",
+		"-max-prompt-cost", "0",
+		"-session", sessionDir,
+	}
+}
+
+func validateMetricsModel(want string, m metrics) error {
+	if m.ModelTarget == want {
+		return nil
+	}
+	return fmt.Errorf("benchmark used model %q, want %q", m.ModelTarget, want)
 }
 
 func benchmarkEnv(goCache string) []string {

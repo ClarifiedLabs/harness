@@ -11,6 +11,31 @@ import (
 	"harness/internal/llm"
 )
 
+func TestBenchmarkArgsPinConfigModelAndReasoning(t *testing.T) {
+	args := benchmarkArgs("provider:model", "/sessions/run", "/isolated/config.json")
+	joined := " " + strings.Join(args, " ") + " "
+	for _, want := range []string{
+		" -config /isolated/config.json ",
+		" -model provider:model ",
+		" -reasoning medium ",
+		" -agent independent ",
+		" -session /sessions/run ",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("benchmark args %q missing %q", joined, want)
+		}
+	}
+}
+
+func TestValidateMetricsModelRejectsAgentOverride(t *testing.T) {
+	if err := validateMetricsModel("requested:model", metrics{ModelTarget: "agent:model"}); err == nil || !strings.Contains(err.Error(), "agent:model") {
+		t.Fatalf("validateMetricsModel error = %v, want mismatch", err)
+	}
+	if err := validateMetricsModel("requested:model", metrics{ModelTarget: "requested:model"}); err != nil {
+		t.Fatalf("validateMetricsModel matching target: %v", err)
+	}
+}
+
 func TestBenchmarkEnvIsolatesGoCache(t *testing.T) {
 	t.Setenv("GOCACHE", "/host/shared-cache")
 	isolated := filepath.Join(t.TempDir(), "go-cache")

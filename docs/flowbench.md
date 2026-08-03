@@ -125,7 +125,10 @@ checks five replacements and byte-for-byte sentinel preservation;
 `prompt_end`; `tool_contracts` exercises 18-operation inspect, mixed
 literal/regex search, and full-output command steps. Run records hash prompts,
 fixtures, binaries, and raw events and retain invalid infrastructure samples for
-`-resume` to rerun rather than scoring them as model failures.
+`-resume` to rerun rather than scoring them as model failures. Child runs use an
+empty explicit Harness config and are rejected when recorded telemetry names a
+model target other than the requested target, preventing local agent model pins
+from silently contaminating the matrix.
 
 ## Live results and disposition
 
