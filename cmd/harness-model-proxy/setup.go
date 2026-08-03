@@ -269,10 +269,12 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 		return fmt.Errorf("%s has no provider_configs", cfgPath)
 	}
 	dir := filepath.Dir(cfgPath)
+	fmt.Fprintln(env.stderr, "harness-model-proxy: refresh-models: refreshing models.dev catalog...")
 	catalog, err := refreshCatalog(ctx, env, dir)
 	if err != nil {
 		return err
 	}
+	fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: models.dev catalog ready (%d providers)\n", len(catalog.Providers))
 
 	type refreshFile struct {
 		file      string
@@ -344,9 +346,11 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 				}
 			}
 			if discoverySupported {
-				snapshot, discoveryErr := providerModelFetcher(env, dir).Fetch(ctx, current, previous)
+				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: querying provider %q...\n", current.Name)
+				snapshot, discoveryErr := fetchProviderModelSnapshot(ctx, env, dir, current, previous)
 				switch {
 				case discoveryErr == nil:
+					fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: provider %q catalog ready (%d models)\n", current.Name, len(snapshot.Models))
 					effective = modeldiscovery.MergeProvider(baseline, snapshot)
 					authoritative = true
 					fetchedSnapshots = append(fetchedSnapshots, snapshot)
@@ -470,7 +474,7 @@ func refreshProviderAfterLogin(ctx context.Context, env environment, cfgPath str
 	if cached, err := modeldiscovery.ReadProviderCache(dir, current.Name, current.BaseURL); err == nil {
 		previous = &cached
 	}
-	snapshot, err := providerModelFetcher(env, dir).Fetch(ctx, current, previous)
+	snapshot, err := fetchProviderModelSnapshot(ctx, env, dir, current, previous)
 	if err != nil {
 		return err
 	}

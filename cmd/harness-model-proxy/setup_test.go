@@ -22,6 +22,12 @@ import (
 	"harness/internal/modelproxy/modeldiscovery"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestRunSetupWritesOnlySelectedModelsAndNoProxyDefault(t *testing.T) {
 	home := t.TempDir()
 	var out, errw bytes.Buffer
@@ -1221,6 +1227,62 @@ func TestRunRefreshModelsPreservesConfiguredModelsOnProviderFailure(t *testing.T
 	}
 	if !strings.Contains(errw.String(), "preserving configured models") {
 		t.Fatalf("stderr = %q", errw.String())
+	}
+}
+
+func TestRunRefreshModelsReportsProgressAndTimesOutStalledProvider(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["sakana.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sakana.json"), []byte(`{
+  "name":"sakana","api_type":"openai","base_url":"https://provider.test/v1","api_key":"sk-test","managed":true,
+  "models":[{"name":"fugu","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
+		"sakana": {ID: "sakana", API: "https://provider.test/v1", NPM: "@ai-sdk/openai-compatible", Models: map[string]modelcatalog.Model{
+			"fugu": {ID: "fugu", Limit: modelcatalog.Limit{Context: 2000}},
+		}},
+	}}
+	timeout := time.Nanosecond
+	var out, errw bytes.Buffer
+	env := environment{
+		stdout: &out,
+		stderr: &errw,
+		providerModelsClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		})},
+		providerModelsTimeout: &timeout,
+		modelsDevCatalog:      func(context.Context) (*modelcatalog.Catalog, error) { return catalog, nil },
+	}
+
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v; stderr=%q", err, errw.String())
+	}
+	for _, want := range []string{
+		"refreshing models.dev catalog",
+		"models.dev catalog ready",
+		`querying provider "sakana"`,
+		"preserving configured models",
+	} {
+		if !strings.Contains(errw.String(), want) {
+			t.Errorf("stderr missing %q: %q", want, errw.String())
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "sakana.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := llm.DecodeProviderConfigs(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) != 1 || len(providers[0].Models) != 1 || providers[0].Models[0].Name != "fugu" {
+		t.Fatalf("providers after timed-out refresh = %+v, want configured allowlist preserved", providers)
 	}
 }
 

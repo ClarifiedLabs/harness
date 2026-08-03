@@ -13,7 +13,10 @@ import (
 	"harness/internal/modelproxy/modeldiscovery"
 )
 
-const providerModelRefreshWorkers = 4
+const (
+	providerModelRefreshWorkers = 4
+	providerModelFetchTimeout   = 30 * time.Second
+)
 
 func providerModelFetcher(env environment, configDir string) modeldiscovery.Fetcher {
 	client := env.providerModelsClient
@@ -28,6 +31,19 @@ func providerModelFetcher(env environment, configDir string) modeldiscovery.Fetc
 		Client: client, ConfigDir: configDir, Getenv: getenv,
 		Now: func() time.Time { return currentTime(env) }, CodexClientVersion: modelcatalog.CodexClientVersion(),
 	}
+}
+
+func fetchProviderModelSnapshot(ctx context.Context, env environment, configDir string, pc llm.ProviderConfig, previous *modeldiscovery.Snapshot) (modeldiscovery.Snapshot, error) {
+	timeout := providerModelFetchTimeout
+	if env.providerModelsTimeout != nil {
+		timeout = *env.providerModelsTimeout
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	return providerModelFetcher(env, configDir).Fetch(ctx, pc, previous)
 }
 
 func directDiscoveryEnabled(pc llm.ProviderConfig) bool {
@@ -61,7 +77,7 @@ func loadProviderModelCaches(configDir string, providers []llm.ProviderConfig, n
 }
 
 func fetchProviderModelCatalog(ctx context.Context, env environment, configDir string, pc llm.ProviderConfig, previous *modeldiscovery.Snapshot) (modeldiscovery.Snapshot, error) {
-	snapshot, err := providerModelFetcher(env, configDir).Fetch(ctx, pc, previous)
+	snapshot, err := fetchProviderModelSnapshot(ctx, env, configDir, pc, previous)
 	if err != nil {
 		return modeldiscovery.Snapshot{}, err
 	}
@@ -99,7 +115,7 @@ func refreshProviderModels(ctx context.Context, env environment, configDir strin
 					copy := state.Snapshot
 					cached = &copy
 				}
-				snapshot, err := providerModelFetcher(env, configDir).Fetch(ctx, pc, cached)
+				snapshot, err := fetchProviderModelSnapshot(ctx, env, configDir, pc, cached)
 				var cacheErr error
 				if err == nil {
 					cacheErr = modeldiscovery.WriteCache(configDir, snapshot)

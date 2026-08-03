@@ -1025,11 +1025,13 @@ provider-specific authentication, response, and pagination contracts.
 
 Run `harness-model-proxy refresh-models` to fetch models.dev and query every
 supported provider with working credentials before rewriting provider files.
-A complete provider response is authoritative for the existing allowlist: it
-removes configured models that disappeared but never adds newly discovered
-models. Authentication, transport, decoding, empty-result, or incomplete-
-pagination failures preserve that provider's entire configured allowlist and
-emit a warning. Providers without a supported endpoint, explicit
+The command reports each catalog stage on stderr, and each provider query has a
+30-second deadline so an unresponsive endpoint cannot stall the refresh
+indefinitely. A complete provider response is authoritative for the existing
+allowlist: it removes configured models that disappeared but never adds newly
+discovered models. Authentication, transport, decoding, empty-result, or
+incomplete-pagination failures preserve that provider's entire configured
+allowlist and emit a warning. Providers without a supported endpoint, explicit
 `model_discovery.enabled:false`, and auto-detected 404/405 responses use
 models.dev availability. A provider that loses every model is deleted along
 with its `provider_configs` reference. Stored API keys, auth blocks, discovery

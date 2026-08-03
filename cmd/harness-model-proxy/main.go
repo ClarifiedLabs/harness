@@ -58,6 +58,7 @@ type environment struct {
 	modelsDevCacheTTL      *time.Duration
 	providerModelsCacheTTL *time.Duration
 	providerModelsClient   *http.Client
+	providerModelsTimeout  *time.Duration
 	providerModelsTicks    <-chan time.Time
 	now                    func() time.Time
 }
