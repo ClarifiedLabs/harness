@@ -132,7 +132,7 @@ func TestOpenRouterDiscoveryMapsRichMetadataAndPricing(t *testing.T) {
 			t.Errorf("undocumented limit query = %q", got)
 		}
 		_, _ = w.Write([]byte(`{"data":[
-          {"id":"vendor/text","name":"Text","context_length":200000,"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},"top_provider":{"max_completion_tokens":8192},"supported_parameters":["reasoning"],"reasoning":{"supported_efforts":["low","high"]},"pricing":{"prompt":"0.000002","completion":"0.000006","input_cache_read":"0.0000005"}},
+          {"id":"vendor/text","name":"Text","context_length":200000,"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},"top_provider":{"max_completion_tokens":8192},"supported_parameters":["reasoning"],"reasoning":{"supported_efforts":["low","high"]},"pricing":{"prompt":"0.000002","completion":"0.000006","input_cache_read":"0.0000005","input_cache_write":"0.000001","input_cache_write_1h":"0.000004","internal_reasoning":"0.000008","audio":"0.000009","audio_output":"0.000010","overrides":[{"min_prompt_tokens":128000,"prompt":"0.000004","completion":"0.000012","input_cache_write_1h":"0.000008","audio":"0.000018","audio_output":"0.000020"},{"min_prompt_tokens":32000,"completion":"0.000009"},{"min_prompt_tokens":128000,"input_cache_read":"0.0000015"},{"min_prompt_tokens":16000,"max_prompt_tokens":32000,"prompt":"0.5"}],"future_pricing":{"unit":"request"},"unit_count":7}},
           {"id":"vendor/image","architecture":{"output_modalities":["image"]},"pricing":{"prompt":"0.1"}}
         ]}`))
 	}))
@@ -142,12 +142,26 @@ func TestOpenRouterDiscoveryMapsRichMetadataAndPricing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Models) != 1 {
-		t.Fatalf("models = %+v", snapshot.Models)
+	if !snapshot.Complete || len(snapshot.Models) != 1 {
+		t.Fatalf("snapshot = %+v", snapshot)
 	}
 	model := snapshot.Models["vendor/text"]
-	if model.Price == nil || model.Price.Input != 2 || model.Price.Output != 6 || model.Price.CacheRead != .5 {
-		t.Fatalf("price = %+v", model.Price)
+	wantPrice := llm.Price{
+		Input: 2, Output: 6, CacheRead: .5, CacheWrite: 1, CacheWrite1h: 4,
+		Reasoning: 8, InputAudio: 9, OutputAudio: 10,
+		Tiers: []llm.PriceTier{
+			{Threshold: 32000, Input: 2, Output: 9, CacheRead: .5, CacheWrite: 1, CacheWrite1h: 4, Reasoning: 8, InputAudio: 9, OutputAudio: 10},
+			{Threshold: 128000, Input: 4, Output: 9, CacheRead: 1.5, CacheWrite: 1, CacheWrite1h: 8, Reasoning: 8, InputAudio: 18, OutputAudio: 20},
+		},
+	}
+	if model.Price == nil || !model.Price.Equal(wantPrice) {
+		t.Fatalf("price = %+v, want %+v", model.Price, wantPrice)
+	}
+	if got := model.Price.Effective(32000); got.Output != 6 {
+		t.Fatalf("price at threshold = %+v, want base price", got)
+	}
+	if got := model.Price.Effective(32001); got.Output != 9 {
+		t.Fatalf("price over threshold = %+v, want first tier", got)
 	}
 	if model.OutputLimit == nil || *model.OutputLimit != 8192 || model.Reasoning == nil || !*model.Reasoning {
 		t.Fatalf("model = %+v", model)

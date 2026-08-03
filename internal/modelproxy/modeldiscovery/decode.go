@@ -259,7 +259,7 @@ func decodeOpenRouter(data []byte, spec Spec) (map[string]Model, string, error) 
 			Reasoning           *struct {
 				SupportedEfforts []string `json:"supported_efforts"`
 			} `json:"reasoning"`
-			Pricing map[string]string `json:"pricing"`
+			Pricing json.RawMessage `json:"pricing"`
 		} `json:"data"`
 		Next string `json:"next"`
 		Meta struct {
@@ -314,26 +314,128 @@ func decodeOpenRouter(data []byte, spec Spec) (map[string]Model, string, error) 
 	return out, next, nil
 }
 
-func openRouterPrice(fields map[string]string) (llm.Price, bool) {
-	var price llm.Price
-	known := false
-	for key, target := range map[string]*float64{
-		"prompt": &price.Input, "completion": &price.Output,
-		"input_cache_read": &price.CacheRead, "input_cache_write": &price.CacheWrite,
-		"internal_reasoning": &price.Reasoning, "input_audio": &price.InputAudio, "output_audio": &price.OutputAudio,
-	} {
-		raw, ok := fields[key]
-		if !ok || strings.TrimSpace(raw) == "" {
-			continue
-		}
-		value, err := strconv.ParseFloat(raw, 64)
-		if err != nil || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
-			continue
-		}
-		*target = value * 1_000_000
-		known = true
+func openRouterPrice(raw json.RawMessage) (llm.Price, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return llm.Price{}, false
 	}
-	return price, known
+	var price llm.Price
+	if !applyOpenRouterRates(fields, &price) {
+		return llm.Price{}, false
+	}
+	price.Tiers = openRouterPriceTiers(fields, price)
+	return price, true
+}
+
+type openRouterPriceOverride struct {
+	threshold int
+	fields    map[string]json.RawMessage
+}
+
+func openRouterPriceTiers(fields map[string]json.RawMessage, base llm.Price) []llm.PriceTier {
+	var items []json.RawMessage
+	if json.Unmarshal(fields["overrides"], &items) != nil {
+		return nil
+	}
+	overrides := make([]openRouterPriceOverride, 0, len(items))
+	thresholdSet := make(map[int]struct{}, len(items))
+	for _, raw := range items {
+		var overrideFields map[string]json.RawMessage
+		if json.Unmarshal(raw, &overrideFields) != nil || !supportedOpenRouterOverride(overrideFields) {
+			continue
+		}
+		var threshold int
+		if json.Unmarshal(overrideFields["min_prompt_tokens"], &threshold) != nil || threshold < 0 {
+			continue
+		}
+		candidate := base
+		if !applyOpenRouterRates(overrideFields, &candidate) {
+			continue
+		}
+		overrides = append(overrides, openRouterPriceOverride{threshold: threshold, fields: overrideFields})
+		thresholdSet[threshold] = struct{}{}
+	}
+
+	thresholds := make([]int, 0, len(thresholdSet))
+	for threshold := range thresholdSet {
+		thresholds = append(thresholds, threshold)
+	}
+	slices.Sort(thresholds)
+	tiers := make([]llm.PriceTier, 0, len(thresholds))
+	for _, threshold := range thresholds {
+		effective := base
+		for _, override := range overrides {
+			if override.threshold <= threshold {
+				applyOpenRouterRates(override.fields, &effective)
+			}
+		}
+		tiers = append(tiers, openRouterPriceTier(threshold, effective))
+	}
+	return tiers
+}
+
+func supportedOpenRouterOverride(fields map[string]json.RawMessage) bool {
+	for key := range fields {
+		switch key {
+		case "min_prompt_tokens",
+			"prompt", "completion",
+			"input_cache_read", "input_cache_write", "input_cache_write_1h",
+			"internal_reasoning", "audio", "audio_output", "input_audio", "output_audio",
+			"image", "image_output", "input_audio_cache", "web_search", "request", "discount":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func applyOpenRouterRates(fields map[string]json.RawMessage, price *llm.Price) bool {
+	known := false
+	for _, field := range []struct {
+		key    string
+		target *float64
+	}{
+		{key: "prompt", target: &price.Input},
+		{key: "completion", target: &price.Output},
+		{key: "input_cache_read", target: &price.CacheRead},
+		{key: "input_cache_write", target: &price.CacheWrite},
+		{key: "input_cache_write_1h", target: &price.CacheWrite1h},
+		{key: "internal_reasoning", target: &price.Reasoning},
+		{key: "input_audio", target: &price.InputAudio},
+		{key: "audio", target: &price.InputAudio},
+		{key: "output_audio", target: &price.OutputAudio},
+		{key: "audio_output", target: &price.OutputAudio},
+	} {
+		if value, ok := openRouterRate(fields, field.key); ok {
+			*field.target = value
+			known = true
+		}
+	}
+	return known
+}
+
+func openRouterRate(fields map[string]json.RawMessage, key string) (float64, bool) {
+	var raw string
+	if json.Unmarshal(fields[key], &raw) != nil || strings.TrimSpace(raw) == "" {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, false
+	}
+	value *= 1_000_000
+	if math.IsInf(value, 0) {
+		return 0, false
+	}
+	return value, true
+}
+
+func openRouterPriceTier(threshold int, price llm.Price) llm.PriceTier {
+	return llm.PriceTier{
+		Threshold: threshold, Input: price.Input, Output: price.Output,
+		CacheRead: price.CacheRead, CacheWrite: price.CacheWrite, CacheWrite1h: price.CacheWrite1h,
+		Reasoning: price.Reasoning, InputAudio: price.InputAudio, OutputAudio: price.OutputAudio,
+	}
 }
 
 func decodeCodex(data []byte, spec Spec) (map[string]Model, string, error) {
