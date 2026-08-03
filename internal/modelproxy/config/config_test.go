@@ -18,7 +18,7 @@ import (
 func TestCatalogCompletenessAndCLIProjection(t *testing.T) {
 	wantKeys := []string{
 		"provider_configs", "default_context_window", "log_level", "log_format",
-		"models_dev_cache_ttl", "drain_delay", "shutdown_timeout", "instance_id",
+		"models_dev_cache_ttl", "provider_models_cache_ttl", "drain_delay", "shutdown_timeout", "instance_id",
 		"api_keys_file", "metrics_enabled", "metrics_listen",
 	}
 	parameters := Catalog().Parameters()
@@ -40,12 +40,12 @@ func TestCatalogCompletenessAndCLIProjection(t *testing.T) {
 			seenFlags[name] = parameter.Key
 		}
 	}
-	if got := parameters[9].Flags; !reflect.DeepEqual(got, []string{"no-metrics"}) {
+	if got := parameters[10].Flags; !reflect.DeepEqual(got, []string{"no-metrics"}) {
 		t.Fatalf("metrics inverse flags = %v", got)
 	}
 	settingFlags := SettingCLIFlags()
-	if len(settingFlags) != 9 {
-		t.Fatalf("setting flags = %d, want 9", len(settingFlags))
+	if len(settingFlags) != 10 {
+		t.Fatalf("setting flags = %d, want 10", len(settingFlags))
 	}
 	for _, flag := range settingFlags {
 		parameter, ok := Catalog().Lookup(flag.ID)
@@ -97,10 +97,10 @@ func TestLoadDefaultsAndSources(t *testing.T) {
 	if result.Config.DefaultContextWindow != llm.DefaultContextWindow || result.Config.LogLevel != "info" || result.Config.LogFormat != "json" {
 		t.Fatalf("scalar defaults = %+v", result.Config)
 	}
-	if result.Config.ModelsDevCacheTTL.Duration != 24*time.Hour || result.Config.DrainDelay.Duration != 5*time.Second || result.Config.ShutdownTimeout.Duration != 5*time.Minute {
+	if result.Config.ModelsDevCacheTTL.Duration != 24*time.Hour || result.Config.ProviderModelsCacheTTL.Duration != time.Hour || result.Config.DrainDelay.Duration != 5*time.Second || result.Config.ShutdownTimeout.Duration != 5*time.Minute {
 		t.Fatalf("duration defaults = %+v %+v %+v", result.Config.ModelsDevCacheTTL, result.Config.DrainDelay, result.Config.ShutdownTimeout)
 	}
-	if !result.Config.ModelsDevCacheTTL.Set || !result.Config.DrainDelay.Set || !result.Config.ShutdownTimeout.Set {
+	if !result.Config.ModelsDevCacheTTL.Set || !result.Config.ProviderModelsCacheTTL.Set || !result.Config.DrainDelay.Set || !result.Config.ShutdownTimeout.Set {
 		t.Fatal("effective durations did not retain explicit effective values")
 	}
 	if result.Config.InstanceID != "derived-1" || result.InstanceIDExplicit || result.Sources["instance_id"].Kind != configmeta.SourceDerived {
@@ -127,6 +127,7 @@ func TestLoadPrecedenceWinnerValidationAndEmptySemantics(t *testing.T) {
 		"log_level":"not-valid",
 		"log_format":"text",
 		"models_dev_cache_ttl":"12h",
+		"provider_models_cache_ttl":"2h",
 		"drain_delay":"7s",
 		"shutdown_timeout":"4m",
 		"instance_id":"file-id",
@@ -138,6 +139,7 @@ func TestLoadPrecedenceWinnerValidationAndEmptySemantics(t *testing.T) {
 		"-log-level", "warn",
 		"-log-format=",
 		"-models-dev-cache-ttl", "0",
+		"-provider-models-cache-ttl", "30m",
 		"-drain-delay", "9s",
 		"-instance-id", " flag-id ",
 		"-no-metrics=false",
@@ -158,7 +160,7 @@ func TestLoadPrecedenceWinnerValidationAndEmptySemantics(t *testing.T) {
 	if result.Config.LogFormat != "text" || result.Sources["log_format"].Kind != configmeta.SourceFile {
 		t.Fatalf("empty log flag overrode file: %q source=%+v", result.Config.LogFormat, result.Sources["log_format"])
 	}
-	if result.Config.ModelsDevCacheTTL.Duration != 0 || result.Config.DrainDelay.Duration != 9*time.Second || result.Config.ShutdownTimeout.Duration != 6*time.Minute {
+	if result.Config.ModelsDevCacheTTL.Duration != 0 || result.Config.ProviderModelsCacheTTL.Duration != 30*time.Minute || result.Config.DrainDelay.Duration != 9*time.Second || result.Config.ShutdownTimeout.Duration != 6*time.Minute {
 		t.Fatalf("duration precedence = ttl %v drain %v shutdown %v", result.Config.ModelsDevCacheTTL.Duration, result.Config.DrainDelay.Duration, result.Config.ShutdownTimeout.Duration)
 	}
 	if result.Sources["shutdown_timeout"] != (configmeta.Source{Kind: configmeta.SourceEnvironment, Name: shutdownTimeoutEnvironment}) {

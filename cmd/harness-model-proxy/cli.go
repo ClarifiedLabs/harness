@@ -49,18 +49,19 @@ var commandCatalog = cli.MustCatalog(cli.Command{
 			ID:          "setup",
 			Name:        "setup",
 			Summary:     "Create or update proxy and provider config interactively.",
-			Description: "Runs the models.dev-backed provider/model picker and writes proxy and provider config files in the default config directory.",
+			Description: "Runs the provider/models.dev-backed provider and model picker and writes proxy and provider config files in the default config directory.",
 			Runnable:    true,
 			Args:        cli.Args{Max: -1, Check: false},
 			Flags: []cli.Flag{
 				boolCLIFlag("force", []string{"force"}, "overwrite existing provider files"),
 				mustModelConfigCLIFlag("models_dev_cache_ttl"),
+				mustModelConfigCLIFlag("provider_models_cache_ttl"),
 			},
 		},
 		{
 			ID:       "refresh-models",
 			Name:     "refresh-models",
-			Summary:  "Fetch models.dev and update configured provider model metadata.",
+			Summary:  "Query provider model catalogs and refresh configured model metadata.",
 			Runnable: true,
 			Args:     cli.Args{Max: -1, Check: false},
 			Flags: []cli.Flag{

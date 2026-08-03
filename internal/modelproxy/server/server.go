@@ -31,6 +31,7 @@ import (
 	"harness/internal/llm/tokencount"
 	"harness/internal/metrics"
 	"harness/internal/modelcatalog"
+	"harness/internal/modelproxy/modeldiscovery"
 	"harness/internal/modelproxy/pricing"
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/reasoningprofile"
@@ -52,16 +53,17 @@ var reasoningProfileRank = map[string]int{
 }
 
 type Config struct {
-	ProviderConfigs      []string      `json:"provider_configs"`
-	DefaultContextWindow int           `json:"default_context_window"`
-	LogLevel             string        `json:"log_level,omitempty"`
-	LogFormat            string        `json:"log_format,omitempty"`
-	ModelsDevCacheTTL    Duration      `json:"models_dev_cache_ttl,omitempty"`
-	DrainDelay           Duration      `json:"drain_delay,omitempty"`
-	ShutdownTimeout      Duration      `json:"shutdown_timeout,omitempty"`
-	InstanceID           string        `json:"instance_id,omitempty"`
-	APIKeysFile          string        `json:"api_keys_file,omitempty"`
-	Metrics              MetricsConfig `json:"metrics,omitempty"`
+	ProviderConfigs        []string      `json:"provider_configs"`
+	DefaultContextWindow   int           `json:"default_context_window"`
+	LogLevel               string        `json:"log_level,omitempty"`
+	LogFormat              string        `json:"log_format,omitempty"`
+	ModelsDevCacheTTL      Duration      `json:"models_dev_cache_ttl,omitempty"`
+	ProviderModelsCacheTTL Duration      `json:"provider_models_cache_ttl,omitempty"`
+	DrainDelay             Duration      `json:"drain_delay,omitempty"`
+	ShutdownTimeout        Duration      `json:"shutdown_timeout,omitempty"`
+	InstanceID             string        `json:"instance_id,omitempty"`
+	APIKeysFile            string        `json:"api_keys_file,omitempty"`
+	Metrics                MetricsConfig `json:"metrics,omitempty"`
 }
 
 type CostBudgetConfig struct {
@@ -155,6 +157,11 @@ type Options struct {
 	// ModelsDevSourceDate dates ModelsDevCatalog (its cache file mtime). Used to
 	// stamp catalog pricing freshness when any provider is managed.
 	ModelsDevSourceDate time.Time
+	// ProviderCatalogs contains cached authenticated provider snapshots. Fresh
+	// states are authoritative for availability; stale states supply metadata.
+	ProviderCatalogs map[string]modeldiscovery.State
+	// ProviderModelsMaxAge is the provider snapshot refresh interval.
+	ProviderModelsMaxAge time.Duration
 	// Now supplies the clock for budget windows. Nil uses time.Now.
 	Now func() time.Time
 	// Metrics, when non-nil, receives Prometheus-style counters for every
@@ -176,9 +183,9 @@ type usageKey struct {
 
 // catalogSnapshot is the immutable served state: a registry used for model
 // metadata, a pricer used for request costs, and the catalog served at
-// /v1/models. It is swapped atomically when the models.dev cache refreshes so
-// managed prices stay fresh without a restart. Readers Load() it; the refresher
-// Stores() a freshly built one.
+// /v1/models. It is swapped atomically when either catalog source refreshes so
+// availability, metadata, and prices stay fresh without a restart. Readers
+// Load() it; refreshers Store() a freshly built one.
 type catalogSnapshot struct {
 	registry *llm.Registry
 	catalog  protocol.Catalog
@@ -217,7 +224,7 @@ type metricsCollectors struct {
 
 type Handler struct {
 	// snapshot holds the current registry+catalog. Built once in NewHandler and
-	// replaced wholesale by UpdateModelsDevCatalog; never mutated in place.
+	// replaced wholesale after catalog refreshes; never mutated in place.
 	snapshot atomic.Pointer[catalogSnapshot]
 
 	providers            []llm.ProviderConfig
@@ -226,6 +233,11 @@ type Handler struct {
 	configDir            string
 	configSourceDate     time.Time
 	pricingMaxAge        time.Duration
+	providerModelsMaxAge time.Duration
+	catalogMu            sync.Mutex
+	modelsDevCatalog     *modelcatalog.Catalog
+	modelsDevSourceDate  time.Time
+	providerCatalogs     map[string]modeldiscovery.State
 	getenv               func(string) string
 	now                  func() time.Time
 	logger               *slog.Logger
@@ -259,6 +271,11 @@ func ValidateConfigReferences(configDir string, cfg Config, getenv func(string) 
 	}
 	if len(providers) == 0 {
 		return fmt.Errorf("model proxy: no provider configs are configured")
+	}
+	for _, pc := range providers {
+		if _, _, err := modeldiscovery.Resolve(pc); err != nil {
+			return err
+		}
 	}
 	if _, err := buildAuthSources(providers, configDir, getenv); err != nil {
 		return err
@@ -321,6 +338,10 @@ func NewHandler(opts Options) (*Handler, error) {
 		configDir:            opts.ConfigDir,
 		configSourceDate:     providerConfigSourceDate(opts.ConfigDir, opts.Config.ProviderConfigs),
 		pricingMaxAge:        maxAge,
+		providerModelsMaxAge: opts.ProviderModelsMaxAge,
+		modelsDevCatalog:     opts.ModelsDevCatalog,
+		modelsDevSourceDate:  opts.ModelsDevSourceDate,
+		providerCatalogs:     cloneProviderCatalogStates(opts.ProviderCatalogs),
 		getenv:               getenv,
 		now:                  now,
 		logger:               logger,
@@ -334,7 +355,12 @@ func NewHandler(opts Options) (*Handler, error) {
 		h.metrics = opts.Metrics
 		h.metricFams = registerMetricFamilies(opts.Metrics)
 	}
-	snapshot, err := h.buildSnapshot(opts.ModelsDevCatalog, opts.ModelsDevSourceDate)
+	for _, pc := range providers {
+		if _, _, err := modeldiscovery.Resolve(pc); err != nil {
+			return nil, err
+		}
+	}
+	snapshot, err := h.buildSnapshot(h.modelsDevCatalog, h.modelsDevSourceDate, h.providerCatalogs)
 	if err != nil {
 		return nil, err
 	}
@@ -531,26 +557,24 @@ func (h *Handler) recordMetrics(r *http.Request, providerID, model string, purpo
 	}
 }
 
-// buildSnapshot resolves managed-provider static pricing schedules from md where
-// applicable, then builds the registry and served catalog from the provider
-// configs. Manual providers keep their own configured prices. The catalog's
-// pricing stamp dates the managed prices to the models.dev cache when any
-// provider is managed, and
-// to the provider-config mtime otherwise.
-func (h *Handler) buildSnapshot(md *modelcatalog.Catalog, mdSourceDate time.Time) (*catalogSnapshot, error) {
-	priced, pruned := h.pricedProviders(md)
+// buildSnapshot resolves provider-direct availability and metadata together
+// with models.dev and configured fallbacks, then builds the registry and served
+// catalog. Manual providers keep their configured availability and prices
+// unless they explicitly opt into discovery.
+func (h *Handler) buildSnapshot(md *modelcatalog.Catalog, mdSourceDate time.Time, providerCatalogs map[string]modeldiscovery.State) (*catalogSnapshot, error) {
+	priced, pruned := h.effectiveProviders(md, providerCatalogs)
 	pricer := pricing.NewComposite()
 	registry := llm.RegistryFromProviderConfigs(priced)
 	registry.SetDefaultContextWindow(h.defaultContextWindow)
 	catalog, targets, err := catalogFromProviderConfigs(priced, pricer)
 	if err != nil {
 		if pruned && configuredTargetCount(priced) == 0 {
-			catalog := protocol.Catalog{Targets: []protocol.Target{}, Pricing: h.pricingInfo(md, mdSourceDate)}
+			catalog := protocol.Catalog{Targets: []protocol.Target{}, Pricing: h.pricingInfo(md, mdSourceDate, providerCatalogs)}
 			return &catalogSnapshot{registry: registry, catalog: catalog, targets: map[string]resolvedTarget{}, pricer: pricer}, nil
 		}
 		return nil, err
 	}
-	catalog.Pricing = h.pricingInfo(md, mdSourceDate)
+	catalog.Pricing = h.pricingInfo(md, mdSourceDate, providerCatalogs)
 	return &catalogSnapshot{registry: registry, catalog: catalog, targets: targets, pricer: pricer}, nil
 }
 
@@ -559,7 +583,11 @@ func (h *Handler) buildSnapshot(md *modelcatalog.Catalog, mdSourceDate time.Time
 // refresher calls this after a successful models.dev cache refresh so live
 // prices reach in-flight cost accounting and /v1/models without a restart.
 func (h *Handler) UpdateModelsDevCatalog(md *modelcatalog.Catalog, sourceDate time.Time) {
-	snapshot, err := h.buildSnapshot(md, sourceDate)
+	h.catalogMu.Lock()
+	defer h.catalogMu.Unlock()
+	h.modelsDevCatalog = md
+	h.modelsDevSourceDate = sourceDate
+	snapshot, err := h.buildSnapshot(h.modelsDevCatalog, h.modelsDevSourceDate, h.providerCatalogs)
 	if err != nil {
 		h.logger.Warn("rebuild catalog snapshot failed", "err", err)
 		return
@@ -567,14 +595,53 @@ func (h *Handler) UpdateModelsDevCatalog(md *modelcatalog.Catalog, sourceDate ti
 	h.snapshot.Store(snapshot)
 }
 
-// pricingInfo dates the served catalog's prices. When any provider is managed
-// and a models.dev cache is available, the cache's source date (kept fresh by
-// the refresher) wins; otherwise the manual prices are only as fresh as the
-// newest provider-config file.
-func (h *Handler) pricingInfo(md *modelcatalog.Catalog, mdSourceDate time.Time) *protocol.PricingInfo {
+// UpdateProviderCatalogs merges newly fetched provider snapshots and atomically
+// rebuilds the served catalog once for the completed refresh cycle.
+func (h *Handler) UpdateProviderCatalogs(updates map[string]modeldiscovery.State) {
+	if len(updates) == 0 {
+		return
+	}
+	h.catalogMu.Lock()
+	defer h.catalogMu.Unlock()
+	if h.providerCatalogs == nil {
+		h.providerCatalogs = map[string]modeldiscovery.State{}
+	}
+	for provider, state := range updates {
+		h.providerCatalogs[provider] = cloneProviderCatalogState(state)
+	}
+	snapshot, err := h.buildSnapshot(h.modelsDevCatalog, h.modelsDevSourceDate, h.providerCatalogs)
+	if err != nil {
+		h.logger.Warn("rebuild catalog snapshot failed", "err", err)
+		return
+	}
+	h.snapshot.Store(snapshot)
+}
+
+// pricingInfo dates the served catalog's prices from every source that actually
+// contributed price data. Provider-direct catalogs and models.dev may expire on
+// different schedules; manual prices are dated by the provider-config files.
+func (h *Handler) pricingInfo(md *modelcatalog.Catalog, mdSourceDate time.Time, providerCatalogs map[string]modeldiscovery.State) *protocol.PricingInfo {
 	sourceDate := h.configSourceDate
-	if md != nil && !mdSourceDate.IsZero() && anyManagedProvider(h.providers) {
+	var expiresAt time.Time
+	if md != nil && !mdSourceDate.IsZero() && modelsDevContributesPrice(h.providers, md, providerCatalogs) {
 		sourceDate = mdSourceDate
+		if h.pricingMaxAge > 0 {
+			expiresAt = mdSourceDate.Add(h.pricingMaxAge)
+		}
+	}
+	if h.providerModelsMaxAge > 0 {
+		for _, state := range providerCatalogs {
+			if !state.Authoritative || state.Snapshot.FetchedAt.IsZero() || !snapshotHasPrice(state.Snapshot) {
+				continue
+			}
+			if sourceDate.IsZero() || state.Snapshot.FetchedAt.Before(sourceDate) {
+				sourceDate = state.Snapshot.FetchedAt
+			}
+			candidate := state.Snapshot.FetchedAt.Add(h.providerModelsMaxAge)
+			if expiresAt.IsZero() || candidate.Before(expiresAt) {
+				expiresAt = candidate
+			}
+		}
 	}
 	if sourceDate.IsZero() {
 		return nil
@@ -582,67 +649,187 @@ func (h *Handler) pricingInfo(md *modelcatalog.Catalog, mdSourceDate time.Time) 
 	return &protocol.PricingInfo{
 		SourceDate:    sourceDate,
 		MaxAgeSeconds: int64(h.pricingMaxAge / time.Second),
+		ExpiresAt:     expiresAt,
 	}
 }
 
-// pricedProviders returns provider configs with static pricing schedules ready
-// for the registry and catalog. Managed providers get a fresh copy whose model
-// prices and input modalities come from the models.dev cache when applicable;
-// when a refreshed cache no longer contains a managed provider/model, the stale
-// entry is pruned from the live snapshot with a warning. Manual providers are
-// returned unchanged, keeping their own configured prices and metadata.
-func (h *Handler) pricedProviders(md *modelcatalog.Catalog) ([]llm.ProviderConfig, bool) {
+// effectiveProviders returns provider configs ready for the registry and
+// catalog. Fresh complete provider snapshots are authoritative for managed
+// availability; stale snapshots contribute metadata only. models.dev and the
+// configured entries remain fallbacks. Manual providers are unchanged unless
+// they explicitly opt into discovery.
+func (h *Handler) effectiveProviders(md *modelcatalog.Catalog, providerCatalogs map[string]modeldiscovery.State) ([]llm.ProviderConfig, bool) {
 	out := make([]llm.ProviderConfig, 0, len(h.providers))
 	pruned := false
 	for _, pc := range h.providers {
-		if pc.Name == modelcatalog.OpenAICodexProviderID {
-			cp := pc
-			cp.Models = make([]llm.ModelEntry, len(pc.Models))
-			for j, entry := range pc.Models {
-				entry.Price = llm.Price{}
-				cp.Models[j] = entry
-			}
-			out = append(out, cp)
-			continue
+		spec, discoverySupported, resolveErr := modeldiscovery.Resolve(pc)
+		if resolveErr != nil {
+			h.logger.Warn("provider model discovery configuration invalid", "provider", pc.Name, "err", resolveErr)
+			discoverySupported = false
 		}
-		if !pc.Managed || md == nil {
+		_ = spec
+		state, hasState := providerCatalogs[pc.Name]
+		if hasState && state.Unsupported {
+			discoverySupported = false
+			hasState = false
+		}
+		explicitDiscovery := pc.ModelDiscovery != nil &&
+			(pc.ModelDiscovery.Enabled == nil || *pc.ModelDiscovery.Enabled)
+		if !pc.Managed && !explicitDiscovery {
 			out = append(out, pc)
 			continue
 		}
-		// Managed prices resolve from PriceSource when set, otherwise from the
-		// provider's own name.
-		priceProvider := pc.PriceSource
-		if priceProvider == "" {
-			priceProvider = pc.Name
+
+		baseline := modeldiscovery.ProviderFromConfig(pc)
+		if provider, ok := md.Provider(pc.Name); ok {
+			baseline = modeldiscovery.OverlayProvider(baseline, provider)
 		}
-		provider, ok := md.Provider(priceProvider)
-		if !ok {
-			pruned = true
-			h.logger.Warn("managed provider no longer exists in models.dev catalog; removing it from live catalog", "provider", pc.Name, "catalog_provider", priceProvider)
-			continue
+		effective := baseline
+		if hasState {
+			if state.Authoritative && state.Snapshot.Complete {
+				effective = modeldiscovery.MergeProvider(baseline, state.Snapshot)
+			} else {
+				effective = modeldiscovery.OverlaySnapshotMetadata(baseline, state.Snapshot)
+			}
+		} else if pc.Managed && !discoverySupported {
+			provider, ok := md.Provider(pc.Name)
+			if !ok {
+				pruned = true
+				h.logger.Warn("managed provider no longer exists in models.dev catalog; removing it from live catalog", "provider", pc.Name)
+				continue
+			}
+			effective = provider
 		}
+
 		cp := pc
 		cp.Models = make([]llm.ModelEntry, 0, len(pc.Models))
 		for _, entry := range pc.Models {
-			info, ok := provider.ModelInfo(entry.Name)
+			info, ok := effective.ModelInfo(entry.Name)
 			if !ok {
 				pruned = true
-				h.logger.Warn("managed model no longer exists in models.dev catalog; removing it from live catalog", "provider", pc.Name, "model", entry.Name, "catalog_provider", priceProvider)
+				h.logger.Warn("configured model is absent from authoritative model catalog; removing it from live catalog", "provider", pc.Name, "model", entry.Name)
 				continue
 			}
-			entry.Price = info.Price
-			entry.InputModalities = append([]string(nil), info.InputModalities...)
-			entry.ServiceTiers = llm.NormalizeServiceTiers(info.ServiceTiers)
+			configuredPrice := entry.Price
+			if info.ContextWindow > 0 {
+				entry.ContextWindow = info.ContextWindow
+			}
+			if info.OutputLimit > 0 {
+				entry.OutputLimit = info.OutputLimit
+			}
+			if len(info.InputModalities) > 0 {
+				entry.InputModalities = append([]string(nil), info.InputModalities...)
+			}
+			if hasState {
+				if direct, ok := state.Snapshot.Models[entry.Name]; ok && direct.InputModalitiesKnown {
+					entry.InputModalities = append([]string(nil), direct.InputModalities...)
+				}
+			}
+			if len(info.ServiceTiers) > 0 {
+				entry.ServiceTiers = llm.NormalizeServiceTiers(info.ServiceTiers)
+			}
+			if info.Reasoning != nil {
+				reasoning := info.Reasoning.Supported
+				entry.Reasoning = &reasoning
+				entry.ReasoningSummarySupported = info.Reasoning.SummarySupported
+				entry.ReasoningOptions = append([]llm.ReasoningOption(nil), info.Reasoning.Options...)
+			}
+			entry.Shape = info.Shape
+			switch {
+			case !pc.Managed:
+				entry.Price = configuredPrice
+			case pc.Name == modelcatalog.OpenAICodexProviderID:
+				entry.Price = llm.Price{}
+			case strings.TrimSpace(pc.PriceSource) != "":
+				entry.Price = llm.Price{}
+				if priceProvider, ok := md.Provider(pc.PriceSource); ok {
+					if priceInfo, ok := priceProvider.ModelInfo(entry.Name); ok {
+						entry.Price = priceInfo.Price
+					}
+				}
+			default:
+				entry.Price = info.Price
+			}
 			cp.Models = append(cp.Models, entry)
 		}
 		if len(cp.Models) == 0 {
 			pruned = true
-			h.logger.Warn("managed provider has no models remaining after models.dev refresh; removing it from live catalog", "provider", pc.Name, "catalog_provider", priceProvider)
+			h.logger.Warn("provider has no models remaining in authoritative model catalog; removing it from live catalog", "provider", pc.Name)
 			continue
 		}
 		out = append(out, cp)
 	}
 	return out, pruned
+}
+
+func snapshotHasPrice(snapshot modeldiscovery.Snapshot) bool {
+	for _, model := range snapshot.Models {
+		if model.Price != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func modelsDevContributesPrice(providers []llm.ProviderConfig, md *modelcatalog.Catalog, providerCatalogs map[string]modeldiscovery.State) bool {
+	for _, pc := range providers {
+		if !pc.Managed || pc.Name == modelcatalog.OpenAICodexProviderID {
+			continue
+		}
+		_, discoverySupported, _ := modeldiscovery.Resolve(pc)
+		state, hasState := providerCatalogs[pc.Name]
+		if hasState && state.Unsupported {
+			discoverySupported = false
+		}
+		// When direct discovery is disabled or unsupported, models.dev remains
+		// the authoritative catalog source even if a refresh removes the whole
+		// provider. Keep dating that catalog decision to the refresh itself.
+		if !discoverySupported {
+			return true
+		}
+		priceProvider := pc.Name
+		if strings.TrimSpace(pc.PriceSource) != "" {
+			priceProvider = pc.PriceSource
+		}
+		provider, ok := md.Provider(priceProvider)
+		if !ok {
+			continue
+		}
+		for _, entry := range pc.Models {
+			info, pricedByModelsDev := provider.ModelInfo(entry.Name)
+			if !pricedByModelsDev || info.Price.IsZero() {
+				continue
+			}
+			if strings.TrimSpace(pc.PriceSource) != "" || !hasState || !state.Authoritative || state.Unsupported {
+				return true
+			}
+			direct, present := state.Snapshot.Models[entry.Name]
+			if present && direct.Price == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func cloneProviderCatalogStates(in map[string]modeldiscovery.State) map[string]modeldiscovery.State {
+	out := make(map[string]modeldiscovery.State, len(in))
+	for provider, state := range in {
+		out[provider] = cloneProviderCatalogState(state)
+	}
+	return out
+}
+
+func cloneProviderCatalogState(state modeldiscovery.State) modeldiscovery.State {
+	snapshot := state.Snapshot
+	snapshot.Models = make(map[string]modeldiscovery.Model, len(state.Snapshot.Models))
+	for id, model := range state.Snapshot.Models {
+		model.InputModalities = append([]string(nil), model.InputModalities...)
+		model.ReasoningOptions = append([]llm.ReasoningOption(nil), model.ReasoningOptions...)
+		model.ServiceTiers = append([]llm.ServiceTier(nil), model.ServiceTiers...)
+		snapshot.Models[id] = model
+	}
+	return modeldiscovery.State{Snapshot: snapshot, Authoritative: state.Authoritative, Unsupported: state.Unsupported}
 }
 
 func configuredTargetCount(providers []llm.ProviderConfig) int {
@@ -681,15 +868,6 @@ func modelsDevModelInfo(md *modelcatalog.Catalog, providerID, modelID string) (l
 		return llm.ModelInfo{}, false
 	}
 	return info, true
-}
-
-func anyManagedProvider(providers []llm.ProviderConfig) bool {
-	for _, pc := range providers {
-		if pc.Managed {
-			return true
-		}
-	}
-	return false
 }
 
 // providerConfigSourceDate returns the newest modification time among the

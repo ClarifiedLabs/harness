@@ -30,10 +30,10 @@ type ProviderConfig struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key"`
 	// Managed marks a config written by `--setup`/`--refresh-models`. Managed
-	// configs omit per-model pricing schedules; the proxy resolves prices live
-	// from the in-memory models.dev cache or provider-specific pricers. A config
-	// lacking this flag (e.g. a hand-written one) is treated as manual and keeps
-	// its own configured prices.
+	// configs omit per-model pricing schedules; the proxy resolves availability,
+	// metadata, and prices from provider-direct catalogs with models.dev and
+	// provider-specific pricing fallbacks. A config lacking this flag (e.g. a
+	// hand-written one) is treated as manual and keeps its configured entries.
 	Managed bool `json:"managed,omitempty"`
 	// PriceSource overrides which models.dev provider id a managed config's prices
 	// are resolved from. Empty means "this provider's own name". It exists so a
@@ -61,7 +61,20 @@ type ProviderConfig struct {
 	ServiceTiers            []ServiceTier     `json:"service_tiers,omitempty"`
 	APIKeyEnv               []string          `json:"api_key_env"`
 	Auth                    *auth.Config      `json:"auth,omitempty"`
-	Models                  []ModelEntry      `json:"models"`
+	// ModelDiscovery controls provider-direct model catalog discovery. Nil uses
+	// the model proxy's provider and dialect defaults.
+	ModelDiscovery *ModelDiscoveryConfig `json:"model_discovery,omitempty"`
+	Models         []ModelEntry          `json:"models"`
+}
+
+// ModelDiscoveryConfig overrides provider-direct model catalog discovery.
+// Pointer booleans preserve the distinction between an omitted default and an
+// explicit false value.
+type ModelDiscoveryConfig struct {
+	Enabled              *bool  `json:"enabled,omitempty"`
+	URL                  string `json:"url,omitempty"`
+	Format               string `json:"format,omitempty"`
+	IncludeUnknownModels *bool  `json:"include_unknown_models,omitempty"`
 }
 
 // ReasoningReplay controls how much historical reasoning state a dialect

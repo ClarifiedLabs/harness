@@ -20,28 +20,30 @@ const (
 
 type Catalog struct {
 	Targets []Target `json:"targets"`
-	// Pricing dates the catalog's prices against the models.dev data that backed
-	// the most recent setup/refresh, so clients can warn when prices are older
-	// than the proxy's refresh interval. Nil when the proxy cannot date them.
+	// Pricing dates the catalog's prices against the provider-direct, models.dev,
+	// or configured data that supplied them. Nil when the proxy cannot date them.
 	Pricing *PricingInfo `json:"pricing,omitempty"`
 }
 
-// PricingInfo describes how fresh a catalog's prices are. The proxy derives its
-// catalog from provider config plus the validated models.dev cache and swaps a
-// rebuilt snapshot after an enabled cache refresh.
+// PricingInfo describes how fresh a catalog's prices are across all sources.
 type PricingInfo struct {
-	// SourceDate is when the price data behind the catalog was last written
-	// (the newest provider config modification time).
+	// SourceDate is the oldest update time among sources that supplied prices.
 	SourceDate time.Time `json:"source_date"`
 	// MaxAgeSeconds is the proxy's configured models.dev refresh interval in
 	// seconds. Prices older than this are stale. Zero when no TTL is configured.
 	MaxAgeSeconds int64 `json:"max_age_seconds,omitempty"`
+	// ExpiresAt is the earliest expiry among the catalog sources that supplied
+	// prices. It permits mixed provider and models.dev refresh intervals.
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
 }
 
 // Stale reports whether the catalog's pricing is older than its refresh
-// interval as of now. It returns false when the source date or max age is
-// unknown, so callers never warn without a basis.
+// interval as of now. ExpiresAt takes precedence for mixed source intervals. It
+// returns false when no expiry basis is known.
 func (p *PricingInfo) Stale(now time.Time) bool {
+	if p != nil && !p.ExpiresAt.IsZero() {
+		return now.After(p.ExpiresAt)
+	}
 	if p == nil || p.SourceDate.IsZero() || p.MaxAgeSeconds <= 0 {
 		return false
 	}

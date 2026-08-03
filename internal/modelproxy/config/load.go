@@ -142,7 +142,7 @@ func CheckLocalReferences(result Result, getenv func(string) string, warn func(s
 }
 
 func validateIntegerDurationRanges(present map[string]json.RawMessage) error {
-	for _, key := range []string{"models_dev_cache_ttl", "drain_delay", "shutdown_timeout"} {
+	for _, key := range []string{"models_dev_cache_ttl", "provider_models_cache_ttl", "drain_delay", "shutdown_timeout"} {
 		raw, ok := present[key]
 		if !ok {
 			continue
@@ -216,6 +216,13 @@ func resolveDurations(result *Result, file server.Config, flags cli.Values, gete
 	}
 	result.Config.ModelsDevCacheTTL = server.Duration{Duration: modelsTTL, Set: true}
 	result.Sources["models_dev_cache_ttl"] = sourceForPath(source, result.Path)
+
+	providerModelsTTL, source, err := resolveDuration("provider-models-cache-ttl", "provider_models_cache_ttl", flags, "", file.ProviderModelsCacheTTL, time.Hour)
+	if err != nil {
+		return err
+	}
+	result.Config.ProviderModelsCacheTTL = server.Duration{Duration: providerModelsTTL, Set: true}
+	result.Sources["provider_models_cache_ttl"] = sourceForPath(source, result.Path)
 
 	drain, source, err := resolveDuration("drain-delay", "drain_delay", flags, getenv(drainDelayEnvironment), file.DrainDelay, 5*time.Second)
 	if err != nil {

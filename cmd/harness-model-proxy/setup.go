@@ -1,5 +1,5 @@
 // Setup wizard and provider-config refresh for harness-model-proxy: the
-// `harness-model-proxy setup` interactive flow (models.dev-backed
+// `harness-model-proxy setup` interactive flow (provider/models.dev-backed
 // provider/model pickers) and the `refresh-models` re-sync of provider config
 // files. Split from main.go so the entrypoint stays focused on serving HTTP.
 package main
@@ -16,19 +16,22 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"harness/internal/auth"
 	"harness/internal/llm"
 	"harness/internal/logging"
 	"harness/internal/modelcatalog"
+	"harness/internal/modelproxy/modeldiscovery"
 	"harness/internal/ui"
 )
 
 type setupMainConfig struct {
-	ProviderConfigs      []string `json:"provider_configs"`
-	DefaultContextWindow int      `json:"default_context_window"`
-	LogLevel             string   `json:"log_level,omitempty"`
-	LogFormat            string   `json:"log_format,omitempty"`
+	ProviderConfigs        []string `json:"provider_configs"`
+	DefaultContextWindow   int      `json:"default_context_window"`
+	ProviderModelsCacheTTL string   `json:"provider_models_cache_ttl,omitempty"`
+	LogLevel               string   `json:"log_level,omitempty"`
+	LogFormat              string   `json:"log_format,omitempty"`
 }
 
 type setupProviderConfig struct {
@@ -52,17 +55,18 @@ type setupProviderConfig struct {
 	ReasoningReplay llm.ReasoningReplay `json:"reasoning_replay,omitempty"`
 	// UsageInputIncludesCache marks Anthropic-compatible endpoints that report
 	// input_tokens including cached tokens; see llm.ProviderConfig.
-	UsageInputIncludesCache bool                  `json:"usage_input_includes_cache,omitempty"`
-	MinOutputTokens         int                   `json:"min_output_tokens,omitempty"`
-	PromptCache             llm.PromptCacheConfig `json:"prompt_cache,omitempty"`
-	ResponsesStateful       *bool                 `json:"responses_stateful,omitempty"`
-	ResponsesWebSocket      *bool                 `json:"responses_websocket,omitempty"`
-	InteractionsStateful    *bool                 `json:"interactions_stateful,omitempty"`
-	ServerTools             []string              `json:"server_tools,omitempty"`
-	ServiceTiers            []llm.ServiceTier     `json:"service_tiers,omitempty"`
-	APIKeyEnv               []string              `json:"api_key_env,omitempty"`
-	Auth                    *auth.Config          `json:"auth,omitempty"`
-	Models                  []setupModelConfig    `json:"models"`
+	UsageInputIncludesCache bool                      `json:"usage_input_includes_cache,omitempty"`
+	MinOutputTokens         int                       `json:"min_output_tokens,omitempty"`
+	PromptCache             llm.PromptCacheConfig     `json:"prompt_cache,omitempty"`
+	ResponsesStateful       *bool                     `json:"responses_stateful,omitempty"`
+	ResponsesWebSocket      *bool                     `json:"responses_websocket,omitempty"`
+	InteractionsStateful    *bool                     `json:"interactions_stateful,omitempty"`
+	ServerTools             []string                  `json:"server_tools,omitempty"`
+	ServiceTiers            []llm.ServiceTier         `json:"service_tiers,omitempty"`
+	APIKeyEnv               []string                  `json:"api_key_env,omitempty"`
+	Auth                    *auth.Config              `json:"auth,omitempty"`
+	ModelDiscovery          *llm.ModelDiscoveryConfig `json:"model_discovery,omitempty"`
+	Models                  []setupModelConfig        `json:"models"`
 }
 
 type setupModelConfig struct {
@@ -140,6 +144,26 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 			apiKey = existingProvider.Config.APIKey
 		}
 	}
+	discoveryConfig := providerMeta.ProviderConfig(apiKey)
+	discoveryConfig.Name = providerMeta.ID
+	discoveryConfig.APIType = setupProviderAPIType(providerMeta)
+	discoveryConfig.BaseURL = setupProviderBaseURL(providerMeta)
+	discoveryConfig.Auth = authCfg
+	discoveryConfig.Managed = true
+	discoveryConfig.ModelDiscovery = existingProvider.Config.ModelDiscovery
+	var previous *modeldiscovery.Snapshot
+	if cached, cacheErr := modeldiscovery.ReadProviderCache(dir, discoveryConfig.Name, discoveryConfig.BaseURL); cacheErr == nil {
+		previous = &cached
+	}
+	setupBaseline := providerMeta
+	if updatingProvider {
+		setupBaseline = modeldiscovery.OverlayProvider(modeldiscovery.ProviderFromConfig(existingProvider.Config), providerMeta)
+	}
+	if snapshot, discoveryErr := fetchProviderModelCatalog(ctx, env, dir, discoveryConfig, previous); discoveryErr == nil {
+		providerMeta = modeldiscovery.MergeProvider(setupBaseline, snapshot)
+	} else if !errors.Is(discoveryErr, modeldiscovery.ErrNoCredentials) && !errors.Is(discoveryErr, modeldiscovery.ErrUnsupported) {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: setup: warning: provider model discovery failed for %q: %v; using catalog metadata\n", providerMeta.ID, discoveryErr)
+	}
 	models, err := promptModelSelection(reader, env.stdout, providerMeta, setupConfiguredModelSet(existingProvider.Config.Models), setupPageSize(env))
 	if err != nil {
 		return err
@@ -150,6 +174,7 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	}
 
 	provider := setupProviderFromCatalog(providerMeta, apiKey, authCfg, models)
+	provider.ModelDiscovery = existingProvider.Config.ModelDiscovery
 	preserveReasoningReplayDomains(existingProvider.Config.Models, provider.Models)
 	if existingProvider.Config.OmitMaxOutputTokens {
 		provider.OmitMaxOutputTokens = true
@@ -177,11 +202,16 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	}
 	applySyntheticProviderDefaults(providerMeta, &provider)
 
+	providerModelsTTL := time.Hour
+	if env.providerModelsCacheTTL != nil {
+		providerModelsTTL = *env.providerModelsCacheTTL
+	}
 	mainConfig := setupMainConfig{
-		ProviderConfigs:      []string{providerFile},
-		DefaultContextWindow: llm.DefaultContextWindow,
-		LogLevel:             logging.LevelInfo,
-		LogFormat:            logging.FormatJSON,
+		ProviderConfigs:        []string{providerFile},
+		DefaultContextWindow:   llm.DefaultContextWindow,
+		ProviderModelsCacheTTL: providerModelsTTL.String(),
+		LogLevel:               logging.LevelInfo,
+		LogFormat:              logging.FormatJSON,
 	}
 
 	var configBody any = mainConfig
@@ -238,19 +268,20 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 	if len(files) == 0 {
 		return fmt.Errorf("%s has no provider_configs", cfgPath)
 	}
-	catalog, err := refreshCatalog(ctx, env, filepath.Dir(cfgPath))
+	dir := filepath.Dir(cfgPath)
+	catalog, err := refreshCatalog(ctx, env, dir)
 	if err != nil {
 		return err
 	}
 
-	dir := filepath.Dir(cfgPath)
-	var codexProvider *modelcatalog.Provider
-	// Files kept after refresh, in original order. Provider files whose every
-	// provider disappeared from the catalog are deleted and dropped from this
-	// list so a stale reference does not fail the next refresh; when any file is
-	// dropped the main config's provider_configs is rewritten to match.
-	remainingFiles := make([]string, 0, len(files))
-	removedFiles := false
+	type refreshFile struct {
+		file      string
+		path      string
+		providers []llm.ProviderConfig
+		missing   bool
+		updated   []setupProviderConfig
+	}
+	loaded := make([]refreshFile, 0, len(files))
 	for _, file := range files {
 		path := file
 		if !filepath.IsAbs(path) {
@@ -259,7 +290,7 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 		data, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider config %s no longer exists; removing its reference\n", file)
-			removedFiles = true
+			loaded = append(loaded, refreshFile{file: file, path: path, missing: true})
 			continue
 		}
 		if err != nil {
@@ -272,84 +303,127 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 		if len(providers) == 0 {
 			return fmt.Errorf("%s has no providers", path)
 		}
-		updated := make([]setupProviderConfig, 0, len(providers))
-		for _, current := range providers {
+		loaded = append(loaded, refreshFile{file: file, path: path, providers: providers})
+	}
+
+	var codexProvider *modelcatalog.Provider
+	var fetchedSnapshots []modeldiscovery.Snapshot
+	for i := range loaded {
+		if loaded[i].missing {
+			continue
+		}
+		loaded[i].updated = make([]setupProviderConfig, 0, len(loaded[i].providers))
+		for _, current := range loaded[i].providers {
 			if current.Name == "" {
-				return fmt.Errorf("%s has provider without name", path)
+				return fmt.Errorf("%s has provider without name", loaded[i].path)
 			}
 			if current.Name == modelcatalog.OpenAICodexProviderID && codexProvider == nil {
-				refreshed, err := refreshCodexProvider(ctx, env, dir)
+				cached, err := setupCodexProvider(env, dir)
 				if err != nil {
 					return err
 				}
-				codexProvider = &refreshed
+				codexProvider = &cached
 			}
-			meta, ok := setupCatalogProvider(catalog, codexProvider, current.Name)
-			if !ok {
-				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider %q from %s is no longer in the model catalog; removing it\n", current.Name, path)
-				continue
+
+			baseline := modeldiscovery.ProviderFromConfig(current)
+			meta, inCatalog := setupCatalogProvider(catalog, codexProvider, current.Name)
+			if inCatalog {
+				baseline = modeldiscovery.OverlayProvider(baseline, meta)
 			}
-			if setupProviderAPIType(meta) == "" || setupProviderBaseURL(meta) == "" {
-				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider %q from %s is no longer supported by harness; removing it\n", current.Name, path)
-				continue
+			effective := baseline
+			spec, discoverySupported, resolveErr := modeldiscovery.Resolve(current)
+			if resolveErr != nil {
+				return resolveErr
 			}
-			updatedModels, missing := refreshConfiguredModels(meta, current.Models)
+			_ = spec
+			authoritative := false
+			var previous *modeldiscovery.Snapshot
+			if cached, cacheErr := modeldiscovery.ReadProviderCache(dir, current.Name, current.BaseURL); cacheErr == nil {
+				if cached.Format == spec.Format && cached.Endpoint == spec.Endpoint && cached.IncludeUnknownModels == spec.IncludeUnknownModels {
+					previous = &cached
+				}
+			}
+			if discoverySupported {
+				snapshot, discoveryErr := providerModelFetcher(env, dir).Fetch(ctx, current, previous)
+				switch {
+				case discoveryErr == nil:
+					effective = modeldiscovery.MergeProvider(baseline, snapshot)
+					authoritative = true
+					fetchedSnapshots = append(fetchedSnapshots, snapshot)
+				case errors.Is(discoveryErr, context.Canceled):
+					return discoveryErr
+				case errors.Is(discoveryErr, modeldiscovery.ErrUnsupported):
+					discoverySupported = false
+					fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider %q does not support model discovery; using models.dev availability\n", current.Name)
+				default:
+					if previous != nil {
+						effective = modeldiscovery.OverlaySnapshotMetadata(baseline, *previous)
+					}
+					fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider model discovery failed for %q: %v; preserving configured models\n", current.Name, discoveryErr)
+				}
+			}
+			if !authoritative && !discoverySupported {
+				if !inCatalog {
+					fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider %q from %s is no longer in the model catalog; removing it\n", current.Name, loaded[i].path)
+					continue
+				}
+				if setupProviderAPIType(meta) == "" || setupProviderBaseURL(meta) == "" {
+					fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider %q from %s is no longer supported by harness; removing it\n", current.Name, loaded[i].path)
+					continue
+				}
+				effective = meta
+			}
+
+			updatedModels, missing := refreshConfiguredModels(effective, current.Models)
 			for _, name := range missing {
-				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: model %q of provider %q from %s is no longer in the model catalog; removing it\n", name, current.Name, path)
+				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: model %q of provider %q from %s is no longer in the model catalog (using authoritative provider availability); removing it\n", name, current.Name, loaded[i].path)
 			}
 			if len(updatedModels) == 0 {
-				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider %q from %s has no models remaining after refresh; removing it\n", current.Name, path)
+				fmt.Fprintf(env.stderr, "harness-model-proxy: refresh-models: warning: provider %q from %s has no models remaining after refresh; removing it\n", current.Name, loaded[i].path)
 				continue
 			}
-			next := setupProviderFromCatalog(meta, current.APIKey, current.Auth, updatedModels)
-			preserveReasoningReplayDomains(current.Models, next.Models)
-			if current.OmitMaxOutputTokens {
-				next.OmitMaxOutputTokens = true
+			var catalogMeta *modelcatalog.Provider
+			if inCatalog && setupProviderAPIType(meta) != "" && setupProviderBaseURL(meta) != "" {
+				catalogMeta = &meta
 			}
-			if current.ReasoningReplay != "" {
-				next.ReasoningReplay = current.ReasoningReplay
-			}
-			if current.UsageInputIncludesCache {
-				next.UsageInputIncludesCache = true
-			}
-			if current.MinOutputTokens > 0 {
-				next.MinOutputTokens = current.MinOutputTokens
-			}
-			next.PromptCache = current.PromptCache
-			if current.ResponsesStateful != nil {
-				next.ResponsesStateful = current.ResponsesStateful
-			}
-			if current.ResponsesWebSocket != nil {
-				next.ResponsesWebSocket = current.ResponsesWebSocket
-			}
-			if current.InteractionsStateful != nil {
-				next.InteractionsStateful = current.InteractionsStateful
-			}
-			if len(current.ServiceTiers) > 0 {
-				next.ServiceTiers = llm.NormalizeServiceTiers(current.ServiceTiers)
-			}
-			applySyntheticProviderDefaults(meta, &next)
-			updated = append(updated, next)
+			loaded[i].updated = append(loaded[i].updated, setupProviderFromCurrent(current, catalogMeta, updatedModels))
 		}
-		if len(updated) == 0 {
-			// Every provider in this file was removed: delete the now-empty file
-			// rather than write an unloadable config, and drop its reference below.
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			fmt.Fprintf(env.stdout, "Removed %s\n", path)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, snapshot := range fetchedSnapshots {
+		if err := modeldiscovery.WriteCache(dir, snapshot); err != nil {
+			return err
+		}
+	}
+
+	remainingFiles := make([]string, 0, len(files))
+	removedFiles := false
+	for _, file := range loaded {
+		if file.missing {
 			removedFiles = true
 			continue
 		}
-		remainingFiles = append(remainingFiles, file)
-		var body any = updated
-		if len(updated) == 1 {
-			body = updated[0]
+		if len(file.updated) == 0 {
+			// Every provider in this file was removed: delete the now-empty file
+			// rather than write an unloadable config, and drop its reference below.
+			if err := os.Remove(file.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			fmt.Fprintf(env.stdout, "Removed %s\n", file.path)
+			removedFiles = true
+			continue
 		}
-		if err := writeJSONFileAtomic(path, body); err != nil {
+		remainingFiles = append(remainingFiles, file.file)
+		var body any = file.updated
+		if len(file.updated) == 1 {
+			body = file.updated[0]
+		}
+		if err := writeJSONFileAtomic(file.path, body); err != nil {
 			return err
 		}
-		fmt.Fprintf(env.stdout, "Updated %s\n", path)
+		fmt.Fprintf(env.stdout, "Updated %s\n", file.path)
 	}
 	if removedFiles {
 		if err := setJSONField(raw, "provider_configs", remainingFiles); err != nil {
@@ -365,6 +439,153 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 
 func refreshCatalog(ctx context.Context, env environment, configDir string) (*modelcatalog.Catalog, error) {
 	return refreshModelsDevCatalog(ctx, env, configDir, "refresh-models")
+}
+
+func refreshProviderAfterLogin(ctx context.Context, env environment, cfgPath string, current llm.ProviderConfig) error {
+	dir := filepath.Dir(cfgPath)
+	var catalog *modelcatalog.Catalog
+	if cached, _ := loadModelsDevCacheForServe(dir); cached != nil {
+		catalog = cached
+	} else {
+		fallback, err := modelcatalog.ModelsDevFallback()
+		if err != nil {
+			return err
+		}
+		catalog = fallback
+	}
+	var codexProvider *modelcatalog.Provider
+	if current.Name == modelcatalog.OpenAICodexProviderID {
+		provider, err := setupCodexProvider(env, dir)
+		if err != nil {
+			return err
+		}
+		codexProvider = &provider
+	}
+	baseline := modeldiscovery.ProviderFromConfig(current)
+	meta, inCatalog := setupCatalogProvider(catalog, codexProvider, current.Name)
+	if inCatalog {
+		baseline = modeldiscovery.OverlayProvider(baseline, meta)
+	}
+	var previous *modeldiscovery.Snapshot
+	if cached, err := modeldiscovery.ReadProviderCache(dir, current.Name, current.BaseURL); err == nil {
+		previous = &cached
+	}
+	snapshot, err := providerModelFetcher(env, dir).Fetch(ctx, current, previous)
+	if err != nil {
+		return err
+	}
+	effective := modeldiscovery.MergeProvider(baseline, snapshot)
+	models, missing := refreshConfiguredModels(effective, current.Models)
+	if err := modeldiscovery.WriteCache(dir, snapshot); err != nil {
+		return err
+	}
+	if len(models) == 0 {
+		return fmt.Errorf("authenticated catalog contains none of the configured models; configuration was preserved")
+	}
+	var catalogMeta *modelcatalog.Provider
+	if inCatalog && setupProviderAPIType(meta) != "" && setupProviderBaseURL(meta) != "" {
+		catalogMeta = &meta
+	}
+	next := setupProviderFromCurrent(current, catalogMeta, models)
+	if err := replaceProviderConfig(cfgPath, current.Name, next); err != nil {
+		return err
+	}
+	for _, name := range missing {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: auth login: warning: configured model %q is absent from the authenticated catalog; removing it\n", name)
+	}
+	fmt.Fprintf(env.stdout, "Refreshed configured models for %s; rerun setup to enable newly discovered models.\n", current.Name)
+	return nil
+}
+
+func replaceProviderConfig(configPath, providerName string, replacement setupProviderConfig) error {
+	mainData, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+	var mainRaw map[string]json.RawMessage
+	if err := json.Unmarshal(mainData, &mainRaw); err != nil {
+		return err
+	}
+	files, err := setupProviderConfigs(mainRaw["provider_configs"])
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(configPath)
+	for _, file := range files {
+		path := file
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(dir, file)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		updated, found, err := replaceProviderConfigData(data, providerName, replacement)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		if found {
+			return writeBytesAtomic(path, updated, true)
+		}
+	}
+	return fmt.Errorf("provider %q is not present in its configured provider files", providerName)
+}
+
+func replaceProviderConfigData(data []byte, providerName string, replacement setupProviderConfig) ([]byte, bool, error) {
+	replacementData, err := json.Marshal(replacement)
+	if err != nil {
+		return nil, false, err
+	}
+	var array []json.RawMessage
+	if err := json.Unmarshal(data, &array); err == nil {
+		found, err := replaceProviderRaw(array, providerName, replacementData)
+		if err != nil || !found {
+			return nil, found, err
+		}
+		updated, err := json.MarshalIndent(array, "", "  ")
+		return updated, true, err
+	}
+	var wrapper map[string]json.RawMessage
+	if err := json.Unmarshal(data, &wrapper); err == nil && wrapper["providers"] != nil {
+		var providers []json.RawMessage
+		if err := json.Unmarshal(wrapper["providers"], &providers); err != nil {
+			return nil, false, err
+		}
+		found, err := replaceProviderRaw(providers, providerName, replacementData)
+		if err != nil || !found {
+			return nil, found, err
+		}
+		providerData, err := json.Marshal(providers)
+		if err != nil {
+			return nil, false, err
+		}
+		wrapper["providers"] = providerData
+		updated, err := json.MarshalIndent(wrapper, "", "  ")
+		return updated, true, err
+	}
+	var one llm.ProviderConfig
+	if err := json.Unmarshal(data, &one); err != nil {
+		return nil, false, err
+	}
+	if one.Name != providerName {
+		return nil, false, nil
+	}
+	updated, err := json.MarshalIndent(replacement, "", "  ")
+	return updated, true, err
+}
+
+func replaceProviderRaw(providers []json.RawMessage, providerName string, replacement []byte) (bool, error) {
+	for i, raw := range providers {
+		var pc llm.ProviderConfig
+		if err := json.Unmarshal(raw, &pc); err != nil {
+			return false, err
+		}
+		if pc.Name == providerName {
+			providers[i] = append(json.RawMessage(nil), replacement...)
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func updatedSetupConfig(path, providerFile string, force bool, allowExisting bool) (map[string]json.RawMessage, error) {
@@ -495,6 +716,61 @@ func setupProviderFromCatalog(provider modelcatalog.Provider, apiKey string, aut
 		Auth:        authCfg,
 		Models:      entries,
 	}
+}
+
+func setupProviderFromCurrent(current llm.ProviderConfig, meta *modelcatalog.Provider, models []modelcatalog.Model) setupProviderConfig {
+	var next setupProviderConfig
+	if meta != nil {
+		next = setupProviderFromCatalog(*meta, current.APIKey, current.Auth, models)
+	} else {
+		entries := make([]setupModelConfig, 0, len(models))
+		for _, model := range models {
+			entries = append(entries, setupModelFromCatalog(model))
+		}
+		next = setupProviderConfig{
+			Name: current.Name, APIType: current.APIType, BaseURL: current.BaseURL,
+			APIKey: current.APIKey, Managed: true, APIKeyEnv: append([]string(nil), current.APIKeyEnv...),
+			Auth: current.Auth, Models: entries,
+		}
+	}
+	next.PriceSource = current.PriceSource
+	if current.Name == modelcatalog.OpenAICodexProviderID {
+		next.PriceSource = ""
+	}
+	if current.OmitMaxOutputTokens {
+		next.OmitMaxOutputTokens = true
+	}
+	if current.ReasoningReplay != "" {
+		next.ReasoningReplay = current.ReasoningReplay
+	}
+	if current.UsageInputIncludesCache {
+		next.UsageInputIncludesCache = true
+	}
+	if current.MinOutputTokens > 0 {
+		next.MinOutputTokens = current.MinOutputTokens
+	}
+	next.PromptCache = current.PromptCache
+	if current.ResponsesStateful != nil {
+		next.ResponsesStateful = current.ResponsesStateful
+	}
+	if current.ResponsesWebSocket != nil {
+		next.ResponsesWebSocket = current.ResponsesWebSocket
+	}
+	if current.InteractionsStateful != nil {
+		next.InteractionsStateful = current.InteractionsStateful
+	}
+	if len(current.ServiceTiers) > 0 {
+		next.ServiceTiers = llm.NormalizeServiceTiers(current.ServiceTiers)
+	}
+	if len(current.ServerTools) > 0 {
+		next.ServerTools = llm.NormalizeServerTools(current.ServerTools)
+	}
+	next.ModelDiscovery = current.ModelDiscovery
+	preserveReasoningReplayDomains(current.Models, next.Models)
+	if meta != nil {
+		applySyntheticProviderDefaults(*meta, &next)
+	}
+	return next
 }
 
 func preserveReasoningReplayDomains(current []llm.ModelEntry, next []setupModelConfig) {

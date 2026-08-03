@@ -46,6 +46,11 @@ func runAuthAction(env environment, invocation cli.Invocation) int {
 			Stdout:    env.stdout,
 			Stderr:    env.stderr,
 		})
+		if err == nil {
+			if refreshErr := refreshProviderAfterLogin(ctx, env, cfgPath, pc); refreshErr != nil {
+				fmt.Fprintf(env.stderr, "harness-model-proxy: auth login: warning: provider model refresh failed for %q: %v; login remains valid\n", pc.Name, refreshErr)
+			}
+		}
 	case "logout":
 		err = auth.Logout(*pc.Auth, configDir, pc.Name)
 		if err == nil {

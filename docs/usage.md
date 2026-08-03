@@ -783,6 +783,7 @@ no network requests and does not mutate configuration or managed state.
 | `log_level` | `string` | `debug`, `info`, `warn`, `error` | `-log-level` | - | `log_level` | info | no | Proxy log level. |
 | `log_format` | `string` | `json`, `text` | `-log-format` | - | `log_format` | json | no | Proxy log format. |
 | `models_dev_cache_ttl` | `duration` | - | `-models-dev-cache-ttl` | - | `models_dev_cache_ttl` | 24h | no | models.dev cache refresh interval; zero disables periodic refresh. |
+| `provider_models_cache_ttl` | `duration` | - | `-provider-models-cache-ttl` | - | `provider_models_cache_ttl` | 1h | no | Authenticated provider model catalog refresh interval; zero disables background refresh. |
 | `drain_delay` | `duration` | - | `-drain-delay` | `HARNESS_MODEL_PROXY_DRAIN_DELAY` | `drain_delay` | 5s | no | Readiness propagation delay before API shutdown. |
 | `shutdown_timeout` | `duration` | - | `-shutdown-timeout` | `HARNESS_MODEL_PROXY_SHUTDOWN_TIMEOUT` | `shutdown_timeout` | 5m | no | Maximum graceful stream drain time. |
 | `instance_id` | `string` | - | `-instance-id` | `HARNESS_MODEL_PROXY_INSTANCE_ID` | `instance_id` | derived: generated at startup | no | Proxy instance identifier. |
@@ -794,11 +795,14 @@ no network requests and does not mutate configuration or managed state.
 ### Setup
 
 Run `harness-model-proxy setup` to create a proxy config and a provider config
-from models.dev, append a new provider config to an existing proxy config, or
+from provider and models.dev metadata, append a new provider config to an existing proxy config, or
 update an existing configured provider without configuring a proxy default model.
 Setup lists harness-supported providers, prompts for the API key when the
-provider needs one, then lets you choose which provider models are available
-locally. If models.dev omits a provider API URL, setup can still derive
+provider needs one, queries the provider's authenticated model-list endpoint
+when supported, then lets you choose which provider models are available
+locally. Newly discovered models are choices, not automatically enabled. If
+direct discovery is unavailable, setup uses models.dev plus the Codex fallback
+catalog. If models.dev omits a provider API URL, setup can still derive
 first-party OpenAI and Anthropic defaults from exact `@ai-sdk/openai` and
 `@ai-sdk/anthropic` package metadata, and maps plain `@ai-sdk/google` to
 the native Gemini Interactions endpoint. Managed Google configs use
@@ -826,6 +830,12 @@ After setup, run:
 harness-model-proxy auth login openai-codex
 ```
 
+A successful OAuth login immediately refreshes that provider's configured
+allowlist and caches the authenticated catalog. Models absent from a complete
+response are removed; newly discovered models remain disabled until setup is
+run again. Failure to refresh the catalog is only a warning and does not undo a
+successful login.
+
 The `kimi-for-coding` provider is deliberately configured with
 `api_type:"openai"` even though models.dev lists the Anthropic SDK package.
 Kimi for Coding serves both protocols off one base URL (OpenAI at
@@ -848,6 +858,29 @@ failing process and keyed by a digest of the rejected refresh token; they are
 never written into the shared token file. A replica rereads the file before
 returning that cached failure and immediately after a terminal refresh response,
 so it can adopt a valid token rotated by a peer without overwriting it.
+
+Provider configs also accept an optional model-discovery override:
+
+```json
+{
+  "model_discovery": {
+    "enabled": true,
+    "url": "https://provider.example/v1/models",
+    "format": "openai",
+    "include_unknown_models": false
+  }
+}
+```
+
+With no block, managed providers are detected from their name, dialect, and
+base URL. Supported formats are `openai`, `openrouter`, `codex`, `anthropic`,
+and `gemini`; the override URL must be an absolute HTTP(S) URL without userinfo
+or a fragment. Set `enabled:false` to use catalog-only availability. Generic
+OpenAI-compatible ID-only responses validate configured/models.dev models but
+do not introduce unknown models. Rich capability fields can establish that a
+new model is generative; Sakana and the provider-specific adapters trust their
+generative-only results. `include_unknown_models` explicitly overrides that
+policy.
 
 Provider configs may also set `prompt_cache` to control how the stable harness
 conversation cache key is sent to OpenAI-compatible backends. This cache
@@ -950,13 +983,16 @@ and `["text", "image"]` for models that accept image attachments.
 
 Provider config files written by `setup` and `refresh-models` are managed
 (`"managed": true`) and store no per-model prices. The proxy resolves their
-prices and input modalities from the models.dev cache, so a cache refresh updates
-served metadata without re-running setup or restarting. Providers or models no
-longer present in that cache are warned about and removed from the live catalog.
+prices and missing metadata from authenticated provider catalogs and models.dev,
+so cache refreshes update served metadata without re-running setup or restarting.
+A fresh, complete provider response controls availability. A failed provider
+request preserves the last successful snapshot and configured allowlist; an
+auto-detected 404/405 falls back to models.dev availability. Background refresh
+only hides confirmed-absent targets in memory and never rewrites provider files.
 A hand-written config without `"managed": true` is manual: the proxy does not
 edit it and uses its own `price` and `input_modalities` entries. A managed config
-may set `price_source` to resolve metadata from a different models.dev provider
-ID.
+may set `price_source` to resolve prices from a different models.dev provider
+ID; it does not change availability or capability metadata.
 
 `harness-model-proxy` stores every models.dev provider and model, projected to
 the metadata harness consumes, at
@@ -974,14 +1010,27 @@ unused upstream fields before saving the previous cache to
 `models.dev.api.json.bak` and replacing the active cache; that single backup is
 overwritten each time.
 
-Run `harness-model-proxy refresh-models` to fetch and cache the latest live
-`models.dev` catalog, then refresh metadata for the currently configured model
-allowlists while preserving stored API keys. If live fetch fails, refresh uses a
-parseable local cache before falling back to the vendored snapshot. Configured
-providers or models that no longer exist in the catalog (or providers harness can
-no longer support) are reported with a warning and removed rather than failing the
-refresh: a missing model is dropped, and a provider that loses all its models is
-deleted along with its `provider_configs` reference.
+Authenticated provider snapshots are stored with mode `0600` under
+`~/.config/harness-model-proxy/provider-models/`. The serving process loads
+fresh snapshots as availability authorities and stale snapshots as metadata
+only, then refreshes supported authenticated managed providers immediately and
+every `provider_models_cache_ttl` (`1h` by default). Set the value to `0` to
+disable background provider polling; setup, `refresh-models`, and post-login
+refreshes still query providers explicitly. OpenAI-compatible providers use
+`/models`; OpenRouter, Anthropic, Gemini, and ChatGPT Codex use their
+provider-specific authentication, response, and pagination contracts.
+
+Run `harness-model-proxy refresh-models` to fetch models.dev and query every
+supported provider with working credentials before rewriting provider files.
+A complete provider response is authoritative for the existing allowlist: it
+removes configured models that disappeared but never adds newly discovered
+models. Authentication, transport, decoding, empty-result, or incomplete-
+pagination failures preserve that provider's entire configured allowlist and
+emit a warning. Providers without a supported endpoint, explicit
+`model_discovery.enabled:false`, and auto-detected 404/405 responses use
+models.dev availability. A provider that loses every model is deleted along
+with its `provider_configs` reference. Stored API keys, auth blocks, discovery
+overrides, and provider quirks are preserved.
 
 ### Serving, probes, and rolling updates
 
@@ -1127,10 +1176,10 @@ The read-only `GET /v1/usage` endpoint aggregates token and cost totals per mode
 target for the serving process, including delegate child-agent spend. Its
 top-level `instance` and `since` fields identify that per-pod lifetime.
 `GET /v1/models` includes complete
-static pricing schedules, including context-length tiers, plus `source_date` and
-`max_age_seconds` fields for detecting stale catalog prices. Managed-provider
-`source_date` values track the models.dev cache; manual-only setups use the
-provider config file modification time. Setup and runtime model pickers display
+static pricing schedules, including context-length tiers, plus `source_date`,
+`max_age_seconds`, and `expires_at` fields for detecting stale catalog prices.
+For mixed sources, `expires_at` is the earliest provider/models.dev expiry;
+manual-only setups use the provider config file modification time. Setup and runtime model pickers display
 each price band as input/output USD per million tokens.
 
 Cost budgets are attached to model-proxy API keys:

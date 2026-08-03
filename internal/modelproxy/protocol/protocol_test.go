@@ -109,6 +109,18 @@ func TestPricingInfoStale(t *testing.T) {
 			now:     base.Add(25 * time.Hour),
 			want:    true,
 		},
+		{
+			name:    "absolute expiry takes precedence while fresh",
+			pricing: &PricingInfo{SourceDate: base.Add(-48 * time.Hour), MaxAgeSeconds: 1, ExpiresAt: base.Add(time.Hour)},
+			now:     base,
+			want:    false,
+		},
+		{
+			name:    "absolute expiry takes precedence when stale",
+			pricing: &PricingInfo{ExpiresAt: base.Add(-time.Second)},
+			now:     base,
+			want:    true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

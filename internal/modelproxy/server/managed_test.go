@@ -16,6 +16,7 @@ import (
 	"harness/internal/llm/factory"
 	"harness/internal/llm/llmtest"
 	"harness/internal/modelcatalog"
+	"harness/internal/modelproxy/modeldiscovery"
 	"harness/internal/modelproxy/protocol"
 )
 
@@ -52,6 +53,18 @@ func catalogHasTarget(c protocol.Catalog, providerID, modelID string) bool {
 		}
 	}
 	return false
+}
+
+func catalogTarget(t *testing.T, c protocol.Catalog, providerID, modelID string) protocol.Target {
+	t.Helper()
+	id := providerID + ":" + modelID
+	for _, target := range c.Targets {
+		if target.ID == id {
+			return target
+		}
+	}
+	t.Fatalf("target %s not found in catalog %+v", id, c.Targets)
+	return protocol.Target{}
 }
 
 // streamOnce drives one /v1/stream request returning fixed usage and discards
@@ -113,6 +126,7 @@ func TestManagedProviderResolvesPriceFromModelsDevCatalog(t *testing.T) {
   "api_type": "openai",
   "base_url": "https://api.test/v1",
   "managed": true,
+  "model_discovery": {"enabled":false},
   "models": [{"name":"alpha","context_window":123000}]
 }`), 0o600); err != nil {
 		t.Fatalf("write provider config: %v", err)
@@ -462,6 +476,7 @@ func TestUpdateModelsDevCatalogPrunesManagedModelsMissingFromRefresh(t *testing.
   "api_type": "openai",
   "base_url": "https://api.test/v1",
   "managed": true,
+  "model_discovery": {"enabled":false},
   "models": [
     {"name":"alpha","context_window":123000},
     {"name":"retired","context_window":123000}
@@ -510,6 +525,7 @@ func TestUpdateModelsDevCatalogPrunesManagedProviderMissingFromRefresh(t *testin
   "api_type": "openai",
   "base_url": "https://api.gone.test/v1",
   "managed": true,
+  "model_discovery": {"enabled":false},
   "models": [{"name":"alpha","context_window":123000}]
 }`), 0o600); err != nil {
 		t.Fatalf("write provider config: %v", err)
@@ -565,6 +581,104 @@ func TestUpdateModelsDevCatalogKeepsManualProviderMissingFromRefresh(t *testing.
 
 	if got := catalogModelPrice(t, handler.Catalog(), "manualai", "alpha"); !got.Equal(llm.Price{Input: 2, Output: 4, Reasoning: 4}) {
 		t.Fatalf("manual provider price after refresh = %+v, want configured {2,4,reasoning:4}", got)
+	}
+}
+
+func TestProviderCatalogControlsManagedAvailabilityAndMetadata(t *testing.T) {
+	dir := t.TempDir()
+	providerPath := filepath.Join(dir, "testai.json")
+	if err := os.WriteFile(providerPath, []byte(`{
+  "name":"testai","api_type":"openai","base_url":"https://api.test/v1","managed":true,
+  "models":[{"name":"alpha","context_window":1000},{"name":"retired","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	contextWindow := 2000
+	directPrice := llm.Price{Input: 3, Output: 7}
+	state := modeldiscovery.State{Authoritative: true, Snapshot: modeldiscovery.Snapshot{
+		Version: 1, Provider: "testai", BaseURL: "https://api.test/v1", Complete: true, FetchedAt: time.Unix(100, 0),
+		Models: map[string]modeldiscovery.Model{"alpha": {ID: "alpha", Eligible: true, ContextWindow: &contextWindow, Price: &directPrice}},
+	}}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir, Config: Config{ProviderConfigs: []string{"testai.json"}},
+		ModelsDevCatalog: modelsDevCatalogWith("testai", "alpha", llm.Price{Input: 2, Output: 4}),
+		ProviderCatalogs: map[string]modeldiscovery.State{"testai": state}, ProviderModelsMaxAge: time.Hour,
+		New: fixedUsageProvider(llm.Usage{}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalogHasTarget(handler.Catalog(), "testai", "retired") {
+		t.Fatalf("authoritative provider catalog kept retired target: %+v", handler.Catalog().Targets)
+	}
+	target := catalogTarget(t, handler.Catalog(), "testai", "alpha")
+	if target.ContextWindow != contextWindow || !target.Price.Equal(llm.Price{Input: 3, Output: 7, Reasoning: 7}) {
+		t.Fatalf("target = %+v", target)
+	}
+	data, err := os.ReadFile(providerPath)
+	if err != nil || !bytes.Contains(data, []byte(`"retired"`)) {
+		t.Fatalf("provider config was mutated: err=%v data=%s", err, data)
+	}
+
+	recovered := state
+	recovered.Snapshot.Models = map[string]modeldiscovery.Model{
+		"alpha": {ID: "alpha", Eligible: true}, "retired": {ID: "retired", Eligible: true},
+	}
+	handler.UpdateProviderCatalogs(map[string]modeldiscovery.State{"testai": recovered})
+	if !catalogHasTarget(handler.Catalog(), "testai", "retired") {
+		t.Fatalf("recovered catalog did not restore target: %+v", handler.Catalog().Targets)
+	}
+}
+
+func TestProviderDiscoveryFailureStatePreservesConfiguredAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+  "name":"testai","api_type":"openai","base_url":"https://api.test/v1","managed":true,
+  "models":[{"name":"configured-only","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir, Config: Config{ProviderConfigs: []string{"testai.json"}},
+		ModelsDevCatalog: modelsDevCatalogWith("other", "different", llm.Price{}), New: fixedUsageProvider(llm.Usage{}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !catalogHasTarget(handler.Catalog(), "testai", "configured-only") {
+		t.Fatalf("configured model was pruned without a successful provider response: %+v", handler.Catalog().Targets)
+	}
+	handler.UpdateProviderCatalogs(map[string]modeldiscovery.State{"testai": {Unsupported: true}})
+	if len(handler.Catalog().Targets) != 0 {
+		t.Fatalf("unsupported endpoint did not fall back to models.dev authority: %+v", handler.Catalog().Targets)
+	}
+}
+
+func TestStaleProviderSnapshotEnrichesMetadataWithoutOverridingPrice(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openrouter.json"), []byte(`{
+  "name":"openrouter","api_type":"openai","base_url":"https://openrouter.ai/api/v1","managed":true,
+  "models":[{"name":"vendor/model","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	contextWindow := 2000
+	directPrice := llm.Price{Input: 99, Output: 99}
+	state := modeldiscovery.State{Authoritative: false, Snapshot: modeldiscovery.Snapshot{
+		Version: 1, Provider: "openrouter", BaseURL: "https://openrouter.ai/api/v1", Complete: true,
+		Models: map[string]modeldiscovery.Model{"vendor/model": {ID: "vendor/model", ContextWindow: &contextWindow, Price: &directPrice, Eligible: true}},
+	}}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir, Config: Config{ProviderConfigs: []string{"openrouter.json"}},
+		ModelsDevCatalog: modelsDevCatalogWith("openrouter", "vendor/model", llm.Price{Input: 2, Output: 4}),
+		ProviderCatalogs: map[string]modeldiscovery.State{"openrouter": state}, New: fixedUsageProvider(llm.Usage{}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := catalogTarget(t, handler.Catalog(), "openrouter", "vendor/model")
+	if target.ContextWindow != contextWindow || !target.Price.Equal(llm.Price{Input: 2, Output: 4, Reasoning: 4}) {
+		t.Fatalf("target = %+v", target)
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"harness/internal/buildinfo"
 	"harness/internal/cli"
 	"harness/internal/httpserve"
+	"harness/internal/llm"
 	"harness/internal/logging"
 	"harness/internal/metrics"
 	"harness/internal/modelcatalog"
@@ -45,17 +46,20 @@ const (
 )
 
 type environment struct {
-	args              []string
-	stdin             io.Reader
-	stdout            io.Writer
-	stderr            io.Writer
-	getenv            func(string) string
-	sigCh             chan os.Signal
-	modelsDevCatalog  func(context.Context) (*modelcatalog.Catalog, error)
-	codexModelsData   func(context.Context) ([]byte, error)
-	terminalRows      func() int
-	modelsDevCacheTTL *time.Duration
-	now               func() time.Time
+	args                   []string
+	stdin                  io.Reader
+	stdout                 io.Writer
+	stderr                 io.Writer
+	getenv                 func(string) string
+	sigCh                  chan os.Signal
+	modelsDevCatalog       func(context.Context) (*modelcatalog.Catalog, error)
+	codexModelsData        func(context.Context) ([]byte, error)
+	terminalRows           func() int
+	modelsDevCacheTTL      *time.Duration
+	providerModelsCacheTTL *time.Duration
+	providerModelsClient   *http.Client
+	providerModelsTicks    <-chan time.Time
+	now                    func() time.Time
 }
 
 func signalCancelContext(sigCh <-chan os.Signal) (context.Context, context.CancelFunc, func() bool) {
@@ -120,6 +124,7 @@ func runServe(env environment, invocation cli.Invocation) int {
 
 	modelsTTL := cfg.ModelsDevCacheTTL.Duration
 	env.modelsDevCacheTTL = &modelsTTL
+	providerModelsTTL := cfg.ProviderModelsCacheTTL.Duration
 	drainDelay := cfg.DrainDelay.Duration
 	shutdownTimeout := cfg.ShutdownTimeout.Duration
 	logger, err := logging.NewProxyLogger(env.stderr, cfg.LogLevel, cfg.LogFormat)
@@ -130,6 +135,12 @@ func runServe(env environment, invocation cli.Invocation) int {
 
 	configDir := filepath.Dir(path)
 	initialCatalog, initialSourceDate := loadModelsDevCacheForServe(configDir)
+	_, configuredProviders, err := llm.LoadProviderConfigs(configDir, cfg.ProviderConfigs, func(msg string) { logger.Warn(msg) })
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitRuntime
+	}
+	initialProviderCatalogs := loadProviderModelCaches(configDir, configuredProviders, currentTime(env), providerModelsTTL, logger)
 	metricsEnabled := cfg.Metrics.Enabled == nil || *cfg.Metrics.Enabled
 	metricsSettings := metrics.Settings{
 		Enabled:        metricsEnabled,
@@ -138,16 +149,18 @@ func runServe(env environment, invocation cli.Invocation) int {
 	}
 	reg := newMetricsRegistry(metricsSettings.Enabled)
 	handler, err := server.NewHandler(server.Options{
-		ConfigDir:           configDir,
-		Config:              cfg,
-		Getenv:              env.getenv,
-		Logger:              logger,
-		PricingMaxAge:       modelsTTL,
-		ModelsDevCatalog:    initialCatalog,
-		ModelsDevSourceDate: initialSourceDate,
-		Now:                 env.now,
-		Metrics:             reg,
-		InstanceID:          cfg.InstanceID,
+		ConfigDir:            configDir,
+		Config:               cfg,
+		Getenv:               env.getenv,
+		Logger:               logger,
+		PricingMaxAge:        modelsTTL,
+		ModelsDevCatalog:     initialCatalog,
+		ModelsDevSourceDate:  initialSourceDate,
+		ProviderCatalogs:     initialProviderCatalogs,
+		ProviderModelsMaxAge: providerModelsTTL,
+		Now:                  env.now,
+		Metrics:              reg,
+		InstanceID:           cfg.InstanceID,
 		Warn: func(msg string) {
 			logger.Warn(msg)
 		},
@@ -166,6 +179,7 @@ func runServe(env environment, invocation cli.Invocation) int {
 	startModelsDevCacheRefresh(backgroundCtx, env, configDir, modelsTTL, logger, func(catalog *modelcatalog.Catalog, sourceDate time.Time) {
 		handler.UpdateModelsDevCatalog(catalog, sourceDate)
 	})
+	startProviderModelRefresh(backgroundCtx, env, configDir, configuredProviders, initialProviderCatalogs, providerModelsTTL, logger, handler.UpdateProviderCatalogs)
 	go apikey.WatchFile(backgroundCtx, keyFile, keyFileState, 2*time.Second, authStore, func(err error) {
 		logger.Warn("reload api keys failed", "path", keyFile, "err", err)
 	})
@@ -254,6 +268,13 @@ func runSetupCmd(env environment, invocation cli.Invocation) int {
 		return exitUsage
 	}
 	env.modelsDevCacheTTL = &ttl
+	providerTTLValue, providerTTLSet := invocation.Flags.Last("provider_models_cache_ttl")
+	providerTTL, err := setupProviderModelsCacheTTL(env, providerTTLValue, providerTTLSet)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		return exitUsage
+	}
+	env.providerModelsCacheTTL = &providerTTL
 	ctx, cancel, interrupted := signalCancelContext(env.sigCh)
 	defer cancel()
 	if err := runSetup(ctx, env, cliBool(invocation.Flags, "force")); err != nil {
@@ -476,6 +497,31 @@ func parseModelsDevCacheTTLFlag(value string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid -models-dev-cache-ttl %q: duration must be non-negative", value)
 	}
 	return ttl, nil
+}
+
+func setupProviderModelsCacheTTL(env environment, flagValue string, flagSet bool) (time.Duration, error) {
+	ttl := time.Hour
+	configPath := filepath.Join(defaultConfigDir(env.getenv), "config.json")
+	if cfg, err := server.LoadConfig(configPath); err == nil && cfg.ProviderModelsCacheTTL.Set {
+		ttl = cfg.ProviderModelsCacheTTL.Duration
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return 0, err
+	}
+	if !flagSet {
+		return ttl, nil
+	}
+	value := strings.TrimSpace(flagValue)
+	if value == "0" {
+		return 0, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < 0 {
+		if err == nil {
+			err = fmt.Errorf("duration must be non-negative")
+		}
+		return 0, fmt.Errorf("invalid -provider-models-cache-ttl %q: %w", value, err)
+	}
+	return parsed, nil
 }
 
 func resolveServeDuration(name, flagValue string, flagSet bool, envValue string, configured server.Duration, fallback time.Duration) (time.Duration, error) {

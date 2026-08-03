@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +19,7 @@ import (
 	"harness/internal/auth"
 	"harness/internal/llm"
 	"harness/internal/modelcatalog"
+	"harness/internal/modelproxy/modeldiscovery"
 )
 
 func TestRunSetupWritesOnlySelectedModelsAndNoProxyDefault(t *testing.T) {
@@ -401,6 +404,44 @@ func TestRunSetupWritesSakanaProvider(t *testing.T) {
 	}
 	if len(model.ReasoningOptions) != 1 || !slices.Equal(model.ReasoningOptions[0].Values, []string{"high", "xhigh"}) {
 		t.Fatalf("fugu-ultra reasoning options = %+v, want high,xhigh", model.ReasoningOptions)
+	}
+}
+
+func TestRunSetupOffersAuthenticatedLiveOnlyProviderModels(t *testing.T) {
+	home := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"live-only"}]}`))
+	}))
+	defer server.Close()
+	catalog := testSetupCatalogWithSakana()
+	provider := catalog.Providers["sakana"]
+	provider.API = server.URL
+	catalog.Providers["sakana"] = provider
+	var out, errw bytes.Buffer
+	env := environment{
+		stdin: strings.NewReader("sakana\nsecret\nlive-only\nsave\n"), stdout: &out, stderr: &errw,
+		getenv: func(key string) string {
+			if key == "HOME" {
+				return home
+			}
+			return ""
+		},
+		modelsDevCatalog:     func(context.Context) (*modelcatalog.Catalog, error) { return catalog, nil },
+		providerModelsClient: server.Client(), terminalRows: func() int { return 12 },
+	}
+	if err := runSetup(context.Background(), env, false); err != nil {
+		t.Fatalf("runSetup: %v; stderr=%q", err, errw.String())
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".config", "harness-model-proxy", "sakana.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := llm.DecodeProviderConfigs(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) != 1 || len(providers[0].Models) != 1 || providers[0].Models[0].Name != "live-only" {
+		t.Fatalf("providers = %+v", providers)
 	}
 }
 
@@ -1006,8 +1047,8 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	if len(provider.Models) != 1 || provider.Models[0].Name != "gpt-5.5" || provider.Models[0].ContextWindow != 272000 {
 		t.Fatalf("provider models after refresh = %+v", provider.Models)
 	}
-	if provider.Models[0].OutputLimit != 0 {
-		t.Fatalf("provider output limit after refresh = %d, want omitted", provider.Models[0].OutputLimit)
+	if provider.Models[0].OutputLimit != 64000 {
+		t.Fatalf("provider output limit after failed direct refresh = %d, want configured fallback 64000", provider.Models[0].OutputLimit)
 	}
 	if provider.PromptCache.KeyField != llm.PromptCacheKeyFieldPromptCacheKey {
 		t.Fatalf("provider prompt cache key field after refresh = %q, want prompt_cache_key", provider.PromptCache.KeyField)
@@ -1095,6 +1136,142 @@ func TestRunRefreshModelsHandlesSakanaProvider(t *testing.T) {
 	}
 }
 
+func TestRunRefreshModelsUsesAuthenticatedProviderAvailabilityWithoutAddingModels(t *testing.T) {
+	dir := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer sk-test" {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"fugu"},{"id":"new-model"}]}`))
+	}))
+	defer server.Close()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["sakana.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	providerData := fmt.Sprintf(`{
+  "name":"sakana","api_type":"openai","base_url":%q,"api_key":"sk-test","managed":true,
+  "models":[{"name":"fugu","context_window":1000},{"name":"retired","context_window":1000}]
+}`, server.URL)
+	if err := os.WriteFile(filepath.Join(dir, "sakana.json"), []byte(providerData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
+		"sakana": {ID: "sakana", Name: "Sakana", API: server.URL, NPM: "@ai-sdk/openai-compatible", Models: map[string]modelcatalog.Model{
+			"fugu":    {ID: "fugu", Limit: modelcatalog.Limit{Context: 2000}},
+			"retired": {ID: "retired", Limit: modelcatalog.Limit{Context: 2000}},
+		}},
+	}}
+	var out, errw bytes.Buffer
+	env := environment{stdout: &out, stderr: &errw, providerModelsClient: server.Client(), modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) { return catalog, nil }}
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v; stderr=%q", err, errw.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "sakana.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := llm.DecodeProviderConfigs(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) != 1 || len(providers[0].Models) != 1 || providers[0].Models[0].Name != "fugu" {
+		t.Fatalf("providers = %+v, want only configured live fugu", providers)
+	}
+	if _, err := os.Stat(modeldiscovery.CachePath(dir, "sakana")); err != nil {
+		t.Fatalf("provider cache: %v", err)
+	}
+}
+
+func TestRunRefreshModelsPreservesConfiguredModelsOnProviderFailure(t *testing.T) {
+	dir := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["sakana.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	providerData := fmt.Sprintf(`{
+  "name":"sakana","api_type":"openai","base_url":%q,"api_key":"bad","managed":true,
+  "models":[{"name":"fugu","context_window":1000},{"name":"configured-only","context_window":1000}]
+}`, server.URL)
+	if err := os.WriteFile(filepath.Join(dir, "sakana.json"), []byte(providerData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
+		"sakana": {ID: "sakana", Name: "Sakana", API: server.URL, NPM: "@ai-sdk/openai-compatible", Models: map[string]modelcatalog.Model{"fugu": {ID: "fugu", Limit: modelcatalog.Limit{Context: 2000}}}},
+	}}
+	var out, errw bytes.Buffer
+	env := environment{stdout: &out, stderr: &errw, providerModelsClient: server.Client(), modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) { return catalog, nil }}
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "sakana.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := llm.DecodeProviderConfigs(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) != 1 || len(providers[0].Models) != 2 {
+		t.Fatalf("providers = %+v, want configured allowlist preserved", providers)
+	}
+	if !strings.Contains(errw.String(), "preserving configured models") {
+		t.Fatalf("stderr = %q", errw.String())
+	}
+}
+
+func TestRefreshProviderAfterLoginUpdatesAllowlistAndPreservesDiscoveryOverride(t *testing.T) {
+	dir := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"fugu"},{"id":"new-model"}]}`))
+	}))
+	defer server.Close()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["sakana.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	includeUnknown := true
+	current := llm.ProviderConfig{
+		Name: "sakana", APIType: "openai", BaseURL: server.URL, APIKey: "secret", Managed: true,
+		ModelDiscovery: &llm.ModelDiscoveryConfig{Enabled: &enabled, IncludeUnknownModels: &includeUnknown},
+		Models:         []llm.ModelEntry{{Name: "fugu", ContextWindow: 1000}, {Name: "retired", ContextWindow: 1000}},
+	}
+	data, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sakana.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errw bytes.Buffer
+	env := environment{stdout: &out, stderr: &errw, providerModelsClient: server.Client()}
+	if err := refreshProviderAfterLogin(context.Background(), env, cfgPath, current); err != nil {
+		t.Fatal(err)
+	}
+	updatedData, err := os.ReadFile(filepath.Join(dir, "sakana.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := llm.DecodeProviderConfigs(updatedData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) != 1 || len(providers[0].Models) != 1 || providers[0].Models[0].Name != "fugu" {
+		t.Fatalf("providers = %+v", providers)
+	}
+	if providers[0].ModelDiscovery == nil || providers[0].ModelDiscovery.IncludeUnknownModels == nil || !*providers[0].ModelDiscovery.IncludeUnknownModels {
+		t.Fatalf("model discovery override was not preserved: %+v", providers[0].ModelDiscovery)
+	}
+	if !strings.Contains(out.String(), "rerun setup") {
+		t.Fatalf("stdout = %q", out.String())
+	}
+}
+
 func TestRunRefreshModelsRemovesProviderMissingFromCatalog(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
@@ -1106,6 +1283,7 @@ func TestRunRefreshModelsRemovesProviderMissingFromCatalog(t *testing.T) {
   "api_type": "openai",
   "base_url": "https://api.test/v1",
   "api_key": "sk-test",
+  "model_discovery": {"enabled":false},
   "models": [{"name":"alpha","context_window":1000}]
 }`), 0o600); err != nil {
 		t.Fatal(err)
@@ -1115,6 +1293,7 @@ func TestRunRefreshModelsRemovesProviderMissingFromCatalog(t *testing.T) {
   "api_type": "openai",
   "base_url": "https://api.gone/v1",
   "api_key": "sk-gone",
+  "model_discovery": {"enabled":false},
   "models": [{"name":"gone-1","context_window":1000}]
 }`), 0o600); err != nil {
 		t.Fatal(err)
@@ -1230,6 +1409,7 @@ func TestRunRefreshModelsDropsMissingModelKeepsOthers(t *testing.T) {
   "api_type": "openai",
   "base_url": "https://api.test/v1",
   "api_key": "sk-test",
+  "model_discovery": {"enabled":false},
   "models": [{"name":"alpha","context_window":1000},{"name":"retired","context_window":1000}]
 }`), 0o600); err != nil {
 		t.Fatal(err)
@@ -1273,6 +1453,7 @@ func TestRunRefreshModelsRemovesProviderWithNoModelsRemaining(t *testing.T) {
   "api_type": "openai",
   "base_url": "https://api.test/v1",
   "api_key": "sk-test",
+  "model_discovery": {"enabled":false},
   "models": [{"name":"retired","context_window":1000}]
 }`), 0o600); err != nil {
 		t.Fatal(err)
@@ -1322,6 +1503,7 @@ func TestRunRefreshModelsDropsMissingProviderFromMultiProviderFile(t *testing.T)
     "api_type": "openai",
     "base_url": "https://api.test/v1",
     "api_key": "sk-test",
+    "model_discovery": {"enabled":false},
     "models": [{"name":"alpha","context_window":1000}]
   },
   {
@@ -1329,6 +1511,7 @@ func TestRunRefreshModelsDropsMissingProviderFromMultiProviderFile(t *testing.T)
     "api_type": "openai",
     "base_url": "https://api.gone/v1",
     "api_key": "sk-gone",
+    "model_discovery": {"enabled":false},
     "models": [{"name":"gone-1","context_window":1000}]
   }
 ]`), 0o600); err != nil {
@@ -1382,6 +1565,7 @@ func TestRunRefreshModelsRemovesUnsupportedProvider(t *testing.T) {
   "api_type": "openai",
   "base_url": "https://api.test/v1",
   "api_key": "sk-test",
+  "model_discovery": {"enabled":false},
   "models": [{"name":"alpha","context_window":1000}]
 }`), 0o600); err != nil {
 		t.Fatal(err)
@@ -1391,6 +1575,7 @@ func TestRunRefreshModelsRemovesUnsupportedProvider(t *testing.T) {
   "api_type": "openai",
   "base_url": "https://api.legacy/v1",
   "api_key": "sk-legacy",
+  "model_discovery": {"enabled":false},
   "models": [{"name":"legacy-1","context_window":1000}]
 }`), 0o600); err != nil {
 		t.Fatal(err)

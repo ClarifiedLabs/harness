@@ -109,7 +109,8 @@ internal/background      process-local background job manager + tools
 internal/session         append-only conversation tree, mutable state, replay, archives, artifacts
 internal/config          typed harness definitions, strict source resolution, provenance, and redacted projections
 internal/configmeta      package-neutral parameter catalog, source vocabulary, provenance snapshots, and deterministic reference renderers
-internal/modelcatalog    normalized models.dev/OpenAI Codex catalogs for proxy setup/pricing metadata
+internal/modelcatalog    normalized models.dev/OpenAI Codex baseline catalogs
+internal/modelproxy/modeldiscovery authenticated provider model adapters, caches, and catalog merging
 internal/ui              REPL, streaming renderer, tool summaries, usage line
 internal/sysprompt       embedded prompt files + environment context + AGENTS.md sections
 internal/agentdef        agent definitions (allowed tools, MCP exposure, prompt/model target) (§14)
@@ -1015,27 +1016,46 @@ func (r *Registry) ContextWindow(model string) int // registry hit, else default
 func (r *Registry) Models() []string               // sorted configured model ids
 ```
 
-Model metadata normally originates from the public **models.dev** catalog. The
-models.dev and OpenAI Codex adapters, normalized catalog types, and vendored
-fallback snapshots live in `internal/modelcatalog`; `harness-model-proxy setup`
-and `refresh-models` consume the normalized provider/context/input-modality/
-reasoning/service-tier fields. models.dev `experimental.modes` entries are
-projected into bounded service-tier request mappings and tier-specific prices.
+Baseline model metadata originates from the public **models.dev** catalog. The
+models.dev and public OpenAI Codex adapters, normalized baseline types, and
+vendored fallback snapshots live in `internal/modelcatalog`.
+`internal/modelproxy/modeldiscovery` owns authenticated provider catalogs,
+normalization, capability filtering, ETags, pagination guards, and their
+provider-local cache. Initial adapters cover generic OpenAI-compatible
+`/models` endpoints (including trusted Sakana results), OpenRouter, Anthropic,
+Gemini, and the ChatGPT Codex account catalog.
+
+Normalized provider models retain field presence separately from zero values so
+merge precedence is deterministic: fields explicitly returned by the provider,
+then models.dev, then configured metadata, then safe runtime defaults. Generic
+OpenAI ID-only results validate baseline/configured IDs; direct-only IDs require
+generative capability evidence unless the endpoint or config is trusted.
+models.dev `experimental.modes` entries are projected into bounded service-tier
+request mappings and tier-specific prices.
 The proxy caches a projected catalog as `models.dev.api.json`
 in the proxy config directory, retaining every provider and model but only the
 metadata fields harness consumes.
 `setup` prefers that cache over the vendored snapshot, but fetches and writes it
 when it is missing or invalid. A running proxy refreshes the cache when it is older
 than `models_dev_cache_ttl` (`24h` by default; `0` disables periodic refresh), and
-`refresh-models` fetches and caches that projected catalog before rewriting
-configured provider allowlists. The vendored snapshot is used only when there is
-no parseable cache and a live fetch fails.
+`refresh-models` fetches and caches that projected catalog before querying
+authenticated providers and rewriting configured allowlists. The vendored
+snapshot is used only when there is no parseable cache and a live fetch fails.
 
-The synthetic `openai-codex` provider is the exception: its model list comes from
-the OpenAI Codex model catalog (`codex-rs/models-manager/models.json`). Setup uses
-a vendored copy or the last cached refresh; `refresh-models` fetches the latest
-catalog from `openai/codex` on GitHub and caches only the fields consumed by the
-adapter as `openai-codex.models.json`. Only list-visible Codex models are exposed.
+Provider snapshots are atomically stored mode `0600` under `provider-models/`.
+A snapshot younger than `provider_models_cache_ttl` (`1h` by default) is
+authoritative for availability; a stale snapshot can only enrich metadata. The
+serving coordinator performs an immediate bounded-concurrency refresh followed
+by hourly polling, then swaps one immutable catalog snapshot after each cycle.
+Network/auth/decode failures retain the prior state. Auto-detected 404/405
+responses mark discovery unsupported for that process and restore models.dev
+availability authority.
+
+The synthetic `openai-codex` provider uses the public OpenAI Codex catalog only
+as baseline metadata. With working `codex_oauth`, the authenticated ChatGPT
+account catalog controls the visible model set. Its list visibility is trusted;
+the public catalog's `supported_in_api:false` flag does not remove a model the
+account endpoint returns.
 
 ### Managed vs manual provider configs
 
@@ -1043,14 +1063,13 @@ Provider config files are either **managed** or **manual**:
 
 - **Managed** configs are written by `setup`/`refresh-models` and carry
   `"managed": true`. They store **no per-model `price`**; instead the proxy
-  resolves each managed model's price and input modalities from the in-memory
-  models.dev cache at request time. Because the background refresher (above)
-  reloads that cache and the serving handler swaps in the new metadata live,
-  refreshed prices and modality support reach the running server **without** a
-  `setup` + restart. If a refreshed cache no longer lists a managed provider or
-  model, the handler warns and removes that stale target from the live catalog;
-  manual configs are not pruned by cache refreshes. Re-running `setup` never
-  clobbers hand-edited prices because managed configs hold none.
+  resolves each managed model from provider snapshots plus the in-memory
+  models.dev cache. A fresh complete provider snapshot controls availability;
+  direct metadata/pricing wins when present and models.dev fills gaps. A failed
+  provider refresh preserves the configured allowlist. Confirmed absence hides
+  a target from the immutable serving snapshot without editing its file, so a
+  later successful response can restore it. Re-running `setup` never clobbers
+  hand-edited prices because managed configs hold none.
 - **Manual** configs are any provider file lacking `"managed": true` — typically
   hand-written. The proxy never touches them and serves their own `price` and
   `input_modalities` entries verbatim. A pre-existing price-bearing config
@@ -1059,7 +1078,8 @@ Provider config files are either **managed** or **manual**:
   a managed, price-less config.
 
 A managed config may also carry `"price_source"` — a models.dev provider id to
-resolve its prices from when that differs from the config's own `name`. The
+resolve its prices from when that differs from the config's own `name`; it is a
+price-only override and does not control availability or capabilities. The
 synthetic `openai-codex` provider does not use `price_source`: it is backed by a
 ChatGPT subscription, so the proxy serves token counts without dollar costs and
 ignores any stale Codex `price_source` left by older configs. It also writes
@@ -1135,10 +1155,11 @@ tokens separately while Google bills them as output tokens. Anthropic Messages
 also receives the output-rate reasoning fallback plus a `2 × input` fallback
 for 1-hour cache writes. Explicit rates always win, and each fallback is applied
 to base, context-tier, service-tier, and speed schedules. The rule is scoped to
-these wire contracts rather than being generic. The numeric schedules still
-come from models.dev (or a manual provider config); the filtered models.dev
-snapshot already preserves explicit `cost.reasoning` values when raw catalog
-entries provide them.
+these wire contracts rather than being generic. Numeric schedules come from a
+direct provider response when it supplies a validated representable schedule
+(currently OpenRouter), then models.dev, or a manual provider config. The
+filtered models.dev snapshot preserves explicit `cost.reasoning` values when raw
+catalog entries provide them.
 
 Google Search per-query charges are not part of `llm.Price` and are not added to
 `CostUSD`. Although the Interactions usage schema exposes
@@ -1149,13 +1170,12 @@ query fee as exact. Anthropic hosted web search follows the same policy: its
 reported token usage is priced, but the per-search fee is excluded.
 
 The serving handler holds its registry, pricer, and served catalog behind an
-atomic snapshot. The initial snapshot is built at startup from the loaded
-provider configs plus the cached models.dev catalog; after each successful cache
-refresh the refresher rebuilds the snapshot (managed pricing schedules and
-modalities from the new catalog, with managed entries absent from that catalog
-pruned and manual metadata unchanged) and atomically swaps it in, so `/v1/models`
-responses and
-per-request `cost_usd` accounting always reflect the freshest managed metadata.
+atomic snapshot. The initial snapshot is built from provider configs,
+models.dev, and cached provider states. Either refresher updates its source
+under a mutex, rebuilds the composite immutable snapshot, and atomically swaps
+it, so `/v1/models` responses and per-request `cost_usd` accounting always
+reflect one coherent catalog. Only a fresh complete provider state prunes live
+availability; failed refreshes do not mutate handler state.
 `internal/llm` stays free of any `internal/modelcatalog` import — the server is
 the layer that bridges normalized catalog metadata into `llm`.
 Candidate cache updates must parse as models.dev JSON and contain at least one
@@ -1260,10 +1280,12 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   harness-supported providers, marks existing providers with bold text and `*`,
   derives missing first-party API URLs from exact `@ai-sdk/openai`,
   `@ai-sdk/anthropic`, and plain `@ai-sdk/google` package metadata, prompts for
-  the API key when the provider needs one, pages the selected provider's
-  models newest-first, and asks which models should be locally available. The
+  the API key when the provider needs one, queries the selected provider's
+  authenticated model endpoint when available, merges its results, pages models
+  newest-first, and asks which models should be locally available. The
   synthetic `openai-codex` provider is listed when OpenAI provider metadata is
-  available, with its models from the vendored or cached Codex model catalog; it
+  available, with its baseline models from the vendored or cached Codex model
+  catalog and its live choices from a usable account token; it
   writes the ChatGPT Codex backend URL and a `codex_oauth` auth block instead of
   API-key fields, plus `omit_max_output_tokens:true`. The proxy defaults the
   Responses WebSocket transport on for this `codex_oauth` provider at runtime,
@@ -1284,21 +1306,19 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   setup refuses to overwrite provider files that are not already referenced by the
   proxy config.
 - `harness-model-proxy refresh-models` fetches and caches the latest live
-  models.dev catalog and refreshes each configured provider file's current model
-  allowlist, preserving stored API keys and `auth` blocks. When `openai-codex` is
-  configured, it also refreshes the cached OpenAI Codex catalog from GitHub and
-  rewrites Codex models from that source. Sakana configs refresh from the
-  models.dev cache like any other managed provider.
-  Refreshed files are rewritten as managed, price-less configs. If live fetch fails, it
-  uses a parseable local cache before using the vendored fallback snapshot. When a
-  configured model is missing from the selected catalog it prints a warning and
-  drops that model; when a configured provider is missing, is no longer supported
-  by harness, or has no models left after refresh it prints a warning and removes
-  the provider (deleting its now-empty provider file and dropping the stale
-  `provider_configs` reference), so a provider that no longer exists never fails
-  the whole refresh. A referenced provider file that has gone missing is likewise
-  warned about and dropped from `provider_configs`. Unreadable or malformed files
+  models.dev catalog, queries supported providers with working credentials, and
+  refreshes each configured allowlist. All catalog fetches finish before provider
+  files are changed. A complete direct response may remove absent configured
+  models but never enables new IDs. Authentication, transport, decode, empty, or
+  incomplete-pagination failures preserve that provider's allowlist; unsupported
+  endpoints use models.dev authority. Refreshed files remain managed and
+  price-less while stored API keys, auth, discovery overrides, and provider quirks
+  are preserved. A provider with no remaining models is removed with its now-empty
+  file/reference. Missing provider files are warned and dropped; malformed files
   still error.
+- Successful `auth login` performs the same direct refresh for that provider.
+  Catalog failure is a warning and does not roll back the stored token. The
+  command reports that setup must be rerun to enable newly discovered IDs.
 - **Model-proxy lifecycle and probes.** `cmd/harness-model-proxy` binds the API
   listener before announcing startup and uses separate background, handler-work,
   API-stop, and metrics lifetimes. An outer lifecycle handler routes unauthenticated
@@ -1383,6 +1403,10 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   (`json` default, or `text`), with serve flags overriding config. Proxy config
   also accepts `models_dev_cache_ttl` as a duration string such as `"24h"` or
   numeric `0`; the `-models-dev-cache-ttl` serve/setup/refresh flag overrides it.
+  `provider_models_cache_ttl` and `-provider-models-cache-ttl` independently
+  control authenticated provider polling (`1h` default, `0` disables background
+  polling but not explicit setup/refresh/login discovery); the flag is accepted
+  by serve/config inspection and setup.
   Every unsuccessful upstream attempt is additionally logged at WARN when it
   occurs, even when a later retry succeeds. These records include the proxy and
   upstream request ids, upstream attempt, status/code, parsed provider message,
@@ -1488,13 +1512,11 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   remains service-specific. The model proxy keeps this endpoint alive until the
   API drain and handler/pool teardown finish.
 - **Pricing staleness.** The `GET /v1/models` catalog response carries an optional
-  `pricing` object — `{source_date, max_age_seconds}` — and `max_age_seconds` is the
-  configured models.dev refresh interval. `source_date` dates the served prices:
-  when any provider is managed and a models.dev cache is loaded, it is the cache's
-  source date (the cache file's mtime, kept fresh by the background refresher);
-  for a manual-only catalog it is the newest modification time among the
-  configured provider config files (the date those prices were last written). A
-  client can compare them to detect stale prices. Static context-tier schedules
+  `pricing` object — `{source_date, max_age_seconds, expires_at}`. `expires_at`
+  is the earliest expiry among provider-direct and models.dev sources that
+  contributed prices; clients prefer it when present. For a manual-only catalog,
+  `source_date` is the newest modification time among configured provider files.
+  Static context-tier schedules
   are included in `Target.Price`; only dynamic or route-dependent models may omit
   it even when request-time `cost_usd` can be calculated by a provider-specific
   pricer. Replicated production deployments pin one identical

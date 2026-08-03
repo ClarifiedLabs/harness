@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	defaultModelsDevCacheTTL = "24h"
-	defaultDrainDelay        = "5s"
-	defaultShutdownTimeout   = "5m"
-	defaultMetricsListen     = "127.0.0.1:9090"
+	defaultModelsDevCacheTTL      = "24h"
+	defaultProviderModelsCacheTTL = "1h"
+	defaultDrainDelay             = "5s"
+	defaultShutdownTimeout        = "5m"
+	defaultMetricsListen          = "127.0.0.1:9090"
 )
 
 var catalog = configmeta.MustCatalog(
@@ -20,6 +21,7 @@ var catalog = configmeta.MustCatalog(
 	configmeta.Parameter{Key: "log_level", Type: "string", Flags: []string{"log-level"}, JSONPath: "log_level", Default: literalDefault("info", "info"), Description: "Proxy log level.", Accepted: []string{"debug", "info", "warn", "error"}},
 	configmeta.Parameter{Key: "log_format", Type: "string", Flags: []string{"log-format"}, JSONPath: "log_format", Default: literalDefault("json", "json"), Description: "Proxy log format.", Accepted: []string{"json", "text"}},
 	configmeta.Parameter{Key: "models_dev_cache_ttl", Type: "duration", Flags: []string{"models-dev-cache-ttl"}, JSONPath: "models_dev_cache_ttl", Default: literalDefault(defaultModelsDevCacheTTL, defaultModelsDevCacheTTL), Description: "models.dev cache refresh interval; zero disables periodic refresh."},
+	configmeta.Parameter{Key: "provider_models_cache_ttl", Type: "duration", Flags: []string{"provider-models-cache-ttl"}, JSONPath: "provider_models_cache_ttl", Default: literalDefault(defaultProviderModelsCacheTTL, defaultProviderModelsCacheTTL), Description: "Authenticated provider model catalog refresh interval; zero disables background refresh."},
 	configmeta.Parameter{Key: "drain_delay", Type: "duration", Flags: []string{"drain-delay"}, Environment: []string{"HARNESS_MODEL_PROXY_DRAIN_DELAY"}, JSONPath: "drain_delay", Default: literalDefault(defaultDrainDelay, defaultDrainDelay), Description: "Readiness propagation delay before API shutdown."},
 	configmeta.Parameter{Key: "shutdown_timeout", Type: "duration", Flags: []string{"shutdown-timeout"}, Environment: []string{"HARNESS_MODEL_PROXY_SHUTDOWN_TIMEOUT"}, JSONPath: "shutdown_timeout", Default: literalDefault(defaultShutdownTimeout, defaultShutdownTimeout), Description: "Maximum graceful stream drain time."},
 	configmeta.Parameter{Key: "instance_id", Type: "string", Flags: []string{"instance-id"}, Environment: []string{"HARNESS_MODEL_PROXY_INSTANCE_ID"}, JSONPath: "instance_id", Default: configmeta.Default{Kind: configmeta.DefaultDerived, Display: "generated at startup"}, Description: "Proxy instance identifier."},
