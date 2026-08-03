@@ -102,10 +102,11 @@ A server with no `type` or `"stdio"` is a child process. `"http"` or
 `harness-mcp-proxy auth login <server>`, `auth status <server>`, or
 `auth logout <server>` for servers configured with built-in OAuth.
 
-`${NAME}` references in any string are expanded from the proxy's environment.
-Invalid server entries are skipped with a warning; the proxy still serves the
-valid ones. See `examples/harness-mcp-proxy/config.json` for a copyable starting
-point.
+`${NAME}` references in downstream server command, URL, argument, environment,
+header, and authentication string values are expanded from the proxy's
+environment. Invalid server entries are skipped with a warning; the proxy still
+serves the valid ones. See `examples/harness-mcp-proxy/config.json` for a
+copyable starting point.
 
 For the GitHub remote MCP example, run `gh auth login` first; the proxy uses
 `gh auth token` to fetch the bearer token.
@@ -113,6 +114,57 @@ For the GitHub remote MCP example, run `gh auth login` first; the proxy uses
 Stdio servers inherit the proxy's full environment plus the per-server `env`
 overrides. Do not configure untrusted stdio servers when secrets live in the
 environment, since the child process can read them.
+
+### Proxy commands and configuration inspection
+
+`harness-mcp-proxy --help` renders the generated root command catalog; use
+`harness-mcp-proxy <command> --help` for command-scoped flags. The available
+commands are `serve`, `tools`, `auth`, `generate-api-key`, `config`, and
+`version`.
+
+The `config` group is offline and non-mutating:
+
+```text
+harness-mcp-proxy config list  [-format text|json|markdown]
+harness-mcp-proxy config show  [-config path] [-format text|json] [-sources] [setting flags]
+harness-mcp-proxy config check [-config path]
+```
+
+An explicit `-config` path wins over conventional-path discovery. Setting flags
+then override file values; source-specific empty-value behavior is preserved,
+including inverse `-no-metrics[=true|false]` handling and explicit empty
+listeners retaining their effective defaults. Relative API-key and OAuth token
+paths from the file are based on the config directory, while explicit
+command-line paths (and the legacy `proxy.logFile` path) are based on the
+working directory. Invalid child servers remain warnings
+and are skipped in deterministic order rather than invalidating otherwise usable
+configuration.
+
+`config list` does not load a file. `config show` performs normal `${NAME}` and
+`${NAME:-default}` expansion in downstream server command, URL, argument,
+environment, header, and authentication string values; it may emit the same
+unset-variable or skipped-server warnings as serving. Its versioned JSON
+projection exposes only server names, counts, and transport kinds: command
+arguments, environment/header
+values, URLs (including credentials and query strings), auth configuration,
+API-key contents, and OAuth tokens are never shown. `config check` validates the
+same local configuration without opening listeners, starting stdio children, or
+mutating files.
+
+#### MCP-proxy configuration parameters
+
+<!-- mcp-proxy-config-parameters:start -->
+| Key | Type | Accepted | Flags | Environment | JSON path | Default | Sensitive | Description |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `mcp_servers` | `object` | - | - | - | `mcpServers` | {} | yes | Downstream MCP server definitions. |
+| `listen` | `string` | - | `-listen` | - | `proxy.listen` | "127.0.0.1:8766" | no | HTTP listen address. |
+| `log_file` | `path` | - | `-log` | - | `proxy.logFile` | stderr | no | Log file path; empty writes to stderr. |
+| `log_level` | `string` | `debug`, `info`, `warn`, `warning`, `error` | `-log-level` | - | `proxy.logLevel` | "info" | no | Minimum log level. |
+| `log_format` | `string` | `json`, `text` | `-log-format` | - | `proxy.logFormat` | "json" | no | Log output format. |
+| `api_keys_file` | `path` | - | `-api-keys-file` | - | `proxy.api_keys_file` | derived: api_keys.json beside the selected config | no | File containing accepted proxy API-key hashes. |
+| `metrics_enabled` | `boolean` | - | `-no-metrics` | - | `proxy.metrics.enabled` | true (The no-metrics flag inversely controls this setting) | no | Whether the Prometheus metrics endpoint is enabled. |
+| `metrics_listen` | `string` | - | `-metrics-listen` | - | `proxy.metrics.listen` | "127.0.0.1:9091" | no | Prometheus metrics listen address. |
+<!-- mcp-proxy-config-parameters:end -->
 
 ## Running The Proxy
 
@@ -190,8 +242,8 @@ harness-mcp-proxy tools
 harness-mcp-proxy tools -proxy http://127.0.0.1:8420
 ```
 
-`harness-mcp-proxy --version` prints the release version;
-`harness-mcp-proxy version` prints the release version plus MCP protocol version.
+`harness-mcp-proxy --version` and `harness-mcp-proxy version` both print the
+release version plus the MCP protocol version.
 
 ## Proxy API-key authentication
 

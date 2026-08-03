@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"harness/internal/cli"
 	"harness/internal/configmeta"
 	"harness/internal/hooks"
 )
@@ -31,16 +32,32 @@ func (context *resolveContext) defaultSource(key string) {
 	context.result.Sources[key] = configmeta.Source{Kind: configmeta.SourceDefault, Name: "built-in"}
 }
 
-// Load strictly validates every present source and resolves one Result.
+var loadCLICatalog = cli.MustCatalog(cli.Command{
+	ID: "root", Name: "harness", Runnable: true, Flags: CLIFlags(),
+	Args: cli.Args{Max: -1, Check: false},
+})
+
+// Load parses Args with the shared CLI catalog and delegates source resolution
+// to LoadParsed. It remains the compatibility entry point for package callers.
 func Load(options LoadOptions) (Result, error) {
+	invocation, err := loadCLICatalog.Parse(options.Args)
+	if err != nil {
+		return Result{}, err
+	}
+	if invocation.Action == cli.Help {
+		return Result{Run: RunOptions{Help: true}}, nil
+	}
+	return LoadParsed(options, invocation.Flags)
+}
+
+// LoadParsed strictly validates every present source and resolves one Result
+// from flags already parsed for a compatible command scope.
+func LoadParsed(options LoadOptions, values cli.Values) (Result, error) {
 	lookup := options.LookupEnv
 	if lookup == nil {
 		lookup = os.LookupEnv
 	}
-	flags := newFlagState()
-	if err := flags.set.Parse(options.Args); err != nil {
-		return Result{}, err
-	}
+	flags := newParsedFlagState(values)
 	meta, err := resolveMetaRunOptions(flags)
 	if err != nil {
 		return Result{}, err
@@ -87,11 +104,11 @@ func ResolveConfigPath(options LoadOptions) (string, error) {
 	if lookup == nil {
 		lookup = os.LookupEnv
 	}
-	flags := newFlagState()
-	if err := flags.set.Parse(options.Args); err != nil {
+	invocation, err := loadCLICatalog.Parse(options.Args)
+	if err != nil {
 		return "", err
 	}
-	return resolveConfigPath(flags, lookup, options.DefaultConfigPath)
+	return resolveConfigPath(newParsedFlagState(invocation.Flags), lookup, options.DefaultConfigPath)
 }
 
 func resolveConfigPath(flags *flagState, lookup func(string) (string, bool), conventional string) (string, error) {

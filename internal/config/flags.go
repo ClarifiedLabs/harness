@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	"harness/internal/cli"
 	"harness/internal/configmeta"
 )
 
@@ -38,7 +39,7 @@ func (value *trackedFlag) Set(raw string) error {
 }
 
 func newFlagState() *flagState {
-	state := &flagState{settings: make(map[string][]flagOccurrence), invocation: make(map[string][]flagOccurrence)}
+	state := newParsedFlagState(cli.Values{})
 	state.set = flag.NewFlagSet("harness", flag.ContinueOnError)
 	state.set.SetOutput(io.Discard)
 	for _, definition := range allDefinitions {
@@ -64,6 +65,25 @@ func newFlagState() *flagState {
 	state.addInvocationFlag("check-model-proxy", "check_model_proxy", "check model proxy reachability and exit", true)
 	state.addInvocationFlag("hooks", "hooks_override", "override hook config file for this run", false)
 	annotateSettingFlags(state.set, parameterCatalog)
+	return state
+}
+
+func newParsedFlagState(values cli.Values) *flagState {
+	state := &flagState{settings: make(map[string][]flagOccurrence), invocation: make(map[string][]flagOccurrence)}
+	for _, value := range values.Occurrences() {
+		occurrence := flagOccurrence{name: value.Name, value: value.Value}
+		if _, setting := parameterCatalog.Lookup(value.ID); setting {
+			if value.ID == "hooks" {
+				state.invocation["hooks_override"] = append(state.invocation["hooks_override"], occurrence)
+			} else {
+				state.settings[value.ID] = append(state.settings[value.ID], occurrence)
+			}
+			continue
+		}
+		if _, known := LookupCLIFlag(value.ID); known {
+			state.invocation[value.ID] = append(state.invocation[value.ID], occurrence)
+		}
+	}
 	return state
 }
 

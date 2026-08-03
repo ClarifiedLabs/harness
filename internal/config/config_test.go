@@ -412,6 +412,20 @@ func TestStructuredSettingsAndInterpolation(t *testing.T) {
 	}
 }
 
+func TestSnapshotDoesNotAliasResolvedConfig(t *testing.T) {
+	result := load(t, nil, nil, writeConfig(t, `{"agents":{"custom":{"description":"Custom agent","allowed_tools":["read_file"]}}}`))
+	snapshot := Snapshot(result)
+	snapshot.Sources["agents"] = configmeta.Source{Kind: configmeta.SourceFlag, Name: "--changed"}
+	snapshot.Values["agents"].(map[string]FileAgentConfig)["custom"] = FileAgentConfig{Description: "Changed"}
+
+	if result.Sources["agents"].Kind != configmeta.SourceFile {
+		t.Fatalf("resolved source changed through snapshot: %+v", result.Sources["agents"])
+	}
+	if got := result.Config.Agents["custom"].Description; got != "Custom agent" {
+		t.Fatalf("resolved agents changed through snapshot: %q", got)
+	}
+}
+
 func TestProjectionRedactsAndIsVersioned(t *testing.T) {
 	path := writeConfig(t, `{"model_proxy_api_key":"model-secret-value","mcp":{"api_key":"mcp-secret-value","headers":{"Authorization":"header-secret-value"},"local":{"env":{"TOKEN":"local-env-secret-value"}}},"lsp":{"servers":{"go":{"languages":[],"root_markers":[],"command":["gopls"],"extensions":[],"env":{"TOKEN":"server-env-secret-value"},"initialization_options":{"apiToken":"lsp-init-secret-value"}}}}}`)
 	result := load(t, nil, nil, path)

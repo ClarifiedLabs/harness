@@ -91,8 +91,10 @@ tool calls dispatch against the local registry:
 
 ```
 cmd/harness              config/session/LSP command dispatch, config load, proxy catalog wiring, signals, and REPL-vs-oneshot execution
-cmd/harness-model-proxy  provider setup/refresh and HTTP model proxy server; subcommands serve (default), setup, refresh-models, auth (login/logout/status), generate-api-key, version
+cmd/harness-model-proxy  provider setup/refresh and HTTP model proxy server; generated command dispatch plus config inspection
+internal/cli             immutable nested command/flag catalogs, presence-aware parsing, and deterministic scoped help
 internal/modelproxy      proxy protocol, client Provider, server handler
+internal/modelproxy/config model-proxy top-level setting catalog, source resolution, and safe projections
 internal/modelproxy/pricing generic request-cost pricers: flat llm.Price plus provider-specific dynamic models
 internal/llm             provider-agnostic types, Provider interface, model/price registry
 internal/llm/openai      Chat Completions dialect: wire structs, request builder, stream decode, tool-call assembly
@@ -106,7 +108,7 @@ internal/delegate        configured child-agent tool; starts child agents withou
 internal/background      process-local background job manager + tools
 internal/session         append-only conversation tree, mutable state, replay, archives, artifacts
 internal/config          typed harness definitions, strict source resolution, provenance, and redacted projections
-internal/configmeta      package-neutral parameter catalog, source vocabulary, and deterministic reference renderers
+internal/configmeta      package-neutral parameter catalog, source vocabulary, provenance snapshots, and deterministic reference renderers
 internal/modelcatalog    normalized models.dev/OpenAI Codex catalogs for proxy setup/pricing metadata
 internal/ui              REPL, streaming renderer, tool summaries, usage line
 internal/sysprompt       embedded prompt files + environment context + AGENTS.md sections
@@ -117,7 +119,7 @@ internal/todo            update_todos store + render (§9.13)
 internal/plan            record_plan store + handoff request holder (§9.17, §9.18, §14)
 internal/goal            session goal state + create/update tools (§9.19, §10)
 internal/auth            provider auth sources (token_command, oauth2, codex_oauth) for the model proxy
-cmd/harness-mcp-proxy  optional MCP proxy daemon + debug client (serve / tools / auth / version)
+cmd/harness-mcp-proxy  optional MCP proxy daemon + debug/config client with generated command dispatch
 internal/mcp             tools-only MCP slice: schema, client, server, stdio + streamable-HTTP transports
 internal/mcp/jsonrpc     JSON-RPC 2.0 framing and bidirectional request/response correlation
 internal/mcpproxy      proxy internals: config, supervisors, tool registry, daemon
@@ -1190,12 +1192,23 @@ is explicitly set on the CLI.
 
 ## 7. Configuration and model selection
 
-`internal/configmeta` defines the package-neutral configuration vocabulary:
-ordered `Catalog` entries describe stable keys, types, flags, environment names,
-JSON paths, accepted values, literal or derived defaults, descriptions, and
-sensitivity. The catalog rejects duplicate input surfaces and drives deterministic
-text, JSON, and Markdown renderers. It contains no harness loading logic;
-`internal/config` owns the typed harness definitions and resolution.
+`internal/cli` and `internal/configmeta` deliberately describe different
+surfaces. `internal/cli` owns immutable nested command trees, command-scoped flag
+metadata, presence-aware ordered values, parser errors, and deterministic scoped
+help; handlers and exit policy remain in each `cmd` package. `internal/configmeta`
+defines the package-neutral configuration vocabulary: ordered `Catalog` entries
+describe stable keys, types, flags, environment names, JSON paths, accepted
+values, literal or derived defaults, descriptions, and sensitivity. It rejects
+duplicate input surfaces and drives deterministic text, JSON, and Markdown
+reference and snapshot renderers.
+
+Configuration loading remains package-owned rather than generic:
+`internal/config`, `internal/modelproxy/config`, and `internal/mcpproxy` each own
+an independent catalog and preserve their domain's precedence, empty-value,
+path, warning, and child-validation semantics. All three return safe resolved
+snapshots with `default`, `derived`, `file`, `environment`, or `flag` provenance.
+The catalog layer does not read configuration or secrets and never routes
+commands.
 
 For scalar settings, one generic definition registers flags, parses and normalizes
 file/environment/flag candidates, applies **flag > environment > config file >
@@ -3230,11 +3243,12 @@ prefix wins, threshold `1 + len(cmd)/3`).
 
 ### Flags
 
-The exhaustive flag inventory is maintained in the
-[usage reference](usage.md#flags). `internal/config.newFlagSet` is the parsing
-source of truth and also backs `config.Usage`, so runtime `-h` output cannot drift
-from accepted flags. Configuration resolution remains flags > environment > file
-> defaults, except for the documented config-only structured settings.
+The exhaustive Harness setting inventory is maintained in the
+[usage reference](usage.md#flags). `internal/cli` parses the same immutable,
+command-scoped declarations used to generate `-h` output, while
+`internal/config` projects its setting catalog into applicable command scopes and
+owns source resolution. Configuration resolution remains flags > environment >
+file > defaults, except for the documented config-only structured settings.
 
 `harness config show` renders the redacted, source-resolved user-setting
 projection and exits without contacting the model proxy. It does not materialize

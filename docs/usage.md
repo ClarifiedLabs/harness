@@ -743,6 +743,54 @@ applicable retention policy.
 
 ## Model Proxy
 
+### Commands and configuration inspection
+
+`harness-model-proxy --help` renders the generated root command catalog; use
+`harness-model-proxy <command> --help` for command-scoped flags. With no
+arguments the binary runs `serve`, preserving its historical default.
+
+The model proxy also provides offline configuration inspection:
+
+```text
+harness-model-proxy config list  [-format text|json|markdown]
+harness-model-proxy config show  [-config path] [-format text|json] [-sources] [setting flags]
+harness-model-proxy config check [-config path]
+```
+
+An explicit `-config` path wins. Without one, the proxy discovers an existing
+`~/.config/harness-model-proxy/config.json` (or its documented temporary
+fallback when `HOME` is unavailable). Setting flags override the file; lifecycle
+environment variables override their corresponding file values and are in turn
+overridden by flags. Empty-value handling remains setting-specific: for example,
+an empty log or metrics-listener override preserves the lower-precedence value,
+an empty instance ID requests derivation, and an empty duration is invalid.
+
+`config list` reads no configuration. `config show` resolves only the top-level
+proxy settings and never opens referenced provider, API-key, or OAuth token
+files. Its versioned JSON projection may show safe file paths but never provider
+credentials, key contents, or token contents. `config check` additionally reads,
+decodes, and locally validates referenced provider files, including auth and
+model-catalog normalization, using the normal warning-and-skip rules. It performs
+no network requests and does not mutate configuration or managed state.
+
+#### Model-proxy configuration parameters
+
+<!-- model-proxy-config-parameters:start -->
+| Key | Type | Accepted | Flags | Environment | JSON path | Default | Sensitive | Description |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `provider_configs` | `array` | - | - | - | `provider_configs` | [] | no | Ordered provider configuration file paths, resolved relative to the main configuration file. |
+| `default_context_window` | `integer` | - | - | - | `default_context_window` | 256000 | no | Fallback context window for models without an explicit value. |
+| `log_level` | `string` | `debug`, `info`, `warn`, `error` | `-log-level` | - | `log_level` | info | no | Proxy log level. |
+| `log_format` | `string` | `json`, `text` | `-log-format` | - | `log_format` | json | no | Proxy log format. |
+| `models_dev_cache_ttl` | `duration` | - | `-models-dev-cache-ttl` | - | `models_dev_cache_ttl` | 24h | no | models.dev cache refresh interval; zero disables periodic refresh. |
+| `drain_delay` | `duration` | - | `-drain-delay` | `HARNESS_MODEL_PROXY_DRAIN_DELAY` | `drain_delay` | 5s | no | Readiness propagation delay before API shutdown. |
+| `shutdown_timeout` | `duration` | - | `-shutdown-timeout` | `HARNESS_MODEL_PROXY_SHUTDOWN_TIMEOUT` | `shutdown_timeout` | 5m | no | Maximum graceful stream drain time. |
+| `instance_id` | `string` | - | `-instance-id` | `HARNESS_MODEL_PROXY_INSTANCE_ID` | `instance_id` | derived: generated at startup | no | Proxy instance identifier. |
+| `api_keys_file` | `string` | - | `-api-keys-file` | - | `api_keys_file` | derived: api_keys.json beside the selected config | no | Accepted API keys file path; this setting is a path and never exposes file contents. |
+| `metrics_enabled` | `boolean` | - | `-no-metrics` | - | `metrics.enabled` | true | no | Whether the Prometheus metrics endpoint is enabled; the command-line flag is inverse. |
+| `metrics_listen` | `string` | - | `-metrics-listen` | - | `metrics.listen` | 127.0.0.1:9090 | no | Prometheus metrics listen address. |
+<!-- model-proxy-config-parameters:end -->
+
 ### Setup
 
 Run `harness-model-proxy setup` to create a proxy config and a provider config

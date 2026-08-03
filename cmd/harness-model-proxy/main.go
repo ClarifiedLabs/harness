@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"math"
@@ -14,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -21,10 +21,12 @@ import (
 
 	"harness/internal/apikey"
 	"harness/internal/buildinfo"
+	"harness/internal/cli"
 	"harness/internal/httpserve"
 	"harness/internal/logging"
 	"harness/internal/metrics"
 	"harness/internal/modelcatalog"
+	modelconfig "harness/internal/modelproxy/config"
 	"harness/internal/modelproxy/server"
 	"harness/internal/term"
 )
@@ -91,136 +93,36 @@ func main() {
 	}))
 }
 
-// run dispatches on the first non-flag argument (the subcommand) and returns
-// the process exit code, mirroring cmd/harness-mcp-proxy's dispatch. With no
-// arguments it serves HTTP (the implicit default preserved from the previous
-// flag-based CLI). Unknown subcommands and -h/--help are handled here so every
-// path prints usage to the right stream with the right exit code.
-func run(env environment) int {
-	args := env.args
-	if len(args) == 0 {
-		return runServe(env, nil)
-	}
-	switch args[0] {
-	case "-h", "--help", "help":
-		usage(env.stdout)
-		return exitOK
-	case "--version", "version":
-		fmt.Fprintln(env.stdout, buildinfo.Line("harness-model-proxy"))
-		return exitOK
-	case "serve":
-		return runServe(env, args[1:])
-	case "setup":
-		return runSetupCmd(env, args[1:])
-	case "refresh-models":
-		return runRefreshModelsCmd(env, args[1:])
-	case "auth":
-		return runAuth(env, args[1:])
-	case "generate-api-key":
-		return runGenerateAPIKeyCmd(env, args[1:])
-	default:
-		fmt.Fprintf(env.stderr, "harness-model-proxy: unknown subcommand %q\n", args[0])
-		usage(env.stderr)
-		return exitUsage
-	}
-}
-
-// runServe parses serve flags and serves HTTP. args may be nil, in which case it
-// serves with the resolved default config and listener (the implicit-default-serve
-// behavior: running `harness-model-proxy` with no arguments still serves).
-func runServe(env environment, args []string) int {
-	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	configPath := fs.String("config", "", "config file path")
-	listen := fs.String("listen", "", "HTTP listen address")
-	modelsDevCacheTTL := fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
-	apiKeysFile := fs.String("api-keys-file", "", "accepted API keys file path")
-	logLevel := fs.String("log-level", "", "log level: debug, info, warn, error")
-	logFormat := fs.String("log-format", "", "log format: json, text")
-	noMetrics := fs.Bool("no-metrics", false, "disable the Prometheus /metrics endpoint")
-	metricsListen := fs.String("metrics-listen", "", "Prometheus /metrics listen address (default: "+defaultMetricsListen+")")
-	drainDelayFlag := fs.String("drain-delay", "", "readiness propagation delay before API shutdown (default: 5s)")
-	shutdownTimeoutFlag := fs.String("shutdown-timeout", "", "maximum graceful stream drain time (default: 5m)")
-	instanceIDFlag := fs.String("instance-id", "", "proxy instance identifier")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			usageServe(env.stdout)
-			return exitOK
-		}
+// runServe consumes the source-resolved model-proxy configuration and serves HTTP.
+func runServe(env environment, invocation cli.Invocation) int {
+	resolved, err := loadModelConfig(env, invocation)
+	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+		var fileErr *modelconfig.FileError
+		if errors.As(err, &fileErr) {
+			return exitRuntime
+		}
 		return exitUsage
 	}
-
-	path := server.ConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv)
-	if path == "" {
+	if resolved.Path == "" {
 		fmt.Fprintln(env.stderr, "harness-model-proxy: no config file found; run harness-model-proxy setup")
 		return exitUsage
 	}
-	cfg, err := server.LoadConfig(path)
-	if err != nil {
-		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
-		return exitRuntime
-	}
-	keyFile := server.ResolveAPIKeysFile(path, cfg.APIKeysFile, *apiKeysFile)
-	keyFileExplicit := *apiKeysFile != "" || cfg.APIKeysFile != ""
-	initialKeys, keyFileState, err := apikey.LoadInitialFile(keyFile, keyFileExplicit)
+	path := resolved.Path
+	cfg := resolved.Config
+	keyFile := cfg.APIKeysFile
+	initialKeys, keyFileState, err := apikey.LoadInitialFile(keyFile, resolved.APIKeysFileExplicit)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: api keys file %s: %v\n", keyFile, err)
 		return exitRuntime
 	}
 	authStore := apikey.NewDynamicStore(initialKeys, nil)
 
-	modelsTTL, err := modelsDevCacheTTLFromConfig(cfg, *modelsDevCacheTTL, flagWasSet(fs, "models-dev-cache-ttl"))
-	if err != nil {
-		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
-		return exitUsage
-	}
+	modelsTTL := cfg.ModelsDevCacheTTL.Duration
 	env.modelsDevCacheTTL = &modelsTTL
-	drainDelay, err := resolveServeDuration(
-		"drain-delay",
-		*drainDelayFlag,
-		flagWasSet(fs, "drain-delay"),
-		env.getenv("HARNESS_MODEL_PROXY_DRAIN_DELAY"),
-		cfg.DrainDelay,
-		defaultDrainDelay,
-	)
-	if err != nil {
-		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
-		return exitUsage
-	}
-	shutdownTimeout, err := resolveServeDuration(
-		"shutdown-timeout",
-		*shutdownTimeoutFlag,
-		flagWasSet(fs, "shutdown-timeout"),
-		env.getenv("HARNESS_MODEL_PROXY_SHUTDOWN_TIMEOUT"),
-		cfg.ShutdownTimeout,
-		defaultShutdownTime,
-	)
-	if err != nil {
-		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
-		return exitUsage
-	}
-	instanceID := resolveServeInstanceID(
-		*instanceIDFlag,
-		flagWasSet(fs, "instance-id"),
-		env.getenv("HARNESS_MODEL_PROXY_INSTANCE_ID"),
-		cfg.InstanceID,
-	)
-
-	level := cfg.LogLevel
-	if *logLevel != "" {
-		level = *logLevel
-	}
-	level, err = logging.CanonicalLevel(level)
-	if err != nil {
-		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
-		return exitUsage
-	}
-	format := cfg.LogFormat
-	if *logFormat != "" {
-		format = *logFormat
-	}
-	logger, err := logging.NewProxyLogger(env.stderr, level, format)
+	drainDelay := cfg.DrainDelay.Duration
+	shutdownTimeout := cfg.ShutdownTimeout.Duration
+	logger, err := logging.NewProxyLogger(env.stderr, cfg.LogLevel, cfg.LogFormat)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitUsage
@@ -228,15 +130,12 @@ func runServe(env environment, args []string) int {
 
 	configDir := filepath.Dir(path)
 	initialCatalog, initialSourceDate := loadModelsDevCacheForServe(configDir)
-	// Resolve metrics before building the handler: a nil registry disables
-	// collection at the handler level, so -no-metrics stops per-request recording
-	// rather than only the listener.
-	metricsSettings := metrics.Resolve(cfg.Metrics, defaultMetricsListen, metrics.Overrides{
-		Disable:    *noMetrics,
-		DisableSet: flagWasSet(fs, "no-metrics"),
-		Listen:     *metricsListen,
-		ListenSet:  flagWasSet(fs, "metrics-listen"),
-	})
+	metricsEnabled := cfg.Metrics.Enabled == nil || *cfg.Metrics.Enabled
+	metricsSettings := metrics.Settings{
+		Enabled:        metricsEnabled,
+		Listen:         cfg.Metrics.Listen,
+		ListenExplicit: resolved.MetricsListenExplicit,
+	}
 	reg := newMetricsRegistry(metricsSettings.Enabled)
 	handler, err := server.NewHandler(server.Options{
 		ConfigDir:           configDir,
@@ -248,7 +147,7 @@ func runServe(env environment, args []string) int {
 		ModelsDevSourceDate: initialSourceDate,
 		Now:                 env.now,
 		Metrics:             reg,
-		InstanceID:          instanceID,
+		InstanceID:          cfg.InstanceID,
 		Warn: func(msg string) {
 			logger.Warn(msg)
 		},
@@ -258,9 +157,9 @@ func runServe(env environment, args []string) int {
 		return exitRuntime
 	}
 	logger = logger.With("proxy_instance_id", handler.InstanceID())
-	addr := defaultListen
-	if *listen != "" {
-		addr = *listen
+	addr := cliLast(invocation.Flags, "listen", defaultListen)
+	if addr == "" {
+		addr = defaultListen
 	}
 	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
 	defer cancelBackground()
@@ -346,21 +245,10 @@ func runServe(env environment, args []string) int {
 	return exitOK
 }
 
-// runSetupCmd parses setup flags and runs the interactive provider-config wizard.
-func runSetupCmd(env environment, args []string) int {
-	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	force := fs.Bool("force", false, "overwrite existing provider files")
-	modelsDevCacheTTL := fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			usageSetup(env.stdout)
-			return exitOK
-		}
-		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
-		return exitUsage
-	}
-	ttl, err := setupModelsDevCacheTTL(env, *modelsDevCacheTTL, flagWasSet(fs, "models-dev-cache-ttl"))
+// runSetupCmd runs the interactive provider-config wizard from a parsed invocation.
+func runSetupCmd(env environment, invocation cli.Invocation) int {
+	ttlValue, ttlSet := invocation.Flags.Last("models_dev_cache_ttl")
+	ttl, err := setupModelsDevCacheTTL(env, ttlValue, ttlSet)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitUsage
@@ -368,7 +256,7 @@ func runSetupCmd(env environment, args []string) int {
 	env.modelsDevCacheTTL = &ttl
 	ctx, cancel, interrupted := signalCancelContext(env.sigCh)
 	defer cancel()
-	if err := runSetup(ctx, env, *force); err != nil {
+	if err := runSetup(ctx, env, cliBool(invocation.Flags, "force")); err != nil {
 		if interrupted() || errors.Is(err, context.Canceled) {
 			return exitInterrupt
 		}
@@ -378,27 +266,16 @@ func runSetupCmd(env environment, args []string) int {
 	return exitOK
 }
 
-// runRefreshModelsCmd parses refresh-models flags and re-syncs configured
-// provider config files from the models.dev catalog.
-func runRefreshModelsCmd(env environment, args []string) int {
-	fs := flag.NewFlagSet("refresh-models", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	configPath := fs.String("config", "", "config file path")
-	modelsDevCacheTTL := fs.String("models-dev-cache-ttl", "", "models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			usageRefreshModels(env.stdout)
-			return exitOK
-		}
-		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
-		return exitUsage
-	}
-	path := server.ConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv)
+// runRefreshModelsCmd re-syncs configured provider files from a parsed invocation.
+func runRefreshModelsCmd(env environment, invocation cli.Invocation) int {
+	configPath, _ := invocation.Flags.Last("config")
+	path := server.ConfigPath(configPath, invocation.Flags.Has("config"), env.getenv)
 	if path == "" {
 		fmt.Fprintln(env.stderr, "harness-model-proxy: no config file found; run harness-model-proxy setup")
 		return exitUsage
 	}
-	ttl, err := configuredModelsDevCacheTTL(path, env, *modelsDevCacheTTL, flagWasSet(fs, "models-dev-cache-ttl"))
+	ttlValue, ttlSet := invocation.Flags.Last("models_dev_cache_ttl")
+	ttl, err := configuredModelsDevCacheTTL(path, env, ttlValue, ttlSet)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitUsage
@@ -416,159 +293,30 @@ func runRefreshModelsCmd(env environment, args []string) int {
 	return exitOK
 }
 
-// runGenerateAPIKeyCmd parses generate-api-key flags, generates a new API key,
-// and appends its hash to the dedicated key file.
-func runGenerateAPIKeyCmd(env environment, args []string) int {
-	fs := flag.NewFlagSet("generate-api-key", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	configPath := fs.String("config", "", "config file path")
-	apiKeysFile := fs.String("api-keys-file", "", "accepted API keys file path")
-	ttl := fs.String("ttl", "", "key TTL as a Go duration; empty or 0 means no expiry")
-	budgetUSD := fs.Float64("budget-usd", 0, "per-key cost budget in USD; 0 means no budget")
-	budgetPeriod := fs.String("budget-period", "", "per-key cost budget period as a Go duration; required when -budget-usd is set")
-	budgetRejectUnpriced := fs.Bool("budget-reject-unpriced", false, "reject unpriced targets while this key's budget is enabled")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			usageGenerateAPIKey(env.stdout)
-			return exitOK
-		}
-		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
+// runGenerateAPIKeyCmd generates and stores an API key from a parsed invocation.
+func runGenerateAPIKeyCmd(env environment, invocation cli.Invocation) int {
+	budgetValue := cliLast(invocation.Flags, "budget_usd", "0")
+	budgetUSD, err := strconv.ParseFloat(budgetValue, 64)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness-model-proxy: invalid -budget-usd %q: %v\n", budgetValue, err)
 		return exitUsage
 	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(env.stderr, "harness-model-proxy: generate-api-key requires exactly one name")
-		return exitUsage
-	}
-	return runGenerateAPIKey(env, *configPath, *apiKeysFile, *ttl, *budgetUSD, *budgetPeriod, *budgetRejectUnpriced, fs.Arg(0))
+	configPath, _ := invocation.Flags.Last("config")
+	return runGenerateAPIKey(
+		env,
+		configPath,
+		invocation.Flags.Has("config"),
+		cliLast(invocation.Flags, "api_keys_file", ""),
+		cliLast(invocation.Flags, "ttl", ""),
+		budgetUSD,
+		cliLast(invocation.Flags, "budget_period", ""),
+		cliBool(invocation.Flags, "budget_reject_unpriced"),
+		invocation.Args[0],
+	)
 }
 
-func usage(w io.Writer) {
-	fmt.Fprint(w, `harness-model-proxy - provider and model proxy for harness
-
-Usage:
-  harness-model-proxy serve             [-config path] [-api-keys-file path] [-listen addr] [-models-dev-cache-ttl d] [-drain-delay d] [-shutdown-timeout d] [-instance-id id] [-log-level level] [-log-format format] [-no-metrics] [-metrics-listen addr]
-  harness-model-proxy setup             [-force] [-models-dev-cache-ttl d]
-  harness-model-proxy refresh-models    [-config path] [-models-dev-cache-ttl d]
-  harness-model-proxy auth              <login|logout|status> [-config path] <provider>
-  harness-model-proxy generate-api-key  [-config path] [-api-keys-file path] [-ttl duration] [-budget-usd amount -budget-period duration] [-budget-reject-unpriced] <name>
-  harness-model-proxy version
-  harness-model-proxy --version
-
-With no arguments, harness-model-proxy serves HTTP (the default action).
-
-Subcommands:
-  serve             Load config and serve the HTTP model proxy (default).
-  setup             Create or update proxy and provider config interactively.
-  refresh-models    Fetch models.dev and update configured provider model metadata.
-  auth              Login, logout, or inspect OAuth tokens for a configured provider.
-  generate-api-key  Generate a new API key with the given name and add it to the key file.
-  version           Print the release version.
-
-serve flags:
-  -config path            config file path
-  -api-keys-file path     accepted API keys file path (default: api_keys.json next to config)
-  -listen addr            HTTP listen address (default: `+defaultListen+`)
-  -models-dev-cache-ttl d models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh
-  -log-level level        debug|info|warn|error (overrides config)
-  -log-format format      json|text (overrides config)
-  -no-metrics             disable the Prometheus /metrics endpoint
-  -metrics-listen addr    Prometheus /metrics listen address (default: `+defaultMetricsListen+`)
-  -drain-delay d          readiness propagation delay before API shutdown (default: 5s)
-  -shutdown-timeout d     maximum graceful stream drain time (default: 5m)
-  -instance-id id         proxy instance identifier (default: random)
-
-setup flags:
-  -force                  overwrite existing provider files
-  -models-dev-cache-ttl d models.dev cache refresh interval
-
-refresh-models flags:
-  -config path            config file path
-  -models-dev-cache-ttl d models.dev cache refresh interval
-
-generate-api-key flags:
-  -config path            config file path
-  -api-keys-file path     accepted API keys file path (default: api_keys.json next to config)
-  -ttl duration           key TTL as a Go duration; empty or 0 means no expiry
-  -budget-usd amount      per-key cost budget in USD; 0 means no budget
-  -budget-period duration per-key cost budget period; required when -budget-usd is set
-  -budget-reject-unpriced reject unpriced targets while this key's budget is enabled
-`)
-}
-
-// usageServe prints serve-specific help.
-func usageServe(w io.Writer) {
-	fmt.Fprint(w, `harness-model-proxy serve - load config and serve the HTTP model proxy
-
-Usage:
-  harness-model-proxy serve [-config path] [-api-keys-file path] [-listen addr] [-models-dev-cache-ttl d] [-drain-delay d] [-shutdown-timeout d] [-instance-id id] [-log-level level] [-log-format format] [-no-metrics] [-metrics-listen addr]
-
-With no arguments, harness-model-proxy serves HTTP (the default action).
-
-Flags:
-  -config path            config file path
-  -api-keys-file path     accepted API keys file path (default: api_keys.json next to config)
-  -listen addr            HTTP listen address (default: `+defaultListen+`)
-  -models-dev-cache-ttl d models.dev cache refresh interval, e.g. 24h; 0 disables periodic refresh
-  -log-level level        debug|info|warn|error (overrides config)
-  -log-format format      json|text (overrides config)
-  -no-metrics             disable the Prometheus /metrics endpoint
-  -metrics-listen addr    Prometheus /metrics listen address (default: `+defaultMetricsListen+`)
-  -drain-delay d          readiness propagation delay before API shutdown (default: 5s)
-  -shutdown-timeout d     maximum graceful stream drain time (default: 5m)
-  -instance-id id         proxy instance identifier (default: random)
-`)
-}
-
-// usageSetup prints setup-specific help.
-func usageSetup(w io.Writer) {
-	fmt.Fprint(w, `harness-model-proxy setup - create or update proxy and provider config interactively
-
-Usage:
-  harness-model-proxy setup [-force] [-models-dev-cache-ttl d]
-
-Runs the models.dev-backed provider/model picker and writes proxy and provider
-config files in the default config directory.
-
-Flags:
-  -force                  overwrite existing provider files
-  -models-dev-cache-ttl d models.dev cache refresh interval
-`)
-}
-
-// usageRefreshModels prints refresh-models-specific help.
-func usageRefreshModels(w io.Writer) {
-	fmt.Fprint(w, `harness-model-proxy refresh-models - fetch models.dev and update configured provider model metadata
-
-Usage:
-  harness-model-proxy refresh-models [-config path] [-models-dev-cache-ttl d]
-
-Flags:
-  -config path            config file path
-  -models-dev-cache-ttl d models.dev cache refresh interval
-`)
-}
-
-// usageGenerateAPIKey prints generate-api-key-specific help.
-func usageGenerateAPIKey(w io.Writer) {
-	fmt.Fprint(w, `harness-model-proxy generate-api-key - generate and store a new API key
-
-Usage:
-  harness-model-proxy generate-api-key [-config path] [-api-keys-file path] [-ttl duration] [-budget-usd amount -budget-period duration] [-budget-reject-unpriced] <name>
-
-Writes the dedicated API-key file; it does not create or mutate the normal config.
-
-Flags:
-  -config path            config file path
-  -api-keys-file path     accepted API keys file path (default: api_keys.json next to config)
-  -ttl duration           key TTL as a Go duration; empty or 0 means no expiry
-  -budget-usd amount      per-key cost budget in USD; 0 means no budget
-  -budget-period duration per-key cost budget period; required when -budget-usd is set
-  -budget-reject-unpriced reject unpriced targets while this key's budget is enabled
-`)
-}
-
-func runGenerateAPIKey(env environment, argsConfigPath, argsAPIKeysFile, ttlValue string, budgetUSD float64, budgetPeriodValue string, budgetRejectUnpriced bool, name string) int {
-	configPath := server.ConfigPath(argsConfigPath, argsConfigPath != "", env.getenv)
+func runGenerateAPIKey(env environment, argsConfigPath string, configExplicit bool, argsAPIKeysFile, ttlValue string, budgetUSD float64, budgetPeriodValue string, budgetRejectUnpriced bool, name string) int {
+	configPath := server.ConfigPath(argsConfigPath, configExplicit, env.getenv)
 	if configPath == "" {
 		configPath = filepath.Join(defaultConfigDir(env.getenv), "config.json")
 	}
@@ -766,16 +514,6 @@ func resolveServeInstanceID(flagValue string, flagSet bool, envValue, configured
 		return value
 	}
 	return strings.TrimSpace(configured)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	set := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == name {
-			set = true
-		}
-	})
-	return set
 }
 
 // newMetricsRegistry returns a registry seeded with the build-info gauge when

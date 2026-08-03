@@ -14,7 +14,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -26,6 +25,7 @@ import (
 
 	"harness/internal/apikey"
 	"harness/internal/buildinfo"
+	"harness/internal/cli"
 	"harness/internal/mcp"
 	"harness/internal/mcpproxy"
 )
@@ -95,143 +95,61 @@ func signalCancelContext(sigCh <-chan os.Signal) (context.Context, context.Cance
 	return ctx, cancel, interrupted.Load
 }
 
-// run dispatches on the first non-flag argument (the subcommand) and returns the
-// process exit code. Unknown/missing subcommands and -h/--help are handled here
-// so every path prints usage to the right stream with the right exit code.
+// run normalizes the two legacy root spellings, parses one selected command
+// scope, renders generated help, and dispatches by stable command ID.
 func run(env environment) int {
-	args := env.args
-	if len(args) > 0 && args[0] == "--version" {
-		fmt.Fprintf(env.stdout, "%s (MCP protocol %s)\n", buildinfo.Line("harness-mcp-proxy"), mcp.ProtocolVersion)
-		return exitOK
-	}
-	if len(args) == 0 {
-		usage(env.stderr, env.getenv)
-		return exitUsage
-	}
-
-	switch args[0] {
-	case "-h", "--help", "help":
-		usage(env.stdout, env.getenv)
-		return exitOK
-	case "serve":
-		return runServe(env, args[1:])
-	case "tools":
-		return runTools(env, args[1:])
-	case "auth":
-		return runAuth(env, args[1:])
-	case "generate-api-key":
-		return runGenerateAPIKey(env, args[1:])
-	case "version":
-		fmt.Fprintf(env.stdout, "%s (MCP protocol %s)\n", buildinfo.Line("harness-mcp-proxy"), mcp.ProtocolVersion)
-		return exitOK
-	default:
-		fmt.Fprintf(env.stderr, "harness-mcp-proxy: unknown subcommand %q\n", args[0])
-		usage(env.stderr, env.getenv)
-		return exitUsage
-	}
-}
-
-// usage prints the command summary to w. It lists the three subcommands, the
-// serve flags, and the live default config/listen values so users can find them.
-func usage(w io.Writer, getenv func(string) string) {
-	fmt.Fprint(w, `harness-mcp-proxy - MCP proxy daemon and debug client
-
-Usage:
-  harness-mcp-proxy serve             [-config path] [-api-keys-file path] [-listen addr] [-stdio] [-no-metrics] [-metrics-listen addr] [-log path] [-log-level level] [-log-format format]
-  harness-mcp-proxy tools             [-config path] [-proxy url]
-  harness-mcp-proxy auth              <login|logout|status> [-config path] <server>
-  harness-mcp-proxy generate-api-key  [-config path] [-api-keys-file path] [-ttl duration] <name>
-  harness-mcp-proxy version
-  harness-mcp-proxy --version
-
-Subcommands:
-  serve             Run the proxy daemon: load config, supervise downstream MCP
-                     servers, and serve their merged tools over streamable HTTP.
-  tools             Connect to a running proxy and print the aggregated tool table,
-                     over HTTP.
-  auth              Login, logout, or inspect OAuth credentials for a configured HTTP
-                     downstream server.
-  generate-api-key  Generate a proxy-level API key and store its hash in the key file.
-  version           Print the release version and MCP protocol revision.
-
-serve flags:
-  -config path      config file (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
-  -api-keys-file path accepted API keys file path (default: api_keys.json next to config/default config dir)
-  -listen addr      HTTP listen address (overrides config; default: `+mcpproxy.DefaultListen+`)
-  -stdio            serve MCP over stdin/stdout instead of HTTP (metrics are disabled)
-  -no-metrics       disable the HTTP-mode Prometheus /metrics endpoint
-  -metrics-listen addr Prometheus /metrics listen address (default: `+defaultMetricsListen+`)
-  -log path         log file (overrides config; default: stderr)
-  -log-level level  debug|info|warn|error (overrides config; default: info)
-  -log-format fmt   json|text (overrides config; default: json)
-
-generate-api-key flags:
-  -config path      config file (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
-  -api-keys-file path accepted API keys file path (default: api_keys.json next to config/default config dir)
-  -ttl duration     key TTL as a Go duration; empty or 0 means no expiry
-
-tools flags:
-  -config path      config file (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
-  -proxy url        proxy URL (default: `+mcpproxy.DefaultURL()+`)
-  -api-key key      proxy API key (also HARNESS_MCP_PROXY_API_KEY)
-`)
-}
-
-// usageGenerateAPIKey prints generate-api-key-specific help, mirroring the
-// model-proxy's usageGenerateAPIKey so both binaries treat -h/--help the same
-// (usage to stdout, exit 0) rather than as a flag parse error.
-func usageGenerateAPIKey(w io.Writer, getenv func(string) string) {
-	fmt.Fprint(w, `harness-mcp-proxy generate-api-key - generate and store a new proxy API key
-
-Usage:
-  harness-mcp-proxy generate-api-key [-config path] [-api-keys-file path] [-ttl duration] <name>
-
-Writes the dedicated API-key file; it does not create or mutate the normal config.
-
-Flags:
-  -config path      config file path (default: `+mcpproxy.DefaultConfigPath(getenv)+`)
-  -api-keys-file path accepted API keys file path (default: api_keys.json next to config/default config dir)
-  -ttl duration     key TTL as a Go duration; empty or 0 means no expiry
-`)
-}
-
-// resolveConfigPath turns the parsed -config flag into the path passed to
-// mcpproxy.LoadConfig, mirroring cmd/harness's resolveConfigPath. An explicit
-// flag value is used verbatim (a typo surfaces as a "not found" error in Load).
-// When the flag was left at its default, a missing file resolves to "" so Load
-// returns a valid empty config rather than erroring — the proxy must run with
-// no config file present. explicit reports whether the user set -config.
-func resolveConfigPath(flagValue string, explicit bool, getenv func(string) string) string {
-	if explicit {
-		return flagValue
-	}
-	def := mcpproxy.DefaultConfigPath(getenv)
-	if _, err := os.Stat(def); err == nil {
-		return def
-	}
-	return ""
-}
-
-func runGenerateAPIKey(env environment, args []string) int {
-	fs := flag.NewFlagSet("generate-api-key", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	configPath := fs.String("config", "", "config file path")
-	apiKeysFile := fs.String("api-keys-file", "", "accepted API keys file path")
-	ttlValue := fs.String("ttl", "", "key TTL as a Go duration; empty or 0 means no expiry")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			usageGenerateAPIKey(env.stdout, env.getenv)
-			return exitOK
+	if len(env.args) > 0 {
+		switch env.args[0] {
+		case "-h", "--help", "help":
+			return writeCommandHelp(env, "root", true)
+		case "--version", "version":
+			return runVersion(env, cli.Invocation{})
 		}
-		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
-		return exitUsage
+		if env.args[0] != "" && env.args[0][0] == '-' {
+			fmt.Fprintf(env.stderr, "harness-mcp-proxy: unknown subcommand %q\n", env.args[0])
+			writeCommandHelp(env, "root", false)
+			return exitUsage
+		}
 	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(env.stderr, "harness-mcp-proxy: generate-api-key requires exactly one name")
-		return exitUsage
+	args := normalizeCLIArgs(env.args)
+	catalog := commandCatalogForEnvironment(env.getenv)
+	invocation, err := catalog.Parse(args)
+	if err != nil {
+		return handleCLIError(env, args, invocation, err)
 	}
-	name := fs.Arg(0)
-	path := resolveConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv)
+	if invocation.Action == cli.Help {
+		return writeCommandHelp(env, invocation.CommandID, true)
+	}
+	handler, ok := commandHandlers[invocation.CommandID]
+	if !ok {
+		fmt.Fprintf(env.stderr, "harness-mcp-proxy: no handler for command %q\n", invocation.CommandID)
+		return exitRuntime
+	}
+	return handler(env, invocation)
+}
+
+func runVersion(env environment, _ cli.Invocation) int {
+	fmt.Fprintf(env.stdout, "%s (MCP protocol %s)\n", buildinfo.Line("harness-mcp-proxy"), mcp.ProtocolVersion)
+	return exitOK
+}
+
+// selectedConfigPath preserves legacy path selection for commands that do not
+// use ResolveConfig directly. Explicit values are returned verbatim; a missing
+// implicit default becomes an empty load path.
+func selectedConfigPath(values cli.Values, getenv func(string) string) (string, bool) {
+	if value, ok := values.Last("config"); ok {
+		return value, true
+	}
+	path := mcpproxy.DefaultConfigPath(getenv)
+	if _, err := os.Stat(path); err == nil {
+		return path, false
+	}
+	return "", false
+}
+
+func handleGenerateAPIKey(env environment, invocation cli.Invocation) int {
+	name := invocation.Args[0]
+	path, _ := selectedConfigPath(invocation.Flags, env.getenv)
 	if path == "" {
 		path = mcpproxy.DefaultConfigPath(env.getenv)
 	}
@@ -247,8 +165,9 @@ func runGenerateAPIKey(env environment, args []string) int {
 		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
 		return exitRuntime
 	}
-	keyFile := mcpproxy.ResolveAPIKeysFile(path, cfg.APIKeysFile, *apiKeysFile, env.getenv)
-	ttl, err := parseAPIKeyTTL(*ttlValue)
+	apiKeysFile := cliLast(invocation.Flags, "api_keys_file", "")
+	keyFile := mcpproxy.ResolveAPIKeysFile(path, cfg.APIKeysFile, apiKeysFile, env.getenv)
+	ttl, err := parseAPIKeyTTL(cliLast(invocation.Flags, "ttl", ""))
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
 		return exitUsage
@@ -297,16 +216,4 @@ func parseAPIKeyTTL(value string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid -ttl %q: duration must be non-negative", value)
 	}
 	return ttl, nil
-}
-
-// flagWasSet reports whether the named flag was explicitly provided on the
-// command line (as opposed to left at its default).
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	set := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == name {
-			set = true
-		}
-	})
-	return set
 }

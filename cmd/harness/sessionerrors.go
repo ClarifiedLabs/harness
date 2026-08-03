@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"harness/internal/cli"
 	"harness/internal/session"
 	"harness/internal/ui"
 )
@@ -22,35 +22,27 @@ const sessionDirTimestampLayout = "20060102T150405Z"
 // runSessionErrors implements `harness session errors`: classified tool and
 // model failures for one session directory, or scanned across recent sessions
 // under the default sessions root when no directory argument is given.
-func runSessionErrors(env environment, args []string) int {
-	flags := flag.NewFlagSet("session errors", flag.ContinueOnError)
-	flags.SetOutput(env.stderr)
-	tool := flags.String("tool", "", "only failures from this tool")
-	kind := flags.String("kind", "", "only failures of this error kind")
-	model := flags.String("model", "", "only failures attributed to this model")
-	agent := flags.String("agent", "", "only failures attributed to this agent")
-	since := flags.String("since", "24h", "when scanning, include sessions created within this duration (e.g. 24h, 720h)")
-	all := flags.Bool("all", false, "scan all sessions, ignoring --since")
-	format := flags.String("format", "text", "output format: text or json")
-	beforeValue := flags.String("before", "", "include only events at or before this RFC3339 timestamp")
-	if err := flags.Parse(args); err != nil {
+func runSessionErrors(env environment, invocation cli.Invocation) int {
+	values := invocation.Flags
+	tool := cliLast(values, "tool", "")
+	kind := cliLast(values, "kind", "")
+	model := cliLast(values, "model", "")
+	agent := cliLast(values, "agent", "")
+	since := cliLast(values, "since", "24h")
+	all := cliBool(values, "all")
+	format := cliLast(values, "format", "text")
+	beforeValue := cliLast(values, "before", "")
+	if format != "text" && format != "json" {
+		fmt.Fprintf(env.stderr, "session errors: unsupported --format %q (want text or json)\n", format)
 		return ui.ExitUsage
 	}
-	if *format != "text" && *format != "json" {
-		fmt.Fprintf(env.stderr, "session errors: unsupported --format %q (want text or json)\n", *format)
-		return ui.ExitUsage
-	}
-	if flags.NArg() > 1 {
-		fmt.Fprintln(env.stderr, "usage: harness session errors [--tool T] [--kind K] [--model M] [--agent A] [--since D|--all] [--before RFC3339] [--format text|json] [dir]")
-		return ui.ExitUsage
-	}
-	filter := session.ErrorFilter{Tool: *tool, Kind: *kind, Model: *model, Agent: *agent}
+	filter := session.ErrorFilter{Tool: tool, Kind: kind, Model: model, Agent: agent}
 	var before time.Time
-	if strings.TrimSpace(*beforeValue) != "" {
+	if strings.TrimSpace(beforeValue) != "" {
 		var err error
-		before, err = time.Parse(time.RFC3339, *beforeValue)
+		before, err = time.Parse(time.RFC3339, beforeValue)
 		if err != nil {
-			fmt.Fprintf(env.stderr, "session errors: invalid --before %q: want RFC3339\n", *beforeValue)
+			fmt.Fprintf(env.stderr, "session errors: invalid --before %q: want RFC3339\n", beforeValue)
 			return ui.ExitUsage
 		}
 	}
@@ -59,27 +51,27 @@ func runSessionErrors(env environment, args []string) int {
 		analyzedAt = env.now().UTC()
 	}
 
-	if flags.NArg() == 1 {
-		dir := flags.Arg(0)
+	if len(invocation.Args) == 1 {
+		dir := invocation.Args[0]
 		analysis, err := session.AnalyzeErrors(dir, filter, before)
 		if err != nil {
 			fmt.Fprintf(env.stderr, "session errors: %v\n", err)
 			return ui.ExitRuntime
 		}
 		report := sessionErrorsReport{
-			Scope:           map[string]any{"dir": dir, "before": *beforeValue},
+			Scope:           map[string]any{"dir": dir, "before": beforeValue},
 			SessionsScanned: 1,
 			AnalyzedAt:      analyzedAt,
 			Summary:         analysis.Summary,
 			Rows:            analysis.Rows,
 			Sources:         analysis.Sources,
 		}
-		return writeSessionErrors(env.stdout, *format, report, []sessionErrorBlock{{dir: dir, rows: analysis.Rows}}, 0)
+		return writeSessionErrors(env.stdout, format, report, []sessionErrorBlock{{dir: dir, rows: analysis.Rows}}, 0)
 	}
 
-	window, err := time.ParseDuration(*since)
+	window, err := time.ParseDuration(since)
 	if err != nil || window < 0 {
-		fmt.Fprintf(env.stderr, "session errors: invalid --since %q: must be a duration like 24h or 720h\n", *since)
+		fmt.Fprintf(env.stderr, "session errors: invalid --since %q: must be a duration like 24h or 720h\n", since)
 		return ui.ExitUsage
 	}
 	now := time.Now
@@ -87,7 +79,7 @@ func runSessionErrors(env environment, args []string) int {
 		now = env.now
 	}
 	root := filepath.Join(stateDir(env.getenv), "harness", "sessions")
-	dirs, err := sessionDirsSince(root, now().Add(-window), *all)
+	dirs, err := sessionDirsSince(root, now().Add(-window), all)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "session errors: %v\n", err)
 		return ui.ExitRuntime
@@ -108,7 +100,7 @@ func runSessionErrors(env environment, args []string) int {
 	}
 	merged := session.MergeErrorAnalyses(analyses...)
 	report := sessionErrorsReport{
-		Scope:           map[string]any{"sessions_root": root, "since": *since, "all": *all, "before": *beforeValue},
+		Scope:           map[string]any{"sessions_root": root, "since": since, "all": all, "before": beforeValue},
 		SessionsScanned: len(analyses),
 		AnalyzedAt:      analyzedAt,
 		Summary:         merged.Summary,
@@ -116,7 +108,7 @@ func runSessionErrors(env environment, args []string) int {
 		Sources:         merged.Sources,
 		SkippedSessions: skipped,
 	}
-	return writeSessionErrors(env.stdout, *format, report, blocks, len(analyses))
+	return writeSessionErrors(env.stdout, format, report, blocks, len(analyses))
 }
 
 // sessionErrorBlock groups one session's rows for the text renderer.

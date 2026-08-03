@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,6 +28,7 @@ import (
 	"harness/internal/agentdef"
 	"harness/internal/background"
 	"harness/internal/buildinfo"
+	"harness/internal/cli"
 	"harness/internal/config"
 	"harness/internal/configmeta"
 	"harness/internal/delegate"
@@ -164,8 +164,7 @@ func signalCancelContext(sigCh <-chan os.Signal) (context.Context, context.Cance
 
 // run wires everything together and returns the process exit code (design §10
 // exit codes: 0 ok, 1 runtime, 2 usage, 130 interrupted).
-func run(env environment) int {
-	args := env.args
+func runRoot(env environment, invocation cli.Invocation) int {
 	stdin := env.stdin
 	stdout := env.stdout
 	stderr := env.stderr
@@ -174,23 +173,16 @@ func run(env environment) int {
 	if now == nil {
 		now = time.Now
 	}
-	if len(args) > 0 && args[0] == "config" {
-		return runConfigCommand(env, args[1:])
-	}
-	if len(args) > 0 && args[0] == "session" {
-		return runSessionCommand(env, args[1:])
-	}
-	if len(args) > 0 && args[0] == "lsp" {
-		return runLSPCommand(env, args[1:])
-	}
-
-	result, err := config.Load(harnessLoadOptions(env, args))
+	result, err := config.LoadParsed(harnessLoadOptions(env, nil), invocation.Flags)
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
 	}
 	if result.Run.Help {
-		config.Usage(stdout)
+		if err := commandCatalog(env).WriteHelp(stdout, "root"); err != nil {
+			fmt.Fprintf(stderr, "harness: help: %v\n", err)
+			return ui.ExitRuntime
+		}
 		return ui.ExitOK
 	}
 	if result.Run.Version {
@@ -1932,111 +1924,59 @@ func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stde
 	})
 }
 
-func runSessionCommand(env environment, args []string) int {
-	if len(args) < 1 {
-		fmt.Fprintln(env.stderr, "usage: harness session <replay|timings|stats|errors|analyze> <session-dir>")
-		return ui.ExitUsage
+func runSessionTimings(env environment, invocation cli.Invocation) int {
+	if err := session.Timings(invocation.Args[0], env.stdout); err != nil {
+		fmt.Fprintf(env.stderr, "harness: session timings: %v\n", err)
+		return ui.ExitRuntime
 	}
-	switch args[0] {
-	case "replay":
-		return runSessionReplay(env, args[1:])
-	case "timings":
-		if len(args) != 2 {
-			fmt.Fprintln(env.stderr, "usage: harness session timings <session-dir>")
-			return ui.ExitUsage
-		}
-		if err := session.Timings(args[1], env.stdout); err != nil {
-			fmt.Fprintf(env.stderr, "harness: session timings: %v\n", err)
-			return ui.ExitRuntime
-		}
-		return ui.ExitOK
-	case "stats":
-		fs := flag.NewFlagSet("session stats", flag.ContinueOnError)
-		fs.SetOutput(env.stderr)
-		format := fs.String("format", "text", "output format: text or json")
-		if err := fs.Parse(args[1:]); err != nil {
-			return ui.ExitUsage
-		}
-		if fs.NArg() != 1 || (*format != "text" && *format != "json") {
-			fmt.Fprintln(env.stderr, "usage: harness session stats [--format text|json] <session-dir>")
-			return ui.ExitUsage
-		}
-		var err error
-		if *format == "json" {
-			err = session.StatsJSON(fs.Arg(0), env.stdout)
-		} else {
-			err = session.Stats(fs.Arg(0), env.stdout)
-		}
-		if err != nil {
-			fmt.Fprintf(env.stderr, "harness: session stats: %v\n", err)
-			return ui.ExitRuntime
-		}
-		return ui.ExitOK
-	case "errors":
-		return runSessionErrors(env, args[1:])
-	case "analyze":
-		return runSessionAnalyze(env, args[1:])
-	default:
-		fmt.Fprintf(env.stderr, "harness: unknown session command %q\n", args[0])
-		fmt.Fprintln(env.stderr, "usage: harness session <replay|timings|stats|errors|analyze> <session-dir>")
-		return ui.ExitUsage
-	}
+	return ui.ExitOK
 }
 
-const sessionReplayUsage = "usage: harness session replay [-f|--follow] [-q|--quiet] [--color-theme dark|light] [--config path] <session-dir>"
-
-func runSessionReplay(env environment, args []string) int {
-	fs := flag.NewFlagSet("session replay", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var follow, quiet bool
-	fs.BoolVar(&follow, "f", false, "follow appended replay events")
-	fs.BoolVar(&follow, "follow", false, "follow appended replay events")
-	fs.BoolVar(&quiet, "q", false, "suppress replay status lines")
-	fs.BoolVar(&quiet, "quiet", false, "suppress replay status lines")
-	colorTheme := fs.String("color-theme", config.ColorThemeDark, "syntax and displayed diff color theme: dark or light")
-	configPath := fs.String("config", "", "alternate config path")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(env.stdout, sessionReplayUsage)
-			return ui.ExitOK
-		}
-		fmt.Fprintf(env.stderr, "harness: session replay: %v\n", err)
-		fmt.Fprintln(env.stderr, sessionReplayUsage)
+func runSessionStats(env environment, invocation cli.Invocation) int {
+	format := cliLast(invocation.Flags, "format", "text")
+	if format != "text" && format != "json" {
+		fmt.Fprintln(env.stderr, "usage: harness session stats [--format text|json] <session-dir>")
 		return ui.ExitUsage
 	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(env.stderr, sessionReplayUsage)
-		return ui.ExitUsage
+	var err error
+	if format == "json" {
+		err = session.StatsJSON(invocation.Args[0], env.stdout)
+	} else {
+		err = session.Stats(invocation.Args[0], env.stdout)
 	}
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness: session stats: %v\n", err)
+		return ui.ExitRuntime
+	}
+	return ui.ExitOK
+}
 
-	colorThemeSet := false
-	configPathSet := false
-	fs.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "color-theme":
-			colorThemeSet = true
-		case "config":
-			configPathSet = true
-		}
-	})
+func runSessionReplay(env environment, invocation cli.Invocation) int {
+	values := invocation.Flags
+	follow := cliBool(values, "follow")
+	quiet := cliBool(values, "quiet")
+	colorTheme, colorThemeSet := values.Last("color_theme")
+	if !colorThemeSet {
+		colorTheme = config.ColorThemeDark
+	}
 	loadOptions := harnessLoadOptions(env, nil)
-	if configPathSet {
-		loadOptions.Args = []string{"--config", *configPath}
+	if configPath, configPathSet := values.Last("config"); configPathSet {
+		loadOptions.Args = []string{"--config", configPath}
 	}
 	resolvedConfigPath, err := config.ResolveConfigPath(loadOptions)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness: session replay: %v\n", err)
-		fmt.Fprintln(env.stderr, sessionReplayUsage)
+		_ = commandCatalog(env).WriteHelp(env.stderr, invocation.CommandID)
 		return ui.ExitUsage
 	}
-	resolvedTheme, err := config.LoadColorTheme(*colorTheme, colorThemeSet, env.envLookup(), resolvedConfigPath)
+	resolvedTheme, err := config.LoadColorTheme(colorTheme, colorThemeSet, env.envLookup(), resolvedConfigPath)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness: session replay: %v\n", err)
-		fmt.Fprintln(env.stderr, sessionReplayUsage)
+		_ = commandCatalog(env).WriteHelp(env.stderr, invocation.CommandID)
 		return ui.ExitUsage
 	}
 
-	dir := fs.Arg(0)
+	dir := invocation.Args[0]
 	opts := sessionReplayOptions(env, quiet, highlightColorTheme(resolvedTheme))
 	if !follow {
 		if err := session.Replay(dir, env.stdout, opts); err != nil {

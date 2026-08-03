@@ -45,7 +45,7 @@ func TestRunAuthHelpExit0WithUsageOnStdout(t *testing.T) {
 			t.Fatalf("run(%v) exit = %d, want %d; stderr=%q", args, code, exitOK, errw.String())
 		}
 		text := out.String()
-		for _, want := range []string{"Usage:", "auth <login|logout|status>", "codex_oauth", "OpenAI Codex", "auth login openai-codex", "-config"} {
+		for _, want := range []string{"Usage:", "harness-model-proxy auth <command>", "codex_oauth", "OpenAI Codex", "auth login openai-codex"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("run(%v) help missing %q; stdout=%q", args, want, text)
 			}
@@ -74,6 +74,37 @@ func TestRunHelpExit0WithUsageOnStdout(t *testing.T) {
 	}
 }
 
+func TestRunRejectsUnrecognizedRootFlagAliases(t *testing.T) {
+	for _, arg := range []string{"-version", "--version=false", "-help", "--"} {
+		env, out, errw := testEnv(t, []string{arg})
+		if code := run(env); code != exitUsage {
+			t.Fatalf("run(%q) exit=%d, want %d", arg, code, exitUsage)
+		}
+		if out.Len() != 0 || !strings.Contains(errw.String(), `unknown subcommand "`+arg+`"`) {
+			t.Fatalf("run(%q) stdout=%q stderr=%q", arg, out.String(), errw.String())
+		}
+	}
+}
+
+func TestRunVersionPreservesIgnoredTails(t *testing.T) {
+	for _, args := range [][]string{{"version", "-bogus"}, {"version", "-h"}, {"--version", "ignored"}} {
+		env, out, errw := testEnv(t, args)
+		if code := run(env); code != exitOK || !strings.HasPrefix(out.String(), "harness-model-proxy ") || errw.Len() != 0 {
+			t.Fatalf("run(%v): exit=%d stdout=%q stderr=%q", args, code, out.String(), errw.String())
+		}
+	}
+}
+
+func TestRunServeHelpDescribesInverseMetricsFlag(t *testing.T) {
+	env, out, errw := testEnv(t, []string{"serve", "--help"})
+	if code := run(env); code != exitOK || errw.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, out.String(), errw.String())
+	}
+	if !strings.Contains(out.String(), "Disable the Prometheus metrics endpoint.") {
+		t.Fatalf("serve help does not describe inverse flag:\n%s", out.String())
+	}
+}
+
 func TestRunVersionExit0(t *testing.T) {
 	for _, arg := range []string{"--version", "version"} {
 		env, out, errw := testEnv(t, []string{arg})
@@ -86,6 +117,38 @@ func TestRunVersionExit0(t *testing.T) {
 		if errw.Len() != 0 {
 			t.Fatalf("%s should not write stderr; stderr=%q", arg, errw.String())
 		}
+	}
+}
+
+func TestRunServePreservesConfigFileErrorClassification(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		path func(t *testing.T) string
+	}{
+		{name: "missing", path: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing.json") }},
+		{name: "malformed", path: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(`{"provider_configs":`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			env, _, stderr := testEnv(t, []string{"serve", "-config", test.path(t)})
+			if code := run(env); code != exitRuntime {
+				t.Fatalf("exit=%d, want %d; stderr=%q", code, exitRuntime, stderr.String())
+			}
+		})
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"provider_configs":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, _, stderr := testEnv(t, []string{"serve", "-config", path, "-log-level", "bogus"})
+	if code := run(env); code != exitUsage {
+		t.Fatalf("invalid flag value exit=%d, want %d; stderr=%q", code, exitUsage, stderr.String())
 	}
 }
 
@@ -145,7 +208,7 @@ func TestRunAuthLoginHelpExit0WithUsageOnStdout(t *testing.T) {
 			t.Fatalf("run(%v) exit = %d, want %d; stderr=%q", args, code, exitOK, errw.String())
 		}
 		text := out.String()
-		for _, want := range []string{"Usage:", "auth login [-config path] <provider>", "codex_oauth", "OpenAI Codex", "ChatGPT", "auth login openai-codex", "-config"} {
+		for _, want := range []string{"Usage:", "auth login [flags] <provider>", "codex_oauth", "OpenAI Codex", "ChatGPT", "auth login openai-codex", "-config"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("run(%v) help missing %q; stdout=%q", args, want, text)
 			}

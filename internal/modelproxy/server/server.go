@@ -246,6 +246,27 @@ type Handler struct {
 	wsPool *wsPool
 }
 
+// ValidateConfigReferences performs the local provider-file and catalog
+// validation used by config check. It does not construct concrete providers,
+// read token/API-key stores, or contact a network service.
+func ValidateConfigReferences(configDir string, cfg Config, getenv func(string) string, warn func(string)) error {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	_, providers, err := llm.LoadProviderConfigs(configDir, cfg.ProviderConfigs, warn)
+	if err != nil {
+		return err
+	}
+	if len(providers) == 0 {
+		return fmt.Errorf("model proxy: no provider configs are configured")
+	}
+	if _, err := buildAuthSources(providers, configDir, getenv); err != nil {
+		return err
+	}
+	_, _, err = catalogFromProviderConfigs(providers, pricing.NewComposite())
+	return err
+}
+
 func NewHandler(opts Options) (*Handler, error) {
 	getenv := opts.Getenv
 	if getenv == nil {
@@ -2317,6 +2338,13 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	return DecodeConfig(data, path)
+}
+
+// DecodeConfig decodes one model-proxy config byte snapshot. path is used only
+// to render config-relative migration guidance. LoadConfig remains the ordinary
+// file-loading entry point.
+func DecodeConfig(data []byte, path string) (Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err

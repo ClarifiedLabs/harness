@@ -586,7 +586,7 @@ func TestRunSetupUpdatesExistingProviderConfig(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"provider_configs":["testai.json"],"default_context_window":256000}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"provider_configs":["testai.json"],"default_context_window":256000,"x-extension":{"nested":[1,true,"keep"]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
@@ -646,6 +646,21 @@ func TestRunSetupUpdatesExistingProviderConfig(t *testing.T) {
 	}
 	if len(provider.Models) != 2 || provider.Models[0].Name != "alpha" || provider.Models[1].Name != "beta" {
 		t.Fatalf("provider models = %+v, want alpha and beta", provider.Models)
+	}
+	configData, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(configData, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw["x-extension"]); err != nil {
+		t.Fatal(err)
+	}
+	if got := compact.String(); got != `{"nested":[1,true,"keep"]}` {
+		t.Fatalf("setup did not preserve unknown config field: %s", got)
 	}
 }
 
@@ -1083,7 +1098,7 @@ func TestRunRefreshModelsHandlesSakanaProvider(t *testing.T) {
 func TestRunRefreshModelsRemovesProviderMissingFromCatalog(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["testai.json","goneai.json"],"default_context_window":222000}`), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["testai.json","goneai.json"],"default_context_window":222000,"x-extension":{"nested":[1,true,"keep"]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
@@ -1145,6 +1160,17 @@ func TestRunRefreshModelsRemovesProviderMissingFromCatalog(t *testing.T) {
 	}
 	if cfg.DefaultContextWindow != 222000 {
 		t.Fatalf("default_context_window after refresh = %d, want 222000 preserved", cfg.DefaultContextWindow)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(cfgData, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw["x-extension"]); err != nil {
+		t.Fatal(err)
+	}
+	if got := compact.String(); got != `{"nested":[1,true,"keep"]}` {
+		t.Fatalf("refresh did not preserve unknown config field: %s", got)
 	}
 }
 

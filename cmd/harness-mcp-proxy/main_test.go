@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -87,6 +86,18 @@ func TestRunUnknownSubcommandExit2(t *testing.T) {
 	}
 }
 
+func TestRunRejectsUnrecognizedRootHelpAndVersionAliases(t *testing.T) {
+	for _, arg := range []string{"-version", "--version=false", "-help"} {
+		env, out, errw := testEnv(t, []string{arg})
+		if code := run(env); code != exitUsage {
+			t.Fatalf("run(%q) exit=%d, want %d", arg, code, exitUsage)
+		}
+		if out.Len() != 0 || !strings.Contains(errw.String(), `unknown subcommand "`+arg+`"`) {
+			t.Fatalf("run(%q) stdout=%q stderr=%q", arg, out.String(), errw.String())
+		}
+	}
+}
+
 func TestRunHelpExit0WithUsageOnStdout(t *testing.T) {
 	for _, arg := range []string{"-h", "--help", "help"} {
 		env, out, errw := testEnv(t, []string{arg})
@@ -94,7 +105,7 @@ func TestRunHelpExit0WithUsageOnStdout(t *testing.T) {
 			t.Fatalf("%s: exit = %d, want %d; stderr=%q", arg, code, exitOK, errw.String())
 		}
 		text := out.String()
-		for _, want := range []string{"serve", "tools", "auth", "version", "Usage:", "-no-metrics", "-metrics-listen", defaultMetricsListen} {
+		for _, want := range []string{"serve", "tools", "auth", "generate-api-key", "config", "version", "Usage:"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s usage missing %q; stdout=%q", arg, want, text)
 			}
@@ -106,15 +117,26 @@ func TestRunHelpExit0WithUsageOnStdout(t *testing.T) {
 }
 
 func TestServeMetricsFlagOverridesAndBuildInfo(t *testing.T) {
-	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	noMetrics := fs.Bool("no-metrics", false, "")
-	listen := fs.String("metrics-listen", "", "")
-	if err := fs.Parse([]string{"-no-metrics=false", "-metrics-listen="}); err != nil {
+	invocation, err := commandCatalog.Parse([]string{"serve", "-no-metrics=false", "-metrics-listen="})
+	if err != nil {
 		t.Fatal(err)
 	}
-	overrides := serveMetricsOverrides(fs, *noMetrics, *listen)
-	if overrides.Disable || !overrides.DisableSet || overrides.Listen != "" || !overrides.ListenSet {
-		t.Fatalf("serveMetricsOverrides = %+v", overrides)
+	home := t.TempDir()
+	result, err := mcpproxy.ResolveConfig(mcpproxy.ResolveOptions{
+		Flags: invocation.Flags,
+		Getenv: func(key string) string {
+			if key == "HOME" {
+				return home
+			}
+			return ""
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := serveMetricsSettings(result)
+	if !settings.Enabled || settings.Listen != defaultMetricsListen || !settings.ListenExplicit {
+		t.Fatalf("serveMetricsSettings = %+v", settings)
 	}
 	if reg := newMCPMetricsRegistry(false); reg != nil {
 		t.Fatal("disabled metrics should yield nil registry")
@@ -128,6 +150,27 @@ func TestServeMetricsFlagOverridesAndBuildInfo(t *testing.T) {
 	}
 	if strings.Contains(text, "mcp=") || strings.Contains(text, "tool=") || strings.Contains(text, "key=") {
 		t.Fatalf("build info should be labeled only by version:\n%s", text)
+	}
+}
+
+func TestRunVersionPreservesIgnoredTails(t *testing.T) {
+	for _, args := range [][]string{{"version", "-bogus"}, {"version", "-h"}, {"--version", "ignored"}} {
+		env, out, errw := testEnv(t, args)
+		if code := run(env); code != exitOK || !strings.HasPrefix(out.String(), "harness-mcp-proxy ") || errw.Len() != 0 {
+			t.Fatalf("run(%v): exit=%d stdout=%q stderr=%q", args, code, out.String(), errw.String())
+		}
+	}
+}
+
+func TestRunServeHelpUsesLiveUnquotedDefaultsAndInverseDescription(t *testing.T) {
+	env, out, errw := testEnv(t, []string{"serve", "--help"})
+	if code := run(env); code != exitOK || errw.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, out.String(), errw.String())
+	}
+	for _, want := range []string{mcpproxy.DefaultConfigPath(env.getenv), `default "` + mcpproxy.DefaultListen + `"`, `default "` + defaultMetricsListen + `"`, "Disable the Prometheus metrics endpoint."} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("serve help missing %q:\n%s", want, out.String())
+		}
 	}
 }
 
@@ -232,7 +275,7 @@ func TestRunAuthHelpExit0WithUsageOnStdout(t *testing.T) {
 			t.Fatalf("run(%v) exit = %d, want %d; stderr=%q", args, code, exitOK, errw.String())
 		}
 		text := out.String()
-		for _, want := range []string{"Usage:", "auth <login|logout|status>", "oauth2", "codex_oauth", "auth login remote", "-config"} {
+		for _, want := range []string{"Usage:", "harness-mcp-proxy auth <command>", "oauth2", "codex_oauth", "auth login remote"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("run(%v) help missing %q; stdout=%q", args, want, text)
 			}
@@ -253,7 +296,7 @@ func TestRunAuthLoginHelpExit0WithUsageOnStdout(t *testing.T) {
 			t.Fatalf("run(%v) exit = %d, want %d; stderr=%q", args, code, exitOK, errw.String())
 		}
 		text := out.String()
-		for _, want := range []string{"Usage:", "auth login [-config path] <server>", "oauth2", "codex_oauth", "device-code", "auth login remote", "-config"} {
+		for _, want := range []string{"Usage:", "auth login [flags] <server>", "oauth2", "codex_oauth", "device-code", "auth login remote", "-config"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("run(%v) help missing %q; stdout=%q", args, want, text)
 			}
@@ -274,7 +317,7 @@ func TestRunGenerateAPIKeyHelpExit0WithUsageOnStdout(t *testing.T) {
 			t.Fatalf("run(%v) exit = %d, want %d; stderr=%q", args, code, exitOK, errw.String())
 		}
 		text := out.String()
-		for _, want := range []string{"Usage:", "generate-api-key [-config path] [-api-keys-file path] [-ttl duration] <name>", "Writes the dedicated API-key file", "-api-keys-file", "-ttl"} {
+		for _, want := range []string{"Usage:", "generate-api-key [flags] <name>", "Writes the dedicated API-key file", "-api-keys-file", "-ttl"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("run(%v) help missing %q; stdout=%q", args, want, text)
 			}
@@ -853,7 +896,11 @@ func TestToolsMissingDefaultConfigFallsBackToDefaultProxy(t *testing.T) {
 		stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
 		getenv: getenv,
 	}
-	got, code := resolveToolsProxy(env, flag.NewFlagSet("tools", flag.ContinueOnError), "", "")
+	invocation, err := commandCatalog.Parse([]string{"tools"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, code := resolveToolsProxy(env, invocation.Flags)
 	if code != exitOK {
 		t.Fatalf("resolveToolsProxy exit = %d, want %d", code, exitOK)
 	}

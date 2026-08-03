@@ -1230,9 +1230,9 @@ func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 			}
 		}
 		for _, annotation := range []string{
-			"(env: HARNESS_MAX_TURNS) (default 0 (non-positive means unlimited))",
-			"(env: HARNESS_NO_COLOR, NO_COLOR) (default false (NO_COLOR is a presence-based override))",
-			"(env: HARNESS_MODEL_PROXY_URL) (default derived: runtime model proxy URL)",
+			"default \"0 (non-positive means unlimited)\"; env: HARNESS_MAX_TURNS",
+			"NO_COLOR is a presence-based override.",
+			"default \"derived: runtime model proxy URL\"; env: HARNESS_MODEL_PROXY_URL",
 		} {
 			if !strings.Contains(text, annotation) {
 				t.Errorf("run(%q) usage missing config annotation %q:\n%s", arg, annotation, text)
@@ -2711,7 +2711,7 @@ func TestRunSessionReplayRejectsInvalidThemeFromEverySource(t *testing.T) {
 				stderr: &errw,
 				getenv: func(key string) string { return tt.env[key] },
 			})
-			if code != ui.ExitUsage || !strings.Contains(errw.String(), "color_theme must be dark, light") || !strings.Contains(errw.String(), sessionReplayUsage) {
+			if code != ui.ExitUsage || !strings.Contains(errw.String(), "color_theme must be dark, light") || !strings.Contains(errw.String(), "Usage:\n  harness session replay") {
 				t.Fatalf("invalid theme: exit=%d stdout=%q stderr=%q", code, out.String(), errw.String())
 			}
 		})
@@ -2731,7 +2731,7 @@ func TestRunSessionReplayConfigReadErrorsAreUsageErrors(t *testing.T) {
 				stderr: &errw,
 				getenv: func(string) string { return "" },
 			})
-			if code != ui.ExitUsage || !strings.Contains(errw.String(), "harness: session replay:") || !strings.Contains(errw.String(), sessionReplayUsage) {
+			if code != ui.ExitUsage || !strings.Contains(errw.String(), "harness: session replay:") || !strings.Contains(errw.String(), "Usage:\n  harness session replay") {
 				t.Fatalf("config error: exit=%d stdout=%q stderr=%q", code, out.String(), errw.String())
 			}
 		})
@@ -2805,7 +2805,7 @@ func TestRunSessionReplayFlagErrorsAndHelp(t *testing.T) {
 		t.Run(help, func(t *testing.T) {
 			var out, errw bytes.Buffer
 			code := run(environment{args: []string{"session", "replay", help}, stdout: &out, stderr: &errw})
-			if code != ui.ExitOK || !strings.Contains(out.String(), sessionReplayUsage) || errw.Len() != 0 {
+			if code != ui.ExitOK || !strings.Contains(out.String(), "Usage:\n  harness session replay") || errw.Len() != 0 {
 				t.Fatalf("help: exit=%d stdout=%q stderr=%q", code, out.String(), errw.String())
 			}
 		})
@@ -2820,7 +2820,7 @@ func TestRunSessionReplayFlagErrorsAndHelp(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var out, errw bytes.Buffer
 			code := run(environment{args: args, stdout: &out, stderr: &errw})
-			if code != ui.ExitUsage || !strings.Contains(errw.String(), sessionReplayUsage) {
+			if code != ui.ExitUsage || !strings.Contains(errw.String(), "Usage:\n  harness session replay") {
 				t.Fatalf("parse error: exit=%d stdout=%q stderr=%q", code, out.String(), errw.String())
 			}
 		})
@@ -2900,8 +2900,8 @@ func TestRunSessionStatsErrors(t *testing.T) {
 		if code != ui.ExitUsage {
 			t.Fatalf("exit = %d, want %d", code, ui.ExitUsage)
 		}
-		if got, want := errw.String(), "usage: harness session stats [--format text|json] <session-dir>\n"; got != want {
-			t.Fatalf("stderr = %q, want %q", got, want)
+		if got := errw.String(); !strings.Contains(got, "Usage:\n  harness session stats") {
+			t.Fatalf("stderr = %q, want generated session stats usage", got)
 		}
 	})
 

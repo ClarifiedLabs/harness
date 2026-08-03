@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +10,7 @@ import (
 
 	"harness/internal/apikey"
 	"harness/internal/buildinfo"
+	"harness/internal/cli"
 	"harness/internal/logging"
 	"harness/internal/mcpproxy"
 	"harness/internal/metrics"
@@ -23,65 +23,28 @@ const (
 	defaultMetricsListen = "127.0.0.1:9091"
 )
 
-// runServe parses serve flags, loads config, resolves the log sink, wires
-// signals into a cancellable context, and runs the daemon.
+// runServe keeps direct in-package callers concise while routing through the
+// same catalog parser and handler as the executable.
 func runServe(env environment, args []string) int {
-	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	fs.SetOutput(io.Discard) // errors are returned, printed once below (cmd/harness convention)
-	// -config defaults to "" so we can distinguish "unset" (a missing default
-	// path is non-fatal) from an explicit value (a typo is a hard error).
-	configPath := fs.String("config", "", "config file path")
-	apiKeysFile := fs.String("api-keys-file", "", "accepted API keys file path")
-	listen := fs.String("listen", "", "HTTP listen address (overrides config and default)")
-	stdio := fs.Bool("stdio", false, "serve MCP over stdin/stdout instead of HTTP")
-	noMetrics := fs.Bool("no-metrics", false, "disable the Prometheus /metrics endpoint")
-	metricsListen := fs.String("metrics-listen", "", "Prometheus /metrics listen address (default: "+defaultMetricsListen+")")
-	logPath := fs.String("log", "", "log file path (overrides config logFile)")
-	logLevel := fs.String("log-level", "", "log level: debug|info|warn|error (overrides config)")
-	logFormat := fs.String("log-format", "", "log format: json|text (overrides config)")
-	if err := fs.Parse(args); err != nil {
-		if err == flag.ErrHelp {
-			usage(env.stdout, env.getenv)
-			return exitOK
-		}
-		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
-		return exitUsage
-	}
+	env.args = append([]string{"serve"}, args...)
+	return run(env)
+}
 
-	resolvedConfigPath := resolveConfigPath(*configPath, flagWasSet(fs, "config"), env.getenv)
-	cfg, err := mcpproxy.LoadConfig(resolvedConfigPath)
+// handleServe resolves all source-aware settings, opens the selected log sink,
+// wires signals into a cancellable context, and runs the daemon.
+func handleServe(env environment, invocation cli.Invocation) int {
+	stdio := cliBool(invocation.Flags, "stdio")
+	result, err := mcpproxy.ResolveConfig(mcpproxy.ResolveOptions{
+		Flags: invocation.Flags, Getenv: env.getenv, Stdio: stdio,
+	})
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
-		return exitRuntime
+		return serveConfigErrorExit(env, invocation, err)
 	}
+	cfg := result.Config
 
-	// Flags override config; LoadConfig fills the default listener.
-	if *listen != "" {
-		cfg.Listen = *listen
-	}
-
-	// Resolve the effective log level (flag > config > info), validating early so
-	// a bad level surfaces as a usage error before we open any sink.
-	level := cfg.LogLevel
-	if *logLevel != "" {
-		level = *logLevel
-	}
-	if _, err := logging.ParseLevel(level); err != nil {
-		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
-		return exitUsage
-	}
-	format := cfg.LogFormat
-	if *logFormat != "" {
-		format = *logFormat
-	}
-	if _, err := logging.ParseFormat(format); err != nil {
-		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
-		return exitUsage
-	}
-
-	// Resolve and open the log sink (flag > config > stderr-if-TTY > file).
+	// Resolve and open the log sink (flag > config > stderr).
 	sink, closeSink, err := openLogSink(logSinkParams{
-		flagPath:   *logPath,
 		configPath: cfg.LogFile,
 		stderr:     env.stderr,
 	})
@@ -91,7 +54,7 @@ func runServe(env environment, args []string) int {
 	}
 	defer closeSink()
 
-	logger, err := logging.NewProxyLogger(sink, level, format)
+	logger, err := logging.NewProxyLogger(sink, cfg.LogLevel, cfg.LogFormat)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
 		return exitUsage
@@ -106,10 +69,9 @@ func runServe(env environment, args []string) int {
 	var authStore *apikey.DynamicStore
 	var keyFile string
 	var keyFileState apikey.FileState
-	if !*stdio {
-		keyFile = mcpproxy.ResolveAPIKeysFile(resolvedConfigPath, cfg.APIKeysFile, *apiKeysFile, env.getenv)
-		keyFileExplicit := *apiKeysFile != "" || cfg.APIKeysFile != ""
-		initialKeys, state, err := apikey.LoadInitialFile(keyFile, keyFileExplicit)
+	if !stdio {
+		keyFile = cfg.APIKeysFile
+		initialKeys, state, err := apikey.LoadInitialFile(keyFile, result.APIKeysFileExplicit)
 		if err != nil {
 			fmt.Fprintf(env.stderr, "harness-mcp-proxy: api keys file %s: %v\n", keyFile, err)
 			return exitRuntime
@@ -138,7 +100,7 @@ func runServe(env environment, args []string) int {
 		})
 	}
 
-	if *stdio {
+	if stdio {
 		// Metrics configuration is intentionally inert in stdio mode: no registry is
 		// created or passed to the daemon, and no endpoint is started.
 		d := mcpproxy.NewDaemon(cfg, logger)
@@ -146,7 +108,7 @@ func runServe(env environment, args []string) int {
 		// (stderr or -log file), never stdout.
 		err = d.RunStdio(ctx, stdioRWC{r: env.stdin, w: env.stdout})
 	} else {
-		metricsSettings := metrics.Resolve(cfg.Metrics, defaultMetricsListen, serveMetricsOverrides(fs, *noMetrics, *metricsListen))
+		metricsSettings := serveMetricsSettings(result)
 		reg := newMCPMetricsRegistry(metricsSettings.Enabled)
 		d := mcpproxy.NewDaemonWithOptions(cfg, logger, mcpproxy.DaemonOptions{APIKeys: authStore, Metrics: reg})
 		if _, err := metrics.StartEndpoint(ctx, logger.With(logging.Category(serveCategory)), reg, metricsSettings); err != nil {
@@ -174,13 +136,42 @@ func (c stdioRWC) Read(p []byte) (int, error)  { return c.r.Read(p) }
 func (c stdioRWC) Write(p []byte) (int, error) { return c.w.Write(p) }
 func (c stdioRWC) Close() error                { return nil }
 
-func serveMetricsOverrides(fs *flag.FlagSet, noMetrics bool, metricsListen string) metrics.Overrides {
-	return metrics.Overrides{
-		Disable:    noMetrics,
-		DisableSet: flagWasSet(fs, "no-metrics"),
-		Listen:     metricsListen,
-		ListenSet:  flagWasSet(fs, "metrics-listen"),
+func serveMetricsSettings(result mcpproxy.ConfigResult) metrics.Settings {
+	enabled := result.Config.Metrics.Enabled != nil && *result.Config.Metrics.Enabled
+	return metrics.Settings{
+		Enabled:        enabled,
+		Listen:         result.Config.Metrics.Listen,
+		ListenExplicit: result.MetricsListenExplicit,
 	}
+}
+
+func serveConfigErrorExit(env environment, invocation cli.Invocation, resolveErr error) int {
+	if value, ok := invocation.Flags.Last("log_level"); ok && value != "" {
+		if _, err := logging.ParseLevel(value); err != nil {
+			return exitUsage
+		}
+	}
+	if value, ok := invocation.Flags.Last("log_format"); ok && value != "" {
+		if _, err := logging.ParseFormat(value); err != nil {
+			return exitUsage
+		}
+	}
+
+	// ResolveConfig intentionally owns validation but returns a single error type.
+	// A second, read-only load only classifies legacy file-sourced logging errors as
+	// usage errors; all config I/O, path, and other resolution failures stay runtime.
+	path, _ := selectedConfigPath(invocation.Flags, env.getenv)
+	cfg, err := mcpproxy.LoadConfig(path)
+	if err == nil {
+		if _, levelErr := logging.ParseLevel(cfg.LogLevel); levelErr != nil {
+			return exitUsage
+		}
+		if _, formatErr := logging.ParseFormat(cfg.LogFormat); formatErr != nil {
+			return exitUsage
+		}
+	}
+	_ = resolveErr
+	return exitRuntime
 }
 
 func newMCPMetricsRegistry(enabled bool) *metrics.Registry {

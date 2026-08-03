@@ -7,7 +7,10 @@ Harness can also launch [Serena](https://github.com/oraios/serena) as an
 independent local MCP server for symbol-aware coding tools.
 
 A compatibility stdio MCP shim is also available as `harness lsp serve` for
-proxy-hosting and other advanced MCP setups.
+proxy-hosting and other advanced MCP setups. `harness lsp --help` and
+`harness lsp serve --help` are generated from the same scoped command/flag
+catalog used for parsing, so the parent help lists subcommands while leaf help
+lists the accepted shim flags.
 
 ## Architecture
 

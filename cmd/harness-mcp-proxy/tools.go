@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
+	"harness/internal/cli"
 	"harness/internal/mcp"
 	"harness/internal/mcpproxy"
 	"harness/internal/ui"
@@ -21,27 +21,16 @@ var toolsCommandTimeout = 10 * time.Second
 // lists, the proxy is up. It targets the HTTP proxy URL from -proxy,
 // config proxy.listen, or the default listener.
 func runTools(env environment, args []string) int {
-	fs := flag.NewFlagSet("tools", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	// -config defaults to "" so a missing default path is non-fatal (resolved
-	// below); an explicit -config typo still surfaces as a load error.
-	configPath := fs.String("config", "", "config file path")
-	proxy := fs.String("proxy", "", "HTTP proxy URL")
-	apiKey := fs.String("api-key", "", "API key for the proxy (also HARNESS_MCP_PROXY_API_KEY)")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			usage(env.stdout, env.getenv)
-			return exitOK
-		}
-		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
-		return exitUsage
-	}
+	env.args = append([]string{"tools"}, args...)
+	return run(env)
+}
 
-	proxyURL, code := resolveToolsProxy(env, fs, *proxy, *configPath)
+func handleTools(env environment, invocation cli.Invocation) int {
+	proxyURL, code := resolveToolsProxy(env, invocation.Flags)
 	if code != exitOK {
 		return code
 	}
-	key := *apiKey
+	key := cliLast(invocation.Flags, "api-key", "")
 	if key == "" && env.getenv != nil {
 		key = env.getenv("HARNESS_MCP_PROXY_API_KEY")
 	}
@@ -90,17 +79,21 @@ func toolsClient(proxyURL, apiKey string) *mcp.Client {
 // the -proxy flag, else the config's proxy.listen, else the default URL. A
 // config that fails to load is a runtime error (a typo'd -config should not
 // silently fall back to the default URL). The returned code is exitOK on success.
-func resolveToolsProxy(env environment, fs *flag.FlagSet, proxyFlag, configFlag string) (string, int) {
-	if proxyFlag != "" {
-		return proxyFlag, exitOK
-	}
-	configPath := resolveConfigPath(configFlag, flagWasSet(fs, "config"), env.getenv)
-	cfg, err := mcpproxy.LoadConfig(configPath)
+func resolveToolsProxy(env environment, flags cli.Values) (string, int) {
+	proxyFlag := cliLast(flags, "proxy", "")
+	result, err := mcpproxy.ResolveConfig(mcpproxy.ResolveOptions{
+		Flags:        flags,
+		Getenv:       env.getenv,
+		BypassConfig: proxyFlag != "",
+	})
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
 		return "", exitRuntime
 	}
-	return mcpproxy.URLForListen(cfg.Listen), exitOK
+	if proxyFlag != "" {
+		return proxyFlag, exitOK
+	}
+	return mcpproxy.URLForListen(result.Config.Listen), exitOK
 }
 
 // printToolTable writes an aligned name/description list preceded by a count

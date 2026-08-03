@@ -227,7 +227,7 @@ func TestRunConfigSubcommandHelpAndUsage(t *testing.T) {
 	}
 
 	env, _, stderr := configCommandEnv(t, []string{"config", "unknown"}, nil)
-	if code := run(env); code != ui.ExitUsage || !strings.Contains(stderr.String(), configUsage) {
+	if code := run(env); code != ui.ExitUsage || !strings.Contains(stderr.String(), "Usage:\n  harness config") {
 		t.Fatalf("unknown command: exit=%d stderr=%q", code, stderr.String())
 	}
 }
