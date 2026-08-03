@@ -810,6 +810,46 @@ func TestFinalAssistantTextRequiresFinalPhase(t *testing.T) {
 	}
 }
 
+func TestResumeRecordsDropsInvalidSamplesForRerun(t *testing.T) {
+	results := t.TempDir()
+	c := benchmarkCase{Name: "resume_invalid", Prompt: "prompt"}
+	cfg := runConfig{
+		Results: results, Case: c,
+		BaselineSHA: "baseline", CandidateSHA: "candidate",
+		Models: []string{"provider:model"}, Repetitions: 1, Resume: true,
+	}
+	invalid := runRecord{
+		Version: runRecordVersion, Case: c.Name, Model: "provider:model",
+		Repetition: 1, Variant: "baseline", TargetSHA: targetSHA,
+		HarnessSHA: cfg.BaselineSHA, Invalid: "interrupted", Completed: false,
+	}
+	if err := writeRecords(results, []runRecord{invalid}); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := resumeRecords(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("resumeRecords returned %d invalid records, want 0", len(records))
+	}
+	data, err := os.ReadFile(filepath.Join(results, c.Name+"-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted []runRecord
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 1 || persisted[0].Invalid == "" {
+		t.Fatalf("persisted invalid evidence = %+v, want the interrupted record retained until rerun", persisted)
+	}
+	if _, err := os.Stat(filepath.Join(results, "matrix-runs.json")); !os.IsNotExist(err) {
+		t.Fatalf("empty resume created matrix-runs.json: %v", err)
+	}
+}
+
 func TestPrepareRunDirPreservesInterruptedRunOnResume(t *testing.T) {
 	parent := t.TempDir()
 	runDir := filepath.Join(parent, "01-candidate")

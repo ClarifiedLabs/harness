@@ -394,17 +394,18 @@ func resumeRecords(cfg runConfig) ([]runRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	var records []runRecord
-	if err := json.Unmarshal(data, &records); err != nil {
+	var loaded []runRecord
+	if err := json.Unmarshal(data, &loaded); err != nil {
 		return nil, fmt.Errorf("decode resume records: %w", err)
 	}
 	models := make(map[string]bool, len(cfg.Models))
 	for _, model := range cfg.Models {
 		models[model] = true
 	}
-	seen := make(map[string]bool, len(records))
-	for i := range records {
-		record := &records[i]
+	seen := make(map[string]bool, len(loaded))
+	records := make([]runRecord, 0, len(loaded))
+	for i := range loaded {
+		record := loaded[i]
 		expectedSHA := map[string]string{"baseline": cfg.BaselineSHA, "candidate": cfg.CandidateSHA}[record.Variant]
 		key := recordKey(record.Model, record.Repetition, record.Variant)
 		switch {
@@ -425,7 +426,7 @@ func resumeRecords(cfg runConfig) ([]runRecord, error) {
 		case seen[key]:
 			return nil, fmt.Errorf("duplicate resume record %q", key)
 		}
-		if err := validateArchivedRecord(*record, cfg.Case); err != nil {
+		if err := validateArchivedRecord(record, cfg.Case); err != nil {
 			return nil, fmt.Errorf("resume record %d: %w", i, err)
 		}
 		seen[key] = true
@@ -448,9 +449,12 @@ func resumeRecords(cfg runConfig) ([]runRecord, error) {
 				Metrics:       metrics,
 			}, record.Score)
 		}
+		records = append(records, record)
 	}
-	if err := writeRecords(cfg.Results, records); err != nil {
-		return nil, err
+	if len(records) > 0 {
+		if err := writeRecords(cfg.Results, records); err != nil {
+			return nil, err
+		}
 	}
 	return records, nil
 }
