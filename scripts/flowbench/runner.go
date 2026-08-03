@@ -37,6 +37,11 @@ type runConfig struct {
 	Profile      string
 }
 
+const (
+	runRecordVersion      = 2
+	oracleContractVersion = "flowbench-oracle-2026-08-03-v2"
+)
+
 type runRecord struct {
 	Version       int       `json:"version"`
 	Case          string    `json:"case"`
@@ -61,6 +66,7 @@ type runRecord struct {
 	Profile       string    `json:"profile,omitempty"`
 	Reasoning     string    `json:"reasoning"`
 	PromptSHA256  string    `json:"prompt_sha256"`
+	OracleVersion string    `json:"oracle_version"`
 	BinarySHA256  string    `json:"binary_sha256,omitempty"`
 	SchemaSet     string    `json:"schema_set"`
 	EventsSHA256  string    `json:"events_sha256,omitempty"`
@@ -143,16 +149,18 @@ func executeMatrix(ctx context.Context, cfg runConfig) ([]runRecord, error) {
 
 func executeOne(ctx context.Context, cfg runConfig, binary, variant, model string, repetition, order int, worktree string) (runRecord, error) {
 	record := runRecord{
-		Version:    1,
-		Case:       cfg.Case.Name,
-		Model:      model,
-		Repetition: repetition,
-		Variant:    variant,
-		Order:      order,
-		TargetSHA:  targetSHA,
-		HarnessSHA: map[string]string{"baseline": cfg.BaselineSHA, "candidate": cfg.CandidateSHA}[variant],
-		Profile:    cfg.Profile, Reasoning: "medium",
-		PromptSHA256: digestString(cfg.Case.Prompt + "\n" + cfg.Case.SecondPrompt),
+		Version:       runRecordVersion,
+		Case:          cfg.Case.Name,
+		Model:         model,
+		Repetition:    repetition,
+		Variant:       variant,
+		Order:         order,
+		TargetSHA:     targetSHA,
+		HarnessSHA:    map[string]string{"baseline": cfg.BaselineSHA, "candidate": cfg.CandidateSHA}[variant],
+		Profile:       cfg.Profile,
+		Reasoning:     "medium",
+		PromptSHA256:  promptDigest(cfg.Case),
+		OracleVersion: oracleContractVersion,
 	}
 	record.SchemaSet = "harness:" + record.HarnessSHA
 	if data, err := os.ReadFile(binary); err == nil {
@@ -253,7 +261,7 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 		return record, err
 	}
 	record.FixtureAfter = after
-	record.Score = cfg.Case.Score(scoreInput{
+	record.Metrics, record.Score = evaluateCase(cfg.Case, scoreInput{
 		Stdout:        m.AssistantText,
 		Worktree:      worktree,
 		GoCache:       goCache,
@@ -263,6 +271,10 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 	})
 	record.Completed = true
 	return record, nil
+}
+
+func promptDigest(c benchmarkCase) string {
+	return digestString(c.Prompt + "\n" + c.SecondPrompt)
 }
 
 func digestString(value string) string {
@@ -413,6 +425,9 @@ func resumeRecords(cfg runConfig) ([]runRecord, error) {
 		case seen[key]:
 			return nil, fmt.Errorf("duplicate resume record %q", key)
 		}
+		if err := validateArchivedRecord(*record, cfg.Case); err != nil {
+			return nil, fmt.Errorf("resume record %d: %w", i, err)
+		}
 		seen[key] = true
 		metrics, err := collectMetrics(record.SessionDir)
 		if err != nil {
@@ -426,12 +441,12 @@ func resumeRecords(cfg runConfig) ([]runRecord, error) {
 		}
 		record.Metrics = metrics
 		if cfg.Case.Name != "command_steps" {
-			record.Score = cfg.Case.Score(scoreInput{
+			record.Metrics, record.Score = evaluateArchivedCase(cfg.Case, scoreInput{
 				Stdout:        metrics.AssistantText,
 				FixtureBefore: record.FixtureBefore,
 				FixtureAfter:  record.FixtureAfter,
 				Metrics:       metrics,
-			})
+			}, record.Score)
 		}
 	}
 	if err := writeRecords(cfg.Results, records); err != nil {
@@ -491,6 +506,9 @@ func importBaselineRecords(cfg runConfig, path string) ([]runRecord, error) {
 		case seen[key]:
 			return nil, fmt.Errorf("duplicate imported baseline record %q", key)
 		}
+		if err := validateArchivedRecord(record, cfg.Case); err != nil {
+			return nil, fmt.Errorf("imported baseline record %d: %w", i, err)
+		}
 		seen[key] = true
 		metrics, err := collectMetrics(record.SessionDir)
 		if err != nil {
@@ -502,13 +520,12 @@ func importBaselineRecords(cfg runConfig, path string) ([]runRecord, error) {
 		if strings.TrimSpace(metrics.FinalText) == "" {
 			return nil, fmt.Errorf("imported baseline record %d has no final answer", i)
 		}
-		record.Metrics = metrics
-		record.Score = cfg.Case.Score(scoreInput{
+		record.Metrics, record.Score = evaluateArchivedCase(cfg.Case, scoreInput{
 			Stdout:        metrics.AssistantText,
 			FixtureBefore: record.FixtureBefore,
 			FixtureAfter:  record.FixtureAfter,
 			Metrics:       metrics,
-		})
+		}, record.Score)
 		record.Order = baselineOrder(index, cfg.Repetitions, record.Repetition)
 		records = append(records, record)
 	}
@@ -520,6 +537,30 @@ func importBaselineRecords(cfg runConfig, path string) ([]runRecord, error) {
 		return nil, err
 	}
 	return records, nil
+}
+
+func validateArchivedRecord(record runRecord, c benchmarkCase) error {
+	switch {
+	case record.Version != runRecordVersion:
+		return fmt.Errorf("record version %d, want %d", record.Version, runRecordVersion)
+	case !record.Completed:
+		return fmt.Errorf("record is incomplete")
+	case record.PromptSHA256 != promptDigest(c):
+		return fmt.Errorf("prompt hash does not match the current case")
+	case record.OracleVersion != oracleContractVersion:
+		return fmt.Errorf("oracle version %q, want %q", record.OracleVersion, oracleContractVersion)
+	case record.EventsSHA256 == "":
+		return fmt.Errorf("event stream hash is missing")
+	}
+	data, err := os.ReadFile(filepath.Join(record.SessionDir, "raw.ndjson"))
+	if err != nil {
+		return fmt.Errorf("read event stream: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	if got := hex.EncodeToString(sum[:]); got != record.EventsSHA256 {
+		return fmt.Errorf("event stream hash %q, want %q", got, record.EventsSHA256)
+	}
+	return nil
 }
 
 func baselineOrder(modelIndex, repetitions, repetition int) int {
@@ -718,14 +759,15 @@ func dryRunRecords(cfg runConfig) []runRecord {
 			for _, variant := range variants {
 				order++
 				records = append(records, runRecord{
-					Version:    1,
-					Case:       cfg.Case.Name,
-					Model:      model,
-					Repetition: rep,
-					Variant:    variant,
-					Order:      order,
-					TargetSHA:  targetSHA,
-					HarnessSHA: map[string]string{"baseline": cfg.BaselineSHA, "candidate": cfg.CandidateSHA}[variant],
+					Version:       runRecordVersion,
+					Case:          cfg.Case.Name,
+					OracleVersion: oracleContractVersion,
+					Model:         model,
+					Repetition:    rep,
+					Variant:       variant,
+					Order:         order,
+					TargetSHA:     targetSHA,
+					HarnessSHA:    map[string]string{"baseline": cfg.BaselineSHA, "candidate": cfg.CandidateSHA}[variant],
 				})
 			}
 		}

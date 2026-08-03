@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -14,39 +16,56 @@ import (
 )
 
 type metrics struct {
-	ModelTarget                 string         `json:"model_target,omitempty"`
-	APIType                     string         `json:"api_type,omitempty"`
-	TotalTokens                 int            `json:"total_tokens"`
-	InputTokens                 int            `json:"input_tokens"`
-	CacheReadTokens             int            `json:"cache_read_tokens"`
-	CacheWriteTokens            int            `json:"cache_write_tokens"`
-	CacheWrite1hTokens          int            `json:"cache_write_1h_tokens"`
-	OutputTokens                int            `json:"output_tokens"`
-	ReasoningTokens             int            `json:"reasoning_tokens"`
-	CostUSD                     float64        `json:"cost_usd"`
-	CostKnown                   bool           `json:"cost_known"`
-	Turns                       int            `json:"turns"`
-	ToolCalls                   map[string]int `json:"tool_calls"`
-	ToolErrors                  int            `json:"tool_errors"`
-	NestedToolErrors            int            `json:"nested_tool_errors"`
-	ErrorKinds                  map[string]int `json:"error_kinds"`
-	ToolResultBytes             int            `json:"tool_result_bytes"`
-	RGToReadTransitions         int            `json:"rg_to_read_transitions"`
-	CommandToCommandTransitions int            `json:"command_to_command_transitions"`
-	AvoidableTodoOnlyTurns      int            `json:"avoidable_todo_only_turns"`
-	GitCalls                    int            `json:"git_calls"`
-	BackgroundPolls             int            `json:"background_polls"`
-	BackgroundWaits             int            `json:"background_waits"`
-	UsedSearch                  bool           `json:"used_search"`
-	UsedCommandSteps            bool           `json:"used_command_steps"`
-	UsedWorkspaceSummary        bool           `json:"used_workspace_summary"`
-	StartedRaceSuite            bool           `json:"started_race_suite"`
-	ReadDriftAfterPhaseOne      bool           `json:"read_drift_after_phase_one"`
-	UnresolvedEditFailure       bool           `json:"unresolved_edit_failure"`
-	EditRecoveryTurns           int            `json:"edit_recovery_turns"`
-	CommandText                 string         `json:"-"`
-	FinalText                   string         `json:"-"`
-	AssistantText               string         `json:"-"`
+	ModelTarget                  string         `json:"model_target,omitempty"`
+	APIType                      string         `json:"api_type,omitempty"`
+	TotalTokens                  int            `json:"total_tokens"`
+	InputTokens                  int            `json:"input_tokens"`
+	CacheReadTokens              int            `json:"cache_read_tokens"`
+	CacheWriteTokens             int            `json:"cache_write_tokens"`
+	CacheWrite1hTokens           int            `json:"cache_write_1h_tokens"`
+	OutputTokens                 int            `json:"output_tokens"`
+	ReasoningTokens              int            `json:"reasoning_tokens"`
+	CostUSD                      float64        `json:"cost_usd"`
+	CostKnown                    bool           `json:"cost_known"`
+	Turns                        int            `json:"turns"`
+	ToolCalls                    map[string]int `json:"tool_calls"`
+	ToolErrors                   int            `json:"tool_errors"`
+	NestedToolErrors             int            `json:"nested_tool_errors"`
+	RecoverableEditMisses        int            `json:"recoverable_edit_misses"`
+	RecoveredEditMisses          int            `json:"recovered_edit_misses"`
+	TimelyRecoveredEditMisses    int            `json:"timely_recovered_edit_misses"`
+	UnresolvedEditFailures       int            `json:"unresolved_edit_failures"`
+	UnrelatedToolErrors          int            `json:"unrelated_tool_errors"`
+	EffectiveToolErrors          int            `json:"effective_tool_errors"`
+	EffectiveToolErrorsAvailable bool           `json:"effective_tool_errors_available"`
+	ErrorKinds                   map[string]int `json:"error_kinds"`
+	ToolResultBytes              int            `json:"tool_result_bytes"`
+	RGToReadTransitions          int            `json:"rg_to_read_transitions"`
+	CommandToCommandTransitions  int            `json:"command_to_command_transitions"`
+	AvoidableTodoOnlyTurns       int            `json:"avoidable_todo_only_turns"`
+	GitCalls                     int            `json:"git_calls"`
+	BackgroundPolls              int            `json:"background_polls"`
+	BackgroundWaits              int            `json:"background_waits"`
+	UsedSearch                   bool           `json:"used_search"`
+	SearchQueries                int            `json:"search_queries"`
+	UsedCommandSteps             bool           `json:"used_command_steps"`
+	UsedWorkspaceSummary         bool           `json:"used_workspace_summary"`
+	StartedRaceSuite             bool           `json:"started_race_suite"`
+	ReadDriftAfterPhaseOne       bool           `json:"read_drift_after_phase_one"`
+	UnresolvedEditFailure        bool           `json:"unresolved_edit_failure"`
+	EditRecoveryTurns            int            `json:"edit_recovery_turns"`
+	InspectOperations            int            `json:"inspect_operations"`
+	InspectReadOperations        int            `json:"inspect_read_operations"`
+	InspectReadPaths             []string       `json:"inspect_read_paths,omitempty"`
+	SuccessfulInspectCalls       int            `json:"successful_inspect_calls"`
+	InspectOperationErrors       int            `json:"inspect_operation_errors"`
+	DirectReadCalls              int            `json:"direct_read_calls"`
+	DiscoveryBeforeRead          bool           `json:"discovery_before_read"`
+	ReadBeforeDiscovery          bool           `json:"read_before_discovery"`
+	AllFailedInspectCalls        int            `json:"all_failed_inspect_calls"`
+	CommandText                  string         `json:"-"`
+	FinalText                    string         `json:"-"`
+	AssistantText                string         `json:"-"`
 }
 
 type turnTools struct {
@@ -82,7 +101,10 @@ func collectMetrics(sessionDir string) (metrics, error) {
 	}
 	byTurn := map[int][]string{}
 	var commandInputs []string
-	lastEditFailureTurn := 0
+	editRecovery := editRecoveryState{}
+	m.ReadDriftAfterPhaseOne = successfulDriftReread(events)
+	discoverySucceeded := false
+	discoveryStarts := make(map[string]bool)
 	for _, ev := range events {
 		if ev.Type == session.EventModelRequest && ev.ModelRequest != nil {
 			if ev.ModelRequest.TargetID != "" {
@@ -96,20 +118,19 @@ func collectMetrics(sessionDir string) (metrics, error) {
 			m.Turns = ev.Turn
 		}
 		if ev.Type == session.EventToolResult {
-			if ev.ResultError {
-				m.ToolErrors++
-				m.ErrorKinds[ev.ErrorKind]++
+			if !ev.ResultError && ev.ResultMetrics["query_errors"] == 0 && discoveryStarts[ev.ToolID] {
+				discoverySucceeded = true
 			}
-			m.NestedToolErrors += ev.ResultMetrics["operation_errors"] + ev.ResultMetrics["query_errors"]
-			if ev.Tool == "edit" {
-				if ev.ResultError {
-					m.UnresolvedEditFailure = true
-					lastEditFailureTurn = ev.Turn
-				} else if m.UnresolvedEditFailure {
-					m.UnresolvedEditFailure = false
-					m.EditRecoveryTurns = max(ev.Turn-lastEditFailureTurn, 0)
+			if ev.Tool == "inspect" {
+				if ev.ResultError && ev.ErrorKind == string(llm.ToolErrorBatchFailed) {
+					m.AllFailedInspectCalls++
 				}
+				if !ev.ResultError {
+					m.SuccessfulInspectCalls++
+				}
+				m.InspectOperationErrors += ev.ResultMetrics["operation_errors"]
 			}
+			observeToolResult(&m, &editRecovery, ev)
 			continue
 		}
 		if ev.Type != session.EventToolStart {
@@ -117,14 +138,34 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		}
 		m.ToolCalls[ev.Tool]++
 		byTurn[ev.Turn] = append(byTurn[ev.Turn], ev.Tool)
+		if isDiscoveryTool(ev.Tool) {
+			discoveryStarts[ev.ToolID] = discoveryTargetsFixture(ev.Tool, ev.Input)
+		}
 		raw := string(ev.Input)
 		switch ev.Tool {
 		case "read_file":
-			if ev.Prompt >= 2 && strings.Contains(raw, "edit-drift.txt") {
-				m.ReadDriftAfterPhaseOne = true
+			m.DirectReadCalls++
+			if discoverySucceeded {
+				m.DiscoveryBeforeRead = true
+			} else {
+				m.ReadBeforeDiscovery = true
+			}
+		case "inspect":
+			operationCount, readPaths := inspectOperationSummary(ev.Input)
+			m.InspectOperations += operationCount
+			readOperations := len(readPaths)
+			m.InspectReadOperations += readOperations
+			m.InspectReadPaths = append(m.InspectReadPaths, readPaths...)
+			if readOperations > 0 {
+				if discoverySucceeded {
+					m.DiscoveryBeforeRead = true
+				} else {
+					m.ReadBeforeDiscovery = true
+				}
 			}
 		case "search":
 			m.UsedSearch = true
+			m.SearchQueries += searchQueryCount(ev.Input)
 		case "run_command":
 			commandInputs = append(commandInputs, strings.Join(flattenJSONStrings(ev.Input), " "))
 			if runCommandInvokesGit(ev.Input) {
@@ -157,6 +198,7 @@ func collectMetrics(sessionDir string) (metrics, error) {
 			}
 		}
 	}
+	finishEditRecovery(&m, editRecovery)
 	m.CommandText = strings.Join(commandInputs, "\n")
 
 	var turns []turnTools
@@ -193,6 +235,253 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		}
 	}
 	return m, nil
+}
+
+func searchQueryCount(raw json.RawMessage) int {
+	var input struct {
+		Queries []json.RawMessage `json:"queries"`
+	}
+	if json.Unmarshal(raw, &input) != nil {
+		return 0
+	}
+	return len(input.Queries)
+}
+
+func isDiscoveryTool(name string) bool {
+	return name == "glob" || name == "list_dir" || name == "search"
+}
+
+func discoveryTargetsFixture(tool string, raw json.RawMessage) bool {
+	const root = toolAccuracyFixture + "/discovery"
+	names := contractFixturePaths("discovery", "shard-%02d-hidden.txt")
+	for i := range names {
+		names[i] = path.Base(names[i])
+	}
+	switch tool {
+	case "glob":
+		var input struct {
+			Root    string `json:"root"`
+			Pattern string `json:"pattern"`
+		}
+		if json.Unmarshal(raw, &input) != nil {
+			return false
+		}
+		pattern := normalizeFixturePath(input.Pattern)
+		switch normalizedRoot := normalizeFixturePath(input.Root); {
+		case normalizedRoot == root:
+		case normalizedRoot == "." && strings.HasPrefix(pattern, root+"/"):
+			pattern = strings.TrimPrefix(pattern, root+"/")
+		default:
+			return false
+		}
+		return globCoversNames(pattern, names)
+	case "list_dir":
+		var input struct {
+			Path string `json:"path"`
+			Glob string `json:"glob"`
+		}
+		if json.Unmarshal(raw, &input) != nil || normalizeFixturePath(input.Path) != root {
+			return false
+		}
+		return input.Glob == "" || globCoversNames(input.Glob, names)
+	case "search":
+		var input struct {
+			Queries []struct {
+				Pattern    string   `json:"pattern"`
+				Fixed      bool     `json:"fixed_strings"`
+				Case       string   `json:"case"`
+				Paths      []string `json:"paths"`
+				Globs      []string `json:"globs"`
+				Output     string   `json:"output"`
+				MaxMatches int      `json:"max_matches"`
+				MaxFiles   int      `json:"max_files"`
+			} `json:"queries"`
+		}
+		if json.Unmarshal(raw, &input) != nil {
+			return false
+		}
+		for _, query := range input.Queries {
+			if len(query.Paths) != 1 || normalizeFixturePath(query.Paths[0]) != root || len(query.Globs) != 0 ||
+				query.Output == "exists" || query.MaxFiles < len(names) ||
+				(query.MaxMatches > 0 && query.MaxMatches < len(names)) {
+				continue
+			}
+			if searchPatternCoversDiscovery(query.Pattern, query.Fixed, query.Case) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func globCoversNames(pattern string, names []string) bool {
+	if pattern == "**" || pattern == "**/*" {
+		return true
+	}
+	pattern = strings.TrimPrefix(pattern, "**/")
+	for _, name := range names {
+		matched, err := path.Match(pattern, name)
+		if err != nil || !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func searchPatternCoversDiscovery(pattern string, fixed bool, caseMode string) bool {
+	for i := 1; i <= 18; i++ {
+		content := fmt.Sprintf("Discover%02d\n", i)
+		if fixed {
+			if caseMode == "insensitive" || ((caseMode == "" || caseMode == "smart") && strings.ToLower(pattern) == pattern) {
+				if !strings.Contains(strings.ToLower(content), strings.ToLower(pattern)) {
+					return false
+				}
+			} else if !strings.Contains(content, pattern) {
+				return false
+			}
+			continue
+		}
+		expression := pattern
+		if caseMode == "insensitive" || (caseMode == "smart" && strings.ToLower(pattern) == pattern) {
+			expression = "(?i)" + expression
+		}
+		re, err := regexp.Compile(expression)
+		if err != nil || !re.MatchString(content) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeFixturePath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return "."
+	}
+	return filepath.ToSlash(filepath.Clean(path))
+}
+
+func inspectReadPaths(raw json.RawMessage) []string {
+	_, paths := inspectOperationSummary(raw)
+	return paths
+}
+
+func inspectOperationSummary(raw json.RawMessage) (int, []string) {
+	var input struct {
+		Operations []struct {
+			Tool  string          `json:"tool"`
+			Input json.RawMessage `json:"input"`
+		} `json:"operations"`
+	}
+	if json.Unmarshal(raw, &input) != nil {
+		return 0, nil
+	}
+	var paths []string
+	for _, operation := range input.Operations {
+		if operation.Tool != "read_file" {
+			continue
+		}
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal(operation.Input, &args) == nil && args.Path != "" {
+			paths = append(paths, normalizeFixturePath(args.Path))
+		}
+	}
+	return len(input.Operations), paths
+}
+
+func successfulDriftReread(events []session.Event) bool {
+	const driftPath = toolAccuracyFixture + "/edit-drift.txt"
+	pending := make(map[string]string)
+	for _, event := range events {
+		switch event.Type {
+		case session.EventToolStart:
+			if event.Prompt >= 2 && event.ToolID != "" && toolReadsPath(event.Tool, event.Input, driftPath) {
+				pending[event.ToolID] = event.Tool
+			}
+		case session.EventToolResult:
+			tool, ok := pending[event.ToolID]
+			if !ok {
+				continue
+			}
+			delete(pending, event.ToolID)
+			if !event.ResultError && (tool != "inspect" || event.ResultMetrics["operation_errors"] == 0) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func toolReadsPath(tool string, raw json.RawMessage, want string) bool {
+	want = normalizeFixturePath(want)
+	var paths []string
+	switch tool {
+	case "read_file":
+		var input struct {
+			Path  string   `json:"path"`
+			Paths []string `json:"paths"`
+		}
+		if json.Unmarshal(raw, &input) != nil {
+			return false
+		}
+		paths = append(input.Paths, input.Path)
+	case "inspect":
+		paths = inspectReadPaths(raw)
+	default:
+		return false
+	}
+	for _, candidate := range paths {
+		if normalizeFixturePath(candidate) == want {
+			return true
+		}
+	}
+	return false
+}
+
+type editRecoveryState struct {
+	pendingMissTurns []int
+	unresolved       int
+}
+
+func observeToolResult(m *metrics, recovery *editRecoveryState, ev session.Event) {
+	if ev.ResultError {
+		m.ToolErrors++
+		m.ErrorKinds[ev.ErrorKind]++
+	}
+	nested := ev.ResultMetrics["operation_errors"] + ev.ResultMetrics["query_errors"]
+	m.NestedToolErrors += nested
+	m.UnrelatedToolErrors += nested
+	if ev.Tool != "edit" {
+		if ev.ResultError {
+			m.UnrelatedToolErrors++
+		}
+		return
+	}
+	if ev.ResultError {
+		if ev.ErrorKind == string(llm.ToolErrorEditOldTextNotFound) {
+			m.RecoverableEditMisses++
+			recovery.pendingMissTurns = append(recovery.pendingMissTurns, ev.Turn)
+			return
+		}
+		recovery.unresolved++
+		m.UnrelatedToolErrors++
+		return
+	}
+	for _, missTurn := range recovery.pendingMissTurns {
+		recoveryTurns := max(ev.Turn-missTurn, 0)
+		m.RecoveredEditMisses++
+		m.EditRecoveryTurns = max(m.EditRecoveryTurns, recoveryTurns)
+		if recoveryTurns <= 2 {
+			m.TimelyRecoveredEditMisses++
+		}
+	}
+	recovery.pendingMissTurns = nil
+}
+
+func finishEditRecovery(m *metrics, recovery editRecoveryState) {
+	m.UnresolvedEditFailures = recovery.unresolved + len(recovery.pendingMissTurns)
+	m.UnresolvedEditFailure = m.UnresolvedEditFailures > 0
 }
 
 func runCommandInvokesGit(raw json.RawMessage) bool {

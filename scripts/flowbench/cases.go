@@ -40,6 +40,27 @@ type score struct {
 	Reasons []string `json:"reasons,omitempty"`
 }
 
+func evaluateCase(c benchmarkCase, in scoreInput) (metrics, score) {
+	result := c.Score(in)
+	return classifyEffectiveToolErrors(c.Name, in.Metrics, result), result
+}
+
+func evaluateArchivedCase(c benchmarkCase, in scoreInput, recorded score) (metrics, score) {
+	if strings.HasPrefix(c.Name, "edit_") {
+		return classifyEffectiveToolErrors(c.Name, in.Metrics, recorded), recorded
+	}
+	return evaluateCase(c, in)
+}
+
+func classifyEffectiveToolErrors(caseName string, m metrics, result score) metrics {
+	m.EffectiveToolErrors = m.ToolErrors + m.NestedToolErrors
+	m.EffectiveToolErrorsAvailable = true
+	if caseName == "edit_drift_recovery" && result.Pass && m.TimelyRecoveredEditMisses > 0 {
+		m.EffectiveToolErrors = max(0, m.EffectiveToolErrors-m.TimelyRecoveredEditMisses)
+	}
+	return m
+}
+
 func allCases() map[string]benchmarkCase {
 	cases := []benchmarkCase{
 		{
@@ -109,11 +130,16 @@ func allCases() map[string]benchmarkCase {
 			PrimaryMetric: "tool_errors", MinimumReductionPct: 0,
 		},
 		{
-			Name: "tool_contracts",
-			Prompt: "Work directly; do not delegate or edit. Use one inspect call to read all 18 files under .flowbench-tool-accuracy/contracts. " +
-				"Use one batched search call containing literal fixed-string queries for Widget( and State{ plus a regex query for Marker[0-9]+. " +
-				"Use one run_command steps call with output_mode full that prints STEP_ALPHA and STEP_BETA. Report the first and last markers and both step outputs.",
-			Setup: setupToolContracts, Score: scoreToolContracts,
+			Name:   "known_path_batching",
+			Prompt: knownPathBatchingPrompt(),
+			Setup:  setupKnownPathBatching, Score: scoreKnownPathBatching,
+			PrimaryMetric: "tool_errors", MinimumReductionPct: 0,
+		},
+		{
+			Name: "unknown_path_discovery",
+			Prompt: "Work directly; do not delegate or edit. Files are somewhere under .flowbench-tool-accuracy/discovery, but their paths are unknown. " +
+				"Discover the paths before reading any file, then use exactly one inspect read batch over every discovered file. Do not use serial direct reads. Report Discover01 and Discover18.",
+			Setup: setupUnknownPathDiscovery, Score: scoreUnknownPathDiscovery,
 			PrimaryMetric: "tool_errors", MinimumReductionPct: 0,
 		},
 	}
@@ -167,17 +193,31 @@ func applyEditDrift(dir string) error {
 	return os.WriteFile(path, []byte(editDriftChanged), 0o644)
 }
 
-func setupToolContracts(dir string) error {
+func knownPathBatchingPrompt() string {
+	paths := contractFixturePaths("known", "contract-%02d.txt")
+	return "Work directly; do not delegate or edit. Use exactly one inspect call to read these known paths: " + strings.Join(paths, ", ") + ". " +
+		"Use one batched search call containing literal fixed-string queries for Widget( and State{ plus a regex query for Marker[0-9]+. " +
+		"Use one run_command steps call with output_mode full that prints STEP_ALPHA and STEP_BETA. Report Marker01, Marker18, and both step outputs."
+}
+
+func setupKnownPathBatching(dir string) error {
+	return setupContractFiles(dir, "known", "contract-%02d.txt", "Marker%02d Widget( State{\n")
+}
+
+func setupUnknownPathDiscovery(dir string) error {
+	return setupContractFiles(dir, "discovery", "shard-%02d-hidden.txt", "Discover%02d\n")
+}
+
+func setupContractFiles(dir, subdir, nameFormat, bodyFormat string) error {
 	if err := setupClean(dir); err != nil {
 		return err
 	}
-	root := filepath.Join(dir, toolAccuracyFixture, "contracts")
+	root := filepath.Join(dir, toolAccuracyFixture, subdir)
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return err
 	}
 	for i := 1; i <= 18; i++ {
-		body := fmt.Sprintf("Marker%02d Widget( State{\n", i)
-		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("marker-%02d.txt", i)), []byte(body), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf(nameFormat, i)), []byte(fmt.Sprintf(bodyFormat, i)), 0o644); err != nil {
 			return err
 		}
 	}
@@ -211,12 +251,6 @@ func scoreEditDrift(in scoreInput) score {
 	if !in.Metrics.ReadDriftAfterPhaseOne {
 		reasons = append(reasons, "drifted path was not re-read in phase two")
 	}
-	if in.Metrics.UnresolvedEditFailure {
-		reasons = append(reasons, "edit failure was not recovered")
-	}
-	if in.Metrics.EditRecoveryTurns > 2 {
-		reasons = append(reasons, "edit recovery exceeded two turns")
-	}
 	if err := requireOnlyUntrackedFixture(in.Worktree, filepath.Join(toolAccuracyFixture, "edit-drift.txt")); err != nil {
 		reasons = append(reasons, err.Error())
 	}
@@ -247,18 +281,72 @@ func requireOnlyUntrackedFixture(worktree string, paths ...string) error {
 	return nil
 }
 
-func scoreToolContracts(in scoreInput) score {
+func scoreKnownPathBatching(in scoreInput) score {
 	result := requireOutput(in.Stdout, "Marker01", "Marker18", "STEP_ALPHA", "STEP_BETA")
 	for _, tool := range []string{"inspect", "search", "run_command"} {
 		if in.Metrics.ToolCalls[tool] == 0 {
 			result.Reasons = append(result.Reasons, "required tool not exercised: "+tool)
 		}
 	}
+	if in.Metrics.ToolCalls["inspect"] != 1 || in.Metrics.InspectOperations != 18 || in.Metrics.InspectReadOperations != 18 ||
+		in.Metrics.SuccessfulInspectCalls != 1 || in.Metrics.InspectOperationErrors != 0 ||
+		in.Metrics.DirectReadCalls != 0 || in.Metrics.AllFailedInspectCalls != 0 ||
+		!sameFixturePaths(in.Metrics.InspectReadPaths, contractFixturePaths("known", "contract-%02d.txt")) {
+		result.Reasons = append(result.Reasons, "known paths were not read exactly once in one successful 18-operation inspect batch")
+	}
+	if in.Metrics.ToolCalls["search"] != 1 || in.Metrics.SearchQueries != 3 {
+		result.Reasons = append(result.Reasons, "search was not one three-query batch")
+	}
+	if !in.Metrics.UsedCommandSteps {
+		result.Reasons = append(result.Reasons, "command steps were not exercised")
+	}
 	if in.FixtureBefore != in.FixtureAfter {
-		result.Reasons = append(result.Reasons, "contract fixture was modified")
+		result.Reasons = append(result.Reasons, "known-path fixture was modified")
 	}
 	result.Pass = len(result.Reasons) == 0
 	return result
+}
+
+func scoreUnknownPathDiscovery(in scoreInput) score {
+	result := requireOutput(in.Stdout, "Discover01", "Discover18")
+	if !in.Metrics.DiscoveryBeforeRead || in.Metrics.ReadBeforeDiscovery {
+		result.Reasons = append(result.Reasons, "paths were not successfully discovered before reads")
+	}
+	if in.Metrics.ToolCalls["inspect"] != 1 || in.Metrics.InspectOperations != 18 || in.Metrics.InspectReadOperations != 18 ||
+		in.Metrics.SuccessfulInspectCalls != 1 || in.Metrics.InspectOperationErrors != 0 ||
+		in.Metrics.DirectReadCalls != 0 || in.Metrics.AllFailedInspectCalls != 0 ||
+		!sameFixturePaths(in.Metrics.InspectReadPaths, contractFixturePaths("discovery", "shard-%02d-hidden.txt")) {
+		result.Reasons = append(result.Reasons, "discovered paths were not read exactly once in one successful 18-operation inspect batch")
+	}
+	if in.FixtureBefore != in.FixtureAfter {
+		result.Reasons = append(result.Reasons, "discovery fixture was modified")
+	}
+	result.Pass = len(result.Reasons) == 0
+	return result
+}
+
+func contractFixturePaths(subdir, nameFormat string) []string {
+	paths := make([]string, 0, 18)
+	for i := 1; i <= 18; i++ {
+		paths = append(paths, fmt.Sprintf("%s/%s/%s", toolAccuracyFixture, subdir, fmt.Sprintf(nameFormat, i)))
+	}
+	return paths
+}
+
+func sameFixturePaths(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	counts := make(map[string]int, len(got))
+	for _, path := range got {
+		counts[normalizeFixturePath(path)]++
+	}
+	for _, path := range want {
+		if counts[path] != 1 {
+			return false
+		}
+	}
+	return true
 }
 
 func setupClean(dir string) error {

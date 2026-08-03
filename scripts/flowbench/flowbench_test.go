@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"harness/internal/llm"
+	"harness/internal/session"
 )
 
 func TestBenchmarkArgsPinConfigModelAndReasoning(t *testing.T) {
@@ -97,7 +98,7 @@ func TestDryRunAlternatesPairs(t *testing.T) {
 
 func TestToolAccuracyCasesRegistered(t *testing.T) {
 	cases := allCases()
-	for _, name := range []string{"edit_precision", "edit_drift_recovery", "tool_contracts"} {
+	for _, name := range []string{"edit_precision", "edit_drift_recovery", "known_path_batching", "unknown_path_discovery"} {
 		c, ok := cases[name]
 		if !ok || c.Setup == nil || c.Score == nil {
 			t.Fatalf("case %q = %+v", name, c)
@@ -139,6 +140,141 @@ func TestFlattenJSONStrings(t *testing.T) {
 		if !contains(got, want) {
 			t.Fatalf("flattened strings %q missing %q", joined, want)
 		}
+	}
+}
+
+func TestSearchQueryCount(t *testing.T) {
+	if got := searchQueryCount(json.RawMessage(`{"queries":[{"pattern":"one"},{"pattern":"two"},{"pattern":"three"}]}`)); got != 3 {
+		t.Fatalf("searchQueryCount = %d, want 3", got)
+	}
+	if got := searchQueryCount(json.RawMessage(`{"pattern":"legacy"}`)); got != 0 {
+		t.Fatalf("searchQueryCount legacy input = %d, want 0", got)
+	}
+}
+
+func TestDiscoveryTargetsFixtureRoot(t *testing.T) {
+	for _, test := range []struct {
+		tool  string
+		input string
+		want  bool
+	}{
+		{"glob", `{"root":".flowbench-tool-accuracy/discovery","pattern":"**/*"}`, true},
+		{"glob", `{"root":".","pattern":".flowbench-tool-accuracy/discovery/**/*"}`, true},
+		{"list_dir", `{"path":".flowbench-tool-accuracy/discovery"}`, true},
+		{"search", `{"queries":[{"pattern":"Discover","paths":[".flowbench-tool-accuracy/discovery"],"max_files":18}]}`, true},
+		{"list_dir", `{"path":".flowbench-tool-accuracy/discovery","glob":"missing-*"}`, false},
+		{"glob", `{"root":".flowbench-tool-accuracy/discovery","pattern":"missing-*"}`, false},
+		{"list_dir", `{"path":"."}`, false},
+		{"search", `{"queries":[{"pattern":"missing","paths":[".flowbench-tool-accuracy/discovery"],"max_files":18}]}`, false},
+		{"search", `{"queries":[{"pattern":"Discover","paths":[".flowbench-tool-accuracy/discovery"]}]}`, false},
+		{"search", `{"queries":[{"pattern":"Discover","paths":[".flowbench-tool-accuracy/discovery"],"max_files":18,"max_matches":1}]}`, false},
+		{"search", `{"queries":[{"pattern":"unrelated"}]}`, false},
+	} {
+		if got := discoveryTargetsFixture(test.tool, json.RawMessage(test.input)); got != test.want {
+			t.Errorf("discoveryTargetsFixture(%q, %s) = %v, want %v", test.tool, test.input, got, test.want)
+		}
+	}
+}
+
+func TestInspectOperationSummary(t *testing.T) {
+	input := json.RawMessage(`{"operations":[{"tool":"read_file","input":{"path":"./.flowbench-tool-accuracy/known/contract-01.txt"}},{"tool":"search","input":{"queries":[]}},{"tool":"read_file","input":{"path":".flowbench-tool-accuracy/known/contract-02.txt"}}]}`)
+	operations, got := inspectOperationSummary(input)
+	want := contractFixturePaths("known", "contract-%02d.txt")[:2]
+	if operations != 3 || !sameFixturePaths(got, want) {
+		t.Fatalf("inspectOperationSummary = %d, %v; want 3, %v", operations, got, want)
+	}
+}
+
+func TestSuccessfulDriftRereadRequiresSuccessfulCorrelatedResult(t *testing.T) {
+	readInput := json.RawMessage(`{"path":".flowbench-tool-accuracy/edit-drift.txt"}`)
+	inspectInput := json.RawMessage(`{"operations":[{"tool":"read_file","input":{"path":".flowbench-tool-accuracy/edit-drift.txt"}}]}`)
+	tests := []struct {
+		name   string
+		events []session.Event
+		want   bool
+	}{
+		{
+			name: "direct success",
+			events: []session.Event{
+				{Type: session.EventToolStart, Prompt: 2, ToolID: "read", Tool: "read_file", Input: readInput},
+				{Type: session.EventToolResult, Prompt: 2, ToolID: "read", Tool: "read_file"},
+			},
+			want: true,
+		},
+		{
+			name: "direct failure",
+			events: []session.Event{
+				{Type: session.EventToolStart, Prompt: 2, ToolID: "read", Tool: "read_file", Input: readInput},
+				{Type: session.EventToolResult, Prompt: 2, ToolID: "read", Tool: "read_file", ResultError: true},
+			},
+		},
+		{
+			name: "inspect success",
+			events: []session.Event{
+				{Type: session.EventToolStart, Prompt: 2, ToolID: "inspect", Tool: "inspect", Input: inspectInput},
+				{Type: session.EventToolResult, Prompt: 2, ToolID: "inspect", Tool: "inspect"},
+			},
+			want: true,
+		},
+		{
+			name: "inspect nested failure",
+			events: []session.Event{
+				{Type: session.EventToolStart, Prompt: 2, ToolID: "inspect", Tool: "inspect", Input: inspectInput},
+				{Type: session.EventToolResult, Prompt: 2, ToolID: "inspect", Tool: "inspect", ResultMetrics: map[string]int{"operation_errors": 1}},
+			},
+		},
+		{
+			name: "phase one",
+			events: []session.Event{
+				{Type: session.EventToolStart, Prompt: 1, ToolID: "read", Tool: "read_file", Input: readInput},
+				{Type: session.EventToolResult, Prompt: 1, ToolID: "read", Tool: "read_file"},
+			},
+		},
+		{
+			name: "uncorrelated success",
+			events: []session.Event{
+				{Type: session.EventToolStart, Prompt: 2, ToolID: "read", Tool: "read_file", Input: readInput},
+				{Type: session.EventToolResult, Prompt: 2, ToolID: "other", Tool: "read_file"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := successfulDriftReread(tt.events); got != tt.want {
+				t.Fatalf("successfulDriftReread = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateArchivedRecordChecksContractAndEvents(t *testing.T) {
+	c := allCases()["edit_drift_recovery"]
+	dir := t.TempDir()
+	raw := []byte("events\n")
+	if err := os.WriteFile(filepath.Join(dir, "raw.ndjson"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := runRecord{
+		Version: runRecordVersion, Completed: true, SessionDir: dir,
+		PromptSHA256: promptDigest(c), OracleVersion: oracleContractVersion,
+		EventsSHA256: digestString(string(raw)), Score: score{Pass: true},
+	}
+	if err := validateArchivedRecord(record, c); err != nil {
+		t.Fatalf("valid archived record: %v", err)
+	}
+	for name, mutate := range map[string]func(*runRecord){
+		"version": func(r *runRecord) { r.Version-- },
+		"prompt":  func(r *runRecord) { r.PromptSHA256 = "stale" },
+		"oracle":  func(r *runRecord) { r.OracleVersion = "stale" },
+		"events":  func(r *runRecord) { r.EventsSHA256 = "stale" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := record
+			mutate(&bad)
+			if err := validateArchivedRecord(bad, c); err == nil {
+				t.Fatal("invalid archived record was accepted")
+			}
+		})
 	}
 }
 
@@ -216,7 +352,7 @@ func TestSummarizeAcceptance(t *testing.T) {
 }
 
 func TestToolAccuracyAcceptanceAllowsStableEfficiencyAndRequiresErrorReduction(t *testing.T) {
-	c := allCases()["tool_contracts"]
+	c := allCases()["known_path_batching"]
 	var records []runRecord
 	for _, model := range defaultModels {
 		for rep := 1; rep <= 3; rep++ {
@@ -238,6 +374,195 @@ func TestToolAccuracyAcceptanceAllowsStableEfficiencyAndRequiresErrorReduction(t
 	agg = summarize(c, records)
 	if agg.Accepted || !containsAnyFold(strings.Join(agg.Failures, "\n"), "tool errors increased", "reduction") {
 		t.Fatalf("regression was not rejected: %+v", agg)
+	}
+}
+
+func TestRecoveredEditMissClassification(t *testing.T) {
+	tests := []struct {
+		name           string
+		events         []session.Event
+		scorePass      bool
+		wantRecovered  int
+		wantUnresolved int
+		wantUnrelated  int
+		wantEffective  int
+	}{
+		{
+			name: "recovered",
+			events: []session.Event{
+				{Type: session.EventToolResult, Tool: "edit", Turn: 1, ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+				{Type: session.EventToolResult, Tool: "edit", Turn: 2},
+			},
+			scorePass: true, wantRecovered: 1, wantEffective: 0,
+		},
+		{
+			name: "unresolved",
+			events: []session.Event{
+				{Type: session.EventToolResult, Tool: "edit", Turn: 1, ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+			},
+			scorePass: true, wantUnresolved: 1, wantEffective: 1,
+		},
+		{
+			name: "timely recovery plus unresolved miss",
+			events: []session.Event{
+				{Type: session.EventToolResult, Tool: "edit", Turn: 1, ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+				{Type: session.EventToolResult, Tool: "edit", Turn: 2},
+				{Type: session.EventToolResult, Tool: "edit", Turn: 3, ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+			},
+			scorePass: true, wantRecovered: 1, wantUnresolved: 1, wantEffective: 1,
+		},
+		{
+			name: "over budget",
+			events: []session.Event{
+				{Type: session.EventToolResult, Tool: "edit", Turn: 1, ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+				{Type: session.EventToolResult, Tool: "edit", Turn: 4},
+			},
+			scorePass: true, wantRecovered: 1, wantEffective: 1,
+		},
+		{
+			name: "oracle failure",
+			events: []session.Event{
+				{Type: session.EventToolResult, Tool: "edit", Turn: 1, ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+				{Type: session.EventToolResult, Tool: "edit", Turn: 2},
+			},
+			wantRecovered: 1, wantEffective: 1,
+		},
+		{
+			name: "unrelated nested errors remain",
+			events: []session.Event{
+				{Type: session.EventToolResult, Tool: "edit", Turn: 1, ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+				{Type: session.EventToolResult, Tool: "edit", Turn: 2},
+				{Type: session.EventToolResult, Tool: "inspect", Turn: 3, ResultError: true, ErrorKind: string(llm.ToolErrorBatchFailed), ResultMetrics: map[string]int{"operation_errors": 2}},
+			},
+			scorePass: true, wantRecovered: 1, wantUnrelated: 3, wantEffective: 3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := metrics{ErrorKinds: map[string]int{}}
+			recovery := editRecoveryState{}
+			for _, event := range tt.events {
+				observeToolResult(&m, &recovery, event)
+			}
+			finishEditRecovery(&m, recovery)
+			m = classifyEffectiveToolErrors("edit_drift_recovery", m, score{Pass: tt.scorePass})
+			if m.RecoveredEditMisses != tt.wantRecovered || m.UnresolvedEditFailures != tt.wantUnresolved ||
+				m.UnrelatedToolErrors != tt.wantUnrelated || m.EffectiveToolErrors != tt.wantEffective {
+				t.Fatalf("metrics = %+v", m)
+			}
+		})
+	}
+}
+
+func TestRecoveryClassifiesPendingMissesIndividually(t *testing.T) {
+	m := metrics{ErrorKinds: map[string]int{}}
+	recovery := editRecoveryState{}
+	for _, event := range []session.Event{
+		{Type: session.EventToolResult, Tool: "edit", Turn: 1, ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+		{Type: session.EventToolResult, Tool: "edit", Turn: 2, ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+		{Type: session.EventToolResult, Tool: "edit", Turn: 3},
+	} {
+		observeToolResult(&m, &recovery, event)
+	}
+	finishEditRecovery(&m, recovery)
+	if m.RecoveredEditMisses != 2 || m.TimelyRecoveredEditMisses != 2 || m.EditRecoveryTurns != 2 || m.UnresolvedEditFailures != 0 {
+		t.Fatalf("metrics = %+v", m)
+	}
+
+	m = metrics{ErrorKinds: map[string]int{}}
+	recovery = editRecoveryState{}
+	for _, event := range []session.Event{
+		{Type: session.EventToolResult, Tool: "edit", Turn: 1, ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+		{Type: session.EventToolResult, Tool: "edit", Turn: 3, ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
+		{Type: session.EventToolResult, Tool: "edit", Turn: 4},
+	} {
+		observeToolResult(&m, &recovery, event)
+	}
+	finishEditRecovery(&m, recovery)
+	m = classifyEffectiveToolErrors("edit_drift_recovery", m, score{Pass: true})
+	if m.RecoveredEditMisses != 2 || m.TimelyRecoveredEditMisses != 1 || m.EffectiveToolErrors != 1 {
+		t.Fatalf("mixed-window metrics = %+v", m)
+	}
+}
+
+func TestEvaluateArchivedEditCaseUsesRecordedOracle(t *testing.T) {
+	m := metrics{ToolErrors: 1, RecoverableEditMisses: 1, RecoveredEditMisses: 1, TimelyRecoveredEditMisses: 1}
+	gotMetrics, gotScore := evaluateArchivedCase(benchmarkCase{Name: "edit_drift_recovery"}, scoreInput{Metrics: m}, score{Pass: true})
+	if !gotScore.Pass || gotMetrics.EffectiveToolErrors != 0 {
+		t.Fatalf("archived result = (%+v, %+v)", gotMetrics, gotScore)
+	}
+}
+
+func TestKnownAndUnknownPathScoresEnforceSeparateFlows(t *testing.T) {
+	known := allCases()["known_path_batching"]
+	if !strings.Contains(known.Prompt, "contract-01.txt") || !strings.Contains(known.Prompt, "contract-18.txt") {
+		t.Fatalf("known-path prompt does not enumerate fixture paths: %s", known.Prompt)
+	}
+	knownMetrics := metrics{
+		ToolCalls:              map[string]int{"inspect": 1, "search": 1, "run_command": 1},
+		InspectOperations:      18,
+		InspectReadOperations:  18,
+		InspectReadPaths:       contractFixturePaths("known", "contract-%02d.txt"),
+		SuccessfulInspectCalls: 1,
+		SearchQueries:          3,
+		UsedCommandSteps:       true,
+	}
+	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); !got.Pass {
+		t.Fatalf("known-path score rejected valid flow: %v", got.Reasons)
+	}
+	knownMetrics.DirectReadCalls = 1
+	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); got.Pass {
+		t.Fatal("known-path score accepted serial direct read")
+	}
+	knownMetrics.DirectReadCalls = 0
+	knownMetrics.SearchQueries = 2
+	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); got.Pass {
+		t.Fatal("known-path score accepted incomplete search batch")
+	}
+	knownMetrics.SearchQueries = 3
+	knownMetrics.InspectReadPaths = append([]string(nil), knownMetrics.InspectReadPaths...)
+	knownMetrics.InspectReadPaths[1] = knownMetrics.InspectReadPaths[0]
+	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); got.Pass {
+		t.Fatal("known-path score accepted a duplicate read path")
+	}
+	knownMetrics.InspectReadPaths = contractFixturePaths("known", "contract-%02d.txt")
+	knownMetrics.InspectOperations = 19
+	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); got.Pass {
+		t.Fatal("known-path score accepted an extra inspect operation")
+	}
+	knownMetrics.InspectOperations = 18
+	knownMetrics.UsedCommandSteps = false
+	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); got.Pass {
+		t.Fatal("known-path score accepted command without steps")
+	}
+
+	validDiscovery := metrics{
+		ToolCalls:              map[string]int{"list_dir": 1, "inspect": 1},
+		InspectOperations:      18,
+		InspectReadOperations:  18,
+		InspectReadPaths:       contractFixturePaths("discovery", "shard-%02d-hidden.txt"),
+		SuccessfulInspectCalls: 1,
+		DiscoveryBeforeRead:    true,
+	}
+	in := scoreInput{Stdout: "Discover01 Discover18", FixtureBefore: "same", FixtureAfter: "same", Metrics: validDiscovery}
+	if got := scoreUnknownPathDiscovery(in); !got.Pass {
+		t.Fatalf("unknown-path score rejected valid flow: %v", got.Reasons)
+	}
+	for name, mutate := range map[string]func(*metrics){
+		"guessed before discovery": func(m *metrics) { m.ReadBeforeDiscovery = true },
+		"all failed inspect":       func(m *metrics) { m.AllFailedInspectCalls = 1 },
+		"serial reads":             func(m *metrics) { m.DirectReadCalls = 1 },
+		"missing batch evidence":   func(m *metrics) { m.InspectReadOperations = 17 },
+		"extra inspect operation":  func(m *metrics) { m.InspectOperations = 19 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := validDiscovery
+			mutate(&bad)
+			in.Metrics = bad
+			if got := scoreUnknownPathDiscovery(in); got.Pass {
+				t.Fatalf("invalid discovery flow passed: %+v", bad)
+			}
+		})
 	}
 }
 

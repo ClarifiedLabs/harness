@@ -101,11 +101,11 @@ go run ./scripts/flowbench \
 
 Available cases are `search_context`, `command_steps`, `todo_coissue`,
 `git_workspace_summary`, `background_wait`, `edit_precision`,
-`edit_drift_recovery`, and `tool_contracts`. Use `-dry-run` to inspect
-ordering, `-resume` for validated completed records, and
+`edit_drift_recovery`, `known_path_batching`, and `unknown_path_discovery`. Use
+`-dry-run` to inspect ordering, `-resume` for validated completed records, and
 `-import-baseline-runs <runs.json>` to reuse a matching immutable baseline.
 
-The tool-accuracy suite runs its three synthetic, exact-oracle cases together:
+The tool-accuracy suite runs its four synthetic, exact-oracle cases together:
 
 ```sh
 go run ./scripts/flowbench -suite tool_accuracy -profile smoke \
@@ -117,18 +117,41 @@ go run ./scripts/flowbench -suite tool_accuracy -profile promotion \
   -results /tmp/harness-tool-accuracy
 ```
 
-`smoke` uses Qwen 3.8 for one paired repetition (six runs). `promotion` uses
-the three default model targets for three paired repetitions (54 runs).
+`smoke` uses Qwen 3.8 for one paired repetition (eight runs). `promotion` uses
+the three default model targets for three paired repetitions (72 runs).
 Explicit `-models` and `-repetitions` override a profile. `edit_precision`
-checks five replacements and byte-for-byte sentinel preservation;
+checks five replacements and byte-for-byte sentinel preservation.
 `edit_drift_recovery` mutates context only after the first interactive
-`prompt_end`; `tool_contracts` exercises 18-operation inspect, mixed
-literal/regex search, and full-output command steps. Run records hash prompts,
-fixtures, binaries, and raw events and retain invalid infrastructure samples for
-`-resume` to rerun rather than scoring them as model failures. Child runs use an
-empty explicit Harness config and are rejected when recorded telemetry names a
-model target other than the requested target, preventing local agent model pins
-from silently contaminating the matrix.
+`prompt_end`; raw tool errors remain recorded, while a structured
+`edit_oldtext_not_found` miss is removed from the effective gate only when a
+later edit succeeds within two turns and the exact file/workspace oracle plus
+required reread pass. Misses are classified individually, so one timely recovery
+can be exempted while another late or unresolved miss remains effective.
+Ambiguous/invalid edits, timeouts, panics, unresolved misses, over-budget
+recovery, and unrelated top-level or nested errors are never forgiven.
+
+`known_path_batching` enumerates all 18 fixture paths and requires one successful
+`inspect` call that reads each exact path once while retaining the literal/regex
+search and full-output command-step oracles. `unknown_path_discovery` supplies
+only a root, requires a successful error-free `glob`, `list_dir`, or `search`
+whose scope, pattern, and limits enumerate all fixture paths before any read,
+then requires one successful `inspect` call that reads each of the 18 exact
+discovered paths once. Both reject empty or partial discovery, duplicate or substituted
+paths, operation-local read errors, serial direct reads, all-failed inspect calls,
+missing marker evidence, and fixture changes.
+
+Run records hash prompts, fixtures, binaries, and raw events and version their
+scoring oracle. Resume and baseline import reject stale record, prompt, oracle,
+or event-stream versions/hashes rather than reusing an unverified prior score.
+They retain invalid
+infrastructure samples for `-resume` to rerun rather than scoring them as model
+failures. Child runs use an empty explicit Harness config and are rejected when
+recorded telemetry names a model target other than the requested target,
+preventing local agent model pins from silently contaminating the matrix. Live
+provider receipts must keep direct Anthropic
+`anthropic:claude-haiku-4-5-20251001` distinct from OpenRouter
+`openrouter:anthropic/claude-haiku-4.5`; an alias or cross-route substitution does
+not satisfy the corresponding lane.
 
 ## Live results and disposition
 

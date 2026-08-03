@@ -213,11 +213,11 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 		if ma.BaselineMedianTurns > 0 && ma.CandidateMedianTurns > ma.BaselineMedianTurns*1.10 {
 			agg.Failures = append(agg.Failures, fmt.Sprintf("%s median turns regressed beyond 10%%", model))
 		}
-		if (strings.HasPrefix(c.Name, "edit_") || c.Name == "tool_contracts") && ma.CandidateMedianPrimary > ma.BaselineMedianPrimary {
+		if isToolAccuracyCase(c.Name) && ma.CandidateMedianPrimary > ma.BaselineMedianPrimary {
 			agg.Failures = append(agg.Failures, fmt.Sprintf("%s median tool errors increased", model))
 		}
 	}
-	toolAccuracy := strings.HasPrefix(c.Name, "edit_") || c.Name == "tool_contracts"
+	toolAccuracy := isToolAccuracyCase(c.Name)
 	minimumPrimaryReduction := c.MinimumReductionPct
 	if toolAccuracy && agg.PrimaryBaselineMedian > 0 {
 		minimumPrimaryReduction = 50
@@ -252,10 +252,17 @@ func primaryValue(c benchmarkCase, m metrics) int {
 	case "background_polls":
 		return m.BackgroundPolls
 	case "tool_errors":
+		if m.EffectiveToolErrorsAvailable {
+			return m.EffectiveToolErrors
+		}
 		return m.ToolErrors + m.NestedToolErrors
 	default:
 		return 0
 	}
+}
+
+func isToolAccuracyCase(name string) bool {
+	return strings.HasPrefix(name, "edit_") || name == "known_path_batching" || name == "unknown_path_discovery"
 }
 
 func adopted(name string, m metrics) bool {
@@ -274,8 +281,10 @@ func adopted(name string, m metrics) bool {
 		return m.ToolCalls["edit"] > 0
 	case "edit_drift_recovery":
 		return m.ToolCalls["edit"] > 0 && m.ReadDriftAfterPhaseOne
-	case "tool_contracts":
-		return m.ToolCalls["inspect"] > 0 && m.ToolCalls["search"] > 0 && m.UsedCommandSteps
+	case "known_path_batching":
+		return m.ToolCalls["inspect"] == 1 && m.ToolCalls["search"] > 0 && m.UsedCommandSteps
+	case "unknown_path_discovery":
+		return m.DiscoveryBeforeRead && m.ToolCalls["inspect"] == 1
 	default:
 		return false
 	}

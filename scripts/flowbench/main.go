@@ -43,7 +43,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "flowbench: unsupported suite/profile %q/%q\n", *suiteName, *profile)
 			os.Exit(2)
 		}
-		for _, name := range []string{"edit_precision", "edit_drift_recovery", "tool_contracts"} {
+		for _, name := range []string{"edit_precision", "edit_drift_recovery", "known_path_batching", "unknown_path_discovery"} {
 			selectedCases = append(selectedCases, cases[name])
 		}
 	}
