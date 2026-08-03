@@ -128,9 +128,10 @@ does not impose a new aggregate cap.
 `inspect` batches heterogeneous repository orientation in the same way. Its
 `operations[]` may contain up to 32 invocations of `read_file`, `search`, `glob`, `list_dir`,
 `workspace_summary`, or `git_readonly`; operations execute in waves of at most
-16 and render under indexed headers. Invalid operations are reported inline
-while valid operations still run; if all operations are invalid, the call
-fails. Nested `git_readonly` uses the same `args` and
+16 and render under indexed headers. Operation failures are reported inline
+while valid operations still run, so a mixed batch remains successful. If every
+operation fails, the outer result is an error with kind `batch_failed` and keeps
+each operation's error detail. Nested `git_readonly` uses the same `args` and
 optional `cwd` input and the same audited command allowlist as the top-level
 tool. When the `git` binary is unavailable, `inspect` omits both
 `workspace_summary` and `git_readonly` from its advertised operations. Prefer

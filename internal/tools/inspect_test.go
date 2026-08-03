@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"harness/internal/llm"
 )
 
 func TestInspectBatchesReadOnlyOperationsInInputOrder(t *testing.T) {
@@ -44,14 +46,41 @@ func TestInspectBatchesReadOnlyOperationsInInputOrder(t *testing.T) {
 	}
 }
 
-func TestInspectRejectsUnavailableAndMutatingOperations(t *testing.T) {
-	tool := inspectTool{tools: map[string]Tool{"edit": edit{}}}
-	for _, input := range []string{
-		`{"operations":[{"tool":"missing","input":{}}]}`,
-		`{"operations":[{"tool":"edit","input":{"path":"x","old_text":"a","new_text":"b"}}]}`,
-	} {
-		if _, err := tool.Run(context.Background(), json.RawMessage(input)); err == nil {
-			t.Errorf("Run(%s) succeeded, want validation error", input)
+func TestInspectAllRejectedOperationsAreStructuredBatchFailure(t *testing.T) {
+	registry := &Registry{}
+	registry.Register(inspectTool{tools: map[string]Tool{"edit": edit{}}})
+	input := json.RawMessage(`{"operations":[{"tool":"missing","input":{}},{"tool":"edit","input":{}}]}`)
+	result := registry.Dispatch(context.Background(), llm.ToolCall{ID: "inspect-1", Name: "inspect", Input: input})
+	if !result.IsError || result.ErrorKind != llm.ToolErrorBatchFailed {
+		t.Fatalf("result = %+v, want is_error with kind %q", result, llm.ToolErrorBatchFailed)
+	}
+	if result.Metrics["operation_errors"] != 2 || result.Metrics["operation_count"] != 2 {
+		t.Fatalf("metrics = %+v", result.Metrics)
+	}
+	for _, want := range []string{"## 1. missing", `tool "missing" is not available`, "## 2. edit", "was not executed"} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("batch failure missing %q:\n%s", want, result.Text)
+		}
+	}
+}
+
+func TestInspectAllRuntimeFailuresAreStructuredBatchFailure(t *testing.T) {
+	dir := t.TempDir()
+	one := filepath.Join(dir, "one.txt")
+	two := filepath.Join(dir, "two.txt")
+	registry := &Registry{}
+	registry.Register(inspectTool{tools: map[string]Tool{"read_file": readFile{}}})
+	input := json.RawMessage(`{"operations":[{"tool":"read_file","input":{"path":` + quoteJSON(one) + `}},{"tool":"read_file","input":{"path":` + quoteJSON(two) + `}}]}`)
+	result := registry.Dispatch(context.Background(), llm.ToolCall{ID: "inspect-1", Name: "inspect", Input: input})
+	if !result.IsError || result.ErrorKind != llm.ToolErrorBatchFailed {
+		t.Fatalf("result = %+v, want is_error with kind %q", result, llm.ToolErrorBatchFailed)
+	}
+	if result.Metrics["operation_errors"] != 2 {
+		t.Fatalf("metrics = %+v", result.Metrics)
+	}
+	for _, want := range []string{"## 1. read_file", "## 2. read_file", one, two} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("batch failure missing %q:\n%s", want, result.Text)
 		}
 	}
 }
@@ -137,11 +166,12 @@ func TestInspectRunsValidOperationsAlongsideRejectedOnes(t *testing.T) {
 	if err := os.WriteFile(path, []byte("ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tool := inspectTool{tools: map[string]Tool{"read_file": readFile{}}}
+	registry := &Registry{}
+	registry.Register(inspectTool{tools: map[string]Tool{"read_file": readFile{}}})
 	input := json.RawMessage(`{"operations":[{"tool":"missing","input":{}},{"tool":"read_file","input":{"path":` + quoteJSON(path) + `}}]}`)
-	result, err := tool.RunResult(context.Background(), input)
-	if err != nil {
-		t.Fatal(err)
+	result := registry.Dispatch(context.Background(), llm.ToolCall{ID: "inspect-1", Name: "inspect", Input: input})
+	if result.IsError || result.ErrorKind != "" {
+		t.Fatalf("partial batch was marked failed: %+v", result)
 	}
 	if !strings.Contains(result.Text, `tool "missing" is not available`) || !strings.Contains(result.Text, "1\tok") {
 		t.Fatalf("partial output:\n%s", result.Text)

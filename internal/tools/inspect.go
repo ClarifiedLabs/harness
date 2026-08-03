@@ -3,9 +3,12 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+
+	"harness/internal/llm"
 )
 
 const (
@@ -143,13 +146,6 @@ func (t inspectTool) RunResult(ctx context.Context, input json.RawMessage) (RunR
 		args.Operations[i] = operation
 		valid = append(valid, i)
 	}
-	if len(valid) == 0 {
-		var messages []string
-		for i, result := range results {
-			messages = append(messages, fmt.Sprintf("operations[%d]: %v", i, result.err))
-		}
-		return RunResult{}, badArgs("no valid read-only operations:\n%s", strings.Join(messages, "\n"))
-	}
 	for start := 0; start < len(valid); start += inspectWaveSize {
 		end := min(start+inspectWaveSize, len(valid))
 		var wg sync.WaitGroup
@@ -164,6 +160,9 @@ func (t inspectTool) RunResult(ctx context.Context, input json.RawMessage) (RunR
 			}(index)
 		}
 		wg.Wait()
+	}
+	if err := ctx.Err(); err != nil {
+		return RunResult{}, err
 	}
 
 	var b strings.Builder
@@ -180,9 +179,13 @@ func (t inspectTool) RunResult(ctx context.Context, input json.RawMessage) (RunR
 		}
 		b.WriteString(result.text)
 	}
-	return RunResult{Text: b.String(), Metrics: map[string]int{
+	result := RunResult{Text: b.String(), Metrics: map[string]int{
 		"operation_count": len(args.Operations), "operation_errors": operationErrors,
-	}}, nil
+	}}
+	if operationErrors == len(results) {
+		return result, WithKind(errors.New(result.Text), llm.ToolErrorBatchFailed)
+	}
+	return result, nil
 }
 
 func inspectReadOnlyError(operation inspectOperation) error {

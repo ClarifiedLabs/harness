@@ -196,6 +196,7 @@ const (
 	ToolErrorUnsupportedModality  ToolErrorKind = "unsupported_modality"
 	ToolErrorInvalidResult        ToolErrorKind = "invalid_result"
 	ToolErrorRegexInvalid         ToolErrorKind = "regex_invalid"
+	ToolErrorBatchFailed          ToolErrorKind = "batch_failed"
 
 	// Kinds assigned only by the offline analysis layer (text classification
 	// of legacy logs and model_request failure mapping); producers never set
