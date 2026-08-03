@@ -107,6 +107,11 @@ func TestToolAccuracyCasesRegistered(t *testing.T) {
 	if cases["edit_drift_recovery"].SecondPrompt == "" || cases["edit_drift_recovery"].BetweenPrompts == nil {
 		t.Fatal("drift case is not configured as a two-phase run")
 	}
+	knownPrompt := cases["known_path_batching"].Prompt
+	if !strings.Contains(knownPrompt, "Scope every search query to the .flowbench-tool-accuracy/known directory") ||
+		!strings.Contains(knownPrompt, "do not list the 18 files as query paths") {
+		t.Fatalf("known-path prompt lacks valid directory-scoped search guidance: %s", knownPrompt)
+	}
 }
 
 func TestRunInteractiveBenchmarkUsesPromptBoundaryHook(t *testing.T) {

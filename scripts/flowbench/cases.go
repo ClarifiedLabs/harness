@@ -196,7 +196,7 @@ func applyEditDrift(dir string) error {
 func knownPathBatchingPrompt() string {
 	paths := contractFixturePaths("known", "contract-%02d.txt")
 	return "Work directly; do not delegate or edit. Use exactly one inspect call to read these known paths: " + strings.Join(paths, ", ") + ". " +
-		"Use one batched search call containing literal fixed-string queries for Widget( and State{ plus a regex query for Marker[0-9]+. " +
+		"Use one batched search call containing literal fixed-string queries for Widget( and State{ plus a regex query for Marker[0-9]+. Scope every search query to the .flowbench-tool-accuracy/known directory; do not list the 18 files as query paths. " +
 		"Use one run_command steps call with output_mode full that prints STEP_ALPHA and STEP_BETA. Report Marker01, Marker18, and both step outputs."
 }
 

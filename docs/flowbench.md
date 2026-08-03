@@ -132,7 +132,9 @@ recovery, and unrelated top-level or nested errors are never forgiven.
 
 `known_path_batching` enumerates all 18 fixture paths and requires one successful
 `inspect` call that reads each exact path once while retaining the literal/regex
-search and full-output command-step oracles. `unknown_path_discovery` supplies
+search and full-output command-step oracles. Its three search queries are scoped
+to the fixture directory instead of listing 18 paths, which would exceed the
+per-query path limit. `unknown_path_discovery` supplies
 only a root, requires a successful error-free `glob`, `list_dir`, or `search`
 whose scope, pattern, and limits enumerate all fixture paths before any read,
 then requires one successful `inspect` call that reads each of the 18 exact
