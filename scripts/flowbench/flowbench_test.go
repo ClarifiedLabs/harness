@@ -617,7 +617,11 @@ func TestWriteSummarySeparatesPairedAndUnpairedTokenMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(data)
-	for _, want := range []string{"Unpaired median tokens:", "Paired-median token saving: 20.0%"} {
+	for _, want := range []string{
+		"Unpaired median tokens:",
+		"Paired-median token saving: 20.0%",
+		"token savings [+20.0%, +20.0%, +20.0%] (improved/regressed/tied 3/0/0",
+	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("summary missing %q:\n%s", want, got)
 		}
@@ -671,6 +675,42 @@ func TestSummarizeUsesPairedMedianReductions(t *testing.T) {
 	agg := summarize(c, records)
 	if agg.TokenSavingPct != 10 {
 		t.Fatalf("paired median token saving = %.1f%%, want 10%%", agg.TokenSavingPct)
+	}
+}
+
+func TestSummarizeReportsPairedDistributions(t *testing.T) {
+	c := allCases()["known_path_batching"]
+	records := []runRecord{
+		{Model: "model", Repetition: 3, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 120, Turns: 5}},
+		{Model: "model", Repetition: 1, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4}},
+		{Model: "model", Repetition: 2, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4}},
+		{Model: "model", Repetition: 3, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4}},
+		{Model: "model", Repetition: 1, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 3}},
+		{Model: "model", Repetition: 2, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4}},
+		{Model: "model", Repetition: 4, Variant: "baseline", Invalid: "interrupted", Metrics: metrics{TotalTokens: 1, Turns: 1}},
+		{Model: "model", Repetition: 4, Variant: "candidate", Invalid: "interrupted", Metrics: metrics{TotalTokens: 1000, Turns: 10}},
+	}
+	agg := summarize(c, records)
+	if agg.TokenSavingPct != 0 {
+		t.Fatalf("aggregate token saving = %.1f%%, want 0%% after invalid pairs are excluded", agg.TokenSavingPct)
+	}
+	paired := agg.Models["model"].Paired
+	if len(paired.Observations) != 3 {
+		t.Fatalf("observations = %d, want 3", len(paired.Observations))
+	}
+	for i, want := range []int{1, 2, 3} {
+		if paired.Observations[i].Repetition != want {
+			t.Fatalf("observation %d repetition = %d, want %d", i, paired.Observations[i].Repetition, want)
+		}
+	}
+	if paired.TokenImprovedPairs != 1 || paired.TokenRegressedPairs != 1 || paired.TokenTiedPairs != 1 {
+		t.Fatalf("token signs = %d/%d/%d, want 1/1/1", paired.TokenImprovedPairs, paired.TokenRegressedPairs, paired.TokenTiedPairs)
+	}
+	if paired.TokenSavingMinPct != -20 || paired.TokenSavingMaxPct != 10 {
+		t.Fatalf("token range = %.1f to %.1f, want -20 to 10", paired.TokenSavingMinPct, paired.TokenSavingMaxPct)
+	}
+	if paired.TurnImprovedPairs != 1 || paired.TurnRegressedPairs != 1 || paired.TurnTiedPairs != 1 || paired.MedianTurnDelta != 0 {
+		t.Fatalf("turn distribution = %d/%d/%d median %.1f, want 1/1/1 median 0", paired.TurnImprovedPairs, paired.TurnRegressedPairs, paired.TurnTiedPairs, paired.MedianTurnDelta)
 	}
 }
 

@@ -19,7 +19,7 @@ func main() {
 		repo         = flag.String("repo", ".", "harness repository")
 		results      = flag.String("results", "", "result directory outside the repository")
 		models       = flag.String("models", strings.Join(defaultModels, ","), "comma-separated model target ids")
-		repetitions  = flag.Int("repetitions", 3, "baseline/candidate pairs per model")
+		repetitions  = flag.Int("repetitions", 5, "baseline/candidate pairs per model")
 		dryRun       = flag.Bool("dry-run", false, "print the resolved run matrix without building or calling models")
 		resume       = flag.Bool("resume", false, "reuse valid completed records and rerun interrupted unrecorded runs")
 		importRuns   = flag.String("import-baseline-runs", "", "reuse validated baseline records from another case runs JSON file")

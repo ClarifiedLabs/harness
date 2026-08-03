@@ -30,18 +30,38 @@ type aggregate struct {
 }
 
 type modelAgg struct {
-	BaselinePasses         int     `json:"baseline_passes"`
-	CandidatePasses        int     `json:"candidate_passes"`
-	Adoptions              int     `json:"adoptions"`
-	BaselineMedianTokens   float64 `json:"baseline_median_tokens"`
-	CandidateMedianTokens  float64 `json:"candidate_median_tokens"`
-	TokenSavingPct         float64 `json:"token_saving_pct"`
-	BaselineMedianTurns    float64 `json:"baseline_median_turns"`
-	CandidateMedianTurns   float64 `json:"candidate_median_turns"`
-	BaselineMedianPrimary  float64 `json:"baseline_median_primary"`
-	CandidateMedianPrimary float64 `json:"candidate_median_primary"`
-	CostUSD                float64 `json:"cost_usd"`
-	CostBasis              string  `json:"cost_basis"`
+	BaselinePasses         int                `json:"baseline_passes"`
+	CandidatePasses        int                `json:"candidate_passes"`
+	Adoptions              int                `json:"adoptions"`
+	BaselineMedianTokens   float64            `json:"baseline_median_tokens"`
+	CandidateMedianTokens  float64            `json:"candidate_median_tokens"`
+	TokenSavingPct         float64            `json:"token_saving_pct"`
+	BaselineMedianTurns    float64            `json:"baseline_median_turns"`
+	CandidateMedianTurns   float64            `json:"candidate_median_turns"`
+	BaselineMedianPrimary  float64            `json:"baseline_median_primary"`
+	CandidateMedianPrimary float64            `json:"candidate_median_primary"`
+	Paired                 pairedDistribution `json:"paired"`
+	CostUSD                float64            `json:"cost_usd"`
+	CostBasis              string             `json:"cost_basis"`
+}
+
+type pairedDistribution struct {
+	Observations        []pairedObservation `json:"observations"`
+	TokenImprovedPairs  int                 `json:"token_improved_pairs"`
+	TokenRegressedPairs int                 `json:"token_regressed_pairs"`
+	TokenTiedPairs      int                 `json:"token_tied_pairs"`
+	TokenSavingMinPct   float64             `json:"token_saving_min_pct"`
+	TokenSavingMaxPct   float64             `json:"token_saving_max_pct"`
+	TurnImprovedPairs   int                 `json:"turn_improved_pairs"`
+	TurnRegressedPairs  int                 `json:"turn_regressed_pairs"`
+	TurnTiedPairs       int                 `json:"turn_tied_pairs"`
+	MedianTurnDelta     float64             `json:"median_turn_delta"`
+}
+
+type pairedObservation struct {
+	Repetition     int     `json:"repetition"`
+	TokenSavingPct float64 `json:"token_saving_pct"`
+	TurnDelta      int     `json:"turn_delta"`
 }
 
 func writeRecords(results string, records []runRecord) error {
@@ -80,6 +100,25 @@ func writeSummary(results string, c benchmarkCase, records []runRecord) error {
 	fmt.Fprintf(&b, "- DeepSeek reported cost: $%.6f\n", agg.DeepSeekCostUSD)
 	fmt.Fprintf(&b, "- Subscription provider cost: %s\n", agg.SubscriptionCosts)
 	fmt.Fprintf(&b, "- Accepted: %t\n", agg.Accepted)
+	modelNames := make([]string, 0, len(agg.Models))
+	for model := range agg.Models {
+		modelNames = append(modelNames, model)
+	}
+	sort.Strings(modelNames)
+	if len(modelNames) > 0 {
+		b.WriteString("\nPaired distributions by model:\n\n")
+		for _, model := range modelNames {
+			ma := agg.Models[model]
+			fmt.Fprintf(&b, "- `%s`: token savings %s (improved/regressed/tied %d/%d/%d, range %.1f%% to %.1f%%); turn deltas %s (median %+.1f, improved/regressed/tied %d/%d/%d)\n",
+				model,
+				formatTokenSavings(ma.Paired.Observations),
+				ma.Paired.TokenImprovedPairs, ma.Paired.TokenRegressedPairs, ma.Paired.TokenTiedPairs,
+				ma.Paired.TokenSavingMinPct, ma.Paired.TokenSavingMaxPct,
+				formatTurnDeltas(ma.Paired.Observations), ma.Paired.MedianTurnDelta,
+				ma.Paired.TurnImprovedPairs, ma.Paired.TurnRegressedPairs, ma.Paired.TurnTiedPairs,
+			)
+		}
+	}
 	if len(agg.Failures) > 0 {
 		b.WriteString("\nFailures:\n\n")
 		for _, failure := range agg.Failures {
@@ -177,6 +216,7 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 		ma.CandidateMedianTurns = median(candidateTurns)
 		ma.BaselineMedianPrimary = median(baselineModelPrimary)
 		ma.CandidateMedianPrimary = median(candidateModelPrimary)
+		ma.Paired = summarizePairedDistribution(modelRecords)
 		if strings.HasPrefix(model, "alibaba-token-plan:") || strings.HasPrefix(model, "openai-codex:") {
 			ma.CostUSD = 0
 			ma.CostBasis = "subscription (N/A)"
@@ -313,16 +353,24 @@ func reductionPct(before, after float64) float64 {
 	return (before - after) * 100 / before
 }
 
-func medianPairedReduction(records []runRecord, value func(runRecord) float64) float64 {
-	type pair struct {
-		baseline  *runRecord
-		candidate *runRecord
-	}
-	pairs := make(map[string]pair)
+type recordPair struct {
+	model      string
+	repetition int
+	baseline   *runRecord
+	candidate  *runRecord
+}
+
+func pairedRecords(records []runRecord) []recordPair {
+	pairs := make(map[string]recordPair)
 	for i := range records {
 		record := &records[i]
+		if record.Invalid != "" {
+			continue
+		}
 		key := record.Model + "\x00" + fmt.Sprint(record.Repetition)
 		p := pairs[key]
+		p.model = record.Model
+		p.repetition = record.Repetition
 		switch record.Variant {
 		case "baseline":
 			p.baseline = record
@@ -331,12 +379,80 @@ func medianPairedReduction(records []runRecord, value func(runRecord) float64) f
 		}
 		pairs[key] = p
 	}
-	var reductions []float64
+	complete := make([]recordPair, 0, len(pairs))
 	for _, p := range pairs {
-		if p.baseline == nil || p.candidate == nil {
-			continue
+		if p.baseline != nil && p.candidate != nil {
+			complete = append(complete, p)
 		}
+	}
+	sort.Slice(complete, func(i, j int) bool {
+		if complete[i].model != complete[j].model {
+			return complete[i].model < complete[j].model
+		}
+		return complete[i].repetition < complete[j].repetition
+	})
+	return complete
+}
+
+func medianPairedReduction(records []runRecord, value func(runRecord) float64) float64 {
+	var reductions []float64
+	for _, p := range pairedRecords(records) {
 		reductions = append(reductions, reductionPct(value(*p.baseline), value(*p.candidate)))
 	}
 	return median(reductions)
+}
+
+func summarizePairedDistribution(records []runRecord) pairedDistribution {
+	var distribution pairedDistribution
+	var turnDeltas []float64
+	for _, p := range pairedRecords(records) {
+		tokenSaving := reductionPct(float64(p.baseline.Metrics.TotalTokens), float64(p.candidate.Metrics.TotalTokens))
+		turnDelta := p.candidate.Metrics.Turns - p.baseline.Metrics.Turns
+		distribution.Observations = append(distribution.Observations, pairedObservation{
+			Repetition:     p.repetition,
+			TokenSavingPct: tokenSaving,
+			TurnDelta:      turnDelta,
+		})
+		turnDeltas = append(turnDeltas, float64(turnDelta))
+		switch {
+		case tokenSaving > 0:
+			distribution.TokenImprovedPairs++
+		case tokenSaving < 0:
+			distribution.TokenRegressedPairs++
+		default:
+			distribution.TokenTiedPairs++
+		}
+		switch {
+		case turnDelta < 0:
+			distribution.TurnImprovedPairs++
+		case turnDelta > 0:
+			distribution.TurnRegressedPairs++
+		default:
+			distribution.TurnTiedPairs++
+		}
+		if len(distribution.Observations) == 1 || tokenSaving < distribution.TokenSavingMinPct {
+			distribution.TokenSavingMinPct = tokenSaving
+		}
+		if len(distribution.Observations) == 1 || tokenSaving > distribution.TokenSavingMaxPct {
+			distribution.TokenSavingMaxPct = tokenSaving
+		}
+	}
+	distribution.MedianTurnDelta = median(turnDeltas)
+	return distribution
+}
+
+func formatTokenSavings(observations []pairedObservation) string {
+	values := make([]string, 0, len(observations))
+	for _, observation := range observations {
+		values = append(values, fmt.Sprintf("%+.1f%%", observation.TokenSavingPct))
+	}
+	return "[" + strings.Join(values, ", ") + "]"
+}
+
+func formatTurnDeltas(observations []pairedObservation) string {
+	values := make([]string, 0, len(observations))
+	for _, observation := range observations {
+		values = append(values, fmt.Sprintf("%+d", observation.TurnDelta))
+	}
+	return "[" + strings.Join(values, ", ") + "]"
 }

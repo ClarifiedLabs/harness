@@ -34,8 +34,9 @@ For each item:
 
 1. Freeze a real target checkout and a before/after harness revision.
 2. Use the same task fixture and correctness oracle for both revisions.
-3. Run three alternating pairs per model (`AB`, `BA`, `AB`) to reduce ordering
-   and provider-cache bias.
+3. Run five alternating pairs per model (`AB`, `BA`, `AB`, `BA`, `AB`) for
+   promotion to reduce ordering and provider-cache bias. A one-pair smoke is an
+   infrastructure preflight, not decisive efficiency evidence.
 4. Require correctness, actual feature adoption, the targeted interaction
    reduction, and paired token results before promotion.
 5. Iterate on an oracle or routing issue only when the persisted transcript
@@ -86,8 +87,11 @@ Acceptance requires:
 - positive aggregate paired-median token savings.
 
 Matrices stop early only when a remaining run cannot mathematically restore a
-failed gate. Alibaba Token Plan and OpenAI Codex are reported as subscription
-cost `N/A`; DeepSeek uses the provider-reported dollar amount.
+failed gate. Each model summary includes every paired token-saving percentage
+and turn delta in repetition order, sign counts, the token range, and the median
+turn delta so a favorable median cannot conceal an unstable distribution.
+Alibaba Token Plan and OpenAI Codex are reported as subscription cost `N/A`;
+DeepSeek uses the provider-reported dollar amount.
 
 Run a matrix from a clean checkout:
 
@@ -118,7 +122,7 @@ go run ./scripts/flowbench -suite tool_accuracy -profile promotion \
 ```
 
 `smoke` uses Qwen 3.8 for one paired repetition (eight runs). `promotion` uses
-the three default model targets for three paired repetitions (72 runs).
+the three default model targets for five paired repetitions (120 runs).
 Explicit `-models` and `-repetitions` override a profile. `edit_precision`
 checks five replacements and byte-for-byte sentinel preservation.
 `edit_drift_recovery` mutates context only after the first interactive
@@ -183,9 +187,12 @@ and do not force the model down the rejected path. Todo coissuing was pure
 steering and was removed after its measured regression.
 
 Future changes should rerun the affected case against its immediate parent
-revision. Do not substitute unpaired token medians for paired savings, treat a
-tool being present as adoption, or waive correctness failures without
-transcript evidence of an oracle/infrastructure defect.
+revision. Treat a one-pair smoke failure as a trigger for a fresh five-pair
+focused confirmation before tuning or reverting; preserve every valid sample
+and predeclare any seven-pair extension for borderline lanes. Do not substitute
+unpaired token medians for paired savings, treat a tool being present as
+adoption, or waive correctness failures without transcript evidence of an
+oracle/infrastructure defect.
 
 ## Retention policy benchmark
 
