@@ -813,8 +813,11 @@ Anthropic `base_url` values are versioned API prefixes (normally ending in
 
 The special `openai-codex` provider uses ChatGPT subscription auth instead of an
 API key, exposes models from the OpenAI Codex catalog, and reports token usage
-without dollar pricing. It omits Responses `max_output_tokens` because the Codex
-backend rejects that parameter. Input-token preflight counts use a local
+without dollar pricing. Authenticated model discovery uses the numeric
+compatibility version of the official stable Codex CLI bundled with Harness; it
+does not send the Harness application version. It omits Responses
+`max_output_tokens` because the Codex backend rejects that parameter.
+Input-token preflight counts use a local
 `o200k_base` estimate because the Codex CLI protocol does not expose a separate
 count-token endpoint. The proxy also uses the Responses WebSocket transport by
 default for this provider, matching Codex's stateful continuation path while

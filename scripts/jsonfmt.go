@@ -11,9 +11,9 @@ import (
 )
 
 func main() {
-	catalog := flag.String("catalog", "", "prune to the harness modelsdev or codex catalog schema")
+	catalog := flag.String("catalog", "", "prune to the harness modelsdev, codex, or codexrelease schema")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: go run ./scripts/jsonfmt.go [-catalog modelsdev|codex] <input> <output>\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: go run ./scripts/jsonfmt.go [-catalog modelsdev|codex|codexrelease] <input> <output>\n")
 	}
 	flag.Parse()
 	if flag.NArg() != 2 {
@@ -42,6 +42,14 @@ func main() {
 }
 
 func formatCatalogJSON(data []byte, catalog string) ([]byte, error) {
+	if catalog == "codexrelease" {
+		version, err := modelcatalog.DecodeCodexReleaseVersion(data)
+		if err != nil {
+			return nil, err
+		}
+		return []byte(version + "\n"), nil
+	}
+
 	var dataToFormat []byte
 	var err error
 	switch catalog {

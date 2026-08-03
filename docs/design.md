@@ -1055,7 +1055,11 @@ The synthetic `openai-codex` provider uses the public OpenAI Codex catalog only
 as baseline metadata. With working `codex_oauth`, the authenticated ChatGPT
 account catalog controls the visible model set. Its list visibility is trusted;
 the public catalog's `supported_in_api:false` flag does not remove a model the
-account endpoint returns.
+account endpoint returns. That endpoint requires a numeric `client_version`.
+Harness sends the official stable Codex CLI compatibility version embedded with
+the vendored catalog, never the Harness build version. `make
+refresh-model-catalogs` resolves the latest stable `rust-vX.Y.Z` release and
+updates the version and catalog from that same release tag as one change.
 
 ### Managed vs manual provider configs
 

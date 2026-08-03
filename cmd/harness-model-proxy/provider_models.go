@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"harness/internal/buildinfo"
 	"harness/internal/llm"
+	"harness/internal/modelcatalog"
 	"harness/internal/modelproxy/modeldiscovery"
 )
 
@@ -26,7 +26,7 @@ func providerModelFetcher(env environment, configDir string) modeldiscovery.Fetc
 	}
 	return modeldiscovery.Fetcher{
 		Client: client, ConfigDir: configDir, Getenv: getenv,
-		Now: func() time.Time { return currentTime(env) }, ClientVersion: buildinfo.Version,
+		Now: func() time.Time { return currentTime(env) }, CodexClientVersion: modelcatalog.CodexClientVersion(),
 	}
 }
 
@@ -49,7 +49,7 @@ func loadProviderModelCaches(configDir string, providers []llm.ProviderConfig, n
 		if err != nil {
 			continue
 		}
-		if snapshot.Format != spec.Format || snapshot.Endpoint != spec.Endpoint || snapshot.IncludeUnknownModels != spec.IncludeUnknownModels {
+		if !modeldiscovery.SnapshotMatches(snapshot, spec, modelcatalog.CodexClientVersion()) {
 			if logger != nil {
 				logger.Warn("provider model cache does not match discovery settings; ignoring it", "provider", pc.Name)
 			}

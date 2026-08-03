@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	// CodexModelsURL is OpenAI Codex's model catalog endpoint.
-	CodexModelsURL = "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json"
+	// codexRepositoryRawURL is the raw-content root for the official OpenAI
+	// Codex repository. Catalog refresh pins files to one stable release tag.
+	codexRepositoryRawURL = "https://raw.githubusercontent.com/openai/codex"
+	codexModelsPath       = "codex-rs/models-manager/models.json"
 	// OpenAICodexProviderID identifies the synthetic ChatGPT subscription provider.
 	OpenAICodexProviderID = "openai-codex"
 	// OpenAICodexProviderName is the synthetic provider's display name.
@@ -25,6 +27,9 @@ const (
 
 //go:embed codex_fallback.json
 var codexModelsFallbackJSON []byte
+
+//go:embed codex_client_version.txt
+var codexClientVersionText string
 
 type codexModelsCatalog struct {
 	Models []codexModel `json:"models"`
@@ -56,11 +61,63 @@ type codexServiceTier struct {
 	Description string `json:"description,omitempty"`
 }
 
+// CodexClientVersion returns the official stable Codex CLI version captured
+// with the vendored Codex catalog by make refresh-model-catalogs. It is a
+// provider protocol compatibility value, not the harness build version.
+func CodexClientVersion() string {
+	return strings.TrimSpace(codexClientVersionText)
+}
+
+// ValidateCodexClientVersion accepts the numeric major.minor.patch shape
+// required by the authenticated ChatGPT Codex model endpoint.
+func ValidateCodexClientVersion(version string) error {
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return fmt.Errorf("invalid Codex client version %q: want major.minor.patch", version)
+	}
+	for _, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return fmt.Errorf("invalid Codex client version %q: want major.minor.patch", version)
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return fmt.Errorf("invalid Codex client version %q: want major.minor.patch", version)
+			}
+		}
+	}
+	return nil
+}
+
+// DecodeCodexReleaseVersion extracts a stable Codex CLI version from GitHub's
+// latest-release response. Stable Codex release tags use rust-vX.Y.Z.
+func DecodeCodexReleaseVersion(data []byte) (string, error) {
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.Unmarshal(data, &release); err != nil {
+		return "", fmt.Errorf("decode OpenAI Codex release: %w", err)
+	}
+	version, ok := strings.CutPrefix(strings.TrimSpace(release.TagName), "rust-v")
+	if !ok {
+		return "", fmt.Errorf("OpenAI Codex release tag %q does not start with rust-v", release.TagName)
+	}
+	if err := ValidateCodexClientVersion(version); err != nil {
+		return "", err
+	}
+	return version, nil
+}
+
+// CodexModelsURL returns the public model catalog pinned to the same official
+// Codex release as CodexClientVersion.
+func CodexModelsURL() string {
+	return codexRepositoryRawURL + "/rust-v" + CodexClientVersion() + "/" + codexModelsPath
+}
+
 // FetchCodexModelsData downloads the OpenAI Codex model catalog and returns its
 // raw JSON body. A nil client uses the default HTTP client.
 func FetchCodexModelsData(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	if url == "" {
-		url = CodexModelsURL
+		url = CodexModelsURL()
 	}
 	return fetchCatalogData(ctx, client, url, "OpenAI Codex model catalog")
 }

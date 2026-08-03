@@ -14,3 +14,13 @@ func TestJSONIndentDoesNotPreserveTrailingWhitespace(t *testing.T) {
 		t.Fatalf("formatted JSON = %q, want %q", got, want)
 	}
 }
+
+func TestFormatCodexReleaseVersion(t *testing.T) {
+	out, err := formatCatalogJSON([]byte(`{"tag_name":"rust-v0.146.0"}`), "codexrelease")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "0.146.0\n"; got != want {
+		t.Fatalf("formatted release = %q, want %q", got, want)
+	}
+}

@@ -17,7 +17,7 @@ import (
 	"harness/internal/llm"
 )
 
-func fetchPages(ctx context.Context, client *http.Client, spec Spec, headers http.Header, etag, clientVersion string) (map[string]Model, string, bool, error) {
+func fetchPages(ctx context.Context, client *http.Client, spec Spec, headers http.Header, etag, codexClientVersion string) (map[string]Model, string, bool, error) {
 	endpoint, err := url.Parse(spec.Endpoint)
 	if err != nil {
 		return nil, "", false, err
@@ -25,8 +25,8 @@ func fetchPages(ctx context.Context, client *http.Client, spec Spec, headers htt
 	q := endpoint.Query()
 	switch spec.Format {
 	case FormatCodex:
-		if strings.TrimSpace(clientVersion) != "" {
-			q.Set("client_version", clientVersion)
+		if strings.TrimSpace(codexClientVersion) != "" {
+			q.Set("client_version", codexClientVersion)
 		}
 	case FormatAnthropic:
 		q.Set("limit", "1000")

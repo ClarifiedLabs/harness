@@ -14,6 +14,7 @@ import (
 
 	"harness/internal/auth"
 	"harness/internal/llm"
+	"harness/internal/modelcatalog"
 )
 
 type Format string
@@ -62,6 +63,7 @@ type Snapshot struct {
 	BaseURL              string           `json:"base_url"`
 	Endpoint             string           `json:"endpoint"`
 	Format               Format           `json:"format"`
+	CodexClientVersion   string           `json:"codex_client_version,omitempty"`
 	FetchedAt            time.Time        `json:"fetched_at"`
 	ETag                 string           `json:"etag,omitempty"`
 	Complete             bool             `json:"complete"`
@@ -86,11 +88,11 @@ type Spec struct {
 }
 
 type Fetcher struct {
-	Client        *http.Client
-	ConfigDir     string
-	Getenv        func(string) string
-	Now           func() time.Time
-	ClientVersion string
+	Client             *http.Client
+	ConfigDir          string
+	Getenv             func(string) string
+	Now                func() time.Time
+	CodexClientVersion string
 }
 
 // Resolve determines whether direct discovery is enabled and supported for pc.
@@ -175,10 +177,27 @@ func defaultEndpoint(base *url.URL, format Format) string {
 	return u.String()
 }
 
+// SnapshotMatches reports whether a cached snapshot was produced with the
+// current discovery settings. Codex snapshots are also scoped to the official
+// client compatibility version because that query can change catalog results.
+func SnapshotMatches(snapshot Snapshot, spec Spec, codexClientVersion string) bool {
+	if snapshot.Format != spec.Format || snapshot.Endpoint != spec.Endpoint || snapshot.IncludeUnknownModels != spec.IncludeUnknownModels {
+		return false
+	}
+	return spec.Format != FormatCodex || snapshot.CodexClientVersion == strings.TrimSpace(codexClientVersion)
+}
+
 func (f Fetcher) Fetch(ctx context.Context, pc llm.ProviderConfig, previous *Snapshot) (Snapshot, error) {
 	spec, ok, err := Resolve(pc)
 	if err != nil || !ok {
 		return Snapshot{}, err
+	}
+	codexClientVersion := ""
+	if spec.Format == FormatCodex {
+		codexClientVersion = strings.TrimSpace(f.CodexClientVersion)
+		if err := modelcatalog.ValidateCodexClientVersion(codexClientVersion); err != nil {
+			return Snapshot{}, fmt.Errorf("provider %q model discovery: %w", pc.Name, err)
+		}
 	}
 	headers, err := f.headers(ctx, pc, spec.Format)
 	if err != nil {
@@ -193,11 +212,11 @@ func (f Fetcher) Fetch(ctx context.Context, pc llm.ProviderConfig, previous *Sna
 		client = http.DefaultClient
 	}
 	etag := ""
-	previousMatches := previous != nil && previous.Provider == pc.Name && previous.BaseURL == pc.BaseURL && previous.Endpoint == spec.Endpoint && previous.Format == spec.Format && previous.IncludeUnknownModels == spec.IncludeUnknownModels
+	previousMatches := previous != nil && previous.Provider == pc.Name && previous.BaseURL == pc.BaseURL && SnapshotMatches(*previous, spec, codexClientVersion)
 	if previousMatches {
 		etag = previous.ETag
 	}
-	models, responseETag, notModified, err := fetchPages(ctx, client, spec, headers, etag, f.ClientVersion)
+	models, responseETag, notModified, err := fetchPages(ctx, client, spec, headers, etag, codexClientVersion)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -215,7 +234,7 @@ func (f Fetcher) Fetch(ctx context.Context, pc llm.ProviderConfig, previous *Sna
 	}
 	return Snapshot{
 		Version: 1, Provider: pc.Name, BaseURL: pc.BaseURL, Endpoint: spec.Endpoint,
-		Format: spec.Format, FetchedAt: now(), ETag: responseETag, Complete: true,
+		Format: spec.Format, CodexClientVersion: codexClientVersion, FetchedAt: now(), ETag: responseETag, Complete: true,
 		IncludeUnknownModels: spec.IncludeUnknownModels, Models: models,
 	}, nil
 }

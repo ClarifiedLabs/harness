@@ -339,7 +339,7 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			authoritative := false
 			var previous *modeldiscovery.Snapshot
 			if cached, cacheErr := modeldiscovery.ReadProviderCache(dir, current.Name, current.BaseURL); cacheErr == nil {
-				if cached.Format == spec.Format && cached.Endpoint == spec.Endpoint && cached.IncludeUnknownModels == spec.IncludeUnknownModels {
+				if modeldiscovery.SnapshotMatches(cached, spec, modelcatalog.CodexClientVersion()) {
 					previous = &cached
 				}
 			}

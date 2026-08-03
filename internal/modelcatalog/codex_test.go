@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"harness/internal/llm"
@@ -52,6 +53,33 @@ func TestCodexFallbackSnapshotDecodes(t *testing.T) {
 	if _, err := DecodeCodexModels(codexModelsFallbackJSON); err != nil {
 		t.Fatalf("DecodeCodexModels fallback: %v", err)
 	}
+	if err := ValidateCodexClientVersion(CodexClientVersion()); err != nil {
+		t.Fatalf("embedded Codex client version: %v", err)
+	}
+	wantSuffix := "/rust-v" + CodexClientVersion() + "/codex-rs/models-manager/models.json"
+	if got := CodexModelsURL(); !strings.HasSuffix(got, wantSuffix) {
+		t.Fatalf("CodexModelsURL() = %q, want suffix %q", got, wantSuffix)
+	}
+}
+
+func TestDecodeCodexReleaseVersion(t *testing.T) {
+	version, err := DecodeCodexReleaseVersion([]byte(`{"tag_name":"rust-v1.23.4"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != "1.23.4" {
+		t.Fatalf("version = %q, want 1.23.4", version)
+	}
+	for _, data := range []string{
+		`{"tag_name":"v1.23.4"}`,
+		`{"tag_name":"rust-vdev"}`,
+		`{"tag_name":"rust-v1.23.4-alpha.1"}`,
+		`{"tag_name":"rust-v01.23.4"}`,
+	} {
+		if _, err := DecodeCodexReleaseVersion([]byte(data)); err == nil {
+			t.Errorf("DecodeCodexReleaseVersion(%s) succeeded", data)
+		}
+	}
 }
 
 func TestPruneCodexModelsDataPreservesReasoningSummarySupport(t *testing.T) {
@@ -99,6 +127,20 @@ func TestCodexFallbackCandidateDecodes(t *testing.T) {
 	}
 	if _, err := DecodeCodexModels(data); err != nil {
 		t.Fatalf("DecodeCodexModels candidate: %v", err)
+	}
+}
+
+func TestCodexClientVersionCandidateDecodes(t *testing.T) {
+	path := os.Getenv("CODEX_CLIENT_VERSION_CANDIDATE")
+	if path == "" {
+		t.Skip("CODEX_CLIENT_VERSION_CANDIDATE is not set")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCodexClientVersion(strings.TrimSpace(string(data))); err != nil {
+		t.Fatal(err)
 	}
 }
 

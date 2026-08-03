@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -211,19 +213,66 @@ func TestGeminiDiscoveryFiltersGenerateContentAndPaginates(t *testing.T) {
 func TestCodexDiscoveryUsesAccountCatalogVisibility(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("client_version") != "test-version" {
+		if r.URL.Query().Get("client_version") != "0.99.0" {
 			t.Errorf("client_version = %q", r.URL.Query().Get("client_version"))
 		}
 		_, _ = w.Write([]byte(`{"models":[{"slug":"spark","display_name":"Spark","context_window":100000,"visibility":"list","supported_in_api":false},{"slug":"hidden","context_window":100000,"visibility":"hide"}]}`))
 	}))
 	defer server.Close()
 	pc := llm.ProviderConfig{Name: "openai-codex", APIType: "responses", BaseURL: server.URL, APIKey: "secret", Managed: true}
-	snapshot, err := (Fetcher{Client: server.Client(), ClientVersion: "test-version"}).Fetch(context.Background(), pc, nil)
+	snapshot, err := (Fetcher{Client: server.Client(), CodexClientVersion: "0.99.0"}).Fetch(context.Background(), pc, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Models) != 1 || snapshot.Models["spark"].Name != "Spark" {
+	if len(snapshot.Models) != 1 || snapshot.Models["spark"].Name != "Spark" || snapshot.CodexClientVersion != "0.99.0" {
 		t.Fatalf("models = %+v", snapshot.Models)
+	}
+}
+
+func TestCodexDiscoveryRejectsInvalidClientVersionBeforeRequest(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	pc := llm.ProviderConfig{Name: "openai-codex", APIType: "responses", BaseURL: server.URL, APIKey: "secret", Managed: true}
+	_, err := (Fetcher{Client: server.Client(), CodexClientVersion: "dev"}).Fetch(context.Background(), pc, nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid Codex client version") {
+		t.Fatalf("Fetch error = %v, want invalid Codex client version", err)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("invalid client version made %d requests", requests.Load())
+	}
+}
+
+func TestCodexDiscoveryDoesNotReuseETagAcrossClientVersions(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("client_version"); got != "0.99.0" {
+			t.Errorf("client_version = %q", got)
+		}
+		if got := r.Header.Get("If-None-Match"); got != "" {
+			t.Errorf("If-None-Match = %q, want empty after client version change", got)
+		}
+		_, _ = w.Write([]byte(`{"models":[{"slug":"spark","context_window":100000,"visibility":"list"}]}`))
+	}))
+	defer server.Close()
+
+	pc := llm.ProviderConfig{Name: "openai-codex", APIType: "responses", BaseURL: server.URL, APIKey: "secret", Managed: true}
+	previous := Snapshot{
+		Version: 1, Provider: pc.Name, BaseURL: pc.BaseURL, Endpoint: server.URL + "/models",
+		Format: FormatCodex, CodexClientVersion: "0.98.0", ETag: `"old"`, Complete: true,
+		IncludeUnknownModels: true, Models: map[string]Model{"old": {ID: "old", Eligible: true}},
+	}
+	snapshot, err := (Fetcher{Client: server.Client(), CodexClientVersion: "0.99.0"}).Fetch(context.Background(), pc, &previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.CodexClientVersion != "0.99.0" || len(snapshot.Models) != 1 {
+		t.Fatalf("snapshot = %+v", snapshot)
 	}
 }
 

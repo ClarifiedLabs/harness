@@ -9,8 +9,20 @@ import (
 	"time"
 
 	"harness/internal/llm"
+	"harness/internal/modelcatalog"
 	"harness/internal/modelproxy/modeldiscovery"
 )
+
+func TestProviderModelFetcherUsesOfficialCodexClientVersion(t *testing.T) {
+	t.Parallel()
+	fetcher := providerModelFetcher(environment{}, t.TempDir())
+	if got, want := fetcher.CodexClientVersion, modelcatalog.CodexClientVersion(); got != want {
+		t.Fatalf("CodexClientVersion = %q, want %q", got, want)
+	}
+	if fetcher.CodexClientVersion == "dev" {
+		t.Fatal("provider discovery leaked the harness development build version")
+	}
+}
 
 func TestStartProviderModelRefreshRunsImmediatelyAndOnTick(t *testing.T) {
 	t.Parallel()

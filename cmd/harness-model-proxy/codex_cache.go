@@ -85,7 +85,7 @@ func fetchCodexModelsData(ctx context.Context, env environment) ([]byte, error) 
 	if env.codexModelsData != nil {
 		return env.codexModelsData(ctx)
 	}
-	return modelcatalog.FetchCodexModelsData(ctx, http.DefaultClient, modelcatalog.CodexModelsURL)
+	return modelcatalog.FetchCodexModelsData(ctx, http.DefaultClient, modelcatalog.CodexModelsURL())
 }
 
 func writeCodexModelsCache(configDir string, data []byte) error {
