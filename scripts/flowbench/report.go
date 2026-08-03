@@ -265,7 +265,7 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 	if agg.PrimaryReductionPct < minimumPrimaryReduction {
 		agg.Failures = append(agg.Failures, fmt.Sprintf("primary metric reduction %.1f%% is below %.1f%%", agg.PrimaryReductionPct, minimumPrimaryReduction))
 	}
-	if !toolAccuracy && agg.TokenSavingPct <= 0 {
+	if agg.TokenSavingPct <= 0 {
 		agg.Failures = append(agg.Failures, "aggregate paired-median tokens did not decrease")
 	}
 	agg.Accepted = len(agg.Failures) == 0

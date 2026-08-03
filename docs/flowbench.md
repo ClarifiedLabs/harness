@@ -168,10 +168,56 @@ not satisfy the corresponding lane.
 | Todo coissuing | 2/2 completed candidates correct, 0/2 adopted | Both candidates still had two todo-only turns | First pair regressed 33.8% | Early rejection; prompt/tool-description steering reverted |
 | Git workspace summary | 8/8 completed candidates correct and adopted | Median git interactions 12→8 (33%); 50% became unreachable | DeepSeek −8.3%, Alibaba +4.6%, OpenAI −24.0% on completed pairs | Automatic promotion rejected; safe read-only workflow retained as optional |
 | Background wait | Candidate 9/9 vs baseline 7/9; 8/9 adopted | Median polls 2→0 (100%) | Aggregate +5.7%; DeepSeek +32.2%, Alibaba +5.7%, OpenAI +1.3% | Accepted after routing descriptions discouraged `get`/`list` and short probe waits |
+| Initial edit precision smoke (`013255c`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median effective errors 0→0, but OpenAI 0→1 | Aggregate +5.7%; Alibaba −47.7%, OpenAI −20.9% | Rejected: Alibaba turns increased 4→6 and OpenAI turns increased 4→5 in addition to the token/error regressions |
+| Initial edit drift recovery smoke (`013255c`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median effective errors 0→0 | Aggregate +6.8% | Accepted at smoke |
+| Initial known-path batching smoke (`013255c`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median tool errors 0→0 | Aggregate +8.4% | Accepted at smoke after correcting the fixture's over-limit search-path instruction |
+| Initial unknown-path discovery smoke (`013255c`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median tool errors 0→0 | Aggregate +5.8% | Accepted at smoke |
+| Revised edit-precision diagnostic (`9e5cabf`) | Baseline 6/6, candidate 6/6; 6/6 adopted | Median errors 0→0; Alibaba turns 6→6, OpenAI 4→4 | Aggregate +7.6%; Alibaba +6.7%, OpenAI +8.5% | Accepted over three alternating pairs on both previously regressed routes |
+| Revised edit-precision smoke (`9e5cabf`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median errors 0→0 | Aggregate +7.2% | Accepted at smoke |
+| Revised edit-drift smoke (`9e5cabf`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median errors 0→0; Sonnet turns 3→4 | Aggregate +7.1%; Sonnet −15.4% | Rejected on the Sonnet turn and token no-regression gates |
+| Revised known-path smoke (`9e5cabf`) | Baseline 3/5, candidate 5/5; 5/5 adopted | Median errors 0→0; OpenAI turns 2→4 | Aggregate +6.8%; OpenAI −90.6% | Rejected on the OpenAI turn and token no-regression gates |
+| Revised unknown-path smoke (`9e5cabf`) | Baseline 4/5, candidate 5/5; 5/5 adopted | Median errors 0→0 | Aggregate +5.1% | Accepted at smoke |
+| Five-pair Sonnet edit-drift confirmation (`9e5cabf`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median errors 0→0; turns 4→4 | +5.6%; five positive deltas | Accepted |
+| Seven-pair OpenAI known-path confirmation (`9e5cabf`) | Baseline 7/7, candidate 7/7; 7/7 adopted | Median errors 0→0; turns 4→4 | +5.4%; four positive and three negative deltas | Accepted after the predeclared extension from a borderline five-pair split |
+| Five-pair promotion edit precision (`9e5cabf`) | Baseline 25/25, candidate 25/25; 25/25 adopted | Median errors 0→0 | Aggregate −4.1%; OpenAI +16.5% | Rejected: aggregate paired-median tokens increased |
+| Five-pair promotion edit drift (`9e5cabf`) | Baseline 25/25, candidate 25/25; 25/25 adopted | Median errors 0→0; aggregate turns unchanged | Aggregate −4.6%; every model's median regressed 4.2–8.0% | Rejected: aggregate paired-median tokens increased |
+| Five-pair promotion known-path batching (`9e5cabf`) | Baseline 20/25, candidate 20/25; 25/25 adopted | Alibaba candidate 1/5 and turns 2→3; OpenAI 4/5 | Aggregate −3.7% | Rejected: candidate correctness 20/25 was below the required 23/25 |
+| Five-pair promotion unknown-path discovery (`9e5cabf`) | Baseline 25/25, candidate 23/25; 23/25 adopted | Alibaba candidate/adoption 3/5 | Aggregate −4.3% | Rejected: correctness fell and Alibaba adoption was below 4/5 |
+
+The 2026-08-03 tool-accuracy smoke compared baseline `446e00c` with product
+candidate `013255c` over five configured provider routes, one alternating pair
+per route and case (40 valid runs). Because edit precision failed its per-model
+no-regression gates, the package did not advance to the three-pair promotion
+matrix against `0594353`. An interrupted OpenRouter pair exposed and received a
+regression fix for resume filtering in `15d5e97`; the final smoke contains no
+invalid records.
+
+The follow-up edit-guidance candidate `9e5cabf` restored recently-read,
+non-overlapping batch guidance while keeping the default catalog under its
+existing schema budget. It cleared a 12-run, three-pair edit-precision diagnostic
+on Alibaba and OpenAI, then cleared edit precision across all five routes in a
+fresh 40-run smoke. That smoke exposed one-pair Sonnet edit-drift and OpenAI
+known-path regressions. Longer confirmation showed those results were not
+stable: Sonnet passed five pairs decisively, and OpenAI remained formally
+accepted after its borderline 3/2 split triggered a preserved seven-pair
+extension.
+
+Those focused gates allowed the full five-route, five-pair promotion matrix
+against `0594353` to run. Its 200 calls rejected the package on two independent
+correctness/adoption gates: known-path candidate correctness was 20/25 below the
+required 23/25, and unknown-path candidate correctness fell from 25/25 to 23/25
+with Alibaba adoption at 3/5. The edit cases were correct but were also rejected
+because aggregate tokens regressed 4.1% and 4.6% against `0594353`.
+Candidate `9e5cabf` therefore fixes the focused edit behavior but does not qualify
+the full change package for promotion.
+
+Runner `fa94896` produced the paired distributions. Focused results are in
+`/tmp/harness-flowbench-edit-drift-446e00c-9e5cabf-r5` and
+`/tmp/harness-flowbench-known-path-446e00c-9e5cabf-r5`; the promotion receipt is
+in `/tmp/harness-flowbench-0594353-9e5cabf-promotion-r5`.
 
 Positive percentages mean token savings; negative percentages mean regressions.
-The search, todo, and git matrices used mathematical early stopping rather than
-spending the remaining provider calls after their gates became unreachable.
+Every configured pair runs; the runner does not implement mathematical early stopping.
 
 The cited final/decisive matrices reported about $1.04 of DeepSeek usage. The
 entire analysis and iteration campaign—including discarded smoke matrices and
@@ -181,10 +227,16 @@ per-token charge because both configured providers are subscription based.
 
 ## Decision rule going forward
 
-Only background wait cleared the complete promotion gate. The optional search,
-steps, and git primitives remain available because they are bounded, useful,
-and do not force the model down the rejected path. Todo coissuing was pure
-steering and was removed after its measured regression.
+In the earlier workflow campaign, only background wait cleared the complete
+promotion gate. The optional search, steps, and git primitives remain available
+because they are bounded, useful, and do not force the model down the rejected
+path. Todo coissuing was pure steering and was removed after its measured
+regression. The typed tool-accuracy package stopped at smoke first because edit
+precision failed; a focused guidance revision fixed that case. Longer focused
+confirmation cleared the smoke's two efficiency anomalies, but the resulting
+five-pair promotion matrix exposed repeatable known-path and discovery
+correctness failures plus aggregate token regressions in every case, so the
+package still did not advance.
 
 Future changes should rerun the affected case against its immediate parent
 revision. Treat a one-pair smoke failure as a trigger for a fresh five-pair

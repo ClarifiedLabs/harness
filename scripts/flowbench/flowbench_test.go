@@ -356,14 +356,14 @@ func TestSummarizeAcceptance(t *testing.T) {
 	}
 }
 
-func TestToolAccuracyAcceptanceAllowsStableEfficiencyAndRequiresErrorReduction(t *testing.T) {
+func TestToolAccuracyAcceptanceRequiresPositiveEfficiencyAndErrorReduction(t *testing.T) {
 	c := allCases()["known_path_batching"]
 	var records []runRecord
 	for _, model := range defaultModels {
 		for rep := 1; rep <= 3; rep++ {
 			records = append(records,
 				runRecord{Model: model, Repetition: rep, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4, ToolErrors: 2}},
-				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"inspect": 1, "search": 1}, UsedCommandSteps: true}},
+				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"inspect": 1, "search": 1}, UsedCommandSteps: true}},
 			)
 		}
 	}
@@ -373,12 +373,22 @@ func TestToolAccuracyAcceptanceAllowsStableEfficiencyAndRequiresErrorReduction(t
 	}
 	for i := range records {
 		if records[i].Variant == "candidate" {
+			records[i].Metrics.TotalTokens = 101
+		}
+	}
+	agg = summarize(c, records)
+	if agg.Accepted || !containsAnyFold(strings.Join(agg.Failures, "\n"), "tokens did not decrease") {
+		t.Fatalf("aggregate token regression was not rejected: %+v", agg)
+	}
+	for i := range records {
+		if records[i].Variant == "candidate" {
+			records[i].Metrics.TotalTokens = 90
 			records[i].Metrics.ToolErrors = 3
 		}
 	}
 	agg = summarize(c, records)
 	if agg.Accepted || !containsAnyFold(strings.Join(agg.Failures, "\n"), "tool errors increased", "reduction") {
-		t.Fatalf("regression was not rejected: %+v", agg)
+		t.Fatalf("error regression was not rejected: %+v", agg)
 	}
 }
 
