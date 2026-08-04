@@ -645,6 +645,23 @@ func TestCollectCheckpointStatsReportsSaveOverheadAndLag(t *testing.T) {
 	}
 }
 
+func TestWriteTreeStatsReportsResetEncodings(t *testing.T) {
+	var out bytes.Buffer
+	writeTreeStats(&out, treeStats{
+		entries: 7, contextResets: 3, snapshotResetEntries: 1, deltaResetEntries: 2,
+		snapshotResetBytes: 9000, deltaResetBytes: 500,
+	})
+	for _, want := range []string{
+		"context resets: 3",
+		"context resets snapshot/delta: 1 / 2",
+		"context reset payload bytes snapshot/delta: 9000 / 500",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("tree stats output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestCollectRetentionStatsReportsEpochEffectsAndRequestShape(t *testing.T) {
 	events := []Event{
 		{Type: EventRetention, Retention: &RetentionSnapshot{

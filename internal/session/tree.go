@@ -42,6 +42,23 @@ type TreeHeader struct {
 	ParentEntryID string    `json:"parent_entry_id,omitempty"`
 }
 
+// ContextDelta replaces selected runs in a context-reset entry's parent
+// materialization. Splice indices always refer to the unmodified parent context.
+type ContextDelta struct {
+	BaseMessageCount   int             `json:"base_message_count"`
+	ResultMessageCount int             `json:"result_message_count"`
+	BaseDigest         string          `json:"base_digest"`
+	ResultDigest       string          `json:"result_digest"`
+	Splices            []ContextSplice `json:"splices"`
+}
+
+// ContextSplice deletes and inserts one run at Start in the parent context.
+type ContextSplice struct {
+	Start    int           `json:"start"`
+	Delete   int           `json:"delete"`
+	Messages []llm.Message `json:"messages,omitempty"`
+}
+
 // Entry is one immutable tree node. Segment nodes contain one transcript-valid
 // unit; tool-use assistant messages are grouped with their result message so
 // every node is a safe navigation boundary.
@@ -51,7 +68,8 @@ type Entry struct {
 	ParentID string    `json:"parent_id,omitempty"`
 	Time     time.Time `json:"time"`
 
-	Messages []llm.Message `json:"messages,omitempty"`
+	Messages     []llm.Message `json:"messages,omitempty"`
+	ContextDelta *ContextDelta `json:"context_delta,omitempty"`
 
 	Checkpoint       *llm.Message `json:"checkpoint,omitempty"`
 	FirstKeptEntryID string       `json:"first_kept_entry_id,omitempty"`
@@ -269,8 +287,17 @@ func validateEntry(entry Entry) error {
 			return errors.New("branch entry must record unchanged workspace")
 		}
 	case EntryContextReset:
-		if err := llm.ValidateTranscript(entry.Messages); err != nil {
-			return fmt.Errorf("invalid context reset: %w", err)
+		if entry.ContextDelta == nil {
+			if err := llm.ValidateTranscript(entry.Messages); err != nil {
+				return fmt.Errorf("invalid context reset: %w", err)
+			}
+			break
+		}
+		if len(entry.Messages) > 0 {
+			return errors.New("context reset contains both messages and context_delta")
+		}
+		if err := validateContextDelta(*entry.ContextDelta); err != nil {
+			return fmt.Errorf("invalid context reset delta: %w", err)
 		}
 	default:
 		return fmt.Errorf("unknown entry type %q", entry.Type)
@@ -348,25 +375,7 @@ func (t *Tree) SyncTranscript(messages []llm.Message) error {
 		return nil
 	}
 
-	entry := Entry{
-		Type:     EntryContextReset,
-		ParentID: t.ActiveLeaf,
-		Messages: cloneMessagesForTree(messages),
-		Reason:   "transcript_rewrite",
-	}
-	if len(messages) > 0 {
-		entry.Time = messages[0].Time
-	}
-	if err := t.appendEntry(entry); err != nil {
-		return err
-	}
-	entryID := t.ActiveLeaf
-	t.activeMsgs = cloneMessagesForTree(messages)
-	t.activeRefs = make([]messageRef, len(messages))
-	for i := range t.activeRefs {
-		t.activeRefs[i] = messageRef{entryID: entryID, offset: i}
-	}
-	return nil
+	return t.appendContextReset(messages, "transcript_rewrite")
 }
 
 func transcriptsEqual(a, b []llm.Message) bool {
@@ -374,6 +383,166 @@ func transcriptsEqual(a, b []llm.Message) bool {
 		return false
 	}
 	return len(a) == 0 || reflect.DeepEqual(a, b)
+}
+
+func buildContextDelta(base, result []llm.Message) (*ContextDelta, error) {
+	baseDigest, err := llm.FingerprintMessages(base)
+	if err != nil {
+		return nil, fmt.Errorf("session: fingerprint context reset base: %w", err)
+	}
+	resultDigest, err := llm.FingerprintMessages(result)
+	if err != nil {
+		return nil, fmt.Errorf("session: fingerprint context reset result: %w", err)
+	}
+	delta := &ContextDelta{
+		BaseMessageCount:   len(base),
+		ResultMessageCount: len(result),
+		BaseDigest:         baseDigest,
+		ResultDigest:       resultDigest,
+	}
+	if len(base) == len(result) {
+		for i := 0; i < len(base); {
+			if reflect.DeepEqual(base[i], result[i]) {
+				i++
+				continue
+			}
+			start := i
+			for i < len(base) && !reflect.DeepEqual(base[i], result[i]) {
+				i++
+			}
+			delta.Splices = append(delta.Splices, ContextSplice{
+				Start: start, Delete: i - start, Messages: cloneMessagesForTree(result[start:i]),
+			})
+		}
+		return delta, nil
+	}
+
+	prefix := 0
+	for prefix < len(base) && prefix < len(result) && reflect.DeepEqual(base[prefix], result[prefix]) {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(base)-prefix && suffix < len(result)-prefix &&
+		reflect.DeepEqual(base[len(base)-1-suffix], result[len(result)-1-suffix]) {
+		suffix++
+	}
+	delta.Splices = []ContextSplice{{
+		Start:    prefix,
+		Delete:   len(base) - prefix - suffix,
+		Messages: cloneMessagesForTree(result[prefix : len(result)-suffix]),
+	}}
+	return delta, nil
+}
+
+func validateContextDelta(delta ContextDelta) error {
+	if delta.BaseMessageCount < 0 || delta.ResultMessageCount < 0 {
+		return errors.New("negative message count")
+	}
+	if !validContextDigest(delta.BaseDigest) || !validContextDigest(delta.ResultDigest) {
+		return errors.New("malformed message digest")
+	}
+	cursor := 0
+	previousStart := -1
+	resultCount := delta.BaseMessageCount
+	for i, splice := range delta.Splices {
+		if splice.Start < 0 || splice.Delete < 0 || splice.Start > delta.BaseMessageCount || splice.Delete > delta.BaseMessageCount-splice.Start {
+			return fmt.Errorf("splice %d is out of bounds", i)
+		}
+		if splice.Start < cursor || splice.Start == previousStart {
+			return fmt.Errorf("splice %d is out of order or overlaps", i)
+		}
+		cursor = splice.Start + splice.Delete
+		previousStart = splice.Start
+		resultCount += len(splice.Messages) - splice.Delete
+	}
+	if resultCount != delta.ResultMessageCount {
+		return fmt.Errorf("result message count is %d, want %d", resultCount, delta.ResultMessageCount)
+	}
+	return nil
+}
+
+func validContextDigest(digest string) bool {
+	if len(digest) != 64 {
+		return false
+	}
+	decoded, err := hex.DecodeString(digest)
+	return err == nil && hex.EncodeToString(decoded) == digest
+}
+
+func applyContextDelta(base []llm.Message, baseRefs []messageRef, entry Entry) ([]llm.Message, []messageRef, error) {
+	if entry.ContextDelta == nil {
+		return nil, nil, errors.New("session: missing context reset delta")
+	}
+	delta := *entry.ContextDelta
+	if err := validateContextDelta(delta); err != nil {
+		return nil, nil, fmt.Errorf("session: context reset %q: %w", entry.ID, err)
+	}
+	if len(base) != delta.BaseMessageCount || len(baseRefs) != len(base) {
+		return nil, nil, fmt.Errorf("session: context reset %q base count = %d, want %d", entry.ID, len(base), delta.BaseMessageCount)
+	}
+	if !llm.MatchesMessageFingerprint(base, delta.BaseDigest) {
+		return nil, nil, fmt.Errorf("session: context reset %q base digest mismatch", entry.ID)
+	}
+	// Replay against the one materialized path buffer. Applying from right to
+	// left keeps every splice index relative to the unmodified parent while
+	// avoiding a full transcript clone for the common equal-length rewrite.
+	msgs := base
+	refs := baseRefs
+	ownedByDelta := make([]bool, len(base))
+	for i := len(delta.Splices) - 1; i >= 0; i-- {
+		splice := delta.Splices[i]
+		oldLen := len(msgs)
+		oldEnd := splice.Start + splice.Delete
+		shift := len(splice.Messages) - splice.Delete
+		switch {
+		case shift > 0:
+			msgs = append(msgs, make([]llm.Message, shift)...)
+			copy(msgs[splice.Start+len(splice.Messages):], msgs[oldEnd:oldLen])
+			refs = append(refs, make([]messageRef, shift)...)
+			copy(refs[splice.Start+len(splice.Messages):], refs[oldEnd:oldLen])
+			ownedByDelta = append(ownedByDelta, make([]bool, shift)...)
+			copy(ownedByDelta[splice.Start+len(splice.Messages):], ownedByDelta[oldEnd:oldLen])
+		case shift < 0:
+			copy(msgs[splice.Start+len(splice.Messages):], msgs[oldEnd:oldLen])
+			copy(refs[splice.Start+len(splice.Messages):], refs[oldEnd:oldLen])
+			copy(ownedByDelta[splice.Start+len(splice.Messages):], ownedByDelta[oldEnd:oldLen])
+			newLen := oldLen + shift
+			clear(msgs[newLen:])
+			clear(refs[newLen:])
+			clear(ownedByDelta[newLen:])
+			msgs = msgs[:newLen]
+			refs = refs[:newLen]
+			ownedByDelta = ownedByDelta[:newLen]
+		}
+		replacements := cloneMessagesForTree(splice.Messages)
+		copy(msgs[splice.Start:], replacements)
+		for j := range replacements {
+			ownedByDelta[splice.Start+j] = true
+		}
+	}
+	if len(msgs) != delta.ResultMessageCount {
+		return nil, nil, fmt.Errorf("session: context reset %q result count = %d, want %d", entry.ID, len(msgs), delta.ResultMessageCount)
+	}
+	if !llm.MatchesMessageFingerprint(msgs, delta.ResultDigest) {
+		return nil, nil, fmt.Errorf("session: context reset %q result digest mismatch", entry.ID)
+	}
+	for i, owned := range ownedByDelta {
+		if owned {
+			refs[i] = messageRef{entryID: entry.ID, offset: i}
+		}
+	}
+	if err := llm.ValidateTranscript(msgs); err != nil {
+		return nil, nil, fmt.Errorf("session: context reset %q result invalid: %w", entry.ID, err)
+	}
+	return msgs, refs, nil
+}
+
+func resetMessageRefs(entryID string, count int) []messageRef {
+	refs := make([]messageRef, count)
+	for i := range refs {
+		refs[i] = messageRef{entryID: entryID, offset: i}
+	}
+	return refs
 }
 
 func (t *Tree) appendMessages(messages []llm.Message) error {
@@ -515,20 +684,64 @@ func (t *Tree) AppendContextReset(messages []llm.Message, reason string) error {
 	if err := llm.ValidateTranscript(messages); err != nil {
 		return err
 	}
-	entry := Entry{Type: EntryContextReset, ParentID: t.ActiveLeaf, Messages: cloneMessagesForTree(messages), Reason: reason}
-	if len(messages) > 0 {
-		entry.Time = messages[0].Time
+	return t.appendContextReset(messages, reason)
+}
+
+func (t *Tree) appendContextReset(messages []llm.Message, reason string) error {
+	parentMsgs, parentRefs, trustedParent := t.materializedActiveContext()
+	if trustedParent && transcriptsEqual(parentMsgs, messages) {
+		return nil
+	}
+	entry, err := t.newContextResetEntry(parentMsgs, messages, reason, trustedParent)
+	if err != nil {
+		return err
 	}
 	if err := t.appendEntry(entry); err != nil {
 		return err
 	}
-	id := t.ActiveLeaf
-	t.activeMsgs = cloneMessagesForTree(messages)
-	t.activeRefs = make([]messageRef, len(messages))
-	for i := range t.activeRefs {
-		t.activeRefs[i] = messageRef{entryID: id, offset: i}
+	entry.ID = t.ActiveLeaf
+	if entry.ContextDelta != nil {
+		msgs, refs, err := applyContextDelta(parentMsgs, parentRefs, entry)
+		if err != nil {
+			return err
+		}
+		t.activeMsgs, t.activeRefs = msgs, refs
+		return nil
 	}
+	t.activeMsgs = cloneMessagesForTree(messages)
+	t.activeRefs = resetMessageRefs(entry.ID, len(messages))
 	return nil
+}
+
+func (t *Tree) materializedActiveContext() ([]llm.Message, []messageRef, bool) {
+	msgs, refs, err := t.buildContext(t.ActiveLeaf)
+	if err != nil || !transcriptsEqual(msgs, t.activeMsgs) || !reflect.DeepEqual(refs, t.activeRefs) {
+		return nil, nil, false
+	}
+	return msgs, refs, true
+}
+
+func (t *Tree) newContextResetEntry(base, messages []llm.Message, reason string, trustedParent bool) (Entry, error) {
+	entry := Entry{Type: EntryContextReset, ParentID: t.ActiveLeaf, Messages: cloneMessagesForTree(messages), Reason: reason}
+	if len(messages) > 0 {
+		entry.Time = messages[0].Time
+	}
+	if !trustedParent {
+		return entry, nil
+	}
+	delta, err := buildContextDelta(base, messages)
+	if err != nil {
+		return Entry{}, err
+	}
+	deltaEntry := entry
+	deltaEntry.Messages = nil
+	deltaEntry.ContextDelta = delta
+	snapshotJSON, snapshotErr := json.Marshal(entry)
+	deltaJSON, deltaErr := json.Marshal(deltaEntry)
+	if snapshotErr == nil && deltaErr == nil && len(deltaJSON) < len(snapshotJSON) {
+		return deltaEntry, nil
+	}
+	return entry, nil
 }
 
 // AppendBranch moves to targetParent and creates a persistent branch marker.
@@ -610,56 +823,79 @@ func (t *Tree) buildContext(leaf string) ([]llm.Message, []messageRef, error) {
 	}
 	var msgs []llm.Message
 	var refs []messageRef
-	latestSpecial := -1
-	for i, entry := range path {
-		if entry.Type == EntryCompaction || entry.Type == EntryContextReset {
-			latestSpecial = i
-		}
-	}
 	start := 0
-	if latestSpecial >= 0 {
-		special := path[latestSpecial]
-		switch special.Type {
-		case EntryContextReset:
-			msgs = append(msgs, cloneMessagesForTree(special.Messages)...)
-			for i := range special.Messages {
-				refs = append(refs, messageRef{entryID: special.ID, offset: i})
+	// A legacy reset and a compaction with an explicitly materialized kept
+	// suffix are self-contained anchors. Starting at the newest such entry avoids
+	// replaying the full path while still applying every later delta exactly once.
+	for i := len(path) - 1; i >= 0; i-- {
+		entry := path[i]
+		switch {
+		case entry.Type == EntryContextReset && entry.ContextDelta == nil:
+			msgs = cloneMessagesForTree(entry.Messages)
+			refs = resetMessageRefs(entry.ID, len(entry.Messages))
+			start = i + 1
+		case entry.Type == EntryCompaction && entry.MaterializedKept:
+			checkpoint, err := contextCheckpoint(entry)
+			if err != nil {
+				return nil, nil, err
 			}
-			start = latestSpecial + 1
-		case EntryCompaction:
-			if special.Checkpoint == nil {
-				return nil, nil, fmt.Errorf("session: compaction %q has no checkpoint", special.ID)
-			}
-			checkpoint := cloneMessagesForTree([]llm.Message{*special.Checkpoint})[0]
-			checkpoint.Compaction = &llm.CompactionMetadata{
-				Summary:       special.Summary,
-				Focus:         special.CustomFocus,
-				ReadFiles:     append([]string(nil), special.ReadFiles...),
-				ModifiedFiles: append([]string(nil), special.ModifiedFiles...),
-			}
-			msgs = append(msgs, checkpoint)
-			refs = append(refs, messageRef{entryID: special.ID})
-			if special.MaterializedKept {
-				start = latestSpecial + 1
-				break
-			}
-			found := false
-			for i := 0; i < latestSpecial; i++ {
-				if path[i].ID == special.FirstKeptEntryID {
-					found = true
-				}
-				if found {
-					msgs, refs = appendContextEntry(msgs, refs, path[i])
-				}
-			}
-			if !found {
-				return nil, nil, fmt.Errorf("session: compaction %q retained entry %q is not on its path", special.ID, special.FirstKeptEntryID)
-			}
-			start = latestSpecial + 1
+			msgs = []llm.Message{checkpoint}
+			refs = []messageRef{{entryID: entry.ID}}
+			start = i + 1
+		default:
+			continue
 		}
+		break
 	}
+
 	for i := start; i < len(path); i++ {
-		msgs, refs = appendContextEntry(msgs, refs, path[i])
+		entry := path[i]
+		switch entry.Type {
+		case EntrySegment:
+			msgs = append(msgs, cloneMessagesForTree(entry.Messages)...)
+			for offset := range entry.Messages {
+				refs = append(refs, messageRef{entryID: entry.ID, offset: offset})
+			}
+		case EntryBranch:
+			text := "=== Conversation branch ===\nThe conversation moved to an earlier point. The working directory was not reverted; inspect current files before assuming their state."
+			if entry.Summary != "" {
+				text += "\n\nSummary of the branch that was left:\n" + entry.Summary
+			}
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Time: entry.Time, Origin: llm.MessageOriginInternal, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: text}}})
+			refs = append(refs, messageRef{entryID: entry.ID})
+		case EntryContextReset:
+			if entry.ContextDelta == nil {
+				msgs = cloneMessagesForTree(entry.Messages)
+				refs = resetMessageRefs(entry.ID, len(entry.Messages))
+				continue
+			}
+			msgs, refs, err = applyContextDelta(msgs, refs, entry)
+			if err != nil {
+				return nil, nil, err
+			}
+		case EntryCompaction:
+			checkpoint, err := contextCheckpoint(entry)
+			if err != nil {
+				return nil, nil, err
+			}
+			if entry.MaterializedKept {
+				msgs = []llm.Message{checkpoint}
+				refs = []messageRef{{entryID: entry.ID}}
+				continue
+			}
+			keptAt := -1
+			for j, ref := range refs {
+				if ref.entryID == entry.FirstKeptEntryID && ref.offset == 0 {
+					keptAt = j
+					break
+				}
+			}
+			if keptAt < 0 {
+				return nil, nil, fmt.Errorf("session: compaction %q retained entry %q is not materialized on its parent path", entry.ID, entry.FirstKeptEntryID)
+			}
+			msgs = append([]llm.Message{checkpoint}, cloneMessagesForTree(msgs[keptAt:])...)
+			refs = append([]messageRef{{entryID: entry.ID}}, refs[keptAt:]...)
+		}
 	}
 	if err := llm.ValidateTranscript(msgs); err != nil {
 		return nil, nil, fmt.Errorf("session: active tree context invalid: %w", err)
@@ -667,28 +903,18 @@ func (t *Tree) buildContext(leaf string) ([]llm.Message, []messageRef, error) {
 	return cloneMessagesForTree(msgs), refs, nil
 }
 
-func appendContextEntry(msgs []llm.Message, refs []messageRef, entry Entry) ([]llm.Message, []messageRef) {
-	switch entry.Type {
-	case EntrySegment:
-		msgs = append(msgs, cloneMessagesForTree(entry.Messages)...)
-		for i := range entry.Messages {
-			refs = append(refs, messageRef{entryID: entry.ID, offset: i})
-		}
-	case EntryBranch:
-		text := "=== Conversation branch ===\nThe conversation moved to an earlier point. The working directory was not reverted; inspect current files before assuming their state."
-		if entry.Summary != "" {
-			text += "\n\nSummary of the branch that was left:\n" + entry.Summary
-		}
-		m := llm.Message{Role: llm.RoleUser, Time: entry.Time, Origin: llm.MessageOriginInternal, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: text}}}
-		msgs = append(msgs, m)
-		refs = append(refs, messageRef{entryID: entry.ID})
-	case EntryContextReset:
-		msgs = append(msgs, cloneMessagesForTree(entry.Messages)...)
-		for i := range entry.Messages {
-			refs = append(refs, messageRef{entryID: entry.ID, offset: i})
-		}
+func contextCheckpoint(entry Entry) (llm.Message, error) {
+	if entry.Checkpoint == nil {
+		return llm.Message{}, fmt.Errorf("session: compaction %q has no checkpoint", entry.ID)
 	}
-	return msgs, refs
+	checkpoint := cloneMessagesForTree([]llm.Message{*entry.Checkpoint})[0]
+	checkpoint.Compaction = &llm.CompactionMetadata{
+		Summary:       entry.Summary,
+		Focus:         entry.CustomFocus,
+		ReadFiles:     append([]string(nil), entry.ReadFiles...),
+		ModifiedFiles: append([]string(nil), entry.ModifiedFiles...),
+	}
+	return checkpoint, nil
 }
 
 // Path returns entries from the root to id. An empty id means an empty path.
@@ -1019,6 +1245,14 @@ func cloneMessagesForTree(messages []llm.Message) []llm.Message {
 
 func cloneEntry(entry Entry) Entry {
 	entry.Messages = cloneMessagesForTree(entry.Messages)
+	if entry.ContextDelta != nil {
+		delta := *entry.ContextDelta
+		delta.Splices = append([]ContextSplice(nil), entry.ContextDelta.Splices...)
+		for i := range delta.Splices {
+			delta.Splices[i].Messages = cloneMessagesForTree(entry.ContextDelta.Splices[i].Messages)
+		}
+		entry.ContextDelta = &delta
+	}
 	entry.ReadFiles = append([]string(nil), entry.ReadFiles...)
 	entry.ModifiedFiles = append([]string(nil), entry.ModifiedFiles...)
 	if entry.Checkpoint != nil {

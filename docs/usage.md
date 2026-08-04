@@ -1610,8 +1610,10 @@ and are unavailable in one-shot mode.
 ## Sessions
 
 - A session path is a directory. `tree.ndjson` is the canonical append-only
-  conversation tree; `state.json` is compact mutable state containing the active
-  leaf and runtime settings; `active-turn.json` is a transient atomic recovery
+  conversation tree; transcript rewrites are stored as validated splice deltas
+  when smaller than a full context snapshot, and existing snapshot entries
+  remain readable without migration. `state.json` is compact mutable state
+  containing the active leaf and runtime settings; `active-turn.json` is a transient atomic recovery
   record for the current model/tool boundary; `raw.ndjson` is the chronological
   replay log. Consecutive assistant stream fragments are stored in bounded 4 KiB
   or 250ms chunks rather than one record per provider delta.

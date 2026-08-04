@@ -141,12 +141,16 @@ type collectedSessionStats struct {
 }
 
 type treeStats struct {
-	entries       int
-	branches      int
-	leaves        int
-	maxDepth      int
-	activeDepth   int
-	contextResets int
+	entries              int
+	branches             int
+	leaves               int
+	maxDepth             int
+	activeDepth          int
+	contextResets        int
+	snapshotResetEntries int
+	deltaResetEntries    int
+	snapshotResetBytes   int
+	deltaResetBytes      int
 }
 
 type delegateStats struct {
@@ -770,8 +774,15 @@ func collectCompactionStats(dir string, tree *Tree) (compactionStats, parallelSt
 	if tree != nil {
 		for _, entry := range tree.Entries {
 			switch entry.Type {
-			case EntrySegment, EntryContextReset:
+			case EntrySegment:
 				collectParallelBatches(entry.Messages, seenBatches, &parallel)
+			case EntryContextReset:
+				collectParallelBatches(entry.Messages, seenBatches, &parallel)
+				if entry.ContextDelta != nil {
+					for _, splice := range entry.ContextDelta.Splices {
+						collectParallelBatches(splice.Messages, seenBatches, &parallel)
+					}
+				}
 			case EntryCompaction:
 				if entry.Checkpoint != nil {
 					collectParallelBatches([]llm.Message{*entry.Checkpoint}, seenBatches, &parallel)
@@ -832,6 +843,19 @@ func collectTreeStats(tree *Tree) treeStats {
 			stats.branches++
 		case EntryContextReset:
 			stats.contextResets++
+			if entry.ContextDelta != nil {
+				stats.deltaResetEntries++
+				if payload, err := json.Marshal(entry.ContextDelta); err == nil {
+					stats.deltaResetBytes += len(payload)
+				}
+			} else {
+				stats.snapshotResetEntries++
+				if len(entry.Messages) > 0 {
+					if payload, err := json.Marshal(entry.Messages); err == nil {
+						stats.snapshotResetBytes += len(payload)
+					}
+				}
+			}
 		}
 		path, err := tree.Path(entry.ID)
 		if err == nil {
@@ -1215,6 +1239,8 @@ func writeTreeStats(w io.Writer, stats treeStats) {
 	fmt.Fprintf(w, "  maximum depth: %d\n", stats.maxDepth)
 	fmt.Fprintf(w, "  active depth: %d\n", stats.activeDepth)
 	fmt.Fprintf(w, "  context resets: %d\n", stats.contextResets)
+	fmt.Fprintf(w, "  context resets snapshot/delta: %d / %d\n", stats.snapshotResetEntries, stats.deltaResetEntries)
+	fmt.Fprintf(w, "  context reset payload bytes snapshot/delta: %d / %d\n", stats.snapshotResetBytes, stats.deltaResetBytes)
 }
 
 func writeActiveContextStats(w io.Writer, stats collectedSessionStats) {

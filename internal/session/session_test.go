@@ -557,6 +557,42 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveUsesDeltaForTranscriptRewriteAndSkipsUnchanged(t *testing.T) {
+	s := sampleSession()
+	s.Messages[0].Content[0].Text = strings.Repeat("large stable prompt ", 2000)
+	dir := filepath.Join(t.TempDir(), "session")
+	if err := s.Save(dir); err != nil {
+		t.Fatalf("initial Save: %v", err)
+	}
+
+	stored, err := Load(dir)
+	if err != nil {
+		t.Fatalf("initial Load: %v", err)
+	}
+	stored.Messages[2].Content[0].ResultText = "[older result trimmed]"
+	if err := stored.Save(dir); err != nil {
+		t.Fatalf("rewrite Save: %v", err)
+	}
+	entry, ok := stored.Tree.Entry(stored.Tree.ActiveLeaf)
+	if !ok || entry.Type != EntryContextReset || entry.ContextDelta == nil || len(entry.Messages) != 0 {
+		t.Fatalf("rewrite entry = %+v, %v; want delta reset", entry, ok)
+	}
+	entries := len(stored.Tree.Entries)
+	if err := stored.Save(dir); err != nil {
+		t.Fatalf("unchanged Save: %v", err)
+	}
+	if len(stored.Tree.Entries) != entries {
+		t.Fatalf("unchanged save appended %d entries", len(stored.Tree.Entries)-entries)
+	}
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !transcriptsEqualMessages(loaded.Messages, stored.Messages) {
+		t.Fatalf("loaded rewritten messages = %+v, want %+v", loaded.Messages, stored.Messages)
+	}
+}
+
 func TestSaveLoadPreservesParallelToolBatches(t *testing.T) {
 	s := sampleSession()
 	s.Messages[1].Content = append(s.Messages[1].Content,
