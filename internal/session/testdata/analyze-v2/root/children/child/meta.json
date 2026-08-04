@@ -1,0 +1,1 @@
+{"id":"fixture-child","parent_id":"fixture-root","kind":"delegate","agent":"explore","provider":"fixture-child","model":"child-model","build":{"version":"fixture-child","commit":"child"},"runtime":{"retention_policy":"pressure","context_window":100000},"status":"completed"}

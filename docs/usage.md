@@ -1735,10 +1735,13 @@ used stateful continuation or full context. When failures occurred, an `Errors`
 section follows the tool report: failed tool-result and model-request counts,
 per-tool/kind/model breakdowns, and repeat loops (the same tool and kind
 failing at least three times consecutively).
-`--format json` emits a transcript-free machine report with per-tool
-calls/results/errors/error rates and the structured error summary. The report
-also includes reliability telemetry reconstructed from the root and all
-physically nested delegate streams.
+`--format json` emits a versioned, transcript-free machine report with per-tool
+calls/results/errors/error rates, the structured error summary, build/runtime
+identity, and reliability telemetry reconstructed from the root and all
+physically nested delegate streams. Its `usage` and `storage` sections use the
+same analyzer-v2 vocabulary described below: physical root/child and
+conversational/maintenance usage are split without folding child spend twice,
+and bounded file/reset metadata is reported without transcript bodies.
 
 `session analyze` emits a deterministic, versioned, transcript-free report for
 one session or a directory containing session roots. When `dir` is omitted,
@@ -1747,11 +1750,17 @@ removes that lookback; those discovery flags are mutually exclusive and do not
 apply to an explicit directory. Discovery recursively
 includes `children/<id>/` streams and never follows symlinks. The report records
 the immutable complete-record prefix byte count, event count, and SHA-256 for
-each `raw.ndjson`; missing, truncated, malformed, and symlinked streams remain
-visible as unavailable or incomplete rather than being silently dropped.
+each `raw.ndjson`; missing, truncated, malformed, symlinked, and bounded-limit
+streams remain visible as unavailable or incomplete rather than being silently
+dropped. A stream is capped at a 256 MiB snapshot prefix, 16 MiB per record, and
+500,000 records; hitting a cap sets `limit_exceeded` and excludes that partial
+hierarchy from promotion distributions.
 `--before` applies an inclusive event-time cutoff and suppresses child-metadata
 fallbacks that could have been written after that cutoff. `--format json` is the
-stable input for corpus comparisons.
+stable analyzer-v2 input for corpus comparisons. Each item identifies its owning
+root and root-derived cohort while retaining its own provider, model, build, and
+runtime metadata. Cohort keys include the root build (including modified state)
+and behavior-changing runtime profile.
 
 Reliability fields carry explicit availability. A supported signal with no
 occurrences is an observed zero; a legacy or missing stream is unavailable.
@@ -1761,9 +1770,19 @@ tool-bearing turns (pending cutoff cases are not failures). Hook diagnostics,
 closure triggers, workflow-status supply, context-accounting/provider-count
 scope, retention/reset totals, and arithmetic invariant violations are bounded
 counters only: prompt text, tool inputs/results, assistant text, and hook
-payloads are never copied into the report. Execution completion means a
-terminal `prompt_usage` record exists; termination reasons describe loop
-control, not task correctness.
+payloads are never copied into the report. Usage comes only from physical
+`turn_attempt_usage` and `maintenance_usage` events. It exposes every normalized
+token class, root/descendant splits, priced/unpriced call coverage, known partial
+cost, hierarchy/cohort median and nearest-rank p90 values, and reconciliation
+against authoritative root state only for complete non-cutoff hierarchies.
+Storage analysis is bounded, never follows symlinks, counts physical snapshotted
+raw-file bytes, and marks missing, incomplete, malformed, symlinked,
+limit-exceeded, or cutoff-incomplete sources explicitly. Context maxima
+keep payload and effective scopes separate; public maxima clamp negatives while
+invariant counters preserve compatible-scope arithmetic errors. Execution
+completion means a terminal `prompt_usage` record exists; termination reasons
+describe loop control, not task correctness, and absent semantic completion
+metadata remains unavailable rather than being inferred.
 
 `session errors` lists the classified failures behind that section: every
 failed tool result and failed model request in one session (root plus delegate

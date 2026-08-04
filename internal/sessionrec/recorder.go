@@ -19,8 +19,9 @@ type Config struct {
 	Dir string
 	// Prompt is the prompt number stamped on every recorded event.
 	Prompt int
-	// Initial model identity covers providers that do not emit successful
-	// model_request lifecycle events. Later lifecycle events refresh it.
+	// Initial execution identity covers providers that do not emit successful
+	// model_request lifecycle events. Later lifecycle events refresh the model.
+	Agent       string
 	ModelTarget string
 	Provider    string
 	APIType     string
@@ -187,11 +188,16 @@ func (r *Recorder) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate
 		r.promptStart = r.now()
 	}
 	r.Append(session.Event{
-		Type:    session.EventTurnAttemptStart,
-		Prompt:  r.cfg.Prompt,
-		Turn:    turn,
-		Attempt: attempt,
-		Context: ContextSnapshot(ctx),
+		Type:        session.EventTurnAttemptStart,
+		Prompt:      r.cfg.Prompt,
+		Turn:        turn,
+		Attempt:     attempt,
+		Agent:       r.cfg.Agent,
+		ModelTarget: r.model.targetID,
+		Provider:    r.model.provider,
+		APIType:     r.model.apiType,
+		Model:       r.model.model,
+		Context:     ContextSnapshot(ctx),
 	})
 }
 

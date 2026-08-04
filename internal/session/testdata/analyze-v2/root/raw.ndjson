@@ -1,0 +1,5 @@
+{"time":"2026-08-01T00:00:00Z","type":"user","prompt":1,"text":"FROZEN SECRET RAW CANARY"}
+{"time":"2026-08-01T00:00:00Z","type":"turn_attempt_start","prompt":1,"turn":1,"attempt":1}
+{"time":"2026-08-01T00:00:00Z","type":"turn_attempt_usage","prompt":1,"turn":1,"attempt":1,"usage":{"input_tokens":10,"output_tokens":2,"cache_read_tokens":3,"cache_write_tokens":0,"cache_write_1h_tokens":0,"reasoning_tokens":0,"cost_usd":0.1,"cost_known":true}}
+{"time":"2026-08-01T00:00:00Z","type":"maintenance_usage","prompt":1,"usage":{"input_tokens":2,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":1,"cache_write_1h_tokens":2,"reasoning_tokens":1,"cost_usd":0.02,"cost_known":true}}
+{"time":"2026-08-01T00:00:01Z","type":"prompt_usage","prompt":1,"telemetry_version":1,"workflow_status":{"outcome":"complete","remaining_requirements":0}}

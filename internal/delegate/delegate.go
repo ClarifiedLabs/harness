@@ -675,7 +675,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	if r.opts.WorkflowStatus != nil {
 		sink.workflowStatus = func() agent.WorkflowStatus { return r.opts.WorkflowStatus(childID) }
 	}
-	sink.configureRecorder(r.opts.Now, launch.Registry, launch.ProviderName, launch.Model)
+	sink.configureRecorder(r.opts.Now, launch.Registry, launch.Agent, launch.ProviderName, launch.Model)
 	sink.messageCount = func() int { return len(child.Transcript()) }
 	sink.checkpoint = func(checkpoint agent.PromptCheckpoint) error {
 		updated := r.now()
@@ -1785,7 +1785,7 @@ func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progre
 	if len(reasoning) > 0 {
 		sink.reasoning = reasoning[0]
 	}
-	sink.rec = sessionrec.New(childRecorderConfig(sessionDir, time.Now, nil, "", "", sink.reasoning))
+	sink.rec = sessionrec.New(childRecorderConfig(sessionDir, time.Now, nil, "", "", "", sink.reasoning))
 	if activity.hasFeed() {
 		sink.assistant = newInlineLineAccumulator(activityChunkMaxBytes, func(text string, continuation bool) {
 			sink.activity.publishText(ActivityEventAssistant, text, sink.turn, sink.attempt, continuation)
@@ -1799,7 +1799,7 @@ func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progre
 // child's launch model. Child sessions run one prompt, so the recorder's
 // default prompt-usage line (cumulative totals equal to the prompt's own
 // usage) matches the parent's line shape.
-func childRecorderConfig(dir string, clock func() time.Time, registry *llm.Registry, provider, model string, reasoning bool) sessionrec.Config {
+func childRecorderConfig(dir string, clock func() time.Time, registry *llm.Registry, agentName, provider, model string, reasoning bool) sessionrec.Config {
 	target := model
 	if provider != "" && model != "" && !strings.HasPrefix(model, provider+":") {
 		target = provider + ":" + model
@@ -1807,6 +1807,7 @@ func childRecorderConfig(dir string, clock func() time.Time, registry *llm.Regis
 	return sessionrec.Config{
 		Dir:                dir,
 		Prompt:             1,
+		Agent:              agentName,
 		ModelTarget:        target,
 		Provider:           provider,
 		Model:              model,
@@ -1827,8 +1828,8 @@ func childRecorderConfig(dir string, clock func() time.Time, registry *llm.Regis
 // configureRecorder replaces the default recorder with one using the
 // runner's clock and the launch registry/model. The runner calls it once
 // after newChildSink; tests that do not configure pricing keep the defaults.
-func (s *childSink) configureRecorder(clock func() time.Time, registry *llm.Registry, provider, model string) {
-	s.rec = sessionrec.New(childRecorderConfig(s.sessionDir, clock, registry, provider, model, s.reasoning))
+func (s *childSink) configureRecorder(clock func() time.Time, registry *llm.Registry, agentName, provider, model string) {
+	s.rec = sessionrec.New(childRecorderConfig(s.sessionDir, clock, registry, agentName, provider, model, s.reasoning))
 }
 
 // Progress is a lock-protected snapshot of one delegate run's live activity,

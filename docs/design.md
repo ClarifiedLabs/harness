@@ -3462,6 +3462,8 @@ type UsageTotals struct {
   prefix; later segment and branch entries are then applied in path order.
 - Every saved message and append-only replay event carries a timestamp. Replay
   events identify `prompt`, `turn`, and (for provider requests) `attempt` separately.
+  `turn_attempt_start` also snapshots agent/provider/model execution identity so
+  analysis can detect switches without trusting mutable final session metadata.
   `turn_attempt_start`, `turn_attempt_abandoned`, and `turn_attempt_usage` describe
   provider calls; `turn_complete` closes a conversational turn; `prompt_usage`
   closes the top-level prompt and carries its successful compaction count;
@@ -3575,13 +3577,45 @@ type UsageTotals struct {
   neither applies to an explicit path. It treats every physical root or
   delegate log as a separate stream, recursively descends real `children/`
   directories without following symlinks, hashes the immutable complete-record
-  prefix, and keeps missing/truncated/malformed sources explicit. Availability is
+  prefix, and keeps missing/truncated/malformed/limit-exceeded sources explicit.
+  Raw parsing is streaming and bounded by snapshot bytes, line size, and record
+  count; retained analysis events discard transcript/body fields after hashing. Availability is
   denominator-aware: schema-supported zeroes are available, while legacy fields
   and absent streams are not inferred. A cutoff includes events at or before the
   requested instant and disables untimestamped child-metadata fallback. Aggregate
   execution completeness has a stable severity order (`incomplete` over
-  `unavailable` over `unknown` over `complete`). `session stats` reuses the same
-  derivation for a single root plus every physically nested delegate.
+  `unavailable` over `unknown` over `complete`). Analyzer schema v2 groups every
+  physical root plus descendants as one experimental hierarchy. Items retain
+  their own provider/model/agent/build/runtime identity, derive immutable
+  per-attempt identity availability/stability, and carry root ownership; cohort
+  distributions use a deterministic key from the root build (with modified and
+  clean builds distinct) and behavior-changing runtime profile.
+
+  Inclusive accounting sums only physical `turn_attempt_usage` and
+  `maintenance_usage` records, split across root/descendant and
+  conversational/maintenance slices. Every normalized token class is retained.
+  Calls without known pricing contribute tokens and increment unpriced coverage,
+  so known cost remains visible with `cost_complete:false`. Persisted root usage
+  is reconciliation-only and is consulted only for complete, non-cutoff
+  hierarchies; it is never added to child usage. Hierarchy and cohort summaries
+  carry sample counts with nearest-rank median/p90 token values and known-complete
+  cost. Missing semantic completion metadata remains unavailable independently
+  of lifecycle termination.
+
+  Corpus/session discovery and storage analysis use chunked, capped
+  entry/depth walks; metadata reads are size-bounded and symlinks are not
+  followed. Storage reports files/directories/bytes for state/tree/raw logs,
+  compactions, and tool-result artifacts, plus context-reset
+  snapshot/delta counts and payload bytes. Raw storage bytes use the physical
+  snapshotted file size, not only the event prefix selected by a cutoff. Missing,
+  incomplete, malformed, symlinked, cutoff-incomplete, and limit-exceeded sources
+  remain explicit.
+  Transcript bodies, tool inputs, and artifact contents never enter output.
+  Context aggregation preserves provider count scope: payload and effective
+  maxima stay separate, incompatible scopes are not subtracted, negative public
+  values are clamped, and compatible-scope arithmetic violations remain counted.
+  `session stats` reuses analyzer-v2 usage/storage vocabulary for a single root
+  plus every physically nested delegate.
 - `harness session replay <session-dir>` prints `raw.ndjson` as the familiar
   user-facing terminal view, filtering assistant/reasoning deltas from retry
   attempts that were explicitly discarded before a later successful attempt.
@@ -3641,8 +3675,10 @@ type UsageTotals struct {
   or skill paths. Compaction metadata uses the writer's canonical field shape;
   the stats reader accepts unknown additive fields while still rejecting
   malformed JSON and trailing values.
-  `--format json` emits the transcript-free tool/error subset with calls,
-  results, failures, rates, and partial composite-operation metrics.
+  `--format json` is versioned and additive: it emits the transcript-free
+  tool/error subset with calls, results, failures, rates, and partial
+  composite-operation metrics, plus build/runtime identity and analyzer-v2
+  usage/storage sections.
 - `harness session errors [dir]` lists classified failures — failed tool
   results and failed model requests — for one session (root plus delegate
   children), or scans recent sessions under the default sessions root when no

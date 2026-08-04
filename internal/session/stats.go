@@ -36,6 +36,10 @@ func StatsJSON(dir string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	analysis, err := AnalyzeCorpus(dir, AnalyzeOptions{})
+	if err != nil {
+		return fmt.Errorf("session: analyze stats json: %w", err)
+	}
 	type toolJSON struct {
 		Calls       int     `json:"calls"`
 		Results     int     `json:"results"`
@@ -63,6 +67,7 @@ func StatsJSON(dir string, w io.Writer) error {
 		}
 	}
 	payload := struct {
+		Version   int                 `json:"version"`
 		Path      string              `json:"path"`
 		SessionID string              `json:"session_id"`
 		Provider  string              `json:"provider"`
@@ -72,10 +77,17 @@ func StatsJSON(dir string, w io.Writer) error {
 		Tools     map[string]toolJSON `json:"tools"`
 		Errors    ErrorSummary        `json:"errors"`
 		Telemetry TelemetryAnalysis   `json:"telemetry"`
+		Build     BuildMetadata       `json:"build"`
+		Runtime   RuntimeProfile      `json:"runtime"`
+		Usage     UsageAnalysis       `json:"usage"`
+		Storage   StorageAnalysis     `json:"storage"`
 	}{
-		Path: dir, SessionID: report.root.state.ID, Provider: report.root.state.Provider,
-		Model: report.root.state.Model, Prompts: report.root.prompts, Turns: report.root.turns,
+		Version: AnalysisVersion, Path: dir, SessionID: report.root.state.ID,
+		Provider: report.root.state.Provider, Model: report.root.state.Model,
+		Prompts: report.root.prompts, Turns: report.root.turns,
 		Tools: tools, Errors: report.errors, Telemetry: report.telemetry,
+		Build: report.root.state.Build, Runtime: report.root.state.Runtime,
+		Usage: analysis.Usage, Storage: analysis.Storage,
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

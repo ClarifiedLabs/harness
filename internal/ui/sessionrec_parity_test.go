@@ -80,6 +80,7 @@ func TestChildParentRawEventParity(t *testing.T) {
 	child := sessionrec.New(sessionrec.Config{
 		Dir:                childDir,
 		Prompt:             1,
+		Agent:              app.AgentName,
 		ModelTarget:        "anthropic:claude-opus-4-8",
 		Provider:           "anthropic",
 		Model:              "claude-opus-4-8",

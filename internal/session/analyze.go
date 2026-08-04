@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,9 +19,17 @@ import (
 )
 
 // AnalysisVersion is the stable schema version emitted by WriteAnalysisJSON.
-const AnalysisVersion = 1
+const AnalysisVersion = 2
 
-const maxAnalysisTextSessions = 100
+const (
+	maxAnalysisTextSessions     = 100
+	maxAnalysisMetadataBytes    = 8 << 20
+	maxAnalysisDiscoveryEntries = 100_000
+	maxAnalysisDiscoveryDepth   = 64
+	maxAnalysisRawBytes         = 256 << 20
+	maxAnalysisRawLineBytes     = 16 << 20
+	maxAnalysisEventRecords     = 500_000
+)
 
 // AnalyzeOptions limits corpus analysis to a reproducible event prefix.
 type AnalyzeOptions struct {
@@ -47,11 +56,17 @@ type ClosureAnalysis struct {
 // WorkflowAnalysis keeps an explicitly supplied "unknown" outcome distinct
 // from prompts for which no workflow status provider was present.
 type WorkflowAnalysis struct {
-	Available  bool           `json:"available"`
-	Prompts    int            `json:"prompts"`
-	Supplied   int            `json:"supplied"`
-	Unsupplied int            `json:"unsupplied"`
-	Outcomes   map[string]int `json:"outcomes"`
+	Available                   bool            `json:"available"`
+	Prompts                     int             `json:"prompts"`
+	Supplied                    int             `json:"supplied"`
+	Unsupplied                  int             `json:"unsupplied"`
+	Outcomes                    map[string]int  `json:"outcomes"`
+	RemainingRequirementsTotal  int             `json:"remaining_requirements_total"`
+	RemainingRequirements       IntDistribution `json:"remaining_requirements"`
+	CompletionSourceAvailable   bool            `json:"completion_source_available"`
+	CompletionSourceReports     int             `json:"completion_source_reports"`
+	CompletionSourceUnavailable int             `json:"completion_source_unavailable"`
+	remainingRequirementValues  []int
 }
 
 // ProgressAnalysis summarizes turn_progress records. Pending batching steers
@@ -88,6 +103,7 @@ type ContextAnalysis struct {
 	MaxPayloadTokens       int            `json:"max_payload_tokens"`
 	MaxProviderInputTokens int            `json:"max_provider_input_tokens"`
 	ProviderCountScopes    map[string]int `json:"provider_count_scopes"`
+	ProviderMaxByScope     map[string]int `json:"provider_max_by_scope"`
 }
 
 // RetentionAnalysis summarizes non-content retention decisions and continuation
@@ -109,8 +125,10 @@ type RetentionAnalysis struct {
 type InvariantAnalysis struct {
 	ContextAvailable                bool `json:"context_available"`
 	RetentionAvailable              bool `json:"retention_available"`
+	UsageReconciliationAvailable    bool `json:"usage_reconciliation_available"`
 	NegativeContextViolations       int  `json:"negative_context_violations"`
 	InconsistentRetentionViolations int  `json:"inconsistent_retention_violations"`
+	UsageReconciliationViolations   int  `json:"usage_reconciliation_violations"`
 }
 
 // TelemetryAnalysis is reusable by single-session stats and corpus reports.
@@ -129,6 +147,7 @@ type TelemetryAnalysis struct {
 type AnalysisSource struct {
 	Path          string `json:"path"`
 	Status        string `json:"status"`
+	SnapshotBytes int64  `json:"snapshot_bytes"`
 	IncludedBytes int    `json:"included_bytes"`
 	Events        int    `json:"events"`
 	SHA256        string `json:"sha256,omitempty"`
@@ -148,19 +167,41 @@ type ExecutionAnalysis struct {
 	Terminations         map[string]int `json:"terminations"`
 }
 
+// ExecutionIdentityAnalysis summarizes immutable per-attempt identity evidence.
+// Available requires complete identity fields on every observed attempt; Stable
+// additionally requires one agent/provider/model tuple matching final metadata.
+type ExecutionIdentityAnalysis struct {
+	Available bool   `json:"available"`
+	Stable    bool   `json:"stable"`
+	Attempts  int    `json:"attempts"`
+	Agent     string `json:"agent,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	Model     string `json:"model,omitempty"`
+}
+
 // SessionAnalysis is one physical root or delegate stream.
 type SessionAnalysis struct {
-	Path           string            `json:"path"`
-	ID             string            `json:"id,omitempty"`
-	ParentID       string            `json:"parent_id,omitempty"`
-	Agent          string            `json:"agent,omitempty"`
-	Provider       string            `json:"provider,omitempty"`
-	Model          string            `json:"model,omitempty"`
-	Delegate       bool              `json:"delegate"`
-	MetadataStatus string            `json:"metadata_status"`
-	Source         AnalysisSource    `json:"source"`
-	Execution      ExecutionAnalysis `json:"execution"`
-	Telemetry      TelemetryAnalysis `json:"telemetry"`
+	Path              string                    `json:"path"`
+	RootPath          string                    `json:"root_path"`
+	RootID            string                    `json:"root_id,omitempty"`
+	CohortKey         string                    `json:"cohort_key"`
+	ID                string                    `json:"id,omitempty"`
+	ParentID          string                    `json:"parent_id,omitempty"`
+	Agent             string                    `json:"agent,omitempty"`
+	Provider          string                    `json:"provider,omitempty"`
+	Model             string                    `json:"model,omitempty"`
+	Delegate          bool                      `json:"delegate"`
+	MetadataStatus    string                    `json:"metadata_status"`
+	BuildAvailable    bool                      `json:"build_available"`
+	RuntimeAvailable  bool                      `json:"runtime_available"`
+	Build             BuildMetadata             `json:"build"`
+	Runtime           RuntimeProfile            `json:"runtime"`
+	Source            AnalysisSource            `json:"source"`
+	Execution         ExecutionAnalysis         `json:"execution"`
+	ExecutionIdentity ExecutionIdentityAnalysis `json:"execution_identity"`
+	Telemetry         TelemetryAnalysis         `json:"telemetry"`
+	Usage             UsageAnalysis             `json:"usage"`
+	Storage           StorageAnalysis           `json:"storage"`
 }
 
 // TelemetryCoverage counts physical streams carrying each structured signal.
@@ -178,21 +219,27 @@ type TelemetryCoverage struct {
 // AnalysisReport is a deterministic, transcript-free corpus report. Path may
 // name one session root or a directory containing session roots.
 type AnalysisReport struct {
-	Version                int               `json:"version"`
-	Path                   string            `json:"path"`
-	Before                 *time.Time        `json:"before"`
-	Roots                  int               `json:"roots"`
-	Sessions               int               `json:"sessions"`
-	MissingStreams         int               `json:"missing_streams"`
-	IncompleteStreams      int               `json:"incomplete_streams"`
-	MalformedStreams       int               `json:"malformed_streams"`
-	SymlinkStreams         int               `json:"symlink_streams"`
-	MalformedChildMetadata int               `json:"malformed_child_metadata"`
-	Completeness           map[string]int    `json:"completeness"`
-	Execution              ExecutionAnalysis `json:"execution"`
-	Telemetry              TelemetryAnalysis `json:"telemetry"`
-	Coverage               TelemetryCoverage `json:"telemetry_coverage"`
-	Items                  []SessionAnalysis `json:"items"`
+	Version                int                 `json:"version"`
+	Path                   string              `json:"path"`
+	Before                 *time.Time          `json:"before"`
+	Roots                  int                 `json:"roots"`
+	Sessions               int                 `json:"sessions"`
+	MissingStreams         int                 `json:"missing_streams"`
+	IncompleteStreams      int                 `json:"incomplete_streams"`
+	MalformedStreams       int                 `json:"malformed_streams"`
+	SymlinkStreams         int                 `json:"symlink_streams"`
+	LimitExceededStreams   int                 `json:"limit_exceeded_streams"`
+	MalformedChildMetadata int                 `json:"malformed_child_metadata"`
+	Completeness           map[string]int      `json:"completeness"`
+	Execution              ExecutionAnalysis   `json:"execution"`
+	Telemetry              TelemetryAnalysis   `json:"telemetry"`
+	Coverage               TelemetryCoverage   `json:"telemetry_coverage"`
+	Usage                  UsageAnalysis       `json:"usage"`
+	Storage                StorageAnalysis     `json:"storage"`
+	Distributions          UsageDistributions  `json:"distributions"`
+	Hierarchies            []HierarchyAnalysis `json:"hierarchies"`
+	Cohorts                []CohortAnalysis    `json:"cohorts"`
+	Items                  []SessionAnalysis   `json:"items"`
 }
 
 type analysisStream struct {
@@ -201,6 +248,15 @@ type analysisStream struct {
 	meta     ChildMeta
 	metaOK   bool
 	metaBad  bool
+}
+
+type analysisMetadata struct {
+	id, parent, agent, provider, model string
+	build                              BuildMetadata
+	runtime                            RuntimeProfile
+	buildAvailable                     bool
+	runtimeAvailable                   bool
+	persistedUsage                     *UsageTotals
 }
 
 // AnalyzeCorpus recursively analyzes one session root or a directory of roots.
@@ -251,6 +307,16 @@ func AnalyzeSessionDirs(path string, dirs []string, opts AnalyzeOptions) (Analys
 	return analyzeSessionRoots(filepath.Clean(path), roots, opts)
 }
 
+type cohortAccumulator struct {
+	analysis        CohortAnalysis
+	inclusiveTokens []int
+	rootTokens      []int
+	childTokens     []int
+	inclusiveCosts  []float64
+	rootCosts       []float64
+	childCosts      []float64
+}
+
 func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (AnalysisReport, error) {
 	report := AnalysisReport{
 		Version: AnalysisVersion, Path: path, Roots: len(roots),
@@ -261,39 +327,90 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 		before := opts.Before.UTC()
 		report.Before = &before
 	}
+	cohorts := make(map[string]*cohortAccumulator)
+	var inclusiveTokens, rootTokens, childTokens []int
+	var inclusiveCosts, rootCosts, childCosts []float64
 	for _, root := range roots {
 		streams, err := discoverAnalysisTree(root)
 		if err != nil {
 			return AnalysisReport{}, err
 		}
+		rootMeta := readAnalysisMetadata(root, streams[0])
+		cohort := cohortIdentity(rootMeta.build, rootMeta.runtime, rootMeta.buildAvailable && rootMeta.runtimeAvailable)
+		acc := cohorts[cohort.Key]
+		if acc == nil {
+			acc = &cohortAccumulator{analysis: CohortAnalysis{
+				Cohort:    cohort,
+				Execution: ExecutionAnalysis{Terminations: make(map[string]int)},
+				Workflow:  WorkflowAnalysis{Outcomes: make(map[string]int)},
+			}}
+			cohorts[cohort.Key] = acc
+		}
+		acc.analysis.Roots++
+		hierarchy := UsageAnalysis{}
+		hierarchyExecution := ExecutionAnalysis{Terminations: make(map[string]int)}
+		hierarchyWorkflow := WorkflowAnalysis{Outcomes: make(map[string]int)}
+		var hierarchyStorage StorageAnalysis
+		allRawComplete := opts.Before.IsZero()
+		rootItem := -1
 		for _, stream := range streams {
 			events, source, err := readAnalysisEvents(stream.dir, opts.Before)
 			if err != nil {
 				return AnalysisReport{}, fmt.Errorf("session: analyze %s: %w", stream.dir, err)
 			}
-			item := SessionAnalysis{Path: stream.dir, Delegate: stream.delegate, Source: source}
-			if stream.delegate {
-				switch {
-				case stream.metaBad:
-					item.MetadataStatus = "malformed"
-					report.MalformedChildMetadata++
-				case stream.metaOK:
-					item.MetadataStatus = "available"
-				default:
-					item.MetadataStatus = "missing"
-				}
+			metadata := readAnalysisMetadata(stream.dir, stream)
+			item := SessionAnalysis{
+				Path: stream.dir, RootPath: root, RootID: rootMeta.id, CohortKey: cohort.Key,
+				Delegate: stream.delegate, Source: source,
+				ID: metadata.id, ParentID: metadata.parent, Agent: metadata.agent,
+				Provider: metadata.provider, Model: metadata.model,
+				BuildAvailable: metadata.buildAvailable, RuntimeAvailable: metadata.runtimeAvailable,
+				Build: metadata.build, Runtime: metadata.runtime,
 			}
-			item.ID, item.ParentID, item.Agent, item.Provider, item.Model = analysisIdentity(stream.dir, stream)
+			switch {
+			case stream.delegate && stream.metaBad:
+				item.MetadataStatus = "malformed"
+				report.MalformedChildMetadata++
+			case stream.delegate && stream.metaOK:
+				item.MetadataStatus = "available"
+			case stream.delegate:
+				item.MetadataStatus = "missing"
+			case metadata.buildAvailable || metadata.runtimeAvailable || metadata.persistedUsage != nil:
+				item.MetadataStatus = "available"
+			default:
+				item.MetadataStatus = "missing"
+			}
 			var fallback *ChildMeta
 			if stream.metaOK && opts.Before.IsZero() {
 				fallback = &stream.meta
 			}
 			item.Execution = deriveExecution(events, source.Status)
+			item.ExecutionIdentity = deriveExecutionIdentity(events, source.Status, metadata)
 			item.Telemetry = deriveTelemetry(events, fallback)
+			conversation, maintenance := usageFromEvents(events, source.Status)
+			if stream.delegate {
+				item.Usage.DescendantConversational = conversation
+				item.Usage.DescendantMaintenance = maintenance
+			} else {
+				item.Usage.RootConversational = conversation
+				item.Usage.RootMaintenance = maintenance
+				rootItem = len(report.Items)
+			}
+			item.Usage.finish()
+			item.Storage, err = analyzeStorage(stream.dir, source, opts.Before)
+			if err != nil {
+				return AnalysisReport{}, err
+			}
+			hierarchy.add(item.Usage)
+			hierarchyExecution.add(item.Execution)
+			hierarchyWorkflow.add(item.Telemetry.Workflow)
+			hierarchyStorage.add(item.Storage)
+			allRawComplete = allRawComplete && source.Status == "complete"
 			report.Completeness[item.Execution.Completeness]++
 			report.Execution.add(item.Execution)
 			report.Telemetry.add(item.Telemetry)
 			report.Coverage.add(item.Telemetry, events)
+			report.Storage.add(item.Storage)
 			report.Items = append(report.Items, item)
 			switch source.Status {
 			case "missing":
@@ -304,10 +421,61 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 				report.MalformedStreams++
 			case "symlink":
 				report.SymlinkStreams++
+			case "limit_exceeded":
+				report.LimitExceededStreams++
+			}
+		}
+		if allRawComplete && hierarchy.Inclusive.Complete && rootMeta.persistedUsage != nil {
+			hierarchy.Reconciliation = reconcileUsage(hierarchy.Inclusive, *rootMeta.persistedUsage)
+			report.Telemetry.Invariants.UsageReconciliationAvailable = true
+			report.Telemetry.Invariants.UsageReconciliationViolations += hierarchy.Reconciliation.Discrepancies
+			if rootItem >= 0 {
+				report.Items[rootItem].Usage.Reconciliation = hierarchy.Reconciliation
+			}
+		}
+		report.Usage.add(hierarchy)
+		report.Hierarchies = append(report.Hierarchies, HierarchyAnalysis{
+			RootPath: root, RootID: rootMeta.id, Cohort: cohort, Sessions: len(streams),
+			Execution: hierarchyExecution, Workflow: hierarchyWorkflow,
+			Usage: hierarchy, Storage: hierarchyStorage,
+		})
+		acc.analysis.Sessions += len(streams)
+		acc.analysis.Execution.add(hierarchyExecution)
+		acc.analysis.Workflow.add(hierarchyWorkflow)
+		acc.analysis.Usage.add(hierarchy)
+		acc.analysis.Storage.add(hierarchyStorage)
+		if allRawComplete && hierarchy.Inclusive.Complete {
+			rootTotal := addUsageSlice(hierarchy.RootConversational, hierarchy.RootMaintenance)
+			childTotal := addUsageSlice(hierarchy.DescendantConversational, hierarchy.DescendantMaintenance)
+			inclusiveTokens = append(inclusiveTokens, hierarchy.Inclusive.TotalTokens)
+			rootTokens = append(rootTokens, rootTotal.TotalTokens)
+			childTokens = append(childTokens, childTotal.TotalTokens)
+			acc.inclusiveTokens = append(acc.inclusiveTokens, hierarchy.Inclusive.TotalTokens)
+			acc.rootTokens = append(acc.rootTokens, rootTotal.TotalTokens)
+			acc.childTokens = append(acc.childTokens, childTotal.TotalTokens)
+			if hierarchy.Inclusive.CostComplete {
+				inclusiveCosts = append(inclusiveCosts, hierarchy.Inclusive.KnownCostUSD)
+				rootCosts = append(rootCosts, rootTotal.KnownCostUSD)
+				childCosts = append(childCosts, childTotal.KnownCostUSD)
+				acc.inclusiveCosts = append(acc.inclusiveCosts, hierarchy.Inclusive.KnownCostUSD)
+				acc.rootCosts = append(acc.rootCosts, rootTotal.KnownCostUSD)
+				acc.childCosts = append(acc.childCosts, childTotal.KnownCostUSD)
 			}
 		}
 	}
 	report.Sessions = len(report.Items)
+	report.Distributions = buildUsageDistributions(inclusiveTokens, rootTokens, childTokens, inclusiveCosts, rootCosts, childCosts)
+	keys := make([]string, 0, len(cohorts))
+	for key := range cohorts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		acc := cohorts[key]
+		acc.analysis.Distributions = buildUsageDistributions(acc.inclusiveTokens, acc.rootTokens, acc.childTokens, acc.inclusiveCosts, acc.rootCosts, acc.childCosts)
+		report.Cohorts = append(report.Cohorts, acc.analysis)
+	}
+	sort.Slice(report.Hierarchies, func(i, j int) bool { return report.Hierarchies[i].RootPath < report.Hierarchies[j].RootPath })
 	sort.Slice(report.Items, func(i, j int) bool { return report.Items[i].Path < report.Items[j].Path })
 	return report, nil
 }
@@ -317,28 +485,33 @@ func discoverAnalysisRoots(path string) ([]string, error) {
 		return []string{path}, nil
 	}
 	var roots []string
-	var walk func(string) error
-	walk = func(dir string) error {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return fmt.Errorf("session: discover roots in %s: %w", dir, err)
+	visited := 0
+	var walk func(string, int) error
+	walk = func(dir string, depth int) error {
+		if depth > maxAnalysisDiscoveryDepth {
+			return fmt.Errorf("session: discovery depth exceeds %d at %s", maxAnalysisDiscoveryDepth, dir)
 		}
-		for _, entry := range entries {
+		err := forEachAnalysisDirEntry(dir, func(entry os.DirEntry) error {
+			visited++
+			if visited > maxAnalysisDiscoveryEntries {
+				return fmt.Errorf("session: discovery entries exceed %d", maxAnalysisDiscoveryEntries)
+			}
 			if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
-				continue
+				return nil
 			}
 			child := filepath.Join(dir, entry.Name())
 			if analysisSessionDir(child) {
 				roots = append(roots, child)
-				continue
+				return nil
 			}
-			if err := walk(child); err != nil {
-				return err
-			}
+			return walk(child, depth+1)
+		})
+		if err != nil {
+			return fmt.Errorf("session: discover roots in %s: %w", dir, err)
 		}
 		return nil
 	}
-	if err := walk(path); err != nil {
+	if err := walk(path, 0); err != nil {
 		return nil, err
 	}
 	sort.Strings(roots)
@@ -357,8 +530,12 @@ func analysisSessionDir(dir string) bool {
 
 func discoverAnalysisTree(root string) ([]analysisStream, error) {
 	streams := []analysisStream{{dir: root}}
-	var children func(string) error
-	children = func(parent string) error {
+	visited := 1
+	var children func(string, int) error
+	children = func(parent string, depth int) error {
+		if depth > maxAnalysisDiscoveryDepth {
+			return fmt.Errorf("session: delegate discovery depth exceeds %d at %s", maxAnalysisDiscoveryDepth, parent)
+		}
 		childrenDir := filepath.Join(parent, "children")
 		info, err := os.Lstat(childrenDir)
 		if errors.Is(err, os.ErrNotExist) {
@@ -373,16 +550,13 @@ func discoverAnalysisTree(root string) ([]analysisStream, error) {
 		if !info.IsDir() {
 			return fmt.Errorf("session: discover delegates in %s: children is not a directory", parent)
 		}
-		entries, err := os.ReadDir(childrenDir)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("session: discover delegates in %s: %w", parent, err)
-		}
-		for _, entry := range entries {
+		err = forEachAnalysisDirEntry(childrenDir, func(entry os.DirEntry) error {
+			visited++
+			if visited > maxAnalysisDiscoveryEntries {
+				return fmt.Errorf("session: delegate discovery entries exceed %d", maxAnalysisDiscoveryEntries)
+			}
 			if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
-				continue
+				return nil
 			}
 			dir := filepath.Join(childrenDir, entry.Name())
 			stream := analysisStream{dir: dir, delegate: true}
@@ -390,8 +564,12 @@ func discoverAnalysisTree(root string) ([]analysisStream, error) {
 			metaInfo, statErr := os.Lstat(metaPath)
 			switch {
 			case statErr == nil && metaInfo.Mode().IsRegular():
-				data, readErr := os.ReadFile(metaPath)
+				data, readErr := readAnalysisMetadataFile(metaPath)
 				if readErr == nil && json.Unmarshal(data, &stream.meta) == nil {
+					stream.meta.TaskPreview = ""
+					stream.meta.Transcript = ""
+					stream.meta.Replay = ""
+					stream.meta.Error = ""
 					stream.metaOK = true
 				} else {
 					stream.metaBad = true
@@ -402,56 +580,139 @@ func discoverAnalysisTree(root string) ([]analysisStream, error) {
 				stream.metaBad = true
 			}
 			streams = append(streams, stream)
-			if err := children(dir); err != nil {
-				return err
-			}
+			return children(dir, depth+1)
+		})
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("session: discover delegates in %s: %w", parent, err)
 		}
 		return nil
 	}
-	return streams, children(root)
+	return streams, children(root, 0)
 }
 
-func analysisIdentity(dir string, stream analysisStream) (id, parent, agent, provider, model string) {
+func readAnalysisMetadata(dir string, stream analysisStream) analysisMetadata {
+	var out analysisMetadata
 	if stream.metaOK {
-		id, parent, agent, provider, model = stream.meta.ID, stream.meta.ParentID, stream.meta.Agent, stream.meta.Provider, stream.meta.Model
+		out.id, out.parent, out.agent = stream.meta.ID, stream.meta.ParentID, stream.meta.Agent
+		out.provider, out.model = stream.meta.Provider, stream.meta.Model
+		out.build, out.runtime = stream.meta.Build, stream.meta.Runtime
+		out.buildAvailable = stream.meta.Build.Version != "" || stream.meta.Build.Commit != "" || stream.meta.Build.Date != "" || stream.meta.Build.Modified
+		out.runtimeAvailable = runtimeProfilePresent(stream.meta.Runtime)
 	}
 	statePath := filepath.Join(dir, stateFile)
 	info, err := os.Lstat(statePath)
 	if err != nil || !info.Mode().IsRegular() {
-		return
+		return out
 	}
-	data, err := os.ReadFile(statePath)
+	data, err := readAnalysisMetadataFile(statePath)
 	if err != nil {
-		return
+		return out
 	}
 	var state struct {
-		ID            string `json:"id"`
-		ParentSession string `json:"parent_session"`
-		Agent         string `json:"agent"`
-		Provider      string `json:"provider"`
-		Model         string `json:"model"`
+		ID            string         `json:"id"`
+		ParentSession string         `json:"parent_session"`
+		Agent         string         `json:"agent"`
+		Provider      string         `json:"provider"`
+		Model         string         `json:"model"`
+		Build         BuildMetadata  `json:"build"`
+		Runtime       RuntimeProfile `json:"runtime"`
+		Usage         UsageTotals    `json:"usage"`
 	}
-	if json.Unmarshal(data, &state) == nil {
-		if state.ID != "" {
-			id = state.ID
-		}
-		if state.ParentSession != "" {
-			parent = state.ParentSession
-		}
-		if state.Agent != "" {
-			agent = state.Agent
-		}
-		if state.Provider != "" {
-			provider = state.Provider
-		}
-		if state.Model != "" {
-			model = state.Model
-		}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &state) != nil || json.Unmarshal(data, &fields) != nil {
+		return out
 	}
-	return
+	if state.ID != "" {
+		out.id = state.ID
+	}
+	if state.ParentSession != "" {
+		out.parent = state.ParentSession
+	}
+	if state.Agent != "" {
+		out.agent = state.Agent
+	}
+	if state.Provider != "" {
+		out.provider = state.Provider
+	}
+	if state.Model != "" {
+		out.model = state.Model
+	}
+	if _, ok := fields["build"]; ok {
+		out.build, out.buildAvailable = state.Build, true
+	}
+	if _, ok := fields["runtime"]; ok {
+		out.runtime, out.runtimeAvailable = state.Runtime, true
+	}
+	if _, ok := fields["usage"]; ok {
+		usage := state.Usage
+		out.persistedUsage = &usage
+	}
+	return out
 }
 
+func forEachAnalysisDirEntry(dir string, visit func(os.DirEntry) error) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	for {
+		entries, readErr := f.ReadDir(256)
+		for _, entry := range entries {
+			if err := visit(entry); err != nil {
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+}
+
+func readAnalysisMetadataFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxAnalysisMetadataBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxAnalysisMetadataBytes {
+		return nil, fmt.Errorf("session: analysis metadata %s exceeds %d bytes", path, maxAnalysisMetadataBytes)
+	}
+	return data, nil
+}
+
+func runtimeProfilePresent(runtime RuntimeProfile) bool {
+	return runtime.RetentionPolicy != "" || runtime.ContextWindow != 0 ||
+		runtime.ToolResultMaxBytes != 0 || runtime.ToolResultMaxLines != 0 ||
+		runtime.CompactToolResultMaxBytes != 0 || runtime.ResponsesStateful ||
+		runtime.DelegateMaxTurns != 0 || runtime.Prewarm || runtime.SearchBackend != ""
+}
+
+type analysisEventLimits struct {
+	maxBytes   int64
+	maxLine    int
+	maxRecords int
+}
+
+var errAnalysisLineTooLong = errors.New("analysis event line exceeds limit")
+
 func readAnalysisEvents(dir string, before time.Time) ([]Event, AnalysisSource, error) {
+	return readAnalysisEventsWithLimits(dir, before, analysisEventLimits{
+		maxBytes: maxAnalysisRawBytes, maxLine: maxAnalysisRawLineBytes, maxRecords: maxAnalysisEventRecords,
+	})
+}
+
+func readAnalysisEventsWithLimits(dir string, before time.Time, limits analysisEventLimits) ([]Event, AnalysisSource, error) {
 	path := filepath.Join(dir, eventLog)
 	pathInfo, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -475,39 +736,87 @@ func readAnalysisEvents(dir string, before time.Time) ([]Event, AnalysisSource, 
 	if err != nil {
 		return nil, AnalysisSource{}, err
 	}
-	data, err := io.ReadAll(io.LimitReader(f, info.Size()))
-	if err != nil {
-		return nil, AnalysisSource{}, err
-	}
 	status := "complete"
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		status = "incomplete"
-		if end := bytes.LastIndexByte(data, '\n'); end >= 0 {
-			data = data[:end+1]
-		} else {
-			data = nil
-		}
+	readBytes := info.Size()
+	if readBytes > limits.maxBytes {
+		readBytes = limits.maxBytes
+		status = "limit_exceeded"
 	}
+	reader := bufio.NewReader(io.LimitReader(f, readBytes))
+	hash := sha256.New()
+	includedBytes := 0
+	records := 0
 	var events []Event
-	var included bytes.Buffer
-	for _, line := range bytes.Split(data, []byte{'\n'}) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
+	for {
+		line, complete, readErr := readBoundedAnalysisLine(reader, limits.maxLine)
+		if errors.Is(readErr, errAnalysisLineTooLong) {
+			status = "limit_exceeded"
+			break
 		}
-		var event Event
-		if err := json.Unmarshal(line, &event); err != nil {
-			status = "malformed"
-			continue
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, AnalysisSource{}, readErr
 		}
-		if !before.IsZero() && event.Time.After(before) {
-			continue
+		if complete && len(bytes.TrimSpace(line)) > 0 {
+			records++
+			if records > limits.maxRecords {
+				status = "limit_exceeded"
+				break
+			}
+			var event Event
+			if err := json.Unmarshal(line, &event); err != nil {
+				if status != "limit_exceeded" {
+					status = "malformed"
+				}
+			} else if before.IsZero() || !event.Time.After(before) {
+				_, _ = hash.Write(line)
+				_, _ = hash.Write([]byte{'\n'})
+				includedBytes += len(line) + 1
+				event.Text = ""
+				event.Display = ""
+				event.Path = ""
+				event.Input = nil
+				event.Images = nil
+				event.Summary = ""
+				event.ErrorExcerpt = ""
+				if event.ModelRequest != nil {
+					event.ModelRequest.Message = ""
+					event.ModelRequest.ResponsePayload = ""
+				}
+				events = append(events, event)
+			}
 		}
-		events = append(events, event)
-		included.Write(line)
-		included.WriteByte('\n')
+		if errors.Is(readErr, io.EOF) {
+			if len(line) > 0 && status == "complete" {
+				status = "incomplete"
+			}
+			break
+		}
 	}
-	sum := sha256.Sum256(included.Bytes())
-	return events, AnalysisSource{Path: dir, Status: status, IncludedBytes: included.Len(), Events: len(events), SHA256: hex.EncodeToString(sum[:])}, nil
+	return events, AnalysisSource{
+		Path: dir, Status: status, SnapshotBytes: info.Size(), IncludedBytes: includedBytes,
+		Events: len(events), SHA256: hex.EncodeToString(hash.Sum(nil)),
+	}, nil
+}
+
+func readBoundedAnalysisLine(reader *bufio.Reader, maxBytes int) ([]byte, bool, error) {
+	line := make([]byte, 0, min(maxBytes, 64<<10))
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(line)+len(fragment) > maxBytes {
+			return nil, false, errAnalysisLineTooLong
+		}
+		line = append(line, fragment...)
+		switch {
+		case err == nil:
+			return line[:len(line)-1], true, nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			return line, false, io.EOF
+		default:
+			return nil, false, err
+		}
+	}
 }
 
 func (c *TelemetryCoverage) add(telemetry TelemetryAnalysis, events []Event) {
@@ -536,6 +845,36 @@ func (c *TelemetryCoverage) add(telemetry TelemetryAnalysis, events []Event) {
 			break
 		}
 	}
+}
+
+func deriveExecutionIdentity(events []Event, sourceStatus string, metadata analysisMetadata) ExecutionIdentityAnalysis {
+	if sourceStatus != "complete" {
+		return ExecutionIdentityAnalysis{}
+	}
+	var out ExecutionIdentityAnalysis
+	for _, event := range events {
+		if event.Type != EventTurnAttemptStart {
+			continue
+		}
+		out.Attempts++
+		if event.Agent == "" || event.Provider == "" || event.Model == "" {
+			return out
+		}
+		if out.Agent == "" {
+			out.Agent, out.Provider, out.Model = event.Agent, event.Provider, event.Model
+			continue
+		}
+		if event.Agent != out.Agent || event.Provider != out.Provider || event.Model != out.Model {
+			out.Available = true
+			return out
+		}
+	}
+	if out.Attempts == 0 {
+		return out
+	}
+	out.Available = true
+	out.Stable = out.Agent == metadata.agent && out.Provider == metadata.provider && out.Model == metadata.model
+	return out
 }
 
 func deriveExecution(events []Event, sourceStatus string) ExecutionAnalysis {
@@ -579,7 +918,7 @@ func deriveExecution(events []Event, sourceStatus string) ExecutionAnalysis {
 	switch {
 	case sourceStatus == "missing" || sourceStatus == "symlink":
 		out.Completeness = "unavailable"
-	case sourceStatus == "incomplete" || sourceStatus == "malformed":
+	case sourceStatus == "incomplete" || sourceStatus == "malformed" || sourceStatus == "limit_exceeded":
 		out.Completeness = "incomplete"
 	case out.Prompts == 0:
 		out.Completeness = "unknown"
@@ -639,7 +978,7 @@ func deriveTelemetry(events []Event, child *ChildMeta) TelemetryAnalysis {
 	out := TelemetryAnalysis{
 		Closure:  ClosureAnalysis{Triggers: make(map[string]int)},
 		Workflow: WorkflowAnalysis{Outcomes: make(map[string]int)},
-		Context:  ContextAnalysis{ProviderCountScopes: make(map[string]int)},
+		Context:  ContextAnalysis{ProviderCountScopes: make(map[string]int), ProviderMaxByScope: make(map[string]int)},
 	}
 	closures := make(map[int]string)
 	closurePrompts := make(map[int]struct{})
@@ -654,14 +993,16 @@ func deriveTelemetry(events []Event, child *ChildMeta) TelemetryAnalysis {
 		if context := event.Context; context != nil {
 			out.Context.Available = true
 			out.Context.Samples++
-			out.Context.MaxTotalTokens = max(out.Context.MaxTotalTokens, context.Total)
-			out.Context.MaxPayloadTokens = max(out.Context.MaxPayloadTokens, context.PayloadTotal)
-			out.Context.MaxProviderInputTokens = max(out.Context.MaxProviderInputTokens, context.ProviderInputTokens)
+			out.Context.MaxTotalTokens = max(out.Context.MaxTotalTokens, max(0, context.Total))
+			out.Context.MaxPayloadTokens = max(out.Context.MaxPayloadTokens, max(0, context.PayloadTotal))
+			out.Context.MaxProviderInputTokens = max(out.Context.MaxProviderInputTokens, max(0, context.ProviderInputTokens))
 			if context.ProviderInputScope != "" {
-				out.Context.ProviderCountScopes[normalizedProviderCountScope(context.ProviderInputScope)]++
+				scope := normalizedProviderCountScope(context.ProviderInputScope)
+				out.Context.ProviderCountScopes[scope]++
+				out.Context.ProviderMaxByScope[scope] = max(out.Context.ProviderMaxByScope[scope], max(0, context.ProviderInputTokens))
 			}
 			out.Invariants.ContextAvailable = true
-			if negativeContext(context) {
+			if negativeContext(context) || negativeCompatibleContextArithmetic(context) {
 				out.Invariants.NegativeContextViolations++
 			}
 		}
@@ -761,7 +1102,12 @@ func deriveTelemetry(events []Event, child *ChildMeta) TelemetryAnalysis {
 		}
 		out.Workflow.Supplied++
 		out.Workflow.Outcomes[normalizedWorkflowOutcome(status.Outcome)]++
+		if status.RemainingRequirements != nil && *status.RemainingRequirements >= 0 {
+			out.Workflow.RemainingRequirementsTotal += *status.RemainingRequirements
+			out.Workflow.remainingRequirementValues = append(out.Workflow.remainingRequirementValues, *status.RemainingRequirements)
+		}
 	}
+	out.Workflow.RemainingRequirements = intDistribution(out.Workflow.remainingRequirementValues)
 	out.Closure.Prompts = len(closurePrompts)
 	for _, trigger := range closures {
 		out.Closure.Triggers[trigger]++
@@ -836,6 +1182,17 @@ func normalizedLabel(value string) string {
 	return "unknown"
 }
 
+func negativeCompatibleContextArithmetic(context *ContextSnapshot) bool {
+	switch normalizedProviderCountScope(context.ProviderInputScope) {
+	case string(llm.InputTokenCountScopeRequestPayload):
+		return context.ProviderInputTokens > context.PayloadTotal && context.PayloadTotal >= 0
+	case string(llm.InputTokenCountScopeEffectiveContext):
+		return context.ProviderInputTokens > context.Total && context.Total >= 0
+	default:
+		return false
+	}
+}
+
 func normalizedProviderCountScope(value string) string {
 	switch strings.TrimSpace(value) {
 	case string(llm.InputTokenCountScopeEffectiveContext):
@@ -888,6 +1245,25 @@ func inconsistentRetention(r *RetentionSnapshot) bool {
 	return r.EstimatedTokensRemoved != 0 && r.EstimatedTokensRemoved != r.LocalEstimateTokensBefore-r.LocalEstimateTokensAfter
 }
 
+func (w *WorkflowAnalysis) add(other WorkflowAnalysis) {
+	if w.Outcomes == nil {
+		w.Outcomes = make(map[string]int)
+	}
+	for key, value := range other.Outcomes {
+		w.Outcomes[key] += value
+	}
+	w.Available = w.Available || other.Available
+	w.Prompts += other.Prompts
+	w.Supplied += other.Supplied
+	w.Unsupplied += other.Unsupplied
+	w.RemainingRequirementsTotal += other.RemainingRequirementsTotal
+	w.remainingRequirementValues = append(w.remainingRequirementValues, other.remainingRequirementValues...)
+	w.RemainingRequirements = intDistribution(w.remainingRequirementValues)
+	w.CompletionSourceAvailable = w.CompletionSourceAvailable || other.CompletionSourceAvailable
+	w.CompletionSourceReports += other.CompletionSourceReports
+	w.CompletionSourceUnavailable += other.CompletionSourceUnavailable
+}
+
 func (t *TelemetryAnalysis) add(other TelemetryAnalysis) {
 	if t.Closure.Triggers == nil {
 		t.Closure.Triggers = make(map[string]int)
@@ -908,6 +1284,12 @@ func (t *TelemetryAnalysis) add(other TelemetryAnalysis) {
 	t.Workflow.Prompts += other.Workflow.Prompts
 	t.Workflow.Supplied += other.Workflow.Supplied
 	t.Workflow.Unsupplied += other.Workflow.Unsupplied
+	t.Workflow.RemainingRequirementsTotal += other.Workflow.RemainingRequirementsTotal
+	t.Workflow.remainingRequirementValues = append(t.Workflow.remainingRequirementValues, other.Workflow.remainingRequirementValues...)
+	t.Workflow.RemainingRequirements = intDistribution(t.Workflow.remainingRequirementValues)
+	t.Workflow.CompletionSourceAvailable = t.Workflow.CompletionSourceAvailable || other.Workflow.CompletionSourceAvailable
+	t.Workflow.CompletionSourceReports += other.Workflow.CompletionSourceReports
+	t.Workflow.CompletionSourceUnavailable += other.Workflow.CompletionSourceUnavailable
 	t.Progress.Available = t.Progress.Available || other.Progress.Available
 	t.Progress.ToolTurns += other.Progress.ToolTurns
 	mergeMaximum(&t.Progress.MaxInspectionNoProgressStreak, other.Progress.MaxInspectionNoProgressStreak)
@@ -930,8 +1312,14 @@ func (t *TelemetryAnalysis) add(other TelemetryAnalysis) {
 	if t.Context.ProviderCountScopes == nil {
 		t.Context.ProviderCountScopes = make(map[string]int)
 	}
+	if t.Context.ProviderMaxByScope == nil {
+		t.Context.ProviderMaxByScope = make(map[string]int)
+	}
 	for scope, count := range other.Context.ProviderCountScopes {
 		t.Context.ProviderCountScopes[scope] += count
+	}
+	for scope, value := range other.Context.ProviderMaxByScope {
+		t.Context.ProviderMaxByScope[scope] = max(t.Context.ProviderMaxByScope[scope], value)
 	}
 	t.Retention.Available = t.Retention.Available || other.Retention.Available
 	t.Retention.Epochs += other.Retention.Epochs
@@ -945,8 +1333,10 @@ func (t *TelemetryAnalysis) add(other TelemetryAnalysis) {
 	t.Retention.NextRequestFull += other.Retention.NextRequestFull
 	t.Invariants.ContextAvailable = t.Invariants.ContextAvailable || other.Invariants.ContextAvailable
 	t.Invariants.RetentionAvailable = t.Invariants.RetentionAvailable || other.Invariants.RetentionAvailable
+	t.Invariants.UsageReconciliationAvailable = t.Invariants.UsageReconciliationAvailable || other.Invariants.UsageReconciliationAvailable
 	t.Invariants.NegativeContextViolations += other.Invariants.NegativeContextViolations
 	t.Invariants.InconsistentRetentionViolations += other.Invariants.InconsistentRetentionViolations
+	t.Invariants.UsageReconciliationViolations += other.Invariants.UsageReconciliationViolations
 }
 
 func mergeMaximum(dst *AnalysisValue, src AnalysisValue) {
@@ -986,7 +1376,7 @@ func WriteAnalysisText(report AnalysisReport, w io.Writer) error {
 	fmt.Fprintf(&b, "Session analysis v%d\n", report.Version)
 	fmt.Fprintf(&b, "  path: %s\n", report.Path)
 	fmt.Fprintf(&b, "  roots/sessions: %d / %d\n", report.Roots, report.Sessions)
-	fmt.Fprintf(&b, "  streams missing/incomplete/malformed/symlink: %d / %d / %d / %d\n", report.MissingStreams, report.IncompleteStreams, report.MalformedStreams, report.SymlinkStreams)
+	fmt.Fprintf(&b, "  streams missing/incomplete/malformed/symlink/limit: %d / %d / %d / %d / %d\n", report.MissingStreams, report.IncompleteStreams, report.MalformedStreams, report.SymlinkStreams, report.LimitExceededStreams)
 	fmt.Fprintf(&b, "  malformed child metadata: %d\n", report.MalformedChildMetadata)
 	fmt.Fprintf(&b, "  completeness: %s\n", formatCountMap(true, report.Completeness))
 	fmt.Fprintf(&b, "  prompts completed/observed: %d / %d\n", report.Execution.CompletedPrompts, report.Execution.Prompts)
@@ -994,6 +1384,10 @@ func WriteAnalysisText(report AnalysisReport, w io.Writer) error {
 	fmt.Fprintf(&b, "  terminations: %s\n", formatCountMap(report.Execution.TerminationAvailable, report.Execution.Terminations))
 	fmt.Fprintf(&b, "  telemetry coverage closure/workflow/progress/hooks/context/count-scope/retention: %d/%d/%d/%d/%d/%d/%d of %d\n", report.Coverage.Closure, report.Coverage.Workflow, report.Coverage.Progress, report.Coverage.Hooks, report.Coverage.Context, report.Coverage.ProviderCountScope, report.Coverage.Retention, report.Coverage.Sessions)
 	writeTelemetryText(&b, "  ", report.Telemetry)
+	writeAnalysisUsageText(&b, "  ", report.Usage, report.Distributions)
+	fmt.Fprintf(&b, "  storage bytes total/state/tree/raw/compactions/tool-results: %d / %d / %d / %d / %d / %d\n", report.Storage.TotalBytes, report.Storage.State.Bytes, report.Storage.Tree.Bytes, report.Storage.Raw.Bytes, report.Storage.Compactions.Bytes, report.Storage.ToolResults.Bytes)
+	fmt.Fprintf(&b, "  context resets snapshot/delta; payload bytes: %d / %d; %d / %d\n", report.Storage.SnapshotResetEntries, report.Storage.DeltaResetEntries, report.Storage.SnapshotPayloadBytes, report.Storage.DeltaPayloadBytes)
+	fmt.Fprintf(&b, "  cohorts: %d\n", len(report.Cohorts))
 	limit := min(len(report.Items), maxAnalysisTextSessions)
 	fmt.Fprintf(&b, "Streams (showing %d of %d)\n", limit, len(report.Items))
 	for _, item := range report.Items[:limit] {
@@ -1012,7 +1406,7 @@ func writeTelemetryText(w io.Writer, indent string, t TelemetryAnalysis) {
 	fmt.Fprintf(w, "%sclosure triggers: %s\n", indent, formatCountMap(t.Closure.Available, t.Closure.Triggers))
 	fmt.Fprintf(w, "%sturn budgets exhausted: %s of %s covered prompts\n", indent, availableCount(t.Closure.Available, t.Closure.TurnBudgetExhausted), availableCount(t.Closure.Available, t.Closure.Prompts))
 	if t.Workflow.Available {
-		fmt.Fprintf(w, "%sworkflow supplied/unsupplied: %d / %d; outcomes: %s\n", indent, t.Workflow.Supplied, t.Workflow.Unsupplied, formatCountMap(true, t.Workflow.Outcomes))
+		fmt.Fprintf(w, "%sworkflow supplied/unsupplied: %d / %d; outcomes: %s; unresolved total/median/p90: %d / %d / %d (%d samples)\n", indent, t.Workflow.Supplied, t.Workflow.Unsupplied, formatCountMap(true, t.Workflow.Outcomes), t.Workflow.RemainingRequirementsTotal, t.Workflow.RemainingRequirements.Median, t.Workflow.RemainingRequirements.P90, t.Workflow.RemainingRequirements.Samples)
 	} else {
 		fmt.Fprintf(w, "%sworkflow outcomes: unavailable\n", indent)
 	}
@@ -1041,6 +1435,27 @@ func writeTelemetryText(w io.Writer, indent string, t TelemetryAnalysis) {
 	}
 	fmt.Fprintf(w, "%snegative-context violations: %s\n", indent, availableCount(t.Invariants.ContextAvailable || t.Invariants.RetentionAvailable, t.Invariants.NegativeContextViolations))
 	fmt.Fprintf(w, "%sinconsistent-retention violations: %s\n", indent, availableCount(t.Invariants.RetentionAvailable, t.Invariants.InconsistentRetentionViolations))
+	fmt.Fprintf(w, "%susage-reconciliation violations: %s\n", indent, availableCount(t.Invariants.UsageReconciliationAvailable, t.Invariants.UsageReconciliationViolations))
+}
+
+func writeAnalysisUsageText(w io.Writer, indent string, usage UsageAnalysis, distributions UsageDistributions) {
+	root := addUsageSlice(usage.RootConversational, usage.RootMaintenance)
+	children := addUsageSlice(usage.DescendantConversational, usage.DescendantMaintenance)
+	fmt.Fprintf(w, "%susage tokens root/descendant/inclusive: %s / %s / %s\n", indent, availableUsageTokens(root), availableUsageTokens(children), availableUsageTokens(usage.Inclusive))
+	if usage.Inclusive.Available {
+		fmt.Fprintf(w, "%susage calls priced/unpriced: %d / %d / %d; known cost: $%.6f (complete=%t)\n", indent, usage.Inclusive.ModelCalls, usage.Inclusive.PricedCalls, usage.Inclusive.UnpricedCalls, usage.Inclusive.KnownCostUSD, usage.Inclusive.CostComplete)
+	} else {
+		fmt.Fprintf(w, "%susage calls/cost: unavailable\n", indent)
+	}
+	fmt.Fprintf(w, "%shierarchy token median/p90 inclusive/root/descendant: %d/%d / %d/%d / %d/%d (%d samples)\n", indent, distributions.InclusiveTokens.Median, distributions.InclusiveTokens.P90, distributions.RootTokens.Median, distributions.RootTokens.P90, distributions.DescendantTokens.Median, distributions.DescendantTokens.P90, distributions.InclusiveTokens.Samples)
+	fmt.Fprintf(w, "%shierarchy known-complete cost median/p90: $%.6f / $%.6f (%d samples)\n", indent, distributions.InclusiveKnownCostUSD.Median, distributions.InclusiveKnownCostUSD.P90, distributions.InclusiveKnownCostUSD.Samples)
+}
+
+func availableUsageTokens(usage UsageSlice) string {
+	if !usage.Available {
+		return "unavailable"
+	}
+	return fmt.Sprint(usage.TotalTokens)
 }
 
 func availableCount(available bool, value int) string {

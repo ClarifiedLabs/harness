@@ -617,9 +617,11 @@ type Event struct {
 	Display string    `json:"display,omitempty"`
 	ToolID  string    `json:"tool_id,omitempty"`
 	Tool    string    `json:"tool,omitempty"`
-	// ModelTarget, Provider, APIType, and Model snapshot the resolved model
-	// selection active when a tool was dispatched. Keeping this attribution on
-	// the tool events makes later analysis independent of mutable state.json.
+	// Agent, ModelTarget, Provider, APIType, and Model snapshot the resolved
+	// execution identity. Attempt-start records make agent/model switches
+	// analyzable independently of mutable state.json; tool events also carry the
+	// model attribution active when each tool was dispatched.
+	Agent       string `json:"agent,omitempty"`
 	ModelTarget string `json:"model_target,omitempty"`
 	Provider    string `json:"provider,omitempty"`
 	APIType     string `json:"api_type,omitempty"`

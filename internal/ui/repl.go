@@ -5013,6 +5013,7 @@ func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 		s.rec = sessionrec.New(sessionrec.Config{
 			Dir:                app.SessionPath,
 			Prompt:             prompt,
+			Agent:              app.AgentName,
 			ModelTarget:        app.RegistryModel,
 			Provider:           app.Provider,
 			Model:              app.Model,

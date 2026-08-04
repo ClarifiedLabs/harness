@@ -303,28 +303,70 @@ snapshots produced by the same task/model matrix:
 go run ./scripts/reliabilitybench \
   -baseline /tmp/reliability-baseline-sessions \
   -candidate /tmp/reliability-candidate-sessions \
+  -baseline-outcomes /tmp/baseline-outcomes.json \
+  -candidate-outcomes /tmp/candidate-outcomes.json \
+  -min-matched 3 \
   -format text
 
 # Stable machine-readable comparison; the cutoff is inclusive.
 go run ./scripts/reliabilitybench \
   -baseline /tmp/reliability-baseline-sessions \
   -candidate /tmp/reliability-candidate-sessions \
+  -baseline-outcomes /tmp/baseline-outcomes.json \
+  -candidate-outcomes /tmp/candidate-outcomes.json \
   -before 2026-08-01T12:00:00Z \
   -format json > /tmp/reliability-comparison.json
 ```
 
 The command runs the same recursive, transcript-free analyzer as `harness
 session analyze`, omits per-stream rows from the comparison output, and reports
-candidate-minus-baseline deltas. Each metric retains an availability bit;
-missing legacy telemetry, a zero denominator, an unobserved milestone, an
-incomplete execution corpus, or a cutoff-pending batching steer is not converted
-into a success or failure. Lower is preferred for error/timeout/streak/violation
-metrics and higher for completion, workflow-supply, and batching-compliance
-rates, but the command intentionally does not impose a promotion gate.
+candidate-minus-baseline deltas plus analyzer-v2 usage, storage, distribution,
+and cohort summaries. Text and JSON include uncached input and cache-read tokens,
+root/child usage, median/p90 known-complete cost, context-reset counts and
+snapshot/delta bytes, disk bytes, and auditable build/runtime cohort identity. Each metric retains an availability bit; missing legacy
+telemetry, a zero denominator, an unobserved milestone, an incomplete execution
+corpus, an incomplete storage component, or any cutoff report is not converted
+into a success or failure. In particular, storage/reset metrics are unavailable
+for cutoff reports rather than treating present-day files as prefix-time state. Lower is preferred for error/timeout/streak/violation and efficiency
+metrics; higher is preferred for completion, workflow-supply, and
+batching-compliance rates.
+
+A fixture is one root hierarchy, paired by the root directory basename. Basenames
+must be unique within each corpus; collisions are emitted as ambiguous unmatched
+rows. Automatic promotion requires the baseline and candidate fixture sets to be
+exactly equal, not merely a sufficiently large matched subset. The full root/descendant provider/model/agent multiset must be available,
+stable for every recorded attempt, and match across a pair; missing, switched,
+or differing identity is insufficient data. This uses immutable attempt-start
+identity rather than the mutable final `state.json` snapshot. Analyzer parser-limit
+counts (including `limit_exceeded_streams`) remain visible in corpus summaries.
+Outcome files are strict JSON maps keyed by that basename and provide the
+task/repository-state correctness identity. Both fields are required booleans,
+and unknown fields or duplicate fixture/field keys are rejected. Outcome input is
+capped at 8 MiB:
+
+```json
+{
+  "fixture-a": {"task_completed": true, "expected_state_matches": true}
+}
+```
+
+The v2 verdict is deliberately conservative. Its default minimum is three
+matched fixtures. Below that it returns `insufficient_data`. A comparison made
+with `-before` remains useful evidence but is always `insufficient_data` for
+automatic promotion because state and correctness may exist after the prefix.
+With enough full-session pairs, every pair must have complete physical usage, explicit baseline and candidate
+task/repository-state outcomes, and complete inclusive pricing. Completion-source
+coverage is reported when present but remains optional until structured child
+completion metadata is universally emitted. A known baseline reconciliation
+failure makes the comparison insufficient; a candidate reconciliation failure
+rejects promotion. Candidate task or expected-state failure also rejects
+promotion before efficiency is considered. Only then may the candidate promote,
+and only when median and nearest-rank p90 inclusive tokens and known USD cost do
+not regress; missing coverage remains `insufficient_data`, never a pass.
 
 Keep the two raw analyzer JSON reports with the benchmark evidence when
 reproducibility matters: they contain the complete-prefix byte counts and
 SHA-256 values that identify exactly which records were analyzed. Match session
 counts, models, task fixtures, ordering, and correctness oracles before treating
 a delta as causal. The semantic comparison complements flowbench; it does not
-replace transcript-backed correctness scoring or paired token/cost analysis.
+replace transcript-backed correctness scoring.

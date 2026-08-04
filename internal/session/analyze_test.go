@@ -55,6 +55,9 @@ func TestAnalyzeCorpusRecursiveDiscoveryAndCutoff(t *testing.T) {
 	if report.MissingStreams != 1 || report.IncompleteStreams != 1 || report.MalformedChildMetadata != 1 {
 		t.Fatalf("stream diagnostics = missing %d incomplete %d malformed-meta %d", report.MissingStreams, report.IncompleteStreams, report.MalformedChildMetadata)
 	}
+	if report.Storage.Raw.Status != "incomplete" {
+		t.Fatalf("aggregate raw storage status = %q, want incomplete", report.Storage.Raw.Status)
+	}
 	if !report.Telemetry.Progress.Available || report.Telemetry.Progress.ToolTurns != 1 || report.Telemetry.Progress.TurnsToFirstMutation.Observed {
 		t.Fatalf("cutoff progress = %+v", report.Telemetry.Progress)
 	}
@@ -71,6 +74,77 @@ func TestAnalyzeCorpusRecursiveDiscoveryAndCutoff(t *testing.T) {
 		if strings.Contains(item.Path, "linked") {
 			t.Fatalf("followed symlink: %s", item.Path)
 		}
+	}
+}
+
+func TestAnalyzeCorpusBoundsDiscoveryDepth(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	mustAppendAnalysisEvent(t, root, Event{Type: EventPromptUsage, Prompt: 1})
+	deep := root
+	for range maxAnalysisDiscoveryDepth + 2 {
+		deep = filepath.Join(deep, "children", "c")
+	}
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AnalyzeCorpus(root, AnalyzeOptions{}); err == nil {
+		t.Fatal("AnalyzeCorpus succeeded past the discovery depth bound")
+	}
+}
+
+func TestReadAnalysisEventsUsesBoundedSnapshotAndDropsBodies(t *testing.T) {
+	dir := t.TempDir()
+	canary := "raw-event-body-must-not-be-retained"
+	line, err := json.Marshal(Event{
+		Type: EventModelRequest, Text: canary,
+		ModelRequest: &llm.ModelRequestEvent{State: llm.ModelRequestFailed, Message: canary, ResponsePayload: llm.DiagnosticPayload(`{"canary":"body"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := append(append(append([]byte(nil), line...), '\n'), append(line, '\n')...)
+	if err := os.WriteFile(filepath.Join(dir, eventLog), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	events, source, err := readAnalysisEventsWithLimits(dir, time.Time{}, analysisEventLimits{
+		maxBytes: int64(len(line) + 1), maxLine: len(line) + 1, maxRecords: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.Status != "limit_exceeded" || source.SnapshotBytes != int64(len(data)) || len(events) != 1 || events[0].Text != "" {
+		t.Fatalf("bounded snapshot = source=%+v events=%+v", source, events)
+	}
+	if events[0].ModelRequest.Message != "" || events[0].ModelRequest.ResponsePayload != "" {
+		t.Fatalf("retained model-request body: %+v", events[0].ModelRequest)
+	}
+	storage, err := analyzeStorage(dir, source, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storage.Raw.Status != "limit_exceeded" || storage.Raw.Bytes != int64(len(data)) {
+		t.Fatalf("raw storage = %+v", storage.Raw)
+	}
+
+	events, source, err = readAnalysisEventsWithLimits(dir, time.Time{}, analysisEventLimits{
+		maxBytes: int64(len(data)), maxLine: len(line) - 1, maxRecords: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.Status != "limit_exceeded" || len(events) != 0 {
+		t.Fatalf("line limit = source=%+v events=%d", source, len(events))
+	}
+
+	events, source, err = readAnalysisEventsWithLimits(dir, time.Time{}, analysisEventLimits{
+		maxBytes: int64(len(data)), maxLine: len(line) + 1, maxRecords: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.Status != "limit_exceeded" || len(events) != 1 {
+		t.Fatalf("record limit = source=%+v events=%d", source, len(events))
 	}
 }
 
@@ -263,7 +337,7 @@ func TestAnalysisJSONDeterministicVersionedAndTranscriptFree(t *testing.T) {
 	if first.String() != second.String() {
 		t.Fatalf("JSON is nondeterministic:\n%s\n%s", first.String(), second.String())
 	}
-	if strings.Contains(first.String(), "TOP SECRET") || !strings.Contains(first.String(), `"version": 1`) {
+	if strings.Contains(first.String(), "TOP SECRET") || !strings.Contains(first.String(), `"version": 2`) {
 		t.Fatalf("JSON leaked transcript or omitted version:\n%s", first.String())
 	}
 }
