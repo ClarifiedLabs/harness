@@ -95,15 +95,24 @@ it to `1`.
 
 `harness -p "<task>" -format json` runs one-shot exactly as above, except
 **stdout carries only NDJSON** — one JSON object per line, no human text.
-Human diagnostics (tool summaries, the usage line, errors) stay on stderr,
-unchanged; `-q`, `-v`, and `-tool-stream` remain stderr-only.
+There are three outcomes:
 
-- Line 1 is always a `run_start` envelope
+1. Before a valid JSON run mode is selected, invalid CLI syntax and invalid
+   JSON-mode combinations (such as TTY stdin without `-p`, or `-i`) are ordinary
+   usage errors: stdout is empty and guidance is printed on stderr.
+2. After valid one-shot or piped-interactive JSON mode selection, a startup
+   failure before `run_start` emits exactly one stdout line:
+   `{"type":"startup_error","v":1,"mode":"oneshot"|"interactive","exit_code":…,"error":…,"time":…}`.
+   Consumers must accept it as the complete stream. Stderr is silent.
+3. Once startup succeeds, stdout begins with `run_start` and continues through
+   best-effort `run_end`; physical stderr stays silent. `-q`, `-v`, and
+   `-tool-stream` cannot re-enable human output.
+
+- For a successfully started run, line 1 is a `run_start` envelope
   (`{"type":"run_start","v":1,"mode":"oneshot","session_id":…,"agent":…,
-  "provider":…,"model":…,"images":N}`); the last line is always a `run_end`
-  envelope (`exit_code` mirroring the process exit code, plus
-  `termination_reason`/`error` on failures), even on error or interrupt
-  (best-effort).
+  "provider":…,"model":…,"images":N}`); the last line is a best-effort
+  `run_end` envelope (`exit_code` mirroring the process exit code, plus
+  `termination_reason`/`error` on failures).
 - Each submitted one-shot prompt is bracketed by `prompt_start`/`prompt_end`
   envelopes, including a prompt rejected by skill or hook preflight.
   `prompt_end` carries `exit_code`, `termination_reason`, a
@@ -119,11 +128,13 @@ unchanged; `-q`, `-v`, and `-tool-stream` remain stderr-only.
   notices are therefore both visible to the client and replayable from the
   session log.
 
-The stream protocol is versioned (`run_start.v`, currently `1`). Events use
-ordered bounded backpressure rather than silent dropping. Consumers must ignore
-unknown event types and must handle EOF without `run_end` (process crash, forced
-exit, or stdout write failure); a stdout write failure makes an otherwise
-successful process exit as a runtime error.
+The stream protocol is versioned (`run_start.v` and `startup_error.v`,
+currently `1`). Events use ordered bounded backpressure rather than silent
+dropping. Consumers must ignore unknown event types and must handle EOF without
+`run_end` (process crash, forced exit, or stdout write failure); a broken stdout
+may prevent any usable stream output and never causes a plaintext stderr
+fallback. A stdout write failure makes an otherwise successful process exit as a
+runtime error.
 
 #### Interactive JSON session (piped stdin, no `-p`)
 
@@ -131,17 +142,19 @@ successful process exit as a runtime error.
 interactive session driven by NDJSON messages on stdin, with the same event
 stream on stdout (`run_start` reports `"mode":"interactive"`). This is the
 embedding surface for apps driving harness as a subprocess: stdin is the
-control channel, stdout the event channel, stderr stays human diagnostics.
+control channel, stdout the machine event channel, and stderr is silent after
+valid JSON-mode selection.
 The simplest client is one line:
 
 ```sh
 printf '%s\n' '{"type":"prompt","text":"explain this repo"}' | harness -model openai:gpt-5.5 -format json
 ```
 
-With TTY stdin, `-format json` without `-p` is a usage error (exit 2) — the
-TTY REPL has no JSON mode; `-i` is likewise rejected. A resolvable model is
-required (`-model` or a configured default): the startup model/reasoning
-pickers do not run without a TTY.
+With TTY stdin, `-format json` without `-p` is a pre-selection usage error
+(exit 2) — the TTY REPL has no JSON mode; `-i` is likewise rejected. These
+errors emit no JSON and print guidance on stderr. A resolvable model is required
+(`-model` or a configured default): the startup model/reasoning pickers do not
+run without a TTY.
 
 Input messages — one JSON object per line, max 16 MiB per line, unknown keys
 ignored:
@@ -155,9 +168,8 @@ ignored:
 
 Stdin EOF is a graceful **drain**, not a cancel: the active prompt and any
 queued prompts finish, then harness saves the session, emits `run_end`, and
-exits 0. EOF with a handoff approval pending declines the handoff (`[handoff
-cancelled]` on stderr, never auto-approve), then drains queued prompts the
-same way.
+exits 0. EOF with a handoff approval pending declines the handoff (never
+auto-approve), then drains queued prompts the same way.
 
 Malformed JSON, an unknown `type`, missing required fields, prompt-preparation
 failure, or a `prompt` sent while an approval is pending produce an
@@ -190,9 +202,9 @@ result text. Ordinary client prompts omit `cause`, preserving their event shape.
 Session events between `prompt_start`/`prompt_end` carry the server-assigned
 `prompt` number. Approving a handoff performs the same agent switch the TTY
 `/handoff` flow does and starts the implementation agent on the recorded
-plan (its prompt appears as a normal `prompt_start`); declining prints
-`[handoff cancelled]` on stderr. Slash commands, session goals, idle
-compaction, history, and interactive pickers are not part of the JSON mode —
+plan (its prompt appears as a normal `prompt_start`); declining cancels the
+handoff. Slash commands, session goals, idle compaction, history, and
+interactive pickers are not part of the JSON mode —
 agent and model switching are `prompt` fields, and a client that needs a
 picker's data can use `--models --format json` / `--agents --format json`
 and send an explicit switch.
@@ -1943,9 +1955,10 @@ likely slow response startup, harness prints one warning per prompt to stderr.
 - A second Ctrl-C within about one second, or Ctrl-C at the idle prompt, saves,
   prints the session token summary, and exits 130.
 - Ctrl-D at the prompt saves, prints the summary, and exits 0.
-- Ctrl-C during startup or helper-command network work cancels the in-flight
-  request and exits 130 instead of waiting for the request timeout. This includes
-  `session replay --follow`, where it ends an otherwise open-ended root follow.
+- Ctrl-C during startup (including `SessionStart` hooks) or helper-command
+  network work cancels the in-flight operation and exits 130 instead of waiting
+  for its timeout. This includes `session replay --follow`, where it ends an
+  otherwise open-ended root follow.
 
 ## Hooks
 

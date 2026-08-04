@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/modelproxy/protocol"
+	"harness/internal/runstream"
 	"harness/internal/session"
 	"harness/internal/tools"
 	"harness/internal/tracing"
@@ -334,6 +336,7 @@ func TestRunOneShotJSONStream(t *testing.T) {
 		Usage:  llm.Usage{InputTokens: 5, OutputTokens: 1},
 	})
 	env, out, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-p", "what is the answer", "-format", "json"}, fp, "")
+	env.colorTTY = true
 
 	code := run(env)
 	if code != ui.ExitOK {
@@ -383,9 +386,9 @@ func TestRunOneShotJSONStream(t *testing.T) {
 		t.Fatalf("run_end exit_code = %v, want 0", runEnd["exit_code"])
 	}
 	// The per-line json.Unmarshal above already proves stdout carries NDJSON
-	// only; human diagnostics stay on stderr, unchanged.
-	if !strings.Contains(errw.String(), "session:") {
-		t.Errorf("session path should be printed on stderr, errw=%q", errw.String())
+	// only; JSON mode suppresses all physical stderr output, even on a TTY.
+	if errw.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", errw.String())
 	}
 }
 
@@ -418,9 +421,169 @@ func TestRunFormatJSONWithoutPromptRequiresPipedStdin(t *testing.T) {
 	}
 }
 
+func TestRunJSONStartupFailure(t *testing.T) {
+	missingResume := filepath.Join(t.TempDir(), "missing-session")
+	tests := []struct {
+		name       string
+		args       []string
+		stdinPiped bool
+		mode       string
+		exitCode   int
+		errorText  string
+	}{
+		{
+			name:      "missing resume",
+			args:      []string{"-model", "claude-opus-4-8", "-resume", missingResume, "-p", "hello", "-format", "json"},
+			mode:      runstream.ModeOneshot,
+			exitCode:  ui.ExitRuntime,
+			errorText: "resume",
+		},
+		{
+			name:       "unknown interactive agent",
+			args:       []string{"-model", "claude-opus-4-8", "-agent", "bogus", "-format", "json"},
+			stdinPiped: true,
+			mode:       runstream.ModeInteractive,
+			exitCode:   ui.ExitUsage,
+			errorText:  "unknown agent",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fp := llmtest.New("fake")
+			env, out, errw, _ := fakeProviderEnv(t, tt.args, fp, "")
+			env.stdinPiped = tt.stdinPiped
+
+			if code := run(env); code != tt.exitCode {
+				t.Fatalf("exit code = %d, want %d; stdout=%q stderr=%q", code, tt.exitCode, out.String(), errw.String())
+			}
+			if errw.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", errw.String())
+			}
+			if strings.Count(out.String(), "\n") != 1 {
+				t.Fatalf("stdout should contain exactly one JSON line, got %q", out.String())
+			}
+
+			var got runstream.StartupError
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatalf("startup error JSON: %v\n%s", err, out.String())
+			}
+			if got.Type != runstream.TypeStartupError || got.V != runstream.Version || got.Mode != tt.mode || got.ExitCode != tt.exitCode {
+				t.Fatalf("startup error = %+v", got)
+			}
+			if got.Time.IsZero() {
+				t.Fatal("startup error time is zero")
+			}
+			if !strings.Contains(got.Error, tt.errorText) {
+				t.Fatalf("startup error text = %q, want %q", got.Error, tt.errorText)
+			}
+			if strings.Contains(out.String(), `"type":"run_start"`) {
+				t.Fatalf("startup output unexpectedly contains run_start: %q", out.String())
+			}
+			if len(fp.Requests) != 0 {
+				t.Fatalf("provider turns = %d, want 0", len(fp.Requests))
+			}
+		})
+	}
+}
+
+type blockingPromptReader struct {
+	started chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingPromptReader) Read([]byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	<-r.release
+	return 0, io.EOF
+}
+
 type rejectingWriter struct{ err error }
 
 func (w rejectingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestRunJSONStartupInterruptDuringPromptRead(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, out, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-p", "-", "-format", "json"}, fp, "")
+	release := make(chan struct{})
+	defer close(release)
+	reader := &blockingPromptReader{started: make(chan struct{}), release: release}
+	env.stdin = reader
+	env.stdinPiped = true
+	signals := make(chan os.Signal, 1)
+	env.sigCh = signals
+
+	done := make(chan int, 1)
+	go func() { done <- run(env) }()
+	select {
+	case <-reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("one-shot prompt read did not start")
+	}
+	signals <- os.Interrupt
+
+	select {
+	case code := <-done:
+		if code != ui.ExitInterrupt {
+			t.Fatalf("startup interrupt exit = %d, want %d; stdout=%q stderr=%q", code, ui.ExitInterrupt, out.String(), errw.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup interrupt did not cancel blocked prompt read")
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", errw.String())
+	}
+	if strings.Count(out.String(), "\n") != 1 {
+		t.Fatalf("stdout should contain exactly one JSON line, got %q", out.String())
+	}
+	var got runstream.StartupError
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("startup error JSON: %v\n%s", err, out.String())
+	}
+	if got.Type != runstream.TypeStartupError || got.V != runstream.Version || got.Mode != runstream.ModeOneshot || got.ExitCode != ui.ExitInterrupt || got.Error != "startup interrupted" {
+		t.Fatalf("startup error = %+v", got)
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("provider turns = %d, want 0", len(fp.Requests))
+	}
+}
+
+func TestRunJSONInterruptDuringBlockedStartupErrorWrite(t *testing.T) {
+	missingResume := filepath.Join(t.TempDir(), "missing-session")
+	fp := llmtest.New("fake")
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-resume", missingResume, "-p", "hello", "-format", "json"}, fp, "")
+	blocked := &blockingWriter{started: make(chan struct{}), release: make(chan struct{})}
+	defer close(blocked.release)
+	env.stdout = blocked
+	signals := make(chan os.Signal, 1)
+	env.sigCh = signals
+
+	done := make(chan int, 1)
+	go func() { done <- run(env) }()
+	select {
+	case <-blocked.started:
+		// The non-interrupt startup failure has reached its sole startup_error
+		// write and is blocked in stdout.
+	case <-time.After(time.Second):
+		t.Fatal("startup error did not attempt stdout write")
+	}
+	signals <- os.Interrupt
+	select {
+	case code := <-done:
+		if code != ui.ExitRuntime {
+			t.Fatalf("interrupted startup error write = %d, want original %d; stderr=%q", code, ui.ExitRuntime, errw.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SIGINT did not release blocked startup_error write")
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", errw.String())
+	}
+	if fp.RequestCount() != 0 {
+		t.Fatalf("provider turns = %d, want 0", fp.RequestCount())
+	}
+}
 
 func TestRunJSONStdoutFailureReturnsRuntimeError(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
@@ -430,6 +593,9 @@ func TestRunJSONStdoutFailureReturnsRuntimeError(t *testing.T) {
 	code := run(env)
 	if code != ui.ExitRuntime {
 		t.Fatalf("run exit = %d, want %d for stdout write failure; stderr=%q", code, ui.ExitRuntime, errw.String())
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty after stream startup", errw.String())
 	}
 }
 
@@ -476,6 +642,51 @@ func TestRunJSONForceExitDoesNotWaitForBlockedStdout(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("force exit waited for blocked JSON stdout")
+	}
+}
+
+func TestRunJSONStartupInterruptDoesNotWaitForBlockedStartupErrorWrite(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-p", "-", "-format", "json"}, fp, "")
+	promptRelease := make(chan struct{})
+	defer close(promptRelease)
+	reader := &blockingPromptReader{started: make(chan struct{}), release: promptRelease}
+	blocked := &blockingWriter{started: make(chan struct{}), release: make(chan struct{})}
+	defer close(blocked.release)
+	env.stdin = reader
+	env.stdinPiped = true
+	env.stdout = blocked
+	signals := make(chan os.Signal, 1)
+	env.sigCh = signals
+
+	done := make(chan int, 1)
+	go func() { done <- run(env) }()
+	select {
+	case <-reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("one-shot prompt read did not start")
+	}
+	signals <- os.Interrupt
+	select {
+	case <-blocked.started:
+		// The finalizer attempted the one allowed startup_error write, but stdout
+		// is intentionally stalled.
+	case <-time.After(time.Second):
+		t.Fatal("startup interrupt did not attempt startup_error output")
+	}
+	select {
+	case code := <-done:
+		if code != ui.ExitInterrupt {
+			t.Fatalf("startup interrupt with blocked stdout = %d, want %d; stderr=%q", code, ui.ExitInterrupt, errw.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup interrupt waited for blocked startup_error output")
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", errw.String())
+	}
+	if fp.RequestCount() != 0 {
+		t.Fatalf("provider turns = %d, want 0", fp.RequestCount())
 	}
 }
 
@@ -535,8 +746,8 @@ func TestRunInteractiveJSONSession(t *testing.T) {
 	if runEnd["exit_code"] != float64(0) {
 		t.Fatalf("run_end = %v", runEnd)
 	}
-	if !strings.Contains(errw.String(), "session:") {
-		t.Errorf("session path should be printed on stderr, errw=%q", errw.String())
+	if errw.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", errw.String())
 	}
 }
 
@@ -563,6 +774,9 @@ func TestRunFormatJSONInitialPromptRejected(t *testing.T) {
 	}
 	if !strings.Contains(errw.String(), "-i is not supported with -format json") {
 		t.Fatalf("stderr = %q, want the -i rejection", errw.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("usage errors stay off stdout, got %q", out.String())
 	}
 }
 
@@ -3240,6 +3454,153 @@ func TestRunSigintDuringModelCatalogFetch(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Fatalf("interrupted startup should not write stdout; stdout=%q", out.String())
+	}
+}
+
+func TestRunJSONSigintDuringModelCatalogFetch(t *testing.T) {
+	requestStarted := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		close(requestStarted)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	sigCh := make(chan os.Signal, 1)
+	var out, errw bytes.Buffer
+	env := environment{
+		args:   []string{"-model", "claude-opus-4-8", "-model-proxy-url", srv.URL, "-p", "hello", "-format", "json"},
+		stdin:  strings.NewReader(""),
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(k string) string {
+			switch k {
+			case "HOME":
+				return dir
+			case "XDG_STATE_HOME":
+				return filepath.Join(dir, "state")
+			default:
+				return ""
+			}
+		},
+		now:      time.Now,
+		colorTTY: false,
+		sigCh:    sigCh,
+	}
+
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(env) }()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("model catalog request did not start")
+	}
+	sigCh <- os.Interrupt
+
+	select {
+	case code := <-codeCh:
+		if code != ui.ExitInterrupt {
+			t.Fatalf("SIGINT during catalog fetch exit = %d, want %d; stdout=%q stderr=%q", code, ui.ExitInterrupt, out.String(), errw.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("run did not exit after SIGINT during catalog fetch")
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", errw.String())
+	}
+	if strings.Count(out.String(), "\n") != 1 {
+		t.Fatalf("stdout should contain exactly one JSON line, got %q", out.String())
+	}
+	var got runstream.StartupError
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("startup error JSON: %v\n%s", err, out.String())
+	}
+	if got.Type != runstream.TypeStartupError || got.V != runstream.Version || got.Mode != runstream.ModeOneshot || got.ExitCode != ui.ExitInterrupt || got.Error != "startup interrupted" {
+		t.Fatalf("startup error = %+v", got)
+	}
+}
+
+func TestRunJSONSigintDuringSessionStartHook(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "hook-started")
+	command := fmt.Sprintf("printf started > %q; sleep 600", marker)
+	raw, err := json.Marshal(map[string]any{
+		"SessionStart": []any{map[string]any{
+			"hooks": []any{map[string]any{"type": "command", "command": command}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookPath := writeMainConfig(t, string(raw))
+	fp := llmtest.New("fake")
+	env, out, errw, _ := fakeProviderEnv(t, []string{
+		"-model", "claude-opus-4-8", "-p", "hello", "-format", "json", "-hooks", hookPath,
+	}, fp, "")
+	signals := make(chan os.Signal, 1)
+	env.sigCh = signals
+
+	codeCh := make(chan int, 1)
+	finished := false
+	t.Cleanup(func() {
+		if finished {
+			return
+		}
+		select {
+		case signals <- os.Interrupt:
+		default:
+		}
+		select {
+		case <-codeCh:
+		case <-time.After(time.Second):
+		}
+	})
+	go func() { codeCh <- run(env) }()
+
+	deadline := time.After(time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("session-start hook did not start")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	signals <- os.Interrupt
+
+	select {
+	case code := <-codeCh:
+		finished = true
+		if code != ui.ExitInterrupt {
+			t.Fatalf("SIGINT during session-start hook exit = %d, want %d; stdout=%q stderr=%q", code, ui.ExitInterrupt, out.String(), errw.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not exit after SIGINT during session-start hook")
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", errw.String())
+	}
+	if strings.Count(out.String(), "\n") != 1 {
+		t.Fatalf("stdout should contain exactly one JSON line, got %q", out.String())
+	}
+	var got runstream.StartupError
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("startup error JSON: %v\n%s", err, out.String())
+	}
+	if got.Type != runstream.TypeStartupError || got.V != runstream.Version || got.Mode != runstream.ModeOneshot || got.ExitCode != ui.ExitInterrupt || got.Error == "" {
+		t.Fatalf("startup error = %+v", got)
+	}
+	if strings.Contains(out.String(), `"type":"run_start"`) {
+		t.Fatalf("startup output unexpectedly contains run_start: %q", out.String())
+	}
+	if fp.RequestCount() != 0 {
+		t.Fatalf("provider turns = %d, want 0", fp.RequestCount())
 	}
 }
 

@@ -19,9 +19,10 @@ import (
 // §10: `harness -format json` with no -p and piped stdin). Prompts, mid-prompt
 // steering, handoff approvals, interrupt, and shutdown arrive as input
 // messages; the JSON run stream on app.RunStream carries prompts, mirrored
-// session events, approvals, and input errors. Human diagnostics stay on
-// app.Errw. Stdin EOF means shutdown. The return value is the process exit
-// code: 0 graceful shutdown, 130 interrupted.
+// session events, approvals, and input errors. Logical UI diagnostics write to
+// app.Errw; root JSON-mode wiring supplies the capture-then-discard writer that
+// mutes physical stderr. Stdin EOF means shutdown. The return value is the
+// process exit code: 0 graceful shutdown, 130 interrupted.
 func RunJSON(r io.Reader, app *App) int {
 	d := &jsonDriver{app: app, w: app.RunStream, dec: runstream.NewDecoder(r)}
 	return d.run()
@@ -36,14 +37,15 @@ type jsonDriver struct {
 	w   *runstream.Writer
 	dec *runstream.Decoder
 
-	msgs              chan jsonInputMsg
-	done              chan jsonPromptDone
-	active            *jsonActivePrompt
-	queued            []jsonPromptRequest
-	approval          *jsonPendingApproval
-	approvalSeq       int
-	shutdownRequested bool
-	eofSeen           bool
+	msgs               chan jsonInputMsg
+	done               chan jsonPromptDone
+	active             *jsonActivePrompt
+	queued             []jsonPromptRequest
+	approval           *jsonPendingApproval
+	approvalSeq        int
+	shutdownRequested  bool
+	eofSeen            bool
+	forceExitRequested bool
 }
 
 type jsonInputMsg struct {
@@ -96,6 +98,10 @@ func (d *jsonDriver) run() int {
 	}
 	go d.readInput()
 	for {
+		if d.forceExitRequested {
+			d.forceExitPrompt()
+			return ExitInterrupt
+		}
 		var detachedWaitReady <-chan struct{}
 		if d.detachedContinuationEligible() {
 			detachedWaitReady = d.app.Background.DetachedWaitReady()
@@ -345,7 +351,16 @@ func (d *jsonDriver) steer(req jsonPromptRequest) {
 		d.queued = append(d.queued, req)
 		return
 	}
-	steered, err := d.app.prepareSteerInput(req.text, promptOptions{resolveSkillMentions: true, attachPromptImages: false})
+	preflight := newForceExitPreflight(d.app.ForceExit)
+	steered, err := d.app.prepareSteerInput(req.text, promptOptions{
+		resolveSkillMentions: true,
+		attachPromptImages:   false,
+		preflightContext:     preflight.Context(),
+	})
+	if preflight.Finish() {
+		d.forceExitRequested = true
+		return
+	}
 	if err != nil {
 		d.w.InputError(req.id, err.Error())
 		return
@@ -420,7 +435,16 @@ func (d *jsonDriver) startPrompt(req jsonPromptRequest) {
 		contentImages = req.steer.Images
 		promptContext = req.steer.RequestContext
 	default:
-		prepared, err := app.preparePrompt(req.text, promptOptions{resolveSkillMentions: true, attachPromptImages: false}, false)
+		preflight := newForceExitPreflight(app.ForceExit)
+		prepared, err := app.preparePrompt(req.text, promptOptions{
+			resolveSkillMentions: true,
+			attachPromptImages:   false,
+			preflightContext:     preflight.Context(),
+		}, false)
+		if preflight.Finish() {
+			d.forceExitRequested = true
+			return
+		}
 		if err != nil {
 			d.w.InputError(req.id, err.Error())
 			d.startNextQueued()
@@ -593,26 +617,10 @@ func (d *jsonDriver) requestShutdown() {
 func (d *jsonDriver) boundary() bool {
 	app := d.app
 	app.pollBackgroundNotices()
-	ctx, cancel := context.WithCancel(context.Background())
-	interrupted := make(chan struct{})
-	if app.ForceExit != nil {
-		go func() {
-			select {
-			case <-app.ForceExit:
-				close(interrupted)
-				cancel()
-			case <-ctx.Done():
-			}
-		}()
-	}
-	_ = app.refreshMCP(ctx)
-	cancel()
-	select {
-	case <-interrupted:
+	preflight := newForceExitPreflight(app.ForceExit)
+	_ = app.refreshMCP(preflight.Context())
+	if preflight.Finish() {
 		return true
-	case <-app.ForceExit:
-		return true
-	default:
 	}
 	if !d.eofSeen && app.hasPendingHandoffRequest() {
 		req, ok := app.prepareHandoff("")

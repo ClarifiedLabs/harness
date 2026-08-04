@@ -164,7 +164,7 @@ func signalCancelContext(sigCh <-chan os.Signal) (context.Context, context.Cance
 
 // run wires everything together and returns the process exit code (design §10
 // exit codes: 0 ok, 1 runtime, 2 usage, 130 interrupted).
-func runRoot(env environment, invocation cli.Invocation) int {
+func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	stdin := env.stdin
 	stdout := env.stdout
 	stderr := env.stderr
@@ -191,6 +191,67 @@ func runRoot(env environment, invocation cli.Invocation) int {
 	}
 	cfg := result.Config
 	runOptions := result.Run
+	jsonInformational := runOptions.ShowAgents || runOptions.ShowModels || runOptions.CheckModelProxy
+	jsonRunMode := runOptions.OutputFormat == "json" && !runOptions.DebugRequest && !jsonInformational
+	jsonRunStreamMode := ""
+	if jsonRunMode {
+		// The TTY REPL has no JSON mode: without -p the session must be driven by
+		// NDJSON messages on piped stdin (interactive JSON sessions). These are
+		// invocation errors, so they remain ordinary stderr usage errors.
+		switch {
+		case !runOptions.PromptSet && runOptions.InitialPromptSet:
+			fmt.Fprintln(stderr, "harness: -i is not supported with -format json; use -p or pipe stdin")
+			return ui.ExitUsage
+		case !runOptions.PromptSet && !env.stdinPiped:
+			fmt.Fprintln(stderr, "harness: -format json without -p: nothing to read JSON messages from; use -p or pipe stdin")
+			return ui.ExitUsage
+		case runOptions.PromptSet:
+			jsonRunStreamMode = runstream.ModeOneshot
+		default:
+			jsonRunStreamMode = runstream.ModeInteractive
+		}
+	}
+
+	rawStdout := stdout
+	var startupDiagnostics *jsonRunDiagnostics
+	jsonRunCommitted := false
+	var startupCtx context.Context
+	var stopStartup func()
+	var startupInterrupted func() bool
+	var startupWriteAbort <-chan struct{}
+	var jsonInterrupts *jsonRunInterrupts
+	if jsonRunMode {
+		startupDiagnostics = &jsonRunDiagnostics{}
+		stderr = startupDiagnostics
+		// Start watching as soon as JSON mode is valid, including proxy and runtime
+		// setup. Register Stop before the finalizer so the watcher remains live while
+		// a startup_error write is in progress.
+		jsonInterrupts = newJSONRunInterrupts(env.sigCh, now)
+		startupCtx = jsonInterrupts.Context()
+		startupWriteAbort = startupCtx.Done()
+		stopStartup = jsonInterrupts.StopStartup
+		startupInterrupted = jsonInterrupts.StartupInterrupted
+		defer jsonInterrupts.Stop()
+		defer func() {
+			if jsonRunCommitted || exitCode == ui.ExitOK {
+				return
+			}
+			diagnostic := startupDiagnostics.snapshotAndSeal()
+			if diagnostic == "" {
+				if exitCode == ui.ExitInterrupt {
+					diagnostic = "startup interrupted"
+				} else {
+					diagnostic = "startup failed"
+				}
+			}
+			_ = runstream.WriteStartupErrorWithAbort(rawStdout, runstream.StartupError{
+				Mode:     jsonRunStreamMode,
+				ExitCode: exitCode,
+				Error:    diagnostic,
+			}, startupWriteAbort)
+		}()
+	}
+
 	configWritePath := result.ConfigPath
 	if configWritePath == "" {
 		configWritePath = filepath.Join(defaultConfigDir(getenv), "config.json")
@@ -215,8 +276,10 @@ func runRoot(env environment, invocation cli.Invocation) int {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
 	}
-	startupCtx, stopStartup, startupInterrupted := signalCancelContext(env.sigCh)
-	defer stopStartup()
+	if !jsonRunMode {
+		startupCtx, stopStartup, startupInterrupted = signalCancelContext(env.sigCh)
+		defer stopStartup()
+	}
 	if runOptions.ShowAgents || runOptions.ShowModels {
 		var agents *agentsListOutput
 		if runOptions.ShowAgents {
@@ -299,26 +362,11 @@ func runRoot(env environment, invocation cli.Invocation) int {
 		}
 		return ui.ExitOK
 	}
-	if runOptions.OutputFormat == "json" && !runOptions.PromptSet && !runOptions.DebugRequest {
-		// -format json without -p selects a JSON run mode (design §10). The
-		// TTY REPL has no JSON mode: without -p the session must be driven by
-		// NDJSON messages on piped stdin (interactive JSON sessions).
-		switch {
-		case runOptions.InitialPromptSet:
-			fmt.Fprintln(stderr, "harness: -i is not supported with -format json; use -p or pipe stdin")
-			return ui.ExitUsage
-		case !env.stdinPiped:
-			fmt.Fprintln(stderr, "harness: -format json without -p: nothing to read JSON messages from; use -p or pipe stdin")
-			return ui.ExitUsage
-		}
-	}
 	// The JSON run modes give stdout exclusively to the NDJSON event stream:
 	// assistant text and reasoning flow as assistant_delta/reasoning_summary
-	// events, so the human renderer's stdout path is muted by discarding
-	// coordinator stdout. stderr is unchanged. The run stream itself writes to
-	// the raw stdout handle.
-	rawStdout := stdout
-	jsonRunMode := runOptions.OutputFormat == "json" && (runOptions.PromptSet || env.stdinPiped) && !runOptions.DebugRequest
+	// events, so the human renderer's stdout path is muted by discarding the
+	// coordinator stdout. Its stderr path uses startupDiagnostics and therefore
+	// captures startup diagnostics before discarding all active-run display output.
 	coordinatorOut := stdout
 	if jsonRunMode {
 		coordinatorOut = io.Discard
@@ -1302,17 +1350,24 @@ func runRoot(env environment, invocation cli.Invocation) int {
 		} else if resumed != nil {
 			source = "resume"
 		}
-		app.RunSessionStartHook(source)
+		app.RunSessionStartHookWithContext(startupCtx, source)
 	}
 	if startupInterrupted() {
 		return ui.ExitInterrupt
 	}
-	stopStartup()
 
-	// SIGINT wiring (design §8.4): a single handler cancels the active prompt or,
-	// on a second press / at the idle prompt, requests exit.
+	// JSON mode keeps its startup watcher through stream admission so a SIGINT
+	// cannot be lost while swapping to active-run behavior. Text modes retain the
+	// existing separate startup and active watchers.
 	exitCh := make(chan struct{})
-	if env.sigCh != nil {
+	if jsonRunMode {
+		if watcher := jsonInterrupts.Watcher(); watcher != nil {
+			exitCh = jsonInterrupts.ExitCh()
+			app.Interrupt = watcher
+			app.ForceExit = exitCh
+		}
+	} else if env.sigCh != nil {
+		stopStartup()
 		var exitOnce sync.Once
 		watcher := agent.NewInterruptWatcher(env.sigCh, now, func() {
 			exitOnce.Do(func() { close(exitCh) })
@@ -1321,6 +1376,8 @@ func runRoot(env environment, invocation cli.Invocation) int {
 		defer stop()
 		app.Interrupt = watcher
 		app.ForceExit = exitCh
+	} else {
+		stopStartup()
 	}
 
 	// Mid-prompt steering: route input submitted during a running prompt into the
@@ -1335,7 +1392,16 @@ func runRoot(env environment, invocation cli.Invocation) int {
 
 	// One-shot mode: a single prompt, then exit (design §10).
 	if runOptions.PromptSet {
-		prompt, err := ui.BuildPrompt(runOptions.Prompt, stdin, env.stdinPiped)
+		var prompt string
+		var err error
+		if jsonRunMode {
+			prompt, err = buildPromptWithStartupContext(startupCtx, runOptions.Prompt, stdin, env.stdinPiped)
+		} else {
+			prompt, err = ui.BuildPrompt(runOptions.Prompt, stdin, env.stdinPiped)
+		}
+		if jsonRunMode && (startupInterrupted() || errors.Is(err, context.Canceled)) {
+			return ui.ExitInterrupt
+		}
 		if err != nil {
 			fmt.Fprintf(stderr, "harness: read prompt: %v\n", err)
 			return ui.ExitRuntime
@@ -1351,16 +1417,24 @@ func runRoot(env environment, invocation cli.Invocation) int {
 		app.PendingImages = images
 		var stream *runstream.Writer
 		if jsonRunMode {
-			stream = runstream.NewWriterWithAbort(rawStdout, runstream.RunStart{
-				Mode:      runstream.ModeOneshot,
-				SessionID: filepath.Base(sessionPath),
-				Agent:     agentName,
-				Provider:  cfg.Provider,
-				Model:     registryModel,
-				Images:    len(images),
-				Time:      now(),
-			}, stderr, exitCh)
-			app.RunStream = stream
+			if !jsonInterrupts.Commit(func() {
+				startupDiagnostics.commit()
+				jsonRunCommitted = true
+				stopStartup()
+				stream = runstream.NewWriterWithAbort(rawStdout, runstream.RunStart{
+					Mode:      runstream.ModeOneshot,
+					SessionID: filepath.Base(sessionPath),
+					Agent:     agentName,
+					Provider:  cfg.Provider,
+					Model:     registryModel,
+					Images:    len(images),
+					Time:      now(),
+				}, stderr, exitCh)
+				app.RunStream = stream
+			}) {
+				return ui.ExitInterrupt
+			}
+			stream.WaitForStart()
 		}
 		fmt.Fprintf(stderr, "session: %s\n", sessionPath)
 		fmt.Fprintln(stderr, ui.ProviderLine(cfg.Provider, cfg.Model, registryModel, reasoning, modelRegistry))
@@ -1384,15 +1458,24 @@ func runRoot(env environment, invocation cli.Invocation) int {
 	// Interactive JSON mode: NDJSON input messages on piped stdin drive the
 	// session (design §10); the JSON run stream owns stdout.
 	if machineInteractive {
-		stream := runstream.NewWriterWithAbort(rawStdout, runstream.RunStart{
-			Mode:      runstream.ModeInteractive,
-			SessionID: filepath.Base(sessionPath),
-			Agent:     agentName,
-			Provider:  cfg.Provider,
-			Model:     registryModel,
-			Time:      now(),
-		}, stderr, exitCh)
-		app.RunStream = stream
+		var stream *runstream.Writer
+		if !jsonInterrupts.Commit(func() {
+			startupDiagnostics.commit()
+			jsonRunCommitted = true
+			stopStartup()
+			stream = runstream.NewWriterWithAbort(rawStdout, runstream.RunStart{
+				Mode:      runstream.ModeInteractive,
+				SessionID: filepath.Base(sessionPath),
+				Agent:     agentName,
+				Provider:  cfg.Provider,
+				Model:     registryModel,
+				Time:      now(),
+			}, stderr, exitCh)
+			app.RunStream = stream
+		}) {
+			return ui.ExitInterrupt
+		}
+		stream.WaitForStart()
 		fmt.Fprintf(stderr, "session: %s\n", sessionPath)
 		fmt.Fprintln(stderr, ui.ProviderLine(cfg.Provider, cfg.Model, registryModel, reasoning, modelRegistry))
 		if resumed != nil {

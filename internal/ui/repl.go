@@ -4581,11 +4581,19 @@ func (app *App) runPromptSubmitHook(ctx context.Context, prompt string, promptID
 	return res
 }
 
+// RunSessionStartHook runs the session-start hooks without cancellation. It is
+// used for session lifecycle transitions initiated from the interactive UI.
 func (app *App) RunSessionStartHook(source string) {
+	app.RunSessionStartHookWithContext(context.Background(), source)
+}
+
+// RunSessionStartHookWithContext runs the session-start hooks with ctx so root
+// startup can stop a slow hook when the user interrupts it.
+func (app *App) RunSessionStartHookWithContext(ctx context.Context, source string) {
 	if app.Hooks == nil || !app.Hooks.HasEvent(hooks.SessionStart) {
 		return
 	}
-	res := app.Hooks.Run(context.Background(), hooks.SessionStart, source, hooks.Payload{"source": source})
+	res := app.Hooks.Run(ctx, hooks.SessionStart, source, hooks.Payload{"source": source})
 	app.recordHookDiagnostics(0, res.Diagnostics)
 	app.renderHookNotices(res.Notices)
 	if len(res.AdditionalContext) > 0 {

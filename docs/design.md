@@ -3374,21 +3374,27 @@ output belongs in hook context.
 
 #### JSON run stream (`-format json`, `internal/runstream`)
 
-`-format json` turns run stdout into a versioned NDJSON stream
-(`run_start.v`, currently `1`): line 1 is a `run_start` envelope, the last
-line is a `run_end` envelope (`exit_code` mirrors the process exit code), and
-each prompt is bracketed by `prompt_start`/`prompt_end` (`prompt_end` carries
-`exit_code`, `termination_reason`, a usage summary, and `final_text` — the
-last assistant text message, extracted the way delegate child reports do). A
-host-created boundary carries the same bounded `cause` on both envelopes;
-ordinary client prompts omit it so their wire shape is unchanged.
+`-format json` has two valid top-level stdout shapes. A failure after valid
+JSON-mode selection but before stream construction emits exactly one versioned
+`startup_error` object (`type`, `v`, `mode`, `exit_code`, `error`, `time`). A
+successfully started run is a versioned NDJSON stream (`run_start.v`, currently
+`1`): line 1 is a `run_start` envelope, the last line is a best-effort
+`run_end` envelope (`exit_code` mirrors the process exit code), and each prompt
+is bracketed by `prompt_start`/`prompt_end` (`prompt_end` carries `exit_code`,
+`termination_reason`, a usage summary, and `final_text` — the last assistant
+text message, extracted the way delegate child reports do). A host-created
+boundary carries the same bounded `cause` on both envelopes; ordinary client
+prompts omit it so their wire shape is unchanged.
 Between the envelopes the stream carries the session's own `session.Event`
 objects, mirrored post-coalescing, so stdout and `raw.ndjson` can never
-diverge (§11). The human renderer's stdout path is muted by discarding the
-output coordinator's stdout; stderr behavior is unchanged. `internal/runstream`
-owns the whole public schema in both directions — event envelopes plus the
-NDJSON input decoder — with doc comments stating the consumer/producer rules;
-stdout-only envelopes are never persisted.
+diverge (§11). After valid JSON-mode selection, root wiring captures logical
+stderr while startup is pending for a possible `startup_error`; immediately
+before `run_start`, it clears that capture and discards both human renderer
+paths. `internal/runstream` continues to write directly to raw stdout, while
+`diagnostics.ndjson` persistence remains independent of display suppression.
+`internal/runstream` owns the whole public schema in both directions — event
+envelopes plus the NDJSON input decoder — with doc comments stating the
+consumer/producer rules; stdout-only envelopes are never persisted.
 
 Two run modes share the stream:
 

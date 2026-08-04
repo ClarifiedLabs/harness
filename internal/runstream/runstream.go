@@ -1,8 +1,8 @@
 // Package runstream owns the JSON run-event vocabulary for the
-// `harness -format json` run modes: a versioned NDJSON stream on stdout that
-// mirrors the session's durable raw.ndjson event stream between run_start and
-// run_end envelopes, with prompt_start/prompt_end envelopes bracketing each
-// prompt. stdout carries only this stream; human diagnostics stay on stderr.
+// `harness -format json` run modes. A valid top-level stdout shape is either a
+// single versioned startup_error for a failure before run_start, or a versioned
+// NDJSON stream beginning with run_start, followed by prompt envelopes and
+// mirrored durable raw.ndjson events, and ending with best-effort run_end.
 //
 // The event vocabulary is JSON-schema-first: the mirrored session.Event lines
 // are exactly what raw.ndjson records (post-coalescing), so the live stream
@@ -28,6 +28,7 @@ const Version = 1
 // keep their raw.ndjson type names ("user", "assistant_delta", "tool_start",
 // ...), which never collide with these envelope names.
 const (
+	TypeStartupError    = "startup_error"
 	TypeRunStart        = "run_start"
 	TypeRunEnd          = "run_end"
 	TypePromptStart     = "prompt_start"
@@ -46,7 +47,71 @@ const (
 	ModeInteractive = "interactive"
 )
 
-// RunStart is always the first line of a JSON run stream.
+// StartupError is the only stdout line when a selected JSON run mode fails
+// before run_start can be emitted.
+type StartupError struct {
+	Type     string    `json:"type"`
+	V        int       `json:"v"`
+	Mode     string    `json:"mode"`
+	ExitCode int       `json:"exit_code"`
+	Error    string    `json:"error"`
+	Time     time.Time `json:"time"`
+}
+
+// WriteStartupError writes one versioned startup_error NDJSON line
+// synchronously. Startup failures happen before a Writer exists, so they do
+// not use its asynchronous event queue.
+func WriteStartupError(out io.Writer, startup StartupError) error {
+	startup.Type = TypeStartupError
+	startup.V = Version
+	if startup.Time.IsZero() {
+		startup.Time = time.Now()
+	}
+	return json.NewEncoder(out).Encode(startup)
+}
+
+const interruptedStartupWriteGrace = 100 * time.Millisecond
+
+// WriteStartupErrorWithAbort writes a startup_error line, but bounds the wait
+// after abort closes. It is for an already-interrupted startup: a stalled
+// stdout pipe must not keep the process alive indefinitely. Fast writers still
+// complete synchronously; a blocked write continues only until process exit.
+func WriteStartupErrorWithAbort(out io.Writer, startup StartupError, abort <-chan struct{}) error {
+	if abort == nil {
+		return WriteStartupError(out, startup)
+	}
+
+	started := make(chan struct{})
+	var startOnce sync.Once
+	done := make(chan error, 1)
+	go func() {
+		done <- WriteStartupError(startAttemptWriter{
+			Writer: out,
+			mark:   func() { startOnce.Do(func() { close(started) }) },
+		}, startup)
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-abort:
+	}
+
+	// Wait for the goroutine to reach the physical write before starting the
+	// grace window. This guarantees one write attempt without letting a blocked
+	// pipe make startup interruption unbounded.
+	<-started
+	timer := time.NewTimer(interruptedStartupWriteGrace)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return nil
+	}
+}
+
+// RunStart is always the first line of a successfully started JSON run stream.
 type RunStart struct {
 	Type      string    `json:"type"`
 	V         int       `json:"v"`
@@ -157,8 +222,10 @@ type Writer struct {
 	errw  io.Writer
 	abort <-chan struct{}
 
-	messages chan any
-	drained  chan struct{}
+	messages  chan any
+	drained   chan struct{}
+	started   chan struct{}
+	startOnce sync.Once
 
 	metaMu     sync.Mutex // guards closed, queue sealing, and lastPrompt
 	closed     bool
@@ -201,10 +268,12 @@ func newWriter(out io.Writer, start RunStart, errw io.Writer, abort <-chan struc
 		abort:    abort,
 		messages: make(chan any, 256),
 		drained:  make(chan struct{}),
+		started:  make(chan struct{}),
 	}
 	go func() {
 		defer close(w.drained)
 		writeFailed := false
+		first := true
 		for v := range w.messages {
 			// Keep draining after an output failure so producers and Close cannot
 			// deadlock, but never resume writing: a later run_end would falsely make
@@ -215,14 +284,47 @@ func newWriter(out io.Writer, start RunStart, errw io.Writer, abort <-chan struc
 			if closeMsg, ok := v.(closeMessage); ok {
 				v = closeMsg.end
 			}
-			if err := json.NewEncoder(out).Encode(v); err != nil {
+			writer := out
+			if first {
+				writer = startAttemptWriter{Writer: out, mark: w.markStartAttempt}
+			}
+			err := json.NewEncoder(writer).Encode(v)
+			if first {
+				w.markStartAttempt()
+				first = false
+			}
+			if err != nil {
 				w.noteWriteError(err)
 				writeFailed = true
 			}
 		}
 	}()
-	w.send(start)
+	// run_start defines a successful stream's top-level shape. The queue is empty
+	// during construction, so enqueue it even when a force-exit signal is already
+	// pending; later events remain abortable.
+	w.messages <- start
 	return w
+}
+
+type startAttemptWriter struct {
+	io.Writer
+	mark func()
+}
+
+func (w startAttemptWriter) Write(p []byte) (int, error) {
+	w.mark()
+	return w.Writer.Write(p)
+}
+
+func (w *Writer) markStartAttempt() {
+	w.startOnce.Do(func() { close(w.started) })
+}
+
+// WaitForStart waits until the writer has reached the first stdout write
+// attempt. It lets the root commit a JSON stream before an active interrupt can
+// return the process, while a stalled write remains abortable afterward.
+func (w *Writer) WaitForStart() {
+	<-w.started
 }
 
 // send queues v for the writer goroutine. A full buffer means the consumer is

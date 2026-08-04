@@ -101,6 +101,32 @@ func TestRunnerExitCodeTwoBlocksPlainOutput(t *testing.T) {
 	}
 }
 
+func TestRunnerStopsAfterCanceledHandler(t *testing.T) {
+	cfg, err := DecodeEventMap([]byte(`{"SessionStart":[{"hooks":[{"type":"command","command":"first"},{"type":"command","command":"must-not-run"}]}]}`))
+	if err != nil {
+		t.Fatalf("DecodeEventMap: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	runner := &Runner{
+		Config: cfg,
+		execute: func(context.Context, Handler, string, []byte) commandResult {
+			calls++
+			cancel()
+			return commandResult{Code: -1, Canceled: true}
+		},
+	}
+
+	res := runner.Run(ctx, SessionStart, "startup", nil)
+	if calls != 1 {
+		t.Fatalf("handler calls = %d, want only the canceled first handler", calls)
+	}
+	if len(res.Diagnostics) != 1 || res.Diagnostics[0].Outcome != OutcomeCanceled {
+		t.Fatalf("diagnostics = %+v, want one canceled handler", res.Diagnostics)
+	}
+}
+
 func TestRunnerTimeoutFailsOpen(t *testing.T) {
 	oldUnit := hookTimeoutUnit
 	hookTimeoutUnit = 25 * time.Millisecond

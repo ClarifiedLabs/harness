@@ -16,6 +16,7 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/background"
+	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
@@ -876,6 +877,52 @@ func TestOneShotProviderErrorExit1(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(errw.String()), "error") {
 		t.Errorf("error should be reported to stderr, errw=%q", errw.String())
+	}
+}
+
+func TestOneShotForceExitCancelsPromptSubmitHook(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	marker := filepath.Join(t.TempDir(), "hook-started")
+	command := fmt.Sprintf("printf started > %q; sleep 600", marker)
+	raw, err := json.Marshal(map[string]any{
+		"UserPromptSubmit": []any{map[string]any{
+			"hooks": []any{map[string]any{"type": "command", "command": command}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := hooks.DecodeEventMap(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.Hooks = &hooks.Runner{Config: cfg}
+	force := make(chan struct{})
+	app.ForceExit = force
+
+	done := make(chan int, 1)
+	go func() { done <- OneShot(app, "go") }()
+	waitFor(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, "one-shot prompt-submit hook start")
+	close(force)
+
+	select {
+	case code := <-done:
+		if code != ExitInterrupt {
+			t.Fatalf("force exit = %d, want %d; stderr=%q", code, ExitInterrupt, errw.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("one-shot force exit waited for prompt-submit hook")
+	}
+	if app.PromptNumber != 0 {
+		t.Fatalf("interrupted hook recorded %d prompts, want 0", app.PromptNumber)
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("provider turns = %d, want 0", len(fp.Requests))
 	}
 }
 

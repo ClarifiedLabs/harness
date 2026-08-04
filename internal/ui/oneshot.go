@@ -49,6 +49,9 @@ func promptExitCode(err error) int {
 // and errors go to app.Errw. The return value is the process exit code:
 // 0 completed, 1 runtime error, 130 interrupted.
 func OneShot(app *App, prompt string) int {
+	if forceExitRequested(app.ForceExit) {
+		return ExitInterrupt
+	}
 	if app.Created.IsZero() {
 		app.Created = app.clock()()
 	}
@@ -65,7 +68,14 @@ func OneShot(app *App, prompt string) int {
 		emitRejectedOneShot(app, ExitUsage, "prompt skill resolution failed")
 		return ExitUsage
 	}
-	promptHook := app.runPromptSubmitHook(context.Background(), prompt, app.PromptNumber+1)
+	preflight := newForceExitPreflight(app.ForceExit)
+	promptHook := app.runPromptSubmitHook(preflight.Context(), prompt, app.PromptNumber+1)
+	if preflight.Finish() {
+		if app.Renderer != nil {
+			app.Renderer.StopProgress()
+		}
+		return ExitInterrupt
+	}
 	if promptHook.Block {
 		reason := promptHook.Reason()
 		if reason == "" {
@@ -103,6 +113,18 @@ func OneShot(app *App, prompt string) int {
 			app.Interrupt.EndPrompt()
 			cancel()
 		}()
+	}
+	if forceExitRequested(app.ForceExit) {
+		if app.Renderer != nil {
+			app.Renderer.StopProgress()
+		}
+		if app.RunStream != nil {
+			app.RunStream.PromptEnd(runstream.PromptEnd{
+				ExitCode:          ExitInterrupt,
+				TerminationReason: string(agent.TerminationCancelled),
+			})
+		}
+		return ExitInterrupt
 	}
 
 	app.Renderer.StartPromptRun()

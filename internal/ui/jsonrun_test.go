@@ -15,6 +15,7 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/background"
+	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/plan"
@@ -68,6 +69,23 @@ func runJSONPipe(t *testing.T, app *App) (*io.PipeWriter, chan int) {
 	codeCh := make(chan int, 1)
 	go func() { codeCh <- RunJSON(pr, app) }()
 	return pw, codeCh
+}
+
+func promptSubmitHookRunner(t *testing.T, command string) *hooks.Runner {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"UserPromptSubmit": []any{map[string]any{
+			"hooks": []any{map[string]any{"type": "command", "command": command}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := hooks.DecodeEventMap(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &hooks.Runner{Config: cfg}
 }
 
 // waitEntryContext signals when Manager.Wait starts selecting. It gives UI
@@ -486,6 +504,102 @@ func TestRunJSONCancelledPromptDoesNotReusePriorFinalText(t *testing.T) {
 	}
 }
 
+func TestRunJSONForceExitCancelsPromptSubmitHook(t *testing.T) {
+	fp := llmtest.New("fake")
+	app, stream, _, w := newJSONRunApp(t, fp)
+	marker := filepath.Join(t.TempDir(), "hook-started")
+	app.Hooks = promptSubmitHookRunner(t, fmt.Sprintf("printf started > %q; sleep 600", marker))
+	forceExit := make(chan struct{})
+	app.ForceExit = forceExit
+	var forceOnce sync.Once
+	stopForceExit := func() { forceOnce.Do(func() { close(forceExit) }) }
+	t.Cleanup(stopForceExit)
+
+	pw, codeCh := runJSONPipe(t, app)
+	t.Cleanup(func() { _ = pw.Close() })
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p1\",\"text\":\"first\"}\n")
+	waitFor(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, "JSON prompt-submit hook start")
+	stopForceExit()
+
+	if code := waitRun(t, codeCh); code != ExitInterrupt {
+		t.Fatalf("force exit during prompt-submit hook = %d, want %d", code, ExitInterrupt)
+	}
+	if err := w.Close(runstream.RunEnd{ExitCode: ExitInterrupt}); err != nil {
+		t.Fatalf("close run stream: %v", err)
+	}
+	if app.PromptNumber != 0 {
+		t.Fatalf("interrupted hook recorded %d prompts, want 0", app.PromptNumber)
+	}
+	if fp.RequestCount() != 0 {
+		t.Fatalf("provider turns = %d, want 0", fp.RequestCount())
+	}
+	if strings.Contains(stream.String(), `"type":"prompt_start"`) {
+		t.Fatalf("stream unexpectedly admitted prompt: %s", stream.String())
+	}
+}
+
+func TestRunJSONForceExitCancelsSteerPromptSubmitHook(t *testing.T) {
+	providerStarted := make(chan struct{})
+	releaseProvider := make(chan struct{})
+	fp := llmtest.New("fake", llmtest.Step{Block: func(context.Context) {
+		close(providerStarted)
+		<-releaseProvider
+	}})
+	app, stream, _, w := newJSONRunApp(t, fp)
+	steerAgent(app, fp, nil)
+	marker := filepath.Join(t.TempDir(), "steer-hook-started")
+	app.Hooks = promptSubmitHookRunner(t, fmt.Sprintf("if grep -q '\"prompt\":\"steer\"'; then printf started > %q; sleep 600; else printf '{}'; fi", marker))
+	forceExit := make(chan struct{})
+	app.ForceExit = forceExit
+	var forceOnce, releaseOnce sync.Once
+	stopForceExit := func() { forceOnce.Do(func() { close(forceExit) }) }
+	release := func() { releaseOnce.Do(func() { close(releaseProvider) }) }
+	t.Cleanup(func() {
+		stopForceExit()
+		release()
+	})
+
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close(); _ = pr.Close() })
+	d := &jsonDriver{app: app, w: app.RunStream, dec: runstream.NewDecoder(pr)}
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- d.run() }()
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p1\",\"text\":\"first\"}\n")
+	select {
+	case <-providerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("initial prompt did not reach provider")
+	}
+	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"s1\",\"text\":\"steer\"}\n")
+	waitFor(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, "JSON steer prompt-submit hook start")
+	stopForceExit()
+
+	if code := waitRun(t, codeCh); code != ExitInterrupt {
+		t.Fatalf("force exit during steer hook = %d, want %d", code, ExitInterrupt)
+	}
+	release()
+	select {
+	case <-d.done:
+	case <-time.After(time.Second):
+		t.Fatal("initial prompt did not finish after provider release")
+	}
+	if err := w.Close(runstream.RunEnd{ExitCode: ExitInterrupt}); err != nil {
+		t.Fatalf("close run stream: %v", err)
+	}
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider turns = %d, want only the initial prompt", fp.RequestCount())
+	}
+	if strings.Contains(stream.String(), `"id":"s1"`) {
+		t.Fatalf("stream unexpectedly admitted steered prompt: %s", stream.String())
+	}
+}
+
 func TestRunJSONForceExitCancelsInitialMCPRefresh(t *testing.T) {
 	fp := llmtest.New("fake")
 	app, _, _, w := newJSONRunApp(t, fp)
@@ -564,6 +678,7 @@ func TestRunJSONDetachedWaitCompletionStartsContinuation(t *testing.T) {
 	pw, codeCh := runJSONPipe(t, app)
 	close(release)
 	waitFor(t, func() bool { return strings.Contains(stream.String(), `"cause":"detached_background_wait"`) }, "detached continuation prompt_start")
+	waitFor(t, func() bool { return fp.RequestCount() == 1 }, "detached continuation model request")
 	writePipe(t, pw, "{\"type\":\"shutdown\"}\n")
 	code := waitRun(t, codeCh)
 	if code != ExitOK {

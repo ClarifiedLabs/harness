@@ -48,6 +48,72 @@ func decodeLines(t *testing.T, out string) []map[string]any {
 	return lines
 }
 
+func TestWriteStartupError(t *testing.T) {
+	var out bytes.Buffer
+	if err := WriteStartupError(&out, StartupError{
+		Type:     "wrong",
+		V:        99,
+		Mode:     ModeInteractive,
+		ExitCode: 2,
+		Error:    "startup failed\nwith details",
+	}); err != nil {
+		t.Fatalf("WriteStartupError: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("lines = %d, want 1: %q", len(lines), out.String())
+	}
+	var got StartupError
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatalf("decode startup error: %v", err)
+	}
+	if got.Type != TypeStartupError || got.V != Version || got.Mode != ModeInteractive || got.ExitCode != 2 || got.Error != "startup failed\nwith details" {
+		t.Fatalf("startup error = %+v", got)
+	}
+	if got.Time.IsZero() {
+		t.Fatal("startup error time is zero")
+	}
+}
+
+type startupErrorFailingWriter struct {
+	err    error
+	writes int
+}
+
+func (w *startupErrorFailingWriter) Write([]byte) (int, error) {
+	w.writes++
+	return 0, w.err
+}
+
+func TestWriteStartupErrorReturnsWriteError(t *testing.T) {
+	want := errors.New("stdout closed")
+	out := &startupErrorFailingWriter{err: want}
+	err := WriteStartupError(out, StartupError{Mode: ModeOneshot, ExitCode: 1, Error: "failed"})
+	if !errors.Is(err, want) {
+		t.Fatalf("WriteStartupError error = %v, want %v", err, want)
+	}
+	if out.writes != 1 {
+		t.Fatalf("writes = %d, want 1", out.writes)
+	}
+}
+
+func TestWriterEmitsRunStartWhenAbortAlreadyClosed(t *testing.T) {
+	abort := make(chan struct{})
+	close(abort)
+	var out lockedBuffer
+	w := NewWriterWithAbort(&out, RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"}, nil, abort)
+	if err := w.Close(RunEnd{ExitCode: 130}); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	<-w.drained
+
+	lines := decodeLines(t, out.String())
+	if len(lines) != 1 || lines[0]["type"] != TypeRunStart {
+		t.Fatalf("stream = %q, want only run_start", out.String())
+	}
+}
+
 func TestWriterEmitsVersionedRunStartFirst(t *testing.T) {
 	var out lockedBuffer
 	var errw bytes.Buffer
@@ -270,6 +336,35 @@ func TestWriterWriteFailureTruncatesStreamWithoutMisleadingRunEnd(t *testing.T) 
 	lines := decodeLines(t, out.String())
 	if len(lines) != 1 || lines[0]["type"] != TypeRunStart {
 		t.Fatalf("stream after write failure = %v, want only run_start and no misleading run_end", lines)
+	}
+}
+
+func TestWriterWaitForStartReturnsAtInitialWriteAttempt(t *testing.T) {
+	gate := make(chan struct{})
+	entered := make(chan struct{})
+	var out lockedBuffer
+	var once sync.Once
+	w := NewWriter(
+		gateWriter{gate: gate, entered: entered, once: &once, out: &out},
+		RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"},
+		nil,
+	)
+
+	started := make(chan struct{})
+	go func() {
+		w.WaitForStart()
+		close(started)
+	}()
+	select {
+	case <-started:
+		// The initial write is still blocked on gate, so stream admission can
+		// proceed without making a later force-exit wait for stdout.
+	case <-time.After(time.Second):
+		t.Fatal("WaitForStart waited for the blocked initial write")
+	}
+	close(gate)
+	if err := w.Close(RunEnd{ExitCode: 0}); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
 

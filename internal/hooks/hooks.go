@@ -443,6 +443,9 @@ func (r *Runner) HasEvent(event Event) bool {
 // meaningful in v1, pass an empty target and all groups will run.
 func (r *Runner) Run(ctx context.Context, event Event, target string, payload Payload) Result {
 	var out Result
+	if ctx.Err() != nil {
+		return out
+	}
 	if r.Empty() {
 		return out
 	}
@@ -468,6 +471,9 @@ func (r *Runner) Run(ctx context.Context, event Event, target string, payload Pa
 			continue
 		}
 		for hookIndex, hook := range group.Hooks {
+			if ctx.Err() != nil {
+				return out
+			}
 			identity := handlerIdentity(event, groupIndex, hookIndex, hook.Name)
 			stateKey := fmt.Sprintf("%s/%d/%d", event, groupIndex, hookIndex)
 			now := r.clock()()
@@ -500,6 +506,9 @@ func (r *Runner) Run(ctx context.Context, event Event, target string, payload Pa
 				CircuitOpen: circuitOpen, CircuitOpenUntil: openUntil,
 			}
 			out.Diagnostics = append(out.Diagnostics, diagnostic)
+			if ctx.Err() != nil {
+				return out
+			}
 			if cmdResult.TimedOut {
 				message := fmt.Sprintf("[hook %s handler %s timed out after %ds; continuing", event, identity, hook.TimeoutSeconds)
 				if circuitOpen {
@@ -658,6 +667,13 @@ type commandResult struct {
 }
 
 func runCommand(ctx context.Context, hook Handler, cwd string, stdin []byte) commandResult {
+	if err := ctx.Err(); err != nil {
+		return commandResult{
+			Code:     -1,
+			TimedOut: errors.Is(err, context.DeadlineExceeded),
+			Canceled: errors.Is(err, context.Canceled),
+		}
+	}
 	command := hook.Command
 	if runtime.GOOS == "windows" && hook.CommandWindows != "" {
 		command = hook.CommandWindows
@@ -676,6 +692,13 @@ func runCommand(ctx context.Context, hook Handler, cwd string, stdin []byte) com
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if err := runCtx.Err(); err != nil {
+		return commandResult{
+			Code:     -1,
+			TimedOut: errors.Is(err, context.DeadlineExceeded),
+			Canceled: errors.Is(err, context.Canceled),
+		}
+	}
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
