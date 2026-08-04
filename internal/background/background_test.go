@@ -772,6 +772,60 @@ func TestManagerWaitTimeoutReturnsLatestState(t *testing.T) {
 	awaitJobDone(t, m, started.ID)
 }
 
+func TestManagerWaitRetainsTimeoutReceivedInSelect(t *testing.T) {
+	m := NewManager(Options{})
+	timers := make(chan *foregroundSelectPathTimer, 1)
+	m.newWaitTimer = func(time.Duration) waitTimer {
+		timer := newForegroundSelectPathTimer()
+		timers <- timer
+		return timer
+	}
+	release := make(chan struct{})
+	startedRun := make(chan struct{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "blocked",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-startedRun
+
+	waited := make(chan WaitResult, 1)
+	waitErr := make(chan error, 1)
+	go func() {
+		result, err := m.Wait(context.Background(), started.ID, time.Hour)
+		waited <- result
+		waitErr <- err
+	}()
+	timer := <-timers
+	select {
+	case <-timer.selectRegistered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("foreground wait did not register its timer select")
+	}
+	// The timer value is consumed by WaitFor's select. It must remain visible
+	// to the next priority-ordered loop iteration.
+	timer.c <- time.Now()
+	select {
+	case result := <-waited:
+		if err := <-waitErr; err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+		if !result.TimedOut || len(result.Jobs) != 1 || result.Jobs[0].Status != StatusRunning {
+			t.Fatalf("timeout result = %+v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("foreground wait lost timeout received in select")
+	}
+	close(release)
+	awaitJobDone(t, m, started.ID)
+}
+
 func TestManagerWaitHonorsContextCancellationAndUnknownID(t *testing.T) {
 	m := NewManager(Options{})
 	if _, err := m.Wait(context.Background(), "missing", time.Second); err == nil {
@@ -1083,4 +1137,482 @@ func sentinelProgressValue(progress any) int {
 		return -1
 	}
 	return fn()
+}
+
+// selectPathWaitTimer lets a test place a timer value specifically in the
+// observer's blocking select rather than its preceding non-blocking probe. That
+// catches a one-shot timer receive being lost between loop iterations.
+type selectPathWaitTimer struct {
+	c                   chan time.Time
+	stopped             chan struct{}
+	observerTop         chan struct{}
+	allowObserverSelect chan struct{}
+	observerSelect      chan struct{}
+	mu                  sync.Mutex
+	calls               int
+	stops               int
+}
+
+func newSelectPathWaitTimer() *selectPathWaitTimer {
+	return &selectPathWaitTimer{
+		c:                   make(chan time.Time, 1),
+		stopped:             make(chan struct{}),
+		observerTop:         make(chan struct{}),
+		allowObserverSelect: make(chan struct{}),
+		observerSelect:      make(chan struct{}),
+	}
+}
+
+func (t *selectPathWaitTimer) C() <-chan time.Time {
+	t.mu.Lock()
+	t.calls++
+	call := t.calls
+	t.mu.Unlock()
+	switch call {
+	case 4:
+		// The foreground wait has made its initial probe, blocking-select
+		// registration, and post-steer probe. Pause the detached observer at
+		// its own initial probe so the next C call is its blocking select.
+		close(t.observerTop)
+		<-t.allowObserverSelect
+	case 5:
+		close(t.observerSelect)
+	}
+	return t.c
+}
+
+func (t *selectPathWaitTimer) Stop() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.stops++
+	if t.stops == 1 {
+		close(t.stopped)
+	}
+	return true
+}
+
+func (t *selectPathWaitTimer) StopCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.stops
+}
+
+// controlledWaitTimer is a plain manually-fired timer for lifecycle tests.
+type controlledWaitTimer struct {
+	c       chan time.Time
+	stopped chan struct{}
+	mu      sync.Mutex
+	stops   int
+}
+
+func newControlledWaitTimer() *controlledWaitTimer {
+	return &controlledWaitTimer{c: make(chan time.Time, 1), stopped: make(chan struct{})}
+}
+
+func (t *controlledWaitTimer) C() <-chan time.Time { return t.c }
+
+func (t *controlledWaitTimer) Stop() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.stops++
+	if t.stops == 1 {
+		close(t.stopped)
+	}
+	return true
+}
+
+func (t *controlledWaitTimer) StopCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.stops
+}
+
+// foregroundSelectPathTimer makes the second C call (the outer select after its
+// initial non-blocking probe) externally visible.
+type foregroundSelectPathTimer struct {
+	c                chan time.Time
+	selectRegistered chan struct{}
+	mu               sync.Mutex
+	calls            int
+}
+
+func newForegroundSelectPathTimer() *foregroundSelectPathTimer {
+	return &foregroundSelectPathTimer{
+		c:                make(chan time.Time, 1),
+		selectRegistered: make(chan struct{}),
+	}
+}
+
+func (t *foregroundSelectPathTimer) C() <-chan time.Time {
+	t.mu.Lock()
+	t.calls++
+	if t.calls == 2 {
+		close(t.selectRegistered)
+	}
+	t.mu.Unlock()
+	return t.c
+}
+
+func (*foregroundSelectPathTimer) Stop() bool { return true }
+
+func TestManagerWaitDetachesOnAcceptedSteerAndDeliversOnce(t *testing.T) {
+	m := NewManager(Options{})
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "run_command",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "detached result"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-startedRun
+
+	entered := make(chan struct{})
+	waited := make(chan WaitResult, 1)
+	waitErr := make(chan error, 1)
+	go func() {
+		result, err := m.Wait(&doneObservedContext{Context: context.Background(), observed: entered}, started.ID, time.Minute)
+		waited <- result
+		waitErr <- err
+	}()
+	<-entered
+	m.NotifyAcceptedSteer()
+
+	var detached WaitResult
+	select {
+	case detached = <-waited:
+		if err := <-waitErr; err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("accepted steer did not detach wait")
+	}
+	if !detached.Detached || detached.WaitID == "" {
+		t.Fatalf("detach acknowledgement = %+v", detached)
+	}
+	if snap, ok := m.Get(started.ID); !ok || snap.Status != StatusRunning {
+		t.Fatalf("detaching changed selected job: %+v, ok=%v", snap, ok)
+	}
+
+	close(release)
+	awaitJobDone(t, m, started.ID)
+	select {
+	case <-m.DetachedWaitReady():
+	case <-time.After(2 * time.Second):
+		t.Fatal("detached completion did not signal readiness")
+	}
+	if !m.DetachedWaitPending() {
+		t.Fatal("detached completion should remain pending")
+	}
+	peek := m.PeekCompletedContext()
+	if len(peek) != 1 || !strings.Contains(peek[0], "[detached background wait "+detached.WaitID+"]") || !strings.Contains(peek[0], "detached result") {
+		t.Fatalf("peeked detached context = %v", peek)
+	}
+	drained := m.DrainCompletedContext(nil)
+	if len(drained) != 1 || drained[0] != peek[0] {
+		t.Fatalf("drained detached context = %v, want %v", drained, peek)
+	}
+	if duplicate := m.DrainCompletedContext(nil); len(duplicate) != 0 {
+		t.Fatalf("detached context delivered twice: %v", duplicate)
+	}
+	if m.DetachedWaitPending() {
+		t.Fatal("detached pending state survived drain")
+	}
+}
+
+func TestManagerDetachedWaitTransfersOriginalTimer(t *testing.T) {
+	m := NewManager(Options{})
+	timers := make(chan *selectPathWaitTimer, 1)
+	m.newWaitTimer = func(time.Duration) waitTimer {
+		timer := newSelectPathWaitTimer()
+		timers <- timer
+		return timer
+	}
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "run_command",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-startedRun
+
+	entered := make(chan struct{})
+	waited := make(chan WaitResult, 1)
+	go func() {
+		result, err := m.Wait(&doneObservedContext{Context: context.Background(), observed: entered}, started.ID, time.Hour)
+		if err != nil {
+			t.Errorf("Wait: %v", err)
+		}
+		waited <- result
+	}()
+	timer := <-timers
+	<-entered
+	m.NotifyAcceptedSteer()
+	select {
+	case result := <-waited:
+		if !result.Detached {
+			t.Fatalf("wait result = %+v, want detached", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wait did not detach")
+	}
+	if calls := timer.StopCalls(); calls != 0 {
+		t.Fatalf("foreground wait stopped transferred timer %d times", calls)
+	}
+	select {
+	case <-timer.observerTop:
+	case <-time.After(2 * time.Second):
+		t.Fatal("detached observer did not reach its timer probe")
+	}
+	close(timer.allowObserverSelect)
+	select {
+	case <-timer.observerSelect:
+	case <-time.After(2 * time.Second):
+		t.Fatal("detached observer did not register its timer select")
+	}
+	// This is now consumed by observeDetachedWait's select, not its next
+	// non-blocking probe. The observer must retain that one-shot timeout.
+	timer.c <- time.Now()
+	select {
+	case <-m.DetachedWaitReady():
+	case <-time.After(2 * time.Second):
+		t.Fatal("transferred timer did not resolve detached wait")
+	}
+	contexts := m.DrainCompletedContext(nil)
+	if len(contexts) != 1 || !strings.Contains(contexts[0], "wait timed out after 1h0m0s") {
+		t.Fatalf("timeout detached context = %v", contexts)
+	}
+	select {
+	case <-timer.stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("observer did not stop transferred timer")
+	}
+	if calls := timer.StopCalls(); calls != 1 {
+		t.Fatalf("timer stop calls = %d, want one", calls)
+	}
+	close(release)
+	awaitJobDone(t, m, started.ID)
+}
+
+func TestManagerWaitCompletionWinsAcceptedSteer(t *testing.T) {
+	m := NewManager(Options{})
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "run_command",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "completed first"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-startedRun
+	entered := make(chan struct{})
+	waited := make(chan WaitResult, 1)
+	waitErr := make(chan error, 1)
+	go func() {
+		result, err := m.Wait(&doneObservedContext{Context: context.Background(), observed: entered}, started.ID, time.Minute)
+		waited <- result
+		waitErr <- err
+	}()
+	<-entered
+	close(release)
+	awaitJobDone(t, m, started.ID)
+	m.NotifyAcceptedSteer()
+	select {
+	case result := <-waited:
+		if err := <-waitErr; err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+		if result.Detached || len(result.Jobs) != 1 || result.Jobs[0].Status != StatusCompleted {
+			t.Fatalf("completion should win accepted steer: %+v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wait did not return completed result")
+	}
+	if m.DetachedWaitPending() {
+		t.Fatal("completion race published a detached outcome")
+	}
+}
+
+func TestManagerOverlappingDetachedWaitsSuppressOrdinaryContext(t *testing.T) {
+	m := NewManager(Options{})
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "run_command",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "shared completion"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-startedRun
+
+	entered := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+	waited := make(chan WaitResult, 2)
+	for _, observed := range entered {
+		go func(observed chan struct{}) {
+			result, err := m.Wait(&doneObservedContext{Context: context.Background(), observed: observed}, started.ID, time.Minute)
+			if err != nil {
+				t.Errorf("Wait: %v", err)
+			}
+			waited <- result
+		}(observed)
+	}
+	<-entered[0]
+	<-entered[1]
+	m.NotifyAcceptedSteer()
+	first, second := <-waited, <-waited
+	if !first.Detached || !second.Detached || first.WaitID == second.WaitID {
+		t.Fatalf("overlapping detach acknowledgements = %+v / %+v", first, second)
+	}
+	close(release)
+	awaitJobDone(t, m, started.ID)
+	select {
+	case <-m.DetachedWaitReady():
+	case <-time.After(2 * time.Second):
+		t.Fatal("overlapping detached waits did not resolve")
+	}
+	contexts := m.DrainCompletedContext(nil)
+	if len(contexts) != 2 {
+		t.Fatalf("contexts = %d, want two detached aggregates: %v", len(contexts), contexts)
+	}
+	for _, context := range contexts {
+		if !strings.Contains(context, "[detached background wait ") || !strings.Contains(context, "shared completion") {
+			t.Fatalf("unexpected detached aggregate: %q", context)
+		}
+	}
+	if duplicate := m.DrainCompletedContext(nil); len(duplicate) != 0 {
+		t.Fatalf("ordinary completion duplicated detached aggregates: %v", duplicate)
+	}
+}
+
+func TestManagerDetachedWaitContextUsesForegroundPreparation(t *testing.T) {
+	m := NewManager(Options{})
+	registry := &tools.Registry{}
+	registry.SetResultLimits(1000, 1000)
+	registry.SetToolResultLimits("background_jobs", 48, 1000)
+	m.SetResultPreparer(registry.PrepareResultWithOriginal)
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	full := strings.Repeat("complete detached output\n", 20)
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "run_command",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "compact detached output", OriginalText: full}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-startedRun
+	entered := make(chan struct{})
+	waited := make(chan WaitResult, 1)
+	go func() {
+		result, err := m.Wait(&doneObservedContext{Context: context.Background(), observed: entered}, started.ID, time.Minute)
+		if err != nil {
+			t.Errorf("Wait: %v", err)
+		}
+		waited <- result
+	}()
+	<-entered
+	m.NotifyAcceptedSteer()
+	<-waited
+	close(release)
+	awaitJobDone(t, m, started.ID)
+	select {
+	case <-m.DetachedWaitReady():
+	case <-time.After(2 * time.Second):
+		t.Fatal("detached wait did not resolve")
+	}
+	archiver := &recordingArchiver{}
+	contexts := m.DrainCompletedContext(archiver)
+	if len(contexts) != 1 || !strings.Contains(contexts[0], toolresult.ArchivedHintMarker) {
+		t.Fatalf("prepared detached context = %v", contexts)
+	}
+	if !archiver.result.Truncated || archiver.result.ForID == "" || !strings.HasPrefix(archiver.result.ForID, "background_wait_") || !strings.Contains(archiver.result.OriginalText, "complete detached output") {
+		t.Fatalf("detached archive result = %+v", archiver.result)
+	}
+}
+
+func TestManagerClearDropsDetachedWaitObserver(t *testing.T) {
+	m := NewManager(Options{})
+	timers := make(chan *controlledWaitTimer, 1)
+	m.newWaitTimer = func(time.Duration) waitTimer {
+		timer := newControlledWaitTimer()
+		timers <- timer
+		return timer
+	}
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	runnerDone := make(chan struct{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "run_command",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			close(runnerDone)
+			return tools.BackgroundJobResult{Text: "must not leak"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-startedRun
+	entered := make(chan struct{})
+	waited := make(chan WaitResult, 1)
+	go func() {
+		result, err := m.Wait(&doneObservedContext{Context: context.Background(), observed: entered}, started.ID, time.Hour)
+		if err != nil {
+			t.Errorf("Wait: %v", err)
+		}
+		waited <- result
+	}()
+	timer := <-timers
+	<-entered
+	m.NotifyAcceptedSteer()
+	if result := <-waited; !result.Detached {
+		t.Fatalf("wait result = %+v, want detached", result)
+	}
+	m.Clear()
+	select {
+	case <-timer.stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Clear did not abort detached observer")
+	}
+	close(release)
+	select {
+	case <-runnerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background runner did not finish")
+	}
+	if m.DetachedWaitPending() {
+		t.Fatal("cleared manager retained detached outcome")
+	}
+	select {
+	case <-m.DetachedWaitReady():
+		t.Fatal("cleared manager readiness channel remained signaled")
+	default:
+	}
 }

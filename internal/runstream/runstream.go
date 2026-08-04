@@ -78,9 +78,12 @@ type RunEnd struct {
 // correlation. Text/Agent/Model describe the accepted prompt in interactive
 // mode; one-shot leaves them to run_start and the user event.
 type PromptStart struct {
-	Type      string    `json:"type"`
-	Prompt    int       `json:"prompt,omitempty"`
-	ID        string    `json:"id,omitempty"`
+	Type   string `json:"type"`
+	Prompt int    `json:"prompt,omitempty"`
+	ID     string `json:"id,omitempty"`
+	// Cause identifies a host-created prompt boundary. It is omitted for ordinary
+	// client prompts so their wire shape remains unchanged.
+	Cause     string    `json:"cause,omitempty"`
 	Text      string    `json:"text,omitempty"`
 	Agent     string    `json:"agent,omitempty"`
 	Model     string    `json:"model,omitempty"`
@@ -102,9 +105,11 @@ type PromptEndUsage struct {
 // PromptEnd closes a prompt with its outcome. FinalText is the last assistant
 // text message (the delegate child-report extraction pattern).
 type PromptEnd struct {
-	Type                string                          `json:"type"`
-	Prompt              int                             `json:"prompt,omitempty"`
-	ID                  string                          `json:"id,omitempty"`
+	Type   string `json:"type"`
+	Prompt int    `json:"prompt,omitempty"`
+	ID     string `json:"id,omitempty"`
+	// Cause mirrors PromptStart.Cause for host-created prompt boundaries.
+	Cause               string                          `json:"cause,omitempty"`
 	ExitCode            int                             `json:"exit_code"`
 	TerminationReason   string                          `json:"termination_reason,omitempty"`
 	ClosureTrigger      string                          `json:"closure_trigger,omitempty"`

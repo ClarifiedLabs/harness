@@ -70,6 +70,19 @@ func runJSONPipe(t *testing.T, app *App) (*io.PipeWriter, chan int) {
 	return pw, codeCh
 }
 
+// waitEntryContext signals when Manager.Wait starts selecting. It gives UI
+// integration tests the same handoff point as an accepted in-prompt steer.
+type waitEntryContext struct {
+	context.Context
+	once    sync.Once
+	entered chan<- struct{}
+}
+
+func (c *waitEntryContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.entered) })
+	return c.Context.Done()
+}
+
 func streamTypes(lines []map[string]any) []string {
 	var types []string
 	for _, line := range lines {
@@ -499,6 +512,79 @@ func TestRunJSONForceExitCancelsInitialMCPRefresh(t *testing.T) {
 	}
 	if err := w.Close(runstream.RunEnd{ExitCode: ExitInterrupt}); err != nil {
 		t.Fatalf("close run stream: %v", err)
+	}
+}
+
+func TestRunJSONDetachedWaitCompletionStartsContinuation(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("continuation answer")},
+		Stop:   llm.StopEndTurn,
+	})
+	app, stream, _, w := newJSONRunApp(t, fp)
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "run_command",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "completed detached work"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start background job: %v", err)
+	}
+	<-startedRun
+
+	entered := make(chan struct{})
+	waited := make(chan background.WaitResult, 1)
+	waitErr := make(chan error, 1)
+	go func() {
+		result, waitErrResult := manager.Wait(&waitEntryContext{Context: context.Background(), entered: entered}, job.ID, time.Minute)
+		waited <- result
+		waitErr <- waitErrResult
+	}()
+	<-entered
+	manager.NotifyAcceptedSteer()
+	select {
+	case result := <-waited:
+		if err := <-waitErr; err != nil {
+			t.Fatalf("detach wait: %v", err)
+		}
+		if !result.Detached {
+			t.Fatalf("wait result = %+v, want detached", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("accepted steer did not detach wait")
+	}
+
+	pw, codeCh := runJSONPipe(t, app)
+	close(release)
+	waitFor(t, func() bool { return strings.Contains(stream.String(), `"cause":"detached_background_wait"`) }, "detached continuation prompt_start")
+	writePipe(t, pw, "{\"type\":\"shutdown\"}\n")
+	code := waitRun(t, codeCh)
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	w.Close(runstream.RunEnd{ExitCode: code})
+
+	if fp.RequestCount() != 1 {
+		t.Fatalf("model requests = %d, want one continuation", fp.RequestCount())
+	}
+	if got := strings.Join(fp.Requests[0].RequestContext, "\n"); !strings.Contains(got, "[detached background wait ") || !strings.Contains(got, "completed detached work") {
+		t.Fatalf("continuation request context = %q", got)
+	}
+	lines := decodeRunStreamLines(t, stream.String())
+	starts := linesOfType(lines, "prompt_start")
+	ends := linesOfType(lines, "prompt_end")
+	if len(starts) != 1 || starts[0]["cause"] != "detached_background_wait" || starts[0]["id"] != nil {
+		t.Fatalf("continuation prompt_start = %v", starts)
+	}
+	if len(ends) != 1 || ends[0]["cause"] != "detached_background_wait" || ends[0]["final_text"] != "continuation answer" {
+		t.Fatalf("continuation prompt_end = %v", ends)
 	}
 }
 

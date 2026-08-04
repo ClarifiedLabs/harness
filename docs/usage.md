@@ -170,13 +170,22 @@ Additional output events beyond the one-shot vocabulary:
 
 | `type` | Fields | When |
 |---|---|---|
-| `prompt_start` | `prompt` (server-assigned number), `id?`, `text`, `agent`, `model`, `has_images` | Before each prompt |
+| `prompt_start` | `prompt` (server-assigned number), `id?`, `cause?`, `text`, `agent`, `model`, `has_images` | Before each prompt |
+| `prompt_end` | `prompt`, `id?`, `cause?`, `exit_code`, `termination_reason`, `usage`, `final_text` | After each prompt; the same optional `cause` as its start is repeated here |
 | `approval_request` | `id`, `kind:"implementation_handoff"`, `brief`, `plan_path`, `agent`, `model` | The model's `request_implementation` tool recorded a handoff; the driver waits for the matching `approval_response` (the input reader stays live, so `interrupt`/`shutdown` still work) |
 | `input_error` | `id?`, `message` | Rejected input line |
 
 Before reading the first prompt and between completed prompts, interactive JSON
 runs the same idle boundary as the TTY REPL: it refreshes the MCP registry and
 records/emits any resulting notice before the next `prompt_start`.
+
+An accepted steer can release a currently blocked `background_jobs` wait without
+cancelling its selected jobs. When its original selection later reaches completion
+or timeout and no client work, approval, EOF, shutdown, or interrupt is pending,
+the driver emits a normal host-created continuation. Its `prompt_start` and
+`prompt_end` carry `"cause":"detached_background_wait"` and omit `id`; the
+aggregate wait result is delivered once as request-only context, not transcript
+result text. Ordinary client prompts omit `cause`, preserving their event shape.
 
 Session events between `prompt_start`/`prompt_end` carry the server-assigned
 `prompt` number. Approving a handoff performs the same agent switch the TTY
@@ -1479,11 +1488,16 @@ the current work without canceling and retyping the prompt.
   so queued and recovered input always runs in submission order.
 - If the prompt finishes before another model request, the submitted steer is
   recovered and run as the next prompt.
+- An accepted steer also releases any blocked `background_jobs` wait from that
+  prompt. The selected jobs keep running; once its completion or original timeout
+  is available, an interactive mode starts a host-created continuation (after
+  already-delivered input, drafts, approvals, EOF, shutdown, and interrupts) with
+  the aggregate result in request-only context.
 - Ctrl-C or double-Esc still cancels the active prompt.
 
 `-no-steer`, `HARNESS_NO_STEER`, or config `no_steer` disables steering and
-queues submitted input as the next prompt. Steering is available only in the
-interactive REPL, not one-shot mode.
+queues submitted input as the next prompt. Steering is available in the TTY REPL
+and interactive JSON mode, not one-shot mode.
 
 ### Session goals
 

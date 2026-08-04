@@ -2737,7 +2737,20 @@ and token-accounting behavior as synchronous delegate.
   returns the current list immediately. A timeout is a normal result containing
   the latest selected status. Jobs returned as completed are marked as delivered
   so the same result is not automatically injected again. Completion notices and
-  nested usage accounting remain one-shot and independent.
+  nested usage accounting remain one-shot and independent. An accepted user
+  steer broadcasts to currently blocked waits only (a wait started after that
+  steer is unaffected). Such a wait returns a detached acknowledgement, keeps
+  its stable selection and original timeout in a manager-owned observer, and
+  claims those jobs so ordinary completion delivery cannot race ahead. When the
+  observer reaches its selected completion or timeout, it publishes one detached
+  aggregate as request-only context. Clearing or shutting down a session aborts
+  stale observers; overlapping detached waits each retain their own aggregate.
+  Ready aggregates use a level-triggered manager signal and may be coalesced into
+  one request. Idle TTY and interactive-JSON schedulers subscribe before a result
+  exists, then give delivered user input/drafts, approvals, EOF/shutdown, and
+  interrupts priority before creating a normal prompt-origin continuation with
+  cause `detached_background_wait`. Ordinary fire-and-forget completion context
+  never signals that scheduler or starts an autonomous model call.
 - The system prompt and background-capable tool schemas route a strict completion
   dependency to one `wait` call. `get` and `list` are for nonblocking inspection,
   not repeated status polling.
@@ -3366,7 +3379,9 @@ output belongs in hook context.
 line is a `run_end` envelope (`exit_code` mirrors the process exit code), and
 each prompt is bracketed by `prompt_start`/`prompt_end` (`prompt_end` carries
 `exit_code`, `termination_reason`, a usage summary, and `final_text` — the
-last assistant text message, extracted the way delegate child reports do).
+last assistant text message, extracted the way delegate child reports do). A
+host-created boundary carries the same bounded `cause` on both envelopes;
+ordinary client prompts omit it so their wire shape is unchanged.
 Between the envelopes the stream carries the session's own `session.Event`
 objects, mirrored post-coalescing, so stdout and `raw.ndjson` can never
 diverge (§11). The human renderer's stdout path is muted by discarding the
@@ -3401,8 +3416,11 @@ Two run modes share the stream:
   with a pending approval declines the handoff (never auto-approves) and
   drains the queue. Steering is attempted only while no earlier input is
   queued, which keeps queued and recovered input in submission order without
-  sequence numbers. The input-reader goroutine aborts blocked sends on
-  force-exit so it cannot leak. Handoff approval uses
+  sequence numbers. A resolved detached background wait wakes an otherwise idle
+  JSON driver and starts a `cause:"detached_background_wait"` continuation only
+  when no client input, approval, or EOF is pending; its aggregate is drained as
+  request-only context by that continuation's first model request. The input-reader
+  goroutine aborts blocked sends on force-exit so it cannot leak. Handoff approval uses
   the protocol (`approval_request`/`approval_response`) with the same
   post-approval helper the TTY `/handoff` flow calls. TTY-coupled behaviors
   (goals, slash commands, idle compaction, pickers, history) stay off: main

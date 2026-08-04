@@ -89,11 +89,12 @@ func TestWriterEmitsVersionedRunStartFirst(t *testing.T) {
 func TestWriterMirrorsSessionEventsVerbatim(t *testing.T) {
 	var out lockedBuffer
 	w := NewWriter(&out, RunStart{Mode: ModeOneshot, SessionID: "s", Provider: "p", Model: "m"}, nil)
-	w.PromptStart(PromptStart{})
+	w.PromptStart(PromptStart{Cause: "detached_background_wait"})
 	w.Mirror(session.Event{Type: session.EventUser, Prompt: 1, Text: "do it"})
 	w.Mirror(session.Event{Type: session.EventAssistantDelta, Prompt: 1, Turn: 1, Attempt: 1, Text: "hello world"})
 	remaining := 1
 	w.PromptEnd(PromptEnd{
+		Cause:               "detached_background_wait",
 		ExitCode:            0,
 		TerminationReason:   "model_completed",
 		ClosureTrigger:      "turn_budget",
@@ -121,8 +122,11 @@ func TestWriterMirrorsSessionEventsVerbatim(t *testing.T) {
 	if lines[2]["text"] != "do it" || lines[3]["text"] != "hello world" {
 		t.Fatalf("mirrored events lost their payload: %q", out.String())
 	}
+	if lines[1]["cause"] != "detached_background_wait" {
+		t.Fatalf("prompt_start cause = %v", lines[1])
+	}
 	if lines[4]["final_text"] != "hello world" || lines[4]["termination_reason"] != "model_completed" ||
-		lines[4]["closure_trigger"] != "turn_budget" || lines[4]["closure_turn"] != float64(3) || lines[4]["turn_budget_exhausted"] != true {
+		lines[4]["cause"] != "detached_background_wait" || lines[4]["closure_trigger"] != "turn_budget" || lines[4]["closure_turn"] != float64(3) || lines[4]["turn_budget_exhausted"] != true {
 		t.Fatalf("prompt_end = %v", lines[4])
 	}
 	for _, index := range []int{4, 5} {

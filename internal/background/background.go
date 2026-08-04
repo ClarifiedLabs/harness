@@ -41,8 +41,57 @@ type Manager struct {
 	jobs          map[string]*Job
 	order         []string
 	changed       chan struct{}
-	prepareResult ResultPreparer
-	now           func() time.Time
+	acceptedSteer chan struct{}
+	// lifecycleAbort is replaced whenever Shutdown or Clear invalidates detached
+	// wait observers. Observers retain the generation captured when they detach so
+	// they cannot publish an outcome into a later session.
+	lifecycle      uint64
+	lifecycleAbort chan struct{}
+	// pendingDetached is process-local request context for waits released by an
+	// accepted user steer. detachedReady is level-triggered while this queue is
+	// non-empty.
+	nextDetachedWait uint64
+	pendingDetached  []detachedWaitOutcome
+	detachedReady    chan struct{}
+	prepareResult    ResultPreparer
+	now              func() time.Time
+	newWaitTimer     func(time.Duration) waitTimer
+}
+
+// waitTimer is deliberately private so tests can prove timer ownership transfers
+// to a detached observer without exposing another runtime setting.
+type waitTimer interface {
+	C() <-chan time.Time
+	Stop() bool
+}
+
+type realWaitTimer struct {
+	timer *time.Timer
+}
+
+func (t realWaitTimer) C() <-chan time.Time { return t.timer.C }
+func (t realWaitTimer) Stop() bool          { return t.timer.Stop() }
+
+func defaultWaitTimer(timeout time.Duration) waitTimer {
+	return realWaitTimer{timer: time.NewTimer(timeout)}
+}
+
+// waitState is one stable wait selection. targets remain in manager launch order
+// even if a later Clear replaces the live job table.
+type waitState struct {
+	targets       []*Job
+	until         string
+	timeout       time.Duration
+	acceptedSteer <-chan struct{}
+	lifecycle     uint64
+	abort         <-chan struct{}
+	timer         waitTimer
+}
+
+type detachedWaitOutcome struct {
+	id      string
+	result  WaitResult
+	timeout time.Duration
 }
 
 // Job is one background run.
@@ -68,6 +117,9 @@ type Job struct {
 	contextDelivered bool
 	noticeDelivered  bool
 	usageDelivered   bool
+	// contextClaims prevents an ordinary completion from being injected while a
+	// detached wait still owns the selected job's aggregate result.
+	contextClaims int
 }
 
 // Snapshot is a copy of one job safe for callers to inspect.
@@ -95,6 +147,10 @@ type WaitResult struct {
 	Jobs      []Snapshot
 	TimedOut  bool
 	NoRunning bool
+	// Detached reports that an accepted user steer released this wait. The final
+	// result is delivered later through request-only background context.
+	Detached bool
+	WaitID   string
 }
 
 func NewManager(opts Options) *Manager {
@@ -108,10 +164,14 @@ func NewManager(opts Options) *Manager {
 	limits := &tools.Registry{}
 	limits.SetResultLimits(opts.MaxContextBytes, 0)
 	return &Manager{
-		jobs:          make(map[string]*Job),
-		changed:       make(chan struct{}),
-		prepareResult: limits.PrepareResultWithOriginal,
-		now:           now,
+		jobs:           make(map[string]*Job),
+		changed:        make(chan struct{}),
+		acceptedSteer:  make(chan struct{}),
+		lifecycleAbort: make(chan struct{}),
+		detachedReady:  make(chan struct{}),
+		prepareResult:  limits.PrepareResultWithOriginal,
+		now:            now,
+		newWaitTimer:   defaultWaitTimer,
 	}
 }
 
@@ -293,10 +353,66 @@ func (m *Manager) Cancel(id string) (Snapshot, bool) {
 	return snap, true
 }
 
+// NotifyAcceptedSteer releases every currently registered wait through a
+// close-and-replace broadcast. A later wait captures the replacement and is not
+// detached by this already-accepted user input.
+func (m *Manager) NotifyAcceptedSteer() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	if m.acceptedSteer != nil {
+		close(m.acceptedSteer)
+	}
+	m.acceptedSteer = make(chan struct{})
+	m.mu.Unlock()
+}
+
+// DetachedWaitReady is level-triggered while one or more detached wait outcomes
+// remain request context. Callers must re-check DetachedWaitPending after wakeup:
+// an active model request may have drained the context first.
+func (m *Manager) DetachedWaitReady() <-chan struct{} {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.detachedReady
+}
+
+// DetachedWaitPending reports whether an unconsumed detached wait outcome is
+// available for request-context delivery.
+func (m *Manager) DetachedWaitPending() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.pendingDetached) > 0
+}
+
+func (m *Manager) invalidateDetachedWaitsLocked() {
+	if m.lifecycleAbort != nil {
+		close(m.lifecycleAbort)
+	}
+	m.lifecycle++
+	m.lifecycleAbort = make(chan struct{})
+	for _, job := range m.jobs {
+		job.contextClaims = 0
+	}
+	// An idle scheduler can be blocked on the old, open readiness channel while
+	// Clear resets the session. Wake it so it re-reads the fresh empty state.
+	if len(m.pendingDetached) == 0 && m.detachedReady != nil {
+		close(m.detachedReady)
+	}
+	m.pendingDetached = nil
+	m.detachedReady = make(chan struct{})
+}
+
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
+	m.invalidateDetachedWaitsLocked()
 	var cancels []context.CancelFunc
-	changed := false
 	for _, job := range m.jobs {
 		if job.finished {
 			continue
@@ -309,11 +425,8 @@ func (m *Manager) Shutdown() {
 		job.Error = "abandoned on harness exit"
 		job.cancel = nil
 		job.finished = true
-		changed = true
 	}
-	if changed {
-		m.signalLocked()
-	}
+	m.signalLocked()
 	m.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
@@ -324,6 +437,9 @@ func (m *Manager) Clear() {
 	m.Shutdown()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// A wait could have detached after Shutdown released the lock and before this
+	// fresh session replaces the table, so invalidate once more under Clear's lock.
+	m.invalidateDetachedWaitsLocked()
 	m.jobs = make(map[string]*Job)
 	m.order = nil
 	m.signalLocked()
@@ -360,93 +476,232 @@ func (m *Manager) WaitFor(ctx context.Context, ids []string, until string, timeo
 	}
 
 	m.mu.Lock()
-	targets := make(map[string]*Job)
+	state := waitState{
+		until:         until,
+		timeout:       timeout,
+		acceptedSteer: m.acceptedSteer,
+		lifecycle:     m.lifecycle,
+		abort:         m.lifecycleAbort,
+	}
 	if ids != nil {
 		if len(ids) == 0 {
 			m.mu.Unlock()
 			return WaitResult{}, fmt.Errorf("ids must contain at least one background job id")
 		}
-		seen := make(map[string]struct{}, len(ids))
+		selected := make(map[string]struct{}, len(ids))
 		for _, rawID := range ids {
 			id := strings.TrimSpace(rawID)
 			if id == "" {
 				m.mu.Unlock()
 				return WaitResult{}, fmt.Errorf("ids must not contain an empty background job id")
 			}
-			if _, duplicate := seen[id]; duplicate {
+			if _, duplicate := selected[id]; duplicate {
 				m.mu.Unlock()
 				return WaitResult{}, fmt.Errorf("ids must not contain duplicate background job %q", id)
 			}
-			seen[id] = struct{}{}
-			job, ok := m.jobs[id]
-			if !ok {
+			if _, ok := m.jobs[id]; !ok {
 				m.mu.Unlock()
 				return WaitResult{}, fmt.Errorf("unknown background job %q", id)
 			}
-			targets[id] = job
+			selected[id] = struct{}{}
 		}
-	} else {
-		for _, jobID := range m.order {
-			job := m.jobs[jobID]
-			if job != nil && job.Status == StatusRunning && !job.finished {
-				targets[jobID] = job
+		for _, id := range m.order {
+			if _, ok := selected[id]; ok {
+				state.targets = append(state.targets, m.jobs[id])
 			}
 		}
-		if len(targets) == 0 {
+	} else {
+		for _, id := range m.order {
+			job := m.jobs[id]
+			if job != nil && job.Status == StatusRunning && !job.finished {
+				state.targets = append(state.targets, job)
+			}
+		}
+		if len(state.targets) == 0 {
 			jobs := m.listLocked()
 			m.mu.Unlock()
 			return WaitResult{Jobs: jobs, NoRunning: true}, nil
 		}
 	}
+	newTimer := m.newWaitTimer
 	m.mu.Unlock()
+	if newTimer == nil {
+		newTimer = defaultWaitTimer
+	}
+	state.timer = newTimer(timeout)
+	timerOwned := true
+	defer func() {
+		if timerOwned {
+			state.timer.Stop()
+		}
+	}()
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	detachRequested := false
+	timedOut := false
 	for {
 		m.mu.Lock()
-		var completed []Snapshot
-		for _, jobID := range m.order {
-			job, selected := targets[jobID]
-			if !selected || !job.finished {
-				continue
-			}
-			completed = append(completed, snapshotJob(job))
-		}
-		ready := len(completed) > 0
-		if until == "all" {
-			ready = len(completed) == len(targets)
-		}
-		if ready {
-			for id := range targets {
-				if job := m.jobs[id]; job != nil && job.finished {
-					job.contextDelivered = true
-				}
-			}
-			for i := range completed {
-				completed[i].ContextPending = false
-			}
+		if result, ready := m.completedWaitResultLocked(&state, true); ready {
 			m.mu.Unlock()
-			return WaitResult{Jobs: completed}, nil
+			return result, nil
+		}
+		if timedOut || waitTimerFired(state.timer) {
+			result := m.timeoutWaitResultLocked(&state, false)
+			m.mu.Unlock()
+			return result, nil
+		}
+		if err := ctx.Err(); err != nil {
+			m.mu.Unlock()
+			return WaitResult{}, err
+		}
+		if !detachRequested {
+			select {
+			case <-state.acceptedSteer:
+				detachRequested = true
+			default:
+			}
+		}
+		if detachRequested {
+			waitID := m.detachWaitLocked(&state)
+			m.mu.Unlock()
+			timerOwned = false
+			go m.observeDetachedWait(state, waitID)
+			return WaitResult{Detached: true, WaitID: waitID}, nil
 		}
 		changed := m.changed
+		steer := state.acceptedSteer
 		m.mu.Unlock()
 
 		select {
 		case <-changed:
-		case <-timer.C:
-			m.mu.Lock()
-			jobs := make([]Snapshot, 0, len(targets))
-			for _, jobID := range m.order {
-				if job := targets[jobID]; job != nil {
-					jobs = append(jobs, snapshotJob(job))
-				}
-			}
-			m.mu.Unlock()
-			return WaitResult{Jobs: jobs, TimedOut: true}, nil
+		case <-state.timer.C():
+			// Remember a receive from the timer channel. Unlike a changed wakeup,
+			// a timer send is one-shot and must not be lost before the next
+			// priority-ordered state check.
+			timedOut = true
 		case <-ctx.Done():
-			return WaitResult{}, ctx.Err()
+		case <-steer:
+			detachRequested = true
 		}
 	}
+}
+
+func (m *Manager) completedWaitResultLocked(state *waitState, consumeContext bool) (WaitResult, bool) {
+	completed := make([]*Job, 0, len(state.targets))
+	for _, job := range state.targets {
+		if job != nil && job.finished {
+			completed = append(completed, job)
+		}
+	}
+	ready := len(completed) > 0
+	if state.until == "all" {
+		ready = len(completed) == len(state.targets)
+	}
+	if !ready {
+		return WaitResult{}, false
+	}
+	if consumeContext {
+		for _, job := range completed {
+			job.contextDelivered = true
+		}
+	}
+	return WaitResult{Jobs: snapshotJobs(completed)}, true
+}
+
+func (m *Manager) timeoutWaitResultLocked(state *waitState, consumeContext bool) WaitResult {
+	if consumeContext {
+		for _, job := range state.targets {
+			if job != nil && job.finished {
+				job.contextDelivered = true
+			}
+		}
+	}
+	return WaitResult{Jobs: snapshotJobs(state.targets), TimedOut: true}
+}
+
+func snapshotJobs(jobs []*Job) []Snapshot {
+	out := make([]Snapshot, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil {
+			out = append(out, snapshotJob(job))
+		}
+	}
+	return out
+}
+
+func waitTimerFired(timer waitTimer) bool {
+	select {
+	case <-timer.C():
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Manager) detachWaitLocked(state *waitState) string {
+	m.nextDetachedWait++
+	waitID := fmt.Sprintf("background_wait_%d", m.nextDetachedWait)
+	for _, job := range state.targets {
+		if job != nil {
+			job.contextClaims++
+		}
+	}
+	return waitID
+}
+
+func (m *Manager) observeDetachedWait(state waitState, waitID string) {
+	defer state.timer.Stop()
+	timedOut := false
+	for {
+		m.mu.Lock()
+		if state.lifecycle != m.lifecycle {
+			m.mu.Unlock()
+			return
+		}
+		if result, ready := m.completedWaitResultLocked(&state, true); ready {
+			m.releaseWaitClaimsLocked(&state)
+			m.enqueueDetachedWaitLocked(detachedWaitOutcome{id: waitID, result: result, timeout: state.timeout})
+			m.mu.Unlock()
+			return
+		}
+		if timedOut || waitTimerFired(state.timer) {
+			result := m.timeoutWaitResultLocked(&state, true)
+			m.releaseWaitClaimsLocked(&state)
+			m.enqueueDetachedWaitLocked(detachedWaitOutcome{id: waitID, result: result, timeout: state.timeout})
+			m.mu.Unlock()
+			return
+		}
+		changed := m.changed
+		abort := state.abort
+		m.mu.Unlock()
+
+		select {
+		case <-changed:
+		case <-state.timer.C():
+			// The observer owns this one-shot timer after detachment, so retain
+			// its receive until the next lock-protected result check.
+			timedOut = true
+		case <-abort:
+			return
+		}
+	}
+}
+
+func (m *Manager) releaseWaitClaimsLocked(state *waitState) {
+	for _, job := range state.targets {
+		if job != nil && job.contextClaims > 0 {
+			job.contextClaims--
+		}
+	}
+}
+
+func (m *Manager) enqueueDetachedWaitLocked(outcome detachedWaitOutcome) {
+	if len(m.pendingDetached) == 0 {
+		if m.detachedReady == nil {
+			m.detachedReady = make(chan struct{})
+		}
+		close(m.detachedReady)
+	}
+	m.pendingDetached = append(m.pendingDetached, outcome)
 }
 
 func (m *Manager) listLocked() []Snapshot {
@@ -549,7 +804,7 @@ func (m *Manager) completedContext(deliver bool, archiver toolresult.Archiver) [
 	var completed []Job
 	for _, id := range m.order {
 		job := m.jobs[id]
-		if job == nil || job.contextDelivered || !job.finished {
+		if job == nil || job.contextDelivered || job.contextClaims > 0 || !job.finished {
 			continue
 		}
 		if deliver {
@@ -557,12 +812,22 @@ func (m *Manager) completedContext(deliver bool, archiver toolresult.Archiver) [
 		}
 		completed = append(completed, *job)
 	}
+	detached := append([]detachedWaitOutcome(nil), m.pendingDetached...)
+	if deliver && len(m.pendingDetached) > 0 {
+		m.pendingDetached = nil
+		// A detached-ready channel is closed exactly while the pending queue is
+		// non-empty. Install a fresh open channel after the one-shot drain.
+		m.detachedReady = make(chan struct{})
+	}
 	prepare := m.prepareResult
 	m.mu.Unlock()
 
-	out := make([]string, 0, len(completed))
+	out := make([]string, 0, len(completed)+len(detached))
 	for i := range completed {
 		out = append(out, contextFor(&completed[i], prepare, archiver))
+	}
+	for _, outcome := range detached {
+		out = append(out, detachedWaitContextFor(outcome, prepare, archiver))
 	}
 	return out
 }
@@ -606,6 +871,16 @@ func contextFor(job *Job, prepare ResultPreparer, archiver toolresult.Archiver) 
 		fmt.Fprintf(&b, "result:\n%s", strings.TrimSpace(result.Text))
 	}
 	return b.String()
+}
+
+func detachedWaitContextFor(outcome detachedWaitOutcome, prepare ResultPreparer, archiver toolresult.Archiver) string {
+	result := formatWaitResult(outcome.result, outcome.timeout)
+	prepared := llm.ToolResult{ForID: outcome.id, Text: result.Text, OriginalText: result.OriginalText}
+	if prepare != nil {
+		prepared = prepare("background_jobs", outcome.id, result.Text, result.OriginalText)
+	}
+	prepared, _ = toolresult.PrepareTruncated(prepared, archiver)
+	return fmt.Sprintf("[detached background wait %s]\n%s", outcome.id, strings.TrimSpace(prepared.Text))
 }
 
 func noticeFor(job *Job) string {
@@ -662,7 +937,7 @@ func NewJobsTool(manager *Manager) *JobsTool {
 func (*JobsTool) Name() string { return "background_jobs" }
 
 func (*JobsTool) Description() string {
-	return "List, inspect, wait for, or cancel background jobs. If the next or final response depends on running work, call action=wait once instead of polling get/list; use ids with until=all to join a group."
+	return "List, inspect, wait for, or cancel background jobs. If the next or final response depends on running work, call action=wait once instead of polling get/list; an accepted user steer can detach a wait while selected jobs continue and its final result arrives automatically. Use ids with until=all to join a group."
 }
 
 func (*JobsTool) Schema() json.RawMessage {
@@ -812,6 +1087,9 @@ func backgroundWaitDuration(seconds int) (time.Duration, error) {
 }
 
 func formatWait(result WaitResult, timeout time.Duration) string {
+	if result.Detached {
+		return fmt.Sprintf("background wait %s detached; selected jobs continue running and the final wait result will arrive automatically.", result.WaitID)
+	}
 	var b strings.Builder
 	if result.TimedOut {
 		fmt.Fprintf(&b, "wait timed out after %s", timeout)

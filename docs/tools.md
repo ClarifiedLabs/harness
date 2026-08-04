@@ -201,7 +201,15 @@ running. `until` defaults to `first`. The selected set is stable: jobs launched
 after the wait starts are never added. Its timeout defaults to 120 seconds and
 a timeout returns the latest selected status as a normal result. Omit
 `timeout_seconds` for ordinary dependency waits; do not use a short timeout as
-a status probe.
+a status probe. An accepted user steer while that wait is blocked detaches the
+wait immediately: the selected jobs continue, and the tool reports that its
+final aggregate result will arrive automatically. Detachment retains the
+call-time selection, `until` condition, launch order, and already-running timeout
+rather than starting a new wait. When the selected completion or timeout later
+resolves, harness delivers that aggregate exactly once as request-only context
+and starts an interactive continuation only after already-delivered user work,
+drafts, approvals, EOF, shutdown, and interrupts have priority. Do not replace
+one dependency wait with `get`/`list` polling.
 
 For repository orientation, `git {"workflow":"workspace_summary"}` combines
 branch/porcelain status, HEAD, staged and unstaged diff stats, and both whitespace

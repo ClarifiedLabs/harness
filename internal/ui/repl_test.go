@@ -6639,6 +6639,143 @@ func TestREPLGoalCommandSetsObjective(t *testing.T) {
 	}
 }
 
+func TestSteerAcceptedDetachesBackgroundWait(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+	app.Steer = func(agent.SteerInput) bool { return true }
+
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "run_command",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start background job: %v", err)
+	}
+	<-startedRun
+
+	entered := make(chan struct{})
+	waited := make(chan background.WaitResult, 1)
+	waitErr := make(chan error, 1)
+	go func() {
+		result, waitErrResult := manager.Wait(&waitEntryContext{Context: context.Background(), entered: entered}, job.ID, time.Minute)
+		waited <- result
+		waitErr <- waitErrResult
+	}()
+	<-entered
+	if !app.steerAccepted(agent.SteerInput{Text: "redirect"}) {
+		t.Fatal("accepted steer = false, want true")
+	}
+	select {
+	case result := <-waited:
+		if err := <-waitErr; err != nil {
+			t.Fatalf("background wait: %v", err)
+		}
+		if !result.Detached {
+			t.Fatalf("background wait result = %+v, want detached", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("accepted steer did not detach background wait")
+	}
+	close(release)
+	waitFor(t, func() bool {
+		snapshot, ok := manager.Get(job.ID)
+		return ok && snapshot.Status != background.StatusRunning
+	}, "background job completion")
+}
+
+func TestREPLDetachedWaitCompletionStartsContinuation(t *testing.T) {
+	var out, errw lockedBuffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("continued after wait")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Prompt = "ready> "
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "run_command",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "TTY detached result"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start background job: %v", err)
+	}
+	<-startedRun
+	entered := make(chan struct{})
+	waited := make(chan background.WaitResult, 1)
+	waitErr := make(chan error, 1)
+	go func() {
+		result, waitErrResult := manager.Wait(&waitEntryContext{Context: context.Background(), entered: entered}, job.ID, time.Minute)
+		waited <- result
+		waitErr <- waitErrResult
+	}()
+	<-entered
+	manager.NotifyAcceptedSteer()
+	select {
+	case result := <-waited:
+		if err := <-waitErr; err != nil {
+			t.Fatalf("detach wait: %v", err)
+		}
+		if !result.Detached {
+			t.Fatalf("wait result = %+v, want detached", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("accepted steer did not detach wait")
+	}
+
+	finished := make(chan struct{}, 1)
+	app.OnPromptFinished = func() { finished <- struct{}{} }
+	reader, writer := io.Pipe()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(reader, app, nil, false) }()
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "ready> ") }, "idle REPL prompt")
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("detached wait completion did not start a continuation")
+	}
+	writePipe(t, writer, "/exit\n")
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close REPL input: %v", err)
+	}
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+
+	if fp.RequestCount() != 1 {
+		t.Fatalf("model requests = %d, want one continuation", fp.RequestCount())
+	}
+	if got := strings.Join(fp.Requests[0].RequestContext, "\n"); !strings.Contains(got, "[detached background wait ") || !strings.Contains(got, "TTY detached result") {
+		t.Fatalf("continuation request context = %q", got)
+	}
+	if prompts := transcriptPrompts(app); prompts != detachedBackgroundWaitContinuation {
+		t.Fatalf("transcript prompts = %q, want detached continuation", prompts)
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	if !strings.Contains(string(raw), `"purpose":"detached_background_wait"`) {
+		t.Fatalf("detached continuation cause missing from raw.ndjson:\n%s", raw)
+	}
+}
+
 func TestREPLGoalAutoContinuesWithoutGoalTools(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake",

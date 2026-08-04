@@ -64,10 +64,14 @@ type jsonPromptRequest struct {
 	model  string
 	images []runstream.InputImage
 	steer  *agent.SteerInput
+	// cause is set only for host-created continuation prompts. It deliberately
+	// leaves id empty so clients do not mistake it for a correlated user request.
+	cause string
 }
 
 type jsonActivePrompt struct {
 	id       string
+	cause    string
 	promptID int
 	started  time.Time
 	cancel   context.CancelFunc
@@ -92,6 +96,10 @@ func (d *jsonDriver) run() int {
 	}
 	go d.readInput()
 	for {
+		var detachedWaitReady <-chan struct{}
+		if d.detachedContinuationEligible() {
+			detachedWaitReady = d.app.Background.DetachedWaitReady()
+		}
 		select {
 		case m, ok := <-d.msgs:
 			if !ok {
@@ -136,11 +144,34 @@ func (d *jsonDriver) run() int {
 			if d.boundary() {
 				return ExitInterrupt
 			}
+		case <-detachedWaitReady:
+			// Preserve the completion-race ordering guarantee: consume any input or
+			// control already buffered before considering the host continuation.
+			if code, exit := d.drainBufferedControls(); exit {
+				return code
+			}
+			if code, exit := d.drainOneBufferedControl(); exit {
+				return code
+			}
+			if d.shutdownRequested || (d.eofSeen && len(d.queued) == 0) {
+				return ExitOK
+			}
+			if d.boundary() {
+				return ExitInterrupt
+			}
 		case <-d.app.ForceExit:
 			d.forceExitPrompt()
 			return ExitInterrupt
 		}
 	}
+}
+
+func (d *jsonDriver) detachedContinuationEligible() bool {
+	// Subscribe while idle even before an observer has published an outcome: the
+	// manager returns an open channel that closes when a detached wait resolves.
+	// Requiring DetachedWaitPending here would miss that future transition and
+	// leave an otherwise idle session asleep forever.
+	return d.active == nil && d.approval == nil && !d.shutdownRequested && !d.eofSeen && len(d.queued) == 0 && d.app.Background != nil
 }
 
 func (d *jsonDriver) readInput() {
@@ -217,6 +248,41 @@ func (d *jsonDriver) drainBufferedControls() (int, bool) {
 	return 0, false
 }
 
+// drainOneBufferedControl is used only before a detached-wait continuation.
+// It catches a just-closed input channel (or one message that arrived after the
+// regular bounded drain) so EOF and already-delivered client input retain
+// priority over host-created work.
+func (d *jsonDriver) drainOneBufferedControl() (int, bool) {
+	if d.msgs == nil {
+		return 0, false
+	}
+	select {
+	case m, ok := <-d.msgs:
+		if !ok {
+			d.eofSeen = true
+			d.msgs = nil
+			return 0, false
+		}
+		if m.lineErr != nil {
+			d.w.InputError(m.lineErr.ID, m.lineErr.Message)
+			return 0, false
+		}
+		switch m.in.Type {
+		case runstream.InputPrompt:
+			d.queued = append(d.queued, jsonPromptRequest{
+				id: m.in.ID, text: m.in.Text, agent: m.in.Agent, model: m.in.Model, images: m.in.Images,
+			})
+		case runstream.InputInterrupt:
+			return ExitInterrupt, true
+		default:
+			return d.handle(m.in)
+		}
+	default:
+		return 0, false
+	}
+	return 0, false
+}
+
 func (d *jsonDriver) handle(in runstream.Input) (int, bool) {
 	switch in.Type {
 	case runstream.InputPrompt:
@@ -285,7 +351,7 @@ func (d *jsonDriver) steer(req jsonPromptRequest) {
 		return
 	}
 	steered.CorrelationID = req.id
-	if !d.app.Steer(steered) {
+	if !d.app.steerAccepted(steered) {
 		// Preserve the already-prepared input (and its protocol ID) when the
 		// agent's bounded non-blocking steer queue is full.
 		req.steer = &steered
@@ -321,14 +387,14 @@ func (d *jsonDriver) handleApproval(in runstream.Input) {
 // prompt-submit hooks, beginPrompt, sink, admitted run.
 func (d *jsonDriver) startPrompt(req jsonPromptRequest) {
 	app := d.app
-	if req.agent != "" {
+	if req.cause == "" && req.agent != "" {
 		if err := app.applyAgentSwitch(req.agent); err != nil {
 			d.w.InputError(req.id, fmt.Sprintf("agent switch failed: %v", err))
 			d.startNextQueued()
 			return
 		}
 	}
-	if req.model != "" {
+	if req.cause == "" && req.model != "" {
 		if !app.switchModel(req.model, app.Reasoning) {
 			d.w.InputError(req.id, "model switch failed")
 			d.startNextQueued()
@@ -341,14 +407,19 @@ func (d *jsonDriver) startPrompt(req jsonPromptRequest) {
 		contentImages []llm.ContentBlock
 		promptContext []string
 	)
-	if req.steer != nil {
+	switch {
+	case req.cause != "":
+		// Host-created continuations intentionally bypass human prompt hooks,
+		// skills, pending images, client images, and model/agent switching.
+		text = req.text
+	case req.steer != nil:
 		// Recovered steer input carries already-prepared text and content
 		// blocks; the session event records no image metadata, matching the
 		// REPL's steered-prompt recovery.
 		text = req.steer.Text
 		contentImages = req.steer.Images
 		promptContext = req.steer.RequestContext
-	} else {
+	default:
 		prepared, err := app.preparePrompt(req.text, promptOptions{resolveSkillMentions: true, attachPromptImages: false}, false)
 		if err != nil {
 			d.w.InputError(req.id, err.Error())
@@ -369,13 +440,20 @@ func (d *jsonDriver) startPrompt(req jsonPromptRequest) {
 	d.w.PromptStart(runstream.PromptStart{
 		Prompt:    app.PromptNumber + 1,
 		ID:        req.id,
+		Cause:     req.cause,
 		Text:      text,
 		Agent:     app.AgentName,
 		Model:     app.RegistryModel,
 		HasImages: len(contentImages) > 0,
 	})
-	admission := app.Agent.AdmitPromptContent(text, contentImages)
-	promptID := app.beginPrompt(text, images)
+	var admission agent.PromptAdmission
+	var promptID int
+	if req.cause != "" {
+		admission, promptID = app.admitInternalPrompt(text, req.cause)
+	} else {
+		admission = app.Agent.AdmitPromptContent(text, contentImages)
+		promptID = app.beginPrompt(text, images)
+	}
 
 	// The in-band interrupt message needs cancel regardless of whether the
 	// SIGINT watcher is wired; the watcher, when present, shares it.
@@ -393,7 +471,7 @@ func (d *jsonDriver) startPrompt(req jsonPromptRequest) {
 		app.Renderer.StartPromptRun()
 	}
 	sink := newREPLSink(app.Renderer, app, promptID)
-	d.active = &jsonActivePrompt{id: req.id, promptID: promptID, started: app.clock()(), cancel: cancel, sink: sink}
+	d.active = &jsonActivePrompt{id: req.id, cause: req.cause, promptID: promptID, started: app.clock()(), cancel: cancel, sink: sink}
 	go func() {
 		d.done <- jsonPromptDone{err: app.Agent.RunAdmittedPromptWithContext(ctx, admission, app.promptHookContext(promptContext), promptID, sink)}
 	}()
@@ -441,6 +519,7 @@ func (d *jsonDriver) finishPrompt(err error) {
 	end := runstream.PromptEnd{
 		Prompt:              active.promptID,
 		ID:                  active.id,
+		Cause:               active.cause,
 		ExitCode:            code,
 		TerminationReason:   string(active.sink.promptUsage.TerminationReason),
 		ClosureTrigger:      string(active.sink.promptUsage.ClosureTrigger),
@@ -495,6 +574,7 @@ func (d *jsonDriver) forceExitPrompt() {
 	d.w.PromptEnd(runstream.PromptEnd{
 		Prompt:            d.active.promptID,
 		ID:                d.active.id,
+		Cause:             d.active.cause,
 		ExitCode:          ExitInterrupt,
 		TerminationReason: string(agent.TerminationCancelled),
 	})
@@ -556,10 +636,20 @@ func (d *jsonDriver) boundary() bool {
 }
 
 func (d *jsonDriver) startNextQueued() {
-	if len(d.queued) == 0 {
+	if d.active != nil || d.approval != nil || d.shutdownRequested {
 		return
 	}
-	req := d.queued[0]
-	d.queued = d.queued[1:]
-	d.startPrompt(req)
+	if len(d.queued) > 0 {
+		req := d.queued[0]
+		d.queued = d.queued[1:]
+		d.startPrompt(req)
+		return
+	}
+	if d.eofSeen || d.app.Background == nil || !d.app.Background.DetachedWaitPending() {
+		return
+	}
+	d.startPrompt(jsonPromptRequest{
+		text:  detachedBackgroundWaitContinuation,
+		cause: detachedBackgroundWaitCause,
+	})
 }

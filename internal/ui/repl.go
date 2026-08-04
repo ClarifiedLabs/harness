@@ -997,6 +997,30 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		return false, ExitOK
 	}
+	startDetachedWaitContinuation := func() (exit bool, code int) {
+		cancelShiftTabPrewarm()
+		if app.Renderer != nil {
+			app.Renderer.SubmittedPromptSeparator()
+			app.Renderer.StartPrompt()
+		}
+		ctx, cancel, interrupted := exitContext()
+		err := app.refreshMCP(ctx)
+		if interrupted() || errors.Is(err, context.Canceled) {
+			cancel()
+			return true, ExitInterrupt
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			cancel()
+			return true, ExitInterrupt
+		}
+		cancel()
+		run, ok := app.prepareDetachedWaitContinuation()
+		if !ok {
+			return false, ExitOK
+		}
+		startRun(run)
+		return false, ExitOK
+	}
 	startPreparedPromptInteraction := func(input agent.SteerInput) (exit bool, code int) {
 		interruptionRevision, ownsActiveGoal := uint64(0), false
 		if app.Goal != nil && app.GoalAutoContinue {
@@ -1083,6 +1107,37 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			return true, ExitInterrupt
 		}
 		return applyAction(res.input)
+	}
+	// reclaimIdleEditorForAutonomous uses the same handoff as goal
+	// auto-continuation: a delivered line wins, a non-empty draft becomes editable
+	// prefill, and only an empty canceled editor read allows host-created work.
+	reclaimIdleEditorForAutonomous := func() (retry bool, exit bool, code int) {
+		if !usePromptEditor || !readPending {
+			return false, false, ExitOK
+		}
+		reader.cancelPromptRead()
+		res := <-inputs
+		readPending = false
+		reader.drainPromptCancel()
+		switch {
+		case res.input.ended:
+			inputEnded = true
+			return true, false, ExitOK
+		case !res.ok:
+			setInputEnded(res.err)
+			return true, false, ExitOK
+		case res.input.deposit:
+			promptPrinted = false
+			pendingPrefill = res.input.text
+			pendingPrefillModelPrompt = false
+			pendingPrefillPasted = res.input.pasted
+			return pendingPrefill != "", false, ExitOK
+		default:
+			if exit, code := handleIdleReadResult(res); exit {
+				return true, true, code
+			}
+			return true, false, ExitOK
+		}
 	}
 
 	if initialPrompt != nil {
@@ -1275,6 +1330,15 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					plainPromptRead = false
 					enableIdlePromptTerm()
 				}
+				// A resolved detached wait gets the first autonomous slot after all
+				// user input, recovered steer, drafts, and handoff work. Its outcome is
+				// still consumed only by the next model request's request-context drain.
+				if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && !app.hasPendingHandoffRequest() && app.Background != nil && app.Background.DetachedWaitPending() {
+					if exit, code := startDetachedWaitContinuation(); exit {
+						return finish(code)
+					}
+					continue
+				}
 				// Autonomous goal continuation: after a non-interrupted prompt, if
 				// there is no queued user input and an active goal remains, queue the
 				// next continuation prompt to run as a normal user turn.
@@ -1359,42 +1423,36 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			}
 		}
 
+		// Detached wait outcomes outrank goal auto-continuation but remain below all
+		// already-delivered user work. Reclaim a raw editor read exactly as goal work
+		// does, preserving any non-empty draft for the user.
+		if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && !app.hasPendingHandoffRequest() && app.Background != nil && app.Background.DetachedWaitPending() {
+			retry, exit, code := reclaimIdleEditorForAutonomous()
+			if exit {
+				return finish(code)
+			}
+			if retry {
+				continue
+			}
+			if app.Background.DetachedWaitPending() {
+				if exit, code := startDetachedWaitContinuation(); exit {
+					return finish(code)
+				}
+				continue
+			}
+		}
+
 		// An active goal continues at every idle boundary before waiting for fresh
-		// input. This starts restored goals. A state transition can wake this boundary
-		// while the raw idle editor is blocked. Reclaim that read before starting
-		// autonomous work: a submitted
-		// line wins, a partial draft is restored as prefill, and only an empty
-		// deposit permits the continuation immediately.
+		// input. This starts restored goals. It shares the raw-editor reclaim path
+		// above so delivered input and editable drafts retain their existing priority.
 		if !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" {
 			if cont, ok := app.goalContinuationReady(); ok {
-				if usePromptEditor && readPending {
-					reader.cancelPromptRead()
-					res := <-inputs
-					readPending = false
-					reader.drainPromptCancel()
-					switch {
-					case res.input.ended:
-						inputEnded = true
-						continue
-					case !res.ok:
-						setInputEnded(res.err)
-						continue
-					case res.input.deposit:
-						promptPrinted = false
-						pendingPrefill = res.input.text
-						pendingPrefillModelPrompt = false
-						pendingPrefillPasted = res.input.pasted
-						if pendingPrefill != "" {
-							continue
-						}
-					default:
-						// Enter/control input raced the cancellation. Handle it
-						// against current state, then recompute goal readiness.
-						if exit, code := handleIdleReadResult(res); exit {
-							return finish(code)
-						}
-						continue
-					}
+				retry, exit, code := reclaimIdleEditorForAutonomous()
+				if exit {
+					return finish(code)
+				}
+				if retry {
+					continue
 				}
 				queued = append(queued, replInput{text: cont.Text, modelPrompt: true, goalPrompt: true, goalContinuation: true, goalRevision: cont.Revision})
 			}
@@ -1445,12 +1503,24 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			pendingPrefillModelPrompt = false
 			pendingPrefillPasted = false
 		}
+		var detachedWaitReady <-chan struct{}
+		if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && !app.hasPendingHandoffRequest() && app.Background != nil {
+			// Subscribe before an observer publishes an outcome. The manager closes
+			// this open channel when a detached wait resolves; checking pending here
+			// would miss that transition while the REPL is otherwise idle.
+			detachedWaitReady = app.Background.DetachedWaitReady()
+		}
 		select {
 		case <-exit:
 			// SIGINT exit request at the idle prompt (design §8.4).
 			return finish(ExitInterrupt)
 		case <-pendingIdleCompaction:
 			startIdleCompaction()
+		case <-detachedWaitReady:
+			// The signal is level-triggered. Do not drain here; loop through the
+			// user/draft priority checks and let the next model request own context
+			// consumption.
+			cancelIdleCompaction()
 		case <-goalChanges:
 			// Shared child-agent tools can transition the root goal while the
 			// REPL is idle. Persist the transition and wake the idle boundary,
@@ -1663,7 +1733,11 @@ type replCommandResult struct {
 	goalRevision         uint64
 }
 
-const implementationStartPrompt = "Begin implementing the recorded plan now."
+const (
+	implementationStartPrompt          = "Begin implementing the recorded plan now."
+	detachedBackgroundWaitCause        = "detached_background_wait"
+	detachedBackgroundWaitContinuation = "A detached `background_jobs` wait has resolved. Review its result in request context and continue the task."
+)
 
 type escapePresses struct {
 	last time.Time
@@ -1693,6 +1767,19 @@ func (app *App) drainLeftoverSteer() agent.SteerInput {
 		return agent.SteerInput{}
 	}
 	return app.DrainSteer()
+}
+
+// steerAccepted invokes the configured steering callback and broadcasts only a
+// successful user steer to blocked background waits. Keeping this at the UI
+// boundary excludes agent-generated steering and rejected/queued input.
+func (app *App) steerAccepted(input agent.SteerInput) bool {
+	if app.Steer == nil || !app.Steer(input) {
+		return false
+	}
+	if app.Background != nil {
+		app.Background.NotifyAcceptedSteer()
+	}
+	return true
 }
 
 func steerInputEmpty(input agent.SteerInput) bool {
@@ -1739,7 +1826,7 @@ func (app *App) steerDuringPrompt(input replInput) (handled bool, queued *agent.
 		if err != nil {
 			return true, nil
 		}
-		if app.Steer(steered) {
+		if app.steerAccepted(steered) {
 			return true, nil
 		}
 		return true, &steered
@@ -3964,6 +4051,49 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 	}, true
 }
 
+// prepareDetachedWaitContinuation admits the small host-created continuation
+// without invoking human prompt hooks, skill resolution, pending-image handling,
+// goal admission, or implementation handoff behavior. It still uses the normal
+// prompt runner so tool refresh, accounting, persistence, and request context
+// delivery remain identical to a top-level prompt.
+func (app *App) prepareDetachedWaitContinuation() (func(), bool) {
+	admission, promptID := app.admitInternalPrompt(detachedBackgroundWaitContinuation, detachedBackgroundWaitCause)
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if app.Interrupt != nil {
+		ctx, cancel = context.WithCancel(ctx)
+		app.Interrupt.BeginPrompt(func() {
+			if app.Renderer != nil {
+				app.Renderer.CancelRequested()
+			}
+			cancel()
+		})
+	}
+
+	app.Renderer.StartPromptRun()
+	return func() {
+		if app.OnPromptFinished != nil {
+			defer app.OnPromptFinished()
+		}
+		if app.Interrupt != nil {
+			defer func() {
+				app.Interrupt.EndPrompt()
+				cancel()
+			}()
+		}
+
+		sink := newREPLSink(app.Renderer, app, promptID)
+		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, app.promptHookContext(nil), promptID, sink)
+		sink.FlushEvents()
+		// Deliberately do not call goalOnPromptEnd or alter its interruption state:
+		// this host-created turn must not consume, pause, or otherwise mutate a goal.
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
+			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
+		}
+		app.saveOrWarn(app.SessionPath)
+	}, true
+}
+
 func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnBlock bool) (preparedPrompt, error) {
 	var skillContext []string
 	if opts.resolveSkillMentions {
@@ -4413,16 +4543,29 @@ func (app *App) goalRequestContext() string {
 }
 
 func (app *App) beginPrompt(prompt string, images []inputimage.Loaded) int {
+	return app.beginPromptWithPurpose(prompt, images, "")
+}
+
+// beginPromptWithPurpose records an optional host-derived cause on the normal
+// prompt boundary. The transcript admission remains prompt-origin so compaction
+// and session trees recognize it as a real top-level turn.
+func (app *App) beginPromptWithPurpose(prompt string, images []inputimage.Loaded, purpose string) int {
 	app.drainMaintenanceUsage()
 	app.PromptNumber++
 	app.recordEvent(session.Event{
-		Time:   app.clock()(),
-		Type:   session.EventUser,
-		Prompt: app.PromptNumber,
-		Text:   prompt,
-		Images: sessionImages(images),
+		Time:    app.clock()(),
+		Type:    session.EventUser,
+		Prompt:  app.PromptNumber,
+		Text:    prompt,
+		Images:  sessionImages(images),
+		Purpose: purpose,
 	})
 	return app.PromptNumber
+}
+
+func (app *App) admitInternalPrompt(prompt, purpose string) (agent.PromptAdmission, int) {
+	admission := app.Agent.AdmitPromptContent(prompt, nil)
+	return admission, app.beginPromptWithPurpose(prompt, nil, purpose)
 }
 
 func (app *App) runPromptSubmitHook(ctx context.Context, prompt string, promptID int) hooks.Result {
