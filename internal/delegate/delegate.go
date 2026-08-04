@@ -20,7 +20,6 @@ import (
 	"unicode/utf8"
 
 	"harness/internal/agent"
-	"harness/internal/goal"
 	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/session"
@@ -348,10 +347,9 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 		// ticker immediately (the job runs in a goroutine that starts now); the
 		// same progress feeds the child sink inside the job's Run closure.
 		progress := NewProgress()
-		// Background jobs own independent cancellation, but child tools still need
-		// prompt-scoped values (for example a goal-generation binding). Preserve
-		// values without coupling the job lifetime to the parent prompt.
-		parentValues := goal.ForkGenerationContext(context.WithoutCancel(ctx))
+		// Background jobs own independent cancellation while preserving
+		// prompt-scoped values from the scheduling context.
+		parentValues := context.WithoutCancel(ctx)
 		jobAgent := req.Agent
 		if prepared.continuation != nil {
 			jobAgent = prepared.continuation.meta.Agent
@@ -400,7 +398,7 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 	// the very object the renderer's closure reads. Fall back to a fresh progress
 	// when no StartProgress ran (e.g. Run called directly outside dispatch).
 	progress := t.takeProgress(input)
-	result, err := t.runner.Run(goal.ForkGenerationContext(ctx), req, progress)
+	result, err := t.runner.Run(ctx, req, progress)
 	if err != nil {
 		return tools.MeteredResult{Usage: result.Usage, Progress: result.Progress}, annotateRunError(ctx, err)
 	}

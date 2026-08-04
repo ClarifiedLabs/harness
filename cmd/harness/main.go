@@ -763,12 +763,8 @@ func runRoot(env environment, invocation cli.Invocation) int {
 	handoffPending := plan.NewPending()
 	toolCatalog.Register(plan.NewTool(planStore, func() string { return delegateState.Snapshot().SessionPath }))
 	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, planStore, interactiveSession || machineInteractive, agentdef.Names(agents)))
-	// Goals are a root-session, REPL-only feature. The tools are registered in the
-	// catalog so agents can opt in by name, but they refuse to run outside an
-	// interactive session.
+	// Goals are managed exclusively by the interactive /goal command.
 	goalStore := goal.NewStore()
-	toolCatalog.Register(goal.NewCreateTool(goalStore, interactiveSession))
-	toolCatalog.Register(goal.NewUpdateTool(goalStore, interactiveSession))
 	// MCP (opt-in): one-shot runs synchronously so the single request can use MCP
 	// tools immediately. Interactive REPL starts remote HTTP discovery in the
 	// background and applies discovered tools at a prompt boundary, so an

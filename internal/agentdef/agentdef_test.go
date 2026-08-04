@@ -369,7 +369,7 @@ func TestResolveReasoningOverride(t *testing.T) {
 	}
 }
 
-func TestDefaultToolsIncludeTodosButOmitImplementationHandoff(t *testing.T) {
+func TestDefaultToolsIncludeTodosButOmitGoalToolsAndImplementationHandoff(t *testing.T) {
 	def := defaultTools()
 	if !slices.Contains(def, "record_plan") {
 		t.Errorf("default tools missing record_plan: %v", def)
@@ -377,11 +377,10 @@ func TestDefaultToolsIncludeTodosButOmitImplementationHandoff(t *testing.T) {
 	if !slices.Contains(def, "update_todos") {
 		t.Errorf("default tools missing update_todos: %v", def)
 	}
-	if !slices.Contains(def, "create_goal") {
-		t.Errorf("default tools missing create_goal: %v", def)
-	}
-	if !slices.Contains(def, "update_goal") {
-		t.Errorf("default tools missing update_goal: %v", def)
+	for _, name := range []string{"create_goal", "update_goal"} {
+		if slices.Contains(def, name) {
+			t.Errorf("default tools unexpectedly include removed %s: %v", name, def)
+		}
 	}
 	if slices.Contains(def, "request_implementation") {
 		t.Errorf("default tools should not include request_implementation: %v", def)

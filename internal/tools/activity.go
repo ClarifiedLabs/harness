@@ -293,7 +293,7 @@ func builtinActivity(name string, input json.RawMessage) (Activity, bool) {
 			activity.Class = ActivityCoordinate
 		}
 		return activity, true
-	case "delegate", "update_todos", "record_plan", "request_implementation", "create_goal", "update_goal":
+	case "delegate", "update_todos", "record_plan", "request_implementation":
 		activity.Class = ActivityCoordinate
 		return activity, true
 	case "git_readonly", "glob", "list_dir", "grep", "view_image", "web_fetch":

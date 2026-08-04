@@ -118,7 +118,7 @@ internal/hooks           command-only lifecycle hooks (SessionStart/UserPromptSu
 internal/skills          skill discovery + `$skillName` prompt expansion
 internal/todo            update_todos store + render (§9.13)
 internal/plan            record_plan store + handoff request holder (§9.17, §9.18, §14)
-internal/goal            session goal state + create/update tools (§9.19, §10)
+internal/goal            `/goal` session state, prompt binding, and continuation rendering (§10)
 internal/auth            provider auth sources (token_command, oauth2, codex_oauth) for the model proxy
 cmd/harness-mcp-proxy  optional MCP proxy daemon + debug/config client with generated command dispatch
 internal/mcp             tools-only MCP slice: schema, client, server, stdio + streamable-HTTP transports
@@ -2828,42 +2828,6 @@ backoff allows.
   implementation agent; `/handoff` remains available as a manual fallback (§10).
   It errors in one-shot mode (no interactive approval).
 
-### 9.19 `create_goal` and `update_goal` (`internal/goal`)
-
-- `internal/goal` is a standard-library-only leaf package so `internal/session`
-  can persist `goal.State` without importing the tool registry. One root
-  `*goal.Store` holds `{objective, status, continuations, set_at}`. Setting a goal
-  trims and rejects empty input, caps the objective at 4,000 Unicode characters,
-  marks it active, resets continuation count, and stamps the creation time.
-- `create_goal` input is `{objective: string}`. Its model-facing contract says to
-  call it only for an explicitly requested autonomous goal and rejects calls
-  outside interactive sessions or while another unfinished active, paused, or
-  blocked goal exists. The unfinished check and creation are one locked store
-  transition, so concurrent root/child calls cannot replace one another.
-- `update_goal` input is `{status: "complete"|"blocked"}`. It requires an active
-  goal. `complete` requires concrete evidence that every objective requirement is
-  satisfied; `blocked` requires the same blocker to recur for at least three
-  consecutive goal turns despite best efforts. Either transition stops automatic
-  continuation. `get_goal` and goal token budgets are intentionally absent: the
-  active objective is already regenerated in request-only context on every model
-  round, and a continuation-count cap is the v1 safety bound.
-- The default (`auto`) and independent agent tool sets include both tools; plan,
-  explore, and review omit them. Child agents may inherit the root-bound tool instances,
-  but goal management is explicitly a root-conversation concern rather than a
-  per-child store. Store transitions are revisioned and terminal statuses cannot
-  be overwritten by stale pause/continuation work. Each admitted root prompt also
-  captures a goal-identity generation in its context. Each foreground and
-  background delegate snapshots that binding at launch, so delayed
-  `create_goal`/`update_goal` calls cannot mutate a user-replaced or cleared goal
-  and already-launched siblings remain stale. A successful child `create_goal`
-  conditionally advances its still-current ancestor bindings so later rounds in
-  that lineage may update the new goal. A coalesced change signal
-  wakes the idle root REPL to checkpoint and pursue child-created goals while
-  preserving user-input priority: an unfinished raw-editor draft is reclaimed as
-  editable prefill and defers autonomous continuation until it is submitted or
-  cleared. Both tools remain registered in one-shot/piped mode so agent tool-set
-  resolution stays stable, but return a mode error there.
-
 ## 10. CLI / REPL (`internal/ui`)
 
 ### Rendering
@@ -3229,29 +3193,37 @@ continuation and prewarm state described in their owning sections. `/clear`
 starts a new cache affinity; context/model/tool changes preserve the current
 conversation affinity.
 
-`/goal` shows the current goal; exact `clear`, `pause`, and `resume` arguments
-apply those transitions, while every other non-empty argument sets/replaces the
-objective and starts a rendered continuation as a normal user prompt. At prompt
-completion the REPL first drains already-submitted user input, then, if none is
-queued and the goal
-is still active, appends a visible continuation user prompt. Active goals pause
-when prompt handling returns `context.Canceled` (but not on deadline expiry) or
-after `goal_max_continuations` (default 25, zero unlimited); resuming a paused,
-blocked, or complete goal resets the count, while resuming an active goal is
+`internal/goal` is a standard-library-only leaf package. One root `*goal.Store`
+holds `{objective, status, continuations, set_at}`. `/goal` shows the current
+goal; exact `clear`, `pause`, and `resume` arguments apply those transitions,
+while every other non-empty argument sets/replaces the objective, trimming empty
+input and capping it at 4,000 Unicode characters, and starts a rendered
+continuation as a normal user prompt. Goal state is controlled exclusively by
+these slash-command paths; no model-callable goal schemas are registered.
+
+At prompt completion the REPL first drains already-submitted user input, then,
+if none is queued and the goal is still active, appends a visible continuation
+user prompt. Active goals pause when prompt handling returns `context.Canceled`
+(but not on deadline expiry) or after `goal_max_continuations` (default 25, zero
+unlimited). Resuming a paused goal resets the count; blocked or complete states
+restored from older sessions are also resumable, while resuming an active goal is
 rejected. Goal-command, cap, and rejected-continuation transitions checkpoint
 immediately; a rejected synthetic prompt pauses without consuming the count.
+Reporting completion or a blocker in model text does not mutate goal state.
+
 Each rendered goal prompt carries its store revision. After MCP refresh and
 prompt hooks pass, admission atomically revalidates that revision, active status,
-cap, and (for autonomous continuations) `update_goal` capability before consuming
-the count or recording the prompt. The agent appends the prompt-origin user
-message synchronously under the same store lock, then executes that admission,
-closing the validation-to-transcript-insertion race with shared child tools. A stale
-prompt is skipped without changing a completed, blocked, paused, cleared, or
-replaced goal. Cancellation during pre-prompt MCP refresh or submission hooks
-pauses the matching goal; deadline expiry does not.
-Restored active goals continue at the first idle boundary. Every later idle
-boundary rechecks capability, so a goal idled by switching to an agent without
-`update_goal` restarts after switching back. A compact XML-escaped reminder is regenerated into
+and cap before consuming the count or recording the prompt. The agent appends the
+prompt-origin user message synchronously under the same store lock, then executes
+that admission, closing the validation-to-transcript-insertion race. A stale
+prompt is skipped without changing a paused, cleared, or replaced goal.
+Cancellation during pre-prompt MCP refresh or submission hooks pauses the
+matching goal; deadline expiry does not. Each admitted root prompt also captures
+a goal-identity generation in its context so interruption of stale work cannot
+pause a user-replaced goal.
+
+Restored active goals continue at the first idle boundary regardless of the
+selected agent's tools. A compact XML-escaped reminder is regenerated into
 `RequestContext` on every active model round, so compaction cannot erase goal
 salience. `Session.Goal` persists status/count/time, `/clear` removes it, and
 clone carries it with the other session state. The driver and `/goal` command
@@ -3922,8 +3894,8 @@ reviewer, or the wide-open default without separate binaries.
   selection path—not a display-name or model-only swap—so it recomposes the agent
   prompt, tools, model/reasoning selection, and response continuation state.
 - **Built-ins:** `auto` (all available built-in tools plus discovered MCP tools,
-  including `update_todos`, `record_plan`, `create_goal`, `update_goal`, `delegate`
-  and background job tools, and `request_implementation` in interactive sessions; its
+  including `update_todos`, `record_plan`, `delegate` and background job tools,
+  and `request_implementation` in interactive sessions; its
   `prompts/agents/auto.txt` is a one-byte file — a single newline — that trims to
   empty, so it contributes no prompt body), `explore` (the shared inspection
   tools — `read_file`, `view_image`, `list_dir`, `glob`, `search`, `inspect`,
@@ -3947,8 +3919,7 @@ reviewer, or the wide-open default without separate binaries.
   duplicate functionality and waste context. The delegation subset guard treats an
   available `git` as satisfying a required `git_readonly`, so these parents can
   still delegate to `explore`/`plan`/`review`. `record_plan` (§9.17) is exposed
-  to `auto`, `plan`, and `independent`; `create_goal` and `update_goal` (§9.19)
-  are exposed to `auto` and `independent`; `update_todos` is in every built-in
+  to `auto`, `plan`, and `independent`; `update_todos` is in every built-in
   agent's set;
   `request_implementation` (§9.18) is exposed to `plan` and to interactive
   `auto`, but not to one-shot `auto` or `independent`.

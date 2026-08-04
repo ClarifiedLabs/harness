@@ -1489,36 +1489,34 @@ loop. Harness starts a visible continuation prompt containing the objective,
 then, after each completed prompt, submits another whenever the goal is still
 active and no user input is already queued. The continuation keeps the complete
 objective, requires evidence-based progress and a requirement-by-requirement
-completion audit, and tells the model to mark the goal blocked only after the
-same blocker recurs for at least three consecutive goal turns.
+completion audit, and asks the model to explain concrete blockers and report
+clear evidence when the objective is achieved.
 
-The `create_goal` and `update_goal` tools let the model create an explicitly
-requested goal or mark the active goal `complete`/`blocked`. While active, the
-objective is also regenerated as request-only context on every model round, so
-it remains salient after compaction without duplicating the reminder in the
-transcript. Autonomous continuation stops when the model marks the goal complete
-or blocked, the user clears or pauses it, a prompt returns `context.Canceled`
-from user interruption (including cancellation during pre-prompt tool refresh or
-a submission hook), a continuation prompt is rejected by a submission hook, or
-the continuation cap is reached. Errors and deadline expiry do not pause a goal. Rejected continuation
-prompts pause without consuming the cap. The cap defaults to 25 and is configured with
-`-goal-max-continuations`, `HARNESS_GOAL_MAX_CONTINUATIONS`, or
+Goals are created and controlled exclusively through the `/goal` command; they
+are not exposed as model-callable tools. While active, the objective is also
+regenerated as request-only context on every model round, so it remains salient
+after compaction without duplicating the reminder in the transcript. Reporting
+completion does not mutate goal state: the loop remains active until the user
+pauses or clears it, a prompt returns `context.Canceled` from user interruption
+(including cancellation during pre-prompt tool refresh or a submission hook), a
+continuation prompt is rejected by a submission hook, or the continuation cap is
+reached. Errors and deadline expiry do not pause a goal. Rejected continuation
+prompts pause without consuming the cap. The cap defaults to 25 and is configured
+with `-goal-max-continuations`, `HARNESS_GOAL_MAX_CONTINUATIONS`, or
 `goal_max_continuations`; `0` means unlimited. `/goal resume` reactivates a
-paused, blocked, or complete goal with a fresh continuation count; it rejects an
-already-active goal rather than resetting the safety count. If a goal changes or
-becomes terminal while a rendered prompt is waiting on tool refresh or submission
-hooks, Harness skips that stale prompt without consuming the count or overwriting
-the newer state.
+paused goal with a fresh continuation count; it also accepts blocked or complete
+states restored from older sessions. It rejects an already-active goal rather
+than resetting the safety count. If a goal changes or becomes inactive while a
+rendered prompt is waiting on tool refresh or submission hooks, Harness skips
+that stale prompt without consuming the count or overwriting the newer state.
 
 Goal state is saved in `state.json`, with idle command and safety-limit
 transitions checkpointed immediately. It is restored by `-resume`, copied by
 `/clone`, and removed by `/clear`. A restored active goal continues at the first
-idle boundary. Switching to an agent without `update_goal` idles the loop;
-switching back to a capable agent restarts it at the next idle boundary. The
-autonomous driver and `/goal` command are interactive-REPL-only; one-shot and
-piped runs expose the tool schemas for stable agent configuration, but goal tool
-calls return an error and no continuation loop runs. Token budgets, an interactive goal menu, and a
-`get_goal` tool are not part of this version.
+idle boundary regardless of the selected agent's tool set. The autonomous driver
+and `/goal` command are interactive-REPL-only; one-shot and piped runs expose no
+goal controls and run no continuation loop. No model-facing goal tools, token
+budget, or interactive goal menu are provided.
 
 ## Agents
 

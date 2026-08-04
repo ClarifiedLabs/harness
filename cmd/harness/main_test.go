@@ -2337,7 +2337,7 @@ func TestRunResumeFlagsWinWarning(t *testing.T) {
 	}
 }
 
-func TestRunResumeActiveGoalContinuesAutonomously(t *testing.T) {
+func TestRunResumeActiveGoalContinuesWithoutGoalTools(t *testing.T) {
 	dir := t.TempDir()
 	sessPath := filepath.Join(dir, "prior")
 	prior := session.Session{
@@ -2353,37 +2353,31 @@ func TestRunResumeActiveGoalContinuesAutonomously(t *testing.T) {
 	if err := prior.Save(sessPath); err != nil {
 		t.Fatal(err)
 	}
-	fp := llmtest.New("fake",
-		llmtest.Step{
-			Events: []llm.StreamEvent{{
-				Kind:      llm.EventToolCallDone,
-				ToolID:    "call_goal",
-				ToolName:  "update_goal",
-				ToolInput: json.RawMessage(`{"status":"complete"}`),
-			}},
-			Stop: llm.StopToolUse,
-		},
-		okStepWithUsage(1, 1),
-	)
+	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t,
-		[]string{"-model", "claude-opus-4-8", "-resume", sessPath}, fp, "/exit\n")
+		[]string{"-model", "claude-opus-4-8", "-goal-max-continuations", "1", "-resume", sessPath}, fp, "/exit\n")
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("resume exit = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 2 {
-		t.Fatalf("requests = %d, want autonomous tool round and final", len(fp.Requests))
+	if len(fp.Requests) != 1 {
+		t.Fatalf("requests = %d, want one autonomous continuation", len(fp.Requests))
 	}
 	messages := fp.Requests[0].Messages
 	last := messages[len(messages)-1]
 	if last.Role != llm.RoleUser || len(last.Content) == 0 || !strings.Contains(last.Content[0].Text, "finish the resumed objective") {
 		t.Fatalf("first resumed request does not contain goal continuation: %+v", last)
 	}
+	for _, schema := range fp.Requests[0].Tools {
+		if schema.Name == "create_goal" || schema.Name == "update_goal" {
+			t.Fatalf("resumed request exposed removed goal tool %q", schema.Name)
+		}
+	}
 	loaded, err := session.Load(sessPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Goal == nil || loaded.Goal.Status != goal.StatusComplete {
-		t.Fatalf("persisted resumed goal = %+v, want complete", loaded.Goal)
+	if loaded.Goal == nil || loaded.Goal.Status != goal.StatusPaused || loaded.Goal.Continuations != 1 {
+		t.Fatalf("persisted resumed goal = %+v, want paused at cap", loaded.Goal)
 	}
 }
 
@@ -3465,7 +3459,7 @@ func TestRunDefaultAgentTools(t *testing.T) {
 	}
 }
 
-func TestRunInteractiveAutoExposesImplementationHandoffTodosAndGoals(t *testing.T) {
+func TestRunInteractiveAutoExposesHandoffAndTodosButNotGoalTools(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8"}, fp, "hi\n/exit\n")
 
@@ -3480,8 +3474,8 @@ func TestRunInteractiveAutoExposesImplementationHandoffTodosAndGoals(t *testing.
 		t.Fatalf("interactive auto tools missing update_todos: %v", names)
 	}
 	for _, name := range []string{"create_goal", "update_goal"} {
-		if !slices.Contains(names, name) {
-			t.Fatalf("interactive auto tools missing %s: %v", name, names)
+		if slices.Contains(names, name) {
+			t.Fatalf("interactive auto tools unexpectedly include removed %s: %v", name, names)
 		}
 	}
 }
@@ -4741,7 +4735,7 @@ func expectedDefaultToolNames() []string {
 	// The default set omits git_readonly: git already covers it, and read-only
 	// agents remain delegatable via the git->git_readonly subset rule.
 	names := tools.DefaultNames()
-	return append(names, "update_todos", "delegate", "background_jobs", "record_plan", "create_goal", "update_goal")
+	return append(names, "update_todos", "delegate", "background_jobs", "record_plan")
 }
 
 func TestEnableInteractiveAutoHandoff(t *testing.T) {

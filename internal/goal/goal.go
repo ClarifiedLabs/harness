@@ -1,8 +1,6 @@
-// Package goal implements session goals and the model-callable create_goal and
-// update_goal tools. It lives outside internal/tools (like todo and plan) so
-// internal/session can persist goal.State without importing the tool registry,
-// and so internal/tools can depend on it for the request_implementation tool.
-// It imports only the standard library.
+// Package goal implements session goals managed by the interactive /goal
+// command. It is a standard-library-only leaf package so internal/session can
+// persist goal.State without importing the UI.
 package goal
 
 import (
@@ -100,38 +98,6 @@ func (s *Store) Set(objective string) error {
 	return nil
 }
 
-// Create sets a model-created goal only when no unfinished goal exists. The
-// check and state transition are atomic so concurrent child calls cannot replace
-// one another.
-func (s *Store) Create(objective string) error {
-	_, err := s.create(objective, 0, false)
-	return err
-}
-
-// CreateAtGeneration is Create conditional on the goal identity generation.
-// It returns the new generation so a prompt-local binding can target the goal it
-// just created while stale child agents remain bound to the prior generation.
-func (s *Store) CreateAtGeneration(objective string, expected uint64) (uint64, error) {
-	return s.create(objective, expected, true)
-}
-
-func (s *Store) create(objective string, expected uint64, conditional bool) (uint64, error) {
-	objective, err := normalizeObjective(objective)
-	if err != nil {
-		return 0, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if conditional && s.generation != expected {
-		return 0, fmt.Errorf("goal changed since this agent started; refusing stale create_goal")
-	}
-	if s.state != nil && s.state.Status != StatusComplete {
-		return 0, fmt.Errorf("an unfinished goal already exists with status %s; use update_goal to complete or block an active goal, or ask the user to clear/replace it", s.state.Status)
-	}
-	s.setLocked(objective)
-	return s.generation, nil
-}
-
 func normalizeObjective(objective string) (string, error) {
 	objective = strings.TrimSpace(objective)
 	if objective == "" {
@@ -157,8 +123,8 @@ func (s *Store) setLocked(objective string) {
 	s.notifyLocked()
 }
 
-// Clear removes the current goal and invalidates model-tool bindings from the
-// prior session generation, even when no goal is currently set.
+// Clear removes the current goal and invalidates prompt bindings from the prior
+// session generation, even when no goal is currently set.
 func (s *Store) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -233,42 +199,6 @@ func (s *Store) Resume() error {
 	}
 }
 
-// MarkStatus transitions the active goal to complete or blocked. Only active
-// goals may be marked; marking a paused/complete/blocked goal or an unset goal
-// is an error.
-func (s *Store) MarkStatus(status Status) error {
-	return s.markStatus(status, 0, false)
-}
-
-// MarkStatusAtGeneration is MarkStatus conditional on goal identity. It rejects
-// delayed work from a child launched for a goal the user has since replaced.
-func (s *Store) MarkStatusAtGeneration(status Status, expected uint64) error {
-	return s.markStatus(status, expected, true)
-}
-
-func (s *Store) markStatus(status Status, expected uint64, conditional bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if conditional && s.generation != expected {
-		return fmt.Errorf("goal changed since this agent started; refusing stale update_goal")
-	}
-	if s.state == nil {
-		return fmt.Errorf("no active goal; create one with create_goal first")
-	}
-	if s.state.Status != StatusActive {
-		return fmt.Errorf("goal is %s, not active", s.state.Status)
-	}
-	switch status {
-	case StatusComplete, StatusBlocked:
-		s.state.Status = status
-		s.revision++
-		s.notifyLocked()
-		return nil
-	default:
-		return fmt.Errorf("invalid goal status %q (want complete or blocked)", status)
-	}
-}
-
 // Restore reseeds the store from persisted state.
 func (s *Store) Restore(state *State) {
 	s.mu.Lock()
@@ -340,7 +270,7 @@ func (s *Store) Reminder() string {
 	if s.state == nil || s.state.Status != StatusActive {
 		return ""
 	}
-	return fmt.Sprintf("<goal status=\"active\">\n<objective>%s</objective>\nThis goal persists across turns. Work toward it from the evidence in the transcript. Call update_goal with status complete when the objective is verifiably achieved, or blocked when the same blocker has recurred for at least three consecutive goal turns.\n</goal>", xmlEscape(s.state.Objective))
+	return fmt.Sprintf("<goal status=\"active\">\n<objective>%s</objective>\nThis user-managed goal persists across turns. Work toward it from the evidence in the transcript, and report concrete evidence when the objective is achieved.\n</goal>", xmlEscape(s.state.Objective))
 }
 
 // ContinuationPrompt renders the user-facing prompt that drives a newly set or
@@ -496,11 +426,11 @@ func continuationPrompt(state *State, continuations, maxContinuations int) strin
 
 Work from the evidence already in the transcript. Do not invent progress. Keep the full objective intact; do not silently narrow its scope.
 
-Completion audit: before finishing, verify the objective requirement by requirement. Only call update_goal with status "complete" when you can point to concrete evidence in the workspace or transcript that the objective is fully satisfied.
+Completion audit: before reporting completion, verify the objective requirement by requirement and point to concrete evidence in the workspace or transcript that it is fully satisfied.
 
-Blocked rule: only call update_goal with status "blocked" after the same blocking condition has recurred for at least three consecutive goal turns and remains unresolved despite your best effort. A user-resumed goal starts a fresh audit.
+If progress is blocked, explain the concrete blocking condition and what you tried. A user-resumed goal starts a fresh audit.
 
-If the objective is achieved, call update_goal {status: "complete"}.`, xmlEscape(state.Objective), elapsed, stats)
+Goal state is controlled by the user through /goal. If the objective is achieved, report the evidence clearly.`, xmlEscape(state.Objective), elapsed, stats)
 }
 
 func xmlEscape(s string) string {

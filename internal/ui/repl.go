@@ -187,9 +187,9 @@ type App struct {
 	// Plans holds the recorded plans (the record_plan tool's store), persisted
 	// in state.json and reset on /clear. nil disables persistence.
 	Plans *plan.Store
-	// Goal holds the session goal (the create_goal/update_goal tool store),
-	// persisted in state.json and reset on /clear. nil disables persistence and
-	// the autonomous continuation loop.
+	// Goal holds the /goal command's session state, persisted in state.json and
+	// reset on /clear. nil disables persistence and the autonomous continuation
+	// loop.
 	Goal *goal.Store
 	// GoalMaxContinuations is the safety cap for autonomous continuations per
 	// goal; 0 means unlimited. Reaching the cap auto-pauses the goal.
@@ -893,10 +893,6 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					admissionOK = false
 					return 0, 0, false
 				}
-				if goalContinuation && !app.agentHasTool("update_goal") {
-					admissionOK = false
-					return 0, 0, false
-				}
 				count, admittedRevision, generation, admitted, capped := app.Goal.AdmitPrompt(goalRevision, app.GoalMaxContinuations, goalContinuation, begin)
 				admissionOK = admitted
 				if capped {
@@ -1364,10 +1360,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 
 		// An active goal continues at every idle boundary before waiting for fresh
-		// input. This starts restored goals and restarts goals after switching from
-		// an agent without update_goal back to one that can finish the goal. A
-		// background transition can wake this boundary while the raw idle editor is
-		// blocked. Reclaim that read before starting autonomous work: a submitted
+		// input. This starts restored goals. A state transition can wake this boundary
+		// while the raw idle editor is blocked. Reclaim that read before starting
+		// autonomous work: a submitted
 		// line wins, a partial draft is restored as prefill, and only an empty
 		// deposit permits the continuation immediately.
 		if !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" {
@@ -2541,7 +2536,7 @@ func (app *App) goalOnPromptEnd(ctx context.Context, err error, revision uint64,
 // true when a continuation should run. It applies the safety cap and pauses the
 // goal when the cap is reached.
 func (app *App) goalContinuationReady() (goal.PromptPreview, bool) {
-	if app.Goal == nil || !app.GoalAutoContinue || !app.agentHasTool("update_goal") || !app.Goal.Active() {
+	if app.Goal == nil || !app.GoalAutoContinue || !app.Goal.Active() {
 		return goal.PromptPreview{}, false
 	}
 	if app.pauseGoalAtContinuationCap() {
@@ -4411,7 +4406,7 @@ func (app *App) goalSnapshot() *goal.State {
 // goalRequestContext returns the active-goal reminder for inclusion in model
 // request context. It is regenerated each request so it survives compaction.
 func (app *App) goalRequestContext() string {
-	if app.Goal == nil || !app.GoalAutoContinue || !app.agentHasTool("update_goal") {
+	if app.Goal == nil || !app.GoalAutoContinue {
 		return ""
 	}
 	return app.Goal.Reminder()

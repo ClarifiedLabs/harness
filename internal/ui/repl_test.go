@@ -6608,10 +6608,6 @@ func newTestAppWithGoal(t *testing.T, out, errw testWriter, fp *llmtest.FakeProv
 	t.Helper()
 	app := newTestApp(t, out, errw, fp)
 	store := goal.NewStore()
-	reg := tools.Default()
-	reg.Register(goal.NewCreateTool(store, true))
-	reg.Register(goal.NewUpdateTool(store, true))
-	app.Agent.SetTools(reg)
 	app.Goal = store
 	app.GoalAutoContinue = true
 	app.GoalMaxContinuations = 25
@@ -6643,14 +6639,14 @@ func TestREPLGoalCommandSetsObjective(t *testing.T) {
 	}
 }
 
-func TestREPLGoalAutoContinuesUntilComplete(t *testing.T) {
+func TestREPLGoalAutoContinuesWithoutGoalTools(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake",
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("working")}, Stop: llm.StopEndTurn},
-		llmtest.Step{Events: []llm.StreamEvent{toolStep("update_goal", `{"status":"complete"}`, "call_1")}, Stop: llm.StopToolUse},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
 	)
 	app := newTestAppWithGoal(t, &out, &errw, fp)
+	app.GoalMaxContinuations = 1
 	finished := make(chan struct{}, 2)
 	app.OnPromptFinished = func() { finished <- struct{}{} }
 	reader, writer := io.Pipe()
@@ -6658,7 +6654,7 @@ func TestREPLGoalAutoContinuesUntilComplete(t *testing.T) {
 	go func() { codeCh <- Run(reader, app, nil) }()
 	_, _ = fmt.Fprintln(writer, "/goal refactor the parser")
 	<-finished // objective turn
-	<-finished // autonomous continuation, including update_goal + final response
+	<-finished // autonomous continuation
 	_, _ = fmt.Fprintln(writer, "/exit")
 	_ = writer.Close()
 	code := <-codeCh
@@ -6666,11 +6662,15 @@ func TestREPLGoalAutoContinuesUntilComplete(t *testing.T) {
 	if code != ExitOK {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 3 {
-		t.Fatalf("requests = %d, want 3 (initial + continuation + post-tool)", len(fp.Requests))
+	if len(fp.Requests) != 2 {
+		t.Fatalf("requests = %d, want initial + continuation", len(fp.Requests))
 	}
-	if got := app.Goal.Status(); got != goal.StatusComplete {
-		t.Fatalf("goal status = %q, want complete", got)
+	for _, req := range fp.Requests {
+		for _, schema := range req.Tools {
+			if schema.Name == "create_goal" || schema.Name == "update_goal" {
+				t.Fatalf("goal request exposed removed tool %q", schema.Name)
+			}
+		}
 	}
 	cont := fp.Requests[1].Messages[len(fp.Requests[1].Messages)-1].Content[0].Text
 	if !strings.Contains(cont, "Continue working toward the active session goal") {
@@ -6870,11 +6870,9 @@ func TestClearResetsGoal(t *testing.T) {
 
 func TestREPLRestoredActiveGoalContinuesAtFirstIdleBoundary(t *testing.T) {
 	var out, errw bytes.Buffer
-	fp := llmtest.New("fake",
-		llmtest.Step{Events: []llm.StreamEvent{toolStep("update_goal", `{"status":"complete"}`, "call_1")}, Stop: llm.StopToolUse},
-		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
-	)
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn})
 	app := newTestAppWithGoal(t, &out, &errw, fp)
+	app.GoalMaxContinuations = 1
 	if err := app.Goal.Set("finish restored work"); err != nil {
 		t.Fatal(err)
 	}
@@ -6889,62 +6887,33 @@ func TestREPLRestoredActiveGoalContinuesAtFirstIdleBoundary(t *testing.T) {
 	if code := <-codeCh; code != ExitOK {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 2 {
-		t.Fatalf("requests = %d, want continuation tool round + final round", len(fp.Requests))
+	if len(fp.Requests) != 1 {
+		t.Fatalf("requests = %d, want one continuation", len(fp.Requests))
 	}
 	prompt := fp.Requests[0].Messages[0].Content[0].Text
 	if !strings.Contains(prompt, "Continue working toward the active session goal") || !strings.Contains(prompt, "finish restored work") {
 		t.Fatalf("restored continuation prompt = %q", prompt)
 	}
-	if app.Goal.Status() != goal.StatusComplete {
-		t.Fatalf("restored goal status = %q, want complete", app.Goal.Status())
-	}
 }
 
-func TestREPLGoalContinuesAfterSwitchingBackToCapableAgent(t *testing.T) {
+func TestREPLGoalContinuationDoesNotRequireGoalTools(t *testing.T) {
 	var out, errw bytes.Buffer
-	fp := llmtest.New("fake",
-		llmtest.Step{Events: []llm.StreamEvent{toolStep("update_goal", `{"status":"complete"}`, "call_1")}, Stop: llm.StopToolUse},
-		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
-	)
-	app := newTestAppWithGoal(t, &out, &errw, fp)
-	if err := app.Goal.Set("finish after switching back"); err != nil {
+	app := newTestAppWithGoal(t, &out, &errw, llmtest.New("fake"))
+	app.Agent.SetTools(tools.Default())
+	if err := app.Goal.Set("finish without model goal tools"); err != nil {
 		t.Fatal(err)
 	}
-	app.Agent.SetTools(tools.Default())
-	app.AgentName = "plan"
-	autoTools := tools.Default()
-	autoTools.Register(goal.NewCreateTool(app.Goal, true))
-	autoTools.Register(goal.NewUpdateTool(app.Goal, true))
-	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		if name != "auto" {
-			return AgentSelection{}, fmt.Errorf("unknown agent %q", name)
-		}
-		return AgentSelection{Name: "auto", Tools: autoTools, System: app.System}, nil
-	}
-
-	if code := Run(strings.NewReader("/agent auto\n/exit\n"), app, nil); code != ExitOK {
-		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
-	}
-	if fp.RequestCount() != 2 {
-		t.Fatalf("requests = %d, want continuation tool round + final round", fp.RequestCount())
-	}
-	prompt := fp.Requests[0].Messages[0].Content[0].Text
-	if !strings.Contains(prompt, "finish after switching back") {
-		t.Fatalf("continuation prompt = %q", prompt)
-	}
-	if app.Goal.Status() != goal.StatusComplete {
-		t.Fatalf("goal status = %q, want complete", app.Goal.Status())
+	preview, ok := app.goalContinuationReady()
+	if !ok || !strings.Contains(preview.Text, "finish without model goal tools") {
+		t.Fatalf("goal continuation unavailable without goal tools: %+v, %v", preview, ok)
 	}
 }
 
-func TestBackgroundGoalCreationWakesIdleREPLAndPersists(t *testing.T) {
+func TestGoalStoreChangeWakesIdleREPLAndPersists(t *testing.T) {
 	var out, errw lockedBuffer
-	fp := llmtest.New("fake",
-		llmtest.Step{Events: []llm.StreamEvent{toolStep("update_goal", `{"status":"complete"}`, "call_1")}, Stop: llm.StopToolUse},
-		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
-	)
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn})
 	app := newTestAppWithGoal(t, &out, &errw, fp)
+	app.GoalMaxContinuations = 1
 	finished := make(chan struct{}, 1)
 	app.OnPromptFinished = func() { finished <- struct{}{} }
 	reader, writer := io.Pipe()
@@ -6952,39 +6921,39 @@ func TestBackgroundGoalCreationWakesIdleREPLAndPersists(t *testing.T) {
 	go func() { codeCh <- Run(reader, app, nil) }()
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "idle prompt")
 
-	if err := app.Goal.Create("wake the root loop"); err != nil {
+	if err := app.Goal.Set("wake the root loop"); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case <-finished:
 	case <-time.After(time.Second):
-		t.Fatal("background goal did not wake idle REPL")
+		t.Fatal("goal change did not wake idle REPL")
 	}
 	_, _ = fmt.Fprintln(writer, "/exit")
 	_ = writer.Close()
 	if code := <-codeCh; code != ExitOK {
 		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
 	}
-	if fp.RequestCount() != 2 || app.Goal.Status() != goal.StatusComplete {
-		t.Fatalf("background goal result: requests=%d state=%+v", fp.RequestCount(), app.Goal.Snapshot())
+	if fp.RequestCount() != 1 || app.Goal.Status() != goal.StatusPaused {
+		t.Fatalf("goal result: requests=%d state=%+v", fp.RequestCount(), app.Goal.Snapshot())
 	}
 	loaded, err := session.Load(app.SessionPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Goal == nil || loaded.Goal.Status != goal.StatusComplete || loaded.Goal.Objective != "wake the root loop" {
-		t.Fatalf("persisted background goal = %+v", loaded.Goal)
+	if loaded.Goal == nil || loaded.Goal.Status != goal.StatusPaused || loaded.Goal.Objective != "wake the root loop" {
+		t.Fatalf("persisted goal = %+v", loaded.Goal)
 	}
 }
 
-func TestBackgroundGoalCreationPreservesIdleEditorDraft(t *testing.T) {
+func TestGoalStoreChangePreservesIdleEditorDraft(t *testing.T) {
 	var out, errw lockedBuffer
 	fp := llmtest.New("fake",
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("user prompt done")}, Stop: llm.StopEndTurn},
-		llmtest.Step{Events: []llm.StreamEvent{toolStep("update_goal", `{"status":"complete"}`, "call_1")}, Stop: llm.StopToolUse},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("goal done")}, Stop: llm.StopEndTurn},
 	)
 	app := newTestAppWithGoal(t, &out, &errw, fp)
+	app.GoalMaxContinuations = 1
 	finished := make(chan struct{}, 2)
 	app.OnPromptFinished = func() { finished <- struct{}{} }
 	reader, writer := io.Pipe()
@@ -6994,7 +6963,7 @@ func TestBackgroundGoalCreationPreservesIdleEditorDraft(t *testing.T) {
 
 	writePipe(t, writer, "unsent draft")
 	waitFor(t, func() bool { return strings.Contains(errw.String(), "> unsent draft") }, "typed idle draft")
-	if err := app.Goal.Create("wake without losing input"); err != nil {
+	if err := app.Goal.Set("wake without losing input"); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool {
@@ -7012,14 +6981,14 @@ func TestBackgroundGoalCreationPreservesIdleEditorDraft(t *testing.T) {
 
 	writePipe(t, writer, "\r")
 	<-finished // submitted user draft
-	<-finished // autonomous continuation, including update_goal
+	<-finished // autonomous continuation
 	writePipe(t, writer, "/exit\r")
 	_ = writer.Close()
 	if code := <-codeCh; code != ExitOK {
 		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
 	}
-	if fp.RequestCount() != 3 {
-		t.Fatalf("requests = %d, want user prompt plus goal tool/final rounds", fp.RequestCount())
+	if fp.RequestCount() != 2 {
+		t.Fatalf("requests = %d, want user prompt plus goal continuation", fp.RequestCount())
 	}
 	prompts := transcriptPrompts(app)
 	if !strings.HasPrefix(prompts, "unsent draft|") || !strings.Contains(prompts, "wake without losing input") {
@@ -7027,7 +6996,7 @@ func TestBackgroundGoalCreationPreservesIdleEditorDraft(t *testing.T) {
 	}
 }
 
-func TestGoalPromptAdmissionSkipsGoalCompletedDuringRefresh(t *testing.T) {
+func TestGoalPromptAdmissionSkipsGoalClearedDuringRefresh(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestAppWithGoal(t, &out, &errw, fp)
@@ -7036,9 +7005,7 @@ func TestGoalPromptAdmissionSkipsGoalCompletedDuringRefresh(t *testing.T) {
 	}
 	refreshed := make(chan struct{})
 	app.RefreshMCP = func(context.Context, string) (*tools.Registry, string) {
-		if err := app.Goal.MarkStatus(goal.StatusComplete); err != nil {
-			t.Errorf("MarkStatus: %v", err)
-		}
+		app.Goal.Clear()
 		close(refreshed)
 		return nil, ""
 	}
@@ -7055,19 +7022,22 @@ func TestGoalPromptAdmissionSkipsGoalCompletedDuringRefresh(t *testing.T) {
 	if fp.RequestCount() != 0 || app.Goal.Continuations() != 0 {
 		t.Fatalf("stale goal prompt ran: requests=%d continuations=%d", fp.RequestCount(), app.Goal.Continuations())
 	}
-	if app.Goal.Status() != goal.StatusComplete {
-		t.Fatalf("goal status = %q, want complete", app.Goal.Status())
+	if app.Goal.Snapshot() != nil {
+		t.Fatalf("goal state = %+v, want cleared", app.Goal.Snapshot())
 	}
 }
 
-func TestGoalContinuationSkippedWhenRefreshRemovesGoalTool(t *testing.T) {
+func TestGoalContinuationRunsWhenRefreshHasNoGoalTools(t *testing.T) {
 	var out, errw bytes.Buffer
-	fp := llmtest.New("fake")
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn})
 	app := newTestAppWithGoal(t, &out, &errw, fp)
-	if err := app.Goal.Set("wait for a capable agent"); err != nil {
+	app.GoalMaxContinuations = 1
+	if err := app.Goal.Set("continue without model goal tools"); err != nil {
 		t.Fatal(err)
 	}
 	refreshed := make(chan struct{})
+	finished := make(chan struct{}, 1)
+	app.OnPromptFinished = func() { finished <- struct{}{} }
 	app.RefreshMCP = func(context.Context, string) (*tools.Registry, string) {
 		close(refreshed)
 		return tools.Default(), ""
@@ -7076,17 +7046,15 @@ func TestGoalContinuationSkippedWhenRefreshRemovesGoalTool(t *testing.T) {
 	codeCh := make(chan int, 1)
 	go func() { codeCh <- Run(reader, app, nil) }()
 	<-refreshed
+	<-finished
 	_, _ = fmt.Fprintln(writer, "/exit")
 	_ = writer.Close()
 
 	if code := <-codeCh; code != ExitOK {
 		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
 	}
-	if fp.RequestCount() != 0 || app.Goal.Continuations() != 0 {
-		t.Fatalf("incapable continuation ran: requests=%d continuations=%d", fp.RequestCount(), app.Goal.Continuations())
-	}
-	if app.Goal.Status() != goal.StatusActive {
-		t.Fatalf("goal status = %q, want active", app.Goal.Status())
+	if fp.RequestCount() != 1 || app.Goal.Continuations() != 1 {
+		t.Fatalf("continuation result: requests=%d continuations=%d", fp.RequestCount(), app.Goal.Continuations())
 	}
 }
 
@@ -7151,43 +7119,6 @@ func TestREPLInterruptedGoalPromptPausesGoal(t *testing.T) {
 	}
 	if app.Goal.Status() != goal.StatusPaused {
 		t.Fatalf("goal status = %q, want paused", app.Goal.Status())
-	}
-}
-
-func TestInterruptedPromptPausesGoalCreatedDuringPrompt(t *testing.T) {
-	var out, errw lockedBuffer
-	started := make(chan struct{})
-	fp := llmtest.New("fake",
-		llmtest.Step{Events: []llm.StreamEvent{toolStep("create_goal", `{"objective":"created in flight"}`, "call_1")}, Stop: llm.StopToolUse},
-		llmtest.Step{
-			Stop: llm.StopEndTurn,
-			Block: func(ctx context.Context) {
-				close(started)
-				<-ctx.Done()
-			},
-		},
-	)
-	app := newTestAppWithGoal(t, &out, &errw, fp)
-	app.Interrupt = agent.NewInterruptWatcher(nil, time.Now, func() {})
-	reader, writer := io.Pipe()
-	codeCh := make(chan int, 1)
-	go func() { codeCh <- Run(reader, app, nil) }()
-	_, _ = fmt.Fprintln(writer, "start an autonomous task")
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("post-create model round did not start")
-	}
-	app.Interrupt.CancelPrompt()
-	waitFor(t, func() bool { return strings.Contains(errw.String(), "[goal paused; /goal resume to continue]") }, "created goal pause notice")
-	_, _ = fmt.Fprintln(writer, "/exit")
-	_ = writer.Close()
-	if code := <-codeCh; code != ExitOK {
-		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
-	}
-	state := app.Goal.Snapshot()
-	if state == nil || state.Objective != "created in flight" || state.Status != goal.StatusPaused {
-		t.Fatalf("created goal after interruption = %+v, want paused", state)
 	}
 }
 
@@ -7357,7 +7288,6 @@ func TestREPLQueuedUserInputWinsOverGoalContinuation(t *testing.T) {
 				<-release
 			},
 		},
-		llmtest.Step{Events: []llm.StreamEvent{toolStep("update_goal", `{"status":"complete"}`, "call_1")}, Stop: llm.StopToolUse},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
 	)
 	app := newTestAppWithGoal(t, &out, &errw, fp)
@@ -7377,6 +7307,7 @@ func TestREPLQueuedUserInputWinsOverGoalContinuation(t *testing.T) {
 	}
 	_, _ = fmt.Fprintln(writer, "user input wins")
 	<-delivered // prove reader publication precedes prompt completion
+	app.Goal.Pause()
 	close(release)
 	<-finished
 	<-finished
@@ -7385,8 +7316,8 @@ func TestREPLQueuedUserInputWinsOverGoalContinuation(t *testing.T) {
 	if code := <-codeCh; code != ExitOK {
 		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
 	}
-	if len(fp.Requests) != 3 {
-		t.Fatalf("requests = %d, want initial + user tool round + final", len(fp.Requests))
+	if len(fp.Requests) != 2 {
+		t.Fatalf("requests = %d, want initial + queued user prompt", len(fp.Requests))
 	}
 	second := fp.Requests[1].Messages
 	if got := second[len(second)-1].Content[0].Text; got != "user input wins" {

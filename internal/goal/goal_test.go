@@ -111,14 +111,9 @@ func TestStorePauseResume(t *testing.T) {
 	}
 }
 
-func TestStorePauseDoesNotOverwriteTerminalStatus(t *testing.T) {
+func TestStorePauseDoesNotOverwriteRestoredTerminalStatus(t *testing.T) {
 	s := NewStore()
-	if err := s.Set("x"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.MarkStatus(StatusComplete); err != nil {
-		t.Fatal(err)
-	}
+	s.Restore(&State{Objective: "x", Status: StatusComplete})
 	if s.Pause() {
 		t.Fatal("Pause changed a completed goal")
 	}
@@ -138,28 +133,6 @@ func TestStoreResumeRejectsActiveGoal(t *testing.T) {
 	}
 	if !s.Active() || s.Continuations() != 1 {
 		t.Fatalf("active goal changed after rejected resume: %+v", s.Snapshot())
-	}
-}
-
-func TestStoreMarkStatus(t *testing.T) {
-	s := NewStore()
-	if err := s.MarkStatus(StatusComplete); err == nil {
-		t.Fatal("marking empty goal complete succeeded")
-	}
-	if err := s.Set("x"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.MarkStatus(StatusComplete); err != nil {
-		t.Fatalf("mark complete: %v", err)
-	}
-	if s.Status() != StatusComplete {
-		t.Fatalf("status = %q, want complete", s.Status())
-	}
-	if err := s.MarkStatus(StatusBlocked); err == nil {
-		t.Fatal("marking complete goal blocked succeeded")
-	}
-	if err := s.MarkStatus(Status("nope")); err == nil {
-		t.Fatal("invalid status accepted")
 	}
 }
 
@@ -204,11 +177,11 @@ func TestBumpContinuations(t *testing.T) {
 	if n := s.BumpContinuations(); n != 2 {
 		t.Fatalf("bump = %d, want 2", n)
 	}
-	if err := s.MarkStatus(StatusComplete); err != nil {
-		t.Fatal(err)
+	if !s.Pause() {
+		t.Fatal("pause active goal")
 	}
 	if n := s.BumpContinuations(); n != 0 {
-		t.Fatalf("bump completed = %d, want 0", n)
+		t.Fatalf("bump paused = %d, want 0", n)
 	}
 }
 
@@ -226,6 +199,9 @@ func TestReminderActive(t *testing.T) {
 	}
 	if !strings.Contains(r, `<goal status="active">`) {
 		t.Fatalf("reminder missing goal tag: %q", r)
+	}
+	if strings.Contains(r, "create_goal") || strings.Contains(r, "update_goal") {
+		t.Fatalf("reminder references removed goal tools: %q", r)
 	}
 }
 
@@ -254,8 +230,11 @@ func TestContinuationPrompt(t *testing.T) {
 	if !strings.Contains(p, "Completion audit") {
 		t.Fatalf("prompt missing audit: %q", p)
 	}
-	if !strings.Contains(p, "Blocked rule") {
-		t.Fatalf("prompt missing blocked rule: %q", p)
+	if !strings.Contains(p, "If progress is blocked") {
+		t.Fatalf("prompt missing blocked guidance: %q", p)
+	}
+	if strings.Contains(p, "create_goal") || strings.Contains(p, "update_goal") {
+		t.Fatalf("prompt references removed goal tools: %q", p)
 	}
 	if !strings.Contains(p, "continuation 1 / 25") {
 		t.Fatalf("prompt missing capped stats: %q", p)
@@ -278,13 +257,13 @@ func TestContinuationAdmissionRejectsChangedGoal(t *testing.T) {
 		t.Fatal(err)
 	}
 	preview := s.NextContinuationPreview(25)
-	if err := s.MarkStatus(StatusComplete); err != nil {
+	if err := s.Set("replacement"); err != nil {
 		t.Fatal(err)
 	}
 	if count, admitted, capped := s.AdmitContinuation(preview.Revision, 25); admitted || capped || count != 0 {
 		t.Fatalf("stale admission = count %d, admitted %v, capped %v", count, admitted, capped)
 	}
-	if s.Status() != StatusComplete || s.Continuations() != 0 {
+	if s.Objective() != "replacement" || s.Continuations() != 0 {
 		t.Fatalf("changed goal mutated by stale admission: %+v", s.Snapshot())
 	}
 }
@@ -307,7 +286,7 @@ func TestAdmitPromptHoldsGoalRevisionThroughAgentTranscriptAdmission(t *testing.
 		}
 		go func() {
 			close(mutationStarted)
-			mutationDone <- s.MarkStatus(StatusComplete)
+			mutationDone <- s.Set("replacement")
 		}()
 		<-mutationStarted
 		select {
@@ -323,8 +302,8 @@ func TestAdmitPromptHoldsGoalRevisionThroughAgentTranscriptAdmission(t *testing.
 	if err := <-mutationDone; err != nil {
 		t.Fatal(err)
 	}
-	if s.Status() != StatusComplete {
-		t.Fatalf("status = %q, want complete", s.Status())
+	if s.Objective() != "replacement" {
+		t.Fatalf("objective = %q, want replacement", s.Objective())
 	}
 }
 
@@ -354,8 +333,8 @@ func TestStoreChangesCoalesceSuccessfulTransitions(t *testing.T) {
 	default:
 		t.Fatal("Set did not notify")
 	}
-	if err := s.Create("replacement"); err == nil {
-		t.Fatal("Create unexpectedly replaced unfinished goal")
+	if err := s.Resume(); err == nil {
+		t.Fatal("Resume unexpectedly accepted an active goal")
 	}
 	select {
 	case <-s.Changes():

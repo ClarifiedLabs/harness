@@ -26,8 +26,6 @@ This page is the operational overview.
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
 | `record_plan` | persist a self-contained markdown implementation plan in the session; the user is shown the plan file path |
 | `request_implementation` | request an approved handoff of the latest recorded plan (plan and interactive auto agents) |
-| `create_goal` | create an explicitly requested interactive session goal for autonomous multi-turn pursuit |
-| `update_goal` | mark the active session goal complete or blocked and stop autonomous continuation |
 
 `apply_patch` (Codex-format add/delete/update/move patches) is no longer in the
 default tool set — `edit` and `write_file` subsume it. It still ships in the tool
@@ -66,32 +64,10 @@ applies language-server text edits.
 
 ## Session Goals
 
-`create_goal` accepts `{objective}` and should be called only when the user
-explicitly requests an autonomous, long-running session goal. It rejects an
-empty objective, caps it at 4,000 characters, and fails while an unfinished
-active, paused, or blocked goal exists. Concurrent attempts are serialized, so
-only one can create the next goal. `/goal <text>` is the direct user-facing
-equivalent.
-
-`update_goal` accepts `{status}` where status is `complete` or `blocked`.
-`complete` is appropriate only after every objective requirement is verifiably
-satisfied. `blocked` is appropriate only when the same blocking condition has
-recurred for at least three consecutive goal turns despite best efforts. Either
-status stops the REPL continuation loop; `/goal resume` can reactivate a blocked
-or complete goal with a fresh continuation count. Goal-tool calls are bound to
-the goal generation present when their root prompt began. Each foreground or
-background delegate snapshots that binding when launched, so delayed work cannot
-update a goal the user has since replaced or cleared, and one child cannot make
-an already-launched sibling current again. A successful child `create_goal`
-advances its still-current parent prompt binding, so later tool rounds in that
-lineage may update the new goal.
-
-Both tools share the root session goal store. They are available to the default
-(`auto`) and `independent` agents, but goal management remains a root-conversation
-concern; delegate children do not receive a private goal. Tool calls outside an
-interactive session return an error, and there is no autonomous loop in one-shot
-or piped mode. See [Session goals](usage.md#session-goals) for `/goal`, pause,
-resume, persistence, and continuation-cap behavior.
+Session goals are deliberately not model-callable tools. They are created and
+controlled exclusively through the interactive `/goal` command. See
+[Session goals](usage.md#session-goals) for setting, pausing, resuming, clearing,
+persistence, and continuation-cap behavior.
 
 ## Search and Inspection
 

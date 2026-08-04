@@ -151,7 +151,7 @@ func defaultTools() []string {
 	// from here because delegate.MissingTools treats an available git as
 	// satisfying a required git_readonly.
 	names := tools.DefaultNames()
-	return append(names, "update_todos", "record_plan", "create_goal", "update_goal", "delegate", "background_jobs")
+	return append(names, "update_todos", "record_plan", "delegate", "background_jobs")
 }
 
 // DefaultTools returns the default allowed-tool set that auto/independent and
