@@ -58,9 +58,12 @@ notices, explicitly enabled reasoning summaries, and errors go to stderr. Tool
 preamble/commentary messages are assistant text, so they stream with the answer
 rather than as bracketed status lines.
 
-When stdout is a terminal, basic Markdown is rendered for readability. With
-color enabled, recognized language tags on fenced code blocks also enable syntax
-highlighting; untagged, unknown-language, and `text` fences remain plain. Choose
+When stdout is a terminal, basic Markdown is rendered for readability. Pipe
+tables remain padded grids when they fit, wrap cells within the terminal width
+when a minimum grid fits, and become labeled stacked records only on very narrow
+terminals. With color enabled, recognized language tags on fenced code blocks
+also enable syntax highlighting; untagged, unknown-language, and `text` fences
+remain plain. Choose
 `--color-theme dark` (the default) or `--color-theme light` to match the terminal
 profile. The `-no-color` flag or `NO_COLOR` disables highlighting and all other
 ANSI styling while structural Markdown rendering remains readable. Redirected or piped

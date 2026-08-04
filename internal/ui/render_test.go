@@ -591,6 +591,37 @@ func TestFormatMarkdownUsesRendererPolicy(t *testing.T) {
 	}
 }
 
+func TestTextDeltaFitsMarkdownTableToWidth(t *testing.T) {
+	const width = 24
+	const source = "| Description | Count |\n" +
+		"| --- | ---: |\n" +
+		"| very long item | 12345 |\n"
+
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{
+		Markdown: true,
+		Width:    func() int { return width },
+	})
+	r.TextDelta(source)
+	if out.Len() != 0 {
+		t.Fatalf("table was emitted before assistant flush: %q", out.String())
+	}
+	r.finishAssistantLine()
+
+	got := out.String()
+	for _, line := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
+		if displayWidth(line) > width {
+			t.Fatalf("table line width = %d, want <= %d: %q", displayWidth(line), width, line)
+		}
+	}
+	if !strings.Contains(got, "Description") || !strings.Contains(got, "12345") {
+		t.Fatalf("responsive table lost content: %q", got)
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("assistant markdown wrote stderr: %q", errw.String())
+	}
+}
+
 func TestMarkdownAssistantFlushesBeforeStatusLine(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{Markdown: true, ToolStream: true})

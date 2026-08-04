@@ -1156,6 +1156,37 @@ func TestReplayWrapsReasoningSummaryWithWidth(t *testing.T) {
 	}
 }
 
+func TestReplayFitsMarkdownTableToWidth(t *testing.T) {
+	const width = 24
+	const source = "| Description | Count |\n" +
+		"| --- | ---: |\n" +
+		"| very long item | 12345 |\n"
+
+	dir := filepath.Join(t.TempDir(), "session")
+	if err := AppendEvent(dir, Event{
+		Type:   EventAssistantDelta,
+		Prompt: 1,
+		Turn:   1,
+		Text:   source,
+	}); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	var out strings.Builder
+	if err := Replay(dir, &out, ReplayOptions{Markdown: true, Width: width}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	got := out.String()
+	for _, line := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
+		if len(line) > width { // The fixture is deliberately ASCII and ANSI-free.
+			t.Fatalf("table line width = %d, want <= %d: %q", len(line), width, line)
+		}
+	}
+	if !strings.Contains(got, "Description") || !strings.Contains(got, "12345") {
+		t.Fatalf("responsive table lost content: %q", got)
+	}
+}
+
 func TestReplaySeparatesCommentaryAndFinalAnswer(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	events := []Event{

@@ -82,8 +82,8 @@ type Options struct {
 	ANSI bool
 	// ColorTheme selects syntax colors when ANSI is enabled. Its zero value is dark.
 	ColorTheme highlight.Theme
-	// Width enables simple word wrapping for paragraphs and list item bodies when
-	// positive.
+	// Width enables visible-width wrapping for paragraphs, list item bodies, and
+	// tables when positive.
 	Width int
 	// Prefix is prepended to each non-empty rendered line.
 	Prefix string
@@ -334,6 +334,60 @@ func (s *Stream) formatTable(lines []tableLine) []tableLine {
 		}
 	}
 
+	if s.opts.Width <= 0 || tableGridWidth(s.opts.Prefix, widths) <= s.opts.Width {
+		return s.formatNaturalTable(rows, widths, aligns, lines)
+	}
+
+	contentBudget := s.opts.Width - visibleLen(s.opts.Prefix) - 1 - 3*cols
+	if contentBudget < minTableRule*cols {
+		return s.formatStackedTable(rows, lines)
+	}
+	return s.formatWrappedTable(rows, fitTableWidths(widths, contentBudget), aligns, lines)
+}
+
+// tableGridWidth includes the leading border and the two spaces plus trailing
+// border that surround every cell.
+func tableGridWidth(prefix string, widths []int) int {
+	width := visibleLen(prefix) + 1
+	for _, columnWidth := range widths {
+		width += columnWidth + 3
+	}
+	return width
+}
+
+// fitTableWidths starts at the smallest valid separator width, then gives each
+// still-growing column one cell at a time from left to right. Keeping the loop
+// round-robin makes one-cell remainders deterministic.
+func fitTableWidths(natural []int, contentBudget int) []int {
+	widths := make([]int, len(natural))
+	for i := range widths {
+		widths[i] = minTableRule
+	}
+	remaining := contentBudget - minTableRule*len(widths)
+	for remaining > 0 {
+		grew := false
+		for i := range widths {
+			if remaining == 0 {
+				break
+			}
+			if widths[i] >= natural[i] {
+				continue
+			}
+			widths[i]++
+			remaining--
+			grew = true
+		}
+		if !grew {
+			break
+		}
+	}
+	return widths
+}
+
+// formatNaturalTable intentionally retains the original table formatter. The
+// width-aware paths below must not change fitting tables' bytes, including ANSI
+// escape ordering and the source line-ending state.
+func (s *Stream) formatNaturalTable(rows [][]string, widths []int, aligns []alignment, lines []tableLine) []tableLine {
 	out := make([]tableLine, 0, len(lines))
 	out = append(out, tableLine{text: s.opts.Prefix + formatTableRow(rows[0], widths, aligns), newline: lines[0].newline})
 	out = append(out, tableLine{text: s.opts.Prefix + formatTableRule(widths, aligns), newline: lines[1].newline})
@@ -345,6 +399,107 @@ func (s *Stream) formatTable(lines []tableLine) []tableLine {
 		out = append(out, tableLine{text: s.opts.Prefix + formatTableRow(rows[i], widths, aligns), newline: newline})
 	}
 	return out
+}
+
+func (s *Stream) formatWrappedTable(rows [][]string, widths []int, aligns []alignment, lines []tableLine) []tableLine {
+	out := make([]tableLine, 0, len(lines))
+	s.appendWrappedTableRow(&out, rows[0], widths, aligns, lines[0].newline)
+	out = append(out, tableLine{text: s.opts.Prefix + formatTableRule(widths, aligns), newline: lines[1].newline})
+	for i := 1; i < len(rows); i++ {
+		newline := true
+		if i+1 < len(lines) {
+			newline = lines[i+1].newline
+		}
+		s.appendWrappedTableRow(&out, rows[i], widths, aligns, newline)
+	}
+	return out
+}
+
+func (s *Stream) appendWrappedTableRow(out *[]tableLine, row []string, widths []int, aligns []alignment, newline bool) {
+	fragments := make([][]string, len(widths))
+	height := 1
+	for c, width := range widths {
+		cell := ""
+		if c < len(row) {
+			cell = row[c]
+		}
+		fragments[c] = wrapRenderedHard(cell, width)
+		if len(fragments[c]) > height {
+			height = len(fragments[c])
+		}
+	}
+	for line := 0; line < height; line++ {
+		physical := make([]string, len(widths))
+		for c := range physical {
+			if line < len(fragments[c]) {
+				physical[c] = fragments[c][line]
+			}
+		}
+		*out = append(*out, tableLine{
+			text:    s.opts.Prefix + formatTableRow(physical, widths, aligns),
+			newline: line+1 < height || newline,
+		})
+	}
+}
+
+func (s *Stream) formatStackedTable(rows [][]string, lines []tableLine) []tableLine {
+	labels := make([]string, len(rows[0]))
+	for c, header := range rows[0] {
+		if visibleLen(header) == 0 {
+			labels[c] = fmt.Sprintf("Column %d", c+1)
+			continue
+		}
+		labels[c] = header
+	}
+
+	available := s.opts.Width - visibleLen(s.opts.Prefix)
+	if available < 1 {
+		available = 1
+	}
+	var out []tableLine
+	if len(rows) == 1 {
+		for c, label := range labels {
+			newline := c+1 < len(labels) || lines[len(lines)-1].newline
+			s.appendStackedTableText(&out, "- "+label, available, newline)
+		}
+		return out
+	}
+
+	for r := 1; r < len(rows); r++ {
+		for c, label := range labels {
+			field := label + ":"
+			if rows[r][c] != "" {
+				field += " " + rows[r][c]
+			}
+			newline := true
+			if r+1 == len(rows) && c+1 == len(labels) {
+				newline = lines[r+1].newline
+			}
+			s.appendStackedTableText(&out, field, available, newline)
+		}
+		if r+1 < len(rows) {
+			out = append(out, tableLine{newline: true})
+		}
+	}
+	return out
+}
+
+func (s *Stream) appendStackedTableText(out *[]tableLine, text string, available int, newline bool) {
+	continuation := ""
+	contentWidth := available
+	if available > 2 {
+		continuation = "  "
+		contentWidth -= visibleLen(continuation)
+	}
+	fragments := wrapRenderedHard(text, contentWidth)
+	for i, fragment := range fragments {
+		line := s.opts.Prefix
+		if i > 0 {
+			line += continuation
+		}
+		line += fragment
+		*out = append(*out, tableLine{text: line, newline: i+1 < len(fragments) || newline})
+	}
 }
 
 func (s *Stream) writeLines(out *strings.Builder, lines []string, newline bool) {
@@ -585,7 +740,14 @@ func wrapBody(body, firstPrefix, nextPrefix string, width int, ansi bool) []stri
 	if body == "" {
 		return []string{strings.TrimRight(firstPrefix, " ")}
 	}
-	rendered := renderInline(body, ansi, style{})
+	return wrapRenderedSoft(renderInline(body, ansi, style{}), firstPrefix, nextPrefix, width)
+}
+
+// wrapRenderedSoft preserves the established paragraph and list behavior: it
+// wraps at words when there is room for useful prose, but leaves an overlong
+// word alone. Table cells use wrapRenderedHard instead because a grid cannot
+// exceed its assigned column width.
+func wrapRenderedSoft(rendered, firstPrefix, nextPrefix string, width int) []string {
 	if width <= visibleLen(firstPrefix)+8 || visibleLen(firstPrefix)+visibleLen(rendered) <= width {
 		return []string{firstPrefix + rendered}
 	}
@@ -648,6 +810,131 @@ func renderedFields(rendered string) []string {
 		words = append(words, field)
 	}
 	return words
+}
+
+// renderedUnit is either one visible UTF-8 rune or a complete ANSI CSI
+// sequence. Keeping CSI sequences indivisible lets constrained table cells
+// wrap safely without exposing escape bytes or splitting a rune encoding.
+type renderedUnit struct {
+	text       string
+	visible    bool
+	whitespace bool
+}
+
+func renderedUnits(rendered string) []renderedUnit {
+	units := make([]renderedUnit, 0, len(rendered))
+	for i := 0; i < len(rendered); {
+		if rendered[i] == '\x1b' && i+1 < len(rendered) && rendered[i+1] == '[' {
+			end := i + 2
+			for end < len(rendered) && (rendered[end] < '@' || rendered[end] > '~') {
+				end++
+			}
+			if end < len(rendered) {
+				end++
+				units = append(units, renderedUnit{text: rendered[i:end]})
+				i = end
+				continue
+			}
+		}
+		r, size := utf8.DecodeRuneInString(rendered[i:])
+		if size == 0 {
+			size = 1
+		}
+		units = append(units, renderedUnit{
+			text:       rendered[i : i+size],
+			visible:    true,
+			whitespace: unicode.IsSpace(r),
+		})
+		i += size
+	}
+	return units
+}
+
+// wrapRenderedHard wraps already-rendered inline text to a visible-column
+// limit. It prefers the last whitespace that fits, and otherwise hard-splits a
+// token. Each emitted fragment closes active SGR attributes; continuations
+// restore the source state before consuming more content, so cell padding and
+// borders never inherit inline styling.
+func wrapRenderedHard(rendered string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	units := renderedUnits(rendered)
+	if len(units) == 0 || visibleLen(rendered) == 0 {
+		return []string{""}
+	}
+
+	var (
+		out          []string
+		state        spanState
+		pos          int
+		continuation bool
+		trimLeading  bool
+	)
+	for pos < len(units) {
+		startState := state
+		fragment := make([]renderedUnit, 0, width)
+		visible := 0
+		hasContent := false
+		lastBreakFragment := -1
+		lastBreakPos := -1
+		var lastBreakState spanState
+
+		for pos < len(units) {
+			unit := units[pos]
+			if unit.visible && unit.whitespace && trimLeading && !hasContent {
+				pos++
+				continue
+			}
+			if unit.visible && visible == width {
+				if lastBreakFragment >= 0 {
+					fragment = fragment[:lastBreakFragment]
+					state = lastBreakState
+					// The whitespace becomes the line break. Any later ANSI sequence
+					// is reprocessed with the continuation so it stays adjacent to
+					// visible content.
+					pos = lastBreakPos + 1
+				}
+				break
+			}
+
+			fragment = append(fragment, unit)
+			pos++
+			if !unit.visible {
+				state.scan(unit.text)
+				continue
+			}
+			visible++
+			if unit.whitespace {
+				if hasContent {
+					lastBreakFragment = len(fragment) - 1
+					lastBreakPos = pos - 1
+					lastBreakState = state
+				}
+				continue
+			}
+			hasContent = true
+		}
+
+		trimLeading = true
+		if !hasContent {
+			continue
+		}
+		var line strings.Builder
+		if continuation {
+			line.WriteString(startState.on())
+		}
+		for _, unit := range fragment {
+			line.WriteString(unit.text)
+		}
+		line.WriteString(state.off())
+		out = append(out, line.String())
+		continuation = true
+	}
+	if len(out) == 0 {
+		return []string{""}
+	}
+	return out
 }
 
 // spanState is the styling left open at some point in already-rendered text.

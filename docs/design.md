@@ -2857,10 +2857,16 @@ backoff allows.
   ANSI bold/italic when color is enabled, inline code and links use cyan,
   headings keep their `#` markers and render bold (with H1 headings also
   underlined), thematic breaks render as `────────────────────`, lists normalize
-  and indent continuations, and tables are padded. Inline spans close only the
-  bold, italic, underline, or foreground attribute they opened instead of issuing
-  a blanket SGR reset, so nested code, links, and emphasis preserve their outer
-  heading or emphasis style.
+  and indent continuations, and tables remain padded grids when they fit. A grid's
+  visible width is `visibleLen(prefix) + 1 + sum(column width + 3)`, so prefixes,
+  borders, and cell padding all count. On overflow, columns start at the
+  three-cell minimum and receive remaining capacity round-robin from left to
+  right; rendered cells wrap ANSI-safely, closing styles before padding or a
+  newline and reopening them in continuations. When even that minimum grid cannot
+  fit, the renderer emits lossless labeled stacked records instead. Inline spans
+  close only the bold, italic, underline, or foreground attribute they opened
+  instead of issuing a blanket SGR reset, so nested code, links, and emphasis
+  preserve their outer heading or emphasis style.
 - Paragraphs and list bodies are rendered once and then wrapped by visible
   rendered width (80 columns when terminal width is unavailable), so Markdown
   delimiters do not consume columns and spans may cross a break. The wrapper
