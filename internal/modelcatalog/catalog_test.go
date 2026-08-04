@@ -150,7 +150,7 @@ func TestDecodeModelsDevServiceTierModes(t *testing.T) {
 	openai, _ := c.Provider("openai")
 	openaiInfo, _ := openai.ModelInfo("gpt-5.5")
 	fast, ok := llm.ResolveServiceTier("fast", openaiInfo.ServiceTiers)
-	if !ok || fast.ID != "fast" || fast.Request.ServiceTier != "priority" || fast.Price.Input != 10 || fast.Price.Output != 60 {
+	if !ok || fast.ID != "fast" || fast.Request.ServiceTier != "fast" || fast.Price.Input != 10 || fast.Price.Output != 60 {
 		t.Fatalf("OpenAI fast tier = %+v, %v", fast, ok)
 	}
 	anthropic, _ := c.Provider("anthropic")
@@ -158,6 +158,24 @@ func TestDecodeModelsDevServiceTierModes(t *testing.T) {
 	fast, ok = llm.ResolveServiceTier("fast", anthropicInfo.ServiceTiers)
 	if !ok || fast.ID != "fast" || fast.Request.Speed != "fast" || !slices.Equal(fast.Request.Betas, []string{"fast-mode-2026-02-01"}) || fast.Price.Input != 30 {
 		t.Fatalf("Anthropic fast tier = %+v, %v", fast, ok)
+	}
+}
+
+func TestDecodeModelsDevCanonicalizesLegacyOpenAIFastTier(t *testing.T) {
+	const data = `{
+	  "openai": {"models": {"gpt-fast": {
+	    "service_tiers": [{"id":"fast","name":"Fast","request":{"service_tier":"priority"}}]
+	  }}}
+	}`
+	catalog, err := DecodeModelsDev(strings.NewReader(data))
+	if err != nil {
+		t.Fatalf("DecodeModelsDev: %v", err)
+	}
+	provider, _ := catalog.Provider("openai")
+	info, _ := provider.ModelInfo("gpt-fast")
+	fast, ok := llm.ResolveServiceTier("fast", info.ServiceTiers)
+	if !ok || fast.ID != "fast" || fast.Request.ServiceTier != "fast" {
+		t.Fatalf("legacy OpenAI fast tier = %+v, %v", fast, ok)
 	}
 }
 
@@ -173,7 +191,7 @@ func TestPruneModelsDevDataPreservesNormalizedServiceTierModes(t *testing.T) {
 	openai, _ := c.Provider("openai")
 	info, _ := openai.ModelInfo("gpt-5.5")
 	fast, ok := llm.ResolveServiceTier("fast", info.ServiceTiers)
-	if !ok || fast.Request.ServiceTier != "priority" || fast.Price.Output != 60 {
+	if !ok || fast.Request.ServiceTier != "fast" || fast.Price.Output != 60 {
 		t.Fatalf("pruned OpenAI fast tier = %+v, %v", fast, ok)
 	}
 }
@@ -206,7 +224,7 @@ func TestPruneModelsDevDataPreservesReasoningPrices(t *testing.T) {
 	provider, _ := catalog.Provider("compatible")
 	info, _ := provider.ModelInfo("reasoning-model")
 	fast, ok := llm.ResolveServiceTier("fast", info.ServiceTiers)
-	if info.Price.Reasoning != 3 || !ok || fast.Price.Reasoning != 6 {
+	if info.Price.Reasoning != 3 || !ok || fast.Request.ServiceTier != "priority" || fast.Price.Reasoning != 6 {
 		t.Fatalf("prices = base:%+v fast:%+v, want explicit reasoning rates 3 and 6", info.Price, fast.Price)
 	}
 }

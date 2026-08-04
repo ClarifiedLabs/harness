@@ -1129,10 +1129,10 @@ does not turn catalog data into arbitrary request bodies or headers.
 
 Managed models get their tier options from models.dev mode metadata. The Codex
 adapter consumes `service_tiers` and the deprecated `additional_speed_tiers`
-catalog fields, normalizing the user-facing `fast` suffix to the OpenAI wire
-value `priority`. No provider-wide tier inference is applied. For every
-non-default mode, the served catalog expands the base model into a separate
-target such as `provider:model:fast`, carrying `base_target_id`, `variant`, and
+catalog fields, canonicalizing legacy OpenAI `priority` Fast metadata to the
+user-facing and wire value `fast`. No provider-wide tier inference is applied.
+For every non-default mode, the served catalog expands the base model into a
+separate target such as `provider:model:fast`, carrying `base_target_id`, `variant`, and
 its own price. Target resolution—not a caller-supplied request field—selects the
 bounded provider mapping. Anthropic encodes `speed` and merges required feature
 identifiers into `anthropic-beta`; OpenAI dialects encode `service_tier`.
@@ -1142,7 +1142,9 @@ continuation/cache identity.
 The base `llm.Price` schedule represents standard processing; each service tier
 may carry its own schedule. Request pricing prefers provider-reported served
 `service_tier`/`speed` metadata, which accounts for graceful downgrades, then
-falls back to the requested mapping. A mode without an accurate price is
+falls back to the requested mapping. OpenAI may report its former `priority`
+label for a Fast request; pricing recognizes that response label as Fast. A
+mode without an accurate price is
 handled-but-unknown, so usage tokens remain known while `CostKnown` stays false
 and reject-unpriced proxy budgets fail closed.
 

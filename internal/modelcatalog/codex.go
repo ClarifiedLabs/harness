@@ -215,12 +215,8 @@ func codexModelToCatalog(model codexModel) (Model, bool) {
 func codexServiceTiers(model codexModel) []llm.ServiceTier {
 	tiers := make([]llm.ServiceTier, 0, len(model.ServiceTiers)+len(model.AdditionalSpeedTiers))
 	for _, raw := range model.ServiceTiers {
-		id := raw.ID
-		if strings.EqualFold(strings.TrimSpace(raw.Name), "fast") {
-			id = "fast"
-		}
 		tier := llm.ServiceTier{
-			ID:          id,
+			ID:          raw.ID,
 			Name:        raw.Name,
 			Description: raw.Description,
 			Request:     llm.ServiceTierRequest{ServiceTier: raw.ID},
@@ -232,20 +228,17 @@ func codexServiceTiers(model codexModel) []llm.ServiceTier {
 		if additional == "" {
 			continue
 		}
-		id := additional
-		requestValue := additional
 		name := catalogModeName(additional)
 		if additional == "fast" {
-			requestValue = "priority"
 			name = "Fast"
 		}
 		tiers = append(tiers, llm.ServiceTier{
-			ID:      id,
+			ID:      additional,
 			Name:    name,
-			Request: llm.ServiceTierRequest{ServiceTier: requestValue},
+			Request: llm.ServiceTierRequest{ServiceTier: additional},
 		})
 	}
-	return llm.NormalizeServiceTiers(tiers)
+	return NormalizeOpenAIFastServiceTiers(tiers)
 }
 
 func codexModelVisible(model codexModel) bool {

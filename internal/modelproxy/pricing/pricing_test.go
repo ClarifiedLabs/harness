@@ -377,6 +377,32 @@ func TestOpenAIAPIsPreserveExplicitReasoningAndTierRates(t *testing.T) {
 	assertKnownCost(t, got, 22)
 }
 
+func TestOpenAIAPIsPricesLegacyPriorityResponseAsFast(t *testing.T) {
+	provider := llm.ProviderConfig{Name: "openai", APIType: "responses"}
+	model := llm.ModelEntry{
+		Name:  "gpt-fast",
+		Price: llm.Price{Input: 2, Output: 4},
+		ServiceTiers: []llm.ServiceTier{{
+			ID:      "fast",
+			Request: llm.ServiceTierRequest{ServiceTier: "fast"},
+			Price:   llm.Price{Input: 4, Output: 8},
+		}},
+	}
+	in := Input{
+		Provider: provider,
+		Model:    model,
+		Request:  llm.Request{ServiceTier: "fast"},
+		Usage:    llm.Usage{ServiceTier: "priority", InputTokens: 1_000_000, OutputTokens: 1_000_000},
+	}
+	assertKnownCost(t, NewComposite().PriceUsage(in), 12)
+
+	in.Provider.Name = "compatible"
+	got := NewComposite().PriceUsage(in)
+	if !got.Handled || got.Known {
+		t.Fatalf("compatible legacy priority response price = %+v, want handled unknown", got)
+	}
+}
+
 func TestGoogleInteractionsPricesServiceTierThoughtTokens(t *testing.T) {
 	pricer := NewComposite()
 	provider := llm.ProviderConfig{

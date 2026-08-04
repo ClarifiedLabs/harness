@@ -306,7 +306,7 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	if len(provider.Models[0].ReasoningOptions) != 1 || !slices.Contains(provider.Models[0].ReasoningOptions[0].Values, "xhigh") {
 		t.Fatalf("provider reasoning options = %+v, want Codex effort values", provider.Models[0].ReasoningOptions)
 	}
-	if fast, ok := llm.ResolveServiceTier("fast", provider.Models[0].ServiceTiers); !ok || fast.ID != "fast" || fast.Request.ServiceTier != "priority" {
+	if fast, ok := llm.ResolveServiceTier("fast", provider.Models[0].ServiceTiers); !ok || fast.ID != "fast" || fast.Request.ServiceTier != "fast" {
 		t.Fatalf("provider fast tier = %+v, %v", fast, ok)
 	}
 	if !provider.Managed {
@@ -1052,6 +1052,9 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	}
 	if len(provider.Models) != 1 || provider.Models[0].Name != "gpt-5.5" || provider.Models[0].ContextWindow != 272000 {
 		t.Fatalf("provider models after refresh = %+v", provider.Models)
+	}
+	if fast, ok := llm.ResolveServiceTier("fast", provider.Models[0].ServiceTiers); !ok || fast.ID != "fast" || fast.Request.ServiceTier != "fast" {
+		t.Fatalf("provider fast tier after refresh = %+v, %v", fast, ok)
 	}
 	if provider.Models[0].OutputLimit != 64000 {
 		t.Fatalf("provider output limit after failed direct refresh = %d, want configured fallback 64000", provider.Models[0].OutputLimit)

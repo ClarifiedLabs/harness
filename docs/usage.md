@@ -343,16 +343,19 @@ Provider and model entries can advertise request-level scheduling tiers with
 typed `service_tiers` objects. Each object has a target-suffix `id`, optional
 `name` and `description`, a bounded `request` mapping, and an optional
 tier-specific `price`. For example, OpenAI fast mode is represented as
-`{"id":"fast","name":"Fast","request":{"service_tier":"priority"}}`.
-Anthropic fast mode instead maps to `request.speed:"fast"` plus its required
+`{"id":"fast","name":"Fast","request":{"service_tier":"fast"}}`.
+OpenAI renamed priority processing to Fast mode; its older responses can still
+report `priority`, which Harness accounts as Fast. Anthropic fast mode instead
+maps to `request.speed:"fast"` plus its required
 `request.betas` feature identifier. A model-level list overrides a provider
 list.
 
 Managed models receive these options from models.dev mode metadata; Codex
-models receive them from the OpenAI Codex catalog. Harness does not infer tiers
-for every model on a provider. Manual compatible endpoints must declare their
-options explicitly. The proxy publishes each non-default mode as a separate
-model target: `provider:model:fast`, `provider:model:flex`, and so on. Select a
+models receive them from the OpenAI Codex catalog. Harness canonicalizes
+first-party OpenAI and Codex Fast metadata to `service_tier:"fast"`, but does
+not infer or rewrite tiers for manual compatible endpoints; those must declare
+their options explicitly. The proxy publishes each non-default mode as a
+separate model target: `provider:model:fast`, `provider:model:flex`, and so on. Select a
 mode with `-model`, `/model`, or an agent's `model` setting. `/fast
 [on|off|status]` is a shortcut that switches between the current base target
 and its `:fast` sibling; it reports unavailable when no such sibling exists.

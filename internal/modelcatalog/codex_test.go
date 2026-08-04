@@ -38,7 +38,7 @@ func TestDecodeCodexModelsUsesListVisibleModels(t *testing.T) {
 		t.Fatalf("gpt-5.5 reasoning summary support = %v, want true", model.ReasoningSummarySupported)
 	}
 	fast, ok := llm.ResolveServiceTier("fast", model.ServiceTiers)
-	if !ok || fast.ID != "fast" || fast.Request.ServiceTier != "priority" {
+	if len(model.ServiceTiers) != 1 || !ok || fast.ID != "fast" || fast.Request.ServiceTier != "fast" {
 		t.Fatalf("gpt-5.5 fast tier = %+v, %v", fast, ok)
 	}
 	if _, ok := provider.Models["codex-auto-review"]; ok {
@@ -163,7 +163,8 @@ func testCodexModelsCatalogJSON() string {
       "visibility": "list",
       "supported_in_api": true,
       "service_tiers": [{"id":"priority","name":"Fast","description":"Lower latency"}],
-      "default_service_tier": null
+      "default_service_tier": null,
+      "additional_speed_tiers": ["fast"]
     },
     {
       "slug": "codex-auto-review",

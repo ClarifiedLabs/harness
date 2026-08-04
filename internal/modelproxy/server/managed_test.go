@@ -177,23 +177,33 @@ func TestManagedProviderResolvesServiceTierAndModePriceFromModelsDevCatalog(t *t
 }`), 0o600); err != nil {
 		t.Fatalf("write provider config: %v", err)
 	}
-	md := modelsDevCatalogWith("openai", "gpt-fast", llm.Price{Input: 2, Output: 4})
-	model := md.Providers["openai"].Models["gpt-fast"]
-	model.ServiceTiers = []llm.ServiceTier{{
-		ID:      "fast",
-		Name:    "Fast",
-		Request: llm.ServiceTierRequest{ServiceTier: "priority"},
-		Price:   llm.Price{Input: 4, Output: 8},
-	}}
-	provider := md.Providers["openai"]
-	provider.Models["gpt-fast"] = model
-	md.Providers["openai"] = provider
+	md, err := modelcatalog.DecodeModelsDev(strings.NewReader(`{
+	  "openai": {"id":"openai","models": {
+	    "gpt-fast": {
+	      "id":"gpt-fast",
+	      "cost":{"input":2,"output":4},
+	      "experimental":{"modes":{"fast":{
+	        "cost":{"input":4,"output":8},
+	        "provider":{"body":{"service_tier":"priority"}}
+	      }}}
+	    }
+	  }}
+	}`))
+	if err != nil {
+		t.Fatalf("DecodeModelsDev: %v", err)
+	}
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
+		Stop:   llm.StopEndTurn,
+	})
 
 	handler, err := NewHandler(Options{
 		ConfigDir:        dir,
 		Config:           Config{ProviderConfigs: []string{"openai.json"}},
 		ModelsDevCatalog: md,
-		New:              fixedUsageProvider(llm.Usage{}),
+		New: func(factory.Options) (llm.Provider, error) {
+			return fp, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
@@ -206,12 +216,81 @@ func TestManagedProviderResolvesServiceTierAndModePriceFromModelsDevCatalog(t *t
 	if fast.ID != "openai:gpt-fast:fast" || fast.BaseTargetID != "openai:gpt-fast" || fast.Variant != "fast" || fast.Price.Output != 8 {
 		t.Fatalf("served fast target = %+v", fast)
 	}
-	usage := handler.priceUsage(fast.ID, llm.Request{ServiceTier: "priority"}, llm.Usage{
+	usage := handler.priceUsage(fast.ID, llm.Request{ServiceTier: "fast"}, llm.Usage{
 		InputTokens:  1_000_000,
 		OutputTokens: 1_000_000,
 	})
 	if !usage.CostKnown || usage.CostUSD != 12 {
 		t.Fatalf("fast usage = %+v, want known $12", usage)
+	}
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	body, _ := json.Marshal(protocol.StreamRequest{TargetID: fast.ID, Request: llm.Request{Model: fast.ID}})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST fast stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fast stream status = %d", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if len(fp.Requests) != 1 || fp.Requests[0].ServiceTier != "fast" {
+		t.Fatalf("fast provider requests = %+v", fp.Requests)
+	}
+}
+
+func TestManagedCodexLegacyFastSnapshotExposesFastTarget(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai-codex.json"), []byte(`{
+  "name": "openai-codex",
+  "api_type": "responses",
+  "base_url": "https://chatgpt.com/backend-api/codex",
+  "managed": true,
+  "model_discovery": {"enabled": false},
+  "models": [{
+    "name": "gpt-codex",
+    "service_tiers": [{"id": "fast", "name": "Fast", "request": {"service_tier": "fast"}}]
+  }]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}}, Stop: llm.StopEndTurn})
+	state := modeldiscovery.State{Authoritative: true, Snapshot: modeldiscovery.Snapshot{
+		Version: 1, Provider: "openai-codex", BaseURL: "https://chatgpt.com/backend-api/codex", Complete: true,
+		Models: map[string]modeldiscovery.Model{
+			"gpt-codex": {ID: "gpt-codex", Eligible: true, ServiceTiers: []llm.ServiceTier{{ID: "priority", Name: "Fast", Request: llm.ServiceTierRequest{ServiceTier: "priority"}}}},
+		},
+	}}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir, Config: Config{ProviderConfigs: []string{"openai-codex.json"}},
+		ProviderCatalogs: map[string]modeldiscovery.State{"openai-codex": state},
+		New:              func(factory.Options) (llm.Provider, error) { return fp, nil },
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	fast := catalogTarget(t, handler.Catalog(), "openai-codex", "gpt-codex:fast")
+	if fast.BaseTargetID != "openai-codex:gpt-codex" || fast.Variant != "fast" {
+		t.Fatalf("Codex Fast target = %+v", fast)
+	}
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	body, _ := json.Marshal(protocol.StreamRequest{TargetID: fast.ID, Request: llm.Request{Model: fast.ID}})
+	resp, err := srv.Client().Post(srv.URL+"/v1/stream", protocol.ContentTypeNDJSON, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST Fast stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Fast stream status = %d", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if len(fp.Requests) != 1 || fp.Requests[0].ServiceTier != "fast" {
+		t.Fatalf("Fast provider requests = %+v", fp.Requests)
 	}
 }
 

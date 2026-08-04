@@ -230,7 +230,7 @@ func TestCodexDiscoveryUsesAccountCatalogVisibility(t *testing.T) {
 		if r.URL.Query().Get("client_version") != "0.99.0" {
 			t.Errorf("client_version = %q", r.URL.Query().Get("client_version"))
 		}
-		_, _ = w.Write([]byte(`{"models":[{"slug":"spark","display_name":"Spark","context_window":100000,"visibility":"list","supported_in_api":false},{"slug":"hidden","context_window":100000,"visibility":"hide"}]}`))
+		_, _ = w.Write([]byte(`{"models":[{"slug":"spark","display_name":"Spark","context_window":100000,"visibility":"list","supported_in_api":false,"service_tiers":[{"id":"priority","name":"Fast"}],"additional_speed_tiers":["fast"]},{"slug":"hidden","context_window":100000,"visibility":"hide"}]}`))
 	}))
 	defer server.Close()
 	pc := llm.ProviderConfig{Name: "openai-codex", APIType: "responses", BaseURL: server.URL, APIKey: "secret", Managed: true}
@@ -238,8 +238,13 @@ func TestCodexDiscoveryUsesAccountCatalogVisibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Models) != 1 || snapshot.Models["spark"].Name != "Spark" || snapshot.CodexClientVersion != "0.99.0" {
+	model, ok := snapshot.Models["spark"]
+	if len(snapshot.Models) != 1 || !ok || model.Name != "Spark" || snapshot.CodexClientVersion != "0.99.0" {
 		t.Fatalf("models = %+v", snapshot.Models)
+	}
+	fast, ok := llm.ResolveServiceTier("fast", model.ServiceTiers)
+	if len(model.ServiceTiers) != 1 || !ok || fast.ID != "fast" || fast.Request.ServiceTier != "fast" {
+		t.Fatalf("Codex fast tiers = %+v", model.ServiceTiers)
 	}
 }
 
@@ -302,6 +307,36 @@ func TestMergeProviderKeepsKnownBasicIDsAndEligibleLiveOnlyModels(t *testing.T) 
 	merged := MergeProvider(baseline, snapshot)
 	if len(merged.Models) != 2 || merged.Models["known"].Limit.Context != 200 {
 		t.Fatalf("merged = %+v", merged.Models)
+	}
+}
+
+func TestMergeCodexProviderCanonicalizesLegacyPriorityTier(t *testing.T) {
+	t.Parallel()
+	baseline := modelcatalog.Provider{
+		ID: modelcatalog.OpenAICodexProviderID,
+		Models: map[string]modelcatalog.Model{
+			"gpt": {ID: "gpt", ServiceTiers: []llm.ServiceTier{{ID: "fast", Name: "Fast", Request: llm.ServiceTierRequest{ServiceTier: "fast"}}}},
+		},
+	}
+	snapshot := Snapshot{Models: map[string]Model{
+		"gpt": {ID: "gpt", ServiceTiers: []llm.ServiceTier{{ID: "priority", Name: "Fast", Request: llm.ServiceTierRequest{ServiceTier: "priority"}}}},
+	}}
+
+	for _, merge := range []struct {
+		name string
+		fn   func(modelcatalog.Provider, Snapshot) modelcatalog.Provider
+	}{
+		{name: "authoritative", fn: MergeProvider},
+		{name: "stale", fn: OverlaySnapshotMetadata},
+	} {
+		t.Run(merge.name, func(t *testing.T) {
+			merged := merge.fn(baseline, snapshot)
+			tiers := merged.Models["gpt"].ServiceTiers
+			fast, ok := llm.ResolveServiceTier("fast", tiers)
+			if len(tiers) != 1 || !ok || fast.ID != "fast" || fast.Name != "Fast" || fast.Request.ServiceTier != "fast" {
+				t.Fatalf("merged Codex tiers = %+v, want canonical Fast tier", tiers)
+			}
+		})
 	}
 }
 

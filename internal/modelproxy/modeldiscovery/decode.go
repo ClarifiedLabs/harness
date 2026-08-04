@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"harness/internal/llm"
+	"harness/internal/modelcatalog"
 )
 
 func fetchPages(ctx context.Context, client *http.Client, spec Spec, headers http.Header, etag, codexClientVersion string) (map[string]Model, string, bool, error) {
@@ -503,14 +504,13 @@ func decodeCodex(data []byte, spec Spec) (map[string]Model, string, error) {
 			if speed == "" {
 				continue
 			}
-			request := speed
 			name := speed
 			if speed == "fast" {
-				request, name = "priority", "Fast"
+				name = "Fast"
 			}
-			model.ServiceTiers = append(model.ServiceTiers, llm.ServiceTier{ID: speed, Name: name, Request: llm.ServiceTierRequest{ServiceTier: request}})
+			model.ServiceTiers = append(model.ServiceTiers, llm.ServiceTier{ID: speed, Name: name, Request: llm.ServiceTierRequest{ServiceTier: speed}})
 		}
-		model.ServiceTiers = llm.NormalizeServiceTiers(model.ServiceTiers)
+		model.ServiceTiers = modelcatalog.NormalizeOpenAIFastServiceTiers(model.ServiceTiers)
 		out[id] = model
 	}
 	return out, "", nil

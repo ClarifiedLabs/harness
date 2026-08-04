@@ -155,7 +155,7 @@ func normalizeProviders(providers map[string]Provider) *Catalog {
 			if m.ID == "" {
 				m.ID = modelKey
 			}
-			m.ServiceTiers = modelsDevServiceTiers(m)
+			m.ServiceTiers = modelsDevServiceTiers(p.ID, m)
 			m.Experimental = modelExperimental{}
 			p.Models[modelKey] = m
 		}
@@ -164,7 +164,7 @@ func normalizeProviders(providers map[string]Provider) *Catalog {
 	return &Catalog{Providers: providers}
 }
 
-func modelsDevServiceTiers(model Model) []llm.ServiceTier {
+func modelsDevServiceTiers(providerID string, model Model) []llm.ServiceTier {
 	tiers := append([]llm.ServiceTier(nil), model.ServiceTiers...)
 	modeIDs := make([]string, 0, len(model.Experimental.Modes))
 	for id := range model.Experimental.Modes {
@@ -189,6 +189,9 @@ func modelsDevServiceTiers(model Model) []llm.ServiceTier {
 			Request: request,
 			Price:   mode.Cost,
 		})
+	}
+	if strings.EqualFold(strings.TrimSpace(providerID), "openai") {
+		return NormalizeOpenAIFastServiceTiers(tiers)
 	}
 	return llm.NormalizeServiceTiers(tiers)
 }

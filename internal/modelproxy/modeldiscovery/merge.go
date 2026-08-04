@@ -71,6 +71,7 @@ func OverlayProvider(fallback, higher modelcatalog.Provider) modelcatalog.Provid
 func MergeProvider(baseline modelcatalog.Provider, snapshot Snapshot) modelcatalog.Provider {
 	out := cloneProvider(baseline)
 	out.Models = make(map[string]modelcatalog.Model, len(snapshot.Models))
+	codex := strings.EqualFold(strings.TrimSpace(baseline.ID), modelcatalog.OpenAICodexProviderID)
 	for id, direct := range snapshot.Models {
 		base, known := catalogModel(baseline, id)
 		if !known && !direct.Eligible {
@@ -79,7 +80,7 @@ func MergeProvider(baseline modelcatalog.Provider, snapshot Snapshot) modelcatal
 		if !known {
 			base = modelcatalog.Model{ID: id, Name: id}
 		}
-		out.Models[id] = mergeModel(base, direct)
+		out.Models[id] = mergeModel(base, direct, codex)
 	}
 	return out
 }
@@ -89,13 +90,14 @@ func MergeProvider(baseline modelcatalog.Provider, snapshot Snapshot) modelcatal
 // may enrich configured models but cannot determine current availability.
 func OverlaySnapshotMetadata(baseline modelcatalog.Provider, snapshot Snapshot) modelcatalog.Provider {
 	out := cloneProvider(baseline)
+	codex := strings.EqualFold(strings.TrimSpace(baseline.ID), modelcatalog.OpenAICodexProviderID)
 	for id, direct := range snapshot.Models {
 		base, known := catalogModel(out, id)
 		if !known {
 			continue
 		}
 		direct.Price = nil
-		out.Models[id] = mergeModel(base, direct)
+		out.Models[id] = mergeModel(base, direct, codex)
 	}
 	return out
 }
@@ -146,7 +148,7 @@ func mergeCatalogModel(base, higher modelcatalog.Model) modelcatalog.Model {
 	return out
 }
 
-func mergeModel(base modelcatalog.Model, direct Model) modelcatalog.Model {
+func mergeModel(base modelcatalog.Model, direct Model, codex bool) modelcatalog.Model {
 	out := cloneCatalogModel(base)
 	out.ID = direct.ID
 	if direct.Name != "" {
@@ -178,7 +180,11 @@ func mergeModel(base modelcatalog.Model, direct Model) modelcatalog.Model {
 		out.Cost = *direct.Price
 	}
 	if direct.ServiceTiers != nil {
-		out.ServiceTiers = llm.NormalizeServiceTiers(direct.ServiceTiers)
+		if codex {
+			out.ServiceTiers = modelcatalog.NormalizeOpenAIFastServiceTiers(direct.ServiceTiers)
+		} else {
+			out.ServiceTiers = llm.NormalizeServiceTiers(direct.ServiceTiers)
+		}
 	}
 	return out
 }

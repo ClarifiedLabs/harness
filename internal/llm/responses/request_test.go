@@ -107,10 +107,10 @@ func TestBuildRequestMaxTokensUsesMaxOutputTokens(t *testing.T) {
 
 func TestBuildRequestServiceTier(t *testing.T) {
 	req := basicRequest()
-	req.ServiceTier = "flex"
+	req.ServiceTier = "fast"
 	w := buildRequest(req, 0, 0)
-	if w.ServiceTier != "flex" {
-		t.Fatalf("service_tier = %q, want flex", w.ServiceTier)
+	if w.ServiceTier != "fast" {
+		t.Fatalf("service_tier = %q, want fast", w.ServiceTier)
 	}
 }
 

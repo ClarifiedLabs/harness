@@ -25,10 +25,32 @@ func (OpenAIAPIs) PriceUsage(in Input) Result {
 	if !isOpenAIAPI(in.Provider) {
 		return Result{}
 	}
+	in = normalizeLegacyOpenAIFastResponseTier(in)
 	in.Provider.ServiceTiers = reasoningAtOutputServiceTiers(in.Provider.ServiceTiers)
 	in.Model.Price = reasoningAtOutputPrice(in.Model.Price)
 	in.Model.ServiceTiers = reasoningAtOutputServiceTiers(in.Model.ServiceTiers)
 	return Flat{}.PriceUsage(in)
+}
+
+// normalizeLegacyOpenAIFastResponseTier preserves Fast-mode pricing while
+// OpenAI continues to report the pre-rename priority label for some models.
+func normalizeLegacyOpenAIFastResponseTier(in Input) Input {
+	if !isFirstPartyOpenAI(in.Provider) ||
+		!strings.EqualFold(strings.TrimSpace(in.Request.ServiceTier), "fast") ||
+		!strings.EqualFold(strings.TrimSpace(in.Usage.ServiceTier), "priority") {
+		return in
+	}
+	in.Usage.ServiceTier = "fast"
+	return in
+}
+
+func isFirstPartyOpenAI(provider llm.ProviderConfig) bool {
+	switch strings.ToLower(strings.TrimSpace(provider.Name)) {
+	case "openai", "openai-codex":
+		return true
+	default:
+		return false
+	}
 }
 
 func isOpenAIAPI(provider llm.ProviderConfig) bool {
