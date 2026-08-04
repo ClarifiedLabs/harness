@@ -252,7 +252,9 @@ retention experiment. It compares `age`, `disabled`, and `pressure` policies
 under both stateful and stateless request shapes. Every run must read more than
 ten deterministic files in order, exactly one `read_file` call per model turn,
 then reproduce every marker. This provides an objective correctness oracle
-while creating old tool results large enough to exercise retention.
+while creating old tool results large enough to exercise retention. The
+provider-free context-reset storage, replay, and load benchmark is documented in
+[`deltabench.md`](deltabench.md).
 
 Build the candidate Harness, inspect the six-run smoke matrix, then run it:
 
