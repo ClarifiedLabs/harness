@@ -416,7 +416,7 @@ func TestManagerResourceLeaseReleaseLifecycle(t *testing.T) {
 			close(cancelObserved)
 			<-cleanupRelease
 			close(returned)
-			return tools.BackgroundJobResult{}, ctx.Err()
+			return tools.BackgroundJobResult{Text: "[delegate completion: unknown, report host/unavailable]"}, ctx.Err()
 		})
 		<-startedRun
 		m.Shutdown()
@@ -428,10 +428,14 @@ func TestManagerResourceLeaseReleaseLifecycle(t *testing.T) {
 			return tools.BackgroundJobResult{}, nil
 		})
 		awaitJobDone(t, m, afterAbandon.ID)
+		m.mu.Lock()
+		done := m.jobs[started.ID].done
+		m.mu.Unlock()
 		close(cleanupRelease)
 		<-returned
-		if got, _ := m.Get(started.ID); got.Status != StatusAbandoned {
-			t.Fatalf("late runner changed abandoned status to %q", got.Status)
+		<-done
+		if got, _ := m.Get(started.ID); got.Status != StatusAbandoned || !strings.Contains(got.Result.Text, "host/unavailable") {
+			t.Fatalf("late abandoned result = %+v", got)
 		}
 	})
 }

@@ -85,14 +85,15 @@ type UsageDistributions struct {
 // HierarchyAnalysis is one root-owned experimental sample. It contains only
 // transcript-free aggregate telemetry.
 type HierarchyAnalysis struct {
-	RootPath  string            `json:"root_path"`
-	RootID    string            `json:"root_id,omitempty"`
-	Cohort    CohortIdentity    `json:"cohort"`
-	Sessions  int               `json:"sessions"`
-	Execution ExecutionAnalysis `json:"execution"`
-	Workflow  WorkflowAnalysis  `json:"workflow"`
-	Usage     UsageAnalysis     `json:"usage"`
-	Storage   StorageAnalysis   `json:"storage"`
+	RootPath   string             `json:"root_path"`
+	RootID     string             `json:"root_id,omitempty"`
+	Cohort     CohortIdentity     `json:"cohort"`
+	Sessions   int                `json:"sessions"`
+	Execution  ExecutionAnalysis  `json:"execution"`
+	Workflow   WorkflowAnalysis   `json:"workflow"`
+	Completion CompletionAnalysis `json:"completion"`
+	Usage      UsageAnalysis      `json:"usage"`
+	Storage    StorageAnalysis    `json:"storage"`
 }
 
 // CohortIdentity is copied into every cohort so opaque keys remain auditable.
@@ -112,6 +113,7 @@ type CohortAnalysis struct {
 	Sessions      int                `json:"sessions"`
 	Execution     ExecutionAnalysis  `json:"execution"`
 	Workflow      WorkflowAnalysis   `json:"workflow"`
+	Completion    CompletionAnalysis `json:"completion"`
 	Usage         UsageAnalysis      `json:"usage"`
 	Distributions UsageDistributions `json:"distributions"`
 	Storage       StorageAnalysis    `json:"storage"`

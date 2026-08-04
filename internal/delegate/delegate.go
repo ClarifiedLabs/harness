@@ -189,6 +189,7 @@ type RunRequest struct {
 // RunResult is the complete outcome of one child-agent run.
 type RunResult struct {
 	Report              string
+	Completion          CompletionReport
 	Usage               llm.Usage
 	Turns               int
 	EffectiveMaxTurns   int
@@ -400,7 +401,11 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 	progress := t.takeProgress(input)
 	result, err := t.runner.Run(ctx, req, progress)
 	if err != nil {
-		return tools.MeteredResult{Usage: result.Usage, Progress: result.Progress}, annotateRunError(ctx, err)
+		annotated := annotateRunError(ctx, err)
+		if result.Completion.Outcome != "" {
+			annotated = fmt.Errorf("%s: %w", completionReceipt(result.Completion), annotated)
+		}
+		return tools.MeteredResult{Text: result.Report, Usage: result.Usage, Progress: result.Progress}, annotated
 	}
 	return tools.MeteredResult{Text: result.Report, Usage: result.Usage, Progress: result.Progress}, nil
 }
@@ -527,6 +532,8 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	if req.Mode == ModeImplementation {
 		launch.System = implementationSystemPrompt(launch.System)
 	}
+	contract := completionContract(req.Mode, launch.Agent)
+	launch.System = completionContractSystemPrompt(launch.System, contract)
 	progress.SetAgent(launch.Agent)
 
 	toolNames := launch.Tools.Names()
@@ -557,8 +564,10 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		return RunResult{}, fmt.Errorf("delegate continuation must use a fresh child id, not %q", childID)
 	}
 	created := r.now()
-	childDir, saveErr := r.saveChildMeta(runtime, launch, childID, req, maxTurns, runtimeFingerprint, session.ChildStatusRunning, created, created, agent.PromptUsage{}, nil, 0)
+	childDir, saveErr := r.saveChildMeta(runtime, launch, childID, req, maxTurns, runtimeFingerprint, session.ChildStatusRunning, created, created, agent.PromptUsage{}, nil, 0, nil)
+	completion := unknownCompletion(contract, session.ChildCompletionSourceHost, session.ChildCompletionValidationUnavailable)
 	result = RunResult{
+		Completion:        completion,
 		ChildID:           childID,
 		TranscriptPath:    childDir,
 		EffectiveMaxTurns: maxTurns,
@@ -566,6 +575,11 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		ContinuedFrom:     req.ContinueChildID,
 		SaveError:         saveErr,
 	}
+	defer func() {
+		if strings.TrimSpace(result.Report) == "" {
+			result.Report = completionReceipt(result.Completion)
+		}
+	}()
 	activity := r.opts.ActivityRegistry.Register(ActivityStart{
 		ID:             childID,
 		ParentID:       runtime.ParentChildID,
@@ -587,6 +601,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	var terminalErr error
 	var terminalMessageCount int
 	var terminalUpdated time.Time
+	terminalCompletion := completion
 	var terminalOnce sync.Once
 	flushDisplay := func() {}
 	finish := func() {
@@ -600,7 +615,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 			// the follower process reads meta.json and needs terminal status to be
 			// on disk (and the pane still alive) before it can finish its final
 			// drain and exit cleanly.
-			_, err := r.saveChildMeta(runtime, launch, childID, req, maxTurns, runtimeFingerprint, terminalStatus, created, terminalUpdated, terminalUsage, terminalErr, terminalMessageCount)
+			_, err := r.saveChildMeta(runtime, launch, childID, req, maxTurns, runtimeFingerprint, terminalStatus, created, terminalUpdated, terminalUsage, terminalErr, terminalMessageCount, &terminalCompletion)
 			result.SaveError = errors.Join(result.SaveError, err)
 			// Close every terminal view. In particular, leaving failed or
 			// canceled followers under tmux's remain-on-exit would strand a dead
@@ -702,6 +717,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 					checkpoint.Usage,
 					nil,
 					len(child.Transcript()),
+					nil,
 				)
 			}
 		default:
@@ -735,6 +751,14 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 
 	failBeforePrompt := func(runErr error) (RunResult, error) {
 		terminalUsage = sink.usage
+		terminalStatus = childTerminalStatus(runErr)
+		if terminalUsage.TerminationReason == "" {
+			if terminalStatus == session.ChildStatusCanceled {
+				terminalUsage.TerminationReason = agent.TerminationCancelled
+			} else {
+				terminalUsage.TerminationReason = agent.TerminationError
+			}
+		}
 		terminalMessageCount = len(child.Transcript())
 		terminalUpdated = r.now()
 		stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, terminalUsage, created, terminalUpdated, ensureChildTree)
@@ -770,6 +794,12 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 			compactUsage, changed, compactErr := child.CompactForContinuation(ctx, sink)
 			sink.addPreflightMaintenance("continuation_compaction", compactUsage, changed)
 			if compactErr != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return failBeforePrompt(ctxErr)
+				}
+				if errors.Is(compactErr, context.Canceled) || errors.Is(compactErr, context.DeadlineExceeded) {
+					return failBeforePrompt(compactErr)
+				}
 				return failBeforePrompt(continuationIncompatibleError(
 					req.ContinueChildID,
 					fmt.Sprintf("could not create a compact continuation checkpoint: %v", compactErr),
@@ -805,7 +835,14 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	terminalUpdated = r.now()
 	stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, usage, created, terminalUpdated, ensureChildTree)
 	persistenceErr := errors.Join(sink.appendError(), stateErr)
+	rawReport := strings.TrimSpace(lastAssistantText(child.Transcript()))
+	if runErr == nil {
+		terminalCompletion, rawReport = parseCompletionReport(rawReport, contract)
+	} else {
+		terminalCompletion = unknownCompletion(contract, session.ChildCompletionSourceHost, session.ChildCompletionValidationUnavailable)
+	}
 	result = RunResult{
+		Completion:          terminalCompletion,
 		Usage:               usage.Usage,
 		Turns:               usage.Turns,
 		EffectiveMaxTurns:   maxTurns,
@@ -826,14 +863,11 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		Progress:            progress.Closure(),
 	}
 	terminalErr = errors.Join(runErr, persistenceErr)
-	finish()
-	if runErr != nil {
-		return result, runErr
-	}
-	report := strings.TrimSpace(lastAssistantText(child.Transcript()))
+	report := strings.TrimSpace(rawReport)
 	if report == "" {
-		report = "(delegate completed without a final text response)"
+		report = "(delegate completed without additional final prose)"
 	}
+	report = completionReceipt(terminalCompletion) + "\n\n" + report
 	report += fmt.Sprintf("\n\n[delegate: %s, turn budget %d", turnPhrase(usage.Turns), maxTurns)
 	if req.Mode != "" {
 		report += ", mode " + req.Mode
@@ -869,6 +903,10 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 	report += "]"
 	result.Report = report
+	finish()
+	if runErr != nil {
+		return result, runErr
+	}
 	return result, nil
 }
 
@@ -1469,7 +1507,7 @@ func withoutChildBudget(system string) string {
 
 func implementationSystemPrompt(system string) string {
 	return fmt.Sprintf(
-		"%s\n\n[implementation mode]\nThis is scoped mutating implementation work. Make the requested changes, verify them, and return an exact handoff with changed paths, checks run, and any remaining work. Commit only when commit ownership was explicitly delegated.",
+		"%s\n\n[implementation mode]\nThis is scoped mutating implementation work. Make the requested changes, verify them, and return an exact handoff with changed paths, checks run, and any remaining work. Commit only when commit ownership was explicitly delegated.\n\nIn the final harness-completion JSON block, include changed_files as an explicit array and verification as a non-empty array of {\"check\":\"...\",\"status\":\"passed|failed|not_run\",\"detail\":\"...\"}. A not_run result requires a detail explaining why verification could not run; a complete outcome cannot include failed verification.",
 		strings.TrimSpace(system),
 	)
 }
@@ -1645,7 +1683,7 @@ func nextChildID(kind string) string {
 	return fmt.Sprintf("%s_%s_%06d", prefix, time.Now().UTC().Format("20060102T150405Z"), childSeq.Add(1))
 }
 
-func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, req RunRequest, effectiveMaxTurns int, runtimeFingerprint, status string, created, updated time.Time, usage agent.PromptUsage, runErr error, messageCount int) (string, error) {
+func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, req RunRequest, effectiveMaxTurns int, runtimeFingerprint, status string, created, updated time.Time, usage agent.PromptUsage, runErr error, messageCount int, completion *CompletionReport) (string, error) {
 	if parent.SessionPath == "" {
 		return "", nil
 	}
@@ -1681,6 +1719,7 @@ func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, re
 		ClosureTurn:         usage.ClosureTurn,
 		TurnBudgetExhausted: usage.TurnBudgetExhausted,
 		WorkflowStatus:      sessionrec.WorkflowStatusSnapshot(usage.WorkflowStatus),
+		Completion:          completion,
 		TelemetryVersion:    session.ReliabilityTelemetryVersion,
 	}
 	if req.MaxTurns != nil && !req.maxTurnsInherited {

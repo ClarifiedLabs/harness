@@ -69,6 +69,26 @@ type WorkflowAnalysis struct {
 	remainingRequirementValues  []int
 }
 
+// CompletionAnalysis aggregates host-validated child completion reports without
+// exposing child prose, blockers, changed paths, or evidence bodies.
+type CompletionAnalysis struct {
+	Applicable                        bool            `json:"applicable"`
+	Reports                           int             `json:"reports"`
+	Unavailable                       int             `json:"unavailable"`
+	Outcomes                          map[string]int  `json:"outcomes"`
+	Validation                        map[string]int  `json:"validation"`
+	Contracts                         map[string]int  `json:"contracts"`
+	UnresolvedRequirementsTotal       int             `json:"unresolved_requirements_total"`
+	UnresolvedRequirements            IntDistribution `json:"unresolved_requirements"`
+	ImplementationChangedFilesReports int             `json:"implementation_changed_files_reports"`
+	ImplementationVerificationReports int             `json:"implementation_verification_reports"`
+	ReviewCoverage                    map[string]int  `json:"review_coverage"`
+	GeneralEvidenceReports            int             `json:"general_evidence_reports"`
+	ParentReworkAvailable             bool            `json:"parent_rework_available"`
+	ParentReworkObserved              int             `json:"parent_rework_observed"`
+	unresolvedRequirementValues       []int
+}
+
 // ProgressAnalysis summarizes turn_progress records. Pending batching steers
 // have not yet had two subsequent tool turns or a completed prompt by the
 // analyzed cutoff and therefore are not treated as failures.
@@ -133,13 +153,14 @@ type InvariantAnalysis struct {
 
 // TelemetryAnalysis is reusable by single-session stats and corpus reports.
 type TelemetryAnalysis struct {
-	Closure    ClosureAnalysis   `json:"closure"`
-	Workflow   WorkflowAnalysis  `json:"workflow"`
-	Progress   ProgressAnalysis  `json:"progress"`
-	Hooks      HookAnalysis      `json:"hooks"`
-	Context    ContextAnalysis   `json:"context"`
-	Retention  RetentionAnalysis `json:"retention"`
-	Invariants InvariantAnalysis `json:"invariants"`
+	Closure    ClosureAnalysis    `json:"closure"`
+	Workflow   WorkflowAnalysis   `json:"workflow"`
+	Completion CompletionAnalysis `json:"completion"`
+	Progress   ProgressAnalysis   `json:"progress"`
+	Hooks      HookAnalysis       `json:"hooks"`
+	Context    ContextAnalysis    `json:"context"`
+	Retention  RetentionAnalysis  `json:"retention"`
+	Invariants InvariantAnalysis  `json:"invariants"`
 }
 
 // AnalysisSource describes the immutable raw.ndjson prefix considered for a
@@ -206,14 +227,17 @@ type SessionAnalysis struct {
 
 // TelemetryCoverage counts physical streams carrying each structured signal.
 type TelemetryCoverage struct {
-	Sessions           int `json:"sessions"`
-	Closure            int `json:"closure"`
-	Workflow           int `json:"workflow"`
-	Progress           int `json:"progress"`
-	Hooks              int `json:"hooks"`
-	Context            int `json:"context"`
-	ProviderCountScope int `json:"provider_count_scope"`
-	Retention          int `json:"retention"`
+	Sessions                   int `json:"sessions"`
+	Closure                    int `json:"closure"`
+	Workflow                   int `json:"workflow"`
+	CompletionApplicable       int `json:"completion_applicable"`
+	CompletionValid            int `json:"completion_valid"`
+	CompletionCoverageFailures int `json:"completion_coverage_failures"`
+	Progress                   int `json:"progress"`
+	Hooks                      int `json:"hooks"`
+	Context                    int `json:"context"`
+	ProviderCountScope         int `json:"provider_count_scope"`
+	Retention                  int `json:"retention"`
 }
 
 // AnalysisReport is a deterministic, transcript-free corpus report. Path may
@@ -340,9 +364,10 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 		acc := cohorts[cohort.Key]
 		if acc == nil {
 			acc = &cohortAccumulator{analysis: CohortAnalysis{
-				Cohort:    cohort,
-				Execution: ExecutionAnalysis{Terminations: make(map[string]int)},
-				Workflow:  WorkflowAnalysis{Outcomes: make(map[string]int)},
+				Cohort:     cohort,
+				Execution:  ExecutionAnalysis{Terminations: make(map[string]int)},
+				Workflow:   WorkflowAnalysis{Outcomes: make(map[string]int)},
+				Completion: CompletionAnalysis{Outcomes: make(map[string]int), Validation: make(map[string]int), Contracts: make(map[string]int), ReviewCoverage: make(map[string]int)},
 			}}
 			cohorts[cohort.Key] = acc
 		}
@@ -350,6 +375,7 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 		hierarchy := UsageAnalysis{}
 		hierarchyExecution := ExecutionAnalysis{Terminations: make(map[string]int)}
 		hierarchyWorkflow := WorkflowAnalysis{Outcomes: make(map[string]int)}
+		hierarchyCompletion := CompletionAnalysis{Outcomes: make(map[string]int), Validation: make(map[string]int), Contracts: make(map[string]int), ReviewCoverage: make(map[string]int)}
 		var hierarchyStorage StorageAnalysis
 		allRawComplete := opts.Before.IsZero()
 		rootItem := -1
@@ -387,6 +413,9 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 			item.Execution = deriveExecution(events, source.Status)
 			item.ExecutionIdentity = deriveExecutionIdentity(events, source.Status, metadata)
 			item.Telemetry = deriveTelemetry(events, fallback)
+			if stream.delegate {
+				item.Telemetry.Completion = deriveCompletion(fallback, true)
+			}
 			conversation, maintenance := usageFromEvents(events, source.Status)
 			if stream.delegate {
 				item.Usage.DescendantConversational = conversation
@@ -404,6 +433,7 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 			hierarchy.add(item.Usage)
 			hierarchyExecution.add(item.Execution)
 			hierarchyWorkflow.add(item.Telemetry.Workflow)
+			hierarchyCompletion.add(item.Telemetry.Completion)
 			hierarchyStorage.add(item.Storage)
 			allRawComplete = allRawComplete && source.Status == "complete"
 			report.Completeness[item.Execution.Completeness]++
@@ -436,12 +466,13 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 		report.Usage.add(hierarchy)
 		report.Hierarchies = append(report.Hierarchies, HierarchyAnalysis{
 			RootPath: root, RootID: rootMeta.id, Cohort: cohort, Sessions: len(streams),
-			Execution: hierarchyExecution, Workflow: hierarchyWorkflow,
+			Execution: hierarchyExecution, Workflow: hierarchyWorkflow, Completion: hierarchyCompletion,
 			Usage: hierarchy, Storage: hierarchyStorage,
 		})
 		acc.analysis.Sessions += len(streams)
 		acc.analysis.Execution.add(hierarchyExecution)
 		acc.analysis.Workflow.add(hierarchyWorkflow)
+		acc.analysis.Completion.add(hierarchyCompletion)
 		acc.analysis.Usage.add(hierarchy)
 		acc.analysis.Storage.add(hierarchyStorage)
 		if allRawComplete && hierarchy.Inclusive.Complete {
@@ -827,6 +858,14 @@ func (c *TelemetryCoverage) add(telemetry TelemetryAnalysis, events []Event) {
 	if telemetry.Workflow.Available {
 		c.Workflow++
 	}
+	if telemetry.Completion.Applicable {
+		c.CompletionApplicable++
+		if telemetry.Completion.Reports > 0 {
+			c.CompletionValid++
+		} else {
+			c.CompletionCoverageFailures++
+		}
+	}
 	if telemetry.Progress.Available {
 		c.Progress++
 	}
@@ -1116,7 +1155,133 @@ func deriveTelemetry(events []Event, child *ChildMeta) TelemetryAnalysis {
 		out.Hooks.Available = true
 	}
 	out.Progress = deriveProgress(progress, completed, schemaAvailable)
+	out.Completion = deriveCompletion(child, child != nil)
 	return out
+}
+
+func deriveCompletion(child *ChildMeta, applicable bool) CompletionAnalysis {
+	out := CompletionAnalysis{
+		Applicable:     applicable,
+		Outcomes:       make(map[string]int),
+		Validation:     make(map[string]int),
+		Contracts:      make(map[string]int),
+		ReviewCoverage: make(map[string]int),
+	}
+	if !applicable {
+		return out
+	}
+
+	contract := ChildCompletionContractGeneral
+	if child != nil {
+		switch {
+		case child.Mode == ChildCompletionContractImplementation:
+			contract = ChildCompletionContractImplementation
+		case strings.EqualFold(strings.TrimSpace(child.Agent), "review"):
+			contract = ChildCompletionContractReview
+		}
+	}
+	report := ChildCompletionReport{
+		Outcome: ChildCompletionOutcomeUnknown, Contract: contract,
+		Source: ChildCompletionSourceCompatibility, ValidationStatus: ChildCompletionValidationMissing,
+	}
+	persisted := child != nil && child.Completion != nil
+	if persisted {
+		report = *child.Completion
+	}
+	switch report.ValidationStatus {
+	case ChildCompletionValidationValid,
+		ChildCompletionValidationMissing,
+		ChildCompletionValidationMalformed,
+		ChildCompletionValidationInvalid,
+		ChildCompletionValidationOversized,
+		ChildCompletionValidationDuplicate,
+		ChildCompletionValidationUnavailable:
+	default:
+		report.ValidationStatus = ChildCompletionValidationInvalid
+	}
+	if !validCompletionProvenance(report.Source, report.ValidationStatus) ||
+		persisted && !validCompletionLifecycle(child, report.ValidationStatus) {
+		report.ValidationStatus = ChildCompletionValidationInvalid
+	}
+	if report.ValidationStatus == ChildCompletionValidationValid {
+		if status := validateChildCompletionReport(report, contract); status != ChildCompletionValidationValid {
+			report.ValidationStatus = status
+		}
+	}
+	if report.ValidationStatus != ChildCompletionValidationValid {
+		report.Outcome = ChildCompletionOutcomeUnknown
+	}
+	out.Outcomes[report.Outcome]++
+	out.Validation[report.ValidationStatus]++
+	out.Contracts[contract]++
+	if report.ValidationStatus != ChildCompletionValidationValid {
+		out.Unavailable++
+		return out
+	}
+
+	out.Reports++
+	out.UnresolvedRequirementsTotal += report.UnresolvedRequirements
+	out.unresolvedRequirementValues = append(out.unresolvedRequirementValues, report.UnresolvedRequirements)
+	out.UnresolvedRequirements = intDistribution(out.unresolvedRequirementValues)
+	switch report.Contract {
+	case ChildCompletionContractImplementation:
+		out.ImplementationChangedFilesReports++
+		out.ImplementationVerificationReports++
+	case ChildCompletionContractReview:
+		coverage := report.Coverage
+		if coverage != "complete" && coverage != "partial" {
+			coverage = "unknown"
+		}
+		out.ReviewCoverage[coverage]++
+	case ChildCompletionContractGeneral:
+		out.GeneralEvidenceReports++
+	}
+	return out
+}
+
+func validCompletionLifecycle(child *ChildMeta, validation string) bool {
+	if child == nil {
+		return false
+	}
+	switch validation {
+	case ChildCompletionValidationValid,
+		ChildCompletionValidationMissing,
+		ChildCompletionValidationMalformed,
+		ChildCompletionValidationInvalid,
+		ChildCompletionValidationOversized,
+		ChildCompletionValidationDuplicate:
+		return child.Status == ChildStatusCompleted && child.TerminationReason != "cancelled" && child.TerminationReason != "error"
+	case ChildCompletionValidationUnavailable:
+		switch child.Status {
+		case ChildStatusFailed:
+			return child.TerminationReason != "" && child.TerminationReason != "cancelled"
+		case ChildStatusCanceled:
+			return child.TerminationReason == "cancelled"
+		case ChildStatusAbandoned:
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+func validCompletionProvenance(source, validation string) bool {
+	switch validation {
+	case ChildCompletionValidationValid:
+		return source == ChildCompletionSourceDeclared
+	case ChildCompletionValidationMissing,
+		ChildCompletionValidationMalformed,
+		ChildCompletionValidationInvalid,
+		ChildCompletionValidationOversized,
+		ChildCompletionValidationDuplicate:
+		return source == ChildCompletionSourceCompatibility
+	case ChildCompletionValidationUnavailable:
+		return source == ChildCompletionSourceHost
+	default:
+		return false
+	}
 }
 
 func deriveProgress(events []Event, completed map[int]bool, schemaAvailable bool) ProgressAnalysis {
@@ -1264,6 +1429,44 @@ func (w *WorkflowAnalysis) add(other WorkflowAnalysis) {
 	w.CompletionSourceUnavailable += other.CompletionSourceUnavailable
 }
 
+func (c *CompletionAnalysis) add(other CompletionAnalysis) {
+	if c.Outcomes == nil {
+		c.Outcomes = make(map[string]int)
+	}
+	if c.Validation == nil {
+		c.Validation = make(map[string]int)
+	}
+	if c.Contracts == nil {
+		c.Contracts = make(map[string]int)
+	}
+	if c.ReviewCoverage == nil {
+		c.ReviewCoverage = make(map[string]int)
+	}
+	c.Applicable = c.Applicable || other.Applicable
+	c.Reports += other.Reports
+	c.Unavailable += other.Unavailable
+	for key, value := range other.Outcomes {
+		c.Outcomes[key] += value
+	}
+	for key, value := range other.Validation {
+		c.Validation[key] += value
+	}
+	for key, value := range other.Contracts {
+		c.Contracts[key] += value
+	}
+	c.UnresolvedRequirementsTotal += other.UnresolvedRequirementsTotal
+	c.unresolvedRequirementValues = append(c.unresolvedRequirementValues, other.unresolvedRequirementValues...)
+	c.UnresolvedRequirements = intDistribution(c.unresolvedRequirementValues)
+	c.ImplementationChangedFilesReports += other.ImplementationChangedFilesReports
+	c.ImplementationVerificationReports += other.ImplementationVerificationReports
+	for key, value := range other.ReviewCoverage {
+		c.ReviewCoverage[key] += value
+	}
+	c.GeneralEvidenceReports += other.GeneralEvidenceReports
+	c.ParentReworkAvailable = c.ParentReworkAvailable || other.ParentReworkAvailable
+	c.ParentReworkObserved += other.ParentReworkObserved
+}
+
 func (t *TelemetryAnalysis) add(other TelemetryAnalysis) {
 	if t.Closure.Triggers == nil {
 		t.Closure.Triggers = make(map[string]int)
@@ -1290,6 +1493,7 @@ func (t *TelemetryAnalysis) add(other TelemetryAnalysis) {
 	t.Workflow.CompletionSourceAvailable = t.Workflow.CompletionSourceAvailable || other.Workflow.CompletionSourceAvailable
 	t.Workflow.CompletionSourceReports += other.Workflow.CompletionSourceReports
 	t.Workflow.CompletionSourceUnavailable += other.Workflow.CompletionSourceUnavailable
+	t.Completion.add(other.Completion)
 	t.Progress.Available = t.Progress.Available || other.Progress.Available
 	t.Progress.ToolTurns += other.Progress.ToolTurns
 	mergeMaximum(&t.Progress.MaxInspectionNoProgressStreak, other.Progress.MaxInspectionNoProgressStreak)
@@ -1383,6 +1587,7 @@ func WriteAnalysisText(report AnalysisReport, w io.Writer) error {
 	fmt.Fprintf(&b, "  turns/tools/results/errors: %d / %d / %d / %d tool, %d model\n", report.Execution.Turns, report.Execution.ToolCalls, report.Execution.ToolResults, report.Execution.ToolErrors, report.Execution.ModelErrors)
 	fmt.Fprintf(&b, "  terminations: %s\n", formatCountMap(report.Execution.TerminationAvailable, report.Execution.Terminations))
 	fmt.Fprintf(&b, "  telemetry coverage closure/workflow/progress/hooks/context/count-scope/retention: %d/%d/%d/%d/%d/%d/%d of %d\n", report.Coverage.Closure, report.Coverage.Workflow, report.Coverage.Progress, report.Coverage.Hooks, report.Coverage.Context, report.Coverage.ProviderCountScope, report.Coverage.Retention, report.Coverage.Sessions)
+	fmt.Fprintf(&b, "  delegate completion valid/failures/applicable: %d / %d / %d\n", report.Coverage.CompletionValid, report.Coverage.CompletionCoverageFailures, report.Coverage.CompletionApplicable)
 	writeTelemetryText(&b, "  ", report.Telemetry)
 	writeAnalysisUsageText(&b, "  ", report.Usage, report.Distributions)
 	fmt.Fprintf(&b, "  storage bytes total/state/tree/raw/compactions/tool-results: %d / %d / %d / %d / %d / %d\n", report.Storage.TotalBytes, report.Storage.State.Bytes, report.Storage.Tree.Bytes, report.Storage.Raw.Bytes, report.Storage.Compactions.Bytes, report.Storage.ToolResults.Bytes)
@@ -1409,6 +1614,13 @@ func writeTelemetryText(w io.Writer, indent string, t TelemetryAnalysis) {
 		fmt.Fprintf(w, "%sworkflow supplied/unsupplied: %d / %d; outcomes: %s; unresolved total/median/p90: %d / %d / %d (%d samples)\n", indent, t.Workflow.Supplied, t.Workflow.Unsupplied, formatCountMap(true, t.Workflow.Outcomes), t.Workflow.RemainingRequirementsTotal, t.Workflow.RemainingRequirements.Median, t.Workflow.RemainingRequirements.P90, t.Workflow.RemainingRequirements.Samples)
 	} else {
 		fmt.Fprintf(w, "%sworkflow outcomes: unavailable\n", indent)
+	}
+	if t.Completion.Applicable {
+		fmt.Fprintf(w, "%sdelegate completion reports/unavailable: %d / %d; outcomes: %s; validation: %s; unresolved total/median/p90: %d / %d / %d (%d samples)\n", indent, t.Completion.Reports, t.Completion.Unavailable, formatCountMap(true, t.Completion.Outcomes), formatCountMap(true, t.Completion.Validation), t.Completion.UnresolvedRequirementsTotal, t.Completion.UnresolvedRequirements.Median, t.Completion.UnresolvedRequirements.P90, t.Completion.UnresolvedRequirements.Samples)
+		fmt.Fprintf(w, "%sdelegate contracts: %s; review coverage: %s; implementation changed-files/verification: %d / %d; general evidence: %d\n", indent, formatCountMap(true, t.Completion.Contracts), formatCountMap(true, t.Completion.ReviewCoverage), t.Completion.ImplementationChangedFilesReports, t.Completion.ImplementationVerificationReports, t.Completion.GeneralEvidenceReports)
+		fmt.Fprintf(w, "%sparent rework observed: %s\n", indent, availableCount(t.Completion.ParentReworkAvailable, t.Completion.ParentReworkObserved))
+	} else {
+		fmt.Fprintf(w, "%sdelegate completion: not applicable\n", indent)
 	}
 	if t.Progress.Available {
 		fmt.Fprintf(w, "%sprogress telemetry: available (%d tool turns)\n", indent, t.Progress.ToolTurns)

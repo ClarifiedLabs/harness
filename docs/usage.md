@@ -1783,8 +1783,14 @@ limit-exceeded, or cutoff-incomplete sources explicitly. Context maxima
 keep payload and effective scopes separate; public maxima clamp negatives while
 invariant counters preserve compatible-scope arithmetic errors. Execution
 completion means a terminal `prompt_usage` record exists; termination reasons
-describe loop control, not task correctness, and absent semantic completion
-metadata remains unavailable rather than being inferred.
+describe loop control, not task correctness. Delegate semantic completion is a
+separate bounded report with `complete`, `partial`, `blocked`, `failed`, or the
+host compatibility fallback `unknown`. Analyzer output exposes only aggregate
+outcome/validation/contract counters, unresolved-count distributions, and
+mode-contract coverage—never blocker text, paths, check names/details, report
+prose, or unresolved questions. Legacy, invalid, failed, and canceled children
+remain explicit coverage failures rather than being inferred as complete;
+parent rework is currently unavailable.
 
 `session errors` lists the classified failures behind that section: every
 failed tool result and failed model request in one session (root plus delegate

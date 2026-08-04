@@ -359,7 +359,8 @@ The `max_turns` schema publishes the active numeric `delegate_max_turns`
 maximum (default `20`). Omitting `max_turns` uses that maximum; a lower value
 selects a smaller tool-enabled loop budget, and an over-cap value is rejected
 before a child is launched. Children receive the exact effective budget in
-their system context. If the final budgeted turn still requests tools, Harness
+their system context and are told to finish early once scoped work and focused
+verification are done. If the final budgeted turn still requests tools, Harness
 may make one additional tools-disabled wind-down request so the transcript ends
 with a concise handoff; `turns_used` records that physical request too.
 Recursion starts at root depth `0` and is limited by `delegate_max_depth`
@@ -377,6 +378,19 @@ turn budgets, physical turns used, and a structured termination reason:
 `token_limit`, `cost_limit`, `repeat_guard`, `error_guard`, `cancelled`, or
 `error`. A termination reason describes why Harness stopped the loop; it does
 not claim that the delegated task is semantically complete.
+
+A successful child final response must end with one `harness-completion` fenced
+JSON report. Harness validates it under the implementation, review, or general
+contract, strips a valid block from the prose, and prefixes foreground and
+background results with the semantic outcome plus source/validation status.
+Implementation reports include explicit `changed_files` and verification;
+review reports include coverage and unreviewed scope; general reports include
+evidence and unresolved questions. Missing, malformed, duplicate, invalid, or
+oversized reports do not discard useful prose: they produce `unknown` with a
+compatibility validation status. Failed or canceled children instead record
+host/unavailable provenance. The bounded report is persisted in child
+`meta.json` independently of lifecycle termination, and every continuation
+produces a fresh report.
 
 `delegate_output=lines` adds a curated prompt-scoped view of foreground,
 background, concurrent, and nested child activity to parent stderr. Direct

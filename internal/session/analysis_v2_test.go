@@ -334,6 +334,141 @@ func TestAnalyzeV2ContextScopesWorkflowAndPercentiles(t *testing.T) {
 	}
 }
 
+func TestDeriveCompletionNormalizesUntrustedMetadataKeys(t *testing.T) {
+	completion := deriveCompletion(&ChildMeta{Completion: &ChildCompletionReport{
+		Outcome:          "private outcome",
+		Contract:         "private contract",
+		Source:           ChildCompletionSourceDeclared,
+		ValidationStatus: "private validation",
+	}}, true)
+	if completion.Outcomes[ChildCompletionOutcomeUnknown] != 1 || completion.Contracts[ChildCompletionContractGeneral] != 1 || completion.Validation[ChildCompletionValidationInvalid] != 1 || completion.Unavailable != 1 {
+		t.Fatalf("completion = %+v", completion)
+	}
+	encoded, err := json.Marshal(completion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("private")) {
+		t.Fatalf("completion leaked untrusted metadata keys: %s", encoded)
+	}
+
+	forged := deriveCompletion(&ChildMeta{Completion: &ChildCompletionReport{
+		Outcome: ChildCompletionOutcomeComplete, Contract: ChildCompletionContractGeneral,
+		Source: ChildCompletionSourceDeclared, ValidationStatus: ChildCompletionValidationValid,
+	}}, true)
+	if forged.Reports != 0 || forged.Unavailable != 1 || forged.Outcomes[ChildCompletionOutcomeUnknown] != 1 || forged.Validation[ChildCompletionValidationInvalid] != 1 {
+		t.Fatalf("forged valid report was trusted: %+v", forged)
+	}
+
+	var omitted ChildMeta
+	if err := json.Unmarshal([]byte(`{"status":"completed","completion":{"outcome":"partial","contract":"general","source":"child_declared","validation_status":"valid","evidence":[],"unresolved_questions":[]}}`), &omitted); err != nil {
+		t.Fatal(err)
+	}
+	missingCount := deriveCompletion(&omitted, true)
+	if missingCount.Reports != 0 || missingCount.Validation[ChildCompletionValidationInvalid] != 1 {
+		t.Fatalf("omitted unresolved count was trusted: %+v", missingCount)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		status      string
+		termination string
+	}{
+		{name: "failed", status: ChildStatusFailed, termination: "error"},
+		{name: "canceled", status: ChildStatusCanceled, termination: "cancelled"},
+	} {
+		t.Run("lifecycle_"+tc.name, func(t *testing.T) {
+			meta := ChildMeta{Status: tc.status, TerminationReason: tc.termination, Completion: &ChildCompletionReport{
+				Outcome: ChildCompletionOutcomeComplete, Contract: ChildCompletionContractGeneral,
+				Evidence: []ChildCompletionEvidence{}, UnresolvedQuestions: []string{},
+				Source: ChildCompletionSourceDeclared, ValidationStatus: ChildCompletionValidationValid,
+			}}
+			meta.Completion.unresolvedRequirementsPresent = true
+			got := deriveCompletion(&meta, true)
+			if got.Reports != 0 || got.Unavailable != 1 || got.Validation[ChildCompletionValidationInvalid] != 1 {
+				t.Fatalf("forged declared report was trusted: %+v", got)
+			}
+		})
+	}
+
+	hostCanceled := deriveCompletion(&ChildMeta{
+		Status: ChildStatusCanceled, TerminationReason: "cancelled",
+		Completion: &ChildCompletionReport{Outcome: ChildCompletionOutcomeUnknown, Contract: ChildCompletionContractGeneral, Source: ChildCompletionSourceHost, ValidationStatus: ChildCompletionValidationUnavailable},
+	}, true)
+	if hostCanceled.Reports != 0 || hostCanceled.Unavailable != 1 || hostCanceled.Validation[ChildCompletionValidationUnavailable] != 1 {
+		t.Fatalf("host canceled report = %+v", hostCanceled)
+	}
+}
+
+func TestAnalyzeDelegateCompletionCoverageAndPrivacy(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult})
+
+	valid := filepath.Join(root, "children", "valid")
+	mustWriteAnalysisJSON(t, filepath.Join(valid, "meta.json"), ChildMeta{
+		ID: "valid", Kind: "delegate", Status: ChildStatusCompleted, Mode: ChildCompletionContractImplementation,
+		Completion: &ChildCompletionReport{
+			Outcome: ChildCompletionOutcomePartial, UnresolvedRequirements: 2,
+			Blockers:     []string{"SECRET_BLOCKER"},
+			ChangedFiles: []string{"SECRET_PATH.go"},
+			Verification: []ChildCompletionVerification{{Check: "SECRET_CHECK", Status: "passed", Detail: "SECRET_DETAIL"}},
+			Contract:     ChildCompletionContractImplementation, Source: ChildCompletionSourceDeclared,
+			ValidationStatus: ChildCompletionValidationValid,
+		},
+	})
+	mustAppendAnalysisEvent(t, valid, Event{Type: EventToolResult})
+
+	review := filepath.Join(root, "children", "review")
+	mustWriteAnalysisJSON(t, filepath.Join(review, "meta.json"), ChildMeta{
+		ID: "review", Kind: "delegate", Status: ChildStatusCompleted, Agent: "review",
+		Completion: &ChildCompletionReport{
+			Outcome: ChildCompletionOutcomePartial, UnresolvedRequirements: 1,
+			Coverage: "partial", UnreviewedScope: []string{"SECRET_UNREVIEWED"},
+			Contract: ChildCompletionContractReview, Source: ChildCompletionSourceDeclared, ValidationStatus: ChildCompletionValidationValid,
+		},
+	})
+	mustAppendAnalysisEvent(t, review, Event{Type: EventToolResult})
+
+	general := filepath.Join(root, "children", "general")
+	mustWriteAnalysisJSON(t, filepath.Join(general, "meta.json"), ChildMeta{
+		ID: "general", Kind: "delegate", Status: ChildStatusCompleted, Agent: "explore",
+		Completion: &ChildCompletionReport{
+			Outcome: ChildCompletionOutcomeBlocked, UnresolvedRequirements: 1, Blockers: []string{"SECRET_GENERAL_BLOCKER"},
+			Evidence: []ChildCompletionEvidence{{Path: "SECRET_EVIDENCE_PATH", Symbol: "SECRET_SYMBOL"}}, UnresolvedQuestions: []string{"SECRET_QUESTION"},
+			Contract: ChildCompletionContractGeneral, Source: ChildCompletionSourceDeclared, ValidationStatus: ChildCompletionValidationValid,
+		},
+	})
+	mustAppendAnalysisEvent(t, general, Event{Type: EventToolResult})
+
+	legacy := filepath.Join(root, "children", "legacy")
+	mustWriteAnalysisJSON(t, filepath.Join(legacy, "meta.json"), ChildMeta{ID: "legacy", Kind: "delegate", Agent: "explore"})
+	mustAppendAnalysisEvent(t, legacy, Event{Type: EventToolResult})
+
+	report, err := AnalyzeCorpus(root, AnalyzeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion := report.Telemetry.Completion
+	if report.Coverage.CompletionApplicable != 4 || report.Coverage.CompletionValid != 3 || report.Coverage.CompletionCoverageFailures != 1 {
+		t.Fatalf("completion coverage = %+v", report.Coverage)
+	}
+	if completion.Reports != 3 || completion.Unavailable != 1 || completion.Outcomes[ChildCompletionOutcomePartial] != 2 || completion.Outcomes[ChildCompletionOutcomeBlocked] != 1 || completion.Outcomes[ChildCompletionOutcomeUnknown] != 1 || completion.UnresolvedRequirementsTotal != 4 || completion.ImplementationVerificationReports != 1 || completion.ReviewCoverage["partial"] != 1 || completion.GeneralEvidenceReports != 1 || completion.ParentReworkAvailable {
+		t.Fatalf("completion analysis = %+v", completion)
+	}
+	if len(report.Hierarchies) != 1 || report.Hierarchies[0].Completion.Reports != 3 || len(report.Cohorts) != 1 || report.Cohorts[0].Completion.Unavailable != 1 {
+		t.Fatalf("hierarchy/cohort completion = %+v / %+v", report.Hierarchies, report.Cohorts)
+	}
+	var out bytes.Buffer
+	if err := WriteAnalysisJSON(report, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"SECRET_BLOCKER", "SECRET_PATH", "SECRET_CHECK", "SECRET_DETAIL", "SECRET_UNREVIEWED", "SECRET_GENERAL_BLOCKER", "SECRET_EVIDENCE_PATH", "SECRET_SYMBOL", "SECRET_QUESTION"} {
+		if bytes.Contains(out.Bytes(), []byte(secret)) {
+			t.Fatalf("completion detail %q leaked into analysis: %s", secret, out.String())
+		}
+	}
+}
+
 func TestStatsJSONIncludesReusableUsageAnalysis(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	usage := llm.Usage{InputTokens: 12, CacheReadTokens: 3, OutputTokens: 4, CostUSD: .25, CostKnown: true}

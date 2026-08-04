@@ -198,6 +198,11 @@ func (m *Manager) start(
 		finished := m.now()
 		m.mu.Lock()
 		if job.Status == StatusAbandoned {
+			job.Result = result
+			if result.Progress != nil {
+				job.progress = result.Progress
+			}
+			m.signalLocked()
 			m.mu.Unlock()
 			close(job.done)
 			return

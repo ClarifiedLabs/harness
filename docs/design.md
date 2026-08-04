@@ -2536,6 +2536,26 @@ this subsection records the common runner those argv tools point at.
   task as scoped mutating work and requiring implementation, verification, and
   an exact handoff with changed paths, checks run, and any remaining work.
   Child metadata, result receipts, and session stats preserve the mode.
+- Every child is instructed to stop once its delegated requirements and focused
+  verification are complete and to end its final response with exactly one
+  `harness-completion` fenced JSON object. The host selects an `implementation`
+  contract for implementation mode, `review` for the resolved review agent, and
+  `general` otherwise. The strict decoder accepts only bounded contract fields:
+  semantic outcome, unresolved count, blockers, and the mode-specific
+  changed-file/verification, review-coverage/unreviewed-scope, or
+  evidence/unresolved-question arrays. `complete` requires zero unresolved
+  requirements; implementation and review contracts enforce their additional
+  verification and coverage invariants.
+- Completion parsing examines only the final assistant response after a
+  successful child run. A valid block is removed from parent-facing prose;
+  missing, malformed, duplicate, invalid, or oversized blocks preserve useful
+  prose and become host-generated `unknown` compatibility outcomes instead of
+  failing the run. Failures and cancellation receive host/unavailable
+  provenance without parsing model output. Receipts show outcome and
+  source/validation, while terminal `ChildMeta.Completion` stores the bounded
+  report beside—not in place of—lifecycle status, workflow status, and
+  `TerminationReason`. Each continuation writes an independent report for its
+  fresh child ID.
 - `continue_child_id` names an already-terminal child of the same immediate
   parent. Continuation never appends to or overwrites that source directory:
   the Runner creates a fresh child ID and seeds it with the source transcript,
@@ -3621,8 +3641,14 @@ type UsageTotals struct {
   is reconciliation-only and is consulted only for complete, non-cutoff
   hierarchies; it is never added to child usage. Hierarchy and cohort summaries
   carry sample counts with nearest-rank median/p90 token values and known-complete
-  cost. Missing semantic completion metadata remains unavailable independently
-  of lifecycle termination.
+  cost. Child completion aggregation counts only outcomes, validation states,
+  contract coverage, unresolved-count distributions, and mode-specific field
+  coverage. It never emits blocker text, changed/evidence paths, verification
+  names or details, unreviewed scope, unresolved questions, or child report
+  prose. Legacy children without reports remain useful but contribute an
+  explicit `unknown`/missing coverage failure; parent rework remains unavailable
+  unless a future host-owned signal can observe it. Semantic completion remains
+  independent of lifecycle termination.
 
   Corpus/session discovery and storage analysis use chunked, capped
   entry/depth walks; metadata reads are size-bounded and symlinks are not

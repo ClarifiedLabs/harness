@@ -101,7 +101,7 @@ func TestDelegateTransientFailureGuidance(t *testing.T) {
 	if got := tools.KindOf(err); got != llm.ToolErrorRateLimited {
 		t.Fatalf("kind = %q, want %q (err: %v)", got, llm.ToolErrorRateLimited, err)
 	}
-	for _, want := range []string{"transient provider error", "rate_limited", "retry the delegate call once", "report the blocker"} {
+	for _, want := range []string{"delegate completion: unknown", "host/unavailable", "transient provider error", "rate_limited", "retry the delegate call once", "report the blocker"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing %q", err, want)
 		}
@@ -126,6 +126,9 @@ func TestDelegatePermanentFailureUnchanged(t *testing.T) {
 	}
 	if got := tools.KindOf(err); got != "" {
 		t.Fatalf("kind = %q, want unclassified", got)
+	}
+	if !strings.Contains(err.Error(), "delegate completion: unknown") || !strings.Contains(err.Error(), "host/unavailable") {
+		t.Fatalf("permanent failure missing completion receipt: %v", err)
 	}
 	if strings.Contains(err.Error(), "transient provider error") || strings.Contains(err.Error(), "retry the delegate call once") {
 		t.Fatalf("permanent failure gained transient guidance: %v", err)
