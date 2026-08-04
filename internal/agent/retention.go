@@ -74,11 +74,10 @@ type retentionPass struct {
 	changed  bool
 }
 
-// applyRetentionPolicy makes the default auto policy a bounded replay window:
-// read-only result bodies older than keepTurns are trimmed even when the request
-// remains below pressure thresholds. When pressure is high, the event is tagged
-// as a pressure epoch and hysteresis prevents repeated scans. Explicit pressure
-// mode remains pressure-only; explicit age mode always uses the turn boundary.
+// applyRetentionPolicy makes auto and pressure epoch-only: eligible history is
+// rewritten only after the context reaches a pressure high-water mark, and
+// hysteresis prevents repeated scans. Explicit age mode alone always uses the
+// turn boundary.
 func (a *Agent) applyRetentionPolicy(sink EventSink, contextTokens int) retentionPass {
 	return a.applyRetentionPolicyWithDecision(sink, ContextEstimate{Total: contextTokens, Source: ContextEstimateSourceBytes})
 }
@@ -108,11 +107,7 @@ func (a *Agent) applyRetentionPolicyWithDecision(sink EventSink, decision Contex
 		LocalEstimateTokensBefore: localBefore,
 	}
 	observed := false
-	pressure := policy == RetentionPolicyPressure
-	if policy == RetentionPolicyAuto {
-		window := a.window()
-		pressure = window > 0 && atOrAbovePercent(decision.Total, window, retentionPressureHighPct) && a.retentionEpochArmed
-	}
+	pressure := policy == RetentionPolicyAuto || policy == RetentionPolicyPressure
 	if pressure {
 		event.Policy = "pressure_epoch"
 		event.Trigger = "context_pressure"
@@ -139,11 +134,6 @@ func (a *Agent) applyRetentionPolicyWithDecision(sink EventSink, decision Contex
 		}
 		a.retentionEpochArmed = false
 		observed = true
-	} else if policy == RetentionPolicyAuto {
-		event.Policy = "auto_age"
-		if window := a.window(); window > 0 && atOrBelowPercent(decision.Total, window, retentionPressureLowPct) {
-			a.retentionEpochArmed = true
-		}
 	}
 	event.BytesBefore = retentionTranscriptBytes(a.transcript)
 	readOnly := a.readOnlyResultIDsIn(a.transcript)

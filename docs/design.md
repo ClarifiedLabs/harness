@@ -3734,19 +3734,19 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   provider-overflow recovery retry remain enabled. The terminal warning follows
   the configured trigger and is suppressed with automatic compaction.
 - **Live-transcript retention pass.** Before each model request the agent runs a
-  pure-local retention pass (no model round-trip). The default `auto` policy
-  trims read-only result bodies older than the eight-turn compaction keep window
-  even below pressure, preventing unbounded verbatim replay. It also uses the
-  larger of the full local estimate and the last provider measurement plus
-  appended-message delta. At 60% of the effective window an armed pressure epoch
-  trims every eligible result and aged image in one pass, then disarms until
-  context falls to 50% or below. Compaction remains the safety net.
+  pure-local retention pass (no model round-trip). The default `auto` policy and
+  explicit `pressure` policy use the larger of the full local estimate and the
+  last provider measurement plus appended-message delta. At 60% of the effective
+  window an armed pressure epoch trims every eligible result and aged image in
+  one pass, then disarms until context falls to 50% or below. Neither policy
+  rewrites history below pressure; compaction remains the safety net.
 - Any retention edit clears the CLI-owned `previous_response_id`
   exactly once, while a below-pressure stateful request preserves it and sends
   only the appended delta. Stateless providers get the same batched transcript
   bounding without continuation reset semantics.
 - The `retention_policy` experiment control can force `age`, `pressure`,
-  or `disabled`. Age mode trims eligible read-only results older than
+  or `disabled`. Auto and pressure share pressure-only epoch semantics, including
+  the optional absolute floor. Age mode trims eligible read-only results older than
   `compact_keep_turns` completed turns and images two or more turns old before
   each request. Disabling the local pass does not disable compaction or
   provider-overflow recovery. Delegate continuation fingerprints include the

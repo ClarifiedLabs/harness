@@ -208,7 +208,7 @@ func TestRetentionPolicyOverridesProviderDefault(t *testing.T) {
 		{name: "disable stateless", policy: RetentionPolicyDisabled, context: 100_000, wantChange: false},
 		{name: "force pressure for stateless", policy: RetentionPolicyPressure, context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
 		{name: "auto uses pressure when high", context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
-		{name: "auto bounds replay when low", context: 1, wantChange: true, wantPolicy: "auto_age"},
+		{name: "auto preserves history when low", context: 1, wantChange: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
@@ -223,6 +223,11 @@ func TestRetentionPolicyOverridesProviderDefault(t *testing.T) {
 			}
 			if tc.wantPolicy != "" && pass.event.Policy != tc.wantPolicy {
 				t.Fatalf("retention policy = %q, want %q (pass %+v)", pass.event.Policy, tc.wantPolicy, pass)
+			}
+			if tc.name == "auto preserves history when low" {
+				if pass.observed || a.Transcript()[0].Content[0].Kind != llm.BlockImage {
+					t.Fatalf("low-pressure auto pass mutated or emitted retention: pass=%+v transcript=%+v", pass, a.Transcript())
+				}
 			}
 		})
 	}
@@ -333,6 +338,14 @@ func TestRetentionLeavesDeclaredStablePrefixByteIdentical(t *testing.T) {
 }
 
 func TestPressureRetentionThresholdAndHysteresis(t *testing.T) {
+	for _, policy := range []RetentionPolicy{RetentionPolicyAuto, RetentionPolicyPressure} {
+		t.Run(string(policy), func(t *testing.T) {
+			testPressureRetentionThresholdAndHysteresis(t, policy)
+		})
+	}
+}
+
+func testPressureRetentionThresholdAndHysteresis(t *testing.T, policy RetentionPolicy) {
 	oldImageTranscript := func() []llm.Message {
 		return []llm.Message{
 			userImage("old.png", agentOnePixelPNG, "q0"), asstText("a0"),
@@ -342,7 +355,7 @@ func TestPressureRetentionThresholdAndHysteresis(t *testing.T) {
 		}
 	}
 	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
-		RetentionPolicy: RetentionPolicyPressure,
+		RetentionPolicy: policy,
 		ContextWindow:   100_000,
 	})
 	a.SetTranscript(oldImageTranscript())
@@ -486,7 +499,7 @@ func TestRetentionKeepsOriginalWhenArtifactWriteFails(t *testing.T) {
 	}
 }
 
-func TestExplicitPressureRetentionPreservesResponseStateBelowPressure(t *testing.T) {
+func TestAutoRetentionPreservesResponseStateBelowPressure(t *testing.T) {
 	msgs := []llm.Message{
 		userImage("old.png", agentOnePixelPNG, "q0"), asstText("a0"),
 		userText("q1"), asstText("a1"),
@@ -507,7 +520,7 @@ func TestExplicitPressureRetentionPreservesResponseStateBelowPressure(t *testing
 	)
 	a := newAgent(fp, readOnlyRegistry(), Options{
 		ResponsesStateful: true,
-		RetentionPolicy:   RetentionPolicyPressure,
+		RetentionPolicy:   RetentionPolicyAuto,
 		ContextWindow:     1_000_000,
 	})
 	a.SetTranscript(msgs)
@@ -531,7 +544,40 @@ func TestExplicitPressureRetentionPreservesResponseStateBelowPressure(t *testing
 	}
 }
 
-func TestStatefulRetentionPressureEpochTrimsEligibleBlocksAndResetsOnce(t *testing.T) {
+func TestAutoPressureEpochWithoutEligibleBlocksPreservesResponseState(t *testing.T) {
+	big := strings.Repeat("x", 60_000)
+	msgs := []llm.Message{
+		userText("q0"), asstToolUse("t0", "write_file", `{}`), toolResult("t0", big), asstText("a0"),
+	}
+	for i := 1; i <= 9; i++ {
+		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+	}
+	fp := llmtest.New("responses", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn, ResponseID: "resp-new",
+	})
+	a := newAgent(fp, readOnlyRegistry(), Options{
+		ResponsesStateful: true, ContextWindow: 20_000, DisableAutoCompaction: true,
+	})
+	a.SetTranscript(msgs)
+	digest, err := llm.FingerprintMessages(msgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "resp-old", AnchorMessages: len(msgs), AnchorDigest: digest})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "next", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(fp.Requests) != 1 || fp.Requests[0].PreviousResponseID != "resp-old" || len(fp.Requests[0].Messages) != 1 {
+		t.Fatalf("request after no-op epoch = %+v", fp.Requests)
+	}
+	if len(sink.retention) != 1 || sink.retention[0].BlocksTrimmed != 0 || sink.retention[0].ResponseStateReset || !sink.retention[0].NextRequestStateful {
+		t.Fatalf("no-op pressure epoch = %+v", sink.retention)
+	}
+}
+
+func TestAutoPressureEpochTrimsEligibleBlocksAndResetsOnce(t *testing.T) {
 	big := strings.Repeat("x", 30_000)
 	msgs := []llm.Message{
 		userText("q0"), asstToolUse("t0", "rd", `{}`), toolResult("t0", big), asstText("a0"),
@@ -835,6 +881,22 @@ func TestPressureRetentionFloorTriggersBelowWindowPercentage(t *testing.T) {
 	// spans the whole transcript: nothing remains a future pass could rewrite.
 	if stable := a.stableMessagePrefixIn(a.Transcript()); stable != len(a.Transcript()) {
 		t.Fatalf("stable prefix after floor trim = %d, want %d (whole transcript)", stable, len(a.Transcript()))
+	}
+}
+
+func TestAutoRetentionFloorTriggersBelowWindowPercentage(t *testing.T) {
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
+		RetentionPolicy: RetentionPolicyAuto, ContextWindow: 1_000_000, RetentionFloorTokens: 200_000,
+	})
+	a.SetTranscript([]llm.Message{
+		userImage("old.png", agentOnePixelPNG, "q0"), asstText("a0"),
+		userText("q1"), asstText("a1"), userText("q2"), asstText("a2"), userText("q3"), asstText("a3"),
+	})
+	if pass := a.applyRetentionPolicy(&recordSink{}, 199_999); pass.changed || pass.observed {
+		t.Fatalf("auto below floor = %+v, want no epoch", pass)
+	}
+	if pass := a.applyRetentionPolicy(&recordSink{}, 200_000); !pass.changed || pass.event.Policy != "pressure_epoch" {
+		t.Fatalf("auto at floor = %+v, want pressure epoch", pass)
 	}
 }
 

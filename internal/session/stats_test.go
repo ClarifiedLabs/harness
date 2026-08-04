@@ -657,6 +657,9 @@ func TestCollectRetentionStatsReportsEpochEffectsAndRequestShape(t *testing.T) {
 			NextRequestStateful: false,
 		}},
 		{Type: EventRetention, Retention: &RetentionSnapshot{
+			Policy: "auto_age",
+		}},
+		{Type: EventRetention, Retention: &RetentionSnapshot{
 			Policy:              "age",
 			Trigger:             "turn_age",
 			BlocksTrimmed:       1,
@@ -667,26 +670,26 @@ func TestCollectRetentionStatsReportsEpochEffectsAndRequestShape(t *testing.T) {
 	}
 	stats := collectRetentionStats(events)
 	if stats != (retentionStats{
-		epochs:              2,
+		epochs:              3,
 		pressureEpochs:      1,
-		agePasses:           1,
+		agePasses:           2,
 		blocksTrimmed:       4,
 		bytesTrimmed:        27_000,
 		responseStateResets: 1,
 		statefulRequests:    1,
-		unknownRequests:     1,
+		unknownRequests:     2,
 	}) {
 		t.Fatalf("retention stats = %+v", stats)
 	}
 	var out bytes.Buffer
 	writeConversationValues(&out, "", collectedSessionStats{retention: stats})
 	for _, want := range []string{
-		"retention epochs: 2",
-		"pressure/age: 1 / 1",
+		"retention epochs: 3",
+		"pressure/age: 1 / 2",
 		"blocks trimmed: 4",
 		"bytes trimmed: 27000",
 		"response-state resets: 1",
-		"next requests stateful/full/stateless/unknown: 1 / 0 / 0 / 1",
+		"next requests stateful/full/stateless/unknown: 1 / 0 / 0 / 2",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("retention stats output missing %q:\n%s", want, out.String())

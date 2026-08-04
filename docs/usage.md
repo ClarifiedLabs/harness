@@ -688,16 +688,16 @@ session and sends only the appended suffix on the next request. A missing,
 malformed, out-of-range, or fingerprint-mismatched anchor is discarded before
 the request and the complete transcript is sent safely.
 
-Live transcript retention defaults to `auto`, which bounds verbatim replay of
-read-only tool results to the eight-turn compaction keep window and also batches
-eligible trimming into pressure epochs when the larger of the local and
-provider-derived estimates reaches 60% of the context window. Experiments can
-override this with `retention_policy`, `HARNESS_RETENTION_POLICY`, or
-`-retention-policy`; accepted values are `auto`, `age`, `pressure`, and
-`disabled`. Disabling live retention does not disable compaction or
+Live transcript retention defaults to `auto`, which batches eligible trimming
+into pressure epochs when the larger of the local and provider-derived estimates
+reaches 60% of the context window. `auto` and `pressure` do not rewrite history
+below pressure; select explicit `age` to bound replay by the eight-turn compaction
+keep window. Experiments can override this with `retention_policy`,
+`HARNESS_RETENTION_POLICY`, or `-retention-policy`; accepted values are `auto`,
+`age`, `pressure`, and `disabled`. Disabling live retention does not disable compaction or
 provider-overflow recovery. The config-only `retention_floor_tokens` adds an
 absolute-context fallback to the pressure epoch: when the estimated context
-exceeds the floor, the same hysteretic trim of aged read-only tool results runs
+reaches the floor, the same hysteretic trim of aged read-only tool results runs
 even below the 60% window high-water mark — which a very large (e.g. 1M-token)
 window may never reach. It defaults to 0 (disabled) and stays opt-in because
 trimming rewrites history and invalidates the cache prefix from the first
