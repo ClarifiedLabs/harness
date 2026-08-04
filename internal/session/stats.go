@@ -1239,8 +1239,8 @@ func writeTreeStats(w io.Writer, stats treeStats) {
 	fmt.Fprintf(w, "  maximum depth: %d\n", stats.maxDepth)
 	fmt.Fprintf(w, "  active depth: %d\n", stats.activeDepth)
 	fmt.Fprintf(w, "  context resets: %d\n", stats.contextResets)
-	fmt.Fprintf(w, "  context resets snapshot/delta: %d / %d\n", stats.snapshotResetEntries, stats.deltaResetEntries)
-	fmt.Fprintf(w, "  context reset payload bytes snapshot/delta: %d / %d\n", stats.snapshotResetBytes, stats.deltaResetBytes)
+	fmt.Fprintf(w, "  context resets snapshot/legacy-delta: %d / %d\n", stats.snapshotResetEntries, stats.deltaResetEntries)
+	fmt.Fprintf(w, "  context reset payload bytes snapshot/legacy-delta: %d / %d\n", stats.snapshotResetBytes, stats.deltaResetBytes)
 }
 
 func writeActiveContextStats(w io.Writer, stats collectedSessionStats) {

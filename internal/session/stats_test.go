@@ -653,8 +653,8 @@ func TestWriteTreeStatsReportsResetEncodings(t *testing.T) {
 	})
 	for _, want := range []string{
 		"context resets: 3",
-		"context resets snapshot/delta: 1 / 2",
-		"context reset payload bytes snapshot/delta: 9000 / 500",
+		"context resets snapshot/legacy-delta: 1 / 2",
+		"context reset payload bytes snapshot/legacy-delta: 9000 / 500",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("tree stats output missing %q:\n%s", want, out.String())

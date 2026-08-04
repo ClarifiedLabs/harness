@@ -1591,7 +1591,7 @@ func WriteAnalysisText(report AnalysisReport, w io.Writer) error {
 	writeTelemetryText(&b, "  ", report.Telemetry)
 	writeAnalysisUsageText(&b, "  ", report.Usage, report.Distributions)
 	fmt.Fprintf(&b, "  storage bytes total/state/tree/raw/compactions/tool-results: %d / %d / %d / %d / %d / %d\n", report.Storage.TotalBytes, report.Storage.State.Bytes, report.Storage.Tree.Bytes, report.Storage.Raw.Bytes, report.Storage.Compactions.Bytes, report.Storage.ToolResults.Bytes)
-	fmt.Fprintf(&b, "  context resets snapshot/delta; payload bytes: %d / %d; %d / %d\n", report.Storage.SnapshotResetEntries, report.Storage.DeltaResetEntries, report.Storage.SnapshotPayloadBytes, report.Storage.DeltaPayloadBytes)
+	fmt.Fprintf(&b, "  context resets snapshot/legacy-delta; payload bytes: %d / %d; %d / %d\n", report.Storage.SnapshotResetEntries, report.Storage.DeltaResetEntries, report.Storage.SnapshotPayloadBytes, report.Storage.DeltaPayloadBytes)
 	fmt.Fprintf(&b, "  cohorts: %d\n", len(report.Cohorts))
 	limit := min(len(report.Items), maxAnalysisTextSessions)
 	fmt.Fprintf(&b, "Streams (showing %d of %d)\n", limit, len(report.Items))

@@ -3437,8 +3437,8 @@ type Entry struct {
     ID           string
     ParentID     string
     Time         time.Time
-    Messages     []llm.Message // segment or legacy context_reset snapshot
-    ContextDelta *ContextDelta // compact context_reset, mutually exclusive with Messages
+    Messages     []llm.Message // segment or context_reset snapshot
+    ContextDelta *ContextDelta // legacy context_reset, mutually exclusive with Messages
     // Compaction checkpoint, kept-entry boundary, archive reference, and size.
     // Branch source/common ancestor/optional summary and workspace warning.
 }
@@ -3489,19 +3489,19 @@ type UsageTotals struct {
   `state.json`. Only after that canonical save succeeds is `active-turn.json`
   removed. Prompt-end/manual saves use the same consolidation order.
 - Saves append and `fsync` new tree entries before atomically replacing
-  `state.json` via temp-file plus rename. Context rewrites use sorted splice
-  deltas when their encoded entry is smaller than a full snapshot, otherwise
-  retaining the legacy snapshot representation; both forms can coexist without a
-  schema migration. A malformed final tree record is
+  `state.json` via temp-file plus rename. Context rewrites are recorded as complete
+  message snapshots. Previously written splice-delta reset entries remain
+  readable for compatibility; both forms can coexist without a schema migration.
+  A malformed final tree record is
   treated as an interrupted append; malformed non-final records, missing
   parents, duplicate IDs, and invalid segments are hard errors.
 - Active provider context is reconstructed by walking parents from
-  `ActiveLeaf`. A legacy context-reset snapshot or compaction with a materialized
-  kept suffix can anchor replay; later segments, branches, compactions, and delta
-  resets are then applied in path order. Delta resets verify parent/result message
-  counts and provider-neutral transcript fingerprints before use, validate the
-  materialized transcript, and preserve message ownership references outside
-  changed splice runs.
+  `ActiveLeaf`. A context-reset snapshot or compaction with a materialized kept
+  suffix can anchor replay; later segments, branches, compactions, and legacy
+  delta resets are then applied in path order. Legacy delta resets verify
+  parent/result message counts and provider-neutral transcript fingerprints before
+  use, validate the materialized transcript, and preserve message ownership
+  references outside changed splice runs.
 - Every saved message and append-only replay event carries a timestamp. Replay
   events identify `prompt`, `turn`, and (for provider requests) `attempt` separately.
   `turn_attempt_start` also snapshots agent/provider/model execution identity so
@@ -3654,7 +3654,7 @@ type UsageTotals struct {
   entry/depth walks; metadata reads are size-bounded and symlinks are not
   followed. Storage reports files/directories/bytes for state/tree/raw logs,
   compactions, and tool-result artifacts, plus context-reset
-  snapshot/delta counts and payload bytes. Raw storage bytes use the physical
+  snapshot/legacy-delta counts and payload bytes. Raw storage bytes use the physical
   snapshotted file size, not only the event prefix selected by a cutoff. Missing,
   incomplete, malformed, symlinked, cutoff-incomplete, and limit-exceeded sources
   remain explicit.

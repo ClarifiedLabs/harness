@@ -557,7 +557,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSaveUsesDeltaForTranscriptRewriteAndSkipsUnchanged(t *testing.T) {
+func TestSaveUsesSnapshotForTranscriptRewriteAndSkipsUnchanged(t *testing.T) {
 	s := sampleSession()
 	s.Messages[0].Content[0].Text = strings.Repeat("large stable prompt ", 2000)
 	dir := filepath.Join(t.TempDir(), "session")
@@ -574,8 +574,8 @@ func TestSaveUsesDeltaForTranscriptRewriteAndSkipsUnchanged(t *testing.T) {
 		t.Fatalf("rewrite Save: %v", err)
 	}
 	entry, ok := stored.Tree.Entry(stored.Tree.ActiveLeaf)
-	if !ok || entry.Type != EntryContextReset || entry.ContextDelta == nil || len(entry.Messages) != 0 {
-		t.Fatalf("rewrite entry = %+v, %v; want delta reset", entry, ok)
+	if !ok || entry.Type != EntryContextReset || entry.ContextDelta != nil || !transcriptsEqualMessages(entry.Messages, stored.Messages) {
+		t.Fatalf("rewrite entry = %+v, %v; want full context snapshot", entry, ok)
 	}
 	entries := len(stored.Tree.Entries)
 	if err := stored.Save(dir); err != nil {

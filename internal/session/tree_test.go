@@ -1,7 +1,6 @@
 package session
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -158,8 +157,8 @@ func TestTreeCompactionMaterializesBoundaryInsideContextReset(t *testing.T) {
 		t.Fatalf("SyncTranscript retention rewrite: %v", err)
 	}
 	resetID := tree.ActiveLeaf
-	if entry, ok := tree.Entry(resetID); !ok || entry.Type != EntryContextReset || entry.ContextDelta == nil || len(entry.Messages) != 0 {
-		t.Fatalf("retention rewrite leaf = %+v, %v; want delta context reset", entry, ok)
+	if entry, ok := tree.Entry(resetID); !ok || entry.Type != EntryContextReset || entry.ContextDelta != nil || !transcriptsEqual(entry.Messages, rewritten) {
+		t.Fatalf("retention rewrite leaf = %+v, %v; want snapshot context reset", entry, ok)
 	}
 
 	checkpoint := llm.Message{
@@ -247,9 +246,7 @@ func TestContextDeltaCompactionOwnershipBoundaries(t *testing.T) {
 				t.Fatalf("LinearTree: %v", err)
 			}
 			rewritten := tc.rewrite()
-			if err := tree.SyncTranscript(rewritten); err != nil {
-				t.Fatalf("SyncTranscript rewrite: %v", err)
-			}
+			appendLegacyContextDeltaForTest(t, tree, rewritten)
 			resetID := tree.ActiveLeaf
 			reset, ok := tree.Entry(resetID)
 			if !ok || reset.ContextDelta == nil {
@@ -517,22 +514,20 @@ func TestTreeContextDeltaMixedReplayAndStorage(t *testing.T) {
 		Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: sessionOnePixelPNG,
 	})
 	tree := NewTree(at, "", "", "")
-	if err := tree.AppendContextReset(base, "legacy_fixture"); err != nil {
-		t.Fatalf("AppendContextReset legacy snapshot: %v", err)
+	if err := tree.AppendContextReset(base, "snapshot_fixture"); err != nil {
+		t.Fatalf("AppendContextReset snapshot: %v", err)
 	}
-	legacyLeaf := tree.ActiveLeaf
-	legacy, _ := tree.Entry(legacyLeaf)
-	if legacy.ContextDelta != nil || len(legacy.Messages) != len(base) {
-		t.Fatalf("initial reset encoding = %+v, want legacy snapshot", legacy)
+	snapshotLeaf := tree.ActiveLeaf
+	snapshot, _ := tree.Entry(snapshotLeaf)
+	if snapshot.ContextDelta != nil || len(snapshot.Messages) != len(base) {
+		t.Fatalf("initial reset encoding = %+v, want snapshot", snapshot)
 	}
 
 	result := cloneMessagesForTree(base)
 	for _, index := range []int{3, 11, 23} {
 		result[index].Content[0].Text = fmt.Sprintf("rewritten assistant %d", index)
 	}
-	if err := tree.SyncTranscript(result); err != nil {
-		t.Fatalf("SyncTranscript delta: %v", err)
-	}
+	appendLegacyContextDeltaForTest(t, tree, result)
 	deltaLeaf := tree.ActiveLeaf
 	delta, _ := tree.Entry(deltaLeaf)
 	if delta.ContextDelta == nil || len(delta.Messages) != 0 || len(delta.ContextDelta.Splices) != 3 {
@@ -569,7 +564,7 @@ func TestTreeContextDeltaMixedReplayAndStorage(t *testing.T) {
 		name string
 		leaf string
 		want []llm.Message
-	}{{"legacy", legacyLeaf, base}, {"delta", deltaLeaf, result}} {
+	}{{"snapshot", snapshotLeaf, base}, {"legacy delta", deltaLeaf, result}} {
 		t.Run(tc.name, func(t *testing.T) {
 			loaded, err := LoadTree(dir, tc.leaf)
 			if err != nil {
@@ -614,7 +609,7 @@ func TestContextDeltaSpliceShapes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			delta, err := buildContextDelta(tc.base, tc.result)
+			delta, err := buildContextDeltaForTest(tc.base, tc.result)
 			if err != nil {
 				t.Fatalf("buildContextDelta: %v", err)
 			}
@@ -705,7 +700,7 @@ func TestApplyContextDeltaReusesEqualLengthReplayBuffer(t *testing.T) {
 	base := largeTreeTranscript(at, 4)
 	result := cloneMessagesForTree(base)
 	result[3].Content[0].Text = "small rewrite"
-	delta, err := buildContextDelta(base, result)
+	delta, err := buildContextDeltaForTest(base, result)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -732,9 +727,7 @@ func TestTreeContextDeltaRejectsCorruption(t *testing.T) {
 	result := cloneMessagesForTree(base)
 	result[3].Content[0].Text = "rewrite one"
 	result[11].Content[0].Text = "rewrite two"
-	if err := tree.SyncTranscript(result); err != nil {
-		t.Fatal(err)
-	}
+	appendLegacyContextDeltaForTest(t, tree, result)
 	cases := []struct {
 		name   string
 		mutate func(*ContextDelta)
@@ -766,7 +759,7 @@ func TestTreeContextDeltaRejectsCorruption(t *testing.T) {
 	}
 	invalid := cloneMessagesForTree(base)
 	invalid[0].Role = "invalid"
-	invalidDelta, err := buildContextDelta(base, invalid)
+	invalidDelta, err := buildContextDeltaForTest(base, invalid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -775,62 +768,29 @@ func TestTreeContextDeltaRejectsCorruption(t *testing.T) {
 	}
 }
 
-func TestTreeContextDeltaRepeatedGrowthAndSnapshotFallback(t *testing.T) {
+func TestTreeContextRewritesUseSnapshots(t *testing.T) {
 	at := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	current := largeTreeTranscript(at, 24)
+	current := largeTreeTranscript(at, 4)
 	tree := NewTree(at, "", "", "")
 	if err := tree.AppendContextReset(current, "initial"); err != nil {
 		t.Fatal(err)
 	}
-	const rewrites = 20
+	const rewrites = 3
 	for i := 0; i < rewrites; i++ {
 		next := cloneMessagesForTree(current)
 		next[1+i*2].Content[0].Text = fmt.Sprintf("small rewrite %d", i)
 		if err := tree.SyncTranscript(next); err != nil {
 			t.Fatalf("rewrite %d: %v", i, err)
 		}
-		entry, _ := tree.Entry(tree.ActiveLeaf)
-		if entry.ContextDelta == nil {
-			t.Fatalf("rewrite %d used snapshot: %+v", i, entry)
+		entry, ok := tree.Entry(tree.ActiveLeaf)
+		if !ok || entry.ContextDelta != nil || !transcriptsEqual(entry.Messages, next) {
+			t.Fatalf("rewrite %d entry = %+v, %v; want full snapshot", i, entry, ok)
 		}
 		current = next
 	}
 	stats := collectTreeStats(tree)
-	if stats.snapshotResetEntries != 1 || stats.deltaResetEntries != rewrites || stats.deltaResetBytes >= stats.snapshotResetBytes {
-		t.Fatalf("repeated reset storage = %+v, want deltas smaller than one snapshot", stats)
-	}
-
-	legacy := cloneTreeForDeltaTest(tree)
-	for i, entry := range legacy.Entries {
-		if entry.ContextDelta == nil {
-			continue
-		}
-		messages, _, err := tree.buildContext(entry.ID)
-		if err != nil {
-			t.Fatalf("materialize legacy snapshot %s: %v", entry.ID, err)
-		}
-		legacy.Entries[i].Messages = messages
-		legacy.Entries[i].ContextDelta = nil
-	}
-	newDir, legacyDir := t.TempDir(), t.TempDir()
-	if err := tree.Save(newDir); err != nil {
-		t.Fatalf("Save delta tree: %v", err)
-	}
-	if err := legacy.Save(legacyDir); err != nil {
-		t.Fatalf("Save legacy tree: %v", err)
-	}
-	newInfo, err := os.Stat(filepath.Join(newDir, treeFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyInfo, err := os.Stat(filepath.Join(legacyDir, treeFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	reduction := 100 * (1 - float64(newInfo.Size())/float64(legacyInfo.Size()))
-	t.Logf("reset-heavy tree reduction: legacy=%d delta=%d reduction=%.2f%%", legacyInfo.Size(), newInfo.Size(), reduction)
-	if reduction < 70 {
-		t.Fatalf("reset-heavy tree reduction = %.2f%%, want at least 70%%", reduction)
+	if stats.snapshotResetEntries != rewrites+1 || stats.deltaResetEntries != 0 {
+		t.Fatalf("repeated reset storage = %+v, want snapshots only", stats)
 	}
 
 	entryCount := len(tree.Entries)
@@ -843,24 +803,75 @@ func TestTreeContextDeltaRepeatedGrowthAndSnapshotFallback(t *testing.T) {
 	if len(tree.Entries) != entryCount {
 		t.Fatalf("unchanged reset paths appended %d entries", len(tree.Entries)-entryCount)
 	}
+}
 
-	small, err := LinearTree(at, "", []llm.Message{treePrompt(at, "a")})
+func appendLegacyContextDeltaForTest(t *testing.T, tree *Tree, messages []llm.Message) {
+	t.Helper()
+	delta, err := buildContextDeltaForTest(tree.activeMsgs, messages)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := small.AppendContextReset([]llm.Message{treePrompt(at, "b")}, "complete_replacement"); err != nil {
+	entry := Entry{
+		Type: EntryContextReset, ParentID: tree.ActiveLeaf,
+		ContextDelta: delta, Reason: "legacy_delta",
+	}
+	if len(messages) > 0 {
+		entry.Time = messages[0].Time
+	}
+	if err := tree.appendEntry(entry); err != nil {
 		t.Fatal(err)
 	}
-	entry, _ := small.Entry(small.ActiveLeaf)
-	if entry.ContextDelta != nil || len(entry.Messages) != 1 {
-		t.Fatalf("non-compact delta did not fall back to snapshot: %+v", entry)
+	entry.ID = tree.ActiveLeaf
+	updated, refs, err := applyContextDelta(tree.activeMsgs, tree.activeRefs, entry)
+	if err != nil {
+		t.Fatal(err)
 	}
-	snapshotPayload, _ := json.Marshal(entry.Messages)
-	delta, _ := buildContextDelta([]llm.Message{treePrompt(at, "a")}, entry.Messages)
-	deltaPayload, _ := json.Marshal(delta)
-	if len(snapshotPayload) >= len(deltaPayload) {
-		t.Fatalf("test precondition failed: snapshot=%d delta=%d", len(snapshotPayload), len(deltaPayload))
+	tree.activeMsgs, tree.activeRefs = updated, refs
+}
+
+func buildContextDeltaForTest(base, result []llm.Message) (*ContextDelta, error) {
+	baseDigest, err := llm.FingerprintMessages(base)
+	if err != nil {
+		return nil, err
 	}
+	resultDigest, err := llm.FingerprintMessages(result)
+	if err != nil {
+		return nil, err
+	}
+	delta := &ContextDelta{
+		BaseMessageCount: len(base), ResultMessageCount: len(result),
+		BaseDigest: baseDigest, ResultDigest: resultDigest,
+	}
+	if len(base) == len(result) {
+		for i := 0; i < len(base); {
+			if transcriptsEqual(base[i:i+1], result[i:i+1]) {
+				i++
+				continue
+			}
+			start := i
+			for i < len(base) && !transcriptsEqual(base[i:i+1], result[i:i+1]) {
+				i++
+			}
+			delta.Splices = append(delta.Splices, ContextSplice{
+				Start: start, Delete: i - start, Messages: cloneMessagesForTree(result[start:i]),
+			})
+		}
+		return delta, nil
+	}
+	prefix := 0
+	for prefix < len(base) && prefix < len(result) && transcriptsEqual(base[prefix:prefix+1], result[prefix:prefix+1]) {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(base)-prefix && suffix < len(result)-prefix &&
+		transcriptsEqual(base[len(base)-1-suffix:len(base)-suffix], result[len(result)-1-suffix:len(result)-suffix]) {
+		suffix++
+	}
+	delta.Splices = []ContextSplice{{
+		Start: prefix, Delete: len(base) - prefix - suffix,
+		Messages: cloneMessagesForTree(result[prefix : len(result)-suffix]),
+	}}
+	return delta, nil
 }
 
 func largeTreeTranscript(at time.Time, pairs int) []llm.Message {

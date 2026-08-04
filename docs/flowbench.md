@@ -252,9 +252,7 @@ retention experiment. It compares `age`, `disabled`, and `pressure` policies
 under both stateful and stateless request shapes. Every run must read more than
 ten deterministic files in order, exactly one `read_file` call per model turn,
 then reproduce every marker. This provides an objective correctness oracle
-while creating old tool results large enough to exercise retention. The
-provider-free context-reset storage, replay, and load benchmark is documented in
-[`deltabench.md`](deltabench.md).
+while creating old tool results large enough to exercise retention.
 
 Build the candidate Harness, inspect the six-run smoke matrix, then run it:
 
@@ -324,8 +322,9 @@ The command runs the same recursive, transcript-free analyzer as `harness
 session analyze`, omits per-stream rows from the comparison output, and reports
 candidate-minus-baseline deltas plus analyzer-v2 usage, storage, distribution,
 and cohort summaries. Text and JSON include uncached input and cache-read tokens,
-root/child usage, median/p90 known-complete cost, context-reset counts and
-snapshot/delta bytes, disk bytes, and auditable build/runtime cohort identity. Each metric retains an availability bit; missing legacy
+root/child usage, median/p90 known-complete cost, context-reset counts,
+snapshot/legacy-delta bytes, disk bytes, and auditable build/runtime cohort
+identity. Each metric retains an availability bit; missing legacy
 telemetry, a zero denominator, an unobserved milestone, an incomplete execution
 corpus, an incomplete storage component, or any cutoff report is not converted
 into a success or failure. In particular, storage/reset metrics are unavailable

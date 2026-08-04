@@ -42,8 +42,8 @@ type TreeHeader struct {
 	ParentEntryID string    `json:"parent_entry_id,omitempty"`
 }
 
-// ContextDelta replaces selected runs in a context-reset entry's parent
-// materialization. Splice indices always refer to the unmodified parent context.
+// ContextDelta is the legacy splice representation of a context reset.
+// Splice indices always refer to the unmodified parent context.
 type ContextDelta struct {
 	BaseMessageCount   int             `json:"base_message_count"`
 	ResultMessageCount int             `json:"result_message_count"`
@@ -385,55 +385,6 @@ func transcriptsEqual(a, b []llm.Message) bool {
 	return len(a) == 0 || reflect.DeepEqual(a, b)
 }
 
-func buildContextDelta(base, result []llm.Message) (*ContextDelta, error) {
-	baseDigest, err := llm.FingerprintMessages(base)
-	if err != nil {
-		return nil, fmt.Errorf("session: fingerprint context reset base: %w", err)
-	}
-	resultDigest, err := llm.FingerprintMessages(result)
-	if err != nil {
-		return nil, fmt.Errorf("session: fingerprint context reset result: %w", err)
-	}
-	delta := &ContextDelta{
-		BaseMessageCount:   len(base),
-		ResultMessageCount: len(result),
-		BaseDigest:         baseDigest,
-		ResultDigest:       resultDigest,
-	}
-	if len(base) == len(result) {
-		for i := 0; i < len(base); {
-			if reflect.DeepEqual(base[i], result[i]) {
-				i++
-				continue
-			}
-			start := i
-			for i < len(base) && !reflect.DeepEqual(base[i], result[i]) {
-				i++
-			}
-			delta.Splices = append(delta.Splices, ContextSplice{
-				Start: start, Delete: i - start, Messages: cloneMessagesForTree(result[start:i]),
-			})
-		}
-		return delta, nil
-	}
-
-	prefix := 0
-	for prefix < len(base) && prefix < len(result) && reflect.DeepEqual(base[prefix], result[prefix]) {
-		prefix++
-	}
-	suffix := 0
-	for suffix < len(base)-prefix && suffix < len(result)-prefix &&
-		reflect.DeepEqual(base[len(base)-1-suffix], result[len(result)-1-suffix]) {
-		suffix++
-	}
-	delta.Splices = []ContextSplice{{
-		Start:    prefix,
-		Delete:   len(base) - prefix - suffix,
-		Messages: cloneMessagesForTree(result[prefix : len(result)-suffix]),
-	}}
-	return delta, nil
-}
-
 func validateContextDelta(delta ContextDelta) error {
 	if delta.BaseMessageCount < 0 || delta.ResultMessageCount < 0 {
 		return errors.New("negative message count")
@@ -688,28 +639,22 @@ func (t *Tree) AppendContextReset(messages []llm.Message, reason string) error {
 }
 
 func (t *Tree) appendContextReset(messages []llm.Message, reason string) error {
-	parentMsgs, parentRefs, trustedParent := t.materializedActiveContext()
+	parentMsgs, _, trustedParent := t.materializedActiveContext()
 	if trustedParent && transcriptsEqual(parentMsgs, messages) {
 		return nil
 	}
-	entry, err := t.newContextResetEntry(parentMsgs, messages, reason, trustedParent)
-	if err != nil {
-		return err
+	entry := Entry{
+		Type: EntryContextReset, ParentID: t.ActiveLeaf,
+		Messages: cloneMessagesForTree(messages), Reason: reason,
+	}
+	if len(messages) > 0 {
+		entry.Time = messages[0].Time
 	}
 	if err := t.appendEntry(entry); err != nil {
 		return err
 	}
-	entry.ID = t.ActiveLeaf
-	if entry.ContextDelta != nil {
-		msgs, refs, err := applyContextDelta(parentMsgs, parentRefs, entry)
-		if err != nil {
-			return err
-		}
-		t.activeMsgs, t.activeRefs = msgs, refs
-		return nil
-	}
 	t.activeMsgs = cloneMessagesForTree(messages)
-	t.activeRefs = resetMessageRefs(entry.ID, len(messages))
+	t.activeRefs = resetMessageRefs(t.ActiveLeaf, len(messages))
 	return nil
 }
 
@@ -719,29 +664,6 @@ func (t *Tree) materializedActiveContext() ([]llm.Message, []messageRef, bool) {
 		return nil, nil, false
 	}
 	return msgs, refs, true
-}
-
-func (t *Tree) newContextResetEntry(base, messages []llm.Message, reason string, trustedParent bool) (Entry, error) {
-	entry := Entry{Type: EntryContextReset, ParentID: t.ActiveLeaf, Messages: cloneMessagesForTree(messages), Reason: reason}
-	if len(messages) > 0 {
-		entry.Time = messages[0].Time
-	}
-	if !trustedParent {
-		return entry, nil
-	}
-	delta, err := buildContextDelta(base, messages)
-	if err != nil {
-		return Entry{}, err
-	}
-	deltaEntry := entry
-	deltaEntry.Messages = nil
-	deltaEntry.ContextDelta = delta
-	snapshotJSON, snapshotErr := json.Marshal(entry)
-	deltaJSON, deltaErr := json.Marshal(deltaEntry)
-	if snapshotErr == nil && deltaErr == nil && len(deltaJSON) < len(snapshotJSON) {
-		return deltaEntry, nil
-	}
-	return entry, nil
 }
 
 // AppendBranch moves to targetParent and creates a persistent branch marker.
@@ -824,9 +746,9 @@ func (t *Tree) buildContext(leaf string) ([]llm.Message, []messageRef, error) {
 	var msgs []llm.Message
 	var refs []messageRef
 	start := 0
-	// A legacy reset and a compaction with an explicitly materialized kept
+	// A snapshot reset and a compaction with an explicitly materialized kept
 	// suffix are self-contained anchors. Starting at the newest such entry avoids
-	// replaying the full path while still applying every later delta exactly once.
+	// replaying the full path while still applying every later legacy delta once.
 	for i := len(path) - 1; i >= 0; i-- {
 		entry := path[i]
 		switch {
