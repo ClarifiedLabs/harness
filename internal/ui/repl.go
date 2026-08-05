@@ -175,6 +175,10 @@ type App struct {
 
 	workPromptStatusBeforeUsage       bool
 	workPromptStatusBeforeUsagePrompt int
+	workPromptRelation                string
+	workContextMu                     sync.Mutex
+	workContextPending                bool
+	workContextReason                 string
 
 	// Work is the canonical objective, plan, execution, evidence, and
 	// verification state. Human plan and progress displays are projections of it.
@@ -336,7 +340,7 @@ const helpText = `commands:
   /mode [name]     alias for /agent
   /plan            alias for /agent plan
   /auto            alias for /agent auto
-  /work [summary|show|new|abandon]
+  /work [summary|steps|show|new|abandon]
                     inspect or control the canonical work state
   /handoff [-a agent] [-m model] [message]
                     hand off the recorded plan with optional implementation guidance
@@ -2707,6 +2711,13 @@ func (app *App) workCommand(arg string) {
 	switch command {
 	case "summary":
 		fmt.Fprintln(app.Errw, workstate.RenderStatus(app.Work.Snapshot()))
+	case "steps":
+		state := app.Work.Snapshot()
+		if state == nil {
+			fmt.Fprintln(app.Errw, "[no active work]")
+			return
+		}
+		fmt.Fprint(app.Errw, workstate.RenderChecklist(*state))
 	case "show":
 		state := app.Work.Snapshot()
 		if state == nil {
@@ -2724,6 +2735,7 @@ func (app *App) workCommand(arg string) {
 			fmt.Fprintf(app.Errw, "[work new failed: %v]\n", err)
 			return
 		}
+		app.ArmWorkContext("explicit new work")
 		fmt.Fprintln(app.Errw, workstate.RenderStatus(state))
 		app.saveOrWarn(app.SessionPath)
 	case "abandon":
@@ -2739,7 +2751,7 @@ func (app *App) workCommand(arg string) {
 		fmt.Fprintln(app.Errw, workstate.RenderStatus(state))
 		app.saveOrWarn(app.SessionPath)
 	default:
-		fmt.Fprintln(app.Errw, "usage: /work [summary|show|new <objective>|abandon [reason]]")
+		fmt.Fprintln(app.Errw, "usage: /work [summary|steps|show|new <objective>|abandon [reason]]")
 	}
 }
 
@@ -2953,7 +2965,7 @@ func writeContextFile(path string, data []byte) error {
 
 func (app *App) contextRequest() llm.Request {
 	out := app.promptHookContext(nil)
-	if ctx := app.workRequestContext(); ctx != "" {
+	if ctx := app.peekWorkRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
 	if ctx := app.goalRequestContext(); ctx != "" {
@@ -3105,6 +3117,7 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	fmt.Fprintf(app.Errw, "[model switched: model=%s proxy-url=%s reasoning=%s]\n", modelDisplayName(app.Provider, app.Model), app.BaseURL, app.reasoningLabel())
 	if oldProvider != app.Provider || oldModel != app.Model {
 		app.onModelChanged()
+		app.ArmWorkContext("model switched")
 	}
 	if baseChanged {
 		app.schedulePrewarm() // the new underlying model/provider invalidated the warm cache prefix (r43)
@@ -3716,6 +3729,7 @@ func (app *App) applyAgentSwitchWithPrewarm(name string, prewarm bool) error {
 		app.onModelChanged()
 		fmt.Fprintln(app.Errw, "[warning: model target changed; the new model may start without prompt cache, increasing token usage or cost]")
 	}
+	app.ArmWorkContext("agent switched")
 	// The agent's tools/system (and possibly model/provider) changed, so re-warm
 	// the cache prefix in the background (r43) — debounced so rapid cycling
 	// warms only the settled selection — unless the idle Shift-Tab path is
@@ -3915,7 +3929,11 @@ func (app *App) handoffToImplementation(req handoff.Request) bool {
 		fmt.Fprintf(app.Errw, "[handoff failed: %v]\n", err)
 		return false
 	}
-	seed := "=== Implementation handoff ===\nContinue the approved work from this active capsule; do not reread or recreate the plan.\n\n" + workstate.RequestContext(work)
+	capsule := workstate.RequestContext(work)
+	if work.ArtifactPath != "" {
+		capsule += "\nPlan artifact: " + work.ArtifactPath
+	}
+	seed := "=== Implementation handoff ===\nContinue the approved work from this active capsule; do not reread or recreate the plan.\n\n" + capsule
 	if req.Brief != "" {
 		seed += "\n\nSupplementary planning context:\n" + req.Brief
 	}
@@ -3937,6 +3955,7 @@ func (app *App) handoffToImplementation(req handoff.Request) bool {
 	}
 	app.Agent.SetTranscript(seedMessages)
 	app.Agent.SetResponseState(nil)
+	app.disarmWorkContext()
 	app.saveOrWarn(app.SessionPath)
 	fmt.Fprintf(app.Errw, "[handed off to %s; implementing active work step %s from a clean context]\n", req.Agent, work.ActiveStepID)
 	return true
@@ -4141,9 +4160,13 @@ func (app *App) ensureWork(objective string) error {
 	}
 	current := app.Work.Snapshot()
 	if current != nil && current.Lifecycle != workstate.LifecycleCompleted && current.Lifecycle != workstate.LifecycleAbandoned {
+		app.workPromptRelation = "leave"
 		return nil
 	}
 	_, err := app.Work.NewWork(objective, "user")
+	if err == nil {
+		app.workPromptRelation = "new"
+	}
 	return err
 }
 
@@ -4714,18 +4737,60 @@ func (app *App) promptHookContext(promptContext []string) []string {
 
 func (app *App) requestContext(promptContext []string) []string {
 	out := app.promptHookContext(promptContext)
-	if ctx := app.workRequestContext(); ctx != "" {
+	if ctx := app.takeWorkRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
 	out = append(out, app.backgroundRequestContext(nil)...)
 	return out
 }
 
-func (app *App) workRequestContext() string {
+// ArmWorkContext schedules one active-step capsule for the next real model
+// request. Repeated reasons coalesce; Peek paths never consume it.
+func (app *App) ArmWorkContext(reason string) {
+	if app == nil || app.Work == nil {
+		return
+	}
+	app.workContextMu.Lock()
+	defer app.workContextMu.Unlock()
+	app.workContextPending = true
+	if strings.TrimSpace(reason) != "" {
+		app.workContextReason = strings.TrimSpace(reason)
+	}
+}
+
+func (app *App) disarmWorkContext() {
+	if app == nil {
+		return
+	}
+	app.workContextMu.Lock()
+	defer app.workContextMu.Unlock()
+	app.workContextPending = false
+	app.workContextReason = ""
+}
+
+func (app *App) takeWorkRequestContext() string {
+	return app.workRequestContext(true)
+}
+
+func (app *App) peekWorkRequestContext() string {
+	return app.workRequestContext(false)
+}
+
+func (app *App) workRequestContext(consume bool) string {
 	if app.Work == nil || !app.agentHasTool("update_work") {
 		return ""
 	}
-	return workstate.RequestContext(app.Work.Snapshot())
+	app.workContextMu.Lock()
+	defer app.workContextMu.Unlock()
+	if !app.workContextPending {
+		return ""
+	}
+	ctx := workstate.RequestContext(app.Work.Snapshot())
+	if ctx != "" && consume {
+		app.workContextPending = false
+		app.workContextReason = ""
+	}
+	return ctx
 }
 
 func (app *App) backgroundRequestContext(archiver agent.ToolResultArchiver) []string {
@@ -5190,6 +5255,10 @@ type accumulatingSink struct {
 	pendingCalls                map[string]llm.ToolCall
 	pendingWorkResults          map[string][]workstate.Result
 	pendingWorkTargets          map[string]workObservationTarget
+	pendingWorkEpoch            bool
+	pendingWorkEpochReason      string
+	pendingWorkEpochFrom        string
+	pendingWorkEpochTo          string
 	turn                        int
 	attempt                     int
 	inMaintenance               bool
@@ -5308,7 +5377,11 @@ func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.Context
 	s.turn = turn
 	s.attempt = attempt
 	s.r.TurnAttemptStart(turn, attempt, ctx)
-	s.rec.TurnAttemptStart(turn, attempt, ctx)
+	if work := s.app.workSnapshot(); work != nil {
+		s.rec.TurnAttemptStartForWork(turn, attempt, ctx, work.WorkID, work.RevisionID, work.ActiveStepID)
+	} else {
+		s.rec.TurnAttemptStart(turn, attempt, ctx)
+	}
 }
 
 func (s *accumulatingSink) TurnAttemptAbandoned(turn, attempt int) {
@@ -5397,14 +5470,81 @@ func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	name := s.pendingNames[res.ForID]
 	call := s.pendingCalls[res.ForID]
+	target := s.pendingWorkTargets[res.ForID]
 	delete(s.pendingNames, res.ForID)
 	delete(s.pendingCalls, res.ForID)
 	s.r.ToolResult(res)
 	s.rec.ToolResult(res)
 	if name == "update_work" && !res.IsError {
+		var args struct {
+			Mode string `json:"mode"`
+		}
+		_ = json.Unmarshal(call.Input, &args)
+		switch args.Mode {
+		case "plan":
+			s.app.workPromptRelation = "extend"
+		case "progress":
+			s.app.workPromptRelation = "steer"
+		}
 		s.app.printWorkStatus(true)
 	}
 	s.attachObservedWorkResults(call, res)
+	if name == "update_work" && !res.IsError && target.stepID != "" && s.app != nil && s.app.Work != nil {
+		if current := s.app.Work.Snapshot(); current != nil && current.ActiveStepID != "" &&
+			workstate.CrossesPhase(*current, target.stepID, current.ActiveStepID) {
+			s.scheduleWorkContextEpoch("phase transition", target.stepID, current.ActiveStepID)
+		}
+	}
+}
+
+func (s *accumulatingSink) scheduleWorkContextEpoch(reason, fromStepID, toStepID string) {
+	if s == nil || s.pendingWorkEpoch {
+		return
+	}
+	s.pendingWorkEpoch = true
+	s.pendingWorkEpochReason = reason
+	s.pendingWorkEpochFrom = fromStepID
+	s.pendingWorkEpochTo = toStepID
+}
+
+func (s *accumulatingSink) TakeContextEpoch(before []llm.Message) ([]llm.Message, bool, error) {
+	if s == nil || !s.pendingWorkEpoch || s.app == nil || s.app.Work == nil {
+		return nil, false, nil
+	}
+	state := s.app.Work.Snapshot()
+	if state == nil || state.ActiveStepID == "" || state.Lifecycle != workstate.LifecycleActive {
+		s.pendingWorkEpoch = false
+		return nil, false, nil
+	}
+	seed := "=== Work context checkpoint ===\nContinue from this active WorkState capsule. Use its retained evidence instead of reorienting broadly.\n\n" + workstate.RequestContext(state)
+	next := []llm.Message{{
+		Role: llm.RoleUser, Time: s.app.clock()(), Origin: llm.MessageOriginInternal,
+		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: seed}},
+	}}
+	if err := llm.ValidateTranscript(next); err != nil {
+		return nil, false, err
+	}
+	if s.app.SessionPath != "" {
+		if _, err := session.SaveCompaction(s.app.SessionPath, session.Compaction{
+			Time: s.app.clock()(), Summary: workstate.RenderStatus(state), Messages: before,
+		}); err != nil {
+			return nil, false, err
+		}
+	}
+	if err := s.app.ensureSessionTree(); err != nil {
+		return nil, false, err
+	}
+	if err := s.app.SessionTree.AppendContextReset(next, "work_"+strings.ReplaceAll(s.pendingWorkEpochReason, " ", "_")); err != nil {
+		return nil, false, err
+	}
+	s.recordEvent(session.Event{
+		Type: session.EventWorkContextReset, Prompt: s.prompt, Turn: s.turn,
+		WorkID: state.WorkID, WorkRevisionID: state.RevisionID, WorkStepID: state.ActiveStepID,
+		Purpose: s.pendingWorkEpochReason, FromEntryID: s.pendingWorkEpochFrom, ToEntryID: s.pendingWorkEpochTo,
+	})
+	s.pendingWorkEpoch = false
+	s.app.disarmWorkContext()
+	return next, true, nil
 }
 
 func (s *accumulatingSink) ToolDiff(call llm.ToolCall, path, text string) {
@@ -5431,6 +5571,23 @@ func (s *accumulatingSink) attachObservedWorkResults(call llm.ToolCall, res llm.
 	results := append([]workstate.Result(nil), s.pendingWorkResults[res.ForID]...)
 	delete(s.pendingWorkResults, res.ForID)
 	activity := s.app.Agent.ToolActivity(call)
+	if activity.Class == tools.ActivityInspect && !res.IsError && state.PlanState != workstate.PlanImplicit {
+		ref, err := session.SaveWorkEvidenceArtifact(s.app.SessionPath, s.prompt, s.turn, res)
+		if err != nil {
+			fmt.Fprintf(s.app.Errw, "[work evidence archive failed: %v]\n", err)
+		} else if ref != "" {
+			path := filepath.Join(s.app.SessionPath, ref)
+			updated, err := s.app.Work.AddEvidence(target.stepID, []workstate.EvidenceInput{{
+				Kind: workstate.EvidenceArtifact, Path: path, Summary: boundedWorkDetail(workCallSummary(call) + " inspection result"), ToolCallID: call.ID,
+			}}, "host")
+			if err != nil {
+				fmt.Fprintf(s.app.Errw, "[work evidence observation failed: %v]\n", err)
+			} else if updated != nil {
+				state = updated
+				s.app.ArmWorkContext("new evidence")
+			}
+		}
+	}
 	if activity.Class == tools.ActivityVerify {
 		status := workstate.VerifyPassed
 		detail := ""
@@ -5464,6 +5621,8 @@ func (s *accumulatingSink) attachObservedWorkResults(call llm.ToolCall, res llm.
 	}
 	if _, err := s.app.Work.AddResults(target.stepID, results, "host"); err != nil {
 		fmt.Fprintf(s.app.Errw, "[work observation failed: %v]\n", err)
+	} else {
+		s.app.ArmWorkContext("new work result")
 	}
 }
 
@@ -5629,8 +5788,12 @@ func (s *accumulatingSink) TurnProgress(progress agent.TurnProgress) {
 	} else {
 		s.rec.TurnProgressForWork(progress, work.WorkID, work.RevisionID, work.ActiveStepID)
 	}
-	if _, err := s.app.Work.RecordInspectionTurn(progress.InspectionOnly && progress.NoExplicitProgress, progress.ExplicitProgress); err != nil {
+	wasRequired := work != nil && work.Gate.DecisionRequired
+	updated, err := s.app.Work.RecordInspectionTurn(progress.InspectionOnly && progress.NoExplicitProgress, progress.ExplicitProgress)
+	if err != nil {
 		fmt.Fprintf(s.app.Errw, "[work progress tracking failed: %v]\n", err)
+	} else if !wasRequired && updated != nil && updated.Gate.DecisionRequired && updated.ActiveStepID != "" {
+		s.scheduleWorkContextEpoch("overlong step", updated.ActiveStepID, updated.ActiveStepID)
 	}
 }
 
@@ -5669,11 +5832,12 @@ func (s *accumulatingSink) AddHookContext(ctx []string) {
 }
 
 func (s *accumulatingSink) TranscriptRewritten() {
+	s.app.ArmWorkContext("transcript rewritten")
 }
 
 func (s *accumulatingSink) RequestContext() []string {
 	var out []string
-	if ctx := s.app.workRequestContext(); ctx != "" {
+	if ctx := s.app.takeWorkRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
 	if ctx := s.app.goalRequestContext(); ctx != "" {
@@ -5688,7 +5852,7 @@ func (s *accumulatingSink) RequestContext() []string {
 // still needs to reach the model on a later real request.
 func (s *accumulatingSink) PeekRequestContext() []string {
 	var out []string
-	if ctx := s.app.workRequestContext(); ctx != "" {
+	if ctx := s.app.peekWorkRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
 	if ctx := s.app.goalRequestContext(); ctx != "" {
@@ -5772,4 +5936,11 @@ func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
 	// The recorder's prompt-usage line hook reads the renderer's cumulative
 	// totals, refreshed by addUsage above, so the recorded line matches live.
 	s.rec.PromptComplete(u)
+	if work := s.app.workSnapshot(); work != nil && s.app.workPromptRelation != "" {
+		s.recordEvent(session.Event{
+			Type: session.EventWorkPromptRelation, Prompt: s.prompt, WorkID: work.WorkID,
+			WorkRevisionID: work.RevisionID, WorkStepID: work.ActiveStepID, Purpose: s.app.workPromptRelation,
+		})
+		s.app.workPromptRelation = ""
+	}
 }

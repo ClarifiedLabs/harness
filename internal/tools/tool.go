@@ -307,8 +307,8 @@ func registerSearchTool(r *Registry, opts Options) {
 	rg, _ := newRipgrep(opts.Background)
 	r.Register(searchTool{program: rg.program})
 	r.SetToolResultLimits("search",
-		defaultToolResultBytes(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
-		defaultToolResultLines(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
+		defaultToolResultBytes(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultTypedSearchBytes),
+		defaultToolResultLines(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultTypedSearchLines))
 }
 
 func registerRawSearchTools(r *Registry, opts Options) {
@@ -382,7 +382,6 @@ func DefaultWithOptions(opts Options) (*Registry, []DisabledTool) {
 	var disabled []DisabledTool
 	registerFileTools(r, &disabled, opts)
 	registerExecTools(r, &disabled, opts)
-	registerInspectTool(r)
 	return r, disabled
 }
 
@@ -417,6 +416,10 @@ func CatalogWithOptions(opts Options) (*Registry, []DisabledTool) {
 	// Raw search commands remain constructible for custom agents that explicitly
 	// whitelist them, but the default model surface exposes only typed search.
 	registerRawSearchTools(r, opts)
+	// inspect remains constructible for explicit custom agents while the built-in
+	// surfaces rely on schema-visible top-level read-only calls, which the agent
+	// dispatcher already runs concurrently.
+	registerInspectTool(r)
 	// apply_patch overlaps edit+write_file, so it is kept out of the default
 	// request and registered only here, where agents may still whitelist it by
 	// name. This auto-drops it from auto/independent allowed lists derived from

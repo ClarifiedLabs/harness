@@ -468,8 +468,8 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 	if len(request.Messages) != 1 || !strings.Contains(request.Messages[0].Content[0].Text, "[delegate continuation from source]") {
 		t.Fatalf("continuation delta messages = %+v", request.Messages)
 	}
-	if len(request.RequestContext) != 1 || !strings.Contains(request.RequestContext[0], "start the work") {
-		t.Fatalf("continuation work context = %+v", request.RequestContext)
+	if len(request.RequestContext) != 0 {
+		t.Fatalf("continuation should reuse its transcript without a repeated work capsule: %+v", request.RequestContext)
 	}
 
 	sourceDir := session.ChildSessionDir(fixture.sessionPath, "source")
@@ -533,6 +533,34 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 	if continuedMeta.TaskPreview != "finish and verify it" {
 		t.Fatalf("continued task preview = %q, want raw task", continuedMeta.TaskPreview)
 	}
+}
+
+func TestDelegateBudgetEnforcesRootAndStepLimits(t *testing.T) {
+	budget := newDelegateBudget(Options{MaxActiveDescendants: 1, MaxTotalDescendants: 2, MaxDelegatesPerStep: 1})
+	release, err := budget.acquire("child-1", "work:step-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := budget.acquire("child-2", "work:step-b", false); err == nil || !strings.Contains(err.Error(), "active descendant") {
+		t.Fatalf("active limit error = %v", err)
+	}
+	release()
+	if _, err := budget.acquire("child-2", "work:step-a", false); err == nil || !strings.Contains(err.Error(), "step limit") {
+		t.Fatalf("step limit error = %v", err)
+	}
+	release, err = budget.acquire("child-2", "work:step-b", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if _, err := budget.acquire("child-3", "work:step-c", false); err == nil || !strings.Contains(err.Error(), "total descendant") {
+		t.Fatalf("total limit error = %v", err)
+	}
+	continued, err := budget.acquire("child-1", "work:step-a", true)
+	if err != nil {
+		t.Fatalf("continuation should reuse total budget: %v", err)
+	}
+	continued()
 }
 
 func TestDelegateContinuationAcceptsAbandonedChildCheckpoint(t *testing.T) {
@@ -1793,6 +1821,29 @@ func TestDelegateChildWorkIsLinkedAndPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWork: %v", err)
 	}
+	root, err = parentWork.SetPlan(workstate.PlanUpdate{
+		BaseRevisionID: root.RevisionID,
+		PlanState:      workstate.PlanDraft,
+		ActiveStepID:   "launch-step",
+		Nodes: []workstate.NodeDefinition{{
+			ID: "launch-step", Type: workstate.NodeStep, Title: "Launch", Kind: workstate.KindChange,
+		}},
+	}, "host")
+	if err != nil {
+		t.Fatalf("SetPlan: %v", err)
+	}
+	snapshotCalls := 0
+	workSnapshot := func() *workstate.State {
+		snapshotCalls++
+		if snapshotCalls == 1 {
+			return parentWork.Snapshot()
+		}
+		drifted := parentWork.Snapshot()
+		drifted.WorkID = "later-work"
+		drifted.RevisionID = "later-revision"
+		drifted.ActiveStepID = "later-step"
+		return drifted
+	}
 	state := NewState(Runtime{
 		Provider:    fp,
 		Model:       "claude-opus-4-8",
@@ -1806,7 +1857,7 @@ func TestDelegateChildWorkIsLinkedAndPrivate(t *testing.T) {
 			Registry: runtime.Registry,
 			Tools:    parentTools,
 		}, nil
-	}, Options{WorkSnapshot: parentWork.Snapshot})
+	}, Options{WorkSnapshot: workSnapshot})
 
 	if _, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"child work"}`)); err != nil {
 		t.Fatalf("RunMetered: %v", err)
@@ -1824,6 +1875,10 @@ func TestDelegateChildWorkIsLinkedAndPrivate(t *testing.T) {
 	}
 	if got := parentWork.Snapshot(); got.WorkID != root.WorkID || got.RevisionID != root.RevisionID {
 		t.Fatalf("parent work was modified: %+v", got)
+	}
+	meta := readDelegateChildMeta(t, filepath.Join(sessionPath, "children", children[0].Name()))
+	if meta.WorkID != root.WorkID || meta.WorkStepID != "launch-step" || snapshotCalls != 1 {
+		t.Fatalf("child launch attribution = work %q step %q snapshots %d", meta.WorkID, meta.WorkStepID, snapshotCalls)
 	}
 }
 

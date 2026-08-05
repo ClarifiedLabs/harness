@@ -721,6 +721,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
 		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		DelegateMaxTurns:          cfg.DelegateMaxTurns,
+		DelegateMaxActive:         cfg.DelegateMaxActive,
+		DelegateMaxDescendants:    cfg.DelegateMaxDescendants,
+		DelegateMaxPerStep:        cfg.DelegateMaxPerStep,
 		Prewarm:                   env.prewarmCache && !env.stdinPiped && prewarmForProvider(catalog, cfg.Provider),
 		SearchBackend:             searchBackend(),
 	}
@@ -774,6 +777,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	delegateOpts := delegate.Options{
 		MaxTurns:                  cfg.DelegateMaxTurns,
 		MaxDepth:                  cfg.DelegateMaxDepth,
+		MaxActiveDescendants:      cfg.DelegateMaxActive,
+		MaxTotalDescendants:       cfg.DelegateMaxDescendants,
+		MaxDelegatesPerStep:       cfg.DelegateMaxPerStep,
 		CompactKeepTurns:          cfg.CompactKeepTurns,
 		CompactKeepTokens:         cfg.CompactKeepTokens,
 		CompactTriggerPercent:     cfg.CompactTriggerPercent,
@@ -806,7 +812,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, workStore, interactiveSession || machineInteractive, agentdef.Names(agents)))
 	toolCatalog.SetDispatchGuard(func(call llm.ToolCall, activity tools.Activity) error {
 		if workStore.DecisionRequired() && activity.Class == tools.ActivityInspect {
-			return fmt.Errorf("work decision required: inspection tool %q is paused; use update_work to record progress, revise the plan, name one bounded evidence question, or report a blocker", call.Name)
+			return fmt.Errorf("work decision required: inspection tool %q is paused; use update_work to record concrete evidence or progress, name one bounded evidence question, or report a blocker", call.Name)
 		}
 		return nil
 	})
@@ -1312,6 +1318,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	}
 	if resumed != nil {
 		app.PromptNumber = resumed.Prompt
+		if resumed.Work != nil {
+			app.ArmWorkContext("session resumed")
+		}
 	}
 	// Wire the MCP tool-list refresh hook for the interactive REPL only: one-shot
 	// runs a single prompt with tools discovered before the request, so it needs no hook.

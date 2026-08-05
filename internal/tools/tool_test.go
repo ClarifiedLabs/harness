@@ -682,9 +682,9 @@ func TestDefaultWithOptionsUsesNoisyToolResultDefaults(t *testing.T) {
 	r, _ := DefaultWithOptions(Options{})
 
 	searchLimits := r.resultLimitsFor("search")
-	if searchLimits.maxBytes != defaultSearchResultBytes || searchLimits.maxLines != defaultSearchResultLines {
+	if searchLimits.maxBytes != defaultTypedSearchBytes || searchLimits.maxLines != defaultTypedSearchLines {
 		t.Fatalf("search limits = %d/%d, want %d/%d",
-			searchLimits.maxBytes, searchLimits.maxLines, defaultSearchResultBytes, defaultSearchResultLines)
+			searchLimits.maxBytes, searchLimits.maxLines, defaultTypedSearchBytes, defaultTypedSearchLines)
 	}
 	readLimits := r.resultLimitsFor("read_file")
 	if readLimits.maxBytes != defaultReadFileResultBytes || readLimits.maxLines != defaultMaxResultLines {
@@ -758,7 +758,7 @@ func expectedDefaultNames() []string {
 	if GitAvailable() {
 		want = append(want, "git")
 	}
-	return append(want, "web_fetch", "inspect")
+	return append(want, "web_fetch")
 }
 
 func TestCatalogRegistersDefaultPlusModeTools(t *testing.T) {
@@ -768,6 +768,7 @@ func TestCatalogRegistersDefaultPlusModeTools(t *testing.T) {
 	if RipgrepAvailable() {
 		want = append(want, "rg")
 	}
+	want = append(want, "inspect")
 	want = append(want, "apply_patch") // relocated out of the default set (r56)
 	if GitAvailable() {
 		want = append(want, "git_readonly")

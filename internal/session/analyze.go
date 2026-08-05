@@ -20,7 +20,7 @@ import (
 )
 
 // AnalysisVersion is the stable schema version emitted by WriteAnalysisJSON.
-const AnalysisVersion = 3
+const AnalysisVersion = 4
 
 const (
 	maxAnalysisTextSessions     = 100
@@ -204,33 +204,63 @@ type ExecutionIdentityAnalysis struct {
 // WorkScopeAnalysis summarizes work.ndjson without exposing objectives,
 // constraints, paths, evidence summaries, or transcript content.
 type WorkScopeAnalysis struct {
-	Available            bool            `json:"available"`
-	Streams              int             `json:"streams"`
-	WorkItems            int             `json:"work_items"`
-	Revisions            int             `json:"revisions"`
-	Structured           int             `json:"structured"`
-	Completed            int             `json:"completed"`
-	Abandoned            int             `json:"abandoned"`
-	Handoffs             int             `json:"handoffs"`
-	Branches             int             `json:"branches"`
-	DecisionGateTrips    int             `json:"decision_gate_trips"`
-	StepTransitions      int             `json:"step_transitions"`
-	EvidenceItems        int             `json:"evidence_items"`
-	EvidenceBatches      int             `json:"evidence_batches"`
-	MutationResults      int             `json:"mutation_results"`
-	DelegateResults      int             `json:"delegate_results"`
-	VerificationPassed   int             `json:"verification_passed"`
-	VerificationFailed   int             `json:"verification_failed"`
-	VerificationNotRun   int             `json:"verification_not_run"`
-	AttributedSteps      int             `json:"attributed_steps"`
-	AttributedToolTurns  int             `json:"attributed_tool_turns"`
-	InspectionOperations int             `json:"inspection_operations"`
-	MutationTurns        int             `json:"mutation_turns"`
-	VerificationAttempts int             `json:"verification_attempts"`
-	FirstMutationMS      IntDistribution `json:"time_to_first_mutation_ms"`
-	TurnsToFirstMutation IntDistribution `json:"tool_turns_to_first_mutation"`
+	Available            bool               `json:"available"`
+	Streams              int                `json:"streams"`
+	WorkItems            int                `json:"work_items"`
+	Revisions            int                `json:"revisions"`
+	Structured           int                `json:"structured"`
+	Completed            int                `json:"completed"`
+	Abandoned            int                `json:"abandoned"`
+	Handoffs             int                `json:"handoffs"`
+	Branches             int                `json:"branches"`
+	DecisionGateTrips    int                `json:"decision_gate_trips"`
+	StepTransitions      int                `json:"step_transitions"`
+	EvidenceItems        int                `json:"evidence_items"`
+	EvidenceBatches      int                `json:"evidence_batches"`
+	MutationResults      int                `json:"mutation_results"`
+	DelegateResults      int                `json:"delegate_results"`
+	VerificationPassed   int                `json:"verification_passed"`
+	VerificationFailed   int                `json:"verification_failed"`
+	VerificationNotRun   int                `json:"verification_not_run"`
+	AttributedSteps      int                `json:"attributed_steps"`
+	AttributedToolTurns  int                `json:"attributed_tool_turns"`
+	InspectionOperations int                `json:"inspection_operations"`
+	MutationTurns        int                `json:"mutation_turns"`
+	VerificationAttempts int                `json:"verification_attempts"`
+	ContextResets        int                `json:"context_resets"`
+	ModelSwitches        int                `json:"model_switches"`
+	AgentSwitches        int                `json:"agent_switches"`
+	PromptRelations      map[string]int     `json:"prompt_relations,omitempty"`
+	FirstMutationMS      IntDistribution    `json:"time_to_first_mutation_ms"`
+	TurnsToFirstMutation IntDistribution    `json:"tool_turns_to_first_mutation"`
+	FirstVerificationMS  IntDistribution    `json:"time_to_first_verification_ms"`
+	TurnsToFirstVerify   IntDistribution    `json:"tool_turns_to_first_verification"`
+	Steps                []WorkStepAnalysis `json:"steps,omitempty"`
 	firstMutationMS      []int
 	turnsToFirstMutation []int
+	firstVerificationMS  []int
+	turnsToFirstVerify   []int
+}
+
+// WorkStepAnalysis is a content-free efficiency row keyed only by opaque work
+// and step IDs.
+type WorkStepAnalysis struct {
+	WorkID                string `json:"work_id"`
+	StepID                string `json:"step_id"`
+	DurationMS            int    `json:"duration_ms,omitempty"`
+	ToolTurns             int    `json:"tool_turns"`
+	InspectionOperations  int    `json:"inspection_operations"`
+	MutationTurns         int    `json:"mutation_turns"`
+	VerificationAttempts  int    `json:"verification_attempts"`
+	EvidenceItems         int    `json:"evidence_items"`
+	DelegateResults       int    `json:"delegate_results"`
+	ContextResets         int    `json:"context_resets"`
+	ModelSwitches         int    `json:"model_switches"`
+	AgentSwitches         int    `json:"agent_switches"`
+	TimeToFirstMutationMS int    `json:"time_to_first_mutation_ms,omitempty"`
+	TurnsToFirstMutation  int    `json:"tool_turns_to_first_mutation,omitempty"`
+	TimeToFirstVerifyMS   int    `json:"time_to_first_verification_ms,omitempty"`
+	TurnsToFirstVerify    int    `json:"tool_turns_to_first_verification,omitempty"`
 }
 
 // WorkAnalysis keeps root, descendant, and inclusive scopes distinct.
@@ -776,7 +806,8 @@ func runtimeProfilePresent(runtime RuntimeProfile) bool {
 	return runtime.RetentionPolicy != "" || runtime.ContextWindow != 0 ||
 		runtime.ToolResultMaxBytes != 0 || runtime.ToolResultMaxLines != 0 ||
 		runtime.CompactToolResultMaxBytes != 0 || runtime.ResponsesStateful ||
-		runtime.DelegateMaxTurns != 0 || runtime.Prewarm || runtime.SearchBackend != ""
+		runtime.DelegateMaxTurns != 0 || runtime.DelegateMaxActive != 0 || runtime.DelegateMaxDescendants != 0 ||
+		runtime.DelegateMaxPerStep != 0 || runtime.Prewarm || runtime.SearchBackend != ""
 }
 
 type analysisEventLimits struct {
@@ -1043,8 +1074,17 @@ func analyzeWork(dir string, before time.Time, events []Event) (WorkScopeAnalysi
 	seenEvidence := make(map[string]bool)
 	seenResults := make(map[string]bool)
 	stepStarted := make(map[string]time.Time)
+	stepCompleted := make(map[string]time.Time)
 	firstMutation := make(map[string]time.Time)
+	firstVerification := make(map[string]time.Time)
 	workCreated := make(map[string]time.Time)
+	stepRows := make(map[string]*WorkStepAnalysis)
+	stepRow := func(key, workID, stepID string) *WorkStepAnalysis {
+		if stepRows[key] == nil {
+			stepRows[key] = &WorkStepAnalysis{WorkID: workID, StepID: stepID}
+		}
+		return stepRows[key]
+	}
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64<<10), maxAnalysisRawLineBytes)
 	var lines [][]byte
@@ -1091,11 +1131,19 @@ func analyzeWork(dir string, before time.Time, events []Event) (WorkScopeAnalysi
 		}
 		evidenceBatch := false
 		for _, node := range state.Nodes {
+			if node.Type != workstate.NodeStep {
+				continue
+			}
 			stepKey := state.WorkID + ":" + node.ID
+			row := stepRow(stepKey, state.WorkID, node.ID)
 			if node.Status == workstate.StatusInProgress && previousStatus[node.ID] != workstate.StatusInProgress && stepStarted[stepKey].IsZero() {
 				stepStarted[stepKey] = revision.Time
 			}
-			if hadPrevious && previousStatus[node.ID] != "" && previousStatus[node.ID] != node.Status {
+			if node.Status == workstate.StatusCompleted && previousStatus[node.ID] != workstate.StatusCompleted && stepCompleted[stepKey].IsZero() {
+				stepCompleted[stepKey] = revision.Time
+			}
+			if hadPrevious && previousStatus[node.ID] != node.Status &&
+				(previousStatus[node.ID] != "" || node.Status == workstate.StatusInProgress) {
 				out.StepTransitions++
 			}
 			for _, evidence := range node.Evidence {
@@ -1104,6 +1152,7 @@ func analyzeWork(dir string, before time.Time, events []Event) (WorkScopeAnalysi
 					seenEvidence[key] = true
 					out.EvidenceItems++
 					evidenceBatch = true
+					row.EvidenceItems++
 				}
 			}
 			for _, result := range node.Results {
@@ -1124,12 +1173,23 @@ func analyzeWork(dir string, before time.Time, events []Event) (WorkScopeAnalysi
 					}
 				case workstate.ResultDelegate:
 					out.DelegateResults++
+					row.DelegateResults++
 				case workstate.ResultVerification:
+					at := result.CreatedAt
+					if at.IsZero() {
+						at = revision.Time
+					}
 					switch result.Status {
 					case workstate.VerifyPassed:
 						out.VerificationPassed++
+						if firstVerification[stepKey].IsZero() || at.Before(firstVerification[stepKey]) {
+							firstVerification[stepKey] = at
+						}
 					case workstate.VerifyFailed:
 						out.VerificationFailed++
+						if firstVerification[stepKey].IsZero() || at.Before(firstVerification[stepKey]) {
+							firstVerification[stepKey] = at
+						}
 					case workstate.VerifyNotRun:
 						out.VerificationNotRun++
 					}
@@ -1160,35 +1220,107 @@ func analyzeWork(dir string, before time.Time, events []Event) (WorkScopeAnalysi
 			started = workCreated[workID]
 		}
 		if !mutationAt.IsZero() && !started.IsZero() {
-			out.firstMutationMS = append(out.firstMutationMS, max(0, int(mutationAt.Sub(started).Milliseconds())))
+			elapsed := max(0, int(mutationAt.Sub(started).Milliseconds()))
+			out.firstMutationMS = append(out.firstMutationMS, elapsed)
+			stepRows[stepKey].TimeToFirstMutationMS = elapsed
+		}
+	}
+	for stepKey, verifiedAt := range firstVerification {
+		started := stepStarted[stepKey]
+		if started.IsZero() {
+			workID, _, _ := strings.Cut(stepKey, ":")
+			started = workCreated[workID]
+		}
+		if !verifiedAt.IsZero() && !started.IsZero() {
+			elapsed := max(0, int(verifiedAt.Sub(started).Milliseconds()))
+			out.firstVerificationMS = append(out.firstVerificationMS, elapsed)
+			stepRows[stepKey].TimeToFirstVerifyMS = elapsed
 		}
 	}
 	stepTurns := make(map[string]int)
 	mutatedStep := make(map[string]bool)
+	verifiedStep := make(map[string]bool)
 	attributedSteps := make(map[string]bool)
+	lastIdentity := make(map[string]string)
 	for _, event := range events {
-		if event.Type != EventTurnProgress || event.TurnProgress == nil || event.WorkID == "" || event.WorkStepID == "" {
+		if event.Type == EventWorkPromptRelation && event.WorkID != "" {
+			if out.PromptRelations == nil {
+				out.PromptRelations = make(map[string]int)
+			}
+			out.PromptRelations[event.Purpose]++
+		}
+		if event.WorkID == "" || event.WorkStepID == "" {
 			continue
 		}
 		key := event.WorkID + ":" + event.WorkStepID
-		attributedSteps[key] = true
-		stepTurns[key]++
-		out.AttributedToolTurns++
-		out.InspectionOperations += event.TurnProgress.Activity["inspect"]
-		if event.TurnProgress.VerificationAttempt {
-			out.VerificationAttempts++
-		}
-		if event.TurnProgress.SuccessfulMutation {
-			out.MutationTurns++
-			if !mutatedStep[key] {
-				mutatedStep[key] = true
-				out.turnsToFirstMutation = append(out.turnsToFirstMutation, stepTurns[key])
+		row := stepRow(key, event.WorkID, event.WorkStepID)
+		switch event.Type {
+		case EventTurnProgress:
+			if event.TurnProgress == nil {
+				continue
 			}
+			attributedSteps[key] = true
+			stepTurns[key]++
+			row.ToolTurns++
+			out.AttributedToolTurns++
+			inspections := event.TurnProgress.Activity["inspect"]
+			out.InspectionOperations += inspections
+			row.InspectionOperations += inspections
+			if event.TurnProgress.VerificationAttempt {
+				out.VerificationAttempts++
+				row.VerificationAttempts++
+				if !verifiedStep[key] {
+					verifiedStep[key] = true
+					row.TurnsToFirstVerify = stepTurns[key]
+					out.turnsToFirstVerify = append(out.turnsToFirstVerify, stepTurns[key])
+				}
+			}
+			if event.TurnProgress.SuccessfulMutation {
+				out.MutationTurns++
+				row.MutationTurns++
+				if !mutatedStep[key] {
+					mutatedStep[key] = true
+					row.TurnsToFirstMutation = stepTurns[key]
+					out.turnsToFirstMutation = append(out.turnsToFirstMutation, stepTurns[key])
+				}
+			}
+		case EventWorkContextReset:
+			out.ContextResets++
+			row.ContextResets++
+		case EventTurnAttemptStart:
+			identity := event.Agent + "\x00" + event.Provider + "\x00" + event.Model
+			if previous := lastIdentity[key]; previous != "" && previous != identity {
+				prevAgent, rest, _ := strings.Cut(previous, "\x00")
+				prevProvider, prevModel, _ := strings.Cut(rest, "\x00")
+				if prevAgent != event.Agent {
+					out.AgentSwitches++
+					row.AgentSwitches++
+				}
+				if prevProvider != event.Provider || prevModel != event.Model {
+					out.ModelSwitches++
+					row.ModelSwitches++
+				}
+			}
+			lastIdentity[key] = identity
 		}
 	}
 	out.AttributedSteps = len(attributedSteps)
+	for key, row := range stepRows {
+		if started, completed := stepStarted[key], stepCompleted[key]; !started.IsZero() && !completed.IsZero() {
+			row.DurationMS = max(0, int(completed.Sub(started).Milliseconds()))
+		}
+		out.Steps = append(out.Steps, *row)
+	}
+	sort.Slice(out.Steps, func(i, j int) bool {
+		if out.Steps[i].WorkID != out.Steps[j].WorkID {
+			return out.Steps[i].WorkID < out.Steps[j].WorkID
+		}
+		return out.Steps[i].StepID < out.Steps[j].StepID
+	})
 	out.FirstMutationMS = intDistribution(out.firstMutationMS)
 	out.TurnsToFirstMutation = intDistribution(out.turnsToFirstMutation)
+	out.FirstVerificationMS = intDistribution(out.firstVerificationMS)
+	out.TurnsToFirstVerify = intDistribution(out.turnsToFirstVerify)
 	return out, nil
 }
 
@@ -1216,10 +1348,26 @@ func (a *WorkScopeAnalysis) add(other WorkScopeAnalysis) {
 	a.InspectionOperations += other.InspectionOperations
 	a.MutationTurns += other.MutationTurns
 	a.VerificationAttempts += other.VerificationAttempts
+	a.ContextResets += other.ContextResets
+	a.ModelSwitches += other.ModelSwitches
+	a.AgentSwitches += other.AgentSwitches
+	if len(other.PromptRelations) > 0 {
+		if a.PromptRelations == nil {
+			a.PromptRelations = make(map[string]int)
+		}
+		for relation, count := range other.PromptRelations {
+			a.PromptRelations[relation] += count
+		}
+	}
+	a.Steps = append(a.Steps, other.Steps...)
 	a.firstMutationMS = append(a.firstMutationMS, other.firstMutationMS...)
 	a.FirstMutationMS = intDistribution(a.firstMutationMS)
 	a.turnsToFirstMutation = append(a.turnsToFirstMutation, other.turnsToFirstMutation...)
 	a.TurnsToFirstMutation = intDistribution(a.turnsToFirstMutation)
+	a.firstVerificationMS = append(a.firstVerificationMS, other.firstVerificationMS...)
+	a.FirstVerificationMS = intDistribution(a.firstVerificationMS)
+	a.turnsToFirstVerify = append(a.turnsToFirstVerify, other.turnsToFirstVerify...)
+	a.TurnsToFirstVerify = intDistribution(a.turnsToFirstVerify)
 }
 
 func (a *WorkAnalysis) add(scope WorkScopeAnalysis, descendant bool) {
@@ -1864,6 +2012,10 @@ func WriteAnalysisText(report AnalysisReport, w io.Writer) error {
 		report.Work.Inclusive.AttributedSteps, report.Work.Inclusive.AttributedToolTurns,
 		report.Work.Inclusive.InspectionOperations, report.Work.Inclusive.MutationTurns,
 		report.Work.Inclusive.TurnsToFirstMutation.Median, report.Work.Inclusive.TurnsToFirstMutation.P90)
+	fmt.Fprintf(&b, "  work verification attempts/turns to first verification median/p90/context resets/model switches/agent switches: %d / %d / %d / %d / %d / %d\n",
+		report.Work.Inclusive.VerificationAttempts, report.Work.Inclusive.TurnsToFirstVerify.Median,
+		report.Work.Inclusive.TurnsToFirstVerify.P90, report.Work.Inclusive.ContextResets,
+		report.Work.Inclusive.ModelSwitches, report.Work.Inclusive.AgentSwitches)
 	fmt.Fprintf(&b, "  telemetry coverage closure/workflow/progress/hooks/context/count-scope/retention: %d/%d/%d/%d/%d/%d/%d of %d\n", report.Coverage.Closure, report.Coverage.Workflow, report.Coverage.Progress, report.Coverage.Hooks, report.Coverage.Context, report.Coverage.ProviderCountScope, report.Coverage.Retention, report.Coverage.Sessions)
 	fmt.Fprintf(&b, "  delegate completion valid/failures/applicable: %d / %d / %d\n", report.Coverage.CompletionValid, report.Coverage.CompletionCoverageFailures, report.Coverage.CompletionApplicable)
 	writeTelemetryText(&b, "  ", report.Telemetry)

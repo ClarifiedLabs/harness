@@ -33,6 +33,9 @@ func TestPlanProgressAndArtifactShareCanonicalState(t *testing.T) {
 	if planned.ArtifactPath == "" {
 		t.Fatal("ready plan did not create artifact")
 	}
+	if context := RequestContext(planned); strings.Contains(context, planned.ArtifactPath) {
+		t.Fatalf("model context exposes internal artifact path: %q", context)
+	}
 	artifact, err := os.ReadFile(filepath.Join(dir, planned.ArtifactPath))
 	if err != nil {
 		t.Fatal(err)
@@ -129,6 +132,41 @@ func TestMeaningfulProgressClearsEvidenceAllowance(t *testing.T) {
 	}
 }
 
+func TestChecklistPhaseBoundaryAndHostEvidence(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(func() string { return dir })
+	root, err := store.NewWork("ship it", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := store.SetPlan(PlanUpdate{
+		BaseRevisionID: root.RevisionID, PlanState: PlanDraft, ActiveStepID: "inspect",
+		Nodes: []NodeDefinition{
+			{ID: "discover", Type: NodePhase, Title: "Discover"},
+			{ID: "inspect", ParentID: "discover", Type: NodeStep, Title: "Inspect", Kind: KindDiscover},
+			{ID: "change", Type: NodePhase, Title: "Change"},
+			{ID: "edit", ParentID: "change", Type: NodeStep, Title: "Edit", Kind: KindChange},
+		},
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !CrossesPhase(*planned, "inspect", "edit") || CrossesPhase(*planned, "inspect", "inspect") {
+		t.Fatalf("phase boundary classification failed: %+v", planned.Nodes)
+	}
+	withEvidence, err := store.AddEvidence("inspect", []EvidenceInput{{Kind: EvidenceArtifact, Path: "/tmp/evidence.txt", Summary: "inspection result", ToolCallID: "call-1"}}, "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withEvidence.Nodes[1].Evidence) != 1 || withEvidence.Nodes[1].Evidence[0].ToolCallID != "call-1" {
+		t.Fatalf("host evidence = %+v", withEvidence.Nodes[1].Evidence)
+	}
+	checklist := RenderChecklist(*withEvidence)
+	if !strings.Contains(checklist, "[>] Inspect") || !strings.Contains(checklist, "[ ] Edit") || strings.Contains(checklist, "Discover") {
+		t.Fatalf("checklist = %q", checklist)
+	}
+}
+
 func TestAdministrativeProgressDoesNotClearDecisionGate(t *testing.T) {
 	store := NewStore(nil)
 	root, err := store.NewWork("Investigate", "user")
@@ -177,7 +215,7 @@ func TestAdministrativeProgressDoesNotClearDecisionGate(t *testing.T) {
 	}
 }
 
-func TestCompletedStepRequiresExplicitCitations(t *testing.T) {
+func TestCompletedStepSelectsFreshEvidence(t *testing.T) {
 	store := NewStore(nil)
 	root, err := store.NewWork("Implement", "user")
 	if err != nil {
@@ -199,14 +237,47 @@ func TestCompletedStepRequiresExplicitCitations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.Progress(ProgressUpdate{
+	completed, err := store.Progress(ProgressUpdate{
 		BaseRevisionID: withEvidence.RevisionID,
 		StepID:         "change",
 		Status:         StatusCompleted,
 		Summary:        "done",
 	}, "model")
-	if err == nil || !strings.Contains(err.Error(), "citations") {
-		t.Fatalf("completion error = %v", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed.Nodes[0].CompletionRefs) != 1 || completed.Nodes[0].CompletionRefs[0] != withEvidence.Nodes[0].Evidence[0].ID {
+		t.Fatalf("completion refs = %v", completed.Nodes[0].CompletionRefs)
+	}
+}
+
+func TestImplicitEvidenceContextAndAutoCompletionHideInternalIDs(t *testing.T) {
+	store := NewStore(nil)
+	root, err := store.NewWork("Investigate", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withEvidence, err := store.Progress(ProgressUpdate{
+		Evidence: []EvidenceInput{{Path: "internal/example.go", Summary: "located the implementation"}},
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withEvidence.ActiveStepID != implicitStepID || len(withEvidence.Nodes) != 1 || len(withEvidence.Nodes[0].Evidence) != 1 {
+		t.Fatalf("implicit evidence state = %+v", withEvidence)
+	}
+	context := RequestContext(withEvidence)
+	for _, internalID := range []string{root.WorkID, withEvidence.RevisionID, implicitStepID, withEvidence.Nodes[0].Evidence[0].ID} {
+		if strings.Contains(context, internalID) {
+			t.Fatalf("request context exposes internal id %q: %q", internalID, context)
+		}
+	}
+	completed, err := store.AutoCompleteImplicit("investigation complete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Lifecycle != LifecycleCompleted || completed.ActiveStepID != "" || completed.Nodes[0].Status != StatusCompleted || len(completed.Nodes[0].CompletionRefs) != 1 {
+		t.Fatalf("completed implicit work = %+v", completed)
 	}
 }
 
@@ -324,7 +395,7 @@ func TestParentMustPrecedeChildAndOnlyOptionalMaySkip(t *testing.T) {
 	if _, err := store.Progress(ProgressUpdate{StepID: "required", Status: StatusSkipped, Summary: "not needed"}, "model"); err == nil {
 		t.Fatal("required step was skipped")
 	}
-	if planned.Nodes[0].Status != StatusPending {
+	if planned.Nodes[0].Status != StatusInProgress || planned.ActiveStepID != "required" {
 		t.Fatalf("planned node = %+v", planned.Nodes[0])
 	}
 }

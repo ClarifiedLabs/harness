@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -110,8 +111,8 @@ func TestToolAccuracyCasesRegistered(t *testing.T) {
 		t.Fatal("drift case is not configured as a two-phase run")
 	}
 	knownPrompt := cases["known_path_batching"].Prompt
-	if !strings.Contains(knownPrompt, "Scope every search query to the .flowbench-tool-accuracy/known directory") ||
-		!strings.Contains(knownPrompt, "do not list the 18 files as query paths") {
+	if !strings.Contains(knownPrompt, "Search the .flowbench-tool-accuracy/known directory") ||
+		!strings.Contains(knownPrompt, "Independent repository lookups may be issued together") {
 		t.Fatalf("known-path prompt lacks valid directory-scoped search guidance: %s", knownPrompt)
 	}
 }
@@ -154,8 +155,46 @@ func TestSearchQueryCount(t *testing.T) {
 	if got := searchQueryCount(json.RawMessage(`{"queries":[{"pattern":"one"},{"pattern":"two"},{"pattern":"three"}]}`)); got != 3 {
 		t.Fatalf("searchQueryCount = %d, want 3", got)
 	}
-	if got := searchQueryCount(json.RawMessage(`{"pattern":"legacy"}`)); got != 0 {
-		t.Fatalf("searchQueryCount legacy input = %d, want 0", got)
+	if got := searchQueryCount(json.RawMessage(`{"pattern":"flat"}`)); got != 1 {
+		t.Fatalf("searchQueryCount flat input = %d, want 1", got)
+	}
+}
+
+func TestObserveSearchResultMetricsCountsSharedBatchOnce(t *testing.T) {
+	var got metrics
+	observeSearchResultMetrics(&got, map[string]int{
+		"search_batch_member":                     1,
+		"search_batch_metrics_owner":              1,
+		"search_batch_calls":                      3,
+		"search_batch_context_lines_before":       90,
+		"search_batch_unique_context_lines":       50,
+		"search_batch_context_lines_after":        40,
+		"search_batch_duplicate_lines_suppressed": 40,
+		"search_batch_budget_lines_omitted":       10,
+		"search_batch_low_yield_calls":            1,
+		"search_batch_bytes_before":               9000,
+		"search_batch_bytes_after":                4000,
+		"context_bounded":                         1,
+	})
+	observeSearchResultMetrics(&got, map[string]int{
+		"search_batch_member": 1,
+		"context_lines":       20,
+	})
+	for name, values := range map[string][2]int{
+		"shown":          {got.SearchContextLines, 40},
+		"before":         {got.SearchContextLinesBeforeBatch, 90},
+		"duplicates":     {got.SearchDuplicateLines, 40},
+		"budget omitted": {got.SearchBudgetOmittedLines, 10},
+		"batches":        {got.SearchBatches, 1},
+		"batch calls":    {got.SearchBatchCalls, 3},
+		"low yield":      {got.SearchLowYieldCalls, 1},
+		"bytes before":   {got.SearchBatchBytesBefore, 9000},
+		"bytes after":    {got.SearchBatchBytesAfter, 4000},
+		"bounded":        {got.SearchBoundedCalls, 1},
+	} {
+		if values[0] != values[1] {
+			t.Errorf("%s = %d, want %d", name, values[0], values[1])
+		}
 	}
 }
 
@@ -172,8 +211,36 @@ func TestKnownPathContractEvidenceRequiresExactInputsAndSuccess(t *testing.T) {
 	}
 	successfulSearch := session.Event{Type: session.EventToolResult, ToolID: "search", Tool: "search"}
 	successfulCommand := session.Event{Type: session.EventToolResult, ToolID: "command", Tool: "run_command"}
-	if searches, commands := evidence(validSearch, validCommand, successfulSearch, successfulCommand); searches != 1 || commands != 1 {
-		t.Fatalf("valid evidence = %d/%d, want 1/1", searches, commands)
+	if searches, commands := evidence(validSearch, validCommand, successfulSearch, successfulCommand); searches != 3 || commands != 1 {
+		t.Fatalf("valid evidence = %d/%d, want 3/1", searches, commands)
+	}
+	flatEvents := []session.Event{}
+	for i, input := range []string{
+		`{"pattern":"Widget\\(","path":".flowbench-tool-accuracy/known"}`,
+		`{"pattern":"State\\{","path":".flowbench-tool-accuracy/known"}`,
+		`{"pattern":"Marker[0-9]+","path":".flowbench-tool-accuracy/known"}`,
+	} {
+		id := fmt.Sprintf("flat-%d", i)
+		flatEvents = append(flatEvents,
+			session.Event{Type: session.EventToolStart, ToolID: id, Tool: "search", Input: json.RawMessage(input)},
+			session.Event{Type: session.EventToolResult, ToolID: id, Tool: "search"},
+		)
+	}
+	if searches, _ := successfulKnownPathContracts(flatEvents); searches != 3 {
+		t.Fatalf("flat search evidence = %d, want 3", searches)
+	}
+	globScopedSearch := `{"queries":[{"pattern":"Widget\\(","globs":[".flowbench-tool-accuracy/known/*"]},{"pattern":"State\\{","globs":[".flowbench-tool-accuracy/known/*"]},{"pattern":"Marker[0-9]+","globs":[".flowbench-tool-accuracy/known/*"]}]}`
+	inspectInput := `{"operations":[{"tool":"search","input":` + globScopedSearch + `}]}`
+	inspectEvents := []session.Event{
+		{Type: session.EventToolStart, ToolID: "inspect", Tool: "inspect", Input: json.RawMessage(inspectInput)},
+		{Type: session.EventToolResult, ToolID: "inspect", Tool: "inspect", ResultMetrics: map[string]int{"operation_errors": 0}},
+	}
+	if searches, _ := successfulKnownPathContracts(inspectEvents); searches != 3 {
+		t.Fatalf("nested inspect search evidence = %d, want 3", searches)
+	}
+	inspectEvents[1].ResultMetrics["operation_errors"] = 1
+	if searches, _ := successfulKnownPathContracts(inspectEvents); searches != 0 {
+		t.Fatalf("failed nested inspect search evidence = %d, want 0", searches)
 	}
 	tests := []struct {
 		name          string
@@ -184,15 +251,15 @@ func TestKnownPathContractEvidenceRequiresExactInputsAndSuccess(t *testing.T) {
 		wantSearch    int
 		wantCommand   int
 	}{
-		{name: "literal kind changed", searchInput: strings.Replace(validSearch, `"fixed_strings":true`, `"fixed_strings":false`, 1), commandInput: validCommand, searchResult: successfulSearch, commandResult: successfulCommand, wantCommand: 1},
+		{name: "literal regex unescaped", searchInput: strings.Replace(validSearch, `"Widget(","fixed_strings":true`, `"Widget("`, 1), commandInput: validCommand, searchResult: successfulSearch, commandResult: successfulCommand, wantCommand: 1},
 		{name: "pattern changed", searchInput: strings.Replace(validSearch, "Marker[0-9]+", "Marker.*", 1), commandInput: validCommand, searchResult: successfulSearch, commandResult: successfulCommand, wantCommand: 1},
 		{name: "scope broadened", searchInput: strings.Replace(validSearch, ".flowbench-tool-accuracy/known", ".", 1), commandInput: validCommand, searchResult: successfulSearch, commandResult: successfulCommand, wantCommand: 1},
 		{name: "search execution failed", searchInput: validSearch, commandInput: validCommand, searchResult: session.Event{Type: session.EventToolResult, ToolID: "search", Tool: "search", ResultError: true}, commandResult: successfulCommand, wantCommand: 1},
 		{name: "search query failed", searchInput: validSearch, commandInput: validCommand, searchResult: session.Event{Type: session.EventToolResult, ToolID: "search", Tool: "search", ResultMetrics: map[string]int{"query_errors": 1}}, commandResult: successfulCommand, wantCommand: 1},
-		{name: "empty second step", searchInput: validSearch, commandInput: strings.Replace(validCommand, `{"argv":["printf","STEP_BETA\n"]}`, `{}`, 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 1},
-		{name: "wrong step input", searchInput: validSearch, commandInput: strings.Replace(validCommand, "STEP_BETA", "STEP_OTHER", 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 1},
-		{name: "compact output", searchInput: validSearch, commandInput: strings.Replace(validCommand, `"full"`, `"receipt"`, 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 1},
-		{name: "command execution failed", searchInput: validSearch, commandInput: validCommand, searchResult: successfulSearch, commandResult: session.Event{Type: session.EventToolResult, ToolID: "command", Tool: "run_command", ResultError: true}, wantSearch: 1},
+		{name: "empty second step", searchInput: validSearch, commandInput: strings.Replace(validCommand, `{"argv":["printf","STEP_BETA\n"]}`, `{}`, 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 3},
+		{name: "wrong step input", searchInput: validSearch, commandInput: strings.Replace(validCommand, "STEP_BETA", "STEP_OTHER", 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 3},
+		{name: "compact output", searchInput: validSearch, commandInput: strings.Replace(validCommand, `"full"`, `"receipt"`, 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 3},
+		{name: "command execution failed", searchInput: validSearch, commandInput: validCommand, searchResult: successfulSearch, commandResult: session.Event{Type: session.EventToolResult, ToolID: "command", Tool: "run_command", ResultError: true}, wantSearch: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -201,6 +268,10 @@ func TestKnownPathContractEvidenceRequiresExactInputsAndSuccess(t *testing.T) {
 				t.Fatalf("evidence = %d/%d, want %d/%d", searches, commands, tt.wantSearch, tt.wantCommand)
 			}
 		})
+	}
+	commandWithNames := strings.ReplaceAll(validCommand, `{"argv"`, `{"name":"step","argv"`)
+	if _, commands := evidence(validSearch, commandWithNames, successfulSearch, successfulCommand); commands != 1 {
+		t.Fatalf("cosmetic command step names rejected: %d", commands)
 	}
 }
 
@@ -229,11 +300,11 @@ func TestDiscoveryTargetsFixtureRoot(t *testing.T) {
 }
 
 func TestInspectOperationSummary(t *testing.T) {
-	input := json.RawMessage(`{"operations":[{"tool":"read_file","input":{"path":"./.flowbench-tool-accuracy/known/contract-01.txt"}},{"tool":"search","input":{"queries":[]}},{"tool":"read_file","input":{"path":".flowbench-tool-accuracy/known/contract-02.txt"}}]}`)
+	input := json.RawMessage(`{"operations":[{"tool":"read_file","input":{"paths":["./.flowbench-tool-accuracy/known/contract-01.txt",".flowbench-tool-accuracy/known/contract-02.txt"]}},{"tool":"search","input":{"queries":[]}}]}`)
 	operations, got := inspectOperationSummary(input)
 	want := contractFixturePaths("known", "contract-%02d.txt")[:2]
-	if operations != 3 || !sameFixturePaths(got, want) {
-		t.Fatalf("inspectOperationSummary = %d, %v; want 3, %v", operations, got, want)
+	if operations != 2 || !sameFixturePaths(got, want) {
+		t.Fatalf("inspectOperationSummary = %d, %v; want 2, %v", operations, got, want)
 	}
 }
 
@@ -410,7 +481,7 @@ func TestToolAccuracyAcceptanceRequiresPositiveEfficiencyAndErrorReduction(t *te
 		for rep := 1; rep <= 3; rep++ {
 			records = append(records,
 				runRecord{Model: model, Repetition: rep, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4, ToolErrors: 2}},
-				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"inspect": 1, "search": 1, "run_command": 1}, ExactKnownPathSearches: 1, ExactKnownPathCommands: 1}},
+				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"search": 3, "read_file": 1, "run_command": 1}, ExactKnownPathSearches: 3, ExactKnownPathCommands: 1, BatchedReadCalls: 1, CoissuedLookupTurns: 1}},
 			)
 		}
 	}
@@ -561,51 +632,35 @@ func TestKnownAndUnknownPathScoresEnforceSeparateFlows(t *testing.T) {
 		t.Fatalf("known-path prompt does not enumerate fixture paths: %s", known.Prompt)
 	}
 	knownMetrics := metrics{
-		ToolCalls:              map[string]int{"inspect": 1, "search": 1, "run_command": 1},
-		InspectOperations:      18,
-		InspectReadOperations:  18,
-		InspectReadPaths:       contractFixturePaths("known", "contract-%02d.txt"),
-		SuccessfulInspectCalls: 1,
+		ToolCalls:              map[string]int{"read_file": 1, "search": 3, "run_command": 1},
+		SuccessfulReadPaths:    contractFixturePaths("known", "contract-%02d.txt"),
 		SearchQueries:          3,
-		ExactKnownPathSearches: 1,
+		ExactKnownPathSearches: 3,
 		ExactKnownPathCommands: 1,
 	}
 	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); !got.Pass {
 		t.Fatalf("known-path score rejected valid flow: %v", got.Reasons)
 	}
-	knownMetrics.DirectReadCalls = 1
+	knownMetrics.ExactKnownPathSearches = 2
 	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); got.Pass {
-		t.Fatal("known-path score accepted serial direct read")
+		t.Fatal("known-path score accepted incomplete searches")
 	}
-	knownMetrics.DirectReadCalls = 0
-	knownMetrics.SearchQueries = 2
+	knownMetrics.ExactKnownPathSearches = 3
+	knownMetrics.SuccessfulReadPaths = knownMetrics.SuccessfulReadPaths[:17]
 	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); got.Pass {
-		t.Fatal("known-path score accepted incomplete search batch")
+		t.Fatal("known-path score accepted a missing read path")
 	}
-	knownMetrics.SearchQueries = 3
-	knownMetrics.InspectReadPaths = append([]string(nil), knownMetrics.InspectReadPaths...)
-	knownMetrics.InspectReadPaths[1] = knownMetrics.InspectReadPaths[0]
-	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); got.Pass {
-		t.Fatal("known-path score accepted a duplicate read path")
-	}
-	knownMetrics.InspectReadPaths = contractFixturePaths("known", "contract-%02d.txt")
-	knownMetrics.InspectOperations = 19
-	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); got.Pass {
-		t.Fatal("known-path score accepted an extra inspect operation")
-	}
-	knownMetrics.InspectOperations = 18
+	knownMetrics.SuccessfulReadPaths = contractFixturePaths("known", "contract-%02d.txt")
 	knownMetrics.ExactKnownPathCommands = 0
 	if got := scoreKnownPathBatching(scoreInput{Stdout: "Marker01 Marker18 STEP_ALPHA STEP_BETA", FixtureBefore: "same", FixtureAfter: "same", Metrics: knownMetrics}); got.Pass {
 		t.Fatal("known-path score accepted assistant text without exact successful command evidence")
 	}
 
+	discoveryPaths := contractFixturePaths("discovery", "shard-%02d-hidden.txt")
 	validDiscovery := metrics{
-		ToolCalls:              map[string]int{"list_dir": 1, "inspect": 1},
-		InspectOperations:      18,
-		InspectReadOperations:  18,
-		InspectReadPaths:       contractFixturePaths("discovery", "shard-%02d-hidden.txt"),
-		SuccessfulInspectCalls: 1,
-		DiscoveryBeforeRead:    true,
+		ToolCalls:           map[string]int{"list_dir": 1, "read_file": 1},
+		SuccessfulReadPaths: []string{discoveryPaths[0], discoveryPaths[len(discoveryPaths)-1]},
+		DiscoveryBeforeRead: true,
 	}
 	in := scoreInput{Stdout: "Discover01 Discover18", FixtureBefore: "same", FixtureAfter: "same", Metrics: validDiscovery}
 	if got := scoreUnknownPathDiscovery(in); !got.Pass {
@@ -613,10 +668,7 @@ func TestKnownAndUnknownPathScoresEnforceSeparateFlows(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*metrics){
 		"guessed before discovery": func(m *metrics) { m.ReadBeforeDiscovery = true },
-		"all failed inspect":       func(m *metrics) { m.AllFailedInspectCalls = 1 },
-		"serial reads":             func(m *metrics) { m.DirectReadCalls = 1 },
-		"missing batch evidence":   func(m *metrics) { m.InspectReadOperations = 17 },
-		"extra inspect operation":  func(m *metrics) { m.InspectOperations = 19 },
+		"missing successful read":  func(m *metrics) { m.SuccessfulReadPaths = m.SuccessfulReadPaths[:1] },
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := validDiscovery
@@ -817,6 +869,23 @@ func TestWorkAdoptionRequiresWorkCall(t *testing.T) {
 	}
 	if got := primaryValue(benchmarkCase{PrimaryMetric: "avoidable_work_only_turns"}, metrics{AvoidableWorkOnlyTurns: 2}); got != 2 {
 		t.Fatalf("work-only primary metric = %d, want 2", got)
+	}
+}
+
+func TestOrientationAdoptionAcceptsCoissuedDirectReads(t *testing.T) {
+	known := metrics{
+		ToolCalls:              map[string]int{"search": 3, "read_file": 18, "run_command": 1},
+		ExactKnownPathSearches: 3,
+		ExactKnownPathCommands: 1,
+		CoissuedReadTurns:      1,
+		CoissuedLookupTurns:    1,
+	}
+	if !adopted("known_path_batching", known) {
+		t.Fatal("coissued known-path reads did not count as adoption")
+	}
+	unknown := metrics{DiscoveryBeforeRead: true, ToolCalls: map[string]int{"read_file": 2}, CoissuedReadTurns: 1}
+	if !adopted("unknown_path_discovery", unknown) {
+		t.Fatal("coissued discovered-path reads did not count as adoption")
 	}
 }
 

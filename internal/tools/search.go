@@ -14,58 +14,32 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 
 	"harness/internal/llm"
 )
 
 const (
-	searchDefaultLines      = 20
-	searchDefaultMaxMatches = 40
-	searchDefaultMaxFiles   = 8
-	searchMaxQueries        = 16
-	searchMaxLines          = 100
-	searchMaxMatches        = 200
-	searchMaxFiles          = 50
-	searchMaxGlobs          = 16
-	searchOutputLines       = 400
+	searchContextLines = 4
+	searchMaxMatches   = 60
+	searchMaxFiles     = 12
+	searchMaxGlobs     = 16
+	searchOutputLines  = 200
 )
 
 const searchSchema = `{
   "type": "object",
   "properties": {
-    "queries": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 16,
-      "items": {
-        "type": "object",
-        "properties": {
-          "pattern": {"type": "string", "description": "Regular expression to search for."},
-          "paths": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": 16,
-            "description": "Files or directories to search (default current directory)."
-          },
-          "globs": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": 16,
-            "description": "Optional include or exclude globs; prefix exclusions with !."
-          },
-          "fixed_strings": {"type": "boolean", "description": "Treat pattern as literal text."},
-          "case": {"type": "string", "enum": ["smart", "sensitive", "insensitive"], "description": "Case policy (default smart)."},
-          "output": {"type": "string", "enum": ["context", "matches", "files", "count", "exists"], "description": "Result shape (default context)."},
-          "context_lines": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Lines around matches for context output (default 20)."},
-          "max_matches": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Maximum matches (default 40)."},
-          "max_files": {"type": "integer", "minimum": 1, "maximum": 50, "description": "Maximum matching files (default 8)."}
-        },
-        "required": ["pattern"]
-      }
-    }
+	"pattern": {"type": "string", "description": "Regular expression to search for."},
+	"path": {"type": "string", "description": "File or directory to search (default current directory); the filesystem root is rejected as excessively broad."},
+	"globs": {
+	  "type": "array",
+	  "items": {"type": "string"},
+	  "maxItems": 16,
+	  "description": "Optional include or exclude globs; prefix exclusions with !."
+	},
+	"case": {"type": "string", "enum": ["smart", "sensitive", "insensitive"], "description": "Case policy (default smart)."}
   },
-  "required": ["queries"]
+	"required": ["pattern"]
 }`
 
 type searchTool struct {
@@ -73,19 +47,17 @@ type searchTool struct {
 }
 
 type searchArgs struct {
-	Queries []searchQuery `json:"queries"`
+	Pattern string   `json:"pattern"`
+	Path    string   `json:"path"`
+	Globs   []string `json:"globs"`
+	Case    string   `json:"case"`
 }
 
 type searchQuery struct {
-	Pattern      string   `json:"pattern"`
-	Paths        []string `json:"paths"`
-	Globs        []string `json:"globs"`
-	FixedStrings bool     `json:"fixed_strings"`
-	Case         string   `json:"case"`
-	Output       string   `json:"output"`
-	ContextLines int      `json:"context_lines"`
-	MaxMatches   int      `json:"max_matches"`
-	MaxFiles     int      `json:"max_files"`
+	Pattern string
+	Path    string
+	Globs   []string
+	Case    string
 }
 
 type searchMatch struct {
@@ -107,19 +79,6 @@ type lineWindow struct {
 	End   int
 }
 
-type taggedLineWindow struct {
-	Path     string
-	Start    int
-	End      int
-	QueryIDs []int
-}
-
-type searchContextPlan struct {
-	windows       []taggedLineWindow
-	selectedLines int
-	limited       bool
-}
-
 type rgJSONText struct {
 	Text  string `json:"text"`
 	Bytes string `json:"bytes"`
@@ -137,7 +96,7 @@ type rgJSONEvent struct {
 func (searchTool) Name() string { return "search" }
 
 func (searchTool) Description() string {
-	return "Search files with up to 16 independent queries in one call. Patterns are regular expressions; set fixed_strings:true for literal punctuation. Returns bounded context, matching lines, file names, counts, or existence; prefer one batched call for orientation."
+	return "Search one file or directory for an RE2 regular expression and return host-bounded matching context. Escape punctuation to match it literally. Coissue independent search calls in one turn when orienting."
 }
 
 func (searchTool) Schema() json.RawMessage { return json.RawMessage(searchSchema) }
@@ -150,249 +109,103 @@ func (s searchTool) Run(ctx context.Context, input json.RawMessage) (string, err
 }
 
 func (s searchTool) RunResult(ctx context.Context, input json.RawMessage) (RunResult, error) {
-	args, queryErrors, normalizedBounds, err := decodeSearchArgsPartial(input)
+	args, err := decodeSearchArgs(input)
 	if err != nil {
 		return RunResult{}, err
 	}
-	validQueries := 0
-	for i := range args.Queries {
-		if queryErrors[i] != nil {
-			continue
-		}
-		validQueries++
-		for _, path := range args.Queries[i].Paths {
-			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-				queryErrors[i] = fmt.Errorf("queries[%d].paths: %w", i, notExistingPathError(path, err))
-				validQueries--
-				break
-			}
-		}
+	query := searchQuery{
+		Pattern: args.Pattern, Path: args.Path, Globs: args.Globs, Case: args.Case,
 	}
-	if validQueries == 0 {
-		return RunResult{}, combineSearchQueryErrors(queryErrors)
+	if _, err := os.Stat(query.Path); errors.Is(err, os.ErrNotExist) {
+		return RunResult{}, fmt.Errorf("path: %w", notExistingPathError(query.Path, err))
 	}
-
-	results := make([]searchResult, len(args.Queries))
-	var wg sync.WaitGroup
-	for i := range args.Queries {
-		if queryErrors[i] != nil {
-			results[i].err = queryErrors[i]
-			continue
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if s.program != "" {
-				results[i] = s.searchRG(ctx, args.Queries[i])
-				return
-			}
-			results[i] = searchGo(ctx, args.Queries[i])
-		}()
+	var result searchResult
+	if s.program != "" {
+		result = s.searchRG(ctx, query)
+	} else {
+		result = searchGo(ctx, query)
 	}
-	wg.Wait()
-
-	failedQueries := 0
-	for i := range results {
-		if results[i].err != nil {
-			failedQueries++
-			results[i].err = classifySearchRuntimeError(i, results[i].err)
-		}
+	if result.err != nil {
+		return RunResult{}, classifySearchRuntimeError(result.err)
 	}
-	if failedQueries == len(results) {
-		return RunResult{}, combineSearchResultsErrors(results)
+	text, contextLines, contextLimited := renderSearchResult(result)
+	metrics := map[string]int{
+		"matches_shown": len(result.matches),
+		"files_shown":   len(uniqueSearchPaths(result.matches)),
+		"context_lines": contextLines,
 	}
-	metrics := map[string]int{"query_errors": failedQueries, "normalized_bounds": normalizedBounds}
-	if len(results) > 1 {
-		text, renderMetrics := renderBatchedSearchResults(args.Queries, results)
-		for key, value := range renderMetrics {
-			metrics[key] = value
-		}
-		if normalizedBounds > 0 {
-			text += fmt.Sprintf("\n\n[normalized %d over-limit bound(s) to documented maxima]", normalizedBounds)
-		}
-		return RunResult{Text: text, Metrics: metrics}, nil
+	if result.capped || result.omittedFiles > 0 {
+		metrics["results_bounded"] = 1
 	}
-	text := renderSearchResult(args.Queries[0], results[0])
-	if normalizedBounds > 0 {
-		text += fmt.Sprintf("\n[normalized %d over-limit bound(s) to documented maxima]", normalizedBounds)
+	if contextLimited {
+		metrics["context_bounded"] = 1
 	}
 	return RunResult{Text: text, Metrics: metrics}, nil
 }
 
 func decodeSearchArgs(input json.RawMessage) (searchArgs, error) {
-	args, failures, _, err := decodeSearchArgsPartial(input)
-	if err != nil {
+	var args searchArgs
+	if err := json.Unmarshal(input, &args); err != nil {
 		return searchArgs{}, err
 	}
-	for _, failure := range failures {
-		if failure != nil {
-			return searchArgs{}, failure
+	if strings.TrimSpace(args.Pattern) == "" {
+		return searchArgs{}, badArgs("pattern is required")
+	}
+	if args.Path == "" {
+		args.Path = "."
+	} else if strings.TrimSpace(args.Path) == "" {
+		return searchArgs{}, badArgs("path must not be empty")
+	}
+	if isFilesystemRoot(args.Path) {
+		return searchArgs{}, badArgs("path must not be the filesystem root; choose a narrower file or directory")
+	}
+	if len(args.Globs) > searchMaxGlobs {
+		return searchArgs{}, badArgs("globs must contain at most %d items", searchMaxGlobs)
+	}
+	for i, glob := range args.Globs {
+		if strings.TrimSpace(glob) == "" {
+			return searchArgs{}, badArgs("globs[%d] must not be empty", i)
 		}
+	}
+	switch args.Case {
+	case "":
+		args.Case = "smart"
+	case "smart", "sensitive", "insensitive":
+	default:
+		return searchArgs{}, badArgs("case must be smart, sensitive, or insensitive")
+	}
+	if err := validateSearchPattern(searchQuery{Pattern: args.Pattern, Case: args.Case}); err != nil {
+		return searchArgs{}, err
 	}
 	return args, nil
 }
 
-func decodeSearchArgsPartial(input json.RawMessage) (searchArgs, []error, int, error) {
-	var envelope struct {
-		Queries []json.RawMessage `json:"queries"`
-	}
-	if err := json.Unmarshal(input, &envelope); err != nil {
-		return searchArgs{}, nil, 0, err
-	}
-	if len(envelope.Queries) == 0 {
-		return searchArgs{}, nil, 0, badArgs("queries is required and must be a non-empty array")
-	}
-	if len(envelope.Queries) > searchMaxQueries {
-		return searchArgs{}, nil, 0, badArgs("queries must contain at most %d items", searchMaxQueries)
-	}
-	args := searchArgs{Queries: make([]searchQuery, len(envelope.Queries))}
-	failures := make([]error, len(envelope.Queries))
-	normalized := 0
-	for i, rawQuery := range envelope.Queries {
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(rawQuery, &fields); err != nil {
-			failures[i] = badArgs("queries[%d]: %v", i, err)
-			continue
-		}
-		query := &args.Queries[i]
-		if err := json.Unmarshal(rawQuery, query); err != nil {
-			failures[i] = badArgs("queries[%d]: %v", i, err)
-			continue
-		}
-		if query.Pattern == "" {
-			failures[i] = badArgs("queries[%d].pattern is required", i)
-			continue
-		}
-		if len(query.Paths) == 0 {
-			query.Paths = []string{"."}
-		}
-		if len(query.Paths) > searchMaxGlobs {
-			failures[i] = badArgs("queries[%d].paths must contain at most %d items", i, searchMaxGlobs)
-			continue
-		}
-		for j, path := range query.Paths {
-			if strings.TrimSpace(path) == "" {
-				failures[i] = badArgs("queries[%d].paths[%d] must not be empty", i, j)
-			}
-		}
-		if failures[i] != nil {
-			continue
-		}
-		if len(query.Globs) > searchMaxGlobs {
-			failures[i] = badArgs("queries[%d].globs must contain at most %d items", i, searchMaxGlobs)
-			continue
-		}
-		for j, glob := range query.Globs {
-			if strings.TrimSpace(glob) == "" {
-				failures[i] = badArgs("queries[%d].globs[%d] must not be empty", i, j)
-			}
-		}
-		switch query.Case {
-		case "":
-			query.Case = "smart"
-		case "smart", "sensitive", "insensitive":
-		default:
-			failures[i] = badArgs("queries[%d].case must be smart, sensitive, or insensitive", i)
-		}
-		switch query.Output {
-		case "":
-			query.Output = "context"
-		case "context", "matches", "files", "count", "exists":
-		default:
-			failures[i] = badArgs("queries[%d].output must be context, matches, files, count, or exists", i)
-		}
-		if failures[i] != nil {
-			continue
-		}
-		switch {
-		case query.ContextLines < 0:
-			failures[i] = badArgs("queries[%d].context_lines must be >= 0", i)
-		case query.MaxMatches < 0:
-			failures[i] = badArgs("queries[%d].max_matches must be >= 1", i)
-		case query.MaxFiles < 0:
-			failures[i] = badArgs("queries[%d].max_files must be >= 1", i)
-		}
-		if failures[i] != nil {
-			continue
-		}
-		if query.ContextLines > searchMaxLines {
-			query.ContextLines = searchMaxLines
-			normalized++
-		}
-		if query.MaxMatches > searchMaxMatches {
-			query.MaxMatches = searchMaxMatches
-			normalized++
-		}
-		if query.MaxFiles > searchMaxFiles {
-			query.MaxFiles = searchMaxFiles
-			normalized++
-		}
-		if query.ContextLines == 0 {
-			if _, ok := fields["context_lines"]; !ok {
-				query.ContextLines = searchDefaultLines
-			}
-		}
-		if query.MaxMatches == 0 {
-			query.MaxMatches = searchDefaultMaxMatches
-		}
-		if query.MaxFiles == 0 {
-			query.MaxFiles = searchDefaultMaxFiles
-		}
-		if err := validateSearchPattern(i, *query); err != nil {
-			failures[i] = err
-		}
-	}
-	return args, failures, normalized, nil
+func isFilesystemRoot(path string) bool {
+	clean := filepath.Clean(path)
+	return filepath.IsAbs(clean) && filepath.Dir(clean) == clean
 }
 
-func combineSearchQueryErrors(failures []error) error {
-	var messages []string
-	kind := llm.ToolErrorInvalidArgs
-	for _, failure := range failures {
-		if failure == nil {
-			continue
-		}
-		messages = append(messages, failure.Error())
-		if declared := KindOf(failure); declared != "" {
-			kind = declared
-		}
-	}
-	return WithKind(fmt.Errorf("all search queries failed validation:\n- %s", strings.Join(messages, "\n- ")), kind)
-}
-
-func combineSearchResultsErrors(results []searchResult) error {
-	failures := make([]error, len(results))
-	for i := range results {
-		failures[i] = results[i].err
-	}
-	return combineSearchQueryErrors(failures)
-}
-
-func classifySearchRuntimeError(i int, err error) error {
+func classifySearchRuntimeError(err error) error {
 	message := strings.ToLower(err.Error())
 	if strings.Contains(message, "regex parse error") || strings.Contains(message, "invalid regex") {
-		return WithKind(fmt.Errorf("queries[%d].pattern: invalid regex: %v; use fixed_strings: true for literal text", i, err), llm.ToolErrorRegexInvalid)
+		return WithKind(fmt.Errorf("pattern: invalid regex: %v; escape regex punctuation to match it literally", err), llm.ToolErrorRegexInvalid)
 	}
-	return fmt.Errorf("query %d: %w", i+1, err)
+	return err
 }
 
-// validateSearchPattern pre-compiles a query's effective regex (respecting
-// fixed_strings and the smart-case (?i) prefix, mirroring the stdlib walker's
-// transformation) so an invalid pattern fails fast with an actionable error
-// instead of surfacing an rg stderr dump. Go's RE2 and ripgrep's default
-// engine are both RE2-class, so divergence is exotic. The kinded regex_invalid
-// class keeps the failure out of the invalid-arguments bucket: switching to
-// literal text is the fix, not different argument shapes.
-func validateSearchPattern(i int, query searchQuery) error {
-	if query.FixedStrings {
-		return nil // regexp.QuoteMeta output always compiles
-	}
+// validateSearchPattern pre-compiles a query's effective regex (respecting the
+// smart-case (?i) prefix applied by the stdlib walker) so an invalid pattern
+// fails fast with an actionable error instead of surfacing an rg stderr dump.
+// Go's RE2 and ripgrep's default engine are both RE2-class, so divergence is
+// exotic. The kinded regex_invalid class keeps the failure out of the
+// invalid-arguments bucket.
+func validateSearchPattern(query searchQuery) error {
 	pattern := query.Pattern
 	if query.Case == "insensitive" || query.Case == "smart" && strings.ToLower(query.Pattern) == query.Pattern {
 		pattern = "(?i)" + pattern
 	}
 	if _, err := regexp.Compile(pattern); err != nil {
-		return WithKind(fmt.Errorf("queries[%d].pattern: invalid regex: %w; use fixed_strings: true for literal text", i, err), llm.ToolErrorRegexInvalid)
+		return WithKind(fmt.Errorf("pattern: invalid regex: %w; escape regex punctuation to match it literally", err), llm.ToolErrorRegexInvalid)
 	}
 	return nil
 }
@@ -406,9 +219,6 @@ func (s searchTool) searchRG(ctx context.Context, args searchQuery) searchResult
 		"--max-columns-preview",
 		"--max-filesize=" + ripgrepDefaultMaxFilesize,
 	}
-	if args.FixedStrings {
-		argv = append(argv, "--fixed-strings")
-	}
 	switch args.Case {
 	case "smart":
 		argv = append(argv, "--smart-case")
@@ -421,7 +231,7 @@ func (s searchTool) searchRG(ctx context.Context, args searchQuery) searchResult
 		argv = append(argv, "--glob", glob)
 	}
 	argv = append(argv, "--", args.Pattern)
-	argv = append(argv, args.Paths...)
+	argv = append(argv, args.Path)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -460,7 +270,7 @@ func (s searchTool) searchRG(ctx context.Context, args searchQuery) searchResult
 			_ = cmd.Wait()
 			return searchResult{err: fmt.Errorf("decode rg path: %w", err)}
 		}
-		if !files[path] && len(files) >= args.MaxFiles {
+		if !files[path] && len(files) >= searchMaxFiles {
 			omitted[path] = true
 			continue
 		}
@@ -477,7 +287,7 @@ func (s searchTool) searchRG(ctx context.Context, args searchQuery) searchResult
 		}
 		start := max(1, event.Data.LineNumber)
 		matches = append(matches, searchMatch{Path: path, Start: start, End: start + span - 1})
-		if len(matches) >= args.MaxMatches || args.Output == "exists" {
+		if len(matches) >= searchMaxMatches {
 			capped = true
 			cancel()
 			break
@@ -504,9 +314,6 @@ func (s searchTool) searchRG(ctx context.Context, args searchQuery) searchResult
 
 func searchGo(ctx context.Context, args searchQuery) searchResult {
 	pattern := args.Pattern
-	if args.FixedStrings {
-		pattern = regexp.QuoteMeta(pattern)
-	}
 	insensitive := args.Case == "insensitive" || args.Case == "smart" && strings.ToLower(args.Pattern) == args.Pattern
 	if insensitive {
 		pattern = "(?i)" + pattern
@@ -530,7 +337,7 @@ func searchGo(ctx context.Context, args searchQuery) searchResult {
 			return err
 		}
 		if entry.IsDir() {
-			if path != "." && strings.HasPrefix(entry.Name(), ".") {
+			if filepath.Clean(path) != filepath.Clean(args.Path) && strings.HasPrefix(entry.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -549,12 +356,12 @@ func searchGo(ctx context.Context, args searchQuery) searchResult {
 		for _, text := range strings.Split(string(data), "\n") {
 			if re.MatchString(text) {
 				total++
-				if !files[path] && len(files) >= args.MaxFiles {
+				if !files[path] && len(files) >= searchMaxFiles {
 					omitted[path] = true
 				} else {
 					files[path] = true
 					matches = append(matches, searchMatch{Path: path, Start: line, End: line})
-					if len(matches) >= args.MaxMatches || args.Output == "exists" {
+					if len(matches) >= searchMaxMatches {
 						capped = true
 						return stop
 					}
@@ -564,14 +371,9 @@ func searchGo(ctx context.Context, args searchQuery) searchResult {
 		}
 		return nil
 	}
-	for _, root := range args.Paths {
-		err := filepath.WalkDir(root, visit)
-		if errors.Is(err, stop) {
-			break
-		}
-		if err != nil {
-			return searchResult{err: err}
-		}
+	err = filepath.WalkDir(args.Path, visit)
+	if !errors.Is(err, stop) && err != nil {
+		return searchResult{err: err}
 	}
 	sortSearchMatches(matches)
 	return searchResult{matches: matches, total: total, omittedFiles: len(omitted), capped: capped}
@@ -605,68 +407,6 @@ func matchesSearchGlobs(path string, globs []string) bool {
 	return included || !haveInclude
 }
 
-const (
-	searchMetricContextLinesBeforeDedupe = "context_lines_before_dedupe"
-	searchMetricUniqueContextLines       = "unique_context_lines"
-)
-
-func renderBatchedSearchResults(queries []searchQuery, results []searchResult) (string, map[string]int) {
-	var b strings.Builder
-	var shared []taggedLineWindow
-	selectedLines := 0
-	for i, result := range results {
-		if i > 0 {
-			b.WriteString("\n\n")
-		}
-		fmt.Fprintf(&b, "## query %d: %s\n", i+1, queries[i].Pattern)
-		if result.err != nil {
-			fmt.Fprintf(&b, "error: %v", result.err)
-			continue
-		}
-		query := queries[i]
-		if query.Output != "context" && query.Output != "matches" || result.total == 0 {
-			b.WriteString(renderSearchResult(query, result))
-			continue
-		}
-		contextLines := query.ContextLines
-		if query.Output == "matches" {
-			contextLines = 0
-		}
-		b.WriteString(renderSearchContextSummary(result.matches, result.total, result.omittedFiles, result.capped))
-		fmt.Fprintf(&b, "\ncontext: included in shared source below (query %d)", i+1)
-		plan := planSearchContext(result.matches, contextLines, i+1)
-		if plan.limited {
-			fmt.Fprintf(&b, "\n[query %d context truncated at %d source lines; narrow the pattern or bounds]", i+1, searchOutputLines)
-		}
-		shared = append(shared, plan.windows...)
-		selectedLines += plan.selectedLines
-	}
-	if len(shared) == 0 {
-		return b.String(), nil
-	}
-
-	b.WriteString("\n\n## shared source context")
-	uniqueLines := 0
-	for _, window := range mergeTaggedLineWindows(shared) {
-		body, lines, err := readSearchContextWindow(window.Path, lineWindow{Start: window.Start, End: window.End})
-		fmt.Fprintf(&b, "\n\n==> %s:%d-%d (queries: %s) <==\n",
-			window.Path, window.Start, window.End, formatQueryIDs(window.QueryIDs))
-		if err != nil {
-			fmt.Fprintf(&b, "error: %v", err)
-			continue
-		}
-		b.WriteString(body)
-		uniqueLines += lines
-	}
-	duplicates := max(selectedLines-uniqueLines, 0)
-	fmt.Fprintf(&b, "\n\n[shared context: %d unique source lines; %d duplicate lines suppressed across queries]",
-		uniqueLines, duplicates)
-	return b.String(), map[string]int{
-		searchMetricContextLinesBeforeDedupe: selectedLines,
-		searchMetricUniqueContextLines:       uniqueLines,
-	}
-}
-
 func renderSearchContextSummary(matches []searchMatch, total, omittedFiles int, capped bool) string {
 	paths := uniqueSearchPaths(matches)
 	var b strings.Builder
@@ -683,159 +423,11 @@ func renderSearchContextSummary(matches []searchMatch, total, omittedFiles int, 
 	return b.String()
 }
 
-func planSearchContext(matches []searchMatch, contextLines, queryID int) searchContextPlan {
-	grouped := map[string][]lineWindow{}
-	for _, match := range matches {
-		start := max(1, match.Start-contextLines)
-		grouped[match.Path] = append(grouped[match.Path], lineWindow{Start: start, End: match.End + contextLines})
-	}
-	paths := make([]string, 0, len(grouped))
-	for path := range grouped {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	remaining := searchOutputLines
-	var plan searchContextPlan
-	for _, path := range paths {
-		for _, window := range mergeLineWindows(grouped[path]) {
-			if remaining <= 0 {
-				plan.limited = true
-				return plan
-			}
-			if size := window.End - window.Start + 1; size > remaining {
-				window.End = window.Start + remaining - 1
-				plan.limited = true
-			}
-			_, lines, _ := readSearchContextWindow(path, window)
-			plan.windows = append(plan.windows, taggedLineWindow{
-				Path:     path,
-				Start:    window.Start,
-				End:      window.End,
-				QueryIDs: []int{queryID},
-			})
-			plan.selectedLines += lines
-			remaining -= lines
-		}
-	}
-	return plan
-}
-
-func mergeTaggedLineWindows(windows []taggedLineWindow) []taggedLineWindow {
-	if len(windows) == 0 {
-		return nil
-	}
-	sort.Slice(windows, func(i, j int) bool {
-		if windows[i].Path != windows[j].Path {
-			return windows[i].Path < windows[j].Path
-		}
-		if windows[i].Start != windows[j].Start {
-			return windows[i].Start < windows[j].Start
-		}
-		return windows[i].End < windows[j].End
-	})
-	out := []taggedLineWindow{cloneTaggedLineWindow(windows[0])}
-	for _, next := range windows[1:] {
-		last := &out[len(out)-1]
-		if next.Path == last.Path && next.Start <= last.End+1 {
-			if next.End > last.End {
-				last.End = next.End
-			}
-			last.QueryIDs = mergeQueryIDs(last.QueryIDs, next.QueryIDs)
-			continue
-		}
-		out = append(out, cloneTaggedLineWindow(next))
-	}
-	return out
-}
-
-func cloneTaggedLineWindow(window taggedLineWindow) taggedLineWindow {
-	window.QueryIDs = append([]int(nil), window.QueryIDs...)
-	return window
-}
-
-func mergeQueryIDs(left, right []int) []int {
-	seen := make(map[int]bool, len(left)+len(right))
-	for _, id := range left {
-		seen[id] = true
-	}
-	for _, id := range right {
-		seen[id] = true
-	}
-	ids := make([]int, 0, len(seen))
-	for id := range seen {
-		ids = append(ids, id)
-	}
-	sort.Ints(ids)
-	return ids
-}
-
-func formatQueryIDs(ids []int) string {
-	values := make([]string, len(ids))
-	for i, id := range ids {
-		values[i] = fmt.Sprintf("%d", id)
-	}
-	return strings.Join(values, ", ")
-}
-
-func renderSearchResult(args searchQuery, result searchResult) string {
+func renderSearchResult(result searchResult) (string, int, bool) {
 	if result.total == 0 {
-		if args.Output == "exists" {
-			return "false"
-		}
-		return "(no matches)"
+		return "(no matches)", 0, false
 	}
-	switch args.Output {
-	case "context":
-		return renderSearchContext(result.matches, result.total, result.omittedFiles, result.capped, args.ContextLines)
-	case "matches":
-		return renderSearchContext(result.matches, result.total, result.omittedFiles, result.capped, 0)
-	case "files":
-		return renderSearchFiles(result)
-	case "count":
-		return renderSearchCounts(result)
-	case "exists":
-		match := result.matches[0]
-		return fmt.Sprintf("true: %s:%d", match.Path, match.Start)
-	default:
-		panic("validated search output")
-	}
-}
-
-func renderSearchFiles(result searchResult) string {
-	paths := uniqueSearchPaths(result.matches)
-	var b strings.Builder
-	for _, path := range paths {
-		b.WriteString(path)
-		b.WriteByte('\n')
-	}
-	if result.omittedFiles > 0 || result.capped {
-		fmt.Fprintf(&b, "[results bounded; %d matches observed", result.total)
-		if result.omittedFiles > 0 {
-			fmt.Fprintf(&b, ", %d additional files omitted", result.omittedFiles)
-		}
-		b.WriteString("]\n")
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func renderSearchCounts(result searchResult) string {
-	counts := map[string]int{}
-	for _, match := range result.matches {
-		counts[match.Path]++
-	}
-	paths := make([]string, 0, len(counts))
-	for path := range counts {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	var b strings.Builder
-	for _, path := range paths {
-		fmt.Fprintf(&b, "%d\t%s\n", counts[path], path)
-	}
-	if result.capped || result.omittedFiles > 0 {
-		fmt.Fprintf(&b, "[partial counts; %d matches observed]\n", result.total)
-	}
-	return strings.TrimRight(b.String(), "\n")
+	return renderSearchContext(result.matches, result.total, result.omittedFiles, result.capped)
 }
 
 func uniqueSearchPaths(matches []searchMatch) []string {
@@ -877,11 +469,11 @@ func decodeRGJSONText(value rgJSONText) (string, error) {
 	return string(decoded), nil
 }
 
-func renderSearchContext(matches []searchMatch, total, omittedFiles int, capped bool, contextLines int) string {
+func renderSearchContext(matches []searchMatch, total, omittedFiles int, capped bool) (string, int, bool) {
 	grouped := map[string][]lineWindow{}
 	for _, match := range matches {
-		start := max(1, match.Start-contextLines)
-		grouped[match.Path] = append(grouped[match.Path], lineWindow{Start: start, End: match.End + contextLines})
+		start := max(1, match.Start-searchContextLines)
+		grouped[match.Path] = append(grouped[match.Path], lineWindow{Start: start, End: match.End + searchContextLines})
 	}
 	paths := make([]string, 0, len(grouped))
 	for path := range grouped {
@@ -894,6 +486,7 @@ func renderSearchContext(matches []searchMatch, total, omittedFiles int, capped 
 	b.WriteByte('\n')
 
 	remaining := searchOutputLines
+	selectedLines := 0
 	outputLimited := false
 	for _, path := range paths {
 		windows := mergeLineWindows(grouped[path])
@@ -915,15 +508,16 @@ func renderSearchContext(matches []searchMatch, total, omittedFiles int, capped 
 			b.WriteString(body)
 			b.WriteByte('\n')
 			remaining -= lines
+			selectedLines += lines
 		}
 		if remaining <= 0 {
 			break
 		}
 	}
 	if outputLimited {
-		fmt.Fprintf(&b, "\n[context truncated at %d source lines; narrow the pattern or bounds]", searchOutputLines)
+		fmt.Fprintf(&b, "\n[context bounded at %d source lines; narrow the pattern or path]", searchOutputLines)
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return strings.TrimRight(b.String(), "\n"), selectedLines, outputLimited
 }
 
 func mergeLineWindows(windows []lineWindow) []lineWindow {

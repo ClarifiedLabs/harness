@@ -4589,7 +4589,7 @@ func TestHandoffToImplementationReseedsContext(t *testing.T) {
 		t.Fatalf("seeded transcript invalid: %v", err)
 	}
 	seed := msgs[0].Content[0].Text
-	for _, want := range []string{"Implementation handoff", ready.ArtifactPath, "Active step change", "tests run with go test", "Additional input from the user", "preserve the public API"} {
+	for _, want := range []string{"Implementation handoff", ready.ArtifactPath, "Active step: Implement the change", "tests run with go test", "Additional input from the user", "preserve the public API"} {
 		if !strings.Contains(seed, want) {
 			t.Errorf("seed missing %q: %q", want, seed)
 		}
@@ -4879,7 +4879,7 @@ func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
 		t.Errorf("handoff target = %q, want auto (default)", target)
 	}
 	got := app.Agent.Transcript()
-	if len(got) != 1 || !strings.Contains(got[0].Content[0].Text, ready.ArtifactPath) || !strings.Contains(got[0].Content[0].Text, "Active step change") {
+	if len(got) != 1 || !strings.Contains(got[0].Content[0].Text, ready.ArtifactPath) || !strings.Contains(got[0].Content[0].Text, "Active step: Implement the change") {
 		t.Errorf("transcript not reseeded with the active work capsule: %+v", got)
 	}
 }
@@ -6160,6 +6160,86 @@ func newTestAppWithGoal(t *testing.T, out, errw testWriter, fp *llmtest.FakeProv
 	app.GoalAutoContinue = true
 	app.GoalMaxContinuations = 25
 	return app
+}
+
+func TestWorkContextDeliveryIsOneShotAndPromptAdmissionPreservesActiveLineage(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	app.Work = workstate.NewStore(func() string { return app.SessionPath })
+	registry := tools.Default()
+	registry.Register(tools.NewUpdateWork(app.Work))
+	app.Agent.SetTools(registry)
+	root, err := app.Work.NewWork("original", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := app.Work.SetPlan(workstate.PlanUpdate{
+		BaseRevisionID: root.RevisionID, PlanState: workstate.PlanDraft, ActiveStepID: "change",
+		Nodes: []workstate.NodeDefinition{{ID: "change", Type: workstate.NodeStep, Title: "Change", Kind: workstate.KindChange}},
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.ArmWorkContext("test")
+	sink := newAccumulatingSink(app.Renderer, app, 1)
+	if got := sink.PeekRequestContext(); len(got) != 1 || !strings.Contains(got[0], "Objective: original") {
+		t.Fatalf("peek context = %+v", got)
+	}
+	if got := sink.RequestContext(); len(got) != 1 {
+		t.Fatalf("take context = %+v", got)
+	}
+	if got := sink.RequestContext(); len(got) != 0 {
+		t.Fatalf("repeated context = %+v", got)
+	}
+	if err := app.ensureWork("just answer a question"); err != nil {
+		t.Fatal(err)
+	}
+	if current := app.Work.Snapshot(); current.WorkID != planned.WorkID || current.RevisionID != planned.RevisionID {
+		t.Fatalf("active lineage changed for ordinary prompt: before=%+v after=%+v", planned, current)
+	}
+	if _, err := app.Work.Abandon("replace", "user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.ensureWork("replacement"); err != nil {
+		t.Fatal(err)
+	}
+	if current := app.Work.Snapshot(); current.WorkID == planned.WorkID || current.Objective != "replacement" {
+		t.Fatalf("terminal lineage was not replaced: %+v", current)
+	}
+	app.workCommand("new explicit objective")
+	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "Objective: explicit objective") {
+		t.Fatalf("explicit /work new context = %q", got)
+	}
+}
+
+func TestWorkContextEpochArchivesAndSeedsActiveStep(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	app.Work = workstate.NewStore(func() string { return app.SessionPath })
+	root, err := app.Work.NewWork("cross phases", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = app.Work.SetPlan(workstate.PlanUpdate{
+		BaseRevisionID: root.RevisionID, PlanState: workstate.PlanDraft, ActiveStepID: "next",
+		Nodes: []workstate.NodeDefinition{{ID: "next", Type: workstate.NodeStep, Title: "Next", Kind: workstate.KindChange}},
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := newAccumulatingSink(app.Renderer, app, 1)
+	sink.scheduleWorkContextEpoch("phase transition", "old", "next")
+	before := []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "old context"}}}}
+	next, applied, err := sink.TakeContextEpoch(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied || len(next) != 1 || !strings.Contains(next[0].Content[0].Text, "Work context checkpoint") || !strings.Contains(next[0].Content[0].Text, "Active step: Next") {
+		t.Fatalf("context epoch = applied=%v next=%+v", applied, next)
+	}
+	if app.SessionTree == nil {
+		t.Fatal("context epoch did not append a session-tree reset")
+	}
 }
 
 func TestREPLGoalCommandSetsObjective(t *testing.T) {

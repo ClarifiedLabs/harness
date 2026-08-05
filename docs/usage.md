@@ -386,8 +386,8 @@ The agent loop has several controls against runaway work:
   Consecutive single `run_command` turns that keep the same underlying shell
   command while changing only downstream pipeline filters are likewise steered
   after four turns and stopped after twelve ignored repeats.
-- Three consecutive turns that each perform one unbatched repository lookup get
-  a batching steer. Twelve inspection-only turns without mutation, verification,
+- Three consecutive turns that each perform one repository lookup get a steer
+  to coissue independent top-level lookups or use `read_file paths[]`. Twelve inspection-only turns without mutation, verification,
   wait, or coordination progress get one phase-transition steer. These semantic
   guards are advisory and never hard-stop a run; explicit user steering resets
   their streaks.
@@ -536,6 +536,9 @@ environment variables, JSON paths, types, and defaults. The concise
 | `compact_tool_result_max_bytes` | `integer` | - | - | - | `compact_tool_result_max_bytes` | 0 (automatic; negative disables truncation) | no | Harness compact tool result max bytes setting. |
 | `delegate_max_turns` | `integer` | - | - | - | `delegate_max_turns` | 20 | no | Harness delegate max turns setting. |
 | `delegate_max_depth` | `integer` | - | - | - | `delegate_max_depth` | 3 | no | Harness delegate max depth setting. |
+| `delegate_max_active` | `integer` | - | - | - | `delegate_max_active` | 4 | no | Harness delegate max active setting. |
+| `delegate_max_descendants` | `integer` | - | - | - | `delegate_max_descendants` | 16 | no | Harness delegate max descendants setting. |
+| `delegate_max_per_step` | `integer` | - | - | - | `delegate_max_per_step` | 4 | no | Harness delegate max per step setting. |
 | `delegate_output` | `string` | `status`, `off`, `lines` | `-delegate-output` | `HARNESS_DELEGATE_OUTPUT` | `delegate_output` | "status" | no | Harness delegate output setting. |
 | `delegate_tmux` | `boolean` | `true`, `false` | `-delegate-tmux` | `HARNESS_DELEGATE_TMUX` | `delegate_tmux` | derived: enabled inside tmux | no | Harness delegate tmux setting. |
 | `delegate_tmux_max_windows` | `integer` | - | - | - | `delegate_tmux_max_windows` | 4 | no | Harness delegate tmux max windows setting. |
@@ -604,7 +607,9 @@ environment variables, JSON paths, types, and defaults. The concise
   `read_file_result_max_lines`, or matching `HARNESS_*` env vars. The delegate
   tool also has config-file-only `delegate_max_turns` (maximum per-child
   tool-enabled loop budget)
-  and `delegate_max_depth` (recursive depth cap, root depth `0`).
+  `delegate_max_depth` (recursive depth cap, root depth `0`),
+  `delegate_max_active`, `delegate_max_descendants`, and
+  `delegate_max_per_step`. Continuations reuse their existing descendant slot.
   `delegate_output` / `HARNESS_DELEGATE_OUTPUT` / `-delegate-output` accepts
   `status` (the default one-row TTY display), `off` (no delegate-specific UI),
   and `lines` (the status row on a TTY plus curated scrolling child activity on
@@ -1449,6 +1454,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/auto` | alias for `/agent auto` |
 | `/handoff [-a agent] [-m model] [message]` | review the ready WorkState and supplementary context, then after approval switch to an implementation agent, apply optional agent/model overrides and user guidance, and start the implementation turn |
 | `/work` | show the active WorkState summary |
+| `/work steps` | show the compact executable-step checklist |
 | `/work show` | render the complete structured plan and current progress |
 | `/work new <objective>` | abandon nonterminal work and start a fresh implicit work item |
 | `/work abandon [reason]` | abandon the active work item |
@@ -1647,6 +1653,14 @@ target otherwise comes from `--handoff-agent`, `HARNESS_HANDOFF_AGENT`, config
 `handoff_agent`, or the `auto` default. Handoffs require an interactive session
 and are unavailable in one-shot mode.
 
+In ordinary auto mode, the initial implicit WorkState is not duplicated into
+request context. A nonterminal lineage remains active across follow-up prompts:
+no `update_work` call leaves it unchanged, `progress` steers it, `plan` extends
+it, and `/work new` explicitly replaces it. Recovery capsules are delivered
+once after resume, compaction, branching, agent/model switches, or host-observed
+evidence. Top-level phase changes and overlong-step decision gates create clean,
+archived context checkpoints at closed tool-turn boundaries.
+
 ## Sessions
 
 - A session path is a directory. `tree.ndjson` is the canonical append-only
@@ -1757,7 +1771,8 @@ entries/branches/leaves/depth, direct and delegate tool/command activity,
 calls per tool-bearing turn, standalone work-state/single-inspection turns, result
 size/truncation/timing totals and per-tool result volume, normalized repeated
 call aggregates with arguments redacted, command-step use, `SKILL.md`
-reads/activations, batched-search context deduplication, active-context
+reads/activations, search context volume/bounding, concurrent-search dedup batch
+size, overlap, low-yield calls, before/after bytes, active-context
 composition and the latest request estimate, parallel batches, compactions,
 and a hierarchical delegate breakdown with the highest direct-token children.
 A child that has metadata and replay events
@@ -1782,7 +1797,7 @@ failing at least three times consecutively).
 calls/results/errors/error rates, the structured error summary, build/runtime
 identity, and reliability telemetry reconstructed from the root and all
 physically nested delegate streams. Its `usage` and `storage` sections use the
-same analyzer-v3 vocabulary described below: physical root/child and
+same analyzer-v4 vocabulary described below: physical root/child and
 conversational/maintenance usage are split without folding child spend twice,
 and bounded file/reset metadata is reported without transcript bodies.
 
@@ -1800,7 +1815,7 @@ dropped. A stream is capped at a 256 MiB snapshot prefix, 16 MiB per record, and
 hierarchy from promotion distributions.
 `--before` applies an inclusive event-time cutoff and suppresses child-metadata
 fallbacks that could have been written after that cutoff. `--format json` is the
-stable analyzer-v3 input for corpus comparisons. Each item identifies its owning
+stable analyzer-v4 input for corpus comparisons. Each item identifies its owning
 root and root-derived cohort while retaining its own provider, model, build, and
 runtime metadata. Cohort keys include the root build (including modified state)
 and behavior-changing runtime profile.
@@ -1833,13 +1848,14 @@ prose, or unresolved questions. Legacy, invalid, failed, and canceled children
 remain explicit coverage failures rather than being inferred as complete;
 parent rework is currently unavailable.
 
-Analyzer v3 also reads bounded `work.ndjson` streams and reports root,
+Analyzer v4 also reads bounded `work.ndjson` streams and reports root,
 descendant, and inclusive WorkState counts: items/revisions, structured plans,
 completion/abandonment, handoffs/branches/decision-gate trips, step transitions,
 evidence batches, delegate/mutation/verification outcomes, attributed tool turns
-and inspection operations, plus per-step tool-turn and elapsed-time-to-first-
-mutation distributions. Objective text, evidence summaries, paths, and artifact
-contents are never copied into analysis output.
+and inspection operations. Its content-free per-step rows include time and turns
+to first mutation and verification, context resets, model/agent switches,
+delegate results, duration, and prompt relationships. Objective text, evidence
+summaries, paths, and artifact contents are never copied into analysis output.
 
 `session errors` lists the classified failures behind that section: every
 failed tool result and failed model request in one session (root plus delegate
@@ -1877,6 +1893,11 @@ and failed results carry a structured `error_kind` plus a bounded, rune-safe
 `error_excerpt` (2 lines / 240 runes) for error analysis; skill activation records
 carry only source and status; neither includes
 skill bodies or adds model-visible content.
+Coissued typed-search results use those metrics to identify one batch owner and
+report candidate, unique, and shown source lines, duplicate lines, low-yield
+siblings, and aggregate bytes before and after deduplication;
+the source text and search arguments remain only in the ordinary session
+transcript.
 New tool start/result records also snapshot `model_target`, `provider`,
 `api_type`, and `model`, making attribution stable if a resumed session later
 switches models.

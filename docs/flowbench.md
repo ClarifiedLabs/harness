@@ -28,6 +28,39 @@ These counts identify opportunities, not proof of savings. A deterministic
 flow can add schema tokens, prompt text, or extra model behavior, so each item
 must pass a live before/after test.
 
+## WorkState orientation baseline
+
+Analyzer v4 was also run against the complete `20260804T152107Z` hierarchy. Its
+recorded build cohort identifies Harness v0.4.6. This is the historic session
+that motivated structured WorkState; it is a reference target, not a paired
+causal comparison, because the old event stream predates WorkState attribution.
+
+| Reference metric | v0.4.6 hierarchy |
+|---|---:|
+| Physical sessions | 30 (1 root, 29 descendants) |
+| Completed/observed prompts | 37 / 37 |
+| Model turns | 1,389 |
+| Tool calls | 1,522 |
+| Tool/model errors | 46 / 9 |
+| Prompt turn budgets exhausted | 24 / 37 covered prompts |
+| Delegate closures caused by turn budget | 29 |
+| Maximum inspection/no-progress streak | 16 tool turns |
+| First observed successful mutation | 7 tool turns |
+| First observed successful verification | 4 tool turns |
+| Retention epochs / continuation resets | 254 / 182 |
+
+WorkState candidate sessions should be compared on the same repository task,
+agent/model route, limits, and outcome oracle. Analyzer v4 provides the primary
+orientation measures: per-step time and tool turns to first mutation and first
+verification, inspection operations, evidence batches, context resets,
+identity switches, delegate results, and terminal outcome. Ordinary turn/tool
+counts and token usage remain guardrails. A candidate is not better merely
+because it resets context more often or records more WorkState activity; it
+must preserve correctness while shortening orientation and avoiding new
+turn-limit failures. Run live provider comparisons only as an explicit paired
+benchmark because replaying the historic transcript cannot exercise the new
+request-context behavior.
+
 ## Applied implementation and test plan
 
 For each item:
@@ -65,8 +98,15 @@ The implementations were:
 The default matrix uses:
 
 - `deepseek:deepseek-v4-pro`
-- `alibaba-token-plan:qwen3.8-max-preview`
+- `deepseek:deepseek-v4-flash`
+- `alibaba-token-plan:qwen3.8-max`
 - `openai-codex:gpt-5.6-terra`
+- `openrouter:moonshotai/kimi-k2.7-code`
+- `openrouter:moonshotai/kimi-k3`
+- `openrouter:x-ai/grok-4.5`
+- `xiaomi:mimo-v2.5`
+- `openrouter:z-ai/glm-5.2`
+- `openrouter:anthropic/claude-sonnet-5`
 
 Each run uses medium reasoning, the independent agent, no web/MCP/LSP/Serena
 augmentation, an immutable target at
@@ -109,7 +149,7 @@ Available cases are `search_context`, `command_steps`, `work_coissue`,
 `-dry-run` to inspect ordering, `-resume` for validated completed records, and
 `-import-baseline-runs <runs.json>` to reuse a matching immutable baseline.
 
-The tool-accuracy suite runs its four synthetic, exact-oracle cases together:
+The tool-accuracy suite runs its four synthetic, evidence-backed cases together:
 
 ```sh
 go run ./scripts/flowbench -suite tool_accuracy -profile smoke \
@@ -122,7 +162,7 @@ go run ./scripts/flowbench -suite tool_accuracy -profile promotion \
 ```
 
 `smoke` uses Qwen 3.8 for one paired repetition (eight runs). `promotion` uses
-the three default model targets for five paired repetitions (120 runs).
+the ten default model targets for five paired repetitions (400 runs).
 Explicit `-models` and `-repetitions` override a profile. `edit_precision`
 checks five replacements and byte-for-byte sentinel preservation.
 `edit_drift_recovery` mutates context only after the first interactive
@@ -134,19 +174,24 @@ can be exempted while another late or unresolved miss remains effective.
 Ambiguous/invalid edits, timeouts, panics, unresolved misses, over-budget
 recovery, and unrelated top-level or nested errors are never forgiven.
 
-`known_path_batching` enumerates all 18 fixture paths and requires one successful
-`inspect` call that reads each exact path once. It also requires one successful
-three-query search batch with the exact two literal patterns, regex pattern, and
-known-directory scopes, plus one successful full-output `run_command` batch with
-the exact two non-empty argv steps. Assistant text and call counts alone do not
-satisfy these oracles. The search queries scope the fixture directory instead of
-listing 18 paths, which would exceed the per-query path limit.
-`unknown_path_discovery` supplies only a root, requires a successful error-free `glob`, `list_dir`, or `search`
-whose scope, pattern, and limits enumerate all fixture paths before any read,
-then requires one successful `inspect` call that reads each of the 18 exact
-discovered paths once. Both reject empty or partial discovery, duplicate or substituted
-paths, operation-local read errors, serial direct reads, all-failed inspect calls,
-missing marker evidence, and fixture changes.
+The v8 orientation oracle no longer requires `inspect` or a particular batching
+wrapper. `known_path_batching` enumerates all 18 fixture paths and requires
+successful reads covering them, successful directory-scoped regex searches for
+the two escaped literals and one regex, the exact two-step command result,
+requested marker evidence, and an unchanged fixture. Cosmetic command-step
+names are ignored. Historical nested search/inspect baselines and current
+flat-search/direct-read candidates normalize to the same evidence. Candidate
+adoption additionally requires no `inspect`, either a batched `read_file` or a
+turn coissuing multiple direct reads, and at least one turn coissuing independent
+repository lookups.
+`unknown_path_discovery` supplies only a root, requires successful complete
+discovery before any read, successful batched reads of the first and last
+discovered paths, requested marker evidence, and an unchanged fixture.
+Candidate adoption requires either a batched direct read or coissued direct
+reads and no `inspect`. Metrics also record successful read paths, direct read
+operations, coissued read/lookup turns, search context before and after shared
+batch shaping, duplicate and budget-omitted lines, low-yield search calls,
+batch bytes before/after, and bounded-search calls.
 
 Run records hash prompts, fixtures, binaries, and raw events and version their
 scoring oracle. Resume and baseline import reject stale record, prompt, oracle,
@@ -185,6 +230,10 @@ not satisfy the corresponding lane.
 | Five-pair promotion edit drift (`9e5cabf`) | Baseline 25/25, candidate 25/25; 25/25 adopted | Median errors 0→0; aggregate turns unchanged | Aggregate −4.6%; every model's median regressed 4.2–8.0% | Rejected: aggregate paired-median tokens increased |
 | Five-pair promotion known-path batching (`9e5cabf`) | Baseline 20/25, candidate 20/25; 25/25 adopted | Alibaba candidate 1/5 and turns 2→3; OpenAI 4/5 | Aggregate −3.7% | Historical v2 score; superseded by v3 and not used as current evidence |
 | Five-pair promotion unknown-path discovery (`9e5cabf`) | Baseline 25/25, candidate 23/25; 23/25 adopted | Alibaba candidate/adoption 3/5 | Aggregate −4.3% | Rejected: correctness fell and Alibaba adoption was below 4/5 |
+| WorkState DeepSeek V4 Flash confirmation (`1530a62`) | Baseline 3/3, candidate 2/3; candidate adopted 2/3 | Turn deltas +7, −2, −4 (median −2); primary interaction reduction 0 | −19.2%, +18.7%, +17.7% paired savings (median +17.7%) | Rejected: candidate correctness fell despite favorable median turns and tokens |
+| Simplified `update_work` Flash diagnostic (`830fa50`) | Baseline 1/1, candidate 1/1; candidate adopted | Turns 22→13; `update_work` calls/errors 11/10→1/0 | +65.9% (739,287→252,061 tokens) | One-pair issue confirmation; formal case gate still rejects because its legacy work-only-turn metric was 0→0 |
+| Simplified `update_work` ten-model matrix (`eed0f68`) | Baseline 30/30, candidate 24/30; adoption 13/30 | Correctness fell on V4 Pro, Qwen, Kimi K2.7, and all Xiaomi candidates | Aggregate paired-median −6.5%; only Flash and Kimi K3 cleared the per-model correctness, adoption, token, and turn gates | Rejected; retain the simpler progress contract but redesign the remaining plan/receipt flow before promotion |
+| Flat-plan focused smoke (`d6bb9a8`) | Baseline 2/4, candidate 2/4; adoption 3/4 | Turns totaled 45→42; `update_work` errors fell 4→1 | Paired-median −16.7%; Qwen +20.8%, Mimo +14.1%, V4 Pro −95.2%, Kimi K2.7 −47.5% | Rejected at smoke; plan-validation loops disappeared, but efficiency did not clear the focused gate |
 
 The 2026-08-03 tool-accuracy smoke compared baseline `446e00c` with product
 candidate `013255c` over five configured provider routes, one alternating pair
@@ -211,6 +260,284 @@ promotion evidence under the stronger v3 oracle.
 Candidate `9e5cabf` therefore fixes the focused edit behavior but does not qualify
 the full change package for promotion.
 
+A later WorkState completion snapshot (`1530a62`, baseline `b010639`) added
+`deepseek:deepseek-v4-flash` as a focused candidate route. Its three
+`work_coissue` pairs used 16/23, 16/14, and 16/12 baseline/candidate turns and
+492,419/586,866, 286,026/232,662, and 488,303/401,739 tokens. The first
+candidate missed required output content, so the lane was rejected even though
+the other two candidate runs were correct and the paired median favored the
+candidate.
+
+The same Flash route ran the four-case tool-accuracy smoke. `edit_precision`
+passed both sides but regressed from 22,600 to 33,692 tokens and 4 to 6 turns;
+`edit_drift_recovery` passed both sides and improved from 40,708 to 33,557
+tokens; `known_path_batching` failed both sides while improving from 23,535 to
+20,154 tokens; and `unknown_path_discovery` passed both sides with 18,749 to
+18,215 tokens. The WorkState and tool-accuracy Flash runs reported $0.169569 in
+total provider cost. Transcripts showed that model-authored work, revision,
+step, and evidence/result IDs were the dominant new coordination failure, which
+motivated moving that bookkeeping behind the model-facing `update_work`
+contract.
+
+A one-pair Flash diagnostic then compared that simplified contract (`830fa50`)
+with `b010639`. Both runs passed the content oracle. The baseline used 22 turns,
+739,287 tokens, and 11 `update_work` calls with 10 tool errors; the candidate
+used 13 turns, 252,061 tokens, and one successful `update_work` call. This is
+strong issue-level evidence, but not promotion evidence: it is one pair, and the
+existing `work_coissue` primary metric only counts avoidable work-only turns,
+which were zero on both sides. The pair reported $0.064874, bringing the Flash
+campaign total to $0.234443.
+
+The subsequent three-pair, ten-model matrix (`eed0f68`, baseline `b010639`)
+ran 60 valid sessions. Baseline correctness was 30/30; candidate correctness
+fell to 24/30, adoption was 13/30, and aggregate paired-median tokens regressed
+6.5%. Recorded per-run cost fields summed to $8.580135; Qwen and Terra used
+subscription routes. Per-model results were:
+
+| Model | Correctness baseline→candidate | Adoption | Paired-median tokens | Median turn delta |
+|---|---:|---:|---:|---:|
+| DeepSeek V4 Pro | 3/3→2/3 | 0/3 | −117.2% | +10 |
+| DeepSeek V4 Flash | 3/3→3/3 | 2/3 | +45.7% | −5 |
+| Qwen 3.8 Max | 3/3→2/3 | 2/3 | +10.2% | 0 |
+| GPT-5.6 Terra | 3/3→3/3 | 0/3 | +29.8% | 0 |
+| Kimi K2.7 Code | 3/3→2/3 | 1/3 | −79.8% | +6 |
+| Kimi K3 | 3/3→3/3 | 3/3 | +61.1% | −6 |
+| Grok 4.5 | 3/3→3/3 | 0/3 | −27.0% | +3 |
+| Mimo V2.5 | 3/3→0/3 | 1/3 | +15.2% | +1 |
+| GLM 5.2 | 3/3→3/3 | 1/3 | +65.4% | −5 |
+| Claude Sonnet 5 | 3/3→3/3 | 3/3 | −24.2% | +1 |
+
+Positive token percentages are savings. The median hides material tails: GLM's
+third candidate took 52 turns and regressed 173.4%, while Qwen's third candidate
+took 50 turns, changed the prepared workspace, and omitted required output.
+Across the matrix, `update_work` calls/errors improved substantially for Flash,
+Terra, both Kimi routes, Sonnet, and Xiaomi, but V4 Pro, Qwen, and Grok still
+looped on plan validation or work coordination. Several models also tried to
+read the session-relative plan artifact path from the target checkout. This
+separates the successful removal of opaque progress IDs from the still-complex
+model-facing plan schema and artifact receipt. The canonical combined receipt
+is `/tmp/harness-updatework-all-r3/work_coissue-summary.md`.
+
+The next candidate therefore kept the simplified progress path while replacing
+model-authored nodes, phases, IDs, plan state, and active selection with a flat
+ordered step list. Harness generates the durable structure and withholds the
+session-relative artifact path from model receipts and ordinary recovery
+capsules.
+
+A one-pair focused smoke (`d6bb9a8`, baseline `eed0f68`) then ran the four routes
+that had lost correctness: V4 Pro, Qwen, Kimi K2.7 Code, and Mimo V2.5. Baseline
+and candidate correctness were both 2/4. V4 Pro omitted `internal/config` on both
+sides; Mimo omitted `internal/config` and `cmd/harness` on both sides. Qwen and
+Kimi remained correct. The candidate eliminated V4 Pro's four consecutive
+plan-validation errors and Mimo's malformed inspection error; its only
+`update_work` error was a Qwen call that put progress fields beside `mode`
+instead of under `progress`, then self-corrected. Total turns improved 45→42,
+but candidate tokens increased from 794,382 to 1,076,989 and paired-median token
+savings were −16.7%. The V4 Pro and Kimi token pairs regressed 95.2% and 47.5%
+despite neither candidate hitting a plan-validation error. The focused receipt
+is `/tmp/harness-flat-plan-focused-r1/work_coissue-summary.md`; reported run cost
+fields sum to $0.170756, with Qwen on a subscription route. Stop before a full
+matrix: the smoke supports the interface diagnosis but not an efficiency
+promotion, so the next experiment should isolate why V4 Pro and Kimi expand
+their investigation after receiving the smaller schema.
+
+The search-surface experiment then compared a flat, host-bounded `search` and
+top-level read-only coissuing against `d6bb9a8`. Its initial four-model
+`work_coissue` trace (`4d3ee23`) kept baseline and candidate correctness at 4/4,
+removed all nine built-in `inspect` calls, reduced nested operation errors from
+7 to 0, and reduced shown tool-result bytes from 597,160 to 456,033 (23.6%).
+Paired-median token savings were 5.2%, but the model lanes were mixed: V4 Pro
+saved 72.0% and 12 turns, Terra saved 21.4% and two turns, Kimi K2.7 regressed
+10.9% and three turns, and Qwen regressed 55.5% and six turns. Qwen's last two
+turns were `update_work` validation failures rather than search failures; Kimi
+continued searching without tool errors. This supports removing the nested
+wrapper, but not a count-only search throttle that would also penalize Terra's
+successful search-heavy run.
+
+The final regex-only surface (`5a486c3`) removed the remaining
+`fixed_strings` ambiguity. Under the v7 orientation oracle, one-pair focused
+preflights were correct and adopted on both sides: Kimi's known-path lane used
+10,238/9,851 baseline/candidate tokens (3.8% saving) in two turns each, and
+Qwen's unknown-path lane used 16,082/15,055 tokens (6.4% saving) in three turns
+each. Neither candidate had a tool error. These are focused validation samples,
+not a multi-pair promotion matrix; a future search-saturation experiment should
+first add yield/overlap telemetry and rerun the natural code case rather than
+hard-capping calls from call count alone.
+
+An exact-final eight-model parallel preflight (`eb8c32f`, baseline `d6bb9a8`)
+then ran one pair each for `work_coissue`, `known_path_batching`, and
+`unknown_path_discovery` through one proxy and eight isolated Harness workers
+(48 sessions). Across all 24 pairs, correctness improved from 18 to 22,
+effective tool errors fell from 30 to 6, built-in `inspect` calls fell from 10
+to 0, turns fell from 135 to 132, and shown tool-result bytes fell from 649,141
+to 627,376. Paired-median token saving was 5.6%; total tokens fell from
+2,147,080 to 1,946,230 (9.4%). Recorded per-run cost fields summed to $3.065152;
+Terra used a subscription route.
+
+| Case | Correctness baseline→candidate | Paired-median tokens | Turns | Effective errors | Result bytes |
+|---|---:|---:|---:|---:|---:|
+| `known_path_batching` | 4/8→7/8 | +0.3% | 20→18 | 5→0 | 22,086→39,826 |
+| `unknown_path_discovery` | 8/8→8/8 | +6.4% | 26→24 | 0→0 | 12,135→11,351 |
+| `work_coissue` | 6/8→7/8 | −32.7% | 89→90 | 25→6 | 614,920→576,199 |
+
+The natural-code case remained heterogeneous:
+
+| Model | Correctness baseline→candidate | Token saving | Turn delta |
+|---|---:|---:|---:|
+| DeepSeek V4 Flash | 1→1 | +55.4% | −7 |
+| DeepSeek V4 Pro | 0→1 | +10.8% | +1 |
+| GPT-5.6 Terra | 1→1 | +59.7% | −3 |
+| Claude Sonnet 5 | 1→1 | −22.6% | −1 |
+| Kimi K3 | 1→1 | −85.2% | +2 |
+| Grok 4.5 | 1→1 | −87.3% | +2 |
+| GLM 5.2 | 1→1 | −46.9% | +2 |
+| Mimo V2.5 | 0→0 | −42.9% | +5 |
+
+The candidate natural runs accumulated 509–1,481 rendered search-context lines
+per model across 7–16 flat calls. The known-path case exposed the same mechanism
+more deterministically: three independent searches returned overlapping source
+separately, increasing shown result bytes even though the old nested renderer
+could deduplicate them. The next candidate should preserve the flat top-level
+surface while enforcing a per-turn aggregate search budget and merging
+overlapping source windows across coissued search results. A count-only search
+throttle is still unsupported: Terra and V4 Flash were search-heavy winners,
+while several regressors issued fewer searches than their baselines. The v7
+unknown-path adoption metric also undercounts valid direct coissuing: Sonnet
+issued two `read_file` calls together in one turn, but the metric recognizes
+only one `read_file paths[]` call.
+
+A shared-search-batch candidate (`cdce7da`, immediate-parent baseline
+`eb8c32f`) then ran the same eight-model, three-case matrix under the v8 oracle:
+48 valid sessions through one proxy and eight parallel isolated workers. All
+records completed with exit zero, unique matrix keys, exact requested-model
+attribution, and the expected baseline/candidate hashes. Candidate adoption was
+22/24: 8/8 in both orientation cases and 6/8 in `work_coissue`.
+
+| Case | Correctness baseline→candidate | Paired-median tokens | Turns | Effective errors | Result bytes |
+|---|---:|---:|---:|---:|---:|
+| `known_path_batching` | 6/8→6/8 | +5.0% | 19→19 | 1→2 | 39,235→23,897 |
+| `unknown_path_discovery` | 7/8→8/8 | −0.3% | 24→24 | 0→0 | 10,495→11,223 |
+| `work_coissue` | 8/8→6/8 | +5.6% | 92→92 | 12→7 | 608,075→544,383 |
+| **Overall** | **21/24→20/24** | **−0.1%** | **135→135** | **13→9** | **657,805→579,503** |
+
+Aggregate tokens fell 2,175,523→2,036,298 (6.4%), despite the approximately
+flat median pair, because natural-case gains and regressions were strongly
+model-dependent. Recorded cost fields summed to $3.189264; Terra used a
+subscription route. Across 40 candidate batches containing 102 search calls,
+7,559 candidate source lines became 5,769 shown lines (−23.7%): 772 duplicate
+lines were suppressed and 1,018 unique lines hit the shared limit. Batch result
+bytes fell 364,279→257,284 (−29.4%). The deterministic known-path workload
+showed the mechanism most clearly: all eight candidates reduced 36 lines to 12
+and 3,300 bytes to 1,374 per run, with no unique lines omitted.
+
+The correctness audit did not establish a batching-caused failure. Both failed
+candidate known-path runs issued an extra `run_command`; their search batches
+omitted no unique lines, and the baseline also had two failures on the same
+command contract. The failed V4 Pro natural run had no budget-omitted search
+lines. Mimo omitted 200 lines in later broad searches, but its initial
+unomitted batch included the `cmd/harness` wiring that its otherwise accurate
+final answer failed to name. The unknown-path control activated no shared
+search batch yet still changed one correctness result and several token totals,
+confirming material one-pair sampling variance.
+
+This is a mechanism win and a promising context-efficiency candidate, but not a
+formal promotion result: correctness fell by one overall and natural-model
+token results remained heterogeneous. This triggered the predeclared fresh
+five-pair focused confirmation below. The preflight receipt is in
+`/tmp/harness-search-batch-eight-20260805-r1`.
+
+The unchanged candidate then completed five fresh `work_coissue` pairs for all
+eight models: 80/80 valid sessions with exit zero, exact model attribution,
+five unique repetition keys, and the expected v8 oracle and revision hashes.
+Aggregate correctness tied at 31/40. Candidate adoption was 27/40; avoidable
+work-only turns changed 15→16, so the unrelated WorkState primary metric did not
+improve. Paired-median token saving was 10.3%, total tokens fell
+8,484,102→7,562,020 (10.9%), turns changed 420→419, effective errors fell
+52→50, and shown result bytes fell 2,958,522→2,742,530 (7.3%). Recorded cost
+fields fell $5.908371→$4.497822, largely through the Sonnet lane; Terra used a
+subscription route.
+
+| Model | Correctness baseline→candidate | Paired-median tokens | Total-token saving | Median turn delta | Effective errors |
+|---|---:|---:|---:|---:|---:|
+| DeepSeek V4 Flash | 5/5→5/5 | −1.7% | −6.7% | +2 | 6→8 |
+| DeepSeek V4 Pro | 2/5→2/5 | −4.4% | −9.2% | 0 | 10→22 |
+| GPT-5.6 Terra | 5/5→5/5 | −2.8% | −14.6% | +1 | 1→3 |
+| Claude Sonnet 5 | 5/5→5/5 | +13.9% | +29.2% | −2 | 6→1 |
+| Kimi K3 | 5/5→5/5 | −19.8% | −15.2% | +1 | 5→8 |
+| Grok 4.5 | 5/5→5/5 | +23.5% | +14.3% | −1 | 2→2 |
+| GLM 5.2 | 4/5→3/5 | +9.1% | +26.6% | 0 | 4→1 |
+| Mimo V2.5 | 0/5→1/5 | +31.4% | +37.7% | −2 | 18→5 |
+
+The mechanism remained deterministic: 133 candidate batches covering 326
+search calls reduced 30,928 candidate lines to 24,594 shown lines (−20.5%),
+suppressing 2,534 duplicates and omitting 3,800 unique lines. Batch bytes fell
+1,551,178→1,158,050 (−25.3%). The model response was bifurcated, however: only
+21/40 pairs saved tokens, four model lanes improved on paired-median tokens,
+and four regressed. Candidate correctness failures still consisted only of
+missing required path labels, but GLM lost one pass while Mimo gained one.
+
+The exact aggregate-budget candidate therefore does not advance as the
+provider-neutral default. The next causal ablation should keep cross-call
+`(path, line)` deduplication and telemetry but remove the additional shared cap
+on unique context, retaining each call's existing host-owned bounds. This
+preserves the deterministic overlap reduction while testing whether unique-line
+omission causes the extra turns seen in Flash, V4 Pro, Terra, and Kimi. The
+focused receipt is in
+`/tmp/harness-search-batch-work-confirm-20260805-r1`.
+
+One baseline Mimo sample also exposed an independent runtime-bound gap: it
+issued three searches with `path:"/"`, causing sorted ripgrep processes to scan
+the filesystem root for more than seven minutes before completing. Output caps
+did not provide a runtime cap. Treat typed-search runtime bounding as a separate
+tool-efficiency follow-up rather than folding it into the deduplication
+ablation.
+
+The causal dedupe-only ablation then compared `01e272a` with its immediate
+root-safe aggregate-cap parent `9f49dbe`. The filesystem-root rejection was
+present in both revisions, so the only candidate difference was removing the
+additional batch line/byte cap while retaining cross-call `(path, line)`
+deduplication and telemetry. One fresh `work_coissue` pair ran for each of the
+same eight models through one proxy and eight parallel isolated workers. All
+16 records were valid v8 sessions with exit zero, unique matrix keys, exact
+model attribution, and the expected revisions.
+
+| Model | Correctness baseline→candidate | Paired tokens | Turn delta | Effective errors | Unique lines omitted |
+|---|---:|---:|---:|---:|---:|
+| DeepSeek V4 Flash | 1/1→1/1 | +7.1% | −2 | 2→0 | 100→0 |
+| DeepSeek V4 Pro | 0/1→1/1 | +30.3% | −4 | 2→2 | 0→0 |
+| GPT-5.6 Terra | 1/1→1/1 | +24.2% | −1 | 1→1 | 713→0 |
+| Claude Sonnet 5 | 1/1→1/1 | +4.2% | 0 | 0→1 | 0→0 |
+| Kimi K3 | 1/1→1/1 | −7.6% | −1 | 1→1 | 0→0 |
+| Grok 4.5 | 1/1→1/1 | +9.2% | −1 | 0→0 | 305→0 |
+| GLM 5.2 | 1/1→1/1 | +2.6% | 0 | 0→1 | 60→0 |
+| Mimo V2.5 | 0/1→1/1 | +5.5% | +1 | 0→2 | 116→0 |
+
+Correctness improved 6/8→8/8. Seven of eight pairs saved tokens; the sole
+regression was Kimi at 7.6%, below the 10% focused-confirmation trigger. The
+paired-model median saving was 6.3%, total tokens fell 1,991,857→1,700,312
+(14.6%), turns fell 90→82, and shown result bytes fell 641,331→575,099
+(10.3%). All candidates called `update_work`; five satisfied the stricter
+coissuing adoption metric, unchanged from the root-safe baseline. Effective
+errors changed 6→8, but two candidate errors were intentional filesystem-root
+rejections described below.
+
+The candidate's 24 batches covered 54 parseable search results within 80 total
+search calls. Dedupe alone reduced 5,735 individually bounded context lines to
+5,248 shown lines (−8.5%) and batch bytes 292,126→258,851 (−11.4%), suppressing
+487 duplicates while omitting zero unique lines. This preserves the
+deterministic overlap benefit without the aggregate-cap candidate's 1,294
+omitted unique lines in the paired baseline sample. No correctness loss and no
+model-level token regression above 10% means the decision rule does not require
+a five-pair escalation. Advance dedupe-only shaping as the provider-neutral
+default; retain individual search bounds as the only unique-context budget.
+
+The root guard also received a direct live exercise. Candidate Mimo coissued
+two first-turn searches with `path:"/"`; both returned `invalid_args` in under
+one millisecond, after which the model retried with `path:"."` on the next turn
+and passed the correctness oracle. The prior seven-minute root scan is therefore
+closed by argument validation rather than a runtime timeout. The ablation
+receipt is in `/tmp/harness-search-dedupe-only-eight-20260805-r1`.
+
 The historical focused results are in
 `/tmp/harness-flowbench-edit-drift-446e00c-9e5cabf-r5` and
 `/tmp/harness-flowbench-known-path-446e00c-9e5cabf-r5`; the historical promotion
@@ -235,7 +562,7 @@ precision failed; a focused guidance revision fixed that case. Longer focused
 confirmation cleared the smoke's Sonnet anomaly, but the resulting five-pair
 promotion matrix exposed discovery correctness failures and aggregate token
 regressions in every case, so the package still did not advance. Historical
-known-path scores require a fresh run under the v3 oracle.
+known-path scores require a fresh run under the v7 orientation oracle.
 
 Future changes should rerun the affected case against its immediate parent
 revision. Treat a one-pair smoke failure as a trigger for a fresh five-pair

@@ -128,6 +128,7 @@ func (app *App) navigateTree(target string, readLine func(string) (string, error
 				fmt.Fprintf(app.Errw, "[tree failed: restore work revision: %v]\n", err)
 				return false
 			}
+			app.ArmWorkContext("branch checkout")
 			app.SessionTree.SetWorkRevisionID(state.RevisionID)
 		}
 	}
@@ -189,6 +190,7 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 				fmt.Fprintf(app.Errw, "[%s failed: restore work revision: %v]\n", source, err)
 				return false
 			}
+			app.ArmWorkContext("branch checkout")
 		}
 	}
 	if app.Background != nil {

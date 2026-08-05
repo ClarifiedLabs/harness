@@ -27,7 +27,7 @@ func TestInspectBatchesReadOnlyOperationsInInputOrder(t *testing.T) {
 	}}
 	input, err := json.Marshal(inspectArgs{Operations: []inspectOperation{
 		{Tool: "read_file", Input: json.RawMessage(`{"path":` + quoteJSON(first) + `}`)},
-		{Tool: "search", Input: json.RawMessage(`{"queries":[{"pattern":"second","paths":[` + quoteJSON(dir) + `],"output":"exists"}]}`)},
+		{Tool: "search", Input: json.RawMessage(`{"pattern":"second","path":` + quoteJSON(dir) + `}`)},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +39,7 @@ func TestInspectBatchesReadOnlyOperationsInInputOrder(t *testing.T) {
 	if firstHeader, secondHeader := strings.Index(out, "## 1. read_file"), strings.Index(out, "## 2. search"); firstHeader < 0 || secondHeader <= firstHeader {
 		t.Fatalf("operation order not preserved:\n%s", out)
 	}
-	for _, want := range []string{"1\tfirst", "true: " + second + ":1"} {
+	for _, want := range []string{"1\tfirst", second + ":1-5"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
@@ -87,7 +87,7 @@ func TestInspectAllRuntimeFailuresAreStructuredBatchFailure(t *testing.T) {
 
 func TestInspectOmitsGitOperationsWhenGitUnavailable(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	registry, _ := DefaultWithOptions(Options{})
+	registry, _ := CatalogWithOptions(Options{})
 	tool, ok := registry.Lookup("inspect")
 	if !ok {
 		t.Fatal("inspect was not registered")

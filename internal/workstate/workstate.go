@@ -70,6 +70,7 @@ const (
 	DecisionThreshold      = 12
 	EvidenceTurnAllowance  = 4
 	RequestContextMaxBytes = 12 << 10
+	implicitStepID         = "implicit_current"
 )
 
 var nodeIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
@@ -287,6 +288,10 @@ func (s *Store) NewWork(objective, actor string) (*State, error) {
 	if s.current != nil && !terminalLifecycle(s.current.Lifecycle) {
 		old := cloneState(s.current)
 		old.Lifecycle = LifecycleAbandoned
+		if node := nodeByID(old, old.ActiveStepID); node != nil {
+			node.Status = StatusPending
+		}
+		old.ActiveStepID = ""
 		old.CompletionSummary = "replaced by new work"
 		if _, err := s.commitLocked(old, actor, "abandon_replaced"); err != nil {
 			return nil, err
@@ -327,6 +332,10 @@ func (s *Store) Abandon(reason, actor string) (*State, error) {
 	}
 	next := cloneState(s.current)
 	next.Lifecycle = LifecycleAbandoned
+	if node := nodeByID(next, next.ActiveStepID); node != nil {
+		node.Status = StatusPending
+	}
+	next.ActiveStepID = ""
 	next.CompletionSummary = strings.TrimSpace(reason)
 	return s.commitLocked(next, actor, "abandon")
 }
@@ -357,10 +366,12 @@ func (s *Store) SetPlan(update PlanUpdate, actor string) (*State, error) {
 	if s.current == nil {
 		return nil, errors.New("no active work")
 	}
-	if update.BaseRevisionID != s.current.RevisionID {
+	if update.BaseRevisionID != "" && update.BaseRevisionID != s.current.RevisionID {
 		return nil, fmt.Errorf("stale work revision %q (current %q)", update.BaseRevisionID, s.current.RevisionID)
 	}
 	next := cloneState(s.current)
+	carryEvidence, carryResults := implicitObservations(*next)
+	previousActiveStepID := next.ActiveStepID
 	next.Title = strings.TrimSpace(update.Title)
 	if strings.TrimSpace(update.Objective) != "" {
 		next.Objective = strings.TrimSpace(update.Objective)
@@ -381,6 +392,7 @@ func (s *Store) SetPlan(update PlanUpdate, actor string) (*State, error) {
 		oldByID[node.ID] = node
 	}
 	next.Nodes = make([]Node, len(update.Nodes))
+	next.ActiveStepID = ""
 	for i, def := range update.Nodes {
 		next.Nodes[i].NodeDefinition = cloneDefinition(def)
 		if old, ok := oldByID[def.ID]; ok {
@@ -394,9 +406,34 @@ func (s *Store) SetPlan(update PlanUpdate, actor string) (*State, error) {
 			next.Nodes[i].Status = StatusPending
 		}
 	}
+	if previous := nodeByID(next, previousActiveStepID); previous != nil && previous.Status == StatusInProgress {
+		next.ActiveStepID = previous.ID
+	}
+	if len(carryEvidence) > 0 || len(carryResults) > 0 {
+		targetID := update.ActiveStepID
+		if targetID == "" || nodeByID(next, targetID) == nil || !isLeaf(*next, targetID) {
+			targetID = firstExecutableLeafID(*next, false)
+		}
+		if targetID == "" {
+			return nil, errors.New("structured plan requires a step to retain implicit work evidence")
+		}
+		target := nodeByID(next, targetID)
+		for _, evidence := range carryEvidence {
+			if !hasEquivalentEvidence(target.Evidence, evidence) {
+				target.Evidence = append(target.Evidence, evidence)
+			}
+		}
+		target.Results = appendUniqueResults(target.Results, carryResults)
+	}
 	if update.ActiveStepID != "" {
 		if err := activateStep(next, update.ActiveStepID); err != nil {
 			return nil, err
+		}
+	} else if next.ActiveStepID == "" && next.Lifecycle == LifecycleActive && !hasBlockingQuestion(*next) {
+		if nextID := firstExecutableLeafID(*next, true); nextID != "" {
+			if err := activateStep(next, nextID); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := Validate(*next); err != nil {
@@ -425,8 +462,33 @@ func (s *Store) Progress(update ProgressUpdate, actor string) (*State, error) {
 	next := cloneState(s.current)
 	changed := false
 	stepID := update.StepID
-	if stepID == "" {
+	if next.PlanState == PlanImplicit && progressNeedsStep(update) {
+		stepID = implicitStepID
+		node := nodeByID(next, stepID)
+		if node == nil {
+			next.Nodes = append(next.Nodes, Node{
+				NodeDefinition: NodeDefinition{ID: implicitStepID, Type: NodeStep, Title: "Current task", Kind: KindDiscover},
+				Status:         StatusInProgress,
+			})
+			next.ActiveStepID = stepID
+			changed = true
+		} else if node.Status == StatusPending {
+			if err := activateStep(next, stepID); err != nil {
+				return nil, err
+			}
+			changed = true
+		}
+	} else if stepID == "" {
 		stepID = next.ActiveStepID
+		if stepID == "" && progressNeedsStep(update) {
+			stepID = firstExecutableLeafID(*next, true)
+			if stepID != "" {
+				if err := activateStep(next, stepID); err != nil {
+					return nil, err
+				}
+				changed = true
+			}
+		}
 	}
 	var node *Node
 	if stepID != "" {
@@ -454,6 +516,9 @@ func (s *Store) Progress(update ProgressUpdate, actor string) (*State, error) {
 		}
 	}
 	refs := append(cloneStrings(update.EvidenceIDs), update.ResultIDs...)
+	if len(refs) == 0 && node != nil && (update.Status == StatusCompleted || update.WorkspaceReconciled) {
+		refs = freshObservationRefs(*node)
+	}
 	if update.Status != "" {
 		if node == nil {
 			return nil, errors.New("step status requires an active or explicit step")
@@ -471,7 +536,7 @@ func (s *Store) Progress(update ProgressUpdate, actor string) (*State, error) {
 				return nil, errors.New("completed step requires summary")
 			}
 			if len(refs) == 0 {
-				return nil, errors.New("completed step requires evidence or result citations")
+				return nil, errors.New("completed step requires fresh evidence or results")
 			}
 			if err := validateRefs(*node, refs); err != nil {
 				return nil, err
@@ -562,26 +627,36 @@ func (s *Store) Progress(update ProgressUpdate, actor string) (*State, error) {
 		changed = true
 	}
 	if update.WorkspaceReconciled {
-		if !next.WorkspaceUnverified {
-			return nil, errors.New("workspace is not awaiting reconciliation")
+		if next.WorkspaceUnverified {
+			if strings.TrimSpace(update.ReconciliationSummary) == "" || len(refs) == 0 {
+				return nil, errors.New("workspace reconciliation requires summary and fresh evidence/results")
+			}
+			if node == nil {
+				return nil, errors.New("workspace reconciliation requires an active step")
+			}
+			if err := validateRefs(*node, refs); err != nil {
+				return nil, err
+			}
+			if err := validateFreshRefs(*node, refs); err != nil {
+				return nil, err
+			}
+			next.WorkspaceUnverified = false
+			changed = true
 		}
-		if strings.TrimSpace(update.ReconciliationSummary) == "" || len(refs) == 0 {
-			return nil, errors.New("workspace reconciliation requires summary and fresh evidence/result citations")
-		}
-		if node == nil {
-			return nil, errors.New("workspace reconciliation requires an active or explicit step")
-		}
-		if err := validateRefs(*node, refs); err != nil {
-			return nil, err
-		}
-		if err := validateFreshRefs(*node, refs); err != nil {
-			return nil, err
-		}
-		next.WorkspaceUnverified = false
-		changed = true
 	}
 	if !changed {
+		if update.WorkspaceReconciled {
+			return cloneState(s.current), nil
+		}
 		return nil, errors.New("progress update made no change")
+	}
+	if next.ActiveStepID == "" && next.PlanState != PlanImplicit && !allRequiredLeavesDone(*next) &&
+		update.Status != StatusBlocked && next.Lifecycle == LifecycleActive {
+		if nextID := firstExecutableLeafID(*next, true); nextID != "" {
+			if err := activateStep(next, nextID); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if next.PlanState != PlanImplicit && allRequiredLeavesDone(*next) && next.ActiveStepID == "" && !hasBlockingQuestion(*next) && len(next.Blockers) == 0 && !next.WorkspaceUnverified {
 		next.Lifecycle = LifecycleCompleted
@@ -604,6 +679,10 @@ func progressIsMeaningful(update ProgressUpdate) bool {
 		len(update.Evidence) > 0 || update.WorkspaceReconciled
 }
 
+func progressNeedsStep(update ProgressUpdate) bool {
+	return update.Status != "" || len(update.Evidence) > 0 || len(update.EvidenceIDs) > 0 || len(update.ResultIDs) > 0 || update.WorkspaceReconciled
+}
+
 // AutoCompleteImplicit completes a planless non-autonomous task after a clean
 // model end. Callers are responsible for excluding goal/async work.
 func (s *Store) AutoCompleteImplicit(summary string) (*State, error) {
@@ -613,6 +692,17 @@ func (s *Store) AutoCompleteImplicit(summary string) (*State, error) {
 		return cloneState(s.current), nil
 	}
 	next := cloneState(s.current)
+	if node := nodeByID(next, next.ActiveStepID); node != nil {
+		refs := freshObservationRefs(*node)
+		if len(refs) > 0 {
+			node.Status = StatusCompleted
+			node.CompletionSummary = strings.TrimSpace(summary)
+			node.CompletionRefs = refs
+		} else {
+			node.Status = StatusPending
+		}
+	}
+	next.ActiveStepID = ""
 	next.Lifecycle = LifecycleCompleted
 	next.CompletionSummary = strings.TrimSpace(summary)
 	return s.commitLocked(next, "host", "auto_complete")
@@ -1040,7 +1130,7 @@ func validateNode(node Node) error {
 	}
 	if node.Status == StatusCompleted {
 		if strings.TrimSpace(node.CompletionSummary) == "" || len(node.CompletionRefs) == 0 {
-			return errors.New("completed step requires summary and evidence/result citations")
+			return errors.New("completed step requires summary and fresh evidence/results")
 		}
 		if err := validateRefs(node, node.CompletionRefs); err != nil {
 			return err
@@ -1193,6 +1283,19 @@ func nodeByID(state *State, id string) *Node {
 	return nil
 }
 
+func firstExecutableLeafID(state State, requiredOnly bool) string {
+	for _, node := range state.Nodes {
+		if node.Type != NodeStep || node.Status != StatusPending || !isLeaf(state, node.ID) {
+			continue
+		}
+		if requiredOnly && node.Optional {
+			continue
+		}
+		return node.ID
+	}
+	return ""
+}
+
 func isLeaf(state State, id string) bool {
 	for _, node := range state.Nodes {
 		if node.ParentID == id {
@@ -1260,6 +1363,49 @@ func makeEvidence(input EvidenceInput, at time.Time) (Evidence, error) {
 		return Evidence{}, err
 	}
 	return Evidence{ID: randomID(6), Kind: kind, Path: path, Symbol: strings.TrimSpace(input.Symbol), Summary: summary, ToolCallID: input.ToolCallID, CreatedAt: at}, nil
+}
+
+func implicitObservations(state State) ([]Evidence, []Result) {
+	if state.PlanState != PlanImplicit {
+		return nil, nil
+	}
+	var evidence []Evidence
+	var results []Result
+	for _, node := range state.Nodes {
+		evidence = append(evidence, cloneEvidence(node.Evidence)...)
+		results = append(results, cloneResults(node.Results)...)
+	}
+	return evidence, results
+}
+
+func appendUniqueResults(existing, additions []Result) []Result {
+	known := make(map[string]bool, len(existing))
+	for _, result := range existing {
+		known[result.ID] = true
+	}
+	for _, result := range additions {
+		if known[result.ID] {
+			continue
+		}
+		existing = append(existing, result)
+		known[result.ID] = true
+	}
+	return existing
+}
+
+func freshObservationRefs(node Node) []string {
+	refs := make([]string, 0, len(node.Evidence)+len(node.Results))
+	for _, evidence := range node.Evidence {
+		if !evidence.Stale {
+			refs = append(refs, evidence.ID)
+		}
+	}
+	for _, result := range node.Results {
+		if !result.Stale {
+			refs = append(refs, result.ID)
+		}
+	}
+	return refs
 }
 
 func validateRefs(node Node, refs []string) error {
@@ -1536,7 +1682,7 @@ func RenderStatus(state *State) string {
 	line := fmt.Sprintf("Work %s · %d/%d complete", state.Lifecycle, done, total)
 	if state.ActiveStepID != "" {
 		if node := nodeByID(state, state.ActiveStepID); node != nil {
-			line += fmt.Sprintf(" · active: %s (%s)", node.Title, node.ID)
+			line += " · active: " + node.Title
 		}
 	}
 	if state.Gate.DecisionRequired {
@@ -1551,10 +1697,10 @@ func RequestContext(state *State) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "[work id=%s revision=%s status=%s plan=%s]\nObjective: %s", state.WorkID, state.RevisionID, state.Lifecycle, state.PlanState, state.Objective)
+	fmt.Fprintf(&b, "[work status=%s plan=%s]\nObjective: %s", state.Lifecycle, state.PlanState, state.Objective)
 	if state.ActiveStepID != "" {
 		if node := nodeByID(state, state.ActiveStepID); node != nil {
-			fmt.Fprintf(&b, "\nActive step %s: %s (%s)", node.ID, node.Title, node.Kind)
+			fmt.Fprintf(&b, "\nActive step: %s (%s)", node.Title, node.Kind)
 			for _, target := range node.Targets {
 				fmt.Fprintf(&b, "\n  Target: %s", target)
 			}
@@ -1568,10 +1714,10 @@ func RequestContext(state *State) string {
 				fmt.Fprintf(&b, "\n  Verify: %s", check)
 			}
 			for _, evidence := range recentEvidence(node.Evidence, 6) {
-				fmt.Fprintf(&b, "\n  Evidence %s: %s (%s)", evidence.ID, evidence.Summary, evidence.Path)
+				fmt.Fprintf(&b, "\n  Evidence: %s (%s)", evidence.Summary, evidence.Path)
 			}
 			for _, result := range recentResults(node.Results, 6) {
-				fmt.Fprintf(&b, "\n  Result %s: %s %s", result.ID, result.Kind, result.Status)
+				fmt.Fprintf(&b, "\n  Result: %s %s", result.Kind, result.Status)
 			}
 		}
 	}
@@ -1584,12 +1730,9 @@ func RequestContext(state *State) string {
 		b.WriteString("\nWorkspace evidence is stale after branching; inspect current files and reconcile through update_work progress before completing steps.")
 	}
 	if state.Gate.DecisionRequired {
-		b.WriteString("\nDecision required: further inspection is blocked. Update the plan/progress, block/wait/complete, record selected evidence, or name one missing-evidence question.")
+		b.WriteString("\nDecision required: further inspection is blocked. Record concrete evidence or progress, block/wait/complete, or name one missing-evidence question.")
 	} else if state.Gate.AllowanceTurns > 0 {
 		fmt.Fprintf(&b, "\nEvidence allowance: %d inspection-bearing turns remain for %s.", state.Gate.AllowanceTurns, state.Gate.Question)
-	}
-	if state.ArtifactPath != "" {
-		fmt.Fprintf(&b, "\nPlan artifact: %s", state.ArtifactPath)
 	}
 	return truncateUTF8(b.String(), RequestContextMaxBytes)
 }
@@ -1635,6 +1778,93 @@ func recentResults(items []Result, n int) []Result {
 		return items
 	}
 	return items[len(items)-n:]
+}
+
+// RenderChecklist renders the compact executable projection of a WorkState.
+// It deliberately omits objectives, evidence, and results; those remain in the
+// full plan and active-step capsule.
+func RenderChecklist(state State) string {
+	if len(state.Nodes) == 0 {
+		return "No structured work steps.\n"
+	}
+	depths := make(map[string]int, len(state.Nodes))
+	var b strings.Builder
+	for _, node := range state.Nodes {
+		depth := 0
+		if node.ParentID != "" {
+			depth = depths[node.ParentID] + 1
+		}
+		depths[node.ID] = depth
+		if node.Type != NodeStep || !isLeaf(state, node.ID) {
+			continue
+		}
+		marker := " "
+		switch node.Status {
+		case StatusInProgress:
+			marker = ">"
+		case StatusCompleted:
+			marker = "x"
+		case StatusBlocked:
+			marker = "!"
+		case StatusSkipped:
+			marker = "-"
+		}
+		fmt.Fprintf(&b, "%s[%s] %s\n", strings.Repeat("  ", depth), marker, node.Title)
+	}
+	if b.Len() == 0 {
+		return "No executable work steps.\n"
+	}
+	return b.String()
+}
+
+// CrossesPhase reports whether moving between two executable leaves crosses a
+// top-level structural phase. Flat plans treat each leaf as its own phase.
+func CrossesPhase(state State, fromStepID, toStepID string) bool {
+	if fromStepID == "" || toStepID == "" || fromStepID == toStepID {
+		return false
+	}
+	return topLevelNodeID(state, fromStepID) != topLevelNodeID(state, toStepID)
+}
+
+func topLevelNodeID(state State, id string) string {
+	seen := make(map[string]bool, len(state.Nodes))
+	for id != "" && !seen[id] {
+		seen[id] = true
+		node := nodeByID(&state, id)
+		if node == nil || node.ParentID == "" {
+			return id
+		}
+		id = node.ParentID
+	}
+	return id
+}
+
+// AddEvidence attaches bounded host-observed evidence to a step in one
+// revision. Model-selected evidence continues to use Progress.
+func (s *Store) AddEvidence(stepID string, evidence []EvidenceInput, actor string) (*State, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.current == nil || len(evidence) == 0 {
+		return cloneState(s.current), nil
+	}
+	if stepID == "" {
+		stepID = s.current.ActiveStepID
+	}
+	next := cloneState(s.current)
+	node := nodeByID(next, stepID)
+	if node == nil {
+		return nil, fmt.Errorf("unknown work step %q", stepID)
+	}
+	for _, input := range evidence {
+		item, err := makeEvidence(input, s.clock()())
+		if err != nil {
+			return nil, err
+		}
+		if !hasEquivalentEvidence(node.Evidence, item) {
+			node.Evidence = append(node.Evidence, item)
+		}
+	}
+	return s.commitLocked(next, actor, "observe_evidence")
 }
 
 // AddResults attaches unambiguous host-observed results to a step in one

@@ -133,7 +133,7 @@ func TestOneShotSavesSessionAndRunsOneTurn(t *testing.T) {
 	}
 }
 
-func TestOneShotCreatesInjectsAndCompletesImplicitWork(t *testing.T) {
+func TestOneShotCreatesAndCompletesImplicitWorkWithoutCapsuleOverhead(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("done")},
@@ -148,12 +148,8 @@ func TestOneShotCreatesInjectsAndCompletesImplicitWork(t *testing.T) {
 	if code := OneShot(app, "ship the parser"); code != ExitOK {
 		t.Fatalf("exit code = %d", code)
 	}
-	if len(fp.Requests) != 1 || len(fp.Requests[0].RequestContext) != 1 {
+	if len(fp.Requests) != 1 || len(fp.Requests[0].RequestContext) != 0 {
 		t.Fatalf("request context = %+v", fp.Requests)
-	}
-	ctx := fp.Requests[0].RequestContext[0]
-	if !strings.Contains(ctx, "[work id=") || !strings.Contains(ctx, "Objective: ship the parser") {
-		t.Fatalf("work capsule = %q", ctx)
 	}
 	state := app.Work.Snapshot()
 	if state == nil || state.PlanState != workstate.PlanImplicit || state.Lifecycle != workstate.LifecycleCompleted {

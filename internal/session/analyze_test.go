@@ -337,7 +337,7 @@ func TestAnalysisJSONDeterministicVersionedAndTranscriptFree(t *testing.T) {
 	if first.String() != second.String() {
 		t.Fatalf("JSON is nondeterministic:\n%s\n%s", first.String(), second.String())
 	}
-	if strings.Contains(first.String(), "TOP SECRET") || !strings.Contains(first.String(), `"version": 3`) {
+	if strings.Contains(first.String(), "TOP SECRET") || !strings.Contains(first.String(), `"version": 4`) {
 		t.Fatalf("JSON leaked transcript or omitted version:\n%s", first.String())
 	}
 }

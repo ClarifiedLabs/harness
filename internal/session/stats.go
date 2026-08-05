@@ -175,6 +175,14 @@ type toolStats struct {
 	searchNoMatches     int
 	searchContextLines  int
 	searchUniqueLines   int
+	searchShownLines    int
+	searchBudgetOmitted int
+	searchBatches       int
+	searchBatchCalls    int
+	searchLowYieldCalls int
+	searchBatchBytesIn  int
+	searchBatchBytesOut int
+	searchBoundedCalls  int
 	resultsByName       map[string]toolResultStats
 	callShapes          map[string]map[string]int
 	skillReads          int
@@ -625,8 +633,36 @@ func collectToolStats(events []Event) (toolStats, error) {
 				}
 			}
 			if ev.Tool == "search" {
-				stats.searchContextLines += ev.ResultMetrics["context_lines_before_dedupe"]
-				stats.searchUniqueLines += ev.ResultMetrics["unique_context_lines"]
+				if ev.ResultMetrics["results_bounded"] != 0 || ev.ResultMetrics["context_bounded"] != 0 {
+					stats.searchBoundedCalls++
+				}
+				if ev.ResultMetrics["search_batch_member"] != 0 {
+					if ev.ResultMetrics["search_batch_metrics_owner"] == 0 {
+						continue
+					}
+					selected := ev.ResultMetrics["search_batch_context_lines_before"]
+					unique := ev.ResultMetrics["search_batch_unique_context_lines"]
+					shown := ev.ResultMetrics["search_batch_context_lines_after"]
+					stats.searchContextLines += selected
+					stats.searchUniqueLines += unique
+					stats.searchShownLines += shown
+					stats.searchBudgetOmitted += ev.ResultMetrics["search_batch_budget_lines_omitted"]
+					stats.searchBatches++
+					stats.searchBatchCalls += ev.ResultMetrics["search_batch_calls"]
+					stats.searchLowYieldCalls += ev.ResultMetrics["search_batch_low_yield_calls"]
+					stats.searchBatchBytesIn += ev.ResultMetrics["search_batch_bytes_before"]
+					stats.searchBatchBytesOut += ev.ResultMetrics["search_batch_bytes_after"]
+					continue
+				}
+				selected := ev.ResultMetrics["context_lines_before_dedupe"]
+				unique := ev.ResultMetrics["unique_context_lines"]
+				if selected == 0 {
+					selected = ev.ResultMetrics["context_lines"]
+					unique = selected
+				}
+				stats.searchContextLines += selected
+				stats.searchUniqueLines += unique
+				stats.searchShownLines += unique
 			}
 			continue
 		}
@@ -995,6 +1031,14 @@ func (stats *toolStats) add(other toolStats) {
 	stats.searchNoMatches += other.searchNoMatches
 	stats.searchContextLines += other.searchContextLines
 	stats.searchUniqueLines += other.searchUniqueLines
+	stats.searchShownLines += other.searchShownLines
+	stats.searchBudgetOmitted += other.searchBudgetOmitted
+	stats.searchBatches += other.searchBatches
+	stats.searchBatchCalls += other.searchBatchCalls
+	stats.searchLowYieldCalls += other.searchLowYieldCalls
+	stats.searchBatchBytesIn += other.searchBatchBytesIn
+	stats.searchBatchBytesOut += other.searchBatchBytesOut
+	stats.searchBoundedCalls += other.searchBoundedCalls
 	stats.skillReads += other.skillReads
 	for name, count := range other.byName {
 		stats.byName[name] += count
@@ -1146,9 +1190,10 @@ func writeSessionStats(w io.Writer, report statsReport) {
 		fmt.Fprintln(w)
 	}
 	if state.Runtime.SearchBackend != "" {
-		fmt.Fprintf(w, "  runtime: retention=%s context=%d search=%s delegate-max=%d prewarm=%t\n",
+		fmt.Fprintf(w, "  runtime: retention=%s context=%d search=%s delegate-max=%d active=%d descendants=%d per-step=%d prewarm=%t\n",
 			state.Runtime.RetentionPolicy, state.Runtime.ContextWindow, state.Runtime.SearchBackend,
-			state.Runtime.DelegateMaxTurns, state.Runtime.Prewarm)
+			state.Runtime.DelegateMaxTurns, state.Runtime.DelegateMaxActive, state.Runtime.DelegateMaxDescendants,
+			state.Runtime.DelegateMaxPerStep, state.Runtime.Prewarm)
 	}
 }
 
@@ -1306,8 +1351,15 @@ func writeOverallToolStats(w io.Writer, report statsReport) {
 	}
 	if all.searchContextLines > 0 {
 		duplicates := max(all.searchContextLines-all.searchUniqueLines, 0)
-		fmt.Fprintf(w, "  batched search context: %d selected source lines / %d unique (%d duplicates suppressed)\n",
-			all.searchContextLines, all.searchUniqueLines, duplicates)
+		fmt.Fprintf(w, "  search context: %d candidate source lines / %d unique / %d shown (%d duplicates suppressed, %d omitted by shared limits)\n",
+			all.searchContextLines, all.searchUniqueLines, all.searchShownLines, duplicates, all.searchBudgetOmitted)
+	}
+	if all.searchBatches > 0 {
+		fmt.Fprintf(w, "  shared search batches: %d (%d calls, %d low-yield); %d B before / %d B after\n",
+			all.searchBatches, all.searchBatchCalls, all.searchLowYieldCalls, all.searchBatchBytesIn, all.searchBatchBytesOut)
+	}
+	if all.searchBoundedCalls > 0 {
+		fmt.Fprintf(w, "  bounded search results: %d\n", all.searchBoundedCalls)
 	}
 	if len(all.resultsByName) > 0 {
 		fmt.Fprintln(w, "  result volume by tool (largest first):")

@@ -125,7 +125,7 @@ func Builtins() map[string]Definition {
 }
 
 func inspectionTools() []string {
-	names := []string{"read_file", "view_image", "list_dir", "glob", "search", "inspect", "update_work"}
+	names := []string{"read_file", "view_image", "list_dir", "glob", "search", "update_work"}
 	// run_command widens exploration (gh, builds, screenshots, live apps) for the
 	// read-only agents (explore, plan, review). None has first-class file-mutation
 	// tools (edit, write_file, apply_patch), so "don't modify the project" stays

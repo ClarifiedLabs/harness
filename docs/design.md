@@ -2030,45 +2030,50 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 - Available to the default `auto`/`independent` agents and the shared
   inspection set used by `explore`, `plan`, and `review`.
 
-### 9.3 `search`, `inspect`, and raw search commands
+### 9.3 `search`, optional `inspect`, and raw search commands
 
-> `search`: Search files with up to 16 independent queries in one call. Patterns are regular expressions; use `fixed_strings:true` for literal punctuation.
+> `search`: Search one file or directory for an RE2 regular expression and return host-bounded matching context. Escape punctuation to match it literally.
 
 > `inspect`: Run up to 32 independent read-only repository operations in waves of at most 16.
 
-- `search` is the only content-search tool in built-in agent definitions. Input
-  is `queries[]` (1–16). Every query requires `pattern`; `paths[]` defaults to
-  `"."`; optional `globs[]`, `fixed_strings`, and `case` (`smart`, `sensitive`,
-  `insensitive`) control matching. `output` is `context` (default), `matches`,
-  `files`, `count`, or `exists`. `context_lines` (default 20), `max_matches`
-  (40), and `max_files` (8) bound collection.
+- `search` is the only content-search tool in built-in agent definitions. Its
+  flat input requires `pattern`; singular `path` defaults to `"."`; optional
+  `globs[]` and `case` (`smart`, `sensitive`, `insensitive`) control matching.
+  Result shape and budgets are host-owned rather than
+  model-authored: four surrounding lines, 60 matches, 12 files, and 200 rendered
+  source lines.
 - With ripgrep available, `search` streams `rg --json --sort=path`; otherwise a
   standard-library walker supplies the same model-facing contract, skips hidden
-  directories and binary files, and uses Go regular expressions. Query workers
-  run concurrently and their rendered results retain input order.
-- A `paths[]` entry that does not exist is rejected before any search runs, with
+  directories and binary files, and uses Go regular expressions.
+- A `path` that does not exist is rejected before search runs, with
   the same `similar existing paths` suggestions as read_file.
-- Patterns are pre-compiled at argument decode (respecting `fixed_strings` and
-  the smart-case `(?i)` transform the stdlib walker applies; Go RE2 and
+- A `path` that is the filesystem root after lexical cleaning is rejected at argument decode as
+  excessively broad. Nested `inspect` searches use the same typed search
+  implementation and inherit the rejection.
+- Patterns are pre-compiled at argument decode (respecting the smart-case
+  `(?i)` transform the stdlib walker applies; Go RE2 and
   ripgrep's default engine are both RE2-class). An invalid regex fails fast as
-  `queries[N].pattern: invalid regex: <compile error>; use fixed_strings: true
-  for literal text` with the kinded `regex_invalid` class instead of surfacing
+  `pattern: invalid regex: <compile error>; escape regex punctuation to match
+  it literally` with the kinded `regex_invalid` class instead of surfacing
   an rg stderr dump or an `invalid_args` bucket.
-- Queries validate and execute independently. Valid results survive malformed,
-  missing-path, or runtime-failed siblings; the call fails only if every query
-  is invalid. Positive bounds above their maxima are clamped with a visible note
-  and `normalized_bounds` metric, while negative values remain errors. Runtime
-  ripgrep regex parser failures are remapped to `regex_invalid`.
+- Runtime ripgrep regex parser failures are remapped to `regex_invalid`.
 - Context output groups matches by file, merges touching windows, numbers source
-  lines, and renders at most 400 source lines. No match is a successful
-  `(no matches)` result and all collection/output bounds are explicit.
-- In a multi-query batch, every `context`/`matches` query keeps that independent
-  400-line allowance, but the renderer emits one shared source section. It unions
-  overlapping or adjacent file windows, annotates them with contributing query
-  numbers, and prints each source line once. `RunResult.Metrics` records selected
-  and unique source-line counts for session analysis without entering model
-  context. There is no new aggregate 400-line cap.
-- `inspect.operations[]` (1–32) selects `read_file`, `search`, `glob`,
+  lines, and renders at most 200 source lines. No match is a successful
+  `(no matches)` result. `RunResult.Metrics` records shown matches/files, source
+  lines, and collection/context bounding for session analysis without entering
+  model context.
+- After a concurrent read-only island completes, two or more successful,
+  parseable, model-visible `search` results are shaped together. They retain one
+  `tool_result` per `tool_use`; duplicate `(path, line)` context is assigned to
+  the earliest sibling only. No additional aggregate line or byte cap is
+  applied, and parsing never restores context removed by an individual call's
+  ordinary host-owned bounds. Batch-only shaping does not set the
+  archive-oriented `Truncated` flag, but it updates shown/original bytes, adds a
+  model-visible duplicate marker where needed, and records diagnostics-only
+  overlap, yield, low-yield, and before/after-byte metrics on one batch owner.
+  Single searches and unparseable/error results are unchanged.
+- `inspect` is constructible only for an explicit custom agent; no built-in
+  agent advertises it. Its `operations[]` (1–32) selects `read_file`, `search`, `glob`,
   `list_dir`, `workspace_summary`, or `git_readonly` and supplies that
   operation's `input` object. Nested `git_readonly` uses the ordinary `git`
   tool's audited read-only classifier and hardened execution path, so mutating
@@ -2079,8 +2084,8 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   operations are never executed but are reported inline while valid siblings
   run. `operation_count` and `operation_errors` are diagnostics-only metrics.
 - Three consecutive turns containing one unbatched orientation lookup trigger
-  one soft steering message recommending `inspect`, `read_file.paths[]`, or
-  `search.queries[]`. It does not block execution.
+  one soft steering message recommending coissued top-level read-only calls or
+  `read_file.paths[]`. It does not block execution.
 - Raw `grep` and optional `rg` are registered only in the complete tool catalog,
   not the default set. Custom agents may explicitly whitelist them for native
   CLI flags or background execution. Their input remains argv-style
@@ -2454,15 +2459,29 @@ The model-facing schema deliberately has only two modes:
 
 | mode | purpose |
 |---|---|
-| `plan` | replace the ordered phase/step definitions, questions, objective/constraints when still mutable, plan state (`draft` or `ready`), and optional active leaf |
-| `progress` | transition one leaf or the work lifecycle, attach selected evidence/result IDs, request one bounded evidence batch, or reconcile a branched workspace |
+| `plan` | replace a flat ordered list of human-readable steps plus optional open questions and mutable objective/constraints |
+| `progress` | transition the current leaf or work lifecycle, attach selected evidence, request one bounded evidence batch, or reconcile a branched workspace |
 
-Every call carries `work_id` and `base_revision_id`. Stale updates fail instead
-of overwriting newer model/host observations. Steps are bounded ordered/nested
-leaves, not a dependency graph: `discover`, `change`, or `verify`, with
-`pending`, `in_progress`, `completed`, `skipped`, or `blocked` status.
-Ready plans require a runnable first leaf plus actions and exit criteria.
-Completed leaves require a summary and fresh referenced evidence/results;
+The model-facing contract carries no work, revision, node, parent, phase,
+active-step, next-step, question, or evidence/result IDs. Plan steps contain a
+required `title` and optional `kind`, `description`, `targets`, `done_when`,
+`verification`, and `optional` flag. Open questions are plain strings. Harness
+generates stable structural identities, groups consecutive kinds into phases,
+infers a missing kind from the step title, supplies action and exit defaults,
+marks plans with open questions as draft and other non-empty plans as ready,
+and selects the first runnable required leaf. The host atomically binds progress
+to that leaf, uses all fresh observations as completion/reconciliation
+references, and advances to the next required leaf. Durable revisions and
+observation IDs remain internal concurrency and validation mechanisms rather
+than model bookkeeping.
+Evidence/results collected against implicit work are carried into the first
+structured leaf when the work is promoted to a plan. Plans require at least one
+step. Steps are bounded ordered leaves, not a model-authored dependency graph:
+`discover`, `change`, or `verify`, with `pending`, `in_progress`, `completed`,
+`skipped`, or `blocked` status.
+The persisted representation retains host-generated phases, actions, exit
+criteria, statuses, and active selection for rendering and handoff.
+Completed leaves require a summary and fresh evidence/results;
 verification leaves additionally require an acceptable verification result.
 
 `internal/workstate` owns validation, immutable revision snapshots, transitions,
@@ -2477,18 +2496,36 @@ session log.
 
 Ordinary accepted prompts create a lightweight implicit work item. Simple work
 stays hidden and auto-completes on a clean non-autonomous turn; a model can
-promote it in place with `plan` mode. The model normally receives only the
-bounded active capsule: objective, constraints, active leaf actions/targets/exit
-criteria/verification, recent evidence/results, gate state, progress counts, and
-artifact pointer. `/work` exposes summary/show/new/abandon operations.
+promote it in place with `plan` mode. An initial implicit prompt receives no
+duplicate WorkState context. Active capsules are one-shot recovery context,
+armed by resume, transcript rewrite, branch checkout, agent/model switch,
+asynchronous host observations, decision gates, and semantic context epochs.
+Peeking for token estimates never consumes a capsule. Ordinary prompts preserve
+a nonterminal lineage by default: no update leaves it unchanged, `progress`
+steers it, `plan` extends it, and `/work new` explicitly replaces it.
+
+The bounded active capsule contains the objective, constraints, active leaf
+actions/targets/exit criteria/verification, recent evidence/results without
+opaque internal IDs, gate state, and progress counts. Plan artifact paths remain
+available to human UI and handoff code but are not placed in tool receipts or
+ordinary recovery capsules. An approved implementation handoff adds the
+artifact path explicitly to its fresh implementation seed. Crossing a
+host-generated top-level phase or
+tripping an overlong-step gate schedules a clean context epoch after the closed
+tool-result batch. Harness archives the prior transcript, appends a session-tree
+context reset, clears provider continuation state, and seeds the next request
+from the active capsule. `/work` exposes summary/steps/show/new/abandon views.
 
 Harness automatically observes unambiguous mutation paths, verification
-commands/outcomes, and foreground delegate completion and attaches them to the
-step active when the tool began. Planning updates and other administrative
-coordination are not meaningful implementation progress. After 12
+commands/outcomes, foreground delegate completion, and successful inspection
+results and attaches them to the step active when the tool began. Structured
+inspection output is atomically archived once under a call-ID-based artifact;
+WorkState retains only a bounded evidence receipt and stable path. Planning
+updates and other administrative coordination are not meaningful implementation
+progress. After 12
 inspection-bearing turns without explicit progress, inspection dispatch is
-gated. The model must record progress, revise/split the plan, block/wait/finish,
-or name one missing-evidence question; that question grants four bounded
+gated. The model must record concrete evidence/progress, block/wait/finish, or
+name one missing-evidence question; that question grants four bounded
 inspection-bearing turns.
 
 ### 9.14 `delegate`
@@ -2522,6 +2559,12 @@ inspection-bearing turns.
   calls cannot narrow or expand that tool set; callers select or define a different
   agent when they need a different capability bundle. If no `agent` is provided,
   the child uses exactly the current parent agent's active tools.
+
+The runner also owns one root-shared budget coordinator. It atomically enforces
+`delegate_max_active`, `delegate_max_descendants`, and
+`delegate_max_per_step` across recursive and background launches without adding
+fields to the tool schema. A continuation reuses its logical descendant slot;
+all terminal paths release active capacity.
   `prompts/delegate-child.txt` is appended after that resolved system
   prompt only in `Runner.Run`; root prompts, including a configured custom static
   prompt, never receive it. The suffix says the child reports to the parent, owns
@@ -3715,7 +3758,7 @@ type UsageTotals struct {
   totals, calls per tool-bearing turn, standalone work-state/single-inspection turns,
   result truncation/byte/timing totals and per-tool volume, redacted aggregates
   of repeated normalized calls, command-step shape, skill reads/activations,
-  batched-search selected-versus-unique context lines, active transcript
+  search selected-versus-unique context lines and bounded-result counts, active transcript
   composition, the latest request estimate, and a hierarchical delegate
   breakdown with the five highest direct-token children.
   The session header includes build identity and the non-secret runtime profile
@@ -3992,7 +4035,7 @@ reviewer, or the wide-open default without separate binaries.
   and `request_implementation` in interactive sessions; its
   `prompts/agents/auto.txt` is a one-byte file — a single newline — that trims to
   empty, so it contributes no prompt body), `explore` (the shared inspection
-  tools — `read_file`, `view_image`, `list_dir`, `glob`, `search`, `inspect`,
+  tools — `read_file`, `view_image`, `list_dir`, `glob`, `search`,
   `run_command`, `web_fetch`, optional `git_readonly`, and `update_work` — and
   read-only MCP tools; no file mutation, implementation handoff, background jobs, or
   delegation; prompt in `prompts/agents/explore.txt`), `plan` (the shared

@@ -16,58 +16,74 @@ import (
 )
 
 type metrics struct {
-	ModelTarget                  string         `json:"model_target,omitempty"`
-	APIType                      string         `json:"api_type,omitempty"`
-	TotalTokens                  int            `json:"total_tokens"`
-	InputTokens                  int            `json:"input_tokens"`
-	CacheReadTokens              int            `json:"cache_read_tokens"`
-	CacheWriteTokens             int            `json:"cache_write_tokens"`
-	CacheWrite1hTokens           int            `json:"cache_write_1h_tokens"`
-	OutputTokens                 int            `json:"output_tokens"`
-	ReasoningTokens              int            `json:"reasoning_tokens"`
-	CostUSD                      float64        `json:"cost_usd"`
-	CostKnown                    bool           `json:"cost_known"`
-	Turns                        int            `json:"turns"`
-	ToolCalls                    map[string]int `json:"tool_calls"`
-	ToolErrors                   int            `json:"tool_errors"`
-	NestedToolErrors             int            `json:"nested_tool_errors"`
-	RecoverableEditMisses        int            `json:"recoverable_edit_misses"`
-	RecoveredEditMisses          int            `json:"recovered_edit_misses"`
-	TimelyRecoveredEditMisses    int            `json:"timely_recovered_edit_misses"`
-	UnresolvedEditFailures       int            `json:"unresolved_edit_failures"`
-	UnrelatedToolErrors          int            `json:"unrelated_tool_errors"`
-	EffectiveToolErrors          int            `json:"effective_tool_errors"`
-	EffectiveToolErrorsAvailable bool           `json:"effective_tool_errors_available"`
-	ErrorKinds                   map[string]int `json:"error_kinds"`
-	ToolResultBytes              int            `json:"tool_result_bytes"`
-	RGToReadTransitions          int            `json:"rg_to_read_transitions"`
-	CommandToCommandTransitions  int            `json:"command_to_command_transitions"`
-	AvoidableWorkOnlyTurns       int            `json:"avoidable_work_only_turns"`
-	GitCalls                     int            `json:"git_calls"`
-	BackgroundPolls              int            `json:"background_polls"`
-	BackgroundWaits              int            `json:"background_waits"`
-	UsedSearch                   bool           `json:"used_search"`
-	SearchQueries                int            `json:"search_queries"`
-	ExactKnownPathSearches       int            `json:"exact_known_path_searches"`
-	ExactKnownPathCommands       int            `json:"exact_known_path_commands"`
-	UsedCommandSteps             bool           `json:"used_command_steps"`
-	UsedWorkspaceSummary         bool           `json:"used_workspace_summary"`
-	StartedRaceSuite             bool           `json:"started_race_suite"`
-	ReadDriftAfterPhaseOne       bool           `json:"read_drift_after_phase_one"`
-	UnresolvedEditFailure        bool           `json:"unresolved_edit_failure"`
-	EditRecoveryTurns            int            `json:"edit_recovery_turns"`
-	InspectOperations            int            `json:"inspect_operations"`
-	InspectReadOperations        int            `json:"inspect_read_operations"`
-	InspectReadPaths             []string       `json:"inspect_read_paths,omitempty"`
-	SuccessfulInspectCalls       int            `json:"successful_inspect_calls"`
-	InspectOperationErrors       int            `json:"inspect_operation_errors"`
-	DirectReadCalls              int            `json:"direct_read_calls"`
-	DiscoveryBeforeRead          bool           `json:"discovery_before_read"`
-	ReadBeforeDiscovery          bool           `json:"read_before_discovery"`
-	AllFailedInspectCalls        int            `json:"all_failed_inspect_calls"`
-	CommandText                  string         `json:"-"`
-	FinalText                    string         `json:"-"`
-	AssistantText                string         `json:"-"`
+	ModelTarget                   string         `json:"model_target,omitempty"`
+	APIType                       string         `json:"api_type,omitempty"`
+	TotalTokens                   int            `json:"total_tokens"`
+	InputTokens                   int            `json:"input_tokens"`
+	CacheReadTokens               int            `json:"cache_read_tokens"`
+	CacheWriteTokens              int            `json:"cache_write_tokens"`
+	CacheWrite1hTokens            int            `json:"cache_write_1h_tokens"`
+	OutputTokens                  int            `json:"output_tokens"`
+	ReasoningTokens               int            `json:"reasoning_tokens"`
+	CostUSD                       float64        `json:"cost_usd"`
+	CostKnown                     bool           `json:"cost_known"`
+	Turns                         int            `json:"turns"`
+	ToolCalls                     map[string]int `json:"tool_calls"`
+	ToolErrors                    int            `json:"tool_errors"`
+	NestedToolErrors              int            `json:"nested_tool_errors"`
+	RecoverableEditMisses         int            `json:"recoverable_edit_misses"`
+	RecoveredEditMisses           int            `json:"recovered_edit_misses"`
+	TimelyRecoveredEditMisses     int            `json:"timely_recovered_edit_misses"`
+	UnresolvedEditFailures        int            `json:"unresolved_edit_failures"`
+	UnrelatedToolErrors           int            `json:"unrelated_tool_errors"`
+	EffectiveToolErrors           int            `json:"effective_tool_errors"`
+	EffectiveToolErrorsAvailable  bool           `json:"effective_tool_errors_available"`
+	ErrorKinds                    map[string]int `json:"error_kinds"`
+	ToolResultBytes               int            `json:"tool_result_bytes"`
+	RGToReadTransitions           int            `json:"rg_to_read_transitions"`
+	CommandToCommandTransitions   int            `json:"command_to_command_transitions"`
+	AvoidableWorkOnlyTurns        int            `json:"avoidable_work_only_turns"`
+	GitCalls                      int            `json:"git_calls"`
+	BackgroundPolls               int            `json:"background_polls"`
+	BackgroundWaits               int            `json:"background_waits"`
+	UsedSearch                    bool           `json:"used_search"`
+	SearchQueries                 int            `json:"search_queries"`
+	SearchContextLines            int            `json:"search_context_lines"`
+	SearchContextLinesBeforeBatch int            `json:"search_context_lines_before_batch"`
+	SearchDuplicateLines          int            `json:"search_duplicate_lines_suppressed"`
+	SearchBudgetOmittedLines      int            `json:"search_budget_lines_omitted"`
+	SearchBatches                 int            `json:"search_batches"`
+	SearchBatchCalls              int            `json:"search_batch_calls"`
+	SearchLowYieldCalls           int            `json:"search_low_yield_calls"`
+	SearchBatchBytesBefore        int            `json:"search_batch_bytes_before"`
+	SearchBatchBytesAfter         int            `json:"search_batch_bytes_after"`
+	SearchBoundedCalls            int            `json:"search_bounded_calls"`
+	ExactKnownPathSearches        int            `json:"exact_known_path_searches"`
+	ExactKnownPathCommands        int            `json:"exact_known_path_commands"`
+	UsedCommandSteps              bool           `json:"used_command_steps"`
+	UsedWorkspaceSummary          bool           `json:"used_workspace_summary"`
+	StartedRaceSuite              bool           `json:"started_race_suite"`
+	ReadDriftAfterPhaseOne        bool           `json:"read_drift_after_phase_one"`
+	UnresolvedEditFailure         bool           `json:"unresolved_edit_failure"`
+	EditRecoveryTurns             int            `json:"edit_recovery_turns"`
+	InspectOperations             int            `json:"inspect_operations"`
+	InspectReadOperations         int            `json:"inspect_read_operations"`
+	InspectReadPaths              []string       `json:"inspect_read_paths,omitempty"`
+	SuccessfulInspectCalls        int            `json:"successful_inspect_calls"`
+	InspectOperationErrors        int            `json:"inspect_operation_errors"`
+	DirectReadCalls               int            `json:"direct_read_calls"`
+	DirectReadOperations          int            `json:"direct_read_operations"`
+	DirectReadPaths               []string       `json:"direct_read_paths,omitempty"`
+	SuccessfulReadPaths           []string       `json:"successful_read_paths,omitempty"`
+	BatchedReadCalls              int            `json:"batched_read_calls"`
+	CoissuedReadTurns             int            `json:"coissued_read_turns"`
+	CoissuedLookupTurns           int            `json:"coissued_lookup_turns"`
+	DiscoveryBeforeRead           bool           `json:"discovery_before_read"`
+	ReadBeforeDiscovery           bool           `json:"read_before_discovery"`
+	AllFailedInspectCalls         int            `json:"all_failed_inspect_calls"`
+	CommandText                   string         `json:"-"`
+	FinalText                     string         `json:"-"`
+	AssistantText                 string         `json:"-"`
 }
 
 type turnTools struct {
@@ -108,6 +124,8 @@ func collectMetrics(sessionDir string) (metrics, error) {
 	m.ExactKnownPathSearches, m.ExactKnownPathCommands = successfulKnownPathContracts(events)
 	discoverySucceeded := false
 	discoveryStarts := make(map[string]bool)
+	readStarts := make(map[string][]string)
+	inspectReadStarts := make(map[string][]string)
 	for _, ev := range events {
 		if ev.Type == session.EventModelRequest && ev.ModelRequest != nil {
 			if ev.ModelRequest.TargetID != "" {
@@ -121,6 +139,10 @@ func collectMetrics(sessionDir string) (metrics, error) {
 			m.Turns = ev.Turn
 		}
 		if ev.Type == session.EventToolResult {
+			if !ev.ResultError && ev.Tool == "read_file" {
+				m.SuccessfulReadPaths = append(m.SuccessfulReadPaths, readStarts[ev.ToolID]...)
+			}
+			delete(readStarts, ev.ToolID)
 			if !ev.ResultError && ev.ResultMetrics["query_errors"] == 0 && discoveryStarts[ev.ToolID] {
 				discoverySucceeded = true
 			}
@@ -132,6 +154,13 @@ func collectMetrics(sessionDir string) (metrics, error) {
 					m.SuccessfulInspectCalls++
 				}
 				m.InspectOperationErrors += ev.ResultMetrics["operation_errors"]
+				if !ev.ResultError && ev.ResultMetrics["operation_errors"] == 0 {
+					m.SuccessfulReadPaths = append(m.SuccessfulReadPaths, inspectReadStarts[ev.ToolID]...)
+				}
+				delete(inspectReadStarts, ev.ToolID)
+			}
+			if ev.Tool == "search" && !ev.ResultError {
+				observeSearchResultMetrics(&m, ev.ResultMetrics)
 			}
 			observeToolResult(&m, &editRecovery, ev)
 			continue
@@ -148,6 +177,13 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		switch ev.Tool {
 		case "read_file":
 			m.DirectReadCalls++
+			paths := readFilePaths(ev.Input)
+			m.DirectReadOperations += len(paths)
+			m.DirectReadPaths = append(m.DirectReadPaths, paths...)
+			readStarts[ev.ToolID] = paths
+			if len(paths) > 1 {
+				m.BatchedReadCalls++
+			}
 			if discoverySucceeded {
 				m.DiscoveryBeforeRead = true
 			} else {
@@ -159,6 +195,7 @@ func collectMetrics(sessionDir string) (metrics, error) {
 			readOperations := len(readPaths)
 			m.InspectReadOperations += readOperations
 			m.InspectReadPaths = append(m.InspectReadPaths, readPaths...)
+			inspectReadStarts[ev.ToolID] = readPaths
 			if readOperations > 0 {
 				if discoverySucceeded {
 					m.DiscoveryBeforeRead = true
@@ -218,6 +255,22 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		}
 	}
 	for i, tt := range turns {
+		lookups := 0
+		reads := 0
+		for _, name := range tt.Names {
+			if name == "read_file" || name == "search" || name == "glob" || name == "list_dir" {
+				lookups++
+			}
+			if name == "read_file" {
+				reads++
+			}
+		}
+		if lookups > 1 {
+			m.CoissuedLookupTurns++
+		}
+		if reads > 1 {
+			m.CoissuedReadTurns++
+		}
 		if len(tt.Names) != 1 || tt.Names[0] != "update_work" {
 			continue
 		}
@@ -240,12 +293,40 @@ func collectMetrics(sessionDir string) (metrics, error) {
 	return m, nil
 }
 
+func observeSearchResultMetrics(m *metrics, values map[string]int) {
+	if values["results_bounded"] != 0 || values["context_bounded"] != 0 {
+		m.SearchBoundedCalls++
+	}
+	if values["search_batch_member"] == 0 {
+		lines := values["context_lines"]
+		m.SearchContextLines += lines
+		m.SearchContextLinesBeforeBatch += lines
+		return
+	}
+	if values["search_batch_metrics_owner"] == 0 {
+		return
+	}
+	m.SearchContextLines += values["search_batch_context_lines_after"]
+	m.SearchContextLinesBeforeBatch += values["search_batch_context_lines_before"]
+	m.SearchDuplicateLines += values["search_batch_duplicate_lines_suppressed"]
+	m.SearchBudgetOmittedLines += values["search_batch_budget_lines_omitted"]
+	m.SearchBatches++
+	m.SearchBatchCalls += values["search_batch_calls"]
+	m.SearchLowYieldCalls += values["search_batch_low_yield_calls"]
+	m.SearchBatchBytesBefore += values["search_batch_bytes_before"]
+	m.SearchBatchBytesAfter += values["search_batch_bytes_after"]
+}
+
 func searchQueryCount(raw json.RawMessage) int {
 	var input struct {
+		Pattern string            `json:"pattern"`
 		Queries []json.RawMessage `json:"queries"`
 	}
 	if json.Unmarshal(raw, &input) != nil {
 		return 0
+	}
+	if strings.TrimSpace(input.Pattern) != "" {
+		return 1
 	}
 	return len(input.Queries)
 }
@@ -256,26 +337,33 @@ func successfulKnownPathContracts(events []session.Event) (searches, commands in
 		searchContract contractKind = iota + 1
 		commandContract
 	)
-	starts := make(map[string]contractKind)
+	type contractStart struct {
+		kind  contractKind
+		count int
+	}
+	starts := make(map[string]contractStart)
 	for _, ev := range events {
 		switch ev.Type {
 		case session.EventToolStart:
 			switch {
-			case ev.Tool == "search" && exactKnownPathSearchInput(ev.Input):
-				starts[ev.ToolID] = searchContract
+			case ev.Tool == "search" && exactKnownPathSearchInput(ev.Input) > 0:
+				starts[ev.ToolID] = contractStart{kind: searchContract, count: exactKnownPathSearchInput(ev.Input)}
+			case ev.Tool == "inspect" && exactKnownPathInspectSearchInput(ev.Input) > 0:
+				starts[ev.ToolID] = contractStart{kind: searchContract, count: exactKnownPathInspectSearchInput(ev.Input)}
 			case ev.Tool == "run_command" && exactKnownPathCommandInput(ev.Input):
-				starts[ev.ToolID] = commandContract
+				starts[ev.ToolID] = contractStart{kind: commandContract, count: 1}
 			}
 		case session.EventToolResult:
-			kind, ok := starts[ev.ToolID]
+			start, ok := starts[ev.ToolID]
 			if !ok || ev.ResultError {
 				continue
 			}
 			delete(starts, ev.ToolID)
-			switch kind {
+			switch start.kind {
 			case searchContract:
-				if ev.Tool == "search" && ev.ResultMetrics["query_errors"] == 0 {
-					searches++
+				if (ev.Tool == "search" && ev.ResultMetrics["query_errors"] == 0) ||
+					(ev.Tool == "inspect" && ev.ResultMetrics["operation_errors"] == 0) {
+					searches += start.count
 				}
 			case commandContract:
 				if ev.Tool == "run_command" {
@@ -287,44 +375,79 @@ func successfulKnownPathContracts(events []session.Event) (searches, commands in
 	return searches, commands
 }
 
-func exactKnownPathSearchInput(raw json.RawMessage) bool {
+func exactKnownPathInspectSearchInput(raw json.RawMessage) int {
+	var input struct {
+		Operations []struct {
+			Tool  string          `json:"tool"`
+			Input json.RawMessage `json:"input"`
+		} `json:"operations"`
+	}
+	if json.Unmarshal(raw, &input) != nil {
+		return 0
+	}
+	total := 0
+	for _, operation := range input.Operations {
+		if operation.Tool == "search" {
+			total += exactKnownPathSearchInput(operation.Input)
+		}
+	}
+	return total
+}
+
+func exactKnownPathSearchInput(raw json.RawMessage) int {
 	type query struct {
 		Pattern      string   `json:"pattern"`
+		Path         string   `json:"path"`
 		Paths        []string `json:"paths"`
 		Globs        []string `json:"globs"`
 		FixedStrings bool     `json:"fixed_strings"`
 	}
 	var input struct {
+		query
 		Queries []query `json:"queries"`
 	}
-	if json.Unmarshal(raw, &input) != nil || len(input.Queries) != 3 {
-		return false
+	if json.Unmarshal(raw, &input) != nil {
+		return 0
+	}
+	queries := input.Queries
+	if input.Pattern != "" {
+		queries = []query{input.query}
+	}
+	if len(queries) == 0 || len(queries) > 3 {
+		return 0
 	}
 	want := map[string]bool{
-		"literal\x00Widget(":    false,
-		"literal\x00State{":     false,
-		"regex\x00Marker[0-9]+": false,
+		"widget": false,
+		"state":  false,
+		"marker": false,
 	}
-	for _, q := range input.Queries {
-		if len(q.Paths) != 1 || q.Paths[0] != toolAccuracyFixture+"/known" || len(q.Globs) != 0 {
-			return false
+	for _, q := range queries {
+		path := q.Path
+		if path == "" && len(q.Paths) == 1 {
+			path = q.Paths[0]
 		}
-		kind := "regex"
-		if q.FixedStrings {
-			kind = "literal"
+		root := toolAccuracyFixture + "/known"
+		directoryScoped := normalizeFixturePath(path) == root && len(q.Globs) == 0
+		globScoped := (path == "" || normalizeFixturePath(path) == ".") && len(q.Globs) == 1 &&
+			normalizeFixturePath(q.Globs[0]) == root+"/*"
+		if !directoryScoped && !globScoped {
+			return 0
 		}
-		key := kind + "\x00" + q.Pattern
+		key := ""
+		switch {
+		case q.FixedStrings && q.Pattern == "Widget(", !q.FixedStrings && q.Pattern == `Widget\(`:
+			key = "widget"
+		case q.FixedStrings && q.Pattern == "State{", !q.FixedStrings && q.Pattern == `State\{`:
+			key = "state"
+		case !q.FixedStrings && q.Pattern == "Marker[0-9]+":
+			key = "marker"
+		}
 		if _, ok := want[key]; !ok || want[key] {
-			return false
+			return 0
 		}
 		want[key] = true
 	}
-	for _, found := range want {
-		if !found {
-			return false
-		}
-	}
-	return true
+	return len(queries)
 }
 
 func exactKnownPathCommandInput(raw json.RawMessage) bool {
@@ -351,7 +474,7 @@ func exactKnownPathCommandInput(raw json.RawMessage) bool {
 	}
 	want := [][]string{{"printf", "STEP_ALPHA\n"}, {"printf", "STEP_BETA\n"}}
 	for i, step := range input.Steps {
-		if step.Name != "" || step.Command != "" || step.Stdin != "" || step.Cwd != "" || step.TimeoutSeconds != 0 ||
+		if step.Command != "" || step.Stdin != "" || step.Cwd != "" || step.TimeoutSeconds != 0 ||
 			len(step.Argv) != len(want[i]) {
 			return false
 		}
@@ -477,6 +600,24 @@ func normalizeFixturePath(path string) string {
 	return filepath.ToSlash(filepath.Clean(path))
 }
 
+func readFilePaths(raw json.RawMessage) []string {
+	var input struct {
+		Path  string   `json:"path"`
+		Paths []string `json:"paths"`
+	}
+	if json.Unmarshal(raw, &input) != nil {
+		return nil
+	}
+	paths := append([]string(nil), input.Paths...)
+	if input.Path != "" {
+		paths = append(paths, input.Path)
+	}
+	for i := range paths {
+		paths[i] = normalizeFixturePath(paths[i])
+	}
+	return paths
+}
+
 func inspectReadPaths(raw json.RawMessage) []string {
 	_, paths := inspectOperationSummary(raw)
 	return paths
@@ -497,12 +638,7 @@ func inspectOperationSummary(raw json.RawMessage) (int, []string) {
 		if operation.Tool != "read_file" {
 			continue
 		}
-		var args struct {
-			Path string `json:"path"`
-		}
-		if json.Unmarshal(operation.Input, &args) == nil && args.Path != "" {
-			paths = append(paths, normalizeFixturePath(args.Path))
-		}
+		paths = append(paths, readFilePaths(operation.Input)...)
 	}
 	return len(input.Operations), paths
 }
@@ -535,14 +671,7 @@ func toolReadsPath(tool string, raw json.RawMessage, want string) bool {
 	var paths []string
 	switch tool {
 	case "read_file":
-		var input struct {
-			Path  string   `json:"path"`
-			Paths []string `json:"paths"`
-		}
-		if json.Unmarshal(raw, &input) != nil {
-			return false
-		}
-		paths = append(input.Paths, input.Path)
+		paths = readFilePaths(raw)
 	case "inspect":
 		paths = inspectReadPaths(raw)
 	default:

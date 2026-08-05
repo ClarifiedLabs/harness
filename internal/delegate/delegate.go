@@ -31,6 +31,9 @@ import (
 
 const DefaultMaxTurns = 20
 const DefaultMaxDepth = 3
+const DefaultMaxActiveDescendants = 4
+const DefaultMaxTotalDescendants = 16
+const DefaultMaxDelegatesPerStep = 4
 const maxAgentDescriptionBytes = 160
 
 const delegateToolName = "delegate"
@@ -125,6 +128,9 @@ func (s *State) Snapshot() Runtime {
 type Options struct {
 	MaxTurns                  int
 	MaxDepth                  int
+	MaxActiveDescendants      int
+	MaxTotalDescendants       int
+	MaxDelegatesPerStep       int
 	CompactKeepTurns          int
 	CompactKeepTokens         int
 	CompactTriggerPercent     int
@@ -186,6 +192,9 @@ type RunRequest struct {
 	continuationContextBefore int
 	continuationContextAfter  int
 	continuationContextWindow int
+	parentWork                *workstate.State
+	workID                    string
+	workStepID                string
 }
 
 // RunResult is the complete outcome of one child-agent run.
@@ -229,10 +238,60 @@ type Runner struct {
 	resolve          func(Runtime, string) (Launch, error)
 	opts             Options
 	childToolBuilder func(Runtime, Launch, string, []string) (*tools.Registry, error)
+	budget           *delegateBudget
 }
 
 func NewRunner(snapshot func() Runtime, resolve func(Runtime, string) (Launch, error), opts Options) *Runner {
-	return &Runner{snapshot: snapshot, resolve: resolve, opts: opts}
+	return &Runner{snapshot: snapshot, resolve: resolve, opts: opts, budget: newDelegateBudget(opts)}
+}
+
+type delegateBudget struct {
+	mu                              sync.Mutex
+	active                          int
+	total                           int
+	known                           map[string]bool
+	perStep                         map[string]int
+	maxActive, maxTotal, maxPerStep int
+}
+
+func newDelegateBudget(opts Options) *delegateBudget {
+	maxActive, maxTotal, maxPerStep := opts.MaxActiveDescendants, opts.MaxTotalDescendants, opts.MaxDelegatesPerStep
+	if maxActive <= 0 {
+		maxActive = DefaultMaxActiveDescendants
+	}
+	if maxTotal <= 0 {
+		maxTotal = DefaultMaxTotalDescendants
+	}
+	if maxPerStep <= 0 {
+		maxPerStep = DefaultMaxDelegatesPerStep
+	}
+	return &delegateBudget{known: make(map[string]bool), perStep: make(map[string]int), maxActive: maxActive, maxTotal: maxTotal, maxPerStep: maxPerStep}
+}
+
+func (b *delegateBudget) acquire(logicalID, stepKey string, continuation bool) (func(), error) {
+	if b == nil {
+		return func() {}, nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.active >= b.maxActive {
+		return nil, fmt.Errorf("delegate root active descendant limit %d reached", b.maxActive)
+	}
+	isNew := !continuation && !b.known[logicalID]
+	if isNew && b.total >= b.maxTotal {
+		return nil, fmt.Errorf("delegate root total descendant limit %d reached", b.maxTotal)
+	}
+	if isNew && b.perStep[stepKey] >= b.maxPerStep {
+		return nil, fmt.Errorf("delegate step limit %d reached for %s", b.maxPerStep, stepKey)
+	}
+	b.active++
+	if isNew {
+		b.known[logicalID] = true
+		b.total++
+		b.perStep[stepKey]++
+	}
+	var once sync.Once
+	return func() { once.Do(func() { b.mu.Lock(); b.active--; b.mu.Unlock() }) }, nil
 }
 
 func (r *Runner) Rebind(snapshot func() Runtime) *Runner {
@@ -565,6 +624,22 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	if childID == req.ContinueChildID {
 		return RunResult{}, fmt.Errorf("delegate continuation must use a fresh child id, not %q", childID)
 	}
+	stepKey := "root"
+	if r.opts.WorkSnapshot != nil {
+		if req.parentWork = r.opts.WorkSnapshot(); req.parentWork != nil {
+			req.workID, req.workStepID = req.parentWork.WorkID, req.parentWork.ActiveStepID
+			stepKey = req.workID + ":" + req.workStepID
+		}
+	}
+	logicalID := childID
+	if req.ContinueChildID != "" {
+		logicalID = req.ContinueChildID
+	}
+	releaseBudget, err := r.budget.acquire(logicalID, stepKey, req.ContinueChildID != "")
+	if err != nil {
+		return RunResult{}, err
+	}
+	defer releaseBudget()
 	created := r.now()
 	childDir, saveErr := r.saveChildMeta(runtime, launch, childID, req, maxTurns, runtimeFingerprint, session.ChildStatusRunning, created, created, agent.PromptUsage{}, nil, 0, nil)
 	completion := unknownCompletion(contract, session.ChildCompletionSourceHost, session.ChildCompletionValidationUnavailable)
@@ -643,11 +718,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 			return result, err
 		}
 	} else {
-		var parentWork *workstate.State
-		if r.opts.WorkSnapshot != nil {
-			parentWork = r.opts.WorkSnapshot()
-		}
-		if _, err := childWork.NewChild(parentWork, childID, req.Task, "host"); err != nil {
+		if _, err := childWork.NewChild(req.parentWork, childID, req.Task, "host"); err != nil {
 			terminalErr = err
 			finish()
 			return result, err
@@ -668,7 +739,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 	childTools.SetDispatchGuard(func(call llm.ToolCall, activity tools.Activity) error {
 		if childWork.DecisionRequired() && activity.Class == tools.ActivityInspect {
-			return fmt.Errorf("work decision required: inspection tool %q is paused; use update_work to record progress, revise the plan, name one bounded evidence question, or report a blocker", call.Name)
+			return fmt.Errorf("work decision required: inspection tool %q is paused; use update_work to record concrete evidence or progress, name one bounded evidence question, or report a blocker", call.Name)
 		}
 		return nil
 	})
@@ -1729,6 +1800,8 @@ func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, re
 		ContinuationAfter:   req.continuationContextAfter,
 		ContinuationWindow:  req.continuationContextWindow,
 		RuntimeFingerprint:  runtimeFingerprint,
+		WorkID:              req.workID,
+		WorkStepID:          req.workStepID,
 		Agent:               launch.Agent,
 		RequestedAgent:      req.Agent,
 		ResourceKey:         req.ResourceKey,
@@ -1844,6 +1917,7 @@ type childSink struct {
 	toolActivity         func(llm.ToolCall) tools.Activity
 	pendingWorkResults   map[string][]workstate.Result
 	pendingWorkTargets   map[string]workObservationTarget
+	workContextPending   bool
 }
 
 type workObservationTarget struct {
@@ -2064,7 +2138,15 @@ func (s *childSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimat
 	s.attempt = attempt
 	s.progress.markTurn(turn, attempt, ctx)
 	s.activity.MarkTurn(turn, attempt, ctx)
-	s.rec.TurnAttemptStart(turn, attempt, ctx)
+	if s.work != nil {
+		if work := s.work.Snapshot(); work != nil {
+			s.rec.TurnAttemptStartForWork(turn, attempt, ctx, work.WorkID, work.RevisionID, work.ActiveStepID)
+		} else {
+			s.rec.TurnAttemptStart(turn, attempt, ctx)
+		}
+	} else {
+		s.rec.TurnAttemptStart(turn, attempt, ctx)
+	}
 	s.activity.publish(ActivityEvent{Kind: ActivityEventTurnStart, Turn: turn, Attempt: attempt})
 }
 
@@ -2159,7 +2241,28 @@ func (s *childSink) attachObservedWorkResults(call llm.ToolCall, result llm.Tool
 	if target.stepID == "" {
 		return
 	}
-	if s.toolActivity != nil && s.toolActivity(call).Class == tools.ActivityVerify {
+	activity := tools.Activity{}
+	if s.toolActivity != nil {
+		activity = s.toolActivity(call)
+	}
+	current := s.work.Snapshot()
+	if activity.Class == tools.ActivityInspect && !result.IsError && current != nil && current.PlanState != workstate.PlanImplicit {
+		ref, err := session.SaveWorkEvidenceArtifact(s.sessionDir, 1, s.turn, result)
+		if err != nil {
+			s.retainAppendError(err)
+		} else if ref != "" {
+			updated, err := s.work.AddEvidence(target.stepID, []workstate.EvidenceInput{{
+				Kind: workstate.EvidenceArtifact, Path: filepath.Join(s.sessionDir, ref), Summary: preview(childWorkCallSummary(call)+" inspection result", 1024), ToolCallID: call.ID,
+			}}, "host")
+			if err != nil {
+				s.retainAppendError(err)
+			} else if updated != nil {
+				current = updated
+				s.workContextPending = true
+			}
+		}
+	}
+	if activity.Class == tools.ActivityVerify {
 		status := workstate.VerifyPassed
 		detail := ""
 		if result.IsError {
@@ -2183,7 +2286,7 @@ func (s *childSink) attachObservedWorkResults(call llm.ToolCall, result llm.Tool
 	if len(results) == 0 {
 		return
 	}
-	current := s.work.Snapshot()
+	current = s.work.Snapshot()
 	if current == nil || current.RevisionID != target.revisionID || current.ActiveStepID != target.stepID {
 		for i := range results {
 			results[i].Stale = true
@@ -2191,6 +2294,8 @@ func (s *childSink) attachObservedWorkResults(call llm.ToolCall, result llm.Tool
 	}
 	if _, err := s.work.AddResults(target.stepID, results, "host"); err != nil {
 		s.retainAppendError(err)
+	} else {
+		s.workContextPending = true
 	}
 }
 
@@ -2327,6 +2432,7 @@ func (s *childSink) RetentionApplied(event agent.RetentionEvent) {
 }
 
 func (s *childSink) TranscriptRewritten() {
+	s.workContextPending = true
 }
 
 func (s *childSink) SkillActivated(event agent.SkillActivationEvent) {
@@ -2340,8 +2446,9 @@ func (s *childSink) SkillActivated(event agent.SkillActivationEvent) {
 }
 
 func (s *childSink) RequestContext() []string {
-	if s.work != nil {
+	if s.work != nil && s.workContextPending {
 		if ctx := workstate.RequestContext(s.work.Snapshot()); ctx != "" {
+			s.workContextPending = false
 			return []string{ctx}
 		}
 	}
@@ -2349,7 +2456,7 @@ func (s *childSink) RequestContext() []string {
 }
 
 func (s *childSink) PeekRequestContext() []string {
-	if s.work != nil {
+	if s.work != nil && s.workContextPending {
 		if ctx := workstate.RequestContext(s.work.Snapshot()); ctx != "" {
 			return []string{ctx}
 		}

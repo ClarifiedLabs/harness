@@ -176,6 +176,12 @@ func (r *Recorder) User(text string) {
 
 // TurnAttemptStart records the attempt boundary and its context snapshot.
 func (r *Recorder) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
+	r.TurnAttemptStartForWork(turn, attempt, ctx, "", "", "")
+}
+
+// TurnAttemptStartForWork records execution identity with opaque WorkState
+// attribution so per-step model and agent switches are analyzable.
+func (r *Recorder) TurnAttemptStartForWork(turn, attempt int, ctx agent.ContextEstimate, workID, revisionID, stepID string) {
 	if r == nil {
 		return
 	}
@@ -188,16 +194,19 @@ func (r *Recorder) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate
 		r.promptStart = r.now()
 	}
 	r.Append(session.Event{
-		Type:        session.EventTurnAttemptStart,
-		Prompt:      r.cfg.Prompt,
-		Turn:        turn,
-		Attempt:     attempt,
-		Agent:       r.cfg.Agent,
-		ModelTarget: r.model.targetID,
-		Provider:    r.model.provider,
-		APIType:     r.model.apiType,
-		Model:       r.model.model,
-		Context:     ContextSnapshot(ctx),
+		Type:           session.EventTurnAttemptStart,
+		Prompt:         r.cfg.Prompt,
+		Turn:           turn,
+		Attempt:        attempt,
+		WorkID:         workID,
+		WorkRevisionID: revisionID,
+		WorkStepID:     stepID,
+		Agent:          r.cfg.Agent,
+		ModelTarget:    r.model.targetID,
+		Provider:       r.model.provider,
+		APIType:        r.model.apiType,
+		Model:          r.model.model,
+		Context:        ContextSnapshot(ctx),
 	})
 }
 

@@ -281,8 +281,11 @@ func TestResolvePromptOnlyReviewOverrideKeepsReadOnlyDefaults(t *testing.T) {
 
 func TestBuiltinsUseTypedSearchOnly(t *testing.T) {
 	for name, agent := range Builtins() {
-		if !slices.Contains(agent.AllowedTools, "search") || !slices.Contains(agent.AllowedTools, "inspect") {
-			t.Fatalf("%s tools missing typed repository tools: %v", name, agent.AllowedTools)
+		if !slices.Contains(agent.AllowedTools, "search") {
+			t.Fatalf("%s tools missing typed search: %v", name, agent.AllowedTools)
+		}
+		if slices.Contains(agent.AllowedTools, "inspect") {
+			t.Fatalf("%s tools unexpectedly include nested inspect: %v", name, agent.AllowedTools)
 		}
 		for _, raw := range []string{"grep", "rg"} {
 			if slices.Contains(agent.AllowedTools, raw) {

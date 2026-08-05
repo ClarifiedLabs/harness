@@ -111,10 +111,8 @@ func TestSearchMissingPathSuggestsSimilarPaths(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "usage.md"), "# usage\n")
 	input, err := json.Marshal(map[string]any{
-		"queries": []any{map[string]any{
-			"pattern": "needle",
-			"paths":   []string{filepath.Join(dir, "ussage.md")},
-		}},
+		"pattern": "needle",
+		"path":    filepath.Join(dir, "ussage.md"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +121,7 @@ func TestSearchMissingPathSuggestsSimilarPaths(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected not-found error")
 	}
-	for _, want := range []string{"queries[0].paths", "no such file or directory", "similar existing paths: ", "usage.md"} {
+	for _, want := range []string{"path", "no such file or directory", "similar existing paths: ", "usage.md"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing %q", err, want)
 		}
@@ -134,12 +132,8 @@ func TestSearchExistingPathUnaffected(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "f.txt"), "needle\n")
 	input, err := json.Marshal(map[string]any{
-		"queries": []any{map[string]any{
-			"pattern":       "needle",
-			"paths":         []string{dir},
-			"output":        "files",
-			"fixed_strings": true,
-		}},
+		"pattern": "needle",
+		"path":    dir,
 	})
 	if err != nil {
 		t.Fatal(err)

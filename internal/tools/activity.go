@@ -277,13 +277,7 @@ func builtinActivity(name string, input json.RawMessage) (Activity, bool) {
 		activity.Batched = len(args.Paths) > 1
 		return activity, true
 	case "search":
-		var args struct {
-			Queries []json.RawMessage `json:"queries"`
-		}
-		_ = json.Unmarshal(input, &args)
 		activity.Class = ActivityInspect
-		activity.OperationCount = max(1, len(args.Queries))
-		activity.Batched = len(args.Queries) > 1
 		return activity, true
 	case "background_jobs":
 		var args struct {

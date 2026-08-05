@@ -677,6 +677,25 @@ func TestSaveToolResultArtifactIgnoresRichImageContent(t *testing.T) {
 	}
 }
 
+func TestSaveWorkEvidenceArtifactAcceptsUntruncatedText(t *testing.T) {
+	dir := t.TempDir()
+	result := llm.ToolResult{ForID: "inspect-1", Text: "complete inspection output"}
+	rel, err := SaveWorkEvidenceArtifact(dir, 2, 3, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rel, "work-evidence") {
+		t.Fatalf("artifact ref = %q", rel)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != result.Text {
+		t.Fatalf("artifact = %q", data)
+	}
+}
+
 func TestSaveLoadPreservesRichToolResult(t *testing.T) {
 	s := sampleSession()
 	s.Messages = []llm.Message{

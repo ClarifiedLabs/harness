@@ -5077,7 +5077,7 @@ func expectedInspectionToolNames() []string {
 	names := []string{"read_file", "view_image", "list_dir", "glob", "search"}
 	// explore (and plan) gain run_command for exploration; it lands right after
 	// the search tool in catalog registration order.
-	names = append(names, "run_command", "web_fetch", "inspect")
+	names = append(names, "run_command", "web_fetch")
 	if tools.GitAvailable() {
 		names = append(names, "git_readonly")
 	}

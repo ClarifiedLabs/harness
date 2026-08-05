@@ -31,6 +31,9 @@ const (
 	defaultGoalMaxContinuations   = 25
 	defaultDelegateMaxTurns       = 20
 	defaultDelegateMaxDepth       = 3
+	defaultDelegateMaxActive      = 4
+	defaultDelegateMaxDescendants = 16
+	defaultDelegateMaxPerStep     = 4
 	defaultDelegateTmuxMaxWindows = 4
 	defaultToolTimeoutSeconds     = 600
 	defaultCompactTriggerPercent  = 78
@@ -132,6 +135,9 @@ type Config struct {
 	CompactToolResultMaxBytes          int     `json:"compact_tool_result_max_bytes"`
 	DelegateMaxTurns                   int     `json:"delegate_max_turns"`
 	DelegateMaxDepth                   int     `json:"delegate_max_depth"`
+	DelegateMaxActive                  int     `json:"delegate_max_active"`
+	DelegateMaxDescendants             int     `json:"delegate_max_descendants"`
+	DelegateMaxPerStep                 int     `json:"delegate_max_per_step"`
 	DelegateOutput                     string  `json:"delegate_output"`
 	DelegateTmux                       bool    `json:"delegate_tmux"`
 	DelegateTmuxMaxWindows             int     `json:"delegate_tmux_max_windows"`

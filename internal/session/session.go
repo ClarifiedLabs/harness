@@ -110,6 +110,9 @@ type RuntimeProfile struct {
 	CompactToolResultMaxBytes int    `json:"compact_tool_result_max_bytes,omitempty"`
 	ResponsesStateful         bool   `json:"responses_stateful,omitempty"`
 	DelegateMaxTurns          int    `json:"delegate_max_turns,omitempty"`
+	DelegateMaxActive         int    `json:"delegate_max_active,omitempty"`
+	DelegateMaxDescendants    int    `json:"delegate_max_descendants,omitempty"`
+	DelegateMaxPerStep        int    `json:"delegate_max_per_step,omitempty"`
 	Prewarm                   bool   `json:"prewarm,omitempty"`
 	SearchBackend             string `json:"search_backend,omitempty"`
 }
@@ -203,6 +206,8 @@ type ChildMeta struct {
 	ContinuationAfter   int                     `json:"continuation_context_after,omitempty"`
 	ContinuationWindow  int                     `json:"continuation_context_window,omitempty"`
 	RuntimeFingerprint  string                  `json:"runtime_fingerprint,omitempty"`
+	WorkID              string                  `json:"work_id,omitempty"`
+	WorkStepID          string                  `json:"work_step_id,omitempty"`
 	Agent               string                  `json:"agent,omitempty"`
 	RequestedAgent      string                  `json:"requested_agent,omitempty"`
 	ResourceKey         string                  `json:"resource_key,omitempty"`
@@ -901,6 +906,8 @@ const (
 	EventSkillActivation      = "skill_activation"
 	EventIdleCompaction       = "idle_compaction"
 	EventBranch               = "branch"
+	EventWorkContextReset     = "work_context_reset"
+	EventWorkPromptRelation   = "work_prompt_relation"
 	EventModelRequest         = "model_request"
 	EventHookDiagnostic       = "hook_diagnostic"
 )
@@ -1989,6 +1996,32 @@ func SaveToolResultArtifact(dir string, prompt, turn int, result llm.ToolResult)
 	}
 	if err := writeBytesAtomic(path, []byte(result.OriginalText)); err != nil {
 		return "", fmt.Errorf("session: write tool artifact: %w", err)
+	}
+	return rel, nil
+}
+
+// SaveWorkEvidenceArtifact persists a complete successful tool result for a
+// structured WorkState evidence receipt. Unlike truncation archival, this is
+// explicitly requested by the work observer and therefore also accepts an
+// untruncated result.
+func SaveWorkEvidenceArtifact(dir string, prompt, turn int, result llm.ToolResult) (string, error) {
+	if dir == "" || result.IsError {
+		return "", nil
+	}
+	text := result.OriginalText
+	if text == "" {
+		text = result.Text
+	}
+	if text == "" {
+		return "", nil
+	}
+	rel := filepath.Join("artifacts", "work-evidence", fmt.Sprintf("%04d-%04d-%s.txt", prompt, turn, safeName(result.ForID)))
+	path := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", fmt.Errorf("session: create work evidence dir: %w", err)
+	}
+	if err := writeBytesAtomic(path, []byte(text)); err != nil {
+		return "", fmt.Errorf("session: write work evidence: %w", err)
 	}
 	return rel, nil
 }

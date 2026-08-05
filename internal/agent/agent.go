@@ -243,6 +243,13 @@ type TranscriptRewriteSink interface {
 	TranscriptRewritten()
 }
 
+// ContextEpochSink may replace a closed-turn transcript at a semantic work
+// boundary. It is consulted only after complete tool results have been
+// appended, so implementations never observe or create dangling tool calls.
+type ContextEpochSink interface {
+	TakeContextEpoch(before []llm.Message) (after []llm.Message, applied bool, err error)
+}
+
 // PromptWorkCoordinator is implemented by sinks that own background work whose
 // results must be incorporated before the current parent prompt may finish.
 // Usage is drained exactly once into the parent prompt; completion context is
@@ -2138,6 +2145,11 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			}
 		}
 		reportTurnProgress(sink, progress)
+		if unlimited || turns < a.maxTurns {
+			if err := a.applyContextEpoch(sink); err != nil {
+				sink.Notice("[work context checkpoint failed; continuing current context: " + err.Error() + "]")
+			}
+		}
 
 		if !unlimited && turns >= a.maxTurns {
 			turnBudgetExhausted = true
@@ -2196,6 +2208,26 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		return err
 	}
 
+	return nil
+}
+
+func (a *Agent) applyContextEpoch(sink EventSink) error {
+	provider, ok := sink.(ContextEpochSink)
+	if !ok {
+		return nil
+	}
+	next, applied, err := provider.TakeContextEpoch(cloneMessages(a.transcript))
+	if err != nil || !applied {
+		return err
+	}
+	if err := llm.ValidateTranscript(next); err != nil {
+		return fmt.Errorf("invalid work context epoch: %w", err)
+	}
+	a.transcript = cloneMessages(next)
+	a.validatedPrefix = 0
+	a.clearMeasuredContext()
+	a.retentionEpochArmed = true
+	a.ResetProxySessionID()
 	return nil
 }
 
@@ -2455,6 +2487,7 @@ func (a *Agent) dispatchReadOnlyBatch(ctx context.Context, calls []llm.ToolCall,
 		}()
 	}
 	wg.Wait()
+	a.tools.PrepareReadOnlyBatch(calls, results)
 
 	var total llm.Usage
 	for i, r := range results {

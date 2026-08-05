@@ -76,7 +76,7 @@ func main() {
 	})
 	if *suiteName != "" && *profile == "smoke" {
 		if !explicitModels {
-			selectedModels = []string{"alibaba-token-plan:qwen3.8-max-preview"}
+			selectedModels = []string{"alibaba-token-plan:qwen3.8-max"}
 		}
 		if !explicitRepetitions {
 			*repetitions = 1

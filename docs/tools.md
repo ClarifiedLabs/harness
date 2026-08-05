@@ -12,8 +12,7 @@ This page is the operational overview.
 | `view_image` | attach a local PNG, JPEG, WebP, or non-animated GIF to the next model request |
 | `list_dir` | list directory entries with type and size, non-recursive |
 | `glob` | recursively find files/dirs by glob, including `**` patterns; read-only |
-| `search` | run up to 16 bounded content queries with context, lines, files, counts, or existence output |
-| `inspect` | run up to 32 independent read/search/glob/list/workspace-summary/read-only-git operations in bounded waves |
+| `search` | search one file or directory and return host-bounded matching context |
 | `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
 | `write_file` | create or overwrite a file, creating parent directories |
 | `run_command` | run a shell command or direct argv program |
@@ -30,6 +29,11 @@ This page is the operational overview.
 default tool set — `edit` and `write_file` subsume it. It still ships in the tool
 catalog, so an agent can opt back in by naming `apply_patch` in its
 `allowed_tools` whitelist.
+
+The composite `inspect` tool also remains in the constructible catalog for an
+explicit custom agent, but built-in agents do not advertise it. Built-ins issue
+schema-visible top-level read-only calls together in one tool turn; Harness runs
+consecutive read-only calls concurrently and preserves their input order.
 
 `read_file` reads one file via `path` (with `offset`/`limit`), or several at once
 via `paths[]` — each file is rendered under a `==> path <==` header with its own
@@ -70,48 +74,43 @@ persistence, and continuation-cap behavior.
 
 ## Search and Inspection
 
-The default model surface exposes one typed `search` tool. It accepts a
-`queries[]` array of up to 16 independent searches. Each query has a pattern,
-optional `paths[]` and `globs[]`, literal/regex and case controls, bounds, and an
-`output` mode: `context`, `matches`, `files`, `count`, or `exists`. Independent
-queries execute concurrently and results stay in input order. Harness uses
+The default model surface exposes one flat typed `search` tool. Each call has a
+required `pattern`, optional singular `path` (default `.`), optional `globs[]`,
+and `case` (`smart`, `sensitive`, or `insensitive`). Patterns are RE2 regular
+expressions; escape punctuation when it should match literally. The model
+does not choose output modes or result bounds. Harness always returns numbered,
+merged matching context and owns the limits: four surrounding lines, at most 60
+matches across 12 files, and at most 200 source lines. Harness uses
 ripgrep when it is installed and a bounded standard-library walker otherwise,
 so the tool contract does not depend on the host CLI.
+The filesystem root (`/`, or the platform equivalent) is rejected as
+excessively broad; callers must choose a narrower file or directory.
 
-A `search` `paths[]` entry or `read_file` path that does not exist fails with
+When a model coissues two or more successful `search` calls, Harness preserves
+one result for each call while showing the same `(path, line)` context only in
+its first sibling result. The batch layer imposes no additional aggregate line
+or byte limit: every call retains the unique context admitted by its ordinary
+host-owned bounds. A compact result marker reports duplicate context shown by a
+sibling; session diagnostics record batch size, overlap, low-yield calls, and
+bytes before and after deduplication. A single `search` call keeps its ordinary
+result unchanged.
+
+A `search` `path` or `read_file` path that does not exist fails with
 `similar existing paths: <up to 3>` appended — a bounded scan of the same
 directory (plus one parent level when the directory itself is missing), never a
 recursive walk — so a mistyped path can be retargeted without a list_dir round
 trip.
 
 Invalid search regexes are rejected at argument decode with `invalid regex:
-<compile error>; use fixed_strings: true for literal text` (error kind
+<compile error>; escape regex punctuation to match it literally` (error kind
 `regex_invalid`), before ripgrep or the stdlib walker runs.
-In a batch, malformed or failed queries are rendered beside successful query
-results. A top-level error is returned only when every query is invalid. Positive
-context/result limits above the documented maxima are clamped and disclosed;
-negative limits remain errors. Ripgrep-only parser failures are also classified
-as `regex_invalid` and never cause a regex to be silently treated as literal.
-
-For a batch with more than one `context` or `matches` query, Harness renders
-each query's match summary followed by one shared source-context section.
-Overlapping or adjacent source windows are merged and labeled with the query
-numbers they serve, so the same lines do not consume the result repeatedly.
-Each query still receives its own existing 400-source-line allowance; batching
-does not impose a new aggregate cap.
-
-`inspect` batches heterogeneous repository orientation in the same way. Its
-`operations[]` may contain up to 32 invocations of `read_file`, `search`, `glob`, `list_dir`,
-`workspace_summary`, or `git_readonly`; operations execute in waves of at most
-16 and render under indexed headers. Operation failures are reported inline
-while valid operations still run, so a mixed batch remains successful. If every
-operation fails, the outer result is an error with kind `batch_failed` and keeps
-each operation's error detail. Nested `git_readonly` uses the same `args` and
-optional `cwd` input and the same audited command allowlist as the top-level
-tool. When the `git` binary is unavailable, `inspect` omits both
-`workspace_summary` and `git_readonly` from its advertised operations. Prefer
-`inspect` to one read-only lookup per model turn. After three consecutive
-single-lookup turns, harness adds a one-time soft reminder to batch.
+Ripgrep-only parser failures are also classified as `regex_invalid` and never
+cause a regex to be silently treated as literal. Results report match/file and
+source-line counts plus whether collection or context was bounded. For several
+independent searches, issue several top-level `search` calls in the same model
+turn. After three consecutive single-lookup turns, Harness adds a one-time soft
+reminder to coissue independent `read_file`, `search`, `glob`, and `list_dir`
+calls or use `read_file paths[]` for already-known files.
 
 Raw `grep` and optional `rg` wrappers remain in the constructible catalog for a
 custom agent that explicitly names them in `allowed_tools`; built-in agents do
@@ -234,15 +233,27 @@ disables pagers, optional locks, filesystem monitors, external diff/textconv
 helpers, prompts, output-file flags, and signature helpers.
 
 `update_work` is available to every built-in agent and has only two modes.
-`plan` replaces the bounded ordered phase/step structure and marks it `draft` or
-`ready`; `progress` changes one step/lifecycle, attaches selected evidence, or
-records reconciliation after a branch. Every call names the work item and base
-revision, so stale model updates are rejected. Harness automatically attaches
-unambiguous file mutations, verification outcomes, and delegate completions to
-the active step. Administrative plan updates do not reset the implementation
-progress guard. After 12 inspection-bearing turns without meaningful progress,
-further inspection is gated until the agent records progress, revises/splits the
-plan, reports a blocker/wait, or names one bounded missing-evidence question.
+`plan` accepts a non-empty flat ordered `steps` list; each step needs only a title and may
+add a kind, description, targets, completion condition, verification commands,
+or an optional flag. Open questions are plain strings. Harness generates IDs
+and phases, fills action/exit defaults, infers draft versus ready state and the
+active step, and keeps the durable plan artifact out of model-facing receipts
+and ordinary recovery context; an approved implementation handoff still carries
+it in the fresh implementation seed. `progress` changes the active step/lifecycle, attaches
+selected evidence, or records reconciliation after a branch. Calls do not carry
+work, revision, step, or evidence/result IDs: Harness binds them to the current
+work and active (or first runnable) step, selects fresh observations when a step
+is completed, and advances to the next required step. Evidence recorded while
+work is still implicit is retained if the model later promotes it to a
+structured plan. Harness automatically attaches
+unambiguous file mutations, verification outcomes, delegate completions, and
+stable archived receipts for successful structured-step inspections to the
+active step. An implicit first prompt carries no duplicate capsule; recovery
+capsules are delivered once after resume, context rewrites, switches, branches,
+or host-side evidence changes. Administrative plan updates do not reset the
+implementation progress guard. After 12 inspection-bearing turns without meaningful progress,
+further inspection is gated until the agent records concrete evidence/progress,
+reports a blocker/wait, or names one bounded missing-evidence question.
 Custom agents with an explicit `allowed_tools` list may omit the tool.
 
 ## File Mutation
@@ -321,6 +332,12 @@ equal to that effective budget; prior physical turns and usage are not counted
 again. When the retained request is already at or below 60% of the current
 context window, the fresh child reuses the complete transcript and safe remote
 continuation anchor directly.
+
+Root-wide delegate safety is separate from the model-facing `max_turns` field.
+`delegate_max_active`, `delegate_max_descendants`, and
+`delegate_max_per_step` bound simultaneous fan-out, unique logical descendants,
+and launches attributed to one WorkState step. Continuations reuse the source
+logical descendant rather than consuming another total slot.
 
 Continuation is intentionally strict. The source must belong to the immediate
 parent, have terminal metadata and resumable `state.json`, and carry the same
@@ -455,7 +472,8 @@ Tool results are centrally capped at 64 KB or 1000 lines by default. Configure
 this with `tool_result_max_bytes` / `tool_result_max_lines`, or
 `HARNESS_TOOL_RESULT_MAX_BYTES` / `HARNESS_TOOL_RESULT_MAX_LINES`. Noisy file
 inspection tools have smaller defaults unless a global cap is configured:
-`rg`/`grep` use 32 KB or 500 lines, and `read_file` uses a 500-line default
+typed `search` uses 16 KB or 250 lines, raw `rg`/`grep` use 32 KB or 500 lines,
+and `read_file` uses a 500-line default
 window plus a 32 KB result cap. Override them with `rg_result_max_bytes` /
 `rg_result_max_lines`, `grep_result_max_bytes` / `grep_result_max_lines`,
 `read_file_default_limit`, and `read_file_result_max_bytes` /

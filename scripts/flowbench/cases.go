@@ -138,7 +138,7 @@ func allCases() map[string]benchmarkCase {
 		{
 			Name: "unknown_path_discovery",
 			Prompt: "Work directly; do not delegate or edit. Files are somewhere under .flowbench-tool-accuracy/discovery, but their paths are unknown. " +
-				"Discover the paths before reading any file, then use exactly one inspect read batch over every discovered file. Do not use serial direct reads. Report Discover01 and Discover18.",
+				"Discover all matching paths before reading any file, then read the first and last discovered files together. Independent repository lookups may be issued together in one turn. Report Discover01 and Discover18.",
 			Setup: setupUnknownPathDiscovery, Score: scoreUnknownPathDiscovery,
 			PrimaryMetric: "tool_errors", MinimumReductionPct: 0,
 		},
@@ -195,8 +195,8 @@ func applyEditDrift(dir string) error {
 
 func knownPathBatchingPrompt() string {
 	paths := contractFixturePaths("known", "contract-%02d.txt")
-	return "Work directly; do not delegate or edit. Use exactly one inspect call to read these known paths: " + strings.Join(paths, ", ") + ". " +
-		"Use one batched search call containing literal fixed-string queries for Widget( and State{ plus a regex query for Marker[0-9]+. Scope every search query to the .flowbench-tool-accuracy/known directory; do not list the 18 files as query paths. " +
+	return "Work directly; do not delegate or edit. Read these known paths efficiently: " + strings.Join(paths, ", ") + ". " +
+		"Search the .flowbench-tool-accuracy/known directory for the literal strings Widget( and State{ (escape the punctuation in the regular expressions) plus the regular expression Marker[0-9]+. Independent repository lookups may be issued together in one turn. " +
 		"Use exactly one run_command call with output_mode full and two steps, in order: argv [\"printf\", \"STEP_ALPHA\\n\"] then argv [\"printf\", \"STEP_BETA\\n\"]. Report Marker01, Marker18, and both step outputs."
 }
 
@@ -283,19 +283,11 @@ func requireOnlyUntrackedFixture(worktree string, paths ...string) error {
 
 func scoreKnownPathBatching(in scoreInput) score {
 	result := requireOutput(in.Stdout, "Marker01", "Marker18", "STEP_ALPHA", "STEP_BETA")
-	for _, tool := range []string{"inspect", "search", "run_command"} {
-		if in.Metrics.ToolCalls[tool] == 0 {
-			result.Reasons = append(result.Reasons, "required tool not exercised: "+tool)
-		}
+	if !coversFixturePaths(in.Metrics.SuccessfulReadPaths, contractFixturePaths("known", "contract-%02d.txt")) {
+		result.Reasons = append(result.Reasons, "not all known paths were read successfully")
 	}
-	if in.Metrics.ToolCalls["inspect"] != 1 || in.Metrics.InspectOperations != 18 || in.Metrics.InspectReadOperations != 18 ||
-		in.Metrics.SuccessfulInspectCalls != 1 || in.Metrics.InspectOperationErrors != 0 ||
-		in.Metrics.DirectReadCalls != 0 || in.Metrics.AllFailedInspectCalls != 0 ||
-		!sameFixturePaths(in.Metrics.InspectReadPaths, contractFixturePaths("known", "contract-%02d.txt")) {
-		result.Reasons = append(result.Reasons, "known paths were not read exactly once in one successful 18-operation inspect batch")
-	}
-	if in.Metrics.ToolCalls["search"] != 1 || in.Metrics.SearchQueries != 3 || in.Metrics.ExactKnownPathSearches != 1 {
-		result.Reasons = append(result.Reasons, "search was not one successful exact three-query literal/regex batch scoped to the known directory")
+	if in.Metrics.ExactKnownPathSearches < 3 {
+		result.Reasons = append(result.Reasons, "the two literal searches and one regex search were not completed successfully in the known directory")
 	}
 	if in.Metrics.ToolCalls["run_command"] != 1 || in.Metrics.ExactKnownPathCommands != 1 {
 		result.Reasons = append(result.Reasons, "run_command was not one successful exact full-output two-step argv batch")
@@ -312,11 +304,9 @@ func scoreUnknownPathDiscovery(in scoreInput) score {
 	if !in.Metrics.DiscoveryBeforeRead || in.Metrics.ReadBeforeDiscovery {
 		result.Reasons = append(result.Reasons, "paths were not successfully discovered before reads")
 	}
-	if in.Metrics.ToolCalls["inspect"] != 1 || in.Metrics.InspectOperations != 18 || in.Metrics.InspectReadOperations != 18 ||
-		in.Metrics.SuccessfulInspectCalls != 1 || in.Metrics.InspectOperationErrors != 0 ||
-		in.Metrics.DirectReadCalls != 0 || in.Metrics.AllFailedInspectCalls != 0 ||
-		!sameFixturePaths(in.Metrics.InspectReadPaths, contractFixturePaths("discovery", "shard-%02d-hidden.txt")) {
-		result.Reasons = append(result.Reasons, "discovered paths were not read exactly once in one successful 18-operation inspect batch")
+	paths := contractFixturePaths("discovery", "shard-%02d-hidden.txt")
+	if !coversFixturePaths(in.Metrics.SuccessfulReadPaths, []string{paths[0], paths[len(paths)-1]}) {
+		result.Reasons = append(result.Reasons, "the first and last discovered paths were not read successfully")
 	}
 	if in.FixtureBefore != in.FixtureAfter {
 		result.Reasons = append(result.Reasons, "discovery fixture was modified")
@@ -343,6 +333,19 @@ func sameFixturePaths(got, want []string) bool {
 	}
 	for _, path := range want {
 		if counts[path] != 1 {
+			return false
+		}
+	}
+	return true
+}
+
+func coversFixturePaths(got, want []string) bool {
+	seen := make(map[string]bool, len(got))
+	for _, path := range got {
+		seen[normalizeFixturePath(path)] = true
+	}
+	for _, path := range want {
+		if !seen[path] {
 			return false
 		}
 	}

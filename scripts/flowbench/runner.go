@@ -19,8 +19,15 @@ import (
 
 var defaultModels = []string{
 	"deepseek:deepseek-v4-pro",
-	"alibaba-token-plan:qwen3.8-max-preview",
+	"deepseek:deepseek-v4-flash",
+	"alibaba-token-plan:qwen3.8-max",
 	"openai-codex:gpt-5.6-terra",
+	"openrouter:moonshotai/kimi-k2.7-code",
+	"openrouter:moonshotai/kimi-k3",
+	"openrouter:x-ai/grok-4.5",
+	"xiaomi:mimo-v2.5",
+	"openrouter:z-ai/glm-5.2",
+	"openrouter:anthropic/claude-sonnet-5",
 }
 
 type runConfig struct {
@@ -39,7 +46,7 @@ type runConfig struct {
 
 const (
 	runRecordVersion      = 3
-	oracleContractVersion = "flowbench-oracle-2026-08-03-v3"
+	oracleContractVersion = "flowbench-oracle-2026-08-05-v8"
 )
 
 type runRecord struct {
