@@ -2030,11 +2030,9 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 - Available to the default `auto`/`independent` agents and the shared
   inspection set used by `explore`, `plan`, and `review`.
 
-### 9.3 `search`, optional `inspect`, and raw search commands
+### 9.3 `search` and raw search commands
 
 > `search`: Search one file or directory for an RE2 regular expression and return host-bounded matching context. Escape punctuation to match it literally.
-
-> `inspect`: Run up to 32 independent read-only repository operations in waves of at most 16.
 
 - `search` is the only content-search tool in built-in agent definitions. Its
   flat input requires `pattern`; singular `path` defaults to `"."`; optional
@@ -2047,9 +2045,8 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   directories and binary files, and uses Go regular expressions.
 - A `path` that does not exist is rejected before search runs, with
   the same `similar existing paths` suggestions as read_file.
-- A `path` that is the filesystem root after lexical cleaning is rejected at argument decode as
-  excessively broad. Nested `inspect` searches use the same typed search
-  implementation and inherit the rejection.
+- A `path` that is the filesystem root after lexical cleaning is rejected at
+  argument decode as excessively broad.
 - Patterns are pre-compiled at argument decode (respecting the smart-case
   `(?i)` transform the stdlib walker applies; Go RE2 and
   ripgrep's default engine are both RE2-class). An invalid regex fails fast as
@@ -2072,17 +2069,6 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   model-visible duplicate marker where needed, and records diagnostics-only
   overlap, yield, low-yield, and before/after-byte metrics on one batch owner.
   Single searches and unparseable/error results are unchanged.
-- `inspect` is constructible only for an explicit custom agent; no built-in
-  agent advertises it. Its `operations[]` (1–32) selects `read_file`, `search`, `glob`,
-  `list_dir`, `workspace_summary`, or `git_readonly` and supplies that
-  operation's `input` object. Nested `git_readonly` uses the ordinary `git`
-  tool's audited read-only classifier and hardened execution path, so mutating
-  argv is rejected before execution. The schema enum and description are built
-  from the operations registered in the composite; without a `git` binary they
-  omit both `workspace_summary` and `git_readonly`. The operations run
-  in waves of at most 16. Every operation is prevalidated: unsafe or malformed
-  operations are never executed but are reported inline while valid siblings
-  run. `operation_count` and `operation_errors` are diagnostics-only metrics.
 - Three consecutive turns containing one unbatched orientation lookup trigger
   one soft steering message recommending coissued top-level read-only calls or
   `read_file.paths[]`. It does not block execution.

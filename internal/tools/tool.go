@@ -416,10 +416,6 @@ func CatalogWithOptions(opts Options) (*Registry, []DisabledTool) {
 	// Raw search commands remain constructible for custom agents that explicitly
 	// whitelist them, but the default model surface exposes only typed search.
 	registerRawSearchTools(r, opts)
-	// inspect remains constructible for explicit custom agents while the built-in
-	// surfaces rely on schema-visible top-level read-only calls, which the agent
-	// dispatcher already runs concurrently.
-	registerInspectTool(r)
 	// apply_patch overlaps edit+write_file, so it is kept out of the default
 	// request and registered only here, where agents may still whitelist it by
 	// name. This auto-drops it from auto/independent allowed lists derived from

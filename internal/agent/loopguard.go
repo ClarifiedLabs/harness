@@ -86,7 +86,7 @@ const (
 )
 
 // ToolActivityCounts reports operation counts rather than just outer tool-call
-// counts, so a batched inspect/steps call remains visible as one model action.
+// counts, so a batched read_file/steps call remains visible as one model action.
 type ToolActivityCounts struct {
 	Inspect    int
 	Mutate     int

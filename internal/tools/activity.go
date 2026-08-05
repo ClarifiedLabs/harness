@@ -258,15 +258,6 @@ func builtinActivity(name string, input json.RawMessage) (Activity, bool) {
 	case "edit", "write_file", "apply_patch":
 		activity.Class = ActivityMutate
 		return activity, true
-	case "inspect":
-		var args struct {
-			Operations []json.RawMessage `json:"operations"`
-		}
-		_ = json.Unmarshal(input, &args)
-		activity.Class = ActivityInspect
-		activity.OperationCount = max(1, len(args.Operations))
-		activity.Batched = len(args.Operations) > 1
-		return activity, true
 	case "read_file":
 		var args struct {
 			Paths []string `json:"paths"`

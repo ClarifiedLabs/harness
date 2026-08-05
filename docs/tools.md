@@ -30,10 +30,9 @@ default tool set — `edit` and `write_file` subsume it. It still ships in the t
 catalog, so an agent can opt back in by naming `apply_patch` in its
 `allowed_tools` whitelist.
 
-The composite `inspect` tool also remains in the constructible catalog for an
-explicit custom agent, but built-in agents do not advertise it. Built-ins issue
-schema-visible top-level read-only calls together in one tool turn; Harness runs
-consecutive read-only calls concurrently and preserves their input order.
+Models issue schema-visible top-level read-only calls together in one tool
+turn; Harness runs consecutive read-only calls concurrently and preserves their
+input order.
 
 `read_file` reads one file via `path` (with `offset`/`limit`), or several at once
 via `paths[]` — each file is rendered under a `==> path <==` header with its own

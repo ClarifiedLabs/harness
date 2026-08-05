@@ -284,9 +284,6 @@ func TestBuiltinsUseTypedSearchOnly(t *testing.T) {
 		if !slices.Contains(agent.AllowedTools, "search") {
 			t.Fatalf("%s tools missing typed search: %v", name, agent.AllowedTools)
 		}
-		if slices.Contains(agent.AllowedTools, "inspect") {
-			t.Fatalf("%s tools unexpectedly include nested inspect: %v", name, agent.AllowedTools)
-		}
 		for _, raw := range []string{"grep", "rg"} {
 			if slices.Contains(agent.AllowedTools, raw) {
 				t.Fatalf("%s tools unexpectedly include raw %s: %v", name, raw, agent.AllowedTools)

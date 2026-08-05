@@ -321,6 +321,11 @@ func searchTestInput(query string) json.RawMessage {
 	return json.RawMessage(query)
 }
 
+func quoteJSON(value string) string {
+	data, _ := json.Marshal(value)
+	return string(data)
+}
+
 func fakeRG(t *testing.T, lines []string, exitCode int) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "rg")

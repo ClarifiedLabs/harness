@@ -79,7 +79,6 @@ func TestOrientationGuardSteersToBatching(t *testing.T) {
 
 func TestOrientationGuardIgnoresBatchedLookups(t *testing.T) {
 	for _, call := range []llm.ToolCall{
-		{Name: "inspect", Input: json.RawMessage(`{"operations":[{},{}]}`)},
 		{Name: "read_file", Input: json.RawMessage(`{"paths":["a","b"]}`)},
 	} {
 		if isSingleOrientationTurn([]llm.ToolCall{call}) {

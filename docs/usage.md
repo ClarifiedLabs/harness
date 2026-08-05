@@ -1877,7 +1877,8 @@ report corrupt or unsupported sessions, and never combine repeat streaks across
 physical agents. A success or different failure breaks a streak. Tool failures
 are attributed to the event-time model identity; older logs use the preceding
 `model_request` before falling back to session metadata. Summaries include
-tool-result denominators and composite inspect/search diagnostics carried in metrics.
+tool-result denominators, historical composite-inspect diagnostics, and current
+search-batch diagnostics carried in metrics.
 
 ### Session diagnostics
 

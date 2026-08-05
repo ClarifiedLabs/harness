@@ -493,23 +493,23 @@ func TestDispatchGuardBlocksBeforeToolExecutionAndSurvivesSubset(t *testing.T) {
 	ran := false
 	r := &Registry{}
 	r.Register(fakeTool{
-		name: "inspect", desc: "inspect", schema: `{"type":"object"}`,
+		name: "reader", desc: "reader", schema: `{"type":"object"}`, readOnly: true,
 		run: func(context.Context, json.RawMessage) (string, error) {
 			ran = true
 			return "unexpected", nil
 		},
 	})
 	r.SetDispatchGuard(func(call llm.ToolCall, activity Activity) error {
-		if call.Name != "inspect" || string(call.Input) != "{}" || activity.Class != ActivityInspect {
+		if call.Name != "reader" || string(call.Input) != "{}" || activity.Class != ActivityInspect {
 			t.Fatalf("guard call/activity = %+v/%+v", call, activity)
 		}
 		return fmt.Errorf("work decision required")
 	})
-	sub, err := r.Subset([]string{"inspect"})
+	sub, err := r.Subset([]string{"reader"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := sub.Dispatch(context.Background(), llm.ToolCall{ID: "guarded", Name: "inspect"})
+	res := sub.Dispatch(context.Background(), llm.ToolCall{ID: "guarded", Name: "reader"})
 	if !res.IsError || res.ErrorKind != llm.ToolErrorInvalidArgs || !strings.Contains(res.Text, "work decision required") {
 		t.Fatalf("guarded result = %+v", res)
 	}
@@ -768,7 +768,6 @@ func TestCatalogRegistersDefaultPlusModeTools(t *testing.T) {
 	if RipgrepAvailable() {
 		want = append(want, "rg")
 	}
-	want = append(want, "inspect")
 	want = append(want, "apply_patch") // relocated out of the default set (r56)
 	if GitAvailable() {
 		want = append(want, "git_readonly")
@@ -781,6 +780,12 @@ func TestCatalogRegistersDefaultPlusModeTools(t *testing.T) {
 		if len(s.Parameters) == 0 {
 			t.Errorf("tool %q has empty schema", s.Name)
 		}
+	}
+}
+
+func TestCatalogDoesNotRegisterInspect(t *testing.T) {
+	if _, ok := Catalog().Lookup("inspect"); ok {
+		t.Fatal("obsolete inspect tool remains constructible")
 	}
 }
 
