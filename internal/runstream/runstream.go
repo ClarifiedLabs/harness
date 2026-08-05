@@ -22,7 +22,7 @@ import (
 )
 
 // Version is the JSON run-stream protocol version, published as run_start.v.
-const Version = 1
+const Version = 2
 
 // Envelope type names. Mirrored session events between run_start and run_end
 // keep their raw.ndjson type names ("user", "assistant_delta", "tool_start",
@@ -192,14 +192,16 @@ type PromptEnd struct {
 // client answers with an approval_response input message carrying the same
 // ID; the prompt boundary waits (interrupt/shutdown still work).
 type ApprovalRequest struct {
-	Type     string    `json:"type"`
-	ID       string    `json:"id"`
-	Kind     string    `json:"kind"`
-	Brief    string    `json:"brief"`
-	PlanPath string    `json:"plan_path"`
-	Agent    string    `json:"agent,omitempty"`
-	Model    string    `json:"model,omitempty"`
-	Time     time.Time `json:"time"`
+	Type       string    `json:"type"`
+	ID         string    `json:"id"`
+	Kind       string    `json:"kind"`
+	Brief      string    `json:"brief"`
+	PlanPath   string    `json:"plan_path"`
+	WorkID     string    `json:"work_id"`
+	RevisionID string    `json:"revision_id"`
+	Agent      string    `json:"agent,omitempty"`
+	Model      string    `json:"model,omitempty"`
+	Time       time.Time `json:"time"`
 }
 
 // InputError reports one rejected input line or message; the session keeps

@@ -24,8 +24,8 @@ import (
 	"harness/internal/llm"
 	"harness/internal/session"
 	"harness/internal/sessionrec"
-	"harness/internal/todo"
 	"harness/internal/tools"
+	"harness/internal/workstate"
 	"harness/prompts"
 )
 
@@ -34,7 +34,7 @@ const DefaultMaxDepth = 3
 const maxAgentDescriptionBytes = 160
 
 const delegateToolName = "delegate"
-const updateTodosToolName = "update_todos"
+const updateWorkToolName = "update_work"
 
 const ModeImplementation = "implementation"
 const continuationContextPercent = 60
@@ -147,6 +147,8 @@ type Options struct {
 	// WorkflowStatus optionally supplies authoritative bounded status for a
 	// child ID. It is telemetry only and never changes child exit semantics.
 	WorkflowStatus func(childID string) agent.WorkflowStatus
+	// WorkSnapshot returns the current root work projection at child launch.
+	WorkSnapshot func() *workstate.State
 }
 
 // ChildView describes one followable delegate child to Options.OpenChildView.
@@ -226,7 +228,7 @@ type Runner struct {
 	snapshot         func() Runtime
 	resolve          func(Runtime, string) (Launch, error)
 	opts             Options
-	childToolBuilder func(Runtime, Launch, string, *todo.Store, []string) (*tools.Registry, error)
+	childToolBuilder func(Runtime, Launch, string, []string) (*tools.Registry, error)
 }
 
 func NewRunner(snapshot func() Runtime, resolve func(Runtime, string) (Launch, error), opts Options) *Runner {
@@ -628,18 +630,48 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 	defer finish()
 
-	childTodos := todo.NewStore()
-	hasTodoTool := slices.Contains(toolNames, updateTodosToolName)
+	childWork := workstate.NewStore(func() string { return childDir })
+	if continuation != nil && continuation.state.Work != nil {
+		if err := childWork.LoadLog(childDir); err != nil {
+			terminalErr = err
+			finish()
+			return result, err
+		}
+		if err := childWork.Restore(continuation.state.Work); err != nil {
+			terminalErr = err
+			finish()
+			return result, err
+		}
+	} else {
+		var parentWork *workstate.State
+		if r.opts.WorkSnapshot != nil {
+			parentWork = r.opts.WorkSnapshot()
+		}
+		if _, err := childWork.NewChild(parentWork, childID, req.Task, "host"); err != nil {
+			terminalErr = err
+			finish()
+			return result, err
+		}
+	}
 	cacheAffinityID := childCacheAffinityID(runtime.CacheAffinityID, childID)
 	if continuation != nil {
 		cacheAffinityID = continuation.state.CacheAffinityID
 	}
-	childTools, err := r.buildChildTools(runtime, launch, childID, childTodos, toolNames, cacheAffinityID)
+	childTools, err := r.buildChildTools(runtime, launch, childID, toolNames, cacheAffinityID)
 	if err != nil {
 		terminalErr = err
 		finish()
 		return result, err
 	}
+	if slices.Contains(toolNames, updateWorkToolName) {
+		childTools.Register(tools.NewUpdateWork(childWork))
+	}
+	childTools.SetDispatchGuard(func(call llm.ToolCall, activity tools.Activity) error {
+		if childWork.DecisionRequired() && activity.Class == tools.ActivityInspect {
+			return fmt.Errorf("work decision required: inspection tool %q is paused; use update_work to record progress, revise the plan, name one bounded evidence question, or report a blocker", call.Name)
+		}
+		return nil
+	})
 	child := agent.New(launch.Provider, childTools, agent.Options{
 		MaxTurns:                  maxTurns,
 		MaxPromptTokens:           runtime.MaxPromptTokens,
@@ -668,7 +700,6 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	prompt := req.Task
 	if continuation != nil {
 		prompt = continuationPrompt(req.ContinueChildID, req.Task)
-		childTodos.Restore(continuation.state.Todos)
 		child.SetTranscript(continuation.state.Messages)
 	}
 
@@ -686,7 +717,9 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		return childTree, nil
 	}
 
-	sink := newChildSink(childDir, childTodos, hasTodoTool, progress, activity, inlineReasoningEnabled(launch.Reasoning))
+	sink := newChildSink(childDir, progress, activity, inlineReasoningEnabled(launch.Reasoning))
+	sink.work = childWork
+	sink.toolActivity = child.ToolActivity
 	if r.opts.WorkflowStatus != nil {
 		sink.workflowStatus = func() agent.WorkflowStatus { return r.opts.WorkflowStatus(childID) }
 	}
@@ -698,7 +731,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		if err != nil {
 			return err
 		}
-		state := r.childSessionState(runtime, launch, child, childTodos, checkpoint.Usage, created, updated, tree)
+		state := r.childSessionState(runtime, launch, child, childWork, checkpoint.Usage, created, updated, tree)
 		var checkpointErr error
 		switch checkpoint.Kind {
 		case agent.PromptCheckpointClosedTurn:
@@ -741,9 +774,6 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 			ReadFiles:     archive.ReadFiles,
 			ModifiedFiles: archive.ModifiedFiles,
 		})
-		if err == nil {
-			childTodos.RequireRequestContext()
-		}
 		return ref, err
 	})
 	flushDisplay = sink.flushDisplay
@@ -761,7 +791,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		}
 		terminalMessageCount = len(child.Transcript())
 		terminalUpdated = r.now()
-		stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, terminalUsage, created, terminalUpdated, ensureChildTree)
+		stateErr := r.saveChildSession(runtime, launch, childID, child, childWork, terminalUsage, created, terminalUpdated, ensureChildTree)
 		persistenceErr := errors.Join(sink.appendError(), stateErr)
 		terminalErr = errors.Join(runErr, persistenceErr)
 		result.Usage = terminalUsage.Usage
@@ -782,7 +812,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 
 	if continuation != nil {
-		requestContext := todo.RequestContext(continuation.state.Todos)
+		requestContext := workstate.RequestContext(continuation.state.Work)
 		before := estimateContinuationContext(child, continuation.state.Messages, prompt, requestContext)
 		req.continuationContextBefore = before.Total
 		req.continuationContextAfter = before.Total
@@ -828,17 +858,21 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 
 	runErr := child.RunPrompt(ctx, prompt, sink)
+	rawReport := strings.TrimSpace(lastAssistantText(child.Transcript()))
+	if runErr == nil {
+		terminalCompletion, rawReport = parseCompletionReport(rawReport, contract)
+	}
+	if runErr == nil && terminalCompletion.Outcome == session.ChildCompletionOutcomeComplete {
+		_, _ = childWork.AutoCompleteImplicit(lastAssistantText(child.Transcript()))
+	}
 	usage := sink.usage
 	terminalUsage = usage
 	terminalMessageCount = len(child.Transcript())
 	terminalStatus = childTerminalStatus(runErr)
 	terminalUpdated = r.now()
-	stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, usage, created, terminalUpdated, ensureChildTree)
+	stateErr := r.saveChildSession(runtime, launch, childID, child, childWork, usage, created, terminalUpdated, ensureChildTree)
 	persistenceErr := errors.Join(sink.appendError(), stateErr)
-	rawReport := strings.TrimSpace(lastAssistantText(child.Transcript()))
-	if runErr == nil {
-		terminalCompletion, rawReport = parseCompletionReport(rawReport, contract)
-	} else {
+	if runErr != nil {
 		terminalCompletion = unknownCompletion(contract, session.ChildCompletionSourceHost, session.ChildCompletionValidationUnavailable)
 	}
 	result = RunResult{
@@ -1316,27 +1350,24 @@ func normalizeMode(mode string) (string, error) {
 	}
 }
 
-func (r *Runner) buildChildTools(parent Runtime, launch Launch, childID string, todos *todo.Store, names []string, cacheAffinityID string) (*tools.Registry, error) {
+func (r *Runner) buildChildTools(parent Runtime, launch Launch, childID string, names []string, cacheAffinityID string) (*tools.Registry, error) {
 	if r.childToolBuilder != nil {
-		return r.childToolBuilder(parent, launch, childID, todos, names)
+		return r.childToolBuilder(parent, launch, childID, names)
 	}
-	return r.childToolsWithCacheAffinity(parent, launch, childID, cacheAffinityID, todos, names)
+	return r.childToolsWithCacheAffinity(parent, launch, childID, cacheAffinityID, names)
 }
 
-func (r *Runner) childTools(parent Runtime, launch Launch, childID string, todos *todo.Store, names []string) (*tools.Registry, error) {
-	return r.childToolsWithCacheAffinity(parent, launch, childID, childCacheAffinityID(parent.CacheAffinityID, childID), todos, names)
+func (r *Runner) childTools(parent Runtime, launch Launch, childID string, names []string) (*tools.Registry, error) {
+	return r.childToolsWithCacheAffinity(parent, launch, childID, childCacheAffinityID(parent.CacheAffinityID, childID), names)
 }
 
-func (r *Runner) childToolsWithCacheAffinity(parent Runtime, launch Launch, childID, cacheAffinityID string, todos *todo.Store, names []string) (*tools.Registry, error) {
+func (r *Runner) childToolsWithCacheAffinity(parent Runtime, launch Launch, childID, cacheAffinityID string, names []string) (*tools.Registry, error) {
 	if names == nil {
 		names = launch.Tools.Names()
 	}
 	childTools, err := launch.Tools.Subset(names)
 	if err != nil {
 		return nil, err
-	}
-	if slices.Contains(names, updateTodosToolName) {
-		childTools.Register(todo.NewTool(todos))
 	}
 	childRuntime := Runtime{
 		Provider:          launch.Provider,
@@ -1742,7 +1773,7 @@ func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, re
 	return session.SaveChildMeta(parent.SessionPath, meta)
 }
 
-func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string, child *agent.Agent, todos *todo.Store, usage agent.PromptUsage, created, updated time.Time, ensureTree func([]llm.Message) (*session.Tree, error)) error {
+func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string, child *agent.Agent, work *workstate.Store, usage agent.PromptUsage, created, updated time.Time, ensureTree func([]llm.Message) (*session.Tree, error)) error {
 	if parent.SessionPath == "" {
 		return nil
 	}
@@ -1751,10 +1782,17 @@ func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string,
 	if err != nil {
 		return err
 	}
-	return r.childSessionState(parent, launch, child, todos, usage, created, updated, tree).SaveConsolidated(childDir)
+	return r.childSessionState(parent, launch, child, work, usage, created, updated, tree).SaveConsolidated(childDir)
 }
 
-func (r *Runner) childSessionState(parent Runtime, launch Launch, child *agent.Agent, todos *todo.Store, usage agent.PromptUsage, created, updated time.Time, tree *session.Tree) session.Session {
+func (r *Runner) childSessionState(parent Runtime, launch Launch, child *agent.Agent, work *workstate.Store, usage agent.PromptUsage, created, updated time.Time, tree *session.Tree) session.Session {
+	var workSnapshot *workstate.State
+	if work != nil {
+		workSnapshot = work.Snapshot()
+		if workSnapshot != nil && tree != nil {
+			tree.SetWorkRevisionID(workSnapshot.RevisionID)
+		}
+	}
 	return session.Session{
 		Version:         session.Version,
 		Provider:        launch.ProviderName,
@@ -1770,7 +1808,7 @@ func (r *Runner) childSessionState(parent Runtime, launch Launch, child *agent.A
 		Prompt:          1,
 		Messages:        child.Transcript(),
 		ResponseState:   child.ResponseState(),
-		Todos:           todos.Snapshot(),
+		Work:            workSnapshot,
 		Usage:           session.UsageTotals{Usage: usage.Usage, CostUSD: usage.Usage.CostUSD, Compactions: usage.Compactions},
 		Tree:            tree,
 	}
@@ -1794,17 +1832,23 @@ type childSink struct {
 	reasoning            bool
 	sessionDir           string
 	rec                  *sessionrec.Recorder
-	todos                *todo.Store
-	todoContext          bool
 	pending              map[string]pendingChildTool
 	turn                 int
 	attempt              int
-	todoTurn             int
 	appendMu             sync.Mutex
 	appendErr            error
 	checkpoint           func(agent.PromptCheckpoint) error
 	messageCount         func() int
 	workflowStatus       func() agent.WorkflowStatus
+	work                 *workstate.Store
+	toolActivity         func(llm.ToolCall) tools.Activity
+	pendingWorkResults   map[string][]workstate.Result
+	pendingWorkTargets   map[string]workObservationTarget
+}
+
+type workObservationTarget struct {
+	revisionID string
+	stepID     string
 }
 
 type pendingChildTool struct {
@@ -1812,14 +1856,14 @@ type pendingChildTool struct {
 	summary string
 }
 
-func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progress *Progress, activity *ActivityRegistration, reasoning ...bool) *childSink {
+func newChildSink(sessionDir string, progress *Progress, activity *ActivityRegistration, reasoning ...bool) *childSink {
 	sink := &childSink{
-		sessionDir:  sessionDir,
-		todos:       todos,
-		todoContext: todoContext,
-		progress:    progress,
-		activity:    activity,
-		pending:     make(map[string]pendingChildTool),
+		sessionDir:         sessionDir,
+		progress:           progress,
+		activity:           activity,
+		pending:            make(map[string]pendingChildTool),
+		pendingWorkResults: make(map[string][]workstate.Result),
+		pendingWorkTargets: make(map[string]workObservationTarget),
 	}
 	if len(reasoning) > 0 {
 		sink.reasoning = reasoning[0]
@@ -2015,10 +2059,6 @@ func (s *childSink) ReasoningSummary(text string) {
 }
 
 func (s *childSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
-	if s.todos != nil && s.todoContext {
-		s.todos.CommitModelRound(turn != s.todoTurn)
-		s.todoTurn = turn
-	}
 	s.flushDisplay()
 	s.turn = turn
 	s.attempt = attempt
@@ -2063,6 +2103,11 @@ func (s *childSink) ToolStart(call llm.ToolCall) {
 	s.flushDisplay()
 	summary := safeToolActivity(call)
 	s.pending[call.ID] = pendingChildTool{call: call, summary: summary}
+	if s.work != nil {
+		if work := s.work.Snapshot(); work != nil && work.ActiveStepID != "" {
+			s.pendingWorkTargets[call.ID] = workObservationTarget{revisionID: work.RevisionID, stepID: work.ActiveStepID}
+		}
+	}
 	s.progress.markTool()
 	s.activity.MarkActivity(summary)
 	s.rec.ToolStart(call)
@@ -2087,6 +2132,7 @@ func (s *childSink) ToolResult(result llm.ToolResult) {
 	}
 	s.rec.ToolResult(result)
 	s.activity.publishText(kind, summary, s.turn, s.attempt, false)
+	s.attachObservedWorkResults(call, result)
 }
 
 // ToolDiff records the rendered diff at parent fidelity. It deliberately
@@ -2095,6 +2141,76 @@ func (s *childSink) ToolResult(result llm.ToolResult) {
 func (s *childSink) ToolDiff(call llm.ToolCall, path, text string) {
 	s.flushDisplay()
 	s.rec.ToolDiff(call, path, text)
+	if strings.TrimSpace(path) != "" {
+		s.pendingWorkResults[call.ID] = append(s.pendingWorkResults[call.ID], workstate.Result{
+			Kind: workstate.ResultChange, Path: path, ToolCallID: call.ID,
+		})
+	}
+}
+
+func (s *childSink) attachObservedWorkResults(call llm.ToolCall, result llm.ToolResult) {
+	if s.work == nil {
+		return
+	}
+	target := s.pendingWorkTargets[result.ForID]
+	delete(s.pendingWorkTargets, result.ForID)
+	results := append([]workstate.Result(nil), s.pendingWorkResults[result.ForID]...)
+	delete(s.pendingWorkResults, result.ForID)
+	if target.stepID == "" {
+		return
+	}
+	if s.toolActivity != nil && s.toolActivity(call).Class == tools.ActivityVerify {
+		status := workstate.VerifyPassed
+		detail := ""
+		if result.IsError {
+			status = workstate.VerifyFailed
+			detail = preview(result.Text, 1024)
+		}
+		results = append(results, workstate.Result{
+			Kind: workstate.ResultVerification, Check: childWorkCallSummary(call), Status: status,
+			Detail: detail, ToolCallID: call.ID,
+		})
+	}
+	if call.Name == delegateToolName && !result.IsError {
+		var args struct {
+			Background bool `json:"background"`
+		}
+		_ = json.Unmarshal(call.Input, &args)
+		if !args.Background {
+			results = append(results, workstate.Result{Kind: workstate.ResultDelegate, Detail: preview(result.Text, 1024), ToolCallID: call.ID})
+		}
+	}
+	if len(results) == 0 {
+		return
+	}
+	current := s.work.Snapshot()
+	if current == nil || current.RevisionID != target.revisionID || current.ActiveStepID != target.stepID {
+		for i := range results {
+			results[i].Stale = true
+		}
+	}
+	if _, err := s.work.AddResults(target.stepID, results, "host"); err != nil {
+		s.retainAppendError(err)
+	}
+}
+
+func childWorkCallSummary(call llm.ToolCall) string {
+	if call.Name != "run_command" {
+		return call.Name
+	}
+	var args struct {
+		Argv    []string `json:"argv"`
+		Command string   `json:"command"`
+	}
+	if json.Unmarshal(call.Input, &args) == nil {
+		if len(args.Argv) > 0 {
+			return preview(strings.Join(args.Argv, " "), 1024)
+		}
+		if strings.TrimSpace(args.Command) != "" {
+			return preview(args.Command, 1024)
+		}
+	}
+	return call.Name
 }
 
 func (s *childSink) ArchiveToolResult(result llm.ToolResult) (agent.ToolResultArchive, error) {
@@ -2175,7 +2291,19 @@ func (s *childSink) ClosureStarted(event agent.ClosureEvent) {
 }
 
 func (s *childSink) TurnProgress(progress agent.TurnProgress) {
-	s.rec.TurnProgress(progress)
+	if s.work == nil {
+		s.rec.TurnProgress(progress)
+		return
+	}
+	work := s.work.Snapshot()
+	if work == nil {
+		s.rec.TurnProgress(progress)
+	} else {
+		s.rec.TurnProgressForWork(progress, work.WorkID, work.RevisionID, work.ActiveStepID)
+	}
+	if _, err := s.work.RecordInspectionTurn(progress.InspectionOnly && progress.NoExplicitProgress, progress.ExplicitProgress); err != nil {
+		s.retainAppendError(err)
+	}
 }
 
 func (s *childSink) HookDiagnostic(diagnostic hooks.Diagnostic) {
@@ -2199,9 +2327,6 @@ func (s *childSink) RetentionApplied(event agent.RetentionEvent) {
 }
 
 func (s *childSink) TranscriptRewritten() {
-	if s.todos != nil && s.todoContext {
-		s.todos.RequireRequestContext()
-	}
 }
 
 func (s *childSink) SkillActivated(event agent.SkillActivationEvent) {
@@ -2215,25 +2340,21 @@ func (s *childSink) SkillActivated(event agent.SkillActivationEvent) {
 }
 
 func (s *childSink) RequestContext() []string {
-	if s.todos == nil || !s.todoContext {
-		return nil
+	if s.work != nil {
+		if ctx := workstate.RequestContext(s.work.Snapshot()); ctx != "" {
+			return []string{ctx}
+		}
 	}
-	ctx := s.todos.PendingRequestContext()
-	if ctx == "" {
-		return nil
-	}
-	return []string{ctx}
+	return nil
 }
 
 func (s *childSink) PeekRequestContext() []string {
-	if s.todos == nil || !s.todoContext {
-		return nil
+	if s.work != nil {
+		if ctx := workstate.RequestContext(s.work.Snapshot()); ctx != "" {
+			return []string{ctx}
+		}
 	}
-	ctx := s.todos.PendingRequestContext()
-	if ctx == "" {
-		return nil
-	}
-	return []string{ctx}
+	return nil
 }
 
 func (s *childSink) PromptComplete(usage agent.PromptUsage) {

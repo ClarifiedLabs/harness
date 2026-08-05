@@ -26,6 +26,7 @@ const (
 
 // State is the compact, serializable goal state persisted in state.json.
 type State struct {
+	WorkID        string    `json:"work_id"`
 	Objective     string    `json:"objective"`
 	Status        Status    `json:"status"`
 	Continuations int       `json:"continuations,omitempty"`
@@ -88,13 +89,19 @@ func (s *Store) Snapshot() *State {
 // Set replaces the current goal with a new active one. The objective is trimmed
 // and length-capped; setting an empty or whitespace-only objective is an error.
 func (s *Store) Set(objective string) error {
+	return s.Bind("", objective)
+}
+
+// Bind replaces the controller state and points it at the authoritative work
+// lineage. Objective is retained only as bounded display/prompt text.
+func (s *Store) Bind(workID, objective string) error {
 	objective, err := normalizeObjective(objective)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.setLocked(objective)
+	s.setLocked(strings.TrimSpace(workID), objective)
 	return nil
 }
 
@@ -111,8 +118,9 @@ func normalizeObjective(objective string) (string, error) {
 }
 
 // setLocked requires s.mu to be held.
-func (s *Store) setLocked(objective string) {
+func (s *Store) setLocked(workID, objective string) {
 	s.state = &State{
+		WorkID:        workID,
 		Objective:     objective,
 		Status:        StatusActive,
 		Continuations: 0,
@@ -121,6 +129,34 @@ func (s *Store) setLocked(objective string) {
 	s.revision++
 	s.generation++
 	s.notifyLocked()
+}
+
+// SyncWork mirrors terminal/waiting lifecycle from the bound WorkState without
+// duplicating its execution details.
+func (s *Store) SyncWork(workID, lifecycle string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == nil || s.state.WorkID == "" || s.state.WorkID != workID {
+		return false
+	}
+	next := s.state.Status
+	switch lifecycle {
+	case "completed", "abandoned":
+		next = StatusComplete
+	case "blocked":
+		next = StatusBlocked
+	case "active", "waiting":
+		if next != StatusPaused {
+			next = StatusActive
+		}
+	}
+	if next == s.state.Status {
+		return false
+	}
+	s.state.Status = next
+	s.revision++
+	s.notifyLocked()
+	return true
 }
 
 // Clear removes the current goal and invalidates prompt bindings from the prior
@@ -270,7 +306,11 @@ func (s *Store) Reminder() string {
 	if s.state == nil || s.state.Status != StatusActive {
 		return ""
 	}
-	return fmt.Sprintf("<goal status=\"active\">\n<objective>%s</objective>\nThis user-managed goal persists across turns. Work toward it from the evidence in the transcript, and report concrete evidence when the objective is achieved.\n</goal>", xmlEscape(s.state.Objective))
+	open := "<goal status=\"active\">"
+	if s.state.WorkID != "" {
+		open = fmt.Sprintf("<goal status=\"active\" work_id=\"%s\">", xmlEscape(s.state.WorkID))
+	}
+	return fmt.Sprintf("%s\n<objective>%s</objective>\nThis controller continues the bound WorkState. Follow its active capsule and report concrete evidence when it is complete.\n</goal>", open, xmlEscape(s.state.Objective))
 }
 
 // ContinuationPrompt renders the user-facing prompt that drives a newly set or
@@ -420,6 +460,7 @@ func continuationPrompt(state *State, continuations, maxContinuations int) strin
 
 	return fmt.Sprintf(`Continue working toward the active session goal.
 
+<work_id>%s</work_id>
 <objective>%s</objective>
 
 %s elapsed; %s.
@@ -430,7 +471,7 @@ Completion audit: before reporting completion, verify the objective requirement 
 
 If progress is blocked, explain the concrete blocking condition and what you tried. A user-resumed goal starts a fresh audit.
 
-Goal state is controlled by the user through /goal. If the objective is achieved, report the evidence clearly.`, xmlEscape(state.Objective), elapsed, stats)
+Goal state is controlled by the user through /goal; execution state belongs to WorkState. If the objective is achieved, complete WorkState with evidence.`, xmlEscape(state.WorkID), xmlEscape(state.Objective), elapsed, stats)
 }
 
 func xmlEscape(s string) string {

@@ -21,16 +21,16 @@ import (
 	"harness/internal/agent"
 	"harness/internal/background"
 	"harness/internal/goal"
+	"harness/internal/handoff"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
-	"harness/internal/plan"
 	"harness/internal/runstream"
 	"harness/internal/session"
 	"harness/internal/skills"
-	"harness/internal/todo"
 	"harness/internal/tools"
+	"harness/internal/workstate"
 )
 
 const uiOnePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
@@ -160,6 +160,29 @@ func newTestApp(t *testing.T, out, errw testWriter, fp *llmtest.FakeProvider) *A
 	}
 }
 
+func readyWorkForApp(t *testing.T, app *App, objective string) *workstate.State {
+	t.Helper()
+	app.Work = workstate.NewStore(func() string { return app.SessionPath })
+	root, err := app.Work.NewWork(objective, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err := app.Work.SetPlan(workstate.PlanUpdate{
+		BaseRevisionID: root.RevisionID,
+		Title:          "Implementation",
+		PlanState:      workstate.PlanReady,
+		Nodes: []workstate.NodeDefinition{{
+			ID: "change", Type: workstate.NodeStep, Title: "Implement the change", Kind: workstate.KindChange,
+			Targets: []string{"internal/example.go"}, Actions: []string{"edit the implementation"},
+			ExitCriteria: []string{"behavior implemented"}, Verification: []string{"go test ./..."},
+		}},
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ready
+}
+
 func TestTurnCompletePricesTurnAgainstRegistry(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
@@ -270,10 +293,10 @@ func TestPromptCheckpointRecoversToolDispatchBeforeResult(t *testing.T) {
 		ResponsesStateful: true,
 	})
 	app.Agent.SetSystem(app.System)
-	app.Todos = todo.NewStore()
-	app.Todos.Replace([]todo.Item{{Content: "mutate once", Status: "in_progress"}})
-	app.Plans = plan.NewStore()
-	app.Plans.Replace([]plan.Plan{{Title: "Safe mutation", Body: "Run once", Path: "plans/safe.md"}})
+	app.Work = workstate.NewStore(func() string { return app.SessionPath })
+	if _, err := app.Work.NewWork("mutate once", "user"); err != nil {
+		t.Fatal(err)
+	}
 
 	promptID := app.beginPrompt("change it", nil)
 	app.Renderer.StartPromptRun()
@@ -314,8 +337,8 @@ func TestPromptCheckpointRecoversToolDispatchBeforeResult(t *testing.T) {
 	if recovered.ResponseState == nil || recovered.ResponseState.PreviousResponseID != "resp-1" {
 		t.Fatalf("response state = %+v", recovered.ResponseState)
 	}
-	if recovered.Usage.InputTokens != 7 || len(recovered.Todos) != 1 || len(recovered.Plans) != 1 {
-		t.Fatalf("durable state = usage %+v todos %+v plans %+v", recovered.Usage, recovered.Todos, recovered.Plans)
+	if recovered.Usage.InputTokens != 7 || recovered.Work == nil || recovered.Work.Objective != "mutate once" {
+		t.Fatalf("durable state = usage %+v work %+v", recovered.Usage, recovered.Work)
 	}
 
 	close(tool.release)
@@ -335,7 +358,7 @@ func TestClosedTurnCheckpointIsDurableBeforeNextModelResponse(t *testing.T) {
 	release := make(chan struct{})
 	fp := llmtest.New("responses",
 		llmtest.Step{
-			Events:     []llm.StreamEvent{toolStep("update_todos", `{"todos":[{"content":"verified","status":"completed"}]}`, "todo-1")},
+			Events:     []llm.StreamEvent{toolStep("checkpoint", `{}`, "checkpoint-1")},
 			Stop:       llm.StopToolUse,
 			Usage:      llm.Usage{InputTokens: 9, OutputTokens: 3},
 			ResponseID: "resp-1",
@@ -349,15 +372,17 @@ func TestClosedTurnCheckpointIsDurableBeforeNextModelResponse(t *testing.T) {
 		},
 	)
 	app := newTestApp(t, &out, &errw, fp)
-	store := todo.NewStore()
 	registry := tools.Default()
-	registry.Register(todo.NewTool(store))
+	registry.Register(mcpRefreshTool{name: "checkpoint"})
 	app.Agent = agent.New(fp, registry, agent.Options{
 		Model:             "claude-opus-4-8",
 		ResponsesStateful: true,
 	})
 	app.Agent.SetSystem(app.System)
-	app.Todos = store
+	app.Work = workstate.NewStore(func() string { return app.SessionPath })
+	if _, err := app.Work.NewWork("track it", "user"); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	promptID := app.beginPrompt("track it", nil)
@@ -392,8 +417,8 @@ func TestClosedTurnCheckpointIsDurableBeforeNextModelResponse(t *testing.T) {
 	if recovered.Usage.InputTokens != 9 || recovered.Usage.OutputTokens != 3 {
 		t.Fatalf("checkpoint usage = %+v", recovered.Usage)
 	}
-	if len(recovered.Todos) != 1 || recovered.Todos[0].Status != "completed" {
-		t.Fatalf("checkpoint todos = %+v", recovered.Todos)
+	if recovered.Work == nil || recovered.Work.Objective != "track it" {
+		t.Fatalf("checkpoint work = %+v", recovered.Work)
 	}
 	if recovered.ResponseState == nil || recovered.ResponseState.PreviousResponseID != "resp-1" || recovered.ResponseState.AnchorMessages != 2 {
 		t.Fatalf("checkpoint response state = %+v", recovered.ResponseState)
@@ -3483,345 +3508,6 @@ func TestREPLContextSavesToFile(t *testing.T) {
 	}
 }
 
-func TestREPLContextIncludesTodoRequestContext(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake")
-	app := newTestApp(t, &out, &errw, fp)
-	store := todo.NewStore()
-	store.Replace([]todo.Item{
-		{Content: "explore", Status: todo.StatusCompleted},
-		{Content: "implement", Status: todo.StatusInProgress},
-	})
-	reg := tools.Default()
-	reg.Register(todo.NewTool(store))
-	app.Agent.SetTools(reg)
-	app.Todos = store
-
-	if code := Run(strings.NewReader("/context\n/exit\n"), app, nil); code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-	if fp.RequestCount() != 0 {
-		t.Fatalf("/context should not invoke the model, got %d requests", fp.RequestCount())
-	}
-	got := errw.String()
-	for _, want := range []string{
-		`[todo]\n1/2 complete`,
-		`[~] implement`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("/context output missing %q:\n%s", want, got)
-		}
-	}
-}
-
-func TestREPLInjectsRestoredTodoContextOnce(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake",
-		llmtest.Step{Stop: llm.StopEndTurn},
-		llmtest.Step{Stop: llm.StopEndTurn},
-	)
-	app := newTestApp(t, &out, &errw, fp)
-	store := todo.NewStore()
-	store.Restore([]todo.Item{{Content: "explore", Status: todo.StatusInProgress}})
-	reg := tools.Default()
-	reg.Register(todo.NewTool(store))
-	app.Agent.SetTools(reg)
-	app.Todos = store
-
-	if code := Run(strings.NewReader("first\nsecond\n/exit\n"), app, nil); code != 0 {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-	}
-	if len(fp.Requests) != 2 {
-		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
-	}
-	// Restored unresolved work is injected once on the first request.
-	if got := strings.Join(fp.Requests[0].RequestContext, "\n"); !strings.Contains(got, "[~] explore") {
-		t.Fatalf("first request context = %q, want the todo reminder", got)
-	}
-	// The reminder is one-shot; the second request relies on transcript state.
-	if got := strings.Join(fp.Requests[1].RequestContext, "\n"); strings.Contains(got, "[todo]") {
-		t.Fatalf("second request context = %q, want the recovery reminder consumed", got)
-	}
-}
-
-func TestREPLPrintsTodoStatusAfterUpdateTodosBeforeUsageAndPrompt(t *testing.T) {
-	var out, setupErrw bytes.Buffer
-	status := "Todos (1/2 done):\n  [x] explore\n  [~] test"
-	errw := newSignalBuffer("\x00")
-	fp := llmtest.New("fake",
-		llmtest.Step{
-			Events: []llm.StreamEvent{toolStep("update_todos", `{"todos":[{"content":"explore","status":"completed"},{"content":"test","status":"in_progress"}]}`, "call_todo")},
-			Stop:   llm.StopToolUse,
-		},
-		llmtest.Step{
-			Events: []llm.StreamEvent{textDelta("done")},
-			Stop:   llm.StopEndTurn,
-		},
-	)
-	app := newTestApp(t, &out, &setupErrw, fp)
-	app.Errw = errw
-	app.Renderer = NewRenderer(&out, errw, RenderOptions{Model: "claude-opus-4-8", ToolStream: true})
-	store := todo.NewStore()
-	reg := tools.Default()
-	reg.Register(todo.NewTool(store))
-	app.Agent.SetTools(reg)
-	app.Todos = store
-
-	pr, pw := io.Pipe()
-	defer pr.Close()
-	defer pw.Close()
-	codeCh := make(chan int, 1)
-	go func() { codeCh <- Run(pr, app, nil) }()
-
-	writePipe(t, pw, "work\n")
-	waitFor(t, func() bool {
-		got := errw.String()
-		return strings.Count(got, "[auto] > ") >= 2 && strings.Contains(got, "[turn:")
-	}, "turn completion line and next prompt")
-	writePipe(t, pw, "/exit\n")
-	select {
-	case code := <-codeCh:
-		if code != 0 {
-			t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-		}
-	case <-time.After(time.Second):
-		t.Fatal("REPL did not exit after /exit")
-	}
-
-	got := errw.String()
-	statusIndex := strings.Index(got, status)
-	if statusIndex < 0 {
-		t.Fatalf("todo status was not printed after update_todos:\n%s", got)
-	}
-	toolResultIndex := strings.Index(got, "[update_todos]")
-	if toolResultIndex < 0 {
-		t.Fatalf("update_todos tool result was not rendered:\n%s", got)
-	}
-	nextModelIndex := strings.Index(got, "[turn: 2 waiting]")
-	if nextModelIndex < 0 {
-		t.Fatalf("second turn was not rendered:\n%s", got)
-	}
-	if !(toolResultIndex < statusIndex && statusIndex < nextModelIndex) {
-		t.Fatalf("todo status should print immediately after update_todos and before the next turn:\n%s", got)
-	}
-
-	promptStatusIndex := strings.LastIndex(got, status)
-	if promptStatusIndex == statusIndex {
-		t.Fatalf("todo status should also be printed before the next prompt:\n%s", got)
-	}
-	afterPromptStatus := got[promptStatusIndex+len(status):]
-	usageIndex := strings.Index(afterPromptStatus, "[prompt:")
-	if usageIndex < 0 {
-		t.Fatalf("usage line should follow the prompt todo status:\n%s", got)
-	}
-	promptIndex := strings.Index(afterPromptStatus, "[auto] > ")
-	if promptIndex < 0 {
-		t.Fatalf("usage line should be followed by the next REPL prompt:\n%s", got)
-	}
-	if usageIndex > promptIndex {
-		t.Fatalf("usage line should be the last status line before the next REPL prompt:\n%s", got)
-	}
-	if strings.Contains(afterPromptStatus[usageIndex:promptIndex], "Todos (") {
-		t.Fatalf("todo status should not be printed between the usage line and next prompt:\n%s", got)
-	}
-}
-
-func TestREPLSkipsTodoPromptStatusWhenToolUnavailable(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake")
-	app := newTestApp(t, &out, &errw, fp)
-	store := todo.NewStore()
-	store.Replace([]todo.Item{
-		{Content: "hidden", Status: todo.StatusInProgress},
-	})
-	app.Todos = store
-
-	if code := Run(strings.NewReader("/exit\n"), app, nil); code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-	if got := errw.String(); strings.Contains(got, "Todos (") || strings.Contains(got, "hidden") {
-		t.Fatalf("todo status should not print when the visible agent lacks update_todos:\n%s", got)
-	}
-}
-
-func TestREPLPrintsLifecycleAwarePlanStatusBeforeUsageAndPrompt(t *testing.T) {
-	for _, tt := range []struct {
-		name        string
-		seed        *plan.Plan
-		record      bool
-		wantState   plan.DisplayState
-		wantLabel   string
-		wantUpdated bool
-	}{
-		{name: "newly recorded", record: true, wantState: plan.DisplayRecorded, wantLabel: "Plan recorded:"},
-		{
-			name:        "updated",
-			seed:        &plan.Plan{Title: "Existing", Path: "/tmp/0001-existing.plan.md"},
-			record:      true,
-			wantState:   plan.DisplayUpdated,
-			wantLabel:   "Plan updated:",
-			wantUpdated: true,
-		},
-		{
-			name:      "unchanged current",
-			seed:      &plan.Plan{Title: "Resumed", Path: "/tmp/0001-resumed.plan.md"},
-			wantState: plan.DisplayCurrent,
-			wantLabel: "Plan:",
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			var out, setupErrw bytes.Buffer
-			errw := newSignalBuffer("\x00")
-			var fp *llmtest.FakeProvider
-			if tt.record {
-				fp = llmtest.New("fake",
-					llmtest.Step{
-						Events: []llm.StreamEvent{toolStep("record_plan", `{"title":"Add widget","plan":"Step one."}`, "call_plan")},
-						Stop:   llm.StopToolUse,
-					},
-					llmtest.Step{
-						Events: []llm.StreamEvent{textDelta("done")},
-						Stop:   llm.StopEndTurn,
-					},
-				)
-			} else {
-				fp = llmtest.New("fake", llmtest.Step{
-					Events: []llm.StreamEvent{textDelta("done")},
-					Stop:   llm.StopEndTurn,
-				})
-			}
-			app := newTestApp(t, &out, &setupErrw, fp)
-			app.Errw = errw
-			app.Renderer = NewRenderer(&out, errw, RenderOptions{Model: "claude-opus-4-8", ToolStream: true})
-			store := plan.NewStore()
-			if tt.seed != nil {
-				store.Add(*tt.seed)
-			}
-			reg := tools.Default()
-			reg.Register(plan.NewTool(store, func() string { return app.SessionPath }))
-			app.Agent.SetTools(reg)
-			app.Plans = store
-
-			pr, pw := io.Pipe()
-			defer pr.Close()
-			defer pw.Close()
-			codeCh := make(chan int, 1)
-			go func() { codeCh <- Run(pr, app, nil) }()
-
-			writePipe(t, pw, "work\n")
-			waitFor(t, func() bool {
-				got := errw.String()
-				return strings.Count(got, "[auto] > ") >= 2 && strings.Contains(got, "[turn:")
-			}, "turn completion line and next prompt")
-			writePipe(t, pw, "/exit\n")
-			select {
-			case code := <-codeCh:
-				if code != 0 {
-					t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-				}
-			case <-time.After(time.Second):
-				t.Fatal("REPL did not exit after /exit")
-			}
-
-			got := errw.String()
-			status := plan.RenderLatest(store.Snapshot(), tt.wantState)
-			if status == "" || !strings.HasPrefix(status, tt.wantLabel) {
-				t.Fatalf("plan status = %q, want label %q", status, tt.wantLabel)
-			}
-			if count := strings.Count(got, status); count != 2 {
-				t.Fatalf("plan status should print at exactly two display boundaries, got %d:\n%s", count, got)
-			}
-			statusIndex := strings.Index(got, status)
-			if statusIndex < 0 {
-				t.Fatalf("plan status was not printed:\n%s", got)
-			}
-			if tt.record {
-				toolResultIndex := strings.Index(got, "[record_plan]")
-				if toolResultIndex < 0 {
-					t.Fatalf("record_plan tool result was not rendered:\n%s", got)
-				}
-				nextModelIndex := strings.Index(got, "[turn: 2 waiting]")
-				if nextModelIndex < 0 {
-					t.Fatalf("second turn was not rendered:\n%s", got)
-				}
-				if !(toolResultIndex < statusIndex && statusIndex < nextModelIndex) {
-					t.Fatalf("plan status should print immediately after record_plan and before the next turn:\n%s", got)
-				}
-			}
-			if tt.wantUpdated && (tt.seed == nil || strings.Contains(status, tt.seed.Path)) {
-				t.Fatalf("updated status should name the newly appended plan, got %q", status)
-			}
-
-			promptStatusIndex := strings.LastIndex(got, status)
-			if promptStatusIndex == statusIndex {
-				t.Fatalf("plan status should also be printed before the next prompt:\n%s", got)
-			}
-			afterPromptStatus := got[promptStatusIndex+len(status):]
-			usageIndex := strings.Index(afterPromptStatus, "[prompt:")
-			if usageIndex < 0 {
-				t.Fatalf("usage line should follow the prompt plan status:\n%s", got)
-			}
-			promptIndex := strings.Index(afterPromptStatus, "[auto] > ")
-			if promptIndex < 0 {
-				t.Fatalf("usage line should be followed by the next REPL prompt:\n%s", got)
-			}
-			if usageIndex > promptIndex {
-				t.Fatalf("usage line should be the last status line before the next REPL prompt:\n%s", got)
-			}
-			if strings.Contains(afterPromptStatus[usageIndex:promptIndex], status) {
-				t.Fatalf("plan status should not be printed between the usage line and next prompt:\n%s", got)
-			}
-		})
-	}
-}
-
-func TestREPLSinkPlanDisplayState(t *testing.T) {
-	for _, tt := range []struct {
-		name     string
-		initial  int
-		appended int
-		want     plan.DisplayState
-	}{
-		{name: "unchanged existing plan", initial: 1, want: plan.DisplayCurrent},
-		{name: "first plan", appended: 1, want: plan.DisplayRecorded},
-		{name: "new version of existing plan", initial: 1, appended: 1, want: plan.DisplayUpdated},
-		{name: "multiple plans in one prompt", appended: 2, want: plan.DisplayUpdated},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			store := plan.NewStore()
-			for range tt.initial {
-				store.Add(plan.Plan{})
-			}
-			sink := newREPLSink(nil, &App{Plans: store}, 1)
-			for range tt.appended {
-				store.Add(plan.Plan{})
-			}
-			if got := sink.planDisplayState(); got != tt.want {
-				t.Fatalf("planDisplayState() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestREPLSkipsPlanPromptStatusWhenToolUnavailable(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake")
-	app := newTestApp(t, &out, &errw, fp)
-	store := plan.NewStore()
-	store.Add(plan.Plan{Title: "hidden", Path: "/tmp/hidden.plan.md"})
-	app.Plans = store
-
-	if code := Run(strings.NewReader("/exit\n"), app, nil); code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-	got := errw.String()
-	for _, hidden := range []string{"Plan:", "Plan recorded:", "Plan updated:", "/tmp/hidden.plan.md"} {
-		if strings.Contains(got, hidden) {
-			t.Fatalf("plan status should not print when the visible agent lacks record_plan:\n%s", got)
-		}
-	}
-}
-
 func TestREPLBackgroundCommandListsNoJobs(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
@@ -4882,19 +4568,17 @@ func TestHandoffToImplementationReseedsContext(t *testing.T) {
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
-	app.Plans = plan.NewStore()
-	app.Todos = todo.NewStore()
-	app.Todos.Replace([]todo.Item{{Content: "planning step", Status: "in_progress"}})
+	ready := readyWorkForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it"), uiAsstMsg("here is the design")})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl system"}, nil
 	}
 
-	app.handoffToImplementation(plan.HandoffRequest{
-		Agent:    "auto",
-		PlanPath: "/sess/plans/0001.plan.md",
-		Brief:    "tests run with go test",
-		Message:  "preserve the public API",
+	app.handoffToImplementation(handoff.Request{
+		Agent:        "auto",
+		ArtifactPath: "/sess/plans/0001.plan.md",
+		Brief:        "tests run with go test",
+		Message:      "preserve the public API",
 	})
 
 	msgs := app.Agent.Transcript()
@@ -4905,7 +4589,7 @@ func TestHandoffToImplementationReseedsContext(t *testing.T) {
 		t.Fatalf("seeded transcript invalid: %v", err)
 	}
 	seed := msgs[0].Content[0].Text
-	for _, want := range []string{"Implementation handoff", "/sess/plans/0001.plan.md", "tests run with go test", "Additional input from the user", "preserve the public API"} {
+	for _, want := range []string{"Implementation handoff", ready.ArtifactPath, "Active step change", "tests run with go test", "Additional input from the user", "preserve the public API"} {
 		if !strings.Contains(seed, want) {
 			t.Errorf("seed missing %q: %q", want, seed)
 		}
@@ -4913,8 +4597,8 @@ func TestHandoffToImplementationReseedsContext(t *testing.T) {
 	if app.AgentName != "auto" {
 		t.Errorf("agent not switched: %q", app.AgentName)
 	}
-	if len(app.Todos.Snapshot()) != 0 {
-		t.Error("planning todos should be cleared on handoff")
+	if got := app.Work.Snapshot(); got.ActiveStepID != "change" || got.ApprovedScopeRevisionID == "" {
+		t.Fatalf("handoff work = %+v", got)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(app.SessionPath, "compactions")); len(entries) == 0 {
 		t.Error("planning transcript not archived under compactions/")
@@ -4925,6 +4609,7 @@ func TestHandoffToImplementationAbortsWhenModelSwitchFails(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
+	readyWorkForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it"), uiAsstMsg("here is the design")})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl system"}, nil
@@ -4933,11 +4618,11 @@ func TestHandoffToImplementationAbortsWhenModelSwitchFails(t *testing.T) {
 		return ModelSelection{}, errors.New("bad model")
 	}
 
-	app.handoffToImplementation(plan.HandoffRequest{
-		Agent:    "auto",
-		Model:    "missing-model",
-		PlanPath: "/sess/plans/0001.plan.md",
-		Brief:    "tests run with go test",
+	app.handoffToImplementation(handoff.Request{
+		Agent:        "auto",
+		Model:        "missing-model",
+		ArtifactPath: "/sess/plans/0001.plan.md",
+		Brief:        "tests run with go test",
 	})
 
 	msgs := app.Agent.Transcript()
@@ -4959,25 +4644,34 @@ func TestHandoffToImplementationAbortsWhenArchiveFails(t *testing.T) {
 	if err := os.WriteFile(app.SessionPath, []byte("not a directory"), 0o644); err != nil {
 		t.Fatalf("make bad session path: %v", err)
 	}
-	app.Todos = todo.NewStore()
-	app.Todos.Replace([]todo.Item{{Content: "planning step", Status: "in_progress"}})
+	app.Work = workstate.NewStore(func() string { return "" })
+	root, err := app.Work.NewWork("Implement structured handoff", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Work.SetPlan(workstate.PlanUpdate{
+		BaseRevisionID: root.RevisionID, PlanState: workstate.PlanReady,
+		Nodes: []workstate.NodeDefinition{{ID: "change", Type: workstate.NodeStep, Title: "Change", Kind: workstate.KindChange, Actions: []string{"edit"}, ExitCriteria: []string{"done"}}},
+	}, "model"); err != nil {
+		t.Fatal(err)
+	}
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it"), uiAsstMsg("here is the design")})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl system"}, nil
 	}
 
-	app.handoffToImplementation(plan.HandoffRequest{
-		Agent:    "auto",
-		PlanPath: "/sess/plans/0001.plan.md",
-		Brief:    "tests run with go test",
+	app.handoffToImplementation(handoff.Request{
+		Agent:        "auto",
+		ArtifactPath: "/sess/plans/0001.plan.md",
+		Brief:        "tests run with go test",
 	})
 
 	msgs := app.Agent.Transcript()
 	if len(msgs) != 2 || msgs[0].Content[0].Text != "design it" || msgs[1].Content[0].Text != "here is the design" {
 		t.Fatalf("archive failure should keep planning transcript, got %+v", msgs)
 	}
-	if len(app.Todos.Snapshot()) != 1 {
-		t.Fatal("archive failure should not clear planning todos")
+	if got := app.Work.Snapshot(); got.ApprovedScopeRevisionID != "" {
+		t.Fatalf("archive failure should not approve work: %+v", got)
 	}
 	if !strings.Contains(errw.String(), "archive failed") {
 		t.Fatalf("stderr missing archive failure:\n%s", errw.String())
@@ -5020,11 +4714,10 @@ func TestParseHandoffCommandOptions(t *testing.T) {
 	}
 }
 
-func TestHandoffCommandRequiresRecordedPlan(t *testing.T) {
+func TestHandoffCommandRequiresReadyWork(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
-	app.Plans = plan.NewStore()
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default()}, nil
 	}
@@ -5033,8 +4726,8 @@ func TestHandoffCommandRequiresRecordedPlan(t *testing.T) {
 	if called {
 		t.Error("should not prompt for approval without a recorded plan")
 	}
-	if !strings.Contains(errw.String(), "no recorded plan") {
-		t.Errorf("expected a no-plan message, got %q", errw.String())
+	if !strings.Contains(errw.String(), "ready plan") {
+		t.Errorf("expected a ready-work message, got %q", errw.String())
 	}
 }
 
@@ -5043,9 +4736,9 @@ func TestHandoffCommandCancelledOnNo(t *testing.T) {
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
-	app.Plans = plan.NewStore()
-	app.Handoff = plan.NewPending()
-	app.Handoff.Request(plan.HandoffRequest{Brief: "ctx", PlanPath: "/p/0001.plan.md"})
+	readyWorkForApp(t, app, "Implement structured handoff")
+	app.Handoff = handoff.NewPending()
+	app.Handoff.Request(handoff.Request{Brief: "ctx", ArtifactPath: "/p/0001.plan.md"})
 	switched := false
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		switched = true
@@ -5065,9 +4758,10 @@ func TestHandoffCommandAppliesOptionsAndSeedsUserMessage(t *testing.T) {
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
+	readyWorkForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
-	app.Handoff = plan.NewPending()
-	app.Handoff.Request(plan.HandoffRequest{Brief: "planning context", PlanPath: "/p/0001.plan.md"})
+	app.Handoff = handoff.NewPending()
+	app.Handoff.Request(handoff.Request{Brief: "planning context", ArtifactPath: "/p/0001.plan.md"})
 	var agentTarget, modelTarget, approval string
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		agentTarget = name
@@ -5096,8 +4790,8 @@ func TestHandoffCommandAppliesOptionsAndSeedsUserMessage(t *testing.T) {
 			t.Errorf("seed missing %q: %q", want, seed)
 		}
 	}
-	if got := errw.String(); !strings.Contains(got, "Handoff brief:\nplanning context") {
-		t.Errorf("handoff brief was not displayed:\n%s", got)
+	if got := errw.String(); !strings.Contains(got, "Supplementary context:\nplanning context") {
+		t.Errorf("supplementary context was not displayed:\n%s", got)
 	}
 }
 
@@ -5105,14 +4799,15 @@ func TestHandoffCommandRendersMarkdownBriefWithoutChangingSource(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
+	readyWorkForApp(t, app, "Implement structured handoff")
 	app.Renderer = NewRenderer(&out, &errw, RenderOptions{
 		Markdown: true,
 		Width:    func() int { return 24 },
 	})
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
-	app.Handoff = plan.NewPending()
+	app.Handoff = handoff.NewPending()
 	const brief = "**Verify behavior** with [docs](https://example.com/design).\n\n- alpha beta gamma delta epsilon zeta eta theta"
-	app.Handoff.Request(plan.HandoffRequest{Brief: brief, PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{Brief: brief, ArtifactPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
 	}
@@ -5123,7 +4818,7 @@ func TestHandoffCommandRendersMarkdownBriefWithoutChangingSource(t *testing.T) {
 
 	display := errw.String()
 	for _, want := range []string{
-		"Handoff brief:\nVerify behavior",
+		"Supplementary context:\nVerify behavior",
 		"docs\n<https://example.com/design>",
 		"- alpha beta gamma delta\n  epsilon zeta eta theta",
 	} {
@@ -5134,18 +4829,14 @@ func TestHandoffCommandRendersMarkdownBriefWithoutChangingSource(t *testing.T) {
 	if strings.Contains(display, "**Verify behavior**") {
 		t.Errorf("display retained raw emphasis delimiters:\n%s", display)
 	}
-	if strings.Contains(out.String(), "Handoff brief:") {
-		t.Errorf("handoff brief should remain on stderr, stdout = %q", out.String())
+	if strings.Contains(out.String(), "Supplementary context:") {
+		t.Errorf("supplementary context should remain on stderr, stdout = %q", out.String())
 	}
 	if seed := transcriptTextForUI(app.Agent.Transcript()); !strings.Contains(seed, brief) {
 		t.Errorf("seed did not retain original Markdown source: %q", seed)
 	}
-	archived, err := os.ReadFile(filepath.Join(app.SessionPath, "compactions", "0001.summary.md"))
-	if err != nil {
-		t.Fatalf("read archived handoff brief: %v", err)
-	}
-	if got := string(archived); got != brief {
-		t.Errorf("archived handoff brief = %q, want original %q", got, brief)
+	if entries, _ := os.ReadDir(filepath.Join(app.SessionPath, "compactions")); len(entries) == 0 {
+		t.Error("planning transcript was not archived")
 	}
 }
 
@@ -5154,70 +4845,17 @@ func TestHandoffCommandDisplaysRawBriefWithoutRenderer(t *testing.T) {
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
 	app.Renderer = nil
-	app.Handoff = plan.NewPending()
-	app.Handoff.Request(plan.HandoffRequest{Brief: "**raw brief**", PlanPath: "/p/0001.plan.md"})
+	readyWorkForApp(t, app, "Implement structured handoff")
+	app.Handoff = handoff.NewPending()
+	app.Handoff.Request(handoff.Request{Brief: "**raw brief**", ArtifactPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default()}, nil
 	}
 
 	app.handoffCommand("", func(string) (string, error) { return "n", nil })
 
-	if got := errw.String(); !strings.Contains(got, "Handoff brief:\n**raw brief**\n") {
-		t.Errorf("handoff brief should be displayed raw without a renderer:\n%s", got)
-	}
-}
-
-func TestHandoffCommandDisplaysGeneratedBrief(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake", llmtest.Step{
-		Events: []llm.StreamEvent{textDelta("generated planning brief")},
-		Stop:   llm.StopEndTurn,
-	})
-	app := newTestApp(t, &out, &errw, fp)
-	app.Plans = plan.NewStore()
-	app.Plans.Add(plan.Plan{Path: "/p/0001.plan.md"})
-	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
-	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{Name: name, Tools: tools.Default()}, nil
-	}
-
-	app.handoffCommand("manual implementation guidance", func(string) (string, error) { return "n", nil })
-
-	if got := errw.String(); !strings.Contains(got, "Handoff brief:\ngenerated planning brief") {
-		t.Errorf("generated handoff brief was not displayed:\n%s", got)
-	}
-}
-
-func TestHandoffCommandShowsProgressWhileGeneratingBrief(t *testing.T) {
-	var out, errw bytes.Buffer
-	now := time.Date(2026, 7, 22, 11, 30, 0, 0, time.Local)
-	var app *App
-	fp := llmtest.New("fake", llmtest.Step{
-		Events: []llm.StreamEvent{textDelta("generated planning brief")},
-		Stop:   llm.StopEndTurn,
-		Block: func(context.Context) {
-			now = now.Add(6 * time.Second)
-			app.Renderer.tick()
-		},
-	})
-	app = newTestApp(t, &out, &errw, fp)
-	app.Renderer = liveRenderer(&out, &errw, func() time.Time { return now })
-	defer app.Renderer.StopProgress()
-	app.Plans = plan.NewStore()
-	app.Plans.Add(plan.Plan{Path: "/p/0001.plan.md"})
-	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
-	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{Name: name, Tools: tools.Default()}, nil
-	}
-
-	app.handoffCommand("", func(string) (string, error) { return "n", nil })
-
-	got := errw.String()
-	if !strings.Contains(got, "[handoff: generating brief · 6s]") {
-		t.Errorf("generated handoff brief did not show elapsed progress:\n%s", got)
-	}
-	if !strings.Contains(got, "\r\x1b[2KHandoff brief:\ngenerated planning brief") {
-		t.Errorf("handoff progress was not erased before displaying the brief:\n%s", got)
+	if got := errw.String(); !strings.Contains(got, "Supplementary context:\n**raw brief**\n") {
+		t.Errorf("supplementary context should be displayed raw without a renderer:\n%s", got)
 	}
 }
 
@@ -5227,11 +4865,10 @@ func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
 	app.HandoffAgent = "auto"
-	app.Plans = plan.NewStore()
-	app.Todos = todo.NewStore()
+	ready := readyWorkForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("x")})
-	app.Handoff = plan.NewPending()
-	app.Handoff.Request(plan.HandoffRequest{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+	app.Handoff = handoff.NewPending()
+	app.Handoff.Request(handoff.Request{Brief: "env: go test", ArtifactPath: "/p/0001.plan.md"})
 	var target string
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		target = name
@@ -5242,8 +4879,8 @@ func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
 		t.Errorf("handoff target = %q, want auto (default)", target)
 	}
 	got := app.Agent.Transcript()
-	if len(got) != 1 || !strings.Contains(got[0].Content[0].Text, "/p/0001.plan.md") {
-		t.Errorf("transcript not reseeded with the plan pointer: %+v", got)
+	if len(got) != 1 || !strings.Contains(got[0].Content[0].Text, ready.ArtifactPath) || !strings.Contains(got[0].Content[0].Text, "Active step change") {
+		t.Errorf("transcript not reseeded with the active work capsule: %+v", got)
 	}
 }
 
@@ -5252,8 +4889,9 @@ func TestREPLHandoffCommandApprovalStartsImplementationTurn(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("implemented")}, Stop: llm.StopEndTurn})
 	app := newTestApp(t, &out, &errw, fp)
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
-	app.Handoff = plan.NewPending()
-	app.Handoff.Request(plan.HandoffRequest{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+	readyWorkForApp(t, app, "Implement structured handoff")
+	app.Handoff = handoff.NewPending()
+	app.Handoff.Request(handoff.Request{Brief: "env: go test", ArtifactPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
 	}
@@ -5274,7 +4912,7 @@ func TestREPLHandoffCommandApprovalStartsImplementationTurn(t *testing.T) {
 
 func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) {
 	var out, errw lockedBuffer
-	pending := plan.NewPending()
+	pending := handoff.NewPending()
 	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	fp := llmtest.New("fake",
@@ -5282,7 +4920,7 @@ func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) 
 			Events: []llm.StreamEvent{textDelta("plan ready")},
 			Stop:   llm.StopEndTurn,
 			Block: func(ctx context.Context) {
-				pending.Request(plan.HandoffRequest{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+				pending.Request(handoff.Request{Brief: "env: go test", ArtifactPath: "/p/0001.plan.md"})
 				close(inPrompt)
 				<-releaseTurn
 			},
@@ -5291,6 +4929,7 @@ func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) 
 	)
 	app := newTestApp(t, &out, &errw, fp)
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
+	readyWorkForApp(t, app, "Implement structured handoff")
 	app.Handoff = pending
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
@@ -5320,22 +4959,23 @@ func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) 
 	if got := transcriptPrompts(app); !strings.Contains(got, implementationStartPrompt) {
 		t.Fatalf("implementation prompt missing from transcript prompts %q", got)
 	}
-	if got := errw.String(); !strings.Contains(got, "Handoff brief:\nenv: go test") {
-		t.Fatalf("tool-requested handoff brief was not displayed: %q", got)
+	if got := errw.String(); !strings.Contains(got, "Supplementary context:\nenv: go test") {
+		t.Fatalf("tool-requested supplementary context was not displayed: %q", got)
 	}
 }
 
 func TestREPLAutoHandoffDeclineDoesNotStartImplementation(t *testing.T) {
 	var out, errw bytes.Buffer
-	pending := plan.NewPending()
+	pending := handoff.NewPending()
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("plan ready")},
 		Stop:   llm.StopEndTurn,
 		Block: func(ctx context.Context) {
-			pending.Request(plan.HandoffRequest{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+			pending.Request(handoff.Request{Brief: "env: go test", ArtifactPath: "/p/0001.plan.md"})
 		},
 	})
 	app := newTestApp(t, &out, &errw, fp)
+	readyWorkForApp(t, app, "Implement structured handoff")
 	app.Handoff = pending
 	switched := false
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
@@ -5361,8 +5001,9 @@ func TestREPLHandoffFailureDoesNotStartImplementationTurn(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("should not run")}, Stop: llm.StopEndTurn})
 	app := newTestApp(t, &out, &errw, fp)
-	app.Handoff = plan.NewPending()
-	app.Handoff.Request(plan.HandoffRequest{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+	readyWorkForApp(t, app, "Implement structured handoff")
+	app.Handoff = handoff.NewPending()
+	app.Handoff.Request(handoff.Request{Brief: "env: go test", ArtifactPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{}, errors.New("no such agent")
 	}
@@ -6510,103 +6151,10 @@ func pumpDuringPromptKey(rr *replReader) (replInput, bool, error) {
 	return res.input, res.done, nil
 }
 
-func TestContextDumpShowsTodoSemanticContextWithoutPendingReminder(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake")
-	app := newTestApp(t, &out, &errw, fp)
-	store := todo.NewStore()
-	reg := tools.Default()
-	reg.Register(todo.NewTool(store))
-	app.Agent.SetTools(reg)
-	app.Todos = store
-	store.Replace([]todo.Item{{Content: "explore", Status: todo.StatusInProgress}})
-
-	// /context answers "what context does the model have" for the user, so it
-	// renders the semantic recovery view even when no injection is pending.
-	req := app.contextRequest()
-	if got := strings.Join(req.RequestContext, "\n"); !strings.Contains(got, "[~] explore") {
-		t.Fatalf("/context request context = %q, want the todo reminder", got)
-	}
-
-	// The display path must not consume a recovery reminder real requests need.
-	store.Replace([]todo.Item{
-		{Content: "explore", Status: todo.StatusCompleted},
-		{Content: "test", Status: todo.StatusInProgress},
-	})
-	store.RequireRequestContext()
-	app.contextRequest()
-	if store.PendingRequestContext() == "" {
-		t.Fatal("/context consumed the todo recovery reminder")
-	}
-}
-
-func TestAccumulatingSinkPeekDoesNotConsumeTodoRecovery(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake")
-	app := newTestApp(t, &out, &errw, fp)
-	store := todo.NewStore()
-	reg := tools.Default()
-	reg.Register(todo.NewTool(store))
-	app.Agent.SetTools(reg)
-	app.Todos = store
-	store.Restore([]todo.Item{{Content: "explore", Status: todo.StatusInProgress}})
-
-	sink := &accumulatingSink{r: app.Renderer, app: app}
-	for i := range 2 {
-		got := strings.Join(sink.PeekRequestContext(), "\n")
-		if !strings.Contains(got, "[~] explore") {
-			t.Fatalf("peek %d = %q, want the todo reminder (peeks must not consume it)", i+1, got)
-		}
-	}
-	// Attaching is still a preview; only the final send boundary consumes the
-	// one-shot reminder.
-	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[~] explore") {
-		t.Fatalf("RequestContext = %q, want the todo reminder", got)
-	}
-	if got := store.PendingRequestContext(); got == "" {
-		t.Fatal("RequestContext consumed the reminder before a model request")
-	}
-	sink.TurnAttemptStart(1, 1, agent.ContextEstimate{})
-	if got := store.PendingRequestContext(); got != "" {
-		t.Fatalf("after the send boundary, PendingRequestContext = %q, want empty", got)
-	}
-
-	store.Replace([]todo.Item{{Content: "implement", Status: todo.StatusInProgress}})
-	sink.TranscriptRewritten()
-	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[~] implement") {
-		t.Fatalf("post-rewrite RequestContext = %q, want immediate recovery reminder", got)
-	}
-	sink.TurnAttemptStart(2, 1, agent.ContextEstimate{})
-}
-
-func TestAccumulatingSinkAdvancesTodoStaleReminder(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake")
-	app := newTestApp(t, &out, &errw, fp)
-	store := todo.NewStore()
-	reg := tools.Default()
-	reg.Register(todo.NewTool(store))
-	app.Agent.SetTools(reg)
-	app.Todos = store
-	store.Replace([]todo.Item{{Content: "implement", Status: todo.StatusInProgress}})
-
-	sink := &accumulatingSink{r: app.Renderer, app: app}
-	for request := 1; request < 12; request++ {
-		if got := sink.RequestContext(); len(got) != 0 {
-			t.Fatalf("request %d context = %q, want none", request, got)
-		}
-		sink.TurnAttemptStart(request, 1, agent.ContextEstimate{})
-		sink.TurnAttemptStart(request, 2, agent.ContextEstimate{})
-	}
-	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[~] implement") {
-		t.Fatalf("request 12 context = %q, want stale todo reminder", got)
-	}
-	sink.TurnAttemptStart(12, 1, agent.ContextEstimate{})
-}
-
 func newTestAppWithGoal(t *testing.T, out, errw testWriter, fp *llmtest.FakeProvider) *App {
 	t.Helper()
 	app := newTestApp(t, out, errw, fp)
+	app.Work = workstate.NewStore(func() string { return app.SessionPath })
 	store := goal.NewStore()
 	app.Goal = store
 	app.GoalAutoContinue = true
@@ -6634,7 +6182,7 @@ func TestREPLGoalCommandSetsObjective(t *testing.T) {
 		t.Fatalf("first prompt = %q, want rendered goal continuation", got)
 	}
 	ctx := strings.Join(req.RequestContext, "\n\n")
-	if !strings.Contains(ctx, "refactor the parser") || !strings.Contains(ctx, "<goal status=\"active\">") {
+	if !strings.Contains(ctx, "refactor the parser") || !strings.Contains(ctx, "<goal status=\"active\" work_id=") {
 		t.Fatalf("missing goal reminder in request context:\n%s", ctx)
 	}
 }
@@ -6911,6 +6459,33 @@ func TestGoalCommandRejectsResumeWhileActive(t *testing.T) {
 	}
 	if !strings.Contains(errw.String(), "goal is already active") {
 		t.Fatalf("active resume error missing: %q", errw.String())
+	}
+}
+
+func TestGoalResumeReactivatesBoundWorkState(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestAppWithGoal(t, &out, &errw, llmtest.New("fake"))
+	work, err := app.Work.NewWork("keep working", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Goal.Bind(work.WorkID, work.Objective); err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := app.Work.Progress(workstate.ProgressUpdate{
+		BaseRevisionID: work.RevisionID,
+		WorkStatus:     workstate.LifecycleBlocked,
+		Summary:        "need another attempt",
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.Goal.SyncWork(blocked.WorkID, blocked.Lifecycle)
+
+	result := app.goalCommand("resume")
+	resumed := app.Work.Snapshot()
+	if result.prompt == "" || !app.Goal.Active() || resumed.WorkID != work.WorkID || resumed.Lifecycle != workstate.LifecycleActive || len(resumed.Blockers) != 0 {
+		t.Fatalf("goal=%+v work=%+v result=%+v", app.Goal.Snapshot(), resumed, result)
 	}
 }
 

@@ -698,6 +698,12 @@ func (a *Agent) SetSystem(system string) {
 // registration order.
 func (a *Agent) ToolNames() []string { return a.tools.Names() }
 
+// ToolActivity returns the diagnostics-only classification used by the loop
+// guard for the agent's current registry.
+func (a *Agent) ToolActivity(call llm.ToolCall) tools.Activity {
+	return a.tools.CallActivity(call)
+}
+
 // ToolSpecs returns the model-facing tool specs in registration order.
 func (a *Agent) ToolSpecs() []llm.ToolSchema { return cloneToolSpecs(a.toolSpecs) }
 

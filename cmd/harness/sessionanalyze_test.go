@@ -89,7 +89,7 @@ func TestRunSessionAnalyzeExplicitBeforeAndText(t *testing.T) {
 	if code != ui.ExitOK {
 		t.Fatalf("exit = %d; stderr = %q", code, errw.String())
 	}
-	if got := out.String(); !bytes.Contains([]byte(got), []byte("Session analysis v2")) || bytes.Contains([]byte(got), []byte("hook timeouts/circuit-openings/circuit-skips: 1")) {
+	if got := out.String(); !bytes.Contains([]byte(got), []byte("Session analysis v3")) || bytes.Contains([]byte(got), []byte("hook timeouts/circuit-openings/circuit-skips: 1")) {
 		t.Fatalf("unexpected text report:\n%s", got)
 	}
 }

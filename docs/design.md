@@ -116,8 +116,8 @@ internal/sysprompt       embedded prompt files + environment context + AGENTS.md
 internal/agentdef        agent definitions (allowed tools, MCP exposure, prompt/model target) (§14)
 internal/hooks           command-only lifecycle hooks (SessionStart/UserPromptSubmit/Pre+PostToolUse/Pre+PostCompact/Stop)
 internal/skills          skill discovery + `$skillName` prompt expansion
-internal/todo            update_todos store + render (§9.13)
-internal/plan            record_plan store + handoff request holder (§9.17, §9.18, §14)
+internal/workstate       structured work model, revisions, evidence/results, plan artifacts, and active capsule (§9.13)
+internal/handoff         pending implementation-approval request holder (§9.17, §14)
 internal/goal            `/goal` session state, prompt binding, and continuation rendering (§10)
 internal/auth            provider auth sources (token_command, oauth2, codex_oauth) for the model proxy
 cmd/harness-mcp-proxy  optional MCP proxy daemon + debug/config client with generated command dispatch
@@ -394,7 +394,7 @@ type Request struct {
     ContextWindowHint    int // effective override or provider-learned window
     StoreResponse      bool
     PreviousResponseID string
-    RequestContext     []string // request-only hook/todo/background context
+    RequestContext     []string // request-only hook/work/goal/background context
     ProxySessionID     string   // harness-local sticky-routing/transport-affinity key
     CacheAffinityID    string   // harness-local conversation key for stable prompt-cache routing
     PromptCacheKey     string   // provider-facing cache-affinity key; proxy derives from CacheAffinityID
@@ -441,7 +441,7 @@ cache breakpoints are laid so the rolling tail breakpoint stays on the last
 real transcript message, and Responses adds it as a late `role:"developer"`
 input item immediately before the current user message or trailing tool-call/output
 group. All three keep the stable system+tools+transcript prefix intact for prefix
-caching. Fresh todo/goal/background/hook context applies to the current request
+caching. Fresh WorkState/goal/background/hook context applies to the current request
 without looking like the latest user prompt or becoming part of the persisted
 transcript.
 Responses streams surface `response.id` on terminal `EventDone.ResponseID`; the
@@ -780,7 +780,7 @@ stable key into non-auth routing headers such as `x-session-id`.
 Anthropic does not use this key directly (it pins explicit `cache_control`
 breakpoints).
 
-Compaction, handoff-summary, and branch-summary requests derive deterministic
+Compaction and branch-summary requests derive deterministic
 purpose-separated cache and proxy IDs from the owning session identity with
 SHA-256 and fixed domain strings. This keeps maintenance traffic on a consistent
 cache shard without letting it reuse or compete with the main conversation's
@@ -865,7 +865,7 @@ persistence; switching models never erases historical reasoning.
 **Anthropic prompt caching:** the CLI declares semantic policy; the dialect
 chooses wire placement within Anthropic's four-breakpoint budget. The last tool
 schema and stable system block use `CachePolicy.StaticTTL`: interactive turns
-request `1h`, while one-shot, delegate, prewarm, compaction, handoff-summary, and
+request `1h`, while one-shot, delegate, prewarm, compaction, and
 branch-summary requests use `5m`. Message breakpoints always retain the
 provider-default five-minute TTL.
 
@@ -2446,49 +2446,50 @@ this subsection records the common runner those argv tools point at.
 - `name` must be relative and stay inside the temp directory: absolute paths and any
   `..` escape (after `filepath.Clean`) are rejected. Returns the absolute path written.
 
-### 9.13 `update_todos`
+### 9.13 `update_work` and WorkState
 
-> Replace the complete todo list for nontrivial work; allow at most one in_progress item.
+> Define/refine the bounded plan or record progress against the current work revision.
 
-| param | type | notes |
-|---|---|---|
-| `todos` | array, required | the complete list; replaces the previous one entirely |
-| `todos[].content` | string, required | concise action label shown in every state |
-| `todos[].status` | string, required | `pending`, `in_progress`, or `completed` |
+The model-facing schema deliberately has only two modes:
 
-- **Whole-list replace semantics** (like Claude Code's TodoWrite): each call carries
-  the complete list, so there is no per-item merge and no IDs. The transcript already
-  records the latest list; the in-memory store is a convenience for rendering and resume.
-- Validates non-empty `content`, a known `status`, and at most one `in_progress` item;
-  returns only a compact count acknowledgment such as
-  `Todos updated (1/3 complete).` or, at completion,
-  `Todos updated (3/3 complete); all complete.` An empty list returns
-  `Todo list cleared.` Keeping task titles out of the tool result avoids duplicating
-  the complete list already present in the tool-call arguments.
-- Implemented in `internal/todo`, not `internal/tools`, so `internal/session` can persist
-  `todo.Item` without importing the tools package. The root has one `todo.Store`;
-  each child agent gets a private store. The root list is saved in `state.json`
-  (`Session.Todos`), reseeded on resume, and cleared by `/clear`.
-- Normal updates restart stale-list tracking without immediately duplicating the
-  complete list already present in the transcript's tool-call arguments. If unresolved
-  work goes 12 conversational model rounds without another update, Harness injects a
-  compact reminder; ignored reminders use exponentially increasing gaps of 24, 48, 96, ...
-  rounds. Resume and transcript rewrites (compaction, branch, fork/clone, or child
-  continuation) schedule an immediate recovery reminder and restart that cadence. The
-  reminder asks the model to reconcile current progress and shows the completion count
-  plus only `in_progress` and `pending` items; completed task titles are omitted. It is
-  request-only rather than saved in the transcript, and context previews do not advance
-  or consume the schedule. Transport and provider-compatibility retries reuse the same
-  request context and do not advance the cadence again; a context-overflow retry also
-  preserves attached context while merging any recovery context required by a rewrite.
-- In the interactive REPL, the visible session's non-empty todo list is also printed
-  as a full `[x]`/`[~]`/`[ ]` checklist before the idle prompt when the current
-  visible agent has `update_todos`, and after each successful `update_todos` call.
-  One-shot runs and child-agent private todo stores do not print there.
-- Every built-in agent exposes the tool, including `explore`; custom agents with an
-  explicit `allowed_tools` list may omit it. Prompt guidance asks models to use it
-  for meaningful multi-step work, update it at phase boundaries, and never spend
-  a turn only on bookkeeping.
+| mode | purpose |
+|---|---|
+| `plan` | replace the ordered phase/step definitions, questions, objective/constraints when still mutable, plan state (`draft` or `ready`), and optional active leaf |
+| `progress` | transition one leaf or the work lifecycle, attach selected evidence/result IDs, request one bounded evidence batch, or reconcile a branched workspace |
+
+Every call carries `work_id` and `base_revision_id`. Stale updates fail instead
+of overwriting newer model/host observations. Steps are bounded ordered/nested
+leaves, not a dependency graph: `discover`, `change`, or `verify`, with
+`pending`, `in_progress`, `completed`, `skipped`, or `blocked` status.
+Ready plans require a runnable first leaf plus actions and exit criteria.
+Completed leaves require a summary and fresh referenced evidence/results;
+verification leaves additionally require an acceptable verification result.
+
+`internal/workstate` owns validation, immutable revision snapshots, transitions,
+rendering, and persistence. Each session has `work.ndjson`, an append-only,
+fsynced revision log. `state.json` stores the current projection and digest-validates
+it against that log on resume. A structural ready-plan revision also writes an
+immutable `work/<work-id>/<revision>.plan.md` artifact by temp-file, fsync, and
+rename. Session-tree entries record their WorkState revision. Branching checks
+out that revision, marks prior evidence/results stale, and requires explicit
+workspace reconciliation; fork/clone rebases the same projection into the new
+session log.
+
+Ordinary accepted prompts create a lightweight implicit work item. Simple work
+stays hidden and auto-completes on a clean non-autonomous turn; a model can
+promote it in place with `plan` mode. The model normally receives only the
+bounded active capsule: objective, constraints, active leaf actions/targets/exit
+criteria/verification, recent evidence/results, gate state, progress counts, and
+artifact pointer. `/work` exposes summary/show/new/abandon operations.
+
+Harness automatically observes unambiguous mutation paths, verification
+commands/outcomes, and foreground delegate completion and attaches them to the
+step active when the tool began. Planning updates and other administrative
+coordination are not meaningful implementation progress. After 12
+inspection-bearing turns without explicit progress, inspection dispatch is
+gated. The model must record progress, revise/split the plan, block/wait/finish,
+or name one missing-evidence question; that question grants four bounded
+inspection-bearing turns.
 
 ### 9.14 `delegate`
 
@@ -2561,7 +2562,7 @@ this subsection records the common runner those argv tools point at.
 - `continue_child_id` names an already-terminal child of the same immediate
   parent. Continuation never appends to or overwrites that source directory:
   the Runner creates a fresh child ID and seeds it with the source transcript,
-  private todos, proxy session ID, cache-affinity ID, and provider response
+  linked WorkState, proxy session ID, cache-affinity ID, and provider response
   anchor. The continuation user message identifies the source and warns the
   child to re-check current repository state. Source usage is not charged again;
   the new child's usage contains only its new physical model calls. Its turn
@@ -2583,7 +2584,7 @@ this subsection records the common runner those argv tools point at.
   Children created before fingerprints were introduced are deliberately not
   resumable through this path.
 - Before the first continued request, the Runner estimates the retained
-  transcript, typed todo request context, and continuation prompt against the
+  transcript, typed WorkState request context, and continuation prompt against the
   current context window. At or below 60%, it restores the complete transcript
   and compatible provider continuation anchor. Above 60%, it performs one
   tool-less maintenance summary over the complete source transcript and
@@ -2641,8 +2642,8 @@ this subsection records the common runner those argv tools point at.
   `agent.Options`. They remain per-prompt ceilings for each child, not a shared
   hierarchy-wide budget. Provider/model output/context settings and recursive
   runtime snapshots are preserved as before.
-- Child agents receive a private `update_todos` store when that tool is available;
-  child todo updates do not affect the parent session's todo list. Foreground
+- Child agents receive a private WorkState linked to the parent work/revision/step;
+  child progress does not mutate the parent state. Foreground
   delegates remain serialized because children share the checkout and may write.
 - The parent transcript records only the normal `delegate` tool call and compact result.
   Child transcripts are saved under `children/<child-id>/` in the parent session
@@ -2707,7 +2708,7 @@ runner. The manager owns ids, status, list/get/wait/cancel, lease enforcement,
 one-shot notices, and request-only context delivery.
 `run_command`, `grep`, `rg`,
 `web_fetch`, and `delegate` support this path via `background:true`; background
-delegate jobs still use the same launch validation, child transcript, private todo,
+delegate jobs still use the same launch validation, child transcript, linked WorkState,
 and token-accounting behavior as synchronous delegate.
 
 `background_jobs` accepts:
@@ -2818,50 +2819,20 @@ fast-fails subsequent calls rather than storming reconnects. A proxy crash
 mid-session surfaces as error tool results; the next call reconnects when the
 backoff allows.
 
-### 9.17 `record_plan` (`internal/plan`)
+### 9.17 `request_implementation` (`internal/handoff` + `internal/tools`)
 
-- Persists an implementation plan as markdown under the live session directory:
-  `<session>/plans/NNNN-<slug>.plan.md`, written temp-then-rename. Input is
-  `{title, plan}`; `plan` is the self-contained markdown body. Returns the
-  absolute path.
-- The store is one `*plan.Store` per process (like `update_todos`); the list is
-  saved in `state.json` (`Session.Plans`), reseeded on resume, and reset on
-  `/clear`. `internal/plan` is a leaf package so `internal/session` can persist the
-  `Plan` type without importing tools.
-- Available to every default agent (in `defaultTools`), so plans are a first-class
-  artifact even outside plan mode. The session directory is read at call time, so
-  it errors clearly when none exists (one-shot mode).
-- The REPL surfaces the latest recorded plan's path to the user, mirroring the
-  `update_todos` status (§9.13). Display state is relative to the current model
-  prompt: the first plan added by that prompt is `Plan recorded: <path>`, a newer
-  artifact added when a plan already existed (or after multiple records in one
-  prompt) is `Plan updated: <path>`, and an unchanged current plan — including a
-  pre-existing plan when resuming — is `Plan: <path>`. The sink prints the line to
-  `Errw` immediately after each successful `record_plan` result and again before
-  the per-prompt usage line; the unchanged fallback is also shown at the idle
-  prompt, with the existing prompt-boundary marker deduplicating a line already
-  printed before usage. All variants are display-only — re-rendered from the
-  shared store, never part of the model's tool result or context — so the user
-  always learns where the plan was written even if the model does not mention it.
-
-### 9.18 `request_implementation` (`internal/plan` + `internal/tools`)
-
-- The plan agent's or interactive auto agent's request to hand the recorded plan
-  to an implementation agent.
-  Input is `{brief, agent?}`. It requires and always selects the most recently
-  recorded plan; the implementation agent reads the plan as its task spec rather
-  than being handed only the brief. Model selection belongs to the target agent's
-  configuration rather than this model-callable tool.
-- The `agent` field's schema is built from the configured agent names: its
-  `enum` constrains the value to a real agent, so the model cannot invent one.
-  The tool also rejects an explicit unknown `agent` before recording a pending
-  handoff. Omitting it leaves target selection to the REPL and configured handoff
-  default (`auto` unless overridden).
-- Tools cannot prompt, so it only records a `plan.HandoffRequest` in a shared
-  `*plan.Pending` holder and returns. At the prompt boundary, the REPL displays
-  the brief, asks for approval, performs the switch, and immediately starts the
-  implementation agent; `/handoff` remains available as a manual fallback (§10).
-  It errors in one-shot mode (no interactive approval).
+- Requests approval to transition the current ready WorkState to implementation.
+  Input is only `{brief?, agent?}`: `brief` is supplementary context, while the
+  objective, constraints, steps, evidence, and plan artifact always come from
+  WorkState. The configured agent names populate the optional `agent` enum.
+- The tool rejects one-shot mode, an absent/non-ready WorkState, and unknown
+  agents. It records a small `handoff.Request` in a synchronized pending holder;
+  tools never prompt or perform the switch themselves.
+- At an interactive boundary, Harness renders the structured plan and optional
+  brief, asks for approval, archives the planning transcript, switches the
+  agent/model, approves the WorkState scope, activates its first runnable leaf,
+  and seeds a clean context with the active capsule. The seed explicitly says
+  not to reread or recreate the plan. Manual `/handoff` uses the same path.
 
 ## 10. CLI / REPL (`internal/ui`)
 
@@ -3439,7 +3410,7 @@ Two run modes share the stream:
 
 ```go
 type Session struct {
-    Version       int                `json:"version"` // 5: build/runtime attribution and efficiency telemetry
+    Version       int                `json:"version"` // 6: structured WorkState
     ID            string             `json:"id"`
     CWD           string             `json:"cwd,omitempty"`
     ParentSession string             `json:"parent_session,omitempty"`
@@ -3457,8 +3428,7 @@ type Session struct {
     ResponseState *llm.ResponseState `json:"response_state,omitempty"` // Responses stateful continuation anchor
     ProxySessionID string `json:"proxy_session_id,omitempty"` // sticky-routing/WebSocket isolation key
     CacheAffinityID string `json:"cache_affinity_id,omitempty"` // stable prompt-cache routing identity
-    Todos         []todo.Item        `json:"todos,omitempty"`          // update_todos list, reseeded on resume
-    Plans         []plan.Plan        `json:"plans,omitempty"`          // record_plan list, reseeded on resume
+    Work          *workstate.State   `json:"work,omitempty"`           // current revision projection
     Goal          *goal.State        `json:"goal,omitempty"`           // autonomous session goal, reseeded on resume
     Usage         UsageTotals        `json:"usage"`                    // session aggregate
     UsageByModel  map[string]UsageTotals `json:"usage_by_model,omitempty"` // per model target cost
@@ -3469,6 +3439,7 @@ type Entry struct {
     ID           string
     ParentID     string
     Time         time.Time
+    WorkRevisionID string // WorkState revision active at this boundary
     Messages     []llm.Message // segment or context_reset snapshot
     ContextDelta *ContextDelta // legacy context_reset, mutually exclusive with Messages
     // Compaction checkpoint, kept-entry boundary, archive reference, and size.
@@ -3496,7 +3467,7 @@ type UsageTotals struct {
 }
 ```
 
-- Schema v5 is intentionally breaking: loading or replaying an older
+- Schema v6 is intentionally breaking: loading or replaying an older
   `state.json` returns a clear unsupported-version error; there are no aliases,
   migrations, or legacy linear-session fallback.
 - A session path is a directory. `tree.ndjson` is canonical append-only
@@ -3512,7 +3483,7 @@ type UsageTotals struct {
   branch cannot split the provider transcript invariant.
 - Before each provider request and before dispatching emitted tool calls,
   Harness atomically replaces `active-turn.json` with the complete resumable
-  runtime state: transcript, todos, plans, usage, cache/proxy IDs, and safe
+  runtime state: transcript, WorkState projection, usage, cache/proxy IDs, and safe
   Responses continuation anchor. An open tool-use is stored with synthetic
   `interrupted` results. Recovery therefore never automatically re-executes a
   tool whose process-local completion is unknown.
@@ -3542,7 +3513,7 @@ type UsageTotals struct {
   provider calls; `turn_complete` closes a conversational turn; `prompt_usage`
   closes the top-level prompt and carries its successful compaction count;
   `maintenance_usage` accounts for compaction,
-  prewarming, handoff-summary, and branch-summary calls without creating turns.
+  prewarming and branch-summary calls without creating turns.
   `model_request` records proxy/request lifecycle and every API issue with timing,
   parsed error, and correlation metadata; these events are replay/analysis data
   only and never become conversation-tree entries or model context. `checkpoint`
@@ -3599,7 +3570,7 @@ type UsageTotals struct {
   sessions receive a new session ID, `ParentSession`/`ParentEntryID`, prompt number
   zero, fresh lifetime usage, and cleared Responses/proxy continuation anchors.
   Model, provider, agent,
-  reasoning, todos, plans, hooks, and working directory stay global/current.
+  reasoning, WorkState projection, hooks, and working directory stay global/current.
 - Conversation navigation does not alter filesystem or Git state. Every branch
   adds a model-visible internal warning to inspect current files before assuming
   their state. Optional branch summaries describe only the divergent old suffix.
@@ -3658,7 +3629,7 @@ type UsageTotals struct {
   and absent streams are not inferred. A cutoff includes events at or before the
   requested instant and disables untimestamped child-metadata fallback. Aggregate
   execution completeness has a stable severity order (`incomplete` over
-  `unavailable` over `unknown` over `complete`). Analyzer schema v2 groups every
+  `unavailable` over `unknown` over `complete`). Analyzer schema v3 groups every
   physical root plus descendants as one experimental hierarchy. Items retain
   their own provider/model/agent/build/runtime identity, derive immutable
   per-attempt identity availability/stability, and carry root ownership; cohort
@@ -3682,6 +3653,15 @@ type UsageTotals struct {
   unless a future host-owned signal can observe it. Semantic completion remains
   independent of lifecycle termination.
 
+  Bounded `work.ndjson` parsing adds root, descendant, and inclusive WorkState
+  scopes: work/revision counts, structured and terminal lifecycle counts,
+  handoffs, branches, decision gates, step transitions, evidence, mutation and
+  verification/delegate results. Content-free work/step IDs on turn-progress
+  records also provide attributed tool-turn and inspection-operation counts plus
+  per-step tool-turn and elapsed-time-to-first-mutation distributions. Only
+  counters and timing enter output; objectives, paths, evidence summaries, and
+  artifact bodies are discarded.
+
   Corpus/session discovery and storage analysis use chunked, capped
   entry/depth walks; metadata reads are size-bounded and symlinks are not
   followed. Storage reports files/directories/bytes for state/tree/raw logs,
@@ -3694,7 +3674,7 @@ type UsageTotals struct {
   Context aggregation preserves provider count scope: payload and effective
   maxima stay separate, incompatible scopes are not subtracted, negative public
   values are clamped, and compatible-scope arithmetic violations remain counted.
-  `session stats` reuses analyzer-v2 usage/storage vocabulary for a single root
+  `session stats` reuses analyzer-v3 usage/storage vocabulary for a single root
   plus every physically nested delegate.
 - `harness session replay <session-dir>` prints `raw.ndjson` as the familiar
   user-facing terminal view, filtering assistant/reasoning deltas from retry
@@ -3732,7 +3712,7 @@ type UsageTotals struct {
   transcripts, and `children/*/meta.json`. It reports turns, direct tool and
   command activity, lifetime parallel batches, compactions, tree
   entries/branches/leaves/depth, navigation events, authoritative token/cost
-  totals, calls per tool-bearing turn, standalone todo/single-inspection turns,
+  totals, calls per tool-bearing turn, standalone work-state/single-inspection turns,
   result truncation/byte/timing totals and per-tool volume, redacted aggregates
   of repeated normalized calls, command-step shape, skill reads/activations,
   batched-search selected-versus-unique context lines, active transcript
@@ -3757,7 +3737,7 @@ type UsageTotals struct {
   malformed JSON and trailing values.
   `--format json` is versioned and additive: it emits the transcript-free
   tool/error subset with calls, results, failures, rates, and partial
-  composite-operation metrics, plus build/runtime identity and analyzer-v2
+  composite-operation metrics, plus build/runtime identity and analyzer-v3
   usage/storage sections.
 - `harness session errors [dir]` lists classified failures — failed tool
   results and failed model requests — for one session (root plus delegate
@@ -3857,7 +3837,7 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   criteria, still-constraining decisions, semantic state for meaningful file
   changes, active worktree/blocker/gate/verification state, key facts, and
   unresolved intent; do not invent. The model does not enumerate read-only
-  inspected files or reproduce the typed active todo list. Summary output is
+  inspected files or reproduce the separately injected WorkState capsule. Summary output is
   capped by `compact_summary_max_tokens` (default 2048).
   A first compaction uses `prompts/compaction-summary.txt`. A repeated compaction
   removes the structured prior checkpoint from ordinary summary history, passes its
@@ -3870,13 +3850,11 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   preserves current instructions explicitly without pretending the summary was a
   conversational assistant turn. `/compact [focus]` adds one-shot emphasis to all
   summary phases and records that focus only on the resulting checkpoint/archive.
-- **Typed compacted-history state:** the active todo store is persisted in
-  session state independently of the transcript. A successful compaction schedules
-  a one-shot recovery reminder, so the first subsequent model request receives
-  the unresolved typed items even if the raw `update_todos` call aged out. Completed
-  task titles are omitted from that reminder. The
-  model-authored summary carries only unresolved intent, blockers, and gates
-  that are not represented by that list.
+- **Typed compacted-history state:** WorkState is persisted independently of the
+  transcript and its active capsule is regenerated for every applicable model
+  request. Compaction summaries therefore omit the structured objective,
+  constraints, active step, and progress already represented there; they carry
+  only unresolved intent, blockers, and gates absent from WorkState.
 - **Deterministic compacted-history files:** correlate each validated assistant
   tool-use message with its immediate result message. Successful supported
   `read_file`, `write_file`, `edit`, and `apply_patch` calls contribute normalized,
@@ -3973,7 +3951,7 @@ injectable), the retry clock, and `ValidateTranscript`.
 | `internal/retry` | `Next`: jitter bounds, 30s cap, Retry-After floor |
 | tools | table-driven against `t.TempDir()`; `grep` wrapper against the host CLI; optional `rg` registration with a fake executable on PATH; `git` against a scratch `git init` repo (skipped if git absent); `run_command` timeout via `sleep`; `apply_patch` at the tool level covers the Codex Add envelope, canonical `patch`, compatibility decoding paths, bare-string input, and conflicting-alias / parse-error format-hint paths, while `internal/tools/patch` covers parse + apply for create/update/delete/rename and first-rejection-leaves-file-untouched |
 | agent loop | `FakeProvider` scripts: multi-tool batches, error-result feedback (next request carries the error), max-turns stop, cancellation → transcript still re-sendable |
-| delegate | child-agent request shape and child-only prompt suffix, model-visible compatible-agent enum/catalog (ordering, normalization, caps), parent-tool subset rejection, depth transitions/deepest-child removal, recursive runtime rebinding, inherited token/cost budgets, private child todo stores, child transcript persistence, metered usage folded into parent prompt totals |
+| delegate | child-agent request shape and child-only prompt suffix, model-visible compatible-agent enum/catalog (ordering, normalization, caps), parent-tool subset rejection, depth transitions/deepest-child removal, recursive runtime rebinding, inherited token/cost budgets, linked private child WorkState, child transcript persistence, metered usage folded into parent prompt totals |
 | background | job start/completion, one-shot context delivery, notices, cancellation/errors, child transcript path preservation |
 | session | save→load→save round-trip; atomic rename leaves no `.tmp`; resume repair; cross-provider resume |
 | compaction | canned summary via FakeProvider; old messages collapse, last 4 turns kept; invariant holds |
@@ -4010,21 +3988,21 @@ reviewer, or the wide-open default without separate binaries.
   selection path—not a display-name or model-only swap—so it recomposes the agent
   prompt, tools, model/reasoning selection, and response continuation state.
 - **Built-ins:** `auto` (all available built-in tools plus discovered MCP tools,
-  including `update_todos`, `record_plan`, `delegate` and background job tools,
+  including `update_work`, `delegate` and background job tools,
   and `request_implementation` in interactive sessions; its
   `prompts/agents/auto.txt` is a one-byte file — a single newline — that trims to
   empty, so it contributes no prompt body), `explore` (the shared inspection
   tools — `read_file`, `view_image`, `list_dir`, `glob`, `search`, `inspect`,
-  `run_command`, `web_fetch`, optional `git_readonly`, and `update_todos` — and
+  `run_command`, `web_fetch`, optional `git_readonly`, and `update_work` — and
   read-only MCP tools; no file mutation, implementation handoff, background jobs, or
   delegation; prompt in `prompts/agents/explore.txt`), `plan` (the shared
-  inspection tools, read-only MCP tools, `write_tmp_file`, `record_plan`,
-  `request_implementation`, `update_todos`, `delegate`, and background job
+  inspection tools, read-only MCP tools, `write_tmp_file`,
+  `request_implementation`, `update_work`, `delegate`, and background job
   tools, plus `prompts/agents/plan.txt`), `review` (the shared inspection tools
   and read-only MCP tools, plus a findings-first prompt in
   `prompts/agents/review.txt` that reviews the working-tree diff and untracked
   files when no range is supplied), and `independent` (all available built-in tools
-  plus discovered MCP tools, including `update_todos`, `record_plan`, `delegate`
+  plus discovered MCP tools, including `update_work`, `delegate`
   and background job tools, a complete-without-asking prompt from
   `prompts/agents/independent.txt`). `explore`, `plan`, and `review` gain
   `run_command` from the shared inspection set so they can use external tools
@@ -4034,10 +4012,8 @@ reviewer, or the wide-open default without separate binaries.
   `git_readonly` — `git` covers every read-only operation, so listing both would
   duplicate functionality and waste context. The delegation subset guard treats an
   available `git` as satisfying a required `git_readonly`, so these parents can
-  still delegate to `explore`/`plan`/`review`. `record_plan` (§9.17) is exposed
-  to `auto`, `plan`, and `independent`; `update_todos` is in every built-in
-  agent's set;
-  `request_implementation` (§9.18) is exposed to `plan` and to interactive
+  still delegate to `explore`/`plan`/`review`. `update_work` (§9.13) is in every
+  built-in agent's set; `request_implementation` (§9.17) is exposed to `plan` and to interactive
   `auto`, but not to one-shot `auto` or `independent`.
 - **Descriptions are required selection metadata:** after resolution, every agent
   must have a nonblank trimmed `description` stating when a parent should use it.
@@ -4069,16 +4045,17 @@ reviewer, or the wide-open default without separate binaries.
   (startup, `/agent`, delegate, or a handoff target) and is then made
   model-compatible and validated like any effort. This lets a cheap implementation
   agent pair a smaller `model` with a lower `reasoning`.
-- **Plan → implementation handoff:** the `plan` agent records plans with
-  `record_plan` (§9.17) and requests a handoff with `request_implementation` (§9.18).
+- **Plan → implementation handoff:** the `plan` agent makes WorkState ready with
+  `update_work` (§9.13) and requests a handoff with `request_implementation` (§9.17).
   At the next prompt boundary, or on manual `/handoff` (§10), the REPL prompts for
   approval, archives the planning transcript via `SaveCompaction`, switches to
   the target agent — default `auto`, overridable by
   `--handoff-agent`/`HARNESS_HANDOFF_AGENT`/`handoff_agent` or `/handoff -a
   <agent>` — optionally swaps the model for a manual `/handoff -m <model>`, then
-  reseeds a clean transcript with a pointer to the recorded plan, the displayed
-  brief, and any trailing `/handoff` user message as a separate section, clears
-  the planning todos, and submits a fixed implementation-start prompt. Reusing
+  approves the scope and activates the first runnable step, then reseeds a clean
+  transcript with the active capsule, optional supplementary brief, and any
+  trailing `/handoff` user message as a separate section before submitting a
+  fixed implementation-start prompt. Reusing
   the same in-session
   switch (not `delegate`) avoids the `delegate` subset gate, so the
   `plan` agent — which has no file-mutation tools — can hand off to a

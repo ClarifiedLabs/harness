@@ -21,11 +21,10 @@ This page is the operational overview.
 | `git_readonly` | restricted git subcommands for read-only agents |
 | `web_fetch` | fetch bounded HTTP(S) text, removing common HTML chrome while preserving block structure and links |
 | `write_tmp_file` | write scratch files under a private temp directory |
-| `update_todos` | replace the current todo list for multi-step work |
+| `update_work` | define/refine the structured plan or record progress on the active WorkState |
 | `delegate` | run a configured child agent and return its final report |
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
-| `record_plan` | persist a self-contained markdown implementation plan in the session; the user is shown the plan file path |
-| `request_implementation` | request an approved handoff of the latest recorded plan (plan and interactive auto agents) |
+| `request_implementation` | request approval to hand a ready WorkState to an implementation agent (plan and interactive auto agents) |
 
 `apply_patch` (Codex-format add/delete/update/move patches) is no longer in the
 default tool set — `edit` and `write_file` subsume it. It still ships in the tool
@@ -234,14 +233,17 @@ Mixed read/write commands such as `branch`, `config`, `remote`, `reflog`,
 disables pagers, optional locks, filesystem monitors, external diff/textconv
 helpers, prompts, output-file flags, and signature helpers.
 
-`update_todos` is available to every built-in agent. Use it for meaningful
-multi-step work, update it at phase boundaries, and do not spend a turn only on
-bookkeeping. Each call replaces the whole list. Harness returns a compact
-completion-count acknowledgment to the model while the interactive REPL renders
-the full checklist for the user. When unresolved work receives no update for 12
-conversational model rounds, Harness injects a compact reconciliation reminder;
-repeated reminders back off exponentially. Custom agents with an explicit
-`allowed_tools` list may omit the tool.
+`update_work` is available to every built-in agent and has only two modes.
+`plan` replaces the bounded ordered phase/step structure and marks it `draft` or
+`ready`; `progress` changes one step/lifecycle, attaches selected evidence, or
+records reconciliation after a branch. Every call names the work item and base
+revision, so stale model updates are rejected. Harness automatically attaches
+unambiguous file mutations, verification outcomes, and delegate completions to
+the active step. Administrative plan updates do not reset the implementation
+progress guard. After 12 inspection-bearing turns without meaningful progress,
+further inspection is gated until the agent records progress, revises/splits the
+plan, reports a blocker/wait, or names one bounded missing-evidence question.
+Custom agents with an explicit `allowed_tools` list may omit the tool.
 
 ## File Mutation
 
@@ -311,7 +313,7 @@ rejection, non-retryable 4xx) are returned unchanged.
 Set `continue_child_id` to a terminal sibling delegate ID when the same child
 runtime should continue retained work. Harness leaves the source child
 unchanged and creates a fresh child record containing the prior transcript,
-todos, prompt-cache/proxy identifiers, and provider continuation anchor. The
+linked WorkState, prompt-cache/proxy identifiers, and provider continuation anchor. The
 new prompt explicitly tells the child to re-check repository state. Omitted
 `agent`, `mode`, and `max_turns` values inherit the source contract; explicitly
 supplied values must match it. The continuation receives a fresh loop allowance
@@ -377,7 +379,8 @@ launch fails before a model request. Children inherit the root
 `max_prompt_tokens` and `max_prompt_cost_usd` per-prompt safety ceilings. These are
 per-child ceilings, not a hierarchy-wide shared budget.
 
-Child agents get private todo stores. Their transcripts are saved under
+Child agents get private WorkState logs linked to the exact parent work,
+revision, and active step at launch. Their transcripts are saved under
 `children/<child-id>/` alongside the parent session. Foreground and background
 child token/cost usage is included exactly once in parent prompt/session usage.
 Child metadata records background resource/access leases, requested and effective

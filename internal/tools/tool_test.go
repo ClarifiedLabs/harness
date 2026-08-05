@@ -489,6 +489,35 @@ func TestDispatch(t *testing.T) {
 	}
 }
 
+func TestDispatchGuardBlocksBeforeToolExecutionAndSurvivesSubset(t *testing.T) {
+	ran := false
+	r := &Registry{}
+	r.Register(fakeTool{
+		name: "inspect", desc: "inspect", schema: `{"type":"object"}`,
+		run: func(context.Context, json.RawMessage) (string, error) {
+			ran = true
+			return "unexpected", nil
+		},
+	})
+	r.SetDispatchGuard(func(call llm.ToolCall, activity Activity) error {
+		if call.Name != "inspect" || string(call.Input) != "{}" || activity.Class != ActivityInspect {
+			t.Fatalf("guard call/activity = %+v/%+v", call, activity)
+		}
+		return fmt.Errorf("work decision required")
+	})
+	sub, err := r.Subset([]string{"inspect"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := sub.Dispatch(context.Background(), llm.ToolCall{ID: "guarded", Name: "inspect"})
+	if !res.IsError || res.ErrorKind != llm.ToolErrorInvalidArgs || !strings.Contains(res.Text, "work decision required") {
+		t.Fatalf("guarded result = %+v", res)
+	}
+	if ran {
+		t.Fatal("guarded tool executed")
+	}
+}
+
 func TestDispatchFormatsJSONUnmarshalTypeErrors(t *testing.T) {
 	r := &Registry{}
 	r.Register(fakeTool{

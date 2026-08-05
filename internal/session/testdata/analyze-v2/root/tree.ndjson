@@ -1,2 +1,2 @@
-{"type":"session","version":5,"id":"fixture-root","created":"2026-08-01T00:00:00Z"}
+{"type":"session","version":6,"id":"fixture-root","created":"2026-08-01T00:00:00Z"}
 {"type":"context_reset","id":"reset-1","time":"2026-08-01T00:00:00Z","messages":[{"role":"user","content":[{"kind":"text","text":"FROZEN SECRET TRANSCRIPT CANARY"}]}],"reason":"fixture"}

@@ -15,10 +15,10 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/background"
+	"harness/internal/handoff"
 	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
-	"harness/internal/plan"
 	"harness/internal/runstream"
 	"harness/internal/skills"
 	"harness/internal/tools"
@@ -799,9 +799,10 @@ func TestRunJSONPromptPreparationRejectionReturnsCorrelatedInputError(t *testing
 
 // newHandoffJSONApp wires the handoff machinery: a shared Pending holder, a
 // successful agent-switch stub, and the JSON run stream.
-func newHandoffJSONApp(t *testing.T, fp *llmtest.FakeProvider, pending *plan.Pending) (*App, *lockedBuffer, *lockedBuffer, *runstream.Writer) {
+func newHandoffJSONApp(t *testing.T, fp *llmtest.FakeProvider, pending *handoff.Pending) (*App, *lockedBuffer, *lockedBuffer, *runstream.Writer) {
 	t.Helper()
 	app, stream, errw, w := newJSONRunApp(t, fp)
+	readyWorkForApp(t, app, "Implement structured handoff")
 	app.Handoff = pending
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
@@ -809,12 +810,12 @@ func newHandoffJSONApp(t *testing.T, fp *llmtest.FakeProvider, pending *plan.Pen
 	return app, stream, errw, w
 }
 
-func handoffPlanStep(pending *plan.Pending) llmtest.Step {
+func handoffPlanStep(pending *handoff.Pending) llmtest.Step {
 	return llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("plan ready")},
 		Stop:   llm.StopEndTurn,
 		Block: func(context.Context) {
-			pending.Request(plan.HandoffRequest{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+			pending.Request(handoff.Request{Brief: "env: go test", ArtifactPath: "/p/0001.plan.md"})
 		},
 	}
 }
@@ -850,7 +851,7 @@ func TestRunJSONPromptWithUnknownAgentRejected(t *testing.T) {
 }
 
 func TestRunJSONHandoffApprovalStartsImplementation(t *testing.T) {
-	pending := plan.NewPending()
+	pending := handoff.NewPending()
 	fp := llmtest.New("fake",
 		handoffPlanStep(pending),
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("implemented")}, Stop: llm.StopEndTurn},
@@ -871,8 +872,9 @@ func TestRunJSONHandoffApprovalStartsImplementation(t *testing.T) {
 		t.Fatalf("approval_request count = %d, want 1", len(approvals))
 	}
 	approval := approvals[0]
+	work := app.Work.Snapshot()
 	if approval["kind"] != "implementation_handoff" || approval["brief"] != "env: go test" ||
-		approval["plan_path"] != "/p/0001.plan.md" || approval["agent"] != "auto" || approval["id"] == nil {
+		approval["plan_path"] != work.ArtifactPath || approval["work_id"] != work.WorkID || approval["revision_id"] != work.RevisionID || approval["agent"] != "auto" || approval["id"] == nil {
 		t.Fatalf("approval_request = %v", approval)
 	}
 	id, _ := approval["id"].(string)
@@ -904,7 +906,7 @@ func TestRunJSONHandoffApprovalStartsImplementation(t *testing.T) {
 }
 
 func TestRunJSONHandoffApprovalDeclined(t *testing.T) {
-	pending := plan.NewPending()
+	pending := handoff.NewPending()
 	fp := llmtest.New("fake",
 		handoffPlanStep(pending),
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("later answer")}, Stop: llm.StopEndTurn},
@@ -936,7 +938,7 @@ func TestRunJSONHandoffApprovalDeclined(t *testing.T) {
 }
 
 func TestRunJSONInterruptDuringApprovalCancelsHandoff(t *testing.T) {
-	pending := plan.NewPending()
+	pending := handoff.NewPending()
 	fp := llmtest.New("fake", handoffPlanStep(pending))
 	app, stream, errw, w := newHandoffJSONApp(t, fp, pending)
 
@@ -963,7 +965,7 @@ func TestRunJSONInterruptDuringApprovalCancelsHandoff(t *testing.T) {
 }
 
 func TestRunJSONEOFAfterCompletionDeclinesPendingApprovalAndDrainsQueue(t *testing.T) {
-	pending := plan.NewPending()
+	pending := handoff.NewPending()
 	fp := llmtest.New("fake",
 		handoffPlanStep(pending),
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
@@ -1200,7 +1202,7 @@ func TestRunJSONForceExitAbortsBlockedInputReader(t *testing.T) {
 }
 
 func TestRunJSONUnknownApprovalIDRejected(t *testing.T) {
-	pending := plan.NewPending()
+	pending := handoff.NewPending()
 	fp := llmtest.New("fake", handoffPlanStep(pending))
 	app, stream, errw, w := newHandoffJSONApp(t, fp, pending)
 
@@ -1224,9 +1226,10 @@ func TestRunJSONUnknownApprovalIDRejected(t *testing.T) {
 }
 
 func TestRunJSONHandoffSwitchFailureSurfaces(t *testing.T) {
-	pending := plan.NewPending()
+	pending := handoff.NewPending()
 	fp := llmtest.New("fake", handoffPlanStep(pending))
 	app, stream, errw, w := newJSONRunApp(t, fp)
+	readyWorkForApp(t, app, "Implement structured handoff")
 	app.Handoff = pending
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{}, errors.New("no such agent")

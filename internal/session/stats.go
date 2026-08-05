@@ -164,7 +164,7 @@ type toolStats struct {
 	commands            commandStats
 	parallel            parallelStats
 	turns               int
-	soloTodoTurns       int
+	soloWorkTurns       int
 	singleInspectTurns  int
 	resultErrors        int
 	resultTruncations   int
@@ -693,8 +693,8 @@ func collectToolStats(events []Event) (toolStats, error) {
 		if len(names) != 1 {
 			continue
 		}
-		if names[0] == "update_todos" {
-			stats.soloTodoTurns++
+		if names[0] == "update_work" {
+			stats.soloWorkTurns++
 		}
 		switch names[0] {
 		case "read_file", "search", "rg", "grep", "glob", "list_dir", "git_readonly":
@@ -984,7 +984,7 @@ func (stats *toolStats) add(other toolStats) {
 	}
 	stats.calls += other.calls
 	stats.turns += other.turns
-	stats.soloTodoTurns += other.soloTodoTurns
+	stats.soloWorkTurns += other.soloWorkTurns
 	stats.singleInspectTurns += other.singleInspectTurns
 	stats.resultErrors += other.resultErrors
 	stats.resultTruncations += other.resultTruncations
@@ -1292,7 +1292,7 @@ func writeOverallToolStats(w io.Writer, report statsReport) {
 	if all.turns > 0 {
 		fmt.Fprintf(w, "  calls per tool-bearing turn: %.2f\n", float64(all.calls)/float64(all.turns))
 	}
-	writeSplitValue(w, "  ", "standalone todo turns", all.soloTodoTurns, root.soloTodoTurns, delegates.soloTodoTurns)
+	writeSplitValue(w, "  ", "standalone work-state turns", all.soloWorkTurns, root.soloWorkTurns, delegates.soloWorkTurns)
 	writeSplitValue(w, "  ", "single inspection turns", all.singleInspectTurns, root.singleInspectTurns, delegates.singleInspectTurns)
 	fmt.Fprintf(w, "  results: %d errors / %d truncated / %d B shown / %d B original\n",
 		all.resultErrors, all.resultTruncations, all.resultShownBytes, all.resultOriginalBytes)

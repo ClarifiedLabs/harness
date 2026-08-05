@@ -28,6 +28,9 @@ type Activity struct {
 	OperationCount int
 	Batched        bool
 	Source         string
+	// ExplicitProgress distinguishes meaningful coordination outcomes from
+	// administrative plan/status bookkeeping.
+	ExplicitProgress bool
 }
 
 // ActivityReporter optionally provides precise diagnostics-only activity for a
@@ -293,7 +296,11 @@ func builtinActivity(name string, input json.RawMessage) (Activity, bool) {
 			activity.Class = ActivityCoordinate
 		}
 		return activity, true
-	case "delegate", "update_todos", "record_plan", "request_implementation":
+	case "delegate":
+		activity.Class = ActivityCoordinate
+		activity.ExplicitProgress = true
+		return activity, true
+	case "request_implementation":
 		activity.Class = ActivityCoordinate
 		return activity, true
 	case "git_readonly", "glob", "list_dir", "grep", "view_image", "web_fetch":

@@ -25,14 +25,14 @@ import (
 	"harness/internal/goal"
 	"harness/internal/llm"
 	"harness/internal/markdown"
-	"harness/internal/plan"
 	"harness/internal/term/highlight"
-	"harness/internal/todo"
+	"harness/internal/workstate"
 )
 
-// Version is the on-disk schema version. v5 adds build/runtime attribution and
-// richer efficiency telemetry.
-const Version = 5
+// Version is the on-disk schema version. v6 replaces independently persisted
+// plans and todos with one structured WorkState projection. There is
+// intentionally no v5 migration reader.
+const Version = 6
 
 // ReliabilityTelemetryVersion marks raw events and child metadata written with
 // closure/workflow observability. It is separate from the resumable state
@@ -77,8 +77,7 @@ type Session struct {
 	Messages      []llm.Message      `json:"-"`
 	Tree          *Tree              `json:"-"`
 	ResponseState *llm.ResponseState `json:"response_state,omitempty"`
-	Todos         []todo.Item        `json:"todos,omitempty"`
-	Plans         []plan.Plan        `json:"plans,omitempty"`
+	Work          *workstate.State   `json:"work,omitempty"`
 	Goal          *goal.State        `json:"goal,omitempty"`
 	Usage         UsageTotals        `json:"usage"`
 	// UsageByModel breaks usage and cost down per "provider/model" so a session
@@ -678,6 +677,11 @@ type Event struct {
 	Display string    `json:"display,omitempty"`
 	ToolID  string    `json:"tool_id,omitempty"`
 	Tool    string    `json:"tool,omitempty"`
+	// Work attribution is limited to opaque IDs so efficiency analysis can
+	// group tool turns by active step without retaining objectives or paths.
+	WorkID         string `json:"work_id,omitempty"`
+	WorkRevisionID string `json:"work_revision_id,omitempty"`
+	WorkStepID     string `json:"work_step_id,omitempty"`
 	// Agent, ModelTarget, Provider, APIType, and Model snapshot the resolved
 	// execution identity. Attempt-start records make agent/model switches
 	// analyzable independently of mutable state.json; tool events also carry the

@@ -15,7 +15,7 @@ calls. A turn-level scan found these recurring patterns:
 |---|---:|---:|---|
 | `rg` turn followed by a `read_file` turn | 688 | 160 | bounded contextual code search |
 | `run_command` followed by another `run_command` | 434 | 65 | ordered verification steps with compact receipts |
-| nonterminal `update_todos`-only turn | 60 | 32 | coissue progress with useful work |
+| nonterminal `update_work`-only turn | 60 | 32 | coissue progress with useful work |
 | repeated git inspection | 2,318 git calls | 179 sessions with at least two | one workspace-summary workflow |
 | `background_jobs` `get`/`list` polling | 95 polls | 20 | event-driven wait |
 
@@ -51,7 +51,7 @@ The implementations were:
   truncation, and artifact-compatible citations.
 - `run_command.steps`: 1–16 serial commands, stop-on-failure behavior, compact
   `PASS` receipts, bounded failure output, and archived suppressed output.
-- Todo coissuing guidance in the system, independent, plan, and tool prompts.
+- WorkState progress coissuing guidance in the system, independent, plan, and tool prompts.
 - `git {"workflow":"workspace_summary"}`: branch/HEAD, porcelain status,
   staged and unstaged stats, and both whitespace checks in one read-only call.
 - `background_jobs {"action":"wait"}`: event-driven manager notification,
@@ -103,7 +103,7 @@ go run ./scripts/flowbench \
   -results /tmp/harness-flowbench-results
 ```
 
-Available cases are `search_context`, `command_steps`, `todo_coissue`,
+Available cases are `search_context`, `command_steps`, `work_coissue`,
 `git_workspace_summary`, `background_wait`, `edit_precision`,
 `edit_drift_recovery`, `known_path_batching`, and `unknown_path_discovery`. Use
 `-dry-run` to inspect ordering, `-resume` for validated completed records, and
@@ -167,7 +167,7 @@ not satisfy the corresponding lane.
 |---|---|---|---|---|
 | Contextual search preference | 8/8 completed candidates correct and adopted; stopped before OpenAI repetition 3 | Median search/read transitions 4→1.5 (62.5%) | DeepSeek −1.8%, Alibaba −5.2%; OpenAI regressed 85% and 143% in its two pairs | Historical result; superseded by the typed batched `search` design |
 | Ordered command steps | 9/9 correct, 8/9 adopted | Median command transitions 1→0 (100%) | Aggregate +8.5%; DeepSeek +8.1%, Alibaba +20.9%, OpenAI −10.4% | Formal gate missed by 0.4 points on OpenAI; retained as an optional structured verification primitive |
-| Todo coissuing | 2/2 completed candidates correct, 0/2 adopted | Both candidates still had two todo-only turns | First pair regressed 33.8% | Early rejection; prompt/tool-description steering reverted |
+| Legacy todo coissuing | 2/2 completed candidates correct, 0/2 adopted | Both candidates still had two todo-only turns | First pair regressed 33.8% | Early rejection; superseded by WorkState coissuing |
 | Git workspace summary | 8/8 completed candidates correct and adopted | Median git interactions 12→8 (33%); 50% became unreachable | DeepSeek −8.3%, Alibaba +4.6%, OpenAI −24.0% on completed pairs | Automatic promotion rejected; safe read-only workflow retained as optional |
 | Background wait | Candidate 9/9 vs baseline 7/9; 8/9 adopted | Median polls 2→0 (100%) | Aggregate +5.7%; DeepSeek +32.2%, Alibaba +5.7%, OpenAI +1.3% | Accepted after routing descriptions discouraged `get`/`list` and short probe waits |
 | Initial edit precision smoke (`013255c`) | Baseline 5/5, candidate 5/5; 5/5 adopted | Median effective errors 0→0, but OpenAI 0→1 | Aggregate +5.7%; Alibaba −47.7%, OpenAI −20.9% | Rejected: Alibaba turns increased 4→6 and OpenAI turns increased 4→5 in addition to the token/error regressions |
@@ -229,7 +229,7 @@ per-token charge because both configured providers are subscription based.
 In the earlier workflow campaign, only background wait cleared the complete
 promotion gate. The optional search, steps, and git primitives remain available
 because they are bounded, useful, and do not force the model down the rejected
-path. Todo coissuing was pure steering and was removed after its measured
+path. The legacy todo-coissuing experiment was pure steering and was removed after its measured
 regression. The typed tool-accuracy package stopped at smoke first because edit
 precision failed; a focused guidance revision fixed that case. Longer focused
 confirmation cleared the smoke's Sonnet anomaly, but the resulting five-pair

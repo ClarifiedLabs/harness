@@ -177,7 +177,7 @@ func (g *turnGuard) aggregateTurnProgress(registry *tools.Registry, turn int, ca
 		case tools.ActivityWait:
 			progress.SuccessfulWait = progress.SuccessfulWait || !failed
 		case tools.ActivityCoordinate:
-			progress.SuccessfulCoordination = progress.SuccessfulCoordination || !failed
+			progress.SuccessfulCoordination = progress.SuccessfulCoordination || !failed && activity.ExplicitProgress
 		}
 		if i < len(results) && results[i].Kind == llm.BlockToolResult && g.evidence.add(toolResultEvidence(results[i])) {
 			progress.NewEvidenceCount++

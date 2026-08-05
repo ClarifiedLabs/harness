@@ -33,6 +33,7 @@ import (
 	"harness/internal/configmeta"
 	"harness/internal/delegate"
 	"harness/internal/goal"
+	"harness/internal/handoff"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
@@ -41,7 +42,6 @@ import (
 	"harness/internal/mcptools"
 	modelclient "harness/internal/modelproxy/client"
 	"harness/internal/modelproxy/protocol"
-	"harness/internal/plan"
 	"harness/internal/reasoningprofile"
 	"harness/internal/runstream"
 	"harness/internal/session"
@@ -50,10 +50,10 @@ import (
 	"harness/internal/term"
 	"harness/internal/term/highlight"
 	"harness/internal/tmux"
-	"harness/internal/todo"
 	"harness/internal/tools"
 	"harness/internal/tracing"
 	"harness/internal/ui"
+	"harness/internal/workstate"
 )
 
 const modelProxyCheckTimeout = 2 * time.Second
@@ -770,6 +770,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		childViewer = setupDelegateTmuxViewer(cfg, getenv, stderr, logger, delegateTmuxExplicit, runOptions.Quiet)
 		defer childViewer.Shutdown()
 	}
+	workStore := workstate.NewStore(func() string { return delegateState.Snapshot().SessionPath })
 	delegateOpts := delegate.Options{
 		MaxTurns:                  cfg.DelegateMaxTurns,
 		MaxDepth:                  cfg.DelegateMaxDepth,
@@ -787,6 +788,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			return delegateAgentCandidates(agents)
 		},
 		ActivityRegistry: delegateActivity,
+		WorkSnapshot:     workStore.Snapshot,
 	}
 	if cfg.DelegateTmux {
 		// The closure stays non-nil even when setup degraded to a nil viewer:
@@ -797,20 +799,17 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 	}
 	delegateRunner := delegate.NewRunner(delegateState.Snapshot, resolveDelegate, delegateOpts)
-	// One todo store per process backs the update_todos tool; the App persists it
-	// in state.json and reseeds it on resume below.
-	todoStore := todo.NewStore()
-	toolCatalog.Register(todo.NewTool(todoStore))
 	toolCatalog.Register(delegate.NewTool(delegateRunner, backgroundManager))
 	toolCatalog.Register(background.NewJobsTool(backgroundManager))
-	// record_plan persists plans under the live session directory (delegateState
-	// tracks it across /clear); request_implementation records a handoff the REPL
-	// approves at the prompt boundary. The App persists/reseeds the plan store like
-	// todos. Handoff is interactive-only.
-	planStore := plan.NewStore()
-	handoffPending := plan.NewPending()
-	toolCatalog.Register(plan.NewTool(planStore, func() string { return delegateState.Snapshot().SessionPath }))
-	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, planStore, interactiveSession || machineInteractive, agentdef.Names(agents)))
+	handoffPending := handoff.NewPending()
+	toolCatalog.Register(tools.NewUpdateWork(workStore))
+	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, workStore, interactiveSession || machineInteractive, agentdef.Names(agents)))
+	toolCatalog.SetDispatchGuard(func(call llm.ToolCall, activity tools.Activity) error {
+		if workStore.DecisionRequired() && activity.Class == tools.ActivityInspect {
+			return fmt.Errorf("work decision required: inspection tool %q is paused; use update_work to record progress, revise the plan, name one bounded evidence question, or report a blocker", call.Name)
+		}
+		return nil
+	})
 	// Goals are managed exclusively by the interactive /goal command.
 	goalStore := goal.NewStore()
 	// MCP (opt-in): one-shot runs synchronously so the single request can use MCP
@@ -1104,8 +1103,27 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			fmt.Fprintf(stderr, "harness: session model %q overridden by %q (flags win)\n", s.Model, cfg.Model)
 		}
 		ag.SetTranscript(s.Messages)
-		todoStore.Restore(s.Todos)
-		planStore.Replace(s.Plans)
+		if !resumeCloned {
+			if err := workStore.LoadLog(delegateState.Snapshot().SessionPath); err != nil {
+				fmt.Fprintf(stderr, "harness: restore work revisions: %v\n", err)
+				return ui.ExitRuntime
+			}
+		}
+		if err := workStore.Restore(s.Work); err != nil {
+			fmt.Fprintf(stderr, "harness: restore work state: %v\n", err)
+			return ui.ExitRuntime
+		}
+		if resumeCloned {
+			if _, err := workStore.RebaseCurrent("host", "clone"); err != nil {
+				fmt.Fprintf(stderr, "harness: clone work state: %v\n", err)
+				return ui.ExitRuntime
+			}
+		} else {
+			if err := workStore.ValidateCurrentRevision(); err != nil {
+				fmt.Fprintf(stderr, "harness: restore work state: %v\n", err)
+				return ui.ExitRuntime
+			}
+		}
 		goalStore.Restore(s.Goal)
 		resumedUsageByModel = s.UsageByModel
 		totals = s.Usage
@@ -1248,8 +1266,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			return agentSummaries(agents, delegateState.Snapshot().ToolNames)
 		},
 		SwitchAgent:                  switchAgent,
-		Todos:                        todoStore,
-		Plans:                        planStore,
+		Work:                         workStore,
 		Goal:                         goalStore,
 		GoalMaxContinuations:         cfg.GoalMaxContinuations,
 		GoalAutoContinue:             interactiveSession,

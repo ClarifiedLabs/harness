@@ -155,8 +155,8 @@ func TestAnalyzeV2UsageCohortReconciliationAndCutoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Version != 2 || len(report.Hierarchies) != 1 || len(report.Cohorts) != 1 || len(report.Items) != 2 {
-		t.Fatalf("v2 shape = version %d hierarchies %d cohorts %d items %d", report.Version, len(report.Hierarchies), len(report.Cohorts), len(report.Items))
+	if report.Version != AnalysisVersion || len(report.Hierarchies) != 1 || len(report.Cohorts) != 1 || len(report.Items) != 2 {
+		t.Fatalf("analysis shape = version %d hierarchies %d cohorts %d items %d", report.Version, len(report.Hierarchies), len(report.Cohorts), len(report.Items))
 	}
 	usage := report.Usage
 	if usage.RootConversational.TotalTokens != 130 || usage.RootMaintenance.TotalTokens != 12 || usage.DescendantConversational.TotalTokens != 59 || usage.DescendantMaintenance.TotalTokens != 5 || usage.Inclusive.TotalTokens != 206 {

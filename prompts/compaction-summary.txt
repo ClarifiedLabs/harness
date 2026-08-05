@@ -1,4 +1,4 @@
-Compact this session for accurate continuation. Typed `read_files`/`modified_files` are authoritative for recognized file activity; omit read-only inspected files. Active todos persist separately and are re-injected; do not repeat them.
+Compact for accurate continuation. Typed `read_files`/`modified_files` are authoritative for recognized file activity; omit read-only inspected files. Active WorkState is re-injected; do not repeat it.
 
 Return:
 - Task: goal, acceptance criteria, active work.
@@ -6,6 +6,6 @@ Return:
 - Changed files: semantic state or unfinished intent for meaningful created/modified/deleted files.
 - Work state: base/head/worktrees, blockers, gates, verification, completed-work receipts.
 - Key facts: relevant code, environment, constraints.
-- Open work: unresolved intent, blockers, or gates absent from typed todos.
+- Open work: unresolved intent, blockers, or gates not represented in WorkState.
 
 Be concise and factual. Do not invent.

@@ -121,13 +121,18 @@ func (app *App) navigateTree(target string, readLine func(string) (string, error
 		fmt.Fprintf(app.Errw, "[tree failed: %v]\n", err)
 		return false
 	}
+	if app.Work != nil {
+		if revisionID := app.SessionTree.WorkRevisionAt(target); revisionID != "" {
+			state, err := app.Work.Checkout(revisionID)
+			if err != nil {
+				fmt.Fprintf(app.Errw, "[tree failed: restore work revision: %v]\n", err)
+				return false
+			}
+			app.SessionTree.SetWorkRevisionID(state.RevisionID)
+		}
+	}
 	app.Agent.SetTranscript(messages)
 	app.Agent.ResetProxySessionID()
-	if app.Todos != nil {
-		// Branching rewrites the transcript and may drop the raw update_todos
-		// result, so re-inject the todo reminder on the next request.
-		app.Todos.RequireRequestContext()
-	}
 	app.recordBranchEvent(from, leaf, summary, "tree")
 	app.saveOrWarn(app.SessionPath)
 	app.prewarm()
@@ -178,6 +183,14 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 		fmt.Fprintf(app.Errw, "[%s failed: %v]\n", source, err)
 		return false
 	}
+	if app.Work != nil {
+		if revisionID := app.SessionTree.WorkRevisionAt(target); revisionID != "" {
+			if _, err := app.Work.Checkout(revisionID); err != nil {
+				fmt.Fprintf(app.Errw, "[%s failed: restore work revision: %v]\n", source, err)
+				return false
+			}
+		}
+	}
 	if app.Background != nil {
 		app.Background.Clear()
 	}
@@ -185,19 +198,22 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 	app.SessionPath = session.DefaultPathForID(app.StateDir, created, tree.Header.ID)
 	app.Created = created
 	app.PromptNumber = 0
-	app.todoPromptStatusBeforeUsage = false
-	app.todoPromptStatusBeforeUsagePrompt = 0
 	app.SetUsage(session.UsageTotals{})
 	app.usageByModel = nil
 	app.Agent.SetTranscript(messages)
 	app.Agent.ResetSessionIDs()
-	if app.Todos != nil {
-		// Fork/clone rewrites the transcript and may drop the raw update_todos
-		// result, so re-inject the todo reminder on the next request.
-		app.Todos.RequireRequestContext()
-	}
 	if app.OnSessionPathChanged != nil {
 		app.OnSessionPathChanged(app.SessionPath)
+	}
+	if app.Work != nil {
+		state, err := app.Work.RebaseCurrent("host", source)
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[%s failed: rebase work state: %v]\n", source, err)
+			return false
+		}
+		if state != nil {
+			app.SessionTree.SetWorkRevisionID(state.RevisionID)
+		}
 	}
 	if app.Hooks != nil {
 		app.Hooks.SetSession(app.SessionPath)

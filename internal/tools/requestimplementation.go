@@ -7,18 +7,19 @@ import (
 	"slices"
 	"strings"
 
-	"harness/internal/plan"
+	"harness/internal/handoff"
+	"harness/internal/workstate"
 )
 
 // requestImplementation is the model-callable tool the plan agent uses to ask
 // for a handoff to an implementation agent. It cannot perform the switch itself
 // (tools cannot prompt the user), so it records the request in the shared Pending
 // holder; the REPL approves it and performs the switch at the prompt boundary. It
-// requires a recorded plan: the implementation agent reads the plan as its task
-// spec rather than being handed only the brief.
+// requires a ready WorkState so the implementation agent receives the approved
+// active-step capsule without rereading or recreating the plan.
 type requestImplementation struct {
-	pending     *plan.Pending
-	plans       *plan.Store
+	pending     *handoff.Pending
+	work        *workstate.Store
 	interactive bool
 	agentNames  []string
 }
@@ -27,10 +28,10 @@ type requestImplementation struct {
 // is false in one-shot mode, where the handoff is unsupported. agentNames is the
 // set of configured agent names offered as handoff targets and feeds the
 // schema's enum so the model cannot invent one (e.g. "implementation").
-func NewRequestImplementation(pending *plan.Pending, plans *plan.Store, interactive bool, agentNames []string) *requestImplementation {
+func NewRequestImplementation(pending *handoff.Pending, work *workstate.Store, interactive bool, agentNames []string) *requestImplementation {
 	return &requestImplementation{
 		pending:     pending,
-		plans:       plans,
+		work:        work,
 		interactive: interactive,
 		agentNames:  slices.Clone(agentNames),
 	}
@@ -39,7 +40,7 @@ func NewRequestImplementation(pending *plan.Pending, plans *plan.Store, interact
 func (*requestImplementation) Name() string { return "request_implementation" }
 
 func (*requestImplementation) Description() string {
-	return "Request approval to hand off the latest recorded plan; brief only context absent from the plan."
+	return "Request approval to hand off the ready WorkState; brief is optional supplementary context."
 }
 
 func (t *requestImplementation) Schema() json.RawMessage {
@@ -60,24 +61,21 @@ func (t *requestImplementation) Run(ctx context.Context, input json.RawMessage) 
 		return "", err
 	}
 	brief := strings.TrimSpace(args.Brief)
-	if brief == "" {
-		return "", fmt.Errorf("brief is required")
+	if t.work == nil {
+		return "", fmt.Errorf("work state is unavailable")
 	}
-	if t.plans == nil {
-		return "", fmt.Errorf("no recorded plan to implement; record one with record_plan first")
-	}
-	latest, ok := t.plans.Latest()
-	if !ok || latest.Path == "" {
-		return "", fmt.Errorf("no recorded plan to implement; record one with record_plan first")
+	current := t.work.Snapshot()
+	if current == nil || current.PlanState != workstate.PlanReady {
+		return "", fmt.Errorf("implementation handoff requires a ready plan recorded with update_work")
 	}
 	agent := strings.TrimSpace(args.Agent)
 	if agent != "" && len(t.agentNames) > 0 && !slices.Contains(t.agentNames, agent) {
 		return "", fmt.Errorf("agent must be one of: %s", strings.Join(t.agentNames, ", "))
 	}
-	t.pending.Request(plan.HandoffRequest{
-		Brief:    brief,
-		Agent:    agent,
-		PlanPath: latest.Path,
+	t.pending.Request(handoff.Request{
+		Brief:        brief,
+		Agent:        agent,
+		ArtifactPath: current.ArtifactPath,
 	})
 	return "handoff to implementation requested; awaiting your approval", nil
 }
@@ -96,7 +94,6 @@ func requestImplementationSchema(agentNames []string) json.RawMessage {
 			"brief": map[string]any{"type": "string"},
 			"agent": agent,
 		},
-		"required": []string{"brief"},
 	}
 	b, _ := json.Marshal(body)
 	return b

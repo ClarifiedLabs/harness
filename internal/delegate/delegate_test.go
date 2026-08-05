@@ -19,8 +19,8 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/session"
-	"harness/internal/todo"
 	"harness/internal/tools"
+	"harness/internal/workstate"
 )
 
 type fakeChildTool struct {
@@ -69,7 +69,7 @@ func newContinuationFixture(t *testing.T, contextWindow int, stateful bool, step
 	}
 	state := NewState(runtime)
 	catalog := &tools.Registry{}
-	catalog.Register(todo.NewTool(todo.NewStore()))
+	catalog.Register(fakeChildTool{name: "read_file", out: "ok"})
 	runner := NewRunner(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
 		if name == "" {
 			name = "worker"
@@ -415,9 +415,9 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 		llmtest.Step{
 			Events: []llm.StreamEvent{{
 				Kind:      llm.EventToolCallDone,
-				ToolID:    "todo-source",
-				ToolName:  "update_todos",
-				ToolInput: json.RawMessage(`{"todos":[{"content":"finish child work","status":"in_progress"}]}`),
+				ToolID:    "read-source",
+				ToolName:  "read_file",
+				ToolInput: json.RawMessage(`{}`),
 			}},
 			Stop:       llm.StopToolUse,
 			ResponseID: "resp-tools",
@@ -468,8 +468,8 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 	if len(request.Messages) != 1 || !strings.Contains(request.Messages[0].Content[0].Text, "[delegate continuation from source]") {
 		t.Fatalf("continuation delta messages = %+v", request.Messages)
 	}
-	if len(request.RequestContext) != 1 || !strings.Contains(request.RequestContext[0], "finish child work") {
-		t.Fatalf("continuation todo context = %+v", request.RequestContext)
+	if len(request.RequestContext) != 1 || !strings.Contains(request.RequestContext[0], "start the work") {
+		t.Fatalf("continuation work context = %+v", request.RequestContext)
 	}
 
 	sourceDir := session.ChildSessionDir(fixture.sessionPath, "source")
@@ -501,8 +501,8 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 		) {
 		t.Fatalf("continued response state = %+v", continuedState.ResponseState)
 	}
-	if len(continuedState.Todos) != 1 || continuedState.Todos[0].Content != "finish child work" {
-		t.Fatalf("continued todos = %+v", continuedState.Todos)
+	if continuedState.Work == nil || continuedState.Work.WorkID != sourceState.Work.WorkID || continuedState.Work.Lifecycle != workstate.LifecycleCompleted || sourceState.Work.Lifecycle != workstate.LifecycleActive {
+		t.Fatalf("continued work = %+v, source work = %+v", continuedState.Work, sourceState.Work)
 	}
 	if len(continuedState.Messages) != len(sourceState.Messages)+2 {
 		t.Fatalf("continued messages = %d, want source %d + 2", len(continuedState.Messages), len(sourceState.Messages))
@@ -1321,9 +1321,9 @@ func TestDelegatePersistsClosedTurnBeforeNextModelResponse(t *testing.T) {
 		llmtest.Step{
 			Events: []llm.StreamEvent{{
 				Kind:      llm.EventToolCallDone,
-				ToolID:    "todo-1",
-				ToolName:  "update_todos",
-				ToolInput: json.RawMessage(`{"todos":[{"content":"child checkpoint","status":"completed"}]}`),
+				ToolID:    "read-1",
+				ToolName:  "read_file",
+				ToolInput: json.RawMessage(`{}`),
 			}},
 			Stop:       llm.StopToolUse,
 			Usage:      llm.Usage{InputTokens: 13, OutputTokens: 4},
@@ -1368,8 +1368,8 @@ func TestDelegatePersistsClosedTurnBeforeNextModelResponse(t *testing.T) {
 	if len(recovered.Messages) != 3 || recovered.Usage.InputTokens != 13 || recovered.Usage.OutputTokens != 4 {
 		t.Fatalf("child checkpoint messages/usage = %d/%+v", len(recovered.Messages), recovered.Usage)
 	}
-	if len(recovered.Todos) != 1 || recovered.Todos[0].Status != "completed" {
-		t.Fatalf("child checkpoint todos = %+v", recovered.Todos)
+	if recovered.Work == nil || recovered.Work.Objective != "checkpoint child work" {
+		t.Fatalf("child checkpoint work = %+v", recovered.Work)
 	}
 	if recovered.ResponseState == nil ||
 		recovered.ResponseState.PreviousResponseID != "child-resp-1" ||
@@ -1408,9 +1408,9 @@ func TestDelegatePersistsAllClosedTurnsInChildTree(t *testing.T) {
 		llmtest.Step{
 			Events: []llm.StreamEvent{{
 				Kind:      llm.EventToolCallDone,
-				ToolID:    "todo-1",
-				ToolName:  "update_todos",
-				ToolInput: json.RawMessage(`{"todos":[{"content":"first turn","status":"completed"}]}`),
+				ToolID:    "read-1",
+				ToolName:  "read_file",
+				ToolInput: json.RawMessage(`{}`),
 			}},
 			Stop:  llm.StopToolUse,
 			Usage: llm.Usage{InputTokens: 11, OutputTokens: 3},
@@ -1418,9 +1418,9 @@ func TestDelegatePersistsAllClosedTurnsInChildTree(t *testing.T) {
 		llmtest.Step{
 			Events: []llm.StreamEvent{{
 				Kind:      llm.EventToolCallDone,
-				ToolID:    "todo-2",
-				ToolName:  "update_todos",
-				ToolInput: json.RawMessage(`{"todos":[{"content":"second turn","status":"completed"}]}`),
+				ToolID:    "read-2",
+				ToolName:  "read_file",
+				ToolInput: json.RawMessage(`{}`),
 			}},
 			Stop:  llm.StopToolUse,
 			Usage: llm.Usage{InputTokens: 12, OutputTokens: 4},
@@ -1561,7 +1561,7 @@ func TestDelegateTerminalizesPostMetadataSetupFailure(t *testing.T) {
 		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools}, nil
 	}, Options{ActivityRegistry: activityRegistry})
 	setupErr := errors.New("build child tools")
-	runner.childToolBuilder = func(Runtime, Launch, string, *todo.Store, []string) (*tools.Registry, error) {
+	runner.childToolBuilder = func(Runtime, Launch, string, []string) (*tools.Registry, error) {
 		return nil, setupErr
 	}
 	progress := NewProgress()
@@ -1600,7 +1600,7 @@ func TestDelegateTerminalizesPostMetadataSetupFailure(t *testing.T) {
 
 func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	dir := t.TempDir()
-	sink := newChildSink(dir, todo.NewStore(), false, NewProgress(), nil)
+	sink := newChildSink(dir, NewProgress(), nil)
 	ctx := agent.ContextEstimate{Total: 123, Window: 456, System: 7, Tools: 8, Messages: 9}
 	sink.User("inspect")
 	sink.TurnAttemptStart(2, 3, ctx)
@@ -1700,7 +1700,7 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 
 func TestChildSinkFoldsPreflightMaintenanceIntoPromptUsage(t *testing.T) {
 	dir := t.TempDir()
-	sink := newChildSink(dir, todo.NewStore(), false, NewProgress(), nil)
+	sink := newChildSink(dir, NewProgress(), nil)
 	sink.addPreflightMaintenance("continuation_compaction", llm.Usage{InputTokens: 7, OutputTokens: 2}, true)
 	sink.PromptComplete(agent.PromptUsage{
 		Turns:       1,
@@ -1731,7 +1731,7 @@ func TestChildSinkRetainsFirstAppendError(t *testing.T) {
 	if err := os.WriteFile(path, []byte("file"), 0o644); err != nil {
 		t.Fatalf("write blocking file: %v", err)
 	}
-	sink := newChildSink(path, todo.NewStore(), false, NewProgress(), nil)
+	sink := newChildSink(path, NewProgress(), nil)
 	sink.User("first")
 	first := sink.appendError()
 	if first == nil {
@@ -1778,26 +1778,21 @@ func readDelegateChildEvents(t *testing.T, childDir string) []session.Event {
 	return events
 }
 
-func TestDelegateChildTodoStoreIsPrivate(t *testing.T) {
-	parentTodos := todo.NewStore()
+func TestDelegateChildWorkIsLinkedAndPrivate(t *testing.T) {
 	parentTools := &tools.Registry{}
-	parentTools.Register(todo.NewTool(parentTodos))
+	parentTools.Register(fakeChildTool{name: "read_file", out: "ok"})
 	fp := llmtest.New("fake",
-		llmtest.Step{
-			Events: []llm.StreamEvent{{
-				Kind:      llm.EventToolCallDone,
-				ToolID:    "todo1",
-				ToolName:  "update_todos",
-				ToolInput: json.RawMessage(`{"todos":[{"content":"child work","status":"in_progress"}]}`),
-			}},
-			Stop: llm.StopToolUse,
-		},
 		llmtest.Step{
 			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "done"}},
 			Stop:   llm.StopEndTurn,
 		},
 	)
 	sessionPath := filepath.Join(t.TempDir(), "session")
+	parentWork := workstate.NewStore(func() string { return sessionPath })
+	root, err := parentWork.NewWork("root objective", "host")
+	if err != nil {
+		t.Fatalf("NewWork: %v", err)
+	}
 	state := NewState(Runtime{
 		Provider:    fp,
 		Model:       "claude-opus-4-8",
@@ -1811,13 +1806,10 @@ func TestDelegateChildTodoStoreIsPrivate(t *testing.T) {
 			Registry: runtime.Registry,
 			Tools:    parentTools,
 		}, nil
-	}, Options{})
+	}, Options{WorkSnapshot: parentWork.Snapshot})
 
-	if _, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"use todos"}`)); err != nil {
+	if _, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"child work"}`)); err != nil {
 		t.Fatalf("RunMetered: %v", err)
-	}
-	if got := parentTodos.Snapshot(); len(got) != 0 {
-		t.Fatalf("parent todo store was modified: %+v", got)
 	}
 	children, err := os.ReadDir(filepath.Join(sessionPath, "children"))
 	if err != nil {
@@ -1827,43 +1819,11 @@ func TestDelegateChildTodoStoreIsPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load child session: %v", err)
 	}
-	if len(childSession.Todos) != 1 || childSession.Todos[0].Content != "child work" {
-		t.Fatalf("child todos = %+v", childSession.Todos)
+	if childSession.Work == nil || childSession.Work.ParentWorkID != root.WorkID || childSession.Work.ParentRevisionID != root.RevisionID || childSession.Work.Objective != "child work" {
+		t.Fatalf("child work = %+v, root = %+v", childSession.Work, root)
 	}
-	if len(fp.Requests) < 2 {
-		t.Fatalf("provider requests = %d, want at least 2", len(fp.Requests))
-	}
-	if got := strings.Join(fp.Requests[1].RequestContext, "\n"); strings.Contains(got, "[todo]") {
-		t.Fatalf("second child request duplicated transcript-backed todo context: %q", got)
-	}
-}
-
-func TestChildSinkAdvancesTodoStaleReminder(t *testing.T) {
-	store := todo.NewStore()
-	store.Replace([]todo.Item{{Content: "implement", Status: todo.StatusInProgress}})
-	sink := newChildSink("", store, true, NewProgress(), nil)
-
-	for request := 1; request < 12; request++ {
-		if got := sink.RequestContext(); len(got) != 0 {
-			t.Fatalf("request %d context = %q, want none", request, got)
-		}
-		sink.TurnAttemptStart(request, 1, agent.ContextEstimate{})
-		sink.TurnAttemptStart(request, 2, agent.ContextEstimate{})
-	}
-	for peek := range 2 {
-		if got := strings.Join(sink.PeekRequestContext(), "\n"); !strings.Contains(got, "[~] implement") {
-			t.Fatalf("peek %d context = %q, want due reminder", peek+1, got)
-		}
-	}
-	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[~] implement") {
-		t.Fatalf("request 12 context = %q, want stale todo reminder", got)
-	}
-	sink.TurnAttemptStart(12, 1, agent.ContextEstimate{})
-
-	store.Replace([]todo.Item{{Content: "test", Status: todo.StatusPending}})
-	sink.TranscriptRewritten()
-	if got := strings.Join(sink.RequestContext(), "\n"); !strings.Contains(got, "[ ] test") {
-		t.Fatalf("post-rewrite context = %q, want immediate child recovery reminder", got)
+	if got := parentWork.Snapshot(); got.WorkID != root.WorkID || got.RevisionID != root.RevisionID {
+		t.Fatalf("parent work was modified: %+v", got)
 	}
 }
 
@@ -1913,7 +1873,7 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 	parent := Runtime{Depth: 0, MaxPromptTokens: 1234, MaxPromptCostUSD: 2.5, SessionPath: "session", CacheAffinityID: "parent-cache"}
 	launch := Launch{Tools: catalog, System: childSystemPrompt("root"), Agent: "explore"}
 
-	childTools, err := runner.childTools(parent, launch, "child-1", todo.NewStore(), []string{"read_file", "delegate"})
+	childTools, err := runner.childTools(parent, launch, "child-1", []string{"read_file", "delegate"})
 	if err != nil {
 		t.Fatalf("childTools: %v", err)
 	}
@@ -1939,7 +1899,7 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 		t.Fatalf("child runtime cache affinity = %q, want %q", snapshot.CacheAffinityID, want)
 	}
 
-	continuedTools, err := runner.childToolsWithCacheAffinity(parent, launch, "child-2", "retained-cache", todo.NewStore(), []string{"read_file", "delegate"})
+	continuedTools, err := runner.childToolsWithCacheAffinity(parent, launch, "child-2", "retained-cache", []string{"read_file", "delegate"})
 	if err != nil {
 		t.Fatalf("continued childTools: %v", err)
 	}
@@ -2196,7 +2156,7 @@ func TestProgressSnapshotZeroAndFinished(t *testing.T) {
 		t.Fatalf("fresh progress = %+v, want zero and not finished", got)
 	}
 
-	s := newChildSink("", todo.NewStore(), false, p, nil)
+	s := newChildSink("", p, nil)
 	ctx := agent.ContextEstimate{Total: 1000, Window: 200000}
 	s.TurnAttemptStart(3, 1, ctx)
 	if got := p.Snapshot(); got.Turn != 3 || got.Attempt != 1 || got.Context.Total != 1000 || got.Context.Window != 200000 {

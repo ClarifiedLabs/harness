@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"harness/internal/agent"
+	"harness/internal/handoff"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
-	"harness/internal/plan"
 	"harness/internal/runstream"
 	"harness/internal/sessionrec"
 )
@@ -82,7 +82,7 @@ type jsonActivePrompt struct {
 
 type jsonPendingApproval struct {
 	id  string
-	req plan.HandoffRequest
+	req handoff.Request
 }
 
 func (d *jsonDriver) run() int {
@@ -461,6 +461,13 @@ func (d *jsonDriver) startPrompt(req jsonPromptRequest) {
 		images = append(images, loaded...)
 		contentImages = imageBlocks(images)
 	}
+	if req.cause == "" {
+		if err := app.ensureWork(text); err != nil {
+			d.w.InputError(req.id, "work admission failed: "+err.Error())
+			d.startNextQueued()
+			return
+		}
+	}
 	d.w.PromptStart(runstream.PromptStart{
 		Prompt:    app.PromptNumber + 1,
 		ID:        req.id,
@@ -580,6 +587,8 @@ func (d *jsonDriver) finishPrompt(err error) {
 	}
 	if len(recovered) > 0 {
 		d.queued = append(recovered, d.queued...)
+	} else {
+		app.completeImplicitWork(err, active.sink.FinalText(), active.cause != "")
 	}
 
 	app.saveOrWarn(app.SessionPath)
@@ -628,14 +637,21 @@ func (d *jsonDriver) boundary() bool {
 			d.approvalSeq++
 			id := fmt.Sprintf("h%d", d.approvalSeq)
 			d.approval = &jsonPendingApproval{id: id, req: req}
-			d.w.RequestApproval(runstream.ApprovalRequest{
+			approval := runstream.ApprovalRequest{
 				ID:       id,
 				Kind:     runstream.ApprovalKindImplementationHandoff,
 				Brief:    req.Brief,
-				PlanPath: req.PlanPath,
+				PlanPath: req.ArtifactPath,
 				Agent:    req.Agent,
 				Model:    req.Model,
-			})
+			}
+			if app.Work != nil {
+				if work := app.Work.Snapshot(); work != nil {
+					approval.WorkID = work.WorkID
+					approval.RevisionID = work.RevisionID
+				}
+			}
+			d.w.RequestApproval(approval)
 			return false // queued prompts wait for the approval decision
 		}
 	}

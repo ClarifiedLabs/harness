@@ -331,7 +331,7 @@ func TestRecorderHookDiagnosticIsStructuredAndDisplayless(t *testing.T) {
 func TestRecorderTurnProgressIsStructuredAndDisplayless(t *testing.T) {
 	dir := t.TempDir()
 	rec := New(Config{Dir: dir, Prompt: 2})
-	rec.TurnProgress(agent.TurnProgress{
+	rec.TurnProgressForWork(agent.TurnProgress{
 		Turn:                    4,
 		ToolCalls:               1,
 		Operations:              3,
@@ -344,7 +344,7 @@ func TestRecorderTurnProgressIsStructuredAndDisplayless(t *testing.T) {
 		CommandRepeatStreak:     4,
 		InspectionNoProgressRun: 12,
 		SteerReason:             agent.GuardSteerPhaseTransition,
-	})
+	}, "work-1", "revision-2", "change")
 	events := readEvents(t, dir)
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
@@ -352,6 +352,9 @@ func TestRecorderTurnProgressIsStructuredAndDisplayless(t *testing.T) {
 	event := events[0]
 	if event.Type != session.EventTurnProgress || event.Prompt != 2 || event.Turn != 4 || event.Display != "" || event.TurnProgress == nil {
 		t.Fatalf("turn progress event = %+v", event)
+	}
+	if event.WorkID != "work-1" || event.WorkRevisionID != "revision-2" || event.WorkStepID != "change" {
+		t.Fatalf("work attribution = %+v", event)
 	}
 	if event.TurnProgress.Activity["inspect"] != 3 || event.TurnProgress.CommandRepeatStreak != 4 || event.TurnProgress.InspectionNoProgressRun != 12 || event.TurnProgress.SteerReason != "phase_transition" {
 		t.Fatalf("turn progress snapshot = %+v", event.TurnProgress)

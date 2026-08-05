@@ -15,9 +15,8 @@ import (
 	"harness/internal/goal"
 	"harness/internal/llm"
 	"harness/internal/markdown"
-	"harness/internal/plan"
 	"harness/internal/term/highlight"
-	"harness/internal/todo"
+	"harness/internal/workstate"
 )
 
 const sessionOnePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
@@ -274,7 +273,7 @@ func sampleSession() Session {
 	}
 }
 
-func TestLoadAndReplayRejectPreV5SessionSchema(t *testing.T) {
+func TestLoadAndReplayRejectPreV6SessionSchema(t *testing.T) {
 	dir := t.TempDir()
 	data, err := json.Marshal(Session{Version: 2, Messages: []llm.Message{}})
 	if err != nil {
@@ -287,20 +286,18 @@ func TestLoadAndReplayRejectPreV5SessionSchema(t *testing.T) {
 		t.Fatalf("AppendEvent: %v", err)
 	}
 
-	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 5)") {
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 6)") {
 		t.Fatalf("Load error = %v, want clear v2 rejection", err)
 	}
 	var replay strings.Builder
-	if err := Replay(dir, &replay, ReplayOptions{}); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 5)") {
+	if err := Replay(dir, &replay, ReplayOptions{}); err == nil || !strings.Contains(err.Error(), "unsupported schema version 2 (want 6)") {
 		t.Fatalf("Replay error = %v, want clear v2 rejection", err)
 	}
 }
 
-func TestSessionRoundTripsPlansAndUsageByModel(t *testing.T) {
+func TestSessionRoundTripsWorkAndUsageByModel(t *testing.T) {
 	s := sampleSession()
-	s.Plans = []plan.Plan{
-		{Title: "First plan", Body: "do the thing", Path: "/sess/plans/0001-first-plan.plan.md"},
-	}
+	s.Work = &workstate.State{WorkID: "work-1", RevisionID: "rev-1", Objective: "do the thing", Lifecycle: workstate.LifecycleActive, PlanState: workstate.PlanImplicit, CreatedAt: s.Created, UpdatedAt: s.Updated}
 	s.UsageByModel = map[string]UsageTotals{
 		"anthropic/claude-opus-4-8": {Usage: llm.Usage{InputTokens: 1200, OutputTokens: 340}, CostUSD: 0.0123},
 		"openai/gpt-5.5":            {Usage: llm.Usage{InputTokens: 30}, CostUSD: 0.0007},
@@ -313,8 +310,8 @@ func TestSessionRoundTripsPlansAndUsageByModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(got.Plans) != 1 || got.Plans[0].Title != "First plan" || got.Plans[0].Path == "" {
-		t.Errorf("plans not round-tripped: %+v", got.Plans)
+	if got.Work == nil || got.Work.WorkID != "work-1" || got.Work.Objective != "do the thing" {
+		t.Errorf("work not round-tripped: %+v", got.Work)
 	}
 	if len(got.UsageByModel) != 2 {
 		t.Fatalf("usage_by_model not round-tripped: %+v", got.UsageByModel)
@@ -727,13 +724,9 @@ func TestSaveLoadPreservesAgent(t *testing.T) {
 	}
 }
 
-func TestSaveLoadPreservesTodos(t *testing.T) {
+func TestSaveLoadPreservesWork(t *testing.T) {
 	s := sampleSession()
-	s.Todos = []todo.Item{
-		{Content: "explore", Status: todo.StatusCompleted},
-		{Content: "implement", Status: todo.StatusInProgress},
-		{Content: "test", Status: todo.StatusPending},
-	}
+	s.Work = &workstate.State{WorkID: "work-1", RevisionID: "rev-1", Objective: "implement", Lifecycle: workstate.LifecycleActive, PlanState: workstate.PlanImplicit, CreatedAt: s.Created, UpdatedAt: s.Updated}
 	path := filepath.Join(t.TempDir(), "session")
 	if err := s.Save(path); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -742,8 +735,8 @@ func TestSaveLoadPreservesTodos(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !reflect.DeepEqual(got.Todos, s.Todos) {
-		t.Errorf("Todos = %+v, want %+v", got.Todos, s.Todos)
+	if !reflect.DeepEqual(got.Work, s.Work) {
+		t.Errorf("Work = %+v, want %+v", got.Work, s.Work)
 	}
 }
 
@@ -1672,7 +1665,7 @@ func TestFollowValidatesMetadataAndAppearingSchema(t *testing.T) {
 		}
 		var out strings.Builder
 		err := followWithWaiter(context.Background(), dir, &out, ReplayOptions{}, wait)
-		if err == nil || !strings.Contains(err.Error(), "unsupported schema version 3 (want 5)") {
+		if err == nil || !strings.Contains(err.Error(), "unsupported schema version 3 (want 6)") {
 			t.Fatalf("Follow error = %v, want appearing schema rejection", err)
 		}
 	})
@@ -1874,8 +1867,7 @@ func TestLoadRecoversActiveToolDispatchWithoutReexecutingTool(t *testing.T) {
 				ToolInput: json.RawMessage(`{"path":"x"}`),
 			}}},
 		},
-		Todos: []todo.Item{{Content: "change it", Status: "in_progress"}},
-		Plans: []plan.Plan{{Title: "Plan 1", Body: "Do it", Path: "plans/1.md"}},
+		Work:  &workstate.State{WorkID: "work-1", RevisionID: "rev-1", Objective: "change it", Lifecycle: workstate.LifecycleActive, PlanState: workstate.PlanImplicit, CreatedAt: at, UpdatedAt: at},
 		Usage: UsageTotals{Usage: llm.Usage{InputTokens: 11, OutputTokens: 3}},
 	}
 	digest, err := llm.FingerprintMessages(state.Messages)
@@ -1907,8 +1899,8 @@ func TestLoadRecoversActiveToolDispatchWithoutReexecutingTool(t *testing.T) {
 	if recovered.ResponseState == nil || recovered.ResponseState.PreviousResponseID != "resp-1" || recovered.ResponseState.AnchorMessages != 2 {
 		t.Fatalf("response state = %+v", recovered.ResponseState)
 	}
-	if len(recovered.Todos) != 1 || len(recovered.Plans) != 1 || recovered.Usage.InputTokens != 11 {
-		t.Fatalf("recovered durable state = todos %+v plans %+v usage %+v", recovered.Todos, recovered.Plans, recovered.Usage)
+	if recovered.Work == nil || recovered.Work.WorkID != "work-1" || recovered.Usage.InputTokens != 11 {
+		t.Fatalf("recovered durable state = work %+v usage %+v", recovered.Work, recovered.Usage)
 	}
 
 	if err := recovered.SaveConsolidated(dir); err != nil {

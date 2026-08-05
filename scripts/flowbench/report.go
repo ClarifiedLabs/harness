@@ -285,8 +285,8 @@ func primaryValue(c benchmarkCase, m metrics) int {
 		return m.RGToReadTransitions
 	case "command_to_command_transitions":
 		return m.CommandToCommandTransitions
-	case "avoidable_todo_only_turns":
-		return m.AvoidableTodoOnlyTurns
+	case "avoidable_work_only_turns":
+		return m.AvoidableWorkOnlyTurns
 	case "git_calls":
 		return m.GitCalls
 	case "background_polls":
@@ -311,8 +311,8 @@ func adopted(name string, m metrics) bool {
 		return m.UsedSearch
 	case "command_steps":
 		return m.UsedCommandSteps
-	case "todo_coissue":
-		return m.ToolCalls["update_todos"] > 0 && m.AvoidableTodoOnlyTurns == 0
+	case "work_coissue":
+		return m.ToolCalls["update_work"] > 0 && m.AvoidableWorkOnlyTurns == 0
 	case "git_workspace_summary":
 		return m.UsedWorkspaceSummary
 	case "background_wait":

@@ -22,10 +22,10 @@ import (
 	"harness/internal/agent"
 	"harness/internal/background"
 	"harness/internal/goal"
+	"harness/internal/handoff"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
-	"harness/internal/plan"
 	"harness/internal/reasoningprofile"
 	"harness/internal/replprompt"
 	"harness/internal/runstream"
@@ -33,9 +33,8 @@ import (
 	"harness/internal/sessionrec"
 	"harness/internal/skills"
 	"harness/internal/term"
-	"harness/internal/todo"
 	"harness/internal/tools"
-	"harness/prompts"
+	"harness/internal/workstate"
 )
 
 const (
@@ -174,19 +173,12 @@ type App struct {
 	// nil disables the hook (one-shot mode and tests leave it nil).
 	RefreshMCP func(ctx context.Context, agentName string) (*tools.Registry, string)
 
-	// Todos holds the model's current todo list (the update_todos tool's store),
-	// persisted in state.json and reset on /clear. nil disables persistence.
-	Todos *todo.Store
+	workPromptStatusBeforeUsage       bool
+	workPromptStatusBeforeUsagePrompt int
 
-	// The REPL sink can print the prompt todo status immediately before the
-	// per-prompt usage line so usage is the last status line before the next prompt.
-	// These fields let the idle prompt avoid printing that same todo block again.
-	todoPromptStatusBeforeUsage       bool
-	todoPromptStatusBeforeUsagePrompt int
-
-	// Plans holds the recorded plans (the record_plan tool's store), persisted
-	// in state.json and reset on /clear. nil disables persistence.
-	Plans *plan.Store
+	// Work is the canonical objective, plan, execution, evidence, and
+	// verification state. Human plan and progress displays are projections of it.
+	Work *workstate.Store
 	// Goal holds the /goal command's session state, persisted in state.json and
 	// reset on /clear. nil disables persistence and the autonomous continuation
 	// loop.
@@ -200,14 +192,9 @@ type App struct {
 	// WorkflowStatusFunc optionally exposes authoritative bounded workflow state
 	// supplied by an embedding orchestrator. Harness does not infer it from text.
 	WorkflowStatusFunc func() agent.WorkflowStatus
-	// The REPL prints the latest recorded plan's path after record_plan and again
-	// before the per-prompt usage line (mirroring the todo status). These fields
-	// let the idle prompt avoid printing that same plan line again.
-	planPromptStatusBeforeUsage       bool
-	planPromptStatusBeforeUsagePrompt int
 	// Handoff carries a pending plan->implementation handoff requested by the
 	// request_implementation tool, consumed at the prompt boundary. nil disables.
-	Handoff *plan.Pending
+	Handoff *handoff.Pending
 	// HandoffAgent is the default agent a handoff switches to when the request
 	// names none. Empty falls back to the built-in default agent.
 	HandoffAgent string
@@ -349,6 +336,8 @@ const helpText = `commands:
   /mode [name]     alias for /agent
   /plan            alias for /agent plan
   /auto            alias for /agent auto
+  /work [summary|show|new|abandon]
+                    inspect or control the canonical work state
   /handoff [-a agent] [-m model] [message]
                     hand off the recorded plan with optional implementation guidance
   /background [id] list background jobs, inspect one, or cancel with "cancel <id>"
@@ -1486,11 +1475,8 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		if !promptPrinted {
 			prompt = renderPrompt()
 			app.pollBackgroundNotices()
-			if !app.todoPromptStatusPrintedBeforeUsageForPrompt(app.PromptNumber) {
-				app.printTodoPromptStatus()
-			}
-			if !app.planPromptStatusPrintedBeforeUsageForPrompt(app.PromptNumber) {
-				app.printPlanStatus(plan.DisplayCurrent)
+			if !app.workPromptStatusPrintedBeforeUsageForPrompt(app.PromptNumber) {
+				app.printWorkStatus(false)
 			}
 			if !usePromptEditor || plainPromptRead {
 				fmt.Fprint(app.Errw, prompt)
@@ -1734,7 +1720,7 @@ type replCommandResult struct {
 }
 
 const (
-	implementationStartPrompt          = "Begin implementing the recorded plan now."
+	implementationStartPrompt          = "Continue the active approved work now."
 	detachedBackgroundWaitCause        = "detached_background_wait"
 	detachedBackgroundWaitContinuation = "A detached `background_jobs` wait has resolved. Review its result in request context and continue the task."
 )
@@ -2501,6 +2487,8 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 			arg = "auto"
 		}
 		app.switchAgent(arg)
+	case "/work":
+		app.workCommand(arg)
 	case "/handoff":
 		if app.handoffCommand(arg, readCommandLine) {
 			return replCommandResult{prompt: implementationStartPrompt, resolveSkillMentions: true}
@@ -2555,8 +2543,27 @@ func (app *App) goalCommand(arg string) replCommandResult {
 			fmt.Fprintln(app.Errw, "[no active goal]")
 		}
 	case "resume":
-		if app.Goal.Snapshot() == nil {
+		goalState := app.Goal.Snapshot()
+		if goalState == nil {
 			fmt.Fprintln(app.Errw, "[no goal set]")
+		} else if goalState.Status == goal.StatusActive {
+			fmt.Fprintln(app.Errw, "[goal error: goal is already active]")
+		} else if app.Work == nil {
+			fmt.Fprintln(app.Errw, "[goal error: work state unavailable]")
+		} else if work := app.Work.Snapshot(); work == nil || work.WorkID != goalState.WorkID {
+			resumed, err := app.Work.NewWork(goalState.Objective, "user")
+			if err != nil {
+				fmt.Fprintf(app.Errw, "[goal error: %v]\n", err)
+			} else if err := app.Goal.Bind(resumed.WorkID, resumed.Objective); err != nil {
+				fmt.Fprintf(app.Errw, "[goal error: %v]\n", err)
+			} else {
+				fmt.Fprintln(app.Errw, "[goal resumed]")
+				app.saveOrWarn(app.SessionPath)
+				preview := app.Goal.ContinuationPreview(app.GoalMaxContinuations)
+				return replCommandResult{prompt: preview.Text, goalPrompt: true, goalRevision: preview.Revision}
+			}
+		} else if _, err := app.Work.Resume("user"); err != nil {
+			fmt.Fprintf(app.Errw, "[goal error: %v]\n", err)
 		} else if err := app.Goal.Resume(); err != nil {
 			fmt.Fprintf(app.Errw, "[goal error: %v]\n", err)
 		} else {
@@ -2569,7 +2576,16 @@ func (app *App) goalCommand(arg string) replCommandResult {
 		// Set a new objective. Exact-match subcommands above mean "/goal clear the
 		// backlog" sets an objective rather than clearing.
 		replaced := app.Goal.Snapshot() != nil
-		if err := app.Goal.Set(arg); err != nil {
+		if app.Work == nil {
+			fmt.Fprintln(app.Errw, "[goal error: work state unavailable]")
+			return replCommandResult{}
+		}
+		work, err := app.Work.NewWork(arg, "user")
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[goal error: %v]\n", err)
+			return replCommandResult{}
+		}
+		if err := app.Goal.Bind(work.WorkID, work.Objective); err != nil {
 			fmt.Fprintf(app.Errw, "[goal error: %v]\n", err)
 			return replCommandResult{}
 		}
@@ -2599,10 +2615,15 @@ func (app *App) showGoalStatus() {
 	if elapsed < 0 {
 		elapsed = 0
 	}
-	fmt.Fprintf(app.Errw, "goal: %s\nobjective: %s\ncontinuations: %s\nelapsed: %s\n", state.Status, state.Objective, continuations, elapsed)
+	fmt.Fprintf(app.Errw, "goal: %s\nwork: %s\nobjective: %s\ncontinuations: %s\nelapsed: %s\n", state.Status, state.WorkID, state.Objective, continuations, elapsed)
 }
 
 func (app *App) goalOnPromptEnd(ctx context.Context, err error, revision uint64, ownedActiveGoal bool) {
+	if app.Goal != nil && app.Work != nil {
+		if work := app.Work.Snapshot(); work != nil {
+			app.Goal.SyncWork(work.WorkID, work.Lifecycle)
+		}
+	}
 	app.lastPromptInterrupted = errors.Is(err, context.Canceled)
 	if !app.lastPromptInterrupted || app.Goal == nil {
 		return
@@ -2671,7 +2692,55 @@ func (app *App) pauseGoalAtContinuationCap() bool {
 var knownCommands = []string{
 	"/help", "/exit", "/quit", "/clear", "/compact", "/tree", "/fork", "/clone", "/context", "/usage",
 	"/max-turns", "/tools", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
-	"/agent", "/mode", "/plan", "/auto", "/handoff", "/background", "/goal", "/skills", "/vi",
+	"/agent", "/mode", "/plan", "/auto", "/work", "/handoff", "/background", "/goal", "/skills", "/vi",
+}
+
+func (app *App) workCommand(arg string) {
+	if app.Work == nil {
+		fmt.Fprintln(app.Errw, "[work state unavailable]")
+		return
+	}
+	command, value := commandFields(strings.TrimSpace(arg))
+	if command == "" {
+		command = "summary"
+	}
+	switch command {
+	case "summary":
+		fmt.Fprintln(app.Errw, workstate.RenderStatus(app.Work.Snapshot()))
+	case "show":
+		state := app.Work.Snapshot()
+		if state == nil {
+			fmt.Fprintln(app.Errw, "[no active work]")
+			return
+		}
+		fmt.Fprint(app.Errw, workstate.RenderPlan(*state))
+	case "new":
+		if strings.TrimSpace(value) == "" {
+			fmt.Fprintln(app.Errw, "usage: /work new <objective>")
+			return
+		}
+		state, err := app.Work.NewWork(value, "user")
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[work new failed: %v]\n", err)
+			return
+		}
+		fmt.Fprintln(app.Errw, workstate.RenderStatus(state))
+		app.saveOrWarn(app.SessionPath)
+	case "abandon":
+		reason := strings.TrimSpace(value)
+		if reason == "" {
+			reason = "abandoned by user"
+		}
+		state, err := app.Work.Abandon(reason, "user")
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[work abandon failed: %v]\n", err)
+			return
+		}
+		fmt.Fprintln(app.Errw, workstate.RenderStatus(state))
+		app.saveOrWarn(app.SessionPath)
+	default:
+		fmt.Fprintln(app.Errw, "usage: /work [summary|show|new <objective>|abandon [reason]]")
+	}
 }
 
 // suggestCommand returns the closest known command to cmd, or "" when nothing is
@@ -2884,11 +2953,7 @@ func writeContextFile(path string, data []byte) error {
 
 func (app *App) contextRequest() llm.Request {
 	out := app.promptHookContext(nil)
-	// Render the full todo list, not the changed-only reminder: /context answers
-	// "what context does the model have" for the user, and the unchanged list is
-	// still model context via the transcript's update_todos result. Going through
-	// todoRequestContext here would show nothing after the first real injection.
-	if ctx := app.todoContextDisplay(); ctx != "" {
+	if ctx := app.workRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
 	if ctx := app.goalRequestContext(); ctx != "" {
@@ -3721,20 +3786,20 @@ func splitHandoffCommandToken(s string) (token, rest string) {
 
 // prepareHandoff assembles a handoff request from any pending
 // request_implementation tool request plus the given /handoff options: it
-// fills in the plan path, generates the brief when needed, and resolves the
-// target agent. Failures are reported on app.Errw. handoffCommand (TTY
+// validates the ready WorkState and resolves the target agent. Failures are
+// reported on app.Errw. handoffCommand (TTY
 // approval) and the JSON run driver (protocol approval) share it.
-func (app *App) prepareHandoff(arg string) (plan.HandoffRequest, bool) {
+func (app *App) prepareHandoff(arg string) (handoff.Request, bool) {
 	if app.SwitchAgent == nil {
 		fmt.Fprintln(app.Errw, "[handoff unavailable]")
-		return plan.HandoffRequest{}, false
+		return handoff.Request{}, false
 	}
 	opts, err := parseHandoffCommandOptions(arg)
 	if err != nil {
 		fmt.Fprintf(app.Errw, "[handoff: %v; usage: %s]\n", err, handoffCommandUsage)
-		return plan.HandoffRequest{}, false
+		return handoff.Request{}, false
 	}
-	var req plan.HandoffRequest
+	var req handoff.Request
 	if app.Handoff != nil {
 		if pending, ok := app.Handoff.Take(); ok {
 			req = pending
@@ -3749,33 +3814,17 @@ func (app *App) prepareHandoff(arg string) (plan.HandoffRequest, bool) {
 	if opts.Message != "" {
 		req.Message = opts.Message
 	}
-	if req.PlanPath == "" && app.Plans != nil {
-		if latest, ok := app.Plans.Latest(); ok {
-			req.PlanPath = latest.Path
-		}
+	if app.Work == nil {
+		fmt.Fprintln(app.Errw, "[handoff: update_work must record a ready plan first]")
+		return handoff.Request{}, false
 	}
-	if req.PlanPath == "" {
-		fmt.Fprintln(app.Errw, "[handoff: no recorded plan; record one with record_plan first]")
-		return plan.HandoffRequest{}, false
+	work := app.Work.Snapshot()
+	if work == nil || work.PlanState != workstate.PlanReady {
+		fmt.Fprintln(app.Errw, "[handoff: update_work must record a ready plan first]")
+		return handoff.Request{}, false
 	}
+	req.ArtifactPath = work.ArtifactPath
 	req.Brief = strings.TrimSpace(req.Brief)
-	if req.Brief == "" {
-		if app.Renderer != nil {
-			app.Renderer.HandoffSummaryStart()
-		}
-		brief, usage, err := app.Agent.GenerateSummary(context.Background(), prompts.HandoffSummary())
-		if app.Renderer != nil {
-			app.Renderer.HandoffSummaryComplete()
-		}
-		if usage != (llm.Usage{}) {
-			app.addMaintenanceUsage("handoff_summary", usage)
-		}
-		if err != nil {
-			fmt.Fprintf(app.Errw, "[handoff: could not generate brief: %v]\n", err)
-			return plan.HandoffRequest{}, false
-		}
-		req.Brief = strings.TrimSpace(brief)
-	}
 	target := req.Agent
 	if target == "" {
 		target = app.HandoffAgent
@@ -3797,17 +3846,24 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 	if !ok {
 		return false
 	}
-	displayBrief := req.Brief
+	displayBrief := workstate.RenderPlan(*app.Work.Snapshot())
 	if app.Renderer != nil {
 		displayBrief = app.Renderer.FormatMarkdown(displayBrief)
 	}
-	fmt.Fprintf(app.Errw, "Handoff brief:\n%s\n", displayBrief)
+	fmt.Fprintf(app.Errw, "Implementation plan:\n%s\n", displayBrief)
+	if req.Brief != "" {
+		displayContext := req.Brief
+		if app.Renderer != nil {
+			displayContext = app.Renderer.FormatMarkdown(displayContext)
+		}
+		fmt.Fprintf(app.Errw, "Supplementary context:\n%s\n", displayContext)
+	}
 
 	approval := fmt.Sprintf("Hand off to %q", req.Agent)
 	if req.Model != "" {
 		approval += fmt.Sprintf(" using model %q", req.Model)
 	}
-	input, err := readLine(fmt.Sprintf("%s to implement %s? (y/N): ", approval, req.PlanPath))
+	input, err := readLine(fmt.Sprintf("%s to implement %s? (y/N): ", approval, req.ArtifactPath))
 	if err != nil {
 		fmt.Fprintf(app.Errw, "[handoff cancelled: %v]\n", err)
 		return false
@@ -3823,11 +3879,10 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 
 // handoffToImplementation switches the session to the implementation agent with
 // a clean context: it switches agent (and model when requested), archives the
-// planning transcript (recoverable), then reseeds the transcript with a pointer
-// to the recorded plan plus the brief. The implementation agent reads the plan
-// as its task spec. The switch is attempted before any destructive step so a
+// planning transcript (recoverable), activates the approved first step, then
+// reseeds the transcript with its compact capsule. The switch is attempted before any destructive step so a
 // failed switch leaves the session — and the recorded plan — untouched.
-func (app *App) handoffToImplementation(req plan.HandoffRequest) bool {
+func (app *App) handoffToImplementation(req handoff.Request) bool {
 	if err := app.applyAgentSwitch(req.Agent); err != nil {
 		fmt.Fprintf(app.Errw, "[handoff failed: %v]\n", err)
 		return false
@@ -3838,17 +3893,32 @@ func (app *App) handoffToImplementation(req plan.HandoffRequest) bool {
 		}
 	}
 	if app.SessionPath != "" {
+		summary := "implementation handoff"
+		if app.Work != nil {
+			summary = workstate.RenderStatus(app.Work.Snapshot())
+		}
 		if _, err := session.SaveCompaction(app.SessionPath, session.Compaction{
 			Time:     app.clock()(),
-			Summary:  req.Brief,
+			Summary:  summary,
 			Messages: app.Agent.Transcript(),
 		}); err != nil {
 			fmt.Fprintf(app.Errw, "[handoff: archive failed: %v]\n", err)
 			return false
 		}
 	}
-	seed := fmt.Sprintf("=== Implementation handoff ===\nYour task is specified in the recorded plan — read it now:\n%s\n\nContext from planning (how it was produced and this environment):\n%s",
-		req.PlanPath, req.Brief)
+	if app.Work == nil {
+		fmt.Fprintln(app.Errw, "[handoff: work state unavailable]")
+		return false
+	}
+	work, err := app.Work.ActivateForHandoff("user")
+	if err != nil {
+		fmt.Fprintf(app.Errw, "[handoff failed: %v]\n", err)
+		return false
+	}
+	seed := "=== Implementation handoff ===\nContinue the approved work from this active capsule; do not reread or recreate the plan.\n\n" + workstate.RequestContext(work)
+	if req.Brief != "" {
+		seed += "\n\nSupplementary planning context:\n" + req.Brief
+	}
 	if req.Message != "" {
 		seed += "\n\nAdditional input from the user:\n" + req.Message
 	}
@@ -3867,11 +3937,8 @@ func (app *App) handoffToImplementation(req plan.HandoffRequest) bool {
 	}
 	app.Agent.SetTranscript(seedMessages)
 	app.Agent.SetResponseState(nil)
-	if app.Todos != nil {
-		app.Todos.Replace(nil) // the implementation agent builds its own task list
-	}
 	app.saveOrWarn(app.SessionPath)
-	fmt.Fprintf(app.Errw, "[handed off to %s; implementing from a clean context seeded by %s]\n", req.Agent, req.PlanPath)
+	fmt.Fprintf(app.Errw, "[handed off to %s; implementing active work step %s from a clean context]\n", req.Agent, work.ActiveStepID)
 	return true
 }
 
@@ -3912,11 +3979,8 @@ func (app *App) clear() {
 	}
 	app.Agent.SetTranscript(nil)
 	app.Agent.ResetSessionIDs()
-	if app.Todos != nil {
-		app.Todos.Replace(nil)
-	}
-	if app.Plans != nil {
-		app.Plans.Replace(nil)
+	if app.Work != nil {
+		app.Work.Clear()
 	}
 	if app.Goal != nil {
 		app.Goal.Clear()
@@ -3927,8 +3991,8 @@ func (app *App) clear() {
 	cwd, _ := os.Getwd()
 	app.SessionTree = session.NewTree(app.Created, cwd, "", "")
 	app.PromptNumber = 0
-	app.todoPromptStatusBeforeUsage = false
-	app.todoPromptStatusBeforeUsagePrompt = 0
+	app.workPromptStatusBeforeUsage = false
+	app.workPromptStatusBeforeUsagePrompt = 0
 	app.SessionPath = session.DefaultPath(app.StateDir, app.Created)
 	if app.OnSessionPathChanged != nil {
 		app.OnSessionPathChanged(app.SessionPath)
@@ -3981,6 +4045,10 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 	var admission agent.PromptAdmission
 	begin := func() bool {
 		if preflightCtx.Err() != nil {
+			return false
+		}
+		if err := app.ensureWork(prepared.prompt); err != nil {
+			fmt.Fprintf(app.Errw, "[work admission failed: %v]\n", err)
 			return false
 		}
 		admission = app.Agent.AdmitPromptContent(prepared.prompt, imageBlocks(prepared.images))
@@ -4044,11 +4112,39 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, app.promptHookContext(prepared.promptContext), promptID, sink)
 		sink.FlushEvents()
 		app.goalOnPromptEnd(ctx, err, goalRevision, goalActive)
+		app.completeImplicitWork(err, sink.FinalText(), goalActive)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 		}
 		app.saveOrWarn(app.SessionPath)
 	}, true
+}
+
+func (app *App) completeImplicitWork(runErr error, summary string, autonomous bool) {
+	if runErr != nil || autonomous || app.Work == nil {
+		return
+	}
+	if app.Background != nil && app.Background.PendingPromptWork() {
+		return
+	}
+	if _, err := app.Work.AutoCompleteImplicit(summary); err != nil {
+		fmt.Fprintf(app.Errw, "[work completion failed: %v]\n", err)
+	}
+}
+
+// ensureWork materializes the lightweight implicit root for a newly admitted
+// task. Follow-up prompts steer the nonterminal lineage in place; a prompt
+// after completion/abandonment starts a fresh work item.
+func (app *App) ensureWork(objective string) error {
+	if app.Work == nil {
+		return nil
+	}
+	current := app.Work.Snapshot()
+	if current != nil && current.Lifecycle != workstate.LifecycleCompleted && current.Lifecycle != workstate.LifecycleAbandoned {
+		return nil
+	}
+	_, err := app.Work.NewWork(objective, "user")
+	return err
 }
 
 // prepareDetachedWaitContinuation admits the small host-created continuation
@@ -4429,6 +4525,10 @@ func (app *App) sessionSnapshot(current *agent.PromptUsage) (session.Session, er
 	if err := app.ensureSessionTree(); err != nil {
 		return session.Session{}, err
 	}
+	work := app.workSnapshot()
+	if work != nil {
+		app.SessionTree.SetWorkRevisionID(work.RevisionID)
+	}
 	usage := app.usage
 	var usageByModel map[string]session.UsageTotals
 	if len(app.usageByModel) > 0 {
@@ -4468,8 +4568,7 @@ func (app *App) sessionSnapshot(current *agent.PromptUsage) (session.Session, er
 		Messages:        app.Agent.Transcript(),
 		Tree:            app.SessionTree,
 		ResponseState:   app.Agent.ResponseState(),
-		Todos:           app.todoSnapshot(),
-		Plans:           app.planSnapshot(),
+		Work:            work,
 		Goal:            app.goalSnapshot(),
 		Usage:           usage,
 		UsageByModel:    usageByModel,
@@ -4498,30 +4597,14 @@ func (app *App) PrepareCompaction(before []llm.Message, olderCount int, summary,
 	if err := app.SessionTree.PrepareCompaction(before, olderCount, summary, archiveRef, tokensBefore, focus, readFiles, modifiedFiles); err != nil {
 		return err
 	}
-	// Compaction rewrites the transcript and may drop the raw update_todos
-	// result, so re-inject the todo reminder on the next request.
-	if app.Todos != nil {
-		app.Todos.RequireRequestContext()
-	}
 	return nil
 }
 
-// planSnapshot returns the recorded plans for persistence, or nil when the plan
-// store is not wired (one-shot mode and tests leave it nil).
-func (app *App) planSnapshot() []plan.Plan {
-	if app.Plans == nil {
+func (app *App) workSnapshot() *workstate.State {
+	if app.Work == nil {
 		return nil
 	}
-	return app.Plans.Snapshot()
-}
-
-// todoSnapshot returns the current todo list for persistence, or nil when the
-// todo store is not wired (one-shot mode and tests leave it nil).
-func (app *App) todoSnapshot() []todo.Item {
-	if app.Todos == nil {
-		return nil
-	}
-	return app.Todos.Snapshot()
+	return app.Work.Snapshot()
 }
 
 // goalSnapshot returns the current goal for persistence, or nil when the goal
@@ -4631,11 +4714,18 @@ func (app *App) promptHookContext(promptContext []string) []string {
 
 func (app *App) requestContext(promptContext []string) []string {
 	out := app.promptHookContext(promptContext)
-	if ctx := app.todoRequestContext(); ctx != "" {
+	if ctx := app.workRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
 	out = append(out, app.backgroundRequestContext(nil)...)
 	return out
+}
+
+func (app *App) workRequestContext() string {
+	if app.Work == nil || !app.agentHasTool("update_work") {
+		return ""
+	}
+	return workstate.RequestContext(app.Work.Snapshot())
 }
 
 func (app *App) backgroundRequestContext(archiver agent.ToolResultArchiver) []string {
@@ -4659,82 +4749,38 @@ func (app *App) pollBackgroundNotices() {
 	}
 }
 
-func (app *App) printTodoPromptStatus() bool {
-	return app.printTodoStatus(false)
-}
-
-func (app *App) printTodoUpdateStatus() bool {
-	return app.printTodoStatus(true)
-}
-
-func (app *App) printTodoStatus(includeEmpty bool) bool {
-	if app.Todos == nil || !app.agentHasTool("update_todos") {
+func (app *App) printWorkStatus(includeImplicit bool) bool {
+	if app.Work == nil || !app.agentHasTool("update_work") {
 		return false
 	}
-	items := app.Todos.Snapshot()
-	if len(items) == 0 && !includeEmpty {
+	state := app.Work.Snapshot()
+	if state == nil {
 		return false
 	}
-	fmt.Fprintln(app.Errw, todo.Render(items))
-	return true
-}
-
-func (app *App) markTodoPromptStatusPrintedBeforeUsage(turn int) {
-	app.todoPromptStatusBeforeUsage = true
-	app.todoPromptStatusBeforeUsagePrompt = turn
-}
-
-func (app *App) todoPromptStatusPrintedBeforeUsageForPrompt(turn int) bool {
-	return app.todoPromptStatusBeforeUsage && app.todoPromptStatusBeforeUsagePrompt == turn
-}
-
-// printPlanStatus prints a one-line pointer to the most recently recorded plan's
-// file (mirroring the todo status). It prints only when the visible agent has
-// record_plan and a plan with a path has been recorded, so the user always knows
-// where the plan was written without the model having to say so. It is
-// display-only and never part of the model's tool result or context.
-func (app *App) printPlanStatus(state plan.DisplayState) bool {
-	if app.Plans == nil || !app.agentHasTool("record_plan") {
+	if !includeImplicit && state.PlanState == workstate.PlanImplicit && !state.Gate.DecisionRequired && state.Lifecycle == workstate.LifecycleActive {
 		return false
 	}
-	line := plan.RenderLatest(app.Plans.Snapshot(), state)
-	if line == "" {
-		return false
+	line := workstate.RenderStatus(state)
+	if state.ArtifactPath != "" {
+		line += " · plan: " + state.ArtifactPath
 	}
 	fmt.Fprintln(app.Errw, line)
 	return true
 }
 
-func (app *App) markPlanPromptStatusPrintedBeforeUsage(turn int) {
-	app.planPromptStatusBeforeUsage = true
-	app.planPromptStatusBeforeUsagePrompt = turn
+func (app *App) markWorkPromptStatusPrintedBeforeUsage(prompt int) {
+	app.workPromptStatusBeforeUsage = true
+	app.workPromptStatusBeforeUsagePrompt = prompt
 }
 
-func (app *App) planPromptStatusPrintedBeforeUsageForPrompt(turn int) bool {
-	return app.planPromptStatusBeforeUsage && app.planPromptStatusBeforeUsagePrompt == turn
+func (app *App) workPromptStatusPrintedBeforeUsageForPrompt(prompt int) bool {
+	return app.workPromptStatusBeforeUsage && app.workPromptStatusBeforeUsagePrompt == prompt
 }
 
 func (app *App) stopBackgroundJobs() {
 	if app.Background != nil {
 		app.Background.Shutdown()
 	}
-}
-
-func (app *App) todoRequestContext() string {
-	if app.Todos == nil || !app.agentHasTool("update_todos") {
-		return ""
-	}
-	return app.Todos.PendingRequestContext()
-}
-
-// todoContextDisplay renders the current list for display paths like /context,
-// regardless of the reminder schedule. It must never advance the request count
-// or consume a recovery reminder.
-func (app *App) todoContextDisplay() string {
-	if app.Todos == nil || !app.agentHasTool("update_todos") {
-		return ""
-	}
-	return todo.RequestContext(app.Todos.Snapshot())
 }
 
 func (app *App) agentHasTool(name string) bool {
@@ -5137,25 +5183,34 @@ type accumulatingSink struct {
 	app                         *App
 	rec                         *sessionrec.Recorder
 	prompt                      int
-	printTodoUpdate             bool
-	printTodoPromptBeforeUsage  bool
-	printPlanUpdate             bool
-	printPlanPromptBeforeUsage  bool
-	planCountAtPromptStart      int
+	printWorkPromptBeforeUsage  bool
 	reasoningOutput             bool
 	promptUsage                 agent.PromptUsage // last PromptComplete, priced; JSON run modes report it in prompt_end
 	pendingNames                map[string]string
+	pendingCalls                map[string]llm.ToolCall
+	pendingWorkResults          map[string][]workstate.Result
+	pendingWorkTargets          map[string]workObservationTarget
 	turn                        int
 	attempt                     int
-	todoTurn                    int
 	inMaintenance               bool
 	terminalModelErrorDisplayed bool
 	attemptText                 strings.Builder
 	finalText                   string
 }
 
+type workObservationTarget struct {
+	revisionID string
+	stepID     string
+}
+
 func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
-	s := &accumulatingSink{r: r, app: app, prompt: prompt, pendingNames: make(map[string]string)}
+	s := &accumulatingSink{
+		r: r, app: app, prompt: prompt,
+		pendingNames:       make(map[string]string),
+		pendingCalls:       make(map[string]llm.ToolCall),
+		pendingWorkResults: make(map[string][]workstate.Result),
+		pendingWorkTargets: make(map[string]workObservationTarget),
+	}
 	if app != nil {
 		var mirror func(session.Event)
 		if app.RunStream != nil {
@@ -5192,13 +5247,7 @@ func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 
 func newREPLSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 	s := newAccumulatingSink(r, app, prompt)
-	s.printTodoUpdate = true
-	s.printTodoPromptBeforeUsage = true
-	s.printPlanUpdate = true
-	s.printPlanPromptBeforeUsage = true
-	if app.Plans != nil {
-		s.planCountAtPromptStart = len(app.Plans.Snapshot())
-	}
+	s.printWorkPromptBeforeUsage = true
 	s.reasoningOutput = true
 	return s
 }
@@ -5215,21 +5264,6 @@ func (s *accumulatingSink) FlushEvents() {
 		return
 	}
 	s.rec.Flush()
-}
-
-func (s *accumulatingSink) planDisplayState() plan.DisplayState {
-	current := 0
-	if s.app.Plans != nil {
-		current = len(s.app.Plans.Snapshot())
-	}
-	switch {
-	case current <= s.planCountAtPromptStart:
-		return plan.DisplayCurrent
-	case s.planCountAtPromptStart == 0 && current == 1:
-		return plan.DisplayRecorded
-	default:
-		return plan.DisplayUpdated
-	}
 }
 
 func (s *accumulatingSink) TextDelta(text string) {
@@ -5271,10 +5305,6 @@ func (s *accumulatingSink) CompactionComplete() {
 
 func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
 	s.attemptText.Reset()
-	if s.app != nil && s.app.Todos != nil && s.app.agentHasTool("update_todos") {
-		s.app.Todos.CommitModelRound(turn != s.todoTurn)
-		s.todoTurn = turn
-	}
 	s.turn = turn
 	s.attempt = attempt
 	s.r.TurnAttemptStart(turn, attempt, ctx)
@@ -5354,26 +5384,115 @@ func (s *accumulatingSink) ToolUseDelta(index int, delta string) {
 
 func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 	s.pendingNames[c.ID] = c.Name
+	s.pendingCalls[c.ID] = c
+	if s.app != nil && s.app.Work != nil {
+		if work := s.app.Work.Snapshot(); work != nil && work.ActiveStepID != "" {
+			s.pendingWorkTargets[c.ID] = workObservationTarget{revisionID: work.RevisionID, stepID: work.ActiveStepID}
+		}
+	}
 	s.r.ToolStart(c)
 	s.rec.ToolStart(c)
 }
 
 func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	name := s.pendingNames[res.ForID]
+	call := s.pendingCalls[res.ForID]
 	delete(s.pendingNames, res.ForID)
+	delete(s.pendingCalls, res.ForID)
 	s.r.ToolResult(res)
 	s.rec.ToolResult(res)
-	if s.printTodoUpdate && name == "update_todos" && !res.IsError {
-		s.app.printTodoUpdateStatus()
+	if name == "update_work" && !res.IsError {
+		s.app.printWorkStatus(true)
 	}
-	if s.printPlanUpdate && name == "record_plan" && !res.IsError {
-		s.app.printPlanStatus(s.planDisplayState())
-	}
+	s.attachObservedWorkResults(call, res)
 }
 
 func (s *accumulatingSink) ToolDiff(call llm.ToolCall, path, text string) {
 	s.r.ToolDiff(call, path, text)
 	s.rec.ToolDiff(call, path, text)
+	if strings.TrimSpace(path) != "" {
+		s.pendingWorkResults[call.ID] = append(s.pendingWorkResults[call.ID], workstate.Result{
+			Kind: workstate.ResultChange, Path: path, ToolCallID: call.ID,
+		})
+	}
+}
+
+func (s *accumulatingSink) attachObservedWorkResults(call llm.ToolCall, res llm.ToolResult) {
+	if s == nil || s.app == nil || s.app.Work == nil {
+		return
+	}
+	state := s.app.Work.Snapshot()
+	target := s.pendingWorkTargets[res.ForID]
+	delete(s.pendingWorkTargets, res.ForID)
+	if state == nil || target.stepID == "" {
+		delete(s.pendingWorkResults, res.ForID)
+		return
+	}
+	results := append([]workstate.Result(nil), s.pendingWorkResults[res.ForID]...)
+	delete(s.pendingWorkResults, res.ForID)
+	activity := s.app.Agent.ToolActivity(call)
+	if activity.Class == tools.ActivityVerify {
+		status := workstate.VerifyPassed
+		detail := ""
+		if res.IsError {
+			status = workstate.VerifyFailed
+			detail = boundedWorkDetail(res.Text)
+		}
+		results = append(results, workstate.Result{
+			Kind: workstate.ResultVerification, Check: workCallSummary(call), Status: status,
+			Detail: detail, ToolCallID: call.ID,
+		})
+	}
+	if call.Name == "delegate" && !res.IsError {
+		var args struct {
+			Background bool `json:"background"`
+		}
+		_ = json.Unmarshal(call.Input, &args)
+		if !args.Background {
+			results = append(results, workstate.Result{
+				Kind: workstate.ResultDelegate, Detail: boundedWorkDetail(res.Text), ToolCallID: call.ID,
+			})
+		}
+	}
+	if len(results) == 0 {
+		return
+	}
+	if state.RevisionID != target.revisionID || state.ActiveStepID != target.stepID {
+		for i := range results {
+			results[i].Stale = true
+		}
+	}
+	if _, err := s.app.Work.AddResults(target.stepID, results, "host"); err != nil {
+		fmt.Fprintf(s.app.Errw, "[work observation failed: %v]\n", err)
+	}
+}
+
+func workCallSummary(call llm.ToolCall) string {
+	if call.Name != "run_command" {
+		return call.Name
+	}
+	var args struct {
+		Argv    []string `json:"argv"`
+		Command string   `json:"command"`
+	}
+	if json.Unmarshal(call.Input, &args) == nil {
+		if len(args.Argv) > 0 {
+			return boundedWorkDetail(strings.Join(args.Argv, " "))
+		}
+		if strings.TrimSpace(args.Command) != "" {
+			return boundedWorkDetail(args.Command)
+		}
+	}
+	return call.Name
+}
+
+func boundedWorkDetail(value string) string {
+	value = strings.TrimSpace(value)
+	const limit = 1024
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "…"
 }
 
 func (s *accumulatingSink) ArchiveToolResult(res llm.ToolResult) (agent.ToolResultArchive, error) {
@@ -5500,7 +5619,19 @@ func (s *accumulatingSink) ClosureStarted(event agent.ClosureEvent) {
 }
 
 func (s *accumulatingSink) TurnProgress(progress agent.TurnProgress) {
-	s.rec.TurnProgress(progress)
+	if s.app == nil || s.app.Work == nil {
+		s.rec.TurnProgress(progress)
+		return
+	}
+	work := s.app.Work.Snapshot()
+	if work == nil {
+		s.rec.TurnProgress(progress)
+	} else {
+		s.rec.TurnProgressForWork(progress, work.WorkID, work.RevisionID, work.ActiveStepID)
+	}
+	if _, err := s.app.Work.RecordInspectionTurn(progress.InspectionOnly && progress.NoExplicitProgress, progress.ExplicitProgress); err != nil {
+		fmt.Fprintf(s.app.Errw, "[work progress tracking failed: %v]\n", err)
+	}
 }
 
 func (s *accumulatingSink) HookDiagnostic(diagnostic hooks.Diagnostic) {
@@ -5538,14 +5669,11 @@ func (s *accumulatingSink) AddHookContext(ctx []string) {
 }
 
 func (s *accumulatingSink) TranscriptRewritten() {
-	if s.app != nil && s.app.Todos != nil {
-		s.app.Todos.RequireRequestContext()
-	}
 }
 
 func (s *accumulatingSink) RequestContext() []string {
 	var out []string
-	if ctx := s.app.todoRequestContext(); ctx != "" {
+	if ctx := s.app.workRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
 	if ctx := s.app.goalRequestContext(); ctx != "" {
@@ -5555,13 +5683,12 @@ func (s *accumulatingSink) RequestContext() []string {
 	return out
 }
 
-// PeekRequestContext mirrors RequestContext without consuming anything: todo
-// recovery and stale-list reminders stay pending, and completed background
-// context stays queued, so post-prompt size estimates never eat context that
+// PeekRequestContext mirrors RequestContext without consuming completed
+// background context, so post-prompt size estimates never eat context that
 // still needs to reach the model on a later real request.
 func (s *accumulatingSink) PeekRequestContext() []string {
 	var out []string
-	if ctx := s.app.todoRequestContext(); ctx != "" {
+	if ctx := s.app.workRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
 	if ctx := s.app.goalRequestContext(); ctx != "" {
@@ -5631,20 +5758,12 @@ func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
 	if !s.promptUsage.Usage.CostKnown {
 		s.promptUsage.Usage.CostUSD, s.promptUsage.Usage.CostKnown = cost, costKnown
 	}
-	if s.printTodoPromptBeforeUsage {
+	if s.printWorkPromptBeforeUsage {
 		s.r.StopProgress()
 		s.r.flushToolUseStarts()
 		s.r.finishAssistantLine()
-		if s.app.printTodoPromptStatus() {
-			s.app.markTodoPromptStatusPrintedBeforeUsage(s.prompt)
-		}
-	}
-	if s.printPlanPromptBeforeUsage {
-		s.r.StopProgress()
-		s.r.flushToolUseStarts()
-		s.r.finishAssistantLine()
-		if s.app.printPlanStatus(s.planDisplayState()) {
-			s.app.markPlanPromptStatusPrintedBeforeUsage(s.prompt)
+		if s.app.printWorkStatus(false) {
+			s.app.markWorkPromptStatusPrintedBeforeUsage(s.prompt)
 		}
 	}
 	s.r.SetPromptCost(cost, costKnown)

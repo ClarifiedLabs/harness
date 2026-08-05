@@ -42,7 +42,7 @@ type metrics struct {
 	ToolResultBytes              int            `json:"tool_result_bytes"`
 	RGToReadTransitions          int            `json:"rg_to_read_transitions"`
 	CommandToCommandTransitions  int            `json:"command_to_command_transitions"`
-	AvoidableTodoOnlyTurns       int            `json:"avoidable_todo_only_turns"`
+	AvoidableWorkOnlyTurns       int            `json:"avoidable_work_only_turns"`
 	GitCalls                     int            `json:"git_calls"`
 	BackgroundPolls              int            `json:"background_polls"`
 	BackgroundWaits              int            `json:"background_waits"`
@@ -218,12 +218,12 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		}
 	}
 	for i, tt := range turns {
-		if len(tt.Names) != 1 || tt.Names[0] != "update_todos" {
+		if len(tt.Names) != 1 || tt.Names[0] != "update_work" {
 			continue
 		}
 		for _, later := range turns[i+1:] {
-			if anyOtherThan(later.Names, "update_todos") {
-				m.AvoidableTodoOnlyTurns++
+			if anyOtherThan(later.Names, "update_work") {
+				m.AvoidableWorkOnlyTurns++
 				break
 			}
 		}

@@ -430,14 +430,23 @@ func (r *Recorder) HookDiagnostic(diagnostic hooks.Diagnostic) {
 
 // TurnProgress records diagnostics-only semantic activity after a tool turn.
 func (r *Recorder) TurnProgress(progress agent.TurnProgress) {
+	r.TurnProgressForWork(progress, "", "", "")
+}
+
+// TurnProgressForWork records semantic activity with content-free WorkState
+// attribution for per-step efficiency analysis.
+func (r *Recorder) TurnProgressForWork(progress agent.TurnProgress, workID, revisionID, stepID string) {
 	if r == nil {
 		return
 	}
 	r.Append(session.Event{
-		Type:         session.EventTurnProgress,
-		Prompt:       r.cfg.Prompt,
-		Turn:         progress.Turn,
-		TurnProgress: TurnProgressSnapshot(progress),
+		Type:           session.EventTurnProgress,
+		Prompt:         r.cfg.Prompt,
+		Turn:           progress.Turn,
+		WorkID:         workID,
+		WorkRevisionID: revisionID,
+		WorkStepID:     stepID,
+		TurnProgress:   TurnProgressSnapshot(progress),
 	})
 }
 

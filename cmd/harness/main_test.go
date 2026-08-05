@@ -3820,7 +3820,7 @@ func TestRunDefaultAgentTools(t *testing.T) {
 	}
 }
 
-func TestRunInteractiveAutoExposesHandoffAndTodosButNotGoalTools(t *testing.T) {
+func TestRunInteractiveAutoExposesHandoffAndWorkButNotGoalTools(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8"}, fp, "hi\n/exit\n")
 
@@ -3831,8 +3831,8 @@ func TestRunInteractiveAutoExposesHandoffAndTodosButNotGoalTools(t *testing.T) {
 	if !slices.Contains(names, "request_implementation") {
 		t.Fatalf("interactive auto tools missing request_implementation: %v", names)
 	}
-	if !slices.Contains(names, "update_todos") {
-		t.Fatalf("interactive auto tools missing update_todos: %v", names)
+	if !slices.Contains(names, "update_work") {
+		t.Fatalf("interactive auto tools missing update_work: %v", names)
 	}
 	for _, name := range []string{"create_goal", "update_goal"} {
 		if slices.Contains(names, name) {
@@ -5070,7 +5070,7 @@ func toolsOutputHasDescribedTool(output, name string) bool {
 
 func expectedExploreToolNames() []string {
 	names := expectedInspectionToolNames()
-	return append(names, "update_todos")
+	return append(names, "update_work")
 }
 
 func expectedInspectionToolNames() []string {
@@ -5087,16 +5087,16 @@ func expectedInspectionToolNames() []string {
 func expectedPlanToolNames() []string {
 	names := expectedInspectionToolNames()
 	// plan's realized tool list is the shared inspection set (which now includes
-	// run_command) followed by the main-registered tools (update_todos, delegate,
-	// background_jobs, record_plan, request_implementation) in catalog order.
-	return append(names, "write_tmp_file", "update_todos", "delegate", "background_jobs", "record_plan", "request_implementation")
+	// run_command) followed by the main-registered coordination tools in catalog
+	// order.
+	return append(names, "write_tmp_file", "delegate", "background_jobs", "update_work", "request_implementation")
 }
 
 func expectedDefaultToolNames() []string {
 	// The default set omits git_readonly: git already covers it, and read-only
 	// agents remain delegatable via the git->git_readonly subset rule.
 	names := tools.DefaultNames()
-	return append(names, "update_todos", "delegate", "background_jobs", "record_plan")
+	return append(names, "delegate", "background_jobs", "update_work")
 }
 
 func TestEnableInteractiveAutoHandoff(t *testing.T) {

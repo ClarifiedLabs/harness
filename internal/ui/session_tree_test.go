@@ -41,7 +41,7 @@ func TestForkTreePageContractsHiddenLinearEntries(t *testing.T) {
 			Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "I’ll inspect the latest commit."}},
 		}}},
 		session.Entry{Type: session.EntrySegment, ID: "99a72f8a", Messages: []llm.Message{
-			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "update_todos"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "update_work"}}},
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1"}}},
 		}},
 		second,

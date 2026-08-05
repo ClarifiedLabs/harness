@@ -181,9 +181,17 @@ type SchemaDescriptionPreserver interface {
 type Registry struct {
 	order            []string
 	tools            map[string]Tool
+	dispatchGuard    func(llm.ToolCall, Activity) error
 	dispatchTimeout  time.Duration // zero = no dispatch-level timeout
 	resultLimits     resultLimits
 	toolResultLimits map[string]resultLimits
+}
+
+// SetDispatchGuard installs a dynamic semantic gate checked immediately before
+// a known tool runs. It is intended for workflow-state constraints, not
+// sandboxing or permissions; Tool.ReadOnly remains the dispatch authority.
+func (r *Registry) SetDispatchGuard(guard func(llm.ToolCall, Activity) error) {
+	r.dispatchGuard = guard
 }
 
 // Options configures a tool registry. Zero values keep package defaults.
@@ -436,7 +444,7 @@ func (r *Registry) Subset(names []string) (*Registry, error) {
 	for _, name := range names {
 		want[name] = true
 	}
-	sub := &Registry{resultLimits: r.resultLimits, dispatchTimeout: r.dispatchTimeout}
+	sub := &Registry{resultLimits: r.resultLimits, dispatchTimeout: r.dispatchTimeout, dispatchGuard: r.dispatchGuard}
 	for _, name := range r.order {
 		if want[name] {
 			sub.Register(r.tools[name])
@@ -745,6 +753,16 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 	input := call.Input
 	if len(input) == 0 {
 		input = json.RawMessage("{}")
+	}
+	if r.dispatchGuard != nil {
+		guardCall := call
+		guardCall.Input = input
+		if err := r.dispatchGuard(guardCall, r.CallActivity(guardCall)); err != nil {
+			res.Text = err.Error()
+			res.IsError = true
+			res.ErrorKind = llm.ToolErrorInvalidArgs
+			return res
+		}
 	}
 
 	timeout := r.dispatchTimeout

@@ -23,8 +23,8 @@ import (
 	"harness/internal/runstream"
 	"harness/internal/session"
 	"harness/internal/skills"
-	"harness/internal/todo"
 	"harness/internal/tools"
+	"harness/internal/workstate"
 )
 
 type releaseAfterFirstProvider struct {
@@ -130,6 +130,34 @@ func TestOneShotSavesSessionAndRunsOneTurn(t *testing.T) {
 	}
 	if _, err := os.Stat(app.SessionPath); err != nil {
 		t.Errorf("one-shot should save the session: %v", err)
+	}
+}
+
+func TestOneShotCreatesInjectsAndCompletesImplicitWork(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("done")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Work = workstate.NewStore(func() string { return app.SessionPath })
+	registry := tools.Default()
+	registry.Register(tools.NewUpdateWork(app.Work))
+	app.Agent.SetTools(registry)
+
+	if code := OneShot(app, "ship the parser"); code != ExitOK {
+		t.Fatalf("exit code = %d", code)
+	}
+	if len(fp.Requests) != 1 || len(fp.Requests[0].RequestContext) != 1 {
+		t.Fatalf("request context = %+v", fp.Requests)
+	}
+	ctx := fp.Requests[0].RequestContext[0]
+	if !strings.Contains(ctx, "[work id=") || !strings.Contains(ctx, "Objective: ship the parser") {
+		t.Fatalf("work capsule = %q", ctx)
+	}
+	state := app.Work.Snapshot()
+	if state == nil || state.PlanState != workstate.PlanImplicit || state.Lifecycle != workstate.LifecycleCompleted {
+		t.Fatalf("implicit work = %+v", state)
 	}
 }
 
@@ -312,61 +340,6 @@ func TestOneShotEscapedSkillMentionSendsLiteralDollar(t *testing.T) {
 	}
 }
 
-func TestOneShotAddsTodoRequestContextWhenToolAvailable(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
-	app := newTestApp(t, &out, &errw, fp)
-	store := todo.NewStore()
-	reg := tools.Default()
-	reg.Register(todo.NewTool(store))
-	app.Agent.SetTools(reg)
-	app.Todos = store
-
-	if code := OneShot(app, "work on it"); code != ExitOK {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
-	}
-	req := fp.Requests[0]
-	msgs := req.Messages
-	if len(msgs) != 1 {
-		t.Fatalf("messages = %d, want only user prompt in transcript messages: %+v", len(msgs), msgs)
-	}
-	if got := msgs[0].Content[0].Text; got != "work on it" {
-		t.Fatalf("first message = %q, want prompt", got)
-	}
-	got := strings.Join(req.RequestContext, "\n\n")
-	if got != "" {
-		t.Errorf("empty todo list should not add request context, got:\n%s", got)
-	}
-}
-
-func TestOneShotDoesNotPrintTodoPromptStatus(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake", llmtest.Step{
-		Events: []llm.StreamEvent{textDelta("done")},
-		Stop:   llm.StopEndTurn,
-	})
-	app := newTestApp(t, &out, &errw, fp)
-	store := todo.NewStore()
-	store.Replace([]todo.Item{
-		{Content: "explore", Status: todo.StatusCompleted},
-		{Content: "test", Status: todo.StatusInProgress},
-	})
-	reg := tools.Default()
-	reg.Register(todo.NewTool(store))
-	app.Agent.SetTools(reg)
-	app.Todos = store
-
-	if code := OneShot(app, "work on it"); code != ExitOK {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-	}
-	if got := errw.String(); strings.Contains(got, "Todos (1/2 done):") || strings.Contains(got, "[~] test") {
-		t.Fatalf("one-shot mode should not print the interactive todo prompt status:\n%s", got)
-	}
-}
-
 func TestOneShotWaitsForBackgroundDelegateSynthesizesAndCountsUsage(t *testing.T) {
 	var out, errw bytes.Buffer
 	release := make(chan struct{})
@@ -420,87 +393,6 @@ func TestOneShotWaitsForBackgroundDelegateSynthesizesAndCountsUsage(t *testing.T
 	}
 	if app.usage.InputTokens != 100 || app.usage.OutputTokens != 36 {
 		t.Fatalf("session usage = %+v, want provider 30/6 + background delegate 70/30", app.usage)
-	}
-}
-
-func TestOneShotSkipsTodoContextWhenToolUnavailable(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
-	app := newTestApp(t, &out, &errw, fp)
-	app.Todos = todo.NewStore()
-
-	if code := OneShot(app, "work on it"); code != ExitOK {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
-	}
-	msgs := fp.Requests[0].Messages
-	if len(msgs) != 1 {
-		t.Fatalf("messages = %d, want only user prompt: %+v", len(msgs), msgs)
-	}
-	if strings.Contains(msgs[0].Content[0].Text, "[todo]") {
-		t.Fatalf("todo context should not be injected when update_todos is unavailable: %+v", msgs)
-	}
-}
-
-func TestOneShotDoesNotDuplicateTodoContextAfterUpdateTodos(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake",
-		llmtest.Step{
-			Events: []llm.StreamEvent{toolStep("update_todos", `{"todos":[{"content":"explore","status":"completed"},{"content":"test","status":"in_progress"}]}`, "call_todo")},
-			Stop:   llm.StopToolUse,
-		},
-		llmtest.Step{Stop: llm.StopEndTurn},
-	)
-	app := newTestApp(t, &out, &errw, fp)
-	store := todo.NewStore()
-	reg := tools.Default()
-	reg.Register(todo.NewTool(store))
-	app.Agent.SetTools(reg)
-	app.Todos = store
-
-	if code := OneShot(app, "work on it"); code != ExitOK {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-	}
-	if len(fp.Requests) != 2 {
-		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
-	}
-	firstContext := strings.Join(fp.Requests[0].RequestContext, "\n\n")
-	if firstContext != "" {
-		t.Fatalf("first request should have no empty-list reminder:\n%s", firstContext)
-	}
-	secondContext := strings.Join(fp.Requests[1].RequestContext, "\n\n")
-	if secondContext != "" {
-		t.Fatalf("second request should rely on the transcript tool call, got duplicate context:\n%s", secondContext)
-	}
-}
-
-func TestOneShotOmitsTodoContextAfterCompletedUpdateTodos(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake",
-		llmtest.Step{
-			Events: []llm.StreamEvent{toolStep("update_todos", `{"todos":[{"content":"explore","status":"completed"},{"content":"summarize","status":"completed"}]}`, "call_todo")},
-			Stop:   llm.StopToolUse,
-		},
-		llmtest.Step{Stop: llm.StopEndTurn},
-	)
-	app := newTestApp(t, &out, &errw, fp)
-	store := todo.NewStore()
-	reg := tools.Default()
-	reg.Register(todo.NewTool(store))
-	app.Agent.SetTools(reg)
-	app.Todos = store
-
-	if code := OneShot(app, "work on it"); code != ExitOK {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-	}
-	if len(fp.Requests) != 2 {
-		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
-	}
-	secondContext := strings.Join(fp.Requests[1].RequestContext, "\n\n")
-	if secondContext != "" {
-		t.Fatalf("completed todo list should not be request context:\n%s", secondContext)
 	}
 }
 

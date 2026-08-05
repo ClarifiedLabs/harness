@@ -1487,12 +1487,15 @@ func TestManagerOverlappingDetachedWaitsSuppressOrdinaryContext(t *testing.T) {
 	}
 	close(release)
 	awaitJobDone(t, m, started.ID)
-	select {
-	case <-m.DetachedWaitReady():
-	case <-time.After(2 * time.Second):
-		t.Fatal("overlapping detached waits did not resolve")
+	var contexts []string
+	for len(contexts) < 2 {
+		select {
+		case <-m.DetachedWaitReady():
+			contexts = append(contexts, m.DrainCompletedContext(nil)...)
+		case <-time.After(2 * time.Second):
+			t.Fatal("overlapping detached waits did not resolve")
+		}
 	}
-	contexts := m.DrainCompletedContext(nil)
 	if len(contexts) != 2 {
 		t.Fatalf("contexts = %d, want two detached aggregates: %v", len(contexts), contexts)
 	}

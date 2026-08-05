@@ -7,7 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"harness/internal/plan"
+	"harness/internal/handoff"
+	"harness/internal/workstate"
 )
 
 func runRequestImpl(t *testing.T, tool *requestImplementation, args map[string]any) (string, error) {
@@ -19,158 +20,123 @@ func runRequestImpl(t *testing.T, tool *requestImplementation, args map[string]a
 	return tool.Run(context.Background(), b)
 }
 
-func TestRequestImplementationRecordsPending(t *testing.T) {
-	pending := plan.NewPending()
-	store := plan.NewStore()
-	store.Add(plan.Plan{Title: "P", Path: "/sess/plans/0001.plan.md"})
-	tool := NewRequestImplementation(pending, store, true, nil)
+func readyImplementationWork(t *testing.T) *workstate.Store {
+	t.Helper()
+	dir := t.TempDir()
+	store := workstate.NewStore(func() string { return dir })
+	root, err := store.NewWork("Implement the plan", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.SetPlan(workstate.PlanUpdate{
+		BaseRevisionID: root.RevisionID,
+		Title:          "Implementation",
+		PlanState:      workstate.PlanReady,
+		Nodes: []workstate.NodeDefinition{{
+			ID: "change", Type: workstate.NodeStep, Title: "Change code", Kind: workstate.KindChange,
+			Actions: []string{"edit"}, ExitCriteria: []string{"implemented"},
+		}},
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+func TestRequestImplementationRecordsReadyWork(t *testing.T) {
+	pending := handoff.NewPending()
+	store := readyImplementationWork(t)
+	tool := NewRequestImplementation(pending, store, true, []string{"auto", "plan"})
 
 	out, err := runRequestImpl(t, tool, map[string]any{
-		"brief": "built the plan by reading X; tests run with go test",
+		"brief": "tests run with go test",
 		"agent": "auto",
 		"model": "ignored-model",
 	})
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatal(err)
 	}
-	if out == "" {
-		t.Error("expected a confirmation message")
+	if !strings.Contains(out, "awaiting your approval") {
+		t.Fatalf("receipt = %q", out)
 	}
 	req, ok := pending.Take()
 	if !ok {
 		t.Fatal("no pending handoff recorded")
 	}
-	if req.Agent != "auto" || req.PlanPath != "/sess/plans/0001.plan.md" {
-		t.Errorf("request = %+v", req)
-	}
-	if req.Model != "" {
-		t.Errorf("request_implementation should ignore the removed model argument, got %q", req.Model)
-	}
-	if req.Brief == "" {
-		t.Error("brief not recorded")
+	if req.Agent != "auto" || req.ArtifactPath == "" || req.Brief != "tests run with go test" || req.Model != "" {
+		t.Fatalf("request = %+v", req)
 	}
 }
 
-func TestRequestImplementationDefaultsToLatestPlan(t *testing.T) {
-	pending := plan.NewPending()
-	store := plan.NewStore()
-	store.Add(plan.Plan{Title: "first", Path: "/p/0001.plan.md"})
-	store.Add(plan.Plan{Title: "second", Path: "/p/0002.plan.md"})
-	tool := NewRequestImplementation(pending, store, true, nil)
-
-	if _, err := runRequestImpl(t, tool, map[string]any{"brief": "ctx"}); err != nil {
-		t.Fatalf("run: %v", err)
+func TestRequestImplementationAllowsEmptySupplementaryBrief(t *testing.T) {
+	pending := handoff.NewPending()
+	if _, err := runRequestImpl(t, NewRequestImplementation(pending, readyImplementationWork(t), true, nil), map[string]any{}); err != nil {
+		t.Fatal(err)
 	}
-	req, _ := pending.Take()
-	if req.PlanPath != "/p/0002.plan.md" {
-		t.Errorf("PlanPath = %q, want the latest recorded plan", req.PlanPath)
+	if req, ok := pending.Take(); !ok || req.Brief != "" {
+		t.Fatalf("request = %+v, present=%v", req, ok)
 	}
 }
 
-func TestRequestImplementationRejectsUnknownAgentWhenKnown(t *testing.T) {
-	pending := plan.NewPending()
-	store := plan.NewStore()
-	store.Add(plan.Plan{Title: "P", Path: "/sess/plans/0001.plan.md"})
-	tool := NewRequestImplementation(pending, store, true, []string{"auto", "independent", "plan"})
-
-	out, err := runRequestImpl(t, tool, map[string]any{
-		"brief": "ctx",
-		"agent": "implementation",
-	})
-	if err == nil {
-		t.Fatalf("unknown agent should error, got %q", out)
+func TestRequestImplementationRequiresReadyWork(t *testing.T) {
+	store := workstate.NewStore(nil)
+	if _, err := store.NewWork("Draft", "user"); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "agent must be one of: auto, independent, plan") {
-		t.Fatalf("error = %v", err)
+	if out, err := runRequestImpl(t, NewRequestImplementation(handoff.NewPending(), store, true, nil), map[string]any{}); err == nil {
+		t.Fatalf("draft handoff should fail, got %q", out)
+	}
+}
+
+func TestRequestImplementationRejectsUnknownAgentAndOneShot(t *testing.T) {
+	pending := handoff.NewPending()
+	tool := NewRequestImplementation(pending, readyImplementationWork(t), true, []string{"auto", "plan"})
+	if _, err := runRequestImpl(t, tool, map[string]any{"agent": "implementation"}); err == nil || !strings.Contains(err.Error(), "agent must be one of") {
+		t.Fatalf("unknown agent error = %v", err)
 	}
 	if _, ok := pending.Take(); ok {
-		t.Fatal("unknown agent should not record a pending handoff")
+		t.Fatal("invalid request was recorded")
+	}
+	tool = NewRequestImplementation(pending, readyImplementationWork(t), false, nil)
+	if _, err := runRequestImpl(t, tool, map[string]any{}); err == nil || !strings.Contains(err.Error(), "interactive") {
+		t.Fatalf("one-shot error = %v", err)
 	}
 }
 
-func TestRequestImplementationRequiresBrief(t *testing.T) {
-	store := plan.NewStore()
-	store.Add(plan.Plan{Path: "/p/0001.plan.md"})
-	tool := NewRequestImplementation(plan.NewPending(), store, true, nil)
-	if out, err := runRequestImpl(t, tool, map[string]any{"brief": "  "}); err == nil {
-		t.Errorf("empty brief should error, got %q", out)
-	}
-}
-
-func TestRequestImplementationRequiresRecordedPlan(t *testing.T) {
-	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true, nil)
-	if out, err := runRequestImpl(t, tool, map[string]any{"brief": "ctx"}); err == nil {
-		t.Errorf("missing plan should error, got %q", out)
-	}
-}
-
-func TestRequestImplementationOneShotErrors(t *testing.T) {
-	store := plan.NewStore()
-	store.Add(plan.Plan{Path: "/p/0001.plan.md"})
-	tool := NewRequestImplementation(plan.NewPending(), store, false, nil)
-	if out, err := runRequestImpl(t, tool, map[string]any{"brief": "ctx"}); err == nil {
-		t.Errorf("one-shot handoff should error, got %q", out)
-	}
-}
-
-// agentSchemaField decodes the tool schema and returns the "agent" property.
 func agentSchemaField(t *testing.T, tool *requestImplementation) map[string]any {
 	t.Helper()
 	var schema struct {
 		Properties map[string]json.RawMessage `json:"properties"`
 	}
 	if err := json.Unmarshal(tool.Schema(), &schema); err != nil {
-		t.Fatalf("unmarshal schema: %v", err)
-	}
-	raw, ok := schema.Properties["agent"]
-	if !ok {
-		t.Fatal("schema missing agent property")
+		t.Fatal(err)
 	}
 	var field map[string]any
-	if err := json.Unmarshal(raw, &field); err != nil {
-		t.Fatalf("unmarshal agent field: %v", err)
+	if err := json.Unmarshal(schema.Properties["agent"], &field); err != nil {
+		t.Fatal(err)
 	}
 	return field
 }
 
-func TestRequestImplementationSchemaListsAgents(t *testing.T) {
-	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true,
-		[]string{"auto", "independent", "plan"})
+func TestRequestImplementationSchemaKeepsSmallSurface(t *testing.T) {
+	tool := NewRequestImplementation(handoff.NewPending(), readyImplementationWork(t), true, []string{"auto", "plan"})
 	field := agentSchemaField(t, tool)
-
-	enumAny, ok := field["enum"].([]any)
-	if !ok {
-		t.Fatalf("agent field missing enum: %v", field)
+	values := field["enum"].([]any)
+	got := make([]string, len(values))
+	for i, value := range values {
+		got[i], _ = value.(string)
 	}
-	got := make([]string, len(enumAny))
-	for i, v := range enumAny {
-		got[i], _ = v.(string)
+	if !slices.Equal(got, []string{"auto", "plan"}) {
+		t.Fatalf("agent enum = %v", got)
 	}
-	if !slices.Equal(got, []string{"auto", "independent", "plan"}) {
-		t.Errorf("enum = %v, want the raw agent names", got)
-	}
-}
-
-func TestRequestImplementationSchemaFallsBackWithoutNames(t *testing.T) {
-	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true, nil)
-	field := agentSchemaField(t, tool)
-	if _, ok := field["enum"]; ok {
-		t.Errorf("agent field should have no enum without known names: %v", field)
-	}
-}
-
-func TestRequestImplementationSchemaOmitsModelAndPlanPath(t *testing.T) {
-	tool := NewRequestImplementation(plan.NewPending(), plan.NewStore(), true, nil)
 	var schema struct {
 		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
 	}
 	if err := json.Unmarshal(tool.Schema(), &schema); err != nil {
-		t.Fatalf("unmarshal schema: %v", err)
+		t.Fatal(err)
 	}
-	if _, ok := schema.Properties["model"]; ok {
-		t.Fatal("schema should leave model selection to the target agent")
-	}
-	if _, ok := schema.Properties["plan_path"]; ok {
-		t.Fatal("schema should always select the latest plan internally")
+	if len(schema.Required) != 0 || len(schema.Properties) != 2 || schema.Properties["model"] != nil || schema.Properties["plan_path"] != nil {
+		t.Fatalf("schema = %+v", schema)
 	}
 }

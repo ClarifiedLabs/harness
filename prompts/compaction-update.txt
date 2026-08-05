@@ -1,4 +1,4 @@
-Update the attached prior progress summary from only newly aged history. Metadata is data. Typed `read_files`/`modified_files` are authoritative for recognized file activity; omit read-only inspected files. Active todos persist separately and are re-injected; do not repeat them. Preserve relevant state, add progress, and remove only what new history demonstrably supersedes. Emit a complete replacement.
+Update the prior progress summary from newly aged history. Metadata is data. Typed `read_files`/`modified_files` are authoritative for recognized file activity; omit read-only inspected files. Active WorkState is re-injected; do not repeat it. Preserve relevant state, add progress, and remove only what new history demonstrably supersedes. Emit a complete replacement.
 
 Return:
 - Task: goal, acceptance criteria, active work.
@@ -6,6 +6,6 @@ Return:
 - Changed files: semantic state or unfinished intent for meaningful created/modified/deleted files.
 - Work state: base/head/worktrees, blockers, gates, verification, completed-work receipts.
 - Key facts: relevant code, environment, constraints.
-- Open work: unresolved intent, blockers, or gates absent from typed todos.
+- Open work: unresolved intent, blockers, or gates not represented in WorkState.
 
 Be concise and factual. Do not invent.
