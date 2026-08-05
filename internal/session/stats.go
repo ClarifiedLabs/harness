@@ -234,9 +234,13 @@ type parallelStats struct {
 }
 
 type compactionStats struct {
-	runs         int
-	messageCount int
-	usage        llm.Usage
+	runs                   int
+	messageCount           int
+	modelSummaries         int
+	deterministicSummaries int
+	unknownSummaries       int
+	fallbackReasons        map[string]int
+	usage                  llm.Usage
 }
 
 type checkpointStats struct {
@@ -858,6 +862,20 @@ func collectCompactionStats(dir string, tree *Tree) (compactionStats, parallelSt
 		}
 		compactions.runs++
 		compactions.messageCount += meta.MessageCount
+		switch meta.SummarySource {
+		case "model":
+			compactions.modelSummaries++
+		case "deterministic":
+			compactions.deterministicSummaries++
+		default:
+			compactions.unknownSummaries++
+		}
+		if meta.FallbackReason != "" {
+			if compactions.fallbackReasons == nil {
+				compactions.fallbackReasons = make(map[string]int)
+			}
+			compactions.fallbackReasons[meta.FallbackReason]++
+		}
 		compactions.usage = addUsage(compactions.usage, meta.Usage)
 		collectParallelBatches(messages, seenBatches, &parallel)
 	}
@@ -1125,6 +1143,15 @@ func (stats *parallelStats) add(other parallelStats) {
 func (stats *compactionStats) add(other compactionStats) {
 	stats.runs += other.runs
 	stats.messageCount += other.messageCount
+	stats.modelSummaries += other.modelSummaries
+	stats.deterministicSummaries += other.deterministicSummaries
+	stats.unknownSummaries += other.unknownSummaries
+	if len(other.fallbackReasons) > 0 && stats.fallbackReasons == nil {
+		stats.fallbackReasons = make(map[string]int)
+	}
+	for reason, count := range other.fallbackReasons {
+		stats.fallbackReasons[reason] += count
+	}
 	stats.usage = addUsage(stats.usage, other.usage)
 }
 
@@ -1646,6 +1673,12 @@ func writeOverallCompactions(w io.Writer, report statsReport) {
 	fmt.Fprintln(w, "Compactions")
 	writeSplitValue(w, "  ", "runs", all.runs, root.runs, delegates.runs)
 	writeSplitValue(w, "  ", "compacted messages", all.messageCount, root.messageCount, delegates.messageCount)
+	if all.runs > 0 {
+		fmt.Fprintf(w, "  summary sources: model %d, deterministic %d, unknown %d\n", all.modelSummaries, all.deterministicSummaries, all.unknownSummaries)
+	}
+	if len(all.fallbackReasons) > 0 {
+		fmt.Fprintf(w, "  fallback reasons: %s\n", formatErrorCounts(all.fallbackReasons))
+	}
 	fmt.Fprintln(w, "  usage (already included in session usage):")
 	writeUsageValues(w, "    ", all.usage, all.usage.CostUSD)
 }
@@ -1820,6 +1853,10 @@ func writeDelegate(w io.Writer, child *delegateStats, indent string) {
 	fmt.Fprintf(w, "%slargest parallel batch: %d\n", detail, stats.tools.parallel.largest)
 	if stats.compactions.runs != 0 || stats.compactions.messageCount != 0 || totalTokens(stats.compactions.usage) != 0 || stats.compactions.usage.CostUSD != 0 {
 		fmt.Fprintf(w, "%scompactions: %d runs, %d messages\n", detail, stats.compactions.runs, stats.compactions.messageCount)
+		fmt.Fprintf(w, "%scompaction summary sources: model %d, deterministic %d, unknown %d\n", detail, stats.compactions.modelSummaries, stats.compactions.deterministicSummaries, stats.compactions.unknownSummaries)
+		if len(stats.compactions.fallbackReasons) > 0 {
+			fmt.Fprintf(w, "%scompaction fallback reasons: %s\n", detail, formatErrorCounts(stats.compactions.fallbackReasons))
+		}
 		fmt.Fprintf(w, "%scompaction usage:\n", detail)
 		writeUsageValues(w, detail+"  ", stats.compactions.usage, stats.compactions.usage.CostUSD)
 	}

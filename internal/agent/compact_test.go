@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,14 @@ func summaryStep(summary string, in, out int) llmtest.Step {
 		Stop:   llm.StopEndTurn,
 		Usage:  llm.Usage{InputTokens: in, OutputTokens: out},
 	}
+}
+
+func summaryErrorSteps(err error) []llmtest.Step {
+	steps := make([]llmtest.Step, streamRetries+1)
+	for i := range steps {
+		steps[i] = llmtest.Step{Err: err}
+	}
+	return steps
 }
 
 // makeTurns builds n whole text turns (user + assistant), labelled by index.
@@ -880,6 +889,180 @@ func TestCompactSummaryFailureKeepsTranscript(t *testing.T) {
 	}
 }
 
+func TestForegroundCompactionFallsBackOnSummaryFailure(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*Agent, EventSink) (bool, error)
+	}{
+		{
+			name: "manual",
+			run: func(a *Agent, sink EventSink) (bool, error) {
+				_, err := a.Compact(context.Background(), sink)
+				return err == nil, err
+			},
+		},
+		{
+			name: "automatic pressure",
+			run: func(a *Agent, sink EventSink) (bool, error) {
+				_, changed, err := a.compactTriggered(context.Background(), sink, "context-overflow")
+				return changed, err
+			},
+		},
+		{
+			name: "continuation",
+			run: func(a *Agent, sink EventSink) (bool, error) {
+				_, changed, err := a.CompactForContinuation(context.Background(), sink)
+				return changed, err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transcript := makeTurns(10)
+			fp := llmtest.New("fake", summaryErrorSteps(errors.New("provider unavailable"))...)
+			a := newAgent(fp, tools.Default(), Options{Model: "claude-opus-4-8"})
+			a.SetSleep(func(time.Duration) {})
+			a.SetTranscript(transcript)
+			var archived CompactionArchive
+			a.SetCompactionArchiver(func(_ context.Context, archive CompactionArchive) (string, error) {
+				archived = archive
+				return "compactions/fallback.input.json", nil
+			})
+			sink := &recordSink{}
+
+			changed, err := test.run(a, sink)
+			if err != nil || !changed {
+				t.Fatalf("fallback compaction = changed %t err %v", changed, err)
+			}
+			if archived.SummarySource != compactionSummarySourceDeterministic || archived.FallbackReason != compactionFallbackProviderError {
+				t.Fatalf("archive provenance = %q/%q", archived.SummarySource, archived.FallbackReason)
+			}
+			if len(archived.Messages) == 0 || len(archived.Messages) > len(transcript) {
+				t.Fatalf("archive message count = %d", len(archived.Messages))
+			}
+			if !reflect.DeepEqual(archived.Messages, transcript[:len(archived.Messages)]) {
+				t.Fatal("fallback archive did not preserve the exact removed prefix")
+			}
+			checkpoint := a.Transcript()[0]
+			if checkpoint.Compaction == nil || checkpoint.Compaction.SummarySource != compactionSummarySourceDeterministic || checkpoint.Compaction.FallbackReason != compactionFallbackProviderError {
+				t.Fatalf("checkpoint provenance = %+v", checkpoint.Compaction)
+			}
+			if !strings.Contains(checkpoint.Compaction.Summary, "Model-generated compaction summary unavailable (provider error)") ||
+				!strings.Contains(checkpoint.Content[0].Text, "compactions/fallback.input.json") {
+				t.Fatalf("fallback checkpoint = %+v", checkpoint)
+			}
+			if !slices.Contains(sink.notices, "[compact summary failed; used deterministic checkpoint]") {
+				t.Fatalf("fallback notice missing: %v", sink.notices)
+			}
+			mustValid(t, a.Transcript())
+		})
+	}
+}
+
+func TestCompactionTimeoutUsesDeterministicCheckpoint(t *testing.T) {
+	started := make(chan struct{})
+	fp := llmtest.New("fake", llmtest.Step{Block: func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+	}})
+	a := newAgent(fp, tools.Default(), Options{Model: "claude-opus-4-8", CompactTimeout: 10 * time.Millisecond})
+	a.SetTranscript(makeTurns(10))
+	var archived CompactionArchive
+	a.SetCompactionArchiver(func(ctx context.Context, archive CompactionArchive) (string, error) {
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("archive inherited expired summary context: %v", err)
+		}
+		archived = archive
+		return "compactions/timeout.input.json", nil
+	})
+	sink := &recordSink{}
+
+	if _, err := a.Compact(context.Background(), sink); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	<-started
+	if archived.FallbackReason != compactionFallbackTimeout || archived.SummarySource != compactionSummarySourceDeterministic {
+		t.Fatalf("archive provenance = %q/%q", archived.SummarySource, archived.FallbackReason)
+	}
+	if !slices.Contains(sink.notices, "[compact summary timed out after 10ms; used deterministic checkpoint]") {
+		t.Fatalf("timeout notice missing: %v", sink.notices)
+	}
+}
+
+func TestCompactionParentCancellationDoesNotFallback(t *testing.T) {
+	started := make(chan struct{})
+	fp := llmtest.New("fake", llmtest.Step{Block: func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+	}})
+	a := newAgent(fp, tools.Default(), Options{Model: "claude-opus-4-8", CompactTimeout: time.Minute})
+	transcript := makeTurns(10)
+	a.SetTranscript(transcript)
+	archived := false
+	a.SetCompactionArchiver(func(_ context.Context, _ CompactionArchive) (string, error) {
+		archived = true
+		return "archive", nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := a.Compact(ctx, &recordSink{})
+		errCh <- err
+	}()
+	<-started
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Compact error = %v, want context canceled", err)
+	}
+	if archived {
+		t.Fatal("parent cancellation archived a fallback checkpoint")
+	}
+	if !reflect.DeepEqual(a.Transcript(), transcript) {
+		t.Fatal("parent cancellation rewrote the transcript")
+	}
+}
+
+func TestIdleCompactionTimeoutDoesNotPrepareFallback(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Block: func(ctx context.Context) { <-ctx.Done() }})
+	a := newAgent(fp, tools.Default(), Options{Model: "local", ContextWindow: 10_000, CompactTimeout: 10 * time.Millisecond})
+	transcript := makeTurns(10)
+	a.SetTranscript(transcript)
+	work, ok, err := a.PrepareIdleCompaction(1)
+	if err != nil || !ok {
+		t.Fatalf("PrepareIdleCompaction = ok %t err %v", ok, err)
+	}
+	result, err := work(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) || result.Prepared {
+		t.Fatalf("idle timeout = prepared %t err %v", result.Prepared, err)
+	}
+	if !reflect.DeepEqual(a.Transcript(), transcript) {
+		t.Fatal("idle timeout rewrote the live transcript")
+	}
+}
+
+func TestCompactionFallbackArchiveFailureKeepsTranscript(t *testing.T) {
+	transcript := makeTurns(10)
+	fp := llmtest.New("fake", summaryErrorSteps(errors.New("provider unavailable"))...)
+	a := newAgent(fp, tools.Default(), Options{Model: "claude-opus-4-8"})
+	a.SetSleep(func(time.Duration) {})
+	a.SetTranscript(transcript)
+	a.SetCompactionArchiver(func(_ context.Context, _ CompactionArchive) (string, error) {
+		return "", errors.New("disk full")
+	})
+	sink := &recordSink{}
+
+	if _, err := a.Compact(context.Background(), sink); err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("Compact error = %v, want archive failure", err)
+	}
+	if !reflect.DeepEqual(a.Transcript(), transcript) {
+		t.Fatal("archive failure rewrote the transcript")
+	}
+	for _, notice := range sink.notices {
+		if strings.Contains(notice, "used deterministic checkpoint") {
+			t.Fatalf("failed archive claimed fallback was applied: %v", sink.notices)
+		}
+	}
+}
+
 func TestCompactDegradesToLastTurnWhenOversized(t *testing.T) {
 	// The last four turns together exceed the budget but the last turn alone fits;
 	// the ladder drops to the last turn. Budget is 78% of the 1M window ≈ 3.12M
@@ -1000,6 +1183,9 @@ func TestCompactArchivesRemovedMessages(t *testing.T) {
 	}
 	if archived.Summary != "S" {
 		t.Fatalf("archived summary %q, want S", archived.Summary)
+	}
+	if archived.SummarySource != compactionSummarySourceModel || archived.FallbackReason != "" {
+		t.Fatalf("archived provenance = %q/%q, want model", archived.SummarySource, archived.FallbackReason)
 	}
 	if !strings.Contains(a.Transcript()[0].Content[0].Text, "Raw compacted transcript archive: compactions/0001.input.json") {
 		t.Fatalf("active summary missing archive reference: %q", a.Transcript()[0].Content[0].Text)

@@ -524,6 +524,9 @@ type Options struct {
 	DisableAutoCompaction bool
 	// CompactSummaryMaxTokens caps summarization output. Zero uses the default.
 	CompactSummaryMaxTokens int
+	// CompactTimeout bounds the complete model summarization phase, including
+	// chunking and retries. Non-positive uses the default.
+	CompactTimeout time.Duration
 	// CompactToolResultMaxBytes caps old tool-result bodies before they are sent
 	// to the summarizer. Zero uses the default; negative disables this pre-pass.
 	CompactToolResultMaxBytes int
@@ -585,6 +588,7 @@ type Agent struct {
 	compactTargetPercent      int
 	disableAutoCompaction     bool
 	compactSummaryMaxTokens   int
+	compactTimeout            time.Duration
 	compactToolResultMaxBytes int
 	compactFallbackNotice     compactFallbackNoticeState
 	compactionRuntimeVersion  uint64
@@ -660,6 +664,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		compactTargetPercent:      opts.CompactTargetPercent,
 		disableAutoCompaction:     opts.DisableAutoCompaction,
 		compactSummaryMaxTokens:   opts.CompactSummaryMaxTokens,
+		compactTimeout:            opts.CompactTimeout,
 		compactToolResultMaxBytes: opts.CompactToolResultMaxBytes,
 		hooks:                     opts.Hooks,
 		showDiffs:                 opts.ShowDiffs,

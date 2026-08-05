@@ -164,6 +164,15 @@ type ParallelToolBatch struct {
     ToolUseIDs []string `json:"tool_use_ids"` // model emission order
 }
 
+type CompactionMetadata struct {
+    Summary        string   `json:"summary"`
+    SummarySource  string   `json:"summary_source,omitempty"` // model | deterministic
+    FallbackReason string   `json:"fallback_reason,omitempty"` // timeout | provider_error
+    Focus          string   `json:"focus,omitempty"`
+    ReadFiles      []string `json:"read_files,omitempty"`
+    ModifiedFiles  []string `json:"modified_files,omitempty"`
+}
+
 type Message struct {
     Role                Role                `json:"role"`
     Time                time.Time           `json:"time,omitempty"`
@@ -171,6 +180,7 @@ type Message struct {
     Origin              MessageOrigin       `json:"origin,omitempty"` // prompt | steer | internal | compaction_checkpoint
     Content             []ContentBlock      `json:"content"`
     ParallelToolBatches []ParallelToolBatch `json:"parallel_tool_batches,omitempty"`
+    Compaction          *CompactionMetadata `json:"compaction,omitempty"`
 }
 
 type BlockKind string
@@ -3870,7 +3880,7 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   capped by `compact_summary_max_tokens` (default 2048).
   A first compaction uses `prompts/compaction-summary.txt`. A repeated compaction
   removes the structured prior checkpoint from ordinary summary history, passes its
-  exact generated summary once as data, and uses `prompts/compaction-update.txt` to
+  exact prior summary once as data, and uses `prompts/compaction-update.txt` to
   produce a complete replacement. Map/reduce phases summarize only newly aged chunks;
   the prior summary appears only in the final update call. Replace the old messages
   with one synthetic **user** checkpoint headed
@@ -3933,7 +3943,10 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   mid-stream errors with the shared `retry.Next` backoff (up to `streamRetries`) so a
   429 at 78% does not abort compaction. If the summary itself is truncated
   (`StopMaxTokens`) it doubles the token budget and retries once, then accepts the
-  result. Chunking, retries, and archive writing remain covered by one transient
+  result. The complete model-backed phase—including every chunk, retry, and final
+  reduction—shares one `compact_timeout_seconds` deadline (default **300 seconds**).
+  Hooks, local validation, and archive persistence use the caller context rather
+  than the summary deadline. The whole operation remains covered by one transient
   `context: compacting` progress phase.
 - **Image-aware estimation.** `estimateTokens`/`estimateRequest` weight each
   `BlockImage` at a flat `imageTokenEstimate` (1600 tokens) rather than counting its
@@ -3961,9 +3974,18 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   (`[compact: transcript over budget but nothing left to shrink]`). Automatic
   current-turn fallback notices are throttled within a prompt so repeated no-op or
   tiny-shrink attempts do not flood the UI. Never wedge.
-- **Failure:** if the summary or archive step errors, abort compaction, warn, and keep
-  the full transcript — the next call may fail visibly on context length, which beats
-  silent data loss.
+- **Failure and deterministic fallback:** foreground automatic, provider-overflow,
+  manual, and continuation compactions replace a failed or timed-out model summary
+  with a deliberately sparse deterministic checkpoint. It points the next model to
+  active WorkState when present, preserved instructions, recognized file activity,
+  recent verbatim turns, and the raw archive; it never infers completed work. The
+  rewrite occurs only when an archive callback is available and exact removed
+  messages are persisted successfully. Missing/failed archiving keeps the full
+  transcript and returns the error. Explicit caller cancellation aborts without a
+  fallback or rewrite. Speculative idle compaction also never falls back: a timeout
+  or provider error discards that candidate so a later foreground path can decide.
+  Checkpoint, tree, and archive metadata record `summary_source` (`model` or
+  `deterministic`) and the bounded fallback reason (`timeout` or `provider_error`).
 - Compacted transcripts must still satisfy the §4 invariant (kept turns are whole turns,
   so no tool_use/tool_result pair is ever split).
 

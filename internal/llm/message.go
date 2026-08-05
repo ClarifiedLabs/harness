@@ -46,14 +46,16 @@ const (
 
 // CompactionMetadata is transcript-only state carried by a synthetic
 // compaction checkpoint. Provider adapters intentionally ignore it: it lets a
-// later compaction update the exact prior generated summary without parsing the
+// later compaction update the exact prior summary without parsing the
 // rendered checkpoint text, and preserves deterministic compacted-history file
-// activity alongside the model-authored prose.
+// activity alongside the summary prose and its provenance.
 type CompactionMetadata struct {
-	Summary       string   `json:"summary"`
-	Focus         string   `json:"focus,omitempty"`
-	ReadFiles     []string `json:"read_files,omitempty"`
-	ModifiedFiles []string `json:"modified_files,omitempty"`
+	Summary        string   `json:"summary"`
+	SummarySource  string   `json:"summary_source,omitempty"`
+	FallbackReason string   `json:"fallback_reason,omitempty"`
+	Focus          string   `json:"focus,omitempty"`
+	ReadFiles      []string `json:"read_files,omitempty"`
+	ModifiedFiles  []string `json:"modified_files,omitempty"`
 }
 
 // Message is one turn-fragment in a transcript: a role plus an ordered list of

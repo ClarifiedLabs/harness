@@ -206,12 +206,14 @@ func TestReplayQuietSuppressesStatusLines(t *testing.T) {
 func TestSaveCompactionPersistsFocusAndFileMetadata(t *testing.T) {
 	dir := t.TempDir()
 	ref, err := SaveCompaction(dir, Compaction{
-		Time:          time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC),
-		Summary:       "summary",
-		Messages:      []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "raw"}}}},
-		Focus:         "API compatibility",
-		ReadFiles:     []string{"a.go"},
-		ModifiedFiles: []string{"b.go"},
+		Time:           time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC),
+		Summary:        "summary",
+		SummarySource:  "deterministic",
+		FallbackReason: "timeout",
+		Messages:       []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "raw"}}}},
+		Focus:          "API compatibility",
+		ReadFiles:      []string{"a.go"},
+		ModifiedFiles:  []string{"b.go"},
 	})
 	if err != nil {
 		t.Fatalf("SaveCompaction: %v", err)
@@ -222,14 +224,16 @@ func TestSaveCompactionPersistsFocusAndFileMetadata(t *testing.T) {
 		t.Fatalf("read metadata: %v", err)
 	}
 	var meta struct {
-		Focus         string   `json:"focus"`
-		ReadFiles     []string `json:"read_files"`
-		ModifiedFiles []string `json:"modified_files"`
+		Focus          string   `json:"focus"`
+		SummarySource  string   `json:"summary_source"`
+		FallbackReason string   `json:"fallback_reason"`
+		ReadFiles      []string `json:"read_files"`
+		ModifiedFiles  []string `json:"modified_files"`
 	}
 	if err := json.Unmarshal(raw, &meta); err != nil {
 		t.Fatalf("decode metadata: %v", err)
 	}
-	if meta.Focus != "API compatibility" || !reflect.DeepEqual(meta.ReadFiles, []string{"a.go"}) || !reflect.DeepEqual(meta.ModifiedFiles, []string{"b.go"}) {
+	if meta.Focus != "API compatibility" || meta.SummarySource != "deterministic" || meta.FallbackReason != "timeout" || !reflect.DeepEqual(meta.ReadFiles, []string{"a.go"}) || !reflect.DeepEqual(meta.ModifiedFiles, []string{"b.go"}) {
 		t.Fatalf("saved compaction metadata = %+v", meta)
 	}
 }

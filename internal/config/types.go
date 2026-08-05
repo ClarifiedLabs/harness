@@ -39,6 +39,7 @@ const (
 	defaultCompactTriggerPercent  = 78
 	defaultCompactTargetPercent   = 65
 	defaultCompactIdleTrigger     = 35
+	defaultCompactTimeoutSeconds  = 300
 )
 
 // RuntimeDefaults are contextual values owned by cmd/harness rather than this
@@ -131,6 +132,7 @@ type Config struct {
 	CompactTargetPercent               int     `json:"compact_target_percent"`
 	CompactIdleAfterSeconds            int     `json:"compact_idle_after_seconds"`
 	CompactIdleTriggerPercent          int     `json:"compact_idle_trigger_percent"`
+	CompactTimeoutSeconds              int     `json:"compact_timeout_seconds"`
 	CompactSummaryMaxTokens            int     `json:"compact_summary_max_tokens"`
 	CompactToolResultMaxBytes          int     `json:"compact_tool_result_max_bytes"`
 	DelegateMaxTurns                   int     `json:"delegate_max_turns"`

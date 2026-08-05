@@ -532,6 +532,7 @@ environment variables, JSON paths, types, and defaults. The concise
 | `compact_target_percent` | `integer` | - | - | - | `compact_target_percent` | 65 | no | Harness compact target percent setting. |
 | `compact_idle_after_seconds` | `integer` | - | - | - | `compact_idle_after_seconds` | 0 (disabled) | no | Harness compact idle after seconds setting. |
 | `compact_idle_trigger_percent` | `integer` | - | - | - | `compact_idle_trigger_percent` | 35 | no | Harness compact idle trigger percent setting. |
+| `compact_timeout_seconds` | `integer` | - | - | - | `compact_timeout_seconds` | 300 | no | Harness compact timeout seconds setting. |
 | `compact_summary_max_tokens` | `integer` | - | - | - | `compact_summary_max_tokens` | 0 (automatic) | no | Harness compact summary max tokens setting. |
 | `compact_tool_result_max_bytes` | `integer` | - | - | - | `compact_tool_result_max_bytes` | 0 (automatic; negative disables truncation) | no | Harness compact tool result max bytes setting. |
 | `delegate_max_turns` | `integer` | - | - | - | `delegate_max_turns` | 20 | no | Harness delegate max turns setting. |
@@ -595,7 +596,7 @@ environment variables, JSON paths, types, and defaults. The concise
   `agents_md_warn_bytes`, `compact_keep_turns`, `compact_keep_tokens`,
   `compact_auto_enabled`, `compact_trigger_percent`,
   `compact_target_percent`, `compact_idle_after_seconds`,
-  `compact_idle_trigger_percent`, `compact_summary_max_tokens`,
+  `compact_idle_trigger_percent`, `compact_timeout_seconds`, `compact_summary_max_tokens`,
   `compact_tool_result_max_bytes`, and `retention_floor_tokens`.
   Tool-result truncation is controlled by config `tool_result_max_bytes` /
   `tool_result_max_lines` or env `HARNESS_TOOL_RESULT_MAX_BYTES` /
@@ -1958,10 +1959,11 @@ reduced to previews (`compact_tool_result_max_bytes`, default `4096`), old image
 are replaced with placeholders, and the raw removed messages are archived under
 `compactions/`. If the old history is too large for one summary call, harness
 summarizes chunks and then summarizes the chunk summaries. Later compactions
-explicitly update the exact prior generated summary with only newly aged
+explicitly update the exact prior summary with only newly aged
 history; they do not re-summarize the rendered checkpoint as conversation.
 Non-quiet TTY runs show a transient elapsed-time indicator while this summary
-work is in progress.
+work is in progress. `compact_timeout_seconds` bounds the complete model-backed
+phase across all chunks and retries; it defaults to `300` seconds.
 Older raw messages are archived before replacement. The active transcript gets
 a synthetic user checkpoint containing the active prompt and steering text
 verbatim, the progress summary, the archive reference, and a deterministic
@@ -1980,7 +1982,13 @@ trimmed, recorded in hook/archive/tree metadata, and applies only to that
 successful compaction. If low-water pressure leaves only the newest complete
 turn, Harness truncates oversized tool payloads as a last resort without
 splitting a tool-use/result pair. If compaction fails validation or
-archive/summary writing, the full transcript is kept.
+archive writing, the full transcript is kept. A foreground summary timeout or
+provider failure uses a sparse deterministic checkpoint only after the exact
+removed transcript has been archived; caller cancellation never does. Idle
+compaction failures are discarded instead. Archive and checkpoint metadata
+identify model-generated versus deterministic summaries and record a bounded
+fallback reason. `session stats` reports summary-source and fallback-reason
+counts for root and delegate compactions.
 
 Turn summaries include approximate context footprint and, when stateful Responses
 sends a smaller request than the full active conversation, the payload estimate.

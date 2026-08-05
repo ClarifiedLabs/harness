@@ -137,6 +137,7 @@ type Options struct {
 	CompactTargetPercent      int
 	DisableAutoCompaction     bool
 	CompactSummaryMaxTokens   int
+	CompactTimeout            time.Duration
 	CompactToolResultMaxBytes int
 	RetentionPolicy           agent.RetentionPolicy
 	// ShowDiffs lets child agents emit tool_diff events (recorded at parent
@@ -762,6 +763,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		CompactTargetPercent:      r.opts.CompactTargetPercent,
 		DisableAutoCompaction:     r.opts.DisableAutoCompaction,
 		CompactSummaryMaxTokens:   r.opts.CompactSummaryMaxTokens,
+		CompactTimeout:            r.opts.CompactTimeout,
 		CompactToolResultMaxBytes: r.opts.CompactToolResultMaxBytes,
 		Now:                       r.opts.Now,
 		ShowDiffs:                 r.opts.ShowDiffs,
@@ -837,13 +839,15 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 	child.SetCompactionArchiver(func(_ context.Context, archive agent.CompactionArchive) (string, error) {
 		ref, err := session.SaveCompaction(childDir, session.Compaction{
-			Time:          r.now(),
-			Summary:       archive.Summary,
-			Usage:         archive.Usage,
-			Messages:      archive.Messages,
-			Focus:         archive.Focus,
-			ReadFiles:     archive.ReadFiles,
-			ModifiedFiles: archive.ModifiedFiles,
+			Time:           r.now(),
+			Summary:        archive.Summary,
+			SummarySource:  archive.SummarySource,
+			FallbackReason: archive.FallbackReason,
+			Usage:          archive.Usage,
+			Messages:       archive.Messages,
+			Focus:          archive.Focus,
+			ReadFiles:      archive.ReadFiles,
+			ModifiedFiles:  archive.ModifiedFiles,
 		})
 		return ref, err
 	})

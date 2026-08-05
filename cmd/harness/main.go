@@ -719,6 +719,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		ToolResultMaxBytes:        cfg.ToolResultMaxBytes,
 		ToolResultMaxLines:        cfg.ToolResultMaxLines,
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
+		CompactTimeoutSeconds:     cfg.CompactTimeoutSeconds,
 		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		DelegateMaxTurns:          cfg.DelegateMaxTurns,
 		DelegateMaxActive:         cfg.DelegateMaxActive,
@@ -786,6 +787,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		CompactTargetPercent:      cfg.CompactTargetPercent,
 		DisableAutoCompaction:     !cfg.CompactAutoEnabled,
 		CompactSummaryMaxTokens:   cfg.CompactSummaryMaxTokens,
+		CompactTimeout:            time.Duration(cfg.CompactTimeoutSeconds) * time.Second,
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
 		RetentionPolicy:           agent.RetentionPolicy(cfg.RetentionPolicy),
 		ShowDiffs:                 cfg.ShowDiffs,
@@ -1080,6 +1082,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		CompactTargetPercent:      cfg.CompactTargetPercent,
 		DisableAutoCompaction:     !cfg.CompactAutoEnabled,
 		CompactSummaryMaxTokens:   cfg.CompactSummaryMaxTokens,
+		CompactTimeout:            time.Duration(cfg.CompactTimeoutSeconds) * time.Second,
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
 		Hooks:                     hookRunner,
 		ShowDiffs:                 cfg.ShowDiffs,
@@ -1339,13 +1342,15 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	}
 	ag.SetCompactionArchiver(func(ctx context.Context, archive agent.CompactionArchive) (string, error) {
 		ref, err := session.SaveCompaction(app.SessionPath, session.Compaction{
-			Time:          now(),
-			Summary:       archive.Summary,
-			Usage:         archive.Usage,
-			Messages:      archive.Messages,
-			Focus:         archive.Focus,
-			ReadFiles:     archive.ReadFiles,
-			ModifiedFiles: archive.ModifiedFiles,
+			Time:           now(),
+			Summary:        archive.Summary,
+			SummarySource:  archive.SummarySource,
+			FallbackReason: archive.FallbackReason,
+			Usage:          archive.Usage,
+			Messages:       archive.Messages,
+			Focus:          archive.Focus,
+			ReadFiles:      archive.ReadFiles,
+			ModifiedFiles:  archive.ModifiedFiles,
 		})
 		if err != nil {
 			return "", err

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -76,18 +77,26 @@ const opaqueBytesPerToken = 8
 const (
 	defaultSummaryMaxTokens      = 2048
 	defaultSummaryToolResultSize = 4096
+	defaultCompactionTimeout     = 5 * time.Minute
+
+	compactionSummarySourceModel         = "model"
+	compactionSummarySourceDeterministic = "deterministic"
+	compactionFallbackTimeout            = "timeout"
+	compactionFallbackProviderError      = "provider_error"
 )
 
 // CompactionArchive is handed to the optional archive callback before old
 // messages are removed from the active transcript.
 type CompactionArchive struct {
-	Messages      []llm.Message
-	Summary       string
-	Usage         llm.Usage
-	TokensBefore  int
-	Focus         string
-	ReadFiles     []string
-	ModifiedFiles []string
+	Messages       []llm.Message
+	Summary        string
+	SummarySource  string
+	FallbackReason string
+	Usage          llm.Usage
+	TokensBefore   int
+	Focus          string
+	ReadFiles      []string
+	ModifiedFiles  []string
 }
 
 // CompactionArchiver preserves raw compacted messages and returns a reference
@@ -174,6 +183,7 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 		CompactTriggerPercent:     a.compactTriggerPercent,
 		CompactTargetPercent:      a.compactTargetPercent,
 		CompactSummaryMaxTokens:   a.compactSummaryMaxTokens,
+		CompactTimeout:            a.compactTimeout,
 		CompactToolResultMaxBytes: a.compactToolResultMaxBytes,
 		Interactive:               a.interactive,
 		RetentionPolicy:           a.retentionPolicy,
@@ -247,6 +257,8 @@ func (a *Agent) ApplyIdleCompaction(ctx context.Context, sink EventSink, result 
 		candidate.archive.Summary,
 		candidate.archive.Messages,
 		archiveRef,
+		candidate.archive.SummarySource,
+		candidate.archive.FallbackReason,
 		candidate.archive.Focus,
 		candidate.archive.ReadFiles,
 		candidate.archive.ModifiedFiles,
@@ -288,6 +300,7 @@ func (a *Agent) idleCompactionFingerprint() ([sha256.Size]byte, error) {
 		CompactKeepTurns          int              `json:"compact_keep_turns"`
 		CompactKeepTokens         int              `json:"compact_keep_tokens"`
 		CompactTargetPercent      int              `json:"compact_target_percent"`
+		CompactTimeout            time.Duration    `json:"compact_timeout"`
 		CompactSummaryMaxTokens   int              `json:"compact_summary_max_tokens"`
 		CompactToolResultMaxBytes int              `json:"compact_tool_result_max_bytes"`
 		RuntimeVersion            uint64           `json:"runtime_version"`
@@ -302,6 +315,7 @@ func (a *Agent) idleCompactionFingerprint() ([sha256.Size]byte, error) {
 		CompactKeepTurns:          a.compactKeepTurns,
 		CompactKeepTokens:         a.compactKeepTokens,
 		CompactTargetPercent:      a.compactTargetPercent,
+		CompactTimeout:            a.compactionSummaryTimeout(),
 		CompactSummaryMaxTokens:   a.compactSummaryMaxTokens,
 		CompactToolResultMaxBytes: a.compactToolResultMaxBytes,
 		RuntimeVersion:            a.compactionRuntimeVersion,
@@ -457,8 +471,14 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	} else if len(a.transcript) == 0 {
 		return llm.Usage{}, false, nil
 	}
+	summaryCtx, cancelSummary := context.WithTimeout(ctx, a.compactionSummaryTimeout())
+	defer cancelSummary()
 
 	var summary string
+	summarySource := compactionSummarySourceModel
+	fallbackReason := ""
+	fallbackUsed := false
+	fallbackNotice := ""
 	var usage llm.Usage
 	var older, kept []llm.Message
 	var readFiles, modifiedFiles []string
@@ -468,14 +488,30 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 		kept = a.transcript[boundary:]
 		prior := priorCompactionMetadata(older)
 		readFiles, modifiedFiles = a.compactionFileActivity(older, prior)
-		generated, attemptUsage, err := a.summarizeCompaction(ctx, older, prior, readFiles, modifiedFiles, focus)
-		usage = add(usage, attemptUsage)
-		if err != nil {
-			sink.Notice(fmt.Sprintf("[compact failed: %v; keeping full transcript]", err))
-			return usage, false, err
+		if !fallbackUsed {
+			generated, attemptUsage, err := a.summarizeCompaction(summaryCtx, older, prior, readFiles, modifiedFiles, focus)
+			usage = add(usage, attemptUsage)
+			if err != nil {
+				if ctx.Err() != nil {
+					return usage, false, err
+				}
+				if trigger == "idle" || a.archiveCompaction == nil {
+					sink.Notice(fmt.Sprintf("[compact failed: %v; keeping full transcript]", err))
+					return usage, false, err
+				}
+				fallbackUsed = true
+				summarySource = compactionSummarySourceDeterministic
+				fallbackReason = compactionFallbackProviderError
+				if errors.Is(summaryCtx.Err(), context.DeadlineExceeded) {
+					fallbackReason = compactionFallbackTimeout
+				}
+				summary = deterministicCompactionSummary(fallbackReason)
+				fallbackNotice = a.deterministicCompactionNotice(fallbackReason)
+			} else {
+				summary = generated
+			}
 		}
-		summary = generated
-		compacted = append([]llm.Message{a.checkpointMessage(summary, older, "", focus, readFiles, modifiedFiles)}, cloneMessages(kept)...)
+		compacted = append([]llm.Message{a.checkpointMessage(summary, older, "", summarySource, fallbackReason, focus, readFiles, modifiedFiles)}, cloneMessages(kept)...)
 		if collapseAll || a.estimateContextForTranscript(nil, compacted).Total <= a.window()*a.targetPercent()/100 {
 			break
 		}
@@ -485,6 +521,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 		}
 		boundary = next
 	}
+	cancelSummary()
 
 	// Once only the newest round remains, local degradation is the only safe
 	// lower rung. It mutates deep copies and cannot silently discard a round.
@@ -503,13 +540,15 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	archiveRef := ""
 	if a.archiveCompaction != nil {
 		ref, err := a.archiveCompaction(ctx, CompactionArchive{
-			Messages:      cloneMessages(older),
-			Summary:       summary,
-			Usage:         usage,
-			TokensBefore:  before,
-			Focus:         focus,
-			ReadFiles:     append([]string(nil), readFiles...),
-			ModifiedFiles: append([]string(nil), modifiedFiles...),
+			Messages:       cloneMessages(older),
+			Summary:        summary,
+			SummarySource:  summarySource,
+			FallbackReason: fallbackReason,
+			Usage:          usage,
+			TokensBefore:   before,
+			Focus:          focus,
+			ReadFiles:      append([]string(nil), readFiles...),
+			ModifiedFiles:  append([]string(nil), modifiedFiles...),
 		})
 		if err != nil {
 			sink.Notice(fmt.Sprintf("[compact archive failed: %v; keeping full transcript]", err))
@@ -522,7 +561,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	// Adding an archive reference changes only checkpoint text, so the transcript
 	// shape validated above cannot become invalid after the side-effectful archive
 	// callback succeeds.
-	compacted[0] = a.checkpointMessage(summary, older, archiveRef, focus, readFiles, modifiedFiles)
+	compacted[0] = a.checkpointMessage(summary, older, archiveRef, summarySource, fallbackReason, focus, readFiles, modifiedFiles)
 
 	a.transcript = compacted
 	a.validatedPrefix = 0        // the transcript was rewritten; re-validate from scratch (r62)
@@ -533,6 +572,9 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	a.ResetProxySessionID()
 	a.compactFallbackNotice = compactFallbackNoticeState{}
 	after := a.estimateContextForTranscript(nil, compacted).Total
+	if fallbackNotice != "" {
+		sink.Notice(fallbackNotice)
+	}
 	sink.Notice(compactionReport(collapsed, before, after))
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PostCompact) {
 		payload := hooks.Payload{"trigger": trigger}
@@ -1216,7 +1258,7 @@ func hasNonResult(m llm.Message) bool {
 	return len(m.Content) == 0
 }
 
-func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRef, focus string, readFiles, modifiedFiles []string) llm.Message {
+func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRef, summarySource, fallbackReason, focus string, readFiles, modifiedFiles []string) llm.Message {
 	var b strings.Builder
 	b.WriteString(checkpointHeader)
 	b.WriteString(checkpointPreamble)
@@ -1254,12 +1296,40 @@ func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRe
 	message := a.textMessage(llm.RoleUser, b.String())
 	message.Origin = llm.MessageOriginCompactionCheckpoint
 	message.Compaction = &llm.CompactionMetadata{
-		Summary:       summary,
-		Focus:         focus,
-		ReadFiles:     append([]string(nil), readFiles...),
-		ModifiedFiles: append([]string(nil), modifiedFiles...),
+		Summary:        summary,
+		SummarySource:  summarySource,
+		FallbackReason: fallbackReason,
+		Focus:          focus,
+		ReadFiles:      append([]string(nil), readFiles...),
+		ModifiedFiles:  append([]string(nil), modifiedFiles...),
 	}
 	return message
+}
+
+func (a *Agent) compactionSummaryTimeout() time.Duration {
+	if a.compactTimeout > 0 {
+		return a.compactTimeout
+	}
+	return defaultCompactionTimeout
+}
+
+func deterministicCompactionSummary(reason string) string {
+	displayReason := "provider error"
+	if reason == compactionFallbackTimeout {
+		displayReason = "timeout"
+	}
+	return "Model-generated compaction summary unavailable (" + displayReason + "). Continue from the active WorkState when present, the preserved instructions and recognized file activity in this checkpoint, and any recent verbatim turns. Recover older details from the raw transcript archive if needed."
+}
+
+func (a *Agent) deterministicCompactionNotice(reason string) string {
+	if reason == compactionFallbackTimeout {
+		timeout := a.compactionSummaryTimeout()
+		if timeout%time.Second == 0 {
+			return fmt.Sprintf("[compact summary timed out after %.0fs; used deterministic checkpoint]", timeout.Seconds())
+		}
+		return fmt.Sprintf("[compact summary timed out after %s; used deterministic checkpoint]", timeout)
+	}
+	return "[compact summary failed; used deterministic checkpoint]"
 }
 
 func priorCompactionMetadata(messages []llm.Message) *llm.CompactionMetadata {

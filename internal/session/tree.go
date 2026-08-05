@@ -75,6 +75,8 @@ type Entry struct {
 	FirstKeptEntryID string       `json:"first_kept_entry_id,omitempty"`
 	ArchiveRef       string       `json:"archive_ref,omitempty"`
 	TokensBefore     int          `json:"tokens_before,omitempty"`
+	SummarySource    string       `json:"summary_source,omitempty"`
+	FallbackReason   string       `json:"fallback_reason,omitempty"`
 	ReadFiles        []string     `json:"read_files,omitempty"`
 	ModifiedFiles    []string     `json:"modified_files,omitempty"`
 	MaterializedKept bool         `json:"materialized_kept,omitempty"`
@@ -614,6 +616,12 @@ func (t *Tree) commitCompaction(messages []llm.Message) error {
 		materializeBoundary = true
 	}
 	checkpoint := cloneMessagesForTree(messages[:1])[0]
+	summarySource := ""
+	fallbackReason := ""
+	if checkpoint.Compaction != nil {
+		summarySource = checkpoint.Compaction.SummarySource
+		fallbackReason = checkpoint.Compaction.FallbackReason
+	}
 	keptCount := len(t.activeMsgs) - p.olderCount
 	baseLen := 1 + keptCount
 	if baseLen > len(messages) {
@@ -629,6 +637,8 @@ func (t *Tree) commitCompaction(messages []llm.Message) error {
 		ArchiveRef:       p.archiveRef,
 		Summary:          p.summary,
 		TokensBefore:     p.tokensBefore,
+		SummarySource:    summarySource,
+		FallbackReason:   fallbackReason,
 		CustomFocus:      p.focus,
 		ReadFiles:        append([]string(nil), p.readFiles...),
 		ModifiedFiles:    append([]string(nil), p.modifiedFiles...),
@@ -862,10 +872,12 @@ func contextCheckpoint(entry Entry) (llm.Message, error) {
 	}
 	checkpoint := cloneMessagesForTree([]llm.Message{*entry.Checkpoint})[0]
 	checkpoint.Compaction = &llm.CompactionMetadata{
-		Summary:       entry.Summary,
-		Focus:         entry.CustomFocus,
-		ReadFiles:     append([]string(nil), entry.ReadFiles...),
-		ModifiedFiles: append([]string(nil), entry.ModifiedFiles...),
+		Summary:        entry.Summary,
+		SummarySource:  entry.SummarySource,
+		FallbackReason: entry.FallbackReason,
+		Focus:          entry.CustomFocus,
+		ReadFiles:      append([]string(nil), entry.ReadFiles...),
+		ModifiedFiles:  append([]string(nil), entry.ModifiedFiles...),
 	}
 	return checkpoint, nil
 }

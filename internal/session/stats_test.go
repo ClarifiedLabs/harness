@@ -468,7 +468,9 @@ func TestStatsCompactionMetadataAllowsAdditiveFields(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	saveStatsFixture(t, dir, Session{}, nil)
 	_, err := SaveCompaction(dir, Compaction{
-		Summary: "summary",
+		Summary:        "summary",
+		SummarySource:  "deterministic",
+		FallbackReason: "timeout",
 		Messages: []llm.Message{{
 			Role:    llm.RoleUser,
 			Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "old context"}},
@@ -505,6 +507,9 @@ func TestStatsCompactionMetadataAllowsAdditiveFields(t *testing.T) {
 	}
 	if report.compactions.runs != 1 || report.compactions.messageCount != 1 {
 		t.Fatalf("compaction stats = %+v", report.compactions)
+	}
+	if report.compactions.deterministicSummaries != 1 || report.compactions.fallbackReasons["timeout"] != 1 {
+		t.Fatalf("compaction provenance stats = %+v", report.compactions)
 	}
 }
 

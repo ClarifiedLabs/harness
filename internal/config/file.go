@@ -74,6 +74,7 @@ type fileConfig struct {
 	CompactTargetPercent               optional[int]                        `json:"compact_target_percent"`
 	CompactIdleAfterSeconds            optional[int]                        `json:"compact_idle_after_seconds"`
 	CompactIdleTriggerPercent          optional[int]                        `json:"compact_idle_trigger_percent"`
+	CompactTimeoutSeconds              optional[int]                        `json:"compact_timeout_seconds"`
 	CompactSummaryMaxTokens            optional[int]                        `json:"compact_summary_max_tokens"`
 	CompactToolResultMaxBytes          optional[int]                        `json:"compact_tool_result_max_bytes"`
 	DelegateMaxTurns                   optional[int]                        `json:"delegate_max_turns"`

@@ -443,7 +443,7 @@ func TestCompactionMaterializesRewrittenKeptSuffix(t *testing.T) {
 		t.Fatalf("LinearTree: %v", err)
 	}
 	checkpoint := llm.Message{Role: llm.RoleUser, Time: at.Add(2 * time.Minute), Origin: llm.MessageOriginCompactionCheckpoint, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "checkpoint"}}}
-	checkpoint.Compaction = &llm.CompactionMetadata{Summary: "summary"}
+	checkpoint.Compaction = &llm.CompactionMetadata{Summary: "summary", SummarySource: "deterministic", FallbackReason: "timeout"}
 	if err := tree.PrepareCompaction(before, 2, "summary", "archive", 100, "focus", []string{"read.go"}, []string{"changed.go"}); err != nil {
 		t.Fatalf("PrepareCompaction: %v", err)
 	}
@@ -467,6 +467,9 @@ func TestCompactionMaterializesRewrittenKeptSuffix(t *testing.T) {
 	}
 	if text := transcriptText(got); !strings.Contains(text, "[truncated payload]") || strings.Contains(text, "large original payload") {
 		t.Fatalf("rewritten kept suffix was not preserved: %q", text)
+	}
+	if got[0].Compaction == nil || got[0].Compaction.SummarySource != "deterministic" || got[0].Compaction.FallbackReason != "timeout" {
+		t.Fatalf("compaction provenance was not preserved: %+v", got[0].Compaction)
 	}
 	if got[0].Compaction == nil || got[0].Compaction.Focus != "focus" || !slices.Equal(got[0].Compaction.ReadFiles, []string{"read.go"}) {
 		t.Fatalf("checkpoint metadata was not reconstructed: %+v", got[0].Compaction)

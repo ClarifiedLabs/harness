@@ -108,6 +108,7 @@ type RuntimeProfile struct {
 	ToolResultMaxBytes        int    `json:"tool_result_max_bytes,omitempty"`
 	ToolResultMaxLines        int    `json:"tool_result_max_lines,omitempty"`
 	CompactToolResultMaxBytes int    `json:"compact_tool_result_max_bytes,omitempty"`
+	CompactTimeoutSeconds     int    `json:"compact_timeout_seconds,omitempty"`
 	ResponsesStateful         bool   `json:"responses_stateful,omitempty"`
 	DelegateMaxTurns          int    `json:"delegate_max_turns,omitempty"`
 	DelegateMaxActive         int    `json:"delegate_max_active,omitempty"`
@@ -1921,27 +1922,31 @@ func formatDuration(d time.Duration) string {
 // Compaction stores the raw messages removed from active context and the summary
 // that replaced them.
 type Compaction struct {
-	Time          time.Time     `json:"time"`
-	Summary       string        `json:"summary"`
-	Usage         llm.Usage     `json:"usage"`
-	Messages      []llm.Message `json:"messages"`
-	Focus         string        `json:"focus,omitempty"`
-	ReadFiles     []string      `json:"read_files,omitempty"`
-	ModifiedFiles []string      `json:"modified_files,omitempty"`
+	Time           time.Time     `json:"time"`
+	Summary        string        `json:"summary"`
+	SummarySource  string        `json:"summary_source,omitempty"`
+	FallbackReason string        `json:"fallback_reason,omitempty"`
+	Usage          llm.Usage     `json:"usage"`
+	Messages       []llm.Message `json:"messages"`
+	Focus          string        `json:"focus,omitempty"`
+	ReadFiles      []string      `json:"read_files,omitempty"`
+	ModifiedFiles  []string      `json:"modified_files,omitempty"`
 }
 
 // compactionMetadata is the canonical shape of compactions/*.meta.json. Keep
 // readers on this type so analysis code cannot drift from the persisted format
 // when metadata fields are added.
 type compactionMetadata struct {
-	Time          time.Time `json:"time"`
-	Usage         llm.Usage `json:"usage"`
-	MessageCount  int       `json:"message_count"`
-	Input         string    `json:"input"`
-	Summary       string    `json:"summary"`
-	Focus         string    `json:"focus,omitempty"`
-	ReadFiles     []string  `json:"read_files,omitempty"`
-	ModifiedFiles []string  `json:"modified_files,omitempty"`
+	Time           time.Time `json:"time"`
+	Usage          llm.Usage `json:"usage"`
+	MessageCount   int       `json:"message_count"`
+	Input          string    `json:"input"`
+	Summary        string    `json:"summary"`
+	SummarySource  string    `json:"summary_source,omitempty"`
+	FallbackReason string    `json:"fallback_reason,omitempty"`
+	Focus          string    `json:"focus,omitempty"`
+	ReadFiles      []string  `json:"read_files,omitempty"`
+	ModifiedFiles  []string  `json:"modified_files,omitempty"`
 }
 
 // SaveCompaction writes one numbered compaction archive and returns the relative
@@ -1969,14 +1974,16 @@ func SaveCompaction(dir string, c Compaction) (string, error) {
 		return "", fmt.Errorf("session: write compaction summary: %w", err)
 	}
 	meta := compactionMetadata{
-		Time:          c.Time,
-		Usage:         c.Usage,
-		MessageCount:  len(c.Messages),
-		Input:         inputRel,
-		Summary:       filepath.Join("compactions", prefix+".summary.md"),
-		Focus:         c.Focus,
-		ReadFiles:     append([]string(nil), c.ReadFiles...),
-		ModifiedFiles: append([]string(nil), c.ModifiedFiles...),
+		Time:           c.Time,
+		Usage:          c.Usage,
+		MessageCount:   len(c.Messages),
+		Input:          inputRel,
+		Summary:        filepath.Join("compactions", prefix+".summary.md"),
+		SummarySource:  c.SummarySource,
+		FallbackReason: c.FallbackReason,
+		Focus:          c.Focus,
+		ReadFiles:      append([]string(nil), c.ReadFiles...),
+		ModifiedFiles:  append([]string(nil), c.ModifiedFiles...),
 	}
 	if err := writeJSONAtomic(filepath.Join(base, prefix+".meta.json"), meta); err != nil {
 		return "", err

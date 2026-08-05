@@ -507,6 +507,25 @@ func TestCompactToolResultLimitAllowsNegativeDisableSentinel(t *testing.T) {
 	}
 }
 
+func TestCompactTimeoutDefaultsAndValidates(t *testing.T) {
+	result := load(t, nil, nil, "")
+	if result.Config.CompactTimeoutSeconds != 300 {
+		t.Fatalf("CompactTimeoutSeconds = %d, want 300", result.Config.CompactTimeoutSeconds)
+	}
+
+	result = load(t, nil, nil, writeConfig(t, `{"compact_timeout_seconds":45}`))
+	if result.Config.CompactTimeoutSeconds != 45 {
+		t.Fatalf("configured CompactTimeoutSeconds = %d, want 45", result.Config.CompactTimeoutSeconds)
+	}
+
+	for _, value := range []string{"0", "-1"} {
+		path := writeConfig(t, `{"compact_timeout_seconds":`+value+`}`)
+		if _, err := Load(LoadOptions{LookupEnv: lookup(nil), DefaultConfigPath: path}); err == nil || !strings.Contains(err.Error(), "compact_timeout_seconds must be positive") {
+			t.Fatalf("compact_timeout_seconds=%s error = %v", value, err)
+		}
+	}
+}
+
 func TestProjectionPreservesProviderQualifiedModel(t *testing.T) {
 	result := load(t, nil, nil, writeConfig(t, `{"model":"openai:gpt-5"}`))
 	values := Project(result, false).Values
