@@ -2483,9 +2483,11 @@ verification leaves additionally require an acceptable verification result.
 `internal/workstate` owns validation, immutable revision snapshots, transitions,
 rendering, and persistence. Each session has `work.ndjson`, an append-only,
 fsynced revision log. `state.json` stores the current projection and digest-validates
-it against that log on resume. A structural ready-plan revision also writes an
-immutable `work/<work-id>/<revision>.plan.md` artifact by temp-file, fsync, and
-rename. Session-tree entries record their WorkState revision. Branching checks
+it against that log on resume. Resume resolves the log directly from the selected
+session directory before restoring the projection; a clone seeds its destination
+directory before rebasing the projection there. A structural ready-plan revision
+also writes an immutable `work/<work-id>/<revision>.plan.md` artifact by temp-file,
+fsync, and rename. Session-tree entries record their WorkState revision. Branching checks
 out that revision, marks prior evidence/results stale, and requires explicit
 workspace reconciliation; fork/clone rebases the same projection into the new
 session log.
@@ -2506,23 +2508,33 @@ opaque internal IDs, gate state, and progress counts. Plan artifact paths remain
 available to human UI and handoff code but are not placed in tool receipts or
 ordinary recovery capsules. An approved implementation handoff adds the
 artifact path explicitly to its fresh implementation seed. Crossing a
-host-generated top-level phase or
-tripping an overlong-step gate schedules a clean context epoch after the closed
+host-generated top-level phase schedules a clean context epoch after the closed
 tool-result batch. Harness archives the prior transcript, appends a session-tree
 context reset, clears provider continuation state, and seeds the next request
-from the active capsule. `/work` exposes summary/steps/show/new/abandon views.
+from the active capsule. Reaching an active-step inspection boundary instead
+preserves the current transcript and provider continuation, arms the updated
+capsule, and gates only later inspection dispatch. `/work` exposes
+summary/steps/show/new/abandon views.
 
 Harness automatically observes unambiguous mutation paths, verification
 commands/outcomes, foreground delegate completion, and successful inspection
 results and attaches them to the step active when the tool began. Structured
 inspection output is atomically archived once under a call-ID-based artifact;
-WorkState retains only a bounded evidence receipt and stable path. Planning
-updates and other administrative coordination are not meaningful implementation
-progress. After 12
-inspection-bearing turns without explicit progress, inspection dispatch is
-gated. The model must record concrete evidence/progress, block/wait/finish, or
-name one missing-evidence question; that question grants four bounded
-inspection-bearing turns.
+WorkState retains only a bounded evidence receipt and stable path. At per-node
+or total evidence limits, the oldest unreferenced automatic receipt is evicted;
+results, model-authored evidence, and receipts selected by completion or
+question references are never eviction candidates. Artifact files remain
+available in the session. Planning updates, source-evidence attachment, and
+other same-step bookkeeping do not reset the active-step guard.
+
+The guard counts inspection operations at dispatch attribution rather than
+tool-bearing turns, so eight parallel reads consume eight operations. After 12
+operations on one active step, inspection dispatch is gated. The model must
+complete or transition the active step, block/wait/finish the work, or name one
+focused missing-evidence question. The first such question grants four more
+inspection operations for that step. The extension is cumulative and cannot be
+renewed; after it is exhausted only a step/lifecycle decision clears the gate.
+The same accounting and capsule behavior applies to delegate children.
 
 ### 9.14 `delegate`
 

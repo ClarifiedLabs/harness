@@ -6212,6 +6212,85 @@ func TestWorkContextDeliveryIsOneShotAndPromptAdmissionPreservesActiveLineage(t 
 	}
 }
 
+func TestInspectionBoundaryCountsBatchedOperationsWithoutContextReset(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	app.Work = workstate.NewStore(func() string { return app.SessionPath })
+	state, err := app.Work.NewWork("inspect without looping", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.Default()
+	registry.Register(tools.NewUpdateWork(app.Work))
+	app.Agent.SetTools(registry)
+	sink := newAccumulatingSink(app.Renderer, app, 1)
+	sink.ToolStart(llm.ToolCall{
+		ID: "batch-8", Name: "read_file",
+		Input: json.RawMessage(`{"paths":["a","b","c","d","e","f","g","h"]}`),
+	})
+	sink.TurnProgress(agent.TurnProgress{Turn: 1})
+	state = app.Work.Snapshot()
+	if state.Gate.InspectionOperations != 8 || state.Gate.DecisionRequired {
+		t.Fatalf("gate after eight operations = %+v", state.Gate)
+	}
+	sink.ToolStart(llm.ToolCall{
+		ID: "batch-4", Name: "read_file",
+		Input: json.RawMessage(`{"paths":["i","j","k","l"]}`),
+	})
+	sink.TurnProgress(agent.TurnProgress{Turn: 2})
+	state = app.Work.Snapshot()
+	if state.Gate.InspectionOperations != workstate.DecisionOperationThreshold || !state.Gate.DecisionRequired {
+		t.Fatalf("gate after twelve operations = %+v", state.Gate)
+	}
+	if sink.pendingWorkEpoch {
+		t.Fatal("inspection boundary scheduled a destructive context epoch")
+	}
+	if context := strings.Join(sink.PeekRequestContext(), "\n"); !strings.Contains(context, "Decision required") {
+		t.Fatalf("retained work capsule = %q", context)
+	}
+}
+
+func TestWorkObservationFailureIsPersistedWithAttribution(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	app.Work = workstate.NewStore(func() string { return app.SessionPath })
+	state, err := app.Work.NewWork("retain diagnostics", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = app.Work.SetPlan(workstate.PlanUpdate{
+		BaseRevisionID: state.RevisionID,
+		PlanState:      workstate.PlanDraft,
+		ActiveStepID:   "inspect",
+		Nodes:          []workstate.NodeDefinition{{ID: "inspect", Type: workstate.NodeStep, Title: "Inspect", Kind: workstate.KindDiscover}},
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := newAccumulatingSink(app.Renderer, app, 1)
+	sink.turn = 4
+	sink.workNotice("work evidence observation failed", errors.New("too much evidence for node \"step_1\""))
+	if !strings.Contains(errw.String(), "[work evidence observation failed: too much evidence for node \"step_1\"]") {
+		t.Fatalf("live warning = %q", errw.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		`work evidence observation failed`,
+		`"turn":4`,
+		`"work_id":"` + state.WorkID + `"`,
+		`"work_revision_id":"` + state.RevisionID + `"`,
+		`"work_step_id":"` + state.ActiveStepID + `"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("raw.ndjson missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestWorkContextEpochArchivesAndSeedsActiveStep(t *testing.T) {
 	var out, errw bytes.Buffer
 	app := newTestApp(t, &out, &errw, llmtest.New("fake"))

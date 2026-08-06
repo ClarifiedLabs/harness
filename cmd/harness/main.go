@@ -739,6 +739,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		ServerTools:           serverTools,
 		ResponsesStateful:     responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		Agent:                 agentName,
+		SessionPath:           sessionPath,
 		Depth:                 0,
 		MaxPromptTokens:       cfg.MaxPromptTokens,
 		MaxPromptCostUSD:      cfg.MaxPromptCostUSD,
@@ -813,8 +814,8 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	toolCatalog.Register(tools.NewUpdateWork(workStore))
 	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, workStore, interactiveSession || machineInteractive, agentdef.Names(agents)))
 	toolCatalog.SetDispatchGuard(func(call llm.ToolCall, activity tools.Activity) error {
-		if workStore.DecisionRequired() && activity.Class == tools.ActivityInspect {
-			return fmt.Errorf("work decision required: inspection tool %q is paused; use update_work to record concrete evidence or progress, name one bounded evidence question, or report a blocker", call.Name)
+		if guidance := workStore.DecisionGuidance(); guidance != "" && activity.Class == tools.ActivityInspect {
+			return fmt.Errorf("%s (inspection tool %q is paused)", guidance, call.Name)
 		}
 		return nil
 	})
@@ -1113,7 +1114,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 		ag.SetTranscript(s.Messages)
 		if !resumeCloned {
-			if err := workStore.LoadLog(delegateState.Snapshot().SessionPath); err != nil {
+			if err := workStore.LoadLog(sessionPath); err != nil {
 				fmt.Fprintf(stderr, "harness: restore work revisions: %v\n", err)
 				return ui.ExitRuntime
 			}

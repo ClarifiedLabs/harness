@@ -739,8 +739,8 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		childTools.Register(tools.NewUpdateWork(childWork))
 	}
 	childTools.SetDispatchGuard(func(call llm.ToolCall, activity tools.Activity) error {
-		if childWork.DecisionRequired() && activity.Class == tools.ActivityInspect {
-			return fmt.Errorf("work decision required: inspection tool %q is paused; use update_work to record concrete evidence or progress, name one bounded evidence question, or report a blocker", call.Name)
+		if guidance := childWork.DecisionGuidance(); guidance != "" && activity.Class == tools.ActivityInspect {
+			return fmt.Errorf("%s (inspection tool %q is paused)", guidance, call.Name)
 		}
 		return nil
 	})
@@ -1921,6 +1921,7 @@ type childSink struct {
 	toolActivity         func(llm.ToolCall) tools.Activity
 	pendingWorkResults   map[string][]workstate.Result
 	pendingWorkTargets   map[string]workObservationTarget
+	inspectionOperations map[string]int
 	workContextPending   bool
 }
 
@@ -1936,12 +1937,13 @@ type pendingChildTool struct {
 
 func newChildSink(sessionDir string, progress *Progress, activity *ActivityRegistration, reasoning ...bool) *childSink {
 	sink := &childSink{
-		sessionDir:         sessionDir,
-		progress:           progress,
-		activity:           activity,
-		pending:            make(map[string]pendingChildTool),
-		pendingWorkResults: make(map[string][]workstate.Result),
-		pendingWorkTargets: make(map[string]workObservationTarget),
+		sessionDir:           sessionDir,
+		progress:             progress,
+		activity:             activity,
+		pending:              make(map[string]pendingChildTool),
+		pendingWorkResults:   make(map[string][]workstate.Result),
+		pendingWorkTargets:   make(map[string]workObservationTarget),
+		inspectionOperations: make(map[string]int),
 	}
 	if len(reasoning) > 0 {
 		sink.reasoning = reasoning[0]
@@ -2190,8 +2192,17 @@ func (s *childSink) ToolStart(call llm.ToolCall) {
 	summary := safeToolActivity(call)
 	s.pending[call.ID] = pendingChildTool{call: call, summary: summary}
 	if s.work != nil {
-		if work := s.work.Snapshot(); work != nil && work.ActiveStepID != "" {
-			s.pendingWorkTargets[call.ID] = workObservationTarget{revisionID: work.RevisionID, stepID: work.ActiveStepID}
+		if work := s.work.Snapshot(); work != nil {
+			if work.ActiveStepID != "" {
+				s.pendingWorkTargets[call.ID] = workObservationTarget{revisionID: work.RevisionID, stepID: work.ActiveStepID}
+			}
+			activity := tools.Activity{}
+			if s.toolActivity != nil {
+				activity = s.toolActivity(call)
+			}
+			if stepID := workstate.InspectionStepID(work); stepID != "" && activity.Class == tools.ActivityInspect {
+				s.inspectionOperations[stepID] += activity.OperationCount
+			}
 		}
 	}
 	s.progress.markTool()
@@ -2253,13 +2264,13 @@ func (s *childSink) attachObservedWorkResults(call llm.ToolCall, result llm.Tool
 	if activity.Class == tools.ActivityInspect && !result.IsError && current != nil && current.PlanState != workstate.PlanImplicit {
 		ref, err := session.SaveWorkEvidenceArtifact(s.sessionDir, 1, s.turn, result)
 		if err != nil {
-			s.retainAppendError(err)
+			s.workNotice("work evidence archive failed", err)
 		} else if ref != "" {
 			updated, err := s.work.AddEvidence(target.stepID, []workstate.EvidenceInput{{
 				Kind: workstate.EvidenceArtifact, Path: filepath.Join(s.sessionDir, ref), Summary: preview(childWorkCallSummary(call)+" inspection result", 1024), ToolCallID: call.ID,
 			}}, "host")
 			if err != nil {
-				s.retainAppendError(err)
+				s.workNotice("work evidence observation failed", err)
 			} else if updated != nil {
 				current = updated
 				s.workContextPending = true
@@ -2297,7 +2308,7 @@ func (s *childSink) attachObservedWorkResults(call llm.ToolCall, result llm.Tool
 		}
 	}
 	if _, err := s.work.AddResults(target.stepID, results, "host"); err != nil {
-		s.retainAppendError(err)
+		s.workNotice("work observation failed", err)
 	} else {
 		s.workContextPending = true
 	}
@@ -2339,6 +2350,24 @@ func (s *childSink) Notice(msg string) {
 	if text, ok := safeNoticeLine(msg); ok {
 		s.activity.publishText(ActivityEventNotice, text, s.turn, s.attempt, false)
 	}
+}
+
+func (s *childSink) workNotice(label string, err error) {
+	if s == nil || err == nil {
+		return
+	}
+	msg := fmt.Sprintf("[%s: %s]", label, session.ErrorExcerpt(err.Error()))
+	var workID, revisionID, stepID string
+	if s.work != nil {
+		if work := s.work.Snapshot(); work != nil {
+			workID, revisionID, stepID = work.WorkID, work.RevisionID, work.ActiveStepID
+		}
+	}
+	s.rec.WorkNotice(msg, s.turn, workID, revisionID, stepID)
+	if text, ok := safeNoticeLine(msg); ok {
+		s.activity.publishText(ActivityEventNotice, text, s.turn, s.attempt, false)
+	}
+	s.retainAppendError(err)
 }
 
 func (s *childSink) TurnComplete(usage agent.TurnUsage) {
@@ -2410,8 +2439,18 @@ func (s *childSink) TurnProgress(progress agent.TurnProgress) {
 	} else {
 		s.rec.TurnProgressForWork(progress, work.WorkID, work.RevisionID, work.ActiveStepID)
 	}
-	if _, err := s.work.RecordInspectionTurn(progress.InspectionOnly && progress.NoExplicitProgress, progress.ExplicitProgress); err != nil {
-		s.retainAppendError(err)
+	wasRequired := work != nil && work.Gate.DecisionRequired
+	stepID, operations := "", 0
+	if work != nil {
+		stepID = workstate.InspectionStepID(work)
+		operations = s.inspectionOperations[stepID]
+	}
+	updated, err := s.work.RecordInspectionOperations(stepID, operations)
+	clear(s.inspectionOperations)
+	if err != nil {
+		s.workNotice("work progress tracking failed", err)
+	} else if !wasRequired && updated != nil && updated.Gate.DecisionRequired {
+		s.workContextPending = true
 	}
 }
 

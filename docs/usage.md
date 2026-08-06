@@ -1659,8 +1659,12 @@ request context. A nonterminal lineage remains active across follow-up prompts:
 no `update_work` call leaves it unchanged, `progress` steers it, `plan` extends
 it, and `/work new` explicitly replaces it. Recovery capsules are delivered
 once after resume, compaction, branching, agent/model switches, or host-observed
-evidence. Top-level phase changes and overlong-step decision gates create clean,
-archived context checkpoints at closed tool-turn boundaries.
+evidence. Top-level phase changes create clean, archived context checkpoints at
+closed tool-turn boundaries. An active step instead reaches a hard inspection
+boundary after 12 inspection operations while preserving the current
+conversation. One focused `needs_evidence` request grants four more operations;
+it cannot be renewed, so exhaustion requires completing or transitioning the
+step or marking the work waiting or blocked.
 
 ## Sessions
 
@@ -1670,7 +1674,9 @@ archived context checkpoints at closed tool-turn boundaries.
   without migration. `state.json` is compact mutable state
   containing the active leaf and runtime settings; `active-turn.json` is a transient atomic recovery
   record for the current model/tool boundary; `raw.ndjson` is the chronological
-  replay log. Consecutive assistant stream fragments are stored in bounded 4 KiB
+  replay log. Work evidence/archive/tracking failures are retained there as
+  attributed notice events, rather than only printed to the terminal.
+  Consecutive assistant stream fragments are stored in bounded 4 KiB
   or 250ms chunks rather than one record per provider delta.
   `compactions/` stores raw messages removed from active context, `children/`
   stores child-agent transcripts and metadata, and `artifacts/tool-results/`
@@ -1685,8 +1691,9 @@ archived context checkpoints at closed tool-turn boundaries.
   automatically executing it again. Closed-turn checkpoints include the current
   WorkState projection, usage, cache/proxy IDs, and a safe provider continuation anchor.
 - `-session <dir>` chooses an explicit session directory. `-resume <dir>` loads
-  its active tree path and continues, applying a newer active-turn recovery
-  record when present and printing the recovered boundary. Resume also prints a
+  its active tree path and `work.ndjson` revision log from that directory before
+  restoring the WorkState projection, then continues, applying a newer
+  active-turn recovery record when present and printing the recovered boundary. Resume also prints a
   bounded recap of the last exchange to stderr before the first prompt — the
   most recent human prompt and assistant reply — with an explicit trailer when
   the prior session ended mid-turn (interrupted mid-reply, during tool

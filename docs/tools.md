@@ -250,9 +250,15 @@ stable archived receipts for successful structured-step inspections to the
 active step. An implicit first prompt carries no duplicate capsule; recovery
 capsules are delivered once after resume, context rewrites, switches, branches,
 or host-side evidence changes. Administrative plan updates do not reset the
-implementation progress guard. After 12 inspection-bearing turns without meaningful progress,
-further inspection is gated until the agent records concrete evidence/progress,
-reports a blocker/wait, or names one bounded missing-evidence question.
+active-step inspection guard. Successful structured-step inspection receipts
+roll at the evidence limit by evicting the oldest unreferenced automatic
+receipt; model-selected evidence and results are preserved. After 12 inspection
+operations on one active step, further inspection is gated. The current
+conversation is preserved and a fresh active-step capsule is armed. The agent
+must complete or transition the step, report a blocker/wait, or name one focused
+missing-evidence question. That question grants the step's only extension of
+four additional inspection operations; exhausting it requires a transition or
+terminal work decision rather than another extension.
 Custom agents with an explicit `allowed_tools` list may omit the tool.
 
 ## File Mutation

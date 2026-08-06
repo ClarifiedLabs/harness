@@ -173,6 +173,22 @@ func TestRecorderStampsExecutionIdentityOnAttemptsAndTools(t *testing.T) {
 	}
 }
 
+func TestRecorderWorkNoticePersistsAttribution(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 2})
+	rec.WorkNotice("[work evidence observation failed: full]", 7, "work-1", "rev-2", "step-3")
+	events := readEvents(t, dir)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.Type != session.EventNotice || event.Prompt != 2 || event.Turn != 7 ||
+		event.Display != "[work evidence observation failed: full]" || event.WorkID != "work-1" ||
+		event.WorkRevisionID != "rev-2" || event.WorkStepID != "step-3" {
+		t.Fatalf("work notice = %+v", event)
+	}
+}
+
 func TestRecorderNoopsOnEmptyDir(t *testing.T) {
 	rec := New(Config{})
 	rec.User("task")

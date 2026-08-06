@@ -1726,6 +1726,31 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	}
 }
 
+func TestChildSinkInspectionBoundaryCountsBatchedOperations(t *testing.T) {
+	dir := t.TempDir()
+	store := workstate.NewStore(func() string { return dir })
+	state, err := store.NewWork("inspect without looping", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.Default()
+	sink := newChildSink(dir, NewProgress(), nil)
+	sink.work = store
+	sink.toolActivity = registry.CallActivity
+	sink.ToolStart(llm.ToolCall{
+		ID: "batch-12", Name: "read_file",
+		Input: json.RawMessage(`{"paths":["a","b","c","d","e","f","g","h","i","j","k","l"]}`),
+	})
+	sink.TurnProgress(agent.TurnProgress{Turn: 1})
+	state = store.Snapshot()
+	if state.Gate.InspectionOperations != workstate.DecisionOperationThreshold || !state.Gate.DecisionRequired {
+		t.Fatalf("child gate = %+v", state.Gate)
+	}
+	if !sink.workContextPending {
+		t.Fatal("child did not arm the retained WorkState capsule")
+	}
+}
+
 func TestChildSinkFoldsPreflightMaintenanceIntoPromptUsage(t *testing.T) {
 	dir := t.TempDir()
 	sink := newChildSink(dir, NewProgress(), nil)

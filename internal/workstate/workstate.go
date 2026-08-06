@@ -58,19 +58,19 @@ const (
 	VerifyFailed = "failed"
 	VerifyNotRun = "not_run"
 
-	maxNodes               = 128
-	maxListItems           = 32
-	maxEvidencePerNode     = 64
-	maxEvidenceTotal       = 512
-	maxQuestions           = 64
-	maxTitleRunes          = 200
-	maxObjectiveRunes      = 4000
-	maxValueRunes          = 1024
-	maxDetailRunes         = 2048
-	DecisionThreshold      = 12
-	EvidenceTurnAllowance  = 4
-	RequestContextMaxBytes = 12 << 10
-	implicitStepID         = "implicit_current"
+	maxNodes                   = 128
+	maxListItems               = 32
+	maxEvidencePerNode         = 64
+	maxEvidenceTotal           = 512
+	maxQuestions               = 64
+	maxTitleRunes              = 200
+	maxObjectiveRunes          = 4000
+	maxValueRunes              = 1024
+	maxDetailRunes             = 2048
+	DecisionOperationThreshold = 12
+	EvidenceOperationAllowance = 4
+	RequestContextMaxBytes     = 12 << 10
+	implicitStepID             = "implicit_current"
 )
 
 var nodeIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
@@ -103,11 +103,15 @@ type State struct {
 }
 
 type Gate struct {
-	InspectionTurns  int      `json:"inspection_turns,omitempty"`
-	DecisionRequired bool     `json:"decision_required,omitempty"`
-	AllowanceTurns   int      `json:"allowance_turns,omitempty"`
-	Question         string   `json:"question,omitempty"`
-	Targets          []string `json:"targets,omitempty"`
+	// The legacy JSON names are retained so existing revision digests remain
+	// valid. These counters are operation-based: one batched tool turn may add
+	// several inspection operations.
+	InspectionOperations int      `json:"inspection_turns,omitempty"`
+	DecisionRequired     bool     `json:"decision_required,omitempty"`
+	AllowanceOperations  int      `json:"allowance_turns,omitempty"`
+	ExtensionUsed        bool     `json:"extension_used,omitempty"`
+	Question             string   `json:"question,omitempty"`
+	Targets              []string `json:"targets,omitempty"`
 }
 
 // NodeDefinition is the model-authored structural portion of a node.
@@ -372,6 +376,7 @@ func (s *Store) SetPlan(update PlanUpdate, actor string) (*State, error) {
 	next := cloneState(s.current)
 	carryEvidence, carryResults := implicitObservations(*next)
 	previousActiveStepID := next.ActiveStepID
+	previousInspectionStepID := InspectionStepID(next)
 	next.Title = strings.TrimSpace(update.Title)
 	if strings.TrimSpace(update.Objective) != "" {
 		next.Objective = strings.TrimSpace(update.Objective)
@@ -444,7 +449,7 @@ func (s *Store) SetPlan(update PlanUpdate, actor string) (*State, error) {
 			return nil, err
 		}
 	}
-	if structuralChange(s.current, next) {
+	if InspectionStepID(next) != previousInspectionStepID {
 		next.Gate = Gate{}
 	}
 	return s.commitLocked(next, actor, "plan")
@@ -505,11 +510,17 @@ func (s *Store) Progress(update ProgressUpdate, actor string) (*State, error) {
 			return nil, errors.New("evidence requires an active or explicit step")
 		}
 		for _, input := range update.Evidence {
+			// Evidence supplied through update_work is model-selected, even if a
+			// caller included an unknown tool_call_id field.
+			input.ToolCallID = ""
 			evidence, err := makeEvidence(input, s.clock()())
 			if err != nil {
 				return nil, err
 			}
 			if !hasEquivalentEvidence(node.Evidence, evidence) {
+				if !makeEvidenceRoom(next, node.ID, 1) {
+					return nil, fmt.Errorf("too much selected evidence/results for node %q", node.ID)
+				}
 				node.Evidence = append(node.Evidence, evidence)
 				changed = true
 			}
@@ -584,11 +595,21 @@ func (s *Store) Progress(update ProgressUpdate, actor string) (*State, error) {
 		changed = true
 	}
 	if update.NeedsEvidence != nil {
+		if !next.Gate.DecisionRequired {
+			return nil, errors.New("focused evidence extension requires a work decision gate")
+		}
+		if gateExtensionUsed(next.Gate) {
+			return nil, errors.New("focused evidence extension already used for the active work step")
+		}
 		question := strings.TrimSpace(update.NeedsEvidence.Question)
 		if err := validateText("evidence question", question, maxValueRunes, false); err != nil {
 			return nil, err
 		}
-		next.Gate = Gate{AllowanceTurns: EvidenceTurnAllowance, Question: question, Targets: cloneStrings(update.NeedsEvidence.Targets)}
+		next.Gate.AllowanceOperations = EvidenceOperationAllowance
+		next.Gate.DecisionRequired = false
+		next.Gate.ExtensionUsed = true
+		next.Gate.Question = question
+		next.Gate.Targets = cloneStrings(update.NeedsEvidence.Targets)
 		changed = true
 	}
 	if update.WorkStatus != "" {
@@ -664,19 +685,10 @@ func (s *Store) Progress(update ProgressUpdate, actor string) (*State, error) {
 			next.CompletionSummary = strings.TrimSpace(update.Summary)
 		}
 	}
-	if progressIsMeaningful(update) {
+	if InspectionStepID(next) != InspectionStepID(s.current) || next.Lifecycle != LifecycleActive {
 		next.Gate = Gate{}
-	} else if update.NeedsEvidence != nil {
-		next.Gate.InspectionTurns = 0
-		next.Gate.DecisionRequired = false
 	}
 	return s.commitLocked(next, actor, "progress")
-}
-
-func progressIsMeaningful(update ProgressUpdate) bool {
-	return update.Status == StatusCompleted || update.Status == StatusSkipped || update.Status == StatusBlocked ||
-		update.WorkStatus == LifecycleWaiting || update.WorkStatus == LifecycleBlocked || update.WorkStatus == LifecycleCompleted ||
-		len(update.Evidence) > 0 || update.WorkspaceReconciled
 }
 
 func progressNeedsStep(update ProgressUpdate) bool {
@@ -708,46 +720,86 @@ func (s *Store) AutoCompleteImplicit(summary string) (*State, error) {
 	return s.commitLocked(next, "host", "auto_complete")
 }
 
-// RecordInspectionTurn updates the persisted decision gate. It commits only
-// when counters change or the gate trips.
-func (s *Store) RecordInspectionTurn(inspectionOnly, explicitProgress bool) (*State, error) {
+// RecordInspectionOperations updates the persisted decision gate for
+// inspection work attributed to the step that was active when tools were
+// dispatched. It commits only when counters change or the gate trips.
+func (s *Store) RecordInspectionOperations(stepID string, operations int) (*State, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.current == nil || terminalLifecycle(s.current.Lifecycle) {
+	if s.current == nil || terminalLifecycle(s.current.Lifecycle) || operations <= 0 {
+		return cloneState(s.current), nil
+	}
+	if stepID == "" || stepID != InspectionStepID(s.current) {
 		return cloneState(s.current), nil
 	}
 	next := cloneState(s.current)
-	if explicitProgress {
-		if gateEmpty(next.Gate) {
-			return cloneState(s.current), nil
-		}
-		next.Gate = Gate{}
-	} else if inspectionOnly {
-		if next.Gate.AllowanceTurns > 0 {
-			next.Gate.AllowanceTurns--
-			if next.Gate.AllowanceTurns == 0 {
-				next.Gate.DecisionRequired = true
-			}
-		} else {
-			next.Gate.InspectionTurns++
-			if next.Gate.InspectionTurns >= DecisionThreshold {
-				next.Gate.DecisionRequired = true
-			}
+	normalizeGate(&next.Gate)
+	if next.Gate.DecisionRequired {
+		return cloneState(s.current), nil
+	}
+	if next.Gate.AllowanceOperations > 0 {
+		next.Gate.AllowanceOperations -= operations
+		if next.Gate.AllowanceOperations <= 0 {
+			next.Gate.AllowanceOperations = 0
+			next.Gate.DecisionRequired = true
 		}
 	} else {
-		return cloneState(s.current), nil
+		next.Gate.InspectionOperations += operations
+		if next.Gate.InspectionOperations >= DecisionOperationThreshold {
+			next.Gate.DecisionRequired = true
+		}
 	}
 	return s.commitLocked(next, "host", "turn_progress")
 }
 
 func gateEmpty(gate Gate) bool {
-	return gate.InspectionTurns == 0 && !gate.DecisionRequired && gate.AllowanceTurns == 0 && gate.Question == "" && len(gate.Targets) == 0
+	return gate.InspectionOperations == 0 && !gate.DecisionRequired && gate.AllowanceOperations == 0 && !gate.ExtensionUsed && gate.Question == "" && len(gate.Targets) == 0
+}
+
+func gateExtensionUsed(gate Gate) bool {
+	return gate.ExtensionUsed || gate.AllowanceOperations > 0 || gate.Question != "" || len(gate.Targets) > 0
+}
+
+func normalizeGate(gate *Gate) {
+	if gate != nil && gateExtensionUsed(*gate) {
+		gate.ExtensionUsed = true
+	}
 }
 
 func (s *Store) DecisionRequired() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.current != nil && s.current.Gate.DecisionRequired
+}
+
+// InspectionStepID returns the durable step attribution used by the inspection
+// guard. Implicit work has a hidden target so orientation is bounded before a
+// model promotes the work to a structured plan.
+func InspectionStepID(state *State) string {
+	if state == nil || state.Lifecycle != LifecycleActive {
+		return ""
+	}
+	if state.ActiveStepID != "" {
+		return state.ActiveStepID
+	}
+	if state.PlanState == PlanImplicit {
+		return implicitStepID
+	}
+	return ""
+}
+
+// DecisionGuidance returns the model-facing action required to leave a hard
+// inspection boundary. An empty string means inspection is not gated.
+func (s *Store) DecisionGuidance() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.current == nil || !s.current.Gate.DecisionRequired {
+		return ""
+	}
+	if gateExtensionUsed(s.current.Gate) {
+		return "work decision required: the focused evidence extension is exhausted; complete or transition the active step, or mark work waiting or blocked"
+	}
+	return "work decision required: complete or transition the active step, mark work waiting or blocked, or request one focused evidence extension"
 }
 
 func (s *Store) MarkApproved(revisionID string) (*State, error) {
@@ -1061,11 +1113,14 @@ func Validate(state State) error {
 			return errors.New("completed work has incomplete required steps")
 		}
 	}
-	if state.Gate.AllowanceTurns < 0 || state.Gate.AllowanceTurns > EvidenceTurnAllowance {
-		return fmt.Errorf("invalid evidence allowance %d", state.Gate.AllowanceTurns)
+	if state.Gate.AllowanceOperations < 0 || state.Gate.AllowanceOperations > EvidenceOperationAllowance {
+		return fmt.Errorf("invalid evidence allowance %d", state.Gate.AllowanceOperations)
 	}
-	if state.Gate.InspectionTurns < 0 {
-		return errors.New("inspection turn count cannot be negative")
+	if state.Gate.InspectionOperations < 0 {
+		return errors.New("inspection operation count cannot be negative")
+	}
+	if state.Gate.AllowanceOperations > 0 && strings.TrimSpace(state.Gate.Question) == "" {
+		return errors.New("inspection allowance requires a focused evidence question")
 	}
 	if state.Gate.Question != "" {
 		if err := validateText("gate question", state.Gate.Question, maxValueRunes, false); err != nil {
@@ -1730,9 +1785,13 @@ func RequestContext(state *State) string {
 		b.WriteString("\nWorkspace evidence is stale after branching; inspect current files and reconcile through update_work progress before completing steps.")
 	}
 	if state.Gate.DecisionRequired {
-		b.WriteString("\nDecision required: further inspection is blocked. Record concrete evidence or progress, block/wait/complete, or name one missing-evidence question.")
-	} else if state.Gate.AllowanceTurns > 0 {
-		fmt.Fprintf(&b, "\nEvidence allowance: %d inspection-bearing turns remain for %s.", state.Gate.AllowanceTurns, state.Gate.Question)
+		if gateExtensionUsed(state.Gate) {
+			b.WriteString("\nDecision required: the focused evidence extension is exhausted. Complete or transition the active step, or mark work waiting or blocked.")
+		} else {
+			b.WriteString("\nDecision required: further inspection is blocked. Complete or transition the active step, mark work waiting or blocked, or name one focused missing-evidence question.")
+		}
+	} else if state.Gate.AllowanceOperations > 0 {
+		fmt.Fprintf(&b, "\nEvidence allowance: %d inspection operations remain for %s.", state.Gate.AllowanceOperations, state.Gate.Question)
 	}
 	return truncateUTF8(b.String(), RequestContextMaxBytes)
 }
@@ -1855,14 +1914,27 @@ func (s *Store) AddEvidence(stepID string, evidence []EvidenceInput, actor strin
 	if node == nil {
 		return nil, fmt.Errorf("unknown work step %q", stepID)
 	}
+	changed := false
 	for _, input := range evidence {
 		item, err := makeEvidence(input, s.clock()())
 		if err != nil {
 			return nil, err
 		}
 		if !hasEquivalentEvidence(node.Evidence, item) {
+			if !makeEvidenceRoom(next, node.ID, 1) {
+				// Automatic receipts are best-effort evidence. Selected evidence
+				// and results already retained by the model must never be evicted.
+				if item.ToolCallID != "" {
+					continue
+				}
+				return nil, fmt.Errorf("too much selected evidence/results for node %q", node.ID)
+			}
 			node.Evidence = append(node.Evidence, item)
+			changed = true
 		}
+	}
+	if !changed {
+		return nil, nil
 	}
 	return s.commitLocked(next, actor, "observe_evidence")
 }
@@ -1884,6 +1956,9 @@ func (s *Store) AddResults(stepID string, results []Result, actor string) (*Stat
 		return nil, fmt.Errorf("unknown work step %q", stepID)
 	}
 	for _, result := range results {
+		if !makeEvidenceRoom(next, node.ID, 1) {
+			return nil, fmt.Errorf("too much selected evidence/results for node %q", node.ID)
+		}
 		if result.ID == "" {
 			result.ID = randomID(6)
 		}
@@ -1893,6 +1968,80 @@ func (s *Store) AddResults(stepID string, results []Result, actor string) (*Stat
 		node.Results = append(node.Results, result)
 	}
 	return s.commitLocked(next, actor, "observe")
+}
+
+// makeEvidenceRoom evicts the oldest unreferenced automatic inspection
+// receipts until one or more selected observations fit. Results and evidence
+// authored through update_work are never eligible for eviction.
+func makeEvidenceRoom(state *State, stepID string, additions int) bool {
+	if state == nil || additions <= 0 {
+		return true
+	}
+	target := nodeByID(state, stepID)
+	if target == nil {
+		return false
+	}
+	protected := protectedEvidenceRefs(*state)
+	for len(target.Evidence)+len(target.Results)+additions > maxEvidencePerNode {
+		if !evictOldestAutomaticEvidence(state, stepID, protected) {
+			return false
+		}
+	}
+	for retainedObservationCount(*state)+additions > maxEvidenceTotal {
+		if !evictOldestAutomaticEvidence(state, "", protected) {
+			return false
+		}
+	}
+	return true
+}
+
+func protectedEvidenceRefs(state State) map[string]bool {
+	refs := make(map[string]bool)
+	for _, node := range state.Nodes {
+		for _, ref := range node.CompletionRefs {
+			refs[ref] = true
+		}
+	}
+	for _, question := range state.Questions {
+		for _, ref := range question.Refs {
+			refs[ref] = true
+		}
+	}
+	return refs
+}
+
+func retainedObservationCount(state State) int {
+	total := 0
+	for _, node := range state.Nodes {
+		total += len(node.Evidence) + len(node.Results)
+	}
+	return total
+}
+
+func evictOldestAutomaticEvidence(state *State, stepID string, protected map[string]bool) bool {
+	nodeIndex, evidenceIndex := -1, -1
+	var oldest time.Time
+	for i := range state.Nodes {
+		node := &state.Nodes[i]
+		if stepID != "" && node.ID != stepID {
+			continue
+		}
+		for j, evidence := range node.Evidence {
+			if evidence.ToolCallID == "" || protected[evidence.ID] {
+				continue
+			}
+			if nodeIndex < 0 || evidence.CreatedAt.Before(oldest) {
+				nodeIndex, evidenceIndex = i, j
+				oldest = evidence.CreatedAt
+			}
+		}
+	}
+	if nodeIndex < 0 {
+		return false
+	}
+	evidence := state.Nodes[nodeIndex].Evidence
+	state.Nodes[nodeIndex].Evidence = append(evidence[:evidenceIndex], evidence[evidenceIndex+1:]...)
+	return true
 }
 
 // RevisionIDs returns stable sorted IDs for diagnostics/tests.

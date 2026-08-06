@@ -8,9 +8,9 @@ import (
 	"harness/internal/llm"
 )
 
-// ActivityClass is diagnostics-only tool activity. It must never be used for
-// dispatch parallelism, permission, or safety decisions; Tool.ReadOnly remains
-// authoritative for dispatch.
+// ActivityClass describes tool activity for telemetry and bounded workflow
+// guards. It must never determine dispatch parallelism, permissions, or safety;
+// Tool.ReadOnly remains authoritative for dispatch.
 type ActivityClass string
 
 const (
@@ -33,14 +33,15 @@ type Activity struct {
 	ExplicitProgress bool
 }
 
-// ActivityReporter optionally provides precise diagnostics-only activity for a
-// tool invocation.
+// ActivityReporter optionally provides precise activity accounting for a tool
+// invocation.
 type ActivityReporter interface {
 	Activity(input json.RawMessage) Activity
 }
 
-// CallActivity classifies a call for diagnostics. Unknown and non-read-only
-// tools default to other; only Tool.ReadOnly controls concurrent dispatch.
+// CallActivity classifies a call for telemetry and workflow accounting. Unknown
+// and non-read-only tools default to other; only Tool.ReadOnly controls
+// concurrent dispatch.
 func (r *Registry) CallActivity(call llm.ToolCall) Activity {
 	input := call.Input
 	if len(input) == 0 {

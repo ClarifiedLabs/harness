@@ -354,6 +354,24 @@ func (r *Recorder) Notice(msg string, turn int) {
 	r.Append(session.Event{Type: session.EventNotice, Prompt: r.cfg.Prompt, Turn: turn, Display: msg})
 }
 
+// WorkNotice records a status line with the WorkState identity that was active
+// when it was emitted. It keeps internal work-observation failures available in
+// raw.ndjson without adding diagnostic text to the WorkState projection.
+func (r *Recorder) WorkNotice(msg string, turn int, workID, revisionID, stepID string) {
+	if r == nil {
+		return
+	}
+	r.Append(session.Event{
+		Type:           session.EventNotice,
+		Prompt:         r.cfg.Prompt,
+		Turn:           turn,
+		Display:        msg,
+		WorkID:         workID,
+		WorkRevisionID: revisionID,
+		WorkStepID:     stepID,
+	})
+}
+
 // ModelRequestEvent records the structured provider-lifecycle event with its
 // durable display line, when one is warranted.
 func (r *Recorder) ModelRequestEvent(event llm.ModelRequestEvent) {

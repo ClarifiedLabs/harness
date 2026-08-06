@@ -5255,6 +5255,7 @@ type accumulatingSink struct {
 	pendingCalls                map[string]llm.ToolCall
 	pendingWorkResults          map[string][]workstate.Result
 	pendingWorkTargets          map[string]workObservationTarget
+	inspectionOperations        map[string]int
 	pendingWorkEpoch            bool
 	pendingWorkEpochReason      string
 	pendingWorkEpochFrom        string
@@ -5275,10 +5276,11 @@ type workObservationTarget struct {
 func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 	s := &accumulatingSink{
 		r: r, app: app, prompt: prompt,
-		pendingNames:       make(map[string]string),
-		pendingCalls:       make(map[string]llm.ToolCall),
-		pendingWorkResults: make(map[string][]workstate.Result),
-		pendingWorkTargets: make(map[string]workObservationTarget),
+		pendingNames:         make(map[string]string),
+		pendingCalls:         make(map[string]llm.ToolCall),
+		pendingWorkResults:   make(map[string][]workstate.Result),
+		pendingWorkTargets:   make(map[string]workObservationTarget),
+		inspectionOperations: make(map[string]int),
 	}
 	if app != nil {
 		var mirror func(session.Event)
@@ -5459,8 +5461,14 @@ func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 	s.pendingNames[c.ID] = c.Name
 	s.pendingCalls[c.ID] = c
 	if s.app != nil && s.app.Work != nil {
-		if work := s.app.Work.Snapshot(); work != nil && work.ActiveStepID != "" {
-			s.pendingWorkTargets[c.ID] = workObservationTarget{revisionID: work.RevisionID, stepID: work.ActiveStepID}
+		if work := s.app.Work.Snapshot(); work != nil {
+			if work.ActiveStepID != "" {
+				s.pendingWorkTargets[c.ID] = workObservationTarget{revisionID: work.RevisionID, stepID: work.ActiveStepID}
+			}
+			activity := s.app.Agent.ToolActivity(c)
+			if stepID := workstate.InspectionStepID(work); stepID != "" && activity.Class == tools.ActivityInspect {
+				s.inspectionOperations[stepID] += activity.OperationCount
+			}
 		}
 	}
 	s.r.ToolStart(c)
@@ -5574,14 +5582,14 @@ func (s *accumulatingSink) attachObservedWorkResults(call llm.ToolCall, res llm.
 	if activity.Class == tools.ActivityInspect && !res.IsError && state.PlanState != workstate.PlanImplicit {
 		ref, err := session.SaveWorkEvidenceArtifact(s.app.SessionPath, s.prompt, s.turn, res)
 		if err != nil {
-			fmt.Fprintf(s.app.Errw, "[work evidence archive failed: %v]\n", err)
+			s.workNotice("work evidence archive failed", err)
 		} else if ref != "" {
 			path := filepath.Join(s.app.SessionPath, ref)
 			updated, err := s.app.Work.AddEvidence(target.stepID, []workstate.EvidenceInput{{
 				Kind: workstate.EvidenceArtifact, Path: path, Summary: boundedWorkDetail(workCallSummary(call) + " inspection result"), ToolCallID: call.ID,
 			}}, "host")
 			if err != nil {
-				fmt.Fprintf(s.app.Errw, "[work evidence observation failed: %v]\n", err)
+				s.workNotice("work evidence observation failed", err)
 			} else if updated != nil {
 				state = updated
 				s.app.ArmWorkContext("new evidence")
@@ -5620,7 +5628,7 @@ func (s *accumulatingSink) attachObservedWorkResults(call llm.ToolCall, res llm.
 		}
 	}
 	if _, err := s.app.Work.AddResults(target.stepID, results, "host"); err != nil {
-		fmt.Fprintf(s.app.Errw, "[work observation failed: %v]\n", err)
+		s.workNotice("work observation failed", err)
 	} else {
 		s.app.ArmWorkContext("new work result")
 	}
@@ -5672,6 +5680,23 @@ func (s *accumulatingSink) Notice(msg string) {
 		turn = 0
 	}
 	s.rec.Notice(msg, turn)
+}
+
+func (s *accumulatingSink) workNotice(label string, err error) {
+	if s == nil || err == nil {
+		return
+	}
+	msg := fmt.Sprintf("[%s: %s]", label, session.ErrorExcerpt(err.Error()))
+	if s.app != nil && s.app.Errw != nil {
+		fmt.Fprintln(s.app.Errw, msg)
+	}
+	var workID, revisionID, stepID string
+	if s.app != nil {
+		if work := s.app.workSnapshot(); work != nil {
+			workID, revisionID, stepID = work.WorkID, work.RevisionID, work.ActiveStepID
+		}
+	}
+	s.rec.WorkNotice(msg, s.turn, workID, revisionID, stepID)
 }
 
 func (s *accumulatingSink) ModelErrorDiagnostic(event agent.ModelErrorDiagnostic) {
@@ -5789,11 +5814,17 @@ func (s *accumulatingSink) TurnProgress(progress agent.TurnProgress) {
 		s.rec.TurnProgressForWork(progress, work.WorkID, work.RevisionID, work.ActiveStepID)
 	}
 	wasRequired := work != nil && work.Gate.DecisionRequired
-	updated, err := s.app.Work.RecordInspectionTurn(progress.InspectionOnly && progress.NoExplicitProgress, progress.ExplicitProgress)
+	stepID, operations := "", 0
+	if work != nil {
+		stepID = workstate.InspectionStepID(work)
+		operations = s.inspectionOperations[stepID]
+	}
+	updated, err := s.app.Work.RecordInspectionOperations(stepID, operations)
+	clear(s.inspectionOperations)
 	if err != nil {
-		fmt.Fprintf(s.app.Errw, "[work progress tracking failed: %v]\n", err)
-	} else if !wasRequired && updated != nil && updated.Gate.DecisionRequired && updated.ActiveStepID != "" {
-		s.scheduleWorkContextEpoch("overlong step", updated.ActiveStepID, updated.ActiveStepID)
+		s.workNotice("work progress tracking failed", err)
+	} else if !wasRequired && updated != nil && updated.Gate.DecisionRequired {
+		s.app.ArmWorkContext("work decision required")
 	}
 }
 

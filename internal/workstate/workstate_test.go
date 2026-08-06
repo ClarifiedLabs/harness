@@ -1,6 +1,7 @@
 package workstate
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,36 +73,105 @@ func TestPlanProgressAndArtifactShareCanonicalState(t *testing.T) {
 
 func TestDecisionGateRequiresNamedEvidenceBatch(t *testing.T) {
 	store := NewStore(nil)
-	if _, err := store.NewWork("Investigate", "user"); err != nil {
+	state, err := store.NewWork("Investigate", "user")
+	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < DecisionThreshold; i++ {
-		if _, err := store.RecordInspectionTurn(true, false); err != nil {
-			t.Fatal(err)
-		}
+	state, err = store.SetPlan(PlanUpdate{
+		BaseRevisionID: state.RevisionID,
+		PlanState:      PlanDraft,
+		ActiveStepID:   "inspect",
+		Nodes:          []NodeDefinition{{ID: "inspect", Type: NodeStep, Title: "Inspect", Kind: KindDiscover}},
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.RecordInspectionOperations(state.ActiveStepID, DecisionOperationThreshold-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Gate.DecisionRequired {
+		t.Fatalf("gate tripped early: %+v", state.Gate)
+	}
+	state, err = store.RecordInspectionOperations(state.ActiveStepID, 1)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if !store.DecisionRequired() {
 		t.Fatal("decision gate did not trip")
 	}
-	state, err := store.Progress(ProgressUpdate{NeedsEvidence: &EvidenceRequest{Question: "Which package owns the state?", Targets: []string{"internal"}}}, "model")
+	state, err = store.Progress(ProgressUpdate{NeedsEvidence: &EvidenceRequest{Question: "Which package owns the state?", Targets: []string{"internal"}}}, "model")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Gate.DecisionRequired || state.Gate.AllowanceTurns != EvidenceTurnAllowance {
+	if state.Gate.DecisionRequired || state.Gate.AllowanceOperations != EvidenceOperationAllowance || !state.Gate.ExtensionUsed {
 		t.Fatalf("gate after request = %+v", state.Gate)
 	}
-	for i := 0; i < EvidenceTurnAllowance; i++ {
-		state, err = store.RecordInspectionTurn(true, false)
-		if err != nil {
-			t.Fatal(err)
-		}
+	state, err = store.RecordInspectionOperations(state.ActiveStepID, EvidenceOperationAllowance)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if !state.Gate.DecisionRequired {
 		t.Fatalf("gate after allowance = %+v", state.Gate)
 	}
+	if _, err := store.Progress(ProgressUpdate{NeedsEvidence: &EvidenceRequest{Question: "One more lookup?"}}, "model"); err == nil || !strings.Contains(err.Error(), "already used") {
+		t.Fatalf("second extension error = %v", err)
+	}
 }
 
-func TestMeaningfulProgressClearsEvidenceAllowance(t *testing.T) {
+func TestLegacyAllowanceGateIsTreatedAsUsedExtension(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(func() string { return dir })
+	state, err := store.NewWork("Investigate", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.RecordInspectionOperations(InspectionStepID(state), DecisionOperationThreshold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.Progress(ProgressUpdate{NeedsEvidence: &EvidenceRequest{Question: "Which package?"}}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := cloneState(state)
+	legacy.Gate.ExtensionUsed = false
+	legacy.RevisionID = randomID(8)
+	digest, err := stateDigest(*legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appendRevision(dir, Revision{
+		Type: "work_revision", ID: legacy.RevisionID, WorkID: legacy.WorkID,
+		Actor: "model", Change: "progress", Time: legacy.UpdatedAt,
+		State: *legacy, StateDigest: digest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded := NewStore(func() string { return dir })
+	if err := loaded.LoadLog(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := loaded.Restore(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := loaded.ValidateCurrentRevision(); err != nil {
+		t.Fatal(err)
+	}
+	state, err = loaded.RecordInspectionOperations(InspectionStepID(legacy), EvidenceOperationAllowance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Gate.DecisionRequired || !state.Gate.ExtensionUsed {
+		t.Fatalf("legacy extension was not exhausted: %+v", state.Gate)
+	}
+	if _, err := loaded.Progress(ProgressUpdate{NeedsEvidence: &EvidenceRequest{Question: "Another batch?"}}, "model"); err == nil || !strings.Contains(err.Error(), "already used") {
+		t.Fatalf("renewed legacy extension: %v", err)
+	}
+}
+
+func TestSelectedEvidenceDoesNotRenewFocusedExtension(t *testing.T) {
 	store := NewStore(nil)
 	root, err := store.NewWork("Investigate", "user")
 	if err != nil {
@@ -110,12 +180,17 @@ func TestMeaningfulProgressClearsEvidenceAllowance(t *testing.T) {
 	planned, err := store.SetPlan(PlanUpdate{
 		BaseRevisionID: root.RevisionID,
 		PlanState:      PlanDraft,
+		ActiveStepID:   "inspect",
 		Nodes:          []NodeDefinition{{ID: "inspect", Type: NodeStep, Title: "Inspect", Kind: KindDiscover}},
 	}, "model")
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := store.Progress(ProgressUpdate{BaseRevisionID: planned.RevisionID, NeedsEvidence: &EvidenceRequest{Question: "Which package owns this?"}}, "model")
+	state, err := store.RecordInspectionOperations(planned.ActiveStepID, DecisionOperationThreshold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.Progress(ProgressUpdate{BaseRevisionID: state.RevisionID, NeedsEvidence: &EvidenceRequest{Question: "Which package owns this?"}}, "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,8 +202,8 @@ func TestMeaningfulProgressClearsEvidenceAllowance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !gateEmpty(state.Gate) {
-		t.Fatalf("gate after progress = %+v", state.Gate)
+	if state.Gate.AllowanceOperations != EvidenceOperationAllowance || !state.Gate.ExtensionUsed {
+		t.Fatalf("selected evidence renewed or cleared extension: %+v", state.Gate)
 	}
 }
 
@@ -167,6 +242,63 @@ func TestChecklistPhaseBoundaryAndHostEvidence(t *testing.T) {
 	}
 }
 
+func TestAutomaticEvidenceRollsWithoutEvictingSelectedEvidence(t *testing.T) {
+	store := NewStore(nil)
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	store.SetClock(func() time.Time {
+		now = now.Add(time.Second)
+		return now
+	})
+	state, err := store.NewWork("Investigate", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.Progress(ProgressUpdate{
+		StepID: state.ActiveStepID,
+		Evidence: []EvidenceInput{{
+			Path: "internal/workstate/workstate.go", Summary: "model-selected evidence",
+		}},
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedID := state.Nodes[0].Evidence[0].ID
+	for i := 0; i < maxEvidencePerNode; i++ {
+		state, err = store.AddEvidence(state.ActiveStepID, []EvidenceInput{{
+			Kind: EvidenceArtifact, Path: filepath.Join("artifacts", fmt.Sprintf("receipt-%d", i)),
+			Summary: "automatic inspection receipt", ToolCallID: fmt.Sprintf("call-%d", i),
+		}}, "host")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	node := state.Nodes[0]
+	if len(node.Evidence) != maxEvidencePerNode {
+		t.Fatalf("retained evidence = %d, want %d", len(node.Evidence), maxEvidencePerNode)
+	}
+	if node.Evidence[0].ID != selectedID || node.Evidence[0].ToolCallID != "" {
+		t.Fatalf("selected evidence was evicted: %+v", node.Evidence[0])
+	}
+	retainedCalls := make(map[string]bool, len(node.Evidence))
+	for _, evidence := range node.Evidence {
+		retainedCalls[evidence.ToolCallID] = true
+	}
+	if retainedCalls["call-0"] || !retainedCalls[fmt.Sprintf("call-%d", maxEvidencePerNode-1)] {
+		t.Fatalf("automatic receipt window = %+v", retainedCalls)
+	}
+	state, err = store.AddResults(state.ActiveStepID, []Result{{Kind: ResultDelegate, Detail: "durable selected result"}}, "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node = state.Nodes[0]
+	if len(node.Evidence)+len(node.Results) != maxEvidencePerNode || len(node.Results) != 1 {
+		t.Fatalf("rolling observations = %d evidence, %d results", len(node.Evidence), len(node.Results))
+	}
+	if node.Evidence[0].ID != selectedID {
+		t.Fatalf("selected evidence was evicted for result: %+v", node.Evidence)
+	}
+}
+
 func TestAdministrativeProgressDoesNotClearDecisionGate(t *testing.T) {
 	store := NewStore(nil)
 	root, err := store.NewWork("Investigate", "user")
@@ -176,17 +308,18 @@ func TestAdministrativeProgressDoesNotClearDecisionGate(t *testing.T) {
 	planned, err := store.SetPlan(PlanUpdate{
 		BaseRevisionID: root.RevisionID,
 		PlanState:      PlanDraft,
-		Nodes:          []NodeDefinition{{ID: "inspect", Type: NodeStep, Title: "Inspect", Kind: KindDiscover}},
+		ActiveStepID:   "inspect",
+		Nodes: []NodeDefinition{
+			{ID: "inspect", Type: NodeStep, Title: "Inspect", Kind: KindDiscover},
+			{ID: "change", Type: NodeStep, Title: "Change", Kind: KindChange},
+		},
 	}, "model")
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := planned
-	for range DecisionThreshold {
-		state, err = store.RecordInspectionTurn(true, false)
-		if err != nil {
-			t.Fatal(err)
-		}
+	state, err := store.RecordInspectionOperations(planned.ActiveStepID, DecisionOperationThreshold)
+	if err != nil {
+		t.Fatal(err)
 	}
 	state, err = store.Progress(ProgressUpdate{
 		BaseRevisionID: state.RevisionID,
@@ -205,13 +338,33 @@ func TestAdministrativeProgressDoesNotClearDecisionGate(t *testing.T) {
 		Nodes: []NodeDefinition{
 			{ID: "inspect", Type: NodeStep, Title: "Inspect", Kind: KindDiscover},
 			{ID: "change", Type: NodeStep, Title: "Change", Kind: KindChange},
+			{ID: "verify", Type: NodeStep, Title: "Verify", Kind: KindVerify},
 		},
 	}, "model")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !state.Gate.DecisionRequired {
+		t.Fatalf("same-step plan revision cleared gate: %+v", state.Gate)
+	}
+	state, err = store.AddResults("inspect", []Result{{Kind: ResultDelegate, Detail: "inspection complete"}}, "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultID := state.Nodes[0].Results[0].ID
+	state, err = store.Progress(ProgressUpdate{
+		BaseRevisionID: state.RevisionID,
+		StepID:         "inspect",
+		Status:         StatusCompleted,
+		Summary:        "inspection complete",
+		ResultIDs:      []string{resultID},
+		NextStepID:     "change",
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !gateEmpty(state.Gate) {
-		t.Fatalf("structural plan revision did not clear gate: %+v", state.Gate)
+		t.Fatalf("step transition did not clear gate: %+v", state.Gate)
 	}
 }
 

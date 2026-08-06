@@ -86,7 +86,7 @@ func NewUpdateWork(store *workstate.Store) Tool { return &updateWork{store: stor
 func (*updateWork) Name() string { return "update_work" }
 
 func (*updateWork) Description() string {
-	return "Set a short ordered plan or record meaningful progress against the active work. Harness owns plan structure and step selection."
+	return "Set a short ordered plan or record meaningful progress against the active work. Harness owns plan structure and step selection. At an inspection decision gate, request at most one focused needs_evidence extension or transition the step/work lifecycle."
 }
 
 func (*updateWork) Schema() json.RawMessage { return json.RawMessage(updateWorkSchema) }
@@ -232,7 +232,7 @@ func availablePhaseID(number int, used map[string]bool, existingTypes map[string
 }
 
 func executablePlanNodes(current *workstate.State) []workstate.Node {
-	if current == nil {
+	if current == nil || current.PlanState == workstate.PlanImplicit {
 		return nil
 	}
 	parents := make(map[string]bool, len(current.Nodes))

@@ -31,6 +31,7 @@ import (
 	"harness/internal/tools"
 	"harness/internal/tracing"
 	"harness/internal/ui"
+	"harness/internal/workstate"
 	"harness/prompts"
 )
 
@@ -2551,6 +2552,50 @@ func TestRunResumeFlagsWinWarning(t *testing.T) {
 	}
 }
 
+func TestRunResumeRestoresWorkRevisionFromSessionDirectory(t *testing.T) {
+	dir := t.TempDir()
+	sessPath := filepath.Join(dir, "prior")
+	workStore := workstate.NewStore(func() string { return sessPath })
+	work, err := workStore.NewWork("continue retained work", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := session.Session{
+		Version:  session.Version,
+		Provider: "anthropic",
+		Model:    "claude-opus-4-8",
+		Created:  time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC),
+		Work:     work,
+	}
+	if err := prior.Save(sessPath); err != nil {
+		t.Fatal(err)
+	}
+
+	fp := llmtest.New("fake", okStep())
+	env, _, errw, _ := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-resume", sessPath, "-p", "continue"}, fp, "")
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("resume exit = %d, want 0; errw=%q", code, errw.String())
+	}
+	if strings.Contains(errw.String(), "missing from work.ndjson") {
+		t.Fatalf("resume loaded work log from the process cwd: %q", errw.String())
+	}
+	loaded, err := session.Load(sessPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := workstate.NewStore(func() string { return sessPath })
+	if err := check.LoadLog(sessPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.Restore(loaded.Work); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.ValidateCurrentRevision(); err != nil {
+		t.Fatalf("resumed work revision is not durable: %v", err)
+	}
+}
+
 func TestRunResumeActiveGoalContinuesWithoutGoalTools(t *testing.T) {
 	dir := t.TempDir()
 	sessPath := filepath.Join(dir, "prior")
@@ -2599,6 +2644,11 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "source")
 	destinationPath := filepath.Join(dir, "destination")
+	workStore := workstate.NewStore(func() string { return sourcePath })
+	work, err := workStore.NewWork("clone retained work", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
 	prior := session.Session{
 		Provider: "anthropic",
 		Model:    "claude-opus-4-8",
@@ -2609,6 +2659,7 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "reply"}}},
 		},
 		Usage: session.UsageTotals{Usage: llm.Usage{InputTokens: 100}},
+		Work:  work,
 	}
 	if err := prior.Save(sourcePath); err != nil {
 		t.Fatalf("save source: %v", err)
@@ -2637,6 +2688,16 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 	}
 	if !strings.Contains(transcriptTextForMainTest(child.Messages), "working directory was not reverted") {
 		t.Fatalf("clone transcript missing workspace warning: %+v", child.Messages)
+	}
+	cloneWork := workstate.NewStore(func() string { return destinationPath })
+	if err := cloneWork.LoadLog(destinationPath); err != nil {
+		t.Fatalf("load clone work log: %v", err)
+	}
+	if err := cloneWork.Restore(child.Work); err != nil {
+		t.Fatalf("restore clone work: %v", err)
+	}
+	if err := cloneWork.ValidateCurrentRevision(); err != nil {
+		t.Fatalf("clone work revision is not durable: %v", err)
 	}
 	unchanged, err := session.Load(sourcePath)
 	if err != nil {
