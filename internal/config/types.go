@@ -1,6 +1,7 @@
 // Package config resolves harness settings from flags, environment variables,
-// an optional config file, and defaults. Resolution is provider-neutral and
-// follows flag > environment > file > default precedence.
+// an optional project config file, an optional global config file, and defaults.
+// Resolution is provider-neutral and follows flag > environment > project file > global file > default precedence.
+// When --config or HARNESS_CONFIG is set explicitly, project discovery is disabled.
 package config
 
 import (
@@ -58,17 +59,19 @@ type LoadOptions struct {
 	LookupEnv         func(string) (string, bool)
 	DefaultConfigPath string
 	Defaults          RuntimeDefaults
+	WorkingDir        string // optional override for project-config discovery (tests); empty uses os.Getwd
 }
 
 // Result separates persistent/source-resolved settings from invocation-only
 // controls. Config is embedded so callers can deliberately select result.Config
 // while field promotion keeps inspection convenient.
 type Result struct {
-	Config         Config
-	Run            RunOptions
-	Sources        map[string]configmeta.Source
-	ConfigPath     string
-	fileReferences []configFileReference
+	Config             Config
+	Run                RunOptions
+	Sources            map[string]configmeta.Source
+	ConfigPath         string // global or explicit file (never project)
+	ProjectConfigPath  string // discovered .harness/config.json, if any
+	fileReferences     []configFileReference
 }
 
 type configFileReference struct {

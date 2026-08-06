@@ -63,8 +63,15 @@ func runConfigCheck(env environment, invocation cli.Invocation) int {
 		fmt.Fprintf(env.stderr, "harness: config check: %v\n", err)
 		return ui.ExitUsage
 	}
-	if result.ConfigPath == "" {
+	if result.ConfigPath == "" && result.ProjectConfigPath == "" {
 		fmt.Fprintln(env.stdout, "config ok: no config file (resolved defaults and environment)")
+	} else if result.ProjectConfigPath != "" {
+		if result.ConfigPath == "" {
+			fmt.Fprintf(env.stdout, "config ok: %s (project)\n", result.ProjectConfigPath)
+		} else {
+			fmt.Fprintf(env.stdout, "config ok: %s (global)\n", result.ConfigPath)
+			fmt.Fprintf(env.stdout, "project config: %s\n", result.ProjectConfigPath)
+		}
 	} else {
 		fmt.Fprintf(env.stdout, "config ok: %s\n", result.ConfigPath)
 	}

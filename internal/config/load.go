@@ -14,19 +14,35 @@ import (
 )
 
 type resolveContext struct {
-	options LoadOptions
-	lookup  func(string) (string, bool)
-	flags   *flagState
-	file    fileConfig
-	path    string
-	result  *Result
+	options     LoadOptions
+	lookup      func(string) (string, bool)
+	flags       *flagState
+	file        fileConfig
+	path        string
+	result      *Result
+	fileSources map[string]string
+}
+
+func (context *resolveContext) fileSourceFor(key string) configmeta.Source {
+	if context.fileSources != nil {
+		if src, ok := context.fileSources[key]; ok && src != "" {
+			return configmeta.Source{Kind: configmeta.SourceFile, Name: src}
+		}
+	}
+	return configmeta.Source{Kind: configmeta.SourceFile, Name: context.path}
 }
 
 func (context *resolveContext) fileError(setting string, err error) error {
-	return fmt.Errorf("config %q setting %s: %w", context.path, setting, err)
+	src := context.path
+	if context.fileSources != nil {
+		if candidate, ok := context.fileSources[setting]; ok && candidate != "" {
+			src = candidate
+		}
+	}
+	return fmt.Errorf("config %q setting %s: %w", src, setting, err)
 }
 func (context *resolveContext) fileSource(key string) {
-	context.result.Sources[key] = configmeta.Source{Kind: configmeta.SourceFile, Name: context.path}
+	context.result.Sources[key] = context.fileSourceFor(key)
 }
 func (context *resolveContext) defaultSource(key string) {
 	context.result.Sources[key] = configmeta.Source{Kind: configmeta.SourceDefault, Name: "built-in"}
@@ -36,6 +52,38 @@ var loadCLICatalog = cli.MustCatalog(cli.Command{
 	ID: "root", Name: "harness", Runnable: true, Flags: CLIFlags(),
 	Args: cli.Args{Max: -1, Check: false},
 })
+
+func resolveProjectFile(flags *flagState, lookup func(string) (string, bool), workingDir string) (string, fileConfig, error) {
+	if isExplicitConfig(flags, lookup) {
+		return "", fileConfig{}, nil
+	}
+	wd := workingDir
+	if wd == "" {
+		var err error
+		wd, err = os.Getwd()
+		if err != nil {
+			return "", fileConfig{}, fmt.Errorf("resolve working directory: %w", err)
+		}
+	}
+	if wd == "" {
+		return "", fileConfig{}, nil
+	}
+	projectPath, err := findProjectConfig(wd)
+	if err != nil {
+		return "", fileConfig{}, err
+	}
+	if projectPath == "" {
+		return "", fileConfig{}, nil
+	}
+	file, err := decodeConfigFile(projectPath)
+	if err != nil {
+		return "", fileConfig{}, err
+	}
+	if err := validateFileConfig(file, projectPath); err != nil {
+		return "", fileConfig{}, err
+	}
+	return projectPath, file, nil
+}
 
 // Load parses Args with the shared CLI catalog and delegates source resolution
 // to LoadParsed. It remains the compatibility entry point for package callers.
@@ -69,15 +117,34 @@ func LoadParsed(options LoadOptions, values cli.Values) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	file, err := decodeConfigFile(path)
+	globalFile, err := decodeConfigFile(path)
 	if err != nil {
 		return Result{}, err
 	}
-	if err := validateFileConfig(file, path); err != nil {
+	if err := validateFileConfig(globalFile, path); err != nil {
 		return Result{}, err
 	}
-	result := Result{Sources: make(map[string]configmeta.Source), ConfigPath: path, fileReferences: collectFileReferences(file)}
-	context := &resolveContext{options: options, lookup: lookup, flags: flags, file: file, path: path, result: &result}
+	projectPath, projectFile, err := resolveProjectFile(flags, lookup, options.WorkingDir)
+	if err != nil {
+		return Result{}, err
+	}
+	// Discovered path equal to primary must not be double-applied.
+	if projectPath != "" && projectPath == path {
+		projectPath = ""
+		projectFile = fileConfig{}
+	}
+	file := globalFile
+	fileSources := map[string]string{}
+	fileReferences := collectFileReferences(globalFile)
+	if projectPath != "" {
+		file, fileSources = mergeFileConfig(globalFile, projectFile, path, projectPath)
+		projectRefs := collectFileReferences(projectFile)
+		fileReferences = append(fileReferences, projectRefs...)
+	} else {
+		fileReferences = collectFileReferences(file)
+	}
+	result := Result{Sources: make(map[string]configmeta.Source), ConfigPath: path, ProjectConfigPath: projectPath, fileReferences: fileReferences}
+	context := &resolveContext{options: options, lookup: lookup, flags: flags, file: file, path: path, result: &result, fileSources: fileSources}
 	for _, definition := range allDefinitions {
 		if err := definition.resolve(context); err != nil {
 			return Result{}, err
@@ -302,6 +369,8 @@ func resolveHooks(context *resolveContext) error {
 		context.fileSource("hooks")
 	}
 	if context.file.HookConfigs.Set {
+		// HookConfigs entries were absolutized at decode time via
+		// normalizeConfigPathRef, so resolvePath passes them through unchanged.
 		external, err := hooks.LoadFiles(filepath.Dir(context.path), context.file.HookConfigs.Value)
 		if err != nil {
 			return context.fileError("hook_configs", err)

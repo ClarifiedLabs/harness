@@ -66,7 +66,7 @@ func (definition scalarDefinition[T]) resolve(context *resolveContext) error {
 		if err != nil {
 			return context.fileError(definition.meta.JSONPath, err)
 		}
-		value, source = resolved, configmeta.Source{Kind: configmeta.SourceFile, Name: context.path}
+		value, source = resolved, context.fileSourceFor(definition.meta.Key)
 	}
 	for _, name := range definition.meta.Environment {
 		if raw, present := context.lookup(name); present {

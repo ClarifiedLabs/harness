@@ -428,18 +428,60 @@ records the exact loop mechanics.
 ## Configuration And Environment
 
 For every applicable setting, precedence is exactly **flag > environment >
-config file > default**. A setting without a flag starts at environment; a
-config-file-only setting starts at the file. Every supplied candidate is parsed
+project config file > global config file > default**. A setting without a flag starts at environment; a
+config-file-only setting starts at the files. Every supplied candidate is parsed
 and validated even when a higher-precedence value wins, so a valid flag does not
 hide a malformed environment or file value. Repeated scalar flags use the last
 occurrence.
 
-The config path itself resolves as **`-config` > `HARNESS_CONFIG` > an existing
+The global config path itself resolves as **`-config` > `HARNESS_CONFIG` > an existing
 `~/.config/harness/config.json`**. A missing conventional file is allowed. An
 explicit flag or environment path must be non-empty, name an existing regular
 file, and decode successfully. Config JSON must be one object with no unknown
 fields, trailing values, or `null` scalar/structured settings. Omit a setting to
 inherit it.
+
+### Project configuration
+
+When neither `-config` nor `HARNESS_CONFIG` is set, harness also looks for a
+project config at `.harness/config.json` by walking from the current working
+directory up to (and including) the nearest ancestor containing a `.git` entry
+(directories and files both count, so worktrees and submodules are handled). If
+no `.git` ancestor is found, only the working directory itself is checked. The
+first regular file found in that walk is the project config; it is decoded
+strictly and validated like the global file and its `@file` prompt references
+are resolved relative to the project file's own directory.
+
+The project file overlays the global file on a per-setting basis: for each key it
+sets, it replaces the global file value while leaving any unset keys inherited.
+`@file` prompt references and `hook_configs` entries are absolutized at decode
+time against their owning file before the overlay, and provenance for file-backed
+values points at the actual owning file. The final ordering is therefore
+`flag > environment > project config file > global config file > default`.
+
+Setting `-config` or `HARNESS_CONFIG` disables project discovery entirely for
+that invocation. This is the documented escape hatch to run with only the
+selected file: both `-config data/config.json` and
+`HARNESS_CONFIG=/path/to/config.json` suppress `.harness/config.json` discovery,
+and the selected file remains authoritative. `harness config check` and
+`harness config show` honor the same rule and, when a project file is present,
+`check` prints both files:
+
+```text
+config ok: ~/.config/harness/config.json (global)
+project config: /path/to/repo/.harness/config.json
+```
+
+When only a project config is present, `check` reports `config ok: <path>
+(project)`; with no config files, it reports the defaults-only form.
+`/model` and REPL edit-mode saves always write to `Result.ConfigPath`—the
+global or explicitly selected file—never to the project config.
+
+Project configs can define hooks, `hook_configs`, MCP local commands, LSP
+servers, and other command-bearing settings that harness will load
+automatically when invoked inside that project tree. Treat the project config
+as trusted code: only run harness in projects you trust and review
+`.harness/config.json` before executing untrusted clones.
 
 Source presence is distinct from content. An explicitly empty flag, environment
 value, or JSON string is therefore a real candidate: plain strings that support

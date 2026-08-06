@@ -188,6 +188,18 @@ func normalizeConfigAtFileRefs(fc *fileConfig, baseDir string) {
 			fc.Agents.Value[name] = agent
 		}
 	}
+	if fc.HookConfigs.Set {
+		for i, entry := range fc.HookConfigs.Value {
+			fc.HookConfigs.Value[i] = normalizeConfigPathRef(entry, baseDir)
+		}
+	}
+}
+
+func normalizeConfigPathRef(value, baseDir string) string {
+	if baseDir == "" || strings.TrimSpace(value) == "" || filepath.IsAbs(value) || strings.HasPrefix(value, "~") {
+		return value
+	}
+	return filepath.Join(baseDir, value)
 }
 
 func normalizeConfigAtFileRef(value, baseDir string) string {
