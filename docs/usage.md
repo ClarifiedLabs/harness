@@ -1514,6 +1514,12 @@ the current work without canceling and retyping the prompt.
   so queued and recovered input always runs in submission order.
 - If the prompt finishes before another model request, the submitted steer is
   recovered and run as the next prompt.
+- At a TTY, submission prints a dim `[steer queued: …]` or
+  `[queued for next prompt: …]` line. The first means steering was accepted for
+  the active prompt, not that it has reached the model: a prompt that ends before
+  its next model request still recovers that input as the next prompt. When the
+  agent actually injects an accepted steer, it prints `[steer sent: …]`; queued
+  input is instead echoed in the normal prompt line when its own prompt starts.
 - An accepted steer also releases any blocked `background_jobs` wait from that
   prompt. The selected jobs keep running; once its completion or original timeout
   is available, an interactive mode starts a host-created continuation (after

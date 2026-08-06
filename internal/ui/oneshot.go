@@ -293,4 +293,5 @@ func readAll(r io.Reader) (string, error) {
 // agent event contracts it forwards.
 var _ agent.EventSink = (*accumulatingSink)(nil)
 var _ agent.AssistantPhaseSink = (*accumulatingSink)(nil)
+var _ agent.SteerDeliveredSink = (*accumulatingSink)(nil)
 var _ agent.CompactionProgressSink = (*accumulatingSink)(nil)

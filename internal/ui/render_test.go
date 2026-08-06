@@ -3,7 +3,9 @@ package ui
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -886,6 +888,44 @@ func TestToolUseStreamEnabledWritesProgressOnlyToStderr(t *testing.T) {
 	}
 	if !strings.Contains(got, "[done]") {
 		t.Errorf("notice should still render after ignored argument deltas, got %q", got)
+	}
+}
+
+// Submission notices arrive from the REPL goroutine while tool-use events are
+// rendered by the active prompt goroutine. Pending tool-call lines must remain
+// race-free and must be flushed exactly once under that overlap.
+func TestRendererNoticeConcurrentWithToolUseStart(t *testing.T) {
+	var out, errw lockedBuffer
+	r := NewRenderer(&out, &errw, RenderOptions{ToolStream: true})
+
+	const calls = 200
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < calls; i++ {
+			r.ToolUseStart(llm.ToolCall{ID: fmt.Sprintf("call_%d", i), Name: "probe"})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < calls; i++ {
+			r.Notice("[submission queued]")
+		}
+	}()
+	close(start)
+	wg.Wait()
+	r.Notice("[flush]")
+
+	got := errw.String()
+	for i := 0; i < calls; i++ {
+		line := fmt.Sprintf("[tool-call: probe id=call_%d]", i)
+		if count := strings.Count(got, line); count != 1 {
+			t.Fatalf("tool-call line %q count = %d, want 1", line, count)
+		}
 	}
 }
 

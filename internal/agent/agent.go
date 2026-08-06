@@ -64,6 +64,15 @@ type AssistantPhaseSink interface {
 	AssistantPhase(phase string)
 }
 
+// SteerDeliveredSink is implemented by sinks that want to know when queued
+// in-prompt steer input is injected as the Origin=MessageOriginSteer RoleUser
+// message ahead of the next model request. It fires only after the message is
+// appended and the retained transcript validates, never on the rollback path,
+// and never when steering is disabled.
+type SteerDeliveredSink interface {
+	SteerDelivered(text string)
+}
+
 // ModelRequestEventSink receives diagnostics-only model request lifecycle
 // telemetry. Implementations may render or persist it, but it must never be
 // added to the agent transcript or subsequent model requests.
@@ -2068,6 +2077,9 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 					a.validatedPrefix = len(a.transcript)
 				}
 				return err
+			}
+			if deliverySink, ok := sink.(SteerDeliveredSink); ok {
+				deliverySink.SteerDelivered(steered.Text)
 			}
 		}
 

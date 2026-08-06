@@ -631,6 +631,11 @@ func TestREPLSeparatesSubmittedPromptFromModelResponse(t *testing.T) {
 			if strings.Contains(got, "\n\n") {
 				t.Fatalf("terminal output should not contain double blank lines; got %q", got)
 			}
+			// Fresh prompt-editor reads already render the submitted line once;
+			// queue-delivery echoing must not duplicate it.
+			if tt.usePromptEditor && strings.Count(got, "hi\n") != 1 {
+				t.Fatalf("fresh idle prompt editor input was echoed more than once: %q", got)
+			}
 		})
 	}
 }
@@ -4095,6 +4100,9 @@ func TestREPLAutoSaveFailureWarned(t *testing.T) {
 	if !strings.Contains(errw.String(), "save failed") {
 		t.Errorf("failed auto-save must warn to errw, got %q", errw.String())
 	}
+	if got := outputCoordinatorFromWriter(app.Errw); got != app.Renderer.output {
+		t.Fatal("REPL did not normalize App stderr to the renderer output coordinator")
+	}
 }
 
 // TestREPLCompactSaveFailureWarned covers the /compact save path, the sixth
@@ -5139,6 +5147,7 @@ func TestREPLDuringPromptInputQueuedOnEnter(t *testing.T) {
 	}
 	close(releaseTurn)
 	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from queued during-prompt input")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "draft\n"+submittedPromptRule+"\n") }, "queued prompt echo and separator")
 	_ = pw.Close()
 
 	if code := waitRun(t, codeCh); code != ExitOK {
@@ -5466,6 +5475,7 @@ func TestREPLDuringPromptNoSteerQueuesForNextTurn(t *testing.T) {
 	}
 	close(releaseTurn)
 	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from queued during-prompt input")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "draft\n"+submittedPromptRule+"\n") }, "queued prompt echo and separator")
 	_ = pw.Close()
 
 	if code := waitRun(t, codeCh); code != ExitOK {
@@ -5521,6 +5531,7 @@ func TestREPLDuringPromptSteerRecoveredWhenTurnEndsWithoutToolRound(t *testing.T
 	}
 	close(releaseTurn)
 	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request from recovered steer")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "redirect\n"+submittedPromptRule+"\n") }, "recovered steer echo and separator")
 	_ = pw.Close()
 
 	if code := waitRun(t, codeCh); code != ExitOK {
@@ -5621,6 +5632,9 @@ func TestREPLRejectedSteerAdmissionRunsPreparedInputNext(t *testing.T) {
 	if got := transcriptPrompts(app); got != "first|redirect" {
 		t.Fatalf("prompts = %q, want rejected steer retained as next prompt", got)
 	}
+	if !strings.Contains(errw.String(), "[queued for next prompt: redirect]") {
+		t.Fatalf("missing queued indicator for rejected steer; errw=%q", errw.String())
+	}
 }
 
 func TestREPLSteerFallbackKeepsSubmissionOrder(t *testing.T) {
@@ -5719,9 +5733,13 @@ func TestSteerDuringPromptClassification(t *testing.T) {
 			var got string
 			var called bool
 			app := &App{Steer: func(input agent.SteerInput) bool { called = true; got = input.Text; return true }}
-			handled, queued := app.steerDuringPrompt(tc.input)
-			if handled != tc.wantSteer {
-				t.Fatalf("steerDuringPrompt handled = %v, want %v", handled, tc.wantSteer)
+			disp, queued := app.steerDuringPrompt(tc.input)
+			wantDisp := steerNotModelBound
+			if tc.wantSteer {
+				wantDisp = steerAccepted
+			}
+			if disp != wantDisp {
+				t.Fatalf("steerDuringPrompt disposition = %v, want %v", disp, wantDisp)
 			}
 			if queued != nil {
 				t.Fatalf("steerDuringPrompt queued = %+v after accepted steering", queued)
@@ -5737,19 +5755,85 @@ func TestSteerDuringPromptClassification(t *testing.T) {
 		})
 	}
 
-	// nil Steer disables steering: everything is queued (returns false).
+	// nil Steer disables steering: everything is queued (not model-bound).
 	app := &App{}
-	if handled, queued := app.steerDuringPrompt(replInput{text: "hi", interactive: true}); handled || queued != nil {
-		t.Fatalf("steerDuringPrompt = (%v, %+v), want (false, nil) when Steer is nil", handled, queued)
+	if disp, queued := app.steerDuringPrompt(replInput{text: "hi", interactive: true}); disp != steerNotModelBound || queued != nil {
+		t.Fatalf("steerDuringPrompt = (%v, %+v), want (steerNotModelBound, nil) when Steer is nil", disp, queued)
 	}
 
 	// A full bounded steer queue must return the already-prepared model input,
 	// including literal-prefix normalization, rather than asking the idle loop to
 	// prepare and run the raw input again.
 	app.Steer = func(agent.SteerInput) bool { return false }
-	handled, queued := app.steerDuringPrompt(replInput{text: "//path", interactive: true})
-	if !handled || queued == nil || queued.Text != "/path" {
-		t.Fatalf("rejected steer = (%v, %+v), want prepared literal /path queued", handled, queued)
+	disp, queued := app.steerDuringPrompt(replInput{text: "//path", interactive: true})
+	if disp != steerQueuedPrepared || queued == nil || queued.Text != "/path" {
+		t.Fatalf("rejected steer = (%v, %+v), want (steerQueuedPrepared, prepared literal /path)", disp, queued)
+	}
+}
+
+// A during-prompt submission immediately prints a dim indicator naming its
+// disposition: [steer queued: ...] when the agent accepts the steer, and
+// [queued for next prompt: ...] when the input waits for the idle prompt.
+func TestREPLDuringPromptSubmissionIndicators(t *testing.T) {
+	var out, errw lockedBuffer
+	inPrompt := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{Stop: llm.StopEndTurn, Block: func(context.Context) { close(inPrompt); <-releaseTurn }},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("next answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp)
+	steered := make(chan struct{})
+	app.Steer = func(agent.SteerInput) bool {
+		close(steered)
+		return true
+	}
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-inPrompt:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+	writePipe(t, pw, "redirect\r")
+	select {
+	case <-steered:
+	case <-time.After(time.Second):
+		t.Fatal("steer was not accepted")
+	}
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "[steer queued: redirect]") }, "steer indicator")
+	if strings.Contains(errw.String(), "[queued for next prompt: redirect]") {
+		t.Fatalf("accepted steer must not report queued-for-next-prompt; errw=%q", errw.String())
+	}
+	// A /command is not model-bound: it queues for the idle prompt and says so.
+	writePipe(t, pw, "/status\r")
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "[queued for next prompt: /status]") }, "queued indicator")
+	close(releaseTurn)
+	_ = pw.Close()
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+}
+
+// A line recovered at the prompt-completion boundary takes a different run-loop
+// branch from an ordinary active read. It still needs the immediate queue notice
+// and the later normal prompt echo marker.
+func TestMarkQueuedSubmissionCoversPromptBoundaryRecovery(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	input := app.markQueuedSubmission(replInput{text: "boundary input", interactive: true}, 0)
+
+	if !input.echoWhenDequeued {
+		t.Fatal("queued boundary input was not marked for prompt echo")
+	}
+	if !strings.Contains(errw.String(), "[queued for next prompt: boundary input]") {
+		t.Fatalf("queued boundary input notice missing: %q", errw.String())
 	}
 }
 
@@ -6321,6 +6405,26 @@ func TestWorkContextEpochArchivesAndSeedsActiveStep(t *testing.T) {
 	}
 }
 
+// accumulatingSink.SteerDelivered routes the steer-delivery indicator through
+// Notice so the dim line renders live AND is recorded in the session log.
+func TestAccumulatingSinkSteerDeliveredRendersAndRecords(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	sink := newAccumulatingSink(app.Renderer, app, 1)
+	sink.turn = 1
+	sink.SteerDelivered("inspect this")
+	if !strings.Contains(errw.String(), "[steer sent: inspect this]") {
+		t.Fatalf("steer delivery line missing from live output:\n%s", errw.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw event log: %v", err)
+	}
+	if !strings.Contains(string(raw), `"type":"notice"`) || !strings.Contains(string(raw), "[steer sent: inspect this]") {
+		t.Fatalf("steer delivery notice missing from raw.ndjson:\n%s", raw)
+	}
+}
+
 func TestREPLGoalCommandSetsObjective(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn})
@@ -6343,6 +6447,12 @@ func TestREPLGoalCommandSetsObjective(t *testing.T) {
 	ctx := strings.Join(req.RequestContext, "\n\n")
 	if !strings.Contains(ctx, "refactor the parser") || !strings.Contains(ctx, "<goal status=\"active\" work_id=") {
 		t.Fatalf("missing goal reminder in request context:\n%s", ctx)
+	}
+	// Host-created goal continuations are not user submissions: no indicator
+	// names them. (The /exit above was user-submitted during the continuation
+	// prompt, so its own queued indicator is expected.)
+	if strings.Contains(errw.String(), "[queued for next prompt: Continue working toward") || strings.Contains(errw.String(), "[steer queued: Continue working toward") {
+		t.Fatalf("goal continuation must not print a submission indicator:\n%s", errw.String())
 	}
 }
 
@@ -6519,6 +6629,9 @@ func TestREPLGoalAutoContinuesWithoutGoalTools(t *testing.T) {
 	cont := fp.Requests[1].Messages[len(fp.Requests[1].Messages)-1].Content[0].Text
 	if !strings.Contains(cont, "Continue working toward the active session goal") {
 		t.Fatalf("continuation prompt missing: %q", cont)
+	}
+	if strings.Contains(errw.String(), "Continue working toward the active session goal") {
+		t.Fatalf("host-created continuation was echoed as user input:\n%s", errw.String())
 	}
 }
 

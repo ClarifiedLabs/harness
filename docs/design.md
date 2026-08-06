@@ -1582,6 +1582,13 @@ run post-prompt maintenance if needed
 emit prompt_usage(prompt, completedTurns)
 ```
 
+`EventSink` remains the required rendering contract. `SteerDeliveredSink` is an
+optional sink interface: after a queued in-prompt steer is appended as a
+validated `MessageOriginSteer` user message, the agent calls `SteerDelivered` so
+TTY sinks can distinguish admission from actual delivery. It is not called for a
+failed validation rollback, a disabled steer, or input recovered for the next
+prompt.
+
 - **Mostly-sequential tool execution.** Coding tools mutate a shared filesystem; deterministic
   ordering matching the model's emission order is worth far more than parallelism. Consecutive
   read-only islands with 2+ calls dispatch concurrently, bounded at 8, unless

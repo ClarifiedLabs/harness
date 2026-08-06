@@ -515,7 +515,9 @@ func (r *Renderer) ToolUseStart(call llm.ToolCall) {
 	if !r.toolProgress() || r.quiet {
 		return
 	}
+	r.renderMu.Lock()
 	r.pendingToolUses = append(r.pendingToolUses, fmt.Sprintf("[tool-call: %s id=%s]", call.Name, call.ID))
+	r.renderMu.Unlock()
 }
 
 func (r *Renderer) ToolUseDelta(_ int, _ string) {}
@@ -655,11 +657,14 @@ func (r *Renderer) usageOutput(line string) {
 }
 
 func (r *Renderer) flushToolUseStarts() {
+	r.renderMu.Lock()
 	if len(r.pendingToolUses) == 0 {
+		r.renderMu.Unlock()
 		return
 	}
 	lines := r.pendingToolUses
 	r.pendingToolUses = nil
+	r.renderMu.Unlock()
 	for _, line := range lines {
 		r.dimLine(line)
 	}

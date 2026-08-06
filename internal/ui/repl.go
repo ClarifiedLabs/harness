@@ -390,6 +390,15 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 }
 
 func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool, initialPrompt *string) int {
+	// Renderer callbacks and host-side notices can run concurrently while a
+	// prompt is active. Make the renderer's coordinator the App-wide output
+	// owner even for embedders that supplied the same raw writers separately.
+	// The main binary already wires these writers explicitly; normalizing here
+	// keeps the App contract safe for other callers and tests too.
+	if app.Renderer != nil && app.Renderer.output != nil {
+		app.Out = app.Renderer.output.Stdout()
+		app.Errw = app.Renderer.output.Stderr()
+	}
 	if app.Created.IsZero() {
 		app.Created = app.clock()()
 	}
@@ -1021,6 +1030,8 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		cancelShiftTabPrewarm()
 		if app.Renderer != nil {
+			app.echoEditedPrompt(prompt, input.Text)
+			app.Renderer.SubmittedPromptSeparator()
 			app.Renderer.StartPrompt()
 		}
 		ctx, cancel, interrupted := exitContext()
@@ -1074,7 +1085,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			return false, ExitOK
 		}
 		if action.run {
-			if action.echoEditedPrompt {
+			if input.echoWhenDequeued || action.echoEditedPrompt {
 				app.echoEditedPrompt(prompt, action.prompt)
 			}
 			return startPromptInteraction(action.prompt, action.resolveSkillMentions, action.attachPromptImages, action.goalPrompt, action.goalContinuation, action.goalRevision)
@@ -1203,6 +1214,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 							pendingPrefillModelPrompt = false
 							pendingPrefillPasted = false
 						} else if res.ok && !res.input.escape && !res.input.interrupt && (res.input.text != "" || res.input.edit) {
+							res.input = app.markQueuedSubmission(res.input, 0)
 							queued = append(queued, res.input)
 						} else {
 							// The read returned via a keystroke (interrupt/Esc)
@@ -1308,6 +1320,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 						case !res.ok:
 							setInputEnded(res.err)
 						default:
+							res.input = app.markQueuedSubmission(res.input, 0)
 							queued = append(queued, res.input)
 						}
 					default:
@@ -1374,7 +1387,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				}
 				if input.escape {
 					if input.text != "" {
-						queued = append(queued, replInput{text: input.text})
+						queued = append(queued, app.markQueuedSubmission(replInput{text: input.text}, 0))
 					}
 					if escPresses.press(app.clock()()) && app.Interrupt != nil {
 						app.Interrupt.CancelPrompt()
@@ -1386,17 +1399,25 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				// either queue, or a later accepted steer would recover ahead
 				// of it at prompt completion. Queueing keeps submission order
 				// by construction.
-				var handled bool
+				disposition := steerNotModelBound
 				var prepared *agent.SteerInput
 				if len(queued) == 0 && len(preparedQueued) == 0 {
-					handled, prepared = app.steerDuringPrompt(input)
+					disposition, prepared = app.steerDuringPrompt(input)
 				}
 				if prepared != nil {
 					preparedQueued = append(preparedQueued, *prepared)
 				}
-				if handled {
+				switch disposition {
+				case steerAccepted:
+					app.submissionIndicator("steer queued", input.text, 0)
+					continue
+				case steerPrepRejected:
+					continue
+				case steerQueuedPrepared:
+					app.submissionIndicator("queued for next prompt", input.text, len(prepared.Images))
 					continue
 				}
+				input = app.markQueuedSubmission(input, 0)
 				queued = append(queued, input)
 			}
 			continue
@@ -1642,6 +1663,11 @@ type replInput struct {
 	escapeTail  bool
 	interrupt   bool
 	interactive bool
+	// echoWhenDequeued marks input the user submitted while another prompt was
+	// active. If it later starts a model prompt from the queue, replay that prompt
+	// line before the separator. Host-created goal continuations share the queue
+	// but deliberately leave this false.
+	echoWhenDequeued bool
 	// modelPrompt marks input already classified as model-bound prompt text. It
 	// bypasses prompt-level command and shell dispatch while preserving normal
 	// prompt enrichment.
@@ -1787,39 +1813,62 @@ func steerInputEmpty(input agent.SteerInput) bool {
 	return true
 }
 
+// steerDisposition reports how steerDuringPrompt disposed of a during-prompt
+// submission so the run loop can word a submission indicator without conflating
+// accepted steering with queueing.
+type steerDisposition int
+
+const (
+	// steerNotModelBound marks input the caller must queue as-is: shell escapes,
+	// /commands, /edit requests, empty text, or any input when steering is
+	// disabled or the steer gate is closed.
+	steerNotModelBound steerDisposition = iota
+	// steerAccepted marks input handed to the agent steer queue. This reports
+	// submission only; the steer may still be recovered as the next prompt if
+	// the running prompt ends before a tool round injects it.
+	steerAccepted
+	// steerPrepRejected marks input consumed but dropped during preparation
+	// (a hook rejected it or prompt preparation failed). The input is handled;
+	// the caller queues nothing and prints no indicator.
+	steerPrepRejected
+	// steerQueuedPrepared marks a prepared model-bound input the bounded steer
+	// queue refused; the caller appends the returned SteerInput to
+	// preparedQueued so it runs as the next prompt without repeating hooks.
+	steerQueuedPrepared
+)
+
 // steerDuringPrompt routes a during-prompt-submitted input into the agent as a
 // in-prompt steering message when steering is enabled and the input is
-// model-bound (would start a prompt at idle). handled is true when the input was
-// accepted for steering or rejected during preparation. If the bounded steer
-// queue refuses an otherwise prepared input, queued contains that exact
-// model-bound content so the caller can run it later without repeating hooks or
-// losing consumed images/context. Non-model-bound input (shell escapes,
-// /commands, /edit requests) and any input when Steer is nil return false, nil
-// so the caller queues the original input. The classification mirrors
-// handlePromptInput's prefix dispatch but performs no command side effects.
-func (app *App) steerDuringPrompt(input replInput) (handled bool, queued *agent.SteerInput) {
+// model-bound (would start a prompt at idle), reporting the disposition. For
+// steerQueuedPrepared the returned input contains that exact model-bound
+// content so the caller can run it later without repeating hooks or losing
+// consumed images/context. steerNotModelBound input (shell escapes, /commands,
+// /edit requests) and any input when Steer is nil is left for the caller to
+// queue unchanged. The classification mirrors handlePromptInput's prefix
+// dispatch but performs no command side effects.
+func (app *App) steerDuringPrompt(input replInput) (steerDisposition, *agent.SteerInput) {
 	if app.Steer == nil {
-		return false, nil
+		return steerNotModelBound, nil
 	}
 	if input.escape || input.interrupt || input.deposit || input.edit {
-		return false, nil
+		return steerNotModelBound, nil
 	}
 	line := input.text
 	if line == "" {
-		return false, nil
+		return steerNotModelBound, nil
 	}
 	if !input.interactive && !input.pasted {
-		return false, nil
+		return steerNotModelBound, nil
 	}
-	prepareAndSteer := func(text string, opts promptOptions) (bool, *agent.SteerInput) {
+	prepareAndSteer := func(text string, opts promptOptions) (steerDisposition, *agent.SteerInput) {
 		steered, err := app.prepareSteerInput(text, opts)
 		if err != nil {
-			return true, nil
+			return steerPrepRejected, nil
 		}
 		if app.steerAccepted(steered) {
-			return true, nil
+			return steerAccepted, nil
 		}
-		return true, &steered
+		return steerQueuedPrepared, &steered
 	}
 	if input.pasted {
 		return prepareAndSteer(line, promptOptions{})
@@ -1834,10 +1883,52 @@ func (app *App) steerDuringPrompt(input replInput) (handled bool, queued *agent.
 		// !shell escapes and /commands (including /edit) are not model input —
 		// leave them queued for the idle prompt.
 		if strings.HasPrefix(line, "!") || strings.HasPrefix(line, "/") {
-			return false, nil
+			return steerNotModelBound, nil
 		}
 	}
 	return prepareAndSteer(line, promptOptions{resolveSkillMentions: true, attachPromptImages: true})
+}
+
+// submissionIndicator prints a dim one-line notice above the live status line
+// reporting how a during-prompt submission was disposed. The wording never
+// promises delivery: a queued steer is still recovered as the next prompt when
+// the running prompt ends before a tool round injects it.
+func (app *App) submissionIndicator(disposition, text string, images int) {
+	if app.Renderer == nil {
+		return
+	}
+	app.Renderer.Notice("[" + disposition + ": " + submissionPreview(text, images) + "]")
+}
+
+// markQueuedSubmission records the immediate disposition of user input and
+// marks it for a normal prompt-line echo if it later starts a model request.
+// Keeping both effects together prevents prompt-boundary recovery paths from
+// silently queueing input without the notice shown by the ordinary active-read
+// path.
+func (app *App) markQueuedSubmission(input replInput, images int) replInput {
+	app.submissionIndicator("queued for next prompt", input.text, images)
+	input.echoWhenDequeued = true
+	return input
+}
+
+// submissionPreview collapses a submission to its first whitespace-normalized
+// line, truncated with an ellipsis, and notes any attached images.
+func submissionPreview(text string, images int) string {
+	line, _, _ := strings.Cut(text, "\n")
+	line = strings.Join(strings.Fields(line), " ")
+	const maxPreview = 72
+	runes := []rune(line)
+	if len(runes) > maxPreview {
+		line = string(runes[:maxPreview-1]) + "…"
+	}
+	if images > 0 {
+		plural := ""
+		if images > 1 {
+			plural = "s"
+		}
+		line += fmt.Sprintf(" (+%d image%s)", images, plural)
+	}
+	return line
 }
 
 func (app *App) handlePromptInput(input replInput, readCommandLine func(string) (string, error)) replAction {
@@ -5680,6 +5771,13 @@ func (s *accumulatingSink) Notice(msg string) {
 		turn = 0
 	}
 	s.rec.Notice(msg, turn)
+}
+
+// SteerDelivered reports that queued in-prompt steer input was injected into
+// the transcript: the dim line renders above the live status line and is
+// recorded as a sessionrec Display line via Notice.
+func (s *accumulatingSink) SteerDelivered(text string) {
+	s.Notice("[steer sent: " + submissionPreview(text, 0) + "]")
 }
 
 func (s *accumulatingSink) workNotice(label string, err error) {

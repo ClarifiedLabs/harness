@@ -4105,6 +4105,81 @@ func TestSteerContentInjectsImagesAndRequestContext(t *testing.T) {
 	}
 }
 
+// steerDeliverySink records SteerDelivered notifications on top of recordSink.
+type steerDeliverySink struct {
+	*recordSink
+	mu        sync.Mutex
+	delivered []string
+}
+
+func (s *steerDeliverySink) SteerDelivered(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.delivered = append(s.delivered, text)
+}
+
+func (s *steerDeliverySink) deliveredTexts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.delivered...)
+}
+
+// TestSteerDeliveredNotifiesSinkOnInjection queues two steers during a tool
+// round; the drain combines them into one Origin=MessageOriginSteer message
+// and the sink must be notified exactly once, with the combined text.
+func TestSteerDeliveredNotifiesSinkOnInjection(t *testing.T) {
+	toolRan := make(chan struct{})
+	releaseTool := make(chan struct{})
+	tool := &recordTool{name: "probe", run: func(_ context.Context, _ json.RawMessage) (string, error) {
+		close(toolRan)
+		<-releaseTool
+		return "probed", nil
+	}}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "call_1", "probe", `{}`)},
+			Stop:   llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, reg, Options{Steer: true})
+	sink := &steerDeliverySink{recordSink: &recordSink{}}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.RunPrompt(context.Background(), "go", sink) }()
+	<-toolRan
+	a.SteerContent(SteerInput{Text: "first steer"})
+	a.SteerContent(SteerInput{Text: "second steer"})
+	close(releaseTool)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	got := sink.deliveredTexts()
+	if len(got) != 1 || got[0] != "first steer\n\nsecond steer" {
+		t.Fatalf("SteerDelivered calls = %q, want one call with the combined steer text", got)
+	}
+}
+
+// TestSteerDeliveredNotCalledWhenSteeringDisabled confirms the notification
+// never fires when Options.Steer is false: no channel, no drain, no delivery.
+func TestSteerDeliveredNotCalledWhenSteeringDisabled(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Catalog(), Options{})
+	sink := &steerDeliverySink{recordSink: &recordSink{}}
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if got := sink.deliveredTexts(); len(got) != 0 {
+		t.Fatalf("SteerDelivered calls = %q, want none when steering is disabled", got)
+	}
+}
+
 // TestSteerResetsLoopGuard queues a steer during a repeating-tool turn. The
 // steer must reset the repeat streak so the loop-guard nudge that would
 // otherwise fire at repeatSteerThreshold (3 identical rounds) does not.
