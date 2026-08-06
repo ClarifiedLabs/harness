@@ -1609,14 +1609,24 @@ func (app *App) promptValues(t *replprompt.Template, viMode string) replprompt.V
 	if t.Uses("git_branch") {
 		gitBranch = replprompt.CurrentGitBranch(cwd)
 	}
+	var contextUsed, contextTotal int
+	if t.Uses("context") || t.Uses("context_pct_used") || t.Uses("context_tokens_used") || t.Uses("context_tokens_total") {
+		if app.Agent != nil {
+			est := app.Agent.EstimateContext()
+			contextUsed = sessionrec.ContextUsed(est)
+			contextTotal = est.Window
+		}
+	}
 	return replprompt.Values{
-		Agent:     app.AgentName,
-		CWD:       cwd,
-		Hostname:  hostname,
-		GitBranch: gitBranch,
-		Model:     app.Model,
-		Reasoning: app.promptReasoningLabel(),
-		ViMode:    viMode,
+		Agent:              app.AgentName,
+		CWD:                cwd,
+		Hostname:           hostname,
+		GitBranch:          gitBranch,
+		Model:              app.Model,
+		Reasoning:          app.promptReasoningLabel(),
+		ViMode:             viMode,
+		ContextTokensUsed:  contextUsed,
+		ContextTokensTotal: contextTotal,
 	}
 }
 

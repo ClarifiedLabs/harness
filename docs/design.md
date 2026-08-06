@@ -3183,8 +3183,9 @@ agent-switch meaning in other input contexts.
 rendered at every idle prompt boundary, so dynamic values reflect runtime
 changes before each read. The default is `[{agent}] > `. Supported placeholders
 are `{agent}`, `{cwd}`, `{hostname}`, `{hostname:short}`, `{hostname:long}`,
-`{git_branch}`, `{model}`, `{reasoning}`, `{vimode}`, `{vimode:short}`, and
-`{vimode:long}`.
+`{git_branch}`, `{model}`, `{reasoning}`, `{vimode}`, `{vimode:short}`,
+`{vimode:long}`, `{context}`, `{context_pct_used}`, `{context_tokens_used}`,
+and `{context_tokens_total}`.
 `{cwd}` abbreviates the user's home directory
 prefix to `~` (for example `~/work`), so the rendered value may differ from the
 raw working directory. `{reasoning}` renders the current reasoning profile, such
@@ -3204,6 +3205,20 @@ prompt. The label updates live as the mode flips mid-edit (Esc enters normal
 mode; `i`/`a`/`A`/`I`/`c`/`s`/etc. return to insert mode), re-rendering the
 prompt at each transition. The label is plain visible text with no color,
 matching the other placeholders.
+
+`{context}` renders the current context-window usage as `<pct>% <used>/<total>`
+using the same shortened token display as the turn status line (e.g.
+`7% 78.6k/1048.6k`), so it shares `sessionrec.HumanTokens` exactly;
+`{context_pct_used}` renders just the integer percentage without the trailing
+`%` (e.g. `25`), `{context_tokens_used}` renders the estimated input tokens
+used, and `{context_tokens_total}` renders the context window size — both of
+the latter use the same `HumanTokens` shortening (e.g. `78.6k`, `12.4k`).
+Both `{context}` and `{context_pct_used}` render empty when no window is known
+(e.g. no agent or unknown model); otherwise the percentage is
+`used*100/total` truncated to an integer and capped to `0..100`. When the
+window is unknown but tokens are present, `{context}` falls back to rendering
+just the shortened `<used>`. Values come from `agent.EstimateContext()`
+computed at prompt render time.
 
 `-repl-edit-mode=vi` (or `HARNESS_REPL_EDIT_MODE=vi` / config `repl_edit_mode`)
 switches the raw prompt editor to a small vi keymap. The prompt starts in insert

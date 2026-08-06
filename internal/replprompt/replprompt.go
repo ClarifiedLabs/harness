@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"harness/internal/sessionrec"
 )
 
 // DefaultFormat is the default REPL prompt template.
@@ -19,17 +22,21 @@ const gitTimeout = 250 * time.Millisecond
 type field string
 
 const (
-	fieldAgent         field = "agent"
-	fieldCWD           field = "cwd"
-	fieldHostname      field = "hostname"
-	fieldHostnameLong  field = "hostname:long"
-	fieldHostnameShort field = "hostname:short"
-	fieldGitBranch     field = "git_branch"
-	fieldModel         field = "model"
-	fieldReasoning     field = "reasoning"
-	fieldViMode        field = "vimode"
-	fieldViModeLong    field = "vimode:long"
-	fieldViModeShort   field = "vimode:short"
+	fieldAgent                field = "agent"
+	fieldCWD                  field = "cwd"
+	fieldHostname             field = "hostname"
+	fieldHostnameLong         field = "hostname:long"
+	fieldHostnameShort        field = "hostname:short"
+	fieldGitBranch            field = "git_branch"
+	fieldModel                field = "model"
+	fieldReasoning            field = "reasoning"
+	fieldViMode               field = "vimode"
+	fieldViModeLong           field = "vimode:long"
+	fieldViModeShort          field = "vimode:short"
+	fieldContext              field = "context"
+	fieldContextPctUsed       field = "context_pct_used"
+	fieldContextTokensUsed    field = "context_tokens_used"
+	fieldContextTokensTotal   field = "context_tokens_total"
 )
 
 // Values carries the runtime values available to a REPL prompt template.
@@ -48,6 +55,10 @@ type Values struct {
 	// ViMode is the current raw-prompt vi edit mode: "insert", "normal", or ""
 	// (empty outside vi mode, e.g. emacs mode). {vimode} renders a label for it.
 	ViMode string
+	// ContextTokensUsed is the current estimated context tokens used.
+	ContextTokensUsed int
+	// ContextTokensTotal is the model's context window size (total tokens).
+	ContextTokensTotal int
 }
 
 // Template is a compiled REPL prompt format string.
@@ -243,6 +254,8 @@ func parseField(name string) (field, bool) {
 		return field(name), true
 	case fieldViMode, fieldViModeLong, fieldViModeShort:
 		return field(name), true
+	case fieldContext, fieldContextPctUsed, fieldContextTokensUsed, fieldContextTokensTotal:
+		return field(name), true
 	default:
 		return "", false
 	}
@@ -268,9 +281,51 @@ func valueForField(f field, values Values) string {
 		return ViModeLabel(values.ViMode, "long")
 	case fieldViModeShort:
 		return ViModeLabel(values.ViMode, "short")
+	case fieldContext:
+		return formatContext(values.ContextTokensUsed, values.ContextTokensTotal)
+	case fieldContextPctUsed:
+		return formatContextPct(values.ContextTokensUsed, values.ContextTokensTotal)
+	case fieldContextTokensUsed:
+		return sessionrec.HumanTokens(values.ContextTokensUsed)
+	case fieldContextTokensTotal:
+		return sessionrec.HumanTokens(values.ContextTokensTotal)
 	default:
 		return ""
 	}
+}
+
+func formatContextPct(used, total int) string {
+	if total <= 0 {
+		return ""
+	}
+	if used < 0 {
+		used = 0
+	}
+	pct := used * 100 / total
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return strconv.Itoa(pct)
+}
+
+func formatContext(used, total int) string {
+	pctStr := formatContextPct(used, total)
+	if pctStr == "" {
+		if used > 0 {
+			return sessionrec.HumanTokens(used)
+		}
+		return ""
+	}
+	if used < 0 {
+		used = 0
+	}
+	if total < 0 {
+		total = 0
+	}
+	return pctStr + "% " + sessionrec.HumanTokens(used) + "/" + sessionrec.HumanTokens(total)
 }
 
 // abbreviateHome rewrites the user's home directory prefix in path as "~",
