@@ -126,7 +126,7 @@ internal/mcp/jsonrpc     JSON-RPC 2.0 framing and bidirectional request/response
 internal/mcpproxy      proxy internals: config, supervisors, tool registry, daemon
 internal/metrics         shared Prometheus collectors/exposition plus endpoint config resolution and lifecycle
 internal/mcptools        harness-side adapter: tools.Tool over a reconnecting proxy Conn (§15)
-internal/lspproxy      LSP manager: language-server supervisors, Content-Length JSON-RPC, navigation tools (§15a)
+internal/lspproxy      LSP manager: language-server supervisors, Content-Length JSON-RPC, agent-oriented code-intelligence tools (§15a)
 internal/lsptools        harness-side adapter exposing short `lsp_*` tools over the LSP manager (§15a)
 ```
 
@@ -2877,6 +2877,25 @@ fast-fails subsequent calls rather than storming reconnects. A proxy crash
 mid-session surfaces as error tool results; the next call reconnects when the
 backoff allows.
 
+### 9.16a Native LSP tools (`internal/lsptools`)
+
+> Short `lsp_*` adapters over the in-process `internal/lspproxy.Manager`; the
+> protocol operations and lifecycle are detailed in §15a.
+
+The adapter deliberately does not weaken the generic MCP adapter's required
+`mcp__` namespace. It lists the manager's bare static surface, prefixes names
+with `lsp_`, honors the configured allowlist, and dispatches the original bare
+name back to the manager. `readOnlyHint` annotations determine scheduling and
+agent `mcp_tools` exposure; code-action apply, formatting apply, and rename apply
+are mutating.
+
+Unlike ordinary dynamic MCP tools, an LSP adapter implements
+`SchemaDescriptionPreserver`. Position and range descriptions are part of the
+model-facing contract: they explain that lines/columns are 1-based, `symbol` is
+preferred when locating identifiers, range bounds are inclusive, and several
+fields have Harness-owned defaults. `Registry.Specs` therefore retains those
+field descriptions instead of applying its normal prose-stripping policy.
+
 ### 9.17 `request_implementation` (`internal/handoff` + `internal/tools`)
 
 - Requests approval to transition the current ready WorkState to implementation.
@@ -4321,10 +4340,12 @@ aggregated table), `auth`, and `version` — with serve flags
 ## 15a. LSP code intelligence (optional)
 
 The **LSP manager** (`internal/lspproxy`) launches already-installed language
-servers on demand and exposes native LSP tools
-(`lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_document_symbols`,
-`lsp_workspace_symbols`, `lsp_diagnostics`, and the read-only
-`lsp_rename_plan`, plus the mutating `lsp_rename`). The normal path is first-class, not generic MCP:
+servers on demand and exposes 21 native LSP tools. Navigation covers declaration,
+definition, type definition, implementation, references, hover, signature help,
+completion, and document highlights. Structural inspection covers document/workspace
+symbols, call/type hierarchies, inlay hints, and diagnostics. Change workflows expose
+read-only action listings and format/rename plans plus mutating text-edit application for code
+actions, formatting, and rename. The normal path is first-class, not generic MCP:
 `lsp.enable=true` registers short `lsp_*` tools directly through
 `internal/lsptools`, while `internal/lspproxy` still owns the language-server
 supervisors. This is distinct from the secrets-isolated remote
@@ -4338,9 +4359,23 @@ entire embedded default entry, so overrides must include all required fields. Th
 built-in path uses `lspproxy.NewManager(..., namespace="")` and adapts the manager's
 bare tools to short `lsp_*` names. `lsp.tools` (config-file-only, bare names with or
 without the `lsp_` prefix) registers only the listed subset of native tools; an
-empty or unset list registers all, and unknown entries warn and are ignored. Tool
+empty or unset list registers the core set (`lspproxy.CoreTools`), `["all"]`
+registers the full surface, and unknown entries warn and are ignored. Tool
 annotations drive scheduling and agent exposure: read-only LSP tools join the
-read-only gate, while `lsp_rename` is mutating.
+read-only gate, while `lsp_code_action`, `lsp_format_document`, and `lsp_rename`
+are mutating. `internal/lsptools.Tool` preserves its schema field descriptions in
+the model-facing spec (§9.16a), so the position and range conventions are not
+lost to normal schema-prose compaction.
+
+Interactive startup prepares this static surface even when `lsp.enable=false`,
+without launching a server. `/lsp enable` re-derives every agent's allowed tools,
+updates the active registry and system prompt together, and resets provider
+continuation state before the next request. `/lsp disable` removes the exposure,
+shuts down every loaded server, and removes the runtime hint. This override is
+process-local. The same re-derivation runs after a dynamic MCP refresh so the
+remote refresh cannot accidentally re-enable disabled LSP tools. `/lsp status`
+re-probes PATH and reports configured servers, available languages, and the
+distinct set of languages with a live initialized process plus loaded roots.
 
 Serena support is independent of native LSP. `lsp.serena.enable=true` starts a
 local stdio MCP child (default `serena start-mcp-server --context=ide
@@ -4383,24 +4418,28 @@ one server is **configured** (the count is of configured servers, not running on
 Because the embedded defaults ship five servers (Go/Rust/Python/TS-JS/C-C++), `path` is
 effectively always required unless the config narrows the set to one. Per-tool optional
 params beyond the shared position shape: `lsp_diagnostics` takes `timeout_ms` (default
-3000); `lsp_references` takes `include_declaration` (default true) and `max_results`
-(default 100); `lsp_workspace_symbols` takes `max_results` (default 100); and
-`lsp_rename_plan`/`lsp_rename` additionally **require** `new_name`. `lsp_rename`
-applies text edits from `textDocument/rename` only after validating all files and
-ranges; unsupported WorkspaceEdit file operations are rejected before any write.
+3000); bounded result operations use `max_results` (default 100); hierarchy tools
+require a direction; inlay-hint/action/formatting ranges use optional 1-based
+inclusive `start_line`/`end_line`; code actions may wait `timeout_ms` for fresh
+pushed diagnostics; and `lsp_rename_plan`/`lsp_rename` additionally
+require `new_name`. Action apply selects an exact offered title and may resolve a
+data-backed action before applying. Language-server commands are never executed.
+Rename and action apply reject unsupported WorkspaceEdit file operations; all
+mutating paths validate every text range before any write.
 Built-in config uses top-level
 `{"lsp":{"servers":{...}}}`; the compatibility `harness lsp serve -config` path
 still accepts the legacy `{"version":1,"servers":{...}}` file shape. Both paths
 replace embedded defaults (Go/Rust/Python/TS-JS/C-C++) by server name rather than
-field-merging them. Per-tool descriptions stay capability-specific and are capped
+field-merging them. Per-tool descriptions stay operation-specific and are capped
 at 512 bytes; one system-prompt runtime hint lists languages whose configured
-server binary is on `PATH`, or reports that none are available.
+server binary is on `PATH`, or reports that none are available. The actual tool
+schemas independently disclose every enabled operation.
 
-**v1 non-goals:** completion, formatting, code actions, and WorkspaceEdit file
-operations; full-text sync (no incremental); one root per language-server
-process, with separate processes for other roots; push diagnostics only; the
-built-in LSP tool surface is static, and the harness refresh hook is only wired
-to external MCP connections.
+**Deliberate limits:** WorkspaceEdit file operations and server command execution;
+full-text sync (no incremental); one root per language-server process, with
+separate processes for other roots; push diagnostics only; and editor-rendering
+features without useful agent semantics (semantic tokens, folding/selection
+ranges, colors, linked editing, inline values, and code lenses).
 
 ## 16. Future work
 

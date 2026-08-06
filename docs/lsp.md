@@ -1,7 +1,8 @@
 # LSP Code Intelligence
 
 Harness includes optional LSP code intelligence. It launches already-installed
-language servers on demand and exposes a small set of code-navigation tools. The
+language servers on demand and exposes an agent-oriented set of navigation,
+inspection, diagnostics, refactoring, and formatting tools. The
 normal built-in path registers short `lsp_*` tool names directly in harness.
 Harness can also launch [Serena](https://github.com/oraios/serena) as an
 independent local MCP server for symbol-aware coding tools.
@@ -22,7 +23,8 @@ harness -> Serena MCP child -> Serena tools
 With `lsp.enable=true`, harness registers the LSP tools at startup and launches
 one language server per `(server, workspace-root)` lazily, on first use. LSP
 read-only tools can join read-only parallel batches; mutating tools, such as
-`lsp_rename`, remain ordering barriers.
+`lsp_code_action`, `lsp_format_document`, and `lsp_rename`, remain ordering
+barriers.
 
 This is independent of `mcp.enable` and `mcp.local`; a custom local stdio MCP
 service can run at the same time.
@@ -39,6 +41,21 @@ LSP is disabled by default. To enable it, set `lsp.enable` or
 `enable: true` turns it on everywhere, including one-shot. `false` or an unset
 value leaves it off. This does not enable the remote MCP proxy or consume the
 generic `mcp.local` slot.
+
+In an interactive session, `/lsp enable` and `/lsp disable` override the initial
+setting for that process only. `/lsp` and `/lsp status` show:
+
+- whether native LSP tools are currently exposed to the active agent;
+- configured tools and languages whose server commands are currently on `PATH`;
+- languages with a live, initialized server process; and
+- each loaded server's workspace root.
+
+Enabling changes both dispatch and, when the active agent's tool policy permits
+LSP, the tool schemas sent on the next model request. Disabling removes those
+schemas, shuts down loaded language servers, and
+removes the LSP runtime hint. It does not rewrite the config file. Servers remain
+lazy after enabling, so `loaded languages: none` is expected until an LSP tool is
+used successfully.
 
 ## Enabling Serena
 
@@ -79,19 +96,48 @@ symbol lookup. If neither is supplied, the tool uses column 0.
 
 | Tool | Purpose |
 |---|---|
-| `lsp_definition` | go to definition |
-| `lsp_references` | find references |
-| `lsp_hover` | type signature and docs |
+| `lsp_declaration` | find a symbol declaration |
+| `lsp_definition` | find a symbol definition |
+| `lsp_type_definition` | find the definition of a symbol's type |
+| `lsp_implementation` | find implementations of an interface, abstract member, or symbol |
+| `lsp_references` | find cross-file references |
+| `lsp_hover` | show type, signature, and documentation |
+| `lsp_signature_help` | show callable signatures and the active parameter |
+| `lsp_completion` | return bounded completion candidates |
+| `lsp_document_highlights` | find textual/read/write occurrences within one file |
 | `lsp_document_symbols` | outline of a file |
 | `lsp_workspace_symbols` | find symbols by name across a project |
 | `lsp_diagnostics` | compiler/linter errors and warnings for a file |
+| `lsp_call_hierarchy` | find incoming callers or outgoing callees |
+| `lsp_type_hierarchy` | find direct supertypes or subtypes |
+| `lsp_inlay_hints` | show inferred type and parameter hints |
+| `lsp_code_actions` | list quick fixes/refactors; does not write files |
+| `lsp_code_action` | apply one exact-title action's text edits |
+| `lsp_format_document_plan` | preview document or range formatting edits |
+| `lsp_format_document` | apply document or range formatting edits |
 | `lsp_rename_plan` | compute a cross-file rename as a diff; does not write files |
 | `lsp_rename` | apply a cross-file rename using language-server text edits |
 
-When LSP is enabled, its tools are registered. A call on a file type with no
-configured server, or whose server binary is not installed, returns a normal tool
-error. Each tool's description advertises which configured languages are actually
-installed, probed via `PATH` at startup.
+The hierarchy tools require `direction` (`incoming`/`outgoing` or
+`supertypes`/`subtypes`). Inlay hints, code actions, and formatting accept optional
+1-based inclusive `start_line`/`end_line` bounds. Formatting defaults to tab size
+4 and spaces. `max_results` bounds references, workspace symbols, completion,
+hierarchies, and inlay hints where present.
+
+`lsp_code_actions` lists the exact action titles the apply tool accepts.
+`lsp_code_action` applies only `WorkspaceEdit` text edits. Harness does not execute
+language-server commands and rejects create/delete/rename file operations before
+writing. An optional `timeout_ms` waits for fresh pushed diagnostics before asking
+for actions; otherwise the latest already-published diagnostics are used. The same
+file-operation rule applies to rename; format operations are single-file text edits.
+
+A call on a file type with no configured server, a missing server binary, or a
+server that does not implement that operation returns a normal tool error. The
+model receives the complete enabled `lsp_*` tool list, capability-specific tool
+descriptions, and the preserved schema descriptions explaining the 1-based
+position/range conventions. A concise system hint separately lists languages
+whose configured command is on `PATH`; `/lsp status` is the authoritative
+human-facing view of availability versus actually loaded processes.
 
 To register only a subset of the native tools, set the config-file-only `lsp.tools`
 allowlist (bare names, with or without the `lsp_` prefix):
@@ -100,7 +146,9 @@ allowlist (bare names, with or without the `lsp_` prefix):
 { "lsp": { "enable": true, "tools": ["definition", "references", "diagnostics"] } }
 ```
 
-An empty or unset `lsp.tools` registers the full set. Unknown entries are warned
+An empty or unset `lsp.tools` registers the core set (≈12 high-value
+navigation and inspection tools). Use `["all"]` to register the full 21-tool
+surface, or list explicit names to add/trim the set. Unknown entries are warned
 about and ignored.
 
 ## Hosting Behind A Proxy
@@ -124,7 +172,7 @@ The shim ships embedded default configs for:
 - TypeScript/JavaScript: `typescript-language-server`
 - C/C++: `clangd`
 
-A server activates lazily when its binary is on `PATH`. To add languages, or
+A server launches lazily on the first tool call for one of its files. To add languages, or
 replace a default server definition by name, add inline `lsp.servers` entries to
 the harness config. A same-name entry replaces the whole default server
 definition, so include all required fields when overriding:
@@ -154,12 +202,14 @@ A crash-looping server backs off exponentially and, after repeated failures,
 stops retrying until a cooldown. A later tool call revives it, so installing the
 binary or fixing config mid-session recovers without restarting harness.
 
-## V1 Non-Goals
+## Deliberate Limits
 
-- No completion, formatting, or code actions.
-- Native write support is limited to text-only rename edits through `lsp_rename`;
-  file create/delete/rename operations from `WorkspaceEdit` are rejected.
+- Language-server commands and `WorkspaceEdit` file create/delete/rename
+  operations are not executed. Mutating tools apply validated text edits only.
 - Full-text document sync only; no incremental sync.
 - Each language-server process has one workspace root, with separate processes
   for other roots.
 - Push diagnostics only.
+- Editor-rendering features that do not provide useful agent semantics—semantic
+  tokens, folding/selection ranges, document colors, linked editing, and inline
+  values—are not exposed as tools.

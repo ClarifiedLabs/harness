@@ -113,8 +113,8 @@ Usage:
   harness lsp --version
 
 Subcommands:
-  serve     Run the shim: launch configured language servers on demand and serve
-            their navigation tools over MCP on stdin/stdout. Logs go to stderr
+	  serve     Run the shim: launch configured language servers on demand and serve
+	            their code-intelligence tools over MCP on stdin/stdout. Logs go to stderr
             (or -log); stdout carries the MCP protocol.
   version   Print the release version and MCP protocol revision.
 

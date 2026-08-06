@@ -27,13 +27,21 @@ func TestManagerListToolsHasExpectedAnnotations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(res.Tools) != 8 {
-		t.Fatalf("tool count = %d, want 8", len(res.Tools))
+	if len(res.Tools) != 21 {
+		t.Fatalf("tool count = %d, want 21", len(res.Tools))
 	}
 	names := map[string]bool{}
+	mutating := map[string]bool{
+		"mcp__lsp__code_action":     true,
+		"mcp__lsp__format_document": true,
+		"mcp__lsp__rename":          true,
+	}
 	for _, tl := range res.Tools {
 		names[tl.Name] = true
-		if tl.Name == "mcp__lsp__rename" {
+		if !json.Valid(tl.InputSchema) {
+			t.Fatalf("tool %s has invalid schema: %s", tl.Name, tl.InputSchema)
+		}
+		if mutating[tl.Name] {
 			if !strings.Contains(string(tl.Annotations), `"readOnlyHint":false`) {
 				t.Fatalf("tool %s should be mutating, annotations=%s", tl.Name, tl.Annotations)
 			}
@@ -43,7 +51,13 @@ func TestManagerListToolsHasExpectedAnnotations(t *testing.T) {
 			t.Fatalf("tool %s missing readOnlyHint=true annotation: %s", tl.Name, tl.Annotations)
 		}
 	}
-	for _, want := range []string{"mcp__lsp__definition", "mcp__lsp__references", "mcp__lsp__hover", "mcp__lsp__document_symbols", "mcp__lsp__workspace_symbols", "mcp__lsp__diagnostics", "mcp__lsp__rename_plan", "mcp__lsp__rename"} {
+	for _, want := range []string{
+		"mcp__lsp__declaration", "mcp__lsp__definition", "mcp__lsp__type_definition", "mcp__lsp__implementation",
+		"mcp__lsp__references", "mcp__lsp__hover", "mcp__lsp__signature_help", "mcp__lsp__completion",
+		"mcp__lsp__document_highlights", "mcp__lsp__document_symbols", "mcp__lsp__workspace_symbols", "mcp__lsp__diagnostics",
+		"mcp__lsp__call_hierarchy", "mcp__lsp__type_hierarchy", "mcp__lsp__inlay_hints", "mcp__lsp__code_actions",
+		"mcp__lsp__code_action", "mcp__lsp__format_document_plan", "mcp__lsp__format_document", "mcp__lsp__rename_plan", "mcp__lsp__rename",
+	} {
 		if !names[want] {
 			t.Fatalf("missing tool %s", want)
 		}
@@ -62,6 +76,33 @@ func TestManagerReportsAvailableLanguagesOnce(t *testing.T) {
 	res, _ := m.ListTools(context.Background(), "")
 	if strings.Contains(res.Tools[0].Description, "Langs:") {
 		t.Fatalf("per-tool descriptions should not repeat languages: %q", res.Tools[0].Description)
+	}
+}
+
+func TestManagerStatusDistinguishesAvailableAndLoadedLanguages(t *testing.T) {
+	m := NewManager(goConfig(), "lsp", nil)
+	m.lookPath = func(string) (string, error) { return "/usr/bin/gopls", nil }
+	m.RefreshAvailability()
+
+	status := m.ServerStatuses()
+	if len(status) != 1 || !status[0].Available || len(status[0].LoadedRoots) != 0 {
+		t.Fatalf("status before load = %+v", status)
+	}
+	if got := m.LoadedLanguages(); len(got) != 0 {
+		t.Fatalf("loaded languages before server acquisition = %v", got)
+	}
+
+	cl, _ := didOpenClient(t, "/tmp/project")
+	inst := newServerInstance(goConfig().Servers[0], "/tmp/project", nil)
+	inst.client = cl
+	m.instances[instanceKey("gopls", "/tmp/project")] = inst
+
+	status = m.ServerStatuses()
+	if len(status[0].LoadedRoots) != 1 || status[0].LoadedRoots[0] != "/tmp/project" {
+		t.Fatalf("status after load = %+v", status)
+	}
+	if got := m.LoadedLanguages(); len(got) != 1 || got[0] != "go" {
+		t.Fatalf("loaded languages = %v, want [go]", got)
 	}
 }
 
@@ -156,6 +197,49 @@ func TestManagerRenameAppliesEdits(t *testing.T) {
 	}
 	if got := string(mustReadTestFile(t, src)); got != "package main\n\nfunc Bar() {}\n" {
 		t.Fatalf("file content = %q", got)
+	}
+}
+
+func TestManagerCodeActionAppliesTextEdits(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(src, []byte("package main\nvar x = bad\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(goConfig(), "lsp", nil)
+	m.acquireFn = func(ctx context.Context, s ResolvedServer, root string) (*lspClient, error) {
+		conn, _ := fakeLSP(t, func(server **jsonrpc.Peer) jsonrpc.PeerOptions {
+			return jsonrpc.PeerOptions{
+				Handlers: map[string]jsonrpc.Handler{
+					"initialize":              initOK,
+					"textDocument/codeAction": rawHandler(`[{"title":"Replace bad","kind":"quickfix","edit":{"changes":{"` + uriForPath(src) + `":[{"range":{"start":{"line":1,"character":8},"end":{"line":1,"character":11}},"newText":"good"}]}}}]`),
+				},
+				Notifications: map[string]jsonrpc.NotificationHandler{
+					"initialized":          func(context.Context, json.RawMessage) {},
+					"textDocument/didOpen": func(context.Context, json.RawMessage) {},
+				},
+			}
+		})
+		cl := newClient(conn, root, nil)
+		if _, err := cl.Initialize(ctx, nil); err != nil {
+			return nil, err
+		}
+		return cl, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	res, err := m.CallTool(ctx, "mcp__lsp__code_action", json.RawMessage(`{"path":"`+src+`","title":"Replace bad","start_line":2}`))
+	if err != nil || res.IsError {
+		t.Fatalf("code action result = %+v, err %v", res, err)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "package main\nvar x = good\n" {
+		t.Fatalf("file after code action = %q", got)
 	}
 }
 

@@ -704,7 +704,7 @@ environment variables, JSON paths, types, and defaults. The concise
   how many discovered remote MCP tools are auto-exposed (`0` = unlimited),
   `mcp.disabled_servers` is a list of remote MCP server names dropped from
   auto-exposure, and `lsp.tools` registers only the listed subset of LSP tools
-  (empty = all). See [mcp.md](mcp.md) and [lsp.md](lsp.md). An explicit
+  (empty = core set, `["all"]` = full surface). See [mcp.md](mcp.md) and [lsp.md](lsp.md). An explicit
   `allowed_tools` whitelist can still name a tool that auto-exposure excluded.
 - Serena can be launched independently with `lsp.serena.enable=true` or
   `HARNESS_LSP_SERENA_ENABLE=true`; this does not imply `lsp.enable=true`.
@@ -1476,6 +1476,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/max-turns` | show the current per-prompt turn limit |
 | `/max-turns <n>` | change the turn limit for subsequent prompts in this REPL session; `n <= 0` means unlimited |
 | `/tools` | list enabled built-in and MCP tools with descriptions, plus disabled optional tools |
+| `/lsp [status\|enable\|disable]` | inspect configured, available, and actually loaded language servers, or toggle native LSP tools for this REPL session |
 | `/image` | list images queued for the next prompt |
 | `/image <path>` | attach an image to the next prompt |
 | `/image --detail <level> <path>` | attach an image with per-image detail |

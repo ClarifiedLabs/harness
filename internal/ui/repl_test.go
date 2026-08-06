@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1691,6 +1692,57 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 	listDirCol := toolSummaryDescriptionColumn(t, got, "list_dir", "List one directory with an optional base-name glob; non-recursive.")
 	if readFileCol != listDirCol {
 		t.Errorf("built-in description separators not aligned:\n%s", got)
+	}
+}
+
+func TestREPLLSPCommandShowsStatusAndAppliesRuntimeSelection(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	base := tools.Default()
+	enabled := &tools.Registry{}
+	enabled.Register(mcpRefreshTool{name: "lsp_definition"})
+	actions := []string{}
+	app.ControlLSP = func(action, agentName string) (LSPSelection, error) {
+		actions = append(actions, action+":"+agentName)
+		status := LSPStatus{
+			Enabled: action != "disable",
+			Tools:   []string{"lsp_definition"}, AvailableLanguages: []string{"go", "rust"},
+			Servers: []LSPServerStatus{{Name: "gopls", Languages: []string{"go"}, Command: "gopls", Available: true}},
+		}
+		switch action {
+		case "enable":
+			return LSPSelection{Tools: enabled, System: "lsp enabled", Status: status}, nil
+		case "disable":
+			status.Tools = nil
+			return LSPSelection{Tools: base, System: "lsp disabled", Status: status}, nil
+		default:
+			status.LoadedLanguages = []string{"go"}
+			status.Servers[0].LoadedRoots = []string{"/work"}
+			return LSPSelection{Status: status}, nil
+		}
+	}
+
+	in := strings.NewReader("/lsp\n/lsp enable\n/lsp disable\n/exit\n")
+	if code := Run(in, app, nil); code != 0 {
+		t.Fatalf("exit code = %d, errw=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 0 {
+		t.Fatalf("/lsp should not invoke the model, got %d request(s)", fp.RequestCount())
+	}
+	if want := []string{"status:auto", "enable:auto", "disable:auto"}; !slices.Equal(actions, want) {
+		t.Fatalf("actions = %v, want %v", actions, want)
+	}
+	for _, want := range []string{"lsp: enabled", "available languages: go, rust", "loaded languages: go", "gopls (go): loaded [/work]", "lsp: disabled"} {
+		if !strings.Contains(errw.String(), want) {
+			t.Errorf("/lsp output missing %q:\n%s", want, errw.String())
+		}
+	}
+	if slices.Contains(app.Agent.ToolNames(), "lsp_definition") {
+		t.Fatalf("disable left LSP tool exposed: %v", app.Agent.ToolNames())
+	}
+	if app.System != "lsp disabled" {
+		t.Fatalf("system = %q, want disabled selection", app.System)
 	}
 }
 

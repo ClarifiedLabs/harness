@@ -67,6 +67,229 @@ func formatWorkspaceSymbols(syms []Symbol) string {
 	return strings.Join(lines, "\n")
 }
 
+func formatSignatureHelp(help SignatureHelp) string {
+	lines := make([]string, 0, len(help.Signatures))
+	for i, sig := range help.Signatures {
+		active := help.ActiveParameter
+		if sig.ActiveParameter != nil {
+			active = *sig.ActiveParameter
+		}
+		prefix := "  "
+		if i == help.ActiveSignature {
+			prefix = "* "
+		}
+		line := fmt.Sprintf("%s%s", prefix, sig.Label)
+		if active >= 0 && active < len(sig.Parameters) {
+			if label := parameterLabel(sig.Parameters[active].Label); label != "" {
+				line += "  [active: " + label + "]"
+			}
+		}
+		if docs := strings.TrimSpace(markupToText(sig.Documentation)); docs != "" {
+			line += "\n    " + strings.ReplaceAll(docs, "\n", "\n    ")
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func parameterLabel(raw json.RawMessage) string {
+	var label string
+	if json.Unmarshal(raw, &label) == nil {
+		return label
+	}
+	var offsets []int
+	if json.Unmarshal(raw, &offsets) == nil && len(offsets) == 2 {
+		return fmt.Sprintf("offsets %d..%d", offsets[0], offsets[1])
+	}
+	return ""
+}
+
+func formatCompletions(items []CompletionItem, max int) string {
+	shown, omitted := items, 0
+	if max > 0 && len(shown) > max {
+		shown, omitted = shown[:max], len(shown)-max
+	}
+	lines := make([]string, 0, len(shown)+1)
+	for _, item := range shown {
+		line := item.Label
+		if kind := completionKindName(item.Kind); kind != "" {
+			line += "  [" + kind + "]"
+		}
+		if item.Detail != "" {
+			line += "  " + strings.TrimSpace(item.Detail)
+		}
+		if insert := item.InsertText; insert != "" && insert != item.Label {
+			line += "  insert=" + fmt.Sprintf("%q", insert)
+		}
+		lines = append(lines, line)
+	}
+	if omitted > 0 {
+		lines = append(lines, fmt.Sprintf("… %d more completion(s) omitted", omitted))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatDocumentHighlights(highlights []DocumentHighlight, path string, lr *lineReader) string {
+	lines := make([]string, 0, len(highlights))
+	for _, h := range highlights {
+		kind := "text"
+		switch h.Kind {
+		case 2:
+			kind = "read"
+		case 3:
+			kind = "write"
+		}
+		line := fmt.Sprintf("%s %s:%d:%d", kind, path, h.Range.Start.Line+1, h.Range.Start.Character+1)
+		if snippet, ok := lr.line(path, h.Range.Start.Line); ok {
+			line += "  " + strings.TrimSpace(snippet)
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatIncomingCalls(calls []CallHierarchyIncomingCall, max int) string {
+	if len(calls) == 0 {
+		return "no incoming calls"
+	}
+	shown, omitted := capCount(calls, max)
+	lines := make([]string, 0, len(shown)+1)
+	for _, call := range shown {
+		lines = append(lines, formatHierarchyItem(call.From))
+	}
+	if omitted > 0 {
+		lines = append(lines, fmt.Sprintf("… %d more call(s) omitted", omitted))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatOutgoingCalls(calls []CallHierarchyOutgoingCall, max int) string {
+	if len(calls) == 0 {
+		return "no outgoing calls"
+	}
+	shown, omitted := capCount(calls, max)
+	lines := make([]string, 0, len(shown)+1)
+	for _, call := range shown {
+		lines = append(lines, formatHierarchyItem(call.To))
+	}
+	if omitted > 0 {
+		lines = append(lines, fmt.Sprintf("… %d more call(s) omitted", omitted))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatHierarchyItem(item CallHierarchyItem) string {
+	line := fmt.Sprintf("%s %s  %s:%d", symbolKindName(item.Kind), item.Name, uriToPath(item.URI), item.SelectionRange.Start.Line+1)
+	if item.Detail != "" {
+		line += "  " + strings.TrimSpace(item.Detail)
+	}
+	return line
+}
+
+func formatTypeHierarchy(items []TypeHierarchyItem, direction string, max int) string {
+	if len(items) == 0 {
+		return "no " + direction
+	}
+	shown, omitted := capCount(items, max)
+	lines := make([]string, 0, len(shown)+1)
+	for _, item := range shown {
+		line := fmt.Sprintf("%s %s  %s:%d", symbolKindName(item.Kind), item.Name, uriToPath(item.URI), item.SelectionRange.Start.Line+1)
+		if item.Detail != "" {
+			line += "  " + strings.TrimSpace(item.Detail)
+		}
+		lines = append(lines, line)
+	}
+	if omitted > 0 {
+		lines = append(lines, fmt.Sprintf("… %d more item(s) omitted", omitted))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatInlayHints(hints []InlayHint, path string, max int) string {
+	if len(hints) == 0 {
+		return "no inlay hints"
+	}
+	shown, omitted := capCount(hints, max)
+	lines := make([]string, 0, len(shown)+1)
+	for _, hint := range shown {
+		label := inlayHintLabel(hint.Label)
+		kind := "hint"
+		if hint.Kind == 1 {
+			kind = "type"
+		} else if hint.Kind == 2 {
+			kind = "parameter"
+		}
+		lines = append(lines, fmt.Sprintf("%s %s:%d:%d  %s", kind, path, hint.Position.Line+1, hint.Position.Character+1, label))
+	}
+	if omitted > 0 {
+		lines = append(lines, fmt.Sprintf("… %d more hint(s) omitted", omitted))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func inlayHintLabel(raw json.RawMessage) string {
+	var label string
+	if json.Unmarshal(raw, &label) == nil {
+		return label
+	}
+	var parts []struct {
+		Value string `json:"value"`
+	}
+	if json.Unmarshal(raw, &parts) == nil {
+		var b strings.Builder
+		for _, part := range parts {
+			b.WriteString(part.Value)
+		}
+		return b.String()
+	}
+	return string(raw)
+}
+
+func formatCodeActions(actions []CodeAction) string {
+	if len(actions) == 0 {
+		return "no code actions"
+	}
+	lines := make([]string, 0, len(actions))
+	for _, action := range actions {
+		line := action.Title
+		if action.Kind != "" {
+			line += "  [" + action.Kind + "]"
+		}
+		switch {
+		case action.Disabled != nil:
+			line += "  disabled: " + action.Disabled.Reason
+		case action.CommandOnly || (len(action.Command) > 0 && string(action.Command) != "null"):
+			line += "  includes server command (not executable by harness)"
+		case len(action.Edit) > 0 && string(action.Edit) != "null":
+			if edits, err := parseWorkspaceEdit(action.Edit); err == nil {
+				files, total := editCounts(edits)
+				line += fmt.Sprintf("  %d edit(s), %d file(s)", total, files)
+			}
+		case len(action.Data) > 0:
+			line += "  resolvable"
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func editCounts(edits []FileEdits) (files, total int) {
+	for _, file := range edits {
+		if len(file.Edits) > 0 {
+			files++
+			total += len(file.Edits)
+		}
+	}
+	return files, total
+}
+
+func capCount[T any](items []T, max int) ([]T, int) {
+	if max > 0 && len(items) > max {
+		return items[:max], len(items) - max
+	}
+	return items, 0
+}
+
 // formatDiagnostics renders diagnostics sorted by line as
 // "severity path:line:col  message [source code]".
 func formatDiagnostics(diags []Diagnostic, path string) string {
@@ -97,8 +320,12 @@ func formatDiagnostics(diags []Diagnostic, path string) string {
 // the apply-ready plan for the agent's own edit tools. lineFor reads the
 // original line so a same-line edit can be shown as a diff.
 func formatRenamePlan(edits []FileEdits, lineFor func(uri string, line int) (string, bool)) string {
+	return formatEditPlan(edits, lineFor, "rename")
+}
+
+func formatEditPlan(edits []FileEdits, lineFor func(uri string, line int) (string, bool), label string) string {
 	if len(edits) == 0 {
-		return "no rename edits (the symbol may not be renameable at this position)"
+		return "no " + label + " edits"
 	}
 	var b strings.Builder
 	total := 0
@@ -116,7 +343,7 @@ func formatRenamePlan(edits []FileEdits, lineFor func(uri string, line int) (str
 			fmt.Fprintf(&b, "  L%d:%d-L%d:%d  → %q\n", e.Range.Start.Line+1, e.Range.Start.Character+1, e.Range.End.Line+1, e.Range.End.Character+1, e.NewText)
 		}
 	}
-	fmt.Fprintf(&b, "\n%d edit(s) across %d file(s). This did NOT modify any files — apply these edits with your file-editing tools to complete the rename.", total, len(edits))
+	fmt.Fprintf(&b, "\n%d edit(s) across %d file(s). This did NOT modify any files.", total, len(edits))
 	return b.String()
 }
 
@@ -234,5 +461,44 @@ func symbolKindName(kind int) string {
 		return "type-parameter"
 	default:
 		return "symbol"
+	}
+}
+
+func completionKindName(kind int) string {
+	switch kind {
+	case 1:
+		return "text"
+	case 2:
+		return "method"
+	case 3:
+		return "function"
+	case 4:
+		return "constructor"
+	case 5:
+		return "field"
+	case 6:
+		return "variable"
+	case 7:
+		return "class"
+	case 8:
+		return "interface"
+	case 9:
+		return "module"
+	case 10:
+		return "property"
+	case 13:
+		return "enum"
+	case 14:
+		return "keyword"
+	case 15:
+		return "snippet"
+	case 21:
+		return "constant"
+	case 22:
+		return "struct"
+	case 25:
+		return "type-parameter"
+	default:
+		return ""
 	}
 }

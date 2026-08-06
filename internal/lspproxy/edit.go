@@ -182,3 +182,15 @@ func formatRenameApplied(result appliedRename) string {
 	}
 	return b.String()
 }
+
+func formatEditsApplied(label string, result appliedRename) string {
+	if result.Total == 0 {
+		return "no " + label + " edits applied"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "applied %s: %d edit(s) across %d file(s)", label, result.Total, len(result.Files))
+	for _, file := range result.Files {
+		fmt.Fprintf(&b, "\n%s: %d edit(s)", file.Path, file.Edits)
+	}
+	return b.String()
+}

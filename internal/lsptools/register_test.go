@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	"harness/internal/llm"
@@ -33,7 +34,7 @@ func TestRegisterUsesShortLSPNames(t *testing.T) {
 	provider := &fakeProvider{tools: []mcp.Tool{{
 		Name:        "definition",
 		Description: "Go to definition.\nMore detail.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Target file."}}}`),
 		Annotations: json.RawMessage(`{"readOnlyHint":true}`),
 	}}}
 	reg := &tools.Registry{}
@@ -54,6 +55,9 @@ func TestRegisterUsesShortLSPNames(t *testing.T) {
 	spec := reg.Specs()[0]
 	if spec.Name != "lsp_definition" || spec.Description != "Go to definition." {
 		t.Fatalf("spec = %+v", spec)
+	}
+	if !strings.Contains(string(spec.Parameters), `"description":"Target file."`) {
+		t.Fatalf("model-facing schema lost LSP argument guidance: %s", spec.Parameters)
 	}
 }
 
@@ -94,7 +98,8 @@ func TestRegisterAllowlistToleratesLSPPrefix(t *testing.T) {
 
 func TestRegisterEmptyAllowlistRegistersAll(t *testing.T) {
 	reg := &tools.Registry{}
-	// All-blank entries behave like an unset allowlist: register everything.
+	// All-blank entries behave like an unset allowlist: register the core set.
+	// threeToolProvider only has core tools (definition/references/hover), so all 3 remain.
 	if _, err := Register(context.Background(), reg, threeToolProvider(), "  ", ""); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -144,13 +149,14 @@ func TestRegisterRespectsReadOnlyAnnotations(t *testing.T) {
 		{Name: "definition", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
 		{Name: "rename", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":false}`)},
 	}}
+	// Default (no allowlist) registers the core set only: definition but not rename.
 	reg := &tools.Registry{}
 	sum, err := Register(context.Background(), reg, provider)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if !slices.Equal(sum.Names, []string{"lsp_definition", "lsp_rename"}) {
-		t.Fatalf("Names = %v, want definition and rename", sum.Names)
+	if !slices.Equal(sum.Names, []string{"lsp_definition"}) {
+		t.Fatalf("Names = %v, want only core tool definition", sum.Names)
 	}
 	if !slices.Equal(sum.ReadOnlyNames, []string{"lsp_definition"}) {
 		t.Fatalf("ReadOnlyNames = %v, want only definition", sum.ReadOnlyNames)
@@ -158,7 +164,74 @@ func TestRegisterRespectsReadOnlyAnnotations(t *testing.T) {
 	if !reg.CallReadOnly(llm.ToolCall{ID: "1", Name: "lsp_definition", Input: json.RawMessage(`{}`)}) {
 		t.Fatal("definition should be read-only")
 	}
-	if reg.CallReadOnly(llm.ToolCall{ID: "2", Name: "lsp_rename", Input: json.RawMessage(`{}`)}) {
+	// Full surface via "all" includes the mutating rename tool with correct annotations.
+	reg2 := &tools.Registry{}
+	sum2, err := Register(context.Background(), reg2, provider, "all")
+	if err != nil {
+		t.Fatalf("Register all: %v", err)
+	}
+	if !slices.Equal(sum2.Names, []string{"lsp_definition", "lsp_rename"}) {
+		t.Fatalf("Names (all) = %v, want definition and rename", sum2.Names)
+	}
+	if !slices.Equal(sum2.ReadOnlyNames, []string{"lsp_definition"}) {
+		t.Fatalf("ReadOnlyNames (all) = %v, want only definition", sum2.ReadOnlyNames)
+	}
+	if reg2.CallReadOnly(llm.ToolCall{ID: "2", Name: "lsp_rename", Input: json.RawMessage(`{}`)}) {
 		t.Fatal("rename should not be read-only")
+	}
+}
+
+func TestRegisterDefaultIsCoreSet(t *testing.T) {
+	// Provider with one core (definition) and one non-core (completion) tool.
+	// Empty allowlist should register only the core tool.
+	provider := &fakeProvider{tools: []mcp.Tool{
+		{Name: "definition", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
+		{Name: "completion", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
+		{Name: "rename", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":false}`)},
+	}}
+	reg := &tools.Registry{}
+	sum, err := Register(context.Background(), reg, provider)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if !slices.Equal(sum.Names, []string{"lsp_definition"}) {
+		t.Fatalf("default core set: Names = %v, want [lsp_definition]", sum.Names)
+	}
+	if len(reg.Names()) != 1 || reg.Names()[0] != "lsp_definition" {
+		t.Fatalf("default core set registry = %v", reg.Names())
+	}
+}
+
+func TestRegisterAllSentinelRegistersFullSet(t *testing.T) {
+	provider := &fakeProvider{tools: []mcp.Tool{
+		{Name: "definition", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
+		{Name: "completion", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
+		{Name: "rename", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":false}`)},
+	}}
+	for _, allow := range [][]string{{"all"}, {"ALL"}, {"lsp_all"}, {"  all  "}} {
+		reg := &tools.Registry{}
+		sum, err := Register(context.Background(), reg, provider, allow...)
+		if err != nil {
+			t.Fatalf("Register %v: %v", allow, err)
+		}
+		if len(sum.Names) != 3 {
+			t.Fatalf("all sentinel %v: Names = %v, want 3", allow, sum.Names)
+		}
+	}
+}
+
+func TestRegisterExplicitAllowlistBeyondCore(t *testing.T) {
+	provider := &fakeProvider{tools: []mcp.Tool{
+		{Name: "definition", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
+		{Name: "completion", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
+		{Name: "rename", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":false}`)},
+	}}
+	reg := &tools.Registry{}
+	sum, err := Register(context.Background(), reg, provider, "completion", "rename")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if !slices.Equal(sum.Names, []string{"lsp_completion", "lsp_rename"}) {
+		t.Fatalf("explicit non-core allowlist: Names = %v, want [lsp_completion lsp_rename]", sum.Names)
 	}
 }

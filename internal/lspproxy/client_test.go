@@ -187,6 +187,93 @@ func TestClientReferencesHoverSymbols(t *testing.T) {
 	}
 }
 
+func TestClientAgenticOperations(t *testing.T) {
+	location := `{"uri":"file:///tmp/proj/b.go","range":{"start":{"line":4,"character":2},"end":{"line":4,"character":5}}}`
+	conn, _ := fakeLSP(t, func(server **jsonrpc.Peer) jsonrpc.PeerOptions {
+		return jsonrpc.PeerOptions{
+			Handlers: map[string]jsonrpc.Handler{
+				"initialize":                        initOK,
+				"textDocument/declaration":          rawHandler(location),
+				"textDocument/typeDefinition":       rawHandler(location),
+				"textDocument/implementation":       rawHandler("[" + location + "]"),
+				"textDocument/signatureHelp":        rawHandler(`{"signatures":[{"label":"Foo(x int)","parameters":[{"label":"x int"}]}],"activeSignature":0,"activeParameter":0}`),
+				"textDocument/completion":           rawHandler(`{"isIncomplete":false,"items":[{"label":"Foo","kind":3,"detail":"func Foo()"}]}`),
+				"textDocument/documentHighlight":    rawHandler(`[{"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":3}},"kind":2}]`),
+				"textDocument/prepareCallHierarchy": rawHandler(`[{"name":"Foo","kind":12,"uri":"file:///tmp/proj/a.go","range":{"start":{"line":1,"character":0},"end":{"line":2,"character":0}},"selectionRange":{"start":{"line":1,"character":5},"end":{"line":1,"character":8}}}]`),
+				"callHierarchy/incomingCalls":       rawHandler(`[{"from":{"name":"Caller","kind":12,"uri":"file:///tmp/proj/c.go","range":{"start":{"line":2,"character":0},"end":{"line":3,"character":0}},"selectionRange":{"start":{"line":2,"character":5},"end":{"line":2,"character":11}}},"fromRanges":[]}]`),
+				"textDocument/prepareTypeHierarchy": rawHandler(`[{"name":"Child","kind":5,"uri":"file:///tmp/proj/a.go","range":{"start":{"line":1,"character":0},"end":{"line":2,"character":0}},"selectionRange":{"start":{"line":1,"character":5},"end":{"line":1,"character":10}}}]`),
+				"typeHierarchy/supertypes":          rawHandler(`[{"name":"Parent","kind":5,"uri":"file:///tmp/proj/base.go","range":{"start":{"line":1,"character":0},"end":{"line":2,"character":0}},"selectionRange":{"start":{"line":1,"character":5},"end":{"line":1,"character":11}}}]`),
+				"textDocument/inlayHint":            rawHandler(`[{"position":{"line":1,"character":8},"label":": int","kind":1}]`),
+				"textDocument/codeAction":           rawHandler(`[{"title":"Fix Foo","kind":"quickfix","edit":{"changes":{}}}]`),
+				"textDocument/formatting":           rawHandler(`[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"newText":"x"}]`),
+			},
+			Notifications: map[string]jsonrpc.NotificationHandler{"initialized": func(context.Context, json.RawMessage) {}},
+		}
+	})
+	cl := initClient(t, conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	uri := "file:///tmp/proj/a.go"
+	pos := Position{Line: 1, Character: 5}
+
+	for name, call := range map[string]func() ([]Location, error){
+		"declaration":     func() ([]Location, error) { return cl.Declaration(ctx, uri, pos) },
+		"type definition": func() ([]Location, error) { return cl.TypeDefinition(ctx, uri, pos) },
+		"implementation":  func() ([]Location, error) { return cl.Implementation(ctx, uri, pos) },
+	} {
+		locations, err := call()
+		if err != nil || len(locations) != 1 || locations[0].Range.Start.Line != 4 {
+			t.Fatalf("%s = %+v, err %v", name, locations, err)
+		}
+	}
+	help, err := cl.SignatureHelp(ctx, uri, pos)
+	if err != nil || help == nil || help.Signatures[0].Label != "Foo(x int)" {
+		t.Fatalf("signature help = %+v, err %v", help, err)
+	}
+	completions, err := cl.Completion(ctx, uri, pos)
+	if err != nil || len(completions) != 1 || completions[0].Label != "Foo" {
+		t.Fatalf("completion = %+v, err %v", completions, err)
+	}
+	highlights, err := cl.DocumentHighlights(ctx, uri, pos)
+	if err != nil || len(highlights) != 1 || highlights[0].Kind != 2 {
+		t.Fatalf("highlights = %+v, err %v", highlights, err)
+	}
+	callItems, err := cl.PrepareCallHierarchy(ctx, uri, pos)
+	if err != nil || len(callItems) != 1 {
+		t.Fatalf("prepare call hierarchy = %+v, err %v", callItems, err)
+	}
+	incoming, err := cl.IncomingCalls(ctx, callItems[0])
+	if err != nil || len(incoming) != 1 || incoming[0].From.Name != "Caller" {
+		t.Fatalf("incoming calls = %+v, err %v", incoming, err)
+	}
+	typeItems, err := cl.PrepareTypeHierarchy(ctx, uri, pos)
+	if err != nil || len(typeItems) != 1 {
+		t.Fatalf("prepare type hierarchy = %+v, err %v", typeItems, err)
+	}
+	supertypes, err := cl.TypeHierarchy(ctx, "supertypes", typeItems[0])
+	if err != nil || len(supertypes) != 1 || supertypes[0].Name != "Parent" {
+		t.Fatalf("supertypes = %+v, err %v", supertypes, err)
+	}
+	hints, err := cl.InlayHints(ctx, uri, Range{End: Position{Line: 2}})
+	if err != nil || len(hints) != 1 || inlayHintLabel(hints[0].Label) != ": int" {
+		t.Fatalf("inlay hints = %+v, err %v", hints, err)
+	}
+	actions, err := cl.CodeActions(ctx, uri, Range{End: Position{Line: 2}}, nil, []string{"quickfix"})
+	if err != nil || len(actions) != 1 || actions[0].Title != "Fix Foo" {
+		t.Fatalf("code actions = %+v, err %v", actions, err)
+	}
+	edits, err := cl.Formatting(ctx, uri, nil, FormattingOptions{TabSize: 4, InsertSpaces: true})
+	if err != nil || len(edits) != 1 || edits[0].NewText != "x" {
+		t.Fatalf("formatting = %+v, err %v", edits, err)
+	}
+}
+
+func rawHandler(raw string) jsonrpc.Handler {
+	return func(context.Context, json.RawMessage) (json.RawMessage, *jsonrpc.Error) {
+		return json.RawMessage(raw), nil
+	}
+}
+
 func TestClientDiagnostics(t *testing.T) {
 	conn, _ := fakeLSP(t, func(server **jsonrpc.Peer) jsonrpc.PeerOptions {
 		return jsonrpc.PeerOptions{

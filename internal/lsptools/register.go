@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"harness/internal/lspproxy"
 	"harness/internal/mcp"
 	"harness/internal/mcptools"
 	"harness/internal/tools"
@@ -27,13 +28,15 @@ var toolNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 var emptySchema = json.RawMessage(`{"type":"object"}`)
 
 // Register lists the LSP provider's bare tools and registers short lsp_* tools
-// backed by provider calls. All first-class LSP tools are trusted read-only.
+// backed by provider calls. Read-only behavior comes from each provider
+// annotation; edit-applying LSP tools remain ordering barriers.
 //
 // When allow is non-empty it is an allowlist of tool names to register; every
 // other discovered tool is skipped. Entries match against the bare provider name
 // (e.g. "definition") with an optional "lsp_" prefix, so an operator can expose a
 // subset without an allowed_tools whitelist (which would disable MCP exposure).
-// An empty or all-blank allow registers the full set.
+// An empty or all-blank allow registers the core set (see lspproxy.CoreTools);
+// use allow=["all"] to register the full surface.
 func Register(ctx context.Context, reg *tools.Registry, provider mcp.ToolProvider, allow ...string) (mcptools.Summary, error) {
 	list, err := provider.ListTools(ctx, "")
 	if err != nil {
@@ -71,11 +74,24 @@ func Register(ctx context.Context, reg *tools.Registry, provider mcp.ToolProvide
 
 // allowlistSet builds the set of bare tool names to register from a configured
 // allowlist. Each entry is trimmed and may carry the "lsp_" prefix, which is
-// stripped so it matches the provider's bare name. It returns nil when allow is
-// empty or all entries are blank, signalling "register everything".
+// stripped so it matches the provider's bare name.
+//
+// An empty or all-blank allow returns the core set (lspproxy.CoreTools).
+// The sentinel "all" (with optional lsp_ prefix, case-insensitive) returns nil
+// signalling "register everything"; it takes precedence over other entries.
 func allowlistSet(allow []string) map[string]bool {
+	for _, a := range allow {
+		bare := strings.TrimPrefix(strings.TrimSpace(a), namePrefix)
+		if strings.EqualFold(bare, "all") {
+			return nil
+		}
+	}
 	if len(allow) == 0 {
-		return nil
+		set := make(map[string]bool, len(lspproxy.CoreTools))
+		for _, n := range lspproxy.CoreTools {
+			set[n] = true
+		}
+		return set
 	}
 	set := make(map[string]bool, len(allow))
 	for _, a := range allow {
@@ -83,10 +99,18 @@ func allowlistSet(allow []string) map[string]bool {
 		if a == "" {
 			continue
 		}
-		set[strings.TrimPrefix(a, namePrefix)] = true
+		bare := strings.TrimPrefix(a, namePrefix)
+		if strings.EqualFold(bare, "all") {
+			continue
+		}
+		set[bare] = true
 	}
 	if len(set) == 0 {
-		return nil
+		core := make(map[string]bool, len(lspproxy.CoreTools))
+		for _, n := range lspproxy.CoreTools {
+			core[n] = true
+		}
+		return core
 	}
 	return set
 }
@@ -119,6 +143,11 @@ func (t *Tool) Name() string { return t.name }
 func (t *Tool) Description() string { return t.desc }
 
 func (t *Tool) Schema() json.RawMessage { return t.schema }
+
+// PreserveSchemaDescriptions keeps the LSP position/range conventions in the
+// model-facing schema. Without these descriptions, generic registry compaction
+// would hide that lines and columns are 1-based and that symbol is preferred.
+func (t *Tool) PreserveSchemaDescriptions() bool { return true }
 
 func (t *Tool) ReadOnly(json.RawMessage) bool { return t.readOnly }
 

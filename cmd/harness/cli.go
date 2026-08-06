@@ -76,7 +76,7 @@ func commandCatalog(env environment) cli.Catalog {
 			{
 				ID: "lsp", Name: "lsp", Summary: "Run the generic LSP-to-MCP shim.",
 				Commands: []cli.Command{
-					{ID: "lsp.serve", Name: "serve", Summary: "Serve LSP navigation tools over MCP on stdin/stdout.", Runnable: true, Args: cli.Args{Max: -1, Check: false}, Flags: []cli.Flag{
+					{ID: "lsp.serve", Name: "serve", Summary: "Serve LSP code-intelligence tools over MCP on stdin/stdout.", Runnable: true, Args: cli.Args{Max: -1, Check: false}, Flags: []cli.Flag{
 						valueCLIFlag("config", []string{"config"}, "path", "config file path", lspproxy.DefaultConfigPath(getenv)),
 						valueCLIFlag("namespace", []string{"namespace"}, "namespace", "tool-name namespace; empty for bare names", "lsp"),
 						valueCLIFlag("log", []string{"log"}, "path", "log file path", ""),

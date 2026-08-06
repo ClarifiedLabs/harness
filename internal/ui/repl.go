@@ -94,6 +94,34 @@ type AgentSelection struct {
 	ReasoningSet          bool
 }
 
+// LSPServerStatus and LSPStatus are UI-neutral snapshots supplied by the
+// harness runtime. LoadedRoots are initialized, currently-live server roots;
+// Available only means the configured command is present on PATH.
+type LSPServerStatus struct {
+	Name        string
+	Languages   []string
+	Command     string
+	Available   bool
+	LoadedRoots []string
+}
+
+type LSPStatus struct {
+	Enabled            bool
+	Tools              []string
+	AvailableLanguages []string
+	LoadedLanguages    []string
+	Servers            []LSPServerStatus
+}
+
+// LSPSelection is returned by an enable/disable command. A non-nil Tools
+// registry and non-empty System are installed together before the next prompt,
+// ensuring model disclosure and dispatch stay in sync.
+type LSPSelection struct {
+	Tools  *tools.Registry
+	System string
+	Status LSPStatus
+}
+
 // App bundles the dependencies the REPL and one-shot driver need. main builds it
 // from the resolved config, provider factory, tool registry, and renderer
 // (design §10). The agent owns the running transcript; App tracks the cumulative
@@ -172,6 +200,9 @@ type App struct {
 	// agent's tools and notice is rendered. A nil registry means "no change".
 	// nil disables the hook (one-shot mode and tests leave it nil).
 	RefreshMCP func(ctx context.Context, agentName string) (*tools.Registry, string)
+	// ControlLSP handles session-local status/enable/disable. nil means the
+	// embedding did not wire native LSP support.
+	ControlLSP func(action, agentName string) (LSPSelection, error)
 
 	workPromptStatusBeforeUsage       bool
 	workPromptStatusBeforeUsagePrompt int
@@ -329,6 +360,8 @@ const helpText = `commands:
   /usage           cumulative session tokens and cost
   /max-turns [n]   show or set turns per prompt for this session (<=0 is unlimited)
   /tools           list available tools (built-in, MCP, and disabled)
+  /lsp [status|enable|disable]
+                    inspect or toggle native LSP tools for this session
   /image [opts]    attach an image to the next prompt, list, or clear
   /edit [draft]    open $VISUAL/$EDITOR (or vi) for a multi-line prompt
   /save [file]     force save (optionally elsewhere)
@@ -2606,6 +2639,8 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		fmt.Fprintln(app.Errw, app.skillsSummary())
 	case "/tools":
 		fmt.Fprintln(app.Errw, app.toolsSummary())
+	case "/lsp":
+		app.lspCommand(arg)
 	case "/vi":
 		app.viCommand(arg)
 	default:
@@ -2796,7 +2831,7 @@ func (app *App) pauseGoalAtContinuationCap() bool {
 // suggestions on an unknown command (r59).
 var knownCommands = []string{
 	"/help", "/exit", "/quit", "/clear", "/compact", "/tree", "/fork", "/clone", "/context", "/usage",
-	"/max-turns", "/tools", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
+	"/max-turns", "/tools", "/lsp", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
 	"/agent", "/mode", "/plan", "/auto", "/work", "/handoff", "/background", "/goal", "/skills", "/vi",
 }
 
@@ -5243,6 +5278,82 @@ func (app *App) toolsSummary() string {
 		return "[no tools available]"
 	}
 	return b.String()
+}
+
+func (app *App) lspCommand(arg string) {
+	if app.ControlLSP == nil {
+		fmt.Fprintln(app.Errw, "[lsp: unavailable]")
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(arg))
+	if action == "" {
+		action = "status"
+	}
+	switch action {
+	case "status", "enable", "disable":
+	default:
+		fmt.Fprintln(app.Errw, "usage: /lsp [status|enable|disable]")
+		return
+	}
+	selection, err := app.ControlLSP(action, app.AgentName)
+	if err != nil {
+		fmt.Fprintf(app.Errw, "[lsp: %v]\n", err)
+		return
+	}
+	runtimeChanged := false
+	if selection.Tools != nil {
+		app.Agent.SetTools(selection.Tools)
+		runtimeChanged = true
+	}
+	if selection.System != "" && selection.System != app.System {
+		app.System = selection.System
+		app.Agent.SetSystem(selection.System)
+		runtimeChanged = true
+	}
+	if runtimeChanged {
+		app.Agent.ResetProxySessionID()
+		app.schedulePrewarm()
+	}
+	fmt.Fprintln(app.Errw, formatLSPStatus(selection.Status))
+}
+
+func formatLSPStatus(status LSPStatus) string {
+	state := "disabled"
+	if status.Enabled {
+		state = "enabled"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "lsp: %s\n", state)
+	fmt.Fprintf(&b, "  configured tools: %d\n", len(status.Tools))
+	fmt.Fprintf(&b, "  available languages: %s\n", listOrNone(status.AvailableLanguages))
+	fmt.Fprintf(&b, "  loaded languages: %s", listOrNone(status.LoadedLanguages))
+	if len(status.Servers) == 0 {
+		return b.String()
+	}
+	b.WriteString("\n  servers:")
+	for _, server := range status.Servers {
+		serverState := "missing"
+		if server.Available {
+			serverState = "available"
+		}
+		if len(server.LoadedRoots) > 0 {
+			serverState = "loaded"
+		}
+		fmt.Fprintf(&b, "\n    %s (%s): %s", server.Name, strings.Join(server.Languages, ", "), serverState)
+		if len(server.LoadedRoots) > 0 {
+			fmt.Fprintf(&b, " [%s]", strings.Join(server.LoadedRoots, ", "))
+		} else if server.Command != "" && !server.Available {
+			fmt.Fprintf(&b, " [%s not on PATH]", server.Command)
+		}
+	}
+	return b.String()
+}
+
+func listOrNone(values []string) string {
+	if len(values) == 0 {
+		return "none"
+	}
+	return strings.Join(values, ", ")
 }
 
 func (app *App) backgroundCommand(arg string) {

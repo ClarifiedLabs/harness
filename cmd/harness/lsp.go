@@ -5,48 +5,113 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
+	"time"
 
+	"harness/internal/agentdef"
 	"harness/internal/config"
 	"harness/internal/logging"
 	"harness/internal/lspproxy"
 	"harness/internal/lsptools"
 	"harness/internal/mcptools"
 	"harness/internal/tools"
+	"harness/internal/ui"
 )
 
-// setupLSP registers harness's first-class LSP tools with short lsp_* names and
-// returns a cleanup func that stops any language servers launched during the
-// session. LSP is optional: on setup failure it logs one warning and leaves the
-// rest of harness usable.
-func setupLSP(ctx context.Context, lspCfg config.LSPConfig, catalog *tools.Registry, logger *slog.Logger) (summary mcptools.Summary, hint string, cleanup func(), ok bool) {
-	noop := func() {}
+type lspRuntime struct {
+	mgr     *lspproxy.Manager
+	summary mcptools.Summary
+	enabled bool
+}
+
+// newLSPRuntime prepares the static tool surface without launching a language
+// server. Keeping the manager available while disabled makes /lsp enable a
+// session-local, immediate operation; servers remain lazy until a tool call.
+func newLSPRuntime(ctx context.Context, lspCfg config.LSPConfig, catalog *tools.Registry, logger *slog.Logger) (*lspRuntime, error) {
 	cfg, err := lspproxy.LoadConfigWithServers(convertLSPServers(lspCfg.Servers))
 	if err != nil {
-		logger.Warn(fmt.Sprintf("lsp: cannot load configuration: %v; LSP tools unavailable", err), logging.Category("lsp"))
-		return mcptools.Summary{}, "", noop, false
+		return nil, err
 	}
-	for _, w := range cfg.Warnings {
-		logger.Warn(w, logging.Category("lsp"))
+	for _, warning := range cfg.Warnings {
+		logger.Warn(warning, logging.Category("lsp"))
 	}
-
 	mgr := lspproxy.NewManager(cfg, "", logger)
-	sum, err := lsptools.Register(ctx, catalog, mgr, lspCfg.Tools...)
+	summary, err := lsptools.Register(ctx, catalog, mgr, lspCfg.Tools...)
 	if err != nil {
-		logger.Warn(fmt.Sprintf("lsp: cannot register tools: %v; LSP tools unavailable", err), logging.Category("lsp"))
 		mgr.Shutdown(context.Background())
-		return mcptools.Summary{}, "", noop, false
+		return nil, err
 	}
-	warnUnknownLSPTools(lspCfg.Tools, sum.Names, logger)
-	logger.Info(fmt.Sprintf("lsp: registered %d tools", sum.Total), logging.Category("lsp"))
-	return sum, lspSystemHint(mgr.AvailableLanguages()), func() { mgr.Shutdown(context.Background()) }, true
+	warnUnknownLSPTools(lspCfg.Tools, summary.Names, logger)
+	return &lspRuntime{mgr: mgr, summary: summary, enabled: lspCfg.Enable}, nil
+}
+
+func (r *lspRuntime) ActiveSummary() mcptools.Summary {
+	if r == nil || !r.enabled {
+		return mcptools.Summary{}
+	}
+	return r.summary
+}
+
+func (r *lspRuntime) SetEnabled(enabled bool) {
+	if r == nil || r.enabled == enabled {
+		return
+	}
+	r.enabled = enabled
+	if enabled {
+		r.mgr.RefreshAvailability()
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r.mgr.Shutdown(ctx)
+}
+
+func (r *lspRuntime) Shutdown() {
+	if r != nil {
+		r.mgr.Shutdown(context.Background())
+	}
+}
+
+func (r *lspRuntime) SystemHint() string {
+	if r == nil || !r.enabled {
+		return ""
+	}
+	return lspSystemHint(r.mgr.AvailableLanguages())
+}
+
+func (r *lspRuntime) Status() ui.LSPStatus {
+	if r == nil {
+		return ui.LSPStatus{}
+	}
+	r.mgr.RefreshAvailability()
+	servers := r.mgr.ServerStatuses()
+	uiServers := make([]ui.LSPServerStatus, 0, len(servers))
+	loaded := map[string]bool{}
+	for _, server := range servers {
+		if len(server.LoadedRoots) > 0 {
+			for _, language := range server.Languages {
+				loaded[language] = true
+			}
+		}
+		uiServers = append(uiServers, ui.LSPServerStatus{
+			Name: server.Name, Languages: server.Languages, Command: server.Command,
+			Available: server.Available, LoadedRoots: server.LoadedRoots,
+		})
+	}
+	return ui.LSPStatus{
+		Enabled: r.enabled, Tools: slices.Clone(r.summary.Names),
+		AvailableLanguages: r.mgr.AvailableLanguages(),
+		LoadedLanguages:    slices.Sorted(maps.Keys(loaded)),
+		Servers:            uiServers,
+	}
 }
 
 func lspSystemHint(languages []string) string {
 	if len(languages) == 0 {
-		return "LSP tools are registered, but no configured language-server binary is on PATH."
+		return "Native lsp_* code-intelligence tools are configured, but no configured language-server binary is on PATH."
 	}
-	return "LSP tools are available for: " + strings.Join(languages, ", ") + "."
+	return "Native lsp_* code-intelligence tools, when present in this request, have configured language-server binaries available for: " + strings.Join(languages, ", ") + ". Prefer them for semantic navigation, diagnostics, hierarchies, code actions, formatting, and rename when the target language supports the operation."
 }
 
 // warnUnknownLSPTools logs a warning for each configured lsp.tools entry that did
@@ -65,6 +130,10 @@ func warnUnknownLSPTools(want, registered []string, logger *slog.Logger) {
 		if w == "" {
 			continue
 		}
+		bare := strings.TrimPrefix(w, "lsp_")
+		if strings.EqualFold(bare, "all") {
+			continue
+		}
 		full := w
 		if !strings.HasPrefix(full, "lsp_") {
 			full = "lsp_" + w
@@ -73,6 +142,48 @@ func warnUnknownLSPTools(want, registered []string, logger *slog.Logger) {
 			logger.Warn(fmt.Sprintf("lsp: configured tool %q is not a known LSP tool; ignoring", w), logging.Category("lsp"))
 		}
 	}
+}
+
+type lspExplicitTools map[string][]string
+
+// captureLSPExplicitTools records explicit agent allowlist entries and removes
+// them from MCP refresh bases. LSP exposure is then re-applied from one runtime
+// gate, so a remote MCP list refresh cannot accidentally re-enable disabled LSP.
+func captureLSPExplicitTools(agents map[string]agentdef.Definition, bases mcpAgentBases) lspExplicitTools {
+	explicit := make(lspExplicitTools)
+	for name, agent := range agents {
+		for _, tool := range agent.AllowedTools {
+			if strings.HasPrefix(tool, "lsp_") {
+				explicit[name] = append(explicit[name], tool)
+			}
+		}
+	}
+	for name, base := range bases {
+		base.Allowed = withoutLSPTools(base.Allowed)
+		bases[name] = base
+	}
+	return explicit
+}
+
+func applyLSPExposure(agents map[string]agentdef.Definition, summary mcptools.Summary, enabled bool, explicit lspExplicitTools) {
+	for name, agent := range agents {
+		agent.AllowedTools = withoutLSPTools(agent.AllowedTools)
+		if enabled {
+			agent.AllowedTools = appendMCPNames(agent.AllowedTools, explicit[name])
+			agent.AllowedTools = appendMCPNames(agent.AllowedTools, mcpNamesForMode(agent.MCPTools, summary.Names, summary.ReadOnlyNames))
+		}
+		agents[name] = agent
+	}
+}
+
+func withoutLSPTools(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if !strings.HasPrefix(name, "lsp_") {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func convertLSPServers(in map[string]config.LSPServerConfig) map[string]lspproxy.ServerConfig {

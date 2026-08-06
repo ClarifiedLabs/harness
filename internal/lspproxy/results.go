@@ -80,6 +80,70 @@ func parseHoverContents(raw json.RawMessage) (string, error) {
 	return markupToText(h.Contents), nil
 }
 
+// parseCompletionItems normalizes CompletionItem[] | CompletionList | null.
+func parseCompletionItems(raw json.RawMessage) ([]CompletionItem, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var items []CompletionItem
+	if raw[0] == '[' {
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return nil, fmt.Errorf("lspproxy: decode completion items: %w", err)
+		}
+		return items, nil
+	}
+	var list struct {
+		Items []CompletionItem `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, fmt.Errorf("lspproxy: decode completion list: %w", err)
+	}
+	return list.Items, nil
+}
+
+// parseCodeActions normalizes (Command | CodeAction)[] | null. Direct Command
+// entries have a string "command" field; CodeAction.command is an object.
+func parseCodeActions(raw json.RawMessage) ([]CodeAction, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, fmt.Errorf("lspproxy: decode code actions: %w", err)
+	}
+	out := make([]CodeAction, 0, len(entries))
+	for _, entry := range entries {
+		var action CodeAction
+		if err := json.Unmarshal(entry, &action); err != nil {
+			return nil, fmt.Errorf("lspproxy: decode code action: %w", err)
+		}
+		var probe struct {
+			Command json.RawMessage `json:"command"`
+		}
+		_ = json.Unmarshal(entry, &probe)
+		command := bytes.TrimSpace(probe.Command)
+		if len(command) > 0 && command[0] == '"' {
+			action.CommandOnly = true
+		}
+		out = append(out, action)
+	}
+	return out, nil
+}
+
+func parseTextEdits(raw json.RawMessage) ([]TextEdit, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var edits []TextEdit
+	if err := json.Unmarshal(raw, &edits); err != nil {
+		return nil, fmt.Errorf("lspproxy: decode text edits: %w", err)
+	}
+	return edits, nil
+}
+
 // markupToText flattens a string, a {language|kind, value} object, or an array
 // of either into plaintext. Both MarkedString objects and MarkupContent carry
 // the text under "value".

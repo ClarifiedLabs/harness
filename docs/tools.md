@@ -61,8 +61,10 @@ replacement count.
 
 When [MCP](mcp.md) is enabled, downstream MCP tools also appear, namespaced as
 `mcp__<server>__<tool>`. When [LSP](lsp.md) is enabled, native `lsp_*` code
-intelligence tools are also registered; most are read-only, while `lsp_rename`
-applies language-server text edits.
+intelligence tools are also registered. Most are read-only; `lsp_code_action`,
+`lsp_format_document`, and `lsp_rename` apply validated language-server text
+edits and therefore remain mutating ordering barriers. Interactive sessions can
+inspect or change this process-local exposure with `/lsp`.
 
 ## Session Goals
 

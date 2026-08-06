@@ -4,3 +4,4 @@
 /harness-lsp
 *.test
 .DS_Store
+.harness/

@@ -1,7 +1,7 @@
 // Package lspproxy is a generic LSP-to-MCP shim: it launches already-installed
-// language-server binaries on demand and exposes a small, read-only set of
-// navigation tools (definition, references, hover, symbols, diagnostics, and a
-// read-only rename plan) over MCP. It speaks MCP upstream over stdio and LSP
+// language-server binaries on demand and exposes agent-oriented navigation,
+// inspection, diagnostics, hierarchy, code-action, formatting, and rename tools
+// over MCP. It speaks MCP upstream over stdio and LSP
 // downstream to one language-server child per (server, workspace-root). Like the
 // rest of harness it depends only on the standard library; the LSP client is
 // hand-rolled.

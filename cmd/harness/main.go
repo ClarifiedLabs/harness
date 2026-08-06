@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -660,19 +661,24 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	}
 	skillsCatalog := skills.BuildCatalog(discoveredSkills)
 	var runtimeHints []string
+	var lspHint string
 
 	// buildSystem assembles the full system prompt for a given agent prompt,
 	// reusing every other input. The configured system prompt replaces only the
 	// static built-in instructions. Runtime hints precede the agent prompt so the
 	// selected agent's instructions remain the final layer.
 	buildSystem := func(agentPrompt string) string {
+		hints := slices.Clone(runtimeHints)
+		if strings.TrimSpace(lspHint) != "" {
+			hints = append(hints, lspHint)
+		}
 		return sysprompt.Build(sysprompt.Options{
 			StaticPrompt:    configuredSystemPrompt,
 			NoEnv:           cfg.NoEnv,
 			UserAgentsMD:    userAgentsMD,
 			ProjectAgentsMD: projectAgentsMD,
 			SkillsCatalog:   skillsCatalog,
-			RuntimeHints:    runtimeHints,
+			RuntimeHints:    hints,
 			AgentPrompt:     agentPrompt,
 			Env:             sysprompt.EnvOptions{Dir: wd},
 		})
@@ -862,15 +868,23 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 	}
 	var lspSummary mcptools.Summary
-	if cfg.LSP.Enable {
-		summary, hint, cleanup, ok := setupLSP(startupCtx, cfg.LSP, toolCatalog, logger)
-		defer cleanup()
+	var lspControl *lspRuntime
+	// Interactive runs prepare the static LSP surface even when it starts
+	// disabled, so /lsp enable can expose it without restarting. Language-server
+	// processes remain lazy and no binary is launched here.
+	if cfg.LSP.Enable || !runOptions.PromptSet {
+		runtime, err := newLSPRuntime(startupCtx, cfg.LSP, toolCatalog, logger)
 		if startupInterrupted() {
 			return ui.ExitInterrupt
 		}
-		if ok {
-			lspSummary = summary
-			runtimeHints = append(runtimeHints, hint)
+		if err != nil {
+			logger.Warn(fmt.Sprintf("lsp: cannot initialize: %v; LSP tools unavailable", err), logging.Category("lsp"))
+		} else {
+			lspControl = runtime
+			defer runtime.Shutdown()
+			lspSummary = runtime.ActiveSummary()
+			lspHint = runtime.SystemHint()
+			logger.Info(fmt.Sprintf("lsp: registered %d tools", runtime.summary.Total), logging.Category("lsp"))
 		}
 	}
 	var serenaSummary mcptools.Summary
@@ -894,22 +908,26 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// re-derive their allowed lists.
 	// The name lists are empty when MCP/LSP are disabled, making this a no-op.
 	mcpBases := mcpExposingAgentBases(agents)
+	lspExplicit := captureLSPExplicitTools(agents, mcpBases)
 	// Cap the discovered remote MCP surface before combining with local MCP and
 	// LSP names (those have their own gating). The same limits feed the interactive
 	// refresh hook below so async-discovered tools are capped identically.
 	mcpLim := mcpLimitsFromConfig(cfg.MCP)
 	cappedMCPNames, cappedMCPReadOnly := capRemoteMCPNames(mcpSummary.Names, mcpSummary.ReadOnlyNames, mcpLim, logger)
-	mcpNames := make([]string, 0, len(cappedMCPNames)+len(localSummary.Names)+len(lspSummary.Names)+len(serenaSummary.Names))
+	mcpNames := make([]string, 0, len(cappedMCPNames)+len(localSummary.Names)+len(serenaSummary.Names))
 	mcpNames = append(mcpNames, cappedMCPNames...)
 	mcpNames = append(mcpNames, localSummary.Names...)
-	mcpNames = append(mcpNames, lspSummary.Names...)
 	mcpNames = append(mcpNames, serenaSummary.Names...)
-	mcpReadOnlyNames := make([]string, 0, len(cappedMCPReadOnly)+len(localSummary.ReadOnlyNames)+len(lspSummary.ReadOnlyNames)+len(serenaSummary.ReadOnlyNames))
+	mcpReadOnlyNames := make([]string, 0, len(cappedMCPReadOnly)+len(localSummary.ReadOnlyNames)+len(serenaSummary.ReadOnlyNames))
 	mcpReadOnlyNames = append(mcpReadOnlyNames, cappedMCPReadOnly...)
 	mcpReadOnlyNames = append(mcpReadOnlyNames, localSummary.ReadOnlyNames...)
-	mcpReadOnlyNames = append(mcpReadOnlyNames, lspSummary.ReadOnlyNames...)
 	mcpReadOnlyNames = append(mcpReadOnlyNames, serenaSummary.ReadOnlyNames...)
 	augmentAgentsWithMCP(agents, mcpNames, mcpReadOnlyNames)
+	if lspControl != nil {
+		applyLSPExposure(agents, lspControl.summary, lspControl.enabled, lspExplicit)
+	} else {
+		applyLSPExposure(agents, mcptools.Summary{}, false, lspExplicit)
+	}
 	// Expand @file references in agent prompts once at startup: a bad reference
 	// fails fast (rather than on a later /agent switch), and the cached text means
 	// switching never touches the filesystem.
@@ -999,6 +1017,70 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			ReasoningSet:          true,
 			ResponsesStateful:     snap.ResponsesStateful,
 		}, nil
+	}
+
+	var controlLSP func(action, agentName string) (ui.LSPSelection, error)
+	if lspControl != nil && !runOptions.PromptSet {
+		controlLSP = func(action, currentAgentName string) (ui.LSPSelection, error) {
+			wantEnabled := lspControl.enabled
+			switch action {
+			case "status":
+				previousHint := lspHint
+				status := lspControl.Status()
+				lspHint = lspControl.SystemHint()
+				selection := ui.LSPSelection{Status: status}
+				if lspHint != previousHint {
+					if definition, ok := agents[currentAgentName]; ok {
+						selection.System = buildSystem(definition.Prompt)
+						snapshot := delegateState.Snapshot()
+						snapshot.System = selection.System
+						delegateState.Set(snapshot)
+					}
+				}
+				return selection, nil
+			case "enable":
+				wantEnabled = true
+			case "disable":
+				wantEnabled = false
+			default:
+				return ui.LSPSelection{}, fmt.Errorf("unknown action %q", action)
+			}
+			previousEnabled := lspControl.enabled
+			previousHint := lspHint
+			previousSummary := lspSummary
+			changed := wantEnabled != previousEnabled
+			lspControl.SetEnabled(wantEnabled)
+			lspSummary = lspControl.ActiveSummary()
+			lspHint = lspControl.SystemHint()
+			applyLSPExposure(agents, lspControl.summary, lspControl.enabled, lspExplicit)
+			selection := ui.LSPSelection{}
+			if !changed {
+				selection.Status = lspControl.Status()
+				return selection, nil
+			}
+			definition, ok := agents[currentAgentName]
+			if !ok {
+				lspControl.SetEnabled(previousEnabled)
+				lspHint, lspSummary = previousHint, previousSummary
+				applyLSPExposure(agents, lspControl.summary, previousEnabled, lspExplicit)
+				return ui.LSPSelection{}, fmt.Errorf("unknown agent %q", currentAgentName)
+			}
+			registry, err := subsetForAgentTools(toolCatalog, definition.AllowedTools, pendingMCP)
+			if err != nil {
+				lspControl.SetEnabled(previousEnabled)
+				lspHint, lspSummary = previousHint, previousSummary
+				applyLSPExposure(agents, lspControl.summary, previousEnabled, lspExplicit)
+				return ui.LSPSelection{}, err
+			}
+			selection.Tools = registry
+			selection.System = buildSystem(definition.Prompt)
+			selection.Status = lspControl.Status()
+			snapshot := delegateState.Snapshot()
+			snapshot.ToolNames = registry.Names()
+			snapshot.System = selection.System
+			delegateState.Set(snapshot)
+			return selection, nil
+		}
 	}
 
 	provider := proxyClient.Provider(cfg.Provider)
@@ -1276,6 +1358,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			return agentSummaries(agents, delegateState.Snapshot().ToolNames)
 		},
 		SwitchAgent:                  switchAgent,
+		ControlLSP:                   controlLSP,
 		Work:                         workStore,
 		Goal:                         goalStore,
 		GoalMaxContinuations:         cfg.GoalMaxContinuations,
@@ -1329,11 +1412,23 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// Wire the MCP tool-list refresh hook for the interactive REPL only: one-shot
 	// runs a single prompt with tools discovered before the request, so it needs no hook.
 	if mcpConn != nil && !runOptions.PromptSet {
-		staticSummary := mergeMCPSummaries(localSummary, lspSummary, serenaSummary)
-		refreshMCP := newMCPRefresher(mcpConn, toolCatalog, agents, mcpBases, mcpSummary, staticSummary, logger, pendingMCP, mcpLim)
+		staticSummary := func() mcptools.Summary {
+			return mergeMCPSummaries(localSummary, lspSummary, serenaSummary)
+		}
+		refreshMCP := newMCPRefresherDynamic(mcpConn, toolCatalog, agents, mcpBases, mcpSummary, staticSummary, logger, pendingMCP, mcpLim)
 		app.RefreshMCP = func(ctx context.Context, agentName string) (*tools.Registry, string) {
 			reg, notice := refreshMCP(ctx, agentName)
 			if reg != nil {
+				if lspControl != nil {
+					applyLSPExposure(agents, lspControl.summary, lspControl.enabled, lspExplicit)
+					if definition, ok := agents[agentName]; ok {
+						if reconciled, err := subsetForAgentTools(toolCatalog, definition.AllowedTools, pendingMCP); err == nil {
+							reg = reconciled
+						} else {
+							logger.Warn(fmt.Sprintf("lsp: tool exposure refresh failed: %v; keeping refreshed tools", err), logging.Category("lsp"))
+						}
+					}
+				}
 				snap := delegateState.Snapshot()
 				snap.ToolNames = reg.Names()
 				delegateState.Set(snap)

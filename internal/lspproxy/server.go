@@ -228,6 +228,13 @@ func (s *serverInstance) Starts() int {
 	return s.starts
 }
 
+// status returns identity plus whether the current initialized client is alive.
+func (s *serverInstance) status() (name, root string, loaded bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.Name, s.root, s.client != nil && s.alive()
+}
+
 func (s *serverInstance) now() time.Time {
 	if s.clock != nil {
 		return s.clock()

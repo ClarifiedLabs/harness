@@ -5119,6 +5119,41 @@ func TestRunREPLToolsCommandListsTools(t *testing.T) {
 	}
 }
 
+func TestRunREPLLSPToggleChangesModelToolSurfaceAndHint(t *testing.T) {
+	fp := llmtest.New("fake", okStepWithUsage(1, 1), okStepWithUsage(1, 1))
+	env, _, errw, _ := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8"},
+		fp,
+		"/lsp enable\nfirst\n/lsp disable\nsecond\n/exit\n",
+	)
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("model requests = %d, want 2", len(fp.Requests))
+	}
+	firstNames := toolNames(fp.Requests[0])
+	if !slices.Contains(firstNames, "lsp_definition") || !slices.Contains(firstNames, "lsp_code_actions") {
+		t.Fatalf("enabled request missing expanded LSP tools: %v", firstNames)
+	}
+	if secondNames := toolNames(fp.Requests[1]); slices.Contains(secondNames, "lsp_definition") {
+		t.Fatalf("disabled request still exposes LSP tools: %v", secondNames)
+	}
+	firstSystem := fp.Requests[0].System
+	if !strings.Contains(firstSystem, "Native lsp_* code-intelligence tools") {
+		t.Fatalf("enabled request missing LSP runtime hint: %q", firstSystem)
+	}
+	secondSystem := fp.Requests[1].System
+	if strings.Contains(secondSystem, "Native lsp_* code-intelligence tools") {
+		t.Fatalf("disabled request retained LSP runtime hint: %q", secondSystem)
+	}
+	for _, spec := range fp.Requests[0].Tools {
+		if spec.Name == "lsp_definition" && !strings.Contains(string(spec.Parameters), `"description":"1-based line number`) {
+			t.Fatalf("LSP schema guidance not disclosed to model: %s", spec.Parameters)
+		}
+	}
+}
+
 func toolsOutputHasDescribedTool(output, name string) bool {
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)

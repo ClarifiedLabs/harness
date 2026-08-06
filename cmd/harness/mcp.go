@@ -355,6 +355,13 @@ func mcpExposingAgentBases(agents map[string]agentdef.Definition) mcpAgentBases 
 // current tools. Not safe for concurrent use: the REPL calls it only at the
 // idle prompt boundary, between turns.
 func newMCPRefresher(conn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, prev, static mcptools.Summary, logger *slog.Logger, pending *asyncMCPRegistration, limits ...mcpLimits) func(context.Context, string) (*tools.Registry, string) {
+	return newMCPRefresherDynamic(conn, catalog, agents, bases, prev, func() mcptools.Summary { return static }, logger, pending, limits...)
+}
+
+// newMCPRefresherDynamic is the runtime-aware form used by main. static is
+// evaluated only when a refresh is applied, allowing session-local LSP toggles
+// to change which first-class tools MCP-exposing agents receive.
+func newMCPRefresherDynamic(conn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, prev mcptools.Summary, static func() mcptools.Summary, logger *slog.Logger, pending *asyncMCPRegistration, limits ...mcpLimits) func(context.Context, string) (*tools.Registry, string) {
 	prevNames := prev.Names
 	var lim mcpLimits
 	if len(limits) > 0 {
@@ -362,7 +369,7 @@ func newMCPRefresher(conn *mcptools.Conn, catalog *tools.Registry, agents map[st
 	}
 	return func(parent context.Context, agentName string) (*tools.Registry, string) {
 		if res, ok := pending.take(); ok {
-			return applyMCPRegistration(catalog, res.registry, agents, bases, agentName, &prevNames, res.summary, static, logger, lim)
+			return applyMCPRegistration(catalog, res.registry, agents, bases, agentName, &prevNames, res.summary, static(), logger, lim)
 		}
 
 		if !conn.Dirty() {
@@ -390,7 +397,7 @@ func newMCPRefresher(conn *mcptools.Conn, catalog *tools.Registry, agents map[st
 			return nil, ""
 		}
 		conn.ClearDirty()
-		return applyMCPRegistration(catalog, nil, agents, bases, agentName, &prevNames, sum, static, logger, lim)
+		return applyMCPRegistration(catalog, nil, agents, bases, agentName, &prevNames, sum, static(), logger, lim)
 	}
 }
 

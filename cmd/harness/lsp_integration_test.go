@@ -68,6 +68,18 @@ func TestIntegrationGopls(t *testing.T) {
 		t.Fatalf("definition = %q, want a location at main.go:3", got)
 	}
 
+	sigArgs, _ := json.Marshal(map[string]any{"path": src, "line": 6, "column": 10})
+	res, err = client.CallTool(ctx, "mcp__lsp__signature_help", sigArgs)
+	if err != nil {
+		t.Fatalf("signature-help call: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("signature help errored: %s", res.Content[0].Text)
+	}
+	if got := res.Content[0].Text; !strings.Contains(got, "Foo() int") {
+		t.Fatalf("signature help = %q, want Foo() int", got)
+	}
+
 	diagArgs, _ := json.Marshal(map[string]any{"path": src, "timeout_ms": 30000})
 	res, err = client.CallTool(ctx, "mcp__lsp__diagnostics", diagArgs)
 	if err != nil {

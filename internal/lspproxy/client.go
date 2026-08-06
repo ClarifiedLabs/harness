@@ -17,23 +17,34 @@ import (
 // defaultPositionEncoding is what LSP assumes when the server advertises none.
 const defaultPositionEncoding = "utf-16"
 
-// clientCapabilitiesJSON is the minimal set of client capabilities the shim
-// advertises. It requests UTF-16 columns (the shim converts), plaintext-or-
-// markdown hover, link-style definitions, hierarchical document symbols, and
-// publishDiagnostics, and tells the server the shim answers configuration and
-// workspaceFolders callbacks.
+// clientCapabilitiesJSON advertises the agent-relevant request surface exposed
+// by the shim. UI-only LSP features (semantic coloring, folding, selection
+// ranges, document colors) are deliberately absent. The client accepts snippet
+// completions as text but never executes server commands returned by actions.
 const clientCapabilitiesJSON = `{
   "general": {"positionEncodings": ["utf-16"]},
   "textDocument": {
     "synchronization": {"didSave": false, "willSave": false},
     "hover": {"contentFormat": ["plaintext", "markdown"]},
+    "declaration": {"linkSupport": true},
     "definition": {"linkSupport": true},
+    "typeDefinition": {"linkSupport": true},
+    "implementation": {"linkSupport": true},
     "references": {},
+    "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext", "markdown"], "parameterInformation": {"labelOffsetSupport": true}, "activeParameterSupport": true}},
+    "completion": {"completionItem": {"documentationFormat": ["plaintext", "markdown"], "snippetSupport": true}},
+    "documentHighlight": {},
     "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
+    "callHierarchy": {},
+    "typeHierarchy": {},
+    "inlayHint": {},
+    "codeAction": {"dataSupport": true, "resolveSupport": {"properties": ["edit"]}},
+    "formatting": {},
+    "rangeFormatting": {},
     "rename": {},
     "publishDiagnostics": {}
   },
-  "workspace": {"symbol": {}, "workspaceFolders": true, "configuration": true}
+  "workspace": {"symbol": {"resolveSupport": {"properties": ["location.range"]}}, "workspaceFolders": true, "configuration": true, "applyEdit": false}
 }`
 
 // lspClient drives one language-server child over the LSP wire protocol. It owns
@@ -216,7 +227,26 @@ func (c *lspClient) DidChange(uri string, version int, text string) error {
 // Definition resolves textDocument/definition at pos, normalizing the
 // polymorphic result into a flat list of locations.
 func (c *lspClient) Definition(ctx context.Context, uri string, pos Position) ([]Location, error) {
-	raw, err := jsonCall(ctx, c.peer, "textDocument/definition", TextDocumentPositionParams{
+	return c.locations(ctx, "textDocument/definition", uri, pos)
+}
+
+// Declaration resolves textDocument/declaration at pos.
+func (c *lspClient) Declaration(ctx context.Context, uri string, pos Position) ([]Location, error) {
+	return c.locations(ctx, "textDocument/declaration", uri, pos)
+}
+
+// TypeDefinition resolves textDocument/typeDefinition at pos.
+func (c *lspClient) TypeDefinition(ctx context.Context, uri string, pos Position) ([]Location, error) {
+	return c.locations(ctx, "textDocument/typeDefinition", uri, pos)
+}
+
+// Implementation resolves textDocument/implementation at pos.
+func (c *lspClient) Implementation(ctx context.Context, uri string, pos Position) ([]Location, error) {
+	return c.locations(ctx, "textDocument/implementation", uri, pos)
+}
+
+func (c *lspClient) locations(ctx context.Context, method, uri string, pos Position) ([]Location, error) {
+	raw, err := jsonCall(ctx, c.peer, method, TextDocumentPositionParams{
 		TextDocument: TextDocumentIdentifier{URI: uri},
 		Position:     pos,
 	})
@@ -224,6 +254,53 @@ func (c *lspClient) Definition(ctx context.Context, uri string, pos Position) ([
 		return nil, err
 	}
 	return parseLocations(raw)
+}
+
+// SignatureHelp resolves callable signatures at pos.
+func (c *lspClient) SignatureHelp(ctx context.Context, uri string, pos Position) (*SignatureHelp, error) {
+	raw, err := jsonCall(ctx, c.peer, "textDocument/signatureHelp", TextDocumentPositionParams{
+		TextDocument: TextDocumentIdentifier{URI: uri}, Position: pos,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	var help SignatureHelp
+	if err := json.Unmarshal(raw, &help); err != nil {
+		return nil, fmt.Errorf("lspproxy: decode signature help: %w", err)
+	}
+	return &help, nil
+}
+
+// Completion resolves completion candidates at pos.
+func (c *lspClient) Completion(ctx context.Context, uri string, pos Position) ([]CompletionItem, error) {
+	raw, err := jsonCall(ctx, c.peer, "textDocument/completion", CompletionParams{
+		TextDocument: TextDocumentIdentifier{URI: uri}, Position: pos,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return parseCompletionItems(raw)
+}
+
+// DocumentHighlights resolves occurrences in the current document.
+func (c *lspClient) DocumentHighlights(ctx context.Context, uri string, pos Position) ([]DocumentHighlight, error) {
+	raw, err := jsonCall(ctx, c.peer, "textDocument/documentHighlight", TextDocumentPositionParams{
+		TextDocument: TextDocumentIdentifier{URI: uri}, Position: pos,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out []DocumentHighlight
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("lspproxy: decode document highlights: %w", err)
+	}
+	return out, nil
 }
 
 // References resolves textDocument/references at pos.
@@ -269,6 +346,157 @@ func (c *lspClient) WorkspaceSymbols(ctx context.Context, query string) ([]Symbo
 		return nil, err
 	}
 	return parseSymbols(raw)
+}
+
+// PrepareCallHierarchy locates the hierarchy item at pos.
+func (c *lspClient) PrepareCallHierarchy(ctx context.Context, uri string, pos Position) ([]CallHierarchyItem, error) {
+	raw, err := jsonCall(ctx, c.peer, "textDocument/prepareCallHierarchy", TextDocumentPositionParams{
+		TextDocument: TextDocumentIdentifier{URI: uri}, Position: pos,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out []CallHierarchyItem
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("lspproxy: decode call hierarchy item: %w", err)
+	}
+	return out, nil
+}
+
+func (c *lspClient) IncomingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyIncomingCall, error) {
+	raw, err := jsonCall(ctx, c.peer, "callHierarchy/incomingCalls", map[string]any{"item": item})
+	if err != nil {
+		return nil, err
+	}
+	var out []CallHierarchyIncomingCall
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("lspproxy: decode incoming calls: %w", err)
+	}
+	return out, nil
+}
+
+func (c *lspClient) OutgoingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyOutgoingCall, error) {
+	raw, err := jsonCall(ctx, c.peer, "callHierarchy/outgoingCalls", map[string]any{"item": item})
+	if err != nil {
+		return nil, err
+	}
+	var out []CallHierarchyOutgoingCall
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("lspproxy: decode outgoing calls: %w", err)
+	}
+	return out, nil
+}
+
+func (c *lspClient) PrepareTypeHierarchy(ctx context.Context, uri string, pos Position) ([]TypeHierarchyItem, error) {
+	raw, err := jsonCall(ctx, c.peer, "textDocument/prepareTypeHierarchy", TextDocumentPositionParams{
+		TextDocument: TextDocumentIdentifier{URI: uri}, Position: pos,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out []TypeHierarchyItem
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("lspproxy: decode type hierarchy item: %w", err)
+	}
+	return out, nil
+}
+
+func (c *lspClient) TypeHierarchy(ctx context.Context, direction string, item TypeHierarchyItem) ([]TypeHierarchyItem, error) {
+	method := "typeHierarchy/supertypes"
+	if direction == "subtypes" {
+		method = "typeHierarchy/subtypes"
+	}
+	raw, err := jsonCall(ctx, c.peer, method, map[string]any{"item": item})
+	if err != nil {
+		return nil, err
+	}
+	var out []TypeHierarchyItem
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("lspproxy: decode type hierarchy: %w", err)
+	}
+	return out, nil
+}
+
+func (c *lspClient) InlayHints(ctx context.Context, uri string, r Range) ([]InlayHint, error) {
+	raw, err := jsonCall(ctx, c.peer, "textDocument/inlayHint", DocumentRangeParams{
+		TextDocument: TextDocumentIdentifier{URI: uri}, Range: r,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out []InlayHint
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("lspproxy: decode inlay hints: %w", err)
+	}
+	return out, nil
+}
+
+func (c *lspClient) CodeActions(ctx context.Context, uri string, r Range, diagnostics []Diagnostic, only []string) ([]CodeAction, error) {
+	raw, err := jsonCall(ctx, c.peer, "textDocument/codeAction", CodeActionParams{
+		TextDocument: TextDocumentIdentifier{URI: uri}, Range: r,
+		Context: CodeActionContext{Diagnostics: diagnostics, Only: only},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return parseCodeActions(raw)
+}
+
+func (c *lspClient) ResolveCodeAction(ctx context.Context, action CodeAction) (CodeAction, error) {
+	raw, err := jsonCall(ctx, c.peer, "codeAction/resolve", action)
+	if err != nil {
+		return CodeAction{}, err
+	}
+	var out CodeAction
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return CodeAction{}, fmt.Errorf("lspproxy: decode resolved code action: %w", err)
+	}
+	return out, nil
+}
+
+func (c *lspClient) Formatting(ctx context.Context, uri string, r *Range, options FormattingOptions) ([]TextEdit, error) {
+	var (
+		raw json.RawMessage
+		err error
+	)
+	if r == nil {
+		raw, err = jsonCall(ctx, c.peer, "textDocument/formatting", DocumentFormattingParams{
+			TextDocument: TextDocumentIdentifier{URI: uri}, Options: options,
+		})
+	} else {
+		raw, err = jsonCall(ctx, c.peer, "textDocument/rangeFormatting", DocumentRangeFormattingParams{
+			TextDocument: TextDocumentIdentifier{URI: uri}, Range: *r, Options: options,
+		})
+	}
+	if err != nil {
+		return nil, err
+	}
+	return parseTextEdits(raw)
+}
+
+// Diagnostics returns the latest pushed diagnostics without waiting.
+func (c *lspClient) Diagnostics(uri string) []Diagnostic {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]Diagnostic(nil), c.diags[uri]...)
 }
 
 // Rename resolves textDocument/rename and returns the resulting cross-file edits
