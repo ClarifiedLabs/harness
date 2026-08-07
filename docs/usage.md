@@ -609,6 +609,12 @@ environment variables, JSON paths, types, and defaults. The concise
 | `lsp.enable` | `boolean` | `true`, `false` | - | `HARNESS_LSP_ENABLE` | `lsp.enable` | false | no | Harness lsp.enable setting. |
 | `lsp.serena.enable` | `boolean` | `true`, `false` | - | `HARNESS_LSP_SERENA_ENABLE` | `lsp.serena.enable` | false | no | Harness lsp.serena.enable setting. |
 | `lsp.serena.command` | `string` | - | - | - | `lsp.serena.command` | "serena" | no | Harness lsp.serena.command setting. |
+| `otel.enabled` | `boolean` | `true`, `false` | `-otel-enabled` | `HARNESS_OTEL_ENABLED` | `otel.enabled` | false | no | Harness otel.enabled setting. |
+| `otel.endpoint` | `string` | - | `-otel-endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT`, `HARNESS_OTEL_ENDPOINT` | `otel.endpoint` | unset | no | Harness otel.endpoint setting. |
+| `otel.protocol` | `string` | `http/json` | `-otel-protocol` | `HARNESS_OTEL_PROTOCOL` | `otel.protocol` | "http/json" | no | Harness otel.protocol setting. |
+| `otel.timeout_seconds` | `integer` | - | `-otel-timeout` | `HARNESS_OTEL_TIMEOUT` | `otel.timeout_seconds` | 5 (seconds) | no | Harness otel.timeout seconds setting. |
+| `otel.service_name` | `string` | - | `-otel-service-name` | `OTEL_SERVICE_NAME`, `HARNESS_OTEL_SERVICE_NAME` | `otel.service_name` | "harness" | no | Harness otel.service name setting. |
+| `otel.traces.enabled` | `boolean` | `true`, `false` | `-otel-traces` | `HARNESS_OTEL_TRACES_ENABLED` | `otel.traces.enabled` | false | no | Harness otel.traces.enabled setting. |
 | `agents` | `object` | - | - | - | `agents` | unset | no | Structured agents settings. |
 | `mcp.headers` | `object` | - | - | - | `mcp.headers` | unset | yes | Structured mcp.headers settings. |
 | `mcp.disabled_servers` | `string[]` | - | - | - | `mcp.disabled_servers` | unset | no | Structured mcp.disabled_servers settings. |
@@ -620,6 +626,8 @@ environment variables, JSON paths, types, and defaults. The concise
 | `lsp.serena.env` | `object` | - | - | - | `lsp.serena.env` | unset | yes | Structured lsp.serena.env settings. |
 | `hooks` | `object` | - | `-hooks` | - | `hooks` | unset | no | Structured hooks settings. |
 | `hook_configs` | `string[]` | - | - | - | `hook_configs` | unset | no | Structured hook_configs settings. |
+| `otel.headers` | `object` | - | - | - | `otel.headers` | unset | yes | Structured otel.headers settings. |
+| `otel.resource_attributes` | `object` | - | - | - | `otel.resource_attributes` | unset | no | Structured otel.resource_attributes settings. |
 <!-- harness-config-parameters:end -->
 
 `HARNESS_WEB_SEARCH=auto` is equivalent to `-web-search auto`; `off` disables it.

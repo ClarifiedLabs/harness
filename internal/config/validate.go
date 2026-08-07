@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -153,11 +154,67 @@ func percent(setting string) func(int) (int, error) {
 	}
 }
 
+func canonicalOTelEndpoint(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("otel.endpoint must be an absolute http(s) URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("otel.endpoint must be an absolute http(s) URL")
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("otel.endpoint must be an absolute http(s) URL")
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("otel.endpoint must not contain user info")
+	}
+	if parsed.Fragment != "" {
+		return "", fmt.Errorf("otel.endpoint must not contain a fragment")
+	}
+	return value, nil
+}
+
+func canonicalOTelProtocol(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "http/json", nil
+	}
+	return canonicalChoice("otel.protocol", value, "http/json")
+}
+
+func canonicalOTelServiceName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "harness", nil
+	}
+	return canonicalNonEmpty("otel.service_name", value)
+}
+
+func oTelTimeoutSeconds(value int) (int, error) {
+	if value == 0 {
+		return 5, nil
+	}
+	if value < 1 || value > 30 {
+		return 0, fmt.Errorf("otel.timeout_seconds must be between 1 and 30")
+	}
+	return value, nil
+}
+
 func validateResolved(config Config) error {
 	if config.MCP.Local.Enable && strings.TrimSpace(config.MCP.Local.Command) == "" {
 		return fmt.Errorf("mcp.local.command is required when mcp.local.enable is true")
 	}
-	return validateCompactionRelationships(config.CompactTriggerPercent, config.CompactTargetPercent, config.CompactIdleAfterSeconds, config.CompactIdleTriggerPercent)
+	if config.OTel.Enabled && strings.TrimSpace(config.OTel.Endpoint) == "" {
+		return fmt.Errorf("otel.endpoint is required when otel.enabled is true")
+	}
+	if err := validateCompactionRelationships(config.CompactTriggerPercent, config.CompactTargetPercent, config.CompactIdleAfterSeconds, config.CompactIdleTriggerPercent); err != nil {
+		return err
+	}
+	return nil
 }
 
 func validateCompactionRelationships(trigger, target, idleAfter, idleTrigger int) error {

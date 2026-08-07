@@ -343,6 +343,82 @@ func resolveSerenaEnv(context *resolveContext) error {
 	return nil
 }
 
+func resolveOTelHeaders(context *resolveContext) error {
+	if context.file.OTel.Set && context.file.OTel.Value.Headers.Set {
+		values, err := expandStringMap(context.file.OTel.Value.Headers.Value, context.lookup, "otel.headers")
+		if err != nil {
+			return context.fileError("otel.headers", err)
+		}
+		context.result.Config.OTel.Headers = values
+		context.fileSource("otel.headers")
+	} else {
+		if raw, present := context.lookup("HARNESS_OTEL_HEADERS"); present {
+			parsed, err := parseOTelHeadersEnv(raw)
+			if err != nil {
+				return fmt.Errorf("environment HARNESS_OTEL_HEADERS for otel.headers: %w", err)
+			}
+			expanded, err := expandStringMap(parsed, context.lookup, "otel.headers")
+			if err != nil {
+				return fmt.Errorf("environment HARNESS_OTEL_HEADERS for otel.headers: %w", err)
+			}
+			context.result.Config.OTel.Headers = expanded
+			context.result.Sources["otel.headers"] = configmeta.Source{Kind: configmeta.SourceEnvironment, Name: "HARNESS_OTEL_HEADERS"}
+			return nil
+		}
+		if raw, present := context.lookup("OTEL_EXPORTER_OTLP_HEADERS"); present {
+			parsed, err := parseOTelHeadersEnv(raw)
+			if err != nil {
+				return fmt.Errorf("environment OTEL_EXPORTER_OTLP_HEADERS for otel.headers: %w", err)
+			}
+			expanded, err := expandStringMap(parsed, context.lookup, "otel.headers")
+			if err != nil {
+				return fmt.Errorf("environment OTEL_EXPORTER_OTLP_HEADERS for otel.headers: %w", err)
+			}
+			context.result.Config.OTel.Headers = expanded
+			context.result.Sources["otel.headers"] = configmeta.Source{Kind: configmeta.SourceEnvironment, Name: "OTEL_EXPORTER_OTLP_HEADERS"}
+			return nil
+		}
+		context.defaultSource("otel.headers")
+	}
+	return nil
+}
+
+func parseOTelHeadersEnv(raw string) (map[string]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return map[string]string{}, nil
+	}
+	out := map[string]string{}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(entry, "=")
+		key = strings.TrimSpace(strings.ToLower(key))
+		value = strings.TrimSpace(value)
+		if !ok || key == "" || value == "" {
+			return nil, fmt.Errorf("must be comma-separated k=v pairs")
+		}
+		out[key] = value
+	}
+	return out, nil
+}
+
+func resolveOTelResourceAttributes(context *resolveContext) error {
+	if context.file.OTel.Set && context.file.OTel.Value.ResourceAttributes.Set {
+		values, err := expandStringMap(context.file.OTel.Value.ResourceAttributes.Value, context.lookup, "otel.resource_attributes")
+		if err != nil {
+			return context.fileError("otel.resource_attributes", err)
+		}
+		context.result.Config.OTel.ResourceAttributes = values
+		context.fileSource("otel.resource_attributes")
+	} else {
+		context.defaultSource("otel.resource_attributes")
+	}
+	return nil
+}
+
 func resolveHooks(context *resolveContext) error {
 	if override, present := context.flags.lastInvocation("hooks_override"); present {
 		if strings.TrimSpace(override.value) == "" {

@@ -108,6 +108,7 @@ type fileConfig struct {
 	HistSize                           optional[int]                        `json:"histsize"`
 	MCP                                optional[fileMCPConfig]              `json:"mcp"`
 	LSP                                optional[fileLSPConfig]              `json:"lsp"`
+	OTel                               optional[fileOTelConfig]             `json:"otel"`
 }
 
 type fileMCPConfig struct {
@@ -139,6 +140,21 @@ type fileSerenaConfig struct {
 	Command optional[string]            `json:"command"`
 	Args    optional[[]string]          `json:"args"`
 	Env     optional[map[string]string] `json:"env"`
+}
+
+type fileOTelTracesConfig struct {
+	Enabled optional[bool] `json:"enabled"`
+}
+
+type fileOTelConfig struct {
+	Enabled            optional[bool]              `json:"enabled"`
+	Endpoint           optional[string]            `json:"endpoint"`
+	Protocol           optional[string]            `json:"protocol"`
+	TimeoutSeconds     optional[int]               `json:"timeout_seconds"`
+	ServiceName        optional[string]            `json:"service_name"`
+	Headers            optional[map[string]string] `json:"headers"`
+	ResourceAttributes optional[map[string]string] `json:"resource_attributes"`
+	Traces             optional[fileOTelTracesConfig] `json:"traces"`
 }
 
 func decodeConfigFile(path string) (fileConfig, error) {

@@ -36,6 +36,7 @@ import (
 	"harness/internal/term"
 	"harness/internal/todo"
 	"harness/internal/tools"
+
 )
 
 const (
@@ -228,6 +229,8 @@ type App struct {
 	// HandoffAgent is the default agent a handoff switches to when the request
 	// names none. Empty falls back to the built-in default agent.
 	HandoffAgent string
+
+	otelForwarder otelForwarder
 
 	SessionPath    string // current save path; /clear rotates it
 	SessionTree    *session.Tree
@@ -5298,11 +5301,13 @@ type accumulatingSink struct {
 	r                           *Renderer
 	app                         *App
 	rec                         *sessionrec.Recorder
+	otel                        otelForwarder
 	prompt                      int
 	printTodoPromptBeforeUsage  bool
 	reasoningOutput             bool
 	promptUsage                 agent.PromptUsage // last PromptComplete, priced; JSON run modes report it in prompt_end
 	pendingNames                map[string]string
+	pendingOTel                 map[string]pendingOTelTool
 	todoTurn                    int
 	turn                        int
 	attempt                     int
@@ -5312,12 +5317,48 @@ type accumulatingSink struct {
 	finalText                   string
 }
 
+// otelForwarder is the minimal OTEL sink surface needed by accumulatingSink.
+// It is satisfied by *otel.Sink and avoids importing otel types into App fields.
+type otelForwarder interface {
+	ToolResultWithName(toolName string, result llm.ToolResult, durationMS int64, activity tools.Activity)
+	TurnProgress(p agent.TurnProgress)
+	TurnComplete(usage agent.TurnUsage)
+	PromptComplete(usage agent.PromptUsage, duration time.Duration)
+	MaintenanceComplete(usage agent.MaintenanceUsage)
+	RetentionApplied(event agent.RetentionEvent)
+	ModelRequestEvent(event llm.ModelRequestEvent)
+}
+
+// SetOTel installs the OTEL forwarder on the App. It is called once per App
+// after the Exporter is created, before any prompt runs.
+func (app *App) SetOTel(f otelForwarder) {
+	app.otelForwarder = f
+}
+
+func (s *accumulatingSink) otelSink() otelForwarder {
+	if s.otel != nil {
+		return s.otel
+	}
+	if s.app != nil {
+		return s.app.otelForwarder
+	}
+	return nil
+}
+
+type pendingOTelTool struct {
+	name     string
+	started  time.Time
+	activity tools.Activity
+}
+
 func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 	s := &accumulatingSink{
 		r: r, app: app, prompt: prompt,
 		pendingNames: make(map[string]string),
+		pendingOTel:  make(map[string]pendingOTelTool),
 	}
 	if app != nil {
+		s.otel = app.otelForwarder
 		var mirror func(session.Event)
 		if app.RunStream != nil {
 			mirror = app.RunStream.Mirror
@@ -5436,6 +5477,9 @@ func (s *accumulatingSink) ModelRequestEvent(event llm.ModelRequestEvent) {
 	if line != "" && event.Outcome == llm.ModelRequestOutcomeTerminal {
 		s.terminalModelErrorDisplayed = true
 	}
+	if s.otel != nil {
+		s.otel.ModelRequestEvent(event)
+	}
 	s.rec.ModelRequestEvent(event)
 	if s.app.DiagnosticLogger == nil {
 		return
@@ -5494,6 +5538,10 @@ func (s *accumulatingSink) ToolUseDelta(index int, delta string) {
 
 func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 	s.pendingNames[c.ID] = c.Name
+	if s.app != nil && s.app.Agent != nil {
+		activity := s.app.Agent.ToolActivity(c)
+		s.pendingOTel[c.ID] = pendingOTelTool{name: c.Name, started: time.Now(), activity: activity}
+	}
 	s.r.ToolStart(c)
 	s.rec.ToolStart(c)
 }
@@ -5501,6 +5549,19 @@ func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	name := s.pendingNames[res.ForID]
 	delete(s.pendingNames, res.ForID)
+	pendingOTel := s.pendingOTel[res.ForID]
+	delete(s.pendingOTel, res.ForID)
+	if s.otel != nil {
+		durMS := int64(-1)
+		if !pendingOTel.started.IsZero() {
+			durMS = time.Since(pendingOTel.started).Milliseconds()
+		}
+		toolName := name
+		if toolName == "" {
+			toolName = pendingOTel.name
+		}
+		s.otel.ToolResultWithName(toolName, res, durMS, pendingOTel.activity)
+	}
 	s.r.ToolResult(res)
 	s.rec.ToolResult(res)
 	if name == "update_todos" && !res.IsError {
@@ -5586,6 +5647,9 @@ func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
 	if !u.Usage.CostKnown {
 		u.Usage.CostUSD, u.Usage.CostKnown = s.app.Registry.Cost(s.app.usageKey(), u.Usage)
 	}
+	if s.otel != nil {
+		s.otel.TurnComplete(u)
+	}
 	s.r.TurnComplete(u)
 	s.rec.TurnComplete(u)
 }
@@ -5600,6 +5664,9 @@ func (s *accumulatingSink) FinalText() string {
 }
 
 func (s *accumulatingSink) MaintenanceComplete(u agent.MaintenanceUsage) {
+	if s.otel != nil {
+		s.otel.MaintenanceComplete(u)
+	}
 	s.rec.MaintenanceComplete(u)
 }
 
@@ -5649,6 +5716,9 @@ func (s *accumulatingSink) ClosureStarted(event agent.ClosureEvent) {
 }
 
 func (s *accumulatingSink) TurnProgress(progress agent.TurnProgress) {
+	if s.otel != nil {
+		s.otel.TurnProgress(progress)
+	}
 	s.rec.TurnProgress(progress)
 }
 
@@ -5664,6 +5734,9 @@ func (s *accumulatingSink) WorkflowStatus() agent.WorkflowStatus {
 }
 
 func (s *accumulatingSink) RetentionApplied(event agent.RetentionEvent) {
+	if s.otel != nil {
+		s.otel.RetentionApplied(event)
+	}
 	s.recordEvent(session.Event{
 		Type:      session.EventRetention,
 		Prompt:    s.prompt,
@@ -5786,6 +5859,10 @@ func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
 		}
 	}
 	s.r.SetPromptCost(cost, costKnown)
+	if s.otel != nil {
+		// PromptComplete duration comes from recorder timing or wall-clock; use zero for now and rely on PromptComplete histogram without duration
+		s.otel.PromptComplete(u, 0)
+	}
 	s.r.PromptComplete(u)
 	s.app.addUsage(u)
 	// The recorder's prompt-usage line hook reads the renderer's cumulative

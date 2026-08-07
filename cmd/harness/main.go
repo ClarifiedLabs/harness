@@ -54,6 +54,7 @@ import (
 	"harness/internal/tmux"
 	"harness/internal/todo"
 	"harness/internal/tools"
+	"harness/internal/otel"
 	"harness/internal/tracing"
 	"harness/internal/ui"
 )
@@ -1432,6 +1433,45 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 		return ref, nil
 	})
+	// OTEL exporter: opt-in, best-effort. Disabled by default or when endpoint is empty.
+	if cfg.OTel.Enabled && cfg.OTel.Endpoint != "" {
+		otelCfg := otel.Config{
+			Enabled:            cfg.OTel.Enabled,
+			Endpoint:           cfg.OTel.Endpoint,
+			Protocol:           cfg.OTel.Protocol,
+			Timeout:            time.Duration(cfg.OTel.TimeoutSeconds) * time.Second,
+			ServiceName:        cfg.OTel.ServiceName,
+			Headers:            cfg.OTel.Headers,
+			ResourceAttributes: cfg.OTel.ResourceAttributes,
+			TracesEnabled:      cfg.OTel.TracesEnabled,
+		}
+		if otelCfg.Protocol == "" {
+			otelCfg.Protocol = "http/json"
+		}
+		if otelCfg.ServiceName == "" {
+			otelCfg.ServiceName = "harness"
+		}
+		if otelCfg.Timeout == 0 {
+			otelCfg.Timeout = 5 * time.Second
+		}
+		sessionID := ""
+		if sessionPath != "" {
+			sessionID = filepath.Base(sessionPath)
+		}
+		exp, err := otel.NewExporter(otelCfg, buildinfo.Current(), sessionID, cfg.Provider, cfg.Model, agentName, cfg.OTel.ResourceAttributes)
+		if err != nil {
+			logger.Warn(fmt.Sprintf("otel: invalid config: %v", err), logging.Category("otel"))
+		} else {
+			otelSink := otel.NewSink(exp, toolRegistry, cfg.Provider, cfg.Model, agentName, false)
+			app.SetOTel(otelSink)
+			defer func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				_ = exp.Export(ctx)
+			}()
+		}
+	}
+
 	app.SetUsage(totals)
 	app.SetUsageByModel(resumedUsageByModel)
 	if resumeCloned {

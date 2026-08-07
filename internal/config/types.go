@@ -168,6 +168,7 @@ type Config struct {
 	HookConfigs []string     `json:"hook_configs,omitempty"`
 	MCP         MCPConfig    `json:"mcp"`
 	LSP         LSPConfig    `json:"lsp"`
+	OTel        OTelConfig   `json:"otel"`
 }
 
 // RunOptions contains controls that apply only to this invocation.
@@ -244,6 +245,17 @@ type FileAgentConfig struct {
 type ImageAttachment struct {
 	Path   string `json:"path"`
 	Detail string `json:"detail"`
+}
+
+type OTelConfig struct {
+	Enabled            bool              `json:"enabled"`
+	Endpoint           string            `json:"endpoint"`
+	Protocol           string            `json:"protocol"`
+	TimeoutSeconds     int               `json:"timeout_seconds"`
+	ServiceName        string            `json:"service_name"`
+	Headers            map[string]string `json:"headers,omitempty"`
+	ResourceAttributes map[string]string `json:"resource_attributes,omitempty"`
+	TracesEnabled      bool              `json:"traces_enabled"`
 }
 
 func DefaultSerenaArgs() []string {

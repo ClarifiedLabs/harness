@@ -287,6 +287,42 @@ var definitions = []parameterDefinition{
 		}
 		return optional[string]{}
 	}, func(c *Config, v string) { c.LSP.Serena.Command = v }, func(c Config) string { return c.LSP.Serena.Command }, canonicalNonEmptyFor("lsp.serena.command"), nil, false),
+	boolDef("otel.enabled", "otel.enabled", []string{"otel-enabled"}, []string{"HARNESS_OTEL_ENABLED"}, literal(false, "", ""), func(f fileConfig) optional[bool] {
+		if f.OTel.Set {
+			return f.OTel.Value.Enabled
+		}
+		return optional[bool]{}
+	}, func(c *Config, v bool) { c.OTel.Enabled = v }, func(c Config) bool { return c.OTel.Enabled }),
+	strDef("otel.endpoint", "otel.endpoint", []string{"otel-endpoint"}, []string{"OTEL_EXPORTER_OTLP_ENDPOINT", "HARNESS_OTEL_ENDPOINT"}, literal("", "unset", ""), func(f fileConfig) optional[string] {
+		if f.OTel.Set {
+			return f.OTel.Value.Endpoint
+		}
+		return optional[string]{}
+	}, func(c *Config, v string) { c.OTel.Endpoint = v }, func(c Config) string { return c.OTel.Endpoint }, canonicalOTelEndpoint, nil, false),
+	strDef("otel.protocol", "otel.protocol", []string{"otel-protocol"}, []string{"HARNESS_OTEL_PROTOCOL"}, literal("http/json", "", ""), func(f fileConfig) optional[string] {
+		if f.OTel.Set {
+			return f.OTel.Value.Protocol
+		}
+		return optional[string]{}
+	}, func(c *Config, v string) { c.OTel.Protocol = v }, func(c Config) string { return c.OTel.Protocol }, canonicalOTelProtocol, []string{"http/json"}, false),
+	intDef("otel.timeout_seconds", "otel.timeout_seconds", []string{"otel-timeout"}, []string{"HARNESS_OTEL_TIMEOUT"}, literal(5, "", "seconds"), func(f fileConfig) optional[int] {
+		if f.OTel.Set {
+			return f.OTel.Value.TimeoutSeconds
+		}
+		return optional[int]{}
+	}, func(c *Config, v int) { c.OTel.TimeoutSeconds = v }, func(c Config) int { return c.OTel.TimeoutSeconds }, oTelTimeoutSeconds),
+	strDef("otel.service_name", "otel.service_name", []string{"otel-service-name"}, []string{"OTEL_SERVICE_NAME", "HARNESS_OTEL_SERVICE_NAME"}, literal("harness", "", ""), func(f fileConfig) optional[string] {
+		if f.OTel.Set {
+			return f.OTel.Value.ServiceName
+		}
+		return optional[string]{}
+	}, func(c *Config, v string) { c.OTel.ServiceName = v }, func(c Config) string { return c.OTel.ServiceName }, canonicalOTelServiceName, nil, false),
+	boolDef("otel.traces.enabled", "otel.traces.enabled", []string{"otel-traces"}, []string{"HARNESS_OTEL_TRACES_ENABLED"}, literal(false, "", ""), func(f fileConfig) optional[bool] {
+		if f.OTel.Set && f.OTel.Value.Traces.Set {
+			return f.OTel.Value.Traces.Value.Enabled
+		}
+		return optional[bool]{}
+	}, func(c *Config, v bool) { c.OTel.TracesEnabled = v }, func(c Config) bool { return c.OTel.TracesEnabled }),
 }
 
 func canonicalNonEmptyFor(setting string) func(string) (string, error) {
@@ -352,6 +388,8 @@ var customDefinitions = []parameterDefinition{
 	custom("lsp.serena.env", "object", "lsp.serena.env", true, resolveSerenaEnv, func(c Config) any { return redactStringMap(c.LSP.Serena.Env) }),
 	hooksCustomDefinition(),
 	custom("hook_configs", "string[]", "hook_configs", false, func(*resolveContext) error { return nil }, func(c Config) any { return c.HookConfigs }),
+	custom("otel.headers", "object", "otel.headers", true, resolveOTelHeaders, func(c Config) any { return redactStringMap(c.OTel.Headers) }),
+	custom("otel.resource_attributes", "object", "otel.resource_attributes", false, resolveOTelResourceAttributes, func(c Config) any { return c.OTel.ResourceAttributes }),
 }
 
 func hooksCustomDefinition() customDefinition {

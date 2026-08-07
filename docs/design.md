@@ -126,6 +126,7 @@ internal/mcp             tools-only MCP slice: schema, client, server, stdio + s
 internal/mcp/jsonrpc     JSON-RPC 2.0 framing and bidirectional request/response correlation
 internal/mcpproxy      proxy internals: config, supervisors, tool registry, daemon
 internal/metrics         shared Prometheus collectors/exposition plus endpoint config resolution and lifecycle
+internal/otel            stdlib-only OTLP/HTTP JSON metrics exporter and live sink (fleet + debug telemetry)
 internal/mcptools        harness-side adapter: tools.Tool over a reconnecting proxy Conn (§15)
 internal/lspproxy      LSP manager: language-server supervisors, Content-Length JSON-RPC, agent-oriented code-intelligence tools (§15a)
 internal/lsptools        harness-side adapter exposing short `lsp_*` tools over the LSP manager (§15a)

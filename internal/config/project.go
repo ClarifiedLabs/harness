@@ -183,6 +183,7 @@ func mergeFileConfig(global, project fileConfig, globalPath, projectPath string)
 	out.HistSize = mergeOpt(global.HistSize, project.HistSize, globalPath, projectPath, "histsize", sourceMap)
 	out.MCP = mergeMCPOpt(global.MCP, project.MCP, globalPath, projectPath, sourceMap)
 	out.LSP = mergeLSPOpt(global.LSP, project.LSP, globalPath, projectPath, sourceMap)
+	out.OTel = mergeOTelOpt(global.OTel, project.OTel, globalPath, projectPath, sourceMap)
 	return out, sourceMap
 }
 
@@ -258,6 +259,53 @@ func mergeLSPOpt(global, project optional[fileLSPConfig], globalPath, projectPat
 		return optional[fileLSPConfig]{Set: true, Value: merged}
 	}
 	return optional[fileLSPConfig]{}
+}
+
+func mergeOTelOpt(global, project optional[fileOTelConfig], globalPath, projectPath string, sourceMap map[string]string) optional[fileOTelConfig] {
+	if !global.Set && !project.Set {
+		return optional[fileOTelConfig]{}
+	}
+	var gVal, pVal fileOTelConfig
+	if global.Set {
+		gVal = global.Value
+	}
+	if project.Set {
+		pVal = project.Value
+	}
+	var merged fileOTelConfig
+	merged.Enabled = mergeOpt(gVal.Enabled, pVal.Enabled, globalPath, projectPath, "otel.enabled", sourceMap)
+	merged.Endpoint = mergeOpt(gVal.Endpoint, pVal.Endpoint, globalPath, projectPath, "otel.endpoint", sourceMap)
+	merged.Protocol = mergeOpt(gVal.Protocol, pVal.Protocol, globalPath, projectPath, "otel.protocol", sourceMap)
+	merged.TimeoutSeconds = mergeOpt(gVal.TimeoutSeconds, pVal.TimeoutSeconds, globalPath, projectPath, "otel.timeout_seconds", sourceMap)
+	merged.ServiceName = mergeOpt(gVal.ServiceName, pVal.ServiceName, globalPath, projectPath, "otel.service_name", sourceMap)
+	merged.Headers = mergeOpt(gVal.Headers, pVal.Headers, globalPath, projectPath, "otel.headers", sourceMap)
+	merged.ResourceAttributes = mergeOpt(gVal.ResourceAttributes, pVal.ResourceAttributes, globalPath, projectPath, "otel.resource_attributes", sourceMap)
+	merged.Traces = mergeOTelTracesOpt(gVal.Traces, pVal.Traces, globalPath, projectPath, sourceMap)
+	hasLeaf := merged.Enabled.Set || merged.Endpoint.Set || merged.Protocol.Set || merged.TimeoutSeconds.Set || merged.ServiceName.Set || merged.Headers.Set || merged.ResourceAttributes.Set || merged.Traces.Set
+	if hasLeaf || global.Set || project.Set {
+		return optional[fileOTelConfig]{Set: true, Value: merged}
+	}
+	return optional[fileOTelConfig]{}
+}
+
+func mergeOTelTracesOpt(global, project optional[fileOTelTracesConfig], globalPath, projectPath string, sourceMap map[string]string) optional[fileOTelTracesConfig] {
+	if !global.Set && !project.Set {
+		return optional[fileOTelTracesConfig]{}
+	}
+	var gVal, pVal fileOTelTracesConfig
+	if global.Set {
+		gVal = global.Value
+	}
+	if project.Set {
+		pVal = project.Value
+	}
+	var merged fileOTelTracesConfig
+	merged.Enabled = mergeOpt(gVal.Enabled, pVal.Enabled, globalPath, projectPath, "otel.traces.enabled", sourceMap)
+	hasLeaf := merged.Enabled.Set
+	if hasLeaf || global.Set || project.Set {
+		return optional[fileOTelTracesConfig]{Set: true, Value: merged}
+	}
+	return optional[fileOTelTracesConfig]{}
 }
 
 func mergeSerenaOpt(global, project optional[fileSerenaConfig], globalPath, projectPath string, sourceMap map[string]string) optional[fileSerenaConfig] {
