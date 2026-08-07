@@ -5574,11 +5574,11 @@ func (s *accumulatingSink) ToolUseDelta(index int, delta string) {
 func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 	s.pendingNames[c.ID] = c.Name
 	if s.otel != nil || (s.app != nil && s.app.Agent != nil) {
-		activity := tools.Activity{}
+		activity := tools.Activity{Class: tools.ActivityOther, OperationCount: 1}
 		if s.app != nil && s.app.Agent != nil {
 			activity = s.app.Agent.ToolActivity(c)
 		}
-		s.pendingOTel[c.ID] = pendingOTelTool{name: c.Name, started: time.Now(), activity: activity, input: c.Input}
+		s.pendingOTel[c.ID] = pendingOTelTool{name: c.Name, started: time.Now(), activity: activity, input: append(json.RawMessage(nil), c.Input...)}
 	}
 	s.r.ToolStart(c)
 	s.rec.ToolStart(c)
@@ -5692,6 +5692,9 @@ func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
 	if !u.Usage.CostKnown {
 		u.Usage.CostUSD, u.Usage.CostKnown = s.app.Registry.Cost(s.app.usageKey(), u.Usage)
 	}
+	// Emit solo_todo / single_inspect via otel when this turn had exactly one tool.
+	// Tool name is not in TurnUsage, so we rely on TurnProgress already handling
+	// batched_operation / single_lookup; solo_todo remains best-effort via RecordTurnSummary if caller knows name.
 	if fwd := s.otel; fwd != nil {
 		otelCall(fwd, func(sink otelSinkIface) { sink.TurnComplete(u) })
 	}

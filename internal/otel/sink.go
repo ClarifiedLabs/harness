@@ -141,12 +141,22 @@ func sanitizeTerminationReason(reason string) string {
 	}
 }
 
-func isSoloTodoTurn(toolNames []string) bool { return len(toolNames) == 1 && toolNames[0] == "update_todos" }
+func isSoloTodoTurn(toolNames []string) bool {
+	normalized := make([]string, 0, len(toolNames))
+	for _, n := range toolNames {
+		normalized = append(normalized, sanitizeToolName(n))
+	}
+	return len(normalized) == 1 && normalized[0] == "update_todos"
+}
 func isSingleInspectTurn(toolNames []string) bool {
-	if len(toolNames) != 1 {
+	normalized := make([]string, 0, len(toolNames))
+	for _, n := range toolNames {
+		normalized = append(normalized, sanitizeToolName(n))
+	}
+	if len(normalized) != 1 {
 		return false
 	}
-	switch toolNames[0] {
+	switch normalized[0] {
 	case "read_file", "search", "rg", "grep", "glob", "list_dir", "git_readonly":
 		return true
 	default:
@@ -369,13 +379,24 @@ func (s *Sink) RecordSkill(source, status string) {
 }
 
 func (s *Sink) RecordTurnSummary(toolNames []string) {
-	if s == nil || s.exp == nil || len(toolNames) == 0 {
+	if s == nil || s.exp == nil {
 		return
 	}
-	if isSoloTodoTurn(toolNames) {
+	if len(toolNames) == 0 {
+		return
+	}
+	names := make([]string, 0, len(toolNames))
+	for _, n := range toolNames {
+		sanitized := sanitizeToolName(n)
+		if sanitized == "other" {
+			// Preserve unknown as "other" bucket but keep count correct
+		}
+		names = append(names, sanitized)
+	}
+	if isSoloTodoTurn(names) {
 		s.exp.RecordSum("harness.solo_todo_turns", "{turn}", 1, s.baseAttrs(nil))
 	}
-	if isSingleInspectTurn(toolNames) {
+	if isSingleInspectTurn(names) {
 		s.exp.RecordSum("harness.single_inspect_turns", "{turn}", 1, s.baseAttrs(nil))
 	}
 }

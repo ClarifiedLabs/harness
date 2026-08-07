@@ -339,6 +339,16 @@ func (e *Exporter) BuildPayloadForTest() ([]byte, error) {
 	return e.buildPayloadLocked()
 }
 
+func (e *Exporter) MetricsForTest() map[string]*aggregatedMetric {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make(map[string]*aggregatedMetric, len(e.metrics))
+	for k, v := range e.metrics {
+		out[k] = v
+	}
+	return out
+}
+
 func (e *Exporter) buildPayloadLocked() ([]byte, error) {
 	if len(e.metrics) == 0 {
 		return nil, nil
