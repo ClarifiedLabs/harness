@@ -2,6 +2,7 @@ package otel
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -9,6 +10,8 @@ import (
 	"harness/internal/llm"
 	"harness/internal/tools"
 )
+
+var jsonUnmarshal = json.Unmarshal
 
 // Sink is a decorator that observes agent events and records OTLP metrics.
 // It implements the minimal agent sink interfaces via type-asserted optional methods.
@@ -99,7 +102,6 @@ func sanitizeToolName(name string) string {
 	if name == "" {
 		return "unknown"
 	}
-	// Allowlist bounded set: known builtins plus mcp_*/lsp_* prefix
 	known := map[string]bool{
 		"read_file": true, "edit": true, "write_file": true, "apply_patch": true, "run_command": true, "search": true, "rg": true, "grep": true, "glob": true, "list_dir": true, "git_readonly": true, "delegate": true, "background_jobs": true, "update_todos": true, "request_implementation": true, "view_image": true, "web_fetch": true,
 	}
@@ -109,8 +111,29 @@ func sanitizeToolName(name string) string {
 	if strings.HasPrefix(name, "mcp_") || strings.HasPrefix(name, "lsp_") {
 		return truncate(name, 64)
 	}
-	// Unknown: bucket as other to bound cardinality
 	return "other"
+}
+
+func sanitizeStatus(status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	switch status {
+	case "completed", "failed", "canceled", "abandoned", "running":
+		return status
+	default:
+		return "unknown"
+	}
+}
+
+func sanitizeTerminationReason(reason string) string {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	switch reason {
+	case "model_completed", "turn_limit", "token_limit", "cost_limit", "repeat_guard", "error_guard", "cancelled", "error":
+		return reason
+	case "":
+		return "unknown"
+	default:
+		return "unknown"
+	}
 }
 
 // TurnProgress records inspection/steer metrics.
@@ -118,7 +141,6 @@ func (s *Sink) TurnProgress(p agent.TurnProgress) {
 	if s == nil || s.exp == nil {
 		return
 	}
-	// Tools/ops per turn histograms
 	ac := dominantActivity(p.Activity)
 	if p.ToolCalls > 0 {
 		s.exp.RecordHistogram("harness.tools_per_turn", "{tool}", float64(p.ToolCalls), s.baseAttrs(map[string]string{"activity_class": ac}), []float64{1, 2, 3, 4, 8, 16})
@@ -132,7 +154,6 @@ func (s *Sink) TurnProgress(p agent.TurnProgress) {
 	if p.SingleLookupCount == 1 && p.ToolCalls == 1 {
 		s.exp.RecordSum("harness.single_lookup_turns", "{turn}", 1, s.baseAttrs(nil))
 	}
-	// Inspection streak histogram (only when >0)
 	if p.InspectionNoProgressRun > 0 {
 		s.exp.RecordHistogram("harness.inspection_no_progress_streak", "{turn}", float64(p.InspectionNoProgressRun), s.baseAttrs(nil), []float64{1, 2, 3, 5, 8, 12, 20})
 	}
@@ -140,6 +161,9 @@ func (s *Sink) TurnProgress(p agent.TurnProgress) {
 		s.exp.RecordSum("harness.guard.steers", "{steer}", 1, s.baseAttrs(map[string]string{"reason": string(p.SteerReason)}))
 	}
 }
+
+// TurnComplete currently delegates to TurnProgress for the common batch/steer signals;
+// it remains a stable hook for per-turn gauges added in later plan slices.
 
 func dominantActivity(a agent.ToolActivityCounts) string {
 	max := a.Inspect
@@ -180,18 +204,17 @@ func (s *Sink) PromptComplete(usage agent.PromptUsage, duration time.Duration) {
 	if s == nil || s.exp == nil {
 		return
 	}
-	term := string(usage.TerminationReason)
-	if term == "" {
-		term = "unknown"
+	term := sanitizeTerminationReason(string(usage.TerminationReason))
+	closure := strings.TrimSpace(string(usage.ClosureTrigger))
+	if closure != "" {
+		closure = truncate(closure, 32)
 	}
-	closure := string(usage.ClosureTrigger)
-	attrs := s.baseAttrs(map[string]string{"termination_reason": truncate(term, 64), "closure_trigger": truncate(closure, 64)})
+	attrs := s.baseAttrs(map[string]string{"termination_reason": truncate(term, 64), "closure_trigger": closure})
 	s.exp.RecordSum("harness.prompt.total", "{prompt}", 1, attrs)
 	s.exp.RecordHistogram("harness.prompt.turns", "{turn}", float64(usage.Turns), attrs, []float64{1, 2, 3, 5, 10, 20, 50})
 	if duration > 0 {
 		s.exp.RecordHistogram("harness.prompt.duration", "s", duration.Seconds(), attrs, []float64{1, 5, 10, 30, 60, 120, 300, 600})
 	}
-	// Tokens
 	u := usage.Usage
 	costKnown := "false"
 	if u.CostKnown {
@@ -212,8 +235,9 @@ func (s *Sink) PromptComplete(usage agent.PromptUsage, duration time.Duration) {
 		s.exp.RecordSum("harness.cost.unpriced_calls", "{call}", 1, s.baseAttrs(nil))
 	}
 	s.exp.RecordSum("harness.compactions.total", "{compaction}", int64(usage.Compactions), s.baseAttrs(nil))
-	if usage.Maintenance.InputTokens != 0 || usage.Maintenance.OutputTokens != 0 {
-		// Maintenance is already included in Usage, but track separately? plan says maintenanceCalls via compactionStats; we'll just record compactions already
+	// Wasted (retried) token cost
+	if w := usage.Wasted; w.InputTokens > 0 || w.OutputTokens > 0 || w.CacheReadTokens > 0 || w.CacheWriteTokens > 0 {
+		s.exp.RecordSum("harness.retries.total", "{retry}", 1, s.baseAttrs(nil))
 	}
 }
 
@@ -224,6 +248,178 @@ func (s *Sink) MaintenanceComplete(usage agent.MaintenanceUsage) {
 	}
 	s.exp.RecordSum("harness.model.requests", "{request}", 1, s.baseAttrs(map[string]string{"purpose": truncate(string(llm.NormalizeRequestPurpose(llm.RequestPurpose(usage.Purpose))), 32)}))
 }
+
+// RecordParallel records harness.parallel.* metrics from the agent's
+// ParallelToolBatch. Call once per tool-result user message that carried
+// parallel batches (len 2+).
+func (s *Sink) RecordParallel(batches [][]string) {
+	if s == nil || s.exp == nil || len(batches) == 0 {
+		return
+	}
+	for _, ids := range batches {
+		size := len(ids)
+		if size < 2 {
+			continue
+		}
+		s.exp.RecordSum("harness.parallel.batches", "{batch}", 1, s.baseAttrs(nil))
+		s.exp.RecordSum("harness.parallel.calls", "{call}", int64(size), s.baseAttrs(nil))
+		s.exp.RecordHistogram("harness.parallel.batch_size", "{call}", float64(size), s.baseAttrs(nil), []float64{2, 3, 4, 6, 8, 12})
+		s.exp.RecordGauge("harness.parallel.largest_batch", "{call}", int64(size), s.baseAttrs(nil))
+	}
+}
+
+// RecordCommands records harness.commands.* from a decoded run_command payload.
+func (s *Sink) RecordCommands(input []byte) {
+	if s == nil || s.exp == nil || len(input) == 0 {
+		return
+	}
+	type step struct {
+		Command string   `json:"command"`
+		Argv    []string `json:"argv"`
+	}
+	type payload struct {
+		Command    string   `json:"command"`
+		Argv       []string `json:"argv"`
+		Background bool     `json:"background"`
+		Steps      []step   `json:"steps"`
+	}
+	var p payload
+	if err := jsonUnmarshal(input, &p); err != nil {
+		return
+	}
+	mode := "foreground"
+	if p.Background {
+		mode = "background"
+	}
+	kind := "shell"
+	if p.Command == "" && len(p.Argv) > 0 {
+		kind = "argv"
+	}
+	s.exp.RecordSum("harness.commands.total", "{command}", 1, s.baseAttrs(map[string]string{"mode": mode, "kind": kind}))
+	if len(p.Steps) > 0 {
+		s.exp.RecordHistogram("harness.commands.steps_per_batch", "{step}", float64(len(p.Steps)), s.baseAttrs(nil), []float64{1, 2, 3, 5, 8})
+	}
+}
+
+// RecordSearch records harness.search.* bounded-result signals.
+func (s *Sink) RecordSearch(tool string, display string, metrics map[string]int) {
+	if s == nil || s.exp == nil {
+		return
+	}
+	tool = sanitizeToolName(tool)
+	if tool != "search" && tool != "rg" && tool != "grep" {
+		return
+	}
+	if strings.Contains(strings.ToLower(display), "no matches") {
+		s.exp.RecordSum("harness.search.no_matches", "{search}", 1, s.baseAttrs(map[string]string{"tool": tool}))
+	}
+	if metrics != nil && (metrics["results_bounded"] != 0 || metrics["context_bounded"] != 0) {
+		s.exp.RecordSum("harness.search.bounded_calls", "{search}", 1, s.baseAttrs(nil))
+	}
+	if metrics != nil && metrics["search_batch_calls"] > 0 {
+		s.exp.RecordSum("harness.search.batch.calls", "{search}", 1, s.baseAttrs(nil))
+	}
+}
+
+// RecordSkill records harness.skill.activations.
+func (s *Sink) RecordSkill(source, status string) {
+	if s == nil || s.exp == nil {
+		return
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "unknown"
+	}
+	s.exp.RecordSum("harness.skill.activations", "{activation}", 1, s.baseAttrs(map[string]string{"source": truncate(source, 32)}))
+	_ = status
+}
+
+// RecordSoloTodo records harness.solo_todo_turns / single_inspect sampling
+// derived from per-turn tool names. Call with the turn's tool names (len==1 when solo).
+func (s *Sink) RecordTurnSummary(toolNames []string) {
+	if s == nil || s.exp == nil || len(toolNames) == 0 {
+		return
+	}
+	if len(toolNames) == 1 && toolNames[0] == "update_todos" {
+		s.exp.RecordSum("harness.solo_todo_turns", "{turn}", 1, s.baseAttrs(nil))
+	}
+}
+
+// RecordSession emits harness.session.* gauges at session-exit.
+func (s *Sink) RecordSession(costUSD float64, totalTokens int) {
+	if s == nil || s.exp == nil {
+		return
+	}
+	s.exp.RecordGaugeFloat("harness.session.cost", "USD", costUSD, s.baseAttrs(nil))
+	s.exp.RecordGauge("harness.session.tokens", "{token}", int64(totalTokens), s.baseAttrs(nil))
+}
+
+// RecordDelegate records harness.delegate.* for one ChildMeta.
+func (s *Sink) RecordDelegate(agentName, status, terminationReason string, turns int, usage inputsUsage, compactions int) {
+	if s == nil || s.exp == nil {
+		return
+	}
+	agentName = truncate(strings.TrimSpace(agentName), 64)
+	if agentName == "" {
+		agentName = "unknown"
+	}
+	status = sanitizeStatus(status)
+	term := sanitizeTerminationReason(terminationReason)
+	attrs := map[string]string{"agent": agentName, "status": status, "termination_reason": term}
+	s.exp.RecordSum("harness.delegate.sessions", "{session}", 1, s.baseAttrs(attrs))
+	s.exp.RecordHistogram("harness.delegate.turns", "{turn}", float64(turns), s.baseAttrs(map[string]string{"agent": agentName, "status": status}), []float64{1, 2, 5, 10, 20})
+	s.exp.RecordSum("harness.delegate.tokens", "{token}", int64(usage.TotalTokens()), s.baseAttrs(map[string]string{"agent": agentName, "status": status}))
+	if usage.Known() {
+		s.exp.RecordSumFloat("harness.delegate.cost", "USD", usage.CostUSDVal(), s.baseAttrs(map[string]string{"agent": agentName, "status": status, "cost_known": "true"}))
+	}
+	if compactions > 0 {
+		s.exp.RecordSum("harness.delegate.compactions", "{compaction}", int64(compactions), s.baseAttrs(map[string]string{"agent": agentName}))
+	}
+}
+
+// RecordContext emits harness.context.* gauges at session-exit.
+type ContextComposition struct {
+	Messages             int
+	Blocks               int
+	UserTextBytes        int
+	AssistantTextBytes   int
+	ToolInputBytes       int
+	ToolResultBytes      int
+	ReasoningTextBytes   int
+	ReasoningOpaqueBytes int
+	ImageEncodedBytes    int
+}
+
+func (s *Sink) RecordContext(c ContextComposition) {
+	if s == nil || s.exp == nil {
+		return
+	}
+	s.exp.RecordGauge("harness.context.messages", "{message}", int64(c.Messages), s.baseAttrs(nil))
+	s.exp.RecordGauge("harness.context.blocks", "{block}", int64(c.Blocks), s.baseAttrs(nil))
+	by := func(v int) int64 { return int64(v) }
+	s.exp.RecordGauge("harness.context.bytes", "By", by(c.UserTextBytes), s.baseAttrs(map[string]string{"component": "user_text"}))
+	s.exp.RecordGauge("harness.context.bytes", "By", by(c.AssistantTextBytes), s.baseAttrs(map[string]string{"component": "assistant_text"}))
+	s.exp.RecordGauge("harness.context.bytes", "By", by(c.ToolInputBytes), s.baseAttrs(map[string]string{"component": "tool_input"}))
+	s.exp.RecordGauge("harness.context.bytes", "By", by(c.ToolResultBytes), s.baseAttrs(map[string]string{"component": "tool_result"}))
+	s.exp.RecordGauge("harness.context.bytes", "By", by(c.ReasoningTextBytes), s.baseAttrs(map[string]string{"component": "reasoning_text"}))
+	s.exp.RecordGauge("harness.context.bytes", "By", by(c.ReasoningOpaqueBytes), s.baseAttrs(map[string]string{"component": "reasoning_opaque"}))
+	s.exp.RecordGauge("harness.context.bytes", "By", by(c.ImageEncodedBytes), s.baseAttrs(map[string]string{"component": "image"}))
+}
+
+type inputsUsage interface {
+	TotalTokens() int
+	CostUSDVal() float64
+	Known() bool
+}
+
+type usageAdapter struct{ u llm.Usage }
+
+func (a usageAdapter) TotalTokens() int { return a.u.InputTokens + a.u.OutputTokens + a.u.CacheReadTokens + a.u.CacheWriteTokens + a.u.CacheWrite1hTokens + a.u.ReasoningTokens }
+func (a usageAdapter) CostUSDVal() float64 { return a.u.CostUSD }
+func (a usageAdapter) Known() bool { return a.u.CostKnown }
+
+// WrapUsage creates an inputsUsage from llm.Usage for RecordDelegate.
+func WrapUsage(u llm.Usage) inputsUsage { return usageAdapter{u: u} }
 
 // RetentionApplied records retention epochs.
 func (s *Sink) RetentionApplied(event agent.RetentionEvent) {
@@ -270,6 +466,13 @@ func (s *Sink) FlushAsync() {
 		defer cancel()
 		_ = exp.Export(ctx)
 	}()
+}
+
+func (s *Sink) Exporter() *Exporter {
+	if s == nil {
+		return nil
+	}
+	return s.exp
 }
 
 // Ensure Sink implements optional agent sinks for static checks.

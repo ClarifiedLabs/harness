@@ -1434,6 +1434,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		return ref, nil
 	})
 	// OTEL exporter: opt-in, best-effort. Disabled by default or when endpoint is empty.
+	// The exporter is shared with delegate children via delegate.Runtime extension (future), and
+	// flushed on SIGINT/exit. Keep it alive for the whole session.
+	var otelExp *otel.Exporter
 	if cfg.OTel.Enabled && cfg.OTel.Endpoint != "" {
 		otelCfg := otel.Config{
 			Enabled:            cfg.OTel.Enabled,
@@ -1462,8 +1465,10 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		if err != nil {
 			logger.Warn(fmt.Sprintf("otel: invalid config: %v", err), logging.Category("otel"))
 		} else {
+			otelExp = exp
 			otelSink := otel.NewSink(exp, toolRegistry, cfg.Provider, cfg.Model, agentName, false)
 			app.SetOTel(otelSink)
+			_ = otelExp
 			defer func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel()
@@ -1471,6 +1476,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			}()
 		}
 	}
+	_ = otelExp
 
 	app.SetUsage(totals)
 	app.SetUsageByModel(resumedUsageByModel)
