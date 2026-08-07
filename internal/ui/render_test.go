@@ -639,6 +639,54 @@ func TestMarkdownAssistantFlushesBeforeStatusLine(t *testing.T) {
 	}
 }
 
+func TestLiveTableNotSplitByWaitCounter(t *testing.T) {
+	// Reproduces the live-vs-replay table misalignment seen in
+	// harness session 20260807T180550Z.  The session's first table is
+	// 4 columns wide; the live TextDelta stream is split mid-table across
+	// several deltas.  Before the fix, resumeLiveModelWaitAfterAssistantText
+	// and beginWait would Flush the markdown stream after a newline-terminated
+	// delta, splitting the buffered table into two separately-formatted
+	// halves.  The short early rows then lacked padding for the wide later
+	// rows (e.g. "explore (no edit/write_file)"), producing
+	// "| independent | same |" live but "| independent                  | same |" on replay.
+	full := "| agent | baseline → candidate (-no-env, request_bytes)  | Δ total      | vs system    |\n| --- | --- | --- | --- |\n| auto | 8282+13980=22275 → 7580+14313=~21906 see below | -369 (-1.7%) | -5.0% system |\n| independent | same | -369 | -5.0% |\n| explore (no edit/write_file) | 8524+10236=18773 → 7822+10355=18190 | -583 (-3.1%) | -8.3% system |\n| plan | 8949+13062=22024 → 8247+13112=~21372 | -652 | -7.8% |\n\n"
+	// Split the way the real session did: header+separator+first row end in
+	// one delta, the next delta continues with the second row.
+	deltas := []string{
+		"| agent | baseline → candidate (-no-env, request_bytes)  | Δ total      | vs system    |\n| --- | --- | --- | --- |\n| auto | 8282+13980=22275 → 7580+14313=~21906 see below | -369 (-1.7%) | -5.0% system |\n",
+		"| independent | same | -369 | -5.0% |\n| explore (no edit/write_file) | 8524+10236=18773 → 7822+10355=18190 | -583 (-3.1%) | -8.3% system |\n| plan | 8949+13062=22024 → 8247+13112=~21372 | -652 | -7.8% |\n\n",
+	}
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{Markdown: true, LiveStatus: true, Width: func() int { return 240 }})
+	r.StartPrompt()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	for _, d := range deltas {
+		r.TextDelta(d)
+	}
+	r.TurnComplete(agent.TurnUsage{})
+	r.PromptComplete(agent.PromptUsage{})
+	live := out.String()
+	replay := ""
+	// replay is the single-Render equivalent (what session.Replay does)
+	replay = r2String(full)
+	if live != replay {
+		t.Fatalf("live vs replay mismatch:\nlive=%q\nreplay=%q", live, replay)
+	}
+	if !strings.Contains(live, "| independent                  | same") {
+		t.Fatalf("live table not padded correctly, got %q", live)
+	}
+}
+
+func r2String(s string) string {
+	// helper so the test does not import markdown directly
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{Markdown: true, Width: func() int { return 240 }})
+	r.TextDelta(s)
+	r.TurnComplete(agent.TurnUsage{})
+	r.PromptComplete(agent.PromptUsage{})
+	return out.String()
+}
+
 func TestTurnAttemptStartGoesToStderr(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{})

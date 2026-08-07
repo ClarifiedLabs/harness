@@ -171,6 +171,14 @@ func (s *Stream) AtLineBoundary() bool {
 	return s.pending == "" && !s.lineOpen
 }
 
+// HasBufferedTable reports whether a markdown table is currently buffered and
+// not yet flushed. A caller that would flush the stream (e.g. to insert a
+// status line) can use it to avoid splitting a table across two flushes,
+// which would render the halves with different column widths.
+func (s *Stream) HasBufferedTable() bool {
+	return len(s.table) > 0
+}
+
 // CloseLine tells the stream that the caller wrote an external newline after an
 // open rendered line.
 func (s *Stream) CloseLine() {

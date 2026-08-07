@@ -527,6 +527,8 @@ func (r *Renderer) resumeLiveModelWaitAfterAssistantText(delta string, lineOpen 
 	// a token is merely pending. Restarting the status line then would flush that
 	// token and finish it with a newline. A newline-terminated delta guarantees
 	// there is no partial source line for beginWait to flush.
+	// Delegate beginWait to handle the buffered-table guard so the wait counter
+	// is still repainted without splitting the table.
 	if !r.liveStatus || lineOpen || !strings.HasSuffix(delta, "\n") {
 		return
 	}
@@ -1039,9 +1041,28 @@ func turnCount(turns int) string {
 
 // beginWait activates (or refreshes) the transient counter for a model wait or a
 // tool-execution gap. It finishes any open assistant line first so the counter
-// sits on its own row and erasing it never clobbers streamed content.
+// sits on its own row and erasing it never clobbers streamed content. When
+// assistant markdown is enabled and a markdown table is currently buffered,
+// it does not flush the table via finishAssistantLine: splitting the table
+// would flush the buffered half with its own column widths and leave the
+// remainder to be formatted separately with narrower widths, producing the
+// misaligned output observed in harness session 20260807T180550Z. In that
+// case the status line is updated without flushing, and the table will be
+// flushed when the next non-table line arrives or at turn completion.
 func (r *Renderer) beginWait(label string, statusCtx agent.ContextEstimate) {
 	if !r.liveStatus {
+		return
+	}
+	if r.markdown && r.assistantMarkdown != nil && r.assistantMarkdown.HasBufferedTable() {
+		activity := r.delegateActivitySnapshot()
+		r.renderMu.Lock()
+		r.statusLabel = label
+		r.statusStart = r.now()
+		r.statusCtx = statusCtx
+		r.statusActive = true
+		r.ensureTickerLocked()
+		r.paintLocked(activity)
+		r.renderMu.Unlock()
 		return
 	}
 	r.finishAssistantLine()
