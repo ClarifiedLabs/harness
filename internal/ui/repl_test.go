@@ -1688,7 +1688,7 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 			t.Errorf("/tools output missing %q:\n%s", want, got)
 		}
 	}
-	readFileCol := toolSummaryDescriptionColumn(t, got, "read_file", "Read one file with optional offset/limit, or batch paths[]; returns line-numbered content.")
+	readFileCol := toolSummaryDescriptionColumn(t, got, "read_file", "Read one file with optional offset/limit, or batch paths[]; directories return a bounded non-recursive listing.")
 	listDirCol := toolSummaryDescriptionColumn(t, got, "list_dir", "List one directory with an optional base-name glob; non-recursive.")
 	if readFileCol != listDirCol {
 		t.Errorf("built-in description separators not aligned:\n%s", got)
@@ -4649,10 +4649,13 @@ func TestHandoffToImplementationReseedsContext(t *testing.T) {
 		t.Fatalf("seeded transcript invalid: %v", err)
 	}
 	seed := msgs[0].Content[0].Text
-	for _, want := range []string{"Implementation handoff", ready.ArtifactPath, "Active step: Implement the change", "tests run with go test", "Additional input from the user", "preserve the public API"} {
+	for _, want := range []string{"Implementation handoff", "Active step: Implement the change", "tests run with go test", "Additional input from the user", "preserve the public API"} {
 		if !strings.Contains(seed, want) {
 			t.Errorf("seed missing %q: %q", want, seed)
 		}
+	}
+	if strings.Contains(seed, ready.ArtifactPath) {
+		t.Errorf("model handoff seed exposes session-relative plan artifact: %q", seed)
 	}
 	if app.AgentName != "auto" {
 		t.Errorf("agent not switched: %q", app.AgentName)
@@ -4925,7 +4928,7 @@ func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
 	app.HandoffAgent = "auto"
-	ready := readyWorkForApp(t, app, "Implement structured handoff")
+	readyWorkForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("x")})
 	app.Handoff = handoff.NewPending()
 	app.Handoff.Request(handoff.Request{Brief: "env: go test", ArtifactPath: "/p/0001.plan.md"})
@@ -4939,7 +4942,7 @@ func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
 		t.Errorf("handoff target = %q, want auto (default)", target)
 	}
 	got := app.Agent.Transcript()
-	if len(got) != 1 || !strings.Contains(got[0].Content[0].Text, ready.ArtifactPath) || !strings.Contains(got[0].Content[0].Text, "Active step: Implement the change") {
+	if len(got) != 1 || !strings.Contains(got[0].Content[0].Text, "Active step: Implement the change") || strings.Contains(got[0].Content[0].Text, "Plan artifact:") {
 		t.Errorf("transcript not reseeded with the active work capsule: %+v", got)
 	}
 }
@@ -6375,14 +6378,26 @@ func TestInspectionBoundaryCountsBatchedOperationsWithoutContextReset(t *testing
 	})
 	sink.TurnProgress(agent.TurnProgress{Turn: 2})
 	state = app.Work.Snapshot()
-	if state.Gate.InspectionOperations != workstate.DecisionOperationThreshold || !state.Gate.DecisionRequired {
+	if state.Gate.InspectionOperations != workstate.DecisionOperationThreshold || state.Gate.DecisionRequired || state.Gate.GraceOperations != workstate.InspectionGraceOperations {
 		t.Fatalf("gate after twelve operations = %+v", state.Gate)
 	}
 	if sink.pendingWorkEpoch {
 		t.Fatal("inspection boundary scheduled a destructive context epoch")
 	}
-	if context := strings.Join(sink.PeekRequestContext(), "\n"); !strings.Contains(context, "Decision required") {
+	if context := strings.Join(sink.PeekRequestContext(), "\n"); !strings.Contains(context, "automatic grace") {
 		t.Fatalf("retained work capsule = %q", context)
+	}
+	sink.ToolStart(llm.ToolCall{
+		ID: "grace-4", Name: "read_file",
+		Input: json.RawMessage(`{"paths":["m","n","o","p"]}`),
+	})
+	sink.TurnProgress(agent.TurnProgress{Turn: 3})
+	state = app.Work.Snapshot()
+	if !state.Gate.DecisionRequired || state.Gate.GraceOperations != 0 {
+		t.Fatalf("gate after grace exhaustion = %+v", state.Gate)
+	}
+	if context := strings.Join(sink.PeekRequestContext(), "\n"); !strings.Contains(context, "Decision required") {
+		t.Fatalf("hard-gate capsule = %q", context)
 	}
 }
 
@@ -6425,6 +6440,91 @@ func TestWorkObservationFailureIsPersistedWithAttribution(t *testing.T) {
 			t.Fatalf("raw.ndjson missing %q:\n%s", want, text)
 		}
 	}
+}
+
+func TestImplicitInspectionEvidenceSurvivesPlanPromotion(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	app.Work = workstate.NewStore(func() string { return app.SessionPath })
+	if _, err := app.Work.NewWork("review telemetry", "user"); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.Default()
+	app.Agent.SetTools(registry)
+	sink := newAccumulatingSink(app.Renderer, app, 1)
+	call := llm.ToolCall{ID: "implicit-read", Name: "read_file", Input: json.RawMessage(`{"path":"internal/tools/runcommand.go"}`)}
+	sink.ToolStart(call)
+	sink.ToolResult(llm.ToolResult{ForID: call.ID, Text: "package tools"})
+	implicit := app.Work.Snapshot()
+	implicitNode := workStepByIDForUI(implicit, implicit.ActiveStepID)
+	if implicit.PlanState != workstate.PlanImplicit || implicitNode == nil || len(implicitNode.Evidence) != 1 {
+		t.Fatalf("implicit observation = %+v", implicit)
+	}
+	if context := sink.PeekRequestContext(); len(context) != 0 {
+		t.Fatalf("implicit observation armed redundant context: %q", context)
+	}
+	planned, err := app.Work.SetPlan(workstate.PlanUpdate{
+		BaseRevisionID: implicit.RevisionID,
+		PlanState:      workstate.PlanDraft,
+		ActiveStepID:   "inspect",
+		Nodes:          []workstate.NodeDefinition{{ID: "inspect", Type: workstate.NodeStep, Title: "Inspect", Kind: workstate.KindDiscover}},
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := workStepByIDForUI(planned, "inspect")
+	if node == nil || len(node.Evidence) != 1 || node.Evidence[0].ToolCallID != call.ID {
+		t.Fatalf("promoted observation = %+v", planned)
+	}
+}
+
+func TestWorkObservationDoesNotMarkFailedCommandVerificationPassed(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	app.Work = workstate.NewStore(func() string { return app.SessionPath })
+	root, err := app.Work.NewWork("verify command outcome", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Work.SetPlan(workstate.PlanUpdate{
+		BaseRevisionID: root.RevisionID,
+		PlanState:      workstate.PlanReady,
+		ActiveStepID:   "verify",
+		Nodes:          []workstate.NodeDefinition{{ID: "verify", Type: workstate.NodeStep, Title: "Verify", Kind: workstate.KindVerify, Actions: []string{"run tests"}, ExitCriteria: []string{"tests pass"}, Verification: []string{"go test ./..."}}},
+	}, "model"); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.Default()
+	app.Agent.SetTools(registry)
+	sink := newAccumulatingSink(app.Renderer, app, 1)
+	call := llm.ToolCall{ID: "failed-check", Name: "run_command", Input: json.RawMessage(`{"argv":["go","test","./..."]}`)}
+	sink.ToolStart(call)
+	sink.ToolResult(llm.ToolResult{
+		ForID: call.ID,
+		Text:  "FAIL go test (exit 1)\n[exit code: 1]",
+		Metrics: map[string]int{
+			tools.CommandMetricOutcomeAvailable: 1,
+			tools.CommandMetricFailed:           1,
+			tools.CommandMetricExitCode:         1,
+		},
+	})
+	state := app.Work.Snapshot()
+	node := workStepByIDForUI(state, "verify")
+	if node == nil || len(node.Results) != 1 || node.Results[0].Status != workstate.VerifyFailed {
+		t.Fatalf("observed verification = %+v", node)
+	}
+}
+
+func workStepByIDForUI(state *workstate.State, id string) *workstate.Node {
+	if state == nil {
+		return nil
+	}
+	for i := range state.Nodes {
+		if state.Nodes[i].ID == id {
+			return &state.Nodes[i]
+		}
+	}
+	return nil
 }
 
 func TestWorkContextEpochArchivesAndSeedsActiveStep(t *testing.T) {

@@ -88,3 +88,26 @@ func TestRunCommandActivityIsConservative(t *testing.T) {
 		})
 	}
 }
+
+func TestInspectionBoundaryBlocksOpaqueShellBypass(t *testing.T) {
+	tests := []struct {
+		name     string
+		call     llm.ToolCall
+		activity Activity
+		blocked  bool
+	}{
+		{name: "typed inspection", call: llm.ToolCall{Name: "read_file"}, activity: Activity{Class: ActivityInspect}, blocked: true},
+		{name: "simple shell inspection", call: llm.ToolCall{Name: "run_command"}, activity: Activity{Class: ActivityInspect}, blocked: true},
+		{name: "opaque shell", call: llm.ToolCall{Name: "run_command"}, activity: Activity{Class: ActivityOther}, blocked: true},
+		{name: "typed mutation", call: llm.ToolCall{Name: "edit"}, activity: Activity{Class: ActivityMutate}},
+		{name: "argv verification", call: llm.ToolCall{Name: "run_command"}, activity: Activity{Class: ActivityVerify}},
+		{name: "coordination", call: llm.ToolCall{Name: "delegate"}, activity: Activity{Class: ActivityCoordinate}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := InspectionBoundaryBlocked(tt.call, tt.activity); got != tt.blocked {
+				t.Fatalf("InspectionBoundaryBlocked() = %v, want %v", got, tt.blocked)
+			}
+		})
+	}
+}

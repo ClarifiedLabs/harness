@@ -40,7 +40,7 @@ func NewRequestImplementation(pending *handoff.Pending, work *workstate.Store, i
 func (*requestImplementation) Name() string { return "request_implementation" }
 
 func (*requestImplementation) Description() string {
-	return "Request approval to hand off the ready WorkState; brief is optional supplementary context."
+	return "Request approval to hand off a ready plan created with set_work_plan; brief is optional supplementary context."
 }
 
 func (t *requestImplementation) Schema() json.RawMessage {
@@ -65,8 +65,21 @@ func (t *requestImplementation) Run(ctx context.Context, input json.RawMessage) 
 		return "", fmt.Errorf("work state is unavailable")
 	}
 	current := t.work.Snapshot()
-	if current == nil || current.PlanState != workstate.PlanReady {
-		return "", fmt.Errorf("implementation handoff requires a ready plan recorded with update_work")
+	if current == nil {
+		return "", fmt.Errorf("implementation handoff requires active work and a ready plan")
+	}
+	if current.PlanState != workstate.PlanReady {
+		reason := "no explicit plan has been set"
+		if current.PlanState == workstate.PlanDraft {
+			unresolved := 0
+			for _, question := range current.Questions {
+				if question.Blocking && !question.Resolved {
+					unresolved++
+				}
+			}
+			reason = fmt.Sprintf("the plan is still draft with %d unresolved blocking question(s)", unresolved)
+		}
+		return "", fmt.Errorf("implementation handoff is not ready: %s; revise it with set_work_plan", reason)
 	}
 	agent := strings.TrimSpace(args.Agent)
 	if agent != "" && len(t.agentNames) > 0 && !slices.Contains(t.agentNames, agent) {
@@ -91,9 +104,10 @@ func requestImplementationSchema(agentNames []string) json.RawMessage {
 	body := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"brief": map[string]any{"type": "string"},
+			"brief": map[string]any{"type": "string", "maxLength": 2048},
 			"agent": agent,
 		},
+		"additionalProperties": false,
 	}
 	b, _ := json.Marshal(body)
 	return b

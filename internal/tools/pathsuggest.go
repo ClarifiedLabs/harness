@@ -18,6 +18,10 @@ const (
 	// pathSuggestMinScore is the minimum bigram-Dice similarity a candidate
 	// name must reach to be suggested, so unrelated entries are not offered.
 	pathSuggestMinScore = 0.3
+	// Recursive fallback remains bounded in both entries and depth. It is used
+	// only after the cheap sibling checks so ordinary typos do not walk a tree.
+	pathSuggestRecursiveMaxEntries = 1024
+	pathSuggestRecursiveMaxDepth   = 4
 )
 
 // pathSuggestion is one candidate path with its similarity score.
@@ -81,6 +85,11 @@ func similarExistingPaths(root, missing string) []string {
 			}
 		}
 	}
+	if len(found) < pathSuggestMaxResults && base != "" {
+		if scanRoot := nearestExistingDirectory(dir); scanRoot != "" {
+			found = append(found, similarRecursiveEntries(scanRoot, base)...)
+		}
+	}
 
 	best := make(map[string]float64, len(found))
 	for _, f := range found {
@@ -105,6 +114,63 @@ func similarExistingPaths(root, missing string) []string {
 		paths = paths[:pathSuggestMaxResults]
 	}
 	return paths
+}
+
+func nearestExistingDirectory(dir string) string {
+	for {
+		info, err := os.Stat(dir)
+		if err == nil && info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func similarRecursiveEntries(root, base string) []pathSuggestion {
+	lowerBase := strings.ToLower(base)
+	baseBigrams := charBigrams(lowerBase)
+	var out []pathSuggestion
+	visited := 0
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			if entry != nil && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if path == root {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		depth := strings.Count(rel, string(filepath.Separator)) + 1
+		if depth > pathSuggestRecursiveMaxDepth {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		visited++
+		if visited > pathSuggestRecursiveMaxEntries {
+			return filepath.SkipAll
+		}
+		name := strings.ToLower(entry.Name())
+		score := diceCoefficient(baseBigrams, charBigrams(name))
+		if len(lowerBase) >= 3 && (strings.Contains(name, lowerBase) || strings.Contains(lowerBase, name)) {
+			score = max(score, 0.9)
+		}
+		if score >= pathSuggestMinScore {
+			out = append(out, pathSuggestion{path: path, score: score})
+		}
+		return nil
+	})
+	return out
 }
 
 // similarDirEntries returns the entries of dir whose names are similar to base,

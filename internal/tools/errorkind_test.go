@@ -117,15 +117,15 @@ func TestDispatchStampsErrorKinds(t *testing.T) {
 		}
 	})
 
-	t.Run("outer cancellation stays unclassified", func(t *testing.T) {
+	t.Run("outer cancellation is distinct", func(t *testing.T) {
 		r := &Registry{}
 		r.Register(ctxTool{})
 		r.SetDispatchTimeout(time.Minute)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		res := r.Dispatch(ctx, llm.ToolCall{ID: "1", Name: "ctx_tool", Input: json.RawMessage(`{}`)})
-		if !res.IsError || res.ErrorKind != "" {
-			t.Fatalf("result = %+v, want is_error with empty kind for outer cancellation", res)
+		if !res.IsError || res.ErrorKind != llm.ToolErrorCancelled {
+			t.Fatalf("result = %+v, want is_error with kind %q", res, llm.ToolErrorCancelled)
 		}
 	})
 }

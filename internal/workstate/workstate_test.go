@@ -71,7 +71,7 @@ func TestPlanProgressAndArtifactShareCanonicalState(t *testing.T) {
 	}
 }
 
-func TestDecisionGateRequiresNamedEvidenceBatch(t *testing.T) {
+func TestDecisionGateAutomaticallyGrantsOneBoundedGrace(t *testing.T) {
 	store := NewStore(nil)
 	state, err := store.NewWork("Investigate", "user")
 	if err != nil {
@@ -97,81 +97,37 @@ func TestDecisionGateRequiresNamedEvidenceBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.DecisionRequired() {
-		t.Fatal("decision gate did not trip")
+	if store.DecisionRequired() || state.Gate.GraceOperations != InspectionGraceOperations || !state.Gate.GraceUsed {
+		t.Fatalf("automatic grace was not started: %+v", state.Gate)
 	}
-	state, err = store.Progress(ProgressUpdate{NeedsEvidence: &EvidenceRequest{Question: "Which package owns the state?", Targets: []string{"internal"}}}, "model")
-	if err != nil {
-		t.Fatal(err)
+	if context := RequestContext(state); !strings.Contains(context, "automatic grace") {
+		t.Fatalf("request context = %q", context)
 	}
-	if state.Gate.DecisionRequired || state.Gate.AllowanceOperations != EvidenceOperationAllowance || !state.Gate.ExtensionUsed {
-		t.Fatalf("gate after request = %+v", state.Gate)
-	}
-	state, err = store.RecordInspectionOperations(state.ActiveStepID, EvidenceOperationAllowance)
+	state, err = store.RecordInspectionOperations(state.ActiveStepID, InspectionGraceOperations)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !state.Gate.DecisionRequired {
-		t.Fatalf("gate after allowance = %+v", state.Gate)
-	}
-	if _, err := store.Progress(ProgressUpdate{NeedsEvidence: &EvidenceRequest{Question: "One more lookup?"}}, "model"); err == nil || !strings.Contains(err.Error(), "already used") {
-		t.Fatalf("second extension error = %v", err)
+		t.Fatalf("gate after grace = %+v", state.Gate)
 	}
 }
 
-func TestLegacyAllowanceGateIsTreatedAsUsedExtension(t *testing.T) {
-	dir := t.TempDir()
-	store := NewStore(func() string { return dir })
+func TestDecisionGateChargesThresholdOvershootAgainstGrace(t *testing.T) {
+	store := NewStore(nil)
 	state, err := store.NewWork("Investigate", "user")
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err = store.RecordInspectionOperations(InspectionStepID(state), DecisionOperationThreshold)
+	state, err = store.RecordInspectionOperations(InspectionStepID(state), DecisionOperationThreshold+InspectionGraceOperations)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err = store.Progress(ProgressUpdate{NeedsEvidence: &EvidenceRequest{Question: "Which package?"}}, "model")
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacy := cloneState(state)
-	legacy.Gate.ExtensionUsed = false
-	legacy.RevisionID = randomID(8)
-	digest, err := stateDigest(*legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := appendRevision(dir, Revision{
-		Type: "work_revision", ID: legacy.RevisionID, WorkID: legacy.WorkID,
-		Actor: "model", Change: "progress", Time: legacy.UpdatedAt,
-		State: *legacy, StateDigest: digest,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	loaded := NewStore(func() string { return dir })
-	if err := loaded.LoadLog(dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := loaded.Restore(legacy); err != nil {
-		t.Fatal(err)
-	}
-	if err := loaded.ValidateCurrentRevision(); err != nil {
-		t.Fatal(err)
-	}
-	state, err = loaded.RecordInspectionOperations(InspectionStepID(legacy), EvidenceOperationAllowance)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !state.Gate.DecisionRequired || !state.Gate.ExtensionUsed {
-		t.Fatalf("legacy extension was not exhausted: %+v", state.Gate)
-	}
-	if _, err := loaded.Progress(ProgressUpdate{NeedsEvidence: &EvidenceRequest{Question: "Another batch?"}}, "model"); err == nil || !strings.Contains(err.Error(), "already used") {
-		t.Fatalf("renewed legacy extension: %v", err)
+	if !state.Gate.DecisionRequired || state.Gate.GraceOperations != 0 || !state.Gate.GraceUsed {
+		t.Fatalf("oversized inspection batch bypassed hard gate: %+v", state.Gate)
 	}
 }
 
-func TestSelectedEvidenceDoesNotRenewFocusedExtension(t *testing.T) {
+func TestSelectedEvidenceDoesNotRenewAutomaticGrace(t *testing.T) {
 	store := NewStore(nil)
 	root, err := store.NewWork("Investigate", "user")
 	if err != nil {
@@ -190,10 +146,6 @@ func TestSelectedEvidenceDoesNotRenewFocusedExtension(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err = store.Progress(ProgressUpdate{BaseRevisionID: state.RevisionID, NeedsEvidence: &EvidenceRequest{Question: "Which package owns this?"}}, "model")
-	if err != nil {
-		t.Fatal(err)
-	}
 	state, err = store.Progress(ProgressUpdate{
 		BaseRevisionID: state.RevisionID,
 		StepID:         "inspect",
@@ -202,8 +154,8 @@ func TestSelectedEvidenceDoesNotRenewFocusedExtension(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Gate.AllowanceOperations != EvidenceOperationAllowance || !state.Gate.ExtensionUsed {
-		t.Fatalf("selected evidence renewed or cleared extension: %+v", state.Gate)
+	if state.Gate.GraceOperations != InspectionGraceOperations || !state.Gate.GraceUsed {
+		t.Fatalf("selected evidence renewed or cleared grace: %+v", state.Gate)
 	}
 }
 
@@ -317,7 +269,7 @@ func TestAdministrativeProgressDoesNotClearDecisionGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := store.RecordInspectionOperations(planned.ActiveStepID, DecisionOperationThreshold)
+	state, err := store.RecordInspectionOperations(planned.ActiveStepID, DecisionOperationThreshold+InspectionGraceOperations)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,9 +362,7 @@ func TestImplicitEvidenceContextAndAutoCompletionHideInternalIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	withEvidence, err := store.Progress(ProgressUpdate{
-		Evidence: []EvidenceInput{{Path: "internal/example.go", Summary: "located the implementation"}},
-	}, "model")
+	withEvidence, err := store.AddEvidence(InspectionStepID(root), []EvidenceInput{{Path: "internal/example.go", Summary: "located the implementation", ToolCallID: "read-1"}}, "host")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,11 +375,14 @@ func TestImplicitEvidenceContextAndAutoCompletionHideInternalIDs(t *testing.T) {
 			t.Fatalf("request context exposes internal id %q: %q", internalID, context)
 		}
 	}
+	if _, err := store.RecordInspectionOperations(InspectionStepID(withEvidence), DecisionOperationThreshold+InspectionGraceOperations); err != nil {
+		t.Fatal(err)
+	}
 	completed, err := store.AutoCompleteImplicit("investigation complete")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if completed.Lifecycle != LifecycleCompleted || completed.ActiveStepID != "" || completed.Nodes[0].Status != StatusCompleted || len(completed.Nodes[0].CompletionRefs) != 1 {
+	if completed.Lifecycle != LifecycleCompleted || completed.ActiveStepID != "" || completed.Nodes[0].Status != StatusCompleted || len(completed.Nodes[0].CompletionRefs) != 1 || !gateEmpty(completed.Gate) {
 		t.Fatalf("completed implicit work = %+v", completed)
 	}
 }

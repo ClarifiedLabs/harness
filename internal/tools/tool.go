@@ -182,6 +182,7 @@ type Registry struct {
 	order            []string
 	tools            map[string]Tool
 	dispatchGuard    func(llm.ToolCall, Activity) error
+	specFilter       func(string) bool
 	dispatchTimeout  time.Duration // zero = no dispatch-level timeout
 	resultLimits     resultLimits
 	toolResultLimits map[string]resultLimits
@@ -192,6 +193,13 @@ type Registry struct {
 // sandboxing or permissions; Tool.ReadOnly remains the dispatch authority.
 func (r *Registry) SetDispatchGuard(guard func(llm.ToolCall, Activity) error) {
 	r.dispatchGuard = guard
+}
+
+// SetSpecFilter installs a dynamic model-visibility filter. Dispatch remains
+// independently guarded, so hiding a tool is an efficiency hint rather than an
+// authorization boundary.
+func (r *Registry) SetSpecFilter(filter func(string) bool) {
+	r.specFilter = filter
 }
 
 // Options configures a tool registry. Zero values keep package defaults.
@@ -443,7 +451,7 @@ func (r *Registry) Subset(names []string) (*Registry, error) {
 	for _, name := range names {
 		want[name] = true
 	}
-	sub := &Registry{resultLimits: r.resultLimits, dispatchTimeout: r.dispatchTimeout, dispatchGuard: r.dispatchGuard}
+	sub := &Registry{resultLimits: r.resultLimits, dispatchTimeout: r.dispatchTimeout, dispatchGuard: r.dispatchGuard, specFilter: r.specFilter}
 	for _, name := range r.order {
 		if want[name] {
 			sub.Register(r.tools[name])
@@ -501,6 +509,9 @@ func (r *Registry) Remove(name string) bool {
 func (r *Registry) Specs() []llm.ToolSchema {
 	specs := make([]llm.ToolSchema, 0, len(r.order))
 	for _, name := range r.order {
+		if r.specFilter != nil && !r.specFilter(name) {
+			continue
+		}
 		t := r.tools[name]
 		preserveDescriptions := false
 		if preserver, ok := t.(SchemaDescriptionPreserver); ok {
@@ -759,7 +770,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		if err := r.dispatchGuard(guardCall, r.CallActivity(guardCall)); err != nil {
 			res.Text = err.Error()
 			res.IsError = true
-			res.ErrorKind = llm.ToolErrorInvalidArgs
+			res.ErrorKind = llm.ToolErrorBlocked
 			return res
 		}
 	}
@@ -836,6 +847,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		// cancellation is deliberately left unclassified (no ErrorKind).
 		if parent.Err() != nil {
 			res.Text = parent.Err().Error()
+			res.ErrorKind = llm.ToolErrorCancelled
 		} else if timeout > 0 {
 			res.Text = fmt.Sprintf("tool timed out after %s", timeout)
 			res.ErrorKind = llm.ToolErrorTimeout
@@ -858,6 +870,9 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		if timeout > 0 && ctx.Err() == context.DeadlineExceeded && parent.Err() == nil {
 			res.Text = fmt.Sprintf("tool timed out after %s", timeout)
 			res.ErrorKind = llm.ToolErrorTimeout
+		} else if errors.Is(err, context.Canceled) {
+			res.Text = err.Error()
+			res.ErrorKind = llm.ToolErrorCancelled
 		} else if detail, invalid := invalidArgumentsDetail(err); invalid {
 			res.Text = "invalid arguments: " + detail
 			res.ErrorKind = llm.ToolErrorInvalidArgs

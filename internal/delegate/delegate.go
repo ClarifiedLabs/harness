@@ -38,6 +38,7 @@ const maxAgentDescriptionBytes = 160
 
 const delegateToolName = "delegate"
 const updateWorkToolName = "update_work"
+const setWorkPlanToolName = "set_work_plan"
 
 const ModeImplementation = "implementation"
 const continuationContextPercent = 60
@@ -738,11 +739,17 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	if slices.Contains(toolNames, updateWorkToolName) {
 		childTools.Register(tools.NewUpdateWork(childWork))
 	}
+	if slices.Contains(toolNames, setWorkPlanToolName) {
+		childTools.Register(tools.NewSetWorkPlan(childWork))
+	}
 	childTools.SetDispatchGuard(func(call llm.ToolCall, activity tools.Activity) error {
-		if guidance := childWork.DecisionGuidance(); guidance != "" && activity.Class == tools.ActivityInspect {
+		if guidance := childWork.DecisionGuidance(); guidance != "" && tools.InspectionBoundaryBlocked(call, activity) {
 			return fmt.Errorf("%s (inspection tool %q is paused)", guidance, call.Name)
 		}
 		return nil
+	})
+	childTools.SetSpecFilter(func(name string) bool {
+		return !childWork.DecisionRequired() || tools.InspectionToolVisibleAtBoundary(name)
 	})
 	child := agent.New(launch.Provider, childTools, agent.Options{
 		MaxTurns:                  maxTurns,
@@ -2193,8 +2200,8 @@ func (s *childSink) ToolStart(call llm.ToolCall) {
 	s.pending[call.ID] = pendingChildTool{call: call, summary: summary}
 	if s.work != nil {
 		if work := s.work.Snapshot(); work != nil {
-			if work.ActiveStepID != "" {
-				s.pendingWorkTargets[call.ID] = workObservationTarget{revisionID: work.RevisionID, stepID: work.ActiveStepID}
+			if stepID := workstate.InspectionStepID(work); stepID != "" {
+				s.pendingWorkTargets[call.ID] = workObservationTarget{revisionID: work.RevisionID, stepID: stepID}
 			}
 			activity := tools.Activity{}
 			if s.toolActivity != nil {
@@ -2261,7 +2268,8 @@ func (s *childSink) attachObservedWorkResults(call llm.ToolCall, result llm.Tool
 		activity = s.toolActivity(call)
 	}
 	current := s.work.Snapshot()
-	if activity.Class == tools.ActivityInspect && !result.IsError && current != nil && current.PlanState != workstate.PlanImplicit {
+	if activity.Class == tools.ActivityInspect && !result.IsError && current != nil {
+		implicit := current.PlanState == workstate.PlanImplicit
 		ref, err := session.SaveWorkEvidenceArtifact(s.sessionDir, 1, s.turn, result)
 		if err != nil {
 			s.workNotice("work evidence archive failed", err)
@@ -2273,7 +2281,9 @@ func (s *childSink) attachObservedWorkResults(call llm.ToolCall, result llm.Tool
 				s.workNotice("work evidence observation failed", err)
 			} else if updated != nil {
 				current = updated
-				s.workContextPending = true
+				if !implicit {
+					s.workContextPending = true
+				}
 			}
 		}
 	}
@@ -2281,8 +2291,21 @@ func (s *childSink) attachObservedWorkResults(call llm.ToolCall, result llm.Tool
 		status := workstate.VerifyPassed
 		detail := ""
 		if result.IsError {
-			status = workstate.VerifyFailed
+			if result.ErrorKind == llm.ToolErrorCancelled {
+				status = workstate.VerifyNotRun
+			} else {
+				status = workstate.VerifyFailed
+			}
 			detail = preview(result.Text, 1024)
+		} else if outcome, ok := tools.CommandResultOutcome(result); ok {
+			switch outcome {
+			case tools.CommandOutcomeFailed:
+				status = workstate.VerifyFailed
+				detail = preview(result.Text, 1024)
+			case tools.CommandOutcomeNotRun:
+				status = workstate.VerifyNotRun
+				detail = preview(result.Text, 1024)
+			}
 		}
 		results = append(results, workstate.Result{
 			Kind: workstate.ResultVerification, Check: childWorkCallSummary(call), Status: status,
@@ -2307,9 +2330,10 @@ func (s *childSink) attachObservedWorkResults(call llm.ToolCall, result llm.Tool
 			results[i].Stale = true
 		}
 	}
+	implicit := current != nil && current.PlanState == workstate.PlanImplicit
 	if _, err := s.work.AddResults(target.stepID, results, "host"); err != nil {
 		s.workNotice("work observation failed", err)
-	} else {
+	} else if !implicit {
 		s.workContextPending = true
 	}
 }
@@ -2440,6 +2464,10 @@ func (s *childSink) TurnProgress(progress agent.TurnProgress) {
 		s.rec.TurnProgressForWork(progress, work.WorkID, work.RevisionID, work.ActiveStepID)
 	}
 	wasRequired := work != nil && work.Gate.DecisionRequired
+	previousAllowance := 0
+	if work != nil {
+		previousAllowance = work.Gate.GraceOperations
+	}
 	stepID, operations := "", 0
 	if work != nil {
 		stepID = workstate.InspectionStepID(work)
@@ -2449,7 +2477,7 @@ func (s *childSink) TurnProgress(progress agent.TurnProgress) {
 	clear(s.inspectionOperations)
 	if err != nil {
 		s.workNotice("work progress tracking failed", err)
-	} else if !wasRequired && updated != nil && updated.Gate.DecisionRequired {
+	} else if updated != nil && (!wasRequired && updated.Gate.DecisionRequired || previousAllowance == 0 && updated.Gate.GraceOperations > 0) {
 		s.workContextPending = true
 	}
 }

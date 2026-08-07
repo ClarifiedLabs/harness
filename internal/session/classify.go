@@ -29,6 +29,8 @@ func ClassifyToolError(display, excerpt string) ClassifiedFailure {
 		return ClassifiedFailure{Kind: llm.ToolErrorInvalidArgs, Confidence: "high"}
 	case strings.Contains(display, "→ error: tool timed out after "):
 		return ClassifiedFailure{Kind: llm.ToolErrorTimeout, Confidence: "high"}
+	case strings.Contains(display, "→ error: context canceled") || strings.Contains(excerpt, "context canceled"):
+		return ClassifiedFailure{Kind: llm.ToolErrorCancelled, Confidence: "high"}
 	case strings.Contains(display, "→ error: tool panicked: "):
 		return ClassifiedFailure{Kind: llm.ToolErrorPanic, Confidence: "high"}
 	case strings.Contains(display, "→ error: ") &&

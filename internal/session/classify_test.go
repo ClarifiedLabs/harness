@@ -58,6 +58,12 @@ func TestClassifyToolError(t *testing.T) {
 			confidence: "high",
 		},
 		{
+			name:       "cancelled",
+			display:    `[run_command argv=["go","test","./..."]] → error: context canceled`,
+			want:       llm.ToolErrorCancelled,
+			confidence: "high",
+		},
+		{
 			name:       "edit oldText not found multi-edit form",
 			display:    `[edit path=a.go edits=2] → error: could not find edits[1].oldText in a.go; oldText must match exac…`,
 			want:       llm.ToolErrorEditOldTextNotFound,

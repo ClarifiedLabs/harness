@@ -817,13 +817,17 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	toolCatalog.Register(delegate.NewTool(delegateRunner, backgroundManager))
 	toolCatalog.Register(background.NewJobsTool(backgroundManager))
 	handoffPending := handoff.NewPending()
+	toolCatalog.Register(tools.NewSetWorkPlan(workStore))
 	toolCatalog.Register(tools.NewUpdateWork(workStore))
 	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, workStore, interactiveSession || machineInteractive, agentdef.Names(agents)))
 	toolCatalog.SetDispatchGuard(func(call llm.ToolCall, activity tools.Activity) error {
-		if guidance := workStore.DecisionGuidance(); guidance != "" && activity.Class == tools.ActivityInspect {
+		if guidance := workStore.DecisionGuidance(); guidance != "" && tools.InspectionBoundaryBlocked(call, activity) {
 			return fmt.Errorf("%s (inspection tool %q is paused)", guidance, call.Name)
 		}
 		return nil
+	})
+	toolCatalog.SetSpecFilter(func(name string) bool {
+		return !workStore.DecisionRequired() || tools.InspectionToolVisibleAtBoundary(name)
 	})
 	// Goals are managed exclusively by the interactive /goal command.
 	goalStore := goal.NewStore()

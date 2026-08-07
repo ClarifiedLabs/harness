@@ -1637,11 +1637,11 @@ Five agents are built in:
 
 | agent | tools | behavior |
 |---|---|---|
-| `auto` | all available built-in tools plus discovered MCP tools, including `update_work`, `delegate`, and background job tools | the default; the model decides what to do |
-| `explore` | read-only inspection/search tools, `web_fetch`, optional `git_readonly`, `update_work`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
-| `plan` | inspection tools, read-only MCP tools, `write_tmp_file`, `update_work`, `delegate`, and `background_jobs` | collaborate on a structured ready plan without modifying the project |
+| `auto` | all available built-in tools plus discovered MCP tools, including `set_work_plan`, `update_work`, `delegate`, and background job tools | the default; the model decides what to do |
+| `explore` | read-only inspection/search tools, `web_fetch`, optional `git_readonly`, both WorkState tools, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
+| `plan` | inspection tools, read-only MCP tools, `write_tmp_file`, both WorkState tools, `delegate`, and `background_jobs` | collaborate on a structured ready plan without modifying the project |
 | `review` | the same read-only inspection and MCP surface as `explore` | findings-first review of a concrete change; if no range is supplied, inspect the working-tree diff and untracked files |
-| `independent` | all available built-in tools plus discovered MCP tools, including `update_work`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
+| `independent` | all available built-in tools plus discovered MCP tools, including `set_work_plan`, `update_work`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
 
 Define new agents or override built-ins in the config file under `agents`.
 **Breaking configuration rule:** every new custom agent must have a nonblank
@@ -1686,7 +1686,7 @@ default to `exclusive`. Implementation-mode delegates are always exclusive.
 ### Planning and implementation handoff
 
 The `plan` agent investigates and designs without modifying the project. It uses
-`update_work` plan mode to make the current WorkState `ready`, which also writes
+`set_work_plan` to make the current WorkState `ready`, which also writes
 an immutable Markdown artifact under the session, then calls
 `request_implementation` with only optional supplementary context. Interactive
 `auto` exposes the same path. At the prompt boundary, Harness renders the
@@ -1705,15 +1705,15 @@ and are unavailable in one-shot mode.
 
 In ordinary auto mode, the initial implicit WorkState is not duplicated into
 request context. A nonterminal lineage remains active across follow-up prompts:
-no `update_work` call leaves it unchanged, `progress` steers it, `plan` extends
+no work-tool call leaves it unchanged, `update_work` steers it, `set_work_plan` extends
 it, and `/work new` explicitly replaces it. Recovery capsules are delivered
 once after resume, compaction, branching, agent/model switches, or host-observed
 evidence. Top-level phase changes create clean, archived context checkpoints at
 closed tool-turn boundaries. An active step instead reaches a hard inspection
-boundary after 12 inspection operations while preserving the current
-conversation. One focused `needs_evidence` request grants four more operations;
-it cannot be renewed, so exhaustion requires completing or transitioning the
-step or marking the work waiting or blocked.
+warning after 12 inspection operations while preserving the current
+conversation. Harness automatically grants four focused grace operations. At
+16 operations, typed inspection and unclassifiable shell commands are blocked;
+the agent must complete or transition the step or mark work waiting/blocked.
 
 ## Sessions
 
@@ -1847,7 +1847,8 @@ count, average/maximum save duration, and lag in completed turns and seconds.
 Retention activity is reported as epoch count, pressure-versus-age passes,
 blocks/bytes trimmed, Responses-state resets, and whether the following request
 used stateful continuation or full context. When failures occurred, an `Errors`
-section follows the tool report: failed tool-result and model-request counts,
+section follows the tool report: failed tool-result, in-band command-execution,
+effective combined, cancellation, and model-request counts,
 per-tool/kind/model breakdowns, and repeat loops (the same tool and kind
 failing at least three times consecutively).
 `--format json` emits a versioned, transcript-free machine report with per-tool
@@ -1934,8 +1935,9 @@ report corrupt or unsupported sessions, and never combine repeat streaks across
 physical agents. A success or different failure breaks a streak. Tool failures
 are attributed to the event-time model identity; older logs use the preceding
 `model_request` before falling back to session metadata. Summaries include
-tool-result denominators, historical composite-inspect diagnostics, and current
-search-batch diagnostics carried in metrics.
+tool-result denominators, separately counted in-band command failures and
+cancellations, an effective combined failure rate, historical composite-inspect
+diagnostics, and current search-batch diagnostics carried in metrics.
 
 ### Session diagnostics
 

@@ -310,6 +310,18 @@ func collectErrorStream(events []Event, sessionDir, agent, provider, model strin
 						stream.summary.CompositeDiagnostics[metric] += value
 					}
 				}
+				if ev.ResultMetrics["command_outcome_available"] != 0 {
+					stream.summary.CommandResults++
+					if ev.ResultMetrics["command_failed"] != 0 {
+						stream.summary.FailedCommandResults++
+					}
+					if ev.ResultMetrics["command_cancelled"] != 0 {
+						stream.summary.CancelledCommandResults++
+					}
+					if ev.ResultMetrics["command_timed_out"] != 0 {
+						stream.summary.TimedOutCommandResults++
+					}
+				}
 			}
 			if !ev.ResultError {
 				previous, runLength = runKey{}, 0
@@ -424,18 +436,25 @@ type ErrorRepeat struct {
 // ErrorSummary aggregates classified rows for the stats section and the
 // errors subcommand summary lines.
 type ErrorSummary struct {
-	ToolResults            int            `json:"tool_results"`
-	FailedToolResults      int            `json:"failed_tool_results"`
-	ToolErrorRate          float64        `json:"tool_error_rate"`
-	ModelRequestFailures   int            `json:"model_request_failures"`
-	ByKind                 map[string]int `json:"by_kind,omitempty"`
-	ByTool                 map[string]int `json:"by_tool,omitempty"`
-	ByModel                map[string]int `json:"by_model,omitempty"`
-	RequestFailuresByModel map[string]int `json:"request_failures_by_model,omitempty"`
-	ResultsByTool          map[string]int `json:"results_by_tool,omitempty"`
-	ResultsByModel         map[string]int `json:"results_by_model,omitempty"`
-	CompositeDiagnostics   map[string]int `json:"composite_diagnostics,omitempty"`
-	Repeats                []ErrorRepeat  `json:"repeats,omitempty"`
+	ToolResults             int            `json:"tool_results"`
+	FailedToolResults       int            `json:"failed_tool_results"`
+	ToolErrorRate           float64        `json:"tool_error_rate"`
+	CommandResults          int            `json:"command_results"`
+	FailedCommandResults    int            `json:"failed_command_results"`
+	CancelledCommandResults int            `json:"cancelled_command_results"`
+	TimedOutCommandResults  int            `json:"timed_out_command_results"`
+	CommandFailureRate      float64        `json:"command_failure_rate"`
+	EffectiveFailedResults  int            `json:"effective_failed_results"`
+	EffectiveFailureRate    float64        `json:"effective_failure_rate"`
+	ModelRequestFailures    int            `json:"model_request_failures"`
+	ByKind                  map[string]int `json:"by_kind,omitempty"`
+	ByTool                  map[string]int `json:"by_tool,omitempty"`
+	ByModel                 map[string]int `json:"by_model,omitempty"`
+	RequestFailuresByModel  map[string]int `json:"request_failures_by_model,omitempty"`
+	ResultsByTool           map[string]int `json:"results_by_tool,omitempty"`
+	ResultsByModel          map[string]int `json:"results_by_model,omitempty"`
+	CompositeDiagnostics    map[string]int `json:"composite_diagnostics,omitempty"`
+	Repeats                 []ErrorRepeat  `json:"repeats,omitempty"`
 }
 
 // repeatFailureMinRun is the consecutive-run length that counts as a
@@ -464,6 +483,10 @@ func newErrorSummary() ErrorSummary {
 
 func (s *ErrorSummary) add(other ErrorSummary) {
 	s.ToolResults += other.ToolResults
+	s.CommandResults += other.CommandResults
+	s.FailedCommandResults += other.FailedCommandResults
+	s.CancelledCommandResults += other.CancelledCommandResults
+	s.TimedOutCommandResults += other.TimedOutCommandResults
 	for k, n := range other.ResultsByTool {
 		s.ResultsByTool[k] += n
 	}
@@ -498,6 +521,11 @@ func (s *ErrorSummary) finish(rows []ErrorRow) {
 	}
 	if s.ToolResults > 0 {
 		s.ToolErrorRate = float64(s.FailedToolResults) / float64(s.ToolResults)
+		s.EffectiveFailedResults = s.FailedToolResults + s.FailedCommandResults
+		s.EffectiveFailureRate = float64(s.EffectiveFailedResults) / float64(s.ToolResults)
+	}
+	if s.CommandResults > 0 {
+		s.CommandFailureRate = float64(s.FailedCommandResults) / float64(s.CommandResults)
 	}
 	type runKey struct{ tool, kind string }
 	runs := make(map[runKey]int)

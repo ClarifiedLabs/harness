@@ -3965,12 +3965,12 @@ func (app *App) prepareHandoff(arg string) (handoff.Request, bool) {
 		req.Message = opts.Message
 	}
 	if app.Work == nil {
-		fmt.Fprintln(app.Errw, "[handoff: update_work must record a ready plan first]")
+		fmt.Fprintln(app.Errw, "[handoff: set_work_plan must record a ready plan first]")
 		return handoff.Request{}, false
 	}
 	work := app.Work.Snapshot()
 	if work == nil || work.PlanState != workstate.PlanReady {
-		fmt.Fprintln(app.Errw, "[handoff: update_work must record a ready plan first]")
+		fmt.Fprintln(app.Errw, "[handoff: set_work_plan must record a ready plan first]")
 		return handoff.Request{}, false
 	}
 	req.ArtifactPath = work.ArtifactPath
@@ -4066,9 +4066,6 @@ func (app *App) handoffToImplementation(req handoff.Request) bool {
 		return false
 	}
 	capsule := workstate.RequestContext(work)
-	if work.ArtifactPath != "" {
-		capsule += "\nPlan artifact: " + work.ArtifactPath
-	}
 	seed := "=== Implementation handoff ===\nContinue the approved work from this active capsule; do not reread or recreate the plan.\n\n" + capsule
 	if req.Brief != "" {
 		seed += "\n\nSupplementary planning context:\n" + req.Brief
@@ -4913,7 +4910,7 @@ func (app *App) peekWorkRequestContext() string {
 }
 
 func (app *App) workRequestContext(consume bool) string {
-	if app.Work == nil || !app.agentHasTool("update_work") {
+	if app.Work == nil || !app.agentHasTool("update_work") && !app.agentHasTool("set_work_plan") {
 		return ""
 	}
 	app.workContextMu.Lock()
@@ -4951,7 +4948,7 @@ func (app *App) pollBackgroundNotices() {
 }
 
 func (app *App) printWorkStatus(includeImplicit bool) bool {
-	if app.Work == nil || !app.agentHasTool("update_work") {
+	if app.Work == nil || !app.agentHasTool("update_work") && !app.agentHasTool("set_work_plan") {
 		return false
 	}
 	state := app.Work.Snapshot()
@@ -5674,8 +5671,8 @@ func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 	s.pendingCalls[c.ID] = c
 	if s.app != nil && s.app.Work != nil {
 		if work := s.app.Work.Snapshot(); work != nil {
-			if work.ActiveStepID != "" {
-				s.pendingWorkTargets[c.ID] = workObservationTarget{revisionID: work.RevisionID, stepID: work.ActiveStepID}
+			if stepID := workstate.InspectionStepID(work); stepID != "" {
+				s.pendingWorkTargets[c.ID] = workObservationTarget{revisionID: work.RevisionID, stepID: stepID}
 			}
 			activity := s.app.Agent.ToolActivity(c)
 			if stepID := workstate.InspectionStepID(work); stepID != "" && activity.Class == tools.ActivityInspect {
@@ -5695,21 +5692,16 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	delete(s.pendingCalls, res.ForID)
 	s.r.ToolResult(res)
 	s.rec.ToolResult(res)
-	if name == "update_work" && !res.IsError {
-		var args struct {
-			Mode string `json:"mode"`
-		}
-		_ = json.Unmarshal(call.Input, &args)
-		switch args.Mode {
-		case "plan":
+	if (name == "set_work_plan" || name == "update_work") && !res.IsError {
+		if name == "set_work_plan" {
 			s.app.workPromptRelation = "extend"
-		case "progress":
+		} else {
 			s.app.workPromptRelation = "steer"
 		}
 		s.app.printWorkStatus(true)
 	}
 	s.attachObservedWorkResults(call, res)
-	if name == "update_work" && !res.IsError && target.stepID != "" && s.app != nil && s.app.Work != nil {
+	if (name == "set_work_plan" || name == "update_work") && !res.IsError && target.stepID != "" && s.app != nil && s.app.Work != nil {
 		if current := s.app.Work.Snapshot(); current != nil && current.ActiveStepID != "" &&
 			workstate.CrossesPhase(*current, target.stepID, current.ActiveStepID) {
 			s.scheduleWorkContextEpoch("phase transition", target.stepID, current.ActiveStepID)
@@ -5791,7 +5783,8 @@ func (s *accumulatingSink) attachObservedWorkResults(call llm.ToolCall, res llm.
 	results := append([]workstate.Result(nil), s.pendingWorkResults[res.ForID]...)
 	delete(s.pendingWorkResults, res.ForID)
 	activity := s.app.Agent.ToolActivity(call)
-	if activity.Class == tools.ActivityInspect && !res.IsError && state.PlanState != workstate.PlanImplicit {
+	if activity.Class == tools.ActivityInspect && !res.IsError {
+		implicit := state.PlanState == workstate.PlanImplicit
 		ref, err := session.SaveWorkEvidenceArtifact(s.app.SessionPath, s.prompt, s.turn, res)
 		if err != nil {
 			s.workNotice("work evidence archive failed", err)
@@ -5804,7 +5797,9 @@ func (s *accumulatingSink) attachObservedWorkResults(call llm.ToolCall, res llm.
 				s.workNotice("work evidence observation failed", err)
 			} else if updated != nil {
 				state = updated
-				s.app.ArmWorkContext("new evidence")
+				if !implicit {
+					s.app.ArmWorkContext("new evidence")
+				}
 			}
 		}
 	}
@@ -5812,8 +5807,21 @@ func (s *accumulatingSink) attachObservedWorkResults(call llm.ToolCall, res llm.
 		status := workstate.VerifyPassed
 		detail := ""
 		if res.IsError {
-			status = workstate.VerifyFailed
+			if res.ErrorKind == llm.ToolErrorCancelled {
+				status = workstate.VerifyNotRun
+			} else {
+				status = workstate.VerifyFailed
+			}
 			detail = boundedWorkDetail(res.Text)
+		} else if outcome, ok := tools.CommandResultOutcome(res); ok {
+			switch outcome {
+			case tools.CommandOutcomeFailed:
+				status = workstate.VerifyFailed
+				detail = boundedWorkDetail(res.Text)
+			case tools.CommandOutcomeNotRun:
+				status = workstate.VerifyNotRun
+				detail = boundedWorkDetail(res.Text)
+			}
 		}
 		results = append(results, workstate.Result{
 			Kind: workstate.ResultVerification, Check: workCallSummary(call), Status: status,
@@ -5839,9 +5847,10 @@ func (s *accumulatingSink) attachObservedWorkResults(call llm.ToolCall, res llm.
 			results[i].Stale = true
 		}
 	}
+	implicit := state.PlanState == workstate.PlanImplicit
 	if _, err := s.app.Work.AddResults(target.stepID, results, "host"); err != nil {
 		s.workNotice("work observation failed", err)
-	} else {
+	} else if !implicit {
 		s.app.ArmWorkContext("new work result")
 	}
 }
@@ -6033,6 +6042,10 @@ func (s *accumulatingSink) TurnProgress(progress agent.TurnProgress) {
 		s.rec.TurnProgressForWork(progress, work.WorkID, work.RevisionID, work.ActiveStepID)
 	}
 	wasRequired := work != nil && work.Gate.DecisionRequired
+	previousAllowance := 0
+	if work != nil {
+		previousAllowance = work.Gate.GraceOperations
+	}
 	stepID, operations := "", 0
 	if work != nil {
 		stepID = workstate.InspectionStepID(work)
@@ -6042,8 +6055,12 @@ func (s *accumulatingSink) TurnProgress(progress agent.TurnProgress) {
 	clear(s.inspectionOperations)
 	if err != nil {
 		s.workNotice("work progress tracking failed", err)
-	} else if !wasRequired && updated != nil && updated.Gate.DecisionRequired {
-		s.app.ArmWorkContext("work decision required")
+	} else if updated != nil {
+		if !wasRequired && updated.Gate.DecisionRequired {
+			s.app.ArmWorkContext("work decision required")
+		} else if previousAllowance == 0 && updated.Gate.GraceOperations > 0 {
+			s.app.ArmWorkContext("inspection grace started")
+		}
 	}
 }
 

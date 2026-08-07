@@ -194,6 +194,35 @@ func TestAnalyzeErrorsUsesEventTimeModelAndCompleteResultStreaks(t *testing.T) {
 	}
 }
 
+func TestAnalyzeErrorsReportsInBandCommandFailuresSeparately(t *testing.T) {
+	dir := t.TempDir()
+	if err := (Session{Provider: "p", Model: "m"}).Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	events := []Event{
+		{Type: EventToolResult, Tool: "run_command", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_succeeded": 1}},
+		{Type: EventToolResult, Tool: "run_command", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_failed": 1, "command_exit_code": 2}},
+		{Type: EventToolResult, Tool: "run_command", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_cancelled": 1}},
+		{Type: EventToolResult, Tool: "read_file", ResultError: true, ErrorKind: string(llm.ToolErrorPathNotFound)},
+	}
+	for _, event := range events {
+		if err := AppendEvent(dir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	analysis, err := AnalyzeErrors(dir, ErrorFilter{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := analysis.Summary
+	if summary.ToolResults != 4 || summary.FailedToolResults != 1 || summary.CommandResults != 3 || summary.FailedCommandResults != 1 || summary.CancelledCommandResults != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if summary.EffectiveFailedResults != 2 || summary.EffectiveFailureRate != 0.5 || summary.CommandFailureRate != 1.0/3.0 {
+		t.Fatalf("effective command summary = %+v", summary)
+	}
+}
+
 func TestAnalyzeErrorsIgnoresIncompleteTailAndHonorsBefore(t *testing.T) {
 	dir := t.TempDir()
 	if err := (Session{Provider: "p", Model: "m"}).Save(dir); err != nil {

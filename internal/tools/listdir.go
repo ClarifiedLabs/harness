@@ -60,6 +60,10 @@ func (listDir) Run(ctx context.Context, input json.RawMessage) (string, error) {
 		return "", fmt.Errorf("%s is not a directory", dir)
 	}
 
+	return renderDirectory(dir, args.Glob, listDirCap)
+}
+
+func renderDirectory(dir, glob string, capEntries int) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return "", err
@@ -73,8 +77,8 @@ func (listDir) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	var rows []row
 	for _, e := range entries {
 		name := e.Name()
-		if args.Glob != "" {
-			ok, _ := path.Match(args.Glob, name)
+		if glob != "" {
+			ok, _ := path.Match(glob, name)
 			if !ok {
 				continue
 			}
@@ -102,8 +106,8 @@ func (listDir) Run(ctx context.Context, input json.RawMessage) (string, error) {
 
 	total := len(rows)
 	truncated := false
-	if total > listDirCap {
-		rows = rows[:listDirCap]
+	if capEntries > 0 && total > capEntries {
+		rows = rows[:capEntries]
 		truncated = true
 	}
 
@@ -115,7 +119,7 @@ func (listDir) Run(ctx context.Context, input json.RawMessage) (string, error) {
 		b.WriteString(r.text)
 	}
 	if truncated {
-		fmt.Fprintf(&b, "\n[truncated: showing first %d of %d entries; pass a glob to filter]", listDirCap, total)
+		fmt.Fprintf(&b, "\n[truncated: showing first %d of %d entries; pass a glob to filter]", capEntries, total)
 	}
 	if total == 0 {
 		return "(empty directory)", nil

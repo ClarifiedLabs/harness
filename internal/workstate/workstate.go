@@ -68,7 +68,7 @@ const (
 	maxValueRunes              = 1024
 	maxDetailRunes             = 2048
 	DecisionOperationThreshold = 12
-	EvidenceOperationAllowance = 4
+	InspectionGraceOperations  = 4
 	RequestContextMaxBytes     = 12 << 10
 	implicitStepID             = "implicit_current"
 )
@@ -103,15 +103,10 @@ type State struct {
 }
 
 type Gate struct {
-	// The legacy JSON names are retained so existing revision digests remain
-	// valid. These counters are operation-based: one batched tool turn may add
-	// several inspection operations.
-	InspectionOperations int      `json:"inspection_turns,omitempty"`
-	DecisionRequired     bool     `json:"decision_required,omitempty"`
-	AllowanceOperations  int      `json:"allowance_turns,omitempty"`
-	ExtensionUsed        bool     `json:"extension_used,omitempty"`
-	Question             string   `json:"question,omitempty"`
-	Targets              []string `json:"targets,omitempty"`
+	InspectionOperations int  `json:"inspection_operations,omitempty"`
+	DecisionRequired     bool `json:"decision_required,omitempty"`
+	GraceOperations      int  `json:"grace_operations,omitempty"`
+	GraceUsed            bool `json:"grace_used,omitempty"`
 }
 
 // NodeDefinition is the model-authored structural portion of a node.
@@ -207,11 +202,6 @@ type EvidenceInput struct {
 	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
-type EvidenceRequest struct {
-	Question string   `json:"question"`
-	Targets  []string `json:"targets,omitempty"`
-}
-
 type ProgressUpdate struct {
 	BaseRevisionID        string
 	StepID                string
@@ -223,7 +213,6 @@ type ProgressUpdate struct {
 	ResultIDs             []string
 	WorkStatus            string
 	WaitingFor            []string
-	NeedsEvidence         *EvidenceRequest
 	WorkspaceReconciled   bool
 	ReconciliationSummary string
 }
@@ -469,15 +458,9 @@ func (s *Store) Progress(update ProgressUpdate, actor string) (*State, error) {
 	stepID := update.StepID
 	if next.PlanState == PlanImplicit && progressNeedsStep(update) {
 		stepID = implicitStepID
-		node := nodeByID(next, stepID)
-		if node == nil {
-			next.Nodes = append(next.Nodes, Node{
-				NodeDefinition: NodeDefinition{ID: implicitStepID, Type: NodeStep, Title: "Current task", Kind: KindDiscover},
-				Status:         StatusInProgress,
-			})
-			next.ActiveStepID = stepID
+		if _, created := ensureImplicitObservationNode(next, stepID); created {
 			changed = true
-		} else if node.Status == StatusPending {
+		} else if node := nodeByID(next, stepID); node != nil && node.Status == StatusPending {
 			if err := activateStep(next, stepID); err != nil {
 				return nil, err
 			}
@@ -594,24 +577,6 @@ func (s *Store) Progress(update ProgressUpdate, actor string) (*State, error) {
 		}
 		changed = true
 	}
-	if update.NeedsEvidence != nil {
-		if !next.Gate.DecisionRequired {
-			return nil, errors.New("focused evidence extension requires a work decision gate")
-		}
-		if gateExtensionUsed(next.Gate) {
-			return nil, errors.New("focused evidence extension already used for the active work step")
-		}
-		question := strings.TrimSpace(update.NeedsEvidence.Question)
-		if err := validateText("evidence question", question, maxValueRunes, false); err != nil {
-			return nil, err
-		}
-		next.Gate.AllowanceOperations = EvidenceOperationAllowance
-		next.Gate.DecisionRequired = false
-		next.Gate.ExtensionUsed = true
-		next.Gate.Question = question
-		next.Gate.Targets = cloneStrings(update.NeedsEvidence.Targets)
-		changed = true
-	}
 	if update.WorkStatus != "" {
 		switch update.WorkStatus {
 		case LifecycleActive:
@@ -700,7 +665,7 @@ func progressNeedsStep(update ProgressUpdate) bool {
 func (s *Store) AutoCompleteImplicit(summary string) (*State, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.current == nil || s.current.PlanState != PlanImplicit || s.current.Lifecycle != LifecycleActive || s.current.Gate.DecisionRequired {
+	if s.current == nil || s.current.PlanState != PlanImplicit || s.current.Lifecycle != LifecycleActive {
 		return cloneState(s.current), nil
 	}
 	next := cloneState(s.current)
@@ -716,6 +681,7 @@ func (s *Store) AutoCompleteImplicit(summary string) (*State, error) {
 	}
 	next.ActiveStepID = ""
 	next.Lifecycle = LifecycleCompleted
+	next.Gate = Gate{}
 	next.CompletionSummary = strings.TrimSpace(summary)
 	return s.commitLocked(next, "host", "auto_complete")
 }
@@ -733,37 +699,33 @@ func (s *Store) RecordInspectionOperations(stepID string, operations int) (*Stat
 		return cloneState(s.current), nil
 	}
 	next := cloneState(s.current)
-	normalizeGate(&next.Gate)
 	if next.Gate.DecisionRequired {
 		return cloneState(s.current), nil
 	}
-	if next.Gate.AllowanceOperations > 0 {
-		next.Gate.AllowanceOperations -= operations
-		if next.Gate.AllowanceOperations <= 0 {
-			next.Gate.AllowanceOperations = 0
+	if next.Gate.GraceOperations > 0 {
+		next.Gate.GraceOperations -= operations
+		if next.Gate.GraceOperations <= 0 {
+			next.Gate.GraceOperations = 0
 			next.Gate.DecisionRequired = true
 		}
 	} else {
 		next.Gate.InspectionOperations += operations
 		if next.Gate.InspectionOperations >= DecisionOperationThreshold {
-			next.Gate.DecisionRequired = true
+			overThreshold := next.Gate.InspectionOperations - DecisionOperationThreshold
+			next.Gate.InspectionOperations = DecisionOperationThreshold
+			next.Gate.GraceUsed = true
+			next.Gate.GraceOperations = InspectionGraceOperations - overThreshold
+			if next.Gate.GraceOperations <= 0 {
+				next.Gate.GraceOperations = 0
+				next.Gate.DecisionRequired = true
+			}
 		}
 	}
 	return s.commitLocked(next, "host", "turn_progress")
 }
 
 func gateEmpty(gate Gate) bool {
-	return gate.InspectionOperations == 0 && !gate.DecisionRequired && gate.AllowanceOperations == 0 && !gate.ExtensionUsed && gate.Question == "" && len(gate.Targets) == 0
-}
-
-func gateExtensionUsed(gate Gate) bool {
-	return gate.ExtensionUsed || gate.AllowanceOperations > 0 || gate.Question != "" || len(gate.Targets) > 0
-}
-
-func normalizeGate(gate *Gate) {
-	if gate != nil && gateExtensionUsed(*gate) {
-		gate.ExtensionUsed = true
-	}
+	return gate.InspectionOperations == 0 && !gate.DecisionRequired && gate.GraceOperations == 0 && !gate.GraceUsed
 }
 
 func (s *Store) DecisionRequired() bool {
@@ -796,10 +758,7 @@ func (s *Store) DecisionGuidance() string {
 	if s.current == nil || !s.current.Gate.DecisionRequired {
 		return ""
 	}
-	if gateExtensionUsed(s.current.Gate) {
-		return "work decision required: the focused evidence extension is exhausted; complete or transition the active step, or mark work waiting or blocked"
-	}
-	return "work decision required: complete or transition the active step, mark work waiting or blocked, or request one focused evidence extension"
+	return "work decision required: the automatic inspection grace is exhausted; complete or transition the active step, or mark work waiting or blocked"
 }
 
 func (s *Store) MarkApproved(revisionID string) (*State, error) {
@@ -1113,22 +1072,11 @@ func Validate(state State) error {
 			return errors.New("completed work has incomplete required steps")
 		}
 	}
-	if state.Gate.AllowanceOperations < 0 || state.Gate.AllowanceOperations > EvidenceOperationAllowance {
-		return fmt.Errorf("invalid evidence allowance %d", state.Gate.AllowanceOperations)
+	if state.Gate.GraceOperations < 0 || state.Gate.GraceOperations > InspectionGraceOperations {
+		return fmt.Errorf("invalid inspection grace %d", state.Gate.GraceOperations)
 	}
 	if state.Gate.InspectionOperations < 0 {
 		return errors.New("inspection operation count cannot be negative")
-	}
-	if state.Gate.AllowanceOperations > 0 && strings.TrimSpace(state.Gate.Question) == "" {
-		return errors.New("inspection allowance requires a focused evidence question")
-	}
-	if state.Gate.Question != "" {
-		if err := validateText("gate question", state.Gate.Question, maxValueRunes, false); err != nil {
-			return err
-		}
-	}
-	if err := validateList("gate targets", state.Gate.Targets); err != nil {
-		return err
 	}
 	return nil
 }
@@ -1219,6 +1167,11 @@ func validateEvidence(evidence Evidence) error {
 	}
 	if err := validateText("summary", evidence.Summary, maxDetailRunes, false); err != nil {
 		return err
+	}
+	if evidence.Symbol != "" {
+		if err := validateText("symbol", evidence.Symbol, maxValueRunes, false); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1417,7 +1370,13 @@ func makeEvidence(input EvidenceInput, at time.Time) (Evidence, error) {
 	if err := validateText("evidence summary", summary, maxDetailRunes, false); err != nil {
 		return Evidence{}, err
 	}
-	return Evidence{ID: randomID(6), Kind: kind, Path: path, Symbol: strings.TrimSpace(input.Symbol), Summary: summary, ToolCallID: input.ToolCallID, CreatedAt: at}, nil
+	symbol := strings.TrimSpace(input.Symbol)
+	if symbol != "" {
+		if err := validateText("evidence symbol", symbol, maxValueRunes, false); err != nil {
+			return Evidence{}, err
+		}
+	}
+	return Evidence{ID: randomID(6), Kind: kind, Path: path, Symbol: symbol, Summary: summary, ToolCallID: input.ToolCallID, CreatedAt: at}, nil
 }
 
 func implicitObservations(state State) ([]Evidence, []Result) {
@@ -1431,6 +1390,24 @@ func implicitObservations(state State) ([]Evidence, []Result) {
 		results = append(results, cloneResults(node.Results)...)
 	}
 	return evidence, results
+}
+
+func ensureImplicitObservationNode(state *State, stepID string) (*Node, bool) {
+	if state == nil {
+		return nil, false
+	}
+	if node := nodeByID(state, stepID); node != nil {
+		return node, false
+	}
+	if state.PlanState != PlanImplicit || stepID != implicitStepID {
+		return nil, false
+	}
+	state.Nodes = append(state.Nodes, Node{
+		NodeDefinition: NodeDefinition{ID: implicitStepID, Type: NodeStep, Title: "Current task", Kind: KindDiscover},
+		Status:         StatusInProgress,
+	})
+	state.ActiveStepID = implicitStepID
+	return &state.Nodes[len(state.Nodes)-1], true
 }
 
 func appendUniqueResults(existing, additions []Result) []Result {
@@ -1782,16 +1759,12 @@ func RequestContext(state *State) string {
 	done, total := completionCount(*state)
 	fmt.Fprintf(&b, "\nProgress: %d/%d required leaves complete.", done, total)
 	if state.WorkspaceUnverified {
-		b.WriteString("\nWorkspace evidence is stale after branching; inspect current files and reconcile through update_work progress before completing steps.")
+		b.WriteString("\nWorkspace evidence is stale after branching; inspect current files and reconcile through update_work before completing steps.")
 	}
 	if state.Gate.DecisionRequired {
-		if gateExtensionUsed(state.Gate) {
-			b.WriteString("\nDecision required: the focused evidence extension is exhausted. Complete or transition the active step, or mark work waiting or blocked.")
-		} else {
-			b.WriteString("\nDecision required: further inspection is blocked. Complete or transition the active step, mark work waiting or blocked, or name one focused missing-evidence question.")
-		}
-	} else if state.Gate.AllowanceOperations > 0 {
-		fmt.Fprintf(&b, "\nEvidence allowance: %d inspection operations remain for %s.", state.Gate.AllowanceOperations, state.Gate.Question)
+		b.WriteString("\nDecision required: the automatic inspection grace is exhausted. Further inspection and unclassified shell commands are blocked; complete or transition the active step, or mark work waiting or blocked.")
+	} else if state.Gate.GraceOperations > 0 {
+		fmt.Fprintf(&b, "\nInspection warning: %d automatic grace operations remain. Use them only to close the current evidence gap, then complete or transition the active step.", state.Gate.GraceOperations)
 	}
 	return truncateUTF8(b.String(), RequestContextMaxBytes)
 }
@@ -1910,7 +1883,7 @@ func (s *Store) AddEvidence(stepID string, evidence []EvidenceInput, actor strin
 		stepID = s.current.ActiveStepID
 	}
 	next := cloneState(s.current)
-	node := nodeByID(next, stepID)
+	node, _ := ensureImplicitObservationNode(next, stepID)
 	if node == nil {
 		return nil, fmt.Errorf("unknown work step %q", stepID)
 	}
@@ -1951,7 +1924,7 @@ func (s *Store) AddResults(stepID string, results []Result, actor string) (*Stat
 		stepID = s.current.ActiveStepID
 	}
 	next := cloneState(s.current)
-	node := nodeByID(next, stepID)
+	node, _ := ensureImplicitObservationNode(next, stepID)
 	if node == nil {
 		return nil, fmt.Errorf("unknown work step %q", stepID)
 	}

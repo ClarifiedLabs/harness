@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"harness/internal/llm"
 )
 
 const (
@@ -29,6 +31,54 @@ const (
 )
 
 const (
+	CommandMetricOutcomeAvailable = "command_outcome_available"
+	CommandMetricSucceeded        = "command_succeeded"
+	CommandMetricFailed           = "command_failed"
+	CommandMetricCancelled        = "command_cancelled"
+	CommandMetricTimedOut         = "command_timed_out"
+	CommandMetricExitCode         = "command_exit_code"
+	CommandMetricWaitComplete     = "command_wait_complete"
+	CommandMetricStepsTotal       = "command_steps_total"
+	CommandMetricStepsExecuted    = "command_steps_executed"
+	CommandMetricStepsFailed      = "command_steps_failed"
+	CommandMetricStepsCancelled   = "command_steps_cancelled"
+	CommandMetricStepsTimedOut    = "command_steps_timed_out"
+	CommandMetricStepsSkipped     = "command_steps_skipped"
+)
+
+// CommandOutcome is the structured process outcome carried in diagnostics
+// metrics. Process failures intentionally remain ordinary tool results so the
+// model can inspect their output; observers use this contract instead of
+// guessing from model-visible text.
+type CommandOutcome uint8
+
+const (
+	CommandOutcomeUnknown CommandOutcome = iota
+	CommandOutcomePassed
+	CommandOutcomeFailed
+	CommandOutcomeNotRun
+)
+
+// CommandResultOutcome decodes run_command's diagnostics-only outcome. It
+// returns false for tools and legacy results that do not carry the contract.
+func CommandResultOutcome(result llm.ToolResult) (CommandOutcome, bool) {
+	metrics := result.Metrics
+	if metrics[CommandMetricOutcomeAvailable] == 0 {
+		return CommandOutcomeUnknown, false
+	}
+	if metrics[CommandMetricFailed] != 0 {
+		return CommandOutcomeFailed, true
+	}
+	if metrics[CommandMetricCancelled] != 0 {
+		return CommandOutcomeNotRun, true
+	}
+	if metrics[CommandMetricSucceeded] != 0 {
+		return CommandOutcomePassed, true
+	}
+	return CommandOutcomeFailed, true
+}
+
+const (
 	runCommandOutputAuto    = "auto"
 	runCommandOutputReceipt = "receipt"
 	runCommandOutputFull    = "full"
@@ -42,13 +92,13 @@ var (
 const runCommandSchemaFmt = `{
   "type": "object",
   "properties": {
-    "command": {"type": "string", "description": "Shell command line to execute."},
     "argv": {
       "type": "array",
       "items": {"type": "string"},
       "minItems": 1,
       "description": "Program and arguments to run directly without a shell. Must be a JSON array of strings, e.g. [\"go\",\"test\",\"./...\"], not a shell string or JSON-encoded array. argv[0] is resolved via PATH; remaining items are passed literally."
     },
+    "command": {"type": "string", "description": "Shell command line to execute when shell syntax is required; prefer argv otherwise."},
     "steps": {
       "type": "array",
       "minItems": 1,
@@ -58,8 +108,8 @@ const runCommandSchemaFmt = `{
         "type": "object",
         "properties": {
           "name": {"type": "string", "description": "Concise receipt label; defaults to step N."},
-          "command": {"type": "string", "description": "Shell command line to execute."},
           "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and literal arguments to run directly."},
+          "command": {"type": "string", "description": "Shell command line to execute when shell syntax is required; prefer argv otherwise."},
           "stdin": {"type": "string", "description": "Written to this step's standard input."},
           "cwd": {"type": "string", "description": "Working directory override for this step."},
           "timeout_seconds": {"type": "integer", "description": "Timeout override for this step."}
@@ -78,13 +128,13 @@ const runCommandSchemaFmt = `{
 const runCommandBackgroundSchemaFmt = `{
   "type": "object",
   "properties": {
-    "command": {"type": "string", "description": "Shell command line to execute."},
     "argv": {
       "type": "array",
       "items": {"type": "string"},
       "minItems": 1,
       "description": "Program and arguments to run directly without a shell. Must be a JSON array of strings, e.g. [\"go\",\"test\",\"./...\"], not a shell string or JSON-encoded array. argv[0] is resolved via PATH; remaining items are passed literally."
     },
+    "command": {"type": "string", "description": "Shell command line to execute when shell syntax is required; prefer argv otherwise."},
     "steps": {
       "type": "array",
       "minItems": 1,
@@ -94,8 +144,8 @@ const runCommandBackgroundSchemaFmt = `{
         "type": "object",
         "properties": {
           "name": {"type": "string", "description": "Concise receipt label; defaults to step N."},
-          "command": {"type": "string", "description": "Shell command line to execute."},
           "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and literal arguments to run directly."},
+          "command": {"type": "string", "description": "Shell command line to execute when shell syntax is required; prefer argv otherwise."},
           "stdin": {"type": "string", "description": "Written to this step's standard input."},
           "cwd": {"type": "string", "description": "Working directory override for this step."},
           "timeout_seconds": {"type": "integer", "description": "Timeout override for this step."}
@@ -130,7 +180,7 @@ type runCommand struct {
 func (runCommand) Name() string { return "run_command" }
 
 func (runCommand) Description() string {
-	return "Run a command or ordered steps using a shell command or argv as an array of strings. Steps accept a batch name and output_mode full for the combined transcript; auto/receipt stay compact. Background supports one command; background_lease only coordinates jobs and does not restrict command behavior."
+	return "Run commands or ordered steps. Prefer argv as an array of strings; use command only for shell syntax. Steps support compact or full output. Background supports one command; background_lease coordinates scheduling and does not restrict command behavior."
 }
 
 func (t runCommand) Schema() json.RawMessage {
@@ -416,12 +466,13 @@ func normalizeRunCommandOutputMode(mode string) (string, error) {
 
 func formatRunCommandResult(args runCommandArgs, result processResult, elapsed string) RunResult {
 	full := formatProcessResult(result)
+	metrics := commandProcessMetrics(result)
 	if args.OutputMode == runCommandOutputFull {
-		return RunResult{Text: full}
+		return RunResult{Text: full, Metrics: metrics}
 	}
 	if result.success() {
 		if args.OutputMode == runCommandOutputAuto && len(result.Output) <= runCommandAutoReceiptBytes {
-			return RunResult{Text: full}
+			return RunResult{Text: full, Metrics: metrics}
 		}
 		text, clipped := formatRunCommandReceipt(args, result, elapsed, runCommandSuccessTailBytes, runCommandSuccessTailLines)
 		original := ""
@@ -432,7 +483,7 @@ func formatRunCommandResult(args runCommandArgs, result processResult, elapsed s
 		if clipped || !result.WaitComplete {
 			original = full
 		}
-		return RunResult{Text: text, OriginalText: original}
+		return RunResult{Text: text, OriginalText: original, Metrics: metrics}
 	}
 
 	text, clipped := formatRunCommandReceipt(args, result, elapsed, runCommandFailureOutputBytes, runCommandFailureTailLines)
@@ -442,7 +493,30 @@ func formatRunCommandResult(args runCommandArgs, result processResult, elapsed s
 	if clipped || !result.WaitComplete {
 		original = full
 	}
-	return RunResult{Text: text, OriginalText: original}
+	return RunResult{Text: text, OriginalText: original, Metrics: metrics}
+}
+
+func commandProcessMetrics(result processResult) map[string]int {
+	metrics := map[string]int{
+		CommandMetricOutcomeAvailable: 1,
+		CommandMetricExitCode:         result.ExitCode,
+	}
+	if result.WaitComplete {
+		metrics[CommandMetricWaitComplete] = 1
+	}
+	if result.success() {
+		metrics[CommandMetricSucceeded] = 1
+		return metrics
+	}
+	if result.Status == processCancelled {
+		metrics[CommandMetricCancelled] = 1
+		return metrics
+	}
+	metrics[CommandMetricFailed] = 1
+	if result.Status == processTimedOut {
+		metrics[CommandMetricTimedOut] = 1
+	}
+	return metrics
 }
 
 func formatRunCommandReceipt(args runCommandArgs, result processResult, elapsed string, tailBytes, tailLines int) (string, bool) {
@@ -565,6 +639,10 @@ func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error
 	var receipt strings.Builder
 	var transcript strings.Builder
 	suppressed := false
+	metrics := map[string]int{
+		CommandMetricOutcomeAvailable: 1,
+		CommandMetricStepsTotal:       len(args.Steps),
+	}
 	for i, step := range args.Steps {
 		name := strings.TrimSpace(step.Name)
 		if name == "" {
@@ -585,6 +663,7 @@ func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error
 		}
 		started := time.Now()
 		result, err := runCommandArgsProcess(ctx, resolved)
+		metrics[CommandMetricStepsExecuted]++
 		elapsed := conciseDuration(time.Since(started))
 
 		if transcript.Len() > 0 {
@@ -592,6 +671,8 @@ func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error
 		}
 		fmt.Fprintf(&transcript, "==> %s <==\n$ %s\n", name, runCommandDescription(resolved))
 		if err != nil {
+			metrics[CommandMetricFailed] = 1
+			metrics[CommandMetricStepsFailed]++
 			fmt.Fprintf(&transcript, "failed to start: %v", err)
 			fmt.Fprintf(&receipt, "FAIL %s (%s; failed to start: %v)\n", name, elapsed, err)
 			if stopOnFailure {
@@ -608,6 +689,17 @@ func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error
 				suppressed = true
 			}
 			continue
+		}
+		if result.Status == processCancelled {
+			metrics[CommandMetricCancelled] = 1
+			metrics[CommandMetricStepsCancelled]++
+		} else {
+			metrics[CommandMetricFailed] = 1
+			metrics[CommandMetricStepsFailed]++
+			if result.Status == processTimedOut {
+				metrics[CommandMetricTimedOut] = 1
+				metrics[CommandMetricStepsTimedOut]++
+			}
 		}
 
 		fmt.Fprintf(&receipt, "FAIL %s (%s; %s)\n", name, elapsed, result.receiptStatus())
@@ -626,6 +718,10 @@ func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error
 			break
 		}
 	}
+	metrics[CommandMetricStepsSkipped] = len(args.Steps) - metrics[CommandMetricStepsExecuted]
+	if metrics[CommandMetricFailed] == 0 && metrics[CommandMetricCancelled] == 0 && metrics[CommandMetricStepsSkipped] == 0 {
+		metrics[CommandMetricSucceeded] = 1
+	}
 	text := strings.TrimRight(receipt.String(), "\n")
 	full := strings.TrimRight(transcript.String(), "\n")
 	if name := strings.TrimSpace(args.Name); name != "" {
@@ -633,13 +729,13 @@ func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error
 		full = fmt.Sprintf("== %s ==\n%s", name, full)
 	}
 	if args.OutputMode == runCommandOutputFull {
-		return RunResult{Text: full}, nil
+		return RunResult{Text: full, Metrics: metrics}, nil
 	}
 	original := ""
 	if suppressed {
 		original = full
 	}
-	return RunResult{Text: text, OriginalText: original}, nil
+	return RunResult{Text: text, OriginalText: original, Metrics: metrics}, nil
 }
 
 func writeSkippedReceipt(b *strings.Builder, count int) {

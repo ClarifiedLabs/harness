@@ -77,6 +77,21 @@ func TestAnalyzeCorpusRecursiveDiscoveryAndCutoff(t *testing.T) {
 	}
 }
 
+func TestAnalyzeCorpusCountsInBandCommandFailures(t *testing.T) {
+	root := t.TempDir()
+	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "run_command", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_failed": 1}})
+	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "run_command", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_cancelled": 1}})
+	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "read_file", ResultError: true})
+	report, err := AnalyzeCorpus(root, AnalyzeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := report.Execution
+	if got.ToolResults != 3 || got.ToolErrors != 1 || got.CommandResults != 2 || got.CommandFailures != 1 || got.CommandCancellations != 1 || got.EffectiveFailures != 2 {
+		t.Fatalf("execution = %+v", got)
+	}
+}
+
 func TestAnalyzeCorpusBoundsDiscoveryDepth(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "root")
 	mustAppendAnalysisEvent(t, root, Event{Type: EventPromptUsage, Prompt: 1})

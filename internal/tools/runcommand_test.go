@@ -393,6 +393,9 @@ func TestRunCommandAutoBoundsFailureAndPreservesClippedOriginal(t *testing.T) {
 	if !strings.Contains(result.OriginalText, largeOutput) || !strings.Contains(result.OriginalText, "[exit code: 7]") {
 		t.Fatalf("failure original was not preserved: %d bytes", len(result.OriginalText))
 	}
+	if outcome, ok := CommandResultOutcome(llm.ToolResult{Metrics: result.Metrics}); !ok || outcome != CommandOutcomeFailed || result.Metrics[CommandMetricExitCode] != 7 {
+		t.Fatalf("failure outcome metrics = %+v, outcome=%v available=%v", result.Metrics, outcome, ok)
+	}
 
 	small, err := runRunCommandResult(t, map[string]any{"command": "printf small-failure; exit 2"})
 	if err != nil {
@@ -454,6 +457,10 @@ func TestRunCommandStepsStopOnFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("later step ran despite stop_on_failure: %v", err)
+	}
+	if outcome, ok := CommandResultOutcome(llm.ToolResult{Metrics: result.Metrics}); !ok || outcome != CommandOutcomeFailed ||
+		result.Metrics[CommandMetricStepsFailed] != 1 || result.Metrics[CommandMetricStepsSkipped] != 1 {
+		t.Fatalf("batch outcome metrics = %+v, outcome=%v available=%v", result.Metrics, outcome, ok)
 	}
 }
 

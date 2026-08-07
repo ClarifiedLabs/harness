@@ -62,8 +62,10 @@ func TestBuiltins(t *testing.T) {
 		}
 	}
 	for name, def := range m {
-		if !slices.Contains(def.AllowedTools, "update_work") {
-			t.Errorf("built-in %s tools missing update_work: %v", name, def.AllowedTools)
+		for _, tool := range []string{"set_work_plan", "update_work"} {
+			if !slices.Contains(def.AllowedTools, tool) {
+				t.Errorf("built-in %s tools missing %s: %v", name, tool, def.AllowedTools)
+			}
 		}
 	}
 
@@ -371,8 +373,10 @@ func TestResolveReasoningOverride(t *testing.T) {
 
 func TestDefaultToolsIncludeWorkButOmitGoalToolsAndImplementationHandoff(t *testing.T) {
 	def := defaultTools()
-	if !slices.Contains(def, "update_work") {
-		t.Errorf("default tools missing update_work: %v", def)
+	for _, tool := range []string{"set_work_plan", "update_work"} {
+		if !slices.Contains(def, tool) {
+			t.Errorf("default tools missing %s: %v", tool, def)
+		}
 	}
 	for _, name := range []string{"create_goal", "update_goal"} {
 		if slices.Contains(def, name) {
@@ -386,7 +390,7 @@ func TestDefaultToolsIncludeWorkButOmitGoalToolsAndImplementationHandoff(t *test
 
 func TestPlanToolsIncludeWorkAndRequestImplementation(t *testing.T) {
 	pt := planTools()
-	for _, name := range []string{"update_work", "request_implementation"} {
+	for _, name := range []string{"set_work_plan", "update_work", "request_implementation"} {
 		if !slices.Contains(pt, name) {
 			t.Errorf("plan tools missing %q: %v", name, pt)
 		}

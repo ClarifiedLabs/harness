@@ -103,12 +103,18 @@ func TestReadFileMissing(t *testing.T) {
 
 func TestReadFileDirectory(t *testing.T) {
 	dir := t.TempDir()
-	_, err := runReadFile(t, map[string]any{"path": dir})
-	if err == nil {
-		t.Fatal("expected error for directory")
+	mustWrite(t, filepath.Join(dir, "a.txt"), "a")
+	if err := os.Mkdir(filepath.Join(dir, "nested"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "use list_dir") {
-		t.Errorf("directory error should direct to list_dir: %v", err)
+	out, err := runReadFile(t, map[string]any{"path": dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[directory listing: " + dir + "]", "nested/", "a.txt"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("directory listing missing %q: %s", want, out)
+		}
 	}
 }
 

@@ -1743,11 +1743,106 @@ func TestChildSinkInspectionBoundaryCountsBatchedOperations(t *testing.T) {
 	})
 	sink.TurnProgress(agent.TurnProgress{Turn: 1})
 	state = store.Snapshot()
-	if state.Gate.InspectionOperations != workstate.DecisionOperationThreshold || !state.Gate.DecisionRequired {
+	if state.Gate.InspectionOperations != workstate.DecisionOperationThreshold || state.Gate.DecisionRequired || state.Gate.GraceOperations != workstate.InspectionGraceOperations {
 		t.Fatalf("child gate = %+v", state.Gate)
 	}
 	if !sink.workContextPending {
 		t.Fatal("child did not arm the retained WorkState capsule")
+	}
+	sink.workContextPending = false
+	sink.ToolStart(llm.ToolCall{
+		ID: "grace-4", Name: "read_file",
+		Input: json.RawMessage(`{"paths":["m","n","o","p"]}`),
+	})
+	sink.TurnProgress(agent.TurnProgress{Turn: 2})
+	state = store.Snapshot()
+	if !state.Gate.DecisionRequired || state.Gate.GraceOperations != 0 || !sink.workContextPending {
+		t.Fatalf("child hard gate = %+v pending=%v", state.Gate, sink.workContextPending)
+	}
+}
+
+func TestChildImplicitInspectionEvidenceSurvivesPlanPromotion(t *testing.T) {
+	dir := t.TempDir()
+	store := workstate.NewStore(func() string { return dir })
+	if _, err := store.NewWork("review telemetry", "user"); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.Default()
+	sink := newChildSink(dir, NewProgress(), nil)
+	sink.work = store
+	sink.toolActivity = registry.CallActivity
+	call := llm.ToolCall{ID: "implicit-read", Name: "read_file", Input: json.RawMessage(`{"path":"internal/tools/runcommand.go"}`)}
+	sink.ToolStart(call)
+	sink.ToolResult(llm.ToolResult{ForID: call.ID, Text: "package tools"})
+	implicit := store.Snapshot()
+	var implicitNode *workstate.Node
+	for i := range implicit.Nodes {
+		if implicit.Nodes[i].ID == implicit.ActiveStepID {
+			implicitNode = &implicit.Nodes[i]
+		}
+	}
+	if implicit.PlanState != workstate.PlanImplicit || implicitNode == nil || len(implicitNode.Evidence) != 1 || sink.workContextPending {
+		t.Fatalf("implicit child observation = state=%+v pending=%v", implicit, sink.workContextPending)
+	}
+	planned, err := store.SetPlan(workstate.PlanUpdate{
+		BaseRevisionID: implicit.RevisionID,
+		PlanState:      workstate.PlanDraft,
+		ActiveStepID:   "inspect",
+		Nodes:          []workstate.NodeDefinition{{ID: "inspect", Type: workstate.NodeStep, Title: "Inspect", Kind: workstate.KindDiscover}},
+	}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plannedNode *workstate.Node
+	for i := range planned.Nodes {
+		if planned.Nodes[i].ID == "inspect" {
+			plannedNode = &planned.Nodes[i]
+		}
+	}
+	if plannedNode == nil || len(plannedNode.Evidence) != 1 || plannedNode.Evidence[0].ToolCallID != call.ID {
+		t.Fatalf("promoted child observation = %+v", planned)
+	}
+}
+
+func TestChildSinkDoesNotMarkFailedCommandVerificationPassed(t *testing.T) {
+	dir := t.TempDir()
+	store := workstate.NewStore(func() string { return dir })
+	root, err := store.NewWork("verify command outcome", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetPlan(workstate.PlanUpdate{
+		BaseRevisionID: root.RevisionID,
+		PlanState:      workstate.PlanReady,
+		ActiveStepID:   "verify",
+		Nodes:          []workstate.NodeDefinition{{ID: "verify", Type: workstate.NodeStep, Title: "Verify", Kind: workstate.KindVerify, Actions: []string{"run tests"}, ExitCriteria: []string{"tests pass"}, Verification: []string{"go test ./..."}}},
+	}, "model"); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.Default()
+	sink := newChildSink(dir, NewProgress(), nil)
+	sink.work = store
+	sink.toolActivity = registry.CallActivity
+	call := llm.ToolCall{ID: "failed-check", Name: "run_command", Input: json.RawMessage(`{"argv":["go","test","./..."]}`)}
+	sink.ToolStart(call)
+	sink.ToolResult(llm.ToolResult{
+		ForID: call.ID,
+		Text:  "FAIL go test (exit 1)\n[exit code: 1]",
+		Metrics: map[string]int{
+			tools.CommandMetricOutcomeAvailable: 1,
+			tools.CommandMetricFailed:           1,
+			tools.CommandMetricExitCode:         1,
+		},
+	})
+	state := store.Snapshot()
+	var verify *workstate.Node
+	for i := range state.Nodes {
+		if state.Nodes[i].ID == "verify" {
+			verify = &state.Nodes[i]
+		}
+	}
+	if verify == nil || len(verify.Results) != 1 || verify.Results[0].Status != workstate.VerifyFailed {
+		t.Fatalf("observed verification = %+v", verify)
 	}
 }
 

@@ -125,7 +125,7 @@ func Builtins() map[string]Definition {
 }
 
 func inspectionTools() []string {
-	names := []string{"read_file", "view_image", "list_dir", "glob", "search", "update_work"}
+	names := []string{"read_file", "view_image", "list_dir", "glob", "search", "set_work_plan", "update_work"}
 	// run_command widens exploration (gh, builds, screenshots, live apps) for the
 	// read-only agents (explore, plan, review). None has first-class file-mutation
 	// tools (edit, write_file, apply_patch), so "don't modify the project" stays
@@ -151,7 +151,7 @@ func defaultTools() []string {
 	// from here because delegate.MissingTools treats an available git as
 	// satisfying a required git_readonly.
 	names := tools.DefaultNames()
-	return append(names, "update_work", "delegate", "background_jobs")
+	return append(names, "set_work_plan", "update_work", "delegate", "background_jobs")
 }
 
 // DefaultTools returns the default allowed-tool set that auto/independent and

@@ -733,7 +733,7 @@ func collectToolStats(events []Event) (toolStats, error) {
 		if len(names) != 1 {
 			continue
 		}
-		if names[0] == "update_work" {
+		if names[0] == "update_work" || names[0] == "set_work_plan" {
 			stats.soloWorkTurns++
 		}
 		switch names[0] {
@@ -1452,11 +1452,17 @@ func writeOverallToolStats(w io.Writer, report statsReport) {
 // nothing failed, keeping clean sessions quiet.
 func writeErrorStats(w io.Writer, report statsReport) {
 	summary := report.errors
-	if summary.FailedToolResults == 0 && summary.ModelRequestFailures == 0 {
+	if summary.FailedToolResults == 0 && summary.FailedCommandResults == 0 && summary.ModelRequestFailures == 0 {
 		return
 	}
 	fmt.Fprintln(w, "Errors")
 	fmt.Fprintf(w, "  failed tool results: %d/%d (%.1f%%)\n", summary.FailedToolResults, summary.ToolResults, summary.ToolErrorRate*100)
+	if summary.CommandResults > 0 {
+		fmt.Fprintf(w, "  command execution failures: %d/%d (%.1f%%); effective failures: %d/%d (%.1f%%); cancelled: %d\n",
+			summary.FailedCommandResults, summary.CommandResults, summary.CommandFailureRate*100,
+			summary.EffectiveFailedResults, summary.ToolResults, summary.EffectiveFailureRate*100,
+			summary.CancelledCommandResults)
+	}
 	if summary.ModelRequestFailures > 0 {
 		fmt.Fprintf(w, "  model request failures: %d\n", summary.ModelRequestFailures)
 	}

@@ -23,6 +23,10 @@ const defaultReadFileLimit = 500
 // each file still shows a useful head even when many paths share the line cap.
 const multiReadMinPerPathLimit = 50
 
+// readFileDirectoryCap keeps an accidental directory read useful without
+// returning the much larger list_dir maximum.
+const readFileDirectoryCap = 200
+
 const readFileSchema = `{
   "type": "object",
   "properties": {
@@ -62,7 +66,7 @@ type readFileArgs struct {
 func (readFile) Name() string { return "read_file" }
 
 func (readFile) Description() string {
-	return "Read one file with optional offset/limit, or batch paths[]; returns line-numbered content."
+	return "Read one file with optional offset/limit, or batch paths[]; directories return a bounded non-recursive listing."
 }
 
 func (readFile) Schema() json.RawMessage { return json.RawMessage(readFileSchema) }
@@ -203,7 +207,11 @@ func readOneFile(path string, offset, limit int) (string, error) {
 		return "", err
 	}
 	if info.IsDir() {
-		return "", fmt.Errorf("%s is a directory; use list_dir", path)
+		listing, err := renderDirectory(path, "", readFileDirectoryCap)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("[directory listing: %s]\n%s", path, listing), nil
 	}
 
 	f, err := os.Open(path)

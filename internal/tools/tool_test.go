@@ -510,11 +510,30 @@ func TestDispatchGuardBlocksBeforeToolExecutionAndSurvivesSubset(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := sub.Dispatch(context.Background(), llm.ToolCall{ID: "guarded", Name: "reader"})
-	if !res.IsError || res.ErrorKind != llm.ToolErrorInvalidArgs || !strings.Contains(res.Text, "work decision required") {
+	if !res.IsError || res.ErrorKind != llm.ToolErrorBlocked || !strings.Contains(res.Text, "work decision required") {
 		t.Fatalf("guarded result = %+v", res)
 	}
 	if ran {
 		t.Fatal("guarded tool executed")
+	}
+}
+
+func TestSpecFilterHidesToolsWithoutChangingDispatch(t *testing.T) {
+	r := &Registry{}
+	reader := newOK("reader", "read")
+	reader.readOnly = true
+	r.Register(reader)
+	r.Register(newOK("writer", "write"))
+	r.SetSpecFilter(func(name string) bool { return name != "reader" })
+	sub, err := r.Subset([]string{"reader", "writer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if specs := sub.Specs(); len(specs) != 1 || specs[0].Name != "writer" {
+		t.Fatalf("filtered specs = %+v", specs)
+	}
+	if result := sub.Dispatch(context.Background(), llm.ToolCall{ID: "hidden", Name: "reader"}); result.IsError {
+		t.Fatalf("visibility filter changed dispatch: %+v", result)
 	}
 }
 

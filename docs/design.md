@@ -1750,13 +1750,13 @@ struct/type details. Tool-specific semantic validation continues to use concise
 Every `is_error` result also carries a diagnostics-only `ErrorKind`
 (`llm.ToolErrorKind`) that, like `Metrics`, never enters model-visible content.
 The dispatch/agent layers stamp `unknown_tool`, `invalid_args`, `timeout`,
-`panic`, `hook_blocked`, `blocked` (the per-prompt identical-failure guard),
+`cancelled`, `panic`, `hook_blocked`, `blocked` (workflow and repetition guards),
 `unsupported_modality`, `invalid_result`, and `regex_invalid` (search pattern
 pre-validation) directly; a tool declares one by wrapping its error with
 `tools.WithKind` (used for `edit_oldtext_not_found` /
 `edit_oldtext_ambiguous`), and the delegate tool stamps transient child
 failures as `rate_limited` / `provider_error`. WithKind leaves the error
-message unchanged. An outer cancellation stays deliberately unclassified. The
+message unchanged. Outer cancellation is classified separately as `cancelled`. The
 session recorder persists the kind plus a bounded, rune-safe `error_excerpt`
 (2 lines / 240 runes) on failed `tool_result` events. Offline analysis
 (`harness session stats`, `harness session errors`) uses the stored kind when
@@ -1766,7 +1766,8 @@ additionally producing `path_not_found`, `regex_invalid`, and `other`; failed
 `rate_limited`, `provider_overloaded`, `provider_internal_error`,
 `provider_auth`, `provider_request`, `provider_5xx`, or `provider_error`.
 `run_command` non-zero exits stay in-band results, not tool errors (§9.7–9.8),
-so they never get a kind.
+so they never get an error kind; their diagnostics metrics feed the separate
+command-failure and effective-failure summaries.
 
 **Per-tool dispatch timeout backstop (`-tool-timeout`, default 600s, `<=0`
 disables).** `Dispatch` runs each tool under a derived `context.WithTimeout` so a
@@ -1948,7 +1949,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.1 `read_file`
 
-> Read one file with optional offset/limit, or batch paths[]; returns line-numbered content.
+> Read one file with optional offset/limit, or batch paths[]; directories return a bounded non-recursive listing.
 
 | param | type | notes |
 |---|---|---|
@@ -1956,6 +1957,10 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `paths` | array of strings | multi-file mode; each file rendered under a `==> path <==` header with its own per-file line budget; `offset` is ignored |
 | `offset` | int | 1-based starting line (single-file mode only) |
 | `limit` | int | max lines, default 500 or `read_file_default_limit` |
+
+If a supplied path is a directory, `read_file` returns the same directories-first
+listing format as `list_dir`, capped at 200 entries. This repairs an accidental
+file/directory mismatch in one tool call without requiring a second dispatch.
 
 - **Parameter aliases (accepted silently; intentionally *not* in the schema):**
   `path` also accepts `file`, `file_path`, `filePath`, `filename`, `filepath`,
@@ -2211,8 +2216,8 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 | param | type | notes |
 |---|---|---|
-| `command` | string | shell command line; mutually exclusive with `argv` |
 | `argv` | array of strings | program + literal arguments; mutually exclusive with `command`; must not be a shell string or JSON-encoded array |
+| `command` | string | shell command line; mutually exclusive with `argv`; use only when shell syntax is required |
 | `steps` | array | 1–16 ordered entries, mutually exclusive with top-level `command`/`argv`/`stdin` |
 | `steps[].name` | string | receipt label; omitted means `step N` |
 | `steps[].command` / `steps[].argv` | string / array | exactly one per step |
@@ -2230,7 +2235,9 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `background_lease.resource_key` | string | coordination resource; defaults to the canonical command cwd |
 | `background_lease.access` | string | `read_only` or `exclusive` (default) sharing mode |
 
-- Exactly one of top-level `command`, top-level `argv`, or `steps` is required.
+- Exactly one of top-level `argv`, top-level `command`, or `steps` is required.
+- Prefer `argv`; it is listed first in both the top-level and step schemas because
+  most commands need no shell quoting or expansion.
 - `command` is executed via a **non-login** `bash -c` (fallback `sh -c` if bash is
   absent). Sourcing the full login-profile chain on every call added ~50-300ms
   (nvm/rbenv/conda) and risked banner noise in results, so it was dropped. The PATH
@@ -2247,6 +2254,11 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 - `[exit code: N]` always appended. **Non-zero exit is NOT an error result** — a failing
   build is exactly the signal the model needs; only infrastructure failures (shell
   couldn't start) set `is_error`.
+- Diagnostics metrics record success, exit code, timeout, cancellation,
+  wait-completion, and step aggregates. WorkState maps exit zero to `passed`,
+  non-zero/timeout to `failed`, and cancellation to `not_run`; session error
+  analysis reports command execution failures separately from tool-protocol
+  errors and also reports their effective combined total.
 - Top-level `output_mode:"auto"` keeps successful output through 8 KiB. Larger
   success becomes a `PASS` receipt containing the normalized, 160-byte-capped
   `name` or command identity, duration, status, output byte count, a tail capped
@@ -2454,16 +2466,16 @@ this subsection records the common runner those argv tools point at.
 - `name` must be relative and stay inside the temp directory: absolute paths and any
   `..` escape (after `filepath.Clean`) are rejected. Returns the absolute path written.
 
-### 9.13 `update_work` and WorkState
+### 9.13 `set_work_plan`, `update_work`, and WorkState
 
-> Define/refine the bounded plan or record progress against the current work revision.
+> Define/refine a bounded plan or record progress against the current work revision.
 
-The model-facing schema deliberately has only two modes:
+The model-facing contract is deliberately split into two flat tools:
 
-| mode | purpose |
+| tool | purpose |
 |---|---|
-| `plan` | replace a flat ordered list of human-readable steps plus optional open questions and mutable objective/constraints |
-| `progress` | transition the current leaf or work lifecycle, attach selected evidence, request one bounded evidence batch, or reconcile a branched workspace |
+| `set_work_plan` | replace a flat ordered list of human-readable steps plus optional open questions and mutable objective/constraints |
+| `update_work` | transition the current leaf or work lifecycle, attach selected evidence, or reconcile a branched workspace |
 
 The model-facing contract carries no work, revision, node, parent, phase,
 active-step, next-step, question, or evidence/result IDs. Plan steps contain a
@@ -2474,11 +2486,22 @@ infers a missing kind from the step title, supplies action and exit defaults,
 marks plans with open questions as draft and other non-empty plans as ready,
 and selects the first runnable required leaf. The host atomically binds progress
 to that leaf, uses all fresh observations as completion/reconciliation
-references, and advances to the next required leaf. Durable revisions and
+references, and advances to the next required leaf. Model-facing `status`
+changes only that active leaf. `work_status` accepts active, waiting, or blocked
+transitions but not completion: Harness completes structured work automatically
+after the final required leaf and completes implicit work at a clean model
+boundary. `summary` is required plain text and evidence remains a separate
+top-level array. Successful pre-plan inspections lazily materialize the hidden
+implicit leaf, retain their archived receipts there, and move those observations
+into the first structured leaf without arming ordinary recovery context.
+The model schema keeps structural array bounds, enums, required fields, and
+closed objects concise; `internal/workstate` enforces text limits again at the
+runtime boundary instead of repeating `maxLength` annotations in every field.
+Durable revisions and
 observation IDs remain internal concurrency and validation mechanisms rather
 than model bookkeeping.
 Evidence/results collected against implicit work are carried into the first
-structured leaf when the work is promoted to a plan. Plans require at least one
+structured leaf when the work is promoted with `set_work_plan`. Plans require at least one
 step. Steps are bounded ordered leaves, not a model-authored dependency graph:
 `discover`, `change`, or `verify`, with `pending`, `in_progress`, `completed`,
 `skipped`, or `blocked` status.
@@ -2501,26 +2524,29 @@ session log.
 
 Ordinary accepted prompts create a lightweight implicit work item. Simple work
 stays hidden and auto-completes on a clean non-autonomous turn; a model can
-promote it in place with `plan` mode. An initial implicit prompt receives no
+promote it in place with `set_work_plan`. An initial implicit prompt receives no
 duplicate WorkState context. Active capsules are one-shot recovery context,
 armed by resume, transcript rewrite, branch checkout, agent/model switch,
 asynchronous host observations, decision gates, and semantic context epochs.
 Peeking for token estimates never consumes a capsule. Ordinary prompts preserve
-a nonterminal lineage by default: no update leaves it unchanged, `progress`
-steers it, `plan` extends it, and `/work new` explicitly replaces it.
+a nonterminal lineage by default: no update leaves it unchanged, `update_work`
+steers it, `set_work_plan` extends it, and `/work new` explicitly replaces it.
 
 The bounded active capsule contains the objective, constraints, active leaf
 actions/targets/exit criteria/verification, recent evidence/results without
 opaque internal IDs, gate state, and progress counts. Plan artifact paths remain
-available to human UI and handoff code but are not placed in tool receipts or
-ordinary recovery capsules. An approved implementation handoff adds the
-artifact path explicitly to its fresh implementation seed. Crossing a
+available to human UI and handoff protocol persistence but are not placed in
+tool receipts, ordinary recovery capsules, or the model-facing implementation
+seed. Crossing a
 host-generated top-level phase schedules a clean context epoch after the closed
 tool-result batch. Harness archives the prior transcript, appends a session-tree
 context reset, clears provider continuation state, and seeds the next request
 from the active capsule. Reaching an active-step inspection boundary instead
-preserves the current transcript and provider continuation, arms the updated
-capsule, and gates only later inspection dispatch. `/work` exposes
+preserves the current transcript and provider continuation. At 12 attributed
+inspection operations, Harness arms a warning capsule and automatically grants
+four grace operations. At 16 operations, dispatch blocks typed inspection tools
+and opaque `run_command` shell strings; typed mutation, classified verification,
+coordination, and WorkState transitions remain available. `/work` exposes
 summary/steps/show/new/abandon views.
 
 Harness automatically observes unambiguous mutation paths, verification
@@ -2536,12 +2562,14 @@ other same-step bookkeeping do not reset the active-step guard.
 
 The guard counts inspection operations at dispatch attribution rather than
 tool-bearing turns, so eight parallel reads consume eight operations. After 12
-operations on one active step, inspection dispatch is gated. The model must
-complete or transition the active step, block/wait/finish the work, or name one
-focused missing-evidence question. The first such question grants four more
-inspection operations for that step. The extension is cumulative and cannot be
-renewed; after it is exhausted only a step/lifecycle decision clears the gate.
-The same accounting and capsule behavior applies to delegate children.
+operations on one active step, the host warns the model and automatically grants
+four grace operations. Once those are consumed, obvious inspection tools are
+removed from the next model request and dispatch independently blocks both
+inspection-classified calls and opaque shell-form `run_command` calls. The model
+must complete or transition the active step or block/wait/finish the work. The
+same accounting, visibility, dispatch, and capsule behavior applies to delegate
+children. A clean final response still completes implicit work and clears the
+gate.
 
 ### 9.14 `delegate`
 
@@ -3842,7 +3870,9 @@ type UsageTotals struct {
   snapshotted at its starting byte length so concurrent appends cannot change
   the scan. Multi-session scans report and skip unsupported/corrupt roots;
   explicitly named invalid roots remain errors.
-  The stats report renders the same collector's aggregate as its Errors
+  The summary additionally reports in-band `run_command` execution failures,
+  cancellations, and an effective failure total without converting them into
+  tool-error rows. The stats report renders the same collector's aggregate as its Errors
   section, including result denominators/rates and repeat loops calculated from
   complete physical tool-result streams. A success or different failure ends
   a streak, and root/child streams never join.
@@ -4092,21 +4122,21 @@ reviewer, or the wide-open default without separate binaries.
   selection path—not a display-name or model-only swap—so it recomposes the agent
   prompt, tools, model/reasoning selection, and response continuation state.
 - **Built-ins:** `auto` (all available built-in tools plus discovered MCP tools,
-  including `update_work`, `delegate` and background job tools,
+  including `set_work_plan`, `update_work`, `delegate` and background job tools,
   and `request_implementation` in interactive sessions; its
   `prompts/agents/auto.txt` is a one-byte file — a single newline — that trims to
   empty, so it contributes no prompt body), `explore` (the shared inspection
   tools — `read_file`, `view_image`, `list_dir`, `glob`, `search`,
-  `run_command`, `web_fetch`, optional `git_readonly`, and `update_work` — and
+  `run_command`, `web_fetch`, optional `git_readonly`, `set_work_plan`, and `update_work` — and
   read-only MCP tools; no file mutation, implementation handoff, background jobs, or
   delegation; prompt in `prompts/agents/explore.txt`), `plan` (the shared
   inspection tools, read-only MCP tools, `write_tmp_file`,
-  `request_implementation`, `update_work`, `delegate`, and background job
+  `request_implementation`, `set_work_plan`, `update_work`, `delegate`, and background job
   tools, plus `prompts/agents/plan.txt`), `review` (the shared inspection tools
   and read-only MCP tools, plus a findings-first prompt in
   `prompts/agents/review.txt` that reviews the working-tree diff and untracked
   files when no range is supplied), and `independent` (all available built-in tools
-  plus discovered MCP tools, including `update_work`, `delegate`
+  plus discovered MCP tools, including both WorkState tools, `delegate`
   and background job tools, a complete-without-asking prompt from
   `prompts/agents/independent.txt`). `explore`, `plan`, and `review` gain
   `run_command` from the shared inspection set so they can use external tools
@@ -4116,7 +4146,7 @@ reviewer, or the wide-open default without separate binaries.
   `git_readonly` — `git` covers every read-only operation, so listing both would
   duplicate functionality and waste context. The delegation subset guard treats an
   available `git` as satisfying a required `git_readonly`, so these parents can
-  still delegate to `explore`/`plan`/`review`. `update_work` (§9.13) is in every
+  still delegate to `explore`/`plan`/`review`. Both WorkState tools (§9.13) are in every
   built-in agent's set; `request_implementation` (§9.17) is exposed to `plan` and to interactive
   `auto`, but not to one-shot `auto` or `independent`.
 - **Descriptions are required selection metadata:** after resolution, every agent
@@ -4150,7 +4180,7 @@ reviewer, or the wide-open default without separate binaries.
   model-compatible and validated like any effort. This lets a cheap implementation
   agent pair a smaller `model` with a lower `reasoning`.
 - **Plan → implementation handoff:** the `plan` agent makes WorkState ready with
-  `update_work` (§9.13) and requests a handoff with `request_implementation` (§9.17).
+  `set_work_plan` (§9.13) and requests a handoff with `request_implementation` (§9.17).
   At the next prompt boundary, or on manual `/handoff` (§10), the REPL prompts for
   approval, archives the planning transcript via `SaveCompaction`, switches to
   the target agent — default `auto`, overridable by

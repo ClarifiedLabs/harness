@@ -5,88 +5,103 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"harness/internal/workstate"
 )
 
-const updateWorkSchema = `{
+const setWorkPlanSchema = `{
   "type": "object",
   "properties": {
-    "mode": {"type": "string", "enum": ["plan", "progress"]},
-    "plan": {
-      "type": "object",
-      "properties": {
-        "title": {"type": "string"},
-        "objective": {"type": "string"},
-        "constraints": {"type": "array", "items": {"type": "string"}},
-        "questions": {"type": "array", "items": {"type": "string"}},
-        "steps": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "properties": {
-              "title": {"type": "string"},
-              "kind": {"type": "string", "enum": ["discover", "change", "verify"]},
-              "description": {"type": "string"},
-              "optional": {"type": "boolean"},
-              "targets": {"type": "array", "items": {"type": "string"}},
-              "done_when": {"type": "string"},
-              "verification": {"type": "array", "items": {"type": "string"}}
-            },
-            "required": ["title"]
-          }
-        }
-      },
-      "required": ["steps"]
-    },
-    "progress": {
-      "type": "object",
-      "properties": {
-        "status": {"type": "string", "enum": ["in_progress", "completed", "skipped", "blocked"]},
-        "summary": {"type": "string"},
-        "evidence": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "kind": {"type": "string", "enum": ["source", "artifact", "delegate"]},
-              "path": {"type": "string"},
-              "symbol": {"type": "string"},
-              "summary": {"type": "string"}
-            },
-            "required": ["path", "summary"]
-          }
+    "title": {"type": "string"},
+    "objective": {"type": "string"},
+    "constraints": {"type": "array", "maxItems": 32, "items": {"type": "string"}},
+    "questions": {"type": "array", "maxItems": 64, "items": {"type": "string"}},
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": {"type": "string"},
+          "kind": {"type": "string", "enum": ["discover", "change", "verify"]},
+          "description": {"type": "string"},
+          "optional": {"type": "boolean"},
+          "targets": {"type": "array", "maxItems": 32, "items": {"type": "string"}},
+          "done_when": {"type": "string"},
+          "verification": {"type": "array", "maxItems": 32, "items": {"type": "string"}}
         },
-        "work_status": {"type": "string", "enum": ["active", "waiting", "blocked", "completed"]},
-        "waiting_for": {"type": "array", "items": {"type": "string"}},
-        "needs_evidence": {
-          "type": "object",
-          "properties": {
-            "question": {"type": "string"},
-            "targets": {"type": "array", "items": {"type": "string"}}
-          },
-          "required": ["question"]
-        },
-        "workspace_reconciled": {"type": "boolean"},
-        "reconciliation_summary": {"type": "string"}
+        "required": ["title"],
+        "additionalProperties": false
       }
     }
   },
-  "required": ["mode"]
+  "required": ["steps"],
+  "additionalProperties": false
 }`
+
+const updateWorkSchema = `{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["in_progress", "completed", "skipped", "blocked"]},
+    "summary": {"type": "string"},
+    "evidence": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {"type": "string", "enum": ["source", "artifact", "delegate"]},
+          "path": {"type": "string"},
+          "symbol": {"type": "string"},
+          "summary": {"type": "string"}
+        },
+        "required": ["path", "summary"],
+        "additionalProperties": false
+      }
+    },
+    "work_status": {"type": "string", "enum": ["active", "waiting", "blocked"]},
+    "waiting_for": {"type": "array", "maxItems": 32, "items": {"type": "string"}},
+    "workspace_reconciled": {"type": "boolean"},
+    "reconciliation_summary": {"type": "string"}
+  },
+  "required": ["summary"],
+  "additionalProperties": false
+}`
+
+type setWorkPlan struct {
+	store *workstate.Store
+}
 
 type updateWork struct {
 	store *workstate.Store
 }
 
-// NewUpdateWork returns the single model-facing WorkState tool.
+// NewSetWorkPlan returns the model-facing structural planning tool.
+func NewSetWorkPlan(store *workstate.Store) Tool { return &setWorkPlan{store: store} }
+
+func (*setWorkPlan) Name() string { return "set_work_plan" }
+
+func (*setWorkPlan) Description() string {
+	return "Define or revise the current multi-step plan; Harness selects IDs, phases, and the active step."
+}
+
+func (*setWorkPlan) Schema() json.RawMessage { return json.RawMessage(setWorkPlanSchema) }
+
+func (*setWorkPlan) ReadOnly(json.RawMessage) bool { return false }
+
+func (*setWorkPlan) Activity(json.RawMessage) Activity {
+	return Activity{Class: ActivityCoordinate, OperationCount: 1, Source: "set_work_plan"}
+}
+
+// NewUpdateWork returns the model-facing progress tool.
 func NewUpdateWork(store *workstate.Store) Tool { return &updateWork{store: store} }
 
 func (*updateWork) Name() string { return "update_work" }
 
 func (*updateWork) Description() string {
-	return "Set a short ordered plan or record meaningful progress against the active work. Harness owns plan structure and step selection. At an inspection decision gate, request at most one focused needs_evidence extension or transition the step/work lifecycle."
+	return "Record active-step progress with a plain-text summary and separate evidence. Complete one step at a time; Harness completes the work."
 }
 
 func (*updateWork) Schema() json.RawMessage { return json.RawMessage(updateWorkSchema) }
@@ -94,22 +109,12 @@ func (*updateWork) Schema() json.RawMessage { return json.RawMessage(updateWorkS
 func (*updateWork) ReadOnly(json.RawMessage) bool { return false }
 
 func (*updateWork) Activity(input json.RawMessage) Activity {
-	var args updateWorkArgs
+	var args updateWorkProgress
 	_ = json.Unmarshal(input, &args)
-	meaningful := false
-	if args.Mode == "progress" && args.Progress != nil {
-		p := args.Progress
-		meaningful = p.Status == workstate.StatusCompleted || p.Status == workstate.StatusSkipped || p.Status == workstate.StatusBlocked ||
-			p.WorkStatus == workstate.LifecycleWaiting || p.WorkStatus == workstate.LifecycleBlocked || p.WorkStatus == workstate.LifecycleCompleted ||
-			len(p.Evidence) > 0 || p.WorkspaceReconciled
-	}
-	return Activity{Class: ActivityCoordinate, OperationCount: 1, Source: "update_work_" + args.Mode, ExplicitProgress: meaningful}
-}
-
-type updateWorkArgs struct {
-	Mode     string              `json:"mode"`
-	Plan     *updateWorkPlan     `json:"plan"`
-	Progress *updateWorkProgress `json:"progress"`
+	meaningful := args.Status == workstate.StatusCompleted || args.Status == workstate.StatusSkipped || args.Status == workstate.StatusBlocked ||
+		args.WorkStatus == workstate.LifecycleWaiting || args.WorkStatus == workstate.LifecycleBlocked || args.WorkStatus == workstate.LifecycleCompleted ||
+		len(args.Evidence) > 0 || args.WorkspaceReconciled
+	return Activity{Class: ActivityCoordinate, OperationCount: 1, Source: "update_work", ExplicitProgress: meaningful}
 }
 
 type updateWorkPlan struct {
@@ -131,14 +136,13 @@ type updateWorkStep struct {
 }
 
 type updateWorkProgress struct {
-	Status                string                     `json:"status"`
-	Summary               string                     `json:"summary"`
-	Evidence              []workstate.EvidenceInput  `json:"evidence"`
-	WorkStatus            string                     `json:"work_status"`
-	WaitingFor            []string                   `json:"waiting_for"`
-	NeedsEvidence         *workstate.EvidenceRequest `json:"needs_evidence"`
-	WorkspaceReconciled   bool                       `json:"workspace_reconciled"`
-	ReconciliationSummary string                     `json:"reconciliation_summary"`
+	Status                string                    `json:"status"`
+	Summary               string                    `json:"summary"`
+	Evidence              []workstate.EvidenceInput `json:"evidence"`
+	WorkStatus            string                    `json:"work_status"`
+	WaitingFor            []string                  `json:"waiting_for"`
+	WorkspaceReconciled   bool                      `json:"workspace_reconciled"`
+	ReconciliationSummary string                    `json:"reconciliation_summary"`
 }
 
 func normalizeModelPlan(current *workstate.State, plan updateWorkPlan) ([]workstate.NodeDefinition, []workstate.Question) {
@@ -347,60 +351,75 @@ func compactStrings(values []string) []string {
 	return result
 }
 
-func (t *updateWork) Run(ctx context.Context, input json.RawMessage) (string, error) {
+func (t *setWorkPlan) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	if t.store == nil {
 		return "", fmt.Errorf("work state is unavailable")
 	}
-	var args updateWorkArgs
+	var args updateWorkPlan
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", err
 	}
 	current := t.store.Snapshot()
 	if current == nil {
+		return "", fmt.Errorf("no active work; submit a user task before calling set_work_plan")
+	}
+	if len(args.Steps) == 0 {
+		return "", badArgs("steps must contain at least one item")
+	}
+	nodes, questions := normalizeModelPlan(current, args)
+	planState := workstate.PlanReady
+	if len(questions) > 0 {
+		planState = workstate.PlanDraft
+	}
+	state, err := t.store.SetPlan(workstate.PlanUpdate{
+		Title:       args.Title,
+		Objective:   args.Objective,
+		Constraints: args.Constraints,
+		Questions:   questions,
+		Nodes:       nodes,
+		PlanState:   planState,
+	}, "model")
+	if err != nil {
+		return "", fmt.Errorf("set work plan: %w", err)
+	}
+	return updateWorkReceipt(state), nil
+}
+
+func (t *updateWork) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	if t.store == nil {
+		return "", fmt.Errorf("work state is unavailable")
+	}
+	var args updateWorkProgress
+	if err := json.Unmarshal(input, &args); err != nil {
+		return "", err
+	}
+	if t.store.Snapshot() == nil {
 		return "", fmt.Errorf("no active work; submit a user task before calling update_work")
 	}
-	var state *workstate.State
-	var err error
-	switch args.Mode {
-	case "plan":
-		if args.Plan == nil {
-			return "", fmt.Errorf("plan mode requires plan")
-		}
-		if len(args.Plan.Steps) == 0 {
-			return "", fmt.Errorf("plan mode requires at least one step")
-		}
-		nodes, questions := normalizeModelPlan(current, *args.Plan)
-		planState := workstate.PlanReady
-		if len(questions) > 0 {
-			planState = workstate.PlanDraft
-		}
-		state, err = t.store.SetPlan(workstate.PlanUpdate{
-			Title:       args.Plan.Title,
-			Objective:   args.Plan.Objective,
-			Constraints: args.Plan.Constraints,
-			Questions:   questions,
-			Nodes:       nodes,
-			PlanState:   planState,
-		}, "model")
-	case "progress":
-		if args.Progress == nil {
-			return "", fmt.Errorf("progress mode requires progress")
-		}
-		state, err = t.store.Progress(workstate.ProgressUpdate{
-			Status:                args.Progress.Status,
-			Summary:               args.Progress.Summary,
-			Evidence:              args.Progress.Evidence,
-			WorkStatus:            args.Progress.WorkStatus,
-			WaitingFor:            args.Progress.WaitingFor,
-			NeedsEvidence:         args.Progress.NeedsEvidence,
-			WorkspaceReconciled:   args.Progress.WorkspaceReconciled,
-			ReconciliationSummary: args.Progress.ReconciliationSummary,
-		}, "model")
-	default:
-		return "", fmt.Errorf("invalid mode %q (want plan or progress)", args.Mode)
+	if strings.TrimSpace(args.Summary) == "" {
+		return "", badArgs("summary is required and must be plain text; pass selected evidence separately in the top-level evidence array")
 	}
+	if utf8.RuneCountInString(args.Summary) > 2048 {
+		return "", badArgs("summary exceeds 2048 runes")
+	}
+	if utf8.RuneCountInString(args.ReconciliationSummary) > 2048 {
+		return "", badArgs("reconciliation_summary exceeds 2048 runes")
+	}
+	if args.WorkStatus == workstate.LifecycleCompleted {
+		return "", badArgs("work_status cannot complete work; complete the current step with status=completed and Harness will complete work automatically after the final required step")
+	}
+	state, err := t.store.Progress(workstate.ProgressUpdate{
+		Status:                args.Status,
+		Summary:               args.Summary,
+		Evidence:              args.Evidence,
+		WorkStatus:            args.WorkStatus,
+		WaitingFor:            args.WaitingFor,
+		WorkspaceReconciled:   args.WorkspaceReconciled,
+		ReconciliationSummary: args.ReconciliationSummary,
+	}, "model")
 	if err != nil {
-		return "", err
+		current := t.store.Snapshot()
+		return "", fmt.Errorf("update work (%s): %w", workstate.RenderStatus(current), err)
 	}
 	return updateWorkReceipt(state), nil
 }

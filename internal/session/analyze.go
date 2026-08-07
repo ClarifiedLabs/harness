@@ -184,6 +184,10 @@ type ExecutionAnalysis struct {
 	ToolCalls            int            `json:"tool_calls"`
 	ToolResults          int            `json:"tool_results"`
 	ToolErrors           int            `json:"tool_errors"`
+	CommandResults       int            `json:"command_results"`
+	CommandFailures      int            `json:"command_failures"`
+	CommandCancellations int            `json:"command_cancellations"`
+	EffectiveFailures    int            `json:"effective_failures"`
 	ModelErrors          int            `json:"model_errors"`
 	TerminationAvailable bool           `json:"termination_available"`
 	Terminations         map[string]int `json:"terminations"`
@@ -1026,6 +1030,15 @@ func deriveExecution(events []Event, sourceStatus string) ExecutionAnalysis {
 			if event.ResultError {
 				out.ToolErrors++
 			}
+			if event.ResultMetrics["command_outcome_available"] != 0 {
+				out.CommandResults++
+				if event.ResultMetrics["command_failed"] != 0 {
+					out.CommandFailures++
+				}
+				if event.ResultMetrics["command_cancelled"] != 0 {
+					out.CommandCancellations++
+				}
+			}
 		case EventModelRequest:
 			if event.ModelRequest != nil && event.ModelRequest.State == llm.ModelRequestFailed {
 				out.ModelErrors++
@@ -1035,6 +1048,7 @@ func deriveExecution(events []Event, sourceStatus string) ExecutionAnalysis {
 	out.Prompts = len(prompts)
 	out.CompletedPrompts = len(completed)
 	out.Turns = len(turns)
+	out.EffectiveFailures = out.ToolErrors + out.CommandFailures
 	switch {
 	case sourceStatus == "missing" || sourceStatus == "symlink":
 		out.Completeness = "unavailable"
@@ -1395,6 +1409,10 @@ func (e *ExecutionAnalysis) add(other ExecutionAnalysis) {
 	e.ToolCalls += other.ToolCalls
 	e.ToolResults += other.ToolResults
 	e.ToolErrors += other.ToolErrors
+	e.CommandResults += other.CommandResults
+	e.CommandFailures += other.CommandFailures
+	e.CommandCancellations += other.CommandCancellations
+	e.EffectiveFailures += other.EffectiveFailures
 	e.ModelErrors += other.ModelErrors
 	e.TerminationAvailable = e.TerminationAvailable || other.TerminationAvailable
 	for reason, count := range other.Terminations {
@@ -2001,6 +2019,7 @@ func WriteAnalysisText(report AnalysisReport, w io.Writer) error {
 	fmt.Fprintf(&b, "  completeness: %s\n", formatCountMap(true, report.Completeness))
 	fmt.Fprintf(&b, "  prompts completed/observed: %d / %d\n", report.Execution.CompletedPrompts, report.Execution.Prompts)
 	fmt.Fprintf(&b, "  turns/tools/results/errors: %d / %d / %d / %d tool, %d model\n", report.Execution.Turns, report.Execution.ToolCalls, report.Execution.ToolResults, report.Execution.ToolErrors, report.Execution.ModelErrors)
+	fmt.Fprintf(&b, "  command results/failures/cancellations; effective failures: %d / %d / %d; %d\n", report.Execution.CommandResults, report.Execution.CommandFailures, report.Execution.CommandCancellations, report.Execution.EffectiveFailures)
 	fmt.Fprintf(&b, "  terminations: %s\n", formatCountMap(report.Execution.TerminationAvailable, report.Execution.Terminations))
 	fmt.Fprintf(&b, "  work root/descendant/inclusive items: %d / %d / %d; revisions: %d / %d / %d\n",
 		report.Work.Root.WorkItems, report.Work.Descendant.WorkItems, report.Work.Inclusive.WorkItems,
@@ -2026,7 +2045,7 @@ func WriteAnalysisText(report AnalysisReport, w io.Writer) error {
 	limit := min(len(report.Items), maxAnalysisTextSessions)
 	fmt.Fprintf(&b, "Streams (showing %d of %d)\n", limit, len(report.Items))
 	for _, item := range report.Items[:limit] {
-		fmt.Fprintf(&b, "  %s: %s, %s, %d turns, %d tools, %d errors, %d events\n", item.Path, item.Source.Status, item.Execution.Completeness, item.Execution.Turns, item.Execution.ToolCalls, item.Execution.ToolErrors+item.Execution.ModelErrors, item.Source.Events)
+		fmt.Fprintf(&b, "  %s: %s, %s, %d turns, %d tools, %d effective errors, %d events\n", item.Path, item.Source.Status, item.Execution.Completeness, item.Execution.Turns, item.Execution.ToolCalls, item.Execution.EffectiveFailures+item.Execution.ModelErrors, item.Source.Events)
 	}
 	if omitted := len(report.Items) - limit; omitted > 0 {
 		fmt.Fprintf(&b, "  ... %d more streams omitted\n", omitted)

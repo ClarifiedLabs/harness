@@ -81,6 +81,26 @@ func normalizedActivity(activity Activity) Activity {
 	return activity
 }
 
+// InspectionBoundaryBlocked reports whether a hard work decision boundary
+// must reject a call. Complex shell strings are intentionally included: when
+// their behavior cannot be classified, they must not provide a bypass around
+// the typed inspection tools blocked by the same boundary.
+func InspectionBoundaryBlocked(call llm.ToolCall, activity Activity) bool {
+	return activity.Class == ActivityInspect || call.Name == "run_command" && activity.Class == ActivityOther
+}
+
+// InspectionToolVisibleAtBoundary keeps tools that can still make a valid
+// transition visible while suppressing obvious typed inspection surfaces.
+// run_command stays visible because argv-classified verification remains legal.
+func InspectionToolVisibleAtBoundary(name string) bool {
+	switch name {
+	case "read_file", "view_image", "list_dir", "glob", "search", "rg", "grep", "git_readonly", "web_fetch":
+		return false
+	default:
+		return true
+	}
+}
+
 func (runCommand) Activity(input json.RawMessage) Activity {
 	var args runCommandArgs
 	if err := json.Unmarshal(input, &args); err != nil || args.Background {

@@ -83,7 +83,7 @@ func TestRequestImplementationRequiresReadyWork(t *testing.T) {
 	if _, err := store.NewWork("Draft", "user"); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runRequestImpl(t, NewRequestImplementation(handoff.NewPending(), store, true, nil), map[string]any{}); err == nil {
+	if out, err := runRequestImpl(t, NewRequestImplementation(handoff.NewPending(), store, true, nil), map[string]any{}); err == nil || !strings.Contains(err.Error(), "set_work_plan") || !strings.Contains(err.Error(), "no explicit plan") {
 		t.Fatalf("draft handoff should fail, got %q", out)
 	}
 }

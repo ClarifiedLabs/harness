@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -57,6 +58,22 @@ func TestSimilarExistingPaths(t *testing.T) {
 			t.Fatalf("suggestions = %v, want none", got)
 		}
 	})
+}
+
+func TestSimilarExistingPathsFindsBoundedRecursiveCandidate(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "internal", "tools")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(nested, "updatework.go")
+	if err := os.WriteFile(want, []byte("package tools\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := similarExistingPaths(dir, "update-work.go")
+	if !slices.Contains(got, want) {
+		t.Fatalf("recursive suggestions = %v, want %s", got, want)
+	}
 }
 
 // A mistyped read_file path (through any alias) names similar existing paths so

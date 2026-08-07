@@ -189,6 +189,7 @@ const (
 	ToolErrorUnknownTool          ToolErrorKind = "unknown_tool"
 	ToolErrorInvalidArgs          ToolErrorKind = "invalid_args"
 	ToolErrorTimeout              ToolErrorKind = "timeout"
+	ToolErrorCancelled            ToolErrorKind = "cancelled"
 	ToolErrorPanic                ToolErrorKind = "panic"
 	ToolErrorPathNotFound         ToolErrorKind = "path_not_found"
 	ToolErrorEditOldTextNotFound  ToolErrorKind = "edit_oldtext_not_found"

@@ -66,7 +66,7 @@ func runSessionErrors(env environment, invocation cli.Invocation) int {
 			Rows:            analysis.Rows,
 			Sources:         analysis.Sources,
 		}
-		return writeSessionErrors(env.stdout, format, report, []sessionErrorBlock{{dir: dir, rows: analysis.Rows}}, 0)
+		return writeSessionErrors(env.stdout, format, report, []sessionErrorBlock{{dir: dir, rows: analysis.Rows, summary: analysis.Summary}}, 0)
 	}
 
 	window, err := time.ParseDuration(since)
@@ -94,8 +94,8 @@ func runSessionErrors(env environment, invocation cli.Invocation) int {
 			continue
 		}
 		analyses = append(analyses, analysis)
-		if len(analysis.Rows) > 0 {
-			blocks = append(blocks, sessionErrorBlock{dir: dir, rows: analysis.Rows})
+		if len(analysis.Rows) > 0 || analysis.Summary.FailedCommandResults > 0 {
+			blocks = append(blocks, sessionErrorBlock{dir: dir, rows: analysis.Rows, summary: analysis.Summary})
 		}
 	}
 	merged := session.MergeErrorAnalyses(analyses...)
@@ -113,8 +113,9 @@ func runSessionErrors(env environment, invocation cli.Invocation) int {
 
 // sessionErrorBlock groups one session's rows for the text renderer.
 type sessionErrorBlock struct {
-	dir  string
-	rows []session.ErrorRow
+	dir     string
+	rows    []session.ErrorRow
+	summary session.ErrorSummary
 }
 
 // sessionErrorsReport is the JSON output shape.
@@ -159,12 +160,18 @@ func writeSessionErrors(w io.Writer, format string, report sessionErrorsReport, 
 		return ui.ExitOK
 	}
 	for _, block := range blocks {
-		writeSessionErrorBlock(w, block.dir, block.rows)
+		writeSessionErrorBlock(w, block.dir, block.rows, block.summary)
 	}
 	if scanned > 0 {
 		summary := report.Summary
 		fmt.Fprintf(w, "Scanned %d sessions: %d/%d failed tool results (%.1f%%), %d model request failures\n",
 			scanned, summary.FailedToolResults, summary.ToolResults, summary.ToolErrorRate*100, summary.ModelRequestFailures)
+		if summary.CommandResults > 0 {
+			fmt.Fprintf(w, "Command execution failures: %d/%d (%.1f%%); effective failures: %d/%d (%.1f%%); cancelled: %d\n",
+				summary.FailedCommandResults, summary.CommandResults, summary.CommandFailureRate*100,
+				summary.EffectiveFailedResults, summary.ToolResults, summary.EffectiveFailureRate*100,
+				summary.CancelledCommandResults)
+		}
 		if len(report.SkippedSessions) > 0 {
 			fmt.Fprintf(w, "Skipped %d unreadable or unsupported sessions\n", len(report.SkippedSessions))
 		}
@@ -172,11 +179,19 @@ func writeSessionErrors(w io.Writer, format string, report sessionErrorsReport, 
 	return ui.ExitOK
 }
 
-func writeSessionErrorBlock(w io.Writer, dir string, rows []session.ErrorRow) {
-	summary := session.SummarizeErrors(rows)
+func writeSessionErrorBlock(w io.Writer, dir string, rows []session.ErrorRow, summary session.ErrorSummary) {
+	if summary.ByKind == nil {
+		summary = session.SummarizeErrors(rows)
+	}
 	fmt.Fprintf(w, "Session errors: %s\n", dir)
 	fmt.Fprintf(w, "  failed tool results: %d   model request failures: %d\n",
 		summary.FailedToolResults, summary.ModelRequestFailures)
+	if summary.CommandResults > 0 {
+		fmt.Fprintf(w, "  command execution failures: %d/%d (%.1f%%)   effective failures: %d/%d (%.1f%%)   cancelled: %d\n",
+			summary.FailedCommandResults, summary.CommandResults, summary.CommandFailureRate*100,
+			summary.EffectiveFailedResults, summary.ToolResults, summary.EffectiveFailureRate*100,
+			summary.CancelledCommandResults)
+	}
 	if len(summary.ByTool) > 0 {
 		top, n := session.TopCount(summary.ByTool)
 		fmt.Fprintf(w, "  top tool: %s (%d)\n", top, n)

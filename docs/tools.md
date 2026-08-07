@@ -20,7 +20,8 @@ This page is the operational overview.
 | `git_readonly` | restricted git subcommands for read-only agents |
 | `web_fetch` | fetch bounded HTTP(S) text, removing common HTML chrome while preserving block structure and links |
 | `write_tmp_file` | write scratch files under a private temp directory |
-| `update_work` | define/refine the structured plan or record progress on the active WorkState |
+| `set_work_plan` | define/refine a structured multi-step WorkState plan |
+| `update_work` | record flat progress on the active WorkState |
 | `delegate` | run a configured child agent and return its final report |
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
 | `request_implementation` | request approval to hand a ready WorkState to an implementation agent (plan and interactive auto agents) |
@@ -36,7 +37,8 @@ input order.
 
 `read_file` reads one file via `path` (with `offset`/`limit`), or several at once
 via `paths[]` — each file is rendered under a `==> path <==` header with its own
-per-file line budget. For cross-harness compatibility `path` also silently accepts
+per-file line budget. A directory path returns a bounded, non-recursive listing
+instead of a tool error. For cross-harness compatibility `path` also silently accepts
 the aliases `file`, `file_path`, `filePath`, `filename`, `filepath`,
 `absolute_path`, and `target_file` (and `paths` accepts `files`); these are
 intentionally not listed in the tool schema, and the canonical name wins if both
@@ -97,10 +99,10 @@ bytes before and after deduplication. A single `search` call keeps its ordinary
 result unchanged.
 
 A `search` `path` or `read_file` path that does not exist fails with
-`similar existing paths: <up to 3>` appended — a bounded scan of the same
-directory (plus one parent level when the directory itself is missing), never a
-recursive walk — so a mistyped path can be retargeted without a list_dir round
-trip.
+`similar existing paths: <up to 3>` appended. Harness first scans the same
+directory and one parent level for a mistyped directory, then uses a bounded
+four-level/1024-entry recursive fallback from the nearest existing directory,
+so a misplaced or mistyped path can be retargeted without a list_dir round trip.
 
 Invalid search regexes are rejected at argument decode with `invalid regex:
 <compile error>; escape regex punctuation to match it literally` (error kind
@@ -135,11 +137,11 @@ than 1024 bytes are clamped in-process (host `grep` has no portable
 
 `run_command` accepts either one command or an ordered `steps` array:
 
+- `argv`: preferred direct program invocation with literal args and no shell
 - `command`: executed through a non-login `bash -c` (with `sh -c` fallback). The
   login PATH a login shell would have added is resolved once at startup and merged
   into the command environment, so build/test toolchains are still found without
   paying the login-profile cost on every call.
-- `argv`: direct program invocation with literal args and no shell
 - `name`: optional command or step-batch label
 - `output_mode`: `auto` (default), `receipt`, or `full`; with `steps`, `auto`
   and `receipt` return compact receipts while `full` returns the combined step transcript
@@ -148,7 +150,9 @@ than 1024 bytes are clamped in-process (host `grep` has no portable
 
 Foreground calls capture combined stdout/stderr and append `[exit code: N]`.
 Non-zero exit is not a tool error; it is returned as ordinary command output so
-the model can react to failing builds, tests, and searches.
+the model can react to failing builds, tests, and searches. Structured result
+metrics separately record exit status, timeout, cancellation, and step failures;
+WorkState and `session errors` consume those metrics rather than parsing text.
 
 For an ordinary top-level command, `output_mode:"auto"` preserves successful
 output through 8 KiB. Above that threshold it returns a compact `PASS` receipt
@@ -233,18 +237,26 @@ Mixed read/write commands such as `branch`, `config`, `remote`, `reflog`,
 disables pagers, optional locks, filesystem monitors, external diff/textconv
 helpers, prompts, output-file flags, and signature helpers.
 
-`update_work` is available to every built-in agent and has only two modes.
-`plan` accepts a non-empty flat ordered `steps` list; each step needs only a title and may
+`set_work_plan` and `update_work` are available to every built-in agent.
+`set_work_plan` accepts a non-empty flat ordered `steps` list; each step needs only a title and may
 add a kind, description, targets, completion condition, verification commands,
 or an optional flag. Open questions are plain strings. Harness generates IDs
 and phases, fills action/exit defaults, infers draft versus ready state and the
 active step, and keeps the durable plan artifact out of model-facing receipts
-and ordinary recovery context; an approved implementation handoff still carries
-it in the fresh implementation seed. `progress` changes the active step/lifecycle, attaches
+and ordinary recovery context. The implementation seed uses only the active
+capsule, not the session-relative artifact path. `update_work` has flat fields
+and changes the active step/lifecycle, attaches
 selected evidence, or records reconciliation after a branch. Calls do not carry
 work, revision, step, or evidence/result IDs: Harness binds them to the current
 work and active (or first runnable) step, selects fresh observations when a step
-is completed, and advances to the next required step. Evidence recorded while
+is completed, and advances to the next required step. The model-facing
+`work_status` can reactivate, wait, or block the whole work item; it does not
+accept `completed`. Harness completes structured work automatically when the
+final required step completes, and completes implicit work at a clean model
+boundary. `summary` is required plain text; selected evidence remains a
+separate top-level array. Successful inspections made before `set_work_plan`
+are retained on a lazily materialized implicit step and carried into the first
+structured step without injecting a redundant mid-prompt capsule. Evidence recorded while
 work is still implicit is retained if the model later promotes it to a
 structured plan. Harness automatically attaches
 unambiguous file mutations, verification outcomes, delegate completions, and
@@ -254,14 +266,13 @@ capsules are delivered once after resume, context rewrites, switches, branches,
 or host-side evidence changes. Administrative plan updates do not reset the
 active-step inspection guard. Successful structured-step inspection receipts
 roll at the evidence limit by evicting the oldest unreferenced automatic
-receipt; model-selected evidence and results are preserved. After 12 inspection
-operations on one active step, further inspection is gated. The current
-conversation is preserved and a fresh active-step capsule is armed. The agent
-must complete or transition the step, report a blocker/wait, or name one focused
-missing-evidence question. That question grants the step's only extension of
-four additional inspection operations; exhausting it requires a transition or
-terminal work decision rather than another extension.
-Custom agents with an explicit `allowed_tools` list may omit the tool.
+receipt; model-selected evidence and results are preserved. At 12 inspection
+operations on one active step, Harness arms a warning capsule and automatically
+grants four focused grace operations. At 16, the hard boundary blocks typed
+inspection tools and unclassifiable `run_command` shell strings while allowing
+typed mutations, classified verification, coordination, and work transitions.
+The current conversation is preserved throughout. Custom agents with an
+explicit `allowed_tools` list may omit either work tool.
 
 ## File Mutation
 
