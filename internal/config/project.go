@@ -278,10 +278,11 @@ func mergeOTelOpt(global, project optional[fileOTelConfig], globalPath, projectP
 	merged.Protocol = mergeOpt(gVal.Protocol, pVal.Protocol, globalPath, projectPath, "otel.protocol", sourceMap)
 	merged.TimeoutSeconds = mergeOpt(gVal.TimeoutSeconds, pVal.TimeoutSeconds, globalPath, projectPath, "otel.timeout_seconds", sourceMap)
 	merged.ServiceName = mergeOpt(gVal.ServiceName, pVal.ServiceName, globalPath, projectPath, "otel.service_name", sourceMap)
+	merged.Hostname = mergeOpt(gVal.Hostname, pVal.Hostname, globalPath, projectPath, "otel.hostname", sourceMap)
 	merged.Headers = mergeOpt(gVal.Headers, pVal.Headers, globalPath, projectPath, "otel.headers", sourceMap)
 	merged.ResourceAttributes = mergeOpt(gVal.ResourceAttributes, pVal.ResourceAttributes, globalPath, projectPath, "otel.resource_attributes", sourceMap)
 	merged.Traces = mergeOTelTracesOpt(gVal.Traces, pVal.Traces, globalPath, projectPath, sourceMap)
-	hasLeaf := merged.Enabled.Set || merged.Endpoint.Set || merged.Protocol.Set || merged.TimeoutSeconds.Set || merged.ServiceName.Set || merged.Headers.Set || merged.ResourceAttributes.Set || merged.Traces.Set
+	hasLeaf := merged.Enabled.Set || merged.Endpoint.Set || merged.Protocol.Set || merged.TimeoutSeconds.Set || merged.ServiceName.Set || merged.Hostname.Set || merged.Headers.Set || merged.ResourceAttributes.Set || merged.Traces.Set
 	if hasLeaf || global.Set || project.Set {
 		return optional[fileOTelConfig]{Set: true, Value: merged}
 	}

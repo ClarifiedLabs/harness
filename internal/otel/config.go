@@ -14,6 +14,7 @@ type Config struct {
 	Protocol           string
 	Timeout            time.Duration
 	ServiceName        string
+	Hostname           string
 	Headers            map[string]string
 	ResourceAttributes map[string]string
 	TracesEnabled      bool

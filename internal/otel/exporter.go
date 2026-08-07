@@ -95,7 +95,13 @@ func NewExporter(cfg Config, build buildinfo.Metadata, sessionID, provider, mode
 	if model != "" {
 		ra = append(ra, stringAttr("harness.model", truncate(model, 128)))
 	}
+	if cfg.Hostname != "" {
+		ra = append(ra, stringAttr("host.name", truncate(cfg.Hostname, 64)))
+	}
 	for k, v := range resourceAttrs {
+		if k == "host.name" {
+			continue
+		}
 		ra = append(ra, stringAttr(k, truncate(v, 128)))
 	}
 	ra = sortedAttrs(ra)

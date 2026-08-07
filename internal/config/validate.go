@@ -194,6 +194,27 @@ func canonicalOTelServiceName(value string) (string, error) {
 	return canonicalNonEmpty("otel.service_name", value)
 }
 
+func canonicalOTelHostname(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if strings.Contains(value, ".") {
+		value = strings.SplitN(value, ".", 2)[0]
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "", fmt.Errorf("otel.hostname must not be empty")
+		}
+	}
+	if strings.ContainsAny(value, " \t\n\r") {
+		return "", fmt.Errorf("otel.hostname must not contain whitespace")
+	}
+	if len(value) > 253 {
+		return "", fmt.Errorf("otel.hostname must be at most 253 characters")
+	}
+	return value, nil
+}
+
 func oTelTimeoutSeconds(value int) (int, error) {
 	if value == 0 {
 		return 5, nil

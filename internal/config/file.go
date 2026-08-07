@@ -152,6 +152,7 @@ type fileOTelConfig struct {
 	Protocol           optional[string]            `json:"protocol"`
 	TimeoutSeconds     optional[int]               `json:"timeout_seconds"`
 	ServiceName        optional[string]            `json:"service_name"`
+	Hostname           optional[string]            `json:"hostname"`
 	Headers            optional[map[string]string] `json:"headers"`
 	ResourceAttributes optional[map[string]string] `json:"resource_attributes"`
 	Traces             optional[fileOTelTracesConfig] `json:"traces"`

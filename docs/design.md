@@ -1281,7 +1281,7 @@ does not embed prompts or materialize built-in agents. `check` additionally perf
 for agents, hooks, and `@file` references.
 
 `trace_proxy` / `HARNESS_TRACE_PROXY` / `-trace-proxy` opts in to W3C Trace
-Context headers for harness-to-proxy requests. OTEL metrics export is controlled by `otel.enabled`/`otel.endpoint` (`HARNESS_OTEL_*` / `OTEL_EXPORTER_*` fallbacks), `otel.headers`/`otel.resource_attributes`, and `otel.traces.enabled`; see `internal/otel/` and the parameter matrix in [usage.md](usage.md#harness-configuration-parameters). `HARNESS_LOG_LEVEL` controls
+Context headers for harness-to-proxy requests. OTEL metrics export is controlled by `otel.enabled`/`otel.endpoint` (`HARNESS_OTEL_*` / `OTEL_EXPORTER_*` fallbacks), `otel.hostname` → `host.name` resource (`HARNESS_OTEL_HOSTNAME`/`OTEL_HOSTNAME` override, defaults to short `os.Hostname()`), `otel.headers`/`otel.resource_attributes`, and `otel.traces.enabled`; see `internal/otel/` and the parameter matrix in [usage.md](usage.md#harness-configuration-parameters). `HARNESS_LOG_LEVEL` controls
 harness diagnostics; `HARNESS_TIMESTAMPS` accepts only `short`, `full`, or `none`.
 `HARNESS_NO_COLOR` is a strict boolean, while non-empty standard `NO_COLOR` is a
 presence-based override. Provider API keys and provider base URLs are resolved

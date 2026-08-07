@@ -317,6 +317,12 @@ var definitions = []parameterDefinition{
 		}
 		return optional[string]{}
 	}, func(c *Config, v string) { c.OTel.ServiceName = v }, func(c Config) string { return c.OTel.ServiceName }, canonicalOTelServiceName, nil, false),
+	strDef("otel.hostname", "otel.hostname", []string{"otel-hostname"}, []string{"HARNESS_OTEL_HOSTNAME", "OTEL_HOSTNAME"}, literal("", "short hostname", "empty disables host.name"), func(f fileConfig) optional[string] {
+		if f.OTel.Set {
+			return f.OTel.Value.Hostname
+		}
+		return optional[string]{}
+	}, func(c *Config, v string) { c.OTel.Hostname = v }, func(c Config) string { return c.OTel.Hostname }, canonicalOTelHostname, nil, false),
 	boolDef("otel.traces.enabled", "otel.traces.enabled", []string{"otel-traces"}, []string{"HARNESS_OTEL_TRACES_ENABLED"}, literal(false, "", ""), func(f fileConfig) optional[bool] {
 		if f.OTel.Set && f.OTel.Value.Traces.Set {
 			return f.OTel.Value.Traces.Value.Enabled

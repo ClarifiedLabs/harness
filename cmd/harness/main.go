@@ -1434,8 +1434,19 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		return ref, nil
 	})
 	// OTEL exporter: opt-in, best-effort. Disabled by default or when endpoint is empty.
-	// The exporter is shared with delegate children via delegate.Runtime extension (future), and
-	// flushed on SIGINT/exit. Keep it alive for the whole session.
+	// Hostname defaults to short OS hostname (host.name) but can be overridden via otel.hostname.
+	hostname := cfg.OTel.Hostname
+	if cfg.OTel.Enabled && cfg.OTel.Hostname == "" {
+		if h, err := os.Hostname(); err == nil {
+			h = strings.TrimSpace(h)
+			if h != "" {
+				if idx := strings.Index(h, "."); idx != -1 {
+					h = h[:idx]
+				}
+				hostname = strings.TrimSpace(h)
+			}
+		}
+	}
 	var otelExp *otel.Exporter
 	if cfg.OTel.Enabled && cfg.OTel.Endpoint != "" {
 		otelCfg := otel.Config{
@@ -1444,6 +1455,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			Protocol:           cfg.OTel.Protocol,
 			Timeout:            time.Duration(cfg.OTel.TimeoutSeconds) * time.Second,
 			ServiceName:        cfg.OTel.ServiceName,
+			Hostname:           hostname,
 			Headers:            cfg.OTel.Headers,
 			ResourceAttributes: cfg.OTel.ResourceAttributes,
 			TracesEnabled:      cfg.OTel.TracesEnabled,

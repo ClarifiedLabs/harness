@@ -614,6 +614,7 @@ environment variables, JSON paths, types, and defaults. The concise
 | `otel.protocol` | `string` | `http/json` | `-otel-protocol` | `HARNESS_OTEL_PROTOCOL` | `otel.protocol` | "http/json" | no | Harness otel.protocol setting. |
 | `otel.timeout_seconds` | `integer` | - | `-otel-timeout` | `HARNESS_OTEL_TIMEOUT` | `otel.timeout_seconds` | 5 (seconds) | no | Harness otel.timeout seconds setting. |
 | `otel.service_name` | `string` | - | `-otel-service-name` | `OTEL_SERVICE_NAME`, `HARNESS_OTEL_SERVICE_NAME` | `otel.service_name` | "harness" | no | Harness otel.service name setting. |
+| `otel.hostname` | `string` | - | `-otel-hostname` | `HARNESS_OTEL_HOSTNAME`, `OTEL_HOSTNAME` | `otel.hostname` | short hostname (empty disables host.name) | no | Harness otel.hostname setting. |
 | `otel.traces.enabled` | `boolean` | `true`, `false` | `-otel-traces` | `HARNESS_OTEL_TRACES_ENABLED` | `otel.traces.enabled` | false | no | Harness otel.traces.enabled setting. |
 | `agents` | `object` | - | - | - | `agents` | unset | no | Structured agents settings. |
 | `mcp.headers` | `object` | - | - | - | `mcp.headers` | unset | yes | Structured mcp.headers settings. |

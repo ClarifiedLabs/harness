@@ -207,4 +207,60 @@ func TestSink_Detailed(t *testing.T) {
 	}
 }
 
+func TestHostNameResource(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		body = data
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	cfg := Config{Enabled: true, Endpoint: srv.URL, Hostname: "myhost.example.com", Timeout: 2 * time.Second}
+	exp, err := NewExporter(cfg, buildinfo.Metadata{Version: "test"}, "", "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exp.RecordSum("harness.test", "{test}", 1, nil)
+	if err := exp.Export(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var req exportMetricsServiceRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, rm := range req.ResourceMetrics {
+		for _, kv := range rm.Resource.Attributes {
+			if kv.Key == "host.name" && kv.Value.StringValue == "myhost.example.com" {
+				found = true
+			}
+			if kv.Key == "host.name" && kv.Value.StringValue == "myhost.example.com." {
+				t.Fatalf("host.name should be short")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("host.name not in resource: %s", string(body))
+	}
+	// resource_attributes host.name should be ignored in favor of otel.hostname
+	cfg2 := Config{Enabled: true, Endpoint: srv.URL, Hostname: "override", Timeout: 2 * time.Second}
+	body = nil
+	exp2, _ := NewExporter(cfg2, buildinfo.Metadata{Version: "test"}, "", "", "", "", map[string]string{"host.name": "should-not-win", "extra": "yes"})
+	exp2.RecordSum("harness.test2", "{test}", 1, nil)
+	if err := exp2.Export(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var req2 exportMetricsServiceRequest
+	if err := json.Unmarshal(body, &req2); err != nil {
+		t.Fatal(err)
+	}
+	for _, rm := range req2.ResourceMetrics {
+		for _, kv := range rm.Resource.Attributes {
+			if kv.Key == "host.name" && kv.Value.StringValue != "override" {
+				t.Fatalf("host.name override failed: %q", kv.Value.StringValue)
+			}
+		}
+	}
+}
+
 
