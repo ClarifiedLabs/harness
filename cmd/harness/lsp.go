@@ -109,9 +109,9 @@ func (r *lspRuntime) Status() ui.LSPStatus {
 
 func lspSystemHint(languages []string) string {
 	if len(languages) == 0 {
-		return "Native lsp_* code-intelligence tools are configured, but no configured language-server binary is on PATH."
+		return "lsp_* tools enabled but no language server on PATH."
 	}
-	return "Native lsp_* code-intelligence tools, when present in this request, have configured language-server binaries available for: " + strings.Join(languages, ", ") + ". Prefer them for semantic navigation, diagnostics, hierarchies, code actions, formatting, and rename when the target language supports the operation."
+	return "lsp_* available for: " + strings.Join(languages, ", ") + ". Prefer lsp_* over search for definitions, references, hover, symbols, diagnostics, and rename."
 }
 
 // warnUnknownLSPTools logs a warning for each configured lsp.tools entry that did

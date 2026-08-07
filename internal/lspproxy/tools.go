@@ -79,31 +79,31 @@ const positionSchema = `{
 var toolSpecs = []toolSpec{
 	{
 		name:        "declaration",
-		description: "Find the declaration of a symbol at a file position; use symbol with a 1-based line when possible.",
+		description: "Find the declaration of a symbol at a file position; use symbol with a 1-based line when possible. Prefer over search.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "definition",
-		description: "Find the definition of a symbol at a file position; use symbol with a 1-based line when possible.",
+		description: "Find the definition of a symbol at a file position; use symbol with a 1-based line when possible. Prefer over search.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "type_definition",
-		description: "Find the type definition of a symbol at a file position.",
+		description: "Find the type definition of a symbol at a file position. Prefer over search.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "implementation",
-		description: "Find implementations of an interface, abstract member, or symbol at a file position.",
+		description: "Find implementations of an interface, abstract member, or symbol at a file position. Prefer over search.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "references",
-		description: "Find cross-file references to a symbol at a file position.",
+		description: "Find cross-file references to a symbol at a file position. Prefer over search.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -120,7 +120,7 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "hover",
-		description: "Show language-server type, signature, and documentation for a symbol at a file position.",
+		description: "Show language-server type, signature, and documentation for a symbol at a file position. Prefer over search.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
@@ -148,13 +148,13 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "document_highlights",
-		description: "Find read, write, and textual occurrences of a symbol in the current file.",
+		description: "Find read, write, and textual occurrences of a symbol in the current file. Prefer over search.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "document_symbols",
-		description: "Return the language-server symbol outline for a file.",
+		description: "Return the language-server symbol outline for a file. Prefer over search.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -166,7 +166,7 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "workspace_symbols",
-		description: "Search symbols by name across one language-server workspace.",
+		description: "Search symbols by name across one language-server workspace. Prefer over search.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -193,7 +193,7 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "call_hierarchy",
-		description: "Find incoming callers or outgoing callees for a symbol at a file position.",
+		description: "Find incoming callers or outgoing callees for a symbol at a file position. Prefer over search.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -210,7 +210,7 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "type_hierarchy",
-		description: "Find direct supertypes or subtypes for a type at a file position.",
+		description: "Find direct supertypes or subtypes for a type at a file position. Prefer over search.",
 		schema: `{
   "type": "object",
   "properties": {
