@@ -16,11 +16,10 @@ import (
 	"time"
 
 	"harness/internal/llm"
-	"harness/internal/workstate"
 )
 
 // AnalysisVersion is the stable schema version emitted by WriteAnalysisJSON.
-const AnalysisVersion = 4
+const AnalysisVersion = 5
 
 const (
 	maxAnalysisTextSessions     = 100
@@ -205,75 +204,6 @@ type ExecutionIdentityAnalysis struct {
 	Model     string `json:"model,omitempty"`
 }
 
-// WorkScopeAnalysis summarizes work.ndjson without exposing objectives,
-// constraints, paths, evidence summaries, or transcript content.
-type WorkScopeAnalysis struct {
-	Available            bool               `json:"available"`
-	Streams              int                `json:"streams"`
-	WorkItems            int                `json:"work_items"`
-	Revisions            int                `json:"revisions"`
-	Structured           int                `json:"structured"`
-	Completed            int                `json:"completed"`
-	Abandoned            int                `json:"abandoned"`
-	Handoffs             int                `json:"handoffs"`
-	Branches             int                `json:"branches"`
-	DecisionGateTrips    int                `json:"decision_gate_trips"`
-	StepTransitions      int                `json:"step_transitions"`
-	EvidenceItems        int                `json:"evidence_items"`
-	EvidenceBatches      int                `json:"evidence_batches"`
-	MutationResults      int                `json:"mutation_results"`
-	DelegateResults      int                `json:"delegate_results"`
-	VerificationPassed   int                `json:"verification_passed"`
-	VerificationFailed   int                `json:"verification_failed"`
-	VerificationNotRun   int                `json:"verification_not_run"`
-	AttributedSteps      int                `json:"attributed_steps"`
-	AttributedToolTurns  int                `json:"attributed_tool_turns"`
-	InspectionOperations int                `json:"inspection_operations"`
-	MutationTurns        int                `json:"mutation_turns"`
-	VerificationAttempts int                `json:"verification_attempts"`
-	ContextResets        int                `json:"context_resets"`
-	ModelSwitches        int                `json:"model_switches"`
-	AgentSwitches        int                `json:"agent_switches"`
-	PromptRelations      map[string]int     `json:"prompt_relations,omitempty"`
-	FirstMutationMS      IntDistribution    `json:"time_to_first_mutation_ms"`
-	TurnsToFirstMutation IntDistribution    `json:"tool_turns_to_first_mutation"`
-	FirstVerificationMS  IntDistribution    `json:"time_to_first_verification_ms"`
-	TurnsToFirstVerify   IntDistribution    `json:"tool_turns_to_first_verification"`
-	Steps                []WorkStepAnalysis `json:"steps,omitempty"`
-	firstMutationMS      []int
-	turnsToFirstMutation []int
-	firstVerificationMS  []int
-	turnsToFirstVerify   []int
-}
-
-// WorkStepAnalysis is a content-free efficiency row keyed only by opaque work
-// and step IDs.
-type WorkStepAnalysis struct {
-	WorkID                string `json:"work_id"`
-	StepID                string `json:"step_id"`
-	DurationMS            int    `json:"duration_ms,omitempty"`
-	ToolTurns             int    `json:"tool_turns"`
-	InspectionOperations  int    `json:"inspection_operations"`
-	MutationTurns         int    `json:"mutation_turns"`
-	VerificationAttempts  int    `json:"verification_attempts"`
-	EvidenceItems         int    `json:"evidence_items"`
-	DelegateResults       int    `json:"delegate_results"`
-	ContextResets         int    `json:"context_resets"`
-	ModelSwitches         int    `json:"model_switches"`
-	AgentSwitches         int    `json:"agent_switches"`
-	TimeToFirstMutationMS int    `json:"time_to_first_mutation_ms,omitempty"`
-	TurnsToFirstMutation  int    `json:"tool_turns_to_first_mutation,omitempty"`
-	TimeToFirstVerifyMS   int    `json:"time_to_first_verification_ms,omitempty"`
-	TurnsToFirstVerify    int    `json:"tool_turns_to_first_verification,omitempty"`
-}
-
-// WorkAnalysis keeps root, descendant, and inclusive scopes distinct.
-type WorkAnalysis struct {
-	Root       WorkScopeAnalysis `json:"root"`
-	Descendant WorkScopeAnalysis `json:"descendant"`
-	Inclusive  WorkScopeAnalysis `json:"inclusive"`
-}
-
 // SessionAnalysis is one physical root or delegate stream.
 type SessionAnalysis struct {
 	Path              string                    `json:"path"`
@@ -297,7 +227,6 @@ type SessionAnalysis struct {
 	Telemetry         TelemetryAnalysis         `json:"telemetry"`
 	Usage             UsageAnalysis             `json:"usage"`
 	Storage           StorageAnalysis           `json:"storage"`
-	Work              WorkScopeAnalysis         `json:"work"`
 }
 
 // TelemetryCoverage counts physical streams carrying each structured signal.
@@ -335,7 +264,6 @@ type AnalysisReport struct {
 	Coverage               TelemetryCoverage   `json:"telemetry_coverage"`
 	Usage                  UsageAnalysis       `json:"usage"`
 	Storage                StorageAnalysis     `json:"storage"`
-	Work                   WorkAnalysis        `json:"work"`
 	Distributions          UsageDistributions  `json:"distributions"`
 	Hierarchies            []HierarchyAnalysis `json:"hierarchies"`
 	Cohorts                []CohortAnalysis    `json:"cohorts"`
@@ -453,7 +381,6 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 		hierarchyWorkflow := WorkflowAnalysis{Outcomes: make(map[string]int)}
 		hierarchyCompletion := CompletionAnalysis{Outcomes: make(map[string]int), Validation: make(map[string]int), Contracts: make(map[string]int), ReviewCoverage: make(map[string]int)}
 		var hierarchyStorage StorageAnalysis
-		var hierarchyWork WorkAnalysis
 		allRawComplete := opts.Before.IsZero()
 		rootItem := -1
 		for _, stream := range streams {
@@ -507,23 +434,17 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 			if err != nil {
 				return AnalysisReport{}, err
 			}
-			item.Work, err = analyzeWork(stream.dir, opts.Before, events)
-			if err != nil {
-				return AnalysisReport{}, err
-			}
 			hierarchy.add(item.Usage)
 			hierarchyExecution.add(item.Execution)
 			hierarchyWorkflow.add(item.Telemetry.Workflow)
 			hierarchyCompletion.add(item.Telemetry.Completion)
 			hierarchyStorage.add(item.Storage)
-			hierarchyWork.add(item.Work, stream.delegate)
 			allRawComplete = allRawComplete && source.Status == "complete"
 			report.Completeness[item.Execution.Completeness]++
 			report.Execution.add(item.Execution)
 			report.Telemetry.add(item.Telemetry)
 			report.Coverage.add(item.Telemetry, events)
 			report.Storage.add(item.Storage)
-			report.Work.add(item.Work, stream.delegate)
 			report.Items = append(report.Items, item)
 			switch source.Status {
 			case "missing":
@@ -550,7 +471,7 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 		report.Hierarchies = append(report.Hierarchies, HierarchyAnalysis{
 			RootPath: root, RootID: rootMeta.id, Cohort: cohort, Sessions: len(streams),
 			Execution: hierarchyExecution, Workflow: hierarchyWorkflow, Completion: hierarchyCompletion,
-			Usage: hierarchy, Storage: hierarchyStorage, Work: hierarchyWork,
+			Usage: hierarchy, Storage: hierarchyStorage,
 		})
 		acc.analysis.Sessions += len(streams)
 		acc.analysis.Execution.add(hierarchyExecution)
@@ -558,7 +479,6 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 		acc.analysis.Completion.add(hierarchyCompletion)
 		acc.analysis.Usage.add(hierarchy)
 		acc.analysis.Storage.add(hierarchyStorage)
-		acc.analysis.Work.addAnalysis(hierarchyWork)
 		if allRawComplete && hierarchy.Inclusive.Complete {
 			rootTotal := addUsageSlice(hierarchy.RootConversational, hierarchy.RootMaintenance)
 			childTotal := addUsageSlice(hierarchy.DescendantConversational, hierarchy.DescendantMaintenance)
@@ -811,7 +731,7 @@ func runtimeProfilePresent(runtime RuntimeProfile) bool {
 		runtime.ToolResultMaxBytes != 0 || runtime.ToolResultMaxLines != 0 ||
 		runtime.CompactToolResultMaxBytes != 0 || runtime.CompactTimeoutSeconds != 0 || runtime.ResponsesStateful ||
 		runtime.DelegateMaxTurns != 0 || runtime.DelegateMaxActive != 0 || runtime.DelegateMaxDescendants != 0 ||
-		runtime.DelegateMaxPerStep != 0 || runtime.Prewarm || runtime.SearchBackend != ""
+		runtime.Prewarm || runtime.SearchBackend != ""
 }
 
 type analysisEventLimits struct {
@@ -1062,341 +982,6 @@ func deriveExecution(events []Event, sourceStatus string) ExecutionAnalysis {
 		out.Completeness = "incomplete"
 	}
 	return out
-}
-
-func analyzeWork(dir string, before time.Time, events []Event) (WorkScopeAnalysis, error) {
-	path := filepath.Join(dir, "work.ndjson")
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return WorkScopeAnalysis{}, nil
-	}
-	if err != nil {
-		return WorkScopeAnalysis{}, fmt.Errorf("session: analyze work: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return WorkScopeAnalysis{}, fmt.Errorf("session: analyze work: invalid file %s", path)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return WorkScopeAnalysis{}, err
-	}
-	defer f.Close()
-
-	out := WorkScopeAnalysis{Available: true, Streams: 1}
-	latest := make(map[string]workstate.State)
-	structured := make(map[string]bool)
-	seenEvidence := make(map[string]bool)
-	seenResults := make(map[string]bool)
-	stepStarted := make(map[string]time.Time)
-	stepCompleted := make(map[string]time.Time)
-	firstMutation := make(map[string]time.Time)
-	firstVerification := make(map[string]time.Time)
-	workCreated := make(map[string]time.Time)
-	stepRows := make(map[string]*WorkStepAnalysis)
-	stepRow := func(key, workID, stepID string) *WorkStepAnalysis {
-		if stepRows[key] == nil {
-			stepRows[key] = &WorkStepAnalysis{WorkID: workID, StepID: stepID}
-		}
-		return stepRows[key]
-	}
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64<<10), maxAnalysisRawLineBytes)
-	var lines [][]byte
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) > 0 {
-			lines = append(lines, append([]byte(nil), line...))
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return WorkScopeAnalysis{}, err
-	}
-	for lineNumber, line := range lines {
-		var revision workstate.Revision
-		if err := json.Unmarshal(line, &revision); err != nil {
-			// A crash may leave only the final append incomplete.
-			if lineNumber == len(lines)-1 {
-				break
-			}
-			return WorkScopeAnalysis{}, fmt.Errorf("session: analyze work line %d: %w", lineNumber+1, err)
-		}
-		if !before.IsZero() && !revision.Time.Before(before) {
-			continue
-		}
-		out.Revisions++
-		state := revision.State
-		workCreated[state.WorkID] = state.CreatedAt
-		previous, hadPrevious := latest[state.WorkID]
-		if state.PlanState != workstate.PlanImplicit {
-			structured[state.WorkID] = true
-		}
-		if revision.Change == "approve_handoff" {
-			out.Handoffs++
-		}
-		if revision.Change == "checkout" {
-			out.Branches++
-		}
-		if state.Gate.DecisionRequired && (!hadPrevious || !previous.Gate.DecisionRequired) {
-			out.DecisionGateTrips++
-		}
-		previousStatus := make(map[string]string, len(previous.Nodes))
-		for _, node := range previous.Nodes {
-			previousStatus[node.ID] = node.Status
-		}
-		evidenceBatch := false
-		for _, node := range state.Nodes {
-			if node.Type != workstate.NodeStep {
-				continue
-			}
-			stepKey := state.WorkID + ":" + node.ID
-			row := stepRow(stepKey, state.WorkID, node.ID)
-			if node.Status == workstate.StatusInProgress && previousStatus[node.ID] != workstate.StatusInProgress && stepStarted[stepKey].IsZero() {
-				stepStarted[stepKey] = revision.Time
-			}
-			if node.Status == workstate.StatusCompleted && previousStatus[node.ID] != workstate.StatusCompleted && stepCompleted[stepKey].IsZero() {
-				stepCompleted[stepKey] = revision.Time
-			}
-			if hadPrevious && previousStatus[node.ID] != node.Status &&
-				(previousStatus[node.ID] != "" || node.Status == workstate.StatusInProgress) {
-				out.StepTransitions++
-			}
-			for _, evidence := range node.Evidence {
-				key := state.WorkID + ":" + evidence.ID
-				if !seenEvidence[key] {
-					seenEvidence[key] = true
-					out.EvidenceItems++
-					evidenceBatch = true
-					row.EvidenceItems++
-				}
-			}
-			for _, result := range node.Results {
-				key := state.WorkID + ":" + result.ID
-				if seenResults[key] {
-					continue
-				}
-				seenResults[key] = true
-				switch result.Kind {
-				case workstate.ResultChange:
-					out.MutationResults++
-					at := result.CreatedAt
-					if at.IsZero() {
-						at = revision.Time
-					}
-					if firstMutation[stepKey].IsZero() || at.Before(firstMutation[stepKey]) {
-						firstMutation[stepKey] = at
-					}
-				case workstate.ResultDelegate:
-					out.DelegateResults++
-					row.DelegateResults++
-				case workstate.ResultVerification:
-					at := result.CreatedAt
-					if at.IsZero() {
-						at = revision.Time
-					}
-					switch result.Status {
-					case workstate.VerifyPassed:
-						out.VerificationPassed++
-						if firstVerification[stepKey].IsZero() || at.Before(firstVerification[stepKey]) {
-							firstVerification[stepKey] = at
-						}
-					case workstate.VerifyFailed:
-						out.VerificationFailed++
-						if firstVerification[stepKey].IsZero() || at.Before(firstVerification[stepKey]) {
-							firstVerification[stepKey] = at
-						}
-					case workstate.VerifyNotRun:
-						out.VerificationNotRun++
-					}
-				}
-			}
-		}
-		if evidenceBatch {
-			out.EvidenceBatches++
-		}
-		latest[state.WorkID] = state
-	}
-	out.WorkItems = len(latest)
-	for workID, state := range latest {
-		if structured[workID] {
-			out.Structured++
-		}
-		switch state.Lifecycle {
-		case workstate.LifecycleCompleted:
-			out.Completed++
-		case workstate.LifecycleAbandoned:
-			out.Abandoned++
-		}
-	}
-	for stepKey, mutationAt := range firstMutation {
-		started := stepStarted[stepKey]
-		if started.IsZero() {
-			workID, _, _ := strings.Cut(stepKey, ":")
-			started = workCreated[workID]
-		}
-		if !mutationAt.IsZero() && !started.IsZero() {
-			elapsed := max(0, int(mutationAt.Sub(started).Milliseconds()))
-			out.firstMutationMS = append(out.firstMutationMS, elapsed)
-			stepRows[stepKey].TimeToFirstMutationMS = elapsed
-		}
-	}
-	for stepKey, verifiedAt := range firstVerification {
-		started := stepStarted[stepKey]
-		if started.IsZero() {
-			workID, _, _ := strings.Cut(stepKey, ":")
-			started = workCreated[workID]
-		}
-		if !verifiedAt.IsZero() && !started.IsZero() {
-			elapsed := max(0, int(verifiedAt.Sub(started).Milliseconds()))
-			out.firstVerificationMS = append(out.firstVerificationMS, elapsed)
-			stepRows[stepKey].TimeToFirstVerifyMS = elapsed
-		}
-	}
-	stepTurns := make(map[string]int)
-	mutatedStep := make(map[string]bool)
-	verifiedStep := make(map[string]bool)
-	attributedSteps := make(map[string]bool)
-	lastIdentity := make(map[string]string)
-	for _, event := range events {
-		if event.Type == EventWorkPromptRelation && event.WorkID != "" {
-			if out.PromptRelations == nil {
-				out.PromptRelations = make(map[string]int)
-			}
-			out.PromptRelations[event.Purpose]++
-		}
-		if event.WorkID == "" || event.WorkStepID == "" {
-			continue
-		}
-		key := event.WorkID + ":" + event.WorkStepID
-		row := stepRow(key, event.WorkID, event.WorkStepID)
-		switch event.Type {
-		case EventTurnProgress:
-			if event.TurnProgress == nil {
-				continue
-			}
-			attributedSteps[key] = true
-			stepTurns[key]++
-			row.ToolTurns++
-			out.AttributedToolTurns++
-			inspections := event.TurnProgress.Activity["inspect"]
-			out.InspectionOperations += inspections
-			row.InspectionOperations += inspections
-			if event.TurnProgress.VerificationAttempt {
-				out.VerificationAttempts++
-				row.VerificationAttempts++
-				if !verifiedStep[key] {
-					verifiedStep[key] = true
-					row.TurnsToFirstVerify = stepTurns[key]
-					out.turnsToFirstVerify = append(out.turnsToFirstVerify, stepTurns[key])
-				}
-			}
-			if event.TurnProgress.SuccessfulMutation {
-				out.MutationTurns++
-				row.MutationTurns++
-				if !mutatedStep[key] {
-					mutatedStep[key] = true
-					row.TurnsToFirstMutation = stepTurns[key]
-					out.turnsToFirstMutation = append(out.turnsToFirstMutation, stepTurns[key])
-				}
-			}
-		case EventWorkContextReset:
-			out.ContextResets++
-			row.ContextResets++
-		case EventTurnAttemptStart:
-			identity := event.Agent + "\x00" + event.Provider + "\x00" + event.Model
-			if previous := lastIdentity[key]; previous != "" && previous != identity {
-				prevAgent, rest, _ := strings.Cut(previous, "\x00")
-				prevProvider, prevModel, _ := strings.Cut(rest, "\x00")
-				if prevAgent != event.Agent {
-					out.AgentSwitches++
-					row.AgentSwitches++
-				}
-				if prevProvider != event.Provider || prevModel != event.Model {
-					out.ModelSwitches++
-					row.ModelSwitches++
-				}
-			}
-			lastIdentity[key] = identity
-		}
-	}
-	out.AttributedSteps = len(attributedSteps)
-	for key, row := range stepRows {
-		if started, completed := stepStarted[key], stepCompleted[key]; !started.IsZero() && !completed.IsZero() {
-			row.DurationMS = max(0, int(completed.Sub(started).Milliseconds()))
-		}
-		out.Steps = append(out.Steps, *row)
-	}
-	sort.Slice(out.Steps, func(i, j int) bool {
-		if out.Steps[i].WorkID != out.Steps[j].WorkID {
-			return out.Steps[i].WorkID < out.Steps[j].WorkID
-		}
-		return out.Steps[i].StepID < out.Steps[j].StepID
-	})
-	out.FirstMutationMS = intDistribution(out.firstMutationMS)
-	out.TurnsToFirstMutation = intDistribution(out.turnsToFirstMutation)
-	out.FirstVerificationMS = intDistribution(out.firstVerificationMS)
-	out.TurnsToFirstVerify = intDistribution(out.turnsToFirstVerify)
-	return out, nil
-}
-
-func (a *WorkScopeAnalysis) add(other WorkScopeAnalysis) {
-	a.Available = a.Available || other.Available
-	a.Streams += other.Streams
-	a.WorkItems += other.WorkItems
-	a.Revisions += other.Revisions
-	a.Structured += other.Structured
-	a.Completed += other.Completed
-	a.Abandoned += other.Abandoned
-	a.Handoffs += other.Handoffs
-	a.Branches += other.Branches
-	a.DecisionGateTrips += other.DecisionGateTrips
-	a.StepTransitions += other.StepTransitions
-	a.EvidenceItems += other.EvidenceItems
-	a.EvidenceBatches += other.EvidenceBatches
-	a.MutationResults += other.MutationResults
-	a.DelegateResults += other.DelegateResults
-	a.VerificationPassed += other.VerificationPassed
-	a.VerificationFailed += other.VerificationFailed
-	a.VerificationNotRun += other.VerificationNotRun
-	a.AttributedSteps += other.AttributedSteps
-	a.AttributedToolTurns += other.AttributedToolTurns
-	a.InspectionOperations += other.InspectionOperations
-	a.MutationTurns += other.MutationTurns
-	a.VerificationAttempts += other.VerificationAttempts
-	a.ContextResets += other.ContextResets
-	a.ModelSwitches += other.ModelSwitches
-	a.AgentSwitches += other.AgentSwitches
-	if len(other.PromptRelations) > 0 {
-		if a.PromptRelations == nil {
-			a.PromptRelations = make(map[string]int)
-		}
-		for relation, count := range other.PromptRelations {
-			a.PromptRelations[relation] += count
-		}
-	}
-	a.Steps = append(a.Steps, other.Steps...)
-	a.firstMutationMS = append(a.firstMutationMS, other.firstMutationMS...)
-	a.FirstMutationMS = intDistribution(a.firstMutationMS)
-	a.turnsToFirstMutation = append(a.turnsToFirstMutation, other.turnsToFirstMutation...)
-	a.TurnsToFirstMutation = intDistribution(a.turnsToFirstMutation)
-	a.firstVerificationMS = append(a.firstVerificationMS, other.firstVerificationMS...)
-	a.FirstVerificationMS = intDistribution(a.firstVerificationMS)
-	a.turnsToFirstVerify = append(a.turnsToFirstVerify, other.turnsToFirstVerify...)
-	a.TurnsToFirstVerify = intDistribution(a.turnsToFirstVerify)
-}
-
-func (a *WorkAnalysis) add(scope WorkScopeAnalysis, descendant bool) {
-	if descendant {
-		a.Descendant.add(scope)
-	} else {
-		a.Root.add(scope)
-	}
-	a.Inclusive.add(scope)
-}
-
-func (a *WorkAnalysis) addAnalysis(other WorkAnalysis) {
-	a.Root.add(other.Root)
-	a.Descendant.add(other.Descendant)
-	a.Inclusive.add(other.Inclusive)
 }
 
 func (e *ExecutionAnalysis) add(other ExecutionAnalysis) {
@@ -2021,20 +1606,6 @@ func WriteAnalysisText(report AnalysisReport, w io.Writer) error {
 	fmt.Fprintf(&b, "  turns/tools/results/errors: %d / %d / %d / %d tool, %d model\n", report.Execution.Turns, report.Execution.ToolCalls, report.Execution.ToolResults, report.Execution.ToolErrors, report.Execution.ModelErrors)
 	fmt.Fprintf(&b, "  command results/failures/cancellations; effective failures: %d / %d / %d; %d\n", report.Execution.CommandResults, report.Execution.CommandFailures, report.Execution.CommandCancellations, report.Execution.EffectiveFailures)
 	fmt.Fprintf(&b, "  terminations: %s\n", formatCountMap(report.Execution.TerminationAvailable, report.Execution.Terminations))
-	fmt.Fprintf(&b, "  work root/descendant/inclusive items: %d / %d / %d; revisions: %d / %d / %d\n",
-		report.Work.Root.WorkItems, report.Work.Descendant.WorkItems, report.Work.Inclusive.WorkItems,
-		report.Work.Root.Revisions, report.Work.Descendant.Revisions, report.Work.Inclusive.Revisions)
-	fmt.Fprintf(&b, "  work completed/structured/mutations/verifications passed/gates/handoffs: %d / %d / %d / %d / %d / %d\n",
-		report.Work.Inclusive.Completed, report.Work.Inclusive.Structured, report.Work.Inclusive.MutationResults,
-		report.Work.Inclusive.VerificationPassed, report.Work.Inclusive.DecisionGateTrips, report.Work.Inclusive.Handoffs)
-	fmt.Fprintf(&b, "  work attributed steps/tool turns/inspection operations/mutation turns: %d / %d / %d / %d; turns to first mutation median/p90: %d / %d\n",
-		report.Work.Inclusive.AttributedSteps, report.Work.Inclusive.AttributedToolTurns,
-		report.Work.Inclusive.InspectionOperations, report.Work.Inclusive.MutationTurns,
-		report.Work.Inclusive.TurnsToFirstMutation.Median, report.Work.Inclusive.TurnsToFirstMutation.P90)
-	fmt.Fprintf(&b, "  work verification attempts/turns to first verification median/p90/context resets/model switches/agent switches: %d / %d / %d / %d / %d / %d\n",
-		report.Work.Inclusive.VerificationAttempts, report.Work.Inclusive.TurnsToFirstVerify.Median,
-		report.Work.Inclusive.TurnsToFirstVerify.P90, report.Work.Inclusive.ContextResets,
-		report.Work.Inclusive.ModelSwitches, report.Work.Inclusive.AgentSwitches)
 	fmt.Fprintf(&b, "  telemetry coverage closure/workflow/progress/hooks/context/count-scope/retention: %d/%d/%d/%d/%d/%d/%d of %d\n", report.Coverage.Closure, report.Coverage.Workflow, report.Coverage.Progress, report.Coverage.Hooks, report.Coverage.Context, report.Coverage.ProviderCountScope, report.Coverage.Retention, report.Coverage.Sessions)
 	fmt.Fprintf(&b, "  delegate completion valid/failures/applicable: %d / %d / %d\n", report.Coverage.CompletionValid, report.Coverage.CompletionCoverageFailures, report.Coverage.CompletionApplicable)
 	writeTelemetryText(&b, "  ", report.Telemetry)

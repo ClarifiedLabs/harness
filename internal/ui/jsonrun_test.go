@@ -802,7 +802,7 @@ func TestRunJSONPromptPreparationRejectionReturnsCorrelatedInputError(t *testing
 func newHandoffJSONApp(t *testing.T, fp *llmtest.FakeProvider, pending *handoff.Pending) (*App, *lockedBuffer, *lockedBuffer, *runstream.Writer) {
 	t.Helper()
 	app, stream, errw, w := newJSONRunApp(t, fp)
-	readyWorkForApp(t, app, "Implement structured handoff")
+	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Handoff = pending
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
@@ -815,7 +815,7 @@ func handoffPlanStep(pending *handoff.Pending) llmtest.Step {
 		Events: []llm.StreamEvent{textDelta("plan ready")},
 		Stop:   llm.StopEndTurn,
 		Block: func(context.Context) {
-			pending.Request(handoff.Request{Brief: "env: go test", ArtifactPath: "/p/0001.plan.md"})
+			pending.Request(handoff.Request{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
 		},
 	}
 }
@@ -872,9 +872,12 @@ func TestRunJSONHandoffApprovalStartsImplementation(t *testing.T) {
 		t.Fatalf("approval_request count = %d, want 1", len(approvals))
 	}
 	approval := approvals[0]
-	work := app.Work.Snapshot()
+	latest, ok := app.Plans.Latest()
+	if !ok {
+		t.Fatal("test app has no recorded plan")
+	}
 	if approval["kind"] != "implementation_handoff" || approval["brief"] != "env: go test" ||
-		approval["plan_path"] != work.ArtifactPath || approval["work_id"] != work.WorkID || approval["revision_id"] != work.RevisionID || approval["agent"] != "auto" || approval["id"] == nil {
+		approval["plan_path"] != latest.Path || approval["agent"] != "auto" || approval["id"] == nil || approval["work_id"] != nil || approval["revision_id"] != nil {
 		t.Fatalf("approval_request = %v", approval)
 	}
 	id, _ := approval["id"].(string)
@@ -1229,7 +1232,7 @@ func TestRunJSONHandoffSwitchFailureSurfaces(t *testing.T) {
 	pending := handoff.NewPending()
 	fp := llmtest.New("fake", handoffPlanStep(pending))
 	app, stream, errw, w := newJSONRunApp(t, fp)
-	readyWorkForApp(t, app, "Implement structured handoff")
+	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Handoff = pending
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{}, errors.New("no such agent")

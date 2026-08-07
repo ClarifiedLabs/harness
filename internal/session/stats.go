@@ -164,7 +164,7 @@ type toolStats struct {
 	commands            commandStats
 	parallel            parallelStats
 	turns               int
-	soloWorkTurns       int
+	soloTodoTurns       int
 	singleInspectTurns  int
 	resultErrors        int
 	resultTruncations   int
@@ -733,8 +733,8 @@ func collectToolStats(events []Event) (toolStats, error) {
 		if len(names) != 1 {
 			continue
 		}
-		if names[0] == "update_work" || names[0] == "set_work_plan" {
-			stats.soloWorkTurns++
+		if names[0] == "update_todos" {
+			stats.soloTodoTurns++
 		}
 		switch names[0] {
 		case "read_file", "search", "rg", "grep", "glob", "list_dir", "git_readonly":
@@ -1038,7 +1038,7 @@ func (stats *toolStats) add(other toolStats) {
 	}
 	stats.calls += other.calls
 	stats.turns += other.turns
-	stats.soloWorkTurns += other.soloWorkTurns
+	stats.soloTodoTurns += other.soloTodoTurns
 	stats.singleInspectTurns += other.singleInspectTurns
 	stats.resultErrors += other.resultErrors
 	stats.resultTruncations += other.resultTruncations
@@ -1217,10 +1217,10 @@ func writeSessionStats(w io.Writer, report statsReport) {
 		fmt.Fprintln(w)
 	}
 	if state.Runtime.SearchBackend != "" {
-		fmt.Fprintf(w, "  runtime: retention=%s context=%d search=%s delegate-max=%d active=%d descendants=%d per-step=%d prewarm=%t\n",
+		fmt.Fprintf(w, "  runtime: retention=%s context=%d search=%s delegate-max=%d active=%d descendants=%d prewarm=%t\n",
 			state.Runtime.RetentionPolicy, state.Runtime.ContextWindow, state.Runtime.SearchBackend,
 			state.Runtime.DelegateMaxTurns, state.Runtime.DelegateMaxActive, state.Runtime.DelegateMaxDescendants,
-			state.Runtime.DelegateMaxPerStep, state.Runtime.Prewarm)
+			state.Runtime.Prewarm)
 	}
 }
 
@@ -1364,7 +1364,7 @@ func writeOverallToolStats(w io.Writer, report statsReport) {
 	if all.turns > 0 {
 		fmt.Fprintf(w, "  calls per tool-bearing turn: %.2f\n", float64(all.calls)/float64(all.turns))
 	}
-	writeSplitValue(w, "  ", "standalone work-state turns", all.soloWorkTurns, root.soloWorkTurns, delegates.soloWorkTurns)
+	writeSplitValue(w, "  ", "standalone TODO turns", all.soloTodoTurns, root.soloTodoTurns, delegates.soloTodoTurns)
 	writeSplitValue(w, "  ", "single inspection turns", all.singleInspectTurns, root.singleInspectTurns, delegates.singleInspectTurns)
 	fmt.Fprintf(w, "  results: %d errors / %d truncated / %d B shown / %d B original\n",
 		all.resultErrors, all.resultTruncations, all.resultShownBytes, all.resultOriginalBytes)

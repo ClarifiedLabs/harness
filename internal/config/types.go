@@ -34,7 +34,6 @@ const (
 	defaultDelegateMaxDepth       = 3
 	defaultDelegateMaxActive      = 4
 	defaultDelegateMaxDescendants = 16
-	defaultDelegateMaxPerStep     = 4
 	defaultDelegateTmuxMaxWindows = 4
 	defaultToolTimeoutSeconds     = 600
 	defaultCompactTriggerPercent  = 78
@@ -66,12 +65,12 @@ type LoadOptions struct {
 // controls. Config is embedded so callers can deliberately select result.Config
 // while field promotion keeps inspection convenient.
 type Result struct {
-	Config             Config
-	Run                RunOptions
-	Sources            map[string]configmeta.Source
-	ConfigPath         string // global or explicit file (never project)
-	ProjectConfigPath  string // discovered .harness/config.json, if any
-	fileReferences     []configFileReference
+	Config            Config
+	Run               RunOptions
+	Sources           map[string]configmeta.Source
+	ConfigPath        string // global or explicit file (never project)
+	ProjectConfigPath string // discovered .harness/config.json, if any
+	fileReferences    []configFileReference
 }
 
 type configFileReference struct {
@@ -142,7 +141,6 @@ type Config struct {
 	DelegateMaxDepth                   int     `json:"delegate_max_depth"`
 	DelegateMaxActive                  int     `json:"delegate_max_active"`
 	DelegateMaxDescendants             int     `json:"delegate_max_descendants"`
-	DelegateMaxPerStep                 int     `json:"delegate_max_per_step"`
 	DelegateOutput                     string  `json:"delegate_output"`
 	DelegateTmux                       bool    `json:"delegate_tmux"`
 	DelegateTmuxMaxWindows             int     `json:"delegate_tmux_max_windows"`

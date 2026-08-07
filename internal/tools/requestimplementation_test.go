@@ -8,51 +8,28 @@ import (
 	"testing"
 
 	"harness/internal/handoff"
-	"harness/internal/workstate"
+	"harness/internal/plan"
 )
 
 func runRequestImpl(t *testing.T, tool *requestImplementation, args map[string]any) (string, error) {
 	t.Helper()
-	b, err := json.Marshal(args)
+	input, err := json.Marshal(args)
 	if err != nil {
-		t.Fatalf("marshal: %v", err)
+		t.Fatal(err)
 	}
-	return tool.Run(context.Background(), b)
+	return tool.Run(context.Background(), input)
 }
 
-func readyImplementationWork(t *testing.T) *workstate.Store {
-	t.Helper()
-	dir := t.TempDir()
-	store := workstate.NewStore(func() string { return dir })
-	root, err := store.NewWork("Implement the plan", "user")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = store.SetPlan(workstate.PlanUpdate{
-		BaseRevisionID: root.RevisionID,
-		Title:          "Implementation",
-		PlanState:      workstate.PlanReady,
-		Nodes: []workstate.NodeDefinition{{
-			ID: "change", Type: workstate.NodeStep, Title: "Change code", Kind: workstate.KindChange,
-			Actions: []string{"edit"}, ExitCriteria: []string{"implemented"},
-		}},
-	}, "model")
-	if err != nil {
-		t.Fatal(err)
-	}
+func recordedPlan() *plan.Store {
+	store := plan.NewStore()
+	store.Replace(&plan.Plan{Title: "Implementation", Body: "Change the code and run tests.", Path: "/session/plans/0001-implementation.plan.md"})
 	return store
 }
 
-func TestRequestImplementationRecordsReadyWork(t *testing.T) {
+func TestRequestImplementationRecordsLatestPlan(t *testing.T) {
 	pending := handoff.NewPending()
-	store := readyImplementationWork(t)
-	tool := NewRequestImplementation(pending, store, true, []string{"auto", "plan"})
-
-	out, err := runRequestImpl(t, tool, map[string]any{
-		"brief": "tests run with go test",
-		"agent": "auto",
-		"model": "ignored-model",
-	})
+	tool := NewRequestImplementation(pending, recordedPlan(), true, []string{"auto", "plan"})
+	out, err := runRequestImpl(t, tool, map[string]any{"brief": "preserve the API", "agent": "auto"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,75 +37,41 @@ func TestRequestImplementationRecordsReadyWork(t *testing.T) {
 		t.Fatalf("receipt = %q", out)
 	}
 	req, ok := pending.Take()
-	if !ok {
-		t.Fatal("no pending handoff recorded")
-	}
-	if req.Agent != "auto" || req.ArtifactPath == "" || req.Brief != "tests run with go test" || req.Model != "" {
-		t.Fatalf("request = %+v", req)
-	}
-}
-
-func TestRequestImplementationAllowsEmptySupplementaryBrief(t *testing.T) {
-	pending := handoff.NewPending()
-	if _, err := runRequestImpl(t, NewRequestImplementation(pending, readyImplementationWork(t), true, nil), map[string]any{}); err != nil {
-		t.Fatal(err)
-	}
-	if req, ok := pending.Take(); !ok || req.Brief != "" {
+	if !ok || req.Agent != "auto" || req.Brief != "preserve the API" || req.PlanPath != "/session/plans/0001-implementation.plan.md" {
 		t.Fatalf("request = %+v, present=%v", req, ok)
 	}
 }
 
-func TestRequestImplementationRequiresReadyWork(t *testing.T) {
-	store := workstate.NewStore(nil)
-	if _, err := store.NewWork("Draft", "user"); err != nil {
-		t.Fatal(err)
+func TestRequestImplementationRequiresRecordedPlan(t *testing.T) {
+	for _, store := range []*plan.Store{nil, plan.NewStore()} {
+		if out, err := runRequestImpl(t, NewRequestImplementation(handoff.NewPending(), store, true, nil), nil); err == nil || !strings.Contains(err.Error(), "plan") {
+			t.Fatalf("Run = %q, %v; want plan error", out, err)
+		}
 	}
-	if out, err := runRequestImpl(t, NewRequestImplementation(handoff.NewPending(), store, true, nil), map[string]any{}); err == nil || !strings.Contains(err.Error(), "set_work_plan") || !strings.Contains(err.Error(), "no explicit plan") {
-		t.Fatalf("draft handoff should fail, got %q", out)
+	store := plan.NewStore()
+	store.Replace(&plan.Plan{Title: "Incomplete", Body: "body"})
+	if _, err := runRequestImpl(t, NewRequestImplementation(handoff.NewPending(), store, true, nil), nil); err == nil {
+		t.Fatal("plan without an artifact path was accepted")
 	}
 }
 
 func TestRequestImplementationRejectsUnknownAgentAndOneShot(t *testing.T) {
 	pending := handoff.NewPending()
-	tool := NewRequestImplementation(pending, readyImplementationWork(t), true, []string{"auto", "plan"})
+	tool := NewRequestImplementation(pending, recordedPlan(), true, []string{"auto", "plan"})
 	if _, err := runRequestImpl(t, tool, map[string]any{"agent": "implementation"}); err == nil || !strings.Contains(err.Error(), "agent must be one of") {
-		t.Fatalf("unknown agent error = %v", err)
+		t.Fatalf("unknown-agent error = %v", err)
 	}
 	if _, ok := pending.Take(); ok {
 		t.Fatal("invalid request was recorded")
 	}
-	tool = NewRequestImplementation(pending, readyImplementationWork(t), false, nil)
-	if _, err := runRequestImpl(t, tool, map[string]any{}); err == nil || !strings.Contains(err.Error(), "interactive") {
+	tool = NewRequestImplementation(pending, recordedPlan(), false, nil)
+	if _, err := runRequestImpl(t, tool, nil); err == nil || !strings.Contains(err.Error(), "interactive") {
 		t.Fatalf("one-shot error = %v", err)
 	}
 }
 
-func agentSchemaField(t *testing.T, tool *requestImplementation) map[string]any {
-	t.Helper()
-	var schema struct {
-		Properties map[string]json.RawMessage `json:"properties"`
-	}
-	if err := json.Unmarshal(tool.Schema(), &schema); err != nil {
-		t.Fatal(err)
-	}
-	var field map[string]any
-	if err := json.Unmarshal(schema.Properties["agent"], &field); err != nil {
-		t.Fatal(err)
-	}
-	return field
-}
-
 func TestRequestImplementationSchemaKeepsSmallSurface(t *testing.T) {
-	tool := NewRequestImplementation(handoff.NewPending(), readyImplementationWork(t), true, []string{"auto", "plan"})
-	field := agentSchemaField(t, tool)
-	values := field["enum"].([]any)
-	got := make([]string, len(values))
-	for i, value := range values {
-		got[i], _ = value.(string)
-	}
-	if !slices.Equal(got, []string{"auto", "plan"}) {
-		t.Fatalf("agent enum = %v", got)
-	}
+	tool := NewRequestImplementation(handoff.NewPending(), recordedPlan(), true, []string{"auto", "plan"})
 	var schema struct {
 		Properties map[string]json.RawMessage `json:"properties"`
 		Required   []string                   `json:"required"`
@@ -138,5 +81,17 @@ func TestRequestImplementationSchemaKeepsSmallSurface(t *testing.T) {
 	}
 	if len(schema.Required) != 0 || len(schema.Properties) != 2 || schema.Properties["model"] != nil || schema.Properties["plan_path"] != nil {
 		t.Fatalf("schema = %+v", schema)
+	}
+	var agent map[string]any
+	if err := json.Unmarshal(schema.Properties["agent"], &agent); err != nil {
+		t.Fatal(err)
+	}
+	values := agent["enum"].([]any)
+	got := make([]string, len(values))
+	for i := range values {
+		got[i], _ = values[i].(string)
+	}
+	if !slices.Equal(got, []string{"auto", "plan"}) {
+		t.Fatalf("agent enum = %v", got)
 	}
 }

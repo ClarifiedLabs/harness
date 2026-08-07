@@ -135,7 +135,7 @@ func TestSafeToolActivityUsesArgumentAllowlist(t *testing.T) {
 	resultBody := "raw result secret"
 	sinkRegistry := NewActivityRegistry(nil)
 	registration := sinkRegistry.Register(ActivityStart{ID: "child", Agent: "explore"})
-	sink := newChildSink("", nil, registration)
+	sink := newChildSink("", nil, false, nil, registration)
 	sink.ToolStart(llm.ToolCall{ID: "call", Name: "run_command", Input: json.RawMessage(`{"command":"echo secret"}`)})
 	sink.ToolResult(llm.ToolResult{ForID: "call", Text: resultBody, IsError: true})
 	if activity := sinkRegistry.Snapshot().Recent.Activity; strings.Contains(activity, "secret") || activity != "tool run_command failed" {
@@ -147,7 +147,7 @@ func TestChildSinkDoesNotRetainAssistantTextInActivity(t *testing.T) {
 	registry := NewActivityRegistry(nil)
 	registration := registry.Register(ActivityStart{ID: "child", Agent: "explore"})
 	defer registration.Finish("completed", 0)
-	sink := newChildSink("", nil, registration)
+	sink := newChildSink("", nil, false, nil, registration)
 	sink.TextDelta("Authorization: Bearer secret-token")
 
 	got := registry.Snapshot().Recent.Activity

@@ -43,6 +43,7 @@ import (
 	"harness/internal/mcptools"
 	modelclient "harness/internal/modelproxy/client"
 	"harness/internal/modelproxy/protocol"
+	"harness/internal/plan"
 	"harness/internal/reasoningprofile"
 	"harness/internal/runstream"
 	"harness/internal/session"
@@ -51,10 +52,10 @@ import (
 	"harness/internal/term"
 	"harness/internal/term/highlight"
 	"harness/internal/tmux"
+	"harness/internal/todo"
 	"harness/internal/tools"
 	"harness/internal/tracing"
 	"harness/internal/ui"
-	"harness/internal/workstate"
 )
 
 const modelProxyCheckTimeout = 2 * time.Second
@@ -485,7 +486,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		return ui.ExitUsage
 	}
 	if interactiveSession || machineInteractive {
-		enableInteractiveAutoHandoff(agents)
+		enableInteractivePlanHandoff(agents)
 	}
 	agentName := cfg.Agent
 	agentSource := result.Sources["agent"]
@@ -730,7 +731,6 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		DelegateMaxTurns:          cfg.DelegateMaxTurns,
 		DelegateMaxActive:         cfg.DelegateMaxActive,
 		DelegateMaxDescendants:    cfg.DelegateMaxDescendants,
-		DelegateMaxPerStep:        cfg.DelegateMaxPerStep,
 		Prewarm:                   env.prewarmCache && !env.stdinPiped && prewarmForProvider(catalog, cfg.Provider),
 		SearchBackend:             searchBackend(),
 	}
@@ -781,13 +781,13 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		childViewer = setupDelegateTmuxViewer(cfg, getenv, stderr, logger, delegateTmuxExplicit, runOptions.Quiet)
 		defer childViewer.Shutdown()
 	}
-	workStore := workstate.NewStore(func() string { return delegateState.Snapshot().SessionPath })
+	todoStore := todo.NewStore()
+	planStore := plan.NewStore()
 	delegateOpts := delegate.Options{
 		MaxTurns:                  cfg.DelegateMaxTurns,
 		MaxDepth:                  cfg.DelegateMaxDepth,
 		MaxActiveDescendants:      cfg.DelegateMaxActive,
 		MaxTotalDescendants:       cfg.DelegateMaxDescendants,
-		MaxDelegatesPerStep:       cfg.DelegateMaxPerStep,
 		CompactKeepTurns:          cfg.CompactKeepTurns,
 		CompactKeepTokens:         cfg.CompactKeepTokens,
 		CompactTriggerPercent:     cfg.CompactTriggerPercent,
@@ -803,7 +803,6 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			return delegateAgentCandidates(agents)
 		},
 		ActivityRegistry: delegateActivity,
-		WorkSnapshot:     workStore.Snapshot,
 	}
 	if cfg.DelegateTmux {
 		// The closure stays non-nil even when setup degraded to a nil viewer:
@@ -817,18 +816,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	toolCatalog.Register(delegate.NewTool(delegateRunner, backgroundManager))
 	toolCatalog.Register(background.NewJobsTool(backgroundManager))
 	handoffPending := handoff.NewPending()
-	toolCatalog.Register(tools.NewSetWorkPlan(workStore))
-	toolCatalog.Register(tools.NewUpdateWork(workStore))
-	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, workStore, interactiveSession || machineInteractive, agentdef.Names(agents)))
-	toolCatalog.SetDispatchGuard(func(call llm.ToolCall, activity tools.Activity) error {
-		if guidance := workStore.DecisionGuidance(); guidance != "" && tools.InspectionBoundaryBlocked(call, activity) {
-			return fmt.Errorf("%s (inspection tool %q is paused)", guidance, call.Name)
-		}
-		return nil
-	})
-	toolCatalog.SetSpecFilter(func(name string) bool {
-		return !workStore.DecisionRequired() || tools.InspectionToolVisibleAtBoundary(name)
-	})
+	toolCatalog.Register(todo.NewTool(todoStore))
+	toolCatalog.Register(plan.NewTool(planStore, func() string { return delegateState.Snapshot().SessionPath }))
+	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, planStore, interactiveSession || machineInteractive, agentdef.Names(agents)))
 	// Goals are managed exclusively by the interactive /goal command.
 	goalStore := goal.NewStore()
 	// MCP (opt-in): one-shot runs synchronously so the single request can use MCP
@@ -1199,27 +1189,8 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			fmt.Fprintf(stderr, "harness: session model %q overridden by %q (flags win)\n", s.Model, cfg.Model)
 		}
 		ag.SetTranscript(s.Messages)
-		if !resumeCloned {
-			if err := workStore.LoadLog(sessionPath); err != nil {
-				fmt.Fprintf(stderr, "harness: restore work revisions: %v\n", err)
-				return ui.ExitRuntime
-			}
-		}
-		if err := workStore.Restore(s.Work); err != nil {
-			fmt.Fprintf(stderr, "harness: restore work state: %v\n", err)
-			return ui.ExitRuntime
-		}
-		if resumeCloned {
-			if _, err := workStore.RebaseCurrent("host", "clone"); err != nil {
-				fmt.Fprintf(stderr, "harness: clone work state: %v\n", err)
-				return ui.ExitRuntime
-			}
-		} else {
-			if err := workStore.ValidateCurrentRevision(); err != nil {
-				fmt.Fprintf(stderr, "harness: restore work state: %v\n", err)
-				return ui.ExitRuntime
-			}
-		}
+		todoStore.Restore(s.Todos)
+		planStore.Replace(s.Plan)
 		goalStore.Restore(s.Goal)
 		resumedUsageByModel = s.UsageByModel
 		totals = s.Usage
@@ -1363,7 +1334,8 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		},
 		SwitchAgent:                  switchAgent,
 		ControlLSP:                   controlLSP,
-		Work:                         workStore,
+		Todos:                        todoStore,
+		Plans:                        planStore,
 		Goal:                         goalStore,
 		GoalMaxContinuations:         cfg.GoalMaxContinuations,
 		GoalAutoContinue:             interactiveSession,
@@ -1409,8 +1381,8 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	}
 	if resumed != nil {
 		app.PromptNumber = resumed.Prompt
-		if resumed.Work != nil {
-			app.ArmWorkContext("session resumed")
+		if len(resumed.Todos) > 0 {
+			app.ArmTodoContext()
 		}
 	}
 	// Wire the MCP tool-list refresh hook for the interactive REPL only: one-shot
@@ -1811,18 +1783,18 @@ func resolveConfiguredAgents(cfg config.Config) (map[string]agentdef.Definition,
 	return agents, nil
 }
 
-func enableInteractiveAutoHandoff(agents map[string]agentdef.Definition) {
-	auto, ok := agents[agentdef.Default]
+func enableInteractivePlanHandoff(agents map[string]agentdef.Definition) {
+	planning, ok := agents["plan"]
 	if !ok {
 		return
 	}
-	for _, name := range auto.AllowedTools {
+	for _, name := range planning.AllowedTools {
 		if name == "request_implementation" {
 			return
 		}
 	}
-	auto.AllowedTools = append(auto.AllowedTools, "request_implementation")
-	agents[agentdef.Default] = auto
+	planning.AllowedTools = append(planning.AllowedTools, "request_implementation")
+	agents["plan"] = planning
 }
 
 func searchBackend() string {

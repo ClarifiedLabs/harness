@@ -94,11 +94,6 @@ func OneShot(app *App, prompt string) int {
 	pendingUnsupportedNotice := len(app.PendingImages) > 0 && !app.currentModelSupportsImages()
 	images := app.takePendingImages()
 	images = app.attachPromptImageReferences(prompt, images, pendingUnsupportedNotice)
-	if err := app.ensureWork(prompt); err != nil {
-		fmt.Fprintf(app.Errw, "[work admission failed: %v]\n", err)
-		emitRejectedOneShot(app, ExitRuntime, "work admission failed: "+err.Error())
-		return ExitRuntime
-	}
 	if app.RunStream != nil {
 		app.RunStream.PromptStart(runstream.PromptStart{HasImages: len(images) > 0})
 	}
@@ -160,7 +155,6 @@ func OneShot(app *App, prompt string) int {
 		return ExitInterrupt
 	}
 	app.stopBackgroundJobs()
-	app.completeImplicitWork(err, sink.FinalText(), false)
 	if app.Renderer != nil {
 		app.Renderer.StopProgress()
 	}

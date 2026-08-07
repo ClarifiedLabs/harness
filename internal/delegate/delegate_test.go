@@ -20,7 +20,6 @@ import (
 	"harness/internal/llm/llmtest"
 	"harness/internal/session"
 	"harness/internal/tools"
-	"harness/internal/workstate"
 )
 
 type fakeChildTool struct {
@@ -203,6 +202,17 @@ func TestMissingToolsPreservesRequiredOrder(t *testing.T) {
 		[]string{"read_file", "run_command"},
 	)
 	want := []string{"write_file", "apply_patch"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("missing tools = %v, want %v", got, want)
+	}
+}
+
+func TestMissingToolsExemptsAgentLocalCoordination(t *testing.T) {
+	got := MissingTools(
+		[]string{"read_file", updateTodosToolName, recordPlanToolName, requestImplementationToolName, "write_file"},
+		[]string{"read_file"},
+	)
+	want := []string{"write_file"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("missing tools = %v, want %v", got, want)
 	}
@@ -469,7 +479,7 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 		t.Fatalf("continuation delta messages = %+v", request.Messages)
 	}
 	if len(request.RequestContext) != 0 {
-		t.Fatalf("continuation should reuse its transcript without a repeated work capsule: %+v", request.RequestContext)
+		t.Fatalf("continuation should reuse its transcript without a repeated TODO reminder: %+v", request.RequestContext)
 	}
 
 	sourceDir := session.ChildSessionDir(fixture.sessionPath, "source")
@@ -500,9 +510,6 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 			continuedState.ResponseState.AnchorDigest,
 		) {
 		t.Fatalf("continued response state = %+v", continuedState.ResponseState)
-	}
-	if continuedState.Work == nil || continuedState.Work.WorkID != sourceState.Work.WorkID || continuedState.Work.Lifecycle != workstate.LifecycleCompleted || sourceState.Work.Lifecycle != workstate.LifecycleActive {
-		t.Fatalf("continued work = %+v, source work = %+v", continuedState.Work, sourceState.Work)
 	}
 	if len(continuedState.Messages) != len(sourceState.Messages)+2 {
 		t.Fatalf("continued messages = %d, want source %d + 2", len(continuedState.Messages), len(sourceState.Messages))
@@ -535,28 +542,25 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 	}
 }
 
-func TestDelegateBudgetEnforcesRootAndStepLimits(t *testing.T) {
-	budget := newDelegateBudget(Options{MaxActiveDescendants: 1, MaxTotalDescendants: 2, MaxDelegatesPerStep: 1})
-	release, err := budget.acquire("child-1", "work:step-a", false)
+func TestDelegateBudgetEnforcesRootLimits(t *testing.T) {
+	budget := newDelegateBudget(Options{MaxActiveDescendants: 1, MaxTotalDescendants: 2})
+	release, err := budget.acquire("child-1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := budget.acquire("child-2", "work:step-b", false); err == nil || !strings.Contains(err.Error(), "active descendant") {
+	if _, err := budget.acquire("child-2", false); err == nil || !strings.Contains(err.Error(), "active descendant") {
 		t.Fatalf("active limit error = %v", err)
 	}
 	release()
-	if _, err := budget.acquire("child-2", "work:step-a", false); err == nil || !strings.Contains(err.Error(), "step limit") {
-		t.Fatalf("step limit error = %v", err)
-	}
-	release, err = budget.acquire("child-2", "work:step-b", false)
+	release, err = budget.acquire("child-2", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	release()
-	if _, err := budget.acquire("child-3", "work:step-c", false); err == nil || !strings.Contains(err.Error(), "total descendant") {
+	if _, err := budget.acquire("child-3", false); err == nil || !strings.Contains(err.Error(), "total descendant") {
 		t.Fatalf("total limit error = %v", err)
 	}
-	continued, err := budget.acquire("child-1", "work:step-a", true)
+	continued, err := budget.acquire("child-1", true)
 	if err != nil {
 		t.Fatalf("continuation should reuse total budget: %v", err)
 	}
@@ -1396,9 +1400,6 @@ func TestDelegatePersistsClosedTurnBeforeNextModelResponse(t *testing.T) {
 	if len(recovered.Messages) != 3 || recovered.Usage.InputTokens != 13 || recovered.Usage.OutputTokens != 4 {
 		t.Fatalf("child checkpoint messages/usage = %d/%+v", len(recovered.Messages), recovered.Usage)
 	}
-	if recovered.Work == nil || recovered.Work.Objective != "checkpoint child work" {
-		t.Fatalf("child checkpoint work = %+v", recovered.Work)
-	}
 	if recovered.ResponseState == nil ||
 		recovered.ResponseState.PreviousResponseID != "child-resp-1" ||
 		recovered.ResponseState.AnchorMessages != 2 ||
@@ -1628,7 +1629,7 @@ func TestDelegateTerminalizesPostMetadataSetupFailure(t *testing.T) {
 
 func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	dir := t.TempDir()
-	sink := newChildSink(dir, NewProgress(), nil)
+	sink := newChildSink(dir, nil, false, NewProgress(), nil)
 	ctx := agent.ContextEstimate{Total: 123, Window: 456, System: 7, Tools: 8, Messages: 9}
 	sink.User("inspect")
 	sink.TurnAttemptStart(2, 3, ctx)
@@ -1726,129 +1727,9 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	}
 }
 
-func TestChildSinkInspectionBoundaryCountsBatchedOperations(t *testing.T) {
-	dir := t.TempDir()
-	store := workstate.NewStore(func() string { return dir })
-	state, err := store.NewWork("inspect without looping", "user")
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry := tools.Default()
-	sink := newChildSink(dir, NewProgress(), nil)
-	sink.work = store
-	sink.toolActivity = registry.CallActivity
-	sink.ToolStart(llm.ToolCall{
-		ID: "batch-12", Name: "read_file",
-		Input: json.RawMessage(`{"paths":["a","b","c","d","e","f","g","h","i","j","k","l"]}`),
-	})
-	sink.TurnProgress(agent.TurnProgress{Turn: 1})
-	state = store.Snapshot()
-	if state.Gate.InspectionOperations != workstate.DecisionOperationThreshold || state.Gate.DecisionRequired || state.Gate.GraceOperations != workstate.InspectionGraceOperations {
-		t.Fatalf("child gate = %+v", state.Gate)
-	}
-	if !sink.workContextPending {
-		t.Fatal("child did not arm the retained WorkState capsule")
-	}
-	sink.workContextPending = false
-	sink.ToolStart(llm.ToolCall{
-		ID: "grace-4", Name: "read_file",
-		Input: json.RawMessage(`{"paths":["m","n","o","p"]}`),
-	})
-	sink.TurnProgress(agent.TurnProgress{Turn: 2})
-	state = store.Snapshot()
-	if !state.Gate.DecisionRequired || state.Gate.GraceOperations != 0 || !sink.workContextPending {
-		t.Fatalf("child hard gate = %+v pending=%v", state.Gate, sink.workContextPending)
-	}
-}
-
-func TestChildImplicitInspectionEvidenceSurvivesPlanPromotion(t *testing.T) {
-	dir := t.TempDir()
-	store := workstate.NewStore(func() string { return dir })
-	if _, err := store.NewWork("review telemetry", "user"); err != nil {
-		t.Fatal(err)
-	}
-	registry := tools.Default()
-	sink := newChildSink(dir, NewProgress(), nil)
-	sink.work = store
-	sink.toolActivity = registry.CallActivity
-	call := llm.ToolCall{ID: "implicit-read", Name: "read_file", Input: json.RawMessage(`{"path":"internal/tools/runcommand.go"}`)}
-	sink.ToolStart(call)
-	sink.ToolResult(llm.ToolResult{ForID: call.ID, Text: "package tools"})
-	implicit := store.Snapshot()
-	var implicitNode *workstate.Node
-	for i := range implicit.Nodes {
-		if implicit.Nodes[i].ID == implicit.ActiveStepID {
-			implicitNode = &implicit.Nodes[i]
-		}
-	}
-	if implicit.PlanState != workstate.PlanImplicit || implicitNode == nil || len(implicitNode.Evidence) != 1 || sink.workContextPending {
-		t.Fatalf("implicit child observation = state=%+v pending=%v", implicit, sink.workContextPending)
-	}
-	planned, err := store.SetPlan(workstate.PlanUpdate{
-		BaseRevisionID: implicit.RevisionID,
-		PlanState:      workstate.PlanDraft,
-		ActiveStepID:   "inspect",
-		Nodes:          []workstate.NodeDefinition{{ID: "inspect", Type: workstate.NodeStep, Title: "Inspect", Kind: workstate.KindDiscover}},
-	}, "model")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var plannedNode *workstate.Node
-	for i := range planned.Nodes {
-		if planned.Nodes[i].ID == "inspect" {
-			plannedNode = &planned.Nodes[i]
-		}
-	}
-	if plannedNode == nil || len(plannedNode.Evidence) != 1 || plannedNode.Evidence[0].ToolCallID != call.ID {
-		t.Fatalf("promoted child observation = %+v", planned)
-	}
-}
-
-func TestChildSinkDoesNotMarkFailedCommandVerificationPassed(t *testing.T) {
-	dir := t.TempDir()
-	store := workstate.NewStore(func() string { return dir })
-	root, err := store.NewWork("verify command outcome", "user")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.SetPlan(workstate.PlanUpdate{
-		BaseRevisionID: root.RevisionID,
-		PlanState:      workstate.PlanReady,
-		ActiveStepID:   "verify",
-		Nodes:          []workstate.NodeDefinition{{ID: "verify", Type: workstate.NodeStep, Title: "Verify", Kind: workstate.KindVerify, Actions: []string{"run tests"}, ExitCriteria: []string{"tests pass"}, Verification: []string{"go test ./..."}}},
-	}, "model"); err != nil {
-		t.Fatal(err)
-	}
-	registry := tools.Default()
-	sink := newChildSink(dir, NewProgress(), nil)
-	sink.work = store
-	sink.toolActivity = registry.CallActivity
-	call := llm.ToolCall{ID: "failed-check", Name: "run_command", Input: json.RawMessage(`{"argv":["go","test","./..."]}`)}
-	sink.ToolStart(call)
-	sink.ToolResult(llm.ToolResult{
-		ForID: call.ID,
-		Text:  "FAIL go test (exit 1)\n[exit code: 1]",
-		Metrics: map[string]int{
-			tools.CommandMetricOutcomeAvailable: 1,
-			tools.CommandMetricFailed:           1,
-			tools.CommandMetricExitCode:         1,
-		},
-	})
-	state := store.Snapshot()
-	var verify *workstate.Node
-	for i := range state.Nodes {
-		if state.Nodes[i].ID == "verify" {
-			verify = &state.Nodes[i]
-		}
-	}
-	if verify == nil || len(verify.Results) != 1 || verify.Results[0].Status != workstate.VerifyFailed {
-		t.Fatalf("observed verification = %+v", verify)
-	}
-}
-
 func TestChildSinkFoldsPreflightMaintenanceIntoPromptUsage(t *testing.T) {
 	dir := t.TempDir()
-	sink := newChildSink(dir, NewProgress(), nil)
+	sink := newChildSink(dir, nil, false, NewProgress(), nil)
 	sink.addPreflightMaintenance("continuation_compaction", llm.Usage{InputTokens: 7, OutputTokens: 2}, true)
 	sink.PromptComplete(agent.PromptUsage{
 		Turns:       1,
@@ -1879,7 +1760,7 @@ func TestChildSinkRetainsFirstAppendError(t *testing.T) {
 	if err := os.WriteFile(path, []byte("file"), 0o644); err != nil {
 		t.Fatalf("write blocking file: %v", err)
 	}
-	sink := newChildSink(path, NewProgress(), nil)
+	sink := newChildSink(path, nil, false, NewProgress(), nil)
 	sink.User("first")
 	first := sink.appendError()
 	if first == nil {
@@ -1924,82 +1805,6 @@ func readDelegateChildEvents(t *testing.T, childDir string) []session.Event {
 		t.Fatalf("scan child replay: %v", err)
 	}
 	return events
-}
-
-func TestDelegateChildWorkIsLinkedAndPrivate(t *testing.T) {
-	parentTools := &tools.Registry{}
-	parentTools.Register(fakeChildTool{name: "read_file", out: "ok"})
-	fp := llmtest.New("fake",
-		llmtest.Step{
-			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "done"}},
-			Stop:   llm.StopEndTurn,
-		},
-	)
-	sessionPath := filepath.Join(t.TempDir(), "session")
-	parentWork := workstate.NewStore(func() string { return sessionPath })
-	root, err := parentWork.NewWork("root objective", "host")
-	if err != nil {
-		t.Fatalf("NewWork: %v", err)
-	}
-	root, err = parentWork.SetPlan(workstate.PlanUpdate{
-		BaseRevisionID: root.RevisionID,
-		PlanState:      workstate.PlanDraft,
-		ActiveStepID:   "launch-step",
-		Nodes: []workstate.NodeDefinition{{
-			ID: "launch-step", Type: workstate.NodeStep, Title: "Launch", Kind: workstate.KindChange,
-		}},
-	}, "host")
-	if err != nil {
-		t.Fatalf("SetPlan: %v", err)
-	}
-	snapshotCalls := 0
-	workSnapshot := func() *workstate.State {
-		snapshotCalls++
-		if snapshotCalls == 1 {
-			return parentWork.Snapshot()
-		}
-		drifted := parentWork.Snapshot()
-		drifted.WorkID = "later-work"
-		drifted.RevisionID = "later-revision"
-		drifted.ActiveStepID = "later-step"
-		return drifted
-	}
-	state := NewState(Runtime{
-		Provider:    fp,
-		Model:       "claude-opus-4-8",
-		Registry:    llm.NewRegistry(nil),
-		SessionPath: sessionPath,
-	})
-	tool := New(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
-		return Launch{
-			Provider: runtime.Provider,
-			Model:    runtime.Model,
-			Registry: runtime.Registry,
-			Tools:    parentTools,
-		}, nil
-	}, Options{WorkSnapshot: workSnapshot})
-
-	if _, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"child work"}`)); err != nil {
-		t.Fatalf("RunMetered: %v", err)
-	}
-	children, err := os.ReadDir(filepath.Join(sessionPath, "children"))
-	if err != nil {
-		t.Fatalf("read children dir: %v", err)
-	}
-	childSession, err := session.Load(filepath.Join(sessionPath, "children", children[0].Name()))
-	if err != nil {
-		t.Fatalf("load child session: %v", err)
-	}
-	if childSession.Work == nil || childSession.Work.ParentWorkID != root.WorkID || childSession.Work.ParentRevisionID != root.RevisionID || childSession.Work.Objective != "child work" {
-		t.Fatalf("child work = %+v, root = %+v", childSession.Work, root)
-	}
-	if got := parentWork.Snapshot(); got.WorkID != root.WorkID || got.RevisionID != root.RevisionID {
-		t.Fatalf("parent work was modified: %+v", got)
-	}
-	meta := readDelegateChildMeta(t, filepath.Join(sessionPath, "children", children[0].Name()))
-	if meta.WorkID != root.WorkID || meta.WorkStepID != "launch-step" || snapshotCalls != 1 {
-		t.Fatalf("child launch attribution = work %q step %q snapshots %d", meta.WorkID, meta.WorkStepID, snapshotCalls)
-	}
 }
 
 func TestDelegateRejectsInvalidMaxTurns(t *testing.T) {
@@ -2331,7 +2136,7 @@ func TestProgressSnapshotZeroAndFinished(t *testing.T) {
 		t.Fatalf("fresh progress = %+v, want zero and not finished", got)
 	}
 
-	s := newChildSink("", p, nil)
+	s := newChildSink("", nil, false, p, nil)
 	ctx := agent.ContextEstimate{Total: 1000, Window: 200000}
 	s.TurnAttemptStart(3, 1, ctx)
 	if got := p.Snapshot(); got.Turn != 3 || got.Attempt != 1 || got.Context.Total != 1000 || got.Context.Window != 200000 {

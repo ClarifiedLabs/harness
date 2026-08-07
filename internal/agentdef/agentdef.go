@@ -125,7 +125,7 @@ func Builtins() map[string]Definition {
 }
 
 func inspectionTools() []string {
-	names := []string{"read_file", "view_image", "list_dir", "glob", "search", "set_work_plan", "update_work"}
+	names := []string{"read_file", "view_image", "list_dir", "glob", "search", "update_todos"}
 	// run_command widens exploration (gh, builds, screenshots, live apps) for the
 	// read-only agents (explore, plan, review). None has first-class file-mutation
 	// tools (edit, write_file, apply_patch), so "don't modify the project" stays
@@ -141,7 +141,8 @@ func planTools() []string {
 	// run_command comes from the shared inspection set; plan adds no first-class
 	// file-mutation tools (edit, write_file, apply_patch), so "don't modify the
 	// project" stays a prompt-level contract (prompts/agents/plan.txt).
-	return append(inspectionTools(), "write_tmp_file", "request_implementation", "delegate", "background_jobs")
+	names := slices.DeleteFunc(inspectionTools(), func(name string) bool { return name == "update_todos" })
+	return append(names, "write_tmp_file", "record_plan", "delegate", "background_jobs")
 }
 
 func defaultTools() []string {
@@ -151,7 +152,7 @@ func defaultTools() []string {
 	// from here because delegate.MissingTools treats an available git as
 	// satisfying a required git_readonly.
 	names := tools.DefaultNames()
-	return append(names, "set_work_plan", "update_work", "delegate", "background_jobs")
+	return append(names, "update_todos", "delegate", "background_jobs")
 }
 
 // DefaultTools returns the default allowed-tool set that auto/independent and

@@ -62,10 +62,14 @@ func TestBuiltins(t *testing.T) {
 		}
 	}
 	for name, def := range m {
-		for _, tool := range []string{"set_work_plan", "update_work"} {
-			if !slices.Contains(def.AllowedTools, tool) {
-				t.Errorf("built-in %s tools missing %s: %v", name, tool, def.AllowedTools)
+		if name == "plan" {
+			if !slices.Contains(def.AllowedTools, "record_plan") || slices.Contains(def.AllowedTools, "update_todos") {
+				t.Errorf("plan coordination tools = %v; want record_plan without update_todos", def.AllowedTools)
 			}
+			continue
+		}
+		if !slices.Contains(def.AllowedTools, "update_todos") || slices.Contains(def.AllowedTools, "record_plan") {
+			t.Errorf("built-in %s coordination tools = %v; want update_todos without record_plan", name, def.AllowedTools)
 		}
 	}
 
@@ -371,31 +375,24 @@ func TestResolveReasoningOverride(t *testing.T) {
 	}
 }
 
-func TestDefaultToolsIncludeWorkButOmitGoalToolsAndImplementationHandoff(t *testing.T) {
+func TestDefaultToolsIncludeTodosButOmitPlanGoalAndHandoffTools(t *testing.T) {
 	def := defaultTools()
-	for _, tool := range []string{"set_work_plan", "update_work"} {
-		if !slices.Contains(def, tool) {
-			t.Errorf("default tools missing %s: %v", tool, def)
-		}
+	if !slices.Contains(def, "update_todos") {
+		t.Errorf("default tools missing update_todos: %v", def)
 	}
-	for _, name := range []string{"create_goal", "update_goal"} {
+	for _, name := range []string{"record_plan", "create_goal", "update_goal", "request_implementation"} {
 		if slices.Contains(def, name) {
 			t.Errorf("default tools unexpectedly include removed %s: %v", name, def)
 		}
 	}
-	if slices.Contains(def, "request_implementation") {
-		t.Errorf("default tools should not include request_implementation: %v", def)
-	}
 }
 
-func TestPlanToolsIncludeWorkAndRequestImplementation(t *testing.T) {
+func TestPlanToolsOnlyIncludePlanCoordinationTool(t *testing.T) {
 	pt := planTools()
-	for _, name := range []string{"set_work_plan", "update_work", "request_implementation"} {
-		if !slices.Contains(pt, name) {
-			t.Errorf("plan tools missing %q: %v", name, pt)
-		}
+	if !slices.Contains(pt, "record_plan") {
+		t.Errorf("plan tools missing record_plan: %v", pt)
 	}
-	for _, name := range []string{"create_goal", "update_goal"} {
+	for _, name := range []string{"update_todos", "request_implementation", "create_goal", "update_goal"} {
 		if slices.Contains(pt, name) {
 			t.Errorf("plan tools unexpectedly include %q: %v", name, pt)
 		}

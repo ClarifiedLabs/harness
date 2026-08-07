@@ -176,12 +176,6 @@ func (r *Recorder) User(text string) {
 
 // TurnAttemptStart records the attempt boundary and its context snapshot.
 func (r *Recorder) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
-	r.TurnAttemptStartForWork(turn, attempt, ctx, "", "", "")
-}
-
-// TurnAttemptStartForWork records execution identity with opaque WorkState
-// attribution so per-step model and agent switches are analyzable.
-func (r *Recorder) TurnAttemptStartForWork(turn, attempt int, ctx agent.ContextEstimate, workID, revisionID, stepID string) {
 	if r == nil {
 		return
 	}
@@ -194,19 +188,16 @@ func (r *Recorder) TurnAttemptStartForWork(turn, attempt int, ctx agent.ContextE
 		r.promptStart = r.now()
 	}
 	r.Append(session.Event{
-		Type:           session.EventTurnAttemptStart,
-		Prompt:         r.cfg.Prompt,
-		Turn:           turn,
-		Attempt:        attempt,
-		WorkID:         workID,
-		WorkRevisionID: revisionID,
-		WorkStepID:     stepID,
-		Agent:          r.cfg.Agent,
-		ModelTarget:    r.model.targetID,
-		Provider:       r.model.provider,
-		APIType:        r.model.apiType,
-		Model:          r.model.model,
-		Context:        ContextSnapshot(ctx),
+		Type:        session.EventTurnAttemptStart,
+		Prompt:      r.cfg.Prompt,
+		Turn:        turn,
+		Attempt:     attempt,
+		Agent:       r.cfg.Agent,
+		ModelTarget: r.model.targetID,
+		Provider:    r.model.provider,
+		APIType:     r.model.apiType,
+		Model:       r.model.model,
+		Context:     ContextSnapshot(ctx),
 	})
 }
 
@@ -354,24 +345,6 @@ func (r *Recorder) Notice(msg string, turn int) {
 	r.Append(session.Event{Type: session.EventNotice, Prompt: r.cfg.Prompt, Turn: turn, Display: msg})
 }
 
-// WorkNotice records a status line with the WorkState identity that was active
-// when it was emitted. It keeps internal work-observation failures available in
-// raw.ndjson without adding diagnostic text to the WorkState projection.
-func (r *Recorder) WorkNotice(msg string, turn int, workID, revisionID, stepID string) {
-	if r == nil {
-		return
-	}
-	r.Append(session.Event{
-		Type:           session.EventNotice,
-		Prompt:         r.cfg.Prompt,
-		Turn:           turn,
-		Display:        msg,
-		WorkID:         workID,
-		WorkRevisionID: revisionID,
-		WorkStepID:     stepID,
-	})
-}
-
 // ModelRequestEvent records the structured provider-lifecycle event with its
 // durable display line, when one is warranted.
 func (r *Recorder) ModelRequestEvent(event llm.ModelRequestEvent) {
@@ -457,23 +430,14 @@ func (r *Recorder) HookDiagnostic(diagnostic hooks.Diagnostic) {
 
 // TurnProgress records diagnostics-only semantic activity after a tool turn.
 func (r *Recorder) TurnProgress(progress agent.TurnProgress) {
-	r.TurnProgressForWork(progress, "", "", "")
-}
-
-// TurnProgressForWork records semantic activity with content-free WorkState
-// attribution for per-step efficiency analysis.
-func (r *Recorder) TurnProgressForWork(progress agent.TurnProgress, workID, revisionID, stepID string) {
 	if r == nil {
 		return
 	}
 	r.Append(session.Event{
-		Type:           session.EventTurnProgress,
-		Prompt:         r.cfg.Prompt,
-		Turn:           progress.Turn,
-		WorkID:         workID,
-		WorkRevisionID: revisionID,
-		WorkStepID:     stepID,
-		TurnProgress:   TurnProgressSnapshot(progress),
+		Type:         session.EventTurnProgress,
+		Prompt:       r.cfg.Prompt,
+		Turn:         progress.Turn,
+		TurnProgress: TurnProgressSnapshot(progress),
 	})
 }
 

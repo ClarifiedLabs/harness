@@ -102,14 +102,14 @@ There are three outcomes:
    usage errors: stdout is empty and guidance is printed on stderr.
 2. After valid one-shot or piped-interactive JSON mode selection, a startup
    failure before `run_start` emits exactly one stdout line:
-   `{"type":"startup_error","v":1,"mode":"oneshot"|"interactive","exit_code":…,"error":…,"time":…}`.
+   `{"type":"startup_error","v":3,"mode":"oneshot"|"interactive","exit_code":…,"error":…,"time":…}`.
    Consumers must accept it as the complete stream. Stderr is silent.
 3. Once startup succeeds, stdout begins with `run_start` and continues through
    best-effort `run_end`; physical stderr stays silent. `-q`, `-v`, and
    `-tool-stream` cannot re-enable human output.
 
 - For a successfully started run, line 1 is a `run_start` envelope
-  (`{"type":"run_start","v":1,"mode":"oneshot","session_id":…,"agent":…,
+  (`{"type":"run_start","v":3,"mode":"oneshot","session_id":…,"agent":…,
   "provider":…,"model":…,"images":N}`); the last line is a best-effort
   `run_end` envelope (`exit_code` mirroring the process exit code, plus
   `termination_reason`/`error` on failures).
@@ -129,7 +129,7 @@ There are three outcomes:
   session log.
 
 The stream protocol is versioned (`run_start.v` and `startup_error.v`,
-currently `1`). Events use ordered bounded backpressure rather than silent
+currently `3`). Events use ordered bounded backpressure rather than silent
 dropping. Consumers must ignore unknown event types and must handle EOF without
 `run_end` (process crash, forced exit, or stdout write failure); a broken stdout
 may prevent any usable stream output and never causes a plaintext stderr
@@ -184,7 +184,7 @@ Additional output events beyond the one-shot vocabulary:
 |---|---|---|
 | `prompt_start` | `prompt` (server-assigned number), `id?`, `cause?`, `text`, `agent`, `model`, `has_images` | Before each prompt |
 | `prompt_end` | `prompt`, `id?`, `cause?`, `exit_code`, `termination_reason`, `usage`, `final_text` | After each prompt; the same optional `cause` as its start is repeated here |
-| `approval_request` | `id`, `kind:"implementation_handoff"`, `work_id`, `revision_id`, `brief`, `plan_path`, `agent`, `model` | The model's `request_implementation` tool proposed a ready WorkState handoff; the driver waits for the matching `approval_response` (the input reader stays live, so `interrupt`/`shutdown` still work) |
+| `approval_request` | `id`, `kind:"implementation_handoff"`, `brief`, `plan_path`, `agent`, `model` | The plan agent's `request_implementation` tool proposed handing off the latest recorded plan; the driver waits for the matching `approval_response` (the input reader stays live, so `interrupt`/`shutdown` still work) |
 | `input_error` | `id?`, `message` | Rejected input line |
 
 Before reading the first prompt and between completed prompts, interactive JSON
@@ -201,8 +201,8 @@ result text. Ordinary client prompts omit `cause`, preserving their event shape.
 
 Session events between `prompt_start`/`prompt_end` carry the server-assigned
 `prompt` number. Approving a handoff performs the same agent switch the TTY
-`/handoff` flow does and starts the implementation agent from the approved
-active-step capsule (its prompt appears as a normal `prompt_start`); declining cancels the
+`/handoff` flow does and starts the implementation agent with the complete
+recorded plan (its prompt appears as a normal `prompt_start`); declining cancels the
 handoff. Slash commands, session goals, idle compaction, history, and
 interactive pickers are not part of the JSON mode —
 agent and model switching are `prompt` fields, and a client that needs a
@@ -581,7 +581,6 @@ environment variables, JSON paths, types, and defaults. The concise
 | `delegate_max_depth` | `integer` | - | - | - | `delegate_max_depth` | 3 | no | Harness delegate max depth setting. |
 | `delegate_max_active` | `integer` | - | - | - | `delegate_max_active` | 4 | no | Harness delegate max active setting. |
 | `delegate_max_descendants` | `integer` | - | - | - | `delegate_max_descendants` | 16 | no | Harness delegate max descendants setting. |
-| `delegate_max_per_step` | `integer` | - | - | - | `delegate_max_per_step` | 4 | no | Harness delegate max per step setting. |
 | `delegate_output` | `string` | `status`, `off`, `lines` | `-delegate-output` | `HARNESS_DELEGATE_OUTPUT` | `delegate_output` | "status" | no | Harness delegate output setting. |
 | `delegate_tmux` | `boolean` | `true`, `false` | `-delegate-tmux` | `HARNESS_DELEGATE_TMUX` | `delegate_tmux` | derived: enabled inside tmux | no | Harness delegate tmux setting. |
 | `delegate_tmux_max_windows` | `integer` | - | - | - | `delegate_tmux_max_windows` | 4 | no | Harness delegate tmux max windows setting. |
@@ -651,8 +650,8 @@ environment variables, JSON paths, types, and defaults. The concise
   tool also has config-file-only `delegate_max_turns` (maximum per-child
   tool-enabled loop budget)
   `delegate_max_depth` (recursive depth cap, root depth `0`),
-  `delegate_max_active`, `delegate_max_descendants`, and
-  `delegate_max_per_step`. Continuations reuse their existing descendant slot.
+  `delegate_max_active`, and `delegate_max_descendants`. Continuations reuse
+  their existing descendant slot.
   `delegate_output` / `HARNESS_DELEGATE_OUTPUT` / `-delegate-output` accepts
   `status` (the default one-row TTY display), `off` (no delegate-specific UI),
   and `lines` (the status row on a TTY plus curated scrolling child activity on
@@ -1045,7 +1044,7 @@ requests use the default five-minute TTL. Message breakpoints always use the
 provider's default five-minute TTL. Harness computes a leading message prefix
 that future retention cannot rewrite, and the Anthropic dialect places one
 message breakpoint there plus a rolling tail breakpoint within the four-anchor
-limit. Volatile request-only context (the active WorkState capsule, hook output, background
+limit. Volatile request-only context (the unresolved TODO reminder, hook output, background
 notices) rides a trailing user-role message appended after the breakpoints are
 placed — never the system head — so its appearance or change does not
 invalidate the cached prefix. Maintenance requests derive deterministic, purpose-separated proxy and
@@ -1496,12 +1495,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/mode`, `/mode <name>` | alias for `/agent` |
 | `/plan` | alias for `/agent plan` |
 | `/auto` | alias for `/agent auto` |
-| `/handoff [-a agent] [-m model] [message]` | review the ready WorkState and supplementary context, then after approval switch to an implementation agent, apply optional agent/model overrides and user guidance, and start the implementation turn |
-| `/work` | show the active WorkState summary |
-| `/work steps` | show the compact executable-step checklist |
-| `/work show` | render the complete structured plan and current progress |
-| `/work new <objective>` | abandon nonterminal work and start a fresh implicit work item |
-| `/work abandon [reason]` | abandon the active work item |
+| `/handoff [-a agent] [-m model] [message]` | review the latest recorded plan and supplementary context, then after approval switch to an implementation agent, apply optional agent/model overrides and user guidance, and start the implementation turn |
 | `/background` | list background jobs |
 | `/background <id>` | show a background job's status, result, and transcript path |
 | `/background cancel <id>` | cancel a running background job |
@@ -1509,7 +1503,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/goal <text>` | set or replace the goal and immediately start working on it; only exact `clear`, `pause`, and `resume` arguments are subcommands |
 | `/goal clear` | remove the current goal |
 | `/goal pause` | pause autonomous continuation for the active goal |
-| `/goal resume` | reactivate a paused, blocked, or complete goal and its bound WorkState with a fresh continuation count, then immediately submit a continuation prompt |
+| `/goal resume` | reactivate a paused goal with a fresh continuation count, then immediately submit a continuation prompt |
 | `/skills` | list available skills |
 | `/vi on\|off` | enable or disable vi-style prompt editing (persisted as the default) |
 | `!command` | run a local shell command at an interactive TTY prompt |
@@ -1585,21 +1579,18 @@ completion audit, and asks the model to explain concrete blockers and report
 clear evidence when the objective is achieved.
 
 Goals are created and controlled exclusively through the `/goal` command; they
-are not exposed as model-callable tools. A goal binds to a WorkState ID, which
-owns the objective and execution progress. While active, the controller is also
-regenerated as request-only context on every model round, so it remains salient
-after compaction without duplicating the reminder in the transcript. WorkState
-lifecycle is mirrored back to the controller, so completed or blocked work ends
-or blocks autonomous continuation. Otherwise the loop remains active until the
-user pauses or clears it, a prompt returns `context.Canceled` from user interruption
+are not exposed as model-callable tools. Goal state is independent of plans and
+TODOs. While active, the controller is regenerated as request-only context on
+every model round, so it remains salient after compaction without duplicating
+the reminder in the transcript. The loop remains active until the user pauses
+or clears it, a prompt returns `context.Canceled` from user interruption
 (including cancellation during pre-prompt tool refresh or a submission hook), a
 continuation prompt is rejected by a submission hook, or the continuation cap is
 reached. Errors and deadline expiry do not pause a goal. Rejected continuation
 prompts pause without consuming the cap. The cap defaults to 25 and is configured
 with `-goal-max-continuations`, `HARNESS_GOAL_MAX_CONTINUATIONS`, or
 `goal_max_continuations`; `0` means unlimited. `/goal resume` reactivates a
-paused goal with a fresh continuation count; it also accepts blocked or complete
-states restored from older sessions. It rejects an already-active goal rather
+paused goal with a fresh continuation count. It rejects an already-active goal rather
 than resetting the safety count. If a goal changes or becomes inactive while a
 rendered prompt is waiting on tool refresh or submission hooks, Harness skips
 that stale prompt without consuming the count or overwriting the newer state.
@@ -1637,11 +1628,11 @@ Five agents are built in:
 
 | agent | tools | behavior |
 |---|---|---|
-| `auto` | all available built-in tools plus discovered MCP tools, including `set_work_plan`, `update_work`, `delegate`, and background job tools | the default; the model decides what to do |
-| `explore` | read-only inspection/search tools, `web_fetch`, optional `git_readonly`, both WorkState tools, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
-| `plan` | inspection tools, read-only MCP tools, `write_tmp_file`, both WorkState tools, `delegate`, and `background_jobs` | collaborate on a structured ready plan without modifying the project |
+| `auto` | all available built-in tools plus discovered MCP tools, including `update_todos`, `delegate`, and background job tools | the default; the model decides what to do |
+| `explore` | read-only inspection/search tools, `web_fetch`, optional `git_readonly`, `update_todos`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
+| `plan` | inspection tools, read-only MCP tools, `write_tmp_file`, `record_plan`, `delegate`, and `background_jobs`; interactive root sessions also expose `request_implementation` | collaborate on a self-contained implementation plan without modifying the project |
 | `review` | the same read-only inspection and MCP surface as `explore` | findings-first review of a concrete change; if no range is supplied, inspect the working-tree diff and untracked files |
-| `independent` | all available built-in tools plus discovered MCP tools, including `set_work_plan`, `update_work`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
+| `independent` | all available built-in tools plus discovered MCP tools, including `update_todos`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
 
 Define new agents or override built-ins in the config file under `agents`.
 **Breaking configuration rule:** every new custom agent must have a nonblank
@@ -1686,14 +1677,13 @@ default to `exclusive`. Implementation-mode delegates are always exclusive.
 ### Planning and implementation handoff
 
 The `plan` agent investigates and designs without modifying the project. It uses
-`set_work_plan` to make the current WorkState `ready`, which also writes
-an immutable Markdown artifact under the session, then calls
-`request_implementation` with only optional supplementary context. Interactive
-`auto` exposes the same path. At the prompt boundary, Harness renders the
-structured plan and asks for approval before switching agents, approving the
-scope, activating the first runnable step, and starting implementation with a
-clean context seeded by the bounded active-step capsule. The receiver is told
-not to reread the full artifact or recreate a separate todo list.
+`record_plan` to write a self-contained immutable Markdown artifact under the
+session, then may call `request_implementation` with optional supplementary
+context in an interactive root session. At the prompt boundary, Harness renders
+the complete latest plan and asks for approval before switching agents and
+starting implementation with a clean context seeded by that complete plan.
+Delegated plan agents have private plan stores and cannot request an interactive
+handoff.
 
 `/handoff [-a agent] [-m model] [message]` performs the same review manually.
 `-a` overrides the configured target agent, `-m` applies a one-off model
@@ -1703,17 +1693,11 @@ target otherwise comes from `--handoff-agent`, `HARNESS_HANDOFF_AGENT`, config
 `handoff_agent`, or the `auto` default. Handoffs require an interactive session
 and are unavailable in one-shot mode.
 
-In ordinary auto mode, the initial implicit WorkState is not duplicated into
-request context. A nonterminal lineage remains active across follow-up prompts:
-no work-tool call leaves it unchanged, `update_work` steers it, `set_work_plan` extends
-it, and `/work new` explicitly replaces it. Recovery capsules are delivered
-once after resume, compaction, branching, agent/model switches, or host-observed
-evidence. Top-level phase changes create clean, archived context checkpoints at
-closed tool-turn boundaries. An active step instead reaches a hard inspection
-warning after 12 inspection operations while preserving the current
-conversation. Harness automatically grants four focused grace operations. At
-16 operations, typed inspection and unclassifiable shell commands are blocked;
-the agent must complete or transition the step or mark work waiting/blocked.
+Non-plan built-in agents use `update_todos` for an advisory checklist. Each call
+replaces the complete `{step,status}` list, and the statuses never complete,
+block, or otherwise control the agent loop. The unresolved list is restored on
+resume and injected once after compaction or another transcript rewrite so the
+model can reconcile it with current progress.
 
 ## Sessions
 
@@ -1723,8 +1707,7 @@ the agent must complete or transition the step or mark work waiting/blocked.
   without migration. `state.json` is compact mutable state
   containing the active leaf and runtime settings; `active-turn.json` is a transient atomic recovery
   record for the current model/tool boundary; `raw.ndjson` is the chronological
-  replay log. Work evidence/archive/tracking failures are retained there as
-  attributed notice events, rather than only printed to the terminal.
+  replay log.
   Consecutive assistant stream fragments are stored in bounded 4 KiB
   or 250ms chunks rather than one record per provider delta.
   `compactions/` stores raw messages removed from active context, `children/`
@@ -1737,11 +1720,10 @@ the agent must complete or transition the step or mark work waiting/blocked.
 - Harness checkpoints root and child runs before provider requests, before tool
   dispatch, and after each validated closed turn. A crash during tool execution
   recovers that open call as an explicit `interrupted` error instead of
-  automatically executing it again. Closed-turn checkpoints include the current
-  WorkState projection, usage, cache/proxy IDs, and a safe provider continuation anchor.
+  automatically executing it again. Closed-turn checkpoints include the latest
+  plan, advisory TODO list, usage, cache/proxy IDs, and a safe provider continuation anchor.
 - `-session <dir>` chooses an explicit session directory. `-resume <dir>` loads
-  its active tree path and `work.ndjson` revision log from that directory before
-  restoring the WorkState projection, then continues, applying a newer
+  its active tree path, latest plan, and TODO list, then continues, applying a newer
   active-turn recovery record when present and printing the recovered boundary. Resume also prints a
   bounded recap of the last exchange to stderr before the first prompt — the
   most recent human prompt and assistant reply — with an explicit trailer when
@@ -1770,8 +1752,7 @@ the agent must complete or transition the step or mark work waiting/blocked.
   checkpoints do not add indentation. `/clone` copies the current branch into a
   new session. Both record parent-session lineage, reset prompt/usage accounting
   and remote continuation anchors, and preserve the current model, agent,
-  reasoning settings and a rebased WorkState projection. Existing evidence and
-  results are marked stale until the workspace is reconciled.
+  reasoning settings, latest plan, and advisory TODO list.
 - Tree navigation changes only model-visible conversation context. It never
   rewinds the working directory or Git; every new branch carries an internal
   warning telling the model to inspect current files before assuming their state.
@@ -1825,7 +1806,7 @@ directory is an immediate error.
 `session stats` prints a deterministic, human-readable report for one session:
 build/runtime attribution, root conversation turns, navigation count, tree
 entries/branches/leaves/depth, direct and delegate tool/command activity,
-calls per tool-bearing turn, standalone work-state/single-inspection turns, result
+calls per tool-bearing turn, standalone TODO/single-inspection turns, result
 size/truncation/timing totals and per-tool result volume, normalized repeated
 call aggregates with arguments redacted, command-step use, `SKILL.md`
 reads/activations, search context volume/bounding, concurrent-search dedup batch
@@ -1905,15 +1886,6 @@ mode-contract coverage—never blocker text, paths, check names/details, report
 prose, or unresolved questions. Legacy, invalid, failed, and canceled children
 remain explicit coverage failures rather than being inferred as complete;
 parent rework is currently unavailable.
-
-Analyzer v4 also reads bounded `work.ndjson` streams and reports root,
-descendant, and inclusive WorkState counts: items/revisions, structured plans,
-completion/abandonment, handoffs/branches/decision-gate trips, step transitions,
-evidence batches, delegate/mutation/verification outcomes, attributed tool turns
-and inspection operations. Its content-free per-step rows include time and turns
-to first mutation and verification, context resets, model/agent switches,
-delegate results, duration, and prompt relationships. Objective text, evidence
-summaries, paths, and artifact contents are never copied into analysis output.
 
 `session errors` lists the classified failures behind that section: every
 failed tool result and failed model request in one session (root plus delegate
@@ -2031,9 +2003,8 @@ tool-call success granularity—so a successful batched read includes paths that
 reported inline per-file errors—and does not infer effects from commands, Git,
 MCP, or custom tools. The model records semantic state only for meaningful
 changes and unfinished mutation intent; it does not duplicate read-only
-inspected paths. WorkState persists separately; every applicable request
-regenerates its bounded active capsule, so compaction summaries do not duplicate
-the objective, constraints, active step, or structured progress.
+inspected paths. The advisory TODO list persists separately; an unresolved list
+is re-injected after compaction, so summaries do not duplicate it.
 
 Use `/compact optional focus text` to emphasize one manual summary. Focus is
 trimmed, recorded in hook/archive/tree metadata, and applies only to that

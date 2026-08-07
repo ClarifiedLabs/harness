@@ -121,19 +121,9 @@ func (app *App) navigateTree(target string, readLine func(string) (string, error
 		fmt.Fprintf(app.Errw, "[tree failed: %v]\n", err)
 		return false
 	}
-	if app.Work != nil {
-		if revisionID := app.SessionTree.WorkRevisionAt(target); revisionID != "" {
-			state, err := app.Work.Checkout(revisionID)
-			if err != nil {
-				fmt.Fprintf(app.Errw, "[tree failed: restore work revision: %v]\n", err)
-				return false
-			}
-			app.ArmWorkContext("branch checkout")
-			app.SessionTree.SetWorkRevisionID(state.RevisionID)
-		}
-	}
 	app.Agent.SetTranscript(messages)
 	app.Agent.ResetProxySessionID()
+	app.ArmTodoContext()
 	app.recordBranchEvent(from, leaf, summary, "tree")
 	app.saveOrWarn(app.SessionPath)
 	app.prewarm()
@@ -184,15 +174,6 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 		fmt.Fprintf(app.Errw, "[%s failed: %v]\n", source, err)
 		return false
 	}
-	if app.Work != nil {
-		if revisionID := app.SessionTree.WorkRevisionAt(target); revisionID != "" {
-			if _, err := app.Work.Checkout(revisionID); err != nil {
-				fmt.Fprintf(app.Errw, "[%s failed: restore work revision: %v]\n", source, err)
-				return false
-			}
-			app.ArmWorkContext("branch checkout")
-		}
-	}
 	if app.Background != nil {
 		app.Background.Clear()
 	}
@@ -204,18 +185,9 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 	app.usageByModel = nil
 	app.Agent.SetTranscript(messages)
 	app.Agent.ResetSessionIDs()
+	app.ArmTodoContext()
 	if app.OnSessionPathChanged != nil {
 		app.OnSessionPathChanged(app.SessionPath)
-	}
-	if app.Work != nil {
-		state, err := app.Work.RebaseCurrent("host", source)
-		if err != nil {
-			fmt.Fprintf(app.Errw, "[%s failed: rebase work state: %v]\n", source, err)
-			return false
-		}
-		if state != nil {
-			app.SessionTree.SetWorkRevisionID(state.RevisionID)
-		}
 	}
 	if app.Hooks != nil {
 		app.Hooks.SetSession(app.SessionPath)

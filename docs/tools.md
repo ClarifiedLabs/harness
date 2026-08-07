@@ -20,11 +20,11 @@ This page is the operational overview.
 | `git_readonly` | restricted git subcommands for read-only agents |
 | `web_fetch` | fetch bounded HTTP(S) text, removing common HTML chrome while preserving block structure and links |
 | `write_tmp_file` | write scratch files under a private temp directory |
-| `set_work_plan` | define/refine a structured multi-step WorkState plan |
-| `update_work` | record flat progress on the active WorkState |
+| `update_todos` | replace the current advisory TODO list for multi-step work |
 | `delegate` | run a configured child agent and return its final report |
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
-| `request_implementation` | request approval to hand a ready WorkState to an implementation agent (plan and interactive auto agents) |
+| `record_plan` | persist a self-contained Markdown implementation plan under the session (plan agent) |
+| `request_implementation` | request approval to hand the latest recorded plan to an implementation agent (interactive plan agent) |
 
 `apply_patch` (Codex-format add/delete/update/move patches) is no longer in the
 default tool set — `edit` and `write_file` subsume it. It still ships in the tool
@@ -152,7 +152,7 @@ Foreground calls capture combined stdout/stderr and append `[exit code: N]`.
 Non-zero exit is not a tool error; it is returned as ordinary command output so
 the model can react to failing builds, tests, and searches. Structured result
 metrics separately record exit status, timeout, cancellation, and step failures;
-WorkState and `session errors` consume those metrics rather than parsing text.
+`session errors` consumes those metrics rather than parsing text.
 
 For an ordinary top-level command, `output_mode:"auto"` preserves successful
 output through 8 KiB. Above that threshold it returns a compact `PASS` receipt
@@ -237,42 +237,25 @@ Mixed read/write commands such as `branch`, `config`, `remote`, `reflog`,
 disables pagers, optional locks, filesystem monitors, external diff/textconv
 helpers, prompts, output-file flags, and signature helpers.
 
-`set_work_plan` and `update_work` are available to every built-in agent.
-`set_work_plan` accepts a non-empty flat ordered `steps` list; each step needs only a title and may
-add a kind, description, targets, completion condition, verification commands,
-or an optional flag. Open questions are plain strings. Harness generates IDs
-and phases, fills action/exit defaults, infers draft versus ready state and the
-active step, and keeps the durable plan artifact out of model-facing receipts
-and ordinary recovery context. The implementation seed uses only the active
-capsule, not the session-relative artifact path. `update_work` has flat fields
-and changes the active step/lifecycle, attaches
-selected evidence, or records reconciliation after a branch. Calls do not carry
-work, revision, step, or evidence/result IDs: Harness binds them to the current
-work and active (or first runnable) step, selects fresh observations when a step
-is completed, and advances to the next required step. The model-facing
-`work_status` can reactivate, wait, or block the whole work item; it does not
-accept `completed`. Harness completes structured work automatically when the
-final required step completes, and completes implicit work at a clean model
-boundary. `summary` is required plain text; selected evidence remains a
-separate top-level array. Successful inspections made before `set_work_plan`
-are retained on a lazily materialized implicit step and carried into the first
-structured step without injecting a redundant mid-prompt capsule. Evidence recorded while
-work is still implicit is retained if the model later promotes it to a
-structured plan. Harness automatically attaches
-unambiguous file mutations, verification outcomes, delegate completions, and
-stable archived receipts for successful structured-step inspections to the
-active step. An implicit first prompt carries no duplicate capsule; recovery
-capsules are delivered once after resume, context rewrites, switches, branches,
-or host-side evidence changes. Administrative plan updates do not reset the
-active-step inspection guard. Successful structured-step inspection receipts
-roll at the evidence limit by evicting the oldest unreferenced automatic
-receipt; model-selected evidence and results are preserved. At 12 inspection
-operations on one active step, Harness arms a warning capsule and automatically
-grants four focused grace operations. At 16, the hard boundary blocks typed
-inspection tools and unclassifiable `run_command` shell strings while allowing
-typed mutations, classified verification, coordination, and work transitions.
-The current conversation is preserved throughout. Custom agents with an
-explicit `allowed_tools` list may omit either work tool.
+`update_todos` is available to every built-in agent except `plan`. Use it as
+an advisory checklist for meaningful multi-step work, update it at phase
+boundaries, and do not spend a turn only on bookkeeping. Each call replaces
+the complete list with `{step,status}` entries. Status is `pending`,
+`in_progress`, or `completed`, and at most one item may be `in_progress`.
+Harness assigns no lifecycle or completion authority to the list.
+
+The root TODO list is saved in `state.json`, restored by `-resume`, and cleared
+by `/clear`. Resume and transcript rewrites inject the unresolved list once as
+request-only recovery context. Child agents receive private TODO stores.
+
+The `plan` agent receives `record_plan` instead of `update_todos`. It writes a
+self-contained Markdown artifact to `<session>/plans/NNNN-<slug>.plan.md` with
+temp-file-then-rename durability and makes that artifact the session's latest
+plan. Older plan files remain immutable. In an interactive root session, the
+plan agent may call `request_implementation`; Harness displays the full latest
+plan, asks for approval, archives the planning transcript, and seeds the
+implementation agent with the complete plan. Delegated plan agents may record
+private child plans but cannot request an interactive handoff.
 
 ## File Mutation
 
@@ -342,7 +325,7 @@ rejection, non-retryable 4xx) are returned unchanged.
 Set `continue_child_id` to a terminal sibling delegate ID when the same child
 runtime should continue retained work. Harness leaves the source child
 unchanged and creates a fresh child record containing the prior transcript,
-linked WorkState, prompt-cache/proxy identifiers, and provider continuation anchor. The
+private TODO list and latest plan, prompt-cache/proxy identifiers, and provider continuation anchor. The
 new prompt explicitly tells the child to re-check repository state. Omitted
 `agent`, `mode`, and `max_turns` values inherit the source contract; explicitly
 supplied values must match it. The continuation receives a fresh loop allowance
@@ -352,10 +335,9 @@ context window, the fresh child reuses the complete transcript and safe remote
 continuation anchor directly.
 
 Root-wide delegate safety is separate from the model-facing `max_turns` field.
-`delegate_max_active`, `delegate_max_descendants`, and
-`delegate_max_per_step` bound simultaneous fan-out, unique logical descendants,
-and launches attributed to one WorkState step. Continuations reuse the source
-logical descendant rather than consuming another total slot.
+`delegate_max_active` and `delegate_max_descendants` bound simultaneous fan-out
+and unique logical descendants. Continuations reuse the source logical
+descendant rather than consuming another total slot.
 
 Continuation is intentionally strict. The source must belong to the immediate
 parent, have terminal metadata and resumable `state.json`, and carry the same
@@ -414,8 +396,7 @@ launch fails before a model request. Children inherit the root
 `max_prompt_tokens` and `max_prompt_cost_usd` per-prompt safety ceilings. These are
 per-child ceilings, not a hierarchy-wide shared budget.
 
-Child agents get private WorkState logs linked to the exact parent work,
-revision, and active step at launch. Their transcripts are saved under
+Child agents get private TODO and plan stores. Their transcripts are saved under
 `children/<child-id>/` alongside the parent session. Foreground and background
 child token/cost usage is included exactly once in parent prompt/session usage.
 Child metadata records background resource/access leases, requested and effective

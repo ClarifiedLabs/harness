@@ -1318,7 +1318,7 @@ func deterministicCompactionSummary(reason string) string {
 	if reason == compactionFallbackTimeout {
 		displayReason = "timeout"
 	}
-	return "Model-generated compaction summary unavailable (" + displayReason + "). Continue from the active WorkState when present, the preserved instructions and recognized file activity in this checkpoint, and any recent verbatim turns. Recover older details from the raw transcript archive if needed."
+	return "Model-generated compaction summary unavailable (" + displayReason + "). Continue from the preserved instructions, recognized file activity, unresolved TODO context, and any recent verbatim turns. Recover older details from the raw transcript archive if needed."
 }
 
 func (a *Agent) deterministicCompactionNotice(reason string) string {

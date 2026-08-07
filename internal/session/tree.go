@@ -87,7 +87,6 @@ type Entry struct {
 	WorkspaceUnchanged bool   `json:"workspace_unchanged,omitempty"`
 	CustomFocus        string `json:"custom_focus,omitempty"`
 	Reason             string `json:"reason,omitempty"`
-	WorkRevisionID     string `json:"work_revision_id,omitempty"`
 }
 
 // TreeNode is the read-only hierarchical form used by the terminal picker.
@@ -118,41 +117,13 @@ type Tree struct {
 	Entries    []Entry
 	ActiveLeaf string
 
-	byID           map[string]int
-	flushed        int
-	flushedPath    string
-	needsInspect   bool
-	activeMsgs     []llm.Message
-	activeRefs     []messageRef
-	pending        *pendingCompaction
-	workRevisionID string
-}
-
-// SetWorkRevisionID stamps subsequently appended immutable entries with the
-// current WorkState revision.
-func (t *Tree) SetWorkRevisionID(revisionID string) {
-	if t != nil {
-		t.workRevisionID = revisionID
-	}
-}
-
-// WorkRevisionAt returns the nearest revision recorded on an entry's ancestry.
-func (t *Tree) WorkRevisionAt(entryID string) string {
-	if t == nil {
-		return ""
-	}
-	for entryID != "" {
-		index, ok := t.byID[entryID]
-		if !ok {
-			return ""
-		}
-		entry := t.Entries[index]
-		if entry.WorkRevisionID != "" {
-			return entry.WorkRevisionID
-		}
-		entryID = entry.ParentID
-	}
-	return ""
+	byID         map[string]int
+	flushed      int
+	flushedPath  string
+	needsInspect bool
+	activeMsgs   []llm.Message
+	activeRefs   []messageRef
+	pending      *pendingCompaction
 }
 
 // NewTree returns an empty current-schema tree.
@@ -537,7 +508,7 @@ func (t *Tree) appendMessages(messages []llm.Message) error {
 			end++
 		}
 		segment := cloneMessagesForTree(messages[i:end])
-		entry := Entry{Type: EntrySegment, ParentID: t.ActiveLeaf, Messages: segment, Time: segment[0].Time, WorkRevisionID: t.workRevisionID}
+		entry := Entry{Type: EntrySegment, ParentID: t.ActiveLeaf, Messages: segment, Time: segment[0].Time}
 		if err := t.appendEntry(entry); err != nil {
 			return err
 		}
@@ -643,7 +614,6 @@ func (t *Tree) commitCompaction(messages []llm.Message) error {
 		ReadFiles:        append([]string(nil), p.readFiles...),
 		ModifiedFiles:    append([]string(nil), p.modifiedFiles...),
 		MaterializedKept: materializedKept,
-		WorkRevisionID:   t.workRevisionID,
 	}
 	if err := t.appendEntry(entry); err != nil {
 		return err
@@ -685,7 +655,7 @@ func (t *Tree) appendContextReset(messages []llm.Message, reason string) error {
 	}
 	entry := Entry{
 		Type: EntryContextReset, ParentID: t.ActiveLeaf,
-		Messages: cloneMessagesForTree(messages), Reason: reason, WorkRevisionID: t.workRevisionID,
+		Messages: cloneMessagesForTree(messages), Reason: reason,
 	}
 	if len(messages) > 0 {
 		entry.Time = messages[0].Time
@@ -721,7 +691,6 @@ func (t *Tree) AppendBranch(targetParent, fromLeaf, common, summary, customFocus
 		Summary:            strings.TrimSpace(summary),
 		CustomFocus:        strings.TrimSpace(customFocus),
 		WorkspaceUnchanged: true,
-		WorkRevisionID:     t.workRevisionID,
 	}
 	if err := t.appendEntry(entry); err != nil {
 		return "", err

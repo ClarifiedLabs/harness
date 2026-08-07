@@ -11,8 +11,8 @@ import (
 
 const targetSHA = "8f76b0b0fb7751a8f7b067fa7f88e4df564f9560"
 
-const workBugOld = "if update.BaseRevisionID != s.current.RevisionID {"
-const workBugNew = "if update.BaseRevisionID == s.current.RevisionID {"
+const todoBugOld = "if active > 1 {"
+const todoBugNew = "if active < 1 {"
 
 type benchmarkCase struct {
 	Name                 string
@@ -75,22 +75,22 @@ func allCases() map[string]benchmarkCase {
 		},
 		{
 			Name: "command_steps",
-			Prompt: "Work directly; do not delegate or commit. The current worktree contains a one-line bug in internal/workstate that makes its existing tests fail. " +
-				"Diagnose and fix only that bug. Before reporting, run gofmt on every changed Go file, go test ./internal/workstate, go vet ./internal/workstate, and go test ./.... Report each result.",
-			Setup:                setupWorkBug,
+			Prompt: "Work directly; do not delegate or commit. The current worktree contains a one-line bug in internal/todo that makes its existing tests fail. " +
+				"Diagnose and fix only that bug. Before reporting, run gofmt on every changed Go file, go test ./internal/todo, go vet ./internal/todo, and go test ./.... Report each result.",
+			Setup:                setupTodoBug,
 			Score:                scoreCommandSteps,
 			PrimaryMetric:        "command_to_command_transitions",
 			MinimumReductionPct:  50,
 			TargetTokenSavingPct: 10,
 		},
 		{
-			Name: "work_coissue",
+			Name: "todo_coissue",
 			Prompt: "Work directly and perform a read-only investigation: do not delegate, call editing tools, or modify files. Diagnose whether " +
 				"compact_tool_result_max_bytes consistently controls both compaction and live retention. Trace the setting from configuration to every use site, " +
-				"identify any mismatch, and describe the exact fix, documentation, and verification that should be implemented. Use update_work progress mode to attach selected evidence without dedicating a turn to bookkeeping.",
+				"identify any mismatch, and describe the exact fix, documentation, and verification that should be implemented. Keep an update_todos checklist without dedicating a turn to bookkeeping.",
 			Setup:                setupClean,
-			Score:                scoreWorkCoissue,
-			PrimaryMetric:        "avoidable_work_only_turns",
+			Score:                scoreTodoCoissue,
+			PrimaryMetric:        "avoidable_todo_only_turns",
 			MinimumReductionPct:  50,
 			TargetTokenSavingPct: 8,
 		},
@@ -363,18 +363,18 @@ func setupClean(dir string) error {
 	return nil
 }
 
-func setupWorkBug(dir string) error {
+func setupTodoBug(dir string) error {
 	if err := setupClean(dir); err != nil {
 		return err
 	}
-	return replaceOnce(filepath.Join(dir, "internal", "workstate", "workstate.go"), workBugOld, workBugNew)
+	return replaceOnce(filepath.Join(dir, "internal", "todo", "todo.go"), todoBugOld, todoBugNew)
 }
 
 func setupGitWorkspace(dir string) error {
-	if err := setupWorkBug(dir); err != nil {
+	if err := setupTodoBug(dir); err != nil {
 		return err
 	}
-	if _, err := gitOutput(dir, "add", "--", "internal/workstate/workstate.go"); err != nil {
+	if _, err := gitOutput(dir, "add", "--", "internal/todo/todo.go"); err != nil {
 		return err
 	}
 	readme := filepath.Join(dir, "README.md")
@@ -433,8 +433,8 @@ func scoreCommandSteps(in scoreInput) score {
 	}
 	for _, required := range []string{
 		"gofmt",
-		"go test ./internal/workstate",
-		"go vet ./internal/workstate",
+		"go test ./internal/todo",
+		"go vet ./internal/todo",
 		"go test ./...",
 	} {
 		if !strings.Contains(in.Metrics.CommandText, required) {
@@ -443,8 +443,8 @@ func scoreCommandSteps(in scoreInput) score {
 	}
 	if len(reasons) == 0 {
 		for _, argv := range [][]string{
-			{"test", "./internal/workstate"},
-			{"vet", "./internal/workstate"},
+			{"test", "./internal/todo"},
+			{"vet", "./internal/todo"},
 			{"test", "./..."},
 		} {
 			cmd := exec.Command("go", argv...)
@@ -459,7 +459,7 @@ func scoreCommandSteps(in scoreInput) score {
 	return score{Pass: len(reasons) == 0, Reasons: reasons}
 }
 
-func scoreWorkCoissue(in scoreInput) score {
+func scoreTodoCoissue(in scoreInput) score {
 	result := requireOutput(in.Stdout,
 		"compact_tool_result_max_bytes",
 		"internal/config",
@@ -481,7 +481,7 @@ func scoreWorkCoissue(in scoreInput) score {
 
 func scoreGitWorkspace(in scoreInput) score {
 	result := requireOutput(in.Stdout,
-		"internal/workstate/workstate.go",
+		"internal/todo/todo.go",
 		"README.md",
 		"flowbench-note.txt",
 		"staged",
@@ -490,8 +490,8 @@ func scoreGitWorkspace(in scoreInput) score {
 		"whitespace",
 	)
 	lower := strings.ToLower(in.Stdout)
-	if !strings.Contains(lower, "revision") && !strings.Contains(lower, "stale") {
-		result.Reasons = append(result.Reasons, "output did not explain the stale-revision safety risk")
+	if !strings.Contains(lower, "validation") && !strings.Contains(lower, "in_progress") {
+		result.Reasons = append(result.Reasons, "output did not explain the TODO validation risk")
 	}
 	if in.FixtureBefore != in.FixtureAfter {
 		result.Reasons = append(result.Reasons, "model changed the prepared workspace")

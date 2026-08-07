@@ -21,7 +21,7 @@ func TestActivityFeedPublishesLifecycleAndChildLines(t *testing.T) {
 		TranscriptPath: "/tmp/child-1",
 	})
 	dir := t.TempDir()
-	sink := newChildSink(dir, NewProgress(), registration, true)
+	sink := newChildSink(dir, nil, false, NewProgress(), registration, true)
 	sink.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 
 	sink.TextDelta("\x1b[")
@@ -88,7 +88,7 @@ func TestActivityFeedPublishesLifecycleAndChildLines(t *testing.T) {
 func TestActivityFeedPublishesOnlyCuratedToolNoticeRetryAndReasoningData(t *testing.T) {
 	feed := NewActivityFeed()
 	registration := NewActivityRegistry(feed).Register(ActivityStart{ID: "child", Agent: "plan"})
-	sink := newChildSink("", NewProgress(), registration, true)
+	sink := newChildSink("", nil, false, NewProgress(), registration, true)
 	sink.TurnAttemptStart(2, 3, agent.ContextEstimate{})
 	sink.ReasoningSummary("safe summary")
 	sink.ToolStart(llm.ToolCall{
@@ -174,7 +174,7 @@ func TestActivityFeedReasoningRequiresResolvedSummarySetting(t *testing.T) {
 
 	feed := NewActivityFeed()
 	registration := NewActivityRegistry(feed).Register(ActivityStart{ID: "child"})
-	sink := newChildSink("", NewProgress(), registration, false)
+	sink := newChildSink("", nil, false, NewProgress(), registration, false)
 	sink.ReasoningSummary("must stay replay-only")
 	registration.Finish(session.ChildStatusCompleted, 1)
 	events, _ := readAllActivity(t, feed, 0)

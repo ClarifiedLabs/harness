@@ -430,10 +430,10 @@ func TestSetupWorkBugAndWorkspaceDigest(t *testing.T) {
 	run("init", "-q")
 	run("config", "user.email", "test@example.com")
 	run("config", "user.name", "Test")
-	if err := os.MkdirAll(filepath.Join(dir, "internal", "workstate"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "internal", "todo"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "internal", "workstate", "workstate.go"), []byte("func x() {\n\t"+workBugOld+"\n\t}\n}\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "internal", "todo", "todo.go"), []byte("func x() {\n\t"+todoBugOld+"\n\t}\n}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("readme\n"), 0o644); err != nil {
@@ -854,21 +854,21 @@ func TestSummarizePrimaryReductionUsesAggregateMedians(t *testing.T) {
 	}
 }
 
-func TestWorkAdoptionRequiresWorkCall(t *testing.T) {
-	if adopted("work_coissue", metrics{}) {
-		t.Fatal("zero work-only turns without a work call counted as adoption")
+func TestTodoAdoptionRequiresTodoCall(t *testing.T) {
+	if adopted("todo_coissue", metrics{}) {
+		t.Fatal("zero todo-only turns without a TODO call counted as adoption")
 	}
-	if !adopted("work_coissue", metrics{ToolCalls: map[string]int{"update_work": 1}}) {
-		t.Fatal("coissued work call did not count as adoption")
+	if !adopted("todo_coissue", metrics{ToolCalls: map[string]int{"update_todos": 1}}) {
+		t.Fatal("coissued TODO call did not count as adoption")
 	}
-	if adopted("work_coissue", metrics{
-		ToolCalls:              map[string]int{"update_work": 1},
-		AvoidableWorkOnlyTurns: 1,
+	if adopted("todo_coissue", metrics{
+		ToolCalls:              map[string]int{"update_todos": 1},
+		AvoidableTodoOnlyTurns: 1,
 	}) {
-		t.Fatal("work-only turn counted as adoption")
+		t.Fatal("todo-only turn counted as adoption")
 	}
-	if got := primaryValue(benchmarkCase{PrimaryMetric: "avoidable_work_only_turns"}, metrics{AvoidableWorkOnlyTurns: 2}); got != 2 {
-		t.Fatalf("work-only primary metric = %d, want 2", got)
+	if got := primaryValue(benchmarkCase{PrimaryMetric: "avoidable_todo_only_turns"}, metrics{AvoidableTodoOnlyTurns: 2}); got != 2 {
+		t.Fatalf("todo-only primary metric = %d, want 2", got)
 	}
 }
 
@@ -903,9 +903,9 @@ func TestBackgroundWaitAdoptionAllowsTimeoutRetry(t *testing.T) {
 	}
 }
 
-func TestScoreWorkCoissueAcceptsBinaryUnitDefault(t *testing.T) {
+func TestScoreTodoCoissueAcceptsBinaryUnitDefault(t *testing.T) {
 	input := "compact_tool_result_max_bytes internal/config cmd/harness CompactToolResultMaxBytes toolResultMaxBytes retention.go default 4 KiB"
-	got := scoreWorkCoissue(scoreInput{Stdout: input})
+	got := scoreTodoCoissue(scoreInput{Stdout: input})
 	if !got.Pass {
 		t.Fatalf("score rejected 4 KiB spelling: %v", got.Reasons)
 	}
@@ -941,8 +941,8 @@ func TestReadOnlyScoresRejectWorkspaceMutation(t *testing.T) {
 			out:   "retention.go compact.go applyRetention keepBoundary trimToolResultBlock readOnlyResultIDsIn archive",
 		},
 		{
-			name:  "work coissue",
-			score: scoreWorkCoissue,
+			name:  "todo coissue",
+			score: scoreTodoCoissue,
 			out:   "compact_tool_result_max_bytes internal/config cmd/harness CompactToolResultMaxBytes toolResultMaxBytes retention.go default 4096",
 		},
 	}

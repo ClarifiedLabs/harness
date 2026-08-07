@@ -24,7 +24,6 @@ import (
 	"harness/internal/session"
 	"harness/internal/skills"
 	"harness/internal/tools"
-	"harness/internal/workstate"
 )
 
 type releaseAfterFirstProvider struct {
@@ -130,30 +129,6 @@ func TestOneShotSavesSessionAndRunsOneTurn(t *testing.T) {
 	}
 	if _, err := os.Stat(app.SessionPath); err != nil {
 		t.Errorf("one-shot should save the session: %v", err)
-	}
-}
-
-func TestOneShotCreatesAndCompletesImplicitWorkWithoutCapsuleOverhead(t *testing.T) {
-	var out, errw bytes.Buffer
-	fp := llmtest.New("fake", llmtest.Step{
-		Events: []llm.StreamEvent{textDelta("done")},
-		Stop:   llm.StopEndTurn,
-	})
-	app := newTestApp(t, &out, &errw, fp)
-	app.Work = workstate.NewStore(func() string { return app.SessionPath })
-	registry := tools.Default()
-	registry.Register(tools.NewUpdateWork(app.Work))
-	app.Agent.SetTools(registry)
-
-	if code := OneShot(app, "ship the parser"); code != ExitOK {
-		t.Fatalf("exit code = %d", code)
-	}
-	if len(fp.Requests) != 1 || len(fp.Requests[0].RequestContext) != 0 {
-		t.Fatalf("request context = %+v", fp.Requests)
-	}
-	state := app.Work.Snapshot()
-	if state == nil || state.PlanState != workstate.PlanImplicit || state.Lifecycle != workstate.LifecycleCompleted {
-		t.Fatalf("implicit work = %+v", state)
 	}
 }
 

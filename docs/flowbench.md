@@ -28,7 +28,7 @@ These counts identify opportunities, not proof of savings. A deterministic
 flow can add schema tokens, prompt text, or extra model behavior, so each item
 must pass a live before/after test.
 
-## WorkState orientation baseline
+## Legacy WorkState orientation baseline
 
 Analyzer v4 was also run against the complete `20260804T152107Z` hierarchy. Its
 recorded build cohort identifies Harness v0.4.6. This is the historic session
@@ -84,7 +84,7 @@ The implementations were:
   truncation, and artifact-compatible citations.
 - `run_command.steps`: 1–16 serial commands, stop-on-failure behavior, compact
   `PASS` receipts, bounded failure output, and archived suppressed output.
-- WorkState progress coissuing guidance in the system, independent, plan, and tool prompts.
+- Advisory `update_todos` coissuing guidance in the system and non-plan agent prompts.
 - `git {"workflow":"workspace_summary"}`: branch/HEAD, porcelain status,
   staged and unstaged stats, and both whitespace checks in one read-only call.
 - `background_jobs {"action":"wait"}`: event-driven manager notification,
@@ -143,7 +143,7 @@ go run ./scripts/flowbench \
   -results /tmp/harness-flowbench-results
 ```
 
-Available cases are `search_context`, `command_steps`, `work_coissue`,
+Available cases are `search_context`, `command_steps`, `todo_coissue`,
 `git_workspace_summary`, `background_wait`, `edit_precision`,
 `edit_drift_recovery`, `known_path_batching`, and `unknown_path_discovery`. Use
 `-dry-run` to inspect ordering, `-resume` for validated completed records, and

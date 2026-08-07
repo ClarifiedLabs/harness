@@ -94,7 +94,6 @@ type HierarchyAnalysis struct {
 	Completion CompletionAnalysis `json:"completion"`
 	Usage      UsageAnalysis      `json:"usage"`
 	Storage    StorageAnalysis    `json:"storage"`
-	Work       WorkAnalysis       `json:"work"`
 }
 
 // CohortIdentity is copied into every cohort so opaque keys remain auditable.
@@ -118,7 +117,6 @@ type CohortAnalysis struct {
 	Usage         UsageAnalysis      `json:"usage"`
 	Distributions UsageDistributions `json:"distributions"`
 	Storage       StorageAnalysis    `json:"storage"`
-	Work          WorkAnalysis       `json:"work"`
 }
 
 func usageFromEvents(events []Event, sourceStatus string) (UsageSlice, UsageSlice) {

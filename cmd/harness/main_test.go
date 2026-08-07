@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -26,12 +27,13 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/modelproxy/protocol"
+	"harness/internal/plan"
 	"harness/internal/runstream"
 	"harness/internal/session"
+	"harness/internal/todo"
 	"harness/internal/tools"
 	"harness/internal/tracing"
 	"harness/internal/ui"
-	"harness/internal/workstate"
 	"harness/prompts"
 )
 
@@ -2552,20 +2554,16 @@ func TestRunResumeFlagsWinWarning(t *testing.T) {
 	}
 }
 
-func TestRunResumeRestoresWorkRevisionFromSessionDirectory(t *testing.T) {
+func TestRunResumeRestoresPlanAndTodos(t *testing.T) {
 	dir := t.TempDir()
 	sessPath := filepath.Join(dir, "prior")
-	workStore := workstate.NewStore(func() string { return sessPath })
-	work, err := workStore.NewWork("continue retained work", "user")
-	if err != nil {
-		t.Fatal(err)
-	}
 	prior := session.Session{
 		Version:  session.Version,
 		Provider: "anthropic",
 		Model:    "claude-opus-4-8",
 		Created:  time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC),
-		Work:     work,
+		Plan:     &plan.Plan{Title: "Continue", Body: "Implement the retained plan.", Path: "/session/plans/0001-continue.plan.md"},
+		Todos:    []todo.Item{{Step: "Implement", Status: todo.StatusInProgress}},
 	}
 	if err := prior.Save(sessPath); err != nil {
 		t.Fatal(err)
@@ -2577,22 +2575,12 @@ func TestRunResumeRestoresWorkRevisionFromSessionDirectory(t *testing.T) {
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("resume exit = %d, want 0; errw=%q", code, errw.String())
 	}
-	if strings.Contains(errw.String(), "missing from work.ndjson") {
-		t.Fatalf("resume loaded work log from the process cwd: %q", errw.String())
-	}
 	loaded, err := session.Load(sessPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	check := workstate.NewStore(func() string { return sessPath })
-	if err := check.LoadLog(sessPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := check.Restore(loaded.Work); err != nil {
-		t.Fatal(err)
-	}
-	if err := check.ValidateCurrentRevision(); err != nil {
-		t.Fatalf("resumed work revision is not durable: %v", err)
+	if loaded.Plan == nil || loaded.Plan.Path != prior.Plan.Path || !slices.Equal(loaded.Todos, prior.Todos) {
+		t.Fatalf("resumed plan/todos = %+v/%+v", loaded.Plan, loaded.Todos)
 	}
 }
 
@@ -2644,11 +2632,6 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "source")
 	destinationPath := filepath.Join(dir, "destination")
-	workStore := workstate.NewStore(func() string { return sourcePath })
-	work, err := workStore.NewWork("clone retained work", "user")
-	if err != nil {
-		t.Fatal(err)
-	}
 	prior := session.Session{
 		Provider: "anthropic",
 		Model:    "claude-opus-4-8",
@@ -2659,7 +2642,8 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "reply"}}},
 		},
 		Usage: session.UsageTotals{Usage: llm.Usage{InputTokens: 100}},
-		Work:  work,
+		Plan:  &plan.Plan{Title: "Clone", Body: "Retain this plan.", Path: "/source/plans/0001-clone.plan.md"},
+		Todos: []todo.Item{{Step: "Continue", Status: todo.StatusPending}},
 	}
 	if err := prior.Save(sourcePath); err != nil {
 		t.Fatalf("save source: %v", err)
@@ -2689,15 +2673,8 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 	if !strings.Contains(transcriptTextForMainTest(child.Messages), "working directory was not reverted") {
 		t.Fatalf("clone transcript missing workspace warning: %+v", child.Messages)
 	}
-	cloneWork := workstate.NewStore(func() string { return destinationPath })
-	if err := cloneWork.LoadLog(destinationPath); err != nil {
-		t.Fatalf("load clone work log: %v", err)
-	}
-	if err := cloneWork.Restore(child.Work); err != nil {
-		t.Fatalf("restore clone work: %v", err)
-	}
-	if err := cloneWork.ValidateCurrentRevision(); err != nil {
-		t.Fatalf("clone work revision is not durable: %v", err)
+	if !reflect.DeepEqual(child.Plan, prior.Plan) || !slices.Equal(child.Todos, prior.Todos) {
+		t.Fatalf("clone plan/todos = %+v/%+v", child.Plan, child.Todos)
 	}
 	unchanged, err := session.Load(sourcePath)
 	if err != nil {
@@ -3881,7 +3858,7 @@ func TestRunDefaultAgentTools(t *testing.T) {
 	}
 }
 
-func TestRunInteractiveAutoExposesHandoffAndWorkButNotGoalTools(t *testing.T) {
+func TestRunInteractiveAutoExposesTodosButNotPlanHandoffOrGoalTools(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8"}, fp, "hi\n/exit\n")
 
@@ -3889,16 +3866,10 @@ func TestRunInteractiveAutoExposesHandoffAndWorkButNotGoalTools(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
 	names := toolNames(fp.Requests[0])
-	if !slices.Contains(names, "request_implementation") {
-		t.Fatalf("interactive auto tools missing request_implementation: %v", names)
+	if !slices.Contains(names, "update_todos") {
+		t.Fatalf("interactive auto tools missing update_todos: %v", names)
 	}
-	if !slices.Contains(names, "update_work") {
-		t.Fatalf("interactive auto tools missing update_work: %v", names)
-	}
-	if !slices.Contains(names, "set_work_plan") {
-		t.Fatalf("interactive auto tools missing set_work_plan: %v", names)
-	}
-	for _, name := range []string{"create_goal", "update_goal"} {
+	for _, name := range []string{"record_plan", "request_implementation", "create_goal", "update_goal"} {
 		if slices.Contains(names, name) {
 			t.Fatalf("interactive auto tools unexpectedly include removed %s: %v", name, names)
 		}
@@ -5051,7 +5022,7 @@ func TestRunREPLModeAliasSwitchesTools(t *testing.T) {
 	if len(fp.Requests) != 1 {
 		t.Fatalf("want 1 post-switch request, got %d", len(fp.Requests))
 	}
-	want := expectedPlanToolNames()
+	want := append(expectedPlanToolNames(), "request_implementation")
 	if got := toolNames(fp.Requests[0]); !slices.Equal(got, want) {
 		t.Errorf("post-/mode tools = %v, want plan set %v", got, want)
 	}
@@ -5169,7 +5140,7 @@ func toolsOutputHasDescribedTool(output, name string) bool {
 
 func expectedExploreToolNames() []string {
 	names := expectedInspectionToolNames()
-	return append(names, "set_work_plan", "update_work")
+	return append(names, "update_todos")
 }
 
 func expectedInspectionToolNames() []string {
@@ -5188,25 +5159,28 @@ func expectedPlanToolNames() []string {
 	// plan's realized tool list is the shared inspection set (which now includes
 	// run_command) followed by the main-registered coordination tools in catalog
 	// order.
-	return append(names, "write_tmp_file", "delegate", "background_jobs", "set_work_plan", "update_work", "request_implementation")
+	return append(names, "write_tmp_file", "delegate", "background_jobs", "record_plan")
 }
 
 func expectedDefaultToolNames() []string {
 	// The default set omits git_readonly: git already covers it, and read-only
 	// agents remain delegatable via the git->git_readonly subset rule.
 	names := tools.DefaultNames()
-	return append(names, "delegate", "background_jobs", "set_work_plan", "update_work")
+	return append(names, "delegate", "background_jobs", "update_todos")
 }
 
-func TestEnableInteractiveAutoHandoff(t *testing.T) {
+func TestEnableInteractivePlanHandoff(t *testing.T) {
 	agents := agentdef.Builtins()
-	enableInteractiveAutoHandoff(agents)
-	if !slices.Contains(agents["auto"].AllowedTools, "request_implementation") {
-		t.Fatalf("interactive auto tools missing request_implementation: %v", agents["auto"].AllowedTools)
+	enableInteractivePlanHandoff(agents)
+	if !slices.Contains(agents["plan"].AllowedTools, "request_implementation") {
+		t.Fatalf("interactive plan tools missing request_implementation: %v", agents["plan"].AllowedTools)
 	}
-	enableInteractiveAutoHandoff(agents)
+	if slices.Contains(agents["auto"].AllowedTools, "request_implementation") {
+		t.Fatalf("interactive auto tools unexpectedly include request_implementation: %v", agents["auto"].AllowedTools)
+	}
+	enableInteractivePlanHandoff(agents)
 	count := 0
-	for _, name := range agents["auto"].AllowedTools {
+	for _, name := range agents["plan"].AllowedTools {
 		if name == "request_implementation" {
 			count++
 		}

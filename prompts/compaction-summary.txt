@@ -1,11 +1,11 @@
-Compact for accurate continuation. Typed `read_files`/`modified_files` are authoritative for recognized file activity; omit read-only inspected files. Active WorkState is re-injected; do not repeat it.
+Compact for accurate continuation. Typed `read_files`/`modified_files` are authoritative for recognized file activity; omit read-only inspected files. Any unresolved TODO list is re-injected after compaction; do not repeat it.
 
 Return:
 - Task: goal, acceptance criteria, active work.
 - Decisions: still-constraining choices.
 - Changed files: semantic state or unfinished intent for meaningful created/modified/deleted files.
-- Work state: base/head/worktrees, blockers, gates, verification, completed-work receipts.
+- Workspace state: base/head/worktrees, blockers, verification, completed-work receipts.
 - Key facts: relevant code, environment, constraints.
-- Open work: unresolved intent, blockers, or gates not represented in WorkState.
+- Open work: unresolved intent or blockers not represented in the TODO list.
 
 Be concise and factual. Do not invent.

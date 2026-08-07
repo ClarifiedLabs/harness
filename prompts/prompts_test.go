@@ -28,7 +28,7 @@ func TestCompactionUpdatePreservesPriorState(t *testing.T) {
 	if update == strings.ToLower(CompactionSummary()) {
 		t.Fatal("compaction update must be distinct from the initial prompt")
 	}
-	for _, want := range []string{"prior progress summary", "preserve", "supersedes", "complete replacement", "changed files", "work state", "open work"} {
+	for _, want := range []string{"prior progress summary", "preserve", "supersedes", "complete replacement", "changed files", "workspace state", "open work"} {
 		if !strings.Contains(update, want) {
 			t.Fatalf("compaction update missing %q:\n%s", want, CompactionUpdate())
 		}
@@ -121,10 +121,10 @@ func TestCompactionPromptsUseTypedInventories(t *testing.T) {
 			"`modified_files`",
 			"authoritative for recognized file activity",
 			"omit read-only inspected files",
-			"active workstate is re-injected",
+			"todo list is re-injected",
 			"do not repeat it",
 			"changed files",
-			"work state",
+			"workspace state",
 			"open work",
 		} {
 			if !strings.Contains(lower, want) {
